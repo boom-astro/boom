@@ -196,6 +196,15 @@ services:
       BOOM_CUTOUTS_STORAGE__TYPE: mongo
       BOOM_CUTOUTS_STORAGE__HOST: mongo
       BOOM_BABAMUL__ENABLED: ${BOOM_BABAMUL__ENABLED:-false}
+      # Milvus vector database (optional; see docs/milvus.md).
+      # Reached over the public internet, so this works regardless of where
+      # BOOM itself is deployed.
+      BOOM_MILVUS__ENABLED: ${BOOM_MILVUS__ENABLED:-false}
+      BOOM_MILVUS__HOST: ${BOOM_MILVUS__HOST:-milvus.nrp-nautilus.io}
+      BOOM_MILVUS__PORT: ${BOOM_MILVUS__PORT:-50051}
+      BOOM_MILVUS__USERNAME: ${BOOM_MILVUS__USERNAME:-}
+      BOOM_MILVUS__PASSWORD: ${BOOM_MILVUS__PASSWORD:-}
+      BOOM_MILVUS__DATABASE: ${BOOM_MILVUS__DATABASE:-}
       # SMTP config for email notifications
       SMTP_SERVER: ${SMTP_SERVER:-}
       SMTP_PORT: ${SMTP_PORT:-}
@@ -483,6 +492,16 @@ services:
       BOOM_REDIS__HOST: valkey
       BOOM_GPU__ENABLED: ${BOOM_GPU__ENABLED:-false}
       BOOM_GPU__DEVICE_IDS: ${BOOM_GPU__DEVICE_IDS:-0}
+      # Milvus vector database (optional; see docs/milvus.md).
+      # This scheduler runs the CIDER fusion model, so it is what produces the
+      # embeddings. Reached over the public internet, so this works regardless
+      # of where BOOM itself is deployed.
+      BOOM_MILVUS__ENABLED: ${BOOM_MILVUS__ENABLED:-false}
+      BOOM_MILVUS__HOST: ${BOOM_MILVUS__HOST:-milvus.nrp-nautilus.io}
+      BOOM_MILVUS__PORT: ${BOOM_MILVUS__PORT:-50051}
+      BOOM_MILVUS__USERNAME: ${BOOM_MILVUS__USERNAME:-}
+      BOOM_MILVUS__PASSWORD: ${BOOM_MILVUS__PASSWORD:-}
+      BOOM_MILVUS__DATABASE: ${BOOM_MILVUS__DATABASE:-}
     networks:
       - boom
     profiles:

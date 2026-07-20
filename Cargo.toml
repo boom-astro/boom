@@ -35,6 +35,7 @@ ndarray = "0.17.2"
 opentelemetry = "0.31.0"
 opentelemetry-otlp = { version = "0.31.0", features = ["grpc-tonic", "metrics", "trace"] }
 opentelemetry_sdk = { version = "0.31.0", features = ["rt-tokio"] }
+prost = "0.14.3"
 rand = "0.10.1"
 rdkafka = { version = "0.39.0", features = ["gssapi", "ssl-vendored", "tracing", "sasl", "zstd"] }
 redis = { version = "1.2.1", features = ["tokio-comp"] }
@@ -47,6 +48,12 @@ sha2 = "0.11.0"
 tempfile = "3.27.0"
 thiserror = "2.0.18"
 tokio = { version = "1.52.3", features = ["rt", "rt-multi-thread", "time", "macros", "sync", "signal"] }
+# Milvus is reached over gRPC only (NRP exposes no REST port), so we talk to it
+# with the same tonic stack that opentelemetry-otlp already pulls in. `tls-aws-lc`
+# matches the aws_lc_rs provider used by jsonwebtoken; `tls-native-roots` is enough
+# for NRP, which serves a standard Let's Encrypt certificate.
+tonic = { version = "0.14.6", features = ["tls-aws-lc", "tls-native-roots"] }
+tonic-prost = "0.14.6"
 tracing = "0.1.44"
 tracing-flame = "0.2.0"
 tracing-log = "0.2.0"
@@ -61,6 +68,13 @@ zune-inflate = { version = "0.2", default-features = false, features = [
     "gzip",
     "std",
 ] }
+
+[build-dependencies]
+# Generates the Milvus gRPC client from the protos vendored in proto/milvus.
+# protoc-bin-vendored ships the compiler itself, so neither CI nor the Dockerfile
+# needs a system protoc package.
+protoc-bin-vendored = "3.2.0"
+tonic-prost-build = "0.14.6"
 
 [features]
 default = []

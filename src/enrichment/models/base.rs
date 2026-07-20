@@ -73,8 +73,7 @@ fn load_model_on_device_inner(
     device_id: Option<i32>,
     #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
     cuda_stream: *mut std::ffi::c_void,
-    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
-    allow_cpu_fallback: bool,
+    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))] allow_cpu_fallback: bool,
 ) -> Result<Session, ModelError> {
     let mut builder = Session::builder()?;
 
