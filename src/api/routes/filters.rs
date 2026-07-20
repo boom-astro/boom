@@ -1,7 +1,8 @@
 use crate::{
     alert::{
-        LsstAliases, LsstCandidate, LsstForcedPhot, ZtfAliases, ZtfCandidate, ZtfForcedPhot,
-        ZtfPrvCandidate,
+        DecamAliases, DecamCandidate, DecamForcedPhot, LsstAliases, LsstCandidate, LsstForcedPhot,
+        WinterAliases, WinterCandidate, WinterPrvCandidate, ZtfAliases, ZtfCandidate,
+        ZtfForcedPhot, ZtfPrvCandidate,
     },
     api::{
         filters::{doc2json, SortOrder},
@@ -1231,6 +1232,33 @@ pub struct LsstAlertToFilter {
     pub ztf: Option<ZtfFilterMatch>,
 }
 
+#[serdavro]
+#[derive(Debug, Deserialize, Serialize)]
+/// WINTER data available at filtering time
+pub struct WinterAlertToFilter {
+    pub candid: i64,
+    #[serde(rename = "objectId")]
+    pub object_id: String,
+    pub candidate: WinterCandidate,
+    pub coordinates: GalacticCoordinates,
+    pub prv_candidates: Vec<WinterPrvCandidate>,
+    pub aliases: WinterAliases,
+}
+
+#[serdavro]
+#[derive(Debug, Deserialize, Serialize)]
+/// DECam data available at filtering time
+pub struct DecamAlertToFilter {
+    pub candid: i64,
+    #[serde(rename = "objectId")]
+    pub object_id: String,
+    pub candidate: DecamCandidate,
+    pub coordinates: GalacticCoordinates,
+    pub prv_candidates: Vec<DecamCandidate>,
+    pub fp_hists: Vec<DecamForcedPhot>,
+    pub aliases: DecamAliases,
+}
+
 /// Get a schema of a survey's data available at filtering time
 #[utoipa::path(
     get,
@@ -1251,15 +1279,57 @@ pub async fn get_filter_schema(path: web::Path<(Survey,)>) -> HttpResponse {
     let schema = match survey_name {
         Survey::Ztf => ZtfAlertToFilter::get_schema(),
         Survey::Lsst => LsstAlertToFilter::get_schema(),
-        _ => {
-            return response::not_found(&format!(
-                "no filter data schema found for survey {}",
-                survey_name
-            ));
-        }
+        Survey::Winter => WinterAlertToFilter::get_schema(),
+        Survey::Decam => DecamAlertToFilter::get_schema(),
     };
     response::ok(
         &format!("avro schema for survey {}", survey_name),
         serde_json::json!(schema),
     )
+}
+
+#[cfg(test)]
+mod schema_tests {
+    use super::*;
+
+    fn schema_str<T: AvroSchema>() -> String {
+        serde_json::to_string(&T::get_schema()).unwrap()
+    }
+
+    #[test]
+    fn decam_filter_schema_exposes_forced_phot_and_snr() {
+        // DECam does aperture difference-image forced photometry (magap/sigmagap)
+        // with a computed snr, and carries a forced-photometry history — all
+        // filterable, so the schema must surface them.
+        let s = schema_str::<DecamAlertToFilter>();
+        for field in [
+            "\"prv_candidates\"",
+            "\"fp_hists\"",
+            "\"magap\"",
+            "\"sigmagap\"",
+            "\"snr\"",
+        ] {
+            assert!(
+                s.contains(field),
+                "DECam filter schema missing {field}: {s}"
+            );
+        }
+    }
+
+    #[test]
+    fn winter_filter_schema_generates_without_forced_phot() {
+        // WINTER does PSF photometry (magpsf) and has no forced-photometry history,
+        // so its schema exposes candidate/prv_candidates but no fp_hists.
+        let s = schema_str::<WinterAlertToFilter>();
+        for field in ["\"candidate\"", "\"prv_candidates\"", "\"magpsf\""] {
+            assert!(
+                s.contains(field),
+                "WINTER filter schema missing {field}: {s}"
+            );
+        }
+        assert!(
+            !s.contains("\"fp_hists\""),
+            "WINTER has no forced photometry; schema should omit fp_hists: {s}"
+        );
+    }
 }

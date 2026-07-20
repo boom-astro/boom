@@ -39,6 +39,7 @@ pub const DECAM_LSST_XMATCH_RADIUS: f64 =
 
 #[serde_as]
 #[skip_serializing_none]
+#[apache_avro_macros::serdavro]
 #[derive(Debug, PartialEq, Clone, serde::Deserialize, serde::Serialize)]
 pub struct FpHist {
     pub mjd: f64,
@@ -57,6 +58,7 @@ pub struct FpHist {
 
 #[serde_as]
 #[skip_serializing_none]
+#[apache_avro_macros::serdavro]
 #[derive(Debug, PartialEq, Clone, serde::Deserialize, serde::Serialize)]
 pub struct Candidate {
     pub mjd: f64,
@@ -78,6 +80,7 @@ pub struct Candidate {
 
 #[serde_as]
 #[skip_serializing_none]
+#[apache_avro_macros::serdavro]
 #[derive(Debug, PartialEq, Clone, serde::Deserialize, serde::Serialize)]
 pub struct DecamCandidate {
     #[serde(flatten)]
@@ -133,6 +136,7 @@ where
 
 #[serde_as]
 #[skip_serializing_none]
+#[apache_avro_macros::serdavro]
 #[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
 pub struct DecamForcedPhot {
     #[serde(flatten)]
@@ -187,6 +191,7 @@ pub struct DecamRawAvroAlert {
     pub cutout_difference: Vec<u8>,
 }
 
+#[apache_avro_macros::serdavro]
 #[derive(Debug, Deserialize, Serialize)]
 pub struct DecamAliases {
     #[serde(rename = "ZTF")]

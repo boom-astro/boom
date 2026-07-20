@@ -9,7 +9,8 @@ pub use base::{
     SchemaRegistryError, TimeSeries,
 };
 pub use decam::{
-    DecamAlert, DecamAlertWorker, DecamCandidate, DecamObject, DecamRawAvroAlert, DECAM_DEC_RANGE,
+    DecamAlert, DecamAlertWorker, DecamAliases, DecamCandidate, DecamForcedPhot, DecamObject,
+    DecamRawAvroAlert, DECAM_DEC_RANGE,
 };
 pub use lsst::{
     DiaForcedSource, DiaSource, LsstAlert, LsstAlertWorker, LsstAliases, LsstCandidate,
@@ -17,8 +18,8 @@ pub use lsst::{
     LSST_SCHEMA_REGISTRY_GITHUB_FALLBACK_URL, LSST_SCHEMA_REGISTRY_URL, LSST_ZTF_XMATCH_RADIUS,
 };
 pub use winter::{
-    sanitize_winter_avro, WinterAlert, WinterAlertWorker, WinterCandidate, WinterObject,
-    WinterPrvCandidate, WinterRawAvroAlert, WINTER_DEC_RANGE,
+    sanitize_winter_avro, WinterAlert, WinterAlertWorker, WinterAliases, WinterCandidate,
+    WinterObject, WinterPrvCandidate, WinterRawAvroAlert, WINTER_DEC_RANGE,
 };
 pub use ztf::{
     deserialize_candidate, deserialize_cutout_as_bytes, deserialize_fp_hists,
