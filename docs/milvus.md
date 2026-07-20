@@ -87,24 +87,46 @@ Milvus is a service NRP hosts. The connection therefore goes over the public
 internet to `milvus.nrp-nautilus.io:50051` — BOOM does not need to run inside
 NRP's cluster, and nothing about this setup depends on where BOOM is deployed.
 
-For a Docker Compose deployment, put the same variables in the `.env` file
-**on the server**. Compose reads `.env` from the project directory and
-substitutes it into the service definitions.
+**Production does not use a `.env` file.** `.github/workflows/deploy.yaml`
+checks out a clean tree (which has no `.env`, since it is gitignored) and
+instead injects configuration as job-level environment variables sourced from
+**GitHub repository secrets and variables**. Docker Compose then substitutes
+those into the `${...}` placeholders in `docker-compose.yaml`.
 
-One thing to know: `docker-compose.yaml` does **not** blanket-forward `BOOM_*`
-variables into containers — each service enumerates the variables it wants
-under `environment:`. `BOOM_MILVUS__*` is wired into:
+```
+GitHub secrets/variables  ->  deploy.yaml env:  ->  compose substitution  ->  container
+```
 
-- **`scheduler-ztf`** — runs the CIDER fusion model, so it produces the embeddings
-- **`api`** — for serving similarity queries
+So git carries the variable *names*; the values live in GitHub's secret store
+and are never committed. To enable Milvus in production, set these under
+**Settings -> Secrets and variables -> Actions**:
 
-If you add another service that needs Milvus, it must declare these variables
-too, or it will silently fall back to the `config.yaml` defaults (i.e. disabled)
-even with `.env` set correctly.
+| Name | Kind | Value |
+|---|---|---|
+| `BOOM_MILVUS__PASSWORD` | **Secret** | the password from the NRP portal |
+| `BOOM_MILVUS__ENABLED` | Variable | `true` |
+| `BOOM_MILVUS__USERNAME` | Variable | your NRP username |
+| `BOOM_MILVUS__DATABASE` | Variable | e.g. `umn_babamul_vectordb` |
+
+Only the password is secret; the rest are plain variables. If
+`BOOM_MILVUS__ENABLED` is unset, Compose defaults it to `false` and the
+integration simply stays off.
+
+Two wiring details worth knowing, because both fail *silently* rather than
+loudly:
+
+1. `deploy.yaml` must list each variable under `env:`. A variable set in GitHub
+   but missing from that block never reaches the runner.
+2. `docker-compose.yaml` does **not** blanket-forward `BOOM_*` into containers —
+   each service enumerates what it wants under `environment:`. `BOOM_MILVUS__*`
+   is wired into **`scheduler-ztf`** (runs the CIDER fusion model, so it produces
+   the embeddings) and **`api`** (for serving similarity queries). A new service
+   needing Milvus must declare them too, or it falls back to the `config.yaml`
+   defaults and quietly runs with Milvus disabled.
 
 If BOOM is instead run under Kubernetes, the equivalent is putting
 `BOOM_MILVUS__PASSWORD` in a Secret and referencing it with `secretKeyRef`;
-pods do not read `.env` files.
+pods do not read `.env` files either.
 
 The username and database name are not secret and can be set directly in
 `config.yaml` if you prefer.
