@@ -34,6 +34,30 @@ gpu:
 redis:
   host: localhost
   port: 6379
+milvus:
+  # Vector database holding the CIDER fusion model's embeddings.
+  # Disabled by default; deployments that don't use it need no further setup.
+  enabled: false # Set via BOOM_MILVUS__ENABLED environment variable
+  # NRP exposes Milvus over gRPC only (no REST port), behind TLS.
+  host: milvus.nrp-nautilus.io
+  port: 50051
+  tls: true
+  username: "" # Set via BOOM_MILVUS__USERNAME environment variable
+  password: "" # Set via BOOM_MILVUS__PASSWORD environment variable
+  # NRP derives the database name from your group name, converting dashes to
+  # underscores. It is not necessarily your Kubernetes namespace: ours is
+  # `umn_babamul_vectordb`. `cargo run --bin milvus_check` lists what your
+  # credentials can see.
+  database: "" # Set via BOOM_MILVUS__DATABASE environment variable
+  timeout_seconds: 30
+  collection:
+    name: ztf_fusion_embeddings
+    # The CIDER fusion model (data/models/cider_fusion_plus_embedding.onnx)
+    # emits 384 floats, L2-normalized -- so COSINE and IP are equivalent.
+    dim: 384
+    metric_type: COSINE
+    index_type: HNSW
+    object_id_max_length: 64
 kafka:
   consumer:
     ztf:
