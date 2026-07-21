@@ -536,11 +536,8 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                 .ok_or_else(|| EnrichmentWorkerError::MissingCutouts(candid))?;
 
             // Compute numerical and boolean features from lightcurve and candidate analysis
-            #[cfg(feature = "gpu")]
+            #[cfg_attr(not(feature = "gpu"), allow(unused_variables))]
             let (properties, all_bands_properties, programid, lightcurve) =
-                self.get_alert_properties(&alert).await?;
-            #[cfg(not(feature = "gpu"))]
-            let (properties, all_bands_properties, programid, _lightcurve) =
                 self.get_alert_properties(&alert).await?;
             #[cfg(feature = "gpu")]
             if self

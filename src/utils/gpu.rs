@@ -29,7 +29,6 @@ fn validate_gpu_inference(device_ids: &[i32]) -> Result<(), Box<dyn std::error::
     info!("Validating GPU inference: running one inference per configured CUDA device");
     for &device_id in device_ids {
         info!(device_id, "Running BTSBotModel inference on device");
-        // Standalone validation; no shared stream needed.
         let mut model = BtsBotModel::new_on_device(
             "data/models/btsbot-v1.0.1.onnx",
             device_id,
