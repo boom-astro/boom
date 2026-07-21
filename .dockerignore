@@ -1,0 +1,19 @@
+# Build context excludes for all image builds (api, consumers, frontend, ...).
+# Every Dockerfile here COPYs specific paths explicitly, so excluding build
+# output and VCS only shrinks the context — it never changes what lands in an
+# image. target/ alone is tens of GB and was previously shipped to the daemon
+# on every root-context build.
+target/
+.git/
+
+# Dependencies are installed inside the images, never copied from the host.
+**/node_modules
+frontend/dist
+
+# Local-only / sensitive files no build needs.
+.claude/
+.env
+.env.*
+!.env.example
+!frontend/.env.example
+*.log

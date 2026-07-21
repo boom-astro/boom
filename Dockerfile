@@ -1,4 +1,4 @@
-ARG KAFKA_VERSION=4.1.1
+ARG KAFKA_VERSION=4.3.1
 ARG SCALA_VERSION=2.13
 
 FROM rust:slim-trixie AS base
@@ -53,7 +53,7 @@ CMD ["cargo", "watch", "-x", "run --bin api"]
 
 FROM debian:trixie-slim AS app
 
-ARG KAFKA_VERSION=4.1.1
+ARG KAFKA_VERSION=4.3.1
 ARG SCALA_VERSION=2.13
 
 RUN apt-get update && \
@@ -77,5 +77,9 @@ COPY --from=builder /app/target/release/migrate_fp_flux /app/migrate_fp_flux
 COPY --from=builder /app/target/release/migrate_snr /app/migrate_snr
 COPY --from=builder /app/target/release/reprocess_crossmatch /app/reprocess_crossmatch
 COPY --from=builder /opt/ort /opt/ort
+# Temporary
+COPY --from=builder /app/target/release/copy_cutouts /app/copy_cutouts
+COPY --from=builder /app/target/release/stream_kowalski_alerts /app/stream_kowalski_alerts
+COPY --from=builder /app/target/release/enrich_reprocess /app/enrich_reprocess
 
 CMD ["/app/scheduler"]
