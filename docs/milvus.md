@@ -87,7 +87,44 @@ Milvus is a service NRP hosts. The connection therefore goes over the public
 internet to `milvus.nrp-nautilus.io:50051` — BOOM does not need to run inside
 NRP's cluster, and nothing about this setup depends on where BOOM is deployed.
 
-**Production does not use a `.env` file.** `.github/workflows/deploy.yaml`
+However BOOM is launched, all that matters is that `BOOM_MILVUS__*` ends up in
+the process environment — `load_config` in `src/conf.rs` reads it from there.
+BOOM is deployed differently at different sites, so pick the section that
+matches yours.
+
+#### Apptainer on MSI (UMN)
+
+BOOM runs on Minnesota Supercomputing Institute HPC nodes, launched by
+`apptainer.sh` (branch `apptainer`; see the
+[boom-umn](https://github.com/boom-astro/boom-umn) repo for the deployment
+guide). There are no GitHub secrets involved.
+
+`apptainer.sh` has a `load_env()` that does:
+
+```bash
+set -a
+source "$BOOM_DIR/.env"
+set +a
+```
+
+`set -a` auto-exports every variable, and Apptainer inherits the host
+environment by default (the script uses no `--cleanenv`), so anything in that
+file reaches the BOOM processes. Add the credentials to `$BOOM_DIR/.env` on the
+node:
+
+```bash
+BOOM_MILVUS__ENABLED=true
+BOOM_MILVUS__USERNAME=your-nrp-username
+BOOM_MILVUS__PASSWORD=the-password
+BOOM_MILVUS__DATABASE=umn_babamul_vectordb
+```
+
+`chmod 600` it. No change to `apptainer.sh` is needed. Restart the affected
+services for the new values to be picked up.
+
+#### Docker Compose via GitHub Actions (Caltech)
+
+This path does **not** use a `.env` file. `.github/workflows/deploy.yaml`
 checks out a clean tree (which has no `.env`, since it is gitignored) and
 instead injects configuration as job-level environment variables sourced from
 **GitHub repository secrets and variables**. Docker Compose then substitutes
