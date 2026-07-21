@@ -72,7 +72,7 @@ impl fmt::Display for WorkerCmd {
 }
 
 #[instrument(skip_all)]
-pub(crate) fn should_terminate(receiver: &mut Receiver<WorkerCmd>) -> bool {
+pub fn should_terminate(receiver: &mut Receiver<WorkerCmd>) -> bool {
     match receiver.try_recv() {
         Ok(WorkerCmd::TERM) => {
             info!("received termination command");
