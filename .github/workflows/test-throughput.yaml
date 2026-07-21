@@ -82,6 +82,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      actions: read # gh run list + cross-run artifact download
     needs: test
     if: github.event_name == 'pull_request'
     steps:
