@@ -110,6 +110,8 @@ pub struct ApiDoc;
         routes::babamul::stats::collections::get_collection_stats,
         routes::babamul::stats::kafka::get_kafka_stats,
         routes::babamul::stats::nightly::get_nightly_stats,
+        routes::babamul::surveys::alerts::moc_search_alerts,
+        routes::babamul::surveys::alerts::alerts_skymap_3d_search,
     ),
     security(
         ("babamul_jwt_token" = [])

@@ -276,8 +276,8 @@ pub async fn xmatch(
                     }
                 };
                 let doc_z = match get_f64_from_doc(&xmatch_doc, distance_key) {
-                    Some(v) => v,
-                    None => {
+                    Some(v) if v > 0.0 => v,
+                    _ => {
                         continue;
                     }
                 };
