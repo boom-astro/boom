@@ -83,14 +83,23 @@ pub struct DecamCandidate {
     #[serde(flatten)]
     pub candidate: Candidate,
     pub jd: f64,
+    // Computed detection SNR (DECam packets carry flux, not snr); enables the
+    // same snr-based filtering as ZTF/LSST. None when the uncertainty is zero.
+    pub snr: Option<f64>,
 }
 
 impl TryFrom<Candidate> for DecamCandidate {
     type Error = AlertError;
 
     fn try_from(candidate: Candidate) -> Result<Self, Self::Error> {
+        let snr = if candidate.forcediffimfluxunc > 0.0 {
+            Some(candidate.forcediffimflux / candidate.forcediffimfluxunc)
+        } else {
+            None
+        };
         Ok(DecamCandidate {
             jd: candidate.mjd + 2400000.5,
+            snr,
             candidate,
         })
     }
@@ -129,14 +138,23 @@ pub struct DecamForcedPhot {
     #[serde(flatten)]
     pub fp_hist: FpHist,
     pub jd: f64,
+    // Computed detection SNR (see DecamCandidate::snr); used by the enrichment
+    // pipeline's fp_hists snr>=3 detection cut.
+    pub snr: Option<f64>,
 }
 
 impl TryFrom<FpHist> for DecamForcedPhot {
     type Error = AlertError;
 
     fn try_from(fp_hist: FpHist) -> Result<Self, Self::Error> {
+        let snr = if fp_hist.forcediffimfluxunc > 0.0 {
+            Some(fp_hist.forcediffimflux / fp_hist.forcediffimfluxunc)
+        } else {
+            None
+        };
         Ok(DecamForcedPhot {
             jd: fp_hist.mjd + 2400000.5,
+            snr,
             fp_hist,
         })
     }
