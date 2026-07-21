@@ -130,6 +130,7 @@ async fn main() -> std::io::Result<()> {
                 .service(routes::kafka::delete_kafka_credentials)
                 .service(routes::filters::post_filter)
                 .service(routes::filters::patch_filter)
+                .service(routes::filters::validate_filter)
                 .service(routes::filters::get_filters)
                 .service(routes::filters::get_filter)
                 .service(routes::filters::post_filter_version)
