@@ -95,6 +95,8 @@ pub enum EnrichmentWorkerError {
     MissingMagZPSci,
     #[error("Missing PSF for forced photometry point, cannot apply ZP correction")]
     MissingFluxPSF,
+    #[error("milvus error")]
+    Milvus(#[from] crate::milvus::MilvusError),
 }
 
 #[async_trait::async_trait]

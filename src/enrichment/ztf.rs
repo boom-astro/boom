@@ -6,6 +6,7 @@ use crate::enrichment::{
     models::{AcaiModel, BtsBotModel, FusionModel, Model, ModelError, SharedModels},
     EnrichmentWorker, EnrichmentWorkerError, LsstMatch,
 };
+use crate::milvus::{EmbeddingRow, MilvusClient};
 use crate::utils::cutouts::{AlertCutout, CutoutStorage};
 use crate::utils::db::mongify;
 use crate::utils::enums::Survey;
@@ -19,7 +20,7 @@ use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use serde::{Deserialize, Deserializer};
 use std::sync::Arc;
-use tracing::{instrument, trace, warn};
+use tracing::{debug, instrument, trace, warn};
 #[cfg(all(feature = "gpu", target_os = "linux"))]
 use villar_pso::gpu::{GpuBatchData, SourceData};
 #[cfg(all(feature = "gpu", target_os = "macos"))]
@@ -444,6 +445,9 @@ pub struct ZtfEnrichmentWorker {
     /// villar-pso `GpuContext` so that PSO and ONNX inference share a stream.
     models: Option<Arc<SharedModels>>,
     babamul: Option<Babamul>,
+    /// Connected Milvus client, present only when `milvus.enabled` is true.
+    /// Fusion embeddings are upserted here after classification.
+    milvus: Option<MilvusClient>,
     gpu_enabled: bool,
     /// Alerts per batch — also the fixed ONNX inference shape (see
     /// [`EnrichmentWorkerConfig::batch_size`] in `conf.rs`).
@@ -503,6 +507,16 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             .enrichment
             .batch_size;
 
+        // Connect to Milvus only when the integration is switched on. The
+        // collection itself must already be provisioned (via `milvus_check
+        // --create-collection`); the worker never creates it, so that the many
+        // enrichment workers don't race to create the same collection.
+        let milvus = if config.milvus.enabled {
+            Some(MilvusClient::connect(&config.milvus).await?)
+        } else {
+            None
+        };
+
         Ok(ZtfEnrichmentWorker {
             input_queue,
             output_queue,
@@ -512,6 +526,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             alert_pipeline: create_ztf_alert_pipeline(false),
             models,
             babamul,
+            milvus,
             gpu_enabled: config.gpu.enabled,
             batch_size,
         })
@@ -566,6 +581,9 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         let mut updates = Vec::new();
         let mut processed_alerts = Vec::new();
         let mut enriched_alerts: Vec<BabamulZtfAlert> = Vec::new();
+        // Fusion embeddings to write to Milvus, collected only when the
+        // integration is enabled and the alert produced an embedding.
+        let mut embedding_rows: Vec<EmbeddingRow> = Vec::new();
 
         let mut work_items: Vec<AlertWork> = Vec::with_capacity(alerts.len());
         #[cfg(feature = "gpu")]
@@ -632,6 +650,22 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             updates.push(update);
             processed_alerts.push(format!("{},{}", item.programid, item.candid));
 
+            // Queue the fusion embedding for Milvus before `item.alert` is
+            // moved into Babamul below. Keyed by object_id, so re-observed
+            // objects overwrite their previous vector.
+            if self.milvus.is_some() {
+                if let Some(cls) = &classifications {
+                    if let Some(embedding) = &cls.fusion_embedding {
+                        embedding_rows.push(EmbeddingRow {
+                            object_id: item.alert.object_id.clone(),
+                            embedding: embedding.clone(),
+                            candid: item.candid,
+                            jd: item.alert.candidate.candidate.jd,
+                        });
+                    }
+                }
+            }
+
             if self.babamul.is_some() {
                 let enriched_alert =
                     BabamulZtfAlert::from_alert_and_properties(item.alert, item.properties);
@@ -640,6 +674,26 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         }
 
         let _ = self.client.bulk_write(updates).await?.modified_count;
+
+        // Write fusion embeddings to Milvus. A failure here is non-fatal: the
+        // alerts are already enriched and persisted in Mongo, so we log and
+        // move on rather than failing the whole batch.
+        if let Some(milvus) = self.milvus.as_mut() {
+            if !embedding_rows.is_empty() {
+                match milvus.upsert_embeddings(&embedding_rows).await {
+                    Ok(count) => {
+                        debug!("upserted {} fusion embeddings to milvus", count);
+                    }
+                    Err(e) => {
+                        warn!(
+                            "failed to upsert {} fusion embeddings to milvus: {}",
+                            embedding_rows.len(),
+                            e
+                        );
+                    }
+                }
+            }
+        }
 
         // GPU batch Villar light curve fitting — only when SharedModels was
         // loaded with a GPU device (i.e. config.gpu.enabled is true).
