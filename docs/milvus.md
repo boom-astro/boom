@@ -216,6 +216,27 @@ constant `WRITE_EMBEDDING_TO_MONGO` in `src/milvus/mod.rs` decides whether to
 
 Changing it requires a rebuild.
 
+## Reading embeddings
+
+`MilvusClient` also exposes the read/manage side of the collection
+(`src/milvus/search.rs`):
+
+- `search_embedding(query, top_k)` — similarity search: returns the `top_k`
+  nearest `object_id`s to a query vector with their scores (and stored
+  `candid`/`jd`), best-first. The query vector is wrapped in a protobuf
+  `PlaceholderGroup` (little-endian `f32` bytes) as Milvus requires.
+- `get_embeddings(&[object_id])` — fetch stored rows by id, with the vector
+  split back out of Milvus's flat column into per-row `Vec<f32>`.
+- `count()` — number of objects in the collection (`count(*)`).
+- `delete_embeddings(&[object_id])` — remove rows by id.
+- `flush()` — seal recent writes so they are immediately searchable (Milvus
+  otherwise flushes on its own schedule); handy for read-after-write in a smoke
+  test.
+
+Note that `search_embedding` requires the collection to have been **loaded**
+(done by `ensure_embedding_collection`), and only rows that have been flushed are
+visible to search.
+
 ## Regenerating the client
 
 The gRPC client is generated at build time from the protos vendored in
