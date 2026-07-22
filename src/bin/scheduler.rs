@@ -273,16 +273,8 @@ async fn run(
     warn_if_missing_crossmatches(&args.survey, &db, &config).await;
 
     #[cfg(target_os = "linux")]
-    {
-        if matches!(args.survey, Survey::Ztf) && config.gpu.enabled {
-            validate_linux_gpu_runtime_preconditions().expect("GPU runtime preconditions not met");
-            validate_gpu_free_vram(&config.gpu.device_ids, ZTF_MIN_FREE_VRAM_MIB)
-                .expect("configured GPU(s) do not have enough free VRAM for ZTF enrichment");
-            validate_gpu_inference(&config.gpu.device_ids)
-                .expect("failed to validate GPU inference");
-            info!("Confirmed GPU runtime preconditions, free VRAM guardrail, and GPU inference");
-        }
-    }
+    validate_gpu_configuration_for_survey(&args.survey, &config)
+        .expect("GPU configuration is invalid for the survey");
 
     // Spawn sigint handler task
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
@@ -436,27 +428,4 @@ async fn main() {
         .expect("failed to initialize metrics");
 
     run(args, meter_provider, tracer_provider).await;
-}
-
-#[cfg(all(test, target_os = "linux"))]
-mod tests {
-    use super::parse_nvidia_smi_memory_free_output;
-
-    #[test]
-    /// Verifies that the `nvidia-smi` parsing helper accepts the exact
-    /// newline-separated MiB output format we rely on at startup.
-    fn parses_memory_free_output_lines() {
-        let parsed = parse_nvidia_smi_memory_free_output("12288\n8192\n").unwrap();
-        assert_eq!(parsed, vec![12288, 8192]);
-    }
-
-    #[test]
-    /// Verifies that malformed `nvidia-smi` output fails fast with a parse
-    /// error instead of silently accepting bad VRAM data.
-    fn rejects_invalid_memory_free_output() {
-        let err = parse_nvidia_smi_memory_free_output("12288\nabc\n").unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("failed to parse nvidia-smi free memory value"));
-    }
 }

@@ -789,6 +789,10 @@ services:
       # rules still fire and are visible in Grafana, and POSTs to the placeholder
       # simply 404, signalling that no real webhook is configured.
       SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-https://hooks.slack.com/services/UNSET/UNSET/UNSET}
+      # Without this, Grafana defaults its root URL to http://localhost:3000 and
+      # stamps that into alert notification "Source"/"Silence" links, which are
+      # useless in production. Match the Traefik Host rule below (grafana.${DOMAIN}).
+      GF_SERVER_ROOT_URL: https://grafana.${DOMAIN?Variable not set}
     volumes:
       - grafana_data:/var/lib/grafana
       # Keep provisioning read-only in the container; the entrypoint script

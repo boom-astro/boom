@@ -95,6 +95,8 @@ pub enum EnrichmentWorkerError {
     MissingMagZPSci,
     #[error("Missing PSF for forced photometry point, cannot apply ZP correction")]
     MissingFluxPSF,
+    #[error("Empty lightcurve after preparation for candid {0}")]
+    EmptyLightcurve(i64),
     #[error("milvus error")]
     Milvus(#[from] crate::milvus::MilvusError),
 }
@@ -114,6 +116,9 @@ pub trait EnrichmentWorker {
         &mut self,
         alerts: &[i64],
     ) -> Result<Vec<String>, EnrichmentWorkerError>;
+
+    /// Forcibly disable Babamul on this worker, regardless of config.
+    fn disable_babamul(&mut self);
 }
 
 /// Fetch alerts from the database given a list of candids and an aggregation pipeline.

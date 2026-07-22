@@ -277,6 +277,10 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
         Survey::Lsst
     }
 
+    fn disable_babamul(&mut self) {
+        self.babamul = None;
+    }
+
     fn input_queue_name(&self) -> String {
         self.input_queue.clone()
     }
