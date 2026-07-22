@@ -203,6 +203,19 @@ Milvus is enabled but unreachable at startup the worker fails fast; a failure
 during an individual upsert is logged and non-fatal (the alerts are already
 enriched and persisted in Mongo).
 
+### Keeping a Mongo copy — the `WRITE_EMBEDDING_TO_MONGO` toggle
+
+When `milvus.enabled`, the embedding always goes to Milvus. The compile-time
+constant `WRITE_EMBEDDING_TO_MONGO` in `src/milvus/mod.rs` decides whether to
+*also* keep it in the alert's Mongo `classifications` doc:
+
+- `true` **(beta default)** — dual-write to Mongo and Milvus, so a Milvus/NRP
+  outage never loses an embedding.
+- `false` — strip the 384-float vector from the Mongo doc; it lives only in
+  Milvus.
+
+Changing it requires a rebuild.
+
 ## Regenerating the client
 
 The gRPC client is generated at build time from the protos vendored in

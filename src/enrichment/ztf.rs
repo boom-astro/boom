@@ -6,7 +6,7 @@ use crate::enrichment::{
     models::{AcaiModel, BtsBotModel, FusionModel, Model, ModelError, SharedModels},
     EnrichmentWorker, EnrichmentWorkerError, LsstMatch,
 };
-use crate::milvus::{EmbeddingRow, MilvusClient};
+use crate::milvus::{EmbeddingRow, MilvusClient, WRITE_EMBEDDING_TO_MONGO};
 use crate::utils::cutouts::{AlertCutout, CutoutStorage};
 use crate::utils::db::mongify;
 use crate::utils::enums::Survey;
@@ -631,8 +631,19 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
 
         for (item, classifications) in work_items.into_iter().zip(classifications_list) {
             let update_alert_document = if let Some(ref cls) = classifications {
+                // Optionally drop the 384-float embedding from the stored
+                // classifications (the class probabilities are still kept); when
+                // disabled it lives only in Milvus.
+                let cls_doc = if WRITE_EMBEDDING_TO_MONGO {
+                    mongify(cls)
+                } else {
+                    mongify(&ZtfAlertClassifications {
+                        fusion_embedding: None,
+                        ..cls.clone()
+                    })
+                };
                 doc! { "$set": {
-                    "classifications": mongify(cls),
+                    "classifications": cls_doc,
                     "properties": mongify(&item.properties),
                     "updated_at": now,
                 }}
