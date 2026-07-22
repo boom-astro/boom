@@ -1115,6 +1115,7 @@ async fn test_babamul_lsst_with_ztf_match() {
         ap_flux_err: Some(15.0),
         snr_ap: Some(90.0),
         band: Band::G,
+        drb: None,
     };
 
     let ztf_forced_phot = ZtfForcedPhot {
