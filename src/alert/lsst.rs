@@ -822,7 +822,120 @@ impl TimeSeries for LsstForcedPhot {
     }
 }
 
-/// Rubin Avro alert schema v10.0 (minus SSO metadata, which we do not use here yet)
+/// Rubin's per-detection Solar System ephemeris and designation record (`ssSource`), present
+/// only when a diaSource was linked to a known Solar System object (ssObject) instead of a
+/// diaObject. `mpc_orbits` (the orbital elements record) is intentionally not parsed here yet.
+#[serde_as]
+#[skip_serializing_none]
+#[serdavro]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, Default, ToSchema)]
+#[serde(default)]
+pub struct SsSource {
+    /// Unique identifier of the observation (matching DiaSource.diaSourceId).
+    #[serde(rename = "diaSourceId")]
+    pub dia_source_id: i64,
+    /// Unique LSST identifier of the Solar System object.
+    #[serde(rename = "ssObjectId")]
+    pub ss_object_id: i64,
+    /// The unpacked primary provisional designation for this object.
+    pub designation: Option<String>,
+    /// Ecliptic longitude, converted from the observed coordinates.
+    #[serde(rename = "eclLambda")]
+    pub ecl_lambda: f64,
+    /// Ecliptic latitude, converted from the observed coordinates.
+    #[serde(rename = "eclBeta")]
+    pub ecl_beta: f64,
+    /// Galactic longitude, converted from the observed coordinates.
+    #[serde(rename = "galLon")]
+    pub gal_lon: f64,
+    /// Galactic latitude, converted from the observed coordinates.
+    #[serde(rename = "galLat")]
+    pub gal_lat: f64,
+    /// Solar elongation of the object at the time of observation.
+    pub elongation: Option<f32>,
+    /// Phase angle between the Sun, object, and observer.
+    #[serde(rename = "phaseAngle")]
+    pub phase_angle: Option<f32>,
+    /// Topocentric distance (delta) at light-emission time.
+    #[serde(rename = "topoRange")]
+    pub topo_range: Option<f32>,
+    /// Topocentric radial (line-of-sight) velocity (deldot); positive values indicate motion away from the observer.
+    #[serde(rename = "topoRangeRate")]
+    pub topo_range_rate: Option<f32>,
+    /// Heliocentric distance (r) at light-emission time.
+    #[serde(rename = "helioRange")]
+    pub helio_range: Option<f32>,
+    /// Heliocentric radial velocity (rdot); positive values indicate motion away from the Sun.
+    #[serde(rename = "helioRangeRate")]
+    pub helio_range_rate: Option<f32>,
+    /// Predicted ICRS right ascension from the orbit in mpc_orbits.
+    #[serde(rename = "ephRa")]
+    pub eph_ra: Option<f64>,
+    /// Predicted ICRS declination from the orbit in mpc_orbits.
+    #[serde(rename = "ephDec")]
+    pub eph_dec: Option<f64>,
+    /// Predicted magnitude in V band, computed from mpc_orbits data including the mpc_orbits-provided (H, G) estimates.
+    #[serde(rename = "ephVmag")]
+    pub eph_vmag: Option<f32>,
+    /// Total predicted on-sky angular rate of motion.
+    #[serde(rename = "ephRate")]
+    pub eph_rate: Option<f32>,
+    /// Predicted on-sky angular rate in the R.A. direction (includes the cos(dec) factor).
+    #[serde(rename = "ephRateRa")]
+    pub eph_rate_ra: Option<f32>,
+    /// Predicted on-sky angular rate in the declination direction.
+    #[serde(rename = "ephRateDec")]
+    pub eph_rate_dec: Option<f32>,
+    /// Total observed versus predicted angular separation on the sky.
+    #[serde(rename = "ephOffset")]
+    pub eph_offset: Option<f32>,
+    /// Offset between observed and predicted position in the R.A. direction (includes cos(dec) term).
+    #[serde(rename = "ephOffsetRa")]
+    pub eph_offset_ra: Option<f64>,
+    /// Offset between observed and predicted position in declination.
+    #[serde(rename = "ephOffsetDec")]
+    pub eph_offset_dec: Option<f64>,
+    /// Offset between observed and predicted position in the along-track direction on the sky.
+    #[serde(rename = "ephOffsetAlongTrack")]
+    pub eph_offset_along_track: Option<f32>,
+    /// Offset between observed and predicted position in the cross-track direction on the sky.
+    #[serde(rename = "ephOffsetCrossTrack")]
+    pub eph_offset_cross_track: Option<f32>,
+    /// Cartesian heliocentric X coordinate at light-emission time (ICRS).
+    pub helio_x: Option<f32>,
+    /// Cartesian heliocentric Y coordinate at light-emission time (ICRS).
+    pub helio_y: Option<f32>,
+    /// Cartesian heliocentric Z coordinate at light-emission time (ICRS).
+    pub helio_z: Option<f32>,
+    /// Cartesian heliocentric X velocity at light-emission time (ICRS).
+    pub helio_vx: Option<f32>,
+    /// Cartesian heliocentric Y velocity at light-emission time (ICRS).
+    pub helio_vy: Option<f32>,
+    /// Cartesian heliocentric Z velocity at light-emission time (ICRS).
+    pub helio_vz: Option<f32>,
+    /// The magnitude of the heliocentric velocity vector, sqrt(vx*vx + vy*vy + vz*vz).
+    pub helio_vtot: Option<f32>,
+    /// Cartesian topocentric X coordinate at light-emission time (ICRS).
+    pub topo_x: Option<f32>,
+    /// Cartesian topocentric Y coordinate at light-emission time (ICRS).
+    pub topo_y: Option<f32>,
+    /// Cartesian topocentric Z coordinate at light-emission time (ICRS).
+    pub topo_z: Option<f32>,
+    /// Cartesian topocentric X velocity at light-emission time (ICRS).
+    pub topo_vx: Option<f32>,
+    /// Cartesian topocentric Y velocity at light-emission time (ICRS).
+    pub topo_vy: Option<f32>,
+    /// Cartesian topocentric Z velocity at light-emission time (ICRS).
+    pub topo_vz: Option<f32>,
+    /// The magnitude of the topocentric velocity vector, sqrt(vx*vx + vy*vy + vz*vz).
+    pub topo_vtot: Option<f32>,
+    /// The rank of the diaSourceId-identified source in terms of its closeness to the predicted SSO position.
+    #[serde(rename = "diaDistanceRank")]
+    pub dia_distance_rank: Option<i32>,
+}
+
+/// Rubin Avro alert schema v11.0 (minus the `mpc_orbits` orbital-elements record, which we do
+/// not use here yet)
 #[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
 pub struct LsstRawAvroAlert {
     #[serde(rename(deserialize = "diaSourceId"))]
@@ -837,6 +950,8 @@ pub struct LsstRawAvroAlert {
     pub fp_hists: Option<Vec<LsstForcedPhot>>,
     #[serde(rename = "diaObject")]
     pub dia_object: Option<DiaObject>,
+    #[serde(rename = "ssSource")]
+    pub ss_source: Option<SsSource>,
     #[serde(rename = "cutoutDifference")]
     #[serde(deserialize_with = "deserialize_cutout")]
     pub cutout_difference: Vec<u8>,
@@ -916,6 +1031,9 @@ pub struct LsstObject {
     pub prv_candidates: Vec<LsstPrvCandidate>,
     pub fp_hists: Vec<LsstForcedPhot>,
     pub is_sso: bool,
+    /// The MPC provisional/permanent designation for this Solar System object, if any.
+    /// Persists regardless of whether a ZTF cross-match is ever found.
+    pub designation: Option<String>,
     pub cross_matches: Option<HashMap<String, Vec<Document>>>,
     pub aliases: Option<LsstAliases>,
     pub coordinates: Coordinates,
@@ -931,6 +1049,7 @@ pub struct LsstAlert {
     pub object_id: String,
     #[serde(rename = "ssObjectId")]
     pub ss_object_id: Option<String>,
+    pub ss_source: Option<SsSource>,
     pub candidate: LsstCandidate,
     pub coordinates: Coordinates,
     pub created_at: f64,
@@ -1008,13 +1127,18 @@ impl LsstAlertWorker {
         fp_hists: &Vec<LsstForcedPhot>,
         survey_matches: &Option<LsstAliases>,
         now: f64,
+        designation: Option<&str>,
     ) -> Result<(), AlertError> {
+        let mut lc_set_update = doc! {
+            "prv_candidates": update_timeseries_op("prv_candidates", "jd", &mongify_vec(prv_candidates)),
+            "fp_hists": update_timeseries_op("fp_hists", "jd", &mongify_vec(fp_hists)),
+        };
+        if let Some(designation) = designation {
+            lc_set_update.insert("designation", designation);
+        }
         Self::db_only_aux_update(
             object_id,
-            doc! {
-                "prv_candidates": update_timeseries_op("prv_candidates", "jd", &mongify_vec(prv_candidates)),
-                "fp_hists": update_timeseries_op("fp_hists", "jd", &mongify_vec(fp_hists)),
-            },
+            lc_set_update,
             survey_matches,
             now,
             &self.alert_aux_collection,
@@ -1031,6 +1155,7 @@ impl LsstAlertWorker {
         survey_matches: &Option<LsstAliases>,
         now: f64,
         existing_alert_aux: &AlertAuxForUpdate,
+        designation: Option<&str>,
     ) -> Result<(), AlertError> {
         let current_version = existing_alert_aux.version;
 
@@ -1050,15 +1175,28 @@ impl LsstAlertWorker {
         Self::add_to_push_aux_update(&mut push_updates, "prv_candidates", prepared_prv_candidates);
         Self::add_to_push_aux_update(&mut push_updates, "fp_hists", prepared_fp_hists);
 
-        Self::finalize_aux_update(
-            object_id,
-            push_updates,
-            survey_matches,
-            current_version,
-            now,
-            &self.alert_aux_collection,
-        )
-        .await
+        // finalize_aux_update always builds a document shaped like `{ "$set": {...} }`
+        // (see make_filter_doc_aux_update in base.rs), so it's safe to reach in and add
+        // the LSST-only `designation` field to that same $set instead of doing a second
+        // update_one just for it.
+        let mut update_doc =
+            Self::make_filter_doc_aux_update(push_updates, survey_matches, current_version, now);
+        if let Some(designation) = designation {
+            update_doc
+                .get_document_mut("$set")
+                .expect("make_filter_doc_aux_update always includes $set")
+                .insert("designation", designation);
+        }
+
+        let find_doc = Self::make_find_doc_aux_update(object_id, current_version);
+        let update_result = self
+            .alert_aux_collection
+            .update_one(find_doc, update_doc)
+            .await?;
+        if update_result.matched_count == 0 {
+            return Err(AlertError::ConcurrentAuxUpdate(object_id.to_string()));
+        }
+        Ok(())
     }
 
     #[instrument(
@@ -1073,6 +1211,7 @@ impl LsstAlertWorker {
         survey_matches: &Option<LsstAliases>,
         now: f64,
         existing_alert_aux: &AlertAuxForUpdate,
+        designation: Option<&str>,
     ) -> Result<(), AlertError> {
         match self
             .update_aux_inner(
@@ -1082,6 +1221,7 @@ impl LsstAlertWorker {
                 survey_matches,
                 now,
                 existing_alert_aux,
+                designation,
             )
             .await
         {
@@ -1093,8 +1233,15 @@ impl LsstAlertWorker {
                     AlertError::ConcurrentAuxUpdate(_) => debug!(error = %e),
                     _ => error!(error = %e),
                 }
-                self.update_aux_fallback(object_id, prv_candidates, fp_hists, survey_matches, now)
-                    .await
+                self.update_aux_fallback(
+                    object_id,
+                    prv_candidates,
+                    fp_hists,
+                    survey_matches,
+                    now,
+                    designation,
+                )
+                .await
             }
         }
     }
@@ -1198,6 +1345,10 @@ impl AlertWorker for LsstAlertWorker {
         let ra = candidate.dia_source.ra;
         let dec = candidate.dia_source.dec;
 
+        let ss_source = avro_alert.ss_source.take();
+        let ss_source_present = ss_source.is_some();
+        let designation = ss_source.as_ref().and_then(|s| s.designation.clone());
+
         let mut prv_candidates = avro_alert.prv_candidates.take().unwrap_or_default();
         let mut fp_hists = avro_alert.fp_hists.take().unwrap_or_default();
 
@@ -1214,6 +1365,7 @@ impl AlertWorker for LsstAlertWorker {
             candid,
             object_id: object_id.clone(),
             ss_object_id: ss_object_id.clone(),
+            ss_source,
             candidate,
             coordinates: Coordinates::new(ra, dec),
             created_at: now,
@@ -1235,7 +1387,14 @@ impl AlertWorker for LsstAlertWorker {
                 .inspect_err(as_error!())?,
         );
 
+        // The designation is only known once a diaSource is linked to an ssObject; keep it
+        // current independent of whichever branch below runs, and regardless of any ZTF
+        // cross-match (an LSST-only or ZTF-only ssObject is a normal outcome). Fold the $set
+        // into the aux insert/update itself rather than issuing a separate round trip: a fresh
+        // insert already carries the designation, and an existing-doc update can carry it in
+        // the same `$set` as the lightcurve/aliases update.
         let existing_alert_aux = self.get_existing_aux(&object_id).await?;
+        let existing_alert_aux_present = existing_alert_aux.is_some();
 
         if let Some(existing) = existing_alert_aux {
             self.update_aux(
@@ -1245,6 +1404,7 @@ impl AlertWorker for LsstAlertWorker {
                 &survey_matches,
                 now,
                 &existing,
+                designation.as_deref(),
             )
             .await
             .inspect_err(as_error!())?;
@@ -1255,6 +1415,7 @@ impl AlertWorker for LsstAlertWorker {
                 prv_candidates,
                 fp_hists,
                 is_sso: ss_object_id.is_some(),
+                designation: designation.clone(),
                 cross_matches: Some(xmatches),
                 aliases: survey_matches,
                 coordinates: Coordinates::new(ra, dec),
@@ -1274,12 +1435,27 @@ impl AlertWorker for LsstAlertWorker {
                     &obj.fp_hists,
                     &obj.aliases,
                     now,
+                    designation.as_deref(),
                 )
                 .await
                 .inspect_err(as_error!())?;
             } else {
                 result.inspect_err(as_error!())?;
             }
+        }
+
+        // The only case not covered by the folded-in `$set` above is clearing a designation
+        // (no designation on this alert's ss_source) on a doc that already existed before this
+        // alert: a fresh insert never has the field set in the first place, so there's nothing
+        // to unset there.
+        if ss_source_present && designation.is_none() && existing_alert_aux_present {
+            self.alert_aux_collection
+                .update_one(
+                    doc! { "_id": &object_id },
+                    doc! { "$unset": { "designation": "" } },
+                )
+                .await
+                .inspect_err(as_error!())?;
         }
 
         let status = self
@@ -1367,6 +1543,7 @@ mod tests {
                 survey_matches,
                 Time::now().to_jd(),
                 existing_aux,
+                None,
             )
             .await
             .unwrap();
@@ -1525,6 +1702,159 @@ mod tests {
         // TODO: check prv_candidates and forced photometry once we have alerts
         //       where they aren't empty
         // TODO: check non detections once these are available in the schema
+
+        // the real fixture alert is not a Solar System object, so ssSource should
+        // deserialize cleanly as None rather than erroring out
+        assert!(alert.ss_source.is_none());
+    }
+
+    #[test]
+    fn test_ss_source_from_avro_value() {
+        use apache_avro::{from_value, types::Value};
+
+        let value = Value::Record(vec![
+            ("diaSourceId".to_string(), Value::Long(123456789)),
+            ("ssObjectId".to_string(), Value::Long(987654321)),
+            (
+                "designation".to_string(),
+                Value::Union(1, Box::new(Value::String("2008 AB".to_string()))),
+            ),
+            ("eclLambda".to_string(), Value::Double(10.0)),
+            ("eclBeta".to_string(), Value::Double(20.0)),
+            ("galLon".to_string(), Value::Double(30.0)),
+            ("galLat".to_string(), Value::Double(40.0)),
+            (
+                "elongation".to_string(),
+                Value::Union(0, Box::new(Value::Null)),
+            ),
+            (
+                "phaseAngle".to_string(),
+                Value::Union(1, Box::new(Value::Float(12.5))),
+            ),
+            (
+                "topoRange".to_string(),
+                Value::Union(0, Box::new(Value::Null)),
+            ),
+            (
+                "topoRangeRate".to_string(),
+                Value::Union(0, Box::new(Value::Null)),
+            ),
+            (
+                "helioRange".to_string(),
+                Value::Union(1, Box::new(Value::Float(2.5))),
+            ),
+            (
+                "helioRangeRate".to_string(),
+                Value::Union(0, Box::new(Value::Null)),
+            ),
+            (
+                "ephRa".to_string(),
+                Value::Union(1, Box::new(Value::Double(100.0))),
+            ),
+            (
+                "ephDec".to_string(),
+                Value::Union(1, Box::new(Value::Double(5.0))),
+            ),
+            (
+                "ephVmag".to_string(),
+                Value::Union(0, Box::new(Value::Null)),
+            ),
+            (
+                "ephRate".to_string(),
+                Value::Union(0, Box::new(Value::Null)),
+            ),
+            (
+                "ephRateRa".to_string(),
+                Value::Union(0, Box::new(Value::Null)),
+            ),
+            (
+                "ephRateDec".to_string(),
+                Value::Union(0, Box::new(Value::Null)),
+            ),
+            (
+                "ephOffset".to_string(),
+                Value::Union(0, Box::new(Value::Null)),
+            ),
+            (
+                "ephOffsetRa".to_string(),
+                Value::Union(0, Box::new(Value::Null)),
+            ),
+            (
+                "ephOffsetDec".to_string(),
+                Value::Union(0, Box::new(Value::Null)),
+            ),
+            (
+                "ephOffsetAlongTrack".to_string(),
+                Value::Union(0, Box::new(Value::Null)),
+            ),
+            (
+                "ephOffsetCrossTrack".to_string(),
+                Value::Union(0, Box::new(Value::Null)),
+            ),
+            (
+                "helio_x".to_string(),
+                Value::Union(0, Box::new(Value::Null)),
+            ),
+            (
+                "helio_y".to_string(),
+                Value::Union(0, Box::new(Value::Null)),
+            ),
+            (
+                "helio_z".to_string(),
+                Value::Union(0, Box::new(Value::Null)),
+            ),
+            (
+                "helio_vx".to_string(),
+                Value::Union(0, Box::new(Value::Null)),
+            ),
+            (
+                "helio_vy".to_string(),
+                Value::Union(0, Box::new(Value::Null)),
+            ),
+            (
+                "helio_vz".to_string(),
+                Value::Union(0, Box::new(Value::Null)),
+            ),
+            (
+                "helio_vtot".to_string(),
+                Value::Union(0, Box::new(Value::Null)),
+            ),
+            ("topo_x".to_string(), Value::Union(0, Box::new(Value::Null))),
+            ("topo_y".to_string(), Value::Union(0, Box::new(Value::Null))),
+            ("topo_z".to_string(), Value::Union(0, Box::new(Value::Null))),
+            (
+                "topo_vx".to_string(),
+                Value::Union(0, Box::new(Value::Null)),
+            ),
+            (
+                "topo_vy".to_string(),
+                Value::Union(0, Box::new(Value::Null)),
+            ),
+            (
+                "topo_vz".to_string(),
+                Value::Union(0, Box::new(Value::Null)),
+            ),
+            (
+                "topo_vtot".to_string(),
+                Value::Union(0, Box::new(Value::Null)),
+            ),
+            (
+                "diaDistanceRank".to_string(),
+                Value::Union(1, Box::new(Value::Int(1))),
+            ),
+        ]);
+
+        let ss_source: SsSource = from_value(&value).expect("failed to deserialize SsSource");
+        assert_eq!(ss_source.dia_source_id, 123456789);
+        assert_eq!(ss_source.ss_object_id, 987654321);
+        assert_eq!(ss_source.designation, Some("2008 AB".to_string()));
+        assert_eq!(ss_source.ecl_lambda, 10.0);
+        assert_eq!(ss_source.phase_angle, Some(12.5));
+        assert_eq!(ss_source.eph_ra, Some(100.0));
+        assert_eq!(ss_source.eph_dec, Some(5.0));
+        assert_eq!(ss_source.helio_range, Some(2.5));
+        assert_eq!(ss_source.topo_range, None);
+        assert_eq!(ss_source.dia_distance_rank, Some(1));
     }
 
     #[tokio::test]
@@ -1588,6 +1918,68 @@ mod tests {
 
         let second = worker.process_alert(&bytes_content).await.unwrap();
         assert_eq!(second, ProcessAlertStatus::Exists(candid));
+
+        drop_alert_from_collections(candid, &Survey::Lsst)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_update_aux_folds_in_designation() {
+        let mut worker = lsst_alert_worker().await;
+        let (candid, object_id, _bytes_content) = seed_lsst_alert(&mut worker).await;
+
+        let existing_aux = load_aux(&worker, &object_id).await;
+        worker
+            .update_aux(
+                &object_id,
+                &vec![],
+                &vec![],
+                &Some(LsstAliases::default()),
+                Time::now().to_jd(),
+                &existing_aux,
+                Some("2008 AB"),
+            )
+            .await
+            .unwrap();
+
+        let aux = worker
+            .alert_aux_collection
+            .find_one(doc! { "_id": &object_id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(aux.designation, Some("2008 AB".to_string()));
+
+        drop_alert_from_collections(candid, &Survey::Lsst)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_update_aux_fallback_folds_in_designation() {
+        let mut worker = lsst_alert_worker().await;
+        let (candid, object_id, _bytes_content) = seed_lsst_alert(&mut worker).await;
+
+        worker
+            .update_aux_fallback(
+                &object_id,
+                &vec![],
+                &vec![],
+                &Some(LsstAliases::default()),
+                Time::now().to_jd(),
+                Some("2010 XY"),
+            )
+            .await
+            .unwrap();
+
+        let aux = worker
+            .alert_aux_collection
+            .find_one(doc! { "_id": &object_id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(aux.designation, Some("2010 XY".to_string()));
 
         drop_alert_from_collections(candid, &Survey::Lsst)
             .await
