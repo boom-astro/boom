@@ -44,9 +44,12 @@ pub struct FpHist {
     pub mjd: f64,
     pub forcediffimflux: f64,
     pub forcediffimfluxunc: f64,
-    #[serde(rename(deserialize = "forcediffimmag"))]
+    // Stored/serialized as `magap`; `alias` also accepts the Avro packet's
+    // `forcediffimmag` on input so the same struct round-trips Avro -> Mongo ->
+    // struct. (A deserialize-only rename would break the Mongo read-back.)
+    #[serde(alias = "forcediffimmag")]
     pub magap: f64,
-    #[serde(rename(deserialize = "forcediffimmagunc"))]
+    #[serde(alias = "forcediffimmagunc")]
     pub sigmagap: f64,
     pub band: Band,
     pub diffmaglim: f64,
@@ -59,14 +62,18 @@ pub struct Candidate {
     pub mjd: f64,
     pub forcediffimflux: f64,
     pub forcediffimfluxunc: f64,
-    #[serde(rename(deserialize = "forcediffimmag"))]
+    // See FpHist: `alias` keeps the struct round-trippable Avro -> Mongo -> struct.
+    #[serde(alias = "forcediffimmag")]
     pub magap: f64,
-    #[serde(rename(deserialize = "forcediffimmagunc"))]
+    #[serde(alias = "forcediffimmagunc")]
     pub sigmagap: f64,
     pub band: Band,
     pub diffmaglim: f64,
     pub ra: f64,
     pub dec: f64,
+    // Real-bogus score (CNN cnn_prob); Rubin-style "reliability". Nullable in
+    // the Avro schema, so absent packets deserialize to None.
+    pub reliability: Option<f64>,
 }
 
 #[serde_as]
@@ -76,14 +83,23 @@ pub struct DecamCandidate {
     #[serde(flatten)]
     pub candidate: Candidate,
     pub jd: f64,
+    // Computed detection SNR (DECam packets carry flux, not snr); enables the
+    // same snr-based filtering as ZTF/LSST. None when the uncertainty is zero.
+    pub snr: Option<f64>,
 }
 
 impl TryFrom<Candidate> for DecamCandidate {
     type Error = AlertError;
 
     fn try_from(candidate: Candidate) -> Result<Self, Self::Error> {
+        let snr = if candidate.forcediffimfluxunc > 0.0 {
+            Some(candidate.forcediffimflux / candidate.forcediffimfluxunc)
+        } else {
+            None
+        };
         Ok(DecamCandidate {
             jd: candidate.mjd + 2400000.5,
+            snr,
             candidate,
         })
     }
@@ -122,14 +138,23 @@ pub struct DecamForcedPhot {
     #[serde(flatten)]
     pub fp_hist: FpHist,
     pub jd: f64,
+    // Computed detection SNR (see DecamCandidate::snr); used by the enrichment
+    // pipeline's fp_hists snr>=3 detection cut.
+    pub snr: Option<f64>,
 }
 
 impl TryFrom<FpHist> for DecamForcedPhot {
     type Error = AlertError;
 
     fn try_from(fp_hist: FpHist) -> Result<Self, Self::Error> {
+        let snr = if fp_hist.forcediffimfluxunc > 0.0 {
+            Some(fp_hist.forcediffimflux / fp_hist.forcediffimfluxunc)
+        } else {
+            None
+        };
         Ok(DecamForcedPhot {
             jd: fp_hist.mjd + 2400000.5,
+            snr,
             fp_hist,
         })
     }
@@ -731,20 +756,24 @@ mod tests {
         assert_eq!(alert.candidate.candidate.ra, ra);
         assert_eq!(alert.candidate.candidate.dec, dec);
 
+        // real-bogus reliability (CNN score) is carried on the candidate
+        let reliability = alert.candidate.candidate.reliability.unwrap();
+        assert!((reliability - 0.93080384).abs() < 1e-6);
+
         // validate the fp_hists
         let fp_hists = alert.clone().fp_hists;
-        assert_eq!(fp_hists.len(), 61);
+        assert_eq!(fp_hists.len(), 1);
 
         let fp_positive_det = fp_hists.get(0).unwrap();
-        assert!((fp_positive_det.fp_hist.magap - 22.595936).abs() < 1e-6);
-        assert!((fp_positive_det.fp_hist.sigmagap - 0.093660).abs() < 1e-6);
-        assert!((fp_positive_det.jd - 2460709.838387).abs() < 1e-6);
+        assert!((fp_positive_det.fp_hist.magap - 23.554045).abs() < 1e-6);
+        assert!((fp_positive_det.fp_hist.sigmagap - 0.2014992).abs() < 1e-6);
+        assert!((fp_positive_det.jd - 2461229.58006057).abs() < 1e-6);
         assert_eq!(fp_positive_det.fp_hist.band, Band::G);
 
         // validate the cutouts
-        assert_eq!(alert.cutout_science.clone().len(), 54561);
-        assert_eq!(alert.cutout_template.clone().len(), 49810);
-        assert_eq!(alert.cutout_difference.clone().len(), 54569);
+        assert_eq!(alert.cutout_science.clone().len(), 14984);
+        assert_eq!(alert.cutout_template.clone().len(), 13988);
+        assert_eq!(alert.cutout_difference.clone().len(), 14953);
     }
 
     #[tokio::test]
