@@ -151,7 +151,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn float_vector_field_concatenates_rows_and_sets_dim() {
+    fn embedding_column_concatenates_rows_with_dim() {
         let field = float_vector_field(FIELD_EMBEDDING, 3, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
 
         assert_eq!(field.field_name, FIELD_EMBEDDING);
@@ -171,7 +171,7 @@ mod tests {
     }
 
     #[test]
-    fn string_field_carries_all_ids_in_order() {
+    fn object_id_column_preserves_row_order() {
         let field = string_field(FIELD_OBJECT_ID, vec!["a".into(), "b".into()]);
         match field.field {
             Some(Field::Scalars(s)) => match s.data {
