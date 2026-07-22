@@ -29,7 +29,11 @@ fn validate_gpu_inference(device_ids: &[i32]) -> Result<(), Box<dyn std::error::
     info!("Validating GPU inference: running one inference per configured CUDA device");
     for &device_id in device_ids {
         info!(device_id, "Running BTSBotModel inference on device");
-        let mut model = BtsBotModel::new_on_device("data/models/btsbot-v1.0.1.onnx", device_id, std::ptr::null_mut())?;
+        let mut model = BtsBotModel::new_on_device(
+            "data/models/btsbot-v1.0.1.onnx",
+            device_id,
+            std::ptr::null_mut(),
+        )?;
         let metadata = ndarray::Array::from_shape_vec((1, 25), vec![0.5; 25])?;
         let triplet = ndarray::Array::from_shape_vec((1, 63, 63, 3), vec![0.5; 63 * 63 * 3])?;
         let _ = model.predict(&metadata, &triplet)?;

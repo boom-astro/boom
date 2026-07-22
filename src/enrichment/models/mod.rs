@@ -117,11 +117,7 @@ impl SharedModels {
                     id,
                     stream_ptr,
                 )?,
-                BtsBotModel::new_on_device(
-                    "data/models/btsbot-v1.0.1.onnx",
-                    id,
-                    stream_ptr,
-                )?,
+                BtsBotModel::new_on_device("data/models/btsbot-v1.0.1.onnx", id, stream_ptr)?,
                 cider::CiderFusionModel::new_on_device(
                     "data/models/cider_fusion_plus_embedding.onnx",
                     id,
