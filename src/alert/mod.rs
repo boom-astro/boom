@@ -1,8 +1,13 @@
+mod askap;
 mod base;
 mod decam;
 mod lsst;
 mod winter;
 mod ztf;
+pub use askap::{
+    AskapAlert, AskapAlertWorker, AskapAliases, AskapCandidate, AskapObject, AskapRawAvroAlert,
+    ASKAP_DEC_RANGE,
+};
 pub use base::{
     deserialize_mjd, deserialize_mjd_option, get_schema_and_startidx, run_alert_worker, AlertError,
     AlertWorker, AlertWorkerError, LightcurveJdOnly, ProcessAlertStatus, SchemaRegistry,

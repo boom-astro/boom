@@ -276,8 +276,8 @@ async fn fetch_cutouts_from_kowalski(
         cutouts.push(AlertCutout {
             candid: kc.candid,
             cutout_science: kc.cutout_science,
-            cutout_template: kc.cutout_template,
-            cutout_difference: kc.cutout_difference,
+            cutout_template: Some(kc.cutout_template),
+            cutout_difference: Some(kc.cutout_difference),
         });
     }
     debug!(

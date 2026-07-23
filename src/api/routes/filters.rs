@@ -1,8 +1,8 @@
 use crate::{
     alert::{
-        DecamAliases, DecamCandidate, DecamForcedPhot, LsstAliases, LsstCandidate, LsstForcedPhot,
-        WinterAliases, WinterCandidate, WinterPrvCandidate, ZtfAliases, ZtfCandidate,
-        ZtfForcedPhot, ZtfPrvCandidate,
+        AskapAliases, AskapCandidate, DecamAliases, DecamCandidate, DecamForcedPhot, LsstAliases,
+        LsstCandidate, LsstForcedPhot, WinterAliases, WinterCandidate, WinterPrvCandidate,
+        ZtfAliases, ZtfCandidate, ZtfForcedPhot, ZtfPrvCandidate,
     },
     api::{
         filters::{doc2json, SortOrder},
@@ -1247,6 +1247,20 @@ pub struct WinterAlertToFilter {
 
 #[serdavro]
 #[derive(Debug, Deserialize, Serialize)]
+/// ASKAP data available at filtering time
+pub struct AskapAlertToFilter {
+    pub candid: i64,
+    #[serde(rename = "objectId")]
+    pub object_id: String,
+    pub candidate: AskapCandidate,
+    pub coordinates: GalacticCoordinates,
+    pub prv_candidates: Vec<AskapCandidate>,
+    pub fp_hists: Vec<AskapCandidate>,
+    pub aliases: AskapAliases,
+}
+
+#[serdavro]
+#[derive(Debug, Deserialize, Serialize)]
 /// DECam data available at filtering time
 pub struct DecamAlertToFilter {
     pub candid: i64,
@@ -1281,6 +1295,7 @@ pub async fn get_filter_schema(path: web::Path<(Survey,)>) -> HttpResponse {
         Survey::Lsst => LsstAlertToFilter::get_schema(),
         Survey::Winter => WinterAlertToFilter::get_schema(),
         Survey::Decam => DecamAlertToFilter::get_schema(),
+        Survey::Askap => AskapAlertToFilter::get_schema(),
     };
     response::ok(
         &format!("avro schema for survey {}", survey_name),

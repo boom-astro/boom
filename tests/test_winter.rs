@@ -171,8 +171,16 @@ async fn test_filter_winter_alert() {
 
     // verify cutouts are non-empty
     assert!(!alert.cutout_science.is_empty());
-    assert!(!alert.cutout_template.is_empty());
-    assert!(!alert.cutout_difference.is_empty());
+    assert!(!alert
+        .cutout_template
+        .as_deref()
+        .unwrap_or_default()
+        .is_empty());
+    assert!(!alert
+        .cutout_difference
+        .as_deref()
+        .unwrap_or_default()
+        .is_empty());
 
     // verify that we can convert the alert to avro bytes
     let schema = load_alert_schema().unwrap();

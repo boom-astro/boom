@@ -1,14 +1,16 @@
 use crate::{
     alert::{
-        run_alert_worker, DecamAlertWorker, LsstAlertWorker, WinterAlertWorker, ZtfAlertWorker,
+        run_alert_worker, AskapAlertWorker, DecamAlertWorker, LsstAlertWorker, WinterAlertWorker,
+        ZtfAlertWorker,
     },
     enrichment::{
         models::{SharedModelPool, SharedModels},
-        run_enrichment_worker, DecamEnrichmentWorker, LsstEnrichmentWorker, WinterEnrichmentWorker,
-        ZtfEnrichmentWorker,
+        run_enrichment_worker, AskapEnrichmentWorker, DecamEnrichmentWorker, LsstEnrichmentWorker,
+        WinterEnrichmentWorker, ZtfEnrichmentWorker,
     },
     filter::{
-        run_filter_worker, DecamFilterWorker, LsstFilterWorker, WinterFilterWorker, ZtfFilterWorker,
+        run_filter_worker, AskapFilterWorker, DecamFilterWorker, LsstFilterWorker,
+        WinterFilterWorker, ZtfFilterWorker,
     },
     utils::{
         enums::Survey,
@@ -370,6 +372,7 @@ impl Worker {
                     Survey::Ztf => run_alert_worker::<ZtfAlertWorker>,
                     Survey::Lsst => run_alert_worker::<LsstAlertWorker>,
                     Survey::Decam => run_alert_worker::<DecamAlertWorker>,
+                    Survey::Askap => run_alert_worker::<AskapAlertWorker>,
                     Survey::Winter => run_alert_worker::<WinterAlertWorker>,
                 };
                 run(receiver, &config_path, id).unwrap_or_else(as_error!("alert worker failed"));
@@ -382,6 +385,7 @@ impl Worker {
                     Survey::Ztf => run_filter_worker::<ZtfFilterWorker>,
                     Survey::Lsst => run_filter_worker::<LsstFilterWorker>,
                     Survey::Decam => run_filter_worker::<DecamFilterWorker>,
+                    Survey::Askap => run_filter_worker::<AskapFilterWorker>,
                     Survey::Winter => run_filter_worker::<WinterFilterWorker>,
                 };
                 run(receiver, &config_path, id).unwrap_or_else(as_error!("filter worker failed"));
@@ -394,6 +398,7 @@ impl Worker {
                     Survey::Ztf => run_enrichment_worker::<ZtfEnrichmentWorker>,
                     Survey::Lsst => run_enrichment_worker::<LsstEnrichmentWorker>,
                     Survey::Decam => run_enrichment_worker::<DecamEnrichmentWorker>,
+                    Survey::Askap => run_enrichment_worker::<AskapEnrichmentWorker>,
                     Survey::Winter => run_enrichment_worker::<WinterEnrichmentWorker>,
                 };
                 run(receiver, &config_path, id, shared_models)

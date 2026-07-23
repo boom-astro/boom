@@ -1,9 +1,11 @@
+mod askap;
 mod base;
 mod decam;
 mod lsst;
 mod winter;
 mod ztf;
 
+pub use askap::{build_askap_filter_pipeline, AskapFilterWorker};
 pub use base::{
     alert_to_avro_bytes, build_filter_pipeline, build_loaded_filter, build_loaded_filters,
     create_producer, load_alert_schema, load_schema, run_filter, run_filter_worker,

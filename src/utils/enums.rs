@@ -15,6 +15,8 @@ pub enum Survey {
     Decam,
     #[serde(alias = "winter", alias = "wntr", alias = "WNTR")]
     Winter,
+    #[serde(alias = "askap")]
+    Askap,
 }
 
 impl Survey {
@@ -24,6 +26,7 @@ impl Survey {
             Survey::Lsst => "LSST",
             Survey::Decam => "DECAM",
             Survey::Winter => "WINTER",
+            Survey::Askap => "ASKAP",
         }
     }
 
@@ -33,12 +36,14 @@ impl Survey {
     /// - LSST   (Cerro Pachón, CL, Chile): UTC−3
     /// - DECam  (Cerro Tololo, CL, Chile): UTC−4
     /// - WINTER (Palomar, CA, USA)       : UTC−7
+    /// - ASKAP  (Inyarrimanha Ilgari Bundara / Murchison, WA, Australia): UTC+8
     pub fn observatory_utc_offset(&self) -> f64 {
         match self {
             Survey::Ztf => -7.0,
             Survey::Lsst => -3.0,
             Survey::Decam => -4.0,
             Survey::Winter => -7.0,
+            Survey::Askap => 8.0,
         }
     }
 

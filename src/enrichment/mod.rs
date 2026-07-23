@@ -1,3 +1,4 @@
+mod askap;
 pub mod babamul;
 mod base;
 mod decam;
@@ -5,6 +6,7 @@ mod lsst;
 pub mod models;
 mod winter;
 mod ztf;
+pub use askap::AskapEnrichmentWorker;
 pub use base::{fetch_alerts, run_enrichment_worker, EnrichmentWorker, EnrichmentWorkerError};
 pub use decam::DecamEnrichmentWorker;
 pub use lsst::{

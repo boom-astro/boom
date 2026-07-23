@@ -1287,8 +1287,8 @@ impl AlertWorker for LsstAlertWorker {
                 candid,
                 &object_id,
                 avro_alert.cutout_science,
-                avro_alert.cutout_template,
-                avro_alert.cutout_difference,
+                Some(avro_alert.cutout_template),
+                Some(avro_alert.cutout_difference),
                 &self.alert_cutout_storage,
             )
             .await
@@ -1568,8 +1568,14 @@ mod tests {
 
         assert_eq!(stored.candid, candid);
         assert_eq!(stored.cutout_science, parsed_alert.cutout_science);
-        assert_eq!(stored.cutout_template, parsed_alert.cutout_template);
-        assert_eq!(stored.cutout_difference, parsed_alert.cutout_difference);
+        assert_eq!(
+            stored.cutout_template.as_deref(),
+            Some(parsed_alert.cutout_template.as_slice())
+        );
+        assert_eq!(
+            stored.cutout_difference.as_deref(),
+            Some(parsed_alert.cutout_difference.as_slice())
+        );
 
         drop_alert_from_collections(candid, &Survey::Lsst)
             .await

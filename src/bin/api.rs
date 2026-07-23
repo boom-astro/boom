@@ -49,7 +49,13 @@ async fn main() -> std::io::Result<()> {
 
     // Build cutout storage for each survey once at startup
     let mut cutout_storage_map: HashMap<Survey, CutoutStorage> = HashMap::new();
-    for survey in [Survey::Ztf, Survey::Lsst, Survey::Decam, Survey::Winter] {
+    for survey in [
+        Survey::Ztf,
+        Survey::Lsst,
+        Survey::Decam,
+        Survey::Winter,
+        Survey::Askap,
+    ] {
         let storage = config
             .build_cutout_storage(&survey)
             .await

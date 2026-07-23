@@ -38,12 +38,21 @@ pub struct S3AlertCutout {
     #[serde_as(as = "Base64")]
     #[serde(rename = "cutoutScience")]
     pub cutout_science: Vec<u8>,
-    #[serde_as(as = "Base64")]
-    #[serde(rename = "cutoutTemplate")]
-    pub cutout_template: Vec<u8>,
-    #[serde_as(as = "Base64")]
-    #[serde(rename = "cutoutDifference")]
-    pub cutout_difference: Vec<u8>,
+    // Optional: radio surveys (ASKAP) only produce a science stamp.
+    #[serde_as(as = "Option<Base64>")]
+    #[serde(
+        rename = "cutoutTemplate",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub cutout_template: Option<Vec<u8>>,
+    #[serde_as(as = "Option<Base64>")]
+    #[serde(
+        rename = "cutoutDifference",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub cutout_difference: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -54,14 +63,22 @@ pub struct AlertCutout {
     #[serde(serialize_with = "serialize_cutout")]
     #[serde(deserialize_with = "deserialize_cutout")]
     pub cutout_science: Vec<u8>,
-    #[serde(serialize_with = "serialize_cutout")]
-    #[serde(deserialize_with = "deserialize_cutout")]
-    #[serde(rename = "cutoutTemplate")]
-    pub cutout_template: Vec<u8>,
-    #[serde(serialize_with = "serialize_cutout")]
-    #[serde(deserialize_with = "deserialize_cutout")]
-    #[serde(rename = "cutoutDifference")]
-    pub cutout_difference: Vec<u8>,
+    #[serde(serialize_with = "serialize_cutout_opt")]
+    #[serde(deserialize_with = "deserialize_cutout_opt")]
+    #[serde(
+        rename = "cutoutTemplate",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub cutout_template: Option<Vec<u8>>,
+    #[serde(serialize_with = "serialize_cutout_opt")]
+    #[serde(deserialize_with = "deserialize_cutout_opt")]
+    #[serde(
+        rename = "cutoutDifference",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub cutout_difference: Option<Vec<u8>>,
 }
 
 fn deserialize_cutout<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
@@ -81,6 +98,24 @@ where
         bytes: cutout.to_vec(),
     };
     binary.serialize(serializer)
+}
+
+fn deserialize_cutout_opt<'de, D>(deserializer: D) -> Result<Option<Vec<u8>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let binary = <Option<mongodb::bson::Binary> as Deserialize>::deserialize(deserializer)?;
+    Ok(binary.map(|b| b.bytes))
+}
+
+fn serialize_cutout_opt<S>(cutout: &Option<Vec<u8>>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match cutout {
+        Some(bytes) => serialize_cutout(bytes, serializer),
+        None => serializer.serialize_none(),
+    }
 }
 
 impl From<S3AlertCutout> for AlertCutout {
@@ -119,8 +154,16 @@ fn compress_stamps(cutout: AlertCutout) -> Result<AlertCutout, CutoutStorageErro
     Ok(AlertCutout {
         candid: cutout.candid,
         cutout_science: compress_stamp(&cutout.cutout_science)?,
-        cutout_template: compress_stamp(&cutout.cutout_template)?,
-        cutout_difference: compress_stamp(&cutout.cutout_difference)?,
+        cutout_template: cutout
+            .cutout_template
+            .as_deref()
+            .map(compress_stamp)
+            .transpose()?,
+        cutout_difference: cutout
+            .cutout_difference
+            .as_deref()
+            .map(compress_stamp)
+            .transpose()?,
     })
 }
 
@@ -128,8 +171,16 @@ fn decompress_stamps(cutout: AlertCutout) -> Result<AlertCutout, CutoutStorageEr
     Ok(AlertCutout {
         candid: cutout.candid,
         cutout_science: decompress_stamp(&cutout.cutout_science)?,
-        cutout_template: decompress_stamp(&cutout.cutout_template)?,
-        cutout_difference: decompress_stamp(&cutout.cutout_difference)?,
+        cutout_template: cutout
+            .cutout_template
+            .as_deref()
+            .map(decompress_stamp)
+            .transpose()?,
+        cutout_difference: cutout
+            .cutout_difference
+            .as_deref()
+            .map(decompress_stamp)
+            .transpose()?,
     })
 }
 
@@ -152,21 +203,46 @@ impl CutoutCache {
         }
     }
 
+    /// Length sentinel for an absent stamp; old cache entries (real lengths
+    /// only) still unpack as `Some`.
+    const ABSENT_STAMP: u64 = u64::MAX;
+
     fn pack(cutout: &AlertCutout) -> Vec<u8> {
+        fn push_opt(buf: &mut Vec<u8>, stamp: Option<&Vec<u8>>) {
+            match stamp {
+                Some(data) => {
+                    buf.extend_from_slice(&(data.len() as u64).to_le_bytes());
+                    buf.extend_from_slice(data);
+                }
+                None => buf.extend_from_slice(&CutoutCache::ABSENT_STAMP.to_le_bytes()),
+            }
+        }
         let s = &cutout.cutout_science;
-        let t = &cutout.cutout_template;
-        let d = &cutout.cutout_difference;
-        let mut buf = Vec::with_capacity(24 + s.len() + t.len() + d.len());
+        let mut buf = Vec::with_capacity(
+            24 + s.len()
+                + cutout.cutout_template.as_ref().map_or(0, |t| t.len())
+                + cutout.cutout_difference.as_ref().map_or(0, |d| d.len()),
+        );
         buf.extend_from_slice(&(s.len() as u64).to_le_bytes());
         buf.extend_from_slice(s);
-        buf.extend_from_slice(&(t.len() as u64).to_le_bytes());
-        buf.extend_from_slice(t);
-        buf.extend_from_slice(&(d.len() as u64).to_le_bytes());
-        buf.extend_from_slice(d);
+        push_opt(&mut buf, cutout.cutout_template.as_ref());
+        push_opt(&mut buf, cutout.cutout_difference.as_ref());
         buf
     }
 
     fn unpack(candid: i64, buf: &[u8]) -> Option<AlertCutout> {
+        fn read_opt(buf: &[u8], pos: &mut usize) -> Option<Option<Vec<u8>>> {
+            let len = u64::from_le_bytes(buf.get(*pos..*pos + 8)?.try_into().ok()?);
+            *pos += 8;
+            if len == CutoutCache::ABSENT_STAMP {
+                return Some(None);
+            }
+            let len = len as usize;
+            let data = buf.get(*pos..*pos + len)?.to_vec();
+            *pos += len;
+            Some(Some(data))
+        }
+
         let mut pos = 0;
 
         let s_len = u64::from_le_bytes(buf.get(pos..pos + 8)?.try_into().ok()?) as usize;
@@ -174,14 +250,8 @@ impl CutoutCache {
         let cutout_science = buf.get(pos..pos + s_len)?.to_vec();
         pos += s_len;
 
-        let t_len = u64::from_le_bytes(buf.get(pos..pos + 8)?.try_into().ok()?) as usize;
-        pos += 8;
-        let cutout_template = buf.get(pos..pos + t_len)?.to_vec();
-        pos += t_len;
-
-        let d_len = u64::from_le_bytes(buf.get(pos..pos + 8)?.try_into().ok()?) as usize;
-        pos += 8;
-        let cutout_difference = buf.get(pos..pos + d_len)?.to_vec();
+        let cutout_template = read_opt(buf, &mut pos)?;
+        let cutout_difference = read_opt(buf, &mut pos)?;
 
         Some(AlertCutout {
             candid,

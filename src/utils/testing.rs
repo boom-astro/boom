@@ -1,7 +1,7 @@
 use crate::{
     alert::{
-        sanitize_winter_avro, AlertWorker, DecamAlertWorker, LightcurveJdOnly, LsstAlertWorker,
-        SchemaRegistry, WinterAlertWorker, ZtfAlertWorker,
+        sanitize_winter_avro, AlertWorker, AskapAlertWorker, DecamAlertWorker, LightcurveJdOnly,
+        LsstAlertWorker, SchemaRegistry, WinterAlertWorker, ZtfAlertWorker,
         LSST_SCHEMA_REGISTRY_GITHUB_FALLBACK_URL, LSST_SCHEMA_REGISTRY_URL,
     },
     conf,
@@ -45,6 +45,13 @@ pub async fn decam_alert_worker() -> DecamAlertWorker {
         .await
         .unwrap();
     DecamAlertWorker::new(TEST_CONFIG_FILE).await.unwrap()
+}
+
+pub async fn askap_alert_worker() -> AskapAlertWorker {
+    initialize_survey_indexes(&Survey::Askap, &conf::get_test_db().await)
+        .await
+        .unwrap();
+    AskapAlertWorker::new(TEST_CONFIG_FILE).await.unwrap()
 }
 
 pub async fn winter_alert_worker() -> WinterAlertWorker {
@@ -114,6 +121,8 @@ const LSST_TEST_PIPELINE: &str = "[{\"$match\": {\"candidate.reliability\": {\"$
 const WINTER_TEST_PIPELINE: &str = "[{\"$match\": {\"candidate.magpsf\": {\"$lte\": 20.0}}}, {\"$project\": {\"objectId\": 1, \"annotations.mag_now\": {\"$round\": [\"$candidate.magpsf\", 2]}}}]";
 // DECam stores the difference-image magnitude as `magap` (not `magpsf`) and the
 // CNN real-bogus score as `reliability`.
+// ASKAP is radio: filter on snr and peak flux (mJy), not magnitudes.
+const ASKAP_TEST_PIPELINE: &str = "[{\"$match\": {\"candidate.snr\": {\"$gte\": 5.0}, \"candidate.flux_peak\": {\"$gt\": 0.0}}}, {\"$project\": {\"objectId\": 1, \"annotations.flux_now\": {\"$round\": [\"$candidate.flux_peak\", 2]}}}]";
 const DECAM_TEST_PIPELINE: &str = "[{\"$match\": {\"candidate.reliability\": {\"$gt\": 0.1}, \"candidate.magap\": {\"$lte\": 25.0}}}, {\"$project\": {\"objectId\": 1, \"annotations.mag_now\": {\"$round\": [\"$candidate.magap\", 2]}}}]";
 
 pub async fn remove_test_filter(
@@ -183,6 +192,7 @@ pub async fn insert_test_filter(
         (Survey::Lsst, _) => LSST_TEST_PIPELINE,
         (Survey::Decam, _) => DECAM_TEST_PIPELINE,
         (Survey::Winter, _) => WINTER_TEST_PIPELINE,
+        (Survey::Askap, _) => ASKAP_TEST_PIPELINE,
     };
 
     insert_custom_test_filter(survey, pipeline).await
@@ -449,7 +459,7 @@ pub async fn assert_update_aux_branches_and_fallback<A>(
 pub fn randomize_object_id(survey: &Survey) -> String {
     let mut rng = rand::rng();
     match survey {
-        Survey::Ztf | Survey::Decam | Survey::Winter => {
+        Survey::Ztf | Survey::Decam | Survey::Winter | Survey::Askap => {
             let mut object_id = survey.to_string();
             for _ in 0..2 {
                 object_id.push(rng.random_range('0'..='9'));
@@ -499,12 +509,13 @@ impl AlertRandomizer {
 
     pub fn new_randomized(survey: Survey) -> Self {
         let (object_id, payload, schema, schema_registry) = match survey {
-            Survey::Ztf | Survey::Decam | Survey::Winter => {
+            Survey::Ztf | Survey::Decam | Survey::Winter | Survey::Askap => {
                 let payload = match survey {
                     Survey::Ztf => {
                         fs::read("tests/data/alerts/ztf/2695378462115010012.avro").unwrap()
                     }
                     Survey::Decam => fs::read("tests/data/alerts/decam/alert.avro").unwrap(),
+                    Survey::Askap => fs::read("tests/data/alerts/askap/alert.avro").unwrap(),
                     // The upstream WINTER schema has a duplicate field name; sanitize
                     // it so the strict avro Reader can parse the container.
                     Survey::Winter => {
@@ -678,7 +689,7 @@ impl AlertRandomizer {
 
     pub async fn get(self) -> (i64, String, f64, f64, Vec<u8>) {
         match self.survey {
-            Survey::Ztf | Survey::Decam | Survey::Winter => {
+            Survey::Ztf | Survey::Decam | Survey::Winter | Survey::Askap => {
                 // Use the same logic for ZTF/Decam/WINTER, just different objectId
                 // prefix (and lowercase `objectid` key for WINTER).
                 let mut candid = self.candid;
@@ -694,6 +705,9 @@ impl AlertRandomizer {
                             }
                             Survey::Decam => {
                                 fs::read("tests/data/alerts/decam/alert.avro").unwrap()
+                            }
+                            Survey::Askap => {
+                                fs::read("tests/data/alerts/askap/alert.avro").unwrap()
                             }
                             Survey::Winter => {
                                 let raw = fs::read("tests/data/alerts/winter/alert.avro").unwrap();
