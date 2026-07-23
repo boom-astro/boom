@@ -422,6 +422,23 @@ pub struct ZtfAlertClassifications {
     pub fusion_embedding: Option<Vec<f32>>,
 }
 
+/// The classifications to persist in Mongo. When `keep_embedding` is false the
+/// 384-float `fusion_embedding` is dropped (it lives only in Milvus); the class
+/// probabilities are always kept either way.
+fn classifications_for_mongo(
+    cls: &ZtfAlertClassifications,
+    keep_embedding: bool,
+) -> ZtfAlertClassifications {
+    if keep_embedding {
+        cls.clone()
+    } else {
+        ZtfAlertClassifications {
+            fusion_embedding: None,
+            ..cls.clone()
+        }
+    }
+}
+
 /// Per-alert intermediate data used during enrichment processing.
 struct AlertWork {
     candid: i64,
@@ -634,14 +651,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                 // Optionally drop the 384-float embedding from the stored
                 // classifications (the class probabilities are still kept); when
                 // disabled it lives only in Milvus.
-                let cls_doc = if WRITE_EMBEDDING_TO_MONGO {
-                    mongify(cls)
-                } else {
-                    mongify(&ZtfAlertClassifications {
-                        fusion_embedding: None,
-                        ..cls.clone()
-                    })
-                };
+                let cls_doc = mongify(&classifications_for_mongo(cls, WRITE_EMBEDDING_TO_MONGO));
                 doc! { "$set": {
                     "classifications": cls_doc,
                     "properties": mongify(&item.properties),
@@ -1193,5 +1203,42 @@ impl ZtfEnrichmentWorker {
         }
 
         Ok(results)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_classifications() -> ZtfAlertClassifications {
+        ZtfAlertClassifications {
+            acai_h: 0.1,
+            acai_n: 0.2,
+            acai_v: 0.3,
+            acai_o: 0.4,
+            acai_b: 0.5,
+            btsbot: 0.6,
+            cider_fusion: None,
+            fusion_embedding: Some(vec![1.0, 2.0, 3.0]),
+        }
+    }
+
+    #[test]
+    fn keeps_embedding_when_writing_to_mongo() {
+        let cls = sample_classifications();
+        let stored = classifications_for_mongo(&cls, true);
+        assert_eq!(stored.fusion_embedding, Some(vec![1.0, 2.0, 3.0]));
+        // Class probabilities are untouched.
+        assert_eq!(stored.btsbot, cls.btsbot);
+    }
+
+    #[test]
+    fn strips_embedding_when_not_writing_to_mongo() {
+        let cls = sample_classifications();
+        let stored = classifications_for_mongo(&cls, false);
+        assert!(stored.fusion_embedding.is_none());
+        // Everything else is preserved.
+        assert_eq!(stored.acai_h, cls.acai_h);
+        assert_eq!(stored.btsbot, cls.btsbot);
     }
 }

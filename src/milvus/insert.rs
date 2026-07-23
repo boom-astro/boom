@@ -53,42 +53,12 @@ impl MilvusClient {
         }
 
         let config = self.config().clone();
-        let dim = config.collection.dim;
-
-        // Validate up front: one bad row would otherwise fail the whole batch
-        // server-side with a far less specific error.
-        for row in rows {
-            if row.embedding.len() as i64 != dim {
-                return Err(MilvusError::DimensionMismatch {
-                    expected: dim,
-                    got: row.embedding.len(),
-                });
-            }
-        }
-
-        // Transpose the rows into columns (Milvus's wire format).
-        let object_ids: Vec<String> = rows.iter().map(|r| r.object_id.clone()).collect();
-        let embeddings: Vec<f32> = rows
-            .iter()
-            .flat_map(|r| r.embedding.iter().copied())
-            .collect();
-        let candids: Vec<i64> = rows.iter().map(|r| r.candid).collect();
-        let jds: Vec<f64> = rows.iter().map(|r| r.jd).collect();
-
-        let fields_data = vec![
-            string_field(FIELD_OBJECT_ID, object_ids),
-            float_vector_field(FIELD_EMBEDDING, dim, embeddings),
-            long_field(FIELD_CANDID, candids),
-            double_field(FIELD_JD, jds),
-        ];
-
-        let request = UpsertRequest {
-            db_name: config.database.clone(),
-            collection_name: config.collection.name.clone(),
-            fields_data,
-            num_rows: rows.len() as u32,
-            ..Default::default()
-        };
+        let request = build_upsert_request(
+            &config.database,
+            &config.collection.name,
+            config.collection.dim,
+            rows,
+        )?;
 
         let result = self.service().upsert(request).await?.into_inner();
         check_status(result.status.as_ref(), "Upsert")?;
@@ -97,6 +67,51 @@ impl MilvusClient {
 
         Ok(result.upsert_cnt as u64)
     }
+}
+
+/// Validate the embeddings and transpose the rows into Milvus's column-oriented
+/// `UpsertRequest`. Split out from the RPC send so it can be tested without a
+/// live server. Assumes `rows` is non-empty.
+fn build_upsert_request(
+    db_name: &str,
+    collection_name: &str,
+    dim: i64,
+    rows: &[EmbeddingRow],
+) -> Result<UpsertRequest, MilvusError> {
+    // Validate up front: one bad row would otherwise fail the whole batch
+    // server-side with a far less specific error.
+    for row in rows {
+        if row.embedding.len() as i64 != dim {
+            return Err(MilvusError::DimensionMismatch {
+                expected: dim,
+                got: row.embedding.len(),
+            });
+        }
+    }
+
+    // Transpose the rows into columns (Milvus's wire format).
+    let object_ids: Vec<String> = rows.iter().map(|r| r.object_id.clone()).collect();
+    let embeddings: Vec<f32> = rows
+        .iter()
+        .flat_map(|r| r.embedding.iter().copied())
+        .collect();
+    let candids: Vec<i64> = rows.iter().map(|r| r.candid).collect();
+    let jds: Vec<f64> = rows.iter().map(|r| r.jd).collect();
+
+    let fields_data = vec![
+        string_field(FIELD_OBJECT_ID, object_ids),
+        float_vector_field(FIELD_EMBEDDING, dim, embeddings),
+        long_field(FIELD_CANDID, candids),
+        double_field(FIELD_JD, jds),
+    ];
+
+    Ok(UpsertRequest {
+        db_name: db_name.to_string(),
+        collection_name: collection_name.to_string(),
+        fields_data,
+        num_rows: rows.len() as u32,
+        ..Default::default()
+    })
 }
 
 fn string_field(name: &str, data: Vec<String>) -> FieldData {
@@ -181,6 +196,93 @@ mod tests {
                 _ => panic!("expected string data"),
             },
             _ => panic!("expected a scalar field"),
+        }
+    }
+
+    fn row(object_id: &str, embedding: Vec<f32>, candid: i64, jd: f64) -> EmbeddingRow {
+        EmbeddingRow {
+            object_id: object_id.to_string(),
+            embedding,
+            candid,
+            jd,
+        }
+    }
+
+    #[test]
+    fn build_upsert_request_rejects_dimension_mismatch() {
+        let rows = vec![
+            row("ZTF_A", vec![0.1, 0.2, 0.3], 1, 2400000.5),
+            row("ZTF_B", vec![0.1, 0.2], 2, 2400001.5), // wrong length
+        ];
+
+        let err = build_upsert_request("db", "coll", 3, &rows).unwrap_err();
+        match err {
+            MilvusError::DimensionMismatch { expected, got } => {
+                assert_eq!(expected, 3);
+                assert_eq!(got, 2);
+            }
+            other => panic!("expected DimensionMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_upsert_request_assembles_all_columns_in_order() {
+        let rows = vec![
+            row("ZTF_A", vec![1.0, 2.0], 10, 2400000.5),
+            row("ZTF_B", vec![3.0, 4.0], 20, 2400001.5),
+        ];
+
+        let request = build_upsert_request("mydb", "mycoll", 2, &rows).unwrap();
+
+        assert_eq!(request.db_name, "mydb");
+        assert_eq!(request.collection_name, "mycoll");
+        assert_eq!(request.num_rows, 2);
+
+        // Column order must match the schema field order.
+        let names: Vec<&str> = request
+            .fields_data
+            .iter()
+            .map(|f| f.field_name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec![FIELD_OBJECT_ID, FIELD_EMBEDDING, FIELD_CANDID, FIELD_JD]
+        );
+
+        // object_id column: both ids, in row order.
+        match &request.fields_data[0].field {
+            Some(Field::Scalars(ScalarField {
+                data: Some(scalar_field::Data::StringData(arr)),
+            })) => assert_eq!(arr.data, vec!["ZTF_A".to_string(), "ZTF_B".to_string()]),
+            other => panic!("object_id column malformed: {other:?}"),
+        }
+
+        // embedding column: the two rows' vectors flattened, dim recorded.
+        match &request.fields_data[1].field {
+            Some(Field::Vectors(VectorField {
+                dim,
+                data: Some(vector_field::Data::FloatVector(arr)),
+            })) => {
+                assert_eq!(*dim, 2);
+                assert_eq!(arr.data, vec![1.0, 2.0, 3.0, 4.0]);
+            }
+            other => panic!("embedding column malformed: {other:?}"),
+        }
+
+        // candid column.
+        match &request.fields_data[2].field {
+            Some(Field::Scalars(ScalarField {
+                data: Some(scalar_field::Data::LongData(arr)),
+            })) => assert_eq!(arr.data, vec![10, 20]),
+            other => panic!("candid column malformed: {other:?}"),
+        }
+
+        // jd column.
+        match &request.fields_data[3].field {
+            Some(Field::Scalars(ScalarField {
+                data: Some(scalar_field::Data::DoubleData(arr)),
+            })) => assert_eq!(arr.data, vec![2400000.5, 2400001.5]),
+            other => panic!("jd column malformed: {other:?}"),
         }
     }
 }
