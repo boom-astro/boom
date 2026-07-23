@@ -229,11 +229,19 @@ async fn test_filter_lsst_alert() {
         "cutout_science should not be empty"
     );
     assert!(
-        !alert.cutout_template.is_empty(),
+        !alert
+            .cutout_template
+            .as_deref()
+            .unwrap_or_default()
+            .is_empty(),
         "cutout_template should not be empty"
     );
     assert!(
-        !alert.cutout_difference.is_empty(),
+        !alert
+            .cutout_difference
+            .as_deref()
+            .unwrap_or_default()
+            .is_empty(),
         "cutout_difference should not be empty"
     );
 
@@ -298,11 +306,19 @@ async fn test_filter_lsst_alert_with_ztf_match() {
         "cutout_science should not be empty"
     );
     assert!(
-        !alert.cutout_template.is_empty(),
+        !alert
+            .cutout_template
+            .as_deref()
+            .unwrap_or_default()
+            .is_empty(),
         "cutout_template should not be empty"
     );
     assert!(
-        !alert.cutout_difference.is_empty(),
+        !alert
+            .cutout_difference
+            .as_deref()
+            .unwrap_or_default()
+            .is_empty(),
         "cutout_difference should not be empty"
     );
 

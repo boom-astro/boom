@@ -1119,8 +1119,8 @@ pub trait AlertWorker {
         candid: i64,
         object_id: &str,
         cutout_science: Vec<u8>,
-        cutout_template: Vec<u8>,
-        cutout_difference: Vec<u8>,
+        cutout_template: Option<Vec<u8>>,
+        cutout_difference: Option<Vec<u8>>,
         cutout_storage: &CutoutStorage,
     ) -> Result<ProcessAlertStatus, AlertError> {
         let cutouts = AlertCutout {

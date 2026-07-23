@@ -1,8 +1,8 @@
 use crate::{
     conf::{self, AppConfig},
     filter::{
-        build_decam_filter_pipeline, build_lsst_filter_pipeline, build_winter_filter_pipeline,
-        build_ztf_filter_pipeline,
+        build_askap_filter_pipeline, build_decam_filter_pipeline, build_lsst_filter_pipeline,
+        build_winter_filter_pipeline, build_ztf_filter_pipeline,
     },
     scheduler::{record_kafka_alert_published, record_worker_retry},
     utils::{
@@ -19,7 +19,7 @@ use crate::{
 use std::time::{Duration, Instant};
 use std::{collections::HashMap, num::NonZero, sync::LazyLock};
 
-use apache_avro::{serde_avro_bytes, Writer};
+use apache_avro::{serde_avro_bytes, serde_avro_bytes_opt, Writer};
 use apache_avro::{AvroSchema, Schema};
 use apache_avro_macros::serdavro;
 use futures::stream::StreamExt;
@@ -185,10 +185,11 @@ pub struct Alert {
     pub photometry: Vec<Photometry>,
     #[serde(with = "serde_avro_bytes", rename = "cutoutScience")]
     pub cutout_science: Vec<u8>,
-    #[serde(with = "serde_avro_bytes", rename = "cutoutTemplate")]
-    pub cutout_template: Vec<u8>,
-    #[serde(with = "serde_avro_bytes", rename = "cutoutDifference")]
-    pub cutout_difference: Vec<u8>,
+    // Optional: radio surveys (ASKAP) only produce a science stamp.
+    #[serde(with = "serde_avro_bytes_opt", rename = "cutoutTemplate")]
+    pub cutout_template: Option<Vec<u8>>,
+    #[serde(with = "serde_avro_bytes_opt", rename = "cutoutDifference")]
+    pub cutout_difference: Option<Vec<u8>>,
     pub survey_matches: SurveyMatches,
 }
 
@@ -687,6 +688,7 @@ pub async fn build_filter_pipeline(
         Survey::Lsst => build_lsst_filter_pipeline(pipeline, permissions).await?,
         Survey::Decam => build_decam_filter_pipeline(pipeline, permissions).await?,
         Survey::Winter => build_winter_filter_pipeline(pipeline, permissions).await?,
+        Survey::Askap => build_askap_filter_pipeline(pipeline, permissions).await?,
     };
     Ok(pipeline)
 }
@@ -1137,8 +1139,8 @@ mod tests {
             classifications: vec![],
             photometry: vec![],
             cutout_science: vec![],
-            cutout_template: vec![],
-            cutout_difference: vec![],
+            cutout_template: None,
+            cutout_difference: None,
             survey_matches: SurveyMatches {
                 ztf: None,
                 lsst: None,
@@ -1173,8 +1175,8 @@ mod tests {
             classifications: vec![],
             photometry: vec![],
             cutout_science: vec![],
-            cutout_template: vec![],
-            cutout_difference: vec![],
+            cutout_template: None,
+            cutout_difference: None,
             survey_matches: SurveyMatches {
                 ztf: None,
                 lsst: None,

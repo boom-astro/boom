@@ -758,8 +758,8 @@ impl AlertWorker for WinterAlertWorker {
                 candid,
                 &object_id,
                 avro_alert.cutout_science,
-                avro_alert.cutout_template,
-                avro_alert.cutout_difference,
+                Some(avro_alert.cutout_template),
+                Some(avro_alert.cutout_difference),
                 &self.alert_cutout_storage,
             )
             .await

@@ -1220,8 +1220,8 @@ async fn test_babamul_lsst_with_ztf_match() {
     let cutouts = AlertCutout {
         candid: lsst_alert_id,
         cutout_science: vec![1, 2, 3, 4, 5],
-        cutout_template: vec![6, 7, 8, 9, 10],
-        cutout_difference: vec![11, 12, 13, 14, 15],
+        cutout_template: Some(vec![6, 7, 8, 9, 10]),
+        cutout_difference: Some(vec![11, 12, 13, 14, 15]),
     };
 
     cutout_storage

@@ -46,10 +46,15 @@ fn serdavro_impl(item: &ItemStruct) -> syn::Result<TokenStream> {
         })
         .collect();
 
-    // Collect field names whose schema must be overridden to Schema::Bytes because
-    // they carry `#[serde(with = "serde_avro_bytes")]`.
-    let avro_bytes_fields = collect_serde_avro_bytes_fields(item)?;
+    let (avro_bytes_fields, avro_bytes_opt_fields) = collect_serde_avro_bytes_fields(item)?;
     let avro_bytes_fields_tokens: Vec<TokenStream> = avro_bytes_fields
+        .iter()
+        .map(|s| {
+            let lit = proc_macro2::Literal::string(s);
+            quote!(#lit)
+        })
+        .collect();
+    let avro_bytes_opt_fields_tokens: Vec<TokenStream> = avro_bytes_opt_fields
         .iter()
         .map(|s| {
             let lit = proc_macro2::Literal::string(s);
@@ -106,11 +111,19 @@ fn serdavro_impl(item: &ItemStruct) -> syn::Result<TokenStream> {
                             // Fields that use serde_avro_bytes; their AvroSchema-derived type
                             // is Array(Int) but the correct Avro schema is Bytes.
                             let avro_bytes_fields: &[&str] = &[#(#avro_bytes_fields_tokens),*];
+                            // serde_avro_bytes_opt fields (Option<Vec<u8>>): Union[Null, Bytes].
+                            let avro_bytes_opt_fields: &[&str] = &[#(#avro_bytes_opt_fields_tokens),*];
 
                             for mut field in fake.fields {
                                 // Fix up schema for `#[serde(with = "serde_avro_bytes")]` fields.
                                 if avro_bytes_fields.iter().any(|n| field.name == *n) {
                                     field.schema = Schema::Bytes;
+                                }
+                                if avro_bytes_opt_fields.iter().any(|n| field.name == *n) {
+                                    field.schema = Schema::Union(
+                                        ::apache_avro::schema::UnionSchema::new(vec![Schema::Null, Schema::Bytes])
+                                            .expect("null|bytes union"),
+                                    );
                                 }
                                 // Apply rename if the field currently matches the original name.
                                 for (from, to) in renames {
@@ -327,24 +340,27 @@ fn collect_field_renames(item: &ItemStruct) -> syn::Result<Vec<(String, String)>
     }
 }
 
-// Collect original field names that carry `#[serde(with = "…serde_avro_bytes")]`.
-// Those fields require Schema::Bytes instead of the Schema::Array that AvroSchema
-// would normally derive for Vec<u8>.
-fn collect_serde_avro_bytes_fields(item: &ItemStruct) -> syn::Result<Vec<String>> {
+// Collect field names using `serde_avro_bytes` (need Schema::Bytes) or
+// `serde_avro_bytes_opt` (need Union[Null, Bytes]).
+fn collect_serde_avro_bytes_fields(item: &ItemStruct) -> syn::Result<(Vec<String>, Vec<String>)> {
     match &item.fields {
         Fields::Named(fields) => {
             let mut names = Vec::new();
+            let mut opt_names = Vec::new();
             for field in fields.named.iter() {
                 let orig = field.ident.clone().unwrap().to_string();
                 for attr in &field.attrs {
                     if attr.path().is_ident("serde") {
                         let mut is_avro_bytes = false;
+                        let mut is_avro_bytes_opt = false;
                         let _ = attr.parse_nested_meta(|meta| {
                             if meta.path.is_ident("with") {
                                 if let Ok(pbuf) = meta.value() {
                                     if let Ok(lit) = pbuf.parse::<syn::Lit>() {
                                         if let syn::Lit::Str(s) = lit {
-                                            if s.value().ends_with("serde_avro_bytes") {
+                                            if s.value().ends_with("serde_avro_bytes_opt") {
+                                                is_avro_bytes_opt = true;
+                                            } else if s.value().ends_with("serde_avro_bytes") {
                                                 is_avro_bytes = true;
                                             }
                                         }
@@ -358,10 +374,13 @@ fn collect_serde_avro_bytes_fields(item: &ItemStruct) -> syn::Result<Vec<String>
                         if is_avro_bytes {
                             names.push(orig.clone());
                         }
+                        if is_avro_bytes_opt {
+                            opt_names.push(orig.clone());
+                        }
                     }
                 }
             }
-            Ok(names)
+            Ok((names, opt_names))
         }
         _ => Err(syn::Error::new(
             item.fields.span(),
@@ -456,7 +475,7 @@ mod tests {
         )
         .unwrap();
 
-        let names = collect_serde_avro_bytes_fields(&s).unwrap();
+        let (names, _) = collect_serde_avro_bytes_fields(&s).unwrap();
         // Original field name (pre-rename) must be collected.
         assert!(names.contains(&"cutout_science".to_string()));
         assert!(!names.contains(&"other".to_string()));
@@ -478,8 +497,29 @@ mod tests {
         )
         .unwrap();
 
-        let names = collect_serde_avro_bytes_fields(&s).unwrap();
+        let (names, _) = collect_serde_avro_bytes_fields(&s).unwrap();
         assert!(names.contains(&"data".to_string()));
+    }
+
+    #[test]
+    fn serde_avro_bytes_opt_field_collected() {
+        let s: ItemStruct = syn::parse_str(
+            r#"
+            struct S {
+                #[serde(with = "apache_avro::serde_avro_bytes_opt")]
+                maybe: Option<Vec<u8>>,
+                #[serde(with = "serde_avro_bytes")]
+                plain: Vec<u8>,
+            }
+        "#,
+        )
+        .unwrap();
+
+        let (names, opt_names) = collect_serde_avro_bytes_fields(&s).unwrap();
+        assert!(names.contains(&"plain".to_string()));
+        assert!(!names.contains(&"maybe".to_string()));
+        assert!(opt_names.contains(&"maybe".to_string()));
+        assert!(!opt_names.contains(&"plain".to_string()));
     }
 
     #[test]

@@ -52,6 +52,9 @@ kafka:
     winter:
       server: "localhost:9092"
       group_id: "" # Set via BOOM_KAFKA__CONSUMER__WINTER__GROUP_ID environment variable
+    askap:
+      server: "localhost:9092"
+      group_id: "" # Set via BOOM_KAFKA__CONSUMER__ASKAP__GROUP_ID environment variable
   producer:
     server: "broker:29092" # Only one global producer for now (filter worker output)
 # cutouts_storage configures where alert cutout images are stored.
@@ -131,6 +134,17 @@ workers:
       max_match_rate: 5
       reference_night:
   winter:
+    command_interval: 500
+    alert:
+      n_workers: 1
+    enrichment:
+      n_workers: 1
+    filter:
+      n_workers: 1
+      refresh_interval_minutes: 15
+      max_match_rate: 5
+      reference_night:
+  askap:
     command_interval: 500
     alert:
       n_workers: 1
@@ -596,3 +610,4 @@ crossmatch:
         z_phot: 1
         z_phot_err: 1
         photo_z_type: 1
+  askap: []
