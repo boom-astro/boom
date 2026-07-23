@@ -595,6 +595,24 @@ pub struct WorkerConfig {
     pub n_workers: usize,
 }
 
+fn default_enrichment_batch_size() -> usize {
+    750
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct EnrichmentWorkerConfig {
+    pub n_workers: usize,
+    /// Alerts processed per enrichment batch. Serves two roles at once: the
+    /// queue RPOP cap (max alerts pulled per worker iteration) and the fixed
+    /// ONNX batch dimension. Every GPU inference runs at exactly this many
+    /// rows — partial batches are zero-padded — so ORT builds a single memory
+    /// plan and the BFC arena stays stable instead of growing per distinct
+    /// input shape. 750 is the proven stable shape on a 16 GB card
+    /// (~10.3 GB footprint); 1000 OOMs (~15.7 GB).
+    #[serde(default = "default_enrichment_batch_size")]
+    pub batch_size: usize,
+}
+
 fn default_filter_refresh_interval_minutes() -> u64 {
     15
 }
@@ -687,7 +705,7 @@ pub struct SurveyWorkerConfig {
     #[serde(deserialize_with = "deserialize_command_interval")]
     pub command_interval: usize, // in milliseconds
     pub alert: WorkerConfig,
-    pub enrichment: WorkerConfig,
+    pub enrichment: EnrichmentWorkerConfig,
     pub filter: FilterWorkerConfig,
 }
 

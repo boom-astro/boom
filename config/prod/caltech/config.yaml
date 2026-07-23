@@ -101,6 +101,10 @@ workers:
       n_workers: 8
     enrichment:
       n_workers: 12
+      # Alerts per enrichment batch: the queue RPOP cap AND the fixed ONNX
+      # inference shape. Partial batches are zero-padded so ORT sees one shape
+      # and the GPU memory arena stays stable. 750 is stable for both VRAM => 12GB.
+      batch_size: 250
     filter:
       n_workers: 4
       refresh_interval_minutes: 15

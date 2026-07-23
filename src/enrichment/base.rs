@@ -235,12 +235,15 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker>(
             is_transient_redis_error,
             || record_worker_retry("enrichment", &survey, "valkey_rpop"),
             || {
-                // Clone the (cheaply-clonable) multiplexed connection so the
-                // future owns it, rather than borrowing `con` through the
-                // FnMut closure.
                 let mut con = con.clone();
                 let key: &str = &input_queue;
-                async move { con.rpop::<&str, Vec<i64>>(key, NonZero::new(1000)).await }
+                async move {
+                    con.rpop::<&str, Vec<i64>>(
+                        key,
+                        NonZero::new(worker_config.enrichment.batch_size),
+                    )
+                    .await
+                }
             },
         )
         .await
@@ -250,6 +253,7 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker>(
         })?;
 
         if candids.is_empty() {
+            debug!(queue = %input_queue, "queue empty, sleeping 500ms");
             ACTIVE.add(-1, &active_attrs);
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             command_check_countdown = 0;
