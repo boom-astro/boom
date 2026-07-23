@@ -579,6 +579,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             let cutouts = candid_to_cutouts
                 .remove(&candid)
                 .ok_or_else(|| EnrichmentWorkerError::MissingCutouts(candid))?;
+
             // Compute numerical and boolean features from lightcurve and candidate analysis
             let (properties, all_bands_properties, programid, lightcurve) =
                 self.get_alert_properties(&alert).await?;
@@ -1004,7 +1005,7 @@ impl ZtfEnrichmentWorker {
             return Ok(results);
         }
 
-        // Cider batch — runs once on all selected items; failure is non-fatal.
+        // CIDER batch on ALL selected alerts at once — failure is non-fatal.
         let n_sel = selected_indices.len();
         let cider_batch: Option<(Vec<f32>, Vec<f32>)> =
             (|| -> Result<(Vec<f32>, Vec<f32>), ModelError> {
@@ -1044,6 +1045,7 @@ impl ZtfEnrichmentWorker {
                 warn!("cider batch inference failed: {}", e);
             })
             .ok();
+
         let cider_n_cls = cider_batch
             .as_ref()
             .map(|(p, _)| p.len() / n_sel)
@@ -1053,11 +1055,10 @@ impl ZtfEnrichmentWorker {
             .map(|(_, e)| e.len() / n_sel)
             .unwrap_or(0);
 
-        // Run ACAI/BTSBot inference in fixed-size chunks so ORT always sees the same
+        // Run ACAI/BTSBot in fixed-size padded chunks so ORT always sees the same
         // input shape (`self.batch_size`). The final chunk is zero-padded
         // up to the fixed size; padding rows produce scores that are ignored.
         for (chunk_idx, chunk) in selected_indices.chunks(self.batch_size).enumerate() {
-            let chunk_start = chunk_idx * self.batch_size;
             let mut triplet = ndarray::Array::zeros((self.batch_size, 63, 63, 3));
             let mut metadata = ndarray::Array::zeros((self.batch_size, 25));
             let mut btsbot_metadata = ndarray::Array::zeros((self.batch_size, 25));
@@ -1103,7 +1104,7 @@ impl ZtfEnrichmentWorker {
                 }
             }
 
-            // Map only the real rows back; padding rows (chunk.len()..) are dropped.
+            let chunk_start = chunk_idx * self.batch_size;
             for (batch_idx, &item_idx) in chunk.iter().enumerate() {
                 let sel_idx = chunk_start + batch_idx;
                 let cider_fusion = cider_batch.as_ref().and_then(|(probs, _)| {

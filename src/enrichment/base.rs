@@ -235,9 +235,6 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker>(
             is_transient_redis_error,
             || record_worker_retry("enrichment", &survey, "valkey_rpop"),
             || {
-                // Clone the (cheaply-clonable) multiplexed connection so the
-                // future owns it, rather than borrowing `con` through the
-                // FnMut closure.
                 let mut con = con.clone();
                 let key: &str = &input_queue;
                 async move {

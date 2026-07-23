@@ -35,6 +35,13 @@ pub fn load_model(path: &str) -> Result<Session, ModelError> {
     load_model_on_device(path, None, std::ptr::null_mut())
 }
 
+pub fn load_model_on_device_with_cpu_fallback(
+    path: &str,
+    device_id: Option<i32>,
+) -> Result<Session, ModelError> {
+    load_model_on_device_inner(path, device_id, std::ptr::null_mut(), true)
+}
+
 fn env_truthy(value: &str) -> bool {
     matches!(
         value.trim().to_ascii_lowercase().as_str(),
@@ -59,21 +66,12 @@ pub fn load_model_on_device(
     load_model_on_device_inner(path, device_id, cuda_stream, false)
 }
 
-/// Like [`load_model_on_device`] but allows CPU fallback for models whose ops
-/// are not fully covered by the CUDA execution provider (e.g. CIDER).
-pub fn load_model_on_device_with_cpu_fallback(
-    path: &str,
-    device_id: Option<i32>,
-) -> Result<Session, ModelError> {
-    load_model_on_device_inner(path, device_id, std::ptr::null_mut(), true)
-}
-
 fn load_model_on_device_inner(
     path: &str,
     device_id: Option<i32>,
     #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
     cuda_stream: *mut std::ffi::c_void,
-    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))] allow_cpu_fallback: bool,
+    allow_cpu_fallback: bool,
 ) -> Result<Session, ModelError> {
     let mut builder = Session::builder()?;
 
