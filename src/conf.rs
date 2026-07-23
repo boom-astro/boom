@@ -781,6 +781,133 @@ fn default_gpu_device_ids() -> Vec<i32> {
     vec![0]
 }
 
+/// Connection settings for a Milvus vector database.
+///
+/// On the NRP platform Milvus is reachable only over gRPC (there is no REST
+/// port exposed), on `milvus.nrp-nautilus.io:50051`, behind TLS. Credentials
+/// come from the NRP portal's `/milvus` page and are emailed to you.
+#[derive(Deserialize, Debug, Clone)]
+pub struct MilvusConfig {
+    /// When false, BOOM never opens a Milvus connection. Defaults to false so
+    /// that existing deployments are unaffected.
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_milvus_host")]
+    pub host: String,
+    #[serde(default = "default_milvus_port")]
+    pub port: u16,
+    /// Whether to use TLS. NRP terminates TLS with a standard Let's Encrypt
+    /// certificate, so the system root store is sufficient.
+    #[serde(default = "default_milvus_tls")]
+    pub tls: bool,
+    #[serde(default)]
+    pub username: String,
+    /// Set via `BOOM_MILVUS__PASSWORD`; never commit a real value.
+    #[serde(default)]
+    pub password: String,
+    /// Milvus database to operate in. NRP derives this from your group name,
+    /// converting dashes to underscores. It is not necessarily the Kubernetes
+    /// namespace: ours is `umn_babamul_vectordb`.
+    #[serde(default)]
+    pub database: String,
+    /// Per-RPC timeout in seconds.
+    #[serde(default = "default_milvus_timeout_seconds")]
+    pub timeout_seconds: u64,
+    #[serde(default)]
+    pub collection: MilvusCollectionConfig,
+}
+
+/// Schema and index settings for the collection holding CIDER fusion embeddings.
+#[derive(Deserialize, Debug, Clone)]
+pub struct MilvusCollectionConfig {
+    #[serde(default = "default_milvus_collection_name")]
+    pub name: String,
+    /// Embedding width. The CIDER fusion model
+    /// (`data/models/cider_fusion_plus_embedding.onnx`) emits 384 floats.
+    #[serde(default = "default_milvus_dim")]
+    pub dim: i64,
+    /// The model L2-normalizes its output, so COSINE and IP are equivalent here.
+    #[serde(default = "default_milvus_metric_type")]
+    pub metric_type: String,
+    #[serde(default = "default_milvus_index_type")]
+    pub index_type: String,
+    /// Upper bound on the stored `objectId` primary key.
+    #[serde(default = "default_milvus_object_id_max_length")]
+    pub object_id_max_length: i64,
+}
+
+fn default_milvus_host() -> String {
+    "milvus.nrp-nautilus.io".to_string()
+}
+
+fn default_milvus_port() -> u16 {
+    50051
+}
+
+fn default_milvus_tls() -> bool {
+    true
+}
+
+fn default_milvus_timeout_seconds() -> u64 {
+    30
+}
+
+fn default_milvus_collection_name() -> String {
+    "ztf_fusion_embeddings".to_string()
+}
+
+fn default_milvus_dim() -> i64 {
+    384
+}
+
+fn default_milvus_metric_type() -> String {
+    "COSINE".to_string()
+}
+
+fn default_milvus_index_type() -> String {
+    "HNSW".to_string()
+}
+
+fn default_milvus_object_id_max_length() -> i64 {
+    64
+}
+
+impl Default for MilvusConfig {
+    fn default() -> Self {
+        MilvusConfig {
+            enabled: false,
+            host: default_milvus_host(),
+            port: default_milvus_port(),
+            tls: default_milvus_tls(),
+            username: String::new(),
+            password: String::new(),
+            database: String::new(),
+            timeout_seconds: default_milvus_timeout_seconds(),
+            collection: MilvusCollectionConfig::default(),
+        }
+    }
+}
+
+impl Default for MilvusCollectionConfig {
+    fn default() -> Self {
+        MilvusCollectionConfig {
+            name: default_milvus_collection_name(),
+            dim: default_milvus_dim(),
+            metric_type: default_milvus_metric_type(),
+            index_type: default_milvus_index_type(),
+            object_id_max_length: default_milvus_object_id_max_length(),
+        }
+    }
+}
+
+impl MilvusConfig {
+    /// The gRPC endpoint to dial, e.g. `https://milvus.nrp-nautilus.io:50051`.
+    pub fn endpoint(&self) -> String {
+        let scheme = if self.tls { "https" } else { "http" };
+        format!("{}://{}:{}", scheme, self.host, self.port)
+    }
+}
+
 #[derive(Deserialize, Debug, Clone)]
 pub struct AppConfig {
     pub api: ApiConfig,
@@ -796,6 +923,8 @@ pub struct AppConfig {
     pub workers: HashMap<Survey, SurveyWorkerConfig>,
     #[serde(default)]
     pub gpu: GpuConfig,
+    #[serde(default)]
+    pub milvus: MilvusConfig,
     pub cutouts_storage: CutoutsStorage,
 }
 
@@ -857,6 +986,35 @@ impl AppConfig {
         // Validate token expiration
         if self.api.auth.token_expiration <= 0 {
             return Err("Token expiration must be greater than 0 for security reasons".to_string());
+        }
+
+        // Milvus settings are only required when the integration is switched on,
+        // so that deployments not using it need no extra configuration.
+        if self.milvus.enabled {
+            if self.milvus.username.is_empty() {
+                return Err(
+                    "Milvus username must be set via BOOM_MILVUS__USERNAME environment variable when milvus.enabled is true"
+                        .to_string(),
+                );
+            }
+
+            if self.milvus.password.is_empty() {
+                return Err(
+                    "Milvus password must be set via BOOM_MILVUS__PASSWORD environment variable when milvus.enabled is true"
+                        .to_string(),
+                );
+            }
+
+            if self.milvus.database.is_empty() {
+                return Err(
+                    "Milvus database must be set via BOOM_MILVUS__DATABASE environment variable when milvus.enabled is true"
+                        .to_string(),
+                );
+            }
+
+            if self.milvus.collection.dim <= 0 {
+                return Err("Milvus collection dimension must be greater than 0".to_string());
+            }
         }
 
         Ok(())
