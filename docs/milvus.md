@@ -189,6 +189,33 @@ left untouched):
 cargo run --bin milvus_check -- --create-collection
 ```
 
+## Writing embeddings
+
+Once `milvus.enabled` is true, the ZTF enrichment worker upserts each alert's
+`fusion_embedding` into the collection right after ML classification, keyed by
+`object_id` so a re-observed object overwrites its previous vector. The write is
+an `Upsert` RPC batched per enrichment batch.
+
+The worker **connects only** — it does not create the collection. Provision it
+once with `milvus_check --create-collection` before starting the workers, since
+several enrichment workers run in parallel and must not race to create it. If
+Milvus is enabled but unreachable at startup the worker fails fast; a failure
+during an individual upsert is logged and non-fatal (the alerts are already
+enriched and persisted in Mongo).
+
+### Keeping a Mongo copy — the `WRITE_EMBEDDING_TO_MONGO` toggle
+
+When `milvus.enabled`, the embedding always goes to Milvus. The compile-time
+constant `WRITE_EMBEDDING_TO_MONGO` in `src/milvus/mod.rs` decides whether to
+*also* keep it in the alert's Mongo `classifications` doc:
+
+- `true` **(beta default)** — dual-write to Mongo and Milvus, so a Milvus/NRP
+  outage never loses an embedding.
+- `false` — strip the 384-float vector from the Mongo doc; it lives only in
+  Milvus.
+
+Changing it requires a rebuild.
+
 ## Regenerating the client
 
 The gRPC client is generated at build time from the protos vendored in
