@@ -8,6 +8,7 @@ use boom::api::email::EmailService;
 use boom::api::observability::request_metrics_middleware;
 use boom::api::routes;
 use boom::conf::{load_dotenv, AppConfig};
+use boom::milvus::MilvusClient;
 use boom::utils::cutouts::CutoutStorage;
 use boom::utils::enums::Survey;
 use boom::utils::o11y::{
@@ -60,6 +61,25 @@ async fn main() -> std::io::Result<()> {
     }
     let cutout_storages = web::Data::new(cutout_storage_map);
 
+    // Connect to Milvus once at startup when enabled. A failure here is
+    // non-fatal: the embedding endpoints reply with a clear error, but the rest
+    // of the API still boots. `None` means disabled or unreachable.
+    let milvus_client: Option<MilvusClient> = if config.milvus.enabled {
+        match MilvusClient::connect(&config.milvus).await {
+            Ok(client) => {
+                tracing::info!("Milvus embedding endpoints are ENABLED");
+                Some(client)
+            }
+            Err(e) => {
+                tracing::warn!("Milvus enabled but connection failed; embedding endpoints will be unavailable: {}", e);
+                None
+            }
+        }
+    } else {
+        tracing::info!("Milvus embedding endpoints are DISABLED");
+        None
+    };
+
     let babamul_is_enabled = config.babamul.enabled;
     if babamul_is_enabled {
         tracing::info!("Babamul API endpoints are ENABLED");
@@ -77,6 +97,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(database.clone()))
             .app_data(web::Data::new(auth.clone()))
             .app_data(web::Data::new(email_service.clone()))
+            .app_data(web::Data::new(milvus_client.clone()))
             .app_data(cutout_storages.clone())
             .wrap(from_fn(request_metrics_middleware));
 
@@ -149,6 +170,9 @@ async fn main() -> std::io::Result<()> {
                 .service(routes::queries::post_count_query)
                 .service(routes::queries::post_estimated_count_query)
                 .service(routes::queries::post_pipeline_query)
+                .service(routes::embeddings::post_similar_objects)
+                .service(routes::embeddings::get_embeddings_count)
+                .service(routes::embeddings::delete_object_embedding)
                 .wrap(Logger::default()),
         )
     })
