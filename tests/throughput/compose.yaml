@@ -63,7 +63,7 @@ services:
       timeout: 5s
       retries: 3
   broker:
-    image: apache/kafka:4.1.1
+    image: apache/kafka:4.3.1
     hostname: broker
     ports:
       - "9092:9092"
