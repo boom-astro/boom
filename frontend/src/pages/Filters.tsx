@@ -13,6 +13,8 @@ import { FilterBuilder } from "@/components/filter/FilterBuilder";
 import type { FilterBuilderHandle } from "@/components/filter/FilterBuilder";
 import { FilterFieldBrowser } from "@/components/filter/FilterFieldBrowser";
 import { FilterHealthPanel } from "@/components/filter/FilterHealthPanel";
+import { TimeFormatSelect, TimeInput } from "@/components/alert-filter-form";
+import { toJd, jdToFormatString, type TimeFormat } from "@/lib/time";
 import { flattenAvroSchema } from "@/lib/filterConstants";
 import api, { type FilterTestParams, type FilterTestCountResult, type AvroSchema } from "@/lib/api";
 import { ZTF_FALLBACK_SCHEMA } from "@/lib/ztfFallbackSchema";
@@ -111,8 +113,11 @@ export default function Filters() {
   const [activeTab, setActiveTab] = useState<"editor" | "results">("editor");
   const [survey, setSurvey] = useState<"ZTF" | "LSST">("ZTF");
   const [pipelineText, setPipelineText] = useState(DEFAULT_PIPELINE);
-  const [startJd, setStartJd] = useState("2461138.5");
-  const [endJd, setEndJd] = useState("2461140.5");
+  // Time range: `startTime`/`endTime` hold the value as typed, in `timeFormat`.
+  // JD stays the wire format — see `startJd`/`endJd` below.
+  const [timeFormat, setTimeFormat] = useState<TimeFormat>("jd");
+  const [startTime, setStartTime] = useState("2461138.5");
+  const [endTime, setEndTime] = useState("2461140.5");
   const [limit, setLimit] = useState("10");
 
   // Ref for FilterBuilder imperative handle
@@ -160,22 +165,41 @@ export default function Filters() {
     return () => { cancelled = true; };
   }, [survey]);
 
+  // The API only ever speaks JD, whatever format is displayed.
+  const startJd = toJd(startTime, timeFormat);
+  const endJd = toJd(endTime, timeFormat);
+  const rangeError =
+    startTime && endTime && (startJd === undefined || endJd === undefined) ? "Invalid date." :
+    startJd !== undefined && endJd !== undefined && endJd <= startJd ? "End must be after start." :
+    null;
+
+  function handleTimeChange(setter: (v: string) => void) {
+    return (v: string) => { setter(v); setCountResult(null); };
+  }
+
+  // Keep the instant the user picked when the display format changes.
+  function handleTimeFormatChange(next: TimeFormat) {
+    if (startJd !== undefined) setStartTime(jdToFormatString(startJd, next));
+    if (endJd !== undefined) setEndTime(jdToFormatString(endJd, next));
+    setTimeFormat(next);
+  }
+
   function buildParams(pipeline: Record<string, unknown>[]): FilterTestParams {
     const params: FilterTestParams = {
       pipeline,
       survey,
       permissions: { [survey]: [1] },
     };
-    if (startJd) params.start_jd = parseFloat(startJd);
-    if (endJd) params.end_jd = parseFloat(endJd);
+    if (startJd !== undefined) params.start_jd = startJd;
+    if (endJd !== undefined) params.end_jd = endJd;
     if (limit) params.limit = parseInt(limit, 10);
     return params;
   }
 
   function fetchTotalForWindow(): Promise<void> {
-    if (!startJd || !endJd) return Promise.resolve();
+    if (startJd === undefined || endJd === undefined) return Promise.resolve();
     setTotalCountLoading(true);
-    return api.fetchTotalAlertCount(survey, parseFloat(startJd), parseFloat(endJd), { [survey]: [1] })
+    return api.fetchTotalAlertCount(survey, startJd, endJd, { [survey]: [1] })
       .then((c) => setTotalCount(c))
       .catch(() => setTotalCount(null))
       .finally(() => setTotalCountLoading(false));
@@ -293,20 +317,35 @@ export default function Filters() {
 
                     <Separator />
 
-                    <div>
-                      <h3 className="font-semibold text-sm mb-2">Time Range</h3>
+                    <div className="flex items-center justify-between gap-3 mb-2">
+                      <h3 className="font-semibold text-sm">Time Range</h3>
+                      <TimeFormatSelect value={timeFormat} onChange={handleTimeFormatChange} />
                     </div>
 
                     <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
                       <div className="sm:col-span-2">
-                        <Label htmlFor="startJd" className="text-xs font-medium mb-1 block text-muted-foreground">Start JD</Label>
-                        <Input id="startJd" type="number" step="any" value={startJd} onChange={(e) => { setStartJd(e.target.value); setCountResult(null); }} placeholder="2461404.5" />
+                        <Label htmlFor="startTime" className="text-xs font-medium mb-1 block text-muted-foreground">Start</Label>
+                        <TimeInput
+                          id="startTime"
+                          value={startTime}
+                          onChange={handleTimeChange(setStartTime)}
+                          format={timeFormat}
+                          className={rangeError ? "border-destructive focus-visible:ring-destructive" : undefined}
+                        />
                       </div>
                       <div className="sm:col-span-2">
-                        <Label htmlFor="endJd" className="text-xs font-medium mb-1 block text-muted-foreground">End JD</Label>
-                        <Input id="endJd" type="number" step="any" value={endJd} onChange={(e) => { setEndJd(e.target.value); setCountResult(null); }} placeholder="2461406.5" />
+                        <Label htmlFor="endTime" className="text-xs font-medium mb-1 block text-muted-foreground">End</Label>
+                        <TimeInput
+                          id="endTime"
+                          value={endTime}
+                          onChange={handleTimeChange(setEndTime)}
+                          format={timeFormat}
+                          className={rangeError ? "border-destructive focus-visible:ring-destructive" : undefined}
+                        />
                       </div>
                     </div>
+
+                    {rangeError && <p className="text-xs text-destructive">{rangeError}</p>}
 
                     <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
                       <div className="sm:col-span-2">

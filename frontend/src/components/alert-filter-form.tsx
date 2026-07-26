@@ -5,10 +5,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
+import { applyPreset, getWindowMs, jdToFormatString, toJd, type TimeFormat } from "@/lib/time";
 
-// ─── Exported types and utilities used by Query ───────────────────────────────
-
-export type TimeFormat = 'local' | 'utc' | 'jd' | 'mjd';
 export type BoolFilter = 'any' | 'true' | 'false';
 
 export type AlertFilterFormProps = {
@@ -28,48 +26,12 @@ export type AlertFilterFormProps = {
   isPositive: BoolFilter;       setIsPositive: (v: BoolFilter) => void;
 };
 
-export function toDatetimeLocalString(date: Date): string {
-  const pad = (n: number) => String(n).padStart(2, '0');
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
-}
-
-function toDatetimeUTCString(date: Date): string {
-  const pad = (n: number) => String(n).padStart(2, '0');
-  return `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())}T${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}`;
-}
-
-function jdToFormatString(jd: number, format: TimeFormat): string {
-  if (format === 'jd') return jd.toFixed(5);
-  if (format === 'mjd') return (jd - 2400000.5).toFixed(5);
-  const date = new Date((jd - 2440587.5) * 86400000);
-  return format === 'utc' ? toDatetimeUTCString(date) : toDatetimeLocalString(date);
-}
-
-export function datetimeLocalDefaults() {
-  const now = new Date();
-  const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000);
-  return { start: toDatetimeLocalString(yesterday), end: toDatetimeLocalString(now) };
-}
-
-export function timeFormatDefaults(fmt: TimeFormat): { start: string; end: string } {
-  return applyPreset(24 * 3_600_000, fmt);
-}
-
-export function toJd(value: string, format: TimeFormat): number | undefined {
-  if (!value) return undefined;
-  if (format === 'jd') { const n = parseFloat(value); return isNaN(n) ? undefined : n; }
-  if (format === 'mjd') { const n = parseFloat(value); return isNaN(n) ? undefined : n + 2400000.5; }
-  const date = format === 'utc' ? new Date(value + 'Z') : new Date(value);
-  if (isNaN(date.getTime())) return undefined;
-  return date.getTime() / 86400000 + 2440587.5;
-}
-
 // ─── Shared primitives ────────────────────────────────────────────────────────
 
-function TimeFormatSelect({ value, onChange }: { value: TimeFormat; onChange: (v: TimeFormat) => void }) {
+export function TimeFormatSelect({ value, onChange, className }: { value: TimeFormat; onChange: (v: TimeFormat) => void; className?: string }) {
   return (
     <Select value={value} onValueChange={v => onChange(v as TimeFormat)}>
-      <SelectTrigger className="h-8 text-sm w-28"><SelectValue /></SelectTrigger>
+      <SelectTrigger className={cn("h-8 text-sm w-28", className)}><SelectValue /></SelectTrigger>
       <SelectContent>
         <SelectItem value="local">Local</SelectItem>
         <SelectItem value="utc">UTC</SelectItem>
@@ -80,7 +42,7 @@ function TimeFormatSelect({ value, onChange }: { value: TimeFormat; onChange: (v
   );
 }
 
-function TimeInput({ id, value, onChange, format, className }: {
+export function TimeInput({ id, value, onChange, format, className }: {
   id: string; value: string; onChange: (v: string) => void; format: TimeFormat; className?: string;
 }) {
   const base = { id, value, onChange: (e: React.ChangeEvent<HTMLInputElement>) => onChange(e.target.value) };
@@ -100,21 +62,6 @@ const TIME_PRESETS = [
   { label: '12h', ms: 12 * 3_600_000 },
   { label: '24h', ms: 24 * 3_600_000 },
 ] as const;
-
-function getWindowMs(start: string, end: string, format: TimeFormat): number | null {
-  const s = toJd(start, format);
-  const e = toJd(end, format);
-  if (s === undefined || e === undefined) return null;
-  return (e - s) * 86_400_000;
-}
-
-function applyPreset(ms: number, format: TimeFormat): { start: string; end: string } {
-  const now = new Date();
-  const start = new Date(now.getTime() - ms);
-  const nowJd = now.getTime() / 86400000 + 2440587.5;
-  const startJd = start.getTime() / 86400000 + 2440587.5;
-  return { start: jdToFormatString(startJd, format), end: jdToFormatString(nowJd, format) };
-}
 
 // ─── CycleTile ────────────────────────────────────────────────────────────────
 
@@ -315,6 +262,8 @@ function TimeCard({ timeFormat, onTimeFormatChange, startTime, setStartTime, end
 
 type ProfileValues = { isRock: BoolFilter; isStar: BoolFilter; isNearBrightstar: BoolFilter; isStationary: BoolFilter; isPositive: BoolFilter };
 
+const ANY_PROFILE: ProfileValues = { isRock: 'any', isStar: 'any', isNearBrightstar: 'any', isStationary: 'any', isPositive: 'any' };
+
 const PROFILES: Array<{ label: string; values: ProfileValues }> = [
   { label: 'Transient', values: { isRock: 'false', isStar: 'false', isNearBrightstar: 'false', isStationary: 'true', isPositive: 'true' } },
   { label: 'Stellar',   values: { isRock: 'false', isStar: 'true',  isNearBrightstar: 'true',  isStationary: 'true', isPositive: 'any'  } },
@@ -341,9 +290,15 @@ function PropertiesCard({ survey, isRock, setIsRock, isStar, setIsStar, isNearBr
   ];
 
   const current: ProfileValues = { isRock, isStar, isNearBrightstar, isStationary, isPositive };
-  const resetAll = () => { setIsRock('any'); setIsStar('any'); setIsNearBrightstar('any'); setIsStationary('any'); setIsPositive('any'); };
+  const applyProfile = (v: ProfileValues) => {
+    setIsRock(v.isRock);
+    setIsStar(v.isStar);
+    setIsNearBrightstar(v.isNearBrightstar);
+    setIsStationary(v.isStationary);
+    setIsPositive(v.isPositive);
+  };
   const isActive = (v: ProfileValues) => (Object.keys(v) as (keyof ProfileValues)[]).every(k => v[k] === current[k]);
-  const toggleProfile = (v: ProfileValues) => isActive(v) ? resetAll() : (setIsRock(v.isRock), setIsStar(v.isStar), setIsNearBrightstar(v.isNearBrightstar), setIsStationary(v.isStationary), setIsPositive(v.isPositive));
+  const toggleProfile = (v: ProfileValues) => applyProfile(isActive(v) ? ANY_PROFILE : v);
 
   return (
     <div className="rounded-lg border bg-muted/40 p-4">

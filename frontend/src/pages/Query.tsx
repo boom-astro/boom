@@ -8,7 +8,8 @@ import { cn } from "@/lib/utils";
 import api, { Alert, AlertSearchParams } from "@/lib/api";
 import { SearchContent } from "@/components/search-dialog"
 import * as analytics from "@/lib/analytics";
-import { AlertFilterForm, AlertFilterFormProps, TimeFormat, BoolFilter, toJd, timeFormatDefaults } from "@/components/alert-filter-form";
+import { AlertFilterForm, AlertFilterFormProps, BoolFilter } from "@/components/alert-filter-form";
+import { TimeFormat, toJd, timeFormatDefaults } from "@/lib/time";
 import { AlertSearchResults } from "@/components/alert-search-results";
 import { PositionInput, ParsedPosition } from "@/components/position-input";
 
