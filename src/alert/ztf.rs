@@ -121,6 +121,10 @@ pub struct ZtfPrvCandidate {
     pub ap_flux_err: Option<f32>,
     pub snr_ap: Option<f32>,
     pub band: Band,
+    // Deep real-bogus, kept from the candidate (packet prv_candidates carry only
+    // legacy `rb`). `default` so pre-existing aux docs still deserialize.
+    #[serde(default)]
+    pub drb: Option<f32>,
 }
 
 impl TimeSeries for ZtfPrvCandidate {
@@ -188,6 +192,7 @@ impl TryFrom<PrvCandidate> for ZtfPrvCandidate {
             ap_flux_err,
             snr_ap,
             band,
+            drb: None, // packet prv_candidates don't carry drb
         })
     }
 }
@@ -594,11 +599,12 @@ impl TryFrom<&ZtfCandidate> for ZtfPrvCandidate {
             ap_flux_err: ztf_candidate.ap_flux_err,
             snr_ap: ztf_candidate.snr_ap,
             band: ztf_candidate.band.clone(),
+            drb: ztf_candidate.candidate.drb,
         })
     }
 }
 
-fn deserialize_candidate<'de, D>(deserializer: D) -> Result<ZtfCandidate, D::Error>
+pub fn deserialize_candidate<'de, D>(deserializer: D) -> Result<ZtfCandidate, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -636,7 +642,7 @@ pub struct ZtfRawAvroAlert {
     pub cutout_difference: Vec<u8>,
 }
 
-fn deserialize_cutout_as_bytes<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+pub fn deserialize_cutout_as_bytes<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
 where
     D: Deserializer<'de>,
 {

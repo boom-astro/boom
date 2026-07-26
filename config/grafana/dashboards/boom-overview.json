@@ -394,7 +394,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "max by (survey) (label_replace(max_over_time(redis_key_size{key=~\"(ZTF|LSST)_alerts_packets_queue\"}[$__interval]), \"survey\", \"$1\", \"key\", \"(ZTF|LSST)_alerts_packets_queue\")) or vector(0)",
+          "expr": "max by (survey) (label_replace(max_over_time(redis_key_size{key=~\"([A-Z]+)_alerts_packets_queue\"}[$__interval]), \"survey\", \"$1\", \"key\", \"([A-Z]+)_alerts_packets_queue\")) or vector(0)",
           "legendFormat": "{{survey}} alerts",
           "range": true,
           "refId": "A"
@@ -405,7 +405,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "max by (survey) (label_replace(max_over_time(redis_key_size{key=~\"(ZTF|LSST)_alerts_packets_queue_temp\"}[$__interval]), \"survey\", \"$1\", \"key\", \"(ZTF|LSST)_alerts_packets_queue_temp\")) or vector(0)",
+          "expr": "max by (survey) (label_replace(max_over_time(redis_key_size{key=~\"([A-Z]+)_alerts_packets_queue_temp\"}[$__interval]), \"survey\", \"$1\", \"key\", \"([A-Z]+)_alerts_packets_queue_temp\")) or vector(0)",
           "legendFormat": "{{survey}} alerts_temp",
           "range": true,
           "refId": "B"
@@ -416,7 +416,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "max by (survey) (label_replace(max_over_time(redis_key_size{key=~\"(ZTF|LSST)_alerts_enrichment_queue\"}[$__interval]), \"survey\", \"$1\", \"key\", \"(ZTF|LSST)_alerts_enrichment_queue\")) or vector(0)",
+          "expr": "max by (survey) (label_replace(max_over_time(redis_key_size{key=~\"([A-Z]+)_alerts_enrichment_queue\"}[$__interval]), \"survey\", \"$1\", \"key\", \"([A-Z]+)_alerts_enrichment_queue\")) or vector(0)",
           "legendFormat": "{{survey}} enrichment",
           "range": true,
           "refId": "C"
@@ -427,10 +427,21 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "max by (survey) (label_replace(max_over_time(redis_key_size{key=~\"(ZTF|LSST)_alerts_filter_queue\"}[$__interval]), \"survey\", \"$1\", \"key\", \"(ZTF|LSST)_alerts_filter_queue\")) or vector(0)",
+          "expr": "max by (survey) (label_replace(max_over_time(redis_key_size{key=~\"([A-Z]+)_alerts_filter_queue\"}[$__interval]), \"survey\", \"$1\", \"key\", \"([A-Z]+)_alerts_filter_queue\")) or vector(0)",
           "legendFormat": "{{survey}} filter",
           "range": true,
           "refId": "D"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "max by (key) (max_over_time(redis_key_size{key=~\".*_queue.*\", key!~\"([A-Z]+)_alerts_(packets|enrichment|filter)_queue\", key!~\"([A-Z]+)_alerts_packets_queue_temp\"}[$__interval]))",
+          "legendFormat": "{{key}}",
+          "range": true,
+          "refId": "E"
         }
       ],
       "title": "Valkey queue depth (messages)",

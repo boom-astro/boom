@@ -4,6 +4,7 @@ pub mod db;
 pub mod derive_avro_schema;
 pub mod enums;
 pub mod fits;
+pub mod gpu;
 pub mod lightcurves;
 pub mod o11y;
 pub mod parser;

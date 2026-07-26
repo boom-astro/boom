@@ -1,6 +1,9 @@
 use crate::{
     conf::{self, AppConfig},
-    filter::{build_lsst_filter_pipeline, build_ztf_filter_pipeline},
+    filter::{
+        build_decam_filter_pipeline, build_lsst_filter_pipeline, build_winter_filter_pipeline,
+        build_ztf_filter_pipeline,
+    },
     scheduler::{record_kafka_alert_published, record_worker_retry},
     utils::{
         cutouts::CutoutStorageError,
@@ -682,11 +685,8 @@ pub async fn build_filter_pipeline(
     let pipeline = match survey {
         Survey::Ztf => build_ztf_filter_pipeline(pipeline, permissions).await?,
         Survey::Lsst => build_lsst_filter_pipeline(pipeline, permissions).await?,
-        _ => {
-            return Err(FilterError::InvalidFilterPipeline(
-                "Unsupported survey for filter pipeline".to_string(),
-            ));
-        }
+        Survey::Decam => build_decam_filter_pipeline(pipeline, permissions).await?,
+        Survey::Winter => build_winter_filter_pipeline(pipeline, permissions).await?,
     };
     Ok(pipeline)
 }
