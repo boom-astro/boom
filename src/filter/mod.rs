@@ -1,4 +1,5 @@
 mod base;
+mod decam;
 mod lsst;
 mod winter;
 mod ztf;
@@ -12,6 +13,7 @@ pub use base::{
     VALID_ZTF_PROGRAMIDS,
 };
 use base::{parse_programid_candid_tuple, update_aliases_index_multiple, Classification};
+pub use decam::{build_decam_filter_pipeline, DecamFilterWorker};
 use lsst::{build_lsst_aux_data, insert_lsst_aux_pipeline_if_needed};
 pub use lsst::{build_lsst_filter_pipeline, LsstFilterWorker};
 pub use winter::{build_winter_filter_pipeline, WinterFilterWorker};

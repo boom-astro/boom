@@ -31,13 +31,23 @@ RUN ORT_CAPI_DIR="$('/opt/ort-py/bin/python' -c 'import pathlib, onnxruntime as 
 COPY data/models/btsbot-v1.0.1.onnx /app/data/models/btsbot-v1.0.1.onnx
 COPY apache-avro-macros /app/apache-avro-macros
 COPY Cargo.toml Cargo.lock /app/
-
-RUN mkdir -p /app/src && \
-    printf '%s\n' 'fn main() {}' > /app/src/main.rs && \
-    cargo build --release && rm -rf /app/src
-
 COPY ./src /app/src
-RUN cargo build --release --bin scheduler --bin migrate_fp_flux --bin migrate_snr --bin reprocess_crossmatch --bin enrich_reprocess
+
+# BuildKit cache mounts keep compiled crates (target/) and fetched deps between
+# builds so only changed crates recompile. The cache mount is not part of the
+# image, so the release binaries are copied out to /app/bin in the same RUN.
+# (rustup here puts CARGO_HOME at /root/.cargo, unlike the rust:slim image.)
+RUN --mount=type=cache,target=/app/target,sharing=locked \
+    --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
+    --mount=type=cache,target=/root/.cargo/git,sharing=locked \
+    cargo build --release --bin scheduler --bin migrate_fp_flux --bin migrate_snr --bin reprocess_crossmatch --bin enrich_reprocess && \
+    mkdir -p /app/bin && \
+    cp target/release/scheduler \
+       target/release/migrate_fp_flux \
+       target/release/migrate_snr \
+       target/release/reprocess_crossmatch \
+       target/release/enrich_reprocess \
+       /app/bin/
 
 FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04 AS app
 
@@ -53,11 +63,11 @@ ENV LD_LIBRARY_PATH=/opt/ort:${LD_LIBRARY_PATH}
 
 WORKDIR /app
 
-COPY --from=builder /app/target/release/scheduler /app/scheduler
-COPY --from=builder /app/target/release/migrate_fp_flux /app/migrate_fp_flux
-COPY --from=builder /app/target/release/migrate_snr /app/migrate_snr
-COPY --from=builder /app/target/release/reprocess_crossmatch /app/reprocess_crossmatch
-COPY --from=builder /app/target/release/enrich_reprocess /app/enrich_reprocess
+COPY --from=builder /app/bin/scheduler /app/scheduler
+COPY --from=builder /app/bin/migrate_fp_flux /app/migrate_fp_flux
+COPY --from=builder /app/bin/migrate_snr /app/migrate_snr
+COPY --from=builder /app/bin/reprocess_crossmatch /app/reprocess_crossmatch
+COPY --from=builder /app/bin/enrich_reprocess /app/enrich_reprocess
 COPY --from=builder /opt/ort /opt/ort
 
 CMD ["/app/scheduler"]

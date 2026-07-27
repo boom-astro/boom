@@ -121,6 +121,10 @@ pub struct ZtfPrvCandidate {
     pub ap_flux_err: Option<f32>,
     pub snr_ap: Option<f32>,
     pub band: Band,
+    // Deep real-bogus, kept from the candidate (packet prv_candidates carry only
+    // legacy `rb`). `default` so pre-existing aux docs still deserialize.
+    #[serde(default)]
+    pub drb: Option<f32>,
 }
 
 impl TimeSeries for ZtfPrvCandidate {
@@ -188,6 +192,7 @@ impl TryFrom<PrvCandidate> for ZtfPrvCandidate {
             ap_flux_err,
             snr_ap,
             band,
+            drb: None, // packet prv_candidates don't carry drb
         })
     }
 }
@@ -594,6 +599,7 @@ impl TryFrom<&ZtfCandidate> for ZtfPrvCandidate {
             ap_flux_err: ztf_candidate.ap_flux_err,
             snr_ap: ztf_candidate.snr_ap,
             band: ztf_candidate.band.clone(),
+            drb: ztf_candidate.candidate.drb,
         })
     }
 }

@@ -66,6 +66,7 @@ fn default_band() -> Band {
 /// avro packet; it defaults during deserialization and is populated from `fid`.
 #[serde_as]
 #[skip_serializing_none]
+#[apache_avro_macros::serdavro]
 #[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
 pub struct WinterCandidate {
     pub candid: i64,
@@ -193,6 +194,7 @@ impl TimeSeries for WinterCandidate {
 /// candidate, `band` is derived from `fid` after deserialization.
 #[serde_as]
 #[skip_serializing_none]
+#[apache_avro_macros::serdavro]
 #[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
 pub struct WinterPrvCandidate {
     pub candid: Option<i64>,
@@ -260,6 +262,7 @@ pub struct WinterRawAvroAlert {
     pub cutout_difference: Vec<u8>,
 }
 
+#[apache_avro_macros::serdavro]
 #[derive(Debug, Deserialize, Serialize)]
 pub struct WinterAliases {
     #[serde(rename = "ZTF")]

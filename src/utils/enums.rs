@@ -13,7 +13,7 @@ pub enum Survey {
     Lsst,
     #[serde(alias = "decam")]
     Decam,
-    #[serde(alias = "winter", alias = "wntr")]
+    #[serde(alias = "winter", alias = "wntr", alias = "WNTR")]
     Winter,
 }
 
