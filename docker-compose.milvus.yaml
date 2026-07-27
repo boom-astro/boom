@@ -1,0 +1,98 @@
+# Local, standalone Milvus for developing/testing BOOM's Milvus integration
+# without touching the shared NRP instance.
+#
+# This is a self-contained stack (etcd + minio + milvus standalone + attu UI),
+# NOT part of the main docker-compose.yaml. Bring it up on its own project:
+#
+#   docker compose -p boom-milvus -f docker-compose.milvus.yaml up -d
+#   docker compose -p boom-milvus -f docker-compose.milvus.yaml down       # keep data
+#   docker compose -p boom-milvus -f docker-compose.milvus.yaml down -v    # wipe data
+#
+# Then point BOOM at it in .env (local Milvus is plaintext gRPC on 19530 with
+# auth disabled and the built-in `default` database):
+#
+#   BOOM_MILVUS__ENABLED=true
+#   BOOM_MILVUS__HOST=localhost
+#   BOOM_MILVUS__PORT=19530
+#   BOOM_MILVUS__TLS=false
+#   BOOM_MILVUS__USERNAME=
+#   BOOM_MILVUS__PASSWORD=
+#   BOOM_MILVUS__DATABASE=
+#
+# gRPC:   localhost:19530   (what BOOM dials)
+# health: localhost:9091    (curl http://localhost:9091/healthz)
+# Attu:   http://localhost:8000  (web UI; connect to standalone:19530)
+
+services:
+  etcd:
+    container_name: milvus-etcd
+    image: quay.io/coreos/etcd:v3.5.18
+    environment:
+      - ETCD_AUTO_COMPACTION_MODE=revision
+      - ETCD_AUTO_COMPACTION_RETENTION=1000
+      - ETCD_QUOTA_BACKEND_BYTES=4294967296
+      - ETCD_SNAPSHOT_COUNT=50000
+    volumes:
+      - etcd_data:/etcd
+    command: etcd -advertise-client-urls=http://127.0.0.1:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  minio:
+    container_name: milvus-minio
+    image: minio/minio:RELEASE.2023-03-20T20-16-18Z
+    environment:
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+    volumes:
+      - minio_data:/minio_data
+    command: minio server /minio_data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  standalone:
+    container_name: milvus-standalone
+    image: milvusdb/milvus:v2.5.10
+    command: ["milvus", "run", "standalone"]
+    security_opt:
+      - seccomp:unconfined
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+    volumes:
+      - milvus_data:/var/lib/milvus
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 30s
+      start_period: 90s
+      timeout: 20s
+      retries: 3
+    ports:
+      - "19530:19530"
+      - "9091:9091"
+    depends_on:
+      etcd:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+  attu:
+    container_name: milvus-attu
+    image: zilliz/attu:v2.5
+    environment:
+      MILVUS_URL: standalone:19530
+    ports:
+      - "8000:3000"
+    depends_on:
+      - standalone
+
+volumes:
+  etcd_data:
+  minio_data:
+  milvus_data:

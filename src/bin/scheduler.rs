@@ -1,6 +1,7 @@
 use boom::{
     conf::{load_dotenv, AppConfig},
     enrichment::models::SharedModelPool,
+    milvus::MilvusClient,
     scheduler::{record_worker_pool_state, ThreadPool},
     utils::{
         db::initialize_survey_indexes,
@@ -269,6 +270,22 @@ async fn run(
     initialize_survey_indexes(&args.survey, &db)
         .await
         .expect("could not initialize indexes");
+
+    // Provision the Milvus embeddings collection once, up front — the same
+    // single-actor pattern as the Mongo indexes above. The enrichment worker
+    // pool deliberately never creates it (concurrent workers would race), so the
+    // scheduler's main thread creates it before spawning the pool. Idempotent:
+    // ensure_embedding_collection's has_collection check no-ops when it already
+    // exists. ZTF-only, since ZTF is the only survey producing fusion embeddings.
+    if config.milvus.enabled && args.survey == Survey::Ztf {
+        let mut milvus = MilvusClient::connect(&config.milvus)
+            .await
+            .expect("could not connect to milvus to provision the embeddings collection");
+        milvus
+            .ensure_embedding_collection()
+            .await
+            .expect("could not provision the milvus embeddings collection");
+    }
 
     warn_if_missing_crossmatches(&args.survey, &db, &config).await;
 
