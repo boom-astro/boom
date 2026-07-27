@@ -66,7 +66,7 @@ struct ConeSearchQuery {
     radius: f64,
     unit: Unit,
     object_coordinates: HashMap<String, [f64; 2]>, // Map of catalog name to coordinates [RA, Dec]
-    limit: Option<i64>,
+    limit: u32,
     skip: Option<u64>,
     sort: Option<serde_json::Value>,
     max_time_ms: Option<u64>,
@@ -86,9 +86,13 @@ impl ConeSearchQuery {
                 }
             }
         }
-        if let Some(limit) = self.limit {
-            options.limit = Some(limit);
+        // assert that limit is a positive integer < 100_000
+        if self.limit == 0 || self.limit > 100_000 {
+            return Err(
+                "Limit must be a positive integer less than or equal to 100,000".to_string(),
+            );
         }
+        options.limit = Some(self.limit as i64);
         if let Some(skip) = self.skip {
             options.skip = Some(skip);
         }
@@ -102,6 +106,8 @@ impl ConeSearchQuery {
         }
         if let Some(max_time_ms) = self.max_time_ms {
             options.max_time = Some(std::time::Duration::from_millis(max_time_ms));
+        } else {
+            options.max_time = Some(std::time::Duration::from_secs(30)); // Default max time
         }
         Ok(options)
     }
@@ -146,6 +152,12 @@ pub async fn post_cone_search_query(
         Unit::Radians => {}
     }
     let object_coordinates = &body.object_coordinates;
+    if object_coordinates.is_empty() || object_coordinates.len() > 10_000 {
+        return response::bad_request(
+            "Invalid number of coordinate pairs, must be between 1 and 10,000",
+        );
+    }
+
     let mut docs: HashMap<String, Vec<mongodb::bson::Document>> = HashMap::new();
     let filter = match parse_optional_filter(&body.filter) {
         Ok(f) => f,

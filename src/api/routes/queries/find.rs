@@ -13,7 +13,7 @@ struct FindQuery {
     catalog_name: String,
     filter: serde_json::Value,
     projection: Option<serde_json::Value>,
-    limit: Option<i64>,
+    limit: u32,
     skip: Option<u64>,
     sort: Option<serde_json::Value>,
     max_time_ms: Option<u64>,
@@ -33,9 +33,13 @@ impl FindQuery {
                 }
             }
         }
-        if let Some(limit) = self.limit {
-            options.limit = Some(limit);
+        // assert that limit is a positive integer < 100_000
+        if self.limit == 0 || self.limit > 100_000 {
+            return Err(
+                "Limit must be a positive integer less than or equal to 100,000".to_string(),
+            );
         }
+        options.limit = Some(self.limit as i64);
         if let Some(skip) = self.skip {
             options.skip = Some(skip);
         }
@@ -49,6 +53,8 @@ impl FindQuery {
         }
         if let Some(max_time_ms) = self.max_time_ms {
             options.max_time = Some(std::time::Duration::from_millis(max_time_ms));
+        } else {
+            options.max_time = Some(std::time::Duration::from_secs(30)); // Default max time
         }
         Ok(options)
     }
