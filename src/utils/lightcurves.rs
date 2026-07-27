@@ -238,8 +238,33 @@ pub fn prepare_photometry(photometry: &mut Vec<PhotometryMag>) {
 pub fn analyze_photometry(
     sorted_photometry: &[PhotometryMag],
 ) -> (PerBandProperties, AllBandsProperties, bool) {
-    let stationary = sorted_photometry.len() > 0
-        && (sorted_photometry.last().unwrap().time - sorted_photometry[0].time) > 0.01;
+    // Defensive guard: an empty lightcurve has no peak/faintest point to
+    // reference, and the code below unconditionally indexes `[0]`. Callers can
+    // legitimately produce empty lightcurves (e.g. reprocessing historical
+    // alerts whose photometry was entirely filtered out), so return neutral
+    // defaults instead of panicking. Callers that need to treat "no photometry"
+    // specially should check emptiness before calling.
+    if sorted_photometry.is_empty() {
+        return (
+            PerBandProperties::default(),
+            AllBandsProperties {
+                peak_jd: 0.0,
+                peak_mag: 0.0,
+                peak_mag_err: 0.0,
+                peak_band: Band::G,
+                faintest_jd: 0.0,
+                faintest_mag: 0.0,
+                faintest_mag_err: 0.0,
+                faintest_band: Band::G,
+                first_jd: 0.0,
+                last_jd: 0.0,
+            },
+            false,
+        );
+    }
+
+    // The empty case returned early above, so the slice is non-empty here.
+    let stationary = (sorted_photometry.last().unwrap().time - sorted_photometry[0].time) > 0.01;
 
     let mut global_peak_jd = sorted_photometry[0].time;
     let mut global_peak_mag = sorted_photometry[0].mag;
@@ -577,6 +602,30 @@ mod tests {
         assert_eq!(photometry.len(), 2);
         assert_eq!(photometry[0].time, 2459000.5);
         assert_eq!(photometry[1].time, 2459001.5);
+    }
+
+    #[test]
+    fn test_analyze_photometry_empty_lightcurve() {
+        // Regression: an empty lightcurve must not panic (it previously indexed
+        // `[0]` unconditionally). It should return neutral defaults with no
+        // per-band properties and stationary = false.
+        let data: Vec<PhotometryMag> = Vec::new();
+        let (results, all_bands_props, stationary) = analyze_photometry(&data);
+
+        assert_eq!(stationary, false);
+        assert!(results.g.is_none());
+        assert!(results.r.is_none());
+        assert!(results.i.is_none());
+        assert!(results.z.is_none());
+        assert!(results.y.is_none());
+        assert!(results.u.is_none());
+        assert!(results.j.is_none());
+        assert!(results.h.is_none());
+        assert!(results.k.is_none());
+        assert_eq!(all_bands_props.peak_jd, 0.0);
+        assert_eq!(all_bands_props.peak_mag, 0.0);
+        assert_eq!(all_bands_props.first_jd, 0.0);
+        assert_eq!(all_bands_props.last_jd, 0.0);
     }
 
     #[test]
