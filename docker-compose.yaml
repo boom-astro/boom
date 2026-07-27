@@ -53,6 +53,9 @@ services:
     command:
       - --mongodb.uri=mongodb://${BOOM_DATABASE__USERNAME:-mongoadmin}:${BOOM_DATABASE__PASSWORD}@mongo:27017/admin?authSource=admin
       - --collector.dbstats
+      - --collector.collstats
+      # Required for --collector.collstats to auto-discover collections
+      - --discovering-mode
       - --web.listen-address=:9216
     networks:
       - boom

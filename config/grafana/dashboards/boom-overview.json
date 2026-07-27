@@ -971,10 +971,12 @@
       "id": 12,
       "options": {
         "legend": {
-          "calcs": [],
+          "calcs": ["lastNotNull"],
           "displayMode": "table",
           "placement": "bottom",
-          "showLegend": true
+          "showLegend": true,
+          "sortBy": "Last *",
+          "sortDesc": true
         },
         "tooltip": {
           "hideZeros": false,
@@ -990,35 +992,13 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "max(mongodb_dbstats_objects) or vector(0)",
-          "legendFormat": "objects",
+          "expr": "max by (database, collection) (mongodb_collstats_storageStats_count)",
+          "legendFormat": "{{database}}.{{collection}}",
           "range": true,
           "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "editorMode": "code",
-          "expr": "max(mongodb_dbstats_collections) or vector(0)",
-          "legendFormat": "collections",
-          "range": true,
-          "refId": "B"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "editorMode": "code",
-          "expr": "max(mongodb_dbstats_indexes) or vector(0)",
-          "legendFormat": "indexes",
-          "range": true,
-          "refId": "C"
         }
       ],
-      "title": "MongoDB logical stats",
+      "title": "MongoDB objects per collection",
       "type": "timeseries"
     },
     {
