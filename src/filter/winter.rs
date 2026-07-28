@@ -6,9 +6,9 @@ use crate::alert::WinterCandidate;
 use crate::conf::AppConfig;
 use crate::enrichment::fetch_alerts;
 use crate::filter::{
-    build_loaded_filters, run_filter, uses_field_in_filter, validate_filter_pipeline, Alert,
-    Classification, Filter, FilterError, FilterResults, FilterWorker, FilterWorkerError,
-    LoadedFilter, Origin, Photometry, SurveyMatches,
+    build_loaded_filters, run_filter, uses_field_in_filter, validate_filter_pipeline,
+    watchlist_projections, Alert, Classification, Filter, FilterError, FilterResults, FilterWorker,
+    FilterWorkerError, LoadedFilter, Origin, Photometry, SurveyMatches,
 };
 use crate::utils::cutouts::CutoutStorage;
 use crate::utils::db::{fetch_timeseries_op, get_array_dict_element};
@@ -329,6 +329,7 @@ pub struct WinterFilterWorker {
     output_topic: String,
     filter_ids: Option<Vec<String>>,
     filters: Vec<LoadedFilter>,
+    watchlist_projections: HashMap<String, Document>,
 }
 
 #[async_trait::async_trait]
@@ -347,8 +348,14 @@ impl FilterWorker for WinterFilterWorker {
         let input_queue = "WINTER_alerts_filter_queue".to_string();
         let output_topic = "WINTER_alerts_results".to_string();
 
-        let filters =
-            build_loaded_filters(&filter_ids, &Survey::Winter, &filter_collection).await?;
+        let watchlist_projections = watchlist_projections(&config, &Survey::Winter);
+        let filters = build_loaded_filters(
+            &filter_ids,
+            &Survey::Winter,
+            &filter_collection,
+            &watchlist_projections,
+        )
+        .await?;
 
         Ok(WinterFilterWorker {
             alert_pipeline: create_winter_filter_alert_pipeline(),
@@ -359,14 +366,19 @@ impl FilterWorker for WinterFilterWorker {
             output_topic,
             filter_ids,
             filters,
+            watchlist_projections,
         })
     }
 
     async fn refresh_filters(&mut self) -> Result<(), FilterWorkerError> {
         info!("refreshing WINTER filters from database");
-        self.filters =
-            build_loaded_filters(&self.filter_ids, &Survey::Winter, &self.filter_collection)
-                .await?;
+        self.filters = build_loaded_filters(
+            &self.filter_ids,
+            &Survey::Winter,
+            &self.filter_collection,
+            &self.watchlist_projections,
+        )
+        .await?;
         info!(
             "refreshed WINTER filters from database; now tracking {} filters",
             self.filters.len()

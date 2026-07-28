@@ -6,9 +6,9 @@ use crate::alert::DecamCandidate;
 use crate::conf::AppConfig;
 use crate::enrichment::fetch_alerts;
 use crate::filter::{
-    build_loaded_filters, run_filter, uses_field_in_filter, validate_filter_pipeline, Alert,
-    Classification, Filter, FilterError, FilterResults, FilterWorker, FilterWorkerError,
-    LoadedFilter, Origin, Photometry, SurveyMatches,
+    build_loaded_filters, run_filter, uses_field_in_filter, validate_filter_pipeline,
+    watchlist_projections, Alert, Classification, Filter, FilterError, FilterResults, FilterWorker,
+    FilterWorkerError, LoadedFilter, Origin, Photometry, SurveyMatches,
 };
 use crate::utils::cutouts::CutoutStorage;
 use crate::utils::db::{fetch_timeseries_op, get_array_dict_element};
@@ -367,6 +367,7 @@ pub struct DecamFilterWorker {
     output_topic: String,
     filter_ids: Option<Vec<String>>,
     filters: Vec<LoadedFilter>,
+    watchlist_projections: HashMap<String, Document>,
 }
 
 #[async_trait::async_trait]
@@ -385,7 +386,14 @@ impl FilterWorker for DecamFilterWorker {
         let input_queue = "DECAM_alerts_filter_queue".to_string();
         let output_topic = "DECAM_alerts_results".to_string();
 
-        let filters = build_loaded_filters(&filter_ids, &Survey::Decam, &filter_collection).await?;
+        let watchlist_projections = watchlist_projections(&config, &Survey::Decam);
+        let filters = build_loaded_filters(
+            &filter_ids,
+            &Survey::Decam,
+            &filter_collection,
+            &watchlist_projections,
+        )
+        .await?;
 
         Ok(DecamFilterWorker {
             alert_pipeline: create_decam_filter_alert_pipeline(),
@@ -396,13 +404,19 @@ impl FilterWorker for DecamFilterWorker {
             output_topic,
             filter_ids,
             filters,
+            watchlist_projections,
         })
     }
 
     async fn refresh_filters(&mut self) -> Result<(), FilterWorkerError> {
         info!("refreshing DECAM filters from database");
-        self.filters =
-            build_loaded_filters(&self.filter_ids, &Survey::Decam, &self.filter_collection).await?;
+        self.filters = build_loaded_filters(
+            &self.filter_ids,
+            &Survey::Decam,
+            &self.filter_collection,
+            &self.watchlist_projections,
+        )
+        .await?;
         info!(
             "refreshed DECAM filters from database; now tracking {} filters",
             self.filters.len()

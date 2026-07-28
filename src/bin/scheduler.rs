@@ -1,7 +1,8 @@
 #[cfg(target_os = "linux")]
 use boom::utils::gpu::validate_gpu_configuration_for_survey;
 use boom::{
-    conf::{load_dotenv, AppConfig},
+    api::catalogs::WATCHLIST_PREFIX,
+    conf::{load_dotenv, AppConfig, CatalogXmatchConfig},
     enrichment::models::SharedModelPool,
     scheduler::{record_worker_pool_state, ThreadPool},
     utils::{
@@ -27,15 +28,22 @@ use tokio::sync::oneshot;
 use tracing::{info, info_span, warn, Instrument};
 use uuid::Uuid;
 
-/// Sample one aux record at random and warn if it's missing crossmatches for
-/// any catalog declared under `crossmatch.<survey>` in the config. The live
-/// pipeline only crossmatches at first insert, so newly added catalogs never
-/// reach pre-existing records — the user has to run `reprocess_crossmatch`.
+/// Sample one aux record at random and warn if it is missing crossmatches for
+/// any catalog declared under `crossmatch.<survey>` in the config, excluding
+/// watchlist catalogs (prefixed with `watchlist_`). The live pipeline only
+/// crossmatches at first insert, so newly added catalogs never reach
+/// pre-existing records — the user has to run `reprocess_crossmatch`.
 async fn warn_if_missing_crossmatches(survey: &Survey, db: &mongodb::Database, config: &AppConfig) {
-    let configured = match config.crossmatch.get(survey) {
-        Some(v) if !v.is_empty() => v,
+    let configured: Vec<&CatalogXmatchConfig> = match config.crossmatch.get(survey) {
+        Some(v) if !v.is_empty() => v
+            .iter()
+            .filter(|c| !c.catalog.starts_with(WATCHLIST_PREFIX))
+            .collect(),
         _ => return,
     };
+    if configured.is_empty() {
+        return;
+    }
     let aux_collection: mongodb::Collection<Document> =
         db.collection(&format!("{}_alerts_aux", survey));
 
