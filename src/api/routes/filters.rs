@@ -1,7 +1,8 @@
 use crate::{
     alert::{
-        LsstAliases, LsstCandidate, LsstForcedPhot, ZtfAliases, ZtfCandidate, ZtfForcedPhot,
-        ZtfPrvCandidate,
+        DecamAliases, DecamCandidate, DecamForcedPhot, LsstAliases, LsstCandidate, LsstForcedPhot,
+        WinterAliases, WinterCandidate, WinterPrvCandidate, ZtfAliases, ZtfCandidate,
+        ZtfForcedPhot, ZtfPrvCandidate,
     },
     api::{
         catalogs::{catalog_accessible, WATCHLIST_PREFIX},
@@ -516,6 +517,8 @@ struct FilterPatch {
     active: Option<bool>,
     active_fid: Option<String>,
     permissions: Option<HashMap<Survey, Vec<i32>>>,
+    #[serde(default)]
+    skip_validation: bool,
 }
 /// Update a filter's metadata
 #[utoipa::path(
@@ -610,7 +613,7 @@ pub async fn patch_filter(
     let exec_changed = (body.active == Some(true) && !filter.active)
         || new_active_fid.is_some()
         || body.permissions.is_some();
-    if will_be_active && exec_changed {
+    if will_be_active && exec_changed && !body.skip_validation {
         let active_fid = new_active_fid
             .as_deref()
             .unwrap_or(filter.active_fid.as_str());
@@ -661,6 +664,108 @@ pub async fn patch_filter(
     match update_result {
         Ok(_) => response::ok_no_data(&format!("successfully updated filter id: {}", &filter_id)),
         Err(e) => response::internal_error(&format!("failed to update filter. error: {}", e)),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct ValidateFilterQuery {
+    fid: Option<String>,
+}
+
+/// Validate a filter version for activation without changing state
+#[utoipa::path(
+    post,
+    path = "/filters/{filter_id}/validate",
+    params(
+        ("filter_id" = String, Path, description = "ID of the filter to validate"),
+        ("fid" = Option<String>, Query, description = "Version to validate (defaults to the active_fid)")
+    ),
+    responses(
+        (status = 200, description = "Validation result (passed true/false)", body = serde_json::Value),
+        (status = 400, description = "Invalid request"),
+        (status = 500, description = "Internal server error")
+    ),
+    tags=["Filters"]
+)]
+#[post("/filters/{filter_id}/validate")]
+pub async fn validate_filter(
+    db: web::Data<Database>,
+    config: web::Data<AppConfig>,
+    filter_id: web::Path<String>,
+    query: web::Query<ValidateFilterQuery>,
+    current_user: Option<web::ReqData<User>>,
+) -> HttpResponse {
+    let current_user = match current_user {
+        Some(user) => user,
+        None => return HttpResponse::Unauthorized().body("Unauthorized"),
+    };
+    let filter_id = filter_id.into_inner();
+    let collection: Collection<Filter> = db.collection("filters");
+    let filter = match collection.find_one(doc! {"_id": filter_id.clone()}).await {
+        Ok(Some(filter)) => filter,
+        Ok(None) => {
+            return response::not_found(&format!("filter with id {} does not exist", filter_id));
+        }
+        Err(e) => {
+            return response::internal_error(&format!(
+                "failed to find filter with id {}. error: {}",
+                &filter_id, e
+            ));
+        }
+    };
+    if filter.user_id != current_user.id && !current_user.is_admin {
+        return response::forbidden("only the filter owner or an admin can validate a filter");
+    }
+
+    let fid = query
+        .fid
+        .clone()
+        .unwrap_or_else(|| filter.active_fid.clone());
+    let version = match filter.fv.iter().find(|fv| fv.fid == fid) {
+        Some(v) => v,
+        None => {
+            return response::bad_request(&format!(
+                "filter {} has no version matching fid {}",
+                filter_id, fid
+            ));
+        }
+    };
+    let pipeline = match serde_json::from_str::<Vec<serde_json::Value>>(&version.pipeline) {
+        Ok(p) => p,
+        Err(e) => {
+            return response::internal_error(&format!(
+                "failed to parse stored filter pipeline: {}",
+                e
+            ));
+        }
+    };
+    let filter_config = match config.workers.get(&filter.survey).map(|w| &w.filter) {
+        Some(c) => c,
+        None => {
+            return response::internal_error(&format!(
+                "no worker config defined for survey {}",
+                filter.survey
+            ));
+        }
+    };
+
+    match validate_filter_activation(
+        &db,
+        filter_config,
+        &filter.survey,
+        &pipeline,
+        &filter.permissions,
+    )
+    .await
+    {
+        Ok(()) => response::ok(
+            &format!("filter version {} passed activation validation", fid),
+            serde_json::json!({ "fid": fid, "passed": true }),
+        ),
+        Err(message) => response::ok(
+            &format!("filter version {} did not pass activation validation", fid),
+            serde_json::json!({ "fid": fid, "passed": false, "message": message }),
+        ),
     }
 }
 
@@ -1180,6 +1285,33 @@ pub struct LsstAlertToFilter {
     pub ztf: Option<ZtfFilterMatch>,
 }
 
+#[serdavro]
+#[derive(Debug, Deserialize, Serialize)]
+/// WINTER data available at filtering time
+pub struct WinterAlertToFilter {
+    pub candid: i64,
+    #[serde(rename = "objectId")]
+    pub object_id: String,
+    pub candidate: WinterCandidate,
+    pub coordinates: GalacticCoordinates,
+    pub prv_candidates: Vec<WinterPrvCandidate>,
+    pub aliases: WinterAliases,
+}
+
+#[serdavro]
+#[derive(Debug, Deserialize, Serialize)]
+/// DECam data available at filtering time
+pub struct DecamAlertToFilter {
+    pub candid: i64,
+    #[serde(rename = "objectId")]
+    pub object_id: String,
+    pub candidate: DecamCandidate,
+    pub coordinates: GalacticCoordinates,
+    pub prv_candidates: Vec<DecamCandidate>,
+    pub fp_hists: Vec<DecamForcedPhot>,
+    pub aliases: DecamAliases,
+}
+
 /// Get a schema of a survey's data available at filtering time
 #[utoipa::path(
     get,
@@ -1200,12 +1332,8 @@ pub async fn get_filter_schema(path: web::Path<(Survey,)>) -> HttpResponse {
     let schema = match survey_name {
         Survey::Ztf => ZtfAlertToFilter::get_schema(),
         Survey::Lsst => LsstAlertToFilter::get_schema(),
-        _ => {
-            return response::not_found(&format!(
-                "no filter data schema found for survey {}",
-                survey_name
-            ));
-        }
+        Survey::Winter => WinterAlertToFilter::get_schema(),
+        Survey::Decam => DecamAlertToFilter::get_schema(),
     };
     response::ok(
         &format!("avro schema for survey {}", survey_name),
@@ -1270,5 +1398,51 @@ mod tests {
 
         collection.drop().await.unwrap();
         assert!(result.is_ok());
+    }
+}
+
+#[cfg(test)]
+mod schema_tests {
+    use super::*;
+
+    fn schema_str<T: AvroSchema>() -> String {
+        serde_json::to_string(&T::get_schema()).unwrap()
+    }
+
+    #[test]
+    fn decam_filter_schema_exposes_forced_phot_and_snr() {
+        // DECam does aperture difference-image forced photometry (magap/sigmagap)
+        // with a computed snr, and carries a forced-photometry history — all
+        // filterable, so the schema must surface them.
+        let s = schema_str::<DecamAlertToFilter>();
+        for field in [
+            "\"prv_candidates\"",
+            "\"fp_hists\"",
+            "\"magap\"",
+            "\"sigmagap\"",
+            "\"snr\"",
+        ] {
+            assert!(
+                s.contains(field),
+                "DECam filter schema missing {field}: {s}"
+            );
+        }
+    }
+
+    #[test]
+    fn winter_filter_schema_generates_without_forced_phot() {
+        // WINTER does PSF photometry (magpsf) and has no forced-photometry history,
+        // so its schema exposes candidate/prv_candidates but no fp_hists.
+        let s = schema_str::<WinterAlertToFilter>();
+        for field in ["\"candidate\"", "\"prv_candidates\"", "\"magpsf\""] {
+            assert!(
+                s.contains(field),
+                "WINTER filter schema missing {field}: {s}"
+            );
+        }
+        assert!(
+            !s.contains("\"fp_hists\""),
+            "WINTER has no forced photometry; schema should omit fp_hists: {s}"
+        );
     }
 }
