@@ -1,3 +1,4 @@
+pub mod llm;
 pub mod stats;
 pub mod surveys;
 pub mod tokens;
@@ -174,6 +175,8 @@ pub struct BabamulUser {
     pub password_reset_token_hash: Option<String>, // SHA-256 hash of the password reset token
     pub password_reset_token_expires_at: Option<i64>, // Unix timestamp expiry for the reset token
     pub password_last_changed_at: Option<i64>, // Unix timestamp of the last successful password reset
+    #[serde(default)]
+    pub groq_api_key_encrypted: Option<String>, // User's own Groq API key (encrypted with server key, AES-256-GCM)
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, ToSchema)]
@@ -184,6 +187,9 @@ pub struct BabamulUserPublic {
     pub username: String,
     pub email: String,
     pub created_at: i64, // Unix timestamp
+    /// Whether the user has saved their own Groq API key for LLM filter generation.
+    #[serde(default)]
+    pub has_groq_api_key: bool,
 }
 
 impl From<BabamulUser> for BabamulUserPublic {
@@ -193,6 +199,7 @@ impl From<BabamulUser> for BabamulUserPublic {
             username: user.username,
             email: user.email,
             created_at: user.created_at,
+            has_groq_api_key: user.groq_api_key_encrypted.is_some(),
         }
     }
 }
@@ -320,6 +327,7 @@ pub async fn post_babamul_signup(
                 password_reset_token_hash: None,
                 password_reset_token_expires_at: None,
                 password_last_changed_at: None,
+                groq_api_key_encrypted: None,
             };
 
             // Note: Kafka credentials will be created on demand via /babamul/kafka-credentials endpoint
