@@ -11,7 +11,7 @@ RUN apt-get update && \
     ca-certificates curl bash tar xz-utils gcc g++ python3 python3-venv libhdf5-dev \
     perl make libsasl2-dev libsasl2-2 default-jre-headless pkg-config clang libclang-dev && \
     apt-get clean && rm -rf /var/lib/apt/lists/* && \
-    curl -fsSL https://dlcdn.apache.org/kafka/${KAFKA_VERSION}/kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz -o /tmp/kafka.tgz && \
+    curl -fsSL https://archive.apache.org/dist/kafka/${KAFKA_VERSION}/kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz -o /tmp/kafka.tgz && \
     tar -xzf /tmp/kafka.tgz -C /opt && \
     ln -s /opt/kafka_${SCALA_VERSION}-${KAFKA_VERSION} /opt/kafka && \
     rm -f /tmp/kafka.tgz

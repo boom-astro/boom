@@ -1,10 +1,14 @@
 mod acai;
 mod base;
 mod btsbot;
+mod mtan;
+mod rtf;
 
 pub use acai::AcaiModel;
 pub use base::{load_model, load_model_on_device, Model, ModelError};
 pub use btsbot::BtsBotModel;
+pub use mtan::MtanModel;
+pub use rtf::RtfModel;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -24,6 +28,8 @@ pub struct SharedModels {
     pub acai_o: Mutex<AcaiModel>,
     pub acai_b: Mutex<AcaiModel>,
     pub btsbot: Mutex<BtsBotModel>,
+    pub rtf_embed: Mutex<RtfModel>,
+    pub mtan_embed: Mutex<MtanModel>,
 }
 
 impl std::fmt::Debug for SharedModels {
@@ -63,6 +69,14 @@ impl SharedModels {
                     "data/models/btsbot-v1.0.1.onnx",
                     id,
                 )?),
+                rtf_embed: Mutex::new(RtfModel::new_on_device(
+                    "data/models/rtf_embed.onnx",
+                    id,
+                )?),
+                mtan_embed: Mutex::new(MtanModel::new_on_device(
+                    "data/models/mtan_embed.onnx",
+                    id,
+                )?),
             },
             None => Self {
                 acai_h: Mutex::new(AcaiModel::new("data/models/acai_h.d1_dnn_20201130.onnx")?),
@@ -71,6 +85,8 @@ impl SharedModels {
                 acai_o: Mutex::new(AcaiModel::new("data/models/acai_o.d1_dnn_20201130.onnx")?),
                 acai_b: Mutex::new(AcaiModel::new("data/models/acai_b.d1_dnn_20201130.onnx")?),
                 btsbot: Mutex::new(BtsBotModel::new("data/models/btsbot-v1.0.1.onnx")?),
+                rtf_embed: Mutex::new(RtfModel::new("data/models/rtf_embed.onnx")?),
+                mtan_embed: Mutex::new(MtanModel::new("data/models/mtan_embed.onnx")?),
             },
         };
         info!("all ONNX models loaded successfully");
