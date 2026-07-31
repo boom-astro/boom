@@ -139,8 +139,8 @@ workers:
     filter:
       n_workers: 1
       refresh_interval_minutes: 15
-      max_match_rate: 5
-      reference_night:
+      max_match_rate: 100
+      reference_night: "2026-07-15"
 crossmatch:
   ztf:
     - catalog: Gaia_DR3
