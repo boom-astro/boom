@@ -1,0 +1,64 @@
+name: Throughput test comment
+
+# Posts the throughput results as a PR comment.
+#
+# This is split out from test-throughput.yaml on purpose: for pull requests
+# opened from a fork, the GITHUB_TOKEN of the `pull_request` workflow is forced
+# read-only by GitHub, so it cannot comment (403 "Resource not accessible by
+# integration"). A `workflow_run` workflow instead runs in the context of the
+# base repository and gets a writable token, even when the triggering run came
+# from a fork.
+
+on:
+  workflow_run:
+    workflows: ["Throughput test"]
+    types:
+      - completed
+
+jobs:
+  comment:
+    name: Post throughput results comment
+    runs-on: ubuntu-latest
+    # `failure` included: the payload is uploaded before the tolerance check.
+    if: >-
+      github.event.workflow_run.event == 'pull_request' &&
+      contains(fromJSON('["success", "failure"]'), github.event.workflow_run.conclusion)
+    permissions:
+      pull-requests: write
+      actions: read # cross-run artifact download
+    steps:
+      - name: Download comment payload
+        id: download
+        continue-on-error: true # no payload when aggregate didn't run
+        uses: actions/download-artifact@v4
+        with:
+          name: throughput-comment
+          path: ./comment
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Read payload
+        id: payload
+        if: steps.download.outcome == 'success'
+        run: |
+          #!/usr/bin/env bash
+          set -euo pipefail
+          echo "pr_number=$(cat ./comment/pr_number.txt)" >> "$GITHUB_OUTPUT"
+          echo "sha=$(cat ./comment/sha.txt)" >> "$GITHUB_OUTPUT"
+          echo "baseline_link=$(cat ./comment/baseline_link.txt)" >> "$GITHUB_OUTPUT"
+          {
+            echo "table<<EOF"
+            cat ./comment/table.md
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+      - name: Post combined PR comment
+        if: steps.download.outcome == 'success'
+        uses: peter-evans/create-or-update-comment@v5
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          issue-number: ${{ steps.payload.outputs.pr_number }}
+          body: |
+            Throughput results (`${{ steps.payload.outputs.sha }}`):
+            ${{ steps.payload.outputs.table }}
+
+            Baseline run: ${{ steps.payload.outputs.baseline_link }}
+          edit-mode: replace

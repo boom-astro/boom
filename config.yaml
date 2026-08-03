@@ -127,7 +127,7 @@ workers:
     alert:
       n_workers: 1
     enrichment:
-      n_workers: 0
+      n_workers: 1
     filter:
       n_workers: 1
       refresh_interval_minutes: 15
@@ -142,8 +142,8 @@ workers:
     filter:
       n_workers: 1
       refresh_interval_minutes: 15
-      max_match_rate: 5
-      reference_night:
+      max_match_rate: 100
+      reference_night: "2026-07-15"
 crossmatch:
   ztf:
     - catalog: PS1_DR1

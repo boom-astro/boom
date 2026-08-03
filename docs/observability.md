@@ -98,7 +98,9 @@ app, the usage for which is described in the README.
 - **Kafka messages produced** — `scheduler_kafka_alert_published_total`.
 - **API requests** — `sum by (api) (rate(api_request_total[5m]))`.
 - **Collector metric flow** — accepted/sent/failed metric points from OTel Collector.
-- **MongoDB storage / logical stats**.
+- **MongoDB storage stats**, plus **objects per collection** from
+  `mongodb_collstats_storageStats_count` (needs the exporter's `collstats`
+  collector and `--discovering-mode`).
 - **Container CPU/memory** joined against Docker metadata for readable names.
 
 ### Host and container infra (BOOM Host & Infrastructure)

@@ -66,6 +66,7 @@ fn default_band() -> Band {
 /// avro packet; it defaults during deserialization and is populated from `fid`.
 #[serde_as]
 #[skip_serializing_none]
+#[apache_avro_macros::serdavro]
 #[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
 pub struct WinterCandidate {
     pub candid: i64,
@@ -193,6 +194,7 @@ impl TimeSeries for WinterCandidate {
 /// candidate, `band` is derived from `fid` after deserialization.
 #[serde_as]
 #[skip_serializing_none]
+#[apache_avro_macros::serdavro]
 #[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
 pub struct WinterPrvCandidate {
     pub candid: Option<i64>,
@@ -260,6 +262,7 @@ pub struct WinterRawAvroAlert {
     pub cutout_difference: Vec<u8>,
 }
 
+#[apache_avro_macros::serdavro]
 #[derive(Debug, Deserialize, Serialize)]
 pub struct WinterAliases {
     #[serde(rename = "ZTF")]
@@ -726,7 +729,15 @@ impl AlertWorker for WinterAlertWorker {
                 .await
                 .inspect_err(as_error!())?;
         } else {
-            let xmatches = xmatch(ra, dec, &self.xmatch_configs, &self.db).await?;
+            let xmatches = xmatch(
+                ra,
+                dec,
+                &object_id,
+                &Survey::Winter,
+                &self.xmatch_configs,
+                &self.db,
+            )
+            .await?;
             let obj = WinterObject {
                 object_id: object_id.clone(),
                 prv_candidates,
