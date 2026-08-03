@@ -32,6 +32,16 @@ jobs:
       # and don't need env vars here.
       BOOM_BABAMUL__ENABLED: ${{ vars.BOOM_BABAMUL__ENABLED }}
       BOOM_DATABASE__PASSWORD: ${{ secrets.BOOM_DATABASE__PASSWORD }}
+      # Milvus vector database, hosted by NRP and reached over the public
+      # internet (gRPC on port 50051), so it works from this server without any
+      # cluster networking. Compose injects these into the api and scheduler-ztf
+      # services. Only the password is a secret; the username and database name
+      # are repository variables. If BOOM_MILVUS__ENABLED is unset, compose
+      # defaults it to false and the integration stays off. See docs/milvus.md.
+      BOOM_MILVUS__ENABLED: ${{ vars.BOOM_MILVUS__ENABLED }}
+      BOOM_MILVUS__USERNAME: ${{ vars.BOOM_MILVUS__USERNAME }}
+      BOOM_MILVUS__PASSWORD: ${{ secrets.BOOM_MILVUS__PASSWORD }}
+      BOOM_MILVUS__DATABASE: ${{ vars.BOOM_MILVUS__DATABASE }}
       BOOM_API__DOMAIN: ${{ vars.BOOM_API__DOMAIN }}
       BOOM_API__AUTH__SECRET_KEY: ${{ secrets.BOOM_API__AUTH__SECRET_KEY }}
       BOOM_API__AUTH__ADMIN_PASSWORD: ${{ secrets.BOOM_API__AUTH__ADMIN_PASSWORD }}

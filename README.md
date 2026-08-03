@@ -276,6 +276,27 @@ gpu:
 
 See [docs/gpu.md](docs/gpu.md) for container-vs-native details, troubleshooting, and version notes.
 
+### Milvus vector database (optional)
+
+BOOM can store the CIDER fusion model's embeddings in a
+[Milvus](https://milvus.io) vector database, so that objects can be retrieved by
+similarity. This is disabled by default; deployments that don't use it need no
+configuration.
+
+Enable it with `BOOM_MILVUS__ENABLED=true`. One vector database serves the whole
+project, so `config.yaml` already names it. BOOM connects with an administrative
+account, so only the username and password come from the environment — they go
+in `.env` (gitignored) or the deployment's secret store, never in `config.yaml`
+or `.env.example`, both of which are committed. Once set, verify the connection
+without writing any data:
+
+```bash
+cargo run --bin milvus_check
+```
+
+See [docs/milvus.md](docs/milvus.md) for the collection schema and how each
+deployment supplies those settings.
+
 ### Start services for local development
 
 1. Install lfs and pull the large files:
