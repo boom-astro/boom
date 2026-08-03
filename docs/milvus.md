@@ -3,10 +3,9 @@
 BOOM stores the CIDER fusion model's embeddings in [Milvus](https://milvus.io)
 so that objects can be retrieved by similarity. The target deployment is the
 [NRP-managed Milvus](https://nrp.ai/documentation/userdocs/ai/vector-database/)
-service, which NRP runs for you — there is no operator to install and no
-instance to create.
+service, which NRP runs for us.
 
-The integration is **off by default**. Deployments that don't use it need no
+The integration to feed the vector embeddings to Milvus is **off by default**. Deployments that don't use it need no
 configuration at all.
 
 ## What the vectors are
@@ -28,21 +27,17 @@ embedding. The `candid` and `jd` fields record which alert that was.
 | `candid` | `Int64` | Alert the stored embedding came from |
 | `jd` | `Double` | Julian date of that alert |
 
-## Getting credentials
+## Credentials
 
-1. Make sure you are a member of an NRP **group** that has the Vector DB
-   capability enabled. If you are a namespace admin you can create one;
-   otherwise ask your namespace admin to add you.
-2. Go to the NRP portal's `/milvus` page and click **Get milvus password**. A
-   link to a secure page containing your credentials is emailed to you.
-3. Work out your database name. NRP derives it from your **group** name,
-   converting dashes to underscores (Milvus database names allow only
-   alphanumerics and underscores).
+BOOM connects with a single **administrative account** owned by the maintainers.
+The account, its password, and the database name are not self-service: they are
+provisioned once and injected into the deployment's environment. This document
+deliberately does not describe how to obtain access to that instance.
 
-   Do not assume it matches your Kubernetes namespace — it often doesn't. Ours
-   is **`umn_babamul_vectordb`**, not `umn_babamul`, because the group carries a
-   `-vectordb` suffix. If in doubt, run `milvus_check` and read the list of
-   databases it prints.
+If you are standing up your own Milvus (self-hosted or through your own
+provider), point `milvus.host` / `milvus.port` at it and supply your own
+`BOOM_MILVUS__USERNAME` / `BOOM_MILVUS__PASSWORD` / `BOOM_MILVUS__DATABASE`. The
+rest of this document applies unchanged.
 
 ## Connection details
 
@@ -71,9 +66,9 @@ Put real values in **`.env`**, which is gitignored and loaded automatically:
 
 ```bash
 BOOM_MILVUS__ENABLED=true
-BOOM_MILVUS__USERNAME=your-nrp-username
-BOOM_MILVUS__PASSWORD=the-password-from-the-emailed-page
-BOOM_MILVUS__DATABASE=umn_babamul_vectordb
+BOOM_MILVUS__USERNAME=
+BOOM_MILVUS__PASSWORD=
+BOOM_MILVUS__DATABASE=
 ```
 
 > **Never put a real password in `.env.example`.** That file is committed to
@@ -109,15 +104,9 @@ set +a
 
 `set -a` auto-exports every variable, and Apptainer inherits the host
 environment by default (the script uses no `--cleanenv`), so anything in that
-file reaches the BOOM processes. Add the credentials to `$BOOM_DIR/.env` on the
-node:
-
-```bash
-BOOM_MILVUS__ENABLED=true
-BOOM_MILVUS__USERNAME=your-nrp-username
-BOOM_MILVUS__PASSWORD=the-password
-BOOM_MILVUS__DATABASE=umn_babamul_vectordb
-```
+file reaches the BOOM processes. The administrative credentials therefore live
+in `$BOOM_DIR/.env` on the node — set `BOOM_MILVUS__ENABLED=true` alongside
+`BOOM_MILVUS__USERNAME`, `BOOM_MILVUS__PASSWORD`, and `BOOM_MILVUS__DATABASE`.
 
 `chmod 600` it. No change to `apptainer.sh` is needed. Restart the affected
 services for the new values to be picked up.
@@ -140,10 +129,10 @@ and are never committed. To enable Milvus in production, set these under
 
 | Name | Kind | Value |
 |---|---|---|
-| `BOOM_MILVUS__PASSWORD` | **Secret** | the password from the NRP portal |
+| `BOOM_MILVUS__PASSWORD` | **Secret** | the administrative account's password |
 | `BOOM_MILVUS__ENABLED` | Variable | `true` |
-| `BOOM_MILVUS__USERNAME` | Variable | your NRP username |
-| `BOOM_MILVUS__DATABASE` | Variable | e.g. `umn_babamul_vectordb` |
+| `BOOM_MILVUS__USERNAME` | Variable | the administrative account |
+| `BOOM_MILVUS__DATABASE` | Variable | the target database |
 
 Only the password is secret; the rest are plain variables. If
 `BOOM_MILVUS__ENABLED` is unset, Compose defaults it to `false` and the
@@ -177,10 +166,10 @@ writing any data:
 cargo run --bin milvus_check
 ```
 
-It prints the server version, the databases your credentials can see, and the
-collections in the configured database. If the configured database is not in the
-list, it says so — that almost always means the group-name-to-database-name
-conversion is wrong.
+It prints the server version, the databases the configured credentials can see,
+and the collections in the configured database. If the configured database is
+not in that list, it says so — usually a sign that `BOOM_MILVUS__DATABASE` is
+wrong or that the account lacks access to it.
 
 To create the collection and its index (idempotent; existing collections are
 left untouched):

@@ -70,8 +70,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     if !databases.contains(&milvus_config.database) {
         println!(
-            "\nWARNING: configured database {:?} is not in that list. On NRP the \
-             database name is your GROUP name with dashes replaced by underscores.",
+            "\nWARNING: configured database {:?} is not in that list. Check \
+             BOOM_MILVUS__DATABASE and that the account has access to it.",
             milvus_config.database
         );
     }

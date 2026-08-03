@@ -283,23 +283,18 @@ BOOM can store the CIDER fusion model's embeddings in a
 similarity. This is disabled by default; deployments that don't use it need no
 configuration.
 
-```yaml
-# config.yaml
-milvus:
-  enabled: true
-  database: your_group_name
-```
-
-Credentials go in `.env` (never in `.env.example`, which is committed). Once set,
-verify the connection without writing any data:
+Enable it with `BOOM_MILVUS__ENABLED=true`. BOOM connects with an administrative
+account, so the username, password, and database all come from the environment —
+they go in `.env` (gitignored) or the deployment's secret store, never in
+`config.yaml` or `.env.example`, both of which are committed. Once set, verify
+the connection without writing any data:
 
 ```bash
 cargo run --bin milvus_check
 ```
 
-See [docs/milvus.md](docs/milvus.md) for getting NRP credentials, the collection
-schema, and how the cluster supplies the same settings from its Kubernetes
-Secret.
+See [docs/milvus.md](docs/milvus.md) for the collection schema and how each
+deployment supplies those settings.
 
 ### Start services for local development
 

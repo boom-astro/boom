@@ -784,8 +784,8 @@ fn default_gpu_device_ids() -> Vec<i32> {
 /// Connection settings for a Milvus vector database.
 ///
 /// On the NRP platform Milvus is reachable only over gRPC (there is no REST
-/// port exposed), on `milvus.nrp-nautilus.io:50051`, behind TLS. Credentials
-/// come from the NRP portal's `/milvus` page and are emailed to you.
+/// port exposed), on `milvus.nrp-nautilus.io:50051`, behind TLS. BOOM connects
+/// with an administrative account supplied entirely through the environment.
 #[derive(Deserialize, Debug, Clone)]
 pub struct MilvusConfig {
     /// When false, BOOM never opens a Milvus connection. Defaults to false so
@@ -805,9 +805,8 @@ pub struct MilvusConfig {
     /// Set via `BOOM_MILVUS__PASSWORD`; never commit a real value.
     #[serde(default)]
     pub password: String,
-    /// Milvus database to operate in. NRP derives this from your group name,
-    /// converting dashes to underscores. It is not necessarily the Kubernetes
-    /// namespace: ours is `umn_babamul_vectordb`.
+    /// Milvus database to operate in. Set via `BOOM_MILVUS__DATABASE`; never
+    /// committed, since it names the deployment's private namespace.
     #[serde(default)]
     pub database: String,
     /// Per-RPC timeout in seconds.
