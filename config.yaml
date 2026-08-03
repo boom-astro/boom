@@ -41,11 +41,7 @@ milvus:
   tls: true
   username: "" # Set via BOOM_MILVUS__USERNAME environment variable
   password: "" # Set via BOOM_MILVUS__PASSWORD environment variable
-  # Target database. Left empty here on purpose: BOOM connects with an
-  # administrative account whose credentials and database are supplied by the
-  # deployment's environment, never committed. `cargo run --bin milvus_check`
-  # lists what the configured credentials can see.
-  database: "" # Set via BOOM_MILVUS__DATABASE environment variable
+  database: umn_babamul_vectordb # Override via BOOM_MILVUS__DATABASE environment variable
   timeout_seconds: 30
   collection:
     name: ztf_fusion_embeddings

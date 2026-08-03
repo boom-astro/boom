@@ -62,13 +62,13 @@ every field is also settable from the environment: `milvus.database` is
 
 ### Local development
 
-Put real values in **`.env`**, which is gitignored and loaded automatically:
+The database name is already in `config.yaml`, so only the credentials need to
+go in **`.env`**, which is gitignored and loaded automatically:
 
 ```bash
 BOOM_MILVUS__ENABLED=true
 BOOM_MILVUS__USERNAME=
 BOOM_MILVUS__PASSWORD=
-BOOM_MILVUS__DATABASE=
 ```
 
 > **Never put a real password in `.env.example`.** That file is committed to
@@ -106,7 +106,8 @@ set +a
 environment by default (the script uses no `--cleanenv`), so anything in that
 file reaches the BOOM processes. The administrative credentials therefore live
 in `$BOOM_DIR/.env` on the node — set `BOOM_MILVUS__ENABLED=true` alongside
-`BOOM_MILVUS__USERNAME`, `BOOM_MILVUS__PASSWORD`, and `BOOM_MILVUS__DATABASE`.
+`BOOM_MILVUS__USERNAME` and `BOOM_MILVUS__PASSWORD`. The database name comes
+from `config.yaml` and needs no entry here.
 
 `chmod 600` it. No change to `apptainer.sh` is needed. Restart the affected
 services for the new values to be picked up.
@@ -132,7 +133,9 @@ and are never committed. To enable Milvus in production, set these under
 | `BOOM_MILVUS__PASSWORD` | **Secret** | the administrative account's password |
 | `BOOM_MILVUS__ENABLED` | Variable | `true` |
 | `BOOM_MILVUS__USERNAME` | Variable | the administrative account |
-| `BOOM_MILVUS__DATABASE` | Variable | the target database |
+
+`BOOM_MILVUS__DATABASE` is not listed because `config.yaml` already carries the
+name; set it only to target a different database.
 
 Only the password is secret; the rest are plain variables. If
 `BOOM_MILVUS__ENABLED` is unset, Compose defaults it to `false` and the

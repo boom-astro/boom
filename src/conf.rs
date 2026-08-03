@@ -82,7 +82,12 @@ pub fn load_raw_config(filepath: &str) -> Result<Config, BoomConfigError> {
         .add_source(
             config::Environment::with_prefix("boom")
                 .prefix_separator("_")
-                .separator("__"),
+                .separator("__")
+                // Compose and deploy.yaml inject unset variables as empty
+                // strings (`${VAR:-}`), and .env.example ships empty
+                // placeholders. Without this, those blank out config.yaml
+                // defaults instead of leaving them alone.
+                .ignore_empty(true),
         )
         .build()?;
 
@@ -805,8 +810,8 @@ pub struct MilvusConfig {
     /// Set via `BOOM_MILVUS__PASSWORD`; never commit a real value.
     #[serde(default)]
     pub password: String,
-    /// Milvus database to operate in. Set via `BOOM_MILVUS__DATABASE`; never
-    /// committed, since it names the deployment's private namespace.
+    /// Milvus database to operate in. One database serves the whole project, so
+    /// `config.yaml` carries the name; `BOOM_MILVUS__DATABASE` overrides it.
     #[serde(default)]
     pub database: String,
     /// Per-RPC timeout in seconds.
@@ -1006,7 +1011,7 @@ impl AppConfig {
 
             if self.milvus.database.is_empty() {
                 return Err(
-                    "Milvus database must be set via BOOM_MILVUS__DATABASE environment variable when milvus.enabled is true"
+                    "Milvus database must not be empty when milvus.enabled is true; config.yaml supplies a default, override it with BOOM_MILVUS__DATABASE"
                         .to_string(),
                 );
             }

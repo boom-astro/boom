@@ -283,11 +283,12 @@ BOOM can store the CIDER fusion model's embeddings in a
 similarity. This is disabled by default; deployments that don't use it need no
 configuration.
 
-Enable it with `BOOM_MILVUS__ENABLED=true`. BOOM connects with an administrative
-account, so the username, password, and database all come from the environment —
-they go in `.env` (gitignored) or the deployment's secret store, never in
-`config.yaml` or `.env.example`, both of which are committed. Once set, verify
-the connection without writing any data:
+Enable it with `BOOM_MILVUS__ENABLED=true`. One vector database serves the whole
+project, so `config.yaml` already names it. BOOM connects with an administrative
+account, so only the username and password come from the environment — they go
+in `.env` (gitignored) or the deployment's secret store, never in `config.yaml`
+or `.env.example`, both of which are committed. Once set, verify the connection
+without writing any data:
 
 ```bash
 cargo run --bin milvus_check
