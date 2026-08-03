@@ -204,7 +204,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn schema_uses_object_id_as_non_generated_primary_key() {
+    fn object_id_is_non_auto_primary_key() {
         let schema = embedding_collection_schema("test_collection", 384, 64);
 
         let pk = schema
