@@ -44,12 +44,13 @@ milvus:
   tls: true
   username: "" # Set via BOOM_MILVUS__USERNAME environment variable
   password: "" # Set via BOOM_MILVUS__PASSWORD environment variable
-  database: umn_babamul_vectordb # Override via BOOM_MILVUS__DATABASE environment variable
+  database: umn_babamul_vectordb # Override via BOOM_MILVUS__DATABASE environment variable if set
   timeout_seconds: 30
   collection:
     name: ztf_fusion_embeddings
     # The CIDER fusion model (data/models/cider_fusion_plus_embedding.onnx)
-    # emits 384 floats, L2-normalized -- so COSINE and IP are equivalent.
+    # emits 384 floats, L2-normalized so we use Cosine as the distance metric.
+    # Hierarchical Navigable Small World is our indexing approach for best recall.
     dim: 384
     metric_type: COSINE
     index_type: HNSW
