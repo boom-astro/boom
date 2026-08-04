@@ -1,5 +1,53 @@
 # Deploying a BOOM system
 
+## Deployment instances
+
+There is more than one BOOM instance running, and they are **not** replicas of
+each other. Each has its own MongoDB, its own users, and its own filters, so
+data present on one is not necessarily present on the other.
+
+| | Caltech | UMN |
+| --- | --- | --- |
+| Role | Primary production instance | Backup / secondary instance |
+| Host | Dedicated server (`kaboom`), `*.kaboom.caltech.edu` | HPC cluster at the University of Minnesota |
+| Deploy method | Automated: release tag → `Deploy to production` GitHub Actions workflow on a self-hosted runner | Manual, on the cluster |
+| Config in this repo | `config/prod/caltech/` | Not yet (deployed manually) |
+
+**They diverge in practice.** Users are created per instance through that
+instance's API, filters live in that instance's database, and each instance
+consumes the upstream alert streams with its own Kafka consumer groups, so
+ingestion offsets and back-fill history differ too. Treat UMN as an
+independent instance that can take over if Caltech is unavailable — not as a
+hot standby that is guaranteed to be in sync. If something needs to exist on
+both (a user account, a filter, a config change), it has to be applied to both.
+
+The Caltech instance also serves [Babamul](https://babamul.caltech.edu), the
+public-facing alert broker interface for the ZTF and LSST streams.
+
+### Caltech instance specifics
+
+The `kaboom` machine has two persistent storage volumes that the Compose data
+paths point at (see [Data volume configuration](#data-volume-configuration)):
+
+- `/scr` — SSD, used for data that benefits from fast I/O (MongoDB, Valkey).
+- `/data` — HDD, used for larger, slower-access data (Kafka).
+
+Administrative access to the machine is via SSH as the shared ZTF root account
+used across ZTF production machines; ask the BOOM maintainers for the password,
+then add your own key to `~/.ssh/authorized_keys`. The GitHub Actions secrets
+and variables for the `production` environment are the source of truth for
+deployment configuration — see the
+[checklist below](#checklist-of-github-environment-variables-and-secrets).
+
+Public endpoints, useful for verifying a deployment:
+
+| Endpoint | Purpose |
+| --- | --- |
+| `https://api.kaboom.caltech.edu/` | API health — returns JSON with no login |
+| `https://api.kaboom.caltech.edu/docs` | Interactive API docs (Scalar) |
+| `https://babamul.caltech.edu` | Babamul web app |
+| `https://grafana.kaboom.caltech.edu` | Grafana dashboards and pipeline statistics |
+
 ## Option 1: Single node with Docker Compose and a GitHub Actions self-hosted runner
 
 ### Preparation
@@ -107,6 +155,20 @@ by running the following command:
 docker compose -f docker-compose.traefik.yml up -d
 ```
 
+A few notes for maintaining an existing Traefik deployment:
+
+- `config/docker-compose.traefik.yml` is generic and has needed no changes in
+  normal operation. It is copied to the host by hand, so if it ever does change
+  upstream, copy the new version over and restart Traefik — this is the only
+  manual file copy in the deployment.
+- The directory holding it is chosen per host; on `kaboom` it lives under `/scr`
+  rather than `/root/code`, so that it sits on the persistent SSD volume.
+- Keep `EMAIL` stable across redeploys. It does not have to be a real mailbox,
+  but changing it triggers a Let's Encrypt certificate regeneration, during
+  which HTTPS is unavailable.
+- `DOMAIN` must match the deployment's apex domain exactly, since the
+  certificates and router rules are derived from it.
+
 ### Configure a GitHub Actions self-hosted runner for continuous deployment (CD)
 
 On the remote server, while running as the `root` user,
@@ -177,6 +239,14 @@ Check the status of the service:
 
 You can read more about this in the official guide:
 [Configuring the self-hosted runner application as a service](https://docs.github.com/en/actions/hosting-your-own-runners/managing-self-hosted-runners/configuring-the-self-hosted-runner-application-as-a-service).
+
+Installing it as a service matters because it is what makes the runner come back
+after a host reboot. If a deploy is triggered but the job never starts, check
+**Settings → Actions → Runners** in GitHub: a grey/offline runner means the
+service isn't running, and `sudo ./svc.sh status` on the host will say why. Note
+that a down runner only blocks *new deploys* — the running BOOM stack is
+unaffected, since Compose restart policies bring the containers back on reboot
+on their own.
 
 ### Set secrets for the GitHub Actions deployment workflow
 
@@ -280,10 +350,11 @@ config/prod/
    caltech/
       overrides.yaml
       config.yaml
-   umn/
-      overrides.yaml
-      config.yaml
 ```
+
+Each automated deployment gets its own directory here. Only `caltech/` exists
+today; the UMN instance is still deployed manually and does not have a
+generated config in this repo yet.
 
 - `overrides.yaml` is the only file you edit for a deployment-specific config.
 - `config.yaml` in each deployment directory is generated from the base config
@@ -387,6 +458,74 @@ the workflow in [`.github/workflows/deploy.yaml`](/.github/workflows/deploy.yaml
 
 In practice, this means only approved release tags can be deployed to
 production, reducing the risk of accidental or unauthorized production changes.
+
+## Running, verifying, and rolling back a deployment
+
+### Triggering a deployment
+
+Deployments run through
+[`deploy-trigger.yaml`](/.github/workflows/deploy-trigger.yaml), which calls the
+reusable [`deploy.yaml`](/.github/workflows/deploy.yaml). There are two ways in:
+
+- **Publish a release** on GitHub with a `v*` tag. This is the normal path.
+- **Run `Trigger deployment to production` manually** (Actions tab → Run
+  workflow) and give it the version tag to deploy, e.g. `v1.0.4`. This is the
+  path used for rollbacks.
+
+No SSH access to the deployment host is needed for either. The job runs on the
+self-hosted runner, checks out the tag, and runs `docker compose build` /
+`docker compose --profile prod up -d`.
+
+Deploys cause brief downtime: Compose stops each service's container and starts
+a new one from the freshly built image, so expect a window of roughly half a
+minute where services such as the API are restarting.
+
+On a **fresh** server, the Traefik reverse proxy must be up before the first
+BOOM deploy — the Compose file references the `traefik-public` network as an
+external network and the deploy fails if it doesn't exist. See
+[Create a public Traefik reverse proxy](#create-a-public-traefik-reverse-proxy).
+That is a one-time step; routine deploys never touch Traefik.
+
+### Verifying a deployment
+
+Once the workflow finishes green:
+
+1. **Ping the API** — the API root should return JSON immediately with no login
+   (for Caltech, `https://api.kaboom.caltech.edu/`).
+2. **Check the web app** — `https://babamul.caltech.edu` exercises the API, so
+   basic functionality working there is a good sign. If the release changed
+   front end code, test what changed: object search, object pages, alert search,
+   the Kafka docs page, and the statistics dashboard are the high-traffic paths.
+3. **Check Grafana** — confirm ingestion and processing rates look normal and no
+   alerts are firing.
+4. **Optional:** on the host, `docker compose --profile prod ps` should show
+   every service `running`/`healthy`.
+
+### Rolling back
+
+Re-run `Trigger deployment to production` manually with the last known-good
+version tag. Because the workflow deploys whatever tag it is given, this is a
+full rollback of both the application and its generated config, and it is
+usually faster than reverting commits and cutting a new tag.
+
+Rolling back the application does **not** roll back data: MongoDB, Kafka, and
+Valkey state stays on disk across a deploy. If a release migrated data in a way
+that an older version can't read, a tag rollback alone is not sufficient.
+
+## Managing users on an instance
+
+Users are per-instance (see [Deployment instances](#deployment-instances)) and
+can only be created by an admin. The bootstrap admin account is created from
+`BOOM_API__AUTH__ADMIN_PASSWORD` and the admin username/email in that
+deployment's `config/prod/<deployment>/config.yaml`.
+
+The easiest route is the interactive API docs (`/docs` on the instance's API,
+e.g. `https://api.kaboom.caltech.edu/docs`): authenticate at the top of the
+page, then run the `POST /users` endpoint. Equivalently, `POST /auth` to get a
+token and then `POST /users` with it. Non-admin callers get a `403`.
+
+Repeat on each instance where the user needs access — creating a user at
+Caltech does not create it at UMN.
 
 ## Migrating from a dedicated deploy repo to this one
 
