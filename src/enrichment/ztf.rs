@@ -417,7 +417,7 @@ pub struct ZtfAlertClassifications {
     pub btsbot: f32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cider_fusion: Option<CiderClassProbs>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing)]
     pub fusion_embedding: Option<Vec<f32>>,
 }
 
@@ -948,21 +948,30 @@ impl ZtfEnrichmentWorker {
                     .unwrap()
                     .predict(&btsbot_metadata, &triplet)?;
 
-                let cider_result = (|| -> Result<(CiderClassProbs, Vec<f32>), ModelError> {
-                    let mut m = models.cider.lock().unwrap();
-                    let meta = m.get_metadata(&[&item.alert], &[&item.all_bands_properties])?;
-                    let img = m.get_triplet(&[&item.cutouts])?;
-                    let (tx, tpm, tg) = m.photometry_inputs(item.lightcurve.clone())?;
-                    let (probs, embedding) = m.predict(&tx, &tpm, &tg, &meta, &img)?;
-                    let cls = CiderClassProbs::from_probs(&probs).ok_or(
-                        ModelError::MissingFeature("cider: unexpected output length"),
-                    )?;
-                    Ok((cls, embedding))
-                })()
-                .map_err(|e| {
-                    warn!("cider inference failed for candid {}: {}", item.candid, e);
-                })
-                .ok();
+                let lc_span = item
+                    .lightcurve
+                    .last()
+                    .and_then(|last| item.lightcurve.first().map(|first| last.time - first.time))
+                    .unwrap_or(f64::MAX);
+                let cider_result = if lc_span <= 100.0 {
+                    (|| -> Result<(CiderClassProbs, Vec<f32>), ModelError> {
+                        let mut m = models.cider.lock().unwrap();
+                        let meta = m.get_metadata(&[&item.alert], &[&item.all_bands_properties])?;
+                        let img = m.get_triplet(&[&item.cutouts])?;
+                        let (tx, tpm, tg) = m.photometry_inputs(item.lightcurve.clone())?;
+                        let (probs, embedding) = m.predict(&tx, &tpm, &tg, &meta, &img)?;
+                        let cls = CiderClassProbs::from_probs(&probs).ok_or(
+                            ModelError::MissingFeature("cider: unexpected output length"),
+                        )?;
+                        Ok((cls, embedding))
+                    })()
+                    .map_err(|e| {
+                        warn!("cider inference failed for candid {}: {}", item.candid, e);
+                    })
+                    .ok()
+                } else {
+                    None
+                };
 
                 Some(ZtfAlertClassifications {
                     acai_h: acai_h_scores[0],
@@ -1041,7 +1050,19 @@ impl ZtfEnrichmentWorker {
         }
 
         // CIDER batch on ALL selected alerts at once — failure is non-fatal.
+        // Only items whose lightcurve spans ≤ 100 days get predictions; others
+        // receive None for cider_fusion/fusion_embedding.
         let n_sel = selected_indices.len();
+        let cider_eligible: Vec<bool> = selected_indices
+            .iter()
+            .map(|&i| {
+                let lc = &work_items[i].lightcurve;
+                lc.last()
+                    .and_then(|last| lc.first().map(|first| last.time - first.time))
+                    .unwrap_or(f64::MAX)
+                    <= 100.0
+            })
+            .collect();
         let cider_batch: Option<(Vec<f32>, Vec<f32>)> =
             (|| -> Result<(Vec<f32>, Vec<f32>), ModelError> {
                 let cider_alerts: Vec<&ZtfAlertForEnrichment> = selected_indices
@@ -1142,14 +1163,23 @@ impl ZtfEnrichmentWorker {
             let chunk_start = chunk_idx * self.batch_size;
             for (batch_idx, &item_idx) in chunk.iter().enumerate() {
                 let sel_idx = chunk_start + batch_idx;
-                let cider_fusion = cider_batch.as_ref().and_then(|(probs, _)| {
-                    CiderClassProbs::from_probs(
-                        &probs[sel_idx * cider_n_cls..(sel_idx + 1) * cider_n_cls],
-                    )
-                });
-                let fusion_embedding = cider_batch.as_ref().map(|(_, emb)| {
-                    emb[sel_idx * cider_emb_dim..(sel_idx + 1) * cider_emb_dim].to_vec()
-                });
+                let eligible = cider_eligible[sel_idx];
+                let cider_fusion = if eligible {
+                    cider_batch.as_ref().and_then(|(probs, _)| {
+                        CiderClassProbs::from_probs(
+                            &probs[sel_idx * cider_n_cls..(sel_idx + 1) * cider_n_cls],
+                        )
+                    })
+                } else {
+                    None
+                };
+                let fusion_embedding = if eligible {
+                    cider_batch.as_ref().map(|(_, emb)| {
+                        emb[sel_idx * cider_emb_dim..(sel_idx + 1) * cider_emb_dim].to_vec()
+                    })
+                } else {
+                    None
+                };
                 results[item_idx] = Some(ZtfAlertClassifications {
                     acai_h: acai_h_scores[batch_idx],
                     acai_n: acai_n_scores[batch_idx],
