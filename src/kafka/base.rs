@@ -3,7 +3,7 @@ use crate::{
     utils::{
         data::count_files_in_dir,
         o11y::{
-            logging::{as_error, log_error},
+            logging::{as_error, log_error, WARN},
             metrics::CONSUMER_METER,
         },
     },
@@ -40,6 +40,11 @@ static ALERT_PROCESSED: LazyLock<Counter<u64>> = LazyLock::new(|| {
 
 const MAX_RETRIES_PRODUCER: usize = 6;
 const KAFKA_TIMEOUT_SECS: std::time::Duration = std::time::Duration::from_secs(30);
+
+// Positioning runs between two polls, so it must stay well under
+// `max.poll.interval.ms` (5 min) or librdkafka fences the member.
+const POSITION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const POSITION_CHUNK: usize = 12;
 
 // rdkafka's Metadata type provides *references* to MetadataTopic and
 // MetadataPartition values, neither of which implement Clone. We use a custom
@@ -395,15 +400,11 @@ pub enum ConsumerError {
 
 #[async_trait::async_trait]
 pub trait AlertConsumer: Sized {
-    /// Concrete topic name(s) for a specific date. Used by the producer side and
-    /// by the one-shot (`exit_on_eof`) drain path.
+    /// Concrete topic name(s) for a specific date.
     fn topic_names(&self, timestamp: i64) -> Vec<String>;
-    /// Subscription entries for the long-running consumer. Entries beginning with
-    /// `^` are interpreted by librdkafka as regular expressions, so the consumer
-    /// auto-discovers each new day's topic (e.g. `ztf_20260629_programid1`) and
-    /// rolls over on its own without restarting. Surveys with a single static
-    /// topic (e.g. LSST) return literal topic names instead. Each survey
-    /// implements this per its topic layout.
+    /// Subscription entries for the long-running consumer. A leading `^` makes
+    /// librdkafka treat the entry as a regex, so new daily topics are joined
+    /// automatically; surveys with a static topic return literal names.
     fn topic_patterns(&self) -> Vec<String>;
     fn output_queue(&self) -> String;
     fn survey(&self) -> &'static str;
@@ -424,10 +425,8 @@ pub trait AlertConsumer: Sized {
         );
         Ok(())
     }
-    // No `#[instrument]` here: `consume` runs the consumer loop for the
-    // entire process lifetime, and any wrapping span would make every
-    // per-message child span a descendant of the same root trace, which
-    // grows until Tempo rejects it (TRACE_TOO_LARGE).
+    // No `#[instrument]`: one span for the process lifetime would grow until
+    // Tempo rejects the trace (TRACE_TOO_LARGE).
     async fn consume(
         &self,
         topics: Option<Vec<String>>,
@@ -441,8 +440,6 @@ pub trait AlertConsumer: Sized {
         let config = AppConfig::from_path(config_path)?;
         let survey = self.survey();
 
-        // Prod: subscribe to topic pattern(s) so new daily topics auto-roll over.
-        // exit_on_eof (tests/dev): target the concrete topic for the date.
         let subscription = topics.unwrap_or_else(|| {
             if exit_on_eof {
                 self.topic_names(timestamp)
@@ -562,10 +559,8 @@ fn seek_to_timestamp(consumer: &BaseConsumer, timestamp_ms: i64) -> KafkaResult<
     Ok(())
 }
 
-// Position the given `targets` partitions for the long-running consumer: those
-// with a committed offset resume from it; the rest are resolved by `timestamp_ms`
-// (an old day's topic has nothing at/after it -> seek to end/skip; today's and
-// any newly-created daily topic -> its start).
+// Resolve uncommitted partitions against `timestamp_ms`: old topics skip to the
+// end, today's starts at its beginning.
 fn position_partitions(
     consumer: &BaseConsumer,
     targets: &TopicPartitionList,
@@ -574,50 +569,24 @@ fn position_partitions(
     if targets.count() == 0 {
         return Ok(());
     }
-    let committed = consumer.committed(KAFKA_TIMEOUT_SECS)?;
-
     let mut to_resolve = TopicPartitionList::new();
     for elem in targets.elements() {
-        match committed
-            .find_partition(elem.topic(), elem.partition())
-            .map(|c| c.offset())
-        {
-            Some(rdkafka::Offset::Offset(offset)) => {
-                consumer.seek(
-                    elem.topic(),
-                    elem.partition(),
-                    rdkafka::Offset::Offset(offset),
-                    KAFKA_TIMEOUT_SECS,
-                )?;
-            }
-            _ => {
-                to_resolve.add_partition_offset(
-                    elem.topic(),
-                    elem.partition(),
-                    rdkafka::Offset::Offset(timestamp_ms),
-                )?;
-            }
-        }
-    }
-
-    if to_resolve.count() == 0 {
-        return Ok(());
+        to_resolve.add_partition_offset(
+            elem.topic(),
+            elem.partition(),
+            rdkafka::Offset::Offset(timestamp_ms),
+        )?;
     }
     let resolved = consumer.offsets_for_times(to_resolve, KAFKA_TIMEOUT_SECS)?;
-    // Persist the resolved start/skip position for each uncommitted partition.
-    // With the default (eager) assignor, discovering the next day's topic revokes
-    // and reassigns everything; committing here means an old skipped topic resumes
-    // from its end (stays skipped) rather than resetting to `earliest` and
-    // replaying, and today's topic resumes from its start.
+    // Commit the resolved position so an eager rebalance doesn't reset it to `earliest`.
     let mut to_commit = TopicPartitionList::new();
     for elem in resolved.elements() {
         let offset = match elem.offset() {
             rdkafka::Offset::Offset(offset) => offset,
-            // No message at/after the timestamp (an old or empty topic): resolve
-            // the end offset numerically so it can be committed and skipped.
+            // Nothing at/after the timestamp: skip to the end.
             _ => {
                 consumer
-                    .fetch_watermarks(elem.topic(), elem.partition(), KAFKA_TIMEOUT_SECS)?
+                    .fetch_watermarks(elem.topic(), elem.partition(), POSITION_TIMEOUT)?
                     .1
             }
         };
@@ -625,7 +594,7 @@ fn position_partitions(
             elem.topic(),
             elem.partition(),
             rdkafka::Offset::Offset(offset),
-            KAFKA_TIMEOUT_SECS,
+            POSITION_TIMEOUT,
         )?;
         to_commit.add_partition_offset(
             elem.topic(),
@@ -639,38 +608,78 @@ fn position_partitions(
     Ok(())
 }
 
-// Position only partitions that have appeared in the assignment since the last
-// call, recording them in `positioned`. Positioning each partition exactly once
-// (rather than re-seeking the whole assignment whenever it changes) means a
-// still-active partition is never rewound to its lagging committed offset, and a
-// same-size membership swap (which a count check would miss) is still handled.
-// A genuinely-new daily topic is correctly picked up here; an old retained topic
-// re-assigned mid-run is skipped. (A brand-new partition consumed between poll
-// and this check would be rewound once here — a bounded, idempotent replay.)
+// Position newly-assigned partitions. A committed partition needs nothing:
+// librdkafka already resumes it from its offset, so it is recorded for free.
+// Only uncommitted ones cost broker round-trips, and those are done
+// POSITION_CHUNK at a time so one pass can't exhaust the poll interval; the rest
+// stay paused until their turn. Returns whether any are still pending.
 fn reposition_new_partitions(
     consumer: &BaseConsumer,
     timestamp_ms: i64,
     positioned: &mut std::collections::HashSet<(String, i32)>,
-) -> KafkaResult<()> {
+) -> KafkaResult<bool> {
     let assignment = consumer.assignment()?;
-    let mut fresh = TopicPartitionList::new();
+    let mut pending = TopicPartitionList::new();
     for elem in assignment.elements() {
         if !positioned.contains(&(elem.topic().to_string(), elem.partition())) {
-            fresh.add_partition_offset(elem.topic(), elem.partition(), rdkafka::Offset::Invalid)?;
+            pending.add_partition_offset(
+                elem.topic(),
+                elem.partition(),
+                rdkafka::Offset::Invalid,
+            )?;
         }
     }
-    if fresh.count() == 0 {
-        return Ok(());
+    if pending.count() == 0 {
+        return Ok(false);
     }
-    position_partitions(consumer, &fresh, timestamp_ms)?;
-    for elem in fresh.elements() {
-        positioned.insert((elem.topic().to_string(), elem.partition()));
+    consumer.pause(&pending)?;
+
+    let committed = consumer.committed_offsets(pending, KAFKA_TIMEOUT_SECS)?;
+    let mut ready = TopicPartitionList::new();
+    let mut chunk = TopicPartitionList::new();
+    let mut remaining = 0;
+    for elem in committed.elements() {
+        let target = match elem.offset() {
+            rdkafka::Offset::Offset(_) => &mut ready,
+            _ if chunk.count() < POSITION_CHUNK => &mut chunk,
+            _ => {
+                remaining += 1;
+                continue;
+            }
+        };
+        target.add_partition_offset(elem.topic(), elem.partition(), rdkafka::Offset::Invalid)?;
     }
-    Ok(())
+
+    position_partitions(consumer, &chunk, timestamp_ms)?;
+    for tpl in [&ready, &chunk] {
+        consumer.resume(tpl)?;
+        for elem in tpl.elements() {
+            positioned.insert((elem.topic().to_string(), elem.partition()));
+        }
+    }
+    if remaining > 0 {
+        debug!("{} partitions still pending positioning", remaining);
+    }
+    Ok(remaining > 0)
 }
 
-// No `#[instrument]` here: this function is the long-lived Kafka poll loop;
-// instrumenting it would funnel every per-message span into one giant trace.
+// A rebalance landing mid-pass must not take the consumer down; the next pass retries.
+fn position_or_warn(
+    consumer: &BaseConsumer,
+    timestamp_ms: i64,
+    positioned: &mut std::collections::HashSet<(String, i32)>,
+) -> bool {
+    match reposition_new_partitions(consumer, timestamp_ms, positioned) {
+        Ok(pending) => pending,
+        Err(error) => {
+            log_error!(WARN, error, "failed to position partitions, will retry");
+            true
+        }
+    }
+}
+
+// No `#[instrument]`: this loop is long-lived, so one span would swallow every
+// per-message span into a single unbounded trace.
 pub async fn consumer(
     id: &str,
     subscription: Vec<String>,
@@ -683,7 +692,13 @@ pub async fn consumer(
     survey: &'static str,
 ) -> Result<(), ConsumerError> {
     let server = survey_consumer_config.server.clone();
-    let group_id = survey_consumer_config.group_id.clone();
+    // Throwaway group so a one-shot replay never rebalances the long-running
+    // consumers; the timestamp suffix keeps one run's threads in the same group.
+    let group_id = if exit_on_eof {
+        format!("{}-oneshot-{}", survey_consumer_config.group_id, timestamp)
+    } else {
+        survey_consumer_config.group_id.clone()
+    };
     let username = survey_consumer_config.username.clone();
     let password = survey_consumer_config.password.clone();
 
@@ -732,20 +747,16 @@ pub async fn consumer(
         .set("bootstrap.servers", &server)
         .set("group.id", &group_id)
         .set("auto.offset.reset", "earliest")
-        // Manual offset storage so the bootstrap seek isn't clobbered; in the
-        // prod path we store offsets explicitly after each push (see below).
+        // Manual storage so the bootstrap seek isn't clobbered.
         .set("enable.auto.offset.store", "false");
 
     if !exit_on_eof {
-        // Long-running consumer: commit stored offsets so restarts and rebalances
-        // resume in place instead of replaying. We deliberately keep the default
-        // (eager) assignment strategy: switching a live consumer group to
-        // cooperative-sticky is an incompatible rebalance protocol, and members
-        // already in the group on the eager protocol reject the join with
-        // InconsistentGroupProtocol.
+        // Commit so restarts resume in place. The default (eager) assignor is
+        // deliberate: cooperative-sticky would be rejected by members already in
+        // the group with InconsistentGroupProtocol.
         client_config
             .set("enable.auto.commit", "true")
-            // How quickly a newly-created daily topic is discovered and joined.
+            // How quickly a new daily topic is discovered.
             .set("topic.metadata.refresh.interval.ms", "10000");
     }
 
@@ -772,8 +783,9 @@ pub async fn consumer(
     // Wait for initial assignment
     debug!("Waiting for partition assignment...");
 
-    // Partitions already positioned (prod path only); see reposition_new_partitions.
+    // Partitions already positioned (prod path only).
     let mut positioned: std::collections::HashSet<(String, i32)> = std::collections::HashSet::new();
+    let mut pending_positions = false;
 
     // Poll once to trigger rebalance and get assignment
     loop {
@@ -781,11 +793,10 @@ pub async fn consumer(
             Some(Ok(_msg)) => {
                 debug!("Got initial assignment, positioning partitions...");
                 if exit_on_eof {
-                    // One-shot drain: (re)read from the requested timestamp.
                     seek_to_timestamp(&consumer, timestamp * 1000)?;
                 } else {
-                    // Resume committed partitions; skip old / start today otherwise.
-                    reposition_new_partitions(&consumer, timestamp * 1000, &mut positioned)?;
+                    pending_positions =
+                        position_or_warn(&consumer, timestamp * 1000, &mut positioned);
                 }
                 break;
             }
@@ -852,10 +863,7 @@ pub async fn consumer(
     // start timer
     let start = std::time::Instant::now();
 
-    // Emit a periodic "still alive" line so low-volume surveys (e.g. WINTER,
-    // which may push far fewer than the every-1000 progress log) visibly report
-    // progress instead of looking stalled. Also confirms the loop is polling
-    // even when idle between nights.
+    // Low-volume surveys rarely reach the every-1000 progress log, so report anyway.
     const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
     let mut last_heartbeat = std::time::Instant::now();
     let mut total_at_last_heartbeat: u64 = 0;
@@ -878,31 +886,70 @@ pub async fn consumer(
             last_heartbeat = std::time::Instant::now();
             total_at_last_heartbeat = total;
         }
-        // Pick up newly-assigned partitions (e.g. the next day's topic rolling
-        // over). Kept off the per-message hot path: checked once per 1000
-        // messages and whenever the poll goes idle (rollover happens in the
-        // quiet gap between nights, so the idle check catches it promptly).
+        // Pick up the next day's topic, off the per-message hot path.
         if !exit_on_eof && total % 1000 == 0 {
-            reposition_new_partitions(&consumer, timestamp * 1000, &mut positioned)?;
+            pending_positions = position_or_warn(&consumer, timestamp * 1000, &mut positioned);
         }
         if max_in_queue > 0 && total % 1000 == 0 {
+            // Back-pressure. Pause rather than sleep: a consumer that stops
+            // polling for `max.poll.interval.ms` (5 min) is fenced out of the group.
+            let mut paused = false;
             loop {
                 let nb_in_queue = con
                     .llen::<&str, usize>(&output_queue)
                     .await
                     .inspect_err(as_error!("failed to get queue length"))?;
-                if nb_in_queue >= max_in_queue {
+                if nb_in_queue < max_in_queue {
+                    break;
+                }
+                if !paused {
                     info!(
-                        "{} (limit: {}) items in queue, sleeping...",
+                        "{} (limit: {}) items in queue, pausing consumption...",
                         nb_in_queue, max_in_queue
                     );
-                    tokio::time::sleep(core::time::Duration::from_millis(500)).await;
-                    continue;
+                    consumer.pause(&consumer.assignment()?)?;
+                    paused = true;
                 }
-                break;
+                // Yields nothing while paused, but forwards anything still in flight.
+                if let Some(Ok(message)) = consumer.poll(core::time::Duration::from_millis(500)) {
+                    let payload = message.payload().unwrap_or_default();
+                    con.rpush::<&str, Vec<u8>, usize>(&output_queue, payload.to_vec())
+                        .await
+                        .inspect_err(as_error!("failed to push message to queue"))?;
+                    if !exit_on_eof {
+                        if let Err(error) = consumer.store_offset_from_message(&message) {
+                            log_error!(error, "failed to store offset");
+                        }
+                    }
+                    ALERT_PROCESSED.add(1, &ok_attrs);
+                    total += 1;
+                }
+            }
+            if paused {
+                // Only what is positioned; the rest is paused on purpose.
+                let assignment = consumer.assignment()?;
+                let mut to_resume = TopicPartitionList::new();
+                for elem in assignment.elements() {
+                    if exit_on_eof
+                        || positioned.contains(&(elem.topic().to_string(), elem.partition()))
+                    {
+                        to_resume.add_partition_offset(
+                            elem.topic(),
+                            elem.partition(),
+                            rdkafka::Offset::Invalid,
+                        )?;
+                    }
+                }
+                consumer.resume(&to_resume)?;
+                info!("queue drained, resuming consumption");
             }
         }
-        match consumer.poll(KAFKA_TIMEOUT_SECS) {
+        let poll_timeout = if pending_positions {
+            core::time::Duration::from_millis(500)
+        } else {
+            KAFKA_TIMEOUT_SECS
+        };
+        match consumer.poll(poll_timeout) {
             Some(Ok(message)) => {
                 let payload = message.payload().unwrap_or_default();
                 con.rpush::<&str, Vec<u8>, usize>(&output_queue, payload.to_vec())
@@ -946,7 +993,7 @@ pub async fn consumer(
                     break;
                 }
                 // Idle: catch a topic that has just rolled over.
-                reposition_new_partitions(&consumer, timestamp * 1000, &mut positioned)?;
+                pending_positions = position_or_warn(&consumer, timestamp * 1000, &mut positioned);
             }
         }
     }

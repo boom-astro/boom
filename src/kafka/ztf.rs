@@ -40,13 +40,8 @@ impl AlertConsumer for ZtfAlertConsumer {
             .collect()
     }
     fn topic_patterns(&self) -> Vec<String> {
-        // Regex matching any date for the selected program id(s), e.g.
-        // ^ztf_[0-9]+_programid(1|2)$ — librdkafka auto-joins new daily topics.
-        // NB: librdkafka's matcher is POSIX/Thompson-NFA, so only basic
-        // constructs are used (no `\d`, no `{n}` bounded repetition).
+        // librdkafka's matcher is POSIX, so no `\d` and no `{n}`.
         let ids = if self.program_ids.is_empty() {
-            // Empty selection would otherwise yield `programid()`, matching
-            // nothing; fall back to any program id.
             "[0-9]+".to_string()
         } else {
             self.program_ids

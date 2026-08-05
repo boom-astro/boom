@@ -357,6 +357,23 @@ To continue with the previous example, you can run:
 cargo run --release --bin kafka_consumer ztf 20240617 --programids public
 ```
 
+`DATE` defaults to today (at 00:00:00 UTC), and `--date-mode` controls how it is
+interpreted:
+
+- `from` (the default) consumes that date **and every night after it**. The
+  consumer subscribes to a topic pattern, so each new nightly topic is picked up
+  automatically and the process never exits. The date only acts as a starting
+  point for partitions the consumer group has never read: earlier nights are
+  skipped, and partitions with a committed offset resume where they left off.
+- `single` consumes **only** that date's topic(s) and exits once they are
+  drained. Offsets are not committed and a throwaway consumer group is used, so
+  replaying a night is repeatable and leaves the long-running consumers alone.
+
+```bash
+# Re-ingest a single night, then exit:
+cargo run --release --bin kafka_consumer ztf 20240617 --programids public --date-mode single
+```
+
 ### Alert Processing
 
 Now that alerts have been queued for processing, let's start the workers that will process them. Instead of starting each worker manually, we provide the `scheduler` binary. You can run it with:
