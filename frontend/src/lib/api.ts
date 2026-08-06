@@ -350,6 +350,69 @@ export async function fetchObjCutouts(survey: string, objectId: string): Promise
   return (typeof result === 'object' && result ? (result as Cutouts) : {} as Cutouts);
 }
 
+/** A Hyrax model that can be run on demand against objects of a survey. */
+export type ClassificationModel = {
+  id: string;
+  name: string;
+  description: string;
+  /** Class labels the model emits, in output order. Empty for single-score models. */
+  classes: string[];
+  /** False when the ONNX artifact is not installed on the server; cannot be run. */
+  available: boolean;
+};
+
+/** Result of running a Hyrax model on a single object, on demand. */
+export type HyraxClassification = {
+  model?: string;
+  /** Candid of the alert whose cutouts were scored. */
+  candid?: number;
+  /** Class name -> probability, for multiclass models. */
+  classes?: Record<string, number>;
+  /** Single score, for models that emit one value. */
+  score?: number;
+};
+
+/** Pull the server's error message out of an API error body, falling back to the status. */
+async function classifyErrorMessage(res: Response): Promise<string> {
+  const txt = await res.text().catch(() => "");
+  try {
+    const parsed = JSON.parse(txt);
+    if (parsed && typeof parsed.message === "string") return parsed.message;
+  } catch {
+    // Not JSON — fall through to the raw body.
+  }
+  return txt || `Request failed with status ${res.status}`;
+}
+
+export async function fetchClassificationModels(survey: string): Promise<ClassificationModel[]> {
+  const url = `${API_BASE}/surveys/${encodeURIComponent(survey)}/classification-models`;
+  const res = await fetchWithAuth(url);
+  if (!res.ok) {
+    throw new Error(await classifyErrorMessage(res));
+  }
+  const body = await parseResponseJson(res).catch(() => ({}));
+  const models = unwrapData<ClassificationModel[]>(body, []);
+  return Array.isArray(models) ? models : [];
+}
+
+export async function classifyObject(
+  survey: string,
+  objectId: string,
+  model: string,
+): Promise<HyraxClassification> {
+  const url = `${API_BASE}/surveys/${encodeURIComponent(survey)}/objects/${encodeURIComponent(objectId)}/classify`;
+  const res = await fetchWithAuth(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model }),
+  });
+  if (!res.ok) {
+    throw new Error(await classifyErrorMessage(res));
+  }
+  const body = await parseResponseJson(res).catch(() => ({}));
+  return unwrapData<HyraxClassification>(body, {} as HyraxClassification);
+}
+
 export type NightlyStat = {
   date: string;
   ztf?: number;
@@ -480,6 +543,8 @@ export default {
   resetPassword,
   fetchObject,
   fetchProfile,
+  classifyObject,
+  fetchClassificationModels,
   fetchAlerts,
   fetchAlertCutouts,
   fetchObjCutouts,

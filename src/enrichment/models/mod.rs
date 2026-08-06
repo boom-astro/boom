@@ -1,10 +1,15 @@
 mod acai;
 mod base;
 mod btsbot;
+mod hyrax;
 
 pub use acai::AcaiModel;
 pub use base::{load_model, load_model_on_device, Model, ModelError};
 pub use btsbot::BtsBotModel;
+pub use hyrax::{
+    find_model_spec, HyraxModel, HyraxModelRegistry, HyraxModelSpec, HyraxPredictError,
+    HYRAX_MODELS,
+};
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};

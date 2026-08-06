@@ -50,6 +50,10 @@ pub fn forbidden(message: &str) -> HttpResponse {
     HttpResponse::Forbidden().json(ApiResponseBody::error(message))
 }
 
+pub fn service_unavailable(message: &str) -> HttpResponse {
+    HttpResponse::ServiceUnavailable().json(ApiResponseBody::error(message))
+}
+
 // have an ok_ser() that takes a serializable object and converts it to serde_json::Value
 pub fn ok_ser<T: serde::Serialize>(message: &str, data: T) -> HttpResponse {
     match serde_json::to_value(data) {

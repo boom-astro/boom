@@ -3260,4 +3260,137 @@ mod tests {
             col.delete_one(doc! { "_id": id }).await.unwrap();
         }
     }
+
+    /// Test GET /babamul/surveys/{survey}/classification-models
+    #[actix_rt::test]
+    async fn test_get_classification_models() {
+        load_dotenv();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+        let test_user = TestUser::create(&database, &auth_app_data).await;
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(database.clone()))
+                .app_data(web::Data::new(auth_app_data))
+                .service(
+                    web::scope("/babamul")
+                        .wrap(from_fn(babamul_auth_middleware))
+                        .service(routes::babamul::surveys::get_classification_models),
+                ),
+        )
+        .await;
+
+        let req = test::TestRequest::get()
+            .uri("/babamul/surveys/ztf/classification-models")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = read_json_response(resp).await;
+        let models = body["data"].as_array().expect("data should be an array");
+        assert!(!models.is_empty(), "ZTF should have Hyrax models listed");
+        for model in models {
+            assert!(model["id"].is_string());
+            assert!(model["name"].is_string());
+            assert!(
+                model["available"].is_boolean(),
+                "each model reports whether its ONNX artifact is installed"
+            );
+        }
+
+        // Unauthenticated requests are rejected
+        let req = test::TestRequest::get()
+            .uri("/babamul/surveys/ztf/classification-models")
+            .to_request();
+        let resp = test::try_call_service(&app, req).await;
+        assert!(resp.is_err());
+        assert_eq!(
+            resp.err().unwrap().as_response_error().status_code(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    /// Test POST /babamul/surveys/{survey}/objects/{object_id}/classify
+    ///
+    /// Only covers the paths reachable without an ONNX artifact on disk. Until real
+    /// Hyrax models are added to data/models/, every registered model is unavailable,
+    /// so the success path cannot be exercised here.
+    #[actix_rt::test]
+    async fn test_classify_object() {
+        load_dotenv();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+        let test_user = TestUser::create(&database, &auth_app_data).await;
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(database.clone()))
+                .app_data(web::Data::new(auth_app_data))
+                .app_data(web::Data::new(HashMap::<Survey, CutoutStorage>::new()))
+                .app_data(web::Data::new(
+                    boom::enrichment::models::HyraxModelRegistry::new(),
+                ))
+                .service(
+                    web::scope("/babamul")
+                        .wrap(from_fn(babamul_auth_middleware))
+                        .service(routes::babamul::surveys::classify_object),
+                ),
+        )
+        .await;
+
+        // An unknown model id is rejected before any database or storage work
+        let req = test::TestRequest::post()
+            .uri("/babamul/surveys/ztf/objects/ZTF24aaaaaaa/classify")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .set_json(serde_json::json!({ "model": "not_a_real_model" }))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "unknown model ids should be rejected"
+        );
+
+        // A model that exists in the registry but has no artifact installed reports
+        // as unavailable rather than failing as an internal error
+        let model_id = boom::enrichment::models::HYRAX_MODELS[0].id;
+        let req = test::TestRequest::post()
+            .uri("/babamul/surveys/ztf/objects/ZTF24aaaaaaa/classify")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .set_json(serde_json::json!({ "model": model_id }))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "a model with no ONNX artifact on disk should report as unavailable"
+        );
+
+        // Models declare which surveys they support
+        let req = test::TestRequest::post()
+            .uri("/babamul/surveys/lsst/objects/LSST123/classify")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .set_json(serde_json::json!({ "model": model_id }))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "a ZTF-only model should be rejected for LSST objects"
+        );
+
+        // Unauthenticated requests are rejected
+        let req = test::TestRequest::post()
+            .uri("/babamul/surveys/ztf/objects/ZTF24aaaaaaa/classify")
+            .set_json(serde_json::json!({ "model": model_id }))
+            .to_request();
+        let resp = test::try_call_service(&app, req).await;
+        assert!(resp.is_err());
+        assert_eq!(
+            resp.err().unwrap().as_response_error().status_code(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
 }
