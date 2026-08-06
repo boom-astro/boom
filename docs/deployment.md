@@ -226,6 +226,8 @@ volume paths, and the specific env keys injected into containers — belong here
 | `VITE_PRERELEASE_MODE` | No | `true` gates unreleased features; defaults to `false`. |
 | `VITE_PUBLIC_POSTHOG_KEY` | No | PostHog analytics; blank disables analytics. |
 | `VITE_PUBLIC_POSTHOG_HOST` | No | PostHog host; blank disables analytics. |
+| `BOOM_POSTHOG__PROJECT_API_KEY` | No | Server-side PostHog analytics for the Babamul API and Kafka stream; blank disables them. Use the **same project** as `VITE_PUBLIC_POSTHOG_KEY` so web and API activity merge onto one person. |
+| `BOOM_POSTHOG__HOST` | No | PostHog ingestion host; defaults to `https://us.i.posthog.com`. |
 | `BOOM_BABAMUL__ENABLED` | No | Defaults to `false`. |
 | `BOOM_GPU__ENABLED` | No | Set `true` to run ONNX inference on GPU. The workflow forces `false` when unset because the model loader's own default is `true` (it reads this env var directly, not `config.gpu.enabled`). |
 | `BOOM_GPU__DEVICE_IDS` | No | Comma-separated CUDA device IDs (e.g. `0,1`); defaults to `0`. Only relevant when `BOOM_GPU__ENABLED=true`. |
