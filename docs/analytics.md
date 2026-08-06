@@ -50,7 +50,9 @@ profiles.
 
 ### `babamul_api_request`
 
-One per request to any `/babamul/*` endpoint.
+One per request to any `/babamul/*` endpoint, including requests rejected
+before they reach a handler — an expired personal access token produces a 401
+from the auth middleware, and that is exactly the event you want to see.
 
 | Property | Notes |
 | --- | --- |
@@ -77,8 +79,8 @@ measure of active streaming.
 | --- | --- |
 | `messages_consumed` | Delta since the previous cycle, summed across the user's groups and topics. Sum this in PostHog to get per-day or per-week consumption. |
 | `lag` | Messages retained but not yet consumed, at sample time. |
-| `topics`, `n_topics` | Which parts of the stream they read. |
-| `credential_names`, `n_credentials` | The user's own names for their Kafka credentials. |
+| `topics`, `n_topics` | Which parts of the stream they read. Topic names are a fixed server-controlled vocabulary, so they're safe to send. |
+| `n_credentials` | How many of the user's Kafka credentials were active. The credential *names* are free text the user typed — they could contain a real name, email or hostname — so they are deliberately **not** sent. |
 | `interval_seconds` | Sampling interval, so deltas stay interpretable if it's ever changed. |
 
 Two person properties are also set: `babamul_last_streamed_at` and
@@ -102,7 +104,7 @@ Metrics, all emitted by the API service:
 | `babamul_kafka_active_consumer_groups` | gauge | — |
 | `api_request_total` | counter | `api`, `method`, `status_code`, `client` |
 | `api_analytics_event_sent_total` | counter | — |
-| `api_analytics_event_dropped_total` | counter | `reason` |
+| `api_analytics_event_dropped_total` | counter | `reason` (`queue_full`, `queue_closed`, `http_error`, `request_failed`) |
 
 ## How Kafka consumption is attributed to users
 

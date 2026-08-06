@@ -32,7 +32,7 @@
 //! slightly but can never double-count.
 
 use crate::api::analytics::{AnalyticsClient, AnalyticsEvent};
-use crate::api::routes::babamul::BabamulUser;
+
 use crate::conf::AppConfig;
 use crate::utils::o11y::metrics::API_METER;
 
@@ -96,11 +96,14 @@ static ACTIVE_CONSUMERS: LazyLock<Gauge<u64>> = LazyLock::new(|| {
 });
 
 /// A Kafka credential resolved back to the user that owns it.
+///
+/// Deliberately does not carry the user-chosen credential *name*: that is free
+/// text which could contain a real name, email or hostname, and nothing here
+/// should be able to carry it into PostHog.
 #[derive(Debug, Clone)]
 struct CredentialOwner {
     user_id: String,
     credential_id: String,
-    credential_name: String,
 }
 
 /// One group's position on one topic at a point in time.
@@ -209,7 +212,7 @@ async fn run_cycle(
                 entry.messages_consumed += delta;
                 entry.lag += position.lag;
                 entry.record_topic(topic);
-                entry.record_credential(&owner.credential_name);
+                entry.record_credential(&owner.credential_id);
             }
         }
     }
@@ -225,10 +228,13 @@ async fn run_cycle(
 
     if analytics.is_enabled() {
         for (user_id, consumption) in user_deltas {
+            // Topic names are a fixed, server-controlled vocabulary
+            // (`babamul.{survey}.{match}.{class}`), so they are safe to send.
+            // Credential *names* are free text the user typed and could easily
+            // contain a real name, email or hostname, so only the count and the
+            // opaque generated ids leave the service.
             let mut topics: Vec<String> = consumption.topics.into_iter().collect();
             topics.sort();
-            let mut credentials: Vec<String> = consumption.credentials.into_iter().collect();
-            credentials.sort();
 
             analytics.capture(
                 AnalyticsEvent::new("babamul_stream_consumed", &user_id)
@@ -236,8 +242,7 @@ async fn run_cycle(
                     .with("lag", consumption.lag)
                     .with("n_topics", topics.len())
                     .with("topics", &topics)
-                    .with("n_credentials", credentials.len())
-                    .with("credential_names", &credentials)
+                    .with("n_credentials", consumption.credentials.len())
                     .with("interval_seconds", interval.as_secs())
                     // Surface the latest activity on the person record so
                     // "who is actively streaming" is answerable without a query
@@ -262,6 +267,8 @@ struct UserConsumption {
     messages_consumed: u64,
     lag: u64,
     topics: std::collections::HashSet<String>,
+    /// Generated credential ids, kept only to count how many of a user's
+    /// credentials were active. Never sent as values.
     credentials: std::collections::HashSet<String>,
 }
 
@@ -270,18 +277,42 @@ impl UserConsumption {
         self.topics.insert(topic.to_string());
     }
 
-    fn record_credential(&mut self, name: &str) {
-        self.credentials.insert(name.to_string());
+    fn record_credential(&mut self, credential_id: &str) {
+        self.credentials.insert(credential_id.to_string());
     }
+}
+
+/// The only part of a user document this module needs.
+///
+/// Projected rather than deserializing the full [`BabamulUser`]: this query
+/// runs every sampling cycle, and there is no reason to pull password hashes,
+/// API tokens and reset tokens over the wire on a timer.
+#[derive(Debug, serde::Deserialize)]
+struct CredentialOwnerRow {
+    #[serde(rename = "_id")]
+    id: String,
+    #[serde(default)]
+    kafka_credentials: Vec<CredentialRow>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct CredentialRow {
+    id: String,
+    kafka_username: String,
 }
 
 /// Build a map of Kafka SCRAM username → owning user, for every credential.
 async fn load_credential_owners(
     db: &Database,
 ) -> Result<HashMap<String, CredentialOwner>, anyhow::Error> {
-    let users: mongodb::Collection<BabamulUser> = db.collection("babamul_users");
+    let users: mongodb::Collection<CredentialOwnerRow> = db.collection("babamul_users");
     let mut cursor = users
         .find(doc! { "kafka_credentials": { "$exists": true, "$ne": [] } })
+        .projection(doc! {
+            "_id": 1,
+            "kafka_credentials.id": 1,
+            "kafka_credentials.kafka_username": 1,
+        })
         .await?;
 
     let mut owners = HashMap::new();
@@ -292,7 +323,6 @@ async fn load_credential_owners(
                 CredentialOwner {
                     user_id: user.id.clone(),
                     credential_id: credential.id.clone(),
-                    credential_name: credential.name.clone(),
                 },
             );
         }
@@ -430,7 +460,6 @@ mod tests {
             CredentialOwner {
                 user_id: "user-1".to_string(),
                 credential_id: "abc-123".to_string(),
-                credential_name: "laptop".to_string(),
             },
         );
         owners

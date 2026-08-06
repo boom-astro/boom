@@ -145,7 +145,17 @@ impl AnalyticsClient {
             return Self::disabled();
         }
 
-        let (tx, rx) = mpsc::channel(config.queue_capacity);
+        // `mpsc::channel` panics on a zero capacity, so a config typo would take
+        // the whole API down at startup. Clamp instead.
+        let capacity = config.queue_capacity.max(1);
+        if capacity != config.queue_capacity {
+            tracing::warn!(
+                configured = config.queue_capacity,
+                capacity,
+                "posthog.queue_capacity must be at least 1; overriding"
+            );
+        }
+        let (tx, rx) = mpsc::channel(capacity);
         let client = AnalyticsClient {
             inner: Some(Arc::new(Sender {
                 tx,
@@ -170,19 +180,31 @@ impl AnalyticsClient {
             return;
         };
 
-        if inner.tx.try_send(event).is_err() {
-            // Full (or closed) queue: drop rather than apply backpressure to an
-            // in-flight API request. Log the first drop and then every 1000th,
-            // so a sustained outage doesn't flood the logs.
-            let dropped = inner.dropped.fetch_add(1, Ordering::Relaxed) + 1;
-            EVENTS_DROPPED.add(1, &[KeyValue::new("reason", "queue_full")]);
-            if dropped == 1 || dropped % 1000 == 0 {
-                tracing::warn!(
-                    dropped,
-                    "PostHog analytics queue is full; dropping events. \
-                     Increase posthog.queue_capacity or check PostHog availability."
-                );
-            }
+        // Drop rather than apply backpressure to an in-flight API request. The
+        // two failure modes need different remediation, so label them
+        // separately: a full queue is a capacity/PostHog-availability problem,
+        // a closed one means the flush task died and analytics are gone until
+        // restart.
+        let (reason, message) = match inner.tx.try_send(event) {
+            Ok(()) => return,
+            Err(mpsc::error::TrySendError::Full(_)) => (
+                "queue_full",
+                "PostHog analytics queue is full; dropping events. \
+                 Increase posthog.queue_capacity or check PostHog availability.",
+            ),
+            Err(mpsc::error::TrySendError::Closed(_)) => (
+                "queue_closed",
+                "PostHog analytics queue is closed; the flush task is no longer \
+                 running and events will be dropped until the service restarts.",
+            ),
+        };
+
+        // Log the first drop and then every 1000th, so a sustained outage
+        // doesn't flood the logs.
+        let dropped = inner.dropped.fetch_add(1, Ordering::Relaxed) + 1;
+        EVENTS_DROPPED.add(1, &[KeyValue::new("reason", reason)]);
+        if dropped == 1 || dropped % 1000 == 0 {
+            tracing::warn!(dropped, "{}", message);
         }
     }
 }
@@ -290,6 +312,20 @@ mod tests {
     fn from_config_without_key_is_disabled() {
         let config = PostHogConfig::default();
         assert!(!AnalyticsClient::from_config(&config).is_enabled());
+    }
+
+    /// `mpsc::channel(0)` panics, so a zero in config must not reach it —
+    /// otherwise a config typo takes the whole API down at startup.
+    #[tokio::test]
+    async fn zero_queue_capacity_does_not_panic() {
+        let config = PostHogConfig {
+            project_api_key: "phc_test".to_string(),
+            queue_capacity: 0,
+            ..PostHogConfig::default()
+        };
+        let client = AnalyticsClient::from_config(&config);
+        assert!(client.is_enabled());
+        client.capture(AnalyticsEvent::new("test", "user-1"));
     }
 
     #[test]

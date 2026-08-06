@@ -39,13 +39,21 @@ pub async fn request_metrics_middleware(
         .app_data::<web::Data<AnalyticsClient>>()
         .map(|client| client.as_ref().clone());
     let client_info = is_babamul.then(|| ClientInfo::from_request(&req));
+    // Cheap `Rc` clone that shares the request's extensions map, so the user
+    // injected by the auth middleware is readable even when the pipeline
+    // returns `Err` and there is no `ServiceResponse` to read it from.
+    let request = req.request().clone();
     let started_at = Instant::now();
 
     let response = next.call(req).await;
-    let status_code = response
-        .as_ref()
-        .map(|service_response| service_response.status().as_u16())
-        .unwrap_or(500);
+    // On the error path actix turns the `Error` into a response later, so read
+    // the status the client will actually see rather than assuming 500 — the
+    // auth middleware rejects bad tokens with `Err(401)`, which is a status
+    // worth getting right.
+    let status_code = match response.as_ref() {
+        Ok(service_response) => service_response.status().as_u16(),
+        Err(error) => error.as_response_error().status_code().as_u16(),
+    };
 
     // `client` is bounded to a handful of buckets by `parse_user_agent`, so it
     // is safe to carry as a metric attribute and lets Grafana separate Python
@@ -66,12 +74,13 @@ pub async fn request_metrics_middleware(
 
     // Report Babamul API usage to PostHog. Only Babamul traffic is captured —
     // the main BOOM API is internal, so it has no product-analytics story.
-    if let (Some(analytics), Some(client_info), Ok(service_response)) =
-        (analytics, client_info, response.as_ref())
-    {
+    //
+    // Deliberately emitted for both `Ok` and `Err` outcomes: the auth
+    // middleware rejects expired or invalid tokens by returning `Err`, and
+    // those 401s are exactly the signal that tells us a user's personal access
+    // token has lapsed. Capturing only `Ok` would hide them.
+    if let (Some(analytics), Some(client_info)) = (analytics, client_info) {
         if analytics.is_enabled() {
-            let request = service_response.request();
-
             // Prefer the registered route pattern over the raw path so that
             // per-object endpoints don't create one PostHog property value per
             // object id.
@@ -86,34 +95,54 @@ pub async fn request_metrics_middleware(
                 .get::<BabamulUser>()
                 .map(|user| user.id.clone());
 
-            let event = AnalyticsEvent::new(
-                "babamul_api_request",
-                user_id
-                    .clone()
-                    .unwrap_or_else(|| ANONYMOUS_DISTINCT_ID.to_string()),
-            )
-            .with("endpoint", &endpoint)
-            .with("method", &method)
-            .with("status_code", status_code)
-            .with("success", (200..400).contains(&status_code))
-            .with("duration_ms", started_at.elapsed().as_millis() as u64)
-            .with("authenticated", user_id.is_some())
-            .with("auth_method", client_info.auth_method)
-            .with("client", client_info.client.as_deref().unwrap_or("unknown"))
-            .with_opt("client_version", client_info.client_version.as_deref())
-            .with_opt("python_version", client_info.python_version.as_deref())
-            .with_opt("client_os", client_info.os.as_deref());
-
-            let event = if user_id.is_some() {
-                event
-            } else {
-                event.anonymous()
-            };
-            analytics.capture(event);
+            analytics.capture(build_request_event(
+                &endpoint,
+                &method,
+                status_code,
+                started_at.elapsed().as_millis() as u64,
+                user_id.as_deref(),
+                &client_info,
+            ));
         }
     }
 
     response
+}
+
+/// Assemble the `babamul_api_request` event.
+///
+/// Split out from the middleware so the property shape can be tested without
+/// standing up an actix pipeline.
+fn build_request_event(
+    endpoint: &str,
+    method: &str,
+    status_code: u16,
+    duration_ms: u64,
+    user_id: Option<&str>,
+    client_info: &ClientInfo,
+) -> AnalyticsEvent {
+    let event = AnalyticsEvent::new(
+        "babamul_api_request",
+        user_id.unwrap_or(ANONYMOUS_DISTINCT_ID),
+    )
+    .with("endpoint", endpoint)
+    .with("method", method)
+    .with("status_code", status_code)
+    .with("success", (200..400).contains(&status_code))
+    .with("duration_ms", duration_ms)
+    .with("authenticated", user_id.is_some())
+    .with("auth_method", client_info.auth_method)
+    .with("client", client_info.client.as_deref().unwrap_or("unknown"))
+    .with_opt("client_version", client_info.client_version.as_deref())
+    .with_opt("python_version", client_info.python_version.as_deref())
+    .with_opt("client_os", client_info.os.as_deref());
+
+    // Unauthenticated traffic must not create person profiles in PostHog.
+    if user_id.is_some() {
+        event
+    } else {
+        event.anonymous()
+    }
 }
 
 /// Non-identifying facts about the caller, taken from request headers.
@@ -275,5 +304,57 @@ mod tests {
         let info = parse_user_agent("");
         assert!(info.client.is_none());
         assert!(info.client_version.is_none());
+    }
+
+    /// A rejected token never reaches a handler — the auth middleware returns
+    /// `Err(401)`. That event must still be captured, and captured as an
+    /// unauthenticated one, or expired personal access tokens are invisible.
+    #[test]
+    fn rejected_requests_are_captured_as_anonymous() {
+        let mut client_info = parse_user_agent("babamul-python/0.2.0 (Python/3.12.1; Linux)");
+        client_info.auth_method = "personal_access_token";
+
+        let event = build_request_event("/babamul/profile", "GET", 401, 3, None, &client_info);
+
+        assert_eq!(event.distinct_id, ANONYMOUS_DISTINCT_ID);
+        assert_eq!(event.properties.get("status_code").unwrap(), 401);
+        assert_eq!(event.properties.get("success").unwrap(), false);
+        assert_eq!(event.properties.get("authenticated").unwrap(), false);
+        // Still attributable to the package, which is what makes the 401
+        // actionable.
+        assert_eq!(event.properties.get("client").unwrap(), "babamul-python");
+        assert_eq!(
+            event.properties.get("auth_method").unwrap(),
+            "personal_access_token"
+        );
+        // Must not create a person profile for the anonymous bucket.
+        assert_eq!(
+            event.properties.get("$process_person_profile").unwrap(),
+            false
+        );
+    }
+
+    #[test]
+    fn authenticated_requests_are_keyed_on_the_user_id() {
+        let client_info = parse_user_agent("babamul-python/0.2.0 (Python/3.12.1; Linux)");
+        let event = build_request_event(
+            "/babamul/surveys/{survey}/objects/{object_id}",
+            "GET",
+            200,
+            12,
+            Some("user-42"),
+            &client_info,
+        );
+
+        assert_eq!(event.distinct_id, "user-42");
+        assert_eq!(event.properties.get("authenticated").unwrap(), true);
+        assert_eq!(event.properties.get("success").unwrap(), true);
+        // The route pattern, not a path with a real object id baked in.
+        assert_eq!(
+            event.properties.get("endpoint").unwrap(),
+            "/babamul/surveys/{survey}/objects/{object_id}"
+        );
+        // Identified events must keep person profiles enabled.
+        assert!(!event.properties.contains_key("$process_person_profile"));
     }
 }
