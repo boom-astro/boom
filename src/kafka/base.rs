@@ -790,11 +790,23 @@ pub async fn consumer(
     // Poll once to trigger rebalance and get assignment
     loop {
         match consumer.poll(KAFKA_TIMEOUT_SECS) {
-            Some(Ok(_msg)) => {
+            Some(Ok(msg)) => {
                 debug!("Got initial assignment, positioning partitions...");
                 if exit_on_eof {
                     seek_to_timestamp(&consumer, timestamp * 1000)?;
                 } else {
+                    // This message is only an assignment signal and is dropped.
+                    // Rewind so it is redelivered: positioning does not seek a
+                    // committed partition, and one that it does seek overrides
+                    // this anyway.
+                    if let Err(error) = consumer.seek(
+                        msg.topic(),
+                        msg.partition(),
+                        rdkafka::Offset::Offset(msg.offset()),
+                        POSITION_TIMEOUT,
+                    ) {
+                        log_error!(WARN, error, "failed to rewind the first message");
+                    }
                     pending_positions =
                         position_or_warn(&consumer, timestamp * 1000, &mut positioned);
                 }

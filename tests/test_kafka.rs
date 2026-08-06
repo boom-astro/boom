@@ -343,6 +343,203 @@ async fn wait_for_payloads(
     }
 }
 
+/// Block until the group's committed offsets across every partition of `topic`
+/// add up to `total`. Summing avoids assuming which partition the keys landed
+/// on. Panics on timeout.
+async fn wait_for_committed(
+    server: &str,
+    group_id: &str,
+    topic: &str,
+    total: i64,
+    timeout: std::time::Duration,
+) {
+    use rdkafka::consumer::{BaseConsumer, Consumer};
+
+    let probe: BaseConsumer = rdkafka::config::ClientConfig::new()
+        .set("bootstrap.servers", server)
+        .set("group.id", group_id)
+        .create()
+        .unwrap();
+    let metadata = probe
+        .fetch_metadata(Some(topic), std::time::Duration::from_secs(10))
+        .unwrap();
+    let partitions: Vec<i32> = metadata
+        .topics()
+        .iter()
+        .find(|t| t.name() == topic)
+        .unwrap()
+        .partitions()
+        .iter()
+        .map(|p| p.id())
+        .collect();
+
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let mut tpl = rdkafka::TopicPartitionList::new();
+        for id in &partitions {
+            tpl.add_partition_offset(topic, *id, rdkafka::Offset::Invalid)
+                .unwrap();
+        }
+        let committed = probe
+            .committed_offsets(tpl, std::time::Duration::from_secs(10))
+            .unwrap();
+        let sum: i64 = committed
+            .elements()
+            .iter()
+            .filter_map(|e| match e.offset() {
+                rdkafka::Offset::Offset(o) => Some(o),
+                _ => None,
+            })
+            .sum();
+        if sum >= total {
+            return;
+        }
+        if std::time::Instant::now() > deadline {
+            panic!("timed out waiting for {total} committed offsets on {topic}, saw {sum}");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+}
+
+/// Run the long-running consumer on its own OS thread + runtime, as prod does.
+/// Send on the returned channel to stop it.
+fn spawn_consumer(
+    subscription: Vec<String>,
+    output_queue: String,
+    timestamp: i64,
+    config: boom::conf::AppConfig,
+    kafka_cfg: boom::conf::KafkaConsumerConfig,
+) -> (std::sync::mpsc::Sender<()>, std::thread::JoinHandle<()>) {
+    let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
+    let handle = std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.spawn(async move {
+            let _ = boom::kafka::consumer(
+                "0",
+                subscription,
+                &output_queue,
+                0,
+                timestamp,
+                &config,
+                &kafka_cfg,
+                false,
+                "ZTF",
+            )
+            .await;
+        });
+        let _ = stop_rx.recv();
+        rt.shutdown_timeout(std::time::Duration::from_secs(1));
+    });
+    (stop_tx, handle)
+}
+
+// Regression: the initial assignment poll discards the message it polls, and
+// positioning does not seek a partition that already has a committed offset.
+// Without an explicit rewind that message is skipped for good on every restart.
+#[tokio::test]
+async fn test_consumer_restart_loses_no_message() {
+    use boom::conf::{AppConfig, KafkaConsumerConfig};
+    use boom::kafka::{delete_topic, initialize_topic};
+    use rdkafka::config::ClientConfig;
+    use rdkafka::producer::{FutureProducer, FutureRecord};
+    use std::time::Duration;
+
+    let server = "localhost:9092";
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let prefix = format!("restarttest{now_ms}");
+    let topic = format!("{prefix}_20260628");
+    let output_queue = format!("{prefix}_queue");
+    let group_id = format!("{prefix}_group");
+
+    let app_config = AppConfig::from_path(TEST_CONFIG_FILE).unwrap();
+    let mut con = app_config.build_redis().await.unwrap();
+    let _: () = con.del(&output_queue).await.unwrap_or(());
+
+    let producer: FutureProducer = ClientConfig::new()
+        .set("bootstrap.servers", server)
+        .create()
+        .unwrap();
+    initialize_topic(server, &topic, 1).await.unwrap();
+
+    let kafka_cfg = KafkaConsumerConfig {
+        server: server.to_string(),
+        group_id: group_id.clone(),
+        schema_registry: None,
+        schema_github_fallback_url: None,
+        username: None,
+        password: None,
+    };
+    let cold_start_ts = now_ms / 1000 - 3600;
+
+    // First run: drain a batch, then wait for the offsets to actually commit —
+    // otherwise the second run is a cold start and the regression can't show.
+    let first: Vec<String> = (0..5).map(|i| format!("first-{i}")).collect();
+    for p in &first {
+        producer
+            .send(
+                FutureRecord::to(topic.as_str())
+                    .payload(p.as_str())
+                    .key("k")
+                    .timestamp(now_ms),
+                Duration::from_secs(10),
+            )
+            .await
+            .unwrap();
+    }
+    let (stop_tx, handle) = spawn_consumer(
+        vec![topic.clone()],
+        output_queue.clone(),
+        cold_start_ts,
+        app_config.clone(),
+        kafka_cfg.clone(),
+    );
+    wait_for_payloads(&mut con, &output_queue, &first, Duration::from_secs(40)).await;
+    wait_for_committed(
+        server,
+        &group_id,
+        &topic,
+        first.len() as i64,
+        Duration::from_secs(30),
+    )
+    .await;
+    let _ = stop_tx.send(());
+    let _ = handle.join();
+
+    // Second run on the same group: the message polled to detect the assignment
+    // sits at the committed offset, and must still reach the queue.
+    let _: () = con.del(&output_queue).await.unwrap_or(());
+    let second: Vec<String> = (0..5).map(|i| format!("second-{i}")).collect();
+    for p in &second {
+        producer
+            .send(
+                FutureRecord::to(topic.as_str())
+                    .payload(p.as_str())
+                    .key("k")
+                    .timestamp(now_ms),
+                Duration::from_secs(10),
+            )
+            .await
+            .unwrap();
+    }
+    let (stop_tx, handle) = spawn_consumer(
+        vec![topic.clone()],
+        output_queue.clone(),
+        cold_start_ts,
+        app_config.clone(),
+        kafka_cfg,
+    );
+    wait_for_payloads(&mut con, &output_queue, &second, Duration::from_secs(40)).await;
+
+    let _ = stop_tx.send(());
+    let _ = handle.join();
+    let _: () = con.del(&output_queue).await.unwrap_or(());
+    let _ = delete_topic(server, &topic).await;
+}
+
 // End-to-end test of the self-rollover consumer: the long-running consumer
 // subscribes to a topic *pattern* and must (a) skip an old retained topic's
 // messages on cold start, (b) consume the current day's messages, and (c)
