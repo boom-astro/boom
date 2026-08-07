@@ -194,6 +194,70 @@ groups:
           summary: OTel Collector exporter is failing to send metric points
           description: 'Check otel-collector logs and the downstream Prometheus OTLP receiver for errors.'
 
+      - uid: api-down
+        title: API is down
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              # docker_container_up is 0 when the container is not running OR is
+              # failing its Docker healthcheck. The healthcheck arm is the one
+              # that matters: in #562 every request panicked its actix worker, so
+              # `/` failed forever while the process itself stayed alive and the
+              # container kept running. Nothing else in the stack saw that --
+              # cAdvisor reports resource usage, not health, and the container
+              # never restarted, so container-restart-flapping stayed silent too.
+              #
+              # min() so that any unhealthy replica trips this, not just an
+              # average across them.
+              expr: |
+                min by (compose_service) (docker_container_up{compose_project="boom",compose_service="api"})
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 0
+              to: 0
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    params: [1]
+                    type: lt
+                  operator:
+                    type: and
+                  query:
+                    params: [C]
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+        # The healthcheck is 10s x 5 retries, so the container is already ~50s
+        # into the fault before it reports unhealthy; 3m on top of that rides
+        # out a restart without waiting long to page on a real outage.
+        for: 3m
+        # Unlike every other rule here, NoData means Alerting: the exporter
+        # lists stopped containers too (all=1), so the series only disappears if
+        # the container was removed outright -- which is itself an outage. The
+        # tradeoff is that a broken docker-metadata-exporter or Prometheus also
+        # pages, which is the right way for a down-detector to fail.
+        noDataState: Alerting
+        execErrState: Error
+        labels:
+          severity: critical
+        annotations:
+          summary: 'The boom API container is not running or is failing its healthcheck'
+          description: 'Check `docker ps` for the api container health, then its logs for panics (a panicking actix worker keeps the process alive but fails every request, including `/`).'
+
   - orgId: 1
     name: pipeline
     folder: boom
