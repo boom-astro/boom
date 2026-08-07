@@ -157,7 +157,10 @@ posthog:
 
 Use the **same PostHog project** as the web app's `VITE_PUBLIC_POSTHOG_KEY`,
 otherwise web and API activity land on different persons and the identity
-merging described above doesn't happen.
+merging described above doesn't happen. The production deploy workflow enforces
+this by feeding `VITE_PUBLIC_POSTHOG_KEY` and `VITE_PUBLIC_POSTHOG_HOST` into
+both, so there is only one key to set; set `BOOM_POSTHOG__*` explicitly only
+when running compose by hand and you want to diverge.
 
 Capture never blocks a request. Events go onto a bounded queue drained by a
 background task; if PostHog is slow or down, events are dropped and counted
