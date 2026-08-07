@@ -39,10 +39,15 @@ pub async fn request_metrics_middleware(
         .app_data::<web::Data<AnalyticsClient>>()
         .map(|client| client.as_ref().clone());
     let client_info = is_babamul.then(|| ClientInfo::from_request(&req));
-    // Cheap `Rc` clone that shares the request's extensions map, so the user
-    // injected by the auth middleware is readable even when the pipeline
-    // returns `Err` and there is no `ServiceResponse` to read it from.
-    let request = req.request().clone();
+    // Raw-path fallback for the (rare) `Err` case below, where actix hands
+    // back an `Error` with no request attached, so there's no route pattern to
+    // read. Must be a plain `String`, not a cloned `HttpRequest`/`ServiceRequest`
+    // handle: actix's `Scope` router calls `HttpRequest::match_info_mut()`
+    // while routing `req` inside `next.call()`, which does
+    // `Rc::get_mut(&mut self.inner).unwrap()` and panics if any other clone of
+    // that `HttpRequest` is alive at the time — as a prior version of this
+    // middleware did by holding `req.request().clone()` across the `.await`.
+    let path = req.path().to_string();
     let started_at = Instant::now();
 
     let response = next.call(req).await;
@@ -81,19 +86,29 @@ pub async fn request_metrics_middleware(
     // token has lapsed. Capturing only `Ok` would hide them.
     if let (Some(analytics), Some(client_info)) = (analytics, client_info) {
         if analytics.is_enabled() {
-            // Prefer the registered route pattern over the raw path so that
-            // per-object endpoints don't create one PostHog property value per
-            // object id.
-            let endpoint = request
-                .match_pattern()
-                .unwrap_or_else(|| request.path().to_string());
-
-            // The auth middleware injects the user on success, so its presence
-            // is exactly "this request was authenticated".
-            let user_id = request
-                .extensions()
-                .get::<BabamulUser>()
-                .map(|user| user.id.clone());
+            // Only the `Ok` branch has a `ServiceResponse` to read a request
+            // back from — by this point dispatch has fully completed, so
+            // borrowing its request here (not cloning it earlier) never races
+            // the router's own mutable access. Prefer the registered route
+            // pattern over the raw path so per-object endpoints don't create
+            // one PostHog property value per object id. The auth middleware
+            // injects the user on success, so its presence in extensions is
+            // exactly "this request was authenticated".
+            let (endpoint, user_id) = match response.as_ref() {
+                Ok(service_response) => {
+                    let request = service_response.request();
+                    (
+                        request
+                            .match_pattern()
+                            .unwrap_or_else(|| request.path().to_string()),
+                        request
+                            .extensions()
+                            .get::<BabamulUser>()
+                            .map(|user| user.id.clone()),
+                    )
+                }
+                Err(_) => (path.clone(), None),
+            };
 
             analytics.capture(build_request_event(
                 &endpoint,
@@ -258,6 +273,34 @@ fn parse_user_agent(user_agent: &str) -> ClientInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression test for a production incident: every request panicked
+    /// because the middleware held `req.request().clone()` (an extra `Rc`
+    /// reference) alive across `next.call(req).await`. actix's `Scope` router
+    /// calls `HttpRequest::match_info_mut()` — `Rc::get_mut(...).unwrap()` —
+    /// while routing inside that `.await`, which panics whenever another
+    /// clone of the same `HttpRequest` is alive. Since every route in the API
+    /// lives inside a `web::scope(...)`, that made every request — including
+    /// the `/` health check — panic the worker handling it, so the container
+    /// never passed its healthcheck.
+    #[actix_web::test]
+    async fn middleware_survives_nested_scope_routing() {
+        use actix_web::{middleware::from_fn, test, web, App, HttpResponse};
+
+        let app = test::init_service(
+            App::new()
+                .wrap(from_fn(request_metrics_middleware))
+                .service(web::scope("/nested").route(
+                    "/ping",
+                    web::get().to(|| async { HttpResponse::Ok().finish() }),
+                )),
+        )
+        .await;
+
+        let req = test::TestRequest::get().uri("/nested/ping").to_request();
+        let resp = test::call_service(&app, req).await;
+        assert!(resp.status().is_success());
+    }
 
     #[test]
     fn parses_the_babamul_package_user_agent() {
