@@ -164,6 +164,13 @@ Alert rules, contact points, and notification policies are provisioned from
 | `otel-collector-dropped-metrics` | OTel exporter is failing to send metric points |
 | `valkey-queue-backed-up` | Any worker queue >50k entries for 30m *and* flat or growing for 15m (slow drain is fine) |
 
+Grafana reads alerting provisioning **only at startup** (unlike dashboards,
+which its file provider re-reads every 30s). Since `config/grafana/provisioning`
+is a bind mount, `docker compose up -d` does not notice the change and leaves
+the container running, so edits here require an explicit
+`docker compose up -d --force-recreate --no-deps grafana`. The production deploy
+workflow does this on every run.
+
 All alerts route to a single **Slack** contact point. Set
 `SLACK_WEBHOOK_URL` in your environment / `.env` to a Slack incoming-webhook
 URL; if unset, alerts still fire and are visible in Grafana but no Slack
