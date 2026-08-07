@@ -162,7 +162,7 @@ Alert rules, contact points, and notification policies are provisioned from
 | `container-restart-flapping` | Container restarted >3 times in 1h |
 | `cpu-throttling` | >25% of CFS periods throttled for 15m |
 | `otel-collector-dropped-metrics` | OTel exporter is failing to send metric points |
-| `valkey-queue-backed-up` | Any worker queue >50k entries for 15m |
+| `valkey-queue-backed-up` | Any worker queue >50k entries for 30m *and* flat or growing for 15m (slow drain is fine) |
 
 All alerts route to a single **Slack** contact point. Set
 `SLACK_WEBHOOK_URL` in your environment / `.env` to a Slack incoming-webhook
