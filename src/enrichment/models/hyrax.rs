@@ -82,6 +82,27 @@ pub fn find_model_spec(id: &str) -> Option<&'static HyraxModelSpec> {
     HYRAX_MODELS.iter().find(|spec| spec.id == id)
 }
 
+/// Everything the API knows about an object, handed to every Hyrax model run.
+///
+/// Only [`triplet`](Self::triplet) is bound to an ONNX input today, because the
+/// current specs declare a single image tensor. The photometry and metadata travel
+/// with every request anyway so that a real Hyrax export wanting light-curve or
+/// candidate features can be wired up by naming its tensors in
+/// [`HyraxModelSpec`] — no change to the API or to the call site.
+///
+/// Both extra blocks are `serde_json::Value` rather than typed structs because ZTF
+/// and LSST objects carry differently shaped candidates and light curves; a model
+/// that wants a specific field reads it by name.
+#[derive(Debug)]
+pub struct HyraxInput {
+    /// (N, 63, 63, 3) cutout triplet.
+    pub triplet: Array<f32, Dim<[usize; 4]>>,
+    /// Light curve: previous candidates, non-detections and forced photometry.
+    pub photometry: serde_json::Value,
+    /// Newest alert's candidate and properties, plus classifications and matches.
+    pub metadata: serde_json::Value,
+}
+
 pub struct HyraxModel {
     model: Session,
     spec: &'static HyraxModelSpec,
@@ -98,6 +119,17 @@ impl HyraxModel {
             model: load_model(spec.path)?,
             spec,
         })
+    }
+
+    /// Run the model over a full object payload.
+    ///
+    /// Delegates to [`Self::predict_triplet`] for now: the placeholder specs bind
+    /// only an image tensor, so `input.photometry` and `input.metadata` are carried
+    /// but unread. A spec that grows tensor names for them is the only change
+    /// needed to start feeding them to the session.
+    #[instrument(skip_all, err)]
+    pub fn predict_input(&mut self, input: &HyraxInput) -> Result<Vec<f32>, ModelError> {
+        self.predict_triplet(&input.triplet)
     }
 
     /// Run the model over a batch of cutout triplets.
@@ -194,17 +226,13 @@ impl HyraxModelRegistry {
         Self::default()
     }
 
-    /// Score a batch of cutout triplets with the model registered under `id`,
-    /// loading the ONNX artifact on first use.
+    /// Score an object payload with the model registered under `id`, loading the
+    /// ONNX artifact on first use.
     ///
     /// This blocks on both the ONNX session mutex and inference itself, so callers
     /// in async contexts should run it on a blocking thread pool.
     #[instrument(skip_all, fields(model = id), err)]
-    pub fn predict(
-        &self,
-        id: &str,
-        image_features: &Array<f32, Dim<[usize; 4]>>,
-    ) -> Result<Vec<f32>, HyraxPredictError> {
+    pub fn predict(&self, id: &str, input: &HyraxInput) -> Result<Vec<f32>, HyraxPredictError> {
         let spec =
             find_model_spec(id).ok_or_else(|| HyraxPredictError::UnknownModel(id.to_string()))?;
 
@@ -225,6 +253,6 @@ impl HyraxModelRegistry {
         Ok(loaded
             .get_mut(spec.id)
             .expect("model just inserted")
-            .predict_triplet(image_features)?)
+            .predict_input(input)?)
     }
 }

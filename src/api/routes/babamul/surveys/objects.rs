@@ -7,7 +7,8 @@ use crate::api::models::response;
 use crate::api::routes::babamul::surveys::alerts::{EnrichedLsstAlert, EnrichedZtfAlert};
 use crate::api::routes::babamul::BabamulUser;
 use crate::enrichment::models::{
-    find_model_spec, HyraxModel, HyraxModelRegistry, HyraxPredictError, Model, HYRAX_MODELS,
+    find_model_spec, HyraxInput, HyraxModel, HyraxModelRegistry, HyraxPredictError, Model,
+    HYRAX_MODELS,
 };
 use crate::enrichment::{LsstAlertProperties, ZtfAlertClassifications, ZtfAlertProperties};
 use crate::utils::cutouts::{CutoutStorage, CutoutStorageError};
@@ -1097,6 +1098,163 @@ pub struct ClassifyObjectQuery {
     model: String,
 }
 
+/// The scored alert, as far as a Hyrax model is concerned: the candidate block and
+/// whatever enrichment the ingest workers already attached to it.
+///
+/// Deliberately its own type rather than a reuse of the object endpoint's response:
+/// the classify path wants the alert whose image is being scored, not the newest
+/// one, and it has no use for cross-survey matches.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct ScoredZtfAlert {
+    candidate: ZtfCandidate,
+    properties: Option<ZtfAlertProperties>,
+    classifications: Option<ZtfAlertClassifications>,
+}
+
+/// LSST counterpart of [`ScoredZtfAlert`]. LSST alerts carry no `classifications`.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct ScoredLsstAlert {
+    candidate: LsstCandidate,
+    properties: Option<LsstAlertProperties>,
+}
+
+/// Gather the photometry and metadata that ride along with every Hyrax run.
+///
+/// Two indexed lookups: the aux document for the light curve and cross-matches, and
+/// the scored alert itself for its candidate block. `candid` is the alert whose
+/// cutouts were handed to the model, so the metadata describes the same image the
+/// model is looking at.
+///
+/// A missing aux entry is not fatal — the models take the cutouts either way, and
+/// refusing to score an object just because its light curve has not been backfilled
+/// would be worse than scoring it with empty photometry.
+async fn fetch_hyrax_object_inputs(
+    db: &Database,
+    survey: &Survey,
+    object_id: &str,
+    candid: i64,
+) -> Result<(serde_json::Value, serde_json::Value), HttpResponse> {
+    let alert_filter = doc! { "_id": candid };
+    let aux_filter = doc! { "_id": object_id };
+
+    let (photometry, cross_matches, alert) = match survey {
+        Survey::Ztf => {
+            let aux: Option<ZtfObject> = db
+                .collection("ZTF_alerts_aux")
+                .find_one(aux_filter)
+                .await
+                .map_err(aux_lookup_error(object_id))?;
+            let alert: Option<ScoredZtfAlert> = db
+                .collection("ZTF_alerts")
+                .find_one(alert_filter)
+                .await
+                .map_err(alert_lookup_error(candid))?;
+
+            let (photometry, cross_matches) = match aux {
+                // Limit photometry to programid 1 (public ZTF alerts), as the object
+                // endpoint does.
+                Some(aux) => (
+                    serde_json::json!({
+                        "prv_candidates": aux.prv_candidates
+                            .into_iter()
+                            .filter(|c| c.prv_candidate.programid == 1)
+                            .collect::<Vec<_>>(),
+                        "prv_nondetections": aux.prv_nondetections
+                            .into_iter()
+                            .filter(|c| c.prv_candidate.programid == 1)
+                            .collect::<Vec<_>>(),
+                        "fp_hists": aux.fp_hists
+                            .into_iter()
+                            .filter(|c| c.fp_hist.programid == 1)
+                            .collect::<Vec<_>>(),
+                    }),
+                    serde_json::json!(aux.cross_matches),
+                ),
+                None => (
+                    serde_json::json!({
+                        "prv_candidates": [],
+                        "prv_nondetections": [],
+                        "fp_hists": [],
+                    }),
+                    serde_json::Value::Null,
+                ),
+            };
+            (photometry, cross_matches, serde_json::to_value(alert))
+        }
+        Survey::Lsst => {
+            let aux: Option<LsstObject> = db
+                .collection("LSST_alerts_aux")
+                .find_one(aux_filter)
+                .await
+                .map_err(aux_lookup_error(object_id))?;
+            let alert: Option<ScoredLsstAlert> = db
+                .collection("LSST_alerts")
+                .find_one(alert_filter)
+                .await
+                .map_err(alert_lookup_error(candid))?;
+
+            let (photometry, cross_matches) = match aux {
+                Some(aux) => (
+                    serde_json::json!({
+                        "prv_candidates": aux.prv_candidates,
+                        "fp_hists": aux.fp_hists,
+                    }),
+                    serde_json::json!(aux.cross_matches),
+                ),
+                None => (
+                    serde_json::json!({
+                        "prv_candidates": [],
+                        "fp_hists": [],
+                    }),
+                    serde_json::Value::Null,
+                ),
+            };
+            (photometry, cross_matches, serde_json::to_value(alert))
+        }
+        _ => {
+            return Err(response::bad_request(
+                "Invalid survey specified, only ZTF and LSST are supported",
+            ));
+        }
+    };
+
+    let alert = match alert {
+        Ok(alert) => alert,
+        Err(error) => {
+            return Err(response::internal_error(&format!(
+                "error serializing alert {}: {}",
+                candid, error
+            )));
+        }
+    };
+
+    let metadata = serde_json::json!({
+        "objectId": object_id,
+        "candid": candid,
+        "survey": survey.to_string(),
+        "alert": alert,
+        "cross_matches": cross_matches,
+    });
+
+    Ok((photometry, metadata))
+}
+
+/// Error mapper for the aux-document lookup, kept out of the branches above so both
+/// surveys report the failure the same way.
+fn aux_lookup_error(object_id: &str) -> impl Fn(mongodb::error::Error) -> HttpResponse + '_ {
+    move |error| {
+        response::internal_error(&format!(
+            "error getting aux entry for object {}: {}",
+            object_id, error
+        ))
+    }
+}
+
+/// Error mapper for the scored-alert lookup.
+fn alert_lookup_error(candid: i64) -> impl Fn(mongodb::error::Error) -> HttpResponse {
+    move |error| response::internal_error(&format!("error getting alert {}: {}", candid, error))
+}
+
 #[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
 pub struct ClassifyObjectResult {
     /// Id of the model that produced this result.
@@ -1223,11 +1381,24 @@ pub async fn classify_object(
         }
     };
 
+    // Every Hyrax run is handed the object's photometry and metadata alongside the
+    // cutouts, whether or not the model's spec binds them to an ONNX input.
+    let (photometry, metadata) =
+        match fetch_hyrax_object_inputs(&db, &survey, &object_id, candid).await {
+            Ok(inputs) => inputs,
+            Err(response) => return response,
+        };
+    let input = HyraxInput {
+        triplet,
+        photometry,
+        metadata,
+    };
+
     // ONNX inference is CPU-bound and serializes on the model's mutex, so keep it
     // off the actix worker threads.
     let registry = hyrax_models.clone();
     let model_id_for_task = model_id.clone();
-    let scores = match web::block(move || registry.predict(&model_id_for_task, &triplet)).await {
+    let scores = match web::block(move || registry.predict(&model_id_for_task, &input)).await {
         Ok(Ok(scores)) => scores,
         Ok(Err(HyraxPredictError::ArtifactNotFound(path))) => {
             // Possible despite the check above if the artifact is removed mid-flight.
