@@ -98,7 +98,9 @@ pub async fn request_metrics_middleware(
                 Ok(service_response) => {
                     let request = service_response.request();
                     (
-                        request.match_pattern().unwrap_or_else(|| path.clone()),
+                        request
+                            .match_pattern()
+                            .unwrap_or_else(|| request.path().to_string()),
                         request
                             .extensions()
                             .get::<BabamulUser>()
