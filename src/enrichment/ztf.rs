@@ -9,6 +9,7 @@ use crate::enrichment::{
 use crate::utils::cutouts::{AlertCutout, CutoutStorage};
 use crate::utils::db::mongify;
 use crate::utils::enums::Survey;
+use crate::utils::host::HostGalaxyAssociation;
 use crate::utils::lightcurves::{
     analyze_photometry, prepare_photometry, AllBandsProperties, Band, PerBandProperties,
     PhotometryMag, ZTF_ZP,
@@ -278,6 +279,7 @@ pub fn create_ztf_alert_pipeline(include_classifications: bool) -> Vec<Document>
                 "prv_candidates": "$aux.prv_candidates",
                 "prv_nondetections": "$aux.prv_nondetections",
                 "fp_hists": "$aux.fp_hists",
+                "host_galaxy": "$aux.host_galaxy",
                 "survey_matches": {
                     "lsst": {
                         "$cond": {
@@ -348,6 +350,8 @@ pub struct ZtfAlertForEnrichment {
     pub prv_nondetections: Vec<ZtfPhotometry>,
     #[serde(deserialize_with = "deserialize_ztf_forced_lightcurve")]
     pub fp_hists: Vec<ZtfPhotometry>,
+    #[serde(default)]
+    pub host_galaxy: Option<HostGalaxyAssociation>,
     pub survey_matches: Option<ZtfSurveyMatches>,
 }
 
@@ -357,6 +361,8 @@ pub struct ZtfAlertProperties {
     pub rock: bool,
     pub star: bool,
     pub near_brightstar: bool,
+    /// A host galaxy was associated within the configured `max_dlr`.
+    pub hosted: bool,
     pub stationary: bool,
     pub photstats: PerBandProperties,
     pub multisurvey_photstats: Option<PerBandProperties>,
@@ -701,11 +707,18 @@ impl ZtfEnrichmentWorker {
             photstats.clone()
         };
 
+        // best_host only exists if it passed the configured d_DLR cut.
+        let hosted = alert
+            .host_galaxy
+            .as_ref()
+            .is_some_and(|hg| hg.best_host.is_some());
+
         Ok((
             ZtfAlertProperties {
                 rock: is_rock,
                 star: is_star,
                 near_brightstar: is_near_brightstar,
+                hosted,
                 stationary,
                 photstats,
                 multisurvey_photstats: Some(multisurvey_photstats),

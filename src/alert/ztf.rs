@@ -8,6 +8,7 @@ use crate::{
         cutouts::CutoutStorage,
         db::{mongify_vec, update_timeseries_op},
         enums::Survey,
+        host::{self, HostGalaxyAssociation, HostGalaxyConfig},
         lightcurves::{diffmaglim2fluxerr, flux2mag, mag2flux, Band, SNT, ZTF_ZP},
         o11y::logging::as_error,
         spatial::{xmatch, Coordinates},
@@ -672,6 +673,10 @@ pub struct ZtfObject {
     pub prv_nondetections: Vec<ZtfPrvCandidate>,
     pub fp_hists: Vec<ZtfForcedPhot>,
     pub cross_matches: Option<HashMap<String, Vec<Document>>>,
+    /// Shape-aware host association derived from the galaxy cross-matches.
+    /// `None` when host association is disabled in the config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_galaxy: Option<HostGalaxyAssociation>,
     pub aliases: Option<ZtfAliases>,
     pub coordinates: Coordinates,
     pub created_at: f64,
@@ -703,6 +708,7 @@ struct AlertAuxForUpdate {
 
 pub struct ZtfAlertWorker {
     xmatch_configs: Vec<conf::CatalogXmatchConfig>,
+    host_galaxy_config: HostGalaxyConfig,
     db: mongodb::Database,
     alert_collection: mongodb::Collection<ZtfAlert>,
     alert_aux_collection: mongodb::Collection<ZtfObject>,
@@ -932,6 +938,7 @@ impl AlertWorker for ZtfAlertWorker {
 
         let worker = ZtfAlertWorker {
             xmatch_configs,
+            host_galaxy_config: config.host_galaxy.clone(),
             db,
             alert_collection,
             alert_aux_collection,
@@ -1036,12 +1043,15 @@ impl AlertWorker for ZtfAlertWorker {
                 &self.db,
             )
             .await?;
+            let host_galaxy =
+                host::associate_from_xmatches(ra, dec, &xmatches, &self.host_galaxy_config);
             let obj = ZtfObject {
                 object_id: object_id.clone(),
                 prv_candidates,
                 prv_nondetections,
                 fp_hists,
                 cross_matches: Some(xmatches),
+                host_galaxy,
                 aliases: survey_matches,
                 coordinates: Coordinates::new(ra, dec),
                 created_at: now,

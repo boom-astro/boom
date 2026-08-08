@@ -81,6 +81,9 @@ async fn test_xmatch_watchlist_excluded_from_cross_matches() {
             None,
             None,
             None,
+            None,
+            1.0,
+            None,
         );
 
         let xmatches = spatial::xmatch(ra, dec, object_id, &survey, &[watchlist_config], &db)

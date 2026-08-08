@@ -1393,6 +1393,9 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
+                1.0,
+                None,
             ));
         let result = validate_watchlist(&db, &name, &Survey::Ztf, &admin, &config).await;
 

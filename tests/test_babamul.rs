@@ -179,6 +179,7 @@ fn create_mock_enriched_ztf_alert(candid: i64, object_id: &str, is_rock: bool) -
             rock: is_rock,
             star: false,
             near_brightstar: false,
+            hosted: false,
             stationary: false,
             photstats: PerBandProperties::default(),
             multisurvey_photstats: Some(PerBandProperties::default()),
@@ -1145,6 +1146,7 @@ async fn test_babamul_lsst_with_ztf_match() {
         prv_nondetections: Vec::new(),
         fp_hists: vec![ztf_forced_phot],
         cross_matches: None,
+        host_galaxy: None,
         aliases: Some(ZtfAliases {
             lsst: Vec::new(),
             decam: Vec::new(),
@@ -1259,6 +1261,7 @@ async fn test_babamul_lsst_with_ztf_match() {
         fp_hists: vec![lsst_forced_phot],
         is_sso: false,
         cross_matches: None,
+        host_galaxy: None,
         aliases: Some(LsstAliases {
             ztf: vec![ztf_match_id.clone()],
             decam: Vec::new(),
@@ -1498,6 +1501,7 @@ async fn test_babamul_ztf_with_lsst_match() {
         fp_hists: vec![lsst_forced_phot],
         is_sso: false,
         cross_matches: None,
+        host_galaxy: None,
         aliases: Some(LsstAliases {
             ztf: Vec::new(),
             decam: Vec::new(),
