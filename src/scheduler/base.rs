@@ -1,14 +1,16 @@
 use crate::{
     alert::{
-        run_alert_worker, DecamAlertWorker, LsstAlertWorker, WinterAlertWorker, ZtfAlertWorker,
+        run_alert_worker, DecamAlertWorker, LsstAlertWorker, RomanAlertWorker, WinterAlertWorker,
+        ZtfAlertWorker,
     },
     enrichment::{
         models::{SharedModelPool, SharedModels},
-        run_enrichment_worker, DecamEnrichmentWorker, LsstEnrichmentWorker, WinterEnrichmentWorker,
-        ZtfEnrichmentWorker,
+        run_enrichment_worker, DecamEnrichmentWorker, LsstEnrichmentWorker, RomanEnrichmentWorker,
+        WinterEnrichmentWorker, ZtfEnrichmentWorker,
     },
     filter::{
-        run_filter_worker, DecamFilterWorker, LsstFilterWorker, WinterFilterWorker, ZtfFilterWorker,
+        run_filter_worker, DecamFilterWorker, LsstFilterWorker, RomanFilterWorker,
+        WinterFilterWorker, ZtfFilterWorker,
     },
     utils::{
         enums::Survey,
@@ -371,6 +373,7 @@ impl Worker {
                     Survey::Lsst => run_alert_worker::<LsstAlertWorker>,
                     Survey::Decam => run_alert_worker::<DecamAlertWorker>,
                     Survey::Winter => run_alert_worker::<WinterAlertWorker>,
+                    Survey::Roman => run_alert_worker::<RomanAlertWorker>,
                 };
                 run(receiver, &config_path, id).unwrap_or_else(as_error!("alert worker failed"));
             }),
@@ -383,6 +386,7 @@ impl Worker {
                     Survey::Lsst => run_filter_worker::<LsstFilterWorker>,
                     Survey::Decam => run_filter_worker::<DecamFilterWorker>,
                     Survey::Winter => run_filter_worker::<WinterFilterWorker>,
+                    Survey::Roman => run_filter_worker::<RomanFilterWorker>,
                 };
                 run(receiver, &config_path, id).unwrap_or_else(as_error!("filter worker failed"));
             }),
@@ -395,6 +399,7 @@ impl Worker {
                     Survey::Lsst => run_enrichment_worker::<LsstEnrichmentWorker>,
                     Survey::Decam => run_enrichment_worker::<DecamEnrichmentWorker>,
                     Survey::Winter => run_enrichment_worker::<WinterEnrichmentWorker>,
+                    Survey::Roman => run_enrichment_worker::<RomanEnrichmentWorker>,
                 };
                 run(receiver, &config_path, id, shared_models)
                     .unwrap_or_else(as_error!("enrichment worker failed"));

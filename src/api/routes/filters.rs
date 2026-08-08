@@ -1,8 +1,9 @@
 use crate::{
     alert::{
         DecamAliases, DecamCandidate, DecamForcedPhot, LsstAliases, LsstCandidate, LsstForcedPhot,
-        WinterAliases, WinterCandidate, WinterPrvCandidate, ZtfAliases, ZtfCandidate,
-        ZtfForcedPhot, ZtfPrvCandidate,
+        RomanAliases, RomanCandidate, RomanForcedPhot, RomanSsMatch, WinterAliases,
+        WinterCandidate, WinterPrvCandidate, ZtfAliases, ZtfCandidate, ZtfForcedPhot,
+        ZtfPrvCandidate,
     },
     api::{
         catalogs::{catalog_accessible, WATCHLIST_PREFIX},
@@ -11,7 +12,9 @@ use crate::{
         routes::users::User,
     },
     conf::{AppConfig, FilterWorkerConfig},
-    enrichment::{LsstAlertProperties, ZtfAlertClassifications, ZtfAlertProperties},
+    enrichment::{
+        LsstAlertProperties, RomanAlertProperties, ZtfAlertClassifications, ZtfAlertProperties,
+    },
     filter::{
         build_filter_pipeline, Filter, FilterError, FilterVersion, SURVEYS_REQUIRING_PERMISSIONS,
     },
@@ -1312,6 +1315,22 @@ pub struct DecamAlertToFilter {
     pub aliases: DecamAliases,
 }
 
+#[serdavro]
+#[derive(Debug, Deserialize, Serialize)]
+/// Roman data available at filtering time
+pub struct RomanAlertToFilter {
+    pub candid: i64,
+    #[serde(rename = "objectId")]
+    pub object_id: String,
+    pub candidate: RomanCandidate,
+    pub ss_matches: Vec<RomanSsMatch>,
+    pub properties: RomanAlertProperties,
+    pub coordinates: GalacticCoordinates,
+    pub prv_candidates: Vec<RomanCandidate>,
+    pub fp_hists: Vec<RomanForcedPhot>,
+    pub aliases: RomanAliases,
+}
+
 /// Get a schema of a survey's data available at filtering time
 #[utoipa::path(
     get,
@@ -1334,6 +1353,7 @@ pub async fn get_filter_schema(path: web::Path<(Survey,)>) -> HttpResponse {
         Survey::Lsst => LsstAlertToFilter::get_schema(),
         Survey::Winter => WinterAlertToFilter::get_schema(),
         Survey::Decam => DecamAlertToFilter::get_schema(),
+        Survey::Roman => RomanAlertToFilter::get_schema(),
     };
     response::ok(
         &format!("avro schema for survey {}", survey_name),
@@ -1444,5 +1464,27 @@ mod schema_tests {
             !s.contains("\"fp_hists\""),
             "WINTER has no forced photometry; schema should omit fp_hists: {s}"
         );
+    }
+
+    #[test]
+    fn roman_filter_schema_exposes_psf_photometry_and_ss_matches() {
+        // Roman does PSF photometry only (aperture flux is a RAPID stub), carries a
+        // forced-photometry history, and reports solar-system associations as
+        // designations — all filterable, so the schema must surface them.
+        let s = schema_str::<RomanAlertToFilter>();
+        for field in [
+            "\"prv_candidates\"",
+            "\"fp_hists\"",
+            "\"magpsf\"",
+            "\"snr_psf\"",
+            "\"ss_matches\"",
+            "\"designation\"",
+            "\"f146\"",
+        ] {
+            assert!(
+                s.contains(field),
+                "Roman filter schema missing {field}: {s}"
+            );
+        }
     }
 }

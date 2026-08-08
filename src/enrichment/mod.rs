@@ -3,6 +3,7 @@ mod base;
 mod decam;
 mod lsst;
 pub mod models;
+mod roman;
 mod winter;
 mod ztf;
 pub use base::{fetch_alerts, run_enrichment_worker, EnrichmentWorker, EnrichmentWorkerError};
@@ -10,6 +11,10 @@ pub use decam::DecamEnrichmentWorker;
 pub use lsst::{
     create_lsst_alert_pipeline, LsstAlertForEnrichment, LsstAlertProperties, LsstEnrichmentWorker,
     LsstMatch, LsstPhotometry, LsstSurveyMatches,
+};
+pub use roman::{
+    create_roman_alert_pipeline, RomanAlertForEnrichment, RomanAlertProperties,
+    RomanEnrichmentWorker, RomanPhotometry,
 };
 pub use winter::{
     create_winter_alert_pipeline, WinterAlertForEnrichment, WinterAlertProperties,

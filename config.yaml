@@ -59,6 +59,11 @@ kafka:
     winter:
       server: "localhost:9092"
       group_id: "" # Set via BOOM_KAFKA__CONSUMER__WINTER__GROUP_ID environment variable
+    roman:
+      # RAPID (the Roman alert production pipeline) has no public broker yet, so
+      # this points at a local one by default.
+      server: "localhost:9092"
+      group_id: "" # Set via BOOM_KAFKA__CONSUMER__ROMAN__GROUP_ID environment variable
   producer:
     server: "localhost:9092" # Only one global producer for now (filter worker output)
 # cutouts_storage configures where alert cutout images are stored.
@@ -150,6 +155,19 @@ workers:
       refresh_interval_minutes: 15
       max_match_rate: 100
       reference_night: "2026-07-15"
+  roman:
+    command_interval: 500
+    alert:
+      n_workers: 1
+    enrichment:
+      n_workers: 1
+    filter:
+      n_workers: 1
+      refresh_interval_minutes: 15
+      max_match_rate: 5
+      # No reference night yet: RAPID is not producing a steady alert stream, so
+      # filters cannot be activated on ROMAN until one is set.
+      reference_night:
 crossmatch:
   ztf:
     - catalog: PS1_DR1
@@ -408,3 +426,6 @@ crossmatch:
         z_phot: 1
         z_phot_err: 1
         photo_z_type: 1
+  # RAPID currently targets the Galactic bulge, where the optical catalogs used
+  # for the other surveys are heavily extincted; start with no crossmatches.
+  roman: []
