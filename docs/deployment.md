@@ -231,8 +231,8 @@ volume paths, and the specific env keys injected into containers — belong here
 | `BOOM_API__DOMAIN` | No | Defaults to `api.${DOMAIN}`. |
 | `WEBAPP_DOMAIN` | No | Host the web app is served on; defaults to `DOMAIN`. |
 | `VITE_PRERELEASE_MODE` | No | `true` gates unreleased features; defaults to `false`. |
-| `VITE_PUBLIC_POSTHOG_KEY` | No | PostHog analytics; blank disables analytics. |
-| `VITE_PUBLIC_POSTHOG_HOST` | No | PostHog host; blank disables analytics. |
+| `VITE_PUBLIC_POSTHOG_KEY` | No | PostHog project key; blank disables analytics. Also supplies the server-side `BOOM_POSTHOG__PROJECT_API_KEY`, so web and API activity merge onto one person and a single variable turns both off. |
+| `VITE_PUBLIC_POSTHOG_HOST` | No | PostHog host, e.g. `https://us.i.posthog.com`. Also supplies the server-side `BOOM_POSTHOG__HOST`. |
 | `BOOM_BABAMUL__ENABLED` | No | Defaults to `false`. |
 | `BOOM_GPU__ENABLED` | No | Set `true` to run ONNX inference on GPU. The workflow forces `false` when unset because the model loader's own default is `true` (it reads this env var directly, not `config.gpu.enabled`). |
 | `BOOM_GPU__DEVICE_IDS` | No | Comma-separated CUDA device IDs (e.g. `0,1`); defaults to `0`. Only relevant when `BOOM_GPU__ENABLED=true`. |
