@@ -704,6 +704,17 @@ fn reposition_new_partitions(
     Ok(())
 }
 
+/// Whether a consumer that started on `start_date` should keep following the
+/// clock onto each new daily topic.
+///
+/// True only when it started on the live date, which is the case for the
+/// long-running production consumers (no explicit date, so they default to
+/// today). A run pinned to a past date is doing a replay or a backfill and must
+/// stay there.
+pub fn tracks_current_date(start_date: chrono::NaiveDate, current_date: chrono::NaiveDate) -> bool {
+    start_date == current_date
+}
+
 /// Whether a poll error refers to a partition whose topic no longer exists
 /// upstream — typically an expired daily topic still present in the group's
 /// assignment. Unlike a transient broker error these never recover, so they
@@ -927,6 +938,11 @@ pub async fn consumer(
         .map(|dt| dt.date_naive())
         .unwrap_or_else(|| chrono::Utc::now().date_naive());
     let mut position_timestamp = timestamp;
+    // Only a consumer that started on the live date should chase the clock. A
+    // run pinned to an explicit past date — replay, backfill, the throughput
+    // benchmark — must stay on the date it was asked for; rolling it forward
+    // would unsubscribe it from the very topic it was started to read.
+    let follow_current_date = tracks_current_date(subscribed_date, chrono::Utc::now().date_naive());
 
     // Expired-partition poll errors repeat indefinitely, so they get a short
     // backoff (enough to keep the loop off a hot spin) and a throttled log.
@@ -959,7 +975,7 @@ pub async fn consumer(
         if !exit_on_eof && last_rollover_check.elapsed() >= ROLLOVER_CHECK_INTERVAL {
             last_rollover_check = std::time::Instant::now();
             let today = chrono::Utc::now().date_naive();
-            if today != subscribed_date {
+            if follow_current_date && today != subscribed_date {
                 position_timestamp = today
                     .and_hms_opt(0, 0, 0)
                     .map(|midnight| midnight.and_utc().timestamp())

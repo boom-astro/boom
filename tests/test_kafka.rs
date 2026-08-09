@@ -632,3 +632,42 @@ fn test_lsst_subscription_topic_is_static() {
     assert_eq!(at_epoch.len(), 1);
     assert_eq!(at_epoch, much_later);
 }
+
+// Rollover must not hijack a consumer that was pinned to an explicit past date.
+// The throughput benchmark runs `kafka_consumer ztf 20250311`, and chasing the
+// wall clock would unsubscribe it from the only topic it was started to read.
+#[test]
+fn test_pinned_past_date_does_not_follow_the_clock() {
+    use boom::kafka::tracks_current_date;
+
+    let today = chrono::NaiveDate::from_ymd_opt(2026, 8, 9).unwrap();
+    let pinned = chrono::NaiveDate::from_ymd_opt(2025, 3, 11).unwrap();
+
+    assert!(!tracks_current_date(pinned, today));
+    assert!(
+        tracks_current_date(today, today),
+        "a consumer started on the live date must keep rolling over"
+    );
+}
+
+// A pinned replay still has to subscribe to the topic it was asked for.
+#[test]
+fn test_pinned_date_window_contains_that_date() {
+    use boom::kafka::AlertConsumer;
+    use boom::kafka::ZtfAlertConsumer;
+    use boom::utils::enums::ProgramId;
+
+    let pinned = chrono::NaiveDate::from_ymd_opt(2025, 3, 11)
+        .unwrap()
+        .and_hms_opt(0, 0, 0)
+        .unwrap()
+        .and_utc()
+        .timestamp();
+
+    let topics =
+        ZtfAlertConsumer::new(None, Some(vec![ProgramId::Public])).subscription_topics(pinned);
+    assert!(
+        topics.contains(&"ztf_20250311_programid1".to_string()),
+        "the pinned date's own topic must be in the window, got {topics:?}"
+    );
+}
