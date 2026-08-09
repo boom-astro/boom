@@ -344,10 +344,13 @@ async fn wait_for_payloads(
 }
 
 // End-to-end test of the self-rollover consumer: the long-running consumer
-// subscribes to a topic *pattern* and must (a) skip an old retained topic's
-// messages on cold start, (b) consume the current day's messages, and (c)
-// auto-discover and consume the *next* day's topic created while it is running,
-// all without restarting. Requires a local Kafka broker + redis.
+// subscribes to the bounded window of concrete daily topic names and must
+// (a) skip an old retained topic's messages on cold start, (b) consume the
+// current day's messages, and (c) consume the *next* day's topic, which does
+// not yet exist at subscribe time and is created while the consumer is
+// running, all without restarting. (c) also covers the regression this window
+// replaced a pattern subscription to avoid: a subscribed-but-absent topic must
+// not stall the poll loop. Requires a local Kafka broker + redis.
 //
 // The consumer runs on its own dedicated OS thread + runtime (see below) so its
 // blocking rdkafka `poll` can't starve this test driver's runtime.
@@ -361,9 +364,8 @@ async fn test_consumer_rolls_over_and_skips_old() {
 
     let server = "localhost:9092";
     let now_ms = chrono::Utc::now().timestamp_millis();
-    // Unique, regex-safe prefix so the pattern matches only this test's topics.
+    // Unique prefix so this test's topics can't collide with another run's.
     let prefix = format!("rollovertest{now_ms}");
-    let pattern = format!("^{prefix}_[0-9]+$");
     let output_queue = format!("{prefix}_queue");
     let group_id = format!("{prefix}_group");
     let topic_day1 = format!("{prefix}_20260628");
@@ -424,7 +426,9 @@ async fn test_consumer_rolls_over_and_skips_old() {
     let consumer_thread = {
         let config = app_config.clone();
         let oq = output_queue.clone();
-        let pat = pattern.clone();
+        // The rollover window as the survey impls build it: both days are
+        // subscribed up front, and day 2 does not exist yet.
+        let window = vec![topic_day1.clone(), topic_day2.clone()];
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(2)
@@ -434,7 +438,7 @@ async fn test_consumer_rolls_over_and_skips_old() {
             rt.spawn(async move {
                 let _ = consumer(
                     "0",
-                    vec![pat],
+                    std::sync::Arc::new(move |_| window.clone()),
                     &oq,
                     0,
                     cold_start_ts,
@@ -489,4 +493,142 @@ async fn test_consumer_rolls_over_and_skips_old() {
     let _: () = con.del(&output_queue).await.unwrap_or(());
     let _ = delete_topic(server, &topic_day1).await;
     let _ = delete_topic(server, &topic_day2).await;
+}
+
+// The rollover window is what keeps a daily-topic subscription bounded. A
+// pattern subscription matched every night the cluster still advertised, so an
+// unbounded set of expired partitions accumulated in the assignment and starved
+// the poll loop; these assert the replacement stays small and concrete.
+#[test]
+fn test_subscription_window_is_today_and_yesterday() {
+    use boom::kafka::{subscription_window, SUBSCRIPTION_WINDOW_DAYS};
+
+    // 2026-08-09 00:00:00 UTC
+    let today = chrono::NaiveDate::from_ymd_opt(2026, 8, 9).unwrap();
+    let ts = today.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp();
+
+    let window = subscription_window(ts);
+    assert_eq!(window.len() as u64, SUBSCRIPTION_WINDOW_DAYS + 1);
+    assert_eq!(
+        window,
+        vec![chrono::NaiveDate::from_ymd_opt(2026, 8, 8).unwrap(), today,],
+        "window should be oldest-first and cover the night straddling UTC midnight"
+    );
+}
+
+#[test]
+fn test_subscription_window_crosses_month_boundary() {
+    use boom::kafka::subscription_window;
+
+    let ts = chrono::NaiveDate::from_ymd_opt(2026, 9, 1)
+        .unwrap()
+        .and_hms_opt(0, 0, 0)
+        .unwrap()
+        .and_utc()
+        .timestamp();
+
+    assert_eq!(
+        subscription_window(ts),
+        vec![
+            chrono::NaiveDate::from_ymd_opt(2026, 8, 31).unwrap(),
+            chrono::NaiveDate::from_ymd_opt(2026, 9, 1).unwrap(),
+        ]
+    );
+}
+
+#[test]
+fn test_ztf_subscription_topics_are_concrete_and_bounded() {
+    use boom::kafka::AlertConsumer;
+    use boom::kafka::ZtfAlertConsumer;
+    use boom::utils::enums::ProgramId;
+
+    let ts = chrono::NaiveDate::from_ymd_opt(2026, 8, 9)
+        .unwrap()
+        .and_hms_opt(0, 0, 0)
+        .unwrap()
+        .and_utc()
+        .timestamp();
+
+    let consumer = ZtfAlertConsumer::new(None, Some(vec![ProgramId::Public]));
+    let topics = consumer.subscription_topics(ts);
+
+    assert_eq!(
+        topics,
+        vec![
+            "ztf_20260808_programid1".to_string(),
+            "ztf_20260809_programid1".to_string(),
+        ]
+    );
+    assert!(
+        topics.iter().all(|t| !t.starts_with('^')),
+        "topics must be literal names; a `^…` entry is treated by librdkafka as \
+         a regex and would match every past night"
+    );
+}
+
+#[test]
+fn test_ztf_subscription_topics_cover_every_program_id() {
+    use boom::kafka::AlertConsumer;
+    use boom::kafka::ZtfAlertConsumer;
+    use boom::utils::enums::ProgramId;
+
+    let ts = chrono::NaiveDate::from_ymd_opt(2026, 8, 9)
+        .unwrap()
+        .and_hms_opt(0, 0, 0)
+        .unwrap()
+        .and_utc()
+        .timestamp();
+
+    let consumer =
+        ZtfAlertConsumer::new(None, Some(vec![ProgramId::Public, ProgramId::Partnership]));
+    let topics = consumer.subscription_topics(ts);
+
+    assert_eq!(topics.len(), 4, "2 days x 2 program ids");
+    for expected in [
+        "ztf_20260808_programid1",
+        "ztf_20260808_programid2",
+        "ztf_20260809_programid1",
+        "ztf_20260809_programid2",
+    ] {
+        assert!(topics.contains(&expected.to_string()), "missing {expected}");
+    }
+}
+
+// An empty selection would otherwise subscribe to nothing at all, silently
+// consuming no alerts.
+#[test]
+fn test_ztf_empty_program_ids_falls_back_to_public() {
+    use boom::kafka::AlertConsumer;
+    use boom::kafka::ZtfAlertConsumer;
+
+    let ts = chrono::NaiveDate::from_ymd_opt(2026, 8, 9)
+        .unwrap()
+        .and_hms_opt(0, 0, 0)
+        .unwrap()
+        .and_utc()
+        .timestamp();
+
+    let topics = ZtfAlertConsumer::new(None, Some(vec![])).subscription_topics(ts);
+    assert_eq!(
+        topics,
+        vec![
+            "ztf_20260808_programid1".to_string(),
+            "ztf_20260809_programid1".to_string(),
+        ]
+    );
+}
+
+// LSST is not date-partitioned: its single static topic must be returned
+// unchanged whatever the date, and must never be windowed.
+#[test]
+fn test_lsst_subscription_topic_is_static() {
+    use boom::kafka::AlertConsumer;
+    use boom::kafka::LsstAlertConsumer;
+
+    let consumer = LsstAlertConsumer::new(None, false);
+    let at_epoch = consumer.subscription_topics(0);
+    let much_later = consumer.subscription_topics(1_800_000_000);
+
+    assert_eq!(at_epoch.len(), 1);
+    assert_eq!(at_epoch, much_later);
 }

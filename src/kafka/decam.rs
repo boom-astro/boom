@@ -1,11 +1,12 @@
 use crate::{
-    kafka::base::{AlertConsumer, AlertProducer},
+    kafka::base::{subscription_window, AlertConsumer, AlertProducer},
     utils::{data::count_files_in_dir, enums::Survey},
 };
 use tracing::info;
 
 const DECAM_DEFAULT_NB_PARTITIONS: usize = 15;
 
+#[derive(Clone)]
 pub struct DecamAlertConsumer {
     output_queue: String,
 }
@@ -26,12 +27,15 @@ impl AlertConsumer for DecamAlertConsumer {
         let date = chrono::DateTime::from_timestamp(timestamp, 0).unwrap();
         vec![format!("decam_{}_programid{}", date.format("%Y%m%d"), 1)]
     }
-    fn topic_patterns(&self) -> Vec<String> {
-        // Regex matching any date and program id — librdkafka auto-joins new
-        // daily topics. (DECAM only produces programid1 today, but this keeps
-        // the consumer from being pinned to it.) librdkafka's matcher is
-        // POSIX/Thompson-NFA: use `[0-9]+`, not `\d`.
-        vec![r"^decam_[0-9]+_programid[0-9]+$".to_string()]
+    fn subscription_topics(&self, timestamp: i64) -> Vec<String> {
+        // Concrete names over the rollover window rather than a
+        // `^decam_[0-9]+_programid[0-9]+$` regex: a pattern also matches every
+        // past night the cluster still advertises, whose partitions have
+        // already been expired upstream.
+        subscription_window(timestamp)
+            .iter()
+            .map(|date| format!("decam_{}_programid{}", date.format("%Y%m%d"), 1))
+            .collect()
     }
     fn output_queue(&self) -> String {
         self.output_queue.clone()
