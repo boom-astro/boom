@@ -25,6 +25,10 @@ jobs:
       BOOM_DATA_VALKEY_PATH: ${{ vars.BOOM_DATA_VALKEY_PATH }}
       BOOM_DATA_KAFKA_PATH: ${{ vars.BOOM_DATA_KAFKA_PATH }}
       BOOM_CUTOUTS_MONGO_VOLUME: ${{ vars.BOOM_DATA_CUTOUTS_MONGODB_PATH }}
+      # Caps each mongo's WiredTiger cache. Unset, both size off host RAM and
+      # together claim all of it. See .env.example for sizing.
+      BOOM_MONGO_MEM_LIMIT: ${{ vars.BOOM_MONGO_MEM_LIMIT }}
+      BOOM_CUTOUTS_MONGO_MEM_LIMIT: ${{ vars.BOOM_CUTOUTS_MONGO_MEM_LIMIT }}
       BOOM_CUTOUTS_STORAGE__PASSWORD: ${{ secrets.BOOM_CUTOUTS_STORAGE__PASSWORD }}
       # Toggles babamul on without editing config.yaml — compose injects it into
       # the api and schedulers. Other babamul settings (webapp_url, etc.) and the

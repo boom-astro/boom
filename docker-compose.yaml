@@ -38,6 +38,13 @@ services:
     volumes:
       - ${BOOM_DATA_MONGODB_PATH:-mongodb}:/data/db
     restart: always
+    deploy:
+      resources:
+        limits:
+          # Caps the WiredTiger cache at 50% of (limit - 1GiB); without a limit
+          # it's 50% of host RAM, so this and mongo-cutouts each claim half the
+          # machine. 0 = unlimited. See .env.example.
+          memory: ${BOOM_MONGO_MEM_LIMIT:-0}
     networks:
       - boom
     healthcheck:
