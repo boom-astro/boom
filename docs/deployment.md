@@ -405,8 +405,8 @@ reusable [`deploy.yaml`](/.github/workflows/deploy.yaml). There are two ways in:
   path used for rollbacks.
 
 No SSH access to the deployment host is needed for either. The job runs on the
-self-hosted runner, checks out the tag, and runs `docker compose build` /
-`docker compose --profile prod up -d`.
+self-hosted runner, checks out the tag, and runs `docker compose --profile prod -f docker-compose.yaml build` then
+`docker compose --profile prod -f docker-compose.yaml -f docker-compose.cutouts-mongo.yaml up -d`.
 
 Deploys cause brief downtime: Compose stops each service's container and starts
 a new one from the freshly built image, so expect a window of roughly half a
