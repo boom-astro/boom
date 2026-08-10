@@ -20,6 +20,16 @@ babamul:
   enabled: false # Set via BOOM_BABAMUL__ENABLED environment variable
   webapp_url: # Set via BOOM_BABAMUL__WEBAPP_URL environment variable
   retention_days: 3
+posthog:
+  # Server-side product analytics for the Babamul API and Kafka stream.
+  # Leave project_api_key empty to disable analytics entirely.
+  project_api_key: "" # Set via BOOM_POSTHOG__PROJECT_API_KEY environment variable
+  host: "https://us.i.posthog.com" # Set via BOOM_POSTHOG__HOST environment variable
+  flush_interval_seconds: 10
+  queue_capacity: 10000
+  # How often Babamul Kafka consumer groups are sampled to attribute stream
+  # consumption to users. Also drives the Grafana consumption metrics.
+  consumption_interval_seconds: 300
 gpu:
   enabled: false # Set to true to load ONNX models on GPU (CUDA) instead of CPU.
   # Models are loaded once at startup and shared across all enrichment workers.

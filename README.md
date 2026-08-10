@@ -414,6 +414,10 @@ The scheduler prints a variety of messages to your terminal, e.g.:
 Metrics are collected by Prometheus and visible on a Grafana dashboard.
 See the [observability docs](docs/observability.md) for more information.
 
+Babamul user-facing usage — who calls the API and who consumes the Kafka
+stream — is tracked separately in PostHog and Grafana; see the
+[analytics docs](docs/analytics.md).
+
 ## Stopping BOOM
 
 To stop BOOM, you can simply stop the `Kafka` consumer with `CTRL+C`, and then stop the scheduler with `CTRL+C` as well.

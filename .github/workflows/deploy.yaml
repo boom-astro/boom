@@ -43,6 +43,14 @@ jobs:
       VITE_PRERELEASE_MODE: ${{ vars.VITE_PRERELEASE_MODE }}
       VITE_PUBLIC_POSTHOG_KEY: ${{ vars.VITE_PUBLIC_POSTHOG_KEY }}
       VITE_PUBLIC_POSTHOG_HOST: ${{ vars.VITE_PUBLIC_POSTHOG_HOST }}
+      # Server-side PostHog analytics for the Babamul API and Kafka stream.
+      # Deliberately reuses the VITE_* values rather than taking its own
+      # variables: web and API activity must land on the same PostHog project
+      # for identity merging to work, and a project key is the same write-only
+      # public key in both places. One variable to set, one to keep in sync,
+      # and clearing it turns off web and server capture together.
+      BOOM_POSTHOG__PROJECT_API_KEY: ${{ vars.VITE_PUBLIC_POSTHOG_KEY }}
+      BOOM_POSTHOG__HOST: ${{ vars.VITE_PUBLIC_POSTHOG_HOST }}
       STACK_NAME: boom
       PROMETHEUS_USER: ${{ vars.PROMETHEUS_USER }}
       PROMETHEUS_HASHED_PASSWORD: ${{ secrets.PROMETHEUS_HASHED_PASSWORD }}
