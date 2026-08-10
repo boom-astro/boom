@@ -24,10 +24,19 @@ babamul:
   webapp_url: https://babamul.caltech.edu # Set via BOOM_BABAMUL__WEBAPP_URL environment variable
   retention_days: 7
   oauth:
-    # Client IDs and secrets are environment-only — never put them in this
-    # file. A provider turns on when its CLIENT_ID and CLIENT_SECRET env vars
-    # are both set; see .env.example.
-    redirect_base_url: https://babamul.caltech.edu/api # Set via BOOM_BABAMUL__OAUTH__REDIRECT_BASE_URL
+    # Social sign-in with Google / GitHub / ORCID.
+    #
+    # Client IDs and secrets are ENVIRONMENT-ONLY and intentionally absent from
+    # this file, which is committed. Set, per provider you want to turn on:
+    #   BOOM_BABAMUL__OAUTH__GOOGLE__CLIENT_ID
+    #   BOOM_BABAMUL__OAUTH__GOOGLE__CLIENT_SECRET
+    # (likewise GITHUB and ORCID). A provider is enabled exactly when both are
+    # set — there is no separate on/off flag to get out of step with them.
+    #
+    # Public base URL of this API. The redirect URI registered with each
+    # provider must be {redirect_base_url}/babamul/oauth/{provider}/callback.
+    redirect_base_url: # Set via BOOM_BABAMUL__OAUTH__REDIRECT_BASE_URL
+    orcid_sandbox: false # Use sandbox.orcid.org instead of orcid.org
 posthog:
   # Server-side product analytics for the Babamul API and Kafka stream.
   # Leave project_api_key empty to disable analytics entirely.
