@@ -168,3 +168,15 @@ jobs:
           docker compose --profile prod
           -f docker-compose.yaml
           -f docker-compose.cutouts-mongo.yaml up -d
+      # Grafana's provisioning lives in a bind mount (config/grafana/provisioning),
+      # so editing it doesn't change the service definition and `up -d` above leaves
+      # the running container alone. Dashboards survive that (the file provider
+      # re-reads them every 30s), but alerting provisioning is read ONCE at startup —
+      # without this, new/changed alert rules, contact points, and notification
+      # policies silently never take effect. Restarting is cheap: all Grafana state
+      # lives in the grafana_data volume.
+      - run: >
+          docker compose --profile prod
+          -f docker-compose.yaml
+          -f docker-compose.cutouts-mongo.yaml
+          up -d --force-recreate --no-deps grafana
