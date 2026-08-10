@@ -272,13 +272,15 @@ pub async fn exchange_code_for_identity(
         ));
     }
 
+    let now = flare::Time::now().to_utc().timestamp();
+
     match provider {
         OAuthProviderKind::Google => {
             let id_token = match token.id_token {
                 Some(t) => t,
                 None => return err("Google did not return an id_token"),
             };
-            google_identity(&id_token)
+            google_identity(&id_token, &provider_config.client_id, now)
         }
         OAuthProviderKind::Github => {
             let access_token = match token.access_token {
@@ -288,42 +290,57 @@ pub async fn exchange_code_for_identity(
             github_identity(&client, &access_token).await
         }
         OAuthProviderKind::Orcid => {
-            // ORCID puts the authenticated iD directly in the token response;
-            // fall back to the id_token's `sub` if that is ever missing.
+            // ORCID's id_token is optional in practice — the iD comes back as a
+            // top-level field of the token response — but when one is present
+            // it must survive the same checks as any other before we read it.
+            let claims = match token.id_token.as_deref() {
+                Some(id_token) => {
+                    let claims = decode_jwt_claims(id_token)?;
+                    let issuer = if sandbox {
+                        "https://sandbox.orcid.org"
+                    } else {
+                        "https://orcid.org"
+                    };
+                    validate_id_token_claims(&claims, &[issuer], &provider_config.client_id, now)?;
+                    Some(claims)
+                }
+                None => None,
+            };
+
             let orcid_id = match token.orcid {
                 Some(id) => id,
-                None => match token.id_token.as_deref().and_then(|t| {
-                    decode_jwt_claims(t)
-                        .ok()
-                        .and_then(|c| c.get("sub").and_then(|v| v.as_str().map(String::from)))
-                }) {
-                    Some(id) => id,
+                None => match claims
+                    .as_ref()
+                    .and_then(|c| c.get("sub"))
+                    .and_then(|v| v.as_str())
+                {
+                    Some(id) => id.to_string(),
                     None => return err("ORCID did not return an ORCID iD"),
                 },
             };
-            let name = token
-                .id_token
-                .as_deref()
-                .and_then(|t| decode_jwt_claims(t).ok())
-                .and_then(|c| {
-                    c.get("name")
-                        .and_then(|v| v.as_str())
-                        .map(str::to_string)
-                        .or_else(|| {
-                            let given = c.get("given_name").and_then(|v| v.as_str());
-                            let family = c.get("family_name").and_then(|v| v.as_str());
-                            match (given, family) {
-                                (Some(g), Some(f)) => Some(format!("{} {}", g, f)),
-                                (Some(g), None) => Some(g.to_string()),
-                                (None, Some(f)) => Some(f.to_string()),
-                                (None, None) => None,
-                            }
-                        })
-                });
+
+            let name = claims.as_ref().and_then(|c| {
+                c.get("name")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+                    .or_else(|| {
+                        let given = c.get("given_name").and_then(|v| v.as_str());
+                        let family = c.get("family_name").and_then(|v| v.as_str());
+                        match (given, family) {
+                            (Some(g), Some(f)) => Some(format!("{} {}", g, f)),
+                            (Some(g), None) => Some(g.to_string()),
+                            (None, Some(f)) => Some(f.to_string()),
+                            (None, None) => None,
+                        }
+                    })
+            });
+
             let email = orcid_public_email(&client, &orcid_id, sandbox).await;
             Ok(ExternalIdentity {
                 provider,
                 subject: orcid_id.clone(),
+                // `orcid_public_email` only returns addresses ORCID explicitly
+                // marks verified, so anything that survives it is trustworthy.
                 email_verified: email.is_some(),
                 email,
                 name,
@@ -343,10 +360,14 @@ fn http_client() -> Result<reqwest::Client, OAuthError> {
 
 /// Read the claims out of a JWT **without** verifying its signature.
 ///
-/// Safe here and only here: the token was just received over TLS directly from
-/// the provider's token endpoint in response to a request authenticated with
-/// our client secret, so there is no untrusted party in the path.  Never use
-/// this on a token that arrived from a browser.
+/// Permitted here, and only here, by OIDC Core §3.1.3.7: the token was just
+/// received over TLS directly from the provider's token endpoint, in response
+/// to a request authenticated with our client secret, so TLS server validation
+/// stands in for checking the signature. Never use this on a token that
+/// arrived from a browser.
+///
+/// Callers must still run [`validate_id_token_claims`] — TLS says the bytes
+/// came from the host we dialled, not that the token was minted for us.
 fn decode_jwt_claims(token: &str) -> Result<serde_json::Value, OAuthError> {
     let payload = match token.split('.').nth(1) {
         Some(p) => p,
@@ -359,8 +380,63 @@ fn decode_jwt_claims(token: &str) -> Result<serde_json::Value, OAuthError> {
         .map_err(|e| OAuthError(format!("Could not parse id_token claims: {}", e)))
 }
 
-fn google_identity(id_token: &str) -> Result<ExternalIdentity, OAuthError> {
+/// Tolerance for clock drift between us and the provider.
+const ID_TOKEN_CLOCK_SKEW_SECONDS: i64 = 120;
+
+/// Check the claims every OIDC relying party is required to check: that the
+/// token was minted by the issuer we expect, *for us*, and hasn't expired.
+///
+/// Cheap (no network, no JWKS) and catches the failure modes that skipping
+/// signature verification leaves open — chiefly a token issued for a different
+/// client being accepted as one of ours, and a misconfigured endpoint handing
+/// back somebody else's token.
+fn validate_id_token_claims(
+    claims: &serde_json::Value,
+    expected_issuers: &[&str],
+    client_id: &str,
+    now: i64,
+) -> Result<(), OAuthError> {
+    let issuer = claims.get("iss").and_then(|v| v.as_str()).unwrap_or("");
+    if !expected_issuers.contains(&issuer) {
+        return err(format!(
+            "id_token issuer {:?} is not one of {:?}",
+            issuer, expected_issuers
+        ));
+    }
+
+    // `aud` is a single string for the common case, an array when the token is
+    // addressed to several clients.
+    let audience_matches = match claims.get("aud") {
+        Some(serde_json::Value::String(aud)) => aud == client_id,
+        Some(serde_json::Value::Array(auds)) => auds
+            .iter()
+            .any(|aud| aud.as_str().is_some_and(|aud| aud == client_id)),
+        _ => false,
+    };
+    if !audience_matches {
+        return err("id_token was not issued for this client");
+    }
+
+    match claims.get("exp").and_then(|v| v.as_i64()) {
+        Some(exp) if exp + ID_TOKEN_CLOCK_SKEW_SECONDS > now => Ok(()),
+        Some(_) => err("id_token has expired"),
+        None => err("id_token has no expiry"),
+    }
+}
+
+fn google_identity(
+    id_token: &str,
+    client_id: &str,
+    now: i64,
+) -> Result<ExternalIdentity, OAuthError> {
     let claims = decode_jwt_claims(id_token)?;
+    validate_id_token_claims(
+        &claims,
+        // Google issues both forms and treats them as equivalent.
+        &["https://accounts.google.com", "accounts.google.com"],
+        client_id,
+        now,
+    )?;
     let subject = match claims.get("sub").and_then(|v| v.as_str()) {
         Some(s) if !s.is_empty() => s.to_string(),
         _ => return err("Google id_token has no subject"),
@@ -521,7 +597,11 @@ async fn orcid_public_email(
     emails
         .email
         .into_iter()
-        .filter(|record| record.verified.unwrap_or(true))
+        // Default to *not* verified. An address ORCID won't explicitly vouch
+        // for could otherwise be auto-linked to an existing Babamul account
+        // with the same email. Being strict costs little now that the fallback
+        // is the confirm-by-email flow rather than a hard failure.
+        .filter(|record| record.verified.unwrap_or(false))
         .filter_map(|record| record.email)
         .map(|email| email.trim().to_lowercase())
         .find(|email| !email.is_empty())
@@ -556,19 +636,35 @@ mod tests {
         assert_eq!(OAuthProviderKind::from_path_segment("facebook"), None);
     }
 
+    const TEST_CLIENT_ID: &str = "test-client-id";
+    const TEST_NOW: i64 = 1_700_000_000;
+
+    /// Build an unsigned id_token whose registered claims pass validation, so
+    /// each test can vary only the thing it is actually about.
+    fn google_token(extra: serde_json::Value) -> String {
+        let mut claims = serde_json::json!({
+            "iss": "https://accounts.google.com",
+            "aud": TEST_CLIENT_ID,
+            "exp": TEST_NOW + 3600,
+        });
+        for (key, value) in extra.as_object().unwrap() {
+            claims[key] = value.clone();
+        }
+        format!(
+            "header.{}.signature",
+            URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap())
+        )
+    }
+
     #[test]
-    fn google_identity_reads_claims_from_an_unsigned_id_token() {
-        let claims = serde_json::json!({
+    fn google_identity_reads_claims_from_an_id_token() {
+        let token = google_token(serde_json::json!({
             "sub": "1234567890",
             "email": "  Researcher@Example.ORG ",
             "email_verified": true,
             "name": "A Researcher",
-        });
-        let token = format!(
-            "header.{}.signature",
-            URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap())
-        );
-        let identity = google_identity(&token).unwrap();
+        }));
+        let identity = google_identity(&token, TEST_CLIENT_ID, TEST_NOW).unwrap();
         assert_eq!(identity.subject, "1234567890");
         assert_eq!(identity.email.as_deref(), Some("researcher@example.org"));
         assert!(identity.email_verified);
@@ -577,22 +673,98 @@ mod tests {
 
     #[test]
     fn google_email_verified_accepts_the_string_form() {
-        let claims =
-            serde_json::json!({ "sub": "1", "email": "a@b.org", "email_verified": "true" });
-        let token = format!(
-            "header.{}.signature",
-            URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap())
+        let token = google_token(
+            serde_json::json!({ "sub": "1", "email": "a@b.org", "email_verified": "true" }),
         );
-        assert!(google_identity(&token).unwrap().email_verified);
+        assert!(
+            google_identity(&token, TEST_CLIENT_ID, TEST_NOW)
+                .unwrap()
+                .email_verified
+        );
     }
 
     #[test]
     fn google_identity_rejects_a_token_without_a_subject() {
-        let claims = serde_json::json!({ "email": "a@b.org" });
-        let token = format!(
-            "header.{}.signature",
-            URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap())
-        );
-        assert!(google_identity(&token).is_err());
+        let token = google_token(serde_json::json!({ "email": "a@b.org" }));
+        assert!(google_identity(&token, TEST_CLIENT_ID, TEST_NOW).is_err());
+    }
+
+    #[test]
+    fn id_token_must_come_from_the_expected_issuer() {
+        let claims = serde_json::json!({
+            "iss": "https://accounts.evil.example",
+            "aud": TEST_CLIENT_ID,
+            "exp": TEST_NOW + 3600,
+        });
+        assert!(validate_id_token_claims(
+            &claims,
+            &["https://accounts.google.com"],
+            TEST_CLIENT_ID,
+            TEST_NOW
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn id_token_must_be_addressed_to_this_client() {
+        // A token minted for a different client is the failure that skipping
+        // signature verification would otherwise let through.
+        let claims = serde_json::json!({
+            "iss": "https://accounts.google.com",
+            "aud": "some-other-clients-id",
+            "exp": TEST_NOW + 3600,
+        });
+        assert!(validate_id_token_claims(
+            &claims,
+            &["https://accounts.google.com"],
+            TEST_CLIENT_ID,
+            TEST_NOW
+        )
+        .is_err());
+
+        // Multi-audience tokens are valid as long as we are one of them.
+        let claims = serde_json::json!({
+            "iss": "https://accounts.google.com",
+            "aud": ["another-client", TEST_CLIENT_ID],
+            "exp": TEST_NOW + 3600,
+        });
+        assert!(validate_id_token_claims(
+            &claims,
+            &["https://accounts.google.com"],
+            TEST_CLIENT_ID,
+            TEST_NOW
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn id_token_must_not_be_expired_but_tolerates_clock_skew() {
+        let with_exp = |exp: i64| {
+            serde_json::json!({
+                "iss": "https://accounts.google.com",
+                "aud": TEST_CLIENT_ID,
+                "exp": exp,
+            })
+        };
+        let validate = |claims: &serde_json::Value| {
+            validate_id_token_claims(
+                claims,
+                &["https://accounts.google.com"],
+                TEST_CLIENT_ID,
+                TEST_NOW,
+            )
+        };
+        assert!(validate(&with_exp(TEST_NOW - 3600)).is_err());
+        // Just inside the skew allowance.
+        assert!(validate(&with_exp(TEST_NOW - 60)).is_ok());
+        assert!(validate(&with_exp(TEST_NOW + 3600)).is_ok());
+
+        // A token with no expiry at all is refused rather than treated as
+        // eternal.
+        let claims = serde_json::json!({
+            "iss": "https://accounts.google.com",
+            "aud": TEST_CLIENT_ID,
+        });
+        assert!(validate(&claims).is_err());
     }
 }

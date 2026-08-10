@@ -321,9 +321,13 @@ impl EmailService {
             .ok_or("SMTP transport not configured")?;
 
         let cta_block = if let Some(url) = webapp_url {
+            // The ticket and code go in the URL *fragment*, not the query
+            // string: browsers never transmit fragments, so these one-time
+            // credentials stay out of the web server's access logs and out of
+            // any `Referer` header the page might emit.
             format!(
                 r#"<table width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td align="center">
-                <a href="{url}/oauth/complete?ticket={ticket}&code={code}"
+                <a href="{url}/oauth/complete#ticket={ticket}&code={code}"
                    style="display:inline-block;margin:18px 0 8px;padding:14px 36px;
                           background:#4f8ef7;color:#ffffff;text-decoration:none;
                           font-size:16px;font-weight:700;border-radius:6px;letter-spacing:0.5px;">
@@ -331,9 +335,9 @@ impl EmailService {
                 </a></td></tr></table>
                 <p style="margin:8px 0 0;font-size:12px;color:#8899aa;text-align:center;">
                   Or paste this URL into your browser:<br>
-                  <a href="{url}/oauth/complete?ticket={ticket}&code={code}"
+                  <a href="{url}/oauth/complete#ticket={ticket}&code={code}"
                      style="color:#4f8ef7;word-break:break-all;">
-                    {url}/oauth/complete?ticket={ticket}&amp;code={code}
+                    {url}/oauth/complete#ticket={ticket}&amp;code={code}
                   </a>
                 </p>"#,
                 url = url,

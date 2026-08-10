@@ -583,8 +583,12 @@ async fn insert_social_user(
         Ok(_) => Ok(user),
         Err(e) if e.to_string().contains("E11000 duplicate key error") => {
             // Lost a race against a concurrent sign-up with the same email.
+            // Retrying is the fix, not a password: the account now exists, so
+            // the next attempt takes the link-to-existing-account path. Telling
+            // the user to sign in with a password would be a dead end, since a
+            // social account has none until they set one via forgot-password.
             Err(ResolveError::Conflict(
-                "An account with that email already exists. Please sign in with your password."
+                "That account was just created by another sign-in. Please try signing in again."
                     .to_string(),
             ))
         }

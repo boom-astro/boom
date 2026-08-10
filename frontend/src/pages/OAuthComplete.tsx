@@ -15,9 +15,11 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
  * stand-in address, we ask for a real one and mail a code to prove the person
  * controls it. No account exists until that code comes back.
  *
- * The ticket standing in for the authenticated identity arrives in the URL
- * fragment; the confirmation email's link supplies both ticket and code as
- * query parameters, which skips straight to the code step.
+ * Both entry points — the sign-in redirect and the confirmation email's link —
+ * pass their parameters in the URL fragment, which browsers never transmit, so
+ * the ticket and code stay out of server access logs and `Referer` headers.
+ * Arriving from the email carries a code too, which skips straight to the
+ * confirmation step.
  */
 export default function OAuthComplete() {
   const navigate = useNavigate();
@@ -37,18 +39,18 @@ export default function OAuthComplete() {
     if (initialized.current) return;
     initialized.current = true;
 
-    // Fragment: arriving from the sign-in redirect. Query: arriving from the
-    // "Confirm My Email" button in the confirmation email.
+    // Both the sign-in redirect and the confirmation email put their
+    // parameters in the fragment. The query string is still read as a fallback
+    // so links from confirmation emails sent before that change keep working.
     const fragment = new URLSearchParams(window.location.hash.replace(/^#/, ""));
     const query = new URLSearchParams(location.search);
 
-    const ticketParam = fragment.get("ticket") || query.get("ticket") || "";
-    setTicket(ticketParam);
+    setTicket(fragment.get("ticket") || query.get("ticket") || "");
     setProviderName(fragment.get("provider_name") || "your account");
     const suggested = fragment.get("suggested_email");
     if (suggested) setEmail(suggested);
 
-    const codeParam = query.get("code");
+    const codeParam = fragment.get("code") || query.get("code");
     if (codeParam) {
       setCode(codeParam);
       setStep("code");

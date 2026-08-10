@@ -40,7 +40,15 @@ API      ──302 {webapp_url}/oauth/callback#access_token=…──▶  browse
 
 The JWT comes back in the URL *fragment*, which browsers never transmit, so it
 stays out of access logs and `Referer` headers. The web app reads it, stores it
-the same way a password login would, and clears the fragment.
+the same way a password login would, and clears the fragment. The confirmation
+email's link uses a fragment for the same reason.
+
+`id_token`s are read without verifying their signature, which OIDC Core §3.1.3.7
+permits when the token comes straight from the token endpoint over TLS in
+response to a client-secret-authenticated request. The registered claims are
+still checked — `iss`, `aud` (must be our client ID), and `exp` — since TLS only
+attests that the bytes came from the host we dialled, not that the token was
+minted for us.
 
 ### Endpoints
 
@@ -75,8 +83,9 @@ sets one if the user wants Kafka access via SCRAM.
 ### Email confirmation (the usual ORCID path)
 
 Most ORCID researchers keep their email private, and the OIDC `id_token` only
-guarantees the ORCID iD. The API tries ORCID's public API for an address; when
-there is none, the user is asked for one and has to prove they control it.
+guarantees the ORCID iD. The API tries ORCID's public API for an address and
+accepts one only if ORCID explicitly marks it verified; otherwise the user is
+asked for an address and has to prove they control it.
 
 ```
 callback  ──302 {webapp}/oauth/complete#ticket=…──▶  browser
