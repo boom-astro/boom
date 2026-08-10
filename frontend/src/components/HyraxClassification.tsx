@@ -41,6 +41,21 @@ function toScoreRows(result: HyraxResult): Array<{ label: string; value: number 
   return [];
 }
 
+/** The extras an evidential model reports beside its probabilities, if it reports any. */
+function evidentialFacts(result: HyraxResult): Array<{ label: string; value: string }> {
+  const facts: Array<{ label: string; value: string }> = [];
+  if (typeof result.vacuity === 'number' && Number.isFinite(result.vacuity)) {
+    facts.push({ label: 'Vacuity', value: result.vacuity.toFixed(3) });
+  }
+  if (typeof result.predictive_entropy === 'number' && Number.isFinite(result.predictive_entropy)) {
+    facts.push({ label: 'Entropy', value: result.predictive_entropy.toFixed(3) });
+  }
+  if (typeof result.n_events_used === 'number' && Number.isFinite(result.n_events_used)) {
+    facts.push({ label: 'Points used', value: String(result.n_events_used) });
+  }
+  return facts;
+}
+
 export default function HyraxClassification() {
   const params = useParams();
   const survey = params.survey as string | undefined;
@@ -100,6 +115,7 @@ export default function HyraxClassification() {
   }
 
   const rows = result ? toScoreRows(result) : [];
+  const facts = result ? evidentialFacts(result) : [];
 
   return (
     <Card className="@container/card col-span-1 h-full bg-card text-card-foreground flex flex-col">
@@ -122,13 +138,8 @@ export default function HyraxClassification() {
             </SelectTrigger>
             <SelectContent>
               {models.map(m => (
-                <SelectItem
-                  key={m.id}
-                  value={m.id}
-                  disabled={!m.available}
-                  className="text-xs"
-                >
-                  {m.name}{!m.available && ' (not installed)'}
+                <SelectItem key={m.id} value={m.id} className="text-xs">
+                  {m.name}
                 </SelectItem>
               ))}
             </SelectContent>
@@ -136,7 +147,7 @@ export default function HyraxClassification() {
           <Button
             size="sm"
             onClick={handleSubmit}
-            disabled={!model || running || !survey || !objectId || !selected?.available}
+            disabled={!model || running || !survey || !objectId}
           >
             {running ? <Spinner className="size-4" /> : <Play className="size-4" />}
             {running ? 'Running…' : 'Run'}
@@ -170,6 +181,15 @@ export default function HyraxClassification() {
 
           {!running && result && rows.length > 0 && (
             <div className="space-y-2">
+              {facts.length > 0 && (
+                <div className="flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
+                  {facts.map(({ label, value }) => (
+                    <span key={label}>
+                      {label}: <span className="tabular-nums font-medium">{value}</span>
+                    </span>
+                  ))}
+                </div>
+              )}
               {rows.map(({ label, value }) => {
                 const pct = Math.max(0, Math.min(1, value)) * 100;
                 const color = value > 0.7 ? 'bg-green-500' : value > 0.4 ? 'bg-yellow-500' : 'bg-red-500';
@@ -224,22 +244,26 @@ export default function HyraxClassification() {
                   <span className="font-medium">1. Select a model:</span>
                   <span>
                     Pick from the dropdown. A short description of the selected model appears below it.
-                    Models marked "not installed" are known to the server but their weights are not
-                    deployed yet, so they cannot be run.
+                    Every model the server knows about can be selected; if one turns out not to be
+                    deployed, the error says so after you press Run.
                   </span>
                 </div>
                 <div className="flex items-start gap-2">
                   <span className="font-medium">2. Press Run:</span>
                   <span>
-                    The cutouts of this object's brightest alert are scored by the model. This may
-                    take a few seconds.
+                    Image models score the cutouts of this object's brightest alert; light-curve
+                    models such as TEMPO score its whole photometry instead. Either may take a few
+                    seconds.
                   </span>
                 </div>
                 <div className="flex items-start gap-2">
                   <span className="font-medium">3. Read the scores:</span>
                   <span>
                     Multiclass models list every class sorted by probability; binary models show a single score.
-                    Bars are colour-coded green (&gt;70%), yellow (40–70%), red (&lt;40%).
+                    Bars are colour-coded green (&gt;70%), yellow (40–70%), red (&lt;40%). Evidential
+                    models also report <span className="font-medium">vacuity</span> — how little
+                    evidence they had, where a high value means the probabilities below rest on very
+                    little light curve.
                   </span>
                 </div>
               </div>

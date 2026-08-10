@@ -7,7 +7,8 @@ pub use acai::AcaiModel;
 pub use base::{load_model, load_model_on_device, Model, ModelError};
 pub use btsbot::BtsBotModel;
 pub use hyrax::{
-    find_model_spec, HyraxInput, HyraxModel, HyraxModelRegistry, HyraxModelSpec, HyraxPredictError,
+    classify_with_service, find_model_spec, HyraxBackend, HyraxInput, HyraxModel,
+    HyraxModelRegistry, HyraxModelSpec, HyraxPredictError, ServiceBackend, ServiceClassification,
     HYRAX_MODELS,
 };
 

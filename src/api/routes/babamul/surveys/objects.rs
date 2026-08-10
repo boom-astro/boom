@@ -7,8 +7,8 @@ use crate::api::models::response;
 use crate::api::routes::babamul::surveys::alerts::{EnrichedLsstAlert, EnrichedZtfAlert};
 use crate::api::routes::babamul::BabamulUser;
 use crate::enrichment::models::{
-    find_model_spec, HyraxInput, HyraxModel, HyraxModelRegistry, HyraxPredictError, Model,
-    HYRAX_MODELS,
+    classify_with_service, find_model_spec, HyraxBackend, HyraxInput, HyraxModel,
+    HyraxModelRegistry, HyraxModelSpec, HyraxPredictError, Model, ServiceBackend, HYRAX_MODELS,
 };
 use crate::enrichment::{LsstAlertProperties, ZtfAlertClassifications, ZtfAlertProperties};
 use crate::utils::cutouts::{CutoutStorage, CutoutStorageError};
@@ -1050,18 +1050,17 @@ pub struct ClassificationModelInfo {
     id: String,
     name: String,
     description: String,
-    /// Class labels this model emits, in output order. Empty for single-score models.
+    /// Class labels this model emits, in output order. Empty when they are not known
+    /// ahead of a run: single-score models, and models whose backend names its own
+    /// classes in the result.
     classes: Vec<String>,
-    /// False when the ONNX artifact has not been installed on the server yet.
-    /// Such a model is listed but cannot be run.
-    available: bool,
 }
 
 /// List the Hyrax models that can be run on demand against objects of a survey.
 ///
-/// Models are reported even when their ONNX artifact is missing from the server,
-/// with `available: false`, so the UI can show them as coming soon rather than
-/// silently omitting them.
+/// Every model registered for the survey is reported and every one of them can be
+/// selected: whether a model's backend can answer is decided when it is run, not by
+/// inspecting the server's `data/models/` directory here.
 #[utoipa::path(
     get,
     path = "/babamul/surveys/{survey}/classification-models",
@@ -1085,7 +1084,6 @@ pub async fn get_classification_models(path: web::Path<Survey>) -> HttpResponse 
             name: spec.name.to_string(),
             description: spec.description.to_string(),
             classes: spec.classes.iter().map(|c| c.to_string()).collect(),
-            available: spec.is_available(),
         })
         .collect();
 
@@ -1118,39 +1116,32 @@ struct ScoredLsstAlert {
     properties: Option<LsstAlertProperties>,
 }
 
-/// Gather the photometry and metadata that ride along with every Hyrax run.
+/// The object's light curve and cross-matches, from its aux document.
 ///
-/// Two indexed lookups: the aux document for the light curve and cross-matches, and
-/// the scored alert itself for its candidate block. `candid` is the alert whose
-/// cutouts were handed to the model, so the metadata describes the same image the
-/// model is looking at.
+/// Split out from [`fetch_hyrax_object_inputs`] because service-backed models score
+/// the light curve alone: they want neither cutouts nor a scored alert, and making
+/// them pay for those lookups would mean refusing an object that the service could
+/// happily classify.
 ///
-/// A missing aux entry is not fatal — the models take the cutouts either way, and
-/// refusing to score an object just because its light curve has not been backfilled
-/// would be worse than scoring it with empty photometry.
-async fn fetch_hyrax_object_inputs(
+/// A missing aux entry is not fatal — refusing to score an object just because its
+/// light curve has not been backfilled would be worse than reporting empty
+/// photometry and letting the model say it has nothing to work with.
+async fn fetch_object_photometry(
     db: &Database,
     survey: &Survey,
     object_id: &str,
-    candid: i64,
 ) -> Result<(serde_json::Value, serde_json::Value), HttpResponse> {
-    let alert_filter = doc! { "_id": candid };
     let aux_filter = doc! { "_id": object_id };
 
-    let (photometry, cross_matches, alert) = match survey {
+    match survey {
         Survey::Ztf => {
             let aux: Option<ZtfObject> = db
                 .collection("ZTF_alerts_aux")
                 .find_one(aux_filter)
                 .await
                 .map_err(aux_lookup_error(object_id))?;
-            let alert: Option<ScoredZtfAlert> = db
-                .collection("ZTF_alerts")
-                .find_one(alert_filter)
-                .await
-                .map_err(alert_lookup_error(candid))?;
 
-            let (photometry, cross_matches) = match aux {
+            Ok(match aux {
                 // Limit photometry to programid 1 (public ZTF alerts), as the object
                 // endpoint does.
                 Some(aux) => (
@@ -1178,8 +1169,7 @@ async fn fetch_hyrax_object_inputs(
                     }),
                     serde_json::Value::Null,
                 ),
-            };
-            (photometry, cross_matches, serde_json::to_value(alert))
+            })
         }
         Survey::Lsst => {
             let aux: Option<LsstObject> = db
@@ -1187,13 +1177,8 @@ async fn fetch_hyrax_object_inputs(
                 .find_one(aux_filter)
                 .await
                 .map_err(aux_lookup_error(object_id))?;
-            let alert: Option<ScoredLsstAlert> = db
-                .collection("LSST_alerts")
-                .find_one(alert_filter)
-                .await
-                .map_err(alert_lookup_error(candid))?;
 
-            let (photometry, cross_matches) = match aux {
+            Ok(match aux {
                 Some(aux) => (
                     serde_json::json!({
                         "prv_candidates": aux.prv_candidates,
@@ -1208,8 +1193,45 @@ async fn fetch_hyrax_object_inputs(
                     }),
                     serde_json::Value::Null,
                 ),
-            };
-            (photometry, cross_matches, serde_json::to_value(alert))
+            })
+        }
+        _ => Err(response::bad_request(
+            "Invalid survey specified, only ZTF and LSST are supported",
+        )),
+    }
+}
+
+/// Gather the photometry and metadata that ride along with every ONNX Hyrax run.
+///
+/// Two indexed lookups: the aux document for the light curve and cross-matches, and
+/// the scored alert itself for its candidate block. `candid` is the alert whose
+/// cutouts were handed to the model, so the metadata describes the same image the
+/// model is looking at.
+async fn fetch_hyrax_object_inputs(
+    db: &Database,
+    survey: &Survey,
+    object_id: &str,
+    candid: i64,
+) -> Result<(serde_json::Value, serde_json::Value), HttpResponse> {
+    let (photometry, cross_matches) = fetch_object_photometry(db, survey, object_id).await?;
+
+    let alert_filter = doc! { "_id": candid };
+    let alert = match survey {
+        Survey::Ztf => {
+            let alert: Option<ScoredZtfAlert> = db
+                .collection("ZTF_alerts")
+                .find_one(alert_filter)
+                .await
+                .map_err(alert_lookup_error(candid))?;
+            serde_json::to_value(alert)
+        }
+        Survey::Lsst => {
+            let alert: Option<ScoredLsstAlert> = db
+                .collection("LSST_alerts")
+                .find_one(alert_filter)
+                .await
+                .map_err(alert_lookup_error(candid))?;
+            serde_json::to_value(alert)
         }
         _ => {
             return Err(response::bad_request(
@@ -1255,23 +1277,198 @@ fn alert_lookup_error(candid: i64) -> impl Fn(mongodb::error::Error) -> HttpResp
     move |error| response::internal_error(&format!("error getting alert {}: {}", candid, error))
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize, ToSchema)]
 pub struct ClassifyObjectResult {
     /// Id of the model that produced this result.
     model: String,
-    /// Candid of the alert whose cutouts were scored.
-    candid: i64,
+    /// Candid of the alert whose cutouts were scored. Absent for models that score
+    /// the whole light curve rather than one alert's image.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    candid: Option<i64>,
     /// Class name -> probability, for multiclass models.
     #[serde(skip_serializing_if = "Option::is_none")]
     classes: Option<HashMap<String, f32>>,
     /// Single score, for models that emit one value.
     #[serde(skip_serializing_if = "Option::is_none")]
     score: Option<f32>,
+    /// Highest-probability class, when the backend names one itself.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pred_class: Option<String>,
+    /// Evidential uncertainty: how little evidence the model had to go on, from 0
+    /// (well-evidenced) to 1. Only evidential models report it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    vacuity: Option<f32>,
+    /// Entropy of the predicted class distribution.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    predictive_entropy: Option<f32>,
+    /// How many photometry points the model actually used.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    n_events_used: Option<usize>,
+}
+
+/// Candid of the alert a classify request should score: the object's brightest
+/// public alert, matching the default the cutouts endpoint uses so the scored image
+/// is the one the UI is showing.
+async fn find_brightest_candid(
+    db: &Database,
+    survey: &Survey,
+    object_id: &str,
+) -> Result<i64, HttpResponse> {
+    let mut filter = doc! { "objectId": object_id };
+    if *survey == Survey::Ztf {
+        filter.insert("candidate.programid", 1);
+    }
+    let alert_collection = db.collection::<AlertCandidOnly>(&format!("{}_alerts", survey));
+    match alert_collection
+        .find_one(filter)
+        .projection(doc! { "_id": 1 })
+        .with_options(
+            mongodb::options::FindOneOptions::builder()
+                // Lowest mag is brightest, so sort in ascending order
+                .sort(doc! { "candidate.magpsf": 1 })
+                .build(),
+        )
+        .await
+    {
+        Ok(Some(alert)) => Ok(alert.candid),
+        Ok(None) => Err(response::not_found(&format!(
+            "no alerts found for objectId {}",
+            object_id
+        ))),
+        Err(error) => Err(response::internal_error(&format!(
+            "error getting documents: {}",
+            error
+        ))),
+    }
+}
+
+/// Shape a model's raw output into the response the UI expects, labelling the
+/// scores with the spec's class names for multiclass models.
+fn classification_response(
+    spec: &'static HyraxModelSpec,
+    object_id: &str,
+    candid: i64,
+    scores: &[f32],
+) -> HttpResponse {
+    if scores.is_empty() {
+        return response::internal_error(&format!("model {} returned no scores", spec.id));
+    }
+
+    let result = if spec.classes.is_empty() {
+        ClassifyObjectResult {
+            model: spec.id.to_string(),
+            candid: Some(candid),
+            score: Some(scores[0]),
+            ..Default::default()
+        }
+    } else if scores.len() >= spec.classes.len() {
+        ClassifyObjectResult {
+            model: spec.id.to_string(),
+            candid: Some(candid),
+            classes: Some(
+                spec.classes
+                    .iter()
+                    .zip(scores)
+                    .map(|(label, score)| (label.to_string(), *score))
+                    .collect(),
+            ),
+            ..Default::default()
+        }
+    } else {
+        // The artifact disagrees with the class labels in its spec; surfacing the
+        // raw first score would silently mislabel it.
+        tracing::error!(
+            model = spec.id,
+            expected = spec.classes.len(),
+            got = scores.len(),
+            "Hyrax model returned fewer scores than it has class labels"
+        );
+        return response::internal_error(&format!(
+            "model {} returned {} scores but declares {} classes",
+            spec.id,
+            scores.len(),
+            spec.classes.len()
+        ));
+    };
+
+    response::ok_ser(&format!("Ran {} on object {}", spec.id, object_id), result)
+}
+
+/// Run a service-backed model: hand the object's light curve to the sidecar that
+/// owns it and translate what comes back.
+///
+/// No candid is reported, and none is looked up: these models score the whole light
+/// curve rather than the image of one alert, so tying the result to a single
+/// candidate would misdescribe it.
+async fn classify_with_backend_service(
+    spec: &'static HyraxModelSpec,
+    backend: &ServiceBackend,
+    db: &Database,
+    survey: &Survey,
+    object_id: &str,
+) -> HttpResponse {
+    let (photometry, _cross_matches) = match fetch_object_photometry(db, survey, object_id).await {
+        Ok(inputs) => inputs,
+        Err(response) => return response,
+    };
+
+    match classify_with_service(spec, backend, object_id, &photometry).await {
+        Ok(result) => {
+            let value = ClassifyObjectResult {
+                model: spec.id.to_string(),
+                classes: Some(result.classes),
+                pred_class: Some(result.pred_class),
+                vacuity: Some(result.vacuity),
+                predictive_entropy: Some(result.predictive_entropy),
+                n_events_used: Some(result.n_events_used),
+                ..Default::default()
+            };
+            response::ok_ser(&format!("Ran {} on object {}", spec.id, object_id), value)
+        }
+        Err(HyraxPredictError::ServiceUnreachable { url, reason }) => {
+            tracing::error!(
+                model = spec.id,
+                url,
+                reason,
+                "Hyrax inference service is unreachable"
+            );
+            response::service_unavailable(&format!(
+                "Model {} is not available: its inference service could not be reached",
+                spec.id
+            ))
+        }
+        Err(HyraxPredictError::ServiceStatus { status, detail }) => {
+            tracing::error!(
+                model = spec.id,
+                status,
+                detail,
+                "Hyrax inference service refused the request"
+            );
+            // A 4xx means the object is the problem — no usable photometry, most
+            // often — so report it as such and pass the service's own message
+            // through rather than flattening it into a server fault.
+            if (400..500).contains(&status) {
+                response::bad_request(&format!(
+                    "Model {} could not classify {}: {}",
+                    spec.id, object_id, detail
+                ))
+            } else {
+                response::internal_error(&format!("error running model {}: {}", spec.id, detail))
+            }
+        }
+        Err(error) => {
+            tracing::error!(model = spec.id, %error, "Hyrax service inference failed");
+            response::internal_error(&format!("error running model {}: {}", spec.id, error))
+        }
+    }
 }
 
 /// Run a Hyrax model against a single object, on demand.
 ///
-/// The model scores the cutout triplet of the object's brightest public alert.
+/// What the model is given depends on its backend: an ONNX model scores the cutout
+/// triplet of the object's brightest public alert, while a service-backed model
+/// scores the object's whole light curve.
+///
 /// Results are returned to the caller only — unlike the classifications produced by
 /// the enrichment worker at ingest time, they are not persisted onto the object.
 #[utoipa::path(
@@ -1284,9 +1481,9 @@ pub struct ClassifyObjectResult {
     request_body = ClassifyObjectQuery,
     responses(
         (status = 200, description = "Classification result", body = ClassifyObjectResult),
-        (status = 400, description = "Unknown model, or model not supported for this survey"),
+        (status = 400, description = "Unknown model, model not supported for this survey, or the object could not be classified"),
         (status = 404, description = "Object or cutouts not found"),
-        (status = 503, description = "Model artifact not installed on the server"),
+        (status = 503, description = "Model artifact not installed, or its inference service is unreachable"),
         (status = 500, description = "Internal server error")
     ),
     tags=["Surveys"]
@@ -1314,13 +1511,14 @@ pub async fn classify_object(
             spec.id, survey
         ));
     }
-    // Checked up front so an uninstalled model reports as unavailable rather than
-    // making the caller wait on a cutout fetch that can only end in failure.
-    if !spec.is_available() {
-        return response::service_unavailable(&format!(
-            "Model {} is not installed on this server",
-            spec.id
-        ));
+    // Nothing else is checked before the run: a model the server cannot actually
+    // serve fails below, with the reason its backend gives, rather than being
+    // refused here on the strength of what is on local disk.
+
+    // Service-backed models take the light curve alone, so they branch off before
+    // the cutout and scored-alert lookups the ONNX path needs.
+    if let HyraxBackend::Service(backend) = &spec.backend {
+        return classify_with_backend_service(spec, backend, &db, &survey, &object_id).await;
     }
 
     let cutout_storage = match cutout_storages.get(&survey) {
@@ -1330,31 +1528,9 @@ pub async fn classify_object(
         }
     };
 
-    // Score the brightest public alert, matching the default the cutouts endpoint
-    // uses so the scored image is the one the UI shows.
-    let mut filter = doc! { "objectId": &object_id };
-    if survey == Survey::Ztf {
-        filter.insert("candidate.programid", 1);
-    }
-    let alert_collection = db.collection::<AlertCandidOnly>(&format!("{}_alerts", survey));
-    let candid = match alert_collection
-        .find_one(filter)
-        .projection(doc! { "_id": 1 })
-        .with_options(
-            mongodb::options::FindOneOptions::builder()
-                // Lowest mag is brightest, so sort in ascending order
-                .sort(doc! { "candidate.magpsf": 1 })
-                .build(),
-        )
-        .await
-    {
-        Ok(Some(alert)) => alert.candid,
-        Ok(None) => {
-            return response::not_found(&format!("no alerts found for objectId {}", object_id));
-        }
-        Err(error) => {
-            return response::internal_error(&format!("error getting documents: {}", error));
-        }
+    let candid = match find_brightest_candid(&db, &survey, &object_id).await {
+        Ok(candid) => candid,
+        Err(response) => return response,
     };
 
     let cutouts = match cutout_storage.retrieve_cutouts(candid, false).await {
@@ -1401,7 +1577,6 @@ pub async fn classify_object(
     let scores = match web::block(move || registry.predict(&model_id_for_task, &input)).await {
         Ok(Ok(scores)) => scores,
         Ok(Err(HyraxPredictError::ArtifactNotFound(path))) => {
-            // Possible despite the check above if the artifact is removed mid-flight.
             tracing::error!(model = spec.id, path, "Hyrax model artifact is missing");
             return response::service_unavailable(&format!(
                 "Model {} is not installed on this server",
@@ -1421,46 +1596,5 @@ pub async fn classify_object(
         }
     };
 
-    if scores.is_empty() {
-        return response::internal_error(&format!("model {} returned no scores", spec.id));
-    }
-
-    let result = if spec.classes.is_empty() {
-        ClassifyObjectResult {
-            model: spec.id.to_string(),
-            candid,
-            classes: None,
-            score: Some(scores[0]),
-        }
-    } else if scores.len() >= spec.classes.len() {
-        ClassifyObjectResult {
-            model: spec.id.to_string(),
-            candid,
-            classes: Some(
-                spec.classes
-                    .iter()
-                    .zip(&scores)
-                    .map(|(label, score)| (label.to_string(), *score))
-                    .collect(),
-            ),
-            score: None,
-        }
-    } else {
-        // The artifact disagrees with the class labels in its spec; surfacing the
-        // raw first score would silently mislabel it.
-        tracing::error!(
-            model = spec.id,
-            expected = spec.classes.len(),
-            got = scores.len(),
-            "Hyrax model returned fewer scores than it has class labels"
-        );
-        return response::internal_error(&format!(
-            "model {} returned {} scores but declares {} classes",
-            spec.id,
-            scores.len(),
-            spec.classes.len()
-        ));
-    };
-
-    response::ok_ser(&format!("Ran {} on object {}", spec.id, object_id), result)
+    classification_response(spec, &object_id, candid, &scores)
 }

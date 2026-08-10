@@ -355,21 +355,31 @@ export type ClassificationModel = {
   id: string;
   name: string;
   description: string;
-  /** Class labels the model emits, in output order. Empty for single-score models. */
+  /**
+   * Class labels the model emits, in output order. Empty when the labels are not
+   * known ahead of a run: either the model emits a single score, or its backend
+   * names its own classes in the result.
+   */
   classes: string[];
-  /** False when the ONNX artifact is not installed on the server; cannot be run. */
-  available: boolean;
 };
 
 /** Result of running a Hyrax model on a single object, on demand. */
 export type HyraxClassification = {
   model?: string;
-  /** Candid of the alert whose cutouts were scored. */
+  /** Candid of the alert whose cutouts were scored. Absent for light-curve models. */
   candid?: number;
   /** Class name -> probability, for multiclass models. */
   classes?: Record<string, number>;
   /** Single score, for models that emit one value. */
   score?: number;
+  /** Highest-probability class, when the backend names one itself. */
+  pred_class?: string;
+  /** Evidential uncertainty, 0 (well-evidenced) to 1. Only evidential models report it. */
+  vacuity?: number;
+  /** Entropy of the predicted class distribution. */
+  predictive_entropy?: number;
+  /** How many photometry points the model actually used. */
+  n_events_used?: number;
 };
 
 /** Pull the server's error message out of an API error body, falling back to the status. */
