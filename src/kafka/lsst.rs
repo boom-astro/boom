@@ -30,7 +30,7 @@ impl AlertConsumer for LsstAlertConsumer {
             vec!["lsst-alerts-v11".to_string()]
         }
     }
-    fn subscription_topics(&self, _timestamp: i64) -> Vec<String> {
+    fn subscription_topics(&self, _timestamp: i64, _window_days: u64) -> Vec<String> {
         // LSST uses a single static topic (not date-partitioned), so there is
         // nothing to roll over: subscribe to the literal topic name.
         self.topic_names(0)

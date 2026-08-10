@@ -44,13 +44,13 @@ impl AlertConsumer for ZtfAlertConsumer {
             .map(|program_id| format!("ztf_{}_programid{}", date.format("%Y%m%d"), program_id))
             .collect()
     }
-    fn subscription_topics(&self, timestamp: i64) -> Vec<String> {
+    fn subscription_topics(&self, timestamp: i64, window_days: u64) -> Vec<String> {
         // One concrete topic per (date, program id) over the rollover window.
         // Not a `^ztf_[0-9]+_programid(…)$` regex: librdkafka expands a pattern
         // against every topic the cluster advertises, and IPAC keeps advertising
         // topic names for nights whose partitions it has long since expired, so
         // the pattern grows an assignment of dead partitions without bound.
-        subscription_window(timestamp)
+        subscription_window(timestamp, window_days)
             .iter()
             .flat_map(|date| {
                 self.program_ids.iter().map(move |program_id| {

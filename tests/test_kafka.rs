@@ -417,6 +417,7 @@ async fn test_consumer_rolls_over_and_skips_old() {
         schema_github_fallback_url: None,
         username: None,
         password: None,
+        subscription_window_days: 1,
     };
     // Run the consumer on its own OS thread + runtime so its blocking rdkafka
     // `poll` doesn't starve the test driver's runtime (this mirrors prod, where
@@ -438,7 +439,7 @@ async fn test_consumer_rolls_over_and_skips_old() {
             rt.spawn(async move {
                 let _ = consumer(
                     "0",
-                    std::sync::Arc::new(move |_| window.clone()),
+                    std::sync::Arc::new(move |_, _| window.clone()),
                     &oq,
                     0,
                     cold_start_ts,
@@ -501,14 +502,14 @@ async fn test_consumer_rolls_over_and_skips_old() {
 // the poll loop; these assert the replacement stays small and concrete.
 #[test]
 fn test_subscription_window_is_today_and_yesterday() {
-    use boom::kafka::{subscription_window, SUBSCRIPTION_WINDOW_DAYS};
+    use boom::kafka::subscription_window;
 
     // 2026-08-09 00:00:00 UTC
     let today = chrono::NaiveDate::from_ymd_opt(2026, 8, 9).unwrap();
     let ts = today.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp();
 
-    let window = subscription_window(ts);
-    assert_eq!(window.len() as u64, SUBSCRIPTION_WINDOW_DAYS + 1);
+    let window = subscription_window(ts, 1);
+    assert_eq!(window.len(), 2);
     assert_eq!(
         window,
         vec![chrono::NaiveDate::from_ymd_opt(2026, 8, 8).unwrap(), today,],
@@ -528,7 +529,7 @@ fn test_subscription_window_crosses_month_boundary() {
         .timestamp();
 
     assert_eq!(
-        subscription_window(ts),
+        subscription_window(ts, 1),
         vec![
             chrono::NaiveDate::from_ymd_opt(2026, 8, 31).unwrap(),
             chrono::NaiveDate::from_ymd_opt(2026, 9, 1).unwrap(),
@@ -550,7 +551,7 @@ fn test_ztf_subscription_topics_are_concrete_and_bounded() {
         .timestamp();
 
     let consumer = ZtfAlertConsumer::new(None, Some(vec![ProgramId::Public]));
-    let topics = consumer.subscription_topics(ts);
+    let topics = consumer.subscription_topics(ts, 1);
 
     assert_eq!(
         topics,
@@ -581,7 +582,7 @@ fn test_ztf_subscription_topics_cover_every_program_id() {
 
     let consumer =
         ZtfAlertConsumer::new(None, Some(vec![ProgramId::Public, ProgramId::Partnership]));
-    let topics = consumer.subscription_topics(ts);
+    let topics = consumer.subscription_topics(ts, 1);
 
     assert_eq!(topics.len(), 4, "2 days x 2 program ids");
     for expected in [
@@ -608,7 +609,7 @@ fn test_ztf_empty_program_ids_falls_back_to_public() {
         .and_utc()
         .timestamp();
 
-    let topics = ZtfAlertConsumer::new(None, Some(vec![])).subscription_topics(ts);
+    let topics = ZtfAlertConsumer::new(None, Some(vec![])).subscription_topics(ts, 1);
     assert_eq!(
         topics,
         vec![
@@ -626,8 +627,8 @@ fn test_lsst_subscription_topic_is_static() {
     use boom::kafka::LsstAlertConsumer;
 
     let consumer = LsstAlertConsumer::new(None, false);
-    let at_epoch = consumer.subscription_topics(0);
-    let much_later = consumer.subscription_topics(1_800_000_000);
+    let at_epoch = consumer.subscription_topics(0, 1);
+    let much_later = consumer.subscription_topics(1_800_000_000, 9);
 
     assert_eq!(at_epoch.len(), 1);
     assert_eq!(at_epoch, much_later);
@@ -665,9 +666,44 @@ fn test_pinned_date_window_contains_that_date() {
         .timestamp();
 
     let topics =
-        ZtfAlertConsumer::new(None, Some(vec![ProgramId::Public])).subscription_topics(pinned);
+        ZtfAlertConsumer::new(None, Some(vec![ProgramId::Public])).subscription_topics(pinned, 1);
     assert!(
         topics.contains(&"ztf_20250311_programid1".to_string()),
         "the pinned date's own topic must be in the window, got {topics:?}"
     );
+}
+
+// After an upstream outage the window can be widened to catch up on the nights
+// that were missed, rather than skipping them (see issue #569). Recovery is
+// still bounded by upstream retention -- ZTF keeps roughly 7 days.
+#[test]
+fn test_widened_window_reaches_back_over_an_outage() {
+    use boom::kafka::AlertConsumer;
+    use boom::kafka::ZtfAlertConsumer;
+    use boom::utils::enums::ProgramId;
+
+    let ts = chrono::NaiveDate::from_ymd_opt(2026, 8, 10)
+        .unwrap()
+        .and_hms_opt(0, 0, 0)
+        .unwrap()
+        .and_utc()
+        .timestamp();
+
+    let consumer = ZtfAlertConsumer::new(None, Some(vec![ProgramId::Public]));
+
+    // Default: only the current night and the one before it.
+    let narrow = consumer.subscription_topics(ts, 1);
+    assert_eq!(narrow.len(), 2);
+    assert!(!narrow.contains(&"ztf_20260806_programid1".to_string()));
+
+    // Widened to cover a 5-day gap: every intervening night is subscribed.
+    let wide = consumer.subscription_topics(ts, 5);
+    assert_eq!(wide.len(), 6, "5 days back plus the current day");
+    for day in 5..=10 {
+        let expected = format!("ztf_202608{:02}_programid1", day);
+        assert!(wide.contains(&expected), "missing {expected}");
+    }
+    // Oldest first, so the backlog is consumed in chronological order.
+    assert_eq!(wide.first().unwrap(), "ztf_20260805_programid1");
+    assert_eq!(wide.last().unwrap(), "ztf_20260810_programid1");
 }

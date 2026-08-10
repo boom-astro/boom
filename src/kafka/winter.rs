@@ -28,11 +28,11 @@ impl AlertConsumer for WinterAlertConsumer {
         let date = chrono::DateTime::from_timestamp(timestamp, 0).unwrap();
         vec![format!("winter_{}", date.format("%Y%m%d"))]
     }
-    fn subscription_topics(&self, timestamp: i64) -> Vec<String> {
+    fn subscription_topics(&self, timestamp: i64, window_days: u64) -> Vec<String> {
         // Concrete names over the rollover window rather than a `^winter_[0-9]+$`
         // regex: a pattern also matches every past night the cluster still
         // advertises, whose partitions have already been expired upstream.
-        subscription_window(timestamp)
+        subscription_window(timestamp, window_days)
             .iter()
             .map(|date| format!("winter_{}", date.format("%Y%m%d")))
             .collect()

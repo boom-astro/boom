@@ -393,23 +393,22 @@ pub enum ConsumerError {
     ConfigError(#[from] config::ConfigError),
 }
 
-/// How many days back the daily-topic subscription window reaches, in addition
-/// to the current UTC day.
-///
-/// A survey night straddles UTC midnight, so yesterday's topic has to stay
-/// subscribed alongside today's or the tail of a night is dropped at rollover.
-/// Nothing older is included: those topics are already drained, and upstream
-/// expires the underlying partitions while still advertising the topic names,
-/// so re-subscribing to them only re-adds partitions that fail every poll.
-pub const SUBSCRIPTION_WINDOW_DAYS: u64 = 1;
-
 /// UTC dates a date-partitioned survey should currently be subscribed to,
-/// oldest first. See [`SUBSCRIPTION_WINDOW_DAYS`].
-pub fn subscription_window(timestamp: i64) -> Vec<chrono::NaiveDate> {
+/// oldest first: the day containing `timestamp` plus the preceding
+/// `window_days`.
+///
+/// The default of 1 keeps yesterday alongside today, because a survey night
+/// straddles UTC midnight and the tail of it would otherwise be dropped at
+/// rollover. Going wider is a deliberate, temporary act: upstream expires a
+/// topic's partitions while still advertising its name, so every extra day
+/// risks re-adding partitions that fail every poll (survivable — see
+/// `is_expired_partition` — but not free). Its intended use is catching up
+/// after an upstream outage, bounded by upstream retention.
+pub fn subscription_window(timestamp: i64, window_days: u64) -> Vec<chrono::NaiveDate> {
     let today = chrono::DateTime::from_timestamp(timestamp, 0)
         .map(|dt| dt.date_naive())
         .unwrap_or_else(|| chrono::Utc::now().date_naive());
-    (0..=SUBSCRIPTION_WINDOW_DAYS)
+    (0..=window_days)
         .rev()
         .filter_map(|days_back| today.checked_sub_days(chrono::Days::new(days_back)))
         .collect()
@@ -433,7 +432,7 @@ pub trait AlertConsumer: Sized + Clone + Send + Sync + 'static {
     /// librdkafka expands a regex against every topic the cluster advertises,
     /// which for a daily-topic survey is the entire history of past nights — a
     /// set that grows without bound and is almost entirely expired.
-    fn subscription_topics(&self, timestamp: i64) -> Vec<String>;
+    fn subscription_topics(&self, timestamp: i64, window_days: u64) -> Vec<String>;
     fn output_queue(&self) -> String;
     fn survey(&self) -> &'static str;
     #[instrument(skip(self))]
@@ -474,15 +473,15 @@ pub trait AlertConsumer: Sized + Clone + Send + Sync + 'static {
         // loop re-invokes this on every UTC-date rollover and re-subscribes, so
         // new daily topics are picked up without a restart.
         // exit_on_eof (tests/dev): target the concrete topic for the date.
-        let subscribe_to: Arc<dyn Fn(i64) -> Vec<String> + Send + Sync> = match topics {
-            Some(overridden) => Arc::new(move |_| overridden.clone()),
+        let subscribe_to: Arc<dyn Fn(i64, u64) -> Vec<String> + Send + Sync> = match topics {
+            Some(overridden) => Arc::new(move |_, _| overridden.clone()),
             None if exit_on_eof => {
                 let survey_consumer = self.clone();
-                Arc::new(move |at| survey_consumer.topic_names(at))
+                Arc::new(move |at, _| survey_consumer.topic_names(at))
             }
             None => {
                 let survey_consumer = self.clone();
-                Arc::new(move |at| survey_consumer.subscription_topics(at))
+                Arc::new(move |at, days| survey_consumer.subscription_topics(at, days))
             }
         };
         let kafka_config = match kafka_config {
@@ -734,7 +733,7 @@ fn is_expired_partition(error: &KafkaError) -> bool {
 // instrumenting it would funnel every per-message span into one giant trace.
 pub async fn consumer(
     id: &str,
-    subscribe_to: Arc<dyn Fn(i64) -> Vec<String> + Send + Sync>,
+    subscribe_to: Arc<dyn Fn(i64, u64) -> Vec<String> + Send + Sync>,
     output_queue: &str,
     max_in_queue: usize,
     timestamp: i64,
@@ -748,7 +747,8 @@ pub async fn consumer(
     let username = survey_consumer_config.username.clone();
     let password = survey_consumer_config.password.clone();
 
-    let subscription = subscribe_to(timestamp);
+    let window_days = survey_consumer_config.subscription_window_days;
+    let subscription = subscribe_to(timestamp, window_days);
 
     let topics: Vec<String> = if exit_on_eof {
         // One-shot drain: keep only concrete topics that have messages, exit if none.
@@ -980,7 +980,7 @@ pub async fn consumer(
                     .and_hms_opt(0, 0, 0)
                     .map(|midnight| midnight.and_utc().timestamp())
                     .unwrap_or(position_timestamp);
-                let rolled = subscribe_to(position_timestamp);
+                let rolled = subscribe_to(position_timestamp, window_days);
                 let rolled_refs: Vec<&str> = rolled.iter().map(|s| s.as_str()).collect();
                 match consumer.subscribe(&rolled_refs) {
                     Ok(()) => {
