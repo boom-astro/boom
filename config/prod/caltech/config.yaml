@@ -23,6 +23,11 @@ babamul:
   enabled: false # Set via BOOM_BABAMUL__ENABLED environment variable
   webapp_url: https://babamul.caltech.edu # Set via BOOM_BABAMUL__WEBAPP_URL environment variable
   retention_days: 7
+  oauth:
+    # Client IDs and secrets are environment-only — never put them in this
+    # file. A provider turns on when its CLIENT_ID and CLIENT_SECRET env vars
+    # are both set; see .env.example.
+    redirect_base_url: https://babamul.caltech.edu/api # Set via BOOM_BABAMUL__OAUTH__REDIRECT_BASE_URL
 posthog:
   # Server-side product analytics for the Babamul API and Kafka stream.
   # Leave project_api_key empty to disable analytics entirely.

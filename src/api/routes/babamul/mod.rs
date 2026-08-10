@@ -1,3 +1,4 @@
+pub mod oauth;
 pub mod stats;
 pub mod surveys;
 pub mod tokens;
@@ -157,6 +158,18 @@ pub struct BabamulUserToken {
     pub last_used_at: Option<i64>,
 }
 
+/// An external account (Google / GitHub / ORCID) linked to a Babamul user.
+#[derive(Serialize, Deserialize, Clone, Debug, ToSchema)]
+pub struct LinkedIdentity {
+    /// Provider slug: `google`, `github`, or `orcid`
+    pub provider: String,
+    /// Stable, provider-scoped user id — the join key for subsequent logins
+    pub subject: String,
+    /// Email the provider reported at link time (informational only)
+    pub email: Option<String>,
+    pub linked_at: i64,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, ToSchema)]
 pub struct BabamulUser {
     // Save in the database as _id, but we want to rename on the way out
@@ -174,6 +187,12 @@ pub struct BabamulUser {
     pub password_reset_token_hash: Option<String>, // SHA-256 hash of the password reset token
     pub password_reset_token_expires_at: Option<i64>, // Unix timestamp expiry for the reset token
     pub password_last_changed_at: Option<i64>, // Unix timestamp of the last successful password reset
+    /// External accounts linked to this user, empty for password-only accounts
+    #[serde(default)]
+    pub identities: Vec<LinkedIdentity>,
+    /// ORCID iD, set when the user has linked an ORCID account
+    #[serde(default)]
+    pub orcid_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, ToSchema)]
@@ -184,6 +203,9 @@ pub struct BabamulUserPublic {
     pub username: String,
     pub email: String,
     pub created_at: i64, // Unix timestamp
+    /// Provider slugs the user can sign in with, e.g. `["google", "orcid"]`
+    pub identity_providers: Vec<String>,
+    pub orcid_id: Option<String>,
 }
 
 impl From<BabamulUser> for BabamulUserPublic {
@@ -193,6 +215,12 @@ impl From<BabamulUser> for BabamulUserPublic {
             username: user.username,
             email: user.email,
             created_at: user.created_at,
+            identity_providers: user
+                .identities
+                .iter()
+                .map(|identity| identity.provider.clone())
+                .collect(),
+            orcid_id: user.orcid_id,
         }
     }
 }
@@ -320,6 +348,8 @@ pub async fn post_babamul_signup(
                 password_reset_token_hash: None,
                 password_reset_token_expires_at: None,
                 password_last_changed_at: None,
+                identities: Vec::new(),
+                orcid_id: None,
             };
 
             // Note: Kafka credentials will be created on demand via /babamul/kafka-credentials endpoint
@@ -405,7 +435,7 @@ fn generate_password() -> String {
 }
 
 /// Basic email validation tailored for activation flow (not full RFC compliance)
-fn is_valid_email(email: &str) -> bool {
+pub fn is_valid_email(email: &str) -> bool {
     // Must contain exactly one '@'
     let parts: Vec<&str> = email.split('@').collect();
     if parts.len() != 2 {

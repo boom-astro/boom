@@ -277,6 +277,27 @@ export default function Profile() {
                 <p className="font-medium">{profile.name}</p>
               </div>
             )}
+            {profile?.orcid_id && (
+              <div>
+                <Label className="text-muted-foreground">ORCID iD</Label>
+                <p className="font-medium">
+                  <a
+                    href={`https://orcid.org/${profile.orcid_id}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="underline underline-offset-4"
+                  >
+                    {profile.orcid_id}
+                  </a>
+                </p>
+              </div>
+            )}
+            {profile?.identity_providers && profile.identity_providers.length > 0 && (
+              <div>
+                <Label className="text-muted-foreground">Connected accounts</Label>
+                <p className="font-medium capitalize">{profile.identity_providers.join(", ")}</p>
+              </div>
+            )}
           </div>
         </CardContent>
       </Card>

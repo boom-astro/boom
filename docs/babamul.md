@@ -24,6 +24,119 @@ Babamul accounts are isolated from main BOOM API accounts:
 3. **Kafka access**: Use email + password with SCRAM-SHA-512 authentication
 4. **API access** (`POST /babamul/auth`): Exchange email + password for JWT token
 
+## Social sign-in (Google, GitHub, ORCID)
+
+Users can also sign in with a Google, GitHub, or ORCID account instead of an
+email and password. This is an OAuth 2.0 authorization-code flow with PKCE,
+run entirely server-side — the browser never holds a client secret.
+
+```
+browser  ──GET /babamul/oauth/{provider}/start──▶  API
+API      ──302──▶  provider consent screen
+provider ──302 ?code&state──▶  /babamul/oauth/{provider}/callback
+API      ──code + PKCE verifier──▶  provider token endpoint  (server-to-server)
+API      ──302 {webapp_url}/oauth/callback#access_token=…──▶  browser
+```
+
+The JWT comes back in the URL *fragment*, which browsers never transmit, so it
+stays out of access logs and `Referer` headers. The web app reads it, stores it
+the same way a password login would, and clears the fragment.
+
+### Endpoints
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /babamul/oauth/providers` | Providers this deployment has configured; the web app renders a button per entry |
+| `GET /babamul/oauth/{provider}/start` | Redirects to the provider. Optional `redirect_to` names an in-app path to land on afterwards |
+| `GET /babamul/oauth/{provider}/callback` | Provider redirects here; ends with a redirect back to the web app |
+| `POST /babamul/oauth/complete` | Supply an email for a sign-in that came without one; mails a confirmation code |
+| `POST /babamul/oauth/verify` | Hand back that code to finish the sign-in and receive a JWT |
+
+All of these are public — they are how a caller obtains a token in the first
+place.
+
+### Account resolution
+
+1. An account already linked to the same `(provider, subject)` pair is reused.
+   The join key is the provider's stable user id, never the email.
+2. Otherwise, if the provider asserts the email is **verified** and an account
+   with that email exists, the identity is linked to it. So a user who signed
+   up with a password can later just press the Google button.
+3. Otherwise, still with a verified email, a new account is created, already
+   activated: the provider authenticated the user and vouched for the address,
+   so there is nothing left to confirm.
+4. Otherwise — no email, or one the provider won't vouch for — the user is sent
+   through the email confirmation flow below. An unverified address is never
+   trusted on its own; that would be an account-takeover vector.
+
+Accounts created this way have no usable password. `POST /babamul/forgot-password`
+sets one if the user wants Kafka access via SCRAM.
+
+### Email confirmation (the usual ORCID path)
+
+Most ORCID researchers keep their email private, and the OIDC `id_token` only
+guarantees the ORCID iD. The API tries ORCID's public API for an address; when
+there is none, the user is asked for one and has to prove they control it.
+
+```
+callback  ──302 {webapp}/oauth/complete#ticket=…──▶  browser
+browser   ──POST /babamul/oauth/complete {ticket, email}──▶  API   (mails a code)
+browser   ──POST /babamul/oauth/verify   {ticket, code}──▶   API   (returns a JWT)
+```
+
+The **ticket** is a short-lived record in `babamul_pending_identities` holding
+the identity the provider authenticated. **No account exists until the code
+comes back** — an abandoned sign-in leaves nothing behind but a row that a TTL
+index sweeps up after 30 minutes.
+
+On confirmation, if an account already owns that address the identity is linked
+to it; otherwise a new activated account is created. Linking to an existing
+account is safe here for the same reason a password reset is: the user proved
+control of the mailbox.
+
+Wrong codes are capped at 5 attempts per ticket, after which the ticket is
+burned and the user starts over. Signing in again with a provider whose account
+never finished confirmation does *not* skip it — the only thing that can stand
+in for the confirmation is the provider re-asserting that exact address as
+verified.
+
+The ORCID iD is stored in `orcid_id` and shown on the profile page.
+
+### Configuration
+
+**Client IDs and secrets are environment-only.** They are deliberately absent
+from `config.yaml`, which is committed — see `.env.example`:
+
+```sh
+BOOM_BABAMUL__OAUTH__GOOGLE__CLIENT_ID="…"
+BOOM_BABAMUL__OAUTH__GOOGLE__CLIENT_SECRET="…"
+```
+
+A provider is enabled exactly when both halves of its credential are present;
+there is no separate `enabled` flag to drift out of step with the secret. Fill
+in neither and that button never renders, fill in one and the provider stays
+off — it fails closed rather than sending users to a consent screen that will
+reject them.
+
+Only the non-secret settings live in YAML:
+
+```yaml
+babamul:
+  oauth:
+    redirect_base_url: https://babamul.caltech.edu/api
+    orcid_sandbox: false # true points ORCID at sandbox.orcid.org
+```
+
+Register this redirect URI with each provider; it must match byte for byte:
+
+```
+{redirect_base_url}/babamul/oauth/{google|github|orcid}/callback
+```
+
+In-flight authorization requests live in the `babamul_oauth_states` collection.
+Each is consumed exactly once by the callback, which is what stops both CSRF
+and code replay; abandoned ones are swept by a TTL index created at startup.
+
 ## Kafka access
 
 After activation, connect to Kafka using:

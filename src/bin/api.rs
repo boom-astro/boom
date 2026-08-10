@@ -64,6 +64,24 @@ async fn main() -> std::io::Result<()> {
     let babamul_is_enabled = config.babamul.enabled;
     if babamul_is_enabled {
         tracing::info!("Babamul API endpoints are ENABLED");
+        // Abandoned sign-in attempts are only cleaned up by this TTL index —
+        // completed flows delete their own state, incomplete ones never do.
+        if let Err(error) = routes::babamul::oauth::ensure_oauth_state_index(&database).await {
+            log_error!(WARN, error, "failed to create the OAuth TTL indexes");
+        }
+        let enabled_providers: Vec<&str> = boom::api::oauth::OAuthProviderKind::ALL
+            .iter()
+            .filter(|provider| provider.config(&config).is_some())
+            .map(|provider| provider.as_str())
+            .collect();
+        if enabled_providers.is_empty() {
+            tracing::info!("No social sign-in providers are configured");
+        } else {
+            tracing::info!(
+                "Social sign-in enabled for: {}",
+                enabled_providers.join(", ")
+            );
+        }
     } else {
         tracing::info!("Babamul API endpoints are DISABLED");
     }
@@ -106,6 +124,11 @@ async fn main() -> std::io::Result<()> {
                     .service(routes::babamul::post_babamul_auth)
                     .service(routes::babamul::post_babamul_forgot_password)
                     .service(routes::babamul::post_babamul_reset_password)
+                    .service(routes::babamul::oauth::get_oauth_providers)
+                    .service(routes::babamul::oauth::get_oauth_start)
+                    .service(routes::babamul::oauth::get_oauth_callback)
+                    .service(routes::babamul::oauth::post_oauth_complete)
+                    .service(routes::babamul::oauth::post_oauth_verify)
                     // Protected routes
                     .service(routes::babamul::get_babamul_profile)
                     .service(routes::babamul::post_kafka_credentials)
