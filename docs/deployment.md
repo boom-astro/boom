@@ -32,9 +32,7 @@ paths point at (see [Data volume configuration](#data-volume-configuration)):
 - `/scr` — SSD, used for data that benefits from fast I/O (MongoDB, Valkey).
 - `/data` — HDD, used for larger, slower-access data (Kafka).
 
-Administrative access to the machine is via SSH as the shared ZTF root account
-used across ZTF production machines; ask the BOOM maintainers for the password,
-then add your own key to `~/.ssh/authorized_keys`. The GitHub Actions secrets
+Administrative access to the machine is via SSH using approved credentials; ask the BOOM maintainers to grant access by adding your SSH public key (preferred) or via the team's credential manager. Avoid sharing passwords over chat/email, and prefer key-based access over password login.
 and variables for the `production` environment are the source of truth for
 deployment configuration — see the
 [checklist below](#checklist-of-github-environment-variables-and-secrets).
@@ -407,8 +405,8 @@ reusable [`deploy.yaml`](/.github/workflows/deploy.yaml). There are two ways in:
   path used for rollbacks.
 
 No SSH access to the deployment host is needed for either. The job runs on the
-self-hosted runner, checks out the tag, and runs `docker compose build` /
-`docker compose --profile prod up -d`.
+self-hosted runner, checks out the tag, and runs `docker compose --profile prod -f docker-compose.yaml build` then
+`docker compose --profile prod -f docker-compose.yaml -f docker-compose.cutouts-mongo.yaml up -d`.
 
 Deploys cause brief downtime: Compose stops each service's container and starts
 a new one from the freshly built image, so expect a window of roughly half a
