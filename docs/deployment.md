@@ -132,9 +132,10 @@ A few notes for maintaining an existing Traefik deployment:
   normal operation. It is copied to the host by hand, so if it ever does change
   upstream, copy the new version over and restart Traefik — this is the only
   manual file copy in the deployment.
-- Keep `EMAIL` stable across redeploys. It does not have to be a real mailbox,
-  but changing it triggers a Let's Encrypt certificate regeneration, during
-  which HTTPS is unavailable.
+- Use a monitored mailbox for `EMAIL` (a team alias is fine) so Let's Encrypt
+  expiry and recovery notices are actually read, and keep it stable across
+  redeploys — changing it triggers a certificate regeneration, during which
+  HTTPS is unavailable.
 - The Traefik dashboard password is not critical and can be rotated freely;
   `DOMAIN` and `EMAIL` cannot, since the certificates depend on them.
 
