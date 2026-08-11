@@ -1,6 +1,6 @@
 use boom::{
     kafka::{
-        count_messages, delete_topic, AlertConsumer, AlertProducer, ZtfAlertConsumer,
+        count_messages, delete_topic, AlertConsumer, AlertProducer, StartDate, ZtfAlertConsumer,
         ZtfAlertProducer,
     },
     utils::{data::count_files_in_dir, enums::ProgramId, testing::TEST_CONFIG_FILE},
@@ -107,7 +107,7 @@ async fn test_produce_and_consume_from_archive() {
     ztf_alert_consumer
         .consume(
             Some(vec![topic]),
-            timestamp,
+            StartDate::Pinned(timestamp),
             None,
             Some(1),
             None,
@@ -443,6 +443,7 @@ async fn test_consumer_rolls_over_and_skips_old() {
                     &oq,
                     0,
                     cold_start_ts,
+                    true,
                     &config,
                     &kafka_cfg,
                     false,
@@ -634,20 +635,34 @@ fn test_lsst_subscription_topic_is_static() {
     assert_eq!(at_epoch, much_later);
 }
 
-// Rollover must not hijack a consumer that was pinned to an explicit past date.
+// Rollover intent is stated by the caller, not inferred from the timestamp.
 // The throughput benchmark runs `kafka_consumer ztf 20250311`, and chasing the
 // wall clock would unsubscribe it from the only topic it was started to read.
 #[test]
-fn test_pinned_past_date_does_not_follow_the_clock() {
-    use boom::kafka::tracks_current_date;
+fn test_start_date_signals_rollover_intent() {
+    use boom::kafka::StartDate;
 
-    let today = chrono::NaiveDate::from_ymd_opt(2026, 8, 9).unwrap();
-    let pinned = chrono::NaiveDate::from_ymd_opt(2025, 3, 11).unwrap();
+    assert!(StartDate::Current.follows_clock());
+    assert!(!StartDate::Pinned(1_741_651_200).follows_clock());
 
-    assert!(!tracks_current_date(pinned, today));
+    // Pinned to *today* is still pinned -- the case an inferred check, comparing
+    // the start date against the current date, would get wrong.
+    let today_midnight = chrono::Utc::now()
+        .date_naive()
+        .and_hms_opt(0, 0, 0)
+        .unwrap()
+        .and_utc()
+        .timestamp();
+    assert!(!StartDate::Pinned(today_midnight).follows_clock());
+
+    // Pinned reports exactly what it was given; Current resolves to a UTC midnight.
+    assert_eq!(StartDate::Pinned(1_741_651_200).timestamp(), 1_741_651_200);
+    let current = StartDate::Current.timestamp();
+    assert_eq!(current % 86_400, 0, "should resolve to a UTC midnight");
+    let now = chrono::Utc::now().timestamp();
     assert!(
-        tracks_current_date(today, today),
-        "a consumer started on the live date must keep rolling over"
+        (0..86_400).contains(&(now - current)),
+        "should resolve to the current UTC day"
     );
 }
 

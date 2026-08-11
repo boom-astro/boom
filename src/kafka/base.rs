@@ -459,7 +459,7 @@ pub trait AlertConsumer: Sized + Clone + Send + Sync + 'static {
     async fn consume(
         &self,
         topics: Option<Vec<String>>,
-        timestamp: i64,
+        start: StartDate,
         kafka_config: Option<KafkaConsumerConfig>,
         n_threads: Option<usize>,
         max_in_queue: Option<usize>,
@@ -468,6 +468,10 @@ pub trait AlertConsumer: Sized + Clone + Send + Sync + 'static {
     ) -> Result<(), ConsumerError> {
         let config = AppConfig::from_path(config_path)?;
         let survey = self.survey();
+        // Resolved once here, not per worker, so every thread agrees on the day
+        // even if they spawn either side of UTC midnight.
+        let timestamp = start.timestamp();
+        let follow_current_date = start.follows_clock();
 
         // Resolves the topics to subscribe to for a given instant. The consumer
         // loop re-invokes this on every UTC-date rollover and re-subscribes, so
@@ -516,6 +520,7 @@ pub trait AlertConsumer: Sized + Clone + Send + Sync + 'static {
                     &output_queue,
                     max_in_queue,
                     timestamp,
+                    follow_current_date,
                     &config,
                     &kafka_config,
                     exit_on_eof,
@@ -703,15 +708,42 @@ fn reposition_new_partitions(
     Ok(())
 }
 
-/// Whether a consumer that started on `start_date` should keep following the
-/// clock onto each new daily topic.
+/// Where a consumer starts reading, and whether it advances with the clock.
 ///
-/// True only when it started on the live date, which is the case for the
-/// long-running production consumers (no explicit date, so they default to
-/// today). A run pinned to a past date is doing a replay or a backfill and must
-/// stay there.
-pub fn tracks_current_date(start_date: chrono::NaiveDate, current_date: chrono::NaiveDate) -> bool {
-    start_date == current_date
+/// The caller states which it wants rather than having it inferred from the
+/// timestamp. Inferring would get two cases wrong: a pinned run that happens to
+/// name today's date is still a pinned run, and a consumer started moments
+/// before UTC midnight would race the comparison.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartDate {
+    /// Begin at the current UTC day and roll onto each new daily topic as
+    /// midnight passes. What the long-running consumers use.
+    Current,
+    /// Pinned to one instant — replay, backfill, benchmarks. Never rolls over:
+    /// advancing it would unsubscribe the consumer from the very topic it was
+    /// started to read.
+    Pinned(i64),
+}
+
+impl StartDate {
+    /// Unix seconds that newly-assigned partitions are positioned to.
+    pub fn timestamp(self) -> i64 {
+        match self {
+            StartDate::Current => {
+                let now = chrono::Utc::now();
+                now.date_naive()
+                    .and_hms_opt(0, 0, 0)
+                    .map(|midnight| midnight.and_utc().timestamp())
+                    .unwrap_or_else(|| now.timestamp())
+            }
+            StartDate::Pinned(timestamp) => timestamp,
+        }
+    }
+
+    /// Whether the subscription should roll onto each new UTC day.
+    pub fn follows_clock(self) -> bool {
+        matches!(self, StartDate::Current)
+    }
 }
 
 /// Whether a poll error refers to a partition whose topic no longer exists
@@ -737,6 +769,8 @@ pub async fn consumer(
     output_queue: &str,
     max_in_queue: usize,
     timestamp: i64,
+    // Whether to roll the subscription onto each new UTC day; see `StartDate`.
+    follow_current_date: bool,
     config: &AppConfig,
     survey_consumer_config: &KafkaConsumerConfig,
     exit_on_eof: bool,
@@ -938,11 +972,6 @@ pub async fn consumer(
         .map(|dt| dt.date_naive())
         .unwrap_or_else(|| chrono::Utc::now().date_naive());
     let mut position_timestamp = timestamp;
-    // Only a consumer that started on the live date should chase the clock. A
-    // run pinned to an explicit past date — replay, backfill, the throughput
-    // benchmark — must stay on the date it was asked for; rolling it forward
-    // would unsubscribe it from the very topic it was started to read.
-    let follow_current_date = tracks_current_date(subscribed_date, chrono::Utc::now().date_naive());
 
     // Expired-partition poll errors repeat indefinitely, so they get a short
     // backoff (enough to keep the loop off a hot spin) and a throttled log.
