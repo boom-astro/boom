@@ -27,18 +27,13 @@ function errorMessage(err: unknown): string {
     : String(err);
 }
 
-/** Normalize either shape the API may return into a list of labelled scores. */
+/** The model's class probabilities, most likely first. */
 function toScoreRows(result: HyraxResult): Array<{ label: string; value: number }> {
-  if (result.classes) {
-    return Object.entries(result.classes)
-      .filter(([, v]) => typeof v === 'number' && Number.isFinite(v))
-      .sort((a, b) => b[1] - a[1])
-      .map(([label, value]) => ({ label, value }));
-  }
-  if (typeof result.score === 'number' && Number.isFinite(result.score)) {
-    return [{ label: 'Score', value: result.score }];
-  }
-  return [];
+  if (!result.classes) return [];
+  return Object.entries(result.classes)
+    .filter(([, v]) => typeof v === 'number' && Number.isFinite(v))
+    .sort((a, b) => b[1] - a[1])
+    .map(([label, value]) => ({ label, value }));
 }
 
 /** The extras an evidential model reports beside its probabilities, if it reports any. */
@@ -251,19 +246,16 @@ export default function HyraxClassification() {
                 <div className="flex items-start gap-2">
                   <span className="font-medium">2. Press Run:</span>
                   <span>
-                    Image models score the cutouts of this object's brightest alert; light-curve
-                    models such as TEMPO score its whole photometry instead. Either may take a few
-                    seconds.
+                    The model is run against this object's photometry. This may take a few seconds.
                   </span>
                 </div>
                 <div className="flex items-start gap-2">
                   <span className="font-medium">3. Read the scores:</span>
                   <span>
-                    Multiclass models list every class sorted by probability; binary models show a single score.
-                    Bars are colour-coded green (&gt;70%), yellow (40–70%), red (&lt;40%). Evidential
-                    models also report <span className="font-medium">vacuity</span> — how little
-                    evidence they had, where a high value means the probabilities below rest on very
-                    little light curve.
+                    Every class is listed, sorted by probability. Bars are colour-coded green
+                    (&gt;70%), yellow (40–70%), red (&lt;40%). Evidential models also report{' '}
+                    <span className="font-medium">vacuity</span> — how little evidence they had,
+                    where a high value means the probabilities rest on very little light curve.
                   </span>
                 </div>
               </div>

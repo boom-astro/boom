@@ -51,6 +51,10 @@ class ClassifyRequest(BaseModel):
     # boom's photometry block: {"prv_candidates": [...], "prv_nondetections": [...],
     # "fp_hists": [...]}. Only detections carry a magnitude, so only they are used.
     photometry: dict[str, Any] = Field(default_factory=dict)
+    # The scored alert's candidate block, enrichment and cross-matches. boom sends
+    # this to every model; TEMPO is photometry-only and ignores it. Declared anyway
+    # so the field is part of this service's contract rather than silently dropped.
+    metadata: dict[str, Any] = Field(default_factory=dict)
     model: str | None = None
     # Forced photometry is a different measurement of the same epochs; mixing it
     # with alert magnitudes changes what the model sees, so it stays opt-in.

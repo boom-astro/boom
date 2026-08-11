@@ -355,26 +355,16 @@ export type ClassificationModel = {
   id: string;
   name: string;
   description: string;
-  /**
-   * Class labels the model emits, in output order. Empty when the labels are not
-   * known ahead of a run: either the model emits a single score, or its backend
-   * names its own classes in the result.
-   */
-  classes: string[];
 };
 
 /** Result of running a Hyrax model on a single object, on demand. */
 export type HyraxClassification = {
   model?: string;
-  /** Candid of the alert whose cutouts were scored. Absent for light-curve models. */
-  candid?: number;
-  /** Class name -> probability, for multiclass models. */
+  /** Class name -> probability. The model names its own classes. */
   classes?: Record<string, number>;
-  /** Single score, for models that emit one value. */
-  score?: number;
-  /** Highest-probability class, when the backend names one itself. */
+  /** Highest-probability class. */
   pred_class?: string;
-  /** Evidential uncertainty, 0 (well-evidenced) to 1. Only evidential models report it. */
+  /** Evidential uncertainty, 0 (well-evidenced) to 1. */
   vacuity?: number;
   /** Entropy of the predicted class distribution. */
   predictive_entropy?: number;

@@ -23,10 +23,6 @@ pub enum ModelError {
     ModelOutputToVecError,
     #[error("missing feature in alert: {0}")]
     MissingFeature(&'static str),
-    #[error("unknown model: {0}")]
-    UnknownModel(String),
-    #[error("model artifact not found on disk: {0}")]
-    ModelArtifactNotFound(String),
     #[error("ORT_DYLIB_PATH is not set on Linux; ONNX Runtime cannot be loaded. Please set ORT_DYLIB_PATH to the path of your libonnxruntime.so.")]
     MissingOrtDylibPath,
 }

@@ -8,7 +8,6 @@ use boom::api::email::EmailService;
 use boom::api::observability::request_metrics_middleware;
 use boom::api::routes;
 use boom::conf::{load_dotenv, AppConfig};
-use boom::enrichment::models::HyraxModelRegistry;
 use boom::utils::cutouts::CutoutStorage;
 use boom::utils::enums::Survey;
 use boom::utils::o11y::{
@@ -61,11 +60,6 @@ async fn main() -> std::io::Result<()> {
     }
     let cutout_storages = web::Data::new(cutout_storage_map);
 
-    // Hyrax models are run on demand by the classify endpoint. The registry loads
-    // each ONNX artifact on first use rather than here, so the API starts fine on
-    // deployments where the models are not installed.
-    let hyrax_models = web::Data::new(HyraxModelRegistry::new());
-
     let babamul_is_enabled = config.babamul.enabled;
     if babamul_is_enabled {
         tracing::info!("Babamul API endpoints are ENABLED");
@@ -84,7 +78,6 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(auth.clone()))
             .app_data(web::Data::new(email_service.clone()))
             .app_data(cutout_storages.clone())
-            .app_data(hyrax_models.clone())
             .wrap(from_fn(request_metrics_middleware));
 
         // Conditionally register Babamul endpoints if enabled
