@@ -730,7 +730,7 @@ services:
     networks:
       - boom
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3200/ready | grep -q 'ready' || exit 1"]
+      test: ["CMD", "/busybox/sh", "-c", "/busybox/wget -qO- http://127.0.0.1:3200/ready | /busybox/grep -q 'ready' || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 10
