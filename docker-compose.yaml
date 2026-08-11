@@ -230,7 +230,14 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 20s
+      # boom-api does all of its init before it binds the port -- mongo connect,
+      # auth setup, and a cutout storage client per survey (see src/bin/api.rs)
+      # -- so nothing answers `/` until that finishes. With a 20s start_period
+      # the container was declared unhealthy ~70s in (20s + 5 x 10s), which is
+      # a routine cold start when mongo is restarting alongside it, and the
+      # api-down alert then paged 3m later. Docker ends the start period at the
+      # first successful check, so a generous value costs nothing on fast boots.
+      start_period: 180s
     profiles:
       - prod
       - api

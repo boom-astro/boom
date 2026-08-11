@@ -245,18 +245,80 @@ groups:
         # into the fault before it reports unhealthy; 3m on top of that rides
         # out a restart without waiting long to page on a real outage.
         for: 3m
-        # Unlike every other rule here, NoData means Alerting: the exporter
-        # lists stopped containers too (all=1), so the series only disappears if
-        # the container was removed outright -- which is itself an outage. The
-        # tradeoff is that a broken docker-metadata-exporter or Prometheus also
-        # pages, which is the right way for a down-detector to fail.
-        noDataState: Alerting
+        # NoData used to mean Alerting here, on the reasoning that the series
+        # only disappears if the container was removed outright. It also
+        # disappears whenever the scrape fails: Prometheus writes stale markers
+        # for every series of a failed target immediately, so a few minutes of
+        # a struggling docker-metadata-exporter paged as "API is down" while the
+        # API was serving traffic normally. A down-detector should still fail
+        # loudly, so that case now pages under its own name -- see
+        # observability-blind below.
+        noDataState: NoData
         execErrState: Error
         labels:
           severity: critical
         annotations:
           summary: 'The boom API container is not running or is failing its healthcheck'
           description: 'Check `docker ps` for the api container health, then its logs for panics (a panicking actix worker keeps the process alive but fails every request, including `/`).'
+
+      - uid: observability-blind
+        title: Container health monitoring is blind
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              # docker-metadata-exporter is the only source of container
+              # liveness and healthcheck state, so while it is unreachable the
+              # api-down rule above cannot fire at all. That silence is the
+              # thing worth paging on -- but as itself, not as an API outage.
+              #
+              # min() covers the multi-target case; the outer `or vector(0)`
+              # covers the target vanishing from the Prometheus config
+              # entirely, which no NoData handling would otherwise catch as a
+              # failure of *this* rule's own datasource.
+              expr: |
+                min(up{job="docker-metadata"}) or vector(0)
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 0
+              to: 0
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    params: [1]
+                    type: lt
+                  operator:
+                    type: and
+                  query:
+                    params: [C]
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+        # Longer than api-down's 3m: a couple of missed scrapes while the Docker
+        # daemon is busy with an image build is normal on this host (it also
+        # runs the self-hosted Actions runner), and unlike a real outage there
+        # is nothing to lose by confirming it first.
+        for: 10m
+        noDataState: Alerting
+        execErrState: Alerting
+        labels:
+          severity: critical
+        annotations:
+          summary: 'Prometheus cannot scrape docker-metadata-exporter, so container health alerts are silent'
+          description: 'The API-down and container health alerts depend on this exporter and cannot fire while it is unreachable. Check the docker-metadata-exporter and docker-socket-proxy containers and the Prometheus targets page.'
 
   - orgId: 1
     name: pipeline
