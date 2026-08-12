@@ -38,7 +38,7 @@ use std::{num::NonZero, sync::Arc, thread, time::Duration};
 use clap::Parser;
 use redis::AsyncCommands;
 use tokio::sync::{mpsc, oneshot};
-use tracing::{debug, info, info_span, span, warn, Instrument};
+use tracing::{debug, error, info, info_span, span, warn, Instrument};
 
 #[derive(Parser)]
 #[command(
@@ -223,15 +223,30 @@ async fn run(args: Cli) {
                 break;
             }
             _ = tokio::time::sleep(Duration::from_secs(60)) => {
+                let total = worker_handles.len();
                 let live = worker_handles
                     .iter()
                     .filter(|(h, _)| !h.is_finished())
                     .count();
-                info!(
-                    live,
-                    total = worker_handles.len(),
-                    "heartbeat: workers running"
-                );
+                let dead = total - live;
+                if live == 0 {
+                    // Every worker has exited; nothing is draining the queue.
+                    // Log loudly and shut down instead of idling forever.
+                    error!(
+                        total,
+                        "all enrichment-only workers have died; nothing is draining the queue, shutting down"
+                    );
+                    break;
+                } else if dead > 0 {
+                    warn!(
+                        live,
+                        dead,
+                        total,
+                        "heartbeat: some enrichment-only workers have died; queue is draining at reduced capacity"
+                    );
+                } else {
+                    info!(live, total, "heartbeat: workers running");
+                }
             }
         }
     }
@@ -258,6 +273,31 @@ async fn main() {
 
     let (subscriber, _guard) = build_subscriber().expect("failed to build subscriber");
     tracing::subscriber::set_global_default(subscriber).expect("failed to install subscriber");
+
+    // Worker enrichment loops run on dedicated OS threads, so a panic there
+    // otherwise only prints to stderr and surfaces as a bare "worker panicked"
+    // when the thread is joined. Install a hook that records the panic message
+    // and location through tracing so failures are visible in structured logs,
+    // then delegate to the default hook to preserve the usual stderr backtrace.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}", l.file(), l.line()))
+            .unwrap_or_else(|| "unknown".to_string());
+        let message = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "<non-string panic payload>".to_string());
+        error!(
+            panic.location = %location,
+            panic.message = %message,
+            "worker thread panicked"
+        );
+        default_hook(info);
+    }));
 
     run(args).await;
 }

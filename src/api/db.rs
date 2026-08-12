@@ -38,6 +38,7 @@ async fn init_api_admin_user(
                 .expect("failed to hash password"),
             email: admin_email.clone(),
             is_admin: true, // Set the user as an admin
+            watchlist_access: Vec::new(),
         };
         match users_collection.insert_one(admin_user).await {
             Ok(_) => {
@@ -93,6 +94,7 @@ async fn init_api_admin_user(
                     .expect("failed to hash password"),
                 email: admin_email.clone(),
                 is_admin: true, // Ensure the user remains an admin
+                watchlist_access: existing_user.watchlist_access.clone(),
             };
             users_collection
                 .replace_one(doc! { "_id": &existing_user.id }, updated_user)

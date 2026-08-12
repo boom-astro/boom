@@ -590,6 +590,69 @@ fn default_password_reset_cooldown_minutes() -> u32 {
     15
 }
 
+/// Server-side PostHog product analytics.
+///
+/// Analytics are only sent when `project_api_key` is non-empty, so leaving it
+/// unset (the default) disables capture entirely without any other change.
+/// The key is a PostHog *project* (write-only, publicly shippable) key — the
+/// same class of key the web app already ships in `VITE_PUBLIC_POSTHOG_KEY`.
+#[derive(Deserialize, Debug, Clone)]
+pub struct PostHogConfig {
+    /// PostHog project API key. Empty disables analytics.
+    #[serde(default)]
+    pub project_api_key: String,
+    /// PostHog ingestion host, e.g. `https://us.i.posthog.com`.
+    #[serde(default = "default_posthog_host")]
+    pub host: String,
+    /// How often the buffered event queue is flushed to PostHog, in seconds.
+    #[serde(default = "default_posthog_flush_interval_seconds")]
+    pub flush_interval_seconds: u64,
+    /// Maximum number of events buffered before excess events are dropped.
+    ///
+    /// Analytics must never apply backpressure to API requests, so the queue is
+    /// bounded and overflow is dropped (and counted) rather than awaited.
+    #[serde(default = "default_posthog_queue_capacity")]
+    pub queue_capacity: usize,
+    /// How often Kafka consumer-group consumption is sampled, in seconds.
+    #[serde(default = "default_posthog_consumption_interval_seconds")]
+    pub consumption_interval_seconds: u64,
+}
+
+impl Default for PostHogConfig {
+    fn default() -> Self {
+        PostHogConfig {
+            project_api_key: String::new(),
+            host: default_posthog_host(),
+            flush_interval_seconds: default_posthog_flush_interval_seconds(),
+            queue_capacity: default_posthog_queue_capacity(),
+            consumption_interval_seconds: default_posthog_consumption_interval_seconds(),
+        }
+    }
+}
+
+impl PostHogConfig {
+    /// Whether analytics capture is enabled (i.e. a project key is configured).
+    pub fn is_enabled(&self) -> bool {
+        !self.project_api_key.trim().is_empty()
+    }
+}
+
+fn default_posthog_host() -> String {
+    "https://us.i.posthog.com".to_string()
+}
+
+fn default_posthog_flush_interval_seconds() -> u64 {
+    10
+}
+
+fn default_posthog_queue_capacity() -> usize {
+    10_000
+}
+
+fn default_posthog_consumption_interval_seconds() -> u64 {
+    5 * 60
+}
+
 #[derive(Deserialize, Debug, Clone)]
 pub struct WorkerConfig {
     pub n_workers: usize,
@@ -789,6 +852,8 @@ pub struct AppConfig {
     pub redis: RedisConfig,
     #[serde(default)]
     pub babamul: BabamulConfig,
+    #[serde(default)]
+    pub posthog: PostHogConfig,
     pub kafka: KafkaConfig,
     #[serde(default)]
     pub crossmatch: HashMap<Survey, Vec<CatalogXmatchConfig>>,

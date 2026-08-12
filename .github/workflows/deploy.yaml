@@ -25,6 +25,10 @@ jobs:
       BOOM_DATA_VALKEY_PATH: ${{ vars.BOOM_DATA_VALKEY_PATH }}
       BOOM_DATA_KAFKA_PATH: ${{ vars.BOOM_DATA_KAFKA_PATH }}
       BOOM_CUTOUTS_MONGO_VOLUME: ${{ vars.BOOM_DATA_CUTOUTS_MONGODB_PATH }}
+      # Caps each mongo's WiredTiger cache. Unset, both size off host RAM and
+      # together claim all of it. See .env.example for sizing.
+      BOOM_MONGO_MEM_LIMIT: ${{ vars.BOOM_MONGO_MEM_LIMIT }}
+      BOOM_CUTOUTS_MONGO_MEM_LIMIT: ${{ vars.BOOM_CUTOUTS_MONGO_MEM_LIMIT }}
       BOOM_CUTOUTS_STORAGE__PASSWORD: ${{ secrets.BOOM_CUTOUTS_STORAGE__PASSWORD }}
       # Toggles babamul on without editing config.yaml — compose injects it into
       # the api and schedulers. Other babamul settings (webapp_url, etc.) and the
@@ -43,6 +47,14 @@ jobs:
       VITE_PRERELEASE_MODE: ${{ vars.VITE_PRERELEASE_MODE }}
       VITE_PUBLIC_POSTHOG_KEY: ${{ vars.VITE_PUBLIC_POSTHOG_KEY }}
       VITE_PUBLIC_POSTHOG_HOST: ${{ vars.VITE_PUBLIC_POSTHOG_HOST }}
+      # Server-side PostHog analytics for the Babamul API and Kafka stream.
+      # Deliberately reuses the VITE_* values rather than taking its own
+      # variables: web and API activity must land on the same PostHog project
+      # for identity merging to work, and a project key is the same write-only
+      # public key in both places. One variable to set, one to keep in sync,
+      # and clearing it turns off web and server capture together.
+      BOOM_POSTHOG__PROJECT_API_KEY: ${{ vars.VITE_PUBLIC_POSTHOG_KEY }}
+      BOOM_POSTHOG__HOST: ${{ vars.VITE_PUBLIC_POSTHOG_HOST }}
       STACK_NAME: boom
       PROMETHEUS_USER: ${{ vars.PROMETHEUS_USER }}
       PROMETHEUS_HASHED_PASSWORD: ${{ secrets.PROMETHEUS_HASHED_PASSWORD }}
@@ -160,3 +172,15 @@ jobs:
           docker compose --profile prod
           -f docker-compose.yaml
           -f docker-compose.cutouts-mongo.yaml up -d
+      # Grafana's provisioning lives in a bind mount (config/grafana/provisioning),
+      # so editing it doesn't change the service definition and `up -d` above leaves
+      # the running container alone. Dashboards survive that (the file provider
+      # re-reads them every 30s), but alerting provisioning is read ONCE at startup —
+      # without this, new/changed alert rules, contact points, and notification
+      # policies silently never take effect. Restarting is cheap: all Grafana state
+      # lives in the grafana_data volume.
+      - run: >
+          docker compose --profile prod
+          -f docker-compose.yaml
+          -f docker-compose.cutouts-mongo.yaml
+          up -d --force-recreate --no-deps grafana

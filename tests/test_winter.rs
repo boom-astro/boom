@@ -2,9 +2,13 @@
 use boom::{
     alert::{sanitize_winter_avro, AlertWorker, ProcessAlertStatus, WinterRawAvroAlert},
     conf::{get_test_cutout_storage, get_test_db},
+    filter::{alert_to_avro_bytes, load_alert_schema, FilterWorker, WinterFilterWorker},
     utils::{
         enums::Survey,
-        testing::{drop_alert_from_collections, winter_alert_worker, AlertRandomizer},
+        testing::{
+            drop_alert_from_collections, insert_custom_test_filter, remove_test_filter,
+            winter_alert_worker, AlertRandomizer, TEST_CONFIG_FILE,
+        },
     },
 };
 use mongodb::bson::doc;
@@ -116,6 +120,63 @@ async fn test_process_winter_alert() {
     assert_eq!(aux.get_str("_id").unwrap(), &object_id);
     let prv_candidates = aux.get_array("prv_candidates").unwrap();
     assert!(!prv_candidates.is_empty());
+
+    drop_alert_from_collections(candid, &Survey::Winter)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_filter_winter_alert() {
+    let mut alert_worker = winter_alert_worker().await;
+
+    let (candid, object_id, _ra, _dec, bytes_content) =
+        AlertRandomizer::new_randomized(Survey::Winter).get().await;
+    let status = alert_worker.process_alert(&bytes_content).await.unwrap();
+    assert_eq!(status, ProcessAlertStatus::Added(candid));
+
+    // A permissive filter so the test is independent of the fixture's magnitude;
+    // this still exercises the full WINTER filter path (build_loaded_filter ->
+    // build_filter_pipeline -> build_winter_filter_pipeline).
+    let pipeline = "[{\"$match\": {\"candidate.jd\": {\"$gt\": 0.0}}}, {\"$project\": {\"objectId\": 1, \"annotations.mag_now\": {\"$round\": [\"$candidate.magpsf\", 2]}}}]";
+    let filter_id = insert_custom_test_filter(&Survey::Winter, pipeline)
+        .await
+        .unwrap();
+
+    let mut filter_worker =
+        WinterFilterWorker::new(TEST_CONFIG_FILE, Some(vec![filter_id.clone()]))
+            .await
+            .unwrap();
+    let result = filter_worker.process_alerts(&[format!("{}", candid)]).await;
+
+    remove_test_filter(&filter_id, &Survey::Winter)
+        .await
+        .unwrap();
+    assert!(result.is_ok(), "Filter failed: {:?}", result.err());
+
+    let alerts_output = result.unwrap();
+    assert_eq!(alerts_output.len(), 1);
+    let alert = &alerts_output[0];
+    assert_eq!(alert.candid, candid);
+    assert_eq!(&alert.object_id, &object_id);
+    assert_eq!(alert.survey, Survey::Winter);
+    assert!(!alert.photometry.is_empty());
+
+    let filter_passed = alert
+        .filters
+        .iter()
+        .find(|f| f.filter_id == filter_id)
+        .unwrap();
+    assert!(filter_passed.annotations.contains("mag_now"));
+
+    // verify cutouts are non-empty
+    assert!(!alert.cutout_science.is_empty());
+    assert!(!alert.cutout_template.is_empty());
+    assert!(!alert.cutout_difference.is_empty());
+
+    // verify that we can convert the alert to avro bytes
+    let schema = load_alert_schema().unwrap();
+    let _ = alert_to_avro_bytes(&alert, &schema).unwrap();
 
     drop_alert_from_collections(candid, &Survey::Winter)
         .await

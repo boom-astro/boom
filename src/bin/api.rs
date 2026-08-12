@@ -1,6 +1,7 @@
 #![recursion_limit = "512"] // for large bson docs and CutoutStorage's s3 client
 use actix_web::middleware::from_fn;
 use actix_web::{middleware::Logger, web, App, HttpServer};
+use boom::api::analytics::AnalyticsClient;
 use boom::api::auth::{auth_middleware, babamul_auth_middleware, get_auth};
 use boom::api::db::build_db_api;
 use boom::api::docs::{ApiDoc, BabamulApiDoc};
@@ -67,6 +68,15 @@ async fn main() -> std::io::Result<()> {
         tracing::info!("Babamul API endpoints are DISABLED");
     }
 
+    // Product analytics. Built once and shared by every worker: the background
+    // flush task must be spawned a single time, not once per worker thread.
+    let analytics = web::Data::new(AnalyticsClient::from_config(&config.posthog));
+
+    // Attribute Kafka stream consumption back to Babamul users, feeding both
+    // Grafana (OTel gauges) and PostHog (per-user deltas). Also spawned once,
+    // outside the `HttpServer::new` closure.
+    boom::api::consumption::spawn(config.clone(), database.clone(), analytics.as_ref().clone());
+
     // Create API docs from OpenAPI spec
     let api_doc = ApiDoc::openapi();
     let babamul_doc = BabamulApiDoc::openapi();
@@ -78,6 +88,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(auth.clone()))
             .app_data(web::Data::new(email_service.clone()))
             .app_data(cutout_storages.clone())
+            .app_data(analytics.clone())
             .wrap(from_fn(request_metrics_middleware));
 
         // Conditionally register Babamul endpoints if enabled
@@ -130,6 +141,7 @@ async fn main() -> std::io::Result<()> {
                 .service(routes::kafka::delete_kafka_credentials)
                 .service(routes::filters::post_filter)
                 .service(routes::filters::patch_filter)
+                .service(routes::filters::validate_filter)
                 .service(routes::filters::get_filters)
                 .service(routes::filters::get_filter)
                 .service(routes::filters::post_filter_version)
@@ -139,6 +151,7 @@ async fn main() -> std::io::Result<()> {
                 .service(routes::users::post_user)
                 .service(routes::users::get_users)
                 .service(routes::users::delete_user)
+                .service(routes::users::patch_watchlist_access)
                 .service(routes::catalogs::get_catalogs)
                 .service(routes::catalogs::get_catalog_indexes)
                 .service(routes::catalogs::get_catalog_sample)

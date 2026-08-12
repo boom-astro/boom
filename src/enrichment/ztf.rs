@@ -19,7 +19,7 @@ use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use serde::{Deserialize, Deserializer};
 use std::sync::Arc;
-use tracing::{instrument, trace, warn};
+use tracing::{debug, instrument, trace, warn};
 #[cfg(all(feature = "gpu", target_os = "linux"))]
 use villar_pso::gpu::{GpuBatchData, SourceData};
 #[cfg(all(feature = "gpu", target_os = "macos"))]
@@ -526,6 +526,8 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         let mut processed_alerts = Vec::new();
         let mut enriched_alerts: Vec<BabamulZtfAlert> = Vec::new();
 
+        let batch_size = alerts.len();
+        let mut skipped_empty_lightcurve = 0usize;
         let mut work_items: Vec<AlertWork> = Vec::with_capacity(alerts.len());
         #[cfg(feature = "gpu")]
         let mut villar_inputs: Vec<(i64, Vec<PhotometryMag>)> = Vec::new();
@@ -534,11 +536,22 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             let cutouts = candid_to_cutouts
                 .remove(&candid)
                 .ok_or_else(|| EnrichmentWorkerError::MissingCutouts(candid))?;
-
             // Compute numerical and boolean features from lightcurve and candidate analysis
             #[cfg_attr(not(feature = "gpu"), allow(unused_variables))]
             let (properties, all_bands_properties, programid, lightcurve) =
-                self.get_alert_properties(&alert).await?;
+                match self.get_alert_properties(&alert).await {
+                    Ok(v) => v,
+                    // No usable photometry: skip this alert (leave it un-enriched)
+                    // rather than aborting the whole batch, so the queue keeps draining.
+                    // Detail is logged per-candid at DEBUG; the per-batch total is
+                    // summarized at WARN below to avoid flooding logs at backfill scale.
+                    Err(EnrichmentWorkerError::EmptyLightcurve(_)) => {
+                        skipped_empty_lightcurve += 1;
+                        debug!(candid, "skipping alert: empty lightcurve after filtering");
+                        continue;
+                    }
+                    Err(e) => return Err(e),
+                };
             #[cfg(feature = "gpu")]
             if self
                 .models
@@ -557,6 +570,15 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                 cutouts,
                 alert,
             });
+        }
+
+        if skipped_empty_lightcurve > 0 {
+            warn!(
+                skipped = skipped_empty_lightcurve,
+                enriched = work_items.len(),
+                batch_size,
+                "skipped alerts with empty lightcurves during enrichment"
+            );
         }
 
         // Run ML classification using shared models
@@ -599,7 +621,11 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             }
         }
 
-        let _ = self.client.bulk_write(updates).await?.modified_count;
+        // `updates` can be empty if every alert in the batch was skipped (e.g.
+        // all had empty lightcurves); bulk_write rejects an empty operation list.
+        if !updates.is_empty() {
+            let _ = self.client.bulk_write(updates).await?.modified_count;
+        }
 
         // GPU batch Villar light curve fitting — only when SharedModels was
         // loaded with a GPU device (i.e. config.gpu.enabled is true).
@@ -772,6 +798,15 @@ impl ZtfEnrichmentWorker {
         let mut lightcurve = [prv_candidates, fp_hists].concat();
 
         prepare_photometry(&mut lightcurve);
+
+        // Alerts whose photometry filters down to nothing (common when
+        // reprocessing historical alerts that predate the SNR fields) cannot be
+        // meaningfully enriched: peak/faintest/rate features are undefined and
+        // the ML metadata would be computed from placeholder zeros. Signal the
+        // caller to skip this alert rather than write garbage scores.
+        if lightcurve.is_empty() {
+            return Err(EnrichmentWorkerError::EmptyLightcurve(alert.candid));
+        }
         let (photstats, all_bands_properties, stationary) = analyze_photometry(&lightcurve);
 
         // Compute multisurvey photstats (including LSST if available, other surveys can be added later)

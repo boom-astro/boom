@@ -194,6 +194,70 @@ groups:
           summary: OTel Collector exporter is failing to send metric points
           description: 'Check otel-collector logs and the downstream Prometheus OTLP receiver for errors.'
 
+      - uid: api-down
+        title: API is down
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              # docker_container_up is 0 when the container is not running OR is
+              # failing its Docker healthcheck. The healthcheck arm is the one
+              # that matters: in #562 every request panicked its actix worker, so
+              # `/` failed forever while the process itself stayed alive and the
+              # container kept running. Nothing else in the stack saw that --
+              # cAdvisor reports resource usage, not health, and the container
+              # never restarted, so container-restart-flapping stayed silent too.
+              #
+              # min() so that any unhealthy replica trips this, not just an
+              # average across them.
+              expr: |
+                min by (compose_service) (docker_container_up{compose_project="boom",compose_service="api"})
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 0
+              to: 0
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    params: [1]
+                    type: lt
+                  operator:
+                    type: and
+                  query:
+                    params: [C]
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+        # The healthcheck is 10s x 5 retries, so the container is already ~50s
+        # into the fault before it reports unhealthy; 3m on top of that rides
+        # out a restart without waiting long to page on a real outage.
+        for: 3m
+        # Unlike every other rule here, NoData means Alerting: the exporter
+        # lists stopped containers too (all=1), so the series only disappears if
+        # the container was removed outright -- which is itself an outage. The
+        # tradeoff is that a broken docker-metadata-exporter or Prometheus also
+        # pages, which is the right way for a down-detector to fail.
+        noDataState: Alerting
+        execErrState: Error
+        labels:
+          severity: critical
+        annotations:
+          summary: 'The boom API container is not running or is failing its healthcheck'
+          description: 'Check `docker ps` for the api container health, then its logs for panics (a panicking actix worker keeps the process alive but fails every request, including `/`).'
+
   - orgId: 1
     name: pipeline
     folder: boom
@@ -210,12 +274,29 @@ groups:
             datasourceUid: prometheus
             model:
               refId: A
-              # min_over_time means the queue's low-water mark over the last 30m is
-              # still above the threshold: even at its emptiest it never drained,
-              # i.e. a consumer is absent or can't keep up. A transient spike that
-              # drains within 30m won't trip this.
+              # Two conditions, both required:
+              #
+              #   1. min_over_time > 50k -- the queue's low-water mark over the last
+              #      30m is still above the threshold: even at its emptiest it never
+              #      drained. A transient spike that clears within 30m won't trip this.
+              #   2. deriv(...) >= 0 -- the queue is flat or growing. This is the
+              #      actual fault signal. Do NOT reintroduce a rate/ETA test here: a
+              #      backlog that legitimately takes weeks to chew through is still
+              #      draining and must stay silent, so we ask only whether the number
+              #      is moving down at all, never how fast.
+              #
+              # deriv is a least-squares slope (items/sec) over the window, not an
+              # endpoint diff, so a single scrape blip can't flip its sign. 15m is
+              # deliberate: at a 15s scrape that is ~60 samples for the regression,
+              # and it tolerates batchy consumers that can sit still for a minute or
+              # two between chunks. Shortening it toward 1m makes the alert flap on
+              # exactly those slow-but-healthy queues.
               expr: |
-                max by (key) (min_over_time(redis_key_size{key=~".*_queue.*"}[30m])) > 50000
+                max by (key) (
+                    (min_over_time(redis_key_size{key=~".*_queue.*"}[30m]) > 50000)
+                  and
+                    (deriv(redis_key_size{key=~".*_queue.*"}[15m]) >= 0)
+                )
               instant: true
               intervalMs: 1000
               maxDataPoints: 43200
@@ -248,8 +329,8 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: 'Valkey queue {{ $labels.key }} stayed above 50k for 30m (not draining)'
-          description: 'A worker pool is not draining its upstream queue. Check scheduler logs/traces and worker health.'
+          summary: 'Valkey queue {{ $labels.key }} stayed above 50k for 30m and stopped moving'
+          description: 'A worker pool is making no headway on its upstream queue: the queue never dipped below 50k in the last 30m, and its depth has been flat or growing for the last 15m. Check scheduler logs/traces and worker health. A backlog that is draining slowly -- even one that will take days or weeks -- will not fire this; only one that has stopped going down.'
 
       - uid: scheduler-worker-pool-degraded
         title: Scheduler worker pool degraded (dead workers)

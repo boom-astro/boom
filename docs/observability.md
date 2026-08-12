@@ -98,7 +98,9 @@ app, the usage for which is described in the README.
 - **Kafka messages produced** — `scheduler_kafka_alert_published_total`.
 - **API requests** — `sum by (api) (rate(api_request_total[5m]))`.
 - **Collector metric flow** — accepted/sent/failed metric points from OTel Collector.
-- **MongoDB storage / logical stats**.
+- **MongoDB storage stats**, plus **objects per collection** from
+  `mongodb_collstats_storageStats_count` (needs the exporter's `collstats`
+  collector and `--discovering-mode`).
 - **Container CPU/memory** joined against Docker metadata for readable names.
 
 ### Host and container infra (BOOM Host & Infrastructure)
@@ -160,7 +162,26 @@ Alert rules, contact points, and notification policies are provisioned from
 | `container-restart-flapping` | Container restarted >3 times in 1h |
 | `cpu-throttling` | >25% of CFS periods throttled for 15m |
 | `otel-collector-dropped-metrics` | OTel exporter is failing to send metric points |
-| `valkey-queue-backed-up` | Any worker queue >50k entries for 15m |
+| `valkey-queue-backed-up` | Any worker queue >50k entries for 30m *and* flat or growing for 15m (slow drain is fine) |
+| `api-down` | The API container is stopped, or running but failing its Docker healthcheck |
+
+`api-down` reads `docker_container_up` from `scripts/docker_metadata_exporter.py`,
+which is 0 when a container is not running **or** is failing its healthcheck.
+cAdvisor reports resource usage but knows nothing about healthchecks, so this
+exporter is the only thing that sees a container that is up but broken — the
+failure mode in [#562](https://github.com/boom-astro/boom/pull/562), where every
+request panicked its actix worker while the process stayed alive. The per-state
+`docker_container_health_status{status="healthy|unhealthy|starting|none"}` is
+exported alongside it for dashboards and ad-hoc queries; both are labelled with
+`container_name`, `compose_project`, and `compose_service`, so pointing the same
+alert at another service is a one-label change.
+
+Grafana reads alerting provisioning **only at startup** (unlike dashboards,
+which its file provider re-reads every 30s). Since `config/grafana/provisioning`
+is a bind mount, `docker compose up -d` does not notice the change and leaves
+the container running, so edits here require an explicit
+`docker compose up -d --force-recreate --no-deps grafana`. The production deploy
+workflow does this on every run.
 
 All alerts route to a single **Slack** contact point. Set
 `SLACK_WEBHOOK_URL` in your environment / `.env` to a Slack incoming-webhook
