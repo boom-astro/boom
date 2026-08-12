@@ -19,9 +19,28 @@ pub async fn create_index(
     index: Document,
     unique: bool,
 ) -> Result<(), CreateIndexError> {
+    create_partial_index(collection, index, unique, None).await
+}
+
+#[instrument(
+    skip(collection, index, partial_filter),
+    fields(collection = collection.name()),
+    err
+)]
+pub async fn create_partial_index(
+    collection: &Collection<Document>,
+    index: Document,
+    unique: bool,
+    partial_filter: Option<Document>,
+) -> Result<(), CreateIndexError> {
     let index_model = IndexModel::builder()
         .keys(index)
-        .options(IndexOptions::builder().unique(unique).build())
+        .options(
+            IndexOptions::builder()
+                .unique(unique)
+                .partial_filter_expression(partial_filter)
+                .build(),
+        )
         .build();
     collection.create_index(index_model).await?;
     Ok(())
@@ -103,12 +122,25 @@ pub async fn initialize_survey_indexes(
     };
     create_index(&alerts_collection, index, false).await?;
 
-    // if survey is LSST, create an index on the ss_object_id field of the alerts collection
+    // if survey is LSST, create an index on the ssObjectId field of the alerts collection,
+    // and on the designation field of the aux collection (used to look up a moving object by
+    // its MPC designation, independent of any cross-survey position match)
     if survey == &Survey::Lsst {
         let index = doc! {
-            "ss_object_id": 1,
+            "ssObjectId": 1,
         };
         create_index(&alerts_collection, index, false).await?;
+
+        let index = doc! {
+            "designation": 1,
+        };
+        create_partial_index(
+            &alerts_aux_collection,
+            index,
+            false,
+            Some(doc! { "designation": { "$exists": true } }),
+        )
+        .await?;
     }
 
     Ok(())
