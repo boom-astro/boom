@@ -215,8 +215,27 @@ groups:
               #
               # min() so that any unhealthy replica trips this, not just an
               # average across them.
+              #
+              # The `or on() vector(0)` catches the series disappearing while
+              # the exporter is still healthy -- the container removed,
+              # renamed, or relabelled out of the selector. That is a real
+              # outage, and without this it would only ever surface as a
+              # DatasourceNoData notification, losing the summary and
+              # description below. The `on()` is load-bearing: `or` keeps
+              # right-hand samples whose labels match nothing on the left, and
+              # bare vector(0) has no labels to match the `by (compose_service)`
+              # result, so a plain `or` would leak a permanent 0-valued series
+              # alongside the healthy one and page forever.
+              #
+              # The `and on()` gate then excludes the other reason the series
+              # can disappear: the scrape itself failing, which stales every
+              # series of the target at the same instant `up` goes to 0. The
+              # gate empties the result in that case, so the rule sees NoData
+              # rather than a spurious vector(0), and observability-blind below
+              # pages for it under its own name.
               expr: |
-                min by (compose_service) (docker_container_up{compose_project="boom",compose_service="api"})
+                (min by (compose_service) (docker_container_up{compose_project="boom",compose_service="api"}) or on() vector(0))
+                  and on() (min(up{job="docker-metadata"}) == 1)
               instant: true
               intervalMs: 1000
               maxDataPoints: 43200
@@ -250,10 +269,14 @@ groups:
         # disappears whenever the scrape fails: Prometheus writes stale markers
         # for every series of a failed target immediately, so a few minutes of
         # a struggling docker-metadata-exporter paged as "API is down" while the
-        # API was serving traffic normally. A down-detector should still fail
-        # loudly, so that case now pages under its own name -- see
-        # observability-blind below.
-        noDataState: NoData
+        # API was serving traffic normally.
+        #
+        # The query above now splits those two cases apart, so a missing
+        # container alerts on its own terms and the only path left to NoData is
+        # the exporter being unreachable -- which observability-blind below
+        # already pages for. OK here so that one fault does not page twice,
+        # once under a name nobody recognises.
+        noDataState: OK
         execErrState: Error
         labels:
           severity: critical
