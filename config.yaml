@@ -46,6 +46,12 @@ kafka:
     ztf:
       server: "localhost:9092"
       group_id: "" # Set via BOOM_KAFKA__CONSUMER__ZTF__GROUP_ID environment variable
+      # Days before the current one to stay subscribed to. 1 keeps yesterday
+      # alongside today so a night spanning UTC midnight isn't cut off. Raise
+      # temporarily (via BOOM_KAFKA__CONSUMER__ZTF__SUBSCRIPTION_WINDOW_DAYS) to
+      # catch up after an upstream outage, then set it back; upstream retention
+      # (~7 days for ZTF) bounds what a lookback can recover.
+      subscription_window_days: 1
     lsst:
       server: "rubin-alert-stream-bootstrap.slac.stanford.edu:9094"
       schema_registry: "https://rubin-alert-schemas.slac.stanford.edu/schema-registry"
