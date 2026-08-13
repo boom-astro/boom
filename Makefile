@@ -4,21 +4,41 @@
 #   make dev-s3             - S3-compatible storage via local rustfs
 #   make dev-s3-external    - external S3 bucket (AWS S3, Wasabi, …); requires BOOM_CUTOUTS_STORAGE__REGION/ACCESS_KEY/SECRET_KEY
 
+# Each dev target checks .env against exactly the compose files it loads.
+# Compose interpolates every file before it filters by profile, so a dev target
+# still needs the required variables of prod-only services; without the check,
+# a stale .env fails one variable at a time with an error naming a service dev
+# never runs.
+DEV_FILES := docker-compose.yaml docker-compose.override.yaml
+DEV_MONGO_FILES := docker-compose.yaml docker-compose.cutouts-mongo.yaml docker-compose.override.yaml
+DEV_S3_FILES := docker-compose.yaml docker-compose.cutouts-s3.yaml docker-compose.override.yaml
+DEV_S3_EXTERNAL_FILES := docker-compose.yaml docker-compose.cutouts-s3-external.yaml docker-compose.override.yaml
+
 .PHONY: dev
 dev:
-	docker compose -f docker-compose.yaml -f docker-compose.override.yaml --profile dev up
+	@bash scripts/check_env.sh $(DEV_FILES)
+	docker compose $(addprefix -f ,$(DEV_FILES)) --profile dev up
 
 .PHONY: dev-mongo
 dev-mongo:
-	docker compose -f docker-compose.yaml -f docker-compose.cutouts-mongo.yaml -f docker-compose.override.yaml --profile dev up
+	@bash scripts/check_env.sh $(DEV_MONGO_FILES)
+	docker compose $(addprefix -f ,$(DEV_MONGO_FILES)) --profile dev up
 
 .PHONY: dev-s3
 dev-s3:
-	docker compose -f docker-compose.yaml -f docker-compose.cutouts-s3.yaml -f docker-compose.override.yaml --profile dev up
+	@bash scripts/check_env.sh $(DEV_S3_FILES)
+	docker compose $(addprefix -f ,$(DEV_S3_FILES)) --profile dev up
 
 .PHONY: dev-s3-external
 dev-s3-external:
-	docker compose -f docker-compose.yaml -f docker-compose.cutouts-s3-external.yaml -f docker-compose.override.yaml --profile dev up
+	@bash scripts/check_env.sh $(DEV_S3_EXTERNAL_FILES)
+	docker compose $(addprefix -f ,$(DEV_S3_EXTERNAL_FILES)) --profile dev up
+
+# dev-s3-external is left out on purpose: its bucket region and credentials
+# have no sensible default, so it is checked only by the target that uses it.
+.PHONY: check-env
+check-env: # Report .env values missing for the local cutout storage modes
+	@bash scripts/check_env.sh $(DEV_FILES) $(DEV_MONGO_FILES) $(DEV_S3_FILES)
 
 .PHONY: delete-produce-ztf
 delete-produce-ztf: # Delete Kafka topic, data, and re-produce ZTF traffic for testing
