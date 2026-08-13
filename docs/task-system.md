@@ -313,6 +313,22 @@ byte cap after which lines are dropped with a marker — a runaway job must not
 fill the disk. The full firehose still goes to Loki via the normal container-log
 path; `task_logs` is the convenience copy the UI reads.
 
+### `task_partitions`
+
+Units of restartable work for long tasks, described in
+[Restartability](#restartability-partitioned-work). Written at plan time,
+claimed with the same atomic `findOneAndUpdate` pattern as runs:
+
+```jsonc
+{ "run_id": "9f1c…", "partition": 412,
+  "range": { "field": "candid", "from": …, "to": … },
+  "status": "done", "counts": { "matched": 98211, "modified": 98211 },
+  "attempts": 1, "lease_expires_at": null }
+```
+
+Indexes: `{run_id: 1, status: 1}` for claiming and for the `done / total`
+progress count, and `{run_id: 1, partition: 1}` unique. Expired with the run.
+
 ### `data_mutations` — the ledger
 
 Append-only. Never updated after the producing operation finishes, never
@@ -538,6 +554,110 @@ admin queueing the next backfill while one is running.
 Leases: the worker renews `lease_expires_at` on a heartbeat. A reaper marks runs
 whose lease has expired as `failed` with a "worker lost" error, and requeues
 them only if the task type is `idempotent`.
+
+## Restartability: partitioned work
+
+The jobs that matter most here run for days. They *will* be interrupted — by a
+reboot, and more routinely by every deploy, since `docker compose up -d`
+recreates containers and sends `SIGTERM`. A backfill that has to start over
+because we shipped a frontend change is not viable, so restartability is a core
+property of the task system rather than a per-task concern.
+
+### Why `enrich_reprocess` uses a queue, and what's wrong with it
+
+The current design — push candids into a Redis list, have workers consume it —
+isn't arbitrary. The enrichment workers already consume from Redis in the live
+pipeline, so reprocessing reuses the existing worker architecture instead of
+growing a second one. And pop-and-process does give you interruption tolerance:
+whatever is left in the list survives a restart.
+
+Two things are wrong with it, and neither is the queue itself:
+
+- **The work set is materialized up front.** Enqueueing every candid that needs
+  reprocessing means billions of entries in an in-memory store. At ~50 bytes per
+  Redis list entry that's tens of gigabytes of RAM to describe work whose
+  definition is a one-line query. Valkey is sharing a box with two MongoDB
+  instances and the alert pipeline; this isn't a tuning problem, it just doesn't
+  fit.
+- **Populating it is a separate manual step.** The binary is only the worker
+  half. Working out what needs reprocessing and getting it into the queue is
+  left to a human at a shell, which is most of why this operation requires SSH
+  today. That step disappears into the admin page: the queueing is something the
+  task does when an admin submits it, not something an admin does before running
+  the task.
+
+### Partition the work, not the items
+
+Rather than enumerating documents, enumerate **ranges** of them. At plan time
+the task divides its target into partitions over a stable indexed key — candid
+or jd ranges — and records those:
+
+```jsonc
+{ "run_id": "9f1c…", "partition": 412,
+  "range": { "field": "candid", "from": 2……, "to": 2……9 },
+  "status": "done",             // pending | running | done | failed
+  "counts": { "matched": 98211, "modified": 98211 },
+  "attempts": 1, "lease_expires_at": null }
+```
+
+For a billion alerts in partitions of ~100k documents, that's ten thousand small
+documents instead of a billion queue entries — bounded state that lives in the
+same store as the run, and is therefore durable across reboots by construction.
+
+What this buys, beyond fitting in memory:
+
+- **Restart is re-claiming, not re-doing.** A worker coming back after a deploy
+  claims `pending` partitions and partitions whose lease expired mid-flight. At
+  worst one partition's work is repeated, which is safe because tasks are
+  idempotent.
+- **Honest progress.** `done / total` partitions is a real percentage and a real
+  ETA, which a queue depth isn't once the queue is the whole job.
+- **Parallelism without coordination.** Multiple workers claim different
+  partitions with the same atomic `findOneAndUpdate` used for runs.
+- **Failures are localized.** One bad partition fails and retries, or is left
+  `failed` with the rest of the run continuing and the count surfaced — rather
+  than poisoning the whole job.
+- **The work set is closed.** Partitions cover what existed at plan time. Alerts
+  arriving during a multi-day run are written by the live pipeline with current
+  enrichments and current stamps, so they're already correct and fall outside
+  the ranges. No moving target.
+
+### Redis holds in-flight work; Mongo holds progress
+
+For enrichment specifically, the Redis queue stays — it's the transport to the
+existing worker pool, and rebuilding that would be gratuitous. It just becomes a
+**sliding window**: the task claims a partition, pushes that partition's candids
+(a hundred thousand, not a billion), waits for them to drain, marks the
+partition done, claims the next.
+
+The division of responsibility is the point. Redis carries work that is in
+flight; MongoDB carries what has been completed. Losing Valkey costs the
+partition currently in flight, not the run — which is the property the current
+design lacks, since today the queue *is* the durable record of remaining work.
+
+### Shutting down cleanly
+
+On `SIGTERM` the worker stops claiming new partitions and lets the current one
+finish if it can within the shutdown grace period, releasing it otherwise. The
+machinery for this already exists — `WorkerCmd::TERM` and `should_terminate` in
+`src/utils/worker.rs` are exactly this pattern for the pipeline workers — so the
+task worker should reuse it rather than invent a second convention. Anything not
+released cleanly is covered by lease expiry, so an abrupt power loss degrades to
+the same path, just slower.
+
+Partition size is a tradeoff between redo cost and bookkeeping overhead, and is
+better expressed as a target duration (a few minutes) than a fixed document
+count, since per-document cost varies by orders of magnitude between a field
+recompute and six ONNX inferences.
+
+### This is general, not enrichment-specific
+
+`reprocess_crossmatch`, `migrate_snr`, and `migrate_fp_flux` all have the same
+shape: iterate a huge collection in batches, update in place. They're all
+currently a bare loop that restarts from the beginning. Partitioning belongs to
+the task framework — a helper that a task declares a key and a range against —
+so every long task gets restartability, progress, and parallelism without
+implementing them again.
 
 ## Catalogs: declared definitions and convergence
 
@@ -941,18 +1061,23 @@ populate yourself** — the binary is only the worker half, and the "work out wh
 needs reprocessing and enqueue it" half is manual. That's a large part of why
 this operation currently requires a shell.
 
-`ensure_enrichment` closes the loop: compute the drift set from the version
-stamp, feed the queue, run the worker pool, track progress against a known
-total, write the ledger record, and stamp the new set ID as it goes.
+`ensure_enrichment` closes the loop: partition the target range, drive the Redis
+queue a partition at a time (see
+[Restartability](#restartability-partitioned-work)), track progress against a
+known total, write the ledger record, and stamp the new set ID as it goes. The
+enqueueing becomes an implementation detail of submitting the task from the
+admin page rather than a step someone performs beforehand.
 
 Two properties matter more here than anywhere else in this document, because
 this is the largest job BOOM will ever run:
 
-- **Resumability comes free from the stamp.** The drift query *is* the resume
-  point. A run killed at 40% restarts by re-asking which alerts lack the current
-  set and continuing — no checkpoint bookkeeping, no separate progress table.
-  This is the strongest practical argument for versioning the scores, beyond the
-  provenance one.
+- **The stamp makes restart correct; partitions make it cheap.** Partitions are
+  how a run resumes after a deploy without redoing finished work. The version
+  stamp is what makes that safe — a partition replayed after an unclean stop is
+  idempotent, and a final drift query catches anything the partitioning missed.
+  Neither substitutes for the other: without the stamp you can't verify
+  completion, and without partitions you re-scan a billion documents to find
+  where you left off.
 - **Live ingest wins.** Rescoring the archive competes with the real-time
   pipeline for the same GPU and the same model mutexes. The task needs a
   throttle (a configurable rate or worker count, adjustable mid-run) and must be
@@ -1150,6 +1275,13 @@ Each phase is meant to be a shippable PR or small stack of them.
 submit/list/get/logs/cancel. Port exactly one task — `migrate_snr` is a good
 first choice: self-contained, idempotent, already batched — and prove the whole
 path end to end.
+
+**1b. Partitioned execution.**
+`task_partitions`, plan-time range splitting over a declared key, partition
+claiming and leases, `SIGTERM` handling reusing `should_terminate`, and
+`done / total` progress. Part of proving the path end to end, since a task that
+can't survive a deploy isn't finished. Retrofit `migrate_snr` onto it as the
+worked example.
 
 **2. Provenance.**
 `data_mutations` with the unified `actor`/`source`/`trigger` shape,
