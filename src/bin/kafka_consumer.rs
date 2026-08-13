@@ -1,7 +1,8 @@
 use boom::{
     conf::load_dotenv,
     kafka::{
-        AlertConsumer, DecamAlertConsumer, LsstAlertConsumer, WinterAlertConsumer, ZtfAlertConsumer,
+        AlertConsumer, DecamAlertConsumer, LsstAlertConsumer, RomanAlertConsumer,
+        WinterAlertConsumer, ZtfAlertConsumer,
     },
     utils::{
         enums::{ProgramId, Survey},
@@ -175,6 +176,27 @@ async fn run(
         }
         Survey::Winter => {
             let consumer = WinterAlertConsumer::new(None);
+            if args.clear {
+                let _ = consumer.clear_output_queue(&args.config).await;
+            }
+            match consumer
+                .consume(
+                    topics,
+                    timestamp,
+                    None,
+                    Some(args.processes),
+                    Some(args.max_in_queue),
+                    exit_on_eof,
+                    &args.config,
+                )
+                .await
+            {
+                Ok(_) => info!("Successfully consumed alerts"),
+                Err(e) => error!("Failed to consume alerts: {}", e),
+            };
+        }
+        Survey::Roman => {
+            let consumer = RomanAlertConsumer::new(None);
             if args.clear {
                 let _ = consumer.clear_output_queue(&args.config).await;
             }

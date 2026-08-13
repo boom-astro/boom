@@ -12,6 +12,7 @@ const FACTOR: f32 = 1.0857362047581294; // where 1.0857362047581294 = 2.5 / np.l
 // now survey-specific values:
 pub const ZTF_ZP: f32 = 23.9;
 pub const LSST_ZP_AB_NJY: f32 = ZP_AB + 22.5; // ZP + nJy to Jy conversion factor, as 2.5 * log10(1e9) = 22.5
+pub const ROMAN_ZP_AB_NJY: f32 = ZP_AB + 22.5; // RAPID reports fluxes in nJy, like Rubin
 
 pub fn flux2mag(flux: f32, flux_err: f32, zp: f32) -> (f32, f32) {
     let mag = -2.5 * (flux).log10() + zp;
@@ -56,6 +57,27 @@ pub enum Band {
     H,
     #[serde(rename = "k")]
     K,
+    // Roman WFI imaging filters. Named by their central wavelength in units of
+    // 0.01 um, and kept distinct from the ground-based NIR bands above because
+    // none of them is a close enough match to share photometry statistics.
+    // The wide F146 filter is also called W146, which is what the RAPID alert
+    // packets currently put in `band`.
+    #[serde(rename = "F062")]
+    F062,
+    #[serde(rename = "F087")]
+    F087,
+    #[serde(rename = "F106")]
+    F106,
+    #[serde(rename = "F129")]
+    F129,
+    #[serde(rename = "F146", alias = "W146")]
+    F146,
+    #[serde(rename = "F158")]
+    F158,
+    #[serde(rename = "F184")]
+    F184,
+    #[serde(rename = "F213")]
+    F213,
 }
 
 impl std::fmt::Display for Band {
@@ -70,6 +92,14 @@ impl std::fmt::Display for Band {
             Band::J => write!(f, "j"),
             Band::H => write!(f, "h"),
             Band::K => write!(f, "k"),
+            Band::F062 => write!(f, "F062"),
+            Band::F087 => write!(f, "F087"),
+            Band::F106 => write!(f, "F106"),
+            Band::F129 => write!(f, "F129"),
+            Band::F146 => write!(f, "F146"),
+            Band::F158 => write!(f, "F158"),
+            Band::F184 => write!(f, "F184"),
+            Band::F213 => write!(f, "F213"),
         }
     }
 }
@@ -116,8 +146,11 @@ pub struct BandProperties {
 // (this needs to be fixed in the apache_avro-related crates)
 // #[serde_as]
 // #[skip_serializing_none]
+// `#[serde(default)]` keeps documents written before a band was added readable
+// (a missing per-band entry deserializes to None instead of erroring).
 #[serdavro]
 #[derive(Debug, PartialEq, Clone, Deserialize, Serialize, Default, ToSchema)]
+#[serde(default)]
 pub struct PerBandProperties {
     pub g: Option<BandProperties>,
     pub r: Option<BandProperties>,
@@ -128,6 +161,15 @@ pub struct PerBandProperties {
     pub j: Option<BandProperties>,
     pub h: Option<BandProperties>,
     pub k: Option<BandProperties>,
+    // Roman WFI filters
+    pub f062: Option<BandProperties>,
+    pub f087: Option<BandProperties>,
+    pub f106: Option<BandProperties>,
+    pub f129: Option<BandProperties>,
+    pub f146: Option<BandProperties>,
+    pub f158: Option<BandProperties>,
+    pub f184: Option<BandProperties>,
+    pub f213: Option<BandProperties>,
 }
 
 #[derive(Debug, PartialEq, Clone, Deserialize, Serialize, AvroSchema)]
@@ -288,17 +330,7 @@ pub fn analyze_photometry(
     }
 
     // let mut results = HashMap::new();
-    let mut results: PerBandProperties = PerBandProperties {
-        g: None,
-        r: None,
-        i: None,
-        z: None,
-        y: None,
-        u: None,
-        j: None,
-        h: None,
-        k: None,
-    };
+    let mut results: PerBandProperties = PerBandProperties::default();
     for (band, mags) in bands {
         if mags.is_empty() {
             continue;
@@ -443,6 +475,14 @@ pub fn analyze_photometry(
             Band::J => results.j = Some(band_properties),
             Band::H => results.h = Some(band_properties),
             Band::K => results.k = Some(band_properties),
+            Band::F062 => results.f062 = Some(band_properties),
+            Band::F087 => results.f087 = Some(band_properties),
+            Band::F106 => results.f106 = Some(band_properties),
+            Band::F129 => results.f129 = Some(band_properties),
+            Band::F146 => results.f146 = Some(band_properties),
+            Band::F158 => results.f158 = Some(band_properties),
+            Band::F184 => results.f184 = Some(band_properties),
+            Band::F213 => results.f213 = Some(band_properties),
         }
     }
 

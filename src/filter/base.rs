@@ -2,8 +2,8 @@ use crate::{
     api::catalogs::WATCHLIST_PREFIX,
     conf::{self, AppConfig},
     filter::{
-        build_decam_filter_pipeline, build_lsst_filter_pipeline, build_winter_filter_pipeline,
-        build_ztf_filter_pipeline,
+        build_decam_filter_pipeline, build_lsst_filter_pipeline, build_roman_filter_pipeline,
+        build_winter_filter_pipeline, build_ztf_filter_pipeline,
     },
     scheduler::{record_kafka_alert_published, record_worker_retry},
     utils::{
@@ -696,6 +696,7 @@ pub async fn build_filter_pipeline(
         Survey::Lsst => build_lsst_filter_pipeline(pipeline, permissions).await?,
         Survey::Decam => build_decam_filter_pipeline(pipeline, permissions).await?,
         Survey::Winter => build_winter_filter_pipeline(pipeline, permissions).await?,
+        Survey::Roman => build_roman_filter_pipeline(pipeline, permissions).await?,
     };
     Ok(pipeline)
 }
