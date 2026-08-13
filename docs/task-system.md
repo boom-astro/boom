@@ -858,6 +858,147 @@ Interim, before any of this exists: run the boom-catalogs binaries via the
 `Command` kind, with those binaries added to the image. That unblocks the UI
 without waiting on the definition engine.
 
+## Enrichments: the same pattern, applied to models
+
+A new ML classifier — or a new version of an existing one — needs to be run
+against every alert already in the database. This is the same shape as the
+catalog case, and it's worth saying so explicitly rather than treating it as a
+separate feature.
+
+Crossmatch catalogs and ML models are both **ingest-time enrichments**: declared
+centrally, applied by the scheduler at first insert, and therefore silently
+absent or stale on every pre-existing record whenever the declaration changes.
+`reprocess_crossmatch` exists precisely because "the live pipeline only
+crossmatches at first insert"; `enrich_reprocess` exists for the identical
+reason on the model side. Both want a declaration, a version, a drift query, and
+a convergence task.
+
+So `ensure_enrichment` is `ensure_catalog` with a different body, and everything
+already described — plan/apply, drift, the ledger record, suggested follow-ups —
+carries over.
+
+### The blocking problem: scores carry no version
+
+`ZtfAlertClassifications` (`src/enrichment/ztf.rs`) is a flat struct of six
+`f32`s — `acai_h`, `acai_n`, `acai_v`, `acai_o`, `acai_b`, `btsbot` — written to
+the alert document under `classifications`. **Nothing records which model
+produced any of them.** The model files are hardcoded paths in
+`SharedModels::load` (`data/models/acai_h.d1_dnn_20201130.onnx` and friends),
+not config, so the version exists only in a filename inside the image.
+
+This is worse than the equivalent catalog problem, because it makes drift
+detection *impossible* rather than merely awkward. For a catalog you can ask
+whether `cross_matches.Gaia_DR3` exists. For a model, `classifications.acai_h`
+exists both before and after a model swap — the field is present, the value is
+just stale, and nothing distinguishes the two. There is no query that returns
+"alerts needing rescoring."
+
+The consequences compound:
+
+- You can't tell which alerts have been reprocessed, so a run that dies at 40%
+  can't be resumed — only restarted from zero, over billions of alerts.
+- You can't reproduce a filter result from six months ago, because you can't
+  determine which classifier produced the score it triggered on.
+- You can't compare model versions, or roll one back with any confidence.
+- A reprocessing run silently overwrites the old scores with no record that the
+  values changed or what they were.
+
+Like `id_from` for catalogs, this is **cheap to add now and impossible to
+retrofit**: once billions of alerts carry unversioned scores, no amount of later
+work can establish which model produced them. It should land before any
+reprocessing task is built, and arguably before the next classifier change
+regardless of this system.
+
+### Stamping without paying for it six times per alert
+
+The obvious fix — a version string per score — costs real money at BOOM's
+scale. Six extra fields across ~10⁹ alerts is on the order of 60 GB of pure
+bookkeeping.
+
+Instead, intern the combination. A `model_sets` collection records each distinct
+set of model versions the deployment has run:
+
+```jsonc
+{ "_id": 7, "survey": "ztf",
+  "models": { "acai_h": "d1_dnn_20201130", "acai_n": "d1_dnn_20201130",
+              "btsbot": "v1.0.1" },
+  "active_from": 1765000000, "code_version": { … } }
+```
+
+and each alert carries a single integer, `classifications_set: 7`. One int per
+alert rather than six strings, and the drift query is
+`{ classifications_set: { $ne: <current> } }` — indexable, exact, and cheap.
+
+Selective reprocessing still works, and this is the point of interning rather
+than using an opaque generation counter: if sets 7 and 8 differ only in
+`btsbot`, then alerts at set 7 need only `btsbot` re-run, not all six models.
+That comparison happens once against the registry, not per document.
+
+### What the task actually does
+
+`enrich_reprocess` today reads candids from a Redis queue that **you have to
+populate yourself** — the binary is only the worker half, and the "work out what
+needs reprocessing and enqueue it" half is manual. That's a large part of why
+this operation currently requires a shell.
+
+`ensure_enrichment` closes the loop: compute the drift set from the version
+stamp, feed the queue, run the worker pool, track progress against a known
+total, write the ledger record, and stamp the new set ID as it goes.
+
+Two properties matter more here than anywhere else in this document, because
+this is the largest job BOOM will ever run:
+
+- **Resumability comes free from the stamp.** The drift query *is* the resume
+  point. A run killed at 40% restarts by re-asking which alerts lack the current
+  set and continuing — no checkpoint bookkeeping, no separate progress table.
+  This is the strongest practical argument for versioning the scores, beyond the
+  provenance one.
+- **Live ingest wins.** Rescoring the archive competes with the real-time
+  pipeline for the same GPU and the same model mutexes. The task needs a
+  throttle (a configurable rate or worker count, adjustable mid-run) and must be
+  cancellable, and it should default to conservative rather than fast. A
+  backfill that takes a week and doesn't delay tonight's alerts is strictly
+  better than one that takes two days and does.
+
+### Declaring models like catalogs
+
+`SharedModels` being a fixed six-field struct with hardcoded paths means adding
+a classifier is a struct change, a worker change, and a deploy — and that the
+set of models a deployment runs isn't declared anywhere inspectable.
+
+The catalog treatment applies directly: a `models:` list in `config.yaml`
+naming which models this deployment runs and at which version, with the
+per-model input adapter (ONNX input shapes and metadata differ) remaining a Rust
+implementation in the repo, exactly as the catalog transform hook does. That
+turns `SharedModels` into a map built from the declaration, makes the drift
+check a config-vs-database comparison like every other, and lets a deployment
+run a subset of models without a code change.
+
+This is a bigger refactor than the catalog case and doesn't have to land at the
+same time — but the version stamp does, because it's the part that can't be
+added retroactively.
+
+### The staleness chain
+
+Worth naming explicitly, because it's the structure the whole provenance effort
+is trying to capture:
+
+```
+raw alert  →  crossmatches  →  enrichment scores  →  filter results  →  artifacts
+```
+
+Each stage is computed at ingest from the stage before it, so a change anywhere
+stales everything downstream. Updating a catalog stales crossmatches; rescoring
+with a new classifier stales every filter result that read a classification.
+
+The task system covers the first three links. **It does not currently cover the
+last one**: filters also run at ingest, and there is no `reprocess_filters` —
+so after a reprocessing run, filter results reflect the old scores with nothing
+recording the discrepancy. That's a real gap in the artifact-provenance story
+rather than an oversight in this design, and it deserves its own issue. At
+minimum, `ensure_enrichment` should surface the affected filters as a warning
+the way `ensure_catalog` surfaces affected crossmatches.
+
 ## External code tasks
 
 The requirement: point at a git repo, a rev, and a path, and run it, given a
@@ -1032,6 +1173,15 @@ This is the phase that actually removes the need to SSH.
 dry-run mode and an idempotence test. boom-catalogs' binaries go into the image
 behind the `Command` kind as an interim.
 
+**5b. Version the classification scores.** Out of phase order deliberately: the
+`model_sets` collection and the `classifications_set` stamp on alert documents,
+written by the live enrichment worker. This is the one item in this document
+that cannot be added retroactively — every alert ingested before it lands is
+permanently unattributable to a model version — so it should go in as early as
+it can be reviewed, ahead of the tasks that depend on it. Includes a one-time
+backfill stamping existing alerts with the set they were (believed to be)
+scored under.
+
 **6. Startup migrations.**
 The migration harness, `schema_migrations`, the protected-collection assertion,
 ledger integration, and the expand/contract note in `CONTRIBUTING.md`. Small,
@@ -1054,6 +1204,12 @@ split in two:
   drift table UI, the startup drift check and gauge (retiring
   `warn_if_missing_crossmatches`), `drop_catalog` for undeclared collections,
   and suggested `reprocess_crossmatch` follow-ups.
+
+**7c. Enrichment convergence.**
+`ensure_enrichment` built on the phase 5b stamp: drift query, queue population
+(closing the loop `enrich_reprocess` leaves open), throttling against live
+ingest, resumability, and ledger records. Optionally the `models:` config
+declaration, which can follow later — only the stamp is order-critical.
 
 **8. External code tasks.**
 Repo allowlist, SHA resolution, the `task:run_external` role, second-person
@@ -1141,6 +1297,22 @@ storage.
   phase 7a — if half of them need a transform hook, the format is probably
   trying to do too much and should shrink to the parts that are genuinely
   common.
+- **What set do existing alerts get stamped with?** Backfilling
+  `classifications_set` onto already-scored alerts means asserting which model
+  versions produced them, which we only know from deploy history and filenames.
+  Proposal: one `model_sets` entry marked `inferred: true`, honest about being a
+  reconstruction rather than a record. Alerts predating it stay unstamped and
+  therefore always appear as drift — which is correct, if inconvenient.
+- **Does rescoring overwrite, or accumulate?** Overwriting loses the old score;
+  keeping both doubles the field count on the hottest collection in the
+  database. Overwrite is proposed, on the grounds that the ledger records the
+  transition and the old score is reproducible from the archived model — but
+  that assumes we archive superseded ONNX files, which should be an explicit
+  commitment rather than an assumption.
+- **`reprocess_filters`.** Named as a gap in
+  [the staleness chain](#the-staleness-chain), not designed here. Needs its own
+  issue: filter results are the actual scientific artifacts, and they're
+  currently the one link with no reprocessing path at all.
 - **Do any existing catalog collections have synthetic `_id`s?** If so, they
   can't be converged in place and need a one-time rebuild with deterministic IDs
   before any of this applies to them. Worth auditing early, because it's a
