@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import os
 import socket
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import urlparse
 from urllib.parse import urlencode
@@ -28,6 +28,15 @@ DOCKER_API_VERSION = "v1.41"
 # Prometheus community port allocation for this exporter (must match the
 # targets entry in prometheus.yaml).
 EXPORTER_PORT = 9158
+# Docker API timeout. A failed scrape is not a neutral event here: Prometheus
+# writes stale markers for every series a target exported the moment a scrape
+# fails, so the series backing the api-down alert vanishes immediately rather
+# than after the usual 5m staleness window. The daemon shares this host with
+# the self-hosted Actions runner, so `/containers/json` can be slow during an
+# image build; give it room rather than turning that into a gap. Capped at
+# Prometheus' scrape_timeout (10s by default) -- waiting past that just holds a
+# connection open for a scrape that has already been abandoned.
+DOCKER_API_TIMEOUT_SECONDS = 10
 # Prometheus metric name. The _info suffix follows the convention for
 # label-only identity metrics (value is always 1).
 METRIC_NAME = "docker_container_identity_info"
@@ -56,6 +65,7 @@ def _http_get_unix_socket(path: str, query: dict[str, Any] | None = None) -> Any
     ).encode("utf-8")
 
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+        client.settimeout(DOCKER_API_TIMEOUT_SECONDS)
         client.connect(DOCKER_SOCKET)
         client.sendall(request)
 
@@ -94,11 +104,15 @@ def _http_get_tcp(path: str, query: dict[str, Any] | None = None) -> Any:
     if parsed.scheme == "https":
         import http.client
 
-        conn = http.client.HTTPSConnection(host, port, timeout=5)
+        conn = http.client.HTTPSConnection(
+            host, port, timeout=DOCKER_API_TIMEOUT_SECONDS
+        )
     else:
         import http.client
 
-        conn = http.client.HTTPConnection(host, port, timeout=5)
+        conn = http.client.HTTPConnection(
+            host, port, timeout=DOCKER_API_TIMEOUT_SECONDS
+        )
 
     conn.request("GET", path, headers={"Accept": "application/json"})
     response = conn.getresponse()
@@ -261,5 +275,9 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    server = HTTPServer(("0.0.0.0", EXPORTER_PORT), Handler)
+    # Threaded so one slow Docker API call can only delay its own scrape. The
+    # single-threaded HTTPServer serialized them, so a stalled call blocked
+    # every subsequent scrape until it returned, turning one slow response into
+    # a run of failed scrapes.
+    server = ThreadingHTTPServer(("0.0.0.0", EXPORTER_PORT), Handler)
     server.serve_forever()
