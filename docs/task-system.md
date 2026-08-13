@@ -82,7 +82,9 @@ That constant becomes the enforced boundary — see
 - Every mutation of data — task, startup migration, or live pipeline — appends
   to an **append-only ledger**, so the state of any collection can be
   reconstructed as `raw ingest + ordered list of mutations`.
-- New catalogs can be ingested without writing code, from the UI.
+- Ingesting or updating a catalog is a one-click operation naming only the
+  catalog ("NED"); how to do it is declared in this repo and shipped with the
+  release, and the deployment converges its data to match.
 - Dangerous jobs support a dry run that reports what *would* change.
 - No SSH required for routine data operations.
 
@@ -115,6 +117,11 @@ timeline, captured logs, and the code/config fingerprint it ran under.
 applied to one target. Produced by a task run, a startup migration, or a
 pipeline version. This is the provenance primitive, and the one thing every
 mechanism in this document shares.
+
+**Catalog definition** — an in-repo, versioned declaration of how a given
+astronomical catalog is sourced, transformed, and indexed. Shipped with the
+release; the deployment converges its collections to match. See
+[Catalogs](#catalogs-declared-definitions-and-convergence).
 
 ## Architecture
 
@@ -484,8 +491,9 @@ All routes require a role; the specific role varies by task type.
 | `GET` | `/tasks/{id}/logs?since_seq=` | Tail logs. |
 | `POST` | `/tasks/{id}/cancel` | Set `cancel_requested`; the worker's token observes it. |
 | `POST` | `/tasks/{id}/approve` | Second-person approval, for types that require it. |
-| `GET` | `/catalog-specs` … | CRUD for declarative catalog specs (see below). |
-| `POST` | `/catalog-specs/{id}/preview` | Parse the first N rows and return sample output documents. |
+| `GET` | `/catalogs/definitions` | The catalog definitions the running release declares. |
+| `GET` | `/catalogs/drift` | Three-way drift: config inventory vs release definitions vs actual state, including undeclared collections. |
+| `POST` | `/catalogs/{id}/plan` | What `ensure_catalog` would do, without doing it. |
 | `GET` | `/data/state` | Ledger timeline, filterable by collection/survey/catalog. |
 | `GET` | `/data/state/snapshot` | Citable provenance hash for a set of collections. |
 
@@ -507,8 +515,11 @@ route guard is UX, not security).
   Destructive types show a confirmation input.
 - **Run detail.** Params, code version, config fingerprint, live log tail,
   cancel button, and the mutation records it produced.
-- **Catalog specs.** The editor described below — the piece that turns "write a
-  Rust struct and SSH in" into "fill in a form and click preview."
+- **Catalogs.** The drift table: every catalog the config inventory declares,
+  its actual state (absent, current, stale definition, new source release
+  available), plus any undeclared collections, and a plan/apply button per row.
+  This is probably the single most useful screen in the admin UI — it's the
+  answer to "is my data what this deployment says it should be?" at a glance.
 - **Data state.** Per-collection timeline of mutations and pipeline versions —
   the human-readable answer to "what has been done to this data?"
 
@@ -528,69 +539,324 @@ Leases: the worker renews `lease_expires_at` on a heartbeat. A reaper marks runs
 whose lease has expired as `failed` with a "worker lost" error, and requeues
 them only if the task type is `idempotent`.
 
-## Catalog ingestion as data, not code
+## Catalogs: declared definitions and convergence
 
-This is the main thing people SSH to do, and it's worth solving properly rather
-than wrapping the status quo.
+The set of catalogs BOOM crossmatches against — NED, Gaia, ALLWISE, Milliquas,
+VSX, PS1, LS, DESI — is essentially the same on every BOOM deployment, and the
+knowledge of how to ingest each one (where it lives, how its columns map, what
+the units are, which quirks to work around) is developed once and shared. That
+knowledge belongs in this repo, written by the people who understand it, in
+PRs, with tests.
 
-Looking at what actually varies between boom-catalogs' ingestion runs: the file
-format (csv / ascii / parquet / fits), a per-catalog Rust struct used to
-deserialize each row, the column-to-field mapping and types, which columns are
-RA/Dec, the output collection name, and the index specification. Only one of
-those is genuinely code-shaped — the per-catalog struct — and it is code only
-because a typed deserializer was the convenient way to express a mapping.
+So the model is **not** "the admin authors an ingestion spec in the UI." It is:
 
-So: **make the catalog a declarative spec, stored as a document, and make
-ingestion a single compiled-in task type that interprets it.**
+> The repo declares a set of catalog definitions. A deployment's job is to
+> **converge** its collections to the definitions the running release declares.
+> The admin picks a catalog — "NED" — and the system works out what that
+> requires.
+
+That's a desired-state model rather than a run-a-script model, and framing it
+that way answers the "what if the definition changes?" question structurally
+instead of case by case. Convergence is not a special event; it is the only
+operation. Ingesting a catalog for the first time is just convergence from
+"absent."
+
+> **This supersedes the user-authored-spec design in the previous revision of
+> this document.** In-repo definitions are better on every axis that matters
+> here — see [Why in-repo](#why-definitions-belong-in-the-repo).
+
+### The deployment declares an inventory
+
+If the repo says *how* to build each catalog, the only deployment-specific
+decision left is *which* ones this instance should hold. That's a list of names,
+and it belongs in `config.yaml` alongside everything else that describes what
+this deployment is.
+
+That splits the problem three ways:
+
+| Where | What it declares | Changes via |
+| --- | --- | --- |
+| `catalogs/<id>.yaml` in this repo | **how** to build each catalog | PR + release |
+| `catalogs:` in `config.yaml` | **which** ones this deployment holds | PR to the config |
+| MongoDB | what's **actually** there | `ensure_catalog` |
+
+Drift is then a three-way comparison, not a two-way one, and every one of the
+three is version-controlled: prod config already lives in the repo at
+`config/prod/<deployment>/config.yaml` and is synced by a workflow, so the
+inventory gets the same review as the definitions do.
+
+**`config.yaml` already half-does this.** `crossmatch.<survey>` is, in effect, a
+catalog list today — it names every catalog the pipeline expects to match
+against. It's just aspirational: nothing checks that a named catalog was ever
+ingested. The evidence that this is a real gap is already in the tree —
+`warn_if_missing_crossmatches` in `src/bin/scheduler.rs` samples a single random
+aux record at startup and warns if a configured catalog has no crossmatches on
+it, which is a hand-rolled, probabilistic drift detector for exactly this
+problem. An explicit inventory plus a real drift check replaces that with an
+exact answer.
+
+A minimal shape, with per-deployment overrides optional:
+
+```yaml
+catalogs:
+  - id: ned                          # usually all you need
+  - id: gaia_dr3
+    source_release: "2023-12"        # pin; default is the definition's release
+  - id: allwise
+    source_dir: /mnt/local/allwise   # files already staged; skip the download
+```
+
+Keep it a separate top-level key rather than deriving the inventory from the
+union of `crossmatch.*`: catalogs can be held for direct querying without being
+crossmatch targets (`get_catalogs` already serves those), so the crossmatch
+config is a subset, not the whole. What it *should* get is a startup validation
+that every catalog named under `crossmatch.<survey>` also appears in `catalogs`
+— a cheap check that converts a silent misconfiguration into a startup error.
+
+**Declaring is not converging.** It's tempting, once config states desired state
+and the system can compute drift, to reconcile automatically on deploy. Don't:
+ingesting NED is hours and hundreds of GB, and making that an implicit side
+effect of a `git push` would undo the attribution and approval properties this
+whole system exists to provide. A typo'd config entry should not be able to
+rebuild a catalog.
+
+The rule is **detect always, act never**. On startup the API computes drift and
+logs it, exports it as a gauge (so Grafana can alert when drift persists), and
+surfaces it in the admin drift table. Converging stays an explicit, attributed,
+human-initiated task. That keeps the existing `warn_if_missing_crossmatches`
+behavior — warn loudly about the gap — while making the warning exact and the
+remedy one click away.
+
+One arguable exception: creating a *missing* index is bounded and
+non-destructive, and there's precedent in `initialize_survey_indexes` doing
+exactly that at scheduler startup. Auto-creating missing indexes is probably
+fine; auto-*dropping* extra ones is not, since someone may have added one
+deliberately for a query workload. Worth deciding explicitly rather than letting
+it fall out of the implementation.
+
+**Drift runs in both directions.** A collection that exists but isn't declared —
+an orphan from an old release, a manual experiment, a renamed catalog — is
+reported as undeclared and never auto-removed. Removing one is a separate,
+destructive, confirmation-gated `drop_catalog` task. For the provenance story to
+hold, "what is in this database and why" has to have no unexplained entries, and
+that means naming the orphans rather than quietly tolerating or deleting them.
+
+**Config declares intent; the ledger records what happened.** These are
+complementary, not alternatives, and it's worth being explicit that the
+inventory does not replace `data_mutations`. Config says NED should be here at
+release 2024-06; the ledger says it was ingested on this date by this person
+under this commit, recomputed in place three months later when the definition
+changed, and swept of 12,000 retracted records. Desired state can't answer any
+of the questions in [Provenance](#provenance) — it has no history, and it is
+edited in place. The `catalogs` collection sits between them as the cached
+*actual* state, so drift is a cheap comparison instead of a scan.
+
+Since config subtrees are already fingerprinted into run and mutation records,
+`catalogs:` composes into that for free: a run's record carries the inventory it
+was executed against.
+
+### What a definition contains
+
+Definitions live in `catalogs/<id>.yaml` in this repo and ship inside the image.
+The declarative form covers the common case; a definition may additionally name
+a Rust transform hook for anything that can't be expressed declaratively.
+
+```yaml
+id: ned
+version: 4                     # bumped when output changes; hash-checked (below)
+collection: NED
+title: NASA/IPAC Extragalactic Database
+source:
+  release: "2024-06"           # the upstream data release, distinct from `version`
+  urls: [ "https://…/ned_2024-06.parquet.tar.gz" ]
+  format: parquet
+id_from: [ prefname ]          # REQUIRED — see below
+fields:
+  - { from: ra,       to: ra,   type: f64 }
+  - { from: dec,      to: dec,  type: f64 }
+  - { from: z,        to: redshift, type: f64, null_if: NaN }
+  - { from: objtype,  to: type, type: string }
+coordinates: { ra: ra, dec: dec, add_healpix: true }
+indexes:
+  - { keys: { "coordinates.radec_geojson": "2dsphere" } }
+transform: null                # or a named Rust hook, e.g. `ned::normalize_z`
+convergence_from:              # how to get here from each earlier version
+  3: recompute_in_place
+  2: reingest_from_source
+```
+
+`version` is bumped by hand, but a content hash of the definition is computed at
+build time and stored alongside it — so a changed definition with a forgotten
+version bump is caught by a test, not discovered in production six months later.
+
+### The linchpin: deterministic document IDs
+
+`id_from` is required, and it is what makes any of this work. If a catalog's
+`_id` is auto-generated, "re-run the ingest" is a duplicate factory rather than
+an idempotent operation, and every convergence strategy below collapses to
+"drop and rebuild." With `_id` derived deterministically from stable source
+fields, re-ingestion is an upsert and is idempotent by construction.
+
+This is cheap to require now and effectively impossible to retrofit later —
+once a collection exists with synthetic IDs, there is no way to match new source
+records to existing documents. It should be a hard validation error for a
+definition to omit it.
+
+The matching requirement for **deletions**: a source release that drops records
+leaves orphans behind, because upserts never delete. So each convergence run
+stamps a generation marker on every document it writes and sweeps anything left
+carrying an older marker. Mark-and-sweep, and without it "idempotent reingest"
+quietly accumulates records that upstream has retracted — which for a
+crossmatch catalog means alerts matching against objects that no longer exist.
+
+### One task: `ensure_catalog`
+
+A single compiled-in task type, parameterized by catalog ID, with a `plan` mode
+and an `apply` mode. Not a new task type per catalog, and not a new task type
+per definition change — the registry has to stay comprehensible, and the
+definition version is data, not a type.
+
+`plan` compares declared state against actual state and reports what apply would
+do:
+
+| Actual | Declared | Plan |
+| --- | --- | --- |
+| absent | v4 | download, ingest, build indexes |
+| v4, release 2024-06 | v4, release 2024-06 | no-op |
+| v4, indexes differ | v4 | create/drop indexes only |
+| v3 | v4 (`recompute_in_place`) | update every document from stored fields |
+| v2 | v4 (`reingest_from_source`) | re-read source files on disk, upsert, sweep |
+| v4, release 2024-06 | v4, release 2025-01 | download new release, upsert, sweep |
+
+Note that the naming matters: "reingest" is what the user asks for, but it
+describes what the system usually *won't* do. `ensure_catalog` says what's
+actually being requested, and `plan` makes the difference visible before
+anything runs.
+
+Much of the comparison is already available: `get_catalog_indexes` in
+`src/api/routes/catalogs.rs` introspects actual indexes today, and
+`catalog_exists` and `get_catalog_sample` cover the rest of the "what's actually
+there" side. The declared side is a file in the image. The missing piece is a
+small `catalogs` collection recording, per ingested catalog:
 
 ```jsonc
-{
-  "_id": "gaia_dr3",
-  "version": 3,                       // bumped on every edit; old versions kept
-  "collection": "Gaia_DR3",
-  "format": "parquet",
-  "source": { "glob": "/data/gaia_dr3/**/*.parquet" },
-  "fields": [
-    { "from": "source_id",   "to": "_id",  "type": "i64" },
-    { "from": "ra",          "to": "ra",   "type": "f64" },
-    { "from": "dec",         "to": "dec",  "type": "f64" },
-    { "from": "phot_g_mean_mag", "to": "Gmag", "type": "f32", "null_if": "NaN" }
-  ],
-  "coordinates": { "ra": "ra", "dec": "dec", "add_healpix": true },
-  "indexes": [ { "keys": { "coordinates.radec_geojson": "2dsphere" } } ],
-  "created_by": { "realm": "babamul", "username": "pete" }
+{ "_id": "NED", "definition_id": "ned", "definition_version": 4,
+  "definition_hash": "…", "source_release": "2024-06", "generation": 7,
+  "document_count": 12400000, "ingested_at": …, "code_version": { … } }
+```
+
+### Convergence strategies are declared, not inferred
+
+When a definition changes, *something* has to know whether the new output is
+derivable from what's already stored or requires going back to source. Three
+ways to decide:
+
+- **Infer it by diffing the definitions.** Attractive and brittle: as soon as a
+  transform hook is involved, the diff is meaningless, and a wrong inference
+  silently produces wrong data.
+- **Always re-ingest from source.** Simple and always correct, but a full Gaia
+  re-ingest is days of work and hundreds of GB of download for what might be a
+  changed unit conversion.
+- **The dev who changes the definition declares it.** Explicit, reviewable in
+  the same PR that makes the change, and the person writing it is exactly the
+  person who knows whether the new field is computable from stored data.
+
+The third, with the second as the always-available fallback. The strategies are
+totally ordered by cost:
+
+```rust
+pub enum Convergence {
+    /// Only indexes or metadata changed.
+    IndexesOnly,
+    /// New/changed fields are computable from fields already on each document.
+    RecomputeInPlace,
+    /// Requires re-reading source files, which are still on disk.
+    ReingestFromSource,
+    /// Requires re-downloading the source.
+    RedownloadAndReingest,
 }
 ```
 
-Why this is better than BYO code, and not just easier:
+Because they're ordered, a deployment that skipped releases — sitting on v2 when
+the repo declares v4 — takes the **max** over the strategies for every version
+in the gap. That case is real (not every BOOM instance updates promptly) and
+this handles it without a migration chain.
 
-- **It is self-describing provenance.** "This collection was built from spec
-  `gaia_dr3` v3" tells you what the data *means*. "This collection was built by
-  running commit `a3f9e1` of some repo" requires reading the code to find out.
-  The ledger references the spec ID and version, and the spec document is
-  immutable once used.
-- **Dev work moves to the frontend for real**, which is the outcome you're
-  after. The spec editor gets a **preview** action: parse the first N rows,
-  show the inferred source schema, the sample output documents, the index plan,
-  and any collision with an existing collection — before anything is written.
-  That feedback loop is what makes a form a substitute for a script.
-- **It removes the deploy from the critical path.** Adding a catalog stops
-  being a PR-and-release, which is most of why people SSH.
+`RecomputeInPlace` is not a hypothetical shape: `migrate_snr` is exactly that
+task, recomputing derived values from stored inputs in batches, and it already
+works. The strategy enum is mostly a way of saying which existing pattern
+applies.
 
-The long tail that a spec can't express — multi-file joins, the `minifiers/`
-pandas transforms, genuinely novel formats — is what
-[External code tasks](#external-code-tasks) are for. My expectation is that the
-spec covers most catalogs and the escape hatch is rare, which is the ratio that
-justifies building the spec first.
+### Converging safely on a live system
 
-The Python `downloaders/` are a separate concern: they fetch large files over
-HTTP with retries and parallelism, which is a small amount of `reqwest` (already
-a dependency), so a native `download_catalog` task taking a URL list is likely
-less work than standing up a Python worker.
+Catalogs are read by the live crossmatch path, so convergence can't take the
+collection away mid-flight:
 
-Interim, before the spec engine exists: run the boom-catalogs binaries via the
+- **Definition changes** converge **in place** — upsert plus generation sweep.
+  Readers see a mix of old and new documents during the run, which is acceptable
+  for the field-level changes this covers.
+- **Source release changes** build into a temporary collection and **swap
+  atomically** with `renameCollection`. Drop-then-rebuild would leave a window
+  where crossmatches silently return nothing, which is worse than a stale
+  catalog: it produces alerts that look confidently unmatched.
+
+### Downstream staleness
+
+Changing a catalog makes every crossmatch against it stale. `ensure_catalog`
+knows which surveys reference the catalog (from `crossmatch.<survey>` in
+`config.yaml`), so after a successful apply it **surfaces the affected
+`reprocess_crossmatch` runs as suggested follow-ups** in the UI, pre-filled and
+one click from submission.
+
+Suggested, not automatic. Auto-chaining would make this a workflow engine, which
+is an explicit non-goal, and a crossmatch reprocess over billions of alerts is
+not something to kick off as a side effect of someone updating a catalog. But
+leaving the user to remember it is how data quietly goes stale, so the system
+should say so loudly.
+
+### Why definitions belong in the repo
+
+Compared to the user-authored specs proposed in the previous revision:
+
+- **They're shared.** The same definitions are correct on every deployment, so
+  authoring them per-deployment is duplicated work that will drift.
+- **They get review and tests.** A wrong unit conversion in a catalog
+  transformation is a science bug that propagates into every crossmatch and
+  every artifact downstream. That deserves a PR, not a form.
+- **Provenance gets simpler, not just better.** If definitions ship with the
+  release, `code_version` in the ledger already pins the definition — there's no
+  second, independently-mutable input to fingerprint. A DB-stored spec would
+  have needed its own version, its own immutability rules, and its own audit
+  trail.
+
+The honest cost: this puts a deploy back on the critical path for adding a
+*new* catalog, which I earlier cited as much of why people SSH. Two things make
+that acceptable. Adding a catalog becomes a PR containing a YAML file — a fast,
+low-risk review, and releases are already automated, so it is a very different
+proposition from "SSH in and run a script." And if release cadence turns out to
+be the real blocker, definitions can also be loaded from a config-mounted
+directory as a deployment-local override, which is a pressure-release valve
+without a code deploy. Start without it; add it if the need is demonstrated
+rather than assumed.
+
+### What's left over
+
+The long tail a declarative definition can't express — multi-file joins, the
+`minifiers/` pandas transforms, genuinely novel formats — is first the transform
+hook (still a PR to this repo), and only then
+[external code tasks](#external-code-tasks). This model shrinks the case for
+external code considerably: "devs develop the ingestion procedures as PRs" *is*
+the well-lit path, and the residual need is narrowed to "someone wants a catalog
+we haven't defined and can't wait for a release."
+
+The Python `downloaders/` fold into the definition's `source.urls`: fetching
+files over HTTP with retries and parallelism is a small amount of `reqwest`
+(already a dependency), so a native downloader driven by the definition is less
+work than standing up a Python worker.
+
+Interim, before any of this exists: run the boom-catalogs binaries via the
 `Command` kind, with those binaries added to the image. That unblocks the UI
-without waiting on any of this.
+without waiting on the definition engine.
 
 ## External code tasks
 
@@ -771,15 +1037,30 @@ The migration harness, `schema_migrations`, the protected-collection assertion,
 ledger integration, and the expand/contract note in `CONTRIBUTING.md`. Small,
 and independent enough to land any time after phase 2.
 
-**7. Catalog specs.**
-The spec document, the interpreter task, the preview endpoint, and the spec
-editor UI. The largest phase, and the one that delivers "do the dev work in the
-frontend."
+**7. Catalog definitions and convergence.**
+The largest phase, and the one that delivers "the admin just picks NED." Best
+split in two:
+
+- **7a. Definitions, inventory, and first ingest.** The definition format, the
+  in-repo `catalogs/` directory, the loader and content-hash test, the
+  `catalogs:` inventory in `config.yaml` with the crossmatch cross-check at
+  startup, the `catalogs` state collection, and `ensure_catalog` covering
+  absent → ingested (download, `id_from` upserts, generation stamping, index
+  creation). Port two or three real catalogs — one easy, one awkward — to
+  validate the format before porting the rest.
+- **7b. Convergence and drift.** `plan` mode, the `Convergence` strategy enum
+  and the max-over-the-gap rule, generation sweep for deletions,
+  build-then-swap for source-release changes, the three-way drift endpoint and
+  drift table UI, the startup drift check and gauge (retiring
+  `warn_if_missing_crossmatches`), `drop_catalog` for undeclared collections,
+  and suggested `reprocess_crossmatch` follow-ups.
 
 **8. External code tasks.**
 Repo allowlist, SHA resolution, the `task:run_external` role, second-person
 approval, the declared-runtime builder, the scoped DB credential. Only if
-phase 7 leaves enough of a long tail to justify it.
+phase 7 leaves enough of a long tail to justify it — and phase 7 is designed to
+make that unlikely, since "devs write ingestion procedures as PRs" is exactly
+the path this would otherwise route around.
 
 **9. Polish.**
 Provenance snapshot endpoint, Grafana panel and alert for failed/stuck runs
@@ -805,6 +1086,22 @@ Celery suggestion.
 **One mechanism for tasks and startup migrations.** Covered above: opposite
 requirements on triggering, ordering, re-runnability, and blocking. Shared
 ledger, separate mechanisms.
+
+**User-authored catalog specs stored in the database** (this document's previous
+revision). Rejected in favor of in-repo definitions: catalog ingestion knowledge
+is identical across deployments and deserves review and tests, and shipping
+definitions with the release means `code_version` already pins them instead of
+introducing a second independently-mutable input to fingerprint. See
+[Why definitions belong in the repo](#why-definitions-belong-in-the-repo) for
+the cost this accepts.
+
+**A distinct task type per catalog, or per definition change.** "Ingest NED" as
+its own registry entry reads nicely, but the registry then grows with every
+catalog and every revision, the UI becomes a list of dozens of near-identical
+types, and the definition version — which is data — gets encoded in a type name.
+One `ensure_catalog` parameterized by catalog ID, with `plan` showing what it
+will actually do, gets the same "the user just picks NED" experience without
+that.
 
 **Merging the boom and babamul auth systems now.** The right end state, but it's
 a project with a live-credential migration in it, and the task system doesn't
@@ -839,9 +1136,34 @@ storage.
 - **Where large input files come from.** Downloads land on a bind-mounted volume
   today. Do admins ever need to *upload* a catalog through the UI, or is
   "download from a URL" always sufficient? Assuming the latter.
-- **How far the catalog spec stretches.** Worth validating against the three or
-  four gnarliest existing catalogs before committing to phase 7 — if it only
-  covers half of them, the balance between phases 7 and 8 changes.
+- **How far the declarative definition stretches.** Worth validating against the
+  three or four gnarliest existing catalogs before committing to the format in
+  phase 7a — if half of them need a transform hook, the format is probably
+  trying to do too much and should shrink to the parts that are genuinely
+  common.
+- **Do any existing catalog collections have synthetic `_id`s?** If so, they
+  can't be converged in place and need a one-time rebuild with deterministic IDs
+  before any of this applies to them. Worth auditing early, because it's a
+  latent constraint on the whole convergence model rather than a detail.
+- **Should `catalogs:` subsume the crossmatch config rather than sit beside it?**
+  Proposed: a separate top-level list, with startup validation that
+  `crossmatch.<survey>` only names catalogs in it. Folding the per-survey
+  matching params into the inventory entries would remove the need for the
+  cross-check, but it restructures a config shape that prod deployments already
+  use and that `CatalogXmatchConfig` deserializes directly.
+- **Auto-create missing indexes at startup, or leave it to `ensure_catalog`?**
+  Precedent exists (`initialize_survey_indexes`), it's non-destructive, and it
+  removes a common cause of drift — but building a 2dsphere index over a
+  multi-million-document catalog during startup is not free.
+- **Source releases as versions, or as separate catalogs?** Treating
+  "NED 2024-06" and "NED 2025-01" as the same catalog at different releases
+  (proposed) means an artifact citing "NED" needs the ledger to say which
+  release it matched against. Keeping them as distinct collections would make
+  that self-evident but complicates the crossmatch config and doubles storage.
+- **Who bumps `version`, and how do we keep the hash test from being noise?**
+  A content hash catches a forgotten bump, but it also fires on comment and
+  formatting changes unless the hash is computed over the parsed, normalized
+  definition. Worth getting right or the test gets disabled.
 - **Ledger granularity for the live pipeline.** One record per scheduler start
   is cheap and probably enough. If deploys become frequent this gets noisy and
   we'd want to collapse consecutive identical versions.
