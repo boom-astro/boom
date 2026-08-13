@@ -360,7 +360,10 @@ pub struct ZtfAlertForEnrichment {
 /// it, never on `objectId`. For the same reason the alert's `prv_candidates` and
 /// `fp_hists` describe whatever else has occupied that sky position, not this
 /// object.
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, AvroSchema, utoipa::ToSchema)]
+#[derive(
+    Debug, Clone, Default, serde::Deserialize, serde::Serialize, AvroSchema, utoipa::ToSchema,
+)]
+#[serde(default)]
 pub struct ZtfSsoAssociation {
     /// Whether a known solar system object was identified at this position.
     ///
@@ -419,7 +422,12 @@ pub struct ZtfAlertProperties {
     pub stationary: bool,
     pub photstats: PerBandProperties,
     pub multisurvey_photstats: Option<PerBandProperties>,
-    pub sso: ZtfSsoAssociation,
+    /// `None` on alerts enriched before this field existed — those were never
+    /// evaluated for a solar system association, which is different from having
+    /// been evaluated and found not to be one (`Some` with `is_sso: false`).
+    /// Consumers must not read `None` as "not an asteroid".
+    #[serde(default)]
+    pub sso: Option<ZtfSsoAssociation>,
 }
 
 /// ZTF alert ML classifier scores
@@ -775,7 +783,7 @@ impl ZtfEnrichmentWorker {
                 stationary,
                 photstats,
                 multisurvey_photstats: Some(multisurvey_photstats),
-                sso,
+                sso: Some(sso),
             },
             all_bands_properties,
             programid,
@@ -998,6 +1006,39 @@ mod tests {
         let sso = ZtfSsoAssociation::from_ipac(None, Some(-999.0), Some(-999.0));
         assert!(sso.separation_arcsec.is_none());
         assert!(sso.predicted_mag.is_none());
+    }
+
+    // Alerts enriched before `properties.sso` existed have no such key. Reading one
+    // back must yield `None` rather than failing, or the API 500s on every
+    // pre-existing object.
+    #[test]
+    fn test_properties_without_sso_still_deserialize() {
+        let legacy = serde_json::json!({
+            "rock": false,
+            "star": false,
+            "near_brightstar": false,
+            "stationary": true,
+            "photstats": PerBandProperties::default(),
+            "multisurvey_photstats": null,
+        });
+
+        let props: ZtfAlertProperties =
+            serde_json::from_value(legacy).expect("legacy properties must still deserialize");
+        assert!(
+            props.sso.is_none(),
+            "absent means never evaluated, not evaluated-and-negative"
+        );
+    }
+
+    // A partially-written block should not fail either.
+    #[test]
+    fn test_partial_sso_block_deserializes() {
+        let sso: ZtfSsoAssociation =
+            serde_json::from_value(serde_json::json!({"designation": "9816"}))
+                .expect("partial sso block must deserialize");
+        assert_eq!(sso.designation.as_deref(), Some("9816"));
+        assert!(!sso.is_sso);
+        assert!(sso.separation_arcsec.is_none());
     }
 
     // The regression this block exists for. `rock` is thresholded at a hardcoded

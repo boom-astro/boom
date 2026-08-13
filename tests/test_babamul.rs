@@ -182,13 +182,13 @@ fn create_mock_enriched_ztf_alert(candid: i64, object_id: &str, is_rock: bool) -
             stationary: false,
             photstats: PerBandProperties::default(),
             multisurvey_photstats: Some(PerBandProperties::default()),
-            sso: ZtfSsoAssociation {
+            sso: Some(ZtfSsoAssociation {
                 is_sso: is_rock,
                 designation: is_rock.then(|| "9816".to_string()),
                 separation_arcsec: is_rock.then_some(1.0),
                 predicted_mag: is_rock.then_some(18.1),
                 source: is_rock.then(|| "ipac".to_string()),
-            },
+            }),
         },
         survey_matches: BabamulSurveyMatches::default(),
     }
