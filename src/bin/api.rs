@@ -112,6 +112,8 @@ async fn main() -> std::io::Result<()> {
                     .service(routes::babamul::get_kafka_credentials)
                     .service(routes::babamul::delete_kafka_credential)
                     .service(routes::babamul::surveys::get_object)
+                    .service(routes::babamul::surveys::get_classification_models)
+                    .service(routes::babamul::surveys::classify_object)
                     .service(routes::babamul::surveys::get_object_xmatches)
                     .service(routes::babamul::surveys::get_objects_xmatches)
                     .service(routes::babamul::surveys::get_objects)

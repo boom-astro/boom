@@ -104,6 +104,8 @@ pub struct ApiDoc;
         routes::babamul::surveys::objects::get_object,
         routes::babamul::surveys::objects::get_objects,
         routes::babamul::surveys::objects::cone_search_objects,
+        routes::babamul::surveys::objects::get_classification_models,
+        routes::babamul::surveys::objects::classify_object,
         routes::babamul::surveys::objects::get_object_xmatches,
         routes::babamul::surveys::objects::get_objects_xmatches,
         routes::babamul::surveys::cutouts::get_cutouts,
