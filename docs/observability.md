@@ -206,6 +206,18 @@ the container running, so edits here require an explicit
 `docker compose up -d --force-recreate --no-deps grafana`. The production deploy
 workflow does this on every run.
 
+The same trap applies to every service whose config or script is a bind mount:
+`up -d` compares the *service definition*, not the file contents, so a container
+keeps running the version it started with. `scripts/docker_metadata_exporter.py`
+was bitten by this — #563 added `docker_container_up` and
+`docker_container_health_status` to it, but the exporter container kept serving
+the pre-#563 metrics, which left the "Service up/down" and "Healthcheck state"
+panels empty and the `api-down` alert querying series that did not exist. The
+deploy workflow now force-recreates `docker-metadata-exporter` alongside
+`grafana`; if you change `config/prometheus.yaml`, the Loki/Tempo/Promtail
+configs, or `config/otel-collector-config.yaml`, add that service to the same
+step or restart it by hand.
+
 All alerts route to a single **Slack** contact point. Set
 `SLACK_WEBHOOK_URL` in your environment / `.env` to a Slack incoming-webhook
 URL; if unset, alerts still fire and are visible in Grafana but no Slack
