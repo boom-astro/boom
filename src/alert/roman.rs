@@ -799,6 +799,7 @@ impl RomanAlertWorker {
             current_version,
             now,
             &self.alert_aux_collection,
+            Document::new(),
         )
         .await
     }
