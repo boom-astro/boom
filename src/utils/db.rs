@@ -122,14 +122,8 @@ pub async fn initialize_survey_indexes(
     };
     create_index(&alerts_collection, index, false).await?;
 
-    // if survey is LSST, create an index on the ssObjectId field of the alerts collection,
-    // and on the designation field of the aux collection (used to look up a moving object by
-    // its MPC designation, independent of any cross-survey position match)
-    // ZTF identifies moving objects by MPC designation rather than a stable id, and
-    // objectId is positional so it cannot join a moving object's detections. Indexes
-    // the raw field rather than the normalised properties.sso.designation: the raw
-    // one is present on the whole archive. Partial, since most alerts are not
-    // solar system objects.
+    // ZTF joins a moving object's detections by MPC designation, since objectId is
+    // positional. Indexes the raw field, which is present on the whole archive.
     if survey == &Survey::Ztf {
         let index = doc! {
             "candidate.ssnamenr": 1,
@@ -144,6 +138,9 @@ pub async fn initialize_survey_indexes(
         .await?;
     }
 
+    // if survey is LSST, create an index on the ssObjectId field of the alerts collection,
+    // and on the designation field of the aux collection (used to look up a moving object by
+    // its MPC designation, independent of any cross-survey position match)
     if survey == &Survey::Lsst {
         let index = doc! {
             "ssObjectId": 1,

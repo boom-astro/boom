@@ -427,7 +427,6 @@ fn sso_history_lookup(ztf_permissions: &Vec<i32>, window_days: f64) -> Document 
             },
             "pipeline": [
                 doc! { "$match": { "$expr": { "$and": [
-                    { "$ne": ["$$desig", Bson::Null] },
                     { "$eq": ["$candidate.ssnamenr", "$$desig"] },
                     { "$gte": ["$candidate.jd", { "$subtract": ["$$jd", window_days] }] },
                     { "$lte": ["$candidate.jd", "$$jd"] },
@@ -600,6 +599,14 @@ pub async fn build_ztf_filter_pipeline(
         let x = mongodb::bson::to_document(&filter_pipeline[i])?;
 
         if insert_sso_history && i == insert_sso_history_index {
+            // Most alerts have no designation (old alerts, or no MPC match); drop
+            // them before the lookup rather than running it to produce an empty
+            // array.
+            pipeline.push(doc! {
+                "$match": {
+                    "properties.sso.designation": { "$exists": true, "$ne": Bson::Null }
+                }
+            });
             pipeline.push(sso_history_lookup(ztf_permissions, 365.0));
             insert_sso_history = false;
         }
@@ -924,6 +931,36 @@ mod sso_history_tests {
             "must not join on the positional objectId"
         );
         assert_eq!(lookup.get_str("from").unwrap(), "ZTF_alerts");
+    }
+
+    // Alerts with no designation (old alerts, or no MPC match) are dropped before
+    // the lookup rather than running it to build an empty array.
+    #[tokio::test]
+    async fn test_designation_match_precedes_the_lookup() {
+        let pipeline = build_ztf_filter_pipeline(
+            &pipeline_from(
+                r#"[{"$match": {"sso_history.0": {"$exists": true}}},
+                 {"$project": {"objectId": 1, "candid": 1}}]"#,
+            ),
+            &perms(),
+        )
+        .await
+        .unwrap();
+
+        let lookup_at = pipeline
+            .iter()
+            .position(|s| s.get_document("$lookup").is_ok())
+            .expect("lookup present");
+        let guard_at = pipeline
+            .iter()
+            .position(|s| {
+                s.get_document("$match")
+                    .ok()
+                    .is_some_and(|m| m.contains_key("properties.sso.designation"))
+            })
+            .expect("designation guard present");
+
+        assert!(guard_at < lookup_at, "guard must run before the lookup");
     }
 
     // A filter must not see programids it lacks permission for.
