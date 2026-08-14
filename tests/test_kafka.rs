@@ -722,3 +722,115 @@ fn test_widened_window_reaches_back_over_an_outage() {
     assert_eq!(wide.first().unwrap(), "ztf_20260805_programid1");
     assert_eq!(wide.last().unwrap(), "ztf_20260810_programid1");
 }
+
+// Regression, 2026-08-14. The existing rollover test produces to the topic BEFORE
+// starting the consumer, so the consumer receives a first message immediately and
+// leaves the initial-assignment loop. Production does not work that way: a deploy
+// between nights starts a consumer with nothing to read, and that loop only exits
+// on a first message. The consumer sat there for 14 hours while the night's alerts
+// went to a topic it never joined, and the test suite showed nothing because no
+// test had ever started a consumer against an empty subscription.
+//
+// This starts a consumer with no data at all, then produces, and asserts the
+// messages still arrive. Requires a local Kafka broker + redis.
+#[tokio::test]
+async fn test_consumer_started_with_no_data_still_consumes() {
+    use boom::conf::{AppConfig, KafkaConsumerConfig};
+    use boom::kafka::{consumer, delete_topic, initialize_topic};
+    use rdkafka::config::ClientConfig;
+    use rdkafka::producer::{FutureProducer, FutureRecord};
+    use std::time::Duration;
+
+    let server = "localhost:9092";
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let prefix = format!("coldstarttest{now_ms}");
+    let output_queue = format!("{prefix}_queue");
+    let group_id = format!("{prefix}_group");
+    let topic = format!("{prefix}_20260814");
+
+    let app_config = AppConfig::from_path(TEST_CONFIG_FILE).unwrap();
+    let mut con = app_config.build_redis().await.unwrap();
+    let _: () = con.del(&output_queue).await.unwrap_or(());
+
+    // Topic exists but is completely empty — the between-nights state.
+    initialize_topic(server, &topic, 1).await.unwrap();
+
+    let cold_start_ts = now_ms / 1000 - 3600;
+    let kafka_cfg = KafkaConsumerConfig {
+        server: server.to_string(),
+        group_id,
+        schema_registry: None,
+        schema_github_fallback_url: None,
+        username: None,
+        password: None,
+        subscription_window_days: 1,
+    };
+
+    let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
+    let consumer_thread = {
+        let config = app_config.clone();
+        let oq = output_queue.clone();
+        let subscription = vec![topic.clone()];
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.spawn(async move {
+                let _ = consumer(
+                    "0",
+                    std::sync::Arc::new(move |_, _| subscription.clone()),
+                    &oq,
+                    0,
+                    cold_start_ts,
+                    true,
+                    &config,
+                    &kafka_cfg,
+                    false,
+                    "WINTER",
+                )
+                .await;
+            });
+            let _ = stop_rx.recv();
+            rt.shutdown_timeout(std::time::Duration::from_secs(1));
+        })
+    };
+
+    // Let it settle into the initial-assignment loop with nothing to read. Under
+    // the old code this is where it stayed forever.
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    assert!(
+        con.llen::<&str, usize>(&output_queue).await.unwrap_or(0) == 0,
+        "nothing should have been consumed yet"
+    );
+
+    let producer: FutureProducer = ClientConfig::new()
+        .set("bootstrap.servers", server)
+        .create()
+        .unwrap();
+    let payloads: Vec<String> = (0..5).map(|i| format!("late-{i}")).collect();
+    for p in &payloads {
+        producer
+            .send(
+                FutureRecord::to(topic.as_str())
+                    .payload(p.as_str())
+                    .key("k")
+                    .timestamp(chrono::Utc::now().timestamp_millis()),
+                Duration::from_secs(10),
+            )
+            .await
+            .unwrap();
+    }
+
+    let seen = wait_for_payloads(&mut con, &output_queue, &payloads, Duration::from_secs(60)).await;
+    assert!(
+        payloads.iter().all(|p| seen.contains(p)),
+        "a consumer that started with no data must still consume once data arrives; saw {seen:?}"
+    );
+
+    let _ = stop_tx.send(());
+    let _ = consumer_thread.join();
+    let _: () = con.del(&output_queue).await.unwrap_or(());
+    let _ = delete_topic(server, &topic).await;
+}
