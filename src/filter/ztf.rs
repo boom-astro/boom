@@ -412,6 +412,11 @@ pub async fn build_ztf_alerts(
 /// `objectId` cannot be used: it is positional, so a moving object is given a new
 /// one on nearly every detection and its aux document describes the sky position
 /// rather than the object.
+///
+/// The outer key is the normalised `properties.sso.designation`; the inner key is
+/// the raw `candidate.ssnamenr` it is derived from. Same value, but the raw field
+/// is present on the whole archive while the normalised one only exists on alerts
+/// enriched since it was introduced.
 fn sso_history_lookup(ztf_permissions: &Vec<i32>, window_days: f64) -> Document {
     doc! {
         "$lookup": {
@@ -423,7 +428,7 @@ fn sso_history_lookup(ztf_permissions: &Vec<i32>, window_days: f64) -> Document 
             "pipeline": [
                 doc! { "$match": { "$expr": { "$and": [
                     { "$ne": ["$$desig", Bson::Null] },
-                    { "$eq": ["$properties.sso.designation", "$$desig"] },
+                    { "$eq": ["$candidate.ssnamenr", "$$desig"] },
                     { "$gte": ["$candidate.jd", { "$subtract": ["$$jd", window_days] }] },
                     { "$lte": ["$candidate.jd", "$$jd"] },
                     { "$in": ["$candidate.programid", ztf_permissions] },
@@ -910,7 +915,10 @@ mod sso_history_tests {
             .expect("lookup present");
         let rendered = format!("{:?}", lookup);
 
+        // Outer key normalised, inner key raw: the raw field covers the whole
+        // archive, so no backfill is needed for history to reach back.
         assert!(rendered.contains("properties.sso.designation"));
+        assert!(rendered.contains("candidate.ssnamenr"));
         assert!(
             !rendered.contains("objectId"),
             "must not join on the positional objectId"
