@@ -962,7 +962,13 @@ pub async fn consumer(
                     seek_to_timestamp(&consumer, timestamp * 1000)?;
                 } else {
                     // Resume committed partitions; skip old / start today otherwise.
-                    reposition_new_partitions(&consumer, timestamp * 1000, &mut positioned)?;
+                    // position_timestamp, not timestamp: a rollover may have
+                    // advanced it while this loop waited for a first message.
+                    reposition_new_partitions(
+                        &consumer,
+                        position_timestamp * 1000,
+                        &mut positioned,
+                    )?;
                 }
                 break;
             }
@@ -1157,7 +1163,7 @@ pub async fn consumer(
                     break;
                 }
                 // Idle: catch a topic that has just rolled over.
-                reposition_new_partitions(&consumer, timestamp * 1000, &mut positioned)?;
+                reposition_new_partitions(&consumer, position_timestamp * 1000, &mut positioned)?;
             }
         }
     }
