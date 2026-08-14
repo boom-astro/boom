@@ -122,6 +122,22 @@ pub async fn initialize_survey_indexes(
     };
     create_index(&alerts_collection, index, false).await?;
 
+    // ZTF joins a moving object's detections by MPC designation, since objectId is
+    // positional. Indexes the raw field, which is present on the whole archive.
+    if survey == &Survey::Ztf {
+        let index = doc! {
+            "candidate.ssnamenr": 1,
+            "candidate.jd": -1,
+        };
+        create_partial_index(
+            &alerts_collection,
+            index,
+            false,
+            Some(doc! { "candidate.ssnamenr": { "$exists": true } }),
+        )
+        .await?;
+    }
+
     // if survey is LSST, create an index on the ssObjectId field of the alerts collection,
     // and on the designation field of the aux collection (used to look up a moving object by
     // its MPC designation, independent of any cross-survey position match)
