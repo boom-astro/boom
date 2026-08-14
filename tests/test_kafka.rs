@@ -739,7 +739,7 @@ async fn test_consumer_started_with_no_data_still_consumes() {
     let prefix = format!("coldstarttest{now_ms}");
     let output_queue = format!("{prefix}_queue");
     let group_id = format!("{prefix}_group");
-    let topic = format!("{prefix}_20260814");
+    let topic = format!("{prefix}_{}", chrono::Utc::now().format("%Y%m%d"));
 
     let app_config = AppConfig::from_path(TEST_CONFIG_FILE).unwrap();
     let mut con = app_config.build_redis().await.unwrap();
