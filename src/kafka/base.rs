@@ -746,6 +746,53 @@ impl StartDate {
     }
 }
 
+/// UTC-midnight timestamp to roll onto, or `None` to stay put. Split out so the
+/// decision is testable without a broker.
+fn rollover_target(
+    follow_current_date: bool,
+    subscribed_date: chrono::NaiveDate,
+    today: chrono::NaiveDate,
+) -> Option<i64> {
+    if !follow_current_date || today == subscribed_date {
+        return None;
+    }
+    today
+        .and_hms_opt(0, 0, 0)
+        .map(|midnight| midnight.and_utc().timestamp())
+}
+
+/// Re-subscribe if the UTC date has rolled onto a new daily topic.
+///
+/// Must be called from both poll loops: a consumer started between nights never
+/// receives a first message, so it never leaves the initial-assignment loop.
+fn roll_subscription_if_needed(
+    consumer: &BaseConsumer,
+    subscribe_to: &Arc<dyn Fn(i64, u64) -> Vec<String> + Send + Sync>,
+    window_days: u64,
+    follow_current_date: bool,
+    subscribed_date: &mut chrono::NaiveDate,
+    position_timestamp: &mut i64,
+) {
+    let today = chrono::Utc::now().date_naive();
+    let Some(new_timestamp) = rollover_target(follow_current_date, *subscribed_date, today) else {
+        return;
+    };
+    let rolled = subscribe_to(new_timestamp, window_days);
+    let rolled_refs: Vec<&str> = rolled.iter().map(|s| s.as_str()).collect();
+    match consumer.subscribe(&rolled_refs) {
+        Ok(()) => {
+            info!(
+                "Rolled subscription from {} to {}, now subscribed to {:?}",
+                subscribed_date, today, rolled
+            );
+            *subscribed_date = today;
+            *position_timestamp = new_timestamp;
+        }
+        // Stay on the current subscription; the next check retries.
+        Err(error) => log_error!(error, "failed to roll subscription onto new day"),
+    }
+}
+
 /// Whether a poll error refers to a partition whose topic no longer exists
 /// upstream — typically an expired daily topic still present in the group's
 /// assignment. Unlike a transient broker error these never recover, so they
@@ -872,8 +919,41 @@ pub async fn consumer(
     // Partitions already positioned (prod path only); see reposition_new_partitions.
     let mut positioned: std::collections::HashSet<(String, i32)> = std::collections::HashSet::new();
 
+    // Declared here because the initial-assignment loop must roll over too.
+    const ROLLOVER_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+    let mut last_rollover_check = std::time::Instant::now();
+    // Advance together on rollover, so a new topic starts at its own day.
+    let mut subscribed_date = chrono::DateTime::from_timestamp(timestamp, 0)
+        .map(|dt| dt.date_naive())
+        .unwrap_or_else(|| chrono::Utc::now().date_naive());
+    let mut position_timestamp = timestamp;
+
+    // Idle and wedged look identical at INFO otherwise.
+    const WAITING_LOG_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+    let mut last_waiting_log = std::time::Instant::now();
+
     // Poll once to trigger rebalance and get assignment
     loop {
+        // This loop can sit across a UTC midnight; roll while waiting.
+        if !exit_on_eof && last_rollover_check.elapsed() >= ROLLOVER_CHECK_INTERVAL {
+            last_rollover_check = std::time::Instant::now();
+            roll_subscription_if_needed(
+                &consumer,
+                &subscribe_to,
+                window_days,
+                follow_current_date,
+                &mut subscribed_date,
+                &mut position_timestamp,
+            );
+            reposition_new_partitions(&consumer, position_timestamp * 1000, &mut positioned)?;
+        }
+        if !exit_on_eof && last_waiting_log.elapsed() >= WAITING_LOG_INTERVAL {
+            last_waiting_log = std::time::Instant::now();
+            info!(
+                "Consumer {} waiting for first message; subscribed for {} (idle between nights is normal)",
+                id, subscribed_date
+            );
+        }
         match consumer.poll(KAFKA_TIMEOUT_SECS) {
             Some(Ok(_msg)) => {
                 debug!("Got initial assignment, positioning partitions...");
@@ -957,22 +1037,6 @@ pub async fn consumer(
     let mut last_heartbeat = std::time::Instant::now();
     let mut total_at_last_heartbeat: u64 = 0;
 
-    // How often the loop re-checks whether the UTC date has rolled onto a new
-    // daily topic. Cheap (a clock read, then a no-op unless the date changed),
-    // and deliberately driven by elapsed time rather than by message count: a
-    // count-gated check cannot fire while no messages are arriving, which is
-    // precisely the state rollover has to recover from.
-    const ROLLOVER_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
-    let mut last_rollover_check = std::time::Instant::now();
-    // The date whose topics are currently subscribed, and the instant that
-    // newly-assigned partitions are positioned to. Both advance together on
-    // rollover, so a freshly-joined topic starts at its own day rather than at
-    // whichever day the process happened to boot on.
-    let mut subscribed_date = chrono::DateTime::from_timestamp(timestamp, 0)
-        .map(|dt| dt.date_naive())
-        .unwrap_or_else(|| chrono::Utc::now().date_naive());
-    let mut position_timestamp = timestamp;
-
     // Expired-partition poll errors repeat indefinitely, so they get a short
     // backoff (enough to keep the loop off a hot spin) and a throttled log.
     const EXPIRED_POLL_BACKOFF: std::time::Duration = std::time::Duration::from_millis(100);
@@ -1003,26 +1067,14 @@ pub async fn consumer(
         // newly-assigned partitions (the new day's topic, or a rebalance).
         if !exit_on_eof && last_rollover_check.elapsed() >= ROLLOVER_CHECK_INTERVAL {
             last_rollover_check = std::time::Instant::now();
-            let today = chrono::Utc::now().date_naive();
-            if follow_current_date && today != subscribed_date {
-                position_timestamp = today
-                    .and_hms_opt(0, 0, 0)
-                    .map(|midnight| midnight.and_utc().timestamp())
-                    .unwrap_or(position_timestamp);
-                let rolled = subscribe_to(position_timestamp, window_days);
-                let rolled_refs: Vec<&str> = rolled.iter().map(|s| s.as_str()).collect();
-                match consumer.subscribe(&rolled_refs) {
-                    Ok(()) => {
-                        info!(
-                            "Rolled subscription from {} to {}, now subscribed to {:?}",
-                            subscribed_date, today, rolled
-                        );
-                        subscribed_date = today;
-                    }
-                    // Stay on the current subscription; the next check retries.
-                    Err(error) => log_error!(error, "failed to roll subscription onto new day"),
-                }
-            }
+            roll_subscription_if_needed(
+                &consumer,
+                &subscribe_to,
+                window_days,
+                follow_current_date,
+                &mut subscribed_date,
+                &mut position_timestamp,
+            );
             reposition_new_partitions(&consumer, position_timestamp * 1000, &mut positioned)?;
         }
         if max_in_queue > 0 && total % 1000 == 0 {
@@ -1111,4 +1163,51 @@ pub async fn consumer(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod rollover_tests {
+    use super::*;
+
+    fn d(y: i32, m: u32, day: u32) -> chrono::NaiveDate {
+        chrono::NaiveDate::from_ymd_opt(y, m, day).unwrap()
+    }
+
+    #[test]
+    fn test_rolls_onto_a_new_utc_day() {
+        let target = rollover_target(true, d(2026, 8, 13), d(2026, 8, 14))
+            .expect("a new day must produce a rollover target");
+        assert_eq!(target % 86_400, 0, "targets UTC midnight");
+        assert_eq!(
+            chrono::DateTime::from_timestamp(target, 0)
+                .unwrap()
+                .date_naive(),
+            d(2026, 8, 14)
+        );
+    }
+
+    #[test]
+    fn test_no_roll_within_the_same_day() {
+        assert!(rollover_target(true, d(2026, 8, 14), d(2026, 8, 14)).is_none());
+    }
+
+    // A pinned run (replay, backfill, benchmark) must never chase the clock.
+    #[test]
+    fn test_pinned_run_never_rolls() {
+        assert!(rollover_target(false, d(2025, 3, 11), d(2026, 8, 14)).is_none());
+    }
+
+    // A stale subscription rolls all the way to today, not one day forward.
+    #[test]
+    fn test_rolls_across_a_multi_day_gap() {
+        let target = rollover_target(true, d(2026, 8, 12), d(2026, 8, 14))
+            .expect("a stale subscription must roll forward however far behind it is");
+        assert_eq!(
+            chrono::DateTime::from_timestamp(target, 0)
+                .unwrap()
+                .date_naive(),
+            d(2026, 8, 14),
+            "rolls to today, not merely one day forward"
+        );
+    }
 }
