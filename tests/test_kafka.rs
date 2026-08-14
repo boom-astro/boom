@@ -723,16 +723,9 @@ fn test_widened_window_reaches_back_over_an_outage() {
     assert_eq!(wide.last().unwrap(), "ztf_20260810_programid1");
 }
 
-// Regression, 2026-08-14. The existing rollover test produces to the topic BEFORE
-// starting the consumer, so the consumer receives a first message immediately and
-// leaves the initial-assignment loop. Production does not work that way: a deploy
-// between nights starts a consumer with nothing to read, and that loop only exits
-// on a first message. The consumer sat there for 14 hours while the night's alerts
-// went to a topic it never joined, and the test suite showed nothing because no
-// test had ever started a consumer against an empty subscription.
-//
-// This starts a consumer with no data at all, then produces, and asserts the
-// messages still arrive. Requires a local Kafka broker + redis.
+// The other rollover test produces before starting the consumer, so it never
+// exercises an empty subscription. This starts one with no data, then produces.
+// Requires a local Kafka broker + redis.
 #[tokio::test]
 async fn test_consumer_started_with_no_data_still_consumes() {
     use boom::conf::{AppConfig, KafkaConsumerConfig};
@@ -797,8 +790,7 @@ async fn test_consumer_started_with_no_data_still_consumes() {
         })
     };
 
-    // Let it settle into the initial-assignment loop with nothing to read. Under
-    // the old code this is where it stayed forever.
+    // Settle into the initial-assignment loop with nothing to read.
     tokio::time::sleep(Duration::from_secs(10)).await;
     assert!(
         con.llen::<&str, usize>(&output_queue).await.unwrap_or(0) == 0,

@@ -746,8 +746,7 @@ impl StartDate {
     }
 }
 
-/// The UTC-midnight timestamp the subscription should roll onto, or `None` if it
-/// should stay where it is. Split out from [`roll_subscription_if_needed`] so the
+/// UTC-midnight timestamp to roll onto, or `None` to stay put. Split out so the
 /// decision is testable without a broker.
 fn rollover_target(
     follow_current_date: bool,
@@ -762,15 +761,10 @@ fn rollover_target(
         .map(|midnight| midnight.and_utc().timestamp())
 }
 
-/// Re-subscribe if the UTC date has rolled onto a new daily topic. Returns the
-/// timestamp new partitions should be positioned to.
+/// Re-subscribe if the UTC date has rolled onto a new daily topic.
 ///
-/// This must be called from BOTH the initial-assignment loop and the main poll
-/// loop. A consumer started between nights never receives a first message, so it
-/// never leaves the initial loop; a rollover check that only ran in the main loop
-/// would therefore never fire, leaving the consumer subscribed to yesterday's
-/// topics while the night's alerts went to a topic it had never joined. That is
-/// not hypothetical — it cost a full night of ZTF ingestion on 2026-08-14.
+/// Must be called from both poll loops: a consumer started between nights never
+/// receives a first message, so it never leaves the initial-assignment loop.
 fn roll_subscription_if_needed(
     consumer: &BaseConsumer,
     subscribe_to: &Arc<dyn Fn(i64, u64) -> Vec<String> + Send + Sync>,
@@ -925,30 +919,22 @@ pub async fn consumer(
     // Partitions already positioned (prod path only); see reposition_new_partitions.
     let mut positioned: std::collections::HashSet<(String, i32)> = std::collections::HashSet::new();
 
-    // Rollover state. Declared here rather than alongside the main loop because
-    // the initial-assignment loop below must be able to roll over too.
+    // Declared here because the initial-assignment loop must roll over too.
     const ROLLOVER_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
     let mut last_rollover_check = std::time::Instant::now();
-    // The date whose topics are currently subscribed, and the instant that
-    // newly-assigned partitions are positioned to. Both advance together on
-    // rollover, so a freshly-joined topic starts at its own day rather than at
-    // whichever day the process happened to boot on.
+    // Advance together on rollover, so a new topic starts at its own day.
     let mut subscribed_date = chrono::DateTime::from_timestamp(timestamp, 0)
         .map(|dt| dt.date_naive())
         .unwrap_or_else(|| chrono::Utc::now().date_naive());
     let mut position_timestamp = timestamp;
 
-    // A consumer that has not yet seen its first message is indistinguishable
-    // from a wedged one at INFO level, which is how a lost night went unnoticed.
-    // Say so out loud while waiting.
+    // Idle and wedged look identical at INFO otherwise.
     const WAITING_LOG_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
     let mut last_waiting_log = std::time::Instant::now();
 
     // Poll once to trigger rebalance and get assignment
     loop {
-        // Between nights there is nothing to consume, so this loop can sit here
-        // across a UTC midnight. Roll the subscription while waiting, or the new
-        // day's topic is never joined.
+        // This loop can sit across a UTC midnight; roll while waiting.
         if !exit_on_eof && last_rollover_check.elapsed() >= ROLLOVER_CHECK_INTERVAL {
             last_rollover_check = std::time::Instant::now();
             roll_subscription_if_needed(
@@ -1211,13 +1197,7 @@ mod rollover_tests {
         assert!(rollover_target(false, d(2025, 3, 11), d(2026, 8, 14)).is_none());
     }
 
-    // Regression, 2026-08-14: a consumer deployed between nights never receives a
-    // first message, so it never left the initial-assignment loop. The rollover
-    // check lived only in the main loop and so never ran, leaving the consumer on
-    // the previous day's topics while that night's 24,112 alerts were published to
-    // a topic it had never joined. The decision itself was always correct -- it was
-    // simply never reached -- so this asserts the multi-day case the outage
-    // produced, and `roll_subscription_if_needed` is now called from both loops.
+    // A stale subscription rolls all the way to today, not one day forward.
     #[test]
     fn test_rolls_across_a_multi_day_gap() {
         let target = rollover_target(true, d(2026, 8, 12), d(2026, 8, 14))
