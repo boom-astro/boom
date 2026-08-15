@@ -40,7 +40,7 @@ COPY ./src /app/src
 RUN --mount=type=cache,target=/app/target,sharing=locked \
     --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
     --mount=type=cache,target=/root/.cargo/git,sharing=locked \
-    cargo build --release --bin scheduler --bin migrate_fp_flux --bin migrate_snr --bin reprocess_crossmatch --bin enrich_reprocess && \
+    cargo build --release --features gpu --bin scheduler --bin migrate_fp_flux --bin migrate_snr --bin reprocess_crossmatch --bin enrich_reprocess && \
     mkdir -p /app/bin && \
     cp target/release/scheduler \
        target/release/migrate_fp_flux \
