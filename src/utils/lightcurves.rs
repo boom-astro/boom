@@ -111,6 +111,58 @@ pub struct BandProperties {
     pub fading: Option<BandRateProperties>,
 }
 
+/// Morphological indicators of cometary activity, computed per survey but expressed
+/// on one scale so a filter reads identically on ZTF and LSST.
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    serde::Deserialize,
+    serde::Serialize,
+    AvroSchema,
+    utoipa::ToSchema,
+)]
+#[serde(default)]
+pub struct ActivityMetrics {
+    /// Flux in the aperture beyond what a point source would put there, in
+    /// magnitudes. Positive means extended. Cross-survey comparable because both
+    /// sides reduce to a magnitude difference.
+    ///
+    /// Confounded by trailing: a fast mover smears during the exposure and looks
+    /// extended. Use alongside `sso.sky_motion` rather than alone.
+    ///
+    /// Computed here only because the degenerate cases are batch-fatal in an
+    /// aggregation: `$divide` by a zero flux and `$log10` of a negative one both
+    /// abort the whole pipeline, and difference imaging produces such fluxes
+    /// routinely. No threshold is applied — filters choose their own cut.
+    pub aperture_excess: Option<f32>,
+}
+
+impl ActivityMetrics {
+    /// ZTF: aperture and PSF magnitudes directly. Brighter aperture => positive.
+    pub fn from_magnitudes(magpsf: Option<f32>, magap: Option<f32>) -> Self {
+        let aperture_excess = match (magpsf, magap) {
+            (Some(psf), Some(ap)) if psf.is_finite() && ap.is_finite() => Some(psf - ap),
+            _ => None,
+        };
+        Self::from_excess(aperture_excess)
+    }
+
+    /// LSST: fluxes rather than magnitudes. Non-positive fluxes are not convertible.
+    pub fn from_fluxes(psf_flux: Option<f32>, ap_flux: Option<f32>) -> Self {
+        let aperture_excess = match (psf_flux, ap_flux) {
+            (Some(psf), Some(ap)) if psf > 0.0 && ap > 0.0 => Some(2.5 * (ap / psf).log10()),
+            _ => None,
+        };
+        Self::from_excess(aperture_excess)
+    }
+
+    fn from_excess(aperture_excess: Option<f32>) -> Self {
+        ActivityMetrics { aperture_excess }
+    }
+}
+
 // TODO: avro serialization fail when we use skip_serializing_none,
 // since the optional fields are not just None but simply missing
 // (this needs to be fixed in the apache_avro-related crates)
@@ -978,5 +1030,48 @@ mod tests {
         let rising_dt = rising_stats.dt;
         assert_eq!(rising_nb_data, 2);
         assert!((rising_dt - 1.0).abs() < 1e-6);
+    }
+}
+
+#[cfg(test)]
+mod activity_tests {
+    use super::*;
+
+    #[test]
+    fn test_ztf_aperture_excess_positive_when_aperture_brighter() {
+        // Brighter aperture => smaller magnitude => positive excess.
+        let a = ActivityMetrics::from_magnitudes(Some(18.0), Some(17.5));
+        assert_eq!(a.aperture_excess, Some(0.5));
+
+        let point = ActivityMetrics::from_magnitudes(Some(18.0), Some(18.0));
+        assert_eq!(point.aperture_excess, Some(0.0));
+    }
+
+    #[test]
+    fn test_lsst_flux_ratio_matches_the_magnitude_scale() {
+        // A 1.585x aperture/psf flux ratio is 0.5 mag, so both surveys agree.
+        let a = ActivityMetrics::from_fluxes(Some(100.0), Some(158.489));
+        let excess = a.aperture_excess.unwrap();
+        assert!((excess - 0.5).abs() < 1e-3, "got {excess}");
+    }
+
+    // Difference imaging routinely yields non-positive fluxes; a log of those is
+    // not a measurement.
+    #[test]
+    fn test_non_positive_fluxes_yield_no_measurement() {
+        for (psf, ap) in [
+            (Some(0.0), Some(10.0)),
+            (Some(10.0), Some(-5.0)),
+            (None, Some(10.0)),
+        ] {
+            let a = ActivityMetrics::from_fluxes(psf, ap);
+            assert!(a.aperture_excess.is_none());
+        }
+    }
+
+    #[test]
+    fn test_missing_magnitudes_yield_no_measurement() {
+        let a = ActivityMetrics::from_magnitudes(Some(18.0), None);
+        assert!(a.aperture_excess.is_none());
     }
 }
