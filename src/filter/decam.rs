@@ -2,117 +2,125 @@ use mongodb::bson::{doc, Document};
 use std::collections::HashMap;
 use tracing::{info, instrument, warn};
 
+use crate::alert::DecamCandidate;
 use crate::conf::AppConfig;
-use crate::enrichment::{create_lsst_alert_pipeline, fetch_alerts, LsstAlertForEnrichment};
+use crate::enrichment::fetch_alerts;
 use crate::filter::{
-    build_loaded_filters, build_ztf_aux_data, insert_ztf_aux_pipeline_if_needed, run_filter,
-    update_aliases_index_multiple, uses_field_in_filter, validate_filter_pipeline,
+    build_loaded_filters, run_filter, uses_field_in_filter, validate_filter_pipeline,
     watchlist_projections, Alert, Classification, Filter, FilterError, FilterResults, FilterWorker,
-    FilterWorkerError, LoadedFilter, Origin, Photometry, SurveyMatch, SurveyMatches,
+    FilterWorkerError, LoadedFilter, Origin, Photometry, SurveyMatches,
 };
 use crate::utils::cutouts::CutoutStorage;
 use crate::utils::db::{fetch_timeseries_op, get_array_dict_element};
 use crate::utils::enums::Survey;
+use crate::utils::lightcurves::Band;
 
-/// For a filter running on another survey (e.g., ZTF), determine if we need to
-/// fetch LSST auxiliary data (prv_candidates, fp_hists) based on the fields
-/// used in the filter pipeline.
+/// A single DECam difference-image forced-photometry point, as fetched from the
+/// DECam aux collection to build the outgoing alert packet.
 ///
-/// # Arguments
-/// * `use_aliases_index` - Current index of the aliases lookup stage, if any.
-/// * `filter_pipeline` - The user-defined filter pipeline stages.
-///
-/// Returns
-/// * `Option<usize>` - Updated index of the aliases lookup stage, if any.
-/// * `bool` - Whether to insert the LSST auxiliary data lookup pipeline.
-/// * `Document` - The fields to add to the alert documents.
-pub fn build_lsst_aux_data(
-    use_aliases_index: Option<usize>,
-    filter_pipeline: &Vec<serde_json::Value>,
-) -> (Option<usize>, bool, Document) {
-    let use_lsst_prv_candidates_index =
-        uses_field_in_filter(filter_pipeline, "LSST.prv_candidates");
-    let use_lsst_fp_hists_index = uses_field_in_filter(filter_pipeline, "LSST.fp_hists");
-
-    let mut lsst_aux_add_fields = doc! {
-        "lsst_aux": mongodb::bson::Bson::Null,
-    };
-    if use_lsst_prv_candidates_index.is_some() {
-        lsst_aux_add_fields.insert(
-            "LSST.prv_candidates".to_string(),
-            fetch_timeseries_op("lsst_aux.prv_candidates", "candidate.jd", 365, None),
-        );
-    }
-    if use_lsst_fp_hists_index.is_some() {
-        lsst_aux_add_fields.insert(
-            "LSST.fp_hists".to_string(),
-            fetch_timeseries_op("lsst_aux.fp_hists", "candidate.jd", 365, None),
-        );
-    }
-
-    let mut lsst_insert_aux_index = usize::MAX;
-    if let Some(index) = use_lsst_prv_candidates_index {
-        lsst_insert_aux_index = lsst_insert_aux_index.min(index);
-    }
-    if let Some(index) = use_lsst_fp_hists_index {
-        lsst_insert_aux_index = lsst_insert_aux_index.min(index);
-    }
-    let lsst_insert_aux_pipeline = lsst_insert_aux_index != usize::MAX;
-
-    let updated_use_aliases_index = update_aliases_index_multiple(
-        use_aliases_index,
-        vec![use_lsst_prv_candidates_index, use_lsst_fp_hists_index],
-    );
-
-    (
-        updated_use_aliases_index,
-        lsst_insert_aux_pipeline,
-        lsst_aux_add_fields,
-    )
+/// `prv_candidates` points carry `ra`/`dec`; `fp_hists` points do not (those
+/// fields are simply absent from the aux document and deserialize to `None`).
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct DecamPhotometry {
+    pub jd: f64,
+    pub forcediffimflux: f64,
+    pub forcediffimfluxunc: f64,
+    pub band: Band,
+    #[serde(default)]
+    pub ra: Option<f64>,
+    #[serde(default)]
+    pub dec: Option<f64>,
 }
 
-/// Inserts the LSST auxiliary data lookup pipeline into the provided pipeline
-/// if needed.
-///
-/// # Arguments
-/// * `pipeline` - The MongoDB aggregation pipeline to modify.
-/// * `lsst_insert_aux_pipeline` - Whether to insert the LSST auxiliary data lookup pipeline.
-/// * `lsst_aux_add_fields` - The fields to add to the alert documents.
-///
-/// Returns
-/// * `()` - The function modifies the pipeline in place.
-pub fn insert_lsst_aux_pipeline_if_needed(
-    pipeline: &mut Vec<Document>,
-    lsst_insert_aux_pipeline: &mut bool,
-    lsst_aux_add_fields: &Document,
-) {
-    if *lsst_insert_aux_pipeline {
-        pipeline.push(doc! {
-            "$lookup": doc! {
-                "from": "LSST_alerts_aux",
-                "localField": "aliases.LSST.0",
-                "foreignField": "_id",
-                "as": "lsst_aux"
+impl DecamPhotometry {
+    /// DECam difference fluxes are stored on the uJy scale (AB zeropoint 23.9),
+    /// while the downstream photometry packet uses nJy (AB zeropoint 31.4) like
+    /// the other surveys -- a fixed factor of 1000 (7.5 mag).
+    fn to_flux(&self) -> (Option<f64>, f64) {
+        (
+            Some(self.forcediffimflux * 1000.0),
+            self.forcediffimfluxunc * 1000.0,
+        )
+    }
+}
+
+/// DECam alert as fetched from the database to build the outgoing alert packet.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct DecamAlertForFilter {
+    #[serde(rename = "_id")]
+    pub candid: i64,
+    #[serde(rename = "objectId")]
+    pub object_id: String,
+    pub candidate: DecamCandidate,
+    #[serde(default)]
+    pub prv_candidates: Vec<DecamPhotometry>,
+    #[serde(default)]
+    pub fp_hists: Vec<DecamPhotometry>,
+}
+
+/// Pipeline used to fetch full DECam alert data (candidate + lightcurve) to
+/// build the alert packets emitted after filtering.
+fn create_decam_filter_alert_pipeline() -> Vec<Document> {
+    vec![
+        doc! {
+            "$match": {
+                "_id": {"$in": []}
             }
-        });
-        pipeline.push(doc! {
-            "$addFields": lsst_aux_add_fields
-        });
-        *lsst_insert_aux_pipeline = false; // only insert once
-    }
+        },
+        doc! {
+            "$project": {
+                "objectId": 1,
+                "candidate": 1,
+            }
+        },
+        doc! {
+            "$lookup": {
+                "from": "DECAM_alerts_aux",
+                "localField": "objectId",
+                "foreignField": "_id",
+                "as": "aux"
+            }
+        },
+        doc! {
+            "$project": doc! {
+                "objectId": 1,
+                "candidate": 1,
+                "prv_candidates": fetch_timeseries_op(
+                    "aux.prv_candidates",
+                    "candidate.jd",
+                    1000,
+                    None
+                ),
+                "fp_hists": fetch_timeseries_op(
+                    "aux.fp_hists",
+                    "candidate.jd",
+                    1000,
+                    None
+                ),
+            }
+        },
+        doc! {
+            "$project": doc! {
+                "objectId": 1,
+                "candidate": 1,
+                "prv_candidates.jd": 1,
+                "prv_candidates.forcediffimflux": 1,
+                "prv_candidates.forcediffimfluxunc": 1,
+                "prv_candidates.band": 1,
+                "prv_candidates.ra": 1,
+                "prv_candidates.dec": 1,
+                "fp_hists.jd": 1,
+                "fp_hists.forcediffimflux": 1,
+                "fp_hists.forcediffimfluxunc": 1,
+                "fp_hists.band": 1,
+            }
+        },
+    ]
 }
 
-/// Builds LSST Alert objects from the provided filter results and alert collection.
-///
-/// # Arguments
-/// * `alerts_with_filter_results` - A mapping of alert candids to their corresponding filter results.
-/// * `alert_pipeline` - The MongoDB aggregation pipeline to fetch alert data, which should be pre-populated with the necessary lookups for auxiliary data.
-/// * `alert_collection` - The MongoDB collection containing LSST alert documents.
-/// * `alert_cutout_storage` -  The storage for LSST alert cutouts.
-/// # Returns
-/// * `Result<Vec<Alert>, FilterWorkerError>` - A vector of constructed Alert objects or a FilterWorkerError.
+/// Builds DECam Alert packets from the provided filter results.
 #[instrument(skip_all, err)]
-pub async fn build_lsst_alerts(
+pub async fn build_decam_alerts(
     alerts_with_filter_results: &HashMap<i64, Vec<FilterResults>>,
     alert_pipeline: &Vec<Document>,
     alert_collection: &mongodb::Collection<Document>,
@@ -123,7 +131,7 @@ pub async fn build_lsst_alerts(
         return Ok(Vec::new());
     }
 
-    let alerts: Vec<LsstAlertForEnrichment> =
+    let alerts: Vec<DecamAlertForFilter> =
         fetch_alerts(&candids, &alert_pipeline, alert_collection)
             .await
             .map_err(|e| FilterWorkerError::FetchAlertsError(e.to_string()))?;
@@ -170,7 +178,7 @@ pub async fn build_lsst_alerts(
         let candid = alert.candid;
 
         let mut classifications = Vec::new();
-        if let Some(reliability) = alert.candidate.dia_source.reliability {
+        if let Some(reliability) = alert.candidate.candidate.reliability {
             classifications.push(Classification {
                 classifier: "reliability".to_string(),
                 score: reliability as f32,
@@ -180,89 +188,34 @@ pub async fn build_lsst_alerts(
 
         let mut photometry = Vec::new();
         for doc in alert.prv_candidates.iter() {
+            let (flux, flux_err) = doc.to_flux();
             photometry.push(Photometry {
                 jd: doc.jd,
-                flux: doc.flux,
-                flux_err: doc.flux_err,
-                band: format!("lsst{}", doc.band),
+                flux,
+                flux_err,
+                band: format!("decam{}", doc.band),
                 origin: Origin::Alert,
-                programid: 1, // only one public stream for LSST
-                survey: Survey::Lsst,
+                programid: 1, // DECam has a single public stream
+                survey: Survey::Decam,
                 ra: doc.ra,
                 dec: doc.dec,
             });
         }
         for doc in alert.fp_hists.iter() {
+            let (flux, flux_err) = doc.to_flux();
             photometry.push(Photometry {
                 jd: doc.jd,
-                flux: doc.flux,
-                flux_err: doc.flux_err,
-                band: format!("lsst{}", doc.band),
+                flux,
+                flux_err,
+                band: format!("decam{}", doc.band),
                 origin: Origin::ForcedPhot,
-                programid: 1, // only one public stream for LSST
-                survey: Survey::Lsst,
+                programid: 1,
+                survey: Survey::Decam,
                 ra: doc.ra,
                 dec: doc.dec,
             });
         }
-
         photometry.sort_by(|a, b| a.jd.partial_cmp(&b.jd).unwrap());
-
-        let mut survey_matches = SurveyMatches {
-            ztf: None,
-            lsst: None,
-        };
-        if let Some(ztf_match) = alert.survey_matches.as_ref().and_then(|m| m.ztf.as_ref()) {
-            let mut ztf_photometry = Vec::new();
-            for doc in ztf_match.prv_candidates.iter() {
-                ztf_photometry.push(Photometry {
-                    jd: doc.jd,
-                    flux: doc.flux,
-                    flux_err: doc.flux_err,
-                    band: format!("ztf{}", doc.band),
-                    origin: Origin::Alert,
-                    programid: doc.programid,
-                    survey: Survey::Ztf,
-                    ra: doc.ra,
-                    dec: doc.dec,
-                });
-            }
-            for doc in ztf_match.prv_nondetections.iter() {
-                ztf_photometry.push(Photometry {
-                    jd: doc.jd,
-                    flux: None,
-                    flux_err: doc.flux_err,
-                    band: format!("ztf{}", doc.band),
-                    origin: Origin::Alert,
-                    programid: doc.programid,
-                    survey: Survey::Ztf,
-                    ra: None,
-                    dec: None,
-                });
-            }
-            for doc in ztf_match.fp_hists.iter() {
-                ztf_photometry.push(Photometry {
-                    jd: doc.jd,
-                    flux: doc.flux,
-                    flux_err: doc.flux_err,
-                    band: format!("ztf{}", doc.band),
-                    origin: Origin::ForcedPhot,
-                    programid: doc.programid,
-                    survey: Survey::Ztf,
-                    ra: None,
-                    dec: None,
-                });
-            }
-
-            ztf_photometry.sort_by(|a, b| a.jd.partial_cmp(&b.jd).unwrap());
-
-            survey_matches.ztf = Some(SurveyMatch {
-                object_id: ztf_match.object_id.clone(),
-                ra: ztf_match.ra,
-                dec: ztf_match.dec,
-                photometry: ztf_photometry,
-            });
-        }
 
         let cutouts = candid_to_cutouts
             .remove(&candid)
@@ -272,8 +225,8 @@ pub async fn build_lsst_alerts(
             candid: alert.candid,
             object_id: alert.object_id,
             jd: alert.candidate.jd,
-            ra: alert.candidate.dia_source.ra,
-            dec: alert.candidate.dia_source.dec,
+            ra: alert.candidate.candidate.ra,
+            dec: alert.candidate.candidate.dec,
             filters: alerts_with_filter_results
                 .get(&candid)
                 .cloned()
@@ -283,8 +236,11 @@ pub async fn build_lsst_alerts(
             cutout_science: cutouts.cutout_science,
             cutout_template: cutouts.cutout_template,
             cutout_difference: cutouts.cutout_difference,
-            survey: Survey::Lsst,
-            survey_matches,
+            survey: Survey::Decam,
+            survey_matches: SurveyMatches {
+                ztf: None,
+                lsst: None,
+            },
         };
 
         alerts_output.push(alert);
@@ -293,23 +249,15 @@ pub async fn build_lsst_alerts(
     Ok(alerts_output)
 }
 
-/// Builds a MongoDB aggregation pipeline for LSST filter execution.
+/// Builds a MongoDB aggregation pipeline for DECam filter execution.
 ///
-/// This function validates the provided filter pipeline and augments it with necessary
-/// auxiliary data lookups (prv_candidates, fp_hists, cross_matches, aliases) based on
-/// which fields are referenced in the filter. The resulting pipeline starts with a match stage
-/// to filter by candids, and should be populated with the actual candids before execution.
-///
-/// # Arguments
-/// * `filter_pipeline` - The user-defined filter pipeline stages
-///
-/// # Returns
-/// * `Result<Vec<Document>, FilterError>` - A complete MongoDB aggregation pipeline ready for execution, or a `FilterError` if validation fails.
-pub async fn build_lsst_filter_pipeline(
+/// Augments the user filter pipeline with DECam aux lookups (prv_candidates,
+/// fp_hists, cross_matches, aliases) based on which fields the filter
+/// references.
+pub async fn build_decam_filter_pipeline(
     filter_pipeline: &Vec<serde_json::Value>,
-    permissions: &HashMap<Survey, Vec<i32>>,
+    _permissions: &HashMap<Survey, Vec<i32>>,
 ) -> Result<Vec<Document>, FilterError> {
-    // validate filter
     validate_filter_pipeline(&filter_pipeline)?;
 
     let use_prv_candidates_index = uses_field_in_filter(filter_pipeline, "prv_candidates");
@@ -317,25 +265,20 @@ pub async fn build_lsst_filter_pipeline(
     let use_cross_matches_index = uses_field_in_filter(filter_pipeline, "cross_matches");
     let use_aliases_index = uses_field_in_filter(filter_pipeline, "aliases");
 
-    // ZTF data products
-    let (use_aliases_index, mut ztf_insert_aux_pipeline, ztf_aux_add_fields) =
-        build_ztf_aux_data(use_aliases_index, filter_pipeline, permissions);
-
     let mut aux_add_fields = doc! {
         "aux": mongodb::bson::Bson::Null,
     };
 
     if use_prv_candidates_index.is_some() {
-        // insert it in aux addFields stage
         aux_add_fields.insert(
             "prv_candidates".to_string(),
-            fetch_timeseries_op("aux.prv_candidates", "candidate.jd", 365, None),
+            fetch_timeseries_op("aux.prv_candidates", "candidate.jd", 1000, None),
         );
     }
     if use_fp_hists_index.is_some() {
         aux_add_fields.insert(
             "fp_hists".to_string(),
-            fetch_timeseries_op("aux.fp_hists", "candidate.jd", 365, None),
+            fetch_timeseries_op("aux.fp_hists", "candidate.jd", 1000, None),
         );
     }
     if use_cross_matches_index.is_some() {
@@ -348,7 +291,7 @@ pub async fn build_lsst_filter_pipeline(
         aux_add_fields.insert("aliases".to_string(), get_array_dict_element("aux.aliases"));
     }
 
-    let mut insert_aux_pipeline = use_prv_candidates_index.is_some()
+    let insert_aux_pipeline = use_prv_candidates_index.is_some()
         || use_fp_hists_index.is_some()
         || use_cross_matches_index.is_some()
         || use_aliases_index.is_some();
@@ -367,7 +310,6 @@ pub async fn build_lsst_filter_pipeline(
         insert_aux_index = insert_aux_index.min(index);
     }
 
-    // some sanity checks
     if insert_aux_index == usize::MAX && insert_aux_pipeline {
         return Err(FilterError::InvalidFilterPipeline(
             "could not determine where to insert aux pipeline".to_string(),
@@ -386,22 +328,20 @@ pub async fn build_lsst_filter_pipeline(
             "$project": doc! {
                 "objectId": 1,
                 "candidate": 1,
-                "ss_source": 1,
                 "properties": 1,
                 "coordinates": 1,
             }
         },
     ];
 
-    // now we loop over the base_pipeline and insert stages from the filter_pipeline
-    // and when i = insert_index, we insert the aux_pipeline before the stage
+    let mut insert_aux_pipeline = insert_aux_pipeline;
     for i in 0..filter_pipeline.len() {
         let x = mongodb::bson::to_document(&filter_pipeline[i])?;
 
         if insert_aux_pipeline && i == insert_aux_index {
             pipeline.push(doc! {
                 "$lookup": doc! {
-                    "from": "LSST_alerts_aux",
+                    "from": "DECAM_alerts_aux",
                     "localField": "objectId",
                     "foreignField": "_id",
                     "as": "aux"
@@ -411,21 +351,14 @@ pub async fn build_lsst_filter_pipeline(
                 "$addFields": &aux_add_fields
             });
             insert_aux_pipeline = false; // only insert once
-
-            insert_ztf_aux_pipeline_if_needed(
-                &mut pipeline,
-                &mut ztf_insert_aux_pipeline,
-                &ztf_aux_add_fields,
-            );
         }
 
-        // push the current stage
         pipeline.push(x);
     }
     Ok(pipeline)
 }
 
-pub struct LsstFilterWorker {
+pub struct DecamFilterWorker {
     alert_pipeline: Vec<Document>,
     alert_collection: mongodb::Collection<Document>,
     alert_cutout_storage: CutoutStorage,
@@ -434,13 +367,11 @@ pub struct LsstFilterWorker {
     output_topic: String,
     filter_ids: Option<Vec<String>>,
     filters: Vec<LoadedFilter>,
-    /// watchlist catalog name -> config projection, used to surface watchlist
-    /// fields under `annotations.watchlist` when a filter is bound to one.
     watchlist_projections: HashMap<String, Document>,
 }
 
 #[async_trait::async_trait]
-impl FilterWorker for LsstFilterWorker {
+impl FilterWorker for DecamFilterWorker {
     #[instrument(err)]
     async fn new(
         config_path: &str,
@@ -448,24 +379,24 @@ impl FilterWorker for LsstFilterWorker {
     ) -> Result<Self, FilterWorkerError> {
         let config = AppConfig::from_path(config_path)?;
         let db: mongodb::Database = config.build_db().await?;
-        let alert_collection = db.collection("LSST_alerts");
+        let alert_collection = db.collection("DECAM_alerts");
         let filter_collection = db.collection("filters");
-        let alert_cutout_storage = config.build_cutout_storage(&Survey::Lsst).await?;
+        let alert_cutout_storage = config.build_cutout_storage(&Survey::Decam).await?;
 
-        let input_queue = "LSST_alerts_filter_queue".to_string();
-        let output_topic = "LSST_alerts_results".to_string();
+        let input_queue = "DECAM_alerts_filter_queue".to_string();
+        let output_topic = "DECAM_alerts_results".to_string();
 
-        let watchlist_projections = watchlist_projections(&config, &Survey::Lsst);
+        let watchlist_projections = watchlist_projections(&config, &Survey::Decam);
         let filters = build_loaded_filters(
             &filter_ids,
-            &Survey::Lsst,
+            &Survey::Decam,
             &filter_collection,
             &watchlist_projections,
         )
         .await?;
 
-        Ok(LsstFilterWorker {
-            alert_pipeline: create_lsst_alert_pipeline(),
+        Ok(DecamFilterWorker {
+            alert_pipeline: create_decam_filter_alert_pipeline(),
             alert_collection,
             alert_cutout_storage,
             filter_collection,
@@ -478,23 +409,23 @@ impl FilterWorker for LsstFilterWorker {
     }
 
     async fn refresh_filters(&mut self) -> Result<(), FilterWorkerError> {
-        info!("refreshing LSST filters from database");
+        info!("refreshing DECAM filters from database");
         self.filters = build_loaded_filters(
             &self.filter_ids,
-            &Survey::Lsst,
+            &Survey::Decam,
             &self.filter_collection,
             &self.watchlist_projections,
         )
         .await?;
         info!(
-            "refreshed LSST filters from database; now tracking {} filters",
+            "refreshed DECAM filters from database; now tracking {} filters",
             self.filters.len()
         );
         Ok(())
     }
 
     fn survey() -> Survey {
-        Survey::Lsst
+        Survey::Decam
     }
 
     fn input_queue_name(&self) -> String {
@@ -513,12 +444,10 @@ impl FilterWorker for LsstFilterWorker {
     async fn process_alerts(&mut self, alerts: &[String]) -> Result<Vec<Alert>, FilterWorkerError> {
         let mut alerts_output = Vec::new();
 
-        // unlike ZTF where we get a tuple of (programid, candid) from redis
-        // LSST has only one public stream, meaning there are no programids
-        // so we simply convert the array of String to Vec<i64>
+        // DECam has a single public stream (no programids), so the queue holds
+        // bare candids.
         let candids: Vec<i64> = alerts.iter().map(|alert| alert.parse().unwrap()).collect();
 
-        // run the filters
         let mut results_map: HashMap<i64, Vec<FilterResults>> = HashMap::new();
         for filter in &self.filters {
             let out_documents = run_filter(
@@ -529,14 +458,11 @@ impl FilterWorker for LsstFilterWorker {
             )
             .await?;
 
-            // if the array is empty, continue
             if out_documents.is_empty() {
                 continue;
             } else {
-                // if we have output documents, we need to process them
-                // and create filter results for each document (which contain annotations)
                 info!(
-                    "{} alerts passed lsst filter {}",
+                    "{} alerts passed decam filter {}",
                     out_documents.len(),
                     filter.id,
                 );
@@ -546,7 +472,6 @@ impl FilterWorker for LsstFilterWorker {
 
             for doc in out_documents {
                 let candid = doc.get_i64("_id")?;
-                // might want to have the annotations as an optional field instead of empty
                 let annotations =
                     serde_json::to_string(doc.get_document("annotations").unwrap_or(&doc! {}))?;
                 let filter_result = FilterResults {
@@ -560,7 +485,7 @@ impl FilterWorker for LsstFilterWorker {
             }
         }
 
-        let alerts = build_lsst_alerts(
+        let alerts = build_decam_alerts(
             &results_map,
             &self.alert_pipeline,
             &self.alert_collection,

@@ -120,6 +120,10 @@ impl EnrichmentWorker for WinterEnrichmentWorker {
         self.output_queue.clone()
     }
 
+    /// No-op: WINTER enrichment has no Babamul integration, so there is
+    /// nothing to disable.
+    fn disable_babamul(&mut self) {}
+
     #[instrument(skip_all, err)]
     async fn process_alerts(
         &mut self,

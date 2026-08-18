@@ -9,20 +9,21 @@ pub use base::{
     SchemaRegistryError, TimeSeries,
 };
 pub use decam::{
-    DecamAlert, DecamAlertWorker, DecamCandidate, DecamObject, DecamRawAvroAlert, DECAM_DEC_RANGE,
+    DecamAlert, DecamAlertWorker, DecamAliases, DecamCandidate, DecamForcedPhot, DecamObject,
+    DecamRawAvroAlert, DECAM_DEC_RANGE,
 };
 pub use lsst::{
     DiaForcedSource, DiaSource, LsstAlert, LsstAlertWorker, LsstAliases, LsstCandidate,
-    LsstForcedPhot, LsstObject, LsstPrvCandidate, LsstRawAvroAlert, LSST_DEC_RANGE,
+    LsstForcedPhot, LsstObject, LsstPrvCandidate, LsstRawAvroAlert, SsSource, LSST_DEC_RANGE,
     LSST_SCHEMA_REGISTRY_GITHUB_FALLBACK_URL, LSST_SCHEMA_REGISTRY_URL, LSST_ZTF_XMATCH_RADIUS,
 };
 pub use winter::{
-    sanitize_winter_avro, WinterAlert, WinterAlertWorker, WinterCandidate, WinterObject,
-    WinterPrvCandidate, WinterRawAvroAlert, WINTER_DEC_RANGE,
+    sanitize_winter_avro, WinterAlert, WinterAlertWorker, WinterAliases, WinterCandidate,
+    WinterObject, WinterPrvCandidate, WinterRawAvroAlert, WINTER_DEC_RANGE,
 };
 pub use ztf::{
-    deserialize_fp_hists, deserialize_prv_candidate, deserialize_prv_candidates, Candidate, FpHist,
-    PrvCandidate, ZtfAlert, ZtfAlertWorker, ZtfAliases, ZtfCandidate, ZtfForcedPhot, ZtfObject,
-    ZtfPrvCandidate, ZtfRawAvroAlert, ZTF_DECAM_XMATCH_RADIUS, ZTF_DEC_RANGE,
-    ZTF_LSST_XMATCH_RADIUS,
+    deserialize_candidate, deserialize_cutout_as_bytes, deserialize_fp_hists,
+    deserialize_prv_candidate, deserialize_prv_candidates, Candidate, FpHist, PrvCandidate,
+    ZtfAlert, ZtfAlertWorker, ZtfAliases, ZtfCandidate, ZtfForcedPhot, ZtfObject, ZtfPrvCandidate,
+    ZtfRawAvroAlert, ZTF_DECAM_XMATCH_RADIUS, ZTF_DEC_RANGE, ZTF_LSST_XMATCH_RADIUS,
 };

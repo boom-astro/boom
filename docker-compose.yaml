@@ -38,6 +38,13 @@ services:
     volumes:
       - ${BOOM_DATA_MONGODB_PATH:-mongodb}:/data/db
     restart: always
+    deploy:
+      resources:
+        limits:
+          # Caps the WiredTiger cache at 50% of (limit - 1GiB); without a limit
+          # it's 50% of host RAM, so this and mongo-cutouts each claim half the
+          # machine. 0 = unlimited. See .env.example.
+          memory: ${BOOM_MONGO_MEM_LIMIT:-0}
     networks:
       - boom
     healthcheck:
@@ -53,6 +60,9 @@ services:
     command:
       - --mongodb.uri=mongodb://${BOOM_DATABASE__USERNAME:-mongoadmin}:${BOOM_DATABASE__PASSWORD}@mongo:27017/admin?authSource=admin
       - --collector.dbstats
+      - --collector.collstats
+      # Required for --collector.collstats to auto-discover collections
+      - --discovering-mode
       - --web.listen-address=:9216
     networks:
       - boom
@@ -86,7 +96,7 @@ services:
       - boom
     restart: always
   broker:
-    image: apache/kafka:4.1.1
+    image: apache/kafka:4.3.1
     hostname: broker
     networks:
       - boom
@@ -143,7 +153,7 @@ services:
       # Uncomment to enable TLS passthrough (requires EXTERNAL listener to use SSL)
       # - traefik.tcp.routers.${STACK_NAME?Variable not set}-kafka.tls.passthrough=true
   kafka-acl-init:
-    image: apache/kafka:4.1.1
+    image: apache/kafka:4.3.1
     hostname: kafka-acl-init
     depends_on:
       broker:
@@ -196,6 +206,9 @@ services:
       BOOM_CUTOUTS_STORAGE__TYPE: mongo
       BOOM_CUTOUTS_STORAGE__HOST: mongo
       BOOM_BABAMUL__ENABLED: ${BOOM_BABAMUL__ENABLED:-false}
+      # Server-side PostHog analytics; blank disables analytics.
+      BOOM_POSTHOG__PROJECT_API_KEY: ${BOOM_POSTHOG__PROJECT_API_KEY:-}
+      BOOM_POSTHOG__HOST: ${BOOM_POSTHOG__HOST:-https://us.i.posthog.com}
       # SMTP config for email notifications
       SMTP_SERVER: ${SMTP_SERVER:-}
       SMTP_PORT: ${SMTP_PORT:-}
@@ -217,7 +230,14 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 20s
+      # boom-api does all of its init before it binds the port -- mongo connect,
+      # auth setup, and a cutout storage client per survey (see src/bin/api.rs)
+      # -- so nothing answers `/` until that finishes. With a 20s start_period
+      # the container was declared unhealthy ~70s in (20s + 5 x 10s), which is
+      # a routine cold start when mongo is restarting alongside it, and the
+      # api-down alert then paged 3m later. Docker ends the start period at the
+      # first successful check, so a generous value costs nothing on fast boots.
+      start_period: 180s
     profiles:
       - prod
       - api
@@ -563,6 +583,7 @@ services:
       - winter
   otel-collector: # [^1]
     image: otel/opentelemetry-collector:0.131.1
+    restart: always
     volumes:
       - ./config/otel-collector-config.yaml:/etc/otelcol/config.yaml
     networks:
@@ -709,7 +730,7 @@ services:
     networks:
       - boom
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3200/ready | grep -q 'ready' || exit 1"]
+      test: ["CMD", "/busybox/sh", "-c", "/busybox/wget -qO- http://127.0.0.1:3200/ready | /busybox/grep -q 'ready' || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 10

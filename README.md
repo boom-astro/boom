@@ -75,6 +75,14 @@ cp .env.example .env
 
 **Note:** Do not commit `.env` to Git or use the example values in production.
 
+When `.env.example` gains a variable, an existing `.env` goes stale and the dev
+targets fail during interpolation. `make check-env` lists what is missing, in a
+form you can paste straight into `.env`; the dev targets run it for you before
+starting anything. Note that this includes variables belonging to services the
+dev profile never starts (the ZTF/WINTER consumers, for instance) — Compose
+interpolates every file it loads before it filters by profile, so those values
+have to resolve regardless.
+
 #### Email configuration (for notifications)
 
 In order to send emails to users, e.g.,
@@ -413,6 +421,10 @@ The scheduler prints a variety of messages to your terminal, e.g.:
 
 Metrics are collected by Prometheus and visible on a Grafana dashboard.
 See the [observability docs](docs/observability.md) for more information.
+
+Babamul user-facing usage — who calls the API and who consumes the Kafka
+stream — is tracked separately in PostHog and Grafana; see the
+[analytics docs](docs/analytics.md).
 
 ## Stopping BOOM
 

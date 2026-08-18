@@ -1,7 +1,8 @@
 use boom::{
     conf::load_dotenv,
     kafka::{
-        AlertConsumer, DecamAlertConsumer, LsstAlertConsumer, WinterAlertConsumer, ZtfAlertConsumer,
+        AlertConsumer, DecamAlertConsumer, LsstAlertConsumer, StartDate, WinterAlertConsumer,
+        ZtfAlertConsumer,
     },
     utils::{
         enums::{ProgramId, Survey},
@@ -93,11 +94,12 @@ async fn run(
     meter_provider: Option<SdkMeterProvider>,
     tracer_provider: Option<SdkTracerProvider>,
 ) {
-    let date = args.date.unwrap_or_else(|| {
-        let today = chrono::Utc::now().naive_utc().date();
-        today.and_hms_opt(0, 0, 0).unwrap()
-    });
-    let timestamp = date.and_utc().timestamp();
+    // An explicit date pins the run to that day (replay/backfill); without one
+    // the consumer tracks the current day and rolls over nightly.
+    let start = match args.date {
+        Some(date) => StartDate::Pinned(date.and_utc().timestamp()),
+        None => StartDate::Current,
+    };
 
     let exit_on_eof = if args.deployment_env == "dev" {
         args.exit_on_eof
@@ -118,7 +120,7 @@ async fn run(
             match consumer
                 .consume(
                     topics,
-                    timestamp,
+                    start,
                     None,
                     Some(args.processes),
                     Some(args.max_in_queue),
@@ -139,7 +141,7 @@ async fn run(
             match consumer
                 .consume(
                     topics,
-                    timestamp,
+                    start,
                     None,
                     Some(args.processes),
                     Some(args.max_in_queue),
@@ -160,7 +162,7 @@ async fn run(
             match consumer
                 .consume(
                     topics,
-                    timestamp,
+                    start,
                     None,
                     Some(args.processes),
                     Some(args.max_in_queue),
@@ -181,7 +183,7 @@ async fn run(
             match consumer
                 .consume(
                     topics,
-                    timestamp,
+                    start,
                     None,
                     Some(args.processes),
                     Some(args.max_in_queue),

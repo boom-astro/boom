@@ -1,4 +1,4 @@
-use mongodb::bson::{doc, Document};
+use mongodb::bson::{doc, Bson, Document};
 use std::collections::HashMap;
 use tracing::{debug, info, instrument, warn};
 
@@ -11,8 +11,9 @@ use crate::enrichment::{
 use crate::filter::{
     build_loaded_filters, build_lsst_aux_data, insert_lsst_aux_pipeline_if_needed,
     parse_programid_candid_tuple, run_filter, update_aliases_index_multiple, uses_field_in_filter,
-    validate_filter_pipeline, Alert, Classification, Filter, FilterError, FilterResults,
-    FilterWorker, FilterWorkerError, LoadedFilter, Origin, Photometry, SurveyMatch, SurveyMatches,
+    validate_filter_pipeline, watchlist_projections, Alert, Classification, Filter, FilterError,
+    FilterResults, FilterWorker, FilterWorkerError, LoadedFilter, Origin, Photometry, SurveyMatch,
+    SurveyMatches,
 };
 use crate::utils::cutouts::CutoutStorage;
 use crate::utils::db::{fetch_timeseries_op, get_array_dict_element};
@@ -406,6 +407,49 @@ pub async fn build_ztf_alerts(
 ///
 /// # Returns
 /// * `Result<Vec<Document>, FilterError>` - A complete MongoDB aggregation pipeline ready for execution, or a `FilterError` if validation fails.
+/// Lookup surfacing a moving object's own photometry, keyed on MPC designation.
+///
+/// `objectId` cannot be used: it is positional, so a moving object is given a new
+/// one on nearly every detection and its aux document describes the sky position
+/// rather than the object.
+///
+/// The outer key is the normalised `properties.sso.designation`; the inner key is
+/// the raw `candidate.ssnamenr` it is derived from. Same value, but the raw field
+/// is present on the whole archive while the normalised one only exists on alerts
+/// enriched since it was introduced.
+fn sso_history_lookup(ztf_permissions: &Vec<i32>, window_days: f64) -> Document {
+    doc! {
+        "$lookup": {
+            "from": "ZTF_alerts",
+            "let": {
+                "desig": "$properties.sso.designation",
+                "jd": "$candidate.jd",
+            },
+            "pipeline": [
+                doc! { "$match": { "$expr": { "$and": [
+                    { "$eq": ["$candidate.ssnamenr", "$$desig"] },
+                    { "$gte": ["$candidate.jd", { "$subtract": ["$$jd", window_days] }] },
+                    { "$lte": ["$candidate.jd", "$$jd"] },
+                    { "$in": ["$candidate.programid", ztf_permissions] },
+                ] } } },
+                doc! { "$project": {
+                    "_id": 0,
+                    "jd": "$candidate.jd",
+                    "fid": "$candidate.fid",
+                    "magpsf": "$candidate.magpsf",
+                    "sigmapsf": "$candidate.sigmapsf",
+                    "ra": "$candidate.ra",
+                    "dec": "$candidate.dec",
+                    "predicted_mag": "$properties.sso.predicted_mag",
+                    "separation_arcsec": "$properties.sso.separation_arcsec",
+                } },
+                doc! { "$sort": { "jd": 1 } },
+            ],
+            "as": "sso_history",
+        }
+    }
+}
+
 pub async fn build_ztf_filter_pipeline(
     filter_pipeline: &Vec<serde_json::Value>,
     permissions: &HashMap<Survey, Vec<i32>>,
@@ -418,6 +462,7 @@ pub async fn build_ztf_filter_pipeline(
     let use_fp_hists_index = uses_field_in_filter(filter_pipeline, "fp_hists");
     let use_cross_matches_index = uses_field_in_filter(filter_pipeline, "cross_matches");
     let use_aliases_index = uses_field_in_filter(filter_pipeline, "aliases");
+    let use_sso_history_index = uses_field_in_filter(filter_pipeline, "sso_history");
 
     // LSST data products
     let (use_aliases_index, mut lsst_insert_aux_pipeline, lsst_aux_add_fields) =
@@ -525,6 +570,9 @@ pub async fn build_ztf_filter_pipeline(
         ));
     }
 
+    let mut insert_sso_history = use_sso_history_index.is_some();
+    let insert_sso_history_index = use_sso_history_index.unwrap_or(usize::MAX);
+
     // filter prefix (with permissions)
     let mut pipeline = vec![
         doc! {
@@ -549,6 +597,19 @@ pub async fn build_ztf_filter_pipeline(
     // and when i = insert_index, we insert the aux_pipeline before the stage
     for i in 0..filter_pipeline.len() {
         let x = mongodb::bson::to_document(&filter_pipeline[i])?;
+
+        if insert_sso_history && i == insert_sso_history_index {
+            // Most alerts have no designation (old alerts, or no MPC match); drop
+            // them before the lookup rather than running it to produce an empty
+            // array.
+            pipeline.push(doc! {
+                "$match": {
+                    "properties.sso.designation": { "$exists": true, "$ne": Bson::Null }
+                }
+            });
+            pipeline.push(sso_history_lookup(ztf_permissions, 365.0));
+            insert_sso_history = false;
+        }
 
         if insert_aux_pipeline && i == insert_aux_index {
             pipeline.push(doc! {
@@ -588,6 +649,9 @@ pub struct ZtfFilterWorker {
     filter_ids: Option<Vec<String>>,
     filters: Vec<LoadedFilter>,
     filters_by_permission: HashMap<i32, Vec<String>>,
+    /// watchlist catalog name -> config projection, used to surface watchlist
+    /// fields under `annotations.watchlist` when a filter is bound to one.
+    watchlist_projections: HashMap<String, Document>,
 }
 
 #[async_trait::async_trait]
@@ -606,7 +670,14 @@ impl FilterWorker for ZtfFilterWorker {
         let input_queue = "ZTF_alerts_filter_queue".to_string();
         let output_topic = "ZTF_alerts_results".to_string();
 
-        let filters = build_loaded_filters(&filter_ids, &Survey::Ztf, &filter_collection).await?;
+        let watchlist_projections = watchlist_projections(&config, &Survey::Ztf);
+        let filters = build_loaded_filters(
+            &filter_ids,
+            &Survey::Ztf,
+            &filter_collection,
+            &watchlist_projections,
+        )
+        .await?;
 
         // Create a hashmap of filters per programid (permissions)
         let mut filters_by_permission: HashMap<i32, Vec<String>> = HashMap::new();
@@ -629,13 +700,19 @@ impl FilterWorker for ZtfFilterWorker {
             filter_ids,
             filters,
             filters_by_permission,
+            watchlist_projections,
         })
     }
 
     async fn refresh_filters(&mut self) -> Result<(), FilterWorkerError> {
         info!("refreshing ZTF filters from database");
-        let filters =
-            build_loaded_filters(&self.filter_ids, &Survey::Ztf, &self.filter_collection).await?;
+        let filters = build_loaded_filters(
+            &self.filter_ids,
+            &Survey::Ztf,
+            &self.filter_collection,
+            &self.watchlist_projections,
+        )
+        .await?;
 
         let mut filters_by_permission: HashMap<i32, Vec<String>> = HashMap::new();
         for filter in &filters {
@@ -776,5 +853,134 @@ impl FilterWorker for ZtfFilterWorker {
         }
 
         Ok(alerts_output)
+    }
+}
+
+#[cfg(test)]
+mod sso_history_tests {
+    use super::*;
+
+    fn pipeline_from(json: &str) -> Vec<serde_json::Value> {
+        serde_json::from_str(json).unwrap()
+    }
+
+    fn perms() -> HashMap<Survey, Vec<i32>> {
+        HashMap::from([(Survey::Ztf, vec![1])])
+    }
+
+    fn has_sso_lookup(pipeline: &[Document]) -> bool {
+        pipeline.iter().any(|s| {
+            s.get_document("$lookup")
+                .ok()
+                .and_then(|l| l.get_str("as").ok())
+                == Some("sso_history")
+        })
+    }
+
+    #[tokio::test]
+    async fn test_sso_history_lookup_injected_only_when_referenced() {
+        let without = build_ztf_filter_pipeline(
+            &pipeline_from(
+                r#"[{"$match": {"candidate.drb": {"$gt": 0.5}}},
+                 {"$project": {"objectId": 1, "candid": 1}}]"#,
+            ),
+            &perms(),
+        )
+        .await
+        .unwrap();
+        assert!(!has_sso_lookup(&without), "no lookup unless referenced");
+
+        let with = build_ztf_filter_pipeline(
+            &pipeline_from(
+                r#"[{"$match": {"sso_history.0": {"$exists": true}}},
+                 {"$project": {"objectId": 1, "candid": 1}}]"#,
+            ),
+            &perms(),
+        )
+        .await
+        .unwrap();
+        assert!(has_sso_lookup(&with), "referencing sso_history injects it");
+    }
+
+    // Joins on designation, never objectId: objectId is positional, so a moving
+    // object gets a new one on nearly every detection.
+    #[tokio::test]
+    async fn test_sso_history_joins_on_designation() {
+        let pipeline = build_ztf_filter_pipeline(
+            &pipeline_from(
+                r#"[{"$match": {"sso_history.0": {"$exists": true}}},
+                 {"$project": {"objectId": 1, "candid": 1}}]"#,
+            ),
+            &perms(),
+        )
+        .await
+        .unwrap();
+
+        let lookup = pipeline
+            .iter()
+            .find_map(|s| s.get_document("$lookup").ok())
+            .expect("lookup present");
+        let rendered = format!("{:?}", lookup);
+
+        // Outer key normalised, inner key raw: the raw field covers the whole
+        // archive, so no backfill is needed for history to reach back.
+        assert!(rendered.contains("properties.sso.designation"));
+        assert!(rendered.contains("candidate.ssnamenr"));
+        assert!(
+            !rendered.contains("objectId"),
+            "must not join on the positional objectId"
+        );
+        assert_eq!(lookup.get_str("from").unwrap(), "ZTF_alerts");
+    }
+
+    // Alerts with no designation (old alerts, or no MPC match) are dropped before
+    // the lookup rather than running it to build an empty array.
+    #[tokio::test]
+    async fn test_designation_match_precedes_the_lookup() {
+        let pipeline = build_ztf_filter_pipeline(
+            &pipeline_from(
+                r#"[{"$match": {"sso_history.0": {"$exists": true}}},
+                 {"$project": {"objectId": 1, "candid": 1}}]"#,
+            ),
+            &perms(),
+        )
+        .await
+        .unwrap();
+
+        let lookup_at = pipeline
+            .iter()
+            .position(|s| s.get_document("$lookup").is_ok())
+            .expect("lookup present");
+        let guard_at = pipeline
+            .iter()
+            .position(|s| {
+                s.get_document("$match")
+                    .ok()
+                    .is_some_and(|m| m.contains_key("properties.sso.designation"))
+            })
+            .expect("designation guard present");
+
+        assert!(guard_at < lookup_at, "guard must run before the lookup");
+    }
+
+    // A filter must not see programids it lacks permission for.
+    #[tokio::test]
+    async fn test_sso_history_respects_permissions() {
+        let pipeline = build_ztf_filter_pipeline(
+            &pipeline_from(
+                r#"[{"$match": {"sso_history.0": {"$exists": true}}},
+                 {"$project": {"objectId": 1, "candid": 1}}]"#,
+            ),
+            &HashMap::from([(Survey::Ztf, vec![1, 2])]),
+        )
+        .await
+        .unwrap();
+
+        let lookup = pipeline
+            .iter()
+            .find_map(|s| s.get_document("$lookup").ok())
+            .expect("lookup present");
+        let rendered = format!("{:?}", lookup);
+        assert!(rendered.contains("candidate.programid"));
     }
 }

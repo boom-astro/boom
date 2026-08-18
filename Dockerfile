@@ -1,4 +1,4 @@
-ARG KAFKA_VERSION=4.1.1
+ARG KAFKA_VERSION=4.3.1
 ARG SCALA_VERSION=2.13
 
 FROM rust:slim-trixie AS base
@@ -37,13 +37,33 @@ RUN ORT_CAPI_DIR="$('/opt/ort-py/bin/python' -c 'import pathlib, onnxruntime as 
 
 COPY apache-avro-macros /app/apache-avro-macros
 COPY Cargo.toml Cargo.lock /app/
-
-RUN mkdir -p /app/src && \
-    printf '%s\n' 'fn main() {}' > /app/src/main.rs && \
-    cargo build --release && rm -rf /app/src
-
 COPY ./src /app/src
-RUN cargo build --release
+
+# BuildKit cache mounts keep the compiled crates (target/) and the fetched
+# dependencies (cargo registry/git) between builds, so only the crates that
+# actually changed are recompiled -- unlike a plain image layer, which is
+# all-or-nothing and rebuilds the whole workspace on any source change.
+#
+# A cache mount is NOT part of the image, so the release binaries are copied out
+# to /app/bin within the same RUN for the runtime stage to pick up. On CI the
+# mounts are persisted across runs by buildkit-cache-dance (see build.yaml);
+# locally they persist on the BuildKit builder.
+RUN --mount=type=cache,target=/app/target,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    cargo build --release && \
+    mkdir -p /app/bin && \
+    cp target/release/scheduler \
+       target/release/kafka_consumer \
+       target/release/kafka_producer \
+       target/release/api \
+       target/release/migrate_fp_flux \
+       target/release/migrate_snr \
+       target/release/reprocess_crossmatch \
+       target/release/copy_cutouts \
+       target/release/stream_kowalski_alerts \
+       target/release/enrich_reprocess \
+       /app/bin/
 
 FROM builder AS dev
 
@@ -53,7 +73,7 @@ CMD ["cargo", "watch", "-x", "run --bin api"]
 
 FROM debian:trixie-slim AS app
 
-ARG KAFKA_VERSION=4.1.1
+ARG KAFKA_VERSION=4.3.1
 ARG SCALA_VERSION=2.13
 
 RUN apt-get update && \
@@ -69,13 +89,17 @@ ENV PATH="/opt/kafka/bin:${PATH}"
 
 WORKDIR /app
 
-COPY --from=builder /app/target/release/scheduler /app/scheduler
-COPY --from=builder /app/target/release/kafka_consumer /app/kafka_consumer
-COPY --from=builder /app/target/release/kafka_producer /app/kafka_producer
-COPY --from=builder /app/target/release/api /app/boom-api
-COPY --from=builder /app/target/release/migrate_fp_flux /app/migrate_fp_flux
-COPY --from=builder /app/target/release/migrate_snr /app/migrate_snr
-COPY --from=builder /app/target/release/reprocess_crossmatch /app/reprocess_crossmatch
+COPY --from=builder /app/bin/scheduler /app/scheduler
+COPY --from=builder /app/bin/kafka_consumer /app/kafka_consumer
+COPY --from=builder /app/bin/kafka_producer /app/kafka_producer
+COPY --from=builder /app/bin/api /app/boom-api
+COPY --from=builder /app/bin/migrate_fp_flux /app/migrate_fp_flux
+COPY --from=builder /app/bin/migrate_snr /app/migrate_snr
+COPY --from=builder /app/bin/reprocess_crossmatch /app/reprocess_crossmatch
 COPY --from=builder /opt/ort /opt/ort
+# Temporary
+COPY --from=builder /app/bin/copy_cutouts /app/copy_cutouts
+COPY --from=builder /app/bin/stream_kowalski_alerts /app/stream_kowalski_alerts
+COPY --from=builder /app/bin/enrich_reprocess /app/enrich_reprocess
 
 CMD ["/app/scheduler"]

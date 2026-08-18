@@ -4,9 +4,12 @@ use crate::{
     },
     enrichment::{
         models::{SharedModelPool, SharedModels},
-        run_enrichment_worker, LsstEnrichmentWorker, WinterEnrichmentWorker, ZtfEnrichmentWorker,
+        run_enrichment_worker, DecamEnrichmentWorker, LsstEnrichmentWorker, WinterEnrichmentWorker,
+        ZtfEnrichmentWorker,
     },
-    filter::{run_filter_worker, LsstFilterWorker, WinterFilterWorker, ZtfFilterWorker},
+    filter::{
+        run_filter_worker, DecamFilterWorker, LsstFilterWorker, WinterFilterWorker, ZtfFilterWorker,
+    },
     utils::{
         enums::Survey,
         o11y::logging::as_error,
@@ -378,14 +381,8 @@ impl Worker {
                 let run = match survey_name {
                     Survey::Ztf => run_filter_worker::<ZtfFilterWorker>,
                     Survey::Lsst => run_filter_worker::<LsstFilterWorker>,
+                    Survey::Decam => run_filter_worker::<DecamFilterWorker>,
                     Survey::Winter => run_filter_worker::<WinterFilterWorker>,
-                    _ => {
-                        error!(
-                            "Filter worker not implemented for survey: {:?}",
-                            survey_name
-                        );
-                        return;
-                    }
                 };
                 run(receiver, &config_path, id).unwrap_or_else(as_error!("filter worker failed"));
             }),
@@ -396,14 +393,8 @@ impl Worker {
                 let run = match survey_name {
                     Survey::Ztf => run_enrichment_worker::<ZtfEnrichmentWorker>,
                     Survey::Lsst => run_enrichment_worker::<LsstEnrichmentWorker>,
+                    Survey::Decam => run_enrichment_worker::<DecamEnrichmentWorker>,
                     Survey::Winter => run_enrichment_worker::<WinterEnrichmentWorker>,
-                    _ => {
-                        error!(
-                            "Enrichment worker not implemented for survey: {:?}",
-                            survey_name
-                        );
-                        return;
-                    }
                 };
                 run(receiver, &config_path, id, shared_models)
                     .unwrap_or_else(as_error!("enrichment worker failed"));
