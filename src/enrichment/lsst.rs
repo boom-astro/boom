@@ -231,15 +231,19 @@ impl LsstSsoAssociation {
     /// Build from Rubin's own association. `ss_object_id` decides `is_sso` so this
     /// agrees with `rock`; `ss_source` may be absent even when it is set.
     pub fn from_rubin(ss_object_id: Option<&str>, ss_source: Option<&SsSource>) -> Self {
-        let is_sso = ss_object_id.is_some();
+        // Gated on ss_object_id so is_sso agrees with `rock`, and so a stray
+        // ss_source can never populate an ephemeris under is_sso: false.
+        let Some(_) = ss_object_id else {
+            return LsstSsoAssociation::default();
+        };
         LsstSsoAssociation {
-            is_sso,
+            is_sso: true,
             designation: ss_source.and_then(|s| s.designation.clone()),
             separation_arcsec: ss_source.and_then(|s| s.eph_offset),
             predicted_mag: ss_source.and_then(|s| s.eph_vmag),
             sky_motion: ss_source.and_then(|s| s.eph_rate),
             phase_angle: ss_source.and_then(|s| s.phase_angle),
-            source: is_sso.then(|| "rubin".to_string()),
+            source: Some("rubin".to_string()),
         }
     }
 }
@@ -587,5 +591,21 @@ mod sso_tests {
         let not_sso = LsstSsoAssociation::from_rubin(None, None);
         assert!(!not_sso.is_sso);
         assert!(not_sso.source.is_none());
+    }
+
+    // An ephemeris without an ssObjectId would otherwise yield is_sso: false with a
+    // designation and predicted magnitude attached, which filters would disagree
+    // about depending on which field they cut on.
+    #[test]
+    fn test_ephemeris_without_ss_object_id_is_not_surfaced() {
+        let mut ss = SsSource::default();
+        ss.designation = Some("2026 XX1".to_string());
+        ss.eph_vmag = Some(19.4);
+
+        let sso = LsstSsoAssociation::from_rubin(None, Some(&ss));
+        assert!(!sso.is_sso);
+        assert!(sso.designation.is_none());
+        assert!(sso.predicted_mag.is_none());
+        assert!(sso.source.is_none());
     }
 }
