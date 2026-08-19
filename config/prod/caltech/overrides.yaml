@@ -98,6 +98,29 @@ crossmatch:
         tMASSphot: 1
         Mstar: 1
         Mstar_unc: 1
+    - catalog: NED_LVS
+      # Per-galaxy match radius from diam; see config.yaml for the rationale
+      # and the angular_size_scale >= host_galaxy.max_dlr coupling.
+      radius: 300.0
+      use_distance: false
+      angular_size_key: diam
+      angular_size_scale: 5.0
+      angular_size_radius_max: 21600.0
+      max_results: 50
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        objtype: 1
+        z: 1
+        z_unc: 1
+        diam: 1
+        diam_ba: 1
+        diam_pa: 1
+        dist_mpc: 1
+        dist_mpc_method: 1
+        m_Ks: 1
+        m_Ks_unc: 1
     - catalog: 2MASS_PSC
       radius: 2.0
       use_distance: false
@@ -272,6 +295,29 @@ crossmatch:
         tMASSphot: 1
         Mstar: 1
         Mstar_unc: 1
+    - catalog: NED_LVS
+      # Per-galaxy match radius from diam; see config.yaml for the rationale
+      # and the angular_size_scale >= host_galaxy.max_dlr coupling.
+      radius: 300.0
+      use_distance: false
+      angular_size_key: diam
+      angular_size_scale: 5.0
+      angular_size_radius_max: 21600.0
+      max_results: 50
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        objtype: 1
+        z: 1
+        z_unc: 1
+        diam: 1
+        diam_ba: 1
+        diam_pa: 1
+        dist_mpc: 1
+        dist_mpc_method: 1
+        m_Ks: 1
+        m_Ks_unc: 1
     - catalog: 2MASS_PSC
       radius: 2.0
       use_distance: false

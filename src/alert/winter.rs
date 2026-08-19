@@ -13,6 +13,7 @@ use crate::{
         cutouts::CutoutStorage,
         db::{mongify_vec, update_timeseries_op},
         enums::Survey,
+        host::{self, HostGalaxyAssociation, HostGalaxyConfig},
         lightcurves::Band,
         o11y::logging::as_error,
         spatial::{xmatch, Coordinates},
@@ -277,6 +278,8 @@ pub struct WinterObject {
     pub object_id: String,
     pub prv_candidates: Vec<WinterPrvCandidate>,
     pub cross_matches: Option<HashMap<String, Vec<Document>>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_galaxy: Option<HostGalaxyAssociation>,
     pub aliases: Option<WinterAliases>,
     pub coordinates: Coordinates,
     pub created_at: f64,
@@ -478,6 +481,7 @@ pub fn sanitize_winter_avro(bytes: &[u8]) -> Result<Vec<u8>, WinterAvroError> {
 
 pub struct WinterAlertWorker {
     xmatch_configs: Vec<conf::CatalogXmatchConfig>,
+    host_galaxy_config: HostGalaxyConfig,
     db: mongodb::Database,
     alert_collection: mongodb::Collection<WinterAlert>,
     alert_aux_collection: mongodb::Collection<WinterObject>,
@@ -644,6 +648,7 @@ impl AlertWorker for WinterAlertWorker {
 
         let worker = WinterAlertWorker {
             xmatch_configs,
+            host_galaxy_config: config.host_galaxy.clone(),
             db,
             alert_collection,
             alert_aux_collection,
@@ -739,10 +744,13 @@ impl AlertWorker for WinterAlertWorker {
                 &self.db,
             )
             .await?;
+            let host_galaxy =
+                host::associate_from_xmatches(ra, dec, &xmatches, &self.host_galaxy_config);
             let obj = WinterObject {
                 object_id: object_id.clone(),
                 prv_candidates,
                 cross_matches: Some(xmatches),
+                host_galaxy,
                 aliases: survey_matches,
                 coordinates: Coordinates::new(ra, dec),
                 created_at: now,

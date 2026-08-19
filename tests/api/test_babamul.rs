@@ -991,6 +991,7 @@ mod tests {
                 created_at: 0.0,
                 updated_at: 0.0,
                 cross_matches: None,
+                host_galaxy: None,
             })
             .await
             .expect("Failed to insert ZTF test object");
@@ -1007,6 +1008,7 @@ mod tests {
                 created_at: 0.0,
                 updated_at: 0.0,
                 cross_matches: None,
+                host_galaxy: None,
             })
             .await
             .expect("Failed to insert LSST test object");
@@ -2174,6 +2176,7 @@ mod tests {
             prv_nondetections: vec![],
             fp_hists: vec![],
             aliases: None,
+            host_galaxy: None,
             created_at: 0.0,
             updated_at: 0.0,
             cross_matches: Some(
@@ -2275,6 +2278,7 @@ mod tests {
                 prv_nondetections: vec![],
                 fp_hists: vec![],
                 aliases: None,
+                host_galaxy: None,
                 created_at: 0.0,
                 updated_at: 0.0,
                 cross_matches: Some(
@@ -2305,6 +2309,7 @@ mod tests {
                 prv_nondetections: vec![],
                 fp_hists: vec![],
                 aliases: None,
+                host_galaxy: None,
                 created_at: 0.0,
                 updated_at: 0.0,
                 cross_matches: Some(
@@ -2436,6 +2441,7 @@ mod tests {
                 created_at: 0.0,
                 updated_at: 0.0,
                 cross_matches: None,
+                host_galaxy: None,
             },
             boom::alert::ZtfObject {
                 object_id: format!("ZTF24obj002_{}", unique_suffix),
@@ -2447,6 +2453,7 @@ mod tests {
                 created_at: 0.0,
                 updated_at: 0.0,
                 cross_matches: None,
+                host_galaxy: None,
             },
         ];
 
