@@ -275,6 +275,30 @@ export async function fetchProfile(): Promise<Profile> {
   return unwrapData<Profile>(body, null);
 }
 
+/**
+ * Set or clear the account's display name.
+ *
+ * Pass an empty string to clear it — the name is free text the user controls,
+ * not an identifier, so having none is a normal state rather than an error.
+ */
+export async function updateProfileName(name: string): Promise<Profile> {
+  const url = `${API_BASE}/profile`;
+  const res = await fetchWithAuth(url, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+  const body = await parseResponseJson(res).catch(() => null);
+  if (!res.ok) {
+    const message =
+      body && typeof body === "object" && "message" in body
+        ? String((body as { message?: unknown }).message)
+        : `Update profile failed: ${res.status}`;
+    throw new Error(message);
+  }
+  return unwrapData<Profile>(body, null);
+}
+
 export async function fetchKafkaCredentials(): Promise<KafkaCredential[]> {
   const url = `${API_BASE}/kafka-credentials`;
   const res = await fetchWithAuth(url);
@@ -576,6 +600,7 @@ export default {
   resetPassword,
   fetchObject,
   fetchProfile,
+  updateProfileName,
   fetchAlerts,
   fetchAlertCutouts,
   fetchObjCutouts,

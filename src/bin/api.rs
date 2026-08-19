@@ -131,6 +131,7 @@ async fn main() -> std::io::Result<()> {
                     .service(routes::babamul::oauth::post_oauth_verify)
                     // Protected routes
                     .service(routes::babamul::get_babamul_profile)
+                    .service(routes::babamul::patch_babamul_profile)
                     .service(routes::babamul::post_kafka_credentials)
                     .service(routes::babamul::get_kafka_credentials)
                     .service(routes::babamul::delete_kafka_credential)

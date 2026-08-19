@@ -51,6 +51,7 @@ mod tests {
                 password_last_changed_at: None,
                 identities: vec![],
                 orcid_id: None,
+                name: None,
             };
 
             let babamul_users_collection: mongodb::Collection<
@@ -1563,6 +1564,120 @@ mod tests {
         );
     }
 
+    /// PATCH /babamul/profile — the editable display name
+    ///
+    /// The name is free text the user controls, not an identifier, so the
+    /// things that matter are that it round-trips, that it can be cleared
+    /// again, and that it cannot be used to store something unbounded.
+    #[actix_rt::test]
+    async fn test_patch_babamul_profile_name() {
+        load_dotenv();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+        let test_user = TestUser::create(&database, &auth_app_data).await;
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(database.clone()))
+                .app_data(web::Data::new(auth_app_data))
+                .service(
+                    web::scope("/babamul")
+                        .wrap(from_fn(babamul_auth_middleware))
+                        .service(routes::babamul::get_babamul_profile)
+                        .service(routes::babamul::patch_babamul_profile),
+                ),
+        )
+        .await;
+
+        let patch = |body: serde_json::Value| {
+            test::TestRequest::patch()
+                .uri("/babamul/profile")
+                .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+                .set_json(body)
+                .to_request()
+        };
+        let users: mongodb::Collection<boom::api::routes::babamul::BabamulUser> =
+            database.collection("babamul_users");
+        let stored_name = || async {
+            users
+                .find_one(doc! { "_id": &test_user.user.id })
+                .await
+                .unwrap()
+                .unwrap()
+                .name
+        };
+
+        // Accounts start with no name at all.
+        assert!(stored_name().await.is_none());
+
+        // Set one — surrounding whitespace is not part of it.
+        let resp = test::call_service(
+            &app,
+            patch(serde_json::json!({ "name": "  Ada Lovelace  " })),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = read_json_response(resp).await;
+        assert_eq!(body["data"]["name"].as_str().unwrap(), "Ada Lovelace");
+        assert_eq!(stored_name().await.as_deref(), Some("Ada Lovelace"));
+
+        // It comes back on the profile the web app reads.
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri("/babamul/profile")
+                .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+                .to_request(),
+        )
+        .await;
+        let body = read_json_response(resp).await;
+        assert_eq!(body["data"]["name"].as_str().unwrap(), "Ada Lovelace");
+
+        // Omitting the field leaves the name alone, so a future PATCH that
+        // sets some other field cannot wipe it out by accident.
+        let resp = test::call_service(&app, patch(serde_json::json!({}))).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(stored_name().await.as_deref(), Some("Ada Lovelace"));
+
+        // Too long, and a name carrying a newline, are both refused.
+        let resp =
+            test::call_service(&app, patch(serde_json::json!({ "name": "a".repeat(101) }))).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let resp =
+            test::call_service(&app, patch(serde_json::json!({ "name": "Ada\nLovelace" }))).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            stored_name().await.as_deref(),
+            Some("Ada Lovelace"),
+            "a rejected update must not change the stored name"
+        );
+
+        // Blank clears it — and clears it out of the document rather than
+        // leaving an empty string that renders as a blank name.
+        let resp = test::call_service(&app, patch(serde_json::json!({ "name": "   " }))).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = read_json_response(resp).await;
+        assert!(body["data"]["name"].is_null());
+        assert!(stored_name().await.is_none());
+
+        // Without a token it is not editable at all. The middleware rejects
+        // the request as an error rather than a response, so this asks for the
+        // Result instead of unwrapping one.
+        let result = test::try_call_service(
+            &app,
+            test::TestRequest::patch()
+                .uri("/babamul/profile")
+                .set_json(serde_json::json!({ "name": "Mallory" }))
+                .to_request(),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "PATCH /babamul/profile must require a token"
+        );
+        assert!(stored_name().await.is_none());
+    }
+
     /// Test POST /babamul/tokens - Create a new PAT
     #[actix_rt::test]
     async fn test_post_token() {
@@ -2752,6 +2867,7 @@ mod tests {
             password_last_changed_at: None,
             identities: vec![],
             orcid_id: None,
+            name: None,
         })
         .await
         .unwrap();
@@ -2821,6 +2937,7 @@ mod tests {
             password_last_changed_at: None,
             identities: vec![],
             orcid_id: None,
+            name: None,
         })
         .await
         .unwrap();
@@ -2867,6 +2984,7 @@ mod tests {
             ),
             identities: vec![],
             orcid_id: None,
+            name: None,
         })
         .await
         .unwrap();
@@ -2962,6 +3080,7 @@ mod tests {
                 password_last_changed_at: None,
                 identities: vec![],
                 orcid_id: None,
+                name: None,
             };
 
         let mut ids_to_cleanup: Vec<String> = Vec::new();
@@ -3288,6 +3407,12 @@ mod tests {
             client_id: "orcid-client-id".to_string(),
             client_secret: "orcid-client-secret".to_string(),
         };
+        // GitHub is this fixture's *unconfigured* provider, so it has to be
+        // cleared rather than left as it comes: `from_test_config` overlays
+        // BOOM_ environment variables, and a developer with real GitHub
+        // credentials in their .env would otherwise turn the provider on and
+        // fail the tests that check a disabled one stays disabled.
+        config.babamul.oauth.github = boom::conf::OAuthProviderConfig::default();
         config
     }
 
@@ -3895,6 +4020,7 @@ mod tests {
                 password_last_changed_at: None,
                 identities: vec![],
                 orcid_id: None,
+                name: None,
             })
             .await
             .unwrap();

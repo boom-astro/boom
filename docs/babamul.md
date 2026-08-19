@@ -113,6 +113,16 @@ address as verified.
 
 The ORCID iD is stored in `orcid_id` and shown on the profile page.
 
+### Display name
+
+Whatever the provider calls the user seeds the account's `name`, which the
+profile page shows and `PATCH /babamul/profile` edits — sending a blank one
+clears it. It is free text: optional, not unique, and never used to identify
+the account. Linking a second provider fills it in only when the account has no
+name yet, so a name the user typed is never overwritten. That is separate from
+`username`, which is derived once at signup (from the provider's name, or the
+local part of the email) and does not change.
+
 ### Configuration
 
 **Client IDs and secrets are environment-only.** They are deliberately absent

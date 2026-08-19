@@ -485,8 +485,14 @@ async fn resolve_identity(
     // 2. Link to the existing account with that address.
     match users.find_one(doc! { "email": verified_email }).await {
         Ok(Some(existing)) => {
-            let user =
-                link_identity_to_user(db, &existing, &linked, identity.orcid_id.as_deref()).await?;
+            let user = link_identity_to_user(
+                db,
+                &existing,
+                &linked,
+                identity.orcid_id.as_deref(),
+                identity.name.as_deref(),
+            )
+            .await?;
             return Ok(Resolution::SignedIn(Box::new(user)));
         }
         Ok(None) => {}
@@ -505,6 +511,7 @@ async fn resolve_identity(
         derive_username(identity, verified_email),
         linked,
         identity.orcid_id.clone(),
+        identity.name.clone(),
         now,
     )?;
     insert_social_user(&users, user)
@@ -519,11 +526,21 @@ async fn link_identity_to_user(
     existing: &BabamulUser,
     linked: &LinkedIdentity,
     orcid_id: Option<&str>,
+    name: Option<&str>,
 ) -> Result<BabamulUser, ResolveError> {
     let users: mongodb::Collection<BabamulUser> = db.collection("babamul_users");
     let mut set = doc! { "is_activated": true, "activation_code": mongodb::bson::Bson::Null };
     if let Some(orcid_id) = orcid_id {
         set.insert("orcid_id", orcid_id);
+    }
+    // Only fill a gap: a name the user typed themselves outranks whatever the
+    // provider calls them, and linking a second provider must not overwrite it.
+    let name_to_set = match (existing.name.as_deref(), name) {
+        (None | Some(""), Some(name)) if !name.trim().is_empty() => Some(name.trim().to_string()),
+        _ => None,
+    };
+    if let Some(name) = &name_to_set {
+        set.insert("name", name);
     }
     let linked_bson = mongodb::bson::to_bson(linked)
         .map_err(|e| ResolveError::Internal(format!("Could not encode identity: {}", e)))?;
@@ -546,6 +563,9 @@ async fn link_identity_to_user(
     if let Some(orcid_id) = orcid_id {
         user.orcid_id = Some(orcid_id.to_string());
     }
+    if let Some(name) = name_to_set {
+        user.name = Some(name);
+    }
     user.identities.push(linked.clone());
     Ok(user)
 }
@@ -556,6 +576,7 @@ fn new_social_user(
     username: String,
     linked: LinkedIdentity,
     orcid_id: Option<String>,
+    name: Option<String>,
     now: i64,
 ) -> Result<BabamulUser, ResolveError> {
     Ok(BabamulUser {
@@ -578,6 +599,9 @@ fn new_social_user(
         password_last_changed_at: None,
         identities: vec![linked],
         orcid_id,
+        // Seeded from the provider so the profile isn't blank on day one; the
+        // user can change or clear it via PATCH /babamul/profile.
+        name,
     })
 }
 
@@ -1018,7 +1042,14 @@ pub async fn post_oauth_verify(
     let users: mongodb::Collection<BabamulUser> = db.collection("babamul_users");
     let user = match users.find_one(doc! { "email": &email }).await {
         Ok(Some(existing)) => {
-            match link_identity_to_user(&db, &existing, &linked, pending.orcid_id.as_deref()).await
+            match link_identity_to_user(
+                &db,
+                &existing,
+                &linked,
+                pending.orcid_id.as_deref(),
+                pending.name.as_deref(),
+            )
+            .await
             {
                 Ok(user) => user,
                 Err(e) => return resolve_error_response(e),
@@ -1030,6 +1061,7 @@ pub async fn post_oauth_verify(
                 derive_username(&identity, &email),
                 linked,
                 pending.orcid_id.clone(),
+                identity.name.clone(),
                 now,
             ) {
                 Ok(user) => user,
