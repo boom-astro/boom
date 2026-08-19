@@ -555,8 +555,9 @@ struct OrcidEmails {
 
 /// Fetch an ORCID record's public email, if the researcher published one.
 ///
-/// Most ORCID users keep their email private, so `None` is the common case and
-/// the caller falls back to a `{orcid-id}@orcid.org` placeholder.
+/// Most ORCID users keep their email private, so `None` is the common case;
+/// the caller then sends the user through the confirm-by-email flow rather
+/// than inventing an address nobody has vouched for.
 async fn orcid_public_email(
     client: &reqwest::Client,
     orcid_id: &str,

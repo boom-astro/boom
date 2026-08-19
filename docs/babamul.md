@@ -104,10 +104,12 @@ account is safe here for the same reason a password reset is: the user proved
 control of the mailbox.
 
 Wrong codes are capped at 5 attempts per ticket, after which the ticket is
-burned and the user starts over. Signing in again with a provider whose account
-never finished confirmation does *not* skip it — the only thing that can stand
-in for the confirmation is the provider re-asserting that exact address as
-verified.
+burned and the user starts over. A ticket will also only ever produce 5
+confirmation codes, so one sign-in cannot be turned into an unlimited supply of
+mail to an address the sender picks. Signing in again with a provider whose
+account never finished confirmation does *not* skip it — the only thing that
+can stand in for the confirmation is the provider re-asserting that exact
+address as verified.
 
 The ORCID iD is stored in `orcid_id` and shown on the profile page.
 

@@ -28,7 +28,13 @@ services:
     networks:
       - boom
   mongo:
-    image: mongo:8.0
+    # 8.2 rather than 8.0: MongoDB 8.0 refuses to start on Linux kernel 6.19 and
+    # newer (https://jira.mongodb.org/browse/SERVER-121912), which current
+    # Docker Desktop VMs already ship, so 8.0 cannot run locally at all. 8.0 to
+    # 8.2 is a supported direct upgrade and 8.2 to 8.0 a supported downgrade,
+    # provided featureCompatibilityVersion is left at "8.0" until you are ready
+    # to give up that path.
+    image: mongo:8.2
     hostname: mongo
     expose:
       - "27017"

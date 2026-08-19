@@ -39,6 +39,11 @@ const PENDING_IDENTITY_TTL_SECONDS: i64 = 1800;
 /// cannot be brute-forced.
 const MAX_VERIFICATION_ATTEMPTS: i32 = 5;
 
+/// Confirmation codes a single ticket may ask for. Without a cap, one sign-in
+/// buys the caller unlimited mail to whatever address they type in, which is
+/// somebody else's inbox as easily as their own.
+const MAX_CODE_SENDS: i32 = 5;
+
 /// A pending authorization request, keyed by the opaque `state` value.
 ///
 /// Consumed exactly once by the callback (`find_one_and_delete`), which is what
@@ -81,6 +86,9 @@ struct PendingIdentity {
     code_expires_at: Option<i64>,
     #[serde(default)]
     attempts: i32,
+    /// Confirmation codes mailed for this ticket, capped at [`MAX_CODE_SENDS`]
+    #[serde(default)]
+    code_sends: i32,
     created_at: i64,
     expires_at: i64,
     /// TTL index field; see [`ensure_oauth_state_index`]
@@ -309,8 +317,7 @@ pub async fn get_oauth_callback(
             }
         };
 
-    let user = match resolve_identity(&db, &config, &identity, pending.redirect_to.as_deref()).await
-    {
+    let user = match resolve_identity(&db, &identity, pending.redirect_to.as_deref()).await {
         Ok(Resolution::SignedIn(user)) => *user,
         Ok(Resolution::NeedsEmail {
             ticket,
@@ -401,7 +408,6 @@ enum Resolution {
 ///    email private.
 async fn resolve_identity(
     db: &Database,
-    config: &AppConfig,
     identity: &ExternalIdentity,
     redirect_to: Option<&str>,
 ) -> Result<Resolution, ResolveError> {
@@ -461,7 +467,7 @@ async fn resolve_identity(
     let verified_email = match (identity.email_verified, identity.email.as_deref()) {
         (true, Some(email)) => email,
         _ => {
-            let ticket = store_pending_identity(db, config, identity, redirect_to).await?;
+            let ticket = store_pending_identity(db, identity, redirect_to).await?;
             return Ok(Resolution::NeedsEmail {
                 ticket,
                 suggested_email: identity.email.clone(),
@@ -715,11 +721,9 @@ fn redirect_to_email_prompt(
 /// Park a provider-verified identity until the user confirms an email address.
 async fn store_pending_identity(
     db: &Database,
-    config: &AppConfig,
     identity: &ExternalIdentity,
     redirect_to: Option<&str>,
 ) -> Result<String, ResolveError> {
-    let _ = config;
     let now = flare::Time::now().to_utc().timestamp();
     let expires_at = now + PENDING_IDENTITY_TTL_SECONDS;
     let ticket = generate_random_string(48);
@@ -734,6 +738,7 @@ async fn store_pending_identity(
         code_hash: None,
         code_expires_at: None,
         attempts: 0,
+        code_sends: 0,
         created_at: now,
         expires_at,
         expires_at_date: mongodb::bson::DateTime::from_millis(expires_at * 1000),
@@ -783,6 +788,7 @@ pub struct OAuthCompleteResponse {
     responses(
         (status = 200, description = "Confirmation code sent", body = OAuthCompleteResponse),
         (status = 400, description = "Invalid email, or expired/unknown ticket"),
+        (status = 429, description = "Too many codes sent for this ticket; start over"),
         (status = 500, description = "Internal server error")
     ),
     tags=["Babamul"]
@@ -819,9 +825,17 @@ pub async fn post_oauth_complete(
 
     let pending_identities: mongodb::Collection<PendingIdentity> =
         db.collection(PENDING_IDENTITIES_COLLECTION);
-    if let Err(e) = pending_identities
+    // Counting the send inside the update is what makes the cap hold: two
+    // requests racing each other both have to pass the filter, and only one
+    // can. `$not: $gte` rather than `$lt` because a missing field is not less
+    // than anything, and tickets minted before this field existed have none.
+    let within_cap = doc! {
+        "_id": &pending.ticket,
+        "code_sends": { "$not": { "$gte": MAX_CODE_SENDS } },
+    };
+    match pending_identities
         .update_one(
-            doc! { "_id": &pending.ticket },
+            within_cap,
             doc! {
                 "$set": {
                     "email": &email,
@@ -829,13 +843,28 @@ pub async fn post_oauth_complete(
                     "code_expires_at": pending.expires_at.min(now + PENDING_IDENTITY_TTL_SECONDS),
                     // A fresh code deserves a fresh budget of attempts.
                     "attempts": 0,
-                }
+                },
+                "$inc": { "code_sends": 1 },
             },
         )
         .await
     {
-        tracing::error!("Could not attach email to pending identity: {}", e);
-        return response::internal_error("Could not send confirmation code");
+        Ok(result) if result.matched_count == 0 => {
+            // The ticket was alive a moment ago, so the send count is what the
+            // filter caught. A ticket that vanished in between lands here too,
+            // and "sign in again" is the right advice either way.
+            return HttpResponse::TooManyRequests().json(
+                crate::api::models::response::ApiResponseBody::error(
+                    "Too many confirmation codes have been sent for this sign-in. \
+                     Please sign in again.",
+                ),
+            );
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::error!("Could not attach email to pending identity: {}", e);
+            return response::internal_error("Could not send confirmation code");
+        }
     }
 
     let provider_name = OAuthProviderKind::from_path_segment(&pending.provider)

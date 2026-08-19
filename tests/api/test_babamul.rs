@@ -3747,6 +3747,58 @@ mod tests {
             .ok();
     }
 
+    /// POST /babamul/oauth/complete — the code-send cap
+    ///
+    /// One sign-in must not become an unlimited supply of mail to whatever
+    /// address the caller types in, which need not be their own.
+    #[actix_rt::test]
+    async fn test_babamul_oauth_complete_caps_code_sends() {
+        load_dotenv();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+        let app = oauth_app!(oauth_test_config(), database.clone(), auth_app_data);
+
+        let orcid = format!("0000-0002-{}", uuid::Uuid::new_v4().simple());
+        let ticket = seed_pending_identity(&database, &orcid, None, None).await;
+
+        let send = |email: String, ticket: String| {
+            test::TestRequest::post()
+                .uri("/babamul/oauth/complete")
+                .set_json(serde_json::json!({ "ticket": ticket, "email": email }))
+                .to_request()
+        };
+        let address = || format!("test+{}@babamul.example.com", uuid::Uuid::new_v4());
+
+        // The seeded ticket carries no `code_sends` field at all, standing in
+        // for one minted before the cap existed. Those must still work.
+        for attempt in 1..=5 {
+            let resp = test::call_service(&app, send(address(), ticket.clone())).await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "code send {} must be allowed",
+                attempt
+            );
+        }
+
+        let resp = test::call_service(&app, send(address(), ticket.clone())).await;
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        // The ticket itself survives: the cap stops further mail, it does not
+        // invalidate a code the user may already be holding.
+        let record = pending_identities(&database)
+            .find_one(doc! { "_id": &ticket })
+            .await
+            .unwrap()
+            .expect("the cap must not burn the ticket");
+        assert_eq!(record.get_i32("code_sends").unwrap(), 5);
+
+        pending_identities(&database)
+            .delete_one(doc! { "_id": &ticket })
+            .await
+            .ok();
+    }
+
     /// POST /babamul/oauth/verify — new account
     #[actix_rt::test]
     async fn test_babamul_oauth_verify_creates_and_links_a_new_account() {
