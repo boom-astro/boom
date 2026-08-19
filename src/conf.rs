@@ -458,6 +458,10 @@ fn default_kafka_server() -> String {
     "localhost:9092".to_string()
 }
 
+fn default_subscription_window_days() -> u64 {
+    1
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct KafkaConsumerConfig {
     #[serde(default = "default_kafka_server")]
@@ -467,6 +471,13 @@ pub struct KafkaConsumerConfig {
     pub schema_github_fallback_url: Option<String>, // URL of the GitHub fallback for schemas (if any)
     pub username: Option<String>,                   // Username for authentication (if any)
     pub password: Option<String>,                   // Password for authentication (if any)
+    /// Days before the current one to stay subscribed to, for surveys whose
+    /// topics are per-night. 1 (the default) keeps yesterday alongside today so
+    /// a night spanning UTC midnight isn't cut off. Raise it temporarily to
+    /// catch up after an upstream outage — bounded by upstream retention, which
+    /// is about 7 days for ZTF. Ignored by surveys with a single static topic.
+    #[serde(default = "default_subscription_window_days")]
+    pub subscription_window_days: u64,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
