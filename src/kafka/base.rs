@@ -1084,20 +1084,46 @@ pub async fn consumer(
             reposition_new_partitions(&consumer, position_timestamp * 1000, &mut positioned)?;
         }
         if max_in_queue > 0 && total % 1000 == 0 {
+            // Pause rather than sleep: a consumer that stops polling for
+            // `max.poll.interval.ms` (5 min) is fenced out of the group.
+            let mut paused = false;
             loop {
                 let nb_in_queue = con
                     .llen::<&str, usize>(&output_queue)
                     .await
                     .inspect_err(as_error!("failed to get queue length"))?;
-                if nb_in_queue >= max_in_queue {
+                if nb_in_queue < max_in_queue {
+                    break;
+                }
+                if !paused {
                     info!(
-                        "{} (limit: {}) items in queue, sleeping...",
+                        "{} (limit: {}) items in queue, pausing consumption...",
                         nb_in_queue, max_in_queue
                     );
-                    tokio::time::sleep(core::time::Duration::from_millis(500)).await;
-                    continue;
+                    consumer.pause(&consumer.assignment()?)?;
+                    paused = true;
                 }
-                break;
+                // Yields nothing while paused, but forwards anything still in flight.
+                if let Some(Ok(message)) = consumer.poll(core::time::Duration::from_millis(500)) {
+                    let payload = message.payload().unwrap_or_default();
+                    con.rpush::<&str, Vec<u8>, usize>(&output_queue, payload.to_vec())
+                        .await
+                        .inspect_err(|error| {
+                            log_error!(error, "failed to push message to queue");
+                            ALERT_PROCESSED.add(1, &output_error_attrs);
+                        })?;
+                    if !exit_on_eof {
+                        if let Err(error) = consumer.store_offset_from_message(&message) {
+                            log_error!(error, "failed to store offset");
+                        }
+                    }
+                    ALERT_PROCESSED.add(1, &ok_attrs);
+                    total += 1;
+                }
+            }
+            if paused {
+                consumer.resume(&consumer.assignment()?)?;
+                info!("queue drained, resuming consumption");
             }
         }
         match consumer.poll(KAFKA_TIMEOUT_SECS) {
