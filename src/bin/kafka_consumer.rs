@@ -22,6 +22,17 @@ use opentelemetry_sdk::trace::SdkTracerProvider;
 use tracing::{error, info};
 use uuid::Uuid;
 
+#[derive(clap::ValueEnum, Clone, Copy, Debug, Default, PartialEq)]
+enum DateMode {
+    /// Consume `date` and every night after it, rolling onto each new topic,
+    /// and never exit
+    #[default]
+    From,
+    /// Consume only `date`'s topic(s), then exit. Nothing is committed, so the
+    /// night can be replayed as often as needed
+    Single,
+}
+
 #[derive(Parser)]
 struct Cli {
     /// Survey to consume alerts from
@@ -32,6 +43,11 @@ struct Cli {
     /// [default: today's date at 00:00:00 UTC]
     #[arg(value_parser = parse_date)]
     date: Option<NaiveDateTime>, // Easier to deal with the default value after clap
+
+    /// Whether `date` is a starting point ("from", the default) or the only
+    /// date to consume ("single")
+    #[arg(long, value_enum, default_value_t = DateMode::From)]
+    date_mode: DateMode,
 
     /// ID(s) of the program(s) to consume the alerts (ZTF-only). Defaults to "public" program if not specified (e.g. --programids public,partnership,caltech).
     #[arg(long, value_enum, value_delimiter = ',', default_value = "public")]
@@ -94,18 +110,28 @@ async fn run(
     meter_provider: Option<SdkMeterProvider>,
     tracer_provider: Option<SdkTracerProvider>,
 ) {
-    // An explicit date pins the run to that day (replay/backfill); without one
-    // the consumer tracks the current day and rolls over nightly.
-    let start = match args.date {
-        Some(date) => StartDate::Pinned(date.and_utc().timestamp()),
-        None => StartDate::Current,
+    let date = args.date.map(|date| date.and_utc().timestamp());
+    let start = match (date, args.date_mode) {
+        (Some(timestamp), DateMode::Single) => StartDate::Pinned(timestamp),
+        (Some(timestamp), DateMode::From) => StartDate::From(timestamp),
+        (None, DateMode::Single) => StartDate::Pinned(StartDate::Current.timestamp()),
+        (None, DateMode::From) => StartDate::Current,
     };
 
-    let exit_on_eof = if args.deployment_env == "dev" {
-        args.exit_on_eof
-    } else {
-        false
+    // `single` reuses the one-shot drain path, ungated on the environment since
+    // it commits nothing and runs in a throwaway consumer group.
+    let exit_on_eof = match args.date_mode {
+        DateMode::Single => true,
+        DateMode::From => args.deployment_env == "dev" && args.exit_on_eof,
     };
+    info!(
+        "Consuming {} alerts ({:?} mode, date {})",
+        args.survey,
+        args.date_mode,
+        chrono::DateTime::from_timestamp(start.timestamp(), 0)
+            .map(|dt| dt.format("%Y-%m-%d").to_string())
+            .unwrap_or_default()
+    );
 
     // If topic override is provided, use it. Otherwise, the consumer
     // will determine the topic based on the survey, program ID, and date.

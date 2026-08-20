@@ -442,8 +442,7 @@ async fn test_consumer_rolls_over_and_skips_old() {
                     std::sync::Arc::new(move |_, _| window.clone()),
                     &oq,
                     0,
-                    cold_start_ts,
-                    true,
+                    boom::kafka::StartDate::From(cold_start_ts).plan(1),
                     &config,
                     &kafka_cfg,
                     false,
@@ -666,6 +665,61 @@ fn test_start_date_signals_rollover_intent() {
     );
 }
 
+// Catching up from a past date means two different instants: the window ends at
+// today, so every night since is subscribed, while partitions are still
+// positioned at the requested date. Positioning them at today instead would find
+// nothing at or after it in the older topics and skip every one of them.
+#[test]
+fn test_from_date_catches_up_every_night_since() {
+    use boom::kafka::{AlertConsumer, StartDate, ZtfAlertConsumer};
+    use boom::utils::enums::ProgramId;
+
+    let today = chrono::Utc::now().date_naive();
+    let start = today.checked_sub_days(chrono::Days::new(10)).unwrap();
+    let start_ts = start.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp();
+
+    let plan = StartDate::From(start_ts).plan(1);
+    assert_eq!(plan.position_timestamp, start_ts);
+    assert_eq!(
+        plan.window_days, 10,
+        "the window must reach back to the start date"
+    );
+    assert!(
+        plan.follows_clock,
+        "catch-up still rolls onto each new night"
+    );
+    assert!(
+        !plan.positions_at_rolled_day,
+        "rolling must not move the position past the nights being caught up"
+    );
+
+    let topics = ZtfAlertConsumer::new(None, Some(vec![ProgramId::Public]))
+        .subscription_topics(plan.subscription_timestamp, plan.window_days);
+    assert_eq!(topics.len(), 11, "10 nights back plus today");
+    assert!(topics.contains(&format!("ztf_{}_programid1", start.format("%Y%m%d"))));
+    assert!(topics.contains(&format!("ztf_{}_programid1", today.format("%Y%m%d"))));
+}
+
+// The other two modes read from the instant they subscribe to, over the window
+// the survey is configured with.
+#[test]
+fn test_current_and_pinned_plans_keep_the_configured_window() {
+    use boom::kafka::StartDate;
+
+    let current = StartDate::Current.plan(1);
+    assert_eq!(current.window_days, 1);
+    assert_eq!(current.position_timestamp, current.subscription_timestamp);
+    assert!(current.follows_clock);
+    assert!(current.positions_at_rolled_day);
+
+    let pinned = StartDate::Pinned(1_741_651_200).plan(1);
+    assert_eq!(pinned.window_days, 1);
+    assert_eq!(pinned.position_timestamp, 1_741_651_200);
+    assert_eq!(pinned.subscription_timestamp, 1_741_651_200);
+    assert!(!pinned.follows_clock);
+    assert!(!pinned.positions_at_rolled_day);
+}
+
 // A pinned replay still has to subscribe to the topic it was asked for.
 #[test]
 fn test_pinned_date_window_contains_that_date() {
@@ -776,8 +830,7 @@ async fn test_consumer_started_with_no_data_still_consumes() {
                     std::sync::Arc::new(move |_, _| subscription.clone()),
                     &oq,
                     0,
-                    cold_start_ts,
-                    true,
+                    boom::kafka::StartDate::From(cold_start_ts).plan(1),
                     &config,
                     &kafka_cfg,
                     false,

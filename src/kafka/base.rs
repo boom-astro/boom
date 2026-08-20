@@ -468,10 +468,6 @@ pub trait AlertConsumer: Sized + Clone + Send + Sync + 'static {
     ) -> Result<(), ConsumerError> {
         let config = AppConfig::from_path(config_path)?;
         let survey = self.survey();
-        // Resolved once here, not per worker, so every thread agrees on the day
-        // even if they spawn either side of UTC midnight.
-        let timestamp = start.timestamp();
-        let follow_current_date = start.follows_clock();
 
         // Resolves the topics to subscribe to for a given instant. The consumer
         // loop re-invokes this on every UTC-date rollover and re-subscribes, so
@@ -506,6 +502,7 @@ pub trait AlertConsumer: Sized + Clone + Send + Sync + 'static {
 
         let n_threads = n_threads.unwrap_or(1);
         let max_in_queue = max_in_queue.unwrap_or(15000);
+        let plan = start.plan(kafka_config.subscription_window_days);
 
         let mut handles = vec![];
         for i in 0..n_threads {
@@ -519,8 +516,7 @@ pub trait AlertConsumer: Sized + Clone + Send + Sync + 'static {
                     subscribe_to,
                     &output_queue,
                     max_in_queue,
-                    timestamp,
-                    follow_current_date,
+                    plan,
                     &config,
                     &kafka_config,
                     exit_on_eof,
@@ -735,6 +731,9 @@ pub enum StartDate {
     /// Begin at the current UTC day and roll onto each new daily topic as
     /// midnight passes. What the long-running consumers use.
     Current,
+    /// Begin at a past instant and catch up every night since, then roll like
+    /// `Current`.
+    From(i64),
     /// Pinned to one instant — replay, backfill, benchmarks. Never rolls over:
     /// advancing it would unsubscribe the consumer from the very topic it was
     /// started to read.
@@ -745,20 +744,72 @@ impl StartDate {
     /// Unix seconds that newly-assigned partitions are positioned to.
     pub fn timestamp(self) -> i64 {
         match self {
-            StartDate::Current => {
-                let now = chrono::Utc::now();
-                now.date_naive()
-                    .and_hms_opt(0, 0, 0)
-                    .map(|midnight| midnight.and_utc().timestamp())
-                    .unwrap_or_else(|| now.timestamp())
-            }
-            StartDate::Pinned(timestamp) => timestamp,
+            StartDate::Current => current_day_midnight(),
+            StartDate::From(timestamp) | StartDate::Pinned(timestamp) => timestamp,
         }
     }
 
     /// Whether the subscription should roll onto each new UTC day.
     pub fn follows_clock(self) -> bool {
-        matches!(self, StartDate::Current)
+        matches!(self, StartDate::Current | StartDate::From(_))
+    }
+
+    /// Resolve into the instants the poll loop runs on, widening the survey's
+    /// configured window if `From` reaches further back than it.
+    pub fn plan(self, configured_window_days: u64) -> StartPlan {
+        let today = current_day_midnight();
+        let position_timestamp = match self {
+            StartDate::Current => today,
+            StartDate::From(timestamp) | StartDate::Pinned(timestamp) => timestamp,
+        };
+        // `From` reaches *back* to its date; the window still ends at today.
+        let subscription_timestamp = match self {
+            StartDate::Pinned(timestamp) => timestamp,
+            _ => today,
+        };
+        let window_days = match self {
+            StartDate::From(_) => {
+                configured_window_days.max(days_between(position_timestamp, subscription_timestamp))
+            }
+            _ => configured_window_days,
+        };
+        StartPlan {
+            position_timestamp,
+            subscription_timestamp,
+            window_days,
+            follows_clock: self.follows_clock(),
+            positions_at_rolled_day: matches!(self, StartDate::Current),
+        }
+    }
+}
+
+/// Resolved once by `consume`, so every worker thread agrees on the day even if
+/// they spawn either side of UTC midnight.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StartPlan {
+    /// A partition holding nothing at or after this is skipped to its end.
+    pub position_timestamp: i64,
+    /// Instant the subscription window ends at.
+    pub subscription_timestamp: i64,
+    pub window_days: u64,
+    pub follows_clock: bool,
+    /// False while catching up, whose older nights the rolled day would skip.
+    pub positions_at_rolled_day: bool,
+}
+
+fn current_day_midnight() -> i64 {
+    let now = chrono::Utc::now();
+    now.date_naive()
+        .and_hms_opt(0, 0, 0)
+        .map(|midnight| midnight.and_utc().timestamp())
+        .unwrap_or_else(|| now.timestamp())
+}
+
+fn days_between(from: i64, to: i64) -> u64 {
+    let day = |timestamp| chrono::DateTime::from_timestamp(timestamp, 0).map(|dt| dt.date_naive());
+    match (day(from), day(to)) {
+        (Some(from), Some(to)) => (to - from).num_days().max(0) as u64,
+        _ => 0,
     }
 }
 
@@ -784,16 +835,15 @@ fn rollover_target(
 fn roll_subscription_if_needed(
     consumer: &BaseConsumer,
     subscribe_to: &Arc<dyn Fn(i64, u64) -> Vec<String> + Send + Sync>,
-    window_days: u64,
-    follow_current_date: bool,
+    plan: StartPlan,
     subscribed_date: &mut chrono::NaiveDate,
     position_timestamp: &mut i64,
 ) {
     let today = chrono::Utc::now().date_naive();
-    let Some(new_timestamp) = rollover_target(follow_current_date, *subscribed_date, today) else {
+    let Some(new_timestamp) = rollover_target(plan.follows_clock, *subscribed_date, today) else {
         return;
     };
-    let rolled = subscribe_to(new_timestamp, window_days);
+    let rolled = subscribe_to(new_timestamp, plan.window_days);
     let rolled_refs: Vec<&str> = rolled.iter().map(|s| s.as_str()).collect();
     match consumer.subscribe(&rolled_refs) {
         Ok(()) => {
@@ -802,7 +852,9 @@ fn roll_subscription_if_needed(
                 subscribed_date, today, rolled
             );
             *subscribed_date = today;
-            *position_timestamp = new_timestamp;
+            if plan.positions_at_rolled_day {
+                *position_timestamp = new_timestamp;
+            }
         }
         // Stay on the current subscription; the next check retries.
         Err(error) => log_error!(error, "failed to roll subscription onto new day"),
@@ -831,9 +883,7 @@ pub async fn consumer(
     subscribe_to: Arc<dyn Fn(i64, u64) -> Vec<String> + Send + Sync>,
     output_queue: &str,
     max_in_queue: usize,
-    timestamp: i64,
-    // Whether to roll the subscription onto each new UTC day; see `StartDate`.
-    follow_current_date: bool,
+    plan: StartPlan,
     config: &AppConfig,
     survey_consumer_config: &KafkaConsumerConfig,
     exit_on_eof: bool,
@@ -843,15 +893,17 @@ pub async fn consumer(
     // Throwaway group so a one-shot replay never rebalances the long-running
     // consumers; the timestamp suffix keeps one run's threads together.
     let group_id = if exit_on_eof {
-        format!("{}-oneshot-{}", survey_consumer_config.group_id, timestamp)
+        format!(
+            "{}-oneshot-{}",
+            survey_consumer_config.group_id, plan.position_timestamp
+        )
     } else {
         survey_consumer_config.group_id.clone()
     };
     let username = survey_consumer_config.username.clone();
     let password = survey_consumer_config.password.clone();
 
-    let window_days = survey_consumer_config.subscription_window_days;
-    let subscription = subscribe_to(timestamp, window_days);
+    let subscription = subscribe_to(plan.subscription_timestamp, plan.window_days);
 
     let topics: Vec<String> = if exit_on_eof {
         // One-shot drain: keep only concrete topics that have messages, exit if none.
@@ -944,11 +996,12 @@ pub async fn consumer(
     // Declared here because the initial-assignment loop must roll over too.
     const ROLLOVER_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
     let mut last_rollover_check = std::time::Instant::now();
-    // Advance together on rollover, so a new topic starts at its own day.
-    let mut subscribed_date = chrono::DateTime::from_timestamp(timestamp, 0)
+    // Advance together on rollover (unless catching up), so a new topic starts
+    // at its own day.
+    let mut subscribed_date = chrono::DateTime::from_timestamp(plan.subscription_timestamp, 0)
         .map(|dt| dt.date_naive())
         .unwrap_or_else(|| chrono::Utc::now().date_naive());
-    let mut position_timestamp = timestamp;
+    let mut position_timestamp = plan.position_timestamp;
 
     // Idle and wedged look identical at INFO otherwise.
     const WAITING_LOG_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
@@ -962,8 +1015,7 @@ pub async fn consumer(
             roll_subscription_if_needed(
                 &consumer,
                 &subscribe_to,
-                window_days,
-                follow_current_date,
+                plan,
                 &mut subscribed_date,
                 &mut position_timestamp,
             );
@@ -981,7 +1033,7 @@ pub async fn consumer(
                 debug!("Got initial assignment, positioning partitions...");
                 if exit_on_eof {
                     // One-shot drain: (re)read from the requested timestamp.
-                    seek_to_timestamp(&consumer, timestamp * 1000)?;
+                    seek_to_timestamp(&consumer, plan.position_timestamp * 1000)?;
                 } else if !position_or_warn(&consumer, position_timestamp * 1000, &mut positioned) {
                     // Consuming unpositioned would replay an old night from
                     // `earliest`; poll again and retry.
@@ -1093,8 +1145,7 @@ pub async fn consumer(
             roll_subscription_if_needed(
                 &consumer,
                 &subscribe_to,
-                window_days,
-                follow_current_date,
+                plan,
                 &mut subscribed_date,
                 &mut position_timestamp,
             );
