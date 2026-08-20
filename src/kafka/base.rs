@@ -754,6 +754,14 @@ impl StartDate {
         matches!(self, StartDate::Current | StartDate::From(_))
     }
 
+    /// Nights of history this start reaches back over, one topic each.
+    pub fn catch_up_days(self) -> u64 {
+        match self {
+            StartDate::From(timestamp) => days_between(timestamp, current_day_midnight()),
+            _ => 0,
+        }
+    }
+
     /// Resolve into the instants the poll loop runs on, widening the survey's
     /// configured window if `From` reaches further back than it.
     pub fn plan(self, configured_window_days: u64) -> StartPlan {
@@ -796,6 +804,10 @@ pub struct StartPlan {
     /// False while catching up, whose older nights the rolled day would skip.
     pub positions_at_rolled_day: bool,
 }
+
+/// Beyond this, a catch-up is asking for more nights than any survey retains,
+/// and every extra one is a topic that no longer exists.
+pub const MAX_CATCH_UP_DAYS: u64 = 30;
 
 fn current_day_midnight() -> i64 {
     let now = chrono::Utc::now();

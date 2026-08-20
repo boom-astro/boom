@@ -366,6 +366,10 @@ interpreted:
   subscribed at once, each new nightly topic is picked up as it appears, and the
   process never exits. Partitions the consumer group has already read resume
   where they left off.
+  A date more than 30 nights back is refused: that is past what any survey
+  retains, so the extra topics no longer exist.
+- `pinned` stays on that date's topic(s), without rolling onto new nights, and
+  keeps running once they are drained.
 - `single` consumes **only** that date's topic(s) and exits once they are
   drained. Offsets are not committed and a throwaway consumer group is used, so
   replaying a night is repeatable and leaves the long-running consumers alone.

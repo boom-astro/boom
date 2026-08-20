@@ -2,7 +2,7 @@ use boom::{
     conf::load_dotenv,
     kafka::{
         AlertConsumer, DecamAlertConsumer, LsstAlertConsumer, StartDate, WinterAlertConsumer,
-        ZtfAlertConsumer,
+        ZtfAlertConsumer, MAX_CATCH_UP_DAYS,
     },
     utils::{
         enums::{ProgramId, Survey},
@@ -28,6 +28,9 @@ enum DateMode {
     /// and never exit
     #[default]
     From,
+    /// Consume `date`'s topic(s) only, without rolling onto new nights, and
+    /// never exit
+    Pinned,
     /// Consume only `date`'s topic(s), then exit. Nothing is committed, so the
     /// night can be replayed as often as needed
     Single,
@@ -44,8 +47,8 @@ struct Cli {
     #[arg(value_parser = parse_date)]
     date: Option<NaiveDateTime>, // Easier to deal with the default value after clap
 
-    /// Whether `date` is a starting point ("from", the default) or the only
-    /// date to consume ("single")
+    /// Whether `date` is a starting point to catch up from ("from", the
+    /// default), or the only date to consume ("pinned", "single")
     #[arg(long, value_enum, default_value_t = DateMode::From)]
     date_mode: DateMode,
 
@@ -110,27 +113,39 @@ async fn run(
     meter_provider: Option<SdkMeterProvider>,
     tracer_provider: Option<SdkTracerProvider>,
 ) {
-    let date = args.date.map(|date| date.and_utc().timestamp());
-    let start = match (date, args.date_mode) {
-        (Some(timestamp), DateMode::Single) => StartDate::Pinned(timestamp),
-        (Some(timestamp), DateMode::From) => StartDate::From(timestamp),
-        (None, DateMode::Single) => StartDate::Pinned(StartDate::Current.timestamp()),
-        (None, DateMode::From) => StartDate::Current,
+    let date = args
+        .date
+        .map(|date| date.and_utc().timestamp())
+        .unwrap_or_else(|| StartDate::Current.timestamp());
+    let start = match args.date_mode {
+        DateMode::From if args.date.is_none() => StartDate::Current,
+        DateMode::From => StartDate::From(date),
+        DateMode::Pinned | DateMode::Single => StartDate::Pinned(date),
     };
+
+    let date_label = chrono::DateTime::from_timestamp(start.timestamp(), 0)
+        .map(|dt| dt.format("%Y-%m-%d").to_string())
+        .unwrap_or_default();
+    if start.catch_up_days() > MAX_CATCH_UP_DAYS {
+        error!(
+            "Catching up from {} would subscribe to {} nights, over the {}-day limit; \
+             use --date-mode pinned or single to read that night alone",
+            date_label,
+            start.catch_up_days(),
+            MAX_CATCH_UP_DAYS
+        );
+        return;
+    }
 
     // `single` reuses the one-shot drain path, ungated on the environment since
     // it commits nothing and runs in a throwaway consumer group.
     let exit_on_eof = match args.date_mode {
         DateMode::Single => true,
-        DateMode::From => args.deployment_env == "dev" && args.exit_on_eof,
+        DateMode::From | DateMode::Pinned => args.deployment_env == "dev" && args.exit_on_eof,
     };
     info!(
         "Consuming {} alerts ({:?} mode, date {})",
-        args.survey,
-        args.date_mode,
-        chrono::DateTime::from_timestamp(start.timestamp(), 0)
-            .map(|dt| dt.format("%Y-%m-%d").to_string())
-            .unwrap_or_default()
+        args.survey, args.date_mode, date_label
     );
 
     // If topic override is provided, use it. Otherwise, the consumer
