@@ -1007,6 +1007,16 @@ pub async fn consumer(
     const WAITING_LOG_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
     let mut last_waiting_log = std::time::Instant::now();
 
+    // Expired-partition poll errors repeat indefinitely, so they get a short
+    // backoff (enough to keep the loop off a hot spin) and a throttled log.
+    // Both loops below share them: a full second per missing topic adds up to
+    // minutes of startup when a wide window is mostly expired.
+    const EXPIRED_POLL_BACKOFF: std::time::Duration = std::time::Duration::from_millis(100);
+    const EXPIRED_LOG_INTERVAL: std::time::Duration = std::time::Duration::from_secs(300);
+    let mut last_expired_log = std::time::Instant::now()
+        .checked_sub(EXPIRED_LOG_INTERVAL)
+        .unwrap_or_else(std::time::Instant::now);
+
     // Poll once to trigger rebalance and get assignment
     loop {
         // This loop can sit across a UTC midnight; roll while waiting.
@@ -1050,6 +1060,18 @@ pub async fn consumer(
                         info!("Topic or partition unknown, exiting consumer {}", id);
                         return Ok(());
                     }
+                }
+                if is_expired_partition(&e) {
+                    if last_expired_log.elapsed() >= EXPIRED_LOG_INTERVAL {
+                        last_expired_log = std::time::Instant::now();
+                        warn!(
+                            "Waiting on partitions whose topics do not exist upstream \
+                             (subscribed date {}): {}",
+                            subscribed_date, e
+                        );
+                    }
+                    tokio::time::sleep(EXPIRED_POLL_BACKOFF).await;
+                    continue;
                 }
                 error!("Error during initial poll: {:?}", e);
                 // sleep and retry
@@ -1111,14 +1133,6 @@ pub async fn consumer(
     const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
     let mut last_heartbeat = std::time::Instant::now();
     let mut total_at_last_heartbeat: u64 = 0;
-
-    // Expired-partition poll errors repeat indefinitely, so they get a short
-    // backoff (enough to keep the loop off a hot spin) and a throttled log.
-    const EXPIRED_POLL_BACKOFF: std::time::Duration = std::time::Duration::from_millis(100);
-    const EXPIRED_LOG_INTERVAL: std::time::Duration = std::time::Duration::from_secs(300);
-    let mut last_expired_log = std::time::Instant::now()
-        .checked_sub(EXPIRED_LOG_INTERVAL)
-        .unwrap_or_else(std::time::Instant::now);
 
     debug!("Starting Kafka consumer loop...");
 
