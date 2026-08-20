@@ -9,7 +9,7 @@ use boom::{
             ForcedPhotometry,
         },
         EnrichmentWorker, LsstAlertForEnrichment, LsstEnrichmentWorker, LsstPhotometry,
-        ZtfAlertProperties, ZtfForcedPhotometry, ZtfPhotometry,
+        ZtfAlertProperties, ZtfForcedPhotometry, ZtfPhotometry, ZtfSsoAssociation,
     },
     utils::{
         cutouts::AlertCutout,
@@ -182,6 +182,13 @@ fn create_mock_enriched_ztf_alert(candid: i64, object_id: &str, is_rock: bool) -
             stationary: false,
             photstats: PerBandProperties::default(),
             multisurvey_photstats: Some(PerBandProperties::default()),
+            sso: Some(ZtfSsoAssociation {
+                is_sso: is_rock,
+                designation: is_rock.then(|| "9816".to_string()),
+                separation_arcsec: is_rock.then_some(1.0),
+                predicted_mag: is_rock.then_some(18.1),
+                source: is_rock.then(|| "ipac".to_string()),
+            }),
         },
         survey_matches: BabamulSurveyMatches::default(),
     }
@@ -277,6 +284,7 @@ async fn create_mock_enriched_lsst_alert_with_matches(
         candid,
         object_id: object_id.to_string(),
         ss_object_id: ss_object_id.map(|id| id.to_string()),
+        ss_source: None,
         candidate,
         prv_candidates: vec![prv_candidate],
         fp_hists: vec![],
@@ -1200,6 +1208,7 @@ async fn test_babamul_lsst_with_ztf_match() {
         candid: lsst_alert_id,
         object_id: lsst_object_id.clone(),
         ss_object_id: None,
+        ss_source: None,
         candidate: lsst_candidate.clone(),
         coordinates: Coordinates::new(180.0, 0.0),
         created_at: now,
@@ -1258,6 +1267,7 @@ async fn test_babamul_lsst_with_ztf_match() {
         prv_candidates: vec![LsstPrvCandidate::try_from(lsst_candidate).unwrap()],
         fp_hists: vec![lsst_forced_phot],
         is_sso: false,
+        designation: None,
         cross_matches: None,
         aliases: Some(LsstAliases {
             ztf: vec![ztf_match_id.clone()],
@@ -1497,6 +1507,7 @@ async fn test_babamul_ztf_with_lsst_match() {
         prv_candidates: vec![LsstPrvCandidate::try_from(lsst_dia_source).unwrap()],
         fp_hists: vec![lsst_forced_phot],
         is_sso: false,
+        designation: None,
         cross_matches: None,
         aliases: Some(LsstAliases {
             ztf: Vec::new(),

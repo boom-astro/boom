@@ -194,6 +194,155 @@ groups:
           summary: OTel Collector exporter is failing to send metric points
           description: 'Check otel-collector logs and the downstream Prometheus OTLP receiver for errors.'
 
+      - uid: api-down
+        title: API is down
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              # docker_container_up is 0 when the container is not running OR is
+              # failing its Docker healthcheck. The healthcheck arm is the one
+              # that matters: in #562 every request panicked its actix worker, so
+              # `/` failed forever while the process itself stayed alive and the
+              # container kept running. Nothing else in the stack saw that --
+              # cAdvisor reports resource usage, not health, and the container
+              # never restarted, so container-restart-flapping stayed silent too.
+              #
+              # min() so that any unhealthy replica trips this, not just an
+              # average across them.
+              #
+              # The `or on() vector(0)` catches the series disappearing while
+              # the exporter is still healthy -- the container removed,
+              # renamed, or relabelled out of the selector. That is a real
+              # outage, and without this it would only ever surface as a
+              # DatasourceNoData notification, losing the summary and
+              # description below. The `on()` is load-bearing: `or` keeps
+              # right-hand samples whose labels match nothing on the left, and
+              # bare vector(0) has no labels to match the `by (compose_service)`
+              # result, so a plain `or` would leak a permanent 0-valued series
+              # alongside the healthy one and page forever.
+              #
+              # The `and on()` gate then excludes the other reason the series
+              # can disappear: the scrape itself failing, which stales every
+              # series of the target at the same instant `up` goes to 0. The
+              # gate empties the result in that case, so the rule sees NoData
+              # rather than a spurious vector(0), and observability-blind below
+              # pages for it under its own name.
+              expr: |
+                (min by (compose_service) (docker_container_up{compose_project="boom",compose_service="api"}) or on() vector(0))
+                  and on() (min(up{job="docker-metadata"}) == 1)
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 0
+              to: 0
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    params: [1]
+                    type: lt
+                  operator:
+                    type: and
+                  query:
+                    params: [C]
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+        # The healthcheck is 10s x 5 retries, so the container is already ~50s
+        # into the fault before it reports unhealthy; 3m on top of that rides
+        # out a restart without waiting long to page on a real outage.
+        for: 3m
+        # NoData used to mean Alerting here, on the reasoning that the series
+        # only disappears if the container was removed outright. It also
+        # disappears whenever the scrape fails: Prometheus writes stale markers
+        # for every series of a failed target immediately, so a few minutes of
+        # a struggling docker-metadata-exporter paged as "API is down" while the
+        # API was serving traffic normally.
+        #
+        # The query above now splits those two cases apart, so a missing
+        # container alerts on its own terms and the only path left to NoData is
+        # the exporter being unreachable -- which observability-blind below
+        # already pages for. OK here so that one fault does not page twice,
+        # once under a name nobody recognises.
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: critical
+        annotations:
+          summary: 'The boom API container is not running or is failing its healthcheck'
+          description: 'Check `docker ps` for the api container health, then its logs for panics (a panicking actix worker keeps the process alive but fails every request, including `/`).'
+
+      - uid: observability-blind
+        title: Container health monitoring is blind
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              # docker-metadata-exporter is the only source of container
+              # liveness and healthcheck state, so while it is unreachable the
+              # api-down rule above cannot fire at all. That silence is the
+              # thing worth paging on -- but as itself, not as an API outage.
+              #
+              # min() covers the multi-target case; the outer `or vector(0)`
+              # covers the target vanishing from the Prometheus config
+              # entirely, which no NoData handling would otherwise catch as a
+              # failure of *this* rule's own datasource.
+              expr: |
+                min(up{job="docker-metadata"}) or vector(0)
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 0
+              to: 0
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    params: [1]
+                    type: lt
+                  operator:
+                    type: and
+                  query:
+                    params: [C]
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+        # Longer than api-down's 3m: a couple of missed scrapes while the Docker
+        # daemon is busy with an image build is normal on this host (it also
+        # runs the self-hosted Actions runner), and unlike a real outage there
+        # is nothing to lose by confirming it first.
+        for: 10m
+        noDataState: Alerting
+        execErrState: Alerting
+        labels:
+          severity: critical
+        annotations:
+          summary: 'Prometheus cannot scrape docker-metadata-exporter, so container health alerts are silent'
+          description: 'The API-down and container health alerts depend on this exporter and cannot fire while it is unreachable. Check the docker-metadata-exporter and docker-socket-proxy containers and the Prometheus targets page.'
+
   - orgId: 1
     name: pipeline
     folder: boom

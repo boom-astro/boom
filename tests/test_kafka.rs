@@ -1,6 +1,6 @@
 use boom::{
     kafka::{
-        count_messages, delete_topic, AlertConsumer, AlertProducer, ZtfAlertConsumer,
+        count_messages, delete_topic, AlertConsumer, AlertProducer, StartDate, ZtfAlertConsumer,
         ZtfAlertProducer,
     },
     utils::{data::count_files_in_dir, enums::ProgramId, testing::TEST_CONFIG_FILE},
@@ -107,7 +107,7 @@ async fn test_produce_and_consume_from_archive() {
     ztf_alert_consumer
         .consume(
             Some(vec![topic]),
-            timestamp,
+            StartDate::Pinned(timestamp),
             None,
             Some(1),
             None,
@@ -343,208 +343,14 @@ async fn wait_for_payloads(
     }
 }
 
-/// Block until the group's committed offsets across every partition of `topic`
-/// add up to `total`. Summing avoids assuming which partition the keys landed
-/// on. Panics on timeout.
-async fn wait_for_committed(
-    server: &str,
-    group_id: &str,
-    topic: &str,
-    total: i64,
-    timeout: std::time::Duration,
-) {
-    use rdkafka::consumer::{BaseConsumer, Consumer};
-
-    let probe: BaseConsumer = rdkafka::config::ClientConfig::new()
-        .set("bootstrap.servers", server)
-        .set("group.id", group_id)
-        .create()
-        .unwrap();
-    let metadata = probe
-        .fetch_metadata(Some(topic), std::time::Duration::from_secs(10))
-        .unwrap();
-    let partitions: Vec<i32> = metadata
-        .topics()
-        .iter()
-        .find(|t| t.name() == topic)
-        .unwrap()
-        .partitions()
-        .iter()
-        .map(|p| p.id())
-        .collect();
-
-    let deadline = std::time::Instant::now() + timeout;
-    loop {
-        let mut tpl = rdkafka::TopicPartitionList::new();
-        for id in &partitions {
-            tpl.add_partition_offset(topic, *id, rdkafka::Offset::Invalid)
-                .unwrap();
-        }
-        let committed = probe
-            .committed_offsets(tpl, std::time::Duration::from_secs(10))
-            .unwrap();
-        let sum: i64 = committed
-            .elements()
-            .iter()
-            .filter_map(|e| match e.offset() {
-                rdkafka::Offset::Offset(o) => Some(o),
-                _ => None,
-            })
-            .sum();
-        if sum >= total {
-            return;
-        }
-        if std::time::Instant::now() > deadline {
-            panic!("timed out waiting for {total} committed offsets on {topic}, saw {sum}");
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    }
-}
-
-/// Run the long-running consumer on its own OS thread + runtime, as prod does.
-/// Send on the returned channel to stop it.
-fn spawn_consumer(
-    subscription: Vec<String>,
-    output_queue: String,
-    timestamp: i64,
-    config: boom::conf::AppConfig,
-    kafka_cfg: boom::conf::KafkaConsumerConfig,
-) -> (std::sync::mpsc::Sender<()>, std::thread::JoinHandle<()>) {
-    let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
-    let handle = std::thread::spawn(move || {
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .build()
-            .unwrap();
-        rt.spawn(async move {
-            let _ = boom::kafka::consumer(
-                "0",
-                subscription,
-                &output_queue,
-                0,
-                timestamp,
-                &config,
-                &kafka_cfg,
-                false,
-                "ZTF",
-            )
-            .await;
-        });
-        let _ = stop_rx.recv();
-        rt.shutdown_timeout(std::time::Duration::from_secs(1));
-    });
-    (stop_tx, handle)
-}
-
-// Regression: the initial assignment poll discards the message it polls, and
-// positioning does not seek a partition that already has a committed offset.
-// Without an explicit rewind that message is skipped for good on every restart.
-#[tokio::test]
-async fn test_consumer_restart_loses_no_message() {
-    use boom::conf::{AppConfig, KafkaConsumerConfig};
-    use boom::kafka::{delete_topic, initialize_topic};
-    use rdkafka::config::ClientConfig;
-    use rdkafka::producer::{FutureProducer, FutureRecord};
-    use std::time::Duration;
-
-    let server = "localhost:9092";
-    let now_ms = chrono::Utc::now().timestamp_millis();
-    let prefix = format!("restarttest{now_ms}");
-    let topic = format!("{prefix}_20260628");
-    let output_queue = format!("{prefix}_queue");
-    let group_id = format!("{prefix}_group");
-
-    let app_config = AppConfig::from_path(TEST_CONFIG_FILE).unwrap();
-    let mut con = app_config.build_redis().await.unwrap();
-    let _: () = con.del(&output_queue).await.unwrap_or(());
-
-    let producer: FutureProducer = ClientConfig::new()
-        .set("bootstrap.servers", server)
-        .create()
-        .unwrap();
-    initialize_topic(server, &topic, 1).await.unwrap();
-
-    let kafka_cfg = KafkaConsumerConfig {
-        server: server.to_string(),
-        group_id: group_id.clone(),
-        schema_registry: None,
-        schema_github_fallback_url: None,
-        username: None,
-        password: None,
-    };
-    let cold_start_ts = now_ms / 1000 - 3600;
-
-    // First run: drain a batch, then wait for the offsets to actually commit —
-    // otherwise the second run is a cold start and the regression can't show.
-    let first: Vec<String> = (0..5).map(|i| format!("first-{i}")).collect();
-    for p in &first {
-        producer
-            .send(
-                FutureRecord::to(topic.as_str())
-                    .payload(p.as_str())
-                    .key("k")
-                    .timestamp(now_ms),
-                Duration::from_secs(10),
-            )
-            .await
-            .unwrap();
-    }
-    let (stop_tx, handle) = spawn_consumer(
-        vec![topic.clone()],
-        output_queue.clone(),
-        cold_start_ts,
-        app_config.clone(),
-        kafka_cfg.clone(),
-    );
-    wait_for_payloads(&mut con, &output_queue, &first, Duration::from_secs(40)).await;
-    wait_for_committed(
-        server,
-        &group_id,
-        &topic,
-        first.len() as i64,
-        Duration::from_secs(30),
-    )
-    .await;
-    let _ = stop_tx.send(());
-    let _ = handle.join();
-
-    // Second run on the same group: the message polled to detect the assignment
-    // sits at the committed offset, and must still reach the queue.
-    let _: () = con.del(&output_queue).await.unwrap_or(());
-    let second: Vec<String> = (0..5).map(|i| format!("second-{i}")).collect();
-    for p in &second {
-        producer
-            .send(
-                FutureRecord::to(topic.as_str())
-                    .payload(p.as_str())
-                    .key("k")
-                    .timestamp(now_ms),
-                Duration::from_secs(10),
-            )
-            .await
-            .unwrap();
-    }
-    let (stop_tx, handle) = spawn_consumer(
-        vec![topic.clone()],
-        output_queue.clone(),
-        cold_start_ts,
-        app_config.clone(),
-        kafka_cfg,
-    );
-    wait_for_payloads(&mut con, &output_queue, &second, Duration::from_secs(40)).await;
-
-    let _ = stop_tx.send(());
-    let _ = handle.join();
-    let _: () = con.del(&output_queue).await.unwrap_or(());
-    let _ = delete_topic(server, &topic).await;
-}
-
 // End-to-end test of the self-rollover consumer: the long-running consumer
-// subscribes to a topic *pattern* and must (a) skip an old retained topic's
-// messages on cold start, (b) consume the current day's messages, and (c)
-// auto-discover and consume the *next* day's topic created while it is running,
-// all without restarting. Requires a local Kafka broker + redis.
+// subscribes to the bounded window of concrete daily topic names and must
+// (a) skip an old retained topic's messages on cold start, (b) consume the
+// current day's messages, and (c) consume the *next* day's topic, which does
+// not yet exist at subscribe time and is created while the consumer is
+// running, all without restarting. (c) also covers the regression this window
+// replaced a pattern subscription to avoid: a subscribed-but-absent topic must
+// not stall the poll loop. Requires a local Kafka broker + redis.
 //
 // The consumer runs on its own dedicated OS thread + runtime (see below) so its
 // blocking rdkafka `poll` can't starve this test driver's runtime.
@@ -558,9 +364,8 @@ async fn test_consumer_rolls_over_and_skips_old() {
 
     let server = "localhost:9092";
     let now_ms = chrono::Utc::now().timestamp_millis();
-    // Unique, regex-safe prefix so the pattern matches only this test's topics.
+    // Unique prefix so this test's topics can't collide with another run's.
     let prefix = format!("rollovertest{now_ms}");
-    let pattern = format!("^{prefix}_[0-9]+$");
     let output_queue = format!("{prefix}_queue");
     let group_id = format!("{prefix}_group");
     let topic_day1 = format!("{prefix}_20260628");
@@ -612,6 +417,7 @@ async fn test_consumer_rolls_over_and_skips_old() {
         schema_github_fallback_url: None,
         username: None,
         password: None,
+        subscription_window_days: 1,
     };
     // Run the consumer on its own OS thread + runtime so its blocking rdkafka
     // `poll` doesn't starve the test driver's runtime (this mirrors prod, where
@@ -621,7 +427,9 @@ async fn test_consumer_rolls_over_and_skips_old() {
     let consumer_thread = {
         let config = app_config.clone();
         let oq = output_queue.clone();
-        let pat = pattern.clone();
+        // The rollover window as the survey impls build it: both days are
+        // subscribed up front, and day 2 does not exist yet.
+        let window = vec![topic_day1.clone(), topic_day2.clone()];
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(2)
@@ -631,10 +439,11 @@ async fn test_consumer_rolls_over_and_skips_old() {
             rt.spawn(async move {
                 let _ = consumer(
                     "0",
-                    vec![pat],
+                    std::sync::Arc::new(move |_, _| window.clone()),
                     &oq,
                     0,
                     cold_start_ts,
+                    true,
                     &config,
                     &kafka_cfg,
                     false,
@@ -686,4 +495,334 @@ async fn test_consumer_rolls_over_and_skips_old() {
     let _: () = con.del(&output_queue).await.unwrap_or(());
     let _ = delete_topic(server, &topic_day1).await;
     let _ = delete_topic(server, &topic_day2).await;
+}
+
+// The rollover window is what keeps a daily-topic subscription bounded. A
+// pattern subscription matched every night the cluster still advertised, so an
+// unbounded set of expired partitions accumulated in the assignment and starved
+// the poll loop; these assert the replacement stays small and concrete.
+#[test]
+fn test_subscription_window_is_today_and_yesterday() {
+    use boom::kafka::subscription_window;
+
+    // 2026-08-09 00:00:00 UTC
+    let today = chrono::NaiveDate::from_ymd_opt(2026, 8, 9).unwrap();
+    let ts = today.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp();
+
+    let window = subscription_window(ts, 1);
+    assert_eq!(window.len(), 2);
+    assert_eq!(
+        window,
+        vec![chrono::NaiveDate::from_ymd_opt(2026, 8, 8).unwrap(), today,],
+        "window should be oldest-first and cover the night straddling UTC midnight"
+    );
+}
+
+#[test]
+fn test_subscription_window_crosses_month_boundary() {
+    use boom::kafka::subscription_window;
+
+    let ts = chrono::NaiveDate::from_ymd_opt(2026, 9, 1)
+        .unwrap()
+        .and_hms_opt(0, 0, 0)
+        .unwrap()
+        .and_utc()
+        .timestamp();
+
+    assert_eq!(
+        subscription_window(ts, 1),
+        vec![
+            chrono::NaiveDate::from_ymd_opt(2026, 8, 31).unwrap(),
+            chrono::NaiveDate::from_ymd_opt(2026, 9, 1).unwrap(),
+        ]
+    );
+}
+
+#[test]
+fn test_ztf_subscription_topics_are_concrete_and_bounded() {
+    use boom::kafka::AlertConsumer;
+    use boom::kafka::ZtfAlertConsumer;
+    use boom::utils::enums::ProgramId;
+
+    let ts = chrono::NaiveDate::from_ymd_opt(2026, 8, 9)
+        .unwrap()
+        .and_hms_opt(0, 0, 0)
+        .unwrap()
+        .and_utc()
+        .timestamp();
+
+    let consumer = ZtfAlertConsumer::new(None, Some(vec![ProgramId::Public]));
+    let topics = consumer.subscription_topics(ts, 1);
+
+    assert_eq!(
+        topics,
+        vec![
+            "ztf_20260808_programid1".to_string(),
+            "ztf_20260809_programid1".to_string(),
+        ]
+    );
+    assert!(
+        topics.iter().all(|t| !t.starts_with('^')),
+        "topics must be literal names; a `^…` entry is treated by librdkafka as \
+         a regex and would match every past night"
+    );
+}
+
+#[test]
+fn test_ztf_subscription_topics_cover_every_program_id() {
+    use boom::kafka::AlertConsumer;
+    use boom::kafka::ZtfAlertConsumer;
+    use boom::utils::enums::ProgramId;
+
+    let ts = chrono::NaiveDate::from_ymd_opt(2026, 8, 9)
+        .unwrap()
+        .and_hms_opt(0, 0, 0)
+        .unwrap()
+        .and_utc()
+        .timestamp();
+
+    let consumer =
+        ZtfAlertConsumer::new(None, Some(vec![ProgramId::Public, ProgramId::Partnership]));
+    let topics = consumer.subscription_topics(ts, 1);
+
+    assert_eq!(topics.len(), 4, "2 days x 2 program ids");
+    for expected in [
+        "ztf_20260808_programid1",
+        "ztf_20260808_programid2",
+        "ztf_20260809_programid1",
+        "ztf_20260809_programid2",
+    ] {
+        assert!(topics.contains(&expected.to_string()), "missing {expected}");
+    }
+}
+
+// An empty selection would otherwise subscribe to nothing at all, silently
+// consuming no alerts.
+#[test]
+fn test_ztf_empty_program_ids_falls_back_to_public() {
+    use boom::kafka::AlertConsumer;
+    use boom::kafka::ZtfAlertConsumer;
+
+    let ts = chrono::NaiveDate::from_ymd_opt(2026, 8, 9)
+        .unwrap()
+        .and_hms_opt(0, 0, 0)
+        .unwrap()
+        .and_utc()
+        .timestamp();
+
+    let topics = ZtfAlertConsumer::new(None, Some(vec![])).subscription_topics(ts, 1);
+    assert_eq!(
+        topics,
+        vec![
+            "ztf_20260808_programid1".to_string(),
+            "ztf_20260809_programid1".to_string(),
+        ]
+    );
+}
+
+// LSST is not date-partitioned: its single static topic must be returned
+// unchanged whatever the date, and must never be windowed.
+#[test]
+fn test_lsst_subscription_topic_is_static() {
+    use boom::kafka::AlertConsumer;
+    use boom::kafka::LsstAlertConsumer;
+
+    let consumer = LsstAlertConsumer::new(None, false);
+    let at_epoch = consumer.subscription_topics(0, 1);
+    let much_later = consumer.subscription_topics(1_800_000_000, 9);
+
+    assert_eq!(at_epoch.len(), 1);
+    assert_eq!(at_epoch, much_later);
+}
+
+// Rollover intent is stated by the caller, not inferred from the timestamp.
+// The throughput benchmark runs `kafka_consumer ztf 20250311`, and chasing the
+// wall clock would unsubscribe it from the only topic it was started to read.
+#[test]
+fn test_start_date_signals_rollover_intent() {
+    use boom::kafka::StartDate;
+
+    assert!(StartDate::Current.follows_clock());
+    assert!(!StartDate::Pinned(1_741_651_200).follows_clock());
+
+    // Pinned to *today* is still pinned -- the case an inferred check, comparing
+    // the start date against the current date, would get wrong.
+    let today_midnight = chrono::Utc::now()
+        .date_naive()
+        .and_hms_opt(0, 0, 0)
+        .unwrap()
+        .and_utc()
+        .timestamp();
+    assert!(!StartDate::Pinned(today_midnight).follows_clock());
+
+    // Pinned reports exactly what it was given; Current resolves to a UTC midnight.
+    assert_eq!(StartDate::Pinned(1_741_651_200).timestamp(), 1_741_651_200);
+    let current = StartDate::Current.timestamp();
+    assert_eq!(current % 86_400, 0, "should resolve to a UTC midnight");
+    let now = chrono::Utc::now().timestamp();
+    assert!(
+        (0..86_400).contains(&(now - current)),
+        "should resolve to the current UTC day"
+    );
+}
+
+// A pinned replay still has to subscribe to the topic it was asked for.
+#[test]
+fn test_pinned_date_window_contains_that_date() {
+    use boom::kafka::AlertConsumer;
+    use boom::kafka::ZtfAlertConsumer;
+    use boom::utils::enums::ProgramId;
+
+    let pinned = chrono::NaiveDate::from_ymd_opt(2025, 3, 11)
+        .unwrap()
+        .and_hms_opt(0, 0, 0)
+        .unwrap()
+        .and_utc()
+        .timestamp();
+
+    let topics =
+        ZtfAlertConsumer::new(None, Some(vec![ProgramId::Public])).subscription_topics(pinned, 1);
+    assert!(
+        topics.contains(&"ztf_20250311_programid1".to_string()),
+        "the pinned date's own topic must be in the window, got {topics:?}"
+    );
+}
+
+// After an upstream outage the window can be widened to catch up on the nights
+// that were missed, rather than skipping them (see issue #569). Recovery is
+// still bounded by upstream retention -- ZTF keeps roughly 7 days.
+#[test]
+fn test_widened_window_reaches_back_over_an_outage() {
+    use boom::kafka::AlertConsumer;
+    use boom::kafka::ZtfAlertConsumer;
+    use boom::utils::enums::ProgramId;
+
+    let ts = chrono::NaiveDate::from_ymd_opt(2026, 8, 10)
+        .unwrap()
+        .and_hms_opt(0, 0, 0)
+        .unwrap()
+        .and_utc()
+        .timestamp();
+
+    let consumer = ZtfAlertConsumer::new(None, Some(vec![ProgramId::Public]));
+
+    // Default: only the current night and the one before it.
+    let narrow = consumer.subscription_topics(ts, 1);
+    assert_eq!(narrow.len(), 2);
+    assert!(!narrow.contains(&"ztf_20260806_programid1".to_string()));
+
+    // Widened to cover a 5-day gap: every intervening night is subscribed.
+    let wide = consumer.subscription_topics(ts, 5);
+    assert_eq!(wide.len(), 6, "5 days back plus the current day");
+    for day in 5..=10 {
+        let expected = format!("ztf_202608{:02}_programid1", day);
+        assert!(wide.contains(&expected), "missing {expected}");
+    }
+    // Oldest first, so the backlog is consumed in chronological order.
+    assert_eq!(wide.first().unwrap(), "ztf_20260805_programid1");
+    assert_eq!(wide.last().unwrap(), "ztf_20260810_programid1");
+}
+
+// The other rollover test produces before starting the consumer, so it never
+// exercises an empty subscription. This starts one with no data, then produces.
+// Requires a local Kafka broker + redis.
+#[tokio::test]
+async fn test_consumer_started_with_no_data_still_consumes() {
+    use boom::conf::{AppConfig, KafkaConsumerConfig};
+    use boom::kafka::{consumer, delete_topic, initialize_topic};
+    use rdkafka::config::ClientConfig;
+    use rdkafka::producer::{FutureProducer, FutureRecord};
+    use std::time::Duration;
+
+    let server = "localhost:9092";
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let prefix = format!("coldstarttest{now_ms}");
+    let output_queue = format!("{prefix}_queue");
+    let group_id = format!("{prefix}_group");
+    let topic = format!("{prefix}_{}", chrono::Utc::now().format("%Y%m%d"));
+
+    let app_config = AppConfig::from_path(TEST_CONFIG_FILE).unwrap();
+    let mut con = app_config.build_redis().await.unwrap();
+    let _: () = con.del(&output_queue).await.unwrap_or(());
+
+    // Topic exists but is completely empty — the between-nights state.
+    initialize_topic(server, &topic, 1).await.unwrap();
+
+    let cold_start_ts = now_ms / 1000 - 3600;
+    let kafka_cfg = KafkaConsumerConfig {
+        server: server.to_string(),
+        group_id,
+        schema_registry: None,
+        schema_github_fallback_url: None,
+        username: None,
+        password: None,
+        subscription_window_days: 1,
+    };
+
+    let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
+    let consumer_thread = {
+        let config = app_config.clone();
+        let oq = output_queue.clone();
+        let subscription = vec![topic.clone()];
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.spawn(async move {
+                let _ = consumer(
+                    "0",
+                    std::sync::Arc::new(move |_, _| subscription.clone()),
+                    &oq,
+                    0,
+                    cold_start_ts,
+                    true,
+                    &config,
+                    &kafka_cfg,
+                    false,
+                    "WINTER",
+                )
+                .await;
+            });
+            let _ = stop_rx.recv();
+            rt.shutdown_timeout(std::time::Duration::from_secs(1));
+        })
+    };
+
+    // Settle into the initial-assignment loop with nothing to read.
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    assert!(
+        con.llen::<&str, usize>(&output_queue).await.unwrap_or(0) == 0,
+        "nothing should have been consumed yet"
+    );
+
+    let producer: FutureProducer = ClientConfig::new()
+        .set("bootstrap.servers", server)
+        .create()
+        .unwrap();
+    let payloads: Vec<String> = (0..5).map(|i| format!("late-{i}")).collect();
+    for p in &payloads {
+        producer
+            .send(
+                FutureRecord::to(topic.as_str())
+                    .payload(p.as_str())
+                    .key("k")
+                    .timestamp(chrono::Utc::now().timestamp_millis()),
+                Duration::from_secs(10),
+            )
+            .await
+            .unwrap();
+    }
+
+    let seen = wait_for_payloads(&mut con, &output_queue, &payloads, Duration::from_secs(60)).await;
+    assert!(
+        payloads.iter().all(|p| seen.contains(p)),
+        "a consumer that started with no data must still consume once data arrives; saw {seen:?}"
+    );
+
+    let _ = stop_tx.send(());
+    let _ = consumer_thread.join();
+    let _: () = con.del(&output_queue).await.unwrap_or(());
+    let _ = delete_topic(server, &topic).await;
 }

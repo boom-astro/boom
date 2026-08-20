@@ -75,6 +75,14 @@ cp .env.example .env
 
 **Note:** Do not commit `.env` to Git or use the example values in production.
 
+When `.env.example` gains a variable, an existing `.env` goes stale and the dev
+targets fail during interpolation. `make check-env` lists what is missing, in a
+form you can paste straight into `.env`; the dev targets run it for you before
+starting anything. Note that this includes variables belonging to services the
+dev profile never starts (the ZTF/WINTER consumers, for instance) — Compose
+interpolates every file it loads before it filters by profile, so those values
+have to resolve regardless.
+
 #### Email configuration (for notifications)
 
 In order to send emails to users, e.g.,
@@ -357,23 +365,6 @@ To continue with the previous example, you can run:
 cargo run --release --bin kafka_consumer ztf 20240617 --programids public
 ```
 
-`DATE` defaults to today (at 00:00:00 UTC), and `--date-mode` controls how it is
-interpreted:
-
-- `from` (the default) consumes that date **and every night after it**. The
-  consumer subscribes to a topic pattern, so each new nightly topic is picked up
-  automatically and the process never exits. The date only acts as a starting
-  point for partitions the consumer group has never read: earlier nights are
-  skipped, and partitions with a committed offset resume where they left off.
-- `single` consumes **only** that date's topic(s) and exits once they are
-  drained. Offsets are not committed and a throwaway consumer group is used, so
-  replaying a night is repeatable and leaves the long-running consumers alone.
-
-```bash
-# Re-ingest a single night, then exit:
-cargo run --release --bin kafka_consumer ztf 20240617 --programids public --date-mode single
-```
-
 ### Alert Processing
 
 Now that alerts have been queued for processing, let's start the workers that will process them. Instead of starting each worker manually, we provide the `scheduler` binary. You can run it with:
@@ -430,6 +421,10 @@ The scheduler prints a variety of messages to your terminal, e.g.:
 
 Metrics are collected by Prometheus and visible on a Grafana dashboard.
 See the [observability docs](docs/observability.md) for more information.
+
+Babamul user-facing usage — who calls the API and who consumes the Kafka
+stream — is tracked separately in PostHog and Grafana; see the
+[analytics docs](docs/analytics.md).
 
 ## Stopping BOOM
 

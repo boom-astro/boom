@@ -351,15 +351,83 @@ pub struct ZtfAlertForEnrichment {
     pub survey_matches: Option<ZtfSurveyMatches>,
 }
 
+/// Solar system object association for a single ZTF detection.
+///
+/// ZTF `objectId`s are positional, so a moving object is given a new one on very
+/// nearly every detection (measured over a week of alerts: 1.03 detections per
+/// `objectId`). `designation` is therefore the only stable key across a moving
+/// object's detections — downstream consumers building light curves must group on
+/// it, never on `objectId`. For the same reason the alert's `prv_candidates` and
+/// `fp_hists` describe whatever else has occupied that sky position, not this
+/// object.
+#[derive(
+    Debug, Clone, Default, serde::Deserialize, serde::Serialize, AvroSchema, utoipa::ToSchema,
+)]
+#[serde(default)]
+pub struct ZtfSsoAssociation {
+    /// Whether a known solar system object was identified at this position.
+    ///
+    /// Deliberately not thresholded on separation, unlike the deprecated `rock`
+    /// flag: when the upstream ephemeris degrades, that shows up as a growing
+    /// `separation_arcsec` the consumer can see, rather than silently flipping a
+    /// boolean they cannot.
+    pub is_sso: bool,
+    /// MPC designation of the matched object (ZTF `ssnamenr`), e.g. `"9816"`.
+    pub designation: Option<String>,
+    /// Separation between the detection and the object's predicted position
+    /// (ZTF `ssdistnr`), in arcseconds. Negative upstream sentinels are stored as
+    /// `None`. This is a quality indicator for the upstream ephemeris, and worth
+    /// monitoring in aggregate: a drifting distribution means stale orbits.
+    pub separation_arcsec: Option<f32>,
+    /// Catalogued magnitude predicted for the object (ZTF `ssmagnr`). Compared
+    /// against the measured `magpsf` this gives predicted-minus-measured per
+    /// detection at no extra cost.
+    pub predicted_mag: Option<f32>,
+    /// Who made the association. `"ipac"` for the identification carried in the
+    /// ZTF alert itself; an independent association computed by BOOM would
+    /// identify itself differently here.
+    pub source: Option<String>,
+}
+
+impl ZtfSsoAssociation {
+    /// Build the association from the solar system fields IPAC puts in the ZTF
+    /// alert. Negative values are upstream "no match" sentinels rather than
+    /// measurements, so they are normalised to `None`.
+    pub fn from_ipac(
+        designation: Option<String>,
+        ssdistnr: Option<f32>,
+        ssmagnr: Option<f32>,
+    ) -> Self {
+        let is_sso = designation.is_some();
+        ZtfSsoAssociation {
+            is_sso,
+            source: is_sso.then(|| "ipac".to_string()),
+            designation,
+            separation_arcsec: ssdistnr.filter(|d| *d >= 0.0),
+            predicted_mag: ssmagnr.filter(|m| *m >= 0.0),
+        }
+    }
+}
+
 /// ZTF alert properties computed during enrichment and inserted back into the alert document
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize, AvroSchema, utoipa::ToSchema)]
 pub struct ZtfAlertProperties {
+    /// Deprecated alias for `sso.is_sso`, retained so existing filters keep
+    /// working. Unlike `sso.is_sso` this is thresholded at a hardcoded 12", so it
+    /// silently loses objects as the upstream ephemeris degrades. Prefer
+    /// `sso.is_sso`, optionally with an explicit `sso.separation_arcsec` cut.
     pub rock: bool,
     pub star: bool,
     pub near_brightstar: bool,
     pub stationary: bool,
     pub photstats: PerBandProperties,
     pub multisurvey_photstats: Option<PerBandProperties>,
+    /// `None` on alerts enriched before this field existed — those were never
+    /// evaluated for a solar system association, which is different from having
+    /// been evaluated and found not to be one (`Some` with `is_sso: false`).
+    /// Consumers must not read `None` as "not an asteroid".
+    #[serde(default)]
+    pub sso: Option<ZtfSsoAssociation>,
 }
 
 /// ZTF alert ML classifier scores
@@ -609,6 +677,12 @@ impl ZtfEnrichmentWorker {
         let ssmagnr = candidate.ssmagnr.unwrap_or(f32::INFINITY);
         let is_rock = ssdistnr >= 0.0 && ssdistnr < 12.0 && ssmagnr >= 0.0;
 
+        let sso = ZtfSsoAssociation::from_ipac(
+            candidate.ssnamenr.clone(),
+            candidate.ssdistnr,
+            candidate.ssmagnr,
+        );
+
         let sgscore1 = candidate.sgscore1.unwrap_or(0.0);
         let sgscore2 = candidate.sgscore2.unwrap_or(0.0);
         let sgscore3 = candidate.sgscore3.unwrap_or(0.0);
@@ -709,6 +783,7 @@ impl ZtfEnrichmentWorker {
                 stationary,
                 photstats,
                 multisurvey_photstats: Some(multisurvey_photstats),
+                sso: Some(sso),
             },
             all_bands_properties,
             programid,
@@ -895,5 +970,97 @@ impl ZtfEnrichmentWorker {
         }
 
         Ok(results)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sso_association_populated_when_identified() {
+        let sso = ZtfSsoAssociation::from_ipac(Some("9816".to_string()), Some(1.0), Some(18.1));
+        assert!(sso.is_sso);
+        assert_eq!(sso.designation.as_deref(), Some("9816"));
+        assert_eq!(sso.separation_arcsec, Some(1.0));
+        assert_eq!(sso.predicted_mag, Some(18.1));
+        assert_eq!(sso.source.as_deref(), Some("ipac"));
+    }
+
+    #[test]
+    fn test_sso_association_absent_when_unidentified() {
+        let sso = ZtfSsoAssociation::from_ipac(None, None, None);
+        assert!(!sso.is_sso);
+        assert!(sso.designation.is_none());
+        assert!(sso.separation_arcsec.is_none());
+        assert!(
+            sso.source.is_none(),
+            "source is only set when a match was made"
+        );
+    }
+
+    // Upstream uses negative values (e.g. -999) to mean "no match". Storing those
+    // verbatim would let a consumer read -999 as a very close separation.
+    #[test]
+    fn test_negative_sentinels_are_normalised_to_none() {
+        let sso = ZtfSsoAssociation::from_ipac(None, Some(-999.0), Some(-999.0));
+        assert!(sso.separation_arcsec.is_none());
+        assert!(sso.predicted_mag.is_none());
+    }
+
+    // Alerts enriched before `properties.sso` existed have no such key. Reading one
+    // back must yield `None` rather than failing, or the API 500s on every
+    // pre-existing object.
+    #[test]
+    fn test_properties_without_sso_still_deserialize() {
+        let legacy = serde_json::json!({
+            "rock": false,
+            "star": false,
+            "near_brightstar": false,
+            "stationary": true,
+            "photstats": PerBandProperties::default(),
+            "multisurvey_photstats": null,
+        });
+
+        let props: ZtfAlertProperties =
+            serde_json::from_value(legacy).expect("legacy properties must still deserialize");
+        assert!(
+            props.sso.is_none(),
+            "absent means never evaluated, not evaluated-and-negative"
+        );
+    }
+
+    // A partially-written block should not fail either.
+    #[test]
+    fn test_partial_sso_block_deserializes() {
+        let sso: ZtfSsoAssociation =
+            serde_json::from_value(serde_json::json!({"designation": "9816"}))
+                .expect("partial sso block must deserialize");
+        assert_eq!(sso.designation.as_deref(), Some("9816"));
+        assert!(!sso.is_sso);
+        assert!(sso.separation_arcsec.is_none());
+    }
+
+    // The regression this block exists for. `rock` is thresholded at a hardcoded
+    // 12", so as the upstream ephemeris degrades it silently drops objects: the
+    // fraction of identified asteroids within 12" fell from 98.2% (Apr 2026) to
+    // 82.4% (Aug 2026). `is_sso` must stay true regardless of separation, with the
+    // degradation visible in `separation_arcsec` instead.
+    #[test]
+    fn test_is_sso_is_not_thresholded_on_separation() {
+        let far = ZtfSsoAssociation::from_ipac(Some("407033".to_string()), Some(18.0), Some(21.6));
+        let rock = 18.0f32 >= 0.0 && 18.0f32 < 12.0 && 21.6f32 >= 0.0;
+
+        assert!(!rock, "the deprecated rock flag drops this object");
+        assert!(
+            far.is_sso,
+            "but it is still an identified solar system object"
+        );
+        assert_eq!(far.separation_arcsec, Some(18.0));
+        assert_eq!(
+            far.designation.as_deref(),
+            Some("407033"),
+            "the grouping key survives, which is what downstream light curves need"
+        );
     }
 }

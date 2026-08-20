@@ -386,6 +386,7 @@ pub async fn build_lsst_filter_pipeline(
             "$project": doc! {
                 "objectId": 1,
                 "candidate": 1,
+                "ss_source": 1,
                 "properties": 1,
                 "coordinates": 1,
             }

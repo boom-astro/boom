@@ -207,3 +207,13 @@ flowchart TD
     style Topic13 fill:#5f2d2d,color:#e0e0e0
     style Topic14 fill:#2d3f5f,color:#e0e0e0
 ```
+
+## Usage analytics
+
+Babamul usage is measured server-side only: API requests we already serve, and
+Kafka consumer-group offsets we already hold. The Python package ships no
+analytics SDK and reports nothing from users' machines — it only identifies
+itself with a `User-Agent` naming the package version, Python version and OS.
+
+See [analytics.md](analytics.md) for the events, metrics, and what is
+deliberately not collected.

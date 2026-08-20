@@ -1,7 +1,8 @@
 use boom::{
     conf::load_dotenv,
     kafka::{
-        AlertConsumer, DecamAlertConsumer, LsstAlertConsumer, WinterAlertConsumer, ZtfAlertConsumer,
+        AlertConsumer, DecamAlertConsumer, LsstAlertConsumer, StartDate, WinterAlertConsumer,
+        ZtfAlertConsumer,
     },
     utils::{
         enums::{ProgramId, Survey},
@@ -21,17 +22,6 @@ use opentelemetry_sdk::trace::SdkTracerProvider;
 use tracing::{error, info};
 use uuid::Uuid;
 
-#[derive(clap::ValueEnum, Clone, Copy, Debug, Default, PartialEq)]
-enum DateMode {
-    /// Consume `date` and every night after it, rolling over to each new
-    /// topic as it appears, and never exit
-    #[default]
-    From,
-    /// Consume only the topic(s) for `date`, then exit. Offsets are not
-    /// committed, so a night can be replayed as often as needed
-    Single,
-}
-
 #[derive(Parser)]
 struct Cli {
     /// Survey to consume alerts from
@@ -42,11 +32,6 @@ struct Cli {
     /// [default: today's date at 00:00:00 UTC]
     #[arg(value_parser = parse_date)]
     date: Option<NaiveDateTime>, // Easier to deal with the default value after clap
-
-    /// Whether `date` is a starting point ("from", the default) or the only
-    /// date to consume ("single")
-    #[arg(long, value_enum, default_value_t = DateMode::From)]
-    date_mode: DateMode,
 
     /// ID(s) of the program(s) to consume the alerts (ZTF-only). Defaults to "public" program if not specified (e.g. --programids public,partnership,caltech).
     #[arg(long, value_enum, value_delimiter = ',', default_value = "public")]
@@ -98,32 +83,32 @@ fn parse_date(s: &str) -> Result<NaiveDateTime, String> {
     Ok(date.and_hms_opt(0, 0, 0).unwrap())
 }
 
-// No `#[instrument]`: one span for the process lifetime would grow until Tempo
-// rejects the trace. The survey is already in the `service.name` attribute.
+// `run` deliberately is NOT `#[instrument]`'d. It runs for the entire lifetime
+// of the consumer; wrapping it in a single span would make every per-batch /
+// per-alert child span a descendant of the same root span, producing a single
+// trace that grows unboundedly until Tempo rejects it. The survey is already
+// captured in the OTel `service.name` resource attribute, so it doesn't need
+// to be a span field here.
 async fn run(
     args: Cli,
     meter_provider: Option<SdkMeterProvider>,
     tracer_provider: Option<SdkTracerProvider>,
 ) {
-    let date = args.date.unwrap_or_else(|| {
-        let today = chrono::Utc::now().naive_utc().date();
-        today.and_hms_opt(0, 0, 0).unwrap()
-    });
-    let timestamp = date.and_utc().timestamp();
-
-    // `single` reuses the one-shot drain path, ungated on the environment since
-    // it commits nothing.
-    let exit_on_eof = match args.date_mode {
-        DateMode::Single => true,
-        DateMode::From => args.deployment_env == "dev" && args.exit_on_eof,
+    // An explicit date pins the run to that day (replay/backfill); without one
+    // the consumer tracks the current day and rolls over nightly.
+    let start = match args.date {
+        Some(date) => StartDate::Pinned(date.and_utc().timestamp()),
+        None => StartDate::Current,
     };
-    info!(
-        "Consuming {} alerts from {} ({:?} mode)",
-        args.survey,
-        date.format("%Y-%m-%d"),
-        args.date_mode
-    );
 
+    let exit_on_eof = if args.deployment_env == "dev" {
+        args.exit_on_eof
+    } else {
+        false
+    };
+
+    // If topic override is provided, use it. Otherwise, the consumer
+    // will determine the topic based on the survey, program ID, and date.
     let topics = args.topics_override;
 
     match args.survey {
@@ -135,7 +120,7 @@ async fn run(
             match consumer
                 .consume(
                     topics,
-                    timestamp,
+                    start,
                     None,
                     Some(args.processes),
                     Some(args.max_in_queue),
@@ -156,7 +141,7 @@ async fn run(
             match consumer
                 .consume(
                     topics,
-                    timestamp,
+                    start,
                     None,
                     Some(args.processes),
                     Some(args.max_in_queue),
@@ -177,7 +162,7 @@ async fn run(
             match consumer
                 .consume(
                     topics,
-                    timestamp,
+                    start,
                     None,
                     Some(args.processes),
                     Some(args.max_in_queue),
@@ -198,7 +183,7 @@ async fn run(
             match consumer
                 .consume(
                     topics,
-                    timestamp,
+                    start,
                     None,
                     Some(args.processes),
                     Some(args.max_in_queue),
@@ -227,12 +212,14 @@ async fn run(
 
 #[tokio::main]
 async fn main() {
+    // Load environment variables from .env file before anything else
     load_dotenv();
 
     let args = Cli::parse();
 
     let instance_id = args.instance_id.unwrap_or_else(Uuid::new_v4);
-    // Matches the Compose service name so Grafana can correlate on one label.
+    // Match the Compose service name (consumer-ztf, consumer-lsst, ...) so
+    // Grafana can correlate traces, logs, and metrics on a single label.
     let service_name = format!("consumer-{}", args.survey.to_string().to_lowercase());
     let tracer_provider = init_tracing(
         service_name.clone(),
