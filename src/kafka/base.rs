@@ -3,7 +3,7 @@ use crate::{
     utils::{
         data::count_files_in_dir,
         o11y::{
-            logging::{as_error, log_error},
+            logging::{as_error, log_error, WARN},
             metrics::CONSUMER_METER,
         },
     },
@@ -708,6 +708,22 @@ fn reposition_new_partitions(
     Ok(())
 }
 
+// A rebalance landing mid-pass must not take the consumer down; the caller
+// retries on its next pass. Reports whether the pass went through.
+fn position_or_warn(
+    consumer: &BaseConsumer,
+    timestamp_ms: i64,
+    positioned: &mut std::collections::HashSet<(String, i32)>,
+) -> bool {
+    match reposition_new_partitions(consumer, timestamp_ms, positioned) {
+        Ok(()) => true,
+        Err(error) => {
+            log_error!(WARN, error, "failed to position partitions, will retry");
+            false
+        }
+    }
+}
+
 /// Where a consumer starts reading, and whether it advances with the clock.
 ///
 /// The caller states which it wants rather than having it inferred from the
@@ -951,7 +967,7 @@ pub async fn consumer(
                 &mut subscribed_date,
                 &mut position_timestamp,
             );
-            reposition_new_partitions(&consumer, position_timestamp * 1000, &mut positioned)?;
+            position_or_warn(&consumer, position_timestamp * 1000, &mut positioned);
         }
         if !exit_on_eof && last_waiting_log.elapsed() >= WAITING_LOG_INTERVAL {
             last_waiting_log = std::time::Instant::now();
@@ -966,15 +982,10 @@ pub async fn consumer(
                 if exit_on_eof {
                     // One-shot drain: (re)read from the requested timestamp.
                     seek_to_timestamp(&consumer, timestamp * 1000)?;
-                } else {
-                    // Resume committed partitions; skip old / start today otherwise.
-                    // position_timestamp, not timestamp: a rollover may have
-                    // advanced it while this loop waited for a first message.
-                    reposition_new_partitions(
-                        &consumer,
-                        position_timestamp * 1000,
-                        &mut positioned,
-                    )?;
+                } else if !position_or_warn(&consumer, position_timestamp * 1000, &mut positioned) {
+                    // Consuming unpositioned would replay an old night from
+                    // `earliest`; poll again and retry.
+                    continue;
                 }
                 break;
             }
@@ -1087,7 +1098,7 @@ pub async fn consumer(
                 &mut subscribed_date,
                 &mut position_timestamp,
             );
-            reposition_new_partitions(&consumer, position_timestamp * 1000, &mut positioned)?;
+            position_or_warn(&consumer, position_timestamp * 1000, &mut positioned);
         }
         if max_in_queue > 0 && total % 1000 == 0 {
             // Pause rather than sleep: a consumer that stops polling for
@@ -1195,7 +1206,7 @@ pub async fn consumer(
                     break;
                 }
                 // Idle: catch a topic that has just rolled over.
-                reposition_new_partitions(&consumer, position_timestamp * 1000, &mut positioned)?;
+                position_or_warn(&consumer, position_timestamp * 1000, &mut positioned);
             }
         }
     }
