@@ -130,7 +130,9 @@ services:
     networks:
       - boom
     # have it sleep 5 seconds to allow kafka to finish producing
-    command: ["/bin/sh", "-c", "sleep 5 && /app/kafka_consumer ztf 20250311 --programids public"]
+    # --date-mode pinned: the benchmark replays one archived night, so the
+    # consumer must stay on it instead of catching up to today.
+    command: ["/bin/sh", "-c", "sleep 5 && /app/kafka_consumer ztf 20250311 --programids public --date-mode pinned"]
     environment:
       RUST_LOG: error,boom=debug
       # No OTel collector runs in the throughput compose. Skipping SDK init

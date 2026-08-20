@@ -359,10 +359,29 @@ cargo run --release --bin kafka_consumer <SURVEY> [DATE] --programids [PROGRAMID
 
 This will start a `Kafka` consumer, which will read the alerts from a given `Kafka` topic and transfer them to `Redis`/`Valkey` in-memory queue that the processing pipeline will read from.
 
+`DATE` defaults to today (at 00:00:00 UTC), and `--date-mode` controls how it is
+interpreted:
+
+- `from` (the default) starts at that date and keeps going: every night since is
+  subscribed at once, each new nightly topic is picked up as it appears, and the
+  process never exits. Partitions the consumer group has already read resume
+  where they left off.
+  A date more than 30 nights back is refused: that is past what any survey
+  retains, so the extra topics no longer exist.
+- `pinned` stays on that date's topic(s), without rolling onto new nights, and
+  keeps running once they are drained.
+- `single` consumes **only** that date's topic(s) and exits once they are
+  drained. Offsets are not committed and a throwaway consumer group is used, so
+  replaying a night is repeatable and leaves the long-running consumers alone.
+
 To continue with the previous example, you can run:
 
 ```bash
+# Consume that night and every night after it:
 cargo run --release --bin kafka_consumer ztf 20240617 --programids public
+
+# Re-ingest that single night, then exit:
+cargo run --release --bin kafka_consumer ztf 20240617 --programids public --date-mode single
 ```
 
 ### Alert Processing
