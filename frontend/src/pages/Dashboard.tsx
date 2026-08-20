@@ -1,13 +1,13 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { Bar, BarChart, CartesianGrid, ReferenceArea, XAxis, YAxis } from "recharts";
+import { Line, LineChart, Bar, BarChart, CartesianGrid, ReferenceArea, XAxis, YAxis } from "recharts";
 import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from "@/components/ui/chart";
 import { Toggle } from "@/components/ui/toggle";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 import { IconZoomReset } from "@tabler/icons-react";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import api, { CollectionEntry, fetchTopics, NightlyStat, type TopicInfo } from "@/lib/api";
+import api, { CollectionEntry, fetchTopics, fetchRealtimeAlerts, NightlyStat, type TopicInfo, type RealtimeAlertMetrics } from "@/lib/api";
 import { SURVEYS, type Survey } from "@/lib/utils";
 import { Switch } from "@/components/ui/switch.tsx";
 import { Label } from "@/components/ui/label.tsx";
@@ -56,6 +56,11 @@ export default function Dashboard() {
   const [topicsLoading, setTopicsLoading] = useState(true);
   const [topicsError, setTopicsError] = useState<string | null>(null);
 
+  // Realtime alerts state
+  const [realtimeAlerts, setRealtimeAlerts] = useState<RealtimeAlertMetrics[]>([]);
+  const [rtaLoading, setRtaLoading] = useState(true);
+  const [rtaError, setRtaError] = useState<string | null>(null);
+
   // Zoom: drag-select on chart to zoom, double-click to reset
   const [zoomLeft, setZoomLeft] = useState<string | null>(null);
   const [zoomRight, setZoomRight] = useState<string | null>(null);
@@ -95,6 +100,45 @@ export default function Dashboard() {
       .catch((e) => setTopicsError(e instanceof Error ? e.message : "Failed to fetch topics"))
       .finally(() => setTopicsLoading(false));
   }, []);
+
+  useEffect(() => {
+    fetchRealtimeAlerts()
+      .then(setRealtimeAlerts)
+      .catch((e) => setRtaError(e instanceof Error ? e.message : "Failed to fetch realtime alerts"))
+      .finally(() => setRtaLoading(false));
+  }, []);
+
+  // gathering realtime data
+  const realtimeChartData = useMemo(() => {
+    const grouped = new Map<
+      number,
+      {
+        time: string;
+        ztf?: number;
+        lsst?: number;
+      }
+    >();
+
+    realtimeAlerts.forEach((row: RealtimeAlertMetrics) => {
+      if (!grouped.has(row.gathered_at)) {
+        grouped.set(row.gathered_at, {
+          time: new Date(
+            row.gathered_at * 1000
+          ).toLocaleTimeString(),
+        });
+      }
+
+      const point = grouped.get(row.gathered_at)!;
+
+      point[row.survey.toLowerCase() as "ztf" | "lsst"] = 
+        row.n_alerts;
+    });
+    
+    return Array.from(grouped.entries())
+      .sort(([a], [b]) => a - b)
+      .map(([, value]) => value);
+  }, [realtimeAlerts]);
+    
 
   const visibleData = useMemo(() => {
     if (surveys.has("ztf") && surveys.has("lsst")) return statsData;
@@ -173,7 +217,7 @@ export default function Dashboard() {
     if (!m) return { survey: "", type: name };
     return { survey: m[1], type: ALERT_TYPE_LABELS[m[2]] ?? m[2] };
   }
-
+  
   return (
     <div className="px-4 lg:px-6 space-y-4">
       <div className="flex items-center justify-between">
@@ -338,6 +382,48 @@ export default function Dashboard() {
         </CardContent>
       </Card>
 
+      <Card>
+        <CardHeader>
+          <CardTitle>Real-Time Alerts for {todayUTC}</CardTitle>
+        </CardHeader>
+      
+        <CardContent>
+          {rtaError && <p className="text-sm text-destructive mb-4">{rtaError}</p>}
+          {!rtaLoading ? (
+            realtimeChartData.length > 0 ? (
+              <ChartContainer config={{}}>
+                <LineChart data={realtimeChartData}>
+                  <CartesianGrid strokeDasharray="3 3" />
+
+                  <XAxis dataKey="time" />
+                  <YAxis />
+
+                  <ChartTooltip />
+
+                  <Line
+                    type="monotone"
+                    dataKey="ztf"
+                    name="ZTF"
+                  />
+
+                  <Line 
+                    type="monotone"
+                    dataKey="lsst"
+                    name="LSST"
+                  />
+                </LineChart>
+              </ChartContainer>
+            ) : (
+              <div className="h-40 w-full flex items-center justify-center text-muted-foreground">
+                No realtime alert data available
+              </div>
+            )
+          ) : (
+            <div className="h-40 w-full shimmer" />
+          )}
+        </CardContent>
+      </Card>
+      
       <Card>
         <CardHeader>
           <CardTitle>Alert Counts by Kafka Topic</CardTitle>
