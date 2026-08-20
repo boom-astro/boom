@@ -824,7 +824,13 @@ pub async fn consumer(
     survey: &'static str,
 ) -> Result<(), ConsumerError> {
     let server = survey_consumer_config.server.clone();
-    let group_id = survey_consumer_config.group_id.clone();
+    // Throwaway group so a one-shot replay never rebalances the long-running
+    // consumers; the timestamp suffix keeps one run's threads together.
+    let group_id = if exit_on_eof {
+        format!("{}-oneshot-{}", survey_consumer_config.group_id, timestamp)
+    } else {
+        survey_consumer_config.group_id.clone()
+    };
     let username = survey_consumer_config.username.clone();
     let password = survey_consumer_config.password.clone();
 
