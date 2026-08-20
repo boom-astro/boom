@@ -356,6 +356,8 @@ export type NightlyStat = {
   lsst?: number;
 };
 
+
+// CURRENT FUNCTION FOR GATHERING AGGREGATE STATISTICS
 export async function fetchStats(startDate: string, endDate: string, survey?: string): Promise<NightlyStat[]> {
   const params = new URLSearchParams({ start_date: startDate, end_date: endDate });
   if (survey) params.set("survey", survey);
@@ -368,12 +370,19 @@ export async function fetchStats(startDate: string, endDate: string, survey?: st
   const body = await parseResponseJson(res).catch(() => ({ data: [] }));
   const result = unwrapData<unknown>(body, []);
   return Array.isArray(result) ? (result as NightlyStat[]) : [];
-}
+};
 
 export type TopicInfo = {
   name: string;
   n_alerts: number;
   retention_days: number;
+};
+
+// KEEPS TRACK OF SURVEY + NUM OF ALERTS WITH TIMESTAMP WHEN GATHERED
+export type RealtimeAlertMetrics = {
+  survey: string;
+  n_alerts: number;
+  gathered_at: number; // unix timestamp in seconds
 };
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -400,6 +409,21 @@ export async function fetchTopics(): Promise<TopicInfo[]> {
   const body = await parseResponseJson(res).catch(() => ({ data: [] }));
   const result = unwrapData<unknown>(body, []);
   return Array.isArray(result) ? (result as TopicInfo[]) : [];
+}
+
+// Fetch realtime alert metrics from the backend stats/kafka handler.
+// The backend queries OTel metrics and returns them as JSON with gathered timestamp.
+// See: api/babamul/stats/realtime.rs
+export async function fetchRealtimeAlerts(): Promise<RealtimeAlertMetrics[]> {
+  const url = `${API_BASE}/stats/realtime`;
+  const res = await fetch(url);
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`Fetch realtime alerts failed: ${res.status} ${txt}`);
+  }
+  const body = await parseResponseJson(res).catch(() => ({ data: [] }));
+  const result = unwrapData<unknown>(body, []);
+  return Array.isArray(result) ? (result as RealtimeAlertMetrics[]) : [];
 }
 
 export type CollectionEntry = {
@@ -485,4 +509,5 @@ export default {
   fetchObjCutouts,
   fetchStats,
   fetchCollectionStats,
+  fetchRealtimeAlerts
 };
