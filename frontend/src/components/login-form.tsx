@@ -15,6 +15,7 @@ import {
 } from "@/components/ui/field"
 import { Link } from 'react-router-dom'
 import { Input } from "@/components/ui/input"
+import { OAuthButtons } from "@/components/oauth-buttons"
 
 // Release mode flag - set VITE_PRERELEASE_MODE=true at build time to restrict signup
 const PRERELEASE_MODE = import.meta.env.VITE_PRERELEASE_MODE === 'true';
@@ -77,6 +78,7 @@ export function LoginForm({
               </Field>
               <Field>
                 <Button type="submit" disabled={!!loading}>{loading ? 'Signing in…' : 'Login'}</Button>
+                <OAuthButtons action="Continue" />
                 {!PRERELEASE_MODE ? (
                   <FieldDescription className="text-center">
                     Don&apos;t have an account? <Link to="/signup" className="underline">Sign up</Link>

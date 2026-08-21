@@ -143,6 +143,19 @@ pub async fn build_db_api(conf: &AppConfig) -> Result<mongodb::Database, BoomCon
             .await
             .expect("failed to create email index on babamul_users collection");
 
+        // Social sign-in resolves an account by the provider's stable user id
+        // on every login; without this that lookup scans the collection.
+        // Deliberately not unique: `identities` is empty for password-only
+        // accounts, and a unique multikey index would collide across all of
+        // them.
+        let identity_index = mongodb::IndexModel::builder()
+            .keys(doc! { "identities.provider": 1, "identities.subject": 1 })
+            .build();
+        let _ = babamul_users_collection
+            .create_index(identity_index)
+            .await
+            .expect("failed to create identities index on babamul_users collection");
+
         // Index on tokens.token_hash for efficient lookup
         let token_hash_index = mongodb::IndexModel::builder()
             .keys(doc! { "tokens.token_hash": 1})
