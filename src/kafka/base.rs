@@ -160,6 +160,18 @@ pub async fn delete_topic(bootstrap_servers: &str, topic_name: &str) -> Result<(
 
     let opts = AdminOptions::new().operation_timeout(Some(KAFKA_TIMEOUT_SECS));
     admin_client.delete_topics(&[topic_name], &opts).await?;
+
+    // Poll until the deletion has propagated to broker metadata so callers
+    // that immediately call count_messages() don't see the old topic.
+    let consumer: BaseConsumer = ClientConfig::new()
+        .set("bootstrap.servers", bootstrap_servers)
+        .create()?;
+    for attempt in 0..20u64 {
+        if get_partition_ids(&consumer, topic_name)?.is_none() {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250 * (attempt + 1))).await;
+    }
     Ok(())
 }
 
@@ -171,36 +183,80 @@ pub fn count_messages(
     let consumer: BaseConsumer = ClientConfig::new()
         .set("bootstrap.servers", bootstrap_servers)
         .create()?;
-    match get_partition_ids(&consumer, topic_name) {
-        Ok(Some(partition_ids)) => {
-            debug!(?topic_name, "topic found");
-            let total_messages =
-                partition_ids
-                    .iter()
-                    .try_fold(0u32, |total_messages, &partition_id| {
-                        consumer
-                            .fetch_watermarks(topic_name, partition_id, KAFKA_TIMEOUT_SECS)
-                            .map(|(low, high)| {
-                                let count = high - low;
-                                debug!(
-                                    ?topic_name,
-                                    ?partition_id,
-                                    ?low,
-                                    ?high,
-                                    ?count,
-                                    "watermarks"
-                                );
-                                total_messages + count as u32
-                            })
-                    })?;
-            debug!(?topic_name, ?total_messages);
+
+    // Retry on NotLeaderForPartition: leader election may not be complete
+    // immediately after topic creation or recreation.
+    const MAX_RETRIES: usize = 5;
+    for attempt in 0..=MAX_RETRIES {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(500 * attempt as u64));
+        }
+        match get_partition_ids(&consumer, topic_name) {
+            Ok(Some(partition_ids)) => {
+                debug!(?topic_name, "topic found");
+                let result =
+                    partition_ids
+                        .iter()
+                        .try_fold(0u32, |total_messages, &partition_id| {
+                            consumer
+                                .fetch_watermarks(topic_name, partition_id, KAFKA_TIMEOUT_SECS)
+                                .map(|(low, high)| {
+                                    let count = high - low;
+                                    debug!(
+                                        ?topic_name,
+                                        ?partition_id,
+                                        ?low,
+                                        ?high,
+                                        ?count,
+                                        "watermarks"
+                                    );
+                                    total_messages + count as u32
+                                })
+                        });
+                match result {
+                    Ok(total_messages) => {
+                        debug!(?topic_name, ?total_messages);
+                        return Ok(Some(total_messages));
+                    }
+                    Err(KafkaError::MetadataFetch(
+                        rdkafka::error::RDKafkaErrorCode::NotLeaderForPartition,
+                    )) if attempt < MAX_RETRIES => {
+                        warn!(
+                            ?topic_name,
+                            attempt, "NotLeaderForPartition in fetch_watermarks, retrying"
+                        );
+                        continue;
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+            Ok(None) => {
+                debug!(?topic_name, "topic not found");
+                return Ok(None);
+            }
+            Err(KafkaError::MetadataFetch(
+                rdkafka::error::RDKafkaErrorCode::NotLeaderForPartition,
+            )) if attempt < MAX_RETRIES => {
+                warn!(
+                    ?topic_name,
+                    attempt, "NotLeaderForPartition in get_partition_ids, retrying"
+                );
+                continue;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    // Exhausted retries — surface the last error by retrying one final time without catching it.
+    match get_partition_ids(&consumer, topic_name)? {
+        Some(partition_ids) => {
+            let total_messages = partition_ids.iter().try_fold(0u32, |acc, &pid| {
+                consumer
+                    .fetch_watermarks(topic_name, pid, KAFKA_TIMEOUT_SECS)
+                    .map(|(low, high)| acc + (high - low) as u32)
+            })?;
             Ok(Some(total_messages))
         }
-        Ok(None) => {
-            debug!(?topic_name, "topic not found");
-            Ok(None)
-        }
-        Err(e) => Err(e),
+        None => Ok(None),
     }
 }
 
