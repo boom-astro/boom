@@ -4,6 +4,9 @@ babamul:
   oauth:
     redirect_base_url: https://babamul.caltech.edu/api
 
+gpu:
+  enabled: true
+
 kafka:
   consumer:
     lsst:
