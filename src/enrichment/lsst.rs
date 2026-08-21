@@ -221,8 +221,14 @@ pub struct LsstSsoAssociation {
     /// proportion to how fast the object moves.
     pub sky_motion: Option<f32>,
     /// Sun-object-observer angle (`ssSource.phaseAngle`), which sets how much of the
-    /// brightness is geometry rather than activity.
+    /// brightness is geometry rather than activity. Degrees.
     pub phase_angle: Option<f32>,
+    /// Sun-to-object distance (`ssSource.helioRange`), au.
+    pub helio_dist: Option<f32>,
+    /// Observer-to-object distance (`ssSource.topoRange`), au. With `helio_dist`
+    /// and `phase_angle` this is the geometry needed to reduce an apparent
+    /// magnitude to an absolute one.
+    pub topo_dist: Option<f32>,
     /// Who made the association.
     pub source: Option<String>,
 }
@@ -243,6 +249,8 @@ impl LsstSsoAssociation {
             predicted_mag: ss_source.and_then(|s| s.eph_vmag),
             sky_motion: ss_source.and_then(|s| s.eph_rate),
             phase_angle: ss_source.and_then(|s| s.phase_angle),
+            helio_dist: ss_source.and_then(|s| s.helio_range),
+            topo_dist: ss_source.and_then(|s| s.topo_range),
             source: Some("rubin".to_string()),
         }
     }
@@ -568,6 +576,8 @@ mod sso_tests {
         ss.eph_offset = Some(0.3);
         ss.eph_rate = Some(42.0);
         ss.phase_angle = Some(12.5);
+        ss.helio_range = Some(3.0114);
+        ss.topo_range = Some(2.2049);
 
         let sso = LsstSsoAssociation::from_rubin(Some("123"), Some(&ss));
         assert!(sso.is_sso);
@@ -576,6 +586,8 @@ mod sso_tests {
         assert_eq!(sso.separation_arcsec, Some(0.3));
         assert_eq!(sso.sky_motion, Some(42.0));
         assert_eq!(sso.phase_angle, Some(12.5));
+        assert_eq!(sso.helio_dist, Some(3.0114));
+        assert_eq!(sso.topo_dist, Some(2.2049));
         assert_eq!(sso.source.as_deref(), Some("rubin"));
     }
 
