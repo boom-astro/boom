@@ -158,8 +158,18 @@ impl ActivityMetrics {
         Self::from_excess(aperture_excess)
     }
 
+    /// Single point where the value is admitted, so the finiteness check cannot
+    /// be forgotten by a future constructor.
+    ///
+    /// Guarding the inputs is not sufficient on the flux path: a ratio of two
+    /// perfectly finite fluxes overflows f32 once they differ by more than ~1e38,
+    /// which difference imaging reaches with a near-zero PSF flux. A non-finite
+    /// value stored here would serialize as a BSON double the filters then
+    /// compare against, so it is dropped rather than passed on.
     fn from_excess(aperture_excess: Option<f32>) -> Self {
-        ActivityMetrics { aperture_excess }
+        ActivityMetrics {
+            aperture_excess: aperture_excess.filter(|e| e.is_finite()),
+        }
     }
 }
 
@@ -1066,6 +1076,37 @@ mod activity_tests {
         ] {
             let a = ActivityMetrics::from_fluxes(psf, ap);
             assert!(a.aperture_excess.is_none());
+        }
+    }
+
+    // Both fluxes can be finite and positive and still produce a non-finite
+    // ratio, so the inputs alone are not enough to guard on.
+    #[test]
+    fn test_finite_fluxes_with_an_overflowing_ratio_yield_no_measurement() {
+        let a = ActivityMetrics::from_fluxes(Some(f32::MIN_POSITIVE), Some(f32::MAX));
+        assert!(a.aperture_excess.is_none(), "got {:?}", a.aperture_excess);
+    }
+
+    #[test]
+    fn test_non_finite_inputs_yield_no_measurement() {
+        for (psf, ap) in [
+            (Some(f32::INFINITY), Some(10.0)),
+            (Some(10.0), Some(f32::INFINITY)),
+            (Some(f32::INFINITY), Some(f32::INFINITY)),
+            (Some(f32::NAN), Some(10.0)),
+        ] {
+            assert!(
+                ActivityMetrics::from_fluxes(psf, ap)
+                    .aperture_excess
+                    .is_none(),
+                "from_fluxes({psf:?}, {ap:?})"
+            );
+            assert!(
+                ActivityMetrics::from_magnitudes(psf, ap)
+                    .aperture_excess
+                    .is_none(),
+                "from_magnitudes({psf:?}, {ap:?})"
+            );
         }
     }
 
