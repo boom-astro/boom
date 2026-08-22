@@ -367,8 +367,6 @@ starts on today's topic(s):
   subscribed at once, each new nightly topic is picked up as it appears, and the
   process never exits. Partitions the consumer group has already read resume
   where they left off.
-  A date more than 30 nights back is refused: that is past what any survey
-  retains, so the extra topics no longer exist.
 - `--on DATE` replays that date's topic(s) alone, never rolling onto new nights.
   It runs in its own consumer group (the configured one suffixed with the date)
   and commits no offsets, so it leaves the long-running consumers alone and the

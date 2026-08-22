@@ -726,14 +726,6 @@ impl StartDate {
         matches!(self, StartDate::Current | StartDate::From(_))
     }
 
-    /// Nights of history this start reaches back over, one topic each.
-    pub fn catch_up_days(self) -> u64 {
-        match self {
-            StartDate::From(timestamp) => days_between(timestamp, current_day_midnight()),
-            _ => 0,
-        }
-    }
-
     /// Resolve into the instants the poll loop runs on, widening the survey's
     /// configured window if `From` reaches further back than it.
     pub fn plan(self, configured_window_days: u64) -> StartPlan {
@@ -779,10 +771,6 @@ pub struct StartPlan {
     /// Own consumer group, no commits, that night's topics alone, no rollover.
     pub replay: bool,
 }
-
-/// Beyond this, a catch-up is asking for more nights than any survey retains,
-/// and every extra one is a topic that no longer exists.
-pub const MAX_CATCH_UP_DAYS: u64 = 30;
 
 fn current_day_midnight() -> i64 {
     let now = chrono::Utc::now();
@@ -971,7 +959,8 @@ pub async fn consumer(
         .create()
         .inspect_err(as_error!("failed to create consumer"))?;
 
-    // Subscribe to topic(s)/pattern(s) - broker handles partition assignment.
+    // Subscribe to topic(s)/pattern(s), broker handles partition assignment.
+    info!("Consumer {} subscribing to {} topic(s)", id, topics.len());
     let topic_refs: Vec<&str> = topics.iter().map(|s| s.as_str()).collect();
     consumer
         .subscribe(&topic_refs)

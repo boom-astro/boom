@@ -701,31 +701,6 @@ fn test_from_date_catches_up_every_night_since() {
     assert!(topics.contains(&format!("ztf_{}_programid1", today.format("%Y%m%d"))));
 }
 
-// Catching up is bounded: a date further back than any survey retains would
-// subscribe to hundreds of topics that no longer exist, each of which fails
-// every poll.
-#[test]
-fn test_catch_up_is_bounded_and_only_applies_to_from() {
-    use boom::kafka::{StartDate, MAX_CATCH_UP_DAYS};
-
-    let old = chrono::Utc::now()
-        .date_naive()
-        .checked_sub_days(chrono::Days::new(MAX_CATCH_UP_DAYS + 500))
-        .unwrap()
-        .and_hms_opt(0, 0, 0)
-        .unwrap()
-        .and_utc()
-        .timestamp();
-
-    assert!(StartDate::From(old).catch_up_days() > MAX_CATCH_UP_DAYS);
-    assert_eq!(
-        StartDate::Pinned(old).catch_up_days(),
-        0,
-        "a pinned replay reaches back over nothing"
-    );
-    assert_eq!(StartDate::Current.catch_up_days(), 0);
-}
-
 // The other two modes read from the instant they subscribe to, over the window
 // the survey is configured with.
 #[test]

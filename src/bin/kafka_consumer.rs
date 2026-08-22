@@ -2,7 +2,7 @@ use boom::{
     conf::load_dotenv,
     kafka::{
         AlertConsumer, DecamAlertConsumer, LsstAlertConsumer, StartDate, WinterAlertConsumer,
-        ZtfAlertConsumer, MAX_CATCH_UP_DAYS,
+        ZtfAlertConsumer,
     },
     utils::{
         enums::{ProgramId, Survey},
@@ -89,12 +89,42 @@ fn parse_date(s: &str) -> Result<NaiveDateTime, String> {
     Ok(date.and_hms_opt(0, 0, 0).unwrap())
 }
 
-// `run` deliberately is NOT `#[instrument]`'d. It runs for the entire lifetime
-// of the consumer; wrapping it in a single span would make every per-batch /
-// per-alert child span a descendant of the same root span, producing a single
-// trace that grows unboundedly until Tempo rejects it. The survey is already
-// captured in the OTel `service.name` resource attribute, so it doesn't need
-// to be a span field here.
+async fn consume_with<C: AlertConsumer>(
+    consumer: C,
+    args: &Cli,
+    start: StartDate,
+    date_label: &str,
+) {
+    info!(
+        "Consuming {} alerts (date {}, replay: {}, exit on EOF: {})",
+        args.survey,
+        date_label,
+        args.on.is_some(),
+        args.exit_on_eof
+    );
+
+    if args.clear {
+        let _ = consumer.clear_output_queue(&args.config).await;
+    }
+    match consumer
+        .consume(
+            args.topics_override.clone(),
+            start,
+            None,
+            Some(args.processes),
+            Some(args.max_in_queue),
+            args.exit_on_eof,
+            &args.config,
+        )
+        .await
+    {
+        Ok(_) => info!("Successfully consumed alerts"),
+        Err(e) => error!("Failed to consume alerts: {}", e),
+    };
+}
+
+// No `#[instrument]`: `run` lives as long as the process, so one wrapping span
+// would grow a single trace until Tempo rejects it.
 async fn run(
     args: Cli,
     meter_provider: Option<SdkMeterProvider>,
@@ -105,116 +135,24 @@ async fn run(
         (Some(date), _) => StartDate::From(date.and_utc().timestamp()),
         _ => StartDate::Current,
     };
-    let replay = args.on.is_some();
-    let exit_on_eof = args.exit_on_eof;
-
     let date_label = chrono::DateTime::from_timestamp(start.timestamp(), 0)
         .map(|dt| dt.format("%Y-%m-%d").to_string())
         .unwrap_or_default();
-    if start.catch_up_days() > MAX_CATCH_UP_DAYS {
-        error!(
-            "Catching up from {} would subscribe to {} nights, over the {}-day limit; \
-             use --on to read that night alone",
-            date_label,
-            start.catch_up_days(),
-            MAX_CATCH_UP_DAYS
-        );
-        return;
-    }
-
-    info!(
-        "Consuming {} alerts (date {}, replay: {}, exit on EOF: {})",
-        args.survey, date_label, replay, exit_on_eof
-    );
-
-    // If topic override is provided, use it. Otherwise, the consumer
-    // will determine the topic based on the survey, program ID, and date.
-    let topics = args.topics_override;
 
     match args.survey {
         Survey::Ztf => {
-            let consumer = ZtfAlertConsumer::new(None, Some(args.programids));
-            if args.clear {
-                let _ = consumer.clear_output_queue(&args.config).await;
-            }
-            match consumer
-                .consume(
-                    topics,
-                    start,
-                    None,
-                    Some(args.processes),
-                    Some(args.max_in_queue),
-                    exit_on_eof,
-                    &args.config,
-                )
-                .await
-            {
-                Ok(_) => info!("Successfully consumed alerts"),
-                Err(e) => error!("Failed to consume alerts: {}", e),
-            };
+            let consumer = ZtfAlertConsumer::new(None, Some(args.programids.clone()));
+            consume_with(consumer, &args, start, &date_label).await
         }
         Survey::Lsst => {
             let consumer = LsstAlertConsumer::new(None, args.simulated);
-            if args.clear {
-                let _ = consumer.clear_output_queue(&args.config).await;
-            }
-            match consumer
-                .consume(
-                    topics,
-                    start,
-                    None,
-                    Some(args.processes),
-                    Some(args.max_in_queue),
-                    exit_on_eof,
-                    &args.config,
-                )
-                .await
-            {
-                Ok(_) => info!("Successfully consumed alerts"),
-                Err(e) => error!("Failed to consume alerts: {}", e),
-            };
+            consume_with(consumer, &args, start, &date_label).await
         }
         Survey::Decam => {
-            let consumer = DecamAlertConsumer::new(None);
-            if args.clear {
-                let _ = consumer.clear_output_queue(&args.config).await;
-            }
-            match consumer
-                .consume(
-                    topics,
-                    start,
-                    None,
-                    Some(args.processes),
-                    Some(args.max_in_queue),
-                    exit_on_eof,
-                    &args.config,
-                )
-                .await
-            {
-                Ok(_) => info!("Successfully consumed alerts"),
-                Err(e) => error!("Failed to consume alerts: {}", e),
-            };
+            consume_with(DecamAlertConsumer::new(None), &args, start, &date_label).await
         }
         Survey::Winter => {
-            let consumer = WinterAlertConsumer::new(None);
-            if args.clear {
-                let _ = consumer.clear_output_queue(&args.config).await;
-            }
-            match consumer
-                .consume(
-                    topics,
-                    start,
-                    None,
-                    Some(args.processes),
-                    Some(args.max_in_queue),
-                    exit_on_eof,
-                    &args.config,
-                )
-                .await
-            {
-                Ok(_) => info!("Successfully consumed alerts"),
-                Err(e) => error!("Failed to consume alerts: {}", e),
-            };
+            consume_with(WinterAlertConsumer::new(None), &args, start, &date_label).await
         }
     }
 
