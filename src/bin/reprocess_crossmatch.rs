@@ -34,7 +34,7 @@ const ARCSEC_TO_RAD: f64 = std::f64::consts::PI / 180.0 / 3600.0;
 const STATE_COLLECTION: &str = "reprocess_crossmatch_state";
 const STATUS_MATCHING: &str = "matching";
 const STATUS_CLEAN: &str = "clean";
-const TEMP_PROBE_SAMPLE: i64 = 200;
+const TEMP_PROBE_SAMPLE: i64 = 10_000;
 
 /// Catalog-driven costs extra full passes over alerts_aux, so it only wins when the
 /// catalog is substantially smaller, not merely smaller.
@@ -272,6 +272,12 @@ async fn range_shards(
     };
 
     if bounds.len() < parts {
+        warn!(
+            "only {} sampled bounds on '{}' for {} shards, running as a single shard",
+            bounds.len(),
+            field,
+            parts
+        );
         return vec![Document::new()];
     }
     let step = bounds.len() / parts;
@@ -295,7 +301,7 @@ async fn sharded_update_many(
 ) -> Result<u64, mongodb::error::Error> {
     let done = Arc::new(AtomicUsize::new(0));
     let total = shards.len();
-    let results = futures::future::join_all(shards.iter().map(|shard| {
+    let results = futures::future::join_all(shards.iter().enumerate().map(|(index, shard)| {
         let filter = if shard.is_empty() {
             base_filter.clone()
         } else if base_filter.is_empty() {
@@ -308,12 +314,25 @@ async fn sharded_update_many(
         let done = Arc::clone(&done);
         async move {
             let result = collection.update_many(filter, update).await;
-            info!(
-                "[{}] shard {}/{} done",
-                label,
-                done.fetch_add(1, Ordering::Relaxed) + 1,
-                total
-            );
+            let completed = done.fetch_add(1, Ordering::Relaxed) + 1;
+            match &result {
+                Ok(outcome) => info!(
+                    "[{}] shard {}/{} done, {} modified ({} shards complete)",
+                    label,
+                    index + 1,
+                    total,
+                    outcome.modified_count,
+                    completed
+                ),
+                Err(e) => warn!(
+                    error = %e,
+                    "[{}] shard {}/{} failed ({} shards complete)",
+                    label,
+                    index + 1,
+                    total,
+                    completed
+                ),
+            }
             result
         }
     }))
