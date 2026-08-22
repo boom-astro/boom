@@ -354,34 +354,36 @@ docker exec -it broker /opt/kafka/bin/kafka-topics.sh --bootstrap-server broker:
 Next, you can start the `Kafka` consumer with:
 
 ```bash
-cargo run --release --bin kafka_consumer <SURVEY> [DATE] --programids [PROGRAMIDS]
+cargo run --release --bin kafka_consumer <SURVEY> --programids [PROGRAMIDS]
 ```
 
 This will start a `Kafka` consumer, which will read the alerts from a given `Kafka` topic and transfer them to `Redis`/`Valkey` in-memory queue that the processing pipeline will read from.
 
-`DATE` defaults to today (at 00:00:00 UTC), and `--date-mode` controls how it is
-interpreted:
+Which night(s) it reads is set by `--from` or `--on`, both taking a UTC date in
+`YYYYMMDD` format. They are mutually exclusive, and with neither the consumer
+starts on today's topic(s):
 
-- `from` (the default) starts at that date and keeps going: every night since is
+- `--from DATE` starts at that date and keeps going: every night since is
   subscribed at once, each new nightly topic is picked up as it appears, and the
   process never exits. Partitions the consumer group has already read resume
   where they left off.
   A date more than 30 nights back is refused: that is past what any survey
   retains, so the extra topics no longer exist.
-- `pinned` stays on that date's topic(s), without rolling onto new nights, and
-  keeps running once they are drained.
-- `single` consumes **only** that date's topic(s) and exits once they are
-  drained. Offsets are not committed and a throwaway consumer group is used, so
-  replaying a night is repeatable and leaves the long-running consumers alone.
+- `--on DATE` replays that date's topic(s) alone, never rolling onto new nights.
+  It runs in its own consumer group (the configured one suffixed with the date)
+  and commits no offsets, so it leaves the long-running consumers alone and the
+  night can be replayed as often as needed. It keeps running once the topics are
+  drained, unless you add `--exit-on-eof`, which is only accepted alongside
+  `--on`.
 
 To continue with the previous example, you can run:
 
 ```bash
 # Consume that night and every night after it:
-cargo run --release --bin kafka_consumer ztf 20240617 --programids public
+cargo run --release --bin kafka_consumer ztf --from 20240617 --programids public
 
 # Re-ingest that single night, then exit:
-cargo run --release --bin kafka_consumer ztf 20240617 --programids public --date-mode single
+cargo run --release --bin kafka_consumer ztf --on 20240617 --programids public --exit-on-eof
 ```
 
 ### Alert Processing

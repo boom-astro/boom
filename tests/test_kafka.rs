@@ -635,7 +635,7 @@ fn test_lsst_subscription_topic_is_static() {
 }
 
 // Rollover intent is stated by the caller, not inferred from the timestamp.
-// The throughput benchmark runs `kafka_consumer ztf 20250311`, and chasing the
+// The throughput benchmark runs `kafka_consumer ztf --on 20250311`, and chasing the
 // wall clock would unsubscribe it from the only topic it was started to read.
 #[test]
 fn test_start_date_signals_rollover_intent() {
@@ -692,6 +692,7 @@ fn test_from_date_catches_up_every_night_since() {
         !plan.positions_at_rolled_day,
         "rolling must not move the position past the nights being caught up"
     );
+    assert!(!plan.replay, "a catch-up is the production path");
 
     let topics = ZtfAlertConsumer::new(None, Some(vec![ProgramId::Public]))
         .subscription_topics(plan.subscription_timestamp, plan.window_days);
@@ -736,6 +737,7 @@ fn test_current_and_pinned_plans_keep_the_configured_window() {
     assert_eq!(current.position_timestamp, current.subscription_timestamp);
     assert!(current.follows_clock);
     assert!(current.positions_at_rolled_day);
+    assert!(!current.replay);
 
     let pinned = StartDate::Pinned(1_741_651_200).plan(1);
     assert_eq!(pinned.window_days, 1);
@@ -743,6 +745,10 @@ fn test_current_and_pinned_plans_keep_the_configured_window() {
     assert_eq!(pinned.subscription_timestamp, 1_741_651_200);
     assert!(!pinned.follows_clock);
     assert!(!pinned.positions_at_rolled_day);
+    assert!(
+        pinned.replay,
+        "pinning to one night is what puts the run on the replay path"
+    );
 }
 
 // A pinned replay still has to subscribe to the topic it was asked for.
