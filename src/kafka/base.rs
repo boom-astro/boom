@@ -1242,8 +1242,11 @@ pub async fn consumer(
                     info!("No more messages, exiting consumer {}", id);
                     break;
                 }
-                // Idle: catch a topic that has just rolled over.
-                position_or_warn(&consumer, position_timestamp * 1000, &mut positioned);
+                // Idle: catch a topic that has just rolled over. Not on a replay,
+                // which would be seeked back to the start of the night it finished.
+                if !replay {
+                    position_or_warn(&consumer, position_timestamp * 1000, &mut positioned);
+                }
             }
         }
     }
