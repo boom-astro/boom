@@ -21,6 +21,8 @@ use tracing_subscriber::FmtSubscriber;
 
 const TARGET_COLLECTION: &str = ORBITS_COLLECTION;
 const STAGING_COLLECTION: &str = "MPC_orbits_staging";
+/// How many parsed orbits between progress lines.
+const PROGRESS_INTERVAL: u64 = 200_000;
 const DEFAULT_URL: &str = "https://www.minorplanetcenter.net/iau/MPCORB/MPCORB.DAT";
 
 #[derive(Parser)]
@@ -86,6 +88,7 @@ async fn main() {
 
     let mut batch: Vec<Document> = Vec::with_capacity(args.batch_size);
     let (mut parsed, mut skipped, mut lines) = (0u64, 0u64, 0u64);
+    let mut last_progress = 0u64;
     // Anything record-shaped that fails to parse is a silent data loss, so keep
     // examples rather than only a count.
     let mut rejected_samples: Vec<String> = Vec::new();
@@ -125,7 +128,12 @@ async fn main() {
                 }
                 None => batch.clear(),
             }
-            if parsed % 200_000 == 0 {
+            // Compared against a running mark rather than tested for divisibility:
+            // `parsed` only lands on a multiple of the interval when the batch size
+            // happens to divide it, so `parsed % PROGRESS_INTERVAL == 0` goes silent
+            // for most `--batch-size` values.
+            if parsed - last_progress >= PROGRESS_INTERVAL {
+                last_progress = parsed;
                 info!("parsed {} orbits", parsed);
             }
         }

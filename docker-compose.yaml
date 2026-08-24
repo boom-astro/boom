@@ -601,7 +601,12 @@ services:
       context: .
       dockerfile: Dockerfile
     environment:
+      # This job touches neither the API nor cutouts, but config loading
+      # validates every secret before handing back a config, so all three are
+      # required to get as far as opening the database.
       BOOM_DATABASE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
+      BOOM_API__AUTH__SECRET_KEY: ${BOOM_API__AUTH__SECRET_KEY:?BOOM_API__AUTH__SECRET_KEY must be set}
+      BOOM_API__AUTH__ADMIN_PASSWORD: ${BOOM_API__AUTH__ADMIN_PASSWORD:?BOOM_API__AUTH__ADMIN_PASSWORD must be set}
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       BOOM_DATABASE__HOST: mongo
       BOOM_DATABASE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
