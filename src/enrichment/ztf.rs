@@ -391,10 +391,14 @@ pub struct ZtfSsoAssociation {
     /// ZTF alert itself; an independent association computed by BOOM would
     /// identify itself differently here.
     pub source: Option<String>,
-    /// Sun-to-object distance at the alert epoch, au. Derived here from MPC
-    /// elements — the ZTF packet carries no state vectors — so it is `None`
-    /// whenever the object is missing from `MPC_orbits`. LSST populates the same
-    /// field from the vectors in its own packet.
+    /// Sun-to-object distance at the alert epoch, au. Derived here by propagating
+    /// MPC elements, since the ZTF packet carries no state vectors, so it is
+    /// `None` whenever the object is missing from `MPC_orbits`.
+    ///
+    /// The name is shared with the LSST association, which takes the same
+    /// quantity straight from the `ssSource` vectors in its own packet, so a
+    /// filter reads identically on both surveys. That side is not on main yet —
+    /// it lands with #578.
     #[serde(default)]
     pub helio_dist: Option<f32>,
     /// Observer-to-object distance at the alert epoch, au. Same provenance.
@@ -707,21 +711,31 @@ impl ZtfEnrichmentWorker {
     ///
     /// A failure here is not fatal: geometry is an enrichment, and dropping it
     /// for one batch is better than refusing to enrich the batch at all.
+    /// Keyed by `ssnamenr` as the alert carries it, not by the MPCORB key, so
+    /// each distinct name is normalised once here rather than again per alert.
     async fn fetch_orbits(
         &self,
         alerts: &[ZtfAlertForEnrichment],
     ) -> HashMap<String, OrbitalElements> {
-        let keys: Vec<String> = alerts
+        let key_by_name: HashMap<&str, String> = alerts
             .iter()
             .filter_map(|a| a.candidate.candidate.ssnamenr.as_deref())
-            .filter_map(normalize_ztf_ssnamenr)
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .filter_map(|name| normalize_ztf_ssnamenr(name).map(|key| (name, key)))
+            .collect();
+
+        if key_by_name.is_empty() {
+            return HashMap::new();
+        }
+
+        // Several names can share a key -- a number and its "(number)Name" form
+        // both reduce to the number -- so query the distinct keys.
+        let keys: Vec<&String> = key_by_name
+            .values()
             .collect::<HashSet<_>>()
             .into_iter()
             .collect();
-
-        if keys.is_empty() {
-            return HashMap::new();
-        }
 
         let cursor = match self.mpc_orbits.find(doc! { "_id": { "$in": &keys } }).await {
             Ok(cursor) => cursor,
@@ -739,17 +753,14 @@ impl ZtfEnrichmentWorker {
             }
         };
 
-        let orbits: HashMap<String, OrbitalElements> = docs
+        let by_key: HashMap<&str, OrbitalElements> = docs
             .iter()
-            .filter_map(|doc| {
-                let id = doc.get_str("_id").ok()?.to_string();
-                Some((id, elements_from_document(doc)?))
-            })
+            .filter_map(|doc| Some((doc.get_str("_id").ok()?, elements_from_document(doc)?)))
             .collect();
 
         // A catalogue that has never been ingested looks exactly like a batch of
         // objects that all happen to be missing, so say which it is.
-        if orbits.is_empty() {
+        if by_key.is_empty() {
             warn!(
                 "no elements found in {} for any of {} objects in this batch",
                 ORBITS_COLLECTION,
@@ -757,7 +768,10 @@ impl ZtfEnrichmentWorker {
             );
         }
 
-        orbits
+        key_by_name
+            .into_iter()
+            .filter_map(|(name, key)| Some((name.to_string(), *by_key.get(key.as_str())?)))
+            .collect()
     }
 
     async fn get_alert_properties(
@@ -785,8 +799,7 @@ impl ZtfEnrichmentWorker {
         let elements = candidate
             .ssnamenr
             .as_deref()
-            .and_then(normalize_ztf_ssnamenr)
-            .and_then(|key| orbits.get(&key));
+            .and_then(|name| orbits.get(name));
 
         let sso = ZtfSsoAssociation::from_ipac(
             candidate.ssnamenr.clone(),
@@ -1163,15 +1176,24 @@ mod tests {
     // write designations the way MPCORB does. Guard the seam with real values.
     #[test]
     fn test_ipac_designations_resolve_to_orbit_keys() {
-        let orbits = HashMap::from([("1".to_string(), ceres())]);
+        // Mirrors what fetch_orbits returns: keyed by ssnamenr as the alert
+        // carries it, having normalised each distinct name once. Two names that
+        // reduce to the same MPCORB key each get their own entry.
+        let by_key = HashMap::from([("1", ceres())]);
+        let orbits: HashMap<String, OrbitalElements> = ["1", "(1)Ceres", "C/2026O1"]
+            .into_iter()
+            .filter_map(|name| normalize_ztf_ssnamenr(name).map(|key| (name, key)))
+            .filter_map(|(name, key)| Some((name.to_string(), *by_key.get(key.as_str())?)))
+            .collect();
+
         for ssnamenr in ["1", "(1)Ceres"] {
-            let key = normalize_ztf_ssnamenr(ssnamenr).expect("normalised");
             assert!(
-                orbits.contains_key(&key),
+                orbits.contains_key(ssnamenr),
                 "ssnamenr {ssnamenr} did not resolve to an orbit"
             );
         }
         // Comets are not in MPCORB; missing beats matching the wrong object.
+        assert!(!orbits.contains_key("C/2026O1"));
         assert!(normalize_ztf_ssnamenr("C/2026O1").is_none());
     }
 
