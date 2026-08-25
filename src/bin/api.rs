@@ -119,6 +119,7 @@ async fn main() -> std::io::Result<()> {
                     .service(routes::babamul::surveys::get_cutouts)
                     .service(routes::babamul::surveys::get_alerts)
                     .service(routes::babamul::surveys::cone_search_alerts)
+                    .service(routes::babamul::stats::get_realtime_stats)
                     .service(routes::babamul::stats::get_nightly_stats)
                     .service(routes::babamul::stats::get_collection_stats)
                     .service(routes::babamul::stats::get_kafka_stats)
