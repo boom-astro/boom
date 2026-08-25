@@ -189,6 +189,7 @@ fn create_mock_enriched_ztf_alert(candid: i64, object_id: &str, is_rock: bool) -
                 predicted_mag: is_rock.then_some(18.1),
                 source: is_rock.then(|| "ipac".to_string()),
             }),
+            activity: None,
         },
         survey_matches: BabamulSurveyMatches::default(),
     }
