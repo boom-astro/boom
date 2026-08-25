@@ -19,11 +19,163 @@
   "links": [],
   "panels": [
     {
+      "id": 101,
+      "title": "Service up/down",
+      "description": "docker_container_up: 1 when the container is running and not failing its Docker healthcheck, 0 when it is stopped, restarting, or unhealthy. A gap means docker-metadata-exporter was not scraped, not that a service was down -- check the scrape target panel below.",
+      "type": "state-timeline",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 9, "w": 16, "x": 0, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": { "text": "Down", "color": "red", "index": 0 },
+                "1": { "text": "Up", "color": "green", "index": 1 }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }]
+          },
+          "min": 0,
+          "max": 1,
+          "custom": { "lineWidth": 0, "fillOpacity": 90 }
+        },
+        "overrides": []
+      },
+      "options": {
+        "mergeValues": true,
+        "showValue": "never",
+        "alignValue": "left",
+        "rowHeight": 0.9,
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": false },
+        "tooltip": { "mode": "single", "sort": "none" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "min by (compose_service) (docker_container_up{compose_project=\"boom\"})",
+          "legendFormat": "{{ compose_service }}"
+        }
+      ]
+    },
+    {
+      "id": 102,
+      "title": "Healthcheck state (now)",
+      "description": "Current Docker healthcheck state per service. 'none' means the service declares no healthcheck, so its up/down value reflects only whether the container is running.",
+      "type": "table",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 9, "w": 8, "x": 16, "y": 0 },
+      "fieldConfig": {
+        "defaults": { "custom": { "align": "auto", "cellOptions": { "type": "auto" } } },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Health" },
+            "properties": [
+              { "id": "custom.cellOptions", "value": { "type": "color-text" } },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "healthy": { "color": "green", "index": 0 },
+                      "starting": { "color": "yellow", "index": 1 },
+                      "unhealthy": { "color": "red", "index": 2 },
+                      "none": { "color": "text", "index": 3 }
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "options": { "showHeader": true, "sortBy": [{ "displayName": "Service", "desc": false }] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "docker_container_health_status{compose_project=\"boom\"} == 1",
+          "instant": true,
+          "format": "table"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "Value": true,
+              "__name__": true,
+              "compose_project": true,
+              "instance": true,
+              "job": true
+            },
+            "indexByName": { "compose_service": 0, "status": 1, "container_name": 2 },
+            "renameByName": { "compose_service": "Service", "status": "Health", "container_name": "Container" }
+          }
+        }
+      ]
+    },
+    {
+      "id": 103,
+      "title": "Prometheus scrape target health",
+      "description": "up per scrape job. While docker-metadata is 0 the panels above have no source and the container health alerts cannot fire at all, which is what the 'Container health monitoring is blind' rule pages on.",
+      "type": "state-timeline",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 7, "w": 24, "x": 0, "y": 9 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": { "text": "Down", "color": "red", "index": 0 },
+                "1": { "text": "Up", "color": "green", "index": 1 }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }]
+          },
+          "min": 0,
+          "max": 1,
+          "custom": { "lineWidth": 0, "fillOpacity": 90 }
+        },
+        "overrides": []
+      },
+      "options": {
+        "mergeValues": true,
+        "showValue": "never",
+        "alignValue": "left",
+        "rowHeight": 0.9,
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": false },
+        "tooltip": { "mode": "single", "sort": "none" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "min by (job) (up)",
+          "legendFormat": "{{ job }}"
+        }
+      ]
+    },
+    {
       "id": 1,
       "title": "Host CPU usage",
       "type": "timeseries",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
       "fieldConfig": {
         "defaults": {
           "unit": "percentunit",
@@ -51,7 +203,7 @@
       "title": "Host memory usage",
       "type": "timeseries",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
       "fieldConfig": {
         "defaults": { "unit": "bytes", "min": 0, "color": { "mode": "palette-classic" } },
         "overrides": []
@@ -80,7 +232,7 @@
       "title": "Filesystem usage (largest mounts)",
       "type": "timeseries",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
       "fieldConfig": {
         "defaults": {
           "unit": "percentunit",
@@ -115,7 +267,7 @@
       "title": "Network throughput (host)",
       "type": "timeseries",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
       "fieldConfig": {
         "defaults": { "unit": "Bps", "color": { "mode": "palette-classic" } },
         "overrides": []
@@ -144,7 +296,7 @@
       "title": "Container CPU throttle ratio",
       "type": "timeseries",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 32 },
       "fieldConfig": {
         "defaults": {
           "unit": "percentunit",
@@ -172,7 +324,7 @@
       "title": "Container restarts (1h rolling)",
       "type": "timeseries",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 32 },
       "fieldConfig": {
         "defaults": { "unit": "short", "color": { "mode": "palette-classic" }, "min": 0 },
         "overrides": []
@@ -195,7 +347,7 @@
       "title": "Errors, warnings, and panics (all containers)",
       "type": "logs",
       "datasource": { "type": "loki", "uid": "loki" },
-      "gridPos": { "h": 12, "w": 24, "x": 0, "y": 24 },
+      "gridPos": { "h": 12, "w": 24, "x": 0, "y": 40 },
       "options": {
         "showTime": true,
         "showLabels": true,
@@ -220,7 +372,7 @@
       "title": "Trace volume by service (RED)",
       "type": "timeseries",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 36 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 52 },
       "fieldConfig": {
         "defaults": { "unit": "ops", "color": { "mode": "palette-classic" } },
         "overrides": []
@@ -243,7 +395,7 @@
       "title": "Trace p95 latency by service",
       "type": "timeseries",
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 36 },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 52 },
       "fieldConfig": {
         "defaults": { "unit": "s", "color": { "mode": "palette-classic" } },
         "overrides": []
