@@ -4,9 +4,14 @@ receivers:
       grpc:
         endpoint: 0.0.0.0:4317
 
+# Add the Prometheus exporter to expose metrics on port 8888
 exporters:
   logging:
     loglevel: debug
+  
+  # Add Prometheus exporter - exposes metrics on port 8888/metrics
+  prometheus:
+    endpoint: "0.0.0.0:8888"
 
 service:
   pipelines:
@@ -15,4 +20,4 @@ service:
       exporters: [logging]
     metrics:
       receivers: [otlp]
-      exporters: [logging]
+      exporters: [prometheus]  # Changed from logging to prometheus
