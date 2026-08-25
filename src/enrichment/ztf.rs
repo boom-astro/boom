@@ -10,8 +10,8 @@ use crate::utils::cutouts::{AlertCutout, CutoutStorage};
 use crate::utils::db::mongify;
 use crate::utils::enums::Survey;
 use crate::utils::lightcurves::{
-    analyze_photometry, prepare_photometry, AllBandsProperties, Band, PerBandProperties,
-    PhotometryMag, ZTF_ZP,
+    analyze_photometry, prepare_photometry, ActivityMetrics, AllBandsProperties, Band,
+    PerBandProperties, PhotometryMag, ZTF_ZP,
 };
 use crate::utils::mpcorb::{elements_from_document, normalize_ztf_ssnamenr, ORBITS_COLLECTION};
 use crate::utils::sso_geometry::{geometry_at, OrbitalElements};
@@ -391,14 +391,12 @@ pub struct ZtfSsoAssociation {
     /// ZTF alert itself; an independent association computed by BOOM would
     /// identify itself differently here.
     pub source: Option<String>,
-    /// Sun-to-object distance at the alert epoch, au. Derived here by propagating
-    /// MPC elements, since the ZTF packet carries no state vectors, so it is
-    /// `None` whenever the object is missing from `MPC_orbits`.
+    /// Sun-to-object distance at the alert epoch, au. Derived by propagating MPC
+    /// elements, since the ZTF packet carries no state vectors, so it is `None`
+    /// whenever the object is missing from `MPC_orbits`.
     ///
-    /// The name is shared with the LSST association, which takes the same
-    /// quantity straight from the `ssSource` vectors in its own packet, so a
-    /// filter reads identically on both surveys. That side is not on main yet —
-    /// it lands with #578.
+    /// Named to match the LSST association, which reads the same quantity straight
+    /// from its own `ssSource` vectors, so a filter is identical on both surveys.
     #[serde(default)]
     pub helio_dist: Option<f32>,
     /// Observer-to-object distance at the alert epoch, au. Same provenance.
@@ -466,6 +464,9 @@ pub struct ZtfAlertProperties {
     /// Consumers must not read `None` as "not an asteroid".
     #[serde(default)]
     pub sso: Option<ZtfSsoAssociation>,
+    /// `None` on alerts enriched before this existed.
+    #[serde(default)]
+    pub activity: Option<ActivityMetrics>,
 }
 
 /// ZTF alert ML classifier scores
@@ -793,6 +794,8 @@ impl ZtfEnrichmentWorker {
         let ssmagnr = candidate.ssmagnr.unwrap_or(f32::INFINITY);
         let is_rock = ssdistnr >= 0.0 && ssdistnr < 12.0 && ssmagnr >= 0.0;
 
+        let activity = ActivityMetrics::from_magnitudes(Some(candidate.magpsf), candidate.magap);
+
         // Geometry is evaluated at the observation epoch, not at the elements'
         // epoch, so a stale MPCORB shows up as a slowly growing error rather
         // than as a wrong answer at a fixed date.
@@ -909,6 +912,7 @@ impl ZtfEnrichmentWorker {
                 photstats,
                 multisurvey_photstats: Some(multisurvey_photstats),
                 sso: Some(sso),
+                activity: Some(activity),
             },
             all_bands_properties,
             programid,
