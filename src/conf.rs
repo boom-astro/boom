@@ -601,6 +601,44 @@ fn default_password_reset_cooldown_minutes() -> u32 {
     15
 }
 
+/// OpenTelemetry Collector configuration for fetching realtime alert metrics.
+///
+/// The collector exposes Prometheus-format metrics on an HTTP endpoint.
+/// This config specifies where to find that endpoint.
+#[derive(Deserialize, Debug, Clone)]
+pub struct OTelCollectorConfig {
+    /// Whether OTel metrics collection is enabled. Set to false to disable the feature.
+    pub enabled: bool,
+    /// Hostname or IP address of the OTel Collector (e.g., "localhost", "otel-collector.example.com")
+    pub host: String,
+    /// Port on which the OTel Collector exposes metrics (default: 8888)
+    pub port: u16,
+    /// HTTP endpoint path for Prometheus-format metrics (default: "/metrics")
+    /// The full URL will be: http://{host}:{port}{metrics_endpoint}
+    #[serde(default = "default_otel_metrics_endpoint")]
+    pub metrics_endpoint: String,
+}
+
+impl Default for OTelCollectorConfig {
+    fn default() -> Self {
+        OTelCollectorConfig {
+            enabled: false,
+            host: "localhost".to_string(),
+            port: 8888,
+            metrics_endpoint: default_otel_metrics_endpoint(),
+        }
+    }
+}
+
+/// Default HTTP endpoint path where OTel Collector exposes Prometheus metrics
+fn default_otel_metrics_endpoint() -> String {
+    "/metrics".to_string()
+}
+
+fn default_otel_metrics_endpoint() -> String {
+    "/metrics".to_string()
+}
+
 /// Server-side PostHog product analytics.
 ///
 /// Analytics are only sent when `project_api_key` is non-empty, so leaving it
