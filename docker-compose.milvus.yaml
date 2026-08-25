@@ -85,6 +85,12 @@ services:
   attu:
     container_name: milvus-attu
     image: zilliz/attu:v2.5
+    # The arm64 build of this image ships a broken node_modules (iconv-lite is
+    # missing its `encodings` directory), so any request with a body -- i.e. the
+    # login POST -- dies with "Cannot find module '../encodings'". The amd64
+    # build is fine; on Apple Silicon it runs under Rosetta, which is plenty for
+    # a small Node UI.
+    platform: linux/amd64
     environment:
       MILVUS_URL: standalone:19530
     ports:
