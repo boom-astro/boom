@@ -4,10 +4,11 @@ use boom::{
     api::catalogs::WATCHLIST_PREFIX,
     conf::{load_dotenv, AppConfig, CatalogXmatchConfig},
     enrichment::models::SharedModelPool,
-    scheduler::{record_worker_pool_state, ThreadPool},
+    scheduler::{record_mpc_orbits_state, record_worker_pool_state, ThreadPool},
     utils::{
         db::initialize_survey_indexes,
         enums::Survey,
+        mpcorb,
         o11y::{
             logging::{build_subscriber_with_otel, log_error, WARN},
             metrics::init_metrics,
@@ -27,6 +28,79 @@ use opentelemetry_sdk::trace::SdkTracerProvider;
 use tokio::sync::oneshot;
 use tracing::{info, info_span, warn, Instrument};
 use uuid::Uuid;
+
+/// How stale the MPC catalogue may get before it is refreshed. MPCORB is
+/// published daily and the elements' own epochs move far more slowly, so this is
+/// about not drifting rather than about needing today's file exactly.
+const MPC_ORBITS_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+/// How often to re-check. Well inside the max age, so a single failed attempt
+/// still leaves several before the catalogue is actually stale.
+const MPC_ORBITS_CHECK_INTERVAL: Duration = Duration::from_secs(4 * 60 * 60);
+
+/// Whether the catalogue is due a refresh. An absent one always is.
+fn mpc_orbits_needs_refresh(age_seconds: Option<f64>, max_age: Duration) -> bool {
+    age_seconds.map_or(true, |age| age >= max_age.as_secs_f64())
+}
+
+/// Keep `MPC_orbits` fresh for as long as the scheduler runs.
+///
+/// A missing catalogue costs geometry silently -- the alert still enriches
+/// without it -- so this runs unattended, and the startup check covers a fresh
+/// deployment. A failed refresh leaves the previous catalogue in place.
+async fn keep_mpc_orbits_fresh(db: mongodb::Database) {
+    let mut tick = tokio::time::interval(MPC_ORBITS_CHECK_INTERVAL);
+    loop {
+        // Fires immediately on the first pass, so startup is covered.
+        tick.tick().await;
+
+        let now = chrono::Utc::now().timestamp() as f64;
+        let age = match mpcorb::orbits_age_seconds(&db, now).await {
+            Ok(age) => age,
+            // Not knowing the age is not the same as it being absent; wait for
+            // the next tick rather than re-downloading on a blip.
+            Err(error) => {
+                log_error!(WARN, error, "could not read the age of MPC_orbits");
+                continue;
+            }
+        };
+        let count = db
+            .collection::<Document>(mpcorb::ORBITS_COLLECTION)
+            .estimated_document_count()
+            .await
+            .ok();
+        record_mpc_orbits_state(age, count);
+
+        if !mpc_orbits_needs_refresh(age, MPC_ORBITS_MAX_AGE) {
+            info!(
+                age_hours = age.unwrap_or(0.0) / 3600.0,
+                orbits = count.unwrap_or(0),
+                "MPC_orbits is current"
+            );
+            continue;
+        }
+        match age {
+            Some(age) => warn!(age_hours = age / 3600.0, "MPC_orbits is stale, refreshing"),
+            None => warn!("MPC_orbits is missing, populating it"),
+        }
+
+        match mpcorb::refresh_orbits(Some(&db), mpcorb::DEFAULT_MPCORB_URL, 10_000, now).await {
+            Ok(report) => {
+                for sample in &report.rejected_samples {
+                    warn!("rejected record-shaped line: {}", sample);
+                }
+                info!(
+                    orbits = report.parsed,
+                    skipped = report.skipped,
+                    "MPC_orbits refreshed"
+                );
+                record_mpc_orbits_state(Some(0.0), Some(report.parsed));
+            }
+            // The previous catalogue is untouched on failure, so geometry keeps
+            // working off slightly older elements until the next attempt.
+            Err(error) => log_error!(WARN, error, "failed to refresh MPC_orbits"),
+        }
+    }
+}
 
 /// Sample one aux record at random and warn if it is missing crossmatches for
 /// any catalog declared under `crossmatch.<survey>` in the config, excluding
@@ -155,6 +229,14 @@ async fn run(
         .expect("could not initialize indexes");
 
     warn_if_missing_crossmatches(&args.survey, &db, &config).await;
+
+    // Only ZTF derives geometry from these elements; LSST reads the equivalent
+    // vectors out of its own packet.
+    if args.survey == Survey::Ztf {
+        tokio::spawn(
+            keep_mpc_orbits_fresh(db.clone()).instrument(info_span!("mpc orbits refresh")),
+        );
+    }
 
     #[cfg(target_os = "linux")]
     validate_gpu_configuration_for_survey(&args.survey, &config)
@@ -312,4 +394,41 @@ async fn main() {
         .expect("failed to initialize metrics");
 
     run(args, meter_provider, tracer_provider).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_absent_catalogue_is_always_due_a_refresh() {
+        assert!(mpc_orbits_needs_refresh(None, MPC_ORBITS_MAX_AGE));
+    }
+
+    #[test]
+    fn test_fresh_catalogue_is_left_alone() {
+        assert!(!mpc_orbits_needs_refresh(Some(0.0), MPC_ORBITS_MAX_AGE));
+        assert!(!mpc_orbits_needs_refresh(Some(3600.0), MPC_ORBITS_MAX_AGE));
+    }
+
+    #[test]
+    fn test_catalogue_past_the_max_age_is_refreshed() {
+        let max = MPC_ORBITS_MAX_AGE.as_secs_f64();
+        assert!(!mpc_orbits_needs_refresh(
+            Some(max - 1.0),
+            MPC_ORBITS_MAX_AGE
+        ));
+        assert!(mpc_orbits_needs_refresh(Some(max), MPC_ORBITS_MAX_AGE));
+        assert!(mpc_orbits_needs_refresh(
+            Some(max * 10.0),
+            MPC_ORBITS_MAX_AGE
+        ));
+    }
+
+    // Several checks must fit inside the staleness window, or one failed refresh
+    // leaves the catalogue stale until the next.
+    #[test]
+    fn test_check_interval_leaves_room_for_retries() {
+        assert!(MPC_ORBITS_CHECK_INTERVAL * 3 <= MPC_ORBITS_MAX_AGE);
+    }
 }

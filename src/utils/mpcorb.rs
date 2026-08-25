@@ -201,6 +201,162 @@ pub fn parse_line(line: &str) -> Option<MpcorbEntry> {
 
 /// Collection `mpcorb_ingest` writes and enrichment reads.
 pub const ORBITS_COLLECTION: &str = "MPC_orbits";
+/// Built here, then renamed over the target so readers never see a partial catalogue.
+const STAGING_COLLECTION: &str = "MPC_orbits_staging";
+pub const DEFAULT_MPCORB_URL: &str = "https://www.minorplanetcenter.net/iau/MPCORB/MPCORB.DAT";
+/// Fewer orbits than this means a truncated download, not a smaller catalogue.
+const MIN_PLAUSIBLE_ORBITS: u64 = 100_000;
+/// How many parsed orbits between progress lines.
+const PROGRESS_INTERVAL: u64 = 200_000;
+
+#[derive(thiserror::Error, Debug)]
+pub enum RefreshError {
+    #[error("failed to download MPCORB: {0}")]
+    Download(String),
+    #[error("failed to read the download: {0}")]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Mongo(#[from] mongodb::error::Error),
+    #[error("only {parsed} orbits parsed, refusing to replace {collection}")]
+    ImplausiblyShort { parsed: u64, collection: String },
+}
+
+/// Outcome of parsing MPCORB, whether or not it was written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefreshReport {
+    pub lines: u64,
+    pub parsed: u64,
+    pub skipped: u64,
+    /// Record-shaped lines that failed to parse. Always empty in a healthy run --
+    /// anything here is data being dropped silently.
+    pub rejected_samples: Vec<String>,
+}
+
+/// Seconds since the catalogue was last written.
+///
+/// `Ok(None)` means it has genuinely never been written; an error means we could
+/// not tell, which is deliberately not the same thing -- treating a failed query
+/// as "absent" would re-download the whole catalogue on a transient blip.
+///
+/// Reads one document: every document in a given refresh carries the same
+/// `updated_at`, so any of them dates the catalogue.
+pub async fn orbits_age_seconds(
+    db: &mongodb::Database,
+    now: f64,
+) -> Result<Option<f64>, mongodb::error::Error> {
+    let doc = db
+        .collection::<Document>(ORBITS_COLLECTION)
+        .find_one(doc! {})
+        .await?;
+    Ok(doc
+        .and_then(|d| d.get_f64("updated_at").ok())
+        .map(|written| now - written))
+}
+
+/// Download MPCORB and swap it into `MPC_orbits`.
+///
+/// Passing `db: None` parses and reports without touching the database.
+pub async fn refresh_orbits(
+    db: Option<&mongodb::Database>,
+    url: &str,
+    batch_size: usize,
+    now: f64,
+) -> Result<RefreshReport, RefreshError> {
+    use std::io::{BufRead, BufReader};
+
+    tracing::info!("downloading MPCORB from {}", url);
+    let mut tmp = tempfile::NamedTempFile::new()?;
+    crate::utils::data::download_to_file(tmp.as_file_mut(), url, None, None, true)
+        .await
+        .map_err(|e| RefreshError::Download(e.to_string()))?;
+
+    let staging = match db {
+        Some(db) => {
+            let c = db.collection::<Document>(STAGING_COLLECTION);
+            // A previous run may have died between insert and rename.
+            let _ = c.drop().await;
+            Some(c)
+        }
+        None => None,
+    };
+
+    let file = std::fs::File::open(tmp.path())?;
+    let mut batch: Vec<Document> = Vec::with_capacity(batch_size);
+    let mut report = RefreshReport {
+        lines: 0,
+        parsed: 0,
+        skipped: 0,
+        rejected_samples: Vec::new(),
+    };
+    let mut last_progress = 0u64;
+
+    for line in BufReader::new(file).lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::warn!("unreadable line: {}", e);
+                continue;
+            }
+        };
+        report.lines += 1;
+        // The file opens with a prose header and separates its three sections
+        // with blank lines; parse_line rejects both.
+        match parse_line(&line) {
+            Some(entry) => {
+                batch.push(to_document(&entry, now));
+                report.parsed += 1;
+            }
+            None => {
+                report.skipped += 1;
+                // Blank lines and the prose header are expected; a long line is not.
+                if line.len() >= 103 && report.rejected_samples.len() < 5 {
+                    report
+                        .rejected_samples
+                        .push(line.chars().take(120).collect());
+                }
+            }
+        }
+
+        if batch.len() >= batch_size {
+            match &staging {
+                Some(c) => c
+                    .insert_many(std::mem::take(&mut batch))
+                    .await
+                    .map(|_| ())?,
+                None => batch.clear(),
+            }
+            // Compared against a running mark rather than tested for divisibility:
+            // `parsed` only lands on a multiple of the interval when the batch size
+            // happens to divide it.
+            if report.parsed - last_progress >= PROGRESS_INTERVAL {
+                last_progress = report.parsed;
+                tracing::info!("parsed {} orbits", report.parsed);
+            }
+        }
+    }
+
+    if let (Some(c), false) = (&staging, batch.is_empty()) {
+        c.insert_many(batch).await?;
+    }
+
+    if report.parsed < MIN_PLAUSIBLE_ORBITS {
+        return Err(RefreshError::ImplausiblyShort {
+            parsed: report.parsed,
+            collection: ORBITS_COLLECTION.to_string(),
+        });
+    }
+
+    if let Some(db) = db {
+        let from = format!("{}.{}", db.name(), STAGING_COLLECTION);
+        let to = format!("{}.{}", db.name(), ORBITS_COLLECTION);
+        db.client()
+            .database("admin")
+            .run_command(doc! { "renameCollection": &from, "to": &to, "dropTarget": true })
+            .await?;
+    }
+
+    Ok(report)
+}
 
 /// Render one entry as the stored document. Kept next to the reader below so
 /// the two halves of this collection's schema cannot drift apart.
