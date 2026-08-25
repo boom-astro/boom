@@ -5,19 +5,11 @@ receivers:
         endpoint: 0.0.0.0:4317
 
 exporters:
-  # Replace 'logging' with 'debug'
-  debug:
-    verbosity: detailed
-  
-  # Prometheus exporter - exposes metrics on port 8888
-  prometheus:
-    endpoint: "0.0.0.0:8888"
+  otlp:
+    endpoint: localhost:4317
 
 service:
   pipelines:
     traces:
       receivers: [otlp]
-      exporters: [debug]
-    metrics:
-      receivers: [otlp]
-      exporters: [prometheus]
+      exporters: [otlp]
