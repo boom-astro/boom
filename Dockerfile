@@ -72,10 +72,10 @@ FROM builder AS dev
 
 RUN cargo install --locked cargo-watch
 
-# On Linux `ort` is built with the `load-dynamic` feature (see Cargo.toml), so
-# libonnxruntime.so is dlopen'd at runtime rather than linked in. The `app`
-# stage sets these as well; without them here the enrichment workers hang
-# during SharedModels::load and never reach their queue loop.
+# On Linux, `ort` uses the `load-dynamic` feature (Cargo.toml), so it looks up
+# libonnxruntime.so at runtime instead of linking it in. These tell it where.
+# The `app` stage repeats them; without them here the enrichment workers hang
+# in SharedModels::load and never reach their queue loop.
 ENV ORT_DYLIB_PATH=/opt/ort/libonnxruntime.so
 ENV LD_LIBRARY_PATH=/opt/ort
 

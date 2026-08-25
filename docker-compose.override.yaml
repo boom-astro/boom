@@ -186,9 +186,9 @@ services:
       - .env
     environment:
       BOOM_KAFKA__CONSUMER__ZTF__SERVER: broker:29092
-      # This service exists only here (the base file defines consumer-ztf-public
-      # / -partnership / -caltech), so unlike scheduler-ztf it inherits no base
-      # definition -- the network and service hostnames must be set explicitly.
+      # The base file has no consumer-ztf (only -public / -partnership /
+      # -caltech), so there is nothing to inherit from: the network and
+      # service hostnames have to be spelled out here.
       BOOM_DATABASE__HOST: mongo
       BOOM_CUTOUTS_STORAGE__HOST: mongo
       BOOM_REDIS__HOST: valkey

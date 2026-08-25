@@ -127,9 +127,7 @@ impl MilvusClient {
             %collection,
             missing = %missing.join(", "),
             found = %present.join(", "),
-            "collection schema does not match what BOOM writes; every upsert \
-             will fail. Point milvus.collection.name at a collection created by \
-             `milvus_check --create-collection`."
+            "collection is missing fields BOOM writes to Milvus, so every upsert will fail."
         );
     }
 
