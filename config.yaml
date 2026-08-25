@@ -16,6 +16,11 @@ api:
     admin_username: admin
     admin_password: "" # Set via BOOM_API__AUTH__ADMIN_PASSWORD environment variable
     admin_email: admin@example.com
+otel: # configures OTel access for the realtime dashboard within API
+  enabled: true
+  host: "localhost"
+  port: 8888
+  metrics_endpoint: "/metrics"
 babamul:
   enabled: false # Set via BOOM_BABAMUL__ENABLED environment variable
   webapp_url: # Set via BOOM_BABAMUL__WEBAPP_URL environment variable
