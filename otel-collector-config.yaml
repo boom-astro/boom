@@ -8,8 +8,8 @@ exporters:
   otlp:
     endpoint: localhost:4317
   
-  # Prometheus exporter - correct syntax
-  prometheusexporter:
+  # Use 'prometheus' - this is the correct name for the base version
+  prometheus:
     endpoint: "0.0.0.0:8888"
 
 service:
@@ -19,4 +19,4 @@ service:
       exporters: [otlp]
     metrics:
       receivers: [otlp]
-      exporters: [prometheusexporter]
+      exporters: [prometheus]
