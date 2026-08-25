@@ -48,11 +48,10 @@ impl MilvusClient {
 
         if self.has_collection(&collection_name).await? {
             info!(collection = %collection_name, "collection already exists");
-            // Existing is not the same as compatible: a collection provisioned
-            // by hand or by another project can carry an unrelated schema, in
-            // which case every upsert fails at runtime with "fieldName ... not
-            // exist in collection schema". Warn rather than abort, so a partial
-            // mismatch does not take down alert ingestion.
+            // A collection that exists is not necessarily one we can write to:
+            // if it was created by hand or by another project, its schema may
+            // not match ours and every upsert will fail. Warn rather than
+            // abort, so a mismatch does not take down alert ingestion.
             self.warn_on_schema_mismatch().await;
             return Ok(false);
         }
@@ -101,11 +100,7 @@ impl MilvusClient {
         Ok(response.value)
     }
 
-    /// Compare the server's schema against the fields [`super::insert`] writes
-    /// and log a warning describing any mismatch.
-    ///
-    /// Deliberately infallible: this is a diagnostic, so a failure to describe
-    /// the collection must not stop the caller from starting up.
+    /// Warn if the collection is missing any field [`super::insert`] writes.
     async fn warn_on_schema_mismatch(&mut self) {
         let collection = self.config().collection.name.clone();
 
