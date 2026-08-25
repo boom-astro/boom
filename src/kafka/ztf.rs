@@ -1,5 +1,5 @@
 use crate::{
-    kafka::base::{AlertConsumer, AlertProducer},
+    kafka::base::{subscription_window, AlertConsumer, AlertProducer},
     utils::{
         data::{count_files_in_dir, download_to_file},
         enums::{ProgramId, Survey},
@@ -10,6 +10,7 @@ use tracing::{info, instrument};
 
 const ZTF_DEFAULT_NB_PARTITIONS: usize = 15;
 
+#[derive(Clone)]
 pub struct ZtfAlertConsumer {
     output_queue: String,
     program_ids: Vec<ProgramId>,
@@ -18,7 +19,11 @@ pub struct ZtfAlertConsumer {
 impl ZtfAlertConsumer {
     #[instrument]
     pub fn new(output_queue: Option<&str>, program_ids: Option<Vec<ProgramId>>) -> Self {
-        let program_ids = program_ids.unwrap_or_else(|| vec![ProgramId::Public]);
+        // An empty selection would yield no topics at all, so it falls back to
+        // the public program the same way an unset one does.
+        let program_ids = program_ids
+            .filter(|ids| !ids.is_empty())
+            .unwrap_or_else(|| vec![ProgramId::Public]);
         let output_queue = output_queue
             .unwrap_or("ZTF_alerts_packets_queue")
             .to_string();
@@ -37,6 +42,21 @@ impl AlertConsumer for ZtfAlertConsumer {
         self.program_ids
             .iter()
             .map(|program_id| format!("ztf_{}_programid{}", date.format("%Y%m%d"), program_id))
+            .collect()
+    }
+    fn subscription_topics(&self, timestamp: i64, window_days: u64) -> Vec<String> {
+        // One concrete topic per (date, program id) over the rollover window.
+        // Not a `^ztf_[0-9]+_programid(…)$` regex: librdkafka expands a pattern
+        // against every topic the cluster advertises, and IPAC keeps advertising
+        // topic names for nights whose partitions it has long since expired, so
+        // the pattern grows an assignment of dead partitions without bound.
+        subscription_window(timestamp, window_days)
+            .iter()
+            .flat_map(|date| {
+                self.program_ids.iter().map(move |program_id| {
+                    format!("ztf_{}_programid{}", date.format("%Y%m%d"), program_id)
+                })
+            })
             .collect()
     }
     fn output_queue(&self) -> String {

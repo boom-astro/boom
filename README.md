@@ -75,6 +75,14 @@ cp .env.example .env
 
 **Note:** Do not commit `.env` to Git or use the example values in production.
 
+When `.env.example` gains a variable, an existing `.env` goes stale and the dev
+targets fail during interpolation. `make check-env` lists what is missing, in a
+form you can paste straight into `.env`; the dev targets run it for you before
+starting anything. Note that this includes variables belonging to services the
+dev profile never starts (the ZTF/WINTER consumers, for instance) — Compose
+interpolates every file it loads before it filters by profile, so those values
+have to resolve regardless.
+
 #### Email configuration (for notifications)
 
 In order to send emails to users, e.g.,
@@ -289,10 +297,19 @@ See [docs/gpu.md](docs/gpu.md) for container-vs-native details, troubleshooting,
   ```bash
   make dev
   ```
-  This brings up the hot-reloading `api`, `consumer-ztf`, and `scheduler-ztf` with `cargo watch`, plus
-  the supporting Docker services they need.
+  This brings up the hot-reloading `api`, `consumer-ztf`, and `scheduler-ztf` with `cargo watch`, the
+  `frontend` web app with the Vite dev server (hot module reload), plus the supporting Docker services
+  they need.
   This may take a couple of minutes the first time you run it, as it needs to download the docker image for each service.
   To check if the containers are running and healthy, run `docker ps`.
+
+  Once the stack is up:
+  - The web app is served at [http://localhost:5173](http://localhost:5173)
+  - The API is served at [http://localhost:4000](http://localhost:4000)
+
+  The frontend lives in [`frontend/`](frontend/) (React + TypeScript + Vite). Editing files under
+  `frontend/src` triggers a live rebuild in the container — no restart needed. The dev server proxies
+  `/api` requests to the `api` service, so the full stack works locally out of the box.
 
   **Note:** Docker Compose will automatically use the environment variables from your `.env` file to configure the MongoDB container with your specified credentials.
 
@@ -337,15 +354,34 @@ docker exec -it broker /opt/kafka/bin/kafka-topics.sh --bootstrap-server broker:
 Next, you can start the `Kafka` consumer with:
 
 ```bash
-cargo run --release --bin kafka_consumer <SURVEY> [DATE] --programids [PROGRAMIDS]
+cargo run --release --bin kafka_consumer <SURVEY> --programids [PROGRAMIDS]
 ```
 
 This will start a `Kafka` consumer, which will read the alerts from a given `Kafka` topic and transfer them to `Redis`/`Valkey` in-memory queue that the processing pipeline will read from.
 
+Which night(s) it reads is set by `--from` or `--on`, both taking a UTC date in
+`YYYYMMDD` format. They are mutually exclusive, and with neither the consumer
+starts on today's topic(s):
+
+- `--from DATE` starts at that date and keeps going: every night since is
+  subscribed at once, each new nightly topic is picked up as it appears, and the
+  process never exits. Partitions the consumer group has already read resume
+  where they left off.
+- `--on DATE` replays that date's topic(s) alone, never rolling onto new nights.
+  It runs in its own consumer group (the configured one suffixed with the date)
+  and commits no offsets, so it leaves the long-running consumers alone and the
+  night can be replayed as often as needed. It keeps running once the topics are
+  drained, unless you add `--exit-on-eof`, which is only accepted alongside
+  `--on`.
+
 To continue with the previous example, you can run:
 
 ```bash
-cargo run --release --bin kafka_consumer ztf 20240617 --programids public
+# Consume that night and every night after it:
+cargo run --release --bin kafka_consumer ztf --from 20240617 --programids public
+
+# Re-ingest that single night, then exit:
+cargo run --release --bin kafka_consumer ztf --on 20240617 --programids public --exit-on-eof
 ```
 
 ### Alert Processing
@@ -367,7 +403,7 @@ cargo run --release --bin scheduler ztf
 
 ### Using Docker
 
-In production, BOOM runs the default services alongside a set of dedicated services defined in `docker-compose.yaml` under the `prod` profile: `api`, `consumer-ztf`, `consumer-lsst`, `scheduler-ztf`, and `scheduler-lsst`. Each of these services starts its binary automatically at container startup.
+In production, BOOM runs the default services alongside a set of dedicated services defined in `docker-compose.yaml` under the `prod` profile: `api`, `consumer-ztf`, `consumer-lsst`, `scheduler-ztf`, `scheduler-lsst`, and `frontend`. The Rust services each start their binary automatically at container startup; `frontend` builds the web app and serves it with nginx.
 
 Bring up the full prod stack with:
 
@@ -404,6 +440,10 @@ The scheduler prints a variety of messages to your terminal, e.g.:
 
 Metrics are collected by Prometheus and visible on a Grafana dashboard.
 See the [observability docs](docs/observability.md) for more information.
+
+Babamul user-facing usage — who calls the API and who consumes the Kafka
+stream — is tracked separately in PostHog and Grafana; see the
+[analytics docs](docs/analytics.md).
 
 ## Stopping BOOM
 

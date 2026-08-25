@@ -248,6 +248,8 @@ pub enum AlertError {
     AlertAuxFallbackUpdateFailed(String),
     #[error("concurrent aux update detected for {0}")]
     ConcurrentAuxUpdate(String),
+    #[error("failed to decode/repair avro packet: {0}")]
+    DecodeError(String),
 }
 
 #[derive(Debug, PartialEq)]
@@ -1252,17 +1254,19 @@ pub trait AlertWorker {
         survey_matches: &Option<T>,
         current_version: Option<i32>,
         now: f64,
+        extra_set: Document,
     ) -> Document
     where
         T: Serialize,
     {
-        let mut update_doc = doc! {
-            "$set": {
-                "aliases": mongify(survey_matches),
-                "updated_at": now,
-                "version": current_version.unwrap_or(0) + 1,
-            }
+        let mut set_doc = doc! {
+            "aliases": mongify(survey_matches),
+            "updated_at": now,
+            "version": current_version.unwrap_or(0) + 1,
         };
+        set_doc.extend(extra_set);
+
+        let mut update_doc = doc! { "$set": set_doc };
 
         if !push_updates.is_empty() {
             update_doc.insert("$push", push_updates);
@@ -1273,6 +1277,8 @@ pub trait AlertWorker {
     /// Finalize the auxiliary update by performing an update_one with a filter that includes a
     /// version check for concurrency control. If the update fails due to a concurrent modification
     /// (matched_count == 0), an error is returned to trigger a fallback to a DB-only update.
+    /// `extra_set` lets a survey-specific caller fold additional field updates into the same
+    /// version-checked write instead of issuing a second, unguarded update_one.
     async fn finalize_aux_update<T, K>(
         object_id: &str,
         push_updates: Document,
@@ -1280,13 +1286,19 @@ pub trait AlertWorker {
         current_version: Option<i32>,
         now: f64,
         alert_aux_collection: &mongodb::Collection<K>,
+        extra_set: Document,
     ) -> Result<(), AlertError>
     where
         T: Serialize + Sync,
         K: Serialize + Unpin + Send + Sync,
     {
-        let update_doc =
-            Self::make_filter_doc_aux_update(push_updates, survey_matches, current_version, now);
+        let update_doc = Self::make_filter_doc_aux_update(
+            push_updates,
+            survey_matches,
+            current_version,
+            now,
+            extra_set,
+        );
 
         let find_doc = Self::make_find_doc_aux_update(object_id, current_version);
 

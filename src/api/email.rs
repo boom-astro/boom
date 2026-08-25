@@ -40,12 +40,18 @@ impl EmailService {
             };
         }
 
-        // Try to load SMTP configuration
-        let smtp_username = env::var("SMTP_USERNAME").ok();
-        let smtp_password = env::var("SMTP_PASSWORD").ok();
-        let smtp_server = env::var("SMTP_SERVER").ok();
-        let from_address = env::var("SMTP_FROM_ADDRESS")
-            .unwrap_or_else(|_| "noreply@boom.example.com".to_string());
+        // Try to load SMTP configuration. Treat empty strings as unset: the
+        // deploy workflow injects SMTP_USERNAME/SMTP_PASSWORD/SMTP_SERVER from
+        // GitHub secrets/vars unconditionally, and an unset secret expands to an
+        // empty string (not absent). Without this filter, blank credentials make
+        // env::var() return Some(""), which selects the authenticated TLS relay
+        // (port 465) instead of plain SMTP (port 25) and fails with connection refused.
+        let non_empty = |k: &str| env::var(k).ok().filter(|v| !v.is_empty());
+        let smtp_username = non_empty("SMTP_USERNAME");
+        let smtp_password = non_empty("SMTP_PASSWORD");
+        let smtp_server = non_empty("SMTP_SERVER");
+        let from_address = non_empty("SMTP_FROM_ADDRESS")
+            .unwrap_or_else(|| "noreply@boom.example.com".to_string());
 
         // If any SMTP config is missing, disable email
         if smtp_server.is_none() {

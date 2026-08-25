@@ -1,5 +1,7 @@
+pub mod analytics;
 pub mod auth;
 pub mod catalogs;
+pub mod consumption;
 pub mod cutouts;
 pub mod db;
 pub mod docs;

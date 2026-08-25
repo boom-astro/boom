@@ -1,3 +1,4 @@
+use boom::api::catalogs::{catalog_exists, WATCHLIST_PREFIX};
 use boom::conf::{load_dotenv, AppConfig};
 use boom::filter::{Filter, FilterVersion, SURVEYS_REQUIRING_PERMISSIONS, VALID_ZTF_PROGRAMIDS};
 use boom::utils::enums::Survey;
@@ -26,6 +27,11 @@ struct Cli {
         help = "Comma-separated permission program IDs. Required for surveys with a permission system (e.g. ZTF: 1=public, 2=partnership, 3=Caltech); ignored for others."
     )]
     permissions: Option<Vec<i32>>,
+    #[arg(
+        long,
+        help = "Optional watchlist catalog name to bind the filter to (must start with 'watchlist_')."
+    )]
+    watchlist: Option<String>,
 }
 
 fn now_jd() -> f64 {
@@ -49,6 +55,7 @@ async fn main() {
     let description = args.description;
     let survey = args.survey;
     let filter_file = args.filter_file;
+    let watchlist = args.watchlist;
     let permissions = if SURVEYS_REQUIRING_PERMISSIONS.contains(&survey) {
         let Some(perms) = args.permissions else {
             eprintln!(
@@ -87,6 +94,48 @@ async fn main() {
         }
     };
 
+    let config = AppConfig::from_default_path().unwrap();
+    let db = match config.build_db().await {
+        Ok(db) => db,
+        Err(e) => {
+            error!("error building db: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    // Validate the watchlist name match an existing collection,
+    // so we don't insert a filter that would never match.
+    if let Some(ref name) = watchlist {
+        if !name.starts_with(WATCHLIST_PREFIX) {
+            eprintln!(
+                "watchlist catalog name must start with '{}'",
+                WATCHLIST_PREFIX
+            );
+            std::process::exit(1);
+        }
+        if !catalog_exists(&db, name).await {
+            eprintln!(
+                "watchlist catalog '{}' does not exist in the database; \
+                 import the source list as a Mongo collection first",
+                name
+            );
+            std::process::exit(1);
+        }
+        // Validate the watchlist is configured for crossmatch on this survey
+        let configured = config
+            .crossmatch
+            .get(&survey)
+            .map(|cats| cats.iter().any(|c| c.catalog == *name))
+            .unwrap_or(false);
+        if !configured {
+            eprintln!(
+                "watchlist '{}' is not configured for crossmatch on survey {:?}.",
+                name, survey
+            );
+            std::process::exit(1);
+        }
+    }
+
     // Create a bson document with id, active, catalog, permissions
     // group_id, and a fv array with one doc that has a fid field and a pipeline field
     let filter_id: String = uuid::Uuid::new_v4().to_string();
@@ -97,6 +146,7 @@ async fn main() {
         description: Some(description),
         active: true,
         user_id: "cli".to_string(),
+        watchlist,
         survey,
         permissions,
         fv: vec![FilterVersion {
@@ -111,16 +161,6 @@ async fn main() {
     };
 
     // insert the filter into the database
-    let config = AppConfig::from_default_path().unwrap();
-
-    let db = match config.build_db().await {
-        Ok(db) => db,
-        Err(e) => {
-            error!("error building db: {}", e);
-            std::process::exit(1);
-        }
-    };
-
     let collection = db.collection::<Filter>("filters");
 
     match collection.insert_one(filter).await {

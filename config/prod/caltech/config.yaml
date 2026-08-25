@@ -23,8 +23,18 @@ babamul:
   enabled: false # Set via BOOM_BABAMUL__ENABLED environment variable
   webapp_url: https://babamul.caltech.edu # Set via BOOM_BABAMUL__WEBAPP_URL environment variable
   retention_days: 7
+posthog:
+  # Server-side product analytics for the Babamul API and Kafka stream.
+  # Leave project_api_key empty to disable analytics entirely.
+  project_api_key: "" # Set via BOOM_POSTHOG__PROJECT_API_KEY environment variable
+  host: "https://us.i.posthog.com" # Set via BOOM_POSTHOG__HOST environment variable
+  flush_interval_seconds: 10
+  queue_capacity: 10000
+  # How often Babamul Kafka consumer groups are sampled to attribute stream
+  # consumption to users. Also drives the Grafana consumption metrics.
+  consumption_interval_seconds: 300
 gpu:
-  enabled: false # Set to true to load ONNX models on GPU (CUDA) instead of CPU.
+  enabled: true # Set to true to load ONNX models on GPU (CUDA) instead of CPU.
   # Models are loaded once at startup and shared across all enrichment workers.
   # When false, models are loaded on CPU (BOOM_GPU__ENABLED env var is still respected).
   device_ids: [0] # CUDA device(s) to use. E.g. [0,1,2,3,4,5,6,7] for 8 GPUs.
@@ -39,6 +49,12 @@ kafka:
     ztf:
       server: "localhost:9092"
       group_id: "" # Set via BOOM_KAFKA__CONSUMER__ZTF__GROUP_ID environment variable
+      # Days before the current one to stay subscribed to. 1 keeps yesterday
+      # alongside today so a night spanning UTC midnight isn't cut off. Raise
+      # temporarily (via BOOM_KAFKA__CONSUMER__ZTF__SUBSCRIPTION_WINDOW_DAYS) to
+      # catch up after an upstream outage, then set it back; upstream retention
+      # (~7 days for ZTF) bounds what a lookback can recover.
+      subscription_window_days: 1
     lsst:
       server: "rubin-alert-stream-bootstrap.slac.stanford.edu:9094"
       schema_registry: "https://rubin-alert-schemas.slac.stanford.edu/schema-registry"
@@ -49,6 +65,9 @@ kafka:
     decam:
       server: "localhost:9092"
       group_id: "" # Set via BOOM_KAFKA__CONSUMER__DECAM__GROUP_ID environment variable
+    winter:
+      server: "localhost:9092"
+      group_id: "" # Set via BOOM_KAFKA__CONSUMER__WINTER__GROUP_ID environment variable
   producer:
     server: "broker:29092" # Only one global producer for now (filter worker output)
 # cutouts_storage configures where alert cutout images are stored.
@@ -127,6 +146,17 @@ workers:
       refresh_interval_minutes: 15
       max_match_rate: 5
       reference_night:
+  winter:
+    command_interval: 500
+    alert:
+      n_workers: 1
+    enrichment:
+      n_workers: 1
+    filter:
+      n_workers: 1
+      refresh_interval_minutes: 15
+      max_match_rate: 100
+      reference_night: "2026-07-15"
 crossmatch:
   ztf:
     - catalog: Gaia_DR3
@@ -270,6 +300,38 @@ crossmatch:
         discovery_jd: 1
         internal_names: 1
       max_results: 3
+    - catalog: DESI_DR1
+      radius: 30.0 # 30 arcseconds
+      use_distance: true
+      distance_key: "z"
+      distance_max: 30.0
+      distance_max_near: 300.0
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        z: 1
+        zerr: 1
+        zwarn: 1
+        chi2: 1
+        deltachi2: 1
+        spectype: 1
+        zcat_nspec: 1
+    - catalog: LS_DR10_PHOTOZ
+      radius: 30.0 # 30 arcseconds
+      use_distance: true
+      distance_key: "z_phot"
+      distance_max: 60.0
+      distance_max_near: 300.0
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        ra_err: 1
+        dec_err: 1
+        z_phot: 1
+        z_phot_err: 1
+        photo_z_type: 1
   lsst:
     - catalog: LSPSC
       radius: 30.0
@@ -422,4 +484,131 @@ crossmatch:
         discovery_jd: 1
         internal_names: 1
       max_results: 3
+    - catalog: DESI_DR1
+      radius: 30.0 # 30 arcseconds
+      use_distance: true
+      distance_key: "z"
+      distance_max: 30.0
+      distance_max_near: 300.0
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        z: 1
+        zerr: 1
+        zwarn: 1
+        chi2: 1
+        deltachi2: 1
+        spectype: 1
+        zcat_nspec: 1
+    - catalog: LS_DR10_PHOTOZ
+      radius: 30.0 # 30 arcseconds
+      use_distance: true
+      distance_key: "z_phot"
+      distance_max: 60.0
+      distance_max_near: 300.0
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        ra_err: 1
+        dec_err: 1
+        z_phot: 1
+        z_phot_err: 1
+        photo_z_type: 1
   decam: []
+  winter:
+    - catalog: PS1_DR1
+      radius: 2.0 # 2 arcseconds
+      use_distance: false
+      projection:
+        _id: 1
+        gMeanPSFMag: 1
+        gMeanPSFMagErr: 1
+        rMeanPSFMag: 1
+        rMeanPSFMagErr: 1
+        iMeanPSFMag: 1
+        iMeanPSFMagErr: 1
+        zMeanPSFMag: 1
+        zMeanPSFMagErr: 1
+        yMeanPSFMag: 1
+        yMeanPSFMagErr: 1
+        ra: 1
+        dec: 1
+    - catalog: Gaia_DR3
+      radius: 2.0 # 2 arcseconds
+      use_distance: false
+      projection:
+        _id: 1
+        parallax: 1
+        parallax_error: 1
+        phot_g_mean_mag: 1
+        phot_bp_mean_mag: 1
+        phot_rp_mean_mag: 1
+        ra: 1
+        dec: 1
+    - catalog: milliquas_v6
+      radius: 2.0 # 2 arcseconds
+      use_distance: false
+      projection:
+        _id: 1
+        Name: 1
+        Descrip: 1
+        Qpct: 1
+        ra: 1
+        dec: 1
+    - catalog: NED
+      radius: 300.0 # 300 arcseconds
+      use_distance: true
+      distance_key: "z"
+      distance_max: 30.0
+      distance_max_near: 300.0
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        objtype: 1
+        z: 1
+        z_unc: 1
+        z_tech: 1
+        z_qual: 1
+        DistMpc: 1
+        DistMpc_unc: 1
+        ebv: 1
+        m_Ks: 1
+        m_Ks_unc: 1
+        tMASSphot: 1
+        Mstar: 1
+        Mstar_unc: 1
+    - catalog: DESI_DR1
+      radius: 30.0 # 30 arcseconds
+      use_distance: true
+      distance_key: "z"
+      distance_max: 30.0
+      distance_max_near: 300.0
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        z: 1
+        zerr: 1
+        zwarn: 1
+        chi2: 1
+        deltachi2: 1
+        spectype: 1
+        zcat_nspec: 1
+    - catalog: LS_DR10_PHOTOZ
+      radius: 30.0 # 30 arcseconds
+      use_distance: true
+      distance_key: "z_phot"
+      distance_max: 60.0
+      distance_max_near: 300.0
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        ra_err: 1
+        dec_err: 1
+        z_phot: 1
+        z_phot_err: 1
+        photo_z_type: 1

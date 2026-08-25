@@ -1,0 +1,35 @@
+name: Check formatting
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+jobs:
+  all:
+    name: Run prek hooks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Configure cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install frontend dependencies
+        run: cd frontend && bun install --frozen-lockfile
+
+      # The action installs prek and runs `prek run --all-files`, which exits
+      # non-zero if any hook fails or modifies a file (e.g. cargo fmt
+      # reformatting), so unformatted files fail the job.
+      - name: Run prek
+        uses: j178/prek-action@v1
+        with:
+          extra_args: --all-files

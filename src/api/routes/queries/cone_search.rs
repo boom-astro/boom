@@ -1,7 +1,8 @@
 /// Endpoints for executing analytical queries.
-use crate::api::catalogs::catalog_exists;
+use crate::api::catalogs::catalog_accessible;
 use crate::api::filters::parse_optional_filter;
 use crate::api::models::response;
+use crate::api::routes::users::User;
 
 use actix_web::{post, web, HttpResponse};
 use futures::TryStreamExt;
@@ -123,9 +124,14 @@ impl ConeSearchQuery {
 pub async fn post_cone_search_query(
     db: web::Data<Database>,
     body: web::Json<ConeSearchQuery>,
+    current_user: Option<web::ReqData<User>>,
 ) -> HttpResponse {
+    let current_user = match current_user {
+        Some(user) => user,
+        None => return HttpResponse::Unauthorized().body("Unauthorized"),
+    };
     let catalog_name = body.catalog_name.trim();
-    if !catalog_exists(&db, &catalog_name).await {
+    if !catalog_accessible(&db, catalog_name, Some(&current_user)).await {
         return response::not_found(&format!("Catalog {} does not exist", catalog_name));
     }
     let collection_name = catalog_name.to_string();

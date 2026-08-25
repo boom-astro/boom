@@ -49,6 +49,13 @@ pub enum Band {
     Y,
     #[serde(rename = "u")]
     U,
+    // Near-infrared bands (e.g. WINTER: fid 0=Y, 1=J, 2=H, 3=K)
+    #[serde(rename = "j")]
+    J,
+    #[serde(rename = "h")]
+    H,
+    #[serde(rename = "k")]
+    K,
 }
 
 impl std::fmt::Display for Band {
@@ -60,6 +67,9 @@ impl std::fmt::Display for Band {
             Band::Z => write!(f, "z"),
             Band::Y => write!(f, "y"),
             Band::U => write!(f, "u"),
+            Band::J => write!(f, "j"),
+            Band::H => write!(f, "h"),
+            Band::K => write!(f, "k"),
         }
     }
 }
@@ -101,6 +111,74 @@ pub struct BandProperties {
     pub fading: Option<BandRateProperties>,
 }
 
+/// Morphological indicators of cometary activity, computed per survey but expressed
+/// on one scale so a filter reads identically on ZTF and LSST.
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    serde::Deserialize,
+    serde::Serialize,
+    AvroSchema,
+    utoipa::ToSchema,
+)]
+#[serde(default)]
+pub struct ActivityMetrics {
+    /// Flux in the aperture beyond what a point source would put there, in
+    /// magnitudes. Positive means extended. Cross-survey comparable because both
+    /// sides reduce to a magnitude difference.
+    ///
+    /// Confounded by trailing: a fast mover smears during the exposure and looks
+    /// extended. Use alongside `sso.sky_motion` rather than alone.
+    ///
+    /// Computed here only because the degenerate cases are batch-fatal in an
+    /// aggregation: `$divide` by a zero flux and `$log10` of a negative one both
+    /// abort the whole pipeline, and difference imaging produces such fluxes
+    /// routinely. No threshold is applied — filters choose their own cut.
+    pub aperture_excess: Option<f32>,
+}
+
+impl ActivityMetrics {
+    /// ZTF: aperture and PSF magnitudes directly. Brighter aperture => positive.
+    pub fn from_magnitudes(magpsf: Option<f32>, magap: Option<f32>) -> Self {
+        let aperture_excess = match (magpsf, magap) {
+            (Some(psf), Some(ap)) if psf.is_finite() && ap.is_finite() => Some(psf - ap),
+            _ => None,
+        };
+        Self::from_excess(aperture_excess)
+    }
+
+    /// LSST: signed fluxes rather than magnitudes.
+    ///
+    /// Same sign rather than positive: a negative source has a well defined
+    /// aperture excess. Mixed signs are rejected -- relating a positive residual to
+    /// a negative one is not one.
+    pub fn from_fluxes(psf_flux: Option<f32>, ap_flux: Option<f32>) -> Self {
+        let aperture_excess = match (psf_flux, ap_flux) {
+            (Some(psf), Some(ap)) if psf != 0.0 && ap != 0.0 && psf.signum() == ap.signum() => {
+                Some(2.5 * (ap / psf).log10())
+            }
+            _ => None,
+        };
+        Self::from_excess(aperture_excess)
+    }
+
+    /// Single point where the value is admitted, so the finiteness check cannot
+    /// be forgotten by a future constructor.
+    ///
+    /// Guarding the inputs is not sufficient on the flux path: a ratio of two
+    /// perfectly finite fluxes overflows f32 once they differ by more than ~1e38,
+    /// which difference imaging reaches with a near-zero PSF flux. A non-finite
+    /// value stored here would serialize as a BSON double the filters then
+    /// compare against, so it is dropped rather than passed on.
+    fn from_excess(aperture_excess: Option<f32>) -> Self {
+        ActivityMetrics {
+            aperture_excess: aperture_excess.filter(|e| e.is_finite()),
+        }
+    }
+}
+
 // TODO: avro serialization fail when we use skip_serializing_none,
 // since the optional fields are not just None but simply missing
 // (this needs to be fixed in the apache_avro-related crates)
@@ -115,6 +193,9 @@ pub struct PerBandProperties {
     pub z: Option<BandProperties>,
     pub y: Option<BandProperties>,
     pub u: Option<BandProperties>,
+    pub j: Option<BandProperties>,
+    pub h: Option<BandProperties>,
+    pub k: Option<BandProperties>,
 }
 
 #[derive(Debug, PartialEq, Clone, Deserialize, Serialize, AvroSchema)]
@@ -225,8 +306,33 @@ pub fn prepare_photometry(photometry: &mut Vec<PhotometryMag>) {
 pub fn analyze_photometry(
     sorted_photometry: &[PhotometryMag],
 ) -> (PerBandProperties, AllBandsProperties, bool) {
-    let stationary = sorted_photometry.len() > 0
-        && (sorted_photometry.last().unwrap().time - sorted_photometry[0].time) > 0.01;
+    // Defensive guard: an empty lightcurve has no peak/faintest point to
+    // reference, and the code below unconditionally indexes `[0]`. Callers can
+    // legitimately produce empty lightcurves (e.g. reprocessing historical
+    // alerts whose photometry was entirely filtered out), so return neutral
+    // defaults instead of panicking. Callers that need to treat "no photometry"
+    // specially should check emptiness before calling.
+    if sorted_photometry.is_empty() {
+        return (
+            PerBandProperties::default(),
+            AllBandsProperties {
+                peak_jd: 0.0,
+                peak_mag: 0.0,
+                peak_mag_err: 0.0,
+                peak_band: Band::G,
+                faintest_jd: 0.0,
+                faintest_mag: 0.0,
+                faintest_mag_err: 0.0,
+                faintest_band: Band::G,
+                first_jd: 0.0,
+                last_jd: 0.0,
+            },
+            false,
+        );
+    }
+
+    // The empty case returned early above, so the slice is non-empty here.
+    let stationary = (sorted_photometry.last().unwrap().time - sorted_photometry[0].time) > 0.01;
 
     let mut global_peak_jd = sorted_photometry[0].time;
     let mut global_peak_mag = sorted_photometry[0].mag;
@@ -257,6 +363,9 @@ pub fn analyze_photometry(
         z: None,
         y: None,
         u: None,
+        j: None,
+        h: None,
+        k: None,
     };
     for (band, mags) in bands {
         if mags.is_empty() {
@@ -399,6 +508,9 @@ pub fn analyze_photometry(
             Band::Z => results.z = Some(band_properties),
             Band::Y => results.y = Some(band_properties),
             Band::U => results.u = Some(band_properties),
+            Band::J => results.j = Some(band_properties),
+            Band::H => results.h = Some(band_properties),
+            Band::K => results.k = Some(band_properties),
         }
     }
 
@@ -558,6 +670,30 @@ mod tests {
         assert_eq!(photometry.len(), 2);
         assert_eq!(photometry[0].time, 2459000.5);
         assert_eq!(photometry[1].time, 2459001.5);
+    }
+
+    #[test]
+    fn test_analyze_photometry_empty_lightcurve() {
+        // Regression: an empty lightcurve must not panic (it previously indexed
+        // `[0]` unconditionally). It should return neutral defaults with no
+        // per-band properties and stationary = false.
+        let data: Vec<PhotometryMag> = Vec::new();
+        let (results, all_bands_props, stationary) = analyze_photometry(&data);
+
+        assert_eq!(stationary, false);
+        assert!(results.g.is_none());
+        assert!(results.r.is_none());
+        assert!(results.i.is_none());
+        assert!(results.z.is_none());
+        assert!(results.y.is_none());
+        assert!(results.u.is_none());
+        assert!(results.j.is_none());
+        assert!(results.h.is_none());
+        assert!(results.k.is_none());
+        assert_eq!(all_bands_props.peak_jd, 0.0);
+        assert_eq!(all_bands_props.peak_mag, 0.0);
+        assert_eq!(all_bands_props.first_jd, 0.0);
+        assert_eq!(all_bands_props.last_jd, 0.0);
     }
 
     #[test]
@@ -910,5 +1046,120 @@ mod tests {
         let rising_dt = rising_stats.dt;
         assert_eq!(rising_nb_data, 2);
         assert!((rising_dt - 1.0).abs() < 1e-6);
+    }
+}
+
+#[cfg(test)]
+mod activity_tests {
+    use super::*;
+
+    #[test]
+    fn test_ztf_aperture_excess_positive_when_aperture_brighter() {
+        // Brighter aperture => smaller magnitude => positive excess.
+        let a = ActivityMetrics::from_magnitudes(Some(18.0), Some(17.5));
+        assert_eq!(a.aperture_excess, Some(0.5));
+
+        let point = ActivityMetrics::from_magnitudes(Some(18.0), Some(18.0));
+        assert_eq!(point.aperture_excess, Some(0.0));
+    }
+
+    #[test]
+    fn test_lsst_flux_ratio_matches_the_magnitude_scale() {
+        // A 1.585x aperture/psf flux ratio is 0.5 mag, so both surveys agree.
+        let a = ActivityMetrics::from_fluxes(Some(100.0), Some(158.489));
+        let excess = a.aperture_excess.unwrap();
+        assert!((excess - 0.5).abs() < 1e-3, "got {excess}");
+    }
+
+    // Difference imaging routinely yields non-positive fluxes; a log of those is
+    // not a measurement.
+    #[test]
+    fn test_zero_or_missing_fluxes_yield_no_measurement() {
+        for (psf, ap) in [
+            (Some(0.0), Some(10.0)),
+            (Some(10.0), Some(0.0)),
+            (None, Some(10.0)),
+        ] {
+            let a = ActivityMetrics::from_fluxes(psf, ap);
+            assert!(a.aperture_excess.is_none());
+        }
+    }
+
+    // A negative source measures the same way as a positive one.
+    #[test]
+    fn test_same_sign_negative_fluxes_measure_the_same_excess() {
+        let positive = ActivityMetrics::from_fluxes(Some(100.0), Some(150.0));
+        let negative = ActivityMetrics::from_fluxes(Some(-100.0), Some(-150.0));
+        assert_eq!(positive.aperture_excess, negative.aperture_excess);
+        assert!(positive.aperture_excess.expect("measured") > 0.0);
+    }
+
+    // The magnitudes are built from |flux|, so they agree with the flux path on
+    // same-sign input -- and would silently disagree on mixed-sign input.
+    #[test]
+    fn test_flux_and_magnitude_paths_agree_on_same_sign_input() {
+        for (psf, ap) in [(100.0f32, 150.0f32), (-100.0, -150.0)] {
+            let (magpsf, _) = flux2mag(psf.abs(), 1.0, LSST_ZP_AB_NJY);
+            let (magap, _) = flux2mag(ap.abs(), 1.0, LSST_ZP_AB_NJY);
+            let from_flux = ActivityMetrics::from_fluxes(Some(psf), Some(ap))
+                .aperture_excess
+                .expect("measured");
+            let from_mag = ActivityMetrics::from_magnitudes(Some(magpsf), Some(magap))
+                .aperture_excess
+                .expect("measured");
+            assert!(
+                (from_flux - from_mag).abs() < 1e-4,
+                "{from_flux} vs {from_mag}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_mixed_sign_fluxes_yield_no_measurement() {
+        for (psf, ap) in [(100.0, -150.0), (-100.0, 150.0)] {
+            assert!(
+                ActivityMetrics::from_fluxes(Some(psf), Some(ap))
+                    .aperture_excess
+                    .is_none(),
+                "from_fluxes({psf}, {ap})"
+            );
+        }
+    }
+
+    // Both fluxes can be finite and positive and still produce a non-finite
+    // ratio, so the inputs alone are not enough to guard on.
+    #[test]
+    fn test_finite_fluxes_with_an_overflowing_ratio_yield_no_measurement() {
+        let a = ActivityMetrics::from_fluxes(Some(f32::MIN_POSITIVE), Some(f32::MAX));
+        assert!(a.aperture_excess.is_none(), "got {:?}", a.aperture_excess);
+    }
+
+    #[test]
+    fn test_non_finite_inputs_yield_no_measurement() {
+        for (psf, ap) in [
+            (Some(f32::INFINITY), Some(10.0)),
+            (Some(10.0), Some(f32::INFINITY)),
+            (Some(f32::INFINITY), Some(f32::INFINITY)),
+            (Some(f32::NAN), Some(10.0)),
+        ] {
+            assert!(
+                ActivityMetrics::from_fluxes(psf, ap)
+                    .aperture_excess
+                    .is_none(),
+                "from_fluxes({psf:?}, {ap:?})"
+            );
+            assert!(
+                ActivityMetrics::from_magnitudes(psf, ap)
+                    .aperture_excess
+                    .is_none(),
+                "from_magnitudes({psf:?}, {ap:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn test_missing_magnitudes_yield_no_measurement() {
+        let a = ActivityMetrics::from_magnitudes(Some(18.0), None);
+        assert!(a.aperture_excess.is_none());
     }
 }
