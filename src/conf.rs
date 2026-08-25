@@ -635,10 +635,6 @@ fn default_otel_metrics_endpoint() -> String {
     "/metrics".to_string()
 }
 
-fn default_otel_metrics_endpoint() -> String {
-    "/metrics".to_string()
-}
-
 /// Server-side PostHog product analytics.
 ///
 /// Analytics are only sent when `project_api_key` is non-empty, so leaving it
