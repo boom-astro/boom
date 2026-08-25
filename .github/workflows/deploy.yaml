@@ -90,6 +90,9 @@ jobs:
       # (true) and BOOM_GPU__DEVICE_IDS (e.g. "0,1") repository variables; no code
       # change needed. Keep config/prod/<deployment>/config.yaml's gpu.enabled in
       # sync so the scheduler's GPU-pool path agrees with the model loader.
+      # BOOM_GPU__ENABLED also drives the "Select GPU compose overlay" step
+      # below, which layers in docker-compose.cuda.yaml (CUDA image + device
+      # passthrough) — setting this var alone does nothing without that overlay.
       BOOM_GPU__ENABLED: ${{ vars.BOOM_GPU__ENABLED || 'false' }}
       BOOM_GPU__DEVICE_IDS: ${{ vars.BOOM_GPU__DEVICE_IDS || '0' }}
     steps:
@@ -165,13 +168,25 @@ jobs:
         with:
           ref: ${{ steps.deploy_tag.outputs.tag_ref }}
           lfs: true
-      - run: >
-          docker compose --profile prod
-          -f docker-compose.yaml build
+      - name: Select GPU compose overlay
+        id: gpu_compose
+        run: |
+          if [ "${BOOM_GPU__ENABLED}" = "true" ]; then
+            echo "Adding docker-compose.cuda.yaml overlay (BOOM_GPU__ENABLED=true)"
+            echo "args=-f docker-compose.cuda.yaml" >> "$GITHUB_OUTPUT"
+          else
+            echo "args=" >> "$GITHUB_OUTPUT"
+          fi
       - run: >
           docker compose --profile prod
           -f docker-compose.yaml
-          -f docker-compose.cutouts-mongo.yaml up -d
+          ${{ steps.gpu_compose.outputs.args }}
+          build
+      - run: >
+          docker compose --profile prod
+          -f docker-compose.yaml
+          -f docker-compose.cutouts-mongo.yaml
+          ${{ steps.gpu_compose.outputs.args }} up -d
       # Services whose only "source code" is a bind-mounted file read once at
       # startup. Editing that file doesn't change the service definition, so the
       # `up -d` above leaves the container running the version it started with
@@ -195,4 +210,5 @@ jobs:
           docker compose --profile prod
           -f docker-compose.yaml
           -f docker-compose.cutouts-mongo.yaml
+          ${{ steps.gpu_compose.outputs.args }}
           up -d --force-recreate --no-deps grafana docker-metadata-exporter
