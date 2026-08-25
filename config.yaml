@@ -19,7 +19,7 @@ api:
 otel: # configures OTel access for the realtime dashboard within API
   enabled: true
   host: "localhost"
-  port: 8888
+  port: 9090
   metrics_endpoint: "/metrics"
 babamul:
   enabled: false # Set via BOOM_BABAMUL__ENABLED environment variable
