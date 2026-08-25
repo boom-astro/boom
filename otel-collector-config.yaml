@@ -7,9 +7,16 @@ receivers:
 exporters:
   otlp:
     endpoint: localhost:4317
+  
+  # Prometheus exporter - correct syntax
+  prometheusexporter:
+    endpoint: "0.0.0.0:8888"
 
 service:
   pipelines:
     traces:
       receivers: [otlp]
       exporters: [otlp]
+    metrics:
+      receivers: [otlp]
+      exporters: [prometheusexporter]
