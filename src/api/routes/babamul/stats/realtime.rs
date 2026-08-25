@@ -110,12 +110,7 @@ fn extract_survey_label(metric_part: &str) -> Option<String> {
     tags=["Babamul", "Stats"]
 )]
 #[get("/stats/realtime")]
-pub async fn get_realtime_stats(
-    /// Application configuration containing OTel collector settings
-    config: web::Data<crate::conf::AppConfig>,
-    /// HTTP client for making requests to OTel Collector
-    client: web::Data<reqwest::Client>,
-) -> HttpResponse {
+pub async fn get_realtime_stats(config: web::Data<crate::conf::AppConfig>, client: web::Data<reqwest::Client>,) -> HttpResponse {
     // --- STEP 1: Validate that OTel is enabled ---
     if !config.otel.enabled {
         debug!("OTel Collector is disabled; returning 503 Service Unavailable");
