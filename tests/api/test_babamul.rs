@@ -3,6 +3,7 @@ mod tests {
     use actix_web::http::StatusCode;
     use actix_web::middleware::from_fn;
     use actix_web::{test, web, App};
+    use base64::prelude::*;
     use boom::alert::{AlertWorker, ProcessAlertStatus};
     use boom::api::auth::{babamul_auth_middleware, get_test_auth, hash_token};
     use boom::api::db::get_test_db_api;
@@ -13,6 +14,7 @@ mod tests {
     use boom::enrichment::{EnrichmentWorker, LsstEnrichmentWorker, ZtfEnrichmentWorker};
     use boom::utils::cutouts::{AlertCutout, CutoutStorage};
     use boom::utils::enums::Survey;
+    use boom::utils::moc::{parse_3d_skymap, LIGO3dskymap};
     use boom::utils::testing::{
         drop_alert_from_collections, lsst_alert_worker, ztf_alert_worker, AlertRandomizer,
         TEST_CONFIG_FILE,
@@ -3260,5 +3262,625 @@ mod tests {
         for id in &ids_to_cleanup {
             col.delete_one(doc! { "_id": id }).await.unwrap();
         }
+    }
+
+    // ── MOC / skymap spatial search ─────────────────────────────────────────
+
+    /// Read back `candidate.jd` for an alert already inserted into `<survey>_alerts`,
+    /// so a MOC/skymap search's time window can be built around a real stored value
+    /// instead of guessing the fixture's baked-in JD.
+    async fn stored_candidate_jd(database: &Database, survey: &Survey, candid: i64) -> f64 {
+        let collection: mongodb::Collection<mongodb::bson::Document> =
+            database.collection(&format!("{}_alerts", survey));
+        let doc = collection
+            .find_one(doc! { "_id": candid })
+            .await
+            .unwrap()
+            .expect("inserted alert should be present");
+        doc.get_document("candidate")
+            .unwrap()
+            .get_f64("jd")
+            .unwrap()
+    }
+
+    /// (ra_deg, dec_deg) of the highest-probability pixel with a valid distance fit
+    /// in a BAYESTAR 3D skymap — a point squarely inside the map's high-credible-level
+    /// volume. Mirrors the pixel-picking logic `boom::utils::moc`'s own unit tests use
+    /// to validate `credible_volume_to_2d_moc`.
+    fn peak_pixel_radec(skymap: &LIGO3dskymap) -> (f64, f64) {
+        let best_row = skymap
+            .prob
+            .iter()
+            .enumerate()
+            .filter(|&(i, &p)| {
+                p > 0.0
+                    && skymap.distmu[i].is_finite()
+                    && skymap.distsigma[i].is_finite()
+                    && skymap.distsigma[i] > 0.0
+                    && skymap.distnorm[i].is_finite()
+                    && skymap.distnorm[i] > 0.0
+            })
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .map(|(i, _)| i)
+            .expect("no valid pixel found in BAYESTAR fixture");
+
+        // Decode the UNIQ index: UNIQ = 4·4^order + ipix.
+        let uniq = skymap.uniq[best_row];
+        let order = ((63 - uniq.leading_zeros()) / 2 - 1) as u8;
+        let ipix = uniq - (1u64 << (2 * order as u32 + 2));
+        let (lon_rad, lat_rad) = cdshealpix::nested::center(order, ipix);
+        (lon_rad.to_degrees(), lat_rad.to_degrees())
+    }
+
+    /// Test POST /babamul/surveys/{survey}/alerts/moc-search — request validation.
+    /// None of these cases require valid FITS bytes: every check they exercise
+    /// (auth, time window, exactly-one-source, credible_level/limit bounds) runs
+    /// before the endpoint ever decodes/parses the payload.
+    #[actix_rt::test]
+    async fn test_moc_search_alerts_validation() {
+        load_dotenv();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+        let test_user = TestUser::create(&database, &auth_app_data).await;
+
+        let app = test::init_service(
+            App::new().service(
+                actix_web::web::scope("/babamul")
+                    .app_data(web::Data::new(database.clone()))
+                    .app_data(web::Data::new(auth_app_data.clone()))
+                    .app_data(web::JsonConfig::default().limit(209_715_200))
+                    .wrap(from_fn(babamul_auth_middleware))
+                    .service(routes::babamul::surveys::moc_search_alerts),
+            ),
+        )
+        .await;
+
+        let auth_header = ("Authorization", format!("Bearer {}", test_user.token));
+
+        // No auth header
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/babamul/surveys/ztf/alerts/moc-search")
+                .set_json(serde_json::json!({
+                    "moc_fits_base64": "x",
+                    "start_jd": 2460000.0,
+                    "end_jd": 2460001.0,
+                }))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "should reject missing auth"
+        );
+
+        // end_jd <= start_jd
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/babamul/surveys/ztf/alerts/moc-search")
+                .insert_header(auth_header.clone())
+                .set_json(serde_json::json!({
+                    "moc_fits_base64": "x",
+                    "start_jd": 2460001.0,
+                    "end_jd": 2460000.0,
+                }))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "should reject end_jd <= start_jd"
+        );
+
+        // Time window > 7 days
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/babamul/surveys/ztf/alerts/moc-search")
+                .insert_header(auth_header.clone())
+                .set_json(serde_json::json!({
+                    "moc_fits_base64": "x",
+                    "start_jd": 2460000.0,
+                    "end_jd": 2460008.0,
+                }))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "should reject time window > 7 days"
+        );
+
+        // Neither moc_fits_base64 nor skymap_fits_base64
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/babamul/surveys/ztf/alerts/moc-search")
+                .insert_header(auth_header.clone())
+                .set_json(serde_json::json!({
+                    "start_jd": 2460000.0,
+                    "end_jd": 2460001.0,
+                }))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "should reject request with no MOC/skymap source"
+        );
+
+        // Both moc_fits_base64 and skymap_fits_base64
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/babamul/surveys/ztf/alerts/moc-search")
+                .insert_header(auth_header.clone())
+                .set_json(serde_json::json!({
+                    "moc_fits_base64": "x",
+                    "skymap_fits_base64": "y",
+                    "start_jd": 2460000.0,
+                    "end_jd": 2460001.0,
+                }))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "should reject both MOC and skymap sources provided together"
+        );
+
+        // credible_level only applies to skymap_fits_base64
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/babamul/surveys/ztf/alerts/moc-search")
+                .insert_header(auth_header.clone())
+                .set_json(serde_json::json!({
+                    "moc_fits_base64": "x",
+                    "credible_level": 0.9,
+                    "start_jd": 2460000.0,
+                    "end_jd": 2460001.0,
+                }))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "should reject credible_level alongside a pre-built moc_fits_base64"
+        );
+
+        // limit = 0
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/babamul/surveys/ztf/alerts/moc-search")
+                .insert_header(auth_header.clone())
+                .set_json(serde_json::json!({
+                    "moc_fits_base64": "x",
+                    "start_jd": 2460000.0,
+                    "end_jd": 2460001.0,
+                    "limit": 0,
+                }))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "should reject limit = 0"
+        );
+    }
+
+    /// Test POST /babamul/surveys/{survey}/alerts/moc-search — a MOC covering too
+    /// much sky (more covering cones than the endpoint's cap) is rejected rather
+    /// than run as an enormous, expensive `$or` query.
+    #[actix_rt::test]
+    async fn test_moc_search_alerts_rejects_oversized_moc() {
+        load_dotenv();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+        let test_user = TestUser::create(&database, &auth_app_data).await;
+
+        let app = test::init_service(
+            App::new().service(
+                actix_web::web::scope("/babamul")
+                    .app_data(web::Data::new(database.clone()))
+                    .app_data(web::Data::new(auth_app_data.clone()))
+                    .app_data(web::JsonConfig::default().limit(209_715_200))
+                    .wrap(from_fn(babamul_auth_middleware))
+                    .service(routes::babamul::surveys::moc_search_alerts),
+            ),
+        )
+        .await;
+
+        // data/ls_footprint_moc.fits (Legacy Survey footprint) degrades to 596
+        // covering cones — over the endpoint's 500-cone cap.
+        let moc_bytes =
+            std::fs::read("data/ls_footprint_moc.fits").expect("Failed to read footprint fixture");
+        let moc_b64 = BASE64_STANDARD.encode(&moc_bytes);
+
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/babamul/surveys/lsst/alerts/moc-search")
+                .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+                .set_json(serde_json::json!({
+                    "moc_fits_base64": moc_b64,
+                    "start_jd": 2460000.0,
+                    "end_jd": 2460001.0,
+                }))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "an oversized MOC should be rejected, got: {}",
+            read_str_response(resp).await
+        );
+    }
+
+    /// Test POST /babamul/surveys/{survey}/alerts/moc-search with `skymap_fits_base64`
+    /// — reproduces GRB 200524A / ZTF20abbiixp: the confirmed optical counterpart
+    /// falls inside the Fermi GBM 90% credible region and outside the 5% region.
+    #[actix_rt::test]
+    async fn test_moc_search_alerts_finds_counterpart_in_skymap() {
+        load_dotenv();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+        let test_user = TestUser::create(&database, &auth_app_data).await;
+
+        boom::utils::db::initialize_survey_indexes(&Survey::Ztf, &database)
+            .await
+            .expect("Failed to initialize ZTF indexes");
+
+        let app = test::init_service(
+            App::new().service(
+                actix_web::web::scope("/babamul")
+                    .app_data(web::Data::new(database.clone()))
+                    .app_data(web::Data::new(auth_app_data.clone()))
+                    .app_data(web::JsonConfig::default().limit(209_715_200))
+                    .wrap(from_fn(babamul_auth_middleware))
+                    .service(routes::babamul::surveys::moc_search_alerts),
+            ),
+        )
+        .await;
+
+        // ZTF20abbiixp (AT2020kym) — the confirmed optical counterpart to GRB 200524A
+        let counterpart_ra = 213.0430731_f64;
+        let counterpart_dec = 60.9052795_f64;
+
+        let mut alert_worker = ztf_alert_worker().await;
+        let mut enrichment_worker = ZtfEnrichmentWorker::new(TEST_CONFIG_FILE, None)
+            .await
+            .unwrap();
+
+        let (in_candid, in_object_id, _, _, in_bytes) =
+            AlertRandomizer::new_randomized(Survey::Ztf)
+                .ra(counterpart_ra)
+                .dec(counterpart_dec)
+                .get()
+                .await;
+        let status = alert_worker.process_alert(&in_bytes).await.unwrap();
+        assert_eq!(status, ProcessAlertStatus::Added(in_candid));
+        enrichment_worker
+            .process_alerts(&[in_candid])
+            .await
+            .expect("Enrichment failed for counterpart alert");
+
+        let jd = stored_candidate_jd(&database, &Survey::Ztf, in_candid).await;
+        let skymap_bytes = std::fs::read("data/glg_healpix_all_bn200524211.fits")
+            .expect("Failed to read GRB 200524A skymap fixture");
+        let skymap_b64 = BASE64_STANDARD.encode(&skymap_bytes);
+
+        // At 90% credible level: the counterpart should be found
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/babamul/surveys/ztf/alerts/moc-search")
+                .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+                .set_json(serde_json::json!({
+                    "skymap_fits_base64": skymap_b64,
+                    "credible_level": 0.9,
+                    "start_jd": jd - 0.001,
+                    "end_jd": jd + 0.001,
+                }))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "moc-search should succeed (error: {})",
+            read_str_response(resp).await
+        );
+        let body = read_json_response(resp).await;
+        let results = body["data"].as_array().expect("data should be an array");
+        assert!(
+            results
+                .iter()
+                .any(|r| r["candid"].as_i64() == Some(in_candid)
+                    && r["objectId"].as_str() == Some(in_object_id.as_str())),
+            "ZTF20abbiixp should be found at 90% credible level"
+        );
+
+        // At 5% credible level: the counterpart should be excluded
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/babamul/surveys/ztf/alerts/moc-search")
+                .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+                .set_json(serde_json::json!({
+                    "skymap_fits_base64": skymap_b64,
+                    "credible_level": 0.05,
+                    "start_jd": jd - 0.001,
+                    "end_jd": jd + 0.001,
+                }))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = read_json_response(resp).await;
+        let results = body["data"].as_array().expect("data should be an array");
+        assert!(
+            !results
+                .iter()
+                .any(|r| r["candid"].as_i64() == Some(in_candid)),
+            "ZTF20abbiixp should NOT be found at 5% credible level"
+        );
+
+        // Clean up
+        drop_alert_from_collections(in_candid, &Survey::Ztf)
+            .await
+            .unwrap();
+    }
+
+    /// Test POST /babamul/surveys/{survey}/alerts/skymap-3d-search — request validation.
+    #[actix_rt::test]
+    async fn test_skymap_3d_search_validation() {
+        load_dotenv();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+        let test_user = TestUser::create(&database, &auth_app_data).await;
+
+        let app = test::init_service(
+            App::new().service(
+                actix_web::web::scope("/babamul")
+                    .app_data(web::Data::new(database.clone()))
+                    .app_data(web::Data::new(auth_app_data.clone()))
+                    .app_data(web::JsonConfig::default().limit(209_715_200))
+                    .wrap(from_fn(babamul_auth_middleware))
+                    .service(routes::babamul::surveys::alerts_skymap_3d_search),
+            ),
+        )
+        .await;
+
+        let auth_header = ("Authorization", format!("Bearer {}", test_user.token));
+
+        // No auth header
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/babamul/surveys/ztf/alerts/skymap-3d-search")
+                .set_json(serde_json::json!({
+                    "bayestar_fits_base64": "x",
+                    "start_jd": 2460000.0,
+                    "end_jd": 2460001.0,
+                }))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "should reject missing auth"
+        );
+
+        // Missing required bayestar_fits_base64 field entirely
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/babamul/surveys/ztf/alerts/skymap-3d-search")
+                .insert_header(auth_header.clone())
+                .set_json(serde_json::json!({
+                    "start_jd": 2460000.0,
+                    "end_jd": 2460001.0,
+                }))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "should reject request missing bayestar_fits_base64"
+        );
+
+        // end_jd <= start_jd
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/babamul/surveys/ztf/alerts/skymap-3d-search")
+                .insert_header(auth_header.clone())
+                .set_json(serde_json::json!({
+                    "bayestar_fits_base64": "x",
+                    "start_jd": 2460001.0,
+                    "end_jd": 2460000.0,
+                }))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "should reject end_jd <= start_jd"
+        );
+
+        // Time window > 7 days
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/babamul/surveys/ztf/alerts/skymap-3d-search")
+                .insert_header(auth_header.clone())
+                .set_json(serde_json::json!({
+                    "bayestar_fits_base64": "x",
+                    "start_jd": 2460000.0,
+                    "end_jd": 2460008.0,
+                }))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "should reject time window > 7 days"
+        );
+
+        // credible_level out of [0, 1]
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/babamul/surveys/ztf/alerts/skymap-3d-search")
+                .insert_header(auth_header.clone())
+                .set_json(serde_json::json!({
+                    "bayestar_fits_base64": "x",
+                    "credible_level": 1.5,
+                    "start_jd": 2460000.0,
+                    "end_jd": 2460001.0,
+                }))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "should reject credible_level outside [0, 1]"
+        );
+    }
+
+    /// Test POST /babamul/surveys/{survey}/alerts/skymap-3d-search — finds a real
+    /// alert placed at a real BAYESTAR skymap's peak-density pixel (well inside the
+    /// 90% credible volume) and excludes one at the antipodal sky position.
+    #[actix_rt::test]
+    async fn test_skymap_3d_search_finds_alert_in_credible_volume() {
+        load_dotenv();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+        let test_user = TestUser::create(&database, &auth_app_data).await;
+
+        boom::utils::db::initialize_survey_indexes(&Survey::Ztf, &database)
+            .await
+            .expect("Failed to initialize ZTF indexes");
+
+        let app = test::init_service(
+            App::new().service(
+                actix_web::web::scope("/babamul")
+                    .app_data(web::Data::new(database.clone()))
+                    .app_data(web::Data::new(auth_app_data.clone()))
+                    .app_data(web::JsonConfig::default().limit(209_715_200))
+                    .wrap(from_fn(babamul_auth_middleware))
+                    .service(routes::babamul::surveys::alerts_skymap_3d_search),
+            ),
+        )
+        .await;
+
+        let bayestar_path = "data/S240618ah_bayestar.fits";
+        let bayestar_bytes = std::fs::read(bayestar_path).expect("Failed to read BAYESTAR fixture");
+        let skymap = parse_3d_skymap(bayestar_path).expect("Failed to parse BAYESTAR fixture");
+        let (in_ra, in_dec) = peak_pixel_radec(&skymap);
+
+        let mut alert_worker = ztf_alert_worker().await;
+        let mut enrichment_worker = ZtfEnrichmentWorker::new(TEST_CONFIG_FILE, None)
+            .await
+            .unwrap();
+
+        let (in_candid, in_object_id, _, _, in_bytes) =
+            AlertRandomizer::new_randomized(Survey::Ztf)
+                .ra(in_ra)
+                .dec(in_dec)
+                .get()
+                .await;
+        let status = alert_worker.process_alert(&in_bytes).await.unwrap();
+        assert_eq!(status, ProcessAlertStatus::Added(in_candid));
+        enrichment_worker
+            .process_alerts(&[in_candid])
+            .await
+            .expect("Enrichment failed for in-volume alert");
+
+        // Antipodal sky position: well outside the map's credible region
+        let (out_ra, out_dec) = ((in_ra + 180.0) % 360.0, -in_dec);
+        let (out_candid, _, _, _, out_bytes) = AlertRandomizer::new_randomized(Survey::Ztf)
+            .ra(out_ra)
+            .dec(out_dec)
+            .get()
+            .await;
+        let status = alert_worker.process_alert(&out_bytes).await.unwrap();
+        assert_eq!(status, ProcessAlertStatus::Added(out_candid));
+        enrichment_worker
+            .process_alerts(&[out_candid])
+            .await
+            .expect("Enrichment failed for out-of-volume alert");
+
+        let jd = stored_candidate_jd(&database, &Survey::Ztf, in_candid).await;
+        let bayestar_b64 = BASE64_STANDARD.encode(&bayestar_bytes);
+
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/babamul/surveys/ztf/alerts/skymap-3d-search")
+                .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+                .set_json(serde_json::json!({
+                    "bayestar_fits_base64": bayestar_b64,
+                    "credible_level": 0.9,
+                    "start_jd": jd - 0.001,
+                    "end_jd": jd + 0.001,
+                }))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "skymap-3d-search should succeed (error: {})",
+            read_str_response(resp).await
+        );
+        let body = read_json_response(resp).await;
+        let results = body["data"].as_array().expect("data should be an array");
+
+        let in_result = results
+            .iter()
+            .find(|r| r["candid"].as_i64() == Some(in_candid));
+        assert!(
+            in_result.is_some(),
+            "peak-density alert should be inside the 90% credible volume"
+        );
+        let in_result = in_result.unwrap();
+        assert_eq!(in_result["objectId"].as_str(), Some(in_object_id.as_str()));
+        assert!(
+            in_result["host_searched_prob_vol"].is_null(),
+            "no NED cross-match was inserted, so host_searched_prob_vol should be null"
+        );
+
+        assert!(
+            !results
+                .iter()
+                .any(|r| r["candid"].as_i64() == Some(out_candid)),
+            "antipodal alert should NOT be inside the credible volume"
+        );
+
+        // Clean up
+        drop_alert_from_collections(in_candid, &Survey::Ztf)
+            .await
+            .unwrap();
+        drop_alert_from_collections(out_candid, &Survey::Ztf)
+            .await
+            .unwrap();
     }
 }
