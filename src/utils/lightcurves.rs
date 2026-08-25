@@ -149,10 +149,16 @@ impl ActivityMetrics {
         Self::from_excess(aperture_excess)
     }
 
-    /// LSST: fluxes rather than magnitudes. Non-positive fluxes are not convertible.
+    /// LSST: signed fluxes rather than magnitudes.
+    ///
+    /// Same sign rather than positive: a negative source has a well defined
+    /// aperture excess. Mixed signs are rejected -- relating a positive residual to
+    /// a negative one is not one.
     pub fn from_fluxes(psf_flux: Option<f32>, ap_flux: Option<f32>) -> Self {
         let aperture_excess = match (psf_flux, ap_flux) {
-            (Some(psf), Some(ap)) if psf > 0.0 && ap > 0.0 => Some(2.5 * (ap / psf).log10()),
+            (Some(psf), Some(ap)) if psf != 0.0 && ap != 0.0 && psf.signum() == ap.signum() => {
+                Some(2.5 * (ap / psf).log10())
+            }
             _ => None,
         };
         Self::from_excess(aperture_excess)
@@ -1068,14 +1074,55 @@ mod activity_tests {
     // Difference imaging routinely yields non-positive fluxes; a log of those is
     // not a measurement.
     #[test]
-    fn test_non_positive_fluxes_yield_no_measurement() {
+    fn test_zero_or_missing_fluxes_yield_no_measurement() {
         for (psf, ap) in [
             (Some(0.0), Some(10.0)),
-            (Some(10.0), Some(-5.0)),
+            (Some(10.0), Some(0.0)),
             (None, Some(10.0)),
         ] {
             let a = ActivityMetrics::from_fluxes(psf, ap);
             assert!(a.aperture_excess.is_none());
+        }
+    }
+
+    // A negative source measures the same way as a positive one.
+    #[test]
+    fn test_same_sign_negative_fluxes_measure_the_same_excess() {
+        let positive = ActivityMetrics::from_fluxes(Some(100.0), Some(150.0));
+        let negative = ActivityMetrics::from_fluxes(Some(-100.0), Some(-150.0));
+        assert_eq!(positive.aperture_excess, negative.aperture_excess);
+        assert!(positive.aperture_excess.expect("measured") > 0.0);
+    }
+
+    // The magnitudes are built from |flux|, so they agree with the flux path on
+    // same-sign input -- and would silently disagree on mixed-sign input.
+    #[test]
+    fn test_flux_and_magnitude_paths_agree_on_same_sign_input() {
+        for (psf, ap) in [(100.0f32, 150.0f32), (-100.0, -150.0)] {
+            let (magpsf, _) = flux2mag(psf.abs(), 1.0, LSST_ZP_AB_NJY);
+            let (magap, _) = flux2mag(ap.abs(), 1.0, LSST_ZP_AB_NJY);
+            let from_flux = ActivityMetrics::from_fluxes(Some(psf), Some(ap))
+                .aperture_excess
+                .expect("measured");
+            let from_mag = ActivityMetrics::from_magnitudes(Some(magpsf), Some(magap))
+                .aperture_excess
+                .expect("measured");
+            assert!(
+                (from_flux - from_mag).abs() < 1e-4,
+                "{from_flux} vs {from_mag}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_mixed_sign_fluxes_yield_no_measurement() {
+        for (psf, ap) in [(100.0, -150.0), (-100.0, 150.0)] {
+            assert!(
+                ActivityMetrics::from_fluxes(Some(psf), Some(ap))
+                    .aperture_excess
+                    .is_none(),
+                "from_fluxes({psf}, {ap})"
+            );
         }
     }
 
