@@ -36,7 +36,10 @@ RUN ORT_CAPI_DIR="$('/opt/ort-py/bin/python' -c 'import pathlib, onnxruntime as 
     rm -rf /opt/ort-py && ln -sf /opt/ort/libonnxruntime.so.${ONNXRUNTIME_GPU_VERSION} /opt/ort/libonnxruntime.so
 
 COPY apache-avro-macros /app/apache-avro-macros
-COPY Cargo.toml Cargo.lock /app/
+COPY Cargo.toml Cargo.lock build.rs /app/
+# build.rs generates the Milvus gRPC bindings from these vendored protos into
+# OUT_DIR; without them src/milvus/proto.rs has nothing to include!().
+COPY ./proto /app/proto
 COPY ./src /app/src
 
 # BuildKit cache mounts keep the compiled crates (target/) and the fetched
@@ -68,6 +71,13 @@ RUN --mount=type=cache,target=/app/target,sharing=locked \
 FROM builder AS dev
 
 RUN cargo install --locked cargo-watch
+
+# On Linux, `ort` uses the `load-dynamic` feature (Cargo.toml), so it looks up
+# libonnxruntime.so at runtime instead of linking it in. These tell it where.
+# The `app` stage repeats them; without them here the enrichment workers hang
+# in SharedModels::load and never reach their queue loop.
+ENV ORT_DYLIB_PATH=/opt/ort/libonnxruntime.so
+ENV LD_LIBRARY_PATH=/opt/ort
 
 CMD ["cargo", "watch", "-x", "run --bin api"]
 

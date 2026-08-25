@@ -85,6 +85,8 @@ services:
   attu:
     container_name: milvus-attu
     image: zilliz/attu:v2.5
+    # The arm64 build is broken, so using the amd64, which runs under Rosetta on Apple Silicon
+    platform: linux/amd64
     environment:
       MILVUS_URL: standalone:19530
     ports:

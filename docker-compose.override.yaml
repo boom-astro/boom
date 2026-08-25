@@ -186,6 +186,14 @@ services:
       - .env
     environment:
       BOOM_KAFKA__CONSUMER__ZTF__SERVER: broker:29092
+      # The base file has no consumer-ztf (only -public / -partnership /
+      # -caltech), so there is nothing to inherit from: the network and
+      # service hostnames have to be spelled out here.
+      BOOM_DATABASE__HOST: mongo
+      BOOM_CUTOUTS_STORAGE__HOST: mongo
+      BOOM_REDIS__HOST: valkey
+    networks:
+      - boom
     profiles:
       - dev
     build:
