@@ -580,6 +580,19 @@ pub struct BabamulConfig {
     /// Minimum number of minutes that must elapse between successive password resets (default: 15)
     #[serde(default = "default_password_reset_cooldown_minutes")]
     pub password_reset_cooldown_minutes: u32,
+    /// Whether this deployment will create new accounts (default: true).
+    ///
+    /// Set to `false` for a pre-release deployment that is open only to
+    /// accounts that already exist. Every path that would mint one honours it —
+    /// password sign-up and social sign-in alike — so it cannot be sidestepped
+    /// by calling the API directly or by pressing a sign-in button the web app
+    /// still shows. Signing in with an account that already exists, including
+    /// linking a new provider to it, is unaffected.
+    ///
+    /// The web app has its own build-time `VITE_PRERELEASE_MODE`, which decides
+    /// what the UI *offers*; this decides what the API *allows*. Set both.
+    #[serde(default = "default_babamul_registration_enabled")]
+    pub registration_enabled: bool,
     /// Social sign-in (Google / GitHub / ORCID) configuration
     #[serde(default)]
     pub oauth: OAuthConfig,
@@ -592,6 +605,7 @@ impl Default for BabamulConfig {
             webapp_url: None,
             retention_days: default_babamul_retention_days(),
             password_reset_cooldown_minutes: default_password_reset_cooldown_minutes(),
+            registration_enabled: default_babamul_registration_enabled(),
             oauth: OAuthConfig::default(),
         }
     }
@@ -667,6 +681,10 @@ fn default_babamul_retention_days() -> u32 {
 
 fn default_password_reset_cooldown_minutes() -> u32 {
     15
+}
+
+fn default_babamul_registration_enabled() -> bool {
+    true
 }
 
 /// Server-side PostHog product analytics.

@@ -373,6 +373,51 @@ mod tests {
     }
 
     /// Test that invalid emails are rejected
+    /// A deployment with `registration_enabled = false` closes the password
+    /// sign-up route too. Hiding the link in the web app is presentation; this
+    /// is the part that holds when somebody posts to the API directly.
+    #[actix_rt::test]
+    async fn test_babamul_signup_honours_registration_enabled() {
+        load_dotenv();
+        let mut config = AppConfig::from_test_config().unwrap();
+        config.babamul.registration_enabled = false;
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+        let app = test::init_service(
+            App::new().service(
+                actix_web::web::scope("/babamul")
+                    .app_data(web::Data::new(config.clone()))
+                    .app_data(web::Data::new(database.clone()))
+                    .app_data(web::Data::new(auth_app_data.clone()))
+                    .app_data(web::Data::new(EmailService::new()))
+                    .service(routes::babamul::post_babamul_signup),
+            ),
+        )
+        .await;
+
+        let email = format!("test+{}@babamul.example.com", uuid::Uuid::new_v4());
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/babamul/signup")
+                .set_json(serde_json::json!({ "email": &email }))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        let users: mongodb::Collection<boom::api::routes::babamul::BabamulUser> =
+            database.collection("babamul_users");
+        assert_eq!(
+            users
+                .count_documents(doc! { "email": &email })
+                .await
+                .unwrap(),
+            0,
+            "the refused signup must not have created anything"
+        );
+    }
+
     #[actix_rt::test]
     async fn test_babamul_signup_invalid_email() {
         load_dotenv();
@@ -3413,6 +3458,11 @@ mod tests {
         // credentials in their .env would otherwise turn the provider on and
         // fail the tests that check a disabled one stays disabled.
         config.babamul.oauth.github = boom::conf::OAuthProviderConfig::default();
+        // Likewise pinned rather than inherited: `from_test_config` overlays
+        // BOOM_ environment variables, and a developer running a closed
+        // deployment locally would otherwise fail every test that signs a new
+        // account in.
+        config.babamul.registration_enabled = true;
         config
     }
 
@@ -3496,6 +3546,66 @@ mod tests {
         .await;
         let body = read_json_response(resp).await;
         assert!(body["data"].as_array().unwrap().is_empty());
+    }
+
+    /// A URL that is present but blank is an *unset* URL.
+    ///
+    /// Compose renders `${VAR:-}` as an empty string rather than leaving the
+    /// variable out, so `Some("")` is what an unconfigured deployment actually
+    /// hands the API — and `webapp_url` counts as much as the redirect base,
+    /// since every way the flow can end needs somewhere to send the browser.
+    #[actix_rt::test]
+    async fn test_babamul_oauth_blank_urls_disable_the_feature() {
+        load_dotenv();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+
+        for (label, mutate) in [
+            (
+                "blank redirect_base_url",
+                (|c: &mut AppConfig| c.babamul.oauth.redirect_base_url = Some("".to_string()))
+                    as fn(&mut AppConfig),
+            ),
+            ("blank webapp_url", |c: &mut AppConfig| {
+                c.babamul.webapp_url = Some("   ".to_string())
+            }),
+            ("missing webapp_url", |c: &mut AppConfig| {
+                c.babamul.webapp_url = None
+            }),
+        ] {
+            let mut config = oauth_test_config();
+            mutate(&mut config);
+            let app = oauth_app!(config, database.clone(), auth_app_data.clone());
+
+            let resp = test::call_service(
+                &app,
+                test::TestRequest::get()
+                    .uri("/babamul/oauth/providers")
+                    .to_request(),
+            )
+            .await;
+            let body = read_json_response(resp).await;
+            assert!(
+                body["data"].as_array().unwrap().is_empty(),
+                "{}: no provider should be advertised",
+                label
+            );
+
+            // And the button, if something rendered one anyway, leads nowhere.
+            let resp = test::call_service(
+                &app,
+                test::TestRequest::get()
+                    .uri("/babamul/oauth/google/start")
+                    .to_request(),
+            )
+            .await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::NOT_FOUND,
+                "{}: /start must refuse rather than mint state",
+                label
+            );
+        }
     }
 
     /// GET /babamul/oauth/{provider}/start
@@ -3724,6 +3834,12 @@ mod tests {
         let auth_app_data = get_test_auth(&database).await.unwrap();
         let app = oauth_app!(oauth_test_config(), database.clone(), auth_app_data);
 
+        // Remember the state `/start` mints so cleanup can take that row and
+        // nothing else. The suite shares one database and runs concurrently, so
+        // deleting every google state would reach into whichever other OAuth
+        // test happens to be between its own /start and its callback.
+        let mut minted_states: Vec<String> = Vec::new();
+
         for uri in [
             "/babamul/oauth/providers",
             "/babamul/oauth/google/start",
@@ -3737,14 +3853,22 @@ mod tests {
                 "{} must not require authentication",
                 uri
             );
+            if uri.ends_with("/start") {
+                let state = url::Url::parse(&location_of(&resp))
+                    .unwrap()
+                    .query_pairs()
+                    .find(|(k, _)| k == "state")
+                    .expect("/start redirect carries a state")
+                    .1
+                    .into_owned();
+                minted_states.push(state);
+            }
         }
 
-        // Clean up the state row the /start call above left behind.
-        database
-            .collection::<mongodb::bson::Document>("babamul_oauth_states")
-            .delete_many(doc! { "provider": "google" })
-            .await
-            .ok();
+        let states = database.collection::<mongodb::bson::Document>("babamul_oauth_states");
+        for state in minted_states {
+            states.delete_one(doc! { "_id": state }).await.ok();
+        }
     }
 
     // ── Email confirmation for providers that share no address (ORCID) ───────
@@ -4054,6 +4178,211 @@ mod tests {
             bcrypt::verify("hunter22hunter22", &user.password_hash).unwrap(),
             "linking must not disturb the existing password"
         );
+
+        users.delete_one(doc! { "_id": &id }).await.ok();
+    }
+
+    /// POST /babamul/oauth/verify — one external identity, one account
+    ///
+    /// Two tickets for the same `(provider, subject)` can be confirmed with two
+    /// addresses the caller controls. Resolving by identity first is what stops
+    /// that from linking one ORCID iD to two users, which later sign-ins would
+    /// then pick between nondeterministically.
+    #[actix_rt::test]
+    async fn test_babamul_oauth_verify_keeps_one_identity_on_one_account() {
+        load_dotenv();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+        let app = oauth_app!(oauth_test_config(), database.clone(), auth_app_data);
+
+        let orcid = format!("0000-0005-{}", uuid::Uuid::new_v4().simple());
+        let first_email = format!("test+{}@babamul.example.com", uuid::Uuid::new_v4());
+        let second_email = format!("test+{}@babamul.example.com", uuid::Uuid::new_v4());
+        let code = "SAME1234";
+
+        let first = seed_pending_identity(&database, &orcid, Some(&first_email), Some(code)).await;
+        let second =
+            seed_pending_identity(&database, &orcid, Some(&second_email), Some(code)).await;
+
+        for ticket in [&first, &second] {
+            let resp = test::call_service(
+                &app,
+                test::TestRequest::post()
+                    .uri("/babamul/oauth/verify")
+                    .set_json(serde_json::json!({ "ticket": ticket, "code": code }))
+                    .to_request(),
+            )
+            .await;
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+
+        let users: mongodb::Collection<boom::api::routes::babamul::BabamulUser> =
+            database.collection("babamul_users");
+        let linked = users
+            .count_documents(doc! {
+                "identities": { "$elemMatch": { "provider": "orcid", "subject": &orcid } }
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            linked, 1,
+            "one ORCID iD must not end up attached to two accounts"
+        );
+        assert_eq!(
+            users
+                .count_documents(doc! { "email": &second_email })
+                .await
+                .unwrap(),
+            0,
+            "the second address must not mint a second account for the same identity"
+        );
+
+        users.delete_one(doc! { "email": &first_email }).await.ok();
+    }
+
+    /// Two accounts for the same person must not wear the same username.
+    ///
+    /// The name a provider hands back is the obvious username and a poor unique
+    /// key: signing in with one provider and then another produces two accounts
+    /// (the addresses differ, and the address is the join key) whose derived
+    /// usernames are identical.
+    #[actix_rt::test]
+    async fn test_babamul_oauth_verify_does_not_reuse_a_username() {
+        load_dotenv();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+        let app = oauth_app!(oauth_test_config(), database.clone(), auth_app_data);
+
+        // `seed_pending_identity` always names the researcher the same thing,
+        // so two unrelated identities derive the same username from it.
+        let emails: Vec<String> = (0..2)
+            .map(|_| format!("test+{}@babamul.example.com", uuid::Uuid::new_v4()))
+            .collect();
+        for email in &emails {
+            let subject = format!("0000-0006-{}", uuid::Uuid::new_v4().simple());
+            let ticket =
+                seed_pending_identity(&database, &subject, Some(email), Some("NAME1234")).await;
+            let resp = test::call_service(
+                &app,
+                test::TestRequest::post()
+                    .uri("/babamul/oauth/verify")
+                    .set_json(serde_json::json!({ "ticket": &ticket, "code": "NAME1234" }))
+                    .to_request(),
+            )
+            .await;
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+
+        let users: mongodb::Collection<boom::api::routes::babamul::BabamulUser> =
+            database.collection("babamul_users");
+        let mut usernames = Vec::new();
+        for email in &emails {
+            usernames.push(
+                users
+                    .find_one(doc! { "email": email })
+                    .await
+                    .unwrap()
+                    .expect("account was created")
+                    .username,
+            );
+        }
+        assert_ne!(
+            usernames[0], usernames[1],
+            "the second account must not reuse the first account's username"
+        );
+        assert!(
+            usernames[1].starts_with(&usernames[0]),
+            "the numbered fallback should still be recognisable: {}",
+            usernames[1]
+        );
+
+        for email in &emails {
+            users.delete_one(doc! { "email": email }).await.ok();
+        }
+    }
+
+    /// A deployment closed to new registrations refuses to mint an account, but
+    /// still lets the accounts it has sign in and link a provider.
+    #[actix_rt::test]
+    async fn test_babamul_oauth_verify_honours_registration_enabled() {
+        load_dotenv();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+        let mut config = oauth_test_config();
+        config.babamul.registration_enabled = false;
+        let app = oauth_app!(config, database.clone(), auth_app_data);
+
+        let users: mongodb::Collection<boom::api::routes::babamul::BabamulUser> =
+            database.collection("babamul_users");
+
+        // Unknown address: nothing may be created.
+        let stranger = format!("test+{}@babamul.example.com", uuid::Uuid::new_v4());
+        let ticket = seed_pending_identity(
+            &database,
+            &format!("0000-0007-{}", uuid::Uuid::new_v4().simple()),
+            Some(&stranger),
+            Some("CLOSED12"),
+        )
+        .await;
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/babamul/oauth/verify")
+                .set_json(serde_json::json!({ "ticket": &ticket, "code": "CLOSED12" }))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            users
+                .count_documents(doc! { "email": &stranger })
+                .await
+                .unwrap(),
+            0,
+            "a closed deployment must not create an account"
+        );
+
+        // An account that already exists still gets its identity linked.
+        let id = uuid::Uuid::new_v4().to_string();
+        let email = format!("test+{}@babamul.example.com", id);
+        users
+            .insert_one(&boom::api::routes::babamul::BabamulUser {
+                id: id.clone(),
+                username: format!("closed-{}", id),
+                email: email.clone(),
+                password_hash: bcrypt::hash("hunter22hunter22", 4).unwrap(),
+                activation_code: None,
+                is_activated: true,
+                created_at: 0,
+                kafka_credentials: vec![],
+                tokens: vec![],
+                password_reset_token_hash: None,
+                password_reset_token_expires_at: None,
+                password_last_changed_at: None,
+                identities: vec![],
+                orcid_id: None,
+                name: None,
+            })
+            .await
+            .unwrap();
+        let subject = format!("0000-0008-{}", uuid::Uuid::new_v4().simple());
+        let ticket =
+            seed_pending_identity(&database, &subject, Some(&email), Some("CLOSED34")).await;
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/babamul/oauth/verify")
+                .set_json(serde_json::json!({ "ticket": &ticket, "code": "CLOSED34" }))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "an existing account must still be able to sign in"
+        );
+        let user = users.find_one(doc! { "_id": &id }).await.unwrap().unwrap();
+        assert_eq!(user.identities.len(), 1);
 
         users.delete_one(doc! { "_id": &id }).await.ok();
     }

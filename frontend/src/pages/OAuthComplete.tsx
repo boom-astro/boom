@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import api from "@/lib/api";
-import { ensureProfileLoaded } from "@/lib/store";
+import { ensureProfileLoaded, useAppStore } from "@/lib/store";
 import * as analytics from "@/lib/analytics";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -85,9 +85,12 @@ export default function OAuthComplete() {
     setLoading(true);
     try {
       const { next } = await api.verifyOAuthEmail(ticket, code);
+      // Confirming here signs in a new token, so any profile the store still
+      // holds is the previous account's. Clear it and refetch rather than let
+      // the five-minute freshness window carry it into the app.
+      useAppStore.getState().clearProfile();
       try {
-        await ensureProfileLoaded();
-        const profile = await api.fetchProfile().catch(() => null);
+        const profile = await ensureProfileLoaded({ force: true });
         if (profile) {
           analytics.identifyUser(profile.id ?? profile.username ?? profile.email, profile.email);
         }

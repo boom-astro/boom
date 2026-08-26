@@ -78,6 +78,11 @@ export function LoginForm({
               </Field>
               <Field>
                 <Button type="submit" disabled={!!loading}>{loading ? 'Signing in…' : 'Login'}</Button>
+                {/* Shown in prerelease mode too: these are a way to sign in to
+                    an account that already exists, and to attach a provider to
+                    one, neither of which the signup restriction covers. What it
+                    does cover — creating an account — is refused by the API
+                    (babamul.registration_enabled), not by hiding the button. */}
                 <OAuthButtons action="Continue" />
                 {!PRERELEASE_MODE ? (
                   <FieldDescription className="text-center">

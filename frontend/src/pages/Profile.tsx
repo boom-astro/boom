@@ -5,7 +5,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { toast } from "sonner";
-import { cn } from "@/lib/utils.ts";
+import { cn } from "@/lib/utils";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { fetchProfile, updateProfileName, fetchKafkaCredentials, createKafkaCredential, deleteKafkaCredential, fetchTokens, createToken, deleteToken, type Profile as ProfileType, type KafkaCredential, type TokenPublic, type TokenResponse } from "@/lib/api";
 import { useAppStore } from "@/lib/store";

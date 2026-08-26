@@ -39,6 +39,13 @@ const PENDING_IDENTITY_TTL_SECONDS: i64 = 1800;
 /// cannot be brute-forced.
 const MAX_VERIFICATION_ATTEMPTS: i32 = 5;
 
+/// Shown when a deployment with `babamul.registration_enabled = false` is asked
+/// to mint an account. Signing in to an account that already exists still
+/// works, so say which half is closed.
+const REGISTRATION_CLOSED: &str =
+    "New accounts aren't being created yet. If you already have a Babamul \
+     account, sign in with the email address it uses.";
+
 /// Confirmation codes a single ticket may ask for. Without a cap, one sign-in
 /// buys the caller unlimited mail to whatever address they type in, which is
 /// somebody else's inbox as easily as their own.
@@ -116,9 +123,9 @@ pub struct OAuthProviderInfo {
 )]
 #[get("/oauth/providers")]
 pub async fn get_oauth_providers(config: web::Data<AppConfig>) -> HttpResponse {
-    // A provider whose redirect base URL is missing would fail at /start, so
-    // treat the whole feature as off rather than advertising a broken button.
-    let providers: Vec<OAuthProviderInfo> = if config.babamul.oauth.redirect_base_url.is_none() {
+    // Credentials alone don't make a provider usable, so don't advertise a
+    // button whose flow would die at /start or on the way back.
+    let providers: Vec<OAuthProviderInfo> = if !oauth_urls_configured(&config) {
         Vec::new()
     } else {
         OAuthProviderKind::ALL
@@ -132,6 +139,22 @@ pub async fn get_oauth_providers(config: web::Data<AppConfig>) -> HttpResponse {
             .collect()
     };
     response::ok_ser("success", providers)
+}
+
+/// Whether the two URLs every social sign-in depends on are actually set.
+///
+/// `/start` needs `oauth.redirect_base_url` to build the redirect URI it hands
+/// the provider, and every way the flow can end — token, error, or the email
+/// detour — needs `babamul.webapp_url` to bounce the browser back to. Missing
+/// either one turns the feature off rather than half on.
+///
+/// Blank counts as missing: Compose renders an unset variable as `""` rather
+/// than leaving it out, so `Some("")` is what an unconfigured deployment
+/// actually looks like here.
+fn oauth_urls_configured(config: &AppConfig) -> bool {
+    let is_set = |value: Option<&str>| value.is_some_and(|value| !value.trim().is_empty());
+    is_set(config.babamul.oauth.redirect_base_url.as_deref())
+        && is_set(config.babamul.webapp_url.as_deref())
 }
 
 #[derive(Deserialize)]
@@ -168,7 +191,7 @@ pub async fn get_oauth_start(
         Some(provider) => provider,
         None => return response::not_found("Unknown sign-in provider"),
     };
-    if provider.config(&config).is_none() {
+    if provider.config(&config).is_none() || !oauth_urls_configured(&config) {
         return response::not_found("Sign-in provider is not enabled");
     }
 
@@ -242,7 +265,7 @@ pub async fn get_oauth_callback(
         Some(provider) => provider,
         None => return response::not_found("Unknown sign-in provider"),
     };
-    if provider.config(&config).is_none() {
+    if provider.config(&config).is_none() || !oauth_urls_configured(&config) {
         return response::not_found("Sign-in provider is not enabled");
     }
 
@@ -317,7 +340,14 @@ pub async fn get_oauth_callback(
             }
         };
 
-    let user = match resolve_identity(&db, &identity, pending.redirect_to.as_deref()).await {
+    let user = match resolve_identity(
+        &db,
+        &identity,
+        pending.redirect_to.as_deref(),
+        config.babamul.registration_enabled,
+    )
+    .await
+    {
         Ok(Resolution::SignedIn(user)) => *user,
         Ok(Resolution::NeedsEmail {
             ticket,
@@ -406,10 +436,16 @@ enum Resolution {
 ///    ticket, and the caller sends the user off to supply and confirm an
 ///    address. This is the usual ORCID path, since most researchers keep their
 ///    email private.
+///
+/// `registration_enabled` gates step 3 only. Steps 1 and 2 sign in or link an
+/// account that already exists, which a deployment closed to new registrations
+/// still wants to allow; step 4 is a detour that may yet reach either of them,
+/// so it is decided when the confirmed address is known rather than here.
 async fn resolve_identity(
     db: &Database,
     identity: &ExternalIdentity,
     redirect_to: Option<&str>,
+    registration_enabled: bool,
 ) -> Result<Resolution, ResolveError> {
     let users: mongodb::Collection<BabamulUser> = db.collection("babamul_users");
     let provider = identity.provider.as_str();
@@ -506,9 +542,13 @@ async fn resolve_identity(
 
     // 3. New account, already activated: the provider authenticated the user
     //    and vouched for the address, so there is nothing left to confirm.
+    if !registration_enabled {
+        return Err(ResolveError::Conflict(REGISTRATION_CLOSED.to_string()));
+    }
+    let username = unique_username(&users, &derive_username(identity, verified_email)).await?;
     let user = new_social_user(
         verified_email.to_string(),
-        derive_username(identity, verified_email),
+        username,
         linked,
         identity.orcid_id.clone(),
         identity.name.clone(),
@@ -544,18 +584,29 @@ async fn link_identity_to_user(
     }
     let linked_bson = mongodb::bson::to_bson(linked)
         .map_err(|e| ResolveError::Internal(format!("Could not encode identity: {}", e)))?;
-    users
+    if let Err(e) = users
         .update_one(
             doc! { "_id": &existing.id },
             doc! { "$set": set, "$push": { "identities": linked_bson } },
         )
         .await
-        .map_err(|e| {
-            ResolveError::Internal(format!(
-                "Could not link identity to user {}: {}",
-                existing.id, e
-            ))
-        })?;
+    {
+        // The unique index caught this identity already sitting on another
+        // account — a race, or a duplicate that predates the index. Either way
+        // the link must not be forced; the person should sign in with the
+        // account the identity already belongs to.
+        if e.to_string().contains("E11000 duplicate key error") {
+            return Err(ResolveError::Conflict(
+                "This sign-in is already connected to a different Babamul account. \
+                 Sign in with that one, or contact support to merge them."
+                    .to_string(),
+            ));
+        }
+        return Err(ResolveError::Internal(format!(
+            "Could not link identity to user {}: {}",
+            existing.id, e
+        )));
+    }
 
     let mut user = existing.clone();
     user.is_activated = true;
@@ -629,8 +680,47 @@ async fn insert_social_user(
     }
 }
 
+/// Pick a username nobody has taken yet, numbering collisions.
+///
+/// `username` is how an account is named everywhere it appears, and the social
+/// path derives it from things that genuinely repeat: a display name, or the
+/// local part of an address. One person signing in with GitHub and then ORCID
+/// is enough to produce the same name twice, since the two providers hand back
+/// different email addresses and so land on two accounts — both called
+/// "Ada-Lovelace" with nothing to tell them apart.
+///
+/// Best effort rather than a guarantee: two sign-ins racing on the same base
+/// can both find it free. `babamul_users.username` carries no unique index —
+/// deployments predate one and may already hold duplicates it could not be
+/// built over — so this closes the ordinary case, not the simultaneous one.
+async fn unique_username(
+    users: &mongodb::Collection<BabamulUser>,
+    base: &str,
+) -> Result<String, ResolveError> {
+    for attempt in 0..10 {
+        let candidate = match attempt {
+            0 => base.to_string(),
+            n => format!("{}-{}", base, n + 1),
+        };
+        let taken = users
+            .find_one(doc! { "username": &candidate })
+            .await
+            .map_err(|e| ResolveError::Internal(format!("Username lookup failed: {}", e)))?
+            .is_some();
+        if !taken {
+            return Ok(candidate);
+        }
+    }
+    // Ten accounts already share this name. Stop counting and stop querying;
+    // a suffix nobody will guess twice is a better answer than a failed
+    // sign-in.
+    Ok(format!("{}-{}", base, generate_random_string(6)))
+}
+
 /// Build a display username from the provider's profile, falling back to the
 /// local part of the email (the same rule the email sign-up path uses).
+///
+/// The result is a starting point, not the final name — see [`unique_username`].
 fn derive_username(identity: &ExternalIdentity, email: &str) -> String {
     let sanitize = |raw: &str| -> String {
         raw.chars()
@@ -964,21 +1054,38 @@ pub struct OAuthVerifyResponse {
 pub async fn post_oauth_verify(
     db: web::Data<Database>,
     auth: web::Data<AuthProvider>,
+    config: web::Data<AppConfig>,
     body: web::Json<OAuthVerifyPost>,
 ) -> HttpResponse {
     let ticket = body.ticket.trim();
     let pending_identities: mongodb::Collection<PendingIdentity> =
         db.collection(PENDING_IDENTITIES_COLLECTION);
+    let now = flare::Time::now().to_utc().timestamp();
 
-    let pending = match load_pending_identity(&db, ticket).await {
+    // Claim an attempt before looking at the code at all. Reading the counter
+    // and incrementing it afterwards lets a burst of parallel guesses all see
+    // the same under-cap value and spend far more than the cap between them;
+    // folding the check into the update makes the write itself the limit, so
+    // every guess costs exactly one attempt no matter how they interleave.
+    // `$not: $gte` rather than `$lt` because a missing field is not less than
+    // anything, and tickets minted before this field existed have none.
+    // Expiry is checked here too, so a stale ticket can't be ground down.
+    let claim = pending_identities
+        .find_one_and_update(
+            doc! {
+                "_id": ticket,
+                "expires_at": { "$gt": now },
+                "attempts": { "$not": { "$gte": MAX_VERIFICATION_ATTEMPTS } },
+            },
+            doc! { "$inc": { "attempts": 1 } },
+        )
+        .await;
+
+    let pending = match claim {
         Ok(Some(pending)) => pending,
-        Ok(None) => {
-            return response::bad_request(
-                "This sign-in request has expired. Please sign in again.",
-            );
-        }
+        Ok(None) => return no_attempt_left(&pending_identities, ticket, now).await,
         Err(e) => {
-            tracing::error!("Could not load pending identity: {}", e);
+            tracing::error!("Could not claim a confirmation attempt: {}", e);
             return response::internal_error("Database error");
         }
     };
@@ -988,29 +1095,32 @@ pub async fn post_oauth_verify(
         _ => return response::bad_request("No confirmation code has been requested yet"),
     };
 
-    let now = flare::Time::now().to_utc().timestamp();
     if pending.code_expires_at.unwrap_or(0) <= now {
         return response::bad_request("That code has expired. Please sign in again.");
     }
 
-    if pending.attempts >= MAX_VERIFICATION_ATTEMPTS {
-        // Burn the ticket rather than leaving it to be ground down.
-        let _ = pending_identities.delete_one(doc! { "_id": ticket }).await;
-        return HttpResponse::TooManyRequests().json(
-            crate::api::models::response::ApiResponseBody::error(
-                "Too many incorrect codes. Please sign in again.",
-            ),
-        );
+    if hash_token(body.code.trim().to_uppercase().as_str()) != code_hash {
+        // The attempt was already counted by the claim above.
+        return response::bad_request("Incorrect code");
     }
 
-    if hash_token(body.code.trim().to_uppercase().as_str()) != code_hash {
-        if let Err(e) = pending_identities
-            .update_one(doc! { "_id": ticket }, doc! { "$inc": { "attempts": 1 } })
-            .await
-        {
-            tracing::error!("Could not record a failed confirmation attempt: {}", e);
+    // The code is right, so burn the ticket now — before it has created
+    // anything. Whoever wins this delete is the single sign-in it authorises;
+    // a second request carrying the same correct code finds nothing left.
+    match pending_identities
+        .find_one_and_delete(doc! { "_id": ticket })
+        .await
+    {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return response::bad_request(
+                "This sign-in request has already been used. Please sign in again.",
+            );
         }
-        return response::bad_request("Incorrect code");
+        Err(e) => {
+            tracing::error!("Could not consume a pending identity: {}", e);
+            return response::internal_error("Database error");
+        }
     }
 
     let provider = match OAuthProviderKind::from_path_segment(&pending.provider) {
@@ -1022,8 +1132,14 @@ pub async fn post_oauth_verify(
     };
 
     // The user proved they control this mailbox, which is exactly the assurance
-    // a password reset relies on — so the identity may be attached to an
-    // account that already owns the address.
+    // a password reset relies on — so the address may now be treated as one the
+    // provider vouched for, and the sign-in takes the ordinary resolution path.
+    //
+    // Going through `resolve_identity` rather than matching on the email alone
+    // is what keeps one external identity on one account: its first step finds
+    // whatever account this `(provider, subject)` is already linked to, so two
+    // tickets for the same identity, confirmed with two different addresses,
+    // converge on that account instead of linking it to a second one.
     let identity = ExternalIdentity {
         provider,
         subject: pending.subject.clone(),
@@ -1032,56 +1148,33 @@ pub async fn post_oauth_verify(
         name: pending.name.clone(),
         orcid_id: pending.orcid_id.clone(),
     };
-    let linked = LinkedIdentity {
-        provider: pending.provider.clone(),
-        subject: pending.subject.clone(),
-        email: Some(email.clone()),
-        linked_at: now,
-    };
 
-    let users: mongodb::Collection<BabamulUser> = db.collection("babamul_users");
-    let user = match users.find_one(doc! { "email": &email }).await {
-        Ok(Some(existing)) => {
-            match link_identity_to_user(
-                &db,
-                &existing,
-                &linked,
-                pending.orcid_id.as_deref(),
-                pending.name.as_deref(),
-            )
-            .await
-            {
-                Ok(user) => user,
-                Err(e) => return resolve_error_response(e),
-            }
+    let user = match resolve_identity(
+        &db,
+        &identity,
+        pending.redirect_to.as_deref(),
+        config.babamul.registration_enabled,
+    )
+    .await
+    {
+        Ok(Resolution::SignedIn(user)) => *user,
+        Ok(Resolution::PendingActivation { email }) => {
+            // The identity already belongs to an account still owed a
+            // confirmation for a different address, which this code cannot
+            // settle on its behalf.
+            return response::bad_request(&format!(
+                "This sign-in is already linked to an account awaiting confirmation at {}. \
+                 Confirm that address instead.",
+                email
+            ));
         }
-        Ok(None) => {
-            let user = match new_social_user(
-                email.clone(),
-                derive_username(&identity, &email),
-                linked,
-                pending.orcid_id.clone(),
-                identity.name.clone(),
-                now,
-            ) {
-                Ok(user) => user,
-                Err(e) => return resolve_error_response(e),
-            };
-            match insert_social_user(&users, user).await {
-                Ok(user) => user,
-                Err(e) => return resolve_error_response(e),
-            }
+        Ok(Resolution::NeedsEmail { .. }) => {
+            // Unreachable: the identity above carries a verified address.
+            tracing::error!("A confirmed identity was asked for an email address again");
+            return response::internal_error("Sign-in failed");
         }
-        Err(e) => {
-            tracing::error!("Email lookup failed during confirmation: {}", e);
-            return response::internal_error("Database error");
-        }
+        Err(e) => return resolve_error_response(e),
     };
-
-    // Single-use: the ticket dies with the sign-in it authorised.
-    if let Err(e) = pending_identities.delete_one(doc! { "_id": ticket }).await {
-        tracing::error!("Could not clear a used pending identity: {}", e);
-    }
 
     match create_babamul_jwt(&auth, &user.id).await {
         Ok((token, expires_in)) => HttpResponse::Ok()
@@ -1095,6 +1188,37 @@ pub async fn post_oauth_verify(
         Err(e) => {
             tracing::error!("Failed to create JWT after email confirmation: {}", e);
             response::internal_error("Could not complete sign-in")
+        }
+    }
+}
+
+/// Explain a claim that matched nothing: either the ticket is out of attempts,
+/// or it is gone. Only the first is rate limiting, and only it needs burning.
+async fn no_attempt_left(
+    pending_identities: &mongodb::Collection<PendingIdentity>,
+    ticket: &str,
+    now: i64,
+) -> HttpResponse {
+    match pending_identities
+        .find_one(doc! { "_id": ticket, "expires_at": { "$gt": now } })
+        .await
+    {
+        Ok(Some(_)) => {
+            // Alive, so the attempt cap is what turned the claim away. Burn the
+            // ticket rather than leave it to be ground down.
+            let _ = pending_identities.delete_one(doc! { "_id": ticket }).await;
+            HttpResponse::TooManyRequests().json(
+                crate::api::models::response::ApiResponseBody::error(
+                    "Too many incorrect codes. Please sign in again.",
+                ),
+            )
+        }
+        Ok(None) => {
+            response::bad_request("This sign-in request has expired. Please sign in again.")
+        }
+        Err(e) => {
+            tracing::error!("Could not load a pending identity: {}", e);
+            response::internal_error("Database error")
         }
     }
 }

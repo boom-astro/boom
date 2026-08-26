@@ -253,6 +253,7 @@ pub struct BabamulSignupResponse {
     request_body = BabamulSignupPost,
     responses(
         (status = 200, description = "Signup successful", body = BabamulSignupResponse),
+        (status = 403, description = "This deployment is not creating new accounts"),
         (status = 409, description = "Email already exists"),
         (status = 500, description = "Internal server error")
     ),
@@ -265,6 +266,14 @@ pub async fn post_babamul_signup(
     body: web::Json<BabamulSignupPost>,
     config: web::Data<crate::conf::AppConfig>,
 ) -> HttpResponse {
+    // Enforced here rather than only in the web app: hiding the sign-up link is
+    // what the UI does, not what keeps the door shut.
+    if !config.babamul.registration_enabled {
+        return HttpResponse::Forbidden().json(response::ApiResponseBody::error(
+            "New accounts aren't being created yet.",
+        ));
+    }
+
     let email = body.email.trim().to_lowercase();
 
     // Basic email validation (single '@', non-empty local part, domain contains a dot and at least two segments)

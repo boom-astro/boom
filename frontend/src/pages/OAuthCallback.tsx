@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import api from "@/lib/api";
-import { ensureProfileLoaded } from "@/lib/store";
+import { ensureProfileLoaded, useAppStore } from "@/lib/store";
 import * as analytics from "@/lib/analytics";
 import { Loader } from "@/components/ui/loader";
 
@@ -47,6 +47,11 @@ export default function OAuthCallback() {
       token_type: params.get("token_type") || "Bearer",
       expires_in: Number.isFinite(expiresIn) && expiresIn > 0 ? expiresIn : undefined,
     });
+    // The token just changed, so whatever profile the store is holding belongs
+    // to whoever was signed in before. Drop it: a cached profile still inside
+    // its five-minute window would otherwise survive the switch and leave the
+    // sidebar and protected pages showing the previous account.
+    useAppStore.getState().clearProfile();
 
     const next = params.get("next");
     // Only in-app paths; the API already filters these, this is belt and braces.
@@ -54,8 +59,7 @@ export default function OAuthCallback() {
 
     (async () => {
       try {
-        await ensureProfileLoaded();
-        const profile = await api.fetchProfile().catch(() => null);
+        const profile = await ensureProfileLoaded({ force: true });
         if (profile) {
           analytics.identifyUser(profile.id ?? profile.username ?? profile.email, profile.email);
         }

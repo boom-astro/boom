@@ -213,6 +213,9 @@ services:
       BOOM_CUTOUTS_STORAGE__HOST: mongo
       BOOM_BABAMUL__ENABLED: ${BOOM_BABAMUL__ENABLED:-false}
       BOOM_BABAMUL__WEBAPP_URL: ${BOOM_BABAMUL__WEBAPP_URL:-}
+      # Whether the API will create accounts. Pair it with VITE_PRERELEASE_MODE
+      # below, which only decides what the web app offers.
+      BOOM_BABAMUL__REGISTRATION_ENABLED: ${BOOM_BABAMUL__REGISTRATION_ENABLED:-true}
       # Social sign-in. Secrets come from the environment only; a provider with
       # no client ID/secret pair stays off.
       BOOM_BABAMUL__OAUTH__REDIRECT_BASE_URL: ${BOOM_BABAMUL__OAUTH__REDIRECT_BASE_URL:-}
