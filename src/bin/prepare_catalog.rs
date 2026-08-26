@@ -2,7 +2,9 @@ use boom::{
     api::catalogs::WATCHLIST_PREFIX,
     conf::{load_dotenv, AppConfig},
     utils::{
-        data::make_progress_bar, db::create_index, parser::parse_positive_usize,
+        data::{make_progress_bar, spawn_progress_logger},
+        db::create_index,
+        parser::parse_positive_usize,
         spatial::Coordinates,
     },
 };
@@ -187,7 +189,9 @@ async fn main() {
             }
         };
 
-        let pb = make_progress_bar(total, format!("{} coordinates", args.catalog));
+        let label = format!("{} coordinates", args.catalog);
+        let pb = make_progress_bar(total, label.clone());
+        let logger = spawn_progress_logger(pb.clone(), label);
         let mut writes: Vec<WriteModel> = Vec::with_capacity(args.batch_size);
 
         loop {
@@ -256,6 +260,7 @@ async fn main() {
                 std::process::exit(1);
             }
         }
+        logger.abort();
         pb.finish();
     }
 
