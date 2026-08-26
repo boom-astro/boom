@@ -2,9 +2,12 @@
 //!
 //! Format: <https://minorplanetcenter.net/iau/info/MPOrbitFormat.html>
 
+use std::collections::HashMap;
+
+use futures::TryStreamExt;
 use mongodb::bson::{doc, Document};
 
-use crate::utils::sso_geometry::OrbitalElements;
+use crate::utils::sso_geometry::{geometry_at, OrbitalElements};
 
 /// One MPCORB record.
 #[derive(Debug, Clone, PartialEq)]
@@ -232,6 +235,57 @@ pub fn elements_from_document(doc: &Document) -> Option<OrbitalElements> {
         peri: doc.get_f64("peri").ok()?,
         mean_anomaly: doc.get_f64("mean_anomaly").ok()?,
     })
+}
+
+/// Load elements for a set of MPCORB keys.
+pub async fn fetch_orbits(
+    collection: &mongodb::Collection<Document>,
+    keys: &[String],
+) -> Result<HashMap<String, OrbitalElements>, mongodb::error::Error> {
+    if keys.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let docs: Vec<Document> = collection
+        .find(doc! { "_id": { "$in": keys } })
+        .await?
+        .try_collect()
+        .await?;
+    Ok(docs
+        .iter()
+        .filter_map(|d| {
+            Some((
+                d.get_str("_id").ok()?.to_string(),
+                elements_from_document(d)?,
+            ))
+        })
+        .collect())
+}
+
+/// Derive geometry into `target` for `designation` at `jd`. Returns whether it
+/// wrote anything.
+///
+/// Enrichment only began writing geometry recently, so most of the archive has
+/// none. It is a pure function of designation and epoch, so it can be recomputed
+/// on read rather than backfilled across the alert collection. A value already
+/// present is left alone: recomputing would re-derive the same number from the
+/// same elements.
+pub fn fill_geometry(
+    target: &mut Document,
+    designation: &str,
+    jd: f64,
+    elements: &HashMap<String, OrbitalElements>,
+) -> bool {
+    if target.get_f64("helio_dist").is_ok() {
+        return false;
+    }
+    let Some(elements) = normalize_ztf_ssnamenr(designation).and_then(|k| elements.get(&k)) else {
+        return false;
+    };
+    let geometry = geometry_at(elements, jd);
+    target.insert("helio_dist", geometry.helio_dist);
+    target.insert("topo_dist", geometry.topo_dist);
+    target.insert("phase_angle", geometry.phase_angle);
+    true
 }
 
 /// Rewrite a ZTF `ssnamenr` into the designation MPCORB is keyed by.
