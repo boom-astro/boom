@@ -17,7 +17,7 @@ BOOM is an alert broker. What sets it apart from other alert brokers is that it 
 
 1. The `Kafka` consumer(s), reading alerts from astronomical surveys' `Kafka` topics to transfer them to `Redis`/`Valkey` in-memory queues.
 2. The Alert Ingestion workers, reading alerts from the `Redis`/`Valkey` queues, responsible of formatting them to BSON documents, and enriching them with crossmatches from archival astronomical catalogs and other surveys before writing the formatted alert packets to a `MongoDB` database.
-3. The enrichment workers, running alerts through a series of enrichment classifiers, and writing the results back to the `MongoDB` database.
+3. The enrichment workers, running alerts through a series of enrichment classifiers (ML inference) and per-alert light-curve fitting (Villar fits, GPU-accelerated when enabled), and writing the results back to the `MongoDB` database.
 4. The Filter workers, running user-defined filters on the alerts, and sending the results to Kafka topics for other services to consume.
 
 Workers are managed by a Scheduler that can spawn or kill workers of each type.
@@ -354,15 +354,34 @@ docker exec -it broker /opt/kafka/bin/kafka-topics.sh --bootstrap-server broker:
 Next, you can start the `Kafka` consumer with:
 
 ```bash
-cargo run --release --bin kafka_consumer <SURVEY> [DATE] --programids [PROGRAMIDS]
+cargo run --release --bin kafka_consumer <SURVEY> --programids [PROGRAMIDS]
 ```
 
 This will start a `Kafka` consumer, which will read the alerts from a given `Kafka` topic and transfer them to `Redis`/`Valkey` in-memory queue that the processing pipeline will read from.
 
+Which night(s) it reads is set by `--from` or `--on`, both taking a UTC date in
+`YYYYMMDD` format. They are mutually exclusive, and with neither the consumer
+starts on today's topic(s):
+
+- `--from DATE` starts at that date and keeps going: every night since is
+  subscribed at once, each new nightly topic is picked up as it appears, and the
+  process never exits. Partitions the consumer group has already read resume
+  where they left off.
+- `--on DATE` replays that date's topic(s) alone, never rolling onto new nights.
+  It runs in its own consumer group (the configured one suffixed with the date)
+  and commits no offsets, so it leaves the long-running consumers alone and the
+  night can be replayed as often as needed. It keeps running once the topics are
+  drained, unless you add `--exit-on-eof`, which is only accepted alongside
+  `--on`.
+
 To continue with the previous example, you can run:
 
 ```bash
-cargo run --release --bin kafka_consumer ztf 20240617 --programids public
+# Consume that night and every night after it:
+cargo run --release --bin kafka_consumer ztf --from 20240617 --programids public
+
+# Re-ingest that single night, then exit:
+cargo run --release --bin kafka_consumer ztf --on 20240617 --programids public --exit-on-eof
 ```
 
 ### Alert Processing
