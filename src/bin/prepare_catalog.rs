@@ -49,11 +49,13 @@ struct Cli {
     #[arg(long)]
     catalog: String,
 
-    /// Field holding the right ascension, in degrees within [0, 360].
+    /// Source field holding the right ascension, in degrees within [0, 360];
+    /// its parsed value is also written to the top-level `ra`.
     #[arg(long, default_value = "ra")]
     ra_field: String,
 
-    /// Field holding the declination, in degrees within [-90, 90].
+    /// Source field holding the declination, in degrees within [-90, 90];
+    /// its parsed value is also written to the top-level `dec`.
     #[arg(long, default_value = "dec")]
     dec_field: String,
 
@@ -221,6 +223,11 @@ async fn main() {
                 continue;
             }
 
+            report.updated += 1;
+            if args.dry_run {
+                continue;
+            }
+
             let coordinates = to_bson(&Coordinates::new(ra, dec)).expect("coordinates serialize");
             writes.push(WriteModel::UpdateOne(
                 UpdateOneModel::builder()
@@ -229,10 +236,13 @@ async fn main() {
                     .update(doc! { "$set": { "coordinates": coordinates, "ra": ra, "dec": dec } })
                     .build(),
             ));
-            report.updated += 1;
 
-            if writes.len() >= args.batch_size && !args.dry_run {
-                if let Err(e) = client.bulk_write(std::mem::take(&mut writes)).await {
+            if writes.len() >= args.batch_size {
+                if let Err(e) = client
+                    .bulk_write(std::mem::take(&mut writes))
+                    .ordered(false)
+                    .await
+                {
                     error!("error writing batch: {}", e);
                     std::process::exit(1);
                 }
@@ -240,8 +250,8 @@ async fn main() {
             }
         }
 
-        if !writes.is_empty() && !args.dry_run {
-            if let Err(e) = client.bulk_write(writes).await {
+        if !writes.is_empty() {
+            if let Err(e) = client.bulk_write(writes).ordered(false).await {
                 error!("error writing final batch: {}", e);
                 std::process::exit(1);
             }
