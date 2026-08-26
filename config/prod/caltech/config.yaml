@@ -23,8 +23,18 @@ babamul:
   enabled: false # Set via BOOM_BABAMUL__ENABLED environment variable
   webapp_url: https://babamul.caltech.edu # Set via BOOM_BABAMUL__WEBAPP_URL environment variable
   retention_days: 7
+posthog:
+  # Server-side product analytics for the Babamul API and Kafka stream.
+  # Leave project_api_key empty to disable analytics entirely.
+  project_api_key: "" # Set via BOOM_POSTHOG__PROJECT_API_KEY environment variable
+  host: "https://us.i.posthog.com" # Set via BOOM_POSTHOG__HOST environment variable
+  flush_interval_seconds: 10
+  queue_capacity: 10000
+  # How often Babamul Kafka consumer groups are sampled to attribute stream
+  # consumption to users. Also drives the Grafana consumption metrics.
+  consumption_interval_seconds: 300
 gpu:
-  enabled: false # Set to true to load ONNX models on GPU (CUDA) instead of CPU.
+  enabled: true # Set to true to load ONNX models on GPU (CUDA) instead of CPU.
   # Models are loaded once at startup and shared across all enrichment workers.
   # When false, models are loaded on CPU (BOOM_GPU__ENABLED env var is still respected).
   device_ids: [0] # CUDA device(s) to use. E.g. [0,1,2,3,4,5,6,7] for 8 GPUs.
@@ -39,6 +49,12 @@ kafka:
     ztf:
       server: "localhost:9092"
       group_id: "" # Set via BOOM_KAFKA__CONSUMER__ZTF__GROUP_ID environment variable
+      # Days before the current one to stay subscribed to. 1 keeps yesterday
+      # alongside today so a night spanning UTC midnight isn't cut off. Raise
+      # temporarily (via BOOM_KAFKA__CONSUMER__ZTF__SUBSCRIPTION_WINDOW_DAYS) to
+      # catch up after an upstream outage, then set it back; upstream retention
+      # (~7 days for ZTF) bounds what a lookback can recover.
+      subscription_window_days: 1
     lsst:
       server: "rubin-alert-stream-bootstrap.slac.stanford.edu:9094"
       schema_registry: "https://rubin-alert-schemas.slac.stanford.edu/schema-registry"
@@ -101,6 +117,11 @@ workers:
       n_workers: 8
     enrichment:
       n_workers: 12
+      # Alerts per enrichment batch: the queue RPOP cap AND the fixed ONNX
+      # inference shape. Partial batches are zero-padded so ORT sees one shape
+      # and the GPU memory arena stays stable. 750 is stable for both VRAM => 12GB.
+      # Caltech and MSI can handle 1000.
+      batch_size: 1000
     filter:
       n_workers: 4
       refresh_interval_minutes: 15
@@ -139,8 +160,8 @@ workers:
     filter:
       n_workers: 1
       refresh_interval_minutes: 15
-      max_match_rate: 5
-      reference_night:
+      max_match_rate: 100
+      reference_night: "2026-07-15"
 crossmatch:
   ztf:
     - catalog: Gaia_DR3
