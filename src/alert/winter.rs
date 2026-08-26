@@ -23,7 +23,7 @@ use flare::Time;
 use mongodb::bson::{doc, Document};
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, skip_serializing_none};
-use tracing::{debug, error, instrument, warn};
+use tracing::{debug, error, instrument};
 
 pub const STREAM_NAME: &str = "WINTER";
 // WINTER observes from Palomar; it covers roughly the same northern sky as ZTF.
@@ -750,7 +750,7 @@ impl AlertWorker for WinterAlertWorker {
             };
             let result = self.insert_aux(&obj, &self.alert_aux_collection).await;
             if let Err(AlertError::AlertAuxExists) = result {
-                warn!(
+                debug!(
                     "Alert aux document for object_id {} already exists. Using fallback update.",
                     object_id
                 );

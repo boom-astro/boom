@@ -1075,7 +1075,7 @@ pub trait AlertWorker {
             })?;
         Ok(status)
     }
-    #[instrument(skip(self, obj, alert_aux_collection), err)]
+    #[instrument(skip(self, obj, alert_aux_collection), err(level = "debug"))]
     async fn insert_aux<T>(
         &self,
         obj: &T,
