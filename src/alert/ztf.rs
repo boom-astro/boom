@@ -1,6 +1,9 @@
 use crate::{
     alert::{
-        base::{AlertError, AlertWorker, AlertWorkerError, ProcessAlertStatus, SchemaCache},
+        base::{
+            alert_input_queue_name, AlertError, AlertWorker, AlertWorkerError, ProcessAlertStatus,
+            SchemaCache,
+        },
         decam, lsst, LightcurveJdOnly, TimeSeries,
     },
     conf::{self, AppConfig},
@@ -950,7 +953,7 @@ impl AlertWorker for ZtfAlertWorker {
     }
 
     fn input_queue_name(&self) -> String {
-        format!("{}_alerts_packets_queue", ZtfAlertWorker::survey())
+        alert_input_queue_name(&ZtfAlertWorker::survey())
     }
 
     fn output_queue_name(&self) -> String {

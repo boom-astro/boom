@@ -1333,6 +1333,35 @@ fn report_progress(start: &Instant, stream: &Survey, count: u64, message: &str) 
     );
 }
 
+pub fn alert_input_queue_name(survey: &Survey) -> String {
+    format!("{}_alerts_packets_queue", survey)
+}
+
+pub fn alert_temp_queue_name(input_queue_name: &str) -> String {
+    format!("{}_temp", input_queue_name)
+}
+
+/// Requeue alerts left in the temp queue by a dead worker. No worker must be running.
+pub async fn recover_temp_queue(
+    con: &mut redis::aio::MultiplexedConnection,
+    input_queue_name: &str,
+) -> Result<usize, AlertWorkerError> {
+    let temp_queue_name = alert_temp_queue_name(input_queue_name);
+    let pending: usize = con.llen(&temp_queue_name).await?;
+    let mut recovered = 0;
+    for _ in 0..pending {
+        let moved: Option<Vec<Vec<u8>>> =
+            con.rpoplpush(&temp_queue_name, input_queue_name)
+                .await
+                .inspect_err(as_error!("failed to requeue an alert from the temp queue"))?;
+        if moved.is_none() {
+            break;
+        }
+        recovered += 1;
+    }
+    Ok(recovered)
+}
+
 async fn retry_valkey<T, Fut>(
     operation: &'static str,
     survey: &str,
@@ -1449,7 +1478,7 @@ pub async fn run_alert_worker<T: AlertWorker>(
     let mut alert_processor = T::new(config_path).await?;
 
     let input_queue_name = alert_processor.input_queue_name();
-    let temp_queue_name = format!("{}_temp", input_queue_name);
+    let temp_queue_name = alert_temp_queue_name(&input_queue_name);
     let output_queue_name = alert_processor.output_queue_name();
 
     let con = config
