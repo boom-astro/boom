@@ -213,6 +213,8 @@ struct TokenResponse {
     id_token: Option<String>,
     /// ORCID returns the authenticated ORCID iD alongside the token.
     orcid: Option<String>,
+    /// Token lifetime in seconds, reported by the client-credentials grant.
+    expires_in: Option<i64>,
     error: Option<String>,
     error_description: Option<String>,
 }
@@ -335,7 +337,7 @@ pub async fn exchange_code_for_identity(
                     })
             });
 
-            let email = orcid_public_email(&client, &orcid_id, sandbox).await;
+            let email = orcid_public_email(&client, &orcid_id, provider_config, sandbox).await;
             Ok(ExternalIdentity {
                 provider,
                 subject: orcid_id.clone(),
@@ -553,48 +555,13 @@ struct OrcidEmails {
     email: Vec<OrcidEmailRecord>,
 }
 
-/// Fetch an ORCID record's public email, if the researcher published one.
+/// Pick the address to trust out of an ORCID `/email` payload.
 ///
-/// Most ORCID users keep their email private, so `None` is the common case;
-/// the caller then sends the user through the confirm-by-email flow rather
-/// than inventing an address nobody has vouched for.
-async fn orcid_public_email(
-    client: &reqwest::Client,
-    orcid_id: &str,
-    sandbox: bool,
-) -> Option<String> {
-    let host = if sandbox {
-        "https://pub.sandbox.orcid.org"
-    } else {
-        "https://pub.orcid.org"
-    };
-    let url = format!("{}/v3.0/{}/email", host, orcid_id);
-    let response = match client
-        .get(&url)
-        .header("Accept", "application/json")
-        .send()
-        .await
-    {
-        Ok(response) => response,
-        Err(e) => {
-            tracing::warn!("ORCID public email lookup failed for {}: {}", orcid_id, e);
-            return None;
-        }
-    };
-    if !response.status().is_success() {
-        return None;
-    }
-    let emails: OrcidEmails = match response.json().await {
-        Ok(emails) => emails,
-        Err(e) => {
-            tracing::warn!(
-                "Could not parse ORCID email response for {}: {}",
-                orcid_id,
-                e
-            );
-            return None;
-        }
-    };
+/// Split out from the request so the selection rule can be tested against a
+/// captured response: this decides whether a user is signed straight in or
+/// sent round the confirm-by-email detour, and a silent change in ORCID's
+/// schema would flip that with nothing to show for it.
+fn first_verified_email(emails: OrcidEmails) -> Option<String> {
     emails
         .email
         .into_iter()
@@ -608,9 +575,266 @@ async fn orcid_public_email(
         .find(|email| !email.is_empty())
 }
 
+/// Fetch an ORCID record's public email, if the researcher published one.
+///
+/// Most ORCID users keep their email private — the registry defaults email
+/// visibility to "only me", and says that default is deliberately unaffected
+/// by changes to the other visibility defaults — so `None` is the common case
+/// and the caller then sends the user through the confirm-by-email flow rather
+/// than inventing an address nobody has vouched for.
+async fn orcid_public_email(
+    client: &reqwest::Client,
+    orcid_id: &str,
+    provider_config: &OAuthProviderConfig,
+    sandbox: bool,
+) -> Option<String> {
+    let host = if sandbox {
+        "https://pub.sandbox.orcid.org"
+    } else {
+        "https://pub.orcid.org"
+    };
+    let url = format!("{}/v3.0/{}/email", host, orcid_id);
+    let mut request = client.get(&url).header("Accept", "application/json");
+    // Anonymous reads share a 25k/day quota keyed on the *server's IP address*,
+    // which every deployment behind that address draws down together. A token
+    // moves the quota to this client ID and quadruples it. Best effort: an
+    // unauthenticated read still works, so a token we couldn't mint is a
+    // smaller quota rather than a broken sign-in.
+    if let Some(token) = orcid_public_api_token(client, provider_config, sandbox).await {
+        request = request.bearer_auth(token);
+    }
+    let response = match request.send().await {
+        Ok(response) => response,
+        Err(e) => {
+            tracing::warn!("ORCID public email lookup failed for {}: {}", orcid_id, e);
+            return None;
+        }
+    };
+    let status = response.status();
+    if !status.is_success() {
+        // Every one of these degrades to "no email", which looks exactly like a
+        // researcher who kept theirs private — so say so, or the fallback path
+        // silently becomes the only path and nothing anywhere records why.
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            tracing::warn!(
+                "ORCID rate-limited the email lookup for {} (HTTP 429). Sign-in still works, \
+                 but affected users are asked to confirm an address instead of being signed \
+                 straight in.",
+                orcid_id
+            );
+        } else if status == reqwest::StatusCode::NOT_FOUND {
+            // Most often a sandbox iD queried against production or the other
+            // way round, which is otherwise a confusing thing to chase.
+            tracing::warn!(
+                "ORCID has no record {} on {} (HTTP 404). Check babamul.oauth.orcid_sandbox \
+                 matches the registry this iD came from.",
+                orcid_id,
+                host
+            );
+        } else {
+            tracing::warn!(
+                "ORCID email lookup for {} returned HTTP {}",
+                orcid_id,
+                status
+            );
+        }
+        return None;
+    }
+    let emails: OrcidEmails = match response.json().await {
+        Ok(emails) => emails,
+        Err(e) => {
+            tracing::warn!(
+                "Could not parse ORCID email response for {}: {}",
+                orcid_id,
+                e
+            );
+            return None;
+        }
+    };
+    first_verified_email(emails)
+}
+
+/// A minted ORCID Public API token, with the instant it stops being usable.
+struct CachedOrcidToken {
+    access_token: String,
+    expires_at: i64,
+    /// Which registry it came from. Sandbox and production tokens are not
+    /// interchangeable, so a token minted under the other setting is a miss.
+    sandbox: bool,
+}
+
+/// The `/read-public` token, minted once per process and reused.
+static ORCID_PUBLIC_TOKEN: tokio::sync::RwLock<Option<CachedOrcidToken>> =
+    tokio::sync::RwLock::const_new(None);
+
+/// Seconds of headroom, so a token that expires mid-request isn't used.
+const ORCID_TOKEN_SKEW_SECONDS: i64 = 300;
+
+/// Get a `/read-public` token for the ORCID Public API, minting one if needed.
+///
+/// Uses the same client credentials the sign-in flow already has, so it needs
+/// no new configuration. ORCID issues these with a very long lifetime, but the
+/// expiry it reports is honoured rather than assumed.
+///
+/// Returns `None` rather than an error: the caller can read public data without
+/// a token, just against a smaller and IP-shared quota.
+async fn orcid_public_api_token(
+    client: &reqwest::Client,
+    provider_config: &OAuthProviderConfig,
+    sandbox: bool,
+) -> Option<String> {
+    let now = flare::Time::now().to_utc().timestamp();
+
+    if let Some(cached) = ORCID_PUBLIC_TOKEN.read().await.as_ref() {
+        if cached.sandbox == sandbox && cached.expires_at > now {
+            return Some(cached.access_token.clone());
+        }
+    }
+
+    // Re-check under the write lock: several sign-ins can reach this together,
+    // and there is no reason for all of them to mint a token.
+    let mut slot = ORCID_PUBLIC_TOKEN.write().await;
+    if let Some(cached) = slot.as_ref() {
+        if cached.sandbox == sandbox && cached.expires_at > now {
+            return Some(cached.access_token.clone());
+        }
+    }
+
+    let params = [
+        ("grant_type", "client_credentials"),
+        ("scope", "/read-public"),
+        ("client_id", provider_config.client_id.as_str()),
+        ("client_secret", provider_config.client_secret.as_str()),
+    ];
+    let response = match client
+        .post(OAuthProviderKind::Orcid.token_url(sandbox))
+        .header("Accept", "application/json")
+        .form(&params)
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(e) => {
+            tracing::warn!("Could not reach ORCID for a /read-public token: {}", e);
+            return None;
+        }
+    };
+    if !response.status().is_success() {
+        tracing::warn!(
+            "ORCID refused a /read-public token (HTTP {}); email lookups fall back to the \
+             smaller anonymous quota",
+            response.status()
+        );
+        return None;
+    }
+    let token: TokenResponse = match response.json().await {
+        Ok(token) => token,
+        Err(e) => {
+            tracing::warn!(
+                "Could not parse the ORCID /read-public token response: {}",
+                e
+            );
+            return None;
+        }
+    };
+    let access_token = token.access_token?;
+    // A response without `expires_in` is treated as short-lived rather than
+    // eternal, so a bad assumption costs an extra request, not a dead token.
+    let lifetime = token.expires_in.unwrap_or(3600).max(0);
+    let expires_at = now + (lifetime - ORCID_TOKEN_SKEW_SECONDS).max(0);
+
+    *slot = Some(CachedOrcidToken {
+        access_token: access_token.clone(),
+        expires_at,
+        sandbox,
+    });
+    tracing::info!(
+        "Minted an ORCID /read-public token, valid for {}s",
+        lifetime
+    );
+    Some(access_token)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A real `pub.orcid.org/v3.0/{id}/email` response, trimmed only of the
+    /// fields we never read.
+    ///
+    /// Captured from a live production record. The point is `verified`: the
+    /// selection rule demands it, so if ORCID ever drops or renames that field
+    /// every public address would start failing the filter and every ORCID
+    /// sign-in would silently divert into the confirm-by-email flow. Nothing
+    /// else in the suite would notice, because that flow works.
+    const ORCID_EMAIL_RESPONSE: &str = r#"{
+      "last-modified-date": { "value": 1599142918360 },
+      "email": [
+        {
+          "created-date": { "value": 1570121540481 },
+          "source": {
+            "source-orcid": { "path": "0000-0002-6332-9634", "host": "orcid.org" },
+            "source-name": { "value": "Charles Crossett" }
+          },
+          "email": "chuck.crossett@jhuapl.edu",
+          "path": null,
+          "visibility": "public",
+          "verified": true,
+          "primary": true
+        }
+      ],
+      "path": "/0000-0002-6332-9634/email"
+    }"#;
+
+    #[test]
+    fn a_public_verified_orcid_email_is_accepted() {
+        let emails: OrcidEmails = serde_json::from_str(ORCID_EMAIL_RESPONSE)
+            .expect("ORCID's email payload should still deserialize");
+        assert_eq!(
+            first_verified_email(emails),
+            Some("chuck.crossett@jhuapl.edu".to_string()),
+            "a public, verified address must skip the confirm-by-email detour"
+        );
+    }
+
+    #[test]
+    fn an_empty_orcid_email_list_is_not_an_email() {
+        // The common case by far: ORCID defaults email visibility to "only me".
+        let emails: OrcidEmails =
+            serde_json::from_str(r#"{"last-modified-date":null,"email":[]}"#).unwrap();
+        assert_eq!(first_verified_email(emails), None);
+    }
+
+    #[test]
+    fn an_orcid_email_is_only_used_when_orcid_says_it_is_verified() {
+        // Absent and explicitly-false both fail closed: an address nobody
+        // vouched for must not be auto-linked to an existing Babamul account
+        // that happens to use it.
+        for record in [
+            r#"{"email":[{"email":"unverified@example.org","verified":false}]}"#,
+            r#"{"email":[{"email":"unstated@example.org"}]}"#,
+        ] {
+            let emails: OrcidEmails = serde_json::from_str(record).unwrap();
+            assert_eq!(first_verified_email(emails), None, "for {}", record);
+        }
+    }
+
+    #[test]
+    fn the_first_verified_orcid_email_wins_over_an_unverified_one() {
+        let emails: OrcidEmails = serde_json::from_str(
+            r#"{"email":[
+                 {"email":"unverified@example.org","verified":false},
+                 {"email":"  Real@Example.ORG  ","verified":true}
+               ]}"#,
+        )
+        .unwrap();
+        // Normalised the same way the sign-up path stores addresses, so the
+        // lookup that links an existing account actually matches.
+        assert_eq!(
+            first_verified_email(emails),
+            Some("real@example.org".to_string())
+        );
+    }
 
     #[test]
     fn pkce_challenge_is_the_s256_of_the_verifier() {
