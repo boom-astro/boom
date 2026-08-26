@@ -23,7 +23,10 @@ function signIn() {
 }
 
 function lastRequest(fetchMock: ReturnType<typeof vi.fn>) {
-  const [url, init] = fetchMock.mock.calls.at(-1) as [string, RequestInit]
+  // Indexed rather than `.at(-1)`: this project's lib floor is ES2020, which
+  // is the browser API surface the app is allowed to use.
+  const calls = fetchMock.mock.calls
+  const [url, init] = calls[calls.length - 1] as [string, RequestInit]
   return { url, init, body: JSON.parse(String(init.body)) }
 }
 
