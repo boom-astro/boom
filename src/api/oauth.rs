@@ -1,9 +1,9 @@
 //! OAuth 2.0 / OpenID Connect sign-in for Babamul accounts.
 //!
 //! Three providers are supported: Google and ORCID (both OIDC) and GitHub
-//! (plain OAuth 2.0 plus its REST API).  The whole exchange happens
+//! (plain OAuth 2.0 plus its REST API). The whole exchange happens
 //! server-side — the browser never sees a client secret, and the only thing
-//! that comes back to the web app is a Babamul JWT.
+//! that comes back to the client is a Babamul JWT.
 //!
 //! Every provider is driven through the authorization-code flow with PKCE.
 //! GitHub does not require PKCE, but sending a challenge it ignores is
@@ -103,12 +103,12 @@ impl fmt::Display for OAuthProviderKind {
     }
 }
 
-/// A verified external identity, normalised across providers.
+/// A verified external identity, normalized across providers.
 #[derive(Debug, Clone)]
 pub struct ExternalIdentity {
     pub provider: OAuthProviderKind,
     /// Stable, provider-scoped user identifier (Google `sub`, GitHub numeric
-    /// id, ORCID iD).  This — never the email — is the join key.
+    /// id, ORCID iD). This — never the email — is the join key.
     pub subject: String,
     pub email: Option<String>,
     /// Whether the provider asserts the email address has been verified.
@@ -674,7 +674,7 @@ const ORCID_TOKEN_SKEW_SECONDS: i64 = 300;
 ///
 /// Uses the same client credentials the sign-in flow already has, so it needs
 /// no new configuration. ORCID issues these with a very long lifetime, but the
-/// expiry it reports is honoured rather than assumed.
+/// expiry it reports is honored rather than assumed.
 ///
 /// Returns `None` rather than an error: the caller can read public data without
 /// a token, just against a smaller and IP-shared quota.
@@ -828,7 +828,7 @@ mod tests {
                ]}"#,
         )
         .unwrap();
-        // Normalised the same way the sign-up path stores addresses, so the
+        // Normalized the same way the sign-up path stores addresses, so the
         // lookup that links an existing account actually matches.
         assert_eq!(
             first_verified_email(emails),

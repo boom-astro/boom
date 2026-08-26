@@ -377,7 +377,7 @@ mod tests {
     /// sign-up route too. Hiding the link in the web app is presentation; this
     /// is the part that holds when somebody posts to the API directly.
     #[actix_rt::test]
-    async fn test_babamul_signup_honours_registration_enabled() {
+    async fn test_babamul_signup_honors_registration_enabled() {
         load_dotenv();
         let mut config = AppConfig::from_test_config().unwrap();
         config.babamul.registration_enabled = false;
@@ -3659,7 +3659,7 @@ mod tests {
             .await
             .unwrap();
 
-        // An off-site redirect_to is dropped rather than honoured.
+        // An off-site redirect_to is dropped rather than honored.
         let resp = test::call_service(
             &app,
             test::TestRequest::get()
@@ -4292,7 +4292,7 @@ mod tests {
         );
         assert!(
             usernames[1].starts_with(&usernames[0]),
-            "the numbered fallback should still be recognisable: {}",
+            "the numbered fallback should still be recognizable: {}",
             usernames[1]
         );
 
@@ -4304,7 +4304,7 @@ mod tests {
     /// A deployment closed to new registrations refuses to mint an account, but
     /// still lets the accounts it has sign in and link a provider.
     #[actix_rt::test]
-    async fn test_babamul_oauth_verify_honours_registration_enabled() {
+    async fn test_babamul_oauth_verify_honors_registration_enabled() {
         load_dotenv();
         let database: Database = get_test_db_api().await;
         let auth_app_data = get_test_auth(&database).await.unwrap();

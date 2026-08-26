@@ -882,7 +882,7 @@ pub struct BabamulForgotPasswordResponse {
 /// Request a password reset link
 ///
 /// Accepts an email address and sends a password-reset link to that address if
-/// an activated account with that email exists.  The response is always the same
+/// an activated account with that email exists. The response is always the same
 /// regardless of whether the email is found – this prevents account enumeration.
 #[utoipa::path(
     post,
@@ -1037,10 +1037,10 @@ pub async fn post_babamul_reset_password(
 
     let babamul_users_collection: mongodb::Collection<BabamulUser> = db.collection("babamul_users");
 
-    // Look up the user by ALL three conditions in a single compound query.  This is
+    // Look up the user by ALL three conditions in a single compound query. This is
     // intentional: whether the token is wrong, the email is wrong, or the token has
     // expired, MongoDB returns the same `Ok(None)` result, so we always respond with
-    // the same generic message.  A separate lookup (e.g. first by token, then by email)
+    // the same generic message. A separate lookup (e.g. first by token, then by email)
     // would let an attacker probe which part of the input was incorrect.
     let now = flare::Time::now().to_utc().timestamp();
 

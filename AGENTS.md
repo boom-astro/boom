@@ -92,6 +92,22 @@ it against a clean tree — `git stash`, run the one test, `git stash pop`. A fe
 integration tests also flake under parallel access to a shared database; rerun
 in isolation before chasing one.
 
+## Prose conventions
+
+These apply to comments, doc comments, log lines, and user-facing strings —
+anywhere the repo writes English rather than code.
+
+- **US spelling.** `normalized`, not `normalised`; `honored`, `canceled`,
+  `catalog`, `center`, `labeled`. The `-ize`/`-or` forms throughout.
+- **One space after a period.** Not two.
+- **"Client", not "web app"**, for whatever is calling the API. The React app
+  is one client; API tokens and the Kafka consumers are others, and a comment
+  that says "web app" quietly excludes them. `babamul.webapp_url` keeps its
+  name because it is a published config key and environment variable — the
+  convention is about prose, not about renaming deployed settings.
+
+Nothing enforces these, so they are worth a glance in review.
+
 ## Checks to run
 
 ```sh

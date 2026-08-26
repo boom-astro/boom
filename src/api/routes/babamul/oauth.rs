@@ -5,7 +5,7 @@
 //!   api ──302──▶ provider consent screen
 //!   provider ──302 ?code&state──▶ /babamul/oauth/{provider}/callback
 //!   api ──code+verifier──▶ provider token endpoint  (server-to-server)
-//!   api ──302 {webapp}/oauth/callback#access_token=…──▶ browser
+//!   api ──302 {client}/oauth/callback#access_token=…──▶ browser
 //! ```
 //!
 //! The JWT comes back in the URL *fragment*, which browsers never send to a
@@ -61,7 +61,7 @@ struct PendingAuthorization {
     state: String,
     provider: String,
     pkce_verifier: String,
-    /// Relative path in the web app to land on after a successful login
+    /// Relative path in the client to land on after a successful login
     redirect_to: Option<String>,
     created_at: i64,
     expires_at: i64,
@@ -123,8 +123,12 @@ pub struct OAuthProviderInfo {
 )]
 #[get("/oauth/providers")]
 pub async fn get_oauth_providers(config: web::Data<AppConfig>) -> HttpResponse {
-    // Credentials alone don't make a provider usable, so don't advertise a
-    // button whose flow would die at /start or on the way back.
+    // Two independent gates, both needed before a button is worth rendering.
+    // Per provider, `config()` returns `Some` only when that provider has BOTH
+    // halves of its credential — client ID and secret — which is the whole
+    // definition of "enabled"; there is no separate flag. Deployment-wide, the
+    // two URLs every flow depends on have to be set, or a provider with
+    // perfectly good credentials would still die at /start or on the way back.
     let providers: Vec<OAuthProviderInfo> = if !oauth_urls_configured(&config) {
         Vec::new()
     } else {
@@ -159,8 +163,8 @@ fn oauth_urls_configured(config: &AppConfig) -> bool {
 
 #[derive(Deserialize)]
 pub struct OAuthStartQuery {
-    /// Where to send the user in the web app once signed in. Only in-app
-    /// absolute paths are honoured; anything else is ignored so this cannot be
+    /// Where to send the user in the client once signed in. Only in-app
+    /// absolute paths are honored; anything else is ignored so this cannot be
     /// turned into an open redirect.
     pub redirect_to: Option<String>,
 }
@@ -238,7 +242,7 @@ pub struct OAuthCallbackQuery {
     pub error_description: Option<String>,
 }
 
-/// Complete a social sign-in and hand the web app a Babamul JWT
+/// Complete a social sign-in and hand the client a Babamul JWT
 #[utoipa::path(
     get,
     path = "/babamul/oauth/{provider}/callback",
@@ -248,7 +252,7 @@ pub struct OAuthCallbackQuery {
         ("state" = Option<String>, Query, description = "Opaque state issued by /start")
     ),
     responses(
-        (status = 302, description = "Redirect back to the web app with a token or an error"),
+        (status = 302, description = "Redirect back to the client with a token or an error"),
         (status = 404, description = "Unknown or disabled provider")
     ),
     tags=["Babamul"]
@@ -277,13 +281,13 @@ pub async fn get_oauth_callback(
             error,
             query.error_description.as_deref().unwrap_or("")
         );
-        return redirect_to_webapp(&config, None, Some("Sign-in was cancelled"), None);
+        return redirect_to_client(&config, None, Some("Sign-in was canceled"), None);
     }
 
     let (code, state) = match (&query.code, &query.state) {
         (Some(code), Some(state)) if !code.is_empty() && !state.is_empty() => (code, state),
         _ => {
-            return redirect_to_webapp(
+            return redirect_to_client(
                 &config,
                 None,
                 Some("Sign-in response was incomplete"),
@@ -298,7 +302,7 @@ pub async fn get_oauth_callback(
     let pending = match states.find_one_and_delete(doc! { "_id": state }).await {
         Ok(Some(pending)) => pending,
         Ok(None) => {
-            return redirect_to_webapp(
+            return redirect_to_client(
                 &config,
                 None,
                 Some("Sign-in request expired or was already used. Please try again."),
@@ -307,13 +311,13 @@ pub async fn get_oauth_callback(
         }
         Err(e) => {
             tracing::error!("Could not look up OAuth state: {}", e);
-            return redirect_to_webapp(&config, None, Some("Sign-in failed"), None);
+            return redirect_to_client(&config, None, Some("Sign-in failed"), None);
         }
     };
 
     let now = flare::Time::now().to_utc().timestamp();
     if pending.expires_at <= now {
-        return redirect_to_webapp(
+        return redirect_to_client(
             &config,
             None,
             Some("Sign-in request expired. Please try again."),
@@ -323,7 +327,7 @@ pub async fn get_oauth_callback(
     // The state is scoped to the provider that issued it; a mismatch means the
     // callback was replayed against a different provider's endpoint.
     if pending.provider != provider.as_str() {
-        return redirect_to_webapp(&config, None, Some("Sign-in request was invalid"), None);
+        return redirect_to_client(&config, None, Some("Sign-in request was invalid"), None);
     }
 
     let identity =
@@ -331,7 +335,7 @@ pub async fn get_oauth_callback(
             Ok(identity) => identity,
             Err(e) => {
                 tracing::error!("{} sign-in failed: {}", provider, e);
-                return redirect_to_webapp(
+                return redirect_to_client(
                     &config,
                     None,
                     Some("Could not verify your account with the sign-in provider"),
@@ -366,7 +370,7 @@ pub async fn get_oauth_callback(
         Ok(Resolution::PendingActivation { email }) => {
             // Signing in again does not skip the verification they never
             // finished; send them back to the confirmation step.
-            return redirect_to_webapp(
+            return redirect_to_client(
                 &config,
                 None,
                 Some(&format!(
@@ -377,16 +381,16 @@ pub async fn get_oauth_callback(
             );
         }
         Err(ResolveError::Conflict(message)) => {
-            return redirect_to_webapp(&config, None, Some(&message), None);
+            return redirect_to_client(&config, None, Some(&message), None);
         }
         Err(ResolveError::Internal(e)) => {
             tracing::error!("Could not resolve {} identity: {}", provider, e);
-            return redirect_to_webapp(&config, None, Some("Sign-in failed"), None);
+            return redirect_to_client(&config, None, Some("Sign-in failed"), None);
         }
     };
 
     match create_babamul_jwt(&auth, &user.id).await {
-        Ok((token, expires_in)) => redirect_to_webapp(
+        Ok((token, expires_in)) => redirect_to_client(
             &config,
             Some((token, expires_in)),
             None,
@@ -394,7 +398,7 @@ pub async fn get_oauth_callback(
         ),
         Err(e) => {
             tracing::error!("Failed to create JWT after {} sign-in: {}", provider, e);
-            redirect_to_webapp(&config, None, Some("Sign-in failed"), None)
+            redirect_to_client(&config, None, Some("Sign-in failed"), None)
         }
     }
 }
@@ -754,9 +758,9 @@ fn safe_redirect_path(raw: &str) -> Option<String> {
     }
 }
 
-/// Send the browser back to the web app, carrying either a token or an error in
+/// Send the browser back to the client, carrying either a token or an error in
 /// the URL fragment.
-fn redirect_to_webapp(
+fn redirect_to_client(
     config: &AppConfig,
     token: Option<(String, Option<usize>)>,
     error: Option<&str>,
@@ -880,7 +884,7 @@ async fn load_pending_identity(
 
 #[derive(Deserialize, Clone, ToSchema)]
 pub struct OAuthCompletePost {
-    /// Ticket handed to the web app by the sign-in redirect
+    /// Ticket handed to the client by the sign-in redirect
     pub ticket: String,
     pub email: String,
 }

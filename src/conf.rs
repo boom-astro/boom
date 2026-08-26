@@ -583,7 +583,7 @@ pub struct BabamulConfig {
     /// Whether this deployment will create new accounts (default: true).
     ///
     /// Set to `false` for a pre-release deployment that is open only to
-    /// accounts that already exist. Every path that would mint one honours it —
+    /// accounts that already exist. Every path that would mint one honors it —
     /// password sign-up and social sign-in alike — so it cannot be sidestepped
     /// by calling the API directly or by pressing a sign-in button the web app
     /// still shows. Signing in with an account that already exists, including
