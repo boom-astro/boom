@@ -226,7 +226,7 @@ volume paths, and the specific env keys injected into containers — belong here
 
 | Variable | Required? | Notes |
 | --- | --- | --- |
-| `DOMAIN` | Yes | Apex domain, e.g. `boom.caltech.edu`. |
+| `DOMAIN` | Yes | Apex domain, e.g. `kaboom.caltech.edu`. |
 | `BOOM_CONFIG_PATH` | Yes | Generated prod config, e.g. `./config/prod/caltech/config.yaml`. |
 | `STACK_NAME` | No | Hard-coded to `boom` in the workflow; not a GitHub var. |
 | `BOOM_API__DOMAIN` | No | Defaults to `api.${DOMAIN}`. |
@@ -240,6 +240,9 @@ volume paths, and the specific env keys injected into containers — belong here
 | `BOOM_DATA_MONGODB_PATH` | No | Host bind mount for MongoDB; falls back to a named volume. |
 | `BOOM_DATA_VALKEY_PATH` | No | Host bind mount for Valkey; falls back to a named volume. |
 | `BOOM_DATA_KAFKA_PATH` | No | Host bind mount for Kafka; falls back to a named volume. |
+| `BOOM_DATA_CUTOUTS_MONGODB_PATH` | No | Host bind mount for the dedicated cutouts MongoDB (the workflow maps it to compose's `BOOM_CUTOUTS_MONGO_VOLUME`); falls back to a named volume. |
+| `BOOM_MONGO_MEM_LIMIT` | No | Memory limit for the alerts MongoDB container, which is what caps its WiredTiger cache. Unset means unlimited, and both mongos then size their cache off total host RAM. See [.env.example](/.env.example) for sizing. |
+| `BOOM_CUTOUTS_MONGO_MEM_LIMIT` | No | Same, for the cutouts MongoDB container. |
 | `BOOM_KAFKA__CONSUMER__ZTF__SERVER` | Yes | ZTF Kafka bootstrap server. Reused for the WINTER consumer, which shares the same (unauthenticated) broker. |
 | `BOOM_KAFKA__CONSUMER__ZTF__GROUP_ID` | Yes | ZTF consumer group ID (per-program suffix added by compose). |
 | `BOOM_KAFKA__CONSUMER__LSST__GROUP_ID` | Yes | LSST consumer group ID. |
@@ -258,7 +261,8 @@ volume paths, and the specific env keys injected into containers — belong here
 
 | Secret | Required? | Notes |
 | --- | --- | --- |
-| `BOOM_DATABASE__PASSWORD` | Yes | MongoDB root password (also used for cutout storage). |
+| `BOOM_DATABASE__PASSWORD` | Yes | MongoDB root password for the alerts database. |
+| `BOOM_CUTOUTS_STORAGE__PASSWORD` | Yes | Root password for the dedicated cutouts MongoDB. The deploy always layers in `docker-compose.cutouts-mongo.yaml`, which reads it as `${BOOM_CUTOUTS_STORAGE__PASSWORD:?...}`, so a missing value aborts the deploy at interpolation time. |
 | `BOOM_API__AUTH__SECRET_KEY` | Yes | JWT signing key (32+ chars). |
 | `BOOM_API__AUTH__ADMIN_PASSWORD` | Yes | Bootstrap admin password. |
 | `KAFKA_ADMIN_PASSWORD` | Yes | SASL admin password used by the ACL init script. |
