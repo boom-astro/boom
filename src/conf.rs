@@ -880,7 +880,7 @@ pub struct AppConfig {
     #[serde(default)]
     pub babamul: BabamulConfig,
     #[serde(default)]
-    pub otel: OTelCollectorConfig, 
+    pub otel: OTelCollectorConfig,
     #[serde(default)]
     pub posthog: PostHogConfig,
     pub kafka: KafkaConfig,
