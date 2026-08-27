@@ -3339,8 +3339,10 @@ mod tests {
 
         let auth_header = ("Authorization", format!("Bearer {}", test_user.token));
 
-        // No auth header
-        let resp = test::call_service(
+        // No auth header — babamul_auth_middleware returns Err (not an Ok(401
+        // response)) for missing auth, so this must go through
+        // try_call_service rather than call_service (which panics on Err).
+        let resp = test::try_call_service(
             &app,
             test::TestRequest::post()
                 .uri("/babamul/surveys/ztf/alerts/skymap-search")
@@ -3352,10 +3354,10 @@ mod tests {
                 .to_request(),
         )
         .await;
+        assert!(resp.is_err(), "should reject missing auth");
         assert_eq!(
-            resp.status(),
-            StatusCode::UNAUTHORIZED,
-            "should reject missing auth"
+            resp.err().unwrap().as_response_error().status_code(),
+            StatusCode::UNAUTHORIZED
         );
 
         // end_jd <= start_jd

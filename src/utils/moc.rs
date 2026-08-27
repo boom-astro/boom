@@ -531,18 +531,32 @@ pub fn select_covering_depth(moc: &HpxMoc) -> u8 {
     }
 }
 
+/// The coarsest depth [`select_covering_depth_bounded`] will ever coarsen to
+/// (matches [`select_covering_depth`]'s own coarsest tier, used for any region
+/// ≥1000 sq deg). Below this, cells are ~13.4 sq deg — coarsening further would
+/// make the covering cones so large they stop meaningfully narrowing the
+/// MongoDB query, which is exactly the "genuinely too broad a search" case that
+/// should still be rejected rather than silently accepted at any cost.
+const MIN_COVERING_DEPTH: u8 = 3;
+
 /// Select a covering depth for `moc` whose covering-cone count is guaranteed
-/// at or under `max_cones`, and return those cones alongside it.
+/// at or under `max_cones` if achievable without coarsening past
+/// [`MIN_COVERING_DEPTH`], and return those cones alongside it (the caller is
+/// still responsible for rejecting the result if it's over `max_cones`).
 ///
 /// Starts from the area-based heuristic in [`select_covering_depth`], then
 /// adaptively coarsens (one depth level at a time) while the actual cone count
 /// exceeds `max_cones` — this is what makes a fragmented-but-small region (see
 /// [`select_covering_depth`]'s caveat) converge on a usable depth instead of
-/// spuriously exceeding the cap at the heuristic's first guess.
+/// spuriously exceeding the cap at the heuristic's first guess. The floor keeps
+/// this fragmentation fix from also swallowing the case it must NOT fix: a
+/// region that's genuinely too broad (e.g. covering most of the sky) should
+/// still hit the cone cap and be rejected, not get coarsened all the way down
+/// to a handful of sky-spanning, effectively-unfiltering cones.
 pub fn select_covering_depth_bounded(moc: &HpxMoc, max_cones: usize) -> (u8, Vec<(f64, f64, f64)>) {
     let mut depth = select_covering_depth(moc);
     let mut cones = moc_to_covering_cones(moc, depth);
-    while depth > 0 && cones.len() > max_cones {
+    while depth > MIN_COVERING_DEPTH && cones.len() > max_cones {
         depth -= 1;
         cones = moc_to_covering_cones(moc, depth);
     }
@@ -1012,27 +1026,24 @@ mod tests {
         );
     }
 
-    /// A small-area but fragmented (many disjoint islands) MOC can need far more
-    /// covering cones than its area alone suggests, since cells don't merge
+    /// A fragmented (many disjoint islands, ~10 sq deg total) MOC can need far
+    /// more covering cones than its area alone suggests, since cells don't merge
     /// across gaps. `select_covering_depth` (area-only) picks a depth that
     /// exceeds a 500-cone budget here; `select_covering_depth_bounded` must
-    /// adaptively coarsen until it fits.
+    /// adaptively coarsen until it fits, without needing to coarsen below
+    /// `MIN_COVERING_DEPTH`.
     #[test]
     fn test_select_covering_depth_bounded_handles_fragmentation() {
         let depth = 9u8;
         let layer = cdshealpix::nested::get(depth);
-        let cells = (0..600u32).map(|i| {
-            let ra = (i as f64 * 137.508) % 360.0; // golden-angle scatter
-            let dec = -80.0 + (i as f64 * 0.19) % 160.0;
+        // 800 small islands golden-angle-scattered across an ~80x40 deg patch —
+        // widely spread, but not the whole sky — totaling ~10.5 sq deg.
+        let cells = (0..800u32).map(|i| {
+            let ra = (i as f64 * 0.61803398875 * 80.0) % 80.0;
+            let dec = (-20.0 + (i as f64 * 0.37 * 40.0) % 40.0).clamp(-89.0, 89.0);
             (depth, layer.hash(ra.to_radians(), dec.to_radians()))
         });
         let moc: HpxMoc = RangeMOC::from_cells(depth, cells, None);
-        let coverage_sq_deg = moc.coverage_percentage() * 41253.0;
-        assert!(
-            coverage_sq_deg < 10.0,
-            "test setup: area should be small ({} sq deg)",
-            coverage_sq_deg
-        );
 
         let naive_depth = select_covering_depth(&moc);
         let naive_cones = moc_to_covering_cones(&moc, naive_depth).len();
@@ -1042,11 +1053,38 @@ mod tests {
             naive_cones
         );
 
-        let (_, bounded_cones) = select_covering_depth_bounded(&moc, 500);
+        let (bounded_depth, bounded_cones) = select_covering_depth_bounded(&moc, 500);
+        assert!(
+            bounded_depth >= MIN_COVERING_DEPTH,
+            "should not coarsen below the floor"
+        );
         assert!(
             bounded_cones.len() <= 500,
             "bounded selection should respect the cap, got {} cones",
             bounded_cones.len()
+        );
+    }
+
+    /// A genuinely broad region (not just fragmented — most of the sky) must
+    /// still exceed the cone cap even after `select_covering_depth_bounded`
+    /// coarsens down to `MIN_COVERING_DEPTH`, so the caller's cap check can
+    /// still reject it. The fragmentation fix above must not make an
+    /// intentionally-too-broad search silently succeed at any cost.
+    #[test]
+    fn test_select_covering_depth_bounded_still_rejects_genuinely_broad_regions() {
+        let bytes = std::fs::read("./data/ls_footprint_moc.fits")
+            .expect("Failed to read footprint MOC file");
+        let moc = moc_from_fits_bytes(&bytes).expect("Failed to parse MOC");
+
+        let (depth, cones) = select_covering_depth_bounded(&moc, 500);
+        assert_eq!(
+            depth, MIN_COVERING_DEPTH,
+            "should coarsen all the way to the floor for a ~67%-of-sky footprint"
+        );
+        assert!(
+            cones.len() > 500,
+            "a genuinely broad region should still exceed the cap at the floor, got {} cones",
+            cones.len()
         );
     }
 }
