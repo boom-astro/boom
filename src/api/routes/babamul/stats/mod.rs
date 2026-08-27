@@ -1,7 +1,7 @@
-pub mod realtime;
 pub mod collections;
 pub mod kafka;
 pub mod nightly;
+pub mod realtime;
 
 pub const STATS_COLLECTION: &str = "stats";
 
