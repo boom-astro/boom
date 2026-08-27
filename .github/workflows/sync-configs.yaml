@@ -20,7 +20,7 @@ jobs:
           fetch-depth: 0
 
       - name: Setup system dependencies
-        run: sudo apt-get install -y libsasl2-dev
+        run: sudo apt-get update && sudo apt-get install -y libsasl2-dev libcfitsio-dev
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
