@@ -18,8 +18,13 @@ pub struct RealtimeAlertMetrics {
 /// 
 /// Looks for gauge metrics matching the pattern:
 /// `babamul_kafka_consumer_committed_offset{survey="...",topic="...",group="..."} <value>`
-pub fn parse_otel_metrics(text: &str, gathered_at: i64) -> Result<Vec<RealtimeAlertMetrics>, String> {
-    let mut survey_totals: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+pub fn parse_otel_metrics(
+      text: &str,
+      gathered_at: i64,
+  ) -> Result<Vec<RealtimeAlertMetrics>, String> {
+    let mut survey_totals: std::collections::HashMap<String, u64> =
+          std::collections::HashMap::new();
+
 
     for line in text.lines() {
         // Skip comments (lines starting with #) and empty lines
@@ -95,7 +100,10 @@ fn extract_survey_label(metric_part: &str) -> Option<String> {
     tags=["Babamul", "Stats"]
 )]
 #[get("/stats/realtime")]
-pub async fn get_realtime_stats(config: web::Data<crate::conf::AppConfig>,client: web::Data<reqwest::Client>,) -> HttpResponse {
+pub async fn get_realtime_stats(
+    config: web::Data<crate::conf::AppConfig>,
+    client: web::Data<reqwest::Client>,
+) -> HttpResponse {
     // --- STEP 1: Validate that metrics collection is enabled ---
     if !config.otel.enabled {
         debug!("Metrics collection is disabled; returning 503 Service Unavailable");
