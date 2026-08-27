@@ -439,6 +439,74 @@ impl ActivityMetrics {
     }
 }
 
+/// Per-object detection-history summary, computed at enrichment from the object's
+/// accumulated light curve and written onto every alert so filters can make
+/// history-aware cuts (e.g. "steady star that just started going negative") with a
+/// plain `$match`. BOOM filter pipelines are strictly per-alert and reject
+/// `$group`/`$unwind`/`$lookup`, so the history has to be precomputed here.
+///
+/// Each survey feeds `(jd, is_negative)` points from its own light curve — sign
+/// from the psfFlux sign (ZTF/LSST), `isdiffpos` (WINTER), or the signed SNR
+/// (DECam). Windows are measured back from the alert epoch, keeping the values
+/// deterministic per alert rather than dependent on wall-clock time at enrichment.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize, AvroSchema, ToSchema)]
+#[serde(default)]
+pub struct DetectionHistory {
+    /// Detections with a known sign in the object's history (`n_pos + n_neg`).
+    pub n_det: i32,
+    /// Positive-difference detections (source brighter than the reference).
+    pub n_pos: i32,
+    /// Negative-difference detections (source fainter than the reference).
+    pub n_neg: i32,
+    /// JD of the object's first-ever negative detection; `None` if it has none.
+    pub first_neg_jd: Option<f64>,
+    /// JD of the object's most recent negative detection; `None` if it has none.
+    pub last_neg_jd: Option<f64>,
+    /// Positive detections in the 30 days ending at the alert epoch.
+    pub n_pos_30d: i32,
+    /// Negative detections in the 30 days ending at the alert epoch.
+    pub n_neg_30d: i32,
+}
+
+impl DetectionHistory {
+    /// Summarise detection history from `(jd, is_negative)` points, with windows
+    /// measured back from the alert epoch `ref_jd`. Points after `ref_jd` (a
+    /// concurrently-ingested newer alert) and points whose sign is unknown (`None`,
+    /// e.g. pre-migration) are skipped, so `n_det == n_pos + n_neg`.
+    pub fn from_points<I>(points: I, ref_jd: f64) -> Self
+    where
+        I: IntoIterator<Item = (f64, Option<bool>)>,
+    {
+        let cutoff = ref_jd - 30.0;
+        let mut h = DetectionHistory::default();
+        for (jd, is_negative) in points {
+            if jd > ref_jd {
+                continue;
+            }
+            let is_negative = match is_negative {
+                Some(v) => v,
+                None => continue,
+            };
+            h.n_det += 1;
+            let recent = jd >= cutoff;
+            if is_negative {
+                h.n_neg += 1;
+                if recent {
+                    h.n_neg_30d += 1;
+                }
+                h.first_neg_jd = Some(h.first_neg_jd.map_or(jd, |j| j.min(jd)));
+                h.last_neg_jd = Some(h.last_neg_jd.map_or(jd, |j| j.max(jd)));
+            } else {
+                h.n_pos += 1;
+                if recent {
+                    h.n_pos_30d += 1;
+                }
+            }
+        }
+        h
+    }
+}
+
 // TODO: avro serialization fail when we use skip_serializing_none,
 // since the optional fields are not just None but simply missing
 // (this needs to be fixed in the apache_avro-related crates)
@@ -727,6 +795,42 @@ pub fn analyze_photometry(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // pos/neg counts, first/last-neg epochs, and the 30-day windows measured back
+    // from the alert epoch. A point after the epoch (concurrent newer alert) and a
+    // sign-unknown point (`None`) are both excluded, so n_det == n_pos + n_neg.
+    #[test]
+    fn test_detection_history_counts_and_windows() {
+        let ref_jd = 2_461_300.0;
+        let points = vec![
+            (ref_jd - 200.0, Some(false)), // old positive
+            (ref_jd - 100.0, Some(true)),  // old negative (first neg)
+            (ref_jd - 20.0, Some(false)),  // recent positive
+            (ref_jd - 10.0, Some(true)),   // recent negative
+            (ref_jd - 2.0, Some(true)),    // recent negative (last neg)
+            (ref_jd - 5.0, None),          // unknown sign -> skipped
+            (ref_jd + 5.0, Some(true)),    // after epoch -> skipped
+        ];
+
+        let h = DetectionHistory::from_points(points, ref_jd);
+        assert_eq!(h.n_det, 5);
+        assert_eq!(h.n_pos, 2);
+        assert_eq!(h.n_neg, 3);
+        assert_eq!(h.first_neg_jd, Some(ref_jd - 100.0));
+        assert_eq!(h.last_neg_jd, Some(ref_jd - 2.0));
+        assert_eq!(h.n_pos_30d, 1);
+        assert_eq!(h.n_neg_30d, 2);
+    }
+
+    #[test]
+    fn test_detection_history_empty_when_never_negative() {
+        let ref_jd = 2_461_300.0;
+        let h = DetectionHistory::from_points(vec![(ref_jd - 3.0, Some(false))], ref_jd);
+        assert_eq!(h.n_pos, 1);
+        assert_eq!(h.n_neg, 0);
+        assert!(h.first_neg_jd.is_none());
+        assert!(h.last_neg_jd.is_none());
+    }
 
     #[test]
     fn test_flux2mag() {
