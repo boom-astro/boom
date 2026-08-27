@@ -99,10 +99,7 @@ pub async fn get_villar_fit(
         {
             Ok(Some(alert)) => alert.candid,
             Ok(None) => {
-                return response::not_found(&format!(
-                    "no alerts found for objectId {}",
-                    object_id
-                ));
+                return response::not_found(&format!("no alerts found for objectId {}", object_id));
             }
             Err(error) => {
                 return response::internal_error(&format!("error getting documents: {}", error));

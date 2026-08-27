@@ -3310,7 +3310,10 @@ mod tests {
 
         // Lookup by candid
         let req = test::TestRequest::get()
-            .uri(&format!("/babamul/surveys/ztf/villar-fit?candid={}", candid))
+            .uri(&format!(
+                "/babamul/surveys/ztf/villar-fit?candid={}",
+                candid
+            ))
             .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
             .to_request();
         let resp = test::call_service(&app, req).await;
@@ -3323,7 +3326,10 @@ mod tests {
         let body = read_json_response(resp).await;
         assert_eq!(body["data"]["candid"].as_i64().unwrap(), candid);
         assert_eq!(body["data"]["reduced_chi2"].as_f64().unwrap(), 1.23);
-        assert_eq!(body["data"]["params"]["amplitude_g"].as_f64().unwrap(), 4.56);
+        assert_eq!(
+            body["data"]["params"]["amplitude_g"].as_f64().unwrap(),
+            4.56
+        );
         assert!(
             body["data"]["params"]["amplitude_r"].is_null(),
             "NaN values should serialize to null"
@@ -3349,7 +3355,10 @@ mod tests {
 
         // Unsupported survey
         let req = test::TestRequest::get()
-            .uri(&format!("/babamul/surveys/lsst/villar-fit?candid={}", candid))
+            .uri(&format!(
+                "/babamul/surveys/lsst/villar-fit?candid={}",
+                candid
+            ))
             .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
             .to_request();
         let resp = test::call_service(&app, req).await;
@@ -3374,7 +3383,10 @@ mod tests {
             .expect("Failed to set programid");
 
         let req = test::TestRequest::get()
-            .uri(&format!("/babamul/surveys/ztf/villar-fit?candid={}", candid))
+            .uri(&format!(
+                "/babamul/surveys/ztf/villar-fit?candid={}",
+                candid
+            ))
             .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
             .to_request();
         let resp = test::call_service(&app, req).await;
