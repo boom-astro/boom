@@ -370,8 +370,7 @@ export async function fetchStats(startDate: string, endDate: string, survey?: st
   const body = await parseResponseJson(res).catch(() => ({ data: [] }));
   const result = unwrapData<unknown>(body, []);
   return Array.isArray(result) ? (result as NightlyStat[]) : [];
-
-};
+}
 
 export type TopicInfo = {
   name: string;
