@@ -81,7 +81,6 @@ fn extract_survey_label(metric_part: &str) -> Option<String> {
 }
 
 /// Fetch realtime alert metrics from your Boom API's Prometheus endpoint.
-///
 /// This endpoint queries your API's native Prometheus metrics (babamul.kafka.consumer.*)
 /// to get realtime alert consumption statistics per survey.
 ///
