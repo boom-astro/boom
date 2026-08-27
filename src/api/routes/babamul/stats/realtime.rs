@@ -21,12 +21,9 @@ pub struct RealtimeAlertMetrics {
 pub fn parse_otel_metrics(
     text: &str,
     gathered_at: i64,
-  ) -> Result<Vec<RealtimeAlertMetrics>, String> {
+) -> Result<Vec<RealtimeAlertMetrics>, String> {
     let mut survey_totals: std::collections::HashMap<String, u64> =
-          
-        
         std::collections::HashMap::new();
-
 
     for line in text.lines() {
         // Skip comments (lines starting with #) and empty lines
