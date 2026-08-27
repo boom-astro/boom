@@ -1,5 +1,6 @@
 use cdshealpix::nested;
 use fitsio::FitsFile;
+use flare::spatial::great_circle_distance;
 use moc::deser::fits::skymap::from_fits_skymap;
 use moc::deser::fits::{from_fits_ivoa, MocIdxType, MocQtyType, MocType};
 use moc::moc::range::RangeMOC;
@@ -49,7 +50,12 @@ pub fn moc_from_skymap_bytes(bytes: &[u8], credible_level: f64) -> Result<HpxMoc
 }
 
 /// Extract HEALPix order from a UNIQ index.  UNIQ = 4·4^order + ipix.
+///
+/// The minimum valid UNIQ (order 0, ipix 0) is 4; callers must not pass a
+/// smaller value (checked once, at parse time, in [`parse_3d_skymap`]) since
+/// `63 - uniq.leading_zeros()` underflows for `uniq < 4`.
 fn uniq_to_order(uniq: u64) -> u8 {
+    debug_assert!(uniq >= 4, "invalid UNIQ index: {uniq} (minimum is 4)");
     ((63 - uniq.leading_zeros()) / 2 - 1) as u8
 }
 
@@ -98,6 +104,13 @@ pub fn parse_3d_skymap(path: &str) -> Result<LIGO3dskymap, String> {
     let (uniq, pixel_area_sr, prob) = if let Ok(uniq_i64) = hdu.read_col::<i64>(&mut fits, "UNIQ") {
         // ── Multi-order format ──────────────────────────────────────────
         let uniq: Vec<u64> = uniq_i64.iter().map(|&u| u as u64).collect();
+        // The minimum valid UNIQ (order 0, ipix 0) is 4; reject anything smaller
+        // up front rather than letting it corrupt downstream order/ipix decoding.
+        if let Some(&bad) = uniq.iter().find(|&&u| u < 4) {
+            return Err(format!(
+                "Invalid UNIQ index in skymap FITS: {bad} (minimum valid UNIQ is 4)"
+            ));
+        }
         let areas: Vec<f64> = uniq
             .iter()
             .map(|&u| pixel_area_from_order(uniq_to_order(u)))
@@ -419,7 +432,7 @@ pub fn credible_volume_to_2d_moc(
     // probability can pass the 3D threshold purely due to a high DISTNORM, pulling
     // in sky regions with no real GW localization support.
     let mut sorted_prob: Vec<f64> = skymap.prob.clone();
-    sorted_prob.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+    sorted_prob.sort_unstable_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
     let cumsum: Vec<f64> = sorted_prob
         .iter()
         .scan(0.0, |acc, &p| {
@@ -427,7 +440,6 @@ pub fn credible_volume_to_2d_moc(
             Some(*acc)
         })
         .collect();
-    // # let cutoff_idx = cumsum.partition_point(|&s| s <= 0.99);
     let cutoff_idx = cumsum.partition_point(|&s| s <= credible_level);
     let prob_floor_2d = if cutoff_idx < sorted_prob.len() {
         sorted_prob[cutoff_idx]
@@ -498,6 +510,12 @@ pub fn moc_to_covering_cones(moc: &HpxMoc, target_depth: u8) -> Vec<(f64, f64, f
 ///
 /// Returns a depth that produces a manageable number of covering cones
 /// (typically under ~500) for use in a MongoDB `$or` query.
+///
+/// This is a fast area-only heuristic: it has no notion of fragmentation, so a
+/// small-area but disjoint/patchy region (many separate islands, none of which
+/// merge into a single covering cell) can still produce far more cones than the
+/// area alone suggests. Callers that need a hard cap on cone count should use
+/// [`select_covering_depth_bounded`] instead.
 pub fn select_covering_depth(moc: &HpxMoc) -> u8 {
     let coverage_pct = moc.coverage_percentage();
     let coverage_sq_deg = coverage_pct * 41253.0; // full sky ≈ 41253 sq deg
@@ -513,12 +531,37 @@ pub fn select_covering_depth(moc: &HpxMoc) -> u8 {
     }
 }
 
-/// Haversine angular distance between two points on the sphere (in radians).
+/// Select a covering depth for `moc` whose covering-cone count is guaranteed
+/// at or under `max_cones`, and return those cones alongside it.
+///
+/// Starts from the area-based heuristic in [`select_covering_depth`], then
+/// adaptively coarsens (one depth level at a time) while the actual cone count
+/// exceeds `max_cones` — this is what makes a fragmented-but-small region (see
+/// [`select_covering_depth`]'s caveat) converge on a usable depth instead of
+/// spuriously exceeding the cap at the heuristic's first guess.
+pub fn select_covering_depth_bounded(moc: &HpxMoc, max_cones: usize) -> (u8, Vec<(f64, f64, f64)>) {
+    let mut depth = select_covering_depth(moc);
+    let mut cones = moc_to_covering_cones(moc, depth);
+    while depth > 0 && cones.len() > max_cones {
+        depth -= 1;
+        cones = moc_to_covering_cones(moc, depth);
+    }
+    (depth, cones)
+}
+
+/// Angular distance between two points on the sphere (in radians).
+///
+/// Delegates to `flare::spatial::great_circle_distance` (an atan2-based
+/// formula, more numerically stable near antipodal points than a haversine)
+/// rather than reimplementing the formula here.
 fn angular_distance(lon1: f64, lat1: f64, lon2: f64, lat2: f64) -> f64 {
-    let dlat = lat2 - lat1;
-    let dlon = lon2 - lon1;
-    let a = (dlat / 2.0).sin().powi(2) + lat1.cos() * lat2.cos() * (dlon / 2.0).sin().powi(2);
-    2.0 * a.sqrt().asin()
+    great_circle_distance(
+        lon1.to_degrees(),
+        lat1.to_degrees(),
+        lon2.to_degrees(),
+        lat2.to_degrees(),
+    )
+    .to_radians()
 }
 
 #[cfg(test)]
@@ -966,6 +1009,44 @@ mod tests {
             frac_finite > 0.5,
             "Expected majority of pixels to have finite (μ, σ, N), got {:.1}%",
             frac_finite * 100.0,
+        );
+    }
+
+    /// A small-area but fragmented (many disjoint islands) MOC can need far more
+    /// covering cones than its area alone suggests, since cells don't merge
+    /// across gaps. `select_covering_depth` (area-only) picks a depth that
+    /// exceeds a 500-cone budget here; `select_covering_depth_bounded` must
+    /// adaptively coarsen until it fits.
+    #[test]
+    fn test_select_covering_depth_bounded_handles_fragmentation() {
+        let depth = 9u8;
+        let layer = cdshealpix::nested::get(depth);
+        let cells = (0..600u32).map(|i| {
+            let ra = (i as f64 * 137.508) % 360.0; // golden-angle scatter
+            let dec = -80.0 + (i as f64 * 0.19) % 160.0;
+            (depth, layer.hash(ra.to_radians(), dec.to_radians()))
+        });
+        let moc: HpxMoc = RangeMOC::from_cells(depth, cells, None);
+        let coverage_sq_deg = moc.coverage_percentage() * 41253.0;
+        assert!(
+            coverage_sq_deg < 10.0,
+            "test setup: area should be small ({} sq deg)",
+            coverage_sq_deg
+        );
+
+        let naive_depth = select_covering_depth(&moc);
+        let naive_cones = moc_to_covering_cones(&moc, naive_depth).len();
+        assert!(
+            naive_cones > 500,
+            "test setup: naive heuristic should exceed the cap here (got {} cones)",
+            naive_cones
+        );
+
+        let (_, bounded_cones) = select_covering_depth_bounded(&moc, 500);
+        assert!(
+            bounded_cones.len() <= 500,
+            "bounded selection should respect the cap, got {} cones",
+            bounded_cones.len()
         );
     }
 }

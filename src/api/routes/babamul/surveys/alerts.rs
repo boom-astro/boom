@@ -6,8 +6,8 @@ use crate::utils::cosmology::luminosity_distance_mpc;
 use crate::utils::enums::Survey;
 use crate::utils::moc::{
     credible_volume_to_2d_moc, is_in_moc, moc_from_fits_bytes, moc_from_skymap_bytes,
-    moc_to_covering_cones, parse_3d_skymap_bytes, select_covering_depth, CredibleVolumeIndex,
-    HpxMoc,
+    parse_3d_skymap_bytes, select_covering_depth_bounded, CredibleVolumeIndex, HpxMoc,
+    LIGO3dskymap,
 };
 use actix_web::{get, post, web, HttpResponse};
 use base64::prelude::*;
@@ -560,79 +560,338 @@ pub async fn cone_search_alerts(
     }
 }
 
-/// Maximum time window for MOC search queries (7 days).
+/// Maximum time window for skymap/MOC search queries (7 days).
 const MOC_SEARCH_MAX_TIME_WINDOW_JD: f64 = 7.0;
 /// Maximum number of covering cones before rejecting the query.
 const MOC_SEARCH_MAX_CONES: usize = 500;
-/// MongoDB server-side query timeout for MOC search (30 seconds).
+/// MongoDB server-side query timeout for skymap/MOC search (30 seconds).
 const MOC_SEARCH_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// Cap on 2D spatial pre-filter candidates for the 3D credible-volume test, to
+/// bound memory use before the host-galaxy cross-match lookup.
+const SKYMAP_3D_SPATIAL_CAP: usize = 50_000;
 
-/// Stream alerts matching `filter_doc`, keep only those whose coordinates fall
-/// inside `moc` (the spatial `$or` is a coarse pre-filter at the cone level), and
-/// build the success response. `coords` extracts (ra, dec) from each alert, which
-/// is the only thing that differs between surveys.
-async fn collect_moc_alerts<T, F>(
+/// The parsed spatial search region, resolved once (off the async worker) from
+/// whichever of `moc_fits_base64`/`skymap_fits_base64` the caller provided.
+///
+/// A `skymap_fits_base64` upload is classified automatically: if it carries the
+/// LIGO/Virgo/KAGRA BAYESTAR distance columns (DISTMU/DISTSIGMA/DISTNORM) it's
+/// treated as a 3D localization and gets the full distance-aware credible-volume
+/// test (refined against cross-matched host-galaxy redshifts); otherwise it's
+/// treated as a plain 2D probability skymap, thresholded at `credible_level`.
+enum SkymapSearchMode {
+    /// A pre-built MOC, used as-is (no distance information).
+    Moc(HpxMoc),
+    /// A 2D HEALPix probability skymap, thresholded at `credible_level`.
+    Skymap2d(HpxMoc),
+    /// A 3D BAYESTAR skymap: the density-sorted index and its 2D sky projection
+    /// (used as a cheap pre-filter before the exact 3D containment test).
+    Skymap3d {
+        skymap: Box<LIGO3dskymap>,
+        idx: CredibleVolumeIndex,
+        moc_2d: HpxMoc,
+        credible_level: f64,
+    },
+}
+
+impl SkymapSearchMode {
+    /// The 2D sky region to use for covering-cone generation and as a coarse/
+    /// exact spatial filter (exact for `Moc`/`Skymap2d`, a pre-filter for
+    /// `Skymap3d`).
+    fn moc_2d(&self) -> &HpxMoc {
+        match self {
+            SkymapSearchMode::Moc(moc) | SkymapSearchMode::Skymap2d(moc) => moc,
+            SkymapSearchMode::Skymap3d { moc_2d, .. } => moc_2d,
+        }
+    }
+}
+
+/// Extract host-galaxy redshifts from an alert's `cross_matches` document, ranked
+/// best-first (spectroscopic over photometric) and deduplicated by 3-arcsec sky
+/// proximity so the same physical source isn't counted twice across catalogs.
+///
+/// Priority: 0 = DESI spec (zwarn=0), 1 = NED SPEC, 2 = DESI spec (zwarn!=0),
+/// 3 = NED PHOT, 4 = LS_DR10_PHOTOZ photo-z.
+fn extract_host_redshifts(cross_matches: Option<&Document>) -> Vec<f64> {
+    // Push every valid (priority, ra, dec, z) row from `catalog`'s cross-match
+    // array into `ranked`. `z_field` is the catalog's redshift/photo-z field
+    // name; `priority` maps a matched row to its rank (lower = better), or
+    // `None` to skip the row entirely (e.g. DESI_DR1 stars).
+    fn extract_catalog_zs(
+        cross_matches: Option<&Document>,
+        catalog: &str,
+        z_field: &str,
+        priority: impl Fn(&Document) -> Option<u8>,
+        ranked: &mut Vec<(u8, f64, f64, f64)>,
+    ) {
+        let Some(arr) = cross_matches.and_then(|cm| cm.get_array(catalog).ok()) else {
+            return;
+        };
+        for v in arr {
+            let Some(m) = v.as_document() else { continue };
+            let Some(p) = priority(m) else { continue };
+            let Some(z) = m
+                .get_f64(z_field)
+                .ok()
+                .filter(|&z| z.is_finite() && z > 0.0)
+            else {
+                continue;
+            };
+            let Some(ra) = m.get_f64("ra").ok() else {
+                continue;
+            };
+            let Some(dec) = m.get_f64("dec").ok() else {
+                continue;
+            };
+            ranked.push((p, ra, dec, z));
+        }
+    }
+
+    let mut ranked: Vec<(u8, f64, f64, f64)> = Vec::new(); // (priority, ra, dec, z)
+
+    extract_catalog_zs(
+        cross_matches,
+        "DESI_DR1",
+        "z",
+        |m| {
+            if m.get_str("spectype").map(|s| s == "STAR").unwrap_or(false) {
+                return None;
+            }
+            Some(if m.get_i64("zwarn").unwrap_or(1) == 0 {
+                0
+            } else {
+                2
+            })
+        },
+        &mut ranked,
+    );
+    extract_catalog_zs(
+        cross_matches,
+        "NED",
+        "z",
+        |m| {
+            Some(
+                if m.get_str("z_tech").map(|s| s == "SPEC").unwrap_or(false) {
+                    1
+                } else {
+                    3
+                },
+            )
+        },
+        &mut ranked,
+    );
+    extract_catalog_zs(
+        cross_matches,
+        "LS_DR10_PHOTOZ",
+        "z_phot",
+        |_| Some(4),
+        &mut ranked,
+    );
+
+    // Sort best priority first, then deduplicate by 3-arcsec proximity.
+    ranked.sort_by_key(|&(p, _, _, _)| p);
+    const DEDUP_ARCSEC: f64 = 3.0;
+    let mut kept: Vec<(f64, f64, f64)> = Vec::new(); // (ra, dec, z)
+    for (_, ra, dec, z) in ranked {
+        let is_dup = kept.iter().any(|&(kra, kdec, _)| {
+            let dra = (ra - kra) * dec.to_radians().cos();
+            let ddec = dec - kdec;
+            (dra * dra + ddec * ddec).sqrt() * 3600.0 < DEDUP_ARCSEC
+        });
+        if !is_dup {
+            kept.push((ra, dec, z));
+        }
+    }
+    kept.into_iter().map(|(_, _, z)| z).collect()
+}
+
+/// Stream alerts matching `filter_doc` and pair each with an optional
+/// `host_searched_prob_vol`:
+/// - For `Moc`/`Skymap2d` modes: a plain point-in-region post-filter (the spatial
+///   `$or` is only a coarse pre-filter at the covering-cone level); every match
+///   pairs with `None`.
+/// - For `Skymap3d` mode: a spatial pre-filter against the 2D projection, a
+///   batched host-galaxy cross-match lookup, then the exact distance-aware
+///   credible-volume test per candidate. Alerts with no cross-matched host pass
+///   through on the 2D projection alone (paired with `None`); alerts whose only
+///   matched hosts fall outside the credible volume are dropped.
+///
+/// `coords`/`object_id` extract what differs between surveys.
+///
+/// Returns the matched `(alert, host_searched_prob_vol)` pairs alongside a
+/// `truncated` flag: `true` only if the internal `SKYMAP_3D_SPATIAL_CAP`
+/// pre-filter cap was hit in `Skymap3d` mode, meaning some alerts that fall
+/// inside the 2D projection were never even considered for the exact 3D test.
+/// Hitting the caller-supplied `limit` is not truncation in this sense — it's
+/// the documented, user-controlled result cap.
+async fn collect_skymap_alerts<T, F>(
     db: &Database,
     survey: Survey,
     filter_doc: Document,
-    moc: &HpxMoc,
+    mode: &SkymapSearchMode,
     limit: u32,
-    cones_len: usize,
-    depth: u8,
     coords: F,
-) -> HttpResponse
+    object_id: fn(&T) -> &str,
+) -> Result<(Vec<(T, Option<f64>)>, bool), HttpResponse>
 where
-    T: serde::de::DeserializeOwned + serde::Serialize + Send + Sync + Unpin,
+    T: serde::de::DeserializeOwned + Send + Sync + Unpin,
     F: Fn(&T) -> (f64, f64),
 {
     let alerts_collection: Collection<T> = db.collection(&format!("{}_alerts", survey));
-    let mut alert_cursor = match alerts_collection
+    let mut cursor = alerts_collection
         .find(filter_doc)
         .max_time(MOC_SEARCH_QUERY_TIMEOUT)
         .await
-    {
-        Ok(cursor) => cursor,
-        Err(error) => {
-            return response::internal_error(&format!(
-                "error retrieving alerts for survey {}: {}",
-                survey, error
-            ));
-        }
-    };
+        .map_err(|e| response::internal_error(&format!("error querying alerts: {}", e)))?;
 
-    let mut results: Vec<T> = Vec::new();
-    while let Some(alert_doc) = match alert_cursor.try_next().await {
-        Ok(Some(doc)) => Some(doc),
-        Ok(None) => None,
-        Err(error) => {
-            return response::internal_error(&format!("error getting documents: {}", error));
-        }
-    } {
-        // Post-filter: check that the alert is actually inside the MOC
-        let (ra, dec) = coords(&alert_doc);
-        if is_in_moc(moc, ra, dec) {
-            results.push(alert_doc);
-            if results.len() >= limit as usize {
-                break;
+    match mode {
+        SkymapSearchMode::Moc(moc) | SkymapSearchMode::Skymap2d(moc) => {
+            let mut results = Vec::new();
+            while let Some(alert) = cursor
+                .try_next()
+                .await
+                .map_err(|e| response::internal_error(&format!("error reading cursor: {}", e)))?
+            {
+                let (ra, dec) = coords(&alert);
+                if is_in_moc(moc, ra, dec) {
+                    results.push((alert, None));
+                    if results.len() >= limit as usize {
+                        break;
+                    }
+                }
             }
+            Ok((results, false))
+        }
+        SkymapSearchMode::Skymap3d {
+            skymap,
+            idx,
+            moc_2d,
+            credible_level,
+        } => {
+            // Phase 1: spatial pre-filter against the 2D sky projection
+            let mut spatial_candidates: Vec<T> = Vec::new();
+            let mut truncated = false;
+            while let Some(alert) = cursor
+                .try_next()
+                .await
+                .map_err(|e| response::internal_error(&format!("error reading cursor: {}", e)))?
+            {
+                let (ra, dec) = coords(&alert);
+                if is_in_moc(moc_2d, ra, dec) {
+                    spatial_candidates.push(alert);
+                    if spatial_candidates.len() >= SKYMAP_3D_SPATIAL_CAP {
+                        truncated = true;
+                        break;
+                    }
+                }
+            }
+
+            // Phase 2: batch aux lookup for host-galaxy redshifts
+            let object_ids: Vec<Bson> = spatial_candidates
+                .iter()
+                .map(|a| Bson::String(object_id(a).to_string()))
+                .collect();
+            let aux_col: Collection<Document> = db.collection(&format!("{}_alerts_aux", survey));
+            let mut aux_cursor = aux_col
+                .find(doc! { "_id": { "$in": object_ids } })
+                .projection(doc! { "_id": 1, "cross_matches": 1 })
+                .await
+                .map_err(|e| response::internal_error(&format!("error querying aux: {}", e)))?;
+
+            let mut host_z_map: HashMap<String, Vec<f64>> = HashMap::new();
+            while let Some(aux_doc) = aux_cursor.try_next().await.map_err(|e| {
+                response::internal_error(&format!("error reading aux cursor: {}", e))
+            })? {
+                let Ok(oid) = aux_doc.get_str("_id") else {
+                    continue;
+                };
+                let z_values = extract_host_redshifts(aux_doc.get_document("cross_matches").ok());
+                host_z_map.insert(oid.to_string(), z_values);
+            }
+
+            // Phase 3: exact 3D test per candidate. `dist_cache` memoizes
+            // luminosity_distance_mpc (a 200-step numerical integration) by
+            // redshift, since many alerts commonly share the same handful of
+            // cross-matched host galaxies.
+            let mut dist_cache: HashMap<u64, f64> = HashMap::new();
+            let mut results = Vec::new();
+            for alert in spatial_candidates {
+                let (ra, dec) = coords(&alert);
+                let z_values = host_z_map
+                    .get(object_id(&alert))
+                    .map(|v| v.as_slice())
+                    .unwrap_or(&[]);
+
+                if z_values.is_empty() {
+                    // No cross-matched host — pass through on the 2D test alone.
+                    results.push((alert, None));
+                } else {
+                    // Find best (lowest) searched_prob_vol across all matched hosts.
+                    let best_spv = z_values
+                        .iter()
+                        .filter_map(|&z| {
+                            let d_mpc = *dist_cache
+                                .entry(z.to_bits())
+                                .or_insert_with(|| luminosity_distance_mpc(z));
+                            idx.searched_prob_vol_at(skymap, ra, dec, d_mpc)
+                        })
+                        .fold(f64::INFINITY, f64::min);
+
+                    if best_spv.is_finite() && best_spv <= *credible_level {
+                        results.push((alert, Some(best_spv)));
+                    }
+                    // else: has cross-matched hosts but none inside the credible volume — drop
+                }
+
+                if results.len() >= limit as usize {
+                    break;
+                }
+            }
+            Ok((results, truncated))
         }
     }
-    response::ok(
-        &format!(
-            "found {} alerts within MOC region ({} covering cones at depth {})",
-            results.len(),
-            cones_len,
-            depth
-        ),
-        serde_json::json!(results),
-    )
+}
+
+/// Runs [`collect_skymap_alerts`] and wraps each matched alert with `wrap`
+/// (attaching `host_searched_prob_vol` into the survey-specific response
+/// struct), returning the collected JSON array alongside the truncation flag.
+/// Factors out the only two lines that actually differ between the ZTF and
+/// LSST branches of `skymap_search_alerts` — the coords closure and the
+/// concrete result-wrapper type — while keeping distinct per-survey result
+/// types for OpenAPI schema clarity.
+#[allow(clippy::too_many_arguments)]
+async fn collect_and_wrap_skymap_alerts<T, F, R, W>(
+    db: &Database,
+    survey: Survey,
+    filter_doc: Document,
+    mode: &SkymapSearchMode,
+    limit: u32,
+    coords: F,
+    object_id: fn(&T) -> &str,
+    wrap: W,
+) -> Result<(serde_json::Value, bool), HttpResponse>
+where
+    T: serde::de::DeserializeOwned + Send + Sync + Unpin,
+    F: Fn(&T) -> (f64, f64),
+    R: serde::Serialize,
+    W: Fn(T, Option<f64>) -> R,
+{
+    let (pairs, truncated) =
+        collect_skymap_alerts(db, survey, filter_doc, mode, limit, coords, object_id).await?;
+    let data = serde_json::json!(pairs
+        .into_iter()
+        .map(|(alert, host_searched_prob_vol)| wrap(alert, host_searched_prob_vol))
+        .collect::<Vec<_>>());
+    Ok((data, truncated))
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ToSchema)]
-struct AlertsMocSearchQuery {
+struct AlertsSkymapSearchQuery {
     /// Base64-encoded MOC FITS file (exactly one of moc_fits_base64 or skymap_fits_base64 required)
     moc_fits_base64: Option<String>,
-    /// Base64-encoded HEALPix skymap FITS file
+    /// Base64-encoded HEALPix skymap FITS file. Automatically classified as a 3D
+    /// LIGO/Virgo/KAGRA BAYESTAR localization (distance-aware credible-volume
+    /// test, refined against any cross-matched host-galaxy redshift) if it carries
+    /// DISTMU/DISTSIGMA/DISTNORM columns, otherwise as a plain 2D probability skymap.
     skymap_fits_base64: Option<String>,
     /// Credible level for skymap thresholding (optional, defaults to 0.9 if omitted when skymap_fits_base64 is provided)
     credible_level: Option<f64>,
@@ -653,24 +912,44 @@ struct AlertsMocSearchQuery {
     limit: Option<u32>,
 }
 
+#[derive(Debug, serde::Serialize, ToSchema)]
+pub struct ZtfAlertSkymapSearchResult {
+    #[serde(flatten)]
+    pub alert: EnrichedZtfAlert,
+    /// Best searched_prob_vol across cross-matched host-galaxy candidates, for a 3D
+    /// (BAYESTAR) search with a redshift match. Null for MOC/2D-skymap searches, or
+    /// when the alert had no cross-matched host.
+    pub host_searched_prob_vol: Option<f64>,
+}
+
+#[derive(Debug, serde::Serialize, ToSchema)]
+pub struct LsstAlertSkymapSearchResult {
+    #[serde(flatten)]
+    pub alert: EnrichedLsstAlert,
+    /// Best searched_prob_vol across cross-matched host-galaxy candidates, for a 3D
+    /// (BAYESTAR) search with a redshift match. Null for MOC/2D-skymap searches, or
+    /// when the alert had no cross-matched host.
+    pub host_searched_prob_vol: Option<f64>,
+}
+
 #[utoipa::path(
     post,
-    path = "/babamul/surveys/{survey}/alerts/moc-search",
+    path = "/babamul/surveys/{survey}/alerts/skymap-search",
     params(
         ("survey" = Survey, Path, description = "Name of the survey (e.g., ztf, lsst)"),
     ),
-    request_body = AlertsMocSearchQuery,
+    request_body = AlertsSkymapSearchQuery,
     responses(
-        (status = 200, description = "Alerts within the MOC region", body = AlertsQueryResult),
-        (status = 400, description = "Invalid query parameters or MOC data"),
+        (status = 200, description = "Alerts within the MOC/skymap region", body = Vec<ZtfAlertSkymapSearchResult>),
+        (status = 400, description = "Invalid query parameters or MOC/skymap data"),
         (status = 500, description = "Internal server error")
     ),
     tags=["Surveys"]
 )]
-#[post("/surveys/{survey}/alerts/moc-search")]
-pub async fn moc_search_alerts(
+#[post("/surveys/{survey}/alerts/skymap-search")]
+pub async fn skymap_search_alerts(
     path: web::Path<Survey>,
-    mut query: web::Json<AlertsMocSearchQuery>,
+    mut query: web::Json<AlertsSkymapSearchQuery>,
     current_user: Option<web::ReqData<BabamulUser>>,
     db: web::Data<Database>,
 ) -> HttpResponse {
@@ -694,7 +973,7 @@ pub async fn moc_search_alerts(
         ));
     }
 
-    // Validate which MOC source was provided before doing any heavy work.
+    // Validate which spatial source was provided before doing any heavy work.
     let moc_b64 = query.moc_fits_base64.take();
     let skymap_b64 = query.skymap_fits_base64.take();
     match (&moc_b64, &skymap_b64) {
@@ -716,61 +995,79 @@ pub async fn moc_search_alerts(
         );
     }
     let credible_level = query.credible_level.unwrap_or(0.9);
+    if skymap_b64.is_some() && !(0.0..=1.0).contains(&credible_level) {
+        return response::bad_request("credible_level must be between 0.0 and 1.0");
+    }
 
     let limit = query.limit.unwrap_or(10000).min(10000);
     if limit == 0 {
         return response::bad_request("limit must be between 1 and 10000");
     }
 
-    // Decoding the base64 payload (up to ~70 MB), parsing the MOC/skymap, and
-    // computing the covering cones is pure CPU work with no `.await` points.
-    // Running it on the async worker would block that worker for the whole
-    // computation, so offload it to the blocking thread pool.
+    // Decoding the base64 payload, parsing the MOC/skymap (including classifying
+    // a skymap_fits_base64 upload as 2D or 3D by its columns), and computing the
+    // covering cones is pure CPU work with no `.await` points. Running it on the
+    // async worker would block that worker for the whole computation, so offload
+    // it to the blocking thread pool.
     let computation = web::block(
-        move || -> Result<(HpxMoc, u8, Vec<(f64, f64, f64)>), String> {
-            let moc = match (moc_b64, skymap_b64) {
+        move || -> Result<(SkymapSearchMode, u8, Vec<(f64, f64, f64)>), String> {
+            let mode = match (moc_b64, skymap_b64) {
                 (Some(moc_b64), _) => {
                     let bytes = BASE64_STANDARD
                         .decode(moc_b64)
                         .map_err(|e| format!("Invalid base64 in moc_fits_base64: {}", e))?;
-                    moc_from_fits_bytes(&bytes)?
+                    SkymapSearchMode::Moc(moc_from_fits_bytes(&bytes)?)
                 }
                 (None, Some(skymap_b64)) => {
-                    if !(0.0..=1.0).contains(&credible_level) {
-                        return Err("credible_level must be between 0.0 and 1.0".to_string());
-                    }
                     let bytes = BASE64_STANDARD
                         .decode(skymap_b64)
                         .map_err(|e| format!("Invalid base64 in skymap_fits_base64: {}", e))?;
-                    moc_from_skymap_bytes(&bytes, credible_level)?
+                    // A LIGO/Virgo/KAGRA BAYESTAR 3D localization always carries
+                    // DISTMU/DISTSIGMA/DISTNORM; anything else is treated as a
+                    // plain 2D probability skymap.
+                    match parse_3d_skymap_bytes(&bytes) {
+                        Ok(skymap) => {
+                            let idx = CredibleVolumeIndex::build(&skymap, 200);
+                            let moc_2d = credible_volume_to_2d_moc(&skymap, &idx, credible_level);
+                            SkymapSearchMode::Skymap3d {
+                                skymap: Box::new(skymap),
+                                idx,
+                                moc_2d,
+                                credible_level,
+                            }
+                        }
+                        Err(_) => SkymapSearchMode::Skymap2d(moc_from_skymap_bytes(
+                            &bytes,
+                            credible_level,
+                        )?),
+                    }
                 }
                 // Presence is validated above: exactly one source is provided.
-                (None, None) => unreachable!("MOC source presence validated before web::block"),
+                (None, None) => unreachable!("spatial source presence validated before web::block"),
             };
-            let depth = select_covering_depth(&moc);
-            let cones = moc_to_covering_cones(&moc, depth);
-            Ok((moc, depth, cones))
+            let (depth, cones) = select_covering_depth_bounded(mode.moc_2d(), MOC_SEARCH_MAX_CONES);
+            Ok((mode, depth, cones))
         },
     )
     .await;
 
-    let (moc, depth, cones) = match computation {
+    let (mode, depth, cones) = match computation {
         Ok(Ok(result)) => result,
         Ok(Err(message)) => return response::bad_request(&message),
         Err(e) => {
-            return response::internal_error(&format!("error processing MOC: {}", e));
+            return response::internal_error(&format!("error processing spatial region: {}", e));
         }
     };
 
     if cones.is_empty() {
         return response::ok(
-            "MOC region is empty, no alerts to search",
+            "search region is empty, no alerts to search",
             serde_json::json!([]),
         );
     }
     if cones.len() > MOC_SEARCH_MAX_CONES {
         return response::bad_request(&format!(
-            "MOC region too large: {} covering cones at depth {} (max {}). Use a smaller credible level or a more targeted MOC.",
+            "Search region too large: {} covering cones at depth {} (max {}). Use a smaller credible level or a more targeted MOC.",
             cones.len(),
             depth,
             MOC_SEARCH_MAX_CONES
@@ -778,7 +1075,8 @@ pub async fn moc_search_alerts(
     }
 
     // Build the query with JD range first (uses the candidate.jd index to narrow quickly),
-    // then spatial $or to filter by sky region, then post-filter with the full-resolution MOC.
+    // then spatial $or to filter by sky region, then post-filter with the full-resolution
+    // MOC/skymap.
     let jd_filter = doc! { "candidate.jd": { "$gte": query.start_jd, "$lte": query.end_jd } };
 
     let or_conditions: Vec<Document> = cones
@@ -846,653 +1144,89 @@ pub async fn moc_search_alerts(
         filter_doc.insert("properties.stationary", is_stationary);
     }
 
-    match survey {
+    let (data, truncated) = match survey {
         Survey::Ztf => {
-            collect_moc_alerts::<EnrichedZtfAlert, _>(
+            match collect_and_wrap_skymap_alerts::<EnrichedZtfAlert, _, _, _>(
                 &db,
                 survey,
                 filter_doc,
-                &moc,
+                &mode,
                 limit,
-                cones.len(),
-                depth,
                 |alert| (alert.candidate.candidate.ra, alert.candidate.candidate.dec),
+                |alert| alert.object_id.as_str(),
+                |alert, host_searched_prob_vol| ZtfAlertSkymapSearchResult {
+                    alert,
+                    host_searched_prob_vol,
+                },
             )
             .await
+            {
+                Ok(result) => result,
+                Err(resp) => return resp,
+            }
         }
         Survey::Lsst => {
-            collect_moc_alerts::<EnrichedLsstAlert, _>(
+            match collect_and_wrap_skymap_alerts::<EnrichedLsstAlert, _, _, _>(
                 &db,
                 survey,
                 filter_doc,
-                &moc,
+                &mode,
                 limit,
-                cones.len(),
-                depth,
                 |alert| {
                     (
                         alert.candidate.dia_source.ra,
                         alert.candidate.dia_source.dec,
                     )
                 },
+                |alert| alert.object_id.as_str(),
+                |alert, host_searched_prob_vol| LsstAlertSkymapSearchResult {
+                    alert,
+                    host_searched_prob_vol,
+                },
             )
             .await
+            {
+                Ok(result) => result,
+                Err(resp) => return resp,
+            }
         }
-        _ => response::bad_request("Invalid survey specified, only ZTF and LSST are supported"),
-    }
-}
-
-// ── 3D credible-volume search ─────────────────────────────────────────────────
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ToSchema)]
-pub struct AlertsSkymap3dSearchQuery {
-    /// Base64-encoded LIGO BAYESTAR FITS file (required)
-    pub bayestar_fits_base64: String,
-    /// Credible level for the 3D volume test (defaults to 0.9)
-    pub credible_level: Option<f64>,
-    /// Start of time window (Julian Date, required)
-    pub start_jd: f64,
-    /// End of time window (Julian Date, required; max 7 days after start_jd)
-    pub end_jd: f64,
-    pub min_magpsf: Option<f64>,
-    pub max_magpsf: Option<f64>,
-    #[serde(alias = "min_reliability")]
-    pub min_drb: Option<f64>,
-    #[serde(alias = "max_reliability")]
-    pub max_drb: Option<f64>,
-    pub is_rock: Option<bool>,
-    pub is_star: Option<bool>,
-    pub is_near_brightstar: Option<bool>,
-    pub is_stationary: Option<bool>,
-    pub limit: Option<u32>,
-}
-
-#[derive(Debug, serde::Serialize, ToSchema)]
-pub struct ZtfAlertSkymap3dResult {
-    #[serde(flatten)]
-    pub alert: EnrichedZtfAlert,
-    /// Best searched_prob_vol across NED cross-match candidates (None if no NED match with valid z).
-    pub host_searched_prob_vol: Option<f64>,
-}
-
-#[derive(Debug, serde::Serialize, ToSchema)]
-pub struct LsstAlertSkymap3dResult {
-    #[serde(flatten)]
-    pub alert: EnrichedLsstAlert,
-    /// Best searched_prob_vol across NED cross-match candidates (None if no NED match with valid z).
-    pub host_searched_prob_vol: Option<f64>,
-}
-
-#[utoipa::path(
-    post,
-    path = "/babamul/surveys/{survey}/alerts/skymap-3d-search",
-    params(
-        ("survey" = Survey, Path, description = "Name of the survey (e.g., ztf, lsst)"),
-    ),
-    request_body = AlertsSkymap3dSearchQuery,
-    responses(
-        (status = 200, description = "Alerts inside the 3D credible volume", body = Vec<ZtfAlertSkymap3dResult>),
-        (status = 400, description = "Invalid query parameters or FITS data"),
-        (status = 500, description = "Internal server error")
-    ),
-    tags=["Surveys"]
-)]
-#[post("/surveys/{survey}/alerts/skymap-3d-search")]
-pub async fn alerts_skymap_3d_search(
-    path: web::Path<Survey>,
-    query: web::Json<AlertsSkymap3dSearchQuery>,
-    current_user: Option<web::ReqData<BabamulUser>>,
-    db: web::Data<Database>,
-) -> HttpResponse {
-    let _current_user = match current_user {
-        Some(user) => user,
-        None => return HttpResponse::Unauthorized().body("Unauthorized"),
+        _ => {
+            return response::bad_request(
+                "Invalid survey specified, only ZTF and LSST are supported",
+            )
+        }
     };
-    let survey = path.into_inner();
 
-    let time_window = query.end_jd - query.start_jd;
-    if time_window <= 0.0 {
-        return response::bad_request("end_jd must be greater than start_jd");
-    }
-    if time_window > MOC_SEARCH_MAX_TIME_WINDOW_JD {
-        return response::bad_request(&format!(
-            "Time window too large ({:.1} days), maximum allowed is {} days",
-            time_window, MOC_SEARCH_MAX_TIME_WINDOW_JD
+    let n = data.as_array().map(|a| a.len()).unwrap_or(0);
+    let mut message = match &mode {
+        SkymapSearchMode::Moc(_) => format!(
+            "found {} alerts within MOC region ({} covering cones at depth {})",
+            n,
+            cones.len(),
+            depth
+        ),
+        SkymapSearchMode::Skymap2d(_) => format!(
+            "found {} alerts within {:.0}% credible region ({} covering cones at depth {})",
+            n,
+            credible_level * 100.0,
+            cones.len(),
+            depth
+        ),
+        SkymapSearchMode::Skymap3d { credible_level, .. } => format!(
+            "found {} alerts inside {:.0}% 3D credible volume ({} covering cones at depth {})",
+            n,
+            credible_level * 100.0,
+            cones.len(),
+            depth
+        ),
+    };
+    if truncated {
+        message.push_str(&format!(
+            " (warning: spatial pre-filter capped at {} candidates before the 3D test; \
+             results may be incomplete — narrow the time window or credible level)",
+            SKYMAP_3D_SPATIAL_CAP
         ));
     }
 
-    let credible_level = query.credible_level.unwrap_or(0.9);
-    if !(0.0..=1.0).contains(&credible_level) {
-        return response::bad_request("credible_level must be between 0.0 and 1.0");
-    }
-
-    // Decode and parse the BAYESTAR FITS
-    let fits_bytes = match BASE64_STANDARD.decode(&query.bayestar_fits_base64) {
-        Ok(b) => b,
-        Err(e) => {
-            return response::bad_request(&format!("Invalid base64 in bayestar_fits_base64: {}", e))
-        }
-    };
-    let skymap = match parse_3d_skymap_bytes(&fits_bytes) {
-        Ok(s) => s,
-        Err(e) => return response::bad_request(&format!("Failed to parse BAYESTAR FITS: {}", e)),
-    };
-
-    // Build the density-sorted index and 2D MOC prefilter
-    let idx = CredibleVolumeIndex::build(&skymap, 200);
-    let moc_2d = credible_volume_to_2d_moc(&skymap, &idx, credible_level);
-
-    let depth = select_covering_depth(&moc_2d);
-    let cones = moc_to_covering_cones(&moc_2d, depth);
-    if cones.is_empty() {
-        return response::ok(
-            "3D credible volume projects to an empty sky region",
-            serde_json::json!([]),
-        );
-    }
-    if cones.len() > MOC_SEARCH_MAX_CONES {
-        return response::bad_request(&format!(
-            "2D projection too large: {} covering cones at depth {} (max {}). Use a smaller credible level.",
-            cones.len(), depth, MOC_SEARCH_MAX_CONES
-        ));
-    }
-
-    let limit = query.limit.unwrap_or(10000).min(10000);
-    if limit == 0 {
-        return response::bad_request("limit must be between 1 and 10000");
-    }
-
-    // Build the MongoDB filter (same structure as moc_search_alerts)
-    let jd_filter = doc! { "candidate.jd": { "$gte": query.start_jd, "$lte": query.end_jd } };
-    let or_conditions: Vec<Document> = cones
-        .iter()
-        .map(|&(ra, dec, radius_rad)| {
-            doc! {
-                "coordinates.radec_geojson": {
-                    "$geoWithin": {
-                        "$centerSphere": [[ra - 180.0, dec], radius_rad]
-                    }
-                }
-            }
-        })
-        .collect();
-
-    let mut filter_doc = jd_filter;
-    filter_doc.insert("$or", or_conditions);
-
-    if survey == Survey::Ztf {
-        filter_doc.insert("candidate.programid", 1);
-    }
-    if query.min_magpsf.is_some() || query.max_magpsf.is_some() {
-        let mut f = Document::new();
-        if let Some(v) = query.min_magpsf {
-            f.insert("$gte", v);
-        }
-        if let Some(v) = query.max_magpsf {
-            f.insert("$lte", v);
-        }
-        filter_doc.insert("candidate.magpsf", f);
-    }
-    if query.min_drb.is_some() || query.max_drb.is_some() {
-        let drb_key = match survey {
-            Survey::Ztf => "candidate.drb",
-            Survey::Lsst => "candidate.reliability",
-            _ => {
-                return response::bad_request(
-                    "Invalid survey specified, only ZTF and LSST are supported",
-                )
-            }
-        };
-        let mut f = Document::new();
-        if let Some(v) = query.min_drb {
-            f.insert("$gte", v);
-        }
-        if let Some(v) = query.max_drb {
-            f.insert("$lte", v);
-        }
-        filter_doc.insert(drb_key, f);
-    }
-    if let Some(v) = query.is_rock {
-        filter_doc.insert("properties.rock", v);
-    }
-    if let Some(v) = query.is_star {
-        filter_doc.insert("properties.star", v);
-    }
-    if let Some(v) = query.is_near_brightstar {
-        filter_doc.insert("properties.near_brightstar", v);
-    }
-    if let Some(v) = query.is_stationary {
-        filter_doc.insert("properties.stationary", v);
-    }
-
-    match survey {
-        Survey::Ztf => {
-            let alerts_col: Collection<EnrichedZtfAlert> =
-                db.collection(&format!("{}_alerts", survey));
-            let mut cursor = match alerts_col
-                .find(filter_doc)
-                .max_time(MOC_SEARCH_QUERY_TIMEOUT)
-                .await
-            {
-                Ok(c) => c,
-                Err(e) => {
-                    return response::internal_error(&format!("error querying alerts: {}", e))
-                }
-            };
-
-            // Phase 1: spatial post-filter
-            const SPATIAL_CAP: usize = 50_000;
-            let mut spatial_candidates: Vec<EnrichedZtfAlert> = Vec::new();
-            loop {
-                match cursor.try_next().await {
-                    Ok(Some(doc)) => {
-                        let ra = doc.candidate.candidate.ra;
-                        let dec = doc.candidate.candidate.dec;
-                        if is_in_moc(&moc_2d, ra, dec) {
-                            spatial_candidates.push(doc);
-                            if spatial_candidates.len() >= SPATIAL_CAP {
-                                break;
-                            }
-                        }
-                    }
-                    Ok(None) => break,
-                    Err(e) => {
-                        return response::internal_error(&format!("error reading cursor: {}", e))
-                    }
-                }
-            }
-
-            // Phase 2: batch aux lookup for NED cross-matches
-            let object_ids: Vec<Bson> = spatial_candidates
-                .iter()
-                .map(|a| Bson::String(a.object_id.clone()))
-                .collect();
-
-            let aux_col: Collection<Document> = db.collection(&format!("{}_alerts_aux", survey));
-            let mut aux_cursor = match aux_col
-                .find(doc! { "_id": { "$in": object_ids } })
-                .projection(doc! { "_id": 1, "cross_matches": 1 })
-                .await
-            {
-                Ok(c) => c,
-                Err(e) => return response::internal_error(&format!("error querying aux: {}", e)),
-            };
-
-            // objectId → best z from NED + DESI_DR1
-            let mut host_z_map: HashMap<String, Vec<f64>> = HashMap::new();
-            loop {
-                match aux_cursor.try_next().await {
-                    Ok(Some(aux_doc)) => {
-                        let oid = match aux_doc.get_str("_id") {
-                            Ok(s) => s.to_string(),
-                            Err(_) => continue,
-                        };
-                        let cm = aux_doc.get_document("cross_matches").ok();
-                        // Collect all catalog matches as (priority, ra, dec, z).
-                        // Priority: 0=DESI spec zwarn=0, 1=NED SPEC, 2=DESI spec zwarn!=0,
-                        //           3=NED PHOT, 4=LS_DR10_PHOTOZ photo-z.
-                        // Then deduplicate by 3-arcsec proximity (same source, different
-                        // catalog), keeping the highest-priority (lowest number) z for
-                        // each unique source.
-                        let mut ranked: Vec<(u8, f64, f64, f64)> = Vec::new();
-
-                        if let Some(arr) = cm.and_then(|cm| cm.get_array("DESI_DR1").ok()) {
-                            for v in arr {
-                                let Some(m) = v.as_document() else { continue };
-                                if m.get_str("spectype").map(|s| s == "STAR").unwrap_or(false) {
-                                    continue;
-                                }
-                                let Some(z) =
-                                    m.get_f64("z").ok().filter(|&z| z.is_finite() && z > 0.0)
-                                else {
-                                    continue;
-                                };
-                                let Some(ra) = m.get_f64("ra").ok() else {
-                                    continue;
-                                };
-                                let Some(dec) = m.get_f64("dec").ok() else {
-                                    continue;
-                                };
-                                let priority = if m.get_i64("zwarn").unwrap_or(1) == 0 {
-                                    0
-                                } else {
-                                    2
-                                };
-                                ranked.push((priority, ra, dec, z));
-                            }
-                        }
-                        if let Some(arr) = cm.and_then(|cm| cm.get_array("NED").ok()) {
-                            for v in arr {
-                                let Some(m) = v.as_document() else { continue };
-                                let Some(z) =
-                                    m.get_f64("z").ok().filter(|&z| z.is_finite() && z > 0.0)
-                                else {
-                                    continue;
-                                };
-                                let Some(ra) = m.get_f64("ra").ok() else {
-                                    continue;
-                                };
-                                let Some(dec) = m.get_f64("dec").ok() else {
-                                    continue;
-                                };
-                                let priority =
-                                    if m.get_str("z_tech").map(|s| s == "SPEC").unwrap_or(false) {
-                                        1
-                                    } else {
-                                        3
-                                    };
-                                ranked.push((priority, ra, dec, z));
-                            }
-                        }
-                        if let Some(arr) = cm.and_then(|cm| cm.get_array("LS_DR10_PHOTOZ").ok()) {
-                            for v in arr {
-                                let Some(m) = v.as_document() else { continue };
-                                let Some(z) = m
-                                    .get_f64("z_phot")
-                                    .ok()
-                                    .filter(|&z| z.is_finite() && z > 0.0)
-                                else {
-                                    continue;
-                                };
-                                let Some(ra) = m.get_f64("ra").ok() else {
-                                    continue;
-                                };
-                                let Some(dec) = m.get_f64("dec").ok() else {
-                                    continue;
-                                };
-                                ranked.push((4, ra, dec, z));
-                            }
-                        }
-
-                        // Sort best priority first, then deduplicate by 3-arcsec proximity.
-                        ranked.sort_by_key(|&(p, _, _, _)| p);
-                        const DEDUP_ARCSEC: f64 = 3.0;
-                        let mut kept: Vec<(f64, f64, f64)> = Vec::new(); // (ra, dec, z)
-                        for (_, ra, dec, z) in ranked {
-                            let is_dup = kept.iter().any(|&(kra, kdec, _)| {
-                                let dra = (ra - kra) * dec.to_radians().cos();
-                                let ddec = dec - kdec;
-                                (dra * dra + ddec * ddec).sqrt() * 3600.0 < DEDUP_ARCSEC
-                            });
-                            if !is_dup {
-                                kept.push((ra, dec, z));
-                            }
-                        }
-                        let z_values: Vec<f64> = kept.into_iter().map(|(_, _, z)| z).collect();
-                        host_z_map.insert(oid, z_values);
-                    }
-                    Ok(None) => break,
-                    Err(e) => {
-                        return response::internal_error(&format!(
-                            "error reading aux cursor: {}",
-                            e
-                        ))
-                    }
-                }
-            }
-
-            // Phase 3: 3D test per alert
-            let mut results: Vec<ZtfAlertSkymap3dResult> = Vec::new();
-            for alert in spatial_candidates {
-                let ra = alert.candidate.candidate.ra;
-                let dec = alert.candidate.candidate.dec;
-
-                let z_values = host_z_map
-                    .get(&alert.object_id)
-                    .map(|v| v.as_slice())
-                    .unwrap_or(&[]);
-
-                if z_values.is_empty() {
-                    // No NED match with valid z — pass through on 2D test alone
-                    results.push(ZtfAlertSkymap3dResult {
-                        alert,
-                        host_searched_prob_vol: None,
-                    });
-                } else {
-                    // Find best (lowest) searched_prob_vol across all NED matches
-                    let best_spv = z_values
-                        .iter()
-                        .filter_map(|&z| {
-                            let d_mpc = luminosity_distance_mpc(z);
-                            idx.searched_prob_vol_at(&skymap, ra, dec, d_mpc)
-                        })
-                        .fold(f64::INFINITY, f64::min);
-
-                    if best_spv.is_finite() && best_spv <= credible_level {
-                        results.push(ZtfAlertSkymap3dResult {
-                            alert,
-                            host_searched_prob_vol: Some(best_spv),
-                        });
-                    }
-                    // else: has NED matches but none inside the credible volume — drop
-                }
-
-                if results.len() >= limit as usize {
-                    break;
-                }
-            }
-
-            response::ok(
-                &format!(
-                    "found {} alerts inside {:.0}% 3D credible volume ({} covering cones at depth {})",
-                    results.len(),
-                    credible_level * 100.0,
-                    cones.len(),
-                    depth
-                ),
-                serde_json::json!(results),
-            )
-        }
-        Survey::Lsst => {
-            let alerts_col: Collection<EnrichedLsstAlert> =
-                db.collection(&format!("{}_alerts", survey));
-            let mut cursor = match alerts_col
-                .find(filter_doc)
-                .max_time(MOC_SEARCH_QUERY_TIMEOUT)
-                .await
-            {
-                Ok(c) => c,
-                Err(e) => {
-                    return response::internal_error(&format!("error querying alerts: {}", e))
-                }
-            };
-
-            const SPATIAL_CAP: usize = 50_000;
-            let mut spatial_candidates: Vec<EnrichedLsstAlert> = Vec::new();
-            loop {
-                match cursor.try_next().await {
-                    Ok(Some(doc)) => {
-                        let ra = doc.candidate.dia_source.ra;
-                        let dec = doc.candidate.dia_source.dec;
-                        if is_in_moc(&moc_2d, ra, dec) {
-                            spatial_candidates.push(doc);
-                            if spatial_candidates.len() >= SPATIAL_CAP {
-                                break;
-                            }
-                        }
-                    }
-                    Ok(None) => break,
-                    Err(e) => {
-                        return response::internal_error(&format!("error reading cursor: {}", e))
-                    }
-                }
-            }
-
-            let object_ids: Vec<Bson> = spatial_candidates
-                .iter()
-                .map(|a| Bson::String(a.object_id.clone()))
-                .collect();
-
-            let aux_col: Collection<Document> = db.collection(&format!("{}_alerts_aux", survey));
-            let mut aux_cursor = match aux_col
-                .find(doc! { "_id": { "$in": object_ids } })
-                .projection(doc! { "_id": 1, "cross_matches": 1 })
-                .await
-            {
-                Ok(c) => c,
-                Err(e) => return response::internal_error(&format!("error querying aux: {}", e)),
-            };
-
-            let mut host_z_map: HashMap<String, Vec<f64>> = HashMap::new();
-            loop {
-                match aux_cursor.try_next().await {
-                    Ok(Some(aux_doc)) => {
-                        let oid = match aux_doc.get_str("_id") {
-                            Ok(s) => s.to_string(),
-                            Err(_) => continue,
-                        };
-                        let cm = aux_doc.get_document("cross_matches").ok();
-                        // Collect all catalog matches as (priority, ra, dec, z).
-                        // Priority: 0=DESI spec zwarn=0, 1=NED SPEC, 2=DESI spec zwarn!=0,
-                        //           3=NED PHOT, 4=LS_DR10_PHOTOZ photo-z.
-                        // Then deduplicate by 3-arcsec proximity (same source, different
-                        // catalog), keeping the highest-priority (lowest number) z for
-                        // each unique source.
-                        let mut ranked: Vec<(u8, f64, f64, f64)> = Vec::new();
-
-                        if let Some(arr) = cm.and_then(|cm| cm.get_array("DESI_DR1").ok()) {
-                            for v in arr {
-                                let Some(m) = v.as_document() else { continue };
-                                if m.get_str("spectype").map(|s| s == "STAR").unwrap_or(false) {
-                                    continue;
-                                }
-                                let Some(z) =
-                                    m.get_f64("z").ok().filter(|&z| z.is_finite() && z > 0.0)
-                                else {
-                                    continue;
-                                };
-                                let Some(ra) = m.get_f64("ra").ok() else {
-                                    continue;
-                                };
-                                let Some(dec) = m.get_f64("dec").ok() else {
-                                    continue;
-                                };
-                                let priority = if m.get_i64("zwarn").unwrap_or(1) == 0 {
-                                    0
-                                } else {
-                                    2
-                                };
-                                ranked.push((priority, ra, dec, z));
-                            }
-                        }
-                        if let Some(arr) = cm.and_then(|cm| cm.get_array("NED").ok()) {
-                            for v in arr {
-                                let Some(m) = v.as_document() else { continue };
-                                let Some(z) =
-                                    m.get_f64("z").ok().filter(|&z| z.is_finite() && z > 0.0)
-                                else {
-                                    continue;
-                                };
-                                let Some(ra) = m.get_f64("ra").ok() else {
-                                    continue;
-                                };
-                                let Some(dec) = m.get_f64("dec").ok() else {
-                                    continue;
-                                };
-                                let priority =
-                                    if m.get_str("z_tech").map(|s| s == "SPEC").unwrap_or(false) {
-                                        1
-                                    } else {
-                                        3
-                                    };
-                                ranked.push((priority, ra, dec, z));
-                            }
-                        }
-                        if let Some(arr) = cm.and_then(|cm| cm.get_array("LS_DR10_PHOTOZ").ok()) {
-                            for v in arr {
-                                let Some(m) = v.as_document() else { continue };
-                                let Some(z) = m
-                                    .get_f64("z_phot")
-                                    .ok()
-                                    .filter(|&z| z.is_finite() && z > 0.0)
-                                else {
-                                    continue;
-                                };
-                                let Some(ra) = m.get_f64("ra").ok() else {
-                                    continue;
-                                };
-                                let Some(dec) = m.get_f64("dec").ok() else {
-                                    continue;
-                                };
-                                ranked.push((4, ra, dec, z));
-                            }
-                        }
-
-                        // Sort best priority first, then deduplicate by 3-arcsec proximity.
-                        ranked.sort_by_key(|&(p, _, _, _)| p);
-                        const DEDUP_ARCSEC: f64 = 3.0;
-                        let mut kept: Vec<(f64, f64, f64)> = Vec::new(); // (ra, dec, z)
-                        for (_, ra, dec, z) in ranked {
-                            let is_dup = kept.iter().any(|&(kra, kdec, _)| {
-                                let dra = (ra - kra) * dec.to_radians().cos();
-                                let ddec = dec - kdec;
-                                (dra * dra + ddec * ddec).sqrt() * 3600.0 < DEDUP_ARCSEC
-                            });
-                            if !is_dup {
-                                kept.push((ra, dec, z));
-                            }
-                        }
-                        let z_values: Vec<f64> = kept.into_iter().map(|(_, _, z)| z).collect();
-                        host_z_map.insert(oid, z_values);
-                    }
-                    Ok(None) => break,
-                    Err(e) => {
-                        return response::internal_error(&format!(
-                            "error reading aux cursor: {}",
-                            e
-                        ))
-                    }
-                }
-            }
-
-            let mut results: Vec<LsstAlertSkymap3dResult> = Vec::new();
-            for alert in spatial_candidates {
-                let ra = alert.candidate.dia_source.ra;
-                let dec = alert.candidate.dia_source.dec;
-
-                let z_values = host_z_map
-                    .get(&alert.object_id)
-                    .map(|v| v.as_slice())
-                    .unwrap_or(&[]);
-
-                if z_values.is_empty() {
-                    results.push(LsstAlertSkymap3dResult {
-                        alert,
-                        host_searched_prob_vol: None,
-                    });
-                } else {
-                    let best_spv = z_values
-                        .iter()
-                        .filter_map(|&z| {
-                            let d_mpc = luminosity_distance_mpc(z);
-                            idx.searched_prob_vol_at(&skymap, ra, dec, d_mpc)
-                        })
-                        .fold(f64::INFINITY, f64::min);
-
-                    if best_spv.is_finite() && best_spv <= credible_level {
-                        results.push(LsstAlertSkymap3dResult {
-                            alert,
-                            host_searched_prob_vol: Some(best_spv),
-                        });
-                    }
-                }
-
-                if results.len() >= limit as usize {
-                    break;
-                }
-            }
-
-            response::ok(
-                &format!(
-                    "found {} alerts inside {:.0}% 3D credible volume ({} covering cones at depth {})",
-                    results.len(),
-                    credible_level * 100.0,
-                    cones.len(),
-                    depth
-                ),
-                serde_json::json!(results),
-            )
-        }
-        _ => response::bad_request("Invalid survey specified, only ZTF and LSST are supported"),
-    }
+    response::ok(&message, data)
 }

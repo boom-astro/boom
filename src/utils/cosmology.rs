@@ -1,35 +1,15 @@
-/// Planck18 flat ΛCDM parameters (Aghanim et al. 2020, Table 2, TT,TE,EE+lowE+lensing)
-const H0: f64 = 67.66; // km/s/Mpc
-const OMEGA_M: f64 = 0.3111;
-const OMEGA_L: f64 = 1.0 - OMEGA_M;
-const C_KM_S: f64 = 299792.458; // speed of light in km/s
+use flare::cosmo::Cosmo;
 
-/// E(z) = H(z)/H0 for flat ΛCDM
-#[inline]
-fn e_z(z: f64) -> f64 {
-    (OMEGA_M * (1.0 + z).powi(3) + OMEGA_L).sqrt()
-}
-
-/// Convert redshift z to luminosity distance in Mpc using Planck18 flat ΛCDM.
-/// Uses Simpson's rule with 200 steps; accurate to <0.1% for z ∈ [0, 5].
+/// Convert redshift `z` to luminosity distance in Mpc.
+///
+/// Delegates to `flare::cosmo::Cosmo::planck18()` (flare is already a
+/// dependency, used elsewhere in this codebase) rather than maintaining a
+/// second, independently-parameterized Planck18 implementation here.
 pub fn luminosity_distance_mpc(z: f64) -> f64 {
     if z <= 0.0 {
         return 0.0;
     }
-
-    let n = 200usize;
-    let dz = z / n as f64;
-
-    // Simpson's rule: ∫₀ᶻ dz'/E(z')
-    let mut sum = 1.0 / e_z(0.0) + 1.0 / e_z(z);
-    for i in 1..n {
-        let zi = i as f64 * dz;
-        let weight = if i % 2 == 0 { 2.0 } else { 4.0 };
-        sum += weight / e_z(zi);
-    }
-    let comoving_mpc = (C_KM_S / H0) * (dz / 3.0) * sum;
-
-    (1.0 + z) * comoving_mpc
+    Cosmo::planck18().luminosity_distance(z)
 }
 
 #[cfg(test)]
@@ -37,7 +17,8 @@ mod tests {
     use super::*;
 
     // Reference values verified against Planck18 parameters (H0=67.66, Om=0.3111, flat ΛCDM).
-    // Tolerance 0.5% — well above the <0.1% numerical error of 200-step Simpson's rule.
+    // Tolerance 0.5% comfortably covers the small shift from flare's own Planck18
+    // preset (Om=0.3103) alongside its numerical integration error.
     const TOL: f64 = 0.005;
 
     fn check(z: f64, expected_mpc: f64) {
