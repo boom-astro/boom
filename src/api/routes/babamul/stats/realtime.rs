@@ -15,7 +15,6 @@ pub struct RealtimeAlertMetrics {
 }
 
 /// Parse Prometheus-format metrics and extract babamul.kafka.consumer gauge values
-/// 
 /// Looks for gauge metrics matching the pattern:
 /// `babamul_kafka_consumer_committed_offset{survey="...",topic="...",group="..."} <value>`
 pub fn parse_otel_metrics(
