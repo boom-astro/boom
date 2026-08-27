@@ -75,18 +75,18 @@ Traefik handles incoming connections and HTTPS certificates. This is done once
 per server, before the first BOOM deploy.
 
 Create a directory on the host to store the Traefik Docker Compose file. Put it
-on persistent storage — on `kaboom` this is under `/scr` rather than
-`/root/code`:
+on persistent storage: on `kaboom` this is under `/scr` rather than
+`/root/code`, so the paths below use it. Adjust them for another host:
 
 ```bash
-mkdir -p /root/code/traefik-public/
+mkdir -p /scr/traefik-public/
 ```
 
 Copy the Traefik Docker Compose file to the host with `scp` or `rsync` from a
 local checkout:
 
 ```bash
-rsync -a config/docker-compose.traefik.yml root@your-server.example.com:/root/code/traefik-public/
+rsync -a config/docker-compose.traefik.yml root@your-server.example.com:/scr/traefik-public/
 ```
 
 This Traefik instance expects a Docker "public network" named `traefik-public`
@@ -119,7 +119,7 @@ Encrypt registers the ACME certificates against. Then start Traefik from the
 directory holding the Compose file:
 
 ```bash
-cd /root/code/traefik-public/
+cd /scr/traefik-public/
 docker compose -f docker-compose.traefik.yml up -d
 ```
 
@@ -147,24 +147,29 @@ The runner runs as a dedicated `github` user, which needs Docker access. As
 ```bash
 adduser github
 usermod -aG docker github
-su - github
-cd
 ```
 
-Then, as the `github` user,
+Then switch to that user:
+
+```bash
+su - github
+```
+
+As the `github` user,
 [install a GitHub Actions self-hosted runner following the official guide](https://docs.github.com/en/actions/hosting-your-own-runners/managing-self-hosted-runners/adding-self-hosted-runners#adding-a-self-hosted-runner-to-a-repository).
 When asked about labels, add `production` — the
 [deploy workflow](/.github/workflows/deploy.yaml) targets
 `runs-on: [self-hosted, production]`. Labels can also be added later.
 
 The guide ends by telling you to start the runner in the foreground. Don't;
-install it as a service instead, so it survives logout and reboots. Exit back to
-`root` and run, from the `actions-runner` directory in the `github` user's home
-(the home may not be under `/home` — on `kaboom` it is under `/scr`; check with
-`getent passwd github`):
+install it as a service instead, so it survives logout and reboots. Leave the
+`github` shell and run this back as `root`, from the `actions-runner` directory
+in the `github` user's home. Use `~github` rather than `/home/github`: that home
+is not necessarily under `/home` (on `kaboom` it is under `/scr`).
 
 ```bash
-cd /home/github/actions-runner
+exit
+cd ~github/actions-runner
 ./svc.sh install github
 ./svc.sh start
 ./svc.sh status
@@ -176,10 +181,10 @@ You can read more about this in the official guide:
 Installing it as a service matters because it is what makes the runner come back
 after a host reboot. If a deploy is triggered but the job never starts, check
 **Settings → Actions → Runners** in GitHub: a grey/offline runner means the
-service isn't running, and `sudo ./svc.sh status` on the host will say why. Note
-that a down runner only blocks *new deploys* — the running BOOM stack is
-unaffected, since Compose restart policies bring the containers back on reboot
-on their own.
+service isn't running, and `./svc.sh status` in that directory (as `root`, or
+with `sudo`) will say why. Note that a down runner only blocks *new deploys* —
+the running BOOM stack is unaffected, since Compose restart policies bring the
+containers back on reboot on their own.
 
 ### Set secrets for the GitHub Actions deployment workflow
 
