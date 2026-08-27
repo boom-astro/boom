@@ -1,7 +1,7 @@
-use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
 use actix_web::{get, web, HttpResponse};
-use tracing::{error, debug};
+use serde::{Deserialize, Serialize};
+use tracing::{debug, error};
+use utoipa::ToSchema;
 
 /// Realtime alert metrics: survey name, current alert count, and timestamp when gathered.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
