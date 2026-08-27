@@ -287,9 +287,12 @@ pub async fn xmatch(
                         continue;
                     }
                 };
+                // z == 0.0 is a legitimate "very nearby" redshift (handled by the
+                // z < 0.01 / z <= 0.005 branches in cm_radius_arcsec /
+                // distance_kpc_from_arcsec below); only negative values are invalid.
                 let doc_z = match get_f64_from_doc(&xmatch_doc, distance_key) {
-                    Some(v) => v,
-                    None => {
+                    Some(v) if v >= 0.0 => v,
+                    _ => {
                         continue;
                     }
                 };

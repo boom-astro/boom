@@ -25,7 +25,7 @@ jobs:
         clean: false
         lfs: 'true'
     - name: Setup System Dependencies
-      run: sudo apt-get install -y libsasl2-dev
+      run: sudo apt-get update && sudo apt-get install -y libsasl2-dev libcfitsio-dev
     - name: Setup Rust
       uses: dtolnay/rust-toolchain@stable
     - name: Configure cache
