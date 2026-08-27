@@ -3261,4 +3261,158 @@ mod tests {
             col.delete_one(doc! { "_id": id }).await.unwrap();
         }
     }
+
+    /// Test GET /babamul/surveys/ztf/villar-fit
+    #[actix_rt::test]
+    async fn test_get_villar_fit() {
+        load_dotenv();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+        let test_user = TestUser::create(&database, &auth_app_data).await;
+
+        let mut alert_worker = ztf_alert_worker().await;
+        let (candid, object_id, _, _, bytes_content) =
+            AlertRandomizer::new_randomized(Survey::Ztf).get().await;
+        let status = alert_worker.process_alert(&bytes_content).await.unwrap();
+        assert_eq!(status, ProcessAlertStatus::Added(candid));
+        let mut enrichment_worker = ZtfEnrichmentWorker::new(TEST_CONFIG_FILE, None)
+            .await
+            .unwrap();
+        let result = enrichment_worker.process_alerts(&[candid]).await;
+        assert!(result.is_ok(), "Enrichment failed: {:?}", result.err());
+
+        // Simulate what the GPU-enabled enrichment worker writes, since the
+        // `gpu` feature isn't necessarily enabled for this test run.
+        let alert_collection: mongodb::Collection<mongodb::bson::Document> =
+            database.collection("ZTF_alerts");
+        alert_collection
+            .update_one(
+                doc! { "_id": candid },
+                doc! { "$set": {
+                    "villar_fit.reduced_chi2": 1.23,
+                    "villar_fit.amplitude_g": 4.56,
+                    "villar_fit.amplitude_r": f64::NAN,
+                }},
+            )
+            .await
+            .expect("Failed to set villar_fit");
+
+        let app = test::init_service(
+            App::new().service(
+                actix_web::web::scope("/babamul")
+                    .app_data(web::Data::new(database.clone()))
+                    .app_data(web::Data::new(auth_app_data.clone()))
+                    .wrap(from_fn(babamul_auth_middleware))
+                    .service(routes::babamul::surveys::get_villar_fit),
+            ),
+        )
+        .await;
+
+        // Lookup by candid
+        let req = test::TestRequest::get()
+            .uri(&format!(
+                "/babamul/surveys/ztf/villar-fit?candid={}",
+                candid
+            ))
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "Should successfully retrieve villar fit by candid (error: {})",
+            read_str_response(resp).await
+        );
+        let body = read_json_response(resp).await;
+        assert_eq!(body["data"]["candid"].as_i64().unwrap(), candid);
+        assert_eq!(body["data"]["reduced_chi2"].as_f64().unwrap(), 1.23);
+        assert_eq!(
+            body["data"]["params"]["amplitude_g"].as_f64().unwrap(),
+            4.56
+        );
+        assert!(
+            body["data"]["params"]["amplitude_r"].is_null(),
+            "NaN values should serialize to null"
+        );
+
+        // Lookup by objectId
+        let req = test::TestRequest::get()
+            .uri(&format!(
+                "/babamul/surveys/ztf/villar-fit?objectId={}&which=last",
+                object_id
+            ))
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "Should successfully retrieve villar fit by objectId (error: {})",
+            read_str_response(resp).await
+        );
+        let body = read_json_response(resp).await;
+        assert_eq!(body["data"]["candid"].as_i64().unwrap(), candid);
+
+        // Unsupported survey
+        let req = test::TestRequest::get()
+            .uri(&format!(
+                "/babamul/surveys/lsst/villar-fit?candid={}",
+                candid
+            ))
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Non-existent candid
+        let req = test::TestRequest::get()
+            .uri("/babamul/surveys/ztf/villar-fit?candid=999999999999")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        // Private-program alerts (programid != 1) must not be exposed via Babamul,
+        // same as every other Babamul survey endpoint.
+        alert_collection
+            .update_one(
+                doc! { "_id": candid },
+                doc! { "$set": { "candidate.programid": 2 } },
+            )
+            .await
+            .expect("Failed to set programid");
+
+        let req = test::TestRequest::get()
+            .uri(&format!(
+                "/babamul/surveys/ztf/villar-fit?candid={}",
+                candid
+            ))
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "private-program alert must not be retrievable by candid via Babamul"
+        );
+
+        let req = test::TestRequest::get()
+            .uri(&format!(
+                "/babamul/surveys/ztf/villar-fit?objectId={}",
+                object_id
+            ))
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "private-program alert must not be retrievable by objectId via Babamul"
+        );
+
+        // Clean up
+        drop_alert_from_collections(candid, &Survey::Ztf)
+            .await
+            .unwrap();
+    }
 }

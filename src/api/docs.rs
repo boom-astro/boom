@@ -109,6 +109,7 @@ pub struct ApiDoc;
         routes::babamul::surveys::cutouts::get_cutouts,
         routes::babamul::surveys::alerts::get_alerts,
         routes::babamul::surveys::alerts::cone_search_alerts,
+        routes::babamul::surveys::villar_fit::get_villar_fit,
         routes::babamul::stats::collections::get_collection_stats,
         routes::babamul::stats::kafka::get_kafka_stats,
         routes::babamul::stats::nightly::get_nightly_stats,
