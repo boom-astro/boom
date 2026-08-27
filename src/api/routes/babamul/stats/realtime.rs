@@ -19,11 +19,13 @@ pub struct RealtimeAlertMetrics {
 /// Looks for gauge metrics matching the pattern:
 /// `babamul_kafka_consumer_committed_offset{survey="...",topic="...",group="..."} <value>`
 pub fn parse_otel_metrics(
-      text: &str,
-      gathered_at: i64,
+    text: &str,
+    gathered_at: i64,
   ) -> Result<Vec<RealtimeAlertMetrics>, String> {
     let mut survey_totals: std::collections::HashMap<String, u64> =
-          std::collections::HashMap::new();
+          
+        
+        std::collections::HashMap::new();
 
 
     for line in text.lines() {
