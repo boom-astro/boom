@@ -82,6 +82,7 @@ async fn main() -> std::io::Result<()> {
     let babamul_doc = BabamulApiDoc::openapi();
 
     let server_result = HttpServer::new(move || {
+        let http_client = web::Data::new(reqwest::Client::new());
         let mut app = App::new()
             .app_data(web::Data::new(config.clone()))
             .app_data(web::Data::new(database.clone()))
@@ -89,6 +90,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(email_service.clone()))
             .app_data(cutout_storages.clone())
             .app_data(analytics.clone())
+            .app_data(http_client)
             .wrap(from_fn(request_metrics_middleware));
 
         // Conditionally register Babamul endpoints if enabled
@@ -119,6 +121,7 @@ async fn main() -> std::io::Result<()> {
                     .service(routes::babamul::surveys::get_cutouts)
                     .service(routes::babamul::surveys::get_alerts)
                     .service(routes::babamul::surveys::cone_search_alerts)
+                    .service(routes::babamul::stats::get_realtime_stats)
                     .service(routes::babamul::stats::get_nightly_stats)
                     .service(routes::babamul::stats::get_collection_stats)
                     .service(routes::babamul::stats::get_kafka_stats)
