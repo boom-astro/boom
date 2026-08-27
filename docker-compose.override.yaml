@@ -207,7 +207,7 @@ services:
       - --ignore
       - target
       - -x
-      - run --bin kafka_consumer -- ztf 20240617 --programids public --config /app/config.yaml
+      - run --bin kafka_consumer -- ztf --on 20240617 --programids public --config /app/config.yaml
     volumes:
       - ./src:/app/src
       - ./apache-avro-macros:/app/apache-avro-macros

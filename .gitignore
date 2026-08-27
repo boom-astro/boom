@@ -19,3 +19,4 @@ logs
 *.jsonl
 simbad_cache
 *.parquet
+config.docker.yaml
