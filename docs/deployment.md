@@ -10,7 +10,7 @@ data present on one is not necessarily present on the other.
 | --- | --- | --- |
 | Role | Primary production instance | Backup / secondary instance |
 | Host | Dedicated server (`kaboom`), `*.kaboom.caltech.edu` | HPC cluster at the University of Minnesota |
-| Deploy method | Automated: release tag → `Deploy to production` GitHub Actions workflow on a self-hosted runner | Manual, on the cluster |
+| Deploy method | Automated: release tag → `Trigger deployment to production` GitHub Actions workflow on a self-hosted runner | Manual, on the cluster |
 | Config in this repo | `config/prod/caltech/` | Not yet (deployed manually) |
 
 **They diverge in practice.** Users are created per instance through that
@@ -79,14 +79,14 @@ on persistent storage: on `kaboom` this is under `/scr` rather than
 `/root/code`, so the paths below use it. Adjust them for another host:
 
 ```bash
-mkdir -p /scr/traefik-public/
+mkdir -p /scr/ztf/dev/traefik-public/
 ```
 
 Copy the Traefik Docker Compose file to the host with `scp` or `rsync` from a
 local checkout:
 
 ```bash
-rsync -a config/docker-compose.traefik.yml root@your-server.example.com:/scr/traefik-public/
+rsync -a config/docker-compose.traefik.yml root@your-server.example.com:/scr/ztf/dev/traefik-public/
 ```
 
 This Traefik instance expects a Docker "public network" named `traefik-public`
@@ -119,7 +119,7 @@ Encrypt registers the ACME certificates against. Then start Traefik from the
 directory holding the Compose file:
 
 ```bash
-cd /scr/traefik-public/
+cd /scr/ztf/dev/traefik-public/
 docker compose -f docker-compose.traefik.yml up -d
 ```
 
@@ -415,8 +415,19 @@ reusable [`deploy.yaml`](/.github/workflows/deploy.yaml). There are two ways in:
   path used for rollbacks.
 
 No SSH access to the deployment host is needed for either. The job runs on the
-self-hosted runner, checks out the tag, and runs `docker compose --profile prod -f docker-compose.yaml build` then
-`docker compose --profile prod -f docker-compose.yaml -f docker-compose.cutouts-mongo.yaml up -d`.
+self-hosted runner, checks out the tag, and runs three Compose commands. When
+`BOOM_GPU__ENABLED` is `true` it also layers in `-f docker-compose.cuda.yaml`,
+shown as `$GPU` here:
+
+```bash
+docker compose --profile prod -f docker-compose.yaml $GPU build
+docker compose --profile prod -f docker-compose.yaml -f docker-compose.cutouts-mongo.yaml $GPU up -d
+docker compose --profile prod -f docker-compose.yaml -f docker-compose.cutouts-mongo.yaml $GPU up -d --force-recreate --no-deps grafana docker-metadata-exporter
+```
+
+The third command is not redundant: `grafana` and `docker-metadata-exporter` run
+off a bind-mounted repo file, so editing it leaves the service definition
+unchanged and `up -d` keeps the old container.
 
 Deploys cause brief downtime: Compose stops each service's container and starts
 a new one from the freshly built image, so expect a window of roughly half a
@@ -440,15 +451,21 @@ Once the workflow finishes green:
    the Kafka docs page, and the statistics dashboard are the high-traffic paths.
 3. **Check Grafana** — confirm ingestion and processing rates look normal and no
    alerts are firing.
-4. **Optional:** on the host, `docker compose --profile prod ps` should show
-   every service `running`/`healthy`.
+4. **Optional:** on the host, `docker compose -p boom ps` should show every
+   service `running`/`healthy`, except the one-shot `kafka-acl-init`. Select the
+   project with `-p` rather than running Compose from the checked-out tree:
+   there is no `.env` on the host, so interpolating the compose files fails.
 
 ### Rolling back
 
 Re-run `Trigger deployment to production` manually with the last known-good
-version tag. Because the workflow deploys whatever tag it is given, this is a
-full rollback of both the application and its generated config, and it is
-usually faster than reverting commits and cutting a new tag.
+version tag. Because the workflow deploys whatever tag it is given, this rolls
+back both the application and its generated config, and it is usually faster
+than reverting commits and cutting a new tag.
+
+**Note:** this does not roll back the deploy pipeline itself.
+`deploy-trigger.yaml` calls `deploy.yaml@main` (GitHub forbids expressions in
+`uses`), so an old tag is always deployed by today's workflow.
 
 Rolling back the application does **not** roll back data: MongoDB, Kafka, and
 Valkey state stays on disk across a deploy. If a release migrated data in a way
