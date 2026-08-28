@@ -262,7 +262,11 @@ async fn build_cutout_storage(
 
 #[derive(Debug, Clone)]
 pub struct CatalogXmatchConfig {
-    pub catalog: String,                     // name of the collection in the database
+    pub catalog: String, // key this catalog's matches appear under in cross_matches
+    // Collection actually queried. Defaults to `catalog`; set it when two
+    // entries read the same collection with different matching rules, since the
+    // results are keyed by `catalog` and the key must stay unique.
+    pub collection: Option<String>,
     pub radius: f64,                         // radius in radians
     pub projection: mongodb::bson::Document, // projection to apply to the catalog
     pub use_distance: bool,                  // whether to use the distance field in the crossmatch
@@ -284,8 +288,10 @@ pub fn radians_to_arcsec(radians: f64) -> f64 {
 }
 
 impl CatalogXmatchConfig {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         catalog: &str,
+        collection: Option<String>,
         radius: f64,
         projection: mongodb::bson::Document,
         use_distance: bool,
@@ -300,6 +306,7 @@ impl CatalogXmatchConfig {
         let arcsec_to_radians = |v: f64| v * std::f64::consts::PI / 180.0 / 3600.0;
         CatalogXmatchConfig {
             catalog: catalog.to_string(),
+            collection,
             radius: arcsec_to_radians(radius),
             projection,
             use_distance,
@@ -311,6 +318,11 @@ impl CatalogXmatchConfig {
             angular_size_scale,
             angular_size_radius_max: angular_size_radius_max.map(arcsec_to_radians),
         }
+    }
+
+    /// Collection to query, which is the catalog name unless overridden.
+    pub fn collection_name(&self) -> &str {
+        self.collection.as_deref().unwrap_or(&self.catalog)
     }
 
     /// Match radius in arcsec for one candidate row.
@@ -346,6 +358,11 @@ impl CatalogXmatchConfig {
             .ok_or(BoomConfigError::MissingKeyError("catalog".to_string()))?
             .clone()
             .into_string()?;
+
+        let collection = match hashmap_xmatch.get("collection") {
+            Some(value) => Some(value.clone().into_string()?),
+            None => None,
+        };
 
         let radius = hashmap_xmatch
             .get("radius")
@@ -449,6 +466,7 @@ impl CatalogXmatchConfig {
 
         Ok(CatalogXmatchConfig::new(
             &catalog,
+            collection,
             radius,
             projection_doc,
             use_distance,

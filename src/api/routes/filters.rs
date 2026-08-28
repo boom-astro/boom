@@ -1386,6 +1386,7 @@ mod tests {
             .or_default()
             .push(CatalogXmatchConfig::new(
                 &name,
+                None,
                 2.0,
                 doc! { "_id": 1 },
                 false,

@@ -197,14 +197,14 @@ pub async fn xmatch(
     for xmatch_config in xmatch_configs.iter().skip(1) {
         x_matches_pipeline.push(doc! {
             "$unionWith": {
-                "coll": &xmatch_config.catalog,
+                "coll": xmatch_config.collection_name(),
                 "pipeline": catalog_pipeline(xmatch_config, ra_geojson, dec_geojson)
             }
         });
     }
 
     let collection: mongodb::Collection<mongodb::bson::Document> =
-        db.collection(&xmatch_configs[0].catalog);
+        db.collection(xmatch_configs[0].collection_name());
     let mut cursor = collection
         .aggregate(x_matches_pipeline)
         .await
@@ -421,6 +421,7 @@ mod tests {
     fn angular_size_config() -> conf::CatalogXmatchConfig {
         conf::CatalogXmatchConfig::new(
             "NED_LVS",
+            None,
             300.0,
             doc! {},
             false,
@@ -437,6 +438,7 @@ mod tests {
     fn plain_config() -> conf::CatalogXmatchConfig {
         conf::CatalogXmatchConfig::new(
             "NED",
+            None,
             300.0,
             doc! {},
             false,

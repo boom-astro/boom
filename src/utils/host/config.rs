@@ -31,6 +31,22 @@ pub struct HostGalaxyConfig {
     /// Include the redshift term in the posterior when both the transient and
     /// the galaxy have one.
     pub use_redshift: bool,
+    /// Round-exponential rejection. REX is the Tractor model for marginally
+    /// resolved sources, and at DECam seeing a small one is indistinguishable
+    /// from a point source. These three cuts are in sensitive regions of the
+    /// parameter space -- small changes move the results materially -- so they
+    /// are configurable rather than hardcoded.
+    ///
+    /// Reject a REX row when it is smaller than this, in arcsec.
+    pub rex_min_shape_r_arcsec: f64,
+    /// Reject a REX row below this r-band signal-to-noise.
+    pub rex_min_snr: f64,
+    /// Reject a REX row with at least this fraction of its aperture flux coming
+    /// from neighbours; such a source sits inside something larger.
+    pub rex_max_fracflux: f64,
+    /// Surface brightness of the isophote the Legacy half-light radius is
+    /// converted to, mag/arcsec^2. 25 puts it on the same scale as NED-LVS D25.
+    pub isophote_mag: f64,
 }
 
 impl Default for HostGalaxyConfig {
@@ -45,6 +61,10 @@ impl Default for HostGalaxyConfig {
             exclude_star_like: true,
             star_type_value: "PSF".to_string(),
             use_redshift: true,
+            rex_min_shape_r_arcsec: 0.3,
+            rex_min_snr: 5.0,
+            rex_max_fracflux: 0.5,
+            isophote_mag: crate::utils::host::sersic::MU_25,
         }
     }
 }
@@ -97,5 +117,32 @@ mod tests {
         assert_eq!(config.ned_lvs_catalog, NED_LVS);
         assert_eq!(config.max_candidates, 10);
         assert!(config.exclude_star_like);
+    }
+}
+
+#[cfg(test)]
+mod config_file_tests {
+    use super::HostGalaxyConfig;
+
+    /// The knobs are only useful if the deployed config actually reaches them.
+    /// `#[serde(default)]` means a typo in config.yaml silently keeps the
+    /// default rather than failing, so assert the parsed values.
+    #[test]
+    fn test_rex_and_isophote_knobs_parse_from_config_yaml() {
+        let settings = config::Config::builder()
+            .add_source(config::File::with_name(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/config.yaml"
+            )))
+            .build()
+            .expect("config.yaml loads");
+        let parsed: HostGalaxyConfig = settings
+            .get("host_galaxy")
+            .expect("host_galaxy deserializes");
+
+        assert_eq!(parsed.rex_min_shape_r_arcsec, 0.3);
+        assert_eq!(parsed.rex_min_snr, 5.0);
+        assert_eq!(parsed.rex_max_fracflux, 0.5);
+        assert_eq!(parsed.isophote_mag, 25.0);
     }
 }

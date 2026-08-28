@@ -51,6 +51,7 @@ mod ellipse;
 mod error;
 mod likelihood;
 mod prior;
+mod sersic;
 mod types;
 
 pub use associate::{associate_host, AssociationConfig, AssociationResult};
@@ -112,10 +113,10 @@ mod tests {
             "objtype": "G",
             "z": 0.005_24,
             "z_unc": 0.000_01,
-            "diam": 444.0_f64,
-            "diam_ba": 0.87_f64,
-            "diam_pa": 30.0_f64,
-            "dist_mpc": 16.8_f64,
+            "Diam": 444.0_f64,
+            "Diam_ba": 0.87_f64,
+            "Diam_pa": 30.0_f64,
+            "DistMpc": 16.8_f64,
         }
     }
 
@@ -195,10 +196,10 @@ mod tests {
             "dec": 41.269_1,
             "objtype": "G",
             "z": -0.001_001_f64,
-            "diam": 11_400.0_f64,   // ~3.2 deg major axis
-            "diam_ba": 0.32_f64,
-            "diam_pa": 35.0_f64,
-            "dist_mpc": 0.79_f64,
+            "Diam": 11_400.0_f64,   // ~3.2 deg major axis
+            "Diam_ba": 0.32_f64,
+            "Diam_pa": 35.0_f64,
+            "DistMpc": 0.79_f64,
         };
         let mut xmatches = HashMap::new();
         xmatches.insert(NED_LVS.to_string(), vec![m31]);

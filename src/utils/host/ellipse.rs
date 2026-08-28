@@ -77,6 +77,21 @@ impl Ellipse {
         })
     }
 
+    /// Same shape and orientation, resized to a new semi-major axis.
+    ///
+    /// The axis ratio is preserved: converting a half-light radius to an
+    /// isophotal one changes the scale of the model, not its shape.
+    pub fn scaled_to_semi_major(&self, a_arcsec: f64, min_b: f64) -> Self {
+        let a = a_arcsec.max(min_b);
+        let b = (a * self.axis_ratio).max(min_b);
+        Self {
+            a,
+            b,
+            pa_rad: self.pa_rad,
+            axis_ratio: b / a,
+        }
+    }
+
     /// Build an ellipse from a [`GalaxyCandidate`], flooring the semi-minor
     /// axis at `min_b` so that catalog rows with a degenerate (or zero) minor
     /// axis still yield a usable directional radius.
