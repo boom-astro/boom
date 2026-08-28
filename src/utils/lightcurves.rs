@@ -55,6 +55,11 @@ pub enum Band {
     H,
     #[serde(rename = "k")]
     K,
+    // Mid-infrared bands (WISE/NEOWISE: bandid 1=W1 3.4um, 2=W2 4.6um).
+    #[serde(rename = "w1")]
+    W1,
+    #[serde(rename = "w2")]
+    W2,
 }
 
 impl std::fmt::Display for Band {
@@ -69,6 +74,8 @@ impl std::fmt::Display for Band {
             Band::J => write!(f, "j"),
             Band::H => write!(f, "h"),
             Band::K => write!(f, "k"),
+            Band::W1 => write!(f, "w1"),
+            Band::W2 => write!(f, "w2"),
         }
     }
 }
@@ -305,6 +312,8 @@ pub struct PerBandProperties {
     pub j: Option<BandProperties>,
     pub h: Option<BandProperties>,
     pub k: Option<BandProperties>,
+    pub w1: Option<BandProperties>,
+    pub w2: Option<BandProperties>,
 }
 
 #[derive(Debug, PartialEq, Clone, Deserialize, Serialize, AvroSchema)]
@@ -474,6 +483,8 @@ pub fn analyze_photometry(
         j: None,
         h: None,
         k: None,
+        w1: None,
+        w2: None,
     };
     for (band, mags) in bands {
         if mags.is_empty() {
@@ -554,6 +565,8 @@ pub fn analyze_photometry(
             Band::J => results.j = Some(band_properties),
             Band::H => results.h = Some(band_properties),
             Band::K => results.k = Some(band_properties),
+            Band::W1 => results.w1 = Some(band_properties),
+            Band::W2 => results.w2 = Some(band_properties),
         }
     }
 

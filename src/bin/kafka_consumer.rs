@@ -2,7 +2,7 @@ use boom::{
     conf::load_dotenv,
     kafka::{
         AlertConsumer, DecamAlertConsumer, LsstAlertConsumer, StartDate, WinterAlertConsumer,
-        ZtfAlertConsumer,
+        WiseAlertConsumer, ZtfAlertConsumer,
     },
     utils::{
         enums::{ProgramId, Survey},
@@ -154,6 +154,7 @@ async fn run(
         Survey::Winter => {
             consume_with(WinterAlertConsumer::new(None), &args, start, &date_label).await
         }
+        Survey::Wise => consume_with(WiseAlertConsumer::new(None), &args, start, &date_label).await,
     }
 
     if let Some(meter_provider) = meter_provider {

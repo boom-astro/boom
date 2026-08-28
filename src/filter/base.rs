@@ -3,7 +3,7 @@ use crate::{
     conf::{self, AppConfig},
     filter::{
         build_decam_filter_pipeline, build_lsst_filter_pipeline, build_winter_filter_pipeline,
-        build_ztf_filter_pipeline,
+        build_wise_filter_pipeline, build_ztf_filter_pipeline,
     },
     scheduler::{record_kafka_alert_published, record_worker_retry},
     utils::{
@@ -695,6 +695,7 @@ pub async fn build_filter_pipeline(
         Survey::Ztf => build_ztf_filter_pipeline(pipeline, permissions).await?,
         Survey::Lsst => build_lsst_filter_pipeline(pipeline, permissions).await?,
         Survey::Decam => build_decam_filter_pipeline(pipeline, permissions).await?,
+        Survey::Wise => build_wise_filter_pipeline(pipeline, permissions).await?,
         Survey::Winter => build_winter_filter_pipeline(pipeline, permissions).await?,
     };
     Ok(pipeline)
