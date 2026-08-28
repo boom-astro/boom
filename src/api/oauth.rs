@@ -97,6 +97,41 @@ impl OAuthProviderKind {
     }
 }
 
+/// Whether the two URLs every social sign-in depends on are actually set.
+///
+/// `/start` needs `oauth.redirect_base_url` to build the redirect URI it hands
+/// the provider, and every way the flow can end — token, error, or the email
+/// detour — needs `babamul.webapp_url` to bounce the browser back to. Missing
+/// either one turns the feature off rather than half on.
+///
+/// Blank counts as missing, so a key left empty in YAML reads as "off" rather
+/// than producing a redirect URI with a hole in it. (Empty *environment*
+/// variables no longer reach this point — `load_raw_config` ignores them, which
+/// is what stops Compose's `${VAR:-}` defaults from blanking the YAML value.)
+pub fn urls_configured(config: &AppConfig) -> bool {
+    let is_set = |value: Option<&str>| value.is_some_and(|value| !value.trim().is_empty());
+    is_set(config.babamul.oauth.redirect_base_url.as_deref())
+        && is_set(config.babamul.webapp_url.as_deref())
+}
+
+/// The providers this deployment can actually sign someone in with.
+///
+/// Both gates in one place — per-provider credentials and the deployment-wide
+/// URLs — so the startup log, `/oauth/providers` and `/start` can never
+/// disagree. They did once: the log listed three providers off the credentials
+/// alone while the endpoint, which also checked the URLs, returned none, and
+/// the logs read as if the feature were on.
+pub fn enabled_providers(config: &AppConfig) -> Vec<OAuthProviderKind> {
+    if !urls_configured(config) {
+        return Vec::new();
+    }
+    OAuthProviderKind::ALL
+        .iter()
+        .copied()
+        .filter(|provider| provider.config(config).is_some())
+        .collect()
+}
+
 impl fmt::Display for OAuthProviderKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())

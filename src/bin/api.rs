@@ -69,18 +69,19 @@ async fn main() -> std::io::Result<()> {
         if let Err(error) = routes::babamul::oauth::ensure_oauth_state_index(&database).await {
             log_error!(WARN, error, "failed to create the OAuth TTL indexes");
         }
-        let enabled_providers: Vec<&str> = boom::api::oauth::OAuthProviderKind::ALL
+        // Same helper `/oauth/providers` uses, so this line always matches what
+        // the client is actually offered — credentials alone are not enough.
+        let providers: Vec<&str> = boom::api::oauth::enabled_providers(&config)
             .iter()
-            .filter(|provider| provider.config(&config).is_some())
             .map(|provider| provider.as_str())
             .collect();
-        if enabled_providers.is_empty() {
-            tracing::info!("No social sign-in providers are configured");
-        } else {
+        if providers.is_empty() {
             tracing::info!(
-                "Social sign-in enabled for: {}",
-                enabled_providers.join(", ")
+                "No social sign-in providers are configured (needs a client ID and secret \
+                 per provider, plus babamul.webapp_url and babamul.oauth.redirect_base_url)"
             );
+        } else {
+            tracing::info!("Social sign-in enabled for: {}", providers.join(", "));
         }
     } else {
         tracing::info!("Babamul API endpoints are DISABLED");
