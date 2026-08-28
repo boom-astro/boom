@@ -1003,6 +1003,7 @@ mod tests {
                 prv_candidates: vec![],
                 fp_hists: vec![],
                 is_sso: false,
+                designation: None,
                 aliases: None,
                 created_at: 0.0,
                 updated_at: 0.0,

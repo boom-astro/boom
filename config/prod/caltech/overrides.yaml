@@ -2,6 +2,9 @@ babamul:
   webapp_url: https://babamul.caltech.edu
   retention_days: 7
 
+gpu:
+  enabled: true
+
 kafka:
   consumer:
     lsst:
