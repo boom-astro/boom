@@ -142,7 +142,7 @@ fn isophotal_semi_major_for(
     ellipse: &Ellipse,
     config: &HostGalaxyConfig,
 ) -> Option<f64> {
-    let objtype = opt_string(doc, "type")?;
+    let objtype = opt_string(doc, "objtype")?;
     let n = sersic_index_for_type(&objtype, opt_f64(doc, "sersic"))?;
     let m_tot = total_mag(opt_f64(doc, "flux_r")?)?;
     isophotal_semi_major(ellipse.a, ellipse.axis_ratio, n, m_tot, config.isophote_mag)
@@ -152,7 +152,7 @@ pub fn galaxy_from_ls_dr10(doc: &Document, config: &HostGalaxyConfig) -> Option<
     let ra = opt_f64(doc, "ra")?;
     let dec = opt_f64(doc, "dec")?;
 
-    let objtype = opt_string(doc, "type");
+    let objtype = opt_string(doc, "objtype");
     if config.exclude_star_like {
         if let Some(t) = objtype.as_deref() {
             if t == config.star_type_value {
@@ -202,7 +202,7 @@ pub fn galaxy_from_ls_dr10(doc: &Document, config: &HostGalaxyConfig) -> Option<
 /// Catalog label recorded on candidates sourced from NED-LVS.
 pub const NED_LVS: &str = "NED_LVS";
 /// Catalog label recorded on candidates sourced from Legacy Survey DR10.
-pub const LS_DR10: &str = "LS_DR10";
+pub const LS_DR10: &str = "LSDR10";
 
 /// Build the candidate list from a survey's cross-match results.
 ///
@@ -285,7 +285,7 @@ mod tests {
             "_id": id,
             "ra": ra,
             "dec": dec,
-            "type": "SER",
+            "objtype": "SER",
             "shape_r": 1.5_f64,
             "shape_e1": 0.2_f64,
             "shape_e2": 0.0_f64,
@@ -387,7 +387,7 @@ mod tests {
     fn test_from_ls_dr10_excludes_point_sources() {
         let config = HostGalaxyConfig::default();
         let mut d = ls_doc("ls-1", 10.0, 20.0);
-        d.insert("type", "PSF");
+        d.insert("objtype", "PSF");
         assert!(galaxy_from_ls_dr10(&d, &config).is_none());
 
         // ...unless the exclusion is turned off
@@ -515,7 +515,7 @@ mod legacy_shape_tests {
             "_id": "ls-rex",
             "ra": 10.0,
             "dec": 20.0,
-            "type": "REX",
+            "objtype": "REX",
             "shape_r": 1.2_f64,
             "shape_e1": 0.0_f64,
             "shape_e2": 0.0_f64,
@@ -576,7 +576,7 @@ mod legacy_shape_tests {
     fn test_rex_cuts_do_not_apply_to_other_types() {
         for objtype in ["EXP", "DEV", "SER"] {
             let mut d = good_rex();
-            d.insert("type", objtype);
+            d.insert("objtype", objtype);
             d.insert("shape_r", 0.2_f64);
             d.insert("flux_r", 2.0_f64);
             assert!(accepted(&d), "{objtype} should not face the REX cuts");
@@ -604,7 +604,7 @@ mod legacy_shape_tests {
     #[test]
     fn test_row_without_flux_keeps_its_half_light_radius() {
         let mut d = good_rex();
-        d.insert("type", "EXP");
+        d.insert("objtype", "EXP");
         d.remove("flux_r");
         let g = galaxy_from_ls_dr10(&d, &HostGalaxyConfig::default()).expect("kept");
         assert!((g.a_arcsec - 1.2).abs() < 1e-9, "got {}", g.a_arcsec);
@@ -614,7 +614,7 @@ mod legacy_shape_tests {
     #[test]
     fn test_conversion_preserves_the_axis_ratio() {
         let mut d = good_rex();
-        d.insert("type", "EXP");
+        d.insert("objtype", "EXP");
         d.insert("shape_e1", 0.3_f64);
         d.insert("flux_r", 1000.0_f64);
         let mut unconverted = d.clone();

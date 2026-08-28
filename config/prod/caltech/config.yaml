@@ -170,19 +170,32 @@ workers:
 # Enabling this requires the galaxy catalogs below to be ingested AND listed in
 # the survey's `crossmatch` block, so their shape columns are projected into the
 # match documents:
-#   NED_LVS  -> diam, diam_ba, diam_pa (plus dist_mpc, dist_mpc_method, z)
-#   LS_DR10  -> shape_r, shape_e1, shape_e2, type
+#   NED_LVS  -> Diam, Diam_ba, Diam_pa (plus DistMpc, DistMpc_method, z)
+#   LSDR10   -> shape_r, shape_e1, shape_e2, objtype, sersic, flux_r,
+#               flux_ivar_r, fracflux_r
+# Field names are the ones the catalog ingest writes, which are not always the
+# source column names: the Legacy `type` column is stored as `objtype`.
 # NED-LVS is preferred where it has a diameter; Legacy Survey fills in the rest.
 host_galaxy:
   enabled: false
   ned_lvs_catalog: NED_LVS
-  ls_dr10_catalog: LS_DR10
+  ls_dr10_catalog: LSDR10 # collection name as ingested; UMN uses LSDR10
   max_dlr: 5.0 # admission cutoff; filters should cut tighter (~4)
   min_axis_arcsec: 0.05
   max_candidates: 10
   exclude_star_like: true # drop LS_DR10 point sources, which have no extent
   star_type_value: PSF
   use_redshift: true
+  # Round-exponential rejection. REX fits marginally resolved sources, and about
+  # half of them are too small, too faint, or too blended to be a believable
+  # host. These sit in sensitive parts of the parameter space, so changing them
+  # moves results materially.
+  rex_min_shape_r_arcsec: 0.3
+  rex_min_snr: 5.0
+  rex_max_fracflux: 0.5
+  # Legacy half-light radii are converted to this isophote so they rank on the
+  # same scale as NED-LVS D25 diameters.
+  isophote_mag: 25.0
 crossmatch:
   ztf:
     - catalog: Gaia_DR3
@@ -241,11 +254,13 @@ crossmatch:
         Mstar: 1
         Mstar_unc: 1
     - catalog: NED_LVS
-      # Per-galaxy match radius from diam; see config.yaml for the rationale
-      # and the angular_size_scale >= host_galaxy.max_dlr coupling.
+      # Reads the NED collection, which holds the NED-LVS sample; there is no
+      # NED_LVS collection. See config.yaml for why this is a separate entry
+      # and for the angular_size_scale >= host_galaxy.max_dlr coupling.
+      collection: NED
       radius: 300.0
       use_distance: false
-      angular_size_key: diam
+      angular_size_key: Diam
       angular_size_scale: 5.0
       angular_size_radius_max: 21600.0
       max_results: 50
@@ -256,11 +271,11 @@ crossmatch:
         objtype: 1
         z: 1
         z_unc: 1
-        diam: 1
-        diam_ba: 1
-        diam_pa: 1
-        dist_mpc: 1
-        dist_mpc_method: 1
+        Diam: 1
+        Diam_ba: 1
+        Diam_pa: 1
+        DistMpc: 1
+        DistMpc_method: 1
         m_Ks: 1
         m_Ks_unc: 1
     - catalog: 2MASS_PSC
@@ -448,11 +463,13 @@ crossmatch:
         Mstar: 1
         Mstar_unc: 1
     - catalog: NED_LVS
-      # Per-galaxy match radius from diam; see config.yaml for the rationale
-      # and the angular_size_scale >= host_galaxy.max_dlr coupling.
+      # Reads the NED collection, which holds the NED-LVS sample; there is no
+      # NED_LVS collection. See config.yaml for why this is a separate entry
+      # and for the angular_size_scale >= host_galaxy.max_dlr coupling.
+      collection: NED
       radius: 300.0
       use_distance: false
-      angular_size_key: diam
+      angular_size_key: Diam
       angular_size_scale: 5.0
       angular_size_radius_max: 21600.0
       max_results: 50
@@ -463,11 +480,11 @@ crossmatch:
         objtype: 1
         z: 1
         z_unc: 1
-        diam: 1
-        diam_ba: 1
-        diam_pa: 1
-        dist_mpc: 1
-        dist_mpc_method: 1
+        Diam: 1
+        Diam_ba: 1
+        Diam_pa: 1
+        DistMpc: 1
+        DistMpc_method: 1
         m_Ks: 1
         m_Ks_unc: 1
     - catalog: 2MASS_PSC
@@ -653,6 +670,11 @@ crossmatch:
         Mstar: 1
         Mstar_unc: 1
     - catalog: NED_LVS
+      # Reads the NED collection, which holds the NED-LVS sample. Kept as its
+      # own entry rather than folded into the NED one: angular_size_key takes
+      # precedence over use_distance, so merging them would silently change
+      # matching for every existing NED consumer.
+      collection: NED
       # Feeds host_galaxy association. use_distance is false on purpose: the
       # redshift-scaled circle is exactly what d_DLR replaces.
       # Each galaxy gets its own match radius from diam (angular major-axis
@@ -661,7 +683,7 @@ crossmatch:
       # past it pay for the wider search, capped at angular_size_radius_max.
       radius: 300.0 # base cone, arcsec
       use_distance: false
-      angular_size_key: diam
+      angular_size_key: Diam
       # Must be >= host_galaxy.max_dlr: d_DLR <= N implies sep <= N * semi-major,
       # so a smaller scale here would silently drop candidates the association
       # would otherwise have considered.
@@ -675,12 +697,13 @@ crossmatch:
         objtype: 1
         z: 1
         z_unc: 1
-        diam: 1
-        diam_ba: 1
-        diam_pa: 1
-        dist_mpc: 1
-        dist_mpc_method: 1
-        m_Ks: 1 # inert until the ingest exposes it and use_absmag is implemented
+        # NED-LVS FITS column names verbatim, as the catalog ingest writes them.
+        Diam: 1
+        Diam_ba: 1
+        Diam_pa: 1
+        DistMpc: 1
+        DistMpc_method: 1
+        m_Ks: 1 # inert until use_absmag is implemented
         m_Ks_unc: 1
     - catalog: DESI_DR1
       radius: 30.0 # 30 arcseconds

@@ -33,12 +33,27 @@ pub async fn create_partial_index(
     unique: bool,
     partial_filter: Option<Document>,
 ) -> Result<(), CreateIndexError> {
+    create_named_partial_index(collection, index, unique, partial_filter, None).await
+}
+
+/// As [`create_partial_index`], with an explicit index name.
+///
+/// Needed when a collection carries two indexes over the same keys: Mongo names
+/// an index after its keys, so the second would collide with the first.
+pub async fn create_named_partial_index(
+    collection: &Collection<Document>,
+    index: Document,
+    unique: bool,
+    partial_filter: Option<Document>,
+    name: Option<String>,
+) -> Result<(), CreateIndexError> {
     let index_model = IndexModel::builder()
         .keys(index)
         .options(
             IndexOptions::builder()
                 .unique(unique)
                 .partial_filter_expression(partial_filter)
+                .name(name)
                 .build(),
         )
         .build();
@@ -162,6 +177,46 @@ pub async fn initialize_survey_indexes(
     Ok(())
 }
 
+/// Index name for the angular-size branch of a catalog's cone match.
+fn angular_size_index_name(size_key: &str) -> String {
+    format!("radec_2dsphere_large_{size_key}")
+}
+
+/// Partial 2dsphere indexes for catalogs matched by angular size.
+///
+/// An angular-size match is an `$or`: a base cone for everything, plus a much
+/// wider cone for rows large enough to reach past it. Only a fraction of a
+/// percent of a galaxy catalog qualifies, but without a partial index the wide
+/// cone scans every row inside several degrees and then discards nearly all of
+/// them. Restricting the index to the rows that can qualify makes that branch
+/// cost about as much as the base cone.
+///
+/// The threshold has to match the one the query uses, so it is derived from the
+/// same config rather than written out again.
+pub async fn initialize_angular_size_indexes(
+    xmatch_configs: &[crate::conf::CatalogXmatchConfig],
+    db: &Database,
+) -> Result<(), CreateIndexError> {
+    for config in xmatch_configs {
+        let Some(size_key) = &config.angular_size_key else {
+            continue;
+        };
+        if config.angular_size_radius_max.is_none() {
+            continue;
+        }
+        let collection: Collection<Document> = db.collection(config.collection_name());
+        create_named_partial_index(
+            &collection,
+            doc! { "coordinates.radec_geojson": "2dsphere" },
+            false,
+            Some(doc! { size_key: { "$gt": config.angular_size_threshold_arcsec() } }),
+            Some(angular_size_index_name(size_key)),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 /// This function updates a timeseries array by appending new values while deduplicating
 /// based on a time field, maintaining sort order, and removing non-finite values.
 /// (so we have only one measurement per epoch).
@@ -280,5 +335,56 @@ pub fn fetch_timeseries_op(
                 "$and": conditions
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod angular_size_index_tests {
+    use super::angular_size_index_name;
+    use crate::conf::CatalogXmatchConfig;
+    use mongodb::bson::doc;
+
+    fn config(angular_size_key: Option<String>, radius_max: Option<f64>) -> CatalogXmatchConfig {
+        CatalogXmatchConfig::new(
+            "NED_LVS",
+            Some("NED".to_string()),
+            300.0,
+            doc! {},
+            false,
+            None,
+            None,
+            None,
+            None,
+            angular_size_key,
+            5.0,
+            radius_max,
+        )
+    }
+
+    // The index filter and the query filter have to use the same threshold, or
+    // the index silently fails to cover rows the query asks for.
+    #[test]
+    fn test_threshold_is_derived_from_the_same_config_as_the_query() {
+        let c = config(Some("Diam".to_string()), Some(21600.0));
+        // 2 * base_radius / scale: the diameter at which the scaled radius first
+        // exceeds the base cone.
+        assert!((c.angular_size_threshold_arcsec() - 120.0).abs() < 1e-9);
+    }
+
+    // The name must differ from the full 2dsphere index on the same keys.
+    #[test]
+    fn test_index_name_does_not_collide_with_the_full_index() {
+        assert_ne!(
+            angular_size_index_name("Diam"),
+            "coordinates.radec_geojson_2dsphere"
+        );
+    }
+
+    #[test]
+    fn test_catalogs_without_angular_size_matching_are_skipped() {
+        assert!(config(None, Some(21600.0)).angular_size_key.is_none());
+        // A key without a cap means no wide branch, so no partial index either.
+        let capped = config(Some("Diam".to_string()), None);
+        assert!(capped.angular_size_radius_max.is_none());
     }
 }

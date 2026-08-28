@@ -6,7 +6,7 @@ use boom::{
     enrichment::models::SharedModelPool,
     scheduler::{record_worker_pool_state, ThreadPool},
     utils::{
-        db::initialize_survey_indexes,
+        db::{initialize_angular_size_indexes, initialize_survey_indexes},
         enums::Survey,
         o11y::{
             logging::{build_subscriber_with_otel, log_error, WARN},
@@ -153,6 +153,14 @@ async fn run(
     initialize_survey_indexes(&args.survey, &db)
         .await
         .expect("could not initialize indexes");
+
+    // Catalog-side, and only for this survey's crossmatches: an angular-size
+    // match is unusably slow without it.
+    if let Some(xmatch_configs) = config.crossmatch.get(&args.survey) {
+        initialize_angular_size_indexes(xmatch_configs, &db)
+            .await
+            .expect("could not initialize angular-size catalog indexes");
+    }
 
     warn_if_missing_crossmatches(&args.survey, &db, &config).await;
 

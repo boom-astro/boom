@@ -170,12 +170,15 @@ workers:
 # the survey's `crossmatch` block, so their shape columns are projected into the
 # match documents:
 #   NED_LVS  -> Diam, Diam_ba, Diam_pa (plus DistMpc, DistMpc_method, z)
-#   LS_DR10  -> shape_r, shape_e1, shape_e2, type
+#   LSDR10   -> shape_r, shape_e1, shape_e2, objtype, sersic, flux_r,
+#               flux_ivar_r, fracflux_r
+# Field names are the ones the catalog ingest writes, which are not always the
+# source column names: the Legacy `type` column is stored as `objtype`.
 # NED-LVS is preferred where it has a diameter; Legacy Survey fills in the rest.
 host_galaxy:
   enabled: false
   ned_lvs_catalog: NED_LVS
-  ls_dr10_catalog: LS_DR10
+  ls_dr10_catalog: LSDR10 # collection name as ingested; UMN uses LSDR10
   max_dlr: 5.0            # admission cutoff; filters should cut tighter (~4)
   min_axis_arcsec: 0.05
   max_candidates: 10
