@@ -408,12 +408,13 @@ async fn test_enrich_ztf_alert() {
     assert!((fading_rate - 0.063829).abs() < 1e-6);
     assert!((fading_dt - 7.956157).abs() < 1e-6);
     // Only 2 points after the peak: the line is exact, so chi2 is 0 and there
-    // are no degrees of freedom left to reduce by. red_chi2 is therefore absent
-    // rather than a number a range cut would silently drop.
-    assert!(
-        fading.get("red_chi2").is_none(),
-        "red_chi2 must be absent when dof is 0, got {:?}",
-        fading.get("red_chi2")
+    // are no degrees of freedom left to reduce by. red_chi2 is therefore null
+    // rather than a number a range cut would silently drop. Explicitly null and
+    // not omitted -- the avro schema requires the field to be present.
+    assert_eq!(
+        fading.get("red_chi2"),
+        Some(&mongodb::bson::Bson::Null),
+        "red_chi2 must be null when dof is 0"
     );
     assert_eq!(fading.get_i32("dof").unwrap(), 0);
     assert_eq!(fading.get_i32("nb_data").unwrap(), 2);

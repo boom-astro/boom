@@ -2,7 +2,6 @@ use apache_avro_derive::AvroSchema;
 use apache_avro_macros::serdavro;
 use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
-use serde_with::{serde_as, skip_serializing_none};
 use utoipa::ToSchema;
 
 pub const ZP_AB: f32 = 8.90; // Zero point for AB magnitude
@@ -85,8 +84,11 @@ pub struct PhotometryMag {
     pub band: Band,
 }
 
-#[serde_as]
-#[skip_serializing_none]
+// TODO: avro serialization fail when we use skip_serializing_none,
+// since the optional fields are not just None but simply missing
+// (this needs to be fixed in the apache_avro-related crates)
+// #[serde_as]
+// #[skip_serializing_none]
 #[derive(Debug, PartialEq, Clone, Deserialize, Serialize, AvroSchema, ToSchema)]
 pub struct BandRateProperties {
     pub rate: f32,
@@ -97,14 +99,14 @@ pub struct BandRateProperties {
     /// Degrees of freedom, `nb_data - 2`. Zero for a two-point fit, which is
     /// what makes `red_chi2` undefined there.
     pub dof: i32,
-    /// Chi-square per degree of freedom, absent when `dof` is zero.
+    /// Chi-square per degree of freedom, null when `dof` is zero.
     ///
     /// A two-point fit has nothing left over to test goodness of fit against, so
-    /// there is no honest value to report. Absent is not "a good fit" and not
+    /// there is no honest value to report. Null is not "a good fit" and not
     /// "a bad fit": a Mongo range cut such as `red_chi2 <= 2` matches *neither*
-    /// absent nor null, so a filter written only on this field silently drops
-    /// every two-point band. Cut on `chi2`/`dof` instead, or pair the range cut
-    /// with an explicit `dof: 0` branch, when sparse bands should still count.
+    /// null nor absent, so a filter written only on this field silently drops
+    /// every two-point band. Pair the range cut with `{red_chi2: null}`, which
+    /// matches both this and pre-existing documents, when sparse bands count.
     pub red_chi2: Option<f32>,
     pub nb_data: i32,
     pub dt: f32,
@@ -1240,5 +1242,51 @@ mod goodness_of_fit_tests {
         let passes_with_dof = |b: &BandRateProperties| b.dof == 0 || b.chi2 <= 2.0 * b.dof as f32;
         assert!(passes_with_dof(&clean));
         assert!(passes_with_dof(&sparse));
+    }
+}
+
+#[cfg(test)]
+mod avro_round_trip_tests {
+    use super::*;
+    use crate::utils::derive_avro_schema::SerdavroWriter;
+    use apache_avro::{AvroSchema, Writer};
+
+    fn fit(x: &[f32], y: &[f32], s: &[f32]) -> BandRateProperties {
+        weighted_least_squares_centered(x, y, s).expect("fit")
+    }
+
+    /// These reach Babamul through `append_serdavro`, which resolves every field
+    /// the schema declares by name. `skip_serializing_none` omits a `None`
+    /// entirely, so the lookup fails there while BSON stays perfectly happy --
+    /// a serialization-only regression the plain unit tests cannot see.
+    #[test]
+    fn test_per_band_properties_serialize_through_the_babamul_path() {
+        let schema = PerBandProperties::get_schema();
+        for (label, band) in [
+            (
+                "three points, red_chi2 defined",
+                fit(&[0.0, 1.0, 2.0], &[20.0, 19.0, 19.5], &[0.1; 3]),
+            ),
+            (
+                "two points, red_chi2 null",
+                fit(&[0.0, 1.0], &[20.0, 19.0], &[0.1; 2]),
+            ),
+        ] {
+            let props = PerBandProperties {
+                g: Some(BandProperties {
+                    peak_jd: 2_460_000.0,
+                    peak_mag: 19.0,
+                    peak_mag_err: 0.1,
+                    dt: 1.0,
+                    rising: Some(band.clone()),
+                    fading: Some(band),
+                }),
+                ..Default::default()
+            };
+            let mut writer = Writer::new(&schema, Vec::new());
+            writer
+                .append_serdavro(&props)
+                .unwrap_or_else(|e| panic!("{label} failed to serialize to avro: {e}"));
+        }
     }
 }
