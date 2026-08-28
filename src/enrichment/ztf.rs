@@ -464,7 +464,13 @@ pub struct ZtfAlertProperties {
     pub star: bool,
     pub near_brightstar: bool,
     /// A host galaxy was associated within the configured `max_dlr`.
-    pub hosted: bool,
+    ///
+    /// `None` on alerts never evaluated for a host -- enriched before this
+    /// existed, or with host association disabled. That is not the same as
+    /// `Some(false)`, which means evaluated and nothing passed the cut, so a
+    /// filter must not read absence as "no host".
+    #[serde(default)]
+    pub hosted: Option<bool>,
     pub stationary: bool,
     pub photstats: PerBandProperties,
     pub multisurvey_photstats: Option<PerBandProperties>,
@@ -1045,11 +1051,10 @@ impl ZtfEnrichmentWorker {
             photstats.clone()
         };
 
-        // best_host only exists if it passed the configured d_DLR cut.
-        let hosted = alert
-            .host_galaxy
-            .as_ref()
-            .is_some_and(|hg| hg.best_host.is_some());
+        // `host_galaxy` is None when association never ran and Some when it did,
+        // so mapping preserves the difference between "not evaluated" and
+        // "evaluated, no host". best_host is set only above the d_DLR cut.
+        let hosted = alert.host_galaxy.as_ref().map(|hg| hg.best_host.is_some());
 
         Ok((
             ZtfAlertProperties {
@@ -1385,6 +1390,29 @@ mod tests {
             props.sso.is_none(),
             "absent means never evaluated, not evaluated-and-negative"
         );
+        assert!(
+            props.hosted.is_none(),
+            "absent means never evaluated for a host, not evaluated-and-hostless"
+        );
+        assert!(props.activity.is_none());
+    }
+
+    // Evaluated-and-nothing-found has to stay distinguishable from never
+    // evaluated, or a filter cutting on `hosted == false` silently sweeps in
+    // every alert enriched before host association existed.
+    #[test]
+    fn test_evaluated_hostless_differs_from_unevaluated() {
+        let evaluated = serde_json::json!({
+            "rock": false,
+            "star": false,
+            "near_brightstar": false,
+            "stationary": true,
+            "hosted": false,
+            "photstats": PerBandProperties::default(),
+            "multisurvey_photstats": null,
+        });
+        let props: ZtfAlertProperties = serde_json::from_value(evaluated).expect("deserializes");
+        assert_eq!(props.hosted, Some(false));
     }
 
     // A partially-written block should not fail either.

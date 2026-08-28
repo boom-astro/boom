@@ -179,7 +179,7 @@ fn create_mock_enriched_ztf_alert(candid: i64, object_id: &str, is_rock: bool) -
             rock: is_rock,
             star: false,
             near_brightstar: false,
-            hosted: false,
+            hosted: Some(false),
             stationary: false,
             photstats: PerBandProperties::default(),
             multisurvey_photstats: Some(PerBandProperties::default()),
