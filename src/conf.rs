@@ -79,21 +79,28 @@ pub fn load_raw_config(filepath: &str) -> Result<Config, BoomConfigError> {
 
     let conf = Config::builder()
         .add_source(File::from(path))
-        .add_source(
-            config::Environment::with_prefix("boom")
-                .prefix_separator("_")
-                .separator("__")
-                // An empty variable means "not set", not "set to empty". Compose
-                // renders every `${VAR:-}` it lists as `VAR=` whether or not the
-                // deployment supplied one, so without this a variable nobody set
-                // still lands here and blanks out whatever the YAML said. That is
-                // silent: the file is right, the container's environment is right
-                // by its own lights, and the setting is simply gone.
-                .ignore_empty(true),
-        )
+        .add_source(env_source())
         .build()?;
 
     Ok(conf)
+}
+
+/// The `BOOM_*` environment overlay applied on top of `config.yaml`.
+///
+/// Split out from [`load_raw_config`] so tests can exercise the exact source
+/// production uses while feeding it a fake environment via
+/// [`config::Environment::source`], rather than mutating the process's own.
+fn env_source() -> config::Environment {
+    config::Environment::with_prefix("boom")
+        .prefix_separator("_")
+        .separator("__")
+        // An empty variable means "not set", not "set to empty". Compose
+        // renders every `${VAR:-}` it lists as `VAR=` whether or not the
+        // deployment supplied one, so without this a variable nobody set
+        // still lands here and blanks out whatever the YAML said. That is
+        // silent: the file is right, the container's environment is right
+        // by its own lights, and the setting is simply gone.
+        .ignore_empty(true)
 }
 
 #[instrument(skip_all, err)]
@@ -1105,6 +1112,31 @@ pub async fn get_test_cutout_storage(survey: &Survey) -> CutoutStorage {
 mod tests {
     use super::*;
 
+    /// `config.yaml` as a deployment with both OAuth URLs set would have it.
+    const URLS_CONFIGURED_YAML: &str = "babamul:\n  webapp_url: https://example.org\n  oauth:\n    redirect_base_url: https://example.org/api\n";
+
+    /// Build a config from [`URLS_CONFIGURED_YAML`] plus a *fake* environment.
+    ///
+    /// `Environment::source` substitutes the map for the real environment, so
+    /// this exercises the production overlay without `set_var` — which would
+    /// race the other tests in this binary reading the environment through
+    /// `from_test_config`, and would clobber any `BOOM_*` values a developer's
+    /// `.env` had already loaded into the process.
+    fn config_with_env(vars: &[(&str, &str)]) -> Config {
+        let env: std::collections::HashMap<String, String> = vars
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect();
+        Config::builder()
+            .add_source(File::from_str(
+                URLS_CONFIGURED_YAML,
+                config::FileFormat::Yaml,
+            ))
+            .add_source(env_source().source(Some(env)))
+            .build()
+            .unwrap()
+    }
+
     #[test]
     fn an_empty_env_var_does_not_blank_out_a_configured_value() {
         // The shape that hid social sign-in in production: docker-compose lists
@@ -1112,21 +1144,10 @@ mod tests {
         // container got `…REDIRECT_BASE_URL=` even though nothing set it, and
         // that empty string beat the value in config/prod/<deployment>/config.yaml.
         // The deployment then looked unconfigured and rendered no buttons.
-        let dir = std::env::temp_dir().join(format!("boom-conf-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("empty-env.config.yaml");
-        std::fs::write(
-            &path,
-            "babamul:\n  webapp_url: https://example.org\n  oauth:\n    redirect_base_url: https://example.org/api\n",
-        )
-        .unwrap();
-
-        std::env::set_var("BOOM_BABAMUL__WEBAPP_URL", "");
-        std::env::set_var("BOOM_BABAMUL__OAUTH__REDIRECT_BASE_URL", "");
-        let conf = load_raw_config(path.to_str().unwrap()).unwrap();
-        std::env::remove_var("BOOM_BABAMUL__WEBAPP_URL");
-        std::env::remove_var("BOOM_BABAMUL__OAUTH__REDIRECT_BASE_URL");
-        std::fs::remove_file(&path).ok();
+        let conf = config_with_env(&[
+            ("BOOM_BABAMUL__WEBAPP_URL", ""),
+            ("BOOM_BABAMUL__OAUTH__REDIRECT_BASE_URL", ""),
+        ]);
 
         assert_eq!(
             conf.get::<String>("babamul.webapp_url").unwrap(),
@@ -1136,6 +1157,20 @@ mod tests {
             conf.get::<String>("babamul.oauth.redirect_base_url")
                 .unwrap(),
             "https://example.org/api"
+        );
+    }
+
+    #[test]
+    fn a_non_empty_env_var_still_overrides_the_file() {
+        // The other half of the pair: ignoring *empty* variables must not turn
+        // into ignoring the environment, or every BOOM_* override in the deploy
+        // workflow would quietly stop working and the test above would pass for
+        // the wrong reason.
+        let conf = config_with_env(&[("BOOM_BABAMUL__WEBAPP_URL", "https://override.example")]);
+
+        assert_eq!(
+            conf.get::<String>("babamul.webapp_url").unwrap(),
+            "https://override.example"
         );
     }
 
