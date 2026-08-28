@@ -82,7 +82,14 @@ pub fn load_raw_config(filepath: &str) -> Result<Config, BoomConfigError> {
         .add_source(
             config::Environment::with_prefix("boom")
                 .prefix_separator("_")
-                .separator("__"),
+                .separator("__")
+                // An empty variable means "not set", not "set to empty". Compose
+                // renders every `${VAR:-}` it lists as `VAR=` whether or not the
+                // deployment supplied one, so without this a variable nobody set
+                // still lands here and blanks out whatever the YAML said. That is
+                // silent: the file is right, the container's environment is right
+                // by its own lights, and the setting is simply gone.
+                .ignore_empty(true),
         )
         .build()?;
 
@@ -1097,6 +1104,40 @@ pub async fn get_test_cutout_storage(survey: &Survey) -> CutoutStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_empty_env_var_does_not_blank_out_a_configured_value() {
+        // The shape that hid social sign-in in production: docker-compose lists
+        // BOOM_BABAMUL__OAUTH__REDIRECT_BASE_URL with a `:-` default, so the
+        // container got `…REDIRECT_BASE_URL=` even though nothing set it, and
+        // that empty string beat the value in config/prod/<deployment>/config.yaml.
+        // The deployment then looked unconfigured and rendered no buttons.
+        let dir = std::env::temp_dir().join(format!("boom-conf-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("empty-env.config.yaml");
+        std::fs::write(
+            &path,
+            "babamul:\n  webapp_url: https://example.org\n  oauth:\n    redirect_base_url: https://example.org/api\n",
+        )
+        .unwrap();
+
+        std::env::set_var("BOOM_BABAMUL__WEBAPP_URL", "");
+        std::env::set_var("BOOM_BABAMUL__OAUTH__REDIRECT_BASE_URL", "");
+        let conf = load_raw_config(path.to_str().unwrap()).unwrap();
+        std::env::remove_var("BOOM_BABAMUL__WEBAPP_URL");
+        std::env::remove_var("BOOM_BABAMUL__OAUTH__REDIRECT_BASE_URL");
+        std::fs::remove_file(&path).ok();
+
+        assert_eq!(
+            conf.get::<String>("babamul.webapp_url").unwrap(),
+            "https://example.org"
+        );
+        assert_eq!(
+            conf.get::<String>("babamul.oauth.redirect_base_url")
+                .unwrap(),
+            "https://example.org/api"
+        );
+    }
 
     #[test]
     fn oauth_provider_needs_a_client_id_and_secret_to_count_as_configured() {

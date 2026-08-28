@@ -15,7 +15,8 @@ use crate::api::auth::{hash_token, AuthProvider};
 use crate::api::email::EmailService;
 use crate::api::models::response;
 use crate::api::oauth::{
-    authorization_url, exchange_code_for_identity, ExternalIdentity, OAuthProviderKind, Pkce,
+    authorization_url, enabled_providers, exchange_code_for_identity, urls_configured,
+    ExternalIdentity, OAuthProviderKind, Pkce,
 };
 use crate::api::routes::babamul::{
     create_babamul_jwt, generate_random_string, BabamulUser, LinkedIdentity,
@@ -123,42 +124,18 @@ pub struct OAuthProviderInfo {
 )]
 #[get("/oauth/providers")]
 pub async fn get_oauth_providers(config: web::Data<AppConfig>) -> HttpResponse {
-    // Two independent gates, both needed before a button is worth rendering.
-    // Per provider, `config()` returns `Some` only when that provider has BOTH
-    // halves of its credential — client ID and secret — which is the whole
-    // definition of "enabled"; there is no separate flag. Deployment-wide, the
-    // two URLs every flow depends on have to be set, or a provider with
-    // perfectly good credentials would still die at /start or on the way back.
-    let providers: Vec<OAuthProviderInfo> = if !oauth_urls_configured(&config) {
-        Vec::new()
-    } else {
-        OAuthProviderKind::ALL
-            .iter()
-            .filter(|provider| provider.config(&config).is_some())
-            .map(|provider| OAuthProviderInfo {
-                id: provider.as_str().to_string(),
-                name: provider.display_name().to_string(),
-                start_url: format!("/babamul/oauth/{}/start", provider),
-            })
-            .collect()
-    };
+    // `enabled_providers` applies both gates: per-provider credentials and the
+    // deployment-wide URLs. An empty list is the normal answer for a
+    // password-only install, not an error — the client renders nothing.
+    let providers: Vec<OAuthProviderInfo> = enabled_providers(&config)
+        .into_iter()
+        .map(|provider| OAuthProviderInfo {
+            id: provider.as_str().to_string(),
+            name: provider.display_name().to_string(),
+            start_url: format!("/babamul/oauth/{}/start", provider),
+        })
+        .collect();
     response::ok_ser("success", providers)
-}
-
-/// Whether the two URLs every social sign-in depends on are actually set.
-///
-/// `/start` needs `oauth.redirect_base_url` to build the redirect URI it hands
-/// the provider, and every way the flow can end — token, error, or the email
-/// detour — needs `babamul.webapp_url` to bounce the browser back to. Missing
-/// either one turns the feature off rather than half on.
-///
-/// Blank counts as missing: Compose renders an unset variable as `""` rather
-/// than leaving it out, so `Some("")` is what an unconfigured deployment
-/// actually looks like here.
-fn oauth_urls_configured(config: &AppConfig) -> bool {
-    let is_set = |value: Option<&str>| value.is_some_and(|value| !value.trim().is_empty());
-    is_set(config.babamul.oauth.redirect_base_url.as_deref())
-        && is_set(config.babamul.webapp_url.as_deref())
 }
 
 #[derive(Deserialize)]
@@ -195,7 +172,7 @@ pub async fn get_oauth_start(
         Some(provider) => provider,
         None => return response::not_found("Unknown sign-in provider"),
     };
-    if provider.config(&config).is_none() || !oauth_urls_configured(&config) {
+    if provider.config(&config).is_none() || !urls_configured(&config) {
         return response::not_found("Sign-in provider is not enabled");
     }
 
@@ -269,7 +246,7 @@ pub async fn get_oauth_callback(
         Some(provider) => provider,
         None => return response::not_found("Unknown sign-in provider"),
     };
-    if provider.config(&config).is_none() || !oauth_urls_configured(&config) {
+    if provider.config(&config).is_none() || !urls_configured(&config) {
         return response::not_found("Sign-in provider is not enabled");
     }
 

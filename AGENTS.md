@@ -66,6 +66,18 @@ Document every new variable in `.env.example`, and add it to the relevant
 service in `docker-compose.yaml` — the compose files list env vars explicitly,
 so an undeclared one silently never reaches the container.
 
+An empty variable counts as *unset*, not as "set to empty": `load_raw_config`
+passes `ignore_empty(true)` to the env source. This matters because a compose
+line like `BOOM_BABAMUL__WEBAPP_URL: ${BOOM_BABAMUL__WEBAPP_URL:-}` renders as
+`BOOM_BABAMUL__WEBAPP_URL=` for every deployment that doesn't set it — without
+`ignore_empty` that blank would win over the value in
+`config/prod/<deployment>/config.yaml`, and the setting would vanish with the
+file, the container environment, and the deploy workflow all looking correct.
+The flip side: a value cannot be *cleared* from the environment. To turn
+something off, give it an empty value in `config.yaml` (which is what
+`posthog.project_api_key` and the `babamul.oauth.*` credentials do) rather than
+expecting `FOO=` to blank it.
+
 ## Tests need real services
 
 The suite talks to actual infrastructure rather than mocks, so results depend
