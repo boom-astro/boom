@@ -404,11 +404,20 @@ async fn test_enrich_ztf_alert() {
     // r fading stats
     let fading = r_stats.get_document("fading").unwrap();
     let fading_rate = fading.get_f64("rate").unwrap();
-    let fading_red_chi2 = fading.get_f64("red_chi2").unwrap();
     let fading_dt = fading.get_f64("dt").unwrap();
     assert!((fading_rate - 0.063829).abs() < 1e-6);
-    assert!(fading_red_chi2.is_nan()); // only 2 points after peak
     assert!((fading_dt - 7.956157).abs() < 1e-6);
+    // Only 2 points after the peak: the line is exact, so chi2 is 0 and there
+    // are no degrees of freedom left to reduce by. red_chi2 is therefore absent
+    // rather than a number a range cut would silently drop.
+    assert!(
+        fading.get("red_chi2").is_none(),
+        "red_chi2 must be absent when dof is 0, got {:?}",
+        fading.get("red_chi2")
+    );
+    assert_eq!(fading.get_i32("dof").unwrap(), 0);
+    assert_eq!(fading.get_i32("nb_data").unwrap(), 2);
+    assert!(fading.get_f64("chi2").unwrap().abs() < 1e-9);
 }
 
 #[tokio::test]

@@ -91,7 +91,21 @@ pub struct PhotometryMag {
 pub struct BandRateProperties {
     pub rate: f32,
     pub rate_error: f32,
-    pub red_chi2: f32,
+    /// Chi-square of the linear fit. Always defined, including for a two-point
+    /// fit, where the line passes through both points and it is exactly zero.
+    pub chi2: f32,
+    /// Degrees of freedom, `nb_data - 2`. Zero for a two-point fit, which is
+    /// what makes `red_chi2` undefined there.
+    pub dof: i32,
+    /// Chi-square per degree of freedom, absent when `dof` is zero.
+    ///
+    /// A two-point fit has nothing left over to test goodness of fit against, so
+    /// there is no honest value to report. Absent is not "a good fit" and not
+    /// "a bad fit": a Mongo range cut such as `red_chi2 <= 2` matches *neither*
+    /// absent nor null, so a filter written only on this field silently drops
+    /// every two-point band. Cut on `chi2`/`dof` instead, or pair the range cut
+    /// with an explicit `dof: 0` branch, when sparse bands should still count.
+    pub red_chi2: Option<f32>,
     pub nb_data: i32,
     pub dt: f32,
 }
@@ -273,15 +287,14 @@ fn weighted_least_squares_centered(
         chi2 += (residual / sigma[i]).powi(2);
     }
 
-    let reduced_chi2 = if n > 2 {
-        chi2 / (n - 2) as f32
-    } else {
-        f32::NAN
-    };
+    let dof = n.saturating_sub(2);
+    let reduced_chi2 = (dof > 0).then(|| chi2 / dof as f32);
 
     Some(BandRateProperties {
         rate: a,
         rate_error: a_err,
+        chi2,
+        dof: dof as i32,
         red_chi2: reduced_chi2,
         nb_data: n as i32,
         dt: x[n - 1] - x[0],
@@ -575,7 +588,7 @@ mod tests {
         let result = weighted_least_squares_centered(&x, &y, &sigma).unwrap();
         assert!((result.rate - 2.04).abs() < 1e-2);
         assert!((result.rate_error - 0.031623).abs() < 1e-6);
-        assert!((result.red_chi2 - 0.400001).abs() < 1e-6);
+        assert!((result.red_chi2.unwrap() - 0.400001).abs() < 1e-6);
         assert_eq!(result.nb_data, 5);
         assert!((result.dt - 4.0).abs() < 1e-5);
 
@@ -630,7 +643,7 @@ mod tests {
         let y = vec![2.0, 8.0, 1.0, 7.0, 3.0];
         let sigma = vec![0.1, 0.1, 0.1, 0.1, 0.1];
         let result = weighted_least_squares_centered(&x, &y, &sigma).unwrap();
-        assert!((result.red_chi2 - 1290.0).abs() < 1e-1);
+        assert!((result.red_chi2.unwrap() - 1290.0).abs() < 1e-1);
 
         // Test case 9: exactly two data points
         let x = vec![1.0, 2.0];
@@ -639,7 +652,11 @@ mod tests {
         let result = weighted_least_squares_centered(&x, &y, &sigma).unwrap();
         assert!((result.rate - 2.0).abs() < 1e-6);
         assert!((result.rate_error - 0.141421).abs() < 1e-6);
-        assert!(result.red_chi2.is_nan()); // for 2 data points, red_chi2 is NaN
+        // Two points define the line exactly: chi2 is 0 with no degrees of
+        // freedom left, so there is no reduced chi2 to report.
+        assert!(result.red_chi2.is_none());
+        assert_eq!(result.dof, 0);
+        assert!(result.chi2.abs() < 1e-9);
         assert_eq!(result.nb_data, 2);
         assert!((result.dt - 1.0).abs() < 1e-6);
     }
@@ -770,7 +787,7 @@ mod tests {
         let rising_nb_data = rising_stats.nb_data;
         let rising_dt = rising_stats.dt;
         assert!((rising_rate + 1.0).abs() < 1e-6); // should be -1 mag/day
-        assert!(rising_red_chi2.is_nan()); // for 2 data points, red_chi2 is NaN
+        assert!(rising_red_chi2.is_none()); // 2 points: exact line, no degrees of freedom
         assert_eq!(rising_nb_data, 2);
         assert!((rising_dt - 1.0).abs() < 1e-6);
 
@@ -821,7 +838,7 @@ mod tests {
         let fading_nb_data = fading_stats.nb_data;
         let fading_dt = fading_stats.dt;
         assert!((fading_rate - 1.0).abs() < 1e-6); // should be 1 mag/day
-        assert!(red_chi2.is_nan()); // for 2 data points, red_chi2 is NaN
+        assert!(red_chi2.is_none()); // 2 points: exact line, no degrees of freedom
         assert_eq!(fading_nb_data, 2);
         assert!((fading_dt - 1.0).abs() < 1e-6);
         // the all band properties should also just match the one data point we have
@@ -877,7 +894,7 @@ mod tests {
         let rising_nb_data = rising_stats.nb_data;
         let rising_dt = rising_stats.dt;
         assert!((rising_rate + 1.0).abs() < 1e-6); // should be -1 mag/day
-        assert!(rising_red_chi2.is_nan()); // for 2 data points, red_chi2 is NaN
+        assert!(rising_red_chi2.is_none()); // 2 points: exact line, no degrees of freedom
         assert_eq!(rising_nb_data, 2);
         assert!((rising_dt - 1.0).abs() < 1e-6);
 
@@ -887,7 +904,7 @@ mod tests {
         let fading_nb_data = fading_stats.nb_data;
         let fading_dt = fading_stats.dt;
         assert!((fading_rate - 1.0).abs() < 1e-6); // should be 1 mag/day
-        assert!(fading_red_chi2.is_nan()); // for 2 data points, red_chi2 is NaN
+        assert!(fading_red_chi2.is_none()); // 2 points: exact line, no degrees of freedom
         assert_eq!(fading_nb_data, 2);
         assert!((fading_dt - 1.0).abs() < 1e-6);
 
@@ -963,7 +980,7 @@ mod tests {
         let rising_nb_data = rising_stats.nb_data;
         let rising_dt = rising_stats.dt;
         assert!((rising_rate + 1.0).abs() < 1e-6); // should be -1 mag/day
-        assert!(rising_red_chi2.abs() < 1e-6); // perfect fit
+        assert!(rising_red_chi2.unwrap().abs() < 1e-6); // perfect fit
         assert_eq!(rising_nb_data, 3);
         assert!((rising_dt - 2.0).abs() < 1e-6);
 
@@ -988,7 +1005,7 @@ mod tests {
         let fading_nb_data = fading_stats.nb_data;
         let fading_dt = fading_stats.dt;
         assert!((fading_rate - 1.0).abs() < 1e-6); // should be 1 mag/day
-        assert!(fading_red_chi2.is_nan()); // for 2 data points, red_chi2 is NaN
+        assert!(fading_red_chi2.is_none()); // 2 points: exact line, no degrees of freedom
         assert_eq!(fading_nb_data, 2);
         assert!((fading_dt - 1.0).abs() < 1e-6);
 
@@ -1161,5 +1178,67 @@ mod activity_tests {
     fn test_missing_magnitudes_yield_no_measurement() {
         let a = ActivityMetrics::from_magnitudes(Some(18.0), None);
         assert!(a.aperture_excess.is_none());
+    }
+}
+
+#[cfg(test)]
+mod goodness_of_fit_tests {
+    use super::*;
+
+    fn fit(x: &[f32], y: &[f32], s: &[f32]) -> BandRateProperties {
+        weighted_least_squares_centered(x, y, s).expect("fit")
+    }
+
+    // Two points define a line exactly. chi2 is 0 and there is nothing left to
+    // reduce by, so red_chi2 has no honest value.
+    #[test]
+    fn test_two_point_fit_has_no_reduced_chi2_but_a_real_chi2() {
+        let r = fit(&[0.0, 1.0], &[20.0, 19.0], &[0.1, 0.1]);
+        assert_eq!(r.dof, 0);
+        assert_eq!(r.nb_data, 2);
+        assert!(r.chi2.abs() < 1e-9, "exact fit, got chi2 = {}", r.chi2);
+        assert!(r.red_chi2.is_none());
+    }
+
+    // The whole point of carrying chi2 and dof: a filter that must not drop
+    // sparse bands has something defined to cut on.
+    #[test]
+    fn test_chi2_is_defined_for_every_fit_including_two_point() {
+        for n in 2..6 {
+            let x: Vec<f32> = (0..n).map(|i| i as f32).collect();
+            let y: Vec<f32> = (0..n).map(|i| 20.0 - 0.1 * i as f32).collect();
+            let s = vec![0.1_f32; n];
+            let r = fit(&x, &y, &s);
+            assert!(r.chi2.is_finite(), "chi2 must be defined at n = {n}");
+            assert_eq!(r.dof, (n as i32) - 2);
+            assert_eq!(r.red_chi2.is_some(), n > 2);
+        }
+    }
+
+    #[test]
+    fn test_reduced_chi2_is_chi2_over_dof() {
+        // Three points not on a line, so the fit leaves a residual.
+        let r = fit(&[0.0, 1.0, 2.0], &[20.0, 19.0, 19.5], &[0.1, 0.1, 0.1]);
+        assert_eq!(r.dof, 1);
+        let expected = r.chi2 / r.dof as f32;
+        assert!((r.red_chi2.unwrap() - expected).abs() < 1e-6);
+    }
+
+    // Documents the trap this change exists to make escapable: a range cut on
+    // red_chi2 alone matches neither direction when the value is absent, so a
+    // two-point band is silently rejected by an AND block.
+    #[test]
+    fn test_a_range_cut_on_reduced_chi2_alone_excludes_two_point_bands() {
+        let sparse = fit(&[0.0, 1.0], &[20.0, 19.0], &[0.1, 0.1]);
+        let clean = fit(&[0.0, 1.0, 2.0], &[20.0, 19.9, 19.8], &[0.1, 0.1, 0.1]);
+
+        let passes_range_cut = |b: &BandRateProperties| b.red_chi2.is_some_and(|c| c <= 2.0);
+        assert!(passes_range_cut(&clean));
+        assert!(!passes_range_cut(&sparse), "this is the trap");
+
+        // With chi2/dof the same intent is expressible without dropping it.
+        let passes_with_dof = |b: &BandRateProperties| b.dof == 0 || b.chi2 <= 2.0 * b.dof as f32;
+        assert!(passes_with_dof(&clean));
+        assert!(passes_with_dof(&sparse));
     }
 }
