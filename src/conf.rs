@@ -580,6 +580,22 @@ pub struct BabamulConfig {
     /// Minimum number of minutes that must elapse between successive password resets (default: 15)
     #[serde(default = "default_password_reset_cooldown_minutes")]
     pub password_reset_cooldown_minutes: u32,
+    /// Whether this deployment will create new accounts (default: true).
+    ///
+    /// Set to `false` for a pre-release deployment that is open only to
+    /// accounts that already exist. Every path that would mint one honors it —
+    /// password sign-up and social sign-in alike — so it cannot be sidestepped
+    /// by calling the API directly or by pressing a sign-in button the web app
+    /// still shows. Signing in with an account that already exists, including
+    /// linking a new provider to it, is unaffected.
+    ///
+    /// The web app has its own build-time `VITE_PRERELEASE_MODE`, which decides
+    /// what the UI *offers*; this decides what the API *allows*. Set both.
+    #[serde(default = "default_babamul_registration_enabled")]
+    pub registration_enabled: bool,
+    /// Social sign-in (Google / GitHub / ORCID) configuration
+    #[serde(default)]
+    pub oauth: OAuthConfig,
 }
 
 impl Default for BabamulConfig {
@@ -589,8 +605,74 @@ impl Default for BabamulConfig {
             webapp_url: None,
             retention_days: default_babamul_retention_days(),
             password_reset_cooldown_minutes: default_password_reset_cooldown_minutes(),
+            registration_enabled: default_babamul_registration_enabled(),
+            oauth: OAuthConfig::default(),
         }
     }
+}
+
+/// Credentials for a single OAuth 2.0 / OIDC identity provider.
+///
+/// **Set these from the environment, not `config.yaml`** — the YAML files are
+/// committed, and a `client_secret:` key sitting in one is an invitation to
+/// paste a live secret into the repo. The env vars are
+/// `BOOM_BABAMUL__OAUTH__{GOOGLE,GITHUB,ORCID}__CLIENT_{ID,SECRET}`.
+///
+/// There is deliberately no `enabled` flag: a provider is on exactly when both
+/// halves of its credential are present. That keeps the on/off switch in the
+/// same place as the secret, so a provider can never be switched on without
+/// one — it fails closed instead of sending users to a consent screen that
+/// will reject them. Same shape as [`PostHogConfig`], where an empty
+/// `project_api_key` disables analytics.
+#[derive(Deserialize, Debug, Clone, Default)]
+pub struct OAuthProviderConfig {
+    #[serde(default)]
+    pub client_id: String,
+    #[serde(default)]
+    pub client_secret: String,
+}
+
+impl OAuthProviderConfig {
+    pub fn is_configured(&self) -> bool {
+        !self.client_id.is_empty() && !self.client_secret.is_empty()
+    }
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct OAuthConfig {
+    #[serde(default)]
+    pub google: OAuthProviderConfig,
+    #[serde(default)]
+    pub github: OAuthProviderConfig,
+    #[serde(default)]
+    pub orcid: OAuthProviderConfig,
+    /// Public base URL the API is reachable at, e.g. `https://api.babamul.org`.
+    /// The redirect URI registered with each provider must be
+    /// `{redirect_base_url}/babamul/oauth/{provider}/callback`.
+    pub redirect_base_url: Option<String>,
+    /// Point ORCID at its sandbox (`sandbox.orcid.org`) instead of production.
+    #[serde(default)]
+    pub orcid_sandbox: bool,
+    /// Seconds an in-flight authorization request stays valid (default: 600)
+    #[serde(default = "default_oauth_state_ttl_seconds")]
+    pub state_ttl_seconds: i64,
+}
+
+impl Default for OAuthConfig {
+    fn default() -> Self {
+        OAuthConfig {
+            google: OAuthProviderConfig::default(),
+            github: OAuthProviderConfig::default(),
+            orcid: OAuthProviderConfig::default(),
+            redirect_base_url: None,
+            orcid_sandbox: false,
+            state_ttl_seconds: default_oauth_state_ttl_seconds(),
+        }
+    }
+}
+
+fn default_oauth_state_ttl_seconds() -> i64 {
+    600
 }
 
 fn default_babamul_retention_days() -> u32 {
@@ -599,6 +681,10 @@ fn default_babamul_retention_days() -> u32 {
 
 fn default_password_reset_cooldown_minutes() -> u32 {
     15
+}
+
+fn default_babamul_registration_enabled() -> bool {
+    true
 }
 
 /// Server-side PostHog product analytics.
@@ -1011,6 +1097,48 @@ pub async fn get_test_cutout_storage(survey: &Survey) -> CutoutStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn oauth_provider_needs_a_client_id_and_secret_to_count_as_configured() {
+        let mut provider = OAuthProviderConfig {
+            client_id: "id".to_string(),
+            client_secret: "secret".to_string(),
+        };
+        assert!(provider.is_configured());
+
+        // A half-filled provider must fail closed rather than send users to a
+        // consent screen that will reject them. Credentials are the only
+        // switch, so there is no way to be "enabled" without them.
+        provider.client_secret = String::new();
+        assert!(!provider.is_configured());
+        provider.client_secret = "secret".to_string();
+        provider.client_id = String::new();
+        assert!(!provider.is_configured());
+    }
+
+    #[test]
+    fn oauth_config_defaults_are_off_with_a_usable_state_ttl() {
+        // Deserializing from `{}` exercises the serde defaults, which are
+        // separate from the Default impl and easy to leave out of step.
+        let config: OAuthConfig = serde_json::from_str("{}").unwrap();
+        assert!(!config.google.is_configured());
+        assert!(!config.github.is_configured());
+        assert!(!config.orcid.is_configured());
+        assert!(config.redirect_base_url.is_none());
+        assert_eq!(config.state_ttl_seconds, 600);
+        assert_eq!(
+            config.state_ttl_seconds,
+            OAuthConfig::default().state_ttl_seconds
+        );
+    }
+
+    #[test]
+    fn babamul_config_without_an_oauth_block_still_deserializes() {
+        // Existing deployments' config.yaml files predate the oauth section.
+        let config: BabamulConfig =
+            serde_json::from_str(r#"{"enabled": true, "webapp_url": null}"#).unwrap();
+        assert!(!config.oauth.google.is_configured());
+    }
 
     #[test]
     fn test_gpu_config_defaults() {

@@ -28,7 +28,13 @@ services:
     networks:
       - boom
   mongo:
-    image: mongo:8.0
+    # 8.2 rather than 8.0: MongoDB 8.0 refuses to start on Linux kernel 6.19 and
+    # newer (https://jira.mongodb.org/browse/SERVER-121912), which current
+    # Docker Desktop VMs already ship, so 8.0 cannot run locally at all. 8.0 to
+    # 8.2 is a supported direct upgrade and 8.2 to 8.0 a supported downgrade,
+    # provided featureCompatibilityVersion is left at "8.0" until you are ready
+    # to give up that path.
+    image: mongo:8.2
     hostname: mongo
     expose:
       - "27017"
@@ -206,6 +212,20 @@ services:
       BOOM_CUTOUTS_STORAGE__TYPE: mongo
       BOOM_CUTOUTS_STORAGE__HOST: mongo
       BOOM_BABAMUL__ENABLED: ${BOOM_BABAMUL__ENABLED:-false}
+      BOOM_BABAMUL__WEBAPP_URL: ${BOOM_BABAMUL__WEBAPP_URL:-}
+      # Whether the API will create accounts. Pair it with VITE_PRERELEASE_MODE
+      # below, which only decides what the web app offers.
+      BOOM_BABAMUL__REGISTRATION_ENABLED: ${BOOM_BABAMUL__REGISTRATION_ENABLED:-true}
+      # Social sign-in. Secrets come from the environment only; a provider with
+      # no client ID/secret pair stays off.
+      BOOM_BABAMUL__OAUTH__REDIRECT_BASE_URL: ${BOOM_BABAMUL__OAUTH__REDIRECT_BASE_URL:-}
+      BOOM_BABAMUL__OAUTH__GOOGLE__CLIENT_ID: ${BOOM_BABAMUL__OAUTH__GOOGLE__CLIENT_ID:-}
+      BOOM_BABAMUL__OAUTH__GOOGLE__CLIENT_SECRET: ${BOOM_BABAMUL__OAUTH__GOOGLE__CLIENT_SECRET:-}
+      BOOM_BABAMUL__OAUTH__GITHUB__CLIENT_ID: ${BOOM_BABAMUL__OAUTH__GITHUB__CLIENT_ID:-}
+      BOOM_BABAMUL__OAUTH__GITHUB__CLIENT_SECRET: ${BOOM_BABAMUL__OAUTH__GITHUB__CLIENT_SECRET:-}
+      BOOM_BABAMUL__OAUTH__ORCID__CLIENT_ID: ${BOOM_BABAMUL__OAUTH__ORCID__CLIENT_ID:-}
+      BOOM_BABAMUL__OAUTH__ORCID__CLIENT_SECRET: ${BOOM_BABAMUL__OAUTH__ORCID__CLIENT_SECRET:-}
+      BOOM_BABAMUL__OAUTH__ORCID_SANDBOX: ${BOOM_BABAMUL__OAUTH__ORCID_SANDBOX:-false}
       # Server-side PostHog analytics; blank disables analytics.
       BOOM_POSTHOG__PROJECT_API_KEY: ${BOOM_POSTHOG__PROJECT_API_KEY:-}
       BOOM_POSTHOG__HOST: ${BOOM_POSTHOG__HOST:-https://us.i.posthog.com}
