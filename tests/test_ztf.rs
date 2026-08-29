@@ -407,10 +407,8 @@ async fn test_enrich_ztf_alert() {
     let fading_dt = fading.get_f64("dt").unwrap();
     assert!((fading_rate - 0.063829).abs() < 1e-6);
     assert!((fading_dt - 7.956157).abs() < 1e-6);
-    // Only 2 points after the peak: the line is exact, so chi2 is 0 and there
-    // are no degrees of freedom left to reduce by. red_chi2 is therefore null
-    // rather than a number a range cut would silently drop. Explicitly null and
-    // not omitted -- the avro schema requires the field to be present.
+    // Only 2 points after the peak, so red_chi2 is null. Explicitly null and not
+    // omitted: the avro schema requires the field to be present.
     assert_eq!(
         fading.get("red_chi2"),
         Some(&mongodb::bson::Bson::Null),

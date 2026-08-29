@@ -93,20 +93,16 @@ pub struct PhotometryMag {
 pub struct BandRateProperties {
     pub rate: f32,
     pub rate_error: f32,
-    /// Chi-square of the linear fit. Always defined, including for a two-point
-    /// fit, where the line passes through both points and it is exactly zero.
+    /// Chi-square of the fit. Always defined; exactly zero for a two-point fit,
+    /// where the line passes through both points.
     pub chi2: f32,
     /// Degrees of freedom, `nb_data - 2`. Zero for a two-point fit, which is
     /// what makes `red_chi2` undefined there.
     pub dof: i32,
-    /// Chi-square per degree of freedom, null when `dof` is zero.
-    ///
-    /// A two-point fit has nothing left over to test goodness of fit against, so
-    /// there is no honest value to report. Null is not "a good fit" and not
-    /// "a bad fit": a Mongo range cut such as `red_chi2 <= 2` matches *neither*
-    /// null nor absent, so a filter written only on this field silently drops
-    /// every two-point band. Pair the range cut with `{red_chi2: null}`, which
-    /// matches both this and pre-existing documents, when sparse bands count.
+    /// Chi-square per degree of freedom, null when `dof` is zero: a two-point
+    /// fit leaves nothing to test goodness of fit against. Null means "unknown",
+    /// not "good" or "bad", and a range cut matches neither null nor absent --
+    /// cut on `chi2`/`dof` to include sparse bands.
     pub red_chi2: Option<f32>,
     pub nb_data: i32,
     pub dt: f32,
@@ -1218,8 +1214,7 @@ mod goodness_of_fit_tests {
         weighted_least_squares_centered(x, y, s).expect("fit")
     }
 
-    // Two points define a line exactly. chi2 is 0 and there is nothing left to
-    // reduce by, so red_chi2 has no honest value.
+    // Two points define a line exactly, leaving no degrees of freedom.
     #[test]
     fn test_two_point_fit_has_no_reduced_chi2_but_a_real_chi2() {
         let r = fit(&[0.0, 1.0], &[20.0, 19.0], &[0.1, 0.1]);
@@ -1229,8 +1224,7 @@ mod goodness_of_fit_tests {
         assert!(r.red_chi2.is_none());
     }
 
-    // The whole point of carrying chi2 and dof: a filter that must not drop
-    // sparse bands has something defined to cut on.
+    // chi2 is defined at every point count, so a sparse band is still cuttable.
     #[test]
     fn test_chi2_is_defined_for_every_fit_including_two_point() {
         for n in 2..6 {
@@ -1253,9 +1247,7 @@ mod goodness_of_fit_tests {
         assert!((r.red_chi2.unwrap() - expected).abs() < 1e-6);
     }
 
-    // Documents the trap this change exists to make escapable: a range cut on
-    // red_chi2 alone matches neither direction when the value is absent, so a
-    // two-point band is silently rejected by an AND block.
+    // A range cut on red_chi2 alone excludes a two-point band; chi2/dof does not.
     #[test]
     fn test_a_range_cut_on_reduced_chi2_alone_excludes_two_point_bands() {
         let sparse = fit(&[0.0, 1.0], &[20.0, 19.0], &[0.1, 0.1]);
@@ -1459,11 +1451,8 @@ mod rate_avro_tests {
         weighted_least_squares_centered(x, y, s).expect("fit")
     }
 
-    /// `append_serdavro` resolves every field the schema declares by name, so a
-    /// `None` that serializes as missing rather than null fails there while BSON
-    /// stays happy. That is how `skip_serializing_none` on this struct broke the
-    /// outgoing packet -- invisible to the plain unit tests, caught only by an
-    /// integration test needing Mongo. Cover the undefined case directly.
+    // `append_serdavro` resolves every declared field by name, so a `None` that
+    // serializes as missing rather than null fails there while BSON accepts it.
     #[test]
     fn test_band_rate_properties_serialize_with_and_without_reduced_chi2() {
         let schema = PerBandProperties::get_schema();
