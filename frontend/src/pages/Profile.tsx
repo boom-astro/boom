@@ -5,10 +5,11 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { toast } from "sonner";
-import { cn } from "@/lib/utils.ts";
+import { cn } from "@/lib/utils";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { fetchProfile, fetchKafkaCredentials, createKafkaCredential, deleteKafkaCredential, fetchTokens, createToken, deleteToken, type Profile as ProfileType, type KafkaCredential, type TokenPublic, type TokenResponse } from "@/lib/api";
-import { Copy, Key, Plus, Trash } from "lucide-react";
+import { fetchProfile, updateProfileName, fetchKafkaCredentials, createKafkaCredential, deleteKafkaCredential, fetchTokens, createToken, deleteToken, type Profile as ProfileType, type KafkaCredential, type TokenPublic, type TokenResponse } from "@/lib/api";
+import { useAppStore } from "@/lib/store";
+import { Check, Copy, Key, Pencil, Plus, Trash, X } from "lucide-react";
 import { IconEye, IconEyeOff } from "@tabler/icons-react";
 import { Spinner } from "@/components/ui/spinner.tsx";
 import * as analytics from "@/lib/analytics";
@@ -16,6 +17,11 @@ import * as analytics from "@/lib/analytics";
 export default function Profile() {
   const [profile, setProfile] = useState<ProfileType>(null);
   const [loading, setLoading] = useState(true);
+
+  // Display-name editing
+  const [editingName, setEditingName] = useState(false);
+  const [nameDraft, setNameDraft] = useState("");
+  const [savingName, setSavingName] = useState(false);
 
   // Kafka credential state
   const [credentials, setCredentials] = useState<KafkaCredential[]>([]);
@@ -59,6 +65,28 @@ export default function Profile() {
       toast.error(`Failed to load profile: ${error}`);
     } finally {
       setLoading(false);
+    }
+  }
+
+  function startEditingName() {
+    setNameDraft(profile?.name ?? "");
+    setEditingName(true);
+  }
+
+  async function handleSaveName() {
+    setSavingName(true);
+    try {
+      const updated = await updateProfileName(nameDraft.trim());
+      setProfile(updated);
+      // nav-user reads the profile from the store, and its cached copy is good
+      // for five minutes — without this the old name lingers in the sidebar.
+      useAppStore.getState().setProfile(updated);
+      setEditingName(false);
+      toast.success(updated?.name ? "Name updated" : "Name cleared");
+    } catch (error) {
+      toast.error(`Failed to update name: ${error instanceof Error ? error.message : error}`);
+    } finally {
+      setSavingName(false);
     }
   }
 
@@ -271,10 +299,61 @@ export default function Profile() {
                 <p className="font-medium">{profile.email}</p>
               </div>
             )}
-            {profile?.name && (
+            <div>
+              <Label className="text-muted-foreground">Name</Label>
+              {editingName ? (
+                <div className="flex items-center gap-2 mt-1">
+                  <Input
+                    value={nameDraft}
+                    onChange={(e) => setNameDraft(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") handleSaveName();
+                      if (e.key === "Escape") setEditingName(false);
+                    }}
+                    placeholder="Your full name"
+                    maxLength={100}
+                    autoFocus
+                    aria-label="Full name"
+                    disabled={savingName}
+                  />
+                  <Button size="icon" variant="ghost" onClick={handleSaveName} disabled={savingName} aria-label="Save name">
+                    {savingName ? <Spinner /> : <Check className="size-4" />}
+                  </Button>
+                  <Button size="icon" variant="ghost" onClick={() => setEditingName(false)} disabled={savingName} aria-label="Cancel">
+                    <X className="size-4" />
+                  </Button>
+                </div>
+              ) : (
+                <div className="flex items-center gap-2">
+                  <p className={cn("font-medium", !profile?.name && "text-muted-foreground italic")}>
+                    {profile?.name || "Not set"}
+                  </p>
+                  <Button size="icon" variant="ghost" onClick={startEditingName} aria-label="Edit name">
+                    <Pencil className="size-3.5" />
+                  </Button>
+                </div>
+              )}
+              {/* Blank saves as "no name", which is why clearing needs no separate control. */}
+            </div>
+            {profile?.orcid_id && (
               <div>
-                <Label className="text-muted-foreground">Name</Label>
-                <p className="font-medium">{profile.name}</p>
+                <Label className="text-muted-foreground">ORCID iD</Label>
+                <p className="font-medium">
+                  <a
+                    href={`https://orcid.org/${profile.orcid_id}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="underline underline-offset-4"
+                  >
+                    {profile.orcid_id}
+                  </a>
+                </p>
+              </div>
+            )}
+            {profile?.identity_providers && profile.identity_providers.length > 0 && (
+              <div>
+                <Label className="text-muted-foreground">Connected accounts</Label>
+                <p className="font-medium capitalize">{profile.identity_providers.join(", ")}</p>
               </div>
             )}
           </div>
