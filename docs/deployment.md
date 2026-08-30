@@ -244,6 +244,7 @@ volume paths, and the specific env keys injected into containers — belong here
 | `VITE_PUBLIC_POSTHOG_KEY` | No | PostHog project key; blank disables analytics. Also supplies the server-side `BOOM_POSTHOG__PROJECT_API_KEY`, so web and API activity merge onto one person and a single variable turns both off. |
 | `VITE_PUBLIC_POSTHOG_HOST` | No | PostHog host, e.g. `https://us.i.posthog.com`. Also supplies the server-side `BOOM_POSTHOG__HOST`. |
 | `BOOM_BABAMUL__ENABLED` | No | Defaults to `false`. |
+| `BOOM_BABAMUL__REGISTRATION_ENABLED` | No | Whether the API accepts new account creation; defaults to `true`. Pairs with `VITE_PRERELEASE_MODE`: that decides what the web app offers, this decides what the API allows. |
 | `BOOM_GPU__ENABLED` | No | Set `true` to run ONNX inference on GPU. The workflow forces `false` when unset because the model loader's own default is `true` (it reads this env var directly, not `config.gpu.enabled`). |
 | `BOOM_GPU__DEVICE_IDS` | No | Comma-separated CUDA device IDs (e.g. `0,1`); defaults to `0`. Only relevant when `BOOM_GPU__ENABLED=true`. |
 | `BOOM_DATA_MONGODB_PATH` | No | Host bind mount for MongoDB; falls back to a named volume. |
@@ -274,6 +275,9 @@ volume paths, and the specific env keys injected into containers — belong here
 | `BOOM_CUTOUTS_STORAGE__PASSWORD` | Yes | Root password for the dedicated cutouts MongoDB. The deploy always layers in `docker-compose.cutouts-mongo.yaml`, which reads it as `${BOOM_CUTOUTS_STORAGE__PASSWORD:?...}`, so a missing value aborts the deploy at interpolation time. |
 | `BOOM_API__AUTH__SECRET_KEY` | Yes | JWT signing key (32+ chars). |
 | `BOOM_API__AUTH__ADMIN_PASSWORD` | Yes | Bootstrap admin password. |
+| `BOOM_BABAMUL__OAUTH__GOOGLE__CLIENT_ID` / `..._CLIENT_SECRET` | No | Google social sign-in. A provider is enabled only when both halves are non-empty, so leaving them unset simply leaves that button off. The redirect URI registered with the provider must be `<redirect_base_url>/babamul/oauth/google/callback`, where `redirect_base_url` comes from `config/prod/<deployment>/config.yaml`. |
+| `BOOM_BABAMUL__OAUTH__GITHUB__CLIENT_ID` / `..._CLIENT_SECRET` | No | Same, for GitHub. |
+| `BOOM_BABAMUL__OAUTH__ORCID__CLIENT_ID` / `..._CLIENT_SECRET` | No | Same, for ORCID. The `orcid_sandbox` key in the deployment config picks sandbox.orcid.org over orcid.org. |
 | `KAFKA_ADMIN_PASSWORD` | Yes | SASL admin password used by the ACL init script. |
 | `KAFKA_READONLY_PASSWORD` | Yes | SASL read-only password for external Kafka access. |
 | `BOOM_KAFKA__CONSUMER__LSST__PASSWORD` | Yes | LSST SASL password. |
