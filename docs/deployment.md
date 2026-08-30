@@ -32,10 +32,14 @@ paths point at (see [Data volume configuration](#data-volume-configuration)):
 - `/scr` — SSD, used for data that benefits from fast I/O (MongoDB, Valkey).
 - `/data` — HDD, used for larger, slower-access data (Kafka).
 
-Administrative access to the machine is via SSH using approved credentials; ask the BOOM maintainers to grant access by adding your SSH public key (preferred) or via the team's credential manager. Avoid sharing passwords over chat/email, and prefer key-based access over password login.
-and variables for the `production` environment are the source of truth for
-deployment configuration — see the
-[checklist below](#checklist-of-github-environment-variables-and-secrets).
+Administrative access to the machine is via SSH using approved credentials. Ask
+the BOOM maintainers to grant access by adding your SSH public key (preferred),
+or to share credentials through the team's credential manager; avoid sending
+passwords over chat or email, and prefer key-based access over password login.
+
+The GitHub Actions secrets and variables for the `production` environment are
+the source of truth for deployment configuration (see the
+[checklist below](#checklist-of-github-environment-variables-and-secrets)).
 
 Public endpoints, useful for verifying a deployment:
 
