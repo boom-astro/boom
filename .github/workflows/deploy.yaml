@@ -35,6 +35,23 @@ jobs:
       # admin username/email are read from config/prod/<deployment>/config.yaml
       # and don't need env vars here.
       BOOM_BABAMUL__ENABLED: ${{ vars.BOOM_BABAMUL__ENABLED }}
+      # Whether the API will create new accounts. Pair it with
+      # VITE_PRERELEASE_MODE below: that decides what the web app offers, this
+      # decides what the API allows. Unset leaves compose's default (true).
+      BOOM_BABAMUL__REGISTRATION_ENABLED: ${{ vars.BOOM_BABAMUL__REGISTRATION_ENABLED }}
+      # Social sign-in. redirect_base_url and orcid_sandbox come from
+      # config/prod/<deployment>/config.yaml; only the credentials are injected
+      # here, since config.yaml is committed. A provider is enabled exactly when
+      # both halves of its pair are non-empty, so an unset secret simply leaves
+      # that button off rather than sending users to a consent screen that will
+      # reject them. The redirect URI registered with each provider must be
+      # <redirect_base_url>/babamul/oauth/<provider>/callback.
+      BOOM_BABAMUL__OAUTH__GOOGLE__CLIENT_ID: ${{ secrets.BOOM_BABAMUL__OAUTH__GOOGLE__CLIENT_ID }}
+      BOOM_BABAMUL__OAUTH__GOOGLE__CLIENT_SECRET: ${{ secrets.BOOM_BABAMUL__OAUTH__GOOGLE__CLIENT_SECRET }}
+      BOOM_BABAMUL__OAUTH__GITHUB__CLIENT_ID: ${{ secrets.BOOM_BABAMUL__OAUTH__GITHUB__CLIENT_ID }}
+      BOOM_BABAMUL__OAUTH__GITHUB__CLIENT_SECRET: ${{ secrets.BOOM_BABAMUL__OAUTH__GITHUB__CLIENT_SECRET }}
+      BOOM_BABAMUL__OAUTH__ORCID__CLIENT_ID: ${{ secrets.BOOM_BABAMUL__OAUTH__ORCID__CLIENT_ID }}
+      BOOM_BABAMUL__OAUTH__ORCID__CLIENT_SECRET: ${{ secrets.BOOM_BABAMUL__OAUTH__ORCID__CLIENT_SECRET }}
       BOOM_DATABASE__PASSWORD: ${{ secrets.BOOM_DATABASE__PASSWORD }}
       BOOM_API__DOMAIN: ${{ vars.BOOM_API__DOMAIN }}
       BOOM_API__AUTH__SECRET_KEY: ${{ secrets.BOOM_API__AUTH__SECRET_KEY }}

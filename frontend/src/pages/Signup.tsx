@@ -4,6 +4,7 @@ import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Alert, AlertTitle, AlertDescription } from '@/components/ui/alert';
+import { OAuthButtons } from '@/components/oauth-buttons';
 import * as analytics from '@/lib/analytics';
 
 // Use same-origin proxy; prod nginx should route /api to backend
@@ -198,6 +199,9 @@ export default function SignupPage() {
               </div>
               {message && <div className="text-sm text-muted-foreground mt-2">{message}</div>}
               {error && <div className="text-sm text-red-600 mt-2">{error}</div>}
+              {/* Social sign-up skips the activation code entirely — the
+                  provider has already verified who the user is. */}
+              <OAuthButtons action="Sign up" />
             </form>
           )}
 
