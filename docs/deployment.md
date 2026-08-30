@@ -458,11 +458,12 @@ Once the workflow finishes green:
 3. **Check Grafana**: confirm ingestion and processing rates look normal and no
    alerts are firing.
 4. **Optional:** on the host, `docker compose -p boom ps` should show every
-   service `running`/`healthy`, except the one-shot `kafka-acl-init`. Select the
-   project with `-p` rather than running Compose from the checked-out tree:
-   there is no `.env` on the host, so interpolating the compose files fails.
-   The project name is pinned to `boom` by the `name:` key at the top of
-   `docker-compose.yaml`.
+   service up, with the ones that have a healthcheck reporting `healthy`. The
+   one exception is `kafka-acl-init`, a one-shot that ends at `Exited (0)`.
+   Always pass `-p`: it makes Compose query the engine by project label instead
+   of loading the compose files, which is what you want since there is no
+   `.env` on the host and interpolation would fail. The project name is pinned
+   to `boom` by the `name:` key at the top of `docker-compose.yaml`.
 
 ### Rolling back
 
