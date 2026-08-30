@@ -272,7 +272,7 @@ volume paths, and the specific env keys injected into containers — belong here
 | Secret | Required? | Notes |
 | --- | --- | --- |
 | `BOOM_DATABASE__PASSWORD` | Yes | MongoDB root password for the alerts database. |
-| `BOOM_CUTOUTS_STORAGE__PASSWORD` | Yes | Root password for the dedicated cutouts MongoDB. The deploy always layers in `docker-compose.cutouts-mongo.yaml`, which reads it as `${BOOM_CUTOUTS_STORAGE__PASSWORD:?...}`, so a missing value aborts the deploy at interpolation time. |
+| `BOOM_CUTOUTS_STORAGE__PASSWORD` | Yes | Root password for the dedicated cutouts MongoDB. Both `up -d` steps layer in `docker-compose.cutouts-mongo.yaml`, which reads it as `${BOOM_CUTOUTS_STORAGE__PASSWORD:?...}`, so a missing value aborts the deploy at interpolation time. |
 | `BOOM_API__AUTH__SECRET_KEY` | Yes | JWT signing key (32+ chars). |
 | `BOOM_API__AUTH__ADMIN_PASSWORD` | Yes | Bootstrap admin password. |
 | `BOOM_BABAMUL__OAUTH__GOOGLE__CLIENT_ID` / `..._CLIENT_SECRET` | No | Google social sign-in. A provider is enabled only when both halves are non-empty, so leaving them unset simply leaves that button off. The redirect URI registered with the provider must be `<redirect_base_url>/babamul/oauth/google/callback`, where `redirect_base_url` comes from `config/prod/<deployment>/config.yaml`. |
