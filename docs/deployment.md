@@ -261,8 +261,8 @@ volume paths, and the specific env keys injected into containers — belong here
 | `KAFKA_EXTERNAL_HOST` | No | Public Kafka hostname for the EXTERNAL listener; defaults to `localhost`. |
 | `PROMETHEUS_USER` | Yes | Basic-auth user for the Prometheus endpoint. |
 | `GRAFANA_ADMIN_USER` | No | Grafana admin user; defaults to `admin`. |
-| `SMTP_SERVER` | No | Blank disables outbound email. |
-| `SMTP_FROM_ADDRESS` | No | From address for outbound email. |
+| `SMTP_SERVER` | No | Blank disables outbound email, and setting it is all that is required to enable it. The workflow deliberately does not inject `SMTP_USERNAME`/`SMTP_PASSWORD`, so the API relays unauthenticated on port 25. |
+| `SMTP_FROM_ADDRESS` | No | From address for outbound email; defaults to `noreply@boom.example.com`. |
 | `BOOM_API_RATE_LIMIT_AVERAGE` | No | Traefik rate limit; defaults to `50`. |
 | `BOOM_API_RATE_LIMIT_BURST` | No | Traefik rate limit; defaults to `200`. |
 | `BOOM_API_RATE_LIMIT_PERIOD` | No | Traefik rate limit; defaults to `1s`. |
@@ -284,8 +284,6 @@ volume paths, and the specific env keys injected into containers — belong here
 | `PROMETHEUS_HASHED_PASSWORD` | Yes | bcrypt hash for Prometheus basic auth (store the raw hash; do **not** `$$`-escape it as you would in a `.env`). |
 | `GRAFANA_ADMIN_PASSWORD` | Yes | Grafana admin password. |
 | `SLACK_WEBHOOK_URL` | No | Grafana alerting webhook; blank uses a placeholder (alerts still fire, POSTs 404). |
-| `SMTP_USERNAME` | No | Required only if sending email. |
-| `SMTP_PASSWORD` | No | Required only if sending email. |
 
 ### Production config layout
 
