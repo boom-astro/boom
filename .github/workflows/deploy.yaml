@@ -102,7 +102,7 @@ jobs:
       BOOM_API_RATE_LIMIT_PERIOD: ${{ vars.BOOM_API_RATE_LIMIT_PERIOD }}
       # Set explicitly because the model loader (src/enrichment/models/base.rs)
       # reads BOOM_GPU__ENABLED straight from the environment and DEFAULTS TO
-      # TRUE when unset — config.gpu.enabled does not gate it. Driven by the
+      # TRUE when unset; config.gpu.enabled does not gate it. Driven by the
       # BOOM_GPU__ENABLED (true/false) and BOOM_GPU__DEVICE_IDS (e.g. "0,1")
       # repository variables; no code change needed to flip it. Keep
       # config/prod/<deployment>/config.yaml's gpu.enabled in sync so the
