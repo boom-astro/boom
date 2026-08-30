@@ -1054,7 +1054,9 @@ pub trait AlertWorker {
     where
         Self: Sized;
     fn survey() -> Survey;
-    fn input_queue_name(&self) -> String;
+    fn input_queue_name(&self) -> String {
+        Self::survey().alert_input_queue()
+    }
     fn output_queue_name(&self) -> String;
     #[instrument(skip(self, alert, collection), err)]
     async fn format_and_insert_alert<T: Serialize + Send + Sync>(
@@ -1331,10 +1333,6 @@ fn report_progress(start: &Instant, stream: &Survey, count: u64, message: &str) 
         "{}",
         message,
     );
-}
-
-pub fn alert_input_queue_name(survey: &Survey) -> String {
-    format!("{}_alerts_packets_queue", survey)
 }
 
 pub fn alert_temp_queue_name(input_queue_name: &str) -> String {

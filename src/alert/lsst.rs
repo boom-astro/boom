@@ -1,8 +1,8 @@
 use crate::{
     alert::{
         base::{
-            alert_input_queue_name, AlertError, AlertWorker, AlertWorkerError, LightcurveJdOnly,
-            ProcessAlertStatus, SchemaRegistry,
+            AlertError, AlertWorker, AlertWorkerError, LightcurveJdOnly, ProcessAlertStatus,
+            SchemaRegistry,
         },
         decam, ztf, TimeSeries,
     },
@@ -1318,10 +1318,6 @@ impl AlertWorker for LsstAlertWorker {
 
     fn survey() -> Survey {
         Survey::Lsst
-    }
-
-    fn input_queue_name(&self) -> String {
-        alert_input_queue_name(&LsstAlertWorker::survey())
     }
 
     fn output_queue_name(&self) -> String {

@@ -1,7 +1,7 @@
 #[cfg(target_os = "linux")]
 use boom::utils::gpu::validate_gpu_configuration_for_survey;
 use boom::{
-    alert::{alert_input_queue_name, recover_temp_queue},
+    alert::recover_temp_queue,
     api::catalogs::WATCHLIST_PREFIX,
     conf::{load_dotenv, AppConfig, CatalogXmatchConfig},
     enrichment::models::SharedModelPool,
@@ -191,13 +191,11 @@ async fn run(
     };
 
     match config.build_redis().await {
-        Ok(mut con) => {
-            match recover_temp_queue(&mut con, &alert_input_queue_name(&args.survey)).await {
-                Ok(0) => {}
-                Ok(recovered) => warn!(recovered, "requeued alerts left in the alert temp queue"),
-                Err(error) => log_error!(WARN, error, "failed to recover the alert temp queue"),
-            }
-        }
+        Ok(mut con) => match recover_temp_queue(&mut con, &args.survey.alert_input_queue()).await {
+            Ok(0) => {}
+            Ok(recovered) => warn!(recovered, "requeued alerts left in the alert temp queue"),
+            Err(error) => log_error!(WARN, error, "failed to recover the alert temp queue"),
+        },
         Err(error) => log_error!(
             WARN,
             error,

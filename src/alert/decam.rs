@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use crate::{
     alert::{
         base::{
-            alert_input_queue_name, AlertError, AlertWorker, AlertWorkerError, LightcurveJdOnly,
-            ProcessAlertStatus, SchemaCache,
+            AlertError, AlertWorker, AlertWorkerError, LightcurveJdOnly, ProcessAlertStatus,
+            SchemaCache,
         },
         lsst, ztf, TimeSeries,
     },
@@ -430,10 +430,6 @@ impl AlertWorker for DecamAlertWorker {
 
     fn survey() -> Survey {
         Survey::Decam
-    }
-
-    fn input_queue_name(&self) -> String {
-        alert_input_queue_name(&DecamAlertWorker::survey())
     }
 
     fn output_queue_name(&self) -> String {
