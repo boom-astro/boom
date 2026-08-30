@@ -17,7 +17,7 @@ data present on one is not necessarily present on the other.
 instance's API, filters live in that instance's database, and each instance
 consumes the upstream alert streams with its own Kafka consumer groups, so
 ingestion offsets and back-fill history differ too. Treat UMN as an
-independent instance that can take over if Caltech is unavailable — not as a
+independent instance that can take over if Caltech is unavailable, not as a
 hot standby that is guaranteed to be in sync. If something needs to exist on
 both (a user account, a filter, a config change), it has to be applied to both.
 
@@ -29,8 +29,8 @@ public-facing alert broker interface for the ZTF and LSST streams.
 The `kaboom` machine has two persistent storage volumes that the Compose data
 paths point at (see [Data volume configuration](#data-volume-configuration)):
 
-- `/scr` — SSD, used for data that benefits from fast I/O (MongoDB, Valkey).
-- `/data` — HDD, used for larger, slower-access data (Kafka).
+- `/scr`: SSD, used for data that benefits from fast I/O (MongoDB, Valkey).
+- `/data`: HDD, used for larger, slower-access data (Kafka).
 
 Administrative access to the machine is via SSH using approved credentials. Ask
 the BOOM maintainers to grant access by adding your SSH public key (preferred),
@@ -45,7 +45,7 @@ Public endpoints, useful for verifying a deployment:
 
 | Endpoint | Purpose |
 | --- | --- |
-| `https://api.kaboom.caltech.edu/` | API health — returns JSON with no login |
+| `https://api.kaboom.caltech.edu/` | API health, returns JSON with no login |
 | `https://api.kaboom.caltech.edu/docs` | Interactive API docs (Scalar) |
 | `https://babamul.caltech.edu` | Babamul web app |
 | `https://grafana.kaboom.caltech.edu` | Grafana dashboards and pipeline statistics |
@@ -54,7 +54,7 @@ Public endpoints, useful for verifying a deployment:
 
 BOOM runs as a single-node Docker Compose stack, deployed by a GitHub Actions
 workflow running on a self-hosted runner on that same node. This is not a
-self-hostable product — the sections below describe how our own deployment hosts
+self-hostable product: the sections below describe how our own deployment hosts
 are put together, and are the reference for rebuilding one or standing up
 another instance, not a general installation guide.
 
@@ -67,7 +67,7 @@ and need none of it.
 
 1. A server, with the DNS records for the deployment's domain pointing at its IP.
 1. A wildcard subdomain (e.g. `*.kaboom.caltech.edu`) so the individual
-   components can each have their own host — `api.kaboom.caltech.edu`,
+   components can each have their own host: `api.kaboom.caltech.edu`,
    `grafana.kaboom.caltech.edu`, and so on.
 1. [Docker](https://docs.docker.com/engine/install/) (Docker Engine, not Docker
    Desktop).
@@ -96,7 +96,7 @@ rsync -a config/docker-compose.traefik.yml root@your-server.example.com:/scr/ztf
 This Traefik instance expects a Docker "public network" named `traefik-public`
 to communicate with BOOM's API and Kafka instance. A single public Traefik proxy
 handles HTTP and HTTPS with the outside world, and behind it there can be one or
-more stacks on different domains on the same server — which is what would allow,
+more stacks on different domains on the same server, which is what would allow,
 for example, a production and a staging instance to coexist on one machine.
 
 To create the `traefik-public` network, run the following on the host:
@@ -134,11 +134,11 @@ A few notes for maintaining an existing Traefik deployment:
 
 - `config/docker-compose.traefik.yml` is generic and has needed no changes in
   normal operation. It is copied to the host by hand, so if it ever does change
-  upstream, copy the new version over and restart Traefik — this is the only
+  upstream, copy the new version over and restart Traefik. This is the only
   manual file copy in the deployment.
 - Use a monitored mailbox for `EMAIL` (a team alias is fine) so Let's Encrypt
   expiry and recovery notices are actually read, and keep it stable across
-  redeploys — changing it triggers a certificate regeneration, during which
+  redeploys; changing it triggers a certificate regeneration, during which
   HTTPS is unavailable.
 - The Traefik dashboard password is not critical and can be rotated freely;
   `DOMAIN` and `EMAIL` cannot, since the certificates depend on them.
@@ -161,7 +161,7 @@ su - github
 
 As the `github` user,
 [install a GitHub Actions self-hosted runner following the official guide](https://docs.github.com/en/actions/hosting-your-own-runners/managing-self-hosted-runners/adding-self-hosted-runners#adding-a-self-hosted-runner-to-a-repository).
-When asked about labels, add `production` — the
+When asked about labels, add `production`: the
 [deploy workflow](/.github/workflows/deploy.yaml) targets
 `runs-on: [self-hosted, production]`. Labels can also be added later.
 
@@ -186,21 +186,21 @@ Installing it as a service matters because it is what makes the runner come back
 after a host reboot. If a deploy is triggered but the job never starts, check
 **Settings → Actions → Runners** in GitHub: a grey/offline runner means the
 service isn't running, and `./svc.sh status` in that directory (as `root`, or
-with `sudo`) will say why. Note that a down runner only blocks *new deploys* —
+with `sudo`) will say why. Note that a down runner only blocks *new deploys*;
 the running BOOM stack is unaffected, since Compose restart policies bring the
 containers back on reboot on their own.
 
 ### Set secrets for the GitHub Actions deployment workflow
 
 All deployment configuration lives in this repository's `production` GitHub
-environment — as **variables** (non-sensitive: domains, consumer group IDs,
+environment, as **variables** (non-sensitive: domains, consumer group IDs,
 data paths) and **secrets** (database, API admin, and Kafka passwords, signing
 keys). Nothing is read from a `.env` file on the host. Add them under
 **Settings → Secrets and variables → Actions**, following the
 [official GitHub guide for setting repository secrets](https://docs.github.com/en/actions/security-guides/using-secrets-in-github-actions#creating-secrets-for-a-repository).
 
 [.github/workflows/deploy.yaml](/.github/workflows/deploy.yaml) is the
-authoritative list — anything it references must exist. When a change introduces
+authoritative list: anything it references must exist. When a change introduces
 a new configuration key that the workflow needs to inject, it has to be added
 both to the environment settings and to the workflow's `env:` block, or Compose
 will fail at interpolation time.
@@ -221,15 +221,15 @@ fails if any config is invalid.
 The `production` environment must define everything the
 [deploy workflow](/.github/workflows/deploy.yaml) references. The runner checks
 out a clean tree on every deploy (no `.env` file), so every value below comes
-from a GitHub Actions **variable** (non-sensitive) or **secret** (sensitive) —
+from a GitHub Actions **variable** (non-sensitive) or **secret** (sensitive);
 nothing is read from a file on the host. A required value that is missing makes
 `docker compose` fail at interpolation time, before anything starts.
 
 App settings that are not in this list (e.g. `babamul.webapp_url`, the admin
 username/email, crossmatch catalogs) are read from
 `config/prod/<deployment>/config.yaml` and intentionally do **not** have env vars
-here. Only values that compose interpolates — image build args, Traefik labels,
-volume paths, and the specific env keys injected into containers — belong here.
+here. Only values that compose interpolates (image build args, Traefik labels,
+volume paths, and the specific env keys injected into containers) belong here.
 
 **Variables** (`vars.*`):
 
@@ -387,7 +387,7 @@ Recommended options (in order of preference):
 If you are still seeing permission errors after one of the above, confirm the
 UID/GID the Kafka image actually runs as (it can differ between image versions)
 and `chown` the directory to match. Avoid world-writable (`chmod 777`)
-permissions, even temporarily — on a shared host any process could read or
+permissions, even temporarily: on a shared host any process could read or
 corrupt Kafka data.
 
 ## GitHub deploy safety controls
@@ -440,7 +440,7 @@ a new one from the freshly built image, so expect a window of roughly half a
 minute where services such as the API are restarting.
 
 On a **fresh** server, the Traefik reverse proxy must be up before the first
-BOOM deploy — the Compose file references the `traefik-public` network as an
+BOOM deploy: the Compose file references the `traefik-public` network as an
 external network and the deploy fails if it doesn't exist. See
 [Create a public Traefik reverse proxy](#create-a-public-traefik-reverse-proxy).
 That is a one-time step; routine deploys never touch Traefik.
@@ -449,18 +449,20 @@ That is a one-time step; routine deploys never touch Traefik.
 
 Once the workflow finishes green:
 
-1. **Ping the API** — the API root should return JSON immediately with no login
+1. **Ping the API**: the API root should return JSON immediately with no login
    (for Caltech, `https://api.kaboom.caltech.edu/`).
-2. **Check the web app** — `https://babamul.caltech.edu` exercises the API, so
+2. **Check the web app**: `https://babamul.caltech.edu` exercises the API, so
    basic functionality working there is a good sign. If the release changed
    front end code, test what changed: object search, object pages, alert search,
    the Kafka docs page, and the statistics dashboard are the high-traffic paths.
-3. **Check Grafana** — confirm ingestion and processing rates look normal and no
+3. **Check Grafana**: confirm ingestion and processing rates look normal and no
    alerts are firing.
 4. **Optional:** on the host, `docker compose -p boom ps` should show every
    service `running`/`healthy`, except the one-shot `kafka-acl-init`. Select the
    project with `-p` rather than running Compose from the checked-out tree:
    there is no `.env` on the host, so interpolating the compose files fails.
+   The project name is pinned to `boom` by the `name:` key at the top of
+   `docker-compose.yaml`.
 
 ### Rolling back
 
@@ -489,6 +491,6 @@ e.g. `https://api.kaboom.caltech.edu/docs`): authenticate at the top of the
 page, then run the `POST /users` endpoint. Equivalently, `POST /auth` to get a
 token and then `POST /users` with it. Non-admin callers get a `403`.
 
-Repeat on each instance where the user needs access — creating a user at
+Repeat on each instance where the user needs access: creating a user at
 Caltech does not create it at UMN.
 
