@@ -64,6 +64,25 @@ async fn main() -> std::io::Result<()> {
     let babamul_is_enabled = config.babamul.enabled;
     if babamul_is_enabled {
         tracing::info!("Babamul API endpoints are ENABLED");
+        // Abandoned sign-in attempts are only cleaned up by this TTL index —
+        // completed flows delete their own state, incomplete ones never do.
+        if let Err(error) = routes::babamul::oauth::ensure_oauth_state_index(&database).await {
+            log_error!(WARN, error, "failed to create the OAuth TTL indexes");
+        }
+        // Same helper `/oauth/providers` uses, so this line always matches what
+        // the client is actually offered — credentials alone are not enough.
+        let providers: Vec<&str> = boom::api::oauth::enabled_providers(&config)
+            .iter()
+            .map(|provider| provider.as_str())
+            .collect();
+        if providers.is_empty() {
+            tracing::info!(
+                "No social sign-in providers are configured (needs a client ID and secret \
+                 per provider, plus babamul.webapp_url and babamul.oauth.redirect_base_url)"
+            );
+        } else {
+            tracing::info!("Social sign-in enabled for: {}", providers.join(", "));
+        }
     } else {
         tracing::info!("Babamul API endpoints are DISABLED");
     }
@@ -106,8 +125,14 @@ async fn main() -> std::io::Result<()> {
                     .service(routes::babamul::post_babamul_auth)
                     .service(routes::babamul::post_babamul_forgot_password)
                     .service(routes::babamul::post_babamul_reset_password)
+                    .service(routes::babamul::oauth::get_oauth_providers)
+                    .service(routes::babamul::oauth::get_oauth_start)
+                    .service(routes::babamul::oauth::get_oauth_callback)
+                    .service(routes::babamul::oauth::post_oauth_complete)
+                    .service(routes::babamul::oauth::post_oauth_verify)
                     // Protected routes
                     .service(routes::babamul::get_babamul_profile)
+                    .service(routes::babamul::patch_babamul_profile)
                     .service(routes::babamul::post_kafka_credentials)
                     .service(routes::babamul::get_kafka_credentials)
                     .service(routes::babamul::delete_kafka_credential)

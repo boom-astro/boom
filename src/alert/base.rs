@@ -4,6 +4,7 @@ use crate::utils::enums::Survey;
 use crate::utils::worker::WorkerCmd;
 use crate::{
     conf,
+    scheduler::record_worker_retry,
     utils::{
         cutouts::{CutoutStorage, CutoutStorageError},
         db::mongify,
@@ -11,13 +12,18 @@ use crate::{
             logging::{as_error, log_error, WARN},
             metrics::SCHEDULER_METER,
         },
+        retry::{
+            is_transient_redis_error, retry_transient, DEFAULT_BASE_BACKOFF, DEFAULT_MAX_RETRIES,
+        },
         spatial::XmatchError,
         worker::should_terminate,
     },
 };
 
 use std::collections::HashSet;
-use std::{collections::HashMap, fmt::Debug, io::Read, sync::LazyLock, time::Instant};
+use std::{
+    collections::HashMap, fmt::Debug, future::Future, io::Read, sync::LazyLock, time::Instant,
+};
 
 use apache_avro::{from_avro_datum, from_value, Reader, Schema};
 use futures::future::join_all;
@@ -1048,7 +1054,9 @@ pub trait AlertWorker {
     where
         Self: Sized;
     fn survey() -> Survey;
-    fn input_queue_name(&self) -> String;
+    fn input_queue_name(&self) -> String {
+        Self::survey().alert_input_queue()
+    }
     fn output_queue_name(&self) -> String;
     #[instrument(skip(self, alert, collection), err)]
     async fn format_and_insert_alert<T: Serialize + Send + Sync>(
@@ -1069,7 +1077,7 @@ pub trait AlertWorker {
             })?;
         Ok(status)
     }
-    #[instrument(skip(self, obj, alert_aux_collection), err)]
+    #[instrument(skip(self, obj, alert_aux_collection), err(level = "debug"))]
     async fn insert_aux<T>(
         &self,
         obj: &T,
@@ -1327,16 +1335,66 @@ fn report_progress(start: &Instant, stream: &Survey, count: u64, message: &str) 
     );
 }
 
+pub fn alert_temp_queue_name(input_queue_name: &str) -> String {
+    format!("{}_temp", input_queue_name)
+}
+
+/// Requeue alerts left in the temp queue by a dead worker. No worker must be running.
+pub async fn recover_temp_queue(
+    con: &mut redis::aio::MultiplexedConnection,
+    input_queue_name: &str,
+) -> Result<usize, AlertWorkerError> {
+    let temp_queue_name = alert_temp_queue_name(input_queue_name);
+    let pending: usize = con.llen(&temp_queue_name).await?;
+    let mut recovered = 0;
+    for _ in 0..pending {
+        let moved: Option<Vec<Vec<u8>>> =
+            con.rpoplpush(&temp_queue_name, input_queue_name)
+                .await
+                .inspect_err(as_error!("failed to requeue an alert from the temp queue"))?;
+        if moved.is_none() {
+            break;
+        }
+        recovered += 1;
+    }
+    Ok(recovered)
+}
+
+async fn retry_valkey<T, Fut>(
+    operation: &'static str,
+    survey: &str,
+    op: impl FnMut() -> Fut,
+) -> Result<T, redis::RedisError>
+where
+    Fut: Future<Output = Result<T, redis::RedisError>>,
+{
+    retry_transient(
+        operation,
+        DEFAULT_MAX_RETRIES,
+        DEFAULT_BASE_BACKOFF,
+        is_transient_redis_error,
+        || record_worker_retry("alert", survey, operation),
+        op,
+    )
+    .await
+}
+
 #[instrument(skip_all, err)]
 async fn retrieve_avro_bytes(
-    con: &mut redis::aio::MultiplexedConnection,
+    con: &redis::aio::MultiplexedConnection,
+    survey: &str,
     input_queue_name: &str,
     temp_queue_name: &str,
 ) -> Result<Option<Vec<u8>>, AlertWorkerError> {
-    let result: Option<Vec<Vec<u8>>> = con
-        .rpoplpush(&input_queue_name, &temp_queue_name)
-        .await
-        .inspect_err(as_error!("failed to pop from input queue"))?;
+    let result = retry_valkey("valkey_rpoplpush", survey, || {
+        let mut con = con.clone();
+        async move {
+            con.rpoplpush::<&str, &str, Option<Vec<Vec<u8>>>>(input_queue_name, temp_queue_name)
+                .await
+        }
+    })
+    .await
+    .inspect_err(as_error!("failed to pop from input queue"))?;
 
     match result {
         Some(mut value) => match value.remove(0) {
@@ -1347,9 +1405,28 @@ async fn retrieve_avro_bytes(
     }
 }
 
+async fn remove_from_temp_queue(
+    con: &redis::aio::MultiplexedConnection,
+    survey: &str,
+    temp_queue_name: &str,
+    avro_bytes: &Vec<u8>,
+) -> Result<(), AlertWorkerError> {
+    retry_valkey("valkey_lrem", survey, || {
+        let mut con = con.clone();
+        async move {
+            con.lrem::<&str, &Vec<u8>, isize>(temp_queue_name, 1, avro_bytes)
+                .await
+        }
+    })
+    .await
+    .inspect_err(as_error!("failed to remove alert from temp queue"))?;
+    Ok(())
+}
+
 #[instrument(skip_all, err)]
 async fn handle_process_result(
-    con: &mut redis::aio::MultiplexedConnection,
+    con: &redis::aio::MultiplexedConnection,
+    survey: &str,
     temp_queue_name: &str,
     output_queue_name: &str,
     avro_bytes: Vec<u8>,
@@ -1358,18 +1435,20 @@ async fn handle_process_result(
     match result {
         Ok(ProcessAlertStatus::Added(candid)) => {
             // queue the candid for processing by the classifier
-            con.lpush::<&str, i64, isize>(&output_queue_name, candid)
-                .await
-                .inspect_err(as_error!("failed to push to output queue"))?;
-            con.lrem::<&str, Vec<u8>, isize>(temp_queue_name, 1, avro_bytes)
-                .await
-                .inspect_err(as_error!("failed to remove new alert from temp queue"))?;
+            retry_valkey("valkey_lpush", survey, || {
+                let mut con = con.clone();
+                async move {
+                    con.lpush::<&str, i64, isize>(output_queue_name, candid)
+                        .await
+                }
+            })
+            .await
+            .inspect_err(as_error!("failed to push to output queue"))?;
+            remove_from_temp_queue(con, survey, temp_queue_name, &avro_bytes).await?;
         }
         Ok(ProcessAlertStatus::Exists(candid)) => {
             debug!(?candid, "alert already exists");
-            con.lrem::<&str, Vec<u8>, isize>(temp_queue_name, 1, avro_bytes)
-                .await
-                .inspect_err(as_error!("failed to remove existing alert from temp queue"))?;
+            remove_from_temp_queue(con, survey, temp_queue_name, &avro_bytes).await?;
         }
         Err(error) => {
             log_error!(WARN, error, "error processing alert, skipping");
@@ -1397,13 +1476,14 @@ pub async fn run_alert_worker<T: AlertWorker>(
     let mut alert_processor = T::new(config_path).await?;
 
     let input_queue_name = alert_processor.input_queue_name();
-    let temp_queue_name = format!("{}_temp", input_queue_name);
+    let temp_queue_name = alert_temp_queue_name(&input_queue_name);
     let output_queue_name = alert_processor.output_queue_name();
 
-    let mut con = config
+    let con = config
         .build_redis()
         .await
         .inspect_err(as_error!("failed to create redis client"))?;
+    let survey_name = survey.to_string();
 
     let command_interval: usize = worker_config.command_interval;
     let mut command_check_countdown = command_interval;
@@ -1455,7 +1535,8 @@ pub async fn run_alert_worker<T: AlertWorker>(
         ACTIVE.add(1, &active_attrs);
 
         command_check_countdown -= 1;
-        let result = retrieve_avro_bytes(&mut con, &input_queue_name, &temp_queue_name).await;
+        let result =
+            retrieve_avro_bytes(&con, &survey_name, &input_queue_name, &temp_queue_name).await;
 
         let avro_bytes = match result {
             Ok(Some(bytes)) => bytes,
@@ -1483,7 +1564,8 @@ pub async fn run_alert_worker<T: AlertWorker>(
             Err(_) => &processing_error_attrs,
         };
         let handle_result = handle_process_result(
-            &mut con,
+            &con,
+            &survey_name,
             &temp_queue_name,
             &output_queue_name,
             avro_bytes,

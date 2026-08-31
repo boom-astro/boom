@@ -252,8 +252,11 @@ pub async fn babamul_auth_middleware(
     req: ServiceRequest,
     next: Next<impl MessageBody>,
 ) -> Result<ServiceResponse<impl MessageBody>, Error> {
-    // Allow public routes without authentication
-    if BABAMUL_PUBLIC_ROUTES.contains(&req.path()) {
+    // Allow public routes without authentication. The social sign-in routes
+    // carry a provider slug in the path, so they are matched by prefix rather
+    // than listed individually — the whole point of those endpoints is to run
+    // before the caller has a token.
+    if BABAMUL_PUBLIC_ROUTES.contains(&req.path()) || req.path().starts_with("/babamul/oauth/") {
         return next.call(req).await;
     }
 
