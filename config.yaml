@@ -289,7 +289,7 @@ crossmatch:
         ra: 1
         dec: 1
         score: 1
-        magwhite: 1
+        mag_white: 1
       max_results: 3 # 3 nearest neighbors
     - catalog: NED
       radius: 300.0 # 300 arcseconds
