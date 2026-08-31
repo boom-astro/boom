@@ -6,6 +6,11 @@ on:
   pull_request:
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
+  # Only PR runs are superseded; main keeps one run, and one status, per commit.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 env:
   CARGO_TERM_COLOR: always
   TOLERANCE_PERCENTAGE: 5.0 # 5% tolerance for wall time increase
