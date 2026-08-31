@@ -551,6 +551,8 @@ crossmatch:
       use_distance: false
       projection:
         _id: 1
+        ra: 1
+        dec: 1
         gMeanPSFMag: 1
         gMeanPSFMagErr: 1
         rMeanPSFMag: 1
@@ -561,20 +563,18 @@ crossmatch:
         zMeanPSFMagErr: 1
         yMeanPSFMag: 1
         yMeanPSFMagErr: 1
-        ra: 1
-        dec: 1
     - catalog: Gaia_DR3
       radius: 2.0 # 2 arcseconds
       use_distance: false
       projection:
         _id: 1
+        ra: 1
+        dec: 1
         parallax: 1
         parallax_error: 1
         phot_g_mean_mag: 1
         phot_bp_mean_mag: 1
         phot_rp_mean_mag: 1
-        ra: 1
-        dec: 1
     - catalog: milliquas_v6
       radius: 2.0 # 2 arcseconds
       use_distance: false
