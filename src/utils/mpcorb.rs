@@ -204,6 +204,192 @@ pub fn parse_line(line: &str) -> Option<MpcorbEntry> {
 
 /// Collection `mpcorb_ingest` writes and enrichment reads.
 pub const ORBITS_COLLECTION: &str = "MPC_orbits";
+/// Built here, then renamed over the target so readers never see a partial catalogue.
+const STAGING_COLLECTION: &str = "MPC_orbits_staging";
+pub const DEFAULT_MPCORB_URL: &str = "https://www.minorplanetcenter.net/iau/MPCORB/MPCORB.DAT";
+/// Fewer orbits than this means a truncated download, not a smaller catalogue.
+const MIN_PLAUSIBLE_ORBITS: u64 = 100_000;
+/// How many parsed orbits between progress lines.
+const PROGRESS_INTERVAL: u64 = 200_000;
+
+#[derive(thiserror::Error, Debug)]
+pub enum RefreshError {
+    #[error("failed to download MPCORB: {0}")]
+    Download(String),
+    #[error("failed to read the download: {0}")]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Mongo(#[from] mongodb::error::Error),
+    #[error("only {parsed} orbits parsed, refusing to replace {collection}")]
+    ImplausiblyShort { parsed: u64, collection: String },
+}
+
+/// Outcome of parsing MPCORB, whether or not it was written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefreshReport {
+    pub lines: u64,
+    pub parsed: u64,
+    pub skipped: u64,
+    /// Record-shaped lines that failed to parse. Always empty in a healthy run --
+    /// anything here is data being dropped silently.
+    pub rejected_samples: Vec<String>,
+}
+
+/// Seconds since the catalogue was last written.
+///
+/// `Ok(None)` means it has genuinely never been written; an error means we could
+/// not tell, which is deliberately not the same thing -- treating a failed query
+/// as "absent" would re-download the whole catalogue on a transient blip.
+///
+/// Reads one document: every document in a given refresh carries the same
+/// `updated_at`, so any of them dates the catalogue.
+pub async fn orbits_age_seconds(
+    db: &mongodb::Database,
+    now: f64,
+) -> Result<Option<f64>, mongodb::error::Error> {
+    let doc = db
+        .collection::<Document>(ORBITS_COLLECTION)
+        .find_one(doc! {})
+        .await?;
+    Ok(doc
+        .and_then(|d| d.get_f64("updated_at").ok())
+        .map(|written| now - written))
+}
+
+/// Download MPCORB and swap it into `MPC_orbits`.
+///
+/// Passing `db: None` parses and reports without touching the database.
+/// `show_progress` draws a progress bar, which suits a terminal but not a log.
+pub async fn refresh_orbits(
+    db: Option<&mongodb::Database>,
+    url: &str,
+    batch_size: usize,
+    now: f64,
+    show_progress: bool,
+) -> Result<RefreshReport, RefreshError> {
+    let staging = match db {
+        Some(db) => {
+            let c = db.collection::<Document>(STAGING_COLLECTION);
+            // A previous run may have died between insert and rename.
+            let _ = c.drop().await;
+            Some(c)
+        }
+        None => None,
+    };
+
+    let result = refresh_into_staging(staging.as_ref(), url, batch_size, now, show_progress).await;
+
+    // Staging holds a partial catalogue on failure, and nothing else reads it.
+    if result.is_err() {
+        if let Some(c) = &staging {
+            let _ = c.drop().await;
+        }
+    }
+    let report = result?;
+
+    if let Some(db) = db {
+        let from = format!("{}.{}", db.name(), STAGING_COLLECTION);
+        let to = format!("{}.{}", db.name(), ORBITS_COLLECTION);
+        db.client()
+            .database("admin")
+            .run_command(doc! { "renameCollection": &from, "to": &to, "dropTarget": true })
+            .await?;
+    }
+    Ok(report)
+}
+
+/// A download with no bound can hang for as long as the peer keeps the socket
+/// open, which would stall the caller indefinitely.
+const DOWNLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+/// Fetch MPCORB, parse it, and fill the staging collection.
+async fn refresh_into_staging(
+    staging: Option<&mongodb::Collection<Document>>,
+    url: &str,
+    batch_size: usize,
+    now: f64,
+    show_progress: bool,
+) -> Result<RefreshReport, RefreshError> {
+    use std::io::{BufRead, BufReader};
+
+    tracing::info!("downloading MPCORB from {}", url);
+    let mut tmp = tempfile::NamedTempFile::new()?;
+    tokio::time::timeout(
+        DOWNLOAD_TIMEOUT,
+        crate::utils::data::download_to_file(tmp.as_file_mut(), url, None, None, show_progress),
+    )
+    .await
+    .map_err(|_| RefreshError::Download(format!("timed out after {DOWNLOAD_TIMEOUT:?}")))?
+    .map_err(|e| RefreshError::Download(e.to_string()))?;
+
+    let file = std::fs::File::open(tmp.path())?;
+    let mut batch: Vec<Document> = Vec::with_capacity(batch_size);
+    let mut report = RefreshReport {
+        lines: 0,
+        parsed: 0,
+        skipped: 0,
+        rejected_samples: Vec::new(),
+    };
+    let mut last_progress = 0u64;
+
+    for line in BufReader::new(file).lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::warn!("unreadable line: {}", e);
+                continue;
+            }
+        };
+        report.lines += 1;
+        // The file opens with a prose header and separates its three sections
+        // with blank lines; parse_line rejects both.
+        match parse_line(&line) {
+            Some(entry) => {
+                batch.push(to_document(&entry, now));
+                report.parsed += 1;
+            }
+            None => {
+                report.skipped += 1;
+                // Blank lines and the prose header are expected; a long line is not.
+                if line.len() >= 103 && report.rejected_samples.len() < 5 {
+                    report
+                        .rejected_samples
+                        .push(line.chars().take(120).collect());
+                }
+            }
+        }
+
+        if batch.len() >= batch_size {
+            match staging {
+                Some(c) => c
+                    .insert_many(std::mem::take(&mut batch))
+                    .await
+                    .map(|_| ())?,
+                None => batch.clear(),
+            }
+            // Compared against a running mark rather than tested for divisibility:
+            // `parsed` only lands on a multiple of the interval when the batch size
+            // happens to divide it.
+            if report.parsed - last_progress >= PROGRESS_INTERVAL {
+                last_progress = report.parsed;
+                tracing::info!("parsed {} orbits", report.parsed);
+            }
+        }
+    }
+
+    if let (Some(c), false) = (staging, batch.is_empty()) {
+        c.insert_many(batch).await?;
+    }
+
+    if report.parsed < MIN_PLAUSIBLE_ORBITS {
+        return Err(RefreshError::ImplausiblyShort {
+            parsed: report.parsed,
+            collection: ORBITS_COLLECTION.to_string(),
+        });
+    }
+
+    Ok(report)
+}
 
 /// Render one entry as the stored document. Kept next to the reader below so
 /// the two halves of this collection's schema cannot drift apart.
@@ -559,5 +745,36 @@ mod tests {
         assert!(parse_line("").is_none());
         assert!(parse_line("Des'n     H     G   Epoch     M        Peri.").is_none());
         assert!(parse_line("-----------------").is_none());
+    }
+}
+
+#[cfg(test)]
+mod refresh_bounds_tests {
+    use super::*;
+
+    // A download with no bound can stall the scheduler for as long as the peer
+    // holds the socket open.
+    #[test]
+    fn test_download_is_bounded() {
+        assert!(DOWNLOAD_TIMEOUT.as_secs() > 0);
+        // Long enough for a ~300MB file on a slow link, short enough to notice.
+        assert!(DOWNLOAD_TIMEOUT.as_secs() <= 60 * 60);
+    }
+
+    // A short download is a truncated one, and swapping it in would replace the
+    // catalogue with a fragment.
+    #[test]
+    fn test_short_catalogue_is_rejected() {
+        let err = RefreshError::ImplausiblyShort {
+            parsed: 12,
+            collection: ORBITS_COLLECTION.to_string(),
+        };
+        assert!(err.to_string().contains("12"));
+        assert!(err.to_string().contains(ORBITS_COLLECTION));
+    }
+
+    #[test]
+    fn test_staging_is_not_the_live_collection() {
+        assert_ne!(STAGING_COLLECTION, ORBITS_COLLECTION);
     }
 }
