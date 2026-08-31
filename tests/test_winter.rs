@@ -1,10 +1,14 @@
 #![recursion_limit = "512"] // for large bson docs and CutoutStorage's s3 client
 use boom::{
-    alert::{sanitize_winter_avro, AlertWorker, ProcessAlertStatus, WinterRawAvroAlert},
+    alert::{
+        fid_to_band, sanitize_winter_avro, AlertError, AlertWorker, ProcessAlertStatus,
+        WinterRawAvroAlert, DARK_FID,
+    },
     conf::{get_test_cutout_storage, get_test_db},
     filter::{alert_to_avro_bytes, load_alert_schema, FilterWorker, WinterFilterWorker},
     utils::{
         enums::Survey,
+        lightcurves::Band,
         testing::{
             drop_alert_from_collections, insert_custom_test_filter, remove_test_filter,
             winter_alert_worker, AlertRandomizer, TEST_CONFIG_FILE,
@@ -181,4 +185,32 @@ async fn test_filter_winter_alert() {
     drop_alert_from_collections(candid, &Survey::Winter)
         .await
         .unwrap();
+}
+
+#[test]
+fn test_fid_maps_to_band() {
+    // fid is 1-indexed. The upstream schema's doc string says 0=Y, 1=J, 2=H, 3=K,
+    // which contradicts the alerts WINTER ships: its J-band data carries fid 2.
+    assert_eq!(fid_to_band(1).unwrap(), Band::Y);
+    assert_eq!(fid_to_band(2).unwrap(), Band::J);
+    assert_eq!(fid_to_band(3).unwrap(), Band::H);
+    // A dark frame and an unrecognised id are refused, never resolved to a
+    // default: the band is what the photometry is later read as.
+    assert!(matches!(fid_to_band(DARK_FID), Err(AlertError::DarkFrame)));
+    assert!(matches!(fid_to_band(0), Err(AlertError::UnknownFid(0))));
+    assert!(matches!(fid_to_band(9), Err(AlertError::UnknownFid(9))));
+}
+
+#[test]
+fn test_real_alert_band_is_j() {
+    // WNTR24awati, published by WINTER-mirar: a genuine alert whose fid is 2.
+    // Kowalski reads the same packets as 2massj, and WINTER confirm the data is
+    // J, so 2 is J and this pins the whole chain to a real packet.
+    let raw = std::fs::read("tests/data/alerts/winter/alert.avro").unwrap();
+    let fixed = sanitize_winter_avro(&raw).unwrap();
+    let reader = apache_avro::Reader::new(&fixed[..]).unwrap();
+    let value = reader.into_iter().next().unwrap().unwrap();
+    let alert: WinterRawAvroAlert = apache_avro::from_value(&value).unwrap();
+    assert_eq!(alert.candidate.fid, 2);
+    assert_eq!(fid_to_band(alert.candidate.fid).unwrap(), Band::J);
 }
