@@ -102,6 +102,10 @@ pub async fn post_find_query(
         Err(e) => return response::bad_request(&format!("Invalid find options: {}", e)),
     };
     let projection = find_options.projection.clone();
+    // Deriving geometry needs the designation and the epoch, so ask for them
+    // whenever a geometry field is wanted and strip them from the response after.
+    let mut find_options = find_options;
+    let injected = inject_geometry_inputs(&collection_name, projection.as_ref(), &mut find_options);
     let mut cursor = match collection.find(filter).with_options(find_options).await {
         Ok(cursor) => cursor,
         Err(e) => return response::internal_error(&format!("Error finding documents: {}", e)),
@@ -117,6 +121,9 @@ pub async fn post_find_query(
         }
     }
     fill_sso_geometry(&db, &collection_name, projection.as_ref(), &mut docs).await;
+    for doc in docs.iter_mut() {
+        remove_injected(doc, &injected);
+    }
     response::ok_ser("success", &docs)
 }
 
@@ -202,6 +209,68 @@ async fn fill_sso_geometry(
                     sso.remove(field);
                 }
             }
+        }
+    }
+}
+
+/// Inputs `fill_sso_geometry` needs that a caller may not have projected.
+const GEOMETRY_INPUTS: [&str; 2] = ["properties.sso.designation", "candidate.jd"];
+
+/// Add the geometry inputs to an inclusion projection, returning the paths added.
+///
+/// An inclusion projection returns only what it names, so a request for
+/// `helio_dist` alone would arrive with no designation or epoch to derive from.
+/// An exclusion projection already returns them unless it names them, and
+/// un-excluding a field the caller explicitly removed would override the request.
+fn inject_geometry_inputs(
+    collection_name: &str,
+    projection: Option<&Document>,
+    options: &mut mongodb::options::FindOptions,
+) -> Vec<&'static str> {
+    if collection_name != ZTF_ALERTS || requested_geometry(projection).is_empty() {
+        return Vec::new();
+    }
+    let Some(projection) = projection else {
+        return Vec::new();
+    };
+    if is_exclusion(projection) {
+        return Vec::new();
+    }
+
+    let missing: Vec<&'static str> = GEOMETRY_INPUTS
+        .iter()
+        .copied()
+        .filter(|path| !projected(projection, path).unwrap_or(false))
+        .collect();
+    if missing.is_empty() {
+        return Vec::new();
+    }
+    let mut augmented = projection.clone();
+    for path in &missing {
+        augmented.insert(*path, 1_i32);
+    }
+    options.projection = Some(augmented);
+    missing
+}
+
+/// Drop the paths added by [`inject_geometry_inputs`], and any subdocument left
+/// empty by their removal.
+fn remove_injected(doc: &mut Document, injected: &[&str]) {
+    for path in injected {
+        let mut parts: Vec<&str> = path.split('.').collect();
+        let Some(leaf) = parts.pop() else { continue };
+
+        let mut current: Option<&mut Document> = Some(doc);
+        for part in &parts {
+            current = current.and_then(|d| d.get_document_mut(*part).ok());
+        }
+        let Some(parent) = current else { continue };
+        parent.remove(leaf);
+        let parent_emptied = parent.is_empty();
+
+        // A subdocument that exists only to carry an injected field is noise.
+        if parent_emptied && parts.len() == 1 {
+            doc.remove(parts[0]);
         }
     }
 }
@@ -391,5 +460,99 @@ mod tests {
             requested_geometry(Some(&projection)),
             vec!["helio_dist", "topo_dist"]
         );
+    }
+}
+
+#[cfg(test)]
+mod injection_tests {
+    use super::*;
+
+    fn options(projection: Option<Document>) -> mongodb::options::FindOptions {
+        let mut o = mongodb::options::FindOptions::default();
+        o.projection = projection;
+        o
+    }
+
+    // Geometry is derived from the designation and the epoch, so asking for a
+    // geometry field alone must still fetch them.
+    #[test]
+    fn test_geometry_alone_pulls_in_its_inputs() {
+        let proj = doc! { "properties.sso.helio_dist": 1 };
+        let mut o = options(Some(proj.clone()));
+        let injected = inject_geometry_inputs(ZTF_ALERTS, Some(&proj), &mut o);
+        assert_eq!(injected, GEOMETRY_INPUTS.to_vec());
+        let sent = o.projection.expect("projection augmented");
+        assert!(sent.contains_key("properties.sso.designation"));
+        assert!(sent.contains_key("candidate.jd"));
+        assert!(sent.contains_key("properties.sso.helio_dist"));
+    }
+
+    #[test]
+    fn test_inputs_the_caller_already_asked_for_are_not_injected() {
+        let proj = doc! {
+            "properties.sso.helio_dist": 1,
+            "properties.sso.designation": 1,
+            "candidate.jd": 1,
+        };
+        let mut o = options(Some(proj.clone()));
+        assert!(inject_geometry_inputs(ZTF_ALERTS, Some(&proj), &mut o).is_empty());
+    }
+
+    #[test]
+    fn test_no_geometry_requested_means_no_injection() {
+        let proj = doc! { "objectId": 1 };
+        let mut o = options(Some(proj.clone()));
+        assert!(inject_geometry_inputs(ZTF_ALERTS, Some(&proj), &mut o).is_empty());
+    }
+
+    // An exclusion projection already returns the inputs unless it names them,
+    // and un-excluding one would override what the caller asked for.
+    #[test]
+    fn test_exclusion_projection_is_left_alone() {
+        let proj = doc! { "cutoutScience": 0 };
+        let mut o = options(Some(proj.clone()));
+        assert!(inject_geometry_inputs(ZTF_ALERTS, Some(&proj), &mut o).is_empty());
+    }
+
+    #[test]
+    fn test_other_catalogs_are_left_alone() {
+        let proj = doc! { "properties.sso.helio_dist": 1 };
+        let mut o = options(Some(proj.clone()));
+        assert!(inject_geometry_inputs("LSST_alerts", Some(&proj), &mut o).is_empty());
+    }
+
+    // What the caller did not ask for must not reach the response.
+    #[test]
+    fn test_injected_inputs_are_stripped_from_the_response() {
+        let mut doc = doc! {
+            "candidate": { "jd": 2_461_272.5 },
+            "properties": { "sso": { "designation": "1", "helio_dist": 2.7 } },
+        };
+        remove_injected(&mut doc, &GEOMETRY_INPUTS);
+
+        let sso = doc
+            .get_document("properties")
+            .unwrap()
+            .get_document("sso")
+            .unwrap();
+        assert!(sso.contains_key("helio_dist"), "requested field is kept");
+        assert!(
+            !sso.contains_key("designation"),
+            "injected field is dropped"
+        );
+        // `candidate` existed only to carry the injected epoch.
+        assert!(!doc.contains_key("candidate"));
+    }
+
+    #[test]
+    fn test_stripping_keeps_a_subdocument_the_caller_asked_for() {
+        let mut doc = doc! {
+            "candidate": { "jd": 2_461_272.5, "magpsf": 18.1 },
+            "properties": { "sso": { "designation": "1", "helio_dist": 2.7 } },
+        };
+        remove_injected(&mut doc, &GEOMETRY_INPUTS);
+        let candidate = doc.get_document("candidate").expect("candidate kept");
+        assert!(candidate.contains_key("magpsf"));
+        assert!(!candidate.contains_key("jd"));
     }
 }

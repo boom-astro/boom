@@ -685,9 +685,13 @@ pub struct ZtfFilterWorker {
 impl ZtfFilterWorker {
     /// Derive geometry for `sso_history` points that do not carry it.
     ///
-    /// Enrichment only began writing geometry recently, so most of the archive
-    /// has none. It is a pure function of designation and epoch, so it can be
-    /// recomputed on read rather than backfilled across the alert collection.
+    /// Geometry is a pure function of designation and epoch, so a point stored
+    /// without it can be derived on read rather than backfilled.
+    ///
+    /// This runs after the aggregation, so the values reach the output but not
+    /// the pipeline: a filter matching on `helio_dist` still sees null for a
+    /// point stored without it. Points enriched with geometry are matchable,
+    /// since the pipeline reads those from storage.
     ///
     /// Only fills entries under `annotations.sso_history`; a filter that projects
     /// the history elsewhere keeps whatever the stored documents had.
