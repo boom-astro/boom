@@ -40,6 +40,8 @@ static ALERT_PROCESSED: LazyLock<Counter<u64>> = LazyLock::new(|| {
 
 const MAX_RETRIES_PRODUCER: usize = 6;
 const KAFKA_TIMEOUT_SECS: std::time::Duration = std::time::Duration::from_secs(30);
+const METADATA_ATTEMPTS: usize = 4;
+const METADATA_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_millis(500);
 
 // rdkafka's Metadata type provides *references* to MetadataTopic and
 // MetadataPartition values, neither of which implement Clone. We use a custom
@@ -163,6 +165,20 @@ pub async fn delete_topic(bootstrap_servers: &str, topic_name: &str) -> Result<(
     Ok(())
 }
 
+/// `UnknownTopicOrPartition` is excluded: a missing topic is a legitimate `Ok(None)`
+/// here, not something to wait on.
+fn is_transient_metadata_error(error: &KafkaError) -> bool {
+    matches!(
+        error,
+        KafkaError::MetadataFetch(
+            rdkafka::error::RDKafkaErrorCode::NotLeaderForPartition
+                | rdkafka::error::RDKafkaErrorCode::LeaderNotAvailable
+                | rdkafka::error::RDKafkaErrorCode::BrokerNotAvailable
+                | rdkafka::error::RDKafkaErrorCode::RequestTimedOut
+        )
+    )
+}
+
 #[instrument(skip_all, err)]
 pub fn count_messages(
     bootstrap_servers: &str,
@@ -171,7 +187,32 @@ pub fn count_messages(
     let consumer: BaseConsumer = ClientConfig::new()
         .set("bootstrap.servers", bootstrap_servers)
         .create()?;
-    match get_partition_ids(&consumer, topic_name) {
+    let mut attempt = 1;
+    loop {
+        let error = match count_messages_once(&consumer, topic_name) {
+            Ok(count) => return Ok(count),
+            Err(error) => error,
+        };
+        if attempt >= METADATA_ATTEMPTS || !is_transient_metadata_error(&error) {
+            return Err(error);
+        }
+        warn!(
+            ?topic_name,
+            %error,
+            "transient metadata error, retrying ({}/{})",
+            attempt,
+            METADATA_ATTEMPTS
+        );
+        std::thread::sleep(METADATA_RETRY_BACKOFF);
+        attempt += 1;
+    }
+}
+
+fn count_messages_once(
+    consumer: &BaseConsumer,
+    topic_name: &str,
+) -> Result<Option<u32>, KafkaError> {
+    match get_partition_ids(consumer, topic_name) {
         Ok(Some(partition_ids)) => {
             debug!(?topic_name, "topic found");
             let total_messages =
@@ -1298,5 +1339,35 @@ mod rollover_tests {
             d(2026, 8, 14),
             "rolls to today, not merely one day forward"
         );
+    }
+}
+
+#[cfg(test)]
+mod metadata_retry_tests {
+    use super::*;
+    use rdkafka::error::RDKafkaErrorCode;
+
+    #[test]
+    fn test_leader_errors_are_retried() {
+        assert!(is_transient_metadata_error(&KafkaError::MetadataFetch(
+            RDKafkaErrorCode::NotLeaderForPartition
+        )));
+        assert!(is_transient_metadata_error(&KafkaError::MetadataFetch(
+            RDKafkaErrorCode::LeaderNotAvailable
+        )));
+    }
+
+    #[test]
+    fn test_missing_topic_is_not_retried() {
+        assert!(!is_transient_metadata_error(&KafkaError::MetadataFetch(
+            RDKafkaErrorCode::UnknownTopicOrPartition
+        )));
+    }
+
+    #[test]
+    fn test_unrelated_errors_are_not_retried() {
+        assert!(!is_transient_metadata_error(
+            &KafkaError::MessageConsumption(RDKafkaErrorCode::NotLeaderForPartition)
+        ));
     }
 }
