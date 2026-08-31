@@ -3,8 +3,8 @@
 ## Deployment instances
 
 There is more than one BOOM instance running, and they are **not** replicas of
-each other. Each has its own MongoDB, its own users, and its own filters, so
-data present on one is not necessarily present on the other.
+each other. Each has its own MongoDB and its own filters, so data present on
+one is not necessarily present on the other.
 
 | | Caltech | UMN |
 | --- | --- | --- |
@@ -13,13 +13,16 @@ data present on one is not necessarily present on the other.
 | Deploy method | Automated: release tag → `Trigger deployment to production` GitHub Actions workflow on a self-hosted runner | Manual, on the cluster |
 | Config in this repo | `config/prod/caltech/` | Not yet (deployed manually) |
 
-**They diverge in practice.** Users are created per instance through that
-instance's API, filters live in that instance's database, and each instance
-consumes the upstream alert streams with its own Kafka consumer groups, so
-ingestion offsets and back-fill history differ too. Treat UMN as an
+**They diverge in practice.** Filters live in each instance's own database, and
+each instance consumes the upstream alert streams with its own Kafka consumer
+groups, so ingestion offsets and back-fill history differ too. Treat UMN as an
 independent instance that can take over if Caltech is unavailable, not as a
 hot standby that is guaranteed to be in sync. If something needs to exist on
-both (a user account, a filter, a config change), it has to be applied to both.
+both (a filter, a config change), it has to be applied to both.
+
+Users are the exception: the UMN side runs a recurring sync that carries
+accounts over, Babamul ones included, so both instances end up holding the same
+users without anyone recreating them.
 
 The Caltech instance also serves [Babamul](https://babamul.caltech.edu), the
 public-facing alert broker interface for the ZTF and LSST streams.
@@ -492,6 +495,7 @@ e.g. `https://api.kaboom.caltech.edu/docs`): authenticate at the top of the
 page, then run the `POST /users` endpoint. Equivalently, `POST /auth` to get a
 token and then `POST /users` with it. Non-admin callers get a `403`.
 
-Repeat on each instance where the user needs access: creating a user at
-Caltech does not create it at UMN.
+Creating a user at Caltech does not itself create it at UMN, but the UMN side
+runs a recurring sync that carries accounts over, Babamul ones included, so
+both instances end up holding the same users.
 
