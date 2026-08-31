@@ -218,6 +218,20 @@ crossmatch:
         z_phot: 1
         z_phot_err: 1
         photo_z_type: 1
+    - catalog: PS1_DR2
+      radius: 2.0
+      use_distance: false
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+    - catalog: lsdr10
+      radius: 30.0
+      use_distance: false
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
   ztf:
     - catalog: Gaia_DR3
       radius: 2.0
@@ -392,3 +406,17 @@ crossmatch:
         z_phot: 1
         z_phot_err: 1
         photo_z_type: 1
+    - catalog: PS1_DR2
+      radius: 2.0
+      use_distance: false
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+    - catalog: lsdr10
+      radius: 30.0
+      use_distance: false
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
