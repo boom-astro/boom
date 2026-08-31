@@ -52,7 +52,8 @@ async fn main() {
     };
 
     let now = chrono::Utc::now().timestamp() as f64;
-    match refresh_orbits(db.as_ref(), &args.url, args.batch_size, now).await {
+    // Run from a terminal, so a progress bar is useful.
+    match refresh_orbits(db.as_ref(), &args.url, args.batch_size, now, true).await {
         Ok(report) => {
             info!(
                 "read {} lines: {} orbits parsed, {} skipped (header/blank/unusable)",

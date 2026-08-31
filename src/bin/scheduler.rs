@@ -84,7 +84,10 @@ async fn keep_mpc_orbits_fresh(db: mongodb::Database) {
             None => warn!("MPC_orbits is missing, populating it"),
         }
 
-        match mpcorb::refresh_orbits(Some(&db), mpcorb::DEFAULT_MPCORB_URL, 10_000, now).await {
+        // No progress bar: this output is a log, not a terminal.
+        match mpcorb::refresh_orbits(Some(&db), mpcorb::DEFAULT_MPCORB_URL, 10_000, now, false)
+            .await
+        {
             Ok(report) => {
                 for sample in &report.rejected_samples {
                     warn!("rejected record-shaped line: {}", sample);

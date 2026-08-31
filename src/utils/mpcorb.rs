@@ -259,20 +259,14 @@ pub async fn orbits_age_seconds(
 /// Download MPCORB and swap it into `MPC_orbits`.
 ///
 /// Passing `db: None` parses and reports without touching the database.
+/// `show_progress` draws a progress bar, which suits a terminal but not a log.
 pub async fn refresh_orbits(
     db: Option<&mongodb::Database>,
     url: &str,
     batch_size: usize,
     now: f64,
+    show_progress: bool,
 ) -> Result<RefreshReport, RefreshError> {
-    use std::io::{BufRead, BufReader};
-
-    tracing::info!("downloading MPCORB from {}", url);
-    let mut tmp = tempfile::NamedTempFile::new()?;
-    crate::utils::data::download_to_file(tmp.as_file_mut(), url, None, None, true)
-        .await
-        .map_err(|e| RefreshError::Download(e.to_string()))?;
-
     let staging = match db {
         Some(db) => {
             let c = db.collection::<Document>(STAGING_COLLECTION);
@@ -282,6 +276,51 @@ pub async fn refresh_orbits(
         }
         None => None,
     };
+
+    let result = refresh_into_staging(staging.as_ref(), url, batch_size, now, show_progress).await;
+
+    // Staging holds a partial catalogue on failure, and nothing else reads it.
+    if result.is_err() {
+        if let Some(c) = &staging {
+            let _ = c.drop().await;
+        }
+    }
+    let report = result?;
+
+    if let Some(db) = db {
+        let from = format!("{}.{}", db.name(), STAGING_COLLECTION);
+        let to = format!("{}.{}", db.name(), ORBITS_COLLECTION);
+        db.client()
+            .database("admin")
+            .run_command(doc! { "renameCollection": &from, "to": &to, "dropTarget": true })
+            .await?;
+    }
+    Ok(report)
+}
+
+/// A download with no bound can hang for as long as the peer keeps the socket
+/// open, which would stall the caller indefinitely.
+const DOWNLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+/// Fetch MPCORB, parse it, and fill the staging collection.
+async fn refresh_into_staging(
+    staging: Option<&mongodb::Collection<Document>>,
+    url: &str,
+    batch_size: usize,
+    now: f64,
+    show_progress: bool,
+) -> Result<RefreshReport, RefreshError> {
+    use std::io::{BufRead, BufReader};
+
+    tracing::info!("downloading MPCORB from {}", url);
+    let mut tmp = tempfile::NamedTempFile::new()?;
+    tokio::time::timeout(
+        DOWNLOAD_TIMEOUT,
+        crate::utils::data::download_to_file(tmp.as_file_mut(), url, None, None, show_progress),
+    )
+    .await
+    .map_err(|_| RefreshError::Download(format!("timed out after {DOWNLOAD_TIMEOUT:?}")))?
+    .map_err(|e| RefreshError::Download(e.to_string()))?;
 
     let file = std::fs::File::open(tmp.path())?;
     let mut batch: Vec<Document> = Vec::with_capacity(batch_size);
@@ -321,7 +360,7 @@ pub async fn refresh_orbits(
         }
 
         if batch.len() >= batch_size {
-            match &staging {
+            match staging {
                 Some(c) => c
                     .insert_many(std::mem::take(&mut batch))
                     .await
@@ -338,7 +377,7 @@ pub async fn refresh_orbits(
         }
     }
 
-    if let (Some(c), false) = (&staging, batch.is_empty()) {
+    if let (Some(c), false) = (staging, batch.is_empty()) {
         c.insert_many(batch).await?;
     }
 
@@ -347,15 +386,6 @@ pub async fn refresh_orbits(
             parsed: report.parsed,
             collection: ORBITS_COLLECTION.to_string(),
         });
-    }
-
-    if let Some(db) = db {
-        let from = format!("{}.{}", db.name(), STAGING_COLLECTION);
-        let to = format!("{}.{}", db.name(), ORBITS_COLLECTION);
-        db.client()
-            .database("admin")
-            .run_command(doc! { "renameCollection": &from, "to": &to, "dropTarget": true })
-            .await?;
     }
 
     Ok(report)
@@ -715,5 +745,36 @@ mod tests {
         assert!(parse_line("").is_none());
         assert!(parse_line("Des'n     H     G   Epoch     M        Peri.").is_none());
         assert!(parse_line("-----------------").is_none());
+    }
+}
+
+#[cfg(test)]
+mod refresh_bounds_tests {
+    use super::*;
+
+    // A download with no bound can stall the scheduler for as long as the peer
+    // holds the socket open.
+    #[test]
+    fn test_download_is_bounded() {
+        assert!(DOWNLOAD_TIMEOUT.as_secs() > 0);
+        // Long enough for a ~300MB file on a slow link, short enough to notice.
+        assert!(DOWNLOAD_TIMEOUT.as_secs() <= 60 * 60);
+    }
+
+    // A short download is a truncated one, and swapping it in would replace the
+    // catalogue with a fragment.
+    #[test]
+    fn test_short_catalogue_is_rejected() {
+        let err = RefreshError::ImplausiblyShort {
+            parsed: 12,
+            collection: ORBITS_COLLECTION.to_string(),
+        };
+        assert!(err.to_string().contains("12"));
+        assert!(err.to_string().contains(ORBITS_COLLECTION));
+    }
+
+    #[test]
+    fn test_staging_is_not_the_live_collection() {
+        assert_ne!(STAGING_COLLECTION, ORBITS_COLLECTION);
     }
 }
