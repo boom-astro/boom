@@ -25,12 +25,33 @@ jobs:
       BOOM_DATA_VALKEY_PATH: ${{ vars.BOOM_DATA_VALKEY_PATH }}
       BOOM_DATA_KAFKA_PATH: ${{ vars.BOOM_DATA_KAFKA_PATH }}
       BOOM_CUTOUTS_MONGO_VOLUME: ${{ vars.BOOM_DATA_CUTOUTS_MONGODB_PATH }}
+      # Caps each mongo's WiredTiger cache. Unset, both size off host RAM and
+      # together claim all of it. See .env.example for sizing.
+      BOOM_MONGO_MEM_LIMIT: ${{ vars.BOOM_MONGO_MEM_LIMIT }}
+      BOOM_CUTOUTS_MONGO_MEM_LIMIT: ${{ vars.BOOM_CUTOUTS_MONGO_MEM_LIMIT }}
       BOOM_CUTOUTS_STORAGE__PASSWORD: ${{ secrets.BOOM_CUTOUTS_STORAGE__PASSWORD }}
       # Toggles babamul on without editing config.yaml — compose injects it into
       # the api and schedulers. Other babamul settings (webapp_url, etc.) and the
       # admin username/email are read from config/prod/<deployment>/config.yaml
       # and don't need env vars here.
       BOOM_BABAMUL__ENABLED: ${{ vars.BOOM_BABAMUL__ENABLED }}
+      # Whether the API will create new accounts. Pair it with
+      # VITE_PRERELEASE_MODE below: that decides what the web app offers, this
+      # decides what the API allows. Unset leaves compose's default (true).
+      BOOM_BABAMUL__REGISTRATION_ENABLED: ${{ vars.BOOM_BABAMUL__REGISTRATION_ENABLED }}
+      # Social sign-in. redirect_base_url and orcid_sandbox come from
+      # config/prod/<deployment>/config.yaml; only the credentials are injected
+      # here, since config.yaml is committed. A provider is enabled exactly when
+      # both halves of its pair are non-empty, so an unset secret simply leaves
+      # that button off rather than sending users to a consent screen that will
+      # reject them. The redirect URI registered with each provider must be
+      # <redirect_base_url>/babamul/oauth/<provider>/callback.
+      BOOM_BABAMUL__OAUTH__GOOGLE__CLIENT_ID: ${{ secrets.BOOM_BABAMUL__OAUTH__GOOGLE__CLIENT_ID }}
+      BOOM_BABAMUL__OAUTH__GOOGLE__CLIENT_SECRET: ${{ secrets.BOOM_BABAMUL__OAUTH__GOOGLE__CLIENT_SECRET }}
+      BOOM_BABAMUL__OAUTH__GITHUB__CLIENT_ID: ${{ secrets.BOOM_BABAMUL__OAUTH__GITHUB__CLIENT_ID }}
+      BOOM_BABAMUL__OAUTH__GITHUB__CLIENT_SECRET: ${{ secrets.BOOM_BABAMUL__OAUTH__GITHUB__CLIENT_SECRET }}
+      BOOM_BABAMUL__OAUTH__ORCID__CLIENT_ID: ${{ secrets.BOOM_BABAMUL__OAUTH__ORCID__CLIENT_ID }}
+      BOOM_BABAMUL__OAUTH__ORCID__CLIENT_SECRET: ${{ secrets.BOOM_BABAMUL__OAUTH__ORCID__CLIENT_SECRET }}
       BOOM_DATABASE__PASSWORD: ${{ secrets.BOOM_DATABASE__PASSWORD }}
       BOOM_API__DOMAIN: ${{ vars.BOOM_API__DOMAIN }}
       BOOM_API__AUTH__SECRET_KEY: ${{ secrets.BOOM_API__AUTH__SECRET_KEY }}
@@ -43,6 +64,14 @@ jobs:
       VITE_PRERELEASE_MODE: ${{ vars.VITE_PRERELEASE_MODE }}
       VITE_PUBLIC_POSTHOG_KEY: ${{ vars.VITE_PUBLIC_POSTHOG_KEY }}
       VITE_PUBLIC_POSTHOG_HOST: ${{ vars.VITE_PUBLIC_POSTHOG_HOST }}
+      # Server-side PostHog analytics for the Babamul API and Kafka stream.
+      # Deliberately reuses the VITE_* values rather than taking its own
+      # variables: web and API activity must land on the same PostHog project
+      # for identity merging to work, and a project key is the same write-only
+      # public key in both places. One variable to set, one to keep in sync,
+      # and clearing it turns off web and server capture together.
+      BOOM_POSTHOG__PROJECT_API_KEY: ${{ vars.VITE_PUBLIC_POSTHOG_KEY }}
+      BOOM_POSTHOG__HOST: ${{ vars.VITE_PUBLIC_POSTHOG_HOST }}
       STACK_NAME: boom
       PROMETHEUS_USER: ${{ vars.PROMETHEUS_USER }}
       PROMETHEUS_HASHED_PASSWORD: ${{ secrets.PROMETHEUS_HASHED_PASSWORD }}
@@ -78,6 +107,9 @@ jobs:
       # (true) and BOOM_GPU__DEVICE_IDS (e.g. "0,1") repository variables; no code
       # change needed. Keep config/prod/<deployment>/config.yaml's gpu.enabled in
       # sync so the scheduler's GPU-pool path agrees with the model loader.
+      # BOOM_GPU__ENABLED also drives the "Select GPU compose overlay" step
+      # below, which layers in docker-compose.cuda.yaml (CUDA image + device
+      # passthrough) — setting this var alone does nothing without that overlay.
       BOOM_GPU__ENABLED: ${{ vars.BOOM_GPU__ENABLED || 'false' }}
       BOOM_GPU__DEVICE_IDS: ${{ vars.BOOM_GPU__DEVICE_IDS || '0' }}
     steps:
@@ -153,10 +185,47 @@ jobs:
         with:
           ref: ${{ steps.deploy_tag.outputs.tag_ref }}
           lfs: true
-      - run: >
-          docker compose --profile prod
-          -f docker-compose.yaml build
+      - name: Select GPU compose overlay
+        id: gpu_compose
+        run: |
+          if [ "${BOOM_GPU__ENABLED}" = "true" ]; then
+            echo "Adding docker-compose.cuda.yaml overlay (BOOM_GPU__ENABLED=true)"
+            echo "args=-f docker-compose.cuda.yaml" >> "$GITHUB_OUTPUT"
+          else
+            echo "args=" >> "$GITHUB_OUTPUT"
+          fi
       - run: >
           docker compose --profile prod
           -f docker-compose.yaml
-          -f docker-compose.cutouts-mongo.yaml up -d
+          ${{ steps.gpu_compose.outputs.args }}
+          build
+      - run: >
+          docker compose --profile prod
+          -f docker-compose.yaml
+          -f docker-compose.cutouts-mongo.yaml
+          ${{ steps.gpu_compose.outputs.args }} up -d
+      # Services whose only "source code" is a bind-mounted file read once at
+      # startup. Editing that file doesn't change the service definition, so the
+      # `up -d` above leaves the container running the version it started with
+      # and the change silently never takes effect — recreate them explicitly.
+      #
+      # - grafana: dashboards survive (the file provider re-reads
+      #   config/grafana/dashboards every 30s), but alerting provisioning is read
+      #   ONCE at startup, so new/changed alert rules, contact points, and
+      #   notification policies would never load. All Grafana state lives in the
+      #   grafana_data volume, so recreating is cheap.
+      # - docker-metadata-exporter: runs scripts/docker_metadata_exporter.py off
+      #   a bind mount under a stock python image. #563 added docker_container_up
+      #   and docker_container_health_status to that script, but the container
+      #   kept serving the pre-#563 metrics, so the panels and the api-down alert
+      #   that query them had no series at all.
+      #
+      # Other services with bind-mounted configs (prometheus, loki, tempo,
+      # promtail, otel-collector) are in the same class: if you change their
+      # config, add them here or restart them by hand.
+      - run: >
+          docker compose --profile prod
+          -f docker-compose.yaml
+          -f docker-compose.cutouts-mongo.yaml
+          ${{ steps.gpu_compose.outputs.args }}
+          up -d --force-recreate --no-deps grafana docker-metadata-exporter

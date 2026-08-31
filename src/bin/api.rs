@@ -1,6 +1,7 @@
 #![recursion_limit = "512"] // for large bson docs and CutoutStorage's s3 client
 use actix_web::middleware::from_fn;
 use actix_web::{middleware::Logger, web, App, HttpServer};
+use boom::api::analytics::AnalyticsClient;
 use boom::api::auth::{auth_middleware, babamul_auth_middleware, get_auth};
 use boom::api::db::build_db_api;
 use boom::api::docs::{ApiDoc, BabamulApiDoc};
@@ -63,9 +64,37 @@ async fn main() -> std::io::Result<()> {
     let babamul_is_enabled = config.babamul.enabled;
     if babamul_is_enabled {
         tracing::info!("Babamul API endpoints are ENABLED");
+        // Abandoned sign-in attempts are only cleaned up by this TTL index —
+        // completed flows delete their own state, incomplete ones never do.
+        if let Err(error) = routes::babamul::oauth::ensure_oauth_state_index(&database).await {
+            log_error!(WARN, error, "failed to create the OAuth TTL indexes");
+        }
+        // Same helper `/oauth/providers` uses, so this line always matches what
+        // the client is actually offered — credentials alone are not enough.
+        let providers: Vec<&str> = boom::api::oauth::enabled_providers(&config)
+            .iter()
+            .map(|provider| provider.as_str())
+            .collect();
+        if providers.is_empty() {
+            tracing::info!(
+                "No social sign-in providers are configured (needs a client ID and secret \
+                 per provider, plus babamul.webapp_url and babamul.oauth.redirect_base_url)"
+            );
+        } else {
+            tracing::info!("Social sign-in enabled for: {}", providers.join(", "));
+        }
     } else {
         tracing::info!("Babamul API endpoints are DISABLED");
     }
+
+    // Product analytics. Built once and shared by every worker: the background
+    // flush task must be spawned a single time, not once per worker thread.
+    let analytics = web::Data::new(AnalyticsClient::from_config(&config.posthog));
+
+    // Attribute Kafka stream consumption back to Babamul users, feeding both
+    // Grafana (OTel gauges) and PostHog (per-user deltas). Also spawned once,
+    // outside the `HttpServer::new` closure.
+    boom::api::consumption::spawn(config.clone(), database.clone(), analytics.as_ref().clone());
 
     // Create API docs from OpenAPI spec
     let api_doc = ApiDoc::openapi();
@@ -78,6 +107,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(auth.clone()))
             .app_data(web::Data::new(email_service.clone()))
             .app_data(cutout_storages.clone())
+            .app_data(analytics.clone())
             .wrap(from_fn(request_metrics_middleware));
 
         // Conditionally register Babamul endpoints if enabled
@@ -95,8 +125,14 @@ async fn main() -> std::io::Result<()> {
                     .service(routes::babamul::post_babamul_auth)
                     .service(routes::babamul::post_babamul_forgot_password)
                     .service(routes::babamul::post_babamul_reset_password)
+                    .service(routes::babamul::oauth::get_oauth_providers)
+                    .service(routes::babamul::oauth::get_oauth_start)
+                    .service(routes::babamul::oauth::get_oauth_callback)
+                    .service(routes::babamul::oauth::post_oauth_complete)
+                    .service(routes::babamul::oauth::post_oauth_verify)
                     // Protected routes
                     .service(routes::babamul::get_babamul_profile)
+                    .service(routes::babamul::patch_babamul_profile)
                     .service(routes::babamul::post_kafka_credentials)
                     .service(routes::babamul::get_kafka_credentials)
                     .service(routes::babamul::delete_kafka_credential)

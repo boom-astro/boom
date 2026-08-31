@@ -23,7 +23,7 @@ use flare::Time;
 use mongodb::bson::{doc, Document};
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, skip_serializing_none};
-use tracing::{debug, error, instrument, warn};
+use tracing::{debug, error, instrument};
 
 pub const STREAM_NAME: &str = "WINTER";
 // WINTER observes from Palomar; it covers roughly the same northern sky as ZTF.
@@ -39,17 +39,26 @@ pub const WINTER_ZTF_XMATCH_RADIUS: f64 =
 pub const WINTER_LSST_XMATCH_RADIUS: f64 =
     (WINTER_POSITION_UNCERTAINTY.max(lsst::LSST_POSITION_UNCERTAINTY) / 3600.0_f64).to_radians();
 
+/// The `fid` WINTER gives a dark frame, which is a calibration exposure rather
+/// than a measurement in any band.
+pub const DARK_FID: i32 = 4;
+
 /// Map a WINTER filter id to a photometric [`Band`].
 ///
-/// WINTER `fid` encoding (from the alert schema): 0=Y, 1=J, 2=H, 3=K.
-/// Unknown ids default to Y so ingestion never fails on an unexpected filter.
-pub fn fid_to_band(fid: i32) -> Band {
+/// `fid` is 1-indexed, as ZTF's is: 1=Y, 2=J, 3=H. The upstream schema's doc
+/// string says 0=Y, 1=J, 2=H, 3=K, which does not match the alerts it ships
+/// with -- WINTER's own J-band data carries fid 2.
+///
+/// An id outside the set is refused rather than resolved to a default: a band
+/// is what the photometry is later read as, so a guess is indistinguishable
+/// from a measurement.
+pub fn fid_to_band(fid: i32) -> Result<Band, AlertError> {
     match fid {
-        0 => Band::Y,
-        1 => Band::J,
-        2 => Band::H,
-        3 => Band::K,
-        _ => Band::Y,
+        1 => Ok(Band::Y),
+        2 => Ok(Band::J),
+        3 => Ok(Band::H),
+        DARK_FID => Err(AlertError::DarkFrame),
+        _ => Err(AlertError::UnknownFid(fid)),
     }
 }
 
@@ -576,6 +585,7 @@ impl WinterAlertWorker {
             current_version,
             now,
             &self.alert_aux_collection,
+            Document::new(),
         )
         .await
     }
@@ -659,10 +669,6 @@ impl AlertWorker for WinterAlertWorker {
         Survey::Winter
     }
 
-    fn input_queue_name(&self) -> String {
-        format!("{}_alerts_packets_queue", WinterAlertWorker::survey())
-    }
-
     fn output_queue_name(&self) -> String {
         format!("{}_alerts_enrichment_queue", WinterAlertWorker::survey())
     }
@@ -680,8 +686,10 @@ impl AlertWorker for WinterAlertWorker {
             .alert_from_avro_bytes(&sanitized)
             .inspect_err(as_error!())?;
 
-        // Fill in derived bands from `fid` (not present in the avro packet).
-        avro_alert.candidate.band = fid_to_band(avro_alert.candidate.fid);
+        // Fill in derived bands from `fid` (not present in the avro packet). A
+        // dark frame or an unrecognised filter is not a detection, so the alert
+        // is refused rather than stored under a guessed band.
+        avro_alert.candidate.band = fid_to_band(avro_alert.candidate.fid)?;
 
         let candid = avro_alert.candid;
         let object_id = avro_alert.object_id;
@@ -690,11 +698,18 @@ impl AlertWorker for WinterAlertWorker {
 
         // Lightcurve = current detection + historical prv_candidates.
         let mut prv_candidates = vec![WinterPrvCandidate::from_candidate(&avro_alert.candidate)];
-        if let Some(mut history) = avro_alert.prv_candidates {
-            for p in history.iter_mut() {
-                p.band = fid_to_band(p.fid);
+        if let Some(history) = avro_alert.prv_candidates {
+            // One unusable point does not invalidate the rest of the history, so
+            // a dark frame or unrecognised filter drops that point alone.
+            for mut p in history {
+                match fid_to_band(p.fid) {
+                    Ok(band) => {
+                        p.band = band;
+                        prv_candidates.push(p);
+                    }
+                    Err(e) => debug!(fid = p.fid, error = %e, "dropping prv_candidate"),
+                }
             }
-            prv_candidates.extend(history);
         }
         WinterPrvCandidate::sanitize_timeseries(&mut prv_candidates);
 
@@ -749,7 +764,7 @@ impl AlertWorker for WinterAlertWorker {
             };
             let result = self.insert_aux(&obj, &self.alert_aux_collection).await;
             if let Err(AlertError::AlertAuxExists) = result {
-                warn!(
+                debug!(
                     "Alert aux document for object_id {} already exists. Using fallback update.",
                     object_id
                 );

@@ -20,6 +20,39 @@ babamul:
   enabled: false # Set via BOOM_BABAMUL__ENABLED environment variable
   webapp_url: # Set via BOOM_BABAMUL__WEBAPP_URL environment variable
   retention_days: 3
+  # Whether new accounts may be created. Set to false for a pre-release
+  # deployment that is open only to the accounts it already has; sign-in for
+  # those accounts, including linking a new social provider to one, still
+  # works. Pair it with VITE_PRERELEASE_MODE in the web app, which decides what
+  # the UI offers, while this decides what the API allows.
+  registration_enabled: true # Set via BOOM_BABAMUL__REGISTRATION_ENABLED
+  oauth:
+    # Social sign-in with Google / GitHub / ORCID.
+    #
+    # Client IDs and secrets are ENVIRONMENT-ONLY and intentionally absent from
+    # this file, which is committed. Set, per provider you want to turn on:
+    #   BOOM_BABAMUL__OAUTH__GOOGLE__CLIENT_ID
+    #   BOOM_BABAMUL__OAUTH__GOOGLE__CLIENT_SECRET
+    # (likewise GITHUB and ORCID). A provider is enabled exactly when both are
+    # set — there is no separate on/off flag to get out of step with them.
+    #
+    # Public base URL of this API. The redirect URI registered with each
+    # provider must be {redirect_base_url}/babamul/oauth/{provider}/callback.
+    redirect_base_url: # Set via BOOM_BABAMUL__OAUTH__REDIRECT_BASE_URL
+    orcid_sandbox: false # Use sandbox.orcid.org instead of orcid.org
+    # Seconds an in-flight authorization request stays valid, i.e. how long the
+    # user has between pressing the button and finishing at the provider.
+    state_ttl_seconds: 600
+posthog:
+  # Server-side product analytics for the Babamul API and Kafka stream.
+  # Leave project_api_key empty to disable analytics entirely.
+  project_api_key: "" # Set via BOOM_POSTHOG__PROJECT_API_KEY environment variable
+  host: "https://us.i.posthog.com" # Set via BOOM_POSTHOG__HOST environment variable
+  flush_interval_seconds: 10
+  queue_capacity: 10000
+  # How often Babamul Kafka consumer groups are sampled to attribute stream
+  # consumption to users. Also drives the Grafana consumption metrics.
+  consumption_interval_seconds: 300
 gpu:
   enabled: false # Set to true to load ONNX models on GPU (CUDA) instead of CPU.
   # Models are loaded once at startup and shared across all enrichment workers.
@@ -36,6 +69,12 @@ kafka:
     ztf:
       server: "localhost:9092"
       group_id: "" # Set via BOOM_KAFKA__CONSUMER__ZTF__GROUP_ID environment variable
+      # Days before the current one to stay subscribed to. 1 keeps yesterday
+      # alongside today so a night spanning UTC midnight isn't cut off. Raise
+      # temporarily (via BOOM_KAFKA__CONSUMER__ZTF__SUBSCRIPTION_WINDOW_DAYS) to
+      # catch up after an upstream outage, then set it back; upstream retention
+      # (~7 days for ZTF) bounds what a lookback can recover.
+      subscription_window_days: 1
     lsst:
       server: "rubin-alert-stream-bootstrap.slac.stanford.edu:9094"
       schema_registry: "https://rubin-alert-schemas.slac.stanford.edu/schema-registry"

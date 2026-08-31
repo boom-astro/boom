@@ -9,7 +9,7 @@ use itertools::Itertools;
 use mongodb::bson::{doc, Bson};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use tracing::{instrument, warn};
+use tracing::{instrument, trace, warn};
 
 #[derive(thiserror::Error, Debug)]
 pub enum XmatchError {
@@ -73,7 +73,7 @@ pub fn get_f64_from_doc(doc: &mongodb::bson::Document, key: &str) -> Option<f64>
         Some(Bson::Int32(v)) => *v as f64,
         Some(Bson::Int64(v)) => *v as f64,
         _ => {
-            warn!("no valid {} in doc", key);
+            trace!("no valid {} in doc", key);
             return None;
         }
     };

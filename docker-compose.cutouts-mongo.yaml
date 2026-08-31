@@ -23,7 +23,7 @@ volumes:
 
 services:
   mongo-cutouts:
-    image: mongo:8.0
+    image: mongo:8.2
     hostname: mongo-cutouts
     expose:
       - "27017"
@@ -33,6 +33,13 @@ services:
     volumes:
       - ${BOOM_CUTOUTS_MONGO_VOLUME:-mongodb_cutouts}:/data/db
     restart: always
+    deploy:
+      resources:
+        limits:
+          # Same as mongo: without a limit the cache sizes off host RAM. ML
+          # scoring reads a cutout per alert, so a backfill fills it to that
+          # ceiling. 0 = unlimited. See .env.example.
+          memory: ${BOOM_CUTOUTS_MONGO_MEM_LIMIT:-0}
     networks:
       - boom
     healthcheck:

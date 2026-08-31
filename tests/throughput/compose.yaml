@@ -8,7 +8,7 @@ volumes:
 
 services:
   mongo:
-    image: mongo:8.0
+    image: mongo:8.2
     hostname: mongo
     expose:
       - "27017"
@@ -25,7 +25,7 @@ services:
     volumes:
       - mongodb:/data/db
   mongo-init:
-    image: mongo:8.0
+    image: mongo:8.2
     depends_on:
       mongo:
         condition: service_healthy
@@ -130,7 +130,8 @@ services:
     networks:
       - boom
     # have it sleep 5 seconds to allow kafka to finish producing
-    command: ["/bin/sh", "-c", "sleep 5 && /app/kafka_consumer ztf 20250311 --programids public"]
+    # --on: replay one archived night instead of catching up to today.
+    command: ["/bin/sh", "-c", "sleep 5 && /app/kafka_consumer ztf --on 20250311 --programids public"]
     environment:
       RUST_LOG: error,boom=debug
       # No OTel collector runs in the throughput compose. Skipping SDK init

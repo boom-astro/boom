@@ -28,7 +28,13 @@ services:
     networks:
       - boom
   mongo:
-    image: mongo:8.0
+    # 8.2 rather than 8.0: MongoDB 8.0 refuses to start on Linux kernel 6.19 and
+    # newer (https://jira.mongodb.org/browse/SERVER-121912), which current
+    # Docker Desktop VMs already ship, so 8.0 cannot run locally at all. 8.0 to
+    # 8.2 is a supported direct upgrade and 8.2 to 8.0 a supported downgrade,
+    # provided featureCompatibilityVersion is left at "8.0" until you are ready
+    # to give up that path.
+    image: mongo:8.2
     hostname: mongo
     expose:
       - "27017"
@@ -38,6 +44,13 @@ services:
     volumes:
       - ${BOOM_DATA_MONGODB_PATH:-mongodb}:/data/db
     restart: always
+    deploy:
+      resources:
+        limits:
+          # Caps the WiredTiger cache at 50% of (limit - 1GiB); without a limit
+          # it's 50% of host RAM, so this and mongo-cutouts each claim half the
+          # machine. 0 = unlimited. See .env.example.
+          memory: ${BOOM_MONGO_MEM_LIMIT:-0}
     networks:
       - boom
     healthcheck:
@@ -199,6 +212,23 @@ services:
       BOOM_CUTOUTS_STORAGE__TYPE: mongo
       BOOM_CUTOUTS_STORAGE__HOST: mongo
       BOOM_BABAMUL__ENABLED: ${BOOM_BABAMUL__ENABLED:-false}
+      BOOM_BABAMUL__WEBAPP_URL: ${BOOM_BABAMUL__WEBAPP_URL:-}
+      # Whether the API will create accounts. Pair it with VITE_PRERELEASE_MODE
+      # below, which only decides what the web app offers.
+      BOOM_BABAMUL__REGISTRATION_ENABLED: ${BOOM_BABAMUL__REGISTRATION_ENABLED:-true}
+      # Social sign-in. Secrets come from the environment only; a provider with
+      # no client ID/secret pair stays off.
+      BOOM_BABAMUL__OAUTH__REDIRECT_BASE_URL: ${BOOM_BABAMUL__OAUTH__REDIRECT_BASE_URL:-}
+      BOOM_BABAMUL__OAUTH__GOOGLE__CLIENT_ID: ${BOOM_BABAMUL__OAUTH__GOOGLE__CLIENT_ID:-}
+      BOOM_BABAMUL__OAUTH__GOOGLE__CLIENT_SECRET: ${BOOM_BABAMUL__OAUTH__GOOGLE__CLIENT_SECRET:-}
+      BOOM_BABAMUL__OAUTH__GITHUB__CLIENT_ID: ${BOOM_BABAMUL__OAUTH__GITHUB__CLIENT_ID:-}
+      BOOM_BABAMUL__OAUTH__GITHUB__CLIENT_SECRET: ${BOOM_BABAMUL__OAUTH__GITHUB__CLIENT_SECRET:-}
+      BOOM_BABAMUL__OAUTH__ORCID__CLIENT_ID: ${BOOM_BABAMUL__OAUTH__ORCID__CLIENT_ID:-}
+      BOOM_BABAMUL__OAUTH__ORCID__CLIENT_SECRET: ${BOOM_BABAMUL__OAUTH__ORCID__CLIENT_SECRET:-}
+      BOOM_BABAMUL__OAUTH__ORCID_SANDBOX: ${BOOM_BABAMUL__OAUTH__ORCID_SANDBOX:-false}
+      # Server-side PostHog analytics; blank disables analytics.
+      BOOM_POSTHOG__PROJECT_API_KEY: ${BOOM_POSTHOG__PROJECT_API_KEY:-}
+      BOOM_POSTHOG__HOST: ${BOOM_POSTHOG__HOST:-https://us.i.posthog.com}
       # SMTP config for email notifications
       SMTP_SERVER: ${SMTP_SERVER:-}
       SMTP_PORT: ${SMTP_PORT:-}
@@ -220,7 +250,14 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 20s
+      # boom-api does all of its init before it binds the port -- mongo connect,
+      # auth setup, and a cutout storage client per survey (see src/bin/api.rs)
+      # -- so nothing answers `/` until that finishes. With a 20s start_period
+      # the container was declared unhealthy ~70s in (20s + 5 x 10s), which is
+      # a routine cold start when mongo is restarting alongside it, and the
+      # api-down alert then paged 3m later. Docker ends the start period at the
+      # first successful check, so a generous value costs nothing on fast boots.
+      start_period: 180s
     profiles:
       - prod
       - api
@@ -564,8 +601,53 @@ services:
     command:
       - /app/scheduler
       - winter
+  # Refreshes MPC_orbits, which ZTF enrichment reads to derive per-alert solar
+  # system geometry. One-shot rather than long-running: it downloads ~316MB from
+  # the MPC, parses it, and exits.
+  #
+  # On its own profile so `up -d` never starts it. Run it from cron on the host,
+  # once a day, ahead of the observing night:
+  #
+  #   docker compose --profile mpcorb run --rm mpcorb-ingest
+  #
+  # Defined here rather than created by hand so the next person to run it gets
+  # the same mounts, network and limits as everything else.
+  mpcorb-ingest:
+    image: boom-astro/boom:latest
+    hostname: mpcorb-ingest
+    # A one-shot job: a restart policy here would re-download on every failure.
+    restart: "no"
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      # This job touches neither the API nor cutouts, but config loading
+      # validates every secret before handing back a config, so all three are
+      # required to get as far as opening the database.
+      BOOM_DATABASE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
+      BOOM_API__AUTH__SECRET_KEY: ${BOOM_API__AUTH__SECRET_KEY:?BOOM_API__AUTH__SECRET_KEY must be set}
+      BOOM_API__AUTH__ADMIN_PASSWORD: ${BOOM_API__AUTH__ADMIN_PASSWORD:?BOOM_API__AUTH__ADMIN_PASSWORD must be set}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      BOOM_DATABASE__HOST: mongo
+      BOOM_DATABASE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
+    deploy:
+      resources:
+        limits:
+          # Parsing streams line by line and inserts in batches, so this is well
+          # clear of what it needs; it is here to keep a bad run off the enrichment
+          # workers' memory rather than to size the job.
+          memory: 2g
+    networks:
+      - boom
+    profiles:
+      - mpcorb
+    volumes:
+      - ${BOOM_CONFIG_PATH:-./config.yaml}:/app/config.yaml
+    command:
+      - /app/mpcorb_ingest
   otel-collector: # [^1]
     image: otel/opentelemetry-collector:0.131.1
+    restart: always
     volumes:
       - ./config/otel-collector-config.yaml:/etc/otelcol/config.yaml
     networks:
@@ -712,7 +794,7 @@ services:
     networks:
       - boom
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3200/ready | grep -q 'ready' || exit 1"]
+      test: ["CMD", "/busybox/sh", "-c", "/busybox/wget -qO- http://127.0.0.1:3200/ready | /busybox/grep -q 'ready' || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 10

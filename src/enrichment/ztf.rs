@@ -10,14 +10,18 @@ use crate::utils::cutouts::{AlertCutout, CutoutStorage};
 use crate::utils::db::mongify;
 use crate::utils::enums::Survey;
 use crate::utils::lightcurves::{
-    analyze_photometry, prepare_photometry, AllBandsProperties, Band, PerBandProperties,
-    PhotometryMag, ZTF_ZP,
+    analyze_photometry, prepare_photometry, ActivityMetrics, AllBandsProperties, Band,
+    PerBandProperties, PhotometryMag, ZTF_ZP,
 };
+use crate::utils::mpcorb::{elements_from_document, normalize_ztf_ssnamenr, ORBITS_COLLECTION};
+use crate::utils::sso_geometry::{geometry_at, OrbitalElements};
 use apache_avro_derive::AvroSchema;
 use apache_avro_macros::serdavro;
+use futures::TryStreamExt;
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use serde::{Deserialize, Deserializer};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tracing::{debug, instrument, trace, warn};
 #[cfg(all(feature = "gpu", target_os = "linux"))]
@@ -355,15 +359,118 @@ pub struct ZtfAlertForEnrichment {
     pub survey_matches: Option<ZtfSurveyMatches>,
 }
 
+/// Solar system object association for a single ZTF detection.
+///
+/// ZTF `objectId`s are positional, so a moving object is given a new one on very
+/// nearly every detection (measured over a week of alerts: 1.03 detections per
+/// `objectId`). `designation` is therefore the only stable key across a moving
+/// object's detections — downstream consumers building light curves must group on
+/// it, never on `objectId`. For the same reason the alert's `prv_candidates` and
+/// `fp_hists` describe whatever else has occupied that sky position, not this
+/// object.
+#[derive(
+    Debug, Clone, Default, serde::Deserialize, serde::Serialize, AvroSchema, utoipa::ToSchema,
+)]
+#[serde(default)]
+pub struct ZtfSsoAssociation {
+    /// Whether a known solar system object was identified at this position.
+    ///
+    /// Deliberately not thresholded on separation, unlike the deprecated `rock`
+    /// flag: when the upstream ephemeris degrades, that shows up as a growing
+    /// `separation_arcsec` the consumer can see, rather than silently flipping a
+    /// boolean they cannot.
+    pub is_sso: bool,
+    /// MPC designation of the matched object (ZTF `ssnamenr`), e.g. `"9816"`.
+    pub designation: Option<String>,
+    /// Separation between the detection and the object's predicted position
+    /// (ZTF `ssdistnr`), in arcseconds. Negative upstream sentinels are stored as
+    /// `None`. This is a quality indicator for the upstream ephemeris, and worth
+    /// monitoring in aggregate: a drifting distribution means stale orbits.
+    pub separation_arcsec: Option<f32>,
+    /// Catalogued magnitude predicted for the object (ZTF `ssmagnr`). Compared
+    /// against the measured `magpsf` this gives predicted-minus-measured per
+    /// detection at no extra cost.
+    pub predicted_mag: Option<f32>,
+    /// Who made the association. `"ipac"` for the identification carried in the
+    /// ZTF alert itself; an independent association computed by BOOM would
+    /// identify itself differently here.
+    pub source: Option<String>,
+    /// Sun-to-object distance at the alert epoch, au. Derived by propagating MPC
+    /// elements, since the ZTF packet carries no state vectors, so it is `None`
+    /// whenever the object is missing from `MPC_orbits`.
+    ///
+    /// Named to match the LSST association, which reads the same quantity straight
+    /// from its own `ssSource` vectors, so a filter is identical on both surveys.
+    #[serde(default)]
+    pub helio_dist: Option<f32>,
+    /// Observer-to-object distance at the alert epoch, au. Same provenance.
+    #[serde(default)]
+    pub topo_dist: Option<f32>,
+    /// Sun-object-observer angle at the alert epoch, degrees. Same provenance.
+    #[serde(default)]
+    pub phase_angle: Option<f32>,
+}
+
+impl ZtfSsoAssociation {
+    /// Build the association from the solar system fields IPAC puts in the ZTF
+    /// alert. Negative values are upstream "no match" sentinels rather than
+    /// measurements, so they are normalised to `None`.
+    pub fn from_ipac(
+        designation: Option<String>,
+        ssdistnr: Option<f32>,
+        ssmagnr: Option<f32>,
+    ) -> Self {
+        let is_sso = designation.is_some();
+        ZtfSsoAssociation {
+            is_sso,
+            source: is_sso.then(|| "ipac".to_string()),
+            designation,
+            separation_arcsec: ssdistnr.filter(|d| *d >= 0.0),
+            predicted_mag: ssmagnr.filter(|m| *m >= 0.0),
+            helio_dist: None,
+            topo_dist: None,
+            phase_angle: None,
+        }
+    }
+
+    /// Fill in observing geometry from MPC elements propagated to `jd`.
+    ///
+    /// Left untouched when the object has no elements available: an absent
+    /// geometry is reported as absent rather than as a default, since a
+    /// plausible-looking wrong distance is worse here than a missing one.
+    pub fn with_geometry(mut self, elements: Option<&OrbitalElements>, jd: f64) -> Self {
+        if let Some(elements) = elements {
+            let geometry = geometry_at(elements, jd);
+            self.helio_dist = Some(geometry.helio_dist as f32);
+            self.topo_dist = Some(geometry.topo_dist as f32);
+            self.phase_angle = Some(geometry.phase_angle as f32);
+        }
+        self
+    }
+}
+
 /// ZTF alert properties computed during enrichment and inserted back into the alert document
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize, AvroSchema, utoipa::ToSchema)]
 pub struct ZtfAlertProperties {
+    /// Deprecated alias for `sso.is_sso`, retained so existing filters keep
+    /// working. Unlike `sso.is_sso` this is thresholded at a hardcoded 12", so it
+    /// silently loses objects as the upstream ephemeris degrades. Prefer
+    /// `sso.is_sso`, optionally with an explicit `sso.separation_arcsec` cut.
     pub rock: bool,
     pub star: bool,
     pub near_brightstar: bool,
     pub stationary: bool,
     pub photstats: PerBandProperties,
     pub multisurvey_photstats: Option<PerBandProperties>,
+    /// `None` on alerts enriched before this field existed — those were never
+    /// evaluated for a solar system association, which is different from having
+    /// been evaluated and found not to be one (`Some` with `is_sso: false`).
+    /// Consumers must not read `None` as "not an asteroid".
+    #[serde(default)]
+    pub sso: Option<ZtfSsoAssociation>,
+    /// `None` on alerts enriched before this existed.
+    #[serde(default)]
+    pub activity: Option<ActivityMetrics>,
 }
 
 /// Class probability output of the CIDER fusion model.
@@ -437,6 +544,8 @@ pub struct ZtfEnrichmentWorker {
     output_queue: String,
     client: mongodb::Client,
     alert_collection: mongodb::Collection<Document>,
+    /// MPC orbital elements, refreshed nightly by `mpcorb_ingest`.
+    mpc_orbits: mongodb::Collection<Document>,
     alert_cutout_storage: CutoutStorage,
     alert_pipeline: Vec<Document>,
     /// Shared ONNX models (loaded once, shared across all enrichment workers
@@ -476,6 +585,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         let db: mongodb::Database = config.build_db().await?;
         let client = db.client().clone();
         let alert_collection = db.collection("ZTF_alerts");
+        let mpc_orbits = db.collection(ORBITS_COLLECTION);
         let alert_cutout_storage = config.build_cutout_storage(&Survey::Ztf).await?;
 
         let input_queue = "ZTF_alerts_enrichment_queue".to_string();
@@ -508,6 +618,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             output_queue,
             client,
             alert_collection,
+            mpc_orbits,
             alert_cutout_storage,
             alert_pipeline: create_ztf_alert_pipeline(false),
             models,
@@ -571,6 +682,8 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         let mut processed_alerts = Vec::new();
         let mut enriched_alerts: Vec<BabamulZtfAlert> = Vec::new();
 
+        let orbits = self.fetch_orbits(&alerts).await;
+
         let batch_size = alerts.len();
         let mut skipped_empty_lightcurve = 0usize;
         let mut work_items: Vec<AlertWork> = Vec::with_capacity(alerts.len());
@@ -583,7 +696,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                 .ok_or_else(|| EnrichmentWorkerError::MissingCutouts(candid))?;
             // Compute numerical and boolean features from lightcurve and candidate analysis
             let (properties, all_bands_properties, programid, lightcurve) =
-                match self.get_alert_properties(&alert).await {
+                match self.get_alert_properties(&alert, &orbits).await {
                     Ok(v) => v,
                     // No usable photometry: skip this alert (leave it un-enriched)
                     // rather than aborting the whole batch, so the queue keeps draining.
@@ -772,9 +885,81 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
 }
 
 impl ZtfEnrichmentWorker {
+    /// Look up MPC elements for every object named in this batch, in one query.
+    ///
+    /// Per-alert lookups would put a round trip in the hot enrichment path for
+    /// every asteroid detection; a batch has at most a few hundred distinct
+    /// objects, so one `$in` covers all of them.
+    ///
+    /// A failure here is not fatal: geometry is an enrichment, and dropping it
+    /// for one batch is better than refusing to enrich the batch at all.
+    /// Keyed by `ssnamenr` as the alert carries it, not by the MPCORB key, so
+    /// each distinct name is normalised once here rather than again per alert.
+    async fn fetch_orbits(
+        &self,
+        alerts: &[ZtfAlertForEnrichment],
+    ) -> HashMap<String, OrbitalElements> {
+        let key_by_name: HashMap<&str, String> = alerts
+            .iter()
+            .filter_map(|a| a.candidate.candidate.ssnamenr.as_deref())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .filter_map(|name| normalize_ztf_ssnamenr(name).map(|key| (name, key)))
+            .collect();
+
+        if key_by_name.is_empty() {
+            return HashMap::new();
+        }
+
+        // Several names can share a key -- a number and its "(number)Name" form
+        // both reduce to the number -- so query the distinct keys.
+        let keys: Vec<&String> = key_by_name
+            .values()
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+
+        let cursor = match self.mpc_orbits.find(doc! { "_id": { "$in": &keys } }).await {
+            Ok(cursor) => cursor,
+            Err(e) => {
+                warn!("failed to query {}: {}", ORBITS_COLLECTION, e);
+                return HashMap::new();
+            }
+        };
+
+        let docs: Vec<Document> = match cursor.try_collect().await {
+            Ok(docs) => docs,
+            Err(e) => {
+                warn!("failed to read {}: {}", ORBITS_COLLECTION, e);
+                return HashMap::new();
+            }
+        };
+
+        let by_key: HashMap<&str, OrbitalElements> = docs
+            .iter()
+            .filter_map(|doc| Some((doc.get_str("_id").ok()?, elements_from_document(doc)?)))
+            .collect();
+
+        // A catalogue that has never been ingested looks exactly like a batch of
+        // objects that all happen to be missing, so say which it is.
+        if by_key.is_empty() {
+            warn!(
+                "no elements found in {} for any of {} objects in this batch",
+                ORBITS_COLLECTION,
+                keys.len()
+            );
+        }
+
+        key_by_name
+            .into_iter()
+            .filter_map(|(name, key)| Some((name.to_string(), *by_key.get(key.as_str())?)))
+            .collect()
+    }
+
     async fn get_alert_properties(
         &self,
         alert: &ZtfAlertForEnrichment,
+        orbits: &HashMap<String, OrbitalElements>,
     ) -> Result<
         (
             ZtfAlertProperties,
@@ -789,6 +974,23 @@ impl ZtfEnrichmentWorker {
         let ssdistnr = candidate.ssdistnr.unwrap_or(f32::INFINITY);
         let ssmagnr = candidate.ssmagnr.unwrap_or(f32::INFINITY);
         let is_rock = ssdistnr >= 0.0 && ssdistnr < 12.0 && ssmagnr >= 0.0;
+
+        let activity = ActivityMetrics::from_magnitudes(Some(candidate.magpsf), candidate.magap);
+
+        // Geometry is evaluated at the observation epoch, not at the elements'
+        // epoch, so a stale MPCORB shows up as a slowly growing error rather
+        // than as a wrong answer at a fixed date.
+        let elements = candidate
+            .ssnamenr
+            .as_deref()
+            .and_then(|name| orbits.get(name));
+
+        let sso = ZtfSsoAssociation::from_ipac(
+            candidate.ssnamenr.clone(),
+            candidate.ssdistnr,
+            candidate.ssmagnr,
+        )
+        .with_geometry(elements, candidate.jd);
 
         let sgscore1 = candidate.sgscore1.unwrap_or(0.0);
         let sgscore2 = candidate.sgscore2.unwrap_or(0.0);
@@ -892,6 +1094,8 @@ impl ZtfEnrichmentWorker {
                 stationary,
                 photstats,
                 multisurvey_photstats: Some(multisurvey_photstats),
+                sso: Some(sso),
+                activity: Some(activity),
             },
             all_bands_properties,
             programid,
@@ -1160,6 +1364,7 @@ impl ZtfEnrichmentWorker {
                 }
             }
 
+            // Map only the real rows back; padding rows (chunk.len()..) are dropped.
             let chunk_start = chunk_idx * self.batch_size;
             for (batch_idx, &item_idx) in chunk.iter().enumerate() {
                 let sel_idx = chunk_start + batch_idx;
@@ -1194,5 +1399,170 @@ impl ZtfEnrichmentWorker {
         }
 
         Ok(results)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sso_association_populated_when_identified() {
+        let sso = ZtfSsoAssociation::from_ipac(Some("9816".to_string()), Some(1.0), Some(18.1));
+        assert!(sso.is_sso);
+        assert_eq!(sso.designation.as_deref(), Some("9816"));
+        assert_eq!(sso.separation_arcsec, Some(1.0));
+        assert_eq!(sso.predicted_mag, Some(18.1));
+        assert_eq!(sso.source.as_deref(), Some("ipac"));
+    }
+
+    #[test]
+    fn test_sso_association_absent_when_unidentified() {
+        let sso = ZtfSsoAssociation::from_ipac(None, None, None);
+        assert!(!sso.is_sso);
+        assert!(sso.designation.is_none());
+        assert!(sso.separation_arcsec.is_none());
+        assert!(
+            sso.source.is_none(),
+            "source is only set when a match was made"
+        );
+    }
+
+    /// 1 Ceres, the MPCORB elements checked against JPL Horizons in
+    /// `sso_geometry::tests`. Values there are the reference for the numbers below.
+    fn ceres() -> OrbitalElements {
+        OrbitalElements {
+            epoch_jd: 2_461_200.5,
+            a: 2.7655526,
+            e: 0.0796923,
+            incl: 10.58803,
+            node: 80.24863,
+            peri: 73.29420,
+            mean_anomaly: 274.41935,
+        }
+    }
+
+    // The whole point of the join: an IPAC designation has to reach the geometry.
+    // Tolerances here are loose because f32 storage, not the propagation, is the
+    // limit — sso_geometry holds the tight comparison against Horizons.
+    #[test]
+    fn test_geometry_populated_when_elements_are_available() {
+        let sso = ZtfSsoAssociation::from_ipac(Some("1".to_string()), Some(0.4), Some(9.2))
+            .with_geometry(Some(&ceres()), 2_461_272.5);
+
+        let helio = sso.helio_dist.expect("heliocentric distance");
+        let topo = sso.topo_dist.expect("topocentric distance");
+        let phase = sso.phase_angle.expect("phase angle");
+        assert!(
+            (helio - 2.706853).abs() < 1e-3,
+            "heliocentric distance was {helio}"
+        );
+        assert!(
+            (topo - 3.168905).abs() < 1e-3,
+            "topocentric distance was {topo}"
+        );
+        assert!((phase - 17.6824).abs() < 0.01, "phase angle was {phase}");
+    }
+
+    // An object missing from MPCORB must read as missing. A default here would be
+    // indistinguishable from a real measurement to everything downstream.
+    #[test]
+    fn test_geometry_absent_when_elements_are_missing() {
+        let sso = ZtfSsoAssociation::from_ipac(Some("9816".to_string()), Some(1.0), Some(18.1))
+            .with_geometry(None, 2_461_272.5);
+        assert!(sso.is_sso, "the association itself still stands");
+        assert!(sso.helio_dist.is_none());
+        assert!(sso.topo_dist.is_none());
+        assert!(sso.phase_angle.is_none());
+    }
+
+    // The lookup key is what actually joins the two collections, and IPAC does not
+    // write designations the way MPCORB does. Guard the seam with real values.
+    #[test]
+    fn test_ipac_designations_resolve_to_orbit_keys() {
+        // Mirrors what fetch_orbits returns: keyed by ssnamenr as the alert
+        // carries it, having normalised each distinct name once. Two names that
+        // reduce to the same MPCORB key each get their own entry.
+        let by_key = HashMap::from([("1", ceres())]);
+        let orbits: HashMap<String, OrbitalElements> = ["1", "(1)Ceres", "C/2026O1"]
+            .into_iter()
+            .filter_map(|name| normalize_ztf_ssnamenr(name).map(|key| (name, key)))
+            .filter_map(|(name, key)| Some((name.to_string(), *by_key.get(key.as_str())?)))
+            .collect();
+
+        for ssnamenr in ["1", "(1)Ceres"] {
+            assert!(
+                orbits.contains_key(ssnamenr),
+                "ssnamenr {ssnamenr} did not resolve to an orbit"
+            );
+        }
+        // Comets are not in MPCORB; missing beats matching the wrong object.
+        assert!(!orbits.contains_key("C/2026O1"));
+        assert!(normalize_ztf_ssnamenr("C/2026O1").is_none());
+    }
+
+    // Upstream uses negative values (e.g. -999) to mean "no match". Storing those
+    // verbatim would let a consumer read -999 as a very close separation.
+    #[test]
+    fn test_negative_sentinels_are_normalised_to_none() {
+        let sso = ZtfSsoAssociation::from_ipac(None, Some(-999.0), Some(-999.0));
+        assert!(sso.separation_arcsec.is_none());
+        assert!(sso.predicted_mag.is_none());
+    }
+
+    // Alerts enriched before `properties.sso` existed have no such key. Reading one
+    // back must yield `None` rather than failing, or the API 500s on every
+    // pre-existing object.
+    #[test]
+    fn test_properties_without_sso_still_deserialize() {
+        let legacy = serde_json::json!({
+            "rock": false,
+            "star": false,
+            "near_brightstar": false,
+            "stationary": true,
+            "photstats": PerBandProperties::default(),
+            "multisurvey_photstats": null,
+        });
+
+        let props: ZtfAlertProperties =
+            serde_json::from_value(legacy).expect("legacy properties must still deserialize");
+        assert!(
+            props.sso.is_none(),
+            "absent means never evaluated, not evaluated-and-negative"
+        );
+    }
+
+    // A partially-written block should not fail either.
+    #[test]
+    fn test_partial_sso_block_deserializes() {
+        let sso: ZtfSsoAssociation =
+            serde_json::from_value(serde_json::json!({"designation": "9816"}))
+                .expect("partial sso block must deserialize");
+        assert_eq!(sso.designation.as_deref(), Some("9816"));
+        assert!(!sso.is_sso);
+        assert!(sso.separation_arcsec.is_none());
+    }
+
+    // The regression this block exists for. `rock` is thresholded at a hardcoded
+    // 12", so as the upstream ephemeris degrades it silently drops objects: the
+    // fraction of identified asteroids within 12" fell from 98.2% (Apr 2026) to
+    // 82.4% (Aug 2026). `is_sso` must stay true regardless of separation, with the
+    // degradation visible in `separation_arcsec` instead.
+    #[test]
+    fn test_is_sso_is_not_thresholded_on_separation() {
+        let far = ZtfSsoAssociation::from_ipac(Some("407033".to_string()), Some(18.0), Some(21.6));
+        let rock = 18.0f32 >= 0.0 && 18.0f32 < 12.0 && 21.6f32 >= 0.0;
+
+        assert!(!rock, "the deprecated rock flag drops this object");
+        assert!(
+            far.is_sso,
+            "but it is still an identified solar system object"
+        );
+        assert_eq!(far.separation_arcsec, Some(18.0));
+        assert_eq!(
+            far.designation.as_deref(),
+            Some("407033"),
+            "the grouping key survives, which is what downstream light curves need"
+        );
     }
 }
