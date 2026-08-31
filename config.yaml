@@ -186,23 +186,6 @@ workers:
       reference_night: "2026-07-15"
 crossmatch:
   ztf:
-    - catalog: PS1_DR1
-      radius: 2.0 # 2 arcseconds
-      use_distance: false
-      projection:
-        _id: 1
-        ra: 1
-        dec: 1
-        gMeanPSFMag: 1
-        gMeanPSFMagErr: 1
-        rMeanPSFMag: 1
-        rMeanPSFMagErr: 1
-        iMeanPSFMag: 1
-        iMeanPSFMagErr: 1
-        zMeanPSFMag: 1
-        zMeanPSFMagErr: 1
-        yMeanPSFMag: 1
-        yMeanPSFMagErr: 1
     - catalog: Gaia_DR3
       radius: 2.0 # 2 arcseconds
       use_distance: false
@@ -212,10 +195,20 @@ crossmatch:
         dec: 1
         parallax: 1
         parallax_error: 1
+        pm: 1
+        pmra: 1
+        pmra_error: 1
+        pmdec: 1
+        pmdec_error: 1
         phot_g_mean_mag: 1
         phot_bp_mean_mag: 1
         phot_rp_mean_mag: 1
-    - catalog: milliquas_v6
+        phot_g_n_obs: 1
+        phot_bp_n_obs: 1
+        phot_rp_n_obs: 1
+        ruwe: 1
+        phot_bp_rp_excess_factor: 1
+    - catalog: milliquas_v8
       radius: 2.0 # 2 arcseconds
       use_distance: false
       projection:
@@ -348,23 +341,6 @@ crossmatch:
         photo_z_type: 1
   decam: []
   winter:
-    - catalog: PS1_DR1
-      radius: 2.0 # 2 arcseconds
-      use_distance: false
-      projection:
-        _id: 1
-        ra: 1
-        dec: 1
-        gMeanPSFMag: 1
-        gMeanPSFMagErr: 1
-        rMeanPSFMag: 1
-        rMeanPSFMagErr: 1
-        iMeanPSFMag: 1
-        iMeanPSFMagErr: 1
-        zMeanPSFMag: 1
-        zMeanPSFMagErr: 1
-        yMeanPSFMag: 1
-        yMeanPSFMagErr: 1
     - catalog: Gaia_DR3
       radius: 2.0 # 2 arcseconds
       use_distance: false
@@ -374,10 +350,20 @@ crossmatch:
         dec: 1
         parallax: 1
         parallax_error: 1
+        pm: 1
+        pmra: 1
+        pmra_error: 1
+        pmdec: 1
+        pmdec_error: 1
         phot_g_mean_mag: 1
         phot_bp_mean_mag: 1
         phot_rp_mean_mag: 1
-    - catalog: milliquas_v6
+        phot_g_n_obs: 1
+        phot_bp_n_obs: 1
+        phot_rp_n_obs: 1
+        ruwe: 1
+        phot_bp_rp_excess_factor: 1
+    - catalog: milliquas_v8
       radius: 2.0 # 2 arcseconds
       use_distance: false
       projection:
