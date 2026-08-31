@@ -5,16 +5,16 @@ use crate::api::models::response;
 use crate::api::routes::users::User;
 
 use crate::utils::mpcorb::{
-    fetch_orbits, fill_geometry, normalize_ztf_ssnamenr, ORBITS_COLLECTION,
+    fetch_orbits, fill_geometry, normalize_ztf_ssnamenr, GEOMETRY_FIELDS, ORBITS_COLLECTION,
 };
 
 use actix_web::{post, web, HttpResponse};
 use futures::StreamExt;
 use mongodb::{
-    bson::{doc, Document},
+    bson::{doc, Bson, Document},
     Database,
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use utoipa::ToSchema;
 
 #[derive(serde::Deserialize, serde::Serialize, Clone, ToSchema)]
@@ -101,6 +101,7 @@ pub async fn post_find_query(
         Ok(options) => options,
         Err(e) => return response::bad_request(&format!("Invalid find options: {}", e)),
     };
+    let projection = find_options.projection.clone();
     let mut cursor = match collection.find(filter).with_options(find_options).await {
         Ok(cursor) => cursor,
         Err(e) => return response::internal_error(&format!("Error finding documents: {}", e)),
@@ -115,7 +116,7 @@ pub async fn post_find_query(
             }
         }
     }
-    fill_sso_geometry(&db, &collection_name, &mut docs).await;
+    fill_sso_geometry(&db, &collection_name, projection.as_ref(), &mut docs).await;
     response::ok_ser("success", &docs)
 }
 
@@ -126,26 +127,47 @@ const ZTF_ALERTS: &str = "ZTF_alerts";
 ///
 /// The alternative to doing this on read is a backfill across the whole alert
 /// collection; geometry is a pure function of designation and epoch, so reading
-/// is enough. Callers that did not project `properties.sso` and `candidate.jd`
-/// are untouched.
-async fn fill_sso_geometry(db: &Database, collection_name: &str, docs: &mut [Document]) {
+/// is enough. Only fields the projection asks for are written, and a result
+/// without `properties.sso.designation` or `candidate.jd` is left alone.
+async fn fill_sso_geometry(
+    db: &Database,
+    collection_name: &str,
+    projection: Option<&Document>,
+    docs: &mut [Document],
+) {
     // LSST reads the equivalent quantities from vectors in its own packet.
     if collection_name != ZTF_ALERTS {
         return;
     }
+    let requested = requested_geometry(projection);
+    if requested.is_empty() {
+        return;
+    }
 
-    let keys: Vec<String> = docs
-        .iter()
-        .filter_map(sso_designation_needing_geometry)
-        .filter_map(|d| normalize_ztf_ssnamenr(&d))
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect();
+    // Resolve each designation once, and skip any with no MPCORB form.
+    let mut keys: HashMap<String, String> = HashMap::new();
+    for doc in docs.iter() {
+        let Some(designation) = sso_designation_needing_geometry(doc, &requested) else {
+            continue;
+        };
+        if keys.contains_key(&designation) {
+            continue;
+        }
+        if let Some(key) = normalize_ztf_ssnamenr(&designation) {
+            keys.insert(designation, key);
+        }
+    }
     if keys.is_empty() {
         return;
     }
 
-    let elements = match fetch_orbits(&db.collection(ORBITS_COLLECTION), &keys).await {
+    let wanted: Vec<String> = keys
+        .values()
+        .cloned()
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    let elements = match fetch_orbits(&db.collection(ORBITS_COLLECTION), &wanted).await {
         Ok(elements) => elements,
         // Geometry is an enhancement on this endpoint: return the documents as
         // stored rather than failing the query.
@@ -156,7 +178,10 @@ async fn fill_sso_geometry(db: &Database, collection_name: &str, docs: &mut [Doc
     };
 
     for doc in docs.iter_mut() {
-        let Some(designation) = sso_designation_needing_geometry(doc) else {
+        let Some(designation) = sso_designation_needing_geometry(doc, &requested) else {
+            continue;
+        };
+        let Some(key) = keys.get(&designation) else {
             continue;
         };
         let Some(jd) = doc
@@ -170,22 +195,95 @@ async fn fill_sso_geometry(db: &Database, collection_name: &str, docs: &mut [Doc
             .get_document_mut("properties")
             .and_then(|p| p.get_document_mut("sso"))
         {
-            fill_geometry(sso, &designation, jd, &elements);
+            if fill_geometry(sso, key, jd, &elements) {
+                // The three are derived together, so drop the ones the caller
+                // did not project.
+                for field in GEOMETRY_FIELDS.iter().filter(|f| !requested.contains(f)) {
+                    sso.remove(field);
+                }
+            }
         }
     }
 }
 
-/// The designation of a document whose `properties.sso` lacks geometry.
-fn sso_designation_needing_geometry(doc: &Document) -> Option<String> {
+/// The designation of a document whose `properties.sso` is missing a requested
+/// geometry field.
+fn sso_designation_needing_geometry(doc: &Document, requested: &[&str]) -> Option<String> {
     let sso = doc
         .get_document("properties")
         .ok()?
         .get_document("sso")
         .ok()?;
-    if sso.get_f64("helio_dist").is_ok() {
+    if requested.iter().all(|f| sso.get_f64(f).is_ok()) {
         return None;
     }
     sso.get_str("designation").ok().map(str::to_string)
+}
+
+/// Geometry fields the projection would have returned had they been stored.
+///
+/// Results come back already projected, so a caller that asked only for, say,
+/// the designation must not be handed geometry alongside it.
+fn requested_geometry(projection: Option<&Document>) -> Vec<&'static str> {
+    let Some(projection) = projection else {
+        return GEOMETRY_FIELDS.to_vec();
+    };
+    // An exclusion projection returns everything it does not name.
+    let exclusion = is_exclusion(projection);
+    GEOMETRY_FIELDS
+        .iter()
+        .copied()
+        .filter(|field| {
+            projected(projection, &format!("properties.sso.{}", field)).unwrap_or(exclusion)
+        })
+        .collect()
+}
+
+/// Whether every field a projection names is turned off. An empty projection
+/// excludes nothing and so returns the whole document.
+fn is_exclusion(projection: &Document) -> bool {
+    projection
+        .iter()
+        .filter(|(key, _)| key.as_str() != "_id")
+        .all(|(_, value)| match value {
+            Bson::Document(sub) => is_exclusion(sub),
+            other => !is_included(other),
+        })
+}
+
+/// Whether the projection includes or excludes `path`, or `None` if it does not
+/// name it. Handles both the dotted and the nested spelling.
+fn projected(projection: &Document, path: &str) -> Option<bool> {
+    for (key, value) in projection {
+        let Some(rest) = strip_prefix_path(path, key) else {
+            continue;
+        };
+        return match value {
+            Bson::Document(sub) if !rest.is_empty() => projected(sub, rest),
+            Bson::Document(_) => Some(true),
+            other => Some(is_included(other)),
+        };
+    }
+    None
+}
+
+/// The remainder of `path` below `key`, or `None` if `key` does not cover it.
+fn strip_prefix_path<'a>(path: &'a str, key: &str) -> Option<&'a str> {
+    if path == key {
+        return Some("");
+    }
+    path.strip_prefix(key)?.strip_prefix('.')
+}
+
+/// Projection values MongoDB reads as "include".
+fn is_included(value: &Bson) -> bool {
+    match value {
+        Bson::Boolean(b) => *b,
+        Bson::Int32(i) => *i != 0,
+        Bson::Int64(i) => *i != 0,
+        Bson::Double(d) => *d != 0.0,
+        _ => true,
+    }
 }
 
 #[cfg(test)]
@@ -202,11 +300,15 @@ mod tests {
         doc! { "candidate": { "jd": jd }, "properties": { "sso": sso } }
     }
 
+    fn all_fields() -> Vec<&'static str> {
+        GEOMETRY_FIELDS.to_vec()
+    }
+
     #[test]
     fn test_bare_sso_document_is_selected() {
         let doc = alert("9816", 2_461_272.5, false);
         assert_eq!(
-            sso_designation_needing_geometry(&doc).as_deref(),
+            sso_designation_needing_geometry(&doc, &all_fields()).as_deref(),
             Some("9816")
         );
     }
@@ -214,7 +316,22 @@ mod tests {
     #[test]
     fn test_document_with_geometry_is_skipped() {
         let doc = alert("9816", 2_461_272.5, true);
-        assert!(sso_designation_needing_geometry(&doc).is_none());
+        assert!(sso_designation_needing_geometry(&doc, &all_fields()).is_none());
+    }
+
+    // A block missing only some of the fields still needs the derivation.
+    #[test]
+    fn test_partially_populated_document_is_selected() {
+        let mut doc = alert("9816", 2_461_272.5, true);
+        doc.get_document_mut("properties")
+            .unwrap()
+            .get_document_mut("sso")
+            .unwrap()
+            .remove("phase_angle");
+        assert_eq!(
+            sso_designation_needing_geometry(&doc, &all_fields()).as_deref(),
+            Some("9816")
+        );
     }
 
     // A non-SSO alert, or one projected without properties.sso, must not be
@@ -226,7 +343,7 @@ mod tests {
             doc! { "properties": { "rock": false } },
             doc! {},
         ] {
-            assert!(sso_designation_needing_geometry(&doc).is_none());
+            assert!(sso_designation_needing_geometry(&doc, &all_fields()).is_none());
         }
     }
 
@@ -234,6 +351,45 @@ mod tests {
     #[test]
     fn test_sso_block_without_a_designation_is_skipped() {
         let doc = doc! { "properties": { "sso": { "is_sso": false } } };
-        assert!(sso_designation_needing_geometry(&doc).is_none());
+        assert!(sso_designation_needing_geometry(&doc, &all_fields()).is_none());
+    }
+
+    // Results arrive already projected, so an absent geometry field means the
+    // caller did not ask for it rather than that it needs deriving.
+    #[test]
+    fn test_projection_that_omits_geometry_requests_none() {
+        for projection in [
+            doc! { "properties.sso.designation": 1, "candidate.jd": 1 },
+            doc! { "objectId": 1 },
+            doc! { "properties": { "sso": { "designation": 1 } } },
+        ] {
+            assert!(requested_geometry(Some(&projection)).is_empty());
+        }
+    }
+
+    #[test]
+    fn test_projection_that_covers_geometry_requests_all() {
+        for projection in [
+            doc! { "properties.sso": 1 },
+            doc! { "properties": 1 },
+            doc! { "properties": { "sso": 1 } },
+            doc! { "candidate.jd": 0 },
+            doc! {},
+        ] {
+            assert_eq!(requested_geometry(Some(&projection)), GEOMETRY_FIELDS);
+        }
+        assert_eq!(requested_geometry(None), GEOMETRY_FIELDS);
+    }
+
+    #[test]
+    fn test_projection_selects_individual_fields() {
+        let projection = doc! { "properties.sso.helio_dist": 1, "candidate.jd": 1 };
+        assert_eq!(requested_geometry(Some(&projection)), vec!["helio_dist"]);
+
+        let projection = doc! { "properties.sso.phase_angle": 0 };
+        assert_eq!(
+            requested_geometry(Some(&projection)),
+            vec!["helio_dist", "topo_dist"]
+        );
     }
 }

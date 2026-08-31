@@ -2,7 +2,7 @@
 //!
 //! Format: <https://minorplanetcenter.net/iau/info/MPOrbitFormat.html>
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use futures::TryStreamExt;
 use mongodb::bson::{doc, Document};
@@ -261,24 +261,69 @@ pub async fn fetch_orbits(
         .collect())
 }
 
-/// Derive geometry into `target` for `designation` at `jd`. Returns whether it
-/// wrote anything.
+/// Elements held across a run of documents, so a designation that recurs costs
+/// a single query.
+#[derive(Default)]
+pub struct OrbitCache {
+    elements: HashMap<String, OrbitalElements>,
+    queried: HashSet<String>,
+}
+
+impl OrbitCache {
+    /// Load whichever of `keys` are not held yet.
+    pub async fn load(
+        &mut self,
+        collection: &mongodb::Collection<Document>,
+        keys: &[String],
+    ) -> Result<(), mongodb::error::Error> {
+        // A key with no MPCORB document is remembered as queried too, so a
+        // designation MPCORB does not carry is asked for once.
+        let missing: Vec<String> = keys
+            .iter()
+            .filter(|k| !self.queried.contains(*k))
+            .cloned()
+            .collect();
+        if missing.is_empty() {
+            return Ok(());
+        }
+        self.elements
+            .extend(fetch_orbits(collection, &missing).await?);
+        self.queried.extend(missing);
+        Ok(())
+    }
+
+    /// The elements loaded so far, keyed by MPCORB designation.
+    pub fn elements(&self) -> &HashMap<String, OrbitalElements> {
+        &self.elements
+    }
+}
+
+/// Geometry fields derived together from one set of elements.
+pub const GEOMETRY_FIELDS: [&str; 3] = ["helio_dist", "topo_dist", "phase_angle"];
+
+/// Whether a document already carries every geometry field.
+pub fn has_geometry(doc: &Document) -> bool {
+    GEOMETRY_FIELDS.iter().all(|f| doc.get_f64(f).is_ok())
+}
+
+/// Derive geometry into `target` for the MPCORB key `key` at `jd`. Returns
+/// whether it wrote anything.
 ///
 /// Enrichment only began writing geometry recently, so most of the archive has
 /// none. It is a pure function of designation and epoch, so it can be recomputed
-/// on read rather than backfilled across the alert collection. A value already
-/// present is left alone: recomputing would re-derive the same number from the
-/// same elements.
+/// on read rather than backfilled across the alert collection. A complete set of
+/// values already present is left alone: recomputing would re-derive the same
+/// numbers from the same elements.
 pub fn fill_geometry(
     target: &mut Document,
-    designation: &str,
+    key: &str,
     jd: f64,
     elements: &HashMap<String, OrbitalElements>,
 ) -> bool {
-    if target.get_f64("helio_dist").is_ok() {
+    if has_geometry(target) {
         return false;
     }
-    let Some(elements) = normalize_ztf_ssnamenr(designation).and_then(|k| elements.get(&k)) else {
+    let Some(elements) = elements.get(key) else {
         return false;
     };
     let geometry = geometry_at(elements, jd);
