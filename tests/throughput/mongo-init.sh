@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-NED_EXPECTED_COUNT=1872544
+NED_EXPECTED_COUNT=2103732
 
 # Only import NED alerts if the collection does not exist or has the wrong count
 NED_COLLECTION_NAME="NED"
