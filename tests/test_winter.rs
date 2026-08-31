@@ -19,58 +19,54 @@ use mongodb::bson::doc;
 
 #[test]
 fn test_sanitize_winter_avro_is_readable() {
-    // The raw upstream WINTER avro has a duplicate field name and is rejected by
-    // the strict avro Reader; the sanitized version must be parseable.
-    let raw = std::fs::read("tests/data/alerts/winter/alert.avro").unwrap();
-    assert!(
-        apache_avro::Reader::new(&raw[..]).is_err(),
-        "raw WINTER avro should be rejected by the strict reader"
-    );
-    let fixed = sanitize_winter_avro(&raw).unwrap();
-    let reader = apache_avro::Reader::new(&fixed[..]).expect("sanitized avro should parse");
-    let value = reader.into_iter().next().unwrap().unwrap();
-    let alert: WinterRawAvroAlert = apache_avro::from_value(&value).unwrap();
-    assert!(!alert.object_id.is_empty());
-    // sanitization is idempotent
-    let fixed2 = sanitize_winter_avro(&fixed).unwrap();
-    assert!(apache_avro::Reader::new(&fixed2[..]).is_ok());
+    // WINTER's embedded schema declares `sgmag1` twice in the candidate record,
+    // which the strict avro Reader rejects. Both published schema versions carry
+    // the duplicate, so both must survive sanitising, and sanitising must be
+    // idempotent.
+    for path in [
+        "tests/data/alerts/winter/alert.avro",
+        "tests/data/alerts/winter/alert_schemavsn_0.1.avro",
+    ] {
+        let raw = std::fs::read(path).unwrap();
+        assert!(
+            apache_avro::Reader::new(&raw[..]).is_err(),
+            "{path}: raw WINTER avro should be rejected by the strict reader"
+        );
+        let fixed = sanitize_winter_avro(&raw).unwrap();
+        let reader = apache_avro::Reader::new(&fixed[..]).unwrap_or_else(|e| panic!("{path}: {e}"));
+        let value = reader.into_iter().next().unwrap().unwrap();
+        let alert: WinterRawAvroAlert = apache_avro::from_value(&value).unwrap();
+        assert!(!alert.object_id.is_empty(), "{path}: empty objectid");
+
+        let fixed2 = sanitize_winter_avro(&fixed).unwrap();
+        assert!(apache_avro::Reader::new(&fixed2[..]).is_ok(), "{path}");
+    }
 }
 
 #[test]
 fn test_winter_candidate_missing_field_deserializes() {
-    // Some upstream WINTER packets omit the candidate `field` entirely. That must
-    // deserialize (with `field` defaulting) rather than failing the whole alert
-    // with "missing field `field`". We simulate it by dropping `field` from the
-    // decoded record, which is exactly the shape the strict serde path sees.
+    // WINTER omits the candidate `field` entirely. It must deserialize with
+    // `field` defaulting rather than failing with "missing field `field`".
     use apache_avro::types::Value;
     let raw = std::fs::read("tests/data/alerts/winter/alert.avro").unwrap();
     let fixed = sanitize_winter_avro(&raw).unwrap();
     let reader = apache_avro::Reader::new(&fixed[..]).unwrap();
-    let mut value = reader.into_iter().next().unwrap().unwrap();
+    let value = reader.into_iter().next().unwrap().unwrap();
 
-    // Baseline: with `field` present it must still parse.
-    apache_avro::from_value::<WinterRawAvroAlert>(&value).expect("baseline should parse");
-
-    // Drop `field` from the nested candidate record.
-    if let Value::Record(top) = &mut value {
-        let candidate = top
-            .iter_mut()
-            .find(|(k, _)| k == "candidate")
-            .map(|(_, v)| v)
-            .expect("candidate field");
-        if let Value::Record(fields) = candidate {
-            let before = fields.len();
-            fields.retain(|(k, _)| k != "field");
-            assert_eq!(before - 1, fields.len(), "expected to drop `field`");
-        } else {
-            panic!("candidate is not a record");
-        }
-    } else {
+    let Value::Record(top) = &value else {
         panic!("alert is not a record");
-    }
+    };
+    let Some(Value::Record(candidate)) = top.iter().find(|(k, _)| k == "candidate").map(|(_, v)| v)
+    else {
+        panic!("candidate is not a record");
+    };
+    assert!(
+        !candidate.iter().any(|(k, _)| k == "field"),
+        "packet is expected to omit `field`"
+    );
 
     let alert: WinterRawAvroAlert =
-        apache_avro::from_value(&value).expect("candidate missing `field` should still parse");
+        apache_avro::from_value(&value).expect("candidate without `field` should parse");
     assert_eq!(alert.candidate.field, 0, "absent `field` defaults to 0");
 }
 
@@ -203,9 +199,9 @@ fn test_fid_maps_to_band() {
 
 #[test]
 fn test_real_alert_band_is_j() {
-    // WNTR24awati, published by WINTER-mirar: a genuine alert whose fid is 2.
-    // Kowalski reads the same packets as 2massj, and WINTER confirm the data is
-    // J, so 2 is J and this pins the whole chain to a real packet.
+    // A genuine WINTER-mirar packet whose fid is 2. Kowalski reads the same
+    // packets as 2massj and WINTER confirm the data is J, so this pins the whole
+    // chain to a real alert.
     let raw = std::fs::read("tests/data/alerts/winter/alert.avro").unwrap();
     let fixed = sanitize_winter_avro(&raw).unwrap();
     let reader = apache_avro::Reader::new(&fixed[..]).unwrap();
