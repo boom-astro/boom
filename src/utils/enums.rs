@@ -27,6 +27,10 @@ impl Survey {
         }
     }
 
+    pub fn alert_input_queue(&self) -> String {
+        format!("{}_alerts_packets_queue", self)
+    }
+
     /// Observatory UTC offset in hours.
     ///
     /// - ZTF    (Palomar, CA, USA)       : UTC−7

@@ -18,7 +18,13 @@ export type Profile = {
   created_at: number;
   name?: string;
   avatar?: string;
+  /** Provider slugs the account can sign in with, e.g. ["google", "orcid"] */
+  identity_providers?: string[];
+  orcid_id?: string | null;
 } | null;
+
+// A social sign-in provider advertised by `/oauth/providers`
+export type OAuthProvider = { id: string; name: string; start_url: string };
 
 // Kafka credential returned by `/babamul/kafka-credentials`
 export type KafkaCredential = { id: string; name: string; kafka_username: string; kafka_password: string };
@@ -113,6 +119,91 @@ export async function login(email: string, password: string): Promise<TokenRecor
   return getTokenRecord();
 }
 
+/**
+ * Social sign-in providers this deployment has configured.
+ *
+ * Returns an empty list when none are set up, so the login page can simply
+ * render nothing rather than special-casing the feature being off.
+ */
+export async function fetchOAuthProviders(): Promise<OAuthProvider[]> {
+  const res = await fetch(`${API_BASE}/oauth/providers`);
+  if (!res.ok) return [];
+  const body = await parseResponseJson(res).catch(() => ({ data: [] }));
+  const result = unwrapData<unknown>(body, []);
+  return Array.isArray(result) ? (result as OAuthProvider[]) : [];
+}
+
+/**
+ * Hand the browser over to a provider's consent screen.
+ *
+ * A full navigation, not a fetch: the OAuth flow is a chain of redirects that
+ * ends back at `/oauth/callback` in this app.
+ */
+export function startOAuthLogin(provider: OAuthProvider, redirectTo?: string) {
+  const params = new URLSearchParams();
+  if (redirectTo) params.set("redirect_to", redirectTo);
+  const query = params.toString();
+  // `start_url` is API-relative; API_BASE already carries the /api prefix.
+  const path = provider.start_url.replace(/^\/babamul/, "");
+  window.location.assign(`${API_BASE}${path}${query ? `?${query}` : ""}`);
+}
+
+/**
+ * Store the token an OAuth callback delivered in the URL fragment.
+ *
+ * Mirrors what `login()` persists so the rest of the app can't tell the two
+ * sign-in paths apart.
+ */
+export function saveOAuthToken(params: { access_token: string; token_type?: string; expires_in?: number }) {
+  saveToken(params);
+  return getTokenRecord();
+}
+
+/**
+ * Supply an email address for a sign-in whose provider didn't give us one.
+ *
+ * Mails a confirmation code; no account is created until `verifyOAuthEmail`
+ * receives it back.
+ */
+export async function completeOAuthEmail(ticket: string, email: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/oauth/complete`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ticket, email }),
+  });
+  if (!res.ok) {
+    const body = await parseResponseJson(res).catch(() => null);
+    const message =
+      body && typeof body === "object" && "message" in body
+        ? String((body as { message?: unknown }).message)
+        : `Request failed: ${res.status}`;
+    throw new Error(message);
+  }
+}
+
+/** Confirm the emailed code, finishing the sign-in and storing the token. */
+export async function verifyOAuthEmail(ticket: string, code: string): Promise<{ next?: string }> {
+  const res = await fetch(`${API_BASE}/oauth/verify`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ticket, code }),
+  });
+  const body = await parseResponseJson(res).catch(() => null);
+  if (!res.ok) {
+    const message =
+      body && typeof body === "object" && "message" in body
+        ? String((body as { message?: unknown }).message)
+        : `Confirmation failed: ${res.status}`;
+    throw new Error(message);
+  }
+  if (!body || typeof body !== "object" || !("access_token" in body)) {
+    throw new Error("Confirmation response missing access_token");
+  }
+  saveToken(body as { access_token: string; token_type?: string; expires_in?: number });
+  const next = (body as { next?: unknown }).next;
+  return { next: typeof next === "string" ? next : undefined };
+}
+
 export function getEmail(): string | null {
   try {
     return localStorage.getItem(USERNAME_KEY);
@@ -181,6 +272,30 @@ export async function fetchProfile(): Promise<Profile> {
     throw new Error(`Fetch profile failed: ${res.status} ${txt}`);
   }
   const body = await parseResponseJson(res).catch(() => ({}));
+  return unwrapData<Profile>(body, null);
+}
+
+/**
+ * Set or clear the account's display name.
+ *
+ * Pass an empty string to clear it — the name is free text the user controls,
+ * not an identifier, so having none is a normal state rather than an error.
+ */
+export async function updateProfileName(name: string): Promise<Profile> {
+  const url = `${API_BASE}/profile`;
+  const res = await fetchWithAuth(url, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+  const body = await parseResponseJson(res).catch(() => null);
+  if (!res.ok) {
+    const message =
+      body && typeof body === "object" && "message" in body
+        ? String((body as { message?: unknown }).message)
+        : `Update profile failed: ${res.status}`;
+    throw new Error(message);
+  }
   return unwrapData<Profile>(body, null);
 }
 
@@ -476,10 +591,16 @@ export default {
   login,
   logout,
   getTokenRecord,
+  fetchOAuthProviders,
+  startOAuthLogin,
+  saveOAuthToken,
+  completeOAuthEmail,
+  verifyOAuthEmail,
   forgotPassword,
   resetPassword,
   fetchObject,
   fetchProfile,
+  updateProfileName,
   fetchAlerts,
   fetchAlertCutouts,
   fetchObjCutouts,
