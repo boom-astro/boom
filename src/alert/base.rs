@@ -244,6 +244,8 @@ pub enum AlertError {
     AlertAuxNotFound,
     #[error("unexpected fid value")]
     UnknownFid(i32),
+    #[error("dark frame carries no band")]
+    DarkFrame,
     #[error("missing diffmaglim value")]
     MissingDiffmaglim,
     #[error("cutout storage error")]
