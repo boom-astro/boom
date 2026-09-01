@@ -83,10 +83,9 @@ pub fn load_raw_config(filepath: &str) -> Result<Config, BoomConfigError> {
             config::Environment::with_prefix("boom")
                 .prefix_separator("_")
                 .separator("__")
-                // Compose and deploy.yaml inject unset variables as empty
-                // strings (`${VAR:-}`), and .env.example ships empty
-                // placeholders. Without this, those blank out config.yaml
-                // defaults instead of leaving them alone.
+                // Compose and .env.example pass unset variables through as
+                // empty strings; without this they would wipe out the
+                // config.yaml defaults rather than leave them alone.
                 .ignore_empty(true),
         )
         .build()?;
@@ -607,13 +606,11 @@ fn default_enrichment_batch_size() -> usize {
 #[derive(Deserialize, Debug, Clone)]
 pub struct EnrichmentWorkerConfig {
     pub n_workers: usize,
-    /// Alerts processed per enrichment batch. Serves two roles at once: the
-    /// queue RPOP cap (max alerts pulled per worker iteration) and the fixed
-    /// ONNX batch dimension. Every GPU inference runs at exactly this many
-    /// rows — partial batches are zero-padded — so ORT builds a single memory
-    /// plan and the BFC arena stays stable instead of growing per distinct
-    /// input shape. 750 is the proven stable shape on a 16 GB card
-    /// (~10.3 GB footprint); 1000 OOMs (~15.7 GB).
+    /// Alerts per enrichment batch: both the queue RPOP cap and the fixed ONNX
+    /// batch dimension. Every inference runs at exactly this many rows (partial
+    /// batches are zero-padded), so ORT reuses one memory plan instead of
+    /// growing the arena per input shape. On a 16 GB card 750 is stable
+    /// (~10.3 GB); 1000 OOMs (~15.7 GB).
     #[serde(default = "default_enrichment_batch_size")]
     pub batch_size: usize,
 }
