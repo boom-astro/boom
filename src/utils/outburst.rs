@@ -20,12 +20,17 @@ pub const DEFAULT_G12: f64 = 0.5;
 /// before it is treated as a different source that happens to carry the same
 /// designation.
 ///
-/// The upstream match radius is generous, so a static source near the predicted
-/// track is routinely labelled with the object's name. Such a detection is
-/// arbitrarily bright relative to the object and reads as a large outburst, which
-/// is why both statistics and the phase curve fit exclude it rather than
-/// down-weighting it.
-pub const MAX_SEPARATION_ARCSEC: f64 = 2.0;
+/// Set at the outer edge of the upstream search radius, not at the width of a
+/// good match. How far a genuine detection falls from its prediction tracks the
+/// ephemeris, which varies by epoch and by how well the object is observed: the
+/// share of detections beyond 2" ranges from 1% to 94% across the archive, so
+/// any threshold near that is really a filter on ephemeris quality and would
+/// discard most of a bad season's photometry. The share beyond 20" holds at
+/// 0.6-1.0% throughout, and those behave like a separate population rather than
+/// a tail -- around 2.6 magnitudes brighter than the MPC prediction, and sitting
+/// about 1" from a source in the reference image where genuine detections sit 7"
+/// away. They are static sources near the predicted track.
+pub const MAX_SEPARATION_ARCSEC: f64 = 20.0;
 
 /// One photometric point in the window.
 #[derive(Debug, Clone, Copy)]

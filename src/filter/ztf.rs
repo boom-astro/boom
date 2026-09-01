@@ -423,13 +423,20 @@ pub async fn build_ztf_alerts(
 /// is present on the whole archive while the normalised one only exists on alerts
 /// enriched since it was introduced.
 ///
-/// Detections further than `MAX_SEPARATION_ARCSEC` from the predicted position
-/// are left out. The upstream match radius is generous enough that a static
-/// source near the track is regularly given the object's designation, and such a
-/// point is arbitrarily bright relative to the object -- roughly one entry in
-/// five hundred, enough to dominate any brightness statistic taken over the
-/// array. `separation_arcsec` is still carried per entry so a filter can be
-/// stricter.
+/// Entries further than `MAX_SEPARATION_ARCSEC` from the predicted position are
+/// excluded. Roughly one detection in a hundred carrying a designation is a
+/// static source near the predicted track that was given that name upstream,
+/// some two magnitudes brighter than the object, which is enough to dominate
+/// anything measured over the array. The threshold sits at the edge of the
+/// upstream search radius rather than at the width of a good match; see its
+/// definition for why a tighter one would cut on ephemeris quality instead.
+///
+/// This is not the thresholding `sso.is_sso` refuses. There, a large separation is
+/// a degraded measurement of this object, and hiding it behind a boolean would
+/// conceal a drifting ephemeris the consumer needs to see -- so the number is
+/// reported instead. Here the entry is a different source that shares only a
+/// label, and putting it in this object's light curve is mislabelling rather than
+/// recording. `separation_arcsec` is still carried per entry.
 ///
 /// Geometry is read from each historical alert rather than recomputed, so it is
 /// null on detections enriched before geometry existed. Recomputing would need
