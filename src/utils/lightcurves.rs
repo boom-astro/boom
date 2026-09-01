@@ -1,4 +1,7 @@
-use crate::utils::outburst::{outburst_statistic, same_band_statistic, Point, DEFAULT_G12};
+use crate::utils::outburst::{
+    outburst_statistic, same_band_statistic, window_scatter, Point, DEFAULT_G12,
+};
+use crate::utils::phase_curve::{deviation, PhaseCurve};
 use apache_avro_derive::AvroSchema;
 use apache_avro_macros::serdavro;
 use mongodb::bson::doc;
@@ -278,6 +281,19 @@ pub struct Outburst {
     /// these to score any window that suits, and expect it to sit near but not on
     /// `d14` -- the medians carry a colour correction these do not.
     pub points: Vec<OutburstPoint>,
+    /// Intrinsic variability used in every denominator above, magnitudes.
+    ///
+    /// From the object's fitted phase curve where it has one, otherwise from the
+    /// window itself. Without it a bright, well measured asteroid reports its own
+    /// rotation as a detection.
+    pub scatter: Option<f32>,
+    /// Sigma above the object's fitted phase curve, `None` without one.
+    ///
+    /// Unlike the medians this has no window: it compares against a baseline fitted
+    /// over the whole archive, so it keeps registering activity that outlasts a
+    /// month and would otherwise become the object's new normal. The medians catch
+    /// the onset; this catches the state.
+    pub baseline: Option<f32>,
 }
 
 impl Outburst {
@@ -286,10 +302,36 @@ impl Outburst {
     /// `history` pairs each earlier detection's epoch with its point, ascending,
     /// and must already be cut to the longest window. `None` when nothing in it
     /// is usable, which is the common case: most objects are seen once.
-    pub fn from_history(history: &[(f64, Point)], test: Point, test_jd: f64) -> Option<Self> {
+    pub fn from_history(
+        history: &[(f64, Point)],
+        test: Point,
+        test_jd: f64,
+        curve: Option<&PhaseCurve>,
+    ) -> Option<Self> {
+        let baseline = curve
+            .and_then(|c| deviation(c, &test))
+            .filter(|s| s.is_finite())
+            .map(|s| s as f32);
+
         if history.is_empty() {
-            return None;
+            // A phase curve alone still scores the point, which is the whole
+            // reason for having one: a first detection has no window.
+            return baseline.map(|baseline| Outburst {
+                baseline: Some(baseline),
+                scatter: curve.map(|c| c.scatter as f32),
+                ..Default::default()
+            });
         }
+
+        let mut all: Vec<Point> = history.iter().map(|(_, p)| *p).collect();
+        all.push(test);
+
+        // A fitted curve sees the whole archive; the window sees a month and
+        // rarely a full rotation, so it is only a fallback.
+        let scatter = match curve {
+            Some(c) => c.scatter,
+            None => window_scatter(&all, DEFAULT_G12).unwrap_or(0.0),
+        };
 
         let median_within = |days: f64| -> Option<f32> {
             let mut window: Vec<Point> = history
@@ -301,13 +343,11 @@ impl Outburst {
                 return None;
             }
             window.push(test);
-            let (_, median) = outburst_statistic(&window, DEFAULT_G12).ok()?;
+            let (_, median) = outburst_statistic(&window, DEFAULT_G12, scatter).ok()?;
             (median as f32).is_finite().then_some(median as f32)
         };
 
-        let mut all: Vec<Point> = history.iter().map(|(_, p)| *p).collect();
-        all.push(test);
-        let points = same_band_statistic(&all, DEFAULT_G12)
+        let points = same_band_statistic(&all, DEFAULT_G12, scatter)
             .unwrap_or_default()
             .into_iter()
             .filter(|(_, sigma)| sigma.is_finite())
@@ -322,8 +362,11 @@ impl Outburst {
             d14: median_within(14.0),
             d30: median_within(30.0),
             points,
+            scatter: Some(scatter as f32),
+            baseline,
         };
-        (outburst.d30.is_some() || !outburst.points.is_empty()).then_some(outburst)
+        (outburst.d30.is_some() || !outburst.points.is_empty() || outburst.baseline.is_some())
+            .then_some(outburst)
     }
 }
 
@@ -1632,7 +1675,7 @@ mod outburst_tests {
             steady(now - 3.0, 18.0, 1),
         ];
         let outburst =
-            Outburst::from_history(&history, test_point(18.0, 1), now).expect("outburst");
+            Outburst::from_history(&history, test_point(18.0, 1), now, None).expect("outburst");
 
         assert_eq!(outburst.d7, Some(0.0));
         assert_eq!(outburst.d14, Some(0.0));
@@ -1650,14 +1693,14 @@ mod outburst_tests {
         // enrichment; it pins the behaviour if a caller ever passes more.
         let history = [steady(now - 90.0, 19.0, 1)];
         let outburst =
-            Outburst::from_history(&history, test_point(18.0, 1), now).expect("outburst");
+            Outburst::from_history(&history, test_point(18.0, 1), now, None).expect("outburst");
         assert!(outburst.d30.is_none());
         assert_eq!(outburst.points.len(), 1);
     }
 
     #[test]
     fn test_no_history_is_no_outburst() {
-        assert!(Outburst::from_history(&[], test_point(18.0, 1), 2_460_000.0).is_none());
+        assert!(Outburst::from_history(&[], test_point(18.0, 1), 2_460_000.0, None).is_none());
     }
 
     /// Only the test point's own band contributes to `points`, which is what
@@ -1667,7 +1710,7 @@ mod outburst_tests {
         let now = 2_460_000.0;
         let history = [steady(now - 1.0, 19.0, 2), steady(now - 2.0, 19.0, 1)];
         let outburst =
-            Outburst::from_history(&history, test_point(18.0, 1), now).expect("outburst");
+            Outburst::from_history(&history, test_point(18.0, 1), now, None).expect("outburst");
         assert_eq!(outburst.points.len(), 1);
         assert_eq!(outburst.points[0].jd, now - 2.0);
     }
@@ -1690,6 +1733,8 @@ mod outburst_tests {
                         jd: 2_460_000.0,
                         sigma: 1.5,
                     }],
+                    scatter: Some(0.08),
+                    baseline: Some(4.2),
                 }),
             ),
         ] {

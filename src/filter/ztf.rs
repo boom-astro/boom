@@ -20,6 +20,7 @@ use crate::utils::db::{fetch_timeseries_op, get_array_dict_element};
 use crate::utils::mpcorb::{
     fill_geometry, has_geometry, normalize_ztf_ssnamenr, OrbitCache, ORBITS_COLLECTION,
 };
+use crate::utils::outburst::MAX_SEPARATION_ARCSEC;
 use crate::utils::sso_geometry::OrbitalElements;
 use crate::utils::{enums::Survey, o11y::logging::as_error};
 
@@ -422,6 +423,14 @@ pub async fn build_ztf_alerts(
 /// is present on the whole archive while the normalised one only exists on alerts
 /// enriched since it was introduced.
 ///
+/// Detections further than `MAX_SEPARATION_ARCSEC` from the predicted position
+/// are left out. The upstream match radius is generous enough that a static
+/// source near the track is regularly given the object's designation, and such a
+/// point is arbitrarily bright relative to the object -- roughly one entry in
+/// five hundred, enough to dominate any brightness statistic taken over the
+/// array. `separation_arcsec` is still carried per entry so a filter can be
+/// stricter.
+///
 /// Geometry is read from each historical alert rather than recomputed, so it is
 /// null on detections enriched before geometry existed. Recomputing would need
 /// the elements here and would close that gap immediately, but any window
@@ -440,6 +449,8 @@ fn sso_history_lookup(ztf_permissions: &Vec<i32>, window_days: f64) -> Document 
                     { "$gte": ["$candidate.jd", { "$subtract": ["$$jd", window_days] }] },
                     { "$lte": ["$candidate.jd", "$$jd"] },
                     { "$in": ["$candidate.programid", ztf_permissions] },
+                    { "$gte": ["$candidate.ssdistnr", 0.0] },
+                    { "$lt": ["$candidate.ssdistnr", MAX_SEPARATION_ARCSEC] },
                 ] } } },
                 doc! { "$project": {
                     "_id": 0,

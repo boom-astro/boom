@@ -14,12 +14,13 @@ use crate::utils::lightcurves::{
     PerBandProperties, PhotometryMag, ZTF_ZP,
 };
 use crate::utils::mpcorb::{elements_from_document, normalize_ztf_ssnamenr, ORBITS_COLLECTION};
-use crate::utils::outburst::Point;
+use crate::utils::outburst::{Point, MAX_SEPARATION_ARCSEC};
+use crate::utils::phase_curve::{curves_from_document, PhaseCurve, BASELINES_COLLECTION};
 use crate::utils::sso_geometry::{geometry_at, OrbitalElements};
 use apache_avro_derive::AvroSchema;
 use apache_avro_macros::serdavro;
 use futures::TryStreamExt;
-use mongodb::bson::{doc, Bson, Document};
+use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use serde::{Deserialize, Deserializer};
 use std::collections::{HashMap, HashSet};
@@ -372,16 +373,7 @@ fn history_point(doc: &Document) -> Option<(String, f64, Point)> {
         .ok()?
         .get_document("sso")
         .ok()?;
-    // Integer-valued BSON is not a double, and a point dropped for that reason
-    // would be invisible.
-    let number = |d: &Document, key: &str| -> Option<f64> {
-        match d.get(key)? {
-            Bson::Double(v) => Some(*v),
-            Bson::Int32(v) => Some(*v as f64),
-            Bson::Int64(v) => Some(*v as f64),
-            _ => None,
-        }
-    };
+    let number = |d: &Document, key: &str| d.get(key).and_then(crate::utils::bson_number);
     Some((
         candidate.get_str("ssnamenr").ok()?.to_string(),
         number(candidate, "jd")?,
@@ -405,7 +397,14 @@ fn outburst_for(
     sso: &ZtfSsoAssociation,
     candidate: &Candidate,
     sso_history: &HashMap<String, Vec<(f64, Point)>>,
+    baselines: &HashMap<String, HashMap<u8, PhaseCurve>>,
 ) -> Option<Outburst> {
+    // A detection that is not at the object's position is not a measurement of
+    // it, so there is nothing here to score.
+    let separation = sso.separation_arcsec? as f64;
+    if separation >= MAX_SEPARATION_ARCSEC {
+        return None;
+    }
     let test = Point {
         rh: sso.helio_dist? as f64,
         delta: sso.topo_dist? as f64,
@@ -416,13 +415,19 @@ fn outburst_for(
     };
     // The alert being enriched is not yet in the collection, but a redelivery of
     // one already stored would be, and comparing a point to itself is a zero.
+    let designation = sso.designation.as_deref()?;
     let history: Vec<(f64, Point)> = sso_history
-        .get(sso.designation.as_deref()?)?
-        .iter()
-        .filter(|(jd, _)| *jd < candidate.jd)
-        .copied()
-        .collect();
-    Outburst::from_history(&history, test, candidate.jd)
+        .get(designation)
+        .map(|points| {
+            points
+                .iter()
+                .filter(|(jd, _)| *jd < candidate.jd)
+                .copied()
+                .collect()
+        })
+        .unwrap_or_default();
+    let curve = baselines.get(designation).and_then(|b| b.get(&test.band));
+    Outburst::from_history(&history, test, candidate.jd, curve)
 }
 
 /// Solar system object association for a single ZTF detection.
@@ -567,6 +572,8 @@ pub struct ZtfEnrichmentWorker {
     alert_collection: mongodb::Collection<Document>,
     /// MPC orbital elements, refreshed nightly by `mpcorb_ingest`.
     mpc_orbits: mongodb::Collection<Document>,
+    /// Fitted per-object phase curves, rebuilt by `sso_baselines`.
+    sso_baselines: mongodb::Collection<Document>,
     alert_cutout_storage: CutoutStorage,
     alert_pipeline: Vec<Document>,
     /// Shared ONNX models (loaded once, shared across all enrichment workers
@@ -607,6 +614,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         let client = db.client().clone();
         let alert_collection = db.collection("ZTF_alerts");
         let mpc_orbits = db.collection(ORBITS_COLLECTION);
+        let sso_baselines = db.collection(BASELINES_COLLECTION);
         let alert_cutout_storage = config.build_cutout_storage(&Survey::Ztf).await?;
 
         let input_queue = "ZTF_alerts_enrichment_queue".to_string();
@@ -640,6 +648,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             client,
             alert_collection,
             mpc_orbits,
+            sso_baselines,
             alert_cutout_storage,
             alert_pipeline: create_ztf_alert_pipeline(false),
             models,
@@ -705,6 +714,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
 
         let orbits = self.fetch_orbits(&alerts).await;
         let sso_history = self.fetch_sso_history(&alerts).await;
+        let baselines = self.fetch_baselines(&alerts).await;
 
         let batch_size = alerts.len();
         let mut skipped_empty_lightcurve = 0usize;
@@ -719,7 +729,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             // Compute numerical and boolean features from lightcurve and candidate analysis
             #[cfg_attr(not(feature = "gpu"), allow(unused_variables))]
             let (properties, all_bands_properties, programid, lightcurve) = match self
-                .get_alert_properties(&alert, &orbits, &sso_history)
+                .get_alert_properties(&alert, &orbits, &sso_history, &baselines)
                 .await
             {
                 Ok(v) => v,
@@ -980,6 +990,54 @@ impl ZtfEnrichmentWorker {
             .collect()
     }
 
+    /// Fitted phase curves for the batch's objects, keyed by `ssnamenr` then band.
+    ///
+    /// One `$in` per batch, for the same reason `fetch_orbits` batches. An object
+    /// with no entry is scored against its window alone.
+    async fn fetch_baselines(
+        &self,
+        alerts: &[ZtfAlertForEnrichment],
+    ) -> HashMap<String, HashMap<u8, PhaseCurve>> {
+        let names: Vec<&str> = alerts
+            .iter()
+            .filter_map(|a| a.candidate.candidate.ssnamenr.as_deref())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+
+        if names.is_empty() {
+            return HashMap::new();
+        }
+
+        let cursor = match self
+            .sso_baselines
+            .find(doc! { "_id": { "$in": &names } })
+            .await
+        {
+            Ok(cursor) => cursor,
+            Err(e) => {
+                warn!("failed to query {}: {}", BASELINES_COLLECTION, e);
+                return HashMap::new();
+            }
+        };
+        let docs: Vec<Document> = match cursor.try_collect().await {
+            Ok(docs) => docs,
+            Err(e) => {
+                warn!("failed to read {}: {}", BASELINES_COLLECTION, e);
+                return HashMap::new();
+            }
+        };
+
+        docs.iter()
+            .filter_map(|doc| {
+                Some((
+                    doc.get_str("_id").ok()?.to_string(),
+                    curves_from_document(doc),
+                ))
+            })
+            .collect()
+    }
+
     /// A moving object's own recent photometry, keyed by `ssnamenr`.
     ///
     /// `objectId` cannot be used to join a mover's detections, so this reads the
@@ -1013,6 +1071,7 @@ impl ZtfEnrichmentWorker {
         let filter = doc! {
             "candidate.ssnamenr": { "$in": &names },
             "candidate.jd": { "$gte": earliest },
+            "candidate.ssdistnr": { "$gte": 0.0, "$lt": MAX_SEPARATION_ARCSEC },
         };
         let projection = doc! {
             "_id": 0,
@@ -1021,6 +1080,7 @@ impl ZtfEnrichmentWorker {
             "candidate.fid": 1,
             "candidate.magpsf": 1,
             "candidate.sigmapsf": 1,
+            "candidate.ssdistnr": 1,
             "properties.sso.helio_dist": 1,
             "properties.sso.topo_dist": 1,
             "properties.sso.phase_angle": 1,
@@ -1064,6 +1124,7 @@ impl ZtfEnrichmentWorker {
         alert: &ZtfAlertForEnrichment,
         orbits: &HashMap<String, OrbitalElements>,
         sso_history: &HashMap<String, Vec<(f64, Point)>>,
+        baselines: &HashMap<String, HashMap<u8, PhaseCurve>>,
     ) -> Result<
         (
             ZtfAlertProperties,
@@ -1097,7 +1158,7 @@ impl ZtfEnrichmentWorker {
         .with_geometry(elements, candidate.jd);
 
         let activity = ActivityMetrics {
-            outburst: outburst_for(&sso, candidate, sso_history),
+            outburst: outburst_for(&sso, candidate, sso_history, baselines),
             ..activity
         };
 
@@ -1560,6 +1621,35 @@ mod tests {
             Some("407033"),
             "the grouping key survives, which is what downstream light curves need"
         );
+    }
+
+    /// A detection far from the predicted position belongs to something else,
+    /// and its brightness would read as a large outburst.
+    #[test]
+    fn test_misassociated_detections_are_not_scored() {
+        let history = HashMap::new();
+        let baselines = HashMap::new();
+        let candidate = Candidate {
+            jd: 2_460_000.0,
+            magpsf: 18.0,
+            sigmapsf: 0.05,
+            fid: 1,
+            ..Default::default()
+        };
+
+        let near = ZtfSsoAssociation::from_ipac(Some("9816".into()), Some(0.5), Some(18.1))
+            .with_geometry(None, candidate.jd);
+        assert!(near.separation_arcsec.is_some());
+
+        let far = ZtfSsoAssociation::from_ipac(
+            Some("9816".into()),
+            Some(MAX_SEPARATION_ARCSEC as f32 + 1.0),
+            Some(18.1),
+        );
+        assert!(outburst_for(&far, &candidate, &history, &baselines).is_none());
+
+        let unmeasured = ZtfSsoAssociation::from_ipac(Some("9816".into()), None, Some(18.1));
+        assert!(outburst_for(&unmeasured, &candidate, &history, &baselines).is_none());
     }
 
     /// Geometry is what lets a point be scaled to the test epoch, so a detection

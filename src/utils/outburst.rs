@@ -16,6 +16,17 @@ pub const DELTA_SLOPE: f64 = -2.0;
 /// Middle value across asteroids, used until per-object fits exist.
 pub const DEFAULT_G12: f64 = 0.5;
 
+/// Furthest a detection may sit from the object's predicted position, arcseconds,
+/// before it is treated as a different source that happens to carry the same
+/// designation.
+///
+/// The upstream match radius is generous, so a static source near the predicted
+/// track is routinely labelled with the object's name. Such a detection is
+/// arbitrarily bright relative to the object and reads as a large outburst, which
+/// is why both statistics and the phase curve fit exclude it rather than
+/// down-weighting it.
+pub const MAX_SEPARATION_ARCSEC: f64 = 2.0;
+
 /// One photometric point in the window.
 #[derive(Debug, Clone, Copy)]
 pub struct Point {
@@ -205,12 +216,51 @@ fn weighted_mean(values: &[f64], errs: &[f64]) -> Option<f64> {
     (sum_w > 0.0).then(|| sum_wx / sum_w)
 }
 
+/// Spread expected between two epochs of the same object.
+///
+/// `scatter` is the object's intrinsic variability, which enters once per epoch
+/// -- both the test point and the point it is compared against are drawn from
+/// it. Passing zero reduces this to the photometric error alone, which is the
+/// form the reference implementation uses.
+fn combined_error(test_err: f64, other_err: f64, scatter: f64) -> f64 {
+    (test_err * test_err + other_err * other_err + 2.0 * scatter * scatter).sqrt()
+}
+
+/// Robust spread of the window's own same-band photometry, magnitudes.
+///
+/// A fallback for an object with no fitted phase curve. A window holds few
+/// points and rarely spans a rotation, so this underestimates variability;
+/// prefer [`crate::utils::phase_curve::PhaseCurve::scatter`] where one exists.
+pub fn window_scatter(points: &[Point], g12: f64) -> Option<f64> {
+    const MIN_POINTS: usize = 5;
+
+    let geom = scale_by_geometry(points, g12);
+    let band = points.last()?.band;
+    let scaled: Vec<f64> = points
+        .iter()
+        .zip(&geom)
+        .filter(|(p, _)| p.band == band)
+        .map(|(p, g)| p.mag + g)
+        .filter(|v| v.is_finite())
+        .collect();
+    if scaled.len() < MIN_POINTS {
+        return None;
+    }
+    let center = median(&scaled)?;
+    let deviations: Vec<f64> = scaled.iter().map(|v| (v - center).abs()).collect();
+    median(&deviations).map(|mad| 1.4826 * mad)
+}
+
 /// The statistic for each earlier point, and the median across them.
 ///
 /// The last point is the one under test. Every earlier point is brought to its
 /// geometry and colour, then differenced and divided by the combined
 /// uncertainty, so the result is in sigma.
-pub fn outburst_statistic(points: &[Point], g12: f64) -> Result<(Vec<f64>, f64), OutburstError> {
+pub fn outburst_statistic(
+    points: &[Point],
+    g12: f64,
+    scatter: f64,
+) -> Result<(Vec<f64>, f64), OutburstError> {
     if points.len() < 2 {
         return Err(OutburstError::TooFewPoints(points.len()));
     }
@@ -249,7 +299,7 @@ pub fn outburst_statistic(points: &[Point], g12: f64) -> Result<(Vec<f64>, f64),
     for (i, p) in points[..last].iter().enumerate() {
         let color = colors.get(&p.band).copied().unwrap_or(0.0);
         let numerator = scaled[i] - color - points[last].mag;
-        let denominator = (errs[last] * errs[last] + p.mag_err * p.mag_err).sqrt();
+        let denominator = combined_error(errs[last], p.mag_err, scatter);
         stats.push(numerator / denominator);
     }
 
@@ -281,7 +331,11 @@ pub fn median(values: &[f64]) -> Option<f64> {
 /// recomputing, which `outburst_statistic` does not allow: its colour offsets
 /// are fitted across whatever the window contains, so they shift when the window
 /// does.
-pub fn same_band_statistic(points: &[Point], g12: f64) -> Result<Vec<(usize, f64)>, OutburstError> {
+pub fn same_band_statistic(
+    points: &[Point],
+    g12: f64,
+    scatter: f64,
+) -> Result<Vec<(usize, f64)>, OutburstError> {
     if points.len() < 2 {
         return Err(OutburstError::TooFewPoints(points.len()));
     }
@@ -300,7 +354,7 @@ pub fn same_band_statistic(points: &[Point], g12: f64) -> Result<Vec<(usize, f64
         .filter(|(_, p)| p.band == test.band)
         .map(|(i, p)| {
             let numerator = p.mag + geom[i] - test.mag;
-            let denominator = (test.mag_err * test.mag_err + p.mag_err * p.mag_err).sqrt();
+            let denominator = combined_error(test.mag_err, p.mag_err, scatter);
             (i, numerator / denominator)
         })
         .collect();
@@ -389,7 +443,7 @@ mod tests {
             point(1.0, 1.0, 0.0, 0.0, 0.1, b'r'),
             point(1.0, 1.0, 0.0, -1.0, 0.1, b'r'),
         ];
-        let (stats, median) = outburst_statistic(&points, DEFAULT_G12).unwrap();
+        let (stats, median) = outburst_statistic(&points, DEFAULT_G12, 0.0).unwrap();
         let expected = 1.0 / (2.0_f64 * 0.1 * 0.1).sqrt();
         assert!((stats[0] - expected).abs() < 1e-9, "got {}", stats[0]);
         assert!((median - expected).abs() < 1e-9);
@@ -403,7 +457,7 @@ mod tests {
             point(1.0, 1.0, 30.0, hg12(30.0, DEFAULT_G12), 0.1, b'r'),
             point(1.0, 1.0, 0.0, -1.0, 0.1, b'r'),
         ];
-        let (stats, _) = outburst_statistic(&points, DEFAULT_G12).unwrap();
+        let (stats, _) = outburst_statistic(&points, DEFAULT_G12, 0.0).unwrap();
         let expected = 1.0 / (2.0_f64 * 0.1 * 0.1).sqrt();
         assert!((stats[0] - expected).abs() < 1e-9, "got {}", stats[0]);
     }
@@ -417,7 +471,7 @@ mod tests {
             point(2.0, 2.0, 0.0, dimming, 0.1, b'r'),
             point(1.0, 1.0, 0.0, 0.0, 0.1, b'r'),
         ];
-        let (stats, _) = outburst_statistic(&points, DEFAULT_G12).unwrap();
+        let (stats, _) = outburst_statistic(&points, DEFAULT_G12, 0.0).unwrap();
         assert!(
             stats[0].abs() < 1e-9,
             "steady object should give ~0, got {}",
@@ -430,7 +484,7 @@ mod tests {
         let points: Vec<Point> = (0..6)
             .map(|i| point(2.5, 1.6, 10.0 + i as f64 * 0.1, 18.0, 0.05, b'r'))
             .collect();
-        let (_, median) = outburst_statistic(&points, DEFAULT_G12).unwrap();
+        let (_, median) = outburst_statistic(&points, DEFAULT_G12, 0.0).unwrap();
         assert!(median.abs() < 0.5, "median {median} should be near zero");
     }
 
@@ -444,7 +498,7 @@ mod tests {
             point(2.5, 1.6, 10.0, 18.0, 0.05, b'r'),
             point(2.5, 1.6, 10.0, 18.0, 0.05, b'r'),
         ];
-        let (_, median) = outburst_statistic(&points, DEFAULT_G12).unwrap();
+        let (_, median) = outburst_statistic(&points, DEFAULT_G12, 0.0).unwrap();
         assert!(
             median.abs() < 0.5,
             "colour alone should not signal, got {median}"
@@ -460,7 +514,7 @@ mod tests {
             point(2.5, 1.6, 10.0, 18.0, 0.05, b'r'),
         ];
         assert_eq!(
-            outburst_statistic(&points, DEFAULT_G12).unwrap_err(),
+            outburst_statistic(&points, DEFAULT_G12, 0.0).unwrap_err(),
             OutburstError::NoBandReference
         );
     }
@@ -469,7 +523,7 @@ mod tests {
     fn test_too_few_points_is_an_error() {
         let points = [point(2.5, 1.6, 10.0, 18.0, 0.05, b'r')];
         assert_eq!(
-            outburst_statistic(&points, DEFAULT_G12).unwrap_err(),
+            outburst_statistic(&points, DEFAULT_G12, 0.0).unwrap_err(),
             OutburstError::TooFewPoints(1)
         );
     }
@@ -484,8 +538,8 @@ mod tests {
         let b = point(2.55, 1.65, 13.0, 18.9, 0.05, 1);
         let other_band = point(2.58, 1.68, 13.5, 18.2, 0.05, 2);
 
-        let wide = same_band_statistic(&[a, other_band, b, test], DEFAULT_G12).expect("wide");
-        let narrow = same_band_statistic(&[b, test], DEFAULT_G12).expect("narrow");
+        let wide = same_band_statistic(&[a, other_band, b, test], DEFAULT_G12, 0.0).expect("wide");
+        let narrow = same_band_statistic(&[b, test], DEFAULT_G12, 0.0).expect("narrow");
 
         let b_in_wide = wide.iter().find(|(i, _)| *i == 2).expect("b in wide").1;
         assert!((b_in_wide - narrow[0].1).abs() < 1e-12);
@@ -496,7 +550,7 @@ mod tests {
         let test = point(2.5, 1.6, 12.0, 18.5, 0.05, 1);
         let other = point(2.6, 1.7, 14.0, 19.0, 0.06, 2);
         assert_eq!(
-            same_band_statistic(&[other, test], DEFAULT_G12),
+            same_band_statistic(&[other, test], DEFAULT_G12, 0.0),
             Err(OutburstError::NoBandReference)
         );
     }
@@ -507,7 +561,7 @@ mod tests {
     fn test_same_band_reduces_to_a_magnitude_difference() {
         let earlier = point(2.5, 1.6, 12.0, 19.0, 0.03, 1);
         let test = point(2.5, 1.6, 12.0, 18.5, 0.04, 1);
-        let stats = same_band_statistic(&[earlier, test], DEFAULT_G12).expect("stats");
+        let stats = same_band_statistic(&[earlier, test], DEFAULT_G12, 0.0).expect("stats");
         let expected = 0.5 / (0.03f64 * 0.03 + 0.04 * 0.04).sqrt();
         assert!((stats[0].1 - expected).abs() < 1e-12);
     }
