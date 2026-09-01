@@ -163,8 +163,7 @@ pub async fn delete_topic(bootstrap_servers: &str, topic_name: &str) -> Result<(
     let opts = AdminOptions::new().operation_timeout(Some(KAFKA_TIMEOUT_SECS));
     admin_client.delete_topics(&[topic_name], &opts).await?;
 
-    // Poll until the deletion has propagated to broker metadata so callers
-    // that immediately call count_messages() don't see the old topic.
+    // Poll until the deletion reaches broker metadata, else count_messages() sees the old topic.
     let consumer: BaseConsumer = ClientConfig::new()
         .set("bootstrap.servers", bootstrap_servers)
         .create()?;

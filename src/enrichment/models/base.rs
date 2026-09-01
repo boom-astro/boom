@@ -75,8 +75,7 @@ fn load_model_on_device_inner(
 
     // Pin execution providers explicitly so CPU mode never initializes GPU EPs.
     if use_gpu {
-        // Linux only: Apple's CoreML EP does need to fall back to the CPU for
-        // some ONNX Runtime operators.
+        // CoreML needs CPU fallback for some ONNX operators, so only Linux disables it.
         #[cfg(target_os = "linux")]
         if !allow_cpu_fallback {
             builder = builder.with_disable_cpu_fallback()?;
@@ -87,10 +86,8 @@ fn load_model_on_device_inner(
 
         #[cfg(target_os = "linux")]
         let cuda_ep = {
-            // `with_conv_max_workspace(false)` caps the cuDNN algorithm-search
-            // workspace at 32 MB. Do not add `arena_extend_strategy =
-            // SameAsRequested`: with dynamic-batch models its exact-sized
-            // extensions wreck BFC arena reuse and VRAM climbs until OOM.
+            // Do not add `arena_extend_strategy = SameAsRequested`: with dynamic-batch models
+            // its exact-sized extensions wreck BFC arena reuse and VRAM climbs until OOM.
             let mut ep = ort::ep::CUDAExecutionProvider::default()
                 .with_device_id(dev)
                 .with_conv_max_workspace(false);
