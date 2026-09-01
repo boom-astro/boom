@@ -29,15 +29,9 @@ embedding. The `candid` and `jd` fields record which alert that was.
 
 ## Credentials
 
-BOOM connects with a single **administrative account** owned by the maintainers.
-The account, its password, and the database name are not self-service: they are
-provisioned once and injected into the deployment's environment. This document
-deliberately does not describe how to obtain access to that instance.
+BOOM connects with a single **administrative/user account** owned by the maintainers.
 
-If you are standing up your own Milvus (self-hosted or through your own
-provider), point `milvus.host` / `milvus.port` at it and supply your own
-`BOOM_MILVUS__USERNAME` / `BOOM_MILVUS__PASSWORD` / `BOOM_MILVUS__DATABASE`. The
-rest of this document applies unchanged.
+One database serves the whole project and `config.yaml` carries the name (`umn_babamul_vectordb`).
 
 ## Connection details
 
@@ -50,7 +44,7 @@ is sufficient (no custom CA, no client certificates).
 |---|---|
 | Host | `milvus.nrp-nautilus.io` |
 | Port | `50051` |
-| Transport | gRPC over TLS |
+| Transport | gRPC over TLS (`milvus.tls`, defaults to `true`) |
 
 ## Configuring BOOM
 
@@ -130,19 +124,19 @@ and are never committed. To enable Milvus in production, set these under
 
 | Name | Kind | Value |
 |---|---|---|
-| `BOOM_MILVUS__PASSWORD` | **Secret** | the administrative account's password |
+| `BOOM_MILVUS__PASSWORD` | **Secret** | the administrative/user account's password |
 | `BOOM_MILVUS__ENABLED` | Variable | `true` |
-| `BOOM_MILVUS__USERNAME` | Variable | the administrative account |
+| `BOOM_MILVUS__USERNAME` | Variable | the administrative/user account |
 
-`BOOM_MILVUS__DATABASE` is not listed because `config.yaml` already carries the
-name; set it only to target a different database.
+`BOOM_MILVUS__DATABASE` is not in the table because `config.yaml` already
+carries the name.
 
 Only the password is secret; the rest are plain variables. If
 `BOOM_MILVUS__ENABLED` is unset, Compose defaults it to `false` and the
 integration simply stays off.
 
-Two wiring details worth knowing, because both fail *silently* rather than
-loudly:
+Some wiring details worth knowing, because all of them fail *silently* rather
+than loudly:
 
 1. `deploy.yaml` must list each variable under `env:`. A variable set in GitHub
    but missing from that block never reaches the runner.
@@ -152,6 +146,14 @@ loudly:
    the embeddings) and **`api`** (for serving similarity queries). A new service
    needing Milvus must declare them too, or it falls back to the `config.yaml`
    defaults and quietly runs with Milvus disabled.
+3. Every `BOOM_MILVUS__*` entry in `docker-compose.yaml` is written `${VAR:-}`,
+   so an unset GitHub variable reaches the container as an **empty string**
+   rather than being absent. `load_raw_config` in `src/conf.rs` sets
+   `.ignore_empty(true)` on the environment source for exactly this reason:
+   without it, an unset `BOOM_MILVUS__DATABASE` would overwrite the
+   `config.yaml` name with `""` and BOOM would try to connect to a nameless
+   database. The same applies to the empty placeholders in `.env.example`.
+   Leaving a variable unset (or blank) keeps the `config.yaml` value.
 
 If BOOM is instead run under Kubernetes, the equivalent is putting
 `BOOM_MILVUS__PASSWORD` in a Secret and referencing it with `secretKeyRef`;

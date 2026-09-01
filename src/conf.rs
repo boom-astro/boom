@@ -787,7 +787,7 @@ fn default_gpu_device_ids() -> Vec<i32> {
 ///
 /// On the NRP platform Milvus is reachable only over gRPC (there is no REST
 /// port exposed), on `milvus.nrp-nautilus.io:50051`, behind TLS. BOOM connects
-/// with an administrative account supplied entirely through the environment.
+/// with an administrative/user account supplied entirely through the environment.
 #[derive(Deserialize, Debug, Clone)]
 pub struct MilvusConfig {
     /// When false, BOOM never opens a Milvus connection. Defaults to false so
