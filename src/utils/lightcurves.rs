@@ -48,7 +48,7 @@ pub enum Band {
     Y,
     #[serde(rename = "u")]
     U,
-    // Near-infrared bands (e.g. WINTER: fid 0=Y, 1=J, 2=H, 3=K)
+    // Near-infrared bands (e.g. WINTER: fid 1=Y, 2=J, 3=H)
     #[serde(rename = "j")]
     J,
     #[serde(rename = "h")]
