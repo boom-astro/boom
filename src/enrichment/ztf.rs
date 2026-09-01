@@ -1,4 +1,4 @@
-use crate::alert::ZtfCandidate;
+use crate::alert::{Candidate, ZtfCandidate};
 use crate::conf::AppConfig;
 use crate::enrichment::{
     babamul::{Babamul, BabamulZtfAlert},
@@ -10,15 +10,16 @@ use crate::utils::cutouts::{AlertCutout, CutoutStorage};
 use crate::utils::db::mongify;
 use crate::utils::enums::Survey;
 use crate::utils::lightcurves::{
-    analyze_photometry, prepare_photometry, ActivityMetrics, AllBandsProperties, Band,
+    analyze_photometry, prepare_photometry, ActivityMetrics, AllBandsProperties, Band, Outburst,
     PerBandProperties, PhotometryMag, ZTF_ZP,
 };
 use crate::utils::mpcorb::{elements_from_document, normalize_ztf_ssnamenr, ORBITS_COLLECTION};
+use crate::utils::outburst::Point;
 use crate::utils::sso_geometry::{geometry_at, OrbitalElements};
 use apache_avro_derive::AvroSchema;
 use apache_avro_macros::serdavro;
 use futures::TryStreamExt;
-use mongodb::bson::{doc, Document};
+use mongodb::bson::{doc, Bson, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use serde::{Deserialize, Deserializer};
 use std::collections::{HashMap, HashSet};
@@ -359,6 +360,71 @@ pub struct ZtfAlertForEnrichment {
     pub survey_matches: Option<ZtfSurveyMatches>,
 }
 
+/// Longest window `Outburst` scores over, so also how far back history is read.
+const HISTORY_WINDOW_DAYS: f64 = 30.0;
+
+/// One historical detection as the outburst statistic needs it, or `None` when
+/// the document is missing photometry or geometry.
+fn history_point(doc: &Document) -> Option<(String, f64, Point)> {
+    let candidate = doc.get_document("candidate").ok()?;
+    let sso = doc
+        .get_document("properties")
+        .ok()?
+        .get_document("sso")
+        .ok()?;
+    // Integer-valued BSON is not a double, and a point dropped for that reason
+    // would be invisible.
+    let number = |d: &Document, key: &str| -> Option<f64> {
+        match d.get(key)? {
+            Bson::Double(v) => Some(*v),
+            Bson::Int32(v) => Some(*v as f64),
+            Bson::Int64(v) => Some(*v as f64),
+            _ => None,
+        }
+    };
+    Some((
+        candidate.get_str("ssnamenr").ok()?.to_string(),
+        number(candidate, "jd")?,
+        Point {
+            rh: number(sso, "helio_dist")?,
+            delta: number(sso, "topo_dist")?,
+            phase: number(sso, "phase_angle")?,
+            mag: number(candidate, "magpsf")?,
+            mag_err: number(candidate, "sigmapsf")?,
+            band: number(candidate, "fid")? as u8,
+        },
+    ))
+}
+
+/// Score this detection against the object's own earlier photometry.
+///
+/// `None` unless the alert is a mover with geometry and at least one earlier
+/// detection that also has geometry. Nearly every mover is seen more than once
+/// in a month, so the limiting factor is geometry on the earlier detection.
+fn outburst_for(
+    sso: &ZtfSsoAssociation,
+    candidate: &Candidate,
+    sso_history: &HashMap<String, Vec<(f64, Point)>>,
+) -> Option<Outburst> {
+    let test = Point {
+        rh: sso.helio_dist? as f64,
+        delta: sso.topo_dist? as f64,
+        phase: sso.phase_angle? as f64,
+        mag: candidate.magpsf as f64,
+        mag_err: candidate.sigmapsf as f64,
+        band: candidate.fid as u8,
+    };
+    // The alert being enriched is not yet in the collection, but a redelivery of
+    // one already stored would be, and comparing a point to itself is a zero.
+    let history: Vec<(f64, Point)> = sso_history
+        .get(sso.designation.as_deref()?)?
+        .iter()
+        .filter(|(jd, _)| *jd < candidate.jd)
+        .copied()
+        .collect();
+    Outburst::from_history(&history, test, candidate.jd)
+}
+
 /// Solar system object association for a single ZTF detection.
 ///
 /// ZTF `objectId`s are positional, so a moving object is given a new one on very
@@ -638,6 +704,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         let mut enriched_alerts: Vec<BabamulZtfAlert> = Vec::new();
 
         let orbits = self.fetch_orbits(&alerts).await;
+        let sso_history = self.fetch_sso_history(&alerts).await;
 
         let batch_size = alerts.len();
         let mut skipped_empty_lightcurve = 0usize;
@@ -651,20 +718,22 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                 .ok_or_else(|| EnrichmentWorkerError::MissingCutouts(candid))?;
             // Compute numerical and boolean features from lightcurve and candidate analysis
             #[cfg_attr(not(feature = "gpu"), allow(unused_variables))]
-            let (properties, all_bands_properties, programid, lightcurve) =
-                match self.get_alert_properties(&alert, &orbits).await {
-                    Ok(v) => v,
-                    // No usable photometry: skip this alert (leave it un-enriched)
-                    // rather than aborting the whole batch, so the queue keeps draining.
-                    // Detail is logged per-candid at DEBUG; the per-batch total is
-                    // summarized at WARN below to avoid flooding logs at backfill scale.
-                    Err(EnrichmentWorkerError::EmptyLightcurve(_)) => {
-                        skipped_empty_lightcurve += 1;
-                        debug!(candid, "skipping alert: empty lightcurve after filtering");
-                        continue;
-                    }
-                    Err(e) => return Err(e),
-                };
+            let (properties, all_bands_properties, programid, lightcurve) = match self
+                .get_alert_properties(&alert, &orbits, &sso_history)
+                .await
+            {
+                Ok(v) => v,
+                // No usable photometry: skip this alert (leave it un-enriched)
+                // rather than aborting the whole batch, so the queue keeps draining.
+                // Detail is logged per-candid at DEBUG; the per-batch total is
+                // summarized at WARN below to avoid flooding logs at backfill scale.
+                Err(EnrichmentWorkerError::EmptyLightcurve(_)) => {
+                    skipped_empty_lightcurve += 1;
+                    debug!(candid, "skipping alert: empty lightcurve after filtering");
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
             #[cfg(feature = "gpu")]
             if self
                 .models
@@ -911,10 +980,90 @@ impl ZtfEnrichmentWorker {
             .collect()
     }
 
+    /// A moving object's own recent photometry, keyed by `ssnamenr`.
+    ///
+    /// `objectId` cannot be used to join a mover's detections, so this reads the
+    /// alert collection directly on the `ssnamenr`/`jd` index. One `$in` per
+    /// batch, for the same reason `fetch_orbits` batches. Points without geometry
+    /// are dropped: the statistic scales every point to the test epoch and
+    /// cannot place one whose distances are unknown.
+    ///
+    /// A failure is not fatal, matching `fetch_orbits`.
+    async fn fetch_sso_history(
+        &self,
+        alerts: &[ZtfAlertForEnrichment],
+    ) -> HashMap<String, Vec<(f64, Point)>> {
+        let names: Vec<&str> = alerts
+            .iter()
+            .filter_map(|a| a.candidate.candidate.ssnamenr.as_deref())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+
+        if names.is_empty() {
+            return HashMap::new();
+        }
+
+        let earliest = alerts
+            .iter()
+            .map(|a| a.candidate.candidate.jd)
+            .fold(f64::INFINITY, f64::min)
+            - HISTORY_WINDOW_DAYS;
+
+        let filter = doc! {
+            "candidate.ssnamenr": { "$in": &names },
+            "candidate.jd": { "$gte": earliest },
+        };
+        let projection = doc! {
+            "_id": 0,
+            "candidate.ssnamenr": 1,
+            "candidate.jd": 1,
+            "candidate.fid": 1,
+            "candidate.magpsf": 1,
+            "candidate.sigmapsf": 1,
+            "properties.sso.helio_dist": 1,
+            "properties.sso.topo_dist": 1,
+            "properties.sso.phase_angle": 1,
+        };
+
+        let cursor = match self
+            .alert_collection
+            .find(filter)
+            .projection(projection)
+            .await
+        {
+            Ok(cursor) => cursor,
+            Err(e) => {
+                warn!("failed to query solar system history: {}", e);
+                return HashMap::new();
+            }
+        };
+        let docs: Vec<Document> = match cursor.try_collect().await {
+            Ok(docs) => docs,
+            Err(e) => {
+                warn!("failed to read solar system history: {}", e);
+                return HashMap::new();
+            }
+        };
+
+        let mut history: HashMap<String, Vec<(f64, Point)>> = HashMap::new();
+        for doc in &docs {
+            let Some((name, jd, point)) = history_point(doc) else {
+                continue;
+            };
+            history.entry(name).or_default().push((jd, point));
+        }
+        for points in history.values_mut() {
+            points.sort_by(|a, b| a.0.total_cmp(&b.0));
+        }
+        history
+    }
+
     async fn get_alert_properties(
         &self,
         alert: &ZtfAlertForEnrichment,
         orbits: &HashMap<String, OrbitalElements>,
+        sso_history: &HashMap<String, Vec<(f64, Point)>>,
     ) -> Result<
         (
             ZtfAlertProperties,
@@ -946,6 +1095,11 @@ impl ZtfEnrichmentWorker {
             candidate.ssmagnr,
         )
         .with_geometry(elements, candidate.jd);
+
+        let activity = ActivityMetrics {
+            outburst: outburst_for(&sso, candidate, sso_history),
+            ..activity
+        };
 
         let sgscore1 = candidate.sgscore1.unwrap_or(0.0);
         let sgscore2 = candidate.sgscore2.unwrap_or(0.0);
@@ -1406,5 +1560,43 @@ mod tests {
             Some("407033"),
             "the grouping key survives, which is what downstream light curves need"
         );
+    }
+
+    /// Geometry is what lets a point be scaled to the test epoch, so a detection
+    /// enriched before geometry existed cannot join the window.
+    #[test]
+    fn test_history_point_requires_geometry() {
+        let complete = doc! {
+            "candidate": { "ssnamenr": "9816", "jd": 2_460_000.0, "fid": 1,
+                           "magpsf": 18.5, "sigmapsf": 0.04 },
+            "properties": { "sso": { "helio_dist": 2.5, "topo_dist": 1.6, "phase_angle": 12.0 } },
+        };
+        let (name, jd, point) = history_point(&complete).expect("complete document");
+        assert_eq!(name, "9816");
+        assert_eq!(jd, 2_460_000.0);
+        assert_eq!(point.band, 1);
+        assert_eq!(point.rh, 2.5);
+
+        let mut without_geometry = complete.clone();
+        without_geometry.insert("properties", doc! { "sso": { "helio_dist": 2.5 } });
+        assert!(history_point(&without_geometry).is_none());
+
+        let mut unenriched = complete.clone();
+        unenriched.insert("properties", doc! {});
+        assert!(history_point(&unenriched).is_none());
+    }
+
+    /// The geometry fields are f32 in the association but reach BSON as either
+    /// double or int depending on the writer, and an integer phase angle is a
+    /// value the archive really holds.
+    #[test]
+    fn test_history_point_accepts_integer_valued_geometry() {
+        let doc = doc! {
+            "candidate": { "ssnamenr": "9816", "jd": 2_460_000.0, "fid": 2,
+                           "magpsf": 18.5, "sigmapsf": 0.04 },
+            "properties": { "sso": { "helio_dist": 2.5, "topo_dist": 1.6, "phase_angle": 12i32 } },
+        };
+        let (_, _, point) = history_point(&doc).expect("integer phase angle");
+        assert_eq!(point.phase, 12.0);
     }
 }

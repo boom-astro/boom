@@ -38,7 +38,7 @@ pub enum OutburstError {
     #[error("need at least two points, got {0}")]
     TooFewPoints(usize),
     #[error("no earlier observation in the test point's band")]
-    NoColorReference,
+    NoBandReference,
     #[error("a point carries a non-finite value")]
     NotFinite,
 }
@@ -237,7 +237,7 @@ pub fn outburst_statistic(points: &[Point], g12: f64) -> Result<(Vec<f64>, f64),
             .unzip();
         weighted_mean(&v, &e)
     };
-    let target_mean = band_mean(target_band).ok_or(OutburstError::NoColorReference)?;
+    let target_mean = band_mean(target_band).ok_or(OutburstError::NoBandReference)?;
     for p in &points[..last] {
         if let std::collections::hash_map::Entry::Vacant(slot) = colors.entry(p.band) {
             let mean = band_mean(p.band).unwrap_or(target_mean);
@@ -253,14 +253,62 @@ pub fn outburst_statistic(points: &[Point], g12: f64) -> Result<(Vec<f64>, f64),
         stats.push(numerator / denominator);
     }
 
-    let mut sorted = stats.clone();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let median = if sorted.len() % 2 == 1 {
-        sorted[sorted.len() / 2]
-    } else {
-        0.5 * (sorted[sorted.len() / 2 - 1] + sorted[sorted.len() / 2])
-    };
+    let median = median(&stats).ok_or(OutburstError::TooFewPoints(points.len()))?;
     Ok((stats, median))
+}
+
+/// Median of `values`, `None` when empty. Even counts average the middle pair.
+pub fn median(values: &[f64]) -> Option<f64> {
+    if values.is_empty() {
+        return None;
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let mid = sorted.len() / 2;
+    Some(if sorted.len() % 2 == 1 {
+        sorted[mid]
+    } else {
+        0.5 * (sorted[mid - 1] + sorted[mid])
+    })
+}
+
+/// Sigma for each earlier point sharing the test point's band, paired with its
+/// index in `points`.
+///
+/// Within one band there is no colour term, so a value depends only on its own
+/// point and the test point -- never on what else the window holds. A consumer
+/// can therefore take the median over any sub-window of these without
+/// recomputing, which `outburst_statistic` does not allow: its colour offsets
+/// are fitted across whatever the window contains, so they shift when the window
+/// does.
+pub fn same_band_statistic(points: &[Point], g12: f64) -> Result<Vec<(usize, f64)>, OutburstError> {
+    if points.len() < 2 {
+        return Err(OutburstError::TooFewPoints(points.len()));
+    }
+    if points.iter().any(|p| {
+        !(p.rh.is_finite() && p.delta.is_finite() && p.phase.is_finite() && p.mag.is_finite())
+    }) {
+        return Err(OutburstError::NotFinite);
+    }
+
+    let geom = scale_by_geometry(points, g12);
+    let last = points.len() - 1;
+    let test = points[last];
+    let stats: Vec<(usize, f64)> = points[..last]
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| p.band == test.band)
+        .map(|(i, p)| {
+            let numerator = p.mag + geom[i] - test.mag;
+            let denominator = (test.mag_err * test.mag_err + p.mag_err * p.mag_err).sqrt();
+            (i, numerator / denominator)
+        })
+        .collect();
+
+    if stats.is_empty() {
+        return Err(OutburstError::NoBandReference);
+    }
+    Ok(stats)
 }
 
 #[cfg(test)]
@@ -413,7 +461,7 @@ mod tests {
         ];
         assert_eq!(
             outburst_statistic(&points, DEFAULT_G12).unwrap_err(),
-            OutburstError::NoColorReference
+            OutburstError::NoBandReference
         );
     }
 
@@ -424,5 +472,50 @@ mod tests {
             outburst_statistic(&points, DEFAULT_G12).unwrap_err(),
             OutburstError::TooFewPoints(1)
         );
+    }
+
+    /// The point of the same-band variant: a value is fixed by its own point and
+    /// the test point, so trimming the window cannot move it. The colour
+    /// corrected statistic has no such guarantee.
+    #[test]
+    fn test_same_band_values_do_not_depend_on_the_window() {
+        let test = point(2.5, 1.6, 12.0, 18.5, 0.05, 1);
+        let a = point(2.6, 1.7, 14.0, 19.0, 0.06, 1);
+        let b = point(2.55, 1.65, 13.0, 18.9, 0.05, 1);
+        let other_band = point(2.58, 1.68, 13.5, 18.2, 0.05, 2);
+
+        let wide = same_band_statistic(&[a, other_band, b, test], DEFAULT_G12).expect("wide");
+        let narrow = same_band_statistic(&[b, test], DEFAULT_G12).expect("narrow");
+
+        let b_in_wide = wide.iter().find(|(i, _)| *i == 2).expect("b in wide").1;
+        assert!((b_in_wide - narrow[0].1).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_same_band_needs_an_earlier_point_in_the_test_band() {
+        let test = point(2.5, 1.6, 12.0, 18.5, 0.05, 1);
+        let other = point(2.6, 1.7, 14.0, 19.0, 0.06, 2);
+        assert_eq!(
+            same_band_statistic(&[other, test], DEFAULT_G12),
+            Err(OutburstError::NoBandReference)
+        );
+    }
+
+    /// Same band and same geometry reduces to a magnitude difference over the
+    /// combined error, which is checkable by hand.
+    #[test]
+    fn test_same_band_reduces_to_a_magnitude_difference() {
+        let earlier = point(2.5, 1.6, 12.0, 19.0, 0.03, 1);
+        let test = point(2.5, 1.6, 12.0, 18.5, 0.04, 1);
+        let stats = same_band_statistic(&[earlier, test], DEFAULT_G12).expect("stats");
+        let expected = 0.5 / (0.03f64 * 0.03 + 0.04 * 0.04).sqrt();
+        assert!((stats[0].1 - expected).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_median_averages_the_middle_pair_when_even() {
+        assert_eq!(median(&[]), None);
+        assert_eq!(median(&[3.0, 1.0, 2.0]), Some(2.0));
+        assert_eq!(median(&[4.0, 1.0, 3.0, 2.0]), Some(2.5));
     }
 }

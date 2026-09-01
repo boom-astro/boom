@@ -1,3 +1,4 @@
+use crate::utils::outburst::{outburst_statistic, same_band_statistic, Point, DEFAULT_G12};
 use apache_avro_derive::AvroSchema;
 use apache_avro_macros::serdavro;
 use mongodb::bson::doc;
@@ -241,6 +242,108 @@ pub struct ActivityMetrics {
     /// abort the whole pipeline, and difference imaging produces such fluxes
     /// routinely. No threshold is applied — filters choose their own cut.
     pub aperture_excess: Option<f32>,
+    /// Photometric outburst statistic for a moving object, `None` for anything
+    /// else and for a mover with no usable earlier detection of its own.
+    pub outburst: Option<Outburst>,
+}
+
+/// How much brighter a moving object is than its own recent history, in sigma.
+///
+/// Every value compares the detection under test against an earlier detection of
+/// the same object, both scaled to the test epoch's observing geometry with an
+/// HG12 phase function. Positive means brighter than history.
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    serde::Deserialize,
+    serde::Serialize,
+    AvroSchema,
+    utoipa::ToSchema,
+)]
+#[serde(default)]
+pub struct Outburst {
+    /// Median over a 7 day window, colour corrected across bands.
+    pub d7: Option<f32>,
+    /// Median over 14 days.
+    pub d14: Option<f32>,
+    /// Median over 30 days.
+    pub d30: Option<f32>,
+    /// Per-point sigma against every earlier detection in the test point's own
+    /// band, over the longest window above.
+    ///
+    /// Deliberately not the same quantity as the medians: with one band there is
+    /// no colour term, which is what lets a value stand alone. Take a median of
+    /// these to score any window that suits, and expect it to sit near but not on
+    /// `d14` -- the medians carry a colour correction these do not.
+    pub points: Vec<OutburstPoint>,
+}
+
+impl Outburst {
+    /// Score `test` against earlier detections of the same object.
+    ///
+    /// `history` pairs each earlier detection's epoch with its point, ascending,
+    /// and must already be cut to the longest window. `None` when nothing in it
+    /// is usable, which is the common case: most objects are seen once.
+    pub fn from_history(history: &[(f64, Point)], test: Point, test_jd: f64) -> Option<Self> {
+        if history.is_empty() {
+            return None;
+        }
+
+        let median_within = |days: f64| -> Option<f32> {
+            let mut window: Vec<Point> = history
+                .iter()
+                .filter(|(jd, _)| *jd >= test_jd - days)
+                .map(|(_, p)| *p)
+                .collect();
+            if window.is_empty() {
+                return None;
+            }
+            window.push(test);
+            let (_, median) = outburst_statistic(&window, DEFAULT_G12).ok()?;
+            (median as f32).is_finite().then_some(median as f32)
+        };
+
+        let mut all: Vec<Point> = history.iter().map(|(_, p)| *p).collect();
+        all.push(test);
+        let points = same_band_statistic(&all, DEFAULT_G12)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(_, sigma)| sigma.is_finite())
+            .map(|(i, sigma)| OutburstPoint {
+                jd: history[i].0,
+                sigma: sigma as f32,
+            })
+            .collect::<Vec<_>>();
+
+        let outburst = Outburst {
+            d7: median_within(7.0),
+            d14: median_within(14.0),
+            d30: median_within(30.0),
+            points,
+        };
+        (outburst.d30.is_some() || !outburst.points.is_empty()).then_some(outburst)
+    }
+}
+
+/// One entry of `Outburst::points`.
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    serde::Deserialize,
+    serde::Serialize,
+    AvroSchema,
+    utoipa::ToSchema,
+)]
+#[serde(default)]
+pub struct OutburstPoint {
+    /// Epoch of the earlier detection being compared against.
+    pub jd: f64,
+    /// Sigma of the test point relative to it.
+    pub sigma: f32,
 }
 
 impl ActivityMetrics {
@@ -279,6 +382,7 @@ impl ActivityMetrics {
     fn from_excess(aperture_excess: Option<f32>) -> Self {
         ActivityMetrics {
             aperture_excess: aperture_excess.filter(|e| e.is_finite()),
+            outburst: None,
         }
     }
 }
@@ -1481,6 +1585,121 @@ mod rate_avro_tests {
             let mut writer = Writer::new(&schema, Vec::new());
             writer
                 .append_serdavro(&props)
+                .unwrap_or_else(|e| panic!("{label} failed to serialize to avro: {e}"));
+        }
+    }
+}
+
+#[cfg(test)]
+mod outburst_tests {
+    use super::*;
+    use crate::utils::derive_avro_schema::SerdavroWriter;
+    use apache_avro::{AvroSchema, Writer};
+
+    fn steady(jd: f64, mag: f64, band: u8) -> (f64, Point) {
+        (
+            jd,
+            Point {
+                rh: 2.5,
+                delta: 1.6,
+                phase: 12.0,
+                mag,
+                mag_err: 0.04,
+                band,
+            },
+        )
+    }
+
+    fn test_point(mag: f64, band: u8) -> Point {
+        Point {
+            rh: 2.5,
+            delta: 1.6,
+            phase: 12.0,
+            mag,
+            mag_err: 0.04,
+            band,
+        }
+    }
+
+    #[test]
+    fn test_windows_narrow_to_the_points_they_contain() {
+        let now = 2_460_000.0;
+        // Brighter only in the last few days, so the short window sees a signal
+        // the long one dilutes.
+        let history = [
+            steady(now - 25.0, 19.0, 1),
+            steady(now - 20.0, 19.0, 1),
+            steady(now - 3.0, 18.0, 1),
+        ];
+        let outburst =
+            Outburst::from_history(&history, test_point(18.0, 1), now).expect("outburst");
+
+        assert_eq!(outburst.d7, Some(0.0));
+        assert_eq!(outburst.d14, Some(0.0));
+        assert!(
+            outburst.d30.expect("d30") > 0.0,
+            "the wider window reaches the fainter history"
+        );
+        assert_eq!(outburst.points.len(), 3);
+    }
+
+    #[test]
+    fn test_history_outside_every_window_still_yields_points() {
+        let now = 2_460_000.0;
+        // The caller cuts history to 30 days, so this cannot happen in
+        // enrichment; it pins the behaviour if a caller ever passes more.
+        let history = [steady(now - 90.0, 19.0, 1)];
+        let outburst =
+            Outburst::from_history(&history, test_point(18.0, 1), now).expect("outburst");
+        assert!(outburst.d30.is_none());
+        assert_eq!(outburst.points.len(), 1);
+    }
+
+    #[test]
+    fn test_no_history_is_no_outburst() {
+        assert!(Outburst::from_history(&[], test_point(18.0, 1), 2_460_000.0).is_none());
+    }
+
+    /// Only the test point's own band contributes to `points`, which is what
+    /// makes each value independent of the window.
+    #[test]
+    fn test_points_hold_only_the_test_band() {
+        let now = 2_460_000.0;
+        let history = [steady(now - 1.0, 19.0, 2), steady(now - 2.0, 19.0, 1)];
+        let outburst =
+            Outburst::from_history(&history, test_point(18.0, 1), now).expect("outburst");
+        assert_eq!(outburst.points.len(), 1);
+        assert_eq!(outburst.points[0].jd, now - 2.0);
+    }
+
+    /// `append_serdavro` resolves every declared field by name, so a nested
+    /// optional that serializes as missing rather than null fails on the Babamul
+    /// path while BSON accepts it. Cover both an absent and a populated block.
+    #[test]
+    fn test_outburst_serializes_through_the_babamul_path() {
+        let schema = ActivityMetrics::get_schema();
+        for (label, outburst) in [
+            ("outburst absent", None),
+            (
+                "outburst populated",
+                Some(Outburst {
+                    d7: Some(1.5),
+                    d14: None,
+                    d30: Some(0.9),
+                    points: vec![OutburstPoint {
+                        jd: 2_460_000.0,
+                        sigma: 1.5,
+                    }],
+                }),
+            ),
+        ] {
+            let metrics = ActivityMetrics {
+                aperture_excess: Some(0.1),
+                outburst,
+            };
+            let mut writer = Writer::new(&schema, Vec::new());
+            writer
+                .append_serdavro(&metrics)
                 .unwrap_or_else(|e| panic!("{label} failed to serialize to avro: {e}"));
         }
     }
