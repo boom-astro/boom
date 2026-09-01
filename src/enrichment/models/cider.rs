@@ -460,21 +460,18 @@ impl CiderFusionModel {
     > {
         const ZTF_ZP: f32 = 23.9;
         const SEQ_LEN: usize = 512;
+        const HORIZON_DAYS: f32 = 100.0;
+        const MAX_EVENTS: usize = 384;
         const NORM_MEAN: [f32; 4] = [3.2246506, 0.75406283, 1.8746188, 0.05986891];
         const NORM_STD: [f32; 4] = [1.1197281, 0.72683305, 0.41507009, 0.03053664];
 
         photometry.sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap());
         photometry.dedup_by(|a, b| a.time == b.time && a.band == b.band);
-        if !photometry.is_empty() {
-            let t0 = photometry[0].time;
-            photometry.retain(|p| (p.time - t0) as f32 <= 100.0);
-        }
-        if photometry.len() > 256 {
-            photometry = photometry[photometry.len() - 256..].to_vec();
-        }
+        let t0 = photometry.first().map_or(0.0, |p| p.time);
+        photometry.retain(|p| (p.time - t0) as f32 <= HORIZON_DAYS);
 
-        let n = photometry.len();
-        let t0 = if n > 0 { photometry[0].time } else { 0.0 };
+        let start = photometry.len().saturating_sub(MAX_EVENTS);
+        let n = photometry.len() - start;
 
         let mut log1p_dt: Vec<f32> = Vec::with_capacity(n);
         let mut log1p_dt_prev: Vec<f32> = Vec::with_capacity(n);
@@ -482,7 +479,7 @@ impl CiderFusionModel {
         let mut log10_flux_err: Vec<f32> = Vec::with_capacity(n);
         let mut band_ids: Vec<usize> = Vec::with_capacity(n);
 
-        for (i, p) in photometry.iter().enumerate() {
+        for (i, p) in photometry.iter().enumerate().skip(start) {
             let dt = (p.time - t0) as f32;
             let dt_prev = if i == 0 {
                 0.0
