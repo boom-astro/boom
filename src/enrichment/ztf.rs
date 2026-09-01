@@ -450,6 +450,7 @@ pub struct ZtfAlertClassifications {
 }
 
 const CIDER_MAX_LC_SPAN_DAYS: f64 = 100.0;
+const CIDER_MIN_PHOTOMETRY_POINTS: usize = 2;
 
 const ACAI_BTS_NAMES: [&str; 6] = ["acai_h", "acai_n", "acai_v", "acai_o", "acai_b", "btsbot"];
 
@@ -466,10 +467,12 @@ struct AlertWork {
 impl AlertWork {
     fn cider_eligible(&self) -> bool {
         let lc = &self.ztf_lightcurve;
-        lc.last()
-            .and_then(|last| lc.first().map(|first| last.time - first.time))
-            .unwrap_or(f64::MAX)
-            <= CIDER_MAX_LC_SPAN_DAYS
+        lc.len() >= CIDER_MIN_PHOTOMETRY_POINTS
+            && lc
+                .last()
+                .and_then(|last| lc.first().map(|first| last.time - first.time))
+                .unwrap_or(f64::MAX)
+                <= CIDER_MAX_LC_SPAN_DAYS
     }
 }
 
