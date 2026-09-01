@@ -1139,22 +1139,23 @@ impl ZtfEnrichmentWorker {
             return Ok(results);
         }
 
-        let n_sel = selected_indices.len();
-        let cider_eligible: Vec<bool> = selected_indices
+        let cider_indices: Vec<usize> = selected_indices
             .iter()
-            .map(|&i| work_items[i].cider_eligible())
+            .copied()
+            .filter(|&i| work_items[i].cider_eligible())
             .collect();
-        let cider_batch: Option<(Vec<f32>, Vec<f32>)> =
-            (|| -> Result<(Vec<f32>, Vec<f32>), ModelError> {
-                let cider_alerts: Vec<&ZtfAlertForEnrichment> = selected_indices
+        let cider_pos = row_of(&cider_indices);
+        let cider_batch: Option<(Vec<f32>, Vec<f32>)> = (!cider_indices.is_empty())
+            .then(|| -> Result<(Vec<f32>, Vec<f32>), ModelError> {
+                let cider_alerts: Vec<&ZtfAlertForEnrichment> = cider_indices
                     .iter()
                     .map(|&i| &work_items[i].alert)
                     .collect();
-                let cider_cutouts: Vec<&AlertCutout> = selected_indices
+                let cider_cutouts: Vec<&AlertCutout> = cider_indices
                     .iter()
                     .map(|&i| &work_items[i].cutouts)
                     .collect();
-                let cider_props: Vec<&AllBandsProperties> = selected_indices
+                let cider_props: Vec<&AllBandsProperties> = cider_indices
                     .iter()
                     .map(|&i| &work_items[i].all_bands_properties)
                     .collect();
@@ -1163,7 +1164,7 @@ impl ZtfEnrichmentWorker {
                 let cider_meta = cider.get_metadata(&cider_alerts, &cider_props)?;
                 let cider_image = cider.get_triplet(&cider_cutouts)?;
 
-                let phot: Vec<_> = selected_indices
+                let phot: Vec<_> = cider_indices
                     .iter()
                     .map(|&i| cider.photometry_inputs(work_items[i].ztf_lightcurve.clone()))
                     .collect::<Result<Vec<_>, _>>()?;
@@ -1177,23 +1178,25 @@ impl ZtfEnrichmentWorker {
                 let tg = ndarray::concatenate(ndarray::Axis(0), &tg_views)?;
 
                 cider.predict(&tx, &tpm, &tg, &cider_meta, &cider_image)
-            })()
-            .map_err(|e| {
-                warn!("cider batch inference failed: {}", e);
             })
-            .ok();
+            .and_then(|r| {
+                r.map_err(|e| {
+                    warn!("cider batch inference failed: {}", e);
+                })
+                .ok()
+            });
 
         let cider_n_cls = cider_batch
             .as_ref()
-            .map(|(p, _)| p.len() / n_sel)
+            .map(|(p, _)| p.len() / cider_indices.len())
             .unwrap_or(0);
         let cider_emb_dim = cider_batch
             .as_ref()
-            .map(|(_, e)| e.len() / n_sel)
+            .map(|(_, e)| e.len() / cider_indices.len())
             .unwrap_or(0);
 
         // ORT needs one fixed input shape, so pad the last chunk and drop the pad rows.
-        for (chunk_idx, chunk) in selected_indices.chunks(self.batch_size).enumerate() {
+        for chunk in selected_indices.chunks(self.batch_size) {
             let mut triplet = ndarray::Array::zeros((self.batch_size, 63, 63, 3));
             let mut metadata = ndarray::Array::zeros((self.batch_size, 25));
             let mut btsbot_metadata = ndarray::Array::zeros((self.batch_size, 25));
@@ -1223,12 +1226,8 @@ impl ZtfEnrichmentWorker {
             }
             let [acai_h, acai_n, acai_v, acai_o, acai_b, btsbot] = scores;
 
-            let chunk_start = chunk_idx * self.batch_size;
             for (batch_idx, &item_idx) in chunk.iter().enumerate() {
-                let sel_idx = chunk_start + batch_idx;
-                let cider = cider_eligible[sel_idx]
-                    .then_some(cider_batch.as_ref())
-                    .flatten();
+                let cider = cider_pos.get(&item_idx).copied().zip(cider_batch.as_ref());
                 results[item_idx] = Some(ZtfAlertClassifications {
                     acai_h: acai_h[batch_idx],
                     acai_n: acai_n[batch_idx],
@@ -1236,13 +1235,13 @@ impl ZtfEnrichmentWorker {
                     acai_o: acai_o[batch_idx],
                     acai_b: acai_b[batch_idx],
                     btsbot: btsbot[batch_idx],
-                    cider_fusion: cider.and_then(|(probs, _)| {
+                    cider_fusion: cider.and_then(|(row, (probs, _))| {
                         CiderClassProbs::from_probs(
-                            &probs[sel_idx * cider_n_cls..(sel_idx + 1) * cider_n_cls],
+                            &probs[row * cider_n_cls..(row + 1) * cider_n_cls],
                         )
                     }),
-                    fusion_embedding: cider.map(|(_, emb)| {
-                        emb[sel_idx * cider_emb_dim..(sel_idx + 1) * cider_emb_dim].to_vec()
+                    fusion_embedding: cider.map(|(row, (_, emb))| {
+                        emb[row * cider_emb_dim..(row + 1) * cider_emb_dim].to_vec()
                     }),
                 });
             }
