@@ -7,6 +7,48 @@ database:
   username: mongoadmin
   password: "" # Set via BOOM_DATABASE__PASSWORD environment variable
   srv: false
+# cutouts_storage configures where alert cutout images are stored.
+#
+# type: "mongo" (default) stores cutouts in MongoDB.
+#       "s3"    stores them in an S3-compatible bucket (e.g. rustfs).
+# Switch backends without editing this file by setting BOOM_CUTOUTS_STORAGE__TYPE.
+# Every field below can also be overridden via BOOM_CUTOUTS_STORAGE__<FIELD>
+# (e.g. BOOM_CUTOUTS_STORAGE__HOST). For Docker deployments the compose overlays
+# inject the correct type and all infrastructure settings automatically —
+# see README for the three cutout storage modes.
+cutouts_storage:
+  type: mongo  # or set via BOOM_CUTOUTS_STORAGE__TYPE
+
+  # --- MongoDB settings (active when type: mongo) ---
+  host: localhost      # or set via BOOM_CUTOUTS_STORAGE__HOST
+  port: 27017
+  name: boom           # same database as alerts; or set via BOOM_CUTOUTS_STORAGE__NAME
+  max_pool_size: 200
+  replica_set: null
+  username: mongoadmin  # or set via BOOM_CUTOUTS_STORAGE__USERNAME
+  password: ""          # or set via BOOM_CUTOUTS_STORAGE__PASSWORD
+  srv: false
+
+  # --- S3 settings (active when type: s3) ---
+  # All surveys share a single bucket, namespaced by a per-survey key prefix
+  # (e.g. ztf/12345.json, lsst/67890.json). This lets you point boom at a
+  # pre-provisioned remote bucket without creating one bucket per survey.
+  # Per-survey S3 lifecycle rules can still be applied using prefix filters.
+  bucket_name: boom-cutouts         # or set via BOOM_CUTOUTS_STORAGE__BUCKET_NAME
+  region: local                     # or set via BOOM_CUTOUTS_STORAGE__REGION
+  # endpoint_url is optional. Set it for S3-compatible services (rustfs, MinIO, Wasabi, …).
+  # Omit it when pointing at AWS S3 — the SDK derives the endpoint from the region automatically.
+  # Docker compose overlays inject this automatically; set BOOM_CUTOUTS_STORAGE__ENDPOINT_URL
+  # when running binaries directly against a non-AWS provider.
+  endpoint_url: http://rustfs:9000
+  access_key: ""                    # or set via BOOM_CUTOUTS_STORAGE__ACCESS_KEY
+  secret_key: ""                    # or set via BOOM_CUTOUTS_STORAGE__SECRET_KEY
+  credentials_provider: rustfs      # or set via BOOM_CUTOUTS_STORAGE__CREDENTIALS_PROVIDER
+  cache:
+    host: valkey-cutouts  # or set via BOOM_CUTOUTS_STORAGE__CACHE__HOST
+    port: 6379             # or set via BOOM_CUTOUTS_STORAGE__CACHE__PORT
+    ttl_seconds: 30        # or set via BOOM_CUTOUTS_STORAGE__CACHE__TTL_SECONDS
+    max_memory: "1024mb"   # or set via BOOM_CUTOUTS_STORAGE__CACHE__MAX_MEMORY
 api:
   domain: "localhost" # Set via BOOM_API__DOMAIN environment variable
   port: 4000 # Set via BOOM_API__PORT environment variable
@@ -90,48 +132,6 @@ kafka:
       group_id: "" # Set via BOOM_KAFKA__CONSUMER__WINTER__GROUP_ID environment variable
   producer:
     server: "localhost:9092" # Only one global producer for now (filter worker output)
-# cutouts_storage configures where alert cutout images are stored.
-#
-# type: "mongo" (default) stores cutouts in MongoDB.
-#       "s3"    stores them in an S3-compatible bucket (e.g. rustfs).
-# Switch backends without editing this file by setting BOOM_CUTOUTS_STORAGE__TYPE.
-# Every field below can also be overridden via BOOM_CUTOUTS_STORAGE__<FIELD>
-# (e.g. BOOM_CUTOUTS_STORAGE__HOST). For Docker deployments the compose overlays
-# inject the correct type and all infrastructure settings automatically —
-# see README for the three cutout storage modes.
-cutouts_storage:
-  type: mongo  # or set via BOOM_CUTOUTS_STORAGE__TYPE
-
-  # --- MongoDB settings (active when type: mongo) ---
-  host: localhost      # or set via BOOM_CUTOUTS_STORAGE__HOST
-  port: 27017
-  name: boom           # same database as alerts; or set via BOOM_CUTOUTS_STORAGE__NAME
-  max_pool_size: 200
-  replica_set: null
-  username: mongoadmin  # or set via BOOM_CUTOUTS_STORAGE__USERNAME
-  password: ""          # or set via BOOM_CUTOUTS_STORAGE__PASSWORD
-  srv: false
-
-  # --- S3 settings (active when type: s3) ---
-  # All surveys share a single bucket, namespaced by a per-survey key prefix
-  # (e.g. ztf/12345.json, lsst/67890.json). This lets you point boom at a
-  # pre-provisioned remote bucket without creating one bucket per survey.
-  # Per-survey S3 lifecycle rules can still be applied using prefix filters.
-  bucket_name: boom-cutouts         # or set via BOOM_CUTOUTS_STORAGE__BUCKET_NAME
-  region: local                     # or set via BOOM_CUTOUTS_STORAGE__REGION
-  # endpoint_url is optional. Set it for S3-compatible services (rustfs, MinIO, Wasabi, …).
-  # Omit it when pointing at AWS S3 — the SDK derives the endpoint from the region automatically.
-  # Docker compose overlays inject this automatically; set BOOM_CUTOUTS_STORAGE__ENDPOINT_URL
-  # when running binaries directly against a non-AWS provider.
-  endpoint_url: http://rustfs:9000
-  access_key: ""                    # or set via BOOM_CUTOUTS_STORAGE__ACCESS_KEY
-  secret_key: ""                    # or set via BOOM_CUTOUTS_STORAGE__SECRET_KEY
-  credentials_provider: rustfs      # or set via BOOM_CUTOUTS_STORAGE__CREDENTIALS_PROVIDER
-  cache:
-    host: valkey-cutouts  # or set via BOOM_CUTOUTS_STORAGE__CACHE__HOST
-    port: 6379             # or set via BOOM_CUTOUTS_STORAGE__CACHE__PORT
-    ttl_seconds: 30        # or set via BOOM_CUTOUTS_STORAGE__CACHE__TTL_SECONDS
-    max_memory: "1024mb"   # or set via BOOM_CUTOUTS_STORAGE__CACHE__MAX_MEMORY
 workers:
   ztf:
     command_interval: 500
@@ -185,36 +185,29 @@ workers:
       reference_night: "2026-07-15"
 crossmatch:
   ztf:
-    - catalog: PS1_DR1
-      radius: 2.0 # 2 arcseconds
-      use_distance: false
-      projection:
-        _id: 1
-        gMeanPSFMag: 1
-        gMeanPSFMagErr: 1
-        rMeanPSFMag: 1
-        rMeanPSFMagErr: 1
-        iMeanPSFMag: 1
-        iMeanPSFMagErr: 1
-        zMeanPSFMag: 1
-        zMeanPSFMagErr: 1
-        yMeanPSFMag: 1
-        yMeanPSFMagErr: 1
-        ra: 1
-        dec: 1
     - catalog: Gaia_DR3
       radius: 2.0 # 2 arcseconds
       use_distance: false
       projection:
         _id: 1
+        ra: 1
+        dec: 1
         parallax: 1
         parallax_error: 1
+        pm: 1
+        pmra: 1
+        pmra_error: 1
+        pmdec: 1
+        pmdec_error: 1
         phot_g_mean_mag: 1
         phot_bp_mean_mag: 1
         phot_rp_mean_mag: 1
-        ra: 1
-        dec: 1
-    - catalog: milliquas_v6
+        phot_g_n_obs: 1
+        phot_bp_n_obs: 1
+        phot_rp_n_obs: 1
+        ruwe: 1
+        phot_bp_rp_excess_factor: 1
+    - catalog: milliquas_v8
       radius: 2.0 # 2 arcseconds
       use_distance: false
       projection:
@@ -288,7 +281,7 @@ crossmatch:
         ra: 1
         dec: 1
         score: 1
-        magwhite: 1
+        mag_white: 1
       max_results: 3 # 3 nearest neighbors
     - catalog: NED
       radius: 300.0 # 300 arcseconds
@@ -347,36 +340,29 @@ crossmatch:
         photo_z_type: 1
   decam: []
   winter:
-    - catalog: PS1_DR1
-      radius: 2.0 # 2 arcseconds
-      use_distance: false
-      projection:
-        _id: 1
-        gMeanPSFMag: 1
-        gMeanPSFMagErr: 1
-        rMeanPSFMag: 1
-        rMeanPSFMagErr: 1
-        iMeanPSFMag: 1
-        iMeanPSFMagErr: 1
-        zMeanPSFMag: 1
-        zMeanPSFMagErr: 1
-        yMeanPSFMag: 1
-        yMeanPSFMagErr: 1
-        ra: 1
-        dec: 1
     - catalog: Gaia_DR3
       radius: 2.0 # 2 arcseconds
       use_distance: false
       projection:
         _id: 1
+        ra: 1
+        dec: 1
         parallax: 1
         parallax_error: 1
+        pm: 1
+        pmra: 1
+        pmra_error: 1
+        pmdec: 1
+        pmdec_error: 1
         phot_g_mean_mag: 1
         phot_bp_mean_mag: 1
         phot_rp_mean_mag: 1
-        ra: 1
-        dec: 1
-    - catalog: milliquas_v6
+        phot_g_n_obs: 1
+        phot_bp_n_obs: 1
+        phot_rp_n_obs: 1
+        ruwe: 1
+        phot_bp_rp_excess_factor: 1
+    - catalog: milliquas_v8
       radius: 2.0 # 2 arcseconds
       use_distance: false
       projection:

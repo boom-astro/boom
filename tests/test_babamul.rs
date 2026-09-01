@@ -52,7 +52,7 @@ fn create_lspsc_cross_matches(
         "dec": 30.002,
         "distance_arcsec": distance,
         "score": score,
-        "magwhite": 18.3
+        "mag_white": 18.3
     })];
 
     // Add additional matches unless single_match is true
@@ -64,7 +64,7 @@ fn create_lspsc_cross_matches(
                 "dec": 30.05,
                 "distance_arcsec": 1.5,  // Beyond stellar threshold
                 "score": 0.75,           // Above hosted threshold
-                "magwhite": 19.1
+                "mag_white": 19.1
             }),
             json!({
                 "_id": 1003,
@@ -72,7 +72,7 @@ fn create_lspsc_cross_matches(
                 "dec": 30.10,
                 "distance_arcsec": 5.0,  // Far match
                 "score": 0.45,           // Below hosted threshold
-                "magwhite": 20.2
+                "mag_white": 20.2
             }),
         ]);
     }
