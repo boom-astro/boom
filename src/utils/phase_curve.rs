@@ -14,10 +14,17 @@ use std::collections::HashMap;
 /// Fewer points than this cannot support a fit that is worth storing.
 pub const MIN_POINTS: usize = 8;
 
-/// Phase angle span, degrees, below which `g12` is left at its default: with
-/// every point at nearly one geometry the slope is unconstrained and fitting it
-/// only absorbs scatter.
-pub const MIN_PHASE_SPAN: f64 = 5.0;
+/// Phase angle span, degrees, below which `g12` is left at its default.
+///
+/// The slope is what the curve does *between* phase angles, so a short span
+/// gives almost no leverage on it and the scan settles wherever the noise is
+/// smallest -- usually against one end of the interval. A fitted `g12` pinned at
+/// 0 or 1 is that failure, and it biases the predicted magnitude for any later
+/// detection outside the range that was fitted.
+pub const MIN_PHASE_SPAN: f64 = 15.0;
+
+/// Points below which `g12` is left at its default, for the same reason.
+pub const MIN_POINTS_FOR_SLOPE: usize = 20;
 
 /// Floor on the reported scatter, magnitudes. A handful of points can agree by
 /// chance, and a zero here would divide a later comparison by the photometric
@@ -99,7 +106,7 @@ pub fn fit(points: &[Point]) -> Option<PhaseCurve> {
     let span = phases.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
         - phases.iter().cloned().fold(f64::INFINITY, f64::min);
 
-    let candidates: Vec<f64> = if span >= MIN_PHASE_SPAN {
+    let candidates: Vec<f64> = if span >= MIN_PHASE_SPAN && usable.len() >= MIN_POINTS_FOR_SLOPE {
         (0..=100).map(|i| i as f64 / 100.0).collect()
     } else {
         vec![DEFAULT_G12]
@@ -302,7 +309,7 @@ mod tests {
 
     #[test]
     fn test_fit_recovers_a_known_curve() {
-        let phases = [2.0, 5.0, 8.0, 12.0, 16.0, 20.0, 25.0, 30.0, 35.0, 40.0];
+        let phases: Vec<f64> = (0..24).map(|i| 2.0 + 1.7 * i as f64).collect();
         let curve = fit(&synthetic(15.5, 0.3, &phases)).expect("fit");
         assert!((curve.h - 15.5).abs() < 0.01, "h was {}", curve.h);
         assert!((curve.g12 - 0.3).abs() < 0.05, "g12 was {}", curve.g12);
@@ -345,7 +352,7 @@ mod tests {
 
     #[test]
     fn test_deviation_is_positive_when_brighter_than_the_curve() {
-        let phases: Vec<f64> = (0..20).map(|i| 2.0 + 2.0 * i as f64).collect();
+        let phases: Vec<f64> = (0..24).map(|i| 2.0 + 1.7 * i as f64).collect();
         let curve = fit(&synthetic(15.5, 0.3, &phases)).expect("fit");
 
         let on_curve = synthetic(15.5, 0.3, &[15.0])[0];
