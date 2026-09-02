@@ -49,10 +49,14 @@ pub fn compute_dlr(
         };
     }
 
-    // Rotate into galaxy ellipse frame
+    // Rotate into the galaxy ellipse frame. Position angle is measured from
+    // north towards east, so the major axis points along (sin PA, cos PA) in
+    // (east, north) -- north at PA=0, east at PA=90. Projecting onto an axis at
+    // PA measured from *east* instead reflects the frame about 45 degrees, which
+    // swaps the roles of a and b at PA=0 and is wrong by the axis ratio.
     let (sin_pa, cos_pa) = ellipse.pa_rad.sin_cos();
-    let x_maj = dra * cos_pa + ddec * sin_pa;
-    let y_min = -dra * sin_pa + ddec * cos_pa;
+    let x_maj = dra * sin_pa + ddec * cos_pa;
+    let y_min = dra * cos_pa - ddec * sin_pa;
 
     // Angle of transient in the ellipse frame
     let theta = y_min.atan2(x_maj);
@@ -89,27 +93,40 @@ mod tests {
     }
 
     #[test]
-    fn test_dlr_along_minor_axis() {
-        // Galaxy with PA=0: the major axis lies along RA, the minor along Dec.
-        // A transient offset purely in Dec therefore probes the *minor* axis,
-        // so the directional radius should come back as b.
+    fn test_dlr_along_major_axis_at_pa_zero() {
+        // PA is measured from north, so a galaxy at PA=0 has its major axis
+        // along Dec. A transient offset purely in Dec probes the major axis.
         let e = Ellipse::new(4.0, 2.0, 0.0).unwrap();
         let galaxy_dec = 0.0;
         let transient_dec = galaxy_dec + 2.0 / 3600.0;
         let result = compute_dlr(0.0, transient_dec, 0.0, galaxy_dec, &e);
         assert_close!(result.separation_arcsec, 2.0, epsilon = 0.01);
+        assert_close!(result.directional_radius, 4.0, epsilon = 0.01);
+        assert_close!(result.fractional_offset, 0.5, epsilon = 0.01);
+    }
+
+    #[test]
+    fn test_dlr_along_minor_axis_at_pa_zero() {
+        // Same galaxy, offset in RA instead: that is east, perpendicular to a
+        // PA=0 major axis, so it probes the minor axis.
+        let e = Ellipse::new(4.0, 2.0, 0.0).unwrap();
+        let result = compute_dlr(2.0 / 3600.0, 0.0, 0.0, 0.0, &e);
+        assert_close!(result.separation_arcsec, 2.0, epsilon = 0.01);
         assert_close!(result.directional_radius, 2.0, epsilon = 0.01);
         assert_close!(result.fractional_offset, 1.0, epsilon = 0.01);
     }
 
+    /// The convention itself, at the angle where getting it backwards is most
+    /// visible: at PA=90 the major axis lies east-west.
     #[test]
-    fn test_dlr_along_major_axis() {
-        // Same galaxy, but offset in RA → probes the major axis → radius = a.
-        let e = Ellipse::new(4.0, 2.0, 0.0).unwrap();
-        let result = compute_dlr(2.0 / 3600.0, 0.0, 0.0, 0.0, &e);
-        assert_close!(result.separation_arcsec, 2.0, epsilon = 0.01);
-        assert_close!(result.directional_radius, 4.0, epsilon = 0.01);
-        assert_close!(result.fractional_offset, 0.5, epsilon = 0.01);
+    fn test_dlr_convention_at_pa_ninety() {
+        let e = Ellipse::new(4.0, 2.0, 90.0).unwrap();
+
+        let east = compute_dlr(2.0 / 3600.0, 0.0, 0.0, 0.0, &e);
+        assert_close!(east.directional_radius, 4.0, epsilon = 0.01);
+
+        let north = compute_dlr(0.0, 2.0 / 3600.0, 0.0, 0.0, &e);
+        assert_close!(north.directional_radius, 2.0, epsilon = 0.01);
     }
 
     #[test]

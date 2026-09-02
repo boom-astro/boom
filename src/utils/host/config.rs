@@ -21,13 +21,25 @@ pub struct HostGalaxyConfig {
     pub max_dlr: f64,
     /// Floor on the semi-minor axis, in arcsec, for degenerate shapes.
     pub min_axis_arcsec: f64,
+    /// Axis ratio below which a shape is taken as unphysical and the row is
+    /// dropped rather than pinned.
+    pub min_axis_ratio: f64,
+    /// Axis ratio that a shape between `min_axis_ratio` and this is pinned to.
+    /// An absolute floor on the minor axis alone would flatten genuinely small
+    /// galaxies; a ratio floor bounds the elongation without touching size.
+    pub pinned_axis_ratio: f64,
     /// Most candidates to store per object.
     pub max_candidates: usize,
     /// Drop Legacy Survey rows typed as point sources; they have no galaxy
     /// extent and would otherwise contribute spurious tiny-DLR candidates.
     pub exclude_star_like: bool,
-    /// The morphological `type` value marking a point source.
-    pub star_type_value: String,
+    /// Morphological `type` values marking a row with no galaxy extent. `PSF`
+    /// is a point source; `DUP` is a Gaia duplicate, which carries no shape.
+    pub star_type_values: Vec<String>,
+    /// NED-LVS `objtype` values that are not host galaxies: quasars, absorption
+    /// and emission line systems, and lensed systems whose catalogued shape
+    /// describes the lens rather than anything a transient sits in.
+    pub ned_lvs_excluded_objtypes: Vec<String>,
     /// Include the redshift term in the posterior when both the transient and
     /// the galaxy have one.
     pub use_redshift: bool,
@@ -57,9 +69,15 @@ impl Default for HostGalaxyConfig {
             ls_dr10_catalog: LS_DR10.to_string(),
             max_dlr: 5.0,
             min_axis_arcsec: 0.05,
+            min_axis_ratio: 0.05,
+            pinned_axis_ratio: 0.1,
             max_candidates: 10,
             exclude_star_like: true,
-            star_type_value: "PSF".to_string(),
+            star_type_values: vec!["PSF".to_string(), "DUP".to_string()],
+            ned_lvs_excluded_objtypes: ["QSO", "AbLS", "EmLS", "EmObj", "Q_Lens", "G_Lens"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
             use_redshift: true,
             rex_min_shape_r_arcsec: 0.3,
             rex_min_snr: 5.0,

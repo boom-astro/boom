@@ -142,6 +142,9 @@ mod tests {
             objname: Some("test-galaxy".to_string()),
             catalog: Some("NED_LVS".to_string()),
             shape_from_image: false,
+            size_is_isophotal: true,
+            diam_survey: None,
+            orientation_is_nominal: false,
         }
     }
 

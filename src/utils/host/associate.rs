@@ -217,6 +217,9 @@ mod tests {
             objname: None,
             catalog: None,
             shape_from_image: false,
+            size_is_isophotal: true,
+            diam_survey: None,
+            orientation_is_nominal: false,
         }
     }
 

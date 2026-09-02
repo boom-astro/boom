@@ -66,9 +66,20 @@ pub const NED_LVS_REQUIRED_KEYS: &[&str] = &[
 ///   semi-major axis is `Diam / 2`.
 /// - `Diam_ba` is the minor-to-major axis ratio, giving `b = a * (b/a)`.
 /// - `Diam_pa` is the ellipse position angle in degrees east of north.
-pub fn galaxy_from_ned_lvs(doc: &Document) -> Option<GalaxyCandidate> {
+pub fn galaxy_from_ned_lvs(doc: &Document, config: &HostGalaxyConfig) -> Option<GalaxyCandidate> {
     let ra = opt_f64(doc, "ra")?;
     let dec = opt_f64(doc, "dec")?;
+
+    let objtype = opt_string(doc, "objtype");
+    if let Some(t) = objtype.as_deref() {
+        if config
+            .ned_lvs_excluded_objtypes
+            .iter()
+            .any(|excluded| excluded.eq_ignore_ascii_case(t))
+        {
+            return None;
+        }
+    }
 
     let diam = opt_f64(doc, "Diam").filter(|d| *d > 0.0)?;
     let a_arcsec = diam / 2.0;
@@ -78,8 +89,18 @@ pub fn galaxy_from_ned_lvs(doc: &Document) -> Option<GalaxyCandidate> {
     let axis_ratio = opt_f64(doc, "Diam_ba")
         .filter(|r| *r > 0.0 && *r <= 1.0)
         .unwrap_or(1.0);
+    let axis_ratio = bounded_axis_ratio(axis_ratio, config)?;
     let b_arcsec = a_arcsec * axis_ratio;
     let pa_deg = opt_f64(doc, "Diam_pa").unwrap_or(0.0);
+
+    // 2MASS diameters carry a position angle fixed at 90 degrees whether or not
+    // the source is elongated, so any association resting on the orientation of
+    // one of these wants a human eye on it.
+    let diam_survey = opt_string(doc, "Diam_survey");
+    let orientation_is_nominal = diam_survey
+        .as_deref()
+        .is_some_and(|s| s.eq_ignore_ascii_case("2MASS"))
+        && axis_ratio < 1.0;
 
     Some(GalaxyCandidate {
         ra,
@@ -93,11 +114,27 @@ pub fn galaxy_from_ned_lvs(doc: &Document) -> Option<GalaxyCandidate> {
         dist_mpc_method: opt_string(doc, "DistMpc_method"),
         mag: opt_f64(doc, "m_Ks"),
         mag_err: opt_f64(doc, "m_Ks_unc"),
-        objtype: opt_string(doc, "objtype"),
+        objtype,
         objname: opt_string(doc, "_id"),
         catalog: Some(NED_LVS.to_string()),
         shape_from_image: false,
+        size_is_isophotal: true,
+        diam_survey,
+        orientation_is_nominal,
     })
+}
+
+/// Bound an axis ratio away from the unphysical end.
+///
+/// `None` below `min_axis_ratio`: a shape that flat is a fit failure rather than
+/// a galaxy. Between there and `pinned_axis_ratio` the ratio is pinned, which
+/// bounds the elongation without shrinking the object -- a floor on the minor
+/// axis in arcsec would instead flatten genuinely small galaxies.
+fn bounded_axis_ratio(axis_ratio: f64, config: &HostGalaxyConfig) -> Option<f64> {
+    if !axis_ratio.is_finite() || axis_ratio < config.min_axis_ratio {
+        return None;
+    }
+    Some(axis_ratio.max(config.pinned_axis_ratio).min(1.0))
 }
 
 /// Convert a Legacy Survey (Tractor) cross-match document into a
@@ -121,15 +158,14 @@ fn rejected_as_marginal_rex(doc: &Document, config: &HostGalaxyConfig) -> bool {
     if shape_r < config.rex_min_shape_r_arcsec {
         return true;
     }
-    // snr = flux * sqrt(flux_ivar); a non-positive flux or ivar means no usable
-    // measurement, which is itself disqualifying.
-    match (opt_f64(doc, "flux_r"), opt_f64(doc, "flux_ivar_r")) {
-        (Some(flux), Some(ivar)) if flux > 0.0 && ivar > 0.0 => {
-            if flux * ivar.sqrt() < config.rex_min_snr {
-                return true;
-            }
+    // snr = flux * sqrt(flux_ivar). Judge only when both columns are there:
+    // an ingest without `flux_ivar_r` cannot measure signal-to-noise at all, and
+    // rejecting on a measurement that was never made drops every REX row rather
+    // than the marginal ones. Size and blending still apply.
+    if let (Some(flux), Some(ivar)) = (opt_f64(doc, "flux_r"), opt_f64(doc, "flux_ivar_r")) {
+        if flux > 0.0 && ivar > 0.0 && flux * ivar.sqrt() < config.rex_min_snr {
+            return true;
         }
-        _ => return true,
     }
     // Absent fracflux is treated as unblended: the column is only missing on
     // older ingests, and rejecting on it would drop every row from those.
@@ -155,7 +191,11 @@ pub fn galaxy_from_ls_dr10(doc: &Document, config: &HostGalaxyConfig) -> Option<
     let objtype = opt_string(doc, "objtype");
     if config.exclude_star_like {
         if let Some(t) = objtype.as_deref() {
-            if t == config.star_type_value {
+            if config
+                .star_type_values
+                .iter()
+                .any(|excluded| excluded.eq_ignore_ascii_case(t))
+            {
                 return None;
             }
         }
@@ -171,14 +211,19 @@ pub fn galaxy_from_ls_dr10(doc: &Document, config: &HostGalaxyConfig) -> Option<
 
     let mut ellipse =
         Ellipse::from_tractor(shape_r, shape_e1, shape_e2, config.min_axis_arcsec).ok()?;
+    bounded_axis_ratio(ellipse.axis_ratio, config)?;
 
     // Legacy gives a half-light radius; NED-LVS gives a D25 isophotal diameter.
     // Rescale to the isophote so the two catalogs rank on one scale. A row that
-    // cannot be converted keeps R_e, which undersizes it -- the alternative is
-    // dropping a real galaxy for want of one column.
-    if let Some(a25) = isophotal_semi_major_for(doc, &ellipse, config) {
-        ellipse = ellipse.scaled_to_semi_major(a25, config.min_axis_arcsec);
-    }
+    // cannot be converted keeps R_e, which undersizes it against every NED-LVS
+    // row it is ranked beside -- reported rather than silently mixed in.
+    let size_is_isophotal = match isophotal_semi_major_for(doc, &ellipse, config) {
+        Some(a25) => {
+            ellipse = ellipse.scaled_to_semi_major(a25, config.min_axis_arcsec);
+            true
+        }
+        None => false,
+    };
 
     Some(GalaxyCandidate {
         ra,
@@ -196,6 +241,9 @@ pub fn galaxy_from_ls_dr10(doc: &Document, config: &HostGalaxyConfig) -> Option<
         objname: opt_string(doc, "_id"),
         catalog: Some(LS_DR10.to_string()),
         shape_from_image: false,
+        size_is_isophotal,
+        diam_survey: None,
+        orientation_is_nominal: false,
     })
 }
 
@@ -225,7 +273,11 @@ pub fn collect_galaxies(
 ) -> Vec<GalaxyCandidate> {
     let mut galaxies: Vec<GalaxyCandidate> = xmatches
         .get(&config.ned_lvs_catalog)
-        .map(|docs| docs.iter().filter_map(galaxy_from_ned_lvs).collect())
+        .map(|docs| {
+            docs.iter()
+                .filter_map(|d| galaxy_from_ned_lvs(d, config))
+                .collect()
+        })
         .unwrap_or_default();
 
     let Some(ls_docs) = xmatches.get(&config.ls_dr10_catalog) else {
@@ -294,7 +346,7 @@ mod tests {
 
     #[test]
     fn test_from_ned_lvs_maps_diameter_to_semi_major() {
-        let g = galaxy_from_ned_lvs(&ned_lvs_doc()).unwrap();
+        let g = galaxy_from_ned_lvs(&ned_lvs_doc(), &HostGalaxyConfig::default()).unwrap();
         // diam is the full major-axis diameter (2a), so a = diam/2
         assert_close!(g.a_arcsec, 222.0);
         assert_close!(g.b_arcsec, 222.0 * 0.87);
@@ -312,17 +364,17 @@ mod tests {
         d.insert("Diam", Bson::Null);
         d.insert("Diam_ba", Bson::Null);
         d.insert("Diam_pa", Bson::Null);
-        assert!(galaxy_from_ned_lvs(&d).is_none());
+        assert!(galaxy_from_ned_lvs(&d, &HostGalaxyConfig::default()).is_none());
 
         // Omitted entirely (pre-null-fix documents) must behave the same.
         let mut d = ned_lvs_doc();
         d.remove("Diam");
-        assert!(galaxy_from_ned_lvs(&d).is_none());
+        assert!(galaxy_from_ned_lvs(&d, &HostGalaxyConfig::default()).is_none());
 
         // A zero diameter is not a usable shape either.
         let mut d = ned_lvs_doc();
         d.insert("Diam", 0.0_f64);
-        assert!(galaxy_from_ned_lvs(&d).is_none());
+        assert!(galaxy_from_ned_lvs(&d, &HostGalaxyConfig::default()).is_none());
     }
 
     #[test]
@@ -330,7 +382,7 @@ mod tests {
         let mut d = ned_lvs_doc();
         d.insert("Diam_ba", Bson::Null);
         d.insert("Diam_pa", Bson::Null);
-        let g = galaxy_from_ned_lvs(&d).unwrap();
+        let g = galaxy_from_ned_lvs(&d, &HostGalaxyConfig::default()).unwrap();
         assert_close!(g.b_arcsec, g.a_arcsec);
         assert_close!(g.pa_deg, 0.0);
     }
@@ -339,7 +391,7 @@ mod tests {
     fn test_from_ned_lvs_requires_a_position() {
         let mut d = ned_lvs_doc();
         d.insert("ra", Bson::Null);
-        assert!(galaxy_from_ned_lvs(&d).is_none());
+        assert!(galaxy_from_ned_lvs(&d, &HostGalaxyConfig::default()).is_none());
     }
 
     #[test]
@@ -347,7 +399,7 @@ mod tests {
         // Absent string columns arrive as "" from the ingest.
         let mut d = ned_lvs_doc();
         d.insert("objtype", "");
-        let g = galaxy_from_ned_lvs(&d).unwrap();
+        let g = galaxy_from_ned_lvs(&d, &HostGalaxyConfig::default()).unwrap();
         assert!(g.objtype.is_none());
     }
 
@@ -358,17 +410,17 @@ mod tests {
         let mut d = ned_lvs_doc();
         d.insert("DistMpc", 16.8_f64);
         d.insert("DistMpc_method", "zIndependent");
-        let g = galaxy_from_ned_lvs(&d).unwrap();
+        let g = galaxy_from_ned_lvs(&d, &HostGalaxyConfig::default()).unwrap();
         assert_close!(g.dist_mpc.unwrap(), 16.8);
         assert_eq!(g.dist_mpc_method.as_deref(), Some("zIndependent"));
 
         let mut d = ned_lvs_doc();
         d.insert("DistMpc", 3200.0_f64);
         d.insert("DistMpc_method", "Redshift");
-        let g = galaxy_from_ned_lvs(&d).unwrap();
+        let g = galaxy_from_ned_lvs(&d, &HostGalaxyConfig::default()).unwrap();
         assert_eq!(g.dist_mpc_method.as_deref(), Some("Redshift"));
 
-        let g = galaxy_from_ned_lvs(&ned_lvs_doc()).unwrap();
+        let g = galaxy_from_ned_lvs(&ned_lvs_doc(), &HostGalaxyConfig::default()).unwrap();
         assert!(g.dist_mpc.is_none());
         assert!(g.dist_mpc_method.is_none());
     }
@@ -562,12 +614,24 @@ mod legacy_shape_tests {
     // No flux or no inverse variance means no signal-to-noise can be formed;
     // that is a disqualifying absence, not a neutral one.
     #[test]
-    fn test_rex_without_a_usable_measurement_is_rejected() {
+    fn test_rex_without_a_signal_to_noise_measurement_is_still_judged_on_size() {
+        // An ingest without these columns cannot measure signal-to-noise at all.
+        // Rejecting on a measurement that was never made drops every REX row --
+        // around 40% of Legacy rows -- rather than the marginal ones.
         for key in ["flux_r", "flux_ivar_r"] {
             let mut d = good_rex();
             d.remove(key);
-            assert!(!accepted(&d), "REX missing {key} should be rejected");
+            assert!(
+                accepted(&d),
+                "REX missing {key} has no S/N to judge, so size and blending decide"
+            );
         }
+
+        // The size cut still applies to such a row.
+        let mut small = good_rex();
+        small.remove("flux_ivar_r");
+        small.insert("shape_r", 0.05_f64);
+        assert!(!accepted(&small), "an unmeasurable REX is still too small");
     }
 
     // The cuts are specific to REX: an exponential or de Vaucouleurs fit is a
@@ -629,5 +693,113 @@ mod legacy_shape_tests {
             "axis ratio changed: {q_converted} vs {q_plain}"
         );
         assert!(converted.a_arcsec > plain.a_arcsec);
+    }
+}
+
+#[cfg(test)]
+mod review_tests {
+    use super::*;
+    use mongodb::bson::doc;
+
+    fn ned(objtype: &str, ba: f64, survey: &str) -> Document {
+        doc! {
+            "_id": "NGC 1234", "ra": 10.0, "dec": 20.0,
+            "Diam": 60.0, "Diam_ba": ba, "Diam_pa": 90.0,
+            "objtype": objtype, "Diam_survey": survey,
+        }
+    }
+
+    /// Quasars, line systems and lensed systems are catalogued in NED-LVS but
+    /// are not things a transient sits inside.
+    #[test]
+    fn test_non_host_object_types_are_excluded() {
+        let config = HostGalaxyConfig::default();
+        for objtype in ["QSO", "AbLS", "EmLS", "EmObj", "Q_Lens", "G_Lens"] {
+            assert!(
+                galaxy_from_ned_lvs(&ned(objtype, 0.5, "SDSS"), &config).is_none(),
+                "{objtype} should not be a host candidate"
+            );
+        }
+        assert!(galaxy_from_ned_lvs(&ned("G", 0.5, "SDSS"), &config).is_some());
+    }
+
+    /// A ratio floor bounds elongation without shrinking the galaxy, where an
+    /// absolute floor on the minor axis flattens genuinely small ones.
+    #[test]
+    fn test_axis_ratio_is_bounded_rather_than_the_minor_axis() {
+        let config = HostGalaxyConfig::default();
+
+        // Below the physical floor: a fit failure, not a galaxy.
+        assert!(galaxy_from_ned_lvs(&ned("G", 0.02, "SDSS"), &config).is_none());
+
+        // Between the floors: pinned, and the semi-major axis is untouched.
+        let pinned = galaxy_from_ned_lvs(&ned("G", 0.07, "SDSS"), &config).expect("pinned");
+        assert_close!(pinned.a_arcsec, 30.0);
+        assert_close!(pinned.b_arcsec, 30.0 * config.pinned_axis_ratio);
+
+        // Above them: untouched.
+        let kept = galaxy_from_ned_lvs(&ned("G", 0.4, "SDSS"), &config).expect("kept");
+        assert_close!(kept.b_arcsec, 30.0 * 0.4);
+    }
+
+    /// 2MASS diameters carry a position angle fixed at 90 degrees, so an
+    /// elongated one is flagged for a human rather than trusted.
+    #[test]
+    fn test_a_2mass_orientation_is_flagged_as_nominal() {
+        let config = HostGalaxyConfig::default();
+
+        let two_mass = galaxy_from_ned_lvs(&ned("G", 0.4, "2MASS"), &config).expect("2mass");
+        assert_eq!(two_mass.diam_survey.as_deref(), Some("2MASS"));
+        assert!(two_mass.orientation_is_nominal);
+
+        // Round: the position angle carries no information either way.
+        let round = galaxy_from_ned_lvs(&ned("G", 1.0, "2MASS"), &config).expect("round");
+        assert!(!round.orientation_is_nominal);
+
+        let sdss = galaxy_from_ned_lvs(&ned("G", 0.4, "SDSS"), &config).expect("sdss");
+        assert!(!sdss.orientation_is_nominal);
+    }
+
+    /// Gaia duplicates carry no shape, so they are dropped alongside point
+    /// sources rather than contributing a candidate.
+    #[test]
+    fn test_duplicate_rows_are_excluded_with_point_sources() {
+        let config = HostGalaxyConfig::default();
+        for objtype in ["PSF", "DUP"] {
+            let d = doc! {
+                "_id": "x", "ra": 10.0, "dec": 20.0, "objtype": objtype,
+                "shape_r": 2.0, "shape_e1": 0.1, "shape_e2": 0.0, "flux_r": 100.0,
+            };
+            assert!(
+                galaxy_from_ls_dr10(&d, &config).is_none(),
+                "{objtype} has no galaxy extent"
+            );
+        }
+    }
+
+    /// A Legacy row that cannot be converted to an isophotal size keeps its
+    /// half-light radius, which undersizes it against catalogued diameters. The
+    /// candidate says so rather than passing it off as the same quantity.
+    #[test]
+    fn test_a_half_light_fallback_is_reported() {
+        let config = HostGalaxyConfig::default();
+        let base = doc! {
+            "_id": "x", "ra": 10.0, "dec": 20.0, "objtype": "EXP",
+            "shape_r": 2.0, "shape_e1": 0.1, "shape_e2": 0.0, "flux_r": 100.0,
+        };
+        let converted = galaxy_from_ls_dr10(&base, &config).expect("converted");
+        assert!(converted.size_is_isophotal);
+
+        // No flux, so no total magnitude, so no isophote.
+        let mut no_flux = base.clone();
+        no_flux.remove("flux_r");
+        let fallback = galaxy_from_ls_dr10(&no_flux, &config).expect("still a candidate");
+        assert!(!fallback.size_is_isophotal);
+
+        // SER rows carry no Sersic index in the current ingest, so they fall back too.
+        let mut ser = base.clone();
+        ser.insert("objtype", "SER");
+        let ser = galaxy_from_ls_dr10(&ser, &config).expect("ser");
+        assert!(!ser.size_is_isophotal);
     }
 }

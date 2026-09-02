@@ -84,6 +84,15 @@ pub struct GalaxyCandidate {
     pub catalog: Option<String>,
     /// Whether shape was derived from image analysis (true) or catalog (false)
     pub shape_from_image: bool,
+    /// Whether `a_arcsec` is the D25-equivalent isophotal size, or a half-light
+    /// radius kept because the conversion had no Sersic index or flux to use.
+    /// A half-light radius undersizes the galaxy against catalogued diameters,
+    /// so a match resting on one is less certain than its offset suggests.
+    pub size_is_isophotal: bool,
+    /// Survey the catalogued diameter came from, where the catalog says.
+    pub diam_survey: Option<String>,
+    /// Whether the position angle is a catalogue default rather than measured.
+    pub orientation_is_nominal: bool,
 }
 
 /// Result of host association for a single galaxy candidate.
