@@ -507,7 +507,11 @@ curl -sL https://caltech.box.com/shared/static/qdois5qq2lmvp02ri50fum80vzr54505.
 
 Download the NED catalog for crossmatching.
 ```
-uvx gdown "https://drive.google.com/uc?id=1BG46oLMbONXhIqiPrepSnhKim1xfiVbB" -O ./data/alerts/kowalski.NED.json.gz
+wget -q https://github.com/boom-astro/boom/releases/download/test-data-v1/BOOM.NED.json.gz -O ./data/alerts/BOOM.NED.json.gz
+```
+**For macOS:**
+```
+curl -sL https://github.com/boom-astro/boom/releases/download/test-data-v1/BOOM.NED.json.gz -o ./data/alerts/BOOM.NED.json.gz
 ```
 
 ### Start Benchmark

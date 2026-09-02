@@ -48,7 +48,7 @@ pub enum Band {
     Y,
     #[serde(rename = "u")]
     U,
-    // Near-infrared bands (e.g. WINTER: fid 0=Y, 1=J, 2=H, 3=K)
+    // Near-infrared bands (e.g. WINTER: fid 1=Y, 2=J, 3=H)
     #[serde(rename = "j")]
     J,
     #[serde(rename = "h")]
@@ -93,12 +93,17 @@ pub struct PhotometryMag {
 pub struct BandRateProperties {
     pub rate: f32,
     pub rate_error: f32,
-    /// Chi-square of the fit. Always defined; exactly zero for a two-point fit,
-    /// where the line passes through both points.
-    pub chi2: f32,
+    /// Chi-square of the fit. Exactly zero for a two-point fit, where the line
+    /// passes through both points.
+    ///
+    /// `None` only on alerts enriched before this was reported; every fit
+    /// computed since defines it. It is not defaulted to zero, because zero is a
+    /// value a real two-point fit takes and the two must stay distinguishable.
+    pub chi2: Option<f32>,
     /// Degrees of freedom, `nb_data - 2`. Zero for a two-point fit, which is
-    /// what makes `red_chi2` undefined there.
-    pub dof: i32,
+    /// what makes `red_chi2` undefined there. `None` on the same alerts `chi2`
+    /// is, and for the same reason.
+    pub dof: Option<i32>,
     /// Chi-square per degree of freedom, null when `dof` is zero: a two-point
     /// fit leaves nothing to test goodness of fit against. Null means "unknown",
     /// not "good" or "bad", and a range cut matches neither null nor absent --
@@ -383,8 +388,8 @@ fn weighted_least_squares_centered(
     Some(BandRateProperties {
         rate: a,
         rate_error: a_err,
-        chi2,
-        dof: dof as i32,
+        chi2: Some(chi2),
+        dof: Some(dof as i32),
         red_chi2: reduced_chi2,
         nb_data: n as i32,
         dt: x[n - 1] - x[0],
@@ -680,8 +685,8 @@ mod tests {
         // Two points define the line exactly: chi2 is 0 with no degrees of
         // freedom left, so there is no reduced chi2 to report.
         assert!(result.red_chi2.is_none());
-        assert_eq!(result.dof, 0);
-        assert!(result.chi2.abs() < 1e-9);
+        assert_eq!(result.dof, Some(0));
+        assert!(result.chi2.expect("chi2").abs() < 1e-9);
         assert_eq!(result.nb_data, 2);
         assert!((result.dt - 1.0).abs() < 1e-6);
     }
@@ -1215,12 +1220,46 @@ mod goodness_of_fit_tests {
     }
 
     // Two points define a line exactly, leaving no degrees of freedom.
+    /// Alerts enriched before chi2 and dof were reported have neither field.
+    /// They must still read back, or every query touching one fails.
+    #[test]
+    fn test_a_fit_written_before_chi2_existed_still_deserializes() {
+        // Copied from a production alert (ZTF25acjmhji, r.fading): `red_chi2`
+        // is present and null, `chi2` and `dof` are absent entirely.
+        let legacy = mongodb::bson::doc! {
+            "rate": 0.360_560_804_605_484,
+            "rate_error": 0.085_027_076_303_958_89,
+            "red_chi2": mongodb::bson::Bson::Null,
+            "nb_data": 2,
+            "dt": 0.977_847_218_513_488_8,
+        };
+        let fit: BandRateProperties =
+            mongodb::bson::from_document(legacy).expect("a pre-chi2 fit must still read");
+
+        assert!(fit.chi2.is_none());
+        assert!(fit.dof.is_none());
+        assert!(fit.red_chi2.is_none());
+        assert_eq!(fit.nb_data, 2);
+    }
+
+    /// A fit written since carries both, and zero stays distinguishable from
+    /// absent -- a two-point fit really does have chi2 zero.
+    #[test]
+    fn test_a_two_point_fit_reports_zero_rather_than_absent() {
+        let fit =
+            weighted_least_squares_centered(&[0.0, 1.0], &[20.0, 19.0], &[0.1, 0.1]).expect("fit");
+        assert_eq!(fit.dof, Some(0));
+        assert!(fit.chi2.expect("chi2 is reported").abs() < 1e-9);
+        assert!(fit.red_chi2.is_none());
+    }
+
     #[test]
     fn test_two_point_fit_has_no_reduced_chi2_but_a_real_chi2() {
         let r = fit(&[0.0, 1.0], &[20.0, 19.0], &[0.1, 0.1]);
-        assert_eq!(r.dof, 0);
+        assert_eq!(r.dof, Some(0));
         assert_eq!(r.nb_data, 2);
-        assert!(r.chi2.abs() < 1e-9, "exact fit, got chi2 = {}", r.chi2);
+        let chi2 = r.chi2.expect("chi2");
+        assert!(chi2.abs() < 1e-9, "exact fit, got chi2 = {}", chi2);
         assert!(r.red_chi2.is_none());
     }
 
@@ -1232,8 +1271,11 @@ mod goodness_of_fit_tests {
             let y: Vec<f32> = (0..n).map(|i| 20.0 - 0.1 * i as f32).collect();
             let s = vec![0.1_f32; n];
             let r = fit(&x, &y, &s);
-            assert!(r.chi2.is_finite(), "chi2 must be defined at n = {n}");
-            assert_eq!(r.dof, (n as i32) - 2);
+            assert!(
+                r.chi2.is_some_and(|c| c.is_finite()),
+                "chi2 must be defined at n = {n}"
+            );
+            assert_eq!(r.dof, Some((n as i32) - 2));
             assert_eq!(r.red_chi2.is_some(), n > 2);
         }
     }
@@ -1242,8 +1284,8 @@ mod goodness_of_fit_tests {
     fn test_reduced_chi2_is_chi2_over_dof() {
         // Three points not on a line, so the fit leaves a residual.
         let r = fit(&[0.0, 1.0, 2.0], &[20.0, 19.0, 19.5], &[0.1, 0.1, 0.1]);
-        assert_eq!(r.dof, 1);
-        let expected = r.chi2 / r.dof as f32;
+        assert_eq!(r.dof, Some(1));
+        let expected = r.chi2.expect("chi2") / r.dof.expect("dof") as f32;
         assert!((r.red_chi2.unwrap() - expected).abs() < 1e-6);
     }
 
@@ -1258,7 +1300,10 @@ mod goodness_of_fit_tests {
         assert!(!passes_range_cut(&sparse), "this is the trap");
 
         // With chi2/dof the same intent is expressible without dropping it.
-        let passes_with_dof = |b: &BandRateProperties| b.dof == 0 || b.chi2 <= 2.0 * b.dof as f32;
+        let passes_with_dof = |b: &BandRateProperties| match (b.chi2, b.dof) {
+            (Some(chi2), Some(dof)) => dof == 0 || chi2 <= 2.0 * dof as f32,
+            _ => false,
+        };
         assert!(passes_with_dof(&clean));
         assert!(passes_with_dof(&sparse));
     }
