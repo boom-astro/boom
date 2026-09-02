@@ -411,6 +411,9 @@ crossmatch:
         shape_r: 1
         shape_e1: 1
         shape_e2: 1
+        sersic: 1
+        flux_ivar_r: 1
+        fracflux_r: 1
   lsst:
     - catalog: LSPSC
       radius: 30.0
@@ -646,6 +649,9 @@ crossmatch:
         shape_r: 1
         shape_e1: 1
         shape_e2: 1
+        sersic: 1
+        flux_ivar_r: 1
+        fracflux_r: 1
   decam: []
   winter:
     - catalog: Gaia_DR3
@@ -786,3 +792,6 @@ crossmatch:
         shape_r: 1
         shape_e1: 1
         shape_e2: 1
+        sersic: 1
+        flux_ivar_r: 1
+        fracflux_r: 1
