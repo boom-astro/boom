@@ -269,6 +269,9 @@ crossmatch:
         shape_r: 1
         shape_e1: 1
         shape_e2: 1
+        sersic: 1
+        flux_ivar_r: 1
+        fracflux_r: 1
   ztf:
     - catalog: Gaia_DR3
       radius: 2.0
@@ -494,3 +497,6 @@ crossmatch:
         shape_r: 1
         shape_e1: 1
         shape_e2: 1
+        sersic: 1
+        flux_ivar_r: 1
+        fracflux_r: 1
