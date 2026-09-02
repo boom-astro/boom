@@ -61,10 +61,10 @@ jobs:
           BUILDX_BAKE_ENTITLEMENTS_FS: 0
       - name: Setup uv
         uses: astral-sh/setup-uv@v5
-      - name: Download NED catalog from Google Drive
+      - name: Download NED catalog
         run: |
           mkdir -p ./data/alerts
-          uvx gdown https://drive.google.com/uc?id=1BG46oLMbONXhIqiPrepSnhKim1xfiVbB -O ./data/alerts/kowalski.NED.json.gz
+          wget -q https://github.com/boom-astro/boom/releases/download/test-data-v1/BOOM.NED.json.gz -O ./data/alerts/BOOM.NED.json.gz
       - name: Download auxiliary ZTF alerts from Caltech Box
         run: wget -q https://caltech.box.com/shared/static/qdois5qq2lmvp02ri50fum80vzr54505.gz -O ./data/alerts/boom_throughput.ZTF_alerts_aux.dump.gz
       - name: Run test
