@@ -249,7 +249,8 @@ crossmatch:
       distance_max_near: 300.0
       # DESI is spectroscopic and full of stars, which sit at z ~ 0 and so have
       # no meaningful projected distance. Naming the type column keeps them from
-      # being ranked as though they were very nearby galaxies.
+      # being ranked as though they were very nearby galaxies. QSO is left out
+      # deliberately: it is a plausible counterpart, so it ranks like a galaxy.
       type_key: "spectype"
       stellar_types: ["STAR"]
       projection:
@@ -320,7 +321,8 @@ crossmatch:
       distance_max_near: 300.0
       # DESI is spectroscopic and full of stars, which sit at z ~ 0 and so have
       # no meaningful projected distance. Naming the type column keeps them from
-      # being ranked as though they were very nearby galaxies.
+      # being ranked as though they were very nearby galaxies. QSO is left out
+      # deliberately: it is a plausible counterpart, so it ranks like a galaxy.
       type_key: "spectype"
       stellar_types: ["STAR"]
       projection:
@@ -414,7 +416,8 @@ crossmatch:
       distance_max_near: 300.0
       # DESI is spectroscopic and full of stars, which sit at z ~ 0 and so have
       # no meaningful projected distance. Naming the type column keeps them from
-      # being ranked as though they were very nearby galaxies.
+      # being ranked as though they were very nearby galaxies. QSO is left out
+      # deliberately: it is a plausible counterpart, so it ranks like a galaxy.
       type_key: "spectype"
       stellar_types: ["STAR"]
       projection:
