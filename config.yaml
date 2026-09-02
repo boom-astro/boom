@@ -299,6 +299,9 @@ crossmatch:
         Diam: 1
         Diam_ba: 1
         Diam_pa: 1
+        # 2MASS diameters carry a position angle fixed at 90 degrees whether or
+        # not the source is elongated, so the provenance is needed to flag them.
+        Diam_survey: 1
         DistMpc: 1
         DistMpc_method: 1
         m_Ks: 1 # inert until use_absmag is implemented
@@ -401,6 +404,9 @@ crossmatch:
         Diam: 1
         Diam_ba: 1
         Diam_pa: 1
+        # 2MASS diameters carry a position angle fixed at 90 degrees whether or
+        # not the source is elongated, so the provenance is needed to flag them.
+        Diam_survey: 1
         DistMpc: 1
         DistMpc_method: 1
         m_Ks: 1 # inert until use_absmag is implemented
@@ -533,6 +539,9 @@ crossmatch:
         Diam: 1
         Diam_ba: 1
         Diam_pa: 1
+        # 2MASS diameters carry a position angle fixed at 90 degrees whether or
+        # not the source is elongated, so the provenance is needed to flag them.
+        Diam_survey: 1
         DistMpc: 1
         DistMpc_method: 1
         m_Ks: 1 # inert until use_absmag is implemented

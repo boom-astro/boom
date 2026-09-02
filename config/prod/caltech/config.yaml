@@ -170,9 +170,17 @@ workers:
 # Enabling this requires the galaxy catalogs below to be ingested AND listed in
 # the survey's `crossmatch` block, so their shape columns are projected into the
 # match documents:
-#   NED_LVS  -> Diam, Diam_ba, Diam_pa (plus DistMpc, DistMpc_method, z)
-#   LSDR10   -> shape_r, shape_e1, shape_e2, objtype, sersic, flux_r,
-#               flux_ivar_r, fracflux_r
+#   NED_LVS  -> Diam, Diam_ba, Diam_pa, Diam_survey
+#               (plus DistMpc, DistMpc_method, z)
+#   LSDR10   -> shape_r, shape_e1, shape_e2, objtype, flux_r
+#               and, where the ingest provides them: sersic, flux_ivar_r,
+#               fracflux_r
+#
+# The three optional Legacy columns each degrade a specific step rather than
+# failing: without `sersic` a SER row has no index and keeps its half-light
+# radius (reported as `size_is_isophotal: false`), without `flux_ivar_r` a REX
+# row cannot be judged on signal-to-noise and is decided on size and blending
+# alone, and without `fracflux_r` a row is taken as unblended.
 # Field names are the ones the catalog ingest writes, which are not always the
 # source column names: the Legacy `type` column is stored as `objtype`.
 # NED-LVS is preferred where it has a diameter; Legacy Survey fills in the rest.
@@ -701,6 +709,9 @@ crossmatch:
         Diam: 1
         Diam_ba: 1
         Diam_pa: 1
+        # 2MASS diameters carry a position angle fixed at 90 degrees whether or
+        # not the source is elongated, so the provenance is needed to flag them.
+        Diam_survey: 1
         DistMpc: 1
         DistMpc_method: 1
         m_Ks: 1 # inert until use_absmag is implemented
