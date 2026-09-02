@@ -111,7 +111,7 @@ impl SharedModels {
                     id,
                     stream_ptr,
                 )?,
-                BtsBotModel::new_on_device("data/models/btsbot-v1.0.1.onnx", id, stream_ptr)?,
+                BtsBotModel::new_on_device("data/models/btsbot-v2.0.0.onnx", id, stream_ptr)?,
             ),
             None => (
                 AcaiModel::new("data/models/acai_h.d1_dnn_20201130.onnx")?,
@@ -119,7 +119,7 @@ impl SharedModels {
                 AcaiModel::new("data/models/acai_v.d1_dnn_20201130.onnx")?,
                 AcaiModel::new("data/models/acai_o.d1_dnn_20201130.onnx")?,
                 AcaiModel::new("data/models/acai_b.d1_dnn_20201130.onnx")?,
-                BtsBotModel::new("data/models/btsbot-v1.0.1.onnx")?,
+                BtsBotModel::new("data/models/btsbot-v2.0.0.onnx")?,
             ),
         };
 

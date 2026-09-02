@@ -27,15 +27,27 @@ impl Model for BtsBotModel {
         metadata_features: &Array<f32, Dim<[usize; 2]>>,
         image_features: &Array<f32, Dim<[usize; 4]>>,
     ) -> Result<Vec<f32>, ModelError> {
+        // The shared triplet is built channels-last for the ACAI models, which are
+        // TensorFlow exports. BTSbot is a PyTorch export and reads channels-first,
+        // so it is the one that converts.
+        let channels_first = image_features
+            .view()
+            .permuted_axes([0, 3, 1, 2])
+            .as_standard_layout()
+            .to_owned();
+
         let model_inputs = inputs! {
-            "triplet" => TensorRef::from_array_view(image_features)?,
+            "image" => TensorRef::from_array_view(&channels_first)?,
             "metadata" => TensorRef::from_array_view(metadata_features)?,
         };
 
         let outputs = self.model.run(model_inputs)?;
 
-        match outputs["fc_out"].try_extract_tensor::<f32>() {
-            Ok((_, scores)) => Ok(scores.to_vec()),
+        // v2 emits logits where v1 emitted a probability. Filters cut on this
+        // score directly, so it is squashed back into [0, 1] here rather than
+        // changing what every threshold means.
+        match outputs["logits"].try_extract_tensor::<f32>() {
+            Ok((_, logits)) => Ok(logits.iter().map(|x| 1.0 / (1.0 + (-x).exp())).collect()),
             Err(_) => Err(ModelError::ModelOutputToVecError),
         }
     }
@@ -173,5 +185,73 @@ impl BtsBotModel {
             sky,
             faintestmag as f32,
         ])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MODEL: &str = "data/models/btsbot-v2.0.0.onnx";
+
+    /// Loads the shipped model and runs it the way enrichment does, with a
+    /// channels-last triplet.
+    ///
+    /// Pins the three things that changed between v1 and v2 and that a type
+    /// check cannot catch: the tensor names, the channel order, and that the
+    /// score is a probability rather than the logit the model emits.
+    #[test]
+    fn test_the_shipped_model_scores_a_channels_last_triplet() {
+        let mut model = BtsBotModel::new(MODEL).expect("the shipped model loads");
+
+        let batch = 3;
+        let metadata = Array::from_shape_vec((batch, 25), vec![0.5; batch * 25]).expect("metadata");
+        let triplet = Array::from_shape_vec(
+            (batch, 63, 63, 3),
+            (0..batch * 63 * 63 * 3)
+                .map(|i| (i % 17) as f32 / 17.0)
+                .collect(),
+        )
+        .expect("triplet");
+
+        let scores = model.predict(&metadata, &triplet).expect("inference runs");
+
+        assert_eq!(scores.len(), batch);
+        for score in &scores {
+            assert!(
+                (0.0..=1.0).contains(score),
+                "score {score} is outside [0, 1], so the logit was not squashed"
+            );
+            assert!(score.is_finite(), "score {score} is not finite");
+        }
+    }
+
+    /// The channel axis is the one that moves, so a triplet whose three planes
+    /// differ must score differently from one where they do not -- a transpose
+    /// that silently reinterpreted rows as channels would not.
+    #[test]
+    fn test_channel_order_reaches_the_model() {
+        let mut model = BtsBotModel::new(MODEL).expect("the shipped model loads");
+        let metadata = Array::from_shape_vec((1, 25), vec![0.5; 25]).expect("metadata");
+
+        let uniform = Array::from_shape_vec((1, 63, 63, 3), vec![0.5; 63 * 63 * 3]).expect("flat");
+        let per_channel = Array::from_shape_vec(
+            (1, 63, 63, 3),
+            (0..63 * 63 * 3)
+                .map(|i| match i % 3 {
+                    0 => 0.1,
+                    1 => 0.5,
+                    _ => 0.9,
+                })
+                .collect(),
+        )
+        .expect("per channel");
+
+        let a = model.predict(&metadata, &uniform).expect("uniform")[0];
+        let b = model.predict(&metadata, &per_channel).expect("per channel")[0];
+        assert!(
+            (a - b).abs() > 1e-6,
+            "channel content did not change the score ({a} vs {b})"
+        );
     }
 }
