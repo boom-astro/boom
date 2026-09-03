@@ -1,11 +1,9 @@
-use crate::{
-    utils::cutouts::AlertCutout,
-    utils::fits::{prepare_triplet, CutoutError},
+use crate::utils::{
+    cutouts::AlertCutout,
+    fits::{prepare_triplet, CutoutError},
 };
 use ndarray::{Array, Dim};
 use ort::session::{builder::GraphOptimizationLevel, Session};
-#[cfg(target_os = "linux")]
-use std::env;
 use tracing::instrument;
 
 #[derive(thiserror::Error, Debug)]
@@ -41,22 +39,20 @@ pub fn load_model(path: &str) -> Result<Session, ModelError> {
 /// # Safety
 /// When non-null, `cuda_stream` must be a valid `cudaStream_t` belonging to
 /// `device_id`'s device, and must outlive the returned [`Session`].
+#[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
 pub fn load_model_on_device(
     path: &str,
     device_id: Option<i32>,
-    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
     cuda_stream: *mut std::ffi::c_void,
 ) -> Result<Session, ModelError> {
     let mut builder = Session::builder()?;
 
     #[cfg(target_os = "linux")]
-    if env::var_os("ORT_DYLIB_PATH").is_none() {
+    if std::env::var_os("ORT_DYLIB_PATH").is_none() {
         return Err(ModelError::MissingOrtDylibPath);
     }
 
     // Pin execution providers explicitly so CPU mode never initializes GPU EPs.
-    // A device is only passed when config.gpu.enabled selected the GPU path.
-    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
     if let Some(dev) = device_id {
         // Disable CPU fallback to make sure we only use the GPUs as instructed.
         // We only do this on Linux as Apple's CoreML EP does need to fallback

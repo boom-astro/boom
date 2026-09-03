@@ -100,9 +100,7 @@ jobs:
       BOOM_API_RATE_LIMIT_AVERAGE: ${{ vars.BOOM_API_RATE_LIMIT_AVERAGE }}
       BOOM_API_RATE_LIMIT_BURST: ${{ vars.BOOM_API_RATE_LIMIT_BURST }}
       BOOM_API_RATE_LIMIT_PERIOD: ${{ vars.BOOM_API_RATE_LIMIT_PERIOD }}
-      # Overrides config.gpu.enabled, and drives the "Select GPU compose overlay"
-      # step below, which layers in docker-compose.cuda.yaml (CUDA image + device
-      # passthrough); setting this var alone does nothing without that overlay.
+      # Drives the "Select GPU compose overlay" step below; alone it does nothing.
       BOOM_GPU__ENABLED: ${{ vars.BOOM_GPU__ENABLED || 'false' }}
       BOOM_GPU__DEVICE_IDS: ${{ vars.BOOM_GPU__DEVICE_IDS }}
     steps:

@@ -742,7 +742,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         }
 
         // GPU batch Villar light curve fitting — only when SharedModels was
-        // loaded with a GPU device (i.e. config.gpu.enabled is true).
+        // loaded with a GPU device.
         // Otherwise `villar_inputs` is empty and we skip the entire block.
         #[cfg(feature = "gpu")]
         if let Some(gpu_ctx) = self.models.as_ref().and_then(|m| m.gpu_ctx.as_ref()) {
