@@ -202,6 +202,11 @@ pub fn parse_line(line: &str) -> Option<MpcorbEntry> {
     })
 }
 
+/// A dropped record still carries digits; MPCORB's column header and rule do not.
+fn is_record_shaped(line: &str) -> bool {
+    line.len() >= 103 && line.contains(|c: char| c.is_ascii_digit())
+}
+
 /// Collection `mpcorb_ingest` writes and enrichment reads.
 pub const ORBITS_COLLECTION: &str = "MPC_orbits";
 /// Built here, then renamed over the target so readers never see a partial catalogue.
@@ -350,8 +355,8 @@ async fn refresh_into_staging(
             }
             None => {
                 report.skipped += 1;
-                // Blank lines and the prose header are expected; a long line is not.
-                if line.len() >= 103 && report.rejected_samples.len() < 5 {
+                // Blank lines and the headers are expected; a dropped record is not.
+                if is_record_shaped(&line) && report.rejected_samples.len() < 5 {
                     report
                         .rejected_samples
                         .push(line.chars().take(120).collect());
@@ -573,6 +578,8 @@ mod tests {
     // Real lines from MPCORB.DAT.
     const CERES: &str = "00001    3.34  0.15 K2669 274.41935   73.29420   80.24863   10.58803  0.0796923  0.21430445   2.7655526  0 MPO980521  7297 126 1801-2026 0.83 M-v 30k Veres      4000      (1) Ceres              20260103";
     const PALLAS: &str = "00002    4.12  0.15 K2669 254.24963  310.96993  172.88661   34.93279  0.2307001  0.21383960   2.7695590  0 E2026-O67  9066 124 1804-2026 0.77 M-c 28k MPCORBFIT  4000      (2) Pallas             20260718";
+    const COLUMN_HEADER: &str = "Des'n     H     G   Epoch     M        Peri.      Node       Incl.       e            n           a        Reference #Obs #Opp    Arc    rms  Perts   Computer";
+    const RULE: &str = "------------------------------------------------------------------------------------------------------------------------";
 
     #[test]
     fn test_parses_ceres() {
@@ -745,6 +752,22 @@ mod tests {
         assert!(parse_line("").is_none());
         assert!(parse_line("Des'n     H     G   Epoch     M        Peri.").is_none());
         assert!(parse_line("-----------------").is_none());
+    }
+
+    // Both are long enough to look like records, and both precede every refresh.
+    #[test]
+    fn test_the_column_header_and_rule_are_not_record_shaped() {
+        assert!(!is_record_shaped(COLUMN_HEADER));
+        assert!(!is_record_shaped(RULE));
+        assert!(COLUMN_HEADER.len() >= 103 && RULE.len() >= 103);
+    }
+
+    #[test]
+    fn test_a_record_that_fails_to_parse_is_still_reported() {
+        let corrupt_eccentricity = CERES.replace("0.0796923", "0.07969xx");
+        assert!(parse_line(&corrupt_eccentricity).is_none());
+        assert!(is_record_shaped(&corrupt_eccentricity));
+        assert!(is_record_shaped(CERES));
     }
 }
 
