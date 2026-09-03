@@ -12,6 +12,7 @@ export type ApiObject = Record<string, unknown>;
 
 // Profile shape returned by `/profile`
 export type Profile = {
+  /** Babamul user id. The API sends this as `_id`; `fetchProfile` renames it. */
   id: string;
   username: string;
   email: string;
@@ -264,6 +265,22 @@ export async function fetchObject(survey: string, objectId: string): Promise<Api
   return unwrapData<ApiObject>(body, {} as ApiObject);
 }
 
+/**
+ * The profile exactly as the API sends it. `BabamulUserPublic` serializes the
+ * user id as `_id`, so a `Profile` typed with `id` is a claim about the wire
+ * that isn't true — and because nothing but analytics read the field, an
+ * `undefined` here went unnoticed while `posthog.identify` quietly fell back to
+ * the username. Keeping the wire shape in its own type is what makes the rename
+ * below the single place that has to know.
+ */
+type ProfileWire = (Omit<NonNullable<Profile>, "id"> & { _id?: string; id?: string }) | null;
+
+function normalizeProfile(wire: ProfileWire): Profile {
+  if (!wire) return null;
+  const { _id, id, ...rest } = wire;
+  return { ...rest, id: _id ?? id ?? "" };
+}
+
 export async function fetchProfile(): Promise<Profile> {
   const url = `${API_BASE}/profile`;
   const res = await fetchWithAuth(url);
@@ -272,7 +289,7 @@ export async function fetchProfile(): Promise<Profile> {
     throw new Error(`Fetch profile failed: ${res.status} ${txt}`);
   }
   const body = await parseResponseJson(res).catch(() => ({}));
-  return unwrapData<Profile>(body, null);
+  return normalizeProfile(unwrapData<ProfileWire>(body, null));
 }
 
 /**
@@ -296,7 +313,7 @@ export async function updateProfileName(name: string): Promise<Profile> {
         : `Update profile failed: ${res.status}`;
     throw new Error(message);
   }
-  return unwrapData<Profile>(body, null);
+  return normalizeProfile(unwrapData<ProfileWire>(body, null));
 }
 
 export async function fetchKafkaCredentials(): Promise<KafkaCredential[]> {

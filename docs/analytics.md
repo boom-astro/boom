@@ -41,6 +41,20 @@ unusual `User-Agent` can't become a fingerprint.
 and Kafka consumption therefore merge into **one** PostHog person instead of
 three.
 
+The web app gets that id from `/babamul/profile`, which serializes it as `_id`
+rather than `id`. `fetchProfile` renames it (`frontend/src/lib/api.ts`) and a
+test pins the rename, because getting it wrong is silent: nothing in the UI
+reads the field, so a missing id shows up only as `identify` falling through to
+its username fallback — which splits one person into two, a web one and an API
+one, and is exactly the bug that made API events unattributable.
+
+Authenticated `babamul_api_request` events also `$set` the person's `email` and
+`username`. Without that, a person is a bare id in the PostHog UI, and a user
+who only ever uses the Python package would never have an email attached at
+all — the web app's `identify` is the only other thing that sets one, and they
+never load the web app. `$set` rather than `$set_once` so a changed email
+follows the account.
+
 Requests that aren't authenticated (signup, activation, the public stats
 endpoints) are reported against a fixed `babamul-anonymous` id and carry
 `$process_person_profile: false`, so they're counted without creating person
@@ -62,6 +76,7 @@ from the auth middleware, and that is exactly the event you want to see.
 | `auth_method` | `personal_access_token` (what the package uses), `jwt` (what the web app uses), or `none`. The cleanest programmatic-vs-browser signal, and it works even for clients that send no useful `User-Agent`. |
 | `client` | `babamul-python`, `browser`, `httpx`, `requests`, `curl`, `other`, `unknown`. |
 | `client_version`, `python_version`, `client_os` | Only present for the official package. |
+| `$set` → `email`, `username` | Person properties, on authenticated requests only. What makes a person identifiable regardless of which surface they arrived through. |
 
 **"How many people use the package?"** — unique users on
 `babamul_api_request` where `client = babamul-python`.

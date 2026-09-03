@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { updateProfileName } from "@/lib/api"
+import { fetchProfile, updateProfileName } from "@/lib/api"
 
 /**
  * The display name is the one profile field a user can change, so what matters
@@ -76,5 +76,42 @@ describe("updateProfileName", () => {
     await expect(updateProfileName("a".repeat(101))).rejects.toThrow(
       "Name must be at most 100 characters"
     )
+  })
+})
+
+describe("fetchProfile", () => {
+  /**
+   * The API serializes the user id as `_id` (`BabamulUserPublic` renames it on
+   * the way out), so reading `profile.id` off the raw body is always
+   * `undefined`. Nothing in the UI reads the field, so the only symptom was in
+   * analytics: `posthog.identify` fell through to the username, which put web
+   * activity on a different PostHog person than the API's events — those are
+   * keyed on the `_id`. Pin the rename so the two identity spaces stay one.
+   */
+  it("renames the API's `_id` to `id`", async () => {
+    const fetchMock = vi.fn(async () =>
+      jsonResponse({
+        message: "success",
+        data: { _id: "68f0c1a2b3c4d5e6f7a8b9c0", username: "ada", email: "ada@example.org", created_at: 0 },
+      })
+    )
+    vi.stubGlobal("fetch", fetchMock)
+
+    const profile = await fetchProfile()
+
+    expect(profile?.id).toBe("68f0c1a2b3c4d5e6f7a8b9c0")
+    expect(profile?.email).toBe("ada@example.org")
+  })
+
+  it("keeps a plain `id` if the API ever sends one", async () => {
+    const fetchMock = vi.fn(async () =>
+      jsonResponse({
+        message: "success",
+        data: { id: "abc123", username: "ada", email: "ada@example.org", created_at: 0 },
+      })
+    )
+    vi.stubGlobal("fetch", fetchMock)
+
+    expect((await fetchProfile())?.id).toBe("abc123")
   })
 })

@@ -94,7 +94,7 @@ pub async fn request_metrics_middleware(
             // one PostHog property value per object id. The auth middleware
             // injects the user on success, so its presence in extensions is
             // exactly "this request was authenticated".
-            let (endpoint, user_id) = match response.as_ref() {
+            let (endpoint, user) = match response.as_ref() {
                 Ok(service_response) => {
                     let request = service_response.request();
                     (
@@ -104,7 +104,7 @@ pub async fn request_metrics_middleware(
                         request
                             .extensions()
                             .get::<BabamulUser>()
-                            .map(|user| user.id.clone()),
+                            .map(UserIdentity::from),
                     )
                 }
                 Err(_) => (path.clone(), None),
@@ -115,13 +115,39 @@ pub async fn request_metrics_middleware(
                 &method,
                 status_code,
                 started_at.elapsed().as_millis() as u64,
-                user_id.as_deref(),
+                user.as_ref(),
                 &client_info,
             ));
         }
     }
 
     response
+}
+
+/// Who the request resolved to, as far as analytics are concerned.
+///
+/// The `distinct_id` is the user `_id`, which is the same value the web app
+/// hands `posthog.identify` — that is what merges web, API and Kafka activity
+/// onto one PostHog person. The id alone, though, makes for a person you
+/// can't put a name to in the PostHog UI, and a user who only ever uses the
+/// Python package never touches the web app's `identify` call, so nothing else
+/// would ever fill that in. Carrying `email` and `username` here lets the
+/// event set them as person properties, so a person is identifiable no matter
+/// which surface they came in through.
+struct UserIdentity {
+    id: String,
+    email: String,
+    username: String,
+}
+
+impl From<&BabamulUser> for UserIdentity {
+    fn from(user: &BabamulUser) -> Self {
+        Self {
+            id: user.id.clone(),
+            email: user.email.clone(),
+            username: user.username.clone(),
+        }
+    }
 }
 
 /// Assemble the `babamul_api_request` event.
@@ -133,19 +159,20 @@ fn build_request_event(
     method: &str,
     status_code: u16,
     duration_ms: u64,
-    user_id: Option<&str>,
+    user: Option<&UserIdentity>,
     client_info: &ClientInfo,
 ) -> AnalyticsEvent {
     let event = AnalyticsEvent::new(
         "babamul_api_request",
-        user_id.unwrap_or(ANONYMOUS_DISTINCT_ID),
+        user.map(|user| user.id.as_str())
+            .unwrap_or(ANONYMOUS_DISTINCT_ID),
     )
     .with("endpoint", endpoint)
     .with("method", method)
     .with("status_code", status_code)
     .with("success", (200..400).contains(&status_code))
     .with("duration_ms", duration_ms)
-    .with("authenticated", user_id.is_some())
+    .with("authenticated", user.is_some())
     .with("auth_method", client_info.auth_method)
     .with("client", client_info.client.as_deref().unwrap_or("unknown"))
     .with_opt("client_version", client_info.client_version.as_deref())
@@ -153,10 +180,19 @@ fn build_request_event(
     .with_opt("client_os", client_info.os.as_deref());
 
     // Unauthenticated traffic must not create person profiles in PostHog.
-    if user_id.is_some() {
-        event
-    } else {
-        event.anonymous()
+    // Authenticated traffic sets the person's email and username so the
+    // profile is legible in the PostHog UI rather than a bare id, and so
+    // package-only users get one without ever visiting the web app. `$set`
+    // (not `$set_once`) so a changed email follows the account.
+    match user {
+        Some(user) => event.with(
+            "$set",
+            serde_json::json!({
+                "email": user.email,
+                "username": user.username,
+            }),
+        ),
+        None => event.anonymous(),
     }
 }
 
@@ -375,6 +411,8 @@ mod tests {
             event.properties.get("$process_person_profile").unwrap(),
             false
         );
+        // And must not attach person properties to the shared anonymous id.
+        assert!(event.properties.get("$set").is_none());
     }
 
     #[test]
@@ -385,12 +423,21 @@ mod tests {
             "GET",
             200,
             12,
-            Some("user-42"),
+            Some(&UserIdentity {
+                id: "user-42".to_string(),
+                email: "someone@example.org".to_string(),
+                username: "someone".to_string(),
+            }),
             &client_info,
         );
 
         assert_eq!(event.distinct_id, "user-42");
         assert_eq!(event.properties.get("authenticated").unwrap(), true);
+        // Email and username land on the person, not just the event, so the
+        // PostHog person for an API-only user is identifiable.
+        let set = event.properties.get("$set").unwrap();
+        assert_eq!(set.get("email").unwrap(), "someone@example.org");
+        assert_eq!(set.get("username").unwrap(), "someone");
         assert_eq!(event.properties.get("success").unwrap(), true);
         // The route pattern, not a path with a real object id baked in.
         assert_eq!(
