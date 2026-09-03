@@ -12,8 +12,12 @@ export type ApiObject = Record<string, unknown>;
 
 // Profile shape returned by `/profile`
 export type Profile = {
-  /** Babamul user id, and the PostHog `distinct_id` the API keys its events on. */
-  id: string;
+  /**
+   * Babamul user id, and the PostHog `distinct_id` the API keys its events on.
+   * Optional because it is absent if the API ever fails to send one, and the
+   * callers that read it depend on that being `undefined` rather than `""`.
+   */
+  id?: string;
   username: string;
   email: string;
   created_at: number;
@@ -275,13 +279,18 @@ export async function fetchObject(survey: string, objectId: string): Promise<Api
  * user into a web person and an API person. The API now sends `id`; `_id` is
  * still accepted so a browser holding a cached bundle across the deploy
  * doesn't quietly regress to that fallback.
+ *
+ * If neither is present the id stays `undefined`, deliberately: callers pick an
+ * identity with `profile.id ?? profile.username ?? profile.email`, and `??`
+ * only falls through on nullish values. Substituting `""` here would look like
+ * a real id and put every such user on a single empty-string PostHog person.
  */
 type ProfileWire = (Omit<NonNullable<Profile>, "id"> & { id?: string; _id?: string }) | null;
 
 function normalizeProfile(wire: ProfileWire): Profile {
   if (!wire) return null;
   const { id, _id, ...rest } = wire;
-  return { ...rest, id: id ?? _id ?? "" };
+  return { ...rest, id: id ?? _id };
 }
 
 export async function fetchProfile(): Promise<Profile> {

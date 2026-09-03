@@ -103,6 +103,24 @@ describe("fetchProfile", () => {
     expect(profile?.email).toBe("ada@example.org")
   })
 
+  it("leaves the id undefined when the API sends neither spelling", async () => {
+    // Not `""`: the identity fallback chain is `id ?? username ?? email`, and
+    // `??` treats an empty string as a real value — so a fabricated one would
+    // collapse every affected user onto a single empty-string PostHog person.
+    const fetchMock = vi.fn(async () =>
+      jsonResponse({
+        message: "success",
+        data: { username: "ada", email: "ada@example.org", created_at: 0 },
+      })
+    )
+    vi.stubGlobal("fetch", fetchMock)
+
+    const profile = await fetchProfile()
+
+    expect(profile?.id).toBeUndefined()
+    expect(profile?.id ?? profile?.username).toBe("ada")
+  })
+
   it("still accepts the legacy `_id` spelling", async () => {
     const fetchMock = vi.fn(async () =>
       jsonResponse({
