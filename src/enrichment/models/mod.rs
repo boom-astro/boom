@@ -1,10 +1,15 @@
 mod acai;
 mod base;
 mod btsbot;
+mod cider;
 
 pub use acai::AcaiModel;
-pub use base::{load_model, load_model_on_device, Model, ModelError};
+pub use base::{
+    load_model, load_model_on_device, load_model_on_device_with_cpu_fallback, FusionModel, Model,
+    ModelError,
+};
 pub use btsbot::BtsBotModel;
+pub use cider::CiderFusionModel;
 
 #[cfg(all(feature = "gpu", target_os = "linux"))]
 use villar_pso::gpu::{GpuContext, Stream};
@@ -37,6 +42,7 @@ pub struct SharedModels {
     pub acai_o: Mutex<AcaiModel>,
     pub acai_b: Mutex<AcaiModel>,
     pub btsbot: Mutex<BtsBotModel>,
+    pub cider: Mutex<cider::CiderFusionModel>,
     /// Villar-PSO GPU context bound to this device. `None` when running
     /// without the `gpu` feature.
     #[cfg(feature = "gpu")]
@@ -84,7 +90,7 @@ impl SharedModels {
         #[cfg(not(all(feature = "gpu", target_os = "linux")))]
         let stream_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
 
-        let (acai_h, acai_n, acai_v, acai_o, acai_b, btsbot) = match device_id {
+        let (acai_h, acai_n, acai_v, acai_o, acai_b, btsbot, cider) = match device_id {
             Some(id) => (
                 AcaiModel::new_on_device(
                     "data/models/acai_h.d1_dnn_20201130.onnx",
@@ -112,6 +118,10 @@ impl SharedModels {
                     stream_ptr,
                 )?,
                 BtsBotModel::new_on_device("data/models/btsbot-v1.0.1.onnx", id, stream_ptr)?,
+                cider::CiderFusionModel::new_on_device(
+                    "data/models/cider_fusion_plus_embedding.onnx",
+                    id,
+                )?,
             ),
             None => (
                 AcaiModel::new("data/models/acai_h.d1_dnn_20201130.onnx")?,
@@ -120,6 +130,7 @@ impl SharedModels {
                 AcaiModel::new("data/models/acai_o.d1_dnn_20201130.onnx")?,
                 AcaiModel::new("data/models/acai_b.d1_dnn_20201130.onnx")?,
                 BtsBotModel::new("data/models/btsbot-v1.0.1.onnx")?,
+                cider::CiderFusionModel::new("data/models/cider_fusion_plus_embedding.onnx")?,
             ),
         };
 
@@ -150,6 +161,7 @@ impl SharedModels {
             acai_o: Mutex::new(acai_o),
             acai_b: Mutex::new(acai_b),
             btsbot: Mutex::new(btsbot),
+            cider: Mutex::new(cider),
             #[cfg(feature = "gpu")]
             gpu_ctx,
             #[cfg(all(feature = "gpu", target_os = "linux"))]

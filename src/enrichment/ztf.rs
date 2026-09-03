@@ -3,8 +3,8 @@ use crate::conf::AppConfig;
 use crate::enrichment::{
     babamul::{Babamul, BabamulZtfAlert},
     fetch_alerts,
-    models::{AcaiModel, BtsBotModel, Model, SharedModels},
-    EnrichmentWorker, EnrichmentWorkerError, LsstMatch,
+    models::{AcaiModel, BtsBotModel, FusionModel, Model, ModelError, SharedModels},
+    EnrichmentWorker, EnrichmentWorkerError, LsstMatch, LsstPhotometry,
 };
 use crate::utils::cutouts::{AlertCutout, CutoutStorage};
 use crate::utils::db::mongify;
@@ -31,8 +31,6 @@ use villar_pso::gpu_metal::{GpuBatchData, SourceData};
 
 #[serdavro]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-/// Represents ZTF alert photometry data we retrieve from the database
-/// (e.g. prv_candidates, prv_nondetections) and later convert to `ZtfPhotometry`
 pub struct ZtfAlertPhotometry {
     pub jd: f64,
     pub magpsf: Option<f64>,
@@ -46,7 +44,6 @@ pub struct ZtfAlertPhotometry {
     pub ra: Option<f64>,
     pub dec: Option<f64>,
     pub snr_psf: Option<f64>,
-    /// Legacy fallback: populated from the `snr` field for un-migrated documents that pre-date the snr migration.
     #[allow(dead_code)]
     #[serde(rename = "snr", default, skip_serializing)]
     pub snr_legacy: Option<f64>,
@@ -55,8 +52,6 @@ pub struct ZtfAlertPhotometry {
 
 #[serdavro]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-/// Represents ZTF forced photometry data we retrieve from the database
-/// (e.g. prv_candidates, prv_nondetections) and later convert to `ZtfPhotometry`
 pub struct ZtfForcedPhotometry {
     pub jd: f64,
     pub magpsf: Option<f64>,
@@ -73,7 +68,6 @@ pub struct ZtfForcedPhotometry {
     pub ra: Option<f64>,
     pub dec: Option<f64>,
     pub snr_psf: Option<f64>,
-    /// Legacy fallback: populated from the `snr` field for un-migrated documents that pre-date the snr migration.
     #[allow(dead_code)]
     #[serde(rename = "snr", default, skip_serializing)]
     pub snr_legacy: Option<f64>,
@@ -83,8 +77,6 @@ pub struct ZtfForcedPhotometry {
 
 #[serdavro]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-/// Represents ZTF photometry data we retrieved from the database
-/// (from alert or forced photometry)
 pub struct ZtfPhotometry {
     pub jd: f64,
     pub magpsf: Option<f64>,
@@ -138,7 +130,7 @@ impl TryFrom<ZtfForcedPhotometry> for ZtfPhotometry {
             return Err(EnrichmentWorkerError::MissingMagZPSci);
         };
 
-        let flux = if phot.flux != Some(-99999.0) && phot.flux.map_or(false, |f| !f.is_nan()) {
+        let flux = if phot.flux != Some(-99999.0) && phot.flux.is_some_and(|f| !f.is_nan()) {
             phot.flux.map(|f| f * 1e9_f64 * zp_scaling_factor) // convert to a fixed ZP and nJy
         } else {
             None
@@ -165,32 +157,35 @@ impl TryFrom<ZtfForcedPhotometry> for ZtfPhotometry {
     }
 }
 
+fn convert_photometry<T>(points: Option<Vec<T>>, kind: &str) -> Vec<ZtfPhotometry>
+where
+    T: TryInto<ZtfPhotometry, Error = EnrichmentWorkerError>,
+{
+    points
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|p| {
+            p.try_into()
+                .map_err(|e| {
+                    if matches!(e, EnrichmentWorkerError::BadProcstatus(_)) {
+                        trace!("Failed to convert {} to ZtfPhotometry: {}", kind, e);
+                    } else {
+                        warn!("Failed to convert {} to ZtfPhotometry: {}", kind, e);
+                    }
+                })
+                .ok()
+        })
+        .collect()
+}
+
 pub fn deserialize_ztf_alert_lightcurve<'de, D>(
     deserializer: D,
 ) -> Result<Vec<ZtfPhotometry>, D::Error>
 where
     D: Deserializer<'de>,
 {
-    let lightcurve = <Option<Vec<ZtfAlertPhotometry>> as Deserialize>::deserialize(deserializer)?;
-    match lightcurve {
-        Some(lightcurve) => {
-            let converted_lightcurve = lightcurve
-                .into_iter()
-                .filter_map(|p| {
-                    ZtfPhotometry::try_from(p)
-                        .map_err(|e| {
-                            warn!(
-                                "Failed to convert ZtfAlertPhotometry to ZtfPhotometry: {}",
-                                e
-                            );
-                        })
-                        .ok()
-                })
-                .collect();
-            Ok(converted_lightcurve)
-        }
-        None => Ok(vec![]),
-    }
+    let points = <Option<Vec<ZtfAlertPhotometry>> as Deserialize>::deserialize(deserializer)?;
+    Ok(convert_photometry(points, "ZtfAlertPhotometry"))
 }
 
 pub fn deserialize_ztf_forced_lightcurve<'de, D>(
@@ -199,54 +194,24 @@ pub fn deserialize_ztf_forced_lightcurve<'de, D>(
 where
     D: Deserializer<'de>,
 {
-    let lightcurve = <Option<Vec<ZtfForcedPhotometry>> as Deserialize>::deserialize(deserializer)?;
-    match lightcurve {
-        Some(lightcurve) => {
-            let converted_lightcurve = lightcurve
-                .into_iter()
-                .filter_map(|p| {
-                    ZtfPhotometry::try_from(p)
-                        .map_err(|e| {
-                            // log badprocstatus at trace level to avoid flooding logs
-                            if let EnrichmentWorkerError::BadProcstatus(_) = e {
-                                trace!(
-                                    "Failed to convert ZtfForcedPhotometry to ZtfPhotometry: {}",
-                                    e
-                                );
-                            } else {
-                                warn!(
-                                    "Failed to convert ZtfForcedPhotometry to ZtfPhotometry: {}",
-                                    e
-                                );
-                            }
-                        })
-                        .ok()
-                })
-                .collect();
-            Ok(converted_lightcurve)
-        }
-        None => Ok(vec![]),
-    }
+    let points = <Option<Vec<ZtfForcedPhotometry>> as Deserialize>::deserialize(deserializer)?;
+    Ok(convert_photometry(points, "ZtfForcedPhotometry"))
 }
 
-// it should return an optional PhotometryMag
 impl ZtfPhotometry {
     pub fn to_photometry_mag(&self, min_snr: Option<f64>) -> Option<PhotometryMag> {
-        // If snr, magpsf, and sigmapsf are all present, this returns Some(PhotometryMag)
-        // optionally applying an SNR filter: when min_snr is None, no SNR filtering is
-        // applied; when it is Some(thresh), points with |snr| below thresh are filtered out.
-        match (self.snr_psf, self.magpsf, self.sigmapsf) {
-            (Some(snr), Some(mag), Some(sig)) => match min_snr {
-                Some(thresh) if snr.abs() < thresh => None,
-                _ => Some(PhotometryMag {
-                    time: self.jd,
-                    mag: mag as f32,
-                    mag_err: sig as f32,
-                    band: self.band.clone(),
-                }),
-            },
-            _ => None,
+        let (Some(snr), Some(mag), Some(sig)) = (self.snr_psf, self.magpsf, self.sigmapsf) else {
+            return None;
+        };
+        if min_snr.is_some_and(|thresh| snr.abs() < thresh) {
+            return None;
         }
+        Some(PhotometryMag {
+            time: self.jd,
+            mag: mag as f32,
+            mag_err: sig as f32,
+            band: self.band.clone(),
+        })
     }
 }
 
@@ -309,11 +274,11 @@ pub fn create_ztf_alert_pipeline(include_classifications: bool) -> Vec<Document>
     ];
 
     if include_classifications {
-        // we want to add classifications: 1 in the final project stage only
-        if let Some(project_stage) = pipeline.last_mut() {
-            if let Some(project_doc) = project_stage.get_document_mut("$project").ok() {
-                project_doc.insert("classifications", 1);
-            }
+        if let Some(project) = pipeline
+            .last_mut()
+            .and_then(|stage| stage.get_document_mut("$project").ok())
+        {
+            project.insert("classifications", 1);
         }
     }
 
@@ -340,9 +305,6 @@ pub struct ZtfMatch {
     pub fp_hists: Vec<ZtfPhotometry>,
 }
 
-/// ZTF alert structure used to deserialize alerts
-/// from the database, used by the enrichment worker
-/// to compute features and ML scores
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct ZtfAlertForEnrichment {
     #[serde(rename = "_id")]
@@ -359,62 +321,36 @@ pub struct ZtfAlertForEnrichment {
     pub survey_matches: Option<ZtfSurveyMatches>,
 }
 
-/// Solar system object association for a single ZTF detection.
-///
-/// ZTF `objectId`s are positional, so a moving object is given a new one on very
-/// nearly every detection (measured over a week of alerts: 1.03 detections per
-/// `objectId`). `designation` is therefore the only stable key across a moving
-/// object's detections — downstream consumers building light curves must group on
-/// it, never on `objectId`. For the same reason the alert's `prv_candidates` and
-/// `fp_hists` describe whatever else has occupied that sky position, not this
-/// object.
+/// Solar system association for one ZTF detection. Group light curves on
+/// `designation`, never on the positional `objectId`.
 #[derive(
     Debug, Clone, Default, serde::Deserialize, serde::Serialize, AvroSchema, utoipa::ToSchema,
 )]
 #[serde(default)]
 pub struct ZtfSsoAssociation {
-    /// Whether a known solar system object was identified at this position.
-    ///
-    /// Deliberately not thresholded on separation, unlike the deprecated `rock`
-    /// flag: when the upstream ephemeris degrades, that shows up as a growing
-    /// `separation_arcsec` the consumer can see, rather than silently flipping a
-    /// boolean they cannot.
+    /// Known solar system object identified here. Not thresholded on separation.
     pub is_sso: bool,
-    /// MPC designation of the matched object (ZTF `ssnamenr`), e.g. `"9816"`.
+    /// MPC designation (ZTF `ssnamenr`), e.g. `"9816"`.
     pub designation: Option<String>,
-    /// Separation between the detection and the object's predicted position
-    /// (ZTF `ssdistnr`), in arcseconds. Negative upstream sentinels are stored as
-    /// `None`. This is a quality indicator for the upstream ephemeris, and worth
-    /// monitoring in aggregate: a drifting distribution means stale orbits.
+    /// Arcseconds to the predicted position (ZTF `ssdistnr`); `None` if unmatched.
     pub separation_arcsec: Option<f32>,
-    /// Catalogued magnitude predicted for the object (ZTF `ssmagnr`). Compared
-    /// against the measured `magpsf` this gives predicted-minus-measured per
-    /// detection at no extra cost.
+    /// Catalogued magnitude predicted for the object (ZTF `ssmagnr`).
     pub predicted_mag: Option<f32>,
-    /// Who made the association. `"ipac"` for the identification carried in the
-    /// ZTF alert itself; an independent association computed by BOOM would
-    /// identify itself differently here.
+    /// Who made the association, `"ipac"` for the one carried in the alert.
     pub source: Option<String>,
-    /// Sun-to-object distance at the alert epoch, au. Derived by propagating MPC
-    /// elements, since the ZTF packet carries no state vectors, so it is `None`
-    /// whenever the object is missing from `MPC_orbits`.
-    ///
-    /// Named to match the LSST association, which reads the same quantity straight
-    /// from its own `ssSource` vectors, so a filter is identical on both surveys.
+    /// Sun-to-object distance at the alert epoch, au. `None` if absent from `MPC_orbits`.
     #[serde(default)]
     pub helio_dist: Option<f32>,
-    /// Observer-to-object distance at the alert epoch, au. Same provenance.
+    /// Observer-to-object distance at the alert epoch, au.
     #[serde(default)]
     pub topo_dist: Option<f32>,
-    /// Sun-object-observer angle at the alert epoch, degrees. Same provenance.
+    /// Sun-object-observer angle at the alert epoch, degrees.
     #[serde(default)]
     pub phase_angle: Option<f32>,
 }
 
 impl ZtfSsoAssociation {
-    /// Build the association from the solar system fields IPAC puts in the ZTF
-    /// alert. Negative values are upstream "no match" sentinels rather than
-    /// measurements, so they are normalised to `None`.
+    /// Negative upstream values are "no match" sentinels, normalised to `None`.
     pub fn from_ipac(
         designation: Option<String>,
         ssdistnr: Option<f32>,
@@ -433,11 +369,6 @@ impl ZtfSsoAssociation {
         }
     }
 
-    /// Fill in observing geometry from MPC elements propagated to `jd`.
-    ///
-    /// Left untouched when the object has no elements available: an absent
-    /// geometry is reported as absent rather than as a default, since a
-    /// plausible-looking wrong distance is worse here than a missing one.
     pub fn with_geometry(mut self, elements: Option<&OrbitalElements>, jd: f64) -> Self {
         if let Some(elements) = elements {
             let geometry = geometry_at(elements, jd);
@@ -449,31 +380,61 @@ impl ZtfSsoAssociation {
     }
 }
 
-/// ZTF alert properties computed during enrichment and inserted back into the alert document
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize, AvroSchema, utoipa::ToSchema)]
 pub struct ZtfAlertProperties {
-    /// Deprecated alias for `sso.is_sso`, retained so existing filters keep
-    /// working. Unlike `sso.is_sso` this is thresholded at a hardcoded 12", so it
-    /// silently loses objects as the upstream ephemeris degrades. Prefer
-    /// `sso.is_sso`, optionally with an explicit `sso.separation_arcsec` cut.
+    /// Deprecated, thresholded at a hardcoded 12". Prefer `sso.is_sso`.
     pub rock: bool,
     pub star: bool,
     pub near_brightstar: bool,
     pub stationary: bool,
     pub photstats: PerBandProperties,
     pub multisurvey_photstats: Option<PerBandProperties>,
-    /// `None` on alerts enriched before this field existed — those were never
-    /// evaluated for a solar system association, which is different from having
-    /// been evaluated and found not to be one (`Some` with `is_sso: false`).
-    /// Consumers must not read `None` as "not an asteroid".
+    /// `None` means never evaluated, not "not an asteroid".
     #[serde(default)]
     pub sso: Option<ZtfSsoAssociation>,
-    /// `None` on alerts enriched before this existed.
     #[serde(default)]
     pub activity: Option<ActivityMetrics>,
 }
 
-/// ZTF alert ML classifier scores
+/// Field order matches the ONNX output index (0-7).
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, AvroSchema, utoipa::ToSchema)]
+pub struct CiderClassProbs {
+    #[serde(rename = "AGN-like")]
+    pub agn_like: f32,
+    #[serde(rename = "Accreting WD Var")]
+    pub accreting_wd_var: f32,
+    #[serde(rename = "Other Stellar Var")]
+    pub other_stellar_var: f32,
+    #[serde(rename = "TDE")]
+    pub tde: f32,
+    #[serde(rename = "Ia-like SN")]
+    pub ia_like_sn: f32,
+    #[serde(rename = "Stripped Envelope SN")]
+    pub stripped_envelope_sn: f32,
+    #[serde(rename = "H-rich CCSN")]
+    pub h_rich_ccsn: f32,
+    #[serde(rename = "Superluminous SN")]
+    pub superluminous_sn: f32,
+}
+
+impl CiderClassProbs {
+    fn from_probs(p: &[f32]) -> Option<Self> {
+        if p.len() < 8 {
+            return None;
+        }
+        Some(Self {
+            agn_like: p[0],
+            accreting_wd_var: p[1],
+            other_stellar_var: p[2],
+            tde: p[3],
+            ia_like_sn: p[4],
+            stripped_envelope_sn: p[5],
+            h_rich_ccsn: p[6],
+            superluminous_sn: p[7],
+        })
+    }
+}
+
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize, AvroSchema, utoipa::ToSchema)]
 pub struct ZtfAlertClassifications {
     pub acai_h: f32,
@@ -482,9 +443,17 @@ pub struct ZtfAlertClassifications {
     pub acai_o: f32,
     pub acai_b: f32,
     pub btsbot: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cider_fusion: Option<CiderClassProbs>,
+    #[serde(skip_serializing)]
+    pub fusion_embedding: Option<Vec<f32>>,
 }
 
-/// Per-alert intermediate data used during enrichment processing.
+const CIDER_MAX_LC_SPAN_DAYS: f64 = 100.0;
+const CIDER_MIN_PHOTOMETRY_POINTS: usize = 2;
+
+const ACAI_BTS_NAMES: [&str; 6] = ["acai_h", "acai_n", "acai_v", "acai_o", "acai_b", "btsbot"];
+
 struct AlertWork {
     candid: i64,
     programid: i32,
@@ -492,6 +461,19 @@ struct AlertWork {
     all_bands_properties: AllBandsProperties,
     cutouts: AlertCutout,
     alert: ZtfAlertForEnrichment,
+    ztf_lightcurve: Vec<PhotometryMag>,
+}
+
+impl AlertWork {
+    fn cider_eligible(&self) -> bool {
+        let lc = &self.ztf_lightcurve;
+        lc.len() >= CIDER_MIN_PHOTOMETRY_POINTS
+            && lc
+                .last()
+                .and_then(|last| lc.first().map(|first| last.time - first.time))
+                .unwrap_or(f64::MAX)
+                <= CIDER_MAX_LC_SPAN_DAYS
+    }
 }
 
 pub struct ZtfEnrichmentWorker {
@@ -499,18 +481,12 @@ pub struct ZtfEnrichmentWorker {
     output_queue: String,
     client: mongodb::Client,
     alert_collection: mongodb::Collection<Document>,
-    /// MPC orbital elements, refreshed nightly by `mpcorb_ingest`.
     mpc_orbits: mongodb::Collection<Document>,
     alert_cutout_storage: CutoutStorage,
     alert_pipeline: Vec<Document>,
-    /// Shared ONNX models (loaded once, shared across all enrichment workers
-    /// via Arc). On Linux+`gpu` this also owns the per-device CUDA stream and
-    /// villar-pso `GpuContext` so that PSO and ONNX inference share a stream.
     models: Option<Arc<SharedModels>>,
     babamul: Option<Babamul>,
     gpu_enabled: bool,
-    /// Alerts per batch — also the fixed ONNX inference shape (see
-    /// [`EnrichmentWorkerConfig::batch_size`] in `conf.rs`).
     batch_size: usize,
 }
 
@@ -546,16 +522,12 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         let input_queue = "ZTF_alerts_enrichment_queue".to_string();
         let output_queue = "ZTF_alerts_filter_queue".to_string();
 
-        // Detect if Babamul is enabled from the config
         let babamul: Option<Babamul> = if config.babamul.enabled {
             Some(Babamul::new(&config))
         } else {
             None
         };
 
-        // Use shared models if provided (GPU path), otherwise load per-worker
-        // models on CPU. Per-worker models avoid mutex contention when multiple
-        // enrichment workers run in parallel on CPU.
         let models = match shared_models {
             Some(m) => Some(m),
             None => Some(SharedModels::load(None)?),
@@ -605,7 +577,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         candids: &[i64],
     ) -> Result<Vec<String>, EnrichmentWorkerError> {
         let alerts: Vec<ZtfAlertForEnrichment> =
-            fetch_alerts(&candids, &self.alert_pipeline, &self.alert_collection).await?;
+            fetch_alerts(candids, &self.alert_pipeline, &self.alert_collection).await?;
 
         if alerts.len() != candids.len() {
             warn!(
@@ -644,35 +616,33 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         let mut work_items: Vec<AlertWork> = Vec::with_capacity(alerts.len());
         #[cfg(feature = "gpu")]
         let mut villar_inputs: Vec<(i64, Vec<PhotometryMag>)> = Vec::new();
+        #[cfg(feature = "gpu")]
+        let villar_enabled = self.models.as_ref().is_some_and(|m| m.gpu_ctx.is_some());
         for alert in alerts {
             let candid = alert.candid;
             let cutouts = candid_to_cutouts
                 .remove(&candid)
                 .ok_or_else(|| EnrichmentWorkerError::MissingCutouts(candid))?;
-            // Compute numerical and boolean features from lightcurve and candidate analysis
             #[cfg_attr(not(feature = "gpu"), allow(unused_variables))]
-            let (properties, all_bands_properties, programid, lightcurve) =
-                match self.get_alert_properties(&alert, &orbits).await {
-                    Ok(v) => v,
-                    // No usable photometry: skip this alert (leave it un-enriched)
-                    // rather than aborting the whole batch, so the queue keeps draining.
-                    // Detail is logged per-candid at DEBUG; the per-batch total is
-                    // summarized at WARN below to avoid flooding logs at backfill scale.
-                    Err(EnrichmentWorkerError::EmptyLightcurve(_)) => {
-                        skipped_empty_lightcurve += 1;
-                        debug!(candid, "skipping alert: empty lightcurve after filtering");
-                        continue;
-                    }
-                    Err(e) => return Err(e),
-                };
+            let (
+                properties,
+                all_bands_properties,
+                programid,
+                multisurvey_lightcurve,
+                ztf_lightcurve,
+            ) = match self.get_alert_properties(&alert, &orbits).await {
+                Ok(v) => v,
+                // Skipping keeps the queue draining; the batch total is warned below.
+                Err(EnrichmentWorkerError::EmptyLightcurve(_)) => {
+                    skipped_empty_lightcurve += 1;
+                    debug!(candid, "skipping alert: empty lightcurve after filtering");
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
             #[cfg(feature = "gpu")]
-            if self
-                .models
-                .as_ref()
-                .and_then(|m| m.gpu_ctx.as_ref())
-                .is_some()
-            {
-                villar_inputs.push((candid, lightcurve));
+            if villar_enabled {
+                villar_inputs.push((candid, multisurvey_lightcurve));
             }
 
             work_items.push(AlertWork {
@@ -682,6 +652,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                 all_bands_properties,
                 cutouts,
                 alert,
+                ztf_lightcurve,
             });
         }
 
@@ -694,59 +665,46 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             );
         }
 
-        // Run ML classification using shared models
         let classifications_list: Vec<Option<ZtfAlertClassifications>> =
             if let Some(ref models) = self.models {
-                self.classify(&models, &work_items)?
+                self.classify(models, &work_items)?
             } else {
                 vec![None; work_items.len()]
             };
 
         for (item, classifications) in work_items.into_iter().zip(classifications_list) {
-            let update_alert_document = if let Some(ref cls) = classifications {
-                doc! { "$set": {
-                    "classifications": mongify(cls),
-                    "properties": mongify(&item.properties),
-                    "updated_at": now,
-                }}
-            } else {
-                doc! { "$set": {
-                    "properties": mongify(&item.properties),
-                    "updated_at": now,
-                }}
+            let mut set_doc = doc! {
+                "properties": mongify(&item.properties),
+                "updated_at": now,
             };
+            if let Some(cls) = &classifications {
+                set_doc.insert("classifications", mongify(cls));
+            }
 
-            let update = WriteModel::UpdateOne(
+            updates.push(WriteModel::UpdateOne(
                 UpdateOneModel::builder()
                     .namespace(self.alert_collection.namespace())
                     .filter(doc! {"_id": item.candid})
-                    .update(update_alert_document)
+                    .update(doc! { "$set": set_doc })
                     .build(),
-            );
-
-            updates.push(update);
+            ));
             processed_alerts.push(format!("{},{}", item.programid, item.candid));
 
             if self.babamul.is_some() {
-                let enriched_alert =
-                    BabamulZtfAlert::from_alert_and_properties(item.alert, item.properties);
-                enriched_alerts.push(enriched_alert);
+                enriched_alerts.push(BabamulZtfAlert::from_alert_and_properties(
+                    item.alert,
+                    item.properties,
+                ));
             }
         }
 
-        // `updates` can be empty if every alert in the batch was skipped (e.g.
-        // all had empty lightcurves); bulk_write rejects an empty operation list.
+        // bulk_write rejects an empty operation list.
         if !updates.is_empty() {
-            let _ = self.client.bulk_write(updates).await?.modified_count;
+            self.client.bulk_write(updates).await?;
         }
 
-        // GPU batch Villar light curve fitting — only when SharedModels was
-        // loaded with a GPU device (i.e. config.gpu.enabled is true).
-        // Otherwise `villar_inputs` is empty and we skip the entire block.
         #[cfg(feature = "gpu")]
         if let Some(gpu_ctx) = self.models.as_ref().and_then(|m| m.gpu_ctx.as_ref()) {
-            // Document whose keys match a successful fit's keys but with all values NaN.
-            // Written whenever a fit can't be produced (bad photometry or GPU failure).
             let nan_set_doc = {
                 let mut d = doc! { "villar_fit.reduced_chi2": f64::NAN };
                 for filt in villar_pso::FILTERS {
@@ -768,8 +726,6 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                 )
             };
 
-            // Preprocess each lightcurve; split into fittable sources and
-            // NaN-update-only candids that failed preprocessing.
             let mut villar_updates: Vec<WriteModel> = Vec::new();
             let mut fittable: Vec<(i64, SourceData)> = Vec::new();
             for (candid, lc) in &villar_inputs {
@@ -790,7 +746,6 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                 }
             }
 
-            // Run GPU batch fit on the fittable sources.
             if !fittable.is_empty() {
                 let (candids, sources): (Vec<i64>, Vec<SourceData>) = fittable.into_iter().unzip();
                 let source_refs: Vec<&SourceData> = sources.iter().collect();
@@ -830,7 +785,6 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             }
         }
 
-        // Send to Babamul for batch processing
         if let Some(babamul) = self.babamul.as_ref() {
             babamul.process_ztf_alerts(enriched_alerts).await?;
         }
@@ -840,16 +794,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
 }
 
 impl ZtfEnrichmentWorker {
-    /// Look up MPC elements for every object named in this batch, in one query.
-    ///
-    /// Per-alert lookups would put a round trip in the hot enrichment path for
-    /// every asteroid detection; a batch has at most a few hundred distinct
-    /// objects, so one `$in` covers all of them.
-    ///
-    /// A failure here is not fatal: geometry is an enrichment, and dropping it
-    /// for one batch is better than refusing to enrich the batch at all.
-    /// Keyed by `ssnamenr` as the alert carries it, not by the MPCORB key, so
-    /// each distinct name is normalised once here rather than again per alert.
+    /// Keyed by `ssnamenr` as the alert carries it, not by the MPCORB key.
     async fn fetch_orbits(
         &self,
         alerts: &[ZtfAlertForEnrichment],
@@ -866,8 +811,7 @@ impl ZtfEnrichmentWorker {
             return HashMap::new();
         }
 
-        // Several names can share a key -- a number and its "(number)Name" form
-        // both reduce to the number -- so query the distinct keys.
+        // Several names reduce to the same key, so query the distinct keys.
         let keys: Vec<&String> = key_by_name
             .values()
             .collect::<HashSet<_>>()
@@ -895,8 +839,6 @@ impl ZtfEnrichmentWorker {
             .filter_map(|doc| Some((doc.get_str("_id").ok()?, elements_from_document(doc)?)))
             .collect();
 
-        // A catalogue that has never been ingested looks exactly like a batch of
-        // objects that all happen to be missing, so say which it is.
         if by_key.is_empty() {
             warn!(
                 "no elements found in {} for any of {} objects in this batch",
@@ -921,6 +863,7 @@ impl ZtfEnrichmentWorker {
             AllBandsProperties,
             i32,
             Vec<PhotometryMag>,
+            Vec<PhotometryMag>,
         ),
         EnrichmentWorkerError,
     > {
@@ -932,9 +875,6 @@ impl ZtfEnrichmentWorker {
 
         let activity = ActivityMetrics::from_magnitudes(Some(candidate.magpsf), candidate.magap);
 
-        // Geometry is evaluated at the observation epoch, not at the elements'
-        // epoch, so a stale MPCORB shows up as a slowly growing error rather
-        // than as a wrong answer at a fixed date.
         let elements = candidate
             .ssnamenr
             .as_deref()
@@ -983,51 +923,44 @@ impl ZtfEnrichmentWorker {
                 && distpsnr1 < 0.5
                 && (sgmag1 < 17.0 || srmag1 < 17.0 || simag1 < 17.0));
 
-        let prv_candidates: Vec<PhotometryMag> = alert
-            .prv_candidates
-            .iter()
-            .filter(|p| p.jd <= alert.candidate.candidate.jd)
-            .filter_map(|p| p.to_photometry_mag(None))
-            .collect();
-        let fp_hists: Vec<PhotometryMag> = alert
-            .fp_hists
-            .iter()
-            .filter(|p| p.jd <= alert.candidate.candidate.jd)
-            .filter_map(|p| p.to_photometry_mag(Some(3.0)))
-            .collect();
+        let ztf_mags = |points: &[ZtfPhotometry], min_snr| -> Vec<PhotometryMag> {
+            points
+                .iter()
+                .filter(|p| p.jd <= candidate.jd)
+                .filter_map(|p| p.to_photometry_mag(min_snr))
+                .collect()
+        };
 
-        // lightcurve is prv_candidates + fp_hists, no need for parse_photometry here
-        let mut lightcurve = [prv_candidates, fp_hists].concat();
+        let mut lightcurve = [
+            ztf_mags(&alert.prv_candidates, None),
+            ztf_mags(&alert.fp_hists, Some(3.0)),
+        ]
+        .concat();
 
         prepare_photometry(&mut lightcurve);
 
-        // Alerts whose photometry filters down to nothing (common when
-        // reprocessing historical alerts that predate the SNR fields) cannot be
-        // meaningfully enriched: peak/faintest/rate features are undefined and
-        // the ML metadata would be computed from placeholder zeros. Signal the
-        // caller to skip this alert rather than write garbage scores.
         if lightcurve.is_empty() {
             return Err(EnrichmentWorkerError::EmptyLightcurve(alert.candid));
         }
         let (photstats, all_bands_properties, stationary) = analyze_photometry(&lightcurve);
+        // cider was trained on ZTF only, so snapshot before the cross-survey extend.
+        let ztf_lightcurve = lightcurve.clone();
 
-        // Compute multisurvey photstats (including LSST if available, other surveys can be added later)
         let mut has_matches = false;
         if let Some(survey_matches) = &alert.survey_matches {
             if let Some(lsst_match) = &survey_matches.lsst {
-                let lsst_prv_candidates: Vec<PhotometryMag> = lsst_match
-                    .prv_candidates
-                    .iter()
-                    .filter(|p| p.jd <= alert.candidate.candidate.jd)
-                    .filter_map(|p| p.to_photometry_mag(None))
-                    .collect();
-                let lsst_fp_hists: Vec<PhotometryMag> = lsst_match
-                    .fp_hists
-                    .iter()
-                    .filter(|p| p.jd <= alert.candidate.candidate.jd)
-                    .filter_map(|p| p.to_photometry_mag(Some(3.0)))
-                    .collect();
-                let mut lsst_lightcurve = [lsst_prv_candidates, lsst_fp_hists].concat();
+                let lsst_mags = |points: &[LsstPhotometry], min_snr| -> Vec<PhotometryMag> {
+                    points
+                        .iter()
+                        .filter(|p| p.jd <= candidate.jd)
+                        .filter_map(|p| p.to_photometry_mag(min_snr))
+                        .collect()
+                };
+                let mut lsst_lightcurve = [
+                    lsst_mags(&lsst_match.prv_candidates, None),
+                    lsst_mags(&lsst_match.fp_hists, Some(3.0)),
+                ]
+                .concat();
                 prepare_photometry(&mut lsst_lightcurve);
                 lightcurve.extend(lsst_lightcurve);
                 has_matches = true;
@@ -1053,11 +986,30 @@ impl ZtfEnrichmentWorker {
             all_bands_properties,
             programid,
             lightcurve,
+            ztf_lightcurve,
         ))
     }
 
-    /// Run ONNX classification using shared models.
-    /// Each model is locked individually to minimize contention.
+    fn predict_acai_btsbot(
+        models: &SharedModels,
+        metadata: &ndarray::Array2<f32>,
+        btsbot_metadata: &ndarray::Array2<f32>,
+        triplet: &ndarray::Array4<f32>,
+    ) -> Result<[Vec<f32>; 6], ModelError> {
+        Ok([
+            models.acai_h.lock().unwrap().predict(metadata, triplet)?,
+            models.acai_n.lock().unwrap().predict(metadata, triplet)?,
+            models.acai_v.lock().unwrap().predict(metadata, triplet)?,
+            models.acai_o.lock().unwrap().predict(metadata, triplet)?,
+            models.acai_b.lock().unwrap().predict(metadata, triplet)?,
+            models
+                .btsbot
+                .lock()
+                .unwrap()
+                .predict(btsbot_metadata, triplet)?,
+        ])
+    }
+
     fn classify(
         &self,
         models: &SharedModels,
@@ -1088,29 +1040,46 @@ impl ZtfEnrichmentWorker {
                 }
             };
             let metadata_result = AcaiModel::get_metadata(&[&item.alert]);
-            let btsbot_metadata_result =
-                BtsBotModel::get_metadata(&[&item.alert], &[item.all_bands_properties.clone()]);
+            let btsbot_metadata_result = BtsBotModel::get_metadata(
+                &[&item.alert],
+                std::slice::from_ref(&item.all_bands_properties),
+            );
 
             let cls = if let (Ok(metadata), Ok(btsbot_metadata)) =
                 (metadata_result, btsbot_metadata_result)
             {
-                let acai_h_scores = models.acai_h.lock().unwrap().predict(&metadata, &triplet)?;
-                let acai_n_scores = models.acai_n.lock().unwrap().predict(&metadata, &triplet)?;
-                let acai_v_scores = models.acai_v.lock().unwrap().predict(&metadata, &triplet)?;
-                let acai_o_scores = models.acai_o.lock().unwrap().predict(&metadata, &triplet)?;
-                let acai_b_scores = models.acai_b.lock().unwrap().predict(&metadata, &triplet)?;
-                let btsbot_scores = models
-                    .btsbot
-                    .lock()
-                    .unwrap()
-                    .predict(&btsbot_metadata, &triplet)?;
+                let [acai_h, acai_n, acai_v, acai_o, acai_b, btsbot] =
+                    Self::predict_acai_btsbot(models, &metadata, &btsbot_metadata, &triplet)?;
+
+                let cider_result = if item.cider_eligible() {
+                    (|| -> Result<(CiderClassProbs, Vec<f32>), ModelError> {
+                        let mut m = models.cider.lock().unwrap();
+                        let meta = m.get_metadata(&[&item.alert], &[&item.all_bands_properties])?;
+                        let img = m.get_triplet(&[&item.cutouts])?;
+                        let (tx, tpm, tg) = m.photometry_inputs(item.ztf_lightcurve.clone())?;
+                        let (probs, embedding) = m.predict(&tx, &tpm, &tg, &meta, &img)?;
+                        let cls = CiderClassProbs::from_probs(&probs).ok_or(
+                            ModelError::MissingFeature("cider: unexpected output length"),
+                        )?;
+                        Ok((cls, embedding))
+                    })()
+                    .map_err(|e| {
+                        warn!("cider inference failed for candid {}: {}", item.candid, e);
+                    })
+                    .ok()
+                } else {
+                    None
+                };
+
                 Some(ZtfAlertClassifications {
-                    acai_h: acai_h_scores[0],
-                    acai_n: acai_n_scores[0],
-                    acai_v: acai_v_scores[0],
-                    acai_o: acai_o_scores[0],
-                    acai_b: acai_b_scores[0],
-                    btsbot: btsbot_scores[0],
+                    acai_h: acai_h[0],
+                    acai_n: acai_n[0],
+                    acai_v: acai_v[0],
+                    acai_o: acai_o[0],
+                    acai_b: acai_b[0],
+                    btsbot: btsbot[0],
+                    cider_fusion: cider_result.as_ref().map(|(cls, _)| cls.clone()),
+                    fusion_embedding: cider_result.map(|(_, emb)| emb),
                 })
             } else {
                 warn!(
@@ -1143,44 +1112,93 @@ impl ZtfEnrichmentWorker {
         let (bts_indices, bts_metadata_all) =
             BtsBotModel::get_metadata_indexed(&all_alerts, &all_band_props)?;
 
-        let triplet_pos: std::collections::HashMap<usize, usize> = triplet_indices
-            .iter()
-            .enumerate()
-            .map(|(pos, idx)| (*idx, pos))
-            .collect();
-        let acai_pos: std::collections::HashMap<usize, usize> = acai_indices
-            .iter()
-            .enumerate()
-            .map(|(pos, idx)| (*idx, pos))
-            .collect();
-        let bts_pos: std::collections::HashMap<usize, usize> = bts_indices
-            .iter()
-            .enumerate()
-            .map(|(pos, idx)| (*idx, pos))
-            .collect();
+        let row_of = |indices: &[usize]| -> HashMap<usize, usize> {
+            indices
+                .iter()
+                .enumerate()
+                .map(|(pos, i)| (*i, pos))
+                .collect()
+        };
+        let triplet_pos = row_of(&triplet_indices);
+        let acai_pos = row_of(&acai_indices);
+        let bts_pos = row_of(&bts_indices);
 
-        let mut selected_indices: Vec<usize> = Vec::new();
-        for idx in 0..work_items.len() {
-            if triplet_pos.contains_key(&idx)
-                && acai_pos.contains_key(&idx)
-                && bts_pos.contains_key(&idx)
-            {
-                selected_indices.push(idx);
-            } else {
-                warn!(
-                    "Skipping ML inference for candid {} due to missing features",
-                    work_items[idx].candid
-                );
-            }
-        }
+        let selected_indices: Vec<usize> = (0..work_items.len())
+            .filter(|idx| {
+                let complete = triplet_pos.contains_key(idx)
+                    && acai_pos.contains_key(idx)
+                    && bts_pos.contains_key(idx);
+                if !complete {
+                    warn!(
+                        "Skipping ML inference for candid {} due to missing features",
+                        work_items[*idx].candid
+                    );
+                }
+                complete
+            })
+            .collect();
 
         if selected_indices.is_empty() {
             return Ok(results);
         }
 
-        // Run inference in fixed-size chunks so ORT always sees the same
-        // input shape (`self.batch_size`). The final chunk is zero-padded
-        // up to the fixed size; padding rows produce scores that are ignored.
+        let cider_indices: Vec<usize> = selected_indices
+            .iter()
+            .copied()
+            .filter(|&i| work_items[i].cider_eligible())
+            .collect();
+        let cider_pos = row_of(&cider_indices);
+        let cider_batch: Option<(Vec<f32>, Vec<f32>)> = (!cider_indices.is_empty())
+            .then(|| -> Result<(Vec<f32>, Vec<f32>), ModelError> {
+                let cider_alerts: Vec<&ZtfAlertForEnrichment> = cider_indices
+                    .iter()
+                    .map(|&i| &work_items[i].alert)
+                    .collect();
+                let cider_cutouts: Vec<&AlertCutout> = cider_indices
+                    .iter()
+                    .map(|&i| &work_items[i].cutouts)
+                    .collect();
+                let cider_props: Vec<&AllBandsProperties> = cider_indices
+                    .iter()
+                    .map(|&i| &work_items[i].all_bands_properties)
+                    .collect();
+
+                let mut cider = models.cider.lock().unwrap();
+                let cider_meta = cider.get_metadata(&cider_alerts, &cider_props)?;
+                let cider_image = cider.get_triplet(&cider_cutouts)?;
+
+                let phot: Vec<_> = cider_indices
+                    .iter()
+                    .map(|&i| cider.photometry_inputs(work_items[i].ztf_lightcurve.clone()))
+                    .collect::<Result<Vec<_>, _>>()?;
+
+                let tx_views: Vec<_> = phot.iter().map(|(x, _, _)| x.view()).collect();
+                let tpm_views: Vec<_> = phot.iter().map(|(_, m, _)| m.view()).collect();
+                let tg_views: Vec<_> = phot.iter().map(|(_, _, g)| g.view()).collect();
+
+                let tx = ndarray::concatenate(ndarray::Axis(0), &tx_views)?;
+                let tpm = ndarray::concatenate(ndarray::Axis(0), &tpm_views)?;
+                let tg = ndarray::concatenate(ndarray::Axis(0), &tg_views)?;
+
+                cider.predict(&tx, &tpm, &tg, &cider_meta, &cider_image)
+            })
+            .and_then(|r| {
+                r.map_err(|e| {
+                    warn!("cider batch inference failed: {}", e);
+                })
+                .ok()
+            });
+
+        let cider_n_cls = cider_batch
+            .as_ref()
+            .map(|(p, _)| p.len() / cider_indices.len())
+            .unwrap_or(0);
+        let cider_emb_dim = cider_batch
+            .as_ref()
+            .map(|(_, e)| e.len() / cider_indices.len())
+            .unwrap_or(0);
+
+        // ORT needs one fixed input shape, so pad the last chunk and drop the pad rows.
         for chunk in selected_indices.chunks(self.batch_size) {
             let mut triplet = ndarray::Array::zeros((self.batch_size, 63, 63, 3));
             let mut metadata = ndarray::Array::zeros((self.batch_size, 25));
@@ -1200,25 +1218,8 @@ impl ZtfEnrichmentWorker {
                     .assign(&bts_metadata_all.row(bpos));
             }
 
-            let acai_h_scores = models.acai_h.lock().unwrap().predict(&metadata, &triplet)?;
-            let acai_n_scores = models.acai_n.lock().unwrap().predict(&metadata, &triplet)?;
-            let acai_v_scores = models.acai_v.lock().unwrap().predict(&metadata, &triplet)?;
-            let acai_o_scores = models.acai_o.lock().unwrap().predict(&metadata, &triplet)?;
-            let acai_b_scores = models.acai_b.lock().unwrap().predict(&metadata, &triplet)?;
-            let btsbot_scores = models
-                .btsbot
-                .lock()
-                .unwrap()
-                .predict(&btsbot_metadata, &triplet)?;
-
-            for (name, got) in [
-                ("acai_h", acai_h_scores.len()),
-                ("acai_n", acai_n_scores.len()),
-                ("acai_v", acai_v_scores.len()),
-                ("acai_o", acai_o_scores.len()),
-                ("acai_b", acai_b_scores.len()),
-                ("btsbot", btsbot_scores.len()),
-            ] {
+            let scores = Self::predict_acai_btsbot(models, &metadata, &btsbot_metadata, &triplet)?;
+            for (name, got) in ACAI_BTS_NAMES.iter().zip(scores.iter().map(Vec::len)) {
                 if got != self.batch_size {
                     return Err(EnrichmentWorkerError::ConfigurationError(format!(
                         "model {} returned {} scores for {} padded inputs",
@@ -1226,16 +1227,25 @@ impl ZtfEnrichmentWorker {
                     )));
                 }
             }
+            let [acai_h, acai_n, acai_v, acai_o, acai_b, btsbot] = scores;
 
-            // Map only the real rows back; padding rows (chunk.len()..) are dropped.
             for (batch_idx, &item_idx) in chunk.iter().enumerate() {
+                let cider = cider_pos.get(&item_idx).copied().zip(cider_batch.as_ref());
                 results[item_idx] = Some(ZtfAlertClassifications {
-                    acai_h: acai_h_scores[batch_idx],
-                    acai_n: acai_n_scores[batch_idx],
-                    acai_v: acai_v_scores[batch_idx],
-                    acai_o: acai_o_scores[batch_idx],
-                    acai_b: acai_b_scores[batch_idx],
-                    btsbot: btsbot_scores[batch_idx],
+                    acai_h: acai_h[batch_idx],
+                    acai_n: acai_n[batch_idx],
+                    acai_v: acai_v[batch_idx],
+                    acai_o: acai_o[batch_idx],
+                    acai_b: acai_b[batch_idx],
+                    btsbot: btsbot[batch_idx],
+                    cider_fusion: cider.and_then(|(row, (probs, _))| {
+                        CiderClassProbs::from_probs(
+                            &probs[row * cider_n_cls..(row + 1) * cider_n_cls],
+                        )
+                    }),
+                    fusion_embedding: cider.map(|(row, (_, emb))| {
+                        emb[row * cider_emb_dim..(row + 1) * cider_emb_dim].to_vec()
+                    }),
                 });
             }
         }
@@ -1270,8 +1280,6 @@ mod tests {
         );
     }
 
-    /// 1 Ceres, the MPCORB elements checked against JPL Horizons in
-    /// `sso_geometry::tests`. Values there are the reference for the numbers below.
     fn ceres() -> OrbitalElements {
         OrbitalElements {
             epoch_jd: 2_461_200.5,
@@ -1284,9 +1292,7 @@ mod tests {
         }
     }
 
-    // The whole point of the join: an IPAC designation has to reach the geometry.
-    // Tolerances here are loose because f32 storage, not the propagation, is the
-    // limit — sso_geometry holds the tight comparison against Horizons.
+    // Tolerances are loose because of f32 storage, not the propagation.
     #[test]
     fn test_geometry_populated_when_elements_are_available() {
         let sso = ZtfSsoAssociation::from_ipac(Some("1".to_string()), Some(0.4), Some(9.2))
@@ -1306,8 +1312,6 @@ mod tests {
         assert!((phase - 17.6824).abs() < 0.01, "phase angle was {phase}");
     }
 
-    // An object missing from MPCORB must read as missing. A default here would be
-    // indistinguishable from a real measurement to everything downstream.
     #[test]
     fn test_geometry_absent_when_elements_are_missing() {
         let sso = ZtfSsoAssociation::from_ipac(Some("9816".to_string()), Some(1.0), Some(18.1))
@@ -1318,13 +1322,8 @@ mod tests {
         assert!(sso.phase_angle.is_none());
     }
 
-    // The lookup key is what actually joins the two collections, and IPAC does not
-    // write designations the way MPCORB does. Guard the seam with real values.
     #[test]
     fn test_ipac_designations_resolve_to_orbit_keys() {
-        // Mirrors what fetch_orbits returns: keyed by ssnamenr as the alert
-        // carries it, having normalised each distinct name once. Two names that
-        // reduce to the same MPCORB key each get their own entry.
         let by_key = HashMap::from([("1", ceres())]);
         let orbits: HashMap<String, OrbitalElements> = ["1", "(1)Ceres", "C/2026O1"]
             .into_iter()
@@ -1338,13 +1337,10 @@ mod tests {
                 "ssnamenr {ssnamenr} did not resolve to an orbit"
             );
         }
-        // Comets are not in MPCORB; missing beats matching the wrong object.
         assert!(!orbits.contains_key("C/2026O1"));
         assert!(normalize_ztf_ssnamenr("C/2026O1").is_none());
     }
 
-    // Upstream uses negative values (e.g. -999) to mean "no match". Storing those
-    // verbatim would let a consumer read -999 as a very close separation.
     #[test]
     fn test_negative_sentinels_are_normalised_to_none() {
         let sso = ZtfSsoAssociation::from_ipac(None, Some(-999.0), Some(-999.0));
@@ -1352,9 +1348,6 @@ mod tests {
         assert!(sso.predicted_mag.is_none());
     }
 
-    // Alerts enriched before `properties.sso` existed have no such key. Reading one
-    // back must yield `None` rather than failing, or the API 500s on every
-    // pre-existing object.
     #[test]
     fn test_properties_without_sso_still_deserialize() {
         let legacy = serde_json::json!({
@@ -1374,7 +1367,6 @@ mod tests {
         );
     }
 
-    // A partially-written block should not fail either.
     #[test]
     fn test_partial_sso_block_deserializes() {
         let sso: ZtfSsoAssociation =
@@ -1385,11 +1377,7 @@ mod tests {
         assert!(sso.separation_arcsec.is_none());
     }
 
-    // The regression this block exists for. `rock` is thresholded at a hardcoded
-    // 12", so as the upstream ephemeris degrades it silently drops objects: the
-    // fraction of identified asteroids within 12" fell from 98.2% (Apr 2026) to
-    // 82.4% (Aug 2026). `is_sso` must stay true regardless of separation, with the
-    // degradation visible in `separation_arcsec` instead.
+    // Regression guard: `rock` is thresholded at 12", `is_sso` must not be.
     #[test]
     fn test_is_sso_is_not_thresholded_on_separation() {
         let far = ZtfSsoAssociation::from_ipac(Some("407033".to_string()), Some(18.0), Some(21.6));
