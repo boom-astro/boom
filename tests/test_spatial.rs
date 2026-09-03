@@ -74,12 +74,16 @@ async fn test_xmatch_watchlist_excluded_from_cross_matches() {
         // 2 arcsec radius, well within the ~0 arcsec separation above.
         let watchlist_config = CatalogXmatchConfig::new(
             &watchlist_name,
+            None,
             2.0,
             doc! { "_id": 1, "ra": 1, "dec": 1 },
             false,
             None,
             None,
             None,
+            None,
+            None,
+            1.0,
             None,
         );
 

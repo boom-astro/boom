@@ -9,6 +9,7 @@ use crate::enrichment::{
 use crate::utils::cutouts::{AlertCutout, CutoutStorage};
 use crate::utils::db::mongify;
 use crate::utils::enums::Survey;
+use crate::utils::host::HostGalaxyAssociation;
 use crate::utils::lightcurves::{
     analyze_photometry, prepare_photometry, ActivityMetrics, AllBandsProperties, Band,
     PerBandProperties, PhotometryMag, ZTF_ZP,
@@ -286,6 +287,7 @@ pub fn create_ztf_alert_pipeline(include_classifications: bool) -> Vec<Document>
                 "prv_candidates": "$aux.prv_candidates",
                 "prv_nondetections": "$aux.prv_nondetections",
                 "fp_hists": "$aux.fp_hists",
+                "host_galaxy": "$aux.host_galaxy",
                 "survey_matches": {
                     "lsst": {
                         "$cond": {
@@ -356,6 +358,8 @@ pub struct ZtfAlertForEnrichment {
     pub prv_nondetections: Vec<ZtfPhotometry>,
     #[serde(deserialize_with = "deserialize_ztf_forced_lightcurve")]
     pub fp_hists: Vec<ZtfPhotometry>,
+    #[serde(default)]
+    pub host_galaxy: Option<HostGalaxyAssociation>,
     pub survey_matches: Option<ZtfSurveyMatches>,
 }
 
@@ -459,6 +463,14 @@ pub struct ZtfAlertProperties {
     pub rock: bool,
     pub star: bool,
     pub near_brightstar: bool,
+    /// A host galaxy was associated within the configured `max_dlr`.
+    ///
+    /// `None` on alerts never evaluated for a host -- enriched before this
+    /// existed, or with host association disabled. That is not the same as
+    /// `Some(false)`, which means evaluated and nothing passed the cut, so a
+    /// filter must not read absence as "no host".
+    #[serde(default)]
+    pub hosted: Option<bool>,
     pub stationary: bool,
     pub photstats: PerBandProperties,
     pub multisurvey_photstats: Option<PerBandProperties>,
@@ -1039,11 +1051,17 @@ impl ZtfEnrichmentWorker {
             photstats.clone()
         };
 
+        // `host_galaxy` is None when association never ran and Some when it did,
+        // so mapping preserves the difference between "not evaluated" and
+        // "evaluated, no host". best_host is set only above the d_DLR cut.
+        let hosted = alert.host_galaxy.as_ref().map(|hg| hg.best_host.is_some());
+
         Ok((
             ZtfAlertProperties {
                 rock: is_rock,
                 star: is_star,
                 near_brightstar: is_near_brightstar,
+                hosted,
                 stationary,
                 photstats,
                 multisurvey_photstats: Some(multisurvey_photstats),
@@ -1372,6 +1390,29 @@ mod tests {
             props.sso.is_none(),
             "absent means never evaluated, not evaluated-and-negative"
         );
+        assert!(
+            props.hosted.is_none(),
+            "absent means never evaluated for a host, not evaluated-and-hostless"
+        );
+        assert!(props.activity.is_none());
+    }
+
+    // Evaluated-and-nothing-found has to stay distinguishable from never
+    // evaluated, or a filter cutting on `hosted == false` silently sweeps in
+    // every alert enriched before host association existed.
+    #[test]
+    fn test_evaluated_hostless_differs_from_unevaluated() {
+        let evaluated = serde_json::json!({
+            "rock": false,
+            "star": false,
+            "near_brightstar": false,
+            "stationary": true,
+            "hosted": false,
+            "photstats": PerBandProperties::default(),
+            "multisurvey_photstats": null,
+        });
+        let props: ZtfAlertProperties = serde_json::from_value(evaluated).expect("deserializes");
+        assert_eq!(props.hosted, Some(false));
     }
 
     // A partially-written block should not fail either.

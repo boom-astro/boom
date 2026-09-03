@@ -1386,12 +1386,16 @@ mod tests {
             .or_default()
             .push(CatalogXmatchConfig::new(
                 &name,
+                None,
                 2.0,
                 doc! { "_id": 1 },
                 false,
                 None,
                 None,
                 None,
+                None,
+                None,
+                1.0,
                 None,
             ));
         let result = validate_watchlist(&db, &name, &Survey::Ztf, &admin, &config).await;

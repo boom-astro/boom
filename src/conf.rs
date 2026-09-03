@@ -1,6 +1,7 @@
 use crate::utils::{
     cutouts::{CutoutCache, CutoutStorage},
     enums::Survey,
+    host::HostGalaxyConfig,
     o11y::logging::as_error,
 };
 use chrono::NaiveDate;
@@ -275,7 +276,11 @@ async fn build_cutout_storage(
 
 #[derive(Debug, Clone)]
 pub struct CatalogXmatchConfig {
-    pub catalog: String,                     // name of the collection in the database
+    pub catalog: String, // key this catalog's matches appear under in cross_matches
+    // Collection actually queried. Defaults to `catalog`; set it when two
+    // entries read the same collection with different matching rules, since the
+    // results are keyed by `catalog` and the key must stay unique.
+    pub collection: Option<String>,
     pub radius: f64,                         // radius in radians
     pub projection: mongodb::bson::Document, // projection to apply to the catalog
     pub use_distance: bool,                  // whether to use the distance field in the crossmatch
@@ -283,11 +288,24 @@ pub struct CatalogXmatchConfig {
     pub distance_max: Option<f64>,           // maximum distance in kpc
     pub distance_max_near: Option<f64>,      // maximum distance in arcsec for nearby objects
     pub max_results: Option<usize>,          // maximum number of results to return
+    // Angular-size matching: give each row its own match radius, scaled by its
+    // angular size, so a large galaxy is still returned for a transient far out
+    // in its disk. Setting `angular_size_key` enables the mode.
+    pub angular_size_key: Option<String>, // field holding the angular DIAMETER in arcsec
+    pub angular_size_scale: f64,          // multiple of the semi-major axis to match within
+    pub angular_size_radius_max: Option<f64>, // cap on the per-row radius, in radians
+}
+
+/// Radians to arcsec.
+pub fn radians_to_arcsec(radians: f64) -> f64 {
+    radians * 180.0 / std::f64::consts::PI * 3600.0
 }
 
 impl CatalogXmatchConfig {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         catalog: &str,
+        collection: Option<String>,
         radius: f64,
         projection: mongodb::bson::Document,
         use_distance: bool,
@@ -295,17 +313,53 @@ impl CatalogXmatchConfig {
         distance_max: Option<f64>,
         distance_max_near: Option<f64>,
         max_results: Option<usize>,
+        angular_size_key: Option<String>,
+        angular_size_scale: f64,
+        angular_size_radius_max: Option<f64>,
     ) -> CatalogXmatchConfig {
+        let arcsec_to_radians = |v: f64| v * std::f64::consts::PI / 180.0 / 3600.0;
         CatalogXmatchConfig {
             catalog: catalog.to_string(),
-            radius: radius * std::f64::consts::PI / 180.0 / 3600.0, // convert arcsec to radians
+            collection,
+            radius: arcsec_to_radians(radius),
             projection,
             use_distance,
             distance_key,
             distance_max,
             distance_max_near,
             max_results,
+            angular_size_key,
+            angular_size_scale,
+            angular_size_radius_max: angular_size_radius_max.map(arcsec_to_radians),
         }
+    }
+
+    /// Collection to query, which is the catalog name unless overridden.
+    pub fn collection_name(&self) -> &str {
+        self.collection.as_deref().unwrap_or(&self.catalog)
+    }
+
+    /// Match radius in arcsec for one candidate row.
+    ///
+    /// Without angular-size matching this is just the cone radius. With it, a
+    /// row reaching further than the cone gets its own larger radius, capped by
+    /// `angular_size_radius_max`.
+    pub fn match_radius_arcsec(&self, angular_size_arcsec: Option<f64>) -> f64 {
+        let base = radians_to_arcsec(self.radius);
+        let Some(max) = self.angular_size_radius_max else {
+            return base;
+        };
+        let scaled = angular_size_arcsec
+            .filter(|s| s.is_finite() && *s > 0.0)
+            .map(|s| self.angular_size_scale * s / 2.0)
+            .unwrap_or(0.0);
+        scaled.clamp(base, radians_to_arcsec(max))
+    }
+
+    /// Smallest angular size that reaches beyond the base cone, and so needs
+    /// the extended search.
+    pub fn angular_size_threshold_arcsec(&self) -> f64 {
+        2.0 * radians_to_arcsec(self.radius) / self.angular_size_scale
     }
 
     // based on the code in the main function, create a from_config function
@@ -318,6 +372,11 @@ impl CatalogXmatchConfig {
             .ok_or(BoomConfigError::MissingKeyError("catalog".to_string()))?
             .clone()
             .into_string()?;
+
+        let collection = match hashmap_xmatch.get("collection") {
+            Some(value) => Some(value.clone().into_string()?),
+            None => None,
+        };
 
         let radius = hashmap_xmatch
             .get("radius")
@@ -389,8 +448,39 @@ impl CatalogXmatchConfig {
             panic!("cannot use max_results with distance filtering");
         }
 
+        let angular_size_key = match hashmap_xmatch.get("angular_size_key") {
+            Some(v) => Some(v.clone().into_string()?),
+            None => None,
+        };
+
+        let angular_size_scale = match hashmap_xmatch.get("angular_size_scale") {
+            Some(v) => v.clone().into_float()?,
+            None => 1.0,
+        };
+
+        let angular_size_radius_max = match hashmap_xmatch.get("angular_size_radius_max") {
+            Some(v) => Some(v.clone().into_float()?),
+            None => None,
+        };
+
+        if angular_size_key.is_some() {
+            if use_distance {
+                panic!("cannot use angular_size_key with distance filtering");
+            }
+            if angular_size_radius_max.is_none() {
+                panic!("must provide an angular_size_radius_max if angular_size_key is set");
+            }
+            if angular_size_scale <= 0.0 {
+                panic!("angular_size_scale must be greater than 0");
+            }
+            if angular_size_radius_max.unwrap() < radius {
+                panic!("angular_size_radius_max must be at least as large as radius");
+            }
+        }
+
         Ok(CatalogXmatchConfig::new(
             &catalog,
+            collection,
             radius,
             projection_doc,
             use_distance,
@@ -398,6 +488,9 @@ impl CatalogXmatchConfig {
             distance_max,
             distance_max_near,
             max_results,
+            angular_size_key,
+            angular_size_scale,
+            angular_size_radius_max,
         ))
     }
 }
@@ -972,6 +1065,8 @@ pub struct AppConfig {
     pub workers: HashMap<Survey, SurveyWorkerConfig>,
     #[serde(default)]
     pub gpu: GpuConfig,
+    #[serde(default)]
+    pub host_galaxy: HostGalaxyConfig,
     pub cutouts_storage: CutoutsStorage,
 }
 

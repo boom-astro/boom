@@ -11,6 +11,7 @@ use crate::{
         cutouts::CutoutStorage,
         db::{mongify_vec, update_timeseries_op},
         enums::Survey,
+        host::{self, HostGalaxyAssociation, HostGalaxyConfig},
         lightcurves::{flux2mag, fluxerr2diffmaglim, Band, LSST_ZP_AB_NJY, SNT},
         o11y::logging::as_error,
         spatial::{xmatch, Coordinates},
@@ -1036,6 +1037,8 @@ pub struct LsstObject {
     /// Persists regardless of whether a ZTF cross-match is ever found.
     pub designation: Option<String>,
     pub cross_matches: Option<HashMap<String, Vec<Document>>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_galaxy: Option<HostGalaxyAssociation>,
     pub aliases: Option<LsstAliases>,
     pub coordinates: Coordinates,
     pub created_at: f64,
@@ -1070,6 +1073,7 @@ struct AlertAuxForUpdate {
 pub struct LsstAlertWorker {
     schema_registry: SchemaRegistry,
     xmatch_configs: Vec<conf::CatalogXmatchConfig>,
+    host_galaxy_config: HostGalaxyConfig,
     db: mongodb::Database,
     alert_collection: mongodb::Collection<LsstAlert>,
     alert_aux_collection: mongodb::Collection<LsstObject>,
@@ -1305,6 +1309,7 @@ impl AlertWorker for LsstAlertWorker {
                 Some(github_fallback_url.to_string()),
             ),
             xmatch_configs,
+            host_galaxy_config: config.host_galaxy.clone(),
             db,
             alert_collection,
             alert_aux_collection,
@@ -1413,6 +1418,8 @@ impl AlertWorker for LsstAlertWorker {
                 &self.db,
             )
             .await?;
+            let host_galaxy =
+                host::associate_from_xmatches(ra, dec, &xmatches, &self.host_galaxy_config);
             let obj = LsstObject {
                 object_id: object_id.clone(),
                 prv_candidates,
@@ -1420,6 +1427,7 @@ impl AlertWorker for LsstAlertWorker {
                 is_sso: ss_object_id.is_some(),
                 designation: designation.clone(),
                 cross_matches: Some(xmatches),
+                host_galaxy,
                 aliases: survey_matches,
                 coordinates: Coordinates::new(ra, dec),
                 created_at: now,
