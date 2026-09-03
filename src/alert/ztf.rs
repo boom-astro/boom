@@ -21,7 +21,7 @@ use mongodb::bson::{doc, Document};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_with::{serde_as, skip_serializing_none};
 use std::collections::HashMap;
-use tracing::{instrument, warn};
+use tracing::{debug, error, instrument, warn};
 use utoipa::ToSchema;
 
 pub const STREAM_NAME: &str = "ZTF";
@@ -121,6 +121,10 @@ pub struct ZtfPrvCandidate {
     pub ap_flux_err: Option<f32>,
     pub snr_ap: Option<f32>,
     pub band: Band,
+    // Deep real-bogus, kept from the candidate (packet prv_candidates carry only
+    // legacy `rb`). `default` so pre-existing aux docs still deserialize.
+    #[serde(default)]
+    pub drb: Option<f32>,
 }
 
 impl TimeSeries for ZtfPrvCandidate {
@@ -188,6 +192,7 @@ impl TryFrom<PrvCandidate> for ZtfPrvCandidate {
             ap_flux_err,
             snr_ap,
             band,
+            drb: None, // packet prv_candidates don't carry drb
         })
     }
 }
@@ -594,11 +599,12 @@ impl TryFrom<&ZtfCandidate> for ZtfPrvCandidate {
             ap_flux_err: ztf_candidate.ap_flux_err,
             snr_ap: ztf_candidate.snr_ap,
             band: ztf_candidate.band.clone(),
+            drb: ztf_candidate.candidate.drb,
         })
     }
 }
 
-fn deserialize_candidate<'de, D>(deserializer: D) -> Result<ZtfCandidate, D::Error>
+pub fn deserialize_candidate<'de, D>(deserializer: D) -> Result<ZtfCandidate, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -636,7 +642,7 @@ pub struct ZtfRawAvroAlert {
     pub cutout_difference: Vec<u8>,
 }
 
-fn deserialize_cutout_as_bytes<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+pub fn deserialize_cutout_as_bytes<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -791,17 +797,14 @@ impl ZtfAlertWorker {
         .await
     }
 
-    #[instrument(
-        skip(
-            self,
-            prv_candidates,
-            prv_nondetections,
-            fp_hists,
-            survey_matches,
-            existing_alert_aux
-        ),
-        err
-    )]
+    #[instrument(skip(
+        self,
+        prv_candidates,
+        prv_nondetections,
+        fp_hists,
+        survey_matches,
+        existing_alert_aux
+    ))]
     async fn update_aux_inner(
         &mut self,
         object_id: &str,
@@ -848,6 +851,7 @@ impl ZtfAlertWorker {
             current_version,
             now,
             &self.alert_aux_collection,
+            Document::new(),
         )
         .await
     }
@@ -875,9 +879,13 @@ impl ZtfAlertWorker {
             .await
         {
             Ok(_) => Ok(()),
-            Err(_) => {
+            Err(e) => {
                 // if we get a concurrent modification error or an error preparing the lightcurves update,
                 // we fallback to a full in-DB update, safe against concurrency and "self-healing", but less efficient
+                match &e {
+                    AlertError::ConcurrentAuxUpdate(_) => debug!(error = %e),
+                    _ => error!(error = %e),
+                }
                 self.update_aux_fallback(
                     object_id,
                     prv_candidates,
@@ -939,10 +947,6 @@ impl AlertWorker for ZtfAlertWorker {
 
     fn survey() -> Survey {
         Survey::Ztf
-    }
-
-    fn input_queue_name(&self) -> String {
-        format!("{}_alerts_packets_queue", ZtfAlertWorker::survey())
     }
 
     fn output_queue_name(&self) -> String {
@@ -1020,7 +1024,15 @@ impl AlertWorker for ZtfAlertWorker {
             .await
             .inspect_err(as_error!())?;
         } else {
-            let xmatches = xmatch(ra, dec, &self.xmatch_configs, &self.db).await?;
+            let xmatches = xmatch(
+                ra,
+                dec,
+                &object_id,
+                &Survey::Ztf,
+                &self.xmatch_configs,
+                &self.db,
+            )
+            .await?;
             let obj = ZtfObject {
                 object_id: object_id.clone(),
                 prv_candidates,
@@ -1034,8 +1046,7 @@ impl AlertWorker for ZtfAlertWorker {
             };
             let result = self.insert_aux(&obj, &self.alert_aux_collection).await;
             if let Err(AlertError::AlertAuxExists) = result {
-                // use the race-condition free fallback update
-                warn!(
+                debug!(
                     "Alert aux document for object_id {} already exists. Using fallback update.",
                     object_id
                 );

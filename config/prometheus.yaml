@@ -53,6 +53,14 @@ scrape_configs:
         target_label: instance
         replacement: "cadvisor"
 
+  - job_name: "node"
+    static_configs:
+      - targets: ["node-exporter:9100"]
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        replacement: "node-exporter"
+
   - job_name: "docker-metadata"
     static_configs:
       - targets: ["docker-metadata-exporter:9158"]

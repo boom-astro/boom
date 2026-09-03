@@ -1,3 +1,4 @@
+use crate::api::auth::hash_token;
 /// Functionality for working with personal access tokens (PATs).
 use crate::api::models::response;
 use crate::api::routes::babamul::{generate_random_string, BabamulUser, BabamulUserToken};
@@ -7,7 +8,6 @@ use flare::Time;
 use mongodb::bson::doc;
 use mongodb::Database;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use utoipa::ToSchema;
 
 #[derive(Deserialize, Clone, ToSchema)]
@@ -32,12 +32,6 @@ pub struct TokenPublic {
     pub created_at: i64,
     pub expires_at: i64,
     pub last_used_at: Option<i64>,
-}
-
-fn hash_token(token: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(token.as_bytes());
-    format!("{:x}", hasher.finalize())
 }
 
 /// Get all tokens for the authenticated user

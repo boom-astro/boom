@@ -11,6 +11,19 @@ use mongodb::Database;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+// sha2 0.11 moved to hybrid-array::Array which dropped the LowerHex impl that
+// GenericArray had. Centralise the byte-level hex encoding here so callers
+// don't need to know about the change.
+pub fn hash_token(token: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(token.as_bytes());
+    hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect()
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Claims {
     pub sub: String,
@@ -239,8 +252,11 @@ pub async fn babamul_auth_middleware(
     req: ServiceRequest,
     next: Next<impl MessageBody>,
 ) -> Result<ServiceResponse<impl MessageBody>, Error> {
-    // Allow public routes without authentication
-    if BABAMUL_PUBLIC_ROUTES.contains(&req.path()) {
+    // Allow public routes without authentication. The social sign-in routes
+    // carry a provider slug in the path, so they are matched by prefix rather
+    // than listed individually — the whole point of those endpoints is to run
+    // before the caller has a token.
+    if BABAMUL_PUBLIC_ROUTES.contains(&req.path()) || req.path().starts_with("/babamul/oauth/") {
         return next.call(req).await;
     }
 
@@ -288,9 +304,7 @@ pub async fn babamul_auth_middleware(
                 let token_secret = &token[5..];
 
                 // Hash the token for comparison
-                let mut hasher = Sha256::new();
-                hasher.update(token_secret.as_bytes());
-                let token_hash = format!("{:x}", hasher.finalize());
+                let token_hash = hash_token(token_secret);
 
                 // Look up the token and update last_used_at in a single atomic operation
                 // Use aggregation pipeline to update token and join with user in one operation

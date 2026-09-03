@@ -4,6 +4,12 @@ on:
   push:
     branches: ["main"]
   pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
+  # Only PR runs are superseded; main keeps one run, and one status, per commit.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -55,10 +61,10 @@ jobs:
           BUILDX_BAKE_ENTITLEMENTS_FS: 0
       - name: Setup uv
         uses: astral-sh/setup-uv@v5
-      - name: Download NED catalog from Google Drive
+      - name: Download NED catalog
         run: |
           mkdir -p ./data/alerts
-          uvx gdown https://drive.google.com/uc?id=1BG46oLMbONXhIqiPrepSnhKim1xfiVbB -O ./data/alerts/kowalski.NED.json.gz
+          wget -q https://github.com/boom-astro/boom/releases/download/test-data-v1/BOOM.NED.json.gz -O ./data/alerts/BOOM.NED.json.gz
       - name: Download auxiliary ZTF alerts from Caltech Box
         run: wget -q https://caltech.box.com/shared/static/qdois5qq2lmvp02ri50fum80vzr54505.gz -O ./data/alerts/boom_throughput.ZTF_alerts_aux.dump.gz
       - name: Run test
@@ -79,7 +85,9 @@ jobs:
   aggregate:
     name: Aggregate and report throughput results
     runs-on: ubuntu-latest
-    permissions: write-all
+    permissions:
+      contents: read
+      actions: read # gh run list + cross-run artifact download
     needs: test
     if: github.event_name == 'pull_request'
     steps:
@@ -94,26 +102,46 @@ jobs:
         with:
           name: throughput-logs-s3
           path: ./s3/current
+      - name: Resolve baseline run
+        id: baseline
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # The baseline is the artifacts from the most recent *successful* run
+          # of this workflow on main (the same selection dawidd6 makes by
+          # default). Resolve it explicitly so we can both pin the downloads
+          # below to it and link to it from the PR comment, guaranteeing the
+          # link matches the artifacts actually used.
+          run_id=$(gh run list --repo "$GITHUB_REPOSITORY" \
+            --workflow test-throughput.yaml --branch main --status success \
+            --limit 1 --json databaseId --jq '.[0].databaseId // empty')
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+          if [ -n "$run_id" ]; then
+            echo "link=[\`$run_id\`](https://github.com/$GITHUB_REPOSITORY/actions/runs/$run_id)" >> "$GITHUB_OUTPUT"
+          else
+            echo "link=_no successful main run found_" >> "$GITHUB_OUTPUT"
+          fi
       - name: Download Mongo baseline logs
+        if: steps.baseline.outputs.run_id != ''
         uses: dawidd6/action-download-artifact@v11
         with:
-          workflow: test-throughput.yaml
-          branch: main
+          run_id: ${{ steps.baseline.outputs.run_id }}
           name: throughput-logs-mongo
           path: ./mongo/baseline
           if_no_artifact_found: warn
         continue-on-error: true
       - name: Download S3 baseline logs
+        if: steps.baseline.outputs.run_id != ''
         uses: dawidd6/action-download-artifact@v11
         with:
-          workflow: test-throughput.yaml
-          branch: main
+          run_id: ${{ steps.baseline.outputs.run_id }}
           name: throughput-logs-s3
           path: ./s3/baseline
           if_no_artifact_found: warn
         continue-on-error: true
       - name: Aggregate and compare results
-        id: aggregate
+        env:
+          BASELINE_LINK: ${{ steps.baseline.outputs.link }}
         run: |
           #!/usr/bin/env bash
           set -euo pipefail
@@ -144,21 +172,21 @@ jobs:
           make_row "mongo" ./mongo/current/boom-*/wall_time.txt ./mongo/baseline/boom-*/wall_time.txt >> table.md
           make_row "s3" ./s3/current/boom-*/wall_time.txt ./s3/baseline/boom-*/wall_time.txt >> table.md
 
-          echo "table<<EOF" >> $GITHUB_OUTPUT
-          cat table.md >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-
           cat results.txt || true
-      - name: Post combined PR comment
+
+          echo "${{ github.event.pull_request.number }}" > pr_number.txt
+          echo "${{ github.sha }}" > sha.txt
+          printf '%s' "$BASELINE_LINK" > baseline_link.txt
+      - name: Upload comment payload as artifact
         if: github.event_name == 'pull_request'
-        uses: peter-evans/create-or-update-comment@v5
+        uses: actions/upload-artifact@v4
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          issue-number: ${{ github.event.pull_request.number }}
-          body: |
-            Throughput results (`${{ github.sha }}`):
-            ${{ steps.aggregate.outputs.table }}
-          edit-mode: replace
+          name: throughput-comment
+          path: |
+            table.md
+            pr_number.txt
+            sha.txt
+            baseline_link.txt
       - name: Fail if wall time increased too much (PR only)
         run: |
           TOL=${{ env.TOLERANCE_PERCENTAGE }}

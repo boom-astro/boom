@@ -1,6 +1,7 @@
 #![recursion_limit = "512"] // for large bson docs and CutoutStorage's s3 client
 use actix_web::middleware::from_fn;
 use actix_web::{middleware::Logger, web, App, HttpServer};
+use boom::api::analytics::AnalyticsClient;
 use boom::api::auth::{auth_middleware, babamul_auth_middleware, get_auth};
 use boom::api::db::build_db_api;
 use boom::api::docs::{ApiDoc, BabamulApiDoc};
@@ -10,7 +11,11 @@ use boom::api::routes;
 use boom::conf::{load_dotenv, AppConfig};
 use boom::utils::cutouts::CutoutStorage;
 use boom::utils::enums::Survey;
-use boom::utils::o11y::metrics::init_metrics;
+use boom::utils::o11y::{
+    logging::{build_subscriber_with_otel, log_error, WARN},
+    metrics::init_metrics,
+    tracing::init_tracing,
+};
 use std::collections::HashMap;
 use utoipa::OpenApi;
 use utoipa_scalar::{Scalar, Servable};
@@ -20,24 +25,32 @@ use uuid::Uuid;
 async fn main() -> std::io::Result<()> {
     // Load environment variables from .env file before anything else
     load_dotenv();
-
-    // Initialize logging
-    env_logger::init_from_env(env_logger::Env::default().default_filter_or("info"));
-
     let config = AppConfig::from_default_path().unwrap();
     let database = build_db_api(&config).await.unwrap();
     let auth = get_auth(&config, &database).await.unwrap();
     let port = config.api.port;
     let deployment_env = std::env::var("BOOM_DEPLOYMENT_ENV").unwrap_or_else(|_| "dev".to_string());
-    let _meter_provider = init_metrics(String::from("api"), Uuid::new_v4(), deployment_env)
+    let instance_id = Uuid::new_v4();
+    let tracer_provider = init_tracing(String::from("api"), instance_id, deployment_env.clone())
+        .expect("failed to initialize tracing");
+    let meter_provider = init_metrics(String::from("api"), instance_id, deployment_env)
         .expect("failed to initialize metrics");
+
+    // Install a tracing subscriber that fans out to stdout and the OTLP
+    // pipeline (Tempo). actix's `Logger` middleware emits access logs via the
+    // `log` crate, so install `LogTracer` to forward them into tracing —
+    // tracing-subscriber does NOT do this automatically.
+    let (subscriber, _guard) = build_subscriber_with_otel(tracer_provider.as_ref(), "api")
+        .expect("failed to build subscriber");
+    tracing::subscriber::set_global_default(subscriber).expect("failed to install subscriber");
+    tracing_log::LogTracer::init().expect("failed to install LogTracer");
 
     // Initialize email service
     let email_service = EmailService::new();
 
     // Build cutout storage for each survey once at startup
     let mut cutout_storage_map: HashMap<Survey, CutoutStorage> = HashMap::new();
-    for survey in [Survey::Ztf, Survey::Lsst, Survey::Decam] {
+    for survey in [Survey::Ztf, Survey::Lsst, Survey::Decam, Survey::Winter] {
         let storage = config
             .build_cutout_storage(&survey)
             .await
@@ -51,21 +64,50 @@ async fn main() -> std::io::Result<()> {
     let babamul_is_enabled = config.babamul.enabled;
     if babamul_is_enabled {
         tracing::info!("Babamul API endpoints are ENABLED");
+        // Abandoned sign-in attempts are only cleaned up by this TTL index —
+        // completed flows delete their own state, incomplete ones never do.
+        if let Err(error) = routes::babamul::oauth::ensure_oauth_state_index(&database).await {
+            log_error!(WARN, error, "failed to create the OAuth TTL indexes");
+        }
+        // Same helper `/oauth/providers` uses, so this line always matches what
+        // the client is actually offered — credentials alone are not enough.
+        let providers: Vec<&str> = boom::api::oauth::enabled_providers(&config)
+            .iter()
+            .map(|provider| provider.as_str())
+            .collect();
+        if providers.is_empty() {
+            tracing::info!(
+                "No social sign-in providers are configured (needs a client ID and secret \
+                 per provider, plus babamul.webapp_url and babamul.oauth.redirect_base_url)"
+            );
+        } else {
+            tracing::info!("Social sign-in enabled for: {}", providers.join(", "));
+        }
     } else {
         tracing::info!("Babamul API endpoints are DISABLED");
     }
+
+    // Product analytics. Built once and shared by every worker: the background
+    // flush task must be spawned a single time, not once per worker thread.
+    let analytics = web::Data::new(AnalyticsClient::from_config(&config.posthog));
+
+    // Attribute Kafka stream consumption back to Babamul users, feeding both
+    // Grafana (OTel gauges) and PostHog (per-user deltas). Also spawned once,
+    // outside the `HttpServer::new` closure.
+    boom::api::consumption::spawn(config.clone(), database.clone(), analytics.as_ref().clone());
 
     // Create API docs from OpenAPI spec
     let api_doc = ApiDoc::openapi();
     let babamul_doc = BabamulApiDoc::openapi();
 
-    HttpServer::new(move || {
+    let server_result = HttpServer::new(move || {
         let mut app = App::new()
             .app_data(web::Data::new(config.clone()))
             .app_data(web::Data::new(database.clone()))
             .app_data(web::Data::new(auth.clone()))
             .app_data(web::Data::new(email_service.clone()))
             .app_data(cutout_storages.clone())
+            .app_data(analytics.clone())
             .wrap(from_fn(request_metrics_middleware));
 
         // Conditionally register Babamul endpoints if enabled
@@ -83,8 +125,14 @@ async fn main() -> std::io::Result<()> {
                     .service(routes::babamul::post_babamul_auth)
                     .service(routes::babamul::post_babamul_forgot_password)
                     .service(routes::babamul::post_babamul_reset_password)
+                    .service(routes::babamul::oauth::get_oauth_providers)
+                    .service(routes::babamul::oauth::get_oauth_start)
+                    .service(routes::babamul::oauth::get_oauth_callback)
+                    .service(routes::babamul::oauth::post_oauth_complete)
+                    .service(routes::babamul::oauth::post_oauth_verify)
                     // Protected routes
                     .service(routes::babamul::get_babamul_profile)
+                    .service(routes::babamul::patch_babamul_profile)
                     .service(routes::babamul::post_kafka_credentials)
                     .service(routes::babamul::get_kafka_credentials)
                     .service(routes::babamul::delete_kafka_credential)
@@ -118,6 +166,7 @@ async fn main() -> std::io::Result<()> {
                 .service(routes::kafka::delete_kafka_credentials)
                 .service(routes::filters::post_filter)
                 .service(routes::filters::patch_filter)
+                .service(routes::filters::validate_filter)
                 .service(routes::filters::get_filters)
                 .service(routes::filters::get_filter)
                 .service(routes::filters::post_filter_version)
@@ -127,6 +176,7 @@ async fn main() -> std::io::Result<()> {
                 .service(routes::users::post_user)
                 .service(routes::users::get_users)
                 .service(routes::users::delete_user)
+                .service(routes::users::patch_watchlist_access)
                 .service(routes::catalogs::get_catalogs)
                 .service(routes::catalogs::get_catalog_indexes)
                 .service(routes::catalogs::get_catalog_sample)
@@ -141,5 +191,21 @@ async fn main() -> std::io::Result<()> {
     })
     .bind(("0.0.0.0", port))?
     .run()
-    .await
+    .await;
+
+    // Flush any buffered metrics/spans before exiting. Without these, recent
+    // telemetry can be lost on shutdown (especially for short-lived dev
+    // restarts). Providers are `None` when `OTEL_SDK_DISABLED=true`.
+    if let Some(meter_provider) = meter_provider {
+        if let Err(error) = meter_provider.shutdown() {
+            log_error!(WARN, error, "failed to shut down the meter provider");
+        }
+    }
+    if let Some(tracer_provider) = tracer_provider {
+        if let Err(error) = tracer_provider.shutdown() {
+            log_error!(WARN, error, "failed to shut down the tracer provider");
+        }
+    }
+
+    server_result
 }

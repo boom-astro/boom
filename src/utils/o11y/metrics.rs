@@ -8,6 +8,8 @@ use opentelemetry_sdk::{
     Resource,
 };
 
+use crate::utils::o11y::is_otel_disabled;
+
 // From the `opentelemetry` docs for the `MeterProvider` trait,
 //
 // > A Meter should be scoped at most to a single application or crate. The name
@@ -77,11 +79,20 @@ pub enum InitMetricsError {
 /// The meter provider is returned so it can be cloned if needed (cloning
 /// providers is cheap), to have finer control of how/when it's dropped, or so
 /// its `shutdown` method can be called later to manually flush metrics.
+///
+/// Returns `Ok(None)` when `OTEL_SDK_DISABLED=true` is set, in which case the
+/// global meter provider is left as the SDK's no-op and the `LazyLock` meters
+/// above resolve to no-op meters — making every `Counter::add` /
+/// `Histogram::record` / `UpDownCounter::add` call in the codebase a no-op.
 pub fn init_metrics(
     service_name: String,
     instance_id: uuid::Uuid,
     deployment_env: String,
-) -> Result<SdkMeterProvider, InitMetricsError> {
+) -> Result<Option<SdkMeterProvider>, InitMetricsError> {
+    if is_otel_disabled() {
+        return Ok(None);
+    }
+
     let endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
         .unwrap_or_else(|_| "http://localhost:4317".to_string());
 
@@ -113,5 +124,5 @@ pub fn init_metrics(
         .build();
 
     opentelemetry::global::set_meter_provider(meter_provider.clone());
-    Ok(meter_provider)
+    Ok(Some(meter_provider))
 }

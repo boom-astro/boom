@@ -39,10 +39,15 @@ impl Model for AcaiModel {
 }
 
 impl AcaiModel {
-    /// Load on a specific CUDA device.
-    pub fn new_on_device(path: &str, device_id: i32) -> Result<Self, ModelError> {
+    /// Load on a specific CUDA device, optionally sharing a compute stream.
+    /// `cuda_stream` is a `cudaStream_t` (or null) — see [`load_model_on_device`].
+    pub fn new_on_device(
+        path: &str,
+        device_id: i32,
+        cuda_stream: *mut std::ffi::c_void,
+    ) -> Result<Self, ModelError> {
         Ok(Self {
-            model: load_model_on_device(path, Some(device_id))?,
+            model: load_model_on_device(path, Some(device_id), cuda_stream)?,
         })
     }
 

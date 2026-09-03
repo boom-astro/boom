@@ -404,11 +404,19 @@ async fn test_enrich_ztf_alert() {
     // r fading stats
     let fading = r_stats.get_document("fading").unwrap();
     let fading_rate = fading.get_f64("rate").unwrap();
-    let fading_red_chi2 = fading.get_f64("red_chi2").unwrap();
     let fading_dt = fading.get_f64("dt").unwrap();
     assert!((fading_rate - 0.063829).abs() < 1e-6);
-    assert!(fading_red_chi2.is_nan()); // only 2 points after peak
     assert!((fading_dt - 7.956157).abs() < 1e-6);
+    // Only 2 points after the peak, so red_chi2 is null. Explicitly null and not
+    // omitted: the avro schema requires the field to be present.
+    assert_eq!(
+        fading.get("red_chi2"),
+        Some(&mongodb::bson::Bson::Null),
+        "red_chi2 must be null when dof is 0"
+    );
+    assert_eq!(fading.get_i32("dof").unwrap(), 0);
+    assert_eq!(fading.get_i32("nb_data").unwrap(), 2);
+    assert!(fading.get_f64("chi2").unwrap().abs() < 1e-9);
 }
 
 #[tokio::test]
@@ -473,7 +481,7 @@ async fn test_filter_ztf_alert() {
     remove_test_filter(&filter_id, &Survey::Ztf).await.unwrap();
     assert!(result.is_ok(), "Filter failed: {:?}", result.err());
 
-    let alerts_output = result.unwrap();
+    let alerts_output: Vec<_> = result.unwrap();
     assert_eq!(alerts_output.len(), 1);
     let alert = &alerts_output[0];
     assert_eq!(alert.candid, candid);
@@ -610,7 +618,7 @@ async fn test_filter_ztf_alert_with_lsst_match() {
     remove_test_filter(&filter_id, &Survey::Ztf).await.unwrap();
     assert!(result.is_ok(), "Filter failed: {:?}", result.err());
 
-    let alerts_output = result.unwrap();
+    let alerts_output: Vec<_> = result.unwrap();
     assert_eq!(alerts_output.len(), 1);
     let alert = &alerts_output[0];
     assert_eq!(alert.candid, candid);

@@ -12,6 +12,12 @@ processors:
 exporters:
   otlphttp/prometheus: # [^2]
     endpoint: "http://prometheus:9090/api/v1/otlp" # [^3]
+  # Forward OTLP traces from boom apps to Tempo (gRPC OTLP, no TLS on the
+  # internal network).
+  otlp/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
   debug:
     verbosity: detailed
 
@@ -39,6 +45,10 @@ service:
       receivers: [otlp]
       processors: [batch]
       exporters: [otlphttp/prometheus]
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp/tempo]
 
 # [^1]: https://github.com/open-telemetry/opentelemetry-collector/tree/main/receiver/otlpreceiver
 

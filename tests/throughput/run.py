@@ -11,11 +11,27 @@
 import argparse
 import json
 import os
+import re
 import subprocess
 
 import pandas as pd
 import yaml
 from astropy.time import Time
+
+# Match an ISO-8601 timestamp like `2026-05-07T18:00:00.000000Z` anywhere in
+# the line. Boom log lines may now be prefixed with `trace_id=<hex> span_id=<hex>`
+# from the OTel formatter when an active span is in scope, so positional
+# splitting (`line.split()[2]`) is no longer reliable.
+TIMESTAMP_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z")
+
+
+def parse_log_timestamp(line: str) -> pd.Timestamp:
+    # Strip any ANSI escapes that older log lines might still contain.
+    cleaned = line.replace("\x1b[2m", "").replace("\x1b[0m", "")
+    match = TIMESTAMP_RE.search(cleaned)
+    if not match:
+        raise ValueError(f"Could not find ISO timestamp in log line: {line!r}")
+    return pd.to_datetime(match.group(0))
 
 # First, create the config
 parser = argparse.ArgumentParser(description="Benchmark BOOM")
@@ -187,12 +203,6 @@ subprocess.run(cmd, check=True)
 # Now analyze the logs and raise an error if we're too slow
 t1_b, t2_b = None, None
 
-def extract_date_from_log(line_to_process):
-    line_index = 2 # Docker logs have two extra columns
-    return pd.to_datetime(
-        line_to_process.split()[line_index].replace("\x1b[2m", "").replace("\x1b[0m", "")
-    )
-
 # To calculate BOOM wall time, take:
 # - Start: timestamp of the first message received by the consumer
 # - End: last timestamp in the scheduler log
@@ -200,7 +210,7 @@ with open(f"{logs_dir}/consumer.log") as f:
     lines = f.readlines()
     for line in lines:
         if "Consumer received first message, continuing..." in line:
-            t1_b = extract_date_from_log(line)
+            t1_b = parse_log_timestamp(line)
             break
 
 if t1_b is None:
@@ -211,8 +221,7 @@ with open(f"{logs_dir}/scheduler.log") as f:
         raise ValueError(
             "Scheduler log has fewer than 3 lines; cannot determine end time."
         )
-    line = lines[-3]
-    t2_b = extract_date_from_log(line)
+    t2_b = parse_log_timestamp(lines[-3])
 
 wall_time_s = (t2_b - t1_b).total_seconds()
 print(f"BOOM throughput test wall time: {wall_time_s:.1f} seconds")
