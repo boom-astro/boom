@@ -1,8 +1,8 @@
 use crate::{
     alert::{
         alert_temp_queue_name, sanitize_winter_avro, AlertWorker, DecamAlertWorker,
-        LightcurveJdOnly, LsstAlertWorker, SchemaRegistry, WinterAlertWorker, ZtfAlertWorker,
-        LSST_SCHEMA_REGISTRY_GITHUB_FALLBACK_URL, LSST_SCHEMA_REGISTRY_URL,
+        LightcurveJdOnly, LsstAlertWorker, SchemaRegistry, WinterAlertWorker, WiseAlertWorker,
+        ZtfAlertWorker, LSST_SCHEMA_REGISTRY_GITHUB_FALLBACK_URL, LSST_SCHEMA_REGISTRY_URL,
     },
     conf,
     filter::{Filter, FilterVersion},
@@ -45,6 +45,13 @@ pub async fn decam_alert_worker() -> DecamAlertWorker {
         .await
         .unwrap();
     DecamAlertWorker::new(TEST_CONFIG_FILE).await.unwrap()
+}
+
+pub async fn wise_alert_worker() -> WiseAlertWorker {
+    initialize_survey_indexes(&Survey::Wise, &conf::get_test_db().await)
+        .await
+        .unwrap();
+    WiseAlertWorker::new(TEST_CONFIG_FILE).await.unwrap()
 }
 
 pub async fn winter_alert_worker() -> WinterAlertWorker {
@@ -112,6 +119,8 @@ const ZTF_TEST_PIPELINE: &str = "[{\"$match\": {\"candidate.drb\": {\"$gt\": 0.5
 const ZTF_TEST_PIPELINE_PRV_CANDIDATES: &str = "[{\"$match\": {\"prv_candidates.0\": {\"$exists\": true}, \"candidate.drb\": {\"$gt\": 0.5}, \"candidate.ndethist\": {\"$gt\": 1.0}, \"candidate.magpsf\": {\"$lte\": 18.5}}}, {\"$project\": {\"objectId\": 1, \"annotations.mag_now\": {\"$round\": [\"$candidate.magpsf\", 2]}}}]";
 const LSST_TEST_PIPELINE: &str = "[{\"$match\": {\"candidate.reliability\": {\"$gt\": 0.1}, \"candidate.snr\": {\"$gt\": 5.0}, \"candidate.magpsf\": {\"$lte\": 25.0}}}, {\"$project\": {\"objectId\": 1, \"annotations.mag_now\": {\"$round\": [\"$candidate.magpsf\", 2]}}}]";
 const WINTER_TEST_PIPELINE: &str = "[{\"$match\": {\"candidate.magpsf\": {\"$lte\": 20.0}}}, {\"$project\": {\"objectId\": 1, \"annotations.mag_now\": {\"$round\": [\"$candidate.magpsf\", 2]}}}]";
+// WISE filters on the deep-learning real-bogus score `drb` and PSF magnitude.
+const WISE_TEST_PIPELINE: &str = "[{\"$match\": {\"candidate.drb\": {\"$gt\": 0.0}, \"candidate.magpsf\": {\"$lte\": 20.0}}}, {\"$project\": {\"objectId\": 1, \"annotations.mag_now\": {\"$round\": [\"$candidate.magpsf\", 2]}}}]";
 // DECam stores the difference-image magnitude as `magap` (not `magpsf`) and the
 // CNN real-bogus score as `reliability`.
 const DECAM_TEST_PIPELINE: &str = "[{\"$match\": {\"candidate.reliability\": {\"$gt\": 0.1}, \"candidate.magap\": {\"$lte\": 25.0}}}, {\"$project\": {\"objectId\": 1, \"annotations.mag_now\": {\"$round\": [\"$candidate.magap\", 2]}}}]";
@@ -183,6 +192,7 @@ pub async fn insert_test_filter(
         (Survey::Ztf, false) => ZTF_TEST_PIPELINE,
         (Survey::Lsst, _) => LSST_TEST_PIPELINE,
         (Survey::Decam, _) => DECAM_TEST_PIPELINE,
+        (Survey::Wise, _) => WISE_TEST_PIPELINE,
         (Survey::Winter, _) => WINTER_TEST_PIPELINE,
     };
 
@@ -452,7 +462,7 @@ pub async fn assert_update_aux_branches_and_fallback<A>(
 pub fn randomize_object_id(survey: &Survey) -> String {
     let mut rng = rand::rng();
     match survey {
-        Survey::Ztf | Survey::Decam | Survey::Winter => {
+        Survey::Ztf | Survey::Decam | Survey::Winter | Survey::Wise => {
             let mut object_id = survey.to_string();
             for _ in 0..2 {
                 object_id.push(rng.random_range('0'..='9'));
@@ -502,12 +512,13 @@ impl AlertRandomizer {
 
     pub fn new_randomized(survey: Survey) -> Self {
         let (object_id, payload, schema, schema_registry) = match survey {
-            Survey::Ztf | Survey::Decam | Survey::Winter => {
+            Survey::Ztf | Survey::Decam | Survey::Winter | Survey::Wise => {
                 let payload = match survey {
                     Survey::Ztf => {
                         fs::read("tests/data/alerts/ztf/2695378462115010012.avro").unwrap()
                     }
                     Survey::Decam => fs::read("tests/data/alerts/decam/alert.avro").unwrap(),
+                    Survey::Wise => fs::read("tests/data/alerts/wise/alert.avro").unwrap(),
                     // The upstream WINTER schema has a duplicate field name; sanitize
                     // it so the strict avro Reader can parse the container.
                     Survey::Winter => {
@@ -681,7 +692,7 @@ impl AlertRandomizer {
 
     pub async fn get(self) -> (i64, String, f64, f64, Vec<u8>) {
         match self.survey {
-            Survey::Ztf | Survey::Decam | Survey::Winter => {
+            Survey::Ztf | Survey::Decam | Survey::Winter | Survey::Wise => {
                 // Use the same logic for ZTF/Decam/WINTER, just different objectId
                 // prefix (and lowercase `objectid` key for WINTER).
                 let mut candid = self.candid;
@@ -698,6 +709,7 @@ impl AlertRandomizer {
                             Survey::Decam => {
                                 fs::read("tests/data/alerts/decam/alert.avro").unwrap()
                             }
+                            Survey::Wise => fs::read("tests/data/alerts/wise/alert.avro").unwrap(),
                             Survey::Winter => {
                                 let raw = fs::read("tests/data/alerts/winter/alert.avro").unwrap();
                                 sanitize_winter_avro(&raw).unwrap()
