@@ -7,7 +7,7 @@
 //! becomes the object's new normal and stops registering; a phase curve fitted
 //! across years keeps registering it for as long as it lasts.
 
-use crate::utils::outburst::{hg12, Point, DEFAULT_G12};
+use crate::utils::outburst::{hg12, median, Point, DEFAULT_G12};
 use mongodb::bson::{doc, Bson, Document};
 use std::collections::HashMap;
 
@@ -58,24 +58,12 @@ fn reduced_magnitude(p: &Point) -> f64 {
     p.mag - 5.0 * (p.rh * p.delta).log10()
 }
 
-/// Median of `values`, which must be non-empty. Sorts a copy.
-fn median(values: &[f64]) -> f64 {
-    let mut sorted = values.to_vec();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let mid = sorted.len() / 2;
-    if sorted.len() % 2 == 1 {
-        sorted[mid]
-    } else {
-        0.5 * (sorted[mid - 1] + sorted[mid])
-    }
-}
-
 /// Median absolute deviation, scaled to match a standard deviation on normal
 /// data. Robust so that a genuinely active object still yields the baseline it
 /// is active against, as long as it is quiet for most of the archive.
-fn robust_scatter(residuals: &[f64], center: f64) -> f64 {
+fn robust_scatter(residuals: &[f64], center: f64) -> Option<f64> {
     let deviations: Vec<f64> = residuals.iter().map(|r| (r - center).abs()).collect();
-    1.4826 * median(&deviations)
+    median(&deviations).map(|mad| 1.4826 * mad)
 }
 
 /// Fit `h`, `g12` and the residual scatter to one band's photometry.
@@ -165,8 +153,12 @@ fn scan(
         if residuals.iter().any(|r| !r.is_finite()) {
             continue;
         }
-        let h = median(&residuals);
-        let scatter = robust_scatter(&residuals, h);
+        let Some(h) = median(&residuals) else {
+            continue;
+        };
+        let Some(scatter) = robust_scatter(&residuals, h) else {
+            continue;
+        };
         if !scatter.is_finite() {
             continue;
         }

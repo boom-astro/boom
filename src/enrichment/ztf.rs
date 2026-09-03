@@ -712,9 +712,13 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         let mut processed_alerts = Vec::new();
         let mut enriched_alerts: Vec<BabamulZtfAlert> = Vec::new();
 
-        let orbits = self.fetch_orbits(&alerts).await;
-        let sso_history = self.fetch_sso_history(&alerts).await;
-        let baselines = self.fetch_baselines(&alerts).await;
+        // Three independent reads of three collections; awaiting them in turn
+        // pays each round trip separately for no reason.
+        let (orbits, sso_history, baselines) = tokio::join!(
+            self.fetch_orbits(&alerts),
+            self.fetch_sso_history(&alerts),
+            self.fetch_baselines(&alerts),
+        );
 
         let batch_size = alerts.len();
         let mut skipped_empty_lightcurve = 0usize;

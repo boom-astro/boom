@@ -313,6 +313,10 @@ impl Outburst {
             .filter(|s| s.is_finite())
             .map(|s| s as f32);
 
+        // A fitted slope describes this object; the default is the population
+        // average standing in for one, so prefer the fit wherever there is one.
+        let g12 = curve.map_or(DEFAULT_G12, |c| c.g12);
+
         if history.is_empty() {
             // A phase curve alone still scores the point, which is the whole
             // reason for having one: a first detection has no window.
@@ -330,7 +334,7 @@ impl Outburst {
         // rarely a full rotation, so it is only a fallback.
         let scatter = match curve {
             Some(c) => c.scatter,
-            None => window_scatter(&all, DEFAULT_G12).unwrap_or(0.0),
+            None => window_scatter(&all, g12).unwrap_or(0.0),
         };
 
         let median_within = |days: f64| -> Option<f32> {
@@ -343,11 +347,11 @@ impl Outburst {
                 return None;
             }
             window.push(test);
-            let (_, median) = outburst_statistic(&window, DEFAULT_G12, scatter).ok()?;
+            let (_, median) = outburst_statistic(&window, g12, scatter).ok()?;
             (median as f32).is_finite().then_some(median as f32)
         };
 
-        let points = same_band_statistic(&all, DEFAULT_G12, scatter)
+        let points = same_band_statistic(&all, g12, scatter)
             .unwrap_or_default()
             .into_iter()
             .filter(|(_, sigma)| sigma.is_finite())
@@ -1713,6 +1717,55 @@ mod outburst_tests {
             Outburst::from_history(&history, test_point(18.0, 1), now, None).expect("outburst");
         assert_eq!(outburst.points.len(), 1);
         assert_eq!(outburst.points[0].jd, now - 2.0);
+    }
+
+    /// A fitted slope must actually reach the statistic. The geometry scaling
+    /// runs through the phase function, so a curve fitted far from the
+    /// population default has to give a different answer than the default does.
+    #[test]
+    fn test_a_fitted_slope_is_used_rather_than_the_default() {
+        let now = 2_460_000.0;
+        // Phase angles far apart, so the slope has something to act on.
+        let history = [(
+            now - 5.0,
+            Point {
+                rh: 2.5,
+                delta: 1.6,
+                phase: 3.0,
+                mag: 19.0,
+                mag_err: 0.04,
+                band: 1,
+            },
+        )];
+        let test = Point {
+            rh: 2.5,
+            delta: 1.6,
+            phase: 25.0,
+            mag: 19.0,
+            mag_err: 0.04,
+            band: 1,
+        };
+
+        let curve = PhaseCurve {
+            h: 15.0,
+            g12: 0.0,
+            scatter: 0.05,
+            n: 100,
+        };
+        let fitted = Outburst::from_history(&history, test, now, Some(&curve))
+            .expect("fitted")
+            .d7
+            .expect("d7");
+        let defaulted = Outburst::from_history(&history, test, now, None)
+            .expect("defaulted")
+            .d7
+            .expect("d7");
+
+        assert!(
+            (fitted - defaulted).abs() > 1e-3,
+            "g12 = {} gave the same answer as the default {DEFAULT_G12} ({fitted} vs {defaulted})",
+            curve.g12
+        );
     }
 
     /// `append_serdavro` resolves every declared field by name, so a nested
