@@ -1,5 +1,5 @@
 # AUTO-GENERATED FILE. DO NOT EDIT DIRECTLY.
-# Edit config.yaml or config/prod/caltech/overrides.yaml, then run 'make configs'.
+# Edit config.yaml or config/prod/umn/overrides.yaml, then run 'make configs'.
 
 database:
   host: localhost
@@ -61,7 +61,7 @@ api:
     admin_email: admin@example.com
 babamul:
   enabled: false # Set via BOOM_BABAMUL__ENABLED environment variable
-  webapp_url: https://babamul.caltech.edu # Set via BOOM_BABAMUL__WEBAPP_URL environment variable
+  webapp_url: https://babamul.umn.edu # Set via BOOM_BABAMUL__WEBAPP_URL environment variable
   retention_days: 7
   # Whether new accounts may be created. Set to false for a pre-release
   # deployment that is open only to the accounts it already has; sign-in for
@@ -81,7 +81,7 @@ babamul:
     #
     # Public base URL of this API. The redirect URI registered with each
     # provider must be {redirect_base_url}/babamul/oauth/{provider}/callback.
-    redirect_base_url: https://babamul.caltech.edu/api # Set via BOOM_BABAMUL__OAUTH__REDIRECT_BASE_URL
+    redirect_base_url: https://babamul.umn.edu/api # Set via BOOM_BABAMUL__OAUTH__REDIRECT_BASE_URL
     orcid_sandbox: false # Use sandbox.orcid.org instead of orcid.org
     # Seconds an in-flight authorization request stays valid, i.e. how long the
     # user has between pressing the button and finishing at the provider.
@@ -100,7 +100,7 @@ gpu:
   enabled: true # Set to true to load ONNX models on GPU (CUDA) instead of CPU.
   # Models are loaded once at startup and shared across all enrichment workers.
   # When false, models are loaded on CPU. Overridden by BOOM_GPU__ENABLED.
-  device_ids: [0] # CUDA device(s) to use. E.g. [0,1,2,3,4,5,6,7] for 8 GPUs.
+  device_ids: [0, 1, 2, 3] # CUDA device(s) to use. E.g. [0,1,2,3,4,5,6,7] for 8 GPUs.
   # ONNX models are loaded on the first device. Additional devices are available
   # for the GPU pool (future lightcurve fitting).
   # Overwrite with BOOM_GPU__DEVICE_IDS environment variable (comma-separated list).
@@ -126,7 +126,7 @@ kafka:
     lsst:
       server: "rubin-alert-stream-bootstrap.slac.stanford.edu:9094"
       schema_registry: "https://rubin-alert-schemas.slac.stanford.edu/schema-registry"
-      schema_github_fallback_url: null
+      schema_github_fallback_url: "https://github.com/lsst/alert_packet/tree/main/python/lsst/alert/packet/schema"
       group_id: "" # Set via BOOM_KAFKA__CONSUMER__LSST__GROUP_ID environment variable
       username: "" # Set via BOOM_KAFKA__CONSUMER__LSST__USERNAME environment variable
       password: "" # Set via BOOM_KAFKA__CONSUMER__LSST__PASSWORD environment variable
@@ -137,21 +137,21 @@ kafka:
       server: "localhost:9092"
       group_id: "" # Set via BOOM_KAFKA__CONSUMER__WINTER__GROUP_ID environment variable
   producer:
-    server: "broker:29092" # Only one global producer for now (filter worker output)
+    server: "localhost:9092" # Only one global producer for now (filter worker output)
 workers:
   ztf:
     command_interval: 500
     alert:
-      n_workers: 8
+      n_workers: 10
     enrichment:
-      n_workers: 12
+      n_workers: 4
       # Alerts per enrichment batch: the queue RPOP cap AND the fixed ONNX
       # inference shape. Partial batches are zero-padded so ORT sees one shape
       # and the GPU memory arena stays stable. 750 is stable for both VRAM => 12GB.
       # Caltech and MSI can handle 1000.
       batch_size: 1000
     filter:
-      n_workers: 4
+      n_workers: 10
       refresh_interval_minutes: 15
       # On activation, filters are validated against a designated reference night.
       # If more than max_match_rate percent of alerts pass, the filter is not validated.
@@ -162,9 +162,9 @@ workers:
     alert:
       n_workers: 10
     enrichment:
-      n_workers: 10
+      n_workers: 9
     filter:
-      n_workers: 4
+      n_workers: 3
       refresh_interval_minutes: 15
       max_match_rate: 5
       reference_night: "2026-02-23"
@@ -318,6 +318,17 @@ crossmatch:
         sigpmra: 1
         sigpmdec: 1
         unwise_objid: 1
+    - catalog: AllWISE
+      radius: 2.0
+      use_distance: false
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        w1mpro: 1
+        w2mpro: 1
+        w3mpro: 1
+        w4mpro: 1
     - catalog: TNS
       radius: 2.0
       use_distance: false
@@ -334,17 +345,11 @@ crossmatch:
         internal_names: 1
       max_results: 3
     - catalog: DESI_DR1
-      radius: 30.0 # 30 arcseconds
+      radius: 30.0
       use_distance: true
       distance_key: "z"
       distance_max: 30.0
       distance_max_near: 300.0
-      # DESI is spectroscopic and full of stars, which sit at z ~ 0 and so have
-      # no meaningful projected distance. Naming the type column keeps them from
-      # being ranked as though they were very nearby galaxies. QSO is left out
-      # deliberately: it is a plausible counterpart, so it ranks like a galaxy.
-      type_key: "spectype"
-      stellar_types: ["STAR"]
       projection:
         _id: 1
         ra: 1
@@ -357,7 +362,7 @@ crossmatch:
         spectype: 1
         zcat_nspec: 1
     - catalog: LS_DR10_PHOTOZ
-      radius: 30.0 # 30 arcseconds
+      radius: 30.0
       use_distance: true
       distance_key: "z_phot"
       distance_max: 60.0
@@ -371,6 +376,16 @@ crossmatch:
         z_phot: 1
         z_phot_err: 1
         photo_z_type: 1
+    - catalog: watchlist_supernovas
+      radius: 2.0
+      use_distance: false
+      # For watchlists, projection picks the fields surfaced under annotations.watchlist.
+      projection:
+        _id: 1
+        classification: 1
+        redshift: 1
+        distance_mpc: 1
+        discovery_date: 1
   lsst:
     - catalog: LSPSC
       radius: 30.0
@@ -524,17 +539,11 @@ crossmatch:
         internal_names: 1
       max_results: 3
     - catalog: DESI_DR1
-      radius: 30.0 # 30 arcseconds
+      radius: 30.0
       use_distance: true
       distance_key: "z"
       distance_max: 30.0
       distance_max_near: 300.0
-      # DESI is spectroscopic and full of stars, which sit at z ~ 0 and so have
-      # no meaningful projected distance. Naming the type column keeps them from
-      # being ranked as though they were very nearby galaxies. QSO is left out
-      # deliberately: it is a plausible counterpart, so it ranks like a galaxy.
-      type_key: "spectype"
-      stellar_types: ["STAR"]
       projection:
         _id: 1
         ra: 1
@@ -547,7 +556,7 @@ crossmatch:
         spectype: 1
         zcat_nspec: 1
     - catalog: LS_DR10_PHOTOZ
-      radius: 30.0 # 30 arcseconds
+      radius: 30.0
       use_distance: true
       distance_key: "z_phot"
       distance_max: 60.0
@@ -561,6 +570,16 @@ crossmatch:
         z_phot: 1
         z_phot_err: 1
         photo_z_type: 1
+    - catalog: watchlist_supernovas
+      radius: 2.0
+      use_distance: false
+      # For watchlists, projection picks the fields surfaced under annotations.watchlist.
+      projection:
+        _id: 1
+        classification: 1
+        redshift: 1
+        distance_mpc: 1
+        discovery_date: 1
   decam: []
   winter:
     - catalog: Gaia_DR3

@@ -33,7 +33,7 @@ services:
       - boom
     volumes:
       - ${BOOM_REPO_ROOT:?Variable not set}/tests/throughput/mongo-init.sh:/mongo-init.sh
-      - ${PWD}/data/alerts/kowalski.NED.json.gz:/kowalski.NED.json.gz
+      - ${PWD}/data/alerts/BOOM.NED.json.gz:/BOOM.NED.json.gz
       - ${PWD}/data/alerts/boom_throughput.ZTF_alerts_aux.dump.gz:/boom_throughput.ZTF_alerts_aux.dump.gz
       - ${BOOM_REPO_ROOT:?Variable not set}/tests/throughput/cats150.filter.json:/cats150.filter.json
     environment:

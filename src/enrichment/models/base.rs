@@ -1,10 +1,9 @@
-use crate::{
-    utils::cutouts::AlertCutout,
-    utils::fits::{prepare_triplet, CutoutError},
+use crate::utils::{
+    cutouts::AlertCutout,
+    fits::{prepare_triplet, CutoutError},
 };
 use ndarray::{Array, Dim};
 use ort::session::{builder::GraphOptimizationLevel, Session};
-use std::env;
 use tracing::instrument;
 
 #[derive(thiserror::Error, Debug)]
@@ -27,48 +26,34 @@ pub enum ModelError {
     MissingOrtDylibPath,
 }
 
-/// Load an ONNX model, optionally on a specific CUDA device.
-///
-/// GPU usage is controlled by the `BOOM_GPU__ENABLED` environment variable (default: `"true"`).
-/// When `device_id` is `Some(id)`, that CUDA device is used; otherwise device 0.
 pub fn load_model(path: &str) -> Result<Session, ModelError> {
     load_model_on_device(path, None, std::ptr::null_mut())
 }
 
-fn env_truthy(value: &str) -> bool {
-    matches!(
-        value.trim().to_ascii_lowercase().as_str(),
-        "1" | "true" | "yes" | "on"
-    )
-}
-
-/// Load an ONNX model on a specific device. On Linux+CUDA, `cuda_stream` (a
-/// `cudaStream_t` cast to `*mut c_void`) lets the session share its compute
-/// stream with other CUDA work — pass `std::ptr::null_mut()` to let ORT
-/// allocate its own stream. The stream argument is ignored on macOS.
+/// Load an ONNX model on `device_id`'s CUDA device, or on CPU when `None`.
+/// On Linux+CUDA, `cuda_stream` (a `cudaStream_t` cast to `*mut c_void`) lets
+/// the session share its compute stream with other CUDA work — pass
+/// `std::ptr::null_mut()` to let ORT allocate its own stream. The stream
+/// argument is ignored on macOS.
 ///
 /// # Safety
 /// When non-null, `cuda_stream` must be a valid `cudaStream_t` belonging to
 /// `device_id`'s device, and must outlive the returned [`Session`].
+#[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
 pub fn load_model_on_device(
     path: &str,
     device_id: Option<i32>,
-    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
     cuda_stream: *mut std::ffi::c_void,
 ) -> Result<Session, ModelError> {
     let mut builder = Session::builder()?;
 
-    let use_gpu = env::var("BOOM_GPU__ENABLED")
-        .map(|v| env_truthy(&v))
-        .unwrap_or(true);
-
     #[cfg(target_os = "linux")]
-    if env::var_os("ORT_DYLIB_PATH").is_none() {
+    if std::env::var_os("ORT_DYLIB_PATH").is_none() {
         return Err(ModelError::MissingOrtDylibPath);
     }
 
     // Pin execution providers explicitly so CPU mode never initializes GPU EPs.
-    if use_gpu {
+    if let Some(dev) = device_id {
         // Disable CPU fallback to make sure we only use the GPUs as instructed.
         // We only do this on Linux as Apple's CoreML EP does need to fallback
         // to the CPU for some operators of the ONNX runtime.
@@ -76,9 +61,6 @@ pub fn load_model_on_device(
         {
             builder = builder.with_disable_cpu_fallback()?;
         }
-
-        #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
-        let dev = device_id.unwrap_or(0);
 
         #[cfg(target_os = "linux")]
         let cuda_ep = {

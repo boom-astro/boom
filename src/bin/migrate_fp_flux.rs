@@ -10,7 +10,7 @@ use mongodb::bson::{doc, Bson, Document};
 use tracing::{error, info, Level};
 use tracing_subscriber::FmtSubscriber;
 
-const FLUXERR2MAGERR_FACTOR: f64 = 2.5_f64 / 2.30258509299_f64;
+const FLUXERR2MAGERR_FACTOR: f64 = 2.5_f64 / std::f64::consts::LN_10;
 
 /// Fixed zeropoint for ZTF forced photometry.
 

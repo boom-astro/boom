@@ -1,5 +1,5 @@
 use mongodb::bson::{doc, Bson, Document};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tracing::{debug, info, instrument, warn};
 
 use crate::alert::ZtfCandidate;
@@ -17,6 +17,11 @@ use crate::filter::{
 };
 use crate::utils::cutouts::CutoutStorage;
 use crate::utils::db::{fetch_timeseries_op, get_array_dict_element};
+use crate::utils::mpcorb::{
+    fill_geometry, has_geometry, normalize_ztf_ssnamenr, OrbitCache, ORBITS_COLLECTION,
+};
+use crate::utils::outburst::MAX_SEPARATION_ARCSEC;
+use crate::utils::sso_geometry::OrbitalElements;
 use crate::utils::{enums::Survey, o11y::logging::as_error};
 
 /// For a filter running on another survey (e.g., LSST), determine if we need to
@@ -417,6 +422,26 @@ pub async fn build_ztf_alerts(
 /// the raw `candidate.ssnamenr` it is derived from. Same value, but the raw field
 /// is present on the whole archive while the normalised one only exists on alerts
 /// enriched since it was introduced.
+///
+/// Entries further than `MAX_SEPARATION_ARCSEC` from the predicted position are
+/// excluded. Roughly one detection in a hundred carrying a designation is a
+/// static source near the predicted track that was given that name upstream,
+/// some two magnitudes brighter than the object, which is enough to dominate
+/// anything measured over the array. The threshold sits at the edge of the
+/// upstream search radius rather than at the width of a good match; see its
+/// definition for why a tighter one would cut on ephemeris quality instead.
+///
+/// This is not the thresholding `sso.is_sso` refuses. There, a large separation is
+/// a degraded measurement of this object, and hiding it behind a boolean would
+/// conceal a drifting ephemeris the consumer needs to see -- so the number is
+/// reported instead. Here the entry is a different source that shares only a
+/// label, and putting it in this object's light curve is mislabelling rather than
+/// recording. `separation_arcsec` is still carried per entry.
+///
+/// Geometry is read from each historical alert rather than recomputed, so it is
+/// null on detections enriched before geometry existed. Recomputing would need
+/// the elements here and would close that gap immediately, but any window
+/// shorter than the time since geometry shipped fills in on its own.
 fn sso_history_lookup(ztf_permissions: &Vec<i32>, window_days: f64) -> Document {
     doc! {
         "$lookup": {
@@ -431,9 +456,15 @@ fn sso_history_lookup(ztf_permissions: &Vec<i32>, window_days: f64) -> Document 
                     { "$gte": ["$candidate.jd", { "$subtract": ["$$jd", window_days] }] },
                     { "$lte": ["$candidate.jd", "$$jd"] },
                     { "$in": ["$candidate.programid", ztf_permissions] },
+                    { "$gte": ["$candidate.ssdistnr", 0.0] },
+                    { "$lt": ["$candidate.ssdistnr", MAX_SEPARATION_ARCSEC] },
                 ] } } },
                 doc! { "$project": {
                     "_id": 0,
+                    // Carried per entry so the array is self-describing: geometry
+                    // is filled in after the pipeline runs, by which point the
+                    // outer document is whatever the filter chose to project.
+                    "designation": "$candidate.ssnamenr",
                     "jd": "$candidate.jd",
                     "fid": "$candidate.fid",
                     "magpsf": "$candidate.magpsf",
@@ -442,6 +473,15 @@ fn sso_history_lookup(ztf_permissions: &Vec<i32>, window_days: f64) -> Document 
                     "dec": "$candidate.dec",
                     "predicted_mag": "$properties.sso.predicted_mag",
                     "separation_arcsec": "$properties.sso.separation_arcsec",
+                    // Each point carries the geometry at its own epoch, not the
+                    // alert's. Statistics that scale a window to a reference
+                    // point (e.g. an outburst statistic) need one value per
+                    // point, and these are the only photometry of the object
+                    // itself -- the positional light curve holds a single
+                    // detection for a mover.
+                    "helio_dist": "$properties.sso.helio_dist",
+                    "topo_dist": "$properties.sso.topo_dist",
+                    "phase_angle": "$properties.sso.phase_angle",
                 } },
                 doc! { "$sort": { "jd": 1 } },
             ],
@@ -639,9 +679,15 @@ pub async fn build_ztf_filter_pipeline(
     Ok(pipeline)
 }
 
+/// Where a filter must project `sso_history` for its geometry to be filled in.
+const SSO_HISTORY_ANNOTATION: &str = "sso_history";
+
 pub struct ZtfFilterWorker {
     alert_pipeline: Vec<Document>,
     alert_collection: mongodb::Collection<Document>,
+    /// MPC orbital elements, used to derive geometry for history points that
+    /// pre-date enrichment writing it.
+    mpc_orbits: mongodb::Collection<Document>,
     alert_cutout_storage: CutoutStorage,
     filter_collection: mongodb::Collection<Filter>,
     input_queue: String,
@@ -654,6 +700,114 @@ pub struct ZtfFilterWorker {
     watchlist_projections: HashMap<String, Document>,
 }
 
+impl ZtfFilterWorker {
+    /// Derive geometry for `sso_history` points that do not carry it.
+    ///
+    /// Geometry is a pure function of designation and epoch, so a point stored
+    /// without it can be derived on read rather than backfilled.
+    ///
+    /// This runs after the aggregation, so the values reach the output but not
+    /// the pipeline: a filter matching on `helio_dist` still sees null for a
+    /// point stored without it. Points enriched with geometry are matchable,
+    /// since the pipeline reads those from storage.
+    ///
+    /// Only fills entries under `annotations.sso_history`; a filter that projects
+    /// the history elsewhere keeps whatever the stored documents had.
+    async fn fill_sso_history_geometry(&self, cache: &mut OrbitCache, documents: &mut [Document]) {
+        // Resolve the designations needing elements before touching anything, so
+        // the whole batch is one query and each designation is parsed once.
+        let keys = sso_history_keys(documents);
+        if keys.is_empty() {
+            return;
+        }
+
+        let wanted: Vec<String> = keys
+            .values()
+            .cloned()
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        // Geometry is an enhancement here: the history is still returned, just
+        // without derived values on the older points.
+        if let Err(e) = cache.load(&self.mpc_orbits, &wanted).await {
+            warn!(
+                "could not read {} for history geometry: {}",
+                ORBITS_COLLECTION, e
+            );
+            return;
+        }
+
+        let mut filled = 0usize;
+        for doc in documents.iter_mut() {
+            let Ok(annotations) = doc.get_document_mut("annotations") else {
+                continue;
+            };
+            let Ok(history) = annotations.get_array_mut(SSO_HISTORY_ANNOTATION) else {
+                continue;
+            };
+            for entry in history.iter_mut() {
+                let Some(entry) = entry.as_document_mut() else {
+                    continue;
+                };
+                if fill_entry_geometry(entry, &keys, cache.elements()) {
+                    filled += 1;
+                }
+            }
+        }
+        if filled > 0 {
+            debug!("derived geometry for {} sso_history points", filled);
+        }
+    }
+}
+
+/// MPCORB key for each designation in the history that still needs geometry.
+fn sso_history_keys(documents: &[Document]) -> HashMap<String, String> {
+    let mut keys: HashMap<String, String> = HashMap::new();
+    for doc in documents {
+        for entry in sso_history_entries(doc) {
+            if has_geometry(entry) {
+                continue;
+            }
+            let Ok(designation) = entry.get_str("designation") else {
+                continue;
+            };
+            if keys.contains_key(designation) {
+                continue;
+            }
+            if let Some(key) = normalize_ztf_ssnamenr(designation) {
+                keys.insert(designation.to_string(), key);
+            }
+        }
+    }
+    keys
+}
+
+/// Derive geometry for one history entry, reading the designation and epoch the
+/// entry carries. A designation absent from `keys` has no MPCORB form.
+fn fill_entry_geometry(
+    entry: &mut Document,
+    keys: &HashMap<String, String>,
+    elements: &HashMap<String, OrbitalElements>,
+) -> bool {
+    let Ok(jd) = entry.get_f64("jd") else {
+        return false;
+    };
+    let Some(key) = entry.get_str("designation").ok().and_then(|d| keys.get(d)) else {
+        return false;
+    };
+    fill_geometry(entry, key, jd, elements)
+}
+
+/// The `sso_history` entries a filter projected into its annotations.
+fn sso_history_entries(doc: &Document) -> impl Iterator<Item = &Document> {
+    doc.get_document("annotations")
+        .ok()
+        .and_then(|a| a.get_array(SSO_HISTORY_ANNOTATION).ok())
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.as_document())
+}
+
 #[async_trait::async_trait]
 impl FilterWorker for ZtfFilterWorker {
     #[instrument(err)]
@@ -664,6 +818,7 @@ impl FilterWorker for ZtfFilterWorker {
         let config = AppConfig::from_path(config_path)?;
         let db: mongodb::Database = config.build_db().await?;
         let alert_collection = db.collection("ZTF_alerts");
+        let mpc_orbits = db.collection(ORBITS_COLLECTION);
         let filter_collection = db.collection("filters");
         let alert_cutout_storage = config.build_cutout_storage(&Survey::Ztf).await?;
 
@@ -693,6 +848,7 @@ impl FilterWorker for ZtfFilterWorker {
         Ok(ZtfFilterWorker {
             alert_pipeline: create_ztf_alert_pipeline(true),
             alert_collection,
+            mpc_orbits,
             alert_cutout_storage,
             filter_collection,
             input_queue,
@@ -754,6 +910,9 @@ impl FilterWorker for ZtfFilterWorker {
     #[instrument(skip_all, err)]
     async fn process_alerts(&mut self, alerts: &[String]) -> Result<Vec<Alert>, FilterWorkerError> {
         let mut alerts_output = Vec::new();
+        // Shared by every (programid, filter) pass below: overlapping alerts
+        // resolve to the same designations.
+        let mut orbit_cache = OrbitCache::default();
 
         // retrieve alerts to process and group by programid
         let mut alerts_by_programid: HashMap<i32, Vec<i64>> = HashMap::new();
@@ -820,6 +979,12 @@ impl FilterWorker for ZtfFilterWorker {
                 }
 
                 let now_ts = chrono::Utc::now().timestamp_millis() as f64;
+
+                // Before the annotations are serialized: most of the archive
+                // pre-dates enrichment writing geometry.
+                let mut out_documents = out_documents;
+                self.fill_sso_history_geometry(&mut orbit_cache, &mut out_documents)
+                    .await;
 
                 for doc in out_documents {
                     let candid = doc
@@ -931,6 +1096,164 @@ mod sso_history_tests {
             "must not join on the positional objectId"
         );
         assert_eq!(lookup.get_str("from").unwrap(), "ZTF_alerts");
+    }
+
+    fn ceres() -> OrbitalElements {
+        OrbitalElements {
+            epoch_jd: 2_461_200.5,
+            a: 2.7655526,
+            e: 0.0796923,
+            incl: 10.58803,
+            node: 80.24863,
+            peri: 73.29420,
+            mean_anomaly: 274.41935,
+        }
+    }
+
+    fn elements() -> HashMap<String, OrbitalElements> {
+        HashMap::from([("1".to_string(), ceres())])
+    }
+
+    /// Keys for the designations a test entry may carry.
+    fn keys() -> HashMap<String, String> {
+        ["1", "(1)Ceres", "C/2026O1", "999999"]
+            .iter()
+            .filter_map(|d| Some((d.to_string(), normalize_ztf_ssnamenr(d)?)))
+            .collect()
+    }
+
+    // The archive pre-dates enrichment writing geometry, so most history points
+    // arrive bare and have to be derived from the elements.
+    #[test]
+    fn test_bare_history_point_gets_geometry() {
+        let mut entry = doc! { "designation": "1", "jd": 2_461_272.5, "magpsf": 9.1 };
+        assert!(fill_entry_geometry(&mut entry, &keys(), &elements()));
+
+        // Matches the Horizons-validated values in sso_geometry.
+        assert!((entry.get_f64("helio_dist").unwrap() - 2.706853).abs() < 1e-3);
+        assert!((entry.get_f64("topo_dist").unwrap() - 3.168905).abs() < 1e-3);
+        assert!((entry.get_f64("phase_angle").unwrap() - 17.6824).abs() < 0.01);
+    }
+
+    // A point enriched with geometry keeps it: recomputing would re-derive the
+    // same number from the same elements, and overwriting hides the provenance.
+    #[test]
+    fn test_stored_geometry_is_not_overwritten() {
+        let mut entry = doc! {
+            "designation": "1", "jd": 2_461_272.5,
+            "helio_dist": 1.0_f64, "topo_dist": 2.0_f64, "phase_angle": 3.0_f64,
+        };
+        assert!(!fill_entry_geometry(&mut entry, &keys(), &elements()));
+        assert_eq!(entry.get_f64("helio_dist").unwrap(), 1.0);
+    }
+
+    // An object with no elements (a comet, say) must stay bare rather than pick
+    // up someone else's geometry.
+    #[test]
+    fn test_unknown_object_stays_bare() {
+        let mut entry = doc! { "designation": "C/2026O1", "jd": 2_461_272.5 };
+        assert!(!fill_entry_geometry(&mut entry, &keys(), &elements()));
+        assert!(entry.get_f64("helio_dist").is_err());
+
+        let mut absent = doc! { "designation": "999999", "jd": 2_461_272.5 };
+        assert!(!fill_entry_geometry(&mut absent, &keys(), &elements()));
+        assert!(absent.get_f64("helio_dist").is_err());
+    }
+
+    // Geometry is a function of the point's own epoch; giving every point the
+    // same value would defeat the scaling it exists for.
+    #[test]
+    fn test_each_point_gets_its_own_epoch() {
+        let mut a = doc! { "designation": "1", "jd": 2_461_272.5 };
+        let mut b = doc! { "designation": "1", "jd": 2_461_202.5 };
+        fill_entry_geometry(&mut a, &keys(), &elements());
+        fill_entry_geometry(&mut b, &keys(), &elements());
+        assert_ne!(
+            a.get_f64("helio_dist").unwrap(),
+            b.get_f64("helio_dist").unwrap()
+        );
+    }
+
+    // The designation is what carries across the two eras, so a history entry
+    // written in the "(100)Hekate" era must still resolve.
+    #[test]
+    fn test_legacy_designation_form_resolves() {
+        let history = doc! { "annotations": { "sso_history": [
+            { "designation": "(1)Ceres", "jd": 2_461_272.5 },
+        ] } };
+        assert_eq!(
+            sso_history_keys(&[history])
+                .get("(1)Ceres")
+                .map(String::as_str),
+            Some("1")
+        );
+
+        let mut entry = doc! { "designation": "(1)Ceres", "jd": 2_461_272.5 };
+        assert!(fill_entry_geometry(&mut entry, &keys(), &elements()));
+    }
+
+    // A point that already carries geometry needs no elements, and one whose
+    // designation has no MPCORB form cannot be looked up.
+    #[test]
+    fn test_only_bare_resolvable_points_are_queried() {
+        let history = doc! { "annotations": { "sso_history": [
+            { "designation": "1", "jd": 2_461_272.5 },
+            { "designation": "C/2026O1", "jd": 2_461_272.5 },
+            {
+                "designation": "2", "jd": 2_461_272.5,
+                "helio_dist": 1.0_f64, "topo_dist": 2.0_f64, "phase_angle": 3.0_f64,
+            },
+        ] } };
+        let keys = sso_history_keys(&[history]);
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys.get("1").map(String::as_str), Some("1"));
+    }
+
+    // A partially written block is completed rather than treated as done.
+    #[test]
+    fn test_partial_geometry_is_completed() {
+        let mut entry = doc! { "designation": "1", "jd": 2_461_272.5, "helio_dist": 1.0_f64 };
+        assert!(fill_entry_geometry(&mut entry, &keys(), &elements()));
+        assert!(entry.get_f64("topo_dist").is_ok());
+        assert!(entry.get_f64("phase_angle").is_ok());
+    }
+
+    // The window points are what a scaling statistic consumes, so each one has to
+    // carry its own geometry -- the alert's own values describe only the last
+    // point in the window.
+    #[tokio::test]
+    async fn test_sso_history_carries_per_point_geometry() {
+        let pipeline = build_ztf_filter_pipeline(
+            &pipeline_from(
+                r#"[{"$match": {"sso_history.0": {"$exists": true}}},
+                 {"$project": {"objectId": 1, "candid": 1}}]"#,
+            ),
+            &perms(),
+        )
+        .await
+        .unwrap();
+
+        let lookup = pipeline
+            .iter()
+            .find_map(|s| s.get_document("$lookup").ok())
+            .expect("lookup present");
+        let projection = lookup
+            .get_array("pipeline")
+            .expect("inner pipeline")
+            .iter()
+            .find_map(|s| s.as_document()?.get_document("$project").ok())
+            .expect("projection present");
+
+        for field in ["helio_dist", "topo_dist", "phase_angle"] {
+            assert_eq!(
+                projection.get_str(field).ok(),
+                Some(format!("$properties.sso.{}", field).as_str()),
+                "{field} must come from the history entry, not the outer alert"
+            );
+        }
+        // Without jd the geometry cannot be matched to a photometry point.
+        assert!(projection.contains_key("jd"));
+        assert!(projection.contains_key("magpsf"));
     }
 
     // Alerts with no designation (old alerts, or no MPC match) are dropped before

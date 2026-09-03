@@ -18,8 +18,9 @@ pub use lsst::{
     LSST_SCHEMA_REGISTRY_GITHUB_FALLBACK_URL, LSST_SCHEMA_REGISTRY_URL, LSST_ZTF_XMATCH_RADIUS,
 };
 pub use winter::{
-    sanitize_winter_avro, WinterAlert, WinterAlertWorker, WinterAliases, WinterCandidate,
-    WinterObject, WinterPrvCandidate, WinterRawAvroAlert, WINTER_DEC_RANGE,
+    fid_to_band, sanitize_winter_avro, WinterAlert, WinterAlertWorker, WinterAliases,
+    WinterCandidate, WinterObject, WinterPrvCandidate, WinterRawAvroAlert, DARK_FID,
+    WINTER_DEC_RANGE,
 };
 pub use ztf::{
     deserialize_candidate, deserialize_cutout_as_bytes, deserialize_fp_hists,
