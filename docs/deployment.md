@@ -11,7 +11,7 @@ one is not necessarily present on the other.
 | Role | Primary production instance | Backup / secondary instance |
 | Host | Dedicated server (`kaboom`), `*.kaboom.caltech.edu` | HPC cluster at the University of Minnesota |
 | Deploy method | Automated: release tag → `Trigger deployment to production` GitHub Actions workflow on a self-hosted runner | Manual, on the cluster |
-| Config in this repo | `config/prod/caltech/` | Not yet (deployed manually) |
+| Config in this repo | `config/prod/caltech/` | `config/prod/umn/` |
 
 **They diverge in practice.** Filters live in each instance's own database, and
 each instance consumes the upstream alert streams with its own Kafka consumer
@@ -299,11 +299,13 @@ config/prod/
    caltech/
       overrides.yaml
       config.yaml
+   umn/
+      overrides.yaml
+      config.yaml
 ```
 
-Each automated deployment gets its own directory here. Only `caltech/` exists
-today; the UMN instance is still deployed manually and does not have a
-generated config in this repo yet.
+Each deployment gets its own directory here: `caltech/` and `umn/`. UMN is
+still deployed manually, but reads its generated config from this repo.
 
 - `overrides.yaml` is the only file you edit for a deployment-specific config.
 - `config.yaml` in each deployment directory is generated from the base config
