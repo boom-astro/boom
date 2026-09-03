@@ -97,6 +97,8 @@ pub enum EnrichmentWorkerError {
     MissingFluxPSF,
     #[error("Empty lightcurve after preparation for candid {0}")]
     EmptyLightcurve(i64),
+    #[error("milvus error")]
+    Milvus(#[from] crate::milvus::MilvusError),
 }
 
 #[async_trait::async_trait]
