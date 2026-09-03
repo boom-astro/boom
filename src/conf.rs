@@ -1031,7 +1031,7 @@ impl AppConfig {
         }
 
         // Validate token expiration
-        if self.api.auth.token_expiration <= 0 {
+        if self.api.auth.token_expiration == 0 {
             return Err("Token expiration must be greater than 0 for security reasons".to_string());
         }
 
