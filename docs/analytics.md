@@ -41,12 +41,13 @@ unusual `User-Agent` can't become a fingerprint.
 and Kafka consumption therefore merge into **one** PostHog person instead of
 three.
 
-The web app gets that id from `/babamul/profile`, which serializes it as `_id`
-rather than `id`. `fetchProfile` renames it (`frontend/src/lib/api.ts`) and a
-test pins the rename, because getting it wrong is silent: nothing in the UI
-reads the field, so a missing id shows up only as `identify` falling through to
-its username fallback — which splits one person into two, a web one and an API
-one, and is exactly the bug that made API events unattributable.
+The web app gets that id from `/babamul/profile`. That endpoint used to send it
+as `_id`, mirroring how Mongo stores it, while the web app read `id` — so the
+id was always `undefined` there. Nothing in the UI reads the field, which made
+the breakage silent: it surfaced only as `identify` falling back to the
+username, splitting every user into a web person and an API person, and that is
+what made API events unattributable. The endpoint now sends `id`;
+`fetchProfile` still accepts `_id` for deploy skew, and tests pin both.
 
 Authenticated `babamul_api_request` events also `$set` the person's `email` and
 `username`. Without that, a person is a bare id in the PostHog UI, and a user
