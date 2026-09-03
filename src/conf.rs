@@ -283,6 +283,10 @@ pub struct CatalogXmatchConfig {
     pub distance_max: Option<f64>,           // maximum distance in kpc
     pub distance_max_near: Option<f64>,      // maximum distance in arcsec for nearby objects
     pub max_results: Option<usize>,          // maximum number of results to return
+    /// Field naming a row's object type, e.g. DESI's `spectype`.
+    pub type_key: Option<String>,
+    /// Values of `type_key` that mean the row is a star rather than a galaxy.
+    pub stellar_types: Vec<String>,
 }
 
 impl CatalogXmatchConfig {
@@ -295,6 +299,8 @@ impl CatalogXmatchConfig {
         distance_max: Option<f64>,
         distance_max_near: Option<f64>,
         max_results: Option<usize>,
+        type_key: Option<String>,
+        stellar_types: Vec<String>,
     ) -> CatalogXmatchConfig {
         CatalogXmatchConfig {
             catalog: catalog.to_string(),
@@ -305,6 +311,8 @@ impl CatalogXmatchConfig {
             distance_max,
             distance_max_near,
             max_results,
+            type_key,
+            stellar_types,
         }
     }
 
@@ -389,6 +397,21 @@ impl CatalogXmatchConfig {
             panic!("cannot use max_results with distance filtering");
         }
 
+        let type_key = match hashmap_xmatch.get("type_key") {
+            Some(type_key) => Some(type_key.clone().into_string()?),
+            None => None,
+        };
+
+        let stellar_types = match hashmap_xmatch.get("stellar_types") {
+            Some(values) => values
+                .clone()
+                .into_array()?
+                .into_iter()
+                .map(|value| value.into_string())
+                .collect::<Result<Vec<String>, _>>()?,
+            None => Vec::new(),
+        };
+
         Ok(CatalogXmatchConfig::new(
             &catalog,
             radius,
@@ -398,6 +421,8 @@ impl CatalogXmatchConfig {
             distance_max,
             distance_max_near,
             max_results,
+            type_key,
+            stellar_types,
         ))
     }
 }
@@ -476,6 +501,81 @@ fn default_subscription_window_days() -> u64 {
     1
 }
 
+/// `Unset` is spelled `""` rather than a missing key, so that an empty env
+/// override deserializes instead of erroring.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum SecurityProtocol {
+    #[default]
+    #[serde(rename = "")]
+    Unset,
+    Plaintext,
+    Ssl,
+    SaslPlaintext,
+    SaslSsl,
+}
+
+impl SecurityProtocol {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SecurityProtocol::Unset | SecurityProtocol::Plaintext => "PLAINTEXT",
+            SecurityProtocol::Ssl => "SSL",
+            SecurityProtocol::SaslPlaintext => "SASL_PLAINTEXT",
+            SecurityProtocol::SaslSsl => "SASL_SSL",
+        }
+    }
+
+    pub fn uses_sasl(self) -> bool {
+        matches!(self, Self::SaslPlaintext | Self::SaslSsl)
+    }
+
+    pub fn uses_tls(self) -> bool {
+        matches!(self, Self::Ssl | Self::SaslSsl)
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct KafkaSecurity {
+    protocol: SecurityProtocol,
+    username: Option<String>,
+    password: Option<String>,
+    ssl_ca_location: Option<String>,
+}
+
+impl KafkaSecurity {
+    pub fn protocol(&self) -> SecurityProtocol {
+        match self.protocol {
+            SecurityProtocol::Unset if self.has_credentials() => SecurityProtocol::SaslPlaintext,
+            SecurityProtocol::Unset => SecurityProtocol::Plaintext,
+            explicit => explicit,
+        }
+    }
+
+    pub fn has_credentials(&self) -> bool {
+        self.username.is_some() && self.password.is_some()
+    }
+
+    pub fn username(&self) -> Option<&str> {
+        self.username.as_deref()
+    }
+
+    pub fn password(&self) -> Option<&str> {
+        self.password.as_deref()
+    }
+
+    pub fn ssl_ca_location(&self) -> Option<&str> {
+        self.ssl_ca_location.as_deref()
+    }
+}
+
+/// An empty string is an unset key, not a credential.
+fn configured(value: &Option<String>) -> Option<String> {
+    value
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct KafkaConsumerConfig {
     #[serde(default = "default_kafka_server")]
@@ -485,6 +585,9 @@ pub struct KafkaConsumerConfig {
     pub schema_github_fallback_url: Option<String>, // URL of the GitHub fallback for schemas (if any)
     pub username: Option<String>,                   // Username for authentication (if any)
     pub password: Option<String>,                   // Password for authentication (if any)
+    #[serde(default)]
+    pub security_protocol: SecurityProtocol, // Empty infers it from the credentials
+    pub ssl_ca_location: Option<String>,            // CA bundle path (only for a private CA)
     /// Days before the current one to stay subscribed to, for surveys whose
     /// topics are per-night. 1 (the default) keeps yesterday alongside today so
     /// a night spanning UTC midnight isn't cut off. Raise it temporarily to
@@ -492,6 +595,17 @@ pub struct KafkaConsumerConfig {
     /// is about 7 days for ZTF. Ignored by surveys with a single static topic.
     #[serde(default = "default_subscription_window_days")]
     pub subscription_window_days: u64,
+}
+
+impl KafkaConsumerConfig {
+    pub fn security(&self) -> KafkaSecurity {
+        KafkaSecurity {
+            protocol: self.security_protocol,
+            username: configured(&self.username),
+            password: configured(&self.password),
+            ssl_ca_location: configured(&self.ssl_ca_location),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -1035,6 +1149,21 @@ impl AppConfig {
             return Err("Token expiration must be greater than 0 for security reasons".to_string());
         }
 
+        for (survey, consumer) in &self.kafka.consumer {
+            let security = consumer.security();
+            let protocol = security.protocol();
+            if protocol.uses_sasl() && !security.has_credentials() {
+                return Err(format!(
+                    "kafka.consumer.{} is set to {} but has no credentials; set \
+                     BOOM_KAFKA__CONSUMER__{}__USERNAME and BOOM_KAFKA__CONSUMER__{}__PASSWORD",
+                    survey.as_str().to_lowercase(),
+                    protocol.as_str(),
+                    survey.as_str(),
+                    survey.as_str(),
+                ));
+            }
+        }
+
         Ok(())
     }
 
@@ -1111,6 +1240,52 @@ pub async fn get_test_cutout_storage(survey: &Survey) -> CutoutStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn consumer_config(yaml: &str) -> KafkaConsumerConfig {
+        Config::builder()
+            .add_source(File::from_str(yaml, config::FileFormat::Yaml))
+            .build()
+            .unwrap()
+            .try_deserialize()
+            .unwrap()
+    }
+
+    #[test]
+    fn a_consumer_without_credentials_stays_on_plaintext() {
+        let config = consumer_config("group_id: boom-ztf\n");
+        assert_eq!(config.security().protocol(), SecurityProtocol::Plaintext);
+    }
+
+    #[test]
+    fn credentials_alone_mean_sasl_plaintext() {
+        let config = consumer_config("group_id: boom-lsst\nusername: user\npassword: pass\n");
+        assert_eq!(
+            config.security().protocol(),
+            SecurityProtocol::SaslPlaintext
+        );
+    }
+
+    #[test]
+    fn an_empty_credential_is_not_a_credential() {
+        let config = consumer_config("group_id: boom-ztf\nusername: \"\"\npassword: \"\"\n");
+        assert_eq!(config.security().protocol(), SecurityProtocol::Plaintext);
+        assert!(!config.security().has_credentials());
+    }
+
+    #[test]
+    fn an_explicit_protocol_wins_over_the_inferred_one() {
+        let config = consumer_config(
+            "group_id: boom-ztf\nsecurity_protocol: SASL_SSL\nusername: user\npassword: pass\n",
+        );
+        assert_eq!(config.security().protocol(), SecurityProtocol::SaslSsl);
+        assert!(config.security().protocol().uses_tls());
+    }
+
+    #[test]
+    fn an_empty_protocol_means_unset_rather_than_a_parse_error() {
+        let config = consumer_config("group_id: boom-ztf\nsecurity_protocol: \"\"\n");
+        assert_eq!(config.security_protocol, SecurityProtocol::Unset);
+    }
 
     /// `config.yaml` as a deployment with both OAuth URLs set would have it.
     const URLS_CONFIGURED_YAML: &str = "babamul:\n  webapp_url: https://example.org\n  oauth:\n    redirect_base_url: https://example.org/api\n";

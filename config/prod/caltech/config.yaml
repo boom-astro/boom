@@ -112,6 +112,11 @@ kafka:
     ztf:
       server: "localhost:9092"
       group_id: "" # Set via BOOM_KAFKA__CONSUMER__ZTF__GROUP_ID environment variable
+      # Empty infers the transport from the credentials below: SASL_PLAINTEXT
+      # when both are set, PLAINTEXT otherwise. SASL_SSL for a broker on TLS.
+      security_protocol: "" # Set via BOOM_KAFKA__CONSUMER__ZTF__SECURITY_PROTOCOL environment variable
+      username: "" # Set via BOOM_KAFKA__CONSUMER__ZTF__USERNAME environment variable
+      password: "" # Set via BOOM_KAFKA__CONSUMER__ZTF__PASSWORD environment variable
       # Days before the current one to stay subscribed to. 1 keeps yesterday
       # alongside today so a night spanning UTC midnight isn't cut off. Raise
       # temporarily (via BOOM_KAFKA__CONSUMER__ZTF__SUBSCRIPTION_WINDOW_DAYS) to
@@ -334,6 +339,12 @@ crossmatch:
       distance_key: "z"
       distance_max: 30.0
       distance_max_near: 300.0
+      # DESI is spectroscopic and full of stars, which sit at z ~ 0 and so have
+      # no meaningful projected distance. Naming the type column keeps them from
+      # being ranked as though they were very nearby galaxies. QSO is left out
+      # deliberately: it is a plausible counterpart, so it ranks like a galaxy.
+      type_key: "spectype"
+      stellar_types: ["STAR"]
       projection:
         _id: 1
         ra: 1
@@ -518,6 +529,12 @@ crossmatch:
       distance_key: "z"
       distance_max: 30.0
       distance_max_near: 300.0
+      # DESI is spectroscopic and full of stars, which sit at z ~ 0 and so have
+      # no meaningful projected distance. Naming the type column keeps them from
+      # being ranked as though they were very nearby galaxies. QSO is left out
+      # deliberately: it is a plausible counterpart, so it ranks like a galaxy.
+      type_key: "spectype"
+      stellar_types: ["STAR"]
       projection:
         _id: 1
         ra: 1
@@ -607,6 +624,12 @@ crossmatch:
       distance_key: "z"
       distance_max: 30.0
       distance_max_near: 300.0
+      # DESI is spectroscopic and full of stars, which sit at z ~ 0 and so have
+      # no meaningful projected distance. Naming the type column keeps them from
+      # being ranked as though they were very nearby galaxies. QSO is left out
+      # deliberately: it is a plausible counterpart, so it ranks like a galaxy.
+      type_key: "spectype"
+      stellar_types: ["STAR"]
       projection:
         _id: 1
         ra: 1
