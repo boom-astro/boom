@@ -49,6 +49,11 @@ jobs:
       - name: Commit generated configs
         if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
         run: |
+          # Stage new files as intent-to-add first: `git diff` only sees
+          # tracked paths, so a generated config that has never been committed
+          # — a newly added deployment, exactly the case that let UMN drift —
+          # would otherwise read as "no changes" and be skipped.
+          git add -AN -- config/prod
           if git diff --quiet -- config/prod; then
             echo "Generated configs already up to date"
             exit 0
@@ -65,6 +70,9 @@ jobs:
       - name: Verify generated configs on fork PRs
         if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
         run: |
+          # As above: without this a brand-new generated config is invisible to
+          # `git diff` and a fork PR would pass while leaving one uncommitted.
+          git add -AN -- config/prod
           if git diff --quiet -- config/prod; then
             echo "Generated configs already up to date"
             exit 0
