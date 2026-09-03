@@ -244,7 +244,7 @@ crossmatch:
         strm_z_phot_err: 1
     - catalog: lsdr10
       radius: 30.0
-      use_distance: false
+      use_distance: true
       projection:
         _id: 1
         ra: 1
@@ -472,7 +472,7 @@ crossmatch:
         strm_z_phot_err: 1
     - catalog: lsdr10
       radius: 30.0
-      use_distance: false
+      use_distance: true
       projection:
         _id: 1
         ra: 1
