@@ -747,6 +747,28 @@ human-initiated task. That keeps the existing `warn_if_missing_crossmatches`
 behavior — warn loudly about the gap — while making the warning exact and the
 remedy one click away.
 
+**Drift is not the same severity as a broken declaration**, and the startup
+check has to distinguish them or it will train everyone to ignore it. Two
+conditions, one mechanism, different consequences:
+
+| Condition | Meaning | On startup |
+| --- | --- | --- |
+| **Drift** — actual state ≠ declared state | the deployment is behind or ahead; it still runs correctly, on staler or newer data than the release expects | log, gauge, drift table. Never blocks |
+| **Unsatisfied dependency** — an enabled feature's declared inputs are absent | the feature will run and produce wrong results without saying so | refuse to start, or require an explicit acknowledgement in config |
+
+NED sitting at definition v4 while the release declares v5 is the first: the
+data is stale, every query still means what it says, and someone converges it
+when they get to it. `host_galaxy.enabled: true` with no `LSDR10` cross-match
+entry is the second: nothing is stale, the association is simply computed from
+half its inputs and reported as if it were complete. The first is an operational
+backlog; the second is a misconfiguration that silently corrupts science, and it
+should be as loud as a missing config key already is. See
+[the preflight in the worked example](#stage-2--turn-it-on-config-pr-effective-at-scheduler-restart)
+for what declaring those inputs looks like.
+
+Neither one submits a task. Refusing to start is still "act never" — the check
+declines to run the pipeline; it does not go and fix the database.
+
 One arguable exception: creating a *missing* index is bounded and
 non-destructive, and there's precedent in `initialize_survey_indexes` doing
 exactly that at scheduler startup. Auto-creating missing indexes is probably
@@ -1265,6 +1287,12 @@ naming exactly what is missing, or an explicit `partial: true` acknowledgement
 in config, rather than quietly degraded science. This is the same check already
 proposed for `crossmatch.<survey>` ⊆ `catalogs:`, one level more specific, and
 it is what finally retires `warn_if_missing_crossmatches`.
+
+Note the severity: this is the second row of
+[the startup table](#the-deployment-declares-an-inventory), not the first. A
+catalog that is merely behind its declared version does not block startup — the
+data is stale but honest. A feature computing from inputs it does not have is
+not stale, it is wrong, and it is worth failing on.
 
 ### Stage 3 — the backfill (three separate admin decisions)
 
