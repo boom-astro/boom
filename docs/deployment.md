@@ -249,7 +249,7 @@ volume paths, and the specific env keys injected into containers) belong here.
 | `BOOM_BABAMUL__ENABLED` | No | Defaults to `false`. |
 | `BOOM_BABAMUL__REGISTRATION_ENABLED` | No | Whether the API accepts new account creation; defaults to `true`. Pairs with `VITE_PRERELEASE_MODE`: that decides what the web app offers, this decides what the API allows. |
 | `BOOM_GPU__ENABLED` | No | Set `true` to run ONNX inference on GPU. Overrides `config.gpu.enabled`, and selects the `docker-compose.cuda.yaml` overlay. |
-| `BOOM_GPU__DEVICE_IDS` | No | Comma-separated CUDA device IDs (e.g. `0,1`); defaults to `0`. Only relevant when `BOOM_GPU__ENABLED=true`. |
+| `BOOM_GPU__DEVICE_IDS` | No | Comma-separated CUDA device IDs (e.g. `0,1`). Unset, the deployment config's `gpu.device_ids` applies. Only relevant when `BOOM_GPU__ENABLED=true`. |
 | `BOOM_DATA_MONGODB_PATH` | No | Host bind mount for MongoDB; falls back to a named volume. |
 | `BOOM_DATA_VALKEY_PATH` | No | Host bind mount for Valkey; falls back to a named volume. |
 | `BOOM_DATA_KAFKA_PATH` | No | Host bind mount for Kafka; falls back to a named volume. |
