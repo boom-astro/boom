@@ -10,8 +10,8 @@ use crate::utils::cutouts::{AlertCutout, CutoutStorage};
 use crate::utils::db::mongify;
 use crate::utils::enums::Survey;
 use crate::utils::lightcurves::{
-    analyze_photometry, prepare_photometry, ActivityMetrics, AllBandsProperties, Band, Outburst,
-    PerBandProperties, PhotometryMag, ZTF_ZP,
+    analyze_photometry, prepare_photometry, ActivityMetrics, AllBandsProperties, Band,
+    DetectionHistory, Outburst, PerBandProperties, PhotometryMag, ZTF_ZP,
 };
 use crate::utils::mpcorb::{elements_from_document, normalize_ztf_ssnamenr, ORBITS_COLLECTION};
 use crate::utils::outburst::{Point, MAX_SEPARATION_ARCSEC};
@@ -537,6 +537,11 @@ pub struct ZtfAlertProperties {
     /// `None` on alerts enriched before this existed.
     #[serde(default)]
     pub activity: Option<ActivityMetrics>,
+    /// Per-object detection-history summary for history-aware filters (pos/neg
+    /// detection counts, first/last negative epoch, rolling 30-day counts).
+    /// `None` on alerts enriched before this field existed.
+    #[serde(default)]
+    pub detection_history: Option<DetectionHistory>,
 }
 
 /// ZTF alert ML classifier scores
@@ -1222,6 +1227,16 @@ impl ZtfEnrichmentWorker {
             photstats.clone()
         };
 
+        // Per-object detection history for history-aware filters, from the full
+        // accumulated light curve (positive/negative by psfFlux sign).
+        let detection_history = DetectionHistory::from_points(
+            alert
+                .prv_candidates
+                .iter()
+                .map(|p| (p.jd, p.flux.filter(|f| !f.is_nan()).map(|f| f < 0.0))),
+            candidate.jd,
+        );
+
         Ok((
             ZtfAlertProperties {
                 rock: is_rock,
@@ -1232,6 +1247,7 @@ impl ZtfEnrichmentWorker {
                 multisurvey_photstats: Some(multisurvey_photstats),
                 sso: Some(sso),
                 activity: Some(activity),
+                detection_history: Some(detection_history),
             },
             all_bands_properties,
             programid,
@@ -1524,6 +1540,10 @@ mod tests {
         assert!(
             props.sso.is_none(),
             "absent means never evaluated, not evaluated-and-negative"
+        );
+        assert!(
+            props.detection_history.is_none(),
+            "detection_history is absent on pre-existing alerts"
         );
     }
 
