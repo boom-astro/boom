@@ -579,7 +579,7 @@ pub struct ZtfEnrichmentWorker {
     /// Shared ONNX models (loaded once, shared across all enrichment workers
     /// via Arc). On Linux+`gpu` this also owns the per-device CUDA stream and
     /// villar-pso `GpuContext` so that PSO and ONNX inference share a stream.
-    models: Option<Arc<SharedModels>>,
+    models: Arc<SharedModels>,
     babamul: Option<Babamul>,
     gpu_enabled: bool,
     /// Alerts per batch — also the fixed ONNX inference shape (see
@@ -631,8 +631,8 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         // models on CPU. Per-worker models avoid mutex contention when multiple
         // enrichment workers run in parallel on CPU.
         let models = match shared_models {
-            Some(m) => Some(m),
-            None => Some(SharedModels::load(None)?),
+            Some(models) => models,
+            None => SharedModels::load(None)?,
         };
 
         let batch_size = config
@@ -749,12 +749,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                 Err(e) => return Err(e),
             };
             #[cfg(feature = "gpu")]
-            if self
-                .models
-                .as_ref()
-                .and_then(|m| m.gpu_ctx.as_ref())
-                .is_some()
-            {
+            if self.models.gpu_ctx.is_some() {
                 villar_inputs.push((candid, lightcurve));
             }
 
@@ -777,13 +772,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             );
         }
 
-        // Run ML classification using shared models
-        let classifications_list: Vec<Option<ZtfAlertClassifications>> =
-            if let Some(ref models) = self.models {
-                self.classify(&models, &work_items)?
-            } else {
-                vec![None; work_items.len()]
-            };
+        let classifications_list = self.classify(&self.models, &work_items)?;
 
         for (item, classifications) in work_items.into_iter().zip(classifications_list) {
             let update_alert_document = if let Some(ref cls) = classifications {
@@ -827,7 +816,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         // loaded with a GPU device.
         // Otherwise `villar_inputs` is empty and we skip the entire block.
         #[cfg(feature = "gpu")]
-        if let Some(gpu_ctx) = self.models.as_ref().and_then(|m| m.gpu_ctx.as_ref()) {
+        if let Some(gpu_ctx) = self.models.gpu_ctx.as_ref() {
             // Document whose keys match a successful fit's keys but with all values NaN.
             // Written whenever a fit can't be produced (bad photometry or GPU failure).
             let nan_set_doc = {
