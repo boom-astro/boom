@@ -40,7 +40,7 @@ const MPC_ORBITS_CHECK_INTERVAL: Duration = Duration::from_secs(4 * 60 * 60);
 
 /// Whether the catalogue is due a refresh. An absent one always is.
 fn mpc_orbits_needs_refresh(age_seconds: Option<f64>, max_age: Duration) -> bool {
-    age_seconds.map_or(true, |age| age >= max_age.as_secs_f64())
+    age_seconds.is_none_or(|age| age >= max_age.as_secs_f64())
 }
 
 /// Keep `MPC_orbits` fresh for as long as the scheduler runs.
@@ -290,21 +290,21 @@ async fn run(
 
     let mut alert_pool = ThreadPool::new(
         WorkerType::Alert,
-        n_alert as usize,
+        n_alert,
         args.survey.clone(),
         config_path.clone(),
         None,
     );
     let mut enrichment_pool = ThreadPool::new(
         WorkerType::Enrichment,
-        n_enrichment as usize,
+        n_enrichment,
         args.survey.clone(),
         config_path.clone(),
         shared_model_pool,
     );
     let mut filter_pool = ThreadPool::new(
         WorkerType::Filter,
-        n_filter as usize,
+        n_filter,
         args.survey.clone(),
         config_path,
         None,
