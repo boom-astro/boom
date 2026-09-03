@@ -258,6 +258,8 @@ volume paths, and the specific env keys injected into containers) belong here.
 | `BOOM_CUTOUTS_MONGO_MEM_LIMIT` | No | Same, for the cutouts MongoDB container. |
 | `BOOM_KAFKA__CONSUMER__ZTF__SERVER` | Yes | ZTF Kafka bootstrap server. Reused for the WINTER consumer, which shares the same (unauthenticated) broker. |
 | `BOOM_KAFKA__CONSUMER__ZTF__GROUP_ID` | Yes | ZTF consumer group ID (per-program suffix added by compose). |
+| `BOOM_KAFKA__CONSUMER__ZTF__SECURITY_PROTOCOL` | No | Kafka transport: `PLAINTEXT`, `SSL`, `SASL_PLAINTEXT` or `SASL_SSL`. Unset infers it from the credentials below. Set it to `SASL_SSL` for a broker that requires TLS. |
+| `BOOM_KAFKA__CONSUMER__ZTF__USERNAME` | No | ZTF SASL username. Required when the protocol above is a `SASL_*` one. |
 | `BOOM_KAFKA__CONSUMER__LSST__GROUP_ID` | Yes | LSST consumer group ID. |
 | `BOOM_KAFKA__CONSUMER__LSST__USERNAME` | Yes | LSST SASL username. |
 | `BOOM_KAFKA__CONSUMER__WINTER__GROUP_ID` | Yes | WINTER consumer group ID (the broker itself comes from `BOOM_KAFKA__CONSUMER__ZTF__SERVER`). Kept here, not in the committed config, because the repo is public and the group ID is what an attacker would reuse to join our group and disrupt ingestion on the unauthenticated broker. |
@@ -284,6 +286,7 @@ volume paths, and the specific env keys injected into containers) belong here.
 | `KAFKA_ADMIN_PASSWORD` | Yes | SASL admin password used by the ACL init script. |
 | `KAFKA_READONLY_PASSWORD` | Yes | SASL read-only password for external Kafka access. |
 | `BOOM_KAFKA__CONSUMER__LSST__PASSWORD` | Yes | LSST SASL password. |
+| `BOOM_KAFKA__CONSUMER__ZTF__PASSWORD` | No | ZTF SASL password. Required when `BOOM_KAFKA__CONSUMER__ZTF__SECURITY_PROTOCOL` is a `SASL_*` one. |
 | `PROMETHEUS_HASHED_PASSWORD` | Yes | bcrypt hash for Prometheus basic auth (store the raw hash; do **not** `$$`-escape it as you would in a `.env`). |
 | `GRAFANA_ADMIN_PASSWORD` | Yes | Grafana admin password. |
 | `SLACK_WEBHOOK_URL` | No | Grafana alerting webhook; blank uses a placeholder (alerts still fire, POSTs 404). |
