@@ -112,8 +112,8 @@ kafka:
     ztf:
       server: "localhost:9092"
       group_id: "" # Set via BOOM_KAFKA__CONSUMER__ZTF__GROUP_ID environment variable
-      # Empty infers the transport from the credentials below:
-      # SASL_PLAINTEXT when both are set, PLAINTEXT otherwise. SASL_SSL for a broker on TLS.
+      # Empty infers the transport from the credentials below: SASL_PLAINTEXT
+      # when both are set, PLAINTEXT otherwise. SASL_SSL for a broker on TLS.
       security_protocol: "" # Set via BOOM_KAFKA__CONSUMER__ZTF__SECURITY_PROTOCOL environment variable
       username: "" # Set via BOOM_KAFKA__CONSUMER__ZTF__USERNAME environment variable
       password: "" # Set via BOOM_KAFKA__CONSUMER__ZTF__PASSWORD environment variable
