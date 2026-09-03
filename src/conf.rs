@@ -889,8 +889,7 @@ use serde::{de, Deserializer};
 pub struct GpuConfig {
     /// Whether to load ONNX models on GPU (CUDA) instead of CPU.
     /// Models are loaded once at startup and shared across all enrichment workers
-    /// via `Arc<Mutex<...>>`. When false, models are loaded on CPU (the BOOM_GPU__ENABLED
-    /// env var is still respected by the ORT session builder).
+    /// via `Arc<Mutex<...>>`. When false, models are loaded on CPU.
     #[serde(default)]
     pub enabled: bool,
     /// CUDA device IDs available for GPU work. Default: [0].
