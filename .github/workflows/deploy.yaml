@@ -30,16 +30,33 @@ jobs:
       BOOM_MONGO_MEM_LIMIT: ${{ vars.BOOM_MONGO_MEM_LIMIT }}
       BOOM_CUTOUTS_MONGO_MEM_LIMIT: ${{ vars.BOOM_CUTOUTS_MONGO_MEM_LIMIT }}
       BOOM_CUTOUTS_STORAGE__PASSWORD: ${{ secrets.BOOM_CUTOUTS_STORAGE__PASSWORD }}
-      # Toggles babamul on without editing config.yaml — compose injects it into
+      # Toggles babamul on without editing config.yaml; compose injects it into
       # the api and schedulers. Other babamul settings (webapp_url, etc.) and the
       # admin username/email are read from config/prod/<deployment>/config.yaml
       # and don't need env vars here.
       BOOM_BABAMUL__ENABLED: ${{ vars.BOOM_BABAMUL__ENABLED }}
+      # Whether the API will create new accounts. Pair it with
+      # VITE_PRERELEASE_MODE below: that decides what the web app offers, this
+      # decides what the API allows. Unset leaves compose's default (true).
+      BOOM_BABAMUL__REGISTRATION_ENABLED: ${{ vars.BOOM_BABAMUL__REGISTRATION_ENABLED }}
+      # Social sign-in. redirect_base_url and orcid_sandbox come from
+      # config/prod/<deployment>/config.yaml; only the credentials are injected
+      # here, since config.yaml is committed. A provider is enabled exactly when
+      # both halves of its pair are non-empty, so an unset secret simply leaves
+      # that button off rather than sending users to a consent screen that will
+      # reject them. The redirect URI registered with each provider must be
+      # <redirect_base_url>/babamul/oauth/<provider>/callback.
+      BOOM_BABAMUL__OAUTH__GOOGLE__CLIENT_ID: ${{ secrets.BOOM_BABAMUL__OAUTH__GOOGLE__CLIENT_ID }}
+      BOOM_BABAMUL__OAUTH__GOOGLE__CLIENT_SECRET: ${{ secrets.BOOM_BABAMUL__OAUTH__GOOGLE__CLIENT_SECRET }}
+      BOOM_BABAMUL__OAUTH__GITHUB__CLIENT_ID: ${{ secrets.BOOM_BABAMUL__OAUTH__GITHUB__CLIENT_ID }}
+      BOOM_BABAMUL__OAUTH__GITHUB__CLIENT_SECRET: ${{ secrets.BOOM_BABAMUL__OAUTH__GITHUB__CLIENT_SECRET }}
+      BOOM_BABAMUL__OAUTH__ORCID__CLIENT_ID: ${{ secrets.BOOM_BABAMUL__OAUTH__ORCID__CLIENT_ID }}
+      BOOM_BABAMUL__OAUTH__ORCID__CLIENT_SECRET: ${{ secrets.BOOM_BABAMUL__OAUTH__ORCID__CLIENT_SECRET }}
       BOOM_DATABASE__PASSWORD: ${{ secrets.BOOM_DATABASE__PASSWORD }}
       BOOM_API__DOMAIN: ${{ vars.BOOM_API__DOMAIN }}
       BOOM_API__AUTH__SECRET_KEY: ${{ secrets.BOOM_API__AUTH__SECRET_KEY }}
       BOOM_API__AUTH__ADMIN_PASSWORD: ${{ secrets.BOOM_API__AUTH__ADMIN_PASSWORD }}
-      # Frontend (web app) settings — WEBAPP_DOMAIN sets the host the SPA is
+      # Frontend (web app) settings: WEBAPP_DOMAIN sets the host the SPA is
       # served on (compose defaults to DOMAIN); the VITE_* values are baked into
       # the static bundle at build time by frontend/Dockerfile. All optional;
       # compose supplies defaults when the GitHub vars are unset.
@@ -83,13 +100,16 @@ jobs:
       BOOM_API_RATE_LIMIT_AVERAGE: ${{ vars.BOOM_API_RATE_LIMIT_AVERAGE }}
       BOOM_API_RATE_LIMIT_BURST: ${{ vars.BOOM_API_RATE_LIMIT_BURST }}
       BOOM_API_RATE_LIMIT_PERIOD: ${{ vars.BOOM_API_RATE_LIMIT_PERIOD }}
-      # GPU is OFF on this machine for now. Set explicitly because the model
-      # loader (src/enrichment/models/base.rs) reads BOOM_GPU__ENABLED straight
-      # from the environment and DEFAULTS TO TRUE when unset — config.gpu.enabled
-      # does not gate it. To switch GPUs on later, set the BOOM_GPU__ENABLED
-      # (true) and BOOM_GPU__DEVICE_IDS (e.g. "0,1") repository variables; no code
-      # change needed. Keep config/prod/<deployment>/config.yaml's gpu.enabled in
-      # sync so the scheduler's GPU-pool path agrees with the model loader.
+      # Set explicitly because the model loader (src/enrichment/models/base.rs)
+      # reads BOOM_GPU__ENABLED straight from the environment and DEFAULTS TO
+      # TRUE when unset; config.gpu.enabled does not gate it. Driven by the
+      # BOOM_GPU__ENABLED (true/false) and BOOM_GPU__DEVICE_IDS (e.g. "0,1")
+      # repository variables; no code change needed to flip it. Keep
+      # config/prod/<deployment>/config.yaml's gpu.enabled in sync so the
+      # scheduler's GPU-pool path agrees with the model loader.
+      # BOOM_GPU__ENABLED also drives the "Select GPU compose overlay" step
+      # below, which layers in docker-compose.cuda.yaml (CUDA image + device
+      # passthrough); setting this var alone does nothing without that overlay.
       BOOM_GPU__ENABLED: ${{ vars.BOOM_GPU__ENABLED || 'false' }}
       BOOM_GPU__DEVICE_IDS: ${{ vars.BOOM_GPU__DEVICE_IDS || '0' }}
     steps:
@@ -165,17 +185,29 @@ jobs:
         with:
           ref: ${{ steps.deploy_tag.outputs.tag_ref }}
           lfs: true
-      - run: >
-          docker compose --profile prod
-          -f docker-compose.yaml build
+      - name: Select GPU compose overlay
+        id: gpu_compose
+        run: |
+          if [ "${BOOM_GPU__ENABLED}" = "true" ]; then
+            echo "Adding docker-compose.cuda.yaml overlay (BOOM_GPU__ENABLED=true)"
+            echo "args=-f docker-compose.cuda.yaml" >> "$GITHUB_OUTPUT"
+          else
+            echo "args=" >> "$GITHUB_OUTPUT"
+          fi
       - run: >
           docker compose --profile prod
           -f docker-compose.yaml
-          -f docker-compose.cutouts-mongo.yaml up -d
+          ${{ steps.gpu_compose.outputs.args }}
+          build
+      - run: >
+          docker compose --profile prod
+          -f docker-compose.yaml
+          -f docker-compose.cutouts-mongo.yaml
+          ${{ steps.gpu_compose.outputs.args }} up -d
       # Services whose only "source code" is a bind-mounted file read once at
       # startup. Editing that file doesn't change the service definition, so the
       # `up -d` above leaves the container running the version it started with
-      # and the change silently never takes effect — recreate them explicitly.
+      # and the change silently never takes effect; recreate them explicitly.
       #
       # - grafana: dashboards survive (the file provider re-reads
       #   config/grafana/dashboards every 30s), but alerting provisioning is read
@@ -195,4 +227,5 @@ jobs:
           docker compose --profile prod
           -f docker-compose.yaml
           -f docker-compose.cutouts-mongo.yaml
+          ${{ steps.gpu_compose.outputs.args }}
           up -d --force-recreate --no-deps grafana docker-metadata-exporter

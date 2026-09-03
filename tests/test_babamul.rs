@@ -9,7 +9,7 @@ use boom::{
             ForcedPhotometry,
         },
         EnrichmentWorker, LsstAlertForEnrichment, LsstEnrichmentWorker, LsstPhotometry,
-        ZtfAlertProperties, ZtfForcedPhotometry, ZtfPhotometry,
+        ZtfAlertProperties, ZtfForcedPhotometry, ZtfPhotometry, ZtfSsoAssociation,
     },
     utils::{
         cutouts::AlertCutout,
@@ -52,7 +52,7 @@ fn create_lspsc_cross_matches(
         "dec": 30.002,
         "distance_arcsec": distance,
         "score": score,
-        "magwhite": 18.3
+        "mag_white": 18.3
     })];
 
     // Add additional matches unless single_match is true
@@ -64,7 +64,7 @@ fn create_lspsc_cross_matches(
                 "dec": 30.05,
                 "distance_arcsec": 1.5,  // Beyond stellar threshold
                 "score": 0.75,           // Above hosted threshold
-                "magwhite": 19.1
+                "mag_white": 19.1
             }),
             json!({
                 "_id": 1003,
@@ -72,7 +72,7 @@ fn create_lspsc_cross_matches(
                 "dec": 30.10,
                 "distance_arcsec": 5.0,  // Far match
                 "score": 0.45,           // Below hosted threshold
-                "magwhite": 20.2
+                "mag_white": 20.2
             }),
         ]);
     }
@@ -182,6 +182,14 @@ fn create_mock_enriched_ztf_alert(candid: i64, object_id: &str, is_rock: bool) -
             stationary: false,
             photstats: PerBandProperties::default(),
             multisurvey_photstats: Some(PerBandProperties::default()),
+            // Built through the constructor rather than as a literal, so adding a
+            // field to the association does not break this fixture.
+            sso: Some(ZtfSsoAssociation::from_ipac(
+                is_rock.then(|| "9816".to_string()),
+                is_rock.then_some(1.0),
+                is_rock.then_some(18.1),
+            )),
+            activity: None,
         },
         survey_matches: BabamulSurveyMatches::default(),
     }

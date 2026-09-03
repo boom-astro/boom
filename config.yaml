@@ -7,60 +7,6 @@ database:
   username: mongoadmin
   password: "" # Set via BOOM_DATABASE__PASSWORD environment variable
   srv: false
-api:
-  domain: "localhost" # Set via BOOM_API__DOMAIN environment variable
-  port: 4000 # Set via BOOM_API__PORT environment variable
-  auth:
-    secret_key: "" # Set via BOOM_API__AUTH__SECRET_KEY environment variable
-    token_expiration: 604800 # JWT token expiration in seconds (7 days) -- must be > 0
-    admin_username: admin
-    admin_password: "" # Set via BOOM_API__AUTH__ADMIN_PASSWORD environment variable
-    admin_email: admin@example.com
-babamul:
-  enabled: false # Set via BOOM_BABAMUL__ENABLED environment variable
-  webapp_url: # Set via BOOM_BABAMUL__WEBAPP_URL environment variable
-  retention_days: 3
-posthog:
-  # Server-side product analytics for the Babamul API and Kafka stream.
-  # Leave project_api_key empty to disable analytics entirely.
-  project_api_key: "" # Set via BOOM_POSTHOG__PROJECT_API_KEY environment variable
-  host: "https://us.i.posthog.com" # Set via BOOM_POSTHOG__HOST environment variable
-  flush_interval_seconds: 10
-  queue_capacity: 10000
-  # How often Babamul Kafka consumer groups are sampled to attribute stream
-  # consumption to users. Also drives the Grafana consumption metrics.
-  consumption_interval_seconds: 300
-gpu:
-  enabled: false # Set to true to load ONNX models on GPU (CUDA) instead of CPU.
-  # Models are loaded once at startup and shared across all enrichment workers.
-  # When false, models are loaded on CPU (BOOM_GPU__ENABLED env var is still respected).
-  device_ids: [0] # CUDA device(s) to use. E.g. [0,1,2,3,4,5,6,7] for 8 GPUs.
-  # ONNX models are loaded on the first device. Additional devices are available
-  # for the GPU pool (future lightcurve fitting).
-  # Overwrite with BOOM_GPU__DEVICE_IDS environment variable (comma-separated list).
-redis:
-  host: localhost
-  port: 6379
-kafka:
-  consumer:
-    ztf:
-      server: "localhost:9092"
-      group_id: "" # Set via BOOM_KAFKA__CONSUMER__ZTF__GROUP_ID environment variable
-    lsst:
-      server: "rubin-alert-stream-bootstrap.slac.stanford.edu:9094"
-      schema_registry: "https://rubin-alert-schemas.slac.stanford.edu/schema-registry"
-      schema_github_fallback_url: "https://github.com/lsst/alert_packet/tree/main/python/lsst/alert/packet/schema"
-      group_id: "" # Set via BOOM_KAFKA__CONSUMER__LSST__GROUP_ID environment variable
-      username: "" # Set via BOOM_KAFKA__CONSUMER__LSST__USERNAME environment variable
-      password: "" # Set via BOOM_KAFKA__CONSUMER__LSST__PASSWORD environment variable
-    decam:
-      server: "localhost:9092"
-      group_id: "" # Set via BOOM_KAFKA__CONSUMER__DECAM__GROUP_ID environment variable
-    winter:
-      server: "localhost:9092"
-      group_id: "" # Set via BOOM_KAFKA__CONSUMER__WINTER__GROUP_ID environment variable
-  producer:
-    server: "localhost:9092" # Only one global producer for now (filter worker output)
 # cutouts_storage configures where alert cutout images are stored.
 #
 # type: "mongo" (default) stores cutouts in MongoDB.
@@ -103,6 +49,89 @@ cutouts_storage:
     port: 6379             # or set via BOOM_CUTOUTS_STORAGE__CACHE__PORT
     ttl_seconds: 30        # or set via BOOM_CUTOUTS_STORAGE__CACHE__TTL_SECONDS
     max_memory: "1024mb"   # or set via BOOM_CUTOUTS_STORAGE__CACHE__MAX_MEMORY
+api:
+  domain: "localhost" # Set via BOOM_API__DOMAIN environment variable
+  port: 4000 # Set via BOOM_API__PORT environment variable
+  auth:
+    secret_key: "" # Set via BOOM_API__AUTH__SECRET_KEY environment variable
+    token_expiration: 604800 # JWT token expiration in seconds (7 days) -- must be > 0
+    admin_username: admin
+    admin_password: "" # Set via BOOM_API__AUTH__ADMIN_PASSWORD environment variable
+    admin_email: admin@example.com
+babamul:
+  enabled: false # Set via BOOM_BABAMUL__ENABLED environment variable
+  webapp_url: # Set via BOOM_BABAMUL__WEBAPP_URL environment variable
+  retention_days: 3
+  # Whether new accounts may be created. Set to false for a pre-release
+  # deployment that is open only to the accounts it already has; sign-in for
+  # those accounts, including linking a new social provider to one, still
+  # works. Pair it with VITE_PRERELEASE_MODE in the web app, which decides what
+  # the UI offers, while this decides what the API allows.
+  registration_enabled: true # Set via BOOM_BABAMUL__REGISTRATION_ENABLED
+  oauth:
+    # Social sign-in with Google / GitHub / ORCID.
+    #
+    # Client IDs and secrets are ENVIRONMENT-ONLY and intentionally absent from
+    # this file, which is committed. Set, per provider you want to turn on:
+    #   BOOM_BABAMUL__OAUTH__GOOGLE__CLIENT_ID
+    #   BOOM_BABAMUL__OAUTH__GOOGLE__CLIENT_SECRET
+    # (likewise GITHUB and ORCID). A provider is enabled exactly when both are
+    # set — there is no separate on/off flag to get out of step with them.
+    #
+    # Public base URL of this API. The redirect URI registered with each
+    # provider must be {redirect_base_url}/babamul/oauth/{provider}/callback.
+    redirect_base_url: # Set via BOOM_BABAMUL__OAUTH__REDIRECT_BASE_URL
+    orcid_sandbox: false # Use sandbox.orcid.org instead of orcid.org
+    # Seconds an in-flight authorization request stays valid, i.e. how long the
+    # user has between pressing the button and finishing at the provider.
+    state_ttl_seconds: 600
+posthog:
+  # Server-side product analytics for the Babamul API and Kafka stream.
+  # Leave project_api_key empty to disable analytics entirely.
+  project_api_key: "" # Set via BOOM_POSTHOG__PROJECT_API_KEY environment variable
+  host: "https://us.i.posthog.com" # Set via BOOM_POSTHOG__HOST environment variable
+  flush_interval_seconds: 10
+  queue_capacity: 10000
+  # How often Babamul Kafka consumer groups are sampled to attribute stream
+  # consumption to users. Also drives the Grafana consumption metrics.
+  consumption_interval_seconds: 300
+gpu:
+  enabled: false # Set to true to load ONNX models on GPU (CUDA) instead of CPU.
+  # Models are loaded once at startup and shared across all enrichment workers.
+  # When false, models are loaded on CPU (BOOM_GPU__ENABLED env var is still respected).
+  device_ids: [0] # CUDA device(s) to use. E.g. [0,1,2,3,4,5,6,7] for 8 GPUs.
+  # ONNX models are loaded on the first device. Additional devices are available
+  # for the GPU pool (future lightcurve fitting).
+  # Overwrite with BOOM_GPU__DEVICE_IDS environment variable (comma-separated list).
+redis:
+  host: localhost
+  port: 6379
+kafka:
+  consumer:
+    ztf:
+      server: "localhost:9092"
+      group_id: "" # Set via BOOM_KAFKA__CONSUMER__ZTF__GROUP_ID environment variable
+      # Days before the current one to stay subscribed to. 1 keeps yesterday
+      # alongside today so a night spanning UTC midnight isn't cut off. Raise
+      # temporarily (via BOOM_KAFKA__CONSUMER__ZTF__SUBSCRIPTION_WINDOW_DAYS) to
+      # catch up after an upstream outage, then set it back; upstream retention
+      # (~7 days for ZTF) bounds what a lookback can recover.
+      subscription_window_days: 1
+    lsst:
+      server: "rubin-alert-stream-bootstrap.slac.stanford.edu:9094"
+      schema_registry: "https://rubin-alert-schemas.slac.stanford.edu/schema-registry"
+      schema_github_fallback_url: "https://github.com/lsst/alert_packet/tree/main/python/lsst/alert/packet/schema"
+      group_id: "" # Set via BOOM_KAFKA__CONSUMER__LSST__GROUP_ID environment variable
+      username: "" # Set via BOOM_KAFKA__CONSUMER__LSST__USERNAME environment variable
+      password: "" # Set via BOOM_KAFKA__CONSUMER__LSST__PASSWORD environment variable
+    decam:
+      server: "localhost:9092"
+      group_id: "" # Set via BOOM_KAFKA__CONSUMER__DECAM__GROUP_ID environment variable
+    winter:
+      server: "localhost:9092"
+      group_id: "" # Set via BOOM_KAFKA__CONSUMER__WINTER__GROUP_ID environment variable
+  producer:
+    server: "localhost:9092" # Only one global producer for now (filter worker output)
 workers:
   ztf:
     command_interval: 500
@@ -110,6 +139,11 @@ workers:
       n_workers: 3
     enrichment:
       n_workers: 3
+      # Alerts per enrichment batch: the queue RPOP cap AND the fixed ONNX
+      # inference shape. Partial batches are zero-padded so ORT sees one shape
+      # and the GPU memory arena stays stable. 750 is stable for both VRAM => 12GB.
+      # Caltech and MSI can handle 1000.
+      batch_size: 1000
     filter:
       n_workers: 3
       refresh_interval_minutes: 15
@@ -152,36 +186,29 @@ workers:
       reference_night: "2026-07-15"
 crossmatch:
   ztf:
-    - catalog: PS1_DR1
-      radius: 2.0 # 2 arcseconds
-      use_distance: false
-      projection:
-        _id: 1
-        gMeanPSFMag: 1
-        gMeanPSFMagErr: 1
-        rMeanPSFMag: 1
-        rMeanPSFMagErr: 1
-        iMeanPSFMag: 1
-        iMeanPSFMagErr: 1
-        zMeanPSFMag: 1
-        zMeanPSFMagErr: 1
-        yMeanPSFMag: 1
-        yMeanPSFMagErr: 1
-        ra: 1
-        dec: 1
     - catalog: Gaia_DR3
       radius: 2.0 # 2 arcseconds
       use_distance: false
       projection:
         _id: 1
+        ra: 1
+        dec: 1
         parallax: 1
         parallax_error: 1
+        pm: 1
+        pmra: 1
+        pmra_error: 1
+        pmdec: 1
+        pmdec_error: 1
         phot_g_mean_mag: 1
         phot_bp_mean_mag: 1
         phot_rp_mean_mag: 1
-        ra: 1
-        dec: 1
-    - catalog: milliquas_v6
+        phot_g_n_obs: 1
+        phot_bp_n_obs: 1
+        phot_rp_n_obs: 1
+        ruwe: 1
+        phot_bp_rp_excess_factor: 1
+    - catalog: milliquas_v8
       radius: 2.0 # 2 arcseconds
       use_distance: false
       projection:
@@ -255,7 +282,7 @@ crossmatch:
         ra: 1
         dec: 1
         score: 1
-        magwhite: 1
+        mag_white: 1
       max_results: 3 # 3 nearest neighbors
     - catalog: NED
       radius: 300.0 # 300 arcseconds
@@ -314,36 +341,29 @@ crossmatch:
         photo_z_type: 1
   decam: []
   winter:
-    - catalog: PS1_DR1
-      radius: 2.0 # 2 arcseconds
-      use_distance: false
-      projection:
-        _id: 1
-        gMeanPSFMag: 1
-        gMeanPSFMagErr: 1
-        rMeanPSFMag: 1
-        rMeanPSFMagErr: 1
-        iMeanPSFMag: 1
-        iMeanPSFMagErr: 1
-        zMeanPSFMag: 1
-        zMeanPSFMagErr: 1
-        yMeanPSFMag: 1
-        yMeanPSFMagErr: 1
-        ra: 1
-        dec: 1
     - catalog: Gaia_DR3
       radius: 2.0 # 2 arcseconds
       use_distance: false
       projection:
         _id: 1
+        ra: 1
+        dec: 1
         parallax: 1
         parallax_error: 1
+        pm: 1
+        pmra: 1
+        pmra_error: 1
+        pmdec: 1
+        pmdec_error: 1
         phot_g_mean_mag: 1
         phot_bp_mean_mag: 1
         phot_rp_mean_mag: 1
-        ra: 1
-        dec: 1
-    - catalog: milliquas_v6
+        phot_g_n_obs: 1
+        phot_bp_n_obs: 1
+        phot_rp_n_obs: 1
+        ruwe: 1
+        phot_bp_rp_excess_factor: 1
+    - catalog: milliquas_v8
       radius: 2.0 # 2 arcseconds
       use_distance: false
       projection:

@@ -2,7 +2,7 @@ import { type ReactNode } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import type { AvroSchema } from "@/lib/api";
-import { SURVEYS, ZTF, type Survey } from "@/lib/utils";
+import { SURVEYS, ZTF, type Survey } from "@/lib/constants";
 import { SchemaViewer } from "@/components/SchemaViewer";
 
 const getFieldDescriptions = (survey: Survey): Record<string, ReactNode> => ({

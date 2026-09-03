@@ -63,6 +63,7 @@ RUN --mount=type=cache,target=/app/target,sharing=locked \
        target/release/copy_cutouts \
        target/release/stream_kowalski_alerts \
        target/release/enrich_reprocess \
+       target/release/mpcorb_ingest \
        /app/bin/
 
 FROM builder AS dev
@@ -96,6 +97,7 @@ COPY --from=builder /app/bin/api /app/boom-api
 COPY --from=builder /app/bin/migrate_fp_flux /app/migrate_fp_flux
 COPY --from=builder /app/bin/migrate_snr /app/migrate_snr
 COPY --from=builder /app/bin/reprocess_crossmatch /app/reprocess_crossmatch
+COPY --from=builder /app/bin/mpcorb_ingest /app/mpcorb_ingest
 COPY --from=builder /opt/ort /opt/ort
 # Temporary
 COPY --from=builder /app/bin/copy_cutouts /app/copy_cutouts

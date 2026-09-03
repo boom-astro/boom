@@ -79,14 +79,28 @@ pub fn load_raw_config(filepath: &str) -> Result<Config, BoomConfigError> {
 
     let conf = Config::builder()
         .add_source(File::from(path))
-        .add_source(
-            config::Environment::with_prefix("boom")
-                .prefix_separator("_")
-                .separator("__"),
-        )
+        .add_source(env_source())
         .build()?;
 
     Ok(conf)
+}
+
+/// The `BOOM_*` environment overlay applied on top of `config.yaml`.
+///
+/// Split out from [`load_raw_config`] so tests can exercise the exact source
+/// production uses while feeding it a fake environment via
+/// [`config::Environment::source`], rather than mutating the process's own.
+fn env_source() -> config::Environment {
+    config::Environment::with_prefix("boom")
+        .prefix_separator("_")
+        .separator("__")
+        // An empty variable means "not set", not "set to empty". Compose
+        // renders every `${VAR:-}` it lists as `VAR=` whether or not the
+        // deployment supplied one, so without this a variable nobody set
+        // still lands here and blanks out whatever the YAML said. That is
+        // silent: the file is right, the container's environment is right
+        // by its own lights, and the setting is simply gone.
+        .ignore_empty(true)
 }
 
 #[instrument(skip_all, err)]
@@ -458,6 +472,10 @@ fn default_kafka_server() -> String {
     "localhost:9092".to_string()
 }
 
+fn default_subscription_window_days() -> u64 {
+    1
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct KafkaConsumerConfig {
     #[serde(default = "default_kafka_server")]
@@ -467,6 +485,13 @@ pub struct KafkaConsumerConfig {
     pub schema_github_fallback_url: Option<String>, // URL of the GitHub fallback for schemas (if any)
     pub username: Option<String>,                   // Username for authentication (if any)
     pub password: Option<String>,                   // Password for authentication (if any)
+    /// Days before the current one to stay subscribed to, for surveys whose
+    /// topics are per-night. 1 (the default) keeps yesterday alongside today so
+    /// a night spanning UTC midnight isn't cut off. Raise it temporarily to
+    /// catch up after an upstream outage — bounded by upstream retention, which
+    /// is about 7 days for ZTF. Ignored by surveys with a single static topic.
+    #[serde(default = "default_subscription_window_days")]
+    pub subscription_window_days: u64,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -569,6 +594,22 @@ pub struct BabamulConfig {
     /// Minimum number of minutes that must elapse between successive password resets (default: 15)
     #[serde(default = "default_password_reset_cooldown_minutes")]
     pub password_reset_cooldown_minutes: u32,
+    /// Whether this deployment will create new accounts (default: true).
+    ///
+    /// Set to `false` for a pre-release deployment that is open only to
+    /// accounts that already exist. Every path that would mint one honors it —
+    /// password sign-up and social sign-in alike — so it cannot be sidestepped
+    /// by calling the API directly or by pressing a sign-in button the web app
+    /// still shows. Signing in with an account that already exists, including
+    /// linking a new provider to it, is unaffected.
+    ///
+    /// The web app has its own build-time `VITE_PRERELEASE_MODE`, which decides
+    /// what the UI *offers*; this decides what the API *allows*. Set both.
+    #[serde(default = "default_babamul_registration_enabled")]
+    pub registration_enabled: bool,
+    /// Social sign-in (Google / GitHub / ORCID) configuration
+    #[serde(default)]
+    pub oauth: OAuthConfig,
 }
 
 impl Default for BabamulConfig {
@@ -578,8 +619,74 @@ impl Default for BabamulConfig {
             webapp_url: None,
             retention_days: default_babamul_retention_days(),
             password_reset_cooldown_minutes: default_password_reset_cooldown_minutes(),
+            registration_enabled: default_babamul_registration_enabled(),
+            oauth: OAuthConfig::default(),
         }
     }
+}
+
+/// Credentials for a single OAuth 2.0 / OIDC identity provider.
+///
+/// **Set these from the environment, not `config.yaml`** — the YAML files are
+/// committed, and a `client_secret:` key sitting in one is an invitation to
+/// paste a live secret into the repo. The env vars are
+/// `BOOM_BABAMUL__OAUTH__{GOOGLE,GITHUB,ORCID}__CLIENT_{ID,SECRET}`.
+///
+/// There is deliberately no `enabled` flag: a provider is on exactly when both
+/// halves of its credential are present. That keeps the on/off switch in the
+/// same place as the secret, so a provider can never be switched on without
+/// one — it fails closed instead of sending users to a consent screen that
+/// will reject them. Same shape as [`PostHogConfig`], where an empty
+/// `project_api_key` disables analytics.
+#[derive(Deserialize, Debug, Clone, Default)]
+pub struct OAuthProviderConfig {
+    #[serde(default)]
+    pub client_id: String,
+    #[serde(default)]
+    pub client_secret: String,
+}
+
+impl OAuthProviderConfig {
+    pub fn is_configured(&self) -> bool {
+        !self.client_id.is_empty() && !self.client_secret.is_empty()
+    }
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct OAuthConfig {
+    #[serde(default)]
+    pub google: OAuthProviderConfig,
+    #[serde(default)]
+    pub github: OAuthProviderConfig,
+    #[serde(default)]
+    pub orcid: OAuthProviderConfig,
+    /// Public base URL the API is reachable at, e.g. `https://api.babamul.org`.
+    /// The redirect URI registered with each provider must be
+    /// `{redirect_base_url}/babamul/oauth/{provider}/callback`.
+    pub redirect_base_url: Option<String>,
+    /// Point ORCID at its sandbox (`sandbox.orcid.org`) instead of production.
+    #[serde(default)]
+    pub orcid_sandbox: bool,
+    /// Seconds an in-flight authorization request stays valid (default: 600)
+    #[serde(default = "default_oauth_state_ttl_seconds")]
+    pub state_ttl_seconds: i64,
+}
+
+impl Default for OAuthConfig {
+    fn default() -> Self {
+        OAuthConfig {
+            google: OAuthProviderConfig::default(),
+            github: OAuthProviderConfig::default(),
+            orcid: OAuthProviderConfig::default(),
+            redirect_base_url: None,
+            orcid_sandbox: false,
+            state_ttl_seconds: default_oauth_state_ttl_seconds(),
+        }
+    }
+}
+
+fn default_oauth_state_ttl_seconds() -> i64 {
+    600
 }
 
 fn default_babamul_retention_days() -> u32 {
@@ -588,6 +695,10 @@ fn default_babamul_retention_days() -> u32 {
 
 fn default_password_reset_cooldown_minutes() -> u32 {
     15
+}
+
+fn default_babamul_registration_enabled() -> bool {
+    true
 }
 
 /// Server-side PostHog product analytics.
@@ -656,6 +767,24 @@ fn default_posthog_consumption_interval_seconds() -> u64 {
 #[derive(Deserialize, Debug, Clone)]
 pub struct WorkerConfig {
     pub n_workers: usize,
+}
+
+fn default_enrichment_batch_size() -> usize {
+    750
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct EnrichmentWorkerConfig {
+    pub n_workers: usize,
+    /// Alerts processed per enrichment batch. Serves two roles at once: the
+    /// queue RPOP cap (max alerts pulled per worker iteration) and the fixed
+    /// ONNX batch dimension. Every GPU inference runs at exactly this many
+    /// rows — partial batches are zero-padded — so ORT builds a single memory
+    /// plan and the BFC arena stays stable instead of growing per distinct
+    /// input shape. 750 is the proven stable shape on a 16 GB card
+    /// (~10.3 GB footprint); 1000 OOMs (~15.7 GB).
+    #[serde(default = "default_enrichment_batch_size")]
+    pub batch_size: usize,
 }
 
 fn default_filter_refresh_interval_minutes() -> u64 {
@@ -750,7 +879,7 @@ pub struct SurveyWorkerConfig {
     #[serde(deserialize_with = "deserialize_command_interval")]
     pub command_interval: usize, // in milliseconds
     pub alert: WorkerConfig,
-    pub enrichment: WorkerConfig,
+    pub enrichment: EnrichmentWorkerConfig,
     pub filter: FilterWorkerConfig,
 }
 
@@ -902,7 +1031,7 @@ impl AppConfig {
         }
 
         // Validate token expiration
-        if self.api.auth.token_expiration <= 0 {
+        if self.api.auth.token_expiration == 0 {
             return Err("Token expiration must be greater than 0 for security reasons".to_string());
         }
 
@@ -982,6 +1111,110 @@ pub async fn get_test_cutout_storage(survey: &Survey) -> CutoutStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `config.yaml` as a deployment with both OAuth URLs set would have it.
+    const URLS_CONFIGURED_YAML: &str = "babamul:\n  webapp_url: https://example.org\n  oauth:\n    redirect_base_url: https://example.org/api\n";
+
+    /// Build a config from [`URLS_CONFIGURED_YAML`] plus a *fake* environment.
+    ///
+    /// `Environment::source` substitutes the map for the real environment, so
+    /// this exercises the production overlay without `set_var` — which would
+    /// race the other tests in this binary reading the environment through
+    /// `from_test_config`, and would clobber any `BOOM_*` values a developer's
+    /// `.env` had already loaded into the process.
+    fn config_with_env(vars: &[(&str, &str)]) -> Config {
+        let env: std::collections::HashMap<String, String> = vars
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect();
+        Config::builder()
+            .add_source(File::from_str(
+                URLS_CONFIGURED_YAML,
+                config::FileFormat::Yaml,
+            ))
+            .add_source(env_source().source(Some(env)))
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn an_empty_env_var_does_not_blank_out_a_configured_value() {
+        // The shape that hid social sign-in in production: docker-compose lists
+        // BOOM_BABAMUL__OAUTH__REDIRECT_BASE_URL with a `:-` default, so the
+        // container got `…REDIRECT_BASE_URL=` even though nothing set it, and
+        // that empty string beat the value in config/prod/<deployment>/config.yaml.
+        // The deployment then looked unconfigured and rendered no buttons.
+        let conf = config_with_env(&[
+            ("BOOM_BABAMUL__WEBAPP_URL", ""),
+            ("BOOM_BABAMUL__OAUTH__REDIRECT_BASE_URL", ""),
+        ]);
+
+        assert_eq!(
+            conf.get::<String>("babamul.webapp_url").unwrap(),
+            "https://example.org"
+        );
+        assert_eq!(
+            conf.get::<String>("babamul.oauth.redirect_base_url")
+                .unwrap(),
+            "https://example.org/api"
+        );
+    }
+
+    #[test]
+    fn a_non_empty_env_var_still_overrides_the_file() {
+        // The other half of the pair: ignoring *empty* variables must not turn
+        // into ignoring the environment, or every BOOM_* override in the deploy
+        // workflow would quietly stop working and the test above would pass for
+        // the wrong reason.
+        let conf = config_with_env(&[("BOOM_BABAMUL__WEBAPP_URL", "https://override.example")]);
+
+        assert_eq!(
+            conf.get::<String>("babamul.webapp_url").unwrap(),
+            "https://override.example"
+        );
+    }
+
+    #[test]
+    fn oauth_provider_needs_a_client_id_and_secret_to_count_as_configured() {
+        let mut provider = OAuthProviderConfig {
+            client_id: "id".to_string(),
+            client_secret: "secret".to_string(),
+        };
+        assert!(provider.is_configured());
+
+        // A half-filled provider must fail closed rather than send users to a
+        // consent screen that will reject them. Credentials are the only
+        // switch, so there is no way to be "enabled" without them.
+        provider.client_secret = String::new();
+        assert!(!provider.is_configured());
+        provider.client_secret = "secret".to_string();
+        provider.client_id = String::new();
+        assert!(!provider.is_configured());
+    }
+
+    #[test]
+    fn oauth_config_defaults_are_off_with_a_usable_state_ttl() {
+        // Deserializing from `{}` exercises the serde defaults, which are
+        // separate from the Default impl and easy to leave out of step.
+        let config: OAuthConfig = serde_json::from_str("{}").unwrap();
+        assert!(!config.google.is_configured());
+        assert!(!config.github.is_configured());
+        assert!(!config.orcid.is_configured());
+        assert!(config.redirect_base_url.is_none());
+        assert_eq!(config.state_ttl_seconds, 600);
+        assert_eq!(
+            config.state_ttl_seconds,
+            OAuthConfig::default().state_ttl_seconds
+        );
+    }
+
+    #[test]
+    fn babamul_config_without_an_oauth_block_still_deserializes() {
+        // Existing deployments' config.yaml files predate the oauth section.
+        let config: BabamulConfig =
+            serde_json::from_str(r#"{"enabled": true, "webapp_url": null}"#).unwrap();
+        assert!(!config.oauth.google.is_configured());
+    }
 
     #[test]
     fn test_gpu_config_defaults() {
