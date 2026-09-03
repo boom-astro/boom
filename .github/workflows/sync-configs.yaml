@@ -3,6 +3,14 @@ name: Sync configs
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
+  # A PR is only ever checked against the base it was last pushed against, so a
+  # config source that lands after that check leaves main's generated configs
+  # stale with nothing to notice — worse for fork PRs, which can't be fixed up
+  # in place and are only re-checked when the contributor pushes again. Running
+  # on main closes that window: whatever the merge actually produced is
+  # regenerated against the tree it landed in.
+  push:
+    branches: [main]
   workflow_dispatch:
 
 concurrency:
@@ -36,8 +44,10 @@ jobs:
       - name: Create and check prod configs
         run: make check-configs
 
+      # Pushes made with GITHUB_TOKEN don't trigger workflows, so committing
+      # back to main cannot retrigger this job.
       - name: Commit generated configs
-        if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
         run: |
           if git diff --quiet -- config/prod; then
             echo "Generated configs already up to date"
