@@ -283,6 +283,10 @@ pub struct CatalogXmatchConfig {
     pub distance_max: Option<f64>,           // maximum distance in kpc
     pub distance_max_near: Option<f64>,      // maximum distance in arcsec for nearby objects
     pub max_results: Option<usize>,          // maximum number of results to return
+    /// Field naming a row's object type, e.g. DESI's `spectype`.
+    pub type_key: Option<String>,
+    /// Values of `type_key` that mean the row is a star rather than a galaxy.
+    pub stellar_types: Vec<String>,
 }
 
 impl CatalogXmatchConfig {
@@ -295,6 +299,8 @@ impl CatalogXmatchConfig {
         distance_max: Option<f64>,
         distance_max_near: Option<f64>,
         max_results: Option<usize>,
+        type_key: Option<String>,
+        stellar_types: Vec<String>,
     ) -> CatalogXmatchConfig {
         CatalogXmatchConfig {
             catalog: catalog.to_string(),
@@ -305,6 +311,8 @@ impl CatalogXmatchConfig {
             distance_max,
             distance_max_near,
             max_results,
+            type_key,
+            stellar_types,
         }
     }
 
@@ -389,6 +397,21 @@ impl CatalogXmatchConfig {
             panic!("cannot use max_results with distance filtering");
         }
 
+        let type_key = match hashmap_xmatch.get("type_key") {
+            Some(type_key) => Some(type_key.clone().into_string()?),
+            None => None,
+        };
+
+        let stellar_types = match hashmap_xmatch.get("stellar_types") {
+            Some(values) => values
+                .clone()
+                .into_array()?
+                .into_iter()
+                .map(|value| value.into_string())
+                .collect::<Result<Vec<String>, _>>()?,
+            None => Vec::new(),
+        };
+
         Ok(CatalogXmatchConfig::new(
             &catalog,
             radius,
@@ -398,6 +421,8 @@ impl CatalogXmatchConfig {
             distance_max,
             distance_max_near,
             max_results,
+            type_key,
+            stellar_types,
         ))
     }
 }
