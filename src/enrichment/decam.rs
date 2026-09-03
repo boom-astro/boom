@@ -111,6 +111,7 @@ pub struct DecamAlertForEnrichment {
     #[serde(rename = "objectId")]
     pub object_id: String,
     pub candidate: DecamCandidate,
+    // Signed SNR is only needed here: detection history counts detections.
     pub prv_candidates: Vec<DecamPhotometry>,
     pub fp_hists: Vec<PhotometryMag>,
 }
