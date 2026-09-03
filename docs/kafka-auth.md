@@ -57,15 +57,14 @@ Admin user is a super user; ACLs not required.
 
 ### Rust (rdkafka)
 
-    let mut config = rdkafka::ClientConfig::new();
-    config
-        .set("bootstrap.servers", "broker.example.org:9093")
-        .set("security.protocol", "SASL_PLAINTEXT")
-        .set("sasl.mechanism", "SCRAM-SHA-512")
-        .set("sasl.username", "readonly")
-        .set("sasl.password", std::env::var("KAFKA_READONLY_PASSWORD").unwrap());
-}
 ```rust,ignore
+let mut config = rdkafka::ClientConfig::new();
+config
+  .set("bootstrap.servers", "broker.example.org:9093")
+  .set("security.protocol", "SASL_PLAINTEXT")
+  .set("sasl.mechanism", "SCRAM-SHA-512")
+  .set("sasl.username", "readonly")
+  .set("sasl.password", std::env::var("KAFKA_READONLY_PASSWORD").unwrap());
 ```
 
 ### Python (confluent-kafka)
