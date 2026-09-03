@@ -1124,6 +1124,252 @@ rather than an oversight in this design, and it deserves its own issue. At
 minimum, `ensure_enrichment` should surface the affected filters as a warning
 the way `ensure_catalog` surfaces affected crossmatches.
 
+## Worked example: host-galaxy association (#566)
+
+[#566](https://github.com/boom-astro/boom/pull/566) is a good stress test for
+everything above, because it is the first feature in a while that moves *all
+three* links of the staleness chain at once: it needs catalog columns BOOM does
+not currently store, computes a new derived field from them at ingest, and
+surfaces a new property on enriched alerts. Walking through what a dev and an
+admin actually do after it merges is a better check on this design than more
+abstraction would be — and it turns up five things the design as written does
+not handle.
+
+### What the PR introduces
+
+- `src/utils/host/` — DLR-based association. A pure function of a transient's
+  position, its cross-match documents, and a config struct.
+- A call in each survey's alert worker, storing the result at
+  `aux.host_galaxy`.
+- A `host_galaxy:` block in `config.yaml`, `enabled: false`, carrying the
+  algorithm's tuning constants (`max_dlr`, the REX rejection thresholds,
+  `isophote_mag`, …).
+- A new `NED_LVS` cross-match entry, reading the *existing* `NED` collection
+  under a new key with an angular-size-driven radius and a projection that
+  includes `Diam`, `Diam_ba`, `Diam_pa`, `Diam_survey`, `DistMpc`.
+- A dependency on an `LSDR10` collection carrying Tractor shape columns
+  (`shape_r`, `shape_e1`, `shape_e2`, `objtype`, `flux_r`, and optionally
+  `sersic`, `flux_ivar_r`, `fracflux_r`).
+- `initialize_angular_size_indexes` at scheduler startup, because an
+  angular-size match without that index is unusably slow.
+- `hosted: Option<bool>` on `ZtfAlertProperties`, three-state on purpose.
+
+**Merging it changes nothing**, because `enabled` defaults to false. That is the
+right default and worth stating as a convention: a feature that depends on data
+the deployment may not have **lands dark**, and switching it on is a config
+change with a reviewer and an actor, not a merge.
+
+What follows is the sequence from there.
+
+### Stage 1 — the catalogs (dev writes a PR; admin runs `ensure_catalog`)
+
+This stage settles the how-do-we-add-a-catalog question: **no, a new catalog
+does not mean a new Rust ingest module.** The split is the one described in
+[Catalogs](#catalogs-declared-definitions-and-convergence) — how to build a
+catalog is a declaration in this repo, which catalogs a deployment holds is its
+`catalogs:` inventory, and Rust enters only through a named transform hook when
+the declarative fields genuinely cannot express the source. #566 needs both
+halves of that, in two different modes.
+
+**NED needs more columns, not a new catalog.** `Diam`, `Diam_ba`, `Diam_pa` and
+`Diam_survey` come from the NED-LVS source table; if the current ingest dropped
+them, they are not in the collection and no amount of reprocessing conjures them
+back. So this is a definition change:
+
+```yaml
+# catalogs/ned.yaml
+version: 5                       # was 4
+fields:
+  # …
+  - { from: Diam,        to: Diam,        type: f64, null_if: NaN }
+  - { from: Diam_ba,     to: Diam_ba,     type: f64, null_if: NaN }
+  - { from: Diam_pa,     to: Diam_pa,     type: f64, null_if: NaN }
+  - { from: Diam_survey, to: Diam_survey, type: string }
+convergence_from:
+  4: reingest_from_source        # NOT recompute_in_place
+```
+
+`reingest_from_source`, not `recompute_in_place`, and that distinction is the
+whole reason the strategy is declared rather than inferred. A diff of the two
+definitions shows four added fields and says nothing about whether they are
+derivable; the person adding them knows they are not, and says so in the same
+PR that adds them.
+
+**`LSDR10` may not exist at all.** The PR's own config comment — "collection
+name as ingested; UMN uses LSDR10" — is a per-deployment fact, which is exactly
+what the inventory is for. A deployment that wants host association adds a
+`catalogs/ls_dr10.yaml` definition (one PR, shared by everyone) and then, in its
+own `config/prod/<deployment>/config.yaml`:
+
+```yaml
+catalogs:
+  - id: ned
+  - id: ls_dr10
+```
+
+Drift appears on the admin page. Someone opens `ensure_catalog`, runs `plan`,
+reads "absent → download, ingest, build indexes; ~N hours, ~M GB", and applies
+it. For NED the same plan reads "v4 → v5 (`reingest_from_source`): re-read
+source files on disk, upsert, sweep" — visibly a different and much cheaper
+operation than the LSDR10 one, which is the point of showing a plan at all.
+
+**Interim, before phase 7a exists**, both of those are the boom-catalogs
+`add_fits_catalog` binary run through the `Command` kind. The dev-facing
+workflow is the same either way — the ingest procedure is code in a repo, not a
+form someone fills in — and the admin-facing workflow is identical, because both
+end as an attributed run with a ledger record. Only the plumbing behind it
+changes when 7a lands.
+
+**One wrinkle: the index is not a property of the catalog alone.**
+`initialize_angular_size_indexes` derives the index it needs from
+`crossmatch.<survey>` — specifically from `angular_size_key` — not from anything
+in the catalog definition. So the required index set for `NED` is a function of
+the definition *and* of how each survey matches against it. The three-way drift
+comparison in [The deployment declares an inventory](#the-deployment-declares-an-inventory)
+is really four-way, and `ensure_catalog`'s index planning has to read the
+crossmatch config too. Not hard, but it does not fall out of the model as
+written.
+
+### Stage 2 — turn it on (config PR; effective at scheduler restart)
+
+Two edits to the deployment config: `host_galaxy.enabled: true`, and the
+`NED_LVS` and `LSDR10` entries under `crossmatch.<survey>` so the shape columns
+are actually projected into the match documents. Schedulers restart, and each
+writes a `pipeline` mutation record — which is what makes the moment host
+association started being computed a fact in the ledger rather than a memory.
+From that instant, **new** alerts get `aux.host_galaxy`; nothing already in the
+database changes.
+
+**This stage is where the design has a real hole.** #566 reads Legacy Survey
+shapes from the collection named by `host_galaxy.ls_dr10_catalog`, but the
+reference `config.yaml` ships no `LSDR10` cross-match entry at all. A deployment
+that flips `enabled: true` today gets NED-LVS-only association, produces
+plausible-looking results, and reports no error — because
+`collect_galaxies` finds no `LSDR10` key in the cross-match map and simply
+returns the NED-LVS candidates. The same failure happens one level down: a key
+missing from the projection reads as "this galaxy has no diameter", which is
+indistinguishable from the ~19% of NED-LVS rows that genuinely have none.
+
+The PR does defend against part of this — there is a test asserting that every
+key `galaxy_from_ned_lvs` reads appears in `config.yaml`'s projection. But that
+test covers the reference config, not `config/prod/*/overrides.yaml`, and no
+test can see whether the deployed `NED` collection actually *has* `Diam`, which
+is the thing stage 1 was about.
+
+The generalization is a **feature preflight**: a feature that depends on data
+declares that dependency — config keys, catalog IDs, and the projected fields it
+reads — and the dependency is checked at startup against the inventory, against
+the crossmatch config, and against a sample of the actual collections. A
+deployment enabling host association without `LSDR10` should get a startup error
+naming exactly what is missing, or an explicit `partial: true` acknowledgement
+in config, rather than quietly degraded science. This is the same check already
+proposed for `crossmatch.<survey>` ⊆ `catalogs:`, one level more specific, and
+it is what finally retires `warn_if_missing_crossmatches`.
+
+### Stage 3 — the backfill (three separate admin decisions)
+
+Nothing here happens automatically. Each step is a task submitted from the admin
+page, and each is a real decision rather than a rubber stamp, because they
+differ in cost by two orders of magnitude.
+
+| # | Task | What it does | Cost | Drift query |
+| --- | --- | --- | --- | --- |
+| 1 | `reprocess_crossmatch` | fills `cross_matches.NED_LVS` / `.LSDR10` on existing aux docs | one pass over aux, DB-bound | `{"cross_matches.NED_LVS": {"$exists": false}}` |
+| 2 | `ensure_host_association` | computes `aux.host_galaxy` from stored cross-matches | one pass over aux, CPU-only | `{"host_galaxy": {"$exists": false}}` |
+| 3 | `ensure_enrichment` | stamps `hosted` onto alert properties | billions of alerts, contends for the GPU | `{"properties.hosted": null}` |
+
+**Step 1 is exactly backfillable, and only because #566 added a key rather than
+widening one.** The PR keeps `NED_LVS` as a separate cross-match entry against
+the same `NED` collection, and justifies it on matching-semantics grounds — but
+the provenance argument is at least as strong. Had it instead widened the
+existing `NED` entry's projection in place, `cross_matches.NED` would exist both
+before and after, with the diameters present in some documents and not others,
+and there would be **no query that finds the un-widened ones** — the same
+failure as unversioned classification scores, on a different collection. Worth a
+rule: *widening a projection in place is not backfillable; adding a key is.*
+
+**Step 2 is a third kind of convergence.** It needs no source files, no network,
+and no GPU — it is a pure recompute from fields already on the document, the
+`RecomputeInPlace` shape applied to an alert collection instead of a catalog.
+That suggests two things:
+
+- `reprocess_crossmatch` should run the downstream derivation in the same pass,
+  so the common case is one scan instead of two, and so the association is
+  computed from the cross-matches that pass just wrote. This mirrors the live
+  path, where association runs immediately after the cross-match in the same
+  function.
+- `ensure_host_association` should *also* exist standalone, because retuning
+  `max_dlr` or the REX thresholds changes every stored association without
+  changing a single cross-match, and that will happen far more often than a
+  re-crossmatch. Coupling them would make a cheap config-tuning pass pay for the
+  expensive step every time.
+
+**Step 3 is the one that genuinely needs a human to say no.** `hosted` is a
+convenience boolean on the enriched alert; the underlying association is already
+readable at `aux.host_galaxy.best_host.d_dlr`, which is what the filters cut on
+anyway. So re-enriching the archive buys a queryable flag on historical alerts,
+and costs a week of contention with the live pipeline. That is a scientific and
+operational judgement, it belongs to whoever is accountable for the instrument's
+throughput, and the system's job is to present it as a suggested follow-up with
+the cost attached — not to chain it automatically after step 2. This is the
+concrete shape of "gated by an admin's decision": the gate is not ceremony, it
+is a decision with a defensible answer of "not yet."
+
+**Step 4 does not exist.** Filter results computed before host association
+existed are not re-run, and there is no `reprocess_filters` to run them —
+[the staleness chain](#the-staleness-chain) again, and #566 is a good argument
+for giving that gap its own issue rather than continuing to note it.
+
+### Stage 4 — what the ledger says afterwards
+
+```
+GET /data/state?collection=ZTF_alerts_aux
+
+2026-04-02  ingest      NED       ensure_catalog v4→v5, reingest_from_source
+                                  pete · ui · git 3f2a91c · 12.4M matched
+2026-04-02  ingest      LSDR10    ensure_catalog absent→v1
+                                  pete · ui · git 3f2a91c · 1.9B inserted
+2026-04-03  pipeline    ztf       scheduler start · git 3f2a91c
+                                  crossmatch.ztf + host_galaxy fingerprint a1b2…
+2026-04-05  backfill    NED_LVS   reprocess_crossmatch · 811M modified
+2026-04-09  recompute   —         ensure_host_association · 811M modified
+```
+
+That timeline is the payoff. A paper saying "host associations were computed
+for ZTF objects" can cite a provenance snapshot over those five records, and
+"against which catalog release, at which `max_dlr`, under which commit" has an
+answer that does not depend on anyone's memory.
+
+### What this example changes about the design
+
+1. **Stored derived results need a config stamp, and this one needs it before
+   the first backfill.** `aux.host_galaxy` is a function of `max_dlr`, the REX
+   thresholds and `isophote_mag` as much as of the cross-matches, and changing
+   any of them leaves every stored association stale with nothing marking it —
+   [the classifications problem](#the-blocking-problem-scores-carry-no-version)
+   exactly. It is much cheaper to fix here: aux documents are per *object*, not
+   per alert, so an interned `host_config_set` integer (or even a short
+   fingerprint string) is affordable at this scale. Add it while the field is
+   new; it is unretrofittable in the same way and for the same reason.
+2. **There is a third convergence family: recompute-from-stored.**
+   `ensure_catalog` goes back to source, `ensure_enrichment` needs models and a
+   GPU, and this needs neither. Proposal: hand-write them until there are three,
+   then decide whether a generic `ensure_derived` parameterized by a declared
+   derivation is worth having.
+3. **Index drift is four-way, not three-way.** Definitions, inventory,
+   *crossmatch config*, and actual state — because `angular_size_key` in a
+   survey's crossmatch block creates an index requirement on a catalog.
+4. **Three-state derived booleans are mandatory, not stylistic.**
+   `hosted: Option<bool>` — absent means never evaluated, `Some(false)` means
+   evaluated and nothing found — is the only reason step 3 above has a drift
+   query at all, and the only reason a filter cutting on `hosted == false` does
+   not silently sweep in every alert enriched before the feature existed. This
+   belongs in `CONTRIBUTING.md` as a rule for any new derived field, alongside
+   expand/contract.
+5. **Features declare their data dependencies, and startup checks them.** The
+   preflight described in stage 2. A feature that can run degraded when its
+   inputs are missing must not do so silently.
+
 ## External code tasks
 
 The requirement: point at a git repo, a rev, and a path, and run it, given a
@@ -1268,6 +1514,9 @@ release delete it. The migration harness can't enforce this, so it goes in
 ## Implementation phases
 
 Each phase is meant to be a shippable PR or small stack of them.
+[The #566 worked example](#worked-example-host-galaxy-association-566) cuts
+across phases 5, 7a and 7b and is a reasonable acceptance test for them: when
+shipping host association end to end requires no shell, the phases have landed.
 
 **1. Skeleton and one real task.**
 `task_runs` + `task_logs`, the `TaskSpec`/`Task` traits and registry, the
@@ -1342,6 +1591,14 @@ split in two:
 (closing the loop `enrich_reprocess` leaves open), throttling against live
 ingest, resumability, and ledger records. Optionally the `models:` config
 declaration, which can follow later — only the stamp is order-critical.
+
+**7d. Derived-field convergence.**
+The third family named in
+[the worked example](#what-this-example-changes-about-the-design): a recompute
+over an alert collection from fields already stored on it, needing neither
+source files nor a GPU. `ensure_host_association` is the first instance;
+`reprocess_crossmatch` also grows the ability to run the derivation in the same
+pass. Small, and only worth generalizing once there is a third one.
 
 **8. External code tasks.**
 Repo allowlist, SHA resolution, the `task:run_external` role, second-person
@@ -1441,6 +1698,20 @@ storage.
   transition and the old score is reproducible from the archived model — but
   that assumes we archive superseded ONNX files, which should be an explicit
   commitment rather than an assumption.
+- **Does a feature get to run degraded?** Host association with `LSDR10` absent
+  produces NED-LVS-only results and no error (see
+  [stage 2](#stage-2--turn-it-on-config-pr-effective-at-scheduler-restart)).
+  Proposal: a declared data dependency, checked at startup, that refuses to
+  start unless the deployment either satisfies it or explicitly acknowledges
+  running partial. The counter-argument is that some features are genuinely
+  useful degraded and a hard failure is worse than a warning — but then the
+  degradation should be recorded on the output, not left implicit.
+- **How wide is the config-stamp requirement?** `classifications_set` is
+  proposed for models and a `host_config` stamp for host association, and the
+  same argument applies to anything derived from config at ingest time. If it
+  applies broadly, a single per-document "which pipeline config produced this"
+  stamp may be cheaper and more general than one stamp per feature — but it is
+  coarser, so any config change stales everything at once.
 - **`reprocess_filters`.** Named as a gap in
   [the staleness chain](#the-staleness-chain), not designed here. Needs its own
   issue: filter results are the actual scientific artifacts, and they're
