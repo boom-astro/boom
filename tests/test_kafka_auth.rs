@@ -32,14 +32,11 @@ async fn create_topic(cfg: &ClientConfig, topic: &str) -> Result<(), KafkaError>
         .create_topics(&[new_topic], &AdminOptions::new())
         .await?;
 
-    for result in results {
-        match result {
-            Ok(_) => return Ok(()),
-            Err((_topic_name, code)) => return Err(KafkaError::AdminOp(code)),
-        }
-    }
     // If the vector was empty (shouldn't happen), treat as success.
-    Ok(())
+    match results.into_iter().next() {
+        Some(Err((_topic_name, code))) => Err(KafkaError::AdminOp(code)),
+        Some(Ok(_)) | None => Ok(()),
+    }
 }
 
 fn make_base_cfg() -> ClientConfig {
