@@ -86,27 +86,99 @@ pub fn get_f64_from_doc(doc: &mongodb::bson::Document, key: &str) -> Option<f64>
 }
 
 /// Effective match radius in arcsec for a `use_distance` catalog row at
-/// redshift `z`. For very nearby objects (z < 0.01) we use the fixed
-/// `distance_max_near`; otherwise the radius scales as
-/// `distance_max * 0.05 / z`.
+/// redshift `z`. Below [`NEARBY_REDSHIFT`] the fixed `distance_max_near`
+/// applies; otherwise the radius scales as `distance_max * 0.05 / z`.
 pub fn cm_radius_arcsec(z: f64, distance_max: f64, distance_max_near: f64) -> f64 {
-    if z < 0.01 {
+    if z <= NEARBY_REDSHIFT {
         distance_max_near
     } else {
         distance_max * (0.05 / z)
     }
 }
 
+/// Redshift below which a projected physical distance is not meaningful: the
+/// peculiar velocity of a nearby galaxy dominates its recession, and a star
+/// sits here too.
+pub const NEARBY_REDSHIFT: f64 = 0.005;
+
 /// Projected distance in kpc from an angular separation (arcsec) at redshift
-/// `z`. Returns `-1.0` for very nearby objects (z <= 0.005), where the
-/// physical distance is meaningless and `-1.0` is used as a sort sentinel
-/// (sorted before positive values).
+/// `z`. Returns `-1.0` below [`NEARBY_REDSHIFT`], where the physical distance
+/// is meaningless.
 pub fn distance_kpc_from_arcsec(distance_arcsec: f64, z: f64) -> f64 {
-    if z > 0.005 {
+    if z > NEARBY_REDSHIFT {
         distance_arcsec * (z / 0.05)
     } else {
         -1.0
     }
+}
+
+/// Whether a catalog row describes a star, per the catalog's own type column.
+///
+/// Catalogs that do not label object type report `false`, which leaves their
+/// ordering as it was.
+fn is_stellar(
+    doc: &mongodb::bson::Document,
+    type_key: Option<&String>,
+    stellar: &[String],
+) -> bool {
+    let Some(key) = type_key else { return false };
+    match doc.get_str(key.as_str()) {
+        Ok(value) => stellar.iter().any(|s| s.eq_ignore_ascii_case(value.trim())),
+        Err(_) => false,
+    }
+}
+
+/// Angular separation, arcsec, within which a match is treated as coincident
+/// with the transient. A source this close is the most likely counterpart
+/// whatever it is, so type and redshift stop mattering.
+pub const COINCIDENT_ARCSEC: f64 = 1.0;
+
+/// Rank of a match for host ordering; lower sorts first.
+///
+/// 0. Spatially coincident, any type. A star sitting on the transient is the
+///    thing to look at first, whether or not it can be a host.
+/// 1. A galaxy below [`NEARBY_REDSHIFT`], which has no meaningful projected
+///    distance. A transient can sit well outside such a galaxy in arcseconds
+///    and still be inside it.
+/// 2. Everything else with a projected distance, ordered by it.
+/// 3. Stars that are not coincident. They have no projected distance and cannot
+///    host anything, so they never compete in 2 -- ranking them by the missing
+///    distance put any star in the search radius ahead of every real candidate,
+///    however much closer those were.
+fn host_rank(doc: &mongodb::bson::Document, type_key: Option<&String>, stellar: &[String]) -> u8 {
+    let arcsec = get_f64_from_doc(doc, "distance_arcsec").unwrap_or(f64::INFINITY);
+    if arcsec < COINCIDENT_ARCSEC {
+        return 0;
+    }
+    if is_stellar(doc, type_key, stellar) {
+        return 3;
+    }
+    let kpc = get_f64_from_doc(doc, "distance_kpc").unwrap_or(f64::INFINITY);
+    if kpc == -1.0 {
+        1
+    } else {
+        2
+    }
+}
+
+/// Sort key: rank, then projected distance where that rank is ordered by it,
+/// then angular separation.
+///
+/// Only rank 2 carries a usable kpc distance. Ordering the other ranks by it
+/// would reintroduce the sentinel problem inside each group.
+fn host_sort_key(
+    doc: &mongodb::bson::Document,
+    type_key: Option<&String>,
+    stellar: &[String],
+) -> (u8, f64, f64) {
+    let rank = host_rank(doc, type_key, stellar);
+    let kpc = if rank == 2 {
+        get_f64_from_doc(doc, "distance_kpc").unwrap_or(f64::INFINITY)
+    } else {
+        0.0
+    };
+    let arcsec = get_f64_from_doc(doc, "distance_arcsec").unwrap_or(f64::INFINITY);
+    (rank, kpc, arcsec)
 }
 
 #[instrument(skip(xmatch_configs, db), fields(database = db.name()), err)]
@@ -306,29 +378,14 @@ pub async fn xmatch(
                     matches_filtered.push(xmatch_doc);
                 }
             }
-            // sort to have nearby galaxies (distance_kpc = -1.0) first, sorted by distance_arcsec
-            // then those with distance_kpc != -1.0 sorted by distance_kpc and distance_arcsec
+            let type_key = xmatch_config.type_key.as_ref();
+            let stellar = xmatch_config.stellar_types.as_slice();
             matches_filtered.sort_by(|a, b| {
-                let da_arcsec = get_f64_from_doc(a, "distance_arcsec").unwrap_or(f64::INFINITY);
-                let db_arcsec = get_f64_from_doc(b, "distance_arcsec").unwrap_or(f64::INFINITY);
-                let da_kpc = get_f64_from_doc(a, "distance_kpc").unwrap_or(f64::INFINITY);
-                let db_kpc = get_f64_from_doc(b, "distance_kpc").unwrap_or(f64::INFINITY);
-
-                // First sort by distance_kpc, treating -1.0 as smaller than any positive value
-                if da_kpc == -1.0 && db_kpc != -1.0 {
-                    std::cmp::Ordering::Less
-                } else if da_kpc != -1.0 && db_kpc == -1.0 {
-                    std::cmp::Ordering::Greater
-                } else if da_kpc != db_kpc {
-                    da_kpc
-                        .partial_cmp(&db_kpc)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                } else {
-                    // If distance_kpc are equal, sort by distance_arcsec
-                    da_arcsec
-                        .partial_cmp(&db_arcsec)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                }
+                let (ra_, ka, aa) = host_sort_key(a, type_key, stellar);
+                let (rb, kb, ab) = host_sort_key(b, type_key, stellar);
+                ra_.cmp(&rb)
+                    .then_with(|| ka.partial_cmp(&kb).unwrap_or(std::cmp::Ordering::Equal))
+                    .then_with(|| aa.partial_cmp(&ab).unwrap_or(std::cmp::Ordering::Equal))
             });
             xmatch_results
                 .get_mut(catalog)
@@ -371,4 +428,110 @@ pub async fn xmatch(
     }
 
     Ok(xmatch_results)
+}
+
+#[cfg(test)]
+mod host_ordering_tests {
+    use super::*;
+    use mongodb::bson::doc;
+
+    fn row(spectype: &str, z: f64, arcsec: f64) -> mongodb::bson::Document {
+        doc! {
+            "spectype": spectype,
+            "z": z,
+            "distance_arcsec": arcsec,
+            "distance_kpc": distance_kpc_from_arcsec(arcsec, z),
+        }
+    }
+
+    fn order(mut rows: Vec<mongodb::bson::Document>) -> Vec<String> {
+        let key = "spectype".to_string();
+        let stellar = vec!["STAR".to_string()];
+        rows.sort_by(|a, b| {
+            let (ra_, ka, aa) = host_sort_key(a, Some(&key), &stellar);
+            let (rb, kb, ab) = host_sort_key(b, Some(&key), &stellar);
+            ra_.cmp(&rb)
+                .then_with(|| ka.partial_cmp(&kb).unwrap_or(std::cmp::Ordering::Equal))
+                .then_with(|| aa.partial_cmp(&ab).unwrap_or(std::cmp::Ordering::Equal))
+        });
+        rows.iter()
+            .map(|r| {
+                format!(
+                    "{}@{}",
+                    r.get_str("spectype").unwrap(),
+                    r.get_f64("distance_arcsec").unwrap()
+                )
+            })
+            .collect()
+    }
+
+    /// The reported case: a star at z ~ 0 shares the missing projected distance
+    /// with a nearby galaxy, and used to be ranked ahead of a closer galaxy.
+    #[test]
+    fn test_a_distant_star_does_not_outrank_a_closer_galaxy() {
+        let ranked = order(vec![
+            row("STAR", 0.000_123, 21.85),
+            row("GALAXY", 0.032_35, 17.16),
+        ]);
+        assert_eq!(ranked, vec!["GALAXY@17.16", "STAR@21.85"]);
+    }
+
+    /// A source sitting on the transient is the first thing to look at, whether
+    /// or not it could be a host.
+    #[test]
+    fn test_a_coincident_source_ranks_first_whatever_it_is() {
+        let ranked = order(vec![
+            row("GALAXY", 0.02, 4.0),
+            row("STAR", 0.0, 0.4),
+            row("GALAXY", 0.001, 20.0),
+        ]);
+        assert_eq!(ranked, vec!["STAR@0.4", "GALAXY@20", "GALAXY@4"]);
+    }
+
+    /// A genuinely nearby galaxy keeps its place ahead of the kpc-ordered ones:
+    /// a transient can sit far from its centre and still be inside it.
+    #[test]
+    fn test_a_nearby_galaxy_outranks_a_projected_distance() {
+        let ranked = order(vec![row("GALAXY", 0.08, 2.0), row("GALAXY", 0.001, 25.0)]);
+        assert_eq!(ranked, vec!["GALAXY@25", "GALAXY@2"]);
+    }
+
+    /// Non-coincident stars never compete on projected distance, and order among
+    /// themselves by separation.
+    #[test]
+    fn test_stars_sort_last_and_by_separation() {
+        let ranked = order(vec![
+            row("STAR", 0.0, 3.0),
+            row("GALAXY", 0.05, 12.0),
+            row("STAR", 0.0, 1.5),
+        ]);
+        assert_eq!(ranked, vec!["GALAXY@12", "STAR@1.5", "STAR@3"]);
+    }
+
+    /// Robert's call: a QSO is a plausible counterpart, so it ranks as a galaxy
+    /// does rather than as a star.
+    #[test]
+    fn test_a_qso_is_ranked_as_a_galaxy() {
+        let key = "spectype".to_string();
+        let stellar = vec!["STAR".to_string()];
+        let qso = row("QSO", 0.001, 20.0);
+        assert_eq!(host_rank(&qso, Some(&key), &stellar), 1);
+        let star = row("STAR", 0.001, 20.0);
+        assert_eq!(host_rank(&star, Some(&key), &stellar), 3);
+    }
+
+    /// A catalog with no type column behaves as it did before.
+    #[test]
+    fn test_without_a_type_column_nothing_is_treated_as_stellar() {
+        let star = row("STAR", 0.0, 3.0);
+        assert_eq!(
+            host_rank(&star, None, &[]),
+            1,
+            "unlabelled rows keep the old rank"
+        );
+        assert_eq!(
+            host_rank(&star, Some(&"spectype".to_string()), &["STAR".to_string()]),
+            3
+        );
+    }
 }
