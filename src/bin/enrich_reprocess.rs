@@ -138,7 +138,7 @@ async fn run(args: Cli) {
         .expect("GPU configuration is invalid for the survey");
 
     let shared_model_pool: Option<Arc<SharedModelPool>> =
-        if matches!(args.survey, Survey::Ztf) && config.gpu.enabled {
+        if matches!(args.survey, Survey::Ztf) && config.gpu.is_active() {
             Some(
                 SharedModelPool::load(&config.gpu.device_ids)
                     .expect("failed to load ONNX models on GPU"),

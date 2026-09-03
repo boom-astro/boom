@@ -1055,6 +1055,13 @@ where
     deserializer.deserialize_any(DeviceIdsVisitor)
 }
 
+impl GpuConfig {
+    /// Whether models load on CUDA: enabled, with at least one device.
+    pub fn is_active(&self) -> bool {
+        self.enabled && !self.device_ids.is_empty()
+    }
+}
+
 impl Default for GpuConfig {
     fn default() -> Self {
         GpuConfig {
@@ -1434,5 +1441,16 @@ mod tests {
         let json = r#"{"enabled": true, "device_ids": [2, 5]}"#;
         let config: GpuConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.device_ids, vec![2, 5]);
+    }
+
+    #[test]
+    fn test_gpu_config_is_active() {
+        let active: GpuConfig = serde_json::from_str(r#"{"enabled": true}"#).unwrap();
+        assert!(active.is_active());
+        let disabled: GpuConfig = serde_json::from_str(r#"{"enabled": false}"#).unwrap();
+        assert!(!disabled.is_active());
+        let no_device: GpuConfig =
+            serde_json::from_str(r#"{"enabled": true, "device_ids": []}"#).unwrap();
+        assert!(!no_device.is_active());
     }
 }

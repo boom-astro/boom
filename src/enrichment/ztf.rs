@@ -653,8 +653,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             alert_pipeline: create_ztf_alert_pipeline(false),
             models,
             babamul,
-            // No devices means SharedModelPool loaded a CPU model set.
-            gpu_enabled: config.gpu.enabled && !config.gpu.device_ids.is_empty(),
+            gpu_enabled: config.gpu.is_active(),
             batch_size,
         })
     }

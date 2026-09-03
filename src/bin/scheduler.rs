@@ -266,7 +266,7 @@ async fn run(
     // shared model sets (one per device) to conserve VRAM — workers round-robin
     // across devices. When GPUs are disabled, pass None so each worker loads
     // its own private models on CPU (zero mutex contention).
-    let shared_model_pool = if matches!(args.survey, Survey::Ztf) && config.gpu.enabled {
+    let shared_model_pool = if matches!(args.survey, Survey::Ztf) && config.gpu.is_active() {
         Some(
             SharedModelPool::load(&config.gpu.device_ids)
                 .expect("failed to load ONNX models on GPU"),
