@@ -38,6 +38,10 @@ const MPC_ORBITS_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 /// still leaves several before the catalogue is actually stale.
 const MPC_ORBITS_CHECK_INTERVAL: Duration = Duration::from_secs(4 * 60 * 60);
 
+fn pool_state(pool: &ThreadPool) -> String {
+    format!("{}/{}", pool.live_worker_count(), pool.total_worker_count())
+}
+
 /// Whether the catalogue is due a refresh. An absent one always is.
 fn mpc_orbits_needs_refresh(age_seconds: Option<f64>, max_age: Duration) -> bool {
     age_seconds.is_none_or(|age| age >= max_age.as_secs_f64())
@@ -57,8 +61,7 @@ async fn keep_mpc_orbits_fresh(db: mongodb::Database) {
         let now = chrono::Utc::now().timestamp() as f64;
         let age = match mpcorb::orbits_age_seconds(&db, now).await {
             Ok(age) => age,
-            // Not knowing the age is not the same as it being absent; wait for
-            // the next tick rather than re-downloading on a blip.
+            // An unknown age is not an absent one: do not re-download on a blip.
             Err(error) => {
                 log_error!(WARN, error, "could not read the age of MPC_orbits");
                 continue;
@@ -99,8 +102,7 @@ async fn keep_mpc_orbits_fresh(db: mongodb::Database) {
                 );
                 record_mpc_orbits_state(Some(0.0), Some(report.parsed));
             }
-            // The previous catalogue is untouched on failure, so geometry keeps
-            // working off slightly older elements until the next attempt.
+            // The previous catalogue survives a failure, so geometry keeps working.
             Err(error) => log_error!(WARN, error, "failed to refresh MPC_orbits"),
         }
     }
@@ -197,11 +199,7 @@ struct Cli {
     deployment_env: String,
 }
 
-// `run` deliberately is NOT `#[instrument]`'d. The scheduler runs for the full
-// process lifetime; wrapping it in a single span would make every per-alert
-// span a descendant of the same root, producing a trace that grows unboundedly
-// until Tempo rejects it. The survey is already encoded in the OTel
-// `service.name` resource attribute, so a span field here is redundant.
+// Not `#[instrument]`'d: a process-lifetime root span grows until Tempo balks.
 async fn run(
     args: Cli,
     meter_provider: Option<SdkMeterProvider>,
@@ -214,7 +212,6 @@ async fn run(
     });
     let config = AppConfig::from_path(&config_path).unwrap();
 
-    // get num workers from config file
     let worker_config = config
         .workers
         .get(&args.survey)
@@ -223,7 +220,6 @@ async fn run(
     let n_enrichment = worker_config.enrichment.n_workers;
     let n_filter = worker_config.filter.n_workers;
 
-    // initialize the indexes for the survey
     let db: mongodb::Database = config
         .build_db()
         .await
@@ -234,8 +230,7 @@ async fn run(
 
     warn_if_missing_crossmatches(&args.survey, &db, &config).await;
 
-    // Only ZTF derives geometry from these elements; LSST reads the equivalent
-    // vectors out of its own packet.
+    // Only ZTF needs these; LSST carries the vectors in its own packet.
     if args.survey == Survey::Ztf {
         tokio::spawn(
             keep_mpc_orbits_fresh(db.clone()).instrument(info_span!("mpc orbits refresh")),
@@ -246,8 +241,7 @@ async fn run(
     validate_gpu_configuration_for_survey(&args.survey, &config)
         .expect("GPU configuration is invalid for the survey");
 
-    // Spawn sigint handler task
-    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
     tokio::spawn(
         async {
             info!("waiting for ctrl-c");
@@ -262,10 +256,7 @@ async fn run(
         .instrument(info_span!("sigint handler")),
     );
 
-    // Load ONNX models at startup. When GPUs are enabled, create a pool of
-    // shared model sets (one per device) to conserve VRAM — workers round-robin
-    // across devices. When GPUs are disabled, pass None so each worker loads
-    // its own private models on CPU (zero mutex contention).
+    // A pool conserves VRAM; None makes each CPU worker load its own models.
     let shared_model_pool = if matches!(args.survey, Survey::Ztf) && config.gpu.is_active() {
         Some(
             SharedModelPool::load(&config.gpu.device_ids)
@@ -310,40 +301,30 @@ async fn run(
         None,
     );
 
-    // Takes the pools by reference (rather than capturing them) so the
-    // supervision tick below can still borrow them mutably.
+    // By reference, so the supervision tick below can still borrow them mutably.
     let record_pool_metrics =
         |survey: &Survey, alert: &ThreadPool, enrichment: &ThreadPool, filter: &ThreadPool| {
-            record_worker_pool_state(
-                survey,
-                "alert",
-                alert.live_worker_count(),
-                alert.total_worker_count(),
-            );
-            record_worker_pool_state(
-                survey,
-                "enrichment",
-                enrichment.live_worker_count(),
-                enrichment.total_worker_count(),
-            );
-            record_worker_pool_state(
-                survey,
-                "filter",
-                filter.live_worker_count(),
-                filter.total_worker_count(),
-            );
+            for (kind, pool) in [
+                ("alert", alert),
+                ("enrichment", enrichment),
+                ("filter", filter),
+            ] {
+                record_worker_pool_state(
+                    survey,
+                    kind,
+                    pool.live_worker_count(),
+                    pool.total_worker_count(),
+                );
+            }
         };
 
     // Emit an initial sample so dashboards show running workers immediately.
     record_pool_metrics(&args.survey, &alert_pool, &enrichment_pool, &filter_pool);
 
-    // Supervise the pools frequently so a crashed worker is respawned within
-    // seconds, but only record metrics / log the heartbeat once a minute.
-    let mut shutdown_rx = shutdown_rx;
+    // Supervise often to respawn fast, but only log the heartbeat once a minute.
     let mut supervise_tick = tokio::time::interval(Duration::from_secs(5));
     let mut heartbeat_tick = tokio::time::interval(Duration::from_secs(60));
-    // Consume the immediate first ticks so the first heartbeat lands ~60s in
-    // (the initial metric sample above already covers t=0).
+    // Drop the immediate first ticks; the sample above already covers t=0.
     supervise_tick.tick().await;
     heartbeat_tick.tick().await;
     loop {
@@ -359,16 +340,15 @@ async fn run(
             _ = heartbeat_tick.tick() => {
                 record_pool_metrics(&args.survey, &alert_pool, &enrichment_pool, &filter_pool);
                 info!(
-                    alert = %format!("{}/{}", alert_pool.live_worker_count(), alert_pool.total_worker_count()),
-                    enrichment = %format!("{}/{}", enrichment_pool.live_worker_count(), enrichment_pool.total_worker_count()),
-                    filter = %format!("{}/{}", filter_pool.live_worker_count(), filter_pool.total_worker_count()),
+                    alert = %pool_state(&alert_pool),
+                    enrichment = %pool_state(&enrichment_pool),
+                    filter = %pool_state(&filter_pool),
                     "heartbeat: workers running"
                 );
             }
         }
     }
 
-    // Shut down:
     info!("shutting down");
     drop(alert_pool);
     drop(enrichment_pool);
@@ -387,14 +367,13 @@ async fn run(
 
 #[tokio::main]
 async fn main() {
-    // Load environment variables from .env file before anything else
+    // Before anything else, so every later config read sees the variables.
     load_dotenv();
 
     let args = Cli::parse();
 
     let instance_id = args.instance_id.unwrap_or_else(Uuid::new_v4);
-    // Match the Compose service name (scheduler-ztf, scheduler-lsst, ...) so
-    // Grafana can correlate traces, logs, and metrics on a single label.
+    // Must match the Compose service name or Grafana loses the correlation label.
     let service_name = format!("scheduler-{}", args.survey.to_string().to_lowercase());
     let tracer_provider = init_tracing(
         service_name.clone(),
@@ -442,8 +421,7 @@ mod tests {
         ));
     }
 
-    // Several checks must fit inside the staleness window, or one failed refresh
-    // leaves the catalogue stale until the next.
+    // Several checks must fit in the staleness window, or one failure strands it.
     #[test]
     fn test_check_interval_leaves_room_for_retries() {
         assert!(MPC_ORBITS_CHECK_INTERVAL * 3 <= MPC_ORBITS_MAX_AGE);
