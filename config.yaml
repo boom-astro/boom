@@ -300,6 +300,9 @@ crossmatch:
     - catalog: lsdr10
       radius: 30.0
       use_distance: true
+      distance_key: "z_phot_mean"
+      distance_max: 60.0
+      distance_max_near: 300.0
       projection:
         _id: 1
         ra: 1
@@ -420,6 +423,9 @@ crossmatch:
     - catalog: lsdr10
       radius: 30.0
       use_distance: true
+      distance_key: "z_phot_mean"
+      distance_max: 60.0
+      distance_max_near: 300.0
       projection:
         _id: 1
         ra: 1
@@ -563,6 +569,9 @@ crossmatch:
     - catalog: lsdr10
       radius: 30.0
       use_distance: true
+      distance_key: "z_phot_mean"
+      distance_max: 60.0
+      distance_max_near: 300.0
       projection:
         _id: 1
         ra: 1
