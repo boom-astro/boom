@@ -24,6 +24,7 @@ use std::time::Duration;
 use clap::Parser;
 use futures::TryStreamExt;
 use mongodb::bson::{doc, Document};
+use mongodb::{Collection, Database};
 use opentelemetry_sdk::metrics::SdkMeterProvider;
 use opentelemetry_sdk::trace::SdkTracerProvider;
 use tokio::sync::oneshot;
@@ -52,7 +53,7 @@ fn mpc_orbits_needs_refresh(age_seconds: Option<f64>, max_age: Duration) -> bool
 /// A missing catalogue costs geometry silently -- the alert still enriches
 /// without it -- so this runs unattended, and the startup check covers a fresh
 /// deployment. A failed refresh leaves the previous catalogue in place.
-async fn keep_mpc_orbits_fresh(db: mongodb::Database) {
+async fn keep_mpc_orbits_fresh(db: Database) {
     let mut tick = tokio::time::interval(MPC_ORBITS_CHECK_INTERVAL);
     loop {
         // Fires immediately on the first pass, so startup is covered.
@@ -113,7 +114,7 @@ async fn keep_mpc_orbits_fresh(db: mongodb::Database) {
 /// watchlist catalogs (prefixed with `watchlist_`). The live pipeline only
 /// crossmatches at first insert, so newly added catalogs never reach
 /// pre-existing records — the user has to run `reprocess_crossmatch`.
-async fn warn_if_missing_crossmatches(survey: &Survey, db: &mongodb::Database, config: &AppConfig) {
+async fn warn_if_missing_crossmatches(survey: &Survey, db: &Database, config: &AppConfig) {
     let configured: Vec<&CatalogXmatchConfig> = match config.crossmatch.get(survey) {
         Some(v) if !v.is_empty() => v
             .iter()
@@ -124,8 +125,7 @@ async fn warn_if_missing_crossmatches(survey: &Survey, db: &mongodb::Database, c
     if configured.is_empty() {
         return;
     }
-    let aux_collection: mongodb::Collection<Document> =
-        db.collection(&format!("{}_alerts_aux", survey));
+    let aux_collection: Collection<Document> = db.collection(&format!("{}_alerts_aux", survey));
 
     let mut cursor = match aux_collection
         .aggregate(vec![
@@ -220,7 +220,7 @@ async fn run(
     let n_enrichment = worker_config.enrichment.n_workers;
     let n_filter = worker_config.filter.n_workers;
 
-    let db: mongodb::Database = config
+    let db: Database = config
         .build_db()
         .await
         .expect("could not create mongodb client");

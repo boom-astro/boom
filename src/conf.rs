@@ -6,7 +6,7 @@ use crate::utils::{
 use chrono::NaiveDate;
 use config::{Config, File, Value};
 use dotenvy;
-use mongodb::bson::doc;
+use mongodb::bson::{doc, Document};
 use mongodb::Database;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -45,7 +45,7 @@ pub enum BoomConfigError {
 /// 2. .env in the parent directory (useful when running from subdirs)
 /// 3. If none found, continues without error (env vars may be set by system)
 pub fn load_dotenv() {
-    if std::path::Path::new(".env").exists() {
+    if Path::new(".env").exists() {
         match dotenvy::dotenv() {
             Ok(_) => debug!("Loaded environment variables from .env file"),
             Err(e) => warn!("Found .env file but failed to load it: {}", e),
@@ -53,7 +53,7 @@ pub fn load_dotenv() {
         return;
     }
 
-    if std::path::Path::new("../.env").exists() {
+    if Path::new("../.env").exists() {
         match dotenvy::from_path("../.env") {
             Ok(_) => debug!("Loaded environment variables from ../.env file"),
             Err(e) => warn!("Found ../.env file but failed to load it: {}", e),
@@ -96,7 +96,7 @@ fn env_source() -> config::Environment {
 }
 
 #[instrument(skip_all, err)]
-async fn _build_db(db_conf: &DatabaseConfig) -> Result<mongodb::Database, BoomConfigError> {
+async fn _build_db(db_conf: &DatabaseConfig) -> Result<Database, BoomConfigError> {
     let mut uri = if db_conf.srv {
         "mongodb+srv://".to_string()
     } else {
@@ -138,7 +138,7 @@ async fn _build_db(db_conf: &DatabaseConfig) -> Result<mongodb::Database, BoomCo
 }
 
 #[instrument(skip_all, err)]
-async fn build_db(conf: &AppConfig) -> Result<mongodb::Database, BoomConfigError> {
+async fn build_db(conf: &AppConfig) -> Result<Database, BoomConfigError> {
     let db_conf = &conf.database;
 
     _build_db(db_conf).await
@@ -268,7 +268,7 @@ async fn build_cutout_storage(
 pub struct CatalogXmatchConfig {
     pub catalog: String,
     pub radius: f64, // in radians
-    pub projection: mongodb::bson::Document,
+    pub projection: Document,
     pub use_distance: bool,
     pub distance_key: Option<String>,
     pub distance_max: Option<f64>,      // in kpc
@@ -284,7 +284,7 @@ impl CatalogXmatchConfig {
     pub fn new(
         catalog: &str,
         radius: f64,
-        projection: mongodb::bson::Document,
+        projection: Document,
         use_distance: bool,
         distance_key: Option<String>,
         distance_max: Option<f64>,
@@ -310,50 +310,45 @@ impl CatalogXmatchConfig {
     #[instrument(skip_all, err)]
     fn from_config(config_value: Value) -> Result<CatalogXmatchConfig, BoomConfigError> {
         let hashmap_xmatch = config_value.into_table()?;
-
-        let catalog = hashmap_xmatch
-            .get("catalog")
-            .ok_or(BoomConfigError::MissingKeyError("catalog".to_string()))?
-            .clone()
-            .into_string()?;
-
-        let radius = hashmap_xmatch
-            .get("radius")
-            .ok_or(BoomConfigError::MissingKeyError("radius".to_string()))?
-            .clone()
-            .into_float()?;
-
-        let projection = hashmap_xmatch
-            .get("projection")
-            .ok_or(BoomConfigError::MissingKeyError("projection".to_string()))?
-            .clone()
-            .into_table()?;
-
-        let use_distance = match hashmap_xmatch.get("use_distance") {
-            Some(use_distance) => use_distance.clone().into_bool()?,
-            None => false,
+        let required = |key: &str| {
+            hashmap_xmatch
+                .get(key)
+                .cloned()
+                .ok_or_else(|| BoomConfigError::MissingKeyError(key.to_string()))
         };
 
-        let distance_key = match hashmap_xmatch.get("distance_key") {
-            Some(distance_key) => Some(distance_key.clone().into_string()?),
-            None => None,
-        };
+        let catalog = required("catalog")?.into_string()?;
+        let radius = required("radius")?.into_float()?;
+        let projection = required("projection")?.into_table()?;
 
-        let distance_max = match hashmap_xmatch.get("distance_max") {
-            Some(distance_max) => Some(distance_max.clone().into_float()?),
-            None => None,
-        };
+        let use_distance = hashmap_xmatch
+            .get("use_distance")
+            .cloned()
+            .map(Value::into_bool)
+            .transpose()?
+            .unwrap_or(false);
 
-        let distance_max_near = match hashmap_xmatch.get("distance_max_near") {
-            Some(distance_max_near) => Some(distance_max_near.clone().into_float()?),
-            None => None,
-        };
+        let distance_key = hashmap_xmatch
+            .get("distance_key")
+            .cloned()
+            .map(Value::into_string)
+            .transpose()?;
 
-        let mut projection_doc = mongodb::bson::Document::new();
-        for (key, value) in projection.iter() {
-            let key = key.as_str();
-            let value = value.clone().into_int()?;
-            projection_doc.insert(key, value);
+        let distance_max = hashmap_xmatch
+            .get("distance_max")
+            .cloned()
+            .map(Value::into_float)
+            .transpose()?;
+
+        let distance_max_near = hashmap_xmatch
+            .get("distance_max_near")
+            .cloned()
+            .map(Value::into_float)
+            .transpose()?;
+
+        let mut projection_doc = Document::new();
+        for (key, value) in projection {
+            projection_doc.insert(key, value.into_int()?);
         }
 
         if use_distance {
@@ -385,17 +380,18 @@ impl CatalogXmatchConfig {
             panic!("cannot use max_results with distance filtering");
         }
 
-        let type_key = match hashmap_xmatch.get("type_key") {
-            Some(type_key) => Some(type_key.clone().into_string()?),
-            None => None,
-        };
+        let type_key = hashmap_xmatch
+            .get("type_key")
+            .cloned()
+            .map(Value::into_string)
+            .transpose()?;
 
         let stellar_types = match hashmap_xmatch.get("stellar_types") {
             Some(values) => values
                 .clone()
                 .into_array()?
                 .into_iter()
-                .map(|value| value.into_string())
+                .map(Value::into_string)
                 .collect::<Result<Vec<String>, _>>()?,
             None => Vec::new(),
         };
@@ -418,7 +414,7 @@ impl CatalogXmatchConfig {
 impl<'de> Deserialize<'de> for CatalogXmatchConfig {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
-        D: serde::Deserializer<'de>,
+        D: Deserializer<'de>,
     {
         let v = Value::deserialize(deserializer).map_err(serde::de::Error::custom)?;
         CatalogXmatchConfig::from_config(v).map_err(serde::de::Error::custom)
@@ -451,7 +447,7 @@ pub enum CutoutsStorage {
 }
 
 impl<'de> Deserialize<'de> for CutoutsStorage {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         use serde::de::Error;
 
         // The config crate's single-pass deserializer rules out #[serde(tag = "type")].
@@ -891,7 +887,7 @@ fn default_filter_refresh_interval_minutes() -> u64 {
 
 fn deserialize_filter_refresh_interval<'de, D>(deserializer: D) -> Result<u64, D::Error>
 where
-    D: serde::Deserializer<'de>,
+    D: Deserializer<'de>,
 {
     let value = u64::deserialize(deserializer)?;
     const MIN_INTERVAL: u64 = 1;
@@ -913,7 +909,7 @@ where
 
 fn deserialize_command_interval<'de, D>(deserializer: D) -> Result<usize, D::Error>
 where
-    D: serde::Deserializer<'de>,
+    D: Deserializer<'de>,
 {
     let value = usize::deserialize(deserializer)?;
     const MIN_INTERVAL: usize = 100;
@@ -936,7 +932,7 @@ where
 
 fn deserialize_max_match_rate<'de, D>(deserializer: D) -> Result<Option<u8>, D::Error>
 where
-    D: serde::Deserializer<'de>,
+    D: Deserializer<'de>,
 {
     let value = Option::<u8>::deserialize(deserializer)?;
     if let Some(v) = value {
@@ -1154,7 +1150,7 @@ impl AppConfig {
     }
 
     #[instrument(skip_all, err)]
-    pub async fn build_db(&self) -> Result<mongodb::Database, BoomConfigError> {
+    pub async fn build_db(&self) -> Result<Database, BoomConfigError> {
         build_db(self).await
     }
 
@@ -1283,7 +1279,7 @@ mod tests {
     /// `from_test_config`, and would clobber any `BOOM_*` values a developer's
     /// `.env` had already loaded into the process.
     fn config_with_env(vars: &[(&str, &str)]) -> Config {
-        let env: std::collections::HashMap<String, String> = vars
+        let env: HashMap<String, String> = vars
             .iter()
             .map(|(key, value)| (key.to_string(), value.to_string()))
             .collect();

@@ -22,7 +22,9 @@ use apache_avro_macros::serdavro;
 use futures::TryStreamExt;
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
-use serde::{Deserialize, Deserializer};
+use mongodb::{Collection, Database};
+use ndarray::Array;
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tracing::{debug, instrument, trace, warn};
@@ -32,7 +34,7 @@ use villar_pso::gpu::{GpuBatchData, SourceData};
 use villar_pso::gpu_metal::{GpuBatchData, SourceData};
 
 #[serdavro]
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 /// Represents ZTF alert photometry data we retrieve from the database
 /// (e.g. prv_candidates, prv_nondetections) and later convert to `ZtfPhotometry`
 pub struct ZtfAlertPhotometry {
@@ -56,7 +58,7 @@ pub struct ZtfAlertPhotometry {
 }
 
 #[serdavro]
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 /// Represents ZTF forced photometry data we retrieve from the database
 /// (e.g. prv_candidates, prv_nondetections) and later convert to `ZtfPhotometry`
 pub struct ZtfForcedPhotometry {
@@ -84,7 +86,7 @@ pub struct ZtfForcedPhotometry {
 }
 
 #[serdavro]
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 /// Represents ZTF photometry data we retrieved from the database
 /// (from alert or forced photometry)
 pub struct ZtfPhotometry {
@@ -317,13 +319,13 @@ pub fn create_ztf_alert_pipeline(include_classifications: bool) -> Vec<Document>
     pipeline
 }
 
-#[derive(serde::Deserialize, serde::Serialize, Debug, Clone, AvroSchema)]
+#[derive(Deserialize, Serialize, Debug, Clone, AvroSchema)]
 pub struct ZtfSurveyMatches {
     pub lsst: Option<LsstMatch>,
 }
 
 #[serdavro]
-#[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct ZtfMatch {
     #[serde(rename = "objectId")]
     pub object_id: String,
@@ -340,7 +342,7 @@ pub struct ZtfMatch {
 /// ZTF alert structure used to deserialize alerts
 /// from the database, used by the enrichment worker
 /// to compute features and ML scores
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ZtfAlertForEnrichment {
     #[serde(rename = "_id")]
     pub candid: i64,
@@ -514,7 +516,7 @@ impl ZtfSsoAssociation {
 }
 
 /// ZTF alert properties computed during enrichment and inserted back into the alert document
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, AvroSchema, utoipa::ToSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize, AvroSchema, utoipa::ToSchema)]
 pub struct ZtfAlertProperties {
     /// Deprecated alias for `sso.is_sso`, retained so existing filters keep
     /// working. Unlike `sso.is_sso` this is thresholded at a hardcoded 12", so it
@@ -538,7 +540,7 @@ pub struct ZtfAlertProperties {
 }
 
 /// ZTF alert ML classifier scores
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, AvroSchema, utoipa::ToSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize, AvroSchema, utoipa::ToSchema)]
 pub struct ZtfAlertClassifications {
     pub acai_h: f32,
     pub acai_n: f32,
@@ -562,11 +564,11 @@ pub struct ZtfEnrichmentWorker {
     input_queue: String,
     output_queue: String,
     client: mongodb::Client,
-    alert_collection: mongodb::Collection<Document>,
+    alert_collection: Collection<Document>,
     /// MPC orbital elements, refreshed nightly by `mpcorb_ingest`.
-    mpc_orbits: mongodb::Collection<Document>,
+    mpc_orbits: Collection<Document>,
     /// Fitted per-object phase curves, rebuilt by `sso_baselines`.
-    sso_baselines: mongodb::Collection<Document>,
+    sso_baselines: Collection<Document>,
     alert_cutout_storage: CutoutStorage,
     alert_pipeline: Vec<Document>,
     /// Shared ONNX models (loaded once, shared across all enrichment workers
@@ -611,7 +613,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         shared_models: Option<Arc<SharedModels>>,
     ) -> Result<Self, EnrichmentWorkerError> {
         let config = AppConfig::from_path(config_path)?;
-        let db: mongodb::Database = config.build_db().await?;
+        let db: Database = config.build_db().await?;
         let client = db.client().clone();
         let alert_collection = db.collection("ZTF_alerts");
         let mpc_orbits = db.collection(ORBITS_COLLECTION);
@@ -1347,9 +1349,9 @@ impl ZtfEnrichmentWorker {
 
         // Fixed-size chunks: ORT needs one input shape, so the last is zero-padded.
         for chunk in selected.chunks(self.batch_size) {
-            let mut triplet = ndarray::Array::zeros((self.batch_size, 63, 63, 3));
-            let mut metadata = ndarray::Array::zeros((self.batch_size, 25));
-            let mut btsbot_metadata = ndarray::Array::zeros((self.batch_size, 25));
+            let mut triplet = Array::zeros((self.batch_size, 63, 63, 3));
+            let mut metadata = Array::zeros((self.batch_size, 25));
+            let mut btsbot_metadata = Array::zeros((self.batch_size, 25));
 
             for (row, &(_, tpos, apos, bpos)) in chunk.iter().enumerate() {
                 triplet
