@@ -654,6 +654,87 @@ pub async fn status(
     Ok(statuses)
 }
 
+/// Crossmatch targets this release cannot build, and why.
+///
+/// Each is a real collection the pipeline matches against, so none is a
+/// mistake -- they simply have no ingest definition. Naming them here is what
+/// lets config validation reject a genuine typo while still accepting these:
+/// anything not defined and not listed is assumed wrong.
+///
+/// Delete an entry when its definition lands. A test requires each of these to
+/// still be undefined, so the list cannot quietly go stale.
+pub const WITHOUT_DEFINITIONS: &[(&str, &str)] = &[
+    (
+        "LS_DR10_PHOTOZ",
+        "the stored table is a join of the LS DR10 tractor sweeps with the photo-z \
+         catalog, produced by the pandas minifiers in boom-catalogs; porting it means \
+         porting that pipeline, not just a download",
+    ),
+    (
+        "LSPSC",
+        "no downloader or record type exists in boom or boom-catalogs -- the collection \
+         is created empty by the test workflow, and where its data comes from is not \
+         recorded",
+    ),
+    (
+        "TNS",
+        "the Transient Name Server is a live, credentialed feed rather than an archival \
+         download, and is populated outside the catalog ingest path",
+    ),
+    (
+        "VSX",
+        "the published vsx.dat needs the fixed-column parser from boom-catalogs, which \
+         has not been ported",
+    ),
+];
+
+/// Names a crossmatch entry may use without having an ingest definition.
+fn is_known_without_definition(collection: &str) -> bool {
+    WITHOUT_DEFINITIONS
+        .iter()
+        .any(|(name, _)| *name == collection)
+}
+
+/// Reject crossmatch entries naming a catalog this release knows nothing about.
+///
+/// The pipeline reads `crossmatch.<survey>[].catalog` as a collection name and
+/// queries it directly, so a typo does not fail -- it silently matches nothing,
+/// and every alert comes out looking confidently unmatched. That is the failure
+/// this catches, and it is worth failing startup over.
+///
+/// Watchlists are user-managed and always allowed; the collections in
+/// [`WITHOUT_DEFINITIONS`] are allowed by name.
+pub fn validate_crossmatch(
+    crossmatch: &std::collections::HashMap<
+        crate::utils::enums::Survey,
+        Vec<crate::conf::CatalogXmatchConfig>,
+    >,
+) -> Result<(), String> {
+    let mut unknown: Vec<String> = crossmatch
+        .values()
+        .flatten()
+        .map(|entry| entry.catalog.clone())
+        .filter(|name| !name.starts_with(crate::api::catalogs::WATCHLIST_PREFIX))
+        .filter(|name| find_by_collection(name).is_none())
+        .filter(|name| !is_known_without_definition(name))
+        .collect();
+    if unknown.is_empty() {
+        return Ok(());
+    }
+    unknown.sort_unstable();
+    unknown.dedup();
+    Err(format!(
+        "crossmatch names {unknown:?}, which this release has no catalog definition for. \
+         Known catalogs: {}. If the collection is real but cannot be ingested by BOOM, \
+         add it to WITHOUT_DEFINITIONS in src/catalogs/mod.rs with the reason.",
+        CATALOGS
+            .iter()
+            .map(|c| c.collection)
+            .collect::<Vec<_>>()
+            .join(", ")
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -714,37 +795,16 @@ mod tests {
             .collect()
     }
 
-    /// Crossmatch targets this release cannot build, and why.
-    ///
-    /// Each of these is a real collection the pipeline matches against, so they
-    /// are not mistakes -- they simply have no ingest definition yet. They
-    /// surface in the admin drift table as an unknown slug, which is the honest
-    /// answer: BOOM cannot tell you whether they are up to date.
-    ///
-    /// Delete an entry when its definition lands; the test below will then
-    /// require it to stay defined.
-    const WITHOUT_DEFINITIONS: &[(&str, &str)] = &[
-        (
-            "LS_DR10_PHOTOZ",
-            "the stored table is a join of the LS DR10 tractor sweeps with the \
-             photo-z catalog, produced by the pandas minifiers in boom-catalogs; \
-             porting it means porting that pipeline, not just a download",
-        ),
-        (
-            "LSPSC",
-            "no downloader or record type exists anywhere in boom or \
-             boom-catalogs -- the collection is created empty by the test \
-             workflow, and where its data comes from is not recorded",
-        ),
-    ];
-
     #[test]
     fn every_crossmatch_target_is_either_defined_or_a_known_exception() {
         // `declared` deliberately reports an unknown name rather than failing --
         // TNS and hand-imported collections are legitimate crossmatch targets.
         // This guards the base config, where a new entry should either come
         // with a definition or be listed above with a reason.
-        let exempt: Vec<&str> = WITHOUT_DEFINITIONS.iter().map(|(name, _)| *name).collect();
+        let exempt: Vec<&str> = super::WITHOUT_DEFINITIONS
+            .iter()
+            .map(|(name, _)| *name)
+            .collect();
         let unknown: Vec<String> = crossmatch_names()
             .into_iter()
             .filter(|name| !name.starts_with(crate::api::catalogs::WATCHLIST_PREFIX))
@@ -762,10 +822,86 @@ mod tests {
     fn the_exception_list_does_not_outlive_its_reason() {
         // Once a catalog gains a definition, leaving it exempt would hide a
         // future regression.
-        for (name, _) in WITHOUT_DEFINITIONS {
+        for (name, _) in super::WITHOUT_DEFINITIONS {
             assert!(
                 find_by_collection(name).is_none(),
                 "{name} now has a definition; remove it from WITHOUT_DEFINITIONS"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod crossmatch_validation_tests {
+    use super::*;
+    use crate::conf::CatalogXmatchConfig;
+    use crate::utils::enums::Survey;
+    use std::collections::HashMap;
+
+    fn crossmatch(names: &[&str]) -> HashMap<Survey, Vec<CatalogXmatchConfig>> {
+        let entries = names
+            .iter()
+            .map(|name| {
+                CatalogXmatchConfig::new(
+                    name,
+                    2.0,
+                    mongodb::bson::doc! {},
+                    false,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Vec::new(),
+                )
+            })
+            .collect();
+        HashMap::from([(Survey::Ztf, entries)])
+    }
+
+    #[test]
+    fn a_defined_catalog_is_accepted() {
+        assert!(validate_crossmatch(&crossmatch(&["NED", "Gaia_DR3"])).is_ok());
+    }
+
+    #[test]
+    fn a_typo_is_rejected_and_names_itself() {
+        // The whole point: a misspelled collection matches nothing at query
+        // time, so every alert comes out looking confidently unmatched.
+        let err = validate_crossmatch(&crossmatch(&["Gaia_DR33"])).unwrap_err();
+        assert!(err.contains("Gaia_DR33"), "{err}");
+        assert!(err.contains("Known catalogs"), "{err}");
+    }
+
+    #[test]
+    fn a_collection_we_cannot_build_is_accepted_by_name() {
+        // TNS is a live credentialed feed and LSPSC has no recorded source;
+        // both are real crossmatch targets and must not fail startup.
+        assert!(validate_crossmatch(&crossmatch(&["TNS", "LSPSC"])).is_ok());
+    }
+
+    #[test]
+    fn watchlists_are_always_accepted() {
+        // User-managed, created through the API rather than ingested.
+        let name = format!("{}supernovas", crate::api::catalogs::WATCHLIST_PREFIX);
+        assert!(validate_crossmatch(&crossmatch(&[&name])).is_ok());
+    }
+
+    #[test]
+    fn the_shipped_prod_configs_pass_validation() {
+        // These are the configs deployments actually run; the check is only
+        // worth having if it does not reject them.
+        for name in ["caltech", "umn"] {
+            let path = format!(
+                "{}/config/prod/{}/config.yaml",
+                env!("CARGO_MANIFEST_DIR"),
+                name
+            );
+            let config = crate::conf::AppConfig::from_path(&path)
+                .unwrap_or_else(|e| panic!("{name} config failed to load: {e}"));
+            assert!(
+                validate_crossmatch(&config.crossmatch).is_ok(),
+                "{name} config was rejected"
             );
         }
     }

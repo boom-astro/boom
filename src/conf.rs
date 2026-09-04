@@ -34,6 +34,8 @@ pub enum BoomConfigError {
     InvalidSecretError(String),
     #[error("cutout storage error: {0}")]
     CutoutStorageError(#[from] crate::utils::cutouts::CutoutStorageError),
+    #[error("invalid crossmatch config: {0}")]
+    UnknownCrossmatchCatalog(String),
 }
 
 /// Load environment variables from a .env file if it exists.
@@ -1244,6 +1246,13 @@ pub fn load_config(config_path: Option<&str>) -> Result<AppConfig, BoomConfigErr
 
     if let Err(e) = app_config.validate_secrets() {
         return Err(BoomConfigError::InvalidSecretError(e));
+    }
+
+    // A misspelled crossmatch catalog does not fail at query time -- it matches
+    // nothing, and the alerts come out looking confidently unmatched. Fail
+    // startup instead, where someone will see it.
+    if let Err(e) = crate::catalogs::validate_crossmatch(&app_config.crossmatch) {
+        return Err(BoomConfigError::UnknownCrossmatchCatalog(e));
     }
 
     debug!("Configuration loaded successfully");

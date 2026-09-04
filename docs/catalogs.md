@@ -23,11 +23,19 @@ If a declared catalog does not exist, a warning will be shown on the admin
 page, and there will be a button to kick off and monitor an ingestion job
 within the [task system](./task-system.md).
 
-A crossmatch target with no ingest definition — `TNS`, a hand-imported
-collection, anything built by `prepare_catalog` — is reported as an unknown slug
-rather than treated as an error. That is the honest answer: BOOM has no way to
-tell whether it is up to date. Watchlists are excluded entirely, being
-user-managed rather than archival.
+Every name under `crossmatch` must be either a catalog BOOM can build, a
+watchlist, or listed in `WITHOUT_DEFINITIONS` in `src/catalogs/mod.rs` with the
+reason it cannot be. Anything else fails config load, in the API at startup and
+in `make check-configs`.
+
+That strictness earns its keep because the failure it prevents is silent: the
+pipeline reads these as collection names and queries them directly, so a
+misspelled one does not error — it matches nothing, and every alert comes out
+looking confidently unmatched.
+
+A collection that is real but unbuildable still shows in the admin drift table
+as an unknown slug, which is the honest answer: BOOM cannot tell whether it is
+up to date.
 
 ## Ingesting a catalog
 
@@ -76,7 +84,7 @@ not yet queryable by position.
 | `gaia-dr3` | `Gaia_DR3` | gzipped CSV | ~3400 files | Astrometry, parallaxes, proper motions and G/BP/RP photometry for 1.8 billion sources. |
 | `galex` | `GALEX` | gzipped CSV | per release | Ultraviolet FUV/NUV photometry from the All-Sky Imaging Survey. |
 
-Two crossmatch targets still have no definition, and are listed as exceptions in
+Four crossmatch targets have no definition, and are listed in
 `WITHOUT_DEFINITIONS` in `src/catalogs/mod.rs`:
 
 - **`LS_DR10_PHOTOZ`** — the stored table is a join of the LS DR10 tractor
@@ -86,9 +94,10 @@ Two crossmatch targets still have no definition, and are listed as exceptions in
 - **`LSPSC`** — no downloader or record type exists in either repo. The
   collection is created empty by the test workflow and where its data comes from
   is not recorded.
-
-`VSX` also remains unported: its `vsx.dat` needs the exact fixed-column parser
-from boom-catalogs, which was not carried over.
+- **`TNS`** — a live, credentialed feed rather than an archival download,
+  populated outside the catalog ingest path.
+- **`VSX`** — its `vsx.dat` needs the fixed-column parser from boom-catalogs,
+  which was not carried over.
 
 ## Adding a catalog
 
