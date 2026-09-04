@@ -6,7 +6,7 @@ use crate::utils::{
 use chrono::NaiveDate;
 use config::{Config, File, Value};
 use dotenvy;
-use mongodb::bson::doc;
+use mongodb::bson::{doc, Document};
 use mongodb::Database;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -45,8 +45,7 @@ pub enum BoomConfigError {
 /// 2. .env in the parent directory (useful when running from subdirs)
 /// 3. If none found, continues without error (env vars may be set by system)
 pub fn load_dotenv() {
-    // Try current directory first
-    if std::path::Path::new(".env").exists() {
+    if Path::new(".env").exists() {
         match dotenvy::dotenv() {
             Ok(_) => debug!("Loaded environment variables from .env file"),
             Err(e) => warn!("Found .env file but failed to load it: {}", e),
@@ -54,8 +53,7 @@ pub fn load_dotenv() {
         return;
     }
 
-    // Try parent directory (useful when running from subdirectories like api/)
-    if std::path::Path::new("../.env").exists() {
+    if Path::new("../.env").exists() {
         match dotenvy::from_path("../.env") {
             Ok(_) => debug!("Loaded environment variables from ../.env file"),
             Err(e) => warn!("Found ../.env file but failed to load it: {}", e),
@@ -63,7 +61,6 @@ pub fn load_dotenv() {
         return;
     }
 
-    // No .env file found - this is fine, environment variables may be set by the system
     info!("No .env file found, using system environment variables only");
 }
 
@@ -94,44 +91,38 @@ fn env_source() -> config::Environment {
     config::Environment::with_prefix("boom")
         .prefix_separator("_")
         .separator("__")
-        // An empty variable means "not set", not "set to empty". Compose
-        // renders every `${VAR:-}` it lists as `VAR=` whether or not the
-        // deployment supplied one, so without this a variable nobody set
-        // still lands here and blanks out whatever the YAML said. That is
-        // silent: the file is right, the container's environment is right
-        // by its own lights, and the setting is simply gone.
+        // Compose renders every `${VAR:-}` as `VAR=`, blanking the YAML. See AGENTS.md.
         .ignore_empty(true)
 }
 
 #[instrument(skip_all, err)]
-async fn _build_db(db_conf: &DatabaseConfig) -> Result<mongodb::Database, BoomConfigError> {
-    let prefix = match db_conf.srv {
-        true => "mongodb+srv://",
-        false => "mongodb://",
+async fn _build_db(db_conf: &DatabaseConfig) -> Result<Database, BoomConfigError> {
+    let mut uri = if db_conf.srv {
+        "mongodb+srv://".to_string()
+    } else {
+        "mongodb://".to_string()
     };
-
-    let mut uri = prefix.to_string();
 
     let using_auth = !db_conf.username.is_empty() && !db_conf.password.is_empty();
 
     if using_auth {
         uri.push_str(&db_conf.username);
-        uri.push_str(":");
+        uri.push(':');
         uri.push_str(&db_conf.password);
-        uri.push_str("@");
+        uri.push('@');
     }
 
     uri.push_str(&db_conf.host);
-    uri.push_str(":");
+    uri.push(':');
     uri.push_str(&db_conf.port.to_string());
 
-    uri.push_str("/");
+    uri.push('/');
     uri.push_str(&db_conf.name);
 
     uri.push_str("?directConnection=true");
 
     if using_auth {
-        uri.push_str(&format!("&authSource=admin"));
+        uri.push_str("&authSource=admin");
     }
 
     if let Some(replica_set) = &db_conf.replica_set {
@@ -147,7 +138,7 @@ async fn _build_db(db_conf: &DatabaseConfig) -> Result<mongodb::Database, BoomCo
 }
 
 #[instrument(skip_all, err)]
-async fn build_db(conf: &AppConfig) -> Result<mongodb::Database, BoomConfigError> {
+async fn build_db(conf: &AppConfig) -> Result<Database, BoomConfigError> {
     let db_conf = &conf.database;
 
     _build_db(db_conf).await
@@ -265,7 +256,7 @@ async fn build_cutout_storage(
             .inspect_err(as_error!("failed to create cutout storage"))?
         }
         CutoutsStorage::Mongo(mongo_conf) => {
-            let db = _build_db(&mongo_conf).await?;
+            let db = _build_db(mongo_conf).await?;
             CutoutStorage::from_mongo(db, survey).await
         }
     };
@@ -275,14 +266,14 @@ async fn build_cutout_storage(
 
 #[derive(Debug, Clone)]
 pub struct CatalogXmatchConfig {
-    pub catalog: String,                     // name of the collection in the database
-    pub radius: f64,                         // radius in radians
-    pub projection: mongodb::bson::Document, // projection to apply to the catalog
-    pub use_distance: bool,                  // whether to use the distance field in the crossmatch
-    pub distance_key: Option<String>,        // name of the field to use for distance
-    pub distance_max: Option<f64>,           // maximum distance in kpc
-    pub distance_max_near: Option<f64>,      // maximum distance in arcsec for nearby objects
-    pub max_results: Option<usize>,          // maximum number of results to return
+    pub catalog: String,
+    pub radius: f64, // in radians
+    pub projection: Document,
+    pub use_distance: bool,
+    pub distance_key: Option<String>,
+    pub distance_max: Option<f64>,      // in kpc
+    pub distance_max_near: Option<f64>, // in arcsec
+    pub max_results: Option<usize>,
     /// Field naming a row's object type, e.g. DESI's `spectype`.
     pub type_key: Option<String>,
     /// Values of `type_key` that mean the row is a star rather than a galaxy.
@@ -293,7 +284,7 @@ impl CatalogXmatchConfig {
     pub fn new(
         catalog: &str,
         radius: f64,
-        projection: mongodb::bson::Document,
+        projection: Document,
         use_distance: bool,
         distance_key: Option<String>,
         distance_max: Option<f64>,
@@ -316,55 +307,48 @@ impl CatalogXmatchConfig {
         }
     }
 
-    // based on the code in the main function, create a from_config function
     #[instrument(skip_all, err)]
     fn from_config(config_value: Value) -> Result<CatalogXmatchConfig, BoomConfigError> {
         let hashmap_xmatch = config_value.into_table()?;
-
-        let catalog = hashmap_xmatch
-            .get("catalog")
-            .ok_or(BoomConfigError::MissingKeyError("catalog".to_string()))?
-            .clone()
-            .into_string()?;
-
-        let radius = hashmap_xmatch
-            .get("radius")
-            .ok_or(BoomConfigError::MissingKeyError("radius".to_string()))?
-            .clone()
-            .into_float()?;
-
-        let projection = hashmap_xmatch
-            .get("projection")
-            .ok_or(BoomConfigError::MissingKeyError("projection".to_string()))?
-            .clone()
-            .into_table()?;
-
-        let use_distance = match hashmap_xmatch.get("use_distance") {
-            Some(use_distance) => use_distance.clone().into_bool()?,
-            None => false,
+        let required = |key: &str| {
+            hashmap_xmatch
+                .get(key)
+                .cloned()
+                .ok_or_else(|| BoomConfigError::MissingKeyError(key.to_string()))
         };
 
-        let distance_key = match hashmap_xmatch.get("distance_key") {
-            Some(distance_key) => Some(distance_key.clone().into_string()?),
-            None => None,
-        };
+        let catalog = required("catalog")?.into_string()?;
+        let radius = required("radius")?.into_float()?;
+        let projection = required("projection")?.into_table()?;
 
-        let distance_max = match hashmap_xmatch.get("distance_max") {
-            Some(distance_max) => Some(distance_max.clone().into_float()?),
-            None => None,
-        };
+        let use_distance = hashmap_xmatch
+            .get("use_distance")
+            .cloned()
+            .map(Value::into_bool)
+            .transpose()?
+            .unwrap_or(false);
 
-        let distance_max_near = match hashmap_xmatch.get("distance_max_near") {
-            Some(distance_max_near) => Some(distance_max_near.clone().into_float()?),
-            None => None,
-        };
+        let distance_key = hashmap_xmatch
+            .get("distance_key")
+            .cloned()
+            .map(Value::into_string)
+            .transpose()?;
 
-        // projection is a hashmap, we need to convert it to a Document
-        let mut projection_doc = mongodb::bson::Document::new();
-        for (key, value) in projection.iter() {
-            let key = key.as_str();
-            let value = value.clone().into_int()?;
-            projection_doc.insert(key, value);
+        let distance_max = hashmap_xmatch
+            .get("distance_max")
+            .cloned()
+            .map(Value::into_float)
+            .transpose()?;
+
+        let distance_max_near = hashmap_xmatch
+            .get("distance_max_near")
+            .cloned()
+            .map(Value::into_float)
+            .transpose()?;
+
+        let mut projection_doc = Document::new();
+        for (key, value) in projection {
+            projection_doc.insert(key, value.into_int()?);
         }
 
         if use_distance {
@@ -392,22 +376,22 @@ impl CatalogXmatchConfig {
             None => None,
         };
 
-        // for now, we don't want to support max_results + distance filtering together
         if max_results.is_some() && use_distance {
             panic!("cannot use max_results with distance filtering");
         }
 
-        let type_key = match hashmap_xmatch.get("type_key") {
-            Some(type_key) => Some(type_key.clone().into_string()?),
-            None => None,
-        };
+        let type_key = hashmap_xmatch
+            .get("type_key")
+            .cloned()
+            .map(Value::into_string)
+            .transpose()?;
 
         let stellar_types = match hashmap_xmatch.get("stellar_types") {
             Some(values) => values
                 .clone()
                 .into_array()?
                 .into_iter()
-                .map(|value| value.into_string())
+                .map(Value::into_string)
                 .collect::<Result<Vec<String>, _>>()?,
             None => Vec::new(),
         };
@@ -427,11 +411,10 @@ impl CatalogXmatchConfig {
     }
 }
 
-// implement Deserialize for CatalogXmatchConfig
 impl<'de> Deserialize<'de> for CatalogXmatchConfig {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
-        D: serde::Deserializer<'de>,
+        D: Deserializer<'de>,
     {
         let v = Value::deserialize(deserializer).map_err(serde::de::Error::custom)?;
         CatalogXmatchConfig::from_config(v).map_err(serde::de::Error::custom)
@@ -464,14 +447,11 @@ pub enum CutoutsStorage {
 }
 
 impl<'de> Deserialize<'de> for CutoutsStorage {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         use serde::de::Error;
 
-        // Materialise the entire map via serde_json::Value so we can (a) read
-        // the "type" discriminant and (b) re-deserialize into the chosen variant
-        // without fighting the config crate's single-pass deserializer constraint
-        // that prevents #[serde(tag = "type")] from working here.
-        let map = serde_json::Value::deserialize(deserializer).map_err(|e| D::Error::custom(e))?;
+        // The config crate's single-pass deserializer rules out #[serde(tag = "type")].
+        let map = serde_json::Value::deserialize(deserializer).map_err(D::Error::custom)?;
 
         let storage_type = map
             .get("type")
@@ -481,10 +461,10 @@ impl<'de> Deserialize<'de> for CutoutsStorage {
         match storage_type {
             "mongo" => serde_json::from_value::<DatabaseConfig>(map)
                 .map(CutoutsStorage::Mongo)
-                .map_err(|e| D::Error::custom(e)),
+                .map_err(D::Error::custom),
             "s3" => serde_json::from_value::<S3CutoutsStorageConfig>(map)
                 .map(CutoutsStorage::S3)
-                .map_err(|e| D::Error::custom(e)),
+                .map_err(D::Error::custom),
             other => Err(D::Error::custom(format!(
                 "unknown cutouts_storage type {:?}; expected \"mongo\" or \"s3\"",
                 other
@@ -917,7 +897,7 @@ fn default_filter_refresh_interval_minutes() -> u64 {
 
 fn deserialize_filter_refresh_interval<'de, D>(deserializer: D) -> Result<u64, D::Error>
 where
-    D: serde::Deserializer<'de>,
+    D: Deserializer<'de>,
 {
     let value = u64::deserialize(deserializer)?;
     const MIN_INTERVAL: u64 = 1;
@@ -939,7 +919,7 @@ where
 
 fn deserialize_command_interval<'de, D>(deserializer: D) -> Result<usize, D::Error>
 where
-    D: serde::Deserializer<'de>,
+    D: Deserializer<'de>,
 {
     let value = usize::deserialize(deserializer)?;
     const MIN_INTERVAL: usize = 100;
@@ -962,7 +942,7 @@ where
 
 fn deserialize_max_match_rate<'de, D>(deserializer: D) -> Result<Option<u8>, D::Error>
 where
-    D: serde::Deserializer<'de>,
+    D: Deserializer<'de>,
 {
     let value = Option::<u8>::deserialize(deserializer)?;
     if let Some(v) = value {
@@ -1065,6 +1045,13 @@ where
     deserializer.deserialize_any(DeviceIdsVisitor)
 }
 
+impl GpuConfig {
+    /// Whether models load on CUDA: enabled, with at least one device.
+    pub fn is_active(&self) -> bool {
+        self.enabled && !self.device_ids.is_empty()
+    }
+}
+
 impl Default for GpuConfig {
     fn default() -> Self {
         GpuConfig {
@@ -1117,18 +1104,15 @@ impl AppConfig {
 
     #[instrument(err)]
     pub fn from_test_config() -> Result<Self, BoomConfigError> {
-        // Find the workspace root by looking for Cargo.toml with tests/ directory
         let mut current_dir = std::env::current_dir().expect("Failed to get current directory");
         let test_config_path = loop {
             let tests_dir = current_dir.join("tests");
             let test_config = tests_dir.join("config.test.yaml");
 
-            // Check if we found the workspace root (has tests dir with config file)
             if test_config.exists() {
                 break test_config;
             }
 
-            // Move up to parent directory
             if let Some(parent) = current_dir.parent() {
                 current_dir = parent.to_path_buf();
             } else {
@@ -1159,7 +1143,6 @@ impl AppConfig {
             return Err("Admin password must be set via BOOM_API__AUTH__ADMIN_PASSWORD environment variable".to_string());
         }
 
-        // Validate token expiration
         if self.api.auth.token_expiration == 0 {
             return Err("Token expiration must be greater than 0 for security reasons".to_string());
         }
@@ -1183,7 +1166,7 @@ impl AppConfig {
     }
 
     #[instrument(skip_all, err)]
-    pub async fn build_db(&self) -> Result<mongodb::Database, BoomConfigError> {
+    pub async fn build_db(&self) -> Result<Database, BoomConfigError> {
         build_db(self).await
     }
 
@@ -1220,7 +1203,6 @@ pub fn load_config(config_path: Option<&str>) -> Result<AppConfig, BoomConfigErr
 
     let app_config: AppConfig = config.try_deserialize()?;
 
-    // Validate that required secrets are present
     if let Err(e) = app_config.validate_secrets() {
         return Err(BoomConfigError::InvalidSecretError(e));
     }
@@ -1313,7 +1295,7 @@ mod tests {
     /// `from_test_config`, and would clobber any `BOOM_*` values a developer's
     /// `.env` had already loaded into the process.
     fn config_with_env(vars: &[(&str, &str)]) -> Config {
-        let env: std::collections::HashMap<String, String> = vars
+        let env: HashMap<String, String> = vars
             .iter()
             .map(|(key, value)| (key.to_string(), value.to_string()))
             .collect();
@@ -1329,11 +1311,7 @@ mod tests {
 
     #[test]
     fn an_empty_env_var_does_not_blank_out_a_configured_value() {
-        // The shape that hid social sign-in in production: docker-compose lists
-        // BOOM_BABAMUL__OAUTH__REDIRECT_BASE_URL with a `:-` default, so the
-        // container got `…REDIRECT_BASE_URL=` even though nothing set it, and
-        // that empty string beat the value in config/prod/<deployment>/config.yaml.
-        // The deployment then looked unconfigured and rendered no buttons.
+        // Regression: an empty compose default hid social sign-in in production.
         let conf = config_with_env(&[
             ("BOOM_BABAMUL__WEBAPP_URL", ""),
             ("BOOM_BABAMUL__OAUTH__REDIRECT_BASE_URL", ""),
@@ -1352,10 +1330,7 @@ mod tests {
 
     #[test]
     fn a_non_empty_env_var_still_overrides_the_file() {
-        // The other half of the pair: ignoring *empty* variables must not turn
-        // into ignoring the environment, or every BOOM_* override in the deploy
-        // workflow would quietly stop working and the test above would pass for
-        // the wrong reason.
+        // The other half: ignoring empty vars must not ignore the environment.
         let conf = config_with_env(&[("BOOM_BABAMUL__WEBAPP_URL", "https://override.example")]);
 
         assert_eq!(
@@ -1372,9 +1347,7 @@ mod tests {
         };
         assert!(provider.is_configured());
 
-        // A half-filled provider must fail closed rather than send users to a
-        // consent screen that will reject them. Credentials are the only
-        // switch, so there is no way to be "enabled" without them.
+        // A half-filled provider must fail closed, not hit a rejecting consent screen.
         provider.client_secret = String::new();
         assert!(!provider.is_configured());
         provider.client_secret = "secret".to_string();
@@ -1384,8 +1357,7 @@ mod tests {
 
     #[test]
     fn oauth_config_defaults_are_off_with_a_usable_state_ttl() {
-        // Deserializing from `{}` exercises the serde defaults, which are
-        // separate from the Default impl and easy to leave out of step.
+        // The serde defaults are separate from the Default impl.
         let config: OAuthConfig = serde_json::from_str("{}").unwrap();
         assert!(!config.google.is_configured());
         assert!(!config.github.is_configured());
@@ -1450,5 +1422,16 @@ mod tests {
         let json = r#"{"enabled": true, "device_ids": [2, 5]}"#;
         let config: GpuConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.device_ids, vec![2, 5]);
+    }
+
+    #[test]
+    fn test_gpu_config_is_active() {
+        let active: GpuConfig = serde_json::from_str(r#"{"enabled": true}"#).unwrap();
+        assert!(active.is_active());
+        let disabled: GpuConfig = serde_json::from_str(r#"{"enabled": false}"#).unwrap();
+        assert!(!disabled.is_active());
+        let no_device: GpuConfig =
+            serde_json::from_str(r#"{"enabled": true, "device_ids": []}"#).unwrap();
+        assert!(!no_device.is_active());
     }
 }

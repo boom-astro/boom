@@ -109,8 +109,7 @@ async fn run_enrich_only<T: EnrichmentWorker>(
 
         command_check_countdown = command_check_countdown.saturating_sub(candids.len());
 
-        // Enrich alerts (writes ML scores + properties to MongoDB).
-        // Return value is discarded: we intentionally do not push to any output queue.
+        // Return value dropped on purpose: nothing is pushed to an output queue.
         worker.process_alerts(&candids).await?;
     }
 
@@ -138,7 +137,7 @@ async fn run(args: Cli) {
         .expect("GPU configuration is invalid for the survey");
 
     let shared_model_pool: Option<Arc<SharedModelPool>> =
-        if matches!(args.survey, Survey::Ztf) && config.gpu.enabled {
+        if matches!(args.survey, Survey::Ztf) && config.gpu.is_active() {
             Some(
                 SharedModelPool::load(&config.gpu.device_ids)
                     .expect("failed to load ONNX models on GPU"),
@@ -200,8 +199,7 @@ async fn run(args: Cli) {
         worker_handles.push((handle, sender));
     }
 
-    // Sigint handler
-    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
     tokio::spawn(
         async {
             info!("waiting for ctrl-c");
@@ -216,7 +214,6 @@ async fn run(args: Cli) {
         .instrument(info_span!("sigint handler")),
     );
 
-    let mut shutdown_rx = shutdown_rx;
     loop {
         tokio::select! {
             _ = &mut shutdown_rx => {
@@ -230,8 +227,7 @@ async fn run(args: Cli) {
                     .count();
                 let dead = total - live;
                 if live == 0 {
-                    // Every worker has exited; nothing is draining the queue.
-                    // Log loudly and shut down instead of idling forever.
+                    // Nothing is draining the queue: shut down instead of idling.
                     error!(
                         total,
                         "all enrichment-only workers have died; nothing is draining the queue, shutting down"
@@ -274,11 +270,7 @@ async fn main() {
     let (subscriber, _guard) = build_subscriber().expect("failed to build subscriber");
     tracing::subscriber::set_global_default(subscriber).expect("failed to install subscriber");
 
-    // Worker enrichment loops run on dedicated OS threads, so a panic there
-    // otherwise only prints to stderr and surfaces as a bare "worker panicked"
-    // when the thread is joined. Install a hook that records the panic message
-    // and location through tracing so failures are visible in structured logs,
-    // then delegate to the default hook to preserve the usual stderr backtrace.
+    // Worker threads panic to stderr only, so route panics through tracing too.
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let location = info

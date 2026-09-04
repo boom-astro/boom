@@ -66,6 +66,7 @@ RUN --mount=type=cache,target=/app/target,sharing=locked \
        target/release/migrate_fp_flux \
        target/release/migrate_snr \
        target/release/reprocess_crossmatch \
+       target/release/prepare_catalog \
        target/release/copy_cutouts \
        target/release/stream_kowalski_alerts \
        target/release/enrich_reprocess \
@@ -115,6 +116,7 @@ COPY --from=builder /app/bin/api /app/boom-api
 COPY --from=builder /app/bin/migrate_fp_flux /app/migrate_fp_flux
 COPY --from=builder /app/bin/migrate_snr /app/migrate_snr
 COPY --from=builder /app/bin/reprocess_crossmatch /app/reprocess_crossmatch
+COPY --from=builder /app/bin/prepare_catalog /app/prepare_catalog
 COPY --from=builder /app/bin/mpcorb_ingest /app/mpcorb_ingest
 COPY --from=builder /app/bin/task_worker /app/task_worker
 COPY --from=builder /opt/ort /opt/ort
