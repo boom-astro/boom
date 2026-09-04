@@ -81,12 +81,8 @@ describe("updateProfileName", () => {
 
 describe("fetchProfile", () => {
   /**
-   * `profile.id` has exactly one consumer — `posthog.identify` — so when it is
-   * `undefined` nothing breaks visibly: `identify` just falls back to the
-   * username, and each user quietly becomes two PostHog persons, a web one and
-   * an API one keyed on the real id. That is what these pin. The API sends
-   * `id`; it used to send `_id`, and that spelling is still accepted so a
-   * browser running a cached bundle across the deploy doesn't regress.
+   * `profile.id` feeds `posthog.identify`, so an `undefined` id silently splits
+   * each user into a web person and an API person.
    */
   it("reads the id the API sends", async () => {
     const fetchMock = vi.fn(async () =>
@@ -104,9 +100,8 @@ describe("fetchProfile", () => {
   })
 
   it("leaves the id undefined when the API sends neither spelling", async () => {
-    // Not `""`: the identity fallback chain is `id ?? username ?? email`, and
-    // `??` treats an empty string as a real value — so a fabricated one would
-    // collapse every affected user onto a single empty-string PostHog person.
+    // Not `""`: `id ?? username ?? email` takes an empty string for a real id,
+    // collapsing every affected user onto one PostHog person.
     const fetchMock = vi.fn(async () =>
       jsonResponse({
         message: "success",

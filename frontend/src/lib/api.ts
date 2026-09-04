@@ -13,9 +13,8 @@ export type ApiObject = Record<string, unknown>;
 // Profile shape returned by `/profile`
 export type Profile = {
   /**
-   * Babamul user id, and the PostHog `distinct_id` the API keys its events on.
-   * Optional because it is absent if the API ever fails to send one, and the
-   * callers that read it depend on that being `undefined` rather than `""`.
+   * Babamul user id, and the PostHog `distinct_id` the API keys its events on;
+   * optional so a missing id stays `undefined` rather than `""`.
    */
   id?: string;
   username: string;
@@ -270,20 +269,8 @@ export async function fetchObject(survey: string, objectId: string): Promise<Api
 }
 
 /**
- * The profile as it arrives, tolerating either spelling of the id.
- *
- * `BabamulUserPublic` used to serialize the id as `_id`, which made a `Profile`
- * typed with `id` a claim about the wire that wasn't true. Nothing but
- * analytics read the field, so the `undefined` went unnoticed — it surfaced
- * only as `posthog.identify` falling back to the username, which split each
- * user into a web person and an API person. The API now sends `id`; `_id` is
- * still accepted so a browser holding a cached bundle across the deploy
- * doesn't quietly regress to that fallback.
- *
- * If neither is present the id stays `undefined`, deliberately: callers pick an
- * identity with `profile.id ?? profile.username ?? profile.email`, and `??`
- * only falls through on nullish values. Substituting `""` here would look like
- * a real id and put every such user on a single empty-string PostHog person.
+ * The profile as it arrives, accepting the legacy `_id` spelling alongside `id`
+ * so a browser on a cached bundle doesn't regress across the deploy.
  */
 type ProfileWire = (Omit<NonNullable<Profile>, "id"> & { id?: string; _id?: string }) | null;
 

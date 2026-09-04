@@ -202,8 +202,8 @@ pub struct BabamulUser {
 
 #[derive(Serialize, Deserialize, Clone, Debug, ToSchema)]
 pub struct BabamulUserPublic {
-    /// The user id. Mongo stores it as `_id` (see `BabamulUser`), but that is
-    /// a storage detail: this is the public shape, so it goes out as `id`.
+    /// The user id: Mongo storing it as `_id` is a storage detail, so the
+    /// public shape sends `id`.
     pub id: String,
     pub username: String,
     pub email: String,

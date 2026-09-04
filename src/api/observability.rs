@@ -124,16 +124,9 @@ pub async fn request_metrics_middleware(
     response
 }
 
-/// Who the request resolved to, as far as analytics are concerned.
-///
-/// The `distinct_id` is the user `_id`, which is the same value the web app
-/// hands `posthog.identify` — that is what merges web, API and Kafka activity
-/// onto one PostHog person. The id alone, though, makes for a person you
-/// can't put a name to in the PostHog UI, and a user who only ever uses the
-/// Python package never touches the web app's `identify` call, so nothing else
-/// would ever fill that in. Carrying `email` and `username` here lets the
-/// event set them as person properties, so a person is identifiable no matter
-/// which surface they came in through.
+/// Who the request resolved to: the id that merges web, API and Kafka activity
+/// onto one PostHog person, plus the `email` and `username` that make that
+/// person identifiable in the PostHog UI.
 struct UserIdentity {
     id: String,
     email: String,
@@ -179,11 +172,9 @@ fn build_request_event(
     .with_opt("python_version", client_info.python_version.as_deref())
     .with_opt("client_os", client_info.os.as_deref());
 
-    // Unauthenticated traffic must not create person profiles in PostHog.
-    // Authenticated traffic sets the person's email and username so the
-    // profile is legible in the PostHog UI rather than a bare id, and so
-    // package-only users get one without ever visiting the web app. `$set`
-    // (not `$set_once`) so a changed email follows the account.
+    // Unauthenticated traffic must not create person profiles in PostHog, while
+    // authenticated traffic `$set`s email and username so the person is legible
+    // even for a user who only ever uses the Python package.
     match user {
         Some(user) => event.with(
             "$set",
@@ -411,7 +402,6 @@ mod tests {
             event.properties.get("$process_person_profile").unwrap(),
             false
         );
-        // And must not attach person properties to the shared anonymous id.
         assert!(event.properties.get("$set").is_none());
     }
 
@@ -433,8 +423,6 @@ mod tests {
 
         assert_eq!(event.distinct_id, "user-42");
         assert_eq!(event.properties.get("authenticated").unwrap(), true);
-        // Email and username land on the person, not just the event, so the
-        // PostHog person for an API-only user is identifiable.
         let set = event.properties.get("$set").unwrap();
         assert_eq!(set.get("email").unwrap(), "someone@example.org");
         assert_eq!(set.get("username").unwrap(), "someone");
