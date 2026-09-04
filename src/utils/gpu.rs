@@ -30,7 +30,7 @@ fn validate_gpu_inference(device_ids: &[i32]) -> Result<(), Box<dyn std::error::
     for &device_id in device_ids {
         info!(device_id, "Running BTSBotModel inference on device");
         let mut model = BtsBotModel::new_on_device(
-            "data/models/btsbot-v1.0.1.onnx",
+            "data/models/btsbot-v2.0.0.onnx",
             device_id,
             std::ptr::null_mut(),
         )?;
