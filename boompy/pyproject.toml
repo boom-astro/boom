@@ -5,7 +5,11 @@ description = "Internal Python add-on for BOOM. Runs inside the BOOM cluster; no
 requires-python = ">=3.11"
 dependencies = [
     "requests>=2.32",
+    # Reads the archives BOOM sources catalogs from, and converts the awkward
+    # formats to parquet so Rust only ever reads one columnar format.
+    "astropy>=6.0",
     "lsdb>=0.6",
+    "pandas>=2.0",
     "pyarrow>=17",
 ]
 

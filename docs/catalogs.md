@@ -65,7 +65,7 @@ not yet queryable by position.
 | Slug | Collection | Format | Chunks | What it is |
 | --- | --- | --- | --- | --- |
 | `2mass` | `2MASS` | pipe-delimited text | ~92 files | Near-infrared JHKs photometry for 471 million point sources. |
-| `ned-lvs` | `NED_LVS` | FITS table | 1 file | Redshifts, distances, stellar masses and angular diameters for nearby galaxies. Always the current NED release. |
+| `ned-lvs` | `NED_LVS` | parquet, converted from FITS | 1 file | Redshifts, distances, stellar masses and angular diameters for nearby galaxies. Always the current NED release. |
 | `allwise` | `AllWISE` | parquet | ~1000 HEALPix partitions | Mid-infrared W1–W4 photometry and proper motions for 748 million sources, from the LSDB HATS mirror. |
 
 TODO: the rest of the catalogs BOOM crossmatches against — Gaia DR3, DESI DR1,
@@ -88,17 +88,23 @@ archives are: LSDB reads HATS partitioning, `astroquery` speaks to the archives
 directly, and reimplementing either in Rust to avoid a subprocess would be a bad
 trade. Everything after the file lands on disk is Rust.
 
-The Rust side needs a record type implementing the trait for its format
-(`FromAsciiRow`, `FromDataFrame`, `FromFitsRows`, or serde's `Deserialize` for
-CSV) plus `HasCoordinates`, and an entry in `CATALOGS` in `src/catalogs/mod.rs`.
-Field names on the record type are load-bearing: the `crossmatch` projections in
-`config.yaml` are written against them.
+The Rust side needs a record type implementing the trait for its format —
+`FromRecordBatch` for parquet, `FromAsciiRow` for delimited text, or serde's
+`Deserialize` for CSV — plus `HasCoordinates`, and an entry in `CATALOGS` in
+`src/catalogs/mod.rs`. Field names on the record type are load-bearing: the
+`crossmatch` projections in `config.yaml` are written against them.
+
+**BOOM reads two formats: delimited text and parquet.** Anything else is
+converted to parquet by boompy, where the library that reads it already lives —
+`astropy` for FITS, `lsdb` for HATS. That is why there is no FITS reader in the
+Rust tree: adding one meant linking cfitsio into every BOOM binary to answer
+"give me this column as f64". Column reads coerce across widths (f32/f64,
+integer types, `Utf8`/`Utf8View`), so ingest does not depend on which tool wrote
+the file, and a column the projection stopped emitting fails with its own name
+rather than ingesting nulls.
 
 Give the record a **deterministic `_id`** derived from a stable source
 identifier. This is what makes re-ingest an upsert rather than a duplicate
 factory, and it cannot be retrofitted — once a collection exists with generated
 ids there is no way to match new source records to the documents already there.
 
-The parquet and FITS engines need `--features catalogs`, which pulls in polars
-and fitsio (the latter needs `libcfitsio-dev`). The csv and ascii engines are
-always built.

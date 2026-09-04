@@ -22,17 +22,6 @@ fn optional_string(field: &str) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
-/// FITS has no null: absent numeric values arrive as NaN or as the type's
-/// extreme, and storing those would let a crossmatch treat a missing redshift
-/// as a real one.
-#[cfg(feature = "catalogs")]
-fn finite(value: f64) -> Option<f64> {
-    value
-        .is_finite()
-        .then_some(value)
-        .filter(|v| *v > f64::MIN && *v < f64::MAX)
-}
-
 // ---------------------------------------------------------------------------
 // 2MASS -- ascii
 // ---------------------------------------------------------------------------
@@ -132,7 +121,7 @@ impl super::ascii::FromAsciiRow for TwoMass {
 impl HasCoordinates for TwoMass {}
 
 // ---------------------------------------------------------------------------
-// NED-LVS -- fits
+// NED-LVS -- parquet, converted from the published FITS table by boompy
 // ---------------------------------------------------------------------------
 
 /// One row of the NED Local Volume Sample.
@@ -196,78 +185,83 @@ pub struct Ned {
     pub ml_ratio: Option<f64>,
 }
 
-#[cfg(feature = "catalogs")]
-impl super::fits::FromFitsRows for Ned {
-    fn read_rows(
-        hdu: &fitsio::hdu::FitsHdu,
-        fptr: &mut fitsio::FitsFile,
-        range: std::ops::Range<usize>,
-    ) -> Result<Vec<Self>, fitsio::errors::Error> {
-        macro_rules! col {
-            ($name:literal, $ty:ty) => {
-                hdu.read_col_range::<$ty>(fptr, $name, &range)?
-            };
-        }
-        let objname = col!("objname", String);
-        let ra = col!("ra", f64);
-        let dec = col!("dec", f64);
-        let objtype = col!("objtype", String);
-        let z = col!("z", f64);
-        let z_unc = col!("z_unc", f64);
-        let z_tech = col!("z_tech", String);
-        let z_qual = col!("z_qual", bool);
-        let z_refcode = col!("z_refcode", String);
-        let dist_mpc = col!("DistMpc", f64);
-        let dist_mpc_unc = col!("DistMpc_unc", f64);
-        let dist_mpc_method = col!("DistMpc_method", String);
-        let diam = col!("Diam", f64);
-        let diam_ra = col!("Diam_ra", f64);
-        let diam_dec = col!("Diam_dec", f64);
-        let diam_ba = col!("Diam_ba", f64);
-        let diam_pa = col!("Diam_pa", f64);
-        let diam_survey = col!("Diam_survey", String);
-        let diam_filt = col!("Diam_filt", String);
-        let diam_refcode = col!("Diam_refcode", String);
-        let diam_qual = col!("Diam_qual", bool);
-        let ebv = col!("ebv", f64);
-        let m_ks = col!("m_Ks", f64);
-        let m_ks_unc = col!("m_Ks_unc", f64);
-        let tmass_phot = col!("tMASSphot", String);
-        let m_star = col!("Mstar", f64);
-        let m_star_unc = col!("Mstar_unc", f64);
-        let ml_ratio = col!("MLratio", f64);
+impl super::arrow::FromRecordBatch for Ned {
+    fn from_batch(
+        batch: &::arrow::array::RecordBatch,
+    ) -> Result<Vec<Self>, super::arrow::ColumnError> {
+        use super::arrow::{bool_column, f64_column, string_column};
 
-        let mut rows = Vec::with_capacity(objname.len());
-        for i in 0..objname.len() {
+        // Column names are the published NED-LVS FITS ones, preserved through
+        // the conversion in boompy so the projection here reads like the
+        // catalog's own documentation.
+        let objname = string_column(batch, "objname")?;
+        let ra = f64_column(batch, "ra")?;
+        let dec = f64_column(batch, "dec")?;
+        let objtype = string_column(batch, "objtype")?;
+        let z = f64_column(batch, "z")?;
+        let z_unc = f64_column(batch, "z_unc")?;
+        let z_tech = string_column(batch, "z_tech")?;
+        let z_qual = bool_column(batch, "z_qual")?;
+        let z_refcode = string_column(batch, "z_refcode")?;
+        let dist_mpc = f64_column(batch, "DistMpc")?;
+        let dist_mpc_unc = f64_column(batch, "DistMpc_unc")?;
+        let dist_mpc_method = string_column(batch, "DistMpc_method")?;
+        let diam = f64_column(batch, "Diam")?;
+        let diam_ra = f64_column(batch, "Diam_ra")?;
+        let diam_dec = f64_column(batch, "Diam_dec")?;
+        let diam_ba = f64_column(batch, "Diam_ba")?;
+        let diam_pa = f64_column(batch, "Diam_pa")?;
+        let diam_survey = string_column(batch, "Diam_survey")?;
+        let diam_filt = string_column(batch, "Diam_filt")?;
+        let diam_refcode = string_column(batch, "Diam_refcode")?;
+        let diam_qual = bool_column(batch, "Diam_qual")?;
+        let ebv = f64_column(batch, "ebv")?;
+        let m_ks = f64_column(batch, "m_Ks")?;
+        let m_ks_unc = f64_column(batch, "m_Ks_unc")?;
+        let tmass_phot = string_column(batch, "tMASSphot")?;
+        let m_star = f64_column(batch, "Mstar")?;
+        let m_star_unc = f64_column(batch, "Mstar_unc")?;
+        let ml_ratio = f64_column(batch, "MLratio")?;
+
+        let mut rows = Vec::with_capacity(batch.num_rows());
+        for i in 0..batch.num_rows() {
+            // A galaxy with no name or no position cannot be crossmatched and
+            // would be rejected by the 2dsphere index; skip rather than invent.
+            let (Some(objname), Some(ra), Some(dec)) = (objname[i].clone(), ra[i], dec[i]) else {
+                continue;
+            };
             rows.push(Ned {
-                objname: objname[i].clone(),
-                ra: ra[i],
-                dec: dec[i],
-                objtype: objtype[i].clone(),
-                z: finite(z[i]),
-                z_unc: finite(z_unc[i]),
-                z_tech: z_tech[i].clone(),
-                z_qual: z_qual[i],
-                z_refcode: z_refcode[i].clone(),
-                dist_mpc: finite(dist_mpc[i]),
-                dist_mpc_unc: finite(dist_mpc_unc[i]),
-                dist_mpc_method: dist_mpc_method[i].clone(),
-                diam: finite(diam[i]),
-                diam_ra: finite(diam_ra[i]),
-                diam_dec: finite(diam_dec[i]),
-                diam_ba: finite(diam_ba[i]),
-                diam_pa: finite(diam_pa[i]),
-                diam_survey: diam_survey[i].clone(),
-                diam_filt: diam_filt[i].clone(),
-                diam_refcode: diam_refcode[i].clone(),
-                diam_qual: diam_qual[i],
-                ebv: finite(ebv[i]),
-                m_ks: finite(m_ks[i]),
-                m_ks_unc: finite(m_ks_unc[i]),
-                tmass_phot: tmass_phot[i].clone(),
-                m_star: finite(m_star[i]),
-                m_star_unc: finite(m_star_unc[i]),
-                ml_ratio: finite(ml_ratio[i]),
+                objname,
+                ra,
+                dec,
+                // The string fields are always present in the document, as
+                // empty strings rather than nulls, because consumers project
+                // them unconditionally.
+                objtype: objtype[i].clone().unwrap_or_default(),
+                z: z[i],
+                z_unc: z_unc[i],
+                z_tech: z_tech[i].clone().unwrap_or_default(),
+                z_qual: z_qual[i].unwrap_or(false),
+                z_refcode: z_refcode[i].clone().unwrap_or_default(),
+                dist_mpc: dist_mpc[i],
+                dist_mpc_unc: dist_mpc_unc[i],
+                dist_mpc_method: dist_mpc_method[i].clone().unwrap_or_default(),
+                diam: diam[i],
+                diam_ra: diam_ra[i],
+                diam_dec: diam_dec[i],
+                diam_ba: diam_ba[i],
+                diam_pa: diam_pa[i],
+                diam_survey: diam_survey[i].clone().unwrap_or_default(),
+                diam_filt: diam_filt[i].clone().unwrap_or_default(),
+                diam_refcode: diam_refcode[i].clone().unwrap_or_default(),
+                diam_qual: diam_qual[i].unwrap_or(false),
+                ebv: ebv[i],
+                m_ks: m_ks[i],
+                m_ks_unc: m_ks_unc[i],
+                tmass_phot: tmass_phot[i].clone().unwrap_or_default(),
+                m_star: m_star[i],
+                m_star_unc: m_star_unc[i],
+                ml_ratio: ml_ratio[i],
             });
         }
         Ok(rows)
@@ -310,90 +304,64 @@ pub struct AllWise {
     pub sigpmdec: Option<f64>,
 }
 
-/// Columns boompy asks LSDB for. Kept next to the struct so the projection and
-/// the reader cannot drift apart.
-pub const ALLWISE_COLUMNS: &[&str] = &[
-    "source_id",
-    "ra",
-    "dec",
-    "sigra",
-    "sigdec",
-    "w1mpro",
-    "w2mpro",
-    "w3mpro",
-    "w4mpro",
-    "w1sigmpro",
-    "w2sigmpro",
-    "w3sigmpro",
-    "w4sigmpro",
-    "w1rchi2",
-    "w2rchi2",
-    "pmra",
-    "pmdec",
-    "sigpmra",
-    "sigpmdec",
-];
+impl super::arrow::FromRecordBatch for AllWise {
+    fn from_batch(
+        batch: &::arrow::array::RecordBatch,
+    ) -> Result<Vec<Self>, super::arrow::ColumnError> {
+        use super::arrow::{f64_column, string_column};
 
-#[cfg(feature = "catalogs")]
-impl super::parquet::FromDataFrame for AllWise {
-    fn from_dataframe(
-        df: &polars::prelude::DataFrame,
-    ) -> Result<Vec<Self>, polars::prelude::PolarsError> {
-        let source_id = df.column("source_id")?.str()?;
-        let ra = df.column("ra")?.f64()?;
-        let dec = df.column("dec")?.f64()?;
-        let sigra = df.column("sigra")?.f64()?;
-        let sigdec = df.column("sigdec")?.f64()?;
-        // Bound once per column rather than per row: `Series::f64()` re-checks
-        // the dtype on every call, which shows up over millions of rows.
-        let w1mpro = df.column("w1mpro")?.f64()?;
-        let w2mpro = df.column("w2mpro")?.f64()?;
-        let w3mpro = df.column("w3mpro")?.f64()?;
-        let w4mpro = df.column("w4mpro")?.f64()?;
-        let w1sigmpro = df.column("w1sigmpro")?.f64()?;
-        let w2sigmpro = df.column("w2sigmpro")?.f64()?;
-        let w3sigmpro = df.column("w3sigmpro")?.f64()?;
-        let w4sigmpro = df.column("w4sigmpro")?.f64()?;
-        let w1rchi2 = df.column("w1rchi2")?.f64()?;
-        let w2rchi2 = df.column("w2rchi2")?.f64()?;
-        let pmra = df.column("pmra")?.f64()?;
-        let pmdec = df.column("pmdec")?.f64()?;
-        let sigpmra = df.column("sigpmra")?.f64()?;
-        let sigpmdec = df.column("sigpmdec")?.f64()?;
+        // boompy projects these out of the HATS catalog; naming them again here
+        // is how the reader says what it needs, and a column the projection
+        // stopped emitting fails loudly with the column name.
+        let source_id = string_column(batch, "source_id")?;
+        let ra = f64_column(batch, "ra")?;
+        let dec = f64_column(batch, "dec")?;
+        let sigra = f64_column(batch, "sigra")?;
+        let sigdec = f64_column(batch, "sigdec")?;
+        let w1mpro = f64_column(batch, "w1mpro")?;
+        let w2mpro = f64_column(batch, "w2mpro")?;
+        let w3mpro = f64_column(batch, "w3mpro")?;
+        let w4mpro = f64_column(batch, "w4mpro")?;
+        let w1sigmpro = f64_column(batch, "w1sigmpro")?;
+        let w2sigmpro = f64_column(batch, "w2sigmpro")?;
+        let w3sigmpro = f64_column(batch, "w3sigmpro")?;
+        let w4sigmpro = f64_column(batch, "w4sigmpro")?;
+        let w1rchi2 = f64_column(batch, "w1rchi2")?;
+        let w2rchi2 = f64_column(batch, "w2rchi2")?;
+        let pmra = f64_column(batch, "pmra")?;
+        let pmdec = f64_column(batch, "pmdec")?;
+        let sigpmra = f64_column(batch, "sigpmra")?;
+        let sigpmdec = f64_column(batch, "sigpmdec")?;
 
-        let mut rows = Vec::with_capacity(df.height());
-        for i in 0..df.height() {
+        let mut rows = Vec::with_capacity(batch.num_rows());
+        for i in 0..batch.num_rows() {
             // A source with no id or no position cannot be crossmatched and
             // would fail the 2dsphere index; skip rather than fabricate.
-            let (Some(id), Some(ra), Some(dec), Some(sigra), Some(sigdec)) = (
-                source_id.get(i),
-                ra.get(i),
-                dec.get(i),
-                sigra.get(i),
-                sigdec.get(i),
-            ) else {
+            let (Some(source_id), Some(ra), Some(dec), Some(sigra), Some(sigdec)) =
+                (source_id[i].clone(), ra[i], dec[i], sigra[i], sigdec[i])
+            else {
                 continue;
             };
             rows.push(AllWise {
-                source_id: id.to_string(),
+                source_id,
                 ra,
                 dec,
                 sigra,
                 sigdec,
-                w1mpro: w1mpro.get(i),
-                w2mpro: w2mpro.get(i),
-                w3mpro: w3mpro.get(i),
-                w4mpro: w4mpro.get(i),
-                w1sigmpro: w1sigmpro.get(i),
-                w2sigmpro: w2sigmpro.get(i),
-                w3sigmpro: w3sigmpro.get(i),
-                w4sigmpro: w4sigmpro.get(i),
-                w1rchi2: w1rchi2.get(i),
-                w2rchi2: w2rchi2.get(i),
-                pmra: pmra.get(i),
-                pmdec: pmdec.get(i),
-                sigpmra: sigpmra.get(i),
-                sigpmdec: sigpmdec.get(i),
+                w1mpro: w1mpro[i],
+                w2mpro: w2mpro[i],
+                w3mpro: w3mpro[i],
+                w4mpro: w4mpro[i],
+                w1sigmpro: w1sigmpro[i],
+                w2sigmpro: w2sigmpro[i],
+                w3sigmpro: w3sigmpro[i],
+                w4sigmpro: w4sigmpro[i],
+                w1rchi2: w1rchi2[i],
+                w2rchi2: w2rchi2[i],
+                pmra: pmra[i],
+                pmdec: pmdec[i],
+                sigpmra: sigpmra[i],
+                sigpmdec: sigpmdec[i],
             });
         }
         Ok(rows)
@@ -478,7 +446,7 @@ mod tests {
     }
 
     #[test]
-    fn allwise_columns_match_the_stored_fields() {
+    fn allwise_document_keys_match_the_published_column_names() {
         // boompy projects exactly these columns out of the HATS catalog, so a
         // field added to the struct without adding the column here would read
         // back as missing.
@@ -504,15 +472,11 @@ mod tests {
             sigpmdec: Some(1.0),
         })
         .expect("serializes");
-        for column in ALLWISE_COLUMNS {
-            // source_id is stored as _id.
-            let key = if *column == "source_id" {
-                "_id"
-            } else {
-                column
-            };
-            assert!(doc.contains_key(key), "{column} missing from the document");
-        }
-        assert_eq!(doc.len(), ALLWISE_COLUMNS.len());
+        // source_id is stored as _id; the other 18 keep their published names,
+        // which the crossmatch projections in config.yaml are written against.
+        assert!(doc.contains_key("_id"));
+        assert!(!doc.contains_key("source_id"));
+        assert!(doc.contains_key("w4sigmpro"));
+        assert_eq!(doc.len(), 19);
     }
 }

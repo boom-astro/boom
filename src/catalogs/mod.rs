@@ -13,14 +13,11 @@
 //! hundreds -- and it makes an interrupted run resumable, which matters when
 //! the run takes a day and the host reboots.
 
+pub mod arrow;
 pub mod ascii;
 pub mod csv;
 pub mod download;
-#[cfg(feature = "catalogs")]
-pub mod fits;
 pub mod ingest;
-#[cfg(feature = "catalogs")]
-pub mod parquet;
 pub mod types;
 
 use crate::tasks::TaskContext;
@@ -43,25 +40,18 @@ pub const STATE_COLLECTION: &str = "catalog_state";
 /// One variant per catalog rather than one per format: the format only says how
 /// to get columns out of a file, and the record type is what says which columns
 /// there are and what they mean.
+///
+/// There are only two formats to read -- delimited text and parquet -- because
+/// anything else is converted to parquet by boompy, where the library that
+/// reads it already lives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reader {
     /// 2MASS PSC, pipe-delimited text.
     TwoMass,
-    /// NED-LVS, a FITS binary table.
+    /// NED-LVS, converted from its published FITS table to parquet.
     Ned,
     /// AllWISE, parquet partitions.
     AllWise,
-}
-
-impl Reader {
-    /// Whether ingesting this catalog needs a build with the `catalogs`
-    /// feature, i.e. whether its format engine is one of the gated ones.
-    pub const fn needs_feature(&self) -> bool {
-        match self {
-            Reader::TwoMass => false,
-            Reader::Ned | Reader::AllWise => true,
-        }
-    }
 }
 
 /// A catalog BOOM knows how to ingest.
@@ -95,7 +85,7 @@ pub const CATALOGS: &[CatalogDef] = &[
         collection: "NED_LVS",
         title: "NED Local Volume Sample",
         description: "Redshifts, distances, stellar masses and angular diameters for \
-                      nearby galaxies. One FITS table, always the current release.",
+                      nearby galaxies. One table, always the current release.",
         reader: Reader::Ned,
     },
     CatalogDef {
@@ -117,11 +107,6 @@ pub fn find(id: &str) -> Option<&'static CatalogDef> {
 pub enum CatalogError {
     #[error("unknown catalog {id:?}; known catalogs are {known}")]
     Unknown { id: String, known: String },
-    #[error(
-        "ingesting {id} needs a build with the `catalogs` feature \
-         (cargo build --features catalogs)"
-    )]
-    FeatureRequired { id: String },
     #[error(transparent)]
     Download(#[from] DownloadError),
     #[error(transparent)]
@@ -220,13 +205,6 @@ pub async fn add_catalog(
         known: CATALOGS.iter().map(|c| c.id).collect::<Vec<_>>().join(", "),
     })?;
     tracing::Span::current().record("collection", def.collection);
-
-    // Fail before downloading a gigabyte, not after.
-    if def.reader.needs_feature() && !cfg!(feature = "catalogs") {
-        return Err(CatalogError::FeatureRequired {
-            id: def.id.to_string(),
-        });
-    }
 
     let state = db.collection::<Document>(STATE_COLLECTION);
     if params.drop_existing {
@@ -389,16 +367,8 @@ async fn ingest_file(
 ) -> Result<IngestReport, CatalogError> {
     match reader {
         Reader::TwoMass => Ok(ascii::ingest_ascii::<types::TwoMass>(inserter, path).await?),
-        #[cfg(feature = "catalogs")]
-        Reader::Ned => Ok(fits::ingest_fits::<types::Ned>(inserter, path).await?),
-        #[cfg(feature = "catalogs")]
-        Reader::AllWise => Ok(parquet::ingest_parquet::<types::AllWise>(inserter, path).await?),
-        // Unreachable via add_catalog, which checks the feature up front, but
-        // ingest_file is reachable on its own.
-        #[cfg(not(feature = "catalogs"))]
-        Reader::Ned | Reader::AllWise => Err(CatalogError::FeatureRequired {
-            id: format!("{:?}", reader),
-        }),
+        Reader::Ned => Ok(arrow::ingest_parquet::<types::Ned>(inserter, path).await?),
+        Reader::AllWise => Ok(arrow::ingest_parquet::<types::AllWise>(inserter, path).await?),
     }
 }
 

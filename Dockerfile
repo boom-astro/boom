@@ -9,8 +9,7 @@ ARG SCALA_VERSION
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     ca-certificates curl bash tar xz-utils gcc g++ python3 python3-venv libhdf5-dev \
-    perl make libsasl2-dev libsasl2-2 default-jre-headless pkg-config clang libclang-dev \
-    libcfitsio-dev && \
+    perl make libsasl2-dev libsasl2-2 default-jre-headless pkg-config clang libclang-dev && \
     apt-get clean && rm -rf /var/lib/apt/lists/* && \
     curl -fsSL https://dlcdn.apache.org/kafka/${KAFKA_VERSION}/kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz -o /tmp/kafka.tgz && \
     tar -xzf /tmp/kafka.tgz -C /opt && \
@@ -45,11 +44,6 @@ COPY ./src /app/src
 # actually changed are recompiled -- unlike a plain image layer, which is
 # all-or-nothing and rebuilds the whole workspace on any source change.
 #
-# Built with --features catalogs so catalog ingest can read parquet and FITS.
-# The feature exists to keep `cargo build`/`cargo test` fast for everyone who is
-# not touching catalog ingest -- polars is a slow compile -- not to keep it out
-# of the image, which needs every binary.
-#
 # A cache mount is NOT part of the image, so the release binaries are copied out
 # to /app/bin within the same RUN for the runtime stage to pick up. On CI the
 # mounts are persisted across runs by buildkit-cache-dance (see build.yaml);
@@ -57,7 +51,7 @@ COPY ./src /app/src
 RUN --mount=type=cache,target=/app/target,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
-    cargo build --release --features catalogs && \
+    cargo build --release && \
     mkdir -p /app/bin && \
     cp target/release/scheduler \
        target/release/kafka_consumer \
@@ -87,12 +81,9 @@ ARG SCALA_VERSION=2.13
 
 ARG UV_VERSION=0.10.0
 
-# libcfitsio-dev rather than the versioned runtime package: fitsio links
-# whatever soname the build stage found, and the -dev name does not move between
-# Debian releases.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-    ca-certificates curl bash libsasl2-2 default-jre-headless libcfitsio-dev && \
+    ca-certificates curl bash libsasl2-2 default-jre-headless && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # boompy fetches archival catalogs -- see boompy/README.md. uv manages both the

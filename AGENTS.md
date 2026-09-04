@@ -125,16 +125,10 @@ Nothing enforces these, so they are worth a glance in review.
 ```sh
 cargo fmt --all                 # or `make format` for pre-commit on everything
 cargo clippy --lib --bins --tests
-cargo clippy --features catalogs --lib --bins   # if you touched src/catalogs
 cd boompy && uv run pytest      # if you touched boompy
 make check-configs              # if you touched any config
 cd frontend && npx tsc --noEmit -p tsconfig.app.json && npm run build
 ```
-
-The `catalogs` feature gates the parquet and FITS ingest engines, so a default
-`cargo clippy` does not compile `src/catalogs/{parquet,fits}.rs` or the record
-types that use them. Building it needs `libcfitsio-dev` (`brew install cfitsio`
-on macOS).
 
 Clippy is noisy with pre-existing warnings across the tree; filter to the files
 you touched (`--message-format=short | grep <your file>`) rather than trying to
