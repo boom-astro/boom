@@ -6,7 +6,7 @@ use boom::{
     api::catalogs::WATCHLIST_PREFIX,
     conf::{load_dotenv, AppConfig, CatalogXmatchConfig},
     utils::{
-        data::make_progress_bar,
+        data::{make_progress_bar, spawn_progress_logger},
         enums::Survey,
         parser::parse_positive_usize,
         spatial::{
@@ -29,7 +29,6 @@ use tracing_subscriber::FmtSubscriber;
 
 const QUEUE_MULTIPLIER: usize = 2;
 const CURSOR_BATCH_SIZE: u32 = 10_000;
-const PROGRESS_LOG_SECS: u64 = 60;
 const ARCSEC_TO_RAD: f64 = std::f64::consts::PI / 180.0 / 3600.0;
 const STATE_COLLECTION: &str = "reprocess_crossmatch_state";
 const STATUS_MATCHING: &str = "matching";
@@ -124,46 +123,6 @@ struct AuxIdAndCoords {
 
 fn aux_match_projection() -> Document {
     doc! { "_id": 1, "coordinates.radec_geojson.coordinates": 1 }
-}
-
-/// The indicatif bar hides itself when stderr is not a terminal, i.e. whenever the run
-/// is piped to a log file, so mirror it into the tracing output.
-fn spawn_progress_logger(pb: ProgressBar, label: String) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(PROGRESS_LOG_SECS));
-        ticker.tick().await;
-        loop {
-            ticker.tick().await;
-            let pos = pb.position();
-            let len = pb.length().unwrap_or(0);
-            let elapsed = pb.elapsed().as_secs_f64();
-            let rate = if elapsed > 0.0 {
-                pos as f64 / elapsed
-            } else {
-                0.0
-            };
-            let eta_secs = if rate > 0.0 && len > pos {
-                ((len - pos) as f64 / rate) as u64
-            } else {
-                0
-            };
-            let pct = if len > 0 {
-                pos as f64 * 100.0 / len as f64
-            } else {
-                0.0
-            };
-            info!(
-                "[{}] {}/{} ({:.2}%) {:.0} docs/s, eta {}h{:02}m",
-                label,
-                pos,
-                len,
-                pct,
-                rate,
-                eta_secs / 3600,
-                (eta_secs % 3600) / 60,
-            );
-        }
-    })
 }
 
 async fn set_reprocess_state(
