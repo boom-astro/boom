@@ -137,7 +137,7 @@ async fn run_one(
     // A shutdown is not an outcome: hand the run back queued so the replacement
     // worker resumes it, instead of recording a failure someone has to
     // re-submit by hand.
-    if shutting_down.load(Ordering::Relaxed) && !matches!(result, Ok(_)) {
+    if shutting_down.load(Ordering::Relaxed) && result.is_err() {
         info!(run_id = %run.id, "shutting down; returning the run to the queue");
         if let Err(e) = queue::release(db, &run.id, worker_name).await {
             error!("failed to release run {}: {}", run.id, e);

@@ -71,19 +71,14 @@ impl Actor {
 /// On the run document from the start: adding it later would leave every
 /// historical run unable to say where it came from, and the whole point of
 /// keeping these records is being able to read them back.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Trigger {
     /// A person, through the API.
+    #[default]
     Api,
     /// A recurring schedule. Not yet implemented -- see docs/task-system.md.
     Schedule,
-}
-
-impl Default for Trigger {
-    fn default() -> Self {
-        Trigger::Api
-    }
 }
 
 /// How far along a running task is.
