@@ -74,6 +74,16 @@ pub struct CatalogDef {
     pub title: &'static str,
     pub description: &'static str,
     pub reader: Reader,
+    /// Other collection names this catalog is stored under.
+    ///
+    /// Some catalogs stamp their release into the collection name, so a
+    /// deployment that ingested an earlier release is running the same catalog
+    /// under a different name. Without this, config validation would call that
+    /// a typo, and the drift table would call a populated catalog missing.
+    ///
+    /// A new ingest always writes to `collection`; aliases only recognize what
+    /// is already there.
+    pub aliases: &'static [&'static str],
 }
 
 /// Every catalog this release knows how to build.
@@ -89,6 +99,7 @@ pub const CATALOGS: &[CatalogDef] = &[
         description: "Near-infrared JHKs photometry for 471 million point sources, \
                       published as ~92 pipe-delimited files.",
         reader: Reader::TwoMass,
+        aliases: &[],
     },
     CatalogDef {
         id: "ned-lvs",
@@ -97,6 +108,7 @@ pub const CATALOGS: &[CatalogDef] = &[
         description: "Redshifts, distances, stellar masses and angular diameters for \
                       nearby galaxies. One table, always the current release.",
         reader: Reader::Ned,
+        aliases: &[],
     },
     CatalogDef {
         id: "allwise",
@@ -105,6 +117,7 @@ pub const CATALOGS: &[CatalogDef] = &[
         description: "Mid-infrared W1-W4 photometry and proper motions for 748 million \
                       sources, read from the LSDB HATS mirror one HEALPix partition at a time.",
         reader: Reader::AllWise,
+        aliases: &[],
     },
     CatalogDef {
         id: "milliquas",
@@ -113,6 +126,9 @@ pub const CATALOGS: &[CatalogDef] = &[
         description: "Quasars and quasar candidates with redshifts and radio/X-ray \
                       associations. One table, converted from FITS.",
         reader: Reader::Milliquas,
+        // Milliquas stamps its release into the collection name; deployments
+        // sit on whichever they last ingested.
+        aliases: &["milliquas_v6", "milliquas_v7"],
     },
     CatalogDef {
         id: "desi-dr1",
@@ -121,6 +137,7 @@ pub const CATALOGS: &[CatalogDef] = &[
         description: "Spectroscopic redshifts from the iron zcatalog, filtered to the \
                       primary spectrum of each science target.",
         reader: Reader::DesiDr1,
+        aliases: &[],
     },
     CatalogDef {
         id: "catwise2020",
@@ -129,6 +146,7 @@ pub const CATALOGS: &[CatalogDef] = &[
         description: "Mid-infrared W1/W2 photometry and proper motions, published as \
                       several hundred IPAC tables.",
         reader: Reader::CatWise2020,
+        aliases: &[],
     },
     CatalogDef {
         id: "gaia-dr3",
@@ -137,6 +155,7 @@ pub const CATALOGS: &[CatalogDef] = &[
         description: "Astrometry, parallaxes, proper motions and G/BP/RP photometry for \
                       1.8 billion sources, in ~3400 gzipped CSV files.",
         reader: Reader::GaiaDr3,
+        aliases: &[],
     },
     CatalogDef {
         id: "galex",
@@ -144,6 +163,7 @@ pub const CATALOGS: &[CatalogDef] = &[
         title: "GALEX GUVcat_AIS",
         description: "Ultraviolet FUV/NUV photometry from the All-Sky Imaging Survey.",
         reader: Reader::Galex,
+        aliases: &[],
     },
 ];
 
@@ -157,7 +177,9 @@ pub fn find(id: &str) -> Option<&'static CatalogDef> {
 /// This is the direction the crossmatch config needs: `crossmatch.<survey>[]`
 /// names collections, not slugs.
 pub fn find_by_collection(collection: &str) -> Option<&'static CatalogDef> {
-    CATALOGS.iter().find(|c| c.collection == collection)
+    CATALOGS
+        .iter()
+        .find(|c| c.collection == collection || c.aliases.contains(&collection))
 }
 
 /// Which catalogs this deployment should hold.
@@ -686,6 +708,11 @@ pub const WITHOUT_DEFINITIONS: &[(&str, &str)] = &[
         "the published vsx.dat needs the fixed-column parser from boom-catalogs, which \
          has not been ported",
     ),
+    (
+        "PS1_DR1",
+        "boom-catalogs has a Pan-STARRS record type and downloader, but neither has been \
+         ported yet",
+    ),
 ];
 
 /// Names a crossmatch entry may use without having an ingest definition.
@@ -857,6 +884,26 @@ mod crossmatch_validation_tests {
             })
             .collect();
         HashMap::from([(Survey::Ztf, entries)])
+    }
+
+    #[test]
+    fn an_older_release_of_the_same_catalog_is_accepted() {
+        // Collection names are version-stamped, so a deployment sitting on an
+        // earlier release is running the same catalog under a different name.
+        // Calling that a typo would fail startup on a perfectly good config.
+        assert!(validate_crossmatch(&crossmatch(&["milliquas_v6"])).is_ok());
+        assert_eq!(
+            find_by_collection("milliquas_v6").map(|d| d.id),
+            Some("milliquas")
+        );
+    }
+
+    #[test]
+    fn the_test_config_passes_validation() {
+        // tests/config.test.yaml is what the rest of the suite loads; if it
+        // stops validating, twenty unrelated tests fail with a config error.
+        let config = crate::conf::AppConfig::from_test_config().expect("test config loads");
+        assert!(validate_crossmatch(&config.crossmatch).is_ok());
     }
 
     #[test]
