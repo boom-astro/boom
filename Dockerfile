@@ -9,7 +9,8 @@ ARG SCALA_VERSION
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     ca-certificates curl bash tar xz-utils gcc g++ python3 python3-venv libhdf5-dev \
-    perl make libsasl2-dev libsasl2-2 default-jre-headless pkg-config clang libclang-dev && \
+    perl make libsasl2-dev libsasl2-2 default-jre-headless pkg-config clang libclang-dev \
+    libcfitsio-dev && \
     apt-get clean && rm -rf /var/lib/apt/lists/* && \
     curl -fsSL https://dlcdn.apache.org/kafka/${KAFKA_VERSION}/kafka_${SCALA_VERSION}-${KAFKA_VERSION}.tgz -o /tmp/kafka.tgz && \
     tar -xzf /tmp/kafka.tgz -C /opt && \
@@ -44,6 +45,11 @@ COPY ./src /app/src
 # actually changed are recompiled -- unlike a plain image layer, which is
 # all-or-nothing and rebuilds the whole workspace on any source change.
 #
+# Built with --features catalogs so catalog ingest can read parquet and FITS.
+# The feature exists to keep `cargo build`/`cargo test` fast for everyone who is
+# not touching catalog ingest -- polars is a slow compile -- not to keep it out
+# of the image, which needs every binary.
+#
 # A cache mount is NOT part of the image, so the release binaries are copied out
 # to /app/bin within the same RUN for the runtime stage to pick up. On CI the
 # mounts are persisted across runs by buildkit-cache-dance (see build.yaml);
@@ -51,7 +57,7 @@ COPY ./src /app/src
 RUN --mount=type=cache,target=/app/target,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
-    cargo build --release && \
+    cargo build --release --features catalogs && \
     mkdir -p /app/bin && \
     cp target/release/scheduler \
        target/release/kafka_consumer \
@@ -77,10 +83,21 @@ FROM debian:trixie-slim AS app
 ARG KAFKA_VERSION=4.3.1
 ARG SCALA_VERSION=2.13
 
+ARG UV_VERSION=0.10.0
+
+# libcfitsio-dev rather than the versioned runtime package: fitsio links
+# whatever soname the build stage found, and the -dev name does not move between
+# Debian releases.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-    ca-certificates curl bash libsasl2-2 default-jre-headless && \
+    ca-certificates curl bash libsasl2-2 default-jre-headless libcfitsio-dev && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# boompy fetches archival catalogs -- see boompy/README.md. uv manages both the
+# interpreter and the dependencies, so there is no system Python to keep in step
+# with the lockfile.
+RUN curl -LsSf https://astral.sh/uv/${UV_VERSION}/install.sh | \
+    env UV_INSTALL_DIR=/usr/local/bin UV_UNMANAGED_INSTALL=1 sh
 
 ENV ORT_DYLIB_PATH=/opt/ort/libonnxruntime.so
 ENV LD_LIBRARY_PATH=/opt/ort
@@ -99,6 +116,14 @@ COPY --from=builder /app/bin/migrate_snr /app/migrate_snr
 COPY --from=builder /app/bin/reprocess_crossmatch /app/reprocess_crossmatch
 COPY --from=builder /app/bin/mpcorb_ingest /app/mpcorb_ingest
 COPY --from=builder /opt/ort /opt/ort
+
+# Resolved at build time from the committed lockfile, so a catalog ingest does
+# not depend on PyPI being reachable -- or on resolving to different versions
+# than the ones the tests ran against.
+COPY boompy /app/boompy
+ENV UV_PROJECT_ENVIRONMENT=/app/boompy/.venv
+ENV BOOM_BOOMPY_PATH=/app/boompy
+RUN uv sync --project /app/boompy --frozen --no-dev
 # Temporary
 COPY --from=builder /app/bin/copy_cutouts /app/copy_cutouts
 COPY --from=builder /app/bin/stream_kowalski_alerts /app/stream_kowalski_alerts
