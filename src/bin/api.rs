@@ -66,6 +66,12 @@ async fn main() -> std::io::Result<()> {
         tracing::info!("Babamul API endpoints are ENABLED");
         // Abandoned sign-in attempts are only cleaned up by this TTL index —
         // completed flows delete their own state, incomplete ones never do.
+        if let Err(error) =
+            boom::api::admin::reconcile_babamul_admins(&database, &config.babamul.admin_emails)
+                .await
+        {
+            panic!("failed to reconcile babamul admins: {error}");
+        }
         if let Err(error) = routes::babamul::oauth::ensure_oauth_state_index(&database).await {
             log_error!(WARN, error, "failed to create the OAuth TTL indexes");
         }

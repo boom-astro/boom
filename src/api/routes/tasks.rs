@@ -4,11 +4,15 @@
 //! deliberately no binary an operator can run over SSH. See
 //! [`docs/task-system.md`](../../../docs/task-system.md).
 
-use crate::api::{models::response, routes::users::User};
+use crate::api::{
+    admin::require_admin,
+    models::response,
+    routes::{babamul::BabamulUser, users::User},
+};
 use crate::tasks::{
     self,
     models::{now, TaskRun, TaskStatus, Trigger},
-    queue, Actor,
+    queue,
 };
 
 use actix_web::{get, post, web, HttpResponse};
@@ -40,16 +44,6 @@ pub struct LogsParams {
     pub after_seq: Option<u64>,
 }
 
-/// Admin-only: these runs mutate the data every scientific artifact derives
-/// from, and the run record has to name a real person.
-fn require_admin(current_user: &Option<web::ReqData<User>>) -> Result<&User, HttpResponse> {
-    match current_user {
-        Some(user) if user.is_admin => Ok(user),
-        Some(_) => Err(response::forbidden("Only admins can manage tasks")),
-        None => Err(HttpResponse::Unauthorized().body("Unauthorized")),
-    }
-}
-
 /// List the task types this release can run
 #[utoipa::path(
     get,
@@ -61,8 +55,11 @@ fn require_admin(current_user: &Option<web::ReqData<User>>) -> Result<&User, Htt
     tags=["Tasks"]
 )]
 #[get("/tasks/types")]
-pub async fn get_task_types(current_user: Option<web::ReqData<User>>) -> HttpResponse {
-    if let Err(e) = require_admin(&current_user) {
+pub async fn get_task_types(
+    current_user: Option<web::ReqData<User>>,
+    babamul_user: Option<web::ReqData<BabamulUser>>,
+) -> HttpResponse {
+    if let Err(e) = require_admin(&current_user, &babamul_user) {
         return e;
     }
     let types: Vec<serde_json::Value> = tasks::TASKS
@@ -98,9 +95,10 @@ pub async fn submit_task(
     db: web::Data<mongodb::Database>,
     body: web::Json<SubmitTaskBody>,
     current_user: Option<web::ReqData<User>>,
+    babamul_user: Option<web::ReqData<BabamulUser>>,
 ) -> HttpResponse {
-    let user = match require_admin(&current_user) {
-        Ok(user) => user,
+    let admin = match require_admin(&current_user, &babamul_user) {
+        Ok(admin) => admin,
         Err(e) => return e,
     };
     let body = body.into_inner();
@@ -134,10 +132,7 @@ pub async fn submit_task(
         task_type: body.task_type,
         params: body.params,
         status: TaskStatus::Queued,
-        actor: Actor {
-            user_id: user.id.clone(),
-            username: user.username.clone(),
-        },
+        actor: admin.as_task_actor(),
         trigger: Trigger::Api,
         requested_at: now(),
         started_at: None,
@@ -180,8 +175,9 @@ pub async fn get_tasks(
     db: web::Data<mongodb::Database>,
     params: web::Query<ListTasksParams>,
     current_user: Option<web::ReqData<User>>,
+    babamul_user: Option<web::ReqData<BabamulUser>>,
 ) -> HttpResponse {
-    if let Err(e) = require_admin(&current_user) {
+    if let Err(e) = require_admin(&current_user, &babamul_user) {
         return e;
     }
     let limit = params
@@ -211,8 +207,9 @@ pub async fn get_task(
     db: web::Data<mongodb::Database>,
     run_id: web::Path<String>,
     current_user: Option<web::ReqData<User>>,
+    babamul_user: Option<web::ReqData<BabamulUser>>,
 ) -> HttpResponse {
-    if let Err(e) = require_admin(&current_user) {
+    if let Err(e) = require_admin(&current_user, &babamul_user) {
         return e;
     }
     match queue::get(&db, &run_id).await {
@@ -242,8 +239,9 @@ pub async fn get_task_logs(
     run_id: web::Path<String>,
     params: web::Query<LogsParams>,
     current_user: Option<web::ReqData<User>>,
+    babamul_user: Option<web::ReqData<BabamulUser>>,
 ) -> HttpResponse {
-    if let Err(e) = require_admin(&current_user) {
+    if let Err(e) = require_admin(&current_user, &babamul_user) {
         return e;
     }
     match tasks::logs::read_after(&db, &run_id, params.after_seq).await {
@@ -269,15 +267,16 @@ pub async fn cancel_task(
     db: web::Data<mongodb::Database>,
     run_id: web::Path<String>,
     current_user: Option<web::ReqData<User>>,
+    babamul_user: Option<web::ReqData<BabamulUser>>,
 ) -> HttpResponse {
-    let user = match require_admin(&current_user) {
-        Ok(user) => user,
+    let admin = match require_admin(&current_user, &babamul_user) {
+        Ok(admin) => admin,
         Err(e) => return e,
     };
     match queue::request_cancel(&db, &run_id).await {
         Ok(None) => response::not_found("no such run"),
         Ok(Some(status)) => {
-            tracing::info!(run_id = %*run_id, "cancel requested by {}", user.username);
+            tracing::info!(run_id = %*run_id, "cancel requested by {}", admin.username);
             let message = match status {
                 // Running tasks stop at their next safe point rather than being
                 // killed, so this is a request, not a completed action.

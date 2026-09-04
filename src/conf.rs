@@ -702,6 +702,15 @@ impl Default for CutoutCacheConfig {
 pub struct BabamulConfig {
     pub enabled: bool,
     pub webapp_url: Option<String>,
+    /// Emails of the Babamul accounts allowed to run data-mutating tasks from
+    /// the admin page.
+    ///
+    /// Desired state: every account's `is_admin` is reconciled against this at
+    /// API startup, so this list is the whole answer to "who can mutate the
+    /// data" and it is reviewable in the deployment's config. Emails rather
+    /// than usernames because an email is what the account signs in with.
+    #[serde(default)]
+    pub admin_emails: Vec<String>,
     /// Number of days to retain Kafka messages for Babamul topics
     #[serde(default = "default_babamul_retention_days")]
     pub retention_days: u32,
@@ -730,6 +739,7 @@ impl Default for BabamulConfig {
     fn default() -> Self {
         BabamulConfig {
             enabled: false,
+            admin_emails: Vec::new(),
             webapp_url: None,
             retention_days: default_babamul_retention_days(),
             password_reset_cooldown_minutes: default_password_reset_cooldown_minutes(),

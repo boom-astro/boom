@@ -5,6 +5,8 @@ use crate::api::{
     routes::users::User,
 };
 
+use crate::api::admin::require_admin;
+use crate::api::routes::babamul::BabamulUser;
 use crate::conf::AppConfig;
 
 use actix_web::{get, web, HttpResponse};
@@ -248,11 +250,10 @@ pub async fn get_catalog_status(
     db: web::Data<Database>,
     config: web::Data<AppConfig>,
     current_user: Option<web::ReqData<User>>,
+    babamul_user: Option<web::ReqData<BabamulUser>>,
 ) -> HttpResponse {
-    match current_user {
-        Some(user) if user.is_admin => {}
-        Some(_) => return response::forbidden("Only admins can see catalog status"),
-        None => return HttpResponse::Unauthorized().body("Unauthorized"),
+    if let Err(e) = require_admin(&current_user, &babamul_user) {
+        return e;
     }
     match crate::catalogs::status(&db, &config.catalogs).await {
         Ok(statuses) => response::ok_ser("success", statuses),
