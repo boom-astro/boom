@@ -20,3 +20,8 @@ logs
 simbad_cache
 *.parquet
 config.docker.yaml
+
+# boompy's uv-managed virtualenv and test cache; uv.lock IS committed, so the
+# image and a developer's checkout resolve to the same versions.
+.venv/
+.pytest_cache/
