@@ -127,6 +127,15 @@ describe("fetchProfile", () => {
     expect(await fetchProfile()).toBeNull()
   })
 
+  it("returns null for a body that parsed but carries no account", async () => {
+    // A gateway envelope reaching `unwrapData` as-is: truthy, but every profile
+    // field `undefined`, which `identify` rejects rather than reports.
+    const fetchMock = vi.fn(async () => jsonResponse({ message: "upstream unavailable" }))
+    vi.stubGlobal("fetch", fetchMock)
+
+    expect(await fetchProfile()).toBeNull()
+  })
+
   it("still accepts the legacy `_id` spelling", async () => {
     const fetchMock = vi.fn(async () =>
       jsonResponse({

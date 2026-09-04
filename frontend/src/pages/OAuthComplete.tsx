@@ -92,7 +92,7 @@ export default function OAuthComplete() {
       try {
         const profile = await ensureProfileLoaded({ force: true });
         if (profile) {
-          analytics.identifyUser(profile.id ?? profile.username ?? profile.email, profile.email);
+          analytics.identifyUser(profile.id ?? profile.username ?? profile.email, profile.email, profile.username);
         }
         analytics.trackLoginSuccess({ email: profile?.email ?? email });
       } catch (profileErr) {
