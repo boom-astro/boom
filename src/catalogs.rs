@@ -23,7 +23,8 @@ pub struct Catalog {
     name: &'static str,
     download_url: &'static str,
     collection_name: &'static str,
-    // Total number of records
+    // Total number of records. TODO: Can we do without this? Read the ingest
+    // log and use that to determine how much to skip?
     n_records: usize,
 }
 
