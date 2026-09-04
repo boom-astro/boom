@@ -9,8 +9,10 @@ import {
   IconPackage,
   IconNotebook,
   IconBook,
+  IconSettings,
 } from "@tabler/icons-react"
 
+import useAppStore from "@/lib/store"
 import { NavDocuments } from "@/components/nav-documents"
 import { NavMain } from "@/components/nav-main"
 import { NavSecondary } from "@/components/nav-secondary"
@@ -80,6 +82,13 @@ const data = {
 }
 
 export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
+  const profile = useAppStore((s) => s.profile)
+  // Shown only to admins, but the page and every route behind it are enforced
+  // server-side -- this just avoids offering a link that would 403.
+  const navMain = profile?.is_admin
+    ? [...data.navMain, { title: "Admin", url: "/admin", icon: IconSettings }]
+    : data.navMain
+
   return (
     <Sidebar collapsible="icon" {...props}>
       <SidebarHeader>
@@ -104,7 +113,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
         </SidebarMenu>
       </SidebarHeader>
       <SidebarContent>
-        <NavMain items={data.navMain} />
+        <NavMain items={navMain} />
         <SidebarSeparator />
         <NavDocuments items={data.documentation} />
         <SidebarSeparator />

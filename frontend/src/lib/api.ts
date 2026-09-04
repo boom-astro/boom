@@ -21,6 +21,9 @@ export type Profile = {
   /** Provider slugs the account can sign in with, e.g. ["google", "orcid"] */
   identity_providers?: string[];
   orcid_id?: string | null;
+  /** Whether this account may reach the admin page. Server-enforced on every
+   * admin route regardless; this only decides what the UI offers. */
+  is_admin?: boolean;
 } | null;
 
 // A social sign-in provider advertised by `/oauth/providers`
@@ -37,7 +40,7 @@ const TOKEN_KEY = "api_token";
 const USERNAME_KEY = "api_user";
 
 // Helper function to parse JSON with bigint support
-async function parseResponseJson(res: Response): Promise<unknown> {
+export async function parseResponseJson(res: Response): Promise<unknown> {
   const text = await res.text();
   // TODO: find a better way to handle bigints in JSON without a heavy dependency
   // For now we convert them to strings by wrapping large integers in quotes, to avoid loss of precision
@@ -48,7 +51,7 @@ async function parseResponseJson(res: Response): Promise<unknown> {
 
 type DataEnvelope<T> = { data?: T };
 
-function unwrapData<T>(body: unknown, fallback: T): T {
+export function unwrapData<T>(body: unknown, fallback: T): T {
   if (body && typeof body === 'object' && 'data' in body) {
     const dataVal = (body as DataEnvelope<unknown>).data;
     if (dataVal !== undefined) return dataVal as T;
@@ -236,7 +239,7 @@ export async function resetPassword(email: string, token: string, new_password: 
   }
 }
 
-async function fetchWithAuth(input: RequestInfo, init: RequestInit = {}) {
+export async function fetchWithAuth(input: RequestInfo, init: RequestInit = {}) {
   const token = getTokenRecord();
   if (!token) {
     throw new Error("Not authenticated");

@@ -221,6 +221,11 @@ pub struct BabamulUserPublic {
     pub orcid_id: Option<String>,
     /// Full name the user chose to display, if any
     pub name: Option<String>,
+    /// Whether this account may run data-mutating tasks. Read-only here: it is
+    /// reconciled from `babamul.admin_emails` at startup, never set through the
+    /// API. Exposed so the web app knows whether to offer the admin page --
+    /// authorization is still enforced server-side on every admin route.
+    pub is_admin: bool,
 }
 
 impl From<BabamulUser> for BabamulUserPublic {
@@ -237,6 +242,7 @@ impl From<BabamulUser> for BabamulUserPublic {
                 .collect(),
             orcid_id: user.orcid_id,
             name: user.name,
+            is_admin: user.is_admin,
         }
     }
 }
