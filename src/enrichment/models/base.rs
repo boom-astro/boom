@@ -54,9 +54,7 @@ pub fn load_model_on_device(
 
     // Pin execution providers explicitly so CPU mode never initializes GPU EPs.
     if let Some(dev) = device_id {
-        // Disable CPU fallback to make sure we only use the GPUs as instructed.
-        // We only do this on Linux as Apple's CoreML EP does need to fallback
-        // to the CPU for some operators of the ONNX runtime.
+        // Linux only: CoreML needs CPU fallback for some ONNX operators.
         #[cfg(target_os = "linux")]
         {
             builder = builder.with_disable_cpu_fallback()?;
@@ -64,22 +62,13 @@ pub fn load_model_on_device(
 
         #[cfg(target_os = "linux")]
         let cuda_ep = {
-            // `with_conv_max_workspace(false)` caps the cuDNN conv
-            // algorithm-search workspace at 32 MB, shrinking the per-shape
-            // scratch buffers the dynamic batch dimension would otherwise grab.
-            //
-            // NOTE: `arena_extend_strategy = SameAsRequested` was tried here
-            // and removed. With the dynamic-batch models its exact-sized
-            // extensions wreck BFC arena reuse, so GPU memory climbs
-            // monotonically every batch and OOMs. The default `kNextPowerOfTwo`
-            // allocates reusable power-of-two blocks and the arena stabilizes.
+            // Tried and reverted: with dynamic batch it kills BFC arena reuse and OOMs.
             // .with_arena_extend_strategy(ort::ep::ArenaExtendStrategy::SameAsRequested)
             let mut ep = ort::ep::CUDAExecutionProvider::default()
                 .with_device_id(dev)
                 .with_conv_max_workspace(false);
             if !cuda_stream.is_null() {
-                // Safety: caller guarantees the stream is valid for `dev`
-                // and outlives the session (see fn-level safety comment).
+                // Safety: guaranteed by this function's own safety contract.
                 ep = unsafe { ep.with_compute_stream(cuda_stream as *mut ()) };
             }
             ep.build()
@@ -104,59 +93,45 @@ pub fn load_model_on_device(
     Ok(model)
 }
 
+/// Batch of 63x63x3 science/template/difference cutouts, one per alert.
+pub type Triplets = Array<f32, Dim<[usize; 4]>>;
+
+fn stack_triplets(cutouts: Vec<(Vec<f32>, Vec<f32>, Vec<f32>)>) -> Result<Triplets, ModelError> {
+    let mut triplets = Array::zeros((cutouts.len(), 63, 63, 3));
+    for (i, (science, template, difference)) in cutouts.into_iter().enumerate() {
+        for (j, cutout) in [science, template, difference].into_iter().enumerate() {
+            let mut slice = triplets.slice_mut(ndarray::s![i, .., .., j]);
+            slice.assign(&Array::from_shape_vec((63, 63), cutout)?);
+        }
+    }
+    Ok(triplets)
+}
+
 pub trait Model {
     fn new(path: &str) -> Result<Self, ModelError>
     where
         Self: Sized;
     #[instrument(skip_all, err)]
-    fn get_triplet(
-        alert_cutouts: &[&AlertCutout],
-    ) -> Result<Array<f32, Dim<[usize; 4]>>, ModelError> {
-        let mut triplets = Array::zeros((alert_cutouts.len(), 63, 63, 3));
-        for i in 0..alert_cutouts.len() {
-            let (cutout_science, cutout_template, cutout_difference) =
-                prepare_triplet(alert_cutouts[i])?;
-            for (j, cutout) in [cutout_science, cutout_template, cutout_difference]
-                .iter()
-                .enumerate()
-            {
-                let mut slice = triplets.slice_mut(ndarray::s![i, .., .., j]);
-                let cutout_array = Array::from_shape_vec((63, 63), cutout.to_vec())?;
-                slice.assign(&cutout_array);
-            }
-        }
-        Ok(triplets)
+    fn get_triplet(alert_cutouts: &[&AlertCutout]) -> Result<Triplets, ModelError> {
+        let cutouts = alert_cutouts
+            .iter()
+            .copied()
+            .map(prepare_triplet)
+            .collect::<Result<Vec<_>, _>>()?;
+        stack_triplets(cutouts)
     }
 
-    /// Build triplets for all valid cutouts and return the original indices kept.
-    /// Invalid cutouts are skipped.
+    /// Like [`Model::get_triplet`], but skips invalid cutouts and returns the indices kept.
     fn get_triplet_indexed(
         alert_cutouts: &[&AlertCutout],
-    ) -> Result<(Vec<usize>, Array<f32, Dim<[usize; 4]>>), ModelError> {
-        let mut kept_indices: Vec<usize> = Vec::new();
-        let mut kept_triplets: Vec<(Vec<f32>, Vec<f32>, Vec<f32>)> = Vec::new();
-
-        for (idx, cutout) in alert_cutouts.iter().enumerate() {
-            if let Ok((science, template, difference)) = prepare_triplet(cutout) {
-                kept_indices.push(idx);
-                kept_triplets.push((science.to_vec(), template.to_vec(), difference.to_vec()));
-            }
-        }
-
-        if kept_indices.is_empty() {
-            return Ok((kept_indices, Array::zeros((0, 63, 63, 3))));
-        }
-
-        let mut triplets = Array::zeros((kept_indices.len(), 63, 63, 3));
-        for (i, (science, template, difference)) in kept_triplets.into_iter().enumerate() {
-            for (j, cutout) in [science, template, difference].iter().enumerate() {
-                let mut slice = triplets.slice_mut(ndarray::s![i, .., .., j]);
-                let cutout_array = Array::from_shape_vec((63, 63), cutout.clone())?;
-                slice.assign(&cutout_array);
-            }
-        }
-
-        Ok((kept_indices, triplets))
+    ) -> Result<(Vec<usize>, Triplets), ModelError> {
+        let (kept_indices, cutouts): (Vec<usize>, Vec<_>) = alert_cutouts
+            .iter()
+            .copied()
+            .enumerate()
+            .filter_map(|(idx, cutout)| prepare_triplet(cutout).ok().map(|t| (idx, t)))
+            .unzip();
+        Ok((kept_indices, stack_triplets(cutouts)?))
     }
 
     fn predict(

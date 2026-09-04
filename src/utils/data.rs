@@ -3,6 +3,8 @@ use indicatif::{ProgressBar, ProgressStyle};
 use std::io::Write;
 use tracing::info;
 
+const PROGRESS_LOG_SECS: u64 = 60;
+
 /// Standard progress bar used by long-running maintenance binaries
 /// (`reprocess_crossmatch`, `migrate_*`).
 pub fn make_progress_bar(total: u64, label: String) -> ProgressBar {
@@ -17,10 +19,6 @@ pub fn make_progress_bar(total: u64, label: String) -> ProgressBar {
     pb
 }
 
-const PROGRESS_LOG_SECS: u64 = 60;
-
-/// The indicatif bar hides itself when stderr is not a terminal, i.e. whenever the run
-/// is piped to a log file, so mirror it into the tracing output.
 pub fn spawn_progress_logger(pb: ProgressBar, label: String) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(PROGRESS_LOG_SECS));
