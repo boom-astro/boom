@@ -25,8 +25,7 @@ use tracing_subscriber::FmtSubscriber;
 /// gives flat columns, while crossmatch (and the `cone_search` endpoint) needs
 /// the same spatial fields the alert pipeline writes:
 ///
-/// - `ra` / `dec` as numbers (Compass imports them as strings unless the type
-///   is set column by column), in degrees
+/// - `ra` / `dec` as numbers, in degrees
 /// - `coordinates.radec_geojson`, a GeoJSON point with longitude shifted to
 ///   `ra - 180` so it fits the `[-180, 180]` range Mongo requires
 /// - `coordinates.l` / `coordinates.b`, the galactic coordinates
