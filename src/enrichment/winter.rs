@@ -4,7 +4,8 @@ use crate::enrichment::{fetch_alerts, EnrichmentWorker, EnrichmentWorkerError};
 use crate::utils::db::{fetch_timeseries_op, mongify};
 use crate::utils::enums::Survey;
 use crate::utils::lightcurves::{
-    analyze_photometry, prepare_photometry, PerBandProperties, PhotometryMag,
+    analyze_photometry, prepare_photometry, Band, DetectionHistory, PerBandProperties,
+    PhotometryMag,
 };
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
@@ -51,9 +52,36 @@ pub fn create_winter_alert_pipeline() -> Vec<Document> {
                 "prv_candidates.magpsf": 1,
                 "prv_candidates.sigmapsf": 1,
                 "prv_candidates.band": 1,
+                "prv_candidates.isdiffpos": 1,
             }
         },
     ]
+}
+
+/// WINTER prv_candidate for enrichment: the magnitude fields feed the light-curve
+/// stats, `isdiffpos` feeds the detection-history sign.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct WinterPhotometry {
+    #[serde(alias = "jd")]
+    pub time: f64,
+    #[serde(alias = "magpsf")]
+    pub mag: f32,
+    #[serde(alias = "sigmapsf")]
+    pub mag_err: f32,
+    pub band: Band,
+    #[serde(default)]
+    pub isdiffpos: Option<bool>,
+}
+
+impl WinterPhotometry {
+    fn to_photometry_mag(&self) -> PhotometryMag {
+        PhotometryMag {
+            time: self.time,
+            mag: self.mag,
+            mag_err: self.mag_err,
+            band: self.band.clone(),
+        }
+    }
 }
 
 /// WINTER alert structure used to deserialize alerts from the database, used by
@@ -65,7 +93,7 @@ pub struct WinterAlertForEnrichment {
     #[serde(rename = "objectId")]
     pub object_id: String,
     pub candidate: WinterCandidate,
-    pub prv_candidates: Vec<PhotometryMag>,
+    pub prv_candidates: Vec<WinterPhotometry>,
 }
 
 /// WINTER alert properties computed during enrichment and inserted back into the
@@ -74,6 +102,10 @@ pub struct WinterAlertForEnrichment {
 pub struct WinterAlertProperties {
     pub stationary: bool,
     pub photstats: PerBandProperties,
+    /// Per-object detection-history summary for history-aware filters.
+    /// `None` on alerts enriched before this field existed.
+    #[serde(default)]
+    pub detection_history: Option<DetectionHistory>,
 }
 
 pub struct WinterEnrichmentWorker {
@@ -183,14 +215,28 @@ impl WinterEnrichmentWorker {
         &self,
         alert: &WinterAlertForEnrichment,
     ) -> Result<WinterAlertProperties, EnrichmentWorkerError> {
-        let mut lightcurve = alert.prv_candidates.clone();
+        let mut lightcurve: Vec<PhotometryMag> = alert
+            .prv_candidates
+            .iter()
+            .map(WinterPhotometry::to_photometry_mag)
+            .collect();
 
         prepare_photometry(&mut lightcurve);
         let (photstats, _, stationary) = analyze_photometry(&lightcurve);
 
+        // Per-object detection history for history-aware filters (sign from isdiffpos).
+        let detection_history = DetectionHistory::from_points(
+            alert
+                .prv_candidates
+                .iter()
+                .map(|p| (p.time, p.isdiffpos.map(|d| !d))),
+            alert.candidate.jd,
+        );
+
         Ok(WinterAlertProperties {
             stationary,
             photstats,
+            detection_history: Some(detection_history),
         })
     }
 }
