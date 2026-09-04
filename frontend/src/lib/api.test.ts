@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { updateProfileName } from "@/lib/api"
+import { fetchProfile, updateProfileName } from "@/lib/api"
 
 /**
  * The display name is the one profile field a user can change, so what matters
@@ -76,5 +76,75 @@ describe("updateProfileName", () => {
     await expect(updateProfileName("a".repeat(101))).rejects.toThrow(
       "Name must be at most 100 characters"
     )
+  })
+})
+
+describe("fetchProfile", () => {
+  /**
+   * `profile.id` feeds `posthog.identify`, so an `undefined` id silently splits
+   * each user into a browser person and an API person.
+   */
+  it("reads the id the API sends", async () => {
+    const fetchMock = vi.fn(async () =>
+      jsonResponse({
+        message: "success",
+        data: { id: "68f0c1a2b3c4d5e6f7a8b9c0", username: "ada", email: "ada@example.org", created_at: 0 },
+      })
+    )
+    vi.stubGlobal("fetch", fetchMock)
+
+    const profile = await fetchProfile()
+
+    expect(profile?.id).toBe("68f0c1a2b3c4d5e6f7a8b9c0")
+    expect(profile?.email).toBe("ada@example.org")
+  })
+
+  it("leaves the id undefined when the API sends neither spelling", async () => {
+    // Not `""`: `id ?? username ?? email` takes an empty string for a real id,
+    // collapsing every affected user onto one PostHog person.
+    const fetchMock = vi.fn(async () =>
+      jsonResponse({
+        message: "success",
+        data: { username: "ada", email: "ada@example.org", created_at: 0 },
+      })
+    )
+    vi.stubGlobal("fetch", fetchMock)
+
+    const profile = await fetchProfile()
+
+    expect(profile?.id).toBeUndefined()
+    expect(profile?.id ?? profile?.username).toBe("ada")
+  })
+
+  it("returns null when the body isn't JSON", async () => {
+    // A truthy profile of `undefined` fields would reach `identify` as
+    // `identify(undefined)` instead of being caught as a missing profile.
+    const fetchMock = vi.fn(
+      async () => new Response("<html>502</html>", { status: 200, headers: { "Content-Type": "text/html" } })
+    )
+    vi.stubGlobal("fetch", fetchMock)
+
+    expect(await fetchProfile()).toBeNull()
+  })
+
+  it("returns null for a body that parsed but carries no account", async () => {
+    // A gateway envelope reaching `unwrapData` as-is: truthy, but every profile
+    // field `undefined`, which `identify` rejects rather than reports.
+    const fetchMock = vi.fn(async () => jsonResponse({ message: "upstream unavailable" }))
+    vi.stubGlobal("fetch", fetchMock)
+
+    expect(await fetchProfile()).toBeNull()
+  })
+
+  it("still accepts the legacy `_id` spelling", async () => {
+    const fetchMock = vi.fn(async () =>
+      jsonResponse({
+        message: "success",
+        data: { _id: "abc123", username: "ada", email: "ada@example.org", created_at: 0 },
+      })
+    )
+    vi.stubGlobal("fetch", fetchMock)
+
+    expect((await fetchProfile())?.id).toBe("abc123")
   })
 })

@@ -110,9 +110,23 @@ export function setUserProperties(properties: Record<string, unknown>) {
 }
 
 /**
- * Identify user by email or ID
+ * Identify the user, merging the person an earlier build left behind.
+ *
+ * `posthog.identify` emits its merge event only while the stored `$user_state`
+ * is still `anonymous`; past that it switches `distinct_id` silently. Sessions
+ * that signed in before `/profile` sent `id` are already identified on the
+ * username, so moving them to the user id would strand their history on a
+ * second person. Aliasing first links the two.
+ *
+ * `username` gates that: an alias is irreversible, so it is claimed only when
+ * the id being replaced is the one this same account was identified under —
+ * never a distinct_id belonging to whoever used the browser before.
  */
-export function identifyUser(userId: string, email?: string) {
+export function identifyUser(userId: string, email?: string, username?: string) {
+  const previousId = posthog.get_distinct_id();
+  if (username && previousId === username && previousId !== userId) {
+    posthog.alias(userId, previousId);
+  }
   posthog.identify(userId, {
     email,
   });

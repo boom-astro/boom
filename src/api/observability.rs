@@ -2,8 +2,9 @@ use crate::api::analytics::{AnalyticsClient, AnalyticsEvent};
 use crate::api::routes::babamul::BabamulUser;
 use crate::utils::o11y::metrics::API_METER;
 
-use std::sync::LazyLock;
-use std::time::Instant;
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant};
 
 use actix_web::{
     body::MessageBody,
@@ -94,7 +95,7 @@ pub async fn request_metrics_middleware(
             // one PostHog property value per object id. The auth middleware
             // injects the user on success, so its presence in extensions is
             // exactly "this request was authenticated".
-            let (endpoint, user_id) = match response.as_ref() {
+            let (endpoint, user) = match response.as_ref() {
                 Ok(service_response) => {
                     let request = service_response.request();
                     (
@@ -104,24 +105,86 @@ pub async fn request_metrics_middleware(
                         request
                             .extensions()
                             .get::<BabamulUser>()
-                            .map(|user| user.id.clone()),
+                            .map(UserIdentity::from),
                     )
                 }
                 Err(_) => (path.clone(), None),
             };
+
+            let refresh_person = user
+                .as_ref()
+                .is_some_and(|user| claim_person_property_refresh(&user.id));
 
             analytics.capture(build_request_event(
                 &endpoint,
                 &method,
                 status_code,
                 started_at.elapsed().as_millis() as u64,
-                user_id.as_deref(),
+                user.as_ref(),
+                refresh_person,
                 &client_info,
             ));
         }
     }
 
     response
+}
+
+/// Who the request resolved to: the id that merges browser, API and Kafka
+/// activity onto one PostHog person, plus the `email` and `username` that make
+/// that person identifiable in the PostHog UI.
+struct UserIdentity {
+    id: String,
+    email: String,
+    username: String,
+}
+
+impl From<&BabamulUser> for UserIdentity {
+    fn from(user: &BabamulUser) -> Self {
+        Self {
+            id: user.id.clone(),
+            email: user.email.clone(),
+            username: user.username.clone(),
+        }
+    }
+}
+
+/// How long a user's person properties stay fresh before a request re-sends
+/// them. Email and username change rarely, so an hour is far below the rate at
+/// which they go stale and far above the rate at which a browser polls.
+const PERSON_PROPERTY_TTL: Duration = Duration::from_secs(60 * 60);
+
+/// Last time each user's person properties rode along with a request.
+///
+/// Per-process and deliberately not persisted: a restart re-sending one `$set`
+/// per user costs nothing, and the point is only to keep a polling session from
+/// updating the same unchanged person on every request.
+static PERSON_PROPERTIES_SENT: LazyLock<Mutex<HashMap<String, Instant>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Whether this request should carry the user's person properties, claiming the
+/// slot if so.
+///
+/// A poisoned lock means some other thread panicked mid-update; sending the
+/// properties again is harmless, so this reports `true` rather than propagating.
+fn claim_person_property_refresh(user_id: &str) -> bool {
+    let now = Instant::now();
+    let Ok(mut sent) = PERSON_PROPERTIES_SENT.lock() else {
+        return true;
+    };
+
+    if sent
+        .get(user_id)
+        .is_some_and(|last| now.duration_since(*last) < PERSON_PROPERTY_TTL)
+    {
+        return false;
+    }
+
+    // Drop everyone whose entry has aged out, so the map tracks active users
+    // rather than every user the process has ever served.
+    sent.retain(|_, last| now.duration_since(*last) < PERSON_PROPERTY_TTL);
+    sent.insert(user_id.to_string(), now);
+    true
 }
 
 /// Assemble the `babamul_api_request` event.
@@ -133,30 +196,40 @@ fn build_request_event(
     method: &str,
     status_code: u16,
     duration_ms: u64,
-    user_id: Option<&str>,
+    user: Option<&UserIdentity>,
+    refresh_person: bool,
     client_info: &ClientInfo,
 ) -> AnalyticsEvent {
     let event = AnalyticsEvent::new(
         "babamul_api_request",
-        user_id.unwrap_or(ANONYMOUS_DISTINCT_ID),
+        user.map(|user| user.id.as_str())
+            .unwrap_or(ANONYMOUS_DISTINCT_ID),
     )
     .with("endpoint", endpoint)
     .with("method", method)
     .with("status_code", status_code)
     .with("success", (200..400).contains(&status_code))
     .with("duration_ms", duration_ms)
-    .with("authenticated", user_id.is_some())
+    .with("authenticated", user.is_some())
     .with("auth_method", client_info.auth_method)
     .with("client", client_info.client.as_deref().unwrap_or("unknown"))
     .with_opt("client_version", client_info.client_version.as_deref())
     .with_opt("python_version", client_info.python_version.as_deref())
     .with_opt("client_os", client_info.os.as_deref());
 
-    // Unauthenticated traffic must not create person profiles in PostHog.
-    if user_id.is_some() {
-        event
-    } else {
-        event.anonymous()
+    // Unauthenticated traffic must not create person profiles in PostHog, while
+    // authenticated traffic periodically `$set`s email and username so the
+    // person is legible even for a user who only ever uses the Python package.
+    match user {
+        Some(user) if refresh_person => event.with(
+            "$set",
+            serde_json::json!({
+                "email": user.email,
+                "username": user.username,
+            }),
+        ),
+        Some(_) => event,
+        None => event.anonymous(),
     }
 }
 
@@ -357,7 +430,8 @@ mod tests {
         let mut client_info = parse_user_agent("babamul-python/0.2.0 (Python/3.12.1; Linux)");
         client_info.auth_method = "personal_access_token";
 
-        let event = build_request_event("/babamul/profile", "GET", 401, 3, None, &client_info);
+        let event =
+            build_request_event("/babamul/profile", "GET", 401, 3, None, true, &client_info);
 
         assert_eq!(event.distinct_id, ANONYMOUS_DISTINCT_ID);
         assert_eq!(event.properties.get("status_code").unwrap(), 401);
@@ -375,6 +449,7 @@ mod tests {
             event.properties.get("$process_person_profile").unwrap(),
             false
         );
+        assert!(event.properties.get("$set").is_none());
     }
 
     #[test]
@@ -385,12 +460,20 @@ mod tests {
             "GET",
             200,
             12,
-            Some("user-42"),
+            Some(&UserIdentity {
+                id: "user-42".to_string(),
+                email: "someone@example.org".to_string(),
+                username: "someone".to_string(),
+            }),
+            true,
             &client_info,
         );
 
         assert_eq!(event.distinct_id, "user-42");
         assert_eq!(event.properties.get("authenticated").unwrap(), true);
+        let set = event.properties.get("$set").unwrap();
+        assert_eq!(set.get("email").unwrap(), "someone@example.org");
+        assert_eq!(set.get("username").unwrap(), "someone");
         assert_eq!(event.properties.get("success").unwrap(), true);
         // The route pattern, not a path with a real object id baked in.
         assert_eq!(
@@ -399,5 +482,42 @@ mod tests {
         );
         // Identified events must keep person profiles enabled.
         assert!(!event.properties.contains_key("$process_person_profile"));
+    }
+
+    /// The throttled request is still a fully attributed event — only the
+    /// person update is skipped.
+    #[test]
+    fn throttled_requests_keep_their_identity_but_drop_person_properties() {
+        let client_info = parse_user_agent("babamul-python/0.2.0 (Python/3.12.1; Linux)");
+        let event = build_request_event(
+            "/babamul/profile",
+            "GET",
+            200,
+            4,
+            Some(&UserIdentity {
+                id: "user-42".to_string(),
+                email: "someone@example.org".to_string(),
+                username: "someone".to_string(),
+            }),
+            false,
+            &client_info,
+        );
+
+        assert_eq!(event.distinct_id, "user-42");
+        assert_eq!(event.properties.get("authenticated").unwrap(), true);
+        assert!(event.properties.get("$set").is_none());
+        assert!(!event.properties.contains_key("$process_person_profile"));
+    }
+
+    #[test]
+    fn person_properties_refresh_once_per_user_per_window() {
+        // Ids unique to this test: the throttle map is process-wide.
+        assert!(claim_person_property_refresh("refresh-window-a"));
+        assert!(!claim_person_property_refresh("refresh-window-a"));
+        assert!(!claim_person_property_refresh("refresh-window-a"));
+
+        // A different user is unaffected by another's claim.
+        assert!(claim_person_property_refresh("refresh-window-b"));
+        assert!(!claim_person_property_refresh("refresh-window-b"));
     }
 }

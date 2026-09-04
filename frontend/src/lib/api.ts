@@ -1,3 +1,5 @@
+import { resetUser } from "@/lib/analytics";
+
 // Always use the same-origin proxy; production should map /api to the backend via the web server
 const API_BASE = "/api/babamul";
 
@@ -12,7 +14,11 @@ export type ApiObject = Record<string, unknown>;
 
 // Profile shape returned by `/profile`
 export type Profile = {
-  id: string;
+  /**
+   * Babamul user id, and the PostHog `distinct_id` the API keys its events on;
+   * optional so a missing id stays `undefined` rather than `""`.
+   */
+  id?: string;
   username: string;
   email: string;
   created_at: number;
@@ -83,6 +89,10 @@ function saveToken(body: { access_token: string; token_type?: string; expires_in
 export function logout() {
   localStorage.removeItem(TOKEN_KEY);
   localStorage.removeItem(USERNAME_KEY);
+  // Clearing the token without clearing PostHog leaves the next visitor on this
+  // browser captured as the account that just signed out, and leaves the stored
+  // `$user_state` identified, which is what stops the next `identify` merging.
+  resetUser();
 }
 
 export function getTokenRecord(): TokenRecord | null {
@@ -264,6 +274,22 @@ export async function fetchObject(survey: string, objectId: string): Promise<Api
   return unwrapData<ApiObject>(body, {} as ApiObject);
 }
 
+/**
+ * The profile as it arrives, accepting the legacy `_id` spelling alongside `id`
+ * so a browser on a cached bundle doesn't regress across the deploy.
+ */
+type ProfileWire = (Omit<NonNullable<Profile>, "id"> & { id?: string; _id?: string }) | null;
+
+function normalizeProfile(wire: ProfileWire): Profile {
+  // `unwrapData` passes any non-null object through, so an envelope that parsed
+  // but carries no account — a gateway's `{"message": ...}`, say — would arrive
+  // as a truthy profile of `undefined` fields and reach `identify` as
+  // `identify(undefined)`. Having neither name nor address is not a profile.
+  if (!wire || (typeof wire.username !== "string" && typeof wire.email !== "string")) return null;
+  const { id, _id, ...rest } = wire;
+  return { ...rest, id: id ?? _id };
+}
+
 export async function fetchProfile(): Promise<Profile> {
   const url = `${API_BASE}/profile`;
   const res = await fetchWithAuth(url);
@@ -271,8 +297,10 @@ export async function fetchProfile(): Promise<Profile> {
     const txt = await res.text().catch(() => "");
     throw new Error(`Fetch profile failed: ${res.status} ${txt}`);
   }
-  const body = await parseResponseJson(res).catch(() => ({}));
-  return unwrapData<Profile>(body, null);
+  // `null`, not `{}`: `unwrapData` passes a non-null body straight through, so
+  // `{}` would become a truthy profile whose every field is `undefined`.
+  const body = await parseResponseJson(res).catch(() => null);
+  return normalizeProfile(unwrapData<ProfileWire>(body, null));
 }
 
 /**
@@ -296,7 +324,7 @@ export async function updateProfileName(name: string): Promise<Profile> {
         : `Update profile failed: ${res.status}`;
     throw new Error(message);
   }
-  return unwrapData<Profile>(body, null);
+  return normalizeProfile(unwrapData<ProfileWire>(body, null));
 }
 
 export async function fetchKafkaCredentials(): Promise<KafkaCredential[]> {

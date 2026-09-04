@@ -202,8 +202,8 @@ pub struct BabamulUser {
 
 #[derive(Serialize, Deserialize, Clone, Debug, ToSchema)]
 pub struct BabamulUserPublic {
-    // Save in the database as _id, but we want to rename on the way out
-    #[serde(rename = "_id")]
+    /// The user id: Mongo storing it as `_id` is a storage detail, so the
+    /// public shape sends `id`.
     pub id: String,
     pub username: String,
     pub email: String,

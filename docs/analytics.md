@@ -41,6 +41,31 @@ unusual `User-Agent` can't become a fingerprint.
 and Kafka consumption therefore merge into **one** PostHog person instead of
 three.
 
+The browser client gets that id from `/babamul/profile`. That endpoint used to
+send it as `_id`, mirroring how Mongo stores it, while the client read `id` —
+so the id was always `undefined` there. Nothing in the UI reads the field,
+which made the breakage silent: it surfaced only as `identify` falling back to
+the username, splitting every user into a browser person and an API person, and
+that is what made API events unattributable. The endpoint now sends `id`;
+`fetchProfile` still accepts `_id` for deploy skew, and tests pin both.
+
+Authenticated `babamul_api_request` events also `$set` the person's `email` and
+`username`. Without that, a person is a bare id in the PostHog UI, and a user
+who only ever uses the Python package would never have an email attached at
+all — the browser client's `identify` is the only other thing that sets one,
+and they never load it. `$set` rather than `$set_once` so a changed email
+follows the account. It rides along at most once per user per hour
+(`PERSON_PROPERTY_TTL`), since values that never change do not need re-sending
+on every request a polling session makes.
+
+Sessions that signed in before the `id` fix are already identified on the
+username, and `posthog.identify` emits its merge event only while the stored
+`$user_state` is still `anonymous` — past that it switches `distinct_id`
+silently. `identifyUser` therefore aliases the old id into the new one, guarded
+on it being the username of the account signing in, so a shared browser never
+merges two real people. Signing out calls `posthog.reset()`, which is what
+leaves the next login anonymous and able to merge on its own.
+
 Requests that aren't authenticated (signup, activation, the public stats
 endpoints) are reported against a fixed `babamul-anonymous` id and carry
 `$process_person_profile: false`, so they're counted without creating person
@@ -62,6 +87,7 @@ from the auth middleware, and that is exactly the event you want to see.
 | `auth_method` | `personal_access_token` (what the package uses), `jwt` (what the web app uses), or `none`. The cleanest programmatic-vs-browser signal, and it works even for clients that send no useful `User-Agent`. |
 | `client` | `babamul-python`, `browser`, `httpx`, `requests`, `curl`, `other`, `unknown`. |
 | `client_version`, `python_version`, `client_os` | Only present for the official package. |
+| `$set` → `email`, `username` | Person properties, on authenticated requests only and at most hourly per user. What makes a person identifiable regardless of which surface they arrived through. |
 
 **"How many people use the package?"** — unique users on
 `babamul_api_request` where `client = babamul-python`.
