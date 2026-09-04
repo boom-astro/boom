@@ -13,6 +13,7 @@ import {
 } from "@tabler/icons-react"
 
 import useAppStore from "@/lib/store"
+import { useCatalogIssues } from "@/hooks/use-catalog-issues"
 import { NavDocuments } from "@/components/nav-documents"
 import { NavMain } from "@/components/nav-main"
 import { NavSecondary } from "@/components/nav-secondary"
@@ -83,10 +84,21 @@ const data = {
 
 export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
   const profile = useAppStore((s) => s.profile)
+  // Only polled for admins; for anyone else the hook is inert.
+  const issues = useCatalogIssues(!!profile?.is_admin)
   // Shown only to admins, but the page and every route behind it are enforced
   // server-side -- this just avoids offering a link that would 403.
   const navMain = profile?.is_admin
-    ? [...data.navMain, { title: "Admin", url: "/admin", icon: IconSettings }]
+    ? [
+        ...data.navMain,
+        {
+          title: "Admin",
+          url: "/admin",
+          icon: IconSettings,
+          badge: issues.count,
+          badgeLabel: issues.label,
+        },
+      ]
     : data.navMain
 
   return (
