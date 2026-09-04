@@ -14,6 +14,27 @@ from pathlib import Path
 
 import requests
 
+#: How BOOM identifies itself to the archives.
+#:
+#: Not cosmetic: at least one archive (quasars.org) answers 406 Not Acceptable
+#: to the default `python-requests/x.y` agent, so a download that is otherwise
+#: perfectly valid fails. Naming the project and linking it is also the polite
+#: thing to do -- an archive operator who sees this traffic can tell what it is
+#: and who to contact.
+USER_AGENT = "boom/0.1 (+https://github.com/boom-astro/boom)"
+
+#: One session for the process, so the agent and connection pooling apply
+#: everywhere rather than having to be remembered at each call site.
+_session: requests.Session | None = None
+
+
+def session() -> requests.Session:
+    global _session
+    if _session is None:
+        _session = requests.Session()
+        _session.headers["User-Agent"] = USER_AGENT
+    return _session
+
 #: Read in 1 MiB blocks -- these files are hundreds of megabytes each, and the
 #: default 1 KiB makes the syscall overhead visible.
 BLOCK_SIZE = 1024 * 1024
@@ -39,7 +60,7 @@ def list_index(url: str, pattern: str) -> list[str]:
     records progress by chunk id, and a shuffled listing would still be correct
     but would make a resumed run's logs impossible to follow.
     """
-    response = requests.get(url, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT))
+    response = session().get(url, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT))
     response.raise_for_status()
     matcher = re.compile(pattern)
     names = {
@@ -53,7 +74,7 @@ def list_index(url: str, pattern: str) -> list[str]:
 def content_length(url: str) -> int | None:
     """The size the archive advertises for `url`, if it advertises one."""
     try:
-        response = requests.head(
+        response = session().head(
             url, allow_redirects=True, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT)
         )
         response.raise_for_status()
@@ -84,7 +105,7 @@ def download(
         try:
             downloaded = partial.stat().st_size if partial.exists() else 0
             headers = {"Range": f"bytes={downloaded}-"} if downloaded else {}
-            response = requests.get(
+            response = session().get(
                 url,
                 stream=True,
                 allow_redirects=True,

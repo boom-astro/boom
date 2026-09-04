@@ -96,3 +96,29 @@ def test_download_restarts_when_server_ignores_range(tmp_path, monkeypatch):
     responses.add(responses.GET, "https://example.test/f.gz", body=b"payload", status=200)
     download("https://example.test/f.gz", dest, expected_size=7)
     assert dest.read_bytes() == b"payload"
+
+
+def test_every_request_identifies_boom():
+    """At least one archive (quasars.org) answers 406 to the default
+    `python-requests/x.y` agent, so a valid download fails for no visible
+    reason. The agent is load-bearing, not cosmetic."""
+    from boompy.catalogs.http import USER_AGENT, session
+
+    assert session().headers["User-Agent"] == USER_AGENT
+    assert "python-requests" not in USER_AGENT
+    # An operator seeing this traffic should be able to tell what it is.
+    assert "boom" in USER_AGENT and "github.com/boom-astro" in USER_AGENT
+
+
+@responses.activate
+def test_the_agent_is_sent_on_download_and_head(tmp_path):
+    from boompy.catalogs.http import USER_AGENT, content_length, download
+
+    responses.add(responses.HEAD, "https://example.test/f.gz", headers={"content-length": "7"})
+    responses.add(responses.GET, "https://example.test/f.gz", body=b"payload")
+    content_length("https://example.test/f.gz")
+    download("https://example.test/f.gz", tmp_path / "f.gz", expected_size=7)
+
+    assert len(responses.calls) == 2
+    for call in responses.calls:
+        assert call.request.headers["User-Agent"] == USER_AGENT

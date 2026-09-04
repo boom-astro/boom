@@ -18,7 +18,7 @@ from pathlib import Path
 import requests
 
 from .base import Chunk, already_complete, ensure_dir
-from .http import CONNECT_TIMEOUT, READ_TIMEOUT, download, log
+from .http import CONNECT_TIMEOUT, READ_TIMEOUT, download, log, session
 
 URL = "https://ned.ipac.caltech.edu/NED::LVS/fits/Current/"
 FITS_FILENAME = "ned_lvs.fits"
@@ -90,7 +90,7 @@ def _to_parquet(fits_path: Path, out_path: Path) -> Path:
 
 def _head() -> tuple[int | None, str | None]:
     """Advertised size and release name for the current file."""
-    response = requests.head(
+    response = session().head(
         URL, allow_redirects=True, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT)
     )
     response.raise_for_status()
