@@ -1,10 +1,8 @@
-use crate::{
-    enrichment::{
-        models::{load_model, load_model_on_device, Model, ModelError},
-        ZtfAlertForEnrichment,
-    },
-    utils::lightcurves::AllBandsProperties,
+use crate::enrichment::{
+    models::{load_model, load_model_on_device, Model, ModelError},
+    ZtfAlertForEnrichment,
 };
+use crate::utils::lightcurves::{analyze_photometry, prepare_photometry, PhotometryMag};
 use ndarray::{Array, Dim};
 use ort::{inputs, session::Session, value::TensorRef};
 use tracing::instrument;
@@ -27,9 +25,7 @@ impl Model for BtsBotModel {
         metadata_features: &Array<f32, Dim<[usize; 2]>>,
         image_features: &Array<f32, Dim<[usize; 4]>>,
     ) -> Result<Vec<f32>, ModelError> {
-        // The shared triplet is built channels-last for the ACAI models, which are
-        // TensorFlow exports. BTSbot is a PyTorch export and reads channels-first,
-        // so it is the one that converts.
+        // ACAI reads channels-last; BTSbot is a PyTorch export and converts.
         let channels_first = image_features
             .view()
             .permuted_axes([0, 3, 1, 2])
@@ -43,14 +39,32 @@ impl Model for BtsBotModel {
 
         let outputs = self.model.run(model_inputs)?;
 
-        // v2 emits logits where v1 emitted a probability. Filters cut on this
-        // score directly, so it is squashed back into [0, 1] here rather than
-        // changing what every threshold means.
+        // v2 emits logits; filters cut on a probability, so squash it back.
         match outputs["logits"].try_extract_tensor::<f32>() {
             Ok((_, logits)) => Ok(logits.iter().map(|x| 1.0 / (1.0 + (-x).exp())).collect()),
             Err(_) => Err(ModelError::ModelOutputToVecError),
         }
     }
+}
+
+/// SNR a detection must reach to count for BTSbot. ZTF's historical default.
+pub const MIN_SNR: f64 = 5.0;
+
+/// Detections up to the alert epoch that clear [`MIN_SNR`], band-agnostic.
+fn btsbot_lightcurve(alert: &ZtfAlertForEnrichment) -> Vec<PhotometryMag> {
+    let mut points: Vec<_> = alert
+        .prv_candidates
+        .iter()
+        .filter(|p| p.jd <= alert.candidate.candidate.jd)
+        .filter_map(|p| p.to_photometry_mag(Some(MIN_SNR)))
+        .collect();
+    prepare_photometry(&mut points);
+    points
+}
+
+/// When the object was first seen, by whichever record reaches back further.
+fn first_seen_jd(jdstarthist: Option<f64>, first_jd: f64) -> f64 {
+    jdstarthist.map_or(first_jd, |j| j.min(first_jd))
 }
 
 impl BtsBotModel {
@@ -69,12 +83,11 @@ impl BtsBotModel {
     #[instrument(skip_all, err)]
     pub fn get_metadata(
         alerts: &[&ZtfAlertForEnrichment],
-        alert_properties: &[AllBandsProperties],
     ) -> Result<Array<f32, Dim<[usize; 2]>>, ModelError> {
         let mut features_batch: Vec<f32> = Vec::with_capacity(alerts.len() * 25);
 
         for i in 0..alerts.len() {
-            let alert_features = Self::metadata_for_alert(&alerts[i], &alert_properties[i])?;
+            let alert_features = Self::metadata_for_alert(alerts[i])?;
 
             features_batch.extend(alert_features);
         }
@@ -86,13 +99,12 @@ impl BtsBotModel {
     /// Build metadata for all valid alerts and return the original indices kept.
     pub fn get_metadata_indexed(
         alerts: &[&ZtfAlertForEnrichment],
-        alert_properties: &[AllBandsProperties],
     ) -> Result<(Vec<usize>, Array<f32, Dim<[usize; 2]>>), ModelError> {
         let mut kept_indices: Vec<usize> = Vec::new();
         let mut features_batch: Vec<f32> = Vec::new();
 
         for i in 0..alerts.len() {
-            if let Ok(features) = Self::metadata_for_alert(&alerts[i], &alert_properties[i]) {
+            if let Ok(features) = Self::metadata_for_alert(alerts[i]) {
                 kept_indices.push(i);
                 features_batch.extend(features);
             }
@@ -106,10 +118,7 @@ impl BtsBotModel {
         Ok((kept_indices, features_array))
     }
 
-    fn metadata_for_alert(
-        alert: &ZtfAlertForEnrichment,
-        alert_properties: &AllBandsProperties,
-    ) -> Result<[f32; 25], ModelError> {
+    fn metadata_for_alert(alert: &ZtfAlertForEnrichment) -> Result<[f32; 25], ModelError> {
         let candidate = &alert.candidate.candidate;
 
         let drb = candidate.drb.ok_or(ModelError::MissingFeature("drb"))? as f32;
@@ -146,15 +155,22 @@ impl BtsBotModel {
             .distpsnr2
             .ok_or(ModelError::MissingFeature("distpsnr2"))? as f32;
 
-        let peakmag = alert_properties.peak_mag;
-        let peakjd = alert_properties.peak_jd;
-        let faintestmag = alert_properties.faintest_mag;
-        let firstjd = alert_properties.first_jd;
-        let lastjd = alert_properties.last_jd;
+        // BTSbot's own view, so the SNR floor does not move `photstats`.
+        let lightcurve = btsbot_lightcurve(alert);
+        if lightcurve.is_empty() {
+            return Err(ModelError::MissingFeature("lightcurve"));
+        }
+        let (_, properties, _) = analyze_photometry(&lightcurve);
+        let peakmag = properties.peak_mag;
+        let peakjd = properties.peak_jd;
+        let faintestmag = properties.faintest_mag;
+        let firstjd = properties.first_jd;
 
-        let days_since_peak = (lastjd - peakjd) as f32;
-        let days_to_peak = (peakjd - firstjd) as f32;
-        let age = (firstjd - lastjd) as f32;
+        // Anchored so that age == days_since_peak + days_to_peak.
+        let start_jd = first_seen_jd(candidate.jdstarthist, firstjd);
+        let age = (candidate.jd - start_jd) as f32;
+        let days_since_peak = (candidate.jd - peakjd) as f32;
+        let days_to_peak = (peakjd - start_jd) as f32;
 
         let nnondet = ncovhist - ndethist;
 
@@ -190,6 +206,16 @@ impl BtsBotModel {
 
 #[cfg(test)]
 mod tests {
+
+    /// The first sighting is whichever record reaches back further.
+    #[test]
+    fn test_first_seen_is_the_earlier_record() {
+        let jd = 2_460_000.0;
+        assert_eq!(first_seen_jd(Some(jd - 900.0), jd - 40.0), jd - 900.0);
+        assert_eq!(first_seen_jd(Some(jd - 10.0), jd - 40.0), jd - 40.0);
+        assert_eq!(first_seen_jd(None, jd - 40.0), jd - 40.0);
+    }
+
     use super::*;
 
     const MODEL: &str = "data/models/btsbot-v2.0.0.onnx";
