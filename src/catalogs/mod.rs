@@ -52,6 +52,16 @@ pub enum Reader {
     Ned,
     /// AllWISE, parquet partitions.
     AllWise,
+    /// Million Quasars, converted from its published FITS table.
+    Milliquas,
+    /// DESI DR1 redshifts, converted and filtered from the iron zcatalog.
+    DesiDr1,
+    /// CatWISE2020, converted from the published IPAC tables.
+    CatWise2020,
+    /// Gaia DR3, read straight from the published gzipped CSV.
+    GaiaDr3,
+    /// GALEX GUVcat_AIS, read straight from the published gzipped CSV.
+    Galex,
 }
 
 /// A catalog BOOM knows how to ingest.
@@ -74,7 +84,7 @@ pub struct CatalogDef {
 pub const CATALOGS: &[CatalogDef] = &[
     CatalogDef {
         id: "2mass",
-        collection: "2MASS",
+        collection: "2MASS_PSC",
         title: "2MASS Point Source Catalog",
         description: "Near-infrared JHKs photometry for 471 million point sources, \
                       published as ~92 pipe-delimited files.",
@@ -82,7 +92,7 @@ pub const CATALOGS: &[CatalogDef] = &[
     },
     CatalogDef {
         id: "ned-lvs",
-        collection: "NED_LVS",
+        collection: "NED",
         title: "NED Local Volume Sample",
         description: "Redshifts, distances, stellar masses and angular diameters for \
                       nearby galaxies. One table, always the current release.",
@@ -96,11 +106,106 @@ pub const CATALOGS: &[CatalogDef] = &[
                       sources, read from the LSDB HATS mirror one HEALPix partition at a time.",
         reader: Reader::AllWise,
     },
+    CatalogDef {
+        id: "milliquas",
+        collection: "milliquas_v8",
+        title: "Million Quasars",
+        description: "Quasars and quasar candidates with redshifts and radio/X-ray \
+                      associations. One table, converted from FITS.",
+        reader: Reader::Milliquas,
+    },
+    CatalogDef {
+        id: "desi-dr1",
+        collection: "DESI_DR1",
+        title: "DESI DR1 redshifts",
+        description: "Spectroscopic redshifts from the iron zcatalog, filtered to the \
+                      primary spectrum of each science target.",
+        reader: Reader::DesiDr1,
+    },
+    CatalogDef {
+        id: "catwise2020",
+        collection: "CatWISE2020",
+        title: "CatWISE2020",
+        description: "Mid-infrared W1/W2 photometry and proper motions, published as \
+                      several hundred IPAC tables.",
+        reader: Reader::CatWise2020,
+    },
+    CatalogDef {
+        id: "gaia-dr3",
+        collection: "Gaia_DR3",
+        title: "Gaia DR3",
+        description: "Astrometry, parallaxes, proper motions and G/BP/RP photometry for \
+                      1.8 billion sources, in ~3400 gzipped CSV files.",
+        reader: Reader::GaiaDr3,
+    },
+    CatalogDef {
+        id: "galex",
+        collection: "GALEX",
+        title: "GALEX GUVcat_AIS",
+        description: "Ultraviolet FUV/NUV photometry from the All-Sky Imaging Survey.",
+        reader: Reader::Galex,
+    },
 ];
 
 /// Look up a catalog by its slug.
 pub fn find(id: &str) -> Option<&'static CatalogDef> {
     CATALOGS.iter().find(|c| c.id == id)
+}
+
+/// Look up a catalog by the collection name it is stored under.
+///
+/// This is the direction the crossmatch config needs: `crossmatch.<survey>[]`
+/// names collections, not slugs.
+pub fn find_by_collection(collection: &str) -> Option<&'static CatalogDef> {
+    CATALOGS.iter().find(|c| c.collection == collection)
+}
+
+/// Which catalogs this deployment should hold.
+///
+/// Derived primarily from `crossmatch.<survey>[].catalog`, because that is
+/// where a catalog is actually put to use -- a deployment that crossmatches
+/// against NED needs NED, and having to say so twice is how the two lists drift
+/// apart. `catalogs:` in the config is additive, for catalogs held for direct
+/// querying without being crossmatch targets.
+///
+/// Entries are returned as slugs where the name maps to a known catalog, and as
+/// the raw collection name where it does not, so an unrecognized name surfaces
+/// in the drift table rather than being silently dropped. That is deliberate
+/// and must not become an error: `TNS`, hand-imported collections, and anything
+/// built by `prepare_catalog` are legitimate crossmatch targets that this
+/// registry has no definition for.
+///
+/// Watchlists are excluded -- they are user-managed, not archival catalogs.
+pub fn declared(config: &crate::conf::AppConfig) -> Vec<String> {
+    let mut declared: Vec<String> = Vec::new();
+    let mut push = |id: String| {
+        if !declared.contains(&id) {
+            declared.push(id);
+        }
+    };
+
+    // Sorted for a stable order regardless of the survey map's iteration order,
+    // so the admin page does not reshuffle its rows between requests.
+    let mut from_crossmatch: Vec<&str> = config
+        .crossmatch
+        .values()
+        .flatten()
+        .map(|entry| entry.catalog.as_str())
+        .filter(|name| !name.starts_with(crate::api::catalogs::WATCHLIST_PREFIX))
+        .collect();
+    from_crossmatch.sort_unstable();
+    from_crossmatch.dedup();
+
+    for name in from_crossmatch {
+        match find_by_collection(name) {
+            Some(def) => push(def.id.to_string()),
+            None => push(name.to_string()),
+        }
+    }
+    for id in &config.catalogs {
+        push(id.clone());
+    }
+    declared
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -369,6 +474,13 @@ async fn ingest_file(
         Reader::TwoMass => Ok(ascii::ingest_ascii::<types::TwoMass>(inserter, path).await?),
         Reader::Ned => Ok(arrow::ingest_parquet::<types::Ned>(inserter, path).await?),
         Reader::AllWise => Ok(arrow::ingest_parquet::<types::AllWise>(inserter, path).await?),
+        Reader::Milliquas => Ok(arrow::ingest_parquet::<types::Milliquas>(inserter, path).await?),
+        Reader::DesiDr1 => Ok(arrow::ingest_parquet::<types::DesiDr1>(inserter, path).await?),
+        Reader::CatWise2020 => {
+            Ok(arrow::ingest_parquet::<types::CatWise2020>(inserter, path).await?)
+        }
+        Reader::GaiaDr3 => Ok(csv::ingest_csv::<types::Gaia>(inserter, path).await?),
+        Reader::Galex => Ok(csv::ingest_csv::<types::Galex>(inserter, path).await?),
     }
 }
 
@@ -540,4 +652,121 @@ pub async fn status(
         });
     }
     Ok(statuses)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn slugs_and_collections_are_unique() {
+        // Both are lookup keys -- a duplicate would make `find` or
+        // `find_by_collection` silently return the wrong definition.
+        let mut ids: Vec<&str> = CATALOGS.iter().map(|c| c.id).collect();
+        let count = ids.len();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), count, "duplicate catalog slug");
+
+        let mut collections: Vec<&str> = CATALOGS.iter().map(|c| c.collection).collect();
+        collections.sort_unstable();
+        collections.dedup();
+        assert_eq!(collections.len(), count, "duplicate collection name");
+    }
+
+    #[test]
+    fn slugs_are_kebab_case() {
+        // They are written by hand into config, and a slug that does not match
+        // the documented convention is a typo waiting to happen.
+        for def in CATALOGS {
+            assert!(
+                def.id
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
+                "{} is not kebab-case",
+                def.id
+            );
+        }
+    }
+
+    #[test]
+    fn every_definition_is_reachable_by_both_keys() {
+        for def in CATALOGS {
+            assert_eq!(find(def.id).map(|d| d.collection), Some(def.collection));
+            assert_eq!(
+                find_by_collection(def.collection).map(|d| d.id),
+                Some(def.id)
+            );
+        }
+    }
+
+    /// The catalog names the shipped config actually crossmatches against.
+    ///
+    /// Read from `config.yaml` rather than hardcoded, so adding a crossmatch
+    /// entry without a definition shows up here.
+    fn crossmatch_names() -> Vec<String> {
+        let config = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/config.yaml"))
+            .expect("config.yaml");
+        config
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("- catalog: "))
+            .map(|name| name.trim().to_string())
+            .collect()
+    }
+
+    /// Crossmatch targets this release cannot build, and why.
+    ///
+    /// Each of these is a real collection the pipeline matches against, so they
+    /// are not mistakes -- they simply have no ingest definition yet. They
+    /// surface in the admin drift table as an unknown slug, which is the honest
+    /// answer: BOOM cannot tell you whether they are up to date.
+    ///
+    /// Delete an entry when its definition lands; the test below will then
+    /// require it to stay defined.
+    const WITHOUT_DEFINITIONS: &[(&str, &str)] = &[
+        (
+            "LS_DR10_PHOTOZ",
+            "the stored table is a join of the LS DR10 tractor sweeps with the \
+             photo-z catalog, produced by the pandas minifiers in boom-catalogs; \
+             porting it means porting that pipeline, not just a download",
+        ),
+        (
+            "LSPSC",
+            "no downloader or record type exists anywhere in boom or \
+             boom-catalogs -- the collection is created empty by the test \
+             workflow, and where its data comes from is not recorded",
+        ),
+    ];
+
+    #[test]
+    fn every_crossmatch_target_is_either_defined_or_a_known_exception() {
+        // `declared` deliberately reports an unknown name rather than failing --
+        // TNS and hand-imported collections are legitimate crossmatch targets.
+        // This guards the base config, where a new entry should either come
+        // with a definition or be listed above with a reason.
+        let exempt: Vec<&str> = WITHOUT_DEFINITIONS.iter().map(|(name, _)| *name).collect();
+        let unknown: Vec<String> = crossmatch_names()
+            .into_iter()
+            .filter(|name| !name.starts_with(crate::api::catalogs::WATCHLIST_PREFIX))
+            .filter(|name| find_by_collection(name).is_none())
+            .filter(|name| !exempt.contains(&name.as_str()))
+            .collect();
+        assert!(
+            unknown.is_empty(),
+            "config.yaml crossmatches against catalogs with no definition: {unknown:?}. \
+             Add a CatalogDef, or list it in WITHOUT_DEFINITIONS with the reason."
+        );
+    }
+
+    #[test]
+    fn the_exception_list_does_not_outlive_its_reason() {
+        // Once a catalog gains a definition, leaving it exempt would hide a
+        // future regression.
+        for (name, _) in WITHOUT_DEFINITIONS {
+            assert!(
+                find_by_collection(name).is_none(),
+                "{name} now has a definition; remove it from WITHOUT_DEFINITIONS"
+            );
+        }
+    }
 }

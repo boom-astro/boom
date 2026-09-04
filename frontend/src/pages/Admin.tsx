@@ -152,6 +152,92 @@ function CatalogsTable({
   );
 }
 
+/**
+ * Runs that are queued or running, surfaced above everything else.
+ *
+ * These are the rows an admin is actually here to watch: a catalog ingest runs
+ * for hours, and having to hunt for it in the history is exactly the friction
+ * the admin page exists to remove.
+ */
+function ActiveRuns({ runs, onSelect, onCancel }: {
+  runs: TaskRun[];
+  onSelect: (id: string) => void;
+  onCancel: (id: string) => void;
+}) {
+  const active = runs.filter(isActive);
+  if (active.length === 0) return null;
+
+  return (
+    <section className="mb-8">
+      <h2 className="text-lg font-semibold mb-1">In progress</h2>
+      <p className="text-sm text-muted-foreground mb-3">
+        {active.length} {active.length === 1 ? "run is" : "runs are"} active. These survive a
+        deploy — a run whose worker goes away is picked up again and resumes.
+      </p>
+      <div className="space-y-3">
+        {active.map((run) => {
+          const pct =
+            run.progress.total > 0
+              ? Math.round((run.progress.done / run.progress.total) * 100)
+              : null;
+          const catalog = typeof run.params.catalog === "string" ? run.params.catalog : null;
+          return (
+            <div key={run._id} className="border rounded-lg p-3">
+              <div className="flex items-start justify-between gap-4 mb-2">
+                <div className="min-w-0">
+                  <div className="font-medium">
+                    {run.task_type}
+                    {catalog && <span className="font-mono text-sm"> · {catalog}</span>}{" "}
+                    <Badge variant={statusVariant(run.status)}>{run.status}</Badge>
+                  </div>
+                  <div className="text-xs text-muted-foreground">
+                    started by {run.actor.username}
+                    {run.started_at && ` · running since ${formatTime(run.started_at)}`}
+                    {run.attempts > 1 && ` · attempt ${run.attempts} (resumed)`}
+                  </div>
+                </div>
+                <div className="flex gap-2 shrink-0">
+                  <Button variant="outline" size="sm" onClick={() => onSelect(run._id)}>
+                    Logs
+                  </Button>
+                  <Button variant="destructive" size="sm" onClick={() => onCancel(run._id)}>
+                    Cancel
+                  </Button>
+                </div>
+              </div>
+              {run.progress.total > 0 ? (
+                <>
+                  <div className="flex justify-between text-xs text-muted-foreground mb-1">
+                    <span>{run.progress.message || "working"}</span>
+                    <span className="tabular-nums">
+                      {run.progress.done}/{run.progress.total}
+                      {pct !== null && ` (${pct}%)`}
+                    </span>
+                  </div>
+                  <div className="h-2 w-full rounded bg-muted overflow-hidden">
+                    <div
+                      className="h-full bg-primary transition-all"
+                      style={{ width: `${pct ?? 0}%` }}
+                    />
+                  </div>
+                </>
+              ) : (
+                // Before the first chunk lands there is nothing to divide by --
+                // the run is downloading, which can take a while on its own.
+                <p className="text-xs text-muted-foreground">
+                  {run.status === "queued"
+                    ? "Waiting for a worker."
+                    : "Starting — fetching the first chunk."}
+                </p>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
 function RunDetail({ runId, onClose }: { runId: string; onClose: () => void }) {
   const [run, setRun] = useState<TaskRun | null>(null);
   const [lines, setLines] = useState<TaskLogLine[]>([]);
@@ -393,6 +479,15 @@ export default function Admin() {
     if (catalog && !runsByCatalog.has(catalog)) runsByCatalog.set(catalog, run);
   }
 
+  async function onCancelRun(runId: string) {
+    try {
+      await cancelTaskRun(runId);
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
   async function onIngest(catalogId: string) {
     setBusy(catalogId);
     try {
@@ -419,6 +514,7 @@ export default function Admin() {
           <p className="text-sm text-muted-foreground">Loading…</p>
         ) : (
           <>
+            <ActiveRuns runs={runs} onSelect={setSelected} onCancel={onCancelRun} />
             <CatalogsTable
               catalogs={catalogs}
               runsByCatalog={runsByCatalog}

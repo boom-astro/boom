@@ -124,3 +124,20 @@ def test_cli_keeps_logs_off_stdout(capsys):
 def test_chunk_json_shape_matches_the_rust_struct():
     assert Chunk(id="a", label="b").as_json() == {"id": "a", "label": "b"}
     assert Chunk(id="a").as_json() == {"id": "a", "label": None}
+
+
+def test_registry_matches_the_rust_side():
+    """Every catalog BOOM declares must be sourceable from here.
+
+    The two halves are separate files in separate languages; a slug added to one
+    and not the other produces an Ingest button that fails at fetch time, which
+    is exactly the drift this catches.
+    """
+    import re
+    from pathlib import Path
+
+    mod = Path(__file__).resolve().parents[2] / "src" / "catalogs" / "mod.rs"
+    rust_slugs = set(re.findall(r'^\s*id: "([^"]+)",', mod.read_text(), re.MULTILINE))
+    assert rust_slugs, "found no CatalogDef ids -- has mod.rs moved?"
+    missing = rust_slugs - set(CATALOGS)
+    assert not missing, f"declared in Rust but not sourceable from boompy: {sorted(missing)}"

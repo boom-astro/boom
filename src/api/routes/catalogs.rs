@@ -255,7 +255,8 @@ pub async fn get_catalog_status(
     if let Err(e) = require_admin(&current_user, &babamul_user) {
         return e;
     }
-    match crate::catalogs::status(&db, &config.catalogs).await {
+    let declared = crate::catalogs::declared(&config);
+    match crate::catalogs::status(&db, &declared).await {
         Ok(statuses) => response::ok_ser("success", statuses),
         Err(e) => response::internal_error(&format!("failed to read catalog status: {e}")),
     }

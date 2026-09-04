@@ -370,6 +370,352 @@ impl super::arrow::FromRecordBatch for AllWise {
 
 impl HasCoordinates for AllWise {}
 
+// ---------------------------------------------------------------------------
+// Milliquas -- parquet, converted from the published FITS table by boompy
+// ---------------------------------------------------------------------------
+
+/// One row of the Million Quasars catalog.
+///
+/// <https://quasars.org/milliquas.htm>
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Milliquas {
+    #[serde(rename(serialize = "_id"))]
+    pub name: String,
+    pub ra: f64,
+    pub dec: f64,
+    pub objtype: String,
+    pub rmag: Option<f64>,
+    pub bmag: Option<f64>,
+    pub comment: Option<String>,
+    pub rclass: Option<String>,
+    pub bclass: Option<String>,
+    pub z: Option<f64>,
+    pub xname: Option<String>,
+    pub rname: Option<String>,
+    pub lobe1: Option<String>,
+    pub lobe2: Option<String>,
+}
+
+impl super::arrow::FromRecordBatch for Milliquas {
+    fn from_batch(
+        batch: &::arrow::array::RecordBatch,
+    ) -> Result<Vec<Self>, super::arrow::ColumnError> {
+        use super::arrow::{f64_column, string_column};
+
+        let name = string_column(batch, "NAME")?;
+        let ra = f64_column(batch, "RA")?;
+        let dec = f64_column(batch, "DEC")?;
+        let objtype = string_column(batch, "TYPE")?;
+        let rmag = f64_column(batch, "RMAG")?;
+        let bmag = f64_column(batch, "BMAG")?;
+        let comment = string_column(batch, "COMMENT")?;
+        let rclass = string_column(batch, "RXPCT")?;
+        let bclass = string_column(batch, "QPCT")?;
+        let z = f64_column(batch, "Z")?;
+        let xname = string_column(batch, "XNAME")?;
+        let rname = string_column(batch, "RNAME")?;
+        let lobe1 = string_column(batch, "LOBE1")?;
+        let lobe2 = string_column(batch, "LOBE2")?;
+
+        // Empty strings are how the FITS table spells "absent" for the optional
+        // text fields; storing "" would make a projection look populated.
+        let blank_to_none = |v: &Option<String>| v.clone().filter(|s| !s.is_empty());
+
+        let mut rows = Vec::with_capacity(batch.num_rows());
+        for i in 0..batch.num_rows() {
+            let (Some(name), Some(ra), Some(dec)) = (name[i].clone(), ra[i], dec[i]) else {
+                continue;
+            };
+            rows.push(Milliquas {
+                name,
+                ra,
+                dec,
+                objtype: objtype[i].clone().unwrap_or_default(),
+                rmag: rmag[i],
+                bmag: bmag[i],
+                comment: blank_to_none(&comment[i]),
+                rclass: blank_to_none(&rclass[i]),
+                bclass: blank_to_none(&bclass[i]),
+                z: z[i],
+                xname: blank_to_none(&xname[i]),
+                rname: blank_to_none(&rname[i]),
+                lobe1: blank_to_none(&lobe1[i]),
+                lobe2: blank_to_none(&lobe2[i]),
+            });
+        }
+        Ok(rows)
+    }
+}
+
+impl HasCoordinates for Milliquas {}
+
+// ---------------------------------------------------------------------------
+// DESI DR1 -- parquet, converted from the iron zcatalog by boompy
+// ---------------------------------------------------------------------------
+
+/// One spectroscopic redshift from the DESI DR1 `zall-tilecumulative-iron`
+/// catalog.
+///
+/// boompy applies the row filters before conversion: only `ZCAT_PRIMARY` rows
+/// (one best spectrum per target) and only positive `TARGETID`s (negative ids
+/// are sky fibers -- not unique, no real source, and often with non-finite
+/// coordinates the 2dsphere index would reject).
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DesiDr1 {
+    #[serde(rename(serialize = "_id"))]
+    pub targetid: i64,
+    pub ra: f64,
+    pub dec: f64,
+    pub survey: String,
+    pub program: String,
+    pub z: f64,
+    pub zerr: f64,
+    pub zwarn: i64,
+    pub chi2: f64,
+    pub deltachi2: f64,
+    pub spectype: String,
+    pub subtype: Option<String>,
+    pub zcat_nspec: i64,
+}
+
+impl super::arrow::FromRecordBatch for DesiDr1 {
+    fn from_batch(
+        batch: &::arrow::array::RecordBatch,
+    ) -> Result<Vec<Self>, super::arrow::ColumnError> {
+        use super::arrow::{f64_column, i64_column, string_column};
+
+        let targetid = i64_column(batch, "TARGETID")?;
+        let ra = f64_column(batch, "TARGET_RA")?;
+        let dec = f64_column(batch, "TARGET_DEC")?;
+        let survey = string_column(batch, "SURVEY")?;
+        let program = string_column(batch, "PROGRAM")?;
+        let z = f64_column(batch, "Z")?;
+        let zerr = f64_column(batch, "ZERR")?;
+        let zwarn = i64_column(batch, "ZWARN")?;
+        let chi2 = f64_column(batch, "CHI2")?;
+        let deltachi2 = f64_column(batch, "DELTACHI2")?;
+        let spectype = string_column(batch, "SPECTYPE")?;
+        let subtype = string_column(batch, "SUBTYPE")?;
+        let zcat_nspec = i64_column(batch, "ZCAT_NSPEC")?;
+
+        let mut rows = Vec::with_capacity(batch.num_rows());
+        for i in 0..batch.num_rows() {
+            let (Some(targetid), Some(ra), Some(dec), Some(z)) = (targetid[i], ra[i], dec[i], z[i])
+            else {
+                continue;
+            };
+            rows.push(DesiDr1 {
+                targetid,
+                ra,
+                dec,
+                survey: survey[i].clone().unwrap_or_default(),
+                program: program[i].clone().unwrap_or_default(),
+                z,
+                zerr: zerr[i].unwrap_or(f64::NAN),
+                zwarn: zwarn[i].unwrap_or_default(),
+                chi2: chi2[i].unwrap_or(f64::NAN),
+                deltachi2: deltachi2[i].unwrap_or(f64::NAN),
+                spectype: spectype[i].clone().unwrap_or_default(),
+                subtype: subtype[i].clone().filter(|s| !s.is_empty()),
+                zcat_nspec: zcat_nspec[i].unwrap_or_default(),
+            });
+        }
+        Ok(rows)
+    }
+}
+
+impl HasCoordinates for DesiDr1 {}
+
+// ---------------------------------------------------------------------------
+// CatWISE2020 -- parquet, converted from the published .tbl tables by boompy
+// ---------------------------------------------------------------------------
+
+/// One row of the CatWISE2020 catalog.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CatWise2020 {
+    #[serde(rename(serialize = "_id"))]
+    pub source_id: String,
+    pub source_name: String,
+    pub ra: f64,
+    pub dec: f64,
+    pub sigra: f64,
+    pub sigdec: f64,
+    pub w1mpro: Option<f64>,
+    pub w2mpro: Option<f64>,
+    pub w1sigmpro: Option<f64>,
+    pub w2sigmpro: Option<f64>,
+    pub w1rchi2: Option<f64>,
+    pub w2rchi2: Option<f64>,
+    pub pmra: Option<f64>,
+    pub pmdec: Option<f64>,
+    pub sigpmra: Option<f64>,
+    pub sigpmdec: Option<f64>,
+    pub unwise_objid: Option<String>,
+}
+
+impl super::arrow::FromRecordBatch for CatWise2020 {
+    fn from_batch(
+        batch: &::arrow::array::RecordBatch,
+    ) -> Result<Vec<Self>, super::arrow::ColumnError> {
+        use super::arrow::{f64_column, string_column};
+
+        let source_id = string_column(batch, "source_id")?;
+        let source_name = string_column(batch, "source_name")?;
+        let ra = f64_column(batch, "ra")?;
+        let dec = f64_column(batch, "dec")?;
+        let sigra = f64_column(batch, "sigra")?;
+        let sigdec = f64_column(batch, "sigdec")?;
+        let w1mpro = f64_column(batch, "w1mpro")?;
+        let w2mpro = f64_column(batch, "w2mpro")?;
+        let w1sigmpro = f64_column(batch, "w1sigmpro")?;
+        let w2sigmpro = f64_column(batch, "w2sigmpro")?;
+        let w1rchi2 = f64_column(batch, "w1rchi2")?;
+        let w2rchi2 = f64_column(batch, "w2rchi2")?;
+        let pmra = f64_column(batch, "pmra")?;
+        let pmdec = f64_column(batch, "pmdec")?;
+        let sigpmra = f64_column(batch, "sigpmra")?;
+        let sigpmdec = f64_column(batch, "sigpmdec")?;
+        let unwise_objid = string_column(batch, "unwise_objid")?;
+
+        let mut rows = Vec::with_capacity(batch.num_rows());
+        for i in 0..batch.num_rows() {
+            let (Some(source_id), Some(ra), Some(dec)) = (source_id[i].clone(), ra[i], dec[i])
+            else {
+                continue;
+            };
+            rows.push(CatWise2020 {
+                source_id,
+                source_name: source_name[i].clone().unwrap_or_default(),
+                ra,
+                dec,
+                sigra: sigra[i].unwrap_or_default(),
+                sigdec: sigdec[i].unwrap_or_default(),
+                w1mpro: w1mpro[i],
+                w2mpro: w2mpro[i],
+                w1sigmpro: w1sigmpro[i],
+                w2sigmpro: w2sigmpro[i],
+                w1rchi2: w1rchi2[i],
+                w2rchi2: w2rchi2[i],
+                pmra: pmra[i],
+                pmdec: pmdec[i],
+                sigpmra: sigpmra[i],
+                sigpmdec: sigpmdec[i],
+                unwise_objid: unwise_objid[i].clone().filter(|s| !s.is_empty()),
+            });
+        }
+        Ok(rows)
+    }
+}
+
+impl HasCoordinates for CatWise2020 {}
+
+// ---------------------------------------------------------------------------
+// Gaia DR3 -- csv, read directly from the published gzipped files
+// ---------------------------------------------------------------------------
+
+/// Empty and the literal "null" both mean absent in the Gaia CSV dumps.
+///
+/// Read through a string rather than with `Option<T>` directly because serde's
+/// numeric parsers reject "null" outright, which would fail the whole file.
+fn gaia_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: std::str::FromStr,
+    <T as std::str::FromStr>::Err: std::fmt::Display,
+{
+    use serde::de::Error;
+    let raw = String::deserialize(deserializer)?;
+    if raw.is_empty() || raw == "null" {
+        return Ok(None);
+    }
+    raw.parse().map(Some).map_err(D::Error::custom)
+}
+
+/// One source from Gaia DR3, as published in the `GaiaSource` CSV dumps.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Gaia {
+    #[serde(rename(serialize = "_id"))]
+    pub source_id: i64,
+    pub ra: f64,
+    pub dec: f64,
+    #[serde(deserialize_with = "gaia_nullable")]
+    pub ra_error: Option<f64>,
+    #[serde(deserialize_with = "gaia_nullable")]
+    pub dec_error: Option<f64>,
+    #[serde(deserialize_with = "gaia_nullable")]
+    pub parallax: Option<f64>,
+    #[serde(deserialize_with = "gaia_nullable")]
+    pub parallax_error: Option<f64>,
+    #[serde(deserialize_with = "gaia_nullable")]
+    pub pm: Option<f64>,
+    #[serde(deserialize_with = "gaia_nullable")]
+    pub pmra: Option<f64>,
+    #[serde(deserialize_with = "gaia_nullable")]
+    pub pmra_error: Option<f64>,
+    #[serde(deserialize_with = "gaia_nullable")]
+    pub pmdec: Option<f64>,
+    #[serde(deserialize_with = "gaia_nullable")]
+    pub pmdec_error: Option<f64>,
+    #[serde(deserialize_with = "gaia_nullable")]
+    pub phot_g_mean_mag: Option<f64>,
+    #[serde(deserialize_with = "gaia_nullable")]
+    pub phot_bp_mean_mag: Option<f64>,
+    #[serde(deserialize_with = "gaia_nullable")]
+    pub phot_rp_mean_mag: Option<f64>,
+    #[serde(deserialize_with = "gaia_nullable")]
+    pub ruwe: Option<f64>,
+    #[serde(deserialize_with = "gaia_nullable")]
+    pub phot_bp_rp_excess_factor: Option<f64>,
+}
+
+impl HasCoordinates for Gaia {}
+
+// ---------------------------------------------------------------------------
+// GALEX -- csv, read directly from the published GUVcat AIS files
+// ---------------------------------------------------------------------------
+
+/// GALEX writes -999 rather than leaving a magnitude blank.
+///
+/// Stored as an explicit absence: -999 as a magnitude would be an absurdly
+/// bright source, and a crossmatch has no way to tell it from a real one.
+fn galex_sentinel<'de, D>(deserializer: D) -> Result<Option<f64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value: Option<f64> = gaia_nullable(deserializer)?;
+    Ok(value.filter(|v| *v > -999.0))
+}
+
+/// One row of the GALEX GUVcat_AIS catalog.
+///
+/// <https://iopscience.iop.org/article/10.3847/1538-4365/aa7053/meta>
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Galex {
+    #[serde(rename(serialize = "_id"))]
+    pub objid: i64,
+    pub ra: f64,
+    pub dec: f64,
+    #[serde(deserialize_with = "galex_sentinel")]
+    pub fuv_mag: Option<f64>,
+    #[serde(deserialize_with = "galex_sentinel")]
+    pub fuv_magerr: Option<f64>,
+    #[serde(deserialize_with = "galex_sentinel")]
+    pub nuv_mag: Option<f64>,
+    #[serde(deserialize_with = "galex_sentinel")]
+    pub nuv_magerr: Option<f64>,
+    #[serde(alias = "fexptime", deserialize_with = "gaia_nullable")]
+    pub fuv_exp: Option<f64>,
+    #[serde(alias = "nexptime", deserialize_with = "gaia_nullable")]
+    pub nuv_exp: Option<f64>,
+}
+
+impl HasCoordinates for Galex {}
+
 #[cfg(test)]
 mod tests {
     use super::*;

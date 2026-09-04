@@ -9,22 +9,25 @@ section.
 These are defined for each catalog and for each survey, so ZTF might
 cross-match against NED differently from how LSST cross-matches against NED.
 
-For a given instance, the desired catalogs are defined as a list in the
-config as kebab-case slugs, e.g.:
+Which catalogs an instance should hold is derived from the ones it actually
+crossmatches against — the collection names under `crossmatch` — so there is one
+place to declare a catalog rather than two lists to keep in step. The optional
+`catalogs:` key adds any held for direct querying without being a crossmatch
+target, as kebab-case slugs:
 
 ```yaml
-catalogs:
-  - ned
-  - desi-dr1
-  - ls-dr10-photoz
-  - gaia-dr3
-  - milliquas-v8
-  - 2mass
+catalogs: [gaia-dr3, 2mass] # BOOM_CATALOGS, comma-separated
 ```
 
 If a declared catalog does not exist, a warning will be shown on the admin
 page, and there will be a button to kick off and monitor an ingestion job
 within the [task system](./task-system.md).
+
+A crossmatch target with no ingest definition — `TNS`, a hand-imported
+collection, anything built by `prepare_catalog` — is reported as an unknown slug
+rather than treated as an error. That is the honest answer: BOOM has no way to
+tell whether it is up to date. Watchlists are excluded entirely, being
+user-managed rather than archival.
 
 ## Ingesting a catalog
 
@@ -64,14 +67,28 @@ not yet queryable by position.
 
 | Slug | Collection | Format | Chunks | What it is |
 | --- | --- | --- | --- | --- |
-| `2mass` | `2MASS` | pipe-delimited text | ~92 files | Near-infrared JHKs photometry for 471 million point sources. |
-| `ned-lvs` | `NED_LVS` | parquet, converted from FITS | 1 file | Redshifts, distances, stellar masses and angular diameters for nearby galaxies. Always the current NED release. |
+| `2mass` | `2MASS_PSC` | pipe-delimited text | ~92 files | Near-infrared JHKs photometry for 471 million point sources. |
+| `ned-lvs` | `NED` | parquet, from FITS | 1 | Redshifts, distances, stellar masses and angular diameters for nearby galaxies. Always the current release. |
 | `allwise` | `AllWISE` | parquet | ~1000 HEALPix partitions | Mid-infrared W1–W4 photometry and proper motions for 748 million sources, from the LSDB HATS mirror. |
+| `milliquas` | `milliquas_v8` | parquet, from FITS | 1 | Quasars and candidates with redshifts and radio/X-ray associations. |
+| `desi-dr1` | `DESI_DR1` | parquet, from FITS | 1 | Spectroscopic redshifts from the iron zcatalog, filtered to the primary spectrum per science target. |
+| `catwise2020` | `CatWISE2020` | parquet, from IPAC tables | ~700 files | Mid-infrared W1/W2 photometry and proper motions. |
+| `gaia-dr3` | `Gaia_DR3` | gzipped CSV | ~3400 files | Astrometry, parallaxes, proper motions and G/BP/RP photometry for 1.8 billion sources. |
+| `galex` | `GALEX` | gzipped CSV | per release | Ultraviolet FUV/NUV photometry from the All-Sky Imaging Survey. |
 
-TODO: the rest of the catalogs BOOM crossmatches against — Gaia DR3, DESI DR1,
-LS DR10 photo-z, Milliquas, VSX, CatWISE2020, GALEX, Pan-STARRS — still live in
-[boom-catalogs](https://github.com/boom-astro/boom-catalogs) and need porting
-onto the interface below.
+Two crossmatch targets still have no definition, and are listed as exceptions in
+`WITHOUT_DEFINITIONS` in `src/catalogs/mod.rs`:
+
+- **`LS_DR10_PHOTOZ`** — the stored table is a join of the LS DR10 tractor
+  sweeps with the photo-z catalog, produced by the pandas minifiers in
+  [boom-catalogs](https://github.com/boom-astro/boom-catalogs). Porting it means
+  porting that pipeline, not just a download.
+- **`LSPSC`** — no downloader or record type exists in either repo. The
+  collection is created empty by the test workflow and where its data comes from
+  is not recorded.
+
+`VSX` also remains unported: its `vsx.dat` needs the exact fixed-column parser
+from boom-catalogs, which was not carried over.
 
 ## Adding a catalog
 

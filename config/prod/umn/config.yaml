@@ -194,12 +194,19 @@ workers:
       refresh_interval_minutes: 15
       max_match_rate: 100
       reference_night: "2026-07-15"
-# Archival catalogs this deployment should hold, as kebab-case slugs -- see
-# docs/catalogs.md for the list. Declaring one does not ingest it: the admin
-# page reports a declared catalog that is missing, and an admin starts the
-# ingest from there. Auto-converging on deploy would let a typo rebuild a
-# catalog, and ingesting one is hours to days of work.
-catalogs: []
+# Extra archival catalogs this deployment should hold, as kebab-case slugs --
+# see docs/catalogs.md for the list.
+#
+# Additive: the inventory is derived primarily from the catalogs named under
+# `crossmatch` below, since that is where a catalog is actually put to use and
+# saying so twice is how two lists drift apart. Add a slug here only for a
+# catalog held for direct querying without being a crossmatch target.
+#
+# Declaring one does not ingest it: the admin page reports a declared catalog
+# that is missing, and an admin starts the ingest from there. Auto-converging on
+# deploy would let a typo rebuild a catalog, and ingesting one is hours to days
+# of work.
+catalogs: [] # BOOM_CATALOGS, comma-separated
 crossmatch:
   ztf:
     - catalog: Gaia_DR3
