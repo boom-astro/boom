@@ -421,8 +421,10 @@ impl super::arrow::FromRecordBatch for Milliquas {
         let rmag = f64_column(batch, "RMAG")?;
         let bmag = f64_column(batch, "BMAG")?;
         let comment = string_column(batch, "COMMENT")?;
-        let rclass = string_column(batch, "RXPCT")?;
-        let bclass = string_column(batch, "QPCT")?;
+        // `R` and `B` in the published table; the struct names them for what
+        // they are rather than repeating the file's one-letter columns.
+        let rclass = string_column(batch, "R")?;
+        let bclass = string_column(batch, "B")?;
         let z = f64_column(batch, "Z")?;
         let xname = string_column(batch, "XNAME")?;
         let rname = string_column(batch, "RNAME")?;

@@ -18,9 +18,12 @@ ID = "milliquas"
 URL = "https://quasars.org/milliquas.fits.zip"
 FILENAME = "milliquas.parquet"
 
+#: Column names are the published FITS ones. `R` and `B` are the redshift and
+#: broad-line classification flags -- short, unhelpful names, but they are what
+#: the file uses and renaming them here would only hide the mapping.
 COLUMNS = [
     "NAME", "RA", "DEC", "TYPE", "RMAG", "BMAG", "COMMENT",
-    "RXPCT", "QPCT", "Z", "XNAME", "RNAME", "LOBE1", "LOBE2",
+    "R", "B", "Z", "XNAME", "RNAME", "LOBE1", "LOBE2",
 ]
 
 
