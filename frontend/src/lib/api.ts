@@ -287,7 +287,9 @@ export async function fetchProfile(): Promise<Profile> {
     const txt = await res.text().catch(() => "");
     throw new Error(`Fetch profile failed: ${res.status} ${txt}`);
   }
-  const body = await parseResponseJson(res).catch(() => ({}));
+  // `null`, not `{}`: `unwrapData` passes a non-null body straight through, so
+  // `{}` would become a truthy profile whose every field is `undefined`.
+  const body = await parseResponseJson(res).catch(() => null);
   return normalizeProfile(unwrapData<ProfileWire>(body, null));
 }
 

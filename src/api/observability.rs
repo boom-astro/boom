@@ -124,9 +124,9 @@ pub async fn request_metrics_middleware(
     response
 }
 
-/// Who the request resolved to: the id that merges web, API and Kafka activity
-/// onto one PostHog person, plus the `email` and `username` that make that
-/// person identifiable in the PostHog UI.
+/// Who the request resolved to: the id that merges browser, API and Kafka
+/// activity onto one PostHog person, plus the `email` and `username` that make
+/// that person identifiable in the PostHog UI.
 struct UserIdentity {
     id: String,
     email: String,

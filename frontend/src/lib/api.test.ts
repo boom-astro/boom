@@ -82,7 +82,7 @@ describe("updateProfileName", () => {
 describe("fetchProfile", () => {
   /**
    * `profile.id` feeds `posthog.identify`, so an `undefined` id silently splits
-   * each user into a web person and an API person.
+   * each user into a browser person and an API person.
    */
   it("reads the id the API sends", async () => {
     const fetchMock = vi.fn(async () =>
@@ -114,6 +114,17 @@ describe("fetchProfile", () => {
 
     expect(profile?.id).toBeUndefined()
     expect(profile?.id ?? profile?.username).toBe("ada")
+  })
+
+  it("returns null when the body isn't JSON", async () => {
+    // A truthy profile of `undefined` fields would reach `identify` as
+    // `identify(undefined)` instead of being caught as a missing profile.
+    const fetchMock = vi.fn(
+      async () => new Response("<html>502</html>", { status: 200, headers: { "Content-Type": "text/html" } })
+    )
+    vi.stubGlobal("fetch", fetchMock)
+
+    expect(await fetchProfile()).toBeNull()
   })
 
   it("still accepts the legacy `_id` spelling", async () => {
