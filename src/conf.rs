@@ -1079,6 +1079,12 @@ pub struct AppConfig {
     #[serde(default)]
     pub posthog: PostHogConfig,
     pub kafka: KafkaConfig,
+    /// Archival catalogs this deployment should hold, as kebab-case slugs.
+    ///
+    /// Desired state, not actual: nothing converges automatically. See
+    /// `docs/catalogs.md`.
+    #[serde(default)]
+    pub catalogs: Vec<String>,
     #[serde(default)]
     pub crossmatch: HashMap<Survey, Vec<CatalogXmatchConfig>>,
     #[serde(default)]

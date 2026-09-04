@@ -27,6 +27,7 @@ use crate::tasks::TaskContext;
 use download::{Boompy, Chunk, DownloadError};
 use ingest::{IngestError, IngestReport, Inserter};
 use mongodb::bson::{doc, Document};
+use mongodb::Database;
 use std::path::{Path, PathBuf};
 use tracing::instrument;
 
@@ -481,4 +482,92 @@ async fn finish_state(
         )
         .await?;
     Ok(())
+}
+
+/// How a declared catalog compares to what is actually in the database.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CatalogHealth {
+    /// Declared, ingested, every chunk in.
+    Present,
+    /// Declared, but the collection has never been ingested.
+    Missing,
+    /// Declared and started, but not every chunk is in. The collection exists
+    /// and is partly populated, so a crossmatch against it silently returns
+    /// fewer matches than it should -- worse than absent, which at least fails
+    /// loudly.
+    Partial,
+    /// Declared in config, but this release has no definition for it. Almost
+    /// always a typo in the slug.
+    Undeclared,
+}
+
+/// The state of one declared catalog.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CatalogStatus {
+    pub id: String,
+    pub collection: Option<String>,
+    pub title: Option<String>,
+    pub health: CatalogHealth,
+    pub chunks_done: usize,
+    pub chunks_total: usize,
+    pub n_records: i64,
+}
+
+/// Compare the catalogs config declares against what is in the database.
+///
+/// Reports; never acts. Ingesting a catalog is hours to days of work and has to
+/// stay an explicit, attributed decision -- a typo in `catalogs:` must not be
+/// able to rebuild anything. See `docs/catalogs.md`.
+#[instrument(skip(db, declared))]
+pub async fn status(
+    db: &Database,
+    declared: &[String],
+) -> Result<Vec<CatalogStatus>, CatalogError> {
+    let state = db.collection::<Document>(STATE_COLLECTION);
+    let mut statuses = Vec::with_capacity(declared.len());
+
+    for id in declared {
+        let Some(def) = find(id) else {
+            statuses.push(CatalogStatus {
+                id: id.clone(),
+                collection: None,
+                title: None,
+                health: CatalogHealth::Undeclared,
+                chunks_done: 0,
+                chunks_total: 0,
+                n_records: 0,
+            });
+            continue;
+        };
+        let doc = state.find_one(doc! { "_id": def.collection }).await?;
+        let (health, chunks_done, chunks_total, n_records) = match &doc {
+            None => (CatalogHealth::Missing, 0, 0, 0),
+            Some(doc) => {
+                let done = doc
+                    .get_array("chunks_done")
+                    .map(|c| c.len())
+                    .unwrap_or_default();
+                let total = doc.get_i64("chunks_total").unwrap_or_default() as usize;
+                let records = doc.get_i64("n_records").unwrap_or_default();
+                let complete = doc.get_str("status").is_ok_and(|s| s == "complete");
+                let health = if complete {
+                    CatalogHealth::Present
+                } else {
+                    CatalogHealth::Partial
+                };
+                (health, done, total, records)
+            }
+        };
+        statuses.push(CatalogStatus {
+            id: def.id.to_string(),
+            collection: Some(def.collection.to_string()),
+            title: Some(def.title.to_string()),
+            health,
+            chunks_done,
+            chunks_total,
+            n_records,
+        });
+    }
+    Ok(statuses)
 }
