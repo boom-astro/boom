@@ -657,8 +657,7 @@ async fn run_catalog_driven(
     let outcome = join_tasks(workers, "worker").await;
     logger.abort();
     pb.finish();
-    // CRITICAL: temp holds a partial result; committing it would overwrite valid
-    // live cross_matches with an incomplete list. The next run's phase 1 clears it.
+    // A partial temp must never reach phase 3: it commits empty match lists over valid ones.
     outcome?;
 
     // Phase 3: sort, trim and commit in a single pass. $ifNull gives records with no
