@@ -12,6 +12,7 @@ use crate::tasks::Actor;
 use actix_web::{web, HttpResponse};
 
 /// An authenticated admin, whichever realm they came from.
+#[derive(Debug)]
 pub struct AdminActor {
     /// `boom` or `babamul`. Recorded so a run can be traced back to an account
     /// in the right collection -- the two id spaces are unrelated.
@@ -33,14 +34,30 @@ impl AdminActor {
     }
 }
 
+/// Why a caller was refused.
+///
+/// Separated from the HTTP response so the decision itself can be tested
+/// without constructing a request: this is the check standing between an
+/// authenticated user and every data-mutating job, and it should not be
+/// exercised only through handlers.
+#[derive(Debug, PartialEq, Eq)]
+pub enum AdminDenied {
+    /// Authenticated, but not an admin.
+    NotAnAdmin,
+    /// No recognized credential in either realm.
+    Unauthenticated,
+}
+
 /// Resolve an admin from whichever realm authenticated the request.
 ///
-/// Returns the response to send when the caller is not an admin, so handlers
-/// stay a single `match`.
-pub fn require_admin(
-    boom_user: &Option<web::ReqData<User>>,
-    babamul_user: &Option<web::ReqData<BabamulUser>>,
-) -> Result<AdminActor, HttpResponse> {
+/// The middlewares inject one realm or the other, never both. If both are
+/// somehow present the main-API user wins, and a non-admin there is refused
+/// rather than falling through to the other realm -- an account that failed the
+/// check must not get a second attempt at it.
+pub fn resolve_admin(
+    boom_user: Option<&User>,
+    babamul_user: Option<&BabamulUser>,
+) -> Result<AdminActor, AdminDenied> {
     if let Some(user) = boom_user {
         return if user.is_admin {
             Ok(AdminActor {
@@ -49,7 +66,7 @@ pub fn require_admin(
                 username: user.username.clone(),
             })
         } else {
-            Err(response::forbidden("Admin access required"))
+            Err(AdminDenied::NotAnAdmin)
         };
     }
     if let Some(user) = babamul_user {
@@ -60,10 +77,26 @@ pub fn require_admin(
                 username: user.username.clone(),
             })
         } else {
-            Err(response::forbidden("Admin access required"))
+            Err(AdminDenied::NotAnAdmin)
         };
     }
-    Err(HttpResponse::Unauthorized().body("Unauthorized"))
+    Err(AdminDenied::Unauthenticated)
+}
+
+/// Resolve an admin from the request, returning the response to send when the
+/// caller is not one, so handlers stay a single `match`.
+pub fn require_admin(
+    boom_user: &Option<web::ReqData<User>>,
+    babamul_user: &Option<web::ReqData<BabamulUser>>,
+) -> Result<AdminActor, HttpResponse> {
+    resolve_admin(
+        boom_user.as_ref().map(|u| &**u),
+        babamul_user.as_ref().map(|u| &**u),
+    )
+    .map_err(|denied| match denied {
+        AdminDenied::NotAnAdmin => response::forbidden("Admin access required"),
+        AdminDenied::Unauthenticated => HttpResponse::Unauthorized().body("Unauthorized"),
+    })
 }
 
 /// Reconcile `is_admin` on every Babamul account against the configured list.
@@ -119,4 +152,105 @@ pub async fn reconcile_babamul_admins(
         tracing::warn!("no babamul.admin_emails configured; the admin page is closed to everyone");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn boom_user(is_admin: bool) -> User {
+        User {
+            id: "boom-1".to_string(),
+            username: "pete".to_string(),
+            email: "pete@example.org".to_string(),
+            password: String::new(),
+            is_admin,
+            watchlist_access: Vec::new(),
+        }
+    }
+
+    fn babamul_user(is_admin: bool) -> BabamulUser {
+        BabamulUser {
+            id: "bbml-1".to_string(),
+            username: "pete".to_string(),
+            email: "pete@example.org".to_string(),
+            password_hash: String::new(),
+            activation_code: None,
+            is_activated: true,
+            created_at: 0,
+            kafka_credentials: Vec::new(),
+            tokens: Vec::new(),
+            password_reset_token_hash: None,
+            password_reset_token_expires_at: None,
+            password_last_changed_at: None,
+            identities: Vec::new(),
+            orcid_id: None,
+            name: None,
+            is_admin,
+        }
+    }
+
+    #[test]
+    fn no_credential_is_unauthenticated_not_forbidden() {
+        // The distinction is what lets a client know to log in rather than to
+        // give up.
+        assert_eq!(
+            resolve_admin(None, None).unwrap_err(),
+            AdminDenied::Unauthenticated
+        );
+    }
+
+    #[test]
+    fn a_non_admin_is_refused_in_either_realm() {
+        assert_eq!(
+            resolve_admin(Some(&boom_user(false)), None).unwrap_err(),
+            AdminDenied::NotAnAdmin
+        );
+        assert_eq!(
+            resolve_admin(None, Some(&babamul_user(false))).unwrap_err(),
+            AdminDenied::NotAnAdmin
+        );
+    }
+
+    #[test]
+    fn an_admin_is_accepted_from_either_realm() {
+        assert_eq!(
+            resolve_admin(Some(&boom_user(true)), None).unwrap().realm,
+            "boom"
+        );
+        assert_eq!(
+            resolve_admin(None, Some(&babamul_user(true)))
+                .unwrap()
+                .realm,
+            "babamul"
+        );
+    }
+
+    #[test]
+    fn a_refused_main_api_user_does_not_fall_through_to_the_other_realm() {
+        // Both realms are never injected at once today, but if that ever
+        // changed, an account that failed the check must not get a second
+        // attempt at it through the other one.
+        assert_eq!(
+            resolve_admin(Some(&boom_user(false)), Some(&babamul_user(true))).unwrap_err(),
+            AdminDenied::NotAnAdmin
+        );
+    }
+
+    #[test]
+    fn the_recorded_actor_is_qualified_by_realm() {
+        // The two id spaces are unrelated, and the point of recording the actor
+        // is being able to look the person up in the right collection later.
+        let boom = resolve_admin(Some(&boom_user(true)), None)
+            .unwrap()
+            .as_task_actor();
+        let babamul = resolve_admin(None, Some(&babamul_user(true)))
+            .unwrap()
+            .as_task_actor();
+        assert_eq!(boom.user_id, "boom:boom-1");
+        assert_eq!(babamul.user_id, "babamul:bbml-1");
+        // Same username in both realms, so the id is what disambiguates.
+        assert_eq!(boom.username, babamul.username);
+        assert_ne!(boom.user_id, babamul.user_id);
+    }
 }
