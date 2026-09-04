@@ -70,6 +70,7 @@ RUN --mount=type=cache,target=/app/target,sharing=locked \
        target/release/stream_kowalski_alerts \
        target/release/enrich_reprocess \
        target/release/mpcorb_ingest \
+       target/release/task_worker \
        /app/bin/
 
 FROM builder AS dev
@@ -115,6 +116,7 @@ COPY --from=builder /app/bin/migrate_fp_flux /app/migrate_fp_flux
 COPY --from=builder /app/bin/migrate_snr /app/migrate_snr
 COPY --from=builder /app/bin/reprocess_crossmatch /app/reprocess_crossmatch
 COPY --from=builder /app/bin/mpcorb_ingest /app/mpcorb_ingest
+COPY --from=builder /app/bin/task_worker /app/task_worker
 COPY --from=builder /opt/ort /opt/ort
 
 # Resolved at build time from the committed lockfile, so a catalog ingest does
