@@ -1,3 +1,7 @@
+use crate::utils::outburst::{
+    outburst_statistic, same_band_statistic, window_scatter, Point, DEFAULT_G12,
+};
+use crate::utils::phase_curve::{deviation, PhaseCurve};
 use apache_avro_derive::AvroSchema;
 use apache_avro_macros::serdavro;
 use mongodb::bson::doc;
@@ -246,6 +250,152 @@ pub struct ActivityMetrics {
     /// abort the whole pipeline, and difference imaging produces such fluxes
     /// routinely. No threshold is applied — filters choose their own cut.
     pub aperture_excess: Option<f32>,
+    /// Photometric outburst statistic for a moving object, `None` for anything
+    /// else and for a mover with no usable earlier detection of its own.
+    pub outburst: Option<Outburst>,
+}
+
+/// How much brighter a moving object is than its own recent history, in sigma.
+///
+/// Every value compares the detection under test against an earlier detection of
+/// the same object, both scaled to the test epoch's observing geometry with an
+/// HG12 phase function. Positive means brighter than history.
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    serde::Deserialize,
+    serde::Serialize,
+    AvroSchema,
+    utoipa::ToSchema,
+)]
+#[serde(default)]
+pub struct Outburst {
+    /// Median over a 7 day window, colour corrected across bands.
+    pub d7: Option<f32>,
+    /// Median over 14 days.
+    pub d14: Option<f32>,
+    /// Median over 30 days.
+    pub d30: Option<f32>,
+    /// Per-point sigma against every earlier detection in the test point's own
+    /// band, over the longest window above.
+    ///
+    /// Deliberately not the same quantity as the medians: with one band there is
+    /// no colour term, which is what lets a value stand alone. Take a median of
+    /// these to score any window that suits, and expect it to sit near but not on
+    /// `d14` -- the medians carry a colour correction these do not.
+    pub points: Vec<OutburstPoint>,
+    /// Intrinsic variability used in every denominator above, magnitudes.
+    ///
+    /// From the object's fitted phase curve where it has one, otherwise from the
+    /// window itself. Without it a bright, well measured asteroid reports its own
+    /// rotation as a detection.
+    pub scatter: Option<f32>,
+    /// Sigma above the object's fitted phase curve, `None` without one.
+    ///
+    /// Unlike the medians this has no window: it compares against a baseline fitted
+    /// over the whole archive, so it keeps registering activity that outlasts a
+    /// month and would otherwise become the object's new normal. The medians catch
+    /// the onset; this catches the state.
+    pub baseline: Option<f32>,
+}
+
+impl Outburst {
+    /// Score `test` against earlier detections of the same object.
+    ///
+    /// `history` pairs each earlier detection's epoch with its point, ascending,
+    /// and must already be cut to the longest window. `None` when nothing in it
+    /// is usable, which is the common case: most objects are seen once.
+    pub fn from_history(
+        history: &[(f64, Point)],
+        test: Point,
+        test_jd: f64,
+        curve: Option<&PhaseCurve>,
+    ) -> Option<Self> {
+        let baseline = curve
+            .and_then(|c| deviation(c, &test))
+            .filter(|s| s.is_finite())
+            .map(|s| s as f32);
+
+        // A fitted slope describes this object; the default is the population
+        // average standing in for one, so prefer the fit wherever there is one.
+        let g12 = curve.map_or(DEFAULT_G12, |c| c.g12);
+
+        if history.is_empty() {
+            // A phase curve alone still scores the point, which is the whole
+            // reason for having one: a first detection has no window.
+            return baseline.map(|baseline| Outburst {
+                baseline: Some(baseline),
+                scatter: curve.map(|c| c.scatter as f32),
+                ..Default::default()
+            });
+        }
+
+        let mut all: Vec<Point> = history.iter().map(|(_, p)| *p).collect();
+        all.push(test);
+
+        // A fitted curve sees the whole archive; the window sees a month and
+        // rarely a full rotation, so it is only a fallback.
+        let scatter = match curve {
+            Some(c) => c.scatter,
+            None => window_scatter(&all, g12).unwrap_or(0.0),
+        };
+
+        let median_within = |days: f64| -> Option<f32> {
+            let mut window: Vec<Point> = history
+                .iter()
+                .filter(|(jd, _)| *jd >= test_jd - days)
+                .map(|(_, p)| *p)
+                .collect();
+            if window.is_empty() {
+                return None;
+            }
+            window.push(test);
+            let (_, median) = outburst_statistic(&window, g12, scatter).ok()?;
+            (median as f32).is_finite().then_some(median as f32)
+        };
+
+        let points = same_band_statistic(&all, g12, scatter)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(_, sigma)| sigma.is_finite())
+            .map(|(i, sigma)| OutburstPoint {
+                jd: history[i].0,
+                sigma: sigma as f32,
+            })
+            .collect::<Vec<_>>();
+
+        let outburst = Outburst {
+            d7: median_within(7.0),
+            d14: median_within(14.0),
+            d30: median_within(30.0),
+            points,
+            scatter: Some(scatter as f32),
+            baseline,
+        };
+        (outburst.d30.is_some() || !outburst.points.is_empty() || outburst.baseline.is_some())
+            .then_some(outburst)
+    }
+}
+
+/// One entry of `Outburst::points`.
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    serde::Deserialize,
+    serde::Serialize,
+    AvroSchema,
+    utoipa::ToSchema,
+)]
+#[serde(default)]
+pub struct OutburstPoint {
+    /// Epoch of the earlier detection being compared against.
+    pub jd: f64,
+    /// Sigma of the test point relative to it.
+    pub sigma: f32,
 }
 
 impl ActivityMetrics {
@@ -284,7 +434,76 @@ impl ActivityMetrics {
     fn from_excess(aperture_excess: Option<f32>) -> Self {
         ActivityMetrics {
             aperture_excess: aperture_excess.filter(|e| e.is_finite()),
+            outburst: None,
         }
+    }
+}
+
+/// Per-object detection-history summary, computed at enrichment from the object's
+/// accumulated light curve and written onto every alert so filters can make
+/// history-aware cuts (e.g. "steady star that just started going negative") with a
+/// plain `$match`. BOOM filter pipelines are strictly per-alert and reject
+/// `$group`/`$unwind`/`$lookup`, so the history has to be precomputed here.
+///
+/// Each survey feeds `(jd, is_negative)` points from its own light curve — sign
+/// from the psfFlux sign (ZTF/LSST), `isdiffpos` (WINTER), or the signed SNR
+/// (DECam). Windows are measured back from the alert epoch, keeping the values
+/// deterministic per alert rather than dependent on wall-clock time at enrichment.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize, AvroSchema, ToSchema)]
+#[serde(default)]
+pub struct DetectionHistory {
+    /// Detections with a known sign in the object's history (`n_pos + n_neg`).
+    pub n_det: i32,
+    /// Positive-difference detections (source brighter than the reference).
+    pub n_pos: i32,
+    /// Negative-difference detections (source fainter than the reference).
+    pub n_neg: i32,
+    /// JD of the object's first-ever negative detection; `None` if it has none.
+    pub first_neg_jd: Option<f64>,
+    /// JD of the object's most recent negative detection; `None` if it has none.
+    pub last_neg_jd: Option<f64>,
+    /// Positive detections in the 30 days ending at the alert epoch.
+    pub n_pos_30d: i32,
+    /// Negative detections in the 30 days ending at the alert epoch.
+    pub n_neg_30d: i32,
+}
+
+impl DetectionHistory {
+    /// Summarise detection history from `(jd, is_negative)` points, with windows
+    /// measured back from the alert epoch `ref_jd`. Points after `ref_jd` (a
+    /// concurrently-ingested newer alert) and points whose sign is unknown (`None`,
+    /// e.g. pre-migration) are skipped, so `n_det == n_pos + n_neg`.
+    pub fn from_points<I>(points: I, ref_jd: f64) -> Self
+    where
+        I: IntoIterator<Item = (f64, Option<bool>)>,
+    {
+        let cutoff = ref_jd - 30.0;
+        let mut h = DetectionHistory::default();
+        for (jd, is_negative) in points {
+            if jd > ref_jd {
+                continue;
+            }
+            let is_negative = match is_negative {
+                Some(v) => v,
+                None => continue,
+            };
+            h.n_det += 1;
+            let recent = jd >= cutoff;
+            if is_negative {
+                h.n_neg += 1;
+                if recent {
+                    h.n_neg_30d += 1;
+                }
+                h.first_neg_jd = Some(h.first_neg_jd.map_or(jd, |j| j.min(jd)));
+                h.last_neg_jd = Some(h.last_neg_jd.map_or(jd, |j| j.max(jd)));
+            } else {
+                h.n_pos += 1;
+                if recent {
+                    h.n_pos_30d += 1;
+                }
+            }
+        }
+        h
     }
 }
 
@@ -576,6 +795,42 @@ pub fn analyze_photometry(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // pos/neg counts, first/last-neg epochs, and the 30-day windows measured back
+    // from the alert epoch. A point after the epoch (concurrent newer alert) and a
+    // sign-unknown point (`None`) are both excluded, so n_det == n_pos + n_neg.
+    #[test]
+    fn test_detection_history_counts_and_windows() {
+        let ref_jd = 2_461_300.0;
+        let points = vec![
+            (ref_jd - 200.0, Some(false)), // old positive
+            (ref_jd - 100.0, Some(true)),  // old negative (first neg)
+            (ref_jd - 20.0, Some(false)),  // recent positive
+            (ref_jd - 10.0, Some(true)),   // recent negative
+            (ref_jd - 2.0, Some(true)),    // recent negative (last neg)
+            (ref_jd - 5.0, None),          // unknown sign -> skipped
+            (ref_jd + 5.0, Some(true)),    // after epoch -> skipped
+        ];
+
+        let h = DetectionHistory::from_points(points, ref_jd);
+        assert_eq!(h.n_det, 5);
+        assert_eq!(h.n_pos, 2);
+        assert_eq!(h.n_neg, 3);
+        assert_eq!(h.first_neg_jd, Some(ref_jd - 100.0));
+        assert_eq!(h.last_neg_jd, Some(ref_jd - 2.0));
+        assert_eq!(h.n_pos_30d, 1);
+        assert_eq!(h.n_neg_30d, 2);
+    }
+
+    #[test]
+    fn test_detection_history_empty_when_never_negative() {
+        let ref_jd = 2_461_300.0;
+        let h = DetectionHistory::from_points(vec![(ref_jd - 3.0, Some(false))], ref_jd);
+        assert_eq!(h.n_pos, 1);
+        assert_eq!(h.n_neg, 0);
+        assert!(h.first_neg_jd.is_none());
+        assert!(h.last_neg_jd.is_none());
+    }
 
     #[test]
     fn test_flux2mag() {
@@ -1526,6 +1781,172 @@ mod rate_avro_tests {
             let mut writer = Writer::new(&schema, Vec::new());
             writer
                 .append_serdavro(&props)
+                .unwrap_or_else(|e| panic!("{label} failed to serialize to avro: {e}"));
+        }
+    }
+}
+
+#[cfg(test)]
+mod outburst_tests {
+    use super::*;
+    use crate::utils::derive_avro_schema::SerdavroWriter;
+    use apache_avro::{AvroSchema, Writer};
+
+    fn steady(jd: f64, mag: f64, band: u8) -> (f64, Point) {
+        (
+            jd,
+            Point {
+                rh: 2.5,
+                delta: 1.6,
+                phase: 12.0,
+                mag,
+                mag_err: 0.04,
+                band,
+            },
+        )
+    }
+
+    fn test_point(mag: f64, band: u8) -> Point {
+        Point {
+            rh: 2.5,
+            delta: 1.6,
+            phase: 12.0,
+            mag,
+            mag_err: 0.04,
+            band,
+        }
+    }
+
+    #[test]
+    fn test_windows_narrow_to_the_points_they_contain() {
+        let now = 2_460_000.0;
+        // Brighter only in the last few days, so the short window sees a signal
+        // the long one dilutes.
+        let history = [
+            steady(now - 25.0, 19.0, 1),
+            steady(now - 20.0, 19.0, 1),
+            steady(now - 3.0, 18.0, 1),
+        ];
+        let outburst =
+            Outburst::from_history(&history, test_point(18.0, 1), now, None).expect("outburst");
+
+        assert_eq!(outburst.d7, Some(0.0));
+        assert_eq!(outburst.d14, Some(0.0));
+        assert!(
+            outburst.d30.expect("d30") > 0.0,
+            "the wider window reaches the fainter history"
+        );
+        assert_eq!(outburst.points.len(), 3);
+    }
+
+    #[test]
+    fn test_history_outside_every_window_still_yields_points() {
+        let now = 2_460_000.0;
+        // The caller cuts history to 30 days, so this cannot happen in
+        // enrichment; it pins the behaviour if a caller ever passes more.
+        let history = [steady(now - 90.0, 19.0, 1)];
+        let outburst =
+            Outburst::from_history(&history, test_point(18.0, 1), now, None).expect("outburst");
+        assert!(outburst.d30.is_none());
+        assert_eq!(outburst.points.len(), 1);
+    }
+
+    #[test]
+    fn test_no_history_is_no_outburst() {
+        assert!(Outburst::from_history(&[], test_point(18.0, 1), 2_460_000.0, None).is_none());
+    }
+
+    /// Only the test point's own band contributes to `points`, which is what
+    /// makes each value independent of the window.
+    #[test]
+    fn test_points_hold_only_the_test_band() {
+        let now = 2_460_000.0;
+        let history = [steady(now - 1.0, 19.0, 2), steady(now - 2.0, 19.0, 1)];
+        let outburst =
+            Outburst::from_history(&history, test_point(18.0, 1), now, None).expect("outburst");
+        assert_eq!(outburst.points.len(), 1);
+        assert_eq!(outburst.points[0].jd, now - 2.0);
+    }
+
+    /// A fitted slope must actually reach the statistic. The geometry scaling
+    /// runs through the phase function, so a curve fitted far from the
+    /// population default has to give a different answer than the default does.
+    #[test]
+    fn test_a_fitted_slope_is_used_rather_than_the_default() {
+        let now = 2_460_000.0;
+        // Phase angles far apart, so the slope has something to act on.
+        let history = [(
+            now - 5.0,
+            Point {
+                rh: 2.5,
+                delta: 1.6,
+                phase: 3.0,
+                mag: 19.0,
+                mag_err: 0.04,
+                band: 1,
+            },
+        )];
+        let test = Point {
+            rh: 2.5,
+            delta: 1.6,
+            phase: 25.0,
+            mag: 19.0,
+            mag_err: 0.04,
+            band: 1,
+        };
+
+        let curve = PhaseCurve {
+            h: 15.0,
+            g12: 0.0,
+            scatter: 0.05,
+            n: 100,
+        };
+        let fitted = Outburst::from_history(&history, test, now, Some(&curve))
+            .expect("fitted")
+            .d7
+            .expect("d7");
+        let defaulted = Outburst::from_history(&history, test, now, None)
+            .expect("defaulted")
+            .d7
+            .expect("d7");
+
+        assert!(
+            (fitted - defaulted).abs() > 1e-3,
+            "g12 = {} gave the same answer as the default {DEFAULT_G12} ({fitted} vs {defaulted})",
+            curve.g12
+        );
+    }
+
+    /// `append_serdavro` resolves every declared field by name, so a nested
+    /// optional that serializes as missing rather than null fails on the Babamul
+    /// path while BSON accepts it. Cover both an absent and a populated block.
+    #[test]
+    fn test_outburst_serializes_through_the_babamul_path() {
+        let schema = ActivityMetrics::get_schema();
+        for (label, outburst) in [
+            ("outburst absent", None),
+            (
+                "outburst populated",
+                Some(Outburst {
+                    d7: Some(1.5),
+                    d14: None,
+                    d30: Some(0.9),
+                    points: vec![OutburstPoint {
+                        jd: 2_460_000.0,
+                        sigma: 1.5,
+                    }],
+                    scatter: Some(0.08),
+                    baseline: Some(4.2),
+                }),
+            ),
+        ] {
+            let metrics = ActivityMetrics {
+                aperture_excess: Some(0.1),
+                outburst,
+            };
+            let mut writer = Writer::new(&schema, Vec::new());
+            writer
+                .append_serdavro(&metrics)
                 .unwrap_or_else(|e| panic!("{label} failed to serialize to avro: {e}"));
         }
     }

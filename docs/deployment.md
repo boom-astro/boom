@@ -11,7 +11,7 @@ one is not necessarily present on the other.
 | Role | Primary production instance | Backup / secondary instance |
 | Host | Dedicated server (`kaboom`), `*.kaboom.caltech.edu` | HPC cluster at the University of Minnesota |
 | Deploy method | Automated: release tag → `Trigger deployment to production` GitHub Actions workflow on a self-hosted runner | Manual, on the cluster |
-| Config in this repo | `config/prod/caltech/` | Not yet (deployed manually) |
+| Config in this repo | `config/prod/caltech/` | `config/prod/umn/` |
 
 **They diverge in practice.** Filters live in each instance's own database, and
 each instance consumes the upstream alert streams with its own Kafka consumer
@@ -248,8 +248,8 @@ volume paths, and the specific env keys injected into containers) belong here.
 | `VITE_PUBLIC_POSTHOG_HOST` | No | PostHog host, e.g. `https://us.i.posthog.com`. Also supplies the server-side `BOOM_POSTHOG__HOST`. |
 | `BOOM_BABAMUL__ENABLED` | No | Defaults to `false`. |
 | `BOOM_BABAMUL__REGISTRATION_ENABLED` | No | Whether the API accepts new account creation; defaults to `true`. Pairs with `VITE_PRERELEASE_MODE`: that decides what the web app offers, this decides what the API allows. |
-| `BOOM_GPU__ENABLED` | No | Set `true` to run ONNX inference on GPU. The workflow forces `false` when unset because the model loader's own default is `true` (it reads this env var directly, not `config.gpu.enabled`). |
-| `BOOM_GPU__DEVICE_IDS` | No | Comma-separated CUDA device IDs (e.g. `0,1`); defaults to `0`. Only relevant when `BOOM_GPU__ENABLED=true`. |
+| `BOOM_GPU__ENABLED` | No | Set `true` to run ONNX inference on GPU. Overrides `config.gpu.enabled`, and selects the `docker-compose.cuda.yaml` overlay. |
+| `BOOM_GPU__DEVICE_IDS` | No | Comma-separated CUDA device IDs (e.g. `0,1`). Unset, the deployment config's `gpu.device_ids` applies. Only relevant when `BOOM_GPU__ENABLED=true`. |
 | `BOOM_DATA_MONGODB_PATH` | No | Host bind mount for MongoDB; falls back to a named volume. |
 | `BOOM_DATA_VALKEY_PATH` | No | Host bind mount for Valkey; falls back to a named volume. |
 | `BOOM_DATA_KAFKA_PATH` | No | Host bind mount for Kafka; falls back to a named volume. |
@@ -258,6 +258,8 @@ volume paths, and the specific env keys injected into containers) belong here.
 | `BOOM_CUTOUTS_MONGO_MEM_LIMIT` | No | Same, for the cutouts MongoDB container. |
 | `BOOM_KAFKA__CONSUMER__ZTF__SERVER` | Yes | ZTF Kafka bootstrap server. Reused for the WINTER consumer, which shares the same (unauthenticated) broker. |
 | `BOOM_KAFKA__CONSUMER__ZTF__GROUP_ID` | Yes | ZTF consumer group ID (per-program suffix added by compose). |
+| `BOOM_KAFKA__CONSUMER__ZTF__SECURITY_PROTOCOL` | No | Kafka transport: `PLAINTEXT`, `SSL`, `SASL_PLAINTEXT` or `SASL_SSL`. Unset infers it from the credentials below. Set it to `SASL_SSL` for a broker that requires TLS. |
+| `BOOM_KAFKA__CONSUMER__ZTF__USERNAME` | No | ZTF SASL username. Required when the protocol above is a `SASL_*` one. |
 | `BOOM_KAFKA__CONSUMER__LSST__GROUP_ID` | Yes | LSST consumer group ID. |
 | `BOOM_KAFKA__CONSUMER__LSST__USERNAME` | Yes | LSST SASL username. |
 | `BOOM_KAFKA__CONSUMER__WINTER__GROUP_ID` | Yes | WINTER consumer group ID (the broker itself comes from `BOOM_KAFKA__CONSUMER__ZTF__SERVER`). Kept here, not in the committed config, because the repo is public and the group ID is what an attacker would reuse to join our group and disrupt ingestion on the unauthenticated broker. |
@@ -284,6 +286,7 @@ volume paths, and the specific env keys injected into containers) belong here.
 | `KAFKA_ADMIN_PASSWORD` | Yes | SASL admin password used by the ACL init script. |
 | `KAFKA_READONLY_PASSWORD` | Yes | SASL read-only password for external Kafka access. |
 | `BOOM_KAFKA__CONSUMER__LSST__PASSWORD` | Yes | LSST SASL password. |
+| `BOOM_KAFKA__CONSUMER__ZTF__PASSWORD` | No | ZTF SASL password. Required when `BOOM_KAFKA__CONSUMER__ZTF__SECURITY_PROTOCOL` is a `SASL_*` one. |
 | `PROMETHEUS_HASHED_PASSWORD` | Yes | bcrypt hash for Prometheus basic auth (store the raw hash; do **not** `$$`-escape it as you would in a `.env`). |
 | `GRAFANA_ADMIN_PASSWORD` | Yes | Grafana admin password. |
 | `SLACK_WEBHOOK_URL` | No | Grafana alerting webhook; blank uses a placeholder (alerts still fire, POSTs 404). |
@@ -299,11 +302,13 @@ config/prod/
    caltech/
       overrides.yaml
       config.yaml
+   umn/
+      overrides.yaml
+      config.yaml
 ```
 
-Each automated deployment gets its own directory here. Only `caltech/` exists
-today; the UMN instance is still deployed manually and does not have a
-generated config in this repo yet.
+Each deployment gets its own directory here: `caltech/` and `umn/`. UMN is
+still deployed manually, but reads its generated config from this repo.
 
 - `overrides.yaml` is the only file you edit for a deployment-specific config.
 - `config.yaml` in each deployment directory is generated from the base config
