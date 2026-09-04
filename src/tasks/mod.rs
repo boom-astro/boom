@@ -59,8 +59,8 @@ pub struct TaskSpec {
 }
 
 // TODO: port the remaining data-mutating binaries -- `enrich_reprocess`,
-// `migrate_fp_flux`, `migrate_snr`, `reprocess_crossmatch`, `copy_cutouts` --
-// so that operators stop running them over SSH too. Each becomes a body plus an
+// `migrate_fp_flux`, `migrate_snr`, `reprocess_crossmatch`, `copy_cutouts`,
+// `prepare_catalog` -- so that operators stop running them over SSH too. Each becomes a body plus an
 // arm in `dispatch`; their existing Valkey work queues already give them the
 // resumability a task needs, so what they mainly want is the params struct and
 // a cancellation check in their batch loop.
