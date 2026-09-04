@@ -199,7 +199,8 @@ struct Cli {
     deployment_env: String,
 }
 
-// Not `#[instrument]`'d: a process-lifetime root span grows until Tempo balks.
+// Not `#[instrument]`'d: the scheduler runs for the process lifetime, so every
+// per-alert span would hang off one unbounded root. Survey is in `service.name`.
 async fn run(
     args: Cli,
     meter_provider: Option<SdkMeterProvider>,
