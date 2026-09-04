@@ -824,6 +824,97 @@ impl super::ascii::FromAsciiRow for Vsx {
 
 impl HasCoordinates for Vsx {}
 
+// ---------------------------------------------------------------------------
+// Pan-STARRS -- parquet, from the HATS mirror on S3
+// ---------------------------------------------------------------------------
+
+/// One object from the Pan-STARRS "otmo" (object-mean) table.
+///
+/// Stored keys are the survey's own camelCase column names, which the
+/// crossmatch projections are written against; `raMean`/`decMean` are stored as
+/// plain `ra`/`dec` so the shared coordinate handling applies.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PanStarrs {
+    #[serde(rename(serialize = "_id"))]
+    pub obj_id: i64,
+    pub ra: f64,
+    pub dec: f64,
+    #[serde(rename(serialize = "gMeanPSFMag"))]
+    pub g_mean_psf_mag: Option<f64>,
+    #[serde(rename(serialize = "gMeanPSFMagErr"))]
+    pub g_mean_psf_mag_err: Option<f64>,
+    #[serde(rename(serialize = "rMeanPSFMag"))]
+    pub r_mean_psf_mag: Option<f64>,
+    #[serde(rename(serialize = "rMeanPSFMagErr"))]
+    pub r_mean_psf_mag_err: Option<f64>,
+    #[serde(rename(serialize = "iMeanPSFMag"))]
+    pub i_mean_psf_mag: Option<f64>,
+    #[serde(rename(serialize = "iMeanPSFMagErr"))]
+    pub i_mean_psf_mag_err: Option<f64>,
+    #[serde(rename(serialize = "zMeanPSFMag"))]
+    pub z_mean_psf_mag: Option<f64>,
+    #[serde(rename(serialize = "zMeanPSFMagErr"))]
+    pub z_mean_psf_mag_err: Option<f64>,
+    #[serde(rename(serialize = "yMeanPSFMag"))]
+    pub y_mean_psf_mag: Option<f64>,
+    #[serde(rename(serialize = "yMeanPSFMagErr"))]
+    pub y_mean_psf_mag_err: Option<f64>,
+}
+
+impl super::arrow::FromRecordBatch for PanStarrs {
+    fn from_batch(
+        batch: &::arrow::array::RecordBatch,
+    ) -> Result<Vec<Self>, super::arrow::ColumnError> {
+        use super::arrow::{f64_column, i64_column};
+
+        let obj_id = i64_column(batch, "objID")?;
+        let ra = f64_column(batch, "raMean")?;
+        let dec = f64_column(batch, "decMean")?;
+        let g = f64_column(batch, "gMeanPSFMag")?;
+        let g_err = f64_column(batch, "gMeanPSFMagErr")?;
+        let r = f64_column(batch, "rMeanPSFMag")?;
+        let r_err = f64_column(batch, "rMeanPSFMagErr")?;
+        let i_band = f64_column(batch, "iMeanPSFMag")?;
+        let i_err = f64_column(batch, "iMeanPSFMagErr")?;
+        let z = f64_column(batch, "zMeanPSFMag")?;
+        let z_err = f64_column(batch, "zMeanPSFMagErr")?;
+        let y = f64_column(batch, "yMeanPSFMag")?;
+        let y_err = f64_column(batch, "yMeanPSFMagErr")?;
+
+        let mut rows = Vec::with_capacity(batch.num_rows());
+        for row in 0..batch.num_rows() {
+            // Pan-STARRS writes -999 for an unmeasured mean position, which
+            // f64_column keeps as a number; a source without a real position
+            // cannot be crossmatched and would fail the 2dsphere index.
+            let (Some(obj_id), Some(ra), Some(dec)) = (obj_id[row], ra[row], dec[row]) else {
+                continue;
+            };
+            if !(0.0..=360.0).contains(&ra) || !(-90.0..=90.0).contains(&dec) {
+                continue;
+            }
+            rows.push(PanStarrs {
+                obj_id,
+                ra,
+                dec,
+                g_mean_psf_mag: g[row],
+                g_mean_psf_mag_err: g_err[row],
+                r_mean_psf_mag: r[row],
+                r_mean_psf_mag_err: r_err[row],
+                i_mean_psf_mag: i_band[row],
+                i_mean_psf_mag_err: i_err[row],
+                z_mean_psf_mag: z[row],
+                z_mean_psf_mag_err: z_err[row],
+                y_mean_psf_mag: y[row],
+                y_mean_psf_mag_err: y_err[row],
+            });
+        }
+        Ok(rows)
+    }
+}
+
+impl HasCoordinates for PanStarrs {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -950,6 +1041,34 @@ mod tests {
         // a panic that takes the whole chunk down.
         let short = "12345   RR Lyr";
         assert!(Vsx::from_line(short).is_err());
+    }
+
+    #[test]
+    fn panstarrs_document_uses_the_surveys_own_column_names() {
+        // The crossmatch projections are written against these camelCase keys,
+        // so renaming them to a house style would silently empty a projection.
+        let doc = mongodb::bson::to_document(&PanStarrs {
+            obj_id: 1,
+            ra: 10.0,
+            dec: 20.0,
+            g_mean_psf_mag: Some(19.0),
+            g_mean_psf_mag_err: None,
+            r_mean_psf_mag: None,
+            r_mean_psf_mag_err: None,
+            i_mean_psf_mag: None,
+            i_mean_psf_mag_err: None,
+            z_mean_psf_mag: None,
+            z_mean_psf_mag_err: None,
+            y_mean_psf_mag: None,
+            y_mean_psf_mag_err: None,
+        })
+        .expect("serializes");
+        assert!(doc.contains_key("_id"));
+        assert!(doc.contains_key("gMeanPSFMag"));
+        // raMean/decMean are stored plainly so the shared coordinate handling
+        // in `ingest` finds them.
+        assert!(doc.contains_key("ra") && doc.contains_key("dec"));
+        assert!(!doc.contains_key("raMean"));
     }
 
     #[test]

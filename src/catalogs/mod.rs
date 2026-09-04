@@ -64,6 +64,8 @@ pub enum Reader {
     Galex,
     /// VSX, fixed-width text.
     Vsx,
+    /// Pan-STARRS otmo, parquet partitions.
+    PanStarrs,
 }
 
 /// A catalog BOOM knows how to ingest.
@@ -175,6 +177,17 @@ pub const CATALOGS: &[CatalogDef] = &[
                       periods for known and suspected variable stars.",
         reader: Reader::Vsx,
         aliases: &[],
+    },
+    CatalogDef {
+        id: "panstarrs",
+        collection: "PS1_DR1",
+        title: "Pan-STARRS object-mean photometry",
+        description: "Mean PSF magnitudes in grizy for Pan-STARRS objects, from the HATS \
+                      mirror of the otmo table. NOTE: the collection every config names is \
+                      PS1_DR1, but the only mirror we have is DR2 -- confirm which release \
+                      this deployment intends before ingesting.",
+        reader: Reader::PanStarrs,
+        aliases: &["PS1_DR2"],
     },
 ];
 
@@ -557,6 +570,7 @@ async fn ingest_file(
         Reader::GaiaDr3 => Ok(csv::ingest_csv::<types::Gaia>(inserter, path).await?),
         Reader::Galex => Ok(csv::ingest_csv::<types::Galex>(inserter, path).await?),
         Reader::Vsx => Ok(ascii::ingest_ascii::<types::Vsx>(inserter, path).await?),
+        Reader::PanStarrs => Ok(arrow::ingest_parquet::<types::PanStarrs>(inserter, path).await?),
     }
 }
 
@@ -756,11 +770,6 @@ pub const WITHOUT_DEFINITIONS: &[(&str, &str)] = &[
         "TNS",
         "the Transient Name Server is a live, credentialed feed rather than an archival \
          download, and is populated outside the catalog ingest path",
-    ),
-    (
-        "PS1_DR1",
-        "boom-catalogs has a Pan-STARRS record type and downloader, but neither has been \
-         ported yet",
     ),
 ];
 
