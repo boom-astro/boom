@@ -16,6 +16,7 @@ concurrency:
 
 permissions:
   contents: write
+  pull-requests: write
 
 jobs:
   sync-configs:
@@ -40,10 +41,8 @@ jobs:
       - name: Create and check prod configs
         run: make check-configs
 
-      # Pushes made with GITHUB_TOKEN don't trigger workflows, so committing
-      # back to main cannot retrigger this job.
-      - name: Commit generated configs
-        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+      - name: Detect config drift
+        id: drift
         run: |
           # Stage new files as intent-to-add first: `git diff` only sees
           # tracked paths, so a generated config that has never been committed
@@ -52,9 +51,20 @@ jobs:
           git add -AN -- config/prod
           if git diff --quiet -- config/prod; then
             echo "Generated configs already up to date"
-            exit 0
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
 
+      # Pushes made with GITHUB_TOKEN don't trigger workflows, so committing
+      # back to a PR branch cannot retrigger this job.
+      - name: Commit generated configs
+        if: |
+          steps.drift.outputs.changed == 'true'
+          && github.ref != 'refs/heads/main'
+          && (github.event_name == 'workflow_dispatch'
+              || github.event.pull_request.head.repo.full_name == github.repository)
+        run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add config/prod
@@ -63,17 +73,48 @@ jobs:
           branch="${{ github.event.pull_request.head.ref || github.ref_name }}"
           git push origin HEAD:"$branch"
 
-      - name: Verify generated configs on fork PRs
-        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
+      # main is behind a ruleset requiring a reviewed PR, so drift found here
+      # cannot be pushed back directly the way it can on a PR branch.
+      - name: Open a PR with the generated configs
+        if: steps.drift.outputs.changed == 'true' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # One reusable branch, force pushed: every run replaces main-plus-one-
+          # commit in place, so repeated drift updates the open PR instead of
+          # stacking up a new one per merge.
+          BRANCH: auto/update-generated-configs
         run: |
-          # As above: without this a brand-new generated config is invisible to
-          # `git diff` and a fork PR would pass while leaving one uncommitted.
-          git add -AN -- config/prod
-          if git diff --quiet -- config/prod; then
-            echo "Generated configs already up to date"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add config/prod
+          git commit -m "Update generated deployment configs"
+          git push --force origin "HEAD:refs/heads/$BRANCH"
+
+          if [ -n "$(gh pr list --head "$BRANCH" --base main --state open --json number --jq '.[].number')" ]; then
+            echo "Updated the PR already open from $BRANCH"
             exit 0
           fi
 
+          {
+            cat <<'BODY'
+          `make configs` produced output that differs from what is committed under `config/prod` on `main`, so the deployed configs would drift from the source they are generated from. This usually means a PR from a fork merged without regenerating them.
+
+          Review and merge to bring `main` back in sync.
+          BODY
+            printf '\nOpened by [Sync configs](%s).\n' \
+              "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          } > "$RUNNER_TEMP/pr-body.md"
+
+          gh pr create --base main --head "$BRANCH" \
+            --title "Update generated configs" \
+            --body-file "$RUNNER_TEMP/pr-body.md"
+
+      - name: Verify generated configs on fork PRs
+        if: |
+          steps.drift.outputs.changed == 'true'
+          && github.event_name == 'pull_request'
+          && github.event.pull_request.head.repo.full_name != github.repository
+        run: |
           echo "::error::Generated configs are out of date. Run 'make configs' and commit the results before merging."
           git --no-pager diff -- config/prod
           exit 1
