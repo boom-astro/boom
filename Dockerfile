@@ -5,6 +5,10 @@ FROM rust:slim-trixie AS base
 
 ARG KAFKA_VERSION
 ARG SCALA_VERSION
+# Installed here rather than only in the runtime stage so the dev image has it
+# too: the task worker shells out to boompy for catalog sourcing, and it runs
+# under cargo-watch in dev exactly as it does from the release binary in prod.
+ARG UV_VERSION=0.10.0
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
@@ -15,6 +19,9 @@ RUN apt-get update && \
     tar -xzf /tmp/kafka.tgz -C /opt && \
     ln -s /opt/kafka_${SCALA_VERSION}-${KAFKA_VERSION} /opt/kafka && \
     rm -f /tmp/kafka.tgz
+
+RUN curl -LsSf https://astral.sh/uv/${UV_VERSION}/install.sh | \
+    env UV_INSTALL_DIR=/usr/local/bin UV_UNMANAGED_INSTALL=1 sh
 
 ENV PATH="/opt/kafka/bin:${PATH}"
 ENV LIBCLANG_PATH=/usr/lib/llvm-19/lib

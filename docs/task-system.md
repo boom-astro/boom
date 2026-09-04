@@ -109,6 +109,25 @@ Still to port, so that the last reasons to SSH in go away: `enrich_reprocess`,
 cancellation check in its batch loop; the ones that drive their work through
 Valkey already have the resumability a task needs.
 
+## Running it in dev
+
+`make dev` brings up a `task-worker` alongside the API, under cargo-watch like
+the other services. It shares the dev MongoDB, so a run kicked off from the
+admin page is picked up within a couple of seconds.
+
+Two things about the dev container specifically:
+
+- It runs `uv sync --project /app/boompy --frozen` before starting, so boompy's
+  environment exists before the first ingest asks for it. The venv lives in its
+  own volume rather than being bind-mounted from the host — a host venv would
+  carry macOS wheels into a Debian image.
+- It shares the `target` volume with the api and scheduler containers, so all of
+  them serialize on one cargo build lock. A source edit therefore costs several
+  sequential rebuilds, and the API can be briefly unavailable while they drain.
+
+Catalog chunks are staged in the `catalog_data` volume, mounted at
+`/app/data/catalogs`.
+
 ## Collections
 
 | Collection | Holds |

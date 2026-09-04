@@ -101,6 +101,52 @@ services:
       # Increase timeouts for slower CI environments
       KAFKA_SOCKET_CONNECTION_SETUP_TIMEOUT_MS: 30000
       KAFKA_SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS: 60000
+  # Runs queued tasks in dev, the same way the prod task-worker service does.
+  #
+  # `uv sync` before cargo-watch so boompy's environment exists before the first
+  # ingest asks for it; the venv lives in its own volume so a container restart
+  # does not re-resolve it. `--frozen` makes a lockfile that drifted fail here
+  # rather than silently resolving to versions nothing was tested against.
+  task-worker:
+    env_file:
+      - .env
+    profiles:
+      - dev
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: dev
+    working_dir: /app
+    environment:
+      BOOM_CATALOG_DATA_PATH: /app/data/catalogs
+      BOOM_BOOMPY_PATH: /app/boompy
+      UV_PROJECT_ENVIRONMENT: /app/boompy/.venv
+    entrypoint:
+      - /bin/bash
+      - -lc
+    command:
+      - >-
+        uv sync --project /app/boompy --frozen --no-dev &&
+        exec cargo watch
+        --watch src --watch apache-avro-macros
+        --watch Cargo.toml --watch Cargo.lock
+        --ignore target
+        -x "run --bin task_worker -- --config /app/config.yaml"
+    volumes:
+      - ./src:/app/src
+      - ./apache-avro-macros:/app/apache-avro-macros
+      - ./Cargo.toml:/app/Cargo.toml
+      - ./Cargo.lock:/app/Cargo.lock
+      - ./boompy:/app/boompy
+      # The venv is built inside the container: a host one would carry macOS
+      # wheels into a Debian image.
+      - boompy-venv:/app/boompy/.venv
+      - cargo-registry:/usr/local/cargo/registry
+      - cargo-git:/usr/local/cargo/git
+      - target:/app/target
+      - catalog_data:/app/data/catalogs
+      - ${BOOM_CONFIG_PATH:-./config.yaml}:/app/config.yaml
+
   # Overrides to run the API in dev mode with cargo-watch, which automatically
   # rebuilds and restarts the container when source files change.
   api:
@@ -259,3 +305,5 @@ volumes:
   cargo-registry:
   cargo-git:
   target:
+  # boompy's resolved environment, built in the container by `uv sync`.
+  boompy-venv:
