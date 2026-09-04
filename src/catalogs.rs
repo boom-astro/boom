@@ -16,7 +16,7 @@ const CHUNK_SIZE: usize = 100_000; // TODO: tune, or get from config
 trait Downloadable {
     fn download_chunk(&self, istart: usize, iend: usize) -> Result<usize>;
     // Get a vector of download URLs.
-    fn get_download_urls(&self) -> Result<Vec<str>>;
+    fn get_download_urls(&self) -> Result<Vec<String>>;
 }
 
 pub struct Catalog {
