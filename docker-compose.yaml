@@ -233,6 +233,8 @@ services:
       BOOM_BABAMUL__OAUTH__ORCID__CLIENT_ID: ${BOOM_BABAMUL__OAUTH__ORCID__CLIENT_ID:-}
       BOOM_BABAMUL__OAUTH__ORCID__CLIENT_SECRET: ${BOOM_BABAMUL__OAUTH__ORCID__CLIENT_SECRET:-}
       BOOM_BABAMUL__OAUTH__ORCID_SANDBOX: ${BOOM_BABAMUL__OAUTH__ORCID_SANDBOX:-false}
+      # Who may run data-mutating tasks from the admin page, comma-separated.
+      BOOM_BABAMUL__ADMIN_EMAILS: ${BOOM_BABAMUL__ADMIN_EMAILS:-}
       # Server-side PostHog analytics; blank disables analytics.
       BOOM_POSTHOG__PROJECT_API_KEY: ${BOOM_POSTHOG__PROJECT_API_KEY:-}
       BOOM_POSTHOG__HOST: ${BOOM_POSTHOG__HOST:-https://us.i.posthog.com}
