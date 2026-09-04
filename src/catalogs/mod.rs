@@ -62,6 +62,8 @@ pub enum Reader {
     GaiaDr3,
     /// GALEX GUVcat_AIS, read straight from the published gzipped CSV.
     Galex,
+    /// VSX, fixed-width text.
+    Vsx,
 }
 
 /// A catalog BOOM knows how to ingest.
@@ -163,6 +165,15 @@ pub const CATALOGS: &[CatalogDef] = &[
         title: "GALEX GUVcat_AIS",
         description: "Ultraviolet FUV/NUV photometry from the All-Sky Imaging Survey.",
         reader: Reader::Galex,
+        aliases: &[],
+    },
+    CatalogDef {
+        id: "vsx",
+        collection: "VSX",
+        title: "AAVSO Variable Star Index",
+        description: "Variability types, magnitudes at maximum and minimum, epochs and \
+                      periods for known and suspected variable stars.",
+        reader: Reader::Vsx,
         aliases: &[],
     },
 ];
@@ -545,6 +556,7 @@ async fn ingest_file(
         }
         Reader::GaiaDr3 => Ok(csv::ingest_csv::<types::Gaia>(inserter, path).await?),
         Reader::Galex => Ok(csv::ingest_csv::<types::Galex>(inserter, path).await?),
+        Reader::Vsx => Ok(ascii::ingest_ascii::<types::Vsx>(inserter, path).await?),
     }
 }
 
@@ -744,11 +756,6 @@ pub const WITHOUT_DEFINITIONS: &[(&str, &str)] = &[
         "TNS",
         "the Transient Name Server is a live, credentialed feed rather than an archival \
          download, and is populated outside the catalog ingest path",
-    ),
-    (
-        "VSX",
-        "the published vsx.dat needs the fixed-column parser from boom-catalogs, which \
-         has not been ported",
     ),
     (
         "PS1_DR1",

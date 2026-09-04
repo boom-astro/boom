@@ -83,9 +83,11 @@ not yet queryable by position.
 | `catwise2020` | `CatWISE2020` | parquet, from IPAC tables | ~700 files | Mid-infrared W1/W2 photometry and proper motions. |
 | `gaia-dr3` | `Gaia_DR3` | gzipped CSV | ~3400 files | Astrometry, parallaxes, proper motions and G/BP/RP photometry for 1.8 billion sources. |
 | `galex` | `GALEX` | gzipped CSV | per release | Ultraviolet FUV/NUV photometry from the All-Sky Imaging Survey. |
+| `vsx` | `VSX` | fixed-width text | 1 | Variability types, magnitudes, epochs and periods for known and suspected variable stars. |
 
 Four crossmatch targets have no definition, and are listed in
-`WITHOUT_DEFINITIONS` in `src/catalogs/mod.rs`:
+`WITHOUT_DEFINITIONS` in `src/catalogs/mod.rs`. Config load rejects any name
+that is neither defined nor listed there:
 
 - **`LS_DR10_PHOTOZ`** — the stored table is a join of the LS DR10 tractor
   sweeps with the photo-z catalog, produced by the pandas minifiers in
@@ -96,8 +98,8 @@ Four crossmatch targets have no definition, and are listed in
   is not recorded.
 - **`TNS`** — a live, credentialed feed rather than an archival download,
   populated outside the catalog ingest path.
-- **`VSX`** — its `vsx.dat` needs the fixed-column parser from boom-catalogs,
-  which was not carried over.
+- **`PS1_DR1`** — boom-catalogs has a Pan-STARRS record type and downloader,
+  but neither has been ported.
 
 ## Adding a catalog
 

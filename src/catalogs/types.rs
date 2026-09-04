@@ -22,6 +22,17 @@ fn optional_string(field: &str) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
+/// A byte range of a fixed-width line, tolerating a line shorter than declared.
+///
+/// The published files pad to a fixed width, but a truncated final line should
+/// produce a parse error naming the field rather than a panic.
+fn column(line: &str, start: usize, end: usize) -> &str {
+    if start >= line.len() {
+        return "";
+    }
+    &line[start..end.min(line.len())]
+}
+
 // ---------------------------------------------------------------------------
 // 2MASS -- ascii
 // ---------------------------------------------------------------------------
@@ -716,6 +727,103 @@ pub struct Galex {
 
 impl HasCoordinates for Galex {}
 
+// ---------------------------------------------------------------------------
+// VSX -- fixed-width text
+// ---------------------------------------------------------------------------
+
+/// One row of the AAVSO International Variable Star Index.
+///
+/// Published as a single fixed-width `vsx.dat`. Column positions are the file's
+/// own and are not self-describing, so they are named once here.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Vsx {
+    #[serde(rename(serialize = "_id"))]
+    pub oid: i64,
+    pub name: String,
+    pub var_flag: i32,
+    pub ra: f64,
+    pub dec: f64,
+    /// Variability types, which the file separates with `|`.
+    pub types: Vec<String>,
+    pub max: Option<f64>,
+    pub max_band: Option<String>,
+    /// Whether `min` is an amplitude rather than a magnitude.
+    pub min_is_amplitude: bool,
+    pub min: Option<f64>,
+    pub min_band: Option<String>,
+    pub epoch: Option<f64>,
+    pub period: Option<f64>,
+    pub spectral_type: Option<String>,
+}
+
+/// Byte offsets of each field in `vsx.dat`.
+mod vsx_col {
+    pub const OID: (usize, usize) = (0, 8);
+    pub const NAME: (usize, usize) = (8, 40);
+    pub const VAR_FLAG: (usize, usize) = (40, 42);
+    pub const RA: (usize, usize) = (42, 52);
+    pub const DEC: (usize, usize) = (52, 62);
+    pub const TYPES: (usize, usize) = (62, 96);
+    pub const MAX: (usize, usize) = (96, 105);
+    pub const MAX_BAND: (usize, usize) = (105, 110);
+    pub const MIN_IS_AMPLITUDE: (usize, usize) = (110, 118);
+    pub const MIN: (usize, usize) = (118, 127);
+    pub const MIN_BAND: (usize, usize) = (127, 137);
+    pub const EPOCH: (usize, usize) = (137, 156);
+    pub const PERIOD: (usize, usize) = (156, 174);
+    pub const SPECTRAL_TYPE: (usize, usize) = (174, 204);
+}
+
+impl super::ascii::FromAsciiRow for Vsx {
+    fn from_line(line: &str) -> Result<Self, String> {
+        let field = |(start, end): (usize, usize)| column(line, start, end).trim();
+
+        let oid = field(vsx_col::OID)
+            .parse()
+            .map_err(|e| format!("oid {:?}: {}", field(vsx_col::OID), e))?;
+        let name = field(vsx_col::NAME);
+        if name.is_empty() {
+            // The name is the only human-readable identifier on the record.
+            return Err("empty name".to_string());
+        }
+        let ra = field(vsx_col::RA)
+            .parse()
+            .map_err(|e| format!("ra {:?}: {}", field(vsx_col::RA), e))?;
+        let dec = field(vsx_col::DEC)
+            .parse()
+            .map_err(|e| format!("dec {:?}: {}", field(vsx_col::DEC), e))?;
+
+        Ok(Vsx {
+            oid,
+            name: name.to_string(),
+            // Absent rather than fatal: the flag is metadata about the record,
+            // not the star, and a blank one should not drop a real variable.
+            var_flag: optional(field(vsx_col::VAR_FLAG)).unwrap_or_default(),
+            ra,
+            dec,
+            types: optional_string(field(vsx_col::TYPES))
+                .map(|t| t.split('|').map(|s| s.trim().to_string()).collect())
+                .unwrap_or_default(),
+            max: optional(field(vsx_col::MAX)),
+            max_band: optional_string(field(vsx_col::MAX_BAND)),
+            min_is_amplitude: matches!(
+                field(vsx_col::MIN_IS_AMPLITUDE)
+                    .to_ascii_lowercase()
+                    .as_str(),
+                "1" | "true" | "yes" | "y"
+            ),
+            min: optional(field(vsx_col::MIN)),
+            min_band: optional_string(field(vsx_col::MIN_BAND)),
+            epoch: optional(field(vsx_col::EPOCH)),
+            period: optional(field(vsx_col::PERIOD)),
+            spectral_type: optional_string(field(vsx_col::SPECTRAL_TYPE)),
+        })
+    }
+}
+
+impl HasCoordinates for Vsx {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -779,6 +887,69 @@ mod tests {
         // record onto a single document.
         let err = TwoMass::from_line(&psc_line(&[(twomass_col::DESIGNATION, " ")])).unwrap_err();
         assert_eq!(err, "empty designation");
+    }
+
+    /// A vsx.dat line built from the file's own column offsets.
+    fn vsx_line(overrides: &[((usize, usize), &str)]) -> String {
+        let mut line = vec![b' '; 204];
+        // Blank the whole field before writing, or an override shorter than
+        // the value it replaces leaves the previous tail behind.
+        let mut put = |(start, end): (usize, usize), value: &str| {
+            line[start..end].fill(b' ');
+            let bytes = value.as_bytes();
+            let width = (end - start).min(bytes.len());
+            line[start..start + width].copy_from_slice(&bytes[..width]);
+        };
+        put(vsx_col::OID, "12345");
+        put(vsx_col::NAME, "RR Lyr");
+        put(vsx_col::VAR_FLAG, "0");
+        put(vsx_col::RA, "291.36630");
+        put(vsx_col::DEC, "42.784390");
+        put(vsx_col::TYPES, "RRAB|SR");
+        put(vsx_col::MAX, "7.06");
+        put(vsx_col::PERIOD, "0.566783");
+        for (range, value) in overrides {
+            put(*range, value);
+        }
+        String::from_utf8(line).expect("ascii")
+    }
+
+    #[test]
+    fn vsx_parses_a_published_row() {
+        let record = Vsx::from_line(&vsx_line(&[])).expect("should parse");
+        assert_eq!(record.oid, 12345);
+        assert_eq!(record.name, "RR Lyr");
+        assert_eq!(record.ra, 291.36630);
+        assert_eq!(record.dec, 42.784390);
+        assert_eq!(record.period, Some(0.566783));
+    }
+
+    #[test]
+    fn vsx_splits_the_pipe_separated_types() {
+        // A star can carry several variability classifications, and storing
+        // "RRAB|SR" as one string would make a type query miss it.
+        let record = Vsx::from_line(&vsx_line(&[])).expect("should parse");
+        assert_eq!(record.types, vec!["RRAB", "SR"]);
+    }
+
+    #[test]
+    fn vsx_reads_a_blank_optional_column_as_absent() {
+        let record = Vsx::from_line(&vsx_line(&[(vsx_col::MAX, "   ")])).expect("should parse");
+        assert_eq!(record.max, None);
+    }
+
+    #[test]
+    fn vsx_rejects_an_unparseable_position() {
+        let err = Vsx::from_line(&vsx_line(&[(vsx_col::RA, "not-a-number")])).unwrap_err();
+        assert!(err.starts_with("ra "), "{err}");
+    }
+
+    #[test]
+    fn vsx_tolerates_a_line_shorter_than_the_declared_width() {
+        // A truncated final line should be a parse error naming the field, not
+        // a panic that takes the whole chunk down.
+        let short = "12345   RR Lyr";
+        assert!(Vsx::from_line(short).is_err());
     }
 
     #[test]

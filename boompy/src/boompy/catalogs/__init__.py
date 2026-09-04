@@ -10,13 +10,25 @@ A catalog is one module defining `ID`, `list_chunks` and `fetch_chunk` -- see
 
 from __future__ import annotations
 
-from . import allwise, catwise2020, desi_dr1, galex, gaia_dr3, milliquas, ned, twomass
+from . import (
+    allwise,
+    catwise2020,
+    desi_dr1,
+    gaia_dr3,
+    galex,
+    milliquas,
+    ned,
+    twomass,
+    vsx,
+)
 from .base import CatalogModule, Chunk
 
 #: Every catalog boompy can source, by slug.
 CATALOGS: dict[str, CatalogModule] = {
     module.ID: module
-    for module in (twomass, ned, allwise, milliquas, desi_dr1, catwise2020, gaia_dr3, galex)
+    for module in (
+        twomass, ned, allwise, milliquas, desi_dr1, catwise2020, gaia_dr3, galex, vsx,
+    )
 }
 
 __all__ = ["CATALOGS", "CatalogModule", "Chunk", "get"]
