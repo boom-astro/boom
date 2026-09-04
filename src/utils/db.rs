@@ -1,11 +1,12 @@
 use chrono::NaiveDate;
+use futures::TryStreamExt;
 use mongodb::{
-    bson::{doc, to_document, Document},
+    bson::{doc, to_document, Bson, Document},
     options::IndexOptions,
     Collection, Database, IndexModel,
 };
 use serde::Serialize;
-use tracing::instrument;
+use tracing::{error, instrument, warn};
 
 use crate::utils::enums::Survey;
 
@@ -280,5 +281,118 @@ pub fn fetch_timeseries_op(
                 "$and": conditions
             }
         }
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Range sharding: splitting a full-collection pass into contiguous ranges is the
+// only way to use more than one thread on it. Ranges are cut on an indexed field
+// that tracks insertion order, so that each shard walks a roughly contiguous
+// region on disk rather than jumping around it.
+// -----------------------------------------------------------------------------
+
+/// `created_at` is exactly insertion order, but it is only indexed if someone created
+/// that index; `_id` always is, and both ZTF object ids and LSST diaObject ids happen
+/// to be allocated in an order that correlates well with insertion.
+pub async fn shard_field(collection: &Collection<Document>) -> &'static str {
+    let indexed_on_created_at = match collection.list_indexes().await {
+        Ok(cursor) => match cursor.try_collect::<Vec<_>>().await {
+            Ok(indexes) => indexes
+                .iter()
+                .any(|index| index.keys.keys().next().is_some_and(|k| k == "created_at")),
+            Err(_) => false,
+        },
+        Err(_) => false,
+    };
+    if indexed_on_created_at {
+        "created_at"
+    } else {
+        "_id"
+    }
+}
+
+pub async fn range_shards(
+    collection: &Collection<Document>,
+    parts: usize,
+    field: &str,
+) -> Vec<Document> {
+    if parts <= 1 {
+        return vec![Document::new()];
+    }
+    let sample_size = (parts * 20).min(10_000);
+    let bounds: Vec<Bson> = match collection
+        .aggregate(vec![
+            doc! { "$sample": { "size": sample_size as i64 } },
+            doc! { "$project": { field: 1 } },
+            doc! { "$sort": { field: 1 } },
+        ])
+        .await
+    {
+        Ok(cursor) => match cursor.try_collect::<Vec<Document>>().await {
+            Ok(docs) => docs.iter().filter_map(|d| d.get(field).cloned()).collect(),
+            Err(e) => {
+                warn!(error = %e, "could not sample {} bounds, falling back to a single shard", field);
+                Vec::new()
+            }
+        },
+        Err(e) => {
+            warn!(error = %e, "could not sample {} bounds, falling back to a single shard", field);
+            Vec::new()
+        }
+    };
+
+    if bounds.len() < parts {
+        warn!(
+            "only {} sampled bounds on '{}' for {} shards, running as a single shard",
+            bounds.len(),
+            field,
+            parts
+        );
+        return vec![Document::new()];
+    }
+    let step = bounds.len() / parts;
+    let cuts: Vec<Bson> = (1..parts).map(|i| bounds[i * step].clone()).collect();
+
+    let mut shards = Vec::with_capacity(cuts.len() + 1);
+    shards.push(doc! { field: { "$lt": cuts[0].clone() } });
+    for pair in cuts.windows(2) {
+        shards.push(doc! { field: { "$gte": pair[0].clone(), "$lt": pair[1].clone() } });
+    }
+    shards.push(doc! { field: { "$gte": cuts[cuts.len() - 1].clone() } });
+    shards
+}
+
+#[derive(thiserror::Error, Debug)]
+pub enum TaskError {
+    #[error("task failed")]
+    Failed(#[from] mongodb::error::Error),
+    #[error("task did not run to completion")]
+    Join(#[from] tokio::task::JoinError),
+}
+
+/// A panicking task is a failure like any other: ignoring its `JoinError` reports a run
+/// that only covered part of the collection as a success.
+pub async fn join_tasks<T>(
+    handles: Vec<tokio::task::JoinHandle<Result<T, mongodb::error::Error>>>,
+    label: &str,
+) -> Result<Vec<T>, TaskError> {
+    let mut results = Vec::with_capacity(handles.len());
+    let mut first_err: Option<TaskError> = None;
+    for handle in handles {
+        match handle.await {
+            Ok(Ok(value)) => results.push(value),
+            Ok(Err(e)) => {
+                error!("{} failed: {}", label, e);
+                first_err.get_or_insert(e.into());
+            }
+            Err(e) => {
+                error!("{} did not run to completion: {}", label, e);
+                first_err.get_or_insert(e.into());
+            }
+        }
+    }
+    match first_err {
+        Some(e) => Err(e),
+        None => Ok(results),
     }
 }

@@ -1,6 +1,7 @@
 use futures::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::io::Write;
+use tracing::info;
 
 /// Standard progress bar used by long-running maintenance binaries
 /// (`reprocess_crossmatch`, `migrate_*`).
@@ -14,6 +15,48 @@ pub fn make_progress_bar(total: u64, label: String) -> ProgressBar {
     );
     pb.set_message(label);
     pb
+}
+
+const PROGRESS_LOG_SECS: u64 = 60;
+
+/// The indicatif bar hides itself when stderr is not a terminal, i.e. whenever the run
+/// is piped to a log file, so mirror it into the tracing output.
+pub fn spawn_progress_logger(pb: ProgressBar, label: String) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(PROGRESS_LOG_SECS));
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            let pos = pb.position();
+            let len = pb.length().unwrap_or(0);
+            let elapsed = pb.elapsed().as_secs_f64();
+            let rate = if elapsed > 0.0 {
+                pos as f64 / elapsed
+            } else {
+                0.0
+            };
+            let eta_secs = if rate > 0.0 && len > pos {
+                ((len - pos) as f64 / rate) as u64
+            } else {
+                0
+            };
+            let pct = if len > 0 {
+                pos as f64 * 100.0 / len as f64
+            } else {
+                0.0
+            };
+            info!(
+                "[{}] {}/{} ({:.2}%) {:.0} docs/s, eta {}h{:02}m",
+                label,
+                pos,
+                len,
+                pct,
+                rate,
+                eta_secs / 3600,
+                (eta_secs % 3600) / 60,
+            );
+        }
+    })
 }
 
 // let's make this more generic so we can take any file type, not just a NamedTempFile
