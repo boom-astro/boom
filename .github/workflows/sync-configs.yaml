@@ -3,12 +3,8 @@ name: Sync configs
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
-  # A PR is only ever checked against the base it was last pushed against, so a
-  # config source that lands after that check leaves main's generated configs
-  # stale with nothing to notice — worse for fork PRs, which can't be fixed up
-  # in place and are only re-checked when the contributor pushes again. Running
-  # on main closes that window: whatever the merge actually produced is
-  # regenerated against the tree it landed in.
+  # Run this on merges to main since it will not run against forks, so we may
+  # miss config updates on PRs from forks.
   push:
     branches: [main]
   workflow_dispatch:
