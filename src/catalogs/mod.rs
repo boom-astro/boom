@@ -401,7 +401,19 @@ pub async fn add_catalog(
             ));
             break;
         }
-        let ingested = ingest_chunk(&boompy, &inserter, def, chunk, &download_dir, params).await?;
+        // Report row counts while the chunk runs. Without this the only
+        // feedback between "fetching" and "chunk done" is the log, and a chunk
+        // of a large catalog is minutes of apparent silence.
+        let ticker = spawn_progress_ticker(
+            ctx.clone(),
+            inserter.clone_counter(),
+            (report.chunks_ingested + report.chunks_resumed) as u64,
+            report.chunks_total as u64,
+            chunk.id.clone(),
+        );
+        let ingested = ingest_chunk(&boompy, &inserter, def, chunk, &download_dir, params).await;
+        ticker.abort();
+        let ingested = ingested?;
         report.records.merge(ingested);
         report.chunks_ingested += 1;
         record_chunk(&state, def.collection, &chunk.id, ingested.inserted).await?;
@@ -441,6 +453,36 @@ pub async fn add_catalog(
     }
     ctx.flush_logs().await;
     Ok(report)
+}
+
+/// How often to publish a running row count while a chunk is in flight.
+///
+/// Slow enough that it is a rounding error next to the ingest's own writes, fast
+/// enough that the admin page looks alive.
+const PROGRESS_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Publish the running row count until aborted.
+fn spawn_progress_ticker(
+    ctx: TaskContext,
+    counter: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    done: u64,
+    total: u64,
+    chunk_id: String,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(PROGRESS_INTERVAL).await;
+            let rows = counter.load(std::sync::atomic::Ordering::Relaxed);
+            // Before the first batch lands the chunk is still downloading, which
+            // is worth saying rather than showing a stuck row count.
+            let message = if rows == 0 {
+                format!("chunk {} of {}: fetching {}", done + 1, total, chunk_id)
+            } else {
+                format!("chunk {} of {}: {} rows inserted", done + 1, total, rows)
+            };
+            ctx.progress(done, total, message).await;
+        }
+    })
 }
 
 /// Fetch one chunk, ingest every file it produced, then delete them.

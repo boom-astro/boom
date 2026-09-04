@@ -8,6 +8,8 @@ use crate::utils::spatial::Coordinates;
 use mongodb::bson::{to_document, Document};
 use mongodb::{Collection, Database};
 use serde::Serialize;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use tracing::instrument;
 
 /// Whether a record carries sky coordinates, and so wants a `coordinates`
@@ -63,6 +65,12 @@ pub struct Inserter {
     num_workers: usize,
     batch_size: usize,
     channel_capacity: usize,
+    /// Rows written so far, across every worker.
+    ///
+    /// Shared rather than returned at the end so a caller can report progress
+    /// while a chunk is still running. A chunk of a large catalog takes minutes,
+    /// and without this the only feedback until it finishes is the log.
+    inserted: Arc<AtomicU64>,
 }
 
 /// What one file's ingest did.
@@ -99,7 +107,22 @@ impl Inserter {
             num_workers: num_workers.max(1),
             batch_size: batch_size.max(1),
             channel_capacity: channel_capacity.max(1),
+            inserted: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// A handle on the running total, for a caller that wants to publish it on
+    /// its own schedule rather than polling this object.
+    pub fn clone_counter(&self) -> Arc<AtomicU64> {
+        self.inserted.clone()
+    }
+
+    /// Rows written so far by the workers currently running.
+    ///
+    /// Relaxed ordering: this drives a progress message, and a count that is a
+    /// batch stale is not worth synchronizing for.
+    pub fn inserted_so_far(&self) -> u64 {
+        self.inserted.load(Ordering::Relaxed)
     }
 
     pub fn collection(&self) -> Collection<Document> {
@@ -120,8 +143,9 @@ impl Inserter {
             let receiver = receiver.clone();
             let collection = self.collection();
             let batch_size = self.batch_size;
+            let inserted = self.inserted.clone();
             workers.push(tokio::spawn(async move {
-                insert_worker(worker_id, receiver, collection, batch_size).await
+                insert_worker(worker_id, receiver, collection, batch_size, inserted).await
             }));
         }
         (sender, workers)
@@ -180,6 +204,7 @@ async fn insert_worker<T>(
     receiver: async_channel::Receiver<T>,
     collection: Collection<Document>,
     batch_size: usize,
+    inserted_total: Arc<AtomicU64>,
 ) -> Result<u64, IngestError>
 where
     T: Serialize + HasCoordinates,
@@ -190,12 +215,18 @@ where
     while let Ok(record) = receiver.recv().await {
         batch.push(to_catalog_document(&record)?);
         if batch.len() >= batch_size {
-            inserted += write_batch(&collection, std::mem::take(&mut batch), worker_id).await?;
+            inserted += write_batch(
+                &collection,
+                std::mem::take(&mut batch),
+                worker_id,
+                &inserted_total,
+            )
+            .await?;
             batch.reserve(batch_size);
         }
     }
     if !batch.is_empty() {
-        inserted += write_batch(&collection, batch, worker_id).await?;
+        inserted += write_batch(&collection, batch, worker_id, &inserted_total).await?;
     }
     Ok(inserted)
 }
@@ -211,13 +242,18 @@ async fn write_batch(
     collection: &Collection<Document>,
     batch: Vec<Document>,
     worker_id: usize,
+    inserted_total: &AtomicU64,
 ) -> Result<u64, IngestError> {
     let n = batch.len() as u64;
     let opts = mongodb::options::InsertManyOptions::builder()
         .ordered(false)
         .build();
     match collection.insert_many(batch).with_options(opts).await {
-        Ok(result) => Ok(result.inserted_ids.len() as u64),
+        Ok(result) => {
+            let written = result.inserted_ids.len() as u64;
+            inserted_total.fetch_add(written, Ordering::Relaxed);
+            Ok(written)
+        }
         Err(e) => match duplicate_key_count(&e) {
             Some(duplicates) => {
                 tracing::debug!(
@@ -225,6 +261,7 @@ async fn write_batch(
                     duplicates,
                     "batch had records already present, treating as written"
                 );
+                inserted_total.fetch_add(n, Ordering::Relaxed);
                 Ok(n)
             }
             None => Err(e.into()),
@@ -248,5 +285,100 @@ fn duplicate_key_count(error: &mongodb::error::Error) -> Option<usize> {
                 .then_some(errors.len())
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A record with sky coordinates, to exercise the `coordinates` subdocument.
+    #[derive(Serialize)]
+    struct Positioned {
+        #[serde(rename = "_id")]
+        id: &'static str,
+        ra: f64,
+        dec: f64,
+    }
+    impl HasCoordinates for Positioned {}
+
+    /// A record that is deliberately not on the sky.
+    #[derive(Serialize)]
+    struct Unpositioned {
+        #[serde(rename = "_id")]
+        id: &'static str,
+        ra: f64,
+        dec: f64,
+    }
+    impl HasCoordinates for Unpositioned {
+        fn has_coordinates() -> bool {
+            false
+        }
+    }
+
+    #[test]
+    fn a_positioned_record_gets_coordinates_in_boom_s_own_shape() {
+        // The longitude is shifted by -180 because Mongo's 2dsphere index needs
+        // [-180, 180], and galactic l/b come along -- the same shape the alert
+        // pipeline writes, which is why this lives in Rust rather than being
+        // rebuilt in the Python that fetches the files.
+        let doc = to_catalog_document(&Positioned {
+            id: "x",
+            ra: 211.275,
+            dec: 55.154,
+        })
+        .expect("serializes");
+        let coords = doc.get_document("coordinates").expect("has coordinates");
+        let point = coords
+            .get_document("radec_geojson")
+            .expect("has radec_geojson");
+        let xy = point.get_array("coordinates").expect("has a position");
+        assert_eq!(xy[0].as_f64().unwrap(), 211.275 - 180.0);
+        assert_eq!(xy[1].as_f64().unwrap(), 55.154);
+        assert!(coords.contains_key("l") && coords.contains_key("b"));
+    }
+
+    #[test]
+    fn a_catalog_that_declares_no_coordinates_gets_none() {
+        // A catalog whose ra/dec mean something else must not silently acquire
+        // a spatial index, which is why this is per-type rather than sniffed.
+        let doc = to_catalog_document(&Unpositioned {
+            id: "x",
+            ra: 1.0,
+            dec: 2.0,
+        })
+        .expect("serializes");
+        assert!(!doc.contains_key("coordinates"));
+    }
+
+    /// A database handle that is never dialed -- these tests only need an
+    /// `Inserter`, not a server. `with_uri_str` resolves the URI without
+    /// connecting.
+    async fn unused_db() -> mongodb::Database {
+        mongodb::Client::with_uri_str("mongodb://127.0.0.1:1/")
+            .await
+            .expect("uri parses")
+            .database("unused")
+    }
+
+    #[tokio::test]
+    async fn the_running_count_starts_at_zero_and_is_shared() {
+        // The progress ticker reads this handle while the workers write to it;
+        // if `clone_counter` returned a copy rather than a handle, the admin
+        // page would show zero for the whole run.
+        let inserter = Inserter::new(unused_db().await, "unused", 1, 1, 1);
+        let counter = inserter.clone_counter();
+        assert_eq!(inserter.inserted_so_far(), 0);
+        counter.fetch_add(7, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(inserter.inserted_so_far(), 7);
+    }
+
+    #[tokio::test]
+    async fn zero_workers_or_batch_size_are_clamped_rather_than_dropping_records() {
+        // A zero here would silently drop every record on the floor.
+        let inserter = Inserter::new(unused_db().await, "unused", 0, 0, 0);
+        assert_eq!(inserter.num_workers, 1);
+        assert_eq!(inserter.batch_size, 1);
+        assert_eq!(inserter.channel_capacity, 1);
     }
 }
