@@ -915,6 +915,72 @@ impl super::arrow::FromRecordBatch for PanStarrs {
 
 impl HasCoordinates for PanStarrs {}
 
+// ---------------------------------------------------------------------------
+// Legacy Survey DR10 photo-z -- staged parquet, built offline
+// ---------------------------------------------------------------------------
+
+/// One source from the Legacy Survey DR10 tractor catalog, with its photo-z
+/// where one exists.
+///
+/// The stored dataset is a LEFT join of the minified tractor sweeps onto the
+/// photo-z catalog on `lsid`, so the astrometry is always present and only the
+/// photo-z fields are optional. `ra_deg` is a hive partition directory rather
+/// than a column, so it is not read here.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Serialize, Deserialize)]
+pub struct LsDr10PhotoZ {
+    /// LS unique id: objid + (brickid << N) + (release << 40). Written
+    /// unsigned upstream, but inside i64 range, which is what BSON stores.
+    #[serde(rename(serialize = "_id"))]
+    pub lsid: i64,
+    pub ra: f64,
+    pub dec: f64,
+    pub ra_err: Option<f64>,
+    pub dec_err: Option<f64>,
+    pub z_phot: Option<f64>,
+    pub z_phot_err: Option<f64>,
+    pub photo_z_type: Option<String>,
+}
+
+impl super::arrow::FromRecordBatch for LsDr10PhotoZ {
+    fn from_batch(
+        batch: &::arrow::array::RecordBatch,
+    ) -> Result<Vec<Self>, super::arrow::ColumnError> {
+        use super::arrow::{f64_column, i64_column, string_column};
+
+        let lsid = i64_column(batch, "lsid")?;
+        let ra = f64_column(batch, "ra")?;
+        let dec = f64_column(batch, "dec")?;
+        let ra_err = f64_column(batch, "ra_err")?;
+        let dec_err = f64_column(batch, "dec_err")?;
+        let z_phot = f64_column(batch, "z_phot")?;
+        let z_phot_err = f64_column(batch, "z_phot_err")?;
+        let photo_z_type = string_column(batch, "photo_z_type")?;
+
+        let mut rows = Vec::with_capacity(batch.num_rows());
+        for row in 0..batch.num_rows() {
+            // The tractor side of the join always has these; a row without them
+            // is malformed rather than merely unmatched.
+            let (Some(lsid), Some(ra), Some(dec)) = (lsid[row], ra[row], dec[row]) else {
+                continue;
+            };
+            rows.push(LsDr10PhotoZ {
+                lsid,
+                ra,
+                dec,
+                ra_err: ra_err[row],
+                dec_err: dec_err[row],
+                z_phot: z_phot[row],
+                z_phot_err: z_phot_err[row],
+                photo_z_type: photo_z_type[row].clone().filter(|s| !s.is_empty()),
+            });
+        }
+        Ok(rows)
+    }
+}
+
+impl HasCoordinates for LsDr10PhotoZ {}
+
 #[cfg(test)]
 mod tests {
     use super::*;

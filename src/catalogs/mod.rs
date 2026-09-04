@@ -66,6 +66,21 @@ pub enum Reader {
     Vsx,
     /// Pan-STARRS otmo, parquet partitions.
     PanStarrs,
+    /// Legacy Survey DR10 tractor joined to photo-z, staged parquet partitions.
+    LsDr10PhotoZ,
+}
+
+/// Where a catalog's files come from, which decides whether BOOM may delete
+/// them after ingesting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Source {
+    /// Fetched from an archive. Each chunk is deleted once ingested -- that is
+    /// what keeps peak disk at one chunk.
+    Fetched,
+    /// Already on disk, built by something outside BOOM. **Never deleted**: the
+    /// files are the artifact, not a cache of it, and rebuilding one can be
+    /// hours of work over hundreds of gigabytes.
+    Staged,
 }
 
 /// A catalog BOOM knows how to ingest.
@@ -78,6 +93,7 @@ pub struct CatalogDef {
     pub title: &'static str,
     pub description: &'static str,
     pub reader: Reader,
+    pub source: Source,
     /// Other collection names this catalog is stored under.
     ///
     /// Some catalogs stamp their release into the collection name, so a
@@ -103,6 +119,7 @@ pub const CATALOGS: &[CatalogDef] = &[
         description: "Near-infrared JHKs photometry for 471 million point sources, \
                       published as ~92 pipe-delimited files.",
         reader: Reader::TwoMass,
+        source: Source::Fetched,
         aliases: &[],
     },
     CatalogDef {
@@ -112,6 +129,7 @@ pub const CATALOGS: &[CatalogDef] = &[
         description: "Redshifts, distances, stellar masses and angular diameters for \
                       nearby galaxies. One table, always the current release.",
         reader: Reader::Ned,
+        source: Source::Fetched,
         aliases: &[],
     },
     CatalogDef {
@@ -121,6 +139,7 @@ pub const CATALOGS: &[CatalogDef] = &[
         description: "Mid-infrared W1-W4 photometry and proper motions for 748 million \
                       sources, read from the LSDB HATS mirror one HEALPix partition at a time.",
         reader: Reader::AllWise,
+        source: Source::Fetched,
         aliases: &[],
     },
     CatalogDef {
@@ -130,6 +149,7 @@ pub const CATALOGS: &[CatalogDef] = &[
         description: "Quasars and quasar candidates with redshifts and radio/X-ray \
                       associations. One table, converted from FITS.",
         reader: Reader::Milliquas,
+        source: Source::Fetched,
         // Milliquas stamps its release into the collection name; deployments
         // sit on whichever they last ingested.
         aliases: &["milliquas_v6", "milliquas_v7"],
@@ -141,6 +161,7 @@ pub const CATALOGS: &[CatalogDef] = &[
         description: "Spectroscopic redshifts from the iron zcatalog, filtered to the \
                       primary spectrum of each science target.",
         reader: Reader::DesiDr1,
+        source: Source::Fetched,
         aliases: &[],
     },
     CatalogDef {
@@ -150,6 +171,7 @@ pub const CATALOGS: &[CatalogDef] = &[
         description: "Mid-infrared W1/W2 photometry and proper motions, published as \
                       several hundred IPAC tables.",
         reader: Reader::CatWise2020,
+        source: Source::Fetched,
         aliases: &[],
     },
     CatalogDef {
@@ -159,6 +181,7 @@ pub const CATALOGS: &[CatalogDef] = &[
         description: "Astrometry, parallaxes, proper motions and G/BP/RP photometry for \
                       1.8 billion sources, in ~3400 gzipped CSV files.",
         reader: Reader::GaiaDr3,
+        source: Source::Fetched,
         aliases: &[],
     },
     CatalogDef {
@@ -167,6 +190,7 @@ pub const CATALOGS: &[CatalogDef] = &[
         title: "GALEX GUVcat_AIS",
         description: "Ultraviolet FUV/NUV photometry from the All-Sky Imaging Survey.",
         reader: Reader::Galex,
+        source: Source::Fetched,
         aliases: &[],
     },
     CatalogDef {
@@ -176,6 +200,7 @@ pub const CATALOGS: &[CatalogDef] = &[
         description: "Variability types, magnitudes at maximum and minimum, epochs and \
                       periods for known and suspected variable stars.",
         reader: Reader::Vsx,
+        source: Source::Fetched,
         aliases: &[],
     },
     CatalogDef {
@@ -187,7 +212,19 @@ pub const CATALOGS: &[CatalogDef] = &[
                       PS1_DR1, but the only mirror we have is DR2 -- confirm which release \
                       this deployment intends before ingesting.",
         reader: Reader::PanStarrs,
+        source: Source::Fetched,
         aliases: &["PS1_DR2"],
+    },
+    CatalogDef {
+        id: "ls-dr10-photoz",
+        collection: "LS_DR10_PHOTOZ",
+        title: "Legacy Survey DR10 astrometry and photo-z",
+        description: "Tractor positions joined to photo-z on lsid. BOOM ingests this \
+                      dataset but does not build it: the join is ~135 GB out-of-core and \
+                      runs offline. Stage the built dataset before ingesting.",
+        reader: Reader::LsDr10PhotoZ,
+        source: Source::Staged,
+        aliases: &[],
     },
 ];
 
@@ -541,7 +578,9 @@ async fn ingest_chunk(
         }
     }
 
-    if !params.keep_downloads {
+    // Staged files are the artifact rather than a cache of it -- deleting them
+    // would destroy work BOOM cannot reproduce.
+    if !params.keep_downloads && def.source == Source::Fetched {
         for file in &files {
             if let Err(e) = std::fs::remove_file(file) {
                 // Not fatal on its own, but it is how the disk fills up.
@@ -571,6 +610,9 @@ async fn ingest_file(
         Reader::Galex => Ok(csv::ingest_csv::<types::Galex>(inserter, path).await?),
         Reader::Vsx => Ok(ascii::ingest_ascii::<types::Vsx>(inserter, path).await?),
         Reader::PanStarrs => Ok(arrow::ingest_parquet::<types::PanStarrs>(inserter, path).await?),
+        Reader::LsDr10PhotoZ => {
+            Ok(arrow::ingest_parquet::<types::LsDr10PhotoZ>(inserter, path).await?)
+        }
     }
 }
 
@@ -754,12 +796,6 @@ pub async fn status(
 /// Delete an entry when its definition lands. A test requires each of these to
 /// still be undefined, so the list cannot quietly go stale.
 pub const WITHOUT_DEFINITIONS: &[(&str, &str)] = &[
-    (
-        "LS_DR10_PHOTOZ",
-        "the stored table is a join of the LS DR10 tractor sweeps with the photo-z \
-         catalog, produced by the pandas minifiers in boom-catalogs; porting it means \
-         porting that pipeline, not just a download",
-    ),
     (
         "LSPSC",
         "no downloader or record type exists in boom or boom-catalogs -- the collection \
@@ -1009,5 +1045,32 @@ mod crossmatch_validation_tests {
                 "{name} config was rejected"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod source_tests {
+    use super::*;
+
+    #[test]
+    fn only_the_offline_built_catalog_is_staged() {
+        // Everything else is fetched from an archive and its chunks are deleted
+        // after ingest; getting this backwards for a fetched catalog would fill
+        // the disk, and for a staged one would destroy the artifact.
+        let staged: Vec<&str> = CATALOGS
+            .iter()
+            .filter(|c| c.source == Source::Staged)
+            .map(|c| c.id)
+            .collect();
+        assert_eq!(staged, vec!["ls-dr10-photoz"]);
+    }
+
+    #[test]
+    fn a_staged_catalog_is_still_chunked_and_resumable() {
+        // Staging changes where the files come from, not how they are ingested:
+        // the dataset is hive-partitioned, so progress is still per partition.
+        let def = find("ls-dr10-photoz").expect("defined");
+        assert_eq!(def.source, Source::Staged);
+        assert_eq!(def.collection, "LS_DR10_PHOTOZ");
     }
 }

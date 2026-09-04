@@ -84,22 +84,35 @@ not yet queryable by position.
 | `gaia-dr3` | `Gaia_DR3` | gzipped CSV | ~3400 files | Astrometry, parallaxes, proper motions and G/BP/RP photometry for 1.8 billion sources. |
 | `galex` | `GALEX` | gzipped CSV | per release | Ultraviolet FUV/NUV photometry from the All-Sky Imaging Survey. |
 | `vsx` | `VSX` | fixed-width text | 1 | Variability types, magnitudes, epochs and periods for known and suspected variable stars. |
+| `panstarrs` | `PS1_DR1` | parquet | HEALPix partitions | Mean PSF magnitudes in grizy, from the HATS mirror of the otmo table. Requester-pays S3. |
+| `ls-dr10-photoz` | `LS_DR10_PHOTOZ` | parquet, **staged** | one per hive partition | Tractor positions joined to photo-z on `lsid`. Built offline — see below. |
 
-Four crossmatch targets have no definition, and are listed in
+### Staged catalogs
+
+`ls-dr10-photoz` is the one catalog BOOM ingests but does not fetch. Its table is
+a LEFT join of the minified LS DR10 tractor sweeps (~101 GB) onto the photo-z
+catalog (~34 GB) on `lsid`, done as a single out-of-core DuckDB hash join. That
+cannot be chunked — the inputs are partitioned differently and the join key is
+unique per source — so it runs offline, and BOOM reads the result.
+
+Stage the built dataset (the directory holding the `ra_deg=NN/` subdirectories)
+at `$BOOM_LS_DR10_PHOTOZ_DIR`, or at `<catalog data path>/ls-dr10-photoz`. Each
+parquet file is a chunk, so the ingest is still resumable and still bounded.
+
+A definition declares `source: Source::Staged`, and **BOOM never deletes a
+staged file** — for a fetched catalog the chunk is a cache and deleting it is
+what keeps peak disk at one chunk; for a staged one the files *are* the artifact,
+and rebuilding one is hours of work over hundreds of gigabytes.
+
+Two crossmatch targets have no definition, and are listed in
 `WITHOUT_DEFINITIONS` in `src/catalogs/mod.rs`. Config load rejects any name
 that is neither defined nor listed there:
 
-- **`LS_DR10_PHOTOZ`** — the stored table is a join of the LS DR10 tractor
-  sweeps with the photo-z catalog, produced by the pandas minifiers in
-  [boom-catalogs](https://github.com/boom-astro/boom-catalogs). Porting it means
-  porting that pipeline, not just a download.
 - **`LSPSC`** — no downloader or record type exists in either repo. The
   collection is created empty by the test workflow and where its data comes from
   is not recorded.
 - **`TNS`** — a live, credentialed feed rather than an archival download,
   populated outside the catalog ingest path.
-- **`PS1_DR1`** — boom-catalogs has a Pan-STARRS record type and downloader,
-  but neither has been ported.
 
 ## Adding a catalog
 

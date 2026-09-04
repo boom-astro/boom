@@ -16,6 +16,7 @@ from . import (
     desi_dr1,
     gaia_dr3,
     galex,
+    ls_dr10_photoz,
     milliquas,
     ned,
     panstarrs,
@@ -29,7 +30,7 @@ CATALOGS: dict[str, CatalogModule] = {
     module.ID: module
     for module in (
         twomass, ned, allwise, milliquas, desi_dr1, catwise2020, gaia_dr3, galex, vsx,
-        panstarrs,
+        panstarrs, ls_dr10_photoz,
     )
 }
 
