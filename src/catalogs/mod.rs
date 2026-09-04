@@ -23,10 +23,10 @@ pub mod ingest;
 pub mod parquet;
 pub mod types;
 
+use crate::tasks::TaskContext;
 use download::{Boompy, Chunk, DownloadError};
 use ingest::{IngestError, IngestReport, Inserter};
 use mongodb::bson::{doc, Document};
-use mongodb::Database;
 use std::path::{Path, PathBuf};
 use tracing::instrument;
 
@@ -175,7 +175,7 @@ impl AddCatalogParams {
 }
 
 /// What one [`add_catalog`] run did.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct AddCatalogReport {
     pub catalog: String,
     pub collection: String,
@@ -185,25 +185,35 @@ pub struct AddCatalogReport {
     pub chunks_resumed: usize,
     pub chunks_total: usize,
     pub records: IngestReport,
-    /// Whether every chunk is now in. False when `max_chunks` cut the run short.
+    /// Whether every chunk is now in. False when `max_chunks` or a cancellation
+    /// cut the run short.
     pub complete: bool,
+    /// Whether the run stopped because cancellation was requested.
+    pub canceled: bool,
 }
 
 /// Download and ingest a catalog, chunk by chunk, resuming where a previous run
 /// left off.
 ///
-/// Safe to re-run: completed chunks are skipped, and because every catalog
-/// derives `_id` from a stable source identifier, re-ingesting a chunk that was
-/// interrupted mid-write upserts rather than duplicates.
+/// Safe to re-run, which is what makes it usable as a task: completed chunks are
+/// skipped, and because every catalog derives `_id` from a stable source
+/// identifier, re-ingesting a chunk that was interrupted mid-write upserts
+/// rather than duplicates. A run cut short by a cancellation, a deploy or a
+/// crash therefore costs one chunk, not the whole catalog.
+///
+/// Cancellation is checked at chunk boundaries. Stopping mid-chunk would leave
+/// a partially written chunk unrecorded, which the next run would redo anyway --
+/// so the wait is bounded by one chunk and buys a clean resume point.
 #[instrument(
-    skip(db, params),
+    skip(ctx, params),
     fields(catalog = %params.catalog, collection = tracing::field::Empty),
     err
 )]
 pub async fn add_catalog(
-    db: &Database,
+    ctx: &TaskContext,
     params: &AddCatalogParams,
 ) -> Result<AddCatalogReport, CatalogError> {
+    let db = ctx.db();
     let def = find(&params.catalog).ok_or_else(|| CatalogError::Unknown {
         id: params.catalog.clone(),
         known: CATALOGS.iter().map(|c| c.id).collect::<Vec<_>>().join(", "),
@@ -233,13 +243,13 @@ pub async fn add_catalog(
     let boompy = Boompy::new(&params.boompy_dir);
     let chunks = boompy.list_chunks(def.id).await?;
     let done = chunks_done(&state, def.collection).await?;
-    tracing::info!(
-        chunks = chunks.len(),
-        already_done = done.len(),
-        "ingesting {} into {}",
+    ctx.info(format!(
+        "ingesting {} into {}: {} chunks, {} already done",
         def.id,
-        def.collection
-    );
+        def.collection,
+        chunks.len(),
+        done.len()
+    ));
 
     let inserter = Inserter::new(
         db.clone(),
@@ -256,6 +266,7 @@ pub async fn add_catalog(
         chunks_total: chunks.len(),
         records: IngestReport::default(),
         complete: false,
+        canceled: false,
     };
     start_state(&state, def, chunks.len()).await?;
 
@@ -264,31 +275,42 @@ pub async fn add_catalog(
             report.chunks_resumed += 1;
             continue;
         }
+        if ctx.is_canceled() {
+            report.canceled = true;
+            ctx.warn(format!(
+                "canceled after {} of {} chunks; the chunks already recorded are kept, \
+                 so a later run resumes from here",
+                report.chunks_ingested + report.chunks_resumed,
+                report.chunks_total
+            ));
+            break;
+        }
         if params
             .max_chunks
             .is_some_and(|max| report.chunks_ingested >= max)
         {
-            tracing::info!(
+            ctx.info(format!(
                 "stopping after {} chunks as requested",
                 report.chunks_ingested
-            );
+            ));
             break;
         }
         let ingested = ingest_chunk(&boompy, &inserter, def, chunk, &download_dir, params).await?;
         report.records.merge(ingested);
         report.chunks_ingested += 1;
         record_chunk(&state, def.collection, &chunk.id, ingested.inserted).await?;
-        tracing::info!(
-            chunk = %chunk.id,
-            read = ingested.read,
-            inserted = ingested.inserted,
-            progress = format!(
-                "{}/{}",
-                report.chunks_ingested + report.chunks_resumed,
-                report.chunks_total
-            ),
-            "chunk done"
-        );
+
+        let done_count = (report.chunks_ingested + report.chunks_resumed) as u64;
+        ctx.info(format!(
+            "chunk {} done ({}/{}): {} read, {} inserted",
+            chunk.id, done_count, report.chunks_total, ingested.read, ingested.inserted
+        ));
+        ctx.progress(
+            done_count,
+            report.chunks_total as u64,
+            format!("chunk {} of {}", done_count, report.chunks_total),
+        )
+        .await;
     }
 
     report.complete = report.chunks_ingested + report.chunks_resumed == report.chunks_total;
@@ -296,22 +318,22 @@ pub async fn add_catalog(
         // Indexed only at the end: an index maintained during the load roughly
         // doubles the time to ingest a large catalog, and a partially ingested
         // catalog should not be servable anyway.
+        ctx.info(format!("building indexes on {}", def.collection));
         inserter.create_indexes(true).await?;
         finish_state(&state, def.collection).await?;
-        tracing::info!(
+        ctx.info(format!(
             "{} complete: {} records in {}",
-            def.id,
-            report.records.inserted,
-            def.collection
-        );
+            def.id, report.records.inserted, def.collection
+        ));
     } else {
-        tracing::warn!(
-            "{} incomplete: {}/{} chunks; re-run to resume",
+        ctx.warn(format!(
+            "{} incomplete: {}/{} chunks; run it again to resume",
             def.id,
             report.chunks_ingested + report.chunks_resumed,
             report.chunks_total
-        );
+        ));
     }
+    ctx.flush_logs().await;
     Ok(report)
 }
 

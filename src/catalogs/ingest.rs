@@ -66,7 +66,7 @@ pub struct Inserter {
 }
 
 /// What one file's ingest did.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct IngestReport {
     /// Records parsed out of the source and sent to the workers.
     pub read: u64,
