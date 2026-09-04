@@ -362,6 +362,16 @@ pub async fn range_shards(
     shards
 }
 
+pub fn merge_filters(base: &Document, shard: &Document) -> Document {
+    if shard.is_empty() {
+        base.clone()
+    } else if base.is_empty() {
+        shard.clone()
+    } else {
+        doc! { "$and": [base.clone(), shard.clone()] }
+    }
+}
+
 #[derive(thiserror::Error, Debug)]
 pub enum TaskError {
     #[error("task failed")]

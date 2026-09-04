@@ -7,7 +7,7 @@ use boom::{
     conf::{load_dotenv, AppConfig, CatalogXmatchConfig},
     utils::{
         data::{make_progress_bar, spawn_progress_logger},
-        db::{join_tasks, range_shards, shard_field, TaskError},
+        db::{join_tasks, merge_filters, range_shards, shard_field, TaskError},
         enums::Survey,
         parser::parse_positive_usize,
         spatial::{
@@ -191,13 +191,7 @@ async fn sharded_update_many(
     let done = Arc::new(AtomicUsize::new(0));
     let total = shards.len();
     let results = futures::future::join_all(shards.iter().enumerate().map(|(index, shard)| {
-        let filter = if shard.is_empty() {
-            base_filter.clone()
-        } else if base_filter.is_empty() {
-            shard.clone()
-        } else {
-            doc! { "$and": [base_filter.clone(), shard.clone()] }
-        };
+        let filter = merge_filters(base_filter, shard);
         let collection = collection.clone();
         let update = update.clone();
         let done = Arc::clone(&done);
