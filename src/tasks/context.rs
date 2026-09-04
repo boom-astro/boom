@@ -6,6 +6,7 @@
 
 use super::logs::LogSink;
 use super::queue;
+use crate::conf::AppConfig;
 use mongodb::Database;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -14,6 +15,11 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct TaskContext {
     db: Database,
+    /// The whole config, not just the database: the data-mutating jobs headed
+    /// here next -- `enrich_reprocess`, `migrate_fp_flux`, `reprocess_crossmatch`
+    /// -- drive their work through Valkey and read the crossmatch and worker
+    /// sections, so a task body needs more than a Mongo handle.
+    config: Arc<AppConfig>,
     run_id: String,
     /// Set by the worker's heartbeat when cancellation is requested, or when
     /// the worker is shutting down. Checked by tasks at their own safe points.
@@ -22,11 +28,17 @@ pub struct TaskContext {
 }
 
 impl TaskContext {
-    pub fn new(db: Database, run_id: impl Into<String>, canceled: Arc<AtomicBool>) -> Self {
+    pub fn new(
+        db: Database,
+        config: Arc<AppConfig>,
+        run_id: impl Into<String>,
+        canceled: Arc<AtomicBool>,
+    ) -> Self {
         let run_id = run_id.into();
         Self {
             logs: LogSink::new(db.clone(), &run_id),
             db,
+            config,
             run_id,
             canceled,
         }
@@ -35,9 +47,10 @@ impl TaskContext {
     /// A context not attached to a run: logs go only to `tracing`, progress is
     /// dropped, and nothing ever cancels. For tests and for calling a task body
     /// directly.
-    pub fn detached(db: Database) -> Self {
+    pub fn detached(db: Database, config: Arc<AppConfig>) -> Self {
         Self {
             db,
+            config,
             run_id: String::new(),
             canceled: Arc::new(AtomicBool::new(false)),
             logs: LogSink::detached(),
@@ -46,6 +59,10 @@ impl TaskContext {
 
     pub fn db(&self) -> &Database {
         &self.db
+    }
+
+    pub fn config(&self) -> &AppConfig {
+        &self.config
     }
 
     pub fn run_id(&self) -> &str {

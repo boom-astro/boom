@@ -23,7 +23,7 @@ pub mod models;
 pub mod queue;
 
 pub use context::TaskContext;
-pub use models::{Actor, TaskRun, TaskStatus};
+pub use models::{Actor, TaskRun, TaskStatus, Trigger};
 
 use mongodb::bson::doc;
 use serde::Deserialize;
@@ -57,6 +57,21 @@ pub struct TaskSpec {
     /// Whether it can destroy data, and so needs the client to confirm.
     pub destructive: bool,
 }
+
+// TODO: port the remaining data-mutating binaries -- `enrich_reprocess`,
+// `migrate_fp_flux`, `migrate_snr`, `reprocess_crossmatch`, `copy_cutouts` --
+// so that operators stop running them over SSH too. Each becomes a body plus an
+// arm in `dispatch`; their existing Valkey work queues already give them the
+// resumability a task needs, so what they mainly want is the params struct and
+// a cancellation check in their batch loop.
+//
+// TODO: recurring runs. A scheduled task needs an enqueue loop that submits
+// with `Trigger::Schedule` and `Actor::system()`, plus a cron expression on
+// TaskSpec; `single_flight_key` already prevents a schedule from stacking runs
+// up when one is still going. Wanted for periodic maintenance work such as
+// trimming old LSST cutouts (#518) -- though for that specific case a TTL index
+// on the cutout documents does the job without a task at all, and only the
+// one-off backfill of the existing rows needs to run here.
 
 /// Every task type this release knows how to run.
 pub const TASKS: &[TaskSpec] = &[TaskSpec {

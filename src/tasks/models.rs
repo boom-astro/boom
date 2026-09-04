@@ -52,6 +52,40 @@ pub struct Actor {
     pub username: String,
 }
 
+impl Actor {
+    /// The actor for a run nothing human asked for.
+    ///
+    /// Exists so that when recurring tasks land, a scheduled run is
+    /// distinguishable from one a person submitted rather than being attributed
+    /// to whoever happened to configure the schedule.
+    pub fn system() -> Self {
+        Self {
+            user_id: "system".to_string(),
+            username: "system".to_string(),
+        }
+    }
+}
+
+/// What caused the run to be submitted.
+///
+/// On the run document from the start: adding it later would leave every
+/// historical run unable to say where it came from, and the whole point of
+/// keeping these records is being able to read them back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Trigger {
+    /// A person, through the API.
+    Api,
+    /// A recurring schedule. Not yet implemented -- see docs/task-system.md.
+    Schedule,
+}
+
+impl Default for Trigger {
+    fn default() -> Self {
+        Trigger::Api
+    }
+}
+
 /// How far along a running task is.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
 pub struct Progress {
@@ -71,6 +105,8 @@ pub struct TaskRun {
     pub params: serde_json::Value,
     pub status: TaskStatus,
     pub actor: Actor,
+    #[serde(default)]
+    pub trigger: Trigger,
     pub requested_at: f64,
     #[serde(default)]
     pub started_at: Option<f64>,
