@@ -180,6 +180,15 @@ async fn main() -> std::io::Result<()> {
                 .service(routes::catalogs::get_catalogs)
                 .service(routes::catalogs::get_catalog_indexes)
                 .service(routes::catalogs::get_catalog_sample)
+                .service(routes::tasks::get_task_types)
+                .service(routes::tasks::submit_task)
+                .service(routes::tasks::get_tasks)
+                .service(routes::tasks::get_task_logs)
+                .service(routes::tasks::cancel_task)
+                // Registered after the more specific /tasks/... paths: actix
+                // matches in registration order, so a leading {run_id} route
+                // would swallow /tasks/types.
+                .service(routes::tasks::get_task)
                 .service(routes::queries::post_find_query)
                 .service(routes::queries::post_cone_search_query)
                 .service(routes::surveys::get_cutouts)
