@@ -560,7 +560,6 @@ struct AlertWork {
     candid: i64,
     programid: i32,
     properties: ZtfAlertProperties,
-    all_bands_properties: AllBandsProperties,
     cutouts: AlertCutout,
     alert: ZtfAlertForEnrichment,
 }
@@ -757,7 +756,6 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                 candid,
                 programid,
                 properties,
-                all_bands_properties,
                 cutouts,
                 alert,
             });
@@ -1287,10 +1285,7 @@ impl ZtfEnrichmentWorker {
                 }
             };
             let metadata_result = AcaiModel::get_metadata(&[&item.alert]);
-            let btsbot_metadata_result = BtsBotModel::get_metadata(
-                &[&item.alert],
-                std::slice::from_ref(&item.all_bands_properties),
-            );
+            let btsbot_metadata_result = BtsBotModel::get_metadata(&[&item.alert]);
 
             let cls = if let (Ok(metadata), Ok(btsbot_metadata)) =
                 (metadata_result, btsbot_metadata_result)
@@ -1334,15 +1329,10 @@ impl ZtfEnrichmentWorker {
 
         let all_alerts: Vec<&ZtfAlertForEnrichment> = work_items.iter().map(|w| &w.alert).collect();
         let all_cutouts: Vec<&AlertCutout> = work_items.iter().map(|w| &w.cutouts).collect();
-        let all_band_props: Vec<AllBandsProperties> = work_items
-            .iter()
-            .map(|w| w.all_bands_properties.clone())
-            .collect();
 
         let (triplet_indices, triplet_all) = AcaiModel::get_triplet_indexed(&all_cutouts)?;
         let (acai_indices, acai_metadata_all) = AcaiModel::get_metadata_indexed(&all_alerts)?;
-        let (bts_indices, bts_metadata_all) =
-            BtsBotModel::get_metadata_indexed(&all_alerts, &all_band_props)?;
+        let (bts_indices, bts_metadata_all) = BtsBotModel::get_metadata_indexed(&all_alerts)?;
 
         let triplet_pos = position_index(&triplet_indices);
         let acai_pos = position_index(&acai_indices);
