@@ -374,9 +374,9 @@ pub fn merge_filters(base: &Document, shard: &Document) -> Document {
 
 #[derive(thiserror::Error, Debug)]
 pub enum TaskError {
-    #[error("task failed")]
+    #[error("{0}")]
     Failed(#[from] mongodb::error::Error),
-    #[error("task did not run to completion")]
+    #[error("task did not run to completion: {0}")]
     Join(#[from] tokio::task::JoinError),
 }
 
