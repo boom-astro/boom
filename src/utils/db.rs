@@ -291,6 +291,9 @@ pub fn fetch_timeseries_op(
 // region on disk rather than jumping around it.
 // -----------------------------------------------------------------------------
 
+/// Cursor batch size for the sharded scans built on the helpers below.
+pub const CURSOR_BATCH_SIZE: u32 = 10_000;
+
 /// `created_at` is exactly insertion order, but it is only indexed if someone created
 /// that index; `_id` always is, and both ZTF object ids and LSST diaObject ids happen
 /// to be allocated in an order that correlates well with insertion.

@@ -3,7 +3,9 @@ use boom::{
     conf::{load_dotenv, AppConfig},
     utils::{
         data::{make_progress_bar, spawn_progress_logger},
-        db::{create_index, join_tasks, merge_filters, range_shards, shard_field},
+        db::{
+            create_index, join_tasks, merge_filters, range_shards, shard_field, CURSOR_BATCH_SIZE,
+        },
         parser::parse_positive_usize,
         spatial::Coordinates,
     },
@@ -137,6 +139,7 @@ async fn process_shard(
         .find(filter)
         .projection(doc! { &ra_field: 1, &dec_field: 1 })
         .no_cursor_timeout(true)
+        .batch_size(CURSOR_BATCH_SIZE)
         .await?;
 
     let mut report = Report::default();

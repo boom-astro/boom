@@ -7,7 +7,7 @@ use boom::{
     conf::{load_dotenv, AppConfig, CatalogXmatchConfig},
     utils::{
         data::{make_progress_bar, spawn_progress_logger},
-        db::{join_tasks, merge_filters, range_shards, shard_field, TaskError},
+        db::{join_tasks, merge_filters, range_shards, shard_field, TaskError, CURSOR_BATCH_SIZE},
         enums::Survey,
         parser::parse_positive_usize,
         spatial::{
@@ -29,7 +29,6 @@ use tracing::{error, info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
 const QUEUE_MULTIPLIER: usize = 2;
-const CURSOR_BATCH_SIZE: u32 = 10_000;
 const ARCSEC_TO_RAD: f64 = std::f64::consts::PI / 180.0 / 3600.0;
 const STATE_COLLECTION: &str = "reprocess_crossmatch_state";
 const STATUS_MATCHING: &str = "matching";

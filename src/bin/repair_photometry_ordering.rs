@@ -2,7 +2,10 @@ use boom::{
     conf::{load_dotenv, AppConfig},
     utils::{
         data::{make_progress_bar, spawn_progress_logger},
-        db::{join_tasks, range_shards, shard_field, update_timeseries_op, TaskError},
+        db::{
+            join_tasks, range_shards, shard_field, update_timeseries_op, TaskError,
+            CURSOR_BATCH_SIZE,
+        },
         enums::Survey,
         parser::parse_positive_usize,
     },
@@ -68,8 +71,6 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     dry_run: bool,
 }
-
-const CURSOR_BATCH_SIZE: u32 = 10_000;
 
 /// Timeseries fields stored in `<survey>_alerts_aux` that must be strictly
 /// increasing by `jd`. Source of truth: the `AlertAuxForUpdate` structs in
