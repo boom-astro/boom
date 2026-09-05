@@ -253,3 +253,337 @@ pub async fn find_active(
     }
     Ok(runs(db).find_one(filter).await?)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tasks::models::{Actor, Progress, Trigger};
+
+    /// A queued run, with a unique id so concurrent tests cannot collide.
+    fn queued(task_type: &str, params: serde_json::Value) -> TaskRun {
+        TaskRun {
+            id: uuid::Uuid::new_v4().to_string(),
+            task_type: task_type.to_string(),
+            params,
+            status: TaskStatus::Queued,
+            actor: Actor {
+                user_id: "test".into(),
+                username: "test".into(),
+            },
+            trigger: Trigger::Api,
+            requested_at: now(),
+            started_at: None,
+            finished_at: None,
+            progress: Progress::default(),
+            worker: None,
+            lease_expires_at: None,
+            cancel_requested: false,
+            error: None,
+            attempts: 0,
+        }
+    }
+
+    /// Each test uses its own task type, so a test only ever claims its own
+    /// runs however many run in parallel against the shared test database.
+    fn unique_type() -> String {
+        format!("test_{}", uuid::Uuid::new_v4().simple())
+    }
+
+    /// Serializes the tests that call `claim_next`.
+    ///
+    /// `claim_next` takes the oldest queued run in the database, whatever it is
+    /// -- that is the behavior under test, not an accident. Two such tests
+    /// running at once therefore claim each other's runs and both fail. The
+    /// lock is only held by tests that claim; the rest still run in parallel.
+    static CLAIM_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+        std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+    /// Claim until we get a run of our own task type.
+    ///
+    /// Even holding [`CLAIM_LOCK`], the database can hold queued runs left by
+    /// tests that never claim, so this still filters for its own. Foreign runs
+    /// are parked (left claimed) and handed back afterwards, so each iteration
+    /// makes progress instead of re-claiming the same run forever.
+    async fn claim_ours(db: &Database, worker: &str, task_type: &str) -> Option<TaskRun> {
+        let mut parked: Vec<String> = Vec::new();
+        let mut ours = None;
+        while let Some(run) = claim_next(db, worker).await.unwrap() {
+            if run.task_type == task_type {
+                ours = Some(run);
+                break;
+            }
+            parked.push(run.id);
+        }
+        for id in parked {
+            release(db, &id, worker).await.unwrap();
+        }
+        ours
+    }
+
+    async fn cleanup(db: &Database, task_type: &str) {
+        let _ = db
+            .collection::<TaskRun>(RUNS_COLLECTION)
+            .delete_many(doc! { "task_type": task_type })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn claiming_moves_a_run_to_running_and_takes_a_lease() {
+        let _claiming = CLAIM_LOCK.lock().await;
+        let db = crate::conf::get_test_db().await;
+        let task_type = unique_type();
+        let run = queued(&task_type, serde_json::json!({}));
+        submit(&db, &run).await.unwrap();
+
+        let claimed = claim_ours(&db, "worker-a", &task_type)
+            .await
+            .expect("claimed");
+        assert_eq!(claimed.status, TaskStatus::Running);
+        assert_eq!(claimed.worker.as_deref(), Some("worker-a"));
+        assert!(claimed.lease_expires_at.unwrap() > now());
+        // The attempt counter is what tells an operator a run was resumed.
+        assert_eq!(claimed.attempts, 1);
+        cleanup(&db, &task_type).await;
+    }
+
+    #[tokio::test]
+    async fn only_one_worker_can_claim_the_same_run() {
+        let _claiming = CLAIM_LOCK.lock().await;
+        // The guard that keeps two workers from ingesting one catalog at once.
+        // Both updates match the document; only the first sees `queued`.
+        let db = crate::conf::get_test_db().await;
+        let task_type = unique_type();
+        submit(&db, &queued(&task_type, serde_json::json!({})))
+            .await
+            .unwrap();
+
+        let ours = claim_ours(&db, "worker-a", &task_type)
+            .await
+            .expect("claimed");
+        // A second worker cannot take the same run: both updates match the
+        // document, but only the first sees `status: queued`.
+        let stolen = claim_ours(&db, "worker-b", &task_type).await;
+        assert!(stolen.is_none(), "a second worker claimed the same run");
+        assert_eq!(
+            get(&db, &ours.id).await.unwrap().unwrap().worker.as_deref(),
+            Some("worker-a")
+        );
+        cleanup(&db, &task_type).await;
+    }
+
+    #[tokio::test]
+    async fn the_oldest_run_is_claimed_first() {
+        let _claiming = CLAIM_LOCK.lock().await;
+        // Newest-first would let a long queue starve a run indefinitely, and
+        // these runs are hours long.
+        let db = crate::conf::get_test_db().await;
+        let task_type = unique_type();
+        let mut older = queued(&task_type, serde_json::json!({ "n": 1 }));
+        older.requested_at = now() - 600.0;
+        let mut newer = queued(&task_type, serde_json::json!({ "n": 2 }));
+        newer.requested_at = now() - 60.0;
+        submit(&db, &newer).await.unwrap();
+        submit(&db, &older).await.unwrap();
+
+        let claimed = claim_ours(&db, "worker-a", &task_type)
+            .await
+            .expect("claimed");
+        assert_eq!(claimed.id, older.id);
+        cleanup(&db, &task_type).await;
+    }
+
+    #[tokio::test]
+    async fn a_heartbeat_renews_the_lease_and_reports_cancellation() {
+        let _claiming = CLAIM_LOCK.lock().await;
+        let db = crate::conf::get_test_db().await;
+        let task_type = unique_type();
+        submit(&db, &queued(&task_type, serde_json::json!({})))
+            .await
+            .unwrap();
+        let run = claim_ours(&db, "worker-a", &task_type)
+            .await
+            .expect("claimed");
+
+        assert_eq!(
+            heartbeat(&db, &run.id, "worker-a").await.unwrap(),
+            Some(false)
+        );
+        request_cancel(&db, &run.id).await.unwrap();
+        // This is how the flag reaches the running task.
+        assert_eq!(
+            heartbeat(&db, &run.id, "worker-a").await.unwrap(),
+            Some(true)
+        );
+        cleanup(&db, &task_type).await;
+    }
+
+    #[tokio::test]
+    async fn a_worker_that_lost_its_lease_is_told_to_stand_down() {
+        let _claiming = CLAIM_LOCK.lock().await;
+        // If another worker took the run, continuing would mean two workers
+        // writing the same collection -- exactly what the lease prevents.
+        let db = crate::conf::get_test_db().await;
+        let task_type = unique_type();
+        submit(&db, &queued(&task_type, serde_json::json!({})))
+            .await
+            .unwrap();
+        let run = claim_ours(&db, "worker-a", &task_type)
+            .await
+            .expect("claimed");
+
+        assert_eq!(heartbeat(&db, &run.id, "worker-b").await.unwrap(), None);
+        cleanup(&db, &task_type).await;
+    }
+
+    #[tokio::test]
+    async fn an_expired_lease_is_requeued_but_a_live_one_is_left_alone() {
+        let _claiming = CLAIM_LOCK.lock().await;
+        // This is what makes a run survive a worker being deployed over.
+        let db = crate::conf::get_test_db().await;
+        let task_type = unique_type();
+        submit(&db, &queued(&task_type, serde_json::json!({})))
+            .await
+            .unwrap();
+        let run = claim_ours(&db, "worker-a", &task_type)
+            .await
+            .expect("claimed");
+
+        requeue_expired(&db).await.unwrap();
+        assert_eq!(
+            get(&db, &run.id).await.unwrap().unwrap().status,
+            TaskStatus::Running,
+            "a live lease must not be stolen"
+        );
+
+        db.collection::<TaskRun>(RUNS_COLLECTION)
+            .update_one(
+                doc! { "_id": &run.id },
+                doc! { "$set": { "lease_expires_at": now() - 1.0 } },
+            )
+            .await
+            .unwrap();
+        requeue_expired(&db).await.unwrap();
+
+        let reaped = get(&db, &run.id).await.unwrap().unwrap();
+        assert_eq!(reaped.status, TaskStatus::Queued);
+        assert!(reaped.worker.is_none());
+        cleanup(&db, &task_type).await;
+    }
+
+    #[tokio::test]
+    async fn a_queued_run_is_canceled_outright() {
+        // Nothing has started, so there is no safe point to wait for.
+        let db = crate::conf::get_test_db().await;
+        let task_type = unique_type();
+        let run = queued(&task_type, serde_json::json!({}));
+        submit(&db, &run).await.unwrap();
+
+        assert_eq!(
+            request_cancel(&db, &run.id).await.unwrap(),
+            Some(TaskStatus::Canceled)
+        );
+        assert_eq!(
+            get(&db, &run.id).await.unwrap().unwrap().status,
+            TaskStatus::Canceled
+        );
+        cleanup(&db, &task_type).await;
+    }
+
+    #[tokio::test]
+    async fn canceling_an_unknown_run_is_reported_rather_than_invented() {
+        let db = crate::conf::get_test_db().await;
+        assert_eq!(request_cancel(&db, "no-such-run").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn releasing_hands_a_run_back_without_failing_it() {
+        let _claiming = CLAIM_LOCK.lock().await;
+        // A deploy is not an outcome: the replacement worker should resume it
+        // rather than someone having to resubmit by hand.
+        let db = crate::conf::get_test_db().await;
+        let task_type = unique_type();
+        submit(&db, &queued(&task_type, serde_json::json!({})))
+            .await
+            .unwrap();
+        let run = claim_ours(&db, "worker-a", &task_type)
+            .await
+            .expect("claimed");
+
+        release(&db, &run.id, "worker-a").await.unwrap();
+        let back = get(&db, &run.id).await.unwrap().unwrap();
+        assert_eq!(back.status, TaskStatus::Queued);
+        assert!(back.lease_expires_at.is_none());
+        cleanup(&db, &task_type).await;
+    }
+
+    #[tokio::test]
+    async fn finishing_clears_the_lease_so_the_reaper_ignores_it() {
+        let _claiming = CLAIM_LOCK.lock().await;
+        let db = crate::conf::get_test_db().await;
+        let task_type = unique_type();
+        submit(&db, &queued(&task_type, serde_json::json!({})))
+            .await
+            .unwrap();
+        let run = claim_ours(&db, "worker-a", &task_type)
+            .await
+            .expect("claimed");
+
+        finish(&db, &run.id, TaskStatus::Failed, Some("boom".into()))
+            .await
+            .unwrap();
+        let done = get(&db, &run.id).await.unwrap().unwrap();
+        assert_eq!(done.status, TaskStatus::Failed);
+        assert_eq!(done.error.as_deref(), Some("boom"));
+        assert!(done.lease_expires_at.is_none());
+        assert!(done.finished_at.is_some());
+
+        // A terminal run is never claimed again.
+        requeue_expired(&db).await.unwrap();
+        assert_eq!(
+            get(&db, &run.id).await.unwrap().unwrap().status,
+            TaskStatus::Failed
+        );
+        cleanup(&db, &task_type).await;
+    }
+
+    #[tokio::test]
+    async fn single_flight_matches_on_params_not_just_task_type() {
+        // Two ingests of the same catalog would race on one collection, but
+        // ingesting 2MASS must not block ingesting NED.
+        let db = crate::conf::get_test_db().await;
+        let task_type = unique_type();
+        submit(
+            &db,
+            &queued(&task_type, serde_json::json!({ "catalog": "2mass" })),
+        )
+        .await
+        .unwrap();
+
+        let same = find_active(&db, &task_type, doc! { "catalog": "2mass" })
+            .await
+            .unwrap();
+        let other = find_active(&db, &task_type, doc! { "catalog": "ned-lvs" })
+            .await
+            .unwrap();
+        assert!(same.is_some());
+        assert!(other.is_none());
+        cleanup(&db, &task_type).await;
+    }
+
+    #[tokio::test]
+    async fn a_finished_run_no_longer_blocks_a_new_one() {
+        let db = crate::conf::get_test_db().await;
+        let task_type = unique_type();
+        let run = queued(&task_type, serde_json::json!({ "catalog": "2mass" }));
+        submit(&db, &run).await.unwrap();
+        finish(&db, &run.id, TaskStatus::Succeeded, None)
+            .await
+            .unwrap();
+
+        assert!(find_active(&db, &task_type, doc! { "catalog": "2mass" })
+            .await
+            .unwrap()
+            .is_none());
+        cleanup(&db, &task_type).await;
+    }
+}
