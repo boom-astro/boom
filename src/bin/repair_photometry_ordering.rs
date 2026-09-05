@@ -199,7 +199,7 @@ async fn flush_batch(
         return Ok(0);
     }
     let drained: Vec<WriteModel> = std::mem::take(batch);
-    let result = client.bulk_write(drained).await?;
+    let result = client.bulk_write(drained).ordered(false).await?;
     Ok(result.modified_count as u64)
 }
 
