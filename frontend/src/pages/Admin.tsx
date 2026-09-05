@@ -69,11 +69,6 @@ function CatalogsTable({
   return (
     <section className="mb-8">
       <h2 className="text-lg font-semibold mb-1">Catalogs</h2>
-      <p className="text-sm text-muted-foreground mb-3">
-        Declared in <code>catalogs:</code> in the deployment config, compared against what is
-        actually in the database. Nothing is ingested automatically — a catalog is hours to days
-        of work, so starting one stays an explicit decision.
-      </p>
       {error && <p className="text-sm text-destructive mb-3">{error}</p>}
       {catalogs.length === 0 ? (
         <p className="text-sm text-muted-foreground">
@@ -386,9 +381,6 @@ function RunsTable({ runs, onSelect }: { runs: TaskRun[]; onSelect: (id: string)
   return (
     <section>
       <h2 className="text-lg font-semibold mb-1">Recent task runs</h2>
-      <p className="text-sm text-muted-foreground mb-3">
-        Every data-mutating job and who started it.
-      </p>
       {runs.length === 0 ? (
         <p className="text-sm text-muted-foreground">Nothing has been run yet.</p>
       ) : (
