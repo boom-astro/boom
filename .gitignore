@@ -1,5 +1,9 @@
 /target
 Cargo.lock
+# Catalog chunks staged by an ingest. Downloads are deleted after each chunk,
+# but a run in flight has files here, and a staged catalog (ls-dr10-photoz) can
+# be hundreds of GB. None of it belongs in git.
+data/catalogs
 data/alerts
 data/schema
 data/lsst_alerts_backup*
