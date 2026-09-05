@@ -1261,6 +1261,8 @@ impl ZtfEnrichmentWorker {
         work_items: &[AlertWork],
     ) -> Result<Vec<Option<ZtfAlertClassifications>>, EnrichmentWorkerError> {
         if self.gpu_enabled {
+            // May have migrated to another runtime thread since the last batch.
+            models.bind_device()?;
             return self.classify_gpu_batch(models, work_items);
         }
 

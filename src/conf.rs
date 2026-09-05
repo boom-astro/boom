@@ -870,13 +870,11 @@ fn default_enrichment_batch_size() -> usize {
 #[derive(Deserialize, Debug, Clone)]
 pub struct EnrichmentWorkerConfig {
     pub n_workers: usize,
-    /// Alerts processed per enrichment batch. Serves two roles at once: the
-    /// queue RPOP cap (max alerts pulled per worker iteration) and the fixed
-    /// ONNX batch dimension. Every GPU inference runs at exactly this many
-    /// rows — partial batches are zero-padded — so ORT builds a single memory
-    /// plan and the BFC arena stays stable instead of growing per distinct
-    /// input shape. 750 is the proven stable shape on a 16 GB card
-    /// (~10.3 GB footprint); 1000 OOMs (~15.7 GB).
+    /// Alerts per enrichment batch: both the queue RPOP cap and the fixed ONNX
+    /// batch dimension (partial batches are zero-padded).
+    ///
+    /// One shape alone does not bound the BFC arena — CUDA sessions also pin
+    /// `SameAsRequested`, which is what makes 1000 hold. Use 750 under 12 GB.
     #[serde(default = "default_enrichment_batch_size")]
     pub batch_size: usize,
 }

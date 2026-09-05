@@ -15,6 +15,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tracing::info;
 
+/// Workers round-robin over sets, so more workers than GPUs means several
+/// threads share one set — and one CUDA stream. Safe: see `bind_device`.
 const SESSIONS_PER_DEVICE: usize = 1;
 
 /// ONNX models shared across all enrichment worker threads via `Arc`.
@@ -38,7 +40,9 @@ pub struct SharedModels {
     pub acai_b: Mutex<AcaiModel>,
     pub btsbot: Mutex<BtsBotModel>,
     /// Villar-PSO GPU context bound to this device. `None` when running
-    /// without the `gpu` feature.
+    /// without the `gpu` feature. No mutex: it is an id plus a stream pointer
+    /// with `&self` methods, per-call buffers, and stream enqueue is
+    /// thread-safe, so workers sharing this set may use it concurrently.
     #[cfg(feature = "gpu")]
     pub gpu_ctx: Option<GpuContext>,
     /// CUDA stream shared with the ORT sessions above. Must be dropped last
@@ -55,12 +59,9 @@ impl std::fmt::Debug for SharedModels {
 
 impl SharedModels {
     /// Load all ONNX models, optionally on a specific CUDA device.
-    /// Returns an `Arc` for sharing across threads.
     ///
-    /// On Linux+`gpu`, this creates a CUDA stream for `device_id` and binds
-    /// every ORT session to it via `with_compute_stream`. The same stream is
-    /// also handed to the villar-pso `GpuContext`, so all GPU work for this
-    /// device runs on one stream.
+    /// On Linux+`gpu` every ORT session and the villar `GpuContext` share one
+    /// stream for the device. Callers must `bind_device` before using these.
     pub fn load(device_id: Option<i32>) -> Result<Arc<Self>, ModelError> {
         info!(?device_id, "loading shared ONNX models");
 
@@ -159,6 +160,25 @@ impl SharedModels {
         info!("all ONNX models loaded successfully");
         Ok(Arc::new(models))
     }
+
+    /// Bind the calling thread to this set's CUDA device.
+    ///
+    /// `cudaSetDevice` is per-thread and defaults to device 0, so an ORT run on
+    /// an unbound thread hits `cudaErrorInvalidResourceHandle`. Workers are
+    /// multi-thread tokio runtimes and migrate between OS threads, so this must
+    /// run before each inference. Villar-PSO already binds itself.
+    pub fn bind_device(&self) -> Result<(), ModelError> {
+        #[cfg(all(feature = "gpu", target_os = "linux"))]
+        if let Some(ctx) = self.gpu_ctx.as_ref() {
+            ctx.set_device().map_err(|e| {
+                ModelError::Ort(ort::Error::new(format!(
+                    "failed to bind thread to CUDA device: {}",
+                    e
+                )))
+            })?;
+        }
+        Ok(())
+    }
 }
 
 /// Pool of model sets across multiple GPU devices (or a single CPU set).
@@ -199,6 +219,8 @@ impl SharedModelPool {
             }
             info!(
                 n_devices = sets.len(),
+                n_gpus = device_ids.len(),
+                sessions_per_device = SESSIONS_PER_DEVICE,
                 "all GPU model sets loaded successfully"
             );
             sets

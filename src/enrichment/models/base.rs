@@ -62,11 +62,13 @@ pub fn load_model_on_device(
 
         #[cfg(target_os = "linux")]
         let cuda_ep = {
-            // Tried and reverted: with dynamic batch it kills BFC arena reuse and OOMs.
-            // .with_arena_extend_strategy(ort::ep::ArenaExtendStrategy::SameAsRequested)
             let mut ep = ort::ep::CUDAExecutionProvider::default()
                 .with_device_id(dev)
-                .with_conv_max_workspace(false);
+                .with_conv_max_workspace(false)
+                // ORT's default grows the arena every batch at 900+ (35 GiB on
+                // an A40). Exact-size extents fit the next batch only because
+                // callers pad to a fixed shape; dynamic shapes would regress.
+                .with_arena_extend_strategy(ort::ep::ArenaExtendStrategy::SameAsRequested);
             if !cuda_stream.is_null() {
                 // Safety: guaranteed by this function's own safety contract.
                 ep = unsafe { ep.with_compute_stream(cuda_stream as *mut ()) };
