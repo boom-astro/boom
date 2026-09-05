@@ -66,6 +66,12 @@ async fn main() -> std::io::Result<()> {
         tracing::info!("Babamul API endpoints are ENABLED");
         // Abandoned sign-in attempts are only cleaned up by this TTL index —
         // completed flows delete their own state, incomplete ones never do.
+        if let Err(error) =
+            boom::api::admin::reconcile_babamul_admins(&database, &config.babamul.admin_emails)
+                .await
+        {
+            panic!("failed to reconcile babamul admins: {error}");
+        }
         if let Err(error) = routes::babamul::oauth::ensure_oauth_state_index(&database).await {
             log_error!(WARN, error, "failed to create the OAuth TTL indexes");
         }
@@ -180,6 +186,17 @@ async fn main() -> std::io::Result<()> {
                 .service(routes::catalogs::get_catalogs)
                 .service(routes::catalogs::get_catalog_indexes)
                 .service(routes::catalogs::get_catalog_sample)
+                .service(routes::catalogs::get_catalog_status)
+                .service(routes::tasks::get_task_types)
+                .service(routes::tasks::submit_task)
+                .service(routes::tasks::get_tasks)
+                .service(routes::tasks::get_task_logs)
+                .service(routes::tasks::cancel_task)
+                .service(routes::tasks::get_data_mutations)
+                // Registered after the more specific /tasks/... paths: actix
+                // matches in registration order, so a leading {run_id} route
+                // would swallow /tasks/types.
+                .service(routes::tasks::get_task)
                 .service(routes::queries::post_find_query)
                 .service(routes::queries::post_cone_search_query)
                 .service(routes::surveys::get_cutouts)

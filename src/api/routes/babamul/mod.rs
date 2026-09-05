@@ -198,6 +198,14 @@ pub struct BabamulUser {
     /// `username` it is free text, optional, and not unique.
     #[serde(default)]
     pub name: Option<String>,
+    /// Whether this account may run data-mutating tasks from the admin page.
+    ///
+    /// Reconciled from `babamul.admin_emails` at API startup, so config is the
+    /// source of truth: removing someone from the list revokes their access on
+    /// the next restart, rather than leaving a grant nobody remembers making.
+    /// Never settable through the API.
+    #[serde(default)]
+    pub is_admin: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, ToSchema)]
@@ -213,6 +221,11 @@ pub struct BabamulUserPublic {
     pub orcid_id: Option<String>,
     /// Full name the user chose to display, if any
     pub name: Option<String>,
+    /// Whether this account may run data-mutating tasks. Read-only here: it is
+    /// reconciled from `babamul.admin_emails` at startup, never set through the
+    /// API. Exposed so the web app knows whether to offer the admin page --
+    /// authorization is still enforced server-side on every admin route.
+    pub is_admin: bool,
 }
 
 impl From<BabamulUser> for BabamulUserPublic {
@@ -229,6 +242,7 @@ impl From<BabamulUser> for BabamulUserPublic {
                 .collect(),
             orcid_id: user.orcid_id,
             name: user.name,
+            is_admin: user.is_admin,
         }
     }
 }
@@ -368,6 +382,9 @@ pub async fn post_babamul_signup(
                 identities: Vec::new(),
                 orcid_id: None,
                 name: None,
+                // Granted only by reconciling against babamul.admin_emails at
+                // startup, never at sign-up.
+                is_admin: false,
             };
 
             // Note: Kafka credentials will be created on demand via /babamul/kafka-credentials endpoint

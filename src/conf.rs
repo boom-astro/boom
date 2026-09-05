@@ -34,6 +34,8 @@ pub enum BoomConfigError {
     InvalidSecretError(String),
     #[error("cutout storage error: {0}")]
     CutoutStorageError(#[from] crate::utils::cutouts::CutoutStorageError),
+    #[error("invalid crossmatch config: {0}")]
+    UnknownCrossmatchCatalog(String),
 }
 
 /// Load environment variables from a .env file if it exists.
@@ -80,6 +82,41 @@ pub fn load_raw_config(filepath: &str) -> Result<Config, BoomConfigError> {
         .build()?;
 
     Ok(conf)
+}
+
+/// Accept a list as either a YAML sequence or a comma-separated string.
+///
+/// A list has no natural single-variable form, and these lists have to be
+/// settable from the environment -- `babamul.admin_emails` decides who may
+/// mutate the data, so it belongs with the other deployment settings rather
+/// than only in a file.
+///
+/// Done as a field deserializer rather than by turning on the config crate's
+/// `list_separator`, which only takes effect with `try_parsing` and would then
+/// coerce *every* env value that looks numeric into an integer -- including a
+/// password that happens to be all digits.
+///
+/// Blank entries are dropped, so a trailing comma or a stray space is not a
+/// silent extra "" entry that matches nothing.
+fn comma_separated<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum SequenceOrString {
+        Sequence(Vec<String>),
+        String(String),
+    }
+
+    Ok(match SequenceOrString::deserialize(deserializer)? {
+        SequenceOrString::Sequence(items) => items,
+        SequenceOrString::String(value) => value
+            .split(',')
+            .map(|item| item.trim().to_string())
+            .filter(|item| !item.is_empty())
+            .collect(),
+    })
 }
 
 /// The `BOOM_*` environment overlay applied on top of `config.yaml`.
@@ -682,6 +719,17 @@ impl Default for CutoutCacheConfig {
 pub struct BabamulConfig {
     pub enabled: bool,
     pub webapp_url: Option<String>,
+    /// Emails of the Babamul accounts allowed to run data-mutating tasks from
+    /// the admin page.
+    ///
+    /// Desired state: every account's `is_admin` is reconciled against this at
+    /// API startup, so this list is the whole answer to "who can mutate the
+    /// data" and it is reviewable in the deployment's config. Emails rather
+    /// than usernames because an email is what the account signs in with.
+    ///
+    /// Settable as `BOOM_BABAMUL__ADMIN_EMAILS`, comma-separated.
+    #[serde(default, deserialize_with = "comma_separated")]
+    pub admin_emails: Vec<String>,
     /// Number of days to retain Kafka messages for Babamul topics
     #[serde(default = "default_babamul_retention_days")]
     pub retention_days: u32,
@@ -710,6 +758,7 @@ impl Default for BabamulConfig {
     fn default() -> Self {
         BabamulConfig {
             enabled: false,
+            admin_emails: Vec::new(),
             webapp_url: None,
             retention_days: default_babamul_retention_days(),
             password_reset_cooldown_minutes: default_password_reset_cooldown_minutes(),
@@ -1066,6 +1115,14 @@ pub struct AppConfig {
     #[serde(default)]
     pub posthog: PostHogConfig,
     pub kafka: KafkaConfig,
+    /// Archival catalogs this deployment should hold, as kebab-case slugs.
+    ///
+    /// Desired state, not actual: nothing converges automatically. See
+    /// `docs/catalogs.md`.
+    ///
+    /// Settable as `BOOM_CATALOGS`, comma-separated.
+    #[serde(default, deserialize_with = "comma_separated")]
+    pub catalogs: Vec<String>,
     #[serde(default)]
     pub crossmatch: HashMap<Survey, Vec<CatalogXmatchConfig>>,
     #[serde(default)]
@@ -1191,6 +1248,13 @@ pub fn load_config(config_path: Option<&str>) -> Result<AppConfig, BoomConfigErr
         return Err(BoomConfigError::InvalidSecretError(e));
     }
 
+    // A misspelled crossmatch catalog does not fail at query time -- it matches
+    // nothing, and the alerts come out looking confidently unmatched. Fail
+    // startup instead, where someone will see it.
+    if let Err(e) = crate::catalogs::validate_crossmatch(&app_config.crossmatch) {
+        return Err(BoomConfigError::UnknownCrossmatchCatalog(e));
+    }
+
     debug!("Configuration loaded successfully");
     debug!("Database host: {}", app_config.database.host);
     debug!("Database name: {}", app_config.database.name);
@@ -1291,6 +1355,92 @@ mod tests {
             .add_source(env_source().source(Some(env)))
             .build()
             .unwrap()
+    }
+
+    #[test]
+    fn admin_emails_can_be_set_as_a_comma_separated_env_var() {
+        // A list has no natural single-variable form, and this one has to be
+        // settable from the environment because it decides who may mutate the
+        // data -- see AGENTS.md on secrets and deployment settings.
+        let conf = config_with_env(&[(
+            "BOOM_BABAMUL__ADMIN_EMAILS",
+            "one@example.org,two@example.org",
+        )]);
+        assert_eq!(
+            conf.get::<AdminEmails>("babamul").unwrap().admin_emails,
+            vec!["one@example.org", "two@example.org"]
+        );
+    }
+
+    #[test]
+    fn a_single_admin_email_still_parses_as_a_list() {
+        let conf = config_with_env(&[("BOOM_BABAMUL__ADMIN_EMAILS", "solo@example.org")]);
+        assert_eq!(
+            conf.get::<AdminEmails>("babamul").unwrap().admin_emails,
+            vec!["solo@example.org"]
+        );
+    }
+
+    #[test]
+    fn admin_emails_tolerate_spacing_and_a_trailing_comma() {
+        // A blank entry would match no account, but it would also make the
+        // configured list look longer than it is.
+        let conf = config_with_env(&[(
+            "BOOM_BABAMUL__ADMIN_EMAILS",
+            " one@example.org , two@example.org ,",
+        )]);
+        assert_eq!(
+            conf.get::<AdminEmails>("babamul").unwrap().admin_emails,
+            vec!["one@example.org", "two@example.org"]
+        );
+    }
+
+    #[test]
+    fn admin_emails_still_accept_a_yaml_sequence() {
+        // The env form must not cost us the readable form in config.yaml.
+        let conf = Config::builder()
+            .add_source(File::from_str(
+                "babamul:\n  admin_emails:\n    - one@example.org\n    - two@example.org\n",
+                config::FileFormat::Yaml,
+            ))
+            .build()
+            .unwrap();
+        assert_eq!(
+            conf.get::<AdminEmails>("babamul").unwrap().admin_emails,
+            vec!["one@example.org", "two@example.org"]
+        );
+    }
+
+    #[test]
+    fn an_unset_admin_email_list_leaves_nobody_an_admin() {
+        // Failing closed matters here: the alternative to "no admins" must not
+        // be "everyone".
+        let conf = config_with_env(&[]);
+        assert_eq!(
+            conf.get::<AdminEmails>("babamul").unwrap().admin_emails,
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn the_catalog_inventory_can_be_set_as_a_comma_separated_env_var() {
+        let conf = config_with_env(&[("BOOM_CATALOGS", "2mass,ned-lvs")]);
+        #[derive(Deserialize)]
+        struct Root {
+            #[serde(default, deserialize_with = "comma_separated")]
+            catalogs: Vec<String>,
+        }
+        assert_eq!(
+            conf.try_deserialize::<Root>().unwrap().catalogs,
+            vec!["2mass", "ned-lvs"]
+        );
+    }
+
+    /// Just the field under test, so these do not need a whole valid AppConfig.
+    #[derive(Deserialize)]
+    struct AdminEmails {
+        #[serde(default, deserialize_with = "comma_separated")]
+        admin_emails: Vec<String>,
     }
 
     #[test]

@@ -5,6 +5,10 @@ use crate::api::{
     routes::users::User,
 };
 
+use crate::api::admin::require_admin;
+use crate::api::routes::babamul::BabamulUser;
+use crate::conf::AppConfig;
+
 use actix_web::{get, web, HttpResponse};
 use futures::StreamExt;
 use mongodb::{bson::doc, Database};
@@ -223,4 +227,37 @@ pub async fn get_catalog_sample(
         }
     }
     response::ok_ser("success", &docs)
+}
+
+/// Report which declared catalogs are actually present
+///
+/// The admin page reads this to decide which catalogs to offer an ingest for.
+/// It reports drift and never acts on it -- converging a catalog is an explicit,
+/// attributed task, because it is hours to days of work and a typo in the
+/// config must not be able to start one.
+#[utoipa::path(
+    get,
+    path = "/catalogs/status",
+    responses(
+        (status = 200, description = "State of each declared catalog", body = Vec<serde_json::Value>),
+        (status = 403, description = "Not an admin"),
+        (status = 500, description = "Internal server error")
+    ),
+    tags=["Catalogs"]
+)]
+#[get("/catalogs/status")]
+pub async fn get_catalog_status(
+    db: web::Data<Database>,
+    config: web::Data<AppConfig>,
+    current_user: Option<web::ReqData<User>>,
+    babamul_user: Option<web::ReqData<BabamulUser>>,
+) -> HttpResponse {
+    if let Err(e) = require_admin(&current_user, &babamul_user) {
+        return e;
+    }
+    let declared = crate::catalogs::declared(&config);
+    match crate::catalogs::status(&db, &declared).await {
+        Ok(statuses) => response::ok_ser("success", statuses),
+        Err(e) => response::internal_error(&format!("failed to read catalog status: {e}")),
+    }
 }

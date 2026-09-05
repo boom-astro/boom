@@ -3,6 +3,10 @@ name: boom
 volumes:
   mongodb:
   valkey:
+  # Staging area for catalog chunks. A named volume rather than the container's
+  # writable layer because a chunk can be a few hundred megabytes, and because
+  # a half-downloaded chunk should survive the task worker being replaced.
+  catalog_data:
   kafka_data:
   prometheus_data:
   grafana_data:
@@ -229,6 +233,8 @@ services:
       BOOM_BABAMUL__OAUTH__ORCID__CLIENT_ID: ${BOOM_BABAMUL__OAUTH__ORCID__CLIENT_ID:-}
       BOOM_BABAMUL__OAUTH__ORCID__CLIENT_SECRET: ${BOOM_BABAMUL__OAUTH__ORCID__CLIENT_SECRET:-}
       BOOM_BABAMUL__OAUTH__ORCID_SANDBOX: ${BOOM_BABAMUL__OAUTH__ORCID_SANDBOX:-false}
+      # Who may run data-mutating tasks from the admin page, comma-separated.
+      BOOM_BABAMUL__ADMIN_EMAILS: ${BOOM_BABAMUL__ADMIN_EMAILS:-}
       # Server-side PostHog analytics; blank disables analytics.
       BOOM_POSTHOG__PROJECT_API_KEY: ${BOOM_POSTHOG__PROJECT_API_KEY:-}
       BOOM_POSTHOG__HOST: ${BOOM_POSTHOG__HOST:-https://us.i.posthog.com}
@@ -514,6 +520,45 @@ services:
     command:
       - /app/kafka_consumer
       - winter
+  # Runs queued tasks -- catalog ingests today, the data migrations and
+  # reprocessing jobs currently started over SSH next. Separate from the api
+  # service on purpose: these run for hours and are memory-hungry, and an API
+  # restart or deploy must not kill one. A run interrupted by a deploy goes back
+  # on the queue and the replacement worker resumes it.
+  task-worker:
+    image: boom-astro/boom:latest
+    hostname: task-worker
+    restart: always
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      # Required secrets - must be set in environment
+      BOOM_DATABASE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
+      BOOM_CUTOUTS_STORAGE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
+      BOOM_API__AUTH__SECRET_KEY: ${BOOM_API__AUTH__SECRET_KEY:?BOOM_API__AUTH__SECRET_KEY must be set}
+      BOOM_API__AUTH__ADMIN_PASSWORD: ${BOOM_API__AUTH__ADMIN_PASSWORD:?BOOM_API__AUTH__ADMIN_PASSWORD must be set}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      # Optional overrides
+      BOOM_DATABASE__HOST: mongo
+      BOOM_DATABASE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
+      BOOM_CUTOUTS_STORAGE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
+      BOOM_CUTOUTS_STORAGE__TYPE: mongo
+      BOOM_CUTOUTS_STORAGE__HOST: mongo
+      # The migration and reprocessing tasks headed here drive their work
+      # through Valkey, as their binaries do today.
+      BOOM_REDIS__HOST: valkey
+      BOOM_CATALOG_DATA_PATH: /app/data/catalogs
+    networks:
+      - boom
+    profiles:
+      - prod
+    volumes:
+      - ${BOOM_CONFIG_PATH:-./config.yaml}:/app/config.yaml
+      - catalog_data:/app/data/catalogs
+    command:
+      - /app/task_worker
+
   scheduler-ztf:
     image: boom-astro/boom:latest
     hostname: scheduler-ztf
