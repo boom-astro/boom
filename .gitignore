@@ -19,11 +19,46 @@ scripts/convert2onnx/models_output/
 tests/throughput/config.yaml
 tests/throughput/cats150.filter.json
 logs
-*.gz
 *.jsonl
 simbad_cache
-*.parquet
 config.docker.yaml
+
+# --- Bulk data never belongs in git -----------------------------------------
+# Catalog ingests, the boompy downloaders and the offline LS DR10 pipeline all
+# write large binaries into the working tree. Ignoring by extension rather than
+# by directory on purpose: the download path is configurable, so listing
+# directories only protects the ones we thought of. A 42 MB archive was
+# committed once because .zip was not on this list.
+*.gz
+*.parquet
+*.zip
+*.tar
+*.tgz
+*.tbl
+*.dat
+*.csv
+*.fits
+*.fit
+*.fz
+*.npy
+*.h5
+*.hdf5
+*.feather
+*.arrow
+*.duckdb
+*.avro
+*.db
+
+# ...except the artifacts the repo genuinely tracks, all of them reviewed and
+# most of them in LFS. Negations, so adding a new one needs an explicit path
+# here rather than a `git add -f` nobody sees in review.
+!data/ls_footprint_moc.fits
+!data/models/
+!data/models/**
+!data/filters/
+!data/filters/**
+!tests/data/
+!tests/data/**
 
 # boompy's uv-managed virtualenv and test cache; uv.lock IS committed, so the
 # image and a developer's checkout resolve to the same versions.

@@ -120,6 +120,28 @@ anywhere the repo writes English rather than code.
 
 Nothing enforces these, so they are worth a glance in review.
 
+## Bulk data never goes in git
+
+Catalog ingests, the boompy downloaders and the offline LS DR10 pipeline all
+write large binaries into the working tree — a chunk in flight, a converted
+parquet, a staged dataset. `.gitignore` excludes them **by extension**, not by
+directory, because the download path is configurable and listing directories
+only protects the ones someone thought of. The handful of binaries the repo does
+track (`data/models/`, `data/filters/`, `tests/data/`, the LS footprint) are
+re-included by explicit negation, so adding a new one means naming it there
+rather than reaching for `git add -f`.
+
+Two habits that go with it:
+
+- **Stage explicit paths.** `git add -A` in a tree where a background job is
+  writing will commit whatever it happened to produce. That is how a 42 MB
+  archive once ended up in a commit, with a 165 MB `.fits` queued to LFS behind
+  it.
+- **Check what a commit contains before pushing**, especially after running an
+  ingest: `git rev-list --objects @{u}..HEAD | git cat-file --batch-check=\
+  '%(objecttype) %(objectsize) %(rest)' | awk '$1=="blob" && $2>1000000'`
+  lists any blob over a megabyte in the unpushed range.
+
 ## Checks to run
 
 ```sh
