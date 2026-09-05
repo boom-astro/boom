@@ -15,6 +15,7 @@ use mongodb::{
     options::{UpdateModifications, UpdateOneModel, WriteModel},
     Collection,
 };
+use std::collections::HashSet;
 use tracing::{error, info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
@@ -22,13 +23,17 @@ use tracing_subscriber::FmtSubscriber;
 ///
 /// Each aux document holds timeseries fields (e.g. `prv_candidates`,
 /// `prv_nondetections`, `fp_hists`) that are expected to be strictly increasing
-/// by `jd`. Bugs in the alert ingestion path could leave these arrays out of
-/// order, containing duplicate `jd` values, or carrying entries with a
-/// non-finite/non-numeric `jd`. Ingestion repairs such a document the next time
-/// the object is updated (`prepare_timeseries_update` rejects the stored array
-/// and the worker falls back to the in-database update path), so this tool
-/// exists to fix the objects that are not going to receive another alert, and
-/// to clear the error path for the ones that are.
+/// by `jd`. Arrays written before ingestion started sanitizing new points can be
+/// out of order, hold duplicate `jd` values, or carry entries with a non-finite
+/// or non-numeric `jd`.
+///
+/// Ingestion self-heals only part of that: an out-of-order, duplicate or
+/// non-finite `jd` makes `prepare_timeseries_update` reject the stored array and
+/// the worker falls back to the in-database update path, which rewrites it. An
+/// entry whose `jd` is missing or not a number never gets that far, it fails to
+/// deserialize in `get_existing_aux` and the alert errors out again on every
+/// retry. This tool fixes both, plus the objects that are never going to receive
+/// another alert.
 ///
 /// Pipeline:
 /// 1. Resolve the survey-specific set of timeseries fields and project only
@@ -36,13 +41,14 @@ use tracing_subscriber::FmtSubscriber;
 /// 2. Split the collection into `--processes` shards cut on an indexed
 ///    insertion-order field, scanned concurrently.
 /// 3. For each document, flag fields that violate the strictly-increasing
-///    invariant (`is_strictly_increasing`).
+///    invariant and count the points the repair deletes (`inspect_series`).
 /// 4. For broken fields, issue a `$set` update whose value is the same
 ///    aggregation expression ingestion uses (`update_timeseries_op` with no new
 ///    points), which filters, dedups and sorts the array in place. Updates are
 ///    batched into bulk writes.
 ///
-/// `--dry-run` performs steps 1-3 and reports counts without writing anything.
+/// `--dry-run` performs steps 1-3 and reports the counts, including how many
+/// points a real run would delete, without writing anything.
 #[derive(Parser)]
 struct Cli {
     #[arg(long, value_enum)]
@@ -77,33 +83,64 @@ fn timeseries_fields(survey: &Survey) -> &'static [&'static str] {
     }
 }
 
-/// Mirrors `TimeSeries::validate_monotonic_increasing`:
-/// any non-finite `jd` or `jd <= prev_jd` makes the series invalid. A missing
-/// or non-array field is treated as valid (nothing to repair).
-fn is_strictly_increasing(doc: &Document, field: &str) -> bool {
+#[derive(Default, Clone, Copy)]
+struct FieldStats {
+    broken: u64,
+    dropped_invalid: u64,
+    dropped_duplicate: u64,
+}
+
+impl FieldStats {
+    fn dropped(&self) -> u64 {
+        self.dropped_invalid + self.dropped_duplicate
+    }
+
+    fn merge(&mut self, other: &FieldStats) {
+        self.broken += other.broken;
+        self.dropped_invalid += other.dropped_invalid;
+        self.dropped_duplicate += other.dropped_duplicate;
+    }
+}
+
+/// Mirrors what `update_timeseries_op` does server-side: drop points whose `jd`
+/// is not a finite number, keep only the first occurrence of a duplicated `jd`,
+/// sort the rest. `broken` is 0 or 1, so summing it counts documents.
+fn inspect_series(doc: &Document, field: &str) -> FieldStats {
+    let mut stats = FieldStats::default();
     let arr = match doc.get_array(field) {
         Ok(a) => a,
-        Err(_) => return true,
+        Err(_) => return stats,
     };
+    let mut seen: HashSet<u64> = HashSet::with_capacity(arr.len());
     let mut prev: Option<f64> = None;
+    let mut out_of_order = false;
     for item in arr {
         let jd = match item.as_document().and_then(|d| d.get("jd")) {
             Some(Bson::Double(v)) => *v,
             Some(Bson::Int32(v)) => *v as f64,
             Some(Bson::Int64(v)) => *v as f64,
-            _ => return false,
+            _ => {
+                stats.dropped_invalid += 1;
+                continue;
+            }
         };
         if !jd.is_finite() {
-            return false;
+            stats.dropped_invalid += 1;
+            continue;
         }
-        if let Some(p) = prev {
-            if jd <= p {
-                return false;
-            }
+        if !seen.insert(if jd == 0.0 { 0.0f64 } else { jd }.to_bits()) {
+            stats.dropped_duplicate += 1;
+            continue;
+        }
+        if prev.is_some_and(|p| jd < p) {
+            out_of_order = true;
         }
         prev = Some(jd);
     }
-    true
+    if out_of_order || stats.dropped() > 0 {
+        stats.broken = 1;
+    }
+    stats
 }
 
 fn jd_projection(fields: &[&str]) -> Document {
@@ -118,6 +155,7 @@ struct ShardStats {
     scanned: u64,
     broken: u64,
     modified: u64,
+    per_field: Vec<FieldStats>,
 }
 
 async fn scan_and_repair_shard(
@@ -140,17 +178,21 @@ async fn scan_and_repair_shard(
     let mut scanned: u64 = 0;
     let mut broken_total: u64 = 0;
     let mut modified: u64 = 0;
+    let mut per_field = vec![FieldStats::default(); fields.len()];
     let mut batch: Vec<WriteModel> = Vec::with_capacity(batch_size);
 
     while let Some(d) = cursor.try_next().await? {
         scanned += 1;
         pb.inc(1);
 
-        let broken: Vec<&'static str> = fields
-            .iter()
-            .copied()
-            .filter(|f| !is_strictly_increasing(&d, f))
-            .collect();
+        let mut broken: Vec<&'static str> = Vec::new();
+        for (i, f) in fields.iter().copied().enumerate() {
+            let stats = inspect_series(&d, f);
+            per_field[i].merge(&stats);
+            if stats.broken > 0 {
+                broken.push(f);
+            }
+        }
         if broken.is_empty() {
             continue;
         }
@@ -188,6 +230,7 @@ async fn scan_and_repair_shard(
         scanned,
         broken: broken_total,
         modified,
+        per_field,
     })
 }
 
@@ -250,11 +293,46 @@ async fn run_repair(
             scanned, aux_ns, estimated
         );
     }
+    let mut per_field = vec![FieldStats::default(); fields.len()];
+    for shard in &stats {
+        for (total, shard_total) in per_field.iter_mut().zip(&shard.per_field) {
+            total.merge(shard_total);
+        }
+    }
+    for (field, totals) in fields.iter().copied().zip(&per_field) {
+        if totals.broken == 0 {
+            continue;
+        }
+        info!(
+            field,
+            documents = totals.broken,
+            points_dropped_invalid = totals.dropped_invalid,
+            points_dropped_duplicate = totals.dropped_duplicate,
+            "field needs repair"
+        );
+    }
+
+    let dropped_invalid = per_field.iter().map(|f| f.dropped_invalid).sum::<u64>();
+    let dropped_duplicate = per_field.iter().map(|f| f.dropped_duplicate).sum::<u64>();
+    let dropped = dropped_invalid + dropped_duplicate;
+    if dropped > 0 {
+        warn!(
+            "{} point(s) {} deleted: {} with a non-finite or non-numeric jd, {} duplicating an \
+             earlier jd. update_timeseries_op removes them, the repaired document does not keep \
+             a copy",
+            dropped,
+            if dry_run { "would be" } else { "were" },
+            dropped_invalid,
+            dropped_duplicate
+        );
+    }
+
     info!(
         survey = %survey,
         scanned,
         broken = stats.iter().map(|s| s.broken).sum::<u64>(),
         modified = stats.iter().map(|s| s.modified).sum::<u64>(),
+        points_dropped = dropped,
         dry_run,
         "repair_photometry_ordering done"
     );
@@ -334,36 +412,52 @@ mod tests {
         doc! { "fp_hists": jds.iter().map(|jd| doc! { "jd": jd }).collect::<Vec<_>>() }
     }
 
+    fn broken(doc: &Document) -> u64 {
+        inspect_series(doc, "fp_hists").broken
+    }
+
     #[test]
     fn accepts_strictly_increasing_and_empty_or_missing_series() {
-        assert!(is_strictly_increasing(
-            &series(&[1.0, 2.0, 3.0]),
-            "fp_hists"
-        ));
-        assert!(is_strictly_increasing(&series(&[]), "fp_hists"));
-        assert!(is_strictly_increasing(&doc! {}, "fp_hists"));
+        assert_eq!(broken(&series(&[1.0, 2.0, 3.0])), 0);
+        assert_eq!(broken(&series(&[])), 0);
+        assert_eq!(broken(&doc! {}), 0);
     }
 
     #[test]
     fn rejects_duplicate_decreasing_and_non_finite_jds() {
-        assert!(!is_strictly_increasing(&series(&[1.0, 1.0]), "fp_hists"));
-        assert!(!is_strictly_increasing(&series(&[2.0, 1.0]), "fp_hists"));
-        assert!(!is_strictly_increasing(&series(&[f64::NAN]), "fp_hists"));
-        assert!(!is_strictly_increasing(
-            &series(&[1.0, f64::INFINITY]),
-            "fp_hists"
-        ));
+        assert_eq!(broken(&series(&[1.0, 1.0])), 1);
+        assert_eq!(broken(&series(&[2.0, 1.0])), 1);
+        assert_eq!(broken(&series(&[f64::NAN])), 1);
+        assert_eq!(broken(&series(&[1.0, f64::INFINITY])), 1);
     }
 
     #[test]
     fn rejects_entries_without_a_numeric_jd() {
         let doc = doc! { "fp_hists": [doc! { "jd": 1.0 }, doc! { "flux": 1.0 }] };
-        assert!(!is_strictly_increasing(&doc, "fp_hists"));
+        let stats = inspect_series(&doc, "fp_hists");
+        assert_eq!(stats.broken, 1);
+        assert_eq!(stats.dropped_invalid, 1);
+        assert_eq!(stats.dropped_duplicate, 0);
     }
 
     #[test]
     fn accepts_integer_jds() {
         let doc = doc! { "fp_hists": [doc! { "jd": 1i32 }, doc! { "jd": 2i64 }] };
-        assert!(is_strictly_increasing(&doc, "fp_hists"));
+        assert_eq!(broken(&doc), 0);
+    }
+
+    #[test]
+    fn counts_the_points_the_repair_deletes() {
+        let stats = inspect_series(&series(&[3.0, 1.0, 1.0, f64::NAN, 2.0]), "fp_hists");
+        assert_eq!(stats.dropped_invalid, 1);
+        assert_eq!(stats.dropped_duplicate, 1);
+        assert_eq!(stats.dropped(), 2);
+    }
+
+    #[test]
+    fn reordering_alone_deletes_nothing() {
+        let stats = inspect_series(&series(&[2.0, 1.0]), "fp_hists");
+        assert_eq!(stats.broken, 1);
+        assert_eq!(stats.dropped(), 0);
     }
 }
