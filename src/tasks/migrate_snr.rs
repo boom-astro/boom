@@ -828,7 +828,7 @@ async fn validate_ztf_alerts(ctx: &TaskContext, db: &mongodb::Database) -> Resul
                             { "$ne": ["$candidate.apFlux", Bson::Null] },
                             { "$gt": [{ "$abs": "$candidate.apFlux" }, 0.0_f64] },
                         ]},
-                        "then": computed_mag_expr("$candidate.apFlux", 1e9, ZTF_ZP as f64),
+                        "then": computed_mag_expr("$candidate.apFlux", 1e9, ZTF_ZP),
                         "else": Bson::Null,
                     }
                 },
@@ -926,7 +926,7 @@ async fn validate_ztf_alerts_aux(
                                     { "$ne": ["$$pc.apFlux", Bson::Null] },
                                     { "$gt": [{ "$abs": "$$pc.apFlux" }, 0.0_f64] },
                                 ]},
-                                "then": computed_mag_expr("$$pc.apFlux", 1e9, ZTF_ZP as f64),
+                                "then": computed_mag_expr("$$pc.apFlux", 1e9, ZTF_ZP),
                                 "else": Bson::Null,
                             }
                         },
