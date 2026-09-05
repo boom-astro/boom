@@ -20,6 +20,7 @@ pub mod catalog_ingest;
 pub mod context;
 pub mod ledger;
 pub mod logs;
+pub mod migrate_fp_flux;
 pub mod models;
 pub mod queue;
 
@@ -60,8 +61,8 @@ pub struct TaskSpec {
 }
 
 // TODO: port the remaining data-mutating binaries -- `enrich_reprocess`,
-// `migrate_fp_flux`, `migrate_snr`, `reprocess_crossmatch`, `copy_cutouts`,
-// `prepare_catalog` -- so that operators stop running them over SSH too. Each becomes a body plus an
+// `migrate_snr`, `reprocess_crossmatch`, `copy_cutouts`, `prepare_catalog` --
+// so that operators stop running them over SSH too. Each becomes a body plus an
 // arm in `dispatch`; their existing Valkey work queues already give them the
 // resumability a task needs, so what they mainly want is the params struct and
 // a cancellation check in their batch loop.
@@ -75,15 +76,29 @@ pub struct TaskSpec {
 // one-off backfill of the existing rows needs to run here.
 
 /// Every task type this release knows how to run.
-pub const TASKS: &[TaskSpec] = &[TaskSpec {
-    id: catalog_ingest::TASK_TYPE,
-    title: "Ingest an archival catalog",
-    description: "Download an archival catalog and insert it into MongoDB, one chunk at a \
-                  time. Resumable: re-running continues from the last completed chunk.",
-    idempotent: true,
-    // Only with drop_existing, which the client has to ask for explicitly.
-    destructive: true,
-}];
+pub const TASKS: &[TaskSpec] = &[
+    TaskSpec {
+        id: catalog_ingest::TASK_TYPE,
+        title: "Ingest an archival catalog",
+        description: "Download an archival catalog and insert it into MongoDB, one chunk at a \
+                      time. Resumable: re-running continues from the last completed chunk.",
+        idempotent: true,
+        // Only with drop_existing, which the client has to ask for explicitly.
+        destructive: true,
+    },
+    TaskSpec {
+        id: migrate_fp_flux::TASK_TYPE,
+        title: "Migrate ZTF forced photometry to a fixed zeropoint",
+        description: "Recompute psfFlux and psfFluxErr in ZTF_alerts_aux from the raw IPAC \
+                      flux fields, at the fixed ZTF_ZP zeropoint.",
+        // Always recomputed from the raw fields, never from the previous
+        // result, so re-running converges on the same values.
+        idempotent: true,
+        // It overwrites derived values, but the inputs it derives from are
+        // untouched, so nothing is lost that cannot be recomputed.
+        destructive: false,
+    },
+];
 
 pub fn find(id: &str) -> Option<&'static TaskSpec> {
     TASKS.iter().find(|t| t.id == id)
@@ -108,6 +123,12 @@ pub fn validate_params(task_type: &str, params: &serde_json::Value) -> Result<()
                 .map(|_| ())
                 .map_err(|e| TaskError::InvalidParams(e.to_string()))
         }
+        migrate_fp_flux::TASK_TYPE => {
+            let parsed: migrate_fp_flux::MigrateFpFluxParams =
+                serde_json::from_value(params.clone())
+                    .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            parsed.validate_params().map_err(TaskError::InvalidParams)
+        }
         other => Err(TaskError::UnknownType {
             id: other.to_string(),
             known: known_types(),
@@ -129,6 +150,10 @@ pub fn single_flight_key(
             .get("catalog")
             .and_then(|c| c.as_str())
             .map(|catalog| doc! { "catalog": catalog }),
+        // One migration of a collection at a time: two concurrent runs would
+        // rewrite the same documents with the same pipeline, wasting a large
+        // amount of write throughput for no benefit.
+        migrate_fp_flux::TASK_TYPE => Some(doc! {}),
         _ => None,
     }
 }
@@ -147,6 +172,11 @@ pub async fn dispatch(
             let params = catalog_ingest::CatalogIngestParams::deserialize(params)
                 .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
             catalog_ingest::run(ctx, params).await
+        }
+        migrate_fp_flux::TASK_TYPE => {
+            let params = migrate_fp_flux::MigrateFpFluxParams::deserialize(params)
+                .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            migrate_fp_flux::run(ctx, params).await
         }
         other => Err(TaskError::UnknownType {
             id: other.to_string(),

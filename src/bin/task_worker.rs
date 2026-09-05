@@ -18,6 +18,7 @@ use boom::tasks::{
 };
 use boom::utils::o11y::logging::build_subscriber;
 use clap::Parser;
+use futures::FutureExt;
 use mongodb::Database;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -140,7 +141,28 @@ async fn run_one(
         run.id, worker_name, run.attempts
     ));
 
-    let result = tasks::dispatch(&ctx, &run.task_type, run.params.clone()).await;
+    // A panicking task must fail its own run, not the worker. Task bodies are
+    // ported from one-shot binaries where an `unwrap` on unexpected data was a
+    // reasonable way to stop; here the same unwrap would take down every other
+    // run on this worker and leave this one holding a lease until it expired.
+    let result = match std::panic::AssertUnwindSafe(tasks::dispatch(
+        &ctx,
+        &run.task_type,
+        run.params.clone(),
+    ))
+    .catch_unwind()
+    .await
+    {
+        Ok(result) => result,
+        Err(panic) => {
+            let detail = panic
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| panic.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "panic with no message".to_string());
+            Err(TaskError::Failed(format!("task panicked: {detail}")))
+        }
+    };
     heartbeat.abort();
     ctx.flush_logs().await;
 

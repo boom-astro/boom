@@ -98,16 +98,38 @@ later.
 | Task | What it does |
 | --- | --- |
 | `catalog_ingest` | Download an archival catalog and insert it. See [catalogs.md](./catalogs.md). |
+| `migrate_fp_flux` | Recompute ZTF forced-photometry flux in `ZTF_alerts_aux` at a fixed zeropoint. |
 
 Submission is single-flight per target, not per type: two ingests of the same
 catalog would race on the same collection and chunk state, but ingesting 2MASS
 should not block ingesting NED.
 
 Still to port, so that the last reasons to SSH in go away: `enrich_reprocess`,
-`migrate_fp_flux`, `migrate_snr`, `reprocess_crossmatch`, `copy_cutouts`,
-`prepare_catalog`. Each needs a params struct, an arm in `dispatch`, and a
-cancellation check in its batch loop; the ones that drive their work through
-Valkey already have the resumability a task needs.
+`migrate_snr`, `reprocess_crossmatch`, `copy_cutouts`, `prepare_catalog`. Each
+needs a params struct, an arm in `dispatch`, and a cancellation check in its
+batch loop; the ones that drive their work through Valkey already have the
+resumability a task needs.
+
+`migrate_fp_flux` shows the shape. Three things change when a one-shot binary
+becomes a task, and all three are about no longer owning the process:
+
+- **`process::exit` becomes an error.** Exiting would kill the worker and every
+  other run on it, and leave this run holding a lease until it expired.
+- **The batch loop checks for cancellation**, at batch boundaries — an
+  `update_many` is atomic per document, so a boundary is the only point where
+  stopping leaves a state that is easy to describe.
+- **Progress goes to the run**, not to a terminal progress bar nobody is
+  watching.
+
+A panicking task fails its own run rather than taking the worker down: the
+worker catches unwinds at the dispatch boundary. That matters precisely because
+these bodies come from binaries where an `unwrap` on unexpected data was a
+reasonable way to stop.
+
+The binaries survive for now as thin wrappers over the same code, so there is
+one implementation rather than two that can drift. They build a *detached*
+context: nothing is recorded to the ledger, and nothing can cancel them — which
+is the argument for using the task instead.
 
 ## Running it in dev
 
