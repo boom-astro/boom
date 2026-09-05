@@ -13,7 +13,7 @@
 //! `migrate_fp_flux`, the move traded `process::exit` for errors, added
 //! cancellation checks at batch boundaries, and pointed progress at the run.
 
-use super::batch::{run_batched_update, BatchError};
+use super::batch::{run_batched_update, BatchError, PROGRESS_EVERY};
 use super::context::TaskContext;
 use super::ledger::{MutationTarget, Operation};
 use futures::TryStreamExt;
@@ -690,11 +690,11 @@ fn validate_entry(
 ) {
     // --- apFlux / apFluxErr validation (magap round-trip) ---
     if has_ap {
-        let ap_flux = entry.get("apFlux").and_then(|v| get_f64(v));
-        let magap = entry.get("magap").and_then(|v| get_f64(v));
-        let sigmagap = entry.get("sigmagap").and_then(|v| get_f64(v));
-        let computed_magap = entry.get("computed_magap").and_then(|v| get_f64(v));
-        let computed_sigmagap = entry.get("computed_sigmagap").and_then(|v| get_f64(v));
+        let ap_flux = entry.get("apFlux").and_then(get_f64);
+        let magap = entry.get("magap").and_then(get_f64);
+        let sigmagap = entry.get("sigmagap").and_then(get_f64);
+        let computed_magap = entry.get("computed_magap").and_then(get_f64);
+        let computed_sigmagap = entry.get("computed_sigmagap").and_then(get_f64);
 
         match (ap_flux, magap, sigmagap, computed_magap, computed_sigmagap) {
             (Some(_), Some(orig_mag), Some(orig_sig), Some(comp_mag), Some(comp_sig)) => {
@@ -727,8 +727,8 @@ fn validate_entry(
     }
 
     // --- SNR PSF validation ---
-    let snr_psf = entry.get("snr_psf").and_then(|v| get_f64(v));
-    let computed_snr_psf = entry.get("computed_snr_psf").and_then(|v| get_f64(v));
+    let snr_psf = entry.get("snr_psf").and_then(get_f64);
+    let computed_snr_psf = entry.get("computed_snr_psf").and_then(get_f64);
     match (snr_psf, computed_snr_psf) {
         (Some(stored), Some(expected)) => {
             if (stored - expected).abs() / expected.abs().max(1e-12) >= tolerance {
@@ -747,8 +747,8 @@ fn validate_entry(
 
     // --- SNR AP validation ---
     if has_ap {
-        let snr_ap = entry.get("snr_ap").and_then(|v| get_f64(v));
-        let computed_snr_ap = entry.get("computed_snr_ap").and_then(|v| get_f64(v));
+        let snr_ap = entry.get("snr_ap").and_then(get_f64);
+        let computed_snr_ap = entry.get("computed_snr_ap").and_then(get_f64);
         match (snr_ap, computed_snr_ap) {
             (Some(stored), Some(expected)) => {
                 if (stored - expected).abs() / expected.abs().max(1e-12) >= tolerance {
@@ -768,8 +768,8 @@ fn validate_entry(
 
     // --- chipsf validation ---
     if has_chipsf {
-        let chipsf = entry.get("chipsf").and_then(|v| get_f64(v));
-        let computed_chipsf = entry.get("computed_chipsf").and_then(|v| get_f64(v));
+        let chipsf = entry.get("chipsf").and_then(get_f64);
+        let computed_chipsf = entry.get("computed_chipsf").and_then(get_f64);
         match (chipsf, computed_chipsf) {
             (Some(stored), Some(expected)) => {
                 if (stored - expected).abs() / expected.abs().max(1e-12) >= tolerance {
@@ -872,11 +872,23 @@ async fn validate_ztf_alerts(ctx: &TaskContext, db: &mongodb::Database) -> Resul
     let mut cursor = collection.aggregate(pipeline).await?;
 
     let mut counters = ValidationCounters::new();
+    let mut seen: u64 = 0;
+    let mut last_reported: u64 = 0;
     while let Some(d) = cursor.try_next().await? {
         // Validation only reads, so stopping anywhere is safe.
         if ctx.is_canceled() {
             ctx.warn("validation canceled");
             return Err(BatchError::Canceled { modified: 0 });
+        }
+        seen += 1;
+        if seen - last_reported >= PROGRESS_EVERY {
+            last_reported = seen;
+            ctx.progress(
+                seen,
+                estimated.max(seen),
+                format!("validating {seen} documents"),
+            )
+            .await;
         }
         let doc_id = d.get("_id").unwrap().clone();
         let entry = d.get_document("validation").unwrap();
@@ -982,11 +994,23 @@ async fn validate_ztf_alerts_aux(
     let mut cursor = collection.aggregate(pipeline).await?;
 
     let mut counters = ValidationCounters::new();
+    let mut seen: u64 = 0;
+    let mut last_reported: u64 = 0;
     while let Some(d) = cursor.try_next().await? {
         // Validation only reads, so stopping anywhere is safe.
         if ctx.is_canceled() {
             ctx.warn("validation canceled");
             return Err(BatchError::Canceled { modified: 0 });
+        }
+        seen += 1;
+        if seen - last_reported >= PROGRESS_EVERY {
+            last_reported = seen;
+            ctx.progress(
+                seen,
+                estimated.max(seen),
+                format!("validating {seen} documents"),
+            )
+            .await;
         }
         let doc_id = d.get("_id").unwrap().clone();
         // prv_candidates
@@ -1083,11 +1107,23 @@ async fn validate_lsst_alerts(ctx: &TaskContext, db: &mongodb::Database) -> Resu
     let mut cursor = collection.aggregate(pipeline).await?;
 
     let mut counters = ValidationCounters::new();
+    let mut seen: u64 = 0;
+    let mut last_reported: u64 = 0;
     while let Some(d) = cursor.try_next().await? {
         // Validation only reads, so stopping anywhere is safe.
         if ctx.is_canceled() {
             ctx.warn("validation canceled");
             return Err(BatchError::Canceled { modified: 0 });
+        }
+        seen += 1;
+        if seen - last_reported >= PROGRESS_EVERY {
+            last_reported = seen;
+            ctx.progress(
+                seen,
+                estimated.max(seen),
+                format!("validating {seen} documents"),
+            )
+            .await;
         }
         let doc_id = d.get("_id").unwrap().clone();
         let entry = d.get_document("validation").unwrap();
@@ -1195,11 +1231,23 @@ async fn validate_lsst_alerts_aux(
     let mut cursor = collection.aggregate(pipeline).await?;
 
     let mut counters = ValidationCounters::new();
+    let mut seen: u64 = 0;
+    let mut last_reported: u64 = 0;
     while let Some(d) = cursor.try_next().await? {
         // Validation only reads, so stopping anywhere is safe.
         if ctx.is_canceled() {
             ctx.warn("validation canceled");
             return Err(BatchError::Canceled { modified: 0 });
+        }
+        seen += 1;
+        if seen - last_reported >= PROGRESS_EVERY {
+            last_reported = seen;
+            ctx.progress(
+                seen,
+                estimated.max(seen),
+                format!("validating {seen} documents"),
+            )
+            .await;
         }
         let doc_id = d.get("_id").unwrap().clone();
         if let Ok(arr) = d.get_array("prv_validation") {
