@@ -83,6 +83,24 @@ Both rely on task bodies being **resumable**: re-running one continues rather
 than repeating. `catalog_ingest` records each completed chunk, so a resumed run
 skips what is already in and costs one chunk, not the whole catalog.
 
+**Only tasks that declare `idempotent` are retried.** Resuming is safe exactly
+when re-running produces the same state — a chunked ingest skips what it
+recorded, a recompute derives from untouched inputs. Anything else is **failed**
+instead, with an error saying why, and left for a person to look at. Quietly
+doing half the work twice is the one outcome nobody could detect afterwards.
+
+The same rule applies on clean shutdown, not just to a lapsed lease: a deploy
+must not silently re-run something that cannot be re-run safely.
+
+A task type this build does not recognize is treated as **not** retryable. A run
+can outlive the release that created it, and re-running something the code
+cannot even describe is precisely the case to be conservative about.
+
+Every task registered today is idempotent, and a test asserts it — not because
+the system requires it, but because it is the property that makes a task survive
+a deploy, which is most of the point. Registering one without it should be a
+deliberate edit to that test.
+
 The heartbeat also carries cancellation in the other direction. `POST
 /tasks/{id}/cancel` sets `cancel_requested`; the heartbeat mirrors it into a
 flag the task polls. A queued run is canceled outright, since nothing started.

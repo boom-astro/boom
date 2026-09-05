@@ -81,7 +81,7 @@ async fn main() {
         // ours to pick up. Cheap, and it is what recovers a run orphaned by a
         // crash rather than by a clean shutdown.
         if let Err(e) = queue::requeue_expired(&db).await {
-            warn!("failed to requeue expired runs: {}", e);
+            warn!("failed to sweep expired leases: {}", e);
         }
 
         let claimed = match queue::claim_next(&db, &worker_name).await {
@@ -169,10 +169,31 @@ async fn run_one(
     // A shutdown is not an outcome: hand the run back queued so the replacement
     // worker resumes it, instead of recording a failure someone has to
     // re-submit by hand.
+    //
+    // Only for a task that is safe to run again, though. The same reasoning as
+    // the lease reaper: resuming is safe exactly when re-running produces the
+    // same state. For anything else the run is failed and left for a person,
+    // because quietly doing half the work twice is the outcome nobody could
+    // detect afterwards.
     if shutting_down.load(Ordering::Relaxed) && result.is_err() {
-        info!(run_id = %run.id, "shutting down; returning the run to the queue");
-        if let Err(e) = queue::release(db, &run.id, worker_name).await {
-            error!("failed to release run {}: {}", run.id, e);
+        if tasks::is_retryable(&run.task_type) {
+            info!(run_id = %run.id, "shutting down; returning the run to the queue");
+            if let Err(e) = queue::release(db, &run.id, worker_name).await {
+                error!("failed to release run {}: {}", run.id, e);
+            }
+        } else {
+            warn!(
+                run_id = %run.id,
+                "shutting down mid-run, and {} is not declared idempotent;                  failing it rather than retrying automatically",
+                run.task_type
+            );
+            let error = Some(format!(
+                "the worker shut down while this was running, and {} is not declared                  idempotent, so it was not retried automatically. Check what it had                  already done before running it again.",
+                run.task_type
+            ));
+            if let Err(e) = queue::finish(db, &run.id, TaskStatus::Failed, error).await {
+                error!("failed to record the outcome of run {}: {}", run.id, e);
+            }
         }
         return;
     }

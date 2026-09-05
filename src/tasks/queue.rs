@@ -159,20 +159,50 @@ pub async fn request_cancel(db: &Database, run_id: &str) -> Result<Option<TaskSt
     }
 }
 
-/// Requeue runs whose lease has expired.
+/// What a sweep of expired leases did.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ReapReport {
+    /// Put back on the queue, to be picked up and resumed.
+    pub requeued: u64,
+    /// Failed instead of retried, because the task does not declare itself
+    /// idempotent and re-running it could apply the change twice.
+    pub failed: u64,
+}
+
+/// Deal with runs whose lease has expired.
 ///
 /// This is what makes a task survive a deploy: the worker goes away mid-run,
-/// its lease lapses, and the next worker to start picks the run back up. Tasks
-/// are written to be resumable, so re-running one continues rather than
-/// repeating -- a catalog ingest skips the chunks it already recorded.
+/// its lease lapses, and the next worker picks the run back up.
+///
+/// Only for task types that declare themselves **idempotent**, though. Retrying
+/// is safe exactly when re-running produces the same state -- a catalog ingest
+/// skips the chunks it recorded, a recompute derives from untouched inputs. A
+/// task without that property could be applied twice by a retry, so its run is
+/// failed and left for a person to look at. Silently doing the work again is
+/// the one outcome nobody could detect afterwards.
 #[instrument(skip(db))]
-pub async fn requeue_expired(db: &Database) -> Result<u64, QueueError> {
-    let result = runs(db)
+pub async fn requeue_expired(db: &Database) -> Result<ReapReport, QueueError> {
+    // Owned Strings: a `Vec<&str>` does not land in the filter as a BSON array
+    // of strings, and the `$in` then matches nothing -- which would fail every
+    // orphaned run instead of resuming the retryable ones.
+    let retryable: Vec<String> = super::retryable_task_types()
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    let expired = |extra: Document| {
+        let mut filter = doc! {
+            "status": TaskStatus::Running.as_str(),
+            "lease_expires_at": { "$lt": now() },
+        };
+        for (key, value) in extra {
+            filter.insert(key, value);
+        }
+        filter
+    };
+
+    let requeued = runs(db)
         .update_many(
-            doc! {
-                "status": TaskStatus::Running.as_str(),
-                "lease_expires_at": { "$lt": now() },
-            },
+            expired(doc! { "task_type": { "$in": retryable.clone() } }),
             doc! {
                 "$set": {
                     "status": TaskStatus::Queued.as_str(),
@@ -182,13 +212,41 @@ pub async fn requeue_expired(db: &Database) -> Result<u64, QueueError> {
             },
         )
         .await?;
-    if result.modified_count > 0 {
+
+    let failed = runs(db)
+        .update_many(
+            expired(doc! { "task_type": { "$nin": retryable.clone() } }),
+            doc! {
+                "$set": {
+                    "status": TaskStatus::Failed.as_str(),
+                    "finished_at": now(),
+                    "error": "the worker running this stopped renewing its lease, and this \
+                              task type is not declared idempotent, so it was not retried \
+                              automatically. Check what it had already done before running \
+                              it again.",
+                    "worker": mongodb::bson::Bson::Null,
+                    "lease_expires_at": mongodb::bson::Bson::Null,
+                },
+            },
+        )
+        .await?;
+
+    if requeued.modified_count > 0 {
         tracing::warn!(
             "requeued {} run(s) whose worker stopped renewing its lease",
-            result.modified_count
+            requeued.modified_count
         );
     }
-    Ok(result.modified_count)
+    if failed.modified_count > 0 {
+        tracing::error!(
+            "failed {} orphaned run(s) that are not safe to retry automatically",
+            failed.modified_count
+        );
+    }
+    Ok(ReapReport {
+        requeued: requeued.modified_count,
+        failed: failed.modified_count,
+    })
 }
 
 /// Hand a run back without failing it, for a worker shutting down cleanly.
@@ -196,6 +254,9 @@ pub async fn requeue_expired(db: &Database) -> Result<u64, QueueError> {
 /// Distinct from letting the lease lapse only in that it is immediate: on a
 /// deploy the replacement worker can pick the run up right away instead of
 /// waiting out the lease.
+///
+/// The caller must only use this for a task that is safe to retry; see
+/// [`super::is_retryable`].
 pub async fn release(db: &Database, run_id: &str, worker: &str) -> Result<(), QueueError> {
     runs(db)
         .update_one(
@@ -438,12 +499,19 @@ mod tests {
     #[tokio::test]
     async fn an_expired_lease_is_requeued_but_a_live_one_is_left_alone() {
         let _claiming = CLAIM_LOCK.lock().await;
-        // This is what makes a run survive a worker being deployed over.
+        // This is what makes a run survive a worker being deployed over. It uses
+        // a registered idempotent type, because only those are retried -- an
+        // unknown one is failed instead, which
+        // `an_orphaned_run_of_an_unknown_type_is_failed_rather_than_retried`
+        // covers.
         let db = crate::conf::get_test_db().await;
-        let task_type = unique_type();
-        submit(&db, &queued(&task_type, serde_json::json!({})))
-            .await
-            .unwrap();
+        let task_type = crate::tasks::catalog_ingest::TASK_TYPE.to_string();
+        submit(
+            &db,
+            &queued(&task_type, serde_json::json!({ "catalog": "test-only" })),
+        )
+        .await
+        .unwrap();
         let run = claim_ours(&db, "worker-a", &task_type)
             .await
             .expect("claimed");
@@ -462,12 +530,88 @@ mod tests {
             )
             .await
             .unwrap();
-        requeue_expired(&db).await.unwrap();
+        let report = requeue_expired(&db).await.unwrap();
+        assert!(report.requeued >= 1);
 
         let reaped = get(&db, &run.id).await.unwrap().unwrap();
         assert_eq!(reaped.status, TaskStatus::Queued);
         assert!(reaped.worker.is_none());
         cleanup(&db, &task_type).await;
+    }
+
+    #[tokio::test]
+    async fn an_orphaned_run_of_an_unknown_type_is_failed_rather_than_retried() {
+        // A run can outlive the release that created it. Re-running something
+        // this build cannot even describe is the case to be conservative about,
+        // so an unknown type is treated as not idempotent.
+        let _claiming = CLAIM_LOCK.lock().await;
+        let db = crate::conf::get_test_db().await;
+        let task_type = unique_type(); // never registered in TASKS
+        submit(&db, &queued(&task_type, serde_json::json!({})))
+            .await
+            .unwrap();
+        let run = claim_ours(&db, "worker-a", &task_type)
+            .await
+            .expect("claimed");
+
+        db.collection::<TaskRun>(RUNS_COLLECTION)
+            .update_one(
+                doc! { "_id": &run.id },
+                doc! { "$set": { "lease_expires_at": now() - 1.0 } },
+            )
+            .await
+            .unwrap();
+        let report = requeue_expired(&db).await.unwrap();
+        assert!(report.failed >= 1);
+
+        let reaped = get(&db, &run.id).await.unwrap().unwrap();
+        assert_eq!(reaped.status, TaskStatus::Failed);
+        // The message has to say why it was not retried, or the next person
+        // just resubmits it and applies the change twice by hand.
+        assert!(
+            reaped.error.unwrap().contains("not declared idempotent"),
+            "the failure must explain itself"
+        );
+        cleanup(&db, &task_type).await;
+    }
+
+    #[tokio::test]
+    async fn an_orphaned_idempotent_run_is_requeued() {
+        // The other half of the rule: a task that declares itself safe to
+        // re-run is picked back up, which is what survives a deploy.
+        let _claiming = CLAIM_LOCK.lock().await;
+        let db = crate::conf::get_test_db().await;
+        assert!(
+            crate::tasks::is_retryable(crate::tasks::catalog_ingest::TASK_TYPE),
+            "catalog_ingest is the worked example of a resumable task"
+        );
+
+        let run = queued(
+            crate::tasks::catalog_ingest::TASK_TYPE,
+            serde_json::json!({ "catalog": "test-only" }),
+        );
+        submit(&db, &run).await.unwrap();
+        let claimed = claim_ours(&db, "worker-a", crate::tasks::catalog_ingest::TASK_TYPE)
+            .await
+            .expect("claimed");
+
+        db.collection::<TaskRun>(RUNS_COLLECTION)
+            .update_one(
+                doc! { "_id": &claimed.id },
+                doc! { "$set": { "lease_expires_at": now() - 1.0 } },
+            )
+            .await
+            .unwrap();
+        requeue_expired(&db).await.unwrap();
+
+        assert_eq!(
+            get(&db, &claimed.id).await.unwrap().unwrap().status,
+            TaskStatus::Queued
+        );
+        let _ = db
+            .collection::<TaskRun>(RUNS_COLLECTION)
+            .delete_one(doc! { "_id": &claimed.id })
+            .await;
     }
 
     #[tokio::test]

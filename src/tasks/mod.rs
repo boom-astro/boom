@@ -104,6 +104,25 @@ pub fn find(id: &str) -> Option<&'static TaskSpec> {
     TASKS.iter().find(|t| t.id == id)
 }
 
+/// Whether a run of this type may be retried automatically.
+///
+/// An unknown type is treated as **not** idempotent. A run can outlive the
+/// release that created it -- a task type removed or renamed in a later version
+/// still has rows in `task_runs` -- and re-running something this build cannot
+/// even describe is exactly the case to be conservative about.
+pub fn is_retryable(task_type: &str) -> bool {
+    find(task_type).is_some_and(|spec| spec.idempotent)
+}
+
+/// Task types safe to requeue after a lost lease.
+pub fn retryable_task_types() -> Vec<&'static str> {
+    TASKS
+        .iter()
+        .filter(|spec| spec.idempotent)
+        .map(|spec| spec.id)
+        .collect()
+}
+
 fn known_types() -> String {
     TASKS.iter().map(|t| t.id).collect::<Vec<_>>().join(", ")
 }
@@ -182,5 +201,65 @@ pub async fn dispatch(
             id: other.to_string(),
             known: known_types(),
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_registered_task_is_idempotent() {
+        // Not a rule of the system -- the queue handles a non-idempotent task
+        // by failing it rather than retrying -- but it is the property that
+        // makes a task survive a deploy, which is most of the point. Adding one
+        // without it is a deliberate choice, so make it a deliberate edit here.
+        let not: Vec<&str> = TASKS
+            .iter()
+            .filter(|spec| !spec.idempotent)
+            .map(|spec| spec.id)
+            .collect();
+        assert!(
+            not.is_empty(),
+            "these task types would be failed rather than resumed when a worker \
+             goes away: {not:?}. If that is intended, update this test and say why."
+        );
+    }
+
+    #[test]
+    fn an_unknown_task_type_is_not_retryable() {
+        // A run can outlive the release that registered its type.
+        assert!(!is_retryable("a_type_from_some_future_release"));
+    }
+
+    #[test]
+    fn task_ids_are_unique_and_stable_looking() {
+        let mut ids: Vec<&str> = TASKS.iter().map(|t| t.id).collect();
+        let count = ids.len();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), count, "duplicate task id");
+        for id in &ids {
+            // Historical runs are read back by this string, so it wants to look
+            // like an identifier rather than a sentence.
+            assert!(
+                id.chars().all(|c| c.is_ascii_lowercase() || c == '_'),
+                "{id} is not a snake_case identifier"
+            );
+        }
+    }
+
+    #[test]
+    fn every_registered_task_validates_and_dispatches() {
+        // A type in TASKS with no arm in validate_params is a task the admin
+        // page offers and the API rejects.
+        for spec in TASKS {
+            let err = validate_params(spec.id, &serde_json::json!({})).err();
+            assert!(
+                !matches!(err, Some(TaskError::UnknownType { .. })),
+                "{} is registered but validate_params does not know it",
+                spec.id
+            );
+        }
     }
 }
