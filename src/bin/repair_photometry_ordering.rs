@@ -239,10 +239,9 @@ async fn flush_batch(
     client: &mongodb::Client,
     batch: &mut Vec<WriteModel>,
 ) -> Result<u64, mongodb::error::Error> {
-    if batch.is_empty() {
-        return Ok(0);
-    }
-    let drained: Vec<WriteModel> = std::mem::take(batch);
+    // Keep the capacity: a bare mem::take makes every following batch regrow from zero.
+    let capacity = batch.capacity();
+    let drained = std::mem::replace(batch, Vec::with_capacity(capacity));
     let result = client.bulk_write(drained).ordered(false).await?;
     Ok(result.modified_count as u64)
 }
