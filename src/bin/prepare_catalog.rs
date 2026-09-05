@@ -96,6 +96,15 @@ fn as_f64(value: Option<&Bson>) -> Option<f64> {
 
 const MAX_SAMPLES: usize = 10;
 
+fn fail_incomplete_coverage(scanned: u64, total: u64) -> ! {
+    error!(
+        "only {} of the {} matching document(s) were scanned: the shards may not have covered the \
+         whole collection, re-run with --processes 1",
+        scanned, total
+    );
+    std::process::exit(1);
+}
+
 #[derive(Default)]
 struct Report {
     updated: u64,
@@ -331,17 +340,20 @@ async fn main() {
     }
 
     let scanned = report.updated + report.missing + report.out_of_range;
-    if scanned < total {
-        error!(
-            "only {} of the {} matching document(s) were scanned: the shards did not cover the \
-             whole collection, re-run with --processes 1",
+    let coverage_failure = scanned < total && args.processes > 1;
+    if scanned < total && args.processes == 1 {
+        warn!(
+            "scanned {} of the {} matching document(s) counted before the pass: documents were \
+             modified or deleted while it ran",
             scanned, total
         );
-        std::process::exit(1);
     }
 
     if args.dry_run {
         info!("dry run: skipping index creation");
+        if coverage_failure {
+            fail_incomplete_coverage(scanned, total);
+        }
         return;
     }
 
@@ -356,6 +368,10 @@ async fn main() {
         std::process::exit(1);
     }
     info!("2dsphere index on coordinates.radec_geojson ready");
+
+    if coverage_failure {
+        fail_incomplete_coverage(scanned, total);
+    }
 
     info!(
         "{} is ready, declare it under crossmatch.<survey> in {} and backfill \

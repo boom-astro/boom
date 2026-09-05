@@ -246,13 +246,15 @@ async fn flush_batch(
     Ok(result.modified_count as u64)
 }
 
+/// `Ok(false)` means the shards did not cover the whole collection: what they saw was
+/// repaired, but the run is not a clean pass over it.
 async fn run_repair(
     survey: &Survey,
     aux_collection: Collection<Document>,
     batch_size: usize,
     processes: usize,
     dry_run: bool,
-) -> Result<(), TaskError> {
+) -> Result<bool, TaskError> {
     let aux_ns = aux_collection.namespace();
     let fields = timeseries_fields(survey);
 
@@ -265,9 +267,9 @@ async fn run_repair(
         shard_field
     );
 
-    let estimated = aux_collection.estimated_document_count().await.unwrap_or(0);
+    let total = aux_collection.count_documents(doc! {}).await?;
     let label = format!("scan→{}", survey);
-    let pb = make_progress_bar(estimated, label.clone());
+    let pb = make_progress_bar(total, label.clone());
     pb.enable_steady_tick(std::time::Duration::from_millis(200));
     let logger = spawn_progress_logger(pb.clone(), label);
 
@@ -286,17 +288,10 @@ async fn run_repair(
     let stats = outcome?;
 
     let scanned = stats.iter().map(|s| s.scanned).sum::<u64>();
-    if processes > 1 && scanned < estimated {
-        warn!(
-            "scanned {} document(s) but {} holds about {}: the shards may not have covered it all, \
-             re-run with --processes 1",
-            scanned, aux_ns, estimated
-        );
-    }
     let mut per_field = vec![FieldStats::default(); fields.len()];
     for shard in &stats {
-        for (total, shard_total) in per_field.iter_mut().zip(&shard.per_field) {
-            total.merge(shard_total);
+        for (acc, shard_total) in per_field.iter_mut().zip(&shard.per_field) {
+            acc.merge(shard_total);
         }
     }
     for (field, totals) in fields.iter().copied().zip(&per_field) {
@@ -336,7 +331,23 @@ async fn run_repair(
         dry_run,
         "repair_photometry_ordering done"
     );
-    Ok(())
+
+    if scanned < total {
+        if processes > 1 {
+            error!(
+                "scanned {} of the {} document(s) in {}: the shards did not cover it all, re-run \
+                 with --processes 1",
+                scanned, total, aux_ns
+            );
+            return Ok(false);
+        }
+        warn!(
+            "scanned {} of the {} document(s) counted in {} before the pass: documents were \
+             deleted while it ran",
+            scanned, total, aux_ns
+        );
+    }
+    Ok(true)
 }
 
 #[tokio::main]
@@ -390,7 +401,7 @@ async fn main() {
         args.survey, args.processes, args.batch_size, args.dry_run,
     );
 
-    if let Err(e) = run_repair(
+    match run_repair(
         &args.survey,
         db.collection(&aux_name),
         args.batch_size,
@@ -399,8 +410,12 @@ async fn main() {
     )
     .await
     {
-        error!("repair run failed: {}", e);
-        std::process::exit(1);
+        Ok(true) => {}
+        Ok(false) => std::process::exit(1),
+        Err(e) => {
+            error!("repair run failed: {}", e);
+            std::process::exit(1);
+        }
     }
 }
 
