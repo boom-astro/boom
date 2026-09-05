@@ -205,12 +205,11 @@ async fn flush_batch(
 
 async fn run_repair(
     survey: &Survey,
-    db: mongodb::Database,
+    aux_collection: Collection<Document>,
     batch_size: usize,
     processes: usize,
     dry_run: bool,
 ) -> Result<(), TaskError> {
-    let aux_collection: Collection<Document> = db.collection(&format!("{}_alerts_aux", survey));
     let aux_ns = aux_collection.namespace();
     let fields = timeseries_fields(survey);
 
@@ -289,6 +288,25 @@ async fn main() {
         }
     };
 
+    let aux_name = format!("{}_alerts_aux", args.survey);
+    match db.list_collection_names().await {
+        Ok(names) => {
+            if !names.iter().any(|n| n == &aux_name) {
+                error!(
+                    "collection {} does not exist in database {}, check that --config points at \
+                     the right database",
+                    aux_name,
+                    db.name()
+                );
+                std::process::exit(1);
+            }
+        }
+        Err(e) => {
+            error!("error listing collections: {}", e);
+            std::process::exit(1);
+        }
+    }
+
     info!(
         "starting repair_photometry_ordering: survey={} processes={} batch_size={} dry_run={}",
         args.survey, args.processes, args.batch_size, args.dry_run,
@@ -296,7 +314,7 @@ async fn main() {
 
     if let Err(e) = run_repair(
         &args.survey,
-        db,
+        db.collection(&aux_name),
         args.batch_size,
         args.processes,
         args.dry_run,
