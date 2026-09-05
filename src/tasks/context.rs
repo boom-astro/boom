@@ -4,7 +4,9 @@
 //! keeps current, a progress sink and a log sink. A task body takes this plus
 //! its typed params and returns a report -- see `docs/task-system.md`.
 
+use super::ledger::{self, MutationRecord};
 use super::logs::LogSink;
+use super::models::{Actor, Trigger};
 use super::queue;
 use crate::conf::AppConfig;
 use mongodb::Database;
@@ -21,6 +23,10 @@ pub struct TaskContext {
     /// sections, so a task body needs more than a Mongo handle.
     config: Arc<AppConfig>,
     run_id: String,
+    /// Who asked for this run, and how. Carried so a task body can attribute
+    /// the mutations it records without the ledger having to re-read the run.
+    actor: Actor,
+    trigger: Trigger,
     /// Set by the worker's heartbeat when cancellation is requested, or when
     /// the worker is shutting down. Checked by tasks at their own safe points.
     canceled: Arc<AtomicBool>,
@@ -32,6 +38,8 @@ impl TaskContext {
         db: Database,
         config: Arc<AppConfig>,
         run_id: impl Into<String>,
+        actor: Actor,
+        trigger: Trigger,
         canceled: Arc<AtomicBool>,
     ) -> Self {
         let run_id = run_id.into();
@@ -40,6 +48,8 @@ impl TaskContext {
             db,
             config,
             run_id,
+            actor,
+            trigger,
             canceled,
         }
     }
@@ -52,6 +62,8 @@ impl TaskContext {
             db,
             config,
             run_id: String::new(),
+            actor: Actor::system(),
+            trigger: Trigger::Api,
             canceled: Arc::new(AtomicBool::new(false)),
             logs: LogSink::detached(),
         }
@@ -118,4 +130,45 @@ impl TaskContext {
     pub async fn flush_logs(&self) {
         self.logs.flush().await
     }
+
+    /// Append what this run changed to the append-only ledger.
+    ///
+    /// Best-effort by design: a task that genuinely mutated data has already
+    /// done so, and failing the run because the bookkeeping write failed would
+    /// leave the data changed *and* the run marked failed -- the worst of both.
+    /// The failure is logged loudly instead.
+    pub async fn record_mutation(
+        &self,
+        target: ledger::MutationTarget,
+        operation: ledger::Operation,
+        details: mongodb::bson::Document,
+    ) {
+        if self.run_id.is_empty() {
+            return;
+        }
+        let entry: MutationRecord = ledger::for_task(
+            &self.run_id,
+            task_type_of(&self.db, &self.run_id)
+                .await
+                .as_deref()
+                .unwrap_or("unknown"),
+            &self.actor,
+            self.trigger,
+            target,
+            operation,
+            details,
+        );
+        if let Err(e) = ledger::record(&self.db, entry).await {
+            self.error(format!("failed to record the data mutation: {e}"));
+        }
+    }
+}
+
+/// The task type of a run, for attributing its ledger entries.
+async fn task_type_of(db: &Database, run_id: &str) -> Option<String> {
+    queue::get(db, run_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|run| run.task_type)
 }

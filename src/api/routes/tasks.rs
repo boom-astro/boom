@@ -39,6 +39,13 @@ pub struct ListTasksParams {
 }
 
 #[derive(Debug, Deserialize, IntoParams)]
+pub struct MutationsParams {
+    /// Only mutations of this collection.
+    pub collection: Option<String>,
+    pub limit: Option<i64>,
+}
+
+#[derive(Debug, Deserialize, IntoParams)]
 pub struct LogsParams {
     /// Return only chunks after this sequence number, for tailing.
     pub after_seq: Option<u64>,
@@ -289,5 +296,41 @@ pub async fn cancel_task(
             response::ok_ser(message, serde_json::json!({ "status": status }))
         }
         Err(e) => response::internal_error(&format!("failed to request cancellation: {e}")),
+    }
+}
+
+/// Read the record of what has been done to the data
+///
+/// Append-only: entries are written when a mutation finishes and are never
+/// edited or removed. This is what makes "what has been done to this
+/// collection, by whom, under which release" an answerable question rather than
+/// a matter of shell history.
+#[utoipa::path(
+    get,
+    path = "/data/mutations",
+    params(MutationsParams),
+    responses(
+        (status = 200, description = "Mutations, most recent first", body = Vec<serde_json::Value>),
+        (status = 403, description = "Not an admin")
+    ),
+    tags=["Tasks"]
+)]
+#[get("/data/mutations")]
+pub async fn get_data_mutations(
+    db: web::Data<mongodb::Database>,
+    params: web::Query<MutationsParams>,
+    current_user: Option<web::ReqData<User>>,
+    babamul_user: Option<web::ReqData<BabamulUser>>,
+) -> HttpResponse {
+    if let Err(e) = require_admin(&current_user, &babamul_user) {
+        return e;
+    }
+    let limit = params
+        .limit
+        .unwrap_or(DEFAULT_LIST_LIMIT)
+        .clamp(1, MAX_LIST_LIMIT);
+    match tasks::ledger::history(&db, params.collection.as_deref(), limit).await {
+        Ok(entries) => response::ok_ser("success", entries),
+        Err(e) => response::internal_error(&format!("failed to read the ledger: {e}")),
     }
 }

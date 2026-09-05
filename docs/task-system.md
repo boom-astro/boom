@@ -134,10 +134,41 @@ Catalog chunks are staged in the `catalog_data` volume, mounted at
 | --- | --- |
 | `task_runs` | One document per run: params, status, actor, progress, lease, error. Also the queue. |
 | `task_logs` | Log lines, batched — one document per flush, not per line. The UI tails by asking for `seq` greater than the last it saw. |
+| `data_mutations` | The append-only ledger: what changed, who changed it, and under which release. |
 
 `task_logs` is a convenience copy for the UI; the full firehose still reaches
 Loki through the normal container-log path. It is capped per run so a task
 logging in a loop cannot fill the disk.
+
+## The ledger
+
+BOOM's scientific artifacts are a function of the *current state* of the
+database, and that state is the raw alert stream plus a sequence of out-of-band
+mutations. If those mutations live only in shell history, the artifacts derived
+from them cannot be reasoned about or reproduced. So every task that changes
+data appends to `data_mutations`, and `GET /data/mutations?collection=NED` reads
+it back, newest first.
+
+It is **append-only**. Entries are written when a mutation finishes, and there
+is no code path that updates or deletes one — a record that can be edited
+answers a much weaker question than "what happened".
+
+Each entry names the source (task run, migration, or pipeline), the actor
+qualified by realm, the trigger, the target collection, a coarse operation
+(`ingest`, `backfill`, `recompute`, `delete`, `index`, `drop`), and a free-form
+`details` document for row counts.
+
+`code_version` carries the package version and the commit, the latter compiled
+in from `BOOM_GIT_SHA`. When the build does not set it the field is **absent**
+rather than a placeholder: "we do not know which commit did this" is a real
+answer, and a fabricated one would make the ledger confidently wrong. Set it
+with `BOOM_GIT_SHA=$(git rev-parse HEAD)`; the Dockerfile takes it as a build
+arg.
+
+Writing a ledger entry is best-effort. A task that mutated data has already
+done so, and failing the run because the bookkeeping write failed would leave
+the data changed *and* the run marked failed — the worst of both. The failure is
+logged loudly instead.
 
 ## Access
 
@@ -162,6 +193,7 @@ the person up later.
 | `GET /tasks/{id}` | One run |
 | `GET /tasks/{id}/logs?after_seq=` | Tail its logs |
 | `POST /tasks/{id}/cancel` | Request cancellation |
+| `GET /data/mutations?collection=&limit=` | What has been done to the data |
 
 ## Not yet built
 
@@ -172,8 +204,8 @@ the person up later.
   cutouts ([#518](https://github.com/boom-astro/boom/issues/518)) — is better
   served by a TTL index on the cutout documents than by a task, with only the
   one-off backfill of existing rows running here.
-- **The `data_mutations` ledger.** Runs record what they did, but there is not
-  yet a single append-only log of every mutation across tasks, startup
-  migrations and the live pipeline.
+- **Ledger coverage beyond tasks.** `data_mutations` records task runs today.
+  Startup migrations and the live pipeline have `SourceKind` variants reserved
+  but do not write to it yet.
 - **Partitioned execution**, for tasks whose unit of work is a key range rather
   than a chunk.

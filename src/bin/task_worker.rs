@@ -60,6 +60,9 @@ async fn main() {
     models::initialize_indexes(&db)
         .await
         .expect("failed to create task indexes");
+    boom::tasks::ledger::initialize_indexes(&db)
+        .await
+        .expect("failed to create ledger indexes");
 
     let worker_name = args.name.unwrap_or_else(|| {
         std::env::var("HOSTNAME").unwrap_or_else(|_| format!("worker-{}", uuid::Uuid::new_v4()))
@@ -124,7 +127,14 @@ async fn run_one(
         shutting_down.clone(),
     );
 
-    let ctx = TaskContext::new(db.clone(), config.clone(), &run.id, canceled.clone());
+    let ctx = TaskContext::new(
+        db.clone(),
+        config.clone(),
+        &run.id,
+        run.actor.clone(),
+        run.trigger,
+        canceled.clone(),
+    );
     ctx.info(format!(
         "run {} claimed by {} (attempt {})",
         run.id, worker_name, run.attempts

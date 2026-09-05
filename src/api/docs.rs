@@ -68,6 +68,7 @@ impl Modify for BabamulSecurityAddon {
         routes::tasks::get_task,
         routes::tasks::get_task_logs,
         routes::tasks::cancel_task,
+        routes::tasks::get_data_mutations,
         routes::filters::post_filter,
         routes::filters::patch_filter,
         routes::filters::validate_filter,

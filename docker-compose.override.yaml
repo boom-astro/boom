@@ -116,6 +116,10 @@ services:
       context: .
       dockerfile: Dockerfile
       target: dev
+      args:
+        # `git rev-parse HEAD` at compose time; blank if unset, which the
+        # ledger records as an unknown commit rather than a fake one.
+        BOOM_GIT_SHA: ${BOOM_GIT_SHA:-}
     working_dir: /app
     environment:
       BOOM_CATALOG_DATA_PATH: /app/data/catalogs

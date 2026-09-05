@@ -31,6 +31,11 @@ WORKDIR /app
 FROM base AS builder
 
 ARG ONNXRUNTIME_GPU_VERSION=1.24.4
+# Compiled into the binaries and recorded on every data mutation, so the ledger
+# can name the commit that produced a change. Absent when unset -- the ledger
+# records that honestly rather than inventing a value.
+ARG BOOM_GIT_SHA
+ENV BOOM_GIT_SHA=${BOOM_GIT_SHA}
 
 RUN python3 -m venv /opt/ort-py && \
     /opt/ort-py/bin/pip install --no-cache-dir "onnxruntime==${ONNXRUNTIME_GPU_VERSION}" && \

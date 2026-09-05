@@ -18,6 +18,7 @@
 
 pub mod catalog_ingest;
 pub mod context;
+pub mod ledger;
 pub mod logs;
 pub mod models;
 pub mod queue;

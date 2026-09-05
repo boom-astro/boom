@@ -105,6 +105,11 @@ pub async fn run(
     let download_dir = std::env::var(DOWNLOAD_DIR_ENV).unwrap_or_else(|_| "data/catalogs".into());
     let boompy_dir = std::env::var(BOOMPY_DIR_ENV).unwrap_or_else(|_| "boompy".into());
 
+    // Captured before `params` is moved into the ingest parameters; whether a
+    // run replaced a catalog or resumed one is exactly the kind of thing the
+    // ledger exists to answer later.
+    let drop_existing = params.drop_existing;
+
     let ingest = AddCatalogParams {
         catalog: params.catalog,
         drop_existing: params.drop_existing,
@@ -127,5 +132,34 @@ pub async fn run(
     if report.canceled {
         return Err(super::TaskError::Canceled);
     }
+
+    // Recorded only for a run that finished the catalog. A partial ingest has
+    // changed data too, but "what has been done to this collection" is only
+    // answerable once the answer is stable -- a resumed run appends the entry
+    // that covers the whole catalog.
+    if report.complete {
+        ctx.record_mutation(
+            super::ledger::MutationTarget {
+                database: ctx.db().name().to_string(),
+                collection: report.collection.clone(),
+                catalog: Some(report.catalog.clone()),
+                survey: None,
+            },
+            super::ledger::Operation::Ingest,
+            mongodb::bson::doc! {
+                "chunks_total": report.chunks_total as i64,
+                "chunks_ingested": report.chunks_ingested as i64,
+                "chunks_resumed": report.chunks_resumed as i64,
+                "records_read": report.records.read as i64,
+                "records_inserted": report.records.inserted as i64,
+                "records_skipped": report.records.skipped as i64,
+                "drop_existing": drop_existing,
+                "code_version": mongodb::bson::to_bson(&super::ledger::CodeVersion::current())
+                    .unwrap_or(mongodb::bson::Bson::Null),
+            },
+        )
+        .await;
+    }
+
     serde_json::to_value(&report).map_err(|e| super::TaskError::Failed(e.to_string()))
 }
