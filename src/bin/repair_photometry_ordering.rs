@@ -15,7 +15,7 @@ use mongodb::{
     options::{UpdateModifications, UpdateOneModel, WriteModel},
     Collection,
 };
-use tracing::{error, info, Level};
+use tracing::{error, info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
 /// Repair the photometry timeseries arrays in `<survey>_alerts_aux`.
@@ -243,9 +243,17 @@ async fn run_repair(
     pb.finish();
     let stats = outcome?;
 
+    let scanned = stats.iter().map(|s| s.scanned).sum::<u64>();
+    if processes > 1 && scanned < estimated {
+        warn!(
+            "scanned {} document(s) but {} holds about {}: the shards may not have covered it all, \
+             re-run with --processes 1",
+            scanned, aux_ns, estimated
+        );
+    }
     info!(
         survey = %survey,
-        scanned = stats.iter().map(|s| s.scanned).sum::<u64>(),
+        scanned,
         broken = stats.iter().map(|s| s.broken).sum::<u64>(),
         modified = stats.iter().map(|s| s.modified).sum::<u64>(),
         dry_run,

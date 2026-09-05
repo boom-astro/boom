@@ -327,6 +327,16 @@ async fn main() {
         warn!("  skipped _id {}", sample);
     }
 
+    let scanned = report.updated + report.missing + report.out_of_range;
+    if scanned < total {
+        error!(
+            "only {} of the {} matching document(s) were scanned: the shards did not cover the \
+             whole collection, re-run with --processes 1",
+            scanned, total
+        );
+        std::process::exit(1);
+    }
+
     if args.dry_run {
         info!("dry run: skipping index creation");
         return;
