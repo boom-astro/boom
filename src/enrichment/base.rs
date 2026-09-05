@@ -193,6 +193,16 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker>(
     let command_interval = worker_config.command_interval;
     let mut command_check_countdown = command_interval;
 
+    // Cap the RPOP at the configured batch size: pulling more would split it
+    // into a full chunk plus a mostly-padded one, paying a second full-cost
+    // GPU pass for the remainder (see `ZtfEnrichmentWorker::classify`).
+    let batch_size = NonZero::new(worker_config.enrichment.batch_size).ok_or_else(|| {
+        EnrichmentWorkerError::ConfigurationError(format!(
+            "enrichment batch_size must be non-zero for survey {}",
+            survey
+        ))
+    })?;
+
     let worker_id_attr = KeyValue::new("worker.id", worker_id.to_string());
     let survey_attr = KeyValue::new("survey", survey.clone());
     let active_attrs = [worker_id_attr.clone(), survey_attr.clone()];
@@ -240,7 +250,7 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker>(
                 // FnMut closure.
                 let mut con = con.clone();
                 let key: &str = &input_queue;
-                async move { con.rpop::<&str, Vec<i64>>(key, NonZero::new(1000)).await }
+                async move { con.rpop::<&str, Vec<i64>>(key, Some(batch_size)).await }
             },
         )
         .await
