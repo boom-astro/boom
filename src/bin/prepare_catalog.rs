@@ -3,17 +3,18 @@ use boom::{
     conf::{load_dotenv, AppConfig},
     utils::{
         data::{make_progress_bar, spawn_progress_logger},
-        db::create_index,
+        db::{create_index, join_tasks, merge_filters, range_shards, shard_field},
         parser::parse_positive_usize,
         spatial::Coordinates,
     },
 };
 use clap::Parser;
 use futures::TryStreamExt;
+use indicatif::ProgressBar;
 use mongodb::{
     bson::{doc, to_bson, Bson, Document},
     options::{UpdateOneModel, WriteModel},
-    Namespace,
+    Collection,
 };
 use tracing::{error, info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
@@ -66,6 +67,10 @@ struct Cli {
     #[arg(long, default_value_t = 1000, value_parser = parse_positive_usize)]
     batch_size: usize,
 
+    /// Number of parallel scan+update shards.
+    #[arg(long, default_value_t = 1, value_parser = parse_positive_usize)]
+    processes: usize,
+
     /// Recompute `coordinates` for documents that already have it.
     #[arg(long, default_value_t = false)]
     force: bool,
@@ -87,6 +92,8 @@ fn as_f64(value: Option<&Bson>) -> Option<f64> {
     }
 }
 
+const MAX_SAMPLES: usize = 10;
+
 #[derive(Default)]
 struct Report {
     updated: u64,
@@ -97,10 +104,93 @@ struct Report {
 
 impl Report {
     fn reject(&mut self, id: &Bson, reason: &str) {
-        if self.samples.len() < 10 {
+        if self.samples.len() < MAX_SAMPLES {
             self.samples.push(format!("{} ({})", id, reason));
         }
     }
+
+    fn merge(&mut self, other: Report) {
+        self.updated += other.updated;
+        self.missing += other.missing;
+        self.out_of_range += other.out_of_range;
+        for sample in other.samples {
+            if self.samples.len() < MAX_SAMPLES {
+                self.samples.push(sample);
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn process_shard(
+    collection: Collection<Document>,
+    filter: Document,
+    ra_field: String,
+    dec_field: String,
+    batch_size: usize,
+    dry_run: bool,
+    pb: ProgressBar,
+) -> Result<Report, mongodb::error::Error> {
+    let client = collection.client().clone();
+    let namespace = collection.namespace();
+    let mut cursor = collection
+        .find(filter)
+        .projection(doc! { &ra_field: 1, &dec_field: 1 })
+        .no_cursor_timeout(true)
+        .await?;
+
+    let mut report = Report::default();
+    let mut writes: Vec<WriteModel> = Vec::with_capacity(batch_size);
+
+    while let Some(doc) = cursor.try_next().await? {
+        pb.inc(1);
+
+        let id = match doc.get("_id") {
+            Some(id) => id.clone(),
+            None => continue,
+        };
+
+        let (ra, dec) = match (as_f64(doc.get(&ra_field)), as_f64(doc.get(&dec_field))) {
+            (Some(ra), Some(dec)) => (ra, dec),
+            _ => {
+                report.missing += 1;
+                report.reject(&id, "missing or non-numeric ra/dec");
+                continue;
+            }
+        };
+        if !(0.0..=360.0).contains(&ra) || !(-90.0..=90.0).contains(&dec) {
+            report.out_of_range += 1;
+            report.reject(&id, &format!("ra={} dec={} out of range", ra, dec));
+            continue;
+        }
+
+        report.updated += 1;
+        if dry_run {
+            continue;
+        }
+
+        let coordinates = to_bson(&Coordinates::new(ra, dec)).expect("coordinates serialize");
+        writes.push(WriteModel::UpdateOne(
+            UpdateOneModel::builder()
+                .namespace(namespace.clone())
+                .filter(doc! { "_id": id })
+                .update(doc! { "$set": { "coordinates": coordinates, "ra": ra, "dec": dec } })
+                .build(),
+        ));
+
+        if writes.len() >= batch_size {
+            client
+                .bulk_write(std::mem::take(&mut writes))
+                .ordered(false)
+                .await?;
+            writes = Vec::with_capacity(batch_size);
+        }
+    }
+
+    if !writes.is_empty() {
+        client.bulk_write(writes).ordered(false).await?;
+    }
+    Ok(report)
 }
 
 #[tokio::main]
@@ -147,18 +237,13 @@ async fn main() {
     }
 
     let collection = db.collection::<Document>(&args.catalog);
-    let namespace = Namespace {
-        db: db.name().to_string(),
-        coll: args.catalog.clone(),
-    };
-    let client = db.client();
 
-    let filter = if args.force {
+    let base_filter = if args.force {
         doc! {}
     } else {
         doc! { "coordinates": { "$exists": false } }
     };
-    let total = match collection.count_documents(filter.clone()).await {
+    let total = match collection.count_documents(base_filter.clone()).await {
         Ok(total) => total,
         Err(e) => {
             error!("error counting documents: {}", e);
@@ -175,92 +260,50 @@ async fn main() {
     let mut report = Report::default();
 
     if total > 0 {
-        let mut cursor = match collection
-            .find(filter)
-            .projection(doc! { &args.ra_field: 1, &args.dec_field: 1 })
-            .no_cursor_timeout(true)
-            .await
-        {
-            Ok(cursor) => cursor,
-            Err(e) => {
-                error!("error querying documents: {}", e);
-                std::process::exit(1);
-            }
-        };
+        let shard_field = shard_field(&collection).await;
+        let shards = range_shards(&collection, args.processes, shard_field).await;
+        info!(
+            "scanning {} in {} shard(s) cut on '{}'",
+            args.catalog,
+            shards.len(),
+            shard_field
+        );
 
         let label = format!("{} coordinates", args.catalog);
         let pb = make_progress_bar(total, label.clone());
         let logger = spawn_progress_logger(pb.clone(), label);
-        let mut writes: Vec<WriteModel> = Vec::with_capacity(args.batch_size);
 
-        loop {
-            let doc = match cursor.try_next().await {
-                Ok(Some(doc)) => doc,
-                Ok(None) => break,
-                Err(e) => {
-                    error!("error reading documents: {}", e);
-                    std::process::exit(1);
-                }
-            };
-            pb.inc(1);
-
-            let id = match doc.get("_id") {
-                Some(id) => id.clone(),
-                None => continue,
-            };
-
-            let (ra, dec) = match (
-                as_f64(doc.get(&args.ra_field)),
-                as_f64(doc.get(&args.dec_field)),
-            ) {
-                (Some(ra), Some(dec)) => (ra, dec),
-                _ => {
-                    report.missing += 1;
-                    report.reject(&id, "missing or non-numeric ra/dec");
-                    continue;
-                }
-            };
-            if !(0.0..=360.0).contains(&ra) || !(-90.0..=90.0).contains(&dec) {
-                report.out_of_range += 1;
-                report.reject(&id, &format!("ra={} dec={} out of range", ra, dec));
-                continue;
-            }
-
-            report.updated += 1;
-            if args.dry_run {
-                continue;
-            }
-
-            let coordinates = to_bson(&Coordinates::new(ra, dec)).expect("coordinates serialize");
-            writes.push(WriteModel::UpdateOne(
-                UpdateOneModel::builder()
-                    .namespace(namespace.clone())
-                    .filter(doc! { "_id": id })
-                    .update(doc! { "$set": { "coordinates": coordinates, "ra": ra, "dec": dec } })
-                    .build(),
-            ));
-
-            if writes.len() >= args.batch_size {
-                if let Err(e) = client
-                    .bulk_write(std::mem::take(&mut writes))
-                    .ordered(false)
-                    .await
-                {
-                    error!("error writing batch: {}", e);
-                    std::process::exit(1);
-                }
-                writes = Vec::with_capacity(args.batch_size);
-            }
+        let mut handles = Vec::with_capacity(shards.len());
+        for shard in &shards {
+            let collection = collection.clone();
+            let filter = merge_filters(&base_filter, shard);
+            let ra_field = args.ra_field.clone();
+            let dec_field = args.dec_field.clone();
+            let batch_size = args.batch_size;
+            let dry_run = args.dry_run;
+            let pb = pb.clone();
+            handles.push(tokio::spawn(async move {
+                process_shard(
+                    collection, filter, ra_field, dec_field, batch_size, dry_run, pb,
+                )
+                .await
+            }));
         }
 
-        if !writes.is_empty() {
-            if let Err(e) = client.bulk_write(writes).ordered(false).await {
-                error!("error writing final batch: {}", e);
+        let outcome = join_tasks(handles, "shard").await;
+        logger.abort();
+        pb.finish();
+        match outcome {
+            Ok(reports) => {
+                for shard_report in reports {
+                    report.merge(shard_report);
+                }
+            }
+            Err(e) => {
+                error!("error preparing {}: {}", args.catalog, e);
                 std::process::exit(1);
             }
         }
-        logger.abort();
-        pb.finish();
     }
 
     if args.dry_run {
@@ -282,6 +325,16 @@ async fn main() {
     }
     for sample in &report.samples {
         warn!("  skipped _id {}", sample);
+    }
+
+    let scanned = report.updated + report.missing + report.out_of_range;
+    if scanned < total {
+        error!(
+            "only {} of the {} matching document(s) were scanned: the shards did not cover the \
+             whole collection, re-run with --processes 1",
+            scanned, total
+        );
+        std::process::exit(1);
     }
 
     if args.dry_run {
