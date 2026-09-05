@@ -16,11 +16,13 @@
 //! bodies are therefore written to be **resumable**: re-running one continues
 //! rather than repeating.
 
+pub mod batch;
 pub mod catalog_ingest;
 pub mod context;
 pub mod ledger;
 pub mod logs;
 pub mod migrate_fp_flux;
+pub mod migrate_snr;
 pub mod models;
 pub mod queue;
 
@@ -61,7 +63,7 @@ pub struct TaskSpec {
 }
 
 // TODO: port the remaining data-mutating binaries -- `enrich_reprocess`,
-// `migrate_snr`, `reprocess_crossmatch`, `copy_cutouts`, `prepare_catalog` --
+// `reprocess_crossmatch`, `copy_cutouts`, `prepare_catalog` --
 // so that operators stop running them over SSH too. Each becomes a body plus an
 // arm in `dispatch`; their existing Valkey work queues already give them the
 // resumability a task needs, so what they mainly want is the params struct and
@@ -85,6 +87,15 @@ pub const TASKS: &[TaskSpec] = &[
         idempotent: true,
         // Only with drop_existing, which the client has to ask for explicitly.
         destructive: true,
+    },
+    TaskSpec {
+        id: migrate_snr::TASK_TYPE,
+        title: "Recompute signal-to-noise for ZTF and LSST",
+        description: "Recompute snr_psf, snr_ap and (for ZTF) apFlux/apFluxErr on alerts \
+                      and their lightcurves, from the stored photometry.",
+        // Derived from stored photometry, never from a previous run's output.
+        idempotent: true,
+        destructive: false,
     },
     TaskSpec {
         id: migrate_fp_flux::TASK_TYPE,
@@ -142,6 +153,11 @@ pub fn validate_params(task_type: &str, params: &serde_json::Value) -> Result<()
                 .map(|_| ())
                 .map_err(|e| TaskError::InvalidParams(e.to_string()))
         }
+        migrate_snr::TASK_TYPE => {
+            let parsed: migrate_snr::MigrateSnrParams = serde_json::from_value(params.clone())
+                .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            parsed.validate_params().map_err(TaskError::InvalidParams)
+        }
         migrate_fp_flux::TASK_TYPE => {
             let parsed: migrate_fp_flux::MigrateFpFluxParams =
                 serde_json::from_value(params.clone())
@@ -173,6 +189,15 @@ pub fn single_flight_key(
         // rewrite the same documents with the same pipeline, wasting a large
         // amount of write throughput for no benefit.
         migrate_fp_flux::TASK_TYPE => Some(doc! {}),
+        // Keyed by survey: migrating ZTF and LSST at once is fine, but two runs
+        // over the same survey would rewrite the same documents.
+        migrate_snr::TASK_TYPE => Some(
+            params
+                .get("survey")
+                .and_then(|s| s.as_str())
+                .map(|survey| doc! { "survey": survey })
+                .unwrap_or_default(),
+        ),
         _ => None,
     }
 }
@@ -191,6 +216,11 @@ pub async fn dispatch(
             let params = catalog_ingest::CatalogIngestParams::deserialize(params)
                 .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
             catalog_ingest::run(ctx, params).await
+        }
+        migrate_snr::TASK_TYPE => {
+            let params = migrate_snr::MigrateSnrParams::deserialize(params)
+                .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            migrate_snr::run(ctx, params).await
         }
         migrate_fp_flux::TASK_TYPE => {
             let params = migrate_fp_flux::MigrateFpFluxParams::deserialize(params)

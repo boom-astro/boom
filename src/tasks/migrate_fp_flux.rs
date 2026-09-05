@@ -18,6 +18,7 @@
 //! (which would kill the whole worker and every other run on it), and progress
 //! is reported to the run rather than only to a terminal progress bar.
 
+use super::batch::{run_batched_update, BatchError, PROGRESS_EVERY};
 use super::context::TaskContext;
 use super::ledger::{MutationTarget, Operation};
 use crate::utils::lightcurves::ZTF_ZP;
@@ -36,17 +37,6 @@ pub const TASK_TYPE: &str = "migrate_fp_flux";
 const COLLECTION: &str = "ZTF_alerts_aux";
 
 const FLUXERR2MAGERR_FACTOR: f64 = 2.5_f64 / std::f64::consts::LN_10;
-
-/// How often to publish progress while a migration runs.
-const PROGRESS_EVERY: u64 = 50_000;
-
-#[derive(thiserror::Error, Debug)]
-pub enum MigrateError {
-    #[error(transparent)]
-    Mongo(#[from] mongodb::error::Error),
-    #[error("canceled after {modified} documents")]
-    Canceled { modified: i64 },
-}
 
 /// What a client may ask for.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -87,7 +77,7 @@ pub async fn run(
     let modified = migrate(ctx, &collection, params.batch_size)
         .await
         .map_err(|e| match e {
-            MigrateError::Canceled { .. } => super::TaskError::Canceled,
+            BatchError::Canceled { .. } => super::TaskError::Canceled,
             other => super::TaskError::Failed(other.to_string()),
         })?;
 
@@ -125,85 +115,11 @@ pub async fn run(
     }))
 }
 
-async fn run_batched_update(
-    ctx: &TaskContext,
-    collection: &mongodb::Collection<Document>,
-    filter: Document,
-    pipeline: Vec<Document>,
-    batch_size: usize,
-    estimated_total: u64,
-    label: &str,
-) -> Result<i64, MigrateError> {
-    let mut cursor = collection
-        .find(filter)
-        .projection(doc! { "_id": 1 })
-        .no_cursor_timeout(true)
-        .await?;
-
-    let mut ids: Vec<Bson> = Vec::with_capacity(batch_size);
-    let mut total_modified: i64 = 0;
-    let mut seen: u64 = 0;
-    let mut last_reported: u64 = 0;
-
-    while let Some(d) = cursor.try_next().await? {
-        let Some(id) = d.get("_id") else {
-            // A document without an _id cannot exist in Mongo; skipping rather
-            // than unwrapping keeps a malformed cursor row from killing a
-            // migration that is otherwise fine.
-            continue;
-        };
-        ids.push(id.clone());
-
-        if ids.len() >= batch_size {
-            // Checked between batches, not mid-batch: an update_many is atomic
-            // per document, so a batch boundary is the only point where
-            // stopping leaves a state that is easy to describe.
-            if ctx.is_canceled() {
-                ctx.warn(format!(
-                    "{label} canceled after {total_modified} documents; \
-                     the work already done stands, and re-running resumes it \
-                     because the migration recomputes from the raw fields"
-                ));
-                return Err(MigrateError::Canceled {
-                    modified: total_modified,
-                });
-            }
-
-            let n = ids.len() as u64;
-            let batch_filter = doc! { "_id": { "$in": &ids } };
-            let result = collection
-                .update_many(batch_filter, pipeline.clone())
-                .await?;
-            total_modified += result.modified_count as i64;
-            seen += n;
-            ids.clear();
-
-            if seen - last_reported >= PROGRESS_EVERY {
-                last_reported = seen;
-                ctx.progress(
-                    seen,
-                    estimated_total.max(seen),
-                    format!("{label}: {total_modified} documents updated"),
-                )
-                .await;
-            }
-        }
-    }
-
-    if !ids.is_empty() {
-        let batch_filter = doc! { "_id": { "$in": &ids } };
-        let result = collection.update_many(batch_filter, pipeline).await?;
-        total_modified += result.modified_count as i64;
-    }
-
-    Ok(total_modified)
-}
-
 async fn migrate(
     ctx: &TaskContext,
     collection: &mongodb::Collection<Document>,
     batch_size: usize,
-) -> Result<i64, MigrateError> {
+) -> Result<i64, BatchError> {
     let estimated_count = collection.estimated_document_count().await?;
     ctx.info(format!(
         "migrating fp_hists in {COLLECTION}: ~{estimated_count} documents"
@@ -306,7 +222,7 @@ async fn migrate(
 async fn validate(
     ctx: &TaskContext,
     collection: &mongodb::Collection<Document>,
-) -> Result<(), MigrateError> {
+) -> Result<(), BatchError> {
     // here we want to validate that where the raw values are valid,
     // the psfFlux and psfFluxErr were correctly updated. We can do this by
     // taking the newly added psfFlux and psfFluxErr and checking that we
@@ -393,7 +309,7 @@ async fn validate(
         // Validation only reads, so stopping anywhere is safe.
         if ctx.is_canceled() {
             ctx.warn("validation canceled");
-            return Err(MigrateError::Canceled { modified: 0 });
+            return Err(BatchError::Canceled { modified: 0 });
         }
         let validation = d.get("validation").unwrap().as_array().unwrap();
         for fp in validation {
