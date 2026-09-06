@@ -15,7 +15,7 @@ use futures::TryStreamExt;
 use indicatif::ProgressBar;
 use mongodb::{
     bson::{doc, Bson, Document},
-    options::{UpdateModifications, UpdateOneModel, WriteModel},
+    options::{Hint, UpdateModifications, UpdateOneModel, WriteModel},
     Collection,
 };
 use std::collections::HashSet;
@@ -257,10 +257,15 @@ async fn run_repair(
     let fields = timeseries_fields(survey);
 
     info!("counting the documents in {}", aux_ns);
-    let total = aux_collection.count_documents(doc! {}).await?;
+    // The hint turns the empty-filter count into an index-only COUNT_SCAN; without it
+    // the server collection-scans terabytes.
+    let total = aux_collection
+        .count_documents(doc! {})
+        .hint(Hint::Keys(doc! { "_id": 1 }))
+        .await?;
 
     let shard_field = shard_field(&aux_collection).await;
-    let shards = range_shards(&aux_collection, processes, shard_field).await;
+    let shards = range_shards(&aux_collection, processes, shard_field, &Document::new()).await;
     let shard_count = shards.len();
     info!(
         "scanning {} document(s) in {} across {} shard(s) cut on '{}'",

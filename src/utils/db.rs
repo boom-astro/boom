@@ -6,7 +6,7 @@ use mongodb::{
     Collection, Database, IndexModel,
 };
 use serde::Serialize;
-use tracing::{error, instrument, warn};
+use tracing::{error, info, instrument, warn};
 
 use crate::utils::enums::Survey;
 
@@ -318,19 +318,30 @@ pub async fn range_shards(
     collection: &Collection<Document>,
     parts: usize,
     field: &str,
+    base_filter: &Document,
 ) -> Vec<Document> {
     if parts <= 1 {
         return vec![Document::new()];
     }
-    let sample_size = (parts * 20).min(10_000);
-    let bounds: Vec<Bson> = match collection
-        .aggregate(vec![
-            doc! { "$sample": { "size": sample_size as i64 } },
-            doc! { "$project": { field: 1 } },
-            doc! { "$sort": { field: 1 } },
-        ])
-        .await
-    {
+    // $sample stays first to keep its random-cursor plan, and is drawn larger when a
+    // $match is going to thin it.
+    let sample_size = if base_filter.is_empty() {
+        (parts * 20).min(10_000)
+    } else {
+        10_000
+    };
+    info!(
+        "sampling {} bounds on '{}' to cut {} shards",
+        sample_size, field, parts
+    );
+    let mut pipeline = vec![doc! { "$sample": { "size": sample_size as i64 } }];
+    if !base_filter.is_empty() {
+        pipeline.push(doc! { "$match": base_filter.clone() });
+    }
+    pipeline.push(doc! { "$project": { field: 1 } });
+    pipeline.push(doc! { "$sort": { field: 1 } });
+
+    let bounds: Vec<Bson> = match collection.aggregate(pipeline).await {
         Ok(cursor) => match cursor.try_collect::<Vec<Document>>().await {
             Ok(docs) => docs.iter().filter_map(|d| d.get(field).cloned()).collect(),
             Err(e) => {
@@ -353,10 +364,16 @@ pub async fn range_shards(
         );
         return vec![Document::new()];
     }
-    let step = bounds.len() / parts;
-    let cuts: Vec<Bson> = (1..parts).map(|i| bounds[i * step].clone()).collect();
+    shard_filters(field, &bounds, parts)
+}
 
-    let mut shards = Vec::with_capacity(cuts.len() + 1);
+/// Contiguous filters covering everything, from `parts` cut points sampled out of
+/// `bounds`. Expects `parts >= 2` and `bounds.len() >= parts`.
+fn shard_filters(field: &str, bounds: &[Bson], parts: usize) -> Vec<Document> {
+    let step = bounds.len() / parts;
+    let cuts: Vec<&Bson> = (1..parts).map(|i| &bounds[i * step]).collect();
+
+    let mut shards = Vec::with_capacity(parts);
     shards.push(doc! { "$or": [
         doc! { field: { "$lt": cuts[0].clone() } },
         doc! { field: { "$exists": false } },
@@ -410,5 +427,148 @@ pub async fn join_tasks<T>(
     match first_err {
         Some(e) => Err(e),
         None => Ok(results),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bounds(values: &[i32]) -> Vec<Bson> {
+        values.iter().map(|v| Bson::Int32(*v)).collect()
+    }
+
+    fn lower(shard: &Document, field: &str) -> Option<Bson> {
+        shard.get_document(field).ok()?.get("$gte").cloned()
+    }
+
+    fn upper(shard: &Document, field: &str) -> Option<Bson> {
+        match shard.get_array("$or") {
+            Ok(branches) => branches[0]
+                .as_document()?
+                .get_document(field)
+                .ok()?
+                .get("$lt")
+                .cloned(),
+            Err(_) => shard.get_document(field).ok()?.get("$lt").cloned(),
+        }
+    }
+
+    #[test]
+    fn shard_filters_builds_one_filter_per_part() {
+        let b = bounds(&(0..100).collect::<Vec<_>>());
+        for parts in 2..10 {
+            assert_eq!(
+                shard_filters("_id", &b, parts).len(),
+                parts,
+                "parts={}",
+                parts
+            );
+        }
+    }
+
+    #[test]
+    fn shard_filters_covers_every_value_without_a_gap() {
+        let b = bounds(&(0..100).collect::<Vec<_>>());
+        for parts in 2..10 {
+            let shards = shard_filters("_id", &b, parts);
+            assert!(
+                lower(&shards[0], "_id").is_none(),
+                "the first shard is open-ended"
+            );
+            assert!(
+                upper(shards.last().unwrap(), "_id").is_none(),
+                "the last shard is open-ended"
+            );
+            for pair in shards.windows(2) {
+                assert_eq!(
+                    upper(&pair[0], "_id"),
+                    lower(&pair[1], "_id"),
+                    "parts={}, a value falls between two shards",
+                    parts
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn shard_filters_first_shard_also_takes_documents_without_the_field() {
+        let shards = shard_filters("created_at", &bounds(&[1, 2, 3, 4]), 2);
+        let branches = shards[0].get_array("$or").expect("first shard is an $or");
+        assert_eq!(branches.len(), 2);
+        assert_eq!(
+            branches[1].as_document().unwrap(),
+            &doc! { "created_at": { "$exists": false } }
+        );
+    }
+
+    #[test]
+    fn shard_filters_handles_a_sample_as_small_as_the_part_count() {
+        let shards = shard_filters("_id", &bounds(&[10, 20, 30]), 3);
+        assert_eq!(shards.len(), 3);
+        assert_eq!(upper(&shards[0], "_id"), Some(Bson::Int32(20)));
+        assert_eq!(lower(&shards[2], "_id"), Some(Bson::Int32(30)));
+    }
+
+    #[test]
+    fn shard_filters_keeps_covering_everything_when_cuts_repeat() {
+        let shards = shard_filters("_id", &bounds(&[7, 7, 7, 7]), 4);
+        assert_eq!(shards.len(), 4);
+        for pair in shards.windows(2) {
+            assert_eq!(upper(&pair[0], "_id"), lower(&pair[1], "_id"));
+        }
+    }
+
+    #[test]
+    fn merge_filters_keeps_whichever_side_is_present() {
+        let base = doc! { "coordinates": { "$exists": false } };
+        let shard = doc! { "_id": { "$gte": 1 } };
+        assert_eq!(merge_filters(&base, &Document::new()), base);
+        assert_eq!(merge_filters(&Document::new(), &shard), shard);
+        assert_eq!(
+            merge_filters(&base, &shard),
+            doc! { "$and": [base.clone(), shard.clone()] }
+        );
+        assert_eq!(
+            merge_filters(&Document::new(), &Document::new()),
+            Document::new()
+        );
+    }
+
+    fn io_error(message: &str) -> mongodb::error::Error {
+        std::io::Error::other(message.to_string()).into()
+    }
+
+    #[tokio::test]
+    async fn join_tasks_returns_every_value_when_all_succeed() {
+        let handles = vec![
+            tokio::spawn(async { Ok::<i32, mongodb::error::Error>(1) }),
+            tokio::spawn(async { Ok::<i32, mongodb::error::Error>(2) }),
+        ];
+        assert_eq!(join_tasks(handles, "task").await.unwrap(), vec![1, 2]);
+    }
+
+    #[tokio::test]
+    async fn join_tasks_reports_the_first_error() {
+        let handles = vec![
+            tokio::spawn(async { Err(io_error("first")) }),
+            tokio::spawn(async { Err(io_error("second")) }),
+        ];
+        let error = join_tasks::<i32>(handles, "task").await.unwrap_err();
+        assert!(error.to_string().contains("first"), "got {}", error);
+    }
+
+    #[tokio::test]
+    async fn join_tasks_does_not_swallow_a_panicking_task() {
+        let handles = vec![
+            tokio::spawn(async { Ok::<i32, mongodb::error::Error>(1) }),
+            tokio::spawn(async {
+                let ran = false;
+                assert!(ran, "panicking on purpose");
+                Ok::<i32, mongodb::error::Error>(2)
+            }),
+        ];
+        let error = join_tasks(handles, "task").await.unwrap_err();
+        assert!(matches!(error, TaskError::Join(_)), "got {:?}", error);
     }
 }

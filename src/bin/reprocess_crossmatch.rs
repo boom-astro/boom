@@ -559,7 +559,7 @@ async fn run_catalog_driven(
     let temp_field = format!("cross_matches.{}_temp", catalog_config.catalog);
     let run_start_jd = Time::now().to_jd();
     let shard_field = shard_field(&aux_collection).await;
-    let shards = range_shards(&aux_collection, processes, shard_field).await;
+    let shards = range_shards(&aux_collection, processes, shard_field, &Document::new()).await;
     info!(
         "[catalog\u{2192}{}] cleanup passes sharded on '{}' into {} ranges",
         catalog_config.catalog,

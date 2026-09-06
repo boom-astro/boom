@@ -274,7 +274,7 @@ async fn main() {
 
     if total > 0 {
         let shard_field = shard_field(&collection).await;
-        let shards = range_shards(&collection, args.processes, shard_field).await;
+        let shards = range_shards(&collection, args.processes, shard_field, &base_filter).await;
         shard_count = shards.len();
         info!(
             "scanning {} in {} shard(s) cut on '{}'",
