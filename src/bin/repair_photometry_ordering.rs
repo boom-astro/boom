@@ -333,7 +333,7 @@ async fn run_repair(
     );
 
     if scanned < total {
-        if processes > 1 {
+        if shard_count > 1 {
             error!(
                 "scanned {} of the {} document(s) in {}: the shards did not cover it all, re-run \
                  with --processes 1",

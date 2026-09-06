@@ -270,10 +270,12 @@ async fn main() {
     );
 
     let mut report = Report::default();
+    let mut shard_count = 1;
 
     if total > 0 {
         let shard_field = shard_field(&collection).await;
         let shards = range_shards(&collection, args.processes, shard_field).await;
+        shard_count = shards.len();
         info!(
             "scanning {} in {} shard(s) cut on '{}'",
             args.catalog,
@@ -340,8 +342,8 @@ async fn main() {
     }
 
     let scanned = report.updated + report.missing + report.out_of_range;
-    let coverage_failure = scanned < total && args.processes > 1;
-    if scanned < total && args.processes == 1 {
+    let coverage_failure = scanned < total && shard_count > 1;
+    if scanned < total && shard_count == 1 {
         warn!(
             "scanned {} of the {} matching document(s) counted before the pass: documents were \
              modified or deleted while it ran",
