@@ -474,6 +474,29 @@ mod tests {
     }
 
     #[test]
+    fn timeseries_fields_matches_the_alert_aux_for_update_structs() {
+        for survey in [Survey::Ztf, Survey::Lsst, Survey::Decam, Survey::Winter] {
+            let path = format!(
+                "{}/src/alert/{}.rs",
+                env!("CARGO_MANIFEST_DIR"),
+                survey.to_string().to_lowercase()
+            );
+            let source = std::fs::read_to_string(&path).unwrap();
+            let (_, block) = source.split_once("struct AlertAuxForUpdate {").unwrap();
+            let fields: Vec<&str> = block[..block.find('}').unwrap()]
+                .lines()
+                .filter_map(|line| {
+                    line.trim()
+                        .strip_prefix("pub ")?
+                        .split_once(": Vec<LightcurveJdOnly>")
+                        .map(|(name, _)| name)
+                })
+                .collect();
+            assert_eq!(timeseries_fields(&survey), fields.as_slice(), "{}", path);
+        }
+    }
+
+    #[test]
     fn reordering_alone_deletes_nothing() {
         let stats = inspect_series(&series(&[2.0, 1.0]), "fp_hists");
         assert_eq!(stats.broken, 1);
