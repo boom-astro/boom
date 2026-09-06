@@ -4,7 +4,8 @@ use boom::{
     utils::{
         data::{make_progress_bar, spawn_progress_logger},
         db::{
-            create_index, join_tasks, merge_filters, range_shards, shard_field, CURSOR_BATCH_SIZE,
+            check_shard_coverage, collection_exists, create_index, exact_count, join_tasks,
+            merge_filters, range_shards, shard_field, CURSOR_BATCH_SIZE,
         },
         parser::parse_positive_usize,
         spatial::Coordinates,
@@ -15,7 +16,7 @@ use futures::TryStreamExt;
 use indicatif::ProgressBar;
 use mongodb::{
     bson::{doc, to_bson, Bson, Document},
-    options::{Hint, UpdateOneModel, WriteModel},
+    options::{UpdateOneModel, WriteModel},
     Collection,
 };
 use tracing::{error, info, warn, Level};
@@ -95,15 +96,6 @@ fn as_f64(value: Option<&Bson>) -> Option<f64> {
 }
 
 const MAX_SAMPLES: usize = 10;
-
-fn fail_incomplete_coverage(scanned: u64, total: u64) -> ! {
-    error!(
-        "only {} of the {} matching document(s) were scanned: the shards may not have covered the \
-         whole collection, re-run with --processes 1",
-        scanned, total
-    );
-    std::process::exit(1);
-}
 
 #[derive(Default)]
 struct Report {
@@ -231,16 +223,15 @@ async fn main() {
         }
     };
 
-    match db.list_collection_names().await {
-        Ok(names) => {
-            if !names.iter().any(|n| n == &args.catalog) {
-                error!(
-                    "collection {} does not exist in database {}, import it first",
-                    args.catalog,
-                    db.name()
-                );
-                std::process::exit(1);
-            }
+    match collection_exists(&db, &args.catalog).await {
+        Ok(true) => {}
+        Ok(false) => {
+            error!(
+                "collection {} does not exist in database {}, import it first",
+                args.catalog,
+                db.name()
+            );
+            std::process::exit(1);
         }
         Err(e) => {
             error!("error listing collections: {}", e);
@@ -255,31 +246,16 @@ async fn main() {
     } else {
         doc! { "coordinates": { "$exists": false } }
     };
-    // `coordinates` is not indexed, so counting the documents that still need one would
-    // collection-scan the catalog once before the pass that does the work. --force targets
-    // everything, which the _id index counts exactly.
+    // Counting the non-indexed coordinates filter would collection-scan the catalog twice.
     let total = if args.force {
-        info!("counting the documents in {}", args.catalog);
-        match collection
-            .count_documents(doc! {})
-            .hint(Hint::Keys(doc! { "_id": 1 }))
-            .await
-        {
-            Ok(total) => total,
-            Err(e) => {
-                error!("error counting documents: {}", e);
-                std::process::exit(1);
-            }
-        }
+        exact_count(&collection).await
     } else {
-        match collection.estimated_document_count().await {
-            Ok(estimated) => estimated,
-            Err(e) => {
-                error!("error estimating the document count: {}", e);
-                std::process::exit(1);
-            }
-        }
-    };
+        collection.estimated_document_count().await
+    }
+    .unwrap_or_else(|e| {
+        error!("error counting documents: {}", e);
+        std::process::exit(1);
+    });
     if args.force {
         info!("{}: {} document(s) to process", args.catalog, total);
     } else {
@@ -362,19 +338,12 @@ async fn main() {
     }
 
     let scanned = report.updated + report.missing + report.out_of_range;
-    let coverage_failure = args.force && scanned < total && shard_count > 1;
-    if args.force && scanned < total && shard_count == 1 {
-        warn!(
-            "scanned {} of the {} matching document(s) counted before the pass: documents were \
-             modified or deleted while it ran",
-            scanned, total
-        );
-    }
+    let covered = !args.force || check_shard_coverage(scanned, total, shard_count);
 
     if args.dry_run {
         info!("dry run: skipping index creation");
-        if coverage_failure {
-            fail_incomplete_coverage(scanned, total);
+        if !covered {
+            std::process::exit(1);
         }
         return;
     }
@@ -391,8 +360,8 @@ async fn main() {
     }
     info!("2dsphere index on coordinates.radec_geojson ready");
 
-    if coverage_failure {
-        fail_incomplete_coverage(scanned, total);
+    if !covered {
+        std::process::exit(1);
     }
 
     info!(

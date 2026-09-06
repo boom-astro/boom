@@ -2,7 +2,7 @@ use chrono::NaiveDate;
 use futures::TryStreamExt;
 use mongodb::{
     bson::{doc, to_document, Bson, Document},
-    options::IndexOptions,
+    options::{Hint, IndexOptions},
     Collection, Database, IndexModel,
 };
 use serde::Serialize;
@@ -291,8 +291,20 @@ pub fn fetch_timeseries_op(
 // region on disk rather than jumping around it.
 // -----------------------------------------------------------------------------
 
-/// Cursor batch size for the sharded scans built on the helpers below.
 pub const CURSOR_BATCH_SIZE: u32 = 10_000;
+
+/// Without the hint the empty-filter count collection-scans instead of counting the _id index.
+pub async fn exact_count(collection: &Collection<Document>) -> Result<u64, mongodb::error::Error> {
+    info!("counting the documents in {}", collection.namespace());
+    collection
+        .count_documents(doc! {})
+        .hint(Hint::Keys(doc! { "_id": 1 }))
+        .await
+}
+
+pub async fn collection_exists(db: &Database, name: &str) -> Result<bool, mongodb::error::Error> {
+    Ok(db.list_collection_names().await?.iter().any(|n| n == name))
+}
 
 /// `created_at` is exactly insertion order, but it is only indexed if someone created
 /// that index; `_id` always is, and both ZTF object ids and LSST diaObject ids happen
@@ -323,8 +335,7 @@ pub async fn range_shards(
     if parts <= 1 {
         return vec![Document::new()];
     }
-    // $sample stays first to keep its random-cursor plan, and is drawn larger when a
-    // $match is going to thin it.
+    // Behind a $match, $sample loses its random-cursor plan and collection-scans.
     let sample_size = if base_filter.is_empty() {
         (parts * 20).min(10_000)
     } else {
@@ -367,8 +378,7 @@ pub async fn range_shards(
     shard_filters(field, &bounds, parts)
 }
 
-/// Contiguous filters covering everything, from `parts` cut points sampled out of
-/// `bounds`. Expects `parts >= 2` and `bounds.len() >= parts`.
+/// Contiguous filters covering everything; expects `parts >= 2` and `bounds.len() >= parts`.
 fn shard_filters(field: &str, bounds: &[Bson], parts: usize) -> Vec<Document> {
     let step = bounds.len() / parts;
     let cuts: Vec<&Bson> = (1..parts).map(|i| &bounds[i * step]).collect();
@@ -383,6 +393,27 @@ fn shard_filters(field: &str, bounds: &[Bson], parts: usize) -> Vec<Document> {
     }
     shards.push(doc! { field: { "$gte": cuts[cuts.len() - 1].clone() } });
     shards
+}
+
+/// False: the shards did not cover every document counted before the pass.
+pub fn check_shard_coverage(scanned: u64, total: u64, shard_count: usize) -> bool {
+    if scanned >= total {
+        true
+    } else if shard_count > 1 {
+        error!(
+            "only {} of the {} document(s) counted before the pass were scanned: the shards did \
+             not cover them all, re-run with --processes 1",
+            scanned, total
+        );
+        false
+    } else {
+        warn!(
+            "scanned {} of the {} document(s) counted before the pass: documents were modified \
+             or deleted while it ran",
+            scanned, total
+        );
+        true
+    }
 }
 
 pub fn merge_filters(base: &Document, shard: &Document) -> Document {
@@ -403,8 +434,7 @@ pub enum TaskError {
     Join(#[from] tokio::task::JoinError),
 }
 
-/// A panicking task is a failure like any other: ignoring its `JoinError` reports a run
-/// that only covered part of the collection as a success.
+/// Ignoring a JoinError would report a run that covered only part of the collection as a success.
 pub async fn join_tasks<T>(
     handles: Vec<tokio::task::JoinHandle<Result<T, mongodb::error::Error>>>,
     label: &str,

@@ -3,8 +3,8 @@ use boom::{
     utils::{
         data::{make_progress_bar, spawn_progress_logger},
         db::{
-            join_tasks, range_shards, shard_field, update_timeseries_op, TaskError,
-            CURSOR_BATCH_SIZE,
+            check_shard_coverage, collection_exists, exact_count, join_tasks, range_shards,
+            shard_field, update_timeseries_op, TaskError, CURSOR_BATCH_SIZE,
         },
         enums::Survey,
         parser::parse_positive_usize,
@@ -15,7 +15,7 @@ use futures::TryStreamExt;
 use indicatif::ProgressBar;
 use mongodb::{
     bson::{doc, Bson, Document},
-    options::{Hint, UpdateModifications, UpdateOneModel, WriteModel},
+    options::{UpdateModifications, UpdateOneModel, WriteModel},
     Collection,
 };
 use std::collections::HashSet;
@@ -72,9 +72,6 @@ struct Cli {
     dry_run: bool,
 }
 
-/// Timeseries fields stored in `<survey>_alerts_aux` that must be strictly
-/// increasing by `jd`. Source of truth: the `AlertAuxForUpdate` structs in
-/// `src/alert/<survey>.rs`.
 fn timeseries_fields(survey: &Survey) -> &'static [&'static str] {
     match survey {
         Survey::Ztf => &["prv_candidates", "prv_nondetections", "fp_hists"],
@@ -103,9 +100,7 @@ impl FieldStats {
     }
 }
 
-/// Mirrors what `update_timeseries_op` does server-side: drop points whose `jd`
-/// is not a finite number, keep only the first occurrence of a duplicated `jd`,
-/// sort the rest. `broken` is 0 or 1, so summing it counts documents.
+/// Mirrors `update_timeseries_op`: drops non-finite jd points, keeps the first of duplicated jds.
 fn inspect_series(doc: &Document, field: &str) -> FieldStats {
     let mut stats = FieldStats::default();
     let arr = match doc.get_array(field) {
@@ -129,7 +124,8 @@ fn inspect_series(doc: &Document, field: &str) -> FieldStats {
             stats.dropped_invalid += 1;
             continue;
         }
-        if !seen.insert(if jd == 0.0 { 0.0f64 } else { jd }.to_bits()) {
+        let key = if jd == 0.0 { 0.0f64 } else { jd };
+        if !seen.insert(key.to_bits()) {
             stats.dropped_duplicate += 1;
             continue;
         }
@@ -138,9 +134,7 @@ fn inspect_series(doc: &Document, field: &str) -> FieldStats {
         }
         prev = Some(jd);
     }
-    if out_of_order || stats.dropped() > 0 {
-        stats.broken = 1;
-    }
+    stats.broken = (out_of_order || stats.dropped() > 0) as u64;
     stats
 }
 
@@ -157,6 +151,26 @@ struct ShardStats {
     broken: u64,
     modified: u64,
     per_field: Vec<FieldStats>,
+}
+
+impl ShardStats {
+    fn new(fields: usize) -> Self {
+        ShardStats {
+            scanned: 0,
+            broken: 0,
+            modified: 0,
+            per_field: vec![FieldStats::default(); fields],
+        }
+    }
+
+    fn merge(&mut self, other: &ShardStats) {
+        self.scanned += other.scanned;
+        self.broken += other.broken;
+        self.modified += other.modified;
+        for (acc, field) in self.per_field.iter_mut().zip(&other.per_field) {
+            acc.merge(field);
+        }
+    }
 }
 
 async fn scan_and_repair_shard(
@@ -244,8 +258,7 @@ async fn flush_batch(
     Ok(result.modified_count as u64)
 }
 
-/// `Ok(false)` means the shards did not cover the whole collection: what they saw was
-/// repaired, but the run is not a clean pass over it.
+/// `Ok(false)`: the shards did not cover the whole collection; what they saw was still repaired.
 async fn run_repair(
     survey: &Survey,
     aux_collection: Collection<Document>,
@@ -256,13 +269,7 @@ async fn run_repair(
     let aux_ns = aux_collection.namespace();
     let fields = timeseries_fields(survey);
 
-    info!("counting the documents in {}", aux_ns);
-    // The hint turns the empty-filter count into an index-only COUNT_SCAN; without it
-    // the server collection-scans terabytes.
-    let total = aux_collection
-        .count_documents(doc! {})
-        .hint(Hint::Keys(doc! { "_id": 1 }))
-        .await?;
+    let total = exact_count(&aux_collection).await?;
 
     let shard_field = shard_field(&aux_collection).await;
     let shards = range_shards(&aux_collection, processes, shard_field, &Document::new()).await;
@@ -291,28 +298,33 @@ async fn run_repair(
     pb.finish();
     let stats = outcome?;
 
-    let scanned = stats.iter().map(|s| s.scanned).sum::<u64>();
-    let mut per_field = vec![FieldStats::default(); fields.len()];
+    let mut totals = ShardStats::new(fields.len());
     for shard in &stats {
-        for (acc, shard_total) in per_field.iter_mut().zip(&shard.per_field) {
-            acc.merge(shard_total);
-        }
+        totals.merge(shard);
     }
-    for (field, totals) in fields.iter().copied().zip(&per_field) {
-        if totals.broken == 0 {
+    for (field, f_stats) in fields.iter().copied().zip(&totals.per_field) {
+        if f_stats.broken == 0 {
             continue;
         }
         info!(
             field,
-            documents = totals.broken,
-            points_dropped_invalid = totals.dropped_invalid,
-            points_dropped_duplicate = totals.dropped_duplicate,
+            documents = f_stats.broken,
+            points_dropped_invalid = f_stats.dropped_invalid,
+            points_dropped_duplicate = f_stats.dropped_duplicate,
             "field needs repair"
         );
     }
 
-    let dropped_invalid = per_field.iter().map(|f| f.dropped_invalid).sum::<u64>();
-    let dropped_duplicate = per_field.iter().map(|f| f.dropped_duplicate).sum::<u64>();
+    let dropped_invalid = totals
+        .per_field
+        .iter()
+        .map(|f| f.dropped_invalid)
+        .sum::<u64>();
+    let dropped_duplicate = totals
+        .per_field
+        .iter()
+        .map(|f| f.dropped_duplicate)
+        .sum::<u64>();
     let dropped = dropped_invalid + dropped_duplicate;
     if dropped > 0 {
         warn!(
@@ -328,30 +340,15 @@ async fn run_repair(
 
     info!(
         survey = %survey,
-        scanned,
-        broken = stats.iter().map(|s| s.broken).sum::<u64>(),
-        modified = stats.iter().map(|s| s.modified).sum::<u64>(),
+        scanned = totals.scanned,
+        broken = totals.broken,
+        modified = totals.modified,
         points_dropped = dropped,
         dry_run,
         "repair_photometry_ordering done"
     );
 
-    if scanned < total {
-        if shard_count > 1 {
-            error!(
-                "scanned {} of the {} document(s) in {}: the shards did not cover it all, re-run \
-                 with --processes 1",
-                scanned, total, aux_ns
-            );
-            return Ok(false);
-        }
-        warn!(
-            "scanned {} of the {} document(s) counted in {} before the pass: documents were \
-             deleted while it ran",
-            scanned, total, aux_ns
-        );
-    }
-    Ok(true)
+    Ok(check_shard_coverage(totals.scanned, total, shard_count))
 }
 
 #[tokio::main]
@@ -382,17 +379,16 @@ async fn main() {
     };
 
     let aux_name = format!("{}_alerts_aux", args.survey);
-    match db.list_collection_names().await {
-        Ok(names) => {
-            if !names.iter().any(|n| n == &aux_name) {
-                error!(
-                    "collection {} does not exist in database {}, check that --config points at \
-                     the right database",
-                    aux_name,
-                    db.name()
-                );
-                std::process::exit(1);
-            }
+    match collection_exists(&db, &aux_name).await {
+        Ok(true) => {}
+        Ok(false) => {
+            error!(
+                "collection {} does not exist in database {}, check that --config points at \
+                 the right database",
+                aux_name,
+                db.name()
+            );
+            std::process::exit(1);
         }
         Err(e) => {
             error!("error listing collections: {}", e);
