@@ -261,14 +261,12 @@ async fn run_repair(
 
     let shard_field = shard_field(&aux_collection).await;
     let shards = range_shards(&aux_collection, processes, shard_field).await;
+    let shard_count = shards.len();
     info!(
-        "scanning {} in {} shard(s) cut on '{}'",
-        aux_ns,
-        shards.len(),
-        shard_field
+        "scanning {} document(s) in {} across {} shard(s) cut on '{}'",
+        total, aux_ns, shard_count, shard_field
     );
 
-    let total = aux_collection.count_documents(doc! {}).await?;
     let label = format!("scan→{}", survey);
     let pb = make_progress_bar(total, label.clone());
     pb.enable_steady_tick(std::time::Duration::from_millis(200));
