@@ -257,6 +257,8 @@ async fn run_repair(
     let fields = timeseries_fields(survey);
 
     info!("counting the documents in {}", aux_ns);
+    let total = aux_collection.count_documents(doc! {}).await?;
+
     let shard_field = shard_field(&aux_collection).await;
     let shards = range_shards(&aux_collection, processes, shard_field).await;
     info!(
