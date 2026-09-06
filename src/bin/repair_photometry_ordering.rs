@@ -239,9 +239,7 @@ async fn flush_batch(
     client: &mongodb::Client,
     batch: &mut Vec<WriteModel>,
 ) -> Result<u64, mongodb::error::Error> {
-    // Keep the capacity: a bare mem::take makes every following batch regrow from zero.
-    let capacity = batch.capacity();
-    let drained = std::mem::replace(batch, Vec::with_capacity(capacity));
+    let drained: Vec<WriteModel> = batch.drain(..).collect();
     let result = client.bulk_write(drained).ordered(false).await?;
     Ok(result.modified_count as u64)
 }
@@ -258,6 +256,7 @@ async fn run_repair(
     let aux_ns = aux_collection.namespace();
     let fields = timeseries_fields(survey);
 
+    info!("counting the documents in {}", aux_ns);
     let shard_field = shard_field(&aux_collection).await;
     let shards = range_shards(&aux_collection, processes, shard_field).await;
     info!(
