@@ -272,9 +272,22 @@ async fn main() {
             }
         }
     } else {
-        collection.estimated_document_count().await.unwrap_or(0)
+        match collection.estimated_document_count().await {
+            Ok(estimated) => estimated,
+            Err(e) => {
+                error!("error estimating the document count: {}", e);
+                std::process::exit(1);
+            }
+        }
     };
-    info!("{}: about {} document(s) to process", args.catalog, total);
+    if args.force {
+        info!("{}: {} document(s) to process", args.catalog, total);
+    } else {
+        info!(
+            "{}: scanning about {} document(s) for missing coordinates",
+            args.catalog, total
+        );
+    }
 
     let mut report = Report::default();
     let mut shard_count = 1;
