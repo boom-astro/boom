@@ -357,7 +357,10 @@ pub async fn range_shards(
     let cuts: Vec<Bson> = (1..parts).map(|i| bounds[i * step].clone()).collect();
 
     let mut shards = Vec::with_capacity(cuts.len() + 1);
-    shards.push(doc! { field: { "$lt": cuts[0].clone() } });
+    shards.push(doc! { "$or": [
+        doc! { field: { "$lt": cuts[0].clone() } },
+        doc! { field: { "$exists": false } },
+    ] });
     for pair in cuts.windows(2) {
         shards.push(doc! { field: { "$gte": pair[0].clone(), "$lt": pair[1].clone() } });
     }
