@@ -15,7 +15,7 @@ use futures::TryStreamExt;
 use indicatif::ProgressBar;
 use mongodb::{
     bson::{doc, to_bson, Bson, Document},
-    options::{UpdateOneModel, WriteModel},
+    options::{Hint, UpdateOneModel, WriteModel},
     Collection,
 };
 use tracing::{error, info, warn, Level};
@@ -255,19 +255,26 @@ async fn main() {
     } else {
         doc! { "coordinates": { "$exists": false } }
     };
-    let total = match collection.count_documents(base_filter.clone()).await {
-        Ok(total) => total,
-        Err(e) => {
-            error!("error counting documents: {}", e);
-            std::process::exit(1);
+    // `coordinates` is not indexed, so counting the documents that still need one would
+    // collection-scan the catalog once before the pass that does the work. --force targets
+    // everything, which the _id index counts exactly.
+    let total = if args.force {
+        info!("counting the documents in {}", args.catalog);
+        match collection
+            .count_documents(doc! {})
+            .hint(Hint::Keys(doc! { "_id": 1 }))
+            .await
+        {
+            Ok(total) => total,
+            Err(e) => {
+                error!("error counting documents: {}", e);
+                std::process::exit(1);
+            }
         }
-    };
-    info!(
-        "{}: {} document(s) to process ({} in total)",
-        args.catalog,
-        total,
+    } else {
         collection.estimated_document_count().await.unwrap_or(0)
-    );
+    };
+    info!("{}: about {} document(s) to process", args.catalog, total);
 
     let mut report = Report::default();
     let mut shard_count = 1;
@@ -342,8 +349,8 @@ async fn main() {
     }
 
     let scanned = report.updated + report.missing + report.out_of_range;
-    let coverage_failure = scanned < total && shard_count > 1;
-    if scanned < total && shard_count == 1 {
+    let coverage_failure = args.force && scanned < total && shard_count > 1;
+    if args.force && scanned < total && shard_count == 1 {
         warn!(
             "scanned {} of the {} matching document(s) counted before the pass: documents were \
              modified or deleted while it ran",
