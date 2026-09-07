@@ -6,7 +6,7 @@ use crate::enrichment::{
     models::{AcaiModel, BtsBotModel, FusionModel, Model, ModelError, SharedModels},
     EnrichmentWorker, EnrichmentWorkerError, LsstMatch,
 };
-use crate::milvus::{EmbeddingRow, MilvusClient, WRITE_EMBEDDING_TO_MONGO};
+use crate::milvus::{EmbeddingRow, MilvusClient};
 use crate::utils::cutouts::{AlertCutout, CutoutStorage};
 use crate::utils::db::mongify;
 use crate::utils::enums::Survey;
@@ -629,21 +629,18 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                 vec![None; work_items.len()]
             };
 
-        for (item, classifications) in work_items.into_iter().zip(classifications_list) {
+        for (item, mut classifications) in work_items.into_iter().zip(classifications_list) {
+            // The 384-float embedding never goes to Mongo: it is taken out of the
+            // classifications here (the class probabilities are still kept) and
+            // written to Milvus below when Milvus is enabled. With Milvus off it
+            // is simply dropped and stored nowhere.
+            let fusion_embedding = classifications
+                .as_mut()
+                .and_then(|cls| cls.fusion_embedding.take());
+
             let update_alert_document = if let Some(ref cls) = classifications {
-                // Optionally drop the 384-float embedding from the stored
-                // classifications (the class probabilities are still kept); when
-                // disabled it lives only in Milvus.
-                let cls_doc = if WRITE_EMBEDDING_TO_MONGO {
-                    mongify(cls)
-                } else {
-                    mongify(&ZtfAlertClassifications {
-                        fusion_embedding: None,
-                        ..cls.clone()
-                    })
-                };
                 doc! { "$set": {
-                    "classifications": cls_doc,
+                    "classifications": mongify(cls),
                     "properties": mongify(&item.properties),
                     "updated_at": now,
                 }}
@@ -669,15 +666,13 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             // moved into Babamul below. Keyed by object_id, so re-observed
             // objects overwrite their previous vector.
             if self.milvus.is_some() {
-                if let Some(cls) = &classifications {
-                    if let Some(embedding) = &cls.fusion_embedding {
-                        embedding_rows.push(EmbeddingRow {
-                            object_id: item.alert.object_id.clone(),
-                            embedding: embedding.clone(),
-                            candid: item.candid,
-                            jd: item.alert.candidate.candidate.jd,
-                        });
-                    }
+                if let Some(embedding) = fusion_embedding {
+                    embedding_rows.push(EmbeddingRow {
+                        object_id: item.alert.object_id.clone(),
+                        embedding,
+                        candid: item.candid,
+                        jd: item.alert.candidate.candidate.jd,
+                    });
                 }
             }
 

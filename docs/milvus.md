@@ -203,18 +203,17 @@ Milvus is enabled but unreachable at startup the worker fails fast; a failure
 during an individual upsert is logged and non-fatal (the alerts are already
 enriched and persisted in Mongo).
 
-### Keeping a Mongo copy — the `WRITE_EMBEDDING_TO_MONGO` toggle
+### The embedding is never written to Mongo
 
-When `milvus.enabled`, the embedding always goes to Milvus. The compile-time
-constant `WRITE_EMBEDDING_TO_MONGO` in `src/milvus/mod.rs` decides whether to
-*also* keep it in the alert's Mongo `classifications` doc:
+`milvus.enabled` is the only switch. The 384-float vector is stripped from the
+alert's Mongo `classifications` document in every case and there is no dual write:
 
-- `true` **(beta default)** — dual-write to Mongo and Milvus, so a Milvus/NRP
-  outage never loses an embedding.
-- `false` — strip the 384-float vector from the Mongo doc; it lives only in
-  Milvus.
+- **Milvus on** — the embedding is written to Milvus only.
+- **Milvus off** — the embedding is not stored anywhere; it is computed as part
+  of CIDER inference and dropped.
 
-Changing it requires a rebuild.
+Either way the CIDER class probabilities (`cider_fusion`) stay in the Mongo
+`classifications` document; only the vector itself is Milvus-only.
 
 ## Regenerating the client
 
