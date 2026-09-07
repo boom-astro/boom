@@ -1,4 +1,3 @@
-/// Errors raised by host-galaxy association.
 #[derive(thiserror::Error, Debug)]
 pub enum HostError {
     #[error("no candidates found within search radius")]

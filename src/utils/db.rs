@@ -14,7 +14,6 @@ use crate::utils::enums::Survey;
 #[error("failed to create index")]
 pub struct CreateIndexError(#[from] mongodb::error::Error);
 
-#[instrument(skip(collection, index), fields(collection = collection.name()), err)]
 pub async fn create_index(
     collection: &Collection<Document>,
     index: Document,
@@ -23,11 +22,6 @@ pub async fn create_index(
     create_partial_index(collection, index, unique, None).await
 }
 
-#[instrument(
-    skip(collection, index, partial_filter),
-    fields(collection = collection.name()),
-    err
-)]
 pub async fn create_partial_index(
     collection: &Collection<Document>,
     index: Document,
@@ -37,10 +31,13 @@ pub async fn create_partial_index(
     create_named_partial_index(collection, index, unique, partial_filter, None).await
 }
 
-/// As [`create_partial_index`], with an explicit index name.
-///
-/// Needed when a collection carries two indexes over the same keys: Mongo names
-/// an index after its keys, so the second would collide with the first.
+/// As [`create_partial_index`], with an explicit index name: Mongo names an
+/// index after its keys, so two indexes over the same keys would collide.
+#[instrument(
+    skip(collection, index, partial_filter),
+    fields(collection = collection.name()),
+    err
+)]
 pub async fn create_named_partial_index(
     collection: &Collection<Document>,
     index: Document,
@@ -178,33 +175,22 @@ pub async fn initialize_survey_indexes(
     Ok(())
 }
 
-/// Index name for the angular-size branch of a catalog's cone match.
 fn angular_size_index_name(size_key: &str) -> String {
     format!("radec_2dsphere_large_{size_key}")
 }
 
-/// Partial 2dsphere indexes for catalogs matched by angular size.
-///
-/// An angular-size match is an `$or`: a base cone for everything, plus a much
-/// wider cone for rows large enough to reach past it. Only a fraction of a
-/// percent of a galaxy catalog qualifies, but without a partial index the wide
-/// cone scans every row inside several degrees and then discards nearly all of
-/// them. Restricting the index to the rows that can qualify makes that branch
-/// cost about as much as the base cone.
-///
-/// The threshold has to match the one the query uses, so it is derived from the
-/// same config rather than written out again.
+/// Partial 2dsphere indexes for catalogs matched by angular size. Without one
+/// the wide branch of the `$or` scans every row inside several degrees.
+#[instrument(skip_all, err)]
 pub async fn initialize_angular_size_indexes(
     xmatch_configs: &[crate::conf::CatalogXmatchConfig],
     db: &Database,
 ) -> Result<(), CreateIndexError> {
     for config in xmatch_configs {
-        let Some(size_key) = &config.angular_size_key else {
+        let (Some(size_key), Some(_)) = (&config.angular_size_key, config.angular_size_radius_max)
+        else {
             continue;
         };
-        if config.angular_size_radius_max.is_none() {
-            continue;
-        }
         let collection: Collection<Document> = db.collection(config.collection_name());
         create_named_partial_index(
             &collection,
@@ -338,6 +324,7 @@ pub fn fetch_timeseries_op(
         }
     }
 }
+
 // -----------------------------------------------------------------------------
 // Range sharding: splitting a full-collection pass into contiguous ranges is the
 // only way to use more than one thread on it. Ranges are cut on an indexed field
@@ -660,39 +647,27 @@ mod tests {
 #[cfg(test)]
 mod angular_size_index_tests {
     use super::angular_size_index_name;
-    use crate::conf::CatalogXmatchConfig;
-    use mongodb::bson::doc;
+    use crate::conf::{arcsec_to_radians, CatalogXmatchConfig};
 
     fn config(angular_size_key: Option<String>, radius_max: Option<f64>) -> CatalogXmatchConfig {
-        CatalogXmatchConfig::new(
-            "NED_LVS",
-            Some("NED".to_string()),
-            300.0,
-            doc! {},
-            false,
-            None,
-            None,
-            None,
-            None,
+        CatalogXmatchConfig {
+            catalog: "NED_LVS".to_string(),
+            collection: Some("NED".to_string()),
+            radius: arcsec_to_radians(300.0),
             angular_size_key,
-            5.0,
-            radius_max,
-            None,
-            Vec::new(),
-        )
+            angular_size_scale: 5.0,
+            angular_size_radius_max: radius_max.map(arcsec_to_radians),
+            ..Default::default()
+        }
     }
 
-    // The index filter and the query filter have to use the same threshold, or
-    // the index silently fails to cover rows the query asks for.
+    // A threshold mismatch makes the index silently miss rows the query asks for.
     #[test]
     fn test_threshold_is_derived_from_the_same_config_as_the_query() {
         let c = config(Some("Diam".to_string()), Some(21600.0));
-        // 2 * base_radius / scale: the diameter at which the scaled radius first
-        // exceeds the base cone.
         assert!((c.angular_size_threshold_arcsec() - 120.0).abs() < 1e-9);
     }
 
-    // The name must differ from the full 2dsphere index on the same keys.
     #[test]
     fn test_index_name_does_not_collide_with_the_full_index() {
         assert_ne!(
@@ -704,8 +679,8 @@ mod angular_size_index_tests {
     #[test]
     fn test_catalogs_without_angular_size_matching_are_skipped() {
         assert!(config(None, Some(21600.0)).angular_size_key.is_none());
-        // A key without a cap means no wide branch, so no partial index either.
-        let capped = config(Some("Diam".to_string()), None);
-        assert!(capped.angular_size_radius_max.is_none());
+        assert!(config(Some("Diam".to_string()), None)
+            .angular_size_radius_max
+            .is_none());
     }
 }

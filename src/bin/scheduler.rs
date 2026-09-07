@@ -229,8 +229,6 @@ async fn run(
         .await
         .expect("could not initialize indexes");
 
-    // Catalog-side, and only for this survey's crossmatches: an angular-size
-    // match is unusably slow without it.
     if let Some(xmatch_configs) = config.crossmatch.get(&args.survey) {
         initialize_angular_size_indexes(xmatch_configs, &db)
             .await

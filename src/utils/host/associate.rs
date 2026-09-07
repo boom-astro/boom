@@ -7,22 +7,15 @@ use super::likelihood::{absmag_likelihood, offset_likelihood, redshift_likelihoo
 use super::prior;
 use super::types::{GalaxyCandidate, HostCandidate, Transient};
 
-/// Configuration for the host association algorithm.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssociationConfig {
-    /// Largest fractional offset (d_DLR) still treated as a plausible host.
-    ///
-    /// This is the *candidate admission* cutoff, deliberately looser than the
-    /// d_DLR a filter would cut on, so that the posterior is normalised over
-    /// the full plausible set rather than a pre-truncated one.
+    /// Largest d_DLR still admitted as a candidate, deliberately looser than the
+    /// cut a filter would apply so the posterior normalises over the full set.
     pub max_fractional_offset: f64,
-    /// Minimum semi-minor axis in arcsec (floor for tiny or degenerate shapes)
+    /// Floor on the semi-minor axis, arcsec, for degenerate shapes.
     pub min_b_arcsec: f64,
-    /// Maximum number of candidates to return
     pub max_candidates: usize,
-    /// Whether to use redshift information in scoring
     pub use_redshift: bool,
-    /// Whether to use absolute magnitude in scoring
     pub use_absmag: bool,
 }
 
@@ -38,25 +31,15 @@ impl Default for AssociationConfig {
     }
 }
 
-/// Full result of a host galaxy association.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssociationResult {
-    /// Ranked list of host candidates, best posterior first
+    /// Ranked host candidates, best posterior first.
     pub candidates: Vec<HostCandidate>,
-    /// Probability that none of the candidates is the true host
     pub p_none: f64,
-    /// Number of input galaxies considered
+    /// Input galaxies considered, before any shape or offset cut.
     pub n_considered: usize,
 }
 
-impl AssociationResult {
-    /// Returns the best host candidate, if any.
-    pub fn best_host(&self) -> Option<&HostCandidate> {
-        self.candidates.first()
-    }
-}
-
-/// A candidate that survived shape validation and the offset cutoff.
 struct Scored {
     index: usize,
     dlr: DlrResult,
@@ -67,12 +50,6 @@ struct Scored {
     posterior: f64,
 }
 
-/// Perform probabilistic host galaxy association.
-///
-/// Given a transient and a list of galaxy candidates, computes DLR-based
-/// fractional offsets and Bayesian posterior probabilities for each candidate.
-/// Candidates with unusable shapes (non-positive or non-finite axes) are
-/// skipped rather than failing the whole association.
 pub fn associate_host(
     transient: &Transient,
     candidates: &[GalaxyCandidate],
@@ -82,35 +59,20 @@ pub fn associate_host(
         return Err(HostError::NoCandidates);
     }
 
-    let mut scored: Vec<Scored> = Vec::new();
-    for (index, galaxy) in candidates.iter().enumerate() {
-        let Ok(ellipse) = Ellipse::from_candidate(galaxy, config.min_b_arcsec) else {
-            continue; // unusable shape - no directional radius to compute
-        };
+    let mut offsets: Vec<(usize, DlrResult)> = candidates
+        .iter()
+        .enumerate()
+        .filter_map(|(index, galaxy)| {
+            let ellipse = Ellipse::from_candidate(galaxy, config.min_b_arcsec).ok()?;
+            let dlr = compute_dlr(transient.ra, transient.dec, galaxy.ra, galaxy.dec, &ellipse);
+            // A NaN compares false against any bound, so test finiteness explicitly.
+            (dlr.fractional_offset.is_finite()
+                && dlr.fractional_offset <= config.max_fractional_offset)
+                .then_some((index, dlr))
+        })
+        .collect();
 
-        let dlr = compute_dlr(transient.ra, transient.dec, galaxy.ra, galaxy.dec, &ellipse);
-
-        // Drop non-finite offsets explicitly: a NaN (from non-finite input
-        // coordinates) compares false against any bound, so relying on the
-        // bound alone to reject it would depend on comparison subtleties.
-        if !dlr.fractional_offset.is_finite()
-            || dlr.fractional_offset > config.max_fractional_offset
-        {
-            continue;
-        }
-
-        scored.push(Scored {
-            index,
-            dlr,
-            dlr_rank: 0, // assigned below, once sorted by offset
-            posterior_offset: 0.0,
-            posterior_redshift: 1.0,
-            posterior_absmag: 1.0,
-            posterior: 0.0,
-        });
-    }
-
-    if scored.is_empty() {
+    if offsets.is_empty() {
         return Ok(AssociationResult {
             candidates: Vec::new(),
             p_none: 1.0,
@@ -118,54 +80,47 @@ pub fn associate_host(
         });
     }
 
-    // Rank by fractional offset first, so `dlr_rank` genuinely means "1 = the
-    // galaxy this transient sits deepest inside", independent of how the
-    // redshift term later reorders the posterior.
-    scored.sort_by(|a, b| a.dlr.fractional_offset.total_cmp(&b.dlr.fractional_offset));
-    for (i, s) in scored.iter_mut().enumerate() {
-        s.dlr_rank = (i + 1) as u32;
-    }
+    // Rank by offset before the posterior reorders, so `dlr_rank` means "deepest in".
+    offsets.sort_by(|a, b| a.1.fractional_offset.total_cmp(&b.1.fractional_offset));
 
-    for s in scored.iter_mut() {
-        let galaxy = &candidates[s.index];
+    let mut scored: Vec<Scored> = offsets
+        .into_iter()
+        .enumerate()
+        .map(|(rank, (index, dlr))| {
+            let galaxy = &candidates[index];
+            let posterior_offset = offset_likelihood(dlr.fractional_offset)
+                * prior::offset_prior(dlr.fractional_offset, config.max_fractional_offset);
+            let posterior_redshift = if config.use_redshift {
+                redshift_likelihood(
+                    galaxy.redshift,
+                    galaxy.redshift_err,
+                    transient.redshift,
+                    transient.redshift_err,
+                )
+            } else {
+                1.0
+            };
+            let posterior_absmag = if config.use_absmag {
+                absmag_likelihood(galaxy.mag, galaxy.mag_err, galaxy.redshift)
+            } else {
+                1.0
+            };
+            Scored {
+                index,
+                dlr,
+                dlr_rank: (rank + 1) as u32,
+                posterior_offset,
+                posterior_redshift,
+                posterior_absmag,
+                posterior: posterior_offset * posterior_redshift * posterior_absmag,
+            }
+        })
+        .collect();
 
-        s.posterior_offset = offset_likelihood(s.dlr.fractional_offset)
-            * prior::offset_prior(s.dlr.fractional_offset, config.max_fractional_offset);
-
-        s.posterior_redshift = if config.use_redshift {
-            redshift_likelihood(
-                galaxy.redshift,
-                galaxy.redshift_err,
-                transient.redshift,
-                transient.redshift_err,
-            )
-        } else {
-            1.0
-        };
-
-        s.posterior_absmag = if config.use_absmag {
-            absmag_likelihood(galaxy.mag, galaxy.mag_err, galaxy.redshift)
-        } else {
-            1.0
-        };
-
-        s.posterior = s.posterior_offset * s.posterior_redshift * s.posterior_absmag;
-    }
-
-    // Null hypothesis: the host is outside the search radius, too faint to be
-    // catalogued, or the transient is genuinely hostless.
     let p_null = prior::p_outside(scored.len()) + prior::p_unobserved() + prior::p_hostless();
-
-    // Normalise over every candidate considered, not just the ones returned,
-    // so truncating to `max_candidates` does not inflate the reported
-    // posteriors of the survivors.
+    // Over every candidate, so truncating later does not inflate the survivors.
     let total: f64 = scored.iter().map(|s| s.posterior).sum::<f64>() + p_null;
-
-    let p_none = if total > 0.0 && total.is_finite() {
-        (p_null / total).clamp(0.0, 1.0)
-    } else {
-        1.0
-    };
+    let normalisable = total > 0.0 && total.is_finite();
 
     scored.sort_by(|a, b| b.posterior.total_cmp(&a.posterior));
 
@@ -178,7 +133,7 @@ pub fn associate_host(
             dlr: s.dlr.directional_radius,
             fractional_offset: s.dlr.fractional_offset,
             dlr_rank: s.dlr_rank,
-            posterior: if total > 0.0 && total.is_finite() {
+            posterior: if normalisable {
                 s.posterior / total
             } else {
                 0.0
@@ -191,7 +146,11 @@ pub fn associate_host(
 
     Ok(AssociationResult {
         candidates: host_candidates,
-        p_none,
+        p_none: if normalisable {
+            (p_null / total).clamp(0.0, 1.0)
+        } else {
+            1.0
+        },
         n_considered: candidates.len(),
     })
 }
@@ -216,7 +175,6 @@ mod tests {
             objtype: None,
             objname: None,
             catalog: None,
-            shape_from_image: false,
             size_is_isophotal: true,
             diam_survey: None,
             orientation_is_nominal: false,
@@ -296,8 +254,6 @@ mod tests {
 
     #[test]
     fn test_dlr_rank_tracks_offset_not_posterior() {
-        // A redshift-discrepant galaxy sits closest in d_DLR, so it must keep
-        // dlr_rank 1 even though the posterior demotes it to last place.
         let transient = Transient::new(180.0, 45.0).with_redshift(0.05, 0.001);
 
         let mut near_wrong_z = make_galaxy(180.0, 45.0 + 1.0 / 3600.0, 5.0, 3.0, 0.0);
@@ -315,13 +271,11 @@ mod tests {
         )
         .unwrap();
 
-        // Posterior order: the redshift-matching galaxy wins.
         assert_close!(
             result.candidates[0].galaxy.redshift.unwrap(),
             0.05,
             epsilon = 1e-9
         );
-        // But the rank still reflects which galaxy the transient is deepest in.
         assert_eq!(result.candidates[0].dlr_rank, 2);
         assert_eq!(result.candidates[1].dlr_rank, 1);
     }
@@ -348,7 +302,7 @@ mod tests {
     #[test]
     fn test_all_candidates_beyond_cutoff() {
         let transient = Transient::new(180.0, 45.0);
-        // 100 arcsec away from a 1 arcsec galaxy -> d_DLR = 100, far past the cutoff
+        // d_DLR = 100, far past the cutoff.
         let far = make_galaxy(180.0, 45.0 + 100.0 / 3600.0, 1.0, 1.0, 0.0);
 
         let result = associate_host(&transient, &[far], &AssociationConfig::default()).unwrap();
@@ -372,7 +326,7 @@ mod tests {
         let result = associate_host(&transient, &galaxies, &config).unwrap();
 
         assert_eq!(result.candidates.len(), 3);
-        // Normalised over all 8, so the returned three must sum to well under 1.
+        // Normalised over all 8, so the returned three sum to well under 1.
         let sum: f64 = result.candidates.iter().map(|c| c.posterior).sum();
         assert!(sum + result.p_none < 1.0);
         assert!(result.candidates.iter().all(|c| c.posterior <= 1.0));

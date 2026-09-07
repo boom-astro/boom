@@ -101,9 +101,7 @@ crossmatch:
         Mstar: 1
         Mstar_unc: 1
     - catalog: NED_LVS
-      # Reads the NED collection, which holds the NED-LVS sample; there is no
-      # NED_LVS collection. See config.yaml for why this is a separate entry
-      # and for the angular_size_scale >= host_galaxy.max_dlr coupling.
+      # See config.yaml for why this is a separate entry on the NED collection.
       collection: NED
       radius: 300.0
       use_distance: false
@@ -306,9 +304,7 @@ crossmatch:
         Mstar: 1
         Mstar_unc: 1
     - catalog: NED_LVS
-      # Reads the NED collection, which holds the NED-LVS sample; there is no
-      # NED_LVS collection. See config.yaml for why this is a separate entry
-      # and for the angular_size_scale >= host_galaxy.max_dlr coupling.
+      # See config.yaml for why this is a separate entry on the NED collection.
       collection: NED
       radius: 300.0
       use_distance: false

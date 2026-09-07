@@ -1,22 +1,15 @@
 use super::ellipse::Ellipse;
 
-/// Result of a directional light radius computation.
 #[derive(Debug, Clone)]
 pub struct DlrResult {
-    /// Angular separation between transient and galaxy center (arcsec)
+    /// Angular separation between transient and galaxy centre, arcsec.
     pub separation_arcsec: f64,
-    /// Directional light radius: galaxy effective radius along the
-    /// direction toward the transient (arcsec)
+    /// Galaxy light radius toward the transient, arcsec.
     pub directional_radius: f64,
-    /// Fractional offset = separation / directional_radius
     pub fractional_offset: f64,
 }
 
-/// Compute the directional light radius (DLR) for a transient-galaxy pair.
-///
-/// Uses tangent-plane projection centered on the galaxy to compute offsets,
-/// then rotates into the galaxy's ellipse frame to find the effective radius
-/// along the direction toward the transient.
+/// By tangent-plane projection onto the galaxy's ellipse frame.
 pub fn compute_dlr(
     transient_ra: f64,
     transient_dec: f64,
@@ -24,23 +17,17 @@ pub fn compute_dlr(
     galaxy_dec: f64,
     ellipse: &Ellipse,
 ) -> DlrResult {
-    let dec_g_rad = galaxy_dec.to_radians();
-    let cos_dec = dec_g_rad.cos();
-
-    // Tangent-plane offsets in arcsec. Wrap the RA difference into
-    // (-180, 180] deg *before* scaling, so a pair straddling RA=0 does not
-    // pick up a ~1.3e6 arcsec separation.
+    // Wrap in degrees, before the cos(dec) scaling: wrapping after fails at high dec.
     let mut dra_deg = transient_ra - galaxy_ra;
     if dra_deg > 180.0 {
         dra_deg -= 360.0;
     } else if dra_deg < -180.0 {
         dra_deg += 360.0;
     }
-    let dra = dra_deg * cos_dec * 3600.0;
+    let dra = dra_deg * galaxy_dec.to_radians().cos() * 3600.0;
     let ddec = (transient_dec - galaxy_dec) * 3600.0;
 
     let separation = dra.hypot(ddec);
-
     if separation < 1e-15 {
         return DlrResult {
             separation_arcsec: 0.0,
@@ -49,21 +36,13 @@ pub fn compute_dlr(
         };
     }
 
-    // Rotate into the galaxy ellipse frame. Position angle is measured from
-    // north towards east, so the major axis points along (sin PA, cos PA) in
-    // (east, north) -- north at PA=0, east at PA=90. Projecting onto an axis at
-    // PA measured from *east* instead reflects the frame about 45 degrees, which
-    // swaps the roles of a and b at PA=0 and is wrong by the axis ratio.
+    // PA is east of north, so the major axis is (sin PA, cos PA) in (east, north).
     let (sin_pa, cos_pa) = ellipse.pa_rad.sin_cos();
     let x_maj = dra * sin_pa + ddec * cos_pa;
     let y_min = dra * cos_pa - ddec * sin_pa;
 
-    // Angle of transient in the ellipse frame
-    let theta = y_min.atan2(x_maj);
-    let (sin_t, cos_t) = theta.sin_cos();
-
-    // Directional radius from the ellipse equation:
-    // r(θ) = a*b / sqrt((b*cosθ)² + (a*sinθ)²)
+    // r(t) = a*b / hypot(b*cos t, a*sin t), t the angle in the ellipse frame.
+    let (sin_t, cos_t) = y_min.atan2(x_maj).sin_cos();
     let denom = (ellipse.b * cos_t).hypot(ellipse.a * sin_t);
     let directional_radius = if denom > 1e-15 {
         ellipse.a * ellipse.b / denom
@@ -71,12 +50,10 @@ pub fn compute_dlr(
         ellipse.a
     };
 
-    let fractional_offset = separation / directional_radius;
-
     DlrResult {
         separation_arcsec: separation,
         directional_radius,
-        fractional_offset,
+        fractional_offset: separation / directional_radius,
     }
 }
 
@@ -94,12 +71,8 @@ mod tests {
 
     #[test]
     fn test_dlr_along_major_axis_at_pa_zero() {
-        // PA is measured from north, so a galaxy at PA=0 has its major axis
-        // along Dec. A transient offset purely in Dec probes the major axis.
         let e = Ellipse::new(4.0, 2.0, 0.0).unwrap();
-        let galaxy_dec = 0.0;
-        let transient_dec = galaxy_dec + 2.0 / 3600.0;
-        let result = compute_dlr(0.0, transient_dec, 0.0, galaxy_dec, &e);
+        let result = compute_dlr(0.0, 2.0 / 3600.0, 0.0, 0.0, &e);
         assert_close!(result.separation_arcsec, 2.0, epsilon = 0.01);
         assert_close!(result.directional_radius, 4.0, epsilon = 0.01);
         assert_close!(result.fractional_offset, 0.5, epsilon = 0.01);
@@ -107,8 +80,6 @@ mod tests {
 
     #[test]
     fn test_dlr_along_minor_axis_at_pa_zero() {
-        // Same galaxy, offset in RA instead: that is east, perpendicular to a
-        // PA=0 major axis, so it probes the minor axis.
         let e = Ellipse::new(4.0, 2.0, 0.0).unwrap();
         let result = compute_dlr(2.0 / 3600.0, 0.0, 0.0, 0.0, &e);
         assert_close!(result.separation_arcsec, 2.0, epsilon = 0.01);
@@ -116,15 +87,12 @@ mod tests {
         assert_close!(result.fractional_offset, 1.0, epsilon = 0.01);
     }
 
-    /// The convention itself, at the angle where getting it backwards is most
-    /// visible: at PA=90 the major axis lies east-west.
     #[test]
     fn test_dlr_convention_at_pa_ninety() {
+        // At PA=90 the major axis lies east-west.
         let e = Ellipse::new(4.0, 2.0, 90.0).unwrap();
-
         let east = compute_dlr(2.0 / 3600.0, 0.0, 0.0, 0.0, &e);
         assert_close!(east.directional_radius, 4.0, epsilon = 0.01);
-
         let north = compute_dlr(0.0, 2.0 / 3600.0, 0.0, 0.0, &e);
         assert_close!(north.directional_radius, 2.0, epsilon = 0.01);
     }
@@ -139,34 +107,20 @@ mod tests {
     #[test]
     fn test_dlr_ra_wraparound() {
         let e = Ellipse::new(3.0, 3.0, 0.0).unwrap();
-        // Galaxy near RA=0, transient near RA=360
         let r1 = compute_dlr(359.999, 0.0, 0.001, 0.0, &e);
-        assert!(r1.separation_arcsec < 10.0); // ~7.2 arcsec, not ~1.3M
         assert_close!(r1.separation_arcsec, 7.2, epsilon = 0.01);
     }
 
     #[test]
     fn test_dlr_ra_wraparound_at_high_dec() {
-        // The wrap has to happen in degrees, before scaling by cos(dec)*3600.
-        // Wrapping afterwards against a fixed arcsec threshold fails at high
-        // declination: here the scaled difference is ~647996 arcsec, just under
-        // a 648000 threshold, so the wrap would never fire and the separation
-        // would come back as ~648000 arcsec instead of ~3.6 -- silently pushing
-        // a real host out of every candidate list.
+        // Wrapping after the cos(dec)*3600 scaling gives ~648000 arcsec here.
         let e = Ellipse::new(3.0, 3.0, 0.0).unwrap();
         let r = compute_dlr(359.999, 60.0, 0.001, 60.0, &e);
-        assert!(
-            r.separation_arcsec < 10.0,
-            "separation was {} arcsec",
-            r.separation_arcsec
-        );
         assert_close!(r.separation_arcsec, 3.6, epsilon = 0.01);
     }
 
     #[test]
     fn test_dlr_symmetric_across_ra_zero() {
-        // The wrap must be sign-correct, not just magnitude-correct: the same
-        // pair evaluated from either side has to give the same separation.
         let e = Ellipse::new(5.0, 2.0, 30.0).unwrap();
         let a = compute_dlr(359.999, 0.0, 0.001, 0.0, &e);
         let b = compute_dlr(0.001, 0.0, 359.999, 0.0, &e);
@@ -176,7 +130,6 @@ mod tests {
 
     #[test]
     fn test_dlr_scales_with_cos_dec() {
-        // At high declination a given RA offset subtends a smaller angle.
         let e = Ellipse::new(3.0, 3.0, 0.0).unwrap();
         let equator = compute_dlr(0.001, 0.0, 0.0, 0.0, &e);
         let high_dec = compute_dlr(0.001, 60.0, 0.0, 60.0, &e);

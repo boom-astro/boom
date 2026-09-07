@@ -67,25 +67,21 @@ impl Coordinates {
     }
 }
 
-/// Like [`get_f64_from_doc`] but silent when the field is absent or null.
-///
-/// Catalogs legitimately leave optional measurements empty -- NED-LVS has no
-/// diameter for about a fifth of its rows -- so this must not log.
-pub fn get_opt_f64_from_doc(doc: &mongodb::bson::Document, key: &str) -> Option<f64> {
-    let value = match doc.get(key) {
-        Some(Bson::Double(v)) => *v,
-        Some(Bson::Int32(v)) => *v as f64,
-        Some(Bson::Int64(v)) => *v as f64,
-        _ => return None,
-    };
-    value.is_finite().then_some(value)
+fn bson_f64(doc: &mongodb::bson::Document, key: &str) -> Option<f64> {
+    match doc.get(key) {
+        Some(Bson::Double(v)) => Some(*v),
+        Some(Bson::Int32(v)) => Some(*v as f64),
+        Some(Bson::Int64(v)) => Some(*v as f64),
+        _ => None,
+    }
 }
 
-/// The `$match` stage selecting candidate rows for one catalog.
-///
-/// Normally a single cone. With angular-size matching, a second cone is added
-/// for rows whose angular size reaches beyond the first; gating that branch on
-/// the size keeps the wide search off the bulk of the catalog.
+/// Like [`get_f64_from_doc`] but silent: catalogs legitimately leave optional
+/// measurements empty, so this must not log.
+pub fn get_opt_f64_from_doc(doc: &mongodb::bson::Document, key: &str) -> Option<f64> {
+    bson_f64(doc, key).filter(|v| v.is_finite())
+}
+
 fn cone_match_stage(
     xmatch_config: &conf::CatalogXmatchConfig,
     ra_geojson: f64,
@@ -118,7 +114,6 @@ fn cone_match_stage(
     }
 }
 
-/// The per-catalog stages: select, project, and collect into one row.
 fn catalog_pipeline(
     xmatch_config: &conf::CatalogXmatchConfig,
     ra_geojson: f64,
@@ -133,17 +128,11 @@ fn catalog_pipeline(
 }
 
 pub fn get_f64_from_doc(doc: &mongodb::bson::Document, key: &str) -> Option<f64> {
-    let value = match doc.get(key) {
-        Some(Bson::Double(v)) => *v,
-        Some(Bson::Int32(v)) => *v as f64,
-        Some(Bson::Int64(v)) => *v as f64,
-        _ => {
-            trace!("no valid {} in doc", key);
-            return None;
-        }
+    let Some(value) = bson_f64(doc, key) else {
+        trace!("no valid {} in doc", key);
+        return None;
     };
-    // if the value is out of bounds, return None
-    if value.is_nan() || value.is_infinite() {
+    if !value.is_finite() {
         warn!("{} is NaN or infinite", key);
         return None;
     }
@@ -304,9 +293,6 @@ pub async fn xmatch(
             .expect("this should never panic, the doc was derived from the catalogs");
 
         if let Some(size_key) = &xmatch_config.angular_size_key {
-            // Each row gets a match radius from its own angular size, so a
-            // large galaxy is kept for a transient far out in its disk while a
-            // small one is not.
             let matches_filtered: Vec<mongodb::bson::Document> = matches
                 .iter()
                 .filter_map(|m| m.as_document().cloned())
@@ -475,75 +461,51 @@ mod tests {
     /// NED_LVS-shaped config: 300" base cone, per-row radius from `diam`,
     /// capped at 6 deg.
     fn angular_size_config() -> conf::CatalogXmatchConfig {
-        conf::CatalogXmatchConfig::new(
-            "NED_LVS",
-            None,
-            300.0,
-            doc! {},
-            false,
-            None,
-            None,
-            None,
-            Some(50),
-            Some("diam".to_string()),
-            2.0,
-            Some(21600.0),
-            None,
-            Vec::new(),
-        )
+        conf::CatalogXmatchConfig {
+            catalog: "NED_LVS".to_string(),
+            radius: conf::arcsec_to_radians(300.0),
+            max_results: Some(50),
+            angular_size_key: Some("diam".to_string()),
+            angular_size_scale: 2.0,
+            angular_size_radius_max: Some(conf::arcsec_to_radians(21600.0)),
+            ..Default::default()
+        }
     }
 
     fn plain_config() -> conf::CatalogXmatchConfig {
-        conf::CatalogXmatchConfig::new(
-            "NED",
-            None,
-            300.0,
-            doc! {},
-            false,
-            None,
-            None,
-            None,
-            None,
-            None,
-            1.0,
-            None,
-            None,
-            Vec::new(),
-        )
+        conf::CatalogXmatchConfig {
+            catalog: "NED".to_string(),
+            radius: conf::arcsec_to_radians(300.0),
+            ..Default::default()
+        }
     }
 
     #[test]
     fn test_plain_config_uses_the_cone_radius() {
         let config = plain_config();
         assert!((config.match_radius_arcsec(None) - 300.0).abs() < 1e-6);
-        // A size is irrelevant without angular-size matching enabled.
         assert!((config.match_radius_arcsec(Some(11400.0)) - 300.0).abs() < 1e-6);
     }
 
     #[test]
     fn test_large_galaxy_gets_a_larger_radius() {
         let config = angular_size_config();
-        // M31: diam 11400" -> semi-major 5700" -> 2x = 11400"
+        // M31: diam 11400" -> semi-major 5700" -> 2x = 11400", past 1440".
         let r = config.match_radius_arcsec(Some(11400.0));
         assert!((r - 11400.0).abs() < 1e-6, "got {r}");
-        // A transient 0.4 deg (1440") out is now inside the match radius,
-        // where the flat 300" cone would have dropped it.
         assert!(1440.0 <= r);
     }
 
     #[test]
     fn test_small_galaxy_does_not_shrink_below_the_base_cone() {
         let config = angular_size_config();
-        // A 10" dwarf would scale to 10", but the base cone still applies.
         assert!((config.match_radius_arcsec(Some(10.0)) - 300.0).abs() < 1e-6);
-        // Rows with no size at all fall back to the base cone too.
         assert!((config.match_radius_arcsec(None) - 300.0).abs() < 1e-6);
     }
 
     #[test]
     fn test_radius_is_capped() {
         let config = angular_size_config();
-        // A degenerate 100 deg diameter must not produce an unbounded radius.
         let r = config.match_radius_arcsec(Some(360_000.0));
         assert!((r - 21600.0).abs() < 1e-6, "got {r}");
     }
@@ -551,11 +513,9 @@ mod tests {
     #[test]
     fn test_threshold_is_where_scaling_overtakes_the_cone() {
         let config = angular_size_config();
-        // scale*size/2 > 300  <=>  size > 300
+        // scale * size / 2 > 300 <=> size > 300.
         let threshold = config.angular_size_threshold_arcsec();
         assert!((threshold - 300.0).abs() < 1e-6, "got {threshold}");
-        // Just below the threshold the base cone still wins, so such rows are
-        // correctly excluded from the extended branch.
         assert!((config.match_radius_arcsec(Some(threshold - 1.0)) - 300.0).abs() < 1e-6);
         assert!(config.match_radius_arcsec(Some(threshold + 100.0)) > 300.0);
     }
@@ -570,8 +530,7 @@ mod tests {
             .unwrap();
         assert_eq!(branches.len(), 2);
 
-        // The wide branch must be gated on size, or it would drag the whole
-        // catalog through a 6 degree cone on every alert.
+        // Gated on size, or every alert drags the catalog through a 6 deg cone.
         let wide = branches[1]
             .as_document()
             .unwrap()

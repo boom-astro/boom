@@ -3,61 +3,47 @@ use serde::{Deserialize, Serialize};
 use super::associate::AssociationConfig;
 use super::catalog::{LS_DR10, NED_LVS};
 
-/// Configuration for host galaxy association, read from `config.yaml` under
-/// the `host_galaxy` key.
+/// Host-galaxy association, read from `config.yaml` under `host_galaxy`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HostGalaxyConfig {
-    /// Off by default: association is only meaningful once a galaxy catalog
-    /// with shapes has been ingested and added to the survey's crossmatch list.
+    /// Off until a galaxy catalog with shapes is ingested and listed in the
+    /// survey's crossmatch block.
     pub enabled: bool,
-    /// Cross-match collection supplying NED-LVS diameters.
+    /// Cross-match key supplying NED-LVS diameters.
     pub ned_lvs_catalog: String,
-    /// Cross-match collection supplying Legacy Survey Tractor shapes.
+    /// Cross-match key supplying Legacy Survey Tractor shapes.
     pub ls_dr10_catalog: String,
-    /// Largest d_DLR still admitted as a candidate. Deliberately looser than
-    /// the cut a filter would apply, so the posterior is normalised over the
-    /// full plausible set rather than a pre-truncated one.
+    /// Largest d_DLR still admitted as a candidate, deliberately looser than the
+    /// cut a filter would apply so the posterior normalises over the full set.
     pub max_dlr: f64,
-    /// Floor on the semi-minor axis, in arcsec, for degenerate shapes.
+    /// Floor on the semi-minor axis, arcsec, for degenerate shapes.
     pub min_axis_arcsec: f64,
-    /// Axis ratio below which a shape is taken as unphysical and the row is
-    /// dropped rather than pinned.
+    /// Axis ratio below which a shape is a fit failure and the row is dropped.
     pub min_axis_ratio: f64,
-    /// Axis ratio that a shape between `min_axis_ratio` and this is pinned to.
-    /// An absolute floor on the minor axis alone would flatten genuinely small
-    /// galaxies; a ratio floor bounds the elongation without touching size.
+    /// Axis ratio a shape between `min_axis_ratio` and this is pinned to, which
+    /// bounds the elongation without shrinking the object.
     pub pinned_axis_ratio: f64,
-    /// Most candidates to store per object.
     pub max_candidates: usize,
-    /// Drop Legacy Survey rows typed as point sources; they have no galaxy
-    /// extent and would otherwise contribute spurious tiny-DLR candidates.
+    /// Drop Legacy Survey rows typed as point sources, which have no extent.
     pub exclude_star_like: bool,
-    /// Morphological `type` values marking a row with no galaxy extent. `PSF`
-    /// is a point source; `DUP` is a Gaia duplicate, which carries no shape.
+    /// Legacy `type` values with no galaxy extent: `PSF` is a point source,
+    /// `DUP` a Gaia duplicate carrying no shape.
     pub star_type_values: Vec<String>,
-    /// NED-LVS `objtype` values that are not host galaxies: quasars, absorption
-    /// and emission line systems, and lensed systems whose catalogued shape
-    /// describes the lens rather than anything a transient sits in.
+    /// NED-LVS `objtype` values that are not host galaxies: quasars, line
+    /// systems, and lensed systems whose shape describes the lens.
     pub ned_lvs_excluded_objtypes: Vec<String>,
-    /// Include the redshift term in the posterior when both the transient and
-    /// the galaxy have one.
+    /// Include the redshift term when both the transient and the galaxy have one.
     pub use_redshift: bool,
-    /// Round-exponential rejection. REX is the Tractor model for marginally
-    /// resolved sources, and at DECam seeing a small one is indistinguishable
-    /// from a point source. These three cuts are in sensitive regions of the
-    /// parameter space -- small changes move the results materially -- so they
-    /// are configurable rather than hardcoded.
-    ///
-    /// Reject a REX row when it is smaller than this, in arcsec.
+    /// Reject a REX row smaller than this, arcsec. The three REX cuts sit in
+    /// sensitive parts of the parameter space, so they are configurable.
     pub rex_min_shape_r_arcsec: f64,
     /// Reject a REX row below this r-band signal-to-noise.
     pub rex_min_snr: f64,
-    /// Reject a REX row with at least this fraction of its aperture flux coming
-    /// from neighbours; such a source sits inside something larger.
+    /// Reject a REX row with at least this fraction of its aperture flux from
+    /// neighbours, which means it sits inside something larger.
     pub rex_max_fracflux: f64,
-    /// Surface brightness of the isophote the Legacy half-light radius is
-    /// converted to, mag/arcsec^2. 25 puts it on the same scale as NED-LVS D25.
+    /// Isophote the Legacy half-light radius is converted to, mag/arcsec^2.
     pub isophote_mag: f64,
 }
 
@@ -82,14 +68,12 @@ impl Default for HostGalaxyConfig {
             rex_min_shape_r_arcsec: 0.3,
             rex_min_snr: 5.0,
             rex_max_fracflux: 0.5,
-            isophote_mag: crate::utils::host::sersic::MU_25,
+            isophote_mag: super::sersic::MU_25,
         }
     }
 }
 
 impl HostGalaxyConfig {
-    /// Project the deployment-facing config onto the algorithm's own config,
-    /// keeping the scoring core independent of BOOM's configuration types.
     pub fn association_config(&self) -> AssociationConfig {
         AssociationConfig {
             max_fractional_offset: self.max_dlr,
@@ -126,8 +110,6 @@ mod tests {
 
     #[test]
     fn test_partial_config_fills_in_defaults() {
-        // `#[serde(default)]` on the struct means an operator can set one key
-        // in config.yaml without having to restate the whole block.
         let config: HostGalaxyConfig =
             serde_json::from_str(r#"{"enabled": true, "max_dlr": 4.0}"#).unwrap();
         assert!(config.enabled);
@@ -142,9 +124,7 @@ mod tests {
 mod config_file_tests {
     use super::HostGalaxyConfig;
 
-    /// The knobs are only useful if the deployed config actually reaches them.
-    /// `#[serde(default)]` means a typo in config.yaml silently keeps the
-    /// default rather than failing, so assert the parsed values.
+    // A typo under `#[serde(default)]` silently keeps the default, so assert values.
     #[test]
     fn test_rex_and_isophote_knobs_parse_from_config_yaml() {
         let settings = config::Config::builder()

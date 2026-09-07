@@ -1237,9 +1237,6 @@ impl ZtfEnrichmentWorker {
             photstats.clone()
         };
 
-        // `host_galaxy` is None when association never ran and Some when it did,
-        // so mapping preserves the difference between "not evaluated" and
-        // "evaluated, no host". best_host is set only above the d_DLR cut.
         let hosted = alert.host_galaxy.as_ref().map(|hg| hg.best_host.is_some());
 
         // Per-object detection history for history-aware filters, from the full
@@ -1560,9 +1557,8 @@ mod tests {
         assert!(props.activity.is_none());
     }
 
-    // Evaluated-and-nothing-found has to stay distinguishable from never
-    // evaluated, or a filter cutting on `hosted == false` silently sweeps in
-    // every alert enriched before host association existed.
+    // Or a filter cutting on `hosted == false` silently sweeps in every alert
+    // enriched before host association existed.
     #[test]
     fn test_evaluated_hostless_differs_from_unevaluated() {
         let evaluated = serde_json::json!({

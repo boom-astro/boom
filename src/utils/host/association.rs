@@ -1,19 +1,12 @@
-//! The stored form of a host association.
-//!
-//! [`super::associate_host`] returns a rich result carrying the full galaxy
-//! record for each candidate. What lands on the alert aux document is a
-//! flattened view of that: the fields a filter actually cuts on, at the top
-//! level of each candidate rather than nested behind `galaxy`.
+//! The stored form of a host association: the fields a filter cuts on, at the
+//! top level of each candidate rather than nested behind `galaxy`.
 
 use serde::{Deserialize, Serialize};
 
 use super::associate::AssociationResult;
 
-/// Arcsec per radian, for converting an angular separation to a projected
-/// physical distance once a distance is known.
 const ARCSEC_PER_RADIAN: f64 = 206_264.806_247_096_36;
 
-/// One candidate host, flattened for storage and filtering.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StoredHostCandidate {
     pub objname: Option<String>,
@@ -27,15 +20,14 @@ pub struct StoredHostCandidate {
     pub sep_kpc: Option<f64>,
     /// Galaxy light radius toward the transient, arcsec.
     pub dlr_arcsec: f64,
-    /// Separation in units of the directional light radius. This is the
-    /// quantity filters should cut on.
+    /// Separation in units of `dlr_arcsec`. This is what filters cut on.
     pub d_dlr: f64,
     /// Rank by `d_dlr`, 1 = the galaxy the transient sits deepest inside.
     pub dlr_rank: u32,
-    /// Normalised probability that this galaxy is the host.
+    /// Normalised over all candidates considered, not just the stored ones.
     pub posterior: f64,
     pub z: Option<f64>,
-    /// Adopted distance in Mpc; redshift-independent only when
+    /// Adopted distance in Mpc, redshift-independent only when
     /// `dist_mpc_method` says so.
     pub dist_mpc: Option<f64>,
     pub dist_mpc_method: Option<String>,
@@ -47,51 +39,44 @@ pub struct StoredHostCandidate {
 /// Host association for one object, as stored under `aux.host_galaxy`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HostGalaxyAssociation {
-    /// Highest-posterior candidate, duplicated out of `candidates` so filters
-    /// and downstream consumers do not have to index into the array.
+    /// Duplicate of `candidates[0]`, so consumers need not index the array.
     pub best_host: Option<StoredHostCandidate>,
     pub candidates: Vec<StoredHostCandidate>,
     /// Galaxies supplied by the cross-match, before any shape or offset cut.
     pub n_candidates_searched: u32,
     /// Galaxies surviving the d_DLR cut.
     pub n_candidates_after_dlr_cut: u32,
-    /// Probability that none of the candidates is the true host.
     pub p_host_none: f64,
 }
 
 impl HostGalaxyAssociation {
-    /// Flatten an [`AssociationResult`] into the stored shape.
     pub fn from_result(result: &AssociationResult) -> Self {
         let candidates: Vec<StoredHostCandidate> = result
             .candidates
             .iter()
-            .map(|c| {
-                let dist_mpc = c.galaxy.dist_mpc;
-                // theta[rad] * D gives the projected separation; Mpc -> kpc is
-                // a factor of 1000.
-                let sep_kpc = dist_mpc
+            .map(|c| StoredHostCandidate {
+                objname: c.galaxy.objname.clone(),
+                catalog: c.galaxy.catalog.clone(),
+                objtype: c.galaxy.objtype.clone(),
+                ra: c.galaxy.ra,
+                dec: c.galaxy.dec,
+                sep_arcsec: c.separation_arcsec,
+                // theta[rad] * D is the projected separation; Mpc -> kpc is 1000.
+                sep_kpc: c
+                    .galaxy
+                    .dist_mpc
                     .filter(|d| *d > 0.0)
-                    .map(|d| c.separation_arcsec / ARCSEC_PER_RADIAN * d * 1000.0);
-
-                StoredHostCandidate {
-                    objname: c.galaxy.objname.clone(),
-                    catalog: c.galaxy.catalog.clone(),
-                    objtype: c.galaxy.objtype.clone(),
-                    ra: c.galaxy.ra,
-                    dec: c.galaxy.dec,
-                    sep_arcsec: c.separation_arcsec,
-                    sep_kpc,
-                    dlr_arcsec: c.dlr,
-                    d_dlr: c.fractional_offset,
-                    dlr_rank: c.dlr_rank,
-                    posterior: c.posterior,
-                    z: c.galaxy.redshift,
-                    dist_mpc,
-                    dist_mpc_method: c.galaxy.dist_mpc_method.clone(),
-                    a_arcsec: c.galaxy.a_arcsec,
-                    b_arcsec: c.galaxy.b_arcsec,
-                    pa_deg: c.galaxy.pa_deg,
-                }
+                    .map(|d| c.separation_arcsec / ARCSEC_PER_RADIAN * d * 1000.0),
+                dlr_arcsec: c.dlr,
+                d_dlr: c.fractional_offset,
+                dlr_rank: c.dlr_rank,
+                posterior: c.posterior,
+                z: c.galaxy.redshift,
+                dist_mpc: c.galaxy.dist_mpc,
+                dist_mpc_method: c.galaxy.dist_mpc_method.clone(),
+                a_arcsec: c.galaxy.a_arcsec,
+                b_arcsec: c.galaxy.b_arcsec,
+                pa_deg: c.galaxy.pa_deg,
             })
             .collect();
 
@@ -105,9 +90,6 @@ impl HostGalaxyAssociation {
         }
     }
 
-    /// An association that found nothing, for objects with no galaxy
-    /// cross-matches at all. Recorded rather than left absent so consumers see
-    /// a consistent shape.
     pub fn empty() -> Self {
         Self {
             best_host: None,
@@ -141,7 +123,6 @@ mod tests {
             objtype: Some("G".to_string()),
             objname: Some("test-galaxy".to_string()),
             catalog: Some("NED_LVS".to_string()),
-            shape_from_image: false,
             size_is_isophotal: true,
             diam_survey: None,
             orientation_is_nominal: false,
@@ -184,7 +165,6 @@ mod tests {
         );
         assert!(without.best_host.unwrap().sep_kpc.is_none());
 
-        // At 16.8 Mpc, 5 arcsec projects to 5/206264.8 * 16.8 * 1000 kpc.
         let with = HostGalaxyAssociation::from_result(
             &associate_host(
                 &transient,
@@ -199,10 +179,7 @@ mod tests {
             5.0 / ARCSEC_PER_RADIAN * 16.8 * 1000.0,
             epsilon = 1e-9
         );
-        // Sanity: a few hundred pc, not kiloparsecs.
         assert!(best.sep_kpc.unwrap() < 1.0);
-        // The provenance has to survive into storage, or a filter cannot tell
-        // a real distance from a repackaged redshift.
         assert_eq!(best.dist_mpc_method.as_deref(), Some("zIndependent"));
     }
 
@@ -216,8 +193,6 @@ mod tests {
 
     #[test]
     fn test_bson_round_trip() {
-        // The alert worker serialises this onto the aux document and the
-        // enrichment pipeline reads it back, so both directions must hold.
         let transient = Transient::new(180.0, 45.0);
         let stored = HostGalaxyAssociation::from_result(
             &associate_host(
@@ -241,7 +216,7 @@ mod tests {
     #[test]
     fn test_no_surviving_candidates_reports_p_none_one() {
         let transient = Transient::new(180.0, 45.0);
-        // 500 arcsec from a 20 arcsec galaxy is far beyond the cutoff.
+        // 500 arcsec from a 20 arcsec galaxy: far beyond the cutoff.
         let result = associate_host(
             &transient,
             &[galaxy(500.0, None)],

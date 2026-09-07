@@ -1,4 +1,4 @@
-use boom::conf::{AppConfig, CatalogXmatchConfig};
+use boom::conf::{arcsec_to_radians, AppConfig, CatalogXmatchConfig};
 use boom::utils::enums::Survey;
 use boom::utils::spatial;
 use mongodb::bson::{doc, Document};
@@ -72,22 +72,12 @@ async fn test_xmatch_watchlist_excluded_from_cross_matches() {
             .unwrap();
 
         // 2 arcsec radius, well within the ~0 arcsec separation above.
-        let watchlist_config = CatalogXmatchConfig::new(
-            &watchlist_name,
-            None,
-            2.0,
-            doc! { "_id": 1, "ra": 1, "dec": 1 },
-            false,
-            None,
-            None,
-            None,
-            None,
-            None,
-            1.0,
-            None,
-            None,
-            Vec::new(),
-        );
+        let watchlist_config = CatalogXmatchConfig {
+            catalog: watchlist_name.clone(),
+            radius: arcsec_to_radians(2.0),
+            projection: doc! { "_id": 1, "ra": 1, "dec": 1 },
+            ..Default::default()
+        };
 
         let xmatches = spatial::xmatch(ra, dec, object_id, &survey, &[watchlist_config], &db)
             .await

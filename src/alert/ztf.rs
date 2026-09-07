@@ -673,7 +673,6 @@ pub struct ZtfObject {
     pub prv_nondetections: Vec<ZtfPrvCandidate>,
     pub fp_hists: Vec<ZtfForcedPhot>,
     pub cross_matches: Option<HashMap<String, Vec<Document>>>,
-    /// Shape-aware host association derived from the galaxy cross-matches.
     /// `None` when host association is disabled in the config.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_galaxy: Option<HostGalaxyAssociation>,

@@ -1,29 +1,14 @@
 //! Shape-aware host-galaxy association.
 //!
-//! Associates a transient with its host galaxy using the directional light
-//! radius (DLR) and a Bayesian posterior, rather than a fixed circular
-//! aperture. Given a galaxy's semi-major axis `a`, axis ratio `b/a` and
-//! position angle, the DLR is the galaxy's radius *along the direction of the
-//! transient*, and the dimensionless `d_DLR = separation / DLR` says how many
-//! galaxy-radii out the transient sits.
-//!
-//! This matters because a circular aperture is simultaneously too small for
-//! large nearby galaxies (M31 spans degrees) and too large for dwarfs, and it
-//! ignores inclination entirely. Doing the geometry here, in typed Rust, also
-//! keeps it out of the Mongo aggregation language, where a null comparison
-//! silently evaluates true and disables the cut.
-//!
-//! Entry point for the alert path: [`associate_from_xmatches`], which takes a
-//! survey's cross-match results and returns the document stored under
-//! `aux.host_galaxy`.
+//! Scores each galaxy cross-match by its directional light radius (DLR), the
+//! galaxy's radius along the direction of the transient, rather than by a fixed
+//! circular aperture. `d_DLR = separation / DLR` says how many galaxy-radii out
+//! the transient sits.
 
 use std::collections::HashMap;
 
 use mongodb::bson::Document;
 
-/// Compares two floats within a tolerance, defaulting to 1e-9 absolute.
-///
-/// Test-only helper so the module stays dependency-free.
 #[cfg(test)]
 macro_rules! assert_close {
     ($a:expr, $b:expr) => {
@@ -65,10 +50,8 @@ pub use types::{GalaxyCandidate, HostCandidate, Transient};
 
 /// Run host association for one alert from its cross-match results.
 ///
-/// Returns `None` when association is disabled, so callers can leave the field
-/// off the aux document entirely rather than storing a misleading empty result.
-/// When it is enabled but nothing matched, an empty association is returned so
-/// the stored shape stays consistent.
+/// `None` when association is disabled, so callers leave the field off the aux
+/// document entirely; an empty association when it ran and matched nothing.
 pub fn associate_from_xmatches(
     ra: f64,
     dec: f64,
@@ -85,11 +68,12 @@ pub fn associate_from_xmatches(
     }
 
     let transient = Transient::new(ra, dec);
-    match associate_host(&transient, &galaxies, &config.association_config()) {
-        Ok(result) => Some(HostGalaxyAssociation::from_result(&result)),
-        // The only error is "no candidates", which the guard above rules out.
-        Err(_) => Some(HostGalaxyAssociation::empty()),
-    }
+    Some(
+        associate_host(&transient, &galaxies, &config.association_config())
+            .map(|result| HostGalaxyAssociation::from_result(&result))
+            // The only error is "no candidates", which the guard above rules out.
+            .unwrap_or_else(|_| HostGalaxyAssociation::empty()),
+    )
 }
 
 #[cfg(test)]
@@ -135,9 +119,6 @@ mod tests {
 
     #[test]
     fn test_end_to_end_from_crossmatch_documents() {
-        // A transient 30 arcsec out sits deep inside this galaxy. The legacy
-        // fixed-aperture path would only agree if its circle happened to be
-        // wider than 30 arcsec.
         let mut xmatches = HashMap::new();
         xmatches.insert(NED_LVS.to_string(), vec![ngc4321()]);
 
@@ -155,7 +136,6 @@ mod tests {
         assert_close!(best.sep_arcsec, 30.0, epsilon = 0.01);
         assert!(best.d_dlr < 1.0, "d_DLR was {}", best.d_dlr);
         assert!(best.posterior > 0.5);
-        // dist_mpc present, so the projected separation is available too.
         assert!(best.sep_kpc.unwrap() > 0.0);
         assert_close!(best.dist_mpc.unwrap(), 16.8);
     }
@@ -174,7 +154,6 @@ mod tests {
         let mut xmatches = HashMap::new();
         xmatches.insert(NED_LVS.to_string(), vec![ngc4321()]);
 
-        // A full degree away: well outside even this large galaxy.
         let assoc =
             associate_from_xmatches(185.728_75, 15.822_3 + 1.0, &xmatches, &enabled_config())
                 .unwrap();
@@ -187,9 +166,6 @@ mod tests {
 
     #[test]
     fn test_m31_scale_host_is_found_far_from_centre() {
-        // The case the fixed 100 arcsec aperture structurally cannot handle:
-        // M31 spans degrees, so a transient half a degree out is still well
-        // inside it.
         let m31 = doc! {
             "_id": "MESSIER 031",
             "ra": 10.684_7,
