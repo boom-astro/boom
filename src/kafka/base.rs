@@ -1,5 +1,5 @@
 use crate::{
-    conf::{self, AppConfig, BoomConfigError, KafkaConsumerConfig},
+    conf::{self, AppConfig, BoomConfigError, KafkaConsumerConfig, KafkaSecurity},
     utils::{
         data::count_files_in_dir,
         o11y::{
@@ -69,14 +69,35 @@ fn get_partition_ids(
     Ok(Some(partition_ids))
 }
 
+fn apply_security(client_config: &mut ClientConfig, security: &KafkaSecurity) {
+    let protocol = security.protocol();
+    client_config.set("security.protocol", protocol.as_str());
+
+    if protocol.uses_sasl() {
+        client_config.set("sasl.mechanisms", "SCRAM-SHA-512");
+        if let Some(username) = security.username() {
+            client_config.set("sasl.username", username);
+        }
+        if let Some(password) = security.password() {
+            client_config.set("sasl.password", password);
+        }
+    }
+
+    if protocol.uses_tls() {
+        client_config.set(
+            "ssl.ca.location",
+            security.ssl_ca_location().unwrap_or("probe"),
+        );
+    }
+}
+
 // check that the topic exists and return the number of partitions
 #[instrument(skip_all, err)]
 pub fn check_kafka_topic_partitions(
     bootstrap_servers: &str,
     topic_name: &str,
     group_id: &str,
-    username: Option<String>,
-    password: Option<String>,
+    security: &KafkaSecurity,
 ) -> Result<Option<usize>, KafkaError> {
     let mut client_config = ClientConfig::new();
     client_config
@@ -84,16 +105,7 @@ pub fn check_kafka_topic_partitions(
         // .set("debug", "consumer,cgrp,topic,fetch")
         .set("bootstrap.servers", bootstrap_servers)
         .set("group.id", group_id);
-
-    if let (Some(username), Some(password)) = (username, password) {
-        client_config
-            .set("security.protocol", "SASL_PLAINTEXT")
-            .set("sasl.mechanisms", "SCRAM-SHA-512")
-            .set("sasl.username", username)
-            .set("sasl.password", password);
-    } else {
-        client_config.set("security.protocol", "PLAINTEXT");
-    }
+    apply_security(&mut client_config, security);
 
     let consumer: BaseConsumer = client_config
         .create()
@@ -116,8 +128,7 @@ pub async fn initialize_topic(
         bootstrap_servers,
         topic_name,
         "producer-topic-check",
-        None,
-        None,
+        &KafkaSecurity::default(),
     )? {
         Some(nb_partitions) => {
             if nb_partitions != expected_nb_partitions {
@@ -183,10 +194,12 @@ fn is_transient_metadata_error(error: &KafkaError) -> bool {
 pub fn count_messages(
     bootstrap_servers: &str,
     topic_name: &str,
+    security: &KafkaSecurity,
 ) -> Result<Option<u32>, KafkaError> {
-    let consumer: BaseConsumer = ClientConfig::new()
-        .set("bootstrap.servers", bootstrap_servers)
-        .create()?;
+    let mut client_config = ClientConfig::new();
+    client_config.set("bootstrap.servers", bootstrap_servers);
+    apply_security(&mut client_config, security);
+    let consumer: BaseConsumer = client_config.create()?;
     let mut attempt = 1;
     loop {
         let error = match count_messages_once(&consumer, topic_name) {
@@ -261,7 +274,9 @@ pub trait AlertProducer {
         topic: Option<String>,
     ) -> Result<Option<i64>, Box<dyn std::error::Error>> {
         let topic_name = topic.unwrap_or_else(|| self.topic_name());
-        if let Some(total_messages) = count_messages(&self.server_url(), &topic_name)? {
+        if let Some(total_messages) =
+            count_messages(&self.server_url(), &topic_name, &KafkaSecurity::default())?
+        {
             // Topic exists, skip producing if it has the expected number of
             // messages. Count the number of Avro files in the data directory:
             if let Some(avro_count) = count_files_in_dir(&self.data_directory(), Some(&["avro"]))
@@ -914,15 +929,14 @@ pub async fn consumer(
     } else {
         survey_consumer_config.group_id.clone()
     };
-    let username = survey_consumer_config.username.clone();
-    let password = survey_consumer_config.password.clone();
+    let security = survey_consumer_config.security();
 
     let subscription = subscribe_to(plan.subscription_timestamp, plan.window_days);
 
     let topics: Vec<String> = if replay {
         let mut non_empty_topics = vec![];
         for topic in &subscription {
-            let nb_messages = count_messages(&server, topic)?;
+            let nb_messages = count_messages(&server, topic, &security)?;
             match nb_messages {
                 Some(0) => {
                     info!(
@@ -986,15 +1000,7 @@ pub async fn consumer(
             .set("topic.metadata.refresh.interval.ms", "10000");
     }
 
-    if let (Some(username), Some(password)) = (username, password) {
-        client_config
-            .set("security.protocol", "SASL_PLAINTEXT")
-            .set("sasl.mechanisms", "SCRAM-SHA-512")
-            .set("sasl.username", username)
-            .set("sasl.password", password);
-    } else {
-        client_config.set("security.protocol", "PLAINTEXT");
-    }
+    apply_security(&mut client_config, &security);
 
     let consumer: BaseConsumer = client_config
         .create()

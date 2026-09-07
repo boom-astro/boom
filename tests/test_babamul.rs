@@ -190,6 +190,7 @@ fn create_mock_enriched_ztf_alert(candid: i64, object_id: &str, is_rock: bool) -
                 is_rock.then_some(18.1),
             )),
             activity: None,
+            detection_history: None,
         },
         survey_matches: BabamulSurveyMatches::default(),
     }

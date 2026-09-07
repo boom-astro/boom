@@ -76,7 +76,7 @@ async fn test_kafka_auth_enforcement() {
     let mut cfg_bad = make_base_cfg();
     cfg_bad
         .set("security.protocol", "SASL_PLAINTEXT")
-        .set("sasl.mechanism", "SCRAM-SHA-512")
+        .set("sasl.mechanisms", "SCRAM-SHA-512")
         .set("sasl.username", &user)
         .set("sasl.password", "definitely-wrong-password");
     let bad_result = fetch_metadata(&cfg_bad);
@@ -89,7 +89,7 @@ async fn test_kafka_auth_enforcement() {
     let mut cfg_good = make_base_cfg();
     cfg_good
         .set("security.protocol", "SASL_PLAINTEXT")
-        .set("sasl.mechanism", "SCRAM-SHA-512")
+        .set("sasl.mechanisms", "SCRAM-SHA-512")
         .set("sasl.username", &user)
         .set("sasl.password", &pass);
     let good_result = fetch_metadata(&cfg_good).unwrap();
