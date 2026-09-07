@@ -1,11 +1,12 @@
 use chrono::NaiveDate;
+use futures::TryStreamExt;
 use mongodb::{
-    bson::{doc, to_document, Document},
-    options::IndexOptions,
+    bson::{doc, to_document, Bson, Document},
+    options::{Hint, IndexOptions},
     Collection, Database, IndexModel,
 };
 use serde::Serialize;
-use tracing::instrument;
+use tracing::{error, info, instrument, warn};
 
 use crate::utils::enums::Survey;
 
@@ -337,6 +338,324 @@ pub fn fetch_timeseries_op(
         }
     }
 }
+// -----------------------------------------------------------------------------
+// Range sharding: splitting a full-collection pass into contiguous ranges is the
+// only way to use more than one thread on it. Ranges are cut on an indexed field
+// that tracks insertion order, so that each shard walks a roughly contiguous
+// region on disk rather than jumping around it.
+// -----------------------------------------------------------------------------
+
+pub const CURSOR_BATCH_SIZE: u32 = 10_000;
+
+/// Without the hint the empty-filter count collection-scans instead of counting the _id index.
+pub async fn exact_count(collection: &Collection<Document>) -> Result<u64, mongodb::error::Error> {
+    info!("counting the documents in {}", collection.namespace());
+    collection
+        .count_documents(doc! {})
+        .hint(Hint::Keys(doc! { "_id": 1 }))
+        .await
+}
+
+pub async fn collection_exists(db: &Database, name: &str) -> Result<bool, mongodb::error::Error> {
+    Ok(db.list_collection_names().await?.iter().any(|n| n == name))
+}
+
+/// `created_at` is exactly insertion order, but it is only indexed if someone created
+/// that index; `_id` always is, and both ZTF object ids and LSST diaObject ids happen
+/// to be allocated in an order that correlates well with insertion.
+pub async fn shard_field(collection: &Collection<Document>) -> &'static str {
+    let indexed_on_created_at = match collection.list_indexes().await {
+        Ok(cursor) => match cursor.try_collect::<Vec<_>>().await {
+            Ok(indexes) => indexes
+                .iter()
+                .any(|index| index.keys.keys().next().is_some_and(|k| k == "created_at")),
+            Err(_) => false,
+        },
+        Err(_) => false,
+    };
+    if indexed_on_created_at {
+        "created_at"
+    } else {
+        "_id"
+    }
+}
+
+pub async fn range_shards(
+    collection: &Collection<Document>,
+    parts: usize,
+    field: &str,
+    base_filter: &Document,
+) -> Vec<Document> {
+    if parts <= 1 {
+        return vec![Document::new()];
+    }
+    // Behind a $match, $sample loses its random-cursor plan and collection-scans.
+    let sample_size = if base_filter.is_empty() {
+        (parts * 20).min(10_000)
+    } else {
+        10_000
+    };
+    info!(
+        "sampling {} bounds on '{}' to cut {} shards",
+        sample_size, field, parts
+    );
+    let mut pipeline = vec![doc! { "$sample": { "size": sample_size as i64 } }];
+    if !base_filter.is_empty() {
+        pipeline.push(doc! { "$match": base_filter.clone() });
+    }
+    pipeline.push(doc! { "$project": { field: 1 } });
+    pipeline.push(doc! { "$sort": { field: 1 } });
+
+    let bounds: Vec<Bson> = match collection.aggregate(pipeline).await {
+        Ok(cursor) => match cursor.try_collect::<Vec<Document>>().await {
+            Ok(docs) => docs.iter().filter_map(|d| d.get(field).cloned()).collect(),
+            Err(e) => {
+                warn!(error = %e, "could not sample {} bounds, falling back to a single shard", field);
+                Vec::new()
+            }
+        },
+        Err(e) => {
+            warn!(error = %e, "could not sample {} bounds, falling back to a single shard", field);
+            Vec::new()
+        }
+    };
+
+    if bounds.len() < parts {
+        warn!(
+            "only {} sampled bounds on '{}' for {} shards, running as a single shard",
+            bounds.len(),
+            field,
+            parts
+        );
+        return vec![Document::new()];
+    }
+    shard_filters(field, &bounds, parts)
+}
+
+/// Contiguous filters covering everything; expects `parts >= 2` and `bounds.len() >= parts`.
+fn shard_filters(field: &str, bounds: &[Bson], parts: usize) -> Vec<Document> {
+    let step = bounds.len() / parts;
+    let cuts: Vec<&Bson> = (1..parts).map(|i| &bounds[i * step]).collect();
+
+    let mut shards = Vec::with_capacity(parts);
+    shards.push(doc! { "$or": [
+        doc! { field: { "$lt": cuts[0].clone() } },
+        doc! { field: { "$exists": false } },
+    ] });
+    for pair in cuts.windows(2) {
+        shards.push(doc! { field: { "$gte": pair[0].clone(), "$lt": pair[1].clone() } });
+    }
+    shards.push(doc! { field: { "$gte": cuts[cuts.len() - 1].clone() } });
+    shards
+}
+
+/// False: the shards did not cover every document counted before the pass.
+pub fn check_shard_coverage(scanned: u64, total: u64, shard_count: usize) -> bool {
+    if scanned >= total {
+        true
+    } else if shard_count > 1 {
+        error!(
+            "only {} of the {} document(s) counted before the pass were scanned: the shards did \
+             not cover them all, re-run with --processes 1",
+            scanned, total
+        );
+        false
+    } else {
+        warn!(
+            "scanned {} of the {} document(s) counted before the pass: documents were modified \
+             or deleted while it ran",
+            scanned, total
+        );
+        true
+    }
+}
+
+pub fn merge_filters(base: &Document, shard: &Document) -> Document {
+    if shard.is_empty() {
+        base.clone()
+    } else if base.is_empty() {
+        shard.clone()
+    } else {
+        doc! { "$and": [base.clone(), shard.clone()] }
+    }
+}
+
+#[derive(thiserror::Error, Debug)]
+pub enum TaskError {
+    #[error("{0}")]
+    Failed(#[from] mongodb::error::Error),
+    #[error("task did not run to completion: {0}")]
+    Join(#[from] tokio::task::JoinError),
+}
+
+/// Ignoring a JoinError would report a run that covered only part of the collection as a success.
+pub async fn join_tasks<T>(
+    handles: Vec<tokio::task::JoinHandle<Result<T, mongodb::error::Error>>>,
+    label: &str,
+) -> Result<Vec<T>, TaskError> {
+    let mut results = Vec::with_capacity(handles.len());
+    let mut first_err: Option<TaskError> = None;
+    for handle in handles {
+        match handle.await {
+            Ok(Ok(value)) => results.push(value),
+            Ok(Err(e)) => {
+                error!("{} failed: {}", label, e);
+                first_err.get_or_insert(e.into());
+            }
+            Err(e) => {
+                error!("{} did not run to completion: {}", label, e);
+                first_err.get_or_insert(e.into());
+            }
+        }
+    }
+    match first_err {
+        Some(e) => Err(e),
+        None => Ok(results),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bounds(values: &[i32]) -> Vec<Bson> {
+        values.iter().map(|v| Bson::Int32(*v)).collect()
+    }
+
+    fn lower(shard: &Document, field: &str) -> Option<Bson> {
+        shard.get_document(field).ok()?.get("$gte").cloned()
+    }
+
+    fn upper(shard: &Document, field: &str) -> Option<Bson> {
+        match shard.get_array("$or") {
+            Ok(branches) => branches[0]
+                .as_document()?
+                .get_document(field)
+                .ok()?
+                .get("$lt")
+                .cloned(),
+            Err(_) => shard.get_document(field).ok()?.get("$lt").cloned(),
+        }
+    }
+
+    #[test]
+    fn shard_filters_builds_one_filter_per_part() {
+        let b = bounds(&(0..100).collect::<Vec<_>>());
+        for parts in 2..10 {
+            assert_eq!(
+                shard_filters("_id", &b, parts).len(),
+                parts,
+                "parts={}",
+                parts
+            );
+        }
+    }
+
+    #[test]
+    fn shard_filters_covers_every_value_without_a_gap() {
+        let b = bounds(&(0..100).collect::<Vec<_>>());
+        for parts in 2..10 {
+            let shards = shard_filters("_id", &b, parts);
+            assert!(
+                lower(&shards[0], "_id").is_none(),
+                "the first shard is open-ended"
+            );
+            assert!(
+                upper(shards.last().unwrap(), "_id").is_none(),
+                "the last shard is open-ended"
+            );
+            for pair in shards.windows(2) {
+                assert_eq!(
+                    upper(&pair[0], "_id"),
+                    lower(&pair[1], "_id"),
+                    "parts={}, a value falls between two shards",
+                    parts
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn shard_filters_first_shard_also_takes_documents_without_the_field() {
+        let shards = shard_filters("created_at", &bounds(&[1, 2, 3, 4]), 2);
+        let branches = shards[0].get_array("$or").expect("first shard is an $or");
+        assert_eq!(branches.len(), 2);
+        assert_eq!(
+            branches[1].as_document().unwrap(),
+            &doc! { "created_at": { "$exists": false } }
+        );
+    }
+
+    #[test]
+    fn shard_filters_handles_a_sample_as_small_as_the_part_count() {
+        let shards = shard_filters("_id", &bounds(&[10, 20, 30]), 3);
+        assert_eq!(shards.len(), 3);
+        assert_eq!(upper(&shards[0], "_id"), Some(Bson::Int32(20)));
+        assert_eq!(lower(&shards[2], "_id"), Some(Bson::Int32(30)));
+    }
+
+    #[test]
+    fn shard_filters_keeps_covering_everything_when_cuts_repeat() {
+        let shards = shard_filters("_id", &bounds(&[7, 7, 7, 7]), 4);
+        assert_eq!(shards.len(), 4);
+        for pair in shards.windows(2) {
+            assert_eq!(upper(&pair[0], "_id"), lower(&pair[1], "_id"));
+        }
+    }
+
+    #[test]
+    fn merge_filters_keeps_whichever_side_is_present() {
+        let base = doc! { "coordinates": { "$exists": false } };
+        let shard = doc! { "_id": { "$gte": 1 } };
+        assert_eq!(merge_filters(&base, &Document::new()), base);
+        assert_eq!(merge_filters(&Document::new(), &shard), shard);
+        assert_eq!(
+            merge_filters(&base, &shard),
+            doc! { "$and": [base.clone(), shard.clone()] }
+        );
+        assert_eq!(
+            merge_filters(&Document::new(), &Document::new()),
+            Document::new()
+        );
+    }
+
+    fn io_error(message: &str) -> mongodb::error::Error {
+        std::io::Error::other(message.to_string()).into()
+    }
+
+    #[tokio::test]
+    async fn join_tasks_returns_every_value_when_all_succeed() {
+        let handles = vec![
+            tokio::spawn(async { Ok::<i32, mongodb::error::Error>(1) }),
+            tokio::spawn(async { Ok::<i32, mongodb::error::Error>(2) }),
+        ];
+        assert_eq!(join_tasks(handles, "task").await.unwrap(), vec![1, 2]);
+    }
+
+    #[tokio::test]
+    async fn join_tasks_reports_the_first_error() {
+        let handles = vec![
+            tokio::spawn(async { Err(io_error("first")) }),
+            tokio::spawn(async { Err(io_error("second")) }),
+        ];
+        let error = join_tasks::<i32>(handles, "task").await.unwrap_err();
+        assert!(error.to_string().contains("first"), "got {}", error);
+    }
+
+    #[tokio::test]
+    async fn join_tasks_does_not_swallow_a_panicking_task() {
+        let handles = vec![
+            tokio::spawn(async { Ok::<i32, mongodb::error::Error>(1) }),
+            tokio::spawn(async {
+                let ran = false;
+                assert!(ran, "panicking on purpose");
+                Ok::<i32, mongodb::error::Error>(2)
+            }),
+        ];
+        let error = join_tasks(handles, "task").await.unwrap_err();
+        assert!(matches!(error, TaskError::Join(_)), "got {:?}", error);
+    }
+}
 
 #[cfg(test)]
 mod angular_size_index_tests {
@@ -358,6 +677,8 @@ mod angular_size_index_tests {
             angular_size_key,
             5.0,
             radius_max,
+            None,
+            Vec::new(),
         )
     }
 

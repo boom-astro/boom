@@ -40,7 +40,7 @@ rand = "0.10.1"
 rdkafka = { version = "0.39.0", features = ["gssapi", "ssl-vendored", "tracing", "sasl", "zstd"] }
 redis = { version = "1.2.1", features = ["tokio-comp"] }
 regex = "1.12.3"
-reqwest = { version = "0.13.3", features = ["json", "stream"] }
+reqwest = { version = "0.13.3", features = ["form", "json", "stream"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0.149"
 serde_with = { version = "3.20.0", features = ["base64"] }
@@ -55,6 +55,7 @@ tracing-opentelemetry = "0.32.0"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "registry"]}
 utoipa = { version = "5.5.0", features = ["actix_extras"] }
 utoipa-scalar = { version = "0.3.0", features = ["actix-web"] }
+url = "2.5"
 uuid = { version = "1.23", features = ["v4"] }
 which = "8.0.2"
 zstd = "0.13"

@@ -1,3 +1,5 @@
+name: boom
+
 volumes:
   mongodb:
   valkey:
@@ -28,7 +30,13 @@ services:
     networks:
       - boom
   mongo:
-    image: mongo:8.0
+    # 8.2 rather than 8.0: MongoDB 8.0 refuses to start on Linux kernel 6.19 and
+    # newer (https://jira.mongodb.org/browse/SERVER-121912), which current
+    # Docker Desktop VMs already ship, so 8.0 cannot run locally at all. 8.0 to
+    # 8.2 is a supported direct upgrade and 8.2 to 8.0 a supported downgrade,
+    # provided featureCompatibilityVersion is left at "8.0" until you are ready
+    # to give up that path.
+    image: mongo:8.2
     hostname: mongo
     expose:
       - "27017"
@@ -200,12 +208,27 @@ services:
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       # Optional overrides (these have defaults in config.yaml)
       BOOM_API__PORT: ${BOOM_API__PORT:-4000}
+      BOOM_API__AUTH__ADMIN_EMAIL: ${BOOM_API__AUTH__ADMIN_EMAIL:-}
       BOOM_DATABASE__HOST: mongo
       BOOM_DATABASE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
       BOOM_CUTOUTS_STORAGE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
       BOOM_CUTOUTS_STORAGE__TYPE: mongo
       BOOM_CUTOUTS_STORAGE__HOST: mongo
       BOOM_BABAMUL__ENABLED: ${BOOM_BABAMUL__ENABLED:-false}
+      BOOM_BABAMUL__WEBAPP_URL: ${BOOM_BABAMUL__WEBAPP_URL:-}
+      # Whether the API will create accounts. Pair it with VITE_PRERELEASE_MODE
+      # below, which only decides what the web app offers.
+      BOOM_BABAMUL__REGISTRATION_ENABLED: ${BOOM_BABAMUL__REGISTRATION_ENABLED:-true}
+      # Social sign-in. Secrets come from the environment only; a provider with
+      # no client ID/secret pair stays off.
+      BOOM_BABAMUL__OAUTH__REDIRECT_BASE_URL: ${BOOM_BABAMUL__OAUTH__REDIRECT_BASE_URL:-}
+      BOOM_BABAMUL__OAUTH__GOOGLE__CLIENT_ID: ${BOOM_BABAMUL__OAUTH__GOOGLE__CLIENT_ID:-}
+      BOOM_BABAMUL__OAUTH__GOOGLE__CLIENT_SECRET: ${BOOM_BABAMUL__OAUTH__GOOGLE__CLIENT_SECRET:-}
+      BOOM_BABAMUL__OAUTH__GITHUB__CLIENT_ID: ${BOOM_BABAMUL__OAUTH__GITHUB__CLIENT_ID:-}
+      BOOM_BABAMUL__OAUTH__GITHUB__CLIENT_SECRET: ${BOOM_BABAMUL__OAUTH__GITHUB__CLIENT_SECRET:-}
+      BOOM_BABAMUL__OAUTH__ORCID__CLIENT_ID: ${BOOM_BABAMUL__OAUTH__ORCID__CLIENT_ID:-}
+      BOOM_BABAMUL__OAUTH__ORCID__CLIENT_SECRET: ${BOOM_BABAMUL__OAUTH__ORCID__CLIENT_SECRET:-}
+      BOOM_BABAMUL__OAUTH__ORCID_SANDBOX: ${BOOM_BABAMUL__OAUTH__ORCID_SANDBOX:-false}
       # Server-side PostHog analytics; blank disables analytics.
       BOOM_POSTHOG__PROJECT_API_KEY: ${BOOM_POSTHOG__PROJECT_API_KEY:-}
       BOOM_POSTHOG__HOST: ${BOOM_POSTHOG__HOST:-https://us.i.posthog.com}
@@ -327,6 +350,10 @@ services:
       BOOM_KAFKA__CONSUMER__ZTF__GROUP_ID: ${BOOM_KAFKA__CONSUMER__ZTF__GROUP_ID:?BOOM_KAFKA__CONSUMER__ZTF__GROUP_ID must be set}-public
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       # Optional overrides
+      BOOM_KAFKA__CONSUMER__ZTF__SECURITY_PROTOCOL: ${BOOM_KAFKA__CONSUMER__ZTF__SECURITY_PROTOCOL:-}
+      BOOM_KAFKA__CONSUMER__ZTF__USERNAME: ${BOOM_KAFKA__CONSUMER__ZTF__USERNAME:-}
+      BOOM_KAFKA__CONSUMER__ZTF__PASSWORD: ${BOOM_KAFKA__CONSUMER__ZTF__PASSWORD:-}
+      BOOM_KAFKA__CONSUMER__ZTF__SSL_CA_LOCATION: ${BOOM_KAFKA__CONSUMER__ZTF__SSL_CA_LOCATION:-}
       BOOM_DATABASE__HOST: mongo
       BOOM_DATABASE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
       BOOM_CUTOUTS_STORAGE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
@@ -361,6 +388,10 @@ services:
       BOOM_KAFKA__CONSUMER__ZTF__GROUP_ID: ${BOOM_KAFKA__CONSUMER__ZTF__GROUP_ID:?BOOM_KAFKA__CONSUMER__ZTF__GROUP_ID must be set}-partnership
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       # Optional overrides
+      BOOM_KAFKA__CONSUMER__ZTF__SECURITY_PROTOCOL: ${BOOM_KAFKA__CONSUMER__ZTF__SECURITY_PROTOCOL:-}
+      BOOM_KAFKA__CONSUMER__ZTF__USERNAME: ${BOOM_KAFKA__CONSUMER__ZTF__USERNAME:-}
+      BOOM_KAFKA__CONSUMER__ZTF__PASSWORD: ${BOOM_KAFKA__CONSUMER__ZTF__PASSWORD:-}
+      BOOM_KAFKA__CONSUMER__ZTF__SSL_CA_LOCATION: ${BOOM_KAFKA__CONSUMER__ZTF__SSL_CA_LOCATION:-}
       BOOM_DATABASE__HOST: mongo
       BOOM_DATABASE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
       BOOM_CUTOUTS_STORAGE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
@@ -395,6 +426,10 @@ services:
       BOOM_KAFKA__CONSUMER__ZTF__GROUP_ID: ${BOOM_KAFKA__CONSUMER__ZTF__GROUP_ID:?BOOM_KAFKA__CONSUMER__ZTF__GROUP_ID must be set}-caltech
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       # Optional overrides
+      BOOM_KAFKA__CONSUMER__ZTF__SECURITY_PROTOCOL: ${BOOM_KAFKA__CONSUMER__ZTF__SECURITY_PROTOCOL:-}
+      BOOM_KAFKA__CONSUMER__ZTF__USERNAME: ${BOOM_KAFKA__CONSUMER__ZTF__USERNAME:-}
+      BOOM_KAFKA__CONSUMER__ZTF__PASSWORD: ${BOOM_KAFKA__CONSUMER__ZTF__PASSWORD:-}
+      BOOM_KAFKA__CONSUMER__ZTF__SSL_CA_LOCATION: ${BOOM_KAFKA__CONSUMER__ZTF__SSL_CA_LOCATION:-}
       BOOM_DATABASE__HOST: mongo
       BOOM_DATABASE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
       BOOM_CUTOUTS_STORAGE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
@@ -502,7 +537,7 @@ services:
       BOOM_BABAMUL__ENABLED: ${BOOM_BABAMUL__ENABLED:-false}
       BOOM_REDIS__HOST: valkey
       BOOM_GPU__ENABLED: ${BOOM_GPU__ENABLED:-false}
-      BOOM_GPU__DEVICE_IDS: ${BOOM_GPU__DEVICE_IDS:-0}
+      BOOM_GPU__DEVICE_IDS: ${BOOM_GPU__DEVICE_IDS:-}
     networks:
       - boom
     profiles:
@@ -537,7 +572,7 @@ services:
       BOOM_BABAMUL__ENABLED: ${BOOM_BABAMUL__ENABLED:-false}
       BOOM_REDIS__HOST: valkey
       BOOM_GPU__ENABLED: ${BOOM_GPU__ENABLED:-false}
-      BOOM_GPU__DEVICE_IDS: ${BOOM_GPU__DEVICE_IDS:-0}
+      BOOM_GPU__DEVICE_IDS: ${BOOM_GPU__DEVICE_IDS:-}
     networks:
       - boom
     profiles:

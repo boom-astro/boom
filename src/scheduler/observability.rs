@@ -41,6 +41,39 @@ static WORKER_RETRY: LazyLock<Counter<u64>> = LazyLock::new(|| {
         .build()
 });
 
+static MPC_ORBITS_AGE: LazyLock<Gauge<i64>> = LazyLock::new(|| {
+    scheduler_meter()
+        .i64_gauge("scheduler.mpc_orbits.age")
+        .with_unit("s")
+        .with_description(
+            "Seconds since MPC_orbits was last refreshed. A stale catalogue degrades \
+             quietly, so alert on this rather than on refresh errors.",
+        )
+        .build()
+});
+
+static MPC_ORBITS_COUNT: LazyLock<Gauge<i64>> = LazyLock::new(|| {
+    scheduler_meter()
+        .i64_gauge("scheduler.mpc_orbits.count")
+        .with_unit("{orbit}")
+        .with_description("Number of orbits in MPC_orbits after the last refresh.")
+        .build()
+});
+
+/// Record the state of the MPC orbital element catalogue.
+///
+/// An absent catalogue is reported as a very large age rather than omitted: a
+/// gap in the series would look like a healthy scrape.
+pub fn record_mpc_orbits_state(age_seconds: Option<f64>, count: Option<u64>) {
+    MPC_ORBITS_AGE.record(
+        age_seconds.map_or(i64::MAX, |a| a as i64),
+        &[KeyValue::new("present", age_seconds.is_some())],
+    );
+    if let Some(count) = count {
+        MPC_ORBITS_COUNT.record(i64::try_from(count).unwrap_or(i64::MAX), &[]);
+    }
+}
+
 pub fn record_worker_pool_state(
     survey: &Survey,
     worker_type: &'static str,

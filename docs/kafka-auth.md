@@ -1,7 +1,9 @@
 # Kafka authentication and authorization
 
-This document describes how external (read-only) clients authenticate to the
-BOOM Kafka broker and what guarantees/limitations apply.
+This document describes Kafka security in both directions: how external
+(read-only) clients authenticate to the BOOM broker and what
+guarantees/limitations apply, and how BOOM authenticates to the brokers it
+consumes from.
 
 ## Goals
 
@@ -55,12 +57,12 @@ Admin user is a super user; ACLs not required.
 
 ### Rust (rdkafka)
 
-```rust
+```rust,ignore
 let mut config = rdkafka::ClientConfig::new();
 config
   .set("bootstrap.servers", "broker.example.org:9093")
   .set("security.protocol", "SASL_PLAINTEXT")
-  .set("sasl.mechanism", "SCRAM-SHA-512")
+  .set("sasl.mechanisms", "SCRAM-SHA-512")
   .set("sasl.username", "readonly")
   .set("sasl.password", std::env::var("KAFKA_READONLY_PASSWORD").unwrap());
 ```
@@ -68,7 +70,9 @@ config
 ### Python (confluent-kafka)
 
 ```python
+import os
 from confluent_kafka import Consumer
+
 c = Consumer({
   'bootstrap.servers': 'broker.example.org:9093',
   'security.protocol': 'SASL_PLAINTEXT',
@@ -90,3 +94,43 @@ c = Consumer({
   kafka-acl-init` (depends on broker health).
   Re-run with `docker compose run --rm kafka-acl-init`
   if you need to refresh credentials without recreating broker.
+
+## Consuming from an upstream broker
+
+BOOM as a client of a survey's broker is configured per survey under
+`kafka.consumer.*`:
+
+| Setting | Environment variable | Meaning |
+|---------|----------------------|---------|
+| `security_protocol` | `BOOM_KAFKA__CONSUMER__<SURVEY>__SECURITY_PROTOCOL` | `PLAINTEXT`, `SSL`, `SASL_PLAINTEXT` or `SASL_SSL`. |
+| `username` | `BOOM_KAFKA__CONSUMER__<SURVEY>__USERNAME` | SASL username. |
+| `password` | `BOOM_KAFKA__CONSUMER__<SURVEY>__PASSWORD` | SASL password. |
+| `ssl_ca_location` | `BOOM_KAFKA__CONSUMER__<SURVEY>__SSL_CA_LOCATION` | CA bundle path. Only needed for a private CA. |
+
+Left empty, `security_protocol` is inferred from the credentials: `SASL_PLAINTEXT`
+when both are set, `PLAINTEXT` otherwise. A survey only needs to set it
+explicitly for a broker that requires TLS, where it is `SASL_SSL`.
+
+`ssl_ca_location` defaults to librdkafka's `probe`, which scans the standard
+system CA paths. The runtime images install `ca-certificates`, so a broker whose
+certificate chains to a public root needs nothing here. A private CA needs the
+bundle mounted into the container as well as pointed at, since the variable
+names a path inside it.
+
+To tell a credential failure apart from a TLS one, run the consumer against one
+night with `RUST_LOG=librdkafka=debug` and read the broker state transitions:
+
+```sh
+BOOM_KAFKA__CONSUMER__ZTF__SERVER=broker.example:443 \
+BOOM_KAFKA__CONSUMER__ZTF__SECURITY_PROTOCOL=SASL_SSL \
+BOOM_KAFKA__CONSUMER__ZTF__USERNAME=... \
+BOOM_KAFKA__CONSUMER__ZTF__PASSWORD=... \
+BOOM_KAFKA__CONSUMER__ZTF__GROUP_ID=boom-ztf-tls-check \
+RUST_LOG=librdkafka=debug \
+cargo run --bin kafka_consumer -- ztf --on $(date -u +%Y%m%d) --exit-on-eof
+```
+
+`Broker SSL certificate verified` followed by `SSL_HANDSHAKE -> APIVERSION_QUERY`
+means TLS and the CA bundle are fine and only the credentials are left. A
+failure before that line is a truststore or hostname problem instead, and no
+password will fix it.

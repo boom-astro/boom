@@ -28,7 +28,7 @@ RUN ORT_CAPI_DIR="$('/opt/ort-py/bin/python' -c 'import pathlib, onnxruntime as 
     cp "${ORT_CAPI_DIR}/libonnxruntime_providers_tensorrt.so" /opt/ort/ && \
     rm -rf /opt/ort-py && ln -sf /opt/ort/libonnxruntime.so.${ONNXRUNTIME_GPU_VERSION} /opt/ort/libonnxruntime.so
 
-COPY data/models/btsbot-v1.0.1.onnx /app/data/models/btsbot-v1.0.1.onnx
+COPY data/models/btsbot-v2.0.0.onnx /app/data/models/btsbot-v2.0.0.onnx
 COPY apache-avro-macros /app/apache-avro-macros
 COPY Cargo.toml Cargo.lock /app/
 COPY ./src /app/src
@@ -40,12 +40,13 @@ COPY ./src /app/src
 RUN --mount=type=cache,target=/app/target,sharing=locked \
     --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
     --mount=type=cache,target=/root/.cargo/git,sharing=locked \
-    cargo build --release --features gpu --bin scheduler --bin migrate_fp_flux --bin migrate_snr --bin reprocess_crossmatch --bin enrich_reprocess && \
+    cargo build --release --features gpu --bin scheduler --bin migrate_fp_flux --bin migrate_snr --bin reprocess_crossmatch --bin prepare_catalog --bin enrich_reprocess && \
     mkdir -p /app/bin && \
     cp target/release/scheduler \
        target/release/migrate_fp_flux \
        target/release/migrate_snr \
        target/release/reprocess_crossmatch \
+       target/release/prepare_catalog \
        target/release/enrich_reprocess \
        /app/bin/
 
@@ -67,6 +68,7 @@ COPY --from=builder /app/bin/scheduler /app/scheduler
 COPY --from=builder /app/bin/migrate_fp_flux /app/migrate_fp_flux
 COPY --from=builder /app/bin/migrate_snr /app/migrate_snr
 COPY --from=builder /app/bin/reprocess_crossmatch /app/reprocess_crossmatch
+COPY --from=builder /app/bin/prepare_catalog /app/prepare_catalog
 COPY --from=builder /app/bin/enrich_reprocess /app/enrich_reprocess
 COPY --from=builder /opt/ort /opt/ort
 

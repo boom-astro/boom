@@ -337,7 +337,14 @@ async fn test_enrich_ztf_alert() {
     assert!(classifications.get_f64("acai_v").unwrap() > 0.99);
     assert!(classifications.get_f64("acai_o").unwrap() < 0.01);
     assert!(classifications.get_f64("acai_b").unwrap() < 0.01);
-    assert!(classifications.get_f64("btsbot").unwrap() < 0.01);
+    let btsbot = classifications.get_f64("btsbot").unwrap();
+    // Bounded as well as small: the model emits a logit, and a large negative
+    // one satisfies "< 0.01" just as well as a probability does.
+    assert!(
+        (0.0..=1.0).contains(&btsbot),
+        "btsbot {btsbot} is not a probability"
+    );
+    assert!(btsbot < 0.01);
 
     // the enrichment worker also adds "properties" to the alert
     let properties = alert.get_document("properties").unwrap();
@@ -404,11 +411,19 @@ async fn test_enrich_ztf_alert() {
     // r fading stats
     let fading = r_stats.get_document("fading").unwrap();
     let fading_rate = fading.get_f64("rate").unwrap();
-    let fading_red_chi2 = fading.get_f64("red_chi2").unwrap();
     let fading_dt = fading.get_f64("dt").unwrap();
     assert!((fading_rate - 0.063829).abs() < 1e-6);
-    assert!(fading_red_chi2.is_nan()); // only 2 points after peak
     assert!((fading_dt - 7.956157).abs() < 1e-6);
+    // Only 2 points after the peak, so red_chi2 is null. Explicitly null and not
+    // omitted: the avro schema requires the field to be present.
+    assert_eq!(
+        fading.get("red_chi2"),
+        Some(&mongodb::bson::Bson::Null),
+        "red_chi2 must be null when dof is 0"
+    );
+    assert_eq!(fading.get_i32("dof").unwrap(), 0);
+    assert_eq!(fading.get_i32("nb_data").unwrap(), 2);
+    assert!(fading.get_f64("chi2").unwrap().abs() < 1e-9);
 }
 
 #[tokio::test]

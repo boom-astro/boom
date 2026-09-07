@@ -1397,6 +1397,8 @@ mod tests {
                 None,
                 1.0,
                 None,
+                None,
+                Vec::new(),
             ));
         let result = validate_watchlist(&db, &name, &Survey::Ztf, &admin, &config).await;
 

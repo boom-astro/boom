@@ -956,10 +956,6 @@ impl AlertWorker for ZtfAlertWorker {
         Survey::Ztf
     }
 
-    fn input_queue_name(&self) -> String {
-        format!("{}_alerts_packets_queue", ZtfAlertWorker::survey())
-    }
-
     fn output_queue_name(&self) -> String {
         format!("{}_alerts_enrichment_queue", ZtfAlertWorker::survey())
     }
@@ -1060,8 +1056,7 @@ impl AlertWorker for ZtfAlertWorker {
             };
             let result = self.insert_aux(&obj, &self.alert_aux_collection).await;
             if let Err(AlertError::AlertAuxExists) = result {
-                // use the race-condition free fallback update
-                warn!(
+                debug!(
                     "Alert aux document for object_id {} already exists. Using fallback update.",
                     object_id
                 );

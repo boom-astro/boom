@@ -1,7 +1,7 @@
 import type { TopicInfo } from "@/lib/api";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
-import { KAFKA_TOPICS, SURVEYS } from "@/lib/utils";
+import { KAFKA_TOPICS, SURVEYS } from "@/lib/constants";
 
 const NO_MATCH_COLOR = "var(--chart-4)";
 const MATCH_COLOR = "var(--chart-3)";

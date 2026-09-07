@@ -7,7 +7,7 @@ use crate::utils::{
 use chrono::NaiveDate;
 use config::{Config, File, Value};
 use dotenvy;
-use mongodb::bson::doc;
+use mongodb::bson::{doc, Document};
 use mongodb::Database;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -46,8 +46,7 @@ pub enum BoomConfigError {
 /// 2. .env in the parent directory (useful when running from subdirs)
 /// 3. If none found, continues without error (env vars may be set by system)
 pub fn load_dotenv() {
-    // Try current directory first
-    if std::path::Path::new(".env").exists() {
+    if Path::new(".env").exists() {
         match dotenvy::dotenv() {
             Ok(_) => debug!("Loaded environment variables from .env file"),
             Err(e) => warn!("Found .env file but failed to load it: {}", e),
@@ -55,8 +54,7 @@ pub fn load_dotenv() {
         return;
     }
 
-    // Try parent directory (useful when running from subdirectories like api/)
-    if std::path::Path::new("../.env").exists() {
+    if Path::new("../.env").exists() {
         match dotenvy::from_path("../.env") {
             Ok(_) => debug!("Loaded environment variables from ../.env file"),
             Err(e) => warn!("Found ../.env file but failed to load it: {}", e),
@@ -64,7 +62,6 @@ pub fn load_dotenv() {
         return;
     }
 
-    // No .env file found - this is fine, environment variables may be set by the system
     info!("No .env file found, using system environment variables only");
 }
 
@@ -80,45 +77,53 @@ pub fn load_raw_config(filepath: &str) -> Result<Config, BoomConfigError> {
 
     let conf = Config::builder()
         .add_source(File::from(path))
-        .add_source(
-            config::Environment::with_prefix("boom")
-                .prefix_separator("_")
-                .separator("__"),
-        )
+        .add_source(env_source())
         .build()?;
 
     Ok(conf)
 }
 
-#[instrument(skip_all, err)]
-async fn _build_db(db_conf: &DatabaseConfig) -> Result<mongodb::Database, BoomConfigError> {
-    let prefix = match db_conf.srv {
-        true => "mongodb+srv://",
-        false => "mongodb://",
-    };
+/// The `BOOM_*` environment overlay applied on top of `config.yaml`.
+///
+/// Split out from [`load_raw_config`] so tests can exercise the exact source
+/// production uses while feeding it a fake environment via
+/// [`config::Environment::source`], rather than mutating the process's own.
+fn env_source() -> config::Environment {
+    config::Environment::with_prefix("boom")
+        .prefix_separator("_")
+        .separator("__")
+        // Compose renders every `${VAR:-}` as `VAR=`, blanking the YAML. See AGENTS.md.
+        .ignore_empty(true)
+}
 
-    let mut uri = prefix.to_string();
+#[instrument(skip_all, err)]
+async fn _build_db(db_conf: &DatabaseConfig) -> Result<Database, BoomConfigError> {
+    let mut uri = if db_conf.srv {
+        "mongodb+srv://".to_string()
+    } else {
+        "mongodb://".to_string()
+    };
 
     let using_auth = !db_conf.username.is_empty() && !db_conf.password.is_empty();
 
     if using_auth {
         uri.push_str(&db_conf.username);
-        uri.push_str(":");
+        uri.push(':');
         uri.push_str(&db_conf.password);
-        uri.push_str("@");
+        uri.push('@');
     }
 
     uri.push_str(&db_conf.host);
-    uri.push_str(":");
+    uri.push(':');
     uri.push_str(&db_conf.port.to_string());
 
-    uri.push_str("/");
+    uri.push('/');
     uri.push_str(&db_conf.name);
 
     uri.push_str("?directConnection=true");
 
     if using_auth {
-        uri.push_str(&format!("&authSource=admin"));
+        uri.push_str("&authSource=admin");
     }
 
     if let Some(replica_set) = &db_conf.replica_set {
@@ -134,7 +139,7 @@ async fn _build_db(db_conf: &DatabaseConfig) -> Result<mongodb::Database, BoomCo
 }
 
 #[instrument(skip_all, err)]
-async fn build_db(conf: &AppConfig) -> Result<mongodb::Database, BoomConfigError> {
+async fn build_db(conf: &AppConfig) -> Result<Database, BoomConfigError> {
     let db_conf = &conf.database;
 
     _build_db(db_conf).await
@@ -252,7 +257,7 @@ async fn build_cutout_storage(
             .inspect_err(as_error!("failed to create cutout storage"))?
         }
         CutoutsStorage::Mongo(mongo_conf) => {
-            let db = _build_db(&mongo_conf).await?;
+            let db = _build_db(mongo_conf).await?;
             CutoutStorage::from_mongo(db, survey).await
         }
     };
@@ -267,19 +272,23 @@ pub struct CatalogXmatchConfig {
     // entries read the same collection with different matching rules, since the
     // results are keyed by `catalog` and the key must stay unique.
     pub collection: Option<String>,
-    pub radius: f64,                         // radius in radians
-    pub projection: mongodb::bson::Document, // projection to apply to the catalog
-    pub use_distance: bool,                  // whether to use the distance field in the crossmatch
-    pub distance_key: Option<String>,        // name of the field to use for distance
-    pub distance_max: Option<f64>,           // maximum distance in kpc
-    pub distance_max_near: Option<f64>,      // maximum distance in arcsec for nearby objects
-    pub max_results: Option<usize>,          // maximum number of results to return
+    pub radius: f64,                    // radius in radians
+    pub projection: Document,           // projection to apply to the catalog
+    pub use_distance: bool,             // whether to use the distance field in the crossmatch
+    pub distance_key: Option<String>,   // name of the field to use for distance
+    pub distance_max: Option<f64>,      // maximum distance in kpc
+    pub distance_max_near: Option<f64>, // maximum distance in arcsec for nearby objects
+    pub max_results: Option<usize>,     // maximum number of results to return
     // Angular-size matching: give each row its own match radius, scaled by its
     // angular size, so a large galaxy is still returned for a transient far out
     // in its disk. Setting `angular_size_key` enables the mode.
     pub angular_size_key: Option<String>, // field holding the angular DIAMETER in arcsec
     pub angular_size_scale: f64,          // multiple of the semi-major axis to match within
     pub angular_size_radius_max: Option<f64>, // cap on the per-row radius, in radians
+    /// Field naming a row's object type, e.g. DESI's `spectype`.
+    pub type_key: Option<String>,
+    /// Values of `type_key` that mean the row is a star rather than a galaxy.
+    pub stellar_types: Vec<String>,
 }
 
 /// Radians to arcsec.
@@ -293,7 +302,7 @@ impl CatalogXmatchConfig {
         catalog: &str,
         collection: Option<String>,
         radius: f64,
-        projection: mongodb::bson::Document,
+        projection: Document,
         use_distance: bool,
         distance_key: Option<String>,
         distance_max: Option<f64>,
@@ -302,6 +311,8 @@ impl CatalogXmatchConfig {
         angular_size_key: Option<String>,
         angular_size_scale: f64,
         angular_size_radius_max: Option<f64>,
+        type_key: Option<String>,
+        stellar_types: Vec<String>,
     ) -> CatalogXmatchConfig {
         let arcsec_to_radians = |v: f64| v * std::f64::consts::PI / 180.0 / 3600.0;
         CatalogXmatchConfig {
@@ -317,6 +328,8 @@ impl CatalogXmatchConfig {
             angular_size_key,
             angular_size_scale,
             angular_size_radius_max: angular_size_radius_max.map(arcsec_to_radians),
+            type_key,
+            stellar_types,
         }
     }
 
@@ -348,60 +361,54 @@ impl CatalogXmatchConfig {
         2.0 * radians_to_arcsec(self.radius) / self.angular_size_scale
     }
 
-    // based on the code in the main function, create a from_config function
     #[instrument(skip_all, err)]
     fn from_config(config_value: Value) -> Result<CatalogXmatchConfig, BoomConfigError> {
         let hashmap_xmatch = config_value.into_table()?;
-
-        let catalog = hashmap_xmatch
-            .get("catalog")
-            .ok_or(BoomConfigError::MissingKeyError("catalog".to_string()))?
-            .clone()
-            .into_string()?;
-
-        let collection = match hashmap_xmatch.get("collection") {
-            Some(value) => Some(value.clone().into_string()?),
-            None => None,
+        let required = |key: &str| {
+            hashmap_xmatch
+                .get(key)
+                .cloned()
+                .ok_or_else(|| BoomConfigError::MissingKeyError(key.to_string()))
         };
 
-        let radius = hashmap_xmatch
-            .get("radius")
-            .ok_or(BoomConfigError::MissingKeyError("radius".to_string()))?
-            .clone()
-            .into_float()?;
+        let catalog = required("catalog")?.into_string()?;
+        let radius = required("radius")?.into_float()?;
+        let projection = required("projection")?.into_table()?;
 
-        let projection = hashmap_xmatch
-            .get("projection")
-            .ok_or(BoomConfigError::MissingKeyError("projection".to_string()))?
-            .clone()
-            .into_table()?;
+        let collection = hashmap_xmatch
+            .get("collection")
+            .cloned()
+            .map(Value::into_string)
+            .transpose()?;
 
-        let use_distance = match hashmap_xmatch.get("use_distance") {
-            Some(use_distance) => use_distance.clone().into_bool()?,
-            None => false,
-        };
+        let use_distance = hashmap_xmatch
+            .get("use_distance")
+            .cloned()
+            .map(Value::into_bool)
+            .transpose()?
+            .unwrap_or(false);
 
-        let distance_key = match hashmap_xmatch.get("distance_key") {
-            Some(distance_key) => Some(distance_key.clone().into_string()?),
-            None => None,
-        };
+        let distance_key = hashmap_xmatch
+            .get("distance_key")
+            .cloned()
+            .map(Value::into_string)
+            .transpose()?;
 
-        let distance_max = match hashmap_xmatch.get("distance_max") {
-            Some(distance_max) => Some(distance_max.clone().into_float()?),
-            None => None,
-        };
+        let distance_max = hashmap_xmatch
+            .get("distance_max")
+            .cloned()
+            .map(Value::into_float)
+            .transpose()?;
 
-        let distance_max_near = match hashmap_xmatch.get("distance_max_near") {
-            Some(distance_max_near) => Some(distance_max_near.clone().into_float()?),
-            None => None,
-        };
+        let distance_max_near = hashmap_xmatch
+            .get("distance_max_near")
+            .cloned()
+            .map(Value::into_float)
+            .transpose()?;
 
-        // projection is a hashmap, we need to convert it to a Document
-        let mut projection_doc = mongodb::bson::Document::new();
-        for (key, value) in projection.iter() {
-            let key = key.as_str();
-            let value = value.clone().into_int()?;
-            projection_doc.insert(key, value);
+        let mut projection_doc = Document::new();
+        for (key, value) in projection {
+            projection_doc.insert(key, value.into_int()?);
         }
 
         if use_distance {
@@ -429,25 +436,28 @@ impl CatalogXmatchConfig {
             None => None,
         };
 
-        // for now, we don't want to support max_results + distance filtering together
         if max_results.is_some() && use_distance {
             panic!("cannot use max_results with distance filtering");
         }
 
-        let angular_size_key = match hashmap_xmatch.get("angular_size_key") {
-            Some(v) => Some(v.clone().into_string()?),
-            None => None,
-        };
+        let angular_size_key = hashmap_xmatch
+            .get("angular_size_key")
+            .cloned()
+            .map(Value::into_string)
+            .transpose()?;
 
-        let angular_size_scale = match hashmap_xmatch.get("angular_size_scale") {
-            Some(v) => v.clone().into_float()?,
-            None => 1.0,
-        };
+        let angular_size_scale = hashmap_xmatch
+            .get("angular_size_scale")
+            .cloned()
+            .map(Value::into_float)
+            .transpose()?
+            .unwrap_or(1.0);
 
-        let angular_size_radius_max = match hashmap_xmatch.get("angular_size_radius_max") {
-            Some(v) => Some(v.clone().into_float()?),
-            None => None,
-        };
+        let angular_size_radius_max = hashmap_xmatch
+            .get("angular_size_radius_max")
+            .cloned()
+            .map(Value::into_float)
+            .transpose()?;
 
         if angular_size_key.is_some() {
             if use_distance {
@@ -464,6 +474,22 @@ impl CatalogXmatchConfig {
             }
         }
 
+        let type_key = hashmap_xmatch
+            .get("type_key")
+            .cloned()
+            .map(Value::into_string)
+            .transpose()?;
+
+        let stellar_types = match hashmap_xmatch.get("stellar_types") {
+            Some(values) => values
+                .clone()
+                .into_array()?
+                .into_iter()
+                .map(Value::into_string)
+                .collect::<Result<Vec<String>, _>>()?,
+            None => Vec::new(),
+        };
+
         Ok(CatalogXmatchConfig::new(
             &catalog,
             collection,
@@ -477,15 +503,16 @@ impl CatalogXmatchConfig {
             angular_size_key,
             angular_size_scale,
             angular_size_radius_max,
+            type_key,
+            stellar_types,
         ))
     }
 }
 
-// implement Deserialize for CatalogXmatchConfig
 impl<'de> Deserialize<'de> for CatalogXmatchConfig {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
-        D: serde::Deserializer<'de>,
+        D: Deserializer<'de>,
     {
         let v = Value::deserialize(deserializer).map_err(serde::de::Error::custom)?;
         CatalogXmatchConfig::from_config(v).map_err(serde::de::Error::custom)
@@ -518,14 +545,11 @@ pub enum CutoutsStorage {
 }
 
 impl<'de> Deserialize<'de> for CutoutsStorage {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         use serde::de::Error;
 
-        // Materialise the entire map via serde_json::Value so we can (a) read
-        // the "type" discriminant and (b) re-deserialize into the chosen variant
-        // without fighting the config crate's single-pass deserializer constraint
-        // that prevents #[serde(tag = "type")] from working here.
-        let map = serde_json::Value::deserialize(deserializer).map_err(|e| D::Error::custom(e))?;
+        // The config crate's single-pass deserializer rules out #[serde(tag = "type")].
+        let map = serde_json::Value::deserialize(deserializer).map_err(D::Error::custom)?;
 
         let storage_type = map
             .get("type")
@@ -535,10 +559,10 @@ impl<'de> Deserialize<'de> for CutoutsStorage {
         match storage_type {
             "mongo" => serde_json::from_value::<DatabaseConfig>(map)
                 .map(CutoutsStorage::Mongo)
-                .map_err(|e| D::Error::custom(e)),
+                .map_err(D::Error::custom),
             "s3" => serde_json::from_value::<S3CutoutsStorageConfig>(map)
                 .map(CutoutsStorage::S3)
-                .map_err(|e| D::Error::custom(e)),
+                .map_err(D::Error::custom),
             other => Err(D::Error::custom(format!(
                 "unknown cutouts_storage type {:?}; expected \"mongo\" or \"s3\"",
                 other
@@ -555,6 +579,81 @@ fn default_subscription_window_days() -> u64 {
     1
 }
 
+/// `Unset` is spelled `""` rather than a missing key, so that an empty env
+/// override deserializes instead of erroring.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum SecurityProtocol {
+    #[default]
+    #[serde(rename = "")]
+    Unset,
+    Plaintext,
+    Ssl,
+    SaslPlaintext,
+    SaslSsl,
+}
+
+impl SecurityProtocol {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SecurityProtocol::Unset | SecurityProtocol::Plaintext => "PLAINTEXT",
+            SecurityProtocol::Ssl => "SSL",
+            SecurityProtocol::SaslPlaintext => "SASL_PLAINTEXT",
+            SecurityProtocol::SaslSsl => "SASL_SSL",
+        }
+    }
+
+    pub fn uses_sasl(self) -> bool {
+        matches!(self, Self::SaslPlaintext | Self::SaslSsl)
+    }
+
+    pub fn uses_tls(self) -> bool {
+        matches!(self, Self::Ssl | Self::SaslSsl)
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct KafkaSecurity {
+    protocol: SecurityProtocol,
+    username: Option<String>,
+    password: Option<String>,
+    ssl_ca_location: Option<String>,
+}
+
+impl KafkaSecurity {
+    pub fn protocol(&self) -> SecurityProtocol {
+        match self.protocol {
+            SecurityProtocol::Unset if self.has_credentials() => SecurityProtocol::SaslPlaintext,
+            SecurityProtocol::Unset => SecurityProtocol::Plaintext,
+            explicit => explicit,
+        }
+    }
+
+    pub fn has_credentials(&self) -> bool {
+        self.username.is_some() && self.password.is_some()
+    }
+
+    pub fn username(&self) -> Option<&str> {
+        self.username.as_deref()
+    }
+
+    pub fn password(&self) -> Option<&str> {
+        self.password.as_deref()
+    }
+
+    pub fn ssl_ca_location(&self) -> Option<&str> {
+        self.ssl_ca_location.as_deref()
+    }
+}
+
+/// An empty string is an unset key, not a credential.
+fn configured(value: &Option<String>) -> Option<String> {
+    value
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct KafkaConsumerConfig {
     #[serde(default = "default_kafka_server")]
@@ -564,6 +663,9 @@ pub struct KafkaConsumerConfig {
     pub schema_github_fallback_url: Option<String>, // URL of the GitHub fallback for schemas (if any)
     pub username: Option<String>,                   // Username for authentication (if any)
     pub password: Option<String>,                   // Password for authentication (if any)
+    #[serde(default)]
+    pub security_protocol: SecurityProtocol, // Empty infers it from the credentials
+    pub ssl_ca_location: Option<String>,            // CA bundle path (only for a private CA)
     /// Days before the current one to stay subscribed to, for surveys whose
     /// topics are per-night. 1 (the default) keeps yesterday alongside today so
     /// a night spanning UTC midnight isn't cut off. Raise it temporarily to
@@ -571,6 +673,17 @@ pub struct KafkaConsumerConfig {
     /// is about 7 days for ZTF. Ignored by surveys with a single static topic.
     #[serde(default = "default_subscription_window_days")]
     pub subscription_window_days: u64,
+}
+
+impl KafkaConsumerConfig {
+    pub fn security(&self) -> KafkaSecurity {
+        KafkaSecurity {
+            protocol: self.security_protocol,
+            username: configured(&self.username),
+            password: configured(&self.password),
+            ssl_ca_location: configured(&self.ssl_ca_location),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -673,6 +786,22 @@ pub struct BabamulConfig {
     /// Minimum number of minutes that must elapse between successive password resets (default: 15)
     #[serde(default = "default_password_reset_cooldown_minutes")]
     pub password_reset_cooldown_minutes: u32,
+    /// Whether this deployment will create new accounts (default: true).
+    ///
+    /// Set to `false` for a pre-release deployment that is open only to
+    /// accounts that already exist. Every path that would mint one honors it —
+    /// password sign-up and social sign-in alike — so it cannot be sidestepped
+    /// by calling the API directly or by pressing a sign-in button the web app
+    /// still shows. Signing in with an account that already exists, including
+    /// linking a new provider to it, is unaffected.
+    ///
+    /// The web app has its own build-time `VITE_PRERELEASE_MODE`, which decides
+    /// what the UI *offers*; this decides what the API *allows*. Set both.
+    #[serde(default = "default_babamul_registration_enabled")]
+    pub registration_enabled: bool,
+    /// Social sign-in (Google / GitHub / ORCID) configuration
+    #[serde(default)]
+    pub oauth: OAuthConfig,
 }
 
 impl Default for BabamulConfig {
@@ -682,8 +811,74 @@ impl Default for BabamulConfig {
             webapp_url: None,
             retention_days: default_babamul_retention_days(),
             password_reset_cooldown_minutes: default_password_reset_cooldown_minutes(),
+            registration_enabled: default_babamul_registration_enabled(),
+            oauth: OAuthConfig::default(),
         }
     }
+}
+
+/// Credentials for a single OAuth 2.0 / OIDC identity provider.
+///
+/// **Set these from the environment, not `config.yaml`** — the YAML files are
+/// committed, and a `client_secret:` key sitting in one is an invitation to
+/// paste a live secret into the repo. The env vars are
+/// `BOOM_BABAMUL__OAUTH__{GOOGLE,GITHUB,ORCID}__CLIENT_{ID,SECRET}`.
+///
+/// There is deliberately no `enabled` flag: a provider is on exactly when both
+/// halves of its credential are present. That keeps the on/off switch in the
+/// same place as the secret, so a provider can never be switched on without
+/// one — it fails closed instead of sending users to a consent screen that
+/// will reject them. Same shape as [`PostHogConfig`], where an empty
+/// `project_api_key` disables analytics.
+#[derive(Deserialize, Debug, Clone, Default)]
+pub struct OAuthProviderConfig {
+    #[serde(default)]
+    pub client_id: String,
+    #[serde(default)]
+    pub client_secret: String,
+}
+
+impl OAuthProviderConfig {
+    pub fn is_configured(&self) -> bool {
+        !self.client_id.is_empty() && !self.client_secret.is_empty()
+    }
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct OAuthConfig {
+    #[serde(default)]
+    pub google: OAuthProviderConfig,
+    #[serde(default)]
+    pub github: OAuthProviderConfig,
+    #[serde(default)]
+    pub orcid: OAuthProviderConfig,
+    /// Public base URL the API is reachable at, e.g. `https://api.babamul.org`.
+    /// The redirect URI registered with each provider must be
+    /// `{redirect_base_url}/babamul/oauth/{provider}/callback`.
+    pub redirect_base_url: Option<String>,
+    /// Point ORCID at its sandbox (`sandbox.orcid.org`) instead of production.
+    #[serde(default)]
+    pub orcid_sandbox: bool,
+    /// Seconds an in-flight authorization request stays valid (default: 600)
+    #[serde(default = "default_oauth_state_ttl_seconds")]
+    pub state_ttl_seconds: i64,
+}
+
+impl Default for OAuthConfig {
+    fn default() -> Self {
+        OAuthConfig {
+            google: OAuthProviderConfig::default(),
+            github: OAuthProviderConfig::default(),
+            orcid: OAuthProviderConfig::default(),
+            redirect_base_url: None,
+            orcid_sandbox: false,
+            state_ttl_seconds: default_oauth_state_ttl_seconds(),
+        }
+    }
+}
+
+fn default_oauth_state_ttl_seconds() -> i64 {
+    600
 }
 
 fn default_babamul_retention_days() -> u32 {
@@ -692,6 +887,10 @@ fn default_babamul_retention_days() -> u32 {
 
 fn default_password_reset_cooldown_minutes() -> u32 {
     15
+}
+
+fn default_babamul_registration_enabled() -> bool {
+    true
 }
 
 /// Server-side PostHog product analytics.
@@ -786,7 +985,7 @@ fn default_filter_refresh_interval_minutes() -> u64 {
 
 fn deserialize_filter_refresh_interval<'de, D>(deserializer: D) -> Result<u64, D::Error>
 where
-    D: serde::Deserializer<'de>,
+    D: Deserializer<'de>,
 {
     let value = u64::deserialize(deserializer)?;
     const MIN_INTERVAL: u64 = 1;
@@ -808,7 +1007,7 @@ where
 
 fn deserialize_command_interval<'de, D>(deserializer: D) -> Result<usize, D::Error>
 where
-    D: serde::Deserializer<'de>,
+    D: Deserializer<'de>,
 {
     let value = usize::deserialize(deserializer)?;
     const MIN_INTERVAL: usize = 100;
@@ -831,7 +1030,7 @@ where
 
 fn deserialize_max_match_rate<'de, D>(deserializer: D) -> Result<Option<u8>, D::Error>
 where
-    D: serde::Deserializer<'de>,
+    D: Deserializer<'de>,
 {
     let value = Option::<u8>::deserialize(deserializer)?;
     if let Some(v) = value {
@@ -882,8 +1081,7 @@ use serde::{de, Deserializer};
 pub struct GpuConfig {
     /// Whether to load ONNX models on GPU (CUDA) instead of CPU.
     /// Models are loaded once at startup and shared across all enrichment workers
-    /// via `Arc<Mutex<...>>`. When false, models are loaded on CPU (the BOOM_GPU__ENABLED
-    /// env var is still respected by the ORT session builder).
+    /// via `Arc<Mutex<...>>`.
     #[serde(default)]
     pub enabled: bool,
     /// CUDA device IDs available for GPU work. Default: [0].
@@ -935,6 +1133,13 @@ where
     deserializer.deserialize_any(DeviceIdsVisitor)
 }
 
+impl GpuConfig {
+    /// Whether models load on CUDA: enabled, with at least one device.
+    pub fn is_active(&self) -> bool {
+        self.enabled && !self.device_ids.is_empty()
+    }
+}
+
 impl Default for GpuConfig {
     fn default() -> Self {
         GpuConfig {
@@ -983,18 +1188,15 @@ impl AppConfig {
 
     #[instrument(err)]
     pub fn from_test_config() -> Result<Self, BoomConfigError> {
-        // Find the workspace root by looking for Cargo.toml with tests/ directory
         let mut current_dir = std::env::current_dir().expect("Failed to get current directory");
         let test_config_path = loop {
             let tests_dir = current_dir.join("tests");
             let test_config = tests_dir.join("config.test.yaml");
 
-            // Check if we found the workspace root (has tests dir with config file)
             if test_config.exists() {
                 break test_config;
             }
 
-            // Move up to parent directory
             if let Some(parent) = current_dir.parent() {
                 current_dir = parent.to_path_buf();
             } else {
@@ -1025,16 +1227,30 @@ impl AppConfig {
             return Err("Admin password must be set via BOOM_API__AUTH__ADMIN_PASSWORD environment variable".to_string());
         }
 
-        // Validate token expiration
-        if self.api.auth.token_expiration <= 0 {
+        if self.api.auth.token_expiration == 0 {
             return Err("Token expiration must be greater than 0 for security reasons".to_string());
+        }
+
+        for (survey, consumer) in &self.kafka.consumer {
+            let security = consumer.security();
+            let protocol = security.protocol();
+            if protocol.uses_sasl() && !security.has_credentials() {
+                return Err(format!(
+                    "kafka.consumer.{} is set to {} but has no credentials; set \
+                     BOOM_KAFKA__CONSUMER__{}__USERNAME and BOOM_KAFKA__CONSUMER__{}__PASSWORD",
+                    survey.as_str().to_lowercase(),
+                    protocol.as_str(),
+                    survey.as_str(),
+                    survey.as_str(),
+                ));
+            }
         }
 
         Ok(())
     }
 
     #[instrument(skip_all, err)]
-    pub async fn build_db(&self) -> Result<mongodb::Database, BoomConfigError> {
+    pub async fn build_db(&self) -> Result<Database, BoomConfigError> {
         build_db(self).await
     }
 
@@ -1071,7 +1287,6 @@ pub fn load_config(config_path: Option<&str>) -> Result<AppConfig, BoomConfigErr
 
     let app_config: AppConfig = config.try_deserialize()?;
 
-    // Validate that required secrets are present
     if let Err(e) = app_config.validate_secrets() {
         return Err(BoomConfigError::InvalidSecretError(e));
     }
@@ -1106,6 +1321,146 @@ pub async fn get_test_cutout_storage(survey: &Survey) -> CutoutStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn consumer_config(yaml: &str) -> KafkaConsumerConfig {
+        Config::builder()
+            .add_source(File::from_str(yaml, config::FileFormat::Yaml))
+            .build()
+            .unwrap()
+            .try_deserialize()
+            .unwrap()
+    }
+
+    #[test]
+    fn a_consumer_without_credentials_stays_on_plaintext() {
+        let config = consumer_config("group_id: boom-ztf\n");
+        assert_eq!(config.security().protocol(), SecurityProtocol::Plaintext);
+    }
+
+    #[test]
+    fn credentials_alone_mean_sasl_plaintext() {
+        let config = consumer_config("group_id: boom-lsst\nusername: user\npassword: pass\n");
+        assert_eq!(
+            config.security().protocol(),
+            SecurityProtocol::SaslPlaintext
+        );
+    }
+
+    #[test]
+    fn an_empty_credential_is_not_a_credential() {
+        let config = consumer_config("group_id: boom-ztf\nusername: \"\"\npassword: \"\"\n");
+        assert_eq!(config.security().protocol(), SecurityProtocol::Plaintext);
+        assert!(!config.security().has_credentials());
+    }
+
+    #[test]
+    fn an_explicit_protocol_wins_over_the_inferred_one() {
+        let config = consumer_config(
+            "group_id: boom-ztf\nsecurity_protocol: SASL_SSL\nusername: user\npassword: pass\n",
+        );
+        assert_eq!(config.security().protocol(), SecurityProtocol::SaslSsl);
+        assert!(config.security().protocol().uses_tls());
+    }
+
+    #[test]
+    fn an_empty_protocol_means_unset_rather_than_a_parse_error() {
+        let config = consumer_config("group_id: boom-ztf\nsecurity_protocol: \"\"\n");
+        assert_eq!(config.security_protocol, SecurityProtocol::Unset);
+    }
+
+    /// `config.yaml` as a deployment with both OAuth URLs set would have it.
+    const URLS_CONFIGURED_YAML: &str = "babamul:\n  webapp_url: https://example.org\n  oauth:\n    redirect_base_url: https://example.org/api\n";
+
+    /// Build a config from [`URLS_CONFIGURED_YAML`] plus a *fake* environment.
+    ///
+    /// `Environment::source` substitutes the map for the real environment, so
+    /// this exercises the production overlay without `set_var` — which would
+    /// race the other tests in this binary reading the environment through
+    /// `from_test_config`, and would clobber any `BOOM_*` values a developer's
+    /// `.env` had already loaded into the process.
+    fn config_with_env(vars: &[(&str, &str)]) -> Config {
+        let env: HashMap<String, String> = vars
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect();
+        Config::builder()
+            .add_source(File::from_str(
+                URLS_CONFIGURED_YAML,
+                config::FileFormat::Yaml,
+            ))
+            .add_source(env_source().source(Some(env)))
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn an_empty_env_var_does_not_blank_out_a_configured_value() {
+        // Regression: an empty compose default hid social sign-in in production.
+        let conf = config_with_env(&[
+            ("BOOM_BABAMUL__WEBAPP_URL", ""),
+            ("BOOM_BABAMUL__OAUTH__REDIRECT_BASE_URL", ""),
+        ]);
+
+        assert_eq!(
+            conf.get::<String>("babamul.webapp_url").unwrap(),
+            "https://example.org"
+        );
+        assert_eq!(
+            conf.get::<String>("babamul.oauth.redirect_base_url")
+                .unwrap(),
+            "https://example.org/api"
+        );
+    }
+
+    #[test]
+    fn a_non_empty_env_var_still_overrides_the_file() {
+        // The other half: ignoring empty vars must not ignore the environment.
+        let conf = config_with_env(&[("BOOM_BABAMUL__WEBAPP_URL", "https://override.example")]);
+
+        assert_eq!(
+            conf.get::<String>("babamul.webapp_url").unwrap(),
+            "https://override.example"
+        );
+    }
+
+    #[test]
+    fn oauth_provider_needs_a_client_id_and_secret_to_count_as_configured() {
+        let mut provider = OAuthProviderConfig {
+            client_id: "id".to_string(),
+            client_secret: "secret".to_string(),
+        };
+        assert!(provider.is_configured());
+
+        // A half-filled provider must fail closed, not hit a rejecting consent screen.
+        provider.client_secret = String::new();
+        assert!(!provider.is_configured());
+        provider.client_secret = "secret".to_string();
+        provider.client_id = String::new();
+        assert!(!provider.is_configured());
+    }
+
+    #[test]
+    fn oauth_config_defaults_are_off_with_a_usable_state_ttl() {
+        // The serde defaults are separate from the Default impl.
+        let config: OAuthConfig = serde_json::from_str("{}").unwrap();
+        assert!(!config.google.is_configured());
+        assert!(!config.github.is_configured());
+        assert!(!config.orcid.is_configured());
+        assert!(config.redirect_base_url.is_none());
+        assert_eq!(config.state_ttl_seconds, 600);
+        assert_eq!(
+            config.state_ttl_seconds,
+            OAuthConfig::default().state_ttl_seconds
+        );
+    }
+
+    #[test]
+    fn babamul_config_without_an_oauth_block_still_deserializes() {
+        // Existing deployments' config.yaml files predate the oauth section.
+        let config: BabamulConfig =
+            serde_json::from_str(r#"{"enabled": true, "webapp_url": null}"#).unwrap();
+        assert!(!config.oauth.google.is_configured());
+    }
 
     #[test]
     fn test_gpu_config_defaults() {
@@ -1151,5 +1506,16 @@ mod tests {
         let json = r#"{"enabled": true, "device_ids": [2, 5]}"#;
         let config: GpuConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.device_ids, vec![2, 5]);
+    }
+
+    #[test]
+    fn test_gpu_config_is_active() {
+        let active: GpuConfig = serde_json::from_str(r#"{"enabled": true}"#).unwrap();
+        assert!(active.is_active());
+        let disabled: GpuConfig = serde_json::from_str(r#"{"enabled": false}"#).unwrap();
+        assert!(!disabled.is_active());
+        let no_device: GpuConfig =
+            serde_json::from_str(r#"{"enabled": true, "device_ids": []}"#).unwrap();
+        assert!(!no_device.is_active());
     }
 }
