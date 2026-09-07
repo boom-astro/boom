@@ -3,7 +3,7 @@
 
 services:
   rustfs:
-    image: rustfs/rustfs:latest
+    image: rustfs/rustfs:1.0.0-rc.5
     hostname: rustfs
     restart: unless-stopped
     expose:
