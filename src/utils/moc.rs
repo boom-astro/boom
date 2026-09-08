@@ -533,7 +533,7 @@ pub fn select_covering_depth(moc: &HpxMoc) -> u8 {
 
 /// The coarsest depth [`select_covering_depth_bounded`] will ever coarsen to
 /// (matches [`select_covering_depth`]'s own coarsest tier, used for any region
-/// ≥1000 sq deg). Below this, cells are ~13.4 sq deg — coarsening further would
+/// ≥1000 sq deg). Below this, cells are ~53.7 sq deg — coarsening further would
 /// make the covering cones so large they stop meaningfully narrowing the
 /// MongoDB query, which is exactly the "genuinely too broad a search" case that
 /// should still be rejected rather than silently accepted at any cost.
