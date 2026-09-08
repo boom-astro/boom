@@ -6,7 +6,7 @@ use crate::enrichment::{
     models::{AcaiModel, BtsBotModel, FusionModel, Model, ModelError, SharedModels},
     EnrichmentWorker, EnrichmentWorkerError, LsstMatch,
 };
-use crate::milvus::{EmbeddingRow, MilvusClient, WRITE_EMBEDDING_TO_MONGO};
+use crate::milvus::{EmbeddingRow, MilvusClient};
 use crate::utils::cutouts::{AlertCutout, CutoutStorage};
 use crate::utils::db::mongify;
 use crate::utils::enums::Survey;
@@ -422,23 +422,6 @@ pub struct ZtfAlertClassifications {
     pub fusion_embedding: Option<Vec<f32>>,
 }
 
-/// The classifications to persist in Mongo. When `keep_embedding` is false the
-/// 384-float `fusion_embedding` is dropped (it lives only in Milvus); the class
-/// probabilities are always kept either way.
-fn classifications_for_mongo(
-    cls: &ZtfAlertClassifications,
-    keep_embedding: bool,
-) -> ZtfAlertClassifications {
-    if keep_embedding {
-        cls.clone()
-    } else {
-        ZtfAlertClassifications {
-            fusion_embedding: None,
-            ..cls.clone()
-        }
-    }
-}
-
 /// Per-alert intermediate data used during enrichment processing.
 struct AlertWork {
     candid: i64,
@@ -646,14 +629,15 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                 vec![None; work_items.len()]
             };
 
-        for (item, classifications) in work_items.into_iter().zip(classifications_list) {
+        for (item, mut classifications) in work_items.into_iter().zip(classifications_list) {
+            // Extracting the fusion embedding from the classifications
+            let fusion_embedding = classifications
+                .as_mut()
+                .and_then(|cls| cls.fusion_embedding.take());
+
             let update_alert_document = if let Some(ref cls) = classifications {
-                // Optionally drop the 384-float embedding from the stored
-                // classifications (the class probabilities are still kept); when
-                // disabled it lives only in Milvus.
-                let cls_doc = mongify(&classifications_for_mongo(cls, WRITE_EMBEDDING_TO_MONGO));
                 doc! { "$set": {
-                    "classifications": cls_doc,
+                    "classifications": mongify(cls),
                     "properties": mongify(&item.properties),
                     "updated_at": now,
                 }}
@@ -675,19 +659,14 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             updates.push(update);
             processed_alerts.push(format!("{},{}", item.programid, item.candid));
 
-            // Queue the fusion embedding for Milvus before `item.alert` is
-            // moved into Babamul below. Keyed by object_id, so re-observed
-            // objects overwrite their previous vector.
             if self.milvus.is_some() {
-                if let Some(cls) = &classifications {
-                    if let Some(embedding) = &cls.fusion_embedding {
-                        embedding_rows.push(EmbeddingRow {
-                            object_id: item.alert.object_id.clone(),
-                            embedding: embedding.clone(),
-                            candid: item.candid,
-                            jd: item.alert.candidate.candidate.jd,
-                        });
-                    }
+                if let Some(embedding) = fusion_embedding {
+                    embedding_rows.push(EmbeddingRow {
+                        object_id: item.alert.object_id.clone(),
+                        embedding,
+                        candid: item.candid,
+                        jd: item.alert.candidate.candidate.jd,
+                    });
                 }
             }
 
@@ -700,9 +679,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
 
         let _ = self.client.bulk_write(updates).await?.modified_count;
 
-        // Write fusion embeddings to Milvus. A failure here is non-fatal: the
-        // alerts are already enriched and persisted in Mongo, so we log and
-        // move on rather than failing the whole batch.
+        // Writing fusion embeddings to Milvus
         if let Some(milvus) = self.milvus.as_mut() {
             if !embedding_rows.is_empty() {
                 match milvus.upsert_embeddings(&embedding_rows).await {
@@ -1223,22 +1200,30 @@ mod tests {
         }
     }
 
+    /// The enrichment worker takes the embedding out of the classifications
+    /// before building the Mongo document; this is that same step.
     #[test]
-    fn keeps_embedding_when_writing_to_mongo() {
-        let cls = sample_classifications();
-        let stored = classifications_for_mongo(&cls, true);
-        assert_eq!(stored.fusion_embedding, Some(vec![1.0, 2.0, 3.0]));
-        // Class probabilities are untouched.
-        assert_eq!(stored.btsbot, cls.btsbot);
+    fn taking_the_embedding_hands_it_over_and_keeps_the_scores() {
+        let mut cls = sample_classifications();
+        let embedding = cls.fusion_embedding.take();
+
+        // The vector goes to the caller (Milvus), not to the stored struct.
+        assert_eq!(embedding, Some(vec![1.0, 2.0, 3.0]));
+        assert!(cls.fusion_embedding.is_none());
+        // Everything else is preserved.
+        assert_eq!(cls.acai_h, 0.1);
+        assert_eq!(cls.btsbot, 0.6);
     }
 
+    /// What actually matters: the document handed to Mongo has no vector in it,
+    /// whether or not Milvus is enabled.
     #[test]
-    fn strips_embedding_when_not_writing_to_mongo() {
-        let cls = sample_classifications();
-        let stored = classifications_for_mongo(&cls, false);
-        assert!(stored.fusion_embedding.is_none());
-        // Everything else is preserved.
-        assert_eq!(stored.acai_h, cls.acai_h);
-        assert_eq!(stored.btsbot, cls.btsbot);
+    fn mongo_document_never_carries_the_embedding() {
+        let mut cls = sample_classifications();
+        cls.fusion_embedding.take();
+        let doc = mongify(&cls);
+
+        assert!(doc.get("fusion_embedding").is_none());
+        assert!(doc.get("btsbot").is_some());
     }
 }
