@@ -1261,7 +1261,10 @@ impl ZtfEnrichmentWorker {
         work_items: &[AlertWork],
     ) -> Result<Vec<Option<ZtfAlertClassifications>>, EnrichmentWorkerError> {
         if self.gpu_enabled {
-            // May have migrated to another runtime thread since the last batch.
+            // Our own compute stream means ORT does not re-bind this thread at
+            // Run boundaries, and a PerThreadContext retired by another
+            // worker's OnRunEnd can be picked up here still on device 0 — see
+            // SharedModels::bind_device.
             models.bind_device()?;
             return self.classify_gpu_batch(models, work_items);
         }

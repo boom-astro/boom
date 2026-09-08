@@ -163,10 +163,28 @@ impl SharedModels {
 
     /// Bind the calling thread to this set's CUDA device.
     ///
-    /// `cudaSetDevice` is per-thread and defaults to device 0, so an ORT run on
-    /// an unbound thread hits `cudaErrorInvalidResourceHandle`. Workers are
-    /// multi-thread tokio runtimes and migrate between OS threads, so this must
-    /// run before each inference. Villar-PSO already binds itself.
+    /// `cudaSetDevice` is per-thread and defaults to device 0. ORT does call it
+    /// itself — in the CUDA EP's `PerThreadContext` constructor and in
+    /// `CUDAAllocator::Alloc` — but none of those calls is guaranteed to land on
+    /// the thread that issues a given `Run`:
+    ///
+    /// - Passing our own compute stream disables ORT's per-`Run` `SetDeviceFn`,
+    ///   so nothing re-binds the thread at `Run` boundaries.
+    /// - `OnRunEnd` retires the `PerThreadContext`. When another worker's thread
+    ///   picks that retired context back up, the constructor does not run again,
+    ///   so that thread is still on device 0.
+    /// - While the allocator's arena is still growing, `CUDAAllocator::Alloc`
+    ///   binds the thread as a side effect. That accidental binding is why the
+    ///   failure is intermittent: it disappears once the arena stops extending.
+    ///
+    /// Left unbound, a `Run` against device N's stream and handles fails with
+    /// `cudaErrorInvalidResourceHandle`, so bind explicitly before each batch.
+    /// Villar-PSO already binds itself.
+    ///
+    /// Note this is *not* tokio task migration: each worker is its own
+    /// `#[tokio::main]` runtime driven by `block_on`, so it stays on its own std
+    /// thread. The stale binding comes from ORT reusing per-thread state across
+    /// worker threads, not from a task moving between them.
     pub fn bind_device(&self) -> Result<(), ModelError> {
         #[cfg(all(feature = "gpu", target_os = "linux"))]
         if let Some(ctx) = self.gpu_ctx.as_ref() {
