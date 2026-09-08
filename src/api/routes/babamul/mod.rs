@@ -1,3 +1,4 @@
+pub mod oauth;
 pub mod stats;
 pub mod surveys;
 pub mod tokens;
@@ -9,7 +10,7 @@ use crate::api::{
     kafka::delete_kafka_credentials_and_acls,
 };
 use crate::utils::enums::Survey;
-use actix_web::{delete, get, post, web, HttpResponse};
+use actix_web::{delete, get, patch, post, web, HttpResponse};
 use mongodb::bson::doc;
 use mongodb::Database;
 use serde::{Deserialize, Serialize};
@@ -157,6 +158,18 @@ pub struct BabamulUserToken {
     pub last_used_at: Option<i64>,
 }
 
+/// An external account (Google / GitHub / ORCID) linked to a Babamul user.
+#[derive(Serialize, Deserialize, Clone, Debug, ToSchema)]
+pub struct LinkedIdentity {
+    /// Provider slug: `google`, `github`, or `orcid`
+    pub provider: String,
+    /// Stable, provider-scoped user id — the join key for subsequent logins
+    pub subject: String,
+    /// Email the provider reported at link time (informational only)
+    pub email: Option<String>,
+    pub linked_at: i64,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, ToSchema)]
 pub struct BabamulUser {
     // Save in the database as _id, but we want to rename on the way out
@@ -174,6 +187,17 @@ pub struct BabamulUser {
     pub password_reset_token_hash: Option<String>, // SHA-256 hash of the password reset token
     pub password_reset_token_expires_at: Option<i64>, // Unix timestamp expiry for the reset token
     pub password_last_changed_at: Option<i64>, // Unix timestamp of the last successful password reset
+    /// External accounts linked to this user, empty for password-only accounts
+    #[serde(default)]
+    pub identities: Vec<LinkedIdentity>,
+    /// ORCID iD, set when the user has linked an ORCID account
+    #[serde(default)]
+    pub orcid_id: Option<String>,
+    /// Full name for display. Seeded from the sign-in provider when there is
+    /// one, editable by the user, never used to identify them — unlike
+    /// `username` it is free text, optional, and not unique.
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, ToSchema)]
@@ -184,6 +208,11 @@ pub struct BabamulUserPublic {
     pub username: String,
     pub email: String,
     pub created_at: i64, // Unix timestamp
+    /// Provider slugs the user can sign in with, e.g. `["google", "orcid"]`
+    pub identity_providers: Vec<String>,
+    pub orcid_id: Option<String>,
+    /// Full name the user chose to display, if any
+    pub name: Option<String>,
 }
 
 impl From<BabamulUser> for BabamulUserPublic {
@@ -193,6 +222,13 @@ impl From<BabamulUser> for BabamulUserPublic {
             username: user.username,
             email: user.email,
             created_at: user.created_at,
+            identity_providers: user
+                .identities
+                .iter()
+                .map(|identity| identity.provider.clone())
+                .collect(),
+            orcid_id: user.orcid_id,
+            name: user.name,
         }
     }
 }
@@ -217,6 +253,7 @@ pub struct BabamulSignupResponse {
     request_body = BabamulSignupPost,
     responses(
         (status = 200, description = "Signup successful", body = BabamulSignupResponse),
+        (status = 403, description = "This deployment is not creating new accounts"),
         (status = 409, description = "Email already exists"),
         (status = 500, description = "Internal server error")
     ),
@@ -229,6 +266,14 @@ pub async fn post_babamul_signup(
     body: web::Json<BabamulSignupPost>,
     config: web::Data<crate::conf::AppConfig>,
 ) -> HttpResponse {
+    // Enforced here rather than only in the web app: hiding the sign-up link is
+    // what the UI does, not what keeps the door shut.
+    if !config.babamul.registration_enabled {
+        return HttpResponse::Forbidden().json(response::ApiResponseBody::error(
+            "New accounts aren't being created yet.",
+        ));
+    }
+
     let email = body.email.trim().to_lowercase();
 
     // Basic email validation (single '@', non-empty local part, domain contains a dot and at least two segments)
@@ -320,6 +365,9 @@ pub async fn post_babamul_signup(
                 password_reset_token_hash: None,
                 password_reset_token_expires_at: None,
                 password_last_changed_at: None,
+                identities: Vec::new(),
+                orcid_id: None,
+                name: None,
             };
 
             // Note: Kafka credentials will be created on demand via /babamul/kafka-credentials endpoint
@@ -405,7 +453,7 @@ fn generate_password() -> String {
 }
 
 /// Basic email validation tailored for activation flow (not full RFC compliance)
-fn is_valid_email(email: &str) -> bool {
+pub fn is_valid_email(email: &str) -> bool {
     // Must contain exactly one '@'
     let parts: Vec<&str> = email.split('@').collect();
     if parts.len() != 2 {
@@ -834,7 +882,7 @@ pub struct BabamulForgotPasswordResponse {
 /// Request a password reset link
 ///
 /// Accepts an email address and sends a password-reset link to that address if
-/// an activated account with that email exists.  The response is always the same
+/// an activated account with that email exists. The response is always the same
 /// regardless of whether the email is found – this prevents account enumeration.
 #[utoipa::path(
     post,
@@ -989,10 +1037,10 @@ pub async fn post_babamul_reset_password(
 
     let babamul_users_collection: mongodb::Collection<BabamulUser> = db.collection("babamul_users");
 
-    // Look up the user by ALL three conditions in a single compound query.  This is
+    // Look up the user by ALL three conditions in a single compound query. This is
     // intentional: whether the token is wrong, the email is wrong, or the token has
     // expired, MongoDB returns the same `Ok(None)` result, so we always respond with
-    // the same generic message.  A separate lookup (e.g. first by token, then by email)
+    // the same generic message. A separate lookup (e.g. first by token, then by email)
     // would let an attacker probe which part of the input was incorrect.
     let now = flare::Time::now().to_utc().timestamp();
 
@@ -1090,6 +1138,93 @@ pub async fn get_babamul_profile(current_user: Option<web::ReqData<BabamulUser>>
     };
     let user_public = BabamulUserPublic::from(current_user.into_inner().clone());
     response::ok_ser("success", user_public)
+}
+
+/// Longest display name accepted. Long enough for any real name written out
+/// in full; short enough that the field cannot be used as free storage.
+const MAX_NAME_LENGTH: usize = 100;
+
+#[derive(Deserialize, Clone, ToSchema)]
+pub struct UpdateProfilePatch {
+    /// Full name to show on the profile. A blank or whitespace-only value
+    /// clears it; omitting the field entirely leaves the current name alone.
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+/// Update the authenticated user's profile
+///
+/// Only the display name is editable. It is free text — not an identifier —
+/// so it needs no uniqueness check, and clearing it is a normal thing to do.
+#[utoipa::path(
+    patch,
+    path = "/babamul/profile",
+    request_body = UpdateProfilePatch,
+    responses(
+        (status = 200, description = "Profile updated", body = BabamulUserPublic),
+        (status = 400, description = "Name is too long or contains control characters"),
+        (status = 401, description = "Unauthorized"),
+        (status = 500, description = "Internal server error")
+    ),
+    tags=["Babamul"]
+)]
+#[patch("/profile")]
+pub async fn patch_babamul_profile(
+    db: web::Data<Database>,
+    current_user: Option<web::ReqData<BabamulUser>>,
+    body: web::Json<UpdateProfilePatch>,
+) -> HttpResponse {
+    let current_user = match current_user {
+        Some(user) => user,
+        None => {
+            return HttpResponse::Unauthorized().body("Unauthorized");
+        }
+    };
+    let mut user = current_user.into_inner().clone();
+
+    let name = match &body.name {
+        // Absent means "leave it as it is", so there is nothing to write.
+        None => return response::ok_ser("success", BabamulUserPublic::from(user)),
+        Some(name) => name.trim(),
+    };
+
+    // Counted in characters, not bytes: a name in a non-Latin script would
+    // otherwise be cut off at a fraction of the length a Latin one gets.
+    if name.chars().count() > MAX_NAME_LENGTH {
+        return response::bad_request(&format!(
+            "Name must be at most {} characters",
+            MAX_NAME_LENGTH
+        ));
+    }
+    // Names are rendered on one line. Control characters buy a caller nothing
+    // except the chance to smuggle newlines into somewhere this is echoed.
+    if name.chars().any(char::is_control) {
+        return response::bad_request("Name cannot contain control characters");
+    }
+
+    // Empty is how the API says "no name", both on the wire and in the
+    // database — storing "" would leave a name that renders as blank.
+    let stored = if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    };
+
+    let babamul_users_collection: mongodb::Collection<BabamulUser> = db.collection("babamul_users");
+    let update = match &stored {
+        Some(name) => doc! { "$set": { "name": name } },
+        None => doc! { "$unset": { "name": "" } },
+    };
+    if let Err(e) = babamul_users_collection
+        .update_one(doc! { "_id": &user.id }, update)
+        .await
+    {
+        tracing::error!("Failed to update profile for user {}: {}", user.id, e);
+        return response::internal_error("Failed to update profile");
+    }
+
+    user.name = stored;
+    response::ok_ser("success", BabamulUserPublic::from(user))
 }
 
 #[derive(Deserialize, Clone, ToSchema)]

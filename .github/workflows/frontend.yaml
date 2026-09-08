@@ -1,4 +1,4 @@
-name: Build frontend
+name: Frontend
 
 on:
   push:
@@ -8,7 +8,30 @@ on:
       - "frontend/**"
       - ".github/workflows/frontend.yaml"
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
+  # Only PR runs are superseded; main keeps one run, and one status, per commit.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
+  test:
+    name: Test frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+
+      # --frozen-lockfile so a dependency that drifted from bun.lock fails here
+      # rather than being silently resolved to something the image never saw.
+      - name: Install dependencies
+        working-directory: frontend
+        run: bun install --frozen-lockfile
+
+      - name: Run tests
+        working-directory: frontend
+        run: bun run test
+
   build:
     name: Build frontend image
     runs-on: ubuntu-latest

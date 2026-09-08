@@ -23,7 +23,7 @@ use flare::Time;
 use mongodb::bson::{doc, Document};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_with::{serde_as, skip_serializing_none};
-use tracing::{debug, error, instrument, warn};
+use tracing::{debug, error, instrument};
 
 pub const STREAM_NAME: &str = "DECAM";
 pub const DECAM_DEC_RANGE: (f64, f64) = (-90.0, 33.5);
@@ -432,10 +432,6 @@ impl AlertWorker for DecamAlertWorker {
         Survey::Decam
     }
 
-    fn input_queue_name(&self) -> String {
-        format!("{}_alerts_packets_queue", DecamAlertWorker::survey())
-    }
-
     fn output_queue_name(&self) -> String {
         format!("{}_alerts_enrichment_queue", DecamAlertWorker::survey())
     }
@@ -517,8 +513,7 @@ impl AlertWorker for DecamAlertWorker {
             };
             let result = self.insert_aux(&obj, &self.alert_aux_collection).await;
             if let Err(AlertError::AlertAuxExists) = result {
-                // use the race-condition free fallback update
-                warn!(
+                debug!(
                     "Alert aux document for object_id {} already exists. Using fallback update.",
                     object_id
                 );

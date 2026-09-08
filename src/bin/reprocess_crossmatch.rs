@@ -6,7 +6,8 @@ use boom::{
     api::catalogs::WATCHLIST_PREFIX,
     conf::{load_dotenv, AppConfig, CatalogXmatchConfig},
     utils::{
-        data::make_progress_bar,
+        data::{make_progress_bar, spawn_progress_logger},
+        db::{join_tasks, merge_filters, range_shards, shard_field, TaskError, CURSOR_BATCH_SIZE},
         enums::Survey,
         parser::parse_positive_usize,
         spatial::{
@@ -20,7 +21,7 @@ use flare::{spatial::great_circle_distance, Time};
 use futures::{StreamExt, TryStreamExt};
 use indicatif::ProgressBar;
 use mongodb::{
-    bson::{doc, Bson, Document},
+    bson::{doc, Document},
     options::{UpdateModifications, UpdateOneModel, WriteModel},
     Namespace,
 };
@@ -28,8 +29,6 @@ use tracing::{error, info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
 const QUEUE_MULTIPLIER: usize = 2;
-const CURSOR_BATCH_SIZE: u32 = 10_000;
-const PROGRESS_LOG_SECS: u64 = 60;
 const ARCSEC_TO_RAD: f64 = std::f64::consts::PI / 180.0 / 3600.0;
 const STATE_COLLECTION: &str = "reprocess_crossmatch_state";
 const STATUS_MATCHING: &str = "matching";
@@ -126,46 +125,6 @@ fn aux_match_projection() -> Document {
     doc! { "_id": 1, "coordinates.radec_geojson.coordinates": 1 }
 }
 
-/// The indicatif bar hides itself when stderr is not a terminal, i.e. whenever the run
-/// is piped to a log file, so mirror it into the tracing output.
-fn spawn_progress_logger(pb: ProgressBar, label: String) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(PROGRESS_LOG_SECS));
-        ticker.tick().await;
-        loop {
-            ticker.tick().await;
-            let pos = pb.position();
-            let len = pb.length().unwrap_or(0);
-            let elapsed = pb.elapsed().as_secs_f64();
-            let rate = if elapsed > 0.0 {
-                pos as f64 / elapsed
-            } else {
-                0.0
-            };
-            let eta_secs = if rate > 0.0 && len > pos {
-                ((len - pos) as f64 / rate) as u64
-            } else {
-                0
-            };
-            let pct = if len > 0 {
-                pos as f64 * 100.0 / len as f64
-            } else {
-                0.0
-            };
-            info!(
-                "[{}] {}/{} ({:.2}%) {:.0} docs/s, eta {}h{:02}m",
-                label,
-                pos,
-                len,
-                pct,
-                rate,
-                eta_secs / 3600,
-                (eta_secs % 3600) / 60,
-            );
-        }
-    })
-}
-
 async fn set_reprocess_state(
     db: &mongodb::Database,
     state_id: &str,
@@ -221,77 +180,6 @@ async fn temp_needs_reset(
 // region on disk rather than jumping around it.
 // -----------------------------------------------------------------------------
 
-/// `created_at` is exactly insertion order, but it is only indexed if someone created
-/// that index; `_id` always is, and both ZTF object ids and LSST diaObject ids happen
-/// to be allocated in an order that correlates well with insertion.
-async fn shard_field(collection: &mongodb::Collection<Document>) -> &'static str {
-    let indexed_on_created_at = match collection.list_indexes().await {
-        Ok(cursor) => match cursor.try_collect::<Vec<_>>().await {
-            Ok(indexes) => indexes
-                .iter()
-                .any(|index| index.keys.keys().next().is_some_and(|k| k == "created_at")),
-            Err(_) => false,
-        },
-        Err(_) => false,
-    };
-    if indexed_on_created_at {
-        "created_at"
-    } else {
-        "_id"
-    }
-}
-
-async fn range_shards(
-    collection: &mongodb::Collection<Document>,
-    parts: usize,
-    field: &str,
-) -> Vec<Document> {
-    if parts <= 1 {
-        return vec![Document::new()];
-    }
-    let sample_size = (parts * 20).min(10_000);
-    let bounds: Vec<Bson> = match collection
-        .aggregate(vec![
-            doc! { "$sample": { "size": sample_size as i64 } },
-            doc! { "$project": { field: 1 } },
-            doc! { "$sort": { field: 1 } },
-        ])
-        .await
-    {
-        Ok(cursor) => match cursor.try_collect::<Vec<Document>>().await {
-            Ok(docs) => docs.iter().filter_map(|d| d.get(field).cloned()).collect(),
-            Err(e) => {
-                warn!(error = %e, "could not sample {} bounds, falling back to a single shard", field);
-                Vec::new()
-            }
-        },
-        Err(e) => {
-            warn!(error = %e, "could not sample {} bounds, falling back to a single shard", field);
-            Vec::new()
-        }
-    };
-
-    if bounds.len() < parts {
-        warn!(
-            "only {} sampled bounds on '{}' for {} shards, running as a single shard",
-            bounds.len(),
-            field,
-            parts
-        );
-        return vec![Document::new()];
-    }
-    let step = bounds.len() / parts;
-    let cuts: Vec<Bson> = (1..parts).map(|i| bounds[i * step].clone()).collect();
-
-    let mut shards = Vec::with_capacity(cuts.len() + 1);
-    shards.push(doc! { field: { "$lt": cuts[0].clone() } });
-    for pair in cuts.windows(2) {
-        shards.push(doc! { field: { "$gte": pair[0].clone(), "$lt": pair[1].clone() } });
-    }
-    shards.push(doc! { field: { "$gte": cuts[cuts.len() - 1].clone() } });
-    shards
-}
-
 async fn sharded_update_many(
     collection: &mongodb::Collection<Document>,
     shards: &[Document],
@@ -302,13 +190,7 @@ async fn sharded_update_many(
     let done = Arc::new(AtomicUsize::new(0));
     let total = shards.len();
     let results = futures::future::join_all(shards.iter().enumerate().map(|(index, shard)| {
-        let filter = if shard.is_empty() {
-            base_filter.clone()
-        } else if base_filter.is_empty() {
-            shard.clone()
-        } else {
-            doc! { "$and": [base_filter.clone(), shard.clone()] }
-        };
+        let filter = merge_filters(base_filter, shard);
         let collection = collection.clone();
         let update = update.clone();
         let done = Arc::clone(&done);
@@ -357,7 +239,7 @@ async fn run_objects_driven(
     processes: usize,
     concurrency: usize,
     skip_existing: bool,
-) -> Result<(), mongodb::error::Error> {
+) -> Result<(), TaskError> {
     let aux_collection: mongodb::Collection<AuxIdAndCoords> =
         db.collection(&format!("{}_alerts_aux", survey));
     let estimated = aux_collection.estimated_document_count().await.unwrap_or(0);
@@ -409,24 +291,10 @@ async fn run_objects_driven(
     }
     drop(tx);
 
-    let mut first_err: Option<mongodb::error::Error> = None;
-    for h in workers {
-        match h.await {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => {
-                error!("worker failed: {}", e);
-                first_err.get_or_insert(e);
-            }
-            Err(e) => {
-                error!("worker join failed: {}", e);
-            }
-        }
-    }
+    let outcome = join_tasks(workers, "worker").await;
     logger.abort();
     pb.finish();
-    if let Some(e) = first_err {
-        return Err(e);
-    }
+    outcome?;
     Ok(())
 }
 
@@ -538,7 +406,7 @@ async fn run_watchlist_driven(
     db: mongodb::Database,
     batch_size: usize,
     processes: usize,
-) -> Result<(), mongodb::error::Error> {
+) -> Result<(), TaskError> {
     let wl_collection: mongodb::Collection<Document> = db.collection(&watchlist_config.catalog);
     let estimated = wl_collection.estimated_document_count().await.unwrap_or(0);
     let label = format!("watchlist→{}", watchlist_config.catalog);
@@ -576,24 +444,10 @@ async fn run_watchlist_driven(
     }
     drop(tx);
 
-    let mut first_err: Option<mongodb::error::Error> = None;
-    for h in workers {
-        match h.await {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => {
-                error!("worker failed: {}", e);
-                first_err.get_or_insert(e);
-            }
-            Err(e) => {
-                error!("worker join failed: {}", e);
-            }
-        }
-    }
+    let outcome = join_tasks(workers, "worker").await;
     logger.abort();
     pb.finish();
-    if let Some(e) = first_err {
-        return Err(e);
-    }
+    outcome?;
     Ok(())
 }
 
@@ -697,7 +551,7 @@ async fn run_catalog_driven(
     concurrency: usize,
     skip_empty: bool,
     reset_temp: bool,
-) -> Result<(), mongodb::error::Error> {
+) -> Result<(), TaskError> {
     let aux_collection: mongodb::Collection<Document> =
         db.collection(&format!("{}_alerts_aux", survey));
     let cat_collection: mongodb::Collection<Document> = db.collection(&catalog_config.catalog);
@@ -705,7 +559,7 @@ async fn run_catalog_driven(
     let temp_field = format!("cross_matches.{}_temp", catalog_config.catalog);
     let run_start_jd = Time::now().to_jd();
     let shard_field = shard_field(&aux_collection).await;
-    let shards = range_shards(&aux_collection, processes, shard_field).await;
+    let shards = range_shards(&aux_collection, processes, shard_field, &Document::new()).await;
     info!(
         "[catalog\u{2192}{}] cleanup passes sharded on '{}' into {} ranges",
         catalog_config.catalog,
@@ -799,26 +653,11 @@ async fn run_catalog_driven(
         }
     }
     drop(tx);
-    let mut first_err: Option<mongodb::error::Error> = None;
-    for h in workers {
-        match h.await {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => {
-                error!("worker failed: {}", e);
-                first_err.get_or_insert(e);
-            }
-            Err(e) => {
-                error!("worker join failed: {}", e);
-            }
-        }
-    }
+    let outcome = join_tasks(workers, "worker").await;
     logger.abort();
     pb.finish();
-    if let Some(e) = first_err {
-        // CRITICAL: temp holds a partial result; committing it would overwrite valid
-        // live cross_matches with an incomplete list. The next run's phase 1 clears it.
-        return Err(e);
-    }
+    // A partial temp must never reach phase 3: it commits empty match lists over valid ones.
+    outcome?;
 
     // Phase 3: sort, trim and commit in a single pass. $ifNull gives records with no
     // match the empty array that phase 1 used to pre-write on every record.

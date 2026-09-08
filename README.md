@@ -17,7 +17,7 @@ BOOM is an alert broker. What sets it apart from other alert brokers is that it 
 
 1. The `Kafka` consumer(s), reading alerts from astronomical surveys' `Kafka` topics to transfer them to `Redis`/`Valkey` in-memory queues.
 2. The Alert Ingestion workers, reading alerts from the `Redis`/`Valkey` queues, responsible of formatting them to BSON documents, and enriching them with crossmatches from archival astronomical catalogs and other surveys before writing the formatted alert packets to a `MongoDB` database.
-3. The enrichment workers, running alerts through a series of enrichment classifiers, and writing the results back to the `MongoDB` database.
+3. The enrichment workers, running alerts through a series of enrichment classifiers (ML inference) and per-alert light-curve fitting (Villar fits, GPU-accelerated when enabled), and writing the results back to the `MongoDB` database.
 4. The Filter workers, running user-defined filters on the alerts, and sending the results to Kafka topics for other services to consume.
 
 Workers are managed by a Scheduler that can spawn or kill workers of each type.
@@ -507,7 +507,11 @@ curl -sL https://caltech.box.com/shared/static/qdois5qq2lmvp02ri50fum80vzr54505.
 
 Download the NED catalog for crossmatching.
 ```
-uvx gdown "https://drive.google.com/uc?id=1BG46oLMbONXhIqiPrepSnhKim1xfiVbB" -O ./data/alerts/kowalski.NED.json.gz
+wget -q https://github.com/boom-astro/boom/releases/download/test-data-v1/BOOM.NED.json.gz -O ./data/alerts/BOOM.NED.json.gz
+```
+**For macOS:**
+```
+curl -sL https://github.com/boom-astro/boom/releases/download/test-data-v1/BOOM.NED.json.gz -o ./data/alerts/BOOM.NED.json.gz
 ```
 
 ### Start Benchmark

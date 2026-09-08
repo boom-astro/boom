@@ -32,14 +32,11 @@ async fn create_topic(cfg: &ClientConfig, topic: &str) -> Result<(), KafkaError>
         .create_topics(&[new_topic], &AdminOptions::new())
         .await?;
 
-    for result in results {
-        match result {
-            Ok(_) => return Ok(()),
-            Err((_topic_name, code)) => return Err(KafkaError::AdminOp(code)),
-        }
-    }
     // If the vector was empty (shouldn't happen), treat as success.
-    Ok(())
+    match results.into_iter().next() {
+        Some(Err((_topic_name, code))) => Err(KafkaError::AdminOp(code)),
+        Some(Ok(_)) | None => Ok(()),
+    }
 }
 
 fn make_base_cfg() -> ClientConfig {
@@ -79,7 +76,7 @@ async fn test_kafka_auth_enforcement() {
     let mut cfg_bad = make_base_cfg();
     cfg_bad
         .set("security.protocol", "SASL_PLAINTEXT")
-        .set("sasl.mechanism", "SCRAM-SHA-512")
+        .set("sasl.mechanisms", "SCRAM-SHA-512")
         .set("sasl.username", &user)
         .set("sasl.password", "definitely-wrong-password");
     let bad_result = fetch_metadata(&cfg_bad);
@@ -92,7 +89,7 @@ async fn test_kafka_auth_enforcement() {
     let mut cfg_good = make_base_cfg();
     cfg_good
         .set("security.protocol", "SASL_PLAINTEXT")
-        .set("sasl.mechanism", "SCRAM-SHA-512")
+        .set("sasl.mechanisms", "SCRAM-SHA-512")
         .set("sasl.username", &user)
         .set("sasl.password", &pass);
     let good_result = fetch_metadata(&cfg_good).unwrap();

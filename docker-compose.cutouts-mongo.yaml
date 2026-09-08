@@ -23,7 +23,7 @@ volumes:
 
 services:
   mongo-cutouts:
-    image: mongo:8.0
+    image: mongo:8.2
     hostname: mongo-cutouts
     expose:
       - "27017"

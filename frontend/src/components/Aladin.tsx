@@ -5,7 +5,7 @@ import {
 import { useEffect, useState } from "react";
 import { ApiObject } from '@/lib/api';
 import { loadAladinScript } from '@/lib/aladinLoader';
-import { radec2lb } from "@/lib/utils";
+import { radec2lb } from "@/lib/coordinates";
 
 export default function Aladin({
         alert,

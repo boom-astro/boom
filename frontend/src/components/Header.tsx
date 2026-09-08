@@ -38,7 +38,8 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { Tooltip, TooltipTrigger, TooltipContent } from './ui/tooltip';
-import { LSST, ZTF, radec2lb } from '@/lib/utils';
+import { LSST, ZTF } from '@/lib/constants';
+import { radec2lb } from '@/lib/coordinates';
 
 
 dayjs.extend(utc);
