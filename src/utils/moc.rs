@@ -126,11 +126,25 @@ pub fn parse_3d_skymap(path: &str) -> Result<LIGO3dskymap, String> {
         (uniq, areas, prob)
     } else {
         // ── Flat HEALPix format ─────────────────────────────────────────
+        // The UNIQ indices synthesised below are NESTED by construction, so a
+        // RING-ordered map would be misread pixel for pixel.
+        let ordering: String = hdu
+            .read_key(&mut fits, "ORDERING")
+            .map_err(|e| format!("ORDERING keyword missing from flat skymap: {}", e))?;
+        if ordering.trim() != "NESTED" {
+            return Err(format!(
+                "Unsupported HEALPix ORDERING {}: only NESTED is supported",
+                ordering.trim()
+            ));
+        }
         let nside: i64 = hdu
             .read_key(&mut fits, "NSIDE")
             .map_err(|e| e.to_string())?;
         let nside = nside as u32;
-        let order = (nside as f64).log2() as u8;
+        if !nside.is_power_of_two() {
+            return Err(format!("NSIDE must be a power of two, got {}", nside));
+        }
+        let order = nside.trailing_zeros() as u8;
         let area = pixel_area_from_order(order);
         let npix = 12 * (nside as usize).pow(2);
         let prob: Vec<f64> = hdu.read_col(&mut fits, "PROB").map_err(|e| e.to_string())?;
