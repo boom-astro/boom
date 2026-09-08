@@ -521,13 +521,13 @@ pub fn select_covering_depth(moc: &HpxMoc) -> u8 {
     let coverage_sq_deg = coverage_pct * 41253.0; // full sky ≈ 41253 sq deg
 
     if coverage_sq_deg < 10.0 {
-        7 // ~0.05 sq deg cells
+        7 // ~0.21 sq deg cells
     } else if coverage_sq_deg < 100.0 {
-        5 // ~0.84 sq deg cells
+        5 // ~3.36 sq deg cells
     } else if coverage_sq_deg < 1000.0 {
-        4 // ~3.36 sq deg cells
+        4 // ~13.4 sq deg cells
     } else {
-        3 // ~13.4 sq deg cells
+        3 // ~53.7 sq deg cells
     }
 }
 
