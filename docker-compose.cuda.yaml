@@ -6,7 +6,7 @@ volumes:
 
 services:
   scheduler-ztf:
-    image: boom-astro/boom-gpu:latest
+    image: ${BOOM_GPU_IMAGE:-boom-astro/boom-gpu:local}
     build:
       context: .
       dockerfile: Dockerfile.gpu
@@ -25,7 +25,7 @@ services:
     volumes:
       - nvidia_compute_cache:/root/.nv/ComputeCache
   scheduler-lsst:
-    image: boom-astro/boom-gpu:latest
+    image: ${BOOM_GPU_IMAGE:-boom-astro/boom-gpu:local}
     build:
       context: .
       dockerfile: Dockerfile.gpu

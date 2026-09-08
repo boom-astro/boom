@@ -196,7 +196,7 @@ services:
       - --kafka.server=broker:29092
     restart: always
   api:
-    image: boom-astro/boom:latest
+    image: ${BOOM_IMAGE:-ghcr.io/boom-astro/boom:latest}
     hostname: api
     build:
       context: .
@@ -296,7 +296,10 @@ services:
       - traefik.http.routers.${STACK_NAME?Variable not set}-api-http.middlewares=https-redirect,${STACK_NAME?Variable not set}-www-redirect,${STACK_NAME?Variable not set}-api-ratelimit,${STACK_NAME?Variable not set}-api-compress
       - traefik.http.routers.${STACK_NAME?Variable not set}-api-https.middlewares=${STACK_NAME?Variable not set}-www-redirect,${STACK_NAME?Variable not set}-api-ratelimit,${STACK_NAME?Variable not set}-api-compress
   frontend:
-    image: boom-astro/boom-frontend:latest
+    # Built locally and never published, unlike the boom image: no workflow
+    # pushes it, so this is a local tag rather than a registry path. `docker
+    # compose pull` will fail on this service by design; build it instead.
+    image: boom-astro/boom-frontend:local
     hostname: frontend
     build:
       # Root context so the build can bundle docs/babamul.md (see frontend/Dockerfile).
@@ -340,7 +343,7 @@ services:
     # Note: separate consumers for each ZTF program ID to allow independent scaling and isolation of processing
     # (there appears to be an issue when one consumer reads from multiple topics, i.e. one group id with multiple topics)
     # TODO: investigate further and consider merging into single consumer with multiple topics if the issue is resolved
-    image: boom-astro/boom:latest
+    image: ${BOOM_IMAGE:-ghcr.io/boom-astro/boom:latest}
     hostname: consumer-ztf-public
     restart: always
     build:
@@ -378,7 +381,7 @@ services:
       - --programids
       - public
   consumer-ztf-partnership:
-    image: boom-astro/boom:latest
+    image: ${BOOM_IMAGE:-ghcr.io/boom-astro/boom:latest}
     hostname: consumer-ztf-partnership
     restart: always
     build:
@@ -416,7 +419,7 @@ services:
       - --programids
       - partnership
   consumer-ztf-caltech:
-    image: boom-astro/boom:latest
+    image: ${BOOM_IMAGE:-ghcr.io/boom-astro/boom:latest}
     hostname: consumer-ztf-caltech
     restart: always
     build:
@@ -454,7 +457,7 @@ services:
       - --programids
       - caltech
   consumer-lsst:
-    image: boom-astro/boom:latest
+    image: ${BOOM_IMAGE:-ghcr.io/boom-astro/boom:latest}
     hostname: consumer-lsst
     restart: always
     build:
@@ -487,7 +490,7 @@ services:
       - /app/kafka_consumer
       - lsst
   consumer-winter:
-    image: boom-astro/boom:latest
+    image: ${BOOM_IMAGE:-ghcr.io/boom-astro/boom:latest}
     hostname: consumer-winter
     restart: always
     build:
@@ -526,7 +529,7 @@ services:
   # restart or deploy must not kill one. A run interrupted by a deploy goes back
   # on the queue and the replacement worker resumes it.
   task-worker:
-    image: boom-astro/boom:latest
+    image: ${BOOM_IMAGE:-ghcr.io/boom-astro/boom:latest}
     hostname: task-worker
     restart: always
     build:
@@ -560,7 +563,7 @@ services:
       - /app/task_worker
 
   scheduler-ztf:
-    image: boom-astro/boom:latest
+    image: ${BOOM_IMAGE:-ghcr.io/boom-astro/boom:latest}
     hostname: scheduler-ztf
     restart: always
     build:
@@ -595,7 +598,7 @@ services:
       - /app/scheduler
       - ztf
   scheduler-lsst:
-    image: boom-astro/boom:latest
+    image: ${BOOM_IMAGE:-ghcr.io/boom-astro/boom:latest}
     hostname: scheduler-lsst
     restart: always
     build:
@@ -630,7 +633,7 @@ services:
       - /app/scheduler
       - lsst
   scheduler-winter:
-    image: boom-astro/boom:latest
+    image: ${BOOM_IMAGE:-ghcr.io/boom-astro/boom:latest}
     hostname: scheduler-winter
     restart: always
     build:
@@ -673,7 +676,7 @@ services:
   # Defined here rather than created by hand so the next person to run it gets
   # the same mounts, network and limits as everything else.
   mpcorb-ingest:
-    image: boom-astro/boom:latest
+    image: ${BOOM_IMAGE:-ghcr.io/boom-astro/boom:latest}
     hostname: mpcorb-ingest
     # A one-shot job: a restart policy here would re-download on every failure.
     restart: "no"
