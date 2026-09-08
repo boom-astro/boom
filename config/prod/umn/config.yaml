@@ -145,10 +145,8 @@ workers:
       n_workers: 10
     enrichment:
       n_workers: 4
-      # Alerts per enrichment batch: the queue RPOP cap AND the fixed ONNX
-      # inference shape. One shape alone does not bound the GPU arena; the CUDA
-      # sessions also pin SameAsRequested. 1000 is sized for ~12GB cards; the
-      # startup check only guarantees 10GiB free, so use 750 on smaller cards.
+      # Alerts per batch: the RPOP cap and the fixed ONNX input shape (CUDA pins SameAsRequested).
+      # 1000 is sized for ~12GB cards; the 10GiB startup check is only a floor — use 750 below that.
       batch_size: 1000
     filter:
       n_workers: 10

@@ -864,8 +864,7 @@ pub struct WorkerConfig {
 }
 
 fn default_enrichment_batch_size() -> usize {
-    // Matches the RPOP cap that was hardcoded before `batch_size` existed, so
-    // surveys that don't set it (lsst/decam/winter) keep their prior pull size.
+    // The RPOP cap that was hardcoded before this field existed.
     1000
 }
 
@@ -873,12 +872,8 @@ fn default_enrichment_batch_size() -> usize {
 pub struct EnrichmentWorkerConfig {
     pub n_workers: usize,
     /// Alerts per enrichment batch: both the queue RPOP cap and the fixed ONNX
-    /// batch dimension (partial batches are zero-padded).
-    ///
-    /// One shape alone does not bound the BFC arena — CUDA sessions also pin
-    /// `SameAsRequested`, which is what makes 1000 hold. 1000 is sized for a
-    /// ~12 GB card; the startup guardrail only checks for 10 GiB free, so on
-    /// smaller cards lower this to 750.
+    /// input shape (partial batches are zero-padded). CUDA sessions pin
+    /// `SameAsRequested`, so this shape must not vary; see `config.yaml` for sizing.
     #[serde(default = "default_enrichment_batch_size")]
     pub batch_size: usize,
 }

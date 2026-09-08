@@ -65,9 +65,8 @@ pub fn load_model_on_device(
             let mut ep = ort::ep::CUDAExecutionProvider::default()
                 .with_device_id(dev)
                 .with_conv_max_workspace(false)
-                // ORT's default grows the arena every batch at 900+ (35 GiB on
-                // an A40). Exact-size extents fit the next batch only because
-                // callers pad to a fixed shape; dynamic shapes would regress.
+                // Safe only because callers pad every batch to one fixed shape;
+                // with dynamic shapes this grows the arena every batch and OOMs.
                 .with_arena_extend_strategy(ort::ep::ArenaExtendStrategy::SameAsRequested);
             if !cuda_stream.is_null() {
                 // Safety: guaranteed by this function's own safety contract.

@@ -89,7 +89,6 @@ async fn run_enrich_only<T: EnrichmentWorker>(
     let command_interval = worker_config.command_interval;
     let mut command_check_countdown = command_interval;
 
-    // Same cap as `run_enrichment_worker`: one inference batch per pull.
     let batch_size = NonZero::new(worker_config.enrichment.batch_size).ok_or_else(|| {
         EnrichmentWorkerError::ConfigurationError(format!(
             "enrichment batch_size must be non-zero for survey {}",

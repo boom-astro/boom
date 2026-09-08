@@ -193,9 +193,7 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker>(
     let command_interval = worker_config.command_interval;
     let mut command_check_countdown = command_interval;
 
-    // Cap the RPOP at the configured batch size: pulling more would split it
-    // into a full chunk plus a mostly-padded one, paying a second full-cost
-    // GPU pass for the remainder (see `ZtfEnrichmentWorker::classify`).
+    // One inference batch per pull; more would cost a second, mostly-padded GPU pass.
     let batch_size = NonZero::new(worker_config.enrichment.batch_size).ok_or_else(|| {
         EnrichmentWorkerError::ConfigurationError(format!(
             "enrichment batch_size must be non-zero for survey {}",

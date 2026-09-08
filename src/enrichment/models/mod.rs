@@ -15,8 +15,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tracing::info;
 
-/// Workers round-robin over sets, so more workers than GPUs means several
-/// threads share one set — and one CUDA stream. Safe: see `bind_device`.
+/// Workers round-robin over sets; more workers than GPUs share a set and its stream.
 const SESSIONS_PER_DEVICE: usize = 1;
 
 /// ONNX models shared across all enrichment worker threads via `Arc`.
@@ -25,13 +24,11 @@ const SESSIONS_PER_DEVICE: usize = 1;
 /// Concurrent workers will serialize on the mutex, but model weights are loaded
 /// only once in memory (and on GPU VRAM if using CUDA).
 ///
-/// On Linux+GPU, all sessions share a single CUDA stream with the villar-pso
-/// `GpuContext` so PSO and ONNX inference run on the same stream and avoid
-/// the implicit cross-stream barriers of the legacy default stream.
+/// On Linux+GPU all sessions and the villar-pso `GpuContext` share one CUDA
+/// stream, avoiding the legacy default stream's implicit cross-stream barriers.
 ///
-/// **Field ordering matters**: Rust drops struct fields in declaration order,
-/// so the stream must be declared AFTER everything that uses it (the ORT
-/// sessions and the `GpuContext`) to ensure `cudaStreamDestroy` fires last.
+/// Fields drop in declaration order, so `_stream` must stay last: its
+/// `cudaStreamDestroy` has to run after everything that uses it.
 pub struct SharedModels {
     pub acai_h: Mutex<AcaiModel>,
     pub acai_n: Mutex<AcaiModel>,
@@ -39,10 +36,8 @@ pub struct SharedModels {
     pub acai_o: Mutex<AcaiModel>,
     pub acai_b: Mutex<AcaiModel>,
     pub btsbot: Mutex<BtsBotModel>,
-    /// Villar-PSO GPU context bound to this device. `None` when running
-    /// without the `gpu` feature. No mutex: it is an id plus a stream pointer
-    /// with `&self` methods, per-call buffers, and stream enqueue is
-    /// thread-safe, so workers sharing this set may use it concurrently.
+    /// Villar-PSO context for this device; `None` for the CPU set. No mutex:
+    /// `&self` methods with per-call buffers, and stream enqueue is thread-safe.
     #[cfg(feature = "gpu")]
     pub gpu_ctx: Option<GpuContext>,
     /// CUDA stream shared with the ORT sessions above. Must be dropped last
@@ -58,15 +53,11 @@ impl std::fmt::Debug for SharedModels {
 }
 
 impl SharedModels {
-    /// Load all ONNX models, optionally on a specific CUDA device.
-    ///
-    /// On Linux+`gpu` every ORT session and the villar `GpuContext` share one
-    /// stream for the device. Callers must `bind_device` before using these.
+    /// Load all ONNX models, optionally on a specific CUDA device. On
+    /// Linux+`gpu` every session and the villar `GpuContext` share one stream.
     pub fn load(device_id: Option<i32>) -> Result<Arc<Self>, ModelError> {
         info!(?device_id, "loading shared ONNX models");
 
-        // Create the per-device CUDA stream first (Linux+gpu only). The raw
-        // pointer is shared between ORT sessions and villar-pso.
         #[cfg(all(feature = "gpu", target_os = "linux"))]
         let stream: Option<Stream> = match device_id {
             Some(id) => Some(Stream::new_on_device(id).map_err(|e| {
@@ -161,30 +152,15 @@ impl SharedModels {
         Ok(Arc::new(models))
     }
 
-    /// Bind the calling thread to this set's CUDA device.
+    /// Bind the calling thread to this set's CUDA device; call before each batch.
     ///
-    /// `cudaSetDevice` is per-thread and defaults to device 0. ORT does call it
-    /// itself — in the CUDA EP's `PerThreadContext` constructor and in
-    /// `CUDAAllocator::Alloc` — but none of those calls is guaranteed to land on
-    /// the thread that issues a given `Run`:
-    ///
-    /// - Passing our own compute stream disables ORT's per-`Run` `SetDeviceFn`,
-    ///   so nothing re-binds the thread at `Run` boundaries.
-    /// - `OnRunEnd` retires the `PerThreadContext`. When another worker's thread
-    ///   picks that retired context back up, the constructor does not run again,
-    ///   so that thread is still on device 0.
-    /// - While the allocator's arena is still growing, `CUDAAllocator::Alloc`
-    ///   binds the thread as a side effect. That accidental binding is why the
-    ///   failure is intermittent: it disappears once the arena stops extending.
-    ///
-    /// Left unbound, a `Run` against device N's stream and handles fails with
-    /// `cudaErrorInvalidResourceHandle`, so bind explicitly before each batch.
-    /// Villar-PSO already binds itself.
-    ///
-    /// Note this is *not* tokio task migration: each worker is its own
-    /// `#[tokio::main]` runtime driven by `block_on`, so it stays on its own std
-    /// thread. The stale binding comes from ORT reusing per-thread state across
-    /// worker threads, not from a task moving between them.
+    /// `cudaSetDevice` is per-thread and defaults to device 0. ORT sets it in the
+    /// `PerThreadContext` ctor and `CUDAAllocator::Alloc`, but our own compute
+    /// stream disables its per-`Run` `SetDeviceFn`, and `OnRunEnd` retires the
+    /// context for another worker's thread to reuse without the ctor — leaving
+    /// that thread on device 0 (`cudaErrorInvalidResourceHandle`). Arena growth
+    /// re-binds by accident, which is why it was intermittent. Not tokio
+    /// migration: each worker is its own `block_on` runtime on a fixed thread.
     pub fn bind_device(&self) -> Result<(), ModelError> {
         #[cfg(all(feature = "gpu", target_os = "linux"))]
         if let Some(ctx) = self.gpu_ctx.as_ref() {
