@@ -1201,29 +1201,18 @@ mod tests {
     }
 
     /// The enrichment worker takes the embedding out of the classifications
-    /// before building the Mongo document; this is that same step.
-    #[test]
-    fn taking_the_embedding_hands_it_over_and_keeps_the_scores() {
-        let mut cls = sample_classifications();
-        let embedding = cls.fusion_embedding.take();
-
-        // The vector goes to the caller (Milvus), not to the stored struct.
-        assert_eq!(embedding, Some(vec![1.0, 2.0, 3.0]));
-        assert!(cls.fusion_embedding.is_none());
-        // Everything else is preserved.
-        assert_eq!(cls.acai_h, 0.1);
-        assert_eq!(cls.btsbot, 0.6);
-    }
-
-    /// What actually matters: the document handed to Mongo has no vector in it,
-    /// whether or not Milvus is enabled.
+    /// before building the Mongo document: the vector goes to Milvus, and the
+    /// document Mongo receives has no `fusion_embedding` key at all.
     #[test]
     fn mongo_document_never_carries_the_embedding() {
         let mut cls = sample_classifications();
-        cls.fusion_embedding.take();
+        let embedding = cls.fusion_embedding.take();
         let doc = mongify(&cls);
 
+        assert_eq!(embedding, Some(vec![1.0, 2.0, 3.0]));
         assert!(doc.get("fusion_embedding").is_none());
         assert!(doc.get("btsbot").is_some());
+        assert_eq!(cls.acai_h, 0.1);
+        assert_eq!(cls.btsbot, 0.6);
     }
 }
