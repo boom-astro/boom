@@ -1142,6 +1142,7 @@ mod sso_history_tests {
         let mut entry = doc! {
             "designation": "1", "jd": 2_461_272.5,
             "helio_dist": 1.0_f64, "topo_dist": 2.0_f64, "phase_angle": 3.0_f64,
+            "true_anomaly": 4.0_f64, "perihelion_time": 2_461_000.5_f64,
         };
         assert!(!fill_entry_geometry(&mut entry, &keys(), &elements()));
         assert_eq!(entry.get_f64("helio_dist").unwrap(), 1.0);
@@ -1202,6 +1203,7 @@ mod sso_history_tests {
             {
                 "designation": "2", "jd": 2_461_272.5,
                 "helio_dist": 1.0_f64, "topo_dist": 2.0_f64, "phase_angle": 3.0_f64,
+            "true_anomaly": 4.0_f64, "perihelion_time": 2_461_000.5_f64,
             },
         ] } };
         // The comet resolves too: it keys on its own designation.

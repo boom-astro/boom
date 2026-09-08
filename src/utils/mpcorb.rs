@@ -414,7 +414,15 @@ async fn refresh_into_staging(
     Ok(report)
 }
 
-/// Stage MPC's comet elements. A failure here costs comets, not the refresh.
+/// Fewer comets than this means a failed download or a changed format, not a
+/// smaller catalogue.
+const MIN_PLAUSIBLE_COMETS: u64 = 100;
+
+/// Stage MPC's comet elements.
+///
+/// The staging collection is renamed over the live one, so publishing it with
+/// no comets would drop every comet already known. Too few is an error, which
+/// leaves the previous catalogue in place.
 async fn refresh_comets_into_staging(
     staging: Option<&mongodb::Collection<Document>>,
     url: &str,
@@ -468,7 +476,13 @@ async fn refresh_comets_into_staging(
     }
 
     let parsed = documents.len() as u64;
-    if let (Some(c), false) = (staging, documents.is_empty()) {
+    if parsed < MIN_PLAUSIBLE_COMETS {
+        return Err(RefreshError::ImplausiblyShort {
+            parsed,
+            collection: "comets".to_string(),
+        });
+    }
+    if let Some(c) = staging {
         c.insert_many(documents).await?;
     }
     tracing::info!("parsed {} comet orbits", parsed);
@@ -575,7 +589,13 @@ impl OrbitCache {
 }
 
 /// Geometry fields derived together from one set of elements.
-pub const GEOMETRY_FIELDS: [&str; 3] = ["helio_dist", "topo_dist", "phase_angle"];
+pub const GEOMETRY_FIELDS: [&str; 5] = [
+    "helio_dist",
+    "topo_dist",
+    "phase_angle",
+    "true_anomaly",
+    "perihelion_time",
+];
 
 /// Whether a document already carries every geometry field.
 pub fn has_geometry(doc: &Document) -> bool {
@@ -606,6 +626,8 @@ pub fn fill_geometry(
     target.insert("helio_dist", geometry.helio_dist);
     target.insert("topo_dist", geometry.topo_dist);
     target.insert("phase_angle", geometry.phase_angle);
+    target.insert("true_anomaly", geometry.true_anomaly);
+    target.insert("perihelion_time", geometry.perihelion_time);
     true
 }
 
@@ -622,6 +644,24 @@ pub fn fill_geometry(
 ///
 /// Returns `None` for anything not resolvable to an MPCORB key, including
 /// comets (`"C/2026O1"`), which MPCORB does not carry at all.
+/// Whether this is a comet rather than an asteroid: an orbit-type prefix like
+/// `C/2025Q3`, or a number and orbit type like `124P`, optionally fragmented.
+///
+/// Deliberately narrow. A provisional asteroid designation can also end in one
+/// of these letters -- `2010TC` -- and must reach the provisional path instead.
+fn is_comet_designation(s: &str) -> bool {
+    if s.contains('/') {
+        return true;
+    }
+    let core = s.split_once('-').map_or(s, |(head, _)| head);
+    let Some(kind) = core.chars().last() else {
+        return false;
+    };
+    "PCDXI".contains(kind)
+        && core.len() > 1
+        && core[..core.len() - 1].bytes().all(|b| b.is_ascii_digit())
+}
+
 pub fn normalize_ztf_ssnamenr(ssnamenr: &str) -> Option<String> {
     let s = ssnamenr.trim();
     if s.is_empty() {
@@ -641,7 +681,7 @@ pub fn normalize_ztf_ssnamenr(ssnamenr: &str) -> Option<String> {
     }
 
     // Comets key on IPAC's own form, which is how the ingest stores them.
-    if s.contains('/') || s.ends_with(|c: char| "PCDXI".contains(c)) {
+    if is_comet_designation(s) {
         return Some(s.to_string());
     }
 
@@ -816,6 +856,24 @@ mod tests {
         for d in ["C/2026O1", "73P-C", "124P", "1P", "P/2005T5"] {
             assert_eq!(normalize_ztf_ssnamenr(d).as_deref(), Some(d));
         }
+    }
+
+    /// A provisional asteroid can end in an orbit-type letter, and must still
+    /// take the provisional path.
+    #[test]
+    fn test_a_provisional_asteroid_is_not_read_as_a_comet() {
+        assert!(!is_comet_designation("2010TC"));
+        assert!(!is_comet_designation("2015XD"));
+        assert!(!is_comet_designation("2022SG320"));
+        assert_eq!(normalize_ztf_ssnamenr("2010TC").as_deref(), Some("2010 TC"));
+        assert_eq!(
+            normalize_ztf_ssnamenr("2022SG320").as_deref(),
+            Some("2022 SG320")
+        );
+
+        assert!(is_comet_designation("124P"));
+        assert!(is_comet_designation("73P-C"));
+        assert!(is_comet_designation("C/2026O1"));
     }
 
     // Roughly 4,000 objects from the Palomar-Leiden surveys use their own packed
