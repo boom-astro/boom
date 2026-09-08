@@ -69,8 +69,6 @@ RUN --mount=type=cache,target=/app/target,sharing=locked \
        target/release/kafka_consumer \
        target/release/kafka_producer \
        target/release/api \
-       target/release/migrate_fp_flux \
-       target/release/migrate_snr \
        target/release/reprocess_crossmatch \
        target/release/prepare_catalog \
        target/release/copy_cutouts \
@@ -116,8 +114,6 @@ COPY --from=builder /app/bin/scheduler /app/scheduler
 COPY --from=builder /app/bin/kafka_consumer /app/kafka_consumer
 COPY --from=builder /app/bin/kafka_producer /app/kafka_producer
 COPY --from=builder /app/bin/api /app/boom-api
-COPY --from=builder /app/bin/migrate_fp_flux /app/migrate_fp_flux
-COPY --from=builder /app/bin/migrate_snr /app/migrate_snr
 COPY --from=builder /app/bin/reprocess_crossmatch /app/reprocess_crossmatch
 COPY --from=builder /app/bin/prepare_catalog /app/prepare_catalog
 COPY --from=builder /app/bin/mpcorb_ingest /app/mpcorb_ingest

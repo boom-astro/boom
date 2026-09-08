@@ -145,10 +145,15 @@ worker catches unwinds at the dispatch boundary. That matters precisely because
 these bodies come from binaries where an `unwrap` on unexpected data was a
 reasonable way to stop.
 
-The binaries survive for now as thin wrappers over the same code, so there is
-one implementation rather than two that can drift. They build a *detached*
-context: nothing is recorded to the ledger, and nothing can cancel them — which
-is the argument for using the task instead.
+**A ported task leaves no binary behind.** `migrate_fp_flux` and `migrate_snr`
+were briefly kept as thin wrappers and are now gone, the same way `add_catalog`
+was: a binary is precisely the thing this system exists to replace, and leaving
+one available means the untracked path stays the easy one.
+
+That does mean these can only be run against a database the API and a worker can
+both reach. The escape hatch, if a migration ever has to run somewhere the task
+system cannot, is a task body called from a one-off binary — but that should be
+a deliberate, temporary addition rather than a standing wrapper.
 
 ## Running it in dev
 

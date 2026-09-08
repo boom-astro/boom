@@ -55,8 +55,11 @@ impl TaskContext {
     }
 
     /// A context not attached to a run: logs go only to `tracing`, progress is
-    /// dropped, and nothing ever cancels. For tests and for calling a task body
-    /// directly.
+    /// dropped, nothing is written to the ledger, and nothing ever cancels.
+    ///
+    /// For tests. It deliberately has no production caller -- the binaries that
+    /// used it were removed once their work became tasks, because a task run
+    /// outside the task system records nothing about itself.
     pub fn detached(db: Database, config: Arc<AppConfig>) -> Self {
         Self {
             db,
