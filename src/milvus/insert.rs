@@ -55,8 +55,6 @@ impl MilvusClient {
         let config = self.config().clone();
         let dim = config.collection.dim;
 
-        // Validate up front: one bad row would otherwise fail the whole batch
-        // server-side with a far less specific error.
         for row in rows {
             if row.embedding.len() as i64 != dim {
                 return Err(MilvusError::DimensionMismatch {
@@ -133,7 +131,7 @@ fn double_field(name: &str, data: Vec<f64>) -> FieldData {
 }
 
 /// A float-vector column: all rows' floats concatenated, tagged with the
-/// per-vector dimension so Milvus can split them back apart.
+/// per-vector dimension so Milvus can split them back apart and perform indexing for similarity search
 fn float_vector_field(name: &str, dim: i64, data: Vec<f32>) -> FieldData {
     FieldData {
         r#type: DataType::FloatVector as i32,

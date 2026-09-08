@@ -630,10 +630,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             };
 
         for (item, mut classifications) in work_items.into_iter().zip(classifications_list) {
-            // The 384-float embedding never goes to Mongo: it is taken out of the
-            // classifications here (the class probabilities are still kept) and
-            // written to Milvus below when Milvus is enabled. With Milvus off it
-            // is simply dropped and stored nowhere.
+            // Extracting the fusion embedding from the classifications
             let fusion_embedding = classifications
                 .as_mut()
                 .and_then(|cls| cls.fusion_embedding.take());
@@ -662,9 +659,6 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             updates.push(update);
             processed_alerts.push(format!("{},{}", item.programid, item.candid));
 
-            // Queue the fusion embedding for Milvus before `item.alert` is
-            // moved into Babamul below. Keyed by object_id, so re-observed
-            // objects overwrite their previous vector.
             if self.milvus.is_some() {
                 if let Some(embedding) = fusion_embedding {
                     embedding_rows.push(EmbeddingRow {
@@ -685,9 +679,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
 
         let _ = self.client.bulk_write(updates).await?.modified_count;
 
-        // Write fusion embeddings to Milvus. A failure here is non-fatal: the
-        // alerts are already enriched and persisted in Mongo, so we log and
-        // move on rather than failing the whole batch.
+        // Writing fusion embeddings to Milvus
         if let Some(milvus) = self.milvus.as_mut() {
             if !embedding_rows.is_empty() {
                 match milvus.upsert_embeddings(&embedding_rows).await {
