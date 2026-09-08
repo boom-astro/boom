@@ -118,13 +118,14 @@ later.
 | `catalog_ingest` | Download an archival catalog and insert it. See [catalogs.md](./catalogs.md). |
 | `migrate_fp_flux` | Recompute ZTF forced-photometry flux in `ZTF_alerts_aux` at a fixed zeropoint. |
 | `migrate_snr` | Recompute `snr_psf`, `snr_ap` and ZTF `apFlux` across alerts and lightcurves. |
+| `reprocess_crossmatch` | Fill in or refresh crossmatches on a survey's `alerts_aux` records. |
 
 Submission is single-flight per target, not per type: two ingests of the same
 catalog would race on the same collection and chunk state, but ingesting 2MASS
 should not block ingesting NED.
 
 Still to port, so that the last reasons to SSH in go away: `enrich_reprocess`,
-`reprocess_crossmatch`, `copy_cutouts`, `prepare_catalog`. Each
+`copy_cutouts`, `prepare_catalog`. Each
 needs a params struct, an arm in `dispatch`, and a cancellation check in its
 batch loop; the ones that drive their work through Valkey already have the
 resumability a task needs.

@@ -1,21 +1,35 @@
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+//! The `reprocess_crossmatch` task: fill in or refresh crossmatches.
+//!
+//! The scheduler only crossmatches at first insert, so adding a catalog to
+//! `crossmatch.<survey>` leaves every pre-existing `alerts_aux` record without
+//! an entry for it. This fills those gaps, and can also refresh existing
+//! crossmatches when a catalog's radius or projection changes.
+//!
+//! **Idempotent.** Every write recomputes a record's matches from the catalog as
+//! it stands rather than amending what was there before; watchlists use
+//! `$addToSet`, which is idempotent by construction and safe alongside live
+//! ingest. That is what lets the queue resume a run whose lease lapsed.
+//!
+//! Ported from `src/bin/reprocess_crossmatch.rs`. The three `run_*_driven`
+//! functions already returned `Result`, so the move was mostly about giving the
+//! feeders a cancellation check and pointing progress at the run instead of a
+//! terminal.
 
-use boom::{
+use super::batch::PROGRESS_EVERY;
+use super::context::TaskContext;
+use super::ledger::{MutationTarget, Operation};
+use crate::{
     api::catalogs::WATCHLIST_PREFIX,
-    conf::{load_dotenv, AppConfig, CatalogXmatchConfig},
+    conf::CatalogXmatchConfig,
     utils::{
         data::{make_progress_bar, spawn_progress_logger},
         enums::Survey,
-        parser::parse_positive_usize,
         spatial::{
             cm_radius_arcsec, distance_kpc_from_arcsec, get_f64_from_doc, watchlist_match_field,
             xmatch, Coordinates,
         },
     },
 };
-use clap::{Parser, ValueEnum};
 use flare::{spatial::great_circle_distance, Time};
 use futures::{StreamExt, TryStreamExt};
 use indicatif::ProgressBar;
@@ -24,8 +38,265 @@ use mongodb::{
     options::{UpdateModifications, UpdateOneModel, WriteModel},
     Namespace,
 };
-use tracing::{error, info, warn, Level};
-use tracing_subscriber::FmtSubscriber;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use tracing::{error, info, warn};
+use utoipa::ToSchema;
+
+/// Stable identifier for this task type.
+pub const TASK_TYPE: &str = "reprocess_crossmatch";
+
+/// What a client may ask for.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ReprocessCrossmatchParams {
+    pub survey: Survey,
+    /// Each must already be declared under `crossmatch.<survey>` in the config,
+    /// which is where the radius and projection come from.
+    pub catalogs: Vec<String>,
+    #[serde(default)]
+    pub direction: Direction,
+    /// Records accumulated per worker before a bulk write.
+    #[serde(default = "default_batch_size")]
+    pub batch_size: usize,
+    /// Parallel worker tasks, and the number of shards the cleanup passes split
+    /// into.
+    #[serde(default = "default_processes")]
+    pub processes: usize,
+    /// Queries in flight per worker. Workers are database-bound, so
+    /// `processes × concurrency` sets throughput -- keep it under
+    /// `database.max_pool_size`.
+    #[serde(default = "default_concurrency")]
+    pub concurrency: usize,
+    /// Objects-driven only: skip records that already carry every selected
+    /// catalog.
+    #[serde(default)]
+    pub skip_existing: bool,
+    /// Catalog-driven only: leave unmatched records untouched rather than
+    /// writing an empty array. Safe when filling in a new catalog, but it will
+    /// not clear stale matches.
+    #[serde(default)]
+    pub skip_empty: bool,
+    /// Catalog-driven only: force the scan that clears the temp buffer.
+    #[serde(default)]
+    pub reset_temp: bool,
+}
+
+fn default_batch_size() -> usize {
+    5_000
+}
+fn default_processes() -> usize {
+    1
+}
+fn default_concurrency() -> usize {
+    8
+}
+
+/// Guards against a submission that would exhaust the connection pool or build
+/// a write far larger than Mongo will accept.
+const MAX_BATCH_SIZE: usize = 100_000;
+const MAX_PROCESSES: usize = 64;
+const MAX_CONCURRENCY: usize = 64;
+
+impl ReprocessCrossmatchParams {
+    pub fn validate_params(&self) -> Result<(), String> {
+        if self.catalogs.is_empty() {
+            return Err("at least one catalog is required".to_string());
+        }
+        if self.batch_size == 0 || self.batch_size > MAX_BATCH_SIZE {
+            return Err(format!("batch_size must be between 1 and {MAX_BATCH_SIZE}"));
+        }
+        if self.processes == 0 || self.processes > MAX_PROCESSES {
+            return Err(format!("processes must be between 1 and {MAX_PROCESSES}"));
+        }
+        if self.concurrency == 0 || self.concurrency > MAX_CONCURRENCY {
+            return Err(format!(
+                "concurrency must be between 1 and {MAX_CONCURRENCY}"
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Resolve the requested catalog names against the survey's crossmatch config.
+///
+/// Done up front so an unknown or undeclared catalog is a rejected submission
+/// rather than a run that fails partway with some collections already rewritten.
+fn resolve_catalogs(
+    config: &crate::conf::AppConfig,
+    survey: &Survey,
+    names: &[String],
+) -> Result<Vec<CatalogXmatchConfig>, String> {
+    let survey_configs = config.crossmatch.get(survey).ok_or_else(|| {
+        format!(
+            "survey {survey} has no crossmatch.{} section in the config",
+            survey.to_string().to_lowercase()
+        )
+    })?;
+
+    let mut resolved: Vec<CatalogXmatchConfig> = Vec::with_capacity(names.len());
+    for name in names {
+        if resolved.iter().any(|c| &c.catalog == name) {
+            continue; // listed twice; the second mention adds nothing
+        }
+        match survey_configs.iter().find(|c| &c.catalog == name) {
+            Some(c) => resolved.push(c.clone()),
+            None => {
+                return Err(format!(
+                    "catalog {name:?} is not declared under crossmatch.{} in the config",
+                    survey.to_string().to_lowercase()
+                ))
+            }
+        }
+    }
+    Ok(resolved)
+}
+
+/// Run the reprocess.
+pub async fn run(
+    ctx: &TaskContext,
+    params: ReprocessCrossmatchParams,
+) -> Result<serde_json::Value, super::TaskError> {
+    let db = ctx.db().clone();
+    let config = ctx.config();
+
+    let resolved = resolve_catalogs(config, &params.survey, &params.catalogs)
+        .map_err(super::TaskError::InvalidParams)?;
+
+    let in_flight = params.processes * params.concurrency;
+    if in_flight > config.database.max_pool_size as usize {
+        ctx.warn(format!(
+            "processes x concurrency = {in_flight} exceeds database.max_pool_size = {}; \
+             workers will queue on the connection pool",
+            config.database.max_pool_size
+        ));
+    }
+
+    // Watchlists take a different path entirely -- object ids are recorded on
+    // the watchlist document rather than on alerts_aux -- so `direction` does
+    // not apply to them.
+    let (watchlist, non_watchlist): (Vec<_>, Vec<_>) = resolved
+        .into_iter()
+        .partition(|c| c.catalog.starts_with(WATCHLIST_PREFIX));
+
+    let mut objects_catalogs = Vec::new();
+    let mut catalog_catalogs = Vec::new();
+    for cat in non_watchlist {
+        let direction = match params.direction {
+            Direction::Auto => pick_direction(&params.survey, &cat, &db).await,
+            other => other,
+        };
+        match direction {
+            Direction::Objects => objects_catalogs.push(cat),
+            Direction::Catalog => catalog_catalogs.push(cat),
+            Direction::Auto => unreachable!("pick_direction never returns Auto"),
+        }
+    }
+
+    ctx.info(format!(
+        "reprocessing {} crossmatches: objects-driven {:?}, catalog-driven {:?}, watchlist {:?}",
+        params.survey,
+        objects_catalogs
+            .iter()
+            .map(|c| &c.catalog)
+            .collect::<Vec<_>>(),
+        catalog_catalogs
+            .iter()
+            .map(|c| &c.catalog)
+            .collect::<Vec<_>>(),
+        watchlist.iter().map(|c| &c.catalog).collect::<Vec<_>>(),
+    ));
+
+    let failed = |e: mongodb::error::Error| super::TaskError::Failed(e.to_string());
+    let mut done: Vec<String> = Vec::new();
+
+    for cat in watchlist {
+        let name = cat.catalog.clone();
+        run_watchlist_driven(
+            ctx,
+            &params.survey,
+            cat,
+            db.clone(),
+            params.batch_size,
+            params.processes,
+        )
+        .await
+        .map_err(failed)?;
+        done.push(name);
+    }
+
+    if !objects_catalogs.is_empty() {
+        let names: Vec<String> = objects_catalogs.iter().map(|c| c.catalog.clone()).collect();
+        run_objects_driven(
+            ctx,
+            &params.survey,
+            objects_catalogs,
+            db.clone(),
+            params.batch_size,
+            params.processes,
+            params.concurrency,
+            params.skip_existing,
+        )
+        .await
+        .map_err(failed)?;
+        done.extend(names);
+    }
+
+    for cat in catalog_catalogs {
+        let name = cat.catalog.clone();
+        run_catalog_driven(
+            ctx,
+            &params.survey,
+            cat,
+            db.clone(),
+            params.batch_size,
+            params.processes,
+            params.concurrency,
+            params.skip_empty,
+            params.reset_temp,
+        )
+        .await
+        .map_err(failed)?;
+        done.push(name);
+    }
+
+    if ctx.is_canceled() {
+        return Err(super::TaskError::Canceled);
+    }
+
+    let aux = format!("{}_alerts_aux", params.survey);
+    ctx.record_mutation(
+        MutationTarget {
+            database: db.name().to_string(),
+            collection: aux.clone(),
+            catalog: None,
+            survey: Some(params.survey.to_string().to_lowercase()),
+        },
+        // Backfill rather than Recompute: the values come from a separate
+        // catalog collection, not from fields already on the record.
+        Operation::Backfill,
+        doc! {
+            "catalogs": done.clone(),
+            "direction": format!("{:?}", params.direction),
+            "processes": params.processes as i64,
+            "concurrency": params.concurrency as i64,
+            "batch_size": params.batch_size as i64,
+            "skip_existing": params.skip_existing,
+            "skip_empty": params.skip_empty,
+            "code_version": mongodb::bson::to_bson(&super::ledger::CodeVersion::current())
+                .unwrap_or(mongodb::bson::Bson::Null),
+        },
+    )
+    .await;
+
+    ctx.info(format!("reprocess complete for {done:?}"));
+    Ok(serde_json::json!({
+        "survey": params.survey.to_string(),
+        "collection": aux,
+        "catalogs": done,
+    }))
+}
 
 const QUEUE_MULTIPLIER: usize = 2;
 const CURSOR_BATCH_SIZE: u32 = 10_000;
@@ -35,66 +306,9 @@ const STATUS_MATCHING: &str = "matching";
 const STATUS_CLEAN: &str = "clean";
 const TEMP_PROBE_SAMPLE: i64 = 10_000;
 
-/// Catalog-driven costs extra full passes over alerts_aux, so it only wins when the
-/// catalog is substantially smaller, not merely smaller.
+/// Catalog-driven costs extra full passes over alerts_aux, so it only wins when
+/// the catalog is substantially smaller, not merely smaller.
 const CATALOG_DRIVEN_MARGIN: u64 = 4;
-
-/// Binary for reprocessing crossmatches between a survey's alerts_aux collection and one or more catalogs.
-/// The scheduler pipeline only crossmatches at first insert, so adding a catalog to
-/// `crossmatch.<survey>` in config.yaml leaves pre-existing alerts_aux records with
-/// no entry for it, so this binary fills in those gaps. It can also be used to reprocess existing
-/// crossmatches if the matching parameters (e.g. radius) for a catalog are changed.
-///
-/// Watchlist catalogs (name prefixed with `watchlist_`) are handled differently: instead of
-/// writing onto `alerts_aux.cross_matches`, ingestion records the matching alert object_ids on
-/// the watchlist document itself under `matching_<survey>_objects`. For those, this binary loops
-/// over the (small) watchlist entries and `$addToSet`s the object_ids of every alerts_aux record
-/// within radius. `$addToSet` is idempotent, so re-running is safe and concurrent with live ingest.
-#[derive(Parser)]
-struct Cli {
-    #[arg(long, value_enum)]
-    survey: Survey,
-
-    /// Each catalog must already be declared under `crossmatch.<survey>` in
-    /// config.yaml (radius / projection / etc. are read from there).
-    #[arg(long, value_delimiter = ',', num_args = 1..)]
-    catalogs: Vec<String>,
-
-    #[arg(long, value_enum, default_value_t = Direction::Auto)]
-    direction: Direction,
-
-    #[arg(long, value_name = "FILE", default_value = "config.yaml")]
-    config: String,
-
-    /// Number of records accumulated per worker before a bulk write is issued.
-    #[arg(long, default_value_t = 5000, value_parser = parse_positive_usize)]
-    batch_size: usize,
-
-    /// Number of parallel worker tasks, and of shards the cleanup passes are split into.
-    #[arg(long, default_value_t = 1, value_parser = parse_positive_usize)]
-    processes: usize,
-
-    /// Queries kept in flight per worker. Workers are database-bound, so
-    /// `processes` × `concurrency` is what sets throughput, not the core count.
-    /// Keep that product under `database.max_pool_size`.
-    #[arg(long, default_value_t = 8, value_parser = parse_positive_usize)]
-    concurrency: usize,
-
-    /// Objects-driven only: skip alerts_aux records that already carry every
-    /// selected catalog. Makes an interrupted run resumable.
-    #[arg(long, default_value_t = false)]
-    skip_existing: bool,
-
-    /// Catalog-driven only: leave records with no match untouched instead of writing an
-    /// empty array. Safe when filling in a new catalog, but it will not clear stale matches.
-    #[arg(long, default_value_t = false)]
-    skip_empty: bool,
-
-    /// Catalog-driven only: force the scan that clears the temp buffer, which is
-    /// otherwise skipped when no interrupted run is detected.
-    #[arg(long, default_value_t = false)]
-    reset_temp: bool,
-}
 
 /// Reprocessing can be done in two directions:
 /// - Checking the crossmatch catalogs for each alerts_aux record,
@@ -104,9 +318,11 @@ struct Cli {
 /// the alerts_aux collection or the catalog collection, depending on which is smaller.
 /// If `--direction` is not provided, it checks the estimated document counts
 /// of each collection and loops over the smaller one.
-#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
-enum Direction {
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum Direction {
     /// Pick `objects` or `catalog` per catalog based on which side has fewer rows.
+    #[default]
     Auto,
     /// Loop over alerts_aux records, query catalog. Best when alerts_aux is smaller.
     Objects,
@@ -308,7 +524,11 @@ async fn sharded_update_many(
 // objects-driven: stream alerts_aux records, fan out to N workers running xmatch().
 // One pass updates all selected catalogs at once via the existing 1×N xmatch.
 // -----------------------------------------------------------------------------
+// Eight arguments, all of them independent knobs the caller genuinely varies.
+// Bundling them into a struct would just move the same list somewhere else.
+#[allow(clippy::too_many_arguments)]
 async fn run_objects_driven(
+    ctx: &TaskContext,
     survey: &Survey,
     catalogs: Vec<CatalogXmatchConfig>,
     db: mongodb::Database,
@@ -361,9 +581,24 @@ async fn run_objects_driven(
         .batch_size(CURSOR_BATCH_SIZE)
         .no_cursor_timeout(true)
         .await?;
+    let mut fed: u64 = 0;
+    let mut last_reported: u64 = 0;
     while let Some(d) = cursor.try_next().await? {
+        // Cancelling here rather than inside the workers: they drain whatever is
+        // already queued and flush their batches, so a cancelled run leaves
+        // whole records written rather than a half-applied bulk write.
+        if ctx.is_canceled() {
+            ctx.warn("cancellation requested; no longer feeding workers");
+            break;
+        }
         if tx.send(d).await.is_err() {
             break;
+        }
+        fed += 1;
+        if fed - last_reported >= PROGRESS_EVERY {
+            last_reported = fed;
+            ctx.progress(fed, estimated.max(fed), format!("{fed} records queued"))
+                .await;
         }
     }
     drop(tx);
@@ -492,6 +727,7 @@ async fn flush_objects_batch(
 // idempotent so re-running is safe and never races with live ingest.
 // -----------------------------------------------------------------------------
 async fn run_watchlist_driven(
+    ctx: &TaskContext,
     survey: &Survey,
     watchlist_config: CatalogXmatchConfig,
     db: mongodb::Database,
@@ -528,9 +764,24 @@ async fn run_watchlist_driven(
         .batch_size(CURSOR_BATCH_SIZE)
         .no_cursor_timeout(true)
         .await?;
+    let mut fed: u64 = 0;
+    let mut last_reported: u64 = 0;
     while let Some(d) = cursor.try_next().await? {
+        // Cancelling here rather than inside the workers: they drain whatever is
+        // already queued and flush their batches, so a cancelled run leaves
+        // whole records written rather than a half-applied bulk write.
+        if ctx.is_canceled() {
+            ctx.warn("cancellation requested; no longer feeding workers");
+            break;
+        }
         if tx.send(d).await.is_err() {
             break;
+        }
+        fed += 1;
+        if fed - last_reported >= PROGRESS_EVERY {
+            last_reported = fed;
+            ctx.progress(fed, estimated.max(fed), format!("{fed} records queued"))
+                .await;
         }
     }
     drop(tx);
@@ -648,6 +899,7 @@ async fn process_watchlist_doc(
 // -----------------------------------------------------------------------------
 #[allow(clippy::too_many_arguments)]
 async fn run_catalog_driven(
+    ctx: &TaskContext,
     survey: &Survey,
     catalog_config: CatalogXmatchConfig,
     db: mongodb::Database,
@@ -752,9 +1004,24 @@ async fn run_catalog_driven(
         .batch_size(CURSOR_BATCH_SIZE)
         .no_cursor_timeout(true)
         .await?;
+    let mut fed: u64 = 0;
+    let mut last_reported: u64 = 0;
     while let Some(d) = cursor.try_next().await? {
+        // Cancelling here rather than inside the workers: they drain whatever is
+        // already queued and flush their batches, so a cancelled run leaves
+        // whole records written rather than a half-applied bulk write.
+        if ctx.is_canceled() {
+            ctx.warn("cancellation requested; no longer feeding workers");
+            break;
+        }
         if tx.send(d).await.is_err() {
             break;
+        }
+        fed += 1;
+        if fed - last_reported >= PROGRESS_EVERY {
+            last_reported = fed;
+            ctx.progress(fed, cat_estimated.max(fed), format!("{fed} records queued"))
+                .await;
         }
     }
     drop(tx);
@@ -1076,181 +1343,112 @@ async fn pick_direction(
     }
 }
 
-#[tokio::main]
-async fn main() {
-    load_dotenv();
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::conf::AppConfig;
 
-    let subscriber = FmtSubscriber::builder()
-        .with_max_level(Level::INFO)
-        .finish();
-    tracing::subscriber::set_global_default(subscriber).expect("setting subscriber failed");
-
-    let args = Cli::parse();
-
-    if args.catalogs.is_empty() {
-        error!("--catalogs requires at least one catalog name");
-        std::process::exit(1);
+    fn params(catalogs: &[&str]) -> ReprocessCrossmatchParams {
+        ReprocessCrossmatchParams {
+            survey: Survey::Ztf,
+            catalogs: catalogs.iter().map(|c| c.to_string()).collect(),
+            direction: Direction::Auto,
+            batch_size: default_batch_size(),
+            processes: default_processes(),
+            concurrency: default_concurrency(),
+            skip_existing: false,
+            skip_empty: false,
+            reset_temp: false,
+        }
     }
 
-    let config = match AppConfig::from_path(&args.config) {
-        Ok(c) => c,
-        Err(e) => {
-            error!("failed to load config from {}: {}", args.config, e);
-            std::process::exit(1);
-        }
-    };
+    #[test]
+    fn at_least_one_catalog_is_required() {
+        // An empty list would run to completion having done nothing, which
+        // reads as success.
+        assert!(params(&[]).validate_params().is_err());
+        assert!(params(&["NED"]).validate_params().is_ok());
+    }
 
-    let in_flight = args.processes * args.concurrency;
-    if in_flight > config.database.max_pool_size as usize {
-        warn!(
-            "processes × concurrency = {} exceeds database.max_pool_size = {}; \
-             workers will queue on the connection pool",
-            in_flight, config.database.max_pool_size
+    #[test]
+    fn the_concurrency_knobs_are_bounded() {
+        // processes x concurrency is what can exhaust the connection pool.
+        let mut p = params(&["NED"]);
+        p.processes = MAX_PROCESSES + 1;
+        assert!(p.validate_params().is_err());
+        let mut p = params(&["NED"]);
+        p.concurrency = 0;
+        assert!(p.validate_params().is_err());
+    }
+
+    #[test]
+    fn direction_defaults_to_auto() {
+        // Auto picks per catalog based on which side has fewer rows, which is
+        // the right default for someone who has not measured.
+        let parsed: ReprocessCrossmatchParams = serde_json::from_value(serde_json::json!({
+            "survey": "ztf",
+            "catalogs": ["NED"],
+        }))
+        .expect("defaults");
+        assert_eq!(parsed.direction, Direction::Auto);
+        assert_eq!(parsed.processes, default_processes());
+    }
+
+    #[test]
+    fn an_undeclared_catalog_is_rejected_before_anything_is_written() {
+        // Resolved up front: a bad name partway through would leave earlier
+        // catalogs already rewritten.
+        let config = AppConfig::from_test_config().expect("test config");
+        let err = resolve_catalogs(&config, &Survey::Ztf, &["NotACatalog".into()])
+            .expect_err("should reject");
+        assert!(err.contains("NotACatalog"), "{err}");
+        assert!(err.contains("crossmatch.ztf"), "{err}");
+    }
+
+    #[test]
+    fn a_declared_catalog_resolves_to_its_crossmatch_config() {
+        // The radius and projection come from config, not from the request --
+        // a client cannot widen a search radius by asking.
+        let config = AppConfig::from_test_config().expect("test config");
+        let declared = config
+            .crossmatch
+            .get(&Survey::Ztf)
+            .and_then(|c| c.first())
+            .map(|c| c.catalog.clone())
+            .expect("the test config crossmatches ztf against something");
+        let resolved =
+            resolve_catalogs(&config, &Survey::Ztf, &[declared.clone()]).expect("resolves");
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].catalog, declared);
+    }
+
+    #[test]
+    fn a_catalog_listed_twice_is_only_processed_once() {
+        let config = AppConfig::from_test_config().expect("test config");
+        let declared = config
+            .crossmatch
+            .get(&Survey::Ztf)
+            .and_then(|c| c.first())
+            .map(|c| c.catalog.clone())
+            .expect("a declared catalog");
+        let resolved = resolve_catalogs(&config, &Survey::Ztf, &[declared.clone(), declared])
+            .expect("resolves");
+        assert_eq!(resolved.len(), 1);
+    }
+
+    #[test]
+    fn the_task_is_registered_and_retryable() {
+        assert!(crate::tasks::is_retryable(TASK_TYPE));
+    }
+
+    #[test]
+    fn single_flight_is_keyed_by_survey() {
+        assert_eq!(
+            crate::tasks::single_flight_key(
+                TASK_TYPE,
+                &serde_json::json!({ "survey": "ztf", "catalogs": ["NED"] })
+            ),
+            Some(mongodb::bson::doc! { "survey": "ztf" })
         );
     }
-
-    let db = match config.build_db().await {
-        Ok(db) => db,
-        Err(e) => {
-            error!("failed to build mongo client: {}", e);
-            std::process::exit(1);
-        }
-    };
-
-    let survey_configs: &Vec<CatalogXmatchConfig> = match config.crossmatch.get(&args.survey) {
-        Some(v) => v,
-        None => {
-            error!(
-                "survey '{}' has no `crossmatch.{}` section in {}",
-                args.survey,
-                args.survey.to_string().to_lowercase(),
-                args.config,
-            );
-            std::process::exit(1);
-        }
-    };
-    let mut resolved: Vec<CatalogXmatchConfig> = Vec::with_capacity(args.catalogs.len());
-    for name in &args.catalogs {
-        if resolved.iter().any(|c| &c.catalog == name) {
-            warn!(
-                "catalog '{}' listed more than once, ignoring the copy",
-                name
-            );
-            continue;
-        }
-        match survey_configs.iter().find(|c| &c.catalog == name) {
-            Some(c) => resolved.push(c.clone()),
-            None => {
-                error!(
-                    "catalog '{}' not declared under crossmatch.{} in {}",
-                    name,
-                    args.survey.to_string().to_lowercase(),
-                    args.config,
-                );
-                std::process::exit(1);
-            }
-        }
-    }
-
-    // Watchlist catalogs use a dedicated path (loop over watchlist entries, $addToSet
-    // object_ids onto the watchlist doc) — the `--direction` flag does not apply to them.
-    let mut watchlist_catalogs: Vec<CatalogXmatchConfig> = Vec::new();
-    let mut non_watchlist: Vec<CatalogXmatchConfig> = Vec::new();
-    for cat in resolved {
-        if cat.catalog.starts_with(WATCHLIST_PREFIX) {
-            watchlist_catalogs.push(cat);
-        } else {
-            non_watchlist.push(cat);
-        }
-    }
-
-    // If direction is Auto, split catalogs into two groups based on which collection is smaller.
-    let mut objects_catalogs: Vec<CatalogXmatchConfig> = Vec::new();
-    let mut catalog_catalogs: Vec<CatalogXmatchConfig> = Vec::new();
-    for cat in non_watchlist {
-        let direction = match args.direction {
-            Direction::Auto => pick_direction(&args.survey, &cat, &db).await,
-            d => d,
-        };
-        match direction {
-            Direction::Objects => objects_catalogs.push(cat),
-            Direction::Catalog => catalog_catalogs.push(cat),
-            Direction::Auto => unreachable!(),
-        }
-    }
-
-    info!(
-        "starting reprocess: survey={} processes={} concurrency={} in_flight={} batch_size={} objects_driven={:?} catalogs_driven={:?} watchlist_driven={:?}",
-        args.survey,
-        args.processes,
-        args.concurrency,
-        in_flight,
-        args.batch_size,
-        objects_catalogs
-            .iter()
-            .map(|c| &c.catalog)
-            .collect::<Vec<_>>(),
-        catalog_catalogs
-            .iter()
-            .map(|c| &c.catalog)
-            .collect::<Vec<_>>(),
-        watchlist_catalogs
-            .iter()
-            .map(|c| &c.catalog)
-            .collect::<Vec<_>>(),
-    );
-
-    for cat in watchlist_catalogs {
-        let name = cat.catalog.clone();
-        if let Err(e) = run_watchlist_driven(
-            &args.survey,
-            cat,
-            db.clone(),
-            args.batch_size,
-            args.processes,
-        )
-        .await
-        {
-            error!("watchlist-driven run for '{}' failed: {}", name, e);
-            std::process::exit(1);
-        }
-    }
-
-    if !objects_catalogs.is_empty() {
-        if let Err(e) = run_objects_driven(
-            &args.survey,
-            objects_catalogs,
-            db.clone(),
-            args.batch_size,
-            args.processes,
-            args.concurrency,
-            args.skip_existing,
-        )
-        .await
-        {
-            error!("objects-driven run failed: {}", e);
-            std::process::exit(1);
-        }
-    }
-
-    for cat in catalog_catalogs {
-        let name = cat.catalog.clone();
-        if let Err(e) = run_catalog_driven(
-            &args.survey,
-            cat,
-            db.clone(),
-            args.batch_size,
-            args.processes,
-            args.concurrency,
-            args.skip_empty,
-            args.reset_temp,
-        )
-        .await
-        {
-            error!("catalog-driven run for '{}' failed: {}", name, e);
-            std::process::exit(1);
-        }
-    }
-
-    info!("reprocess_crossmatch complete.");
 }
