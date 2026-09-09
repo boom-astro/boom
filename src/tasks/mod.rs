@@ -25,6 +25,7 @@ pub mod logs;
 pub mod migrate_fp_flux;
 pub mod migrate_snr;
 pub mod models;
+pub mod mpcorb_ingest;
 pub mod prepare_catalog;
 pub mod queue;
 pub mod reprocess_crossmatch;
@@ -89,6 +90,15 @@ pub const TASKS: &[TaskSpec] = &[
         idempotent: true,
         // Only with drop_existing, which the client has to ask for explicitly.
         destructive: true,
+    },
+    TaskSpec {
+        id: mpcorb_ingest::TASK_TYPE,
+        title: "Refresh MPC orbital elements",
+        description: "Re-download MPCORB and swap it into MPC_orbits. The scheduler does \
+                      this on its own; use this to force a refresh or validate a parse.",
+        // Staged and swapped atomically, so a rerun replaces wholesale.
+        idempotent: true,
+        destructive: false,
     },
     TaskSpec {
         id: enrich_reprocess::TASK_TYPE,
@@ -187,6 +197,11 @@ pub fn validate_params(task_type: &str, params: &serde_json::Value) -> Result<()
                 .map(|_| ())
                 .map_err(|e| TaskError::InvalidParams(e.to_string()))
         }
+        mpcorb_ingest::TASK_TYPE => {
+            let parsed: mpcorb_ingest::MpcorbIngestParams = serde_json::from_value(params.clone())
+                .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            parsed.validate_params().map_err(TaskError::InvalidParams)
+        }
         enrich_reprocess::TASK_TYPE => {
             let parsed: enrich_reprocess::EnrichReprocessParams =
                 serde_json::from_value(params.clone())
@@ -243,6 +258,9 @@ pub fn single_flight_key(
         migrate_fp_flux::TASK_TYPE => Some(doc! {}),
         // Keyed by survey: migrating ZTF and LSST at once is fine, but two runs
         // over the same survey would rewrite the same documents.
+        // One refresh at a time: two would download the same file and race on
+        // the staging collection.
+        mpcorb_ingest::TASK_TYPE => Some(doc! {}),
         // Keyed by survey: two reprocesses of one survey would contend for the
         // same enrichment workers and GPU, but ZTF and LSST are independent.
         enrich_reprocess::TASK_TYPE => Some(
@@ -292,6 +310,11 @@ pub async fn dispatch(
             let params = catalog_ingest::CatalogIngestParams::deserialize(params)
                 .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
             catalog_ingest::run(ctx, params).await
+        }
+        mpcorb_ingest::TASK_TYPE => {
+            let params = mpcorb_ingest::MpcorbIngestParams::deserialize(params)
+                .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            mpcorb_ingest::run(ctx, params).await
         }
         enrich_reprocess::TASK_TYPE => {
             let params = enrich_reprocess::EnrichReprocessParams::deserialize(params)

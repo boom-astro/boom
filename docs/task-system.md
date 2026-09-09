@@ -121,12 +121,18 @@ later.
 | `reprocess_crossmatch` | Fill in or refresh crossmatches on a survey's `alerts_aux` records. |
 | `prepare_catalog` | Add spatial fields and a 2dsphere index to a hand-imported collection. |
 | `enrich_reprocess` | Select alerts, queue them, and re-run enrichment over them. |
+| `mpcorb_ingest` | Re-download MPC orbital elements and swap them into `MPC_orbits`. |
 
 Submission is single-flight per target, not per type: two ingests of the same
 catalog would race on the same collection and chunk state, but ingesting 2MASS
 should not block ingesting NED.
 
-Still to port: `copy_cutouts`, which is the same batch shape as the others.
+Still to port: `copy_cutouts`. It is the same batch shape as the others, but it
+takes source and destination MongoDB **connection URIs** as arguments, and task
+parameters are stored in `task_runs` and rendered on the admin page. Submitting
+it as-is would put credentials at rest in the database and on screen. It needs
+the endpoints to come from config or the environment, named by key, before it
+can become a task.
 
 `enrich_reprocess` **populates the queue and then drains it**, rather than only
 draining one something else filled. That is what closes the loop the binary left
