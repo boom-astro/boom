@@ -263,6 +263,27 @@ done so, and failing the run because the bookkeeping write failed would leave
 the data changed *and* the run marked failed — the worst of both. The failure is
 logged loudly instead.
 
+## The submission form
+
+The admin page renders a form for each task from the `params_schema` on
+`/tasks/types`. That schema is derived from the params struct's `ToSchema`
+derive, so it cannot drift from what the API will accept, and the help text
+under each field is the doc comment written on it — which is a reason to write
+them well.
+
+Adding a parameter to a task therefore puts it on the form with no frontend
+change. Two conventions the form depends on:
+
+- **A blank field is omitted, not sent as zero or null.** The server then
+  applies the struct's `#[serde(default)]`. An empty number box becoming `0`
+  would be rejected by nearly every `validate_params` here, and confusingly so.
+- **A closed set renders as a dropdown.** `survey`, and anything else that is a
+  Rust enum, arrives in the schema as `enum` and cannot be mistyped.
+
+A task whose parameters are a tagged union — `enrich_reprocess`'s `selection` —
+falls back to a JSON field rather than a half-working widget that would need to
+guess at the variants.
+
 ## Access
 
 Admin-only, and both login realms are accepted: the BOOM API's `users` and
@@ -280,7 +301,7 @@ the person up later.
 
 | Route | |
 | --- | --- |
-| `GET /tasks/types` | What this release can run |
+| `GET /tasks/types` | What this release can run, with a JSON Schema per task |
 | `POST /tasks` | Submit a run |
 | `GET /tasks` | Runs, most recent first |
 | `GET /tasks/{id}` | One run |

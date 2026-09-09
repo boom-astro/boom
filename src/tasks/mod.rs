@@ -68,6 +68,18 @@ pub struct TaskSpec {
     pub idempotent: bool,
     /// Whether it can destroy data, and so needs the client to confirm.
     pub destructive: bool,
+    /// JSON Schema for this task's parameters, for a client to render a form
+    /// from.
+    ///
+    /// Derived from the params struct's `ToSchema`, so it cannot drift from
+    /// what the API will actually accept, and the field descriptions are the
+    /// doc comments already written on each field.
+    pub params_schema: fn() -> serde_json::Value,
+}
+
+/// The schema of a params type, as JSON.
+fn schema_of<T: utoipa::PartialSchema>() -> serde_json::Value {
+    serde_json::to_value(T::schema()).unwrap_or_else(|_| serde_json::json!({}))
 }
 
 // TODO: port `stream_kowalski_alerts`, the last data-mutating binary. It is a
@@ -95,6 +107,7 @@ pub const TASKS: &[TaskSpec] = &[
         idempotent: true,
         // Only with drop_existing, which the client has to ask for explicitly.
         destructive: true,
+        params_schema: || schema_of::<catalog_ingest::CatalogIngestParams>(),
     },
     TaskSpec {
         id: stream_kowalski_alerts::TASK_TYPE,
@@ -104,6 +117,7 @@ pub const TASKS: &[TaskSpec] = &[
         // Unordered inserts skipping duplicates, so re-running resumes.
         idempotent: true,
         destructive: false,
+        params_schema: || schema_of::<stream_kowalski_alerts::StreamKowalskiParams>(),
     },
     TaskSpec {
         id: copy_cutouts::TASK_TYPE,
@@ -114,6 +128,7 @@ pub const TASKS: &[TaskSpec] = &[
         // Keyed on candid; duplicates are counted rather than fatal.
         idempotent: true,
         destructive: false,
+        params_schema: || schema_of::<copy_cutouts::CopyCutoutsParams>(),
     },
     TaskSpec {
         id: sso_baselines::TASK_TYPE,
@@ -123,6 +138,7 @@ pub const TASKS: &[TaskSpec] = &[
         // Upserts keyed on designation, refit from the same detections.
         idempotent: true,
         destructive: false,
+        params_schema: || schema_of::<sso_baselines::SsoBaselinesParams>(),
     },
     TaskSpec {
         id: mpcorb_ingest::TASK_TYPE,
@@ -132,6 +148,7 @@ pub const TASKS: &[TaskSpec] = &[
         // Staged and swapped atomically, so a rerun replaces wholesale.
         idempotent: true,
         destructive: false,
+        params_schema: || schema_of::<mpcorb_ingest::MpcorbIngestParams>(),
     },
     TaskSpec {
         id: enrich_reprocess::TASK_TYPE,
@@ -142,6 +159,7 @@ pub const TASKS: &[TaskSpec] = &[
         // Scores are recomputed from the stored alert, so re-running converges.
         idempotent: true,
         destructive: false,
+        params_schema: || schema_of::<enrich_reprocess::EnrichReprocessParams>(),
     },
     TaskSpec {
         id: prepare_catalog::TASK_TYPE,
@@ -153,6 +171,7 @@ pub const TASKS: &[TaskSpec] = &[
         // and index creation is a no-op when it already exists.
         idempotent: true,
         destructive: false,
+        params_schema: || schema_of::<prepare_catalog::PrepareCatalogParams>(),
     },
     TaskSpec {
         id: reprocess_crossmatch::TASK_TYPE,
@@ -164,6 +183,7 @@ pub const TASKS: &[TaskSpec] = &[
         // stands; watchlists use $addToSet, which is idempotent by construction.
         idempotent: true,
         destructive: false,
+        params_schema: || schema_of::<reprocess_crossmatch::ReprocessCrossmatchParams>(),
     },
     TaskSpec {
         id: migrate_snr::TASK_TYPE,
@@ -173,6 +193,7 @@ pub const TASKS: &[TaskSpec] = &[
         // Derived from stored photometry, never from a previous run's output.
         idempotent: true,
         destructive: false,
+        params_schema: || schema_of::<migrate_snr::MigrateSnrParams>(),
     },
     TaskSpec {
         id: migrate_fp_flux::TASK_TYPE,
@@ -185,6 +206,7 @@ pub const TASKS: &[TaskSpec] = &[
         // It overwrites derived values, but the inputs it derives from are
         // untouched, so nothing is lost that cannot be recomputed.
         destructive: false,
+        params_schema: || schema_of::<migrate_fp_flux::MigrateFpFluxParams>(),
     },
 ];
 
@@ -432,6 +454,45 @@ pub async fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_task_publishes_a_schema_a_form_can_be_built_from() {
+        // The admin page renders its submission form from this. A task whose
+        // schema has no properties would appear in the list and then offer no
+        // way to fill it in.
+        for spec in TASKS {
+            let schema = (spec.params_schema)();
+            let properties = schema
+                .get("properties")
+                .and_then(|p| p.as_object())
+                .unwrap_or_else(|| panic!("{} has no properties", spec.id));
+            assert!(!properties.is_empty(), "{} has an empty schema", spec.id);
+        }
+    }
+
+    #[test]
+    fn a_schema_marks_the_fields_the_api_will_insist_on() {
+        // `required` is what stops the form submitting something validate_params
+        // would reject; catalog_ingest cannot run without a catalog.
+        let schema = (find(catalog_ingest::TASK_TYPE).unwrap().params_schema)();
+        let required: Vec<&str> = schema["required"]
+            .as_array()
+            .expect("required")
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(required.contains(&"catalog"), "{required:?}");
+    }
+
+    #[test]
+    fn field_descriptions_come_from_the_doc_comments() {
+        // Which is why they are worth writing: they are the form's help text.
+        let schema = (find(catalog_ingest::TASK_TYPE).unwrap().params_schema)();
+        let description = schema["properties"]["drop_existing"]["description"]
+            .as_str()
+            .expect("described");
+        assert!(description.contains("start over"), "{description}");
+    }
 
     #[test]
     fn every_registered_task_is_idempotent() {

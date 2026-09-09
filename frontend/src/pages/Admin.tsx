@@ -11,13 +11,17 @@ import {
   fetchCatalogStatus,
   fetchTaskLogs,
   fetchTaskRuns,
+  fetchTaskTypes,
   isActive,
   submitCatalogIngest,
+  submitTask,
   type CatalogHealth,
   type CatalogStatus,
   type TaskLogLine,
   type TaskRun,
+  type TaskType,
 } from "@/lib/adminApi";
+import { TaskForm } from "@/components/task-form";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 
@@ -377,6 +381,80 @@ function RunDetail({ runId, onClose }: { runId: string; onClose: () => void }) {
   );
 }
 
+/**
+ * Every task this release can run, with a form built from its schema.
+ *
+ * Catalog ingests have their own row-level button above, because starting one
+ * from the drift table needs no parameters. This is for everything else.
+ */
+function TaskCatalogue({
+  types,
+  onSubmit,
+  busy,
+}: {
+  types: TaskType[];
+  onSubmit: (taskType: string, params: Record<string, unknown>) => void;
+  busy: string | null;
+}) {
+  const [selected, setSelected] = useState<string | null>(null);
+  const task = types.find((t) => t.id === selected) ?? null;
+
+  return (
+    <section className="mb-8">
+      <h2 className="text-lg font-semibold mb-1">Run a task</h2>
+      <p className="text-sm text-muted-foreground mb-3">
+        Data-mutating work runs here rather than over SSH: every run records who
+        started it, with which parameters, under which release.
+      </p>
+
+      {task && (
+        <TaskForm
+          task={task}
+          busy={busy === task.id}
+          onCancel={() => setSelected(null)}
+          onSubmit={(params) => onSubmit(task.id, params)}
+        />
+      )}
+
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <tbody>
+            {types.map((type) => (
+              <tr key={type.id} className="border-b last:border-0">
+                <td className="py-2 pr-4">
+                  <div className="font-medium">
+                    {type.title}{" "}
+                    {type.destructive && (
+                      <Badge variant="destructive">can destroy data</Badge>
+                    )}
+                  </div>
+                  <div className="text-xs text-muted-foreground">
+                    {type.description}
+                  </div>
+                  <div className="text-xs text-muted-foreground font-mono mt-0.5">
+                    {type.id}
+                  </div>
+                </td>
+                <td className="py-2 w-24 text-right">
+                  <Button
+                    variant={selected === type.id ? "secondary" : "outline"}
+                    size="sm"
+                    onClick={() =>
+                      setSelected(selected === type.id ? null : type.id)
+                    }
+                  >
+                    {selected === type.id ? "Close" : "Configure"}
+                  </Button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
 function RunsTable({ runs, onSelect }: { runs: TaskRun[]; onSelect: (id: string) => void }) {
   return (
     <section>
@@ -427,6 +505,7 @@ function RunsTable({ runs, onSelect }: { runs: TaskRun[]; onSelect: (id: string)
 export default function Admin() {
   const [catalogs, setCatalogs] = useState<CatalogStatus[]>([]);
   const [runs, setRuns] = useState<TaskRun[]>([]);
+  const [taskTypes, setTaskTypes] = useState<TaskType[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -434,9 +513,14 @@ export default function Admin() {
 
   const refresh = useCallback(async () => {
     try {
-      const [status, recent] = await Promise.all([fetchCatalogStatus(), fetchTaskRuns()]);
+      const [status, recent, types] = await Promise.all([
+        fetchCatalogStatus(),
+        fetchTaskRuns(),
+        fetchTaskTypes(),
+      ]);
       setCatalogs(status);
       setRuns(recent);
+      setTaskTypes(types);
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -480,6 +564,19 @@ export default function Admin() {
     }
   }
 
+  async function onSubmitTask(taskType: string, params: Record<string, unknown>) {
+    setBusy(taskType);
+    try {
+      const run = await submitTask(taskType, params);
+      setSelected(run._id);
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  }
+
   async function onIngest(catalogId: string) {
     setBusy(catalogId);
     try {
@@ -516,6 +613,7 @@ export default function Admin() {
               error={error}
             />
             {selected && <RunDetail runId={selected} onClose={() => setSelected(null)} />}
+            <TaskCatalogue types={taskTypes} onSubmit={onSubmitTask} busy={busy} />
             <RunsTable runs={runs} onSelect={setSelected} />
           </>
         )}

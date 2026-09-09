@@ -88,6 +88,9 @@ pub async fn get_task_types(
                 "description": spec.description,
                 "idempotent": spec.idempotent,
                 "destructive": spec.destructive,
+                // The client renders its submission form from this, so the form
+                // and what the API accepts come from one definition.
+                "params_schema": (spec.params_schema)(),
             })
         })
         .collect();

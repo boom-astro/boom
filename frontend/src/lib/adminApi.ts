@@ -21,6 +21,34 @@ export type CatalogStatus = {
   n_records: number;
 };
 
+/** One field of a task's parameters, from its JSON Schema. */
+export type SchemaField = {
+  /** "string" | "integer" | "number" | "boolean", or a pair with "null" for an
+   *  optional field. */
+  type?: string | string[];
+  description?: string;
+  /** Present when the field is a closed set, e.g. a survey. */
+  enum?: string[];
+  minimum?: number;
+  maximum?: number;
+  /** Present for tagged unions, e.g. enrich_reprocess's selection. */
+  oneOf?: SchemaField[];
+  properties?: Record<string, SchemaField>;
+  required?: string[];
+};
+
+export type TaskType = {
+  id: string;
+  title: string;
+  description: string;
+  idempotent: boolean;
+  destructive: boolean;
+  params_schema: {
+    properties?: Record<string, SchemaField>;
+    required?: string[];
+  };
+};
+
 export type TaskStatus = "queued" | "running" | "succeeded" | "failed" | "canceled";
 
 export type TaskRun = {
@@ -61,6 +89,26 @@ async function request<T>(path: string, init: RequestInit | undefined, fallback:
     throw new Error(message);
   }
   return unwrapData<T>(body, fallback);
+}
+
+export function fetchTaskTypes(): Promise<TaskType[]> {
+  return request<TaskType[]>("/tasks/types", undefined, []);
+}
+
+/** Submit any task type. */
+export function submitTask(
+  taskType: string,
+  params: Record<string, unknown>,
+): Promise<TaskRun> {
+  return request<TaskRun>(
+    "/tasks",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ task_type: taskType, params }),
+    },
+    {} as TaskRun,
+  );
 }
 
 export function fetchCatalogStatus(): Promise<CatalogStatus[]> {
