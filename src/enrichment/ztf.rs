@@ -1444,6 +1444,53 @@ impl ZtfEnrichmentWorker {
 }
 
 #[cfg(test)]
+mod enrichment_stamp_tests {
+    use super::*;
+
+    /// Construct a real worker and read back the set it will stamp.
+    ///
+    /// This is the end of the chain the unit tests cannot reach: it loads the
+    /// actual ONNX models, hashes the actual files, and interns against a real
+    /// database. If the loader and the stamp ever disagreed about which file is
+    /// in use, this is where it would show.
+    #[tokio::test]
+    async fn a_worker_resolves_a_set_from_the_models_it_loaded() {
+        let config_path = crate::conf::test_config_path();
+        let worker = match ZtfEnrichmentWorker::new(&config_path, None).await {
+            Ok(worker) => worker,
+            // ONNX is not available on every machine that runs the suite.
+            Err(e) => {
+                eprintln!("skipping: could not build an enrichment worker: {e}");
+                return;
+            }
+        };
+        assert!(worker.enrichment_set > 0, "a set id was never assigned");
+
+        let db = crate::conf::get_test_db().await;
+        let set = db
+            .collection::<crate::enrichment::version::EnrichmentSet>(
+                crate::enrichment::version::SETS_COLLECTION,
+            )
+            .find_one(mongodb::bson::doc! { "_id": worker.enrichment_set })
+            .await
+            .expect("queryable")
+            .expect("the worker's set was interned");
+
+        // Every declared model is recorded, with the hash of the file on disk.
+        assert_eq!(
+            set.models.len(),
+            crate::enrichment::version::ZTF_MODELS.len()
+        );
+        for m in crate::enrichment::version::ZTF_MODELS {
+            let recorded = set.models.get(m.field).expect("model recorded");
+            assert_eq!(recorded.name, m.version);
+            assert_eq!(recorded.sha256.len(), 64);
+        }
+        assert_eq!(set.survey, "ztf");
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

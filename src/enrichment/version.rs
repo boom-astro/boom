@@ -56,6 +56,14 @@ pub const SETS_COLLECTION: &str = "enrichment_sets";
 /// Allocates the integer ids for [`SETS_COLLECTION`].
 const COUNTERS_COLLECTION: &str = "enrichment_set_counters";
 
+/// The single sequence every set id comes from.
+///
+/// Deliberately not per-survey: `_id` is unique across the whole collection, so
+/// a per-survey counter would have ZTF's set 1 and LSST's set 1 collide the
+/// first time a second survey enriched anything. Ids are globally unique and a
+/// set carries its survey as a field.
+const COUNTER_ID: &str = "enrichment_set";
+
 /// One ONNX model the enrichment pipeline loads.
 ///
 /// Declared once here rather than at each load site: the CPU and GPU paths both
@@ -160,6 +168,8 @@ pub enum VersionError {
     Mongo(#[from] mongodb::error::Error),
     #[error("failed to allocate an enrichment set id")]
     IdAllocationFailed,
+    #[error("failed to intern the enrichment set: {0}")]
+    InternFailed(String),
 }
 
 /// Hash a model file.
@@ -259,37 +269,55 @@ async fn intern(
         return Ok(existing);
     }
 
-    // Allocated from a counter rather than a document count, which would reuse
-    // an id if a set were ever removed.
-    let counter = db
-        .collection::<mongodb::bson::Document>(COUNTERS_COLLECTION)
-        .find_one_and_update(doc! { "_id": survey }, doc! { "$inc": { "next_id": 1i64 } })
-        .upsert(true)
-        .return_document(mongodb::options::ReturnDocument::After)
-        .await?;
-    let id = counter
-        .and_then(|d| d.get_i64("next_id").ok())
-        .ok_or(VersionError::IdAllocationFailed)?;
+    // Retried because the counter and the collection can fall out of step --
+    // a restored backup, a removed row, or a change to how ids were allocated
+    // can leave the next id already taken. The counter advances on every
+    // attempt, so a retry moves past the collision rather than repeating it.
+    // Without this the worker refuses to start until someone intervenes.
+    const ATTEMPTS: usize = 5;
+    let mut last_error = None;
 
-    let set = EnrichmentSet {
-        id,
-        survey: survey.to_string(),
-        models,
-        derivations,
-        fingerprint: fingerprint.clone(),
-        first_seen: chrono::Utc::now().timestamp() as f64,
-    };
+    for _ in 0..ATTEMPTS {
+        let counter = db
+            .collection::<mongodb::bson::Document>(COUNTERS_COLLECTION)
+            .find_one_and_update(
+                doc! { "_id": COUNTER_ID },
+                doc! { "$inc": { "next_id": 1i64 } },
+            )
+            .upsert(true)
+            .return_document(mongodb::options::ReturnDocument::After)
+            .await?;
+        let id = counter
+            .and_then(|d| d.get_i64("next_id").ok())
+            .ok_or(VersionError::IdAllocationFailed)?;
 
-    match sets.insert_one(&set).await {
-        Ok(_) => Ok(set),
-        // Another worker interned the same set between the read and the write.
-        // Its row is as good as ours, and the id it allocated is the one alerts
-        // must carry.
-        Err(_) => sets
-            .find_one(doc! { "fingerprint": &fingerprint })
-            .await?
-            .ok_or(VersionError::IdAllocationFailed),
+        let set = EnrichmentSet {
+            id,
+            survey: survey.to_string(),
+            models: models.clone(),
+            derivations: derivations.clone(),
+            fingerprint: fingerprint.clone(),
+            first_seen: chrono::Utc::now().timestamp() as f64,
+        };
+
+        match sets.insert_one(&set).await {
+            Ok(_) => return Ok(set),
+            Err(e) => {
+                // Another worker interned the same set between the read and the
+                // write: its row is as good as ours, and the id it allocated is
+                // the one alerts must carry.
+                if let Some(existing) = sets.find_one(doc! { "fingerprint": &fingerprint }).await? {
+                    return Ok(existing);
+                }
+                // Otherwise the id itself collided; take the next one.
+                last_error = Some(e.to_string());
+            }
+        }
     }
+
+    Err(VersionError::InternFailed(
+        last_error.unwrap_or_else(|| "exhausted id attempts".to_string()),
+    ))
 }
 
 /// Which components differ between two sets.
@@ -469,6 +497,100 @@ mod tests {
         let a = set(1, &[("acai_h", "aa")], &[("sso", 1)]);
         let b = set(2, &[("acai_h", "aa")], &[("sso", 1)]);
         assert!(diff(&a, &b).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_set_is_interned_once_and_reused() {
+        // The property the whole scheme rests on: two workers starting against
+        // the same models must stamp the same id, or the drift query splits the
+        // archive along a line that means nothing.
+        let db = crate::conf::get_test_db().await;
+        let first = resolve_current_set(&db, "ztf_test", ZTF_MODELS)
+            .await
+            .expect("resolves");
+        let second = resolve_current_set(&db, "ztf_test", ZTF_MODELS)
+            .await
+            .expect("resolves");
+        assert_eq!(first.id, second.id, "the same models produced two ids");
+        assert_eq!(first.fingerprint, second.fingerprint);
+        // Hashes are of the real files on disk.
+        assert_eq!(first.models.len(), ZTF_MODELS.len());
+        assert_eq!(first.derivations.len(), DERIVATIONS.len());
+    }
+
+    #[tokio::test]
+    async fn a_changed_model_interns_a_new_set() {
+        // What a deploy with new weights looks like: a new row, a new id, and a
+        // diff naming exactly the model that moved.
+        let db = crate::conf::get_test_db().await;
+        let survey = format!("ztf_change_{}", uuid::Uuid::new_v4().simple());
+
+        let before = resolve_current_set(&db, &survey, ZTF_MODELS)
+            .await
+            .expect("resolves");
+
+        // Stand in for retrained weights by declaring a different file for one
+        // field; every other model is unchanged.
+        let swapped: Vec<ModelFile> = ZTF_MODELS
+            .iter()
+            .map(|m| ModelFile {
+                field: m.field,
+                version: m.version,
+                path: if m.field == "acai_h" {
+                    "data/models/acai_n.d1_dnn_20201130.onnx"
+                } else {
+                    m.path
+                },
+            })
+            .collect();
+        let after = resolve_current_set(&db, &survey, &swapped)
+            .await
+            .expect("resolves");
+
+        assert_ne!(before.id, after.id, "a changed model must intern a new set");
+        assert_eq!(
+            diff(&before, &after),
+            vec!["acai_h"],
+            "the diff must name only what moved, so a rerun can be selective"
+        );
+
+        let _ = db
+            .collection::<EnrichmentSet>(SETS_COLLECTION)
+            .delete_many(mongodb::bson::doc! { "survey": &survey })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn two_surveys_do_not_collide_on_a_set_id() {
+        // Regression: the id sequence was once per-survey while `_id` is unique
+        // across the collection, so ZTF's set 1 and LSST's set 1 collided the
+        // first time a second survey enriched anything.
+        let db = crate::conf::get_test_db().await;
+        let run = uuid::Uuid::new_v4().simple().to_string();
+        let a = format!("surveyA_{run}");
+        let b = format!("surveyB_{run}");
+
+        let first = resolve_current_set(&db, &a, ZTF_MODELS)
+            .await
+            .expect("first survey resolves");
+        let second = resolve_current_set(&db, &b, ZTF_MODELS)
+            .await
+            .expect("second survey resolves");
+
+        assert_ne!(
+            first.id, second.id,
+            "two surveys were given the same set id"
+        );
+        // The same models under a different survey are a different set, because
+        // the survey is part of what a set identifies.
+        assert_ne!(first.fingerprint, second.fingerprint);
+
+        for survey in [&a, &b] {
+            let _ = db
+                .collection::<EnrichmentSet>(SETS_COLLECTION)
+                .delete_many(mongodb::bson::doc! { "survey": survey })
+                .await;
+        }
     }
 
     #[test]
