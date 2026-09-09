@@ -22,6 +22,12 @@ pub struct TaskContext {
     /// -- drive their work through Valkey and read the crossmatch and worker
     /// sections, so a task body needs more than a Mongo handle.
     config: Arc<AppConfig>,
+    /// Where the config was loaded from.
+    ///
+    /// Carried alongside the parsed config because the enrichment workers build
+    /// themselves from a path rather than from an `AppConfig` -- they run on
+    /// their own threads with their own runtimes and load it again there.
+    config_path: String,
     run_id: String,
     /// Who asked for this run, and how. Carried so a task body can attribute
     /// the mutations it records without the ledger having to re-read the run.
@@ -37,6 +43,7 @@ impl TaskContext {
     pub fn new(
         db: Database,
         config: Arc<AppConfig>,
+        config_path: impl Into<String>,
         run_id: impl Into<String>,
         actor: Actor,
         trigger: Trigger,
@@ -47,6 +54,7 @@ impl TaskContext {
             logs: LogSink::new(db.clone(), &run_id),
             db,
             config,
+            config_path: config_path.into(),
             run_id,
             actor,
             trigger,
@@ -64,6 +72,7 @@ impl TaskContext {
         Self {
             db,
             config,
+            config_path: crate::conf::DEFAULT_CONFIG_PATH.to_string(),
             run_id: String::new(),
             actor: Actor::system(),
             trigger: Trigger::Api,
@@ -78,6 +87,12 @@ impl TaskContext {
 
     pub fn config(&self) -> &AppConfig {
         &self.config
+    }
+
+    /// The path the config was loaded from, for code that must load it again
+    /// on another thread.
+    pub fn config_path(&self) -> &str {
+        &self.config_path
     }
 
     pub fn run_id(&self) -> &str {

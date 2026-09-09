@@ -14,7 +14,8 @@ use std::sync::OnceLock;
 use std::{collections::HashMap, path::Path};
 use tracing::{debug, error, info, instrument, warn};
 
-const DEFAULT_CONFIG_PATH: &str = "config.yaml";
+/// Where config is loaded from when nothing names a path.
+pub const DEFAULT_CONFIG_PATH: &str = "config.yaml";
 
 static HASHED_SECRET_KEY: OnceLock<[u8; 32]> = OnceLock::new();
 

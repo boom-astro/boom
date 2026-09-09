@@ -120,6 +120,7 @@ later.
 | `migrate_snr` | Recompute `snr_psf`, `snr_ap` and ZTF `apFlux` across alerts and lightcurves. |
 | `reprocess_crossmatch` | Fill in or refresh crossmatches on a survey's `alerts_aux` records. |
 | `prepare_catalog` | Add spatial fields and a 2dsphere index to a hand-imported collection. |
+| `enrich_reprocess` | Select alerts, queue them, and re-run enrichment over them. |
 
 Submission is single-flight per target, not per type: two ingests of the same
 catalog would race on the same collection and chunk state, but ingesting 2MASS
@@ -127,28 +128,25 @@ should not block ingesting NED.
 
 Still to port: `copy_cutouts`, which is the same batch shape as the others.
 
-`enrich_reprocess` is deliberately **not** ported yet, because it is a different
-shape and porting it mechanically would produce something misleading. It is a
-pool of enrichment workers draining a Redis queue: it has no natural completion
-(it runs until signalled), and nothing in this repo fills the queue it reads --
-that is done out of band, e.g. after importing historical alerts with
-`stream_kowalski_alerts`. As a task it would sit in `running` forever, possibly
-against an empty queue.
+`enrich_reprocess` **populates the queue and then drains it**, rather than only
+draining one something else filled. That is what closes the loop the binary left
+open, and it is also what makes completion well-defined: because the task owns
+the queue, `LLEN == 0` means done rather than "nobody has pushed anything yet".
 
-Three ways it could become a task, in increasing order of usefulness and work:
+The queue is scoped to the run — `<survey>_enrichment_queue_reprocess_<run_id>`
+— precisely so that holds. An `input_queue` parameter overrides it for a queue
+filled out of band; the task then only drains, and never deletes it.
 
-1. **Drain until empty** -- finish once the queue has been empty for several
-   consecutive polls. Makes it a real task, but the termination rule is a
-   heuristic that has to be chosen.
-2. **Populate and drain** -- the task selects the alerts to reprocess (say,
-   those missing a given classification set), fills the queue itself, then
-   drains it. This closes the loop the binary leaves open and is what an
-   operator actually wants: "reprocess these alerts", not "run some workers".
-3. **Leave it a service** -- it is arguably a worker pool rather than a job, and
-   belongs in compose alongside the schedulers.
+Completion needs `LLEN == 0` twice in a row. A worker pops a batch of up to
+1000 before processing it, so a single zero can be observed while a batch is
+still in flight, and stopping there would count those alerts as reprocessed
+before they were.
 
-Option 2 is the one worth building, and it depends on the enrichment version
-stamp, which does not exist yet. Each
+Selection is explicit rather than inferred: every alert, alerts missing a field
+(`classifications.acai_h` after adding a classifier — the usual case), or a
+candid range. A version-stamp-driven selection ("everything scored under an
+older model set") is the natural next step, and needs the stamp that does not
+exist yet. Each
 needs a params struct, an arm in `dispatch`, and a cancellation check in its
 batch loop; the ones that drive their work through Valkey already have the
 resumability a task needs.

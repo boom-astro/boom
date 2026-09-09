@@ -71,7 +71,6 @@ RUN --mount=type=cache,target=/app/target,sharing=locked \
        target/release/api \
        target/release/copy_cutouts \
        target/release/stream_kowalski_alerts \
-       target/release/enrich_reprocess \
        target/release/mpcorb_ingest \
        target/release/task_worker \
        /app/bin/
@@ -126,6 +125,5 @@ RUN uv sync --project /app/boompy --frozen --no-dev
 # Temporary
 COPY --from=builder /app/bin/copy_cutouts /app/copy_cutouts
 COPY --from=builder /app/bin/stream_kowalski_alerts /app/stream_kowalski_alerts
-COPY --from=builder /app/bin/enrich_reprocess /app/enrich_reprocess
 
 CMD ["/app/scheduler"]

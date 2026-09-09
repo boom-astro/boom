@@ -19,6 +19,7 @@
 pub mod batch;
 pub mod catalog_ingest;
 pub mod context;
+pub mod enrich_reprocess;
 pub mod ledger;
 pub mod logs;
 pub mod migrate_fp_flux;
@@ -64,8 +65,7 @@ pub struct TaskSpec {
     pub destructive: bool,
 }
 
-// TODO: port the remaining data-mutating binaries -- `copy_cutouts`, and
-// `enrich_reprocess` once its shape is settled (see docs/task-system.md) --
+// TODO: port the remaining data-mutating binary -- `copy_cutouts` --
 // so that operators stop running them over SSH too. Each becomes a body plus an
 // arm in `dispatch`; their existing Valkey work queues already give them the
 // resumability a task needs, so what they mainly want is the params struct and
@@ -89,6 +89,16 @@ pub const TASKS: &[TaskSpec] = &[
         idempotent: true,
         // Only with drop_existing, which the client has to ask for explicitly.
         destructive: true,
+    },
+    TaskSpec {
+        id: enrich_reprocess::TASK_TYPE,
+        title: "Re-run enrichment over a selection of alerts",
+        description: "Select alerts, queue them, and run enrichment workers over them. \
+                      Babamul is disabled and nothing is forwarded to the filter queue, \
+                      so reprocessing does not re-alert anyone.",
+        // Scores are recomputed from the stored alert, so re-running converges.
+        idempotent: true,
+        destructive: false,
     },
     TaskSpec {
         id: prepare_catalog::TASK_TYPE,
@@ -177,6 +187,12 @@ pub fn validate_params(task_type: &str, params: &serde_json::Value) -> Result<()
                 .map(|_| ())
                 .map_err(|e| TaskError::InvalidParams(e.to_string()))
         }
+        enrich_reprocess::TASK_TYPE => {
+            let parsed: enrich_reprocess::EnrichReprocessParams =
+                serde_json::from_value(params.clone())
+                    .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            parsed.validate_params().map_err(TaskError::InvalidParams)
+        }
         prepare_catalog::TASK_TYPE => {
             let parsed: prepare_catalog::PrepareCatalogParams =
                 serde_json::from_value(params.clone())
@@ -227,6 +243,15 @@ pub fn single_flight_key(
         migrate_fp_flux::TASK_TYPE => Some(doc! {}),
         // Keyed by survey: migrating ZTF and LSST at once is fine, but two runs
         // over the same survey would rewrite the same documents.
+        // Keyed by survey: two reprocesses of one survey would contend for the
+        // same enrichment workers and GPU, but ZTF and LSST are independent.
+        enrich_reprocess::TASK_TYPE => Some(
+            params
+                .get("survey")
+                .and_then(|s| s.as_str())
+                .map(|survey| doc! { "survey": survey })
+                .unwrap_or_default(),
+        ),
         // One preparation of a collection at a time; two would rewrite the same
         // documents and race on creating the index.
         prepare_catalog::TASK_TYPE => params
@@ -267,6 +292,11 @@ pub async fn dispatch(
             let params = catalog_ingest::CatalogIngestParams::deserialize(params)
                 .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
             catalog_ingest::run(ctx, params).await
+        }
+        enrich_reprocess::TASK_TYPE => {
+            let params = enrich_reprocess::EnrichReprocessParams::deserialize(params)
+                .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            enrich_reprocess::run(ctx, params).await
         }
         prepare_catalog::TASK_TYPE => {
             let params = prepare_catalog::PrepareCatalogParams::deserialize(params)

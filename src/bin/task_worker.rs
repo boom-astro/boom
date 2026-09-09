@@ -56,6 +56,7 @@ async fn main() {
 
     let config_path = args.config.unwrap_or_else(|| "config.yaml".to_string());
     let config = Arc::new(AppConfig::from_path(&config_path).expect("failed to load config"));
+    let config_path = Arc::new(config_path);
     let db = config.build_db().await.expect("failed to connect to mongo");
 
     models::initialize_indexes(&db)
@@ -97,7 +98,15 @@ async fn main() {
             continue;
         };
 
-        run_one(&db, &config, &worker_name, run, shutting_down.clone()).await;
+        run_one(
+            &db,
+            &config,
+            &config_path,
+            &worker_name,
+            run,
+            shutting_down.clone(),
+        )
+        .await;
     }
 
     info!("task worker {} stopped", worker_name);
@@ -107,6 +116,7 @@ async fn main() {
 async fn run_one(
     db: &Database,
     config: &Arc<AppConfig>,
+    config_path: &str,
     worker_name: &str,
     run: tasks::TaskRun,
     shutting_down: Arc<AtomicBool>,
@@ -131,6 +141,7 @@ async fn run_one(
     let ctx = TaskContext::new(
         db.clone(),
         config.clone(),
+        config_path,
         &run.id,
         run.actor.clone(),
         run.trigger,
