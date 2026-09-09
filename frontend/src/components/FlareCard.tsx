@@ -47,7 +47,7 @@ const CLASSES: Array<{ key: string; name: string; prob: ProbKey }> = [
   { key: 'CV', name: 'CV', prob: 'p_cv' },
 ];
 
-const classLabel = (key: string) => CLASSES.find((c) => c.key === key)?.name ?? key.replace('_', ' ');
+const classLabel = (key: string) => CLASSES.find((c) => c.key === key)?.name ?? key.replace(/_/g, ' ');
 const pct = (x: number | undefined | null, digits = 1) =>
   x === undefined || x === null ? '—' : `${(x * 100).toFixed(digits)}%`;
 const num = (x: number | undefined | null, digits = 3) =>
