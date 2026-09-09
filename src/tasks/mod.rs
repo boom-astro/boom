@@ -32,6 +32,7 @@ pub mod queue;
 pub mod redact;
 pub mod reprocess_crossmatch;
 pub mod sso_baselines;
+pub mod stream_kowalski_alerts;
 
 pub use context::TaskContext;
 pub use models::{Actor, TaskRun, TaskStatus, Trigger};
@@ -94,6 +95,15 @@ pub const TASKS: &[TaskSpec] = &[
         idempotent: true,
         // Only with drop_existing, which the client has to ask for explicitly.
         destructive: true,
+    },
+    TaskSpec {
+        id: stream_kowalski_alerts::TASK_TYPE,
+        title: "Back-fill BOOM from a Kowalski deployment",
+        description: "Stream Kowalski's ZTF_alerts into BOOM, importing alerts for objects \
+                      BOOM already knows and fetching cutouts only for what was new.",
+        // Unordered inserts skipping duplicates, so re-running resumes.
+        idempotent: true,
+        destructive: false,
     },
     TaskSpec {
         id: copy_cutouts::TASK_TYPE,
@@ -220,6 +230,12 @@ pub fn validate_params(task_type: &str, params: &serde_json::Value) -> Result<()
                 .map(|_| ())
                 .map_err(|e| TaskError::InvalidParams(e.to_string()))
         }
+        stream_kowalski_alerts::TASK_TYPE => {
+            let parsed: stream_kowalski_alerts::StreamKowalskiParams =
+                serde_json::from_value(params.clone())
+                    .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            parsed.validate_params().map_err(TaskError::InvalidParams)
+        }
         copy_cutouts::TASK_TYPE => {
             let parsed: copy_cutouts::CopyCutoutsParams = serde_json::from_value(params.clone())
                 .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
@@ -291,6 +307,11 @@ pub fn single_flight_key(
         migrate_fp_flux::TASK_TYPE => Some(doc! {}),
         // Keyed by survey: migrating ZTF and LSST at once is fine, but two runs
         // over the same survey would rewrite the same documents.
+        // Two imports into one BOOM would duplicate the whole stream's work.
+        stream_kowalski_alerts::TASK_TYPE => params
+            .get("boom_uri")
+            .and_then(|v| v.as_str())
+            .map(|uri| doc! { "boom_uri": uri }),
         // Keyed by destination and survey: two copies into one collection would
         // race, but different surveys or deployments are independent.
         copy_cutouts::TASK_TYPE => {
@@ -355,6 +376,11 @@ pub async fn dispatch(
             let params = catalog_ingest::CatalogIngestParams::deserialize(params)
                 .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
             catalog_ingest::run(ctx, params).await
+        }
+        stream_kowalski_alerts::TASK_TYPE => {
+            let params = stream_kowalski_alerts::StreamKowalskiParams::deserialize(params)
+                .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            stream_kowalski_alerts::run(ctx, params).await
         }
         copy_cutouts::TASK_TYPE => {
             let params = copy_cutouts::CopyCutoutsParams::deserialize(params)

@@ -69,7 +69,6 @@ RUN --mount=type=cache,target=/app/target,sharing=locked \
        target/release/kafka_consumer \
        target/release/kafka_producer \
        target/release/api \
-       target/release/stream_kowalski_alerts \
        target/release/task_worker \
        /app/bin/
 
@@ -120,6 +119,5 @@ ENV UV_PROJECT_ENVIRONMENT=/app/boompy/.venv
 ENV BOOM_BOOMPY_PATH=/app/boompy
 RUN uv sync --project /app/boompy --frozen --no-dev
 # Temporary
-COPY --from=builder /app/bin/stream_kowalski_alerts /app/stream_kowalski_alerts
 
 CMD ["/app/scheduler"]
