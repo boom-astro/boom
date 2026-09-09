@@ -43,7 +43,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 use utoipa::ToSchema;
 
 /// Stable identifier for this task type.
@@ -209,7 +209,10 @@ pub async fn run(
         watchlist.iter().map(|c| &c.catalog).collect::<Vec<_>>(),
     ));
 
-    let failed = |e: mongodb::error::Error| super::TaskError::Failed(e.to_string());
+    // Untyped on purpose: the drivers return `utils::db::TaskError`, a
+    // different type from this module's `super::TaskError` despite the name.
+    let failed = |e: TaskError| super::TaskError::Failed(e.to_string());
+
     let mut done: Vec<String> = Vec::new();
 
     for cat in watchlist {

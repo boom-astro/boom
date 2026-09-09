@@ -24,6 +24,7 @@ pub mod logs;
 pub mod migrate_fp_flux;
 pub mod migrate_snr;
 pub mod models;
+pub mod prepare_catalog;
 pub mod queue;
 pub mod reprocess_crossmatch;
 
@@ -63,8 +64,8 @@ pub struct TaskSpec {
     pub destructive: bool,
 }
 
-// TODO: port the remaining data-mutating binaries -- `enrich_reprocess`,
-// `copy_cutouts`, `prepare_catalog` --
+// TODO: port the remaining data-mutating binaries -- `copy_cutouts`, and
+// `enrich_reprocess` once its shape is settled (see docs/task-system.md) --
 // so that operators stop running them over SSH too. Each becomes a body plus an
 // arm in `dispatch`; their existing Valkey work queues already give them the
 // resumability a task needs, so what they mainly want is the params struct and
@@ -88,6 +89,17 @@ pub const TASKS: &[TaskSpec] = &[
         idempotent: true,
         // Only with drop_existing, which the client has to ask for explicitly.
         destructive: true,
+    },
+    TaskSpec {
+        id: prepare_catalog::TASK_TYPE,
+        title: "Prepare an imported collection for crossmatching",
+        description: "Add ra/dec, the GeoJSON point, galactic coordinates and a 2dsphere \
+                      index to a collection imported from a file, so it can be used as a \
+                      crossmatch catalog.",
+        // Documents that already carry coordinates are skipped unless forced,
+        // and index creation is a no-op when it already exists.
+        idempotent: true,
+        destructive: false,
     },
     TaskSpec {
         id: reprocess_crossmatch::TASK_TYPE,
@@ -165,6 +177,12 @@ pub fn validate_params(task_type: &str, params: &serde_json::Value) -> Result<()
                 .map(|_| ())
                 .map_err(|e| TaskError::InvalidParams(e.to_string()))
         }
+        prepare_catalog::TASK_TYPE => {
+            let parsed: prepare_catalog::PrepareCatalogParams =
+                serde_json::from_value(params.clone())
+                    .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            parsed.validate_params().map_err(TaskError::InvalidParams)
+        }
         reprocess_crossmatch::TASK_TYPE => {
             let parsed: reprocess_crossmatch::ReprocessCrossmatchParams =
                 serde_json::from_value(params.clone())
@@ -209,6 +227,12 @@ pub fn single_flight_key(
         migrate_fp_flux::TASK_TYPE => Some(doc! {}),
         // Keyed by survey: migrating ZTF and LSST at once is fine, but two runs
         // over the same survey would rewrite the same documents.
+        // One preparation of a collection at a time; two would rewrite the same
+        // documents and race on creating the index.
+        prepare_catalog::TASK_TYPE => params
+            .get("catalog")
+            .and_then(|c| c.as_str())
+            .map(|catalog| doc! { "catalog": catalog }),
         // Keyed by survey: two runs over the same alerts_aux would fight over
         // the same records, but reprocessing ZTF and LSST at once is fine.
         reprocess_crossmatch::TASK_TYPE => Some(
@@ -243,6 +267,11 @@ pub async fn dispatch(
             let params = catalog_ingest::CatalogIngestParams::deserialize(params)
                 .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
             catalog_ingest::run(ctx, params).await
+        }
+        prepare_catalog::TASK_TYPE => {
+            let params = prepare_catalog::PrepareCatalogParams::deserialize(params)
+                .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            prepare_catalog::run(ctx, params).await
         }
         reprocess_crossmatch::TASK_TYPE => {
             let params = reprocess_crossmatch::ReprocessCrossmatchParams::deserialize(params)

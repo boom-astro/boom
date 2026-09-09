@@ -69,7 +69,6 @@ RUN --mount=type=cache,target=/app/target,sharing=locked \
        target/release/kafka_consumer \
        target/release/kafka_producer \
        target/release/api \
-       target/release/prepare_catalog \
        target/release/copy_cutouts \
        target/release/stream_kowalski_alerts \
        target/release/enrich_reprocess \
@@ -113,7 +112,6 @@ COPY --from=builder /app/bin/scheduler /app/scheduler
 COPY --from=builder /app/bin/kafka_consumer /app/kafka_consumer
 COPY --from=builder /app/bin/kafka_producer /app/kafka_producer
 COPY --from=builder /app/bin/api /app/boom-api
-COPY --from=builder /app/bin/prepare_catalog /app/prepare_catalog
 COPY --from=builder /app/bin/mpcorb_ingest /app/mpcorb_ingest
 COPY --from=builder /app/bin/task_worker /app/task_worker
 COPY --from=builder /opt/ort /opt/ort
