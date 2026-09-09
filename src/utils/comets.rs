@@ -37,7 +37,8 @@ pub fn julian_date(year: i64, month: i64, day: f64) -> f64 {
 
 /// The key `ssnamenr` carries: `1P` when numbered, else `C/2025Q3`.
 fn designation_for(line: &str) -> Option<String> {
-    let name = column(line, 102, line.len())?;
+    // The name is fixed-width; the MPC reference follows it on the same line.
+    let name = column(line, 102, 159)?;
     let designation = name.split('(').next()?.trim();
     if designation.is_empty() {
         return None;
@@ -104,6 +105,8 @@ mod tests {
     // Real lines from CometEls.txt.
     const HALLEY: &str = "0001P         2061 08  2.8739  0.571098  0.968021  112.1899   59.2896  162.1880  20260905   5.5  3.2  1P/Halley";
     const HALE_BOPP: &str = "    CJ95O010  1997 03 29.0338  0.924783  0.994898  130.7211  281.8006   89.7380  20260905  -2.0  4.0  C/1995 O1 (Hale-Bopp)";
+    // Unnamed, so no "(" ends the designation before the trailing MPC reference.
+    const UNNAMED: &str = "    AK18W030  2021 04 13.1805  4.275055  0.993544  313.7786  251.6557  104.8233  20260908  10.5  2.0  A/2018 W3                                                MPC194158";
     const NEARLY_PARABOLIC: &str = "    CJ47X01b  1947 10 21.2095  0.124034  0.999440  196.9183  338.0351  140.7380  20260905   9.0  4.0  C/1947 X1-B (Southern comet)";
 
     #[test]
@@ -176,5 +179,13 @@ mod tests {
         assert!((julian_date(2000, 1, 1.5) - 2_451_545.0).abs() < 1e-9);
         // MPC's own epoch stamp format, 2026 Sep 5.
         assert!((julian_date(2026, 9, 5.0) - 2_461_288.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_designation_stops_before_the_mpc_reference() {
+        assert_eq!(
+            parse_line(UNNAMED).expect("must parse").designation,
+            "A/2018W3"
+        );
     }
 }
