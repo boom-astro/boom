@@ -56,6 +56,8 @@ export default function FlareCard({ alert }: { alert: unknown }) {
 
   const set = flare.set ?? [];
   const coverage = flare.alpha === undefined ? null : Math.round((1 - flare.alpha) * 100);
+  const setLabel = coverage === null ? 'prediction set' : `${coverage}% prediction set`;
+  const alphaLabel = flare.alpha === undefined ? 'the alpha level' : `${flare.alpha}`;
   const noveltyP = flare.novelty_p ?? null;
   const percentile = flare.energy_percentile ?? null;
   // The novelty p-value is the fraction of known-class objects at least this extreme,
@@ -225,8 +227,8 @@ export default function FlareCard({ alert }: { alert: unknown }) {
             <div>
               <h3 className="font-semibold mb-2">Reading the Table</h3>
               <p className="text-gray-600 dark:text-gray-300">
-                Each row gives the class probability and its conformal p-value. A class is in the 90% prediction set when
-                its p-value exceeds 0.1, so the set has a guaranteed coverage per class rather than a single best guess.
+                Each row gives the class probability and its conformal p-value. A class is in the {setLabel} when
+                its p-value exceeds {alphaLabel}, so the set has a guaranteed coverage per class rather than a single best guess.
                 A set with several classes means the photometry alone does not separate them; an empty set means no class fits.
               </p>
             </div>
