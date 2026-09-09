@@ -55,7 +55,7 @@ export default function FlareCard({ alert }: { alert: unknown }) {
   if (!flare) return null;
 
   const set = flare.set ?? [];
-  const coverage = Math.round((1 - (flare.alpha ?? 0.1)) * 100);
+  const coverage = flare.alpha === undefined ? null : Math.round((1 - flare.alpha) * 100);
   const noveltyP = flare.novelty_p ?? null;
   const percentile = flare.energy_percentile ?? null;
   // The novelty p-value is the fraction of known-class objects at least this extreme,
@@ -100,7 +100,7 @@ export default function FlareCard({ alert }: { alert: unknown }) {
           <span className="font-medium">
             {set.length ? `{${set.map(classLabel).join(', ')}}` : 'No class'}
           </span>
-          <span className="text-muted-foreground"> at {coverage}% coverage</span>
+          {coverage !== null && <span className="text-muted-foreground"> at {coverage}% coverage</span>}
         </div>
 
         <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
