@@ -19,6 +19,7 @@
 pub mod batch;
 pub mod catalog_ingest;
 pub mod context;
+pub mod copy_cutouts;
 pub mod enrich_reprocess;
 pub mod ledger;
 pub mod logs;
@@ -68,8 +69,9 @@ pub struct TaskSpec {
     pub destructive: bool,
 }
 
-// TODO: port the remaining data-mutating binary -- `copy_cutouts` --
-// so that operators stop running them over SSH too. Each becomes a body plus an
+// TODO: port `stream_kowalski_alerts`, the last data-mutating binary. It is a
+// worker pool over an external Kowalski deployment rather than a batch job, so
+// it wants the same populate-and-drain treatment `enrich_reprocess` got. Each becomes a body plus an
 // arm in `dispatch`; their existing Valkey work queues already give them the
 // resumability a task needs, so what they mainly want is the params struct and
 // a cancellation check in their batch loop.
@@ -92,6 +94,16 @@ pub const TASKS: &[TaskSpec] = &[
         idempotent: true,
         // Only with drop_existing, which the client has to ask for explicitly.
         destructive: true,
+    },
+    TaskSpec {
+        id: copy_cutouts::TASK_TYPE,
+        title: "Copy alert cutouts between deployments",
+        description: "Copy a survey's cutout collection from one MongoDB to another, \
+                      typically before repointing BOOM at new storage. Re-run with \
+                      min_candid to catch up on what arrived during the first pass.",
+        // Keyed on candid; duplicates are counted rather than fatal.
+        idempotent: true,
+        destructive: false,
     },
     TaskSpec {
         id: sso_baselines::TASK_TYPE,
@@ -208,6 +220,11 @@ pub fn validate_params(task_type: &str, params: &serde_json::Value) -> Result<()
                 .map(|_| ())
                 .map_err(|e| TaskError::InvalidParams(e.to_string()))
         }
+        copy_cutouts::TASK_TYPE => {
+            let parsed: copy_cutouts::CopyCutoutsParams = serde_json::from_value(params.clone())
+                .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            parsed.validate_params().map_err(TaskError::InvalidParams)
+        }
         sso_baselines::TASK_TYPE => {
             let parsed: sso_baselines::SsoBaselinesParams = serde_json::from_value(params.clone())
                 .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
@@ -274,6 +291,16 @@ pub fn single_flight_key(
         migrate_fp_flux::TASK_TYPE => Some(doc! {}),
         // Keyed by survey: migrating ZTF and LSST at once is fine, but two runs
         // over the same survey would rewrite the same documents.
+        // Keyed by destination and survey: two copies into one collection would
+        // race, but different surveys or deployments are independent.
+        copy_cutouts::TASK_TYPE => {
+            let dst = params.get("dst_uri").and_then(|v| v.as_str());
+            let survey = params.get("survey").and_then(|v| v.as_str());
+            match (dst, survey) {
+                (Some(dst), Some(survey)) => Some(doc! { "dst_uri": dst, "survey": survey }),
+                _ => Some(doc! {}),
+            }
+        }
         // Two would upsert the same baselines from the same detections.
         sso_baselines::TASK_TYPE => Some(doc! {}),
         // One refresh at a time: two would download the same file and race on
@@ -328,6 +355,11 @@ pub async fn dispatch(
             let params = catalog_ingest::CatalogIngestParams::deserialize(params)
                 .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
             catalog_ingest::run(ctx, params).await
+        }
+        copy_cutouts::TASK_TYPE => {
+            let params = copy_cutouts::CopyCutoutsParams::deserialize(params)
+                .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            copy_cutouts::run(ctx, params).await
         }
         sso_baselines::TASK_TYPE => {
             let params = sso_baselines::SsoBaselinesParams::deserialize(params)

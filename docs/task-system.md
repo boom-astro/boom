@@ -123,13 +123,15 @@ later.
 | `enrich_reprocess` | Select alerts, queue them, and re-run enrichment over them. |
 | `mpcorb_ingest` | Re-download MPC orbital elements and swap them into `MPC_orbits`. |
 | `sso_baselines` | Fit solar system phase-curve baselines from ZTF detections. |
+| `copy_cutouts` | Copy a survey's cutout collection between MongoDB deployments. |
 
 Submission is single-flight per target, not per type: two ingests of the same
 catalog would race on the same collection and chunk state, but ingesting 2MASS
 should not block ingesting NED.
 
-Still to port: `copy_cutouts` and `stream_kowalski_alerts`. Both are one-off
-migration tools rather than recurring work, and both take connection URIs.
+Still to port: `stream_kowalski_alerts`. It is a worker pool reading from an
+external Kowalski deployment rather than a batch job, so like `enrich_reprocess`
+it wants a completion condition rather than a mechanical move.
 
 ### Credentials in parameters
 
