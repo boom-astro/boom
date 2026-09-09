@@ -54,7 +54,7 @@ export default function FlareCard({ alert }: { alert: unknown }) {
   const flare = (alert as { flare?: FlareResult } | null)?.flare;
   if (!flare) return null;
 
-  const set = flare.set ?? [];
+  const set = flare.set ?? null;
   const coverage = flare.alpha === undefined ? null : Math.round((1 - flare.alpha) * 100);
   const setLabel = coverage === null ? 'prediction set' : `${coverage}% prediction set`;
   const alphaLabel = flare.alpha === undefined ? 'the alpha level' : `${flare.alpha}`;
@@ -100,7 +100,7 @@ export default function FlareCard({ alert }: { alert: unknown }) {
 
         <div className="text-sm">
           <span className="font-medium">
-            {set.length ? `{${set.map(classLabel).join(', ')}}` : 'No class'}
+            {set === null ? '—' : set.length ? `{${set.map(classLabel).join(', ')}}` : 'No class'}
           </span>
           {coverage !== null && <span className="text-muted-foreground"> at {coverage}% coverage</span>}
         </div>
@@ -151,7 +151,7 @@ export default function FlareCard({ alert }: { alert: unknown }) {
             </TableHeader>
             <TableBody>
               {CLASSES.map(({ key, name, prob }) => {
-                const inSet = set.includes(key);
+                const inSet = set?.includes(key) ?? false;
                 return (
                   <TableRow key={key} className={inSet ? 'font-medium' : ''}>
                     <TableCell>{name}</TableCell>
