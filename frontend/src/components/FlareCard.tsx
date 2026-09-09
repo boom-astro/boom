@@ -34,7 +34,9 @@ export type FlareResult = {
   model?: string;
 };
 
-const CLASSES: Array<{ key: string; name: string; prob: keyof FlareResult }> = [
+type ProbKey = 'p_sn_ia' | 'p_sn_cc' | 'p_slsn' | 'p_agn' | 'p_tde' | 'p_cv';
+
+const CLASSES: Array<{ key: string; name: string; prob: ProbKey }> = [
   { key: 'SN_Ia', name: 'SN Ia', prob: 'p_sn_ia' },
   { key: 'SN_CC', name: 'SN CC', prob: 'p_sn_cc' },
   { key: 'SLSN', name: 'SLSN', prob: 'p_slsn' },
@@ -155,7 +157,7 @@ export default function FlareCard({ alert }: { alert: unknown }) {
                 return (
                   <TableRow key={key} className={inSet ? 'font-medium' : ''}>
                     <TableCell>{name}</TableCell>
-                    <TableCell className="text-right">{pct(flare[prob] as number | undefined)}</TableCell>
+                    <TableCell className="text-right">{pct(flare[prob])}</TableCell>
                     <TableCell className="text-right">{num(flare.p_values?.[key])}</TableCell>
                     <TableCell className="text-right">{inSet ? 'Yes' : '—'}</TableCell>
                   </TableRow>
