@@ -1099,15 +1099,15 @@ mod sso_history_tests {
     }
 
     fn ceres() -> OrbitalElements {
-        OrbitalElements {
-            epoch_jd: 2_461_200.5,
-            a: 2.7655526,
-            e: 0.0796923,
-            incl: 10.58803,
-            node: 80.24863,
-            peri: 73.29420,
-            mean_anomaly: 274.41935,
-        }
+        OrbitalElements::elliptical(
+            2_461_200.5,
+            2.7655526,
+            0.0796923,
+            10.58803,
+            80.24863,
+            73.29420,
+            274.41935,
+        )
     }
 
     fn elements() -> HashMap<String, OrbitalElements> {
@@ -1142,6 +1142,7 @@ mod sso_history_tests {
         let mut entry = doc! {
             "designation": "1", "jd": 2_461_272.5,
             "helio_dist": 1.0_f64, "topo_dist": 2.0_f64, "phase_angle": 3.0_f64,
+            "true_anomaly": 4.0_f64, "perihelion_time": 2_461_000.5_f64,
         };
         assert!(!fill_entry_geometry(&mut entry, &keys(), &elements()));
         assert_eq!(entry.get_f64("helio_dist").unwrap(), 1.0);
@@ -1202,11 +1203,14 @@ mod sso_history_tests {
             {
                 "designation": "2", "jd": 2_461_272.5,
                 "helio_dist": 1.0_f64, "topo_dist": 2.0_f64, "phase_angle": 3.0_f64,
+            "true_anomaly": 4.0_f64, "perihelion_time": 2_461_000.5_f64,
             },
         ] } };
+        // The comet resolves too: it keys on its own designation.
         let keys = sso_history_keys(&[history]);
-        assert_eq!(keys.len(), 1);
+        assert_eq!(keys.len(), 2);
         assert_eq!(keys.get("1").map(String::as_str), Some("1"));
+        assert_eq!(keys.get("C/2026O1").map(String::as_str), Some("C/2026O1"));
     }
 
     // A partially written block is completed rather than treated as done.

@@ -6,7 +6,7 @@ babamul:
 
 gpu:
   enabled: true
-  device_ids: [0, 1, 2, 3]
+  device_ids: [0, 1]
 
 workers:
   ztf:
@@ -14,6 +14,7 @@ workers:
       n_workers: 10
     enrichment:
       n_workers: 4
+      batch_size: 250
     filter:
       n_workers: 10
   lsst:

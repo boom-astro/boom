@@ -100,7 +100,7 @@ gpu:
   enabled: true # Set to true to load ONNX models on GPU (CUDA) instead of CPU.
   # Models are loaded once at startup and shared across all enrichment workers.
   # When false, models are loaded on CPU. Overridden by BOOM_GPU__ENABLED.
-  device_ids: [0, 1, 2, 3] # CUDA device(s) to use. E.g. [0,1,2,3,4,5,6,7] for 8 GPUs.
+  device_ids: [0, 1] # CUDA device(s) to use. E.g. [0,1,2,3,4,5,6,7] for 8 GPUs.
   # ONNX models are loaded on the first device. Additional devices are available
   # for the GPU pool (future lightcurve fitting).
   # Overwrite with BOOM_GPU__DEVICE_IDS environment variable (comma-separated list).
@@ -149,7 +149,7 @@ workers:
       # inference shape. Partial batches are zero-padded so ORT sees one shape
       # and the GPU memory arena stays stable. 750 is stable for both VRAM => 12GB.
       # Caltech and MSI can handle 1000.
-      batch_size: 1000
+      batch_size: 250
     filter:
       n_workers: 10
       refresh_interval_minutes: 15
