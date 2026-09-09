@@ -148,7 +148,9 @@ pub fn for_task(
         trigger,
         target,
         operation,
-        details,
+        // Redacted here rather than at the call site: the ledger is append-only
+        // and never deleted, so a password written into it stays forever.
+        details: super::redact::redact_document(&details),
         recorded_at: now(),
     }
 }

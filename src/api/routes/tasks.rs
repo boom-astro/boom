@@ -12,7 +12,7 @@ use crate::api::{
 use crate::tasks::{
     self,
     models::{now, TaskRun, TaskStatus, Trigger},
-    queue,
+    queue, redact,
 };
 
 use actix_web::{get, post, web, HttpResponse};
@@ -49,6 +49,16 @@ pub struct MutationsParams {
 pub struct LogsParams {
     /// Return only chunks after this sequence number, for tailing.
     pub after_seq: Option<u64>,
+}
+
+/// Mask connection credentials before a run leaves the API.
+///
+/// The worker reads the real parameters straight from `task_runs`; nothing that
+/// renders them needs the password, and the admin page is the most likely place
+/// for one to end up on a screen or in a screenshot.
+fn redacted(mut run: TaskRun) -> TaskRun {
+    run.params = redact::redact_params(&run.params);
+    run
 }
 
 /// List the task types this release can run
@@ -124,7 +134,7 @@ pub async fn submit_task(
             Ok(Some(existing)) => {
                 return HttpResponse::Conflict().json(response::ApiResponseBody::ok(
                     "an equivalent run is already queued or running",
-                    serde_json::to_value(&existing).unwrap_or_default(),
+                    serde_json::to_value(redacted(existing)).unwrap_or_default(),
                 ));
             }
             Ok(None) => {}
@@ -160,7 +170,7 @@ pub async fn submit_task(
                 "queued a run for {}",
                 run.actor.username
             );
-            response::ok_ser("success", &run)
+            response::ok_ser("success", redacted(run))
         }
         Err(e) => response::internal_error(&format!("failed to queue the run: {e}")),
     }
@@ -192,7 +202,10 @@ pub async fn get_tasks(
         .unwrap_or(DEFAULT_LIST_LIMIT)
         .clamp(1, MAX_LIST_LIMIT);
     match queue::list(&db, params.task_type.as_deref(), limit).await {
-        Ok(runs) => response::ok_ser("success", runs),
+        Ok(runs) => response::ok_ser(
+            "success",
+            runs.into_iter().map(redacted).collect::<Vec<_>>(),
+        ),
         Err(e) => response::internal_error(&format!("failed to list runs: {e}")),
     }
 }
@@ -220,7 +233,7 @@ pub async fn get_task(
         return e;
     }
     match queue::get(&db, &run_id).await {
-        Ok(Some(run)) => response::ok_ser("success", run),
+        Ok(Some(run)) => response::ok_ser("success", redacted(run)),
         Ok(None) => response::not_found("no such run"),
         Err(e) => response::internal_error(&format!("failed to read the run: {e}")),
     }

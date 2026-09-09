@@ -122,17 +122,29 @@ later.
 | `prepare_catalog` | Add spatial fields and a 2dsphere index to a hand-imported collection. |
 | `enrich_reprocess` | Select alerts, queue them, and re-run enrichment over them. |
 | `mpcorb_ingest` | Re-download MPC orbital elements and swap them into `MPC_orbits`. |
+| `sso_baselines` | Fit solar system phase-curve baselines from ZTF detections. |
 
 Submission is single-flight per target, not per type: two ingests of the same
 catalog would race on the same collection and chunk state, but ingesting 2MASS
 should not block ingesting NED.
 
-Still to port: `copy_cutouts`. It is the same batch shape as the others, but it
-takes source and destination MongoDB **connection URIs** as arguments, and task
-parameters are stored in `task_runs` and rendered on the admin page. Submitting
-it as-is would put credentials at rest in the database and on screen. It needs
-the endpoints to come from config or the environment, named by key, before it
-can become a task.
+Still to port: `copy_cutouts` and `stream_kowalski_alerts`. Both are one-off
+migration tools rather than recurring work, and both take connection URIs.
+
+### Credentials in parameters
+
+A task may take a connection URI — a copy between two clusters has to name both
+ends somehow. But parameters are stored on the run, rendered on the admin page,
+and copied into the ledger, so a URI carries a password into all three.
+
+The worker reads the real parameters from `task_runs`. Everywhere they are read
+*back* they are redacted first: every API response, and the ledger, which is
+append-only and would otherwise archive a password permanently.
+
+Redaction masks the password and leaves the rest — `mongodb://alice:***@host/db`
+— because which host and database a run touched is most of why anyone reads the
+parameters back. It keys on the field *name* (`*_uri`, `uri`), not on whether a
+value looks like a URI, so a catalog source URL stays readable in full.
 
 `enrich_reprocess` **populates the queue and then drains it**, rather than only
 draining one something else filled. That is what closes the loop the binary left
