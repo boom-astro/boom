@@ -120,7 +120,7 @@ later.
 | `migrate_snr` | Recompute `snr_psf`, `snr_ap` and ZTF `apFlux` across alerts and lightcurves. |
 | `reprocess_crossmatch` | Fill in or refresh crossmatches on a survey's `alerts_aux` records. |
 | `prepare_catalog` | Add spatial fields and a 2dsphere index to a hand-imported collection. |
-| `enrich_reprocess` | Select alerts, queue them, and re-run enrichment over them. |
+| `enrich_reprocess` | Select alerts, queue them, and re-run enrichment over them. See [alert-processing.md](./alert-processing.md#re-enriching-alerts-after-a-change). |
 | `mpcorb_ingest` | Re-download MPC orbital elements and swap them into `MPC_orbits`. |
 | `sso_baselines` | Fit solar system phase-curve baselines from ZTF detections. |
 | `copy_cutouts` | Copy a survey's cutout collection between MongoDB deployments. |
@@ -167,11 +167,11 @@ Completion needs `LLEN == 0` twice in a row. A worker pops a batch of up to
 still in flight, and stopping there would count those alerts as reprocessed
 before they were.
 
-Selection is explicit rather than inferred: every alert, alerts missing a field
-(`classifications.acai_h` after adding a classifier — the usual case), or a
-candid range. A version-stamp-driven selection ("everything scored under an
-older model set") is the natural next step, and needs the stamp that does not
-exist yet. Each
+Selection is explicit rather than inferred: everything not enriched by the
+current set (`stale`, the one to use after changing a model or a formula),
+alerts missing a field, a candid range, or everything. See
+[alert-processing.md](./alert-processing.md#re-enriching-alerts-after-a-change)
+for how staleness is recorded and why `missing_field` cannot express it. Each
 needs a params struct, an arm in `dispatch`, and a cancellation check in its
 batch loop; the ones that drive their work through Valkey already have the
 resumability a task needs.

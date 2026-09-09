@@ -591,6 +591,10 @@ pub struct ZtfEnrichmentWorker {
     models: Arc<SharedModels>,
     babamul: Option<Babamul>,
     gpu_enabled: bool,
+    /// Which models and derivation versions this worker is running, stamped
+    /// onto every alert it enriches so staleness is a query rather than a
+    /// guess. Resolved once at construction; see `enrichment::version`.
+    enrichment_set: i64,
     /// Alerts per batch — also the fixed ONNX inference shape (see
     /// [`EnrichmentWorkerConfig::batch_size`] in `conf.rs`).
     batch_size: usize,
@@ -634,6 +638,18 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         let sso_baselines = db.collection(BASELINES_COLLECTION);
         let alert_cutout_storage = config.build_cutout_storage(&Survey::Ztf).await?;
 
+        // Resolved once per worker rather than per alert: it is a few megabytes
+        // of hashing, and the answer cannot change while the process runs.
+        crate::enrichment::version::initialize_indexes(&db).await?;
+        let enrichment_set = crate::enrichment::version::resolve_current_set(
+            &db,
+            "ztf",
+            crate::enrichment::version::ZTF_MODELS,
+        )
+        .await?
+        .id;
+        tracing::info!(enrichment_set, "enrichment set resolved");
+
         let input_queue = "ZTF_alerts_enrichment_queue".to_string();
         let output_queue = "ZTF_alerts_filter_queue".to_string();
 
@@ -657,6 +673,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             .batch_size;
 
         Ok(ZtfEnrichmentWorker {
+            enrichment_set,
             input_queue,
             output_queue,
             client,
@@ -787,11 +804,15 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                 doc! { "$set": {
                     "classifications": mongify(cls),
                     "properties": mongify(&item.properties),
+                    // What produced the two above. Without it, a changed model
+                    // or formula leaves values that look current and are not.
+                    "enrichment_set": self.enrichment_set,
                     "updated_at": now,
                 }}
             } else {
                 doc! { "$set": {
                     "properties": mongify(&item.properties),
+                    "enrichment_set": self.enrichment_set,
                     "updated_at": now,
                 }}
             };
