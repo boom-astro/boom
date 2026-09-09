@@ -77,17 +77,18 @@ pub enum Selection {
 impl Selection {
     /// The query that picks the alerts out of `<survey>_alerts`.
     ///
-    /// `current_set` is the set this release would produce; only `Stale` uses
-    /// it. Alerts with no `enrichment_set` at all are included, because they
-    /// were enriched before stamping existed and cannot be shown to be current.
-    fn filter(&self, current_set: i64) -> Document {
+    /// `acceptable` is the current set plus any an operator has accepted; only
+    /// `Stale` uses it. Alerts with no `enrichment_set` at all are included,
+    /// because they were enriched before stamping existed and cannot be shown
+    /// to be current.
+    fn filter(&self, acceptable: &[i64]) -> Document {
         match self {
             Selection::All => doc! {},
             Selection::MissingField { field } => doc! { field: { "$exists": false } },
             Selection::CandidRange { from, to } => {
                 doc! { "_id": { "$gte": from, "$lte": to } }
             }
-            Selection::Stale => doc! { "enrichment_set": { "$ne": current_set } },
+            Selection::Stale => crate::enrichment::version::stale_filter(acceptable),
         }
     }
 
@@ -157,7 +158,7 @@ async fn populate(
     ctx: &TaskContext,
     survey: &Survey,
     selection: &Selection,
-    current_set: i64,
+    acceptable: &[i64],
     queue: &str,
 ) -> Result<u64, super::TaskError> {
     let failed = |e: String| super::TaskError::Failed(e);
@@ -170,7 +171,7 @@ async fn populate(
         .map_err(|e| failed(e.to_string()))?;
 
     let mut cursor = alerts
-        .find(selection.filter(current_set))
+        .find(selection.filter(acceptable))
         .projection(doc! { "_id": 1 })
         .no_cursor_timeout(true)
         .await
@@ -243,7 +244,18 @@ pub async fn run(
     .await
     .map_err(|e| failed(e.to_string()))?;
     let current_set_id = current_set.id;
-    ctx.info(format!("current enrichment set is {current_set_id}"));
+    // Includes sets an operator accepted, so a run does not redo work that was
+    // explicitly signed off as good enough.
+    let acceptable = crate::enrichment::version::acceptable_set_ids(
+        ctx.db(),
+        &params.survey.to_string().to_lowercase(),
+        current_set_id,
+    )
+    .await
+    .map_err(|e| failed(e.to_string()))?;
+    ctx.info(format!(
+        "current enrichment set is {current_set_id}; acceptable: {acceptable:?}"
+    ));
 
     // Owning the queue is what makes "empty" mean "done". A caller-supplied one
     // may still be filling, so the task only drains it and never deletes it.
@@ -262,14 +274,7 @@ pub async fn run(
             params.selection.describe(),
             params.survey
         ));
-        let n = populate(
-            ctx,
-            &params.survey,
-            &params.selection,
-            current_set_id,
-            &queue,
-        )
-        .await?;
+        let n = populate(ctx, &params.survey, &params.selection, &acceptable, &queue).await?;
         ctx.info(format!("queued {n} alerts on {queue}"));
         if n == 0 {
             // Nothing to do is a success, not a failure, but it is worth saying
@@ -562,16 +567,16 @@ mod tests {
 
     #[test]
     fn each_selection_builds_the_query_it_describes() {
-        assert_eq!(Selection::All.filter(7), doc! {});
+        assert_eq!(Selection::All.filter(&[7]), doc! {});
         assert_eq!(
             Selection::MissingField {
                 field: "classifications.acai_h".into()
             }
-            .filter(7),
+            .filter(&[7]),
             doc! { "classifications.acai_h": { "$exists": false } }
         );
         assert_eq!(
-            Selection::CandidRange { from: 1, to: 9 }.filter(7),
+            Selection::CandidRange { from: 1, to: 9 }.filter(&[7]),
             doc! { "_id": { "$gte": 1i64, "$lte": 9i64 } }
         );
     }
@@ -579,10 +584,11 @@ mod tests {
     #[test]
     fn stale_selects_everything_not_enriched_by_the_current_set() {
         // Including alerts with no stamp at all: they were enriched before
-        // stamping existed, so they cannot be shown to be current.
+        // stamping existed, so they cannot be shown to be current. `$nin`
+        // matches a missing field, which is what makes that work.
         assert_eq!(
-            Selection::Stale.filter(7),
-            doc! { "enrichment_set": { "$ne": 7i64 } }
+            Selection::Stale.filter(&[7]),
+            doc! { "enrichment_set": { "$nin": [7i64] } }
         );
     }
 
@@ -595,11 +601,21 @@ mod tests {
             field: "classifications.btsbot".into(),
         };
         assert_eq!(
-            changed_model.filter(7),
+            changed_model.filter(&[7]),
             doc! { "classifications.btsbot": { "$exists": false } },
             "MissingField cannot express staleness, which is why Stale exists"
         );
         assert!(Selection::Stale.describe().contains("current set"));
+    }
+
+    #[test]
+    fn stale_skips_sets_an_operator_accepted() {
+        // Accepting a set is a decision that reprocessing it is unnecessary;
+        // a run that redid it anyway would waste days and ignore the decision.
+        assert_eq!(
+            Selection::Stale.filter(&[6, 7]),
+            doc! { "enrichment_set": { "$nin": [6i64, 7i64] } }
+        );
     }
 
     #[test]

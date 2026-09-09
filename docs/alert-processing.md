@@ -153,6 +153,41 @@ Erring toward bumping costs a reprocessing run. Erring the other way leaves
 values that look current and are not — which is the failure this exists to
 prevent, and the one nobody notices.
 
+### Seeing what is stale
+
+The admin page shows an **Enrichment** section per survey: the current set, and
+any set alerts are still sitting at, with what each differs by (`differs by:
+btsbot`, `differs by: sso`). Alerts enriched before stamping existed are listed
+separately, since what produced them cannot be established at all.
+
+Like the catalogs table, it reports and never acts: re-enriching an archive is
+days of work and stays an explicit decision. The count also feeds the badge on
+the admin link, so drift is visible without going looking for it.
+
+`GET /enrichment/status` is the same data.
+
+### Accepting a set instead of reprocessing
+
+Not every change is worth a reprocessing run. A derivation version might be
+bumped for something that cannot affect the alerts already scored, or the stale
+values might simply be good enough. **Accept** the set and it stops being
+reported as drift, and a `stale` reprocess skips it.
+
+Accepting records the decision **against the set**, in one document. It does not
+touch a single alert, and that is deliberate: stamping alerts with a set that did
+not produce them would make each of them claim provenance it does not have —
+the one thing the stamp exists to prevent — and would cost a write per alert
+across the archive to do it. Every alert keeps saying exactly what enriched it;
+the acceptance sits beside that, with who decided and why.
+
+A reason is required, because "this is fine" is only useful to the next person
+if it says on what grounds. The decision is written to the `data_mutations`
+ledger, and it can be withdrawn — nothing is destroyed.
+
+An acceptance is **scoped to the set it was made against**. Accepting set 6 while
+7 is current says "6 is as good as 7". When the current set becomes 8, that is a
+new question and set 6 is reported as stale again.
+
 ### Kicking off a re-enrichment
 
 From the admin page, or the API:

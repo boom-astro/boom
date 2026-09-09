@@ -350,3 +350,166 @@ pub async fn get_data_mutations(
         Err(e) => response::internal_error(&format!("failed to read the ledger: {e}")),
     }
 }
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct AcceptSetBody {
+    /// Why this set is acceptable despite not being current. Required: "this is
+    /// fine" is only useful to the next person if it says on what grounds.
+    pub reason: String,
+}
+
+/// Report which enrichment each survey's alerts were produced by
+///
+/// The enrichment analogue of `/catalogs/status`: it reports drift and never
+/// acts on it. Re-enriching an archive is days of work, so starting one stays an
+/// explicit, attributed decision.
+#[utoipa::path(
+    get,
+    path = "/enrichment/status",
+    responses(
+        (status = 200, description = "Drift per survey", body = Vec<serde_json::Value>),
+        (status = 403, description = "Not an admin")
+    ),
+    tags=["Tasks"]
+)]
+#[get("/enrichment/status")]
+pub async fn get_enrichment_status(
+    db: web::Data<mongodb::Database>,
+    current_user: Option<web::ReqData<User>>,
+    babamul_user: Option<web::ReqData<BabamulUser>>,
+) -> HttpResponse {
+    if let Err(e) = require_admin(&current_user, &babamul_user) {
+        return e;
+    }
+    // Only ZTF has enrichment models declared today; LSST joins the list when
+    // it does, rather than reporting an empty status that reads as "no drift".
+    match crate::enrichment::version::drift_status(
+        &db,
+        "ztf",
+        crate::enrichment::version::ZTF_MODELS,
+    )
+    .await
+    {
+        Ok(status) => response::ok_ser("success", vec![status]),
+        Err(e) => response::internal_error(&format!("failed to read enrichment status: {e}")),
+    }
+}
+
+/// Accept a non-current enrichment set, so it stops being reported as drift
+///
+/// For when the difference does not matter for the alerts already scored — a
+/// derivation version bumped for a change that cannot affect them, say. It
+/// records the decision **against the set**; no alert is rewritten, so every
+/// alert keeps saying exactly which enrichment produced it.
+#[utoipa::path(
+    post,
+    path = "/enrichment/sets/{set_id}/accept",
+    params(("set_id" = i64, Path, description = "The set to accept")),
+    request_body = AcceptSetBody,
+    responses(
+        (status = 200, description = "Accepted"),
+        (status = 400, description = "No reason given"),
+        (status = 403, description = "Not an admin")
+    ),
+    tags=["Tasks"]
+)]
+#[post("/enrichment/sets/{set_id}/accept")]
+pub async fn accept_enrichment_set(
+    db: web::Data<mongodb::Database>,
+    set_id: web::Path<i64>,
+    body: web::Json<AcceptSetBody>,
+    current_user: Option<web::ReqData<User>>,
+    babamul_user: Option<web::ReqData<BabamulUser>>,
+) -> HttpResponse {
+    let admin = match require_admin(&current_user, &babamul_user) {
+        Ok(admin) => admin,
+        Err(e) => return e,
+    };
+    let reason = body.reason.trim();
+    if reason.is_empty() {
+        return response::bad_request("a reason is required to accept a set");
+    }
+
+    let current = match crate::enrichment::version::resolve_current_set(
+        &db,
+        "ztf",
+        crate::enrichment::version::ZTF_MODELS,
+    )
+    .await
+    {
+        Ok(set) => set,
+        Err(e) => return response::internal_error(&format!("failed to resolve the set: {e}")),
+    };
+
+    let actor = admin.as_task_actor();
+    if let Err(e) =
+        crate::enrichment::version::accept_set(&db, *set_id, current.id, &actor.user_id, reason)
+            .await
+    {
+        return response::internal_error(&format!("failed to accept the set: {e}"));
+    }
+
+    // The ledger is where "what has been done to this data, and by whom" lives,
+    // and deciding not to reprocess is such a decision.
+    let entry = tasks::ledger::MutationRecord {
+        id: uuid::Uuid::new_v4().to_string(),
+        source_kind: tasks::ledger::SourceKind::Task,
+        source_id: format!("enrichment-accept-{}", *set_id),
+        task_type: None,
+        actor,
+        trigger: Trigger::Api,
+        target: tasks::ledger::MutationTarget {
+            database: db.name().to_string(),
+            collection: "ZTF_alerts".to_string(),
+            catalog: None,
+            survey: Some("ztf".to_string()),
+        },
+        // No document changed; what changed is whether these alerts are
+        // considered to need reprocessing.
+        operation: tasks::ledger::Operation::Index,
+        details: mongodb::bson::doc! {
+            "accepted_set": *set_id,
+            "against_current_set": current.id,
+            "reason": reason,
+        },
+        recorded_at: now(),
+    };
+    if let Err(e) = tasks::ledger::record(&db, entry).await {
+        tracing::warn!("failed to record the acceptance in the ledger: {}", e);
+    }
+
+    tracing::info!(
+        set_id = *set_id,
+        "enrichment set accepted by {}: {}",
+        admin.username,
+        reason
+    );
+    response::ok_no_data("set accepted")
+}
+
+/// Withdraw an acceptance, so the set is reported as drift again
+#[utoipa::path(
+    post,
+    path = "/enrichment/sets/{set_id}/unaccept",
+    params(("set_id" = i64, Path, description = "The set to stop accepting")),
+    responses(
+        (status = 200, description = "Acceptance withdrawn"),
+        (status = 403, description = "Not an admin")
+    ),
+    tags=["Tasks"]
+)]
+#[post("/enrichment/sets/{set_id}/unaccept")]
+pub async fn unaccept_enrichment_set(
+    db: web::Data<mongodb::Database>,
+    set_id: web::Path<i64>,
+    current_user: Option<web::ReqData<User>>,
+    babamul_user: Option<web::ReqData<BabamulUser>>,
+) -> HttpResponse {
+    if let Err(e) = require_admin(&current_user, &babamul_user) {
+        return e;
+    }
+    match crate::enrichment::version::unaccept_set(&db, *set_id).await {
+        Ok(()) => response::ok_no_data("acceptance withdrawn"),
+        Err(e) => response::internal_error(&format!("failed to withdraw: {e}")),
+    }
+}

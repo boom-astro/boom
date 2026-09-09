@@ -155,6 +155,31 @@ pub struct EnrichmentSet {
     /// Digest of everything above; the key this set is interned on.
     pub fingerprint: String,
     pub first_seen: f64,
+    /// Set when an operator has decided alerts at this set need not be
+    /// reprocessed, even though it is not the current one.
+    ///
+    /// **This does not rewrite any alert.** Each alert keeps saying exactly
+    /// which set produced it; acceptance is recorded here, once, against the
+    /// set. Stamping alerts with a set that did not produce them would make the
+    /// provenance record lie, which is the one thing it exists not to do -- and
+    /// it would cost a write per alert across the archive to do it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted: Option<Acceptance>,
+}
+
+/// A decision that a non-current set is good enough.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Acceptance {
+    /// Who decided, realm-qualified as elsewhere.
+    pub actor: String,
+    /// Why. Required, because "this is fine" is only useful to the next person
+    /// if it says on what grounds.
+    pub reason: String,
+    pub accepted_at: f64,
+    /// The set that was current when the decision was made. If the current set
+    /// moves on again, that is a new decision to make rather than one already
+    /// covered.
+    pub accepted_against: i64,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -298,6 +323,7 @@ async fn intern(
             derivations: derivations.clone(),
             fingerprint: fingerprint.clone(),
             first_seen: chrono::Utc::now().timestamp() as f64,
+            accepted: None,
         };
 
         match sets.insert_one(&set).await {
@@ -348,6 +374,173 @@ pub fn diff(from: &EnrichmentSet, to: &EnrichmentSet) -> Vec<String> {
     changed
 }
 
+/// What the admin page shows about enrichment drift.
+#[derive(Debug, Clone, Serialize)]
+pub struct DriftStatus {
+    pub survey: String,
+    /// The set this release would produce.
+    pub current_set: i64,
+    /// Sets seen on alerts that are neither current nor accepted, with what
+    /// each one differs by. Empty means nothing needs reprocessing.
+    pub stale_sets: Vec<StaleSet>,
+    /// Sets an operator has explicitly accepted.
+    pub accepted_sets: Vec<i64>,
+    /// Whether any alert carries no set at all -- enriched before stamping
+    /// existed, so it cannot be shown to be current.
+    pub has_unstamped: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StaleSet {
+    pub id: i64,
+    /// Which models or derivations differ from the current set. This is what a
+    /// reprocessing run would have to redo.
+    pub changed: Vec<String>,
+}
+
+/// The set ids that do not need reprocessing: the current one, plus any an
+/// operator has accepted against it.
+///
+/// Acceptance is scoped to the set it was made against. If the current set has
+/// moved on since, the old decision no longer applies -- someone said "set 6 is
+/// as good as set 7", not "set 6 is good forever".
+pub async fn acceptable_set_ids(
+    db: &mongodb::Database,
+    survey: &str,
+    current: i64,
+) -> Result<Vec<i64>, VersionError> {
+    use futures::TryStreamExt;
+    use mongodb::bson::doc;
+
+    let accepted: Vec<EnrichmentSet> = db
+        .collection::<EnrichmentSet>(SETS_COLLECTION)
+        .find(doc! { "survey": survey, "accepted.accepted_against": current })
+        .await?
+        .try_collect()
+        .await?;
+
+    let mut ids: Vec<i64> = accepted.into_iter().map(|s| s.id).collect();
+    ids.push(current);
+    ids.sort_unstable();
+    Ok(ids)
+}
+
+/// The query for alerts that need re-enriching.
+pub fn stale_filter(acceptable: &[i64]) -> mongodb::bson::Document {
+    use mongodb::bson::doc;
+    // `$nin` also matches documents with no `enrichment_set` at all, which is
+    // what we want: those were enriched before stamping and cannot be shown to
+    // be current.
+    doc! { "enrichment_set": { "$nin": acceptable } }
+}
+
+/// Which sets alerts are actually sitting at, and how they differ.
+///
+/// Reads the *distinct* set ids on the collection rather than counting alerts:
+/// a count per set is an index scan over the whole archive, and the admin page
+/// polls. Distinct over an indexed field with a handful of values is cheap; the
+/// magnitude of the drift is a question for the reprocessing run, not for a
+/// status poll.
+pub async fn drift_status(
+    db: &mongodb::Database,
+    survey: &str,
+    models: &[ModelFile],
+) -> Result<DriftStatus, VersionError> {
+    use mongodb::bson::doc;
+
+    let current = resolve_current_set(db, survey, models).await?;
+    let acceptable = acceptable_set_ids(db, survey, current.id).await?;
+
+    let alerts =
+        db.collection::<mongodb::bson::Document>(&format!("{}_alerts", survey.to_uppercase()));
+    let seen = alerts.distinct("enrichment_set", doc! {}).await?;
+
+    let mut stale_sets = Vec::new();
+    let mut has_unstamped = false;
+    for value in seen {
+        match value.as_i64() {
+            Some(id) if !acceptable.contains(&id) => {
+                // What a reprocessing run would have to redo. A set that is no
+                // longer in the registry cannot be diffed, and is reported with
+                // no detail rather than omitted.
+                let changed = match db
+                    .collection::<EnrichmentSet>(SETS_COLLECTION)
+                    .find_one(doc! { "_id": id })
+                    .await?
+                {
+                    Some(old) => diff(&old, &current),
+                    None => Vec::new(),
+                };
+                stale_sets.push(StaleSet { id, changed });
+            }
+            Some(_) => {}
+            // A null or absent value: enriched before stamping existed.
+            None => has_unstamped = true,
+        }
+    }
+    stale_sets.sort_by_key(|s| s.id);
+
+    Ok(DriftStatus {
+        survey: survey.to_string(),
+        current_set: current.id,
+        stale_sets,
+        accepted_sets: acceptable
+            .into_iter()
+            .filter(|id| *id != current.id)
+            .collect(),
+        has_unstamped,
+    })
+}
+
+/// Record that a non-current set is acceptable, so it stops being reported as
+/// drift.
+///
+/// Writes one document. It does **not** touch a single alert: the alternative --
+/// stamping alerts with a set that did not produce them -- would cost a write
+/// per alert and, far worse, would make each of those alerts claim provenance
+/// it does not have.
+pub async fn accept_set(
+    db: &mongodb::Database,
+    set_id: i64,
+    current: i64,
+    actor: &str,
+    reason: &str,
+) -> Result<(), VersionError> {
+    use mongodb::bson::doc;
+
+    if set_id == current {
+        // Nothing to accept, and recording it would imply the current set was
+        // in some way doubtful.
+        return Ok(());
+    }
+    let acceptance = Acceptance {
+        actor: actor.to_string(),
+        reason: reason.to_string(),
+        accepted_at: chrono::Utc::now().timestamp() as f64,
+        accepted_against: current,
+    };
+    db.collection::<EnrichmentSet>(SETS_COLLECTION)
+        .update_one(
+            doc! { "_id": set_id },
+            doc! { "$set": { "accepted": mongodb::bson::to_bson(&acceptance)
+            .map_err(|e| VersionError::InternFailed(e.to_string()))? } },
+        )
+        .await?;
+    Ok(())
+}
+
+/// Withdraw an acceptance, so the set is reported as drift again.
+pub async fn unaccept_set(db: &mongodb::Database, set_id: i64) -> Result<(), VersionError> {
+    use mongodb::bson::doc;
+    db.collection::<EnrichmentSet>(SETS_COLLECTION)
+        .update_one(
+            doc! { "_id": set_id },
+            doc! { "$unset": { "accepted": "" } },
+        )
+        .await?;
+    Ok(())
+}
+
 /// Index for the drift query.
 pub async fn initialize_indexes(db: &mongodb::Database) -> Result<(), mongodb::error::Error> {
     use mongodb::bson::doc;
@@ -393,6 +586,7 @@ mod tests {
             models,
             derivations,
             first_seen: 0.0,
+            accepted: None,
         }
     }
 
@@ -591,6 +785,127 @@ mod tests {
                 .delete_many(mongodb::bson::doc! { "survey": survey })
                 .await;
         }
+    }
+
+    #[test]
+    fn the_stale_filter_catches_unstamped_alerts() {
+        // `$nin` matches a document with no such field, which is what makes
+        // pre-stamping alerts show up as stale. They cannot be shown to be
+        // current, so treating them as fine would be a guess.
+        let filter = stale_filter(&[7]);
+        assert_eq!(
+            filter,
+            mongodb::bson::doc! { "enrichment_set": { "$nin": [7i64] } }
+        );
+    }
+
+    #[tokio::test]
+    async fn accepting_a_set_changes_no_alert() {
+        // The point of accepting rather than restamping: an alert stamped with
+        // a set that did not produce it would claim provenance it does not
+        // have, which is the one thing the stamp exists not to do.
+        let db = crate::conf::get_test_db().await;
+        let survey = format!("accept_{}", uuid::Uuid::new_v4().simple());
+
+        let current = resolve_current_set(&db, &survey, ZTF_MODELS)
+            .await
+            .expect("resolves");
+        // A second, different set to stand in for an older enrichment.
+        let older = intern(
+            &db,
+            &survey,
+            current.models.clone(),
+            [("photstats".to_string(), 99u32)].into_iter().collect(),
+            format!("older-{survey}"),
+        )
+        .await
+        .expect("interned");
+
+        assert_eq!(
+            acceptable_set_ids(&db, &survey, current.id).await.unwrap(),
+            vec![current.id],
+            "nothing is acceptable but the current set until someone says so"
+        );
+
+        accept_set(
+            &db,
+            older.id,
+            current.id,
+            "babamul:someone",
+            "no output change",
+        )
+        .await
+        .expect("accepted");
+
+        let mut acceptable = acceptable_set_ids(&db, &survey, current.id).await.unwrap();
+        acceptable.sort_unstable();
+        let mut expected = vec![current.id, older.id];
+        expected.sort_unstable();
+        assert_eq!(
+            acceptable, expected,
+            "the accepted set joins the current one"
+        );
+
+        // The reason is recorded, so the next person can see the grounds.
+        let stored = db
+            .collection::<EnrichmentSet>(SETS_COLLECTION)
+            .find_one(mongodb::bson::doc! { "_id": older.id })
+            .await
+            .unwrap()
+            .unwrap();
+        let acceptance = stored.accepted.expect("recorded");
+        assert_eq!(acceptance.reason, "no output change");
+        assert_eq!(acceptance.accepted_against, current.id);
+
+        // Withdrawing puts it back into drift.
+        unaccept_set(&db, older.id).await.expect("withdrawn");
+        assert_eq!(
+            acceptable_set_ids(&db, &survey, current.id).await.unwrap(),
+            vec![current.id]
+        );
+
+        let _ = db
+            .collection::<EnrichmentSet>(SETS_COLLECTION)
+            .delete_many(mongodb::bson::doc! { "survey": &survey })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn an_acceptance_does_not_survive_the_current_set_moving_on() {
+        // Someone said "set 6 is as good as set 7", not "set 6 is good
+        // forever". When the current set becomes 8, that is a new decision.
+        let db = crate::conf::get_test_db().await;
+        let survey = format!("scoped_{}", uuid::Uuid::new_v4().simple());
+
+        let current = resolve_current_set(&db, &survey, ZTF_MODELS)
+            .await
+            .expect("resolves");
+        let older = intern(
+            &db,
+            &survey,
+            current.models.clone(),
+            [("photstats".to_string(), 98u32)].into_iter().collect(),
+            format!("older2-{survey}"),
+        )
+        .await
+        .expect("interned");
+
+        accept_set(&db, older.id, current.id, "babamul:someone", "fine for now")
+            .await
+            .expect("accepted");
+
+        // A later current set: the old acceptance no longer applies.
+        let moved_on = current.id + 1000;
+        assert_eq!(
+            acceptable_set_ids(&db, &survey, moved_on).await.unwrap(),
+            vec![moved_on],
+            "the acceptance was scoped to the set it was made against"
+        );
+
+        let _ = db
+            .collection::<EnrichmentSet>(SETS_COLLECTION)
+            .delete_many(mongodb::bson::doc! { "survey": &survey })
+            .await;
     }
 
     #[test]

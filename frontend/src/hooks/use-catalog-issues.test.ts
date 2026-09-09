@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { countIssues } from "./use-catalog-issues";
+import { countEnrichmentIssues, countIssues } from "./use-catalog-issues";
 import type { CatalogStatus, CatalogHealth } from "@/lib/adminApi";
 
 function catalog(id: string, health: CatalogHealth): CatalogStatus {
@@ -59,5 +59,47 @@ describe("countIssues", () => {
 
   it("is zero for a deployment that declares nothing", () => {
     expect(countIssues([]).count).toBe(0);
+  });
+});
+
+describe("countEnrichmentIssues", () => {
+  const clean = {
+    survey: "ztf",
+    current_set: 7,
+    stale_sets: [],
+    accepted_sets: [],
+    has_unstamped: false,
+  };
+
+  it("reports nothing when every alert is at the current set", () => {
+    expect(countEnrichmentIssues([clean]).count).toBe(0);
+  });
+
+  it("counts a survey once, however many stale sets it has", () => {
+    // An operator acts on "ZTF needs reprocessing", not on each set: one run
+    // covers all of them.
+    const { count, parts } = countEnrichmentIssues([
+      {
+        ...clean,
+        stale_sets: [
+          { id: 5, changed: ["btsbot"] },
+          { id: 6, changed: ["sso"] },
+        ],
+      },
+    ]);
+    expect(count).toBe(1);
+    expect(parts).toEqual(["ZTF enrichment is stale"]);
+  });
+
+  it("counts alerts that predate stamping as drift", () => {
+    // They carry no set, so what produced them cannot be established.
+    expect(countEnrichmentIssues([{ ...clean, has_unstamped: true }]).count).toBe(1);
+  });
+
+  it("does not count a set an operator accepted", () => {
+    // Accepted sets are absent from stale_sets, so the survey reads clean.
+    expect(
+      countEnrichmentIssues([{ ...clean, accepted_sets: [6] }]).count,
+    ).toBe(0);
   });
 });

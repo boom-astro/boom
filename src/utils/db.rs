@@ -123,6 +123,14 @@ pub async fn initialize_survey_indexes(
     };
     create_index(&alerts_collection, index, false).await?;
 
+    // Which enrichment produced each alert. Without this the drift check and
+    // the reprocessing selection are collection scans over the whole archive,
+    // and neither is worth running at that price.
+    let index = doc! {
+        "enrichment_set": 1,
+    };
+    create_index(&alerts_collection, index, false).await?;
+
     // ZTF joins a moving object's detections by MPC designation, since objectId is
     // positional. Indexes the raw field, which is present on the whole archive.
     if survey == &Survey::Ztf {

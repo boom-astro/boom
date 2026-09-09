@@ -8,15 +8,19 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   cancelTaskRun,
+  acceptEnrichmentSet,
   fetchCatalogStatus,
+  fetchEnrichmentStatus,
   fetchTaskLogs,
   fetchTaskRuns,
   fetchTaskTypes,
   isActive,
   submitCatalogIngest,
   submitTask,
+  unacceptEnrichmentSet,
   type CatalogHealth,
   type CatalogStatus,
+  type EnrichmentDrift,
   type TaskLogLine,
   type TaskRun,
   type TaskType,
@@ -24,6 +28,7 @@ import {
 import { TaskForm } from "@/components/task-form";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 
 /** How often to re-poll while anything is still running. */
 const POLL_MS = 3000;
@@ -382,6 +387,167 @@ function RunDetail({ runId, onClose }: { runId: string; onClose: () => void }) {
 }
 
 /**
+ * Which enrichment produced the alerts already in the database.
+ *
+ * The enrichment counterpart of the catalogs table: it reports drift and never
+ * acts on it, because re-enriching an archive is days of work.
+ */
+function EnrichmentDriftTable({
+  drift,
+  onReprocess,
+  onAccept,
+  onUnaccept,
+  busy,
+}: {
+  drift: EnrichmentDrift[];
+  onReprocess: (survey: string) => void;
+  onAccept: (setId: number, reason: string) => void;
+  onUnaccept: (setId: number) => void;
+  busy: string | null;
+}) {
+  const [accepting, setAccepting] = useState<number | null>(null);
+  const [reason, setReason] = useState("");
+
+  if (drift.length === 0) return null;
+
+  return (
+    <section className="mb-8">
+      <h2 className="text-lg font-semibold mb-1">Enrichment</h2>
+      <p className="text-sm text-muted-foreground mb-3">
+        Enrichment runs once, when an alert is ingested. After a model or a
+        derivation changes, alerts already in the database hold values the
+        current code would not produce.
+      </p>
+
+      {drift.map((survey) => {
+        const clean = survey.stale_sets.length === 0 && !survey.has_unstamped;
+        return (
+          <div key={survey.survey} className="border rounded-lg p-3 mb-3">
+            <div className="flex items-center justify-between gap-4 mb-2">
+              <div>
+                <span className="font-medium uppercase">{survey.survey}</span>{" "}
+                <span className="text-xs text-muted-foreground font-mono">
+                  current set {survey.current_set}
+                </span>
+              </div>
+              {clean ? (
+                <Badge>up to date</Badge>
+              ) : (
+                <Button
+                  size="sm"
+                  disabled={busy === survey.survey}
+                  onClick={() => onReprocess(survey.survey)}
+                >
+                  {busy === survey.survey ? "Starting…" : "Reprocess stale"}
+                </Button>
+              )}
+            </div>
+
+            {clean ? (
+              <p className="text-xs text-muted-foreground">
+                Every alert was enriched by the current set.
+              </p>
+            ) : (
+              <table className="w-full text-sm">
+                <tbody>
+                  {survey.has_unstamped && (
+                    <tr className="border-b">
+                      <td className="py-2 pr-4">
+                        <div className="font-medium">Enriched before stamping</div>
+                        <div className="text-xs text-muted-foreground">
+                          These carry no set at all, so what produced them cannot
+                          be established. Reprocessing is the only way to make
+                          them attributable.
+                        </div>
+                      </td>
+                      <td className="py-2 w-32 text-right text-xs text-muted-foreground">
+                        no set
+                      </td>
+                    </tr>
+                  )}
+                  {survey.stale_sets.map((stale) => (
+                    <tr key={stale.id} className="border-b last:border-0">
+                      <td className="py-2 pr-4">
+                        <div className="font-medium">Set {stale.id}</div>
+                        <div className="text-xs text-muted-foreground">
+                          {stale.changed.length > 0
+                            ? `differs by: ${stale.changed.join(", ")}`
+                            : "no longer in the registry, so what changed is unknown"}
+                        </div>
+                        {accepting === stale.id && (
+                          <div className="mt-2 flex items-center gap-2">
+                            <Input
+                              autoFocus
+                              placeholder="Why is this acceptable?"
+                              value={reason}
+                              onChange={(e) => setReason(e.target.value)}
+                              className="h-8 text-xs"
+                            />
+                            <Button
+                              size="sm"
+                              disabled={!reason.trim()}
+                              onClick={() => {
+                                onAccept(stale.id, reason.trim());
+                                setAccepting(null);
+                                setReason("");
+                              }}
+                            >
+                              Accept
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => setAccepting(null)}
+                            >
+                              Cancel
+                            </Button>
+                          </div>
+                        )}
+                      </td>
+                      <td className="py-2 w-32 text-right">
+                        {accepting !== stale.id && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => setAccepting(stale.id)}
+                          >
+                            Accept
+                          </Button>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+
+            {survey.accepted_sets.length > 0 && (
+              <p className="text-xs text-muted-foreground mt-2">
+                Accepted (not reported as drift, and skipped by a reprocess):{" "}
+                {survey.accepted_sets.map((id, i) => (
+                  <span key={id}>
+                    {i > 0 && ", "}
+                    set {id}{" "}
+                    <button
+                      className="underline hover:no-underline"
+                      onClick={() => onUnaccept(id)}
+                    >
+                      undo
+                    </button>
+                  </span>
+                ))}
+                . Accepting records the decision against the set; no alert is
+                rewritten, so each still says what actually produced it.
+              </p>
+            )}
+          </div>
+        );
+      })}
+    </section>
+  );
+}
+
+/**
  * Every task this release can run, with a form built from its schema.
  *
  * Catalog ingests have their own row-level button above, because starting one
@@ -506,6 +672,7 @@ export default function Admin() {
   const [catalogs, setCatalogs] = useState<CatalogStatus[]>([]);
   const [runs, setRuns] = useState<TaskRun[]>([]);
   const [taskTypes, setTaskTypes] = useState<TaskType[]>([]);
+  const [enrichment, setEnrichment] = useState<EnrichmentDrift[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -513,14 +680,16 @@ export default function Admin() {
 
   const refresh = useCallback(async () => {
     try {
-      const [status, recent, types] = await Promise.all([
+      const [status, recent, types, drift] = await Promise.all([
         fetchCatalogStatus(),
         fetchTaskRuns(),
         fetchTaskTypes(),
+        fetchEnrichmentStatus(),
       ]);
       setCatalogs(status);
       setRuns(recent);
       setTaskTypes(types);
+      setEnrichment(drift);
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -558,6 +727,48 @@ export default function Admin() {
   async function onCancelRun(runId: string) {
     try {
       await cancelTaskRun(runId);
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  async function onReprocessStale(survey: string) {
+    await onSubmitTaskFor(survey, "enrich_reprocess", {
+      survey,
+      selection: { kind: "stale" },
+    });
+  }
+
+  async function onSubmitTaskFor(
+    busyKey: string,
+    taskType: string,
+    params: Record<string, unknown>,
+  ) {
+    setBusy(busyKey);
+    try {
+      const run = await submitTask(taskType, params);
+      setSelected(run._id);
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function onAcceptSet(setId: number, reason: string) {
+    try {
+      await acceptEnrichmentSet(setId, reason);
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  async function onUnacceptSet(setId: number) {
+    try {
+      await unacceptEnrichmentSet(setId);
       await refresh();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -613,6 +824,13 @@ export default function Admin() {
               error={error}
             />
             {selected && <RunDetail runId={selected} onClose={() => setSelected(null)} />}
+            <EnrichmentDriftTable
+              drift={enrichment}
+              onReprocess={onReprocessStale}
+              onAccept={onAcceptSet}
+              onUnaccept={onUnacceptSet}
+              busy={busy}
+            />
             <TaskCatalogue types={taskTypes} onSubmit={onSubmitTask} busy={busy} />
             <RunsTable runs={runs} onSelect={setSelected} />
           </>
