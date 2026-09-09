@@ -171,8 +171,17 @@ pub trait Model {
     ) -> Result<Vec<f32>, ModelError>;
 }
 
+/// Raw outputs of the AppleCiDER fusion graph.
+///
+/// `alpha` is the Dirichlet concentration; `probs` is its mean, before the
+/// deployment calibration applied in `applecider_postprocess`.
+pub struct FusionOutputs {
+    pub probs: Vec<f32>,
+    pub alpha: Vec<f32>,
+    pub embedding: Vec<f32>,
+}
+
 pub trait FusionModel {
-    /// Returns `(probs, fusion_embedding)`.
     fn predict(
         &mut self,
         tempo_x: &ndarray::Array3<f32>,
@@ -180,5 +189,5 @@ pub trait FusionModel {
         tempo_global: &ndarray::Array2<f32>,
         metadata: &Array<f32, Dim<[usize; 2]>>,
         image: &Array<f32, Dim<[usize; 4]>>,
-    ) -> Result<(Vec<f32>, Vec<f32>), ModelError>;
+    ) -> Result<FusionOutputs, ModelError>;
 }

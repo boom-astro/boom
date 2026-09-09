@@ -1,5 +1,5 @@
 use crate::enrichment::models::{
-    load_model, load_model_on_device_with_cpu_fallback, FusionModel, ModelError,
+    load_model, load_model_on_device_with_cpu_fallback, FusionModel, FusionOutputs, ModelError,
 };
 use crate::enrichment::ZtfAlertForEnrichment;
 use crate::utils::cutouts::AlertCutout;
@@ -39,7 +39,7 @@ impl FusionModel for CiderFusionModel {
         tempo_global: &Array2<f32>,
         metadata: &Array<f32, Dim<[usize; 2]>>,
         image: &Array<f32, Dim<[usize; 4]>>,
-    ) -> Result<(Vec<f32>, Vec<f32>), ModelError> {
+    ) -> Result<FusionOutputs, ModelError> {
         let outputs = self.model.run(inputs! {
             "tempo_x"        => TensorRef::from_array_view(tempo_x.view())?,
             "tempo_pad_mask" => TensorRef::from_array_view(tempo_pad_mask.view())?,
@@ -51,10 +51,18 @@ impl FusionModel for CiderFusionModel {
         let (_, probs) = outputs["probs"]
             .try_extract_tensor::<f32>()
             .map_err(|_| ModelError::ModelOutputToVecError)?;
+        // alpha carries the evidence the calibrated outputs are derived from.
+        let (_, alpha) = outputs["alpha"]
+            .try_extract_tensor::<f32>()
+            .map_err(|_| ModelError::ModelOutputToVecError)?;
         let (_, embedding) = outputs["fusion_embedding"]
             .try_extract_tensor::<f32>()
             .map_err(|_| ModelError::ModelOutputToVecError)?;
-        Ok((probs.to_vec(), embedding.to_vec()))
+        Ok(FusionOutputs {
+            probs: probs.to_vec(),
+            alpha: alpha.to_vec(),
+            embedding: embedding.to_vec(),
+        })
     }
 }
 

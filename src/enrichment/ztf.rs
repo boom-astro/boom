@@ -3,7 +3,10 @@ use crate::conf::AppConfig;
 use crate::enrichment::{
     babamul::{Babamul, BabamulZtfAlert},
     fetch_alerts,
-    models::{AcaiModel, BtsBotModel, FusionModel, Model, ModelError, SharedModels},
+    models::{
+        applecider_postprocess, AcaiModel, AppleCiderOutputs, BtsBotModel, FusionModel,
+        FusionOutputs, Model, ModelError, SharedModels,
+    },
     EnrichmentWorker, EnrichmentWorkerError, LsstMatch, LsstPhotometry,
 };
 use crate::utils::cutouts::{AlertCutout, CutoutStorage};
@@ -397,8 +400,11 @@ pub struct ZtfAlertProperties {
 }
 
 /// Field order matches the ONNX output index (0-7).
+///
+/// Used both for the calibrated leaf probabilities and for the raw Dirichlet
+/// `alpha`, which share these eight class keys.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize, AvroSchema, utoipa::ToSchema)]
-pub struct CiderClassProbs {
+pub struct AppleCiderClassProbs {
     #[serde(rename = "AGN-like")]
     pub agn_like: f32,
     #[serde(rename = "Accreting WD Var")]
@@ -417,8 +423,8 @@ pub struct CiderClassProbs {
     pub superluminous_sn: f32,
 }
 
-impl CiderClassProbs {
-    fn from_probs(p: &[f32]) -> Option<Self> {
+impl AppleCiderClassProbs {
+    pub(crate) fn from_probs(p: &[f32]) -> Option<Self> {
         if p.len() < 8 {
             return None;
         }
@@ -433,6 +439,11 @@ impl CiderClassProbs {
             superluminous_sn: p[7],
         })
     }
+
+    pub(crate) fn from_slice_f64(p: &[f64]) -> Option<Self> {
+        let as_f32: Vec<f32> = p.iter().map(|&v| v as f32).collect();
+        Self::from_probs(&as_f32)
+    }
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize, AvroSchema, utoipa::ToSchema)]
@@ -443,8 +454,14 @@ pub struct ZtfAlertClassifications {
     pub acai_o: f32,
     pub acai_b: f32,
     pub btsbot: f32,
+    // pub cider_fusion: Option<CiderClassProbs>,
+    /// Calibrated, prior-adjusted leaf probabilities. Previously the raw head
+    /// output; `applecider_outputs.alpha` still recovers that exactly.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub cider_fusion: Option<CiderClassProbs>,
+    pub applecider_fusion: Option<AppleCiderClassProbs>,
+    /// Evidence, hierarchy and abstention decision, all derived from `alpha`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub applecider_outputs: Option<AppleCiderOutputs>,
     #[serde(skip_serializing)]
     pub fusion_embedding: Option<Vec<f32>>,
 }
@@ -1052,16 +1069,16 @@ impl ZtfEnrichmentWorker {
                     Self::predict_acai_btsbot(models, &metadata, &btsbot_metadata, &triplet)?;
 
                 let cider_result = if item.cider_eligible() {
-                    (|| -> Result<(CiderClassProbs, Vec<f32>), ModelError> {
+                    (|| -> Result<(AppleCiderClassProbs, AppleCiderOutputs, Vec<f32>), ModelError> {
                         let mut m = models.cider.lock().unwrap();
                         let meta = m.get_metadata(&[&item.alert], &[&item.all_bands_properties])?;
                         let img = m.get_triplet(&[&item.cutouts])?;
                         let (tx, tpm, tg) = m.photometry_inputs(item.ztf_lightcurve.clone())?;
-                        let (probs, embedding) = m.predict(&tx, &tpm, &tg, &meta, &img)?;
-                        let cls = CiderClassProbs::from_probs(&probs).ok_or(
-                            ModelError::MissingFeature("cider: unexpected output length"),
+                        let out = m.predict(&tx, &tpm, &tg, &meta, &img)?;
+                        let (probs, outputs) = applecider_postprocess::derive(&out.alpha).ok_or(
+                            ModelError::MissingFeature("applecider: unexpected output length"),
                         )?;
-                        Ok((cls, embedding))
+                        Ok((probs, outputs, out.embedding))
                     })()
                     .map_err(|e| {
                         warn!("cider inference failed for candid {}: {}", item.candid, e);
@@ -1078,8 +1095,9 @@ impl ZtfEnrichmentWorker {
                     acai_o: acai_o[0],
                     acai_b: acai_b[0],
                     btsbot: btsbot[0],
-                    cider_fusion: cider_result.as_ref().map(|(cls, _)| cls.clone()),
-                    fusion_embedding: cider_result.map(|(_, emb)| emb),
+                    applecider_fusion: cider_result.as_ref().map(|(p, _, _)| p.clone()),
+                    applecider_outputs: cider_result.as_ref().map(|(_, o, _)| o.clone()),
+                    fusion_embedding: cider_result.map(|(_, _, emb)| emb),
                 })
             } else {
                 warn!(
@@ -1148,8 +1166,8 @@ impl ZtfEnrichmentWorker {
             .filter(|&i| work_items[i].cider_eligible())
             .collect();
         let cider_pos = row_of(&cider_indices);
-        let cider_batch: Option<(Vec<f32>, Vec<f32>)> = (!cider_indices.is_empty())
-            .then(|| -> Result<(Vec<f32>, Vec<f32>), ModelError> {
+        let cider_batch: Option<FusionOutputs> = (!cider_indices.is_empty())
+            .then(|| -> Result<FusionOutputs, ModelError> {
                 let cider_alerts: Vec<&ZtfAlertForEnrichment> = cider_indices
                     .iter()
                     .map(|&i| &work_items[i].alert)
@@ -1189,13 +1207,22 @@ impl ZtfEnrichmentWorker {
                 .ok()
             });
 
-        let cider_n_cls = cider_batch
-            .as_ref()
-            .map(|(p, _)| p.len() / cider_indices.len())
-            .unwrap_or(0);
+        // One entry per row of `cider_indices`, in the same order. `None` means
+        // the batch came back a shape the postprocessing does not recognise.
+        let cider_derived = cider_batch.as_ref().and_then(|out| {
+            let derived = applecider_postprocess::derive_batch(&out.alpha, cider_indices.len());
+            if derived.is_none() {
+                warn!(
+                    alpha_len = out.alpha.len(),
+                    rows = cider_indices.len(),
+                    "applecider: unexpected alpha batch shape, skipping outputs"
+                );
+            }
+            derived
+        });
         let cider_emb_dim = cider_batch
             .as_ref()
-            .map(|(_, e)| e.len() / cider_indices.len())
+            .map(|out| out.embedding.len() / cider_indices.len())
             .unwrap_or(0);
 
         // ORT needs one fixed input shape, so pad the last chunk and drop the pad rows.
@@ -1231,6 +1258,11 @@ impl ZtfEnrichmentWorker {
 
             for (batch_idx, &item_idx) in chunk.iter().enumerate() {
                 let cider = cider_pos.get(&item_idx).copied().zip(cider_batch.as_ref());
+                let derived = cider_pos
+                    .get(&item_idx)
+                    .copied()
+                    .zip(cider_derived.as_ref())
+                    .map(|(row, rows)| &rows[row]);
                 results[item_idx] = Some(ZtfAlertClassifications {
                     acai_h: acai_h[batch_idx],
                     acai_n: acai_n[batch_idx],
@@ -1238,13 +1270,10 @@ impl ZtfEnrichmentWorker {
                     acai_o: acai_o[batch_idx],
                     acai_b: acai_b[batch_idx],
                     btsbot: btsbot[batch_idx],
-                    cider_fusion: cider.and_then(|(row, (probs, _))| {
-                        CiderClassProbs::from_probs(
-                            &probs[row * cider_n_cls..(row + 1) * cider_n_cls],
-                        )
-                    }),
-                    fusion_embedding: cider.map(|(row, (_, emb))| {
-                        emb[row * cider_emb_dim..(row + 1) * cider_emb_dim].to_vec()
+                    applecider_fusion: derived.map(|(p, _)| p.clone()),
+                    applecider_outputs: derived.map(|(_, o)| o.clone()),
+                    fusion_embedding: cider.map(|(row, out)| {
+                        out.embedding[row * cider_emb_dim..(row + 1) * cider_emb_dim].to_vec()
                     }),
                 });
             }

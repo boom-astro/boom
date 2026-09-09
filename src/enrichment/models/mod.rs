@@ -1,12 +1,14 @@
 mod acai;
+pub mod applecider_postprocess;
 mod base;
 mod btsbot;
 mod cider;
 
 pub use acai::AcaiModel;
+pub use applecider_postprocess::AppleCiderOutputs;
 pub use base::{
-    load_model, load_model_on_device, load_model_on_device_with_cpu_fallback, FusionModel, Model,
-    ModelError,
+    load_model, load_model_on_device, load_model_on_device_with_cpu_fallback, FusionModel,
+    FusionOutputs, Model, ModelError,
 };
 pub use btsbot::BtsBotModel;
 pub use cider::CiderFusionModel;
