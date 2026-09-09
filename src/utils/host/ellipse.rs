@@ -145,6 +145,24 @@ mod tests {
     }
 
     #[test]
+    fn test_from_tractor_pa_is_east_of_north() {
+        use std::f64::consts::{FRAC_PI_2, FRAC_PI_4};
+        // Tractor's 0.5*atan2(e2, e1) is already east of north, matching NED's Diam_pa.
+        assert_close!(
+            Ellipse::from_tractor(2.0, 0.5, 0.0, 0.05).unwrap().pa_rad,
+            0.0
+        );
+        assert_close!(
+            Ellipse::from_tractor(2.0, -0.5, 0.0, 0.05).unwrap().pa_rad,
+            FRAC_PI_2
+        );
+        assert_close!(
+            Ellipse::from_tractor(2.0, 0.0, 0.5, 0.05).unwrap().pa_rad,
+            FRAC_PI_4
+        );
+    }
+
+    #[test]
     fn test_from_tractor_invalid() {
         assert!(Ellipse::from_tractor(0.0, 0.0, 0.0, 0.05).is_err());
         assert!(Ellipse::from_tractor(1.0, f64::NAN, 0.0, 0.05).is_err());
