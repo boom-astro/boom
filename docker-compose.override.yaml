@@ -126,8 +126,12 @@ services:
       BOOM_BOOMPY_PATH: /app/boompy
       UV_PROJECT_ENVIRONMENT: /app/boompy/.venv
     entrypoint:
+      # `bash -c`, not `-lc`: a login shell sources /etc/profile and replaces
+      # the PATH the rust image sets, which drops /usr/local/cargo/bin and makes
+      # cargo vanish. A shell is needed at all only to run `uv sync` before
+      # handing off to cargo-watch.
       - /bin/bash
-      - -lc
+      - -c
     command:
       - >-
         uv sync --project /app/boompy --frozen --no-dev &&
