@@ -300,11 +300,17 @@ services:
       - traefik.http.routers.${STACK_NAME?Variable not set}-api-http.middlewares=https-redirect,${STACK_NAME?Variable not set}-www-redirect,${STACK_NAME?Variable not set}-api-ratelimit,${STACK_NAME?Variable not set}-api-compress
       - traefik.http.routers.${STACK_NAME?Variable not set}-api-https.middlewares=${STACK_NAME?Variable not set}-www-redirect,${STACK_NAME?Variable not set}-api-ratelimit,${STACK_NAME?Variable not set}-api-compress
   frontend:
-    # Built locally and never published: no workflow pushes a frontend image, so
-    # this is a local tag rather than a registry path. `pull_policy: build` is
-    # what stops compose trying to pull it and failing with "pull access denied".
-    image: boom-astro/boom-frontend:local
-    pull_policy: build
+    # Published to GHCR on release (.github/workflows/build-frontend.yaml), but
+    # built here by default -- and that default is deliberate. Vite inlines
+    # `import.meta.env.VITE_*` into the bundle at build time, so the published
+    # image carries neutral values: analytics off, prerelease mode false, and no
+    # Kafka domain on the docs page. A deployment that needs any of those has to
+    # build its own, which `pull_policy: build` makes the default path.
+    #
+    # Set BOOM_FRONTEND_IMAGE to pull the published one instead, for a
+    # deployment that wants none of those values.
+    image: ${BOOM_FRONTEND_IMAGE:-boom-astro/boom-frontend:local}
+    pull_policy: ${BOOM_FRONTEND_PULL_POLICY:-build}
     hostname: frontend
     build:
       # Root context so the build can bundle docs/babamul.md (see frontend/Dockerfile).
