@@ -56,8 +56,8 @@ async fn main() {
     match refresh_orbits(db.as_ref(), &args.url, args.batch_size, now, true).await {
         Ok(report) => {
             info!(
-                "read {} lines: {} orbits parsed, {} skipped (header/blank/unusable)",
-                report.lines, report.parsed, report.skipped
+                "read {} lines: {} orbits parsed, {} skipped (header/blank/unusable), {} comets",
+                report.lines, report.parsed, report.skipped, report.comets
             );
             for sample in &report.rejected_samples {
                 warn!("rejected record-shaped line: {}", sample);
