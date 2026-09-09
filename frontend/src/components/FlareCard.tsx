@@ -164,7 +164,6 @@ export default function FlareCard({ alert }: { alert: unknown }) {
         </div>
       </CardContent>
 
-      {/* Help Dialog */}
       <Dialog open={helpDialogOpen} onOpenChange={setHelpDialogOpen}>
         <DialogContent className="w-[min(1000px,95vw)] max-w-none sm:!max-w-none max-h-[90vh] overflow-auto">
           <DialogHeader>
