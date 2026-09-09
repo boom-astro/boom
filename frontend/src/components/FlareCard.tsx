@@ -34,6 +34,8 @@ export type FlareResult = {
   model?: string;
 };
 
+const CONTEXT_COLUMNS = 30;
+
 type ProbKey = 'p_sn_ia' | 'p_sn_cc' | 'p_slsn' | 'p_agn' | 'p_tde' | 'p_cv';
 
 const CLASSES: Array<{ key: string; name: string; prob: ProbKey }> = [
@@ -137,7 +139,7 @@ export default function FlareCard({ alert }: { alert: unknown }) {
 
           <span className="text-muted-foreground">Catalog columns</span>
           <span className="font-medium">
-            {flare.n_context_present !== undefined ? `${flare.n_context_present} of 30` : '—'}
+            {flare.n_context_present !== undefined ? `${flare.n_context_present} of ${CONTEXT_COLUMNS}` : '—'}
           </span>
         </div>
 
@@ -221,7 +223,7 @@ export default function FlareCard({ alert }: { alert: unknown }) {
                 </div>
                 <div className="flex items-start gap-2">
                   <span className="font-medium">Catalog columns:</span>
-                  <span>How many of the 30 cross-match features were available. Missing catalogs lower the reliability of the result.</span>
+                  <span>How many of the {CONTEXT_COLUMNS} cross-match features were available. Missing catalogs lower the reliability of the result.</span>
                 </div>
               </div>
             </div>
