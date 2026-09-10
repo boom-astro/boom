@@ -591,8 +591,7 @@ pub struct ZtfEnrichmentWorker {
     models: Arc<SharedModels>,
     babamul: Option<Babamul>,
     gpu_enabled: bool,
-    /// Alerts per batch — also the fixed ONNX inference shape (see
-    /// [`EnrichmentWorkerConfig::batch_size`] in `conf.rs`).
+    /// Alerts per batch; also the fixed ONNX input shape. See [`EnrichmentWorkerConfig::batch_size`].
     batch_size: usize,
 }
 
@@ -1271,6 +1270,7 @@ impl ZtfEnrichmentWorker {
         work_items: &[AlertWork],
     ) -> Result<Vec<Option<ZtfAlertClassifications>>, EnrichmentWorkerError> {
         if self.gpu_enabled {
+            models.bind_device()?;
             return self.classify_gpu_batch(models, work_items);
         }
 
