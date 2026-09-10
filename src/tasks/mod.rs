@@ -30,6 +30,7 @@ pub mod mpcorb_ingest;
 pub mod prepare_catalog;
 pub mod queue;
 pub mod redact;
+pub mod repair_photometry;
 pub mod reprocess_crossmatch;
 pub mod sso_baselines;
 pub mod stream_kowalski_alerts;
@@ -189,6 +190,19 @@ pub const TASKS: &[TaskSpec] = &[
         params_schema: || schema_of::<prepare_catalog::PrepareCatalogParams>(),
     },
     TaskSpec {
+        id: repair_photometry::TASK_TYPE,
+        title: "Repair out-of-order photometry timeseries",
+        description: "Rewrite alerts_aux timeseries arrays that are out of order by jd, hold \
+                      duplicate jds, or carry entries with a non-finite or non-numeric jd. \
+                      Run with dry_run first: the repair deletes the offending points.",
+        // A repaired array no longer looks broken, so a second run finds
+        // nothing to do.
+        idempotent: true,
+        // It deletes photometry points, and does not keep a copy.
+        destructive: true,
+        params_schema: || schema_of::<repair_photometry::RepairPhotometryParams>(),
+    },
+    TaskSpec {
         id: reprocess_crossmatch::TASK_TYPE,
         title: "Reprocess crossmatches against archival catalogs",
         description: "Fill in or refresh crossmatches on a survey's alerts_aux records. \
@@ -317,6 +331,12 @@ pub fn validate_params(task_type: &str, params: &serde_json::Value) -> Result<()
                     .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
             parsed.validate_params().map_err(TaskError::InvalidParams)
         }
+        repair_photometry::TASK_TYPE => {
+            let parsed: repair_photometry::RepairPhotometryParams =
+                serde_json::from_value(params.clone())
+                    .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            parsed.validate_params().map_err(TaskError::InvalidParams)
+        }
         other => Err(TaskError::UnknownType {
             id: other.to_string(),
             known: known_types(),
@@ -395,6 +415,15 @@ pub fn single_flight_key(
                 .map(|survey| doc! { "survey": survey })
                 .unwrap_or_default(),
         ),
+        // Keyed by survey: two runs over the same aux collection would scan
+        // and rewrite the same documents.
+        repair_photometry::TASK_TYPE => Some(
+            params
+                .get("survey")
+                .and_then(|v| v.as_str())
+                .map(|survey| doc! { "survey": survey })
+                .unwrap_or_default(),
+        ),
         _ => None,
     }
 }
@@ -423,6 +452,11 @@ pub async fn dispatch(
             let params = copy_cutouts::CopyCutoutsParams::deserialize(params)
                 .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
             copy_cutouts::run(ctx, params).await
+        }
+        repair_photometry::TASK_TYPE => {
+            let params = repair_photometry::RepairPhotometryParams::deserialize(params)
+                .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            repair_photometry::run(ctx, params).await
         }
         sso_baselines::TASK_TYPE => {
             let params = sso_baselines::SsoBaselinesParams::deserialize(params)
