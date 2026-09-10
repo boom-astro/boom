@@ -19,6 +19,10 @@ export type CatalogStatus = {
   chunks_done: number;
   chunks_total: number;
   n_records: number;
+  /** Whether crossmatch config names this catalog. Only these turn a missing
+   *  ingest into a problem: the pipeline queries them on every alert and gets
+   *  nothing back. */
+  crossmatched: boolean;
 };
 
 /** One field of a task's parameters, from its JSON Schema. */

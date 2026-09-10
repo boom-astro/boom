@@ -256,7 +256,8 @@ pub async fn get_catalog_status(
         return e;
     }
     let declared = crate::catalogs::declared(&config);
-    match crate::catalogs::status(&db, &declared).await {
+    let crossmatched = crate::catalogs::crossmatched(&config);
+    match crate::catalogs::status(&db, &declared, &crossmatched).await {
         Ok(statuses) => response::ok_ser("success", statuses),
         Err(e) => response::internal_error(&format!("failed to read catalog status: {e}")),
     }

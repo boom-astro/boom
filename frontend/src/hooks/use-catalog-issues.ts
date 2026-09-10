@@ -39,13 +39,20 @@ export function countEnrichmentIssues(drift: EnrichmentDrift[]): {
   };
 }
 
-/** Catalogs that are declared but not fully in the database. */
+/** Catalogs the pipeline is configured to query but cannot fully read.
+ *
+ *  The table lists every catalog this release can ingest; most deployments
+ *  will never ingest all of them, and an un-ingested catalog nobody
+ *  crossmatches against is not a problem to fix. What counts is the gap
+ *  between what crossmatch config asks the alert pipeline to query and what is
+ *  actually in the database. */
 export function countIssues(catalogs: CatalogStatus[]): CatalogIssues {
-  const missing = catalogs.filter((c) => c.health === "missing").length;
+  const configured = catalogs.filter((c) => c.crossmatched);
+  const missing = configured.filter((c) => c.health === "missing").length;
   // Partial is counted too, and is arguably the worse state: the collection
   // exists, so a crossmatch against it succeeds and quietly returns fewer
   // matches than it should rather than failing.
-  const partial = catalogs.filter((c) => c.health === "partial").length;
+  const partial = configured.filter((c) => c.health === "partial").length;
   // An unknown slug cannot be fixed by clicking Ingest -- it needs a catalog
   // definition or a config correction -- but it is still something to address.
   const unknown = catalogs.filter((c) => c.health === "undeclared").length;
@@ -57,7 +64,9 @@ export function countIssues(catalogs: CatalogStatus[]): CatalogIssues {
 
   return {
     count: missing + partial + unknown,
-    label: parts.length ? `Catalogs: ${parts.join(", ")}` : "All declared catalogs present",
+    label: parts.length
+      ? `Catalogs: ${parts.join(", ")}`
+      : "Every crossmatched catalog is present",
   };
 }
 

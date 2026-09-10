@@ -259,6 +259,74 @@ pub fn find_by_collection(collection: &str) -> Option<&'static CatalogDef> {
 /// registry has no definition for.
 ///
 /// Watchlists are excluded -- they are user-managed, not archival catalogs.
+/// Warn about crossmatch collections that are configured but hold nothing.
+///
+/// A missing collection is not an error in MongoDB: the `$geoWithin` stage and
+/// the `$unionWith` legs both return zero rows, so the alert worker keeps
+/// running and every alert comes out with an empty match list for that catalog.
+/// Nothing distinguishes that from "there was genuinely nothing within the
+/// radius", which is the failure this warning exists to make visible.
+///
+/// A warning rather than a hard failure: a catalog ingest takes hours to days,
+/// and refusing to start the pipeline until it finishes would be a worse
+/// outage than degraded crossmatches. The admin page carries the same
+/// information with a button attached.
+pub async fn warn_on_empty_crossmatch_catalogs(
+    db: &Database,
+    xmatch_configs: &[crate::conf::CatalogXmatchConfig],
+) {
+    for entry in xmatch_configs {
+        if entry
+            .catalog
+            .starts_with(crate::api::catalogs::WATCHLIST_PREFIX)
+        {
+            // Watchlists are user-managed and legitimately start empty.
+            continue;
+        }
+        match db
+            .collection::<Document>(&entry.catalog)
+            .estimated_document_count()
+            .await
+        {
+            Ok(0) => tracing::warn!(
+                catalog = %entry.catalog,
+                "crossmatch is configured against {} but it holds no documents; every alert \
+                 will be written with zero matches for it, which is indistinguishable from a \
+                 genuine non-match. Ingest it from the admin page, or remove it from \
+                 crossmatch config",
+                entry.catalog
+            ),
+            Ok(_) => {}
+            // Not fatal: the pipeline runs either way, and a failure to count
+            // must not be the thing that stops alerts being processed.
+            Err(e) => tracing::warn!(
+                catalog = %entry.catalog,
+                "could not check whether crossmatch catalog {} is populated: {e}",
+                entry.catalog
+            ),
+        }
+    }
+}
+
+/// Collection names crossmatch config actually references, across all surveys.
+///
+/// Separate from [`declared`] because the two answer different questions now:
+/// `declared` is "what did config ask for", this is "what will the alert
+/// pipeline try to query". Only the second turns a missing catalog into a
+/// silent wrong answer.
+pub fn crossmatched(config: &crate::conf::AppConfig) -> Vec<String> {
+    let mut names: Vec<String> = config
+        .crossmatch
+        .values()
+        .flatten()
+        .map(|entry| entry.catalog.clone())
+        .filter(|name| !name.starts_with(crate::api::catalogs::WATCHLIST_PREFIX))
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    names
+}
+
 pub fn declared(config: &crate::conf::AppConfig) -> Vec<String> {
     let mut declared: Vec<String> = Vec::new();
     let mut push = |id: String| {
@@ -716,7 +784,7 @@ pub enum CatalogHealth {
     Undeclared,
 }
 
-/// The state of one declared catalog.
+/// The state of one catalog this release can ingest.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct CatalogStatus {
     pub id: String,
@@ -726,22 +794,64 @@ pub struct CatalogStatus {
     pub chunks_done: usize,
     pub chunks_total: usize,
     pub n_records: i64,
+    /// Whether crossmatch config names this catalog for at least one survey.
+    ///
+    /// This is what turns a not-yet-ingested catalog into a problem. One nobody
+    /// crossmatches against is simply available; one the pipeline is configured
+    /// to use and cannot find returns zero matches on every alert, silently.
+    pub crossmatched: bool,
 }
 
-/// Compare the catalogs config declares against what is in the database.
+/// Every catalog this release can ingest, and how each compares to the database.
+///
+/// **The list comes from the code, not from config.** A catalog BOOM knows how
+/// to build is available to ingest whether or not anything crossmatches against
+/// it yet, so the order of operations is: add the definition to `CATALOGS`,
+/// ingest it from the admin page, *then* add it to crossmatch config. Deriving
+/// the list from crossmatch config forced that backwards -- you had to configure
+/// the pipeline to use a catalog before you could ingest it, which is exactly
+/// the window in which crossmatches silently return nothing.
+///
+/// `declared` still contributes, so a name in config that this release has no
+/// definition for shows up as [`CatalogHealth::Undeclared`] rather than being
+/// dropped from the page.
 ///
 /// Reports; never acts. Ingesting a catalog is hours to days of work and has to
-/// stay an explicit, attributed decision -- a typo in `catalogs:` must not be
-/// able to rebuild anything. See `docs/catalogs.md`.
-#[instrument(skip(db, declared))]
+/// stay an explicit, attributed decision. See `docs/catalogs.md`.
+#[instrument(skip(db, declared, crossmatched))]
 pub async fn status(
     db: &Database,
     declared: &[String],
+    crossmatched: &[String],
 ) -> Result<Vec<CatalogStatus>, CatalogError> {
     let state = db.collection::<Document>(STATE_COLLECTION);
-    let mut statuses = Vec::with_capacity(declared.len());
 
+    // Everything the release can build, then anything config names that it
+    // cannot -- the second group is almost always a typo, and hiding it would
+    // hide the typo.
+    let mut ids: Vec<String> = CATALOGS.iter().map(|c| c.id.to_string()).collect();
     for id in declared {
+        let known = find(id).map(|def| def.id.to_string());
+        match known {
+            Some(id) if ids.contains(&id) => {}
+            Some(id) => ids.push(id),
+            None => {
+                if !ids.contains(id) {
+                    ids.push(id.clone());
+                }
+            }
+        }
+    }
+
+    let is_crossmatched = |def: Option<&CatalogDef>, id: &str| -> bool {
+        crossmatched.iter().any(|name| {
+            name == id
+                || def.is_some_and(|d| d.collection == name || d.aliases.contains(&name.as_str()))
+        })
+    };
+
+    let mut statuses = Vec::with_capacity(ids.len());
+    for id in &ids {
         let Some(def) = find(id) else {
             statuses.push(CatalogStatus {
                 id: id.clone(),
@@ -751,6 +861,7 @@ pub async fn status(
                 chunks_done: 0,
                 chunks_total: 0,
                 n_records: 0,
+                crossmatched: is_crossmatched(None, id),
             });
             continue;
         };
@@ -781,6 +892,7 @@ pub async fn status(
             chunks_done,
             chunks_total,
             n_records,
+            crossmatched: is_crossmatched(Some(def), id),
         });
     }
     Ok(statuses)
@@ -1072,5 +1184,87 @@ mod source_tests {
         let def = find("ls-dr10-photoz").expect("defined");
         assert_eq!(def.source, Source::Staged);
         assert_eq!(def.collection, "LS_DR10_PHOTOZ");
+    }
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn every_ingestable_catalog_is_listed_whether_or_not_config_names_it() {
+        // The list comes from the code so that the order of operations can be
+        // "ingest, then configure crossmatching". Deriving it from crossmatch
+        // config forced the reverse, which is the window where the pipeline
+        // queries a catalog that is not there yet.
+        let db = crate::conf::get_test_db().await;
+        let statuses = status(&db, &[], &[]).await.expect("reads");
+
+        assert_eq!(
+            statuses.len(),
+            CATALOGS.len(),
+            "a deployment that configures nothing still sees everything it could ingest"
+        );
+        for def in CATALOGS {
+            let row = statuses
+                .iter()
+                .find(|s| s.id == def.id)
+                .unwrap_or_else(|| panic!("{} is missing from the status list", def.id));
+            assert!(
+                !row.crossmatched,
+                "{} is not in crossmatch config, so nothing queries it",
+                def.id
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_configured_catalog_is_marked_as_in_use() {
+        let db = crate::conf::get_test_db().await;
+        // Config names the collection; the status row is keyed by slug. Both
+        // have to resolve to the same catalog or the admin page would show a
+        // configured catalog as unused.
+        let statuses = status(&db, &[], &["NED".to_string()]).await.expect("reads");
+
+        let ned = statuses.iter().find(|s| s.id == "ned-lvs").expect("listed");
+        assert!(ned.crossmatched, "config names NED, which is ned-lvs");
+        assert!(
+            statuses.iter().filter(|s| s.crossmatched).count() == 1,
+            "only the configured catalog is marked in use"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_alias_still_counts_as_configured() {
+        // A deployment that ingested an earlier release names the old
+        // collection. Treating that as unconfigured would report a catalog the
+        // pipeline is actively querying as one nothing uses.
+        let db = crate::conf::get_test_db().await;
+        let statuses = status(&db, &[], &["milliquas_v6".to_string()])
+            .await
+            .expect("reads");
+
+        let mq = statuses
+            .iter()
+            .find(|s| s.id == "milliquas")
+            .expect("listed");
+        assert!(mq.crossmatched);
+    }
+
+    #[tokio::test]
+    async fn a_name_with_no_definition_is_still_reported() {
+        // Almost always a typo. Dropping it from the page would hide the typo,
+        // and it is the one kind of entry clicking Ingest cannot fix.
+        let db = crate::conf::get_test_db().await;
+        let statuses = status(&db, &["not-a-catalog".to_string()], &[])
+            .await
+            .expect("reads");
+
+        let row = statuses
+            .iter()
+            .find(|s| s.id == "not-a-catalog")
+            .expect("listed");
+        assert_eq!(row.health, CatalogHealth::Undeclared);
+        assert!(row.collection.is_none());
     }
 }

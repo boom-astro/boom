@@ -81,7 +81,7 @@ function CatalogsTable({
       {error && <p className="text-sm text-destructive mb-3">{error}</p>}
       {catalogs.length === 0 ? (
         <p className="text-sm text-muted-foreground">
-          No catalogs declared for this deployment.
+          This release defines no catalogs.
         </p>
       ) : (
         <div className="overflow-x-auto">
@@ -91,6 +91,7 @@ function CatalogsTable({
                 <th className="py-2 pr-4 font-medium">Catalog</th>
                 <th className="py-2 pr-4 font-medium">Collection</th>
                 <th className="py-2 pr-4 font-medium">State</th>
+                <th className="py-2 pr-4 font-medium">Crossmatch</th>
                 <th className="py-2 pr-4 font-medium">Chunks</th>
                 <th className="py-2 pr-4 font-medium">Records</th>
                 <th className="py-2 font-medium" />
@@ -112,6 +113,17 @@ function CatalogsTable({
                     <td className="py-2 pr-4 font-mono text-xs">{catalog.collection ?? "—"}</td>
                     <td className="py-2 pr-4">
                       <Badge variant={label.variant}>{label.text}</Badge>
+                    </td>
+                    <td className="py-2 pr-4">
+                      {/* Whether the alert pipeline queries this catalog. An
+                          un-ingested catalog nobody crossmatches against is
+                          simply available; a configured one that is missing
+                          returns zero matches on every alert, silently. */}
+                      {catalog.crossmatched ? (
+                        <Badge variant="outline">in use</Badge>
+                      ) : (
+                        <span className="text-xs text-muted-foreground">not configured</span>
+                      )}
                     </td>
                     <td className="py-2 pr-4 tabular-nums">
                       {catalog.chunks_total > 0

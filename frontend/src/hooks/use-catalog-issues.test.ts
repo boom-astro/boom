@@ -2,7 +2,11 @@ import { describe, expect, it } from "vitest";
 import { countEnrichmentIssues, countIssues } from "./use-catalog-issues";
 import type { CatalogStatus, CatalogHealth } from "@/lib/adminApi";
 
-function catalog(id: string, health: CatalogHealth): CatalogStatus {
+function catalog(
+  id: string,
+  health: CatalogHealth,
+  crossmatched = true,
+): CatalogStatus {
   return {
     id,
     collection: id.toUpperCase(),
@@ -11,6 +15,7 @@ function catalog(id: string, health: CatalogHealth): CatalogStatus {
     chunks_done: 0,
     chunks_total: 0,
     n_records: 0,
+    crossmatched,
   };
 }
 
@@ -18,7 +23,7 @@ describe("countIssues", () => {
   it("shows nothing when every declared catalog is present", () => {
     const { count, label } = countIssues([catalog("ned-lvs", "present")]);
     expect(count).toBe(0);
-    expect(label).toBe("All declared catalogs present");
+    expect(label).toBe("Every crossmatched catalog is present");
   });
 
   it("counts a missing catalog", () => {
@@ -55,6 +60,24 @@ describe("countIssues", () => {
     ]);
     expect(count).toBe(4);
     expect(label).toBe("Catalogs: 2 missing, 1 partially ingested, 1 with no definition");
+  });
+
+  it("ignores a catalog nothing crossmatches against", () => {
+    // The table lists every catalog this release can ingest. Most deployments
+    // never ingest all of them, and one the pipeline never queries is simply
+    // available -- not a problem to fix.
+    const { count, label } = countIssues([
+      catalog("vsx", "missing", false),
+      catalog("galex", "missing", false),
+    ]);
+    expect(count).toBe(0);
+    expect(label).toBe("Every crossmatched catalog is present");
+  });
+
+  it("counts an undeclared name even when config does not crossmatch it", () => {
+    // A slug with no definition is a config error either way: it cannot be
+    // ingested and it will never match anything.
+    expect(countIssues([catalog("LSPSCC", "undeclared", false)]).count).toBe(1);
   });
 
   it("is zero for a deployment that declares nothing", () => {
