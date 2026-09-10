@@ -28,8 +28,10 @@ export function countEnrichmentIssues(drift: EnrichmentDrift[]): {
   count: number;
   parts: string[];
 } {
+  // A survey with no published set is not counted: nothing is known to be
+  // stale, and there is no action an operator could take from the badge.
   const surveys = drift.filter(
-    (d) => d.stale_sets.length > 0 || d.has_unstamped,
+    (d) => d.current_set !== null && (d.stale_sets.length > 0 || d.has_unstamped),
   );
   return {
     count: surveys.length,

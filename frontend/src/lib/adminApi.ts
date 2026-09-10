@@ -58,7 +58,9 @@ export type StaleSet = {
 
 export type EnrichmentDrift = {
   survey: string;
-  current_set: number;
+  /** null when no enrichment worker has published a set yet, so there is
+   *  nothing to compare alerts against. */
+  current_set: number | null;
   stale_sets: StaleSet[];
   accepted_sets: number[];
   /** Alerts enriched before stamping existed. */

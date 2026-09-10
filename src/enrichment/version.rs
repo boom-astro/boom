@@ -64,6 +64,18 @@ const COUNTERS_COLLECTION: &str = "enrichment_set_counters";
 /// set carries its survey as a field.
 const COUNTER_ID: &str = "enrichment_set";
 
+/// What the running enrichment workers say they are producing, one document per
+/// survey.
+///
+/// The API cannot work this out for itself. Resolving a set means hashing the
+/// model files, which the API has no reason to carry -- and if it did carry
+/// them, they could differ from the ones the worker actually loaded, so the
+/// admin page would report a "current" set no alert was ever stamped with.
+/// Worse, resolving *interns*: polling a status endpoint would create set rows
+/// as a side effect. So the worker publishes what it resolved, and readers read
+/// that.
+pub const CURRENT_COLLECTION: &str = "enrichment_current";
+
 /// One ONNX model the enrichment pipeline loads.
 ///
 /// Declared once here rather than at each load site: the CPU and GPU paths both
@@ -276,7 +288,12 @@ pub async fn resolve_current_set(
     let models = current_models(models)?;
     let derivations = current_derivations();
     let fingerprint = fingerprint(survey, &models, &derivations);
-    intern(db, survey, models, derivations, fingerprint).await
+    let set = intern(db, survey, models, derivations, fingerprint).await?;
+    // Published here rather than at the call site so a worker cannot resolve a
+    // set and forget to say so, leaving the admin page reporting drift against
+    // a set nothing is running.
+    publish_current_set(db, survey, set.id).await?;
+    Ok(set)
 }
 
 /// Find the set with this fingerprint, or create it.
@@ -378,8 +395,10 @@ pub fn diff(from: &EnrichmentSet, to: &EnrichmentSet) -> Vec<String> {
 #[derive(Debug, Clone, Serialize)]
 pub struct DriftStatus {
     pub survey: String,
-    /// The set this release would produce.
-    pub current_set: i64,
+    /// The set the running enrichment workers published. `None` when no worker
+    /// has started since stamping was deployed, in which case there is nothing
+    /// to compare against and the other fields are empty.
+    pub current_set: Option<i64>,
     /// Sets seen on alerts that are neither current nor accepted, with what
     /// each one differs by. Empty means nothing needs reprocessing.
     pub stale_sets: Vec<StaleSet>,
@@ -404,6 +423,46 @@ pub struct StaleSet {
 /// Acceptance is scoped to the set it was made against. If the current set has
 /// moved on since, the old decision no longer applies -- someone said "set 6 is
 /// as good as set 7", not "set 6 is good forever".
+/// Record which set this process is running, for readers that cannot resolve
+/// one themselves.
+///
+/// Upserted rather than appended: the answer to "what are the workers producing
+/// now" has one value per survey, and a worker rolling back to an older release
+/// must be able to move it backwards.
+pub async fn publish_current_set(
+    db: &mongodb::Database,
+    survey: &str,
+    set_id: i64,
+) -> Result<(), VersionError> {
+    use mongodb::bson::doc;
+    db.collection::<mongodb::bson::Document>(CURRENT_COLLECTION)
+        .update_one(
+            doc! { "_id": survey },
+            doc! { "$set": { "set_id": set_id, "updated_at": chrono::Utc::now().timestamp() } },
+        )
+        .upsert(true)
+        .await?;
+    Ok(())
+}
+
+/// The set the running workers last published for this survey.
+///
+/// `None` means no enrichment worker has started since stamping was deployed,
+/// so there is nothing to compare against. Reported as such rather than guessed
+/// at: an inferred "current" set would be a claim about what produced the data,
+/// which is the one thing this module exists not to make up.
+pub async fn current_set_id(
+    db: &mongodb::Database,
+    survey: &str,
+) -> Result<Option<i64>, VersionError> {
+    use mongodb::bson::doc;
+    Ok(db
+        .collection::<mongodb::bson::Document>(CURRENT_COLLECTION)
+        .find_one(doc! { "_id": survey })
+        .await?
+        .and_then(|d| d.get_i64("set_id").ok()))
+}
+
 pub async fn acceptable_set_ids(
     db: &mongodb::Database,
     survey: &str,
@@ -444,12 +503,26 @@ pub fn stale_filter(acceptable: &[i64]) -> mongodb::bson::Document {
 pub async fn drift_status(
     db: &mongodb::Database,
     survey: &str,
-    models: &[ModelFile],
 ) -> Result<DriftStatus, VersionError> {
     use mongodb::bson::doc;
 
-    let current = resolve_current_set(db, survey, models).await?;
-    let acceptable = acceptable_set_ids(db, survey, current.id).await?;
+    // Read, never resolve. See CURRENT_COLLECTION: resolving here would hash
+    // model files the reader may not have, and would intern a set as a side
+    // effect of someone opening the admin page.
+    let Some(current_id) = current_set_id(db, survey).await? else {
+        return Ok(DriftStatus {
+            survey: survey.to_string(),
+            current_set: None,
+            stale_sets: Vec::new(),
+            accepted_sets: Vec::new(),
+            has_unstamped: false,
+        });
+    };
+    let current = db
+        .collection::<EnrichmentSet>(SETS_COLLECTION)
+        .find_one(doc! { "_id": current_id })
+        .await?;
+    let acceptable = acceptable_set_ids(db, survey, current_id).await?;
 
     let alerts =
         db.collection::<mongodb::bson::Document>(&format!("{}_alerts", survey.to_uppercase()));
@@ -463,13 +536,16 @@ pub async fn drift_status(
                 // What a reprocessing run would have to redo. A set that is no
                 // longer in the registry cannot be diffed, and is reported with
                 // no detail rather than omitted.
-                let changed = match db
+                let old = db
                     .collection::<EnrichmentSet>(SETS_COLLECTION)
                     .find_one(doc! { "_id": id })
-                    .await?
-                {
-                    Some(old) => diff(&old, &current),
-                    None => Vec::new(),
+                    .await?;
+                let changed = match (&old, &current) {
+                    (Some(old), Some(current)) => diff(old, current),
+                    // Either end missing: the row was removed, or the current
+                    // set was published by a release whose row is gone. Report
+                    // the staleness with no detail rather than omitting it.
+                    _ => Vec::new(),
                 };
                 stale_sets.push(StaleSet { id, changed });
             }
@@ -482,11 +558,11 @@ pub async fn drift_status(
 
     Ok(DriftStatus {
         survey: survey.to_string(),
-        current_set: current.id,
+        current_set: Some(current_id),
         stale_sets,
         accepted_sets: acceptable
             .into_iter()
-            .filter(|id| *id != current.id)
+            .filter(|id| *id != current_id)
             .collect(),
         has_unstamped,
     })
@@ -797,6 +873,79 @@ mod tests {
             filter,
             mongodb::bson::doc! { "enrichment_set": { "$nin": [7i64] } }
         );
+    }
+
+    #[tokio::test]
+    async fn resolving_publishes_what_the_worker_is_running() {
+        // The API reads this rather than resolving, so a worker that resolved
+        // without publishing would leave the admin page unable to say what is
+        // current.
+        let db = crate::conf::get_test_db().await;
+        let survey = format!("publish_{}", uuid::Uuid::new_v4().simple());
+
+        assert_eq!(
+            current_set_id(&db, &survey).await.unwrap(),
+            None,
+            "nothing is published before a worker starts"
+        );
+
+        let set = resolve_current_set(&db, &survey, ZTF_MODELS)
+            .await
+            .expect("resolves");
+        assert_eq!(current_set_id(&db, &survey).await.unwrap(), Some(set.id));
+    }
+
+    #[tokio::test]
+    async fn a_rollback_moves_the_current_set_backwards() {
+        // Upsert, not append: a worker rolled back to an older release has to
+        // be able to say so, or the admin page reports drift against a set
+        // nothing is running.
+        let db = crate::conf::get_test_db().await;
+        let survey = format!("rollback_{}", uuid::Uuid::new_v4().simple());
+
+        let first = resolve_current_set(&db, &survey, ZTF_MODELS)
+            .await
+            .expect("resolves");
+        publish_current_set(&db, &survey, first.id + 1000)
+            .await
+            .expect("publishes");
+        assert_eq!(
+            current_set_id(&db, &survey).await.unwrap(),
+            Some(first.id + 1000)
+        );
+        publish_current_set(&db, &survey, first.id)
+            .await
+            .expect("publishes");
+        assert_eq!(current_set_id(&db, &survey).await.unwrap(), Some(first.id));
+    }
+
+    #[tokio::test]
+    async fn drift_status_reads_rather_than_resolving() {
+        // Reading the status must not create a set row. Polling an admin page
+        // that interns would grow the registry for free.
+        let db = crate::conf::get_test_db().await;
+        let survey = format!("driftread_{}", uuid::Uuid::new_v4().simple());
+
+        let before = drift_status(&db, &survey).await.expect("reads");
+        assert_eq!(
+            before.current_set, None,
+            "no worker has published, so there is nothing to compare against"
+        );
+        assert!(before.stale_sets.is_empty());
+        assert_eq!(
+            db.collection::<EnrichmentSet>(SETS_COLLECTION)
+                .count_documents(mongodb::bson::doc! { "survey": &survey })
+                .await
+                .unwrap(),
+            0,
+            "reading the status interned a set"
+        );
+
+        let set = resolve_current_set(&db, &survey, ZTF_MODELS)
+            .await
+            .expect("resolves");
+        let after = drift_status(&db, &survey).await.expect("reads");
+        assert_eq!(after.current_set, Some(set.id));
     }
 
     #[tokio::test]

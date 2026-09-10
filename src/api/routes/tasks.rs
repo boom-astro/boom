@@ -383,13 +383,7 @@ pub async fn get_enrichment_status(
     }
     // Only ZTF has enrichment models declared today; LSST joins the list when
     // it does, rather than reporting an empty status that reads as "no drift".
-    match crate::enrichment::version::drift_status(
-        &db,
-        "ztf",
-        crate::enrichment::version::ZTF_MODELS,
-    )
-    .await
-    {
+    match crate::enrichment::version::drift_status(&db, "ztf").await {
         Ok(status) => response::ok_ser("success", vec![status]),
         Err(e) => response::internal_error(&format!("failed to read enrichment status: {e}")),
     }

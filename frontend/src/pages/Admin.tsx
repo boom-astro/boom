@@ -420,17 +420,25 @@ function EnrichmentDriftTable({
       </p>
 
       {drift.map((survey) => {
-        const clean = survey.stale_sets.length === 0 && !survey.has_unstamped;
+        // No published set means no enrichment worker has started since
+        // stamping was deployed. Nothing can be called stale against a set
+        // that does not exist, so the row says that instead of claiming the
+        // archive is clean.
+        const unknown = survey.current_set === null;
+        const clean =
+          !unknown && survey.stale_sets.length === 0 && !survey.has_unstamped;
         return (
           <div key={survey.survey} className="border rounded-lg p-3 mb-3">
             <div className="flex items-center justify-between gap-4 mb-2">
               <div>
                 <span className="font-medium uppercase">{survey.survey}</span>{" "}
                 <span className="text-xs text-muted-foreground font-mono">
-                  current set {survey.current_set}
+                  {unknown ? "no set published" : `current set ${survey.current_set}`}
                 </span>
               </div>
-              {clean ? (
+              {unknown ? (
+                <Badge variant="outline">unknown</Badge>
+              ) : clean ? (
                 <Badge>up to date</Badge>
               ) : (
                 <Button
@@ -443,7 +451,13 @@ function EnrichmentDriftTable({
               )}
             </div>
 
-            {clean ? (
+            {unknown ? (
+              <p className="text-xs text-muted-foreground">
+                No enrichment worker has published a set for this survey yet, so
+                there is nothing to compare against. It appears once a worker
+                starts.
+              </p>
+            ) : clean ? (
               <p className="text-xs text-muted-foreground">
                 Every alert was enriched by the current set.
               </p>

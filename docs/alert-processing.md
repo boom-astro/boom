@@ -199,6 +199,19 @@ the admin link, so drift is visible without going looking for it.
 
 `GET /enrichment/status` is the same data.
 
+**"Current" is what the workers say it is, not what the reader computes.** An
+enrichment worker publishes the set it resolved into `enrichment_current`, one
+document per survey, and the admin page reads that. It does not resolve a set of
+its own, for three reasons: the API has no reason to carry the ONNX model files;
+if it carried them they could differ from the ones the worker actually loaded,
+so the page would report a "current" set no alert was ever stamped with; and
+resolving *interns*, so polling a status endpoint would create set rows as a
+side effect.
+
+Until a worker has started, the survey reads **no set published** rather than
+"up to date" — nothing can be shown stale against a set that does not exist, and
+saying otherwise would be the guess this whole mechanism is meant to avoid.
+
 ### Accepting a set instead of reprocessing
 
 Not every change is worth a reprocessing run. A derivation version might be

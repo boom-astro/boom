@@ -96,6 +96,16 @@ describe("countEnrichmentIssues", () => {
     expect(countEnrichmentIssues([{ ...clean, has_unstamped: true }]).count).toBe(1);
   });
 
+  it("does not count a survey with no published set", () => {
+    // No worker has published one, so nothing can be shown to be stale and
+    // there is no action the badge could point at. The table still says so.
+    expect(
+      countEnrichmentIssues([
+        { ...clean, current_set: null, has_unstamped: true },
+      ]).count,
+    ).toBe(0);
+  });
+
   it("does not count a set an operator accepted", () => {
     // Accepted sets are absent from stale_sets, so the survey reads clean.
     expect(
