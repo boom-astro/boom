@@ -6,6 +6,7 @@ pub mod derive_avro_schema;
 pub mod enums;
 pub mod fits;
 pub mod gpu;
+pub mod heliolinc;
 pub mod lightcurves;
 pub mod linking;
 pub mod mpcorb;

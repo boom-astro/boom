@@ -68,6 +68,33 @@ pub struct Tracklet {
 }
 
 impl Tracklet {
+    /// A tracklet stated directly as a position and a rate, for a caller that
+    /// already knows the motion rather than fitting it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_motion(
+        ids: Vec<i64>,
+        jd_ref: f64,
+        ra: f64,
+        dec: f64,
+        ra_rate_deg_per_day: f64,
+        dec_rate_deg_per_day: f64,
+        rms_arcsec: f64,
+    ) -> Self {
+        Self {
+            ids,
+            jd_ref,
+            ra_ref: ra,
+            dec_ref: dec,
+            ra_rate_deg_per_day,
+            dec_rate_deg_per_day,
+            rms_arcsec,
+            ra_center: ra,
+            dec_center: dec,
+            xi0: 0.0,
+            eta0: 0.0,
+        }
+    }
+
     /// Total on-sky rate, degrees/day.
     pub fn rate_deg_per_day(&self) -> f64 {
         self.ra_rate_deg_per_day.hypot(self.dec_rate_deg_per_day)

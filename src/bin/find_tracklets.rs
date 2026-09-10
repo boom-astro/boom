@@ -6,6 +6,7 @@
 //! where anything new would be.
 
 use boom::conf::{load_dotenv, AppConfig};
+use boom::utils::heliolinc::{link_tracklets, main_belt_hypotheses, LinkConfig};
 use boom::utils::linking::{find_tracklets, Detection, Tracklet, TrackletConfig};
 use clap::Parser;
 use futures::StreamExt;
@@ -48,6 +49,73 @@ struct Cli {
     /// Read detections from a JSONL dump instead of the database.
     #[arg(long, value_name = "FILE")]
     input: Option<String>,
+
+    /// Find tracklets per night, then link them across nights.
+    #[arg(long, default_value_t = false)]
+    link: bool,
+
+    /// Position agreement required to cluster propagated states, au.
+    #[arg(long, default_value_t = 0.002)]
+    position_tol: f64,
+
+    /// Velocity agreement required to cluster propagated states, au/day.
+    #[arg(long, default_value_t = 0.0004)]
+    velocity_tol: f64,
+}
+
+/// Tracklets found independently in each night the detections span.
+fn tracklets_per_night(detections: &[Detection], cfg: &TrackletConfig) -> Vec<Tracklet> {
+    let mut by_night: HashMap<i64, Vec<Detection>> = HashMap::new();
+    for d in detections {
+        by_night
+            .entry((d.jd - 0.5).floor() as i64)
+            .or_default()
+            .push(*d);
+    }
+    let mut nights: Vec<_> = by_night.into_iter().collect();
+    nights.sort_by_key(|(n, _)| *n);
+    let mut out = Vec::new();
+    for (night, dets) in nights {
+        let found = find_tracklets(&dets, cfg);
+        info!(
+            "night {}: {} detections -> {} tracklets",
+            night,
+            dets.len(),
+            found.len()
+        );
+        out.extend(found);
+    }
+    out
+}
+
+/// How well tracks reproduce the labels: pure, mixed, and objects recovered.
+fn score_tracks(
+    tracks: &[boom::utils::heliolinc::Track],
+    tracklets: &[Tracklet],
+    labels: &HashMap<i64, String>,
+) -> (usize, usize, usize) {
+    let name_of = |t: &Tracklet| -> Option<&str> {
+        t.ids
+            .iter()
+            .find_map(|id| labels.get(id).map(|s| s.as_str()))
+    };
+    let mut pure = 0;
+    let mut mixed = 0;
+    let mut recovered: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for track in tracks {
+        let names: std::collections::HashSet<&str> = track
+            .members
+            .iter()
+            .filter_map(|&m| name_of(&tracklets[m]))
+            .collect();
+        if names.len() == 1 {
+            pure += 1;
+            recovered.extend(names);
+        } else if names.len() > 1 {
+            mixed += 1;
+        }
+    }
+    (pure, mixed, recovered.len())
 }
 
 /// One line of a dump: the fields `load` would have projected.
@@ -230,7 +298,11 @@ async fn main() {
         ..TrackletConfig::default()
     };
     let started = std::time::Instant::now();
-    let tracklets = find_tracklets(&detections, &cfg);
+    let tracklets = if args.link {
+        tracklets_per_night(&detections, &cfg)
+    } else {
+        find_tracklets(&detections, &cfg)
+    };
     info!(
         "{} tracklets from {} detections in {:.1}s",
         tracklets.len(),
@@ -258,6 +330,53 @@ async fn main() {
             linked.len(),
             distinct.len()
         );
+    }
+
+    if args.link {
+        let jds: Vec<f64> = tracklets.iter().map(|t| t.jd_ref).collect();
+        let reference_jd = (jds.iter().cloned().fold(f64::MAX, f64::min)
+            + jds.iter().cloned().fold(f64::MIN, f64::max))
+            / 2.0;
+        let link_cfg = LinkConfig {
+            hypotheses: main_belt_hypotheses(),
+            reference_jd,
+            position_tol_au: args.position_tol,
+            velocity_tol_au_per_day: args.velocity_tol,
+            min_nights: 2,
+        };
+        let started = std::time::Instant::now();
+        let tracks = link_tracklets(&tracklets, &link_cfg);
+        info!(
+            "{} tracks from {} tracklets over {} hypotheses in {:.1}s",
+            tracks.len(),
+            tracklets.len(),
+            link_cfg.hypotheses.len(),
+            started.elapsed().as_secs_f64()
+        );
+        if !labels.is_empty() {
+            let (pure, mixed, recovered) = score_tracks(&tracks, &tracklets, &labels);
+            info!(
+                "tracks: {} pure, {} mixed, {} distinct objects recovered",
+                pure, mixed, recovered
+            );
+        }
+        for track in tracks.iter().take(args.show) {
+            let name = track
+                .members
+                .iter()
+                .find_map(|&m| tracklets[m].ids.iter().find_map(|id| labels.get(id)))
+                .map(|s| s.as_str())
+                .unwrap_or("-");
+            info!(
+                "track n={} nights={} r={:.2} au rdot={:+.5} label={}",
+                track.members.len(),
+                track.nights,
+                track.hypothesis.r_au,
+                track.hypothesis.rdot_au_per_day,
+                name
+            );
+        }
+        return;
     }
 
     for t in tracklets.iter().take(args.show) {
