@@ -359,21 +359,6 @@ crossmatch:
         deltachi2: 1
         spectype: 1
         zcat_nspec: 1
-    - catalog: LS_DR10_PHOTOZ
-      radius: 30.0
-      use_distance: true
-      distance_key: "z_phot"
-      distance_max: 60.0
-      distance_max_near: 300.0
-      projection:
-        _id: 1
-        ra: 1
-        dec: 1
-        ra_err: 1
-        dec_err: 1
-        z_phot: 1
-        z_phot_err: 1
-        photo_z_type: 1
     - catalog: watchlist_supernovas
       radius: 2.0
       use_distance: false
@@ -384,6 +369,39 @@ crossmatch:
         redshift: 1
         distance_mpc: 1
         discovery_date: 1
+    - catalog: LSDR10
+      radius: 30.0
+      use_distance: true
+      distance_key: "z_phot_mean"
+      distance_max: 60.0
+      distance_max_near: 300.0
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        objtype: 1
+        ebv: 1
+        z_spec: 1
+        survey: 1
+        z_phot_mean: 1
+        z_phot_median: 1
+        z_phot_std: 1
+        z_phot_l95: 1
+        z_phot_u95: 1
+        flux_g: 1
+        flux_r: 1
+        flux_i: 1
+        flux_z: 1
+        flux_w1: 1
+        flux_w2: 1
+        flux_w3: 1
+        flux_w4: 1
+        shape_r: 1
+        shape_e1: 1
+        shape_e2: 1
+        sersic: 1
+        flux_ivar_r: 1
+        fracflux_r: 1
   lsst:
     - catalog: LSPSC
       radius: 30.0
@@ -553,21 +571,6 @@ crossmatch:
         deltachi2: 1
         spectype: 1
         zcat_nspec: 1
-    - catalog: LS_DR10_PHOTOZ
-      radius: 30.0
-      use_distance: true
-      distance_key: "z_phot"
-      distance_max: 60.0
-      distance_max_near: 300.0
-      projection:
-        _id: 1
-        ra: 1
-        dec: 1
-        ra_err: 1
-        dec_err: 1
-        z_phot: 1
-        z_phot_err: 1
-        photo_z_type: 1
     - catalog: watchlist_supernovas
       radius: 2.0
       use_distance: false
@@ -578,6 +581,39 @@ crossmatch:
         redshift: 1
         distance_mpc: 1
         discovery_date: 1
+    - catalog: LSDR10
+      radius: 30.0
+      use_distance: true
+      distance_key: "z_phot_mean"
+      distance_max: 60.0
+      distance_max_near: 300.0
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        objtype: 1
+        ebv: 1
+        z_spec: 1
+        survey: 1
+        z_phot_mean: 1
+        z_phot_median: 1
+        z_phot_std: 1
+        z_phot_l95: 1
+        z_phot_u95: 1
+        flux_g: 1
+        flux_r: 1
+        flux_i: 1
+        flux_z: 1
+        flux_w1: 1
+        flux_w2: 1
+        flux_w3: 1
+        flux_w4: 1
+        shape_r: 1
+        shape_e1: 1
+        shape_e2: 1
+        sersic: 1
+        flux_ivar_r: 1
+        fracflux_r: 1
   decam: []
   winter:
     - catalog: Gaia_DR3
@@ -658,21 +694,6 @@ crossmatch:
         deltachi2: 1
         spectype: 1
         zcat_nspec: 1
-    - catalog: LS_DR10_PHOTOZ
-      radius: 30.0 # 30 arcseconds
-      use_distance: true
-      distance_key: "z_phot"
-      distance_max: 60.0
-      distance_max_near: 300.0
-      projection:
-        _id: 1
-        ra: 1
-        dec: 1
-        ra_err: 1
-        dec_err: 1
-        z_phot: 1
-        z_phot_err: 1
-        photo_z_type: 1
     - catalog: PS1_DR2
       radius: 2.0
       use_distance: false
@@ -697,7 +718,7 @@ crossmatch:
         strm_uid: 1
         strm_z_phot: 1
         strm_z_phot_err: 1
-    - catalog: lsdr10
+    - catalog: LSDR10
       radius: 30.0
       use_distance: true
       distance_key: "z_phot_mean"
