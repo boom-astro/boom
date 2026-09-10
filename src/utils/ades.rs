@@ -172,6 +172,20 @@ pub fn ztf_header(submitter: &str, observers: &str) -> SubmissionHeader {
     }
 }
 
+/// Rubin Observatory on Cerro Pachon, as the MPC lists it.
+pub fn rubin_header(submitter: &str, observers: &str) -> SubmissionHeader {
+    SubmissionHeader {
+        mpc_code: "X05".to_string(),
+        submitter: submitter.to_string(),
+        observers: observers.to_string(),
+        measurers: submitter.to_string(),
+        telescope_design: "reflector".to_string(),
+        telescope_aperture: 8.4,
+        telescope_detector: "CCD".to_string(),
+        ast_cat: "Gaia3".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -215,6 +229,28 @@ mod tests {
             0.02,
             0.1,
         )
+    }
+
+    #[test]
+    fn test_each_survey_reports_its_own_station() {
+        let uncertainty = Uncertainty {
+            rms_ra_arcsec: 0.15,
+            rms_dec_arcsec: 0.15,
+        };
+        for (header, code) in [
+            (ztf_header("M. Coughlin", "ZTF"), "I41"),
+            (rubin_header("M. Coughlin", "Rubin"), "X05"),
+        ] {
+            let psv = to_psv(&[tracklet()], &detections(), &header, uncertainty);
+            let rows: Vec<&str> = psv
+                .lines()
+                .filter(|l| !l.starts_with('#') && !l.starts_with('!') && !l.starts_with("trkSub"))
+                .collect();
+            assert!(rows
+                .iter()
+                .all(|r| r.split('|').nth(2).unwrap().trim() == code));
+            assert!(psv.contains(&format!("! mpcCode {code}")));
+        }
     }
 
     #[test]
