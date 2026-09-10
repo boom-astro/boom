@@ -128,6 +128,20 @@ struct DumpRow {
     dec: f64,
     #[serde(default)]
     ssnamenr: Option<String>,
+    #[serde(default)]
+    magpsf: Option<f64>,
+    #[serde(default)]
+    fid: Option<i32>,
+}
+
+/// ZTF filter id as the single letter ADES wants.
+fn ztf_band(fid: Option<i32>) -> Option<char> {
+    match fid {
+        Some(1) => Some('g'),
+        Some(2) => Some('r'),
+        Some(3) => Some('i'),
+        _ => None,
+    }
 }
 
 /// Detections from a JSONL dump, with labels where the rows carry them.
@@ -148,6 +162,8 @@ fn load_file(
             jd: row.jd,
             ra: row.ra,
             dec: row.dec,
+            mag: row.magpsf,
+            band: ztf_band(row.fid),
         });
     }
     Ok((detections, labels))
@@ -185,6 +201,8 @@ async fn load(
         "candidate.ra": 1,
         "candidate.dec": 1,
         "candidate.ssnamenr": 1,
+        "candidate.magpsf": 1,
+        "candidate.fid": 1,
     };
 
     let mut cursor = db
@@ -211,7 +229,14 @@ async fn load(
         if let Ok(name) = candidate.get_str("ssnamenr") {
             labels.insert(id, name.to_string());
         }
-        detections.push(Detection { id, jd, ra, dec });
+        detections.push(Detection {
+            id,
+            jd,
+            ra,
+            dec,
+            mag: candidate.get_f64("magpsf").ok(),
+            band: ztf_band(candidate.get_i32("fid").ok()),
+        });
     }
     Ok((detections, labels))
 }

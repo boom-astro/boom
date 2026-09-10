@@ -10,6 +10,10 @@ pub struct Detection {
     pub ra: f64,
     /// Degrees.
     pub dec: f64,
+    /// Apparent magnitude, when the survey reported one.
+    pub mag: Option<f64>,
+    /// Filter as a single letter, for reporting.
+    pub band: Option<char>,
 }
 
 /// Bounds a tracklet must satisfy to be believable.
@@ -326,6 +330,8 @@ mod tests {
                     jd,
                     ra,
                     dec,
+                    mag: None,
+                    band: None,
                 }
             })
             .collect()
@@ -416,6 +422,8 @@ mod tests {
             jd: NIGHT[0] + 3.0,
             ra: 120.9,
             dec: 19.7,
+            mag: None,
+            band: None,
         });
         let found = find_tracklets(&dets, &TrackletConfig::default());
         assert_eq!(found.len(), 1);

@@ -46,6 +46,9 @@ pub struct Track {
     pub state: State,
     /// Nights the members span, by integer JD.
     pub nights: usize,
+    /// Spread of the member states about their mean position, au. Lower is a
+    /// better fit, so it picks between hypotheses that both cluster a track.
+    pub rms_au: f64,
 }
 
 /// Bounds the search and how tightly propagated states must agree.
@@ -98,6 +101,17 @@ fn unit_vector(ra_deg: f64, dec_deg: f64) -> [f64; 3] {
     let (x, y, z) = (dec.cos() * ra.cos(), dec.cos() * ra.sin(), dec.sin());
     let (s, c) = OBLIQUITY_DEG.to_radians().sin_cos();
     [x, c * y + s * z, -s * y + c * z]
+}
+
+/// Right ascension and declination, degrees, for an ecliptic vector.
+pub fn radec_from_ecliptic(v: &[f64; 3]) -> (f64, f64) {
+    let (s, c) = OBLIQUITY_DEG.to_radians().sin_cos();
+    let eq = [v[0], c * v[1] - s * v[2], s * v[1] + c * v[2]];
+    let r = (eq[0] * eq[0] + eq[1] * eq[1] + eq[2] * eq[2]).sqrt();
+    (
+        eq[1].atan2(eq[0]).to_degrees().rem_euclid(360.0),
+        (eq[2] / r).asin().to_degrees(),
+    )
 }
 
 /// Rate of change of the line of sight, per day, from the on-sky rates.
@@ -371,23 +385,55 @@ pub fn link_tracklets(tracklets: &[Tracklet], cfg: &LinkConfig) -> Vec<Track> {
                     vel[c] += s.vel[c] / n;
                 }
             }
+            let mut sq = 0.0;
+            for &g in &group {
+                let (_, ref s) = states[g];
+                sq += (s.pos[0] - pos[0]).powi(2)
+                    + (s.pos[1] - pos[1]).powi(2)
+                    + (s.pos[2] - pos[2]).powi(2);
+            }
             tracks.push(Track {
                 members,
                 hypothesis: *hypothesis,
                 state: State { pos, vel },
                 nights,
+                rms_au: (sq / n).sqrt(),
             });
         }
     }
 
-    // Longest first so a caller taking the best per tracklet sees it first.
+    // Longest first, then tightest, so deduplication keeps the best version.
     tracks.sort_by(|a, b| {
         b.members
             .len()
             .cmp(&a.members.len())
             .then(b.nights.cmp(&a.nights))
+            .then(
+                a.rms_au
+                    .partial_cmp(&b.rms_au)
+                    .unwrap_or(std::cmp::Ordering::Equal),
+            )
     });
-    tracks
+    deduplicate(tracks)
+}
+
+/// Drop tracks whose members are already covered by a kept track.
+///
+/// One object clusters under every hypothesis close enough to its true
+/// distance, so the same track is found many times over; only the best-fitting
+/// version is worth reporting.
+pub fn deduplicate(tracks: Vec<Track>) -> Vec<Track> {
+    let mut claimed: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    let mut kept: Vec<Track> = Vec::new();
+    for track in tracks {
+        // A track adds nothing when every tracklet in it is already reported.
+        if track.members.iter().all(|m| claimed.contains(m)) {
+            continue;
+        }
+        claimed.extend(track.members.iter().copied());
+        kept.push(track);
+    }
+    kept
 }
 
 #[cfg(test)]
@@ -544,6 +590,31 @@ mod tests {
             ..LinkConfig::default()
         };
         assert!(link_tracklets(&tracklets, &cfg).is_empty());
+    }
+
+    #[test]
+    fn test_one_object_is_reported_once_across_a_hypothesis_grid() {
+        let el = ceres_like();
+        let jds = [2460010.0, 2460013.0, 2460017.0];
+        let tracklets: Vec<Tracklet> = jds.iter().map(|&jd| tracklet_for(&el, jd)).collect();
+        let truth_r = norm(&heliocentric_position(&el, jds[1]));
+        // Several neighbouring distances all cluster this object.
+        let hypotheses = (-2..=2)
+            .map(|k| Hypothesis {
+                r_au: truth_r + 0.02 * f64::from(k),
+                rdot_au_per_day: 0.0,
+            })
+            .collect();
+        let cfg = LinkConfig {
+            hypotheses,
+            reference_jd: jds[1],
+            position_tol_au: 0.05,
+            velocity_tol_au_per_day: 0.01,
+            min_nights: 2,
+        };
+        let tracks = link_tracklets(&tracklets, &cfg);
+        assert_eq!(tracks.len(), 1, "one object should yield one track");
+        assert_eq!(tracks[0].members.len(), 3);
     }
 
     #[test]

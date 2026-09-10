@@ -1,3 +1,4 @@
+pub mod ades;
 pub mod comets;
 pub mod cutouts;
 pub mod data;
@@ -11,6 +12,7 @@ pub mod lightcurves;
 pub mod linking;
 pub mod mpcorb;
 pub mod o11y;
+pub mod orbit_fit;
 pub mod outburst;
 pub mod parser;
 pub mod phase_curve;
