@@ -222,6 +222,29 @@ Two things about the dev container specifically:
 Catalog chunks are staged in the `catalog_data` volume, mounted at
 `/app/data/catalogs`.
 
+## Where the worker runs
+
+One `task-worker` service, running one task at a time. It needs more than a
+database connection:
+
+- **The ONNX models**, bind-mounted read-only at `/app/data/models`.
+  `enrich_reprocess` builds a real enrichment worker, which loads every model in
+  `ZTF_MODELS` and hashes it for the enrichment set stamp, so a worker without
+  them fails at startup rather than part way through a run.
+- **boompy**, baked into the image, for the catalog downloaders.
+- **Valkey**, which the migration and reprocessing tasks use to drive and resume
+  their work.
+
+On a GPU deployment, `docker-compose.cuda.yaml` moves the task worker onto the
+GPU image alongside the schedulers. That is not an optimisation: `enrich_reprocess`
+loads the models in-process rather than handing work to the enrichment workers,
+so on the CPU image it would re-enrich the archive without a GPU at all.
+
+The consequence is that a long catalog ingest occupies the GPU box for its
+duration, since a worker runs one task at a time and claims whatever is at the
+head of the queue. Acceptable while there is one worker; splitting CPU work from
+GPU work needs claim-time routing, which is listed below.
+
 ## Collections
 
 | Collection | Holds |
@@ -365,3 +388,10 @@ moving part. The scheduling is the small half; the offload is the work.
   but do not write to it yet.
 - **Partitioned execution**, for tasks whose unit of work is a key range rather
   than a chunk.
+- **Claim-time routing.** `claim_next` takes the oldest queued run regardless of
+  type, so every worker is interchangeable. Once there is more than one — a GPU
+  worker for `enrich_reprocess` and a CPU worker for everything else — a worker
+  needs to declare what it will accept and the claim filter needs to honour it.
+  The guard rail that comes with it is starvation: an allowlist that no worker
+  covers leaves a run queued forever, so the admin page would need to say a
+  queued run has no worker willing to take it.
