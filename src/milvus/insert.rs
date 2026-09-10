@@ -70,8 +70,7 @@ impl MilvusClient {
 }
 
 /// Validate the embeddings and transpose the rows into Milvus's column-oriented
-/// `UpsertRequest`. Split out from the RPC send so it can be tested without a
-/// live server. Assumes `rows` is non-empty.
+/// `UpsertRequest`.
 fn build_upsert_request(
     db_name: &str,
     collection_name: &str,

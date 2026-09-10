@@ -41,9 +41,8 @@ pub struct SearchHit {
 }
 
 impl MilvusClient {
-    /// Find the `top_k` objects whose stored embeddings are most similar to
-    /// `query`, using the collection's configured metric. Results are ordered
-    /// best-first.
+    /// Find the `top_k` objects whose stored embeddings are most similar.
+    /// Results are ordered best-first.
     #[instrument(skip_all, err, fields(collection = %self.config().collection.name, top_k))]
     pub async fn search_embedding(
         &mut self,
