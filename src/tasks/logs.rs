@@ -31,6 +31,10 @@ struct Inner {
     db: Option<Database>,
     run_id: String,
     buffer: Mutex<Vec<TaskLogLine>>,
+    /// Serializes sequence allocation and insertion. The client advances its
+    /// cursor to the largest persisted sequence, so allowing a later chunk to
+    /// commit first would make an earlier delayed chunk invisible forever.
+    flush_lock: tokio::sync::Mutex<()>,
     seq: AtomicU64,
     written: AtomicU64,
     truncation_reported: std::sync::atomic::AtomicBool,
@@ -43,6 +47,7 @@ impl LogSink {
                 db: Some(db),
                 run_id: run_id.into(),
                 buffer: Mutex::new(Vec::new()),
+                flush_lock: tokio::sync::Mutex::new(()),
                 seq: AtomicU64::new(0),
                 written: AtomicU64::new(0),
                 truncation_reported: std::sync::atomic::AtomicBool::new(false),
@@ -57,6 +62,7 @@ impl LogSink {
                 db: None,
                 run_id: String::new(),
                 buffer: Mutex::new(Vec::new()),
+                flush_lock: tokio::sync::Mutex::new(()),
                 seq: AtomicU64::new(0),
                 written: AtomicU64::new(0),
                 truncation_reported: std::sync::atomic::AtomicBool::new(false),
@@ -115,6 +121,7 @@ impl LogSink {
     /// line is not worth failing a multi-hour ingest over.
     pub async fn flush(&self) {
         let Some(db) = &self.inner.db else { return };
+        let _flush = self.inner.flush_lock.lock().await;
         let lines = {
             let mut buffer = self.inner.buffer.lock().expect("log buffer poisoned");
             if buffer.is_empty() {

@@ -107,7 +107,12 @@ pub async fn report_progress(
     Ok(())
 }
 
-/// Mark a run finished, clearing its lease so the reaper leaves it alone.
+/// Mark a run finished without an ownership guard.
+///
+/// Only test setup may manufacture terminal runs this way. Production workers
+/// must use [`finish_claimed`] so a stale worker cannot overwrite a reclaimed
+/// run.
+#[cfg(test)]
 #[instrument(skip(db, error), fields(status = status.as_str()), err)]
 pub async fn finish(
     db: &Database,
@@ -131,6 +136,39 @@ pub async fn finish(
     Ok(())
 }
 
+/// Mark a run finished, but only if this worker still owns its live lease.
+///
+/// A task can notice a lost lease only at a safe point, which may be after a
+/// replacement worker has claimed the run. The ownership guard prevents that
+/// stale task from overwriting the replacement worker's status or clearing its
+/// lease as it winds down.
+pub async fn finish_claimed(
+    db: &Database,
+    run_id: &str,
+    worker: &str,
+    status: TaskStatus,
+    error: Option<String>,
+) -> Result<bool, QueueError> {
+    let result = runs(db)
+        .update_one(
+            doc! {
+                "_id": run_id,
+                "worker": worker,
+                "status": TaskStatus::Running.as_str(),
+            },
+            doc! {
+                "$set": {
+                    "status": status.as_str(),
+                    "finished_at": now(),
+                    "error": to_bson(&error)?,
+                    "lease_expires_at": mongodb::bson::Bson::Null,
+                },
+            },
+        )
+        .await?;
+    Ok(result.matched_count == 1)
+}
+
 /// Ask a running task to stop.
 ///
 /// Sets a flag rather than killing anything: the task notices it at the next
@@ -138,25 +176,44 @@ pub async fn finish(
 /// so a later run resumes rather than starting over. A queued run is canceled
 /// outright, since nothing has started.
 pub async fn request_cancel(db: &Database, run_id: &str) -> Result<Option<TaskStatus>, QueueError> {
-    let Some(run) = runs(db).find_one(doc! { "_id": run_id }).await? else {
-        return Ok(None);
-    };
-    match run.status {
-        TaskStatus::Queued => {
-            finish(db, run_id, TaskStatus::Canceled, None).await?;
-            Ok(Some(TaskStatus::Canceled))
-        }
-        TaskStatus::Running => {
-            runs(db)
-                .update_one(
-                    doc! { "_id": run_id },
-                    doc! { "$set": { "cancel_requested": true } },
-                )
-                .await?;
-            Ok(Some(TaskStatus::Running))
-        }
-        terminal => Ok(Some(terminal)),
+    // Each transition includes the observed status in its filter. A worker
+    // can claim a queued run while this request is in flight, so a read then
+    // unguarded write could otherwise mark an actively running task canceled.
+    if runs(db)
+        .update_one(
+            doc! { "_id": run_id, "status": TaskStatus::Queued.as_str() },
+            doc! {
+                "$set": {
+                    "status": TaskStatus::Canceled.as_str(),
+                    "finished_at": now(),
+                    "error": mongodb::bson::Bson::Null,
+                    "lease_expires_at": mongodb::bson::Bson::Null,
+                },
+            },
+        )
+        .await?
+        .matched_count
+        == 1
+    {
+        return Ok(Some(TaskStatus::Canceled));
     }
+
+    if runs(db)
+        .update_one(
+            doc! { "_id": run_id, "status": TaskStatus::Running.as_str() },
+            doc! { "$set": { "cancel_requested": true } },
+        )
+        .await?
+        .matched_count
+        == 1
+    {
+        return Ok(Some(TaskStatus::Running));
+    }
+
+    Ok(runs(db)
+        .find_one(doc! { "_id": run_id })
+        .await?
+        .map(|run| run.status))
 }
 
 /// What a sweep of expired leases did.
@@ -260,7 +317,7 @@ pub async fn requeue_expired(db: &Database) -> Result<ReapReport, QueueError> {
 pub async fn release(db: &Database, run_id: &str, worker: &str) -> Result<(), QueueError> {
     runs(db)
         .update_one(
-            doc! { "_id": run_id, "worker": worker },
+            doc! { "_id": run_id, "worker": worker, "status": TaskStatus::Running.as_str() },
             doc! {
                 "$set": {
                     "status": TaskStatus::Queued.as_str(),

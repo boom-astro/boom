@@ -76,10 +76,16 @@ export function TaskForm({
   const [jsonError, setJsonError] = useState<string | null>(null);
   const useRawJson = nested.length > 0;
 
-  const missing = (task.params_schema.required ?? []).filter((name) => {
-    const v = values[name];
-    return v === undefined || (typeof v === "string" && v.trim() === "");
-  });
+  // Structured tasks are entered as one JSON value, so their required fields
+  // do not live in the flat form state. Validation for those happens when the
+  // JSON is parsed and again on the API; keeping this flat-field check would
+  // make every such form permanently disabled.
+  const missing = useRawJson
+    ? []
+    : (task.params_schema.required ?? []).filter((name) => {
+        const v = values[name];
+        return v === undefined || (typeof v === "string" && v.trim() === "");
+      });
 
   function submit() {
     if (useRawJson) {

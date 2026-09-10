@@ -41,8 +41,9 @@ struct Cli {
     #[arg(long, value_name = "FILE")]
     config: Option<String>,
 
-    /// Name this worker reports as. Defaults to the hostname, which is what
-    /// makes a stuck run traceable back to a container.
+    /// Label this worker reports as. Defaults to the hostname; a process-unique
+    /// suffix is always added so a replacement cannot inherit its predecessor's
+    /// lease identity.
     #[arg(long, env = "BOOM_TASK_WORKER_NAME")]
     name: Option<String>,
 }
@@ -66,9 +67,13 @@ async fn main() {
         .await
         .expect("failed to create ledger indexes");
 
-    let worker_name = args.name.unwrap_or_else(|| {
+    let worker_label = args.name.unwrap_or_else(|| {
         std::env::var("HOSTNAME").unwrap_or_else(|_| format!("worker-{}", uuid::Uuid::new_v4()))
     });
+    // A hostname identifies a container role, not one process: during a
+    // rollout an old and replacement task-worker can both be named
+    // `task-worker`. Lease ownership must distinguish those processes.
+    let worker_name = format!("{}-{}", worker_label, uuid::Uuid::new_v4());
     info!("task worker {} started", worker_name);
 
     // Set on SIGTERM/ctrl-c. The running task sees it as a cancellation and
@@ -202,8 +207,10 @@ async fn run_one(
                 "the worker shut down while this was running, and {} is not declared                  idempotent, so it was not retried automatically. Check what it had                  already done before running it again.",
                 run.task_type
             ));
-            if let Err(e) = queue::finish(db, &run.id, TaskStatus::Failed, error).await {
-                error!("failed to record the outcome of run {}: {}", run.id, e);
+            match queue::finish_claimed(db, &run.id, worker_name, TaskStatus::Failed, error).await {
+                Ok(true) => {}
+                Ok(false) => warn!(run_id = %run.id, "lost lease before recording failure"),
+                Err(e) => error!("failed to record the outcome of run {}: {}", run.id, e),
             }
         }
         return;
@@ -224,8 +231,10 @@ async fn run_one(
         }
     };
     ctx.flush_logs().await;
-    if let Err(e) = queue::finish(db, &run.id, status, error).await {
-        error!("failed to record the outcome of run {}: {}", run.id, e);
+    match queue::finish_claimed(db, &run.id, worker_name, status, error).await {
+        Ok(true) => {}
+        Ok(false) => warn!(run_id = %run.id, "lost lease before recording outcome"),
+        Err(e) => error!("failed to record the outcome of run {}: {}", run.id, e),
     }
 }
 
