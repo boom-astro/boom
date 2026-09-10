@@ -449,3 +449,17 @@ crossmatch:
         z_phot: 1
         z_phot_err: 1
         photo_z_type: 1
+    - catalog: watchlist_wtp
+      radius: 2.75 # 2.75 arcseconds, one WISE pixel
+      use_distance: false
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        jd_position: 1
+        jd_first: 1
+        jd_last: 1
+        n_obs: 1
+        n_det: 1
+        lightcurve: 1
+        forced: 1
