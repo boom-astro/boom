@@ -209,21 +209,6 @@ crossmatch:
         deltachi2: 1
         spectype: 1
         zcat_nspec: 1
-    - catalog: LS_DR10_PHOTOZ
-      radius: 30.0 # 30 arcseconds
-      use_distance: true
-      distance_key: "z_phot"
-      distance_max: 60.0
-      distance_max_near: 300.0
-      projection:
-        _id: 1
-        ra: 1
-        dec: 1
-        ra_err: 1
-        dec_err: 1
-        z_phot: 1
-        z_phot_err: 1
-        photo_z_type: 1
     - catalog: PS1_DR2
       radius: 2.0
       use_distance: false
@@ -248,7 +233,7 @@ crossmatch:
         strm_uid: 1
         strm_z_phot: 1
         strm_z_phot_err: 1
-    - catalog: lsdr10
+    - catalog: LSDR10
       radius: 30.0
       use_distance: true
       distance_key: "z_phot_mean"
@@ -446,21 +431,6 @@ crossmatch:
         deltachi2: 1
         spectype: 1
         zcat_nspec: 1
-    - catalog: LS_DR10_PHOTOZ
-      radius: 30.0 # 30 arcseconds
-      use_distance: true
-      distance_key: "z_phot"
-      distance_max: 60.0
-      distance_max_near: 300.0
-      projection:
-        _id: 1
-        ra: 1
-        dec: 1
-        ra_err: 1
-        dec_err: 1
-        z_phot: 1
-        z_phot_err: 1
-        photo_z_type: 1
     - catalog: PS1_DR2
       radius: 2.0
       use_distance: false
@@ -485,7 +455,7 @@ crossmatch:
         strm_uid: 1
         strm_z_phot: 1
         strm_z_phot_err: 1
-    - catalog: lsdr10
+    - catalog: LSDR10
       radius: 30.0
       use_distance: true
       distance_key: "z_phot_mean"
