@@ -153,6 +153,39 @@ Erring toward bumping costs a reprocessing run. Erring the other way leaves
 values that look current and are not — which is the failure this exists to
 prevent, and the one nobody notices.
 
+### Adding or swapping a model
+
+Adding a classifier, or pointing an existing one at retrained weights, means
+one edit here: the entry in `ZTF_MODELS`. That is the whole registration — the
+worker loads the file through `model_path`, which reads this list, and the same
+list is what gets hashed into the fingerprint. A new or changed entry moves the
+fingerprint, which interns a new set, which is what makes every previously
+enriched alert show up as stale on the admin page.
+
+**Skipping it is silent.** The model runs, scores get written, and the
+fingerprint does not move — so no alert is marked stale, the admin page shows
+no drift, and `enrich_reprocess --selection stale` selects nothing. The archive
+keeps its unscored state while the page reports it current, which is worse than
+having no stamp at all: there is now a green light on it.
+
+Nothing catches this for you if the model lives in its own module and calls
+`load_model` directly. Models routed through `src/enrichment/models/` get a
+panic at startup (`<field> is not declared in ZTF_MODELS`) because they resolve
+their path through the list; a module that hardcodes its own path does not.
+
+Two constraints on what may go in the list:
+
+- **Every declared file must exist wherever the worker runs.** `current_models`
+  hashes all of them at startup and a missing file is a hard error, not a
+  warning — the worker will not start.
+- **A model behind a cargo feature must be `#[cfg]`'d out of the list when the
+  feature is off**, which follows from the above. That is also the right
+  answer: a build without the model genuinely produces different enrichment, so
+  it should get a different set id rather than claim the same one.
+
+Do not bump `DERIVATIONS` for a model change. The file hash already covers it;
+`DERIVATIONS` is for output computed by BOOM's own code.
+
 ### Seeing what is stale
 
 The admin page shows an **Enrichment** section per survey: the current set, and
