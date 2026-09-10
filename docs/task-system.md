@@ -309,15 +309,56 @@ the person up later.
 | `POST /tasks/{id}/cancel` | Request cancellation |
 | `GET /data/mutations?collection=&limit=` | What has been done to the data |
 
+## Scheduled tasks, when we build them
+
+The first candidate is the LSST cutout retention policy
+([#518](https://github.com/boom-astro/boom/issues/518)). Nothing here is built
+yet; this records what the current design already supports so that whoever
+picks it up does not have to re-derive it.
+
+**What is already in place.** A run carries `trigger` (`api` or `schedule`) and
+`Actor::system()`, both on the document from the start, so a scheduled run is
+distinguishable from one a person submitted rather than being attributed to
+whoever configured the schedule. Everything else a run gets — the lease and
+heartbeat, requeue after a lost worker, cancellation, streamed logs, progress,
+the `data_mutations` ledger entry — is keyed off the run rather than off what
+triggered it, so a scheduled run inherits all of it unchanged.
+
+**What is missing** is where a schedule is declared and the loop that fires it,
+plus two things worth getting right the first time.
+
+*Firing exactly once per tick.* Every task-worker in the fleet wakes at the same
+cron instant. `single_flight_key` does not solve this: it is a check-then-insert
+in the API handler, not an invariant of `queue::submit`, so a scheduler that
+enqueues directly bypasses it, and two schedulers racing would both pass the
+check anyway. The fix needs no leader election and no new index — give a
+scheduled run a deterministic id, `sched:{schedule}:{unix_fire_time}`, and let
+the `_id` uniqueness Mongo already enforces settle it. One worker inserts, the
+rest take a duplicate-key error and move on.
+
+*Missed ticks.* If the fleet was down across a fire time, maintenance work wants
+skip-to-next rather than one backfilled run per missed tick. The work is
+cumulative — a single run catches up on everything that accrued.
+
+**Where the schedule lives** is the open design question. Declaring it on
+`TaskSpec` keeps "may this run unattended" in code review; storing it in a
+collection lets an operator change it from the admin page, which is more in
+keeping with the rest of this system. The likely answer is both: the spec says a
+task is schedulable and gives a default cron, and the collection holds whether
+it is enabled and any override.
+
+**On #518 specifically:** it asks to *offload* cutouts to S3 after ~30 days, not
+to delete them — Babamul is meant to read the archived ones back. A TTL index
+would quietly destroy exactly the data the issue wants kept, so this is a task
+body rather than an index: a chunked, resumable copy-then-delete of the same
+shape as `catalog_ingest`, where each chunk is durable before the source rows go.
+`CutoutStorage` and the existing `copy_cutouts` task already cover most of the
+moving part. The scheduling is the small half; the offload is the work.
+
 ## Not yet built
 
-- **Recurring runs.** The run record already distinguishes `trigger` (`api` vs
-  `schedule`) and has a `system` actor, so a schedule needs an enqueue loop and
-  a cron expression on `TaskSpec`; `single_flight_key` already stops a schedule
-  stacking runs up. Worth noting that the first candidate — trimming old LSST
-  cutouts ([#518](https://github.com/boom-astro/boom/issues/518)) — is better
-  served by a TTL index on the cutout documents than by a task, with only the
-  one-off backfill of existing rows running here.
+- **Recurring runs.** See below — the run record is ready for them, the loop
+  that fires them is not.
 - **Ledger coverage beyond tasks.** `data_mutations` records task runs today.
   Startup migrations and the live pipeline have `SourceKind` variants reserved
   but do not write to it yet.

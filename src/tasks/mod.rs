@@ -82,20 +82,35 @@ fn schema_of<T: utoipa::PartialSchema>() -> serde_json::Value {
     serde_json::to_value(T::schema()).unwrap_or_else(|_| serde_json::json!({}))
 }
 
-// TODO: port `stream_kowalski_alerts`, the last data-mutating binary. It is a
-// worker pool over an external Kowalski deployment rather than a batch job, so
-// it wants the same populate-and-drain treatment `enrich_reprocess` got. Each becomes a body plus an
-// arm in `dispatch`; their existing Valkey work queues already give them the
-// resumability a task needs, so what they mainly want is the params struct and
-// a cancellation check in their batch loop.
+// TODO: recurring runs, for periodic maintenance such as the LSST cutout
+// retention policy (#518). The run document is already ready for them --
+// `Trigger::Schedule` and `Actor::system()` exist so a scheduled run is
+// distinguishable from one a person asked for, and lease, heartbeat, cancel,
+// logs and the ledger are all keyed off the run rather than off what triggered
+// it. What is missing is where a schedule is declared and the loop that fires
+// it.
 //
-// TODO: recurring runs. A scheduled task needs an enqueue loop that submits
-// with `Trigger::Schedule` and `Actor::system()`, plus a cron expression on
-// TaskSpec; `single_flight_key` already prevents a schedule from stacking runs
-// up when one is still going. Wanted for periodic maintenance work such as
-// trimming old LSST cutouts (#518) -- though for that specific case a TTL index
-// on the cutout documents does the job without a task at all, and only the
-// one-off backfill of the existing rows needs to run here.
+// Two things to get right, neither of which the current code handles:
+//
+// 1. **Firing exactly once per tick across a fleet.** Every task-worker wakes
+//    at the same cron instant, and `single_flight_key` will not save us: it is
+//    a check-then-insert in the API handler (`api::routes::tasks::submit`), not
+//    an invariant of `queue::submit`, so a scheduler enqueuing directly bypasses
+//    it and two schedulers racing would both pass the check anyway. The fix
+//    needs no leader election -- give a scheduled run a deterministic id such
+//    as `sched:{schedule}:{unix_fire_time}` and let the `_id` uniqueness Mongo
+//    already enforces settle it. One worker inserts, the rest get a duplicate
+//    key and move on.
+//
+// 2. **Missed ticks.** If the fleet was down over a fire time, maintenance work
+//    wants skip-to-next rather than a backfilled run per missed tick: the work
+//    is cumulative, so one run catches up on all of it.
+//
+// Note that #518 is an *offload* to S3, not a delete -- Babamul is meant to
+// read the archived cutouts back. A TTL index would destroy exactly the data
+// the issue wants kept, so this does need a task body: a chunked, resumable
+// copy-then-delete of the same shape as `catalog_ingest`, with `CutoutStorage`
+// and `copy_cutouts` already covering most of the moving part.
 
 /// Every task type this release knows how to run.
 pub const TASKS: &[TaskSpec] = &[
