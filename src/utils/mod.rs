@@ -8,6 +8,7 @@ pub mod enums;
 pub mod fits;
 pub mod gpu;
 pub mod heliolinc;
+pub mod identify;
 pub mod lightcurves;
 pub mod linking;
 pub mod mpcorb;
@@ -20,6 +21,7 @@ pub mod retry;
 pub mod spatial;
 pub mod sso_geometry;
 pub mod testing;
+pub mod thor;
 pub mod worker;
 
 /// A BSON number as `f64`, whatever width it was written at.
