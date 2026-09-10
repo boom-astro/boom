@@ -40,14 +40,9 @@ COPY ./src /app/src
 RUN --mount=type=cache,target=/app/target,sharing=locked \
     --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
     --mount=type=cache,target=/root/.cargo/git,sharing=locked \
-    cargo build --release --features gpu --bin scheduler --bin migrate_fp_flux --bin migrate_snr --bin reprocess_crossmatch --bin prepare_catalog --bin enrich_reprocess && \
+    cargo build --release --features gpu --bin scheduler && \
     mkdir -p /app/bin && \
     cp target/release/scheduler \
-       target/release/migrate_fp_flux \
-       target/release/migrate_snr \
-       target/release/reprocess_crossmatch \
-       target/release/prepare_catalog \
-       target/release/enrich_reprocess \
        /app/bin/
 
 FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04 AS app
@@ -64,12 +59,10 @@ ENV LD_LIBRARY_PATH=/opt/ort:${LD_LIBRARY_PATH}
 
 WORKDIR /app
 
+# Only the scheduler. The migration binaries became task types -- see
+# docs/task-system.md -- and the `task-worker` service that runs them is not
+# overridden onto this image by docker-compose.cuda.yaml.
 COPY --from=builder /app/bin/scheduler /app/scheduler
-COPY --from=builder /app/bin/migrate_fp_flux /app/migrate_fp_flux
-COPY --from=builder /app/bin/migrate_snr /app/migrate_snr
-COPY --from=builder /app/bin/reprocess_crossmatch /app/reprocess_crossmatch
-COPY --from=builder /app/bin/prepare_catalog /app/prepare_catalog
-COPY --from=builder /app/bin/enrich_reprocess /app/enrich_reprocess
 COPY --from=builder /opt/ort /opt/ort
 
 CMD ["/app/scheduler"]

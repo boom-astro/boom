@@ -595,8 +595,8 @@ pub struct ZtfEnrichmentWorker {
     /// onto every alert it enriches so staleness is a query rather than a
     /// guess. Resolved once at construction; see `enrichment::version`.
     enrichment_set: i64,
-    /// Alerts per batch — also the fixed ONNX inference shape (see
-    /// [`EnrichmentWorkerConfig::batch_size`] in `conf.rs`).
+    /// Alerts per batch; also the fixed ONNX input shape. See
+    /// [`EnrichmentWorkerConfig::batch_size`].
     batch_size: usize,
 }
 
@@ -1292,6 +1292,7 @@ impl ZtfEnrichmentWorker {
         work_items: &[AlertWork],
     ) -> Result<Vec<Option<ZtfAlertClassifications>>, EnrichmentWorkerError> {
         if self.gpu_enabled {
+            models.bind_device()?;
             return self.classify_gpu_batch(models, work_items);
         }
 

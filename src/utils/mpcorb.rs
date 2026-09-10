@@ -453,28 +453,34 @@ async fn refresh_comets_into_staging(
     }
 
     let file = std::fs::File::open(tmp.path())?;
-    let mut documents: Vec<Document> = Vec::new();
+    // MPC publishes a second solution for a comet while one is pending, so the
+    // same designation can appear twice; the later row wins.
+    let mut documents: HashMap<String, Document> = HashMap::new();
     for line in BufReader::new(file).lines() {
         let Ok(line) = line else { continue };
         if let Some(entry) = crate::utils::comets::parse_line(&line) {
-            documents.push(doc! {
-                "_id": &entry.designation,
-                "epoch_jd": entry.elements.epoch_jd,
-                "a": entry.elements.a,
-                "e": entry.elements.e,
-                "incl": entry.elements.incl,
-                "node": entry.elements.node,
-                "peri": entry.elements.peri,
-                "mean_anomaly": entry.elements.mean_anomaly,
-                "q": entry.elements.q,
-                "tp": entry.elements.tp,
-                "h": entry.h,
-                "g": entry.g,
-                "updated_at": now,
-            });
+            documents.insert(
+                entry.designation.clone(),
+                doc! {
+                    "_id": &entry.designation,
+                    "epoch_jd": entry.elements.epoch_jd,
+                    "a": entry.elements.a,
+                    "e": entry.elements.e,
+                    "incl": entry.elements.incl,
+                    "node": entry.elements.node,
+                    "peri": entry.elements.peri,
+                    "mean_anomaly": entry.elements.mean_anomaly,
+                    "q": entry.elements.q,
+                    "tp": entry.elements.tp,
+                    "h": entry.h,
+                    "g": entry.g,
+                    "updated_at": now,
+                },
+            );
         }
     }
 
+    let documents: Vec<Document> = documents.into_values().collect();
     let parsed = documents.len() as u64;
     if parsed < MIN_PLAUSIBLE_COMETS {
         return Err(RefreshError::ImplausiblyShort {
