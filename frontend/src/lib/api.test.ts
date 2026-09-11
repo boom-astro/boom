@@ -127,6 +127,15 @@ describe("fetchProfile", () => {
     expect(await fetchProfile()).toBeNull()
   })
 
+  it("returns null when the payload has no username", async () => {
+    const fetchMock = vi.fn(async () =>
+      jsonResponse({ message: "success", data: { email: "ada@example.org", created_at: 0 } })
+    )
+    vi.stubGlobal("fetch", fetchMock)
+
+    expect(await fetchProfile()).toBeNull()
+  })
+
   it("returns null for a body that parsed but carries no account", async () => {
     // A gateway envelope reaching `unwrapData` as-is: truthy, but every profile
     // field `undefined`, which `identify` rejects rather than reports.

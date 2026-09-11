@@ -278,8 +278,9 @@ function normalizeProfile(wire: ProfileWire): Profile {
   // `unwrapData` passes any non-null object through, so an envelope that parsed
   // but carries no account — a gateway's `{"message": ...}`, say — would arrive
   // as a truthy profile of `undefined` fields and reach `identify` as
-  // `identify(undefined)`. Having neither name nor address is not a profile.
-  if (!wire || (typeof wire.username !== "string" && typeof wire.email !== "string")) return null;
+  // `identify(undefined)`. Both are required by `Profile`, so a payload missing
+  // either is not a profile.
+  if (!wire || typeof wire.username !== "string" || typeof wire.email !== "string") return null;
   const { id, _id, ...rest } = wire;
   return { ...rest, id: id || _id || undefined };
 }
