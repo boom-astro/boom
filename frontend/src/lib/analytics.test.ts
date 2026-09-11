@@ -23,7 +23,15 @@ describe("identifyUser", () => {
     identifyUser(USER_ID, EMAIL, "ada")
 
     expect(mocked.alias).toHaveBeenCalledWith(USER_ID, "ada")
-    expect(mocked.identify).toHaveBeenCalledWith(USER_ID, { email: EMAIL })
+    expect(mocked.identify).toHaveBeenCalledOnce()
+  })
+
+  it("identifies without sending the address as a person property", () => {
+    mocked.get_distinct_id.mockReturnValue("ada")
+
+    identifyUser(USER_ID, EMAIL, "ada")
+
+    expect(mocked.identify).toHaveBeenCalledWith(USER_ID)
   })
 
   it("identifies before aliasing", () => {

@@ -40,7 +40,7 @@ export function trackError(context: string, error: unknown, additionalInfo?: Sea
 
 export function identifyUser(userId: string, email?: string, username?: string) {
   const previousId = posthog.get_distinct_id();
-  posthog.identify(userId, { email });
+  posthog.identify(userId);
   // Alias after identify: identify skips its distinct_id switch when handed the registered __alias.
   const vouchedFor = !!previousId && (previousId === username || previousId === email);
   if (vouchedFor && previousId !== userId) {

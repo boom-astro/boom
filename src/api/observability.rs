@@ -97,7 +97,7 @@ pub async fn request_metrics_middleware(
     ));
 
     // A dropped event takes the `$set` with it, so give the hourly slot back.
-    if let Some(user) = user.as_ref().filter(|u| !enqueued && u.person.is_some()) {
+    if let Some(user) = user.as_ref().filter(|u| !enqueued && u.username.is_some()) {
         release_person_property_refresh(&user.id);
     }
 
@@ -106,24 +106,17 @@ pub async fn request_metrics_middleware(
 
 struct UserIdentity {
     id: String,
-    person: Option<PersonProperties>,
-}
-
-struct PersonProperties {
-    email: String,
-    username: String,
+    /// Present only on the request carrying this person's property refresh.
+    username: Option<String>,
 }
 
 impl UserIdentity {
     /// Also claims the process-wide person-property slot, once per user per TTL.
     fn claim(user: &BabamulUser) -> Self {
-        let person = claim_person_property_refresh(&user.id).then(|| PersonProperties {
-            email: user.email.clone(),
-            username: user.username.clone(),
-        });
+        let username = claim_person_property_refresh(&user.id).then(|| user.username.clone());
         Self {
             id: user.id.clone(),
-            person,
+            username,
         }
     }
 }
@@ -189,14 +182,8 @@ fn build_request_event(
     let Some(user) = user else {
         return event.anonymous();
     };
-    match &user.person {
-        Some(person) => event.with(
-            "$set",
-            serde_json::json!({
-                "email": person.email,
-                "username": person.username,
-            }),
-        ),
+    match &user.username {
+        Some(username) => event.with("$set", serde_json::json!({ "username": username })),
         None => event,
     }
 }
@@ -393,10 +380,7 @@ mod tests {
             12,
             Some(&UserIdentity {
                 id: "user-42".to_string(),
-                person: Some(PersonProperties {
-                    email: "someone@example.org".to_string(),
-                    username: "someone".to_string(),
-                }),
+                username: Some("someone".to_string()),
             }),
             &client_info,
         );
@@ -404,8 +388,8 @@ mod tests {
         assert_eq!(event.distinct_id, "user-42");
         assert_eq!(event.properties.get("authenticated").unwrap(), true);
         let set = event.properties.get("$set").unwrap();
-        assert_eq!(set.get("email").unwrap(), "someone@example.org");
         assert_eq!(set.get("username").unwrap(), "someone");
+        assert!(set.get("email").is_none(), "the address must not be sent");
         assert_eq!(event.properties.get("success").unwrap(), true);
         // The route pattern, not a path with a real object id baked in.
         assert_eq!(
@@ -426,7 +410,7 @@ mod tests {
             4,
             Some(&UserIdentity {
                 id: "user-42".to_string(),
-                person: None,
+                username: None,
             }),
             &client_info,
         );
