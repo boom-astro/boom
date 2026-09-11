@@ -35,13 +35,13 @@ export default function Login({ onLoginSuccess }: Props) {
     try {
       await api.login(email, password);
       const profile = await api.fetchProfile().catch(() => null);
+      // No id to identify by: staying anonymous lets the next identify merge this in.
       if (profile) analytics.identifyProfile(profile);
-      else analytics.identifyUser(email, email);
-      analytics.trackLoginSuccess({ email });
+      analytics.trackLoginSuccess();
       onLoginSuccess();
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : String(err));
-      analytics.trackError('login', err, { email });
+      analytics.trackError('login', err);
     } finally {
       setLoading(false);
     }

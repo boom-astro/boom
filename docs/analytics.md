@@ -55,12 +55,18 @@ at most once per user per hour (`PERSON_PROPERTY_TTL`), since a value that
 almost never changes does not need re-sending on every request a polling
 session makes. `$set` rather than `$set_once` so a renamed account follows.
 
-**Email addresses are deliberately not sent.** They add nothing PostHog needs:
-the `distinct_id` already keys everything to one person, and the id-to-address
-join lives in Mongo, where the account does. Sending them would put a personal
-identifier in a third-party product-analytics tool for every user, including
-the ones who only ever call the API from the Python package and never load a
-page that could tell them so.
+**Email addresses are never sent**, as a person property, as an event property,
+or as a `distinct_id`. They add nothing PostHog needs: the `distinct_id` already
+keys everything to one person, and the id-to-address join lives in Mongo, where
+the account does. Sending them would put a personal identifier in a third-party
+product-analytics tool for every user, including the ones who only ever call the
+API from the Python package and never load a page that could tell them so.
+
+The browser client's signup and login events therefore carry no properties at
+all, and `trackSignupInitiated` and friends are typed to accept none, so an
+address cannot be attached to one by accident. A login whose `/profile` call
+fails identifies nobody rather than falling back to the address: the session
+stays anonymous and the next successful `identify` merges it in.
 
 Sessions that signed in before the `id` fix are already identified on the
 username, and `posthog.identify` emits its merge event only while the stored
