@@ -354,6 +354,9 @@ pub struct Candidate {
     pub diffmaglim: Option<f32>,
     pub programpi: Option<String>,
     pub programid: i32,
+    /// Whether the exposure was a Target of Opportunity, as WINTER reports it.
+    #[serde(deserialize_with = "deserialize_tooflag")]
+    pub tooflag: bool,
     pub candid: i64,
     #[serde(deserialize_with = "deserialize_isdiffpos")]
     pub isdiffpos: bool,
@@ -455,6 +458,24 @@ where
         serde_json::Value::Bool(b) => Ok(Some(b)),
         _ => Ok(None),
     }
+}
+
+/// IPAC sends `["null", "int"]`; WINTER reports a boolean, so coerce to that.
+///
+/// A null means the exposure carried no ToO marking, which reads as not a ToO.
+fn deserialize_tooflag<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value: serde_json::Value = Deserialize::deserialize(deserializer)?;
+    Ok(match value {
+        serde_json::Value::Number(n) => n.as_i64() == Some(1),
+        serde_json::Value::Bool(b) => b,
+        serde_json::Value::String(s) => {
+            s == "1" || s.eq_ignore_ascii_case("t") || s.eq_ignore_ascii_case("true")
+        }
+        _ => false,
+    })
 }
 
 fn deserialize_isdiffpos<'de, D>(deserializer: D) -> Result<bool, D::Error>
@@ -1528,6 +1549,32 @@ mod tests {
     ///      which will make `from_avro_datum` fail on the next call.
     ///   3. Deserialize the same packet again – the fallback should kick in,
     ///      repair the cache, and return the same alert.
+    #[test]
+    fn test_tooflag_survives_deserialization() {
+        let avro_bytes = std::fs::read("tests/data/alerts/ztf/2695378462115010012.avro").unwrap();
+        let mut cache = SchemaCache::default();
+        let alert: ZtfRawAvroAlert = cache.alert_from_avro_bytes(&avro_bytes).unwrap();
+        // A survey pointing is not a ToO, so this packet reads false; the point
+        // is that it parses at all, since the field was previously discarded.
+        assert!(!alert.candidate.candidate.tooflag);
+    }
+
+    #[test]
+    fn test_tooflag_coerces_every_form_ipac_sends() {
+        #[derive(serde::Deserialize)]
+        struct Wrapper {
+            #[serde(deserialize_with = "deserialize_tooflag")]
+            tooflag: bool,
+        }
+        let parse = |json: &str| serde_json::from_str::<Wrapper>(json).unwrap().tooflag;
+        assert!(parse(r#"{"tooflag": 1}"#));
+        assert!(!parse(r#"{"tooflag": 0}"#));
+        assert!(!parse(r#"{"tooflag": null}"#));
+        assert!(parse(r#"{"tooflag": true}"#));
+        assert!(parse(r#"{"tooflag": "t"}"#));
+        assert!(!parse(r#"{"tooflag": "f"}"#));
+    }
+
     #[test]
     fn test_schema_cache_fallback_on_corrupt_start_idx() {
         let avro_bytes = std::fs::read("tests/data/alerts/ztf/2695378462115010012.avro").unwrap();
