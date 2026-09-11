@@ -116,7 +116,11 @@ export function setUserProperties(properties: Record<string, unknown>) {
  * is still `anonymous`; past that it switches `distinct_id` silently. Sessions
  * that signed in before `/profile` sent `id` are already identified on the
  * username, so moving them to the user id would strand their history on a
- * second person. Aliasing first links the two.
+ * second person. The alias links the two.
+ *
+ * The alias must come after the identify: `posthog.alias` registers `__alias`,
+ * and `identify` skips its `distinct_id` switch when handed the registered
+ * `__alias`.
  *
  * `username` gates that: an alias is irreversible, so it is claimed only when
  * the id being replaced is the one this same account was identified under —
@@ -124,12 +128,12 @@ export function setUserProperties(properties: Record<string, unknown>) {
  */
 export function identifyUser(userId: string, email?: string, username?: string) {
   const previousId = posthog.get_distinct_id();
-  if (username && previousId === username && previousId !== userId) {
-    posthog.alias(userId, previousId);
-  }
   posthog.identify(userId, {
     email,
   });
+  if (username && previousId === username && previousId !== userId) {
+    posthog.alias(userId, previousId);
+  }
 }
 
 /**

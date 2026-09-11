@@ -32,6 +32,17 @@ describe("identifyUser", () => {
     })
   })
 
+  it("identifies before aliasing", () => {
+    // `identify` skips its `distinct_id` switch when handed the registered `__alias`.
+    mocked.get_distinct_id.mockReturnValue("ada")
+
+    identifyUser("68f0c1a2b3c4d5e6f7a8b9c0", "ada@example.org", "ada")
+
+    expect(mocked.identify.mock.invocationCallOrder[0]).toBeLessThan(
+      mocked.alias.mock.invocationCallOrder[0]
+    )
+  })
+
   it("leaves a stranger's distinct id alone", () => {
     // A shared browser: the id on record belongs to whoever signed in last, not
     // to this account, and an alias would irreversibly merge two real people.
