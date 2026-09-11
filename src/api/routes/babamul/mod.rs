@@ -203,7 +203,9 @@ pub struct BabamulUser {
 #[derive(Serialize, Deserialize, Clone, Debug, ToSchema)]
 pub struct BabamulUserPublic {
     /// The user id: Mongo storing it as `_id` is a storage detail, so the
-    /// public shape sends `id`.
+    /// public shape sends `id`. The deserializer stays on `_id` so the type can
+    /// still decode a document straight out of the collection.
+    #[serde(rename(serialize = "id", deserialize = "_id"))]
     pub id: String,
     pub username: String,
     pub email: String,
