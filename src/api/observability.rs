@@ -105,15 +105,11 @@ pub async fn request_metrics_middleware(
                         request
                             .extensions()
                             .get::<BabamulUser>()
-                            .map(UserIdentity::from),
+                            .map(UserIdentity::claim),
                     )
                 }
                 Err(_) => (path.clone(), None),
             };
-
-            let refresh_person = user
-                .as_ref()
-                .is_some_and(|user| claim_person_property_refresh(&user.id));
 
             let enqueued = analytics.capture(build_request_event(
                 &endpoint,
@@ -121,14 +117,13 @@ pub async fn request_metrics_middleware(
                 status_code,
                 started_at.elapsed().as_millis() as u64,
                 user.as_ref(),
-                refresh_person,
                 &client_info,
             ));
 
             // A dropped event takes the `$set` with it, so hand the slot back
             // rather than leave the person un-refreshed for a whole TTL.
-            if refresh_person && !enqueued {
-                if let Some(user) = user.as_ref() {
+            if !enqueued {
+                if let Some(user) = user.as_ref().filter(|user| user.person.is_some()) {
                     release_person_property_refresh(&user.id);
                 }
             }
@@ -140,19 +135,28 @@ pub async fn request_metrics_middleware(
 
 /// Who the request resolved to: the id that merges browser, API and Kafka
 /// activity onto one PostHog person, plus the `email` and `username` that make
-/// that person identifiable in the PostHog UI.
+/// that person identifiable in the PostHog UI, on the requests that carry them.
 struct UserIdentity {
     id: String,
+    person: Option<PersonProperties>,
+}
+
+struct PersonProperties {
     email: String,
     username: String,
 }
 
-impl From<&BabamulUser> for UserIdentity {
-    fn from(user: &BabamulUser) -> Self {
-        Self {
-            id: user.id.clone(),
+impl UserIdentity {
+    /// Claims the person-property slot as it reads, so `email` and `username`
+    /// are cloned only on the one request per window that sends them.
+    fn claim(user: &BabamulUser) -> Self {
+        let person = claim_person_property_refresh(&user.id).then(|| PersonProperties {
             email: user.email.clone(),
             username: user.username.clone(),
+        });
+        Self {
+            id: user.id.clone(),
+            person,
         }
     }
 }
@@ -212,7 +216,6 @@ fn build_request_event(
     status_code: u16,
     duration_ms: u64,
     user: Option<&UserIdentity>,
-    refresh_person: bool,
     client_info: &ClientInfo,
 ) -> AnalyticsEvent {
     let event = AnalyticsEvent::new(
@@ -235,15 +238,15 @@ fn build_request_event(
     // Unauthenticated traffic must not create person profiles in PostHog, while
     // authenticated traffic periodically `$set`s email and username so the
     // person is legible even for a user who only ever uses the Python package.
-    match user {
-        Some(user) if refresh_person => event.with(
+    match user.map(|user| user.person.as_ref()) {
+        Some(Some(person)) => event.with(
             "$set",
             serde_json::json!({
-                "email": user.email,
-                "username": user.username,
+                "email": person.email,
+                "username": person.username,
             }),
         ),
-        Some(_) => event,
+        Some(None) => event,
         None => event.anonymous(),
     }
 }
@@ -445,8 +448,7 @@ mod tests {
         let mut client_info = parse_user_agent("babamul-python/0.2.0 (Python/3.12.1; Linux)");
         client_info.auth_method = "personal_access_token";
 
-        let event =
-            build_request_event("/babamul/profile", "GET", 401, 3, None, true, &client_info);
+        let event = build_request_event("/babamul/profile", "GET", 401, 3, None, &client_info);
 
         assert_eq!(event.distinct_id, ANONYMOUS_DISTINCT_ID);
         assert_eq!(event.properties.get("status_code").unwrap(), 401);
@@ -477,10 +479,11 @@ mod tests {
             12,
             Some(&UserIdentity {
                 id: "user-42".to_string(),
-                email: "someone@example.org".to_string(),
-                username: "someone".to_string(),
+                person: Some(PersonProperties {
+                    email: "someone@example.org".to_string(),
+                    username: "someone".to_string(),
+                }),
             }),
-            true,
             &client_info,
         );
 
@@ -511,10 +514,8 @@ mod tests {
             4,
             Some(&UserIdentity {
                 id: "user-42".to_string(),
-                email: "someone@example.org".to_string(),
-                username: "someone".to_string(),
+                person: None,
             }),
-            false,
             &client_info,
         );
 
