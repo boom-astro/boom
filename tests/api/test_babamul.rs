@@ -8,6 +8,7 @@ mod tests {
     use boom::api::db::get_test_db_api;
     use boom::api::email::EmailService;
     use boom::api::routes;
+    use boom::api::routes::babamul::{create_babamul_jwt, BabamulUser};
     use boom::api::test_utils::{read_json_response, read_str_response};
     use boom::conf::{load_dotenv, AppConfig};
     use boom::enrichment::{EnrichmentWorker, LsstEnrichmentWorker, ZtfEnrichmentWorker};
@@ -21,22 +22,20 @@ mod tests {
     use mongodb::Database;
     use std::collections::HashMap;
 
-    /// Helper struct to manage test user lifecycle
     struct TestUser {
-        pub user: boom::api::routes::babamul::BabamulUser,
+        pub user: BabamulUser,
         pub token: String,
         database: Database,
     }
 
     impl TestUser {
-        /// Create a new test user with a unique email and JWT token
         async fn create(
             database: &Database,
             auth_app_data: &boom::api::auth::AuthProvider,
         ) -> Self {
             let id = uuid::Uuid::new_v4().to_string();
             let test_email = format!("test+{}@babamul.example.com", id);
-            let test_user = boom::api::routes::babamul::BabamulUser {
+            let test_user = BabamulUser {
                 id: id.clone(),
                 username: "testuser".to_string(),
                 email: test_email.clone(),
@@ -54,19 +53,16 @@ mod tests {
                 name: None,
             };
 
-            let babamul_users_collection: mongodb::Collection<
-                boom::api::routes::babamul::BabamulUser,
-            > = database.collection("babamul_users");
+            let babamul_users_collection: mongodb::Collection<BabamulUser> =
+                database.collection("babamul_users");
             babamul_users_collection
                 .insert_one(&test_user)
                 .await
                 .expect("Failed to insert test user");
 
-            // Create JWT token for test user
-            let (token, _) =
-                boom::api::routes::babamul::create_babamul_jwt(auth_app_data, &test_user.id)
-                    .await
-                    .expect("Failed to create JWT");
+            let (token, _) = create_babamul_jwt(auth_app_data, &test_user.id)
+                .await
+                .expect("Failed to create JWT");
 
             Self {
                 user: test_user,
@@ -78,14 +74,12 @@ mod tests {
 
     impl Drop for TestUser {
         fn drop(&mut self) {
-            // Clean up the test user when the struct is dropped
             let database = self.database.clone();
             let user_id = self.user.id.clone();
 
             tokio::spawn(async move {
-                let babamul_users_collection: mongodb::Collection<
-                    boom::api::routes::babamul::BabamulUser,
-                > = database.collection("babamul_users");
+                let babamul_users_collection: mongodb::Collection<BabamulUser> =
+                    database.collection("babamul_users");
                 babamul_users_collection
                     .delete_one(doc! { "_id": &user_id })
                     .await
@@ -94,7 +88,6 @@ mod tests {
         }
     }
 
-    /// Test POST /babamul/signup
     #[actix_rt::test]
     async fn test_babamul_signup() {
         load_dotenv();
@@ -113,11 +106,9 @@ mod tests {
         )
         .await;
 
-        // Generate a unique test email
         let id = uuid::Uuid::new_v4().to_string();
         let test_email = format!("test+{}@babamul.example.com", id);
 
-        // Create a signup request
         let req = test::TestRequest::post()
             .uri("/babamul/signup")
             .set_json(serde_json::json!({
@@ -144,14 +135,12 @@ mod tests {
             "Activation should be required"
         );
 
-        // No password should be returned yet (only after activation)
         assert!(
             body["password"].is_null() || !body.get("password").is_some(),
             "Password should not be returned before activation"
         );
 
-        // Verify the user was created in the database
-        let babamul_users_collection: mongodb::Collection<boom::api::routes::babamul::BabamulUser> =
+        let babamul_users_collection: mongodb::Collection<BabamulUser> =
             database.collection("babamul_users");
         let user = babamul_users_collection
             .find_one(doc! { "email": &test_email })
@@ -167,8 +156,6 @@ mod tests {
             "Activation code should be set"
         );
 
-        // Try to signup with the same email again - should succeed
-        // (since it is not activated yet), but generate a new activation code
         let req = test::TestRequest::post()
             .uri("/babamul/signup")
             .set_json(serde_json::json!({
@@ -205,17 +192,13 @@ mod tests {
             "A new activation code should be generated on re-signup"
         );
 
-        // Clean up: delete the test user
         babamul_users_collection
             .delete_one(doc! { "email": &test_email })
             .await
             .unwrap();
     }
 
-    /// Test POST /babamul/activate
-    /// NOTE:
-    /// - This test requires Kafka CLI tools (kafka-configs / kafka-acls) and a reachable Kafka broker.
-    /// - Install tools with: brew install kafka (macOS) or run against a Docker Kafka.
+    /// Needs the Kafka CLI tools (`brew install kafka`) and a reachable broker.
     #[actix_rt::test]
     async fn test_babamul_activate() {
         load_dotenv();
@@ -236,11 +219,9 @@ mod tests {
         )
         .await;
 
-        // Generate a unique test email
         let id = uuid::Uuid::new_v4().to_string();
         let test_email = format!("test+{}@babamul.example.com", id);
 
-        // First, sign up
         let req = test::TestRequest::post()
             .uri("/babamul/signup")
             .set_json(serde_json::json!({
@@ -251,8 +232,7 @@ mod tests {
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), StatusCode::OK);
 
-        // Get the activation code from the database
-        let babamul_users_collection: mongodb::Collection<boom::api::routes::babamul::BabamulUser> =
+        let babamul_users_collection: mongodb::Collection<BabamulUser> =
             database.collection("babamul_users");
         let user = babamul_users_collection
             .find_one(doc! { "email": &test_email })
@@ -261,7 +241,6 @@ mod tests {
             .unwrap();
         let activation_code = user.activation_code.clone().unwrap();
 
-        // Try to activate with wrong code
         let req = test::TestRequest::post()
             .uri("/babamul/activate")
             .set_json(serde_json::json!({
@@ -277,7 +256,6 @@ mod tests {
             "Wrong activation code should be rejected"
         );
 
-        // Activate with correct code
         let req = test::TestRequest::post()
             .uri("/babamul/activate")
             .set_json(serde_json::json!({
@@ -299,10 +277,8 @@ mod tests {
         let password = body["password"].as_str().unwrap();
         assert_eq!(password.len(), 32, "Password should be 32 characters");
 
-        // Save password for later use
         let user_password = password.to_string();
 
-        // Verify user is activated in database
         let user = babamul_users_collection
             .find_one(doc! { "email": &test_email })
             .await
@@ -314,13 +290,11 @@ mod tests {
             "Activation code should be cleared"
         );
 
-        // Verify password is stored (hashed)
         assert!(
             !user.password_hash.is_empty(),
             "Password hash should be stored"
         );
 
-        // Test authentication with the password
         let req = test::TestRequest::post()
             .uri("/babamul/auth")
             .set_form(serde_json::json!({
@@ -344,7 +318,6 @@ mod tests {
         );
         assert_eq!(auth_body["token_type"].as_str().unwrap(), "Bearer");
 
-        // Try to activate again - should succeed but not return password
         let req = test::TestRequest::post()
             .uri("/babamul/activate")
             .set_json(serde_json::json!({
@@ -365,17 +338,13 @@ mod tests {
             "Password should not be returned for already-activated account"
         );
 
-        // Clean up: delete the test user
         babamul_users_collection
             .delete_one(doc! { "email": &test_email })
             .await
             .unwrap();
     }
 
-    /// Test that invalid emails are rejected
-    /// A deployment with `registration_enabled = false` closes the password
-    /// sign-up route too. Hiding the link in the web app is presentation; this
-    /// is the part that holds when somebody posts to the API directly.
+    /// `registration_enabled = false` must hold against a direct POST, not just a hidden link.
     #[actix_rt::test]
     async fn test_babamul_signup_honors_registration_enabled() {
         load_dotenv();
@@ -406,8 +375,7 @@ mod tests {
         .await;
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 
-        let users: mongodb::Collection<boom::api::routes::babamul::BabamulUser> =
-            database.collection("babamul_users");
+        let users: mongodb::Collection<BabamulUser> = database.collection("babamul_users");
         assert_eq!(
             users
                 .count_documents(doc! { "email": &email })
@@ -436,7 +404,6 @@ mod tests {
         )
         .await;
 
-        // Test invalid emails
         for invalid_email in &["invalid", "no-at-sign", "@nodomain", ""] {
             let req = test::TestRequest::post()
                 .uri("/babamul/signup")
@@ -455,7 +422,6 @@ mod tests {
         }
     }
 
-    /// Test GET /babamul/schema/{survey}
     #[actix_rt::test]
     async fn test_get_babamul_schema() {
         load_dotenv();
@@ -470,7 +436,6 @@ mod tests {
         )
         .await;
 
-        // ZTF schema
         let req = test::TestRequest::get()
             .uri("/babamul/surveys/ztf/schemas")
             .to_request();
@@ -489,7 +454,6 @@ mod tests {
             "Schema should contain a 'name' field"
         );
 
-        // LSST schema
         let req = test::TestRequest::get()
             .uri("/babamul/surveys/lsst/schemas")
             .to_request();
@@ -508,7 +472,6 @@ mod tests {
             "Schema should contain a 'name' field"
         );
 
-        // Invalid survey
         let req = test::TestRequest::get()
             .uri("/babamul/surveys/invalid_survey/schemas")
             .to_request();
@@ -521,7 +484,6 @@ mod tests {
         );
     }
 
-    /// Test GET /babamul/surveys/{survey_name}/cutouts success case
     #[actix_rt::test]
     async fn test_get_alert_cutouts() {
         load_dotenv();
@@ -529,10 +491,8 @@ mod tests {
         let database: Database = get_test_db_api().await;
         let auth_app_data = get_test_auth(&database).await.unwrap();
 
-        // Create a test user
         let test_user = TestUser::create(&database, &auth_app_data).await;
 
-        // Insert test cutout data with unique ID
         let ztf_cutouts_storage = config
             .build_cutout_storage(&Survey::Ztf)
             .await
@@ -594,7 +554,6 @@ mod tests {
             "Cutout should be base64 encoded string"
         );
 
-        // Clean up
         config
             .build_cutout_storage(&Survey::Ztf)
             .await
@@ -603,7 +562,6 @@ mod tests {
             .await
             .expect("Failed to delete test cutout");
 
-        // Test retrieval of non-existent candid
         let req = test::TestRequest::get()
             .uri("/babamul/surveys/ztf/cutouts?candid=8888888888")
             .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
@@ -617,14 +575,12 @@ mod tests {
         );
     }
 
-    /// Test GET /babamul/surveys/lsst/alerts
     #[actix_rt::test]
     async fn test_get_lsst_alerts() {
         load_dotenv();
         let database: Database = get_test_db_api().await;
         let auth_app_data = get_test_auth(&database).await.unwrap();
 
-        // Create a test user
         let test_user = TestUser::create(&database, &auth_app_data).await;
 
         let app = test::init_service(
@@ -652,7 +608,6 @@ mod tests {
             .unwrap();
         let result = enrichment_worker.process_alerts(&[candid]).await;
         assert!(result.is_ok(), "Enrichment failed: {:?}", result.err());
-        // Query with cone search and magnitude filters
         let req = test::TestRequest::get()
             .uri("/babamul/surveys/lsst/alerts?ra=180.0&dec=0.0&radius_arcsec=60&min_magpsf=11&max_magpsf=26")
             .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
@@ -679,20 +634,17 @@ mod tests {
             "Response should contain the inserted alert"
         );
 
-        // Clean up
         drop_alert_from_collections(candid, &Survey::Lsst)
             .await
             .unwrap();
     }
 
-    /// Test GET /babamul/surveys/ztf/alerts
     #[actix_rt::test]
     async fn test_get_ztf_alerts() {
         load_dotenv();
         let database: Database = get_test_db_api().await;
         let auth_app_data = get_test_auth(&database).await.unwrap();
 
-        // Create a test user
         let test_user = TestUser::create(&database, &auth_app_data).await;
 
         let app = test::init_service(
@@ -719,7 +671,6 @@ mod tests {
             .unwrap();
         let result = enrichment_worker.process_alerts(&[candid]).await;
         assert!(result.is_ok(), "Enrichment failed: {:?}", result.err());
-        // Query with cone search and magnitude filters
         let req = test::TestRequest::get()
             .uri("/babamul/surveys/ztf/alerts?ra=180.0&dec=0.0&radius_arcsec=60&min_magpsf=11&max_magpsf=26")
             .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
@@ -746,20 +697,17 @@ mod tests {
             "Response should contain the inserted alert"
         );
 
-        // Clean up
         drop_alert_from_collections(candid, &Survey::Ztf)
             .await
             .unwrap();
     }
 
-    /// Test GET /babamul/surveys/lsst/objects/{object_id}
     #[actix_rt::test]
     async fn test_get_lsst_object() {
         load_dotenv();
         let database: Database = get_test_db_api().await;
         let auth_app_data = get_test_auth(&database).await.unwrap();
 
-        // Create a test user
         let test_user = TestUser::create(&database, &auth_app_data).await;
 
         let mut alert_worker = lsst_alert_worker().await;
@@ -808,12 +756,10 @@ mod tests {
             "Response should contain candidate"
         );
 
-        // Clean up
         drop_alert_from_collections(candid, &Survey::Lsst)
             .await
             .unwrap();
 
-        // Test retrieval of non-existent object
         let req = test::TestRequest::get()
             .uri("/babamul/surveys/lsst/objects/nonexistent_object")
             .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
@@ -827,14 +773,12 @@ mod tests {
         );
     }
 
-    /// Test GET /babamul/surveys/ztf/objects/{object_id}
     #[actix_rt::test]
     async fn test_get_ztf_object() {
         load_dotenv();
         let database: Database = get_test_db_api().await;
         let auth_app_data = get_test_auth(&database).await.unwrap();
 
-        // Create a test user
         let test_user = TestUser::create(&database, &auth_app_data).await;
 
         let mut alert_worker = ztf_alert_worker().await;
@@ -883,12 +827,10 @@ mod tests {
             "Response should contain candidate"
         );
 
-        // Clean up
         drop_alert_from_collections(candid, &Survey::Ztf)
             .await
             .unwrap();
 
-        // Test retrieval of non-existent object
         let req = test::TestRequest::get()
             .uri("/babamul/surveys/ztf/objects/nonexistent_object")
             .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
@@ -902,14 +844,12 @@ mod tests {
         );
     }
 
-    /// Test GET /babamul/objects validation for ZTF patterns
     #[actix_rt::test]
     async fn test_get_objects_validation() {
         load_dotenv();
         let database: Database = get_test_db_api().await;
         let auth_app_data = get_test_auth(&database).await.unwrap();
 
-        // Create a test user
         let test_user = TestUser::create(&database, &auth_app_data).await;
 
         let app = test::init_service(
@@ -923,8 +863,6 @@ mod tests {
         )
         .await;
 
-        // ZTF:
-        // Acceptable values
         for value in ["Z", "ZT", "ZTF", "ZTF20a", "20a"] {
             let req = test::TestRequest::get()
                 .uri(&format!("/babamul/objects?object_id={}", value))
@@ -940,7 +878,6 @@ mod tests {
             );
         }
 
-        // Invalid values
         for value in ["Z2", "ZTF231", "ZTF2a", "ZTF20aaaaaaaa"] {
             let req = test::TestRequest::get()
                 .uri(&format!("/babamul/objects?object_id={}", value))
@@ -956,8 +893,6 @@ mod tests {
             );
         }
 
-        // LSST:
-        // Acceptable values
         for value in ["L", "LS", "LSS", "LSST", "LSST1", "1", "LSST123", "123"] {
             let req = test::TestRequest::get()
                 .uri(&format!("/babamul/objects?object_id={}", value))
@@ -972,7 +907,6 @@ mod tests {
             );
         }
 
-        // Invalid values
         for value in ["L2", "LSSTA", "1a"] {
             let req = test::TestRequest::get()
                 .uri(&format!("/babamul/objects?object_id={}", value))
@@ -988,7 +922,6 @@ mod tests {
         }
     }
 
-    /// Test GET /babamul/objects with ra/dec/radius (cross-survey cone search)
     #[actix_rt::test]
     async fn test_get_objects_cone_search() {
         use boom::utils::spatial::Coordinates;
@@ -1010,8 +943,7 @@ mod tests {
         let lsst_ra = ztf_ra + offset_arcsec;
         let lsst_dec = ztf_dec + offset_arcsec;
 
-        // Ensure the 2dsphere index on coordinates.radec_geojson exists for both surveys
-        // so $nearSphere works regardless of test execution order.
+        // $nearSphere needs the 2dsphere index, whatever order the suite runs in.
         boom::utils::db::initialize_survey_indexes(&Survey::Ztf, &database)
             .await
             .expect("Failed to initialize ZTF indexes");
@@ -1019,7 +951,6 @@ mod tests {
             .await
             .expect("Failed to initialize LSST indexes");
 
-        // Insert one ZTF and one LSST object close to each other
         let ztf_aux: mongodb::Collection<boom::alert::ZtfObject> =
             database.collection("ZTF_alerts_aux");
         let lsst_aux: mongodb::Collection<boom::alert::LsstObject> =
@@ -1070,7 +1001,6 @@ mod tests {
         )
         .await;
 
-        // Successful cone search: both objects should be returned (within 10 arcsec)
         let req = test::TestRequest::get()
             .uri(&format!(
                 "/babamul/objects?ra={}&dec={}&radius=10&limit=10",
@@ -1112,7 +1042,6 @@ mod tests {
             "Results should be sorted by distance ascending"
         );
 
-        // Tiny radius — no objects expected
         let req = test::TestRequest::get()
             .uri(&format!(
                 "/babamul/objects?ra={}&dec={}&radius=0.001&limit=10",
@@ -1131,7 +1060,6 @@ mod tests {
             "Should return no results for tiny radius far from test objects"
         );
 
-        // Providing both object_id and ra/dec/radius should be rejected
         let req = test::TestRequest::get()
             .uri(&format!(
                 "/babamul/objects?object_id=ZTF24abc&ra={}&dec={}&radius=10",
@@ -1147,7 +1075,6 @@ mod tests {
             "Should reject both object_id and ra/dec/radius"
         );
 
-        // Missing one of ra/dec/radius should be rejected
         let req = test::TestRequest::get()
             .uri(&format!("/babamul/objects?ra={}&dec={}", ztf_ra, ztf_dec))
             .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
@@ -1160,7 +1087,6 @@ mod tests {
             "Should reject incomplete position params (missing radius)"
         );
 
-        // Invalid RA
         let req = test::TestRequest::get()
             .uri("/babamul/objects?ra=400&dec=0&radius=10")
             .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
@@ -1173,7 +1099,6 @@ mod tests {
             "Should reject RA out of range"
         );
 
-        // Invalid radius
         let req = test::TestRequest::get()
             .uri("/babamul/objects?ra=83&dec=-5&radius=700")
             .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
@@ -1186,7 +1111,6 @@ mod tests {
             "Should reject radius > 600"
         );
 
-        // No params at all should be rejected
         let req = test::TestRequest::get()
             .uri("/babamul/objects")
             .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
@@ -1199,13 +1123,11 @@ mod tests {
             "Should reject request with no search params"
         );
 
-        // Clean up
         ztf_aux.delete_one(doc! { "_id": &ztf_id }).await.ok();
         lsst_aux.delete_one(doc! { "_id": &lsst_id }).await.ok();
     }
 
-    /// Test POST /babamul/kafka-credentials - Create a new Kafka credential
-    /// NOTE: This test requires Kafka CLI tools and a reachable Kafka broker
+    /// Needs the Kafka CLI tools (`brew install kafka`) and a reachable broker.
     #[actix_rt::test]
     async fn test_create_kafka_credential() {
         load_dotenv();
@@ -1213,7 +1135,6 @@ mod tests {
         let database: Database = get_test_db_api().await;
         let auth_app_data = get_test_auth(&database).await.unwrap();
 
-        // Create a test user
         let test_user = TestUser::create(&database, &auth_app_data).await;
 
         let app = test::init_service(
@@ -1230,7 +1151,6 @@ mod tests {
         )
         .await;
 
-        // Create a Kafka credential with a valid name
         let credential_name = "My Test Kafka Credential";
         let req = test::TestRequest::post()
             .uri("/babamul/kafka-credentials")
@@ -1258,7 +1178,6 @@ mod tests {
             "Response should contain credential object"
         );
 
-        // Verify credential structure
         let credential = &body["data"];
         assert!(credential["id"].is_string(), "Credential should have id");
         assert_eq!(
@@ -1279,14 +1198,12 @@ mod tests {
             "Credential should have created_at timestamp"
         );
 
-        // Verify kafka_username starts with "babamul-"
         let kafka_username = credential["kafka_username"].as_str().unwrap();
         assert!(
             kafka_username.starts_with("babamul-"),
             "Kafka username should start with 'babamul-'"
         );
 
-        // Verify kafka_password is 32 characters
         let kafka_password = credential["kafka_password"].as_str().unwrap();
         assert_eq!(
             kafka_password.len(),
@@ -1296,8 +1213,7 @@ mod tests {
 
         let credential_id = credential["id"].as_str().unwrap();
 
-        // Verify credential was added to user in database
-        let babamul_users_collection: mongodb::Collection<boom::api::routes::babamul::BabamulUser> =
+        let babamul_users_collection: mongodb::Collection<BabamulUser> =
             database.collection("babamul_users");
         let user = babamul_users_collection
             .find_one(doc! { "_id": &test_user.user.id })
@@ -1319,7 +1235,6 @@ mod tests {
             "Credential name should match"
         );
 
-        // Clean up: delete the Kafka credential (which also deletes Kafka user/ACLs)
         let req = test::TestRequest::delete()
             .uri(&format!("/babamul/kafka-credentials/{}", credential_id))
             .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
@@ -1332,8 +1247,6 @@ mod tests {
             "Should successfully delete Kafka credential"
         );
 
-        // Test creating credential with invalid names:
-        // - empty name
         let req = test::TestRequest::post()
             .uri("/babamul/kafka-credentials")
             .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
@@ -1349,7 +1262,6 @@ mod tests {
             "Should reject empty credential name"
         );
 
-        // - whitespace-only name
         let req = test::TestRequest::post()
             .uri("/babamul/kafka-credentials")
             .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
@@ -1366,8 +1278,7 @@ mod tests {
         );
     }
 
-    /// Test GET /babamul/kafka-credentials - List all credentials
-    /// NOTE: This test requires Kafka CLI tools and a reachable Kafka broker
+    /// Needs the Kafka CLI tools (`brew install kafka`) and a reachable broker.
     #[actix_rt::test]
     async fn test_list_kafka_credentials() {
         load_dotenv();
@@ -1375,7 +1286,6 @@ mod tests {
         let database: Database = get_test_db_api().await;
         let auth_app_data = get_test_auth(&database).await.unwrap();
 
-        // Create a test user
         let test_user = TestUser::create(&database, &auth_app_data).await;
 
         let app = test::init_service(
@@ -1392,7 +1302,6 @@ mod tests {
         )
         .await;
 
-        // Initially, the user should have no Kafka credentials
         let req = test::TestRequest::get()
             .uri("/babamul/kafka-credentials")
             .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
@@ -1413,7 +1322,6 @@ mod tests {
             "User should initially have no credentials"
         );
 
-        // Create two Kafka credentials
         let req = test::TestRequest::post()
             .uri("/babamul/kafka-credentials")
             .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
@@ -1440,7 +1348,6 @@ mod tests {
         let body2 = read_json_response(resp).await;
         let credential_id_2 = body2["data"]["id"].as_str().unwrap();
 
-        // Now list should show 2 credentials
         let req = test::TestRequest::get()
             .uri("/babamul/kafka-credentials")
             .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
@@ -1453,7 +1360,6 @@ mod tests {
         let credentials = body["data"].as_array().unwrap();
         assert_eq!(credentials.len(), 2, "User should have 2 credentials");
 
-        // Verify both credentials are present
         let cred_ids: Vec<&str> = credentials
             .iter()
             .map(|c| c["id"].as_str().unwrap())
@@ -1461,20 +1367,17 @@ mod tests {
         assert!(cred_ids.contains(&credential_id_1));
         assert!(cred_ids.contains(&credential_id_2));
 
-        // Verify kafka_password is included in the list (stored in DB)
         for cred in credentials {
             assert!(
                 cred["kafka_password"].is_string(),
                 "Credential should include kafka_password"
             );
-            // Verify kafka_username starts with "babamul-"
             assert!(cred["kafka_username"]
                 .as_str()
                 .unwrap()
                 .starts_with("babamul-"));
         }
 
-        // Clean up: delete both credentials
         let req = test::TestRequest::delete()
             .uri(&format!("/babamul/kafka-credentials/{}", credential_id_1))
             .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
@@ -1488,8 +1391,7 @@ mod tests {
         test::call_service(&app, req).await;
     }
 
-    /// Test DELETE /babamul/kafka-credentials/{credential_id}
-    /// NOTE: This test requires Kafka CLI tools and a reachable Kafka broker
+    /// Needs the Kafka CLI tools (`brew install kafka`) and a reachable broker.
     #[actix_rt::test]
     async fn test_delete_kafka_credential() {
         load_dotenv();
@@ -1497,7 +1399,6 @@ mod tests {
         let database: Database = get_test_db_api().await;
         let auth_app_data = get_test_auth(&database).await.unwrap();
 
-        // Create a test user
         let test_user = TestUser::create(&database, &auth_app_data).await;
 
         let app = test::init_service(
@@ -1514,7 +1415,6 @@ mod tests {
         )
         .await;
 
-        // Create a Kafka credential
         let req = test::TestRequest::post()
             .uri("/babamul/kafka-credentials")
             .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
@@ -1529,7 +1429,6 @@ mod tests {
         let body = read_json_response(resp).await;
         let credential_id = body["data"]["id"].as_str().unwrap();
 
-        // Verify credential exists before deletion
         let req = test::TestRequest::get()
             .uri("/babamul/kafka-credentials")
             .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
@@ -1540,7 +1439,6 @@ mod tests {
         let credentials = body["data"].as_array().unwrap();
         assert_eq!(credentials.len(), 1);
 
-        // Delete the credential
         let req = test::TestRequest::delete()
             .uri(&format!("/babamul/kafka-credentials/{}", credential_id))
             .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
@@ -1565,8 +1463,7 @@ mod tests {
             "Response should contain message"
         );
 
-        // Verify credential was removed from database
-        let babamul_users_collection: mongodb::Collection<boom::api::routes::babamul::BabamulUser> =
+        let babamul_users_collection: mongodb::Collection<BabamulUser> =
             database.collection("babamul_users");
         let user = babamul_users_collection
             .find_one(doc! { "_id": &test_user.user.id })
@@ -1580,7 +1477,6 @@ mod tests {
             "User should have no credentials after deletion"
         );
 
-        // Verify GET list also shows no credentials
         let req = test::TestRequest::get()
             .uri("/babamul/kafka-credentials")
             .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
@@ -1591,7 +1487,6 @@ mod tests {
         let credentials = body["data"].as_array().unwrap();
         assert_eq!(credentials.len(), 0);
 
-        // Try to delete a non-existent credential
         let fake_credential_id = uuid::Uuid::new_v4().to_string();
         let req = test::TestRequest::delete()
             .uri(&format!(
@@ -1609,11 +1504,7 @@ mod tests {
         );
     }
 
-    /// PATCH /babamul/profile — the editable display name
-    ///
-    /// The name is free text the user controls, not an identifier, so the
-    /// things that matter are that it round-trips, that it can be cleared
-    /// again, and that it cannot be used to store something unbounded.
+    /// The display name round-trips, can be cleared, and cannot store something unbounded.
     #[actix_rt::test]
     async fn test_patch_babamul_profile_name() {
         load_dotenv();
@@ -1641,8 +1532,7 @@ mod tests {
                 .set_json(body)
                 .to_request()
         };
-        let users: mongodb::Collection<boom::api::routes::babamul::BabamulUser> =
-            database.collection("babamul_users");
+        let users: mongodb::Collection<BabamulUser> = database.collection("babamul_users");
         let stored_name = || async {
             users
                 .find_one(doc! { "_id": &test_user.user.id })
@@ -1666,7 +1556,7 @@ mod tests {
         assert_eq!(body["data"]["name"].as_str().unwrap(), "Ada Lovelace");
         assert_eq!(stored_name().await.as_deref(), Some("Ada Lovelace"));
 
-        // It comes back on the profile the web app reads.
+        // It comes back on the profile the client reads.
         let resp = test::call_service(
             &app,
             test::TestRequest::get()
@@ -1678,8 +1568,7 @@ mod tests {
         let body = read_json_response(resp).await;
         assert_eq!(body["data"]["name"].as_str().unwrap(), "Ada Lovelace");
 
-        // Omitting the field leaves the name alone, so a future PATCH that
-        // sets some other field cannot wipe it out by accident.
+        // Omitting the field must not wipe the name a later PATCH leaves alone.
         let resp = test::call_service(&app, patch(serde_json::json!({}))).await;
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(stored_name().await.as_deref(), Some("Ada Lovelace"));
@@ -1697,17 +1586,14 @@ mod tests {
             "a rejected update must not change the stored name"
         );
 
-        // Blank clears it — and clears it out of the document rather than
-        // leaving an empty string that renders as a blank name.
+        // Blank unsets the field rather than storing "", which renders as a blank name.
         let resp = test::call_service(&app, patch(serde_json::json!({ "name": "   " }))).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = read_json_response(resp).await;
         assert!(body["data"]["name"].is_null());
         assert!(stored_name().await.is_none());
 
-        // Without a token it is not editable at all. The middleware rejects
-        // the request as an error rather than a response, so this asks for the
-        // Result instead of unwrapping one.
+        // The middleware rejects with an `Err`, not a response, hence `try_call_service`.
         let result = test::try_call_service(
             &app,
             test::TestRequest::patch()
@@ -1723,14 +1609,12 @@ mod tests {
         assert!(stored_name().await.is_none());
     }
 
-    /// Test POST /babamul/tokens - Create a new PAT
     #[actix_rt::test]
     async fn test_post_token() {
         load_dotenv();
         let database: Database = get_test_db_api().await;
         let auth_app_data = get_test_auth(&database).await.unwrap();
 
-        // Create a test user
         let test_user = TestUser::create(&database, &auth_app_data).await;
 
         let app = test::init_service(
@@ -1747,7 +1631,6 @@ mod tests {
         )
         .await;
 
-        // Create a token with a valid name
         let req = test::TestRequest::post()
             .uri("/babamul/tokens")
             .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
@@ -1804,7 +1687,6 @@ mod tests {
             "Token should expire in ~30 days"
         );
 
-        // Test that the PAT can be used to authenticate and fetch user profile
         let req = test::TestRequest::get()
             .uri("/babamul/profile")
             .insert_header(("Authorization", format!("Bearer {}", access_token)))
@@ -1833,7 +1715,6 @@ mod tests {
             "Profile should no longer send the legacy `_id` spelling"
         );
 
-        // Test creating token with empty name
         let req = test::TestRequest::post()
             .uri("/babamul/tokens")
             .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
@@ -1850,7 +1731,6 @@ mod tests {
             "Empty name should be rejected"
         );
 
-        // Test creating token with whitespace-only name
         let req = test::TestRequest::post()
             .uri("/babamul/tokens")
             .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
@@ -1867,7 +1747,6 @@ mod tests {
             "Whitespace-only name should be rejected"
         );
 
-        // Test creating token with default expiration (365 days)
         let req = test::TestRequest::post()
             .uri("/babamul/tokens")
             .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
@@ -1892,7 +1771,6 @@ mod tests {
             "Token should expire in ~365 days by default"
         );
 
-        // Test creating token with zero days expiration
         let req = test::TestRequest::post()
             .uri("/babamul/tokens")
             .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
@@ -1909,7 +1787,6 @@ mod tests {
             "Zero days expiration should be rejected"
         );
 
-        // Test creating token with expiration > 3 years
         let req = test::TestRequest::post()
             .uri("/babamul/tokens")
             .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
@@ -1926,7 +1803,6 @@ mod tests {
             "Expiration > 3 years should be rejected"
         );
 
-        // Test creating token with exactly 3 years (should succeed)
         let req = test::TestRequest::post()
             .uri("/babamul/tokens")
             .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
@@ -1953,14 +1829,12 @@ mod tests {
         );
     }
 
-    /// Test POST /babamul/tokens - Token limit enforcement
     #[actix_rt::test]
     async fn test_post_token_limit() {
         load_dotenv();
         let database: Database = get_test_db_api().await;
         let auth_app_data = get_test_auth(&database).await.unwrap();
 
-        // Create a test user
         let test_user = TestUser::create(&database, &auth_app_data).await;
 
         let app = test::init_service(
@@ -1976,7 +1850,6 @@ mod tests {
         )
         .await;
 
-        // Create 10 tokens (the maximum allowed)
         let mut token_ids = Vec::new();
         for i in 1..=10 {
             let req = test::TestRequest::post()
@@ -2000,7 +1873,6 @@ mod tests {
             token_ids.push(body["id"].as_str().unwrap().to_string());
         }
 
-        // Try to create an 11th token - should fail
         let req = test::TestRequest::post()
             .uri("/babamul/tokens")
             .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
@@ -2023,7 +1895,6 @@ mod tests {
             "Error message should mention token limit"
         );
 
-        // Delete one token
         let req = test::TestRequest::delete()
             .uri(&format!("/babamul/tokens/{}", token_ids[0]))
             .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
@@ -2032,7 +1903,6 @@ mod tests {
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), StatusCode::OK);
 
-        // Now we should be able to create a new token
         let req = test::TestRequest::post()
             .uri("/babamul/tokens")
             .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
@@ -2049,7 +1919,6 @@ mod tests {
             "Token creation should succeed after deleting one"
         );
 
-        // Clean up: delete remaining tokens
         for token_id in &token_ids[1..] {
             let req = test::TestRequest::delete()
                 .uri(&format!("/babamul/tokens/{}", token_id))
@@ -2059,14 +1928,12 @@ mod tests {
         }
     }
 
-    /// Test GET /babamul/tokens - List all PATs
     #[actix_rt::test]
     async fn test_get_tokens() {
         load_dotenv();
         let database: Database = get_test_db_api().await;
         let auth_app_data = get_test_auth(&database).await.unwrap();
 
-        // Create a test user
         let test_user = TestUser::create(&database, &auth_app_data).await;
 
         let app = test::init_service(
@@ -2082,7 +1949,6 @@ mod tests {
         )
         .await;
 
-        // Initially, user should have no tokens
         let req = test::TestRequest::get()
             .uri("/babamul/tokens")
             .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
@@ -2095,7 +1961,6 @@ mod tests {
         let tokens = body.as_array().unwrap();
         assert_eq!(tokens.len(), 0, "User should start with no tokens");
 
-        // Create three tokens
         let token_names = vec!["Token 1", "Token 2", "Token 3"];
         let mut created_token_ids = Vec::new();
 
@@ -2116,7 +1981,6 @@ mod tests {
             created_token_ids.push(body["id"].as_str().unwrap().to_string());
         }
 
-        // List tokens
         let req = test::TestRequest::get()
             .uri("/babamul/tokens")
             .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
@@ -2129,7 +1993,6 @@ mod tests {
         let tokens = body.as_array().unwrap();
         assert_eq!(tokens.len(), 3, "User should have 3 tokens");
 
-        // Verify token structure and content
         for (i, token) in tokens.iter().enumerate() {
             assert!(token["id"].is_string(), "Token should have id");
             assert!(token["name"].is_string(), "Token should have name");
@@ -2145,7 +2008,6 @@ mod tests {
                 "Token should have null last_used_at initially"
             );
 
-            // Token should NOT expose the token_hash or access_token
             assert!(
                 token.get("token_hash").is_none(),
                 "Token hash should not be exposed"
@@ -2159,11 +2021,9 @@ mod tests {
                 "User ID should not be exposed"
             );
 
-            // Verify this is one of the tokens we created
             assert!(created_token_ids.contains(&token["id"].as_str().unwrap().to_string()));
         }
 
-        // Verify token names are in the response (order may vary)
         let returned_names: Vec<&str> =
             tokens.iter().map(|t| t["name"].as_str().unwrap()).collect();
         for name in &token_names {
@@ -2174,14 +2034,12 @@ mod tests {
         }
     }
 
-    /// Test DELETE /babamul/tokens/{id} - Delete a PAT
     #[actix_rt::test]
     async fn test_delete_token() {
         load_dotenv();
         let database: Database = get_test_db_api().await;
         let auth_app_data = get_test_auth(&database).await.unwrap();
 
-        // Create a test user
         let test_user = TestUser::create(&database, &auth_app_data).await;
 
         let app = test::init_service(
@@ -2198,7 +2056,6 @@ mod tests {
         )
         .await;
 
-        // Create a token
         let req = test::TestRequest::post()
             .uri("/babamul/tokens")
             .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
@@ -2214,7 +2071,6 @@ mod tests {
         let body = read_json_response(resp).await;
         let token_id = body["id"].as_str().unwrap().to_string();
 
-        // Verify token exists by listing
         let req = test::TestRequest::get()
             .uri("/babamul/tokens")
             .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
@@ -2227,7 +2083,6 @@ mod tests {
         let tokens = body.as_array().unwrap();
         assert_eq!(tokens.len(), 1, "Should have 1 token before delete");
 
-        // Delete the token
         let req = test::TestRequest::delete()
             .uri(&format!("/babamul/tokens/{}", token_id))
             .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
@@ -2242,7 +2097,6 @@ mod tests {
             "Token deleted successfully"
         );
 
-        // Verify token is gone by listing
         let req = test::TestRequest::get()
             .uri("/babamul/tokens")
             .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
@@ -2255,7 +2109,6 @@ mod tests {
         let tokens = body.as_array().unwrap();
         assert_eq!(tokens.len(), 0, "Token should be deleted");
 
-        // Try to delete again - should get 404
         let req = test::TestRequest::delete()
             .uri(&format!("/babamul/tokens/{}", token_id))
             .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
@@ -2268,14 +2121,12 @@ mod tests {
         assert_eq!(body["error"].as_str().unwrap(), "Token not found");
     }
 
-    /// Test DELETE /babamul/tokens/{id} with unauthorized access (token belongs to another user)
     #[actix_rt::test]
     async fn test_delete_token_unauthorized() {
         load_dotenv();
         let database: Database = get_test_db_api().await;
         let auth_app_data = get_test_auth(&database).await.unwrap();
 
-        // Create two test users
         let user1 = TestUser::create(&database, &auth_app_data).await;
         let user2 = TestUser::create(&database, &auth_app_data).await;
 
@@ -2292,7 +2143,6 @@ mod tests {
         )
         .await;
 
-        // User 1 creates a token
         let req = test::TestRequest::post()
             .uri("/babamul/tokens")
             .insert_header(("Authorization", format!("Bearer {}", user1.token)))
@@ -2308,7 +2158,6 @@ mod tests {
         let body = read_json_response(resp).await;
         let token_id = body["id"].as_str().unwrap().to_string();
 
-        // User 2 tries to delete User 1's token - should get 404
         let req = test::TestRequest::delete()
             .uri(&format!("/babamul/tokens/{}", token_id))
             .insert_header(("Authorization", format!("Bearer {}", user2.token)))
@@ -2322,7 +2171,6 @@ mod tests {
         );
     }
 
-    /// Test GET /babamul/surveys/{survey}/objects/{object_id}/cross-matches
     #[actix_rt::test]
     async fn test_get_object_xmatches() {
         use boom::utils::spatial::Coordinates;
@@ -2331,10 +2179,8 @@ mod tests {
         let database: Database = get_test_db_api().await;
         let auth_app_data = get_test_auth(&database).await.unwrap();
 
-        // Create a test user
         let test_user = TestUser::create(&database, &auth_app_data).await;
 
-        // Create test aux data with cross_matches
         let aux_collection = database.collection::<boom::alert::ZtfObject>("ZTF_alerts_aux");
         let test_object_id = "ZTF24aaaaaaa".to_string();
 
@@ -2386,7 +2232,6 @@ mod tests {
         )
         .await;
 
-        // Test successful retrieval
         let req = test::TestRequest::get()
             .uri(&format!(
                 "/babamul/surveys/ztf/objects/{}/cross-matches",
@@ -2409,7 +2254,6 @@ mod tests {
             "Should contain cross_matches data"
         );
 
-        // Test not found
         let req = test::TestRequest::get()
             .uri("/babamul/surveys/ztf/objects/ZTF99nonexistent/cross-matches")
             .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
@@ -2418,14 +2262,12 @@ mod tests {
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 
-        // Clean up
         aux_collection
             .delete_one(doc! { "_id": &test_object_id })
             .await
             .ok();
     }
 
-    // Test POST /babamul/surveys/{survey}/objects/cross_matches endpoint (batch cross-match retrieval)
     #[actix_rt::test]
     async fn test_get_cross_matches_batch() {
         use boom::utils::spatial::Coordinates;
@@ -2433,9 +2275,7 @@ mod tests {
         load_dotenv();
         let database: Database = get_test_db_api().await;
         let auth_app_data = get_test_auth(&database).await.unwrap();
-        // Create a test user
         let test_user = TestUser::create(&database, &auth_app_data).await;
-        // Create test aux data with cross_matches
         let aux_collection = database.collection::<boom::alert::ZtfObject>("ZTF_alerts_aux");
         let unique_suffix = uuid::Uuid::new_v4().to_string()[..8].to_string();
         let test_objects = vec![
@@ -2520,7 +2360,6 @@ mod tests {
         )
         .await;
 
-        // Test successful batch retrieval
         let req = test::TestRequest::post()
             .uri("/babamul/surveys/ztf/objects/cross-matches")
             .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
@@ -2544,7 +2383,6 @@ mod tests {
             "Should contain cross_matches data"
         );
 
-        // Test with some non-existent object IDs
         let req = test::TestRequest::post()
             .uri("/babamul/surveys/ztf/objects/cross-matches")
             .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
@@ -2572,7 +2410,6 @@ mod tests {
             "Should not have data for non-existent object"
         );
 
-        // Clean up test objects
         for obj in test_objects {
             aux_collection
                 .delete_one(doc! { "_id": &obj.object_id })
@@ -2581,7 +2418,6 @@ mod tests {
         }
     }
 
-    /// Test POST /babamul/surveys/{survey}/objects/cone-search
     #[actix_rt::test]
     async fn test_cone_search_objects() {
         use boom::utils::spatial::Coordinates;
@@ -2590,10 +2426,8 @@ mod tests {
         let database: Database = get_test_db_api().await;
         let auth_app_data = get_test_auth(&database).await.unwrap();
 
-        // Create a test user
         let test_user = TestUser::create(&database, &auth_app_data).await;
 
-        // Insert test objects with specific coordinates
         let aux_collection = database.collection::<boom::alert::ZtfObject>("ZTF_alerts_aux");
         let unique_suffix = uuid::Uuid::new_v4().to_string()[..8].to_string();
         let test_objects = vec![
@@ -2640,7 +2474,6 @@ mod tests {
         )
         .await;
 
-        // Test successful cone search with multiple coordinates
         let req = test::TestRequest::post()
             .uri("/babamul/surveys/ztf/objects/cone-search")
             .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
@@ -2664,7 +2497,6 @@ mod tests {
         let body = read_json_response(resp).await;
         assert!(body["data"].is_object(), "Should return results as object");
 
-        // Test with invalid radius (too large)
         let req = test::TestRequest::post()
             .uri("/babamul/surveys/ztf/objects/cone-search")
             .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
@@ -2683,7 +2515,6 @@ mod tests {
             "Should reject radius > 600 arcsec"
         );
 
-        // Test with no coordinates
         let req = test::TestRequest::post()
             .uri("/babamul/surveys/ztf/objects/cone-search")
             .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
@@ -2700,7 +2531,6 @@ mod tests {
             "Should reject empty coordinates"
         );
 
-        // Test with unauthorized access
         let req = test::TestRequest::post()
             .uri("/babamul/surveys/ztf/objects/cone-search")
             .set_json(serde_json::json!({
@@ -2718,7 +2548,6 @@ mod tests {
             StatusCode::UNAUTHORIZED
         );
 
-        // Clean up
         for obj in test_objects {
             aux_collection
                 .delete_one(doc! { "_id": &obj.object_id })
@@ -2727,14 +2556,12 @@ mod tests {
         }
     }
 
-    /// Test POST /babamul/surveys/{survey}/alerts/cone-search
     #[actix_rt::test]
     async fn test_cone_search_alerts() {
         load_dotenv();
         let database: Database = get_test_db_api().await;
         let auth_app_data = get_test_auth(&database).await.unwrap();
 
-        // Create a test user
         let test_user = TestUser::create(&database, &auth_app_data).await;
 
         let app = test::init_service(
@@ -2749,7 +2576,6 @@ mod tests {
         )
         .await;
 
-        // Test with invalid radius (too small)
         let req = test::TestRequest::post()
             .uri("/babamul/surveys/ztf/alerts/cone-search")
             .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
@@ -2768,7 +2594,6 @@ mod tests {
             "Should reject radius <= 0"
         );
 
-        // Test with invalid radius (too large)
         let req = test::TestRequest::post()
             .uri("/babamul/surveys/ztf/alerts/cone-search")
             .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
@@ -2787,7 +2612,6 @@ mod tests {
             "Should reject radius > 600"
         );
 
-        // Test with no coordinates
         let req = test::TestRequest::post()
             .uri("/babamul/surveys/ztf/alerts/cone-search")
             .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
@@ -2804,7 +2628,6 @@ mod tests {
             "Should reject empty coordinates"
         );
 
-        // Test with unauthorized access
         let req = test::TestRequest::post()
             .uri("/babamul/surveys/ztf/alerts/cone-search")
             .set_json(serde_json::json!({
@@ -2822,7 +2645,6 @@ mod tests {
             StatusCode::UNAUTHORIZED
         );
 
-        // Test successful cone search with valid parameters
         let req = test::TestRequest::post()
             .uri("/babamul/surveys/ztf/alerts/cone-search")
             .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
@@ -2853,12 +2675,8 @@ mod tests {
         assert!(body["data"].is_object(), "Should return results as object");
     }
 
-    // ─── Password reset tests ─────────────────────────────────────────────────
-
-    /// Helper: insert a password-reset token directly into the DB for a user.
     async fn set_reset_token(database: &Database, user_id: &str, raw_token: &str, expires_at: i64) {
-        let col: mongodb::Collection<boom::api::routes::babamul::BabamulUser> =
-            database.collection("babamul_users");
+        let col: mongodb::Collection<BabamulUser> = database.collection("babamul_users");
         let token_hash = hash_token(raw_token);
         col.update_one(
             doc! { "_id": user_id },
@@ -2874,12 +2692,6 @@ mod tests {
     }
 
     /// POST /babamul/forgot-password
-    ///
-    /// Covers:
-    /// - Known activated user: token hash and expiry are written to DB
-    /// - Unknown email: returns 200 with generic message (no enumeration)
-    /// - Non-activated account: returns 200 but no token is stored
-    /// - Password changed too recently: returns 429 with Retry-After header
     #[actix_rt::test]
     async fn test_babamul_forgot_password() {
         load_dotenv();
@@ -2900,13 +2712,12 @@ mod tests {
         )
         .await;
 
-        let col: mongodb::Collection<boom::api::routes::babamul::BabamulUser> =
-            database.collection("babamul_users");
+        let col: mongodb::Collection<BabamulUser> = database.collection("babamul_users");
 
-        // ── Case 1: activated user – token is written to DB ──────────────────
+        // Case 1: activated user, the token is written to the database
         let id_activated = uuid::Uuid::new_v4().to_string();
         let email_activated = format!("test+{}@babamul.example.com", id_activated);
-        col.insert_one(&boom::api::routes::babamul::BabamulUser {
+        col.insert_one(&BabamulUser {
             id: id_activated.clone(),
             username: "resettest".to_string(),
             email: email_activated.clone(),
@@ -2953,7 +2764,7 @@ mod tests {
             "token expiry should be ~1 hour from now"
         );
 
-        // ── Case 2: unknown email – generic 200 response, no enumeration ─────
+        // Case 2: unknown email, generic 200 response, no enumeration
         let resp = test::call_service(
             &app,
             test::TestRequest::post()
@@ -2973,10 +2784,10 @@ mod tests {
             "response must use the generic non-revealing message"
         );
 
-        // ── Case 3: non-activated account – no token stored ──────────────────
+        // Case 3: non-activated account, no token stored
         let id_inactive = uuid::Uuid::new_v4().to_string();
         let email_inactive = format!("test+{}@babamul.example.com", id_inactive);
-        col.insert_one(&boom::api::routes::babamul::BabamulUser {
+        col.insert_one(&BabamulUser {
             id: id_inactive.clone(),
             username: "notactivated".to_string(),
             email: email_inactive.clone(),
@@ -3016,11 +2827,11 @@ mod tests {
             "no reset token should be stored for a non-activated account"
         );
 
-        // ── Case 4: password changed too recently – returns 429 ──────────────
+        // Case 4: password changed too recently, returns 429
         let now = flare::Time::now().to_utc().timestamp();
         let id_rl = uuid::Uuid::new_v4().to_string();
         let email_rl = format!("test+{}@babamul.example.com", id_rl);
-        col.insert_one(&boom::api::routes::babamul::BabamulUser {
+        col.insert_one(&BabamulUser {
             id: id_rl.clone(),
             username: "ratelimitforgot".to_string(),
             email: email_rl.clone(),
@@ -3078,21 +2889,12 @@ mod tests {
             "no reset token should be stored when the cooldown is active"
         );
 
-        // Clean up
         col.delete_one(doc! { "_id": &id_activated }).await.unwrap();
         col.delete_one(doc! { "_id": &id_inactive }).await.unwrap();
         col.delete_one(doc! { "_id": &id_rl }).await.unwrap();
     }
 
     /// POST /babamul/reset-password
-    ///
-    /// Covers:
-    /// - Happy path: successful reset clears token, old password fails, new password logs in
-    /// - Invalid (wrong) token → 400
-    /// - Correct token but wrong email → 400
-    /// - Expired token → 400
-    /// - New password shorter than 12 characters → 400
-    /// - Token is single-use: second attempt with the same token → 400
     #[actix_rt::test]
     async fn test_babamul_reset_password() {
         load_dotenv();
@@ -3113,37 +2915,34 @@ mod tests {
         )
         .await;
 
-        let col: mongodb::Collection<boom::api::routes::babamul::BabamulUser> =
-            database.collection("babamul_users");
+        let col: mongodb::Collection<BabamulUser> = database.collection("babamul_users");
         let now = flare::Time::now().to_utc().timestamp();
 
-        // Helper closure for inserting a plain activated user
-        let insert_user =
-            |id: &str, email: &str, username: &str| boom::api::routes::babamul::BabamulUser {
-                id: id.to_string(),
-                username: username.to_string(),
-                email: email.to_string(),
-                password_hash: bcrypt::hash("pw12345678", 4).unwrap(),
-                activation_code: None,
-                is_activated: true,
-                created_at: 0,
-                kafka_credentials: vec![],
-                tokens: vec![],
-                password_reset_token_hash: None,
-                password_reset_token_expires_at: None,
-                password_last_changed_at: None,
-                identities: vec![],
-                orcid_id: None,
-                name: None,
-            };
+        let insert_user = |id: &str, email: &str, username: &str| BabamulUser {
+            id: id.to_string(),
+            username: username.to_string(),
+            email: email.to_string(),
+            password_hash: bcrypt::hash("pw12345678", 4).unwrap(),
+            activation_code: None,
+            is_activated: true,
+            created_at: 0,
+            kafka_credentials: vec![],
+            tokens: vec![],
+            password_reset_token_hash: None,
+            password_reset_token_expires_at: None,
+            password_last_changed_at: None,
+            identities: vec![],
+            orcid_id: None,
+            name: None,
+        };
 
         let mut ids_to_cleanup: Vec<String> = Vec::new();
 
-        // ── Happy path ────────────────────────────────────────────────────────
+        // Happy path
         let id = uuid::Uuid::new_v4().to_string();
         let email = format!("test+{}@babamul.example.com", id);
         let old_password = "oldpassword1234!";
-        col.insert_one(&boom::api::routes::babamul::BabamulUser {
+        col.insert_one(&BabamulUser {
             password_hash: bcrypt::hash(old_password, 4).unwrap(),
             ..insert_user(&id, &email, "happypath")
         })
@@ -3208,7 +3007,7 @@ mod tests {
         );
         assert!(read_json_response(resp).await["access_token"].is_string());
 
-        // ── Invalid (wrong) token → 400 ───────────────────────────────────────
+        // Invalid (wrong) token: 400
         let id2 = uuid::Uuid::new_v4().to_string();
         let email2 = format!("test+{}@babamul.example.com", id2);
         col.insert_one(&insert_user(&id2, &email2, "invalidtok"))
@@ -3246,7 +3045,7 @@ mod tests {
             "wrong-token error must use the same generic message as wrong-email to prevent oracle attacks"
         );
 
-        // ── Correct token but wrong email → 400 ──────────────────────────────
+        // Correct token but wrong email: 400
         let id3 = uuid::Uuid::new_v4().to_string();
         let email3 = format!("test+{}@babamul.example.com", id3);
         col.insert_one(&insert_user(&id3, &email3, "wrongemail"))
@@ -3279,7 +3078,7 @@ mod tests {
             "wrong-email error must use the same generic message as wrong-token to prevent oracle attacks"
         );
 
-        // ── Expired token → 400 ───────────────────────────────────────────────
+        // Expired token: 400
         let id4 = uuid::Uuid::new_v4().to_string();
         let email4 = format!("test+{}@babamul.example.com", id4);
         col.insert_one(&insert_user(&id4, &email4, "expiredtok"))
@@ -3307,10 +3106,10 @@ mod tests {
             "expired token must be rejected"
         );
 
-        // ── Password changed too recently → 429 ───────────────────────────────
+        // Password changed too recently: 429
         let id_rl = uuid::Uuid::new_v4().to_string();
         let email_rl = format!("test+{}@babamul.example.com", id_rl);
-        col.insert_one(&boom::api::routes::babamul::BabamulUser {
+        col.insert_one(&BabamulUser {
             password_last_changed_at: Some(
                 now - config.babamul.password_reset_cooldown_minutes as i64 * 30,
             ), // halfway through the cooldown window
@@ -3355,7 +3154,7 @@ mod tests {
             retry_after
         );
 
-        // ── Weak / non-complex passwords → 400 ───────────────────────────────
+        // Weak / non-complex passwords: 400
         let id5 = uuid::Uuid::new_v4().to_string();
         let email5 = format!("test+{}@babamul.example.com", id5);
         col.insert_one(&insert_user(&id5, &email5, "weakpw"))
@@ -3397,7 +3196,7 @@ mod tests {
             );
         }
 
-        // ── Token is single-use ───────────────────────────────────────────────
+        // Token is single-use
         let id6 = uuid::Uuid::new_v4().to_string();
         let email6 = format!("test+{}@babamul.example.com", id6);
         col.insert_one(&insert_user(&id6, &email6, "singleuse"))
@@ -3445,10 +3244,7 @@ mod tests {
         }
     }
 
-    // ── Social sign-in (Google / GitHub / ORCID) ─────────────────────────────
-
-    /// Test config with Google and ORCID wired up but GitHub left off, so the
-    /// tests can tell "configured" apart from "merely known".
+    /// Google and ORCID configured, GitHub not: "configured" must differ from "known".
     fn oauth_test_config() -> AppConfig {
         let mut config = AppConfig::from_test_config().unwrap();
         config.babamul.webapp_url = Some("https://webapp.example.org".to_string());
@@ -3461,25 +3257,14 @@ mod tests {
             client_id: "orcid-client-id".to_string(),
             client_secret: "orcid-client-secret".to_string(),
         };
-        // GitHub is this fixture's *unconfigured* provider, so it has to be
-        // cleared rather than left as it comes: `from_test_config` overlays
-        // BOOM_ environment variables, and a developer with real GitHub
-        // credentials in their .env would otherwise turn the provider on and
-        // fail the tests that check a disabled one stays disabled.
+        // Cleared, not inherited: `from_test_config` overlays BOOM_ vars from a developer's .env.
         config.babamul.oauth.github = boom::conf::OAuthProviderConfig::default();
-        // Likewise pinned rather than inherited: `from_test_config` overlays
-        // BOOM_ environment variables, and a developer running a closed
-        // deployment locally would otherwise fail every test that signs a new
-        // account in.
+        // Pinned for the same reason: a locally closed deployment would fail every sign-up test.
         config.babamul.registration_enabled = true;
         config
     }
 
-    /// Build a test app exposing just the OAuth routes, behind the real
-    /// Babamul auth middleware so the public-route handling is covered too.
-    ///
-    /// A macro rather than a function: `test::init_service` returns an opaque
-    /// type that is impractical to name.
+    /// A macro, not a function: `test::init_service` returns an opaque type.
     macro_rules! oauth_app {
         ($config:expr, $database:expr, $auth:expr) => {
             test::init_service(
@@ -3510,10 +3295,7 @@ mod tests {
             .to_string()
     }
 
-    /// GET /babamul/oauth/providers
-    ///
-    /// The endpoint is public and only advertises providers that are fully
-    /// configured — a button we render must always lead somewhere.
+    /// Only fully configured providers are advertised: a rendered button must lead somewhere.
     #[actix_rt::test]
     async fn test_babamul_oauth_providers_lists_only_configured_providers() {
         load_dotenv();
@@ -3541,8 +3323,7 @@ mod tests {
             "/babamul/oauth/google/start"
         );
 
-        // Without a redirect base URL the flow cannot work at all, so nothing
-        // is advertised even though credentials are present.
+        // No redirect base URL: nothing is advertised even though credentials are present.
         let mut config = oauth_test_config();
         config.babamul.oauth.redirect_base_url = None;
         let app = oauth_app!(config, database.clone(), auth_app_data);
@@ -3557,12 +3338,7 @@ mod tests {
         assert!(body["data"].as_array().unwrap().is_empty());
     }
 
-    /// A URL that is present but blank is an *unset* URL.
-    ///
-    /// Compose renders `${VAR:-}` as an empty string rather than leaving the
-    /// variable out, so `Some("")` is what an unconfigured deployment actually
-    /// hands the API — and `webapp_url` counts as much as the redirect base,
-    /// since every way the flow can end needs somewhere to send the browser.
+    /// Compose renders `${VAR:-}` as "", so `Some("")` is what an unset URL looks like here.
     #[actix_rt::test]
     async fn test_babamul_oauth_blank_urls_disable_the_feature() {
         load_dotenv();
@@ -3617,10 +3393,7 @@ mod tests {
         }
     }
 
-    /// GET /babamul/oauth/{provider}/start
-    ///
-    /// Covers the redirect to the provider, the PKCE/state record it leaves
-    /// behind, and rejection of unknown or disabled providers.
+    /// Covers the redirect, the PKCE/state record, and unknown or disabled providers.
     #[actix_rt::test]
     async fn test_babamul_oauth_start_redirects_and_records_state() {
         load_dotenv();
@@ -3652,8 +3425,7 @@ mod tests {
         assert_eq!(params["code_challenge_method"], "S256");
         assert!(!params["code_challenge"].is_empty());
 
-        // The state must have been persisted, or the callback could never
-        // validate it.
+        // The state must be persisted or the callback could never validate it.
         let states = database.collection::<mongodb::bson::Document>("babamul_oauth_states");
         let state = states
             .find_one(doc! { "_id": &params["state"] })
@@ -3715,10 +3487,7 @@ mod tests {
         }
     }
 
-    /// GET /babamul/oauth/{provider}/callback
-    ///
-    /// The callback is where CSRF and replay are stopped, so these cases matter
-    /// more than the happy path (which needs a live provider).
+    /// The callback is where CSRF and replay are stopped; the happy path needs a live provider.
     #[actix_rt::test]
     async fn test_babamul_oauth_callback_rejects_bad_state() {
         load_dotenv();
@@ -3727,8 +3496,7 @@ mod tests {
         let app = oauth_app!(oauth_test_config(), database.clone(), auth_app_data);
         let states = database.collection::<mongodb::bson::Document>("babamul_oauth_states");
 
-        // A state we never issued: the browser goes back to the web app with an
-        // error in the fragment rather than getting a token.
+        // A state we never issued: the error comes back in the fragment, not a token.
         let resp = test::call_service(
             &app,
             test::TestRequest::get()
@@ -3749,8 +3517,7 @@ mod tests {
             "no token may be issued for an unknown state"
         );
 
-        // The user declining consent is reported, not treated as a failure to
-        // debug.
+        // Declining consent is reported, not treated as a failure to debug.
         let resp = test::call_service(
             &app,
             test::TestRequest::get()
@@ -3761,8 +3528,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::FOUND);
         assert!(location_of(&resp).contains("error="));
 
-        // A state issued for one provider must not be redeemable at another's
-        // callback.
+        // A state issued for one provider must not be redeemable at another's callback.
         let start = test::call_service(
             &app,
             test::TestRequest::get()
@@ -3834,8 +3600,7 @@ mod tests {
         states.delete_one(doc! { "_id": &state_value }).await.ok();
     }
 
-    /// The OAuth routes must be reachable without a token — they are how a
-    /// caller gets one in the first place.
+    /// The OAuth routes are how a caller gets a token, so they must work without one.
     #[actix_rt::test]
     async fn test_babamul_oauth_routes_are_public() {
         load_dotenv();
@@ -3843,10 +3608,7 @@ mod tests {
         let auth_app_data = get_test_auth(&database).await.unwrap();
         let app = oauth_app!(oauth_test_config(), database.clone(), auth_app_data);
 
-        // Remember the state `/start` mints so cleanup can take that row and
-        // nothing else. The suite shares one database and runs concurrently, so
-        // deleting every google state would reach into whichever other OAuth
-        // test happens to be between its own /start and its callback.
+        // Delete only this state: the suite shares one database and runs concurrently.
         let mut minted_states: Vec<String> = Vec::new();
 
         for uri in [
@@ -3880,17 +3642,11 @@ mod tests {
         }
     }
 
-    // ── Email confirmation for providers that share no address (ORCID) ───────
-
     fn pending_identities(database: &Database) -> mongodb::Collection<mongodb::bson::Document> {
         database.collection("babamul_pending_identities")
     }
 
-    /// Seed a pending identity the way the OAuth callback would.
-    ///
-    /// When `code` is given the ticket is already past the "email supplied"
-    /// step, which is what the `/oauth/verify` tests need — the real code is
-    /// only ever mailed, so a test can't read it back out of the hash.
+    /// With `code`, the ticket is past the email step: the real code is only ever mailed.
     async fn seed_pending_identity(
         database: &Database,
         subject: &str,
@@ -3929,10 +3685,7 @@ mod tests {
         ticket
     }
 
-    /// POST /babamul/oauth/complete
-    ///
-    /// Covers ticket validation, email validation, and the code being stored
-    /// only as a hash.
+    /// Covers ticket validation, email validation, and the code being stored only as a hash.
     #[actix_rt::test]
     async fn test_babamul_oauth_complete_records_a_hashed_code() {
         load_dotenv();
@@ -3989,10 +3742,8 @@ mod tests {
         );
         assert!(record.get_i64("code_expires_at").unwrap() > 0);
 
-        // Crucially, no account exists yet — an abandoned confirmation must
-        // leave nothing behind.
-        let users: mongodb::Collection<boom::api::routes::babamul::BabamulUser> =
-            database.collection("babamul_users");
+        // No account exists yet: an abandoned confirmation must leave nothing behind.
+        let users: mongodb::Collection<BabamulUser> = database.collection("babamul_users");
         assert!(users
             .find_one(doc! { "email": &email })
             .await
@@ -4005,10 +3756,7 @@ mod tests {
             .ok();
     }
 
-    /// POST /babamul/oauth/complete — the code-send cap
-    ///
-    /// One sign-in must not become an unlimited supply of mail to whatever
-    /// address the caller types in, which need not be their own.
+    /// One sign-in must not become unlimited mail to whatever address the caller types.
     #[actix_rt::test]
     async fn test_babamul_oauth_complete_caps_code_sends() {
         load_dotenv();
@@ -4027,8 +3775,7 @@ mod tests {
         };
         let address = || format!("test+{}@babamul.example.com", uuid::Uuid::new_v4());
 
-        // The seeded ticket carries no `code_sends` field at all, standing in
-        // for one minted before the cap existed. Those must still work.
+        // No `code_sends` field: a ticket minted before the cap existed must still work.
         for attempt in 1..=5 {
             let resp = test::call_service(&app, send(address(), ticket.clone())).await;
             assert_eq!(
@@ -4042,8 +3789,7 @@ mod tests {
         let resp = test::call_service(&app, send(address(), ticket.clone())).await;
         assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
 
-        // The ticket itself survives: the cap stops further mail, it does not
-        // invalidate a code the user may already be holding.
+        // The cap stops further mail; it does not invalidate a code already in hand.
         let record = pending_identities(&database)
             .find_one(doc! { "_id": &ticket })
             .await
@@ -4085,8 +3831,7 @@ mod tests {
             "confirming the code must sign the user in"
         );
 
-        let users: mongodb::Collection<boom::api::routes::babamul::BabamulUser> =
-            database.collection("babamul_users");
+        let users: mongodb::Collection<BabamulUser> = database.collection("babamul_users");
         let user = users
             .find_one(doc! { "email": &email })
             .await
@@ -4121,11 +3866,7 @@ mod tests {
         users.delete_one(doc! { "_id": &user.id }).await.ok();
     }
 
-    /// POST /babamul/oauth/verify — existing account
-    ///
-    /// Confirming the code proves control of the mailbox, which is the same
-    /// assurance a password reset relies on, so the identity may attach to an
-    /// account that already owns the address.
+    /// Confirming the code proves mailbox control, so the identity may join an existing account.
     #[actix_rt::test]
     async fn test_babamul_oauth_verify_links_to_an_existing_account() {
         load_dotenv();
@@ -4133,12 +3874,11 @@ mod tests {
         let auth_app_data = get_test_auth(&database).await.unwrap();
         let app = oauth_app!(oauth_test_config(), database.clone(), auth_app_data);
 
-        let users: mongodb::Collection<boom::api::routes::babamul::BabamulUser> =
-            database.collection("babamul_users");
+        let users: mongodb::Collection<BabamulUser> = database.collection("babamul_users");
         let id = uuid::Uuid::new_v4().to_string();
         let email = format!("test+{}@babamul.example.com", id);
         users
-            .insert_one(&boom::api::routes::babamul::BabamulUser {
+            .insert_one(&BabamulUser {
                 id: id.clone(),
                 username: "existing".to_string(),
                 email: email.clone(),
@@ -4191,12 +3931,7 @@ mod tests {
         users.delete_one(doc! { "_id": &id }).await.ok();
     }
 
-    /// POST /babamul/oauth/verify — one external identity, one account
-    ///
-    /// Two tickets for the same `(provider, subject)` can be confirmed with two
-    /// addresses the caller controls. Resolving by identity first is what stops
-    /// that from linking one ORCID iD to two users, which later sign-ins would
-    /// then pick between nondeterministically.
+    /// Resolving by identity first is what stops one ORCID iD from linking to two users.
     #[actix_rt::test]
     async fn test_babamul_oauth_verify_keeps_one_identity_on_one_account() {
         load_dotenv();
@@ -4225,8 +3960,7 @@ mod tests {
             assert_eq!(resp.status(), StatusCode::OK);
         }
 
-        let users: mongodb::Collection<boom::api::routes::babamul::BabamulUser> =
-            database.collection("babamul_users");
+        let users: mongodb::Collection<BabamulUser> = database.collection("babamul_users");
         let linked = users
             .count_documents(doc! {
                 "identities": { "$elemMatch": { "provider": "orcid", "subject": &orcid } }
@@ -4249,12 +3983,7 @@ mod tests {
         users.delete_one(doc! { "email": &first_email }).await.ok();
     }
 
-    /// Two accounts for the same person must not wear the same username.
-    ///
-    /// The name a provider hands back is the obvious username and a poor unique
-    /// key: signing in with one provider and then another produces two accounts
-    /// (the addresses differ, and the address is the join key) whose derived
-    /// usernames are identical.
+    /// Two accounts for the same person must not wear the same derived username.
     #[actix_rt::test]
     async fn test_babamul_oauth_verify_does_not_reuse_a_username() {
         load_dotenv();
@@ -4262,8 +3991,7 @@ mod tests {
         let auth_app_data = get_test_auth(&database).await.unwrap();
         let app = oauth_app!(oauth_test_config(), database.clone(), auth_app_data);
 
-        // `seed_pending_identity` always names the researcher the same thing,
-        // so two unrelated identities derive the same username from it.
+        // `seed_pending_identity` reuses one name, so both derive the same username.
         let emails: Vec<String> = (0..2)
             .map(|_| format!("test+{}@babamul.example.com", uuid::Uuid::new_v4()))
             .collect();
@@ -4282,8 +4010,7 @@ mod tests {
             assert_eq!(resp.status(), StatusCode::OK);
         }
 
-        let users: mongodb::Collection<boom::api::routes::babamul::BabamulUser> =
-            database.collection("babamul_users");
+        let users: mongodb::Collection<BabamulUser> = database.collection("babamul_users");
         let mut usernames = Vec::new();
         for email in &emails {
             usernames.push(
@@ -4310,8 +4037,7 @@ mod tests {
         }
     }
 
-    /// A deployment closed to new registrations refuses to mint an account, but
-    /// still lets the accounts it has sign in and link a provider.
+    /// Closed to new registrations still lets existing accounts sign in and link a provider.
     #[actix_rt::test]
     async fn test_babamul_oauth_verify_honors_registration_enabled() {
         load_dotenv();
@@ -4321,8 +4047,7 @@ mod tests {
         config.babamul.registration_enabled = false;
         let app = oauth_app!(config, database.clone(), auth_app_data);
 
-        let users: mongodb::Collection<boom::api::routes::babamul::BabamulUser> =
-            database.collection("babamul_users");
+        let users: mongodb::Collection<BabamulUser> = database.collection("babamul_users");
 
         // Unknown address: nothing may be created.
         let stranger = format!("test+{}@babamul.example.com", uuid::Uuid::new_v4());
@@ -4355,7 +4080,7 @@ mod tests {
         let id = uuid::Uuid::new_v4().to_string();
         let email = format!("test+{}@babamul.example.com", id);
         users
-            .insert_one(&boom::api::routes::babamul::BabamulUser {
+            .insert_one(&BabamulUser {
                 id: id.clone(),
                 username: format!("closed-{}", id),
                 email: email.clone(),
@@ -4452,8 +4177,7 @@ mod tests {
         .await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 
-        let users: mongodb::Collection<boom::api::routes::babamul::BabamulUser> =
-            database.collection("babamul_users");
+        let users: mongodb::Collection<BabamulUser> = database.collection("babamul_users");
         assert!(
             users
                 .find_one(doc! { "email": &email })
