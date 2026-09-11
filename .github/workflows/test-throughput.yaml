@@ -13,8 +13,8 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  # Runner wall time swings over 10% between identical runs; the exact figure
-  # is reported on every PR anyway, so this only catches a real regression.
+  # Shared-runner wall time varies by over 10% run to run, so only a real
+  # regression trips this; the measured figure is reported on every PR.
   TOLERANCE_PERCENTAGE: 25.0
   # If true, data required to bootstrap MongoDB and the Kafka producer
   # are deleted before we start processing to save storage space.
@@ -190,8 +190,8 @@ jobs:
             sha.txt
             baseline_link.txt
       - name: Fail if wall time increased too much (PR only)
-        # A failing run on main cannot become the next baseline, which pins
-        # every later PR against an ever staler, ever faster reference.
+        # Only PRs are gated: main's run has to succeed to serve as the
+        # baseline the next PR measures against.
         if: github.event_name == 'pull_request'
         run: |
           TOL=${{ env.TOLERANCE_PERCENTAGE }}
