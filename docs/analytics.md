@@ -36,10 +36,10 @@ unusual `User-Agent` can't become a fingerprint.
 
 ## Identity
 
-`distinct_id` is the Babamul user `_id` — the same value the web app passes to
-`posthog.identify` (`frontend/src/pages/Login.tsx`). Web activity, API calls
-and Kafka consumption therefore merge into **one** PostHog person instead of
-three.
+`distinct_id` is the Babamul user `_id` — the same value the browser client
+passes to `posthog.identify` (`frontend/src/lib/analytics.ts`). Web activity,
+API calls and Kafka consumption therefore merge into **one** PostHog person
+instead of three.
 
 The browser client gets that id from `/babamul/profile`. That endpoint used to
 send it as `_id`, mirroring how Mongo stores it, while the client read `id` —
@@ -90,7 +90,7 @@ from the auth middleware, and that is exactly the event you want to see.
 | `endpoint` | Registered route *pattern* (e.g. `/babamul/surveys/{survey}/objects/{object_id}`), not the raw path — so object ids don't explode the property's value space. |
 | `method`, `status_code`, `success`, `duration_ms` | |
 | `authenticated` | Whether the request resolved to a user. |
-| `auth_method` | `personal_access_token` (what the package uses), `jwt` (what the web app uses), or `none`. The cleanest programmatic-vs-browser signal, and it works even for clients that send no useful `User-Agent`. |
+| `auth_method` | `personal_access_token` (what the package uses), `jwt` (what the browser client uses), or `none`. The cleanest programmatic-vs-browser signal, and it works even for clients that send no useful `User-Agent`. |
 | `client` | `babamul-python`, `browser`, `httpx`, `requests`, `curl`, `other`, `unknown`. |
 | `client_version`, `python_version`, `client_os` | Only present for the official package. |
 | `$set` → `email`, `username` | Person properties, on authenticated requests only and at most hourly per user. What makes a person identifiable regardless of which surface they arrived through. |
@@ -187,7 +187,7 @@ posthog:
   consumption_interval_seconds: 300
 ```
 
-Use the **same PostHog project** as the web app's `VITE_PUBLIC_POSTHOG_KEY`,
+Use the **same PostHog project** as the browser client's `VITE_PUBLIC_POSTHOG_KEY`,
 otherwise web and API activity land on different persons and the identity
 merging described above doesn't happen. The production deploy workflow enforces
 this by feeding `VITE_PUBLIC_POSTHOG_KEY` and `VITE_PUBLIC_POSTHOG_HOST` into
