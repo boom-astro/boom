@@ -272,7 +272,7 @@ export async function fetchObject(survey: string, objectId: string): Promise<Api
  * The profile as it arrives, accepting the legacy `_id` spelling alongside `id`
  * so a browser on a cached bundle doesn't regress across the deploy.
  */
-type ProfileWire = (Omit<NonNullable<Profile>, "id"> & { id?: string; _id?: string }) | null;
+type ProfileWire = (NonNullable<Profile> & { _id?: string }) | null;
 
 function normalizeProfile(wire: ProfileWire): Profile {
   // `unwrapData` passes any non-null object through, so an envelope that parsed
