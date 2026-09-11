@@ -18,9 +18,7 @@ export default function Login({ onLoginSuccess }: Props) {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    // Credentials are handed off from signup via in-memory navigation state
-    // (never persisted to web storage). Consume them once and clear the state
-    // so they don't survive a refresh or back-navigation.
+    // Consume once: navigation state left in place is replayed by a refresh or a back-navigation.
     const state = location.state as { prefillEmail?: string; prefillPassword?: string } | null;
     if (state?.prefillEmail || state?.prefillPassword) {
       if (state.prefillEmail) setEmail(state.prefillEmail);
@@ -37,14 +35,12 @@ export default function Login({ onLoginSuccess }: Props) {
     try {
       await api.login(email, password);
       const profile = await api.fetchProfile().catch(() => null);
-      const identifiedEmail = profile?.email ?? email;
-      const identifiedUserId = profile?.id ?? profile?.username ?? identifiedEmail;
-      analytics.identifyUser(identifiedUserId, identifiedEmail, profile?.username);
+      if (profile) analytics.identifyProfile(profile);
+      else analytics.identifyUser(email, email);
       analytics.trackLoginSuccess({ email });
       onLoginSuccess();
     } catch (err: unknown) {
-      const msg = err && typeof err === 'object' && 'message' in err ? String((err as { message?: unknown }).message) : String(err);
-      setError(msg);
+      setError(err instanceof Error ? err.message : String(err));
       analytics.trackError('login', err, { email });
     } finally {
       setLoading(false);
@@ -55,7 +51,7 @@ export default function Login({ onLoginSuccess }: Props) {
     <div className="w-full max-w-lg mx-auto p-4">
       {prefilledFromSignup && (
         <div className="mb-4 rounded-md bg-muted p-3 text-sm flex items-center justify-between">
-          <div className="text-sm">Credentials were pre-filled from account activation.</div>
+          <span>Credentials were pre-filled from account activation.</span>
           <button
             className="ml-4 text-sm text-primary hover:underline"
             onClick={() => setPrefilledFromSignup(false)}

@@ -1,4 +1,3 @@
-// Always use the same-origin proxy; production should map /api to the backend via the web server
 const API_BASE = "/api/babamul";
 
 export type TokenRecord = {
@@ -7,15 +6,9 @@ export type TokenRecord = {
   expires_at: number; // unix ms
 };
 
-// Generic API object shape for responses we don't have a stricter schema for
 export type ApiObject = Record<string, unknown>;
 
-// Profile shape returned by `/profile`
 export type Profile = {
-  /**
-   * Babamul user id, and the PostHog `distinct_id` the API keys its events on;
-   * optional so a missing id stays `undefined` rather than `""`.
-   */
   id?: string;
   username: string;
   email: string;
@@ -27,40 +20,58 @@ export type Profile = {
   orcid_id?: string | null;
 } | null;
 
-// A social sign-in provider advertised by `/oauth/providers`
 export type OAuthProvider = { id: string; name: string; start_url: string };
 
-// Kafka credential returned by `/babamul/kafka-credentials`
 export type KafkaCredential = { id: string; name: string; kafka_username: string; kafka_password: string };
 
-// Personal Access Token types
 export type TokenPublic = { id: string; name: string; created_at: number; expires_at: number; last_used_at: number | null };
 export type TokenResponse = { id: string; name: string; access_token: string; created_at: number; expires_at: number };
 
-const TOKEN_KEY = "api_token";
-const USERNAME_KEY = "api_user";
+export const TOKEN_KEY = "api_token";
+export const USERNAME_KEY = "api_user";
 
-// Helper function to parse JSON with bigint support
 async function parseResponseJson(res: Response): Promise<unknown> {
   const text = await res.text();
-  // TODO: find a better way to handle bigints in JSON without a heavy dependency
-  // For now we convert them to strings by wrapping large integers in quotes, to avoid loss of precision
-  const bigIntRegex = /:\s*(-?\d{16,})(?![\d]*["])/g;
-  const safeText = text.replace(bigIntRegex, (_, numStr) => `:"${numStr}"`);
+  // Quote 16+ digit integers: `JSON.parse` would round them and lose candid precision.
+  const safeText = text.replace(/:\s*(-?\d{16,})(?![\d]*["])/g, (_, numStr) => `:"${numStr}"`);
   return JSON.parse(safeText);
 }
 
 type DataEnvelope<T> = { data?: T };
 
 function unwrapData<T>(body: unknown, fallback: T): T {
-  if (body && typeof body === 'object' && 'data' in body) {
+  if (body && typeof body === "object" && "data" in body) {
     const dataVal = (body as DataEnvelope<unknown>).data;
     if (dataVal !== undefined) return dataVal as T;
   }
-  if (body !== null && body !== undefined) {
-    return body as T;
-  }
-  return fallback;
+  return body === null || body === undefined ? fallback : (body as T);
+}
+
+async function ensureOk(res: Response, action: string): Promise<void> {
+  if (res.ok) return;
+  const text = await res.text().catch(() => "");
+  throw new Error(`${action} failed: ${res.status} ${text}`);
+}
+
+async function readJson(res: Response): Promise<unknown> {
+  return parseResponseJson(res).catch(() => null);
+}
+
+async function readList<T>(res: Response): Promise<T[]> {
+  const result = unwrapData<unknown>(await readJson(res), []);
+  return Array.isArray(result) ? (result as T[]) : [];
+}
+
+function messageOf(body: unknown): string | undefined {
+  if (!body || typeof body !== "object" || !("message" in body)) return undefined;
+  const message = (body as { message?: unknown }).message;
+  return typeof message === "string" ? message : undefined;
+}
+
+type TokenBody = { access_token: string; token_type?: string; expires_in?: number };
+
+function hasAccessToken(body: unknown): body is TokenBody {
+  return !!body && typeof body === "object" && "access_token" in body;
 }
 
 function getSavedToken(): TokenRecord | null {
@@ -73,13 +84,12 @@ function getSavedToken(): TokenRecord | null {
   }
 }
 
-function saveToken(body: { access_token: string; token_type?: string; expires_in?: number }) {
-  const now = Date.now();
+function saveToken(body: TokenBody) {
   const expires_in = typeof body.expires_in === "number" ? body.expires_in : 3600;
   const rec: TokenRecord = {
     access_token: body.access_token,
     token_type: body.token_type || "Bearer",
-    expires_at: now + expires_in * 1000,
+    expires_at: Date.now() + expires_in * 1000,
   };
   localStorage.setItem(TOKEN_KEY, JSON.stringify(rec));
 }
@@ -93,7 +103,6 @@ export function getTokenRecord(): TokenRecord | null {
   const t = getSavedToken();
   if (!t) return null;
   if (t.expires_at <= Date.now()) {
-    // expired -> clear and return null
     localStorage.removeItem(TOKEN_KEY);
     return null;
   }
@@ -103,117 +112,59 @@ export function getTokenRecord(): TokenRecord | null {
 export async function login(email: string, password: string): Promise<TokenRecord | null> {
   const res = await fetch(`${API_BASE}/auth`, {
     method: "POST",
-    // headers: { "Content-Type": "application/json" },
-    // use form-encoded for compatibility with OAuth2 password grant
+    // Form-encoded for compatibility with the OAuth2 password grant.
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({ email, password }).toString(),
   });
-  if (!res.ok) {
-    const txt = await res.text().catch(() => "");
-    throw new Error(`Login failed: ${res.status} ${txt}`);
-  }
+  await ensureOk(res, "Login");
   const body = await parseResponseJson(res);
-  if (!body || typeof body !== 'object' || !('access_token' in body)) throw new Error("Auth response missing access_token");
-  saveToken(body as { access_token: string; token_type?: string; expires_in?: number });
-  try {
-    localStorage.setItem(USERNAME_KEY, email);
-  } catch {
-    // ignore
-  }
+  if (!hasAccessToken(body)) throw new Error("Auth response missing access_token");
+  saveToken(body);
+  localStorage.setItem(USERNAME_KEY, email);
   return getTokenRecord();
 }
 
-/**
- * Social sign-in providers this deployment has configured.
- *
- * Returns an empty list when none are set up, so the login page can simply
- * render nothing rather than special-casing the feature being off.
- */
 export async function fetchOAuthProviders(): Promise<OAuthProvider[]> {
   const res = await fetch(`${API_BASE}/oauth/providers`);
   if (!res.ok) return [];
-  const body = await parseResponseJson(res).catch(() => ({ data: [] }));
-  const result = unwrapData<unknown>(body, []);
-  return Array.isArray(result) ? (result as OAuthProvider[]) : [];
+  return readList<OAuthProvider>(res);
 }
 
-/**
- * Hand the browser over to a provider's consent screen.
- *
- * A full navigation, not a fetch: the OAuth flow is a chain of redirects that
- * ends back at `/oauth/callback` in this app.
- */
 export function startOAuthLogin(provider: OAuthProvider, redirectTo?: string) {
-  const params = new URLSearchParams();
-  if (redirectTo) params.set("redirect_to", redirectTo);
-  const query = params.toString();
+  const query = redirectTo ? `?${new URLSearchParams({ redirect_to: redirectTo })}` : "";
   // `start_url` is API-relative; API_BASE already carries the /api prefix.
   const path = provider.start_url.replace(/^\/babamul/, "");
-  window.location.assign(`${API_BASE}${path}${query ? `?${query}` : ""}`);
+  window.location.assign(`${API_BASE}${path}${query}`);
 }
 
-/**
- * Store the token an OAuth callback delivered in the URL fragment.
- *
- * Mirrors what `login()` persists so the rest of the app can't tell the two
- * sign-in paths apart.
- */
-export function saveOAuthToken(params: { access_token: string; token_type?: string; expires_in?: number }) {
+export function saveOAuthToken(params: TokenBody) {
   saveToken(params);
   return getTokenRecord();
 }
 
-/**
- * Supply an email address for a sign-in whose provider didn't give us one.
- *
- * Mails a confirmation code; no account is created until `verifyOAuthEmail`
- * receives it back.
- */
+/** No account exists until `verifyOAuthEmail` confirms the code this mails out. */
 export async function completeOAuthEmail(ticket: string, email: string): Promise<void> {
   const res = await fetch(`${API_BASE}/oauth/complete`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ ticket, email }),
   });
-  if (!res.ok) {
-    const body = await parseResponseJson(res).catch(() => null);
-    const message =
-      body && typeof body === "object" && "message" in body
-        ? String((body as { message?: unknown }).message)
-        : `Request failed: ${res.status}`;
-    throw new Error(message);
-  }
+  if (res.ok) return;
+  throw new Error(messageOf(await readJson(res)) ?? `Request failed: ${res.status}`);
 }
 
-/** Confirm the emailed code, finishing the sign-in and storing the token. */
 export async function verifyOAuthEmail(ticket: string, code: string): Promise<{ next?: string }> {
   const res = await fetch(`${API_BASE}/oauth/verify`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ ticket, code }),
   });
-  const body = await parseResponseJson(res).catch(() => null);
-  if (!res.ok) {
-    const message =
-      body && typeof body === "object" && "message" in body
-        ? String((body as { message?: unknown }).message)
-        : `Confirmation failed: ${res.status}`;
-    throw new Error(message);
-  }
-  if (!body || typeof body !== "object" || !("access_token" in body)) {
-    throw new Error("Confirmation response missing access_token");
-  }
-  saveToken(body as { access_token: string; token_type?: string; expires_in?: number });
+  const body = await readJson(res);
+  if (!res.ok) throw new Error(messageOf(body) ?? `Confirmation failed: ${res.status}`);
+  if (!hasAccessToken(body)) throw new Error("Confirmation response missing access_token");
+  saveToken(body);
   const next = (body as { next?: unknown }).next;
   return { next: typeof next === "string" ? next : undefined };
-}
-
-export function getEmail(): string | null {
-  try {
-    return localStorage.getItem(USERNAME_KEY);
-  } catch {
-    return null;
-  }
 }
 
 export async function forgotPassword(email: string): Promise<void> {
@@ -222,10 +173,7 @@ export async function forgotPassword(email: string): Promise<void> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ email }),
   });
-  if (!res.ok) {
-    const txt = await res.text().catch(() => "");
-    throw new Error(`Request failed: ${res.status} ${txt}`);
-  }
+  await ensureOk(res, "Request");
 }
 
 export async function resetPassword(email: string, token: string, new_password: string): Promise<void> {
@@ -234,22 +182,16 @@ export async function resetPassword(email: string, token: string, new_password: 
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ email, token, new_password }),
   });
-  if (!res.ok) {
-    const txt = await res.text().catch(() => "");
-    throw new Error(`Password reset failed: ${res.status} ${txt}`);
-  }
+  await ensureOk(res, "Password reset");
 }
 
 async function fetchWithAuth(input: RequestInfo, init: RequestInit = {}) {
   const token = getTokenRecord();
-  if (!token) {
-    throw new Error("Not authenticated");
-  }
+  if (!token) throw new Error("Not authenticated");
   const headers = new Headers(init.headers || {});
   headers.set("Authorization", `${token.token_type} ${token.access_token}`);
   const res = await fetch(input, { ...init, headers });
   if (res.status === 401) {
-    // server says token invalid -> clear and notify caller
     logout();
     throw new Error("Unauthorized");
   }
@@ -259,94 +201,51 @@ async function fetchWithAuth(input: RequestInfo, init: RequestInit = {}) {
 export async function fetchObject(survey: string, objectId: string): Promise<ApiObject> {
   const url = `${API_BASE}/surveys/${encodeURIComponent(survey)}/objects/${encodeURIComponent(objectId)}`;
   const res = await fetchWithAuth(url);
-  if (!res.ok) {
-    const txt = await res.text().catch(() => "");
-    throw new Error(`Fetch object failed: ${res.status} ${txt}`);
-  }
-  // API responses sometimes wrap the payload in { data: ... }
-  const body = await parseResponseJson(res).catch(() => ({}));
-  return unwrapData<ApiObject>(body, {} as ApiObject);
+  await ensureOk(res, "Fetch object");
+  return unwrapData<ApiObject>(await readJson(res), {});
 }
 
-/**
- * The profile as it arrives, accepting the legacy `_id` spelling alongside `id`
- * so a browser on a cached bundle doesn't regress across the deploy.
- */
 type ProfileWire = (NonNullable<Profile> & { _id?: string }) | null;
 
 function normalizeProfile(wire: ProfileWire): Profile {
-  // `unwrapData` passes any non-null object through, so an envelope that parsed
-  // but carries no account — a gateway's `{"message": ...}`, say — would arrive
-  // as a truthy profile of `undefined` fields and reach `identify` as
-  // `identify(undefined)`. Both are required by `Profile`, so a payload missing
-  // either is not a profile.
   if (!wire || typeof wire.username !== "string" || typeof wire.email !== "string") return null;
   const { id, _id, ...rest } = wire;
   return { ...rest, id: id || _id || undefined };
 }
 
 export async function fetchProfile(): Promise<Profile> {
-  const url = `${API_BASE}/profile`;
-  const res = await fetchWithAuth(url);
-  if (!res.ok) {
-    const txt = await res.text().catch(() => "");
-    throw new Error(`Fetch profile failed: ${res.status} ${txt}`);
-  }
-  // `null`, not `{}`: `unwrapData` passes a non-null body straight through, so
-  // `{}` would become a truthy profile whose every field is `undefined`.
-  const body = await parseResponseJson(res).catch(() => null);
-  return normalizeProfile(unwrapData<ProfileWire>(body, null));
+  const res = await fetchWithAuth(`${API_BASE}/profile`);
+  await ensureOk(res, "Fetch profile");
+  return normalizeProfile(unwrapData<ProfileWire>(await readJson(res), null));
 }
 
-/**
- * Set or clear the account's display name.
- *
- * Pass an empty string to clear it — the name is free text the user controls,
- * not an identifier, so having none is a normal state rather than an error.
- */
+/** Pass an empty string to clear the name: having none is a normal state. */
 export async function updateProfileName(name: string): Promise<Profile> {
-  const url = `${API_BASE}/profile`;
-  const res = await fetchWithAuth(url, {
+  const res = await fetchWithAuth(`${API_BASE}/profile`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ name }),
   });
-  const body = await parseResponseJson(res).catch(() => null);
-  if (!res.ok) {
-    const message =
-      body && typeof body === "object" && "message" in body
-        ? String((body as { message?: unknown }).message)
-        : `Update profile failed: ${res.status}`;
-    throw new Error(message);
-  }
+  const body = await readJson(res);
+  if (!res.ok) throw new Error(messageOf(body) ?? `Update profile failed: ${res.status}`);
   return normalizeProfile(unwrapData<ProfileWire>(body, null));
 }
 
 export async function fetchKafkaCredentials(): Promise<KafkaCredential[]> {
-  const url = `${API_BASE}/kafka-credentials`;
-  const res = await fetchWithAuth(url);
-  if (!res.ok) {
-    const txt = await res.text().catch(() => "");
-    throw new Error(`Fetch kafka credentials failed: ${res.status} ${txt}`);
-  }
-  const body = await parseResponseJson(res).catch(() => ({ data: [] }));
-  const result = unwrapData<unknown>(body, []);
-  return Array.isArray(result) ? (result as KafkaCredential[]) : [];
+  const res = await fetchWithAuth(`${API_BASE}/kafka-credentials`);
+  await ensureOk(res, "Fetch kafka credentials");
+  return readList<KafkaCredential>(res);
 }
 
 export async function createKafkaCredential(name: string): Promise<KafkaCredential> {
-  const url = `${API_BASE}/kafka-credentials`;
-  const res = await fetchWithAuth(url, {
+  const res = await fetchWithAuth(`${API_BASE}/kafka-credentials`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ name }),
   });
-  if (!res.ok) {
-    const txt = await res.text().catch(() => "");
-    throw new Error(`Create kafka credential failed: ${res.status} ${txt}`);
-  }
-  const body = await parseResponseJson(res).catch(() => ({}));
-  if (body && typeof body === 'object' && 'credential' in body) {
+  await ensureOk(res, "Create kafka credential");
+  const body = await readJson(res);
+  if (body && typeof body === "object" && "credential" in body) {
     return (body as { credential: KafkaCredential }).credential;
   }
   return unwrapData<KafkaCredential>(body, {} as KafkaCredential);
@@ -354,52 +253,28 @@ export async function createKafkaCredential(name: string): Promise<KafkaCredenti
 
 export async function deleteKafkaCredential(credentials_id: string): Promise<void> {
   const url = `${API_BASE}/kafka-credentials/${encodeURIComponent(credentials_id)}`;
-  const res = await fetchWithAuth(url, {
-    method: "DELETE",
-  });
-  if (!res.ok) {
-    const txt = await res.text().catch(() => "");
-    throw new Error(`Delete kafka credential failed: ${res.status} ${txt}`);
-  }
-  // no content expected
+  await ensureOk(await fetchWithAuth(url, { method: "DELETE" }), "Delete kafka credential");
 }
 
 export async function fetchTokens(): Promise<TokenPublic[]> {
-  const url = `${API_BASE}/tokens`;
-  const res = await fetchWithAuth(url);
-  if (!res.ok) {
-    const txt = await res.text().catch(() => "");
-    throw new Error(`Fetch tokens failed: ${res.status} ${txt}`);
-  }
-  const body = await parseResponseJson(res).catch(() => ({ data: [] }));
-  const result = unwrapData<unknown>(body, []);
-  return Array.isArray(result) ? (result as TokenPublic[]) : [];
+  const res = await fetchWithAuth(`${API_BASE}/tokens`);
+  await ensureOk(res, "Fetch tokens");
+  return readList<TokenPublic>(res);
 }
 
 export async function createToken(name: string, expires_in_days?: number): Promise<TokenResponse> {
-  const url = `${API_BASE}/tokens`;
-  const res = await fetchWithAuth(url, {
+  const res = await fetchWithAuth(`${API_BASE}/tokens`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ name, expires_in_days }),
   });
-  if (!res.ok) {
-    const txt = await res.text().catch(() => "");
-    throw new Error(`Create token failed: ${res.status} ${txt}`);
-  }
-  const body = await parseResponseJson(res).catch(() => ({}));
-  return unwrapData<TokenResponse>(body, {} as TokenResponse);
+  await ensureOk(res, "Create token");
+  return unwrapData<TokenResponse>(await readJson(res), {} as TokenResponse);
 }
 
 export async function deleteToken(tokenId: string): Promise<void> {
   const url = `${API_BASE}/tokens/${encodeURIComponent(tokenId)}`;
-  const res = await fetchWithAuth(url, {
-    method: "DELETE",
-  });
-  if (!res.ok) {
-    const txt = await res.text().catch(() => "");
-    throw new Error(`Delete token failed: ${res.status} ${txt}`);
-  }
+  await ensureOk(await fetchWithAuth(url, { method: "DELETE" }), "Delete token");
 }
 
 export type AlertSearchParams = {
@@ -445,47 +320,30 @@ export type Alert = {
 
 export async function fetchAlerts(survey: string, params: AlertSearchParams): Promise<Alert[]> {
   const searchParams = new URLSearchParams();
-
-  // Add all defined parameters to the query string
   Object.entries(params).forEach(([key, value]) => {
-    if (value !== undefined && value !== null) {
-      searchParams.append(key, String(value));
-    }
+    if (value !== undefined && value !== null) searchParams.append(key, String(value));
   });
 
-  const url = `${API_BASE}/surveys/${encodeURIComponent(survey)}/alerts?${searchParams.toString()}`;
+  const url = `${API_BASE}/surveys/${encodeURIComponent(survey)}/alerts?${searchParams}`;
   const res = await fetchWithAuth(url);
-  if (!res.ok) {
-    const txt = await res.text().catch(() => "");
-    throw new Error(`Fetch alerts failed: ${res.status} ${txt}`);
-  }
-  const body = await parseResponseJson(res).catch(() => ({ data: [] }));
-  const result = unwrapData<unknown>(body, []);
-  return Array.isArray(result) ? (result as Alert[]) : [];
+  await ensureOk(res, "Fetch alerts");
+  return readList<Alert>(res);
 }
 
-export async function fetchAlertCutouts(survey: string, candid: string): Promise<Cutouts> {
-  const url = `${API_BASE}/surveys/${encodeURIComponent(survey)}/cutouts?candid=${encodeURIComponent(`${candid}`)}`;
+async function fetchCutouts(survey: string, query: string): Promise<Cutouts> {
+  const url = `${API_BASE}/surveys/${encodeURIComponent(survey)}/cutouts?${query}`;
   const res = await fetchWithAuth(url);
-  if (!res.ok) {
-    const txt = await res.text().catch(() => "");
-    throw new Error(`Fetch cutouts failed: ${res.status} ${txt}`);
-  }
-  const body = await parseResponseJson(res).catch(() => ({}));
-  const result = unwrapData<unknown>(body, {});
-  return (typeof result === 'object' && result ? (result as Cutouts) : {} as Cutouts);
+  await ensureOk(res, "Fetch cutouts");
+  const result = unwrapData<unknown>(await readJson(res), {});
+  return typeof result === "object" && result ? (result as Cutouts) : {};
 }
 
-export async function fetchObjCutouts(survey: string, objectId: string): Promise<Cutouts> {
-  const url = `${API_BASE}/surveys/${encodeURIComponent(survey)}/cutouts?objectId=${encodeURIComponent(objectId)}`;
-  const res = await fetchWithAuth(url);
-  if (!res.ok) {
-    const txt = await res.text().catch(() => "");
-    throw new Error(`Fetch cutouts failed: ${res.status} ${txt}`);
-  }
-  const body = await parseResponseJson(res).catch(() => ({}));
-  const result = unwrapData<unknown>(body, {});
-  return (typeof result === 'object' && result ? (result as Cutouts) : {} as Cutouts);
+export function fetchAlertCutouts(survey: string, candid: string): Promise<Cutouts> {
+  return fetchCutouts(survey, `candid=${encodeURIComponent(candid)}`);
+}
+
+export function fetchObjCutouts(survey: string, objectId: string): Promise<Cutouts> {
+  return fetchCutouts(survey, `objectId=${encodeURIComponent(objectId)}`);
 }
 
 export type NightlyStat = {
@@ -497,15 +355,9 @@ export type NightlyStat = {
 export async function fetchStats(startDate: string, endDate: string, survey?: string): Promise<NightlyStat[]> {
   const params = new URLSearchParams({ start_date: startDate, end_date: endDate });
   if (survey) params.set("survey", survey);
-  const url = `${API_BASE}/stats/nightly?${params.toString()}`;
-  const res = await fetch(url);
-  if (!res.ok) {
-    const txt = await res.text().catch(() => "");
-    throw new Error(`Fetch stats failed: ${res.status} ${txt}`);
-  }
-  const body = await parseResponseJson(res).catch(() => ({ data: [] }));
-  const result = unwrapData<unknown>(body, []);
-  return Array.isArray(result) ? (result as NightlyStat[]) : [];
+  const res = await fetch(`${API_BASE}/stats/nightly?${params}`);
+  await ensureOk(res, "Fetch stats");
+  return readList<NightlyStat>(res);
 }
 
 export type TopicInfo = {
@@ -518,26 +370,15 @@ export type TopicInfo = {
 export type AvroSchema = Record<string, any>;
 
 export async function fetchSchema(survey: string): Promise<AvroSchema> {
-  const url = `${API_BASE}/surveys/${encodeURIComponent(survey)}/schemas`;
-  const res = await fetch(url);
-  if (!res.ok) {
-    const txt = await res.text().catch(() => "");
-    throw new Error(`Fetch schema failed: ${res.status} ${txt}`);
-  }
-  const body = await parseResponseJson(res).catch(() => ({}));
-  return body as AvroSchema;
+  const res = await fetch(`${API_BASE}/surveys/${encodeURIComponent(survey)}/schemas`);
+  await ensureOk(res, "Fetch schema");
+  return ((await readJson(res)) ?? {}) as AvroSchema;
 }
 
 export async function fetchTopics(): Promise<TopicInfo[]> {
-  const url = `${API_BASE}/stats/kafka`;
-  const res = await fetch(url);
-  if (!res.ok) {
-    const txt = await res.text().catch(() => "");
-    throw new Error(`Fetch topics failed: ${res.status} ${txt}`);
-  }
-  const body = await parseResponseJson(res).catch(() => ({ data: [] }));
-  const result = unwrapData<unknown>(body, []);
-  return Array.isArray(result) ? (result as TopicInfo[]) : [];
+  const res = await fetch(`${API_BASE}/stats/kafka`);
+  await ensureOk(res, "Fetch topics");
+  return readList<TopicInfo>(res);
 }
 
 export type CollectionEntry = {
@@ -552,14 +393,9 @@ export type CollectionStats = {
 };
 
 export async function fetchCollectionStats(): Promise<CollectionStats> {
-  const url = `${API_BASE}/stats/collections?count=true&size=true`;
-  const res = await fetch(url);
-  if (!res.ok) {
-    const txt = await res.text().catch(() => "");
-    throw new Error(`Fetch collection stats failed: ${res.status} ${txt}`);
-  }
-  const body = await parseResponseJson(res).catch(() => ({}));
-  return unwrapData<CollectionStats>(body, { n_collections: 0, collections: [] });
+  const res = await fetch(`${API_BASE}/stats/collections?count=true&size=true`);
+  await ensureOk(res, "Fetch collection stats");
+  return unwrapData<CollectionStats>(await readJson(res), { n_collections: 0, collections: [] });
 }
 
 export type SearchResult = {
@@ -575,39 +411,20 @@ export type SearchObjectsResponse = {
 };
 
 export async function searchObjects(value: string, limit: number = 10): Promise<SearchObjectsResponse> {
-  const searchParams = new URLSearchParams({
-    object_id: value,
-    limit: String(limit),
-  });
-
-  const url = `${API_BASE}/objects?${searchParams.toString()}`;
-  const res = await fetchWithAuth(url);
-  if (!res.ok) {
-    // Gracefully handle 400 with message, error if there is no message
-    if (res.status === 400) {
-      const body = await parseResponseJson(res).catch(() => ({}));
-      let message: string | undefined = undefined;
-      if (body && typeof body === 'object' && 'message' in body) {
-        const m = (body as { message?: unknown }).message;
-        if (typeof m === 'string') message = m;
-        return { results: [], message };
-      }
-      const txt = await res.text().catch(() => "");
-      throw new Error(`Search objects failed: ${res.status} ${message ? message : txt}`);
-    }
-    const txt = await res.text().catch(() => "");
-    throw new Error(`Search objects failed: ${res.status} ${txt}`);
+  const params = new URLSearchParams({ object_id: value, limit: String(limit) });
+  const res = await fetchWithAuth(`${API_BASE}/objects?${params}`);
+  if (res.status === 400) {
+    const message = messageOf(await readJson(res));
+    if (message) return { results: [], message };
+    throw new Error(`Search objects failed: ${res.status}`);
   }
-  const body = await parseResponseJson(res).catch(() => ({ data: [] }));
+  await ensureOk(res, "Search objects");
+  const body = await readJson(res);
   const result = unwrapData<unknown>(body, []);
-  const results = Array.isArray(result) ? (result as SearchResult[]) : [];
-  // If server returns a message field even on success, include it
-  let message: string | undefined = undefined;
-  if (body && typeof body === 'object' && 'message' in (body as Record<string, unknown>)) {
-    const m = (body as { message?: unknown }).message;
-    if (typeof m === 'string') message = m;
-  }
-  return { results, message };
+  return {
+    results: Array.isArray(result) ? (result as SearchResult[]) : [],
+    message: messageOf(body),
+  };
 }
 
 export default {

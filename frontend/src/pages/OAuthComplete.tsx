@@ -1,25 +1,17 @@
 import { useEffect, useRef, useState } from "react";
-import { Link, useLocation, useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import api from "@/lib/api";
 import { ensureProfileLoaded, useAppStore } from "@/lib/store";
 import * as analytics from "@/lib/analytics";
+import { safeNext } from "@/lib/oauth";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { SignInError } from "@/components/sign-in-error";
 
 /**
- * Finishes a social sign-in whose provider gave us no email address.
- *
- * ORCID is the common case: most researchers keep their email private, so the
- * only thing the provider vouches for is the ORCID iD. Rather than inventing a
- * stand-in address, we ask for a real one and mail a code to prove the person
- * controls it. No account exists until that code comes back.
- *
- * Both entry points — the sign-in redirect and the confirmation email's link —
- * pass their parameters in the URL fragment, which browsers never transmit, so
- * the ticket and code stay out of server access logs and `Referer` headers.
- * Arriving from the email carries a code too, which skips straight to the
- * confirmation step.
+ * Finishes a social sign-in whose provider gave us no email address, ORCID being the common case.
+ * Parameters arrive in the URL fragment, which browsers never transmit.
  */
 export default function OAuthComplete() {
   const navigate = useNavigate();
@@ -39,10 +31,8 @@ export default function OAuthComplete() {
     if (initialized.current) return;
     initialized.current = true;
 
-    // Both the sign-in redirect and the confirmation email put their
-    // parameters in the fragment. The query string is still read as a fallback
-    // so links from confirmation emails sent before that change keep working.
     const fragment = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+    // Query string too: confirmation emails sent before the move to the fragment still carry one.
     const query = new URLSearchParams(location.search);
 
     setTicket(fragment.get("ticket") || query.get("ticket") || "");
@@ -56,7 +46,6 @@ export default function OAuthComplete() {
       setStep("code");
     }
 
-    // Keep the ticket out of the address bar so it isn't shared or replayed.
     if (window.location.hash || window.location.search) {
       window.history.replaceState(null, "", window.location.pathname);
     }
@@ -85,22 +74,16 @@ export default function OAuthComplete() {
     setLoading(true);
     try {
       const { next } = await api.verifyOAuthEmail(ticket, code);
-      // Confirming here signs in a new token, so any profile the store still
-      // holds is the previous account's. Clear it and refetch rather than let
-      // the five-minute freshness window carry it into the app.
+      // The store's five-minute freshness window would otherwise serve the previous account.
       useAppStore.getState().clearProfile();
       try {
         const profile = await ensureProfileLoaded({ force: true });
-        if (profile) {
-          analytics.identifyUser(profile.id ?? profile.username ?? profile.email, profile.email, profile.username);
-        }
+        if (profile) analytics.identifyProfile(profile);
         analytics.trackLoginSuccess({ email: profile?.email ?? email });
       } catch (profileErr) {
-        // Already signed in; a profile hiccup shouldn't strand the user here.
         console.error("OAuthComplete: could not load profile", profileErr);
       }
-      const destination = next && next.startsWith("/") && !next.startsWith("//") ? next : "/query";
-      navigate(destination, { replace: true });
+      navigate(safeNext(next), { replace: true });
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : String(err));
       analytics.trackError("oauth_verify_email", err, { email });
@@ -111,17 +94,9 @@ export default function OAuthComplete() {
 
   if (!ticket) {
     return (
-      <div className="w-full max-w-lg mx-auto p-4">
-        <div className="rounded-md border border-destructive/40 bg-destructive/10 p-4">
-          <h1 className="font-medium mb-1">Sign-in request missing</h1>
-          <p className="text-sm text-muted-foreground">
-            This page needs a sign-in request to finish. Please start again from the login page.
-          </p>
-          <Link to="/login" className="mt-3 inline-block text-sm underline">
-            Back to login
-          </Link>
-        </div>
-      </div>
+      <SignInError title="Sign-in request missing">
+        This page needs a sign-in request to finish. Please start again from the login page.
+      </SignInError>
     );
   }
 
@@ -157,11 +132,9 @@ export default function OAuthComplete() {
                   {providerName} to it.
                 </p>
               </div>
-              <div>
-                <Button type="submit" disabled={loading || !email}>
-                  {loading ? "Sending…" : "Send confirmation code"}
-                </Button>
-              </div>
+              <Button type="submit" className="justify-self-start" disabled={loading || !email}>
+                {loading ? "Sending…" : "Send confirmation code"}
+              </Button>
             </form>
           ) : (
             <form onSubmit={submitCode} className="grid gap-4">
