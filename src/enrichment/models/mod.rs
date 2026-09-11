@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tracing::info;
 
+/// Workers round-robin over sets; more workers than GPUs share a set and its stream.
 const SESSIONS_PER_DEVICE: usize = 1;
 
 /// ONNX models shared across all enrichment worker threads via `Arc`.
@@ -23,13 +24,11 @@ const SESSIONS_PER_DEVICE: usize = 1;
 /// Concurrent workers will serialize on the mutex, but model weights are loaded
 /// only once in memory (and on GPU VRAM if using CUDA).
 ///
-/// On Linux+GPU, all sessions share a single CUDA stream with the villar-pso
-/// `GpuContext` so PSO and ONNX inference run on the same stream and avoid
-/// the implicit cross-stream barriers of the legacy default stream.
+/// On Linux+GPU all sessions and the villar-pso `GpuContext` share one CUDA
+/// stream, avoiding the legacy default stream's implicit cross-stream barriers.
 ///
-/// **Field ordering matters**: Rust drops struct fields in declaration order,
-/// so the stream must be declared AFTER everything that uses it (the ORT
-/// sessions and the `GpuContext`) to ensure `cudaStreamDestroy` fires last.
+/// Fields drop in declaration order, so `_stream` must stay last: its
+/// `cudaStreamDestroy` has to run after everything that uses it.
 pub struct SharedModels {
     pub acai_h: Mutex<AcaiModel>,
     pub acai_n: Mutex<AcaiModel>,
@@ -37,8 +36,8 @@ pub struct SharedModels {
     pub acai_o: Mutex<AcaiModel>,
     pub acai_b: Mutex<AcaiModel>,
     pub btsbot: Mutex<BtsBotModel>,
-    /// Villar-PSO GPU context bound to this device. `None` when running
-    /// without the `gpu` feature.
+    /// Villar-PSO context for this device; `None` for the CPU set. No mutex:
+    /// `&self` methods with per-call buffers, and stream enqueue is thread-safe.
     #[cfg(feature = "gpu")]
     pub gpu_ctx: Option<GpuContext>,
     /// CUDA stream shared with the ORT sessions above. Must be dropped last
@@ -54,18 +53,11 @@ impl std::fmt::Debug for SharedModels {
 }
 
 impl SharedModels {
-    /// Load all ONNX models, optionally on a specific CUDA device.
-    /// Returns an `Arc` for sharing across threads.
-    ///
-    /// On Linux+`gpu`, this creates a CUDA stream for `device_id` and binds
-    /// every ORT session to it via `with_compute_stream`. The same stream is
-    /// also handed to the villar-pso `GpuContext`, so all GPU work for this
-    /// device runs on one stream.
+    /// Load all ONNX models, optionally on a specific CUDA device. On
+    /// Linux+`gpu` every session and the villar `GpuContext` share one stream.
     pub fn load(device_id: Option<i32>) -> Result<Arc<Self>, ModelError> {
         info!(?device_id, "loading shared ONNX models");
 
-        // Create the per-device CUDA stream first (Linux+gpu only). The raw
-        // pointer is shared between ORT sessions and villar-pso.
         #[cfg(all(feature = "gpu", target_os = "linux"))]
         let stream: Option<Stream> = match device_id {
             Some(id) => Some(Stream::new_on_device(id).map_err(|e| {
@@ -111,7 +103,7 @@ impl SharedModels {
                     id,
                     stream_ptr,
                 )?,
-                BtsBotModel::new_on_device("data/models/btsbot-v1.0.1.onnx", id, stream_ptr)?,
+                BtsBotModel::new_on_device("data/models/btsbot-v2.0.0.onnx", id, stream_ptr)?,
             ),
             None => (
                 AcaiModel::new("data/models/acai_h.d1_dnn_20201130.onnx")?,
@@ -119,7 +111,7 @@ impl SharedModels {
                 AcaiModel::new("data/models/acai_v.d1_dnn_20201130.onnx")?,
                 AcaiModel::new("data/models/acai_o.d1_dnn_20201130.onnx")?,
                 AcaiModel::new("data/models/acai_b.d1_dnn_20201130.onnx")?,
-                BtsBotModel::new("data/models/btsbot-v1.0.1.onnx")?,
+                BtsBotModel::new("data/models/btsbot-v2.0.0.onnx")?,
             ),
         };
 
@@ -158,6 +150,28 @@ impl SharedModels {
 
         info!("all ONNX models loaded successfully");
         Ok(Arc::new(models))
+    }
+
+    /// Bind the calling thread to this set's CUDA device; call before each batch.
+    ///
+    /// `cudaSetDevice` is per-thread and defaults to device 0. ORT sets it in the
+    /// `PerThreadContext` ctor and `CUDAAllocator::Alloc`, but our own compute
+    /// stream disables its per-`Run` `SetDeviceFn`, and `OnRunEnd` retires the
+    /// context for another worker's thread to reuse without the ctor — leaving
+    /// that thread on device 0 (`cudaErrorInvalidResourceHandle`). Arena growth
+    /// re-binds by accident, which is why it was intermittent. Not tokio
+    /// migration: each worker is its own `block_on` runtime on a fixed thread.
+    pub fn bind_device(&self) -> Result<(), ModelError> {
+        #[cfg(all(feature = "gpu", target_os = "linux"))]
+        if let Some(ctx) = self.gpu_ctx.as_ref() {
+            ctx.set_device().map_err(|e| {
+                ModelError::Ort(ort::Error::new(format!(
+                    "failed to bind thread to CUDA device: {}",
+                    e
+                )))
+            })?;
+        }
+        Ok(())
     }
 }
 
@@ -199,6 +213,8 @@ impl SharedModelPool {
             }
             info!(
                 n_devices = sets.len(),
+                n_gpus = device_ids.len(),
+                sessions_per_device = SESSIONS_PER_DEVICE,
                 "all GPU model sets loaded successfully"
             );
             sets

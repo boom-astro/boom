@@ -13,6 +13,8 @@ use std::f64::consts::PI;
 const GAUSS_K: f64 = 0.017_202_098_95;
 /// Obliquity is not applied: everything here stays in the ecliptic frame.
 const KEPLER_TOLERANCE: f64 = 1e-12;
+/// Where both the elliptical and hyperbolic solutions go numerically unusable.
+const PARABOLIC_TOLERANCE: f64 = 1e-8;
 const KEPLER_MAX_ITER: usize = 64;
 
 /// Heliocentric osculating elements at `epoch_jd`, as MPCORB distributes them.
@@ -29,8 +31,46 @@ pub struct OrbitalElements {
     pub node: f64,
     /// Argument of perihelion, degrees.
     pub peri: f64,
-    /// Mean anomaly at `epoch_jd`, degrees.
+    /// Mean anomaly at `epoch_jd`, degrees. Meaningless once `e >= 1`.
     pub mean_anomaly: f64,
+    /// Perihelion distance, au. Authoritative: build it, do not field-update it.
+    pub q: f64,
+    /// Time of perihelion passage, JD.
+    pub tp: f64,
+}
+
+impl OrbitalElements {
+    /// Elliptical elements as MPCORB gives them, with `q` and `tp` derived.
+    pub fn elliptical(
+        epoch_jd: f64,
+        a: f64,
+        e: f64,
+        incl: f64,
+        node: f64,
+        peri: f64,
+        mean_anomaly: f64,
+    ) -> Self {
+        Self {
+            epoch_jd,
+            a,
+            e,
+            incl,
+            node,
+            peri,
+            mean_anomaly,
+            q: 0.0,
+            tp: 0.0,
+        }
+        .with_perihelion()
+    }
+
+    /// Fill `q` and `tp` from an elliptical element set that lacks them.
+    pub fn with_perihelion(mut self) -> Self {
+        self.q = self.a * (1.0 - self.e);
+        let n = GAUSS_K / self.a.powf(1.5);
+        self.tp = self.epoch_jd - self.mean_anomaly.to_radians() / n;
+        self
+    }
 }
 
 /// Observing geometry at a given instant.
@@ -42,6 +82,10 @@ pub struct Geometry {
     pub topo_dist: f64,
     /// Sun-object-observer angle, degrees.
     pub phase_angle: f64,
+    /// Degrees from perihelion in (-180, 180], negative inbound.
+    pub true_anomaly: f64,
+    /// Perihelion passage, JD. Per detection because a refreshed orbit moves it.
+    pub perihelion_time: f64,
 }
 
 /// Solve `M = E - e sin E` for the eccentric anomaly, radians.
@@ -61,15 +105,58 @@ pub fn solve_kepler(mean_anomaly: f64, e: f64) -> f64 {
     ecc_anomaly
 }
 
+/// True anomaly at `jd`, radians, by Kepler, Barker or the hyperbolic analogue.
+pub fn true_anomaly(elements: &OrbitalElements, jd: f64) -> f64 {
+    let e = elements.e;
+    let dt = jd - elements.tp;
+
+    if (e - 1.0).abs() < PARABOLIC_TOLERANCE {
+        // Barker's equation, solved by Cardano rather than iteration.
+        let n = GAUSS_K * (2.0 / (elements.q.powi(3))).sqrt() / 2.0;
+        let b = 3.0 * n * dt / 2.0;
+        let w = (b + (b * b + 1.0).sqrt()).cbrt();
+        return 2.0 * (w - 1.0 / w).atan();
+    }
+
+    if e < 1.0 {
+        let a = elements.q / (1.0 - e);
+        let m = GAUSS_K / a.powf(1.5) * dt;
+        let ecc = solve_kepler(m, e);
+        let half = ((1.0 + e) / (1.0 - e)).sqrt() * (ecc / 2.0).tan();
+        return 2.0 * half.atan();
+    }
+
+    let a = elements.q / (e - 1.0);
+    let m = GAUSS_K / a.powf(1.5) * dt;
+    let h = solve_hyperbolic_kepler(m, e);
+    let half = ((e + 1.0) / (e - 1.0)).sqrt() * (h / 2.0).tanh();
+    2.0 * half.atan()
+}
+
+/// Solve `M = e sinh H - H` for the hyperbolic anomaly, radians.
+fn solve_hyperbolic_kepler(m: f64, e: f64) -> f64 {
+    let mut h = if m.abs() > 6.0 {
+        m.signum() * (2.0 * m.abs() / e).ln()
+    } else {
+        m / (e - 1.0)
+    };
+    for _ in 0..KEPLER_MAX_ITER {
+        let delta = (e * h.sinh() - h - m) / (e * h.cosh() - 1.0);
+        h -= delta;
+        if delta.abs() < KEPLER_TOLERANCE {
+            break;
+        }
+    }
+    h
+}
+
 /// Heliocentric ecliptic position at `jd`, au.
 pub fn heliocentric_position(elements: &OrbitalElements, jd: f64) -> [f64; 3] {
-    let n = GAUSS_K / elements.a.powf(1.5);
-    let m = elements.mean_anomaly.to_radians() + n * (jd - elements.epoch_jd);
-    let ecc_anomaly = solve_kepler(m, elements.e);
-
-    // Position in the orbital plane.
-    let x_orb = elements.a * (ecc_anomaly.cos() - elements.e);
-    let y_orb = elements.a * (1.0 - elements.e * elements.e).sqrt() * ecc_anomaly.sin();
+    // Conic equation from the true anomaly, so one path serves every orbit type.
+    let nu = true_anomaly(elements, jd);
+    let r = elements.q * (1.0 + elements.e) / (1.0 + elements.e * nu.cos());
+    let x_orb = r * nu.cos();
+    let y_orb = r * nu.sin();
 
     let (sin_peri, cos_peri) = elements.peri.to_radians().sin_cos();
     let (sin_node, cos_node) = elements.node.to_radians().sin_cos();
@@ -138,6 +225,15 @@ pub fn geometry_at(elements: &OrbitalElements, jd: f64) -> Geometry {
     Geometry {
         helio_dist,
         topo_dist,
+        true_anomaly: {
+            let nu = true_anomaly(elements, jd).to_degrees().rem_euclid(360.0);
+            if nu > 180.0 {
+                nu - 360.0
+            } else {
+                nu
+            }
+        },
+        perihelion_time: elements.tp,
         phase_angle: cos_phase.acos().to_degrees(),
     }
 }
@@ -154,17 +250,101 @@ fn norm(v: &[f64; 3]) -> f64 {
 mod tests {
     use super::*;
 
+    /// Perihelion distance is reached at the perihelion time, for every conic.
+    #[test]
+    fn test_each_conic_reaches_perihelion_at_tp() {
+        let tp = 2_461_000.5;
+        for e in [0.0, 0.5, 0.95, 1.0, 1.5, 3.0] {
+            let el = OrbitalElements {
+                epoch_jd: tp,
+                a: if e < 1.0 { 2.0 / (1.0 - e) } else { 0.0 },
+                e,
+                incl: 10.0,
+                node: 30.0,
+                peri: 60.0,
+                mean_anomaly: 0.0,
+                q: 2.0,
+                tp,
+            };
+            let r = norm(&heliocentric_position(&el, tp));
+            assert!((r - 2.0).abs() < 1e-6, "e={e} gave r={r}");
+            assert!(
+                true_anomaly(&el, tp).abs() < 1e-6,
+                "e={e} is not at perihelion"
+            );
+        }
+    }
+
+    /// A hyperbolic orbit only ever recedes, and never comes back.
+    #[test]
+    fn test_a_hyperbolic_orbit_recedes_forever() {
+        let tp = 2_461_000.5;
+        let el = OrbitalElements {
+            epoch_jd: tp,
+            a: 0.0,
+            e: 2.5,
+            incl: 20.0,
+            node: 45.0,
+            peri: 90.0,
+            mean_anomaly: 0.0,
+            q: 1.5,
+            tp,
+        };
+        let mut previous = 0.0;
+        for days in [0.0, 100.0, 500.0, 2000.0] {
+            let r = norm(&heliocentric_position(&el, tp + days));
+            assert!(r >= previous, "r went backwards at {days} days");
+            previous = r;
+        }
+        assert!(previous > 10.0, "still at {previous} au after 2000 days");
+    }
+
+    /// Equal distance either side of perihelion; a wrong time sign breaks it.
+    #[test]
+    fn test_distance_is_symmetric_about_perihelion() {
+        let tp = 2_461_000.5;
+        for e in [0.7, 1.0, 1.4] {
+            let el = OrbitalElements {
+                epoch_jd: tp,
+                a: if e < 1.0 { 1.2 / (1.0 - e) } else { 0.0 },
+                e,
+                incl: 5.0,
+                node: 0.0,
+                peri: 0.0,
+                mean_anomaly: 0.0,
+                q: 1.2,
+                tp,
+            };
+            for days in [30.0, 200.0] {
+                let before = norm(&heliocentric_position(&el, tp - days));
+                let after = norm(&heliocentric_position(&el, tp + days));
+                assert!(
+                    (before - after).abs() < 1e-6,
+                    "e={e} at {days} days: {before} vs {after}"
+                );
+            }
+        }
+    }
+
+    /// a and M must agree with q and tp, since only the latter propagates.
+    #[test]
+    fn test_perihelion_derivation_round_trips() {
+        let b = main_belt();
+        assert!((b.q - b.a * (1.0 - b.e)).abs() < 1e-12);
+
+        // Half an orbit past tp the object sits at aphelion.
+        let period = 2.0 * PI / (GAUSS_K / b.a.powf(1.5));
+        let r = norm(&heliocentric_position(&b, b.tp + period / 2.0));
+        assert!(
+            (r - b.a * (1.0 + b.e)).abs() < 1e-6,
+            "aphelion was {r}, expected {}",
+            b.a * (1.0 + b.e)
+        );
+    }
+
     /// Roughly main-belt, low eccentricity and inclination.
     fn main_belt() -> OrbitalElements {
-        OrbitalElements {
-            epoch_jd: 2_461_000.5,
-            a: 3.0,
-            e: 0.05,
-            incl: 5.0,
-            node: 120.0,
-            peri: 45.0,
-            mean_anomaly: 10.0,
-        }
+        OrbitalElements::elliptical(2_461_000.5, 3.0, 0.05, 5.0, 120.0, 45.0, 10.0)
     }
 
     #[test]
@@ -181,10 +361,17 @@ mod tests {
 
     #[test]
     fn test_circular_orbit_stays_at_its_semimajor_axis() {
-        let circular = OrbitalElements {
-            e: 0.0,
-            ..main_belt()
-        };
+        let b = main_belt();
+        // Built, not field-updated: overriding e alone would strand q and tp.
+        let circular = OrbitalElements::elliptical(
+            b.epoch_jd,
+            b.a,
+            0.0,
+            b.incl,
+            b.node,
+            b.peri,
+            b.mean_anomaly,
+        );
         for days in [0.0, 100.0, 1000.0, 5000.0] {
             let r = norm(&heliocentric_position(&circular, circular.epoch_jd + days));
             assert!((r - circular.a).abs() < 1e-9, "days={days} r={r}");
@@ -295,15 +482,15 @@ mod horizons_validation {
         vec![
             Case {
                 name: "1 Ceres",
-                elements: OrbitalElements {
-                    epoch_jd: 2_461_200.5,
-                    a: 2.7655526,
-                    e: 0.0796923,
-                    incl: 10.58803,
-                    node: 80.24863,
-                    peri: 73.29420,
-                    mean_anomaly: 274.41935,
-                },
+                elements: OrbitalElements::elliptical(
+                    2_461_200.5,
+                    2.7655526,
+                    0.0796923,
+                    10.58803,
+                    80.24863,
+                    73.29420,
+                    274.41935,
+                ),
                 helio_dist: 2.706853365104,
                 topo_dist: 3.16890538454643,
                 phase_angle: 17.6824,
@@ -312,15 +499,15 @@ mod horizons_validation {
             // error that survived Ceres would show here.
             Case {
                 name: "2 Pallas",
-                elements: OrbitalElements {
-                    epoch_jd: 2_461_200.5,
-                    a: 2.7695590,
-                    e: 0.2307001,
-                    incl: 34.93279,
-                    node: 172.88661,
-                    peri: 310.96993,
-                    mean_anomaly: 254.24963,
-                },
+                elements: OrbitalElements::elliptical(
+                    2_461_200.5,
+                    2.7695590,
+                    0.2307001,
+                    34.93279,
+                    172.88661,
+                    310.96993,
+                    254.24963,
+                ),
                 helio_dist: 2.915730582216,
                 topo_dist: 2.22979772666357,
                 phase_angle: 16.7833,
@@ -348,15 +535,15 @@ mod horizons_validation {
             (
                 Case {
                     name: "433 Eros, 200 days before epoch",
-                    elements: OrbitalElements {
-                        epoch_jd: 2_461_200.5,
-                        a: 1.4582437,
-                        e: 0.2228780,
-                        incl: 10.82855,
-                        node: 304.26797,
-                        peri: 178.91814,
-                        mean_anomaly: 62.51145,
-                    },
+                    elements: OrbitalElements::elliptical(
+                        2_461_200.5,
+                        1.4582437,
+                        0.2228780,
+                        10.82855,
+                        304.26797,
+                        178.91814,
+                        62.51145,
+                    ),
                     helio_dist: 1.298448154570,
                     topo_dist: 0.400169669522,
                     phase_angle: 33.1581,
@@ -366,15 +553,15 @@ mod horizons_validation {
             (
                 Case {
                     name: "433 Eros, 300 days after epoch",
-                    elements: OrbitalElements {
-                        epoch_jd: 2_461_200.5,
-                        a: 1.4582437,
-                        e: 0.2228780,
-                        incl: 10.82855,
-                        node: 304.26797,
-                        peri: 178.91814,
-                        mean_anomaly: 62.51145,
-                    },
+                    elements: OrbitalElements::elliptical(
+                        2_461_200.5,
+                        1.4582437,
+                        0.2228780,
+                        10.82855,
+                        304.26797,
+                        178.91814,
+                        62.51145,
+                    ),
                     helio_dist: 1.700293597970,
                     topo_dist: 2.561134066572,
                     phase_angle: 14.0222,
@@ -384,15 +571,15 @@ mod horizons_validation {
             (
                 Case {
                     name: "99942 Apophis, 200 days before epoch",
-                    elements: OrbitalElements {
-                        epoch_jd: 2_461_200.5,
-                        a: 0.9223592,
-                        e: 0.1911492,
-                        incl: 3.34100,
-                        node: 203.89365,
-                        peri: 126.67957,
-                        mean_anomaly: 175.33040,
-                    },
+                    elements: OrbitalElements::elliptical(
+                        2_461_200.5,
+                        0.9223592,
+                        0.1911492,
+                        3.34100,
+                        203.89365,
+                        126.67957,
+                        175.33040,
+                    ),
                     helio_dist: 0.824595526480,
                     topo_dist: 1.766171027568,
                     phase_angle: 14.2409,
@@ -402,15 +589,15 @@ mod horizons_validation {
             (
                 Case {
                     name: "99942 Apophis, 300 days after epoch",
-                    elements: OrbitalElements {
-                        epoch_jd: 2_461_200.5,
-                        a: 0.9223592,
-                        e: 0.1911492,
-                        incl: 3.34100,
-                        node: 203.89365,
-                        peri: 126.67957,
-                        mean_anomaly: 175.33040,
-                    },
+                    elements: OrbitalElements::elliptical(
+                        2_461_200.5,
+                        0.9223592,
+                        0.1911492,
+                        3.34100,
+                        203.89365,
+                        126.67957,
+                        175.33040,
+                    ),
                     helio_dist: 1.080704644109,
                     topo_dist: 1.129927205505,
                     phase_angle: 53.7417,
