@@ -129,9 +129,8 @@ mod tests {
             body["message"].is_string(),
             "Response should contain message"
         );
-        assert_eq!(
+        assert!(
             body["activation_required"].as_bool().unwrap(),
-            true,
             "Activation should be required"
         );
 
@@ -176,9 +175,8 @@ mod tests {
             body["message"].is_string(),
             "Response should contain message"
         );
-        assert_eq!(
+        assert!(
             body["activation_required"].as_bool().unwrap(),
-            true,
             "Activation should be required"
         );
 
@@ -268,7 +266,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK, "Activation should succeed");
 
         let body = read_json_response(resp).await;
-        assert_eq!(body["activated"].as_bool().unwrap(), true);
+        assert!(body["activated"].as_bool().unwrap());
         assert!(
             body["password"].is_string(),
             "Password should be returned on activation"
@@ -733,7 +731,7 @@ mod tests {
         .await;
 
         let req = test::TestRequest::get()
-            .uri(&format!("/babamul/surveys/lsst/objects/{}", &object_id))
+            .uri(&format!("/babamul/surveys/lsst/objects/{}", object_id))
             .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
             .to_request();
 
@@ -804,7 +802,7 @@ mod tests {
         .await;
 
         let req = test::TestRequest::get()
-            .uri(&format!("/babamul/surveys/ztf/objects/{}", &object_id))
+            .uri(&format!("/babamul/surveys/ztf/objects/{}", object_id))
             .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
             .to_request();
 
@@ -1453,9 +1451,8 @@ mod tests {
         );
 
         let body = read_json_response(resp).await;
-        assert_eq!(
+        assert!(
             body["deleted"].as_bool().unwrap(),
-            true,
             "Response should indicate deletion"
         );
         assert!(
@@ -3010,7 +3007,7 @@ mod tests {
         // Invalid (wrong) token: 400
         let id2 = uuid::Uuid::new_v4().to_string();
         let email2 = format!("test+{}@babamul.example.com", id2);
-        col.insert_one(&insert_user(&id2, &email2, "invalidtok"))
+        col.insert_one(insert_user(&id2, &email2, "invalidtok"))
             .await
             .unwrap();
         ids_to_cleanup.push(id2.clone());
@@ -3048,7 +3045,7 @@ mod tests {
         // Correct token but wrong email: 400
         let id3 = uuid::Uuid::new_v4().to_string();
         let email3 = format!("test+{}@babamul.example.com", id3);
-        col.insert_one(&insert_user(&id3, &email3, "wrongemail"))
+        col.insert_one(insert_user(&id3, &email3, "wrongemail"))
             .await
             .unwrap();
         ids_to_cleanup.push(id3.clone());
@@ -3081,7 +3078,7 @@ mod tests {
         // Expired token: 400
         let id4 = uuid::Uuid::new_v4().to_string();
         let email4 = format!("test+{}@babamul.example.com", id4);
-        col.insert_one(&insert_user(&id4, &email4, "expiredtok"))
+        col.insert_one(insert_user(&id4, &email4, "expiredtok"))
             .await
             .unwrap();
         ids_to_cleanup.push(id4.clone());
@@ -3157,7 +3154,7 @@ mod tests {
         // Weak / non-complex passwords: 400
         let id5 = uuid::Uuid::new_v4().to_string();
         let email5 = format!("test+{}@babamul.example.com", id5);
-        col.insert_one(&insert_user(&id5, &email5, "weakpw"))
+        col.insert_one(insert_user(&id5, &email5, "weakpw"))
             .await
             .unwrap();
         ids_to_cleanup.push(id5.clone());
@@ -3199,7 +3196,7 @@ mod tests {
         // Token is single-use
         let id6 = uuid::Uuid::new_v4().to_string();
         let email6 = format!("test+{}@babamul.example.com", id6);
-        col.insert_one(&insert_user(&id6, &email6, "singleuse"))
+        col.insert_one(insert_user(&id6, &email6, "singleuse"))
             .await
             .unwrap();
         ids_to_cleanup.push(id6.clone());
