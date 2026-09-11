@@ -22,9 +22,7 @@ static REQUESTS: LazyLock<Counter<u64>> = LazyLock::new(|| {
         .build()
 });
 
-/// Distinct id used for unauthenticated Babamul traffic (signup, activation,
-/// public stats). These events are flagged so PostHog does not build a person
-/// profile from them; the id only exists because PostHog requires one.
+/// PostHog requires a distinct id even for events that must not create a person.
 const ANONYMOUS_DISTINCT_ID: &str = "babamul-anonymous";
 
 pub async fn request_metrics_middleware(
@@ -35,35 +33,21 @@ pub async fn request_metrics_middleware(
     let api = if is_babamul { "babamul" } else { "boom" };
     let method = req.method().as_str().to_string();
 
-    // Capture request-side context before the request is consumed by `next`.
     let analytics = req
         .app_data::<web::Data<AnalyticsClient>>()
         .map(|client| client.as_ref().clone());
     let client_info = is_babamul.then(|| ClientInfo::from_request(&req));
-    // Raw-path fallback for the (rare) `Err` case below, where actix hands
-    // back an `Error` with no request attached, so there's no route pattern to
-    // read. Must be a plain `String`, not a cloned `HttpRequest`/`ServiceRequest`
-    // handle: actix's `Scope` router calls `HttpRequest::match_info_mut()`
-    // while routing `req` inside `next.call()`, which does
-    // `Rc::get_mut(&mut self.inner).unwrap()` and panics if any other clone of
-    // that `HttpRequest` is alive at the time — as a prior version of this
-    // middleware did by holding `req.request().clone()` across the `.await`.
+    // Plain String: an HttpRequest clone alive across the await panics actix's Scope router.
     let path = req.path().to_string();
     let started_at = Instant::now();
 
     let response = next.call(req).await;
-    // On the error path actix turns the `Error` into a response later, so read
-    // the status the client will actually see rather than assuming 500 — the
-    // auth middleware rejects bad tokens with `Err(401)`, which is a status
-    // worth getting right.
     let status_code = match response.as_ref() {
         Ok(service_response) => service_response.status().as_u16(),
         Err(error) => error.as_response_error().status_code().as_u16(),
     };
 
-    // `client` is bounded to a handful of buckets by `parse_user_agent`, so it
-    // is safe to carry as a metric attribute and lets Grafana separate Python
-    // package traffic from the web app without going to PostHog.
+    // Bounded by parse_user_agent: an unbounded value here would explode metric cardinality.
     let attrs = [
         KeyValue::new("api", api),
         KeyValue::new("method", method.clone()),
@@ -78,64 +62,48 @@ pub async fn request_metrics_middleware(
     ];
     REQUESTS.add(1, &attrs);
 
-    // Report Babamul API usage to PostHog. Only Babamul traffic is captured —
-    // the main BOOM API is internal, so it has no product-analytics story.
-    //
-    // Deliberately emitted for both `Ok` and `Err` outcomes: the auth
-    // middleware rejects expired or invalid tokens by returning `Err`, and
-    // those 401s are exactly the signal that tells us a user's personal access
-    // token has lapsed. Capturing only `Ok` would hide them.
-    if let (Some(analytics), Some(client_info)) = (analytics, client_info) {
-        if analytics.is_enabled() {
-            // Only the `Ok` branch has a `ServiceResponse` to read a request
-            // back from — by this point dispatch has fully completed, so
-            // borrowing its request here (not cloning it earlier) never races
-            // the router's own mutable access. Prefer the registered route
-            // pattern over the raw path so per-object endpoints don't create
-            // one PostHog property value per object id. The auth middleware
-            // injects the user on success, so its presence in extensions is
-            // exactly "this request was authenticated".
-            let (endpoint, user) = match response.as_ref() {
-                Ok(service_response) => {
-                    let request = service_response.request();
-                    (
-                        request
-                            .match_pattern()
-                            .unwrap_or_else(|| request.path().to_string()),
-                        request
-                            .extensions()
-                            .get::<BabamulUser>()
-                            .map(UserIdentity::claim),
-                    )
-                }
-                Err(_) => (path.clone(), None),
-            };
+    let (Some(analytics), Some(client_info)) = (analytics, client_info) else {
+        return response;
+    };
+    if !analytics.is_enabled() {
+        return response;
+    }
 
-            let enqueued = analytics.capture(build_request_event(
-                &endpoint,
-                &method,
-                status_code,
-                started_at.elapsed().as_millis() as u64,
-                user.as_ref(),
-                &client_info,
-            ));
-
-            // A dropped event takes the `$set` with it, so hand the slot back
-            // rather than leave the person un-refreshed for a whole TTL.
-            if !enqueued {
-                if let Some(user) = user.as_ref().filter(|user| user.person.is_some()) {
-                    release_person_property_refresh(&user.id);
-                }
-            }
+    // Route pattern, not the raw path: object ids would make one property value per object.
+    let (endpoint, user) = match response.as_ref() {
+        Ok(service_response) => {
+            let request = service_response.request();
+            (
+                request
+                    .match_pattern()
+                    .unwrap_or_else(|| request.path().to_string()),
+                request
+                    .extensions()
+                    .get::<BabamulUser>()
+                    .map(UserIdentity::claim),
+            )
         }
+        // Still captured: the 401 from a rejected token is the only sign that one lapsed.
+        Err(_) => (path, None),
+    };
+
+    let enqueued = analytics.capture(build_request_event(
+        &endpoint,
+        &method,
+        status_code,
+        started_at.elapsed().as_millis() as u64,
+        user.as_ref(),
+        &client_info,
+    ));
+
+    // A dropped event takes the `$set` with it, so give the hourly slot back.
+    if let Some(user) = user.as_ref().filter(|u| !enqueued && u.person.is_some()) {
+        release_person_property_refresh(&user.id);
     }
 
     response
 }
 
-/// Who the request resolved to: the id that merges browser, API and Kafka
-/// activity onto one PostHog person, plus the `email` and `username` that make
-/// that person identifiable in the PostHog UI, on the requests that carry them.
 struct UserIdentity {
     id: String,
     person: Option<PersonProperties>,
@@ -147,8 +115,7 @@ struct PersonProperties {
 }
 
 impl UserIdentity {
-    /// Claims the person-property slot as it reads, so `email` and `username`
-    /// are cloned only on the one request per window that sends them.
+    /// Also claims the process-wide person-property slot, once per user per TTL.
     fn claim(user: &BabamulUser) -> Self {
         let person = claim_person_property_refresh(&user.id).then(|| PersonProperties {
             email: user.email.clone(),
@@ -161,24 +128,13 @@ impl UserIdentity {
     }
 }
 
-/// How long a user's person properties stay fresh before a request re-sends
-/// them. Email and username change rarely, so an hour is far below the rate at
-/// which they go stale and far above the rate at which a browser polls.
 const PERSON_PROPERTY_TTL: Duration = Duration::from_secs(60 * 60);
 
-/// Last time each user's person properties rode along with a request.
-///
-/// Per-process and deliberately not persisted: a restart re-sending one `$set`
-/// per user costs nothing, and the point is only to keep a polling session from
-/// updating the same unchanged person on every request.
+/// Per-process and deliberately not persisted: a restart costs one extra `$set` per user.
 static PERSON_PROPERTIES_SENT: LazyLock<Mutex<HashMap<String, Instant>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// Whether this request should carry the user's person properties, claiming the
-/// slot if so.
-///
-/// A poisoned lock means some other thread panicked mid-update; sending the
-/// properties again is harmless, so this reports `true` rather than propagating.
+/// A poisoned lock reports `true`: re-sending the properties is harmless.
 fn claim_person_property_refresh(user_id: &str) -> bool {
     let now = Instant::now();
     let Ok(mut sent) = PERSON_PROPERTIES_SENT.lock() else {
@@ -192,24 +148,18 @@ fn claim_person_property_refresh(user_id: &str) -> bool {
         return false;
     }
 
-    // Drop everyone whose entry has aged out, so the map tracks active users
-    // rather than every user the process has ever served.
+    // Without the retain the map grows to every user the process has ever served.
     sent.retain(|_, last| now.duration_since(*last) < PERSON_PROPERTY_TTL);
     sent.insert(user_id.to_string(), now);
     true
 }
 
-/// Hand a claimed slot back.
 fn release_person_property_refresh(user_id: &str) {
     if let Ok(mut sent) = PERSON_PROPERTIES_SENT.lock() {
         sent.remove(user_id);
     }
 }
 
-/// Assemble the `babamul_api_request` event.
-///
-/// Split out from the middleware so the property shape can be tested without
-/// standing up an actix pipeline.
 fn build_request_event(
     endpoint: &str,
     method: &str,
@@ -235,29 +185,23 @@ fn build_request_event(
     .with_opt("python_version", client_info.python_version.as_deref())
     .with_opt("client_os", client_info.os.as_deref());
 
-    // Unauthenticated traffic must not create person profiles in PostHog, while
-    // authenticated traffic periodically `$set`s email and username so the
-    // person is legible even for a user who only ever uses the Python package.
-    match user.map(|user| user.person.as_ref()) {
-        Some(Some(person)) => event.with(
+    // Unauthenticated traffic must not create person profiles in PostHog.
+    let Some(user) = user else {
+        return event.anonymous();
+    };
+    match &user.person {
+        Some(person) => event.with(
             "$set",
             serde_json::json!({
                 "email": person.email,
                 "username": person.username,
             }),
         ),
-        Some(None) => event,
-        None => event.anonymous(),
+        None => event,
     }
 }
 
-/// Non-identifying facts about the caller, taken from request headers.
-///
-/// This is everything we learn about *how* the API is being called. The
-/// Babamul Python package sends a `User-Agent` like
-/// `babamul-python/0.2.0 (Python/3.12.1; Linux)`; anything else is reported
-/// generically so we can still separate package traffic from raw HTTP clients
-/// and from the web app.
+/// Deliberately non-identifying; see the privacy stance in `docs/analytics.md`.
 struct ClientInfo {
     client: Option<String>,
     client_version: Option<String>,
@@ -274,9 +218,7 @@ impl ClientInfo {
             .and_then(|value| value.to_str().ok())
             .unwrap_or("");
 
-        // Personal access tokens are the package's auth path; JWTs come from
-        // the web app's login flow. This distinguishes programmatic from
-        // browser usage even for callers that send no useful User-Agent.
+        // `bbml_` is the personal-access-token prefix; any other Bearer is a client JWT.
         let auth_method = match req
             .headers()
             .get("Authorization")
@@ -293,12 +235,7 @@ impl ClientInfo {
     }
 }
 
-/// Parse a `User-Agent` into client name/version plus optional environment
-/// detail from the parenthesized comment.
-///
-/// Recognizes the Babamul package's own format and degrades gracefully:
-/// browsers are bucketed as `browser`, anything else as `other`. We never
-/// store the raw string, so a user cannot be fingerprinted by an unusual one.
+/// Never returns the raw string: an unusual `User-Agent` must not become a fingerprint.
 fn parse_user_agent(user_agent: &str) -> ClientInfo {
     let mut info = ClientInfo {
         client: None,
@@ -313,24 +250,16 @@ fn parse_user_agent(user_agent: &str) -> ClientInfo {
         return info;
     }
 
-    // `name/version (comment)` — the product token is everything up to the
-    // first space or opening parenthesis.
-    let product = user_agent
-        .split(['(', ' '])
-        .next()
-        .unwrap_or("")
-        .trim()
-        .to_string();
+    let product = user_agent.split(['(', ' ']).next().unwrap_or("").trim();
     let (name, version) = match product.split_once('/') {
-        Some((name, version)) => (name.to_string(), Some(version.to_string())),
+        Some((name, version)) => (name, Some(version.to_string())),
         None => (product, None),
     };
 
     if name == "babamul-python" {
-        info.client = Some(name);
+        info.client = Some(name.to_string());
         info.client_version = version;
 
-        // Comment is `Python/<version>; <os>`.
         if let Some(comment) = user_agent
             .split_once('(')
             .and_then(|(_, rest)| rest.split_once(')'))
@@ -348,7 +277,6 @@ fn parse_user_agent(user_agent: &str) -> ClientInfo {
     } else if user_agent.contains("Mozilla") {
         info.client = Some("browser".to_string());
     } else if !name.is_empty() {
-        // Known non-browser tooling worth telling apart from the package.
         let bucket = match name.to_ascii_lowercase() {
             n if n.starts_with("python-httpx") => "httpx",
             n if n.starts_with("python-requests") => "requests",
@@ -365,15 +293,7 @@ fn parse_user_agent(user_agent: &str) -> ClientInfo {
 mod tests {
     use super::*;
 
-    /// Regression test for a production incident: every request panicked
-    /// because the middleware held `req.request().clone()` (an extra `Rc`
-    /// reference) alive across `next.call(req).await`. actix's `Scope` router
-    /// calls `HttpRequest::match_info_mut()` — `Rc::get_mut(...).unwrap()` —
-    /// while routing inside that `.await`, which panics whenever another
-    /// clone of the same `HttpRequest` is alive. Since every route in the API
-    /// lives inside a `web::scope(...)`, that made every request — including
-    /// the `/` health check — panic the worker handling it, so the container
-    /// never passed its healthcheck.
+    /// Regression: an HttpRequest clone alive across the await panicked actix's Scope router.
     #[actix_web::test]
     async fn middleware_survives_nested_scope_routing() {
         use actix_web::{middleware::from_fn, test, web, App, HttpResponse};
@@ -440,9 +360,6 @@ mod tests {
         assert!(info.client_version.is_none());
     }
 
-    /// A rejected token never reaches a handler — the auth middleware returns
-    /// `Err(401)`. That event must still be captured, and captured as an
-    /// unauthenticated one, or expired personal access tokens are invisible.
     #[test]
     fn rejected_requests_are_captured_as_anonymous() {
         let mut client_info = parse_user_agent("babamul-python/0.2.0 (Python/3.12.1; Linux)");
@@ -454,14 +371,11 @@ mod tests {
         assert_eq!(event.properties.get("status_code").unwrap(), 401);
         assert_eq!(event.properties.get("success").unwrap(), false);
         assert_eq!(event.properties.get("authenticated").unwrap(), false);
-        // Still attributable to the package, which is what makes the 401
-        // actionable.
         assert_eq!(event.properties.get("client").unwrap(), "babamul-python");
         assert_eq!(
             event.properties.get("auth_method").unwrap(),
             "personal_access_token"
         );
-        // Must not create a person profile for the anonymous bucket.
         assert_eq!(
             event.properties.get("$process_person_profile").unwrap(),
             false
@@ -502,8 +416,6 @@ mod tests {
         assert!(!event.properties.contains_key("$process_person_profile"));
     }
 
-    /// The throttled request is still a fully attributed event — only the
-    /// person update is skipped.
     #[test]
     fn throttled_requests_keep_their_identity_but_drop_person_properties() {
         let client_info = parse_user_agent("babamul-python/0.2.0 (Python/3.12.1; Linux)");
