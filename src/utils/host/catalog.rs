@@ -130,6 +130,11 @@ fn isophotal_semi_major_for(
     isophotal_semi_major(ellipse.a, ellipse.axis_ratio, n, m_tot, config.isophote_mag)
 }
 
+/// A Legacy redshift column, or `None` where it holds the -99 that means absent.
+fn legacy_redshift(doc: &Document, key: &str) -> Option<f64> {
+    opt_f64(doc, key).filter(|z| *z > -0.5)
+}
+
 pub fn galaxy_from_ls_dr10(doc: &Document, config: &HostGalaxyConfig) -> Option<GalaxyCandidate> {
     let ra = opt_f64(doc, "ra")?;
     let dec = opt_f64(doc, "dec")?;
@@ -168,14 +173,23 @@ pub fn galaxy_from_ls_dr10(doc: &Document, config: &HostGalaxyConfig) -> Option<
         None => false,
     };
 
+    // Spectroscopic where Legacy has one; its error is negligible beside a photo-z.
+    let (redshift, redshift_err) = match legacy_redshift(doc, "z_spec") {
+        Some(z) => (Some(z), None),
+        None => (
+            legacy_redshift(doc, "z_phot_median"),
+            legacy_redshift(doc, "z_phot_std"),
+        ),
+    };
+
     Some(GalaxyCandidate {
         ra,
         dec,
         a_arcsec: ellipse.a,
         b_arcsec: ellipse.b,
         pa_deg: ellipse.pa_rad.to_degrees(),
-        redshift: opt_f64(doc, "z"),
-        redshift_err: opt_f64(doc, "z_unc"),
+        redshift,
+        redshift_err,
         dist_mpc: None,
         dist_mpc_method: None,
         mag: None,
@@ -239,6 +253,17 @@ pub fn collect_galaxies(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn test_legacy_redshift_rejects_the_absent_sentinel() {
+        let doc = doc! { "z_spec": -99.0, "z_phot_median": 0.21, "z_phot_std": -99.0 };
+        assert_eq!(legacy_redshift(&doc, "z_spec"), None);
+        assert_eq!(legacy_redshift(&doc, "z_phot_median"), Some(0.21));
+        assert_eq!(legacy_redshift(&doc, "z_phot_std"), None);
+        assert_eq!(legacy_redshift(&doc, "missing"), None);
+    }
+
     use super::*;
     use mongodb::bson::doc;
     use std::collections::HashMap;
