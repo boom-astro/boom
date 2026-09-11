@@ -13,7 +13,10 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  TOLERANCE_PERCENTAGE: 5.0 # 5% tolerance for wall time increase
+  # Wall time on shared runners varies by well over 10% between identical runs,
+  # so this is set to catch a real regression rather than to police small
+  # changes; the exact figure is reported on every PR either way.
+  TOLERANCE_PERCENTAGE: 25.0
   # If true, data required to bootstrap MongoDB and the Kafka producer
   # are deleted before we start processing to save storage space.
   # This is useful for CI environments where storage is limited.
@@ -188,6 +191,10 @@ jobs:
             sha.txt
             baseline_link.txt
       - name: Fail if wall time increased too much (PR only)
+        # Without this the gate also runs on main, where a slow run then fails
+        # and so cannot become the next baseline -- leaving every later PR
+        # measured against an ever staler, ever faster reference.
+        if: github.event_name == 'pull_request'
         run: |
           TOL=${{ env.TOLERANCE_PERCENTAGE }}
           while IFS=: read -r type diff; do
