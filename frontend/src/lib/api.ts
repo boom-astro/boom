@@ -1,5 +1,3 @@
-import { resetUser } from "@/lib/analytics";
-
 // Always use the same-origin proxy; production should map /api to the backend via the web server
 const API_BASE = "/api/babamul";
 
@@ -89,10 +87,6 @@ function saveToken(body: { access_token: string; token_type?: string; expires_in
 export function logout() {
   localStorage.removeItem(TOKEN_KEY);
   localStorage.removeItem(USERNAME_KEY);
-  // Clearing the token without clearing PostHog leaves the next visitor on this
-  // browser captured as the account that just signed out, and leaves the stored
-  // `$user_state` identified, which is what stops the next `identify` merging.
-  resetUser();
 }
 
 export function getTokenRecord(): TokenRecord | null {

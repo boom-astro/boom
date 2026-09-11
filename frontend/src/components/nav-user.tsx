@@ -7,6 +7,7 @@ import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { SidebarMenu, SidebarMenuButton, SidebarMenuItem, useSidebar } from "@/components/ui/sidebar"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
+import * as analytics from "@/lib/analytics"
 import api from "@/lib/api"
 import useAppStore, { ensureProfileLoaded } from "@/lib/store"
 
@@ -52,6 +53,9 @@ export function NavUser() {
 
   function handleLogout() {
     api.logout()
+    // Not in `api.logout()`: that also runs on every 401, where a reset would
+    // mint a fresh anonymous person per failed request.
+    analytics.resetUser()
     clearProfile()
     navigate('/')
   }
