@@ -174,10 +174,11 @@ impl AnalyticsClient {
         client
     }
 
-    /// Enqueue an event. Never blocks and never fails the caller.
-    pub fn capture(&self, event: AnalyticsEvent) {
+    /// Enqueue an event, reporting whether it made it onto the queue. Never
+    /// blocks and never fails the caller.
+    pub fn capture(&self, event: AnalyticsEvent) -> bool {
         let Some(inner) = self.inner.as_ref() else {
-            return;
+            return false;
         };
 
         // Drop rather than apply backpressure to an in-flight API request. The
@@ -186,7 +187,7 @@ impl AnalyticsClient {
         // a closed one means the flush task died and analytics are gone until
         // restart.
         let (reason, message) = match inner.tx.try_send(event) {
-            Ok(()) => return,
+            Ok(()) => return true,
             Err(mpsc::error::TrySendError::Full(_)) => (
                 "queue_full",
                 "PostHog analytics queue is full; dropping events. \
@@ -206,6 +207,7 @@ impl AnalyticsClient {
         if dropped == 1 || dropped % 1000 == 0 {
             tracing::warn!(dropped, "{}", message);
         }
+        false
     }
 }
 

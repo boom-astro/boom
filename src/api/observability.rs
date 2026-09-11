@@ -115,7 +115,7 @@ pub async fn request_metrics_middleware(
                 .as_ref()
                 .is_some_and(|user| claim_person_property_refresh(&user.id));
 
-            analytics.capture(build_request_event(
+            let enqueued = analytics.capture(build_request_event(
                 &endpoint,
                 &method,
                 status_code,
@@ -124,6 +124,14 @@ pub async fn request_metrics_middleware(
                 refresh_person,
                 &client_info,
             ));
+
+            // A dropped event takes the `$set` with it, so hand the slot back
+            // rather than leave the person un-refreshed for a whole TTL.
+            if refresh_person && !enqueued {
+                if let Some(user) = user.as_ref() {
+                    release_person_property_refresh(&user.id);
+                }
+            }
         }
     }
 
@@ -185,6 +193,13 @@ fn claim_person_property_refresh(user_id: &str) -> bool {
     sent.retain(|_, last| now.duration_since(*last) < PERSON_PROPERTY_TTL);
     sent.insert(user_id.to_string(), now);
     true
+}
+
+/// Hand a claimed slot back.
+fn release_person_property_refresh(user_id: &str) {
+    if let Ok(mut sent) = PERSON_PROPERTIES_SENT.lock() {
+        sent.remove(user_id);
+    }
 }
 
 /// Assemble the `babamul_api_request` event.
@@ -519,5 +534,15 @@ mod tests {
         // A different user is unaffected by another's claim.
         assert!(claim_person_property_refresh("refresh-window-b"));
         assert!(!claim_person_property_refresh("refresh-window-b"));
+    }
+
+    #[test]
+    fn a_released_claim_lets_the_next_request_carry_the_properties() {
+        assert!(claim_person_property_refresh("refresh-release"));
+        assert!(!claim_person_property_refresh("refresh-release"));
+
+        release_person_property_refresh("refresh-release");
+
+        assert!(claim_person_property_refresh("refresh-release"));
     }
 }
