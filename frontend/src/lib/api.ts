@@ -281,7 +281,7 @@ function normalizeProfile(wire: ProfileWire): Profile {
   // `identify(undefined)`. Having neither name nor address is not a profile.
   if (!wire || (typeof wire.username !== "string" && typeof wire.email !== "string")) return null;
   const { id, _id, ...rest } = wire;
-  return { ...rest, id: id ?? _id };
+  return { ...rest, id: id || _id || undefined };
 }
 
 export async function fetchProfile(): Promise<Profile> {

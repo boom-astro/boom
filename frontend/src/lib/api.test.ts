@@ -136,6 +136,19 @@ describe("fetchProfile", () => {
     expect(await fetchProfile()).toBeNull()
   })
 
+  it("treats an empty id as no id", async () => {
+    // posthog-js rejects a blank distinct_id silently.
+    const fetchMock = vi.fn(async () =>
+      jsonResponse({
+        message: "success",
+        data: { id: "", username: "ada", email: "ada@example.org", created_at: 0 },
+      })
+    )
+    vi.stubGlobal("fetch", fetchMock)
+
+    expect((await fetchProfile())?.id).toBeUndefined()
+  })
+
   it("still accepts the legacy `_id` spelling", async () => {
     const fetchMock = vi.fn(async () =>
       jsonResponse({
