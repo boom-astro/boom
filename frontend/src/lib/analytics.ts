@@ -122,16 +122,18 @@ export function setUserProperties(properties: Record<string, unknown>) {
  * and `identify` skips its `distinct_id` switch when handed the registered
  * `__alias`.
  *
- * `username` gates that: an alias is irreversible, so it is claimed only when
- * the id being replaced is the one this same account was identified under —
- * never a distinct_id belonging to whoever used the browser before.
+ * `username` and `email` gate that: an alias is irreversible, so it is claimed
+ * only when the id being replaced is one this same account was identified
+ * under, never a distinct_id belonging to whoever used the browser before. Both
+ * count, because the old chain was `id ?? username ?? email`.
  */
 export function identifyUser(userId: string, email?: string, username?: string) {
   const previousId = posthog.get_distinct_id();
   posthog.identify(userId, {
     email,
   });
-  if (username && previousId === username && previousId !== userId) {
+  const vouchedFor = !!previousId && (previousId === username || previousId === email);
+  if (vouchedFor && previousId !== userId) {
     posthog.alias(userId, previousId);
   }
 }

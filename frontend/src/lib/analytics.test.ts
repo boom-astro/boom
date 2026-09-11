@@ -43,6 +43,14 @@ describe("identifyUser", () => {
     )
   })
 
+  it("aliases the email the account was previously identified under", () => {
+    mocked.get_distinct_id.mockReturnValue("ada@example.org")
+
+    identifyUser("68f0c1a2b3c4d5e6f7a8b9c0", "ada@example.org", "ada")
+
+    expect(mocked.alias).toHaveBeenCalledWith("68f0c1a2b3c4d5e6f7a8b9c0", "ada@example.org")
+  })
+
   it("leaves a stranger's distinct id alone", () => {
     // A shared browser: the id on record belongs to whoever signed in last, not
     // to this account, and an alias would irreversibly merge two real people.
