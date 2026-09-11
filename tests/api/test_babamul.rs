@@ -1553,7 +1553,6 @@ mod tests {
         assert_eq!(body["data"]["name"].as_str().unwrap(), "Ada Lovelace");
         assert_eq!(stored_name().await.as_deref(), Some("Ada Lovelace"));
 
-        // It comes back on the profile the client reads.
         let resp = test::call_service(
             &app,
             test::TestRequest::get()

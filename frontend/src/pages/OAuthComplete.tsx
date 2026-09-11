@@ -9,10 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { SignInError } from "@/components/sign-in-error";
 
-/**
- * Finishes a social sign-in whose provider gave us no email address, ORCID being the common case.
- * Parameters arrive in the URL fragment, which browsers never transmit.
- */
+/** Parameters arrive in the URL fragment, which browsers never transmit. */
 export default function OAuthComplete() {
   const navigate = useNavigate();
   const location = useLocation();
