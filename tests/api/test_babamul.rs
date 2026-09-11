@@ -1823,6 +1823,15 @@ mod tests {
             test_user.user.email,
             "Profile should return correct user email"
         );
+        assert_eq!(
+            profile_body["data"]["id"].as_str().unwrap(),
+            test_user.user.id,
+            "Profile should return the user id as `id`, which is what the web client identifies on"
+        );
+        assert!(
+            profile_body["data"]["_id"].is_null(),
+            "Profile should no longer send the legacy `_id` spelling"
+        );
 
         // Test creating token with empty name
         let req = test::TestRequest::post()
