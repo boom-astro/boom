@@ -1,3 +1,4 @@
+pub mod comets;
 pub mod cutouts;
 pub mod data;
 pub mod db;
