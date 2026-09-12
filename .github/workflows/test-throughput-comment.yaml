@@ -60,5 +60,5 @@ jobs:
             Throughput results (`${{ steps.payload.outputs.sha }}`):
             ${{ steps.payload.outputs.table }}
 
-            Baseline run: ${{ steps.payload.outputs.baseline_link }}
+            Baseline runs: ${{ steps.payload.outputs.baseline_link }}
           edit-mode: replace
