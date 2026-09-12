@@ -20,6 +20,8 @@ env:
   # are deleted before we start processing to save storage space.
   # This is useful for CI environments where storage is limited.
   LOW_STORAGE: true
+  # The baseline is the median wall time over this many successful main runs.
+  BASELINE_RUNS: 5
   # GPU is never available on CI runners; always run CPU-only.
   BOOM_GPU__ENABLED: 'false'
 
@@ -104,75 +106,84 @@ jobs:
         with:
           name: throughput-logs-s3
           path: ./s3/current
-      - name: Resolve baseline run
+      - name: Download baseline logs
         id: baseline
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # The baseline is the artifacts from the most recent *successful* run
-          # of this workflow on main (the same selection dawidd6 makes by
-          # default). Resolve it explicitly so we can both pin the downloads
-          # below to it and link to it from the PR comment, guaranteeing the
-          # link matches the artifacts actually used.
-          run_id=$(gh run list --repo "$GITHUB_REPOSITORY" \
+          #!/usr/bin/env bash
+          set -euo pipefail
+          # Wall time on the shared runners swings by more than 30% from run to
+          # run, so a single run makes a coin-flip baseline; take the median over
+          # the last few successful main runs, and link every run it covers.
+          links=()
+          while read -r run_id; do
+            downloaded=0
+            for type in mongo s3; do
+              if gh run download "$run_id" --repo "$GITHUB_REPOSITORY" \
+                --name "throughput-logs-$type" --dir "./$type/baseline/$run_id"; then
+                downloaded=1
+              else
+                echo "::warning::no $type logs on run $run_id"
+              fi
+            done
+            if [ "$downloaded" -eq 1 ]; then
+              links+=("[\`$run_id\`](https://github.com/$GITHUB_REPOSITORY/actions/runs/$run_id)")
+            fi
+          done < <(gh run list --repo "$GITHUB_REPOSITORY" \
             --workflow test-throughput.yaml --branch main --status success \
-            --limit 1 --json databaseId --jq '.[0].databaseId // empty')
-          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
-          if [ -n "$run_id" ]; then
-            echo "link=[\`$run_id\`](https://github.com/$GITHUB_REPOSITORY/actions/runs/$run_id)" >> "$GITHUB_OUTPUT"
-          else
+            --limit "$BASELINE_RUNS" --json databaseId --jq '.[].databaseId')
+          if [ ${#links[@]} -eq 0 ]; then
             echo "link=_no successful main run found_" >> "$GITHUB_OUTPUT"
+          else
+            printf -v joined '%s, ' "${links[@]}"
+            echo "link=${joined%, }" >> "$GITHUB_OUTPUT"
           fi
-      - name: Download Mongo baseline logs
-        if: steps.baseline.outputs.run_id != ''
-        uses: dawidd6/action-download-artifact@v11
-        with:
-          run_id: ${{ steps.baseline.outputs.run_id }}
-          name: throughput-logs-mongo
-          path: ./mongo/baseline
-          if_no_artifact_found: warn
-        continue-on-error: true
-      - name: Download S3 baseline logs
-        if: steps.baseline.outputs.run_id != ''
-        uses: dawidd6/action-download-artifact@v11
-        with:
-          run_id: ${{ steps.baseline.outputs.run_id }}
-          name: throughput-logs-s3
-          path: ./s3/baseline
-          if_no_artifact_found: warn
-        continue-on-error: true
       - name: Aggregate and compare results
         env:
           BASELINE_LINK: ${{ steps.baseline.outputs.link }}
         run: |
           #!/usr/bin/env bash
           set -euo pipefail
+          baseline_median() {
+            local type=$1 n
+            local -a values=()
+            mapfile -t values < <(find "./$type/baseline" -name wall_time.txt \
+              -exec awk 'FNR == 1 { print $1 }' {} + 2>/dev/null | LC_ALL=C sort -n)
+            n=${#values[@]}
+            if [ "$n" -eq 0 ]; then
+              echo "N/A"
+            elif [ $((n % 2)) -eq 1 ]; then
+              echo "${values[n / 2]}"
+            else
+              echo "scale=1; (${values[n / 2 - 1]} + ${values[n / 2]}) / 2" | bc
+            fi
+          }
+
           make_row() {
             local type=$1
             local current_file=$2
-            local baseline_file=$3
             local current baseline percentage_diff
             if [ -f "$current_file" ]; then
               current=$(cat "$current_file")
             else
               current="N/A"
             fi
-            if [ -f "$baseline_file" ]; then
-              baseline=$(cat "$baseline_file")
-              percentage_diff=$(echo "scale=2; (($current - $baseline) / $baseline) * 100" | bc)
-            else
-              baseline="N/A"
+            baseline=$(baseline_median "$type")
+            if [ "$current" = "N/A" ] || [ "$baseline" = "N/A" ]; then
               percentage_diff="N/A"
+            else
+              percentage_diff=$(echo "scale=2; (($current - $baseline) / $baseline) * 100" | bc)
             fi
             echo "| $type | $current | $baseline | $percentage_diff% |"
             # Export for fail check
             echo "$type:$percentage_diff" >> results.txt
           }
 
-          echo "| Storage | New wall time | Baseline wall time | Difference |" > table.md
-          echo "| ------- | ------------- | ------------------ | ---------- |" >> table.md
-          make_row "mongo" ./mongo/current/boom-*/wall_time.txt ./mongo/baseline/boom-*/wall_time.txt >> table.md
-          make_row "s3" ./s3/current/boom-*/wall_time.txt ./s3/baseline/boom-*/wall_time.txt >> table.md
+          echo "| Storage | New wall time | Baseline median | Difference |" > table.md
+          echo "| ------- | ------------- | --------------- | ---------- |" >> table.md
+          make_row "mongo" ./mongo/current/boom-*/wall_time.txt >> table.md
+          make_row "s3" ./s3/current/boom-*/wall_time.txt >> table.md
 
           cat results.txt || true
 
