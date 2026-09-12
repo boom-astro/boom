@@ -46,6 +46,11 @@ endpoints) are reported against a fixed `babamul-anonymous` id and carry
 `$process_person_profile: false`, so they're counted without creating person
 profiles.
 
+**Email addresses are never sent**, as a person property, as an event property,
+or as a `distinct_id`: the id keys everything to one person already, and the
+id-to-address join lives in Mongo, where the account does. A login whose
+`/profile` call fails identifies nobody rather than falling back to the address.
+
 ## PostHog events
 
 ### `babamul_api_request`
