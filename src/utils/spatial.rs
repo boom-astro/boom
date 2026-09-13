@@ -359,12 +359,12 @@ pub async fn xmatch(
                         continue;
                     }
                 };
-                // z == 0.0 is a legitimate "very nearby" redshift (handled by the
-                // z < 0.01 / z <= 0.005 branches in cm_radius_arcsec /
-                // distance_kpc_from_arcsec below); only negative values are invalid.
+                // Legacy writes -99 for "no photo-z"; fold it to 0 rather than drop
+                // the row, which would also discard any z_spec it carries.
                 let doc_z = match get_f64_from_doc(&xmatch_doc, distance_key) {
                     Some(v) if v >= 0.0 => v,
-                    _ => {
+                    Some(_) => 0.0,
+                    None => {
                         continue;
                     }
                 };
