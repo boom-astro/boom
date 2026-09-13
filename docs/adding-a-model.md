@@ -18,7 +18,7 @@ Which catalogs exist depends on the deployment. The base `config.yaml` has Gaia 
 
 ## Files to change
 
-- `Cargo.toml`: the model crate as an optional dependency and a feature that enables it, so the default build does not change. Pick names that do not clash with existing dependencies: BOOM already depends on a crate called `flare` (`flare::Time`), so the FLARE crate is imported as `applecider_flare` and the module and feature need a different name too.
+- `Cargo.toml`: the model crate as an optional dependency and a feature that enables it, so the default build does not change. Pick names that do not clash with existing dependencies: BOOM already depends on a crate called `flare` (`flare::Time`), so the FLARE crate is imported as `applecider_flare` and the module and feature are called `flare_classifier`.
 - `src/enrichment/<model>.rs`: load the ONNX files with `load_model`, build the inputs from the alert, run inference, return a serializable struct.
 - `src/enrichment/mod.rs`: declare the module privately and re-export what the worker needs, like the other modules there (`mod <model>;` followed by `pub use <model>::...;`), both behind `#[cfg(feature = "...")]`.
 - `src/enrichment/base.rs`: a variant in `EnrichmentWorkerError` for the model's error type.
