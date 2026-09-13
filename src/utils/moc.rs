@@ -334,7 +334,7 @@ impl CredibleVolumeIndex {
     ///
     /// Works natively at the map's own resolution — no degradation. For
     /// multi-order (UNIQ) skymaps the pixel count is already small. For flat
-    /// nside=512 maps two filters keep the voxel array manageable:
+    /// flat maps two filters keep the voxel array manageable:
     /// - pixels with prob < total_prob × 1e-7 are skipped (retains >99.5% of mass);
     /// - distance bins beyond 5σ from DISTMU are skipped (negligible Gaussian tail).
     ///
@@ -858,7 +858,7 @@ mod tests {
     #[test]
     fn test_conditional_pdf_integrates_to_one() {
         let skymap =
-            parse_3d_skymap("./data/S251031cq_bayestar.fits").expect("Failed to parse 3D skymap");
+            parse_3d_skymap("./data/S240618ah_bayestar.fits").expect("Failed to parse 3D skymap");
 
         // Find the pixel with the highest PROB that also has a valid distance fit
         let best_pix = skymap
@@ -904,7 +904,7 @@ mod tests {
     #[test]
     fn test_credible_volume_index_build() {
         let skymap =
-            parse_3d_skymap("./data/S251031cq_bayestar.fits").expect("Failed to parse 3D skymap");
+            parse_3d_skymap("./data/S240618ah_bayestar.fits").expect("Failed to parse 3D skymap");
         let idx = CredibleVolumeIndex::build(&skymap, 200);
 
         assert!(!idx.sorted_dpdv.is_empty(), "Index should have voxels");
@@ -943,7 +943,7 @@ mod tests {
     #[test]
     fn test_density_threshold_monotonic() {
         let skymap =
-            parse_3d_skymap("./data/S251031cq_bayestar.fits").expect("Failed to parse 3D skymap");
+            parse_3d_skymap("./data/S240618ah_bayestar.fits").expect("Failed to parse 3D skymap");
         let idx = CredibleVolumeIndex::build(&skymap, 200);
 
         let threshold_50 = idx.density_threshold(0.5);
@@ -961,7 +961,7 @@ mod tests {
     #[test]
     fn test_credible_volume_to_2d_moc_contains_max_pixel() {
         let skymap =
-            parse_3d_skymap("./data/S251031cq_bayestar.fits").expect("Failed to parse 3D skymap");
+            parse_3d_skymap("./data/S240618ah_bayestar.fits").expect("Failed to parse 3D skymap");
         let idx = CredibleVolumeIndex::build(&skymap, 200);
         let moc = credible_volume_to_2d_moc(&skymap, &idx, 0.9);
 
@@ -996,7 +996,7 @@ mod tests {
     #[test]
     fn test_searched_prob_vol_at_max_density_is_low() {
         let skymap =
-            parse_3d_skymap("./data/S251031cq_bayestar.fits").expect("Failed to parse 3D skymap");
+            parse_3d_skymap("./data/S240618ah_bayestar.fits").expect("Failed to parse 3D skymap");
         let idx = CredibleVolumeIndex::build(&skymap, 200);
 
         // The maximum dP/dV in the index
@@ -1030,19 +1030,19 @@ mod tests {
     /// Verify that `parse_3d_skymap` reads the BAYESTAR FITS file and
     /// returns all four expected per-pixel columns with matching lengths.
     ///
-    /// Test file: `./data/S251031cq_bayestar.fits` — a flat HEALPix BAYESTAR
-    /// skymap at nside=512 (npix = 12 × 512² = 3,145,728).
+    /// Test file: `./data/S240618ah_bayestar.fits`, a flat HEALPix BAYESTAR
+    /// skymap at nside=256 (npix = 12 × 256² = 786,432).
     #[test]
     fn test_parse_3d_skymap_columns() {
-        let skymap = parse_3d_skymap("./data/S251031cq_bayestar.fits")
+        let skymap = parse_3d_skymap("./data/S240618ah_bayestar.fits")
             .expect("Failed to parse 3D skymap FITS");
 
-        // Flat nside=512 file → order=9 after parsing
-        assert_eq!(skymap.max_order, 9, "max_order should be 9 (nside=512)");
+        // Flat nside=256 file → order=8 after parsing
+        assert_eq!(skymap.max_order, 8, "max_order should be 8 (nside=256)");
         let expected_npix = skymap.prob.len();
         assert_eq!(
-            expected_npix, 3_145_728,
-            "npix should be 12 × 512² for this file"
+            expected_npix, 786_432,
+            "npix should be 12 × 256² for this file"
         );
         assert_eq!(
             skymap.uniq.len(),
