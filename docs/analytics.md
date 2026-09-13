@@ -46,6 +46,15 @@ endpoints) are reported against a fixed `babamul-anonymous` id and carry
 `$process_person_profile: false`, so they're counted without creating person
 profiles.
 
+**Email addresses are never sent**, as a person property, as an event property,
+or as a `distinct_id`: the id keys everything to one person already, and the
+id-to-address join lives in Mongo, where the account does. A login whose
+`/profile` call fails identifies nobody rather than falling back to the address.
+Activation and password-reset links do carry the address in their query string,
+so the client masks `email`, `token` and `activation_code` out of the
+`$current_url` every event reports (`mask_personal_data_properties` in
+[`frontend/src/main.tsx`](../frontend/src/main.tsx)).
+
 ## PostHog events
 
 ### `babamul_api_request`
