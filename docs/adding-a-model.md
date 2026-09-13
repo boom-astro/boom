@@ -4,7 +4,7 @@ This page lists what needs to change in BOOM to run a new classifier on ZTF aler
 
 ## Where the model runs
 
-The enrichment worker (`src/enrichment/ztf.rs`) reads alerts from the database in batches, computes properties and ML scores, and writes them back with a `$set` update. The alert is fetched with the aggregation pipeline in `create_ztf_alert_pipeline`, which joins the aux document. Add any field you need to the projection there (FLARE added `cross_matches`).
+The enrichment worker (`src/enrichment/ztf.rs`) reads alerts from the database in batches, computes properties and ML scores, and writes them back with a `$set` update. The alert is fetched with the aggregation pipeline in `create_ztf_alert_pipeline`, which joins the aux document. Fields from the aux document are projected as `"<field>": "$aux.<field>"`; FLARE added `"cross_matches": "$aux.cross_matches"`. The same pipeline is used by the filter worker (`src/filter/ztf.rs`), so every field added to the projection is also read by every filter. Only add what the model needs.
 
 What is available per alert:
 
@@ -14,13 +14,13 @@ What is available per alert:
 - `cross_matches`: catalog name to list of matches, each with `distance_arcsec`
 - properties BOOM already computed, e.g. the peak magnitude
 
-Which catalogs exist depends on the deployment. The base `config.yaml` has Gaia DR3, milliquas, NED, DESI DR1 and the Legacy Surveys photo-z. Each site adds its own in `config/prod/<site>/overrides.yaml`. Treat a missing catalog as NaN rather than failing.
+Which catalogs exist depends on the deployment. The base `config.yaml` has Gaia DR3, milliquas, NED, DESI DR1, PS1 DR2 and LS DR10 for ZTF, but `make configs` merges the `crossmatch` list from `config/prod/<site>/overrides.yaml` by replacing it, so each site lists its full set of catalogs there and it can differ from the base (UMN, for example, has AllWISE and no PS1 DR2). Check the overrides of the deployment you target, and treat a missing catalog as NaN rather than failing.
 
 ## Files to change
 
-- `Cargo.toml`: the model crate as an optional dependency and a feature that enables it, so the default build does not change.
+- `Cargo.toml`: the model crate as an optional dependency and a feature that enables it, so the default build does not change. Pick names that do not clash with existing dependencies: BOOM already depends on a crate called `flare` (`flare::Time`), so the FLARE crate is imported as `applecider_flare` and the module and feature need a different name too.
 - `src/enrichment/<model>.rs`: load the ONNX files with `load_model`, build the inputs from the alert, run inference, return a serializable struct.
-- `src/enrichment/mod.rs`: `#[cfg(feature = "...")] pub mod <model>;`
+- `src/enrichment/mod.rs`: declare the module privately and re-export what the worker needs, like the other modules there (`mod <model>;` followed by `pub use <model>::...;`), both behind `#[cfg(feature = "...")]`.
 - `src/enrichment/base.rs`: a variant in `EnrichmentWorkerError` for the model's error type.
 - `src/enrichment/ztf.rs`: keep the loaded model on the worker, call it per alert, `$set` the result.
 - `src/conf.rs` and `config.yaml`: a config section with `enabled: false` by default. Document the env variable override (`BOOM_<SECTION>__ENABLED`).
@@ -42,7 +42,7 @@ Model errors on one alert should log a warning and move on, not stop the batch. 
 ## Build and deploy
 
 - CI runs `cargo test --release` without features. Add a `cargo check --features <yours>` step to `.github/workflows/test.yaml` so the code keeps compiling.
-- `Dockerfile` and `Dockerfile.gpu` run `cargo build --release` without features. Add the feature and any system packages the crate needs (FLARE's `ceres` needs `cmake`).
+- `Dockerfile` runs `cargo build --release` without features. `Dockerfile.gpu` builds with `--features gpu` and an explicit list of `--bin` targets, so a new feature goes next to `gpu` and a new binary has to be added to that list. Both need any system packages the crate requires (FLARE's `ceres` needs `cmake`).
 - Run `make configs` after changing `config.yaml` or the overrides and commit the generated files.
 
 ## Testing
