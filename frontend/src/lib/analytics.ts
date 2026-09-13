@@ -1,18 +1,22 @@
 import posthog, { type Properties } from 'posthog-js';
 import type { Profile } from '@/lib/api';
 
-type EmailProps = { email?: string };
 type SearchProps = Record<string, unknown>;
 
 function event<P extends Properties>(name: string) {
   return (properties?: P) => posthog.capture(name, properties);
 }
 
-export const trackSignupInitiated = event<EmailProps>('signup_initiated');
-export const trackSignupEmailSubmitted = event<EmailProps>('signup_email_submitted');
-export const trackActivationCodeSubmitted = event<EmailProps>('activation_code_submitted');
-export const trackAccountActivated = event<EmailProps & { via_link?: boolean }>('account_activated');
-export const trackLoginSuccess = event<EmailProps>('login_success');
+/** Takes no properties, so an address cannot be attached to it by accident. */
+function bareEvent(name: string) {
+  return () => posthog.capture(name);
+}
+
+export const trackSignupInitiated = bareEvent('signup_initiated');
+export const trackSignupEmailSubmitted = bareEvent('signup_email_submitted');
+export const trackActivationCodeSubmitted = bareEvent('activation_code_submitted');
+export const trackAccountActivated = event<{ via_link?: boolean }>('account_activated');
+export const trackLoginSuccess = bareEvent('login_success');
 
 export const trackKafkaCredentialCreateInitiated = event<{ credential_name?: string }>('kafka_credential_create_initiated');
 export const trackKafkaCredentialCreated = event<{ credential_id?: string; credential_name?: string }>('kafka_credential_created');
@@ -40,7 +44,7 @@ export function trackError(context: string, error: unknown, additionalInfo?: Sea
 
 export function identifyUser(userId: string, email?: string, username?: string) {
   const previousId = posthog.get_distinct_id();
-  posthog.identify(userId, { email });
+  posthog.identify(userId);
   // Alias after identify: identify skips its distinct_id switch when handed the registered __alias.
   const vouchedFor = !!previousId && (previousId === username || previousId === email);
   if (vouchedFor && previousId !== userId) {

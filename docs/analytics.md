@@ -49,14 +49,24 @@ the username, splitting every user into a browser person and an API person, and
 that is what made API events unattributable. The endpoint now sends `id`;
 `fetchProfile` still accepts `_id` for deploy skew, and tests pin both.
 
-Authenticated `babamul_api_request` events also `$set` the person's `email` and
-`username`. Without that, a person is a bare id in the PostHog UI, and a user
-who only ever uses the Python package would never have an email attached at
-all — the browser client's `identify` is the only other thing that sets one,
-and they never load it. `$set` rather than `$set_once` so a changed email
-follows the account. It rides along at most once per user per hour
-(`PERSON_PROPERTY_TTL`), since values that never change do not need re-sending
-on every request a polling session makes.
+Authenticated `babamul_api_request` events also `$set` the person's `username`,
+so a person is something other than a bare id in the PostHog UI. It rides along
+at most once per user per hour (`PERSON_PROPERTY_TTL`), since a value that
+almost never changes does not need re-sending on every request a polling
+session makes. `$set` rather than `$set_once` so a renamed account follows.
+
+**Email addresses are never sent**, as a person property, as an event property,
+or as a `distinct_id`. They add nothing PostHog needs: the `distinct_id` already
+keys everything to one person, and the id-to-address join lives in Mongo, where
+the account does. Sending them would put a personal identifier in a third-party
+product-analytics tool for every user, including the ones who only ever call the
+API from the Python package and never load a page that could tell them so.
+
+The browser client's signup and login events therefore carry no properties at
+all, and `trackSignupInitiated` and friends are typed to accept none, so an
+address cannot be attached to one by accident. A login whose `/profile` call
+fails identifies nobody rather than falling back to the address: the session
+stays anonymous and the next successful `identify` merges it in.
 
 Sessions that signed in before the `id` fix are already identified on the
 username, and `posthog.identify` emits its merge event only while the stored
@@ -93,7 +103,7 @@ from the auth middleware, and that is exactly the event you want to see.
 | `auth_method` | `personal_access_token` (what the package uses), `jwt` (what the browser client uses), or `none`. The cleanest programmatic-vs-browser signal, and it works even for clients that send no useful `User-Agent`. |
 | `client` | `babamul-python`, `browser`, `httpx`, `requests`, `curl`, `other`, `unknown`. |
 | `client_version`, `python_version`, `client_os` | Only present for the official package. |
-| `$set` → `email`, `username` | Person properties, on authenticated requests only and at most hourly per user. What makes a person identifiable regardless of which surface they arrived through. |
+| `$set` → `username` | Person property, on authenticated requests only and at most hourly per user. What makes a person legible in the UI regardless of which surface they arrived through. The address is never sent. |
 
 **"How many people use the package?"** — unique users on
 `babamul_api_request` where `client = babamul-python`.

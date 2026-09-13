@@ -50,7 +50,7 @@ export default function OAuthCallback() {
       try {
         const profile = await ensureProfileLoaded({ force: true });
         if (profile) analytics.identifyProfile(profile);
-        analytics.trackLoginSuccess({ email: profile?.email });
+        analytics.trackLoginSuccess();
       } catch (err) {
         console.error("OAuthCallback: could not load profile", err);
       }

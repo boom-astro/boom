@@ -59,7 +59,7 @@ export default function OAuthComplete() {
       setStep("code");
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : String(err));
-      analytics.trackError("oauth_complete_email", err, { email });
+      analytics.trackError("oauth_complete_email", err);
     } finally {
       setLoading(false);
     }
@@ -76,14 +76,14 @@ export default function OAuthComplete() {
       try {
         const profile = await ensureProfileLoaded({ force: true });
         if (profile) analytics.identifyProfile(profile);
-        analytics.trackLoginSuccess({ email: profile?.email ?? email });
+        analytics.trackLoginSuccess();
       } catch (profileErr) {
         console.error("OAuthComplete: could not load profile", profileErr);
       }
       navigate(safeNext(next), { replace: true });
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : String(err));
-      analytics.trackError("oauth_verify_email", err, { email });
+      analytics.trackError("oauth_verify_email", err);
     } finally {
       setLoading(false);
     }
