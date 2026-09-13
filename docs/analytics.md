@@ -50,6 +50,10 @@ profiles.
 or as a `distinct_id`: the id keys everything to one person already, and the
 id-to-address join lives in Mongo, where the account does. A login whose
 `/profile` call fails identifies nobody rather than falling back to the address.
+Activation and password-reset links do carry the address in their query string,
+so the client masks `email`, `token` and `activation_code` out of the
+`$current_url` every event reports (`mask_personal_data_properties` in
+[`frontend/src/main.tsx`](../frontend/src/main.tsx)).
 
 ## PostHog events
 
