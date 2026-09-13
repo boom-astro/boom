@@ -942,7 +942,8 @@ pub struct LsstAlertSkymapSearchResult {
     ),
     request_body = AlertsSkymapSearchQuery,
     responses(
-        (status = 200, description = "Alerts within the MOC/skymap region", body = Vec<ZtfAlertSkymapSearchResult>),
+        (status = 200, description = "Alerts within the MOC/skymap region (ZTF)", body = Vec<ZtfAlertSkymapSearchResult>),
+        (status = 200, description = "Alerts within the MOC/skymap region (LSST)", body = Vec<LsstAlertSkymapSearchResult>),
         (status = 400, description = "Invalid query parameters or MOC/skymap data"),
         (status = 500, description = "Internal server error")
     ),
