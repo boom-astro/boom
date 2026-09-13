@@ -365,6 +365,8 @@ mod tests {
             sso.insert("helio_dist", 1.0_f64);
             sso.insert("topo_dist", 2.0_f64);
             sso.insert("phase_angle", 3.0_f64);
+            sso.insert("true_anomaly", 4.0_f64);
+            sso.insert("perihelion_time", 2_461_000.5_f64);
         }
         doc! { "candidate": { "jd": jd }, "properties": { "sso": sso } }
     }
@@ -455,10 +457,11 @@ mod tests {
         let projection = doc! { "properties.sso.helio_dist": 1, "candidate.jd": 1 };
         assert_eq!(requested_geometry(Some(&projection)), vec!["helio_dist"]);
 
+        // Exclusion: everything else is still requested.
         let projection = doc! { "properties.sso.phase_angle": 0 };
         assert_eq!(
             requested_geometry(Some(&projection)),
-            vec!["helio_dist", "topo_dist"]
+            vec!["helio_dist", "topo_dist", "true_anomaly", "perihelion_time"]
         );
     }
 }

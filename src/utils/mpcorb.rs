@@ -187,7 +187,10 @@ pub fn parse_line(line: &str) -> Option<MpcorbEntry> {
         incl: parse_f64(line, 59, 68)?,
         e: parse_f64(line, 70, 79)?,
         a: parse_f64(line, 92, 103)?,
-    };
+        q: 0.0,
+        tp: 0.0,
+    }
+    .with_perihelion();
     // A non-elliptical or degenerate orbit is not usable here. Written as a
     // positive test so a NaN fails it rather than slipping through a negation.
     let elliptical = elements.a > 0.0 && (0.0..1.0).contains(&elements.e);
@@ -238,6 +241,8 @@ pub struct RefreshReport {
     /// Record-shaped lines that failed to parse. Always empty in a healthy run --
     /// anything here is data being dropped silently.
     pub rejected_samples: Vec<String>,
+    /// Comet orbits staged alongside the minor planets.
+    pub comets: u64,
 }
 
 /// Seconds since the catalogue was last written.
@@ -282,7 +287,15 @@ pub async fn refresh_orbits(
         None => None,
     };
 
-    let result = refresh_into_staging(staging.as_ref(), url, batch_size, now, show_progress).await;
+    let result = refresh_into_staging(
+        staging.as_ref(),
+        url,
+        crate::utils::comets::DEFAULT_COMETELS_URL,
+        batch_size,
+        now,
+        show_progress,
+    )
+    .await;
 
     // Staging holds a partial catalogue on failure, and nothing else reads it.
     if result.is_err() {
@@ -311,6 +324,7 @@ const DOWNLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30 
 async fn refresh_into_staging(
     staging: Option<&mongodb::Collection<Document>>,
     url: &str,
+    comet_url: &str,
     batch_size: usize,
     now: f64,
     show_progress: bool,
@@ -330,6 +344,7 @@ async fn refresh_into_staging(
     let file = std::fs::File::open(tmp.path())?;
     let mut batch: Vec<Document> = Vec::with_capacity(batch_size);
     let mut report = RefreshReport {
+        comets: 0,
         lines: 0,
         parsed: 0,
         skipped: 0,
@@ -393,7 +408,91 @@ async fn refresh_into_staging(
         });
     }
 
+    // Same staging collection, so one rename publishes both catalogues.
+    report.comets = refresh_comets_into_staging(staging, comet_url, now, show_progress).await?;
+
     Ok(report)
+}
+
+/// Fewer comets than this means a failed download or a changed format, not a
+/// smaller catalogue.
+const MIN_PLAUSIBLE_COMETS: u64 = 100;
+
+/// Stage MPC's comet elements.
+///
+/// The staging collection is renamed over the live one, so publishing it with
+/// no comets would drop every comet already known. Too few is an error, which
+/// leaves the previous catalogue in place.
+async fn refresh_comets_into_staging(
+    staging: Option<&mongodb::Collection<Document>>,
+    url: &str,
+    now: f64,
+    show_progress: bool,
+) -> Result<u64, RefreshError> {
+    use std::io::{BufRead, BufReader};
+
+    tracing::info!("downloading comet elements from {}", url);
+    let mut tmp = tempfile::NamedTempFile::new()?;
+    // Not `Send`, so it cannot be held across the awaits below.
+    let failure: Option<String> = match tokio::time::timeout(
+        DOWNLOAD_TIMEOUT,
+        crate::utils::data::download_to_file(tmp.as_file_mut(), url, None, None, show_progress),
+    )
+    .await
+    {
+        Ok(Ok(())) => None,
+        Ok(Err(e)) => Some(e.to_string()),
+        Err(_) => Some(format!("timed out after {DOWNLOAD_TIMEOUT:?}")),
+    };
+    if let Some(why) = failure {
+        tracing::warn!(
+            "comet elements unavailable, continuing without them: {}",
+            why
+        );
+        return Ok(0);
+    }
+
+    let file = std::fs::File::open(tmp.path())?;
+    // MPC publishes a second solution for a comet while one is pending, so the
+    // same designation can appear twice; the later row wins.
+    let mut documents: HashMap<String, Document> = HashMap::new();
+    for line in BufReader::new(file).lines() {
+        let Ok(line) = line else { continue };
+        if let Some(entry) = crate::utils::comets::parse_line(&line) {
+            documents.insert(
+                entry.designation.clone(),
+                doc! {
+                    "_id": &entry.designation,
+                    "epoch_jd": entry.elements.epoch_jd,
+                    "a": entry.elements.a,
+                    "e": entry.elements.e,
+                    "incl": entry.elements.incl,
+                    "node": entry.elements.node,
+                    "peri": entry.elements.peri,
+                    "mean_anomaly": entry.elements.mean_anomaly,
+                    "q": entry.elements.q,
+                    "tp": entry.elements.tp,
+                    "h": entry.h,
+                    "g": entry.g,
+                    "updated_at": now,
+                },
+            );
+        }
+    }
+
+    let documents: Vec<Document> = documents.into_values().collect();
+    let parsed = documents.len() as u64;
+    if parsed < MIN_PLAUSIBLE_COMETS {
+        return Err(RefreshError::ImplausiblyShort {
+            parsed,
+            collection: "comets".to_string(),
+        });
+    }
+    if let Some(c) = staging {
+        c.insert_many(documents).await?;
+    }
+    tracing::info!("parsed {} comet orbits", parsed);
+    Ok(parsed)
 }
 
 /// Render one entry as the stored document. Kept next to the reader below so
@@ -409,6 +508,8 @@ pub fn to_document(entry: &MpcorbEntry, updated_at: f64) -> Document {
         "node": el.node,
         "peri": el.peri,
         "mean_anomaly": el.mean_anomaly,
+        "q": el.q,
+        "tp": el.tp,
         "h": entry.h,
         "g": entry.g,
         "updated_at": updated_at,
@@ -425,7 +526,11 @@ pub fn elements_from_document(doc: &Document) -> Option<OrbitalElements> {
         node: doc.get_f64("node").ok()?,
         peri: doc.get_f64("peri").ok()?,
         mean_anomaly: doc.get_f64("mean_anomaly").ok()?,
+        // Absent before comets; an elliptical orbit recovers both.
+        q: doc.get_f64("q").ok().unwrap_or(0.0),
+        tp: doc.get_f64("tp").ok().unwrap_or(0.0),
     })
+    .map(|e: OrbitalElements| if e.tp == 0.0 { e.with_perihelion() } else { e })
 }
 
 /// Load elements for a set of MPCORB keys.
@@ -490,7 +595,13 @@ impl OrbitCache {
 }
 
 /// Geometry fields derived together from one set of elements.
-pub const GEOMETRY_FIELDS: [&str; 3] = ["helio_dist", "topo_dist", "phase_angle"];
+pub const GEOMETRY_FIELDS: [&str; 5] = [
+    "helio_dist",
+    "topo_dist",
+    "phase_angle",
+    "true_anomaly",
+    "perihelion_time",
+];
 
 /// Whether a document already carries every geometry field.
 pub fn has_geometry(doc: &Document) -> bool {
@@ -521,6 +632,8 @@ pub fn fill_geometry(
     target.insert("helio_dist", geometry.helio_dist);
     target.insert("topo_dist", geometry.topo_dist);
     target.insert("phase_angle", geometry.phase_angle);
+    target.insert("true_anomaly", geometry.true_anomaly);
+    target.insert("perihelion_time", geometry.perihelion_time);
     true
 }
 
@@ -537,6 +650,24 @@ pub fn fill_geometry(
 ///
 /// Returns `None` for anything not resolvable to an MPCORB key, including
 /// comets (`"C/2026O1"`), which MPCORB does not carry at all.
+/// Whether this is a comet rather than an asteroid: an orbit-type prefix like
+/// `C/2025Q3`, or a number and orbit type like `124P`, optionally fragmented.
+///
+/// Deliberately narrow. A provisional asteroid designation can also end in one
+/// of these letters -- `2010TC` -- and must reach the provisional path instead.
+fn is_comet_designation(s: &str) -> bool {
+    if s.contains('/') {
+        return true;
+    }
+    let core = s.split_once('-').map_or(s, |(head, _)| head);
+    let Some(kind) = core.chars().last() else {
+        return false;
+    };
+    "PCDXI".contains(kind)
+        && core.len() > 1
+        && core[..core.len() - 1].bytes().all(|b| b.is_ascii_digit())
+}
+
 pub fn normalize_ztf_ssnamenr(ssnamenr: &str) -> Option<String> {
     let s = ssnamenr.trim();
     if s.is_empty() {
@@ -555,9 +686,14 @@ pub fn normalize_ztf_ssnamenr(ssnamenr: &str) -> Option<String> {
         return Some(s.to_string());
     }
 
+    // Comets key on IPAC's own form, which is how the ingest stores them.
+    if is_comet_designation(s) {
+        return Some(s.to_string());
+    }
+
     // Provisional: four-digit year, then the half-month and order letters, then
-    // an optional cycle count. Anything else (comet prefixes, survey forms we
-    // have not seen from IPAC) is left alone rather than guessed at.
+    // an optional cycle count. Anything else (survey forms we have not seen
+    // from IPAC) is left alone rather than guessed at.
     let b = s.as_bytes();
     if b.len() >= 6
         && b[..4].iter().all(|c| c.is_ascii_digit())
@@ -716,10 +852,34 @@ mod tests {
     // resolve to something else.
     #[test]
     fn test_rejects_what_it_cannot_resolve() {
-        assert_eq!(normalize_ztf_ssnamenr("C/2026O1"), None);
-        assert_eq!(normalize_ztf_ssnamenr("73P-C"), None);
         assert_eq!(normalize_ztf_ssnamenr(""), None);
         assert_eq!(normalize_ztf_ssnamenr("()"), None);
+    }
+
+    /// Comets key on IPAC's own designation form.
+    #[test]
+    fn test_comet_designations_pass_through() {
+        for d in ["C/2026O1", "73P-C", "124P", "1P", "P/2005T5"] {
+            assert_eq!(normalize_ztf_ssnamenr(d).as_deref(), Some(d));
+        }
+    }
+
+    /// A provisional asteroid can end in an orbit-type letter, and must still
+    /// take the provisional path.
+    #[test]
+    fn test_a_provisional_asteroid_is_not_read_as_a_comet() {
+        assert!(!is_comet_designation("2010TC"));
+        assert!(!is_comet_designation("2015XD"));
+        assert!(!is_comet_designation("2022SG320"));
+        assert_eq!(normalize_ztf_ssnamenr("2010TC").as_deref(), Some("2010 TC"));
+        assert_eq!(
+            normalize_ztf_ssnamenr("2022SG320").as_deref(),
+            Some("2022 SG320")
+        );
+
+        assert!(is_comet_designation("124P"));
+        assert!(is_comet_designation("73P-C"));
+        assert!(is_comet_designation("C/2026O1"));
     }
 
     // Roughly 4,000 objects from the Palomar-Leiden surveys use their own packed

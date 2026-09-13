@@ -475,6 +475,12 @@ pub struct ZtfSsoAssociation {
     /// Sun-object-observer angle at the alert epoch, degrees. Same provenance.
     #[serde(default)]
     pub phase_angle: Option<f32>,
+    /// Angle from perihelion at the alert epoch, degrees, negative inbound.
+    #[serde(default)]
+    pub true_anomaly: Option<f32>,
+    /// Perihelion passage, JD. Per detection because a refreshed orbit moves it.
+    #[serde(default)]
+    pub perihelion_time: Option<f64>,
 }
 
 impl ZtfSsoAssociation {
@@ -496,6 +502,8 @@ impl ZtfSsoAssociation {
             helio_dist: None,
             topo_dist: None,
             phase_angle: None,
+            true_anomaly: None,
+            perihelion_time: None,
         }
     }
 
@@ -510,6 +518,8 @@ impl ZtfSsoAssociation {
             self.helio_dist = Some(geometry.helio_dist as f32);
             self.topo_dist = Some(geometry.topo_dist as f32);
             self.phase_angle = Some(geometry.phase_angle as f32);
+            self.true_anomaly = Some(geometry.true_anomaly as f32);
+            self.perihelion_time = Some(geometry.perihelion_time);
         }
         self
     }
@@ -581,8 +591,7 @@ pub struct ZtfEnrichmentWorker {
     models: Arc<SharedModels>,
     babamul: Option<Babamul>,
     gpu_enabled: bool,
-    /// Alerts per batch — also the fixed ONNX inference shape (see
-    /// [`EnrichmentWorkerConfig::batch_size`] in `conf.rs`).
+    /// Alerts per batch; also the fixed ONNX input shape. See [`EnrichmentWorkerConfig::batch_size`].
     batch_size: usize,
 }
 
@@ -1261,6 +1270,7 @@ impl ZtfEnrichmentWorker {
         work_items: &[AlertWork],
     ) -> Result<Vec<Option<ZtfAlertClassifications>>, EnrichmentWorkerError> {
         if self.gpu_enabled {
+            models.bind_device()?;
             return self.classify_gpu_batch(models, work_items);
         }
 
@@ -1441,15 +1451,15 @@ mod tests {
     /// 1 Ceres, the MPCORB elements checked against JPL Horizons in
     /// `sso_geometry::tests`. Values there are the reference for the numbers below.
     fn ceres() -> OrbitalElements {
-        OrbitalElements {
-            epoch_jd: 2_461_200.5,
-            a: 2.7655526,
-            e: 0.0796923,
-            incl: 10.58803,
-            node: 80.24863,
-            peri: 73.29420,
-            mean_anomaly: 274.41935,
-        }
+        OrbitalElements::elliptical(
+            2_461_200.5,
+            2.7655526,
+            0.0796923,
+            10.58803,
+            80.24863,
+            73.29420,
+            274.41935,
+        )
     }
 
     // An IPAC designation has to reach the geometry; f32 storage sets the tolerance.
@@ -1500,9 +1510,12 @@ mod tests {
                 "ssnamenr {ssnamenr} did not resolve to an orbit"
             );
         }
-        // Comets are not in MPCORB; missing beats matching the wrong object.
+        // A comet resolves to itself; absent here only because this map is Ceres.
+        assert_eq!(
+            normalize_ztf_ssnamenr("C/2026O1").as_deref(),
+            Some("C/2026O1")
+        );
         assert!(!orbits.contains_key("C/2026O1"));
-        assert!(normalize_ztf_ssnamenr("C/2026O1").is_none());
     }
 
     // Upstream uses -999 for "no match"; stored verbatim it reads as a close match.

@@ -1,3 +1,4 @@
+pub mod comets;
 pub mod cosmology;
 pub mod cutouts;
 pub mod data;
