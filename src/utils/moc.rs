@@ -49,11 +49,8 @@ pub fn moc_from_skymap_bytes(bytes: &[u8], credible_level: f64) -> Result<HpxMoc
     .map_err(|e| format!("Failed to parse skymap FITS: {}", e))
 }
 
-/// Extract HEALPix order from a UNIQ index.  UNIQ = 4·4^order + ipix.
-///
-/// The minimum valid UNIQ (order 0, ipix 0) is 4; callers must not pass a
-/// smaller value (checked once, at parse time, in [`parse_3d_skymap`]) since
-/// `63 - uniq.leading_zeros()` underflows for `uniq < 4`.
+/// HEALPix order from a UNIQ index (UNIQ = 4·4^order + ipix). Underflows below
+/// UNIQ 4, which [`parse_3d_skymap`] rejects at load.
 fn uniq_to_order(uniq: u64) -> u8 {
     debug_assert!(uniq >= 4, "invalid UNIQ index: {uniq} (minimum is 4)");
     ((63 - uniq.leading_zeros()) / 2 - 1) as u8
@@ -254,12 +251,8 @@ pub fn parse_3d_skymap_bytes(bytes: &[u8]) -> Result<LIGO3dskymap, Skymap3dError
 }
 
 impl LIGO3dskymap {
-    /// Row index of the pixel containing (ra_deg, dec_deg).
-    ///
-    /// Walks from `max_order` down to order 0, checking parent pixels at each
-    /// level, so it works correctly for multi-order (UNIQ) maps where adjacent
-    /// pixels can be at different resolutions. Returns `None` only if the map
-    /// has a coverage gap at that location (should not happen for a valid map).
+    /// Row index of the pixel containing (ra_deg, dec_deg), walking up to coarser
+    /// parents so multi-order maps resolve correctly. `None` on a coverage gap.
     pub fn ang2pix(&self, ra_deg: f64, dec_deg: f64) -> Option<usize> {
         let layer = nested::get(self.max_order);
         let mut ipix = layer.hash(ra_deg.to_radians(), dec_deg.to_radians());
@@ -330,15 +323,9 @@ pub struct CredibleVolumeIndex {
 }
 
 impl CredibleVolumeIndex {
-    /// Precompute density-sorted cumulative arrays.
-    ///
-    /// Works natively at the map's own resolution — no degradation. For
-    /// multi-order (UNIQ) skymaps the pixel count is already small. For flat
-    /// flat maps two filters keep the voxel array manageable:
-    /// - pixels with prob < total_prob × 1e-7 are skipped (retains >99.5% of mass);
-    /// - distance bins beyond 5σ from DISTMU are skipped (negligible Gaussian tail).
-    ///
-    /// The `n_dist_bins` bins span `[0, max(DISTMU + 5σ)]` uniformly.
+    /// Precompute density-sorted cumulative arrays at the map's own resolution.
+    /// `n_dist_bins` bins span `[0, max(DISTMU + 5σ)]`; negligible pixels
+    /// (prob < 1e-7 of the total) and bins beyond 5σ are skipped.
     pub fn build(skymap: &LIGO3dskymap, n_dist_bins: usize) -> Self {
         let d_max = skymap
             .distmu
@@ -487,12 +474,9 @@ impl CredibleVolumeIndex {
     }
 }
 
-/// Build a 2D MOC covering the sky projection of the X% credible volume.
-///
-/// Pixels at their native UNIQ order are included when their peak dP/dV
-/// (evaluated at D = DISTMU) exceeds the credible-level threshold. This is an
-/// over-approximation by design; downstream code must call
-/// `CredibleVolumeIndex::contains` per candidate for the exact 3D test.
+/// 2D MOC covering the sky projection of the X% credible volume: pixels whose
+/// peak dP/dV clears the threshold. Deliberately an over-approximation, so
+/// callers must still run `CredibleVolumeIndex::contains` per candidate.
 pub fn credible_volume_to_2d_moc(
     skymap: &LIGO3dskymap,
     idx: &CredibleVolumeIndex,
@@ -550,11 +534,8 @@ pub fn is_in_moc(moc: &HpxMoc, ra_deg: f64, dec_deg: f64) -> bool {
     moc.contains_cell(depth, cell)
 }
 
-/// Degrade a MOC to a target depth and return covering cones.
-///
-/// Each cone is `(ra_deg, dec_deg, radius_rad)` — the center and circumscribing
-/// radius of a HEALPix cell at the target depth. These cones fully cover the
-/// degraded MOC cells (with some overlap), suitable for a MongoDB `$centerSphere` query.
+/// Degrade a MOC and return `(ra_deg, dec_deg, radius_rad)` cones circumscribing
+/// its cells, ready for a MongoDB `$centerSphere` query.
 pub fn moc_to_covering_cones(moc: &HpxMoc, target_depth: u8) -> Vec<(f64, f64, f64)> {
     let degraded = moc.degraded(target_depth);
     degraded
@@ -579,16 +560,9 @@ pub fn moc_to_covering_cones(moc: &HpxMoc, target_depth: u8) -> Vec<(f64, f64, f
         .collect()
 }
 
-/// Select an appropriate covering depth based on the MOC's sky coverage.
-///
-/// Returns a depth that produces a manageable number of covering cones
-/// (typically under ~500) for use in a MongoDB `$or` query.
-///
-/// This is a fast area-only heuristic: it has no notion of fragmentation, so a
-/// small-area but disjoint/patchy region (many separate islands, none of which
-/// merge into a single covering cell) can still produce far more cones than the
-/// area alone suggests. Callers that need a hard cap on cone count should use
-/// [`select_covering_depth_bounded`] instead.
+/// Covering depth for a MOC, from its sky area alone. Area-only, so a small but
+/// fragmented region can still blow past any cone budget: use
+/// [`select_covering_depth_bounded`] when the count must be capped.
 pub fn select_covering_depth(moc: &HpxMoc) -> u8 {
     let coverage_pct = moc.coverage_percentage();
     let coverage_sq_deg = coverage_pct * 41253.0; // full sky ≈ 41253 sq deg
@@ -604,28 +578,13 @@ pub fn select_covering_depth(moc: &HpxMoc) -> u8 {
     }
 }
 
-/// The coarsest depth [`select_covering_depth_bounded`] will ever coarsen to
-/// (matches [`select_covering_depth`]'s own coarsest tier, used for any region
-/// ≥1000 sq deg). Below this, cells are ~53.7 sq deg — coarsening further would
-/// make the covering cones so large they stop meaningfully narrowing the
-/// MongoDB query, which is exactly the "genuinely too broad a search" case that
-/// should still be rejected rather than silently accepted at any cost.
+/// Coarsening floor: below ~53.7 sq deg cells the cones stop narrowing the query
+/// at all, so a genuinely sky-wide region must hit the cap and be rejected.
 const MIN_COVERING_DEPTH: u8 = 3;
 
-/// Select a covering depth for `moc` whose covering-cone count is guaranteed
-/// at or under `max_cones` if achievable without coarsening past
-/// [`MIN_COVERING_DEPTH`], and return those cones alongside it (the caller is
-/// still responsible for rejecting the result if it's over `max_cones`).
-///
-/// Starts from the area-based heuristic in [`select_covering_depth`], then
-/// adaptively coarsens (one depth level at a time) while the actual cone count
-/// exceeds `max_cones` — this is what makes a fragmented-but-small region (see
-/// [`select_covering_depth`]'s caveat) converge on a usable depth instead of
-/// spuriously exceeding the cap at the heuristic's first guess. The floor keeps
-/// this fragmentation fix from also swallowing the case it must NOT fix: a
-/// region that's genuinely too broad (e.g. covering most of the sky) should
-/// still hit the cone cap and be rejected, not get coarsened all the way down
-/// to a handful of sky-spanning, effectively-unfiltering cones.
+/// Coarsen from [`select_covering_depth`] until the cone count fits `max_cones`,
+/// never past [`MIN_COVERING_DEPTH`]. The caller must still reject a result that
+/// is over the cap.
 pub fn select_covering_depth_bounded(moc: &HpxMoc, max_cones: usize) -> (u8, Vec<(f64, f64, f64)>) {
     let mut depth = select_covering_depth(moc);
     let mut cones = moc_to_covering_cones(moc, depth);
@@ -636,11 +595,7 @@ pub fn select_covering_depth_bounded(moc: &HpxMoc, max_cones: usize) -> (u8, Vec
     (depth, cones)
 }
 
-/// Angular distance between two points on the sphere (in radians).
-///
-/// Delegates to `flare::spatial::great_circle_distance` (an atan2-based
-/// formula, more numerically stable near antipodal points than a haversine)
-/// rather than reimplementing the formula here.
+/// Angular distance between two points on the sphere, in radians.
 fn angular_distance(lon1: f64, lat1: f64, lon2: f64, lat2: f64) -> f64 {
     great_circle_distance(
         lon1.to_degrees(),

@@ -347,10 +347,8 @@ enum AlertsConeSearchResult {
     LsstAlerts(HashMap<String, Vec<EnrichedLsstAlert>>),
 }
 
-/// Run one cone search per coordinate pair and group the matching alerts by object
-/// name. `base_filter_doc` holds the non-spatial filters shared across every cone;
-/// the per-cone `$centerSphere` condition is prepended so the geospatial index is
-/// used. The alert type is the only thing that differs between surveys.
+/// One cone search per coordinate pair, grouped by object name. The per-cone
+/// `$centerSphere` is prepended to `base_filter_doc` so the geospatial index is used.
 async fn cone_search_by_coordinates<T>(
     db: &Database,
     survey: Survey,
@@ -571,14 +569,9 @@ const MOC_SEARCH_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_
 /// bound memory use before the host-galaxy cross-match lookup.
 const SKYMAP_3D_SPATIAL_CAP: usize = 50_000;
 
-/// The parsed spatial search region, resolved once (off the async worker) from
-/// whichever of `moc_fits_base64`/`skymap_fits_base64` the caller provided.
-///
-/// A `skymap_fits_base64` upload is classified automatically: if it carries the
-/// LIGO/Virgo/KAGRA BAYESTAR distance columns (DISTMU/DISTSIGMA/DISTNORM) it's
-/// treated as a 3D localization and gets the full distance-aware credible-volume
-/// test (refined against cross-matched host-galaxy redshifts); otherwise it's
-/// treated as a plain 2D probability skymap, thresholded at `credible_level`.
+/// The parsed spatial search region. A `skymap_fits_base64` upload is classified
+/// by its columns: DISTMU/DISTSIGMA/DISTNORM present means a 3D BAYESTAR
+/// localization, anything else a plain 2D probability skymap.
 enum SkymapSearchMode {
     /// A pre-built MOC, used as-is (no distance information).
     Moc(HpxMoc),
@@ -595,9 +588,8 @@ enum SkymapSearchMode {
 }
 
 impl SkymapSearchMode {
-    /// The 2D sky region to use for covering-cone generation and as a coarse/
-    /// exact spatial filter (exact for `Moc`/`Skymap2d`, a pre-filter for
-    /// `Skymap3d`).
+    /// The 2D sky region used for covering cones: exact for `Moc`/`Skymap2d`,
+    /// a pre-filter for `Skymap3d`.
     fn moc_2d(&self) -> &HpxMoc {
         match self {
             SkymapSearchMode::Moc(moc) | SkymapSearchMode::Skymap2d(moc) => moc,
@@ -606,17 +598,13 @@ impl SkymapSearchMode {
     }
 }
 
-/// Extract host-galaxy redshifts from an alert's `cross_matches` document, ranked
-/// best-first (spectroscopic over photometric) and deduplicated by 3-arcsec sky
-/// proximity so the same physical source isn't counted twice across catalogs.
+/// Host-galaxy redshifts from an alert's `cross_matches`, best-first and
+/// deduplicated by 3-arcsec proximity so one galaxy isn't counted per catalog.
 ///
 /// Priority: 0 = DESI spec (zwarn=0), 1 = NED SPEC, 2 = DESI spec (zwarn!=0)
 /// and LSDR10 spec, 3 = NED PHOT, 4 = LSDR10 photo-z.
 fn extract_host_redshifts(cross_matches: Option<&Document>) -> Vec<f64> {
-    // Push every valid (priority, ra, dec, z) row from `catalog`'s cross-match
-    // array into `ranked`. `z_field` is the catalog's redshift/photo-z field
-    // name; `priority` maps a matched row to its rank (lower = better), or
-    // `None` to skip the row entirely (e.g. DESI_DR1 stars).
+    // `priority` ranks a row (lower = better) or returns None to skip it.
     fn extract_catalog_zs(
         cross_matches: Option<&Document>,
         catalog: &str,
@@ -707,24 +695,15 @@ fn extract_host_redshifts(cross_matches: Option<&Document>) -> Vec<f64> {
 }
 
 /// Stream alerts matching `filter_doc` and pair each with an optional
-/// `host_searched_prob_vol`:
-/// - For `Moc`/`Skymap2d` modes: a plain point-in-region post-filter (the spatial
-///   `$or` is only a coarse pre-filter at the covering-cone level); every match
-///   pairs with `None`.
-/// - For `Skymap3d` mode: a spatial pre-filter against the 2D projection, a
-///   batched host-galaxy cross-match lookup, then the exact distance-aware
-///   credible-volume test per candidate. Alerts with no cross-matched host pass
-///   through on the 2D projection alone (paired with `None`); alerts whose only
-///   matched hosts fall outside the credible volume are dropped.
+/// `host_searched_prob_vol`. The spatial `$or` is only a covering-cone
+/// pre-filter, so every mode re-tests each alert against the real region:
+/// `Moc`/`Skymap2d` point-in-region (always paired with `None`), `Skymap3d` the
+/// exact distance-aware test against cross-matched host redshifts. An alert with
+/// no matched host passes on the 2D projection alone; one whose hosts all fall
+/// outside the credible volume is dropped.
 ///
-/// `coords`/`object_id` extract what differs between surveys.
-///
-/// Returns the matched `(alert, host_searched_prob_vol)` pairs alongside a
-/// `truncated` flag: `true` only if the internal `SKYMAP_3D_SPATIAL_CAP`
-/// pre-filter cap was hit in `Skymap3d` mode, meaning some alerts that fall
-/// inside the 2D projection were never even considered for the exact 3D test.
-/// Hitting the caller-supplied `limit` is not truncation in this sense — it's
-/// the documented, user-controlled result cap.
+/// The returned `truncated` flag means `SKYMAP_3D_SPATIAL_CAP` was hit, not the
+/// caller's `limit`.
 async fn collect_skymap_alerts<T, F>(
     db: &Database,
     survey: Survey,
@@ -853,13 +832,8 @@ where
     }
 }
 
-/// Runs [`collect_skymap_alerts`] and wraps each matched alert with `wrap`
-/// (attaching `host_searched_prob_vol` into the survey-specific response
-/// struct), returning the collected JSON array alongside the truncation flag.
-/// Factors out the only two lines that actually differ between the ZTF and
-/// LSST branches of `skymap_search_alerts` — the coords closure and the
-/// concrete result-wrapper type — while keeping distinct per-survey result
-/// types for OpenAPI schema clarity.
+/// [`collect_skymap_alerts`] plus the survey-specific response wrapper, so the
+/// ZTF and LSST branches differ only by their coords closure and result type.
 #[allow(clippy::too_many_arguments)]
 async fn collect_and_wrap_skymap_alerts<T, F, R, W>(
     db: &Database,
