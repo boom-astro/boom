@@ -609,8 +609,8 @@ impl SkymapSearchMode {
 /// best-first (spectroscopic over photometric) and deduplicated by 3-arcsec sky
 /// proximity so the same physical source isn't counted twice across catalogs.
 ///
-/// Priority: 0 = DESI spec (zwarn=0), 1 = NED SPEC, 2 = DESI spec (zwarn!=0),
-/// 3 = NED PHOT, 4 = LS_DR10_PHOTOZ photo-z.
+/// Priority: 0 = DESI spec (zwarn=0), 1 = NED SPEC, 2 = DESI spec (zwarn!=0)
+/// and LSDR10 spec, 3 = NED PHOT, 4 = LSDR10 photo-z.
 fn extract_host_redshifts(cross_matches: Option<&Document>) -> Vec<f64> {
     // Push every valid (priority, ra, dec, z) row from `catalog`'s cross-match
     // array into `ranked`. `z_field` is the catalog's redshift/photo-z field
@@ -679,10 +679,13 @@ fn extract_host_redshifts(cross_matches: Option<&Document>) -> Vec<f64> {
         },
         &mut ranked,
     );
+    // Legacy carries both; a row with each is deduplicated below, keeping the
+    // spectroscopic one because it sorts first.
+    extract_catalog_zs(cross_matches, "LSDR10", "z_spec", |_| Some(2), &mut ranked);
     extract_catalog_zs(
         cross_matches,
-        "LS_DR10_PHOTOZ",
-        "z_phot",
+        "LSDR10",
+        "z_phot_median",
         |_| Some(4),
         &mut ranked,
     );
@@ -1229,4 +1232,82 @@ pub async fn skymap_search_alerts(
     }
 
     response::ok(&message, data)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mongodb::bson::{doc, Document};
+
+    /// A cross-match block holding one row per catalog at the same position.
+    fn cross_matches(rows: Vec<(&str, Document)>) -> Document {
+        let mut d = Document::new();
+        for (catalog, row) in rows {
+            d.insert(catalog, vec![row]);
+        }
+        d
+    }
+
+    #[test]
+    fn test_reads_legacy_redshifts_from_lsdr10() {
+        let cm = cross_matches(vec![(
+            "LSDR10",
+            doc! { "ra": 10.0, "dec": 20.0, "z_phot_median": 0.31, "z_spec": -99.0 },
+        )]);
+        assert_eq!(extract_host_redshifts(Some(&cm)), vec![0.31]);
+    }
+
+    #[test]
+    fn test_absent_legacy_redshift_sentinel_is_not_a_redshift() {
+        // Legacy writes -99 where it has none; a negative z is never valid.
+        let cm = cross_matches(vec![(
+            "LSDR10",
+            doc! { "ra": 10.0, "dec": 20.0, "z_phot_median": -99.0, "z_spec": -99.0 },
+        )]);
+        assert!(extract_host_redshifts(Some(&cm)).is_empty());
+    }
+
+    #[test]
+    fn test_legacy_spectroscopic_outranks_its_own_photometric() {
+        let cm = cross_matches(vec![(
+            "LSDR10",
+            doc! { "ra": 10.0, "dec": 20.0, "z_spec": 0.42, "z_phot_median": 0.31 },
+        )]);
+        // One physical source, so the photo-z is deduplicated away.
+        assert_eq!(extract_host_redshifts(Some(&cm)), vec![0.42]);
+    }
+
+    #[test]
+    fn test_desi_spectroscopic_outranks_legacy() {
+        let cm = cross_matches(vec![
+            (
+                "LSDR10",
+                doc! { "ra": 10.0, "dec": 20.0, "z_phot_median": 0.31, "z_spec": -99.0 },
+            ),
+            (
+                "DESI_DR1",
+                doc! { "ra": 10.0, "dec": 20.0, "z": 0.40, "zwarn": 0_i64 },
+            ),
+        ]);
+        assert_eq!(extract_host_redshifts(Some(&cm)), vec![0.40]);
+    }
+
+    #[test]
+    fn test_distinct_positions_are_both_kept() {
+        let cm = cross_matches(vec![(
+            "NED",
+            doc! { "ra": 10.0, "dec": 20.0, "z": 0.11, "z_tech": "SPEC" },
+        )]);
+        let mut with_far = cm.clone();
+        with_far.insert(
+            "LSDR10",
+            vec![doc! { "ra": 11.0, "dec": 20.0, "z_phot_median": 0.25, "z_spec": -99.0 }],
+        );
+        let got = extract_host_redshifts(Some(&with_far));
+        assert_eq!(
+            got.len(),
+            2,
+            "a degree apart is not the same galaxy: {got:?}"
+        );
+    }
 }
