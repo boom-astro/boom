@@ -1,0 +1,42 @@
+name: boompy
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    paths:
+      - "boompy/**"
+      - ".github/workflows/boompy.yaml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
+  # Only PR runs are superseded; main keeps one run, and one status, per commit.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  test:
+    name: Test boompy
+    runs-on: ubuntu-latest
+    # Deliberately separate from the Rust suite: boompy needs no MongoDB, Kafka
+    # or ONNX runtime, so it should report in a couple of minutes rather than
+    # queue behind a 30-minute matrix.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "boompy/uv.lock"
+
+      # --frozen so a dependency that drifted from uv.lock fails here rather
+      # than being silently resolved to something the image never saw. The image
+      # installs from the same lockfile.
+      - name: Install dependencies
+        working-directory: boompy
+        run: uv sync --frozen --extra dev
+
+      - name: Run tests
+        working-directory: boompy
+        run: uv run pytest -q

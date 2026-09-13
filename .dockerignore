@@ -9,6 +9,11 @@ target/
 # Dependencies are installed inside the images, never copied from the host.
 **/node_modules
 frontend/dist
+# boompy's venv is built in the image by `uv sync`; copying a host one in would
+# put a macOS interpreter and macOS wheels into a Debian image.
+**/.venv
+**/__pycache__
+**/.pytest_cache
 
 # Local-only / sensitive files no build needs.
 .claude/

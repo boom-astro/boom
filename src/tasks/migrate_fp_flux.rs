@@ -1,156 +1,129 @@
-use std::collections::HashMap;
+//! The `migrate_fp_flux` task: put ZTF forced photometry on a fixed zeropoint.
+//!
+//! Recomputes `psfFlux` and `psfFluxErr` in `fp_hists` from the raw IPAC
+//! `forcediffimflux` / `forcediffimfluxunc` fields, converting to nJy at the
+//! fixed `ZTF_ZP` = 23.9 zeropoint:
+//!
+//! ```text
+//! value = raw_value * 1e9 * 10^((23.9 - magzpsci) / 2.5)
+//! ```
+//!
+//! Idempotent, because it always recomputes from the raw fields rather than
+//! from what it wrote last time -- which is what makes it safe for the task
+//! system to requeue after a lost lease.
+//!
+//! Ported from `src/bin/migrate_fp_flux.rs`, which is now a thin wrapper over
+//! this. Three things changed in the move: the batch loop checks for
+//! cancellation, failures return errors instead of calling `process::exit`
+//! (which would kill the whole worker and every other run on it), and progress
+//! is reported to the run rather than only to a terminal progress bar.
 
-use boom::conf::{load_dotenv, AppConfig};
-use boom::utils::data::make_progress_bar;
-use boom::utils::lightcurves::ZTF_ZP;
-use boom::utils::parser::parse_positive_usize;
-use clap::Parser;
+use super::batch::{run_batched_update, BatchError, PROGRESS_EVERY};
+use super::context::TaskContext;
+use super::ledger::{MutationTarget, Operation};
+use crate::utils::lightcurves::ZTF_ZP;
 use futures::TryStreamExt;
 use mongodb::bson::{doc, Bson, Document};
-use tracing::{error, info, Level};
-use tracing_subscriber::FmtSubscriber;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use utoipa::ToSchema;
+
+/// Stable identifier for this task type.
+pub const TASK_TYPE: &str = "migrate_fp_flux";
+
+/// The collection this task rewrites. Not a parameter: the migration is
+/// specific to ZTF's forced photometry schema, and pointing it at another
+/// collection would silently do nothing or corrupt it.
+const COLLECTION: &str = "ZTF_alerts_aux";
 
 const FLUXERR2MAGERR_FACTOR: f64 = 2.5_f64 / std::f64::consts::LN_10;
 
-/// Fixed zeropoint for ZTF forced photometry.
-
-/// Migrate ZTF forced photometry flux values to a fixed zeropoint.
-///
-/// Recomputes `psfFlux` and `psfFluxErr` in `fp_hists` from the raw IPAC
-/// `forcediffimflux` and `forcediffimfluxunc` fields, converting to nJy at
-/// the fixed ZTF_ZP = 23.9 zeropoint.
-///
-/// Formula: value = raw_value * 1e9 * 10^((23.9 - magzpsci) / 2.5)
-///
-/// Idempotent: since it always recomputes from raw fields, running this
-/// multiple times produces the same result.
-#[derive(Parser)]
-struct Cli {
-    /// Path to the configuration file
-    #[arg(long, value_name = "FILE")]
-    config: Option<String>,
-
-    /// Number of document IDs to collect per update_many batch
-    #[arg(long, default_value_t = 5000, value_parser = parse_positive_usize)]
-    batch_size: usize,
-    /// Whether or not validation should run after migration. Defaults to False (caution, it's very slow!)
-    #[arg(long, default_value_t = false)]
-    validate: bool,
+/// What a client may ask for.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct MigrateFpFluxParams {
+    /// Document ids collected per `update_many` batch.
+    #[serde(default = "default_batch_size")]
+    pub batch_size: usize,
+    /// Run the validation pass afterwards. Off by default: it recomputes
+    /// magnitudes for every forced-photometry point and is very slow.
+    #[serde(default)]
+    pub validate: bool,
 }
 
-/// Run batched updates by streaming IDs from a cursor and calling update_many
-/// with `{ _id: { $in: [...] } }` per batch.
-async fn run_batched_update(
-    collection: &mongodb::Collection<Document>,
-    filter: Document,
-    pipeline: Vec<Document>,
-    batch_size: usize,
-    estimated_total: u64,
-    label: &str,
-) -> i64 {
-    let pb = make_progress_bar(estimated_total, label.to_string());
+fn default_batch_size() -> usize {
+    5_000
+}
 
-    let mut cursor = match collection
-        .find(filter)
-        .projection(doc! { "_id": 1 })
-        .no_cursor_timeout(true)
+/// Upper bound on a batch, so a client cannot ask for one large enough to
+/// build a filter document Mongo will reject.
+const MAX_BATCH_SIZE: usize = 100_000;
+
+impl MigrateFpFluxParams {
+    pub fn validate_params(&self) -> Result<(), String> {
+        if self.batch_size == 0 || self.batch_size > MAX_BATCH_SIZE {
+            return Err(format!("batch_size must be between 1 and {MAX_BATCH_SIZE}"));
+        }
+        Ok(())
+    }
+}
+
+/// Run the migration.
+pub async fn run(
+    ctx: &TaskContext,
+    params: MigrateFpFluxParams,
+) -> Result<serde_json::Value, super::TaskError> {
+    let collection = ctx.db().collection::<Document>(COLLECTION);
+
+    let modified = migrate(ctx, &collection, params.batch_size)
         .await
-    {
-        Ok(c) => c,
-        Err(e) => {
-            error!("error querying documents: {}", e);
-            std::process::exit(1);
-        }
-    };
+        .map_err(|e| match e {
+            BatchError::Canceled { .. } => super::TaskError::Canceled,
+            other => super::TaskError::Failed(other.to_string()),
+        })?;
 
-    let mut ids: Vec<Bson> = Vec::with_capacity(batch_size);
-    let mut total_modified: i64 = 0;
-
-    while let Some(d) = cursor.try_next().await.unwrap() {
-        ids.push(d.get("_id").unwrap().clone());
-
-        if ids.len() >= batch_size {
-            let n = ids.len() as u64;
-            let batch_filter = doc! { "_id": { "$in": &ids } };
-            match collection.update_many(batch_filter, pipeline.clone()).await {
-                Ok(result) => {
-                    total_modified += result.modified_count as i64;
-                }
-                Err(e) => {
-                    error!("error writing batch: {}", e);
-                    std::process::exit(1);
-                }
-            }
-            pb.inc(n);
-            ids.clear();
-        }
+    if params.validate {
+        ctx.info("starting validation (this is slow)");
+        validate(ctx, &collection)
+            .await
+            .map_err(|e| super::TaskError::Failed(e.to_string()))?;
     }
 
-    if !ids.is_empty() {
-        let n = ids.len() as u64;
-        let batch_filter = doc! { "_id": { "$in": &ids } };
-        match collection.update_many(batch_filter, pipeline).await {
-            Ok(result) => {
-                total_modified += result.modified_count as i64;
-            }
-            Err(e) => {
-                error!("error writing final batch: {}", e);
-                std::process::exit(1);
-            }
-        }
-        pb.inc(n);
-    }
+    ctx.record_mutation(
+        MutationTarget {
+            database: ctx.db().name().to_string(),
+            collection: COLLECTION.to_string(),
+            catalog: None,
+            survey: Some("ztf".to_string()),
+        },
+        // Recompute rather than Backfill: every value is derived from fields
+        // already on the document, with no external source involved.
+        Operation::Recompute,
+        doc! {
+            "documents_modified": modified,
+            "batch_size": params.batch_size as i64,
+            "validated": params.validate,
+            "code_version": mongodb::bson::to_bson(&super::ledger::CodeVersion::current())
+                .unwrap_or(Bson::Null),
+        },
+    )
+    .await;
 
-    pb.finish();
-    total_modified
+    Ok(serde_json::json!({
+        "collection": COLLECTION,
+        "documents_modified": modified,
+        "validated": params.validate,
+    }))
 }
 
-#[tokio::main]
-async fn main() {
-    load_dotenv();
-
-    let subscriber = FmtSubscriber::builder()
-        .with_max_level(Level::INFO)
-        .finish();
-    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
-
-    let args = Cli::parse();
-
-    let default_config_path = "config.yaml".to_string();
-    let config_path = args.config.unwrap_or_else(|| {
-        tracing::warn!("no config file provided, using {}", default_config_path);
-        default_config_path
-    });
-    let config = AppConfig::from_path(&config_path).unwrap();
-
-    let db = match config.build_db().await {
-        Ok(db) => db,
-        Err(e) => {
-            error!("error building db: {}", e);
-            std::process::exit(1);
-        }
-    };
-
-    let collection = db.collection::<Document>("ZTF_alerts_aux");
-
-    migrate(&collection, args.batch_size).await;
-
-    // then validate
-    if args.validate {
-        info!("Starting validation...");
-        validate(&collection).await;
-    }
-}
-
-async fn migrate(collection: &mongodb::Collection<Document>, batch_size: usize) {
-    let estimated_count = match collection.estimated_document_count().await {
-        Ok(c) => c,
-        Err(e) => {
-            error!("error estimating document count: {}", e);
-            std::process::exit(1);
-        }
-    };
-    info!("Estimated ~{} documents in collection", estimated_count);
+async fn migrate(
+    ctx: &TaskContext,
+    collection: &mongodb::Collection<Document>,
+    batch_size: usize,
+) -> Result<i64, BatchError> {
+    let estimated_count = collection.estimated_document_count().await?;
+    ctx.info(format!(
+        "migrating fp_hists in {COLLECTION}: ~{estimated_count} documents"
+    ));
 
     // Only process documents that have fp_hists
     let filter = doc! {
@@ -232,6 +205,7 @@ async fn migrate(collection: &mongodb::Collection<Document>, batch_size: usize) 
     }];
 
     let total = run_batched_update(
+        ctx,
         collection,
         filter,
         pipeline,
@@ -239,12 +213,16 @@ async fn migrate(collection: &mongodb::Collection<Document>, batch_size: usize) 
         estimated_count,
         "migrate",
     )
-    .await;
+    .await?;
 
-    info!("Migration complete. Modified {} documents.", total);
+    ctx.info(format!("migration complete: {total} documents modified"));
+    Ok(total)
 }
 
-async fn validate(collection: &mongodb::Collection<Document>) {
+async fn validate(
+    ctx: &TaskContext,
+    collection: &mongodb::Collection<Document>,
+) -> Result<(), BatchError> {
     // here we want to validate that where the raw values are valid,
     // the psfFlux and psfFluxErr were correctly updated. We can do this by
     // taking the newly added psfFlux and psfFluxErr and checking that we
@@ -315,23 +293,8 @@ async fn validate(collection: &mongodb::Collection<Document>) {
         }
     }];
 
-    let estimated_count = match collection.estimated_document_count().await {
-        Ok(c) => c,
-        Err(e) => {
-            error!("error estimating document count: {}", e);
-            std::process::exit(1);
-        }
-    };
-
-    let pb = make_progress_bar(estimated_count, "validate".to_string());
-
-    let mut cursor = match collection.aggregate(pipeline).await {
-        Ok(c) => c,
-        Err(e) => {
-            error!("error running validation aggregation: {}", e);
-            std::process::exit(1);
-        }
-    };
+    let estimated_count = collection.estimated_document_count().await?;
+    let mut cursor = collection.aggregate(pipeline).await?;
 
     let mut num_validated = 0;
     let mut num_failed = 0;
@@ -339,7 +302,15 @@ async fn validate(collection: &mongodb::Collection<Document>) {
     let mut skipped_by_reason = HashMap::new();
     let mut failed_by_reason = HashMap::new();
 
-    while let Some(d) = cursor.try_next().await.unwrap() {
+    let mut seen: u64 = 0;
+    let mut last_reported: u64 = 0;
+
+    while let Some(d) = cursor.try_next().await? {
+        // Validation only reads, so stopping anywhere is safe.
+        if ctx.is_canceled() {
+            ctx.warn("validation canceled");
+            return Err(BatchError::Canceled { modified: 0 });
+        }
         let validation = d.get("validation").unwrap().as_array().unwrap();
         for fp in validation {
             let fp = fp.as_document().unwrap();
@@ -389,24 +360,109 @@ async fn validate(collection: &mongodb::Collection<Document>) {
             if (computed_magpsf - magpsf).abs() >= 1e-5 {
                 num_failed += 1;
                 *failed_by_reason.entry("magpsf_mismatch").or_insert(0) += 1;
-                error!("Validation failed for document {}: computed magpsf {}±{} vs existing magpsf {}±{}",
-                    d.get("_id").unwrap(), computed_magpsf, computed_sigmapsf, magpsf, sigmapsf);
+                ctx.warn(format!(
+                    "validation mismatch on {:?}: computed magpsf {computed_magpsf}±{computed_sigmapsf} \
+                     vs stored {magpsf}±{sigmapsf}",
+                    d.get("_id")
+                ));
             } else if (computed_sigmapsf - sigmapsf).abs() >= 1e-5 {
                 num_failed += 1;
                 *failed_by_reason.entry("sigmapsf_mismatch").or_insert(0) += 1;
-                error!("Validation failed for document {}: computed sigmapsf {} vs existing sigmapsf {}",
-                    d.get("_id").unwrap(), computed_sigmapsf, sigmapsf);
+                ctx.warn(format!(
+                    "validation mismatch on {:?}: computed sigmapsf {computed_sigmapsf} \
+                     vs stored {sigmapsf}",
+                    d.get("_id")
+                ));
             } else {
                 num_validated += 1;
             }
         }
-        pb.inc(1);
+        seen += 1;
+        if seen - last_reported >= PROGRESS_EVERY {
+            last_reported = seen;
+            ctx.progress(
+                seen,
+                estimated_count.max(seen),
+                format!("validate: {num_failed} mismatches so far"),
+            )
+            .await;
+        }
     }
 
-    info!(
-        "Validation complete. {} validated, {} failed, {} skipped.",
-        num_validated, num_failed, num_skipped
+    let summary = format!(
+        "validation complete: {num_validated} validated, {num_failed} failed, \
+         {num_skipped} skipped; skipped by reason {skipped_by_reason:?}, \
+         failed by reason {failed_by_reason:?}"
     );
-    info!("Skipped by reason: {:?}", skipped_by_reason);
-    info!("Failed by reason: {:?}", failed_by_reason);
+    // A mismatch means the migration produced values that do not round-trip
+    // back to the stored magnitudes, which is worth more than an info line.
+    if num_failed > 0 {
+        ctx.error(summary);
+    } else {
+        ctx.info(summary);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn params(batch_size: usize) -> MigrateFpFluxParams {
+        MigrateFpFluxParams {
+            batch_size,
+            validate: false,
+        }
+    }
+
+    #[test]
+    fn a_zero_batch_size_is_rejected() {
+        // Zero would collect no ids and update nothing, forever.
+        assert!(params(0).validate_params().is_err());
+    }
+
+    #[test]
+    fn an_absurd_batch_size_is_rejected() {
+        // A filter document with a million ids in `$in` is one Mongo refuses,
+        // and the run would fail deep in the loop rather than at submit.
+        assert!(params(MAX_BATCH_SIZE + 1).validate_params().is_err());
+        assert!(params(MAX_BATCH_SIZE).validate_params().is_ok());
+    }
+
+    #[test]
+    fn params_default_to_something_runnable() {
+        // The admin page can submit `{}` for this task.
+        let parsed: MigrateFpFluxParams =
+            serde_json::from_value(serde_json::json!({})).expect("defaults");
+        assert_eq!(parsed.batch_size, default_batch_size());
+        assert!(!parsed.validate, "validation is slow, so it is opt-in");
+        assert!(parsed.validate_params().is_ok());
+    }
+
+    #[test]
+    fn the_task_is_registered_and_declared_idempotent() {
+        // Idempotence is what lets the queue requeue a run whose lease lapsed;
+        // a task that is not idempotent must not claim to be.
+        let spec = crate::tasks::find(TASK_TYPE).expect("registered");
+        assert!(spec.idempotent);
+        // It recomputes from raw fields, never from its own previous output.
+        assert!(!spec.destructive);
+    }
+
+    #[test]
+    fn submitting_it_is_single_flight_across_the_whole_collection() {
+        // Unlike a catalog ingest, which is keyed per catalog, two of these
+        // would rewrite the same documents with the same pipeline.
+        let key = crate::tasks::single_flight_key(TASK_TYPE, &serde_json::json!({}));
+        assert_eq!(key, Some(mongodb::bson::doc! {}));
+    }
+
+    #[test]
+    fn bad_params_are_rejected_before_a_worker_ever_sees_them() {
+        assert!(
+            crate::tasks::validate_params(TASK_TYPE, &serde_json::json!({ "batch_size": 0 }))
+                .is_err()
+        );
+        assert!(crate::tasks::validate_params(TASK_TYPE, &serde_json::json!({})).is_ok());
+    }
 }

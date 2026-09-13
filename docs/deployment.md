@@ -504,3 +504,41 @@ Creating a user at Caltech does not itself create it at UMN, but the UMN side
 runs a recurring sync that carries accounts over, Babamul ones included, so
 both instances end up holding the same users.
 
+## Container images
+
+Two images are published to GHCR on release:
+
+| Image | Built by | Deployment-specific? |
+| --- | --- | --- |
+| `ghcr.io/boom-astro/boom` | `.github/workflows/build.yaml` | No — everything is config and environment at runtime. |
+| `ghcr.io/boom-astro/boom-frontend` | `.github/workflows/build-frontend.yaml` | **Partly** — see below. |
+
+Both are multi-arch (amd64 + arm64) and carry a build-provenance attestation.
+
+The deploy workflow **builds on the host** rather than pulling, and compose sets
+`pull_policy: build` on every service built from this repo. That is deliberate:
+with both an `image:` and a `build:`, compose otherwise pulls when the image is
+absent locally, which would silently run the registry's build instead of the
+checkout. Set `BOOM_IMAGE` to pull a specific tag or digest instead.
+
+### Why the frontend image is not fully generic
+
+Vite inlines `import.meta.env.VITE_*` into the JavaScript bundle at build time,
+so these are fixed when the image is built, not when it starts:
+
+- `VITE_PUBLIC_POSTHOG_KEY` / `VITE_PUBLIC_POSTHOG_HOST`
+- `VITE_PRERELEASE_MODE`
+- `VITE_KAFKA_DOMAIN` (from `DOMAIN`, shown on the Kafka docs page)
+
+The published image is therefore built with **neutral** values: analytics off,
+prerelease mode false, no Kafka domain. That is safe to pull anywhere — an image
+built with one deployment's PostHog key would send another deployment's
+analytics to the wrong project — but a deployment that wants any of those values
+must build its own, which is the default.
+
+The API origin is *not* in that list: it is injected at container start by
+`/docker-entrypoint.d/00-set-api-origin.sh`, which rewrites the nginx
+`proxy_pass` from `VITE_API_PROXY_TARGET`. Extending that same pattern to the
+values above — build with sentinels, sed them at startup — would make one image
+serve every deployment, and is the natural next step if pulling becomes
+preferable to building.

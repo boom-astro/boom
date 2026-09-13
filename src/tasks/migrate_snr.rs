@@ -1,122 +1,177 @@
-use std::collections::HashMap;
+//! The `migrate_snr` task: recompute signal-to-noise across ZTF and LSST.
+//!
+//! Recomputes `snr_psf`, `snr_ap`, and (for ZTF) `apFlux` / `apFluxErr` on
+//! alerts and on the lightcurves in the aux collections.
+//!
+//! For ZTF, `apFlux` and `apFluxErr` come from `magap` / `sigmagap`; for LSST
+//! they already exist on the DiaSource, so only the SNRs are recomputed. Either
+//! way the values derive from stored photometry, never from a previous run's
+//! output, which is what makes this **idempotent** -- and therefore safe for the
+//! queue to requeue after a lost lease.
+//!
+//! Ported from `src/bin/migrate_snr.rs`, which is now a thin wrapper. As with
+//! `migrate_fp_flux`, the move traded `process::exit` for errors, added
+//! cancellation checks at batch boundaries, and pointed progress at the run.
 
-use boom::conf::{load_dotenv, AppConfig};
-use boom::utils::data::make_progress_bar;
-use boom::utils::parser::parse_positive_usize;
-use clap::Parser;
+use super::batch::{run_batched_update, BatchError, PROGRESS_EVERY};
+use super::context::TaskContext;
+use super::ledger::{MutationTarget, Operation};
 use futures::TryStreamExt;
 use mongodb::bson::{doc, Bson, Document};
-use tracing::{error, info, Level};
-use tracing_subscriber::FmtSubscriber;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+// Per-document validation findings go to the process log rather than the run
+// log: there can be a great many of them, the run log is capped, and the run
+// gets the summary. They still reach Loki through the normal container path.
+use tracing::{error, info};
+use utoipa::ToSchema;
 
-/// Recompute `snr_psf`, `snr_ap`, `apFlux`, and `apFluxErr` for all ZTF and
-/// LSST alerts and their lightcurves (prv_candidates and fp_hists in the aux
-/// collections).
+/// Stable identifier for this task type.
+pub const TASK_TYPE: &str = "migrate_snr";
+
+/// Which surveys to migrate.
 ///
-/// For ZTF, `apFlux` and `apFluxErr` are computed from `magap` and `sigmagap`:
-///   flux_raw = 10^(-0.4 * (magap - ZTF_ZP))
-///   apFlux   = ±flux_raw * 1e9     (nJy, sign from isdiffpos)
-///   apFluxErr= (sigmagap / FACTOR) * flux_raw * 1e9   (nJy)
-/// and then SNR is computed as:
-///   snr_psf  = abs(psfFlux) / psfFluxErr
-///   snr_ap   = abs(apFlux)  / apFluxErr
-///
-/// For LSST, `apFlux` and `apFluxErr` already exist (from DiaSource), so we
-/// only recompute:
-///   snr_psf = abs(psfFlux) / psfFluxErr
-///   snr_ap  = abs(apFlux)  / apFluxErr
-///
-/// Idempotent: always recomputes from the stored flux / mag fields so running
-/// multiple times produces the same result.
-#[derive(Parser)]
-struct Cli {
-    /// Which survey(s) to migrate: ztf, lsst, or all
-    #[arg(long, default_value = "all")]
-    survey: String,
-
-    /// Path to the configuration file
-    #[arg(long, value_name = "FILE")]
-    config: Option<String>,
-
-    /// Number of document IDs to collect per update_many batch
-    #[arg(long, default_value_t = 5000, value_parser = parse_positive_usize)]
-    batch_size: usize,
-
-    /// Whether or not validation should run after migration. Defaults to false (caution, it's slow!)
-    #[arg(long, default_value_t = false)]
-    validate: bool,
+/// A closed set rather than a free string: the collections are named per
+/// variant, so an unrecognized value could only ever be a typo, and catching it
+/// at submit time beats a run that does nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum SnrSurvey {
+    Ztf,
+    Lsst,
+    All,
 }
 
-/// Run batched updates by streaming IDs from a cursor and calling update_many
-/// with `{ _id: { $in: [...] } }` per batch.
-async fn run_batched_update(
-    collection: &mongodb::Collection<Document>,
-    filter: Document,
-    pipeline: Vec<Document>,
-    batch_size: usize,
-    estimated_total: u64,
-    label: &str,
-) -> i64 {
-    let pb = make_progress_bar(estimated_total, label.to_string());
+impl SnrSurvey {
+    fn includes_ztf(&self) -> bool {
+        matches!(self, SnrSurvey::Ztf | SnrSurvey::All)
+    }
+    fn includes_lsst(&self) -> bool {
+        matches!(self, SnrSurvey::Lsst | SnrSurvey::All)
+    }
+}
 
-    let mut cursor = match collection
-        .find(filter)
-        .projection(doc! { "_id": 1 })
-        .no_cursor_timeout(true)
-        .await
-    {
-        Ok(c) => c,
-        Err(e) => {
-            error!("error querying documents: {}", e);
-            std::process::exit(1);
+/// What a client may ask for.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct MigrateSnrParams {
+    #[serde(default = "default_survey")]
+    pub survey: SnrSurvey,
+    /// Document ids collected per `update_many` batch.
+    #[serde(default = "default_batch_size")]
+    pub batch_size: usize,
+    /// Run the validation pass afterwards. Off by default: it re-derives every
+    /// magnitude and SNR to compare against what was written, and is slow.
+    #[serde(default)]
+    pub validate: bool,
+}
+
+fn default_survey() -> SnrSurvey {
+    SnrSurvey::All
+}
+
+fn default_batch_size() -> usize {
+    5_000
+}
+
+const MAX_BATCH_SIZE: usize = 100_000;
+
+impl MigrateSnrParams {
+    pub fn validate_params(&self) -> Result<(), String> {
+        if self.batch_size == 0 || self.batch_size > MAX_BATCH_SIZE {
+            return Err(format!("batch_size must be between 1 and {MAX_BATCH_SIZE}"));
         }
+        Ok(())
+    }
+}
+
+/// Run the migration.
+pub async fn run(
+    ctx: &TaskContext,
+    params: MigrateSnrParams,
+) -> Result<serde_json::Value, super::TaskError> {
+    let db = ctx.db().clone();
+    let to_task_error = |e: BatchError| match e {
+        BatchError::Canceled { .. } => super::TaskError::Canceled,
+        other => super::TaskError::Failed(other.to_string()),
     };
 
-    let mut ids: Vec<Bson> = Vec::with_capacity(batch_size);
-    let mut total_modified: i64 = 0;
+    let mut modified: i64 = 0;
+    let mut collections: Vec<&str> = Vec::new();
 
-    while let Some(d) = cursor.try_next().await.unwrap() {
-        ids.push(d.get("_id").unwrap().clone());
+    if params.survey.includes_ztf() {
+        ctx.info("migrating ZTF SNR fields");
+        modified += migrate_ztf_alerts(ctx, &db, params.batch_size)
+            .await
+            .map_err(to_task_error)?;
+        modified += migrate_ztf_alerts_aux(ctx, &db, params.batch_size)
+            .await
+            .map_err(to_task_error)?;
+        collections.extend(["ZTF_alerts", "ZTF_alerts_aux"]);
+    }
+    if params.survey.includes_lsst() {
+        ctx.info("migrating LSST SNR fields");
+        modified += migrate_lsst_alerts(ctx, &db, params.batch_size)
+            .await
+            .map_err(to_task_error)?;
+        modified += migrate_lsst_alerts_aux(ctx, &db, params.batch_size)
+            .await
+            .map_err(to_task_error)?;
+        collections.extend(["LSST_alerts", "LSST_alerts_aux"]);
+    }
 
-        if ids.len() >= batch_size {
-            let n = ids.len() as u64;
-            let batch_filter = doc! { "_id": { "$in": &ids } };
-            match collection.update_many(batch_filter, pipeline.clone()).await {
-                Ok(result) => {
-                    total_modified += result.modified_count as i64;
-                }
-                Err(e) => {
-                    error!("error writing batch: {}", e);
-                    std::process::exit(1);
-                }
-            }
-            pb.inc(n);
-            ids.clear();
+    if params.validate {
+        ctx.info("starting validation (this is slow)");
+        if params.survey.includes_ztf() {
+            validate_ztf_alerts(ctx, &db).await.map_err(to_task_error)?;
+            validate_ztf_alerts_aux(ctx, &db)
+                .await
+                .map_err(to_task_error)?;
+        }
+        if params.survey.includes_lsst() {
+            validate_lsst_alerts(ctx, &db)
+                .await
+                .map_err(to_task_error)?;
+            validate_lsst_alerts_aux(ctx, &db)
+                .await
+                .map_err(to_task_error)?;
         }
     }
 
-    if !ids.is_empty() {
-        let n = ids.len() as u64;
-        let batch_filter = doc! { "_id": { "$in": &ids } };
-        match collection.update_many(batch_filter, pipeline).await {
-            Ok(result) => {
-                total_modified += result.modified_count as i64;
-            }
-            Err(e) => {
-                error!("error writing final batch: {}", e);
-                std::process::exit(1);
-            }
-        }
-        pb.inc(n);
+    // One entry per collection touched, so "what has been done to
+    // ZTF_alerts_aux" is answerable without parsing a combined record.
+    for collection in &collections {
+        ctx.record_mutation(
+            MutationTarget {
+                database: db.name().to_string(),
+                collection: (*collection).to_string(),
+                catalog: None,
+                survey: Some(
+                    if collection.starts_with("ZTF") {
+                        "ztf"
+                    } else {
+                        "lsst"
+                    }
+                    .to_string(),
+                ),
+            },
+            Operation::Recompute,
+            doc! {
+                "documents_modified_total": modified,
+                "batch_size": params.batch_size as i64,
+                "validated": params.validate,
+                "code_version": mongodb::bson::to_bson(&super::ledger::CodeVersion::current())
+                    .unwrap_or(Bson::Null),
+            },
+        )
+        .await;
     }
 
-    pb.finish();
-    total_modified
+    Ok(serde_json::json!({
+        "collections": collections,
+        "documents_modified": modified,
+        "validated": params.validate,
+    }))
 }
-
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
 
 const ZTF_ZP: f64 = 23.9;
 const FACTOR: f64 = 1.0857362047581294; // 2.5 / ln(10)
@@ -241,7 +296,11 @@ fn ztf_ap_flux_err_expr(magap_ref: &str, sigmagap_ref: &str, existing_ref: &str)
 // ZTF migration
 // ---------------------------------------------------------------------------
 
-async fn migrate_ztf_alerts(db: &mongodb::Database, batch_size: usize) {
+async fn migrate_ztf_alerts(
+    ctx: &TaskContext,
+    db: &mongodb::Database,
+    batch_size: usize,
+) -> Result<i64, BatchError> {
     let collection = db.collection::<Document>("ZTF_alerts");
     let estimated = collection.estimated_document_count().await.unwrap_or(0);
     info!("ZTF_alerts: estimated ~{} documents", estimated);
@@ -263,6 +322,7 @@ async fn migrate_ztf_alerts(db: &mongodb::Database, batch_size: usize) {
     }];
 
     let total = run_batched_update(
+        ctx,
         &collection,
         doc! {},
         flux_pipeline,
@@ -270,8 +330,9 @@ async fn migrate_ztf_alerts(db: &mongodb::Database, batch_size: usize) {
         estimated,
         "ZTF_alerts apFlux",
     )
-    .await;
-    info!("ZTF_alerts apFlux: modified {} documents", total);
+    .await?;
+    ctx.info(format!("ZTF_alerts apFlux: modified {} documents", total));
+    let first_pass = total;
 
     // Second pass: recompute SNR from the (now present) flux fields
     let snr_pipeline = vec![doc! {
@@ -282,6 +343,7 @@ async fn migrate_ztf_alerts(db: &mongodb::Database, batch_size: usize) {
     }];
 
     let total = run_batched_update(
+        ctx,
         &collection,
         doc! {},
         snr_pipeline,
@@ -289,11 +351,18 @@ async fn migrate_ztf_alerts(db: &mongodb::Database, batch_size: usize) {
         estimated,
         "ZTF_alerts snr",
     )
-    .await;
-    info!("ZTF_alerts snr: modified {} documents", total);
+    .await?;
+    ctx.info(format!("ZTF_alerts snr: modified {} documents", total));
+    // Both passes touched the collection; report the work, not just the last
+    // pass, or the ledger under-counts what a run changed.
+    Ok(first_pass + total)
 }
 
-async fn migrate_ztf_alerts_aux(db: &mongodb::Database, batch_size: usize) {
+async fn migrate_ztf_alerts_aux(
+    ctx: &TaskContext,
+    db: &mongodb::Database,
+    batch_size: usize,
+) -> Result<i64, BatchError> {
     let collection = db.collection::<Document>("ZTF_alerts_aux");
     let estimated = collection.estimated_document_count().await.unwrap_or(0);
     info!("ZTF_alerts_aux: estimated ~{} documents", estimated);
@@ -332,6 +401,7 @@ async fn migrate_ztf_alerts_aux(db: &mongodb::Database, batch_size: usize) {
     };
 
     let total = run_batched_update(
+        ctx,
         &collection,
         filter,
         flux_pipeline,
@@ -339,8 +409,12 @@ async fn migrate_ztf_alerts_aux(db: &mongodb::Database, batch_size: usize) {
         estimated,
         "ZTF_alerts_aux apFlux",
     )
-    .await;
-    info!("ZTF_alerts_aux apFlux: modified {} documents", total);
+    .await?;
+    ctx.info(format!(
+        "ZTF_alerts_aux apFlux: modified {} documents",
+        total
+    ));
+    let first_pass = total;
 
     // Second pass: recompute all SNR fields (prv_candidates + fp_hists)
     let snr_pipeline = vec![doc! {
@@ -385,6 +459,7 @@ async fn migrate_ztf_alerts_aux(db: &mongodb::Database, batch_size: usize) {
     };
 
     let total = run_batched_update(
+        ctx,
         &collection,
         filter,
         snr_pipeline,
@@ -392,15 +467,20 @@ async fn migrate_ztf_alerts_aux(db: &mongodb::Database, batch_size: usize) {
         estimated,
         "ZTF_alerts_aux snr",
     )
-    .await;
-    info!("ZTF_alerts_aux snr: modified {} documents", total);
+    .await?;
+    ctx.info(format!("ZTF_alerts_aux snr: modified {} documents", total));
+    Ok(first_pass + total)
 }
 
 // ---------------------------------------------------------------------------
 // LSST migration
 // ---------------------------------------------------------------------------
 
-async fn migrate_lsst_alerts(db: &mongodb::Database, batch_size: usize) {
+async fn migrate_lsst_alerts(
+    ctx: &TaskContext,
+    db: &mongodb::Database,
+    batch_size: usize,
+) -> Result<i64, BatchError> {
     let collection = db.collection::<Document>("LSST_alerts");
     let estimated = collection.estimated_document_count().await.unwrap_or(0);
     info!("LSST_alerts: estimated ~{} documents", estimated);
@@ -418,6 +498,7 @@ async fn migrate_lsst_alerts(db: &mongodb::Database, batch_size: usize) {
     }];
 
     let total = run_batched_update(
+        ctx,
         &collection,
         doc! {},
         pipeline,
@@ -425,11 +506,16 @@ async fn migrate_lsst_alerts(db: &mongodb::Database, batch_size: usize) {
         estimated,
         "LSST_alerts snr+chipsf",
     )
-    .await;
-    info!("LSST_alerts: modified {} documents", total);
+    .await?;
+    ctx.info(format!("LSST_alerts: modified {} documents", total));
+    Ok(total)
 }
 
-async fn migrate_lsst_alerts_aux(db: &mongodb::Database, batch_size: usize) {
+async fn migrate_lsst_alerts_aux(
+    ctx: &TaskContext,
+    db: &mongodb::Database,
+    batch_size: usize,
+) -> Result<i64, BatchError> {
     let collection = db.collection::<Document>("LSST_alerts_aux");
     let estimated = collection.estimated_document_count().await.unwrap_or(0);
     info!("LSST_alerts_aux: estimated ~{} documents", estimated);
@@ -481,6 +567,7 @@ async fn migrate_lsst_alerts_aux(db: &mongodb::Database, batch_size: usize) {
     };
 
     let total = run_batched_update(
+        ctx,
         &collection,
         filter,
         pipeline,
@@ -488,8 +575,9 @@ async fn migrate_lsst_alerts_aux(db: &mongodb::Database, batch_size: usize) {
         estimated,
         "LSST_alerts_aux snr",
     )
-    .await;
-    info!("LSST_alerts_aux: modified {} documents", total);
+    .await?;
+    ctx.info(format!("LSST_alerts_aux: modified {} documents", total));
+    Ok(total)
 }
 
 // ---------------------------------------------------------------------------
@@ -602,11 +690,11 @@ fn validate_entry(
 ) {
     // --- apFlux / apFluxErr validation (magap round-trip) ---
     if has_ap {
-        let ap_flux = entry.get("apFlux").and_then(|v| get_f64(v));
-        let magap = entry.get("magap").and_then(|v| get_f64(v));
-        let sigmagap = entry.get("sigmagap").and_then(|v| get_f64(v));
-        let computed_magap = entry.get("computed_magap").and_then(|v| get_f64(v));
-        let computed_sigmagap = entry.get("computed_sigmagap").and_then(|v| get_f64(v));
+        let ap_flux = entry.get("apFlux").and_then(get_f64);
+        let magap = entry.get("magap").and_then(get_f64);
+        let sigmagap = entry.get("sigmagap").and_then(get_f64);
+        let computed_magap = entry.get("computed_magap").and_then(get_f64);
+        let computed_sigmagap = entry.get("computed_sigmagap").and_then(get_f64);
 
         match (ap_flux, magap, sigmagap, computed_magap, computed_sigmagap) {
             (Some(_), Some(orig_mag), Some(orig_sig), Some(comp_mag), Some(comp_sig)) => {
@@ -639,8 +727,8 @@ fn validate_entry(
     }
 
     // --- SNR PSF validation ---
-    let snr_psf = entry.get("snr_psf").and_then(|v| get_f64(v));
-    let computed_snr_psf = entry.get("computed_snr_psf").and_then(|v| get_f64(v));
+    let snr_psf = entry.get("snr_psf").and_then(get_f64);
+    let computed_snr_psf = entry.get("computed_snr_psf").and_then(get_f64);
     match (snr_psf, computed_snr_psf) {
         (Some(stored), Some(expected)) => {
             if (stored - expected).abs() / expected.abs().max(1e-12) >= tolerance {
@@ -659,8 +747,8 @@ fn validate_entry(
 
     // --- SNR AP validation ---
     if has_ap {
-        let snr_ap = entry.get("snr_ap").and_then(|v| get_f64(v));
-        let computed_snr_ap = entry.get("computed_snr_ap").and_then(|v| get_f64(v));
+        let snr_ap = entry.get("snr_ap").and_then(get_f64);
+        let computed_snr_ap = entry.get("computed_snr_ap").and_then(get_f64);
         match (snr_ap, computed_snr_ap) {
             (Some(stored), Some(expected)) => {
                 if (stored - expected).abs() / expected.abs().max(1e-12) >= tolerance {
@@ -680,8 +768,8 @@ fn validate_entry(
 
     // --- chipsf validation ---
     if has_chipsf {
-        let chipsf = entry.get("chipsf").and_then(|v| get_f64(v));
-        let computed_chipsf = entry.get("computed_chipsf").and_then(|v| get_f64(v));
+        let chipsf = entry.get("chipsf").and_then(get_f64);
+        let computed_chipsf = entry.get("computed_chipsf").and_then(get_f64);
         match (chipsf, computed_chipsf) {
             (Some(stored), Some(expected)) => {
                 if (stored - expected).abs() / expected.abs().max(1e-12) >= tolerance {
@@ -718,7 +806,7 @@ fn get_f64(v: &Bson) -> Option<f64> {
 // ZTF validation
 // ---------------------------------------------------------------------------
 
-async fn validate_ztf_alerts(db: &mongodb::Database) {
+async fn validate_ztf_alerts(ctx: &TaskContext, db: &mongodb::Database) -> Result<(), BatchError> {
     let collection = db.collection::<Document>("ZTF_alerts");
     let estimated = collection.estimated_document_count().await.unwrap_or(0);
 
@@ -740,7 +828,7 @@ async fn validate_ztf_alerts(db: &mongodb::Database) {
                             { "$ne": ["$candidate.apFlux", Bson::Null] },
                             { "$gt": [{ "$abs": "$candidate.apFlux" }, 0.0_f64] },
                         ]},
-                        "then": computed_mag_expr("$candidate.apFlux", 1e9, ZTF_ZP as f64),
+                        "then": computed_mag_expr("$candidate.apFlux", 1e9, ZTF_ZP),
                         "else": Bson::Null,
                     }
                 },
@@ -781,28 +869,39 @@ async fn validate_ztf_alerts(db: &mongodb::Database) {
         }
     }];
 
-    let pb = make_progress_bar(estimated, "validate ZTF_alerts".to_string());
-
-    let mut cursor = match collection.aggregate(pipeline).await {
-        Ok(c) => c,
-        Err(e) => {
-            error!("error running validation aggregation: {}", e);
-            return;
-        }
-    };
+    let mut cursor = collection.aggregate(pipeline).await?;
 
     let mut counters = ValidationCounters::new();
-    while let Some(d) = cursor.try_next().await.unwrap() {
+    let mut seen: u64 = 0;
+    let mut last_reported: u64 = 0;
+    while let Some(d) = cursor.try_next().await? {
+        // Validation only reads, so stopping anywhere is safe.
+        if ctx.is_canceled() {
+            ctx.warn("validation canceled");
+            return Err(BatchError::Canceled { modified: 0 });
+        }
+        seen += 1;
+        if seen - last_reported >= PROGRESS_EVERY {
+            last_reported = seen;
+            ctx.progress(
+                seen,
+                estimated.max(seen),
+                format!("validating {seen} documents"),
+            )
+            .await;
+        }
         let doc_id = d.get("_id").unwrap().clone();
         let entry = d.get_document("validation").unwrap();
         validate_entry(entry, &doc_id, &mut counters, true, false, 1e-4);
-        pb.inc(1);
     }
-    pb.finish();
     counters.report("ZTF_alerts");
+    Ok(())
 }
 
-async fn validate_ztf_alerts_aux(db: &mongodb::Database) {
+async fn validate_ztf_alerts_aux(
+    ctx: &TaskContext,
+    db: &mongodb::Database,
+) -> Result<(), BatchError> {
     let collection = db.collection::<Document>("ZTF_alerts_aux");
     let estimated = collection.estimated_document_count().await.unwrap_or(0);
 
@@ -827,7 +926,7 @@ async fn validate_ztf_alerts_aux(db: &mongodb::Database) {
                                     { "$ne": ["$$pc.apFlux", Bson::Null] },
                                     { "$gt": [{ "$abs": "$$pc.apFlux" }, 0.0_f64] },
                                 ]},
-                                "then": computed_mag_expr("$$pc.apFlux", 1e9, ZTF_ZP as f64),
+                                "then": computed_mag_expr("$$pc.apFlux", 1e9, ZTF_ZP),
                                 "else": Bson::Null,
                             }
                         },
@@ -892,18 +991,27 @@ async fn validate_ztf_alerts_aux(db: &mongodb::Database) {
         }
     }];
 
-    let pb = make_progress_bar(estimated, "validate ZTF_alerts_aux".to_string());
-
-    let mut cursor = match collection.aggregate(pipeline).await {
-        Ok(c) => c,
-        Err(e) => {
-            error!("error running validation aggregation: {}", e);
-            return;
-        }
-    };
+    let mut cursor = collection.aggregate(pipeline).await?;
 
     let mut counters = ValidationCounters::new();
-    while let Some(d) = cursor.try_next().await.unwrap() {
+    let mut seen: u64 = 0;
+    let mut last_reported: u64 = 0;
+    while let Some(d) = cursor.try_next().await? {
+        // Validation only reads, so stopping anywhere is safe.
+        if ctx.is_canceled() {
+            ctx.warn("validation canceled");
+            return Err(BatchError::Canceled { modified: 0 });
+        }
+        seen += 1;
+        if seen - last_reported >= PROGRESS_EVERY {
+            last_reported = seen;
+            ctx.progress(
+                seen,
+                estimated.max(seen),
+                format!("validating {seen} documents"),
+            )
+            .await;
+        }
         let doc_id = d.get("_id").unwrap().clone();
         // prv_candidates
         if let Ok(arr) = d.get_array("prv_validation") {
@@ -921,17 +1029,16 @@ async fn validate_ztf_alerts_aux(db: &mongodb::Database) {
                 }
             }
         }
-        pb.inc(1);
     }
-    pb.finish();
     counters.report("ZTF_alerts_aux");
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
 // LSST validation
 // ---------------------------------------------------------------------------
 
-async fn validate_lsst_alerts(db: &mongodb::Database) {
+async fn validate_lsst_alerts(ctx: &TaskContext, db: &mongodb::Database) -> Result<(), BatchError> {
     let collection = db.collection::<Document>("LSST_alerts");
     let estimated = collection.estimated_document_count().await.unwrap_or(0);
 
@@ -997,28 +1104,39 @@ async fn validate_lsst_alerts(db: &mongodb::Database) {
         }
     }];
 
-    let pb = make_progress_bar(estimated, "validate LSST_alerts".to_string());
-
-    let mut cursor = match collection.aggregate(pipeline).await {
-        Ok(c) => c,
-        Err(e) => {
-            error!("error running validation aggregation: {}", e);
-            return;
-        }
-    };
+    let mut cursor = collection.aggregate(pipeline).await?;
 
     let mut counters = ValidationCounters::new();
-    while let Some(d) = cursor.try_next().await.unwrap() {
+    let mut seen: u64 = 0;
+    let mut last_reported: u64 = 0;
+    while let Some(d) = cursor.try_next().await? {
+        // Validation only reads, so stopping anywhere is safe.
+        if ctx.is_canceled() {
+            ctx.warn("validation canceled");
+            return Err(BatchError::Canceled { modified: 0 });
+        }
+        seen += 1;
+        if seen - last_reported >= PROGRESS_EVERY {
+            last_reported = seen;
+            ctx.progress(
+                seen,
+                estimated.max(seen),
+                format!("validating {seen} documents"),
+            )
+            .await;
+        }
         let doc_id = d.get("_id").unwrap().clone();
         let entry = d.get_document("validation").unwrap();
         validate_entry(entry, &doc_id, &mut counters, true, true, 1e-4);
-        pb.inc(1);
     }
-    pb.finish();
     counters.report("LSST_alerts");
+    Ok(())
 }
 
-async fn validate_lsst_alerts_aux(db: &mongodb::Database) {
+async fn validate_lsst_alerts_aux(
+    ctx: &TaskContext,
+    db: &mongodb::Database,
+) -> Result<(), BatchError> {
     let collection = db.collection::<Document>("LSST_alerts_aux");
     let estimated = collection.estimated_document_count().await.unwrap_or(0);
 
@@ -1110,18 +1228,27 @@ async fn validate_lsst_alerts_aux(db: &mongodb::Database) {
         }
     }];
 
-    let pb = make_progress_bar(estimated, "validate LSST_alerts_aux".to_string());
-
-    let mut cursor = match collection.aggregate(pipeline).await {
-        Ok(c) => c,
-        Err(e) => {
-            error!("error running validation aggregation: {}", e);
-            return;
-        }
-    };
+    let mut cursor = collection.aggregate(pipeline).await?;
 
     let mut counters = ValidationCounters::new();
-    while let Some(d) = cursor.try_next().await.unwrap() {
+    let mut seen: u64 = 0;
+    let mut last_reported: u64 = 0;
+    while let Some(d) = cursor.try_next().await? {
+        // Validation only reads, so stopping anywhere is safe.
+        if ctx.is_canceled() {
+            ctx.warn("validation canceled");
+            return Err(BatchError::Canceled { modified: 0 });
+        }
+        seen += 1;
+        if seen - last_reported >= PROGRESS_EVERY {
+            last_reported = seen;
+            ctx.progress(
+                seen,
+                estimated.max(seen),
+                format!("validating {seen} documents"),
+            )
+            .await;
+        }
         let doc_id = d.get("_id").unwrap().clone();
         if let Ok(arr) = d.get_array("prv_validation") {
             for item in arr {
@@ -1137,75 +1264,74 @@ async fn validate_lsst_alerts_aux(db: &mongodb::Database) {
                 }
             }
         }
-        pb.inc(1);
     }
-    pb.finish();
     counters.report("LSST_alerts_aux");
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
 
-#[tokio::main]
-async fn main() {
-    load_dotenv();
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    let subscriber = FmtSubscriber::builder()
-        .with_max_level(Level::INFO)
-        .finish();
-    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
-
-    let args = Cli::parse();
-
-    let default_config_path = "config.yaml".to_string();
-    let config_path = args.config.unwrap_or_else(|| {
-        tracing::warn!("no config file provided, using {}", default_config_path);
-        default_config_path
-    });
-    let config = AppConfig::from_path(&config_path).unwrap();
-
-    let db = match config.build_db().await {
-        Ok(db) => db,
-        Err(e) => {
-            error!("error building db: {}", e);
-            std::process::exit(1);
-        }
-    };
-
-    let survey = args.survey.to_lowercase();
-
-    if survey == "ztf" || survey == "all" {
-        info!("=== Migrating ZTF SNR fields ===");
-        migrate_ztf_alerts(&db, args.batch_size).await;
-        migrate_ztf_alerts_aux(&db, args.batch_size).await;
+    #[test]
+    fn survey_selection_covers_the_right_collections() {
+        assert!(SnrSurvey::All.includes_ztf() && SnrSurvey::All.includes_lsst());
+        assert!(SnrSurvey::Ztf.includes_ztf() && !SnrSurvey::Ztf.includes_lsst());
+        assert!(SnrSurvey::Lsst.includes_lsst() && !SnrSurvey::Lsst.includes_ztf());
     }
 
-    if survey == "lsst" || survey == "all" {
-        info!("=== Migrating LSST SNR fields ===");
-        migrate_lsst_alerts(&db, args.batch_size).await;
-        migrate_lsst_alerts_aux(&db, args.batch_size).await;
+    #[test]
+    fn an_unknown_survey_is_rejected_at_submit() {
+        // A closed set rather than a free string: the collections are named per
+        // variant, so a typo could only ever produce a run that does nothing.
+        assert!(
+            crate::tasks::validate_params(TASK_TYPE, &serde_json::json!({ "survey": "ztff" }))
+                .is_err()
+        );
+        assert!(
+            crate::tasks::validate_params(TASK_TYPE, &serde_json::json!({ "survey": "ztf" }))
+                .is_ok()
+        );
     }
 
-    if survey != "ztf" && survey != "lsst" && survey != "all" {
-        error!("Unknown survey '{}'. Use ztf, lsst, or all.", survey);
-        std::process::exit(1);
+    #[test]
+    fn params_default_to_migrating_everything() {
+        let parsed: MigrateSnrParams =
+            serde_json::from_value(serde_json::json!({})).expect("defaults");
+        assert_eq!(parsed.survey, SnrSurvey::All);
+        assert_eq!(parsed.batch_size, default_batch_size());
+        assert!(!parsed.validate, "validation is slow, so it is opt-in");
     }
 
-    info!("SNR migration complete.");
+    #[test]
+    fn batch_size_is_bounded() {
+        let bad = MigrateSnrParams {
+            survey: SnrSurvey::All,
+            batch_size: 0,
+            validate: false,
+        };
+        assert!(bad.validate_params().is_err());
+    }
 
-    if args.validate {
-        info!("Starting validation...");
-        if survey == "ztf" || survey == "all" {
-            info!("=== Validating ZTF ===");
-            validate_ztf_alerts(&db).await;
-            validate_ztf_alerts_aux(&db).await;
-        }
-        if survey == "lsst" || survey == "all" {
-            info!("=== Validating LSST ===");
-            validate_lsst_alerts(&db).await;
-            validate_lsst_alerts_aux(&db).await;
-        }
-        info!("Validation complete.");
+    #[test]
+    fn the_task_is_registered_and_retryable() {
+        // It derives from stored photometry rather than its own output, so the
+        // queue may resume it after a lost lease.
+        assert!(crate::tasks::is_retryable(TASK_TYPE));
+        assert!(!crate::tasks::find(TASK_TYPE).unwrap().destructive);
+    }
+
+    #[test]
+    fn single_flight_is_keyed_by_survey() {
+        // Migrating ZTF and LSST at once is fine; two runs over the same survey
+        // would rewrite the same documents.
+        assert_eq!(
+            crate::tasks::single_flight_key(TASK_TYPE, &serde_json::json!({ "survey": "ztf" })),
+            Some(mongodb::bson::doc! { "survey": "ztf" })
+        );
     }
 }
