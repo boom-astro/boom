@@ -9,6 +9,7 @@ use crate::utils::moc::{
     parse_3d_skymap_bytes, select_covering_depth_bounded, CredibleVolumeIndex, HpxMoc,
     LIGO3dskymap, Skymap3dError,
 };
+use crate::utils::spatial::get_f64_from_doc;
 use actix_web::{get, post, web, HttpResponse};
 use base64::prelude::*;
 use futures::TryStreamExt;
@@ -629,17 +630,15 @@ fn extract_host_redshifts(cross_matches: Option<&Document>) -> Vec<f64> {
         for v in arr {
             let Some(m) = v.as_document() else { continue };
             let Some(p) = priority(m) else { continue };
-            let Some(z) = m
-                .get_f64(z_field)
-                .ok()
-                .filter(|&z| z.is_finite() && z > 0.0)
-            else {
+            // get_f64_from_doc, not Document::get_f64: the catalogs store some of
+            // these as Int32/Int64 and get_f64 silently rejects those.
+            let Some(z) = get_f64_from_doc(m, z_field).filter(|&z| z > 0.0) else {
                 continue;
             };
-            let Some(ra) = m.get_f64("ra").ok() else {
+            let Some(ra) = get_f64_from_doc(m, "ra") else {
                 continue;
             };
-            let Some(dec) = m.get_f64("dec").ok() else {
+            let Some(dec) = get_f64_from_doc(m, "dec") else {
                 continue;
             };
             ranked.push((p, ra, dec, z));
@@ -656,7 +655,7 @@ fn extract_host_redshifts(cross_matches: Option<&Document>) -> Vec<f64> {
             if m.get_str("spectype").map(|s| s == "STAR").unwrap_or(false) {
                 return None;
             }
-            Some(if m.get_i64("zwarn").unwrap_or(1) == 0 {
+            Some(if get_f64_from_doc(m, "zwarn").unwrap_or(1.0) == 0.0 {
                 0
             } else {
                 2
@@ -1295,6 +1294,38 @@ mod tests {
             ),
         ]);
         assert_eq!(extract_host_redshifts(Some(&cm)), vec![0.40]);
+    }
+
+    #[test]
+    fn test_desi_zwarn_is_read_whatever_its_bson_int_width() {
+        // zwarn arrives as Int32 in the imported catalogs; Document::get_i64
+        // rejects that, which used to demote every clean spec-z to the bad tier.
+        let cm = cross_matches(vec![
+            (
+                "NED",
+                doc! { "ra": 10.0, "dec": 20.0, "z": 0.11, "z_tech": "SPEC" },
+            ),
+            (
+                "DESI_DR1",
+                doc! { "ra": 10.0, "dec": 20.0, "z": 0.40, "zwarn": 0_i32 },
+            ),
+        ]);
+        assert_eq!(extract_host_redshifts(Some(&cm)), vec![0.40]);
+    }
+
+    #[test]
+    fn test_desi_flagged_redshift_ranks_below_ned_spec() {
+        let cm = cross_matches(vec![
+            (
+                "NED",
+                doc! { "ra": 10.0, "dec": 20.0, "z": 0.11, "z_tech": "SPEC" },
+            ),
+            (
+                "DESI_DR1",
+                doc! { "ra": 10.0, "dec": 20.0, "z": 0.40, "zwarn": 4_i32 },
+            ),
+        ]);
+        assert_eq!(extract_host_redshifts(Some(&cm)), vec![0.11]);
     }
 
     #[test]
