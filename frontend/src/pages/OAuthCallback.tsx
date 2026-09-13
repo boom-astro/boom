@@ -1,23 +1,17 @@
 import { useEffect, useRef, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 import api from "@/lib/api";
 import { ensureProfileLoaded, useAppStore } from "@/lib/store";
 import * as analytics from "@/lib/analytics";
+import { safeNext } from "@/lib/oauth";
 import { Loader } from "@/components/ui/loader";
+import { SignInError } from "@/components/sign-in-error";
 
-/**
- * Landing spot for a social sign-in.
- *
- * The API redirects here with the result in the URL *fragment* — browsers
- * never transmit fragments, so the token stays out of server logs and
- * `Referer` headers. We read it, hand it to the token store, and scrub it from
- * the address bar before navigating on.
- */
+/** The API returns the token in the URL fragment, which browsers never transmit. */
 export default function OAuthCallback() {
   const navigate = useNavigate();
   const [error, setError] = useState<string | null>(null);
-  // React 18 mounts effects twice in StrictMode; the fragment is consumed
-  // destructively, so guard against running this a second time.
+  // StrictMode mounts effects twice, and the fragment below is consumed destructively.
   const handled = useRef(false);
 
   useEffect(() => {
@@ -28,7 +22,7 @@ export default function OAuthCallback() {
     const failure = params.get("error");
     const accessToken = params.get("access_token");
 
-    // Drop the fragment either way so a refresh or a shared URL can't replay it.
+    // Before the early returns: a fragment left in place can be replayed by a refresh or a share.
     window.history.replaceState(null, "", window.location.pathname);
 
     if (failure) {
@@ -47,44 +41,24 @@ export default function OAuthCallback() {
       token_type: params.get("token_type") || "Bearer",
       expires_in: Number.isFinite(expiresIn) && expiresIn > 0 ? expiresIn : undefined,
     });
-    // The token just changed, so whatever profile the store is holding belongs
-    // to whoever was signed in before. Drop it: a cached profile still inside
-    // its five-minute window would otherwise survive the switch and leave the
-    // sidebar and protected pages showing the previous account.
+    // The store's five-minute freshness window would otherwise serve the previous account.
     useAppStore.getState().clearProfile();
 
-    const next = params.get("next");
-    // Only in-app paths; the API already filters these, this is belt and braces.
-    const destination = next && next.startsWith("/") && !next.startsWith("//") ? next : "/query";
+    const destination = safeNext(params.get("next"));
 
     (async () => {
       try {
         const profile = await ensureProfileLoaded({ force: true });
-        if (profile) {
-          analytics.identifyUser(profile.id ?? profile.username ?? profile.email, profile.email);
-        }
-        analytics.trackLoginSuccess({ email: profile?.email });
+        if (profile) analytics.identifyProfile(profile);
+        analytics.trackLoginSuccess();
       } catch (err) {
-        // A profile hiccup shouldn't strand a user who is already signed in.
         console.error("OAuthCallback: could not load profile", err);
       }
       navigate(destination, { replace: true });
     })();
   }, [navigate]);
 
-  if (error) {
-    return (
-      <div className="w-full max-w-lg mx-auto p-4">
-        <div className="rounded-md border border-destructive/40 bg-destructive/10 p-4">
-          <h1 className="font-medium mb-1">Sign-in failed</h1>
-          <p className="text-sm text-muted-foreground">{error}</p>
-          <Link to="/login" className="mt-3 inline-block text-sm underline">
-            Back to login
-          </Link>
-        </div>
-      </div>
-    );
-  }
+  if (error) return <SignInError title="Sign-in failed">{error}</SignInError>;
 
   return <Loader />;
 }

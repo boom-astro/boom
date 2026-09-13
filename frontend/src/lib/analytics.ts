@@ -1,126 +1,60 @@
-/**
- * PostHog Analytics Utility
- * Event tracking for common user activities
- */
+import posthog, { type Properties } from 'posthog-js';
+import type { Profile } from '@/lib/api';
 
-import posthog from 'posthog-js';
+type SearchProps = Record<string, unknown>;
 
-// Signup & Authentication
-
-export function trackSignupInitiated(properties?: { email?: string }) {
-  posthog.capture('signup_initiated', properties);
+function event<P extends Properties>(name: string) {
+  return (properties?: P) => posthog.capture(name, properties);
 }
 
-export function trackSignupEmailSubmitted(properties?: { email?: string }) {
-  posthog.capture('signup_email_submitted', properties);
+/** Takes no properties, so an address cannot be attached to it by accident. */
+function bareEvent(name: string) {
+  return () => posthog.capture(name);
 }
 
-export function trackActivationCodeSubmitted(properties?: { email?: string }) {
-  posthog.capture('activation_code_submitted', properties);
-}
+export const trackSignupInitiated = bareEvent('signup_initiated');
+export const trackSignupEmailSubmitted = bareEvent('signup_email_submitted');
+export const trackActivationCodeSubmitted = bareEvent('activation_code_submitted');
+export const trackAccountActivated = event<{ via_link?: boolean }>('account_activated');
+export const trackLoginSuccess = bareEvent('login_success');
 
-export function trackAccountActivated(properties?: { email?: string; via_link?: boolean }) {
-  posthog.capture('account_activated', properties);
-}
+export const trackKafkaCredentialCreateInitiated = event<{ credential_name?: string }>('kafka_credential_create_initiated');
+export const trackKafkaCredentialCreated = event<{ credential_id?: string; credential_name?: string }>('kafka_credential_created');
+export const trackKafkaCredentialDeleted = event<{ credential_id?: string }>('kafka_credential_deleted');
+export const trackCredentialSecretToggled = event<{ credential_id?: string; revealed?: boolean }>('credential_secret_toggled');
+export const trackCredentialCopied = event<{ label?: string }>('credential_copied');
 
-export function trackLoginSuccess(properties?: { email?: string }) {
-  posthog.capture('login_success', properties);
-}
+export const trackApiTokenCreateInitiated = event<{ token_name?: string; expiry_days?: number }>('api_token_create_initiated');
+export const trackApiTokenCreated = event<{ token_id?: string; token_name?: string; expiry_days?: number }>('api_token_created');
+export const trackApiTokenDeleted = event<{ token_id?: string }>('api_token_deleted');
 
-// Kafka Credentials
+export const trackAlertSearchSubmitted = event<SearchProps>('alert_search_submitted');
+export const trackAlertSearchCompleted = event<SearchProps>('alert_search_completed');
+export const trackObjectSearchSubmitted = event<SearchProps>('object_search_submitted');
+export const trackObjectSearchCompleted = event<SearchProps>('object_search_completed');
 
-export function trackKafkaCredentialCreateInitiated(properties?: { credential_name?: string }) {
-  posthog.capture('kafka_credential_create_initiated', properties);
-}
-
-export function trackKafkaCredentialCreated(properties?: { credential_id?: string; credential_name?: string }) {
-  posthog.capture('kafka_credential_created', properties);
-}
-
-export function trackKafkaCredentialDeleted(properties?: { credential_id?: string }) {
-  posthog.capture('kafka_credential_deleted', properties);
-}
-
-export function trackCredentialSecretToggled(properties?: { credential_id?: string; revealed?: boolean }) {
-  posthog.capture('credential_secret_toggled', properties);
-}
-
-export function trackCredentialCopied(properties?: { label?: string }) {
-  posthog.capture('credential_copied', properties);
-}
-
-// API Tokens
-
-export function trackApiTokenCreateInitiated(properties?: { token_name?: string; expiry_days?: number }) {
-  posthog.capture('api_token_create_initiated', properties);
-}
-
-export function trackApiTokenCreated(properties?: { token_id?: string; token_name?: string; expiry_days?: number }) {
-  posthog.capture('api_token_created', properties);
-}
-
-export function trackApiTokenDeleted(properties?: { token_id?: string }) {
-  posthog.capture('api_token_deleted', properties);
-}
-
-export function trackTokenCopied(properties?: { label?: string }) {
-  posthog.capture('token_copied', properties);
-}
-
-// Search & Queries
-
-export function trackAlertSearchSubmitted(properties?: Record<string, unknown>) {
-  posthog.capture('alert_search_submitted', properties);
-}
-
-export function trackAlertSearchCompleted(properties?: Record<string, unknown>) {
-  posthog.capture('alert_search_completed', properties);
-}
-
-export function trackObjectSearchSubmitted(properties?: Record<string, unknown>) {
-  posthog.capture('object_search_submitted', properties);
-}
-
-export function trackObjectSearchCompleted(properties?: Record<string, unknown>) {
-  posthog.capture('object_search_completed', properties);
-}
-
-/**
- * Track an error that occurred in the application
- */
-export function trackError(
-  context: string,
-  error: unknown,
-  additionalInfo?: Record<string, unknown>
-) {
-  const errorMessage = error instanceof Error ? error.message : String(error);
+export function trackError(context: string, error: unknown, additionalInfo?: SearchProps) {
   posthog.capture('error_occurred', {
     category: 'error',
     context,
-    error_message: errorMessage,
+    error_message: error instanceof Error ? error.message : String(error),
     ...additionalInfo,
   });
 }
 
-/**
- * Set user properties after signup/login
- */
-export function setUserProperties(properties: Record<string, unknown>) {
-  posthog.setPersonProperties(properties);
+export function identifyUser(userId: string, username?: string) {
+  const previousId = posthog.get_distinct_id();
+  posthog.identify(userId);
+  // Alias after identify: identify skips its distinct_id switch when handed the registered __alias.
+  if (previousId && previousId === username && previousId !== userId) {
+    posthog.alias(userId, previousId);
+  }
 }
 
-/**
- * Identify user by email or ID
- */
-export function identifyUser(userId: string, email?: string) {
-  posthog.identify(userId, {
-    email,
-  });
+export function identifyProfile(profile: NonNullable<Profile>) {
+  identifyUser(profile.id ?? profile.username, profile.username);
 }
 
-/**
- * Reset user identity on logout
- */
 export function resetUser() {
   posthog.reset();
 }

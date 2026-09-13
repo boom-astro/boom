@@ -49,7 +49,7 @@ export default function SignupPage() {
     setError(null);
     setMessage(null);
     setLoading(true);
-    analytics.trackSignupInitiated({ email });
+    analytics.trackSignupInitiated();
     try {
       const res = await fetch(`${API_BASE}/signup`, {
         method: 'POST',
@@ -71,11 +71,11 @@ export default function SignupPage() {
         setMessage('An email has been sent with an activation code. Check your inbox.');
         setStep('code');
       }
-      analytics.trackSignupEmailSubmitted({ email });
+      analytics.trackSignupEmailSubmitted();
     } catch (err: unknown) {
       const msg = err && typeof err === 'object' && 'message' in err ? String((err as { message?: unknown }).message) : String(err);
       setError(msg);
-      analytics.trackError('signup_email_submission', err, { email });
+      analytics.trackError('signup_email_submission', err);
     } finally {
       setLoading(false);
     }
@@ -85,7 +85,7 @@ export default function SignupPage() {
     e?.preventDefault();
     setError(null);
     setLoading(true);
-    analytics.trackActivationCodeSubmitted({ email });
+    analytics.trackActivationCodeSubmitted();
     try {
       const res = await fetch(`${API_BASE}/activate`, {
         method: 'POST',
@@ -108,11 +108,11 @@ export default function SignupPage() {
         setMessage('An account with this email is already activated.');
         setStep('done');
       }
-      analytics.trackAccountActivated({ email });
+      analytics.trackAccountActivated();
     } catch (err: unknown) {
       const msg = err && typeof err === 'object' && 'message' in err ? String((err as { message?: unknown }).message) : String(err);
       setError(msg);
-      analytics.trackError('account_activation', err, { email });
+      analytics.trackError('account_activation', err);
     } finally {
       setLoading(false);
     }
@@ -143,11 +143,11 @@ export default function SignupPage() {
         setMessage('An account with this email is already activated.');
         setStep('done');
       }
-      analytics.trackAccountActivated({ email: emailToUse, via_link: true });
+      analytics.trackAccountActivated({ via_link: true });
     } catch (err: unknown) {
       const msg = err && typeof err === 'object' && 'message' in err ? String((err as { message?: unknown }).message) : String(err);
       setError(msg);
-      analytics.trackError('auto_account_activation', err, { email: emailToUse });
+      analytics.trackError('auto_account_activation', err);
     } finally {
       setLoading(false);
     }
