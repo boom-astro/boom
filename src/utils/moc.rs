@@ -87,8 +87,31 @@ pub struct LIGO3dskymap {
     pub distnorm: Vec<f64>,
     /// Maximum HEALPix order present in this map.
     pub max_order: u8,
-    /// Fast lookup: UNIQ index → row in the above Vecs.
-    uniq_to_row: HashMap<u64, usize>,
+    /// Fast lookup: UNIQ index → row in the above Vecs. `None` for a flat
+    /// full-sky map, where the row *is* the pixel index at `max_order`.
+    uniq_to_row: Option<HashMap<u64, usize>>,
+}
+
+/// Why a FITS file could not be read as a 3D BAYESTAR localization.
+#[derive(Debug)]
+pub enum Skymap3dError {
+    /// No DISTMU/DISTSIGMA/DISTNORM columns, so it is not a 3D localization at
+    /// all. Callers may retry it as a plain 2D probability skymap.
+    NotThreeDimensional,
+    /// It carries the distance columns but is otherwise unreadable. Never
+    /// silently downgrade this to a 2D search.
+    Invalid(String),
+}
+
+impl std::fmt::Display for Skymap3dError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Skymap3dError::NotThreeDimensional => {
+                write!(f, "not a 3D skymap (no DISTMU/DISTSIGMA/DISTNORM columns)")
+            }
+            Skymap3dError::Invalid(e) => write!(f, "{}", e),
+        }
+    }
 }
 
 /// Parse a LIGO BAYESTAR 3D skymap FITS file.
@@ -97,76 +120,108 @@ pub struct LIGO3dskymap {
 /// - **Multi-order** (UNIQ column present): `UNIQ` + `PROBDENSITY` per steradian.
 /// - **Flat HEALPix** (NSIDE header, no UNIQ column): `PROB` per pixel.
 ///   Flat maps are converted to the UNIQ representation on load.
-pub fn parse_3d_skymap(path: &str) -> Result<LIGO3dskymap, String> {
-    let mut fits = FitsFile::open(path).map_err(|e| e.to_string())?;
-    let hdu = fits.hdu(1).map_err(|e| e.to_string())?;
+pub fn parse_3d_skymap(path: &str) -> Result<LIGO3dskymap, Skymap3dError> {
+    use Skymap3dError::{Invalid, NotThreeDimensional};
+    let invalid = |e: String| Invalid(e);
 
-    let (uniq, pixel_area_sr, prob) = if let Ok(uniq_i64) = hdu.read_col::<i64>(&mut fits, "UNIQ") {
-        // ── Multi-order format ──────────────────────────────────────────
-        let uniq: Vec<u64> = uniq_i64.iter().map(|&u| u as u64).collect();
-        // The minimum valid UNIQ (order 0, ipix 0) is 4; reject anything smaller
-        // up front rather than letting it corrupt downstream order/ipix decoding.
-        if let Some(&bad) = uniq.iter().find(|&&u| u < 4) {
-            return Err(format!(
-                "Invalid UNIQ index in skymap FITS: {bad} (minimum valid UNIQ is 4)"
-            ));
-        }
-        let areas: Vec<f64> = uniq
-            .iter()
-            .map(|&u| pixel_area_from_order(uniq_to_order(u)))
-            .collect();
-        let probdensity: Vec<f64> = hdu
-            .read_col(&mut fits, "PROBDENSITY")
-            .map_err(|e| format!("PROBDENSITY column missing from UNIQ skymap: {}", e))?;
-        let prob: Vec<f64> = probdensity
-            .iter()
-            .zip(areas.iter())
-            .map(|(&pd, &a)| pd * a)
-            .collect();
-        (uniq, areas, prob)
-    } else {
-        // ── Flat HEALPix format ─────────────────────────────────────────
-        // The UNIQ indices synthesised below are NESTED by construction, so a
-        // RING-ordered map would be misread pixel for pixel.
-        let ordering: String = hdu
-            .read_key(&mut fits, "ORDERING")
-            .map_err(|e| format!("ORDERING keyword missing from flat skymap: {}", e))?;
-        if ordering.trim() != "NESTED" {
-            return Err(format!(
-                "Unsupported HEALPix ORDERING {}: only NESTED is supported",
-                ordering.trim()
-            ));
-        }
-        let nside: i64 = hdu
-            .read_key(&mut fits, "NSIDE")
-            .map_err(|e| e.to_string())?;
-        let nside = nside as u32;
-        if !nside.is_power_of_two() {
-            return Err(format!("NSIDE must be a power of two, got {}", nside));
-        }
-        let order = nside.trailing_zeros() as u8;
-        let area = pixel_area_from_order(order);
-        let npix = 12 * (nside as usize).pow(2);
-        let prob: Vec<f64> = hdu.read_col(&mut fits, "PROB").map_err(|e| e.to_string())?;
-        // Synthesise UNIQ indices: UNIQ[i] = 4·4^order + i
-        let base = 1u64 << (2 * order as u32 + 2);
-        let uniq: Vec<u64> = (0..npix as u64).map(|i| base + i).collect();
-        let areas = vec![area; npix];
-        (uniq, areas, prob)
-    };
+    let mut fits = FitsFile::open(path).map_err(|e| Invalid(e.to_string()))?;
+    let hdu = fits.hdu(1).map_err(|e| Invalid(e.to_string()))?;
 
+    // Distance columns first: their absence is the only failure that means "2D
+    // skymap". Anything failing after this point is a broken 3D map, not a 2D one.
     let distmu: Vec<f64> = hdu
         .read_col(&mut fits, "DISTMU")
-        .map_err(|e| e.to_string())?;
+        .map_err(|_| NotThreeDimensional)?;
     let distsigma: Vec<f64> = hdu
         .read_col(&mut fits, "DISTSIGMA")
-        .map_err(|e| e.to_string())?;
+        .map_err(|_| NotThreeDimensional)?;
     let distnorm: Vec<f64> = hdu
         .read_col(&mut fits, "DISTNORM")
-        .map_err(|e| e.to_string())?;
+        .map_err(|_| NotThreeDimensional)?;
+
+    let (uniq, pixel_area_sr, prob, uniq_to_row) =
+        if let Ok(uniq_i64) = hdu.read_col::<i64>(&mut fits, "UNIQ") {
+            // ── Multi-order format ──────────────────────────────────────────
+            let uniq: Vec<u64> = uniq_i64.iter().map(|&u| u as u64).collect();
+            // The minimum valid UNIQ (order 0, ipix 0) is 4; reject anything smaller
+            // up front rather than letting it corrupt downstream order/ipix decoding.
+            if let Some(&bad) = uniq.iter().find(|&&u| u < 4) {
+                return Err(invalid(format!(
+                    "Invalid UNIQ index in skymap FITS: {bad} (minimum valid UNIQ is 4)"
+                )));
+            }
+            let areas: Vec<f64> = uniq
+                .iter()
+                .map(|&u| pixel_area_from_order(uniq_to_order(u)))
+                .collect();
+            let probdensity: Vec<f64> = hdu.read_col(&mut fits, "PROBDENSITY").map_err(|e| {
+                invalid(format!(
+                    "PROBDENSITY column missing from UNIQ skymap: {}",
+                    e
+                ))
+            })?;
+            let prob: Vec<f64> = probdensity
+                .iter()
+                .zip(areas.iter())
+                .map(|(&pd, &a)| pd * a)
+                .collect();
+            let rows = uniq.iter().enumerate().map(|(i, &u)| (u, i)).collect();
+            (uniq, areas, prob, Some(rows))
+        } else {
+            // ── Flat HEALPix format ─────────────────────────────────────────
+            // The UNIQ indices synthesised below are NESTED by construction, so a
+            // RING-ordered map would be misread pixel for pixel.
+            let ordering: String = hdu.read_key(&mut fits, "ORDERING").map_err(|e| {
+                invalid(format!("ORDERING keyword missing from flat skymap: {}", e))
+            })?;
+            if ordering.trim() != "NESTED" {
+                return Err(invalid(format!(
+                    "Unsupported HEALPix ORDERING {}: only NESTED is supported",
+                    ordering.trim()
+                )));
+            }
+            let nside: i64 = hdu
+                .read_key(&mut fits, "NSIDE")
+                .map_err(|e| invalid(e.to_string()))?;
+            let nside = nside as u32;
+            if !nside.is_power_of_two() {
+                return Err(invalid(format!(
+                    "NSIDE must be a power of two, got {}",
+                    nside
+                )));
+            }
+            let order = nside.trailing_zeros() as u8;
+            let area = pixel_area_from_order(order);
+            let npix = 12 * (nside as usize).pow(2);
+            let prob: Vec<f64> = hdu
+                .read_col(&mut fits, "PROB")
+                .map_err(|e| invalid(e.to_string()))?;
+            // An implicit full-sky map is the only flat layout handled here: the
+            // synthesised UNIQ indices below assume row i *is* pixel i, so a
+            // partial (INDXSCHM='EXPLICIT') table would index past the columns.
+            if prob.len() != npix {
+                return Err(invalid(format!(
+                    "Flat skymap has {} rows but NSIDE={} implies {} pixels; \
+                     only implicit full-sky maps are supported",
+                    prob.len(),
+                    nside,
+                    npix
+                )));
+            }
+            // Synthesise UNIQ indices: UNIQ[i] = 4·4^order + i
+            let base = 1u64 << (2 * order as u32 + 2);
+            let uniq: Vec<u64> = (0..npix as u64).map(|i| base + i).collect();
+            let areas = vec![area; npix];
+            (uniq, areas, prob, None)
+        };
+
+    if distmu.len() != prob.len() || distsigma.len() != prob.len() || distnorm.len() != prob.len() {
+        return Err(invalid(
+            "DISTMU/DISTSIGMA/DISTNORM lengths do not match the probability column".to_string(),
+        ));
+    }
 
     let max_order = uniq.iter().map(|&u| uniq_to_order(u)).max().unwrap_or(0);
-    let uniq_to_row: HashMap<u64, usize> = uniq.iter().enumerate().map(|(i, &u)| (u, i)).collect();
 
     Ok(LIGO3dskymap {
         uniq,
@@ -184,15 +239,16 @@ pub fn parse_3d_skymap(path: &str) -> Result<LIGO3dskymap, String> {
 ///
 /// Writes bytes to a temp file then delegates to `parse_3d_skymap`, because fitsio
 /// (based on cfitsio) requires a file path.
-pub fn parse_3d_skymap_bytes(bytes: &[u8]) -> Result<LIGO3dskymap, String> {
+pub fn parse_3d_skymap_bytes(bytes: &[u8]) -> Result<LIGO3dskymap, Skymap3dError> {
     use std::io::Write;
-    let mut tmp = tempfile::NamedTempFile::new().map_err(|e| e.to_string())?;
-    tmp.write_all(bytes).map_err(|e| e.to_string())?;
-    tmp.flush().map_err(|e| e.to_string())?;
+    let invalid = |e: std::io::Error| Skymap3dError::Invalid(e.to_string());
+    let mut tmp = tempfile::NamedTempFile::new().map_err(invalid)?;
+    tmp.write_all(bytes).map_err(invalid)?;
+    tmp.flush().map_err(invalid)?;
     let path = tmp
         .path()
         .to_str()
-        .ok_or("temp file path is not valid UTF-8")?
+        .ok_or_else(|| Skymap3dError::Invalid("temp file path is not valid UTF-8".to_string()))?
         .to_string();
     parse_3d_skymap(&path)
 }
@@ -207,9 +263,12 @@ impl LIGO3dskymap {
     pub fn ang2pix(&self, ra_deg: f64, dec_deg: f64) -> Option<usize> {
         let layer = nested::get(self.max_order);
         let mut ipix = layer.hash(ra_deg.to_radians(), dec_deg.to_radians());
+        let Some(uniq_to_row) = self.uniq_to_row.as_ref() else {
+            return Some(ipix as usize); // flat full-sky map: row == ipix
+        };
         for order in (0..=self.max_order).rev() {
             let uniq = (1u64 << (2 * order as u32 + 2)) + ipix;
-            if let Some(&row) = self.uniq_to_row.get(&uniq) {
+            if let Some(&row) = uniq_to_row.get(&uniq) {
                 return Some(row);
             }
             if order > 0 {
@@ -1038,6 +1097,62 @@ mod tests {
             "Expected majority of pixels to have finite (μ, σ, N), got {:.1}%",
             frac_finite * 100.0,
         );
+    }
+
+    /// Build a flat BAYESTAR-shaped table whose row count does not match the
+    /// `npix` implied by its NSIDE header (an `INDXSCHM='EXPLICIT'` partial map).
+    fn write_partial_flat_skymap(path: &str, nside: i64, n_rows: usize) {
+        use fitsio::tables::{ColumnDataType, ColumnDescription};
+        let columns: Vec<_> = ["PROB", "DISTMU", "DISTSIGMA", "DISTNORM"]
+            .iter()
+            .map(|name| {
+                ColumnDescription::new(*name)
+                    .with_type(ColumnDataType::Double)
+                    .create()
+                    .unwrap()
+            })
+            .collect();
+        let mut f = fitsio::FitsFile::create(path).overwrite().open().unwrap();
+        let hdu = f.create_table("SKYMAP", &columns).unwrap();
+        hdu.write_key(&mut f, "NSIDE", nside).unwrap();
+        hdu.write_key(&mut f, "ORDERING", "NESTED").unwrap();
+        for (name, value) in [
+            ("PROB", 0.1_f64),
+            ("DISTMU", 100.0),
+            ("DISTSIGMA", 10.0),
+            ("DISTNORM", 1.0),
+        ] {
+            hdu.write_col(&mut f, name, &vec![value; n_rows]).unwrap();
+        }
+    }
+
+    /// A partial flat skymap must be rejected at parse time: the synthesised UNIQ
+    /// indices assume row i is pixel i, so accepting one lets `ang2pix` return a
+    /// row past the end of the columns and panic mid-request.
+    #[test]
+    fn test_parse_3d_skymap_rejects_partial_flat_map() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_str().unwrap().to_string();
+        write_partial_flat_skymap(&path, 4, 10); // NSIDE=4 implies 192 pixels
+
+        match parse_3d_skymap(&path) {
+            Err(Skymap3dError::Invalid(e)) => {
+                assert!(e.contains("10 rows"), "unexpected message: {e}")
+            }
+            Err(other) => panic!("expected Invalid, got {other:?}"),
+            Ok(_) => panic!("a partial flat skymap must be rejected"),
+        }
+    }
+
+    /// A 2D skymap (no distance columns) must report `NotThreeDimensional` so the
+    /// caller can retry it as 2D, while a broken 3D map must not be downgraded.
+    #[test]
+    fn test_parse_3d_skymap_classifies_2d_skymap() {
+        match parse_3d_skymap("./data/glg_healpix_all_bn200524211.fits") {
+            Err(Skymap3dError::NotThreeDimensional) => {}
+            Err(other) => panic!("expected NotThreeDimensional, got {other:?}"),
+            Ok(_) => panic!("a Fermi GBM 2D skymap is not a 3D localization"),
+        }
     }
 
     /// A fragmented (many disjoint islands, ~10 sq deg total) MOC can need far

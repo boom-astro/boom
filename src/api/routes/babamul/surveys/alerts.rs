@@ -7,7 +7,7 @@ use crate::utils::enums::Survey;
 use crate::utils::moc::{
     credible_volume_to_2d_moc, is_in_moc, moc_from_fits_bytes, moc_from_skymap_bytes,
     parse_3d_skymap_bytes, select_covering_depth_bounded, CredibleVolumeIndex, HpxMoc,
-    LIGO3dskymap,
+    LIGO3dskymap, Skymap3dError,
 };
 use actix_web::{get, post, web, HttpResponse};
 use base64::prelude::*;
@@ -1039,10 +1039,15 @@ pub async fn skymap_search_alerts(
                                 credible_level,
                             }
                         }
-                        Err(_) => SkymapSearchMode::Skymap2d(moc_from_skymap_bytes(
-                            &bytes,
-                            credible_level,
-                        )?),
+                        Err(Skymap3dError::NotThreeDimensional) => SkymapSearchMode::Skymap2d(
+                            moc_from_skymap_bytes(&bytes, credible_level)?,
+                        ),
+                        // It has the distance columns but is unreadable: failing
+                        // over to a 2D search here would silently drop the
+                        // distance constraint the caller asked for.
+                        Err(e @ Skymap3dError::Invalid(_)) => {
+                            return Err(format!("Invalid 3D skymap FITS: {}", e));
+                        }
                     }
                 }
                 // Presence is validated above: exactly one source is provided.
