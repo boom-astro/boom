@@ -20,7 +20,7 @@ describe("identifyUser", () => {
   it("aliases the username the account was previously identified under", () => {
     mocked.get_distinct_id.mockReturnValue("ada")
 
-    identifyUser(USER_ID, EMAIL, "ada")
+    identifyUser(USER_ID, "ada")
 
     expect(mocked.alias).toHaveBeenCalledWith(USER_ID, "ada")
     expect(mocked.identify).toHaveBeenCalledOnce()
@@ -29,7 +29,7 @@ describe("identifyUser", () => {
   it("identifies without sending the address as a person property", () => {
     mocked.get_distinct_id.mockReturnValue("ada")
 
-    identifyUser(USER_ID, EMAIL, "ada")
+    identifyUser(USER_ID, "ada")
 
     expect(mocked.identify).toHaveBeenCalledWith(USER_ID)
   })
@@ -37,25 +37,25 @@ describe("identifyUser", () => {
   it("identifies before aliasing", () => {
     mocked.get_distinct_id.mockReturnValue("ada")
 
-    identifyUser(USER_ID, EMAIL, "ada")
+    identifyUser(USER_ID, "ada")
 
     expect(mocked.identify.mock.invocationCallOrder[0]).toBeLessThan(
       mocked.alias.mock.invocationCallOrder[0]
     )
   })
 
-  it("aliases the email the account was previously identified under", () => {
+  it("leaves a session identified on the address alone, rather than aliasing it", () => {
     mocked.get_distinct_id.mockReturnValue(EMAIL)
 
-    identifyUser(USER_ID, EMAIL, "ada")
+    identifyUser(USER_ID, "ada")
 
-    expect(mocked.alias).toHaveBeenCalledWith(USER_ID, EMAIL)
+    expect(mocked.alias).not.toHaveBeenCalled()
   })
 
   it("leaves a stranger's distinct id alone", () => {
     mocked.get_distinct_id.mockReturnValue("bob")
 
-    identifyUser(USER_ID, EMAIL, "ada")
+    identifyUser(USER_ID, "ada")
 
     expect(mocked.alias).not.toHaveBeenCalled()
     expect(mocked.identify).toHaveBeenCalledOnce()
@@ -64,7 +64,7 @@ describe("identifyUser", () => {
   it("does not alias an id to itself", () => {
     mocked.get_distinct_id.mockReturnValue("ada")
 
-    identifyUser("ada", EMAIL, "ada")
+    identifyUser("ada", "ada")
 
     expect(mocked.alias).not.toHaveBeenCalled()
   })
@@ -72,7 +72,7 @@ describe("identifyUser", () => {
   it("skips the alias when nothing vouches for the previous id", () => {
     mocked.get_distinct_id.mockReturnValue("ada")
 
-    identifyUser(USER_ID, EMAIL)
+    identifyUser(USER_ID)
 
     expect(mocked.alias).not.toHaveBeenCalled()
     expect(mocked.identify).toHaveBeenCalledOnce()

@@ -42,18 +42,17 @@ export function trackError(context: string, error: unknown, additionalInfo?: Sea
   });
 }
 
-export function identifyUser(userId: string, email?: string, username?: string) {
+export function identifyUser(userId: string, username?: string) {
   const previousId = posthog.get_distinct_id();
   posthog.identify(userId);
   // Alias after identify: identify skips its distinct_id switch when handed the registered __alias.
-  const vouchedFor = !!previousId && (previousId === username || previousId === email);
-  if (vouchedFor && previousId !== userId) {
+  if (previousId && previousId === username && previousId !== userId) {
     posthog.alias(userId, previousId);
   }
 }
 
 export function identifyProfile(profile: NonNullable<Profile>) {
-  identifyUser(profile.id ?? profile.username, profile.email, profile.username);
+  identifyUser(profile.id ?? profile.username, profile.username);
 }
 
 export function resetUser() {

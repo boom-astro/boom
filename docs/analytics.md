@@ -72,15 +72,16 @@ Sessions that signed in before the `id` fix are already identified on the
 username, and `posthog.identify` emits its merge event only while the stored
 `$user_state` is still `anonymous` — past that it switches `distinct_id`
 silently. `identifyUser` therefore aliases the old id into the new one, guarded
-on it being the username or the email of the account signing in (the old chain
-was `id ?? username ?? email`), so a shared browser never merges two real
-people. The alias comes *after* the `identify`: `posthog.alias` registers
-`__alias`, and `identify` skips its `distinct_id` switch when handed the
-registered `__alias`, so aliasing first would pin the browser to the old id for
-good. Signing out from the sidebar calls `posthog.reset()`, which is what leaves
-the next login anonymous and able to merge on its own; `api.logout()` does not,
-because it also runs on every 401 and resetting there would mint a fresh
-anonymous person per failed request.
+on it being the username of the account signing in, so a shared browser never
+merges two real people. A session identified on the address is left alone: the
+alias would send that address to PostHog as a `distinct_id`, which is the one
+thing this is not allowed to do. The alias comes *after* the `identify`:
+`posthog.alias` registers `__alias`, and `identify` skips its `distinct_id`
+switch when handed the registered `__alias`, so aliasing first would pin the
+browser to the old id for good. Signing out from the sidebar calls
+`posthog.reset()`, which is what leaves the next login anonymous and able to
+merge on its own; `api.logout()` does not, because it also runs on every 401
+and resetting there would mint a fresh anonymous person per failed request.
 
 Requests that aren't authenticated (signup, activation, the public stats
 endpoints) are reported against a fixed `babamul-anonymous` id and carry
