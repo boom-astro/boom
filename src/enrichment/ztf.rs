@@ -9,6 +9,7 @@ use crate::enrichment::{
 use crate::utils::cutouts::{AlertCutout, CutoutStorage};
 use crate::utils::db::mongify;
 use crate::utils::enums::Survey;
+use crate::utils::host::HostGalaxyAssociation;
 use crate::utils::lightcurves::{
     analyze_photometry, prepare_photometry, ActivityMetrics, AllBandsProperties, Band,
     DetectionHistory, Outburst, PerBandProperties, PhotometryMag, ZTF_ZP,
@@ -286,6 +287,7 @@ pub fn create_ztf_alert_pipeline(include_classifications: bool) -> Vec<Document>
                 "prv_candidates": "$aux.prv_candidates",
                 "prv_nondetections": "$aux.prv_nondetections",
                 "fp_hists": "$aux.fp_hists",
+                "host_galaxy": "$aux.host_galaxy",
                 "survey_matches": {
                     "lsst": {
                         "$cond": {
@@ -355,6 +357,8 @@ pub struct ZtfAlertForEnrichment {
     pub prv_nondetections: Vec<ZtfPhotometry>,
     #[serde(deserialize_with = "deserialize_ztf_forced_lightcurve")]
     pub fp_hists: Vec<ZtfPhotometry>,
+    #[serde(default)]
+    pub host_galaxy: Option<HostGalaxyAssociation>,
     pub survey_matches: Option<ZtfSurveyMatches>,
 }
 
@@ -535,6 +539,14 @@ pub struct ZtfAlertProperties {
     pub rock: bool,
     pub star: bool,
     pub near_brightstar: bool,
+    /// A host galaxy was associated within the configured `max_dlr`.
+    ///
+    /// `None` on alerts never evaluated for a host -- enriched before this
+    /// existed, or with host association disabled. That is not the same as
+    /// `Some(false)`, which means evaluated and nothing passed the cut, so a
+    /// filter must not read absence as "no host".
+    #[serde(default)]
+    pub hosted: Option<bool>,
     pub stationary: bool,
     pub photstats: PerBandProperties,
     pub multisurvey_photstats: Option<PerBandProperties>,
@@ -1234,6 +1246,8 @@ impl ZtfEnrichmentWorker {
             photstats.clone()
         };
 
+        let hosted = alert.host_galaxy.as_ref().map(|hg| hg.best_host.is_some());
+
         // Per-object detection history for history-aware filters, from the full
         // accumulated light curve (positive/negative by psfFlux sign).
         let detection_history = DetectionHistory::from_points(
@@ -1249,6 +1263,7 @@ impl ZtfEnrichmentWorker {
                 rock: is_rock,
                 star: is_star,
                 near_brightstar: is_near_brightstar,
+                hosted,
                 stationary,
                 photstats,
                 multisurvey_photstats: Some(multisurvey_photstats),
@@ -1545,9 +1560,31 @@ mod tests {
             "absent means never evaluated, not evaluated-and-negative"
         );
         assert!(
+            props.hosted.is_none(),
+            "absent means never evaluated for a host, not evaluated-and-hostless"
+        );
+        assert!(
             props.detection_history.is_none(),
             "detection_history is absent on pre-existing alerts"
         );
+        assert!(props.activity.is_none());
+    }
+
+    // Or a filter cutting on `hosted == false` silently sweeps in every alert
+    // enriched before host association existed.
+    #[test]
+    fn test_evaluated_hostless_differs_from_unevaluated() {
+        let evaluated = serde_json::json!({
+            "rock": false,
+            "star": false,
+            "near_brightstar": false,
+            "stationary": true,
+            "hosted": false,
+            "photstats": PerBandProperties::default(),
+            "multisurvey_photstats": null,
+        });
+        let props: ZtfAlertProperties = serde_json::from_value(evaluated).expect("deserializes");
+        assert_eq!(props.hosted, Some(false));
     }
 
     // A partially-written block should not fail either.

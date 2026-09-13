@@ -187,6 +187,39 @@ workers:
       refresh_interval_minutes: 15
       max_match_rate: 100
       reference_night: "2026-07-15"
+# Shape-aware host-galaxy association: scores each galaxy cross-match by its
+# directional light radius (d_DLR) instead of a fixed circular aperture. Stored
+# on the alert aux document under `host_galaxy`; filters cut on
+# `host_galaxy.best_host.d_dlr`.
+#
+# The galaxy catalogs must be ingested AND listed in the survey's `crossmatch`
+# block, so their shape columns reach the match documents. Field names are the
+# ones the ingest writes, not always the source column names (Legacy `type` is
+# stored as `objtype`):
+#   NED_LVS  -> Diam, Diam_ba, Diam_pa, Diam_survey, DistMpc, DistMpc_method, z
+#   LSDR10   -> shape_r, shape_e1, shape_e2, objtype, flux_r, and where the
+#               ingest provides them sersic, flux_ivar_r, fracflux_r
+#
+# The three optional Legacy columns degrade one step each rather than failing:
+# no `sersic` leaves a SER row on its half-light radius, no `flux_ivar_r` leaves
+# a REX row judged on size and blending alone, no `fracflux_r` reads as unblended.
+host_galaxy:
+  enabled: false
+  ned_lvs_catalog: NED_LVS
+  ls_dr10_catalog: LSDR10 # collection name as ingested; UMN uses LSDR10
+  max_dlr: 5.0            # admission cutoff; filters should cut tighter (~4)
+  min_axis_arcsec: 0.05
+  max_candidates: 10
+  exclude_star_like: true # drop LSDR10 point sources, which have no extent
+  star_type_value: PSF
+  use_redshift: true
+  # REX fits marginally resolved sources, and about half are too small, faint or
+  # blended to be a believable host. These sit in sensitive parts of the
+  # parameter space, so changing them moves results materially.
+  rex_min_shape_r_arcsec: 0.3
+  rex_min_snr: 5.0
+  rex_max_fracflux: 0.5
+  isophote_mag: 25.0 # puts Legacy R_e on the NED-LVS D25 scale
 crossmatch:
   ztf:
     - catalog: Gaia_DR3
@@ -244,6 +277,39 @@ crossmatch:
         tMASSphot: 1
         Mstar: 1
         Mstar_unc: 1
+    - catalog: NED_LVS
+      # Feeds host_galaxy association. Its own entry rather than folded into the
+      # NED one: angular_size_key takes precedence over use_distance, so merging
+      # them would silently change matching for every existing NED consumer.
+      collection: NED
+      # use_distance is false on purpose: the redshift-scaled circle is what
+      # d_DLR replaces. Each galaxy instead gets its own radius from Diam, so
+      # M31 is still returned a degree out while a dwarf is not, and only rows
+      # reaching past the base cone pay for the wider search.
+      radius: 300.0 # base cone, arcsec
+      use_distance: false
+      angular_size_key: Diam
+      # Must be >= host_galaxy.max_dlr, since d_DLR <= N implies sep <= N *
+      # semi-major; a smaller scale would drop candidates before scoring.
+      angular_size_scale: 5.0
+      angular_size_radius_max: 21600.0 # 6 deg, enough for the LMC
+      max_results: 50
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        objtype: 1
+        z: 1
+        z_unc: 1
+        # NED-LVS FITS column names verbatim, as the catalog ingest writes them.
+        Diam: 1
+        Diam_ba: 1
+        Diam_pa: 1
+        Diam_survey: 1 # flags the 2MASS diameters, whose PA is a fixed 90 deg
+        DistMpc: 1
+        DistMpc_method: 1
+        m_Ks: 1 # inert until use_absmag is implemented
+        m_Ks_unc: 1
     - catalog: DESI_DR1
       radius: 30.0 # 30 arcseconds
       use_distance: true
@@ -358,6 +424,39 @@ crossmatch:
         tMASSphot: 1
         Mstar: 1
         Mstar_unc: 1
+    - catalog: NED_LVS
+      # Feeds host_galaxy association. Its own entry rather than folded into the
+      # NED one: angular_size_key takes precedence over use_distance, so merging
+      # them would silently change matching for every existing NED consumer.
+      collection: NED
+      # use_distance is false on purpose: the redshift-scaled circle is what
+      # d_DLR replaces. Each galaxy instead gets its own radius from Diam, so
+      # M31 is still returned a degree out while a dwarf is not, and only rows
+      # reaching past the base cone pay for the wider search.
+      radius: 300.0 # base cone, arcsec
+      use_distance: false
+      angular_size_key: Diam
+      # Must be >= host_galaxy.max_dlr, since d_DLR <= N implies sep <= N *
+      # semi-major; a smaller scale would drop candidates before scoring.
+      angular_size_scale: 5.0
+      angular_size_radius_max: 21600.0 # 6 deg, enough for the LMC
+      max_results: 50
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        objtype: 1
+        z: 1
+        z_unc: 1
+        # NED-LVS FITS column names verbatim, as the catalog ingest writes them.
+        Diam: 1
+        Diam_ba: 1
+        Diam_pa: 1
+        Diam_survey: 1 # flags the 2MASS diameters, whose PA is a fixed 90 deg
+        DistMpc: 1
+        DistMpc_method: 1
+        m_Ks: 1 # inert until use_absmag is implemented
+        m_Ks_unc: 1
     - catalog: DESI_DR1
       radius: 30.0 # 30 arcseconds
       use_distance: true
@@ -495,6 +594,39 @@ crossmatch:
         tMASSphot: 1
         Mstar: 1
         Mstar_unc: 1
+    - catalog: NED_LVS
+      # Feeds host_galaxy association. Its own entry rather than folded into the
+      # NED one: angular_size_key takes precedence over use_distance, so merging
+      # them would silently change matching for every existing NED consumer.
+      collection: NED
+      # use_distance is false on purpose: the redshift-scaled circle is what
+      # d_DLR replaces. Each galaxy instead gets its own radius from Diam, so
+      # M31 is still returned a degree out while a dwarf is not, and only rows
+      # reaching past the base cone pay for the wider search.
+      radius: 300.0 # base cone, arcsec
+      use_distance: false
+      angular_size_key: Diam
+      # Must be >= host_galaxy.max_dlr, since d_DLR <= N implies sep <= N *
+      # semi-major; a smaller scale would drop candidates before scoring.
+      angular_size_scale: 5.0
+      angular_size_radius_max: 21600.0 # 6 deg, enough for the LMC
+      max_results: 50
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        objtype: 1
+        z: 1
+        z_unc: 1
+        # NED-LVS FITS column names verbatim, as the catalog ingest writes them.
+        Diam: 1
+        Diam_ba: 1
+        Diam_pa: 1
+        Diam_survey: 1 # flags the 2MASS diameters, whose PA is a fixed 90 deg
+        DistMpc: 1
+        DistMpc_method: 1
+        m_Ks: 1 # inert until use_absmag is implemented
+        m_Ks_unc: 1
     - catalog: DESI_DR1
       radius: 30.0 # 30 arcseconds
       use_distance: true

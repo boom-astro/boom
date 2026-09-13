@@ -1344,7 +1344,7 @@ pub async fn get_filter_schema(path: web::Path<(Survey,)>) -> HttpResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::conf::{get_test_db, CatalogXmatchConfig};
+    use crate::conf::{arcsec_to_radians, get_test_db, CatalogXmatchConfig};
 
     fn admin() -> User {
         User {
@@ -1384,18 +1384,12 @@ mod tests {
             .crossmatch
             .entry(Survey::Ztf)
             .or_default()
-            .push(CatalogXmatchConfig::new(
-                &name,
-                2.0,
-                doc! { "_id": 1 },
-                false,
-                None,
-                None,
-                None,
-                None,
-                None,
-                Vec::new(),
-            ));
+            .push(CatalogXmatchConfig {
+                catalog: name.clone(),
+                radius: arcsec_to_radians(2.0),
+                projection: doc! { "_id": 1 },
+                ..Default::default()
+            });
         let result = validate_watchlist(&db, &name, &Survey::Ztf, &admin, &config).await;
 
         collection.drop().await.unwrap();

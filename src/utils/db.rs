@@ -14,7 +14,6 @@ use crate::utils::enums::Survey;
 #[error("failed to create index")]
 pub struct CreateIndexError(#[from] mongodb::error::Error);
 
-#[instrument(skip(collection, index), fields(collection = collection.name()), err)]
 pub async fn create_index(
     collection: &Collection<Document>,
     index: Document,
@@ -23,16 +22,28 @@ pub async fn create_index(
     create_partial_index(collection, index, unique, None).await
 }
 
-#[instrument(
-    skip(collection, index, partial_filter),
-    fields(collection = collection.name()),
-    err
-)]
 pub async fn create_partial_index(
     collection: &Collection<Document>,
     index: Document,
     unique: bool,
     partial_filter: Option<Document>,
+) -> Result<(), CreateIndexError> {
+    create_named_partial_index(collection, index, unique, partial_filter, None).await
+}
+
+/// As [`create_partial_index`], with an explicit index name: Mongo names an
+/// index after its keys, so two indexes over the same keys would collide.
+#[instrument(
+    skip(collection, index, partial_filter),
+    fields(collection = collection.name()),
+    err
+)]
+pub async fn create_named_partial_index(
+    collection: &Collection<Document>,
+    index: Document,
+    unique: bool,
+    partial_filter: Option<Document>,
+    name: Option<String>,
 ) -> Result<(), CreateIndexError> {
     let index_model = IndexModel::builder()
         .keys(index)
@@ -40,6 +51,7 @@ pub async fn create_partial_index(
             IndexOptions::builder()
                 .unique(unique)
                 .partial_filter_expression(partial_filter)
+                .name(name)
                 .build(),
         )
         .build();
@@ -160,6 +172,35 @@ pub async fn initialize_survey_indexes(
         .await?;
     }
 
+    Ok(())
+}
+
+fn angular_size_index_name(size_key: &str) -> String {
+    format!("radec_2dsphere_large_{size_key}")
+}
+
+/// Partial 2dsphere indexes for catalogs matched by angular size. Without one
+/// the wide branch of the `$or` scans every row inside several degrees.
+#[instrument(skip_all, err)]
+pub async fn initialize_angular_size_indexes(
+    xmatch_configs: &[crate::conf::CatalogXmatchConfig],
+    db: &Database,
+) -> Result<(), CreateIndexError> {
+    for config in xmatch_configs {
+        let (Some(size_key), Some(_)) = (&config.angular_size_key, config.angular_size_radius_max)
+        else {
+            continue;
+        };
+        let collection: Collection<Document> = db.collection(config.collection_name());
+        create_named_partial_index(
+            &collection,
+            doc! { "coordinates.radec_geojson": "2dsphere" },
+            false,
+            Some(doc! { size_key: { "$gt": config.angular_size_threshold_arcsec() } }),
+            Some(angular_size_index_name(size_key)),
+        )
+        .await?;
+    }
     Ok(())
 }
 
@@ -600,5 +641,46 @@ mod tests {
         ];
         let error = join_tasks(handles, "task").await.unwrap_err();
         assert!(matches!(error, TaskError::Join(_)), "got {:?}", error);
+    }
+}
+
+#[cfg(test)]
+mod angular_size_index_tests {
+    use super::angular_size_index_name;
+    use crate::conf::{arcsec_to_radians, CatalogXmatchConfig};
+
+    fn config(angular_size_key: Option<String>, radius_max: Option<f64>) -> CatalogXmatchConfig {
+        CatalogXmatchConfig {
+            catalog: "NED_LVS".to_string(),
+            collection: Some("NED".to_string()),
+            radius: arcsec_to_radians(300.0),
+            angular_size_key,
+            angular_size_scale: 5.0,
+            angular_size_radius_max: radius_max.map(arcsec_to_radians),
+            ..Default::default()
+        }
+    }
+
+    // A threshold mismatch makes the index silently miss rows the query asks for.
+    #[test]
+    fn test_threshold_is_derived_from_the_same_config_as_the_query() {
+        let c = config(Some("Diam".to_string()), Some(21600.0));
+        assert!((c.angular_size_threshold_arcsec() - 120.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_index_name_does_not_collide_with_the_full_index() {
+        assert_ne!(
+            angular_size_index_name("Diam"),
+            "coordinates.radec_geojson_2dsphere"
+        );
+    }
+
+    #[test]
+    fn test_catalogs_without_angular_size_matching_are_skipped() {
+        assert!(config(None, Some(21600.0)).angular_size_key.is_none());
+        assert!(config(Some("Diam".to_string()), None)
+            .angular_size_radius_max
+            .is_none());
     }
 }

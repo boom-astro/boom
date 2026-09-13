@@ -1,6 +1,7 @@
 use crate::utils::{
     cutouts::{CutoutCache, CutoutStorage},
     enums::Survey,
+    host::HostGalaxyConfig,
     o11y::logging::as_error,
 };
 use chrono::NaiveDate;
@@ -266,7 +267,12 @@ async fn build_cutout_storage(
 
 #[derive(Debug, Clone)]
 pub struct CatalogXmatchConfig {
+    /// Key this catalog's matches appear under in `cross_matches`.
     pub catalog: String,
+    /// Collection actually queried, defaulting to `catalog`. Set it when two
+    /// entries read the same collection with different matching rules, since
+    /// the results are keyed by `catalog` and that key must stay unique.
+    pub collection: Option<String>,
     pub radius: f64, // in radians
     pub projection: Document,
     pub use_distance: bool,
@@ -274,37 +280,72 @@ pub struct CatalogXmatchConfig {
     pub distance_max: Option<f64>,      // in kpc
     pub distance_max_near: Option<f64>, // in arcsec
     pub max_results: Option<usize>,
+    /// Field holding the angular DIAMETER in arcsec. Setting it gives each row
+    /// its own match radius, scaled from that size.
+    pub angular_size_key: Option<String>,
+    /// Multiple of the semi-major axis to match within.
+    pub angular_size_scale: f64,
+    /// Cap on the per-row radius, in radians.
+    pub angular_size_radius_max: Option<f64>,
     /// Field naming a row's object type, e.g. DESI's `spectype`.
     pub type_key: Option<String>,
     /// Values of `type_key` that mean the row is a star rather than a galaxy.
     pub stellar_types: Vec<String>,
 }
 
-impl CatalogXmatchConfig {
-    pub fn new(
-        catalog: &str,
-        radius: f64,
-        projection: Document,
-        use_distance: bool,
-        distance_key: Option<String>,
-        distance_max: Option<f64>,
-        distance_max_near: Option<f64>,
-        max_results: Option<usize>,
-        type_key: Option<String>,
-        stellar_types: Vec<String>,
-    ) -> CatalogXmatchConfig {
-        CatalogXmatchConfig {
-            catalog: catalog.to_string(),
-            radius: radius * std::f64::consts::PI / 180.0 / 3600.0, // convert arcsec to radians
-            projection,
-            use_distance,
-            distance_key,
-            distance_max,
-            distance_max_near,
-            max_results,
-            type_key,
-            stellar_types,
+impl Default for CatalogXmatchConfig {
+    fn default() -> Self {
+        Self {
+            catalog: String::new(),
+            collection: None,
+            radius: 0.0,
+            projection: Document::new(),
+            use_distance: false,
+            distance_key: None,
+            distance_max: None,
+            distance_max_near: None,
+            max_results: None,
+            angular_size_key: None,
+            // 1.0, not 0.0: `angular_size_threshold_arcsec` divides by it.
+            angular_size_scale: 1.0,
+            angular_size_radius_max: None,
+            type_key: None,
+            stellar_types: Vec::new(),
         }
+    }
+}
+
+pub fn arcsec_to_radians(arcsec: f64) -> f64 {
+    arcsec * std::f64::consts::PI / 180.0 / 3600.0
+}
+
+fn radians_to_arcsec(radians: f64) -> f64 {
+    radians * 180.0 / std::f64::consts::PI * 3600.0
+}
+
+impl CatalogXmatchConfig {
+    /// Collection to query, which is the catalog name unless overridden.
+    pub fn collection_name(&self) -> &str {
+        self.collection.as_deref().unwrap_or(&self.catalog)
+    }
+
+    /// Match radius in arcsec for one candidate row.
+    pub fn match_radius_arcsec(&self, angular_size_arcsec: Option<f64>) -> f64 {
+        let base = radians_to_arcsec(self.radius);
+        let Some(max) = self.angular_size_radius_max else {
+            return base;
+        };
+        let scaled = angular_size_arcsec
+            .filter(|s| s.is_finite() && *s > 0.0)
+            .map(|s| self.angular_size_scale * s / 2.0)
+            .unwrap_or(0.0);
+        scaled.clamp(base, radians_to_arcsec(max))
+    }
+
+    /// Smallest angular size that reaches beyond the base cone, and so needs
+    /// the extended search.
+    pub fn angular_size_threshold_arcsec(&self) -> f64 {
+        2.0 * radians_to_arcsec(self.radius) / self.angular_size_scale
     }
 
     #[instrument(skip_all, err)]
@@ -317,6 +358,21 @@ impl CatalogXmatchConfig {
                 .ok_or_else(|| BoomConfigError::MissingKeyError(key.to_string()))
         };
 
+        let opt_string = |key: &str| -> Result<Option<String>, BoomConfigError> {
+            Ok(hashmap_xmatch
+                .get(key)
+                .cloned()
+                .map(Value::into_string)
+                .transpose()?)
+        };
+        let opt_float = |key: &str| -> Result<Option<f64>, BoomConfigError> {
+            Ok(hashmap_xmatch
+                .get(key)
+                .cloned()
+                .map(Value::into_float)
+                .transpose()?)
+        };
+
         let catalog = required("catalog")?.into_string()?;
         let radius = required("radius")?.into_float()?;
         let projection = required("projection")?.into_table()?;
@@ -326,25 +382,11 @@ impl CatalogXmatchConfig {
             .cloned()
             .map(Value::into_bool)
             .transpose()?
-            .unwrap_or(false);
+            .unwrap_or_default();
 
-        let distance_key = hashmap_xmatch
-            .get("distance_key")
-            .cloned()
-            .map(Value::into_string)
-            .transpose()?;
-
-        let distance_max = hashmap_xmatch
-            .get("distance_max")
-            .cloned()
-            .map(Value::into_float)
-            .transpose()?;
-
-        let distance_max_near = hashmap_xmatch
-            .get("distance_max_near")
-            .cloned()
-            .map(Value::into_float)
-            .transpose()?;
+        let distance_key = opt_string("distance_key")?;
+        let distance_max = opt_float("distance_max")?;
+        let distance_max_near = opt_float("distance_max_near")?;
 
         let mut projection_doc = Document::new();
         for (key, value) in projection {
@@ -380,11 +422,24 @@ impl CatalogXmatchConfig {
             panic!("cannot use max_results with distance filtering");
         }
 
-        let type_key = hashmap_xmatch
-            .get("type_key")
-            .cloned()
-            .map(Value::into_string)
-            .transpose()?;
+        let angular_size_key = opt_string("angular_size_key")?;
+        let angular_size_scale = opt_float("angular_size_scale")?.unwrap_or(1.0);
+        let angular_size_radius_max = opt_float("angular_size_radius_max")?;
+
+        if angular_size_key.is_some() {
+            if use_distance {
+                panic!("cannot use angular_size_key with distance filtering");
+            }
+            let Some(radius_max) = angular_size_radius_max else {
+                panic!("must provide an angular_size_radius_max if angular_size_key is set");
+            };
+            if angular_size_scale <= 0.0 {
+                panic!("angular_size_scale must be greater than 0");
+            }
+            if radius_max < radius {
+                panic!("angular_size_radius_max must be at least as large as radius");
+            }
+        }
 
         let stellar_types = match hashmap_xmatch.get("stellar_types") {
             Some(values) => values
@@ -396,18 +451,22 @@ impl CatalogXmatchConfig {
             None => Vec::new(),
         };
 
-        Ok(CatalogXmatchConfig::new(
-            &catalog,
-            radius,
-            projection_doc,
+        Ok(CatalogXmatchConfig {
+            catalog,
+            collection: opt_string("collection")?,
+            radius: arcsec_to_radians(radius),
+            projection: projection_doc,
             use_distance,
             distance_key,
             distance_max,
             distance_max_near,
             max_results,
-            type_key,
+            angular_size_key,
+            angular_size_scale,
+            angular_size_radius_max: angular_size_radius_max.map(arcsec_to_radians),
+            type_key: opt_string("type_key")?,
             stellar_types,
-        ))
+        })
     }
 }
 
@@ -1069,6 +1128,8 @@ pub struct AppConfig {
     pub workers: HashMap<Survey, SurveyWorkerConfig>,
     #[serde(default)]
     pub gpu: GpuConfig,
+    #[serde(default)]
+    pub host_galaxy: HostGalaxyConfig,
     pub cutouts_storage: CutoutsStorage,
 }
 
