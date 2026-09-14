@@ -4,8 +4,8 @@ use crate::enrichment::{fetch_alerts, EnrichmentWorker, EnrichmentWorkerError};
 use crate::utils::db::{fetch_timeseries_op, mongify};
 use crate::utils::enums::Survey;
 use crate::utils::lightcurves::{
-    analyze_photometry, prepare_photometry, Band, DetectionHistory, EpisodeHistory,
-    PerBandProperties, PhotometryMag, EPISODE_GAP_DAYS,
+    analyze_photometry, prepare_photometry, summarise_detections, Band, DetectionHistory,
+    EpisodeHistory, PerBandProperties, PhotometryMag, EPISODE_GAP_DAYS,
 };
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
@@ -228,14 +228,7 @@ impl WinterEnrichmentWorker {
         let (photstats, _, stationary) = analyze_photometry(&lightcurve);
 
         // Per-object detection history for history-aware filters (sign from isdiffpos).
-        let detection_history = DetectionHistory::from_points(
-            alert
-                .prv_candidates
-                .iter()
-                .map(|p| (p.time, p.isdiffpos.map(|d| !d))),
-            alert.candidate.jd,
-        );
-        let episode_history = EpisodeHistory::from_points(
+        let (detection_history, episode_history) = summarise_detections(
             alert
                 .prv_candidates
                 .iter()

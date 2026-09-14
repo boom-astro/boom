@@ -96,6 +96,54 @@ pub struct PhotometryMag {
 /// which grouping produced it.
 pub const EPISODE_GAP_DAYS: f64 = 30.0;
 
+/// Both light-curve summaries from a single pass over the detections.
+///
+/// The two are derived from the same points and are always wanted together, so
+/// iterating once keeps the enrichment worker from walking a long light curve
+/// twice.
+pub fn summarise_detections<I>(
+    points: I,
+    ref_jd: f64,
+    gap_days: f64,
+) -> (DetectionHistory, EpisodeHistory)
+where
+    I: IntoIterator<Item = (f64, Option<bool>)>,
+{
+    let cutoff = ref_jd - 30.0;
+    let mut detections = DetectionHistory::default();
+    let mut positives: Vec<f64> = Vec::new();
+
+    for (jd, is_negative) in points {
+        if jd > ref_jd {
+            continue;
+        }
+        let Some(is_negative) = is_negative else {
+            continue;
+        };
+        detections.n_det += 1;
+        let recent = jd >= cutoff;
+        if is_negative {
+            detections.n_neg += 1;
+            if recent {
+                detections.n_neg_30d += 1;
+            }
+            detections.first_neg_jd = Some(detections.first_neg_jd.map_or(jd, |j| j.min(jd)));
+            detections.last_neg_jd = Some(detections.last_neg_jd.map_or(jd, |j| j.max(jd)));
+        } else {
+            detections.n_pos += 1;
+            if recent {
+                detections.n_pos_30d += 1;
+            }
+            positives.push(jd);
+        }
+    }
+
+    (
+        detections,
+        EpisodeHistory::from_positive_epochs(positives, gap_days),
+    )
+}
+
 /// Detection episodes in an object's light curve, for finding sources that
 /// outburst more than once.
 ///
@@ -145,11 +193,16 @@ impl EpisodeHistory {
     where
         I: IntoIterator<Item = (f64, Option<bool>)>,
     {
-        let mut jds: Vec<f64> = points
+        let jds: Vec<f64> = points
             .into_iter()
             .filter(|&(jd, is_negative)| jd <= ref_jd && is_negative == Some(false))
             .map(|(jd, _)| jd)
             .collect();
+        Self::from_positive_epochs(jds, gap_days)
+    }
+
+    /// Group already-selected positive epochs, which need not be sorted.
+    fn from_positive_epochs(mut jds: Vec<f64>, gap_days: f64) -> Self {
         jds.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
         let mut out = EpisodeHistory {
@@ -899,6 +952,29 @@ mod tests {
     }
 
     const REF: f64 = 3000.0;
+
+    #[test]
+    fn test_one_pass_matches_summarising_separately() {
+        use super::{summarise_detections, DetectionHistory};
+        // Positives, a negative, and a point past the alert epoch.
+        let points = vec![
+            (100.0, Some(false)),
+            (101.0, Some(false)),
+            (500.0, Some(false)),
+            (505.0, Some(true)),
+            (REF + 10.0, Some(false)),
+            (300.0, None),
+        ];
+        let (detections, episodes) = summarise_detections(points.clone(), REF, EPISODE_GAP_DAYS);
+        assert_eq!(
+            detections,
+            DetectionHistory::from_points(points.clone(), REF)
+        );
+        assert_eq!(
+            episodes,
+            EpisodeHistory::from_points(points, REF, EPISODE_GAP_DAYS)
+        );
+    }
 
     #[test]
     fn test_one_run_of_detections_is_one_episode() {
