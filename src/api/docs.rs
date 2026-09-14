@@ -120,6 +120,9 @@ pub struct ApiDoc;
         routes::babamul::stats::nightly::get_nightly_stats,
         routes::babamul::surveys::alerts::skymap_search_alerts,
     ),
+    components(schemas(
+        routes::babamul::surveys::alerts::LsstAlertSkymapSearchResult
+    )),
     security(
         ("babamul_jwt_token" = [])
     ),
