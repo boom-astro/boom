@@ -60,10 +60,8 @@ export default function OAuthCallback() {
     (async () => {
       try {
         const profile = await ensureProfileLoaded({ force: true });
-        if (profile) {
-          analytics.identifyUser(profile.id ?? profile.username ?? profile.email, profile.email);
-        }
-        analytics.trackLoginSuccess({ email: profile?.email });
+        if (profile) analytics.identifyUser(profile.id ?? profile.username);
+        analytics.trackLoginSuccess();
       } catch (err) {
         // A profile hiccup shouldn't strand a user who is already signed in.
         console.error("OAuthCallback: could not load profile", err);
