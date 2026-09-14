@@ -84,7 +84,7 @@ async fn keep_mpc_orbits_fresh(db: Database) {
             continue;
         }
         match age {
-            Some(age) => warn!(age_hours = age / 3600.0, "MPC_orbits is stale, refreshing"),
+            Some(age) => info!(age_hours = age / 3600.0, "MPC_orbits is stale, refreshing"),
             None => warn!("MPC_orbits is missing, populating it"),
         }
 
