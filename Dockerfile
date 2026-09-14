@@ -66,6 +66,7 @@ RUN --mount=type=cache,target=/app/target,sharing=locked \
        target/release/stream_kowalski_alerts \
        target/release/enrich_reprocess \
        target/release/mpcorb_ingest \
+       target/release/backfill_hpx \
        /app/bin/
 
 FROM builder AS dev
