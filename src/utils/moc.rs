@@ -1,3 +1,4 @@
+use crate::utils::spatial::HPX_DEPTH;
 use cdshealpix::nested;
 use fitsio::FitsFile;
 use flare::spatial::great_circle_distance;
@@ -427,11 +428,14 @@ pub fn is_in_moc(moc: &HpxMoc, ra_deg: f64, dec_deg: f64) -> bool {
 /// `(ra_deg, dec_deg, radius_rad)` cones circumscribing the cells of a degraded MOC.
 pub fn moc_to_covering_cones(moc: &HpxMoc, target_depth: u8) -> Vec<Cone> {
     let degraded = moc.degraded(target_depth);
+    // `degraded` only coarsens, so a MOC already coarser than `target_depth`
+    // keeps its own depth and its cell indices mean nothing at the finer one.
+    let depth = degraded.depth_max();
     degraded
         .flatten_to_fixed_depth_cells()
         .map(|cell_idx| {
-            let (lon_rad, lat_rad) = nested::center(target_depth, cell_idx);
-            let vertices = nested::vertices(target_depth, cell_idx);
+            let (lon_rad, lat_rad) = nested::center(depth, cell_idx);
+            let vertices = nested::vertices(depth, cell_idx);
 
             let radius_rad = vertices
                 .iter()
@@ -469,6 +473,129 @@ const MIN_COVERING_DEPTH: u8 = 3;
 
 /// Coarsens no further than [`MIN_COVERING_DEPTH`], so the caller must still reject
 /// a result that is over `max_cones`.
+/// Longest IVOA ASCII MOC accepted, in bytes.
+///
+/// A MOC is a cell list, so its serialization grows with the region. This is
+/// generous for any real localization: the 95% region of a Fermi event is a few
+/// kilobytes.
+pub const MOC_ASCII_MAX_BYTES: usize = 1 << 20;
+
+/// Largest number of `$or` branches a HEALPix range match will produce.
+///
+/// Each is an index range, so this bounds the query mongo has to plan the same
+/// way [`MOC_MATCH_MAX_CONES`] bounds the cone form.
+pub const MOC_MATCH_MAX_RANGES: usize = 5000;
+
+/// Largest number of covering cones a match stage will expand a MOC into.
+///
+/// Each becomes an `$or` branch, so this bounds the query mongo has to plan.
+pub const MOC_MATCH_MAX_CONES: usize = 500;
+
+/// Parse a MOC from its IVOA ASCII serialization, e.g. `"5/1-3 8 9 11/1234"`.
+///
+/// A MOC is a sorted cell list, and ASCII carries it directly. FITS pads to
+/// 2880-byte blocks and then needs base64 on top, so it costs several times the
+/// bytes and makes the sender round-trip through a file to produce it.
+pub fn moc_from_ascii(input: &str) -> Result<HpxMoc, String> {
+    use moc::deser::ascii::from_ascii_ivoa;
+    use moc::moc::{CellOrCellRangeMOCIntoIterator, CellOrCellRangeMOCIterator};
+
+    if input.len() > MOC_ASCII_MAX_BYTES {
+        return Err(format!(
+            "MOC is {} bytes, over the {} byte limit",
+            input.len(),
+            MOC_ASCII_MAX_BYTES
+        ));
+    }
+    let cells = from_ascii_ivoa::<u64, Hpx<u64>>(input)
+        .map_err(|e| format!("invalid IVOA ASCII MOC: {e}"))?;
+    let depth = cells.depth_max();
+    let ranges = cells.into_cellcellrange_moc_iter().ranges().collect();
+    Ok(RangeMOC::new(depth, ranges))
+}
+
+/// A `$match` stage selecting alerts inside `moc` exactly, by HEALPix range.
+///
+/// A MOC is a set of ranges in the nested ordering, so with the index stored at
+/// [`HPX_DEPTH`] this tests membership rather than approximating it: no cell is
+/// circumscribed and nothing outside the region is returned.
+///
+/// Requires `coordinates.hpx`, which is written on ingest and backfilled across
+/// the archive. An alert without it cannot match, and that is indistinguishable
+/// from a position outside the region, so the backfill has to be complete
+/// before this is trusted over the whole baseline.
+pub fn moc_hpx_stage(moc: &HpxMoc) -> Result<mongodb::bson::Document, String> {
+    use mongodb::bson::doc;
+
+    let shift = 2 * (HPX_DEPTH.saturating_sub(moc.depth_max())) as u32;
+    let mut conditions: Vec<mongodb::bson::Document> = Vec::new();
+    for cell in moc.flatten_to_fixed_depth_cells() {
+        let start = (cell as i64) << shift;
+        let end = ((cell + 1) as i64) << shift;
+        match conditions.last_mut() {
+            // Cells are yielded in order, so adjacent ones extend the open range.
+            Some(last)
+                if last
+                    .get_document("coordinates.hpx")
+                    .ok()
+                    .and_then(|r| r.get_i64("$lt").ok())
+                    == Some(start) =>
+            {
+                last.get_document_mut("coordinates.hpx")
+                    .map_err(|e| e.to_string())?
+                    .insert("$lt", end);
+            }
+            _ => conditions.push(doc! {
+                "coordinates.hpx": { "$gte": start, "$lt": end }
+            }),
+        }
+    }
+    if conditions.is_empty() {
+        return Err("MOC covers no sky".to_string());
+    }
+    if conditions.len() > MOC_MATCH_MAX_RANGES {
+        return Err(format!(
+            "search region is too fragmented: {} index ranges (max {})",
+            conditions.len(),
+            MOC_MATCH_MAX_RANGES
+        ));
+    }
+    Ok(doc! { "$match": { "$or": conditions } })
+}
+
+/// A `$match` stage selecting alerts inside `moc`.
+///
+/// Prepending this to a filter's own pipeline keeps a skymap search on the same
+/// cuts as any other run of that filter, rather than a parallel set. Mongo
+/// cannot test a MOC directly, so the region is expanded into covering cones.
+pub fn moc_match_stage(moc: &HpxMoc) -> Result<mongodb::bson::Document, String> {
+    use mongodb::bson::doc;
+
+    let (depth, cones) = select_covering_depth_bounded(moc, MOC_MATCH_MAX_CONES);
+    if cones.is_empty() {
+        return Err("MOC covers no sky".to_string());
+    }
+    if cones.len() > MOC_MATCH_MAX_CONES {
+        return Err(format!(
+            "search region too large: {} covering cones at depth {} (max {})",
+            cones.len(),
+            depth,
+            MOC_MATCH_MAX_CONES
+        ));
+    }
+    let or_conditions: Vec<mongodb::bson::Document> = cones
+        .iter()
+        .map(|&(ra, dec, radius_rad)| {
+            doc! {
+                "coordinates.radec_geojson": {
+                    "$geoWithin": { "$centerSphere": [[ra - 180.0, dec], radius_rad] }
+                }
+            }
+        })
+        .collect();
+    Ok(doc! { "$match": { "$or": or_conditions } })
+}
+
 pub fn select_covering_depth_bounded(moc: &HpxMoc, max_cones: usize) -> (u8, Vec<Cone>) {
     let mut depth = select_covering_depth(moc);
     let mut cones = moc_to_covering_cones(moc, depth);
@@ -492,6 +619,349 @@ fn angular_distance(lon1: f64, lat1: f64, lon2: f64, lat2: f64) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    use super::{moc_match_stage, MOC_MATCH_MAX_CONES};
+    use moc::moc::range::RangeMOC;
+    use moc::qty::Hpx;
+
+    /// A MOC covering a single cell at the given depth.
+    fn one_cell(depth: u8, cell: u64) -> super::HpxMoc {
+        RangeMOC::<u64, Hpx<u64>>::from_cells(depth, std::iter::once((depth, cell)), None)
+    }
+
+    #[test]
+    fn test_stage_is_a_match_of_cone_alternatives() {
+        let stage = moc_match_stage(&one_cell(3, 100)).expect("a stage");
+        let or = stage
+            .get_document("$match")
+            .expect("$match")
+            .get_array("$or")
+            .expect("$or");
+        assert!(!or.is_empty());
+        for branch in or {
+            let d = branch.as_document().expect("a condition");
+            assert!(d.contains_key("coordinates.radec_geojson"));
+        }
+    }
+
+    #[test]
+    fn test_longitude_is_written_in_the_stored_convention() {
+        // Positions are stored as [ra - 180, dec], so the stage must match that.
+        let stage = moc_match_stage(&one_cell(3, 100)).expect("a stage");
+        let or = stage
+            .get_document("$match")
+            .unwrap()
+            .get_array("$or")
+            .unwrap();
+        let centre = or[0]
+            .as_document()
+            .unwrap()
+            .get_document("coordinates.radec_geojson")
+            .unwrap()
+            .get_document("$geoWithin")
+            .unwrap()
+            .get_array("$centerSphere")
+            .unwrap();
+        let lon = centre[0].as_array().unwrap()[0].as_f64().unwrap();
+        assert!(
+            (-180.0..=180.0).contains(&lon),
+            "longitude {lon} is not shifted"
+        );
+    }
+
+    #[test]
+    fn test_an_empty_moc_is_refused() {
+        let empty = RangeMOC::<u64, Hpx<u64>>::new_empty(3);
+        assert!(moc_match_stage(&empty).is_err());
+    }
+
+    /// ASCII and FITS must describe the same region, or the wire format would
+    /// change which alerts a filter returns.
+    #[test]
+    fn test_ascii_and_fits_agree_on_a_real_localization() {
+        use super::{is_in_moc, moc_from_ascii};
+        let bytes = std::fs::read("./data/glg_healpix_all_bn200524211.fits").unwrap();
+        let from_fits = super::moc_from_skymap_bytes(&bytes, 0.9).expect("a MOC");
+
+        // Serialize what we parsed, then read it back the other way.
+        let ascii = from_fits.to_ascii().expect("serializes");
+        let from_ascii = moc_from_ascii(&ascii).expect("round trips");
+
+        assert_eq!(from_fits.depth_max(), from_ascii.depth_max());
+        let mut ra = 0.5_f64;
+        while ra < 360.0 {
+            let mut dec = -89.5_f64;
+            while dec < 90.0 {
+                assert_eq!(
+                    is_in_moc(&from_fits, ra, dec),
+                    is_in_moc(&from_ascii, ra, dec),
+                    "disagreement at {ra}, {dec}"
+                );
+                dec += 2.0;
+            }
+            ra += 2.0;
+        }
+    }
+
+    #[test]
+    fn test_ascii_parses_cells_and_ranges() {
+        use super::{is_in_moc, moc_from_ascii};
+        let moc = moc_from_ascii("5/1-3 8").expect("a MOC");
+        assert_eq!(moc.depth_max(), 5);
+        // Four cells named: the range 1-3 plus 8.
+        let cells: Vec<u64> = moc.flatten_to_fixed_depth_cells().collect();
+        assert_eq!(cells, vec![1, 2, 3, 8]);
+        let _ = is_in_moc(&moc, 0.0, 0.0);
+    }
+
+    #[test]
+    fn test_an_oversized_ascii_moc_is_refused() {
+        use super::{moc_from_ascii, MOC_ASCII_MAX_BYTES};
+        let huge = "5/1 ".repeat(MOC_ASCII_MAX_BYTES);
+        let err = moc_from_ascii(&huge).expect_err("should be refused");
+        assert!(err.contains("over the"), "{err}");
+    }
+
+    #[test]
+    fn test_too_many_ranges_is_refused() {
+        use super::{moc_hpx_stage, MOC_MATCH_MAX_RANGES};
+        // Every other cell, so nothing merges and each is its own range.
+        let scattered = RangeMOC::<u64, Hpx<u64>>::from_cells(
+            8,
+            (0..)
+                .step_by(2)
+                .take(MOC_MATCH_MAX_RANGES + 100)
+                .map(|c| (8, c as u64)),
+            None,
+        );
+        let err = moc_hpx_stage(&scattered).expect_err("should be refused");
+        assert!(err.contains("fragmented"), "{err}");
+    }
+
+    #[test]
+    fn test_malformed_ascii_is_refused() {
+        use super::moc_from_ascii;
+        assert!(moc_from_ascii("not a moc").is_err());
+        assert!(moc_from_ascii("5/").is_ok(), "an empty level is legal");
+    }
+
+    /// The range form is exact: every position it selects is in the MOC, and
+    /// every position in the MOC is selected.
+    #[test]
+    fn test_hpx_ranges_match_the_moc_exactly() {
+        use super::{is_in_moc, moc_hpx_stage};
+        use crate::utils::spatial::{Coordinates, HPX_DEPTH};
+
+        let moc = one_cell(5, 1234);
+        let stage = moc_hpx_stage(&moc).expect("a stage");
+        let ranges: Vec<(i64, i64)> = stage
+            .get_document("$match")
+            .unwrap()
+            .get_array("$or")
+            .unwrap()
+            .iter()
+            .map(|b| {
+                let r = b
+                    .as_document()
+                    .unwrap()
+                    .get_document("coordinates.hpx")
+                    .unwrap();
+                (r.get_i64("$gte").unwrap(), r.get_i64("$lt").unwrap())
+            })
+            .collect();
+
+        let selected = |ra: f64, dec: f64| {
+            let hpx = Coordinates::new(ra, dec).hpx().expect("a fresh coordinate");
+            ranges.iter().any(|&(lo, hi)| hpx >= lo && hpx < hi)
+        };
+
+        let (mut agree, mut disagree) = (0, 0);
+        let mut ra = 0.25_f64;
+        while ra < 360.0 {
+            let mut dec = -89.75_f64;
+            while dec < 90.0 {
+                if is_in_moc(&moc, ra, dec) == selected(ra, dec) {
+                    agree += 1;
+                } else {
+                    disagree += 1;
+                }
+                dec += 0.5;
+            }
+            ra += 0.5;
+        }
+        assert_eq!(disagree, 0, "{disagree} positions disagree, {agree} agree");
+        let _ = HPX_DEPTH;
+    }
+
+    /// Contiguous cells collapse into one range rather than one condition each.
+    #[test]
+    fn test_adjacent_cells_merge_into_a_single_range() {
+        use super::moc_hpx_stage;
+        let moc = RangeMOC::<u64, Hpx<u64>>::from_cells(5, (100..164).map(|c| (5, c)), None);
+        let n = moc_hpx_stage(&moc)
+            .expect("a stage")
+            .get_document("$match")
+            .unwrap()
+            .get_array("$or")
+            .unwrap()
+            .len();
+        assert_eq!(n, 1, "64 adjacent cells should be one range, got {n}");
+    }
+
+    /// A coarse MOC must still be covered: every point inside it has to fall in
+    /// some cone, or the search silently misses alerts.
+    #[test]
+    fn test_a_coarse_moc_is_actually_covered() {
+        use super::{is_in_moc, moc_to_covering_cones};
+        // Depth 1 cells are ~859 deg2, coarser than the depth 3 the covering targets.
+        let moc = RangeMOC::<u64, Hpx<u64>>::from_cells(1, (0..4).map(|c| (1, c)), None);
+        let cones = moc_to_covering_cones(&moc, 3);
+
+        let mut inside = 0;
+        let mut uncovered = 0;
+        let mut ra = 0.5_f64;
+        while ra < 360.0 {
+            let mut dec = -89.5_f64;
+            while dec < 90.0 {
+                if is_in_moc(&moc, ra, dec) {
+                    inside += 1;
+                    let covered = cones.iter().any(|&(cra, cdec, r)| {
+                        super::angular_distance(
+                            ra.to_radians(),
+                            dec.to_radians(),
+                            cra.to_radians(),
+                            cdec.to_radians(),
+                        ) <= r
+                    });
+                    if !covered {
+                        uncovered += 1;
+                    }
+                }
+                dec += 1.0;
+            }
+            ra += 1.0;
+        }
+        assert!(inside > 0, "the test MOC must contain sky");
+        assert_eq!(
+            uncovered, 0,
+            "{uncovered} of {inside} points inside the MOC fall in no cone"
+        );
+    }
+
+    /// Covering cones circumscribe healpix cells, so they always take in more
+    /// sky than the region itself. That overhead must stay bounded as the
+    /// region grows, since an alert outside the MOC still costs a row.
+    #[test]
+    fn test_covering_overhead_stays_bounded_as_the_region_grows() {
+        for (depth, n_cells) in [(5u8, 30u64), (5, 300), (5, 1500), (4, 800), (0, 12)] {
+            let moc = RangeMOC::<u64, Hpx<u64>>::from_cells(
+                depth,
+                (0..n_cells).map(|c| (depth, c)),
+                None,
+            );
+            let area = moc.coverage_percentage() * 41253.0;
+            let Ok(stage) = moc_match_stage(&moc) else {
+                continue;
+            };
+            let cone_area: f64 = stage
+                .get_document("$match")
+                .unwrap()
+                .get_array("$or")
+                .unwrap()
+                .iter()
+                .map(|b| {
+                    let r = b
+                        .as_document()
+                        .unwrap()
+                        .get_document("coordinates.radec_geojson")
+                        .unwrap()
+                        .get_document("$geoWithin")
+                        .unwrap()
+                        .get_array("$centerSphere")
+                        .unwrap()[1]
+                        .as_f64()
+                        .unwrap();
+                    2.0 * std::f64::consts::PI
+                        * (1.0 - r.cos())
+                        * (180.0 / std::f64::consts::PI).powi(2)
+                })
+                .sum();
+            let inflation = cone_area / area;
+            assert!(
+                (1.0..4.0).contains(&inflation),
+                "{area:.0} deg2 covered by {cone_area:.0} deg2 of cones ({inflation:.1}x)"
+            );
+        }
+    }
+
+    /// The whole path a skymap event takes: real localization -> MOC at a
+    /// credible level -> the stage mongo actually runs.
+    #[test]
+    fn test_a_real_fermi_localization_becomes_a_usable_stage() {
+        let bytes =
+            std::fs::read("./data/glg_healpix_all_bn200524211.fits").expect("the Fermi fixture");
+        let moc = super::moc_from_skymap_bytes(&bytes, 0.9).expect("a 90% MOC");
+        let stage = moc_match_stage(&moc).expect("a stage");
+        let or = stage
+            .get_document("$match")
+            .expect("$match")
+            .get_array("$or")
+            .expect("$or");
+        assert!(!or.is_empty(), "a real localization must cover some sky");
+        assert!(or.len() <= MOC_MATCH_MAX_CONES, "{} cones", or.len());
+    }
+
+    /// A tighter credible level is a subset, so it can never need more cones.
+    #[test]
+    fn test_a_smaller_credible_level_does_not_cost_more_cones() {
+        let bytes =
+            std::fs::read("./data/glg_healpix_all_bn200524211.fits").expect("the Fermi fixture");
+        let count = |level: f64| {
+            let moc = super::moc_from_skymap_bytes(&bytes, level).expect("a MOC");
+            moc_match_stage(&moc)
+                .expect("a stage")
+                .get_document("$match")
+                .unwrap()
+                .get_array("$or")
+                .unwrap()
+                .len()
+        };
+        let (fifty, ninety) = (count(0.5), count(0.9));
+        assert!(
+            fifty <= ninety,
+            "50% took {fifty} cones against 90% at {ninety}"
+        );
+    }
+
+    /// Roughly the area of the largest Fermi localization seen in production.
+    #[test]
+    fn test_a_five_thousand_square_degree_region_still_yields_a_stage() {
+        // Depth 5 cells are ~3.36 deg^2, so ~1500 of them cover ~5000 deg^2.
+        let moc = RangeMOC::<u64, Hpx<u64>>::from_cells(5, (0..1500).map(|c| (5, c)), None);
+        let stage = moc_match_stage(&moc).expect("a wide region must still search");
+        let n = stage
+            .get_document("$match")
+            .unwrap()
+            .get_array("$or")
+            .unwrap()
+            .len();
+        assert!(n <= MOC_MATCH_MAX_CONES, "{n} cones exceeds the budget");
+    }
+
+    #[test]
+    fn test_the_cone_budget_is_never_exceeded() {
+        // All-sky at depth 0 is the widest region a caller could hand over.
+        let all_sky = RangeMOC::<u64, Hpx<u64>>::from_cells(0, (0..12).map(|c| (0, c)), None);
+        if let Ok(stage) = moc_match_stage(&all_sky) {
+            let n = stage
+                .get_document("$match")
+                .unwrap()
+                .get_array("$or")
+                .unwrap()
+                .len();
+            assert!(n <= MOC_MATCH_MAX_CONES, "{n} cones exceeds the budget");
+        }
+    }
+
     use super::*;
 
     #[test]
