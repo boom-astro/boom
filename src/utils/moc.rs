@@ -427,11 +427,14 @@ pub fn is_in_moc(moc: &HpxMoc, ra_deg: f64, dec_deg: f64) -> bool {
 /// `(ra_deg, dec_deg, radius_rad)` cones circumscribing the cells of a degraded MOC.
 pub fn moc_to_covering_cones(moc: &HpxMoc, target_depth: u8) -> Vec<Cone> {
     let degraded = moc.degraded(target_depth);
+    // `degraded` only coarsens, so a MOC already coarser than `target_depth`
+    // keeps its own depth and its cell indices mean nothing at the finer one.
+    let depth = degraded.depth_max();
     degraded
         .flatten_to_fixed_depth_cells()
         .map(|cell_idx| {
-            let (lon_rad, lat_rad) = nested::center(target_depth, cell_idx);
-            let vertices = nested::vertices(target_depth, cell_idx);
+            let (lon_rad, lat_rad) = nested::center(depth, cell_idx);
+            let vertices = nested::vertices(depth, cell_idx);
 
             let radius_rad = vertices
                 .iter()
@@ -583,6 +586,92 @@ mod tests {
     fn test_an_empty_moc_is_refused() {
         let empty = RangeMOC::<u64, Hpx<u64>>::new_empty(3);
         assert!(moc_match_stage(&empty).is_err());
+    }
+
+    /// A coarse MOC must still be covered: every point inside it has to fall in
+    /// some cone, or the search silently misses alerts.
+    #[test]
+    fn test_a_coarse_moc_is_actually_covered() {
+        use super::{is_in_moc, moc_to_covering_cones};
+        // Depth 1 cells are ~859 deg2, coarser than the depth 3 the covering targets.
+        let moc = RangeMOC::<u64, Hpx<u64>>::from_cells(1, (0..4).map(|c| (1, c)), None);
+        let cones = moc_to_covering_cones(&moc, 3);
+
+        let mut inside = 0;
+        let mut uncovered = 0;
+        let mut ra = 0.5_f64;
+        while ra < 360.0 {
+            let mut dec = -89.5_f64;
+            while dec < 90.0 {
+                if is_in_moc(&moc, ra, dec) {
+                    inside += 1;
+                    let covered = cones.iter().any(|&(cra, cdec, r)| {
+                        super::angular_distance(
+                            ra.to_radians(),
+                            dec.to_radians(),
+                            cra.to_radians(),
+                            cdec.to_radians(),
+                        ) <= r
+                    });
+                    if !covered {
+                        uncovered += 1;
+                    }
+                }
+                dec += 1.0;
+            }
+            ra += 1.0;
+        }
+        assert!(inside > 0, "the test MOC must contain sky");
+        assert_eq!(
+            uncovered, 0,
+            "{uncovered} of {inside} points inside the MOC fall in no cone"
+        );
+    }
+
+    /// Covering cones circumscribe healpix cells, so they always take in more
+    /// sky than the region itself. That overhead must stay bounded as the
+    /// region grows, since an alert outside the MOC still costs a row.
+    #[test]
+    fn test_covering_overhead_stays_bounded_as_the_region_grows() {
+        for (depth, n_cells) in [(5u8, 30u64), (5, 300), (5, 1500), (4, 800), (0, 12)] {
+            let moc = RangeMOC::<u64, Hpx<u64>>::from_cells(
+                depth,
+                (0..n_cells).map(|c| (depth, c)),
+                None,
+            );
+            let area = moc.coverage_percentage() * 41253.0;
+            let Ok(stage) = moc_match_stage(&moc) else {
+                continue;
+            };
+            let cone_area: f64 = stage
+                .get_document("$match")
+                .unwrap()
+                .get_array("$or")
+                .unwrap()
+                .iter()
+                .map(|b| {
+                    let r = b
+                        .as_document()
+                        .unwrap()
+                        .get_document("coordinates.radec_geojson")
+                        .unwrap()
+                        .get_document("$geoWithin")
+                        .unwrap()
+                        .get_array("$centerSphere")
+                        .unwrap()[1]
+                        .as_f64()
+                        .unwrap();
+                    2.0 * std::f64::consts::PI
+                        * (1.0 - r.cos())
+                        * (180.0 / std::f64::consts::PI).powi(2)
+                })
+                .sum();
+            let inflation = cone_area / area;
+            assert!(
+                (1.0..4.0).contains(&inflation),
+                "{area:.0} deg2 covered by {cone_area:.0} deg2 of cones ({inflation:.1}x)"
+            );
+        }
     }
 
     /// The whole path a skymap event takes: real localization -> MOC at a
