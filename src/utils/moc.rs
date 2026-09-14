@@ -473,6 +473,19 @@ const MIN_COVERING_DEPTH: u8 = 3;
 
 /// Coarsens no further than [`MIN_COVERING_DEPTH`], so the caller must still reject
 /// a result that is over `max_cones`.
+/// Longest IVOA ASCII MOC accepted, in bytes.
+///
+/// A MOC is a cell list, so its serialization grows with the region. This is
+/// generous for any real localization: the 95% region of a Fermi event is a few
+/// kilobytes.
+pub const MOC_ASCII_MAX_BYTES: usize = 1 << 20;
+
+/// Largest number of `$or` branches a HEALPix range match will produce.
+///
+/// Each is an index range, so this bounds the query mongo has to plan the same
+/// way [`MOC_MATCH_MAX_CONES`] bounds the cone form.
+pub const MOC_MATCH_MAX_RANGES: usize = 5000;
+
 /// Largest number of covering cones a match stage will expand a MOC into.
 ///
 /// Each becomes an `$or` branch, so this bounds the query mongo has to plan.
@@ -487,6 +500,13 @@ pub fn moc_from_ascii(input: &str) -> Result<HpxMoc, String> {
     use moc::deser::ascii::from_ascii_ivoa;
     use moc::moc::{CellOrCellRangeMOCIntoIterator, CellOrCellRangeMOCIterator};
 
+    if input.len() > MOC_ASCII_MAX_BYTES {
+        return Err(format!(
+            "MOC is {} bytes, over the {} byte limit",
+            input.len(),
+            MOC_ASCII_MAX_BYTES
+        ));
+    }
     let cells = from_ascii_ivoa::<u64, Hpx<u64>>(input)
         .map_err(|e| format!("invalid IVOA ASCII MOC: {e}"))?;
     let depth = cells.depth_max();
@@ -532,6 +552,13 @@ pub fn moc_hpx_stage(moc: &HpxMoc) -> Result<mongodb::bson::Document, String> {
     }
     if conditions.is_empty() {
         return Err("MOC covers no sky".to_string());
+    }
+    if conditions.len() > MOC_MATCH_MAX_RANGES {
+        return Err(format!(
+            "search region is too fragmented: {} index ranges (max {})",
+            conditions.len(),
+            MOC_MATCH_MAX_RANGES
+        ));
     }
     Ok(doc! { "$match": { "$or": conditions } })
 }
@@ -684,6 +711,30 @@ mod tests {
         let cells: Vec<u64> = moc.flatten_to_fixed_depth_cells().collect();
         assert_eq!(cells, vec![1, 2, 3, 8]);
         let _ = is_in_moc(&moc, 0.0, 0.0);
+    }
+
+    #[test]
+    fn test_an_oversized_ascii_moc_is_refused() {
+        use super::{moc_from_ascii, MOC_ASCII_MAX_BYTES};
+        let huge = "5/1 ".repeat(MOC_ASCII_MAX_BYTES);
+        let err = moc_from_ascii(&huge).expect_err("should be refused");
+        assert!(err.contains("over the"), "{err}");
+    }
+
+    #[test]
+    fn test_too_many_ranges_is_refused() {
+        use super::{moc_hpx_stage, MOC_MATCH_MAX_RANGES};
+        // Every other cell, so nothing merges and each is its own range.
+        let scattered = RangeMOC::<u64, Hpx<u64>>::from_cells(
+            8,
+            (0..)
+                .step_by(2)
+                .take(MOC_MATCH_MAX_RANGES + 100)
+                .map(|c| (8, c as u64)),
+            None,
+        );
+        let err = moc_hpx_stage(&scattered).expect_err("should be refused");
+        assert!(err.contains("fragmented"), "{err}");
     }
 
     #[test]

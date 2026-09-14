@@ -866,6 +866,8 @@ async fn build_test_filter_pipeline(
     end_jd: Option<f64>,
     object_ids: Option<Vec<String>>,
     candids: Option<Vec<String>>,
+    // Region conditions, merged into the leading $match below.
+    moc_conditions: Option<mongodb::bson::Array>,
 ) -> Result<Vec<Document>, FilterError> {
     if SURVEYS_REQUIRING_PERMISSIONS.contains(&survey) && permissions.get(&survey).is_none() {
         return Err(FilterError::InvalidFilterPipeline(format!(
@@ -961,6 +963,9 @@ async fn build_test_filter_pipeline(
             doc! { "$in": permissions.get(&survey).unwrap() },
         );
     }
+    if let Some(or) = moc_conditions {
+        match_stage.insert("$or", or);
+    }
     test_pipeline[0].insert("$match", match_stage);
     Ok(test_pipeline)
 }
@@ -1028,19 +1033,23 @@ pub async fn post_filter_test(
     let body = body.clone();
     let survey = body.survey;
     let permissions = body.permissions;
-    let mut pipeline = body.pipeline;
+    let pipeline = body.pipeline;
 
-    if let Some(moc_ascii) = body.moc_ascii {
-        let stage = match moc_from_ascii(&moc_ascii).and_then(|moc| moc_hpx_stage(&moc)) {
-            Ok(stage) => stage,
+    // Merged into the leading $match rather than prepended as its own stage: a
+    // $match after the $project cannot use the coordinates.hpx index.
+    let moc_conditions = match body.moc_ascii {
+        Some(moc_ascii) => match moc_from_ascii(&moc_ascii).and_then(|moc| moc_hpx_stage(&moc)) {
+            Ok(stage) => match stage
+                .get_document("$match")
+                .and_then(|m| m.get_array("$or"))
+            {
+                Ok(or) => Some(or.clone()),
+                Err(e) => return response::internal_error(&format!("malformed moc stage: {e}")),
+            },
             Err(e) => return response::bad_request(&e),
-        };
-        let stage = match serde_json::to_value(&stage) {
-            Ok(v) => v,
-            Err(e) => return response::internal_error(&format!("failed to encode moc stage: {e}")),
-        };
-        pipeline.insert(0, stage);
-    }
+        },
+        None => None,
+    };
 
     let mut test_pipeline = match build_test_filter_pipeline(
         &survey,
@@ -1050,6 +1059,7 @@ pub async fn post_filter_test(
         body.end_jd,
         body.object_ids,
         body.candids,
+        moc_conditions,
     )
     .await
     {
@@ -1184,6 +1194,7 @@ pub async fn post_filter_test_count(
         body.end_jd,
         body.object_ids,
         body.candids,
+        None,
     )
     .await
     {
