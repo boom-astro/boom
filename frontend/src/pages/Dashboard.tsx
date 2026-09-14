@@ -5,13 +5,14 @@ import { Bar, BarChart, CartesianGrid, ReferenceArea, XAxis, YAxis } from "recha
 import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from "@/components/ui/chart";
 import { Toggle } from "@/components/ui/toggle";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
-import { IconZoomReset } from "@tabler/icons-react";
+import { IconInfoCircle, IconZoomReset } from "@tabler/icons-react";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import api, { CollectionEntry, fetchTopics, NightlyStat, type TopicInfo } from "@/lib/api";
 import { SURVEYS, type Survey } from "@/lib/constants";
 import { Switch } from "@/components/ui/switch.tsx";
 import { Label } from "@/components/ui/label.tsx";
 import KafkaAlertCounts from "@/components/kafka/KafkaAlertCounts.tsx";
+import { NIGHT_CONVENTION, describeNight, formatNightRange, formatNightRangeLong } from "@/lib/nights";
 
 const SURVEY_COLORS: Record<string, string> = {
   ztf: "var(--chart-1)",
@@ -185,20 +186,27 @@ export default function Dashboard() {
             <CardHeader className="pb-2">
               <CardDescription>Total Alerts</CardDescription>
               <CardTitle className="text-2xl">{totalAlerts.toLocaleString()}</CardTitle>
+              <p className="text-muted-foreground text-xs">
+                {nbNightsWithAlerts.toLocaleString()} nights with alerts
+              </p>
             </CardHeader>
           </Card>
           <Card>
             <CardHeader className="pb-2">
               <CardDescription>Avg / Night</CardDescription>
               <CardTitle className="text-2xl">{avgAlerts.toLocaleString()}</CardTitle>
+              <p className="text-muted-foreground text-xs">per observing night, dusk to dawn</p>
             </CardHeader>
           </Card>
           <Card>
             <CardHeader className="pb-2">
               <CardDescription>Peak Night</CardDescription>
               <CardTitle className="text-2xl">
-                {maxNight?.total ? `${maxNight.total.toLocaleString()} (${maxNight.date})` : "-"}
+                {maxNight?.total ? maxNight.total.toLocaleString() : "-"}
               </CardTitle>
+              <p className="text-muted-foreground text-xs">
+                {maxNight?.total ? `night of ${formatNightRange(maxNight.date)}` : "no alerts in range"}
+              </p>
             </CardHeader>
           </Card>
         </div>
@@ -213,11 +221,19 @@ export default function Dashboard() {
       <Card>
         <CardHeader className="space-y-3">
           <div className="flex flex-wrap items-center justify-between gap-4">
-            <div>
-              <CardTitle>Alerts per Night
+            <div className="space-y-1.5">
+              <CardTitle className="flex items-center gap-1.5">
+                Alerts per Night
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <IconInfoCircle className="text-muted-foreground size-4 cursor-help" />
+                  </TooltipTrigger>
+                  <TooltipContent side="right" className="max-w-xs">{NIGHT_CONVENTION}</TooltipContent>
+                </Tooltip>
               </CardTitle>
               <CardDescription>
-                ({chartData.length} nights{zoomSlice ? " — zoomed" : ""})
+                {chartData.length} nights{zoomSlice ? ", zoomed" : ""} · a night is labeled by
+                its evening date and runs to the next morning
               </CardDescription>
             </div>
             <div className="flex flex-wrap items-center gap-6">
@@ -240,6 +256,7 @@ export default function Dashboard() {
                 ))}
               </div>
               <div className="flex flex-wrap items-center gap-2">
+                <span className="text-muted-foreground text-sm">Nights</span>
                 <Input
                   type="date"
                   value={startDate}
@@ -294,11 +311,8 @@ export default function Dashboard() {
                   tickLine={false}
                   axisLine={false}
                   tickMargin={8}
-                  minTickGap={32}
-                  tickFormatter={(v: string) => {
-                    const d = new Date(v + "T00:00:00");
-                    return d.toLocaleDateString("en-US", {month: "short", day: "numeric"});
-                  }}
+                  minTickGap={40}
+                  tickFormatter={formatNightRange}
                 />
                 <YAxis
                   tickLine={false}
@@ -310,14 +324,14 @@ export default function Dashboard() {
                   content={
                     <ChartTooltipContent
                       labelFormatter={(_, payload) => {
-                        if (!payload?.[0]?.payload?.date) return "";
-                        const d = new Date(payload[0].payload.date + "T00:00:00");
-                        return d.toLocaleDateString("en-US", {
-                          weekday: "short",
-                          month: "short",
-                          day: "numeric",
-                          year: "numeric"
-                        });
+                        const date: string | undefined = payload?.[0]?.payload?.date;
+                        if (!date) return "";
+                        return (
+                          <div className="space-y-0.5">
+                            <div>Night of {formatNightRangeLong(date)}</div>
+                            <div className="text-muted-foreground font-normal">{describeNight(date)}</div>
+                          </div>
+                        );
                       }}
                     />
                   }
