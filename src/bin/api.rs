@@ -149,7 +149,14 @@ async fn main() -> std::io::Result<()> {
                     .service(routes::babamul::stats::get_kafka_stats)
                     .service(routes::babamul::tokens::get_tokens)
                     .service(routes::babamul::tokens::post_token)
-                    .service(routes::babamul::tokens::delete_token),
+                    .service(routes::babamul::tokens::delete_token)
+                    // Larger JSON limit for skymap uploads (~130 MB base64). This
+                    // prefix-less scope swallows any sibling after it, so keep it last.
+                    .service(
+                        actix_web::web::scope("")
+                            .app_data(web::JsonConfig::default().limit(209_715_200))
+                            .service(routes::babamul::surveys::skymap_search_alerts),
+                    ),
             )
         }
 
