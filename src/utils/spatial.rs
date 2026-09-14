@@ -359,8 +359,11 @@ pub async fn xmatch(
                         continue;
                     }
                 };
+                // Legacy writes -99 for "no photo-z"; fold it to 0 rather than drop
+                // the row, which would also discard any z_spec it carries.
                 let doc_z = match get_f64_from_doc(&xmatch_doc, distance_key) {
-                    Some(v) => v,
+                    Some(v) if v >= 0.0 => v,
+                    Some(_) => 0.0,
                     None => {
                         continue;
                     }
