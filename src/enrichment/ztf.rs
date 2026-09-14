@@ -979,11 +979,20 @@ impl ZtfEnrichmentWorker {
 
         // An empty catalogue looks like every object missing, so say which it is.
         if by_key.is_empty() {
-            warn!(
-                "no elements found in {} for any of {} objects in this batch",
-                ORBITS_COLLECTION,
-                keys.len()
-            );
+            let catalogue_empty = self
+                .mpc_orbits
+                .estimated_document_count()
+                .await
+                .is_ok_and(|count| count == 0);
+            if catalogue_empty {
+                warn!("{} is empty, enriching without geometry", ORBITS_COLLECTION);
+            } else {
+                debug!(
+                    "no elements found in {} for any of {} objects in this batch",
+                    ORBITS_COLLECTION,
+                    keys.len()
+                );
+            }
         }
 
         key_by_name
