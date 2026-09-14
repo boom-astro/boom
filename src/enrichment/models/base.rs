@@ -62,11 +62,12 @@ pub fn load_model_on_device(
 
         #[cfg(target_os = "linux")]
         let cuda_ep = {
-            // Tried and reverted: with dynamic batch it kills BFC arena reuse and OOMs.
-            // .with_arena_extend_strategy(ort::ep::ArenaExtendStrategy::SameAsRequested)
             let mut ep = ort::ep::CUDAExecutionProvider::default()
                 .with_device_id(dev)
-                .with_conv_max_workspace(false);
+                .with_conv_max_workspace(false)
+                // Safe only because callers pad every batch to one fixed shape;
+                // with dynamic shapes this grows the arena every batch and OOMs.
+                .with_arena_extend_strategy(ort::ep::ArenaExtendStrategy::SameAsRequested);
             if !cuda_stream.is_null() {
                 // Safety: guaranteed by this function's own safety contract.
                 ep = unsafe { ep.with_compute_stream(cuda_stream as *mut ()) };
