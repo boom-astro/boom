@@ -66,7 +66,11 @@ The browser client's signup and login events therefore carry no properties at
 all, and `trackSignupInitiated` and friends are typed to accept none, so an
 address cannot be attached to one by accident. A login whose `/profile` call
 fails identifies nobody rather than falling back to the address: the session
-stays anonymous and the next successful `identify` merges it in.
+stays anonymous and the next successful `identify` merges it in. Activation
+and password-reset links do carry the address in their query string, and PostHog
+reports `$current_url` with every event, so the client masks `email`, `token`
+and `activation_code` out of it (`mask_personal_data_properties` in
+[`frontend/src/main.tsx`](../frontend/src/main.tsx)).
 
 Sessions that signed in before the `id` fix are already identified on the
 username, and `posthog.identify` emits its merge event only while the stored

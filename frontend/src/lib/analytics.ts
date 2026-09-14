@@ -1,22 +1,15 @@
 import posthog, { type Properties } from 'posthog-js';
 import type { Profile } from '@/lib/api';
 
-type SearchProps = Record<string, unknown>;
-
 function event<P extends Properties>(name: string) {
   return (properties?: P) => posthog.capture(name, properties);
 }
 
-/** Takes no properties, so an address cannot be attached to it by accident. */
-function bareEvent(name: string) {
-  return () => posthog.capture(name);
-}
-
-export const trackSignupInitiated = bareEvent('signup_initiated');
-export const trackSignupEmailSubmitted = bareEvent('signup_email_submitted');
-export const trackActivationCodeSubmitted = bareEvent('activation_code_submitted');
+export const trackSignupInitiated = () => posthog.capture('signup_initiated');
+export const trackSignupEmailSubmitted = () => posthog.capture('signup_email_submitted');
+export const trackActivationCodeSubmitted = () => posthog.capture('activation_code_submitted');
 export const trackAccountActivated = event<{ via_link?: boolean }>('account_activated');
-export const trackLoginSuccess = bareEvent('login_success');
+export const trackLoginSuccess = () => posthog.capture('login_success');
 
 export const trackKafkaCredentialCreateInitiated = event<{ credential_name?: string }>('kafka_credential_create_initiated');
 export const trackKafkaCredentialCreated = event<{ credential_id?: string; credential_name?: string }>('kafka_credential_created');
@@ -28,12 +21,12 @@ export const trackApiTokenCreateInitiated = event<{ token_name?: string; expiry_
 export const trackApiTokenCreated = event<{ token_id?: string; token_name?: string; expiry_days?: number }>('api_token_created');
 export const trackApiTokenDeleted = event<{ token_id?: string }>('api_token_deleted');
 
-export const trackAlertSearchSubmitted = event<SearchProps>('alert_search_submitted');
-export const trackAlertSearchCompleted = event<SearchProps>('alert_search_completed');
-export const trackObjectSearchSubmitted = event<SearchProps>('object_search_submitted');
-export const trackObjectSearchCompleted = event<SearchProps>('object_search_completed');
+export const trackAlertSearchSubmitted = event<Properties>('alert_search_submitted');
+export const trackAlertSearchCompleted = event<Properties>('alert_search_completed');
+export const trackObjectSearchSubmitted = event<Properties>('object_search_submitted');
+export const trackObjectSearchCompleted = event<Properties>('object_search_completed');
 
-export function trackError(context: string, error: unknown, additionalInfo?: SearchProps) {
+export function trackError(context: string, error: unknown, additionalInfo?: Properties) {
   posthog.capture('error_occurred', {
     category: 'error',
     context,
@@ -55,6 +48,4 @@ export function identifyProfile(profile: NonNullable<Profile>) {
   identifyUser(profile.id ?? profile.username, profile.username);
 }
 
-export function resetUser() {
-  posthog.reset();
-}
+export const resetUser = () => posthog.reset();

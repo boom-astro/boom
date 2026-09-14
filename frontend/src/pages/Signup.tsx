@@ -10,6 +10,10 @@ import * as analytics from '@/lib/analytics';
 // Use same-origin proxy; prod nginx should route /api to backend
 const API_BASE = '/api/babamul';
 
+function errorMessage(err: unknown) {
+  return err && typeof err === 'object' && 'message' in err ? String((err as { message?: unknown }).message) : String(err);
+}
+
 export default function SignupPage() {
   const navigate = useNavigate();
   const location = useLocation();
@@ -73,8 +77,7 @@ export default function SignupPage() {
       }
       analytics.trackSignupEmailSubmitted();
     } catch (err: unknown) {
-      const msg = err && typeof err === 'object' && 'message' in err ? String((err as { message?: unknown }).message) : String(err);
-      setError(msg);
+      setError(errorMessage(err));
       analytics.trackError('signup_email_submission', err);
     } finally {
       setLoading(false);
@@ -110,8 +113,7 @@ export default function SignupPage() {
       }
       analytics.trackAccountActivated();
     } catch (err: unknown) {
-      const msg = err && typeof err === 'object' && 'message' in err ? String((err as { message?: unknown }).message) : String(err);
-      setError(msg);
+      setError(errorMessage(err));
       analytics.trackError('account_activation', err);
     } finally {
       setLoading(false);
@@ -145,8 +147,7 @@ export default function SignupPage() {
       }
       analytics.trackAccountActivated({ via_link: true });
     } catch (err: unknown) {
-      const msg = err && typeof err === 'object' && 'message' in err ? String((err as { message?: unknown }).message) : String(err);
-      setError(msg);
+      setError(errorMessage(err));
       analytics.trackError('auto_account_activation', err);
     } finally {
       setLoading(false);
