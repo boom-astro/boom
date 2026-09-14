@@ -122,8 +122,9 @@ async fn backfill(
         if batch.len() >= batch_size {
             let n = batch.len() as u64;
             if !dry_run {
-                let drained: Vec<WriteModel> = batch.drain(..).collect();
-                client.bulk_write(drained).ordered(false).await?;
+                // Replaced rather than drained so the next batch keeps the allocation.
+                let full = std::mem::replace(&mut batch, Vec::with_capacity(batch_size));
+                client.bulk_write(full).ordered(false).await?;
             } else {
                 batch.clear();
             }
