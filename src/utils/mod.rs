@@ -1,4 +1,5 @@
 pub mod comets;
+pub mod cosmology;
 pub mod cutouts;
 pub mod data;
 pub mod db;
@@ -7,6 +8,7 @@ pub mod enums;
 pub mod fits;
 pub mod gpu;
 pub mod lightcurves;
+pub mod moc;
 pub mod mpcorb;
 pub mod o11y;
 pub mod outburst;
