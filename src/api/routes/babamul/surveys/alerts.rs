@@ -6,7 +6,7 @@ use crate::utils::cosmology::luminosity_distance_mpc;
 use crate::utils::enums::Survey;
 use crate::utils::moc::{
     credible_volume_to_2d_moc, is_in_moc, moc_from_fits_bytes, moc_from_skymap_bytes,
-    parse_3d_skymap_bytes, select_covering_depth_bounded, CredibleVolumeIndex, HpxMoc,
+    parse_3d_skymap_bytes, select_covering_depth_bounded, Cone, CredibleVolumeIndex, HpxMoc,
     LIGO3dskymap, Skymap3dError,
 };
 use crate::utils::spatial::get_f64_from_doc;
@@ -347,8 +347,6 @@ enum AlertsConeSearchResult {
     LsstAlerts(HashMap<String, Vec<EnrichedLsstAlert>>),
 }
 
-/// One cone search per coordinate pair, grouped by object name. The per-cone
-/// `$centerSphere` is prepended to `base_filter_doc` so the geospatial index is used.
 async fn cone_search_by_coordinates<T>(
     db: &Database,
     survey: Survey,
@@ -388,8 +386,7 @@ where
                 }
             }
         };
-        // we need to make sure that the condition on coordinates is at the start of the
-        // filter document to take advantage of geospatial indexing
+        // MongoDB only picks the geospatial index if this key comes first.
         let filter_doc: Document = center_sphere
             .into_iter()
             .chain(base_filter_doc.clone())
@@ -559,26 +556,15 @@ pub async fn cone_search_alerts(
     }
 }
 
-/// Maximum time window for skymap/MOC search queries (7 days).
 const MOC_SEARCH_MAX_TIME_WINDOW_JD: f64 = 7.0;
-/// Maximum number of covering cones before rejecting the query.
 const MOC_SEARCH_MAX_CONES: usize = 500;
-/// MongoDB server-side query timeout for skymap/MOC search (30 seconds).
 const MOC_SEARCH_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-/// Cap on 2D spatial pre-filter candidates for the 3D credible-volume test, to
-/// bound memory use before the host-galaxy cross-match lookup.
+/// Bounds memory before the host-galaxy cross-match lookup.
 const SKYMAP_3D_SPATIAL_CAP: usize = 50_000;
 
-/// The parsed spatial search region. A `skymap_fits_base64` upload is classified
-/// by its columns: DISTMU/DISTSIGMA/DISTNORM present means a 3D BAYESTAR
-/// localization, anything else a plain 2D probability skymap.
 enum SkymapSearchMode {
-    /// A pre-built MOC, used as-is (no distance information).
     Moc(HpxMoc),
-    /// A 2D HEALPix probability skymap, thresholded at `credible_level`.
     Skymap2d(HpxMoc),
-    /// A 3D BAYESTAR skymap: the density-sorted index and its 2D sky projection
-    /// (used as a cheap pre-filter before the exact 3D containment test).
     Skymap3d {
         skymap: Box<LIGO3dskymap>,
         idx: CredibleVolumeIndex,
@@ -588,8 +574,7 @@ enum SkymapSearchMode {
 }
 
 impl SkymapSearchMode {
-    /// The 2D sky region used for covering cones: exact for `Moc`/`Skymap2d`,
-    /// a pre-filter for `Skymap3d`.
+    /// Exact for `Moc`/`Skymap2d`, only a pre-filter for `Skymap3d`.
     fn moc_2d(&self) -> &HpxMoc {
         match self {
             SkymapSearchMode::Moc(moc) | SkymapSearchMode::Skymap2d(moc) => moc,
@@ -604,7 +589,7 @@ impl SkymapSearchMode {
 /// Priority: 0 = DESI spec (zwarn=0), 1 = NED SPEC, 2 = DESI spec (zwarn!=0)
 /// and LSDR10 spec, 3 = NED PHOT, 4 = LSDR10 photo-z.
 fn extract_host_redshifts(cross_matches: Option<&Document>) -> Vec<f64> {
-    // `priority` ranks a row (lower = better) or returns None to skip it.
+    /// `priority` ranks a row (lower = better) or returns None to skip it.
     fn extract_catalog_zs(
         cross_matches: Option<&Document>,
         catalog: &str,
@@ -618,8 +603,7 @@ fn extract_host_redshifts(cross_matches: Option<&Document>) -> Vec<f64> {
         for v in arr {
             let Some(m) = v.as_document() else { continue };
             let Some(p) = priority(m) else { continue };
-            // get_f64_from_doc, not Document::get_f64: the catalogs store some of
-            // these as Int32/Int64 and get_f64 silently rejects those.
+            // Document::get_f64 rejects the Int32 these catalogs sometimes store.
             let Some(z) = get_f64_from_doc(m, z_field).filter(|&z| z > 0.0) else {
                 continue;
             };
@@ -666,8 +650,7 @@ fn extract_host_redshifts(cross_matches: Option<&Document>) -> Vec<f64> {
         },
         &mut ranked,
     );
-    // Legacy carries both; a row with each is deduplicated below, keeping the
-    // spectroscopic one because it sorts first.
+    // A Legacy row carrying both is deduplicated below, keeping the spectroscopic one.
     extract_catalog_zs(cross_matches, "LSDR10", "z_spec", |_| Some(2), &mut ranked);
     extract_catalog_zs(
         cross_matches,
@@ -677,7 +660,6 @@ fn extract_host_redshifts(cross_matches: Option<&Document>) -> Vec<f64> {
         &mut ranked,
     );
 
-    // Sort best priority first, then deduplicate by 3-arcsec proximity.
     ranked.sort_by_key(|&(p, _, _, _)| p);
     const DEDUP_ARCSEC: f64 = 3.0;
     let mut kept: Vec<(f64, f64, f64)> = Vec::new(); // (ra, dec, z)
@@ -694,16 +676,9 @@ fn extract_host_redshifts(cross_matches: Option<&Document>) -> Vec<f64> {
     kept.into_iter().map(|(_, _, z)| z).collect()
 }
 
-/// Stream alerts matching `filter_doc` and pair each with an optional
-/// `host_searched_prob_vol`. The spatial `$or` is only a covering-cone
-/// pre-filter, so every mode re-tests each alert against the real region:
-/// `Moc`/`Skymap2d` point-in-region (always paired with `None`), `Skymap3d` the
-/// exact distance-aware test against cross-matched host redshifts. An alert with
-/// no matched host passes on the 2D projection alone; one whose hosts all fall
-/// outside the credible volume is dropped.
-///
-/// The returned `truncated` flag means `SKYMAP_3D_SPATIAL_CAP` was hit, not the
-/// caller's `limit`.
+/// The spatial `$or` is only a covering-cone pre-filter, so each alert is re-tested
+/// against the real region here. `truncated` means `SKYMAP_3D_SPATIAL_CAP` was hit,
+/// not the caller's `limit`.
 async fn collect_skymap_alerts<T, F>(
     db: &Database,
     survey: Survey,
@@ -748,7 +723,6 @@ where
             moc_2d,
             credible_level,
         } => {
-            // Phase 1: spatial pre-filter against the 2D sky projection
             let mut spatial_candidates: Vec<T> = Vec::new();
             let mut truncated = false;
             while let Some(alert) = cursor
@@ -766,7 +740,6 @@ where
                 }
             }
 
-            // Phase 2: batch aux lookup for host-galaxy redshifts
             let object_ids: Vec<Bson> = spatial_candidates
                 .iter()
                 .map(|a| Bson::String(object_id(a).to_string()))
@@ -789,10 +762,7 @@ where
                 host_z_map.insert(oid.to_string(), z_values);
             }
 
-            // Phase 3: exact 3D test per candidate. `dist_cache` memoizes
-            // luminosity_distance_mpc (a 200-step numerical integration) by
-            // redshift, since many alerts commonly share the same handful of
-            // cross-matched host galaxies.
+            // luminosity_distance_mpc is a 200-step integration; alerts share hosts.
             let mut dist_cache: HashMap<u64, f64> = HashMap::new();
             let mut results = Vec::new();
             for alert in spatial_candidates {
@@ -803,10 +773,9 @@ where
                     .unwrap_or(&[]);
 
                 if z_values.is_empty() {
-                    // No cross-matched host — pass through on the 2D test alone.
+                    // No host: the 2D test is all we have, so let it through.
                     results.push((alert, None));
                 } else {
-                    // Find best (lowest) searched_prob_vol across all matched hosts.
                     let best_spv = z_values
                         .iter()
                         .filter_map(|&z| {
@@ -820,7 +789,6 @@ where
                     if best_spv.is_finite() && best_spv <= *credible_level {
                         results.push((alert, Some(best_spv)));
                     }
-                    // else: has cross-matched hosts but none inside the credible volume — drop
                 }
 
                 if results.len() >= limit as usize {
@@ -832,8 +800,6 @@ where
     }
 }
 
-/// [`collect_skymap_alerts`] plus the survey-specific response wrapper, so the
-/// ZTF and LSST branches differ only by their coords closure and result type.
 #[allow(clippy::too_many_arguments)]
 async fn collect_and_wrap_skymap_alerts<T, F, R, W>(
     db: &Database,
@@ -937,7 +903,6 @@ pub async fn skymap_search_alerts(
     };
     let survey = path.into_inner();
 
-    // Validate time window (required, capped at 7 days)
     let time_window = query.end_jd - query.start_jd;
     if time_window <= 0.0 {
         return response::bad_request("end_jd must be greater than start_jd");
@@ -949,7 +914,6 @@ pub async fn skymap_search_alerts(
         ));
     }
 
-    // Validate which spatial source was provided before doing any heavy work.
     let moc_b64 = query.moc_fits_base64.take();
     let skymap_b64 = query.skymap_fits_base64.take();
     match (&moc_b64, &skymap_b64) {
@@ -980,13 +944,9 @@ pub async fn skymap_search_alerts(
         return response::bad_request("limit must be between 1 and 10000");
     }
 
-    // Decoding the base64 payload, parsing the MOC/skymap (including classifying
-    // a skymap_fits_base64 upload as 2D or 3D by its columns), and computing the
-    // covering cones is pure CPU work with no `.await` points. Running it on the
-    // async worker would block that worker for the whole computation, so offload
-    // it to the blocking thread pool.
+    // Pure CPU with no await points, so it must not run on the async worker.
     let computation = web::block(
-        move || -> Result<(SkymapSearchMode, u8, Vec<(f64, f64, f64)>), String> {
+        move || -> Result<(SkymapSearchMode, u8, Vec<Cone>), String> {
             let mode = match (moc_b64, skymap_b64) {
                 (Some(moc_b64), _) => {
                     let bytes = BASE64_STANDARD
@@ -998,9 +958,6 @@ pub async fn skymap_search_alerts(
                     let bytes = BASE64_STANDARD
                         .decode(skymap_b64)
                         .map_err(|e| format!("Invalid base64 in skymap_fits_base64: {}", e))?;
-                    // A LIGO/Virgo/KAGRA BAYESTAR 3D localization always carries
-                    // DISTMU/DISTSIGMA/DISTNORM; anything else is treated as a
-                    // plain 2D probability skymap.
                     match parse_3d_skymap_bytes(&bytes) {
                         Ok(skymap) => {
                             let idx = CredibleVolumeIndex::build(&skymap, 200);
@@ -1015,15 +972,11 @@ pub async fn skymap_search_alerts(
                         Err(Skymap3dError::NotThreeDimensional) => SkymapSearchMode::Skymap2d(
                             moc_from_skymap_bytes(&bytes, credible_level)?,
                         ),
-                        // It has the distance columns but is unreadable: failing
-                        // over to a 2D search here would silently drop the
-                        // distance constraint the caller asked for.
                         Err(e @ Skymap3dError::Invalid(_)) => {
                             return Err(format!("Invalid 3D skymap FITS: {}", e));
                         }
                     }
                 }
-                // Presence is validated above: exactly one source is provided.
                 (None, None) => unreachable!("spatial source presence validated before web::block"),
             };
             let (depth, cones) = select_covering_depth_bounded(mode.moc_2d(), MOC_SEARCH_MAX_CONES);
@@ -1055,9 +1008,6 @@ pub async fn skymap_search_alerts(
         ));
     }
 
-    // Build the query with JD range first (uses the candidate.jd index to narrow quickly),
-    // then spatial $or to filter by sky region, then post-filter with the full-resolution
-    // MOC/skymap.
     let jd_filter = doc! { "candidate.jd": { "$gte": query.start_jd, "$lte": query.end_jd } };
 
     let or_conditions: Vec<Document> = cones
@@ -1076,7 +1026,6 @@ pub async fn skymap_search_alerts(
         })
         .collect();
 
-    // Start with JD filter (indexed), then add spatial $or, then other filters
     let mut filter_doc = jd_filter;
     filter_doc.insert("$or", or_conditions);
 
@@ -1272,8 +1221,7 @@ mod tests {
 
     #[test]
     fn test_desi_zwarn_is_read_whatever_its_bson_int_width() {
-        // zwarn arrives as Int32 in the imported catalogs; Document::get_i64
-        // rejects that, which used to demote every clean spec-z to the bad tier.
+        // Int32 zwarn used to read as "flagged", demoting every clean spec-z.
         let cm = cross_matches(vec![
             (
                 "NED",

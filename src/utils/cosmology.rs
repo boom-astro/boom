@@ -1,10 +1,6 @@
 use flare::cosmo::Cosmo;
 
-/// Convert redshift `z` to luminosity distance in Mpc.
-///
-/// Delegates to `flare::cosmo::Cosmo::planck18()` (flare is already a
-/// dependency, used elsewhere in this codebase) rather than maintaining a
-/// second, independently-parameterized Planck18 implementation here.
+/// Redshift to Planck18 luminosity distance, in Mpc.
 pub fn luminosity_distance_mpc(z: f64) -> f64 {
     if z <= 0.0 {
         return 0.0;
@@ -16,9 +12,7 @@ pub fn luminosity_distance_mpc(z: f64) -> f64 {
 mod tests {
     use super::*;
 
-    // Reference values verified against Planck18 parameters (H0=67.66, Om=0.3111, flat ΛCDM).
-    // Tolerance 0.5% comfortably covers the small shift from flare's own Planck18
-    // preset (Om=0.3103) alongside its numerical integration error.
+    // Reference values from astropy Planck18 (H0=67.66, Om=0.3111, flat ΛCDM).
     const TOL: f64 = 0.005;
 
     fn check(z: f64, expected_mpc: f64) {
