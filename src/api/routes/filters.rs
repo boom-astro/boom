@@ -58,11 +58,10 @@ async fn validate_watchlist(
     Ok(())
 }
 
-use crate::utils::moc::{moc_from_fits_bytes, moc_hpx_stage};
+use crate::utils::moc::{moc_from_ascii, moc_hpx_stage};
 use actix_web::{get, patch, post, web, HttpResponse};
 use apache_avro::AvroSchema;
 use apache_avro_macros::serdavro;
-use base64::prelude::{Engine as _, BASE64_STANDARD};
 use flare::Time;
 use futures::stream::StreamExt;
 use mongodb::{
@@ -969,10 +968,11 @@ async fn build_test_filter_pipeline(
 #[derive(serde::Deserialize, Clone, ToSchema)]
 pub struct FilterTestRequest {
     pub pipeline: Vec<serde_json::Value>,
-    /// Base64-encoded MOC FITS. When present the region is prepended to
-    /// `pipeline` as a match stage, so a skymap search runs the filter's own
-    /// cuts rather than a separate set. Matched exactly, by HEALPix range.
-    pub moc_fits_base64: Option<String>,
+    /// A MOC in IVOA ASCII form, e.g. `"5/1-3 8 11/1234"`. When present the
+    /// region is prepended to `pipeline` as a match stage, so a skymap search
+    /// runs the filter's own cuts rather than a separate set. Matched exactly,
+    /// by HEALPix range.
+    pub moc_ascii: Option<String>,
     pub permissions: HashMap<Survey, Vec<i32>>,
     pub survey: Survey,
     pub start_jd: Option<f64>,
@@ -1030,13 +1030,8 @@ pub async fn post_filter_test(
     let permissions = body.permissions;
     let mut pipeline = body.pipeline;
 
-    if let Some(moc_b64) = body.moc_fits_base64 {
-        let stage = match BASE64_STANDARD
-            .decode(&moc_b64)
-            .map_err(|e| format!("invalid base64 in moc_fits_base64: {e}"))
-            .and_then(|bytes| moc_from_fits_bytes(&bytes))
-            .and_then(|moc| moc_hpx_stage(&moc))
-        {
+    if let Some(moc_ascii) = body.moc_ascii {
+        let stage = match moc_from_ascii(&moc_ascii).and_then(|moc| moc_hpx_stage(&moc)) {
             Ok(stage) => stage,
             Err(e) => return response::bad_request(&e),
         };

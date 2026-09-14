@@ -478,6 +478,22 @@ const MIN_COVERING_DEPTH: u8 = 3;
 /// Each becomes an `$or` branch, so this bounds the query mongo has to plan.
 pub const MOC_MATCH_MAX_CONES: usize = 500;
 
+/// Parse a MOC from its IVOA ASCII serialization, e.g. `"5/1-3 8 9 11/1234"`.
+///
+/// A MOC is a sorted cell list, and ASCII carries it directly. FITS pads to
+/// 2880-byte blocks and then needs base64 on top, so it costs several times the
+/// bytes and makes the sender round-trip through a file to produce it.
+pub fn moc_from_ascii(input: &str) -> Result<HpxMoc, String> {
+    use moc::deser::ascii::from_ascii_ivoa;
+    use moc::moc::{CellOrCellRangeMOCIntoIterator, CellOrCellRangeMOCIterator};
+
+    let cells = from_ascii_ivoa::<u64, Hpx<u64>>(input)
+        .map_err(|e| format!("invalid IVOA ASCII MOC: {e}"))?;
+    let depth = cells.depth_max();
+    let ranges = cells.into_cellcellrange_moc_iter().ranges().collect();
+    Ok(RangeMOC::new(depth, ranges))
+}
+
 /// A `$match` stage selecting alerts inside `moc` exactly, by HEALPix range.
 ///
 /// A MOC is a set of ranges in the nested ordering, so with the index stored at
@@ -629,6 +645,52 @@ mod tests {
     fn test_an_empty_moc_is_refused() {
         let empty = RangeMOC::<u64, Hpx<u64>>::new_empty(3);
         assert!(moc_match_stage(&empty).is_err());
+    }
+
+    /// ASCII and FITS must describe the same region, or the wire format would
+    /// change which alerts a filter returns.
+    #[test]
+    fn test_ascii_and_fits_agree_on_a_real_localization() {
+        use super::{is_in_moc, moc_from_ascii};
+        let bytes = std::fs::read("./data/glg_healpix_all_bn200524211.fits").unwrap();
+        let from_fits = super::moc_from_skymap_bytes(&bytes, 0.9).expect("a MOC");
+
+        // Serialize what we parsed, then read it back the other way.
+        let ascii = from_fits.to_ascii().expect("serializes");
+        let from_ascii = moc_from_ascii(&ascii).expect("round trips");
+
+        assert_eq!(from_fits.depth_max(), from_ascii.depth_max());
+        let mut ra = 0.5_f64;
+        while ra < 360.0 {
+            let mut dec = -89.5_f64;
+            while dec < 90.0 {
+                assert_eq!(
+                    is_in_moc(&from_fits, ra, dec),
+                    is_in_moc(&from_ascii, ra, dec),
+                    "disagreement at {ra}, {dec}"
+                );
+                dec += 2.0;
+            }
+            ra += 2.0;
+        }
+    }
+
+    #[test]
+    fn test_ascii_parses_cells_and_ranges() {
+        use super::{is_in_moc, moc_from_ascii};
+        let moc = moc_from_ascii("5/1-3 8").expect("a MOC");
+        assert_eq!(moc.depth_max(), 5);
+        // Four cells named: the range 1-3 plus 8.
+        let cells: Vec<u64> = moc.flatten_to_fixed_depth_cells().collect();
+        assert_eq!(cells, vec![1, 2, 3, 8]);
+        let _ = is_in_moc(&moc, 0.0, 0.0);
+    }
+
+    #[test]
+    fn test_malformed_ascii_is_refused() {
+        use super::moc_from_ascii;
+        assert!(moc_from_ascii("not a moc").is_err());
+        assert!(moc_from_ascii("5/").is_ok(), "an empty level is legal");
     }
 
     /// The range form is exact: every position it selects is in the MOC, and
