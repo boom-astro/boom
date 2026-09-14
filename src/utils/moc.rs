@@ -484,9 +484,10 @@ pub const MOC_MATCH_MAX_CONES: usize = 500;
 /// [`HPX_DEPTH`] this tests membership rather than approximating it: no cell is
 /// circumscribed and nothing outside the region is returned.
 ///
-/// Only alerts carrying `coordinates.hpx` can match, so a window reaching back
-/// before that field existed must use [`moc_match_stage`] instead. The two are
-/// not interchangeable: this one silently returns nothing for older alerts.
+/// Requires `coordinates.hpx`, which is written on ingest and backfilled across
+/// the archive. An alert without it cannot match, and that is indistinguishable
+/// from a position outside the region, so the backfill has to be complete
+/// before this is trusted over the whole baseline.
 pub fn moc_hpx_stage(moc: &HpxMoc) -> Result<mongodb::bson::Document, String> {
     use mongodb::bson::doc;
 

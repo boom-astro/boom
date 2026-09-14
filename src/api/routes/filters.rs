@@ -58,7 +58,7 @@ async fn validate_watchlist(
     Ok(())
 }
 
-use crate::utils::moc::{moc_from_fits_bytes, moc_match_stage};
+use crate::utils::moc::{moc_from_fits_bytes, moc_hpx_stage};
 use actix_web::{get, patch, post, web, HttpResponse};
 use apache_avro::AvroSchema;
 use apache_avro_macros::serdavro;
@@ -971,7 +971,7 @@ pub struct FilterTestRequest {
     pub pipeline: Vec<serde_json::Value>,
     /// Base64-encoded MOC FITS. When present the region is prepended to
     /// `pipeline` as a match stage, so a skymap search runs the filter's own
-    /// cuts rather than a separate set.
+    /// cuts rather than a separate set. Matched exactly, by HEALPix range.
     pub moc_fits_base64: Option<String>,
     pub permissions: HashMap<Survey, Vec<i32>>,
     pub survey: Survey,
@@ -1035,7 +1035,7 @@ pub async fn post_filter_test(
             .decode(&moc_b64)
             .map_err(|e| format!("invalid base64 in moc_fits_base64: {e}"))
             .and_then(|bytes| moc_from_fits_bytes(&bytes))
-            .and_then(|moc| moc_match_stage(&moc))
+            .and_then(|moc| moc_hpx_stage(&moc))
         {
             Ok(stage) => stage,
             Err(e) => return response::bad_request(&e),
