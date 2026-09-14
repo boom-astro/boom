@@ -38,6 +38,9 @@ pub struct AssociationResult {
     pub p_none: f64,
     /// Input galaxies considered, before any shape or offset cut.
     pub n_considered: usize,
+    /// Galaxies passing the d_DLR cut, counted before `max_candidates` truncates
+    /// `candidates`, so a caller can tell when the cap is binding.
+    pub n_passed_dlr: usize,
 }
 
 struct Scored {
@@ -77,6 +80,7 @@ pub fn associate_host(
             candidates: Vec::new(),
             p_none: 1.0,
             n_considered: candidates.len(),
+            n_passed_dlr: 0,
         });
     }
 
@@ -152,6 +156,7 @@ pub fn associate_host(
             1.0
         },
         n_considered: candidates.len(),
+        n_passed_dlr: scored.len(),
     })
 }
 

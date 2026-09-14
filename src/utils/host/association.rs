@@ -12,6 +12,11 @@ pub struct StoredHostCandidate {
     pub objname: Option<String>,
     pub catalog: Option<String>,
     pub objtype: Option<String>,
+    /// Whether the size is an isophotal diameter rather than a half-light radius.
+    pub size_is_isophotal: bool,
+    /// False when the catalogue gave a real position angle. 2MASS diameters carry
+    /// a fixed 90 degrees, which makes `d_dlr` directionally meaningless.
+    pub orientation_is_nominal: bool,
     pub ra: f64,
     pub dec: f64,
     /// Angular separation from the transient, arcsec.
@@ -58,6 +63,8 @@ impl HostGalaxyAssociation {
                 objname: c.galaxy.objname.clone(),
                 catalog: c.galaxy.catalog.clone(),
                 objtype: c.galaxy.objtype.clone(),
+                size_is_isophotal: c.galaxy.size_is_isophotal,
+                orientation_is_nominal: c.galaxy.orientation_is_nominal,
                 ra: c.galaxy.ra,
                 dec: c.galaxy.dec,
                 sep_arcsec: c.separation_arcsec,
@@ -84,7 +91,7 @@ impl HostGalaxyAssociation {
             // `candidates` is already sorted by descending posterior.
             best_host: candidates.first().cloned(),
             n_candidates_searched: result.n_considered as u32,
-            n_candidates_after_dlr_cut: candidates.len() as u32,
+            n_candidates_after_dlr_cut: result.n_passed_dlr as u32,
             p_host_none: result.p_none,
             candidates,
         }

@@ -211,7 +211,7 @@ host_galaxy:
   min_axis_arcsec: 0.05
   max_candidates: 10
   exclude_star_like: true # drop LSDR10 point sources, which have no extent
-  star_type_value: PSF
+  star_type_values: [PSF, DUP]
   use_redshift: true
   # REX fits marginally resolved sources, and about half are too small, faint or
   # blended to be a believable host. These sit in sensitive parts of the

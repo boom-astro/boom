@@ -119,6 +119,7 @@ crossmatch:
         Diam: 1
         Diam_ba: 1
         Diam_pa: 1
+        Diam_survey: 1
         DistMpc: 1
         DistMpc_method: 1
         m_Ks: 1
@@ -364,6 +365,7 @@ crossmatch:
         Diam: 1
         Diam_ba: 1
         Diam_pa: 1
+        Diam_survey: 1
         DistMpc: 1
         DistMpc_method: 1
         m_Ks: 1

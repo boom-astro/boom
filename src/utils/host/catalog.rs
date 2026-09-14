@@ -21,6 +21,17 @@ fn opt_string(doc: &Document, key: &str) -> Option<String> {
     }
 }
 
+/// An object's catalogue name. NED names its rows with a string, Legacy with a
+/// numeric id, so both spellings have to be accepted.
+fn opt_objname(doc: &Document, key: &str) -> Option<String> {
+    match doc.get(key) {
+        Some(Bson::String(s)) if !s.is_empty() => Some(s.clone()),
+        Some(Bson::Int64(v)) => Some(v.to_string()),
+        Some(Bson::Int32(v)) => Some(v.to_string()),
+        _ => None,
+    }
+}
+
 /// Every NED-LVS key the reader depends on, for the projection drift test.
 #[cfg(test)]
 pub const NED_LVS_REQUIRED_KEYS: &[&str] = &[
@@ -33,6 +44,8 @@ pub const NED_LVS_REQUIRED_KEYS: &[&str] = &[
     "Diam",
     "Diam_ba",
     "Diam_pa",
+    "Diam_survey",
+    "m_Ks",
     "DistMpc",
     "DistMpc_method",
 ];
@@ -86,7 +99,7 @@ pub fn galaxy_from_ned_lvs(doc: &Document, config: &HostGalaxyConfig) -> Option<
         mag: opt_f64(doc, "m_Ks"),
         mag_err: opt_f64(doc, "m_Ks_unc"),
         objtype,
-        objname: opt_string(doc, "_id"),
+        objname: opt_objname(doc, "_id"),
         catalog: Some(NED_LVS.to_string()),
         size_is_isophotal: true,
         diam_survey,
@@ -195,7 +208,7 @@ pub fn galaxy_from_ls_dr10(doc: &Document, config: &HostGalaxyConfig) -> Option<
         mag: None,
         mag_err: None,
         objtype,
-        objname: opt_string(doc, "_id"),
+        objname: opt_objname(doc, "_id"),
         catalog: Some(LS_DR10.to_string()),
         size_is_isophotal,
         diam_survey: None,
@@ -453,22 +466,80 @@ mod tests {
 mod projection_tests {
     use super::NED_LVS_REQUIRED_KEYS;
 
+    /// Every config a deployment actually runs, not just the base one.
+    fn deployment_configs() -> Vec<(String, String)> {
+        let root = concat!(env!("CARGO_MANIFEST_DIR"));
+        let mut out = vec![(
+            "config.yaml".to_string(),
+            std::fs::read_to_string(format!("{root}/config.yaml")).expect("config.yaml"),
+        )];
+        let prod = std::path::Path::new(root).join("config/prod");
+        let Ok(entries) = std::fs::read_dir(&prod) else {
+            return out;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path().join("config.yaml");
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                out.push((path.display().to_string(), text));
+            }
+        }
+        out
+    }
+
     // These drifted once (`diam` vs `Diam`) and nothing failed: absent reads as 0.
     #[test]
     fn test_config_projects_every_key_the_reader_needs() {
-        let config = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/config.yaml"))
-            .expect("config.yaml");
-        let block = config
-            .split("- catalog: NED_LVS")
-            .nth(1)
-            .expect("a NED_LVS crossmatch entry");
-        let projection = block.split("- catalog:").next().expect("entry body");
+        for (name, config) in deployment_configs() {
+            let Some(block) = config.split("- catalog: NED_LVS").nth(1) else {
+                continue;
+            };
+            let projection = block.split("- catalog:").next().expect("entry body");
+            for key in NED_LVS_REQUIRED_KEYS {
+                assert!(
+                    projection.contains(&format!("{key}: 1")),
+                    "{name}: NED_LVS projection is missing `{key}`, which the reader depends on"
+                );
+            }
+        }
+    }
 
-        for key in NED_LVS_REQUIRED_KEYS {
-            assert!(
-                projection.contains(&format!("{key}: 1")),
-                "NED_LVS projection is missing `{key}`, which the reader depends on"
-            );
+    /// A misspelled key is dropped in silence, leaving the default in force.
+    #[test]
+    fn test_host_galaxy_keys_match_the_config_struct() {
+        let known = [
+            "enabled",
+            "ned_lvs_catalog",
+            "ls_dr10_catalog",
+            "max_dlr",
+            "min_axis_arcsec",
+            "max_candidates",
+            "exclude_star_like",
+            "star_type_values",
+            "use_redshift",
+            "rex_min_shape_r_arcsec",
+            "rex_min_snr",
+            "rex_max_fracflux",
+            "isophote_mag",
+        ];
+        for (name, config) in deployment_configs() {
+            let Some(block) = config.split("\nhost_galaxy:").nth(1) else {
+                continue;
+            };
+            for line in block.lines().skip(1) {
+                // The block ends at the next top-level key.
+                if !line.starts_with("  ") && !line.trim().is_empty() {
+                    break;
+                }
+                let trimmed = line.trim();
+                if trimmed.is_empty() || trimmed.starts_with('#') || !trimmed.contains(':') {
+                    continue;
+                }
+                let key = trimmed.split(':').next().unwrap().trim();
+                assert!(
+                    known.contains(&key),
+                    "{name}: host_galaxy key `{key}` is not on HostGalaxyConfig, so it is ignored"
+                );
+            }
         }
     }
 
@@ -701,7 +772,7 @@ mod review_tests {
         let fallback = galaxy_from_ls_dr10(&no_flux, &config).expect("still a candidate");
         assert!(!fallback.size_is_isophotal);
 
-        // SER rows carry no Sersic index in the current ingest.
+        // A SER row without a Sersic index falls back to its half-light radius.
         let mut ser = base.clone();
         ser.insert("objtype", "SER");
         let ser = galaxy_from_ls_dr10(&ser, &config).expect("ser");
