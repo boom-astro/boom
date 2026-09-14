@@ -67,12 +67,13 @@ async fn backfill(
 ) -> Result<u64, mongodb::error::Error> {
     // Only documents still missing the field, so a resumed run skips its own work.
     let filter = doc! { "coordinates.hpx": { "$exists": false } };
-    let remaining = collection.count_documents(filter.clone()).await?;
-    if remaining == 0 {
-        info!("{}: already complete", collection.name());
-        return Ok(0);
-    }
-    let pb = progress_bar(remaining, collection.name().to_string());
+    // An exact count means a collection scan on an unindexed field, which on the
+    // larger collections costs more than the pass itself, so the bar is sized by
+    // the metadata estimate and reset to the real total once the cursor is done.
+    let pb = progress_bar(
+        collection.estimated_document_count().await?,
+        collection.name().to_string(),
+    );
 
     let mut cursor = collection
         .find(filter)
@@ -121,8 +122,9 @@ async fn backfill(
         if batch.len() >= batch_size {
             let n = batch.len() as u64;
             if !dry_run {
-                let drained: Vec<WriteModel> = batch.drain(..).collect();
-                client.bulk_write(drained).ordered(false).await?;
+                // Replaced rather than drained so the next batch keeps the allocation.
+                let full = std::mem::replace(&mut batch, Vec::with_capacity(batch_size));
+                client.bulk_write(full).ordered(false).await?;
             } else {
                 batch.clear();
             }
@@ -139,7 +141,12 @@ async fn backfill(
         written += n;
         pb.inc(n);
     }
+    pb.set_length(written);
     pb.finish();
+
+    if written == 0 {
+        info!("{}: already complete", collection.name());
+    }
 
     if skipped > 0 {
         warn!(

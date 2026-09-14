@@ -6,13 +6,17 @@ use moc::deser::fits::skymap::from_fits_skymap;
 use moc::deser::fits::{from_fits_ivoa, MocIdxType, MocQtyType, MocType};
 use moc::moc::range::RangeMOC;
 use moc::moc::{CellMOCIntoIterator, CellMOCIterator, HasMaxDepth};
-use moc::qty::Hpx;
+use moc::qty::{Hpx, MocQty};
 use std::collections::HashMap;
 use std::io::{BufReader, Cursor};
 
 const SQRT_2PI: f64 = 2.5066282746310002;
 
 pub type HpxMoc = RangeMOC<u64, Hpx<u64>>;
+
+// moc_hpx_stage reads a MOC's stored range bounds as coordinates.hpx values
+// without rescaling, which only holds while the two depths agree.
+const _: () = assert!(HPX_DEPTH == <Hpx<u64> as MocQty<u64>>::MAX_DEPTH);
 
 /// `(ra_deg, dec_deg, radius_rad)`.
 pub type Cone = (f64, f64, f64);
@@ -527,39 +531,24 @@ pub fn moc_from_ascii(input: &str) -> Result<HpxMoc, String> {
 pub fn moc_hpx_stage(moc: &HpxMoc) -> Result<mongodb::bson::Document, String> {
     use mongodb::bson::doc;
 
-    let shift = 2 * (HPX_DEPTH.saturating_sub(moc.depth_max())) as u32;
-    let mut conditions: Vec<mongodb::bson::Document> = Vec::new();
-    for cell in moc.flatten_to_fixed_depth_cells() {
-        let start = (cell as i64) << shift;
-        let end = ((cell + 1) as i64) << shift;
-        match conditions.last_mut() {
-            // Cells are yielded in order, so adjacent ones extend the open range.
-            Some(last)
-                if last
-                    .get_document("coordinates.hpx")
-                    .ok()
-                    .and_then(|r| r.get_i64("$lt").ok())
-                    == Some(start) =>
-            {
-                last.get_document_mut("coordinates.hpx")
-                    .map_err(|e| e.to_string())?
-                    .insert("$lt", end);
-            }
-            _ => conditions.push(doc! {
-                "coordinates.hpx": { "$gte": start, "$lt": end }
-            }),
-        }
-    }
-    if conditions.is_empty() {
+    // A RangeMOC already holds its coverage as minimal, ordered ranges at
+    // Hpx<u64>'s maximum depth, which is HPX_DEPTH, so these are the index
+    // bounds directly: nothing to enumerate and nothing left to merge.
+    let ranges = &moc.moc_ranges().0 .0;
+    if ranges.is_empty() {
         return Err("MOC covers no sky".to_string());
     }
-    if conditions.len() > MOC_MATCH_MAX_RANGES {
+    if ranges.len() > MOC_MATCH_MAX_RANGES {
         return Err(format!(
             "search region is too fragmented: {} index ranges (max {})",
-            conditions.len(),
+            ranges.len(),
             MOC_MATCH_MAX_RANGES
         ));
     }
+    let conditions: Vec<mongodb::bson::Document> = ranges
+        .iter()
+        .map(|r| doc! { "coordinates.hpx": { "$gte": r.start as i64, "$lt": r.end as i64 } })
+        .collect();
     Ok(doc! { "$match": { "$or": conditions } })
 }
 
@@ -749,7 +738,7 @@ mod tests {
     #[test]
     fn test_hpx_ranges_match_the_moc_exactly() {
         use super::{is_in_moc, moc_hpx_stage};
-        use crate::utils::spatial::{Coordinates, HPX_DEPTH};
+        use crate::utils::spatial::Coordinates;
 
         let moc = one_cell(5, 1234);
         let stage = moc_hpx_stage(&moc).expect("a stage");
@@ -789,7 +778,6 @@ mod tests {
             ra += 0.5;
         }
         assert_eq!(disagree, 0, "{disagree} positions disagree, {agree} agree");
-        let _ = HPX_DEPTH;
     }
 
     /// Contiguous cells collapse into one range rather than one condition each.
@@ -805,6 +793,23 @@ mod tests {
             .unwrap()
             .len();
         assert_eq!(n, 1, "64 adjacent cells should be one range, got {n}");
+    }
+
+    /// A coarse cell in a deep MOC costs one range, not one condition per cell
+    /// at depth_max.
+    #[test]
+    fn test_a_coarse_cell_in_a_deep_moc_stays_cheap() {
+        use super::{moc_from_ascii, moc_hpx_stage};
+        let moc = moc_from_ascii("0/1 29/0").expect("a moc");
+        assert_eq!(moc.depth_max(), 29);
+        let n = moc_hpx_stage(&moc)
+            .expect("a stage")
+            .get_document("$match")
+            .unwrap()
+            .get_array("$or")
+            .unwrap()
+            .len();
+        assert_eq!(n, 2, "{n} ranges");
     }
 
     /// A coarse MOC must still be covered: every point inside it has to fall in
