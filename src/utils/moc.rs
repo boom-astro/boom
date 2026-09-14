@@ -1,3 +1,4 @@
+use crate::utils::spatial::HPX_DEPTH;
 use cdshealpix::nested;
 use fitsio::FitsFile;
 use flare::spatial::great_circle_distance;
@@ -477,6 +478,47 @@ const MIN_COVERING_DEPTH: u8 = 3;
 /// Each becomes an `$or` branch, so this bounds the query mongo has to plan.
 pub const MOC_MATCH_MAX_CONES: usize = 500;
 
+/// A `$match` stage selecting alerts inside `moc` exactly, by HEALPix range.
+///
+/// A MOC is a set of ranges in the nested ordering, so with the index stored at
+/// [`HPX_DEPTH`] this tests membership rather than approximating it: no cell is
+/// circumscribed and nothing outside the region is returned.
+///
+/// Only alerts carrying `coordinates.hpx` can match, so a window reaching back
+/// before that field existed must use [`moc_match_stage`] instead. The two are
+/// not interchangeable: this one silently returns nothing for older alerts.
+pub fn moc_hpx_stage(moc: &HpxMoc) -> Result<mongodb::bson::Document, String> {
+    use mongodb::bson::doc;
+
+    let shift = 2 * (HPX_DEPTH.saturating_sub(moc.depth_max())) as u32;
+    let mut conditions: Vec<mongodb::bson::Document> = Vec::new();
+    for cell in moc.flatten_to_fixed_depth_cells() {
+        let start = (cell as i64) << shift;
+        let end = ((cell + 1) as i64) << shift;
+        match conditions.last_mut() {
+            // Cells are yielded in order, so adjacent ones extend the open range.
+            Some(last)
+                if last
+                    .get_document("coordinates.hpx")
+                    .ok()
+                    .and_then(|r| r.get_i64("$lt").ok())
+                    == Some(start) =>
+            {
+                last.get_document_mut("coordinates.hpx")
+                    .map_err(|e| e.to_string())?
+                    .insert("$lt", end);
+            }
+            _ => conditions.push(doc! {
+                "coordinates.hpx": { "$gte": start, "$lt": end }
+            }),
+        }
+    }
+    if conditions.is_empty() {
+        return Err("MOC covers no sky".to_string());
+    }
+    Ok(doc! { "$match": { "$or": conditions } })
+}
+
 /// A `$match` stage selecting alerts inside `moc`.
 ///
 /// Prepending this to a filter's own pipeline keeps a skymap search on the same
@@ -586,6 +628,69 @@ mod tests {
     fn test_an_empty_moc_is_refused() {
         let empty = RangeMOC::<u64, Hpx<u64>>::new_empty(3);
         assert!(moc_match_stage(&empty).is_err());
+    }
+
+    /// The range form is exact: every position it selects is in the MOC, and
+    /// every position in the MOC is selected.
+    #[test]
+    fn test_hpx_ranges_match_the_moc_exactly() {
+        use super::{is_in_moc, moc_hpx_stage};
+        use crate::utils::spatial::{Coordinates, HPX_DEPTH};
+
+        let moc = one_cell(5, 1234);
+        let stage = moc_hpx_stage(&moc).expect("a stage");
+        let ranges: Vec<(i64, i64)> = stage
+            .get_document("$match")
+            .unwrap()
+            .get_array("$or")
+            .unwrap()
+            .iter()
+            .map(|b| {
+                let r = b
+                    .as_document()
+                    .unwrap()
+                    .get_document("coordinates.hpx")
+                    .unwrap();
+                (r.get_i64("$gte").unwrap(), r.get_i64("$lt").unwrap())
+            })
+            .collect();
+
+        let selected = |ra: f64, dec: f64| {
+            let hpx = Coordinates::new(ra, dec).hpx().expect("a fresh coordinate");
+            ranges.iter().any(|&(lo, hi)| hpx >= lo && hpx < hi)
+        };
+
+        let (mut agree, mut disagree) = (0, 0);
+        let mut ra = 0.25_f64;
+        while ra < 360.0 {
+            let mut dec = -89.75_f64;
+            while dec < 90.0 {
+                if is_in_moc(&moc, ra, dec) == selected(ra, dec) {
+                    agree += 1;
+                } else {
+                    disagree += 1;
+                }
+                dec += 0.5;
+            }
+            ra += 0.5;
+        }
+        assert_eq!(disagree, 0, "{disagree} positions disagree, {agree} agree");
+        let _ = HPX_DEPTH;
+    }
+
+    /// Contiguous cells collapse into one range rather than one condition each.
+    #[test]
+    fn test_adjacent_cells_merge_into_a_single_range() {
+        use super::moc_hpx_stage;
+        let moc = RangeMOC::<u64, Hpx<u64>>::from_cells(5, (100..164).map(|c| (5, c)), None);
+        let n = moc_hpx_stage(&moc)
+            .expect("a stage")
+            .get_document("$match")
+            .unwrap()
+            .get_array("$or")
+            .unwrap()
+            .len();
+        assert_eq!(n, 1, "64 adjacent cells should be one range, got {n}");
     }
 
     /// A coarse MOC must still be covered: every point inside it has to fall in
