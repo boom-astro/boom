@@ -70,16 +70,13 @@ impl MilvusClient {
 }
 
 /// Validate the embeddings and transpose the rows into Milvus's column-oriented
-/// `UpsertRequest`. Split out from the RPC send so it can be tested without a
-/// live server. Assumes `rows` is non-empty.
+/// `UpsertRequest`.
 fn build_upsert_request(
     db_name: &str,
     collection_name: &str,
     dim: i64,
     rows: &[EmbeddingRow],
 ) -> Result<UpsertRequest, MilvusError> {
-    // Validate up front: one bad row would otherwise fail the whole batch
-    // server-side with a far less specific error.
     for row in rows {
         if row.embedding.len() as i64 != dim {
             return Err(MilvusError::DimensionMismatch {
@@ -148,7 +145,7 @@ fn double_field(name: &str, data: Vec<f64>) -> FieldData {
 }
 
 /// A float-vector column: all rows' floats concatenated, tagged with the
-/// per-vector dimension so Milvus can split them back apart.
+/// per-vector dimension so Milvus can split them back apart and perform indexing for similarity search
 fn float_vector_field(name: &str, dim: i64, data: Vec<f32>) -> FieldData {
     FieldData {
         r#type: DataType::FloatVector as i32,
