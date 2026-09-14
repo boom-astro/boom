@@ -1,3 +1,4 @@
+use crate::enrichment::models::applecider_postprocess::HORIZON_DAYS;
 use crate::enrichment::models::{
     load_model, load_model_on_device_with_cpu_fallback, FusionModel, FusionOutputs, ModelError,
 };
@@ -463,12 +464,12 @@ impl CiderFusionModel {
             Array3<f32>,  // tempo_x       (1, 512, 5)
             Array2<bool>, // tempo_pad_mask (1, 512)
             Array2<f32>,  // tempo_global   (1, 24)
+            usize,        // detections actually fed to the model
         ),
         ModelError,
     > {
         const ZTF_ZP: f32 = 23.9;
         const SEQ_LEN: usize = 512;
-        const HORIZON_DAYS: f32 = 100.0;
         const MAX_EVENTS: usize = 384;
         const NORM_MEAN: [f32; 4] = [3.2246506, 0.75406283, 1.8746188, 0.05986891];
         const NORM_STD: [f32; 4] = [1.1197281, 0.72683305, 0.41507009, 0.03053664];
@@ -530,6 +531,6 @@ impl CiderFusionModel {
         let pad_mask_arr = Array2::from_shape_vec((1, SEQ_LEN), pad_mask)?;
         let tempo_global = Array2::from_shape_vec((1, 24), global.to_vec())?;
 
-        Ok((tempo_x, pad_mask_arr, tempo_global))
+        Ok((tempo_x, pad_mask_arr, tempo_global, n_real))
     }
 }

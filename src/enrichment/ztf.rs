@@ -4,8 +4,9 @@ use crate::enrichment::{
     babamul::{Babamul, BabamulZtfAlert},
     fetch_alerts,
     models::{
-        applecider_postprocess, AcaiModel, AppleCiderOutputs, BtsBotModel, FusionModel,
-        FusionOutputs, Model, ModelError, SharedModels,
+        applecider_postprocess::{self, AppleCiderFusion, AppleCiderModalities},
+        AcaiModel, AppleCiderOutputs, BtsBotModel, FusionModel, FusionOutputs, Model, ModelError,
+        SharedModels,
     },
     EnrichmentWorker, EnrichmentWorkerError, LsstMatch, LsstPhotometry,
 };
@@ -458,13 +459,24 @@ pub struct ZtfAlertClassifications {
     /// Calibrated, prior-adjusted leaf probabilities. Previously the raw head
     /// output; `applecider_outputs.alpha` still recovers that exactly.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub applecider_fusion: Option<AppleCiderClassProbs>,
+    pub applecider_fusion: Option<AppleCiderFusion>,
     /// Evidence, hierarchy and abstention decision, all derived from `alpha`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub applecider_outputs: Option<AppleCiderOutputs>,
     #[serde(skip_serializing)]
     pub fusion_embedding: Option<Vec<f32>>,
 }
+
+/// Every alert that reaches inference has a decoded triplet and a metadata
+/// vector, so those flags are true whenever an output exists; `redshift` is
+/// false because the deployed export has no input for it.
+const APPLECIDER_MODALITIES: AppleCiderModalities = AppleCiderModalities {
+    photometry: true,
+    science_stamp: true,
+    reference_stamp: true,
+    metadata: true,
+    redshift: false,
+};
 
 const CIDER_MAX_LC_SPAN_DAYS: f64 = 100.0;
 const CIDER_MIN_PHOTOMETRY_POINTS: usize = 2;
@@ -1068,25 +1080,29 @@ impl ZtfEnrichmentWorker {
                 let [acai_h, acai_n, acai_v, acai_o, acai_b, btsbot] =
                     Self::predict_acai_btsbot(models, &metadata, &btsbot_metadata, &triplet)?;
 
-                let cider_result = if item.cider_eligible() {
-                    (|| -> Result<(AppleCiderClassProbs, AppleCiderOutputs, Vec<f32>), ModelError> {
+                let cider_result =
+                    if item.cider_eligible() {
+                        (|| -> Result<(AppleCiderFusion, AppleCiderOutputs, Vec<f32>), ModelError> {
                         let mut m = models.cider.lock().unwrap();
                         let meta = m.get_metadata(&[&item.alert], &[&item.all_bands_properties])?;
                         let img = m.get_triplet(&[&item.cutouts])?;
-                        let (tx, tpm, tg) = m.photometry_inputs(item.ztf_lightcurve.clone())?;
+                        let (tx, tpm, tg, n_det) =
+                            m.photometry_inputs(item.ztf_lightcurve.clone())?;
                         let out = m.predict(&tx, &tpm, &tg, &meta, &img)?;
-                        let (probs, outputs) = applecider_postprocess::derive(&out.alpha).ok_or(
-                            ModelError::MissingFeature("applecider: unexpected output length"),
-                        )?;
-                        Ok((probs, outputs, out.embedding))
+                        let (fusion, outputs) =
+                            applecider_postprocess::derive(&out.alpha, n_det, APPLECIDER_MODALITIES)
+                                .ok_or(ModelError::MissingFeature(
+                                    "applecider: unexpected output length",
+                                ))?;
+                        Ok((fusion, outputs, out.embedding))
                     })()
                     .map_err(|e| {
                         warn!("cider inference failed for candid {}: {}", item.candid, e);
                     })
                     .ok()
-                } else {
-                    None
-                };
+                    } else {
+                        None
+                    };
 
                 Some(ZtfAlertClassifications {
                     acai_h: acai_h[0],
@@ -1166,8 +1182,8 @@ impl ZtfEnrichmentWorker {
             .filter(|&i| work_items[i].cider_eligible())
             .collect();
         let cider_pos = row_of(&cider_indices);
-        let cider_batch: Option<FusionOutputs> = (!cider_indices.is_empty())
-            .then(|| -> Result<FusionOutputs, ModelError> {
+        let cider_batch: Option<(FusionOutputs, Vec<usize>)> = (!cider_indices.is_empty())
+            .then(|| -> Result<(FusionOutputs, Vec<usize>), ModelError> {
                 let cider_alerts: Vec<&ZtfAlertForEnrichment> = cider_indices
                     .iter()
                     .map(|&i| &work_items[i].alert)
@@ -1190,15 +1206,18 @@ impl ZtfEnrichmentWorker {
                     .map(|&i| cider.photometry_inputs(work_items[i].ztf_lightcurve.clone()))
                     .collect::<Result<Vec<_>, _>>()?;
 
-                let tx_views: Vec<_> = phot.iter().map(|(x, _, _)| x.view()).collect();
-                let tpm_views: Vec<_> = phot.iter().map(|(_, m, _)| m.view()).collect();
-                let tg_views: Vec<_> = phot.iter().map(|(_, _, g)| g.view()).collect();
+                let tx_views: Vec<_> = phot.iter().map(|(x, _, _, _)| x.view()).collect();
+                let tpm_views: Vec<_> = phot.iter().map(|(_, m, _, _)| m.view()).collect();
+                let tg_views: Vec<_> = phot.iter().map(|(_, _, g, _)| g.view()).collect();
+                let n_detections: Vec<usize> = phot.iter().map(|(_, _, _, n)| *n).collect();
 
                 let tx = ndarray::concatenate(ndarray::Axis(0), &tx_views)?;
                 let tpm = ndarray::concatenate(ndarray::Axis(0), &tpm_views)?;
                 let tg = ndarray::concatenate(ndarray::Axis(0), &tg_views)?;
 
-                cider.predict(&tx, &tpm, &tg, &cider_meta, &cider_image)
+                cider
+                    .predict(&tx, &tpm, &tg, &cider_meta, &cider_image)
+                    .map(|out| (out, n_detections))
             })
             .and_then(|r| {
                 r.map_err(|e| {
@@ -1209,8 +1228,12 @@ impl ZtfEnrichmentWorker {
 
         // One entry per row of `cider_indices`, in the same order. `None` means
         // the batch came back a shape the postprocessing does not recognise.
-        let cider_derived = cider_batch.as_ref().and_then(|out| {
-            let derived = applecider_postprocess::derive_batch(&out.alpha, cider_indices.len());
+        let cider_derived = cider_batch.as_ref().and_then(|(out, n_detections)| {
+            let derived = applecider_postprocess::derive_batch(
+                &out.alpha,
+                n_detections,
+                APPLECIDER_MODALITIES,
+            );
             if derived.is_none() {
                 warn!(
                     alpha_len = out.alpha.len(),
@@ -1222,7 +1245,7 @@ impl ZtfEnrichmentWorker {
         });
         let cider_emb_dim = cider_batch
             .as_ref()
-            .map(|out| out.embedding.len() / cider_indices.len())
+            .map(|(out, _)| out.embedding.len() / cider_indices.len())
             .unwrap_or(0);
 
         // ORT needs one fixed input shape, so pad the last chunk and drop the pad rows.
@@ -1272,7 +1295,7 @@ impl ZtfEnrichmentWorker {
                     btsbot: btsbot[batch_idx],
                     applecider_fusion: derived.map(|(p, _)| p.clone()),
                     applecider_outputs: derived.map(|(_, o)| o.clone()),
-                    fusion_embedding: cider.map(|(row, out)| {
+                    fusion_embedding: cider.map(|(row, (out, _))| {
                         out.embedding[row * cider_emb_dim..(row + 1) * cider_emb_dim].to_vec()
                     }),
                 });

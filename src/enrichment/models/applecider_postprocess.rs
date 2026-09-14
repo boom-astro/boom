@@ -66,6 +66,16 @@ impl UncertaintyScore {
 // class. A bundle fitted with a global threshold would need different code,
 // not just different numbers.
 
+/// Model family, bundle, and taxonomy this block was produced by. Stored per
+/// alert so a document can be interpreted after the deployed model changes.
+pub const MODEL_NAME: &str = "cider_mid";
+pub const MODEL_VERSION: &str = "prod8_mid";
+pub const TAXONOMY_VERSION: &str = "cider_8class_v1";
+
+/// Light-curve horizon, in days. Shared with the photometry preprocessing so
+/// the stored value cannot drift from the truncation actually applied.
+pub const HORIZON_DAYS: f32 = 100.0;
+
 /// Leaf classes, in ONNX output order.
 pub const CLASS_NAMES: [&str; 8] = [
     "AGN-like",
@@ -105,7 +115,12 @@ pub const PI_DEPLOY: [f64; 8] = [
     0.004440091413646752,
 ];
 
-/// Per-class probability thresholds for the thresholded leaf prediction.
+/// Per-class probability thresholds the bundle fits for its own leaf call, and
+/// the leaf gate that goes with them. Neither is applied here: the stored
+/// decision takes each level's argmax under that level's own gate, so a strong
+/// rare-class candidate keeps its label instead of being reassigned to a
+/// commoner class (the bundle gates TDE at 0.974 probability). Retained so a
+/// consumer can reproduce the bundle's own call from the stored `alpha`.
 pub const LEAF_PROB_THRESHOLDS: [f64; 8] = [
     0.0554321508387317,
     0.3764948034637756,
@@ -348,27 +363,6 @@ fn argmax(values: &[f64]) -> usize {
         .unwrap_or(0)
 }
 
-/// Predicted leaf class under the bundle's per-class probability thresholds:
-/// the highest-probability class among those clearing their own threshold, or
-/// plain argmax when none do.
-///
-/// Note this is tuned for classification F-beta, not for follow-up triage: the
-/// rare classes are gated near certainty (TDE at 0.974), so a strong rare-class
-/// candidate can be reported as a commoner class. Triage should read `probs`
-/// and `alpha`, not this field.
-fn thresholded_prediction(probs: &[f64]) -> usize {
-    let clearing: Vec<usize> = (0..probs.len())
-        .filter(|&i| probs[i] >= LEAF_PROB_THRESHOLDS[i])
-        .collect();
-    match clearing
-        .iter()
-        .max_by(|&&a, &&b| probs[a].partial_cmp(&probs[b]).unwrap())
-    {
-        Some(&i) => i,
-        None => argmax(probs),
-    }
-}
-
 /// Weighted robust z-sum over the five base scores.
 fn fused_uncertainty(s: &Scores) -> f64 {
     let base = [s.vacuity, s.entropy, s.expected_entropy, s.mi, s.trace];
@@ -453,7 +447,11 @@ fn resolve_level(
 /// Build the `applecider_outputs` document from the head's raw `alpha`.
 ///
 /// Returns `None` if `alpha` is not the expected 8 classes.
-pub fn build(alpha_raw: &[f32]) -> Option<AppleCiderOutputs> {
+pub fn build(
+    alpha_raw: &[f32],
+    n_detections_used: usize,
+    modalities: AppleCiderModalities,
+) -> Option<(AppleCiderFusion, AppleCiderOutputs)> {
     if alpha_raw.len() != 8 {
         return None;
     }
@@ -491,40 +489,54 @@ pub fn build(alpha_raw: &[f32]) -> Option<AppleCiderOutputs> {
         &CLASS_GATE_THRESHOLDS,
     );
 
-    // The leaf gate is fitted separately from the identical-membership `class`
-    // level and can disagree with it, so both are reported.
-    let pred_thresholded = thresholded_prediction(&probs_final);
-    let leaf_gate_value = leaf_scores.get(LEAF_GATE_SCORE);
-    let leaf_gate_threshold = LEAF_GATE_THRESHOLDS[pred_thresholded];
-    let leaf_kept = leaf_gate_value <= leaf_gate_threshold;
-
-    // Report at the deepest level that survives its gate; abstain if none do.
-    let (label, label_level) = if leaf_kept {
-        (
-            Some(CLASS_NAMES[pred_thresholded].to_string()),
-            Some("class".to_string()),
-        )
-    } else if class.kept {
+    // Report at the deepest level that survives its own gate; abstain if none
+    // do. Each level has its own metric and independently fitted thresholds, so
+    // the levels are not guaranteed to be monotonic: a rejected `domain` above
+    // a kept `family` is possible and the deepest kept level still wins.
+    let (label, level, probability) = if class.kept {
         (
             Some(CLASS_NODES[class.pred].to_string()),
-            Some("class".to_string()),
+            Some("class"),
+            Some(class.probs[class.pred]),
         )
     } else if family.kept {
         (
             Some(FAMILY_NODES[family.pred].to_string()),
-            Some("family".to_string()),
+            Some("family"),
+            Some(family.probs[family.pred]),
         )
     } else if domain.kept {
         (
             Some(DOMAIN_NODES[domain.pred].to_string()),
-            Some("domain".to_string()),
+            Some("domain"),
+            Some(domain.probs[domain.pred]),
         )
     } else {
-        (None, None)
+        (None, None, None)
     };
+    let abstain_completely = label.is_none();
 
     let f = |v: f64| v as f32;
-    Some(AppleCiderOutputs {
+    let leaf_probs = AppleCiderClassProbs::from_slice_f64(&probs_final)?;
+    let decision = AppleCiderDecision {
+        label: label.clone(),
+        level: level.map(str::to_string),
+        probability: probability.map(f),
+        abstain_completely,
+    };
+
+    let fusion = AppleCiderFusion {
+        decision_label: label,
+        decision_level: level.map(str::to_string),
+        decision_probability: probability.map(f),
+        abstain_completely,
+        class_probabilities: leaf_probs.clone(),
+    };
+
+    let outputs = AppleCiderOutputs {
+        model: MODEL_NAME.to_string(),
+        model_version: MODEL_VERSION.to_string(),
+        taxonomy_version: TAXONOMY_VERSION.to_string(),
         alpha: AppleCiderClassProbs::from_slice_f64(&alpha)?,
         evidence_total: f(alpha.iter().sum()),
         domain: AppleCiderDomainLevel {
@@ -553,25 +565,16 @@ pub fn build(alpha_raw: &[f32]) -> Option<AppleCiderOutputs> {
             gate_threshold: f(family.gate_threshold),
             kept: family.kept,
         },
-        // No `probs` here: this level's membership map is the identity, so its
-        // probabilities are `applecider_fusion` verbatim.
         class: AppleCiderClassLevel {
             pred: CLASS_NODES[class.pred].to_string(),
             prob: f(class.probs[class.pred]),
+            probs: leaf_probs,
             gate_name: class.gate.name().to_string(),
             gate: f(class.gate_value),
             gate_threshold: f(class.gate_threshold),
             kept: class.kept,
         },
-        leaf_gate: AppleCiderGate {
-            gate_name: LEAF_GATE_SCORE.name().to_string(),
-            gate: f(leaf_gate_value),
-            gate_threshold: f(leaf_gate_threshold),
-            kept: leaf_kept,
-        },
-        label,
-        label_level,
-        abstain: !(leaf_kept || class.kept || family.kept || domain.kept),
+        decision,
         uncertainty: AppleCiderUncertainty {
             vacuity: f(leaf_scores.vacuity),
             epistemic: f(leaf_scores.mi),
@@ -585,7 +588,12 @@ pub fn build(alpha_raw: &[f32]) -> Option<AppleCiderOutputs> {
             votes: ood_votes as i32,
             flag: ood_flag,
         },
-    })
+        modalities_used: modalities,
+        n_detections_used: n_detections_used as i32,
+        horizon_days: HORIZON_DAYS,
+    };
+
+    Some((fusion, outputs))
 }
 
 /// Both stored documents for one alert, from its raw `alpha`.
@@ -593,11 +601,12 @@ pub fn build(alpha_raw: &[f32]) -> Option<AppleCiderOutputs> {
 /// The graph's own `probs` are the uncalibrated Dirichlet mean, so the leaf
 /// probabilities are recomputed here with the deployment temperature and
 /// priors instead.
-pub fn derive(alpha: &[f32]) -> Option<(AppleCiderClassProbs, AppleCiderOutputs)> {
-    Some((
-        AppleCiderClassProbs::from_probs(&calibrated_probs(alpha)?)?,
-        build(alpha)?,
-    ))
+pub fn derive(
+    alpha: &[f32],
+    n_detections_used: usize,
+    modalities: AppleCiderModalities,
+) -> Option<(AppleCiderFusion, AppleCiderOutputs)> {
+    build(alpha, n_detections_used, modalities)
 }
 
 /// [`derive`] over a batched forward pass, whose `alpha` arrives flattened as
@@ -611,14 +620,17 @@ pub fn derive(alpha: &[f32]) -> Option<(AppleCiderClassProbs, AppleCiderOutputs)
 /// Returns `None` if the buffer is not exactly `n_rows` rows of 8.
 pub fn derive_batch(
     alpha_batch: &[f32],
-    n_rows: usize,
-) -> Option<Vec<(AppleCiderClassProbs, AppleCiderOutputs)>> {
+    n_detections_used: &[usize],
+    modalities: AppleCiderModalities,
+) -> Option<Vec<(AppleCiderFusion, AppleCiderOutputs)>> {
+    let n_rows = n_detections_used.len();
     if n_rows == 0 || alpha_batch.len() != n_rows * CLASS_NAMES.len() {
         return None;
     }
     alpha_batch
         .chunks_exact(CLASS_NAMES.len())
-        .map(derive)
+        .zip(n_detections_used)
+        .map(|(row, &n)| derive(row, n, modalities))
         .collect()
 }
 
@@ -682,18 +694,53 @@ pub struct AppleCiderFamilyLevel {
 pub struct AppleCiderClassLevel {
     pub pred: String,
     pub prob: f32,
+    pub probs: AppleCiderClassProbs,
     pub gate_name: String,
     pub gate: f32,
     pub gate_threshold: f32,
     pub kept: bool,
 }
 
+/// Which inputs the model actually consumed for this alert.
+///
+/// `redshift` is always false: the deployed export has no `extra_context`
+/// input, so the redshift-conditioned bundles cannot be driven through it.
+#[derive(
+    Debug, Clone, Copy, serde::Deserialize, serde::Serialize, AvroSchema, utoipa::ToSchema,
+)]
+pub struct AppleCiderModalities {
+    pub photometry: bool,
+    pub science_stamp: bool,
+    pub reference_stamp: bool,
+    pub metadata: bool,
+    pub redshift: bool,
+}
+
+/// The label reported for this alert, at the deepest level that survived its
+/// gate. All three fields are absent when every level abstained.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize, AvroSchema, utoipa::ToSchema)]
-pub struct AppleCiderGate {
-    pub gate_name: String,
-    pub gate: f32,
-    pub gate_threshold: f32,
-    pub kept: bool,
+pub struct AppleCiderDecision {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub level: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub probability: Option<f32>,
+    pub abstain_completely: bool,
+}
+
+/// Summary written to `classifications.applecider_fusion`: the decision plus
+/// the calibrated leaf probabilities, so a filter needs only this one subtree.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, AvroSchema, utoipa::ToSchema)]
+pub struct AppleCiderFusion {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decision_label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decision_level: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decision_probability: Option<f32>,
+    pub abstain_completely: bool,
+    pub class_probabilities: AppleCiderClassProbs,
 }
 
 /// Leaf uncertainty. `entropy` splits into `aleatoric` + `epistemic`; a high
@@ -721,6 +768,9 @@ pub struct AppleCiderOod {
 /// abstention decision.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize, AvroSchema, utoipa::ToSchema)]
 pub struct AppleCiderOutputs {
+    pub model: String,
+    pub model_version: String,
+    pub taxonomy_version: String,
     /// Dirichlet concentration, `1 + evidence`, per leaf class. Every other
     /// field here is a function of this, so a recalibration can be replayed
     /// over stored documents without re-running the model.
@@ -729,14 +779,13 @@ pub struct AppleCiderOutputs {
     pub domain: AppleCiderDomainLevel,
     pub family: AppleCiderFamilyLevel,
     pub class: AppleCiderClassLevel,
-    pub leaf_gate: AppleCiderGate,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub label: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub label_level: Option<String>,
-    pub abstain: bool,
+    pub decision: AppleCiderDecision,
     pub uncertainty: AppleCiderUncertainty,
     pub ood: AppleCiderOod,
+    pub modalities_used: AppleCiderModalities,
+    /// Detections fed to the model after the horizon cut and event cap.
+    pub n_detections_used: i32,
+    pub horizon_days: f32,
 }
 
 #[cfg(test)]
@@ -752,6 +801,19 @@ mod tests {
             0.026309, 0.026309, 0.026309, 0.026309, 0.815578, 0.026309, 0.026568, 0.026309,
         ];
         probs_base.iter().map(|p| (p * s) as f32).collect()
+    }
+
+    const TEST_MODALITIES: AppleCiderModalities = AppleCiderModalities {
+        photometry: true,
+        science_stamp: true,
+        reference_stamp: true,
+        metadata: true,
+        redshift: false,
+    };
+
+    /// 34 detections, matching the reference notebook's run for this object.
+    fn built(alpha: &[f32]) -> (AppleCiderFusion, AppleCiderOutputs) {
+        build(alpha, 34, TEST_MODALITIES).unwrap()
     }
 
     fn assert_close(got: f32, want: f64, tol: f64, what: &str) {
@@ -794,7 +856,7 @@ mod tests {
 
     #[test]
     fn uncertainty_scores_match_reference_notebook() {
-        let out = build(&ztf25abtzltn_alpha()).unwrap();
+        let (_fusion, out) = built(&ztf25abtzltn_alpha());
         // notebook "Class uncertainty metrics"
         assert_close(out.uncertainty.vacuity, 0.210472, 1e-5, "vacuity");
         assert_close(out.uncertainty.entropy, 0.836901, 1e-5, "entropy");
@@ -811,14 +873,14 @@ mod tests {
 
     #[test]
     fn entropy_decomposes_into_aleatoric_and_epistemic() {
-        let out = build(&ztf25abtzltn_alpha()).unwrap();
+        let (_fusion, out) = built(&ztf25abtzltn_alpha());
         let sum = out.uncertainty.aleatoric + out.uncertainty.epistemic;
         assert_close(sum, out.uncertainty.entropy as f64, 1e-6, "aleatoric + mi");
     }
 
     #[test]
     fn hierarchy_matches_reference_notebook() {
-        let out = build(&ztf25abtzltn_alpha()).unwrap();
+        let (_fusion, out) = built(&ztf25abtzltn_alpha());
 
         assert_eq!(out.domain.pred, "Transient");
         assert_close(out.domain.prob, 0.971360, 1e-5, "domain top prob");
@@ -844,14 +906,14 @@ mod tests {
         assert_close(out.class.gate, 0.759036, 1e-5, "class gate");
         assert!(out.class.kept);
 
-        assert_eq!(out.label.as_deref(), Some("Ia-like SN"));
-        assert_eq!(out.label_level.as_deref(), Some("class"));
-        assert!(!out.abstain);
+        assert_eq!(out.decision.label.as_deref(), Some("Ia-like SN"));
+        assert_eq!(out.decision.level.as_deref(), Some("class"));
+        assert!(!out.decision.abstain_completely);
     }
 
     #[test]
     fn hierarchy_probabilities_sum_to_one_at_every_level() {
-        let out = build(&ztf25abtzltn_alpha()).unwrap();
+        let (_fusion, out) = built(&ztf25abtzltn_alpha());
         let d = out.domain.probs.variable + out.domain.probs.transient;
         assert!((d - 1.0).abs() < 1e-5, "domain sums to {}", d);
         let f = out.family.probs.nuclear_variable
@@ -863,7 +925,7 @@ mod tests {
 
     #[test]
     fn alpha_is_preserved_and_totals_the_evidence() {
-        let out = build(&ztf25abtzltn_alpha()).unwrap();
+        let (_fusion, out) = built(&ztf25abtzltn_alpha());
         assert_close(out.alpha.ia_like_sn, 31.0, 1e-3, "alpha Ia-like SN");
         assert_close(out.alpha.agn_like, 1.0, 1e-3, "alpha AGN-like");
         assert_close(out.evidence_total, 38.0098, 1e-2, "evidence_total");
@@ -878,7 +940,7 @@ mod tests {
 
     #[test]
     fn ood_matches_reference_notebook() {
-        let out = build(&ztf25abtzltn_alpha()).unwrap();
+        let (_fusion, out) = built(&ztf25abtzltn_alpha());
         assert_close(out.ood.score, 3.389418, 1e-3, "ood score");
         assert_eq!(out.ood.votes, 0);
         assert!(!out.ood.flag);
@@ -888,11 +950,13 @@ mod tests {
     /// and every gate must reject.
     #[test]
     fn zero_evidence_abstains_completely() {
-        let out = build(&[1.0; 8]).unwrap();
+        let (fusion, out) = built(&[1.0; 8]);
         assert_close(out.uncertainty.vacuity, 1.0, 1e-6, "vacuity");
         assert_close(out.evidence_total, 8.0, 1e-6, "evidence_total");
-        assert!(out.abstain, "no evidence must abstain");
-        assert!(out.label.is_none());
+        assert!(out.decision.abstain_completely, "no evidence must abstain");
+        assert!(out.decision.label.is_none());
+        assert!(fusion.abstain_completely);
+        assert!(fusion.decision_label.is_none());
         assert!(!out.domain.kept && !out.family.kept && !out.class.kept);
     }
 
@@ -904,7 +968,7 @@ mod tests {
     fn rare_class_candidate_keeps_its_probability_mass() {
         let alpha = [4.0, 1.0, 1.0, 9.0, 2.0, 1.0, 1.0, 1.0];
         let probs = calibrated_probs(&alpha).unwrap();
-        let out = build(&alpha).unwrap();
+        let (_fusion, out) = built(&alpha);
         assert!(
             probs[3] > probs[0],
             "TDE {} should lead AGN-like {}",
@@ -1026,11 +1090,117 @@ mod tests {
         }
     }
 
+    /// Locks the stored document shape: a field renamed or dropped here is a
+    /// schema break for every consumer reading these alerts.
+    #[test]
+    fn serialises_to_the_agreed_document_shape() {
+        let (fusion, outputs) = built(&ztf25abtzltn_alpha());
+        let doc = serde_json::json!({
+            "applecider_fusion": fusion,
+            "applecider_outputs": outputs,
+        });
+        println!("{}", serde_json::to_string_pretty(&doc).unwrap());
+
+        let keys = |v: &serde_json::Value| -> Vec<String> {
+            v.as_object().unwrap().keys().cloned().collect()
+        };
+        assert_eq!(
+            keys(&doc["applecider_fusion"]),
+            vec![
+                "decision_label",
+                "decision_level",
+                "decision_probability",
+                "abstain_completely",
+                "class_probabilities",
+            ]
+        );
+        assert_eq!(
+            keys(&doc["applecider_outputs"]),
+            vec![
+                "model",
+                "model_version",
+                "taxonomy_version",
+                "alpha",
+                "evidence_total",
+                "domain",
+                "family",
+                "class",
+                "decision",
+                "uncertainty",
+                "ood",
+                "modalities_used",
+                "n_detections_used",
+                "horizon_days",
+            ]
+        );
+        assert_eq!(
+            keys(&doc["applecider_outputs"]["class"]),
+            vec![
+                "pred",
+                "prob",
+                "probs",
+                "gate_name",
+                "gate",
+                "gate_threshold",
+                "kept"
+            ]
+        );
+        assert_eq!(
+            keys(&doc["applecider_outputs"]["modalities_used"]),
+            vec![
+                "photometry",
+                "science_stamp",
+                "reference_stamp",
+                "metadata",
+                "redshift"
+            ]
+        );
+        // the eight class keys are the taxonomy labels, not Rust field names
+        assert!(doc["applecider_fusion"]["class_probabilities"]["Ia-like SN"].is_number());
+        assert!(doc["applecider_outputs"]["alpha"]["Accreting WD Var"].is_number());
+    }
+
+    /// The summary and the detail block must never disagree about the call.
+    #[test]
+    fn fusion_summary_agrees_with_the_outputs_decision() {
+        for alpha in [
+            ztf25abtzltn_alpha(),
+            vec![1.0; 8],
+            vec![4.0, 1.0, 1.0, 9.0, 2.0, 1.0, 1.0, 1.0],
+        ] {
+            let (fusion, out) = built(&alpha);
+            assert_eq!(fusion.decision_label, out.decision.label);
+            assert_eq!(fusion.decision_level, out.decision.level);
+            assert_eq!(fusion.decision_probability, out.decision.probability);
+            assert_eq!(fusion.abstain_completely, out.decision.abstain_completely);
+            // the summary's probabilities are the leaf level's, verbatim
+            assert_eq!(
+                fusion.class_probabilities.ia_like_sn,
+                out.class.probs.ia_like_sn
+            );
+        }
+    }
+
+    #[test]
+    fn records_the_photometry_context() {
+        let (_fusion, out) = build(&ztf25abtzltn_alpha(), 23, TEST_MODALITIES).unwrap();
+        assert_eq!(out.n_detections_used, 23);
+        assert_eq!(out.horizon_days, HORIZON_DAYS);
+        assert_eq!(out.model, "cider_mid");
+        assert_eq!(out.model_version, "prod8_mid");
+        assert_eq!(out.taxonomy_version, "cider_8class_v1");
+        assert!(out.modalities_used.photometry);
+        assert!(
+            !out.modalities_used.redshift,
+            "the deployed export has no redshift input"
+        );
+    }
+
     #[test]
     fn rejects_wrong_length_alpha() {
-        assert!(build(&[1.0; 5]).is_none());
+        assert!(build(&[1.0; 5], 3, TEST_MODALITIES).is_none());
         assert!(calibrated_probs(&[1.0; 5]).is_none());
-        assert!(derive(&[1.0; 5]).is_none());
+        assert!(derive(&[1.0; 5], 3, TEST_MODALITIES).is_none());
     }
 
     /// Three alerts with clearly different evidence, so a row mix-up shows up
@@ -1047,13 +1217,23 @@ mod tests {
     #[test]
     fn batch_matches_row_by_row_processing() {
         let (flat, rows) = three_distinct_alphas();
-        let batched = derive_batch(&flat, rows.len()).unwrap();
+        let counts = vec![34usize, 12, 7];
+        let batched = derive_batch(&flat, &counts, TEST_MODALITIES).unwrap();
         assert_eq!(batched.len(), rows.len());
 
         for (i, row) in rows.iter().enumerate() {
-            let (probs_single, out_single) = derive(row).unwrap();
-            let (probs_batched, out_batched) = &batched[i];
-            assert_eq!(out_batched.label, out_single.label, "row {} label", i);
+            let (fusion_single, out_single) = derive(row, counts[i], TEST_MODALITIES).unwrap();
+            let (fusion_batched, out_batched) = &batched[i];
+            assert_eq!(
+                out_batched.decision.label, out_single.decision.label,
+                "row {} label",
+                i
+            );
+            assert_eq!(
+                out_batched.n_detections_used, counts[i] as i32,
+                "row {} kept its own detection count",
+                i
+            );
             assert_eq!(
                 out_batched.class.pred, out_single.class.pred,
                 "row {} class",
@@ -1065,7 +1245,8 @@ mod tests {
                 i
             );
             assert_eq!(
-                probs_batched.ia_like_sn, probs_single.ia_like_sn,
+                fusion_batched.class_probabilities.ia_like_sn,
+                fusion_single.class_probabilities.ia_like_sn,
                 "row {} leaf probability",
                 i
             );
@@ -1081,8 +1262,8 @@ mod tests {
     /// alert's evidence, not its neighbour's.
     #[test]
     fn batch_preserves_row_order() {
-        let (flat, rows) = three_distinct_alphas();
-        let batched = derive_batch(&flat, rows.len()).unwrap();
+        let (flat, _rows) = three_distinct_alphas();
+        let batched = derive_batch(&flat, &[34, 12, 7], TEST_MODALITIES).unwrap();
         assert_eq!(batched[0].1.class.pred, "Ia-like SN");
         assert_eq!(batched[1].1.class.pred, "TDE");
         assert_eq!(batched[2].1.class.pred, "Superluminous SN");
@@ -1100,17 +1281,18 @@ mod tests {
     fn batch_rejects_a_ragged_buffer() {
         let (flat, rows) = three_distinct_alphas();
         // A miscounted batch must fail rather than silently re-stride the rows.
-        assert!(derive_batch(&flat, rows.len() + 1).is_none());
-        assert!(derive_batch(&flat, rows.len() - 1).is_none());
-        assert!(derive_batch(&flat[..flat.len() - 1], rows.len()).is_none());
-        assert!(derive_batch(&[], 0).is_none());
+        let n = rows.len();
+        assert!(derive_batch(&flat, &vec![34; n + 1], TEST_MODALITIES).is_none());
+        assert!(derive_batch(&flat, &vec![34; n - 1], TEST_MODALITIES).is_none());
+        assert!(derive_batch(&flat[..flat.len() - 1], &vec![34; n], TEST_MODALITIES).is_none());
+        assert!(derive_batch(&[], &[], TEST_MODALITIES).is_none());
     }
 
     #[test]
     fn batch_of_one_matches_the_single_alert_path() {
         let alpha = ztf25abtzltn_alpha();
-        let batched = derive_batch(&alpha, 1).unwrap();
+        let batched = derive_batch(&alpha, &[34], TEST_MODALITIES).unwrap();
         assert_eq!(batched.len(), 1);
-        assert_eq!(batched[0].1.label.as_deref(), Some("Ia-like SN"));
+        assert_eq!(batched[0].1.decision.label.as_deref(), Some("Ia-like SN"));
     }
 }
