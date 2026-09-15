@@ -3,6 +3,8 @@ name: boom
 volumes:
   mongodb:
   valkey:
+  # Staging area for catalog chunks
+  catalog_data:
   kafka_data:
   prometheus_data:
   grafana_data:
@@ -551,12 +553,24 @@ services:
       BOOM_CUTOUTS_STORAGE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
       BOOM_CUTOUTS_STORAGE__TYPE: mongo
       BOOM_CUTOUTS_STORAGE__HOST: mongo
+      BOOM_CATALOG_DATA_PATH: /app/data/catalogs
+      # Pan-STARRS is in a requester-pays bucket, so fetching it is billed to
+      # whoever asks and needs credentials that can pay. Unprefixed because
+      # boto reads them, not BOOM's config. Left empty for deployments that do
+      # not ingest it: an empty value is unset, and only that one catalog
+      # refuses to start without them. On AWS, leave these unset and give the
+      # instance a role instead -- boto finds that on its own.
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}
     networks:
       - boom
     profiles:
       - prod
     volumes:
       - ${BOOM_CONFIG_PATH:-./config.yaml}:/app/config.yaml
+      - catalog_data:/app/data/catalogs
     command:
       - /app/task_worker
 
