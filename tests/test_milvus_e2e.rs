@@ -33,9 +33,9 @@ async fn test_ztf_alert_to_milvus_e2e() {
 
     if !config.milvus.enabled {
         eprintln!(
-            "skipping test_ztf_alert_to_milvus_e2e: milvus is disabled. Set \
-             BOOM_MILVUS__ENABLED=true (and the credentials) in .env to run the \
-             full end-to-end flow — see docs/milvus.md."
+            "skipping test because milvus is disabled. Set \
+             BOOM_MILVUS__ENABLED=true and add credentials in .env to run the \
+             full end-to-end flow."
         );
         return;
     }
@@ -51,8 +51,7 @@ async fn test_ztf_alert_to_milvus_e2e() {
         .await
         .expect("failed to ensure embeddings collection");
     // ensure_embedding_collection() skips the load when the collection already
-    // exists, so load explicitly (idempotent). Search rejects an unloaded
-    // collection.
+    // exists
     client
         .load_collection()
         .await
