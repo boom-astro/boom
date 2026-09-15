@@ -205,15 +205,17 @@ pub const CATALOGS: &[CatalogDef] = &[
     },
     CatalogDef {
         id: "panstarrs",
-        collection: "PS1_DR1",
-        title: "Pan-STARRS object-mean photometry",
+        collection: "PS1_DR2",
+        title: "Pan-STARRS DR2 object-mean photometry",
         description: "Mean PSF magnitudes in grizy for Pan-STARRS objects, from the HATS \
-                      mirror of the otmo table. NOTE: the collection every config names is \
-                      PS1_DR1, but the only mirror we have is DR2 -- confirm which release \
-                      this deployment intends before ingesting.",
+                      mirror of the DR2 otmo table. Does not carry the PS1-STRM \
+                      classification and photo-z columns (strm_*) that crossmatch config \
+                      projects: those come from a separate catalog this ingest does not \
+                      join.",
         reader: Reader::PanStarrs,
         source: Source::Fetched,
-        aliases: &["PS1_DR2"],
+        // Configs named PS1_DR1 until #598, though the only mirror was ever DR2.
+        aliases: &["PS1_DR1"],
     },
     CatalogDef {
         id: "ls-dr10-photoz",
@@ -908,6 +910,15 @@ pub async fn status(
 /// Delete an entry when its definition lands. A test requires each of these to
 /// still be undefined, so the list cannot quietly go stale.
 pub const WITHOUT_DEFINITIONS: &[(&str, &str)] = &[
+    (
+        "LSDR10",
+        "Legacy Survey DR10 with photo-z posteriors, fluxes and shape parameters \
+         (z_phot_mean, flux_*, shape_*, objtype, ebv), built outside BOOM. Not the \
+         ls-dr10-photoz dataset BOOM ingests into LS_DR10_PHOTOZ, whose record carries \
+         z_phot/z_phot_err only -- pointing that definition here would build a \
+         collection with no z_phot_mean, and the distance crossmatch keyed on it would \
+         silently match nothing",
+    ),
     (
         "LSPSC",
         "no downloader or record type exists in boom or boom-catalogs -- the collection \

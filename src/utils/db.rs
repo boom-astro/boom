@@ -117,6 +117,11 @@ pub async fn initialize_survey_indexes(
     create_index(&alerts_collection, index.clone(), false).await?;
     create_index(&alerts_aux_collection, index, false).await?;
 
+    // A MOC is a set of HEALPix ranges, so a region search is a range scan here.
+    let index = doc! { "coordinates.hpx": 1 };
+    create_index(&alerts_collection, index.clone(), false).await?;
+    create_index(&alerts_aux_collection, index, false).await?;
+
     // create a simple index on the objectId field of the alerts collection
     let index = doc! {
         "objectId": 1,

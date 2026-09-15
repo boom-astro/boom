@@ -53,6 +53,8 @@ config.docker.yaml
 # most of them in LFS. Negations, so adding a new one needs an explicit path
 # here rather than a `git add -f` nobody sees in review.
 !data/ls_footprint_moc.fits
+!data/S240618ah_bayestar.fits
+!data/glg_healpix_all_bn200524211.fits
 !data/models/
 !data/models/**
 !data/filters/
