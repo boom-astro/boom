@@ -32,7 +32,6 @@ workers:
 
 crossmatch:
   ztf:
-    PS1_DR2: null
     AllWISE:
       radius: 2.0
       use_distance: false
@@ -47,7 +46,6 @@ crossmatch:
     watchlist_supernovas:
       radius: 2.0
       use_distance: false
-      # For watchlists, projection picks the fields surfaced under annotations.watchlist.
       projection:
         _id: 1
         classification: 1
@@ -55,11 +53,9 @@ crossmatch:
         distance_mpc: 1
         discovery_date: 1
   lsst:
-    PS1_DR2: null
     watchlist_supernovas:
       radius: 2.0
       use_distance: false
-      # For watchlists, projection picks the fields surfaced under annotations.watchlist.
       projection:
         _id: 1
         classification: 1
