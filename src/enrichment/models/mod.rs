@@ -18,6 +18,24 @@ use tracing::info;
 /// Workers round-robin over sets; more workers than GPUs share a set and its stream.
 const SESSIONS_PER_DEVICE: usize = 1;
 
+/// The declared path for a model field.
+///
+/// Reads from `enrichment::version::ZTF_MODELS`, which is also what gets
+/// hashed into the enrichment set. Loading from one list and stamping from
+/// another would let an alert claim a model it was not scored by.
+fn model_path(field: &str) -> &'static str {
+    crate::enrichment::version::ZTF_MODELS
+        .iter()
+        .find(|m| m.field == field)
+        .map(|m| m.path)
+        .unwrap_or_else(|| panic!("{field} is not declared in ZTF_MODELS"))
+}
+
+#[cfg(test)]
+pub fn model_path_for_test(field: &str) -> &'static str {
+    model_path(field)
+}
+
 /// ONNX models shared across all enrichment worker threads via `Arc`.
 ///
 /// Each model is wrapped in a `Mutex` because `Session::run` requires `&mut self`.
@@ -78,40 +96,20 @@ impl SharedModels {
 
         let (acai_h, acai_n, acai_v, acai_o, acai_b, btsbot) = match device_id {
             Some(id) => (
-                AcaiModel::new_on_device(
-                    "data/models/acai_h.d1_dnn_20201130.onnx",
-                    id,
-                    stream_ptr,
-                )?,
-                AcaiModel::new_on_device(
-                    "data/models/acai_n.d1_dnn_20201130.onnx",
-                    id,
-                    stream_ptr,
-                )?,
-                AcaiModel::new_on_device(
-                    "data/models/acai_v.d1_dnn_20201130.onnx",
-                    id,
-                    stream_ptr,
-                )?,
-                AcaiModel::new_on_device(
-                    "data/models/acai_o.d1_dnn_20201130.onnx",
-                    id,
-                    stream_ptr,
-                )?,
-                AcaiModel::new_on_device(
-                    "data/models/acai_b.d1_dnn_20201130.onnx",
-                    id,
-                    stream_ptr,
-                )?,
-                BtsBotModel::new_on_device("data/models/btsbot-v2.0.0.onnx", id, stream_ptr)?,
+                AcaiModel::new_on_device(model_path("acai_h"), id, stream_ptr)?,
+                AcaiModel::new_on_device(model_path("acai_n"), id, stream_ptr)?,
+                AcaiModel::new_on_device(model_path("acai_v"), id, stream_ptr)?,
+                AcaiModel::new_on_device(model_path("acai_o"), id, stream_ptr)?,
+                AcaiModel::new_on_device(model_path("acai_b"), id, stream_ptr)?,
+                BtsBotModel::new_on_device(model_path("btsbot"), id, stream_ptr)?,
             ),
             None => (
-                AcaiModel::new("data/models/acai_h.d1_dnn_20201130.onnx")?,
-                AcaiModel::new("data/models/acai_n.d1_dnn_20201130.onnx")?,
-                AcaiModel::new("data/models/acai_v.d1_dnn_20201130.onnx")?,
-                AcaiModel::new("data/models/acai_o.d1_dnn_20201130.onnx")?,
-                AcaiModel::new("data/models/acai_b.d1_dnn_20201130.onnx")?,
-                BtsBotModel::new("data/models/btsbot-v2.0.0.onnx")?,
+                AcaiModel::new(model_path("acai_h"))?,
+                AcaiModel::new(model_path("acai_n"))?,
+                AcaiModel::new(model_path("acai_v"))?,
+                AcaiModel::new(model_path("acai_o"))?,
+                AcaiModel::new(model_path("acai_b"))?,
+                BtsBotModel::new(model_path("btsbot"))?,
             ),
         };
 
