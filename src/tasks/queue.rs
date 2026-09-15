@@ -554,6 +554,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_expired_lease_is_requeued_but_a_live_one_is_left_alone() {
+        let _claiming = CLAIM_LOCK.lock().await;
+        // This is what makes a run survive a worker being deployed over. It uses
+        // a registered idempotent type, because only those are retried -- an
+        // unknown one is failed instead, which
+        // `an_orphaned_run_of_an_unknown_type_is_failed_rather_than_retried`
+        // covers.
+        let db = crate::conf::get_test_db().await;
+        let task_type = crate::tasks::catalog_ingest::TASK_TYPE.to_string();
+        submit(
+            &db,
+            &queued(&task_type, serde_json::json!({ "catalog": "test-only" })),
+        )
+        .await
+        .unwrap();
+        let run = claim_ours(&db, "worker-a", &task_type)
+            .await
+            .expect("claimed");
+
+        requeue_expired(&db).await.unwrap();
+        assert_eq!(
+            get(&db, &run.id).await.unwrap().unwrap().status,
+            TaskStatus::Running,
+            "a live lease must not be stolen"
+        );
+
+        db.collection::<TaskRun>(RUNS_COLLECTION)
+            .update_one(
+                doc! { "_id": &run.id },
+                doc! { "$set": { "lease_expires_at": now() - 1.0 } },
+            )
+            .await
+            .unwrap();
+        let report = requeue_expired(&db).await.unwrap();
+        assert!(report.requeued >= 1);
+
+        let reaped = get(&db, &run.id).await.unwrap().unwrap();
+        assert_eq!(reaped.status, TaskStatus::Queued);
+        assert!(reaped.worker.is_none());
+        cleanup(&db, &task_type).await;
+    }
+
+    #[tokio::test]
     async fn an_orphaned_run_of_an_unknown_type_is_failed_rather_than_retried() {
         // A run can outlive the release that created it. Re-running something
         // this build cannot even describe is the case to be conservative about,
@@ -587,6 +630,45 @@ mod tests {
             "the failure must explain itself"
         );
         cleanup(&db, &task_type).await;
+    }
+
+    #[tokio::test]
+    async fn an_orphaned_idempotent_run_is_requeued() {
+        // The other half of the rule: a task that declares itself safe to
+        // re-run is picked back up, which is what survives a deploy.
+        let _claiming = CLAIM_LOCK.lock().await;
+        let db = crate::conf::get_test_db().await;
+        assert!(
+            crate::tasks::is_retryable(crate::tasks::catalog_ingest::TASK_TYPE),
+            "catalog_ingest is the worked example of a resumable task"
+        );
+
+        let run = queued(
+            crate::tasks::catalog_ingest::TASK_TYPE,
+            serde_json::json!({ "catalog": "test-only" }),
+        );
+        submit(&db, &run).await.unwrap();
+        let claimed = claim_ours(&db, "worker-a", crate::tasks::catalog_ingest::TASK_TYPE)
+            .await
+            .expect("claimed");
+
+        db.collection::<TaskRun>(RUNS_COLLECTION)
+            .update_one(
+                doc! { "_id": &claimed.id },
+                doc! { "$set": { "lease_expires_at": now() - 1.0 } },
+            )
+            .await
+            .unwrap();
+        requeue_expired(&db).await.unwrap();
+
+        assert_eq!(
+            get(&db, &claimed.id).await.unwrap().unwrap().status,
+            TaskStatus::Queued
+        );
+        let _ = db
+            .collection::<TaskRun>(RUNS_COLLECTION)
+            .delete_one(doc! { "_id": &claimed.id })
+            .await;
     }
 
     #[tokio::test]
