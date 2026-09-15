@@ -1,4 +1,16 @@
 repos:
+  # boompy is the only Python in the tree, and its `pyproject.toml` sets the
+  # line length, so the hooks need no arguments. `ruff-check` fixes what it can
+  # (import sorting, unused imports) and fails on the rest.
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.10
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+        files: ^boompy/.*\.py$
+      - id: ruff-format
+        files: ^boompy/.*\.py$
+
   - repo: local
     hooks:
       - id: cargo-fmt

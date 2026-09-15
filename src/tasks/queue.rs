@@ -5,7 +5,7 @@
 //! so there is no separate broker to keep consistent with the task document. At
 //! a few runs a week that is the right trade -- see docs/task-system.md.
 
-use super::models::{now, Task, TaskStatus, TASKS_COLLECTION};
+use super::models::{now, Task, TaskStatus, FAILED_LOG_RETENTION_DAYS, TASKS_COLLECTION};
 use mongodb::bson::{doc, to_bson, Document};
 use mongodb::options::ReturnDocument;
 use mongodb::Database;
@@ -166,6 +166,11 @@ pub async fn finish_claimed(
             },
         )
         .await?;
+    if matches!(status, TaskStatus::Failed | TaskStatus::Canceled) {
+        // The outcome decides how long the logs are worth keeping, and this is
+        // the first point that knows it.
+        super::logs::extend_retention(db, task_id, FAILED_LOG_RETENTION_DAYS).await;
+    }
     Ok(result.matched_count == 1)
 }
 
@@ -273,9 +278,31 @@ pub async fn requeue_expired(db: &Database) -> Result<ReapReport, QueueError> {
         )
         .await?;
 
+    // Read the ids before the update, because `update_many` does not return
+    // them and these are the runs whose logs are worth keeping longest. A run
+    // that slips out of the filter in between just keeps its logs longer than
+    // it needed to, which is the harmless direction.
+    let failing = expired(doc! { "task_type": { "$nin": retryable.clone() } });
+    let failed_ids: Vec<String> = {
+        use futures::TryStreamExt;
+        // As `Document`, not `Task`: a projection of `_id` alone cannot
+        // deserialize into the full type, and that failure would only show up
+        // at runtime.
+        collection(db)
+            .clone_with_type::<Document>()
+            .find(failing.clone())
+            .projection(doc! { "_id": 1 })
+            .await?
+            .try_collect::<Vec<Document>>()
+            .await?
+            .iter()
+            .filter_map(|d| d.get_str("_id").ok().map(str::to_string))
+            .collect()
+    };
+
     let failed = collection(db)
         .update_many(
-            expired(doc! { "task_type": { "$nin": retryable.clone() } }),
+            failing,
             doc! {
                 "$set": {
                     "status": TaskStatus::Failed.as_str(),
@@ -290,6 +317,14 @@ pub async fn requeue_expired(db: &Database) -> Result<ReapReport, QueueError> {
             },
         )
         .await?;
+
+    if failed.modified_count > 0 {
+        // Same reasoning as finish_claimed: these runs died without recording
+        // their own outcome, which makes their logs the most worth keeping.
+        for id in &failed_ids {
+            super::logs::extend_retention(db, id, FAILED_LOG_RETENTION_DAYS).await;
+        }
+    }
 
     if requeued.modified_count > 0 {
         tracing::warn!(
@@ -559,6 +594,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_expired_lease_is_requeued_but_a_live_one_is_left_alone() {
+        let _claiming = CLAIM_LOCK.lock().await;
+        // This is what makes a run survive a worker being deployed over. It uses
+        // a registered idempotent type, because only those are retried -- an
+        // unknown one is failed instead, which
+        // `an_orphaned_run_of_an_unknown_type_is_failed_rather_than_retried`
+        // covers.
+        let db = crate::conf::get_test_db().await;
+        let task_type = crate::tasks::catalog_ingest::TASK_TYPE.to_string();
+        submit(
+            &db,
+            &queued(&task_type, serde_json::json!({ "catalog": "test-only" })),
+        )
+        .await
+        .unwrap();
+        let task = claim_ours(&db, "worker-a", &task_type)
+            .await
+            .expect("claimed");
+
+        requeue_expired(&db).await.unwrap();
+        assert_eq!(
+            get(&db, &task.id).await.unwrap().unwrap().status,
+            TaskStatus::Running,
+            "a live lease must not be stolen"
+        );
+
+        db.collection::<Task>(TASKS_COLLECTION)
+            .update_one(
+                doc! { "_id": &task.id },
+                doc! { "$set": { "lease_expires_at": now() - 1.0 } },
+            )
+            .await
+            .unwrap();
+        let report = requeue_expired(&db).await.unwrap();
+        assert!(report.requeued >= 1);
+
+        let reaped = get(&db, &task.id).await.unwrap().unwrap();
+        assert_eq!(reaped.status, TaskStatus::Queued);
+        assert!(reaped.worker.is_none());
+        cleanup(&db, &task_type).await;
+    }
+
+    #[tokio::test]
     async fn an_orphaned_run_of_an_unknown_type_is_failed_rather_than_retried() {
         // A run can outlive the release that created it. Re-running something
         // this build cannot even describe is the case to be conservative about,
@@ -592,6 +670,45 @@ mod tests {
             "the failure must explain itself"
         );
         cleanup(&db, &task_type).await;
+    }
+
+    #[tokio::test]
+    async fn an_orphaned_idempotent_run_is_requeued() {
+        // The other half of the rule: a task that declares itself safe to
+        // re-run is picked back up, which is what survives a deploy.
+        let _claiming = CLAIM_LOCK.lock().await;
+        let db = crate::conf::get_test_db().await;
+        assert!(
+            crate::tasks::is_retryable(crate::tasks::catalog_ingest::TASK_TYPE),
+            "catalog_ingest is the worked example of a resumable task"
+        );
+
+        let task = queued(
+            crate::tasks::catalog_ingest::TASK_TYPE,
+            serde_json::json!({ "catalog": "test-only" }),
+        );
+        submit(&db, &task).await.unwrap();
+        let claimed = claim_ours(&db, "worker-a", crate::tasks::catalog_ingest::TASK_TYPE)
+            .await
+            .expect("claimed");
+
+        db.collection::<Task>(TASKS_COLLECTION)
+            .update_one(
+                doc! { "_id": &claimed.id },
+                doc! { "$set": { "lease_expires_at": now() - 1.0 } },
+            )
+            .await
+            .unwrap();
+        requeue_expired(&db).await.unwrap();
+
+        assert_eq!(
+            get(&db, &claimed.id).await.unwrap().unwrap().status,
+            TaskStatus::Queued
+        );
+        let _ = db
+            .collection::<Task>(TASKS_COLLECTION)
+            .delete_one(doc! { "_id": &claimed.id })
+            .await;
     }
 
     #[tokio::test]
