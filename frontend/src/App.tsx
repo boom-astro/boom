@@ -10,6 +10,7 @@ import { Toaster } from "@/components/ui/sonner";
 import { Loader } from "@/components/ui/loader";
 
 const Query = lazy(() => import("@/pages/Query"));
+const Admin = lazy(() => import("@/pages/Admin"));
 const ApiDocs = lazy(() => import("@/pages/ApiDocs"));
 const KafkaDocs = lazy(() => import("@/pages/KafkaDocs"));
 const KafkaAccessGuide = lazy(() => import("@/pages/KafkaAccessGuide"));
@@ -25,7 +26,6 @@ const ResetPassword = lazy(() => import("@/pages/ResetPassword"))
 const Help = lazy(() => import("@/pages/Help"))
 const Acknowledgments = lazy(() => import("@/pages/Acknowledgments"))
 const Dashboard = lazy(() => import("@/pages/Dashboard"))
-const Admin = lazy(() => import("@/pages/Admin"))
 
 // Release mode flag - set VITE_PRERELEASE_MODE=true at build time to restrict app to landing page only
 const PRERELEASE_MODE = import.meta.env.VITE_PRERELEASE_MODE === 'true';
@@ -82,6 +82,23 @@ function ProtectedRoute({ children }: { children: React.ReactElement }) {
   return children;
 }
 
+/**
+ * Route guard for the admin section.
+ *
+ * Hiding the page is a convenience, not the control: every admin route checks
+ * `is_admin` server-side, so a non-admin who navigates here directly gets a
+ * 403 from the API rather than a working page.
+ */
+function AdminRoute({ children }: { children: React.ReactElement }) {
+  const profile = useAppStore((s) => s.profile);
+  const token = api.getTokenRecord();
+
+  if (!token) return <Navigate to="/login" replace />;
+  if (!profile) return <Loader />;
+  if (!profile.is_admin) return <Navigate to="/" replace />;
+  return <ProtectedRoute>{children}</ProtectedRoute>;
+}
+
 function LayoutRoutes() {
   const location = useLocation();
   const path = location.pathname || '/';
@@ -109,7 +126,7 @@ function LayoutRoutes() {
                   {!PRERELEASE_MODE && <Route path="/activate" element={<SignupPage />} />}
                   <Route path="/query" element={<ProtectedRoute><Query /></ProtectedRoute>} />
                   <Route path="/profile" element={<ProtectedRoute><Profile /></ProtectedRoute>} />
-                  <Route path="/admin" element={<ProtectedRoute><Admin /></ProtectedRoute>} />
+                  <Route path="/admin" element={<AdminRoute><Admin /></AdminRoute>} />
                   <Route path="/dashboard" element={<Dashboard />} />
                   <Route path="/docs/kafka" element={<KafkaDocs />} />
                   <Route path="/docs/kafka/access-guide" element={<KafkaAccessGuide />} />
