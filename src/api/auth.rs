@@ -216,8 +216,27 @@ pub async fn auth_middleware(
                     // inject the user in the request
                     req.extensions_mut().insert(user);
                 }
+                // Not a main-API credential. It may still be a Babamul one: the
+                // web app holds a Babamul token and reaches the admin routes on
+                // this scope, and requiring a second login for them would mean
+                // two sessions in one page. Authorization is unchanged --
+                // `api::admin::require_admin` still gates every admin route on
+                // is_admin, whichever realm the caller came from.
                 Err(_) => {
-                    return Err(actix_web::error::ErrorUnauthorized("Invalid token"));
+                    let db_app_data: Option<&web::Data<mongodb::Database>> = req.app_data();
+                    let Some(db) = db_app_data else {
+                        return Err(actix_web::error::ErrorInternalServerError(
+                            "Database connection not available",
+                        ));
+                    };
+                    match resolve_babamul_user(db, auth_app_data, token).await? {
+                        Some(user) => {
+                            req.extensions_mut().insert(user);
+                        }
+                        None => {
+                            return Err(actix_web::error::ErrorUnauthorized("Invalid token"));
+                        }
+                    }
                 }
             }
         }
@@ -228,6 +247,67 @@ pub async fn auth_middleware(
         }
     }
     next.call(req).await
+}
+
+/// Resolve a Babamul credential -- personal access token or JWT -- to its user.
+///
+/// Shared by the Babamul middleware and the main one, so the two cannot drift
+/// on what counts as a valid Babamul credential or on the activation check.
+/// `Ok(None)` means "not a Babamul credential"; an `Err` means it was one and
+/// was rejected, which the caller must not paper over by falling through.
+async fn resolve_babamul_user(
+    db: &web::Data<mongodb::Database>,
+    auth: &web::Data<AuthProvider>,
+    token: &str,
+) -> Result<Option<BabamulUser>, Error> {
+    let collection: mongodb::Collection<BabamulUser> = db.collection("babamul_users");
+
+    let user = if token.starts_with("bbml_") {
+        // Expected format: "bbml_" (5 chars) + 36-char secret.
+        if token.len() != 41 {
+            return Err(actix_web::error::ErrorUnauthorized(
+                "Invalid Babamul personal access token",
+            ));
+        }
+        let token_hash = hash_token(&token[5..]);
+        let now = flare::Time::now().to_utc().timestamp();
+        collection
+            .find_one_and_update(
+                doc! { "tokens.token_hash": &token_hash },
+                doc! { "$set": { "tokens.$[token].last_used_at": now } },
+            )
+            .with_options(
+                mongodb::options::FindOneAndUpdateOptions::builder()
+                    .array_filters(vec![doc! { "token.token_hash": &token_hash }])
+                    .build(),
+            )
+            .await
+            .map_err(|e| {
+                tracing::error!("Database error looking up token: {}", e);
+                actix_web::error::ErrorInternalServerError("Database error")
+            })?
+    } else {
+        let Ok(subject) = auth.validate_token(token).await else {
+            return Ok(None);
+        };
+        let Some(user_id) = subject.strip_prefix("babamul:") else {
+            return Ok(None);
+        };
+        collection
+            .find_one(doc! { "_id": user_id })
+            .await
+            .map_err(|e| {
+                tracing::error!("Database error fetching babamul user: {}", e);
+                actix_web::error::ErrorInternalServerError("Database error")
+            })?
+    };
+
+    match user {
+        Some(user) if !user.is_activated => Err(actix_web::error::ErrorForbidden(
+            "Account not activated. Please check your email for activation instructions.",
+        )),
+        other => Ok(other),
+    }
 }
 
 const BABAMUL_PUBLIC_ROUTES: &[&str] = &[

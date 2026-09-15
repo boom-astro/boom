@@ -188,6 +188,16 @@ pub struct BabamulUser {
     /// `username` it is free text, optional, and not unique.
     #[serde(default)]
     pub name: Option<String>,
+    /// Whether this account has elevated privileges. Today that means running
+    /// data-mutating tasks from the admin page; user management will land here
+    /// too.
+    ///
+    /// Reconciled from `babamul.admin_emails` at API startup, so config is the
+    /// source of truth: removing someone from the list revokes their access on
+    /// the next restart, rather than leaving a grant nobody remembers making.
+    /// Never settable through the API.
+    #[serde(default)]
+    pub is_admin: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, ToSchema)]
@@ -205,6 +215,9 @@ pub struct BabamulUserPublic {
     pub orcid_id: Option<String>,
     /// Full name the user chose to display, if any
     pub name: Option<String>,
+    /// Exposed so the web app knows whether to offer the admin page.
+    /// Authorization is enforced server-side on every admin route regardless.
+    pub is_admin: bool,
 }
 
 impl From<BabamulUser> for BabamulUserPublic {
@@ -221,6 +234,7 @@ impl From<BabamulUser> for BabamulUserPublic {
                 .collect(),
             orcid_id: user.orcid_id,
             name: user.name,
+            is_admin: user.is_admin,
         }
     }
 }
@@ -328,6 +342,9 @@ pub async fn post_babamul_signup(
                 identities: Vec::new(),
                 orcid_id: None,
                 name: None,
+                // Granted only by reconciling against babamul.admin_emails at
+                // startup, never at sign-up.
+                is_admin: false,
             };
 
             if let Err(e) = babamul_users_collection.insert_one(&babamul_user).await {
