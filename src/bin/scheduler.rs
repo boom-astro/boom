@@ -1,3 +1,5 @@
+#[cfg(target_os = "linux")]
+use boom::utils::gpu::validate_gpu_configuration_for_survey;
 use boom::{
     conf::{load_dotenv, AppConfig},
     enrichment::models::SharedModelPool,

@@ -853,7 +853,7 @@ fn default_milvus_timeout_seconds() -> u64 {
 }
 
 fn default_milvus_collection_name() -> String {
-    "ztf_fusion_embeddings".to_string()
+    "boom_ztf_fusion_embeddings".to_string()
 }
 
 fn default_milvus_dim() -> i64 {
