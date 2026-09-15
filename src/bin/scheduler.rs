@@ -271,12 +271,8 @@ async fn run(
         .await
         .expect("could not initialize indexes");
 
-    // Provision the Milvus embeddings collection once, up front — the same
-    // single-actor pattern as the Mongo indexes above. The enrichment worker
-    // pool deliberately never creates it (concurrent workers would race), so the
-    // scheduler's main thread creates it before spawning the pool. Idempotent:
-    // ensure_embedding_collection's has_collection check no-ops when it already
-    // exists. ZTF-only, since ZTF is the only survey producing fusion embeddings.
+    // Create the Milvus collection once, up front, to avoid workers racing to
+    // create it themselves. Safe to call if it already exists. ZTF-only.
     if config.milvus.enabled && args.survey == Survey::Ztf {
         let mut milvus = MilvusClient::connect(&config.milvus)
             .await

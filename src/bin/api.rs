@@ -71,12 +71,18 @@ async fn main() -> std::io::Result<()> {
                 Some(client)
             }
             Err(e) => {
-                tracing::warn!("Milvus enabled but connection failed; embedding endpoints will be unavailable: {}", e);
+                tracing::warn!(
+                    "Milvus configuration is enabled but connection failed, \
+                so embedding endpoints will be unavailable: {}",
+                    e
+                );
                 None
             }
         }
     } else {
-        tracing::info!("Milvus embedding endpoints are DISABLED");
+        tracing::info!(
+            "Milvus configuration is currently disabled, so embedding endpoints are DISABLED"
+        );
         None
     };
 
