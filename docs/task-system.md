@@ -140,43 +140,11 @@ That is the point the system was built for: there is no longer a binary an
 operator can run over SSH that mutates data without a record of who ran it, with
 what, under which release.
 
-### Credentials in parameters
+### Porting a binary to a task
 
-A task may take a connection URI — a copy between two clusters has to name both
-ends somehow. But parameters are stored on the run, rendered on the admin page,
-and copied into the ledger, so a URI carries a password into all three.
-
-The worker reads the real parameters from `task_runs`. Everywhere they are read
-*back* they are redacted first: every API response, and the ledger, which is
-append-only and would otherwise archive a password permanently.
-
-Redaction masks the password and leaves the rest — `mongodb://alice:***@host/db`
-— because which host and database a run touched is most of why anyone reads the
-parameters back. It keys on the field *name* (`*_uri`, `uri`), not on whether a
-value looks like a URI, so a catalog source URL stays readable in full.
-
-`enrich_reprocess` **populates the queue and then drains it**, rather than only
-draining one something else filled. That is what closes the loop the binary left
-open, and it is also what makes completion well-defined: because the task owns
-the queue, `LLEN == 0` means done rather than "nobody has pushed anything yet".
-
-The queue is scoped to the run — `<survey>_enrichment_queue_reprocess_<run_id>`
-— precisely so that holds. An `input_queue` parameter overrides it for a queue
-filled out of band; the task then only drains, and never deletes it.
-
-Completion needs `LLEN == 0` twice in a row. A worker pops a batch of up to
-1000 before processing it, so a single zero can be observed while a batch is
-still in flight, and stopping there would count those alerts as reprocessed
-before they were.
-
-Selection is explicit rather than inferred: everything not enriched by the
-current set (`stale`, the one to use after changing a model or a formula),
-alerts missing a field, a candid range, or everything. See
-[alert-processing.md](./alert-processing.md#re-enriching-alerts-after-a-change)
-for how staleness is recorded and why `missing_field` cannot express it. Each
-needs a params struct, an arm in `dispatch`, and a cancellation check in its
-batch loop; the ones that drive their work through Valkey already have the
-resumability a task needs.
+A task body needs a params struct, an arm in `dispatch` and `validate_params`,
+an entry in `TASKS`, and a cancellation check in its batch loop. The ones that
+drive their work through Valkey already have the resumability a task needs.
 
 `migrate_fp_flux` shows the shape. Three things change when a one-shot binary
 becomes a task, and all three are about no longer owning the process:
@@ -203,6 +171,43 @@ That does mean these can only be run against a database the API and a worker can
 both reach. The escape hatch, if a migration ever has to run somewhere the task
 system cannot, is a task body called from a one-off binary — but that should be
 a deliberate, temporary addition rather than a standing wrapper.
+
+### `enrich_reprocess`
+
+`enrich_reprocess` **populates the queue and then drains it**, rather than only
+draining one something else filled. That is what closes the loop the binary left
+open, and it is also what makes completion well-defined: because the task owns
+the queue, `LLEN == 0` means done rather than "nobody has pushed anything yet".
+
+The queue is scoped to the run — `<survey>_enrichment_queue_reprocess_<run_id>`
+— precisely so that holds. An `input_queue` parameter overrides it for a queue
+filled out of band; the task then only drains, and never deletes it.
+
+Completion needs `LLEN == 0` twice in a row. A worker pops a batch of up to
+1000 before processing it, so a single zero can be observed while a batch is
+still in flight, and stopping there would count those alerts as reprocessed
+before they were.
+
+Selection is explicit rather than inferred: everything not enriched by the
+current set (`stale`, the one to use after changing a model or a formula),
+alerts missing a field, a candid range, or everything. See
+[alert-processing.md](./alert-processing.md#re-enriching-alerts-after-a-change)
+for how staleness is recorded and why `missing_field` cannot express it.
+
+### Credentials in parameters
+
+A task may take a connection URI — a copy between two clusters has to name both
+ends somehow. But parameters are stored on the run, rendered on the admin page,
+and copied into the ledger, so a URI carries a password into all three.
+
+The worker reads the real parameters from `task_runs`. Everywhere they are read
+*back* they are redacted first: every API response, and the ledger, which is
+append-only and would otherwise archive a password permanently.
+
+Redaction masks the password and leaves the rest — `mongodb://alice:***@host/db`
+— because which host and database a run touched is most of why anyone reads the
+parameters back. It keys on the field *name* (`*_uri`, `uri`), not on whether a
+value looks like a URI, so a catalog source URL stays readable in full.
 
 ## Running it in dev
 
@@ -382,8 +387,8 @@ moving part. The scheduling is the small half; the offload is the work.
 
 ## Not yet built
 
-- **Recurring runs.** See below — the run record is ready for them, the loop
-  that fires them is not.
+- **Recurring runs.** See [Scheduled tasks](#scheduled-tasks-when-we-build-them)
+  above — the run record is ready for them, the loop that fires them is not.
 - **Ledger coverage beyond tasks.** `data_mutations` records task runs today.
   Startup migrations and the live pipeline have `SourceKind` variants reserved
   but do not write to it yet.
