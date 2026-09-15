@@ -121,6 +121,10 @@ pub struct ZtfPrvCandidate {
     pub ap_flux_err: Option<f32>,
     pub snr_ap: Option<f32>,
     pub band: Band,
+    // Deep real-bogus, kept from the candidate (packet prv_candidates carry only
+    // legacy `rb`). `default` so pre-existing aux docs still deserialize.
+    #[serde(default)]
+    pub drb: Option<f32>,
 }
 
 impl TimeSeries for ZtfPrvCandidate {
@@ -188,6 +192,7 @@ impl TryFrom<PrvCandidate> for ZtfPrvCandidate {
             ap_flux_err,
             snr_ap,
             band,
+            drb: None, // packet prv_candidates don't carry drb
         })
     }
 }
@@ -349,6 +354,9 @@ pub struct Candidate {
     pub diffmaglim: Option<f32>,
     pub programpi: Option<String>,
     pub programid: i32,
+    /// Whether the exposure was a Target of Opportunity, as WINTER reports it.
+    #[serde(deserialize_with = "deserialize_tooflag")]
+    pub tooflag: bool,
     pub candid: i64,
     #[serde(deserialize_with = "deserialize_isdiffpos")]
     pub isdiffpos: bool,
@@ -450,6 +458,24 @@ where
         serde_json::Value::Bool(b) => Ok(Some(b)),
         _ => Ok(None),
     }
+}
+
+/// IPAC sends `["null", "int"]`; WINTER reports a boolean, so coerce to that.
+///
+/// A null means the exposure carried no ToO marking, which reads as not a ToO.
+fn deserialize_tooflag<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value: serde_json::Value = Deserialize::deserialize(deserializer)?;
+    Ok(match value {
+        serde_json::Value::Number(n) => n.as_i64() == Some(1),
+        serde_json::Value::Bool(b) => b,
+        serde_json::Value::String(s) => {
+            s == "1" || s.eq_ignore_ascii_case("t") || s.eq_ignore_ascii_case("true")
+        }
+        _ => false,
+    })
 }
 
 fn deserialize_isdiffpos<'de, D>(deserializer: D) -> Result<bool, D::Error>
@@ -594,11 +620,12 @@ impl TryFrom<&ZtfCandidate> for ZtfPrvCandidate {
             ap_flux_err: ztf_candidate.ap_flux_err,
             snr_ap: ztf_candidate.snr_ap,
             band: ztf_candidate.band.clone(),
+            drb: ztf_candidate.candidate.drb,
         })
     }
 }
 
-fn deserialize_candidate<'de, D>(deserializer: D) -> Result<ZtfCandidate, D::Error>
+pub fn deserialize_candidate<'de, D>(deserializer: D) -> Result<ZtfCandidate, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -636,7 +663,7 @@ pub struct ZtfRawAvroAlert {
     pub cutout_difference: Vec<u8>,
 }
 
-fn deserialize_cutout_as_bytes<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+pub fn deserialize_cutout_as_bytes<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -845,6 +872,7 @@ impl ZtfAlertWorker {
             current_version,
             now,
             &self.alert_aux_collection,
+            Document::new(),
         )
         .await
     }
@@ -942,10 +970,6 @@ impl AlertWorker for ZtfAlertWorker {
         Survey::Ztf
     }
 
-    fn input_queue_name(&self) -> String {
-        format!("{}_alerts_packets_queue", ZtfAlertWorker::survey())
-    }
-
     fn output_queue_name(&self) -> String {
         format!("{}_alerts_enrichment_queue", ZtfAlertWorker::survey())
     }
@@ -1021,7 +1045,15 @@ impl AlertWorker for ZtfAlertWorker {
             .await
             .inspect_err(as_error!())?;
         } else {
-            let xmatches = xmatch(ra, dec, &self.xmatch_configs, &self.db).await?;
+            let xmatches = xmatch(
+                ra,
+                dec,
+                &object_id,
+                &Survey::Ztf,
+                &self.xmatch_configs,
+                &self.db,
+            )
+            .await?;
             let obj = ZtfObject {
                 object_id: object_id.clone(),
                 prv_candidates,
@@ -1035,8 +1067,7 @@ impl AlertWorker for ZtfAlertWorker {
             };
             let result = self.insert_aux(&obj, &self.alert_aux_collection).await;
             if let Err(AlertError::AlertAuxExists) = result {
-                // use the race-condition free fallback update
-                warn!(
+                debug!(
                     "Alert aux document for object_id {} already exists. Using fallback update.",
                     object_id
                 );
@@ -1518,6 +1549,32 @@ mod tests {
     ///      which will make `from_avro_datum` fail on the next call.
     ///   3. Deserialize the same packet again – the fallback should kick in,
     ///      repair the cache, and return the same alert.
+    #[test]
+    fn test_tooflag_survives_deserialization() {
+        let avro_bytes = std::fs::read("tests/data/alerts/ztf/2695378462115010012.avro").unwrap();
+        let mut cache = SchemaCache::default();
+        let alert: ZtfRawAvroAlert = cache.alert_from_avro_bytes(&avro_bytes).unwrap();
+        // A survey pointing is not a ToO, so this packet reads false; the point
+        // is that it parses at all, since the field was previously discarded.
+        assert!(!alert.candidate.candidate.tooflag);
+    }
+
+    #[test]
+    fn test_tooflag_coerces_every_form_ipac_sends() {
+        #[derive(serde::Deserialize)]
+        struct Wrapper {
+            #[serde(deserialize_with = "deserialize_tooflag")]
+            tooflag: bool,
+        }
+        let parse = |json: &str| serde_json::from_str::<Wrapper>(json).unwrap().tooflag;
+        assert!(parse(r#"{"tooflag": 1}"#));
+        assert!(!parse(r#"{"tooflag": 0}"#));
+        assert!(!parse(r#"{"tooflag": null}"#));
+        assert!(parse(r#"{"tooflag": true}"#));
+        assert!(parse(r#"{"tooflag": "t"}"#));
+        assert!(!parse(r#"{"tooflag": "f"}"#));
+    }
+
     #[test]
     fn test_schema_cache_fallback_on_corrupt_start_idx() {
         let avro_bytes = std::fs::read("tests/data/alerts/ztf/2695378462115010012.avro").unwrap();

@@ -184,7 +184,7 @@ echo "$(current_datetime) - Kafka consumer started in $STARTUP_TIME seconds"
 # If we are in LOW_STORAGE mode, clean up the downloaded files (producer files are not mounted)
 if [ "${LOW_STORAGE:-}" = "true" ]; then
     echo "$(current_datetime) - LOW_STORAGE mode enabled; cleaning up downloaded files to save space"
-    rm -rf ./data/alerts/kowalski.NED.json.gz || true
+    rm -rf ./data/alerts/BOOM.NED.json.gz || true
     rm -rf ./data/alerts/boom_throughput.ZTF_alerts_aux.dump.gz || true
 fi
 
@@ -197,7 +197,7 @@ if [ "${BOOM_GPU__ENABLED:-false}" = "true" ] && [ "$PLATFORM" = "linux" ]; then
     START_TIME=$(date +%s)
 
     check_gpu_ready() {
-      docker compose "${COMPOSE_CONFIG[@]}" logs scheduler | grep -q "Confirmed GPU runtime preconditions, free VRAM guardrail, and GPU inference"
+      ( set +o pipefail; docker compose "${COMPOSE_CONFIG[@]}" logs scheduler | grep -q "Confirmed GPU runtime preconditions, free VRAM guardrail, and GPU inference" )
     }
 
     while ! check_gpu_ready; do

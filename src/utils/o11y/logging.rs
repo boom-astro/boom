@@ -1,9 +1,22 @@
 //! Common logging utilities.
-use std::{fs::File, io::BufWriter, iter::successors};
+use std::{fmt, fs::File, io::BufWriter, iter::successors};
 
-use tracing::Subscriber;
+use opentelemetry::trace::TraceContextExt;
+use opentelemetry_sdk::trace::SdkTracerProvider;
+use tracing::{Event, Subscriber};
 use tracing_flame::{FlameLayer, FlushGuard};
-use tracing_subscriber::{fmt::format::FmtSpan, layer::SubscriberExt, EnvFilter, Layer};
+use tracing_opentelemetry::OpenTelemetrySpanExt;
+use tracing_subscriber::{
+    fmt::{
+        format::{FmtSpan, Format, Writer},
+        FmtContext, FormatEvent, FormatFields,
+    },
+    layer::SubscriberExt,
+    registry::LookupSpan,
+    EnvFilter, Layer,
+};
+
+use crate::utils::o11y::tracing::otel_layer;
 
 /// Iterate over the `Display` representations of the sources of the given error
 /// by recursively calling `std::error::Error::source()`.
@@ -220,20 +233,69 @@ fn parse_span_events(env_var: &str) -> FmtSpan {
         .unwrap_or(FmtSpan::NONE)
 }
 
-/// Build a tracing subscriber.
+/// `FormatEvent` adapter that prefixes each formatted log line with
+/// `trace_id=<32-hex> span_id=<16-hex> ` when an OTel span context is active.
+///
+/// This is what makes Loki → Tempo derived-field linking work: the matcher
+/// regex on the Loki datasource (`trace_id=([a-f0-9]{32})`) needs the trace
+/// id to actually appear in the log line. `tracing-opentelemetry` adds the
+/// OTel context to spans as an extension but does not surface it as a
+/// formatted field, so we read it ourselves at format time.
+pub struct OtelTraceFormatter<F = Format> {
+    inner: F,
+}
+
+impl<F> OtelTraceFormatter<F> {
+    pub fn new(inner: F) -> Self {
+        Self { inner }
+    }
+}
+
+impl<S, N, F> FormatEvent<S, N> for OtelTraceFormatter<F>
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+    N: for<'a> FormatFields<'a> + 'static,
+    F: FormatEvent<S, N>,
+{
+    fn format_event(
+        &self,
+        ctx: &FmtContext<'_, S, N>,
+        mut writer: Writer<'_>,
+        event: &Event<'_>,
+    ) -> fmt::Result {
+        // The OTel span context lives on the *currently entered* tracing
+        // span, which `tracing::Span::current()` returns. We use the
+        // `OpenTelemetrySpanExt::context` extension to extract it.
+        let cx = tracing::Span::current().context();
+        let span_cx = cx.span().span_context().clone();
+        if span_cx.is_valid() {
+            write!(
+                writer,
+                "trace_id={} span_id={} ",
+                span_cx.trace_id(),
+                span_cx.span_id()
+            )?;
+        }
+        self.inner.format_event(ctx, writer, event)
+    }
+}
+
+/// Build a tracing subscriber without an OpenTelemetry layer.
 ///
 /// The Ok value is a tuple containing the subscriber and an optional flush
 /// guard. The flush guard is created if the subscriber includes a flame graph
 /// layer and should be kept in scope until the program ends to ensure all of
-/// the flame graph data are flushed to it. If the subscriber does not include a
-/// flame graph layer, then the second value in the tuple is None (no flush
+/// the flame graph data are flushed to it. If the subscriber does not include
+/// a flame graph layer, then the second value in the tuple is None (no flush
 /// guard).
 ///
-/// The inclusion of a flame graph layer depends on the environment variable
-/// BOOM_SPAN_EVENTS. If set, a flame graph layer is added to the subscriber and
-/// the value is used as the path where the raw flame graph data are to be
-/// written. If unset, then the returned subscriber will not include a flame
-/// graph layer.
+/// The inclusion of a flame graph layer is gated by the environment variable
+/// `BOOM_FLAME_FILE`. If set, a flame graph layer is added to the subscriber
+/// and the value is used as the path where the raw flame graph data are
+/// written. If unset, the returned subscriber omits the flame layer. (The
+/// related `BOOM_SPAN_EVENTS` env var separately controls which span
+/// lifecycle events the fmt layer prints — new/enter/exit/close — and is
+/// independent of the flame layer.)
 pub fn build_subscriber() -> Result<
     (
         // Return a boxed subscriber because the subscriber type is different
@@ -243,22 +305,129 @@ pub fn build_subscriber() -> Result<
     ),
     BuildSubscriberError,
 > {
-    let fmt_layer = tracing_subscriber::fmt::layer()
+    build_subscriber_with_otel(None, "boom")
+}
+
+/// Like `build_subscriber`, but if `tracer_provider` is `Some`, also adds a
+/// `tracing-opentelemetry` layer that forwards `tracing` spans to the OTLP
+/// pipeline. `service_name` is used as the tracer name for the OTel layer.
+pub fn build_subscriber_with_otel(
+    tracer_provider: Option<&SdkTracerProvider>,
+    service_name: &str,
+) -> Result<
+    (
+        Box<dyn Subscriber + Send + Sync>,
+        Option<FlushGuard<BufWriter<File>>>,
+    ),
+    BuildSubscriberError,
+> {
+    // Default filter excludes the HTTP/2 + HTTP plumbing crates that the OTLP
+    // gRPC exporter itself uses. Without this, tracing the tracer's own
+    // network operations produces thousands of `h2`/`hyper`/`tonic`/`tower`
+    // spans per outbound batch, which inflates traces past Tempo's
+    // per-trace size cap (TRACE_TOO_LARGE) and creates a feedback loop where
+    // exporting telemetry generates more telemetry. The override env var
+    // `RUST_LOG` still wins if set explicitly. We build it twice because
+    // `EnvFilter` isn't `Clone` and we attach it to two different layers.
+    let filter_directives =
+        "info,ort=error,h2=off,hyper=off,tonic=warn,tower=off,reqwest=warn,opentelemetry=warn";
+    let env_filter =
+        EnvFilter::try_from_default_env().or_else(|_| EnvFilter::try_new(filter_directives))?;
+    let otel_filter =
+        EnvFilter::try_from_default_env().or_else(|_| EnvFilter::try_new(filter_directives))?;
+
+    // Build the base `Format` with our line-shape options and reuse it whether
+    // or not OTel is active. When OTel tracing is on, wrap the format in
+    // `OtelTraceFormatter` so each log line gets a `trace_id=<hex>` prefix —
+    // that's what the Loki datasource's derived field matches on to link
+    // logs back to traces in Tempo. ANSI is disabled because the dominant log
+    // sink is Loki/Grafana (and `docker compose logs`), where escape codes
+    // render as visual noise.
+    let format = Format::default()
         .with_target(false)
         .with_file(true)
         .with_line_number(true)
-        .with_span_events(parse_span_events("BOOM_SPAN_EVENTS"));
+        .with_ansi(false);
+    let fmt_base =
+        tracing_subscriber::fmt::layer().with_span_events(parse_span_events("BOOM_SPAN_EVENTS"));
+    let fmt_layer = if tracer_provider.is_some() {
+        fmt_base
+            .event_format(OtelTraceFormatter::new(format))
+            .boxed()
+    } else {
+        fmt_base.event_format(format).boxed()
+    };
 
-    let env_filter =
-        EnvFilter::try_from_default_env().or_else(|_| EnvFilter::try_new("info,ort=error"))?;
-
-    let subscriber = tracing_subscriber::registry().with(fmt_layer.with_filter(env_filter));
-
-    match std::env::var("BOOM_FLAME_FILE") {
+    // Compose optional layers (flame + OTel) by type-erasing each into a
+    // boxed dyn Layer so we can attach them in a single shared layered chain.
+    let (flame_layer, guard) = match std::env::var("BOOM_FLAME_FILE") {
         Ok(path) => {
-            let (flame_layer, guard) = FlameLayer::with_file(path)?;
-            Ok((Box::new(subscriber.with(flame_layer)), Some(guard)))
+            let (layer, guard) = FlameLayer::with_file(path)?;
+            (Some(layer.boxed()), Some(guard))
         }
-        Err(_) => Ok((Box::new(subscriber), None)),
+        Err(_) => (None, None),
+    };
+
+    // Filter the OTel layer separately so h2/hyper/etc. spans don't reach
+    // Tempo even though they might still appear in stdout (if the user
+    // overrode `RUST_LOG`). This is what actually prevents TRACE_TOO_LARGE.
+    let otel = tracer_provider.map(|provider| {
+        otel_layer(provider, service_name)
+            .with_filter(otel_filter)
+            .boxed()
+    });
+
+    // Attach all layers as a single `Vec` in which every element carries its
+    // own per-layer filter: the fmt layer with `env_filter`, plus (when
+    // present) the otel layer with `otel_filter`. tracing-subscriber treats a
+    // `Vec` as per-layer filtered only when *all* of its elements are filtered,
+    // which lets it cache filtered-out callsites as `Interest::never()` rather
+    // than re-checking them on every event — important for hot, noisy callsites
+    // like the `mongodb` driver's own `debug!`/`trace!`.
+    //
+    // Keep the fmt layer inside this `Vec` rather than attaching the optional
+    // layers as separate unfiltered siblings of it. An unfiltered sibling
+    // breaks the caching above: an absent (empty) one reports `never()` for
+    // every callsite and suppresses all logs, and an `Option::None` one reports
+    // `always()` and forces a per-event filter re-check. Holding the fmt layer
+    // here keeps the `Vec` non-empty and avoids both.
+    let mut layers: Vec<Box<dyn Layer<_> + Send + Sync>> = Vec::new();
+    layers.push(fmt_layer.with_filter(env_filter).boxed());
+    layers.extend(flame_layer);
+    layers.extend(otel);
+
+    let subscriber = tracing_subscriber::registry().with(layers);
+
+    Ok((Box::new(subscriber), guard))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression test for the throughput-test log suppression.
+    ///
+    /// `build_subscriber()` passes `tracer_provider = None`, so when
+    /// `BOOM_FLAME_FILE` is also unset (as in the throughput compose) there are
+    /// no optional layers. A previous implementation attached an *empty* `Vec`
+    /// as a global sibling of the fmt layer; because that sibling has no
+    /// per-layer filter and its `register_callsite` returns `Interest::never()`,
+    /// `Layered::pick_interest` short-circuited and cached *every* callsite as
+    /// disabled — silently dropping all logs. The throughput harness waits for
+    /// the consumer to log "Consumer received first message, continuing..." and
+    /// timed out because that line (and every other) was suppressed.
+    #[test]
+    fn boom_events_enabled_without_optional_layers() {
+        std::env::remove_var("BOOM_FLAME_FILE");
+
+        let (subscriber, _guard) = build_subscriber().expect("failed to build subscriber");
+        let dispatch = tracing::Dispatch::new(subscriber);
+
+        tracing::dispatcher::with_default(&dispatch, || {
+            assert!(
+                tracing::enabled!(target: "boom", tracing::Level::INFO),
+                "boom INFO events must stay enabled when no optional layers are present"
+            );
+        });
     }
 }

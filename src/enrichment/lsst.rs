@@ -1,4 +1,4 @@
-use crate::alert::LsstCandidate;
+use crate::alert::{LsstCandidate, SsSource};
 use crate::conf::AppConfig;
 use crate::enrichment::{
     babamul::{Babamul, BabamulLsstAlert},
@@ -7,60 +7,36 @@ use crate::enrichment::{
 use crate::utils::db::mongify;
 use crate::utils::enums::Survey;
 use crate::utils::lightcurves::{
-    analyze_photometry, prepare_photometry, Band, PerBandProperties, PhotometryMag,
+    analyze_photometry, prepare_photometry, summarise_detections, ActivityMetrics, Band,
+    DetectionHistory, EpisodeHistory, PerBandProperties, PhotometryMag, EPISODE_GAP_DAYS,
 };
 use apache_avro_derive::AvroSchema;
 use apache_avro_macros::serdavro;
-use cdshealpix::nested::get;
-use moc::deser::fits::{from_fits_ivoa, MocIdxType, MocQtyType, MocType};
-use moc::moc::range::RangeMOC;
-use moc::moc::{CellMOCIntoIterator, CellMOCIterator, HasMaxDepth};
-use moc::qty::Hpx;
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use std::collections::HashMap;
 use std::sync::OnceLock;
 use tracing::{error, instrument, warn};
 
+use crate::utils::moc::{is_in_moc, moc_from_fits_bytes, HpxMoc};
+
 pub const IS_STELLAR_DISTANCE_THRESH_ARCSEC: f64 = 1.0;
 pub const IS_NEAR_BRIGHTSTAR_DISTANCE_THRESH_ARCSEC: f64 = 20.0;
 pub const IS_NEAR_BRIGHTSTAR_MAG_THRESH: f64 = 15.0;
 pub const IS_HOSTED_SCORE_THRESH: f64 = 0.5;
 const MOC_FOOTPRINT_PATH: &str = "./data/ls_footprint_moc.fits";
-const MOC_DEPTH: u8 = 11;
 
 // Lazy-loaded footprint MOC
-static FOOTPRINT_MOC: OnceLock<RangeMOC<u64, Hpx<u64>>> = OnceLock::new();
+static FOOTPRINT_MOC: OnceLock<HpxMoc> = OnceLock::new();
 
-fn load_footprint_moc() -> RangeMOC<u64, Hpx<u64>> {
-    let file = std::fs::File::open(MOC_FOOTPRINT_PATH).expect("Failed to open footprint MOC file");
-
-    let reader = std::io::BufReader::new(file);
-    match from_fits_ivoa(reader) {
-        Ok(MocIdxType::U64(MocQtyType::Hpx(MocType::Ranges(moc)))) => {
-            RangeMOC::new(moc.depth_max(), moc.collect())
-        }
-        Ok(MocIdxType::U64(MocQtyType::Hpx(MocType::Cells(cell_moc)))) => {
-            let depth = cell_moc.depth_max();
-            let ranges = cell_moc.into_cell_moc_iter().ranges().collect();
-            RangeMOC::new(depth, ranges)
-        }
-        Ok(_) => {
-            panic!("Unexpected MOC type in footprint MOC file");
-        }
-        Err(e) => {
-            panic!("Failed to parse footprint MOC: {}", e);
-        }
-    }
+fn load_footprint_moc() -> HpxMoc {
+    let bytes = std::fs::read(MOC_FOOTPRINT_PATH).expect("Failed to read footprint MOC file");
+    moc_from_fits_bytes(&bytes).expect("Failed to parse footprint MOC")
 }
 
 pub fn is_in_footprint(ra_deg: f64, dec_deg: f64) -> bool {
     let moc = FOOTPRINT_MOC.get_or_init(load_footprint_moc);
-    let ra_rad = ra_deg.to_radians();
-    let dec_rad = dec_deg.to_radians();
-    let layer = get(MOC_DEPTH);
-    let cell = layer.hash(ra_rad, dec_rad);
-    moc.contains_cell(MOC_DEPTH, cell)
+    is_in_moc(moc, ra_deg, dec_deg)
 }
 
 #[serdavro]
@@ -130,6 +106,7 @@ pub fn create_lsst_alert_pipeline() -> Vec<Document> {
             "$project": {
                 "objectId": 1,
                 "ssObjectId": 1,
+                "ss_source": 1,
                 "candidate": 1,
                 "prv_candidates": "$aux.prv_candidates",
                 "fp_hists": "$aux.fp_hists",
@@ -185,6 +162,7 @@ pub struct LsstAlertForEnrichment {
     pub object_id: String,
     #[serde(rename = "ssObjectId")]
     pub ss_object_id: Option<String>,
+    pub ss_source: Option<SsSource>,
     pub candidate: LsstCandidate,
     pub prv_candidates: Vec<LsstPhotometry>,
     pub fp_hists: Vec<LsstPhotometry>,
@@ -192,15 +170,92 @@ pub struct LsstAlertForEnrichment {
     pub survey_matches: Option<LsstSurveyMatches>,
 }
 
+/// Solar system association for a single LSST detection, mirroring the ZTF block so
+/// a filter reads identically on both surveys.
+///
+/// Rubin supplies the ephemeris directly in `ssSource`, so unlike ZTF nothing here
+/// is derived: the predicted magnitude, the observed-minus-predicted separation and
+/// the predicted sky motion all come from `mpc_orbits` upstream.
+#[derive(
+    Debug, Clone, Default, serde::Deserialize, serde::Serialize, AvroSchema, utoipa::ToSchema,
+)]
+#[serde(default)]
+pub struct LsstSsoAssociation {
+    /// Whether Rubin associated this detection with a solar system object.
+    pub is_sso: bool,
+    /// MPC designation, when Rubin has made an MPC association.
+    pub designation: Option<String>,
+    /// Observed versus predicted angular separation (`ssSource.ephOffset`). The LSST
+    /// analogue of ZTF's `ssdistnr`, and worth monitoring in aggregate: a drifting
+    /// distribution means the upstream orbits are going stale.
+    pub separation_arcsec: Option<f32>,
+    /// Predicted V-band magnitude from the orbit's H/G (`ssSource.ephVmag`).
+    /// Against the measured magnitude this gives an activity indicator directly.
+    pub predicted_mag: Option<f32>,
+    /// Predicted total on-sky rate of motion (`ssSource.ephRate`). Needed to tell
+    /// genuine extension from trailing, which inflates every morphology metric in
+    /// proportion to how fast the object moves.
+    pub sky_motion: Option<f32>,
+    /// Sun-object-observer angle (`ssSource.phaseAngle`), which sets how much of the
+    /// brightness is geometry rather than activity. Degrees.
+    pub phase_angle: Option<f32>,
+    /// Sun-to-object distance (`ssSource.helioRange`), au.
+    pub helio_dist: Option<f32>,
+    /// Observer-to-object distance (`ssSource.topoRange`), au. With `helio_dist`
+    /// and `phase_angle` this is the geometry needed to reduce an apparent
+    /// magnitude to an absolute one.
+    pub topo_dist: Option<f32>,
+    /// Who made the association.
+    pub source: Option<String>,
+}
+
+impl LsstSsoAssociation {
+    /// Build from Rubin's own association. `ss_object_id` decides `is_sso` so this
+    /// agrees with `rock`; `ss_source` may be absent even when it is set.
+    pub fn from_rubin(ss_object_id: Option<&str>, ss_source: Option<&SsSource>) -> Self {
+        // Gated on ss_object_id so is_sso agrees with `rock`, and so a stray
+        // ss_source can never populate an ephemeris under is_sso: false.
+        let Some(_) = ss_object_id else {
+            return LsstSsoAssociation::default();
+        };
+        LsstSsoAssociation {
+            is_sso: true,
+            designation: ss_source.and_then(|s| s.designation.clone()),
+            separation_arcsec: ss_source.and_then(|s| s.eph_offset),
+            predicted_mag: ss_source.and_then(|s| s.eph_vmag),
+            sky_motion: ss_source.and_then(|s| s.eph_rate),
+            phase_angle: ss_source.and_then(|s| s.phase_angle),
+            helio_dist: ss_source.and_then(|s| s.helio_range),
+            topo_dist: ss_source.and_then(|s| s.topo_range),
+            source: Some("rubin".to_string()),
+        }
+    }
+}
+
 /// LSST alert properties computed during enrichment and inserted back into the alert document
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize, AvroSchema, utoipa::ToSchema)]
 pub struct LsstAlertProperties {
+    /// Deprecated alias for `sso.is_sso`, kept so existing filters keep working.
     pub rock: bool,
     pub stationary: bool,
     pub star: Option<bool>,
     pub near_brightstar: Option<bool>,
     pub photstats: PerBandProperties,
     pub multisurvey_photstats: PerBandProperties,
+    /// `None` on alerts enriched before this existed: never evaluated, which is not
+    /// the same as evaluated and found not to be a solar system object.
+    #[serde(default)]
+    pub sso: Option<LsstSsoAssociation>,
+    /// `None` on alerts enriched before this existed.
+    #[serde(default)]
+    pub activity: Option<ActivityMetrics>,
+    /// Per-object detection-history summary for history-aware filters.
+    /// `None` on alerts enriched before this field existed.
+    #[serde(default)]
+    pub detection_history: Option<DetectionHistory>,
+    /// Detection episodes, for finding sources that outburst more than once.
+    /// `None` on alerts enriched before this field existed.
+    pub episode_history: Option<EpisodeHistory>,
 }
 
 pub struct LsstEnrichmentWorker {
@@ -275,6 +330,10 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
 
     fn survey() -> Survey {
         Survey::Lsst
+    }
+
+    fn disable_babamul(&mut self) {
+        self.babamul = None;
     }
 
     fn input_queue_name(&self) -> String {
@@ -370,6 +429,12 @@ impl LsstEnrichmentWorker {
     ) -> Result<LsstAlertProperties, EnrichmentWorkerError> {
         // Compute numerical and boolean features from lightcurve and candidate analysis
         let is_rock = alert.ss_object_id.is_some();
+        let sso =
+            LsstSsoAssociation::from_rubin(alert.ss_object_id.as_deref(), alert.ss_source.as_ref());
+        let activity = ActivityMetrics::from_fluxes(
+            alert.candidate.dia_source.psf_flux,
+            alert.candidate.dia_source.ap_flux,
+        );
 
         // Determine if this is a star based on LSPSC cross-matches
         let mut is_star = Some(false);
@@ -469,13 +534,86 @@ impl LsstEnrichmentWorker {
             photstats.clone()
         };
 
+        // Per-object detection history for history-aware filters (positive/negative
+        // by psfFlux sign; LSST difference psfFlux is signed natively).
+        let (detection_history, episode_history) = summarise_detections(
+            alert
+                .prv_candidates
+                .iter()
+                .map(|p| (p.jd, p.flux.filter(|f| !f.is_nan()).map(|f| f < 0.0))),
+            alert.candidate.jd,
+            EPISODE_GAP_DAYS,
+        );
+
         Ok(LsstAlertProperties {
             rock: is_rock,
+            sso: Some(sso),
+            activity: Some(activity),
             star: is_star,
             near_brightstar: is_near_brightstar,
             stationary,
             photstats,
             multisurvey_photstats,
+            detection_history: Some(detection_history),
+            episode_history: Some(episode_history),
         })
+    }
+}
+
+#[cfg(test)]
+mod sso_tests {
+    use super::*;
+
+    #[test]
+    fn test_rubin_ephemeris_is_surfaced() {
+        let mut ss = SsSource::default();
+        ss.designation = Some("2026 XX1".to_string());
+        ss.eph_vmag = Some(19.4);
+        ss.eph_offset = Some(0.3);
+        ss.eph_rate = Some(42.0);
+        ss.phase_angle = Some(12.5);
+        ss.helio_range = Some(3.0114);
+        ss.topo_range = Some(2.2049);
+
+        let sso = LsstSsoAssociation::from_rubin(Some("123"), Some(&ss));
+        assert!(sso.is_sso);
+        assert_eq!(sso.designation.as_deref(), Some("2026 XX1"));
+        assert_eq!(sso.predicted_mag, Some(19.4));
+        assert_eq!(sso.separation_arcsec, Some(0.3));
+        assert_eq!(sso.sky_motion, Some(42.0));
+        assert_eq!(sso.phase_angle, Some(12.5));
+        assert_eq!(sso.helio_dist, Some(3.0114));
+        assert_eq!(sso.topo_dist, Some(2.2049));
+        assert_eq!(sso.source.as_deref(), Some("rubin"));
+    }
+
+    // Rubin can link a detection to an ssObject without supplying ssSource, so
+    // is_sso must follow ssObjectId and agree with `rock`.
+    #[test]
+    fn test_is_sso_follows_ss_object_id_not_the_ephemeris() {
+        let sso = LsstSsoAssociation::from_rubin(Some("123"), None);
+        assert!(sso.is_sso, "must agree with rock");
+        assert!(sso.predicted_mag.is_none());
+        assert!(sso.designation.is_none());
+
+        let not_sso = LsstSsoAssociation::from_rubin(None, None);
+        assert!(!not_sso.is_sso);
+        assert!(not_sso.source.is_none());
+    }
+
+    // An ephemeris without an ssObjectId would otherwise yield is_sso: false with a
+    // designation and predicted magnitude attached, which filters would disagree
+    // about depending on which field they cut on.
+    #[test]
+    fn test_ephemeris_without_ss_object_id_is_not_surfaced() {
+        let mut ss = SsSource::default();
+        ss.designation = Some("2026 XX1".to_string());
+        ss.eph_vmag = Some(19.4);
+
+        let sso = LsstSsoAssociation::from_rubin(None, Some(&ss));
+        assert!(!sso.is_sso);
+        assert!(sso.designation.is_none());
+        assert!(sso.predicted_mag.is_none());
+        assert!(sso.source.is_none());
     }
 }

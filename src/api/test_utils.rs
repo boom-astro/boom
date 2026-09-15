@@ -1,4 +1,18 @@
+use crate::api::auth::{get_test_auth, AuthProvider};
+use crate::conf::AppConfig;
 use mongodb::{bson, Database};
+
+/// Auth provider plus a bearer token for the config's admin user, for tests
+/// that need to exercise endpoints behind `auth_middleware`.
+pub async fn get_admin_auth(db: &Database) -> (AuthProvider, String) {
+    let auth = get_test_auth(db).await.unwrap();
+    let auth_config = AppConfig::from_test_config().unwrap().api.auth;
+    let (token, _) = auth
+        .create_token_for_user(&auth_config.admin_username, &auth_config.admin_password)
+        .await
+        .unwrap();
+    (auth, token)
+}
 
 pub async fn create_test_catalog(db: &Database) -> String {
     let name = format!("test_catalog_{}", uuid::Uuid::new_v4());

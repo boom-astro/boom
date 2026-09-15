@@ -1,10 +1,18 @@
 use crate::{
+    api::catalogs::WATCHLIST_PREFIX,
     conf::{self, AppConfig},
-    filter::{build_lsst_filter_pipeline, build_ztf_filter_pipeline},
+    filter::{
+        build_decam_filter_pipeline, build_lsst_filter_pipeline, build_winter_filter_pipeline,
+        build_ztf_filter_pipeline,
+    },
+    scheduler::{record_kafka_alert_published, record_worker_retry},
     utils::{
         cutouts::CutoutStorageError,
         enums::Survey,
         o11y::metrics::SCHEDULER_METER,
+        retry::{
+            is_transient_redis_error, retry_transient, DEFAULT_BASE_BACKOFF, DEFAULT_MAX_RETRIES,
+        },
         worker::{should_terminate, WorkerCmd},
     },
 };
@@ -86,6 +94,8 @@ pub enum FilterError {
     InvalidFilterId,
     #[error("error during filter execution")]
     FilterExecutionError(String),
+    #[error("invalid watchlist catalog name '{0}': must start with '{WATCHLIST_PREFIX}'")]
+    InvalidWatchlist(String),
 }
 
 pub fn parse_programid_candid_tuple(tuple_str: &str) -> Option<(i32, i64)> {
@@ -334,6 +344,40 @@ pub fn uses_field_in_filter(filter_pipeline: &[serde_json::Value], field: &str) 
     None
 }
 
+/// Joined documents the `$addFields` stages null out once their arrays have been
+/// flattened to the top level, so any path into one reads as empty rather than
+/// as the data it names.
+const NULLED_JOINS: [&str; 3] = ["aux", "ztf_aux", "lsst_aux"];
+
+/// The top-level name a path into a nulled join should have used, if it is one.
+fn flattened_name(path: &str) -> Option<&str> {
+    NULLED_JOINS.iter().find_map(|join| {
+        path.strip_prefix(join)
+            .and_then(|rest| rest.strip_prefix('.'))
+            .or(if path == *join { Some("") } else { None })
+    })
+}
+
+/// The first reference to a nulled join anywhere in `value`, as `(path, name)`.
+///
+/// Object keys are field paths; string values are only references when they are
+/// `$`-prefixed, so a literal naming one of these is left alone.
+fn find_nulled_join(value: &serde_json::Value) -> Option<(String, String)> {
+    match value {
+        serde_json::Value::String(s) => s
+            .strip_prefix('$')
+            .and_then(flattened_name)
+            .map(|name| (s.clone(), name.to_string())),
+        serde_json::Value::Array(items) => items.iter().find_map(find_nulled_join),
+        serde_json::Value::Object(map) => map.iter().find_map(|(key, nested)| {
+            flattened_name(key)
+                .map(|name| (key.clone(), name.to_string()))
+                .or_else(|| find_nulled_join(nested))
+        }),
+        _ => None,
+    }
+}
+
 /// Validates a MongoDB aggregation pipeline used as a filter.
 ///
 /// # Arguments
@@ -358,6 +402,19 @@ pub fn validate_filter_pipeline(filter_pipeline: &[serde_json::Value]) -> Result
         return Err(FilterError::InvalidFilterPipeline(
             "Filter pipeline cannot be empty".to_string(),
         ));
+    }
+    for stage in filter_pipeline {
+        if let Some((path, name)) = find_nulled_join(stage) {
+            let advice = if name.is_empty() {
+                "its arrays are available at the top level".to_string()
+            } else {
+                format!("use `{name}` instead")
+            };
+            return Err(FilterError::InvalidFilterPipeline(format!(
+                "`{path}` always reads as empty: a joined document is discarded once \
+                 its arrays are flattened, so {advice}."
+            )));
+        }
     }
     let mut nb_match_stages = 0;
     for (i, stage) in filter_pipeline.iter().enumerate() {
@@ -585,6 +642,12 @@ pub struct Filter {
     pub description: Option<String>,
     pub permissions: HashMap<Survey, Vec<i32>>,
     pub user_id: String,
+    /// Optional watchlist catalog name (must start with "watchlist_"). When set,
+    /// a `$lookup` against the watchlist catalog is injected at load time so the
+    /// filter only sees alerts whose `objectId` is recorded in the watchlist
+    /// document's `matching_<survey>_objects` array.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watchlist: Option<String>,
     pub survey: Survey,
     pub active: bool,
     pub active_fid: String,
@@ -678,11 +741,8 @@ pub async fn build_filter_pipeline(
     let pipeline = match survey {
         Survey::Ztf => build_ztf_filter_pipeline(pipeline, permissions).await?,
         Survey::Lsst => build_lsst_filter_pipeline(pipeline, permissions).await?,
-        _ => {
-            return Err(FilterError::InvalidFilterPipeline(
-                "Unsupported survey for filter pipeline".to_string(),
-            ));
-        }
+        Survey::Decam => build_decam_filter_pipeline(pipeline, permissions).await?,
+        Survey::Winter => build_winter_filter_pipeline(pipeline, permissions).await?,
     };
     Ok(pipeline)
 }
@@ -703,6 +763,7 @@ pub async fn build_loaded_filter(
     filter_id: &str,
     survey: &Survey,
     filter_collection: &mongodb::Collection<Filter>,
+    watchlist_projections: &HashMap<String, Document>,
 ) -> Result<LoadedFilter, FilterError> {
     let filter = get_filter(filter_id, survey, filter_collection).await?;
     if SURVEYS_REQUIRING_PERMISSIONS.contains(survey)
@@ -715,15 +776,69 @@ pub async fn build_loaded_filter(
     }
 
     let pipeline = get_active_filter_pipeline(&filter)?;
-    let pipeline = build_filter_pipeline(&pipeline, &filter.permissions, &filter.survey).await?;
+    let mut pipeline =
+        build_filter_pipeline(&pipeline, &filter.permissions, &filter.survey).await?;
+
+    // If bound to a watchlist, keep only alerts matching its
+    // `matching_<survey>_objects` array.
+    if let Some(watchlist) = filter.watchlist.as_deref() {
+        if !watchlist.starts_with(WATCHLIST_PREFIX) {
+            return Err(FilterError::InvalidWatchlist(watchlist.to_string()));
+        }
+        let foreign_field = format!("matching_{}_objects", survey.to_string().to_lowercase());
+        pipeline.push(doc! {
+            "$lookup": {
+                "from": watchlist,
+                "localField": "objectId",
+                "foreignField": &foreign_field,
+                "as": "_watchlist_match",
+            }
+        });
+        pipeline.push(doc! {
+            "$match": { "_watchlist_match.0": { "$exists": true } }
+        });
+
+        // Surface the matched watchlist docs (projected to the configured fields)
+        // under `annotations.watchlist` as an array.
+        if let Some(projection) = watchlist_projections.get(watchlist) {
+            let mut projected_fields = Document::new();
+            for key in projection.keys() {
+                projected_fields.insert(key.clone(), format!("$$w.{}", key));
+            }
+            let watchlist_array = doc! {
+                "$map": {
+                    "input": "$_watchlist_match",
+                    "as": "w",
+                    "in": projected_fields,
+                }
+            };
+            pipeline.push(doc! { "$set": { "annotations.watchlist": watchlist_array } });
+            pipeline.push(doc! { "$unset": "_watchlist_match" });
+        }
+    }
 
     let loaded = LoadedFilter {
         id: filter.id.clone(),
         name: filter.name.clone(),
-        pipeline: pipeline,
+        pipeline,
         permissions: filter.permissions,
     };
     Ok(loaded)
+}
+
+/// Build the map of watchlist catalog name -> config projection for a survey.
+/// Only catalogs whose name starts with the watchlist prefix are included; the
+/// projection lists which watchlist-document fields a bound filter surfaces
+/// under `annotations.watchlist`.
+pub fn watchlist_projections(config: &AppConfig, survey: &Survey) -> HashMap<String, Document> {
+    config
+        .crossmatch
+        .get(survey)
+        .into_iter()
+        .flatten()
+        .filter(|c| c.catalog.starts_with(WATCHLIST_PREFIX))
+        .map(|c| (c.catalog.clone(), c.projection.clone()))
+        .collect()
 }
 
 /// Builds a vector of LoadedFilter objects for the specified filter IDs and survey.
@@ -741,6 +856,7 @@ pub async fn build_loaded_filters(
     filter_ids: &Option<Vec<String>>,
     survey: &Survey,
     filter_collection: &mongodb::Collection<Filter>,
+    watchlist_projections: &HashMap<String, Document>,
 ) -> Result<Vec<LoadedFilter>, FilterError> {
     let all_filter_ids: Vec<String> = filter_collection
         .distinct("_id", doc! {"active": true, "survey": survey.to_string()})
@@ -768,7 +884,9 @@ pub async fn build_loaded_filters(
 
     let mut filters: Vec<LoadedFilter> = Vec::new();
     for filter_id in filter_ids {
-        match build_loaded_filter(&filter_id, survey, filter_collection).await {
+        match build_loaded_filter(&filter_id, survey, filter_collection, watchlist_projections)
+            .await
+        {
             Ok(filter) => filters.push(filter),
             Err(err) => {
                 warn!("Skipping filter {} for {:?}: {}", filter_id, survey, err);
@@ -798,8 +916,6 @@ pub enum FilterWorkerError {
     LoadConfigError(#[from] conf::BoomConfigError),
     #[error("filter error")]
     FilterError(#[from] FilterError),
-    #[error("failed to get filter by queue")]
-    GetFilterByQueueError,
     #[error("could not find alert")]
     AlertNotFound,
     #[error("filter not found")]
@@ -837,7 +953,8 @@ pub trait FilterWorker {
 }
 
 #[tokio::main]
-#[instrument(skip_all, err)]
+// No `#[instrument]`: this is the long-lived filter worker loop; a wrapping
+// span would put every per-alert span under a single root trace.
 pub async fn run_filter_worker<T: FilterWorker>(
     mut receiver: mpsc::Receiver<WorkerCmd>,
     config_path: &str,
@@ -855,10 +972,9 @@ pub async fn run_filter_worker<T: FilterWorker>(
     let mut filter_worker = T::new(config_path, None).await?;
 
     // in a never ending loop, loop over the queues
-    let mut con = config.build_redis().await?;
+    let con = config.build_redis().await?;
 
     let input_queue = filter_worker.input_queue_name();
-    let output_topic = filter_worker.output_topic_name();
     let survey = input_queue
         .split('_')
         .next()
@@ -946,9 +1062,21 @@ pub async fn run_filter_worker<T: FilterWorker>(
         }
 
         ACTIVE.add(1, &active_attrs);
-        let alerts: Vec<String> = match con
-            .rpop::<&str, Vec<String>>(&input_queue, NonZero::new(1000))
-            .await
+        let alerts: Vec<String> = match retry_transient(
+            "valkey_rpop",
+            DEFAULT_MAX_RETRIES,
+            DEFAULT_BASE_BACKOFF,
+            is_transient_redis_error,
+            || record_worker_retry("filter", &survey, "valkey_rpop"),
+            || {
+                // Clone the multiplexed connection so the future owns it rather
+                // than borrowing `con` through the FnMut closure.
+                let mut con = con.clone();
+                let key: &str = &input_queue;
+                async move { con.rpop::<&str, Vec<String>>(key, NonZero::new(1000)).await }
+            },
+        )
+        .await
         {
             Ok(alerts) => alerts,
             Err(error) => {
@@ -967,8 +1095,8 @@ pub async fn run_filter_worker<T: FilterWorker>(
 
         command_check_countdown = command_check_countdown.saturating_sub(alerts.len());
 
-        let alerts_output = match filter_worker.process_alerts(&alerts).await {
-            Ok(alerts_output) => alerts_output,
+        let matched_alerts = match filter_worker.process_alerts(&alerts).await {
+            Ok(matched) => matched,
             Err(error) => {
                 BATCH_PROCESSED.add(1, &processing_error_attrs);
                 ACTIVE.add(-1, &active_attrs);
@@ -978,15 +1106,28 @@ pub async fn run_filter_worker<T: FilterWorker>(
 
         BATCH_PROCESSED.add(1, &ok_attrs);
         ALERT_PROCESSED.add(
-            (alerts.len() - alerts_output.len()) as u64,
+            alerts.len().saturating_sub(matched_alerts.len()) as u64,
             &ok_excluded_attrs,
         );
 
+        let output_topic = filter_worker.output_topic_name();
         let mut total_enqueued = 0;
         let mut delivery_futures = Vec::new();
         let mut enqueue_error = None;
-        for alert in alerts_output {
-            match send_alert_to_kafka(&alert, &schema, &producer, &output_topic).await {
+        for alert in &matched_alerts {
+            // Enqueue errors are typically transient producer backpressure
+            // (local queue full); retry those before giving up. Encoding errors
+            // are not Kafka errors and fall through immediately.
+            let send_result = retry_transient(
+                "kafka_send",
+                DEFAULT_MAX_RETRIES,
+                DEFAULT_BASE_BACKOFF,
+                |error: &FilterWorkerError| matches!(error, FilterWorkerError::Kafka(_)),
+                || record_worker_retry("filter", &survey, "kafka_send"),
+                || send_alert_to_kafka(&alert, &schema, &producer, &output_topic),
+            )
+            .await;
+            match send_result {
                 Ok(delivery_future) => {
                     delivery_futures.push(delivery_future);
                     total_enqueued += 1;
@@ -1001,7 +1142,7 @@ pub async fn run_filter_worker<T: FilterWorker>(
 
         debug!(
             "Enqueued total of {} alerts to Kafka topic {}",
-            total_enqueued, &output_topic
+            total_enqueued, output_topic
         );
 
         // Wait for all futures to complete and check for errors
@@ -1011,17 +1152,11 @@ pub async fn run_filter_worker<T: FilterWorker>(
             let result = r.map_err(|e| {
                 ALERT_PROCESSED.add(1, &output_error_attrs);
                 ACTIVE.add(-1, &active_attrs);
-                FilterWorkerError::Kafka(format!(
-                    "Failed to deliver alert to Kafka topic {}: {}",
-                    &output_topic, e
-                ))
+                FilterWorkerError::Kafka(format!("Failed to deliver alert to Kafka: {}", e))
             })?;
             if let Err((e, _)) = result {
                 ALERT_PROCESSED.add(1, &output_error_attrs);
-                error!(
-                    "Failed to deliver alert to Kafka topic {}: {}",
-                    &output_topic, e
-                );
+                error!("Failed to deliver alert to Kafka: {}", e);
             } else {
                 total_sent += 1;
                 ALERT_PROCESSED.add(1, &ok_included_attrs);
@@ -1029,9 +1164,18 @@ pub async fn run_filter_worker<T: FilterWorker>(
         }
 
         debug!(
-            "Successfully sent total of {}/{} alerts to Kafka topic {}",
-            total_sent, total_enqueued, &output_topic
+            "Successfully sent total of {}/{} alerts to Kafka",
+            total_sent, total_enqueued
         );
+
+        if total_enqueued > 0 {
+            record_kafka_alert_published(
+                "filter_worker",
+                &survey,
+                &output_topic,
+                total_enqueued as u64,
+            );
+        }
 
         if let Some(error) = enqueue_error {
             ACTIVE.add(-1, &active_attrs);
@@ -1209,6 +1353,54 @@ mod tests {
         assert!(stage_index.is_none());
     }
 
+    /// A path into a joined document reads as empty rather than erroring, so it
+    /// is refused with the name that carries the data.
+    #[test]
+    fn nulled_join_paths_are_refused() {
+        for (stage, expected) in [
+            (
+                serde_json::json!({"$match": {"$expr": {"$gt": [{"$size": "$aux.fp_hists"}, 0]}}}),
+                "fp_hists",
+            ),
+            (
+                serde_json::json!({"$match": {"aux.prv_candidates.magpsf": {"$lt": 20}}}),
+                "prv_candidates.magpsf",
+            ),
+            (
+                serde_json::json!({"$project": {"x": "$ztf_aux.aliases"}}),
+                "aliases",
+            ),
+            (
+                serde_json::json!({"$match": {"lsst_aux.fp_hists": {"$exists": true}}}),
+                "fp_hists",
+            ),
+        ] {
+            let error = validate_filter_pipeline(&[stage.clone()])
+                .expect_err(&format!("{stage} should be refused"));
+            let message = error.to_string();
+            assert!(
+                message.contains(expected),
+                "{message} should name `{expected}`"
+            );
+        }
+    }
+
+    /// The flattened names, and fields that merely start with the same letters,
+    /// stay usable.
+    #[test]
+    fn flattened_and_lookalike_paths_are_allowed() {
+        assert!(
+            find_nulled_join(&serde_json::json!({"$match": {"fp_hists.jd": {"$gt": 0}}})).is_none()
+        );
+        assert!(find_nulled_join(&serde_json::json!({"$match": {"auxiliary": 1}})).is_none());
+        assert!(
+            find_nulled_join(&serde_json::json!({"$match": {"note": "aux.fp_hists"}})).is_none()
+        );
+        assert!(
+            find_nulled_join(&serde_json::json!({"$project": {"x": "$prv_candidates"}})).is_none()
+        );
+    }
+
     #[tokio::test]
     async fn test_validate_filter_pipeline() {
         // first let's test a valid pipeline, and then we will test some invalid ones
@@ -1379,6 +1571,7 @@ mod tests {
             description: Some("A test filter".to_string()),
             permissions,
             user_id: "test_user".to_string(),
+            watchlist: None,
             survey: Survey::Ztf,
             active: true,
             active_fid: "v1".to_string(),
@@ -1409,6 +1602,7 @@ mod tests {
             description: Some("A test filter".to_string()),
             permissions,
             user_id: "test_user".to_string(),
+            watchlist: None,
             survey: Survey::Ztf,
             active: true,
             active_fid: "v1".to_string(),

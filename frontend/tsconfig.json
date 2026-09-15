@@ -1,0 +1,19 @@
+{
+  "files": [],
+  "references": [
+    {
+      "path": "./tsconfig.app.json"
+    },
+    {
+      "path": "./tsconfig.node.json"
+    }
+  ],
+  "compilerOptions": {
+    // No `baseUrl` — deprecated in TypeScript 6, removed in 7. `paths` entries
+    // are resolved relative to this file, so it was never needed here.
+    "paths": {
+      "@/*": ["./src/*"]
+    }
+  }
+}
+

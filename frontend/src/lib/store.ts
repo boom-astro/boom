@@ -1,0 +1,93 @@
+import { create } from 'zustand'
+import { persist } from 'zustand/middleware'
+import api, { Profile } from './api'
+
+async function generateAvatarUrl(email: string) {
+    const msgUint8 = new TextEncoder().encode(email.trim().toLowerCase());
+    const hashBuffer = await crypto.subtle.digest("SHA-256", msgUint8);
+    const hashArray = Array.from(new Uint8Array(hashBuffer));
+    const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+    return `https://www.gravatar.com/avatar/${hashHex}?d=identicon&s=64`;
+}
+
+type AppState = {
+  profile: Profile
+  setProfile: (p: Profile) => void
+  clearProfile: () => void
+
+  // currently-loaded source/object data
+  currentSource: Record<string, unknown> | null
+  setCurrentSource: (v: Record<string, unknown> | null) => void
+  clearCurrentSource: () => void
+
+  // misc helpers
+  lastUpdated: number | null
+  touch: () => void
+}
+
+export const useAppStore = create<AppState>()(
+  persist(
+    (set) => ({
+      profile: null,
+      setProfile: (p) => set(() => ({ profile: p, lastUpdated: Date.now() })),
+      clearProfile: () => {
+        set(() => ({ profile: null, lastUpdated: Date.now() }))
+      },
+
+      currentSource: null,
+      setCurrentSource: (v) => set(() => ({ currentSource: v, lastUpdated: Date.now() })),
+      clearCurrentSource: () => set(() => ({ currentSource: null, lastUpdated: Date.now() })),
+
+      lastUpdated: null,
+      touch: () => set(() => ({ lastUpdated: Date.now() })),
+    }),
+    {
+      name: 'boom-app-state', // localStorage key
+      // only persist selected parts
+      partialize: (state) => ({ profile: state.profile, currentSource: state.currentSource, lastUpdated: state.lastUpdated }),
+    }
+  )
+)
+
+// helper to load profile if authenticated and no profile in store
+//
+// Pass `{ force: true }` whenever the token has just changed. The cache is keyed
+// on nothing but age, so a profile fetched minutes ago under the *previous*
+// token still counts as fresh — which is how signing in as somebody else could
+// leave the sidebar showing the account you just left. Returns the profile in
+// play so callers don't need a second fetch to read it.
+export async function ensureProfileLoaded(options?: { force?: boolean }): Promise<Profile> {
+  const token = api.getTokenRecord()
+  if (!token) return null
+  const state = useAppStore.getState()
+  if (
+    !options?.force &&
+    state.profile &&
+    state.lastUpdated &&
+    state.lastUpdated > Date.now() - 5 * 60 * 1000
+  ) {
+    // profile exists and was updated less than 5min ago
+    return state.profile
+  }
+    try {
+    const data = await api.fetchProfile()
+    // assume API returns { username, email, avatar }
+    // normalize: if API returns `name`, copy it to `username`
+    if (data && data.name && !data.username) {
+      data.username = data.name as string;
+    }
+    if (data && data.email) {
+        data.avatar = await generateAvatarUrl(data.email);
+    }
+    useAppStore.getState().setProfile(data)
+    return data
+  } catch (err: unknown) {
+    // if fetchProfile throws (e.g. unauthorized) clear token
+    console.error('ensureProfileLoaded: failed to fetch profile', err)
+    api.logout()
+    useAppStore.getState().clearProfile()
+    return null
+  }
+}
+
+export default useAppStore

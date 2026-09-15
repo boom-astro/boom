@@ -1,13 +1,19 @@
+#[cfg(target_os = "linux")]
+use boom::utils::gpu::validate_gpu_configuration_for_survey;
 use boom::{
-    conf::{load_dotenv, AppConfig},
+    alert::recover_temp_queue,
+    api::catalogs::WATCHLIST_PREFIX,
+    conf::{load_dotenv, AppConfig, CatalogXmatchConfig},
     enrichment::models::SharedModelPool,
-    scheduler::{record_worker_pool_state, ThreadPool},
+    scheduler::{record_mpc_orbits_state, record_worker_pool_state, ThreadPool},
     utils::{
         db::initialize_survey_indexes,
         enums::Survey,
+        mpcorb,
         o11y::{
-            logging::{build_subscriber, log_error, WARN},
+            logging::{build_subscriber_with_otel, log_error, WARN},
             metrics::init_metrics,
+            tracing::init_tracing,
         },
         worker::WorkerType,
     },
@@ -18,143 +24,108 @@ use std::time::Duration;
 use clap::Parser;
 use futures::TryStreamExt;
 use mongodb::bson::{doc, Document};
+use mongodb::{Collection, Database};
 use opentelemetry_sdk::metrics::SdkMeterProvider;
+use opentelemetry_sdk::trace::SdkTracerProvider;
 use tokio::sync::oneshot;
-use tracing::{info, info_span, instrument, warn, Instrument};
+use tracing::{info, info_span, warn, Instrument};
 use uuid::Uuid;
 
-#[cfg(target_os = "linux")]
-const ZTF_MIN_FREE_VRAM_MIB: u64 = 10 * 1024;
+/// How stale the MPC catalogue may get before it is refreshed. MPCORB is
+/// published daily and the elements' own epochs move far more slowly, so this is
+/// about not drifting rather than about needing today's file exactly.
+const MPC_ORBITS_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+/// How often to re-check. Well inside the max age, so a single failed attempt
+/// still leaves several before the catalogue is actually stale.
+const MPC_ORBITS_CHECK_INTERVAL: Duration = Duration::from_secs(4 * 60 * 60);
 
-#[cfg(target_os = "linux")]
-fn validate_linux_gpu_runtime_preconditions() -> Result<(), &'static str> {
-    // fail fast if the runtime library path is not explicitly configured.
-    if std::env::var("ORT_DYLIB_PATH").map_or(true, |v| v.trim().is_empty()) {
-        return Err("GPU is enabled but ORT_DYLIB_PATH is not set. \
-Set ORT_DYLIB_PATH to a valid libonnxruntime.so path before starting scheduler.");
-    }
-
-    Ok(())
+fn pool_state(pool: &ThreadPool) -> String {
+    format!("{}/{}", pool.live_worker_count(), pool.total_worker_count())
 }
 
-#[cfg(target_os = "linux")]
-fn validate_gpu_inference(device_ids: &[i32]) -> Result<(), Box<dyn std::error::Error>> {
-    info!("Validating GPU inference: running one inference per configured CUDA device");
-
-    use boom::enrichment::models::{BtsBotModel, Model};
-    for &device_id in device_ids {
-        info!(device_id, "Running BTSBotModel inference on device");
-        let mut model = BtsBotModel::new_on_device("data/models/btsbot-v1.0.1.onnx", device_id)?;
-        let metadata = ndarray::Array::from_shape_vec((1, 25), vec![0.5; 25])?;
-        let triplet = ndarray::Array::from_shape_vec((1, 63, 63, 3), vec![0.5; 63 * 63 * 3])?;
-        let _ = model.predict(&metadata, &triplet)?;
-    }
-    Ok(())
+/// Whether the catalogue is due a refresh. An absent one always is.
+fn mpc_orbits_needs_refresh(age_seconds: Option<f64>, max_age: Duration) -> bool {
+    age_seconds.is_none_or(|age| age >= max_age.as_secs_f64())
 }
 
-#[cfg(target_os = "linux")]
-fn parse_nvidia_smi_memory_free_output(
-    output: &str,
-) -> Result<Vec<u64>, Box<dyn std::error::Error>> {
-    let mut values = Vec::new();
-    for line in output.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
+/// Keep `MPC_orbits` fresh for as long as the scheduler runs.
+///
+/// A missing catalogue costs geometry silently -- the alert still enriches
+/// without it -- so this runs unattended, and the startup check covers a fresh
+/// deployment. A failed refresh leaves the previous catalogue in place.
+async fn keep_mpc_orbits_fresh(db: Database) {
+    let mut tick = tokio::time::interval(MPC_ORBITS_CHECK_INTERVAL);
+    loop {
+        // Fires immediately on the first pass, so startup is covered.
+        tick.tick().await;
+
+        let now = chrono::Utc::now().timestamp() as f64;
+        let age = match mpcorb::orbits_age_seconds(&db, now).await {
+            Ok(age) => age,
+            // An unknown age is not an absent one: do not re-download on a blip.
+            Err(error) => {
+                log_error!(WARN, error, "could not read the age of MPC_orbits");
+                continue;
+            }
+        };
+        let count = db
+            .collection::<Document>(mpcorb::ORBITS_COLLECTION)
+            .estimated_document_count()
+            .await
+            .ok();
+        record_mpc_orbits_state(age, count);
+
+        if !mpc_orbits_needs_refresh(age, MPC_ORBITS_MAX_AGE) {
+            info!(
+                age_hours = age.unwrap_or(0.0) / 3600.0,
+                orbits = count.unwrap_or(0),
+                "MPC_orbits is current"
+            );
             continue;
         }
-        let value = trimmed.parse::<u64>().map_err(|e| {
-            std::io::Error::other(format!(
-                "failed to parse nvidia-smi free memory value '{trimmed}': {e}"
-            ))
-        })?;
-        values.push(value);
-    }
-
-    if values.is_empty() {
-        return Err(std::io::Error::other("nvidia-smi returned no GPU free-memory values").into());
-    }
-
-    Ok(values)
-}
-
-#[cfg(target_os = "linux")]
-fn query_nvidia_smi_free_memory_mib() -> Result<Vec<u64>, Box<dyn std::error::Error>> {
-    let output = std::process::Command::new("nvidia-smi")
-        .args(["--query-gpu=memory.free", "--format=csv,noheader,nounits"])
-        .output()
-        .map_err(|e| {
-            std::io::Error::other(format!(
-                "failed to execute nvidia-smi for GPU memory validation: {e}"
-            ))
-        })?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(std::io::Error::other(format!(
-            "nvidia-smi failed while validating free GPU memory: {}",
-            stderr.trim()
-        ))
-        .into());
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    parse_nvidia_smi_memory_free_output(&stdout)
-}
-
-#[cfg(target_os = "linux")]
-fn validate_gpu_free_vram(
-    device_ids: &[i32],
-    min_free_vram_mib: u64,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let free_by_gpu = query_nvidia_smi_free_memory_mib()?;
-
-    for &device_id in device_ids {
-        if device_id < 0 {
-            return Err(std::io::Error::other(format!(
-                "invalid CUDA device id {device_id}; device ids must be >= 0"
-            ))
-            .into());
+        match age {
+            Some(age) => info!(age_hours = age / 3600.0, "MPC_orbits is stale, refreshing"),
+            None => warn!("MPC_orbits is missing, populating it"),
         }
 
-        let index = device_id as usize;
-        let Some(&free_mib) = free_by_gpu.get(index) else {
-            return Err(std::io::Error::other(format!(
-                "configured CUDA device id {device_id} is out of range; nvidia-smi reported {} device(s)",
-                free_by_gpu.len()
-            ))
-            .into());
-        };
-
-        if free_mib < min_free_vram_mib {
-            return Err(std::io::Error::other(format!(
-                "configured CUDA device {device_id} has only {free_mib} MiB free VRAM; ZTF enrichment requires at least {min_free_vram_mib} MiB ({:.1} GiB) free per device",
-                min_free_vram_mib as f64 / 1024.0
-            ))
-            .into());
+        // No progress bar: this output is a log, not a terminal.
+        match mpcorb::refresh_orbits(Some(&db), mpcorb::DEFAULT_MPCORB_URL, 10_000, now, false)
+            .await
+        {
+            Ok(report) => {
+                for sample in &report.rejected_samples {
+                    warn!("rejected record-shaped line: {}", sample);
+                }
+                info!(
+                    orbits = report.parsed,
+                    skipped = report.skipped,
+                    "MPC_orbits refreshed"
+                );
+                record_mpc_orbits_state(Some(0.0), Some(report.parsed));
+            }
+            // The previous catalogue survives a failure, so geometry keeps working.
+            Err(error) => log_error!(WARN, error, "failed to refresh MPC_orbits"),
         }
-
-        info!(
-            device_id,
-            free_vram_mib = free_mib,
-            min_required_mib = min_free_vram_mib,
-            "validated free GPU VRAM for ZTF enrichment"
-        );
     }
-
-    Ok(())
 }
 
-/// Sample one aux record at random and warn if it's missing crossmatches for
-/// any catalog declared under `crossmatch.<survey>` in the config. The live
-/// pipeline only crossmatches at first insert, so newly added catalogs never
-/// reach pre-existing records — the user has to run `reprocess_crossmatch`.
-async fn warn_if_missing_crossmatches(survey: &Survey, db: &mongodb::Database, config: &AppConfig) {
-    let configured = match config.crossmatch.get(survey) {
-        Some(v) if !v.is_empty() => v,
+/// Sample one aux record at random and warn if it is missing crossmatches for
+/// any catalog declared under `crossmatch.<survey>` in the config, excluding
+/// watchlist catalogs (prefixed with `watchlist_`). The live pipeline only
+/// crossmatches at first insert, so newly added catalogs never reach
+/// pre-existing records — the user has to run `reprocess_crossmatch`.
+async fn warn_if_missing_crossmatches(survey: &Survey, db: &Database, config: &AppConfig) {
+    let configured: Vec<&CatalogXmatchConfig> = match config.crossmatch.get(survey) {
+        Some(v) if !v.is_empty() => v
+            .iter()
+            .filter(|c| !c.catalog.starts_with(WATCHLIST_PREFIX))
+            .collect(),
         _ => return,
     };
-    let aux_collection: mongodb::Collection<Document> =
-        db.collection(&format!("{}_alerts_aux", survey));
+    if configured.is_empty() {
+        return;
+    }
+    let aux_collection: Collection<Document> = db.collection(&format!("{}_alerts_aux", survey));
 
     let mut cursor = match aux_collection
         .aggregate(vec![
@@ -228,8 +199,13 @@ struct Cli {
     deployment_env: String,
 }
 
-#[instrument(skip_all, fields(survey = %args.survey))]
-async fn run(args: Cli, meter_provider: SdkMeterProvider) {
+// Not `#[instrument]`'d: the scheduler runs for the process lifetime, so every
+// per-alert span would hang off one unbounded root. Survey is in `service.name`.
+async fn run(
+    args: Cli,
+    meter_provider: Option<SdkMeterProvider>,
+    tracer_provider: Option<SdkTracerProvider>,
+) {
     let default_config_path = "config.yaml".to_string();
     let config_path = args.config.unwrap_or_else(|| {
         warn!("no config file provided, using {}", default_config_path);
@@ -237,7 +213,6 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
     });
     let config = AppConfig::from_path(&config_path).unwrap();
 
-    // get num workers from config file
     let worker_config = config
         .workers
         .get(&args.survey)
@@ -246,8 +221,7 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
     let n_enrichment = worker_config.enrichment.n_workers;
     let n_filter = worker_config.filter.n_workers;
 
-    // initialize the indexes for the survey
-    let db: mongodb::Database = config
+    let db: Database = config
         .build_db()
         .await
         .expect("could not create mongodb client");
@@ -257,20 +231,18 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
 
     warn_if_missing_crossmatches(&args.survey, &db, &config).await;
 
-    #[cfg(target_os = "linux")]
-    {
-        if matches!(args.survey, Survey::Ztf) && config.gpu.enabled {
-            validate_linux_gpu_runtime_preconditions().expect("GPU runtime preconditions not met");
-            validate_gpu_free_vram(&config.gpu.device_ids, ZTF_MIN_FREE_VRAM_MIB)
-                .expect("configured GPU(s) do not have enough free VRAM for ZTF enrichment");
-            validate_gpu_inference(&config.gpu.device_ids)
-                .expect("failed to validate GPU inference");
-            info!("Confirmed GPU runtime preconditions, free VRAM guardrail, and GPU inference");
-        }
+    // Only ZTF needs these; LSST carries the vectors in its own packet.
+    if args.survey == Survey::Ztf {
+        tokio::spawn(
+            keep_mpc_orbits_fresh(db.clone()).instrument(info_span!("mpc orbits refresh")),
+        );
     }
 
-    // Spawn sigint handler task
-    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    #[cfg(target_os = "linux")]
+    validate_gpu_configuration_for_survey(&args.survey, &config)
+        .expect("GPU configuration is invalid for the survey");
+
+    let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
     tokio::spawn(
         async {
             info!("waiting for ctrl-c");
@@ -285,11 +257,8 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
         .instrument(info_span!("sigint handler")),
     );
 
-    // Load ONNX models at startup. When GPUs are enabled, create a pool of
-    // shared model sets (one per device) to conserve VRAM — workers round-robin
-    // across devices. When GPUs are disabled, pass None so each worker loads
-    // its own private models on CPU (zero mutex contention).
-    let shared_model_pool = if matches!(args.survey, Survey::Ztf) && config.gpu.enabled {
+    // A pool conserves VRAM; None makes each CPU worker load its own models.
+    let shared_model_pool = if matches!(args.survey, Survey::Ztf) && config.gpu.is_active() {
         Some(
             SharedModelPool::load(&config.gpu.device_ids)
                 .expect("failed to load ONNX models on GPU"),
@@ -298,121 +267,164 @@ async fn run(args: Cli, meter_provider: SdkMeterProvider) {
         None
     };
 
-    let alert_pool = ThreadPool::new(
+    match config.build_redis().await {
+        Ok(mut con) => match recover_temp_queue(&mut con, &args.survey.alert_input_queue()).await {
+            Ok(0) => {}
+            Ok(recovered) => warn!(recovered, "requeued alerts left in the alert temp queue"),
+            Err(error) => log_error!(WARN, error, "failed to recover the alert temp queue"),
+        },
+        Err(error) => log_error!(
+            WARN,
+            error,
+            "failed to connect to redis for temp queue recovery"
+        ),
+    }
+
+    let mut alert_pool = ThreadPool::new(
         WorkerType::Alert,
-        n_alert as usize,
+        n_alert,
         args.survey.clone(),
         config_path.clone(),
         None,
     );
-    let enrichment_pool = ThreadPool::new(
+    let mut enrichment_pool = ThreadPool::new(
         WorkerType::Enrichment,
-        n_enrichment as usize,
+        n_enrichment,
         args.survey.clone(),
         config_path.clone(),
         shared_model_pool,
     );
-    let filter_pool = ThreadPool::new(
+    let mut filter_pool = ThreadPool::new(
         WorkerType::Filter,
-        n_filter as usize,
+        n_filter,
         args.survey.clone(),
         config_path,
         None,
     );
 
-    let record_pool_metrics = || {
-        record_worker_pool_state(
-            &args.survey,
-            "alert",
-            alert_pool.live_worker_count(),
-            alert_pool.total_worker_count(),
-        );
-        record_worker_pool_state(
-            &args.survey,
-            "enrichment",
-            enrichment_pool.live_worker_count(),
-            enrichment_pool.total_worker_count(),
-        );
-        record_worker_pool_state(
-            &args.survey,
-            "filter",
-            filter_pool.live_worker_count(),
-            filter_pool.total_worker_count(),
-        );
-    };
+    // By reference, so the supervision tick below can still borrow them mutably.
+    let record_pool_metrics =
+        |survey: &Survey, alert: &ThreadPool, enrichment: &ThreadPool, filter: &ThreadPool| {
+            for (kind, pool) in [
+                ("alert", alert),
+                ("enrichment", enrichment),
+                ("filter", filter),
+            ] {
+                record_worker_pool_state(
+                    survey,
+                    kind,
+                    pool.live_worker_count(),
+                    pool.total_worker_count(),
+                );
+            }
+        };
 
     // Emit an initial sample so dashboards show running workers immediately.
-    record_pool_metrics();
+    record_pool_metrics(&args.survey, &alert_pool, &enrichment_pool, &filter_pool);
 
-    // Wait for shutdown signal, logging heartbeat every 60 seconds with live worker counts
-    let mut shutdown_rx = shutdown_rx;
+    // Supervise often to respawn fast, but only log the heartbeat once a minute.
+    let mut supervise_tick = tokio::time::interval(Duration::from_secs(5));
+    let mut heartbeat_tick = tokio::time::interval(Duration::from_secs(60));
+    // Drop the immediate first ticks; the sample above already covers t=0.
+    supervise_tick.tick().await;
+    heartbeat_tick.tick().await;
     loop {
         tokio::select! {
             _ = &mut shutdown_rx => {
                 break;
             }
-            _ = tokio::time::sleep(Duration::from_secs(60)) => {
-                record_pool_metrics();
+            _ = supervise_tick.tick() => {
+                alert_pool.supervise();
+                enrichment_pool.supervise();
+                filter_pool.supervise();
+            }
+            _ = heartbeat_tick.tick() => {
+                record_pool_metrics(&args.survey, &alert_pool, &enrichment_pool, &filter_pool);
                 info!(
-                    alert = %format!("{}/{}", alert_pool.live_worker_count(), alert_pool.total_worker_count()),
-                    enrichment = %format!("{}/{}", enrichment_pool.live_worker_count(), enrichment_pool.total_worker_count()),
-                    filter = %format!("{}/{}", filter_pool.live_worker_count(), filter_pool.total_worker_count()),
+                    alert = %pool_state(&alert_pool),
+                    enrichment = %pool_state(&enrichment_pool),
+                    filter = %pool_state(&filter_pool),
                     "heartbeat: workers running"
                 );
             }
         }
     }
 
-    // Shut down:
     info!("shutting down");
     drop(alert_pool);
     drop(enrichment_pool);
     drop(filter_pool);
-    if let Err(error) = meter_provider.shutdown() {
-        log_error!(WARN, error, "failed to shut down the meter provider");
+    if let Some(meter_provider) = meter_provider {
+        if let Err(error) = meter_provider.shutdown() {
+            log_error!(WARN, error, "failed to shut down the meter provider");
+        }
+    }
+    if let Some(tracer_provider) = tracer_provider {
+        if let Err(error) = tracer_provider.shutdown() {
+            log_error!(WARN, error, "failed to shut down the tracer provider");
+        }
     }
 }
 
 #[tokio::main]
 async fn main() {
-    // Load environment variables from .env file before anything else
+    // Before anything else, so every later config read sees the variables.
     load_dotenv();
 
     let args = Cli::parse();
 
-    let (subscriber, _guard) = build_subscriber().expect("failed to build subscriber");
-    tracing::subscriber::set_global_default(subscriber).expect("failed to install subscriber");
-
     let instance_id = args.instance_id.unwrap_or_else(Uuid::new_v4);
-    let meter_provider = init_metrics(
-        String::from("scheduler"),
+    // Must match the Compose service name or Grafana loses the correlation label.
+    let service_name = format!("scheduler-{}", args.survey.to_string().to_lowercase());
+    let tracer_provider = init_tracing(
+        service_name.clone(),
         instance_id,
         args.deployment_env.clone(),
     )
-    .expect("failed to initialize metrics");
+    .expect("failed to initialize tracing");
 
-    run(args, meter_provider).await;
+    let (subscriber, _guard) = build_subscriber_with_otel(tracer_provider.as_ref(), &service_name)
+        .expect("failed to build subscriber");
+    tracing::subscriber::set_global_default(subscriber).expect("failed to install subscriber");
+
+    let meter_provider = init_metrics(service_name, instance_id, args.deployment_env.clone())
+        .expect("failed to initialize metrics");
+
+    run(args, meter_provider, tracer_provider).await;
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(test)]
 mod tests {
-    use super::parse_nvidia_smi_memory_free_output;
+    use super::*;
 
     #[test]
-    /// Verifies that the `nvidia-smi` parsing helper accepts the exact
-    /// newline-separated MiB output format we rely on at startup.
-    fn parses_memory_free_output_lines() {
-        let parsed = parse_nvidia_smi_memory_free_output("12288\n8192\n").unwrap();
-        assert_eq!(parsed, vec![12288, 8192]);
+    fn test_absent_catalogue_is_always_due_a_refresh() {
+        assert!(mpc_orbits_needs_refresh(None, MPC_ORBITS_MAX_AGE));
     }
 
     #[test]
-    /// Verifies that malformed `nvidia-smi` output fails fast with a parse
-    /// error instead of silently accepting bad VRAM data.
-    fn rejects_invalid_memory_free_output() {
-        let err = parse_nvidia_smi_memory_free_output("12288\nabc\n").unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("failed to parse nvidia-smi free memory value"));
+    fn test_fresh_catalogue_is_left_alone() {
+        assert!(!mpc_orbits_needs_refresh(Some(0.0), MPC_ORBITS_MAX_AGE));
+        assert!(!mpc_orbits_needs_refresh(Some(3600.0), MPC_ORBITS_MAX_AGE));
+    }
+
+    #[test]
+    fn test_catalogue_past_the_max_age_is_refreshed() {
+        let max = MPC_ORBITS_MAX_AGE.as_secs_f64();
+        assert!(!mpc_orbits_needs_refresh(
+            Some(max - 1.0),
+            MPC_ORBITS_MAX_AGE
+        ));
+        assert!(mpc_orbits_needs_refresh(Some(max), MPC_ORBITS_MAX_AGE));
+        assert!(mpc_orbits_needs_refresh(
+            Some(max * 10.0),
+            MPC_ORBITS_MAX_AGE
+        ));
+    }
+
+    // Several checks must fit in the staleness window, or one failure strands it.
+    #[test]
+    fn test_check_interval_leaves_room_for_retries() {
+        assert!(MPC_ORBITS_CHECK_INTERVAL * 3 <= MPC_ORBITS_MAX_AGE);
     }
 }

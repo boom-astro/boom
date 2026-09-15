@@ -1,0 +1,17 @@
+node_modules
+dist
+.git
+.github
+.idea
+.claude
+.env
+.env.*
+!.env.example
+.pre-commit-config.yaml
+.gitignore
+docker-compose*.yaml
+Dockerfile
+README.md
+eslint.config.js
+test.js
+test2.js
