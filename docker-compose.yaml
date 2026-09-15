@@ -554,11 +554,11 @@ services:
     command:
       - /app/kafka_consumer
       - winter
-  # Runs queued tasks -- catalog ingests today, the data migrations and
-  # reprocessing jobs currently started over SSH next. Separate from the api
-  # service on purpose: these run for hours and are memory-hungry, and an API
-  # restart or deploy must not kill one. A run interrupted by a deploy goes back
-  # on the queue and the replacement worker resumes it.
+  # Runs queued tasks: catalog ingests, data migrations and reprocessing jobs.
+  # Separate from the api service on purpose: these run for hours and are
+  # memory-hungry, and an API restart or deploy must not kill one. A run
+  # interrupted by a deploy goes back on the queue and the replacement worker
+  # resumes it.
   task-worker:
     image: ${BOOM_IMAGE:-ghcr.io/boom-astro/boom:latest}
     # Built from this checkout, never pulled: with both an `image:` and a
@@ -583,8 +583,7 @@ services:
       BOOM_CUTOUTS_STORAGE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
       BOOM_CUTOUTS_STORAGE__TYPE: mongo
       BOOM_CUTOUTS_STORAGE__HOST: mongo
-      # The migration and reprocessing tasks headed here drive their work
-      # through Valkey, as their binaries do today.
+      # The migration and reprocessing tasks drive their work through Valkey.
       BOOM_REDIS__HOST: valkey
       BOOM_CATALOG_DATA_PATH: /app/data/catalogs
     networks:
