@@ -145,8 +145,9 @@ workers:
     enrichment:
       n_workers: 3
       # Alerts per batch: the RPOP cap and the fixed ONNX input shape (CUDA pins SameAsRequested).
-      # 1000 is sized for ~12GB cards; the 10GiB startup check is only a floor — use 750 below that.
-      batch_size: 1000
+      # Lowered from main's 1000 because AppleCiDER runs a second, larger model
+      # per alert: 250 measured ~12 GB VRAM on this stack.
+      batch_size: 250
     filter:
       n_workers: 3
       refresh_interval_minutes: 15

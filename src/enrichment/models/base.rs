@@ -45,6 +45,23 @@ pub fn load_model_on_device(
     device_id: Option<i32>,
     cuda_stream: *mut std::ffi::c_void,
 ) -> Result<Session, ModelError> {
+    load_model_on_device_inner(path, device_id, cuda_stream, false)
+}
+
+pub fn load_model_on_device_with_cpu_fallback(
+    path: &str,
+    device_id: Option<i32>,
+) -> Result<Session, ModelError> {
+    load_model_on_device_inner(path, device_id, std::ptr::null_mut(), true)
+}
+
+fn load_model_on_device_inner(
+    path: &str,
+    device_id: Option<i32>,
+    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
+    cuda_stream: *mut std::ffi::c_void,
+    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))] allow_cpu_fallback: bool,
+) -> Result<Session, ModelError> {
     let mut builder = Session::builder()?;
 
     #[cfg(target_os = "linux")]
@@ -56,7 +73,7 @@ pub fn load_model_on_device(
     if let Some(dev) = device_id {
         // Linux only: CoreML needs CPU fallback for some ONNX operators.
         #[cfg(target_os = "linux")]
-        {
+        if !allow_cpu_fallback {
             builder = builder.with_disable_cpu_fallback()?;
         }
 
@@ -86,12 +103,10 @@ pub fn load_model_on_device(
             builder.with_execution_providers([ort::ep::CPUExecutionProvider::default().build()])?;
     }
 
-    let model = builder
+    Ok(builder
         .with_optimization_level(GraphOptimizationLevel::Level3)?
         .with_intra_threads(1)?
-        .commit_from_file(path)?;
-
-    Ok(model)
+        .commit_from_file(path)?)
 }
 
 /// Batch of 63x63x3 science/template/difference cutouts, one per alert.
@@ -112,6 +127,7 @@ pub trait Model {
     fn new(path: &str) -> Result<Self, ModelError>
     where
         Self: Sized;
+
     #[instrument(skip_all, err)]
     fn get_triplet(alert_cutouts: &[&AlertCutout]) -> Result<Triplets, ModelError> {
         let cutouts = alert_cutouts
@@ -140,4 +156,25 @@ pub trait Model {
         metadata_features: &Array<f32, Dim<[usize; 2]>>,
         image_features: &Array<f32, Dim<[usize; 4]>>,
     ) -> Result<Vec<f32>, ModelError>;
+}
+
+/// Raw outputs of the AppleCiDER fusion graph.
+///
+/// `alpha` is the Dirichlet concentration; `probs` is its mean, before the
+/// deployment calibration applied in `applecider_postprocess`.
+pub struct FusionOutputs {
+    pub probs: Vec<f32>,
+    pub alpha: Vec<f32>,
+    pub embedding: Vec<f32>,
+}
+
+pub trait FusionModel {
+    fn predict(
+        &mut self,
+        tempo_x: &ndarray::Array3<f32>,
+        tempo_pad_mask: &ndarray::Array2<bool>,
+        tempo_global: &ndarray::Array2<f32>,
+        metadata: &Array<f32, Dim<[usize; 2]>>,
+        image: &Array<f32, Dim<[usize; 4]>>,
+    ) -> Result<FusionOutputs, ModelError>;
 }
