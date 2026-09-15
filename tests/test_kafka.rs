@@ -1,4 +1,5 @@
 use boom::{
+    conf::KafkaSecurity,
     kafka::{
         count_messages, delete_topic, AlertConsumer, AlertProducer, StartDate, ZtfAlertConsumer,
         ZtfAlertProducer,
@@ -83,7 +84,7 @@ async fn test_produce_and_consume_from_archive() {
     assert_eq!(result.unwrap().unwrap(), expected_count as i64);
 
     // Verify that the messages were actually produced:
-    let message_count = count_messages(&producer.server_url(), &topic)
+    let message_count = count_messages(&producer.server_url(), &topic, &KafkaSecurity::default())
         .unwrap()
         .unwrap();
     assert_eq!(message_count, expected_count);
@@ -209,7 +210,7 @@ async fn test_skip_producing_when_counts_match() {
     assert!(option.is_none()); // Reported count is None, i.e., no messages were produced
 
     // Verify the topic still has the correct number of messages:
-    let message_count = count_messages(&producer.server_url(), &topic)
+    let message_count = count_messages(&producer.server_url(), &topic, &KafkaSecurity::default())
         .unwrap()
         .unwrap();
     assert_eq!(message_count, limit);
@@ -249,7 +250,7 @@ async fn test_produce_when_counts_do_not_match() {
     assert_eq!(message_count, (limit - 1) as i64);
 
     // Verify the topic now has one fewer message:
-    let message_count = count_messages(&producer.server_url(), &topic)
+    let message_count = count_messages(&producer.server_url(), &topic, &KafkaSecurity::default())
         .unwrap()
         .unwrap();
     assert_eq!(message_count, limit - 1);
@@ -278,7 +279,7 @@ async fn test_produce_when_topic_does_not_exist() {
     assert_eq!(message_count, limit as i64);
 
     // Verify the topic has the correct number of messages:
-    let message_count = count_messages(&producer.server_url(), &topic)
+    let message_count = count_messages(&producer.server_url(), &topic, &KafkaSecurity::default())
         .unwrap()
         .unwrap();
     assert_eq!(message_count, limit);
@@ -311,7 +312,7 @@ async fn test_produce_when_data_does_not_exist() {
     assert_eq!(message_count, limit as i64);
 
     // Verify the topic has the correct number of messages:
-    let message_count = count_messages(&producer.server_url(), &topic)
+    let message_count = count_messages(&producer.server_url(), &topic, &KafkaSecurity::default())
         .unwrap()
         .unwrap();
     assert_eq!(message_count, limit);
@@ -417,6 +418,8 @@ async fn test_consumer_rolls_over_and_skips_old() {
         schema_github_fallback_url: None,
         username: None,
         password: None,
+        security_protocol: Default::default(),
+        ssl_ca_location: None,
         subscription_window_days: 1,
     };
     // Run the consumer on its own OS thread + runtime so its blocking rdkafka
@@ -816,6 +819,8 @@ async fn test_consumer_started_with_no_data_still_consumes() {
         schema_github_fallback_url: None,
         username: None,
         password: None,
+        security_protocol: Default::default(),
+        ssl_ca_location: None,
         subscription_window_days: 1,
     };
 

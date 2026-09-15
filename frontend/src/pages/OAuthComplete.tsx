@@ -73,7 +73,7 @@ export default function OAuthComplete() {
       setStep("code");
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : String(err));
-      analytics.trackError("oauth_complete_email", err, { email });
+      analytics.trackError("oauth_complete_email", err);
     } finally {
       setLoading(false);
     }
@@ -91,10 +91,8 @@ export default function OAuthComplete() {
       useAppStore.getState().clearProfile();
       try {
         const profile = await ensureProfileLoaded({ force: true });
-        if (profile) {
-          analytics.identifyUser(profile.id ?? profile.username ?? profile.email, profile.email);
-        }
-        analytics.trackLoginSuccess({ email: profile?.email ?? email });
+        if (profile) analytics.identifyUser(profile.id ?? profile.username);
+        analytics.trackLoginSuccess();
       } catch (profileErr) {
         // Already signed in; a profile hiccup shouldn't strand the user here.
         console.error("OAuthComplete: could not load profile", profileErr);
@@ -103,7 +101,7 @@ export default function OAuthComplete() {
       navigate(destination, { replace: true });
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : String(err));
-      analytics.trackError("oauth_verify_email", err, { email });
+      analytics.trackError("oauth_verify_email", err);
     } finally {
       setLoading(false);
     }

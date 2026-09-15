@@ -58,6 +58,7 @@ async fn validate_watchlist(
     Ok(())
 }
 
+use crate::utils::moc::{moc_from_ascii, moc_hpx_stage};
 use actix_web::{get, patch, post, web, HttpResponse};
 use apache_avro::AvroSchema;
 use apache_avro_macros::serdavro;
@@ -865,6 +866,8 @@ async fn build_test_filter_pipeline(
     end_jd: Option<f64>,
     object_ids: Option<Vec<String>>,
     candids: Option<Vec<String>>,
+    // Region conditions, merged into the leading $match below.
+    moc_conditions: Option<mongodb::bson::Array>,
 ) -> Result<Vec<Document>, FilterError> {
     if SURVEYS_REQUIRING_PERMISSIONS.contains(&survey) && permissions.get(&survey).is_none() {
         return Err(FilterError::InvalidFilterPipeline(format!(
@@ -960,6 +963,9 @@ async fn build_test_filter_pipeline(
             doc! { "$in": permissions.get(&survey).unwrap() },
         );
     }
+    if let Some(or) = moc_conditions {
+        match_stage.insert("$or", or);
+    }
     test_pipeline[0].insert("$match", match_stage);
     Ok(test_pipeline)
 }
@@ -967,6 +973,11 @@ async fn build_test_filter_pipeline(
 #[derive(serde::Deserialize, Clone, ToSchema)]
 pub struct FilterTestRequest {
     pub pipeline: Vec<serde_json::Value>,
+    /// A MOC in IVOA ASCII form, e.g. `"5/1-3 8 11/1234"`. When present the
+    /// region is prepended to `pipeline` as a match stage, so a skymap search
+    /// runs the filter's own cuts rather than a separate set. Matched exactly,
+    /// by HEALPix range.
+    pub moc_ascii: Option<String>,
     pub permissions: HashMap<Survey, Vec<i32>>,
     pub survey: Survey,
     pub start_jd: Option<f64>,
@@ -1024,6 +1035,22 @@ pub async fn post_filter_test(
     let permissions = body.permissions;
     let pipeline = body.pipeline;
 
+    // Merged into the leading $match rather than prepended as its own stage: a
+    // $match after the $project cannot use the coordinates.hpx index.
+    let moc_conditions = match body.moc_ascii {
+        Some(moc_ascii) => match moc_from_ascii(&moc_ascii).and_then(|moc| moc_hpx_stage(&moc)) {
+            Ok(stage) => match stage
+                .get_document("$match")
+                .and_then(|m| m.get_array("$or"))
+            {
+                Ok(or) => Some(or.clone()),
+                Err(e) => return response::internal_error(&format!("malformed moc stage: {e}")),
+            },
+            Err(e) => return response::bad_request(&e),
+        },
+        None => None,
+    };
+
     let mut test_pipeline = match build_test_filter_pipeline(
         &survey,
         &permissions,
@@ -1032,6 +1059,7 @@ pub async fn post_filter_test(
         body.end_jd,
         body.object_ids,
         body.candids,
+        moc_conditions,
     )
     .await
     {
@@ -1166,6 +1194,7 @@ pub async fn post_filter_test_count(
         body.end_jd,
         body.object_ids,
         body.candids,
+        None,
     )
     .await
     {
@@ -1393,6 +1422,8 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
+                Vec::new(),
             ));
         let result = validate_watchlist(&db, &name, &Survey::Ztf, &admin, &config).await;
 

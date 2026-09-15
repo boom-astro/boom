@@ -4,7 +4,8 @@ use crate::enrichment::{fetch_alerts, EnrichmentWorker, EnrichmentWorkerError};
 use crate::utils::db::{fetch_timeseries_op, mongify};
 use crate::utils::enums::Survey;
 use crate::utils::lightcurves::{
-    analyze_photometry, prepare_photometry, PerBandProperties, PhotometryMag,
+    analyze_photometry, prepare_photometry, summarise_detections, Band, DetectionHistory,
+    EpisodeHistory, PerBandProperties, PhotometryMag, EPISODE_GAP_DAYS,
 };
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
@@ -73,6 +74,33 @@ pub fn create_decam_alert_pipeline() -> Vec<Document> {
     ]
 }
 
+/// DECAM prv_candidate for enrichment: the magnitude fields feed the light-curve
+/// stats (mirrors `PhotometryMag`, also accepting DECam's `magap`/`sigmagap`
+/// keys), the signed `snr` feeds the detection-history sign.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct DecamPhotometry {
+    #[serde(alias = "jd")]
+    pub time: f64,
+    #[serde(alias = "magpsf", alias = "magap")]
+    pub mag: f32,
+    #[serde(alias = "sigmapsf", alias = "sigmagap")]
+    pub mag_err: f32,
+    pub band: Band,
+    #[serde(default)]
+    pub snr: Option<f64>,
+}
+
+impl DecamPhotometry {
+    fn to_photometry_mag(&self) -> PhotometryMag {
+        PhotometryMag {
+            time: self.time,
+            mag: self.mag,
+            mag_err: self.mag_err,
+            band: self.band.clone(),
+        }
+    }
+}
+
 /// DECAM alert structure used to deserialize alerts
 /// from the database, used by the enrichment worker
 /// to compute features and ML scores
@@ -83,7 +111,8 @@ pub struct DecamAlertForEnrichment {
     #[serde(rename = "objectId")]
     pub object_id: String,
     pub candidate: DecamCandidate,
-    pub prv_candidates: Vec<PhotometryMag>,
+    // Signed SNR is only needed here: detection history counts detections.
+    pub prv_candidates: Vec<DecamPhotometry>,
     pub fp_hists: Vec<PhotometryMag>,
 }
 
@@ -93,6 +122,13 @@ pub struct DecamAlertForEnrichment {
 pub struct DecamAlertProperties {
     pub stationary: bool,
     pub photstats: PerBandProperties,
+    /// Per-object detection-history summary for history-aware filters.
+    /// `None` on alerts enriched before this field existed.
+    #[serde(default)]
+    pub detection_history: Option<DetectionHistory>,
+    /// Detection episodes, for finding sources that outburst more than once.
+    /// `None` on alerts enriched before this field existed.
+    pub episode_history: Option<EpisodeHistory>,
 }
 
 pub struct DecamEnrichmentWorker {
@@ -202,7 +238,11 @@ impl DecamEnrichmentWorker {
         &self,
         alert: &DecamAlertForEnrichment,
     ) -> Result<DecamAlertProperties, EnrichmentWorkerError> {
-        let prv_candidates = alert.prv_candidates.clone();
+        let prv_candidates: Vec<PhotometryMag> = alert
+            .prv_candidates
+            .iter()
+            .map(DecamPhotometry::to_photometry_mag)
+            .collect();
         let fp_hists = alert.fp_hists.clone();
 
         // lightcurve is prv_candidates + fp_hists, no need for parse_photometry here
@@ -211,9 +251,21 @@ impl DecamEnrichmentWorker {
         prepare_photometry(&mut lightcurve);
         let (photstats, _, stationary) = analyze_photometry(&lightcurve);
 
+        // Per-object detection history for history-aware filters (sign from signed snr).
+        let (detection_history, episode_history) = summarise_detections(
+            alert
+                .prv_candidates
+                .iter()
+                .map(|p| (p.time, p.snr.filter(|s| !s.is_nan()).map(|s| s < 0.0))),
+            alert.candidate.jd,
+            EPISODE_GAP_DAYS,
+        );
+
         Ok(DecamAlertProperties {
             stationary,
             photstats,
+            detection_history: Some(detection_history),
+            episode_history: Some(episode_history),
         })
     }
 }

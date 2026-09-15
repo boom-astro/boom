@@ -20,6 +20,7 @@ use crate::utils::db::{fetch_timeseries_op, get_array_dict_element};
 use crate::utils::mpcorb::{
     fill_geometry, has_geometry, normalize_ztf_ssnamenr, OrbitCache, ORBITS_COLLECTION,
 };
+use crate::utils::outburst::MAX_SEPARATION_ARCSEC;
 use crate::utils::sso_geometry::OrbitalElements;
 use crate::utils::{enums::Survey, o11y::logging::as_error};
 
@@ -422,6 +423,21 @@ pub async fn build_ztf_alerts(
 /// is present on the whole archive while the normalised one only exists on alerts
 /// enriched since it was introduced.
 ///
+/// Entries further than `MAX_SEPARATION_ARCSEC` from the predicted position are
+/// excluded. Roughly one detection in a hundred carrying a designation is a
+/// static source near the predicted track that was given that name upstream,
+/// some two magnitudes brighter than the object, which is enough to dominate
+/// anything measured over the array. The threshold sits at the edge of the
+/// upstream search radius rather than at the width of a good match; see its
+/// definition for why a tighter one would cut on ephemeris quality instead.
+///
+/// This is not the thresholding `sso.is_sso` refuses. There, a large separation is
+/// a degraded measurement of this object, and hiding it behind a boolean would
+/// conceal a drifting ephemeris the consumer needs to see -- so the number is
+/// reported instead. Here the entry is a different source that shares only a
+/// label, and putting it in this object's light curve is mislabelling rather than
+/// recording. `separation_arcsec` is still carried per entry.
+///
 /// Geometry is read from each historical alert rather than recomputed, so it is
 /// null on detections enriched before geometry existed. Recomputing would need
 /// the elements here and would close that gap immediately, but any window
@@ -440,6 +456,8 @@ fn sso_history_lookup(ztf_permissions: &Vec<i32>, window_days: f64) -> Document 
                     { "$gte": ["$candidate.jd", { "$subtract": ["$$jd", window_days] }] },
                     { "$lte": ["$candidate.jd", "$$jd"] },
                     { "$in": ["$candidate.programid", ztf_permissions] },
+                    { "$gte": ["$candidate.ssdistnr", 0.0] },
+                    { "$lt": ["$candidate.ssdistnr", MAX_SEPARATION_ARCSEC] },
                 ] } } },
                 doc! { "$project": {
                     "_id": 0,
@@ -1081,15 +1099,15 @@ mod sso_history_tests {
     }
 
     fn ceres() -> OrbitalElements {
-        OrbitalElements {
-            epoch_jd: 2_461_200.5,
-            a: 2.7655526,
-            e: 0.0796923,
-            incl: 10.58803,
-            node: 80.24863,
-            peri: 73.29420,
-            mean_anomaly: 274.41935,
-        }
+        OrbitalElements::elliptical(
+            2_461_200.5,
+            2.7655526,
+            0.0796923,
+            10.58803,
+            80.24863,
+            73.29420,
+            274.41935,
+        )
     }
 
     fn elements() -> HashMap<String, OrbitalElements> {
@@ -1124,6 +1142,7 @@ mod sso_history_tests {
         let mut entry = doc! {
             "designation": "1", "jd": 2_461_272.5,
             "helio_dist": 1.0_f64, "topo_dist": 2.0_f64, "phase_angle": 3.0_f64,
+            "true_anomaly": 4.0_f64, "perihelion_time": 2_461_000.5_f64,
         };
         assert!(!fill_entry_geometry(&mut entry, &keys(), &elements()));
         assert_eq!(entry.get_f64("helio_dist").unwrap(), 1.0);
@@ -1184,11 +1203,14 @@ mod sso_history_tests {
             {
                 "designation": "2", "jd": 2_461_272.5,
                 "helio_dist": 1.0_f64, "topo_dist": 2.0_f64, "phase_angle": 3.0_f64,
+            "true_anomaly": 4.0_f64, "perihelion_time": 2_461_000.5_f64,
             },
         ] } };
+        // The comet resolves too: it keys on its own designation.
         let keys = sso_history_keys(&[history]);
-        assert_eq!(keys.len(), 1);
+        assert_eq!(keys.len(), 2);
         assert_eq!(keys.get("1").map(String::as_str), Some("1"));
+        assert_eq!(keys.get("C/2026O1").map(String::as_str), Some("C/2026O1"));
     }
 
     // A partially written block is completed rather than treated as done.

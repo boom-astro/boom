@@ -337,7 +337,14 @@ async fn test_enrich_ztf_alert() {
     assert!(classifications.get_f64("acai_v").unwrap() > 0.99);
     assert!(classifications.get_f64("acai_o").unwrap() < 0.01);
     assert!(classifications.get_f64("acai_b").unwrap() < 0.01);
-    assert!(classifications.get_f64("btsbot").unwrap() < 0.01);
+    let btsbot = classifications.get_f64("btsbot").unwrap();
+    // Bounded as well as small: the model emits a logit, and a large negative
+    // one satisfies "< 0.01" just as well as a probability does.
+    assert!(
+        (0.0..=1.0).contains(&btsbot),
+        "btsbot {btsbot} is not a probability"
+    );
+    assert!(btsbot < 0.01);
 
     // the enrichment worker also adds "properties" to the alert
     let properties = alert.get_document("properties").unwrap();

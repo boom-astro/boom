@@ -181,7 +181,7 @@ consumer = Consumer(
     {
         "bootstrap.servers": "kafka.boom.example.com:9092",
         "security.protocol": "SASL_PLAINTEXT",
-        "sasl.mechanism": "SCRAM-SHA-512",
+        "sasl.mechanisms": "SCRAM-SHA-512",
         "sasl.username": "user@example.com",
         "sasl.password": "your-password-here",
         "group.id": "babamul-myapp",
