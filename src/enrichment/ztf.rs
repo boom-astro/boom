@@ -778,8 +778,6 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         let mut work_items: Vec<AlertWork> = Vec::with_capacity(alerts.len());
         #[cfg(feature = "gpu")]
         let mut villar_inputs: Vec<(i64, Vec<PhotometryMag>)> = Vec::new();
-        #[cfg(feature = "gpu")]
-        let villar_enabled = self.models.as_ref().is_some_and(|m| m.gpu_ctx.is_some());
         for alert in alerts {
             let candid = alert.candid;
             let cutouts = candid_to_cutouts
