@@ -56,6 +56,14 @@ jobs:
       BOOM_API__DOMAIN: ${{ vars.BOOM_API__DOMAIN }}
       BOOM_API__AUTH__SECRET_KEY: ${{ secrets.BOOM_API__AUTH__SECRET_KEY }}
       BOOM_API__AUTH__ADMIN_PASSWORD: ${{ secrets.BOOM_API__AUTH__ADMIN_PASSWORD }}
+      # Which images to run. All optional: unset, compose builds every image from
+      # this checkout. To deploy a published boom image instead, set BOOM_IMAGE
+      # to its tag and BOOM_PULL_POLICY to `always`. See docs/deployment.md.
+      BOOM_IMAGE: ${{ vars.BOOM_IMAGE }}
+      BOOM_PULL_POLICY: ${{ vars.BOOM_PULL_POLICY }}
+      BOOM_GPU_IMAGE: ${{ vars.BOOM_GPU_IMAGE }}
+      BOOM_FRONTEND_IMAGE: ${{ vars.BOOM_FRONTEND_IMAGE }}
+      BOOM_FRONTEND_PULL_POLICY: ${{ vars.BOOM_FRONTEND_PULL_POLICY }}
       # Frontend (web app) settings: WEBAPP_DOMAIN sets the host the SPA is
       # served on (compose defaults to DOMAIN); the VITE_* values are baked into
       # the static bundle at build time by frontend/Dockerfile. All optional;

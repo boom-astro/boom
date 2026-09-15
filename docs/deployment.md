@@ -506,39 +506,36 @@ both instances end up holding the same users.
 
 ## Container images
 
-Two images are published to GHCR on release:
+Release builds publish `ghcr.io/boom-astro/boom` (`.github/workflows/build.yaml`),
+multi-arch and with a build-provenance attestation. Nothing in it is specific to
+a deployment: everything comes from config and the environment at runtime.
 
-| Image | Built by | Deployment-specific? |
-| --- | --- | --- |
-| `ghcr.io/boom-astro/boom` | `.github/workflows/build.yaml` | No — everything is config and environment at runtime. |
-| `ghcr.io/boom-astro/boom-frontend` | `.github/workflows/build-frontend.yaml` | **Partly** — see below. |
+The deploy workflow **builds on the host** rather than pulling. Every compose
+service built from this repo sets `pull_policy: ${BOOM_PULL_POLICY:-build}`, so
+by default compose builds from the checkout even when an image of that name
+exists in a registry. With both an `image:` and a `build:` and no policy,
+compose pulls whenever the image is absent locally, which silently runs the
+registry's build instead of the checkout, and fails with "pull access denied"
+for an image that was never published.
 
-Both are multi-arch (amd64 + arm64) and carry a build-provenance attestation.
+To run a published image instead, set both of these, in `.env` or as GitHub
+variables for the deploy workflow:
 
-The deploy workflow **builds on the host** rather than pulling, and compose sets
-`pull_policy: build` on every service built from this repo. That is deliberate:
-with both an `image:` and a `build:`, compose otherwise pulls when the image is
-absent locally, which would silently run the registry's build instead of the
-checkout. Set `BOOM_IMAGE` to pull a specific tag or digest instead.
+- `BOOM_IMAGE` to the image, e.g. `ghcr.io/boom-astro/boom:v1.2.3`
+- `BOOM_PULL_POLICY` to `always` or `missing`
 
-### Why the frontend image is not fully generic
+Setting `BOOM_IMAGE` alone only changes the name the local build is tagged with.
 
-Vite inlines `import.meta.env.VITE_*` into the JavaScript bundle at build time,
-so these are fixed when the image is built, not when it starts:
+### The frontend is built per deployment
 
-- `VITE_PUBLIC_POSTHOG_KEY` / `VITE_PUBLIC_POSTHOG_HOST`
-- `VITE_PRERELEASE_MODE`
-- `VITE_KAFKA_DOMAIN` (from `DOMAIN`, shown on the Kafka docs page)
+No frontend image is published. `frontend/Dockerfile` bakes deployment-specific
+values in at build time: Vite inlines `VITE_PUBLIC_POSTHOG_KEY`,
+`VITE_PUBLIC_POSTHOG_HOST`, `VITE_PRERELEASE_MODE` and `VITE_KAFKA_DOMAIN` into
+the bundle, and the nginx API origin comes from the `BOOM_API__DOMAIN` build
+arg. An image built without them does not start: the entrypoint writes an empty
+origin into `proxy_pass`, which nginx rejects.
 
-The published image is therefore built with **neutral** values: analytics off,
-prerelease mode false, no Kafka domain. That is safe to pull anywhere — an image
-built with one deployment's PostHog key would send another deployment's
-analytics to the wrong project — but a deployment that wants any of those values
-must build its own, which is the default.
-
-The API origin is *not* in that list: it is injected at container start by
-`/docker-entrypoint.d/00-set-api-origin.sh`, which rewrites the nginx
-`proxy_pass` from `VITE_API_PROXY_TARGET`. Extending that same pattern to the
-values above — build with sentinels, sed them at startup — would make one image
-serve every deployment, and is the natural next step if pulling becomes
-preferable to building.
+`BOOM_FRONTEND_IMAGE` and `BOOM_FRONTEND_PULL_POLICY` are for running a frontend
+image built elsewhere *for the same deployment*. Making one image serve every
+deployment would mean building with placeholders and substituting them at
+container start, for the nginx origin and the bundle alike.

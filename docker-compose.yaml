@@ -200,7 +200,7 @@ services:
     # Built from this checkout, never pulled: with both an `image:` and a
     # `build:`, compose pulls when the image is absent locally, which would
     # silently run the registry's build instead of this working tree.
-    pull_policy: build
+    pull_policy: ${BOOM_PULL_POLICY:-build}
     hostname: api
     build:
       context: .
@@ -300,15 +300,11 @@ services:
       - traefik.http.routers.${STACK_NAME?Variable not set}-api-http.middlewares=https-redirect,${STACK_NAME?Variable not set}-www-redirect,${STACK_NAME?Variable not set}-api-ratelimit,${STACK_NAME?Variable not set}-api-compress
       - traefik.http.routers.${STACK_NAME?Variable not set}-api-https.middlewares=${STACK_NAME?Variable not set}-www-redirect,${STACK_NAME?Variable not set}-api-ratelimit,${STACK_NAME?Variable not set}-api-compress
   frontend:
-    # Published to GHCR on release (.github/workflows/build-frontend.yaml), but
-    # built here by default -- and that default is deliberate. Vite inlines
-    # `import.meta.env.VITE_*` into the bundle at build time, so the published
-    # image carries neutral values: analytics off, prerelease mode false, and no
-    # Kafka domain on the docs page. A deployment that needs any of those has to
-    # build its own, which `pull_policy: build` makes the default path.
-    #
-    # Set BOOM_FRONTEND_IMAGE to pull the published one instead, for a
-    # deployment that wants none of those values.
+    # Built from this checkout for each deployment: frontend/Dockerfile bakes the
+    # VITE_* values and the nginx API origin into the image at build time, so
+    # there is no generic frontend image to pull. BOOM_FRONTEND_IMAGE together
+    # with BOOM_FRONTEND_PULL_POLICY runs one built elsewhere for this same
+    # deployment; setting the image alone still builds.
     image: ${BOOM_FRONTEND_IMAGE:-boom-astro/boom-frontend:local}
     pull_policy: ${BOOM_FRONTEND_PULL_POLICY:-build}
     hostname: frontend
@@ -358,7 +354,7 @@ services:
     # Built from this checkout, never pulled: with both an `image:` and a
     # `build:`, compose pulls when the image is absent locally, which would
     # silently run the registry's build instead of this working tree.
-    pull_policy: build
+    pull_policy: ${BOOM_PULL_POLICY:-build}
     hostname: consumer-ztf-public
     restart: always
     build:
@@ -400,7 +396,7 @@ services:
     # Built from this checkout, never pulled: with both an `image:` and a
     # `build:`, compose pulls when the image is absent locally, which would
     # silently run the registry's build instead of this working tree.
-    pull_policy: build
+    pull_policy: ${BOOM_PULL_POLICY:-build}
     hostname: consumer-ztf-partnership
     restart: always
     build:
@@ -442,7 +438,7 @@ services:
     # Built from this checkout, never pulled: with both an `image:` and a
     # `build:`, compose pulls when the image is absent locally, which would
     # silently run the registry's build instead of this working tree.
-    pull_policy: build
+    pull_policy: ${BOOM_PULL_POLICY:-build}
     hostname: consumer-ztf-caltech
     restart: always
     build:
@@ -484,7 +480,7 @@ services:
     # Built from this checkout, never pulled: with both an `image:` and a
     # `build:`, compose pulls when the image is absent locally, which would
     # silently run the registry's build instead of this working tree.
-    pull_policy: build
+    pull_policy: ${BOOM_PULL_POLICY:-build}
     hostname: consumer-lsst
     restart: always
     build:
@@ -521,7 +517,7 @@ services:
     # Built from this checkout, never pulled: with both an `image:` and a
     # `build:`, compose pulls when the image is absent locally, which would
     # silently run the registry's build instead of this working tree.
-    pull_policy: build
+    pull_policy: ${BOOM_PULL_POLICY:-build}
     hostname: consumer-winter
     restart: always
     build:
@@ -564,7 +560,7 @@ services:
     # Built from this checkout, never pulled: with both an `image:` and a
     # `build:`, compose pulls when the image is absent locally, which would
     # silently run the registry's build instead of this working tree.
-    pull_policy: build
+    pull_policy: ${BOOM_PULL_POLICY:-build}
     hostname: task-worker
     restart: always
     build:
@@ -606,7 +602,7 @@ services:
     # Built from this checkout, never pulled: with both an `image:` and a
     # `build:`, compose pulls when the image is absent locally, which would
     # silently run the registry's build instead of this working tree.
-    pull_policy: build
+    pull_policy: ${BOOM_PULL_POLICY:-build}
     hostname: scheduler-ztf
     restart: always
     build:
@@ -645,7 +641,7 @@ services:
     # Built from this checkout, never pulled: with both an `image:` and a
     # `build:`, compose pulls when the image is absent locally, which would
     # silently run the registry's build instead of this working tree.
-    pull_policy: build
+    pull_policy: ${BOOM_PULL_POLICY:-build}
     hostname: scheduler-lsst
     restart: always
     build:
@@ -684,7 +680,7 @@ services:
     # Built from this checkout, never pulled: with both an `image:` and a
     # `build:`, compose pulls when the image is absent locally, which would
     # silently run the registry's build instead of this working tree.
-    pull_policy: build
+    pull_policy: ${BOOM_PULL_POLICY:-build}
     hostname: scheduler-winter
     restart: always
     build:
