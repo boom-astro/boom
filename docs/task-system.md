@@ -113,6 +113,10 @@ does. Parameters are validated by the API at submit time, so a bad request is a
 400 the client can act on rather than a run that fails on a worker minutes
 later.
 
+| Task | What it does |
+| --- | --- |
+| `catalog_ingest` | Download an archival catalog and insert it. See [catalogs.md](./catalogs.md). |
+
 Submission is single-flight per target, not per type: two ingests of the same
 catalog would race on the same collection and chunk state, but ingesting 2MASS
 should not block ingesting NED.
@@ -138,9 +142,18 @@ value looks like a URI, so a catalog source URL stays readable in full.
 the other services. It shares the dev MongoDB, so a run kicked off from the
 admin page is picked up within a couple of seconds.
 
-It shares the `target` volume with the api and scheduler containers, so all of
-them serialize on one cargo build lock. A source edit therefore costs several
-sequential rebuilds, and the API can be briefly unavailable while they drain.
+Two things about the dev container specifically:
+
+- It runs `uv sync --project /app/boompy --frozen` before starting, so boompy's
+  environment exists before the first ingest asks for it. The venv lives in its
+  own volume rather than being bind-mounted from the host — a host venv would
+  carry macOS wheels into a Debian image.
+- It shares the `target` volume with the api and scheduler containers, so all of
+  them serialize on one cargo build lock. A source edit therefore costs several
+  sequential rebuilds, and the API can be briefly unavailable while they drain.
+
+Catalog chunks are staged in the `catalog_data` volume, mounted at
+`/app/data/catalogs`.
 
 ## Collections
 

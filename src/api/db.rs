@@ -8,8 +8,14 @@ use mongodb::Database;
 
 /// Protected names for operational data collections, which should not be used
 /// for analytical data catalogs
-pub const PROTECTED_COLLECTION_NAMES: [&str; 4] =
-    ["filters", "babamul_users", "users", STATS_COLLECTION];
+pub const PROTECTED_COLLECTION_NAMES: [&str; 5] = [
+    "filters",
+    "babamul_users",
+    "users",
+    STATS_COLLECTION,
+    // Per-catalog ingest state; operational bookkeeping, not a catalog itself.
+    crate::catalogs::STATE_COLLECTION,
+];
 
 async fn init_api_admin_user(
     auth_config: &AuthConfig,
