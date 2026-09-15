@@ -354,7 +354,30 @@ crossmatch:
         deltachi2: 1
         spectype: 1
         zcat_nspec: 1
-    PS1_DR2: null
+    PS1_DR2:
+      radius: 2.0
+      use_distance: false
+      projection:
+        _id: 1
+        gMeanPSFMag: 1
+        gMeanPSFMagErr: 1
+        rMeanPSFMag: 1
+        rMeanPSFMagErr: 1
+        iMeanPSFMag: 1
+        iMeanPSFMagErr: 1
+        zMeanPSFMag: 1
+        zMeanPSFMagErr: 1
+        yMeanPSFMag: 1
+        yMeanPSFMagErr: 1
+        ra: 1
+        dec: 1
+        strm_class: 1
+        strm_prob_galaxy: 1
+        strm_prob_qso: 1
+        strm_prob_star: 1
+        strm_uid: 1
+        strm_z_phot: 1
+        strm_z_phot_err: 1
     LSDR10:
       radius: 30.0
       use_distance: true
@@ -402,7 +425,6 @@ crossmatch:
     watchlist_supernovas:
       radius: 2.0
       use_distance: false
-      # For watchlists, projection picks the fields surfaced under annotations.watchlist.
       projection:
         _id: 1
         classification: 1
@@ -584,7 +606,30 @@ crossmatch:
         deltachi2: 1
         spectype: 1
         zcat_nspec: 1
-    PS1_DR2: null
+    PS1_DR2:
+      radius: 2.0
+      use_distance: false
+      projection:
+        _id: 1
+        gMeanPSFMag: 1
+        gMeanPSFMagErr: 1
+        rMeanPSFMag: 1
+        rMeanPSFMagErr: 1
+        iMeanPSFMag: 1
+        iMeanPSFMagErr: 1
+        zMeanPSFMag: 1
+        zMeanPSFMagErr: 1
+        yMeanPSFMag: 1
+        yMeanPSFMagErr: 1
+        ra: 1
+        dec: 1
+        strm_class: 1
+        strm_prob_galaxy: 1
+        strm_prob_qso: 1
+        strm_prob_star: 1
+        strm_uid: 1
+        strm_z_phot: 1
+        strm_z_phot_err: 1
     LSDR10:
       radius: 30.0
       use_distance: true
@@ -621,7 +666,6 @@ crossmatch:
     watchlist_supernovas:
       radius: 2.0
       use_distance: false
-      # For watchlists, projection picks the fields surfaced under annotations.watchlist.
       projection:
         _id: 1
         classification: 1
