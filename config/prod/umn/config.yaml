@@ -60,6 +60,10 @@ api:
     admin_password: "" # Set via BOOM_API__AUTH__ADMIN_PASSWORD environment variable
     admin_email: admin@example.com
 babamul:
+  # Emails of the accounts that may run data-mutating tasks from the admin page.
+  # Reconciled onto every account at API startup, so removing someone here
+  # revokes their access on the next restart.
+  admin_emails: [] # BOOM_BABAMUL__ADMIN_EMAILS
   enabled: false # Set via BOOM_BABAMUL__ENABLED environment variable
   webapp_url: https://babamul.umn.edu # Set via BOOM_BABAMUL__WEBAPP_URL environment variable
   retention_days: 7

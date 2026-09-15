@@ -233,6 +233,8 @@ services:
       BOOM_BABAMUL__OAUTH__ORCID__CLIENT_ID: ${BOOM_BABAMUL__OAUTH__ORCID__CLIENT_ID:-}
       BOOM_BABAMUL__OAUTH__ORCID__CLIENT_SECRET: ${BOOM_BABAMUL__OAUTH__ORCID__CLIENT_SECRET:-}
       BOOM_BABAMUL__OAUTH__ORCID_SANDBOX: ${BOOM_BABAMUL__OAUTH__ORCID_SANDBOX:-false}
+      # Who may run data-mutating tasks from the admin page, comma-separated.
+      BOOM_BABAMUL__ADMIN_EMAILS: ${BOOM_BABAMUL__ADMIN_EMAILS:-}
       # Server-side PostHog analytics; blank disables analytics.
       BOOM_POSTHOG__PROJECT_API_KEY: ${BOOM_POSTHOG__PROJECT_API_KEY:-}
       BOOM_POSTHOG__HOST: ${BOOM_POSTHOG__HOST:-https://us.i.posthog.com}
@@ -544,6 +546,44 @@ services:
     command:
       - /app/kafka_consumer
       - winter
+  # Runs queued tasks: catalog ingests, data migrations and reprocessing jobs.
+  # Separate from the api service on purpose: these run for hours and are
+  # memory-hungry, and an API restart or deploy must not kill one. A run
+  # interrupted by a deploy goes back on the queue and the replacement worker
+  # resumes it.
+  task-worker:
+    image: ${BOOM_IMAGE:-ghcr.io/boom-astro/boom:latest}
+    # Built from this checkout, never pulled: with both an `image:` and a
+    # `build:`, compose pulls when the image is absent locally, which would
+    # silently run the registry's build instead of this working tree.
+    pull_policy: ${BOOM_PULL_POLICY:-build}
+    hostname: task-worker
+    restart: always
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      # Required secrets - must be set in environment
+      BOOM_DATABASE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
+      BOOM_CUTOUTS_STORAGE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
+      BOOM_API__AUTH__SECRET_KEY: ${BOOM_API__AUTH__SECRET_KEY:?BOOM_API__AUTH__SECRET_KEY must be set}
+      BOOM_API__AUTH__ADMIN_PASSWORD: ${BOOM_API__AUTH__ADMIN_PASSWORD:?BOOM_API__AUTH__ADMIN_PASSWORD must be set}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      # Optional overrides
+      BOOM_DATABASE__HOST: mongo
+      BOOM_DATABASE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
+      BOOM_CUTOUTS_STORAGE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
+      BOOM_CUTOUTS_STORAGE__TYPE: mongo
+      BOOM_CUTOUTS_STORAGE__HOST: mongo
+    networks:
+      - boom
+    profiles:
+      - prod
+    volumes:
+      - ${BOOM_CONFIG_PATH:-./config.yaml}:/app/config.yaml
+    command:
+      - /app/task_worker
+
   scheduler-ztf:
     image: ${BOOM_IMAGE:-ghcr.io/boom-astro/boom:latest}
     # Built from this checkout, never pulled: with both an `image:` and a
