@@ -1,6 +1,7 @@
 use boom::{
     conf::{load_dotenv, AppConfig},
     enrichment::models::SharedModelPool,
+    milvus::MilvusClient,
     scheduler::{record_worker_pool_state, ThreadPool},
     utils::{
         db::initialize_survey_indexes,
@@ -269,6 +270,18 @@ async fn run(
     initialize_survey_indexes(&args.survey, &db)
         .await
         .expect("could not initialize indexes");
+
+    // Create the Milvus collection once, up front, to avoid workers racing to
+    // create it themselves. Safe to call if it already exists. ZTF-only.
+    if config.milvus.enabled && args.survey == Survey::Ztf {
+        let mut milvus = MilvusClient::connect(&config.milvus)
+            .await
+            .expect("could not connect to milvus to provision the embeddings collection");
+        milvus
+            .ensure_embedding_collection()
+            .await
+            .expect("could not provision the milvus embeddings collection");
+    }
 
     warn_if_missing_crossmatches(&args.survey, &db, &config).await;
 

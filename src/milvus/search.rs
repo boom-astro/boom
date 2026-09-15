@@ -27,7 +27,7 @@ use super::proto::schema::{
 };
 
 /// One nearest-neighbor result from a similarity search.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct SearchHit {
     /// The matched object's identifier.
     pub object_id: String,
