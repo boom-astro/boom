@@ -58,6 +58,7 @@ async fn validate_watchlist(
     Ok(())
 }
 
+use crate::utils::moc::{moc_from_ascii, moc_hpx_stage};
 use actix_web::{get, patch, post, web, HttpResponse};
 use apache_avro::AvroSchema;
 use apache_avro_macros::serdavro;
@@ -857,6 +858,25 @@ pub async fn get_filter(
     }
 }
 
+/// HEALPix range conditions for a MOC, or the response explaining why it cannot
+/// be used. Merged into the leading `$match` rather than prepended as its own
+/// stage: a `$match` after the `$project` cannot use the `coordinates.hpx` index.
+fn region_conditions(
+    moc_ascii: Option<String>,
+) -> Result<Option<mongodb::bson::Array>, HttpResponse> {
+    let Some(moc_ascii) = moc_ascii else {
+        return Ok(None);
+    };
+    let stage = moc_from_ascii(&moc_ascii)
+        .and_then(|moc| moc_hpx_stage(&moc))
+        .map_err(|e| response::bad_request(&e))?;
+    stage
+        .get_document("$match")
+        .and_then(|m| m.get_array("$or"))
+        .map(|or| Some(or.clone()))
+        .map_err(|e| response::internal_error(&format!("malformed moc stage: {e}")))
+}
+
 async fn build_test_filter_pipeline(
     survey: &Survey,
     permissions: &HashMap<Survey, Vec<i32>>,
@@ -865,6 +885,8 @@ async fn build_test_filter_pipeline(
     end_jd: Option<f64>,
     object_ids: Option<Vec<String>>,
     candids: Option<Vec<String>>,
+    // Region conditions, merged into the leading $match below.
+    moc_conditions: Option<mongodb::bson::Array>,
 ) -> Result<Vec<Document>, FilterError> {
     if SURVEYS_REQUIRING_PERMISSIONS.contains(&survey) && permissions.get(&survey).is_none() {
         return Err(FilterError::InvalidFilterPipeline(format!(
@@ -960,6 +982,9 @@ async fn build_test_filter_pipeline(
             doc! { "$in": permissions.get(&survey).unwrap() },
         );
     }
+    if let Some(or) = moc_conditions {
+        match_stage.insert("$or", or);
+    }
     test_pipeline[0].insert("$match", match_stage);
     Ok(test_pipeline)
 }
@@ -967,6 +992,11 @@ async fn build_test_filter_pipeline(
 #[derive(serde::Deserialize, Clone, ToSchema)]
 pub struct FilterTestRequest {
     pub pipeline: Vec<serde_json::Value>,
+    /// A MOC in IVOA ASCII form, e.g. `"5/1-3 8 11/1234"`. When present the
+    /// region is prepended to `pipeline` as a match stage, so a skymap search
+    /// runs the filter's own cuts rather than a separate set. Matched exactly,
+    /// by HEALPix range.
+    pub moc_ascii: Option<String>,
     pub permissions: HashMap<Survey, Vec<i32>>,
     pub survey: Survey,
     pub start_jd: Option<f64>,
@@ -1024,6 +1054,11 @@ pub async fn post_filter_test(
     let permissions = body.permissions;
     let pipeline = body.pipeline;
 
+    let moc_conditions = match region_conditions(body.moc_ascii) {
+        Ok(conditions) => conditions,
+        Err(response) => return response,
+    };
+
     let mut test_pipeline = match build_test_filter_pipeline(
         &survey,
         &permissions,
@@ -1032,6 +1067,7 @@ pub async fn post_filter_test(
         body.end_jd,
         body.object_ids,
         body.candids,
+        moc_conditions,
     )
     .await
     {
@@ -1104,6 +1140,10 @@ pub async fn post_filter_test(
 #[derive(serde::Deserialize, Clone, ToSchema)]
 pub struct FilterTestCountRequest {
     pub pipeline: Vec<serde_json::Value>,
+    /// A MOC in IVOA ASCII form, e.g. `"5/1-3 8 11/1234"`. Counts alerts inside
+    /// the region, so the result can be compared against a test's `limit` to
+    /// tell a truncated result from a complete one.
+    pub moc_ascii: Option<String>,
     pub permissions: HashMap<Survey, Vec<i32>>,
     pub survey: Survey,
     pub start_jd: Option<f64>,
@@ -1158,6 +1198,11 @@ pub async fn post_filter_test_count(
     let permissions = body.permissions;
     let pipeline = body.pipeline;
 
+    let moc_conditions = match region_conditions(body.moc_ascii) {
+        Ok(conditions) => conditions,
+        Err(response) => return response,
+    };
+
     let mut test_pipeline = match build_test_filter_pipeline(
         &survey,
         &permissions,
@@ -1166,6 +1211,7 @@ pub async fn post_filter_test_count(
         body.end_jd,
         body.object_ids,
         body.candids,
+        moc_conditions,
     )
     .await
     {
@@ -1345,6 +1391,38 @@ pub async fn get_filter_schema(path: web::Path<(Survey,)>) -> HttpResponse {
 mod tests {
     use super::*;
     use crate::conf::{get_test_db, CatalogXmatchConfig};
+
+    /// A count request must carry the region, so a count can be compared against
+    /// a test's `limit` to tell a truncated result from a complete one.
+    #[test]
+    fn count_request_keeps_the_moc() {
+        let body = serde_json::json!({
+            "pipeline": [{"$match": {}}],
+            "moc_ascii": "5/1-3 8 11/1234",
+            "permissions": {"ztf": [1]},
+            "survey": "ztf",
+        });
+        let parsed: FilterTestCountRequest = serde_json::from_value(body).expect("a request");
+        assert_eq!(parsed.moc_ascii.as_deref(), Some("5/1-3 8 11/1234"));
+    }
+
+    /// Both endpoints derive their region the same way, so they cannot disagree
+    /// about what a MOC covers.
+    #[test]
+    fn region_conditions_are_hpx_ranges() {
+        let conditions = region_conditions(Some("5/1-3 8 11/1234".to_string()))
+            .expect("a valid moc")
+            .expect("some conditions");
+        assert!(!conditions.is_empty());
+        for condition in &conditions {
+            assert!(condition
+                .as_document()
+                .expect("a document")
+                .contains_key("coordinates.hpx"));
+        }
+        assert!(region_conditions(None).expect("no moc").is_none());
+        assert!(region_conditions(Some("not a moc".to_string())).is_err());
+    }
 
     fn admin() -> User {
         User {

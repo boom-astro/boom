@@ -44,7 +44,16 @@ pub struct Coordinates {
     radec_geojson: GeoJsonPoint,
     l: Option<f64>,
     b: Option<f64>,
+    /// HEALPix NESTED index at [`HPX_DEPTH`]. `None` on alerts written before
+    /// this field existed, which a range query cannot distinguish from a
+    /// position outside the region -- see `moc_hpx_stage`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hpx: Option<i64>,
 }
+
+/// Depth of the stored HEALPix index, matching healpix-alchemy's HPX_MAX_ORDER
+/// so a MOC range maps onto it by a bit shift with nothing approximated.
+pub const HPX_DEPTH: u8 = 29;
 
 impl Coordinates {
     pub fn new(ra: f64, dec: f64) -> Self {
@@ -56,7 +65,15 @@ impl Coordinates {
             },
             l: Some(l),
             b: Some(b),
+            hpx: Some(
+                cdshealpix::nested::get(HPX_DEPTH).hash(ra.to_radians(), dec.to_radians()) as i64,
+            ),
         }
+    }
+
+    /// The stored HEALPix index, absent on alerts written before it existed.
+    pub fn hpx(&self) -> Option<i64> {
+        self.hpx
     }
 
     /// Get RA and Dec from the stored GeoJSON coordinates (formatting RA back to [0, 360])
