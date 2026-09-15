@@ -9,7 +9,7 @@ use crate::tasks::{
     self,
     ledger::MutationRecord,
     models::{now, Task, TaskLogChunk, TaskStatus, Trigger},
-    queue, redact,
+    queue, redact, TaskType,
 };
 
 use actix_web::{get, post, web, HttpResponse};
@@ -22,8 +22,10 @@ const MAX_LIST_LIMIT: i64 = 500;
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct SubmitTaskBody {
-    /// Task type id, e.g. `catalog_ingest`.
-    pub task_type: String,
+    /// Which task to run. The schema carries the values this release accepts,
+    /// so an unknown one is refused here rather than after a run has been
+    /// written.
+    pub task_type: TaskType,
     /// Parameters for that task type, validated here rather than on the worker.
     pub params: serde_json::Value,
 }
@@ -31,7 +33,7 @@ pub struct SubmitTaskBody {
 #[derive(Debug, Deserialize, IntoParams)]
 pub struct ListTasksParams {
     /// Only runs of this task type.
-    pub task_type: Option<String>,
+    pub task_type: Option<TaskType>,
     pub limit: Option<i64>,
 }
 
@@ -55,20 +57,24 @@ pub struct LogsParams {
 /// for one to end up on a screen or in a screenshot.
 fn redacted(mut task: Task) -> Task {
     task.params = redact::redact_params(&task.params);
+    // The error too: a failure to connect usually quotes the whole URI back,
+    // so the password would be rendered on the admin page beside the parameter
+    // that was carefully masked. Masked by shape, since an error is free text.
+    task.error = task.error.as_deref().map(redact::redact_text);
     task
 }
 
 /// List the task types this release can run
 #[utoipa::path(
     get,
-    path = "/tasks/types",
+    path = "/task-types",
     responses(
         (status = 200, description = "Available task types", body = Vec<serde_json::Value>),
         (status = 403, description = "Not an admin")
     ),
     tags=["Tasks"]
 )]
-#[get("/tasks/types")]
+#[get("/task-types")]
 pub async fn get_task_types(_admin: AdminActor) -> HttpResponse {
     let types: Vec<serde_json::Value> = tasks::TASKS
         .iter()
@@ -111,15 +117,15 @@ pub async fn submit_task(
 
     // Validated here so a typo comes back as a 400 the client can act on,
     // rather than as a run that fails on a worker minutes later.
-    if let Err(e) = tasks::validate_params(&body.task_type, &body.params) {
+    if let Err(e) = tasks::validate_params(body.task_type.as_str(), &body.params) {
         return response::bad_request(&e.to_string());
     }
 
     // Single-flight: two ingests of the same catalog would race on the same
     // collection and the same chunk state. Returning the existing run rather
     // than a bare error lets the client jump straight to watching it.
-    if let Some(key) = tasks::single_flight_key(&body.task_type, &body.params) {
-        match queue::find_active(&db, &body.task_type, key).await {
+    if let Some(key) = tasks::single_flight_key(body.task_type.as_str(), &body.params) {
+        match queue::find_active(&db, body.task_type.as_str(), key).await {
             Ok(Some(existing)) => {
                 return HttpResponse::Conflict().json(response::ApiResponseBody::ok(
                     "an equivalent run is already queued or running",
@@ -135,7 +141,9 @@ pub async fn submit_task(
 
     let task = Task {
         id: uuid::Uuid::new_v4().to_string(),
-        task_type: body.task_type,
+        // Stored as a string: a run outlives the release that defined its
+        // type, and the record still has to say what it was.
+        task_type: body.task_type.as_str().to_string(),
         params: body.params,
         status: TaskStatus::Queued,
         actor: admin.as_task_actor(),
@@ -186,7 +194,7 @@ pub async fn get_tasks(
         .limit
         .unwrap_or(DEFAULT_LIST_LIMIT)
         .clamp(1, MAX_LIST_LIMIT);
-    match queue::list(&db, params.task_type.as_deref(), limit).await {
+    match queue::list(&db, params.task_type.map(|t| t.as_str()), limit).await {
         Ok(runs) => response::ok_ser(
             "success",
             runs.into_iter().map(redacted).collect::<Vec<_>>(),
@@ -318,5 +326,152 @@ pub async fn get_data_mutations(
     match tasks::ledger::history(&db, params.collection.as_deref(), limit).await {
         Ok(entries) => response::ok_ser("success", entries),
         Err(e) => response::internal_error(&format!("failed to read the ledger: {e}")),
+    }
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct AcceptSetBody {
+    /// Why this set is acceptable despite not being current. Required: "this is
+    /// fine" is only useful to the next person if it says on what grounds.
+    pub reason: String,
+}
+
+/// Report which enrichment each survey's alerts were produced by
+///
+/// The enrichment analogue of `/catalogs/status`: it reports drift and never
+/// acts on it. Re-enriching an archive is days of work, so starting one stays an
+/// explicit, attributed decision.
+#[utoipa::path(
+    get,
+    path = "/enrichment/status",
+    responses(
+        (status = 200, description = "Drift per survey", body = Vec<serde_json::Value>),
+        (status = 403, description = "Not an admin")
+    ),
+    tags=["Tasks"]
+)]
+#[get("/enrichment/status")]
+pub async fn get_enrichment_status(
+    db: web::Data<mongodb::Database>,
+    _admin: AdminActor,
+) -> HttpResponse {
+    // Only ZTF has enrichment models declared today; LSST joins the list when
+    // it does, rather than reporting an empty status that reads as "no drift".
+    match crate::enrichment::version::drift_status(&db, "ztf").await {
+        Ok(status) => response::ok_ser("success", vec![status]),
+        Err(e) => response::internal_error(&format!("failed to read enrichment status: {e}")),
+    }
+}
+
+/// Accept a non-current enrichment set, so it stops being reported as drift
+///
+/// For when the difference does not matter for the alerts already scored — a
+/// derivation version bumped for a change that cannot affect them, say. It
+/// records the decision **against the set**; no alert is rewritten, so every
+/// alert keeps saying exactly which enrichment produced it.
+#[utoipa::path(
+    post,
+    path = "/enrichment/sets/{set_id}/accept",
+    params(("set_id" = i64, Path, description = "The set to accept")),
+    request_body = AcceptSetBody,
+    responses(
+        (status = 200, description = "Accepted"),
+        (status = 400, description = "No reason given"),
+        (status = 403, description = "Not an admin")
+    ),
+    tags=["Tasks"]
+)]
+#[post("/enrichment/sets/{set_id}/accept")]
+pub async fn accept_enrichment_set(
+    db: web::Data<mongodb::Database>,
+    set_id: web::Path<i64>,
+    body: web::Json<AcceptSetBody>,
+    admin: AdminActor,
+) -> HttpResponse {
+    let reason = body.reason.trim();
+    if reason.is_empty() {
+        return response::bad_request("a reason is required to accept a set");
+    }
+
+    // The set the running workers published, read rather than resolved -- the
+    // same reasoning as `drift_status`: resolving here would hash model files
+    // the API does not carry, and intern a set as a side effect of a click.
+    let current_id = match crate::enrichment::version::current_set_id(&db, "ztf").await {
+        Ok(Some(id)) => id,
+        Ok(None) => {
+            return response::bad_request(
+                "no enrichment worker has published a current set yet, so there is nothing \
+                 to accept this set against",
+            )
+        }
+        Err(e) => return response::internal_error(&format!("failed to read the current set: {e}")),
+    };
+
+    let actor = admin.as_task_actor();
+    if let Err(e) =
+        crate::enrichment::version::accept_set(&db, *set_id, current_id, &actor.user_id, reason)
+            .await
+    {
+        return response::internal_error(&format!("failed to accept the set: {e}"));
+    }
+
+    // The ledger is where "what has been done to this data, and by whom" lives,
+    // and deciding not to reprocess is such a decision.
+    let entry = tasks::ledger::MutationRecord {
+        id: uuid::Uuid::new_v4().to_string(),
+        source_kind: tasks::ledger::SourceKind::Task,
+        source_id: format!("enrichment-accept-{}", *set_id),
+        task_type: None,
+        actor,
+        trigger: Trigger::Api,
+        target: tasks::ledger::MutationTarget {
+            database: db.name().to_string(),
+            collection: "ZTF_alerts".to_string(),
+            catalog: None,
+            survey: Some("ztf".to_string()),
+        },
+        // No document changed; what changed is whether these alerts are
+        // considered to need reprocessing.
+        operation: tasks::ledger::Operation::Index,
+        details: mongodb::bson::doc! {
+            "accepted_set": *set_id,
+            "against_current_set": current_id,
+            "reason": reason,
+        },
+        recorded_at: now(),
+    };
+    if let Err(e) = tasks::ledger::record(&db, entry).await {
+        tracing::warn!("failed to record the acceptance in the ledger: {}", e);
+    }
+
+    tracing::info!(
+        set_id = *set_id,
+        "enrichment set accepted by {}: {}",
+        admin.username,
+        reason
+    );
+    response::ok_no_data("set accepted")
+}
+
+/// Withdraw an acceptance, so the set is reported as drift again
+#[utoipa::path(
+    post,
+    path = "/enrichment/sets/{set_id}/unaccept",
+    params(("set_id" = i64, Path, description = "The set to stop accepting")),
+    responses(
+        (status = 200, description = "Acceptance withdrawn"),
+        (status = 403, description = "Not an admin")
+    ),
+    tags=["Tasks"]
+)]
+#[post("/enrichment/sets/{set_id}/unaccept")]
+pub async fn unaccept_enrichment_set(
+    db: web::Data<mongodb::Database>,
+    set_id: web::Path<i64>,
+    _admin: AdminActor,
+) -> HttpResponse {
+    match crate::enrichment::version::unaccept_set(&db, *set_id).await {
+        Ok(()) => response::ok_no_data("acceptance withdrawn"),
+        Err(e) => response::internal_error(&format!("failed to withdraw: {e}")),
     }
 }
