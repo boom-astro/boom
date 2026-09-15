@@ -97,7 +97,7 @@ posthog:
   # consumption to users. Also drives the Grafana consumption metrics.
   consumption_interval_seconds: 300
 gpu:
-  enabled: true # Set to true to load ONNX models on GPU (CUDA) instead of CPU.
+  enabled: true
   # Models are loaded once at startup and shared across all enrichment workers.
   # When false, models are loaded on CPU. Overridden by BOOM_GPU__ENABLED.
   device_ids: [0] # CUDA device(s) to use. E.g. [0,1,2,3,4,5,6,7] for 8 GPUs.
@@ -190,8 +190,8 @@ workers:
       reference_night: "2026-07-15"
 crossmatch:
   ztf:
-    - catalog: Gaia_DR3
-      radius: 2.0
+    Gaia_DR3:
+      radius: 2.0 # 2 arcseconds
       use_distance: false
       projection:
         _id: 1
@@ -212,8 +212,8 @@ crossmatch:
         phot_rp_n_obs: 1
         ruwe: 1
         phot_bp_rp_excess_factor: 1
-    - catalog: milliquas_v8
-      radius: 2.0
+    milliquas_v8:
+      radius: 2.0 # 2 arcseconds
       use_distance: false
       projection:
         _id: 1
@@ -222,8 +222,8 @@ crossmatch:
         Qpct: 1
         ra: 1
         dec: 1
-    - catalog: NED
-      radius: 300.0
+    NED:
+      radius: 300.0 # 300 arcseconds
       use_distance: true
       distance_key: "z"
       distance_max: 30.0
@@ -245,7 +245,7 @@ crossmatch:
         tMASSphot: 1
         Mstar: 1
         Mstar_unc: 1
-    - catalog: 2MASS_PSC
+    2MASS_PSC:
       radius: 2.0
       use_distance: false
       projection:
@@ -262,7 +262,7 @@ crossmatch:
         k_msigcom: 1
         k_snr: 1
         ndet: 1
-    - catalog: GALEX
+    GALEX:
       radius: 2.0
       use_distance: false
       projection:
@@ -277,7 +277,7 @@ crossmatch:
         nuv_exp: 1
         obstype: 1
         band: 1
-    - catalog: VSX
+    VSX:
       radius: 2.0
       use_distance: false
       projection:
@@ -295,7 +295,7 @@ crossmatch:
         epoch: 1
         period: 1
         spectral_type: 1
-    - catalog: CatWISE2020
+    CatWISE2020:
       radius: 2.0
       use_distance: false
       projection:
@@ -316,7 +316,7 @@ crossmatch:
         sigpmra: 1
         sigpmdec: 1
         unwise_objid: 1
-    - catalog: TNS
+    TNS:
       radius: 2.0
       use_distance: false
       projection:
@@ -331,7 +331,7 @@ crossmatch:
         discovery_jd: 1
         internal_names: 1
       max_results: 3
-    - catalog: DESI_DR1
+    DESI_DR1:
       radius: 30.0 # 30 arcseconds
       use_distance: true
       distance_key: "z"
@@ -354,7 +354,7 @@ crossmatch:
         deltachi2: 1
         spectype: 1
         zcat_nspec: 1
-    - catalog: PS1_DR2
+    PS1_DR2:
       radius: 2.0
       use_distance: false
       projection:
@@ -378,7 +378,7 @@ crossmatch:
         strm_uid: 1
         strm_z_phot: 1
         strm_z_phot_err: 1
-    - catalog: LSDR10
+    LSDR10:
       radius: 30.0
       use_distance: true
       distance_key: "z_phot_mean"
@@ -412,8 +412,8 @@ crossmatch:
         flux_ivar_r: 1
         fracflux_r: 1
   lsst:
-    - catalog: LSPSC
-      radius: 30.0
+    LSPSC:
+      radius: 30.0 # 30 arcseconds
       use_distance: false
       projection:
         _id: 1
@@ -421,8 +421,8 @@ crossmatch:
         dec: 1
         score: 1
         mag_white: 1
-      max_results: 3
-    - catalog: Gaia_DR3
+      max_results: 3 # 3 nearest neighbors
+    Gaia_DR3:
       radius: 2.0
       use_distance: false
       projection:
@@ -444,7 +444,7 @@ crossmatch:
         phot_rp_n_obs: 1
         ruwe: 1
         phot_bp_rp_excess_factor: 1
-    - catalog: milliquas_v8
+    milliquas_v8:
       radius: 2.0
       use_distance: false
       projection:
@@ -454,8 +454,8 @@ crossmatch:
         Qpct: 1
         ra: 1
         dec: 1
-    - catalog: NED
-      radius: 300.0
+    NED:
+      radius: 300.0 # 300 arcseconds
       use_distance: true
       distance_key: "z"
       distance_max: 30.0
@@ -477,7 +477,7 @@ crossmatch:
         tMASSphot: 1
         Mstar: 1
         Mstar_unc: 1
-    - catalog: 2MASS_PSC
+    2MASS_PSC:
       radius: 2.0
       use_distance: false
       projection:
@@ -494,7 +494,7 @@ crossmatch:
         k_msigcom: 1
         k_snr: 1
         ndet: 1
-    - catalog: GALEX
+    GALEX:
       radius: 2.0
       use_distance: false
       projection:
@@ -509,7 +509,7 @@ crossmatch:
         nuv_exp: 1
         obstype: 1
         band: 1
-    - catalog: VSX
+    VSX:
       radius: 2.0
       use_distance: false
       projection:
@@ -527,7 +527,7 @@ crossmatch:
         epoch: 1
         period: 1
         spectral_type: 1
-    - catalog: CatWISE2020
+    CatWISE2020:
       radius: 2.0
       use_distance: false
       projection:
@@ -548,7 +548,7 @@ crossmatch:
         sigpmra: 1
         sigpmdec: 1
         unwise_objid: 1
-    - catalog: TNS
+    TNS:
       radius: 2.0
       use_distance: false
       projection:
@@ -563,7 +563,7 @@ crossmatch:
         discovery_jd: 1
         internal_names: 1
       max_results: 3
-    - catalog: DESI_DR1
+    DESI_DR1:
       radius: 30.0 # 30 arcseconds
       use_distance: true
       distance_key: "z"
@@ -586,7 +586,7 @@ crossmatch:
         deltachi2: 1
         spectype: 1
         zcat_nspec: 1
-    - catalog: PS1_DR2
+    PS1_DR2:
       radius: 2.0
       use_distance: false
       projection:
@@ -610,7 +610,7 @@ crossmatch:
         strm_uid: 1
         strm_z_phot: 1
         strm_z_phot_err: 1
-    - catalog: LSDR10
+    LSDR10:
       radius: 30.0
       use_distance: true
       distance_key: "z_phot_mean"
@@ -643,9 +643,9 @@ crossmatch:
         sersic: 1
         flux_ivar_r: 1
         fracflux_r: 1
-  decam: []
+  decam: {}
   winter:
-    - catalog: Gaia_DR3
+    Gaia_DR3:
       radius: 2.0 # 2 arcseconds
       use_distance: false
       projection:
@@ -667,7 +667,7 @@ crossmatch:
         phot_rp_n_obs: 1
         ruwe: 1
         phot_bp_rp_excess_factor: 1
-    - catalog: milliquas_v8
+    milliquas_v8:
       radius: 2.0 # 2 arcseconds
       use_distance: false
       projection:
@@ -677,7 +677,7 @@ crossmatch:
         Qpct: 1
         ra: 1
         dec: 1
-    - catalog: NED
+    NED:
       radius: 300.0 # 300 arcseconds
       use_distance: true
       distance_key: "z"
@@ -700,7 +700,7 @@ crossmatch:
         tMASSphot: 1
         Mstar: 1
         Mstar_unc: 1
-    - catalog: DESI_DR1
+    DESI_DR1:
       radius: 30.0 # 30 arcseconds
       use_distance: true
       distance_key: "z"
@@ -723,7 +723,7 @@ crossmatch:
         deltachi2: 1
         spectype: 1
         zcat_nspec: 1
-    - catalog: PS1_DR2
+    PS1_DR2:
       radius: 2.0
       use_distance: false
       projection:
@@ -747,7 +747,7 @@ crossmatch:
         strm_uid: 1
         strm_z_phot: 1
         strm_z_phot_err: 1
-    - catalog: LSDR10
+    LSDR10:
       radius: 30.0
       use_distance: true
       distance_key: "z_phot_mean"
