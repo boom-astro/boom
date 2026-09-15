@@ -18,6 +18,8 @@ export type Profile = {
   /** Provider slugs the account can sign in with, e.g. ["google", "orcid"] */
   identity_providers?: string[];
   orcid_id?: string | null;
+  /** Whether this account may reach the admin page. Server-enforced on every
+   * admin route regardless; this only decides what the UI offers. */
   is_admin?: boolean;
   acls?: string[];
 } | null;
@@ -32,7 +34,7 @@ export type TokenResponse = { id: string; name: string; access_token: string; cr
 export const TOKEN_KEY = "api_token";
 export const USERNAME_KEY = "api_user";
 
-async function parseResponseJson(res: Response): Promise<unknown> {
+export async function parseResponseJson(res: Response): Promise<unknown> {
   const text = await res.text();
   // Quote 16+ digit integers: `JSON.parse` would round them and lose candid precision.
   const safeText = text.replace(/:\s*(-?\d{16,})(?![\d]*["])/g, (_, numStr) => `:"${numStr}"`);
@@ -41,7 +43,7 @@ async function parseResponseJson(res: Response): Promise<unknown> {
 
 type DataEnvelope<T> = { data?: T };
 
-function unwrapData<T>(body: unknown, fallback: T): T {
+export function unwrapData<T>(body: unknown, fallback: T): T {
   if (body && typeof body === "object" && "data" in body) {
     const dataVal = (body as DataEnvelope<unknown>).data;
     if (dataVal !== undefined) return dataVal as T;
@@ -189,7 +191,9 @@ export async function resetPassword(email: string, token: string, new_password: 
 
 const authorization = (token: TokenRecord) => `${token.token_type} ${token.access_token}`;
 
-async function fetchWithAuth(input: RequestInfo, init: RequestInit = {}) {
+// Exported for the admin client, which shares this request path rather than
+// carrying a second copy of the auth handling.
+export async function fetchWithAuth(input: RequestInfo, init: RequestInit = {}) {
   const token = getTokenRecord();
   if (!token) throw new Error("Not authenticated");
   const headers = new Headers(init.headers || {});
