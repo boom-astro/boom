@@ -72,19 +72,6 @@ RUN --mount=type=cache,target=/app/target,sharing=locked \
        target/release/kafka_producer \
        target/release/api \
        target/release/task_worker \
-       target/release/migrate_fp_flux \
-       target/release/migrate_snr \
-       target/release/reprocess_crossmatch \
-       target/release/prepare_catalog \
-       target/release/repair_photometry_ordering \
-       target/release/copy_cutouts \
-       target/release/stream_kowalski_alerts \
-       target/release/enrich_reprocess \
-       target/release/mpcorb_ingest \
-       target/release/backfill_detection_span \
-       target/release/backfill_hpx \
-       target/release/backfill_host_galaxy \
-       target/release/find_tracklets \
        /app/bin/
 
 FROM builder AS dev
@@ -121,15 +108,6 @@ COPY --from=builder /app/bin/kafka_consumer /app/kafka_consumer
 COPY --from=builder /app/bin/kafka_producer /app/kafka_producer
 COPY --from=builder /app/bin/api /app/boom-api
 COPY --from=builder /app/bin/task_worker /app/task_worker
-COPY --from=builder /app/bin/migrate_fp_flux /app/migrate_fp_flux
-COPY --from=builder /app/bin/migrate_snr /app/migrate_snr
-COPY --from=builder /app/bin/reprocess_crossmatch /app/reprocess_crossmatch
-COPY --from=builder /app/bin/prepare_catalog /app/prepare_catalog
-COPY --from=builder /app/bin/repair_photometry_ordering /app/repair_photometry_ordering
-COPY --from=builder /app/bin/mpcorb_ingest /app/mpcorb_ingest
-COPY --from=builder /app/bin/backfill_detection_span /app/backfill_detection_span
-COPY --from=builder /app/bin/backfill_hpx /app/backfill_hpx
-COPY --from=builder /app/bin/backfill_host_galaxy /app/backfill_host_galaxy
 COPY --from=builder /opt/ort /opt/ort
 
 # Resolved at build time from the committed lockfile, so a catalog ingest does
@@ -140,8 +118,5 @@ ENV UV_PROJECT_ENVIRONMENT=/app/boompy/.venv
 ENV BOOM_BOOMPY_PATH=/app/boompy
 RUN uv sync --project /app/boompy --frozen --no-dev
 # Temporary
-COPY --from=builder /app/bin/copy_cutouts /app/copy_cutouts
-COPY --from=builder /app/bin/stream_kowalski_alerts /app/stream_kowalski_alerts
-COPY --from=builder /app/bin/enrich_reprocess /app/enrich_reprocess
 
 CMD ["/app/scheduler"]
