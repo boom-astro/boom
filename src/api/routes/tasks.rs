@@ -424,20 +424,23 @@ pub async fn accept_enrichment_set(
         return response::bad_request("a reason is required to accept a set");
     }
 
-    let current = match crate::enrichment::version::resolve_current_set(
-        &db,
-        "ztf",
-        crate::enrichment::version::ZTF_MODELS,
-    )
-    .await
-    {
-        Ok(set) => set,
-        Err(e) => return response::internal_error(&format!("failed to resolve the set: {e}")),
+    // The set the running workers published, read rather than resolved -- the
+    // same reasoning as `drift_status`: resolving here would hash model files
+    // the API does not carry, and intern a set as a side effect of a click.
+    let current_id = match crate::enrichment::version::current_set_id(&db, "ztf").await {
+        Ok(Some(id)) => id,
+        Ok(None) => {
+            return response::bad_request(
+                "no enrichment worker has published a current set yet, so there is nothing \
+                 to accept this set against",
+            )
+        }
+        Err(e) => return response::internal_error(&format!("failed to read the current set: {e}")),
     };
 
     let actor = admin.as_task_actor();
     if let Err(e) =
-        crate::enrichment::version::accept_set(&db, *set_id, current.id, &actor.user_id, reason)
+        crate::enrichment::version::accept_set(&db, *set_id, current_id, &actor.user_id, reason)
             .await
     {
         return response::internal_error(&format!("failed to accept the set: {e}"));
@@ -463,7 +466,7 @@ pub async fn accept_enrichment_set(
         operation: tasks::ledger::Operation::Index,
         details: mongodb::bson::doc! {
             "accepted_set": *set_id,
-            "against_current_set": current.id,
+            "against_current_set": current_id,
             "reason": reason,
         },
         recorded_at: now(),
