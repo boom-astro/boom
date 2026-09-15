@@ -1266,14 +1266,6 @@ pub struct AppConfig {
     #[serde(default)]
     pub posthog: PostHogConfig,
     pub kafka: KafkaConfig,
-    /// Archival catalogs this deployment should hold, as kebab-case slugs.
-    ///
-    /// Desired state, not actual: nothing converges automatically. See
-    /// `docs/catalogs.md`.
-    ///
-    /// Settable as `BOOM_CATALOGS`, comma-separated.
-    #[serde(default, deserialize_with = "comma_separated")]
-    pub catalogs: Vec<String>,
     #[serde(default, deserialize_with = "deserialize_crossmatch")]
     pub crossmatch: HashMap<Survey, Vec<CatalogXmatchConfig>>,
     #[serde(default)]
@@ -1298,23 +1290,7 @@ impl AppConfig {
 
     #[instrument(err)]
     pub fn from_test_config() -> Result<Self, BoomConfigError> {
-        let mut current_dir = std::env::current_dir().expect("Failed to get current directory");
-        let test_config_path = loop {
-            let tests_dir = current_dir.join("tests");
-            let test_config = tests_dir.join("config.test.yaml");
-
-            if test_config.exists() {
-                break test_config;
-            }
-
-            if let Some(parent) = current_dir.parent() {
-                current_dir = parent.to_path_buf();
-            } else {
-                panic!("Could not find workspace root with tests/config.test.yaml");
-            }
-        };
-
-        load_config(Some(test_config_path.to_str().expect("Invalid path")))
+        load_config(Some(&test_config_path()))
     }
 
     /// Validate that all required secrets are present
@@ -1420,6 +1396,26 @@ pub fn load_config(config_path: Option<&str>) -> Result<AppConfig, BoomConfigErr
     );
 
     Ok(app_config)
+}
+
+/// Path to `tests/config.test.yaml`, found by walking up from the working
+/// directory.
+///
+/// Public because some components load config from a *path* rather than an
+/// `AppConfig` -- the enrichment workers build themselves that way -- so a test
+/// that constructs one needs the path, not just the parsed config.
+pub fn test_config_path() -> String {
+    let mut current_dir = std::env::current_dir().expect("Failed to get current directory");
+    loop {
+        let test_config = current_dir.join("tests").join("config.test.yaml");
+        if test_config.exists() {
+            return test_config.to_str().expect("Invalid path").to_string();
+        }
+        match current_dir.parent() {
+            Some(parent) => current_dir = parent.to_path_buf(),
+            None => panic!("Could not find workspace root with tests/config.test.yaml"),
+        }
+    }
 }
 
 pub async fn get_test_db() -> Database {
@@ -1572,20 +1568,6 @@ mod tests {
         assert_eq!(
             conf.get::<AdminEmails>("babamul").unwrap().admin_emails,
             Vec::<String>::new()
-        );
-    }
-
-    #[test]
-    fn the_catalog_inventory_can_be_set_as_a_comma_separated_env_var() {
-        let conf = config_with_env(&[("BOOM_CATALOGS", "2mass,ned-lvs")]);
-        #[derive(Deserialize)]
-        struct Root {
-            #[serde(default, deserialize_with = "comma_separated")]
-            catalogs: Vec<String>,
-        }
-        assert_eq!(
-            conf.try_deserialize::<Root>().unwrap().catalogs,
-            vec!["2mass", "ned-lvs"]
         );
     }
 
