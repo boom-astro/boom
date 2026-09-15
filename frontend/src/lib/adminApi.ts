@@ -63,6 +63,24 @@ export type TaskType = {
   };
 };
 
+/** One enrichment set alerts are sitting at that is neither current nor accepted. */
+export type StaleSet = {
+  id: number;
+  /** Which models or derivations differ from the current set. */
+  changed: string[];
+};
+
+export type EnrichmentDrift = {
+  survey: string;
+  /** null when no enrichment worker has published a set yet, so there is
+   *  nothing to compare alerts against. */
+  current_set: number | null;
+  stale_sets: StaleSet[];
+  accepted_sets: number[];
+  /** Alerts enriched before stamping existed. */
+  has_unstamped: boolean;
+};
+
 export type TaskStatus = "queued" | "running" | "succeeded" | "failed" | "canceled";
 
 export type Task = {
@@ -106,7 +124,7 @@ async function request<T>(path: string, init: RequestInit | undefined, fallback:
 }
 
 export function fetchTaskTypes(): Promise<TaskType[]> {
-  return request<TaskType[]>("/tasks/types", undefined, []);
+  return request<TaskType[]>("/task-types", undefined, []);
 }
 
 /** Submit any task type. */
@@ -123,6 +141,49 @@ export function submitTask(
     },
     {} as Task,
   );
+}
+
+export function fetchEnrichmentStatus(): Promise<EnrichmentDrift[]> {
+  return request<EnrichmentDrift[]>("/enrichment/status", undefined, []);
+}
+
+/**
+ * Record that a non-current set need not be reprocessed.
+ *
+ * Writes the decision against the set, not onto any alert — every alert keeps
+ * saying which enrichment actually produced it.
+ */
+export function acceptEnrichmentSet(setId: number, reason: string): Promise<unknown> {
+  return request<unknown>(
+    `/enrichment/sets/${setId}/accept`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reason }),
+    },
+    null,
+  );
+}
+
+export function unacceptEnrichmentSet(setId: number): Promise<unknown> {
+  return request<unknown>(`/enrichment/sets/${setId}/unaccept`, { method: "POST" }, null);
+}
+
+/** One catalog export sitting on the task worker's disk, written by
+ *  `export_catalog` and waiting to be published somewhere durable. */
+export type CatalogExport = {
+  collection: string;
+  files: { name: string; bytes: number }[];
+  manifest: {
+    rows?: number;
+    fields?: string[];
+    source_database?: string;
+    code_version?: { package_version: string; git_sha?: string };
+  } | null;
+};
+
+export function fetchCatalogExports(): Promise<CatalogExport[]> {
+  return request<CatalogExport[]>("/catalogs/exports", undefined, []);
 }
 
 export function fetchCatalogStatus(): Promise<CatalogStatus[]> {

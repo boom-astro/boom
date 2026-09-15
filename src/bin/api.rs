@@ -96,7 +96,7 @@ async fn main() -> std::io::Result<()> {
             boom::api::admin::reconcile_babamul_admins(&database, &config.babamul.admin_emails)
                 .await
         {
-            panic!("failed to reconcile babamul admins: {error}");
+            panic!("failed to seed babamul admins: {error}");
         }
         if let Err(error) = routes::babamul::oauth::ensure_oauth_state_index(&database).await {
             log_error!(WARN, error, "failed to create the OAuth TTL indexes");
@@ -234,9 +234,9 @@ async fn main() -> std::io::Result<()> {
                 .service(routes::tasks::get_task_logs)
                 .service(routes::tasks::cancel_task)
                 .service(routes::tasks::get_data_mutations)
-                // Registered after the more specific /tasks/... paths: actix
-                // matches in registration order, so a leading {task_id} route
-                // would swallow /tasks/types.
+                .service(routes::tasks::get_enrichment_status)
+                .service(routes::tasks::accept_enrichment_set)
+                .service(routes::tasks::unaccept_enrichment_set)
                 .service(routes::tasks::get_task)
                 .service(routes::queries::post_find_query)
                 .service(routes::queries::post_cone_search_query)
