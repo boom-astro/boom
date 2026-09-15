@@ -192,7 +192,11 @@ services:
       - --kafka.server=broker:29092
     restart: always
   api:
-    image: boom-astro/boom:latest
+    image: ${BOOM_IMAGE:-ghcr.io/boom-astro/boom:latest}
+    # Built from this checkout, never pulled: with both an `image:` and a
+    # `build:`, compose pulls when the image is absent locally, which would
+    # silently run the registry's build instead of this working tree.
+    pull_policy: ${BOOM_PULL_POLICY:-build}
     hostname: api
     build:
       context: .
@@ -290,7 +294,13 @@ services:
       - traefik.http.routers.${STACK_NAME?Variable not set}-api-http.middlewares=https-redirect,${STACK_NAME?Variable not set}-www-redirect,${STACK_NAME?Variable not set}-api-ratelimit,${STACK_NAME?Variable not set}-api-compress
       - traefik.http.routers.${STACK_NAME?Variable not set}-api-https.middlewares=${STACK_NAME?Variable not set}-www-redirect,${STACK_NAME?Variable not set}-api-ratelimit,${STACK_NAME?Variable not set}-api-compress
   frontend:
-    image: boom-astro/boom-frontend:latest
+    # Built from this checkout for each deployment: frontend/Dockerfile bakes the
+    # VITE_* values and the nginx API origin into the image at build time, so
+    # there is no generic frontend image to pull. BOOM_FRONTEND_IMAGE together
+    # with BOOM_FRONTEND_PULL_POLICY runs one built elsewhere for this same
+    # deployment; setting the image alone still builds.
+    image: ${BOOM_FRONTEND_IMAGE:-boom-astro/boom-frontend:local}
+    pull_policy: ${BOOM_FRONTEND_PULL_POLICY:-build}
     hostname: frontend
     build:
       # Root context so the build can bundle docs/babamul.md (see frontend/Dockerfile).
@@ -334,7 +344,11 @@ services:
     # Note: separate consumers for each ZTF program ID to allow independent scaling and isolation of processing
     # (there appears to be an issue when one consumer reads from multiple topics, i.e. one group id with multiple topics)
     # TODO: investigate further and consider merging into single consumer with multiple topics if the issue is resolved
-    image: boom-astro/boom:latest
+    image: ${BOOM_IMAGE:-ghcr.io/boom-astro/boom:latest}
+    # Built from this checkout, never pulled: with both an `image:` and a
+    # `build:`, compose pulls when the image is absent locally, which would
+    # silently run the registry's build instead of this working tree.
+    pull_policy: ${BOOM_PULL_POLICY:-build}
     hostname: consumer-ztf-public
     restart: always
     build:
@@ -372,7 +386,11 @@ services:
       - --programids
       - public
   consumer-ztf-partnership:
-    image: boom-astro/boom:latest
+    image: ${BOOM_IMAGE:-ghcr.io/boom-astro/boom:latest}
+    # Built from this checkout, never pulled: with both an `image:` and a
+    # `build:`, compose pulls when the image is absent locally, which would
+    # silently run the registry's build instead of this working tree.
+    pull_policy: ${BOOM_PULL_POLICY:-build}
     hostname: consumer-ztf-partnership
     restart: always
     build:
@@ -410,7 +428,11 @@ services:
       - --programids
       - partnership
   consumer-ztf-caltech:
-    image: boom-astro/boom:latest
+    image: ${BOOM_IMAGE:-ghcr.io/boom-astro/boom:latest}
+    # Built from this checkout, never pulled: with both an `image:` and a
+    # `build:`, compose pulls when the image is absent locally, which would
+    # silently run the registry's build instead of this working tree.
+    pull_policy: ${BOOM_PULL_POLICY:-build}
     hostname: consumer-ztf-caltech
     restart: always
     build:
@@ -448,7 +470,11 @@ services:
       - --programids
       - caltech
   consumer-lsst:
-    image: boom-astro/boom:latest
+    image: ${BOOM_IMAGE:-ghcr.io/boom-astro/boom:latest}
+    # Built from this checkout, never pulled: with both an `image:` and a
+    # `build:`, compose pulls when the image is absent locally, which would
+    # silently run the registry's build instead of this working tree.
+    pull_policy: ${BOOM_PULL_POLICY:-build}
     hostname: consumer-lsst
     restart: always
     build:
@@ -481,7 +507,11 @@ services:
       - /app/kafka_consumer
       - lsst
   consumer-winter:
-    image: boom-astro/boom:latest
+    image: ${BOOM_IMAGE:-ghcr.io/boom-astro/boom:latest}
+    # Built from this checkout, never pulled: with both an `image:` and a
+    # `build:`, compose pulls when the image is absent locally, which would
+    # silently run the registry's build instead of this working tree.
+    pull_policy: ${BOOM_PULL_POLICY:-build}
     hostname: consumer-winter
     restart: always
     build:
@@ -515,7 +545,11 @@ services:
       - /app/kafka_consumer
       - winter
   scheduler-ztf:
-    image: boom-astro/boom:latest
+    image: ${BOOM_IMAGE:-ghcr.io/boom-astro/boom:latest}
+    # Built from this checkout, never pulled: with both an `image:` and a
+    # `build:`, compose pulls when the image is absent locally, which would
+    # silently run the registry's build instead of this working tree.
+    pull_policy: ${BOOM_PULL_POLICY:-build}
     hostname: scheduler-ztf
     restart: always
     build:
@@ -550,7 +584,11 @@ services:
       - /app/scheduler
       - ztf
   scheduler-lsst:
-    image: boom-astro/boom:latest
+    image: ${BOOM_IMAGE:-ghcr.io/boom-astro/boom:latest}
+    # Built from this checkout, never pulled: with both an `image:` and a
+    # `build:`, compose pulls when the image is absent locally, which would
+    # silently run the registry's build instead of this working tree.
+    pull_policy: ${BOOM_PULL_POLICY:-build}
     hostname: scheduler-lsst
     restart: always
     build:
@@ -585,7 +623,11 @@ services:
       - /app/scheduler
       - lsst
   scheduler-winter:
-    image: boom-astro/boom:latest
+    image: ${BOOM_IMAGE:-ghcr.io/boom-astro/boom:latest}
+    # Built from this checkout, never pulled: with both an `image:` and a
+    # `build:`, compose pulls when the image is absent locally, which would
+    # silently run the registry's build instead of this working tree.
+    pull_policy: ${BOOM_PULL_POLICY:-build}
     hostname: scheduler-winter
     restart: always
     build:
@@ -628,7 +670,11 @@ services:
   # Defined here rather than created by hand so the next person to run it gets
   # the same mounts, network and limits as everything else.
   mpcorb-ingest:
-    image: boom-astro/boom:latest
+    image: ${BOOM_IMAGE:-ghcr.io/boom-astro/boom:latest}
+    # Built from this checkout, never pulled: with both an `image:` and a
+    # `build:`, compose pulls when the image is absent locally, which would
+    # silently run the registry's build instead of this working tree.
+    pull_policy: ${BOOM_PULL_POLICY:-build}
     hostname: mpcorb-ingest
     # A one-shot job: a restart policy here would re-download on every failure.
     restart: "no"
