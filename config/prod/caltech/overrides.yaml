@@ -3,10 +3,10 @@ babamul:
   oauth:
     redirect_base_url: https://babamul.caltech.edu/api
 
+gpu:
+  device_ids: [0]
+
 kafka:
-  consumer:
-    lsst:
-      schema_github_fallback_url: null
   producer:
     server: "broker:29092"
 
@@ -16,10 +16,20 @@ workers:
       n_workers: 8
     enrichment:
       n_workers: 12
+      batch_size: 1000
     filter:
       n_workers: 4
   lsst:
+    alert:
+      n_workers: 10
     enrichment:
       n_workers: 10
     filter:
       n_workers: 4
+  decam:
+    alert:
+      n_workers: 1
+    enrichment:
+      n_workers: 1
+    filter:
+      n_workers: 1

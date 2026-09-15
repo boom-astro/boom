@@ -16,16 +16,22 @@ workers:
     filter:
       n_workers: 10
   lsst:
+    alert:
+      n_workers: 10
     enrichment:
       n_workers: 9
     filter:
       n_workers: 3
+  decam:
+    alert:
+      n_workers: 1
+    enrichment:
+      n_workers: 1
+    filter:
+      n_workers: 1
 
 crossmatch:
   ztf:
-    DESI_DR1:
-      type_key: null
-      stellar_types: null
     PS1_DR2: null
     AllWISE:
       radius: 2.0
@@ -49,9 +55,6 @@ crossmatch:
         distance_mpc: 1
         discovery_date: 1
   lsst:
-    DESI_DR1:
-      type_key: null
-      stellar_types: null
     PS1_DR2: null
     watchlist_supernovas:
       radius: 2.0
