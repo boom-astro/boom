@@ -197,6 +197,19 @@ workers:
       refresh_interval_minutes: 15
       max_match_rate: 100
       reference_night: "2026-07-15"
+# Archival catalogs this deployment holds for direct querying, as kebab-case
+# slugs -- see docs/catalogs.md for the list.
+#
+# Not needed to make a catalog ingestable: the admin page lists every catalog
+# this release defines, whether or not anything names it. The catalogs under
+# `crossmatch` below are the ones the alert pipeline queries, and those are what
+# the admin page flags when missing. A slug here that the release has no
+# definition for is reported on the admin page rather than ignored.
+#
+# Declaring one does not ingest it. Ingesting is an explicit task started from
+# the admin page: auto-converging on deploy would let a typo rebuild a catalog,
+# and an ingest is hours to days of work.
+catalogs: [] # BOOM_CATALOGS, comma-separated
 crossmatch:
   ztf:
     Gaia_DR3:
