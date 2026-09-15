@@ -16,6 +16,7 @@
 //! bodies are therefore written to be **resumable**: re-running one continues
 //! rather than repeating.
 
+pub mod backfill_hpx;
 pub mod batch;
 pub mod catalog_ingest;
 pub mod context;
@@ -190,6 +191,18 @@ pub const TASKS: &[TaskSpec] = &[
         params_schema: || schema_of::<prepare_catalog::PrepareCatalogParams>(),
     },
     TaskSpec {
+        id: backfill_hpx::TASK_TYPE,
+        title: "Backfill HEALPix indexes on existing alerts",
+        description: "Write coordinates.hpx onto alerts and alerts_aux documents written \
+                      before the field existed. Until this has covered a collection, MOC \
+                      region queries silently miss everything in it.",
+        // Only documents still missing the field are selected, and the index is
+        // a pure function of the stored position.
+        idempotent: true,
+        destructive: false,
+        params_schema: || schema_of::<backfill_hpx::BackfillHpxParams>(),
+    },
+    TaskSpec {
         id: repair_photometry::TASK_TYPE,
         title: "Repair out-of-order photometry timeseries",
         description: "Rewrite alerts_aux timeseries arrays that are out of order by jd, hold \
@@ -331,6 +344,11 @@ pub fn validate_params(task_type: &str, params: &serde_json::Value) -> Result<()
                     .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
             parsed.validate_params().map_err(TaskError::InvalidParams)
         }
+        backfill_hpx::TASK_TYPE => {
+            let parsed: backfill_hpx::BackfillHpxParams = serde_json::from_value(params.clone())
+                .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            parsed.validate_params().map_err(TaskError::InvalidParams)
+        }
         repair_photometry::TASK_TYPE => {
             let parsed: repair_photometry::RepairPhotometryParams =
                 serde_json::from_value(params.clone())
@@ -415,6 +433,9 @@ pub fn single_flight_key(
                 .map(|survey| doc! { "survey": survey })
                 .unwrap_or_default(),
         ),
+        // One per deployment: an all-surveys run and a single-survey run would
+        // walk the same collections, and params cannot express that overlap.
+        backfill_hpx::TASK_TYPE => Some(doc! {}),
         // Keyed by survey: two runs over the same aux collection would scan
         // and rewrite the same documents.
         repair_photometry::TASK_TYPE => Some(
@@ -452,6 +473,11 @@ pub async fn dispatch(
             let params = copy_cutouts::CopyCutoutsParams::deserialize(params)
                 .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
             copy_cutouts::run(ctx, params).await
+        }
+        backfill_hpx::TASK_TYPE => {
+            let params = backfill_hpx::BackfillHpxParams::deserialize(params)
+                .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            backfill_hpx::run(ctx, params).await
         }
         repair_photometry::TASK_TYPE => {
             let params = repair_photometry::RepairPhotometryParams::deserialize(params)
