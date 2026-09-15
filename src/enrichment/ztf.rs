@@ -5,8 +5,7 @@ use crate::enrichment::{
     fetch_alerts,
     models::{
         applecider_postprocess::{self, AppleCiderFusion, AppleCiderModalities},
-        AcaiModel, AppleCiderOutputs, BtsBotModel, FusionModel, FusionOutputs, Model, ModelError,
-        SharedModels,
+        AcaiModel, AppleCiderOutputs, BtsBotModel, FusionModel, Model, ModelError, SharedModels,
     },
     EnrichmentWorker, EnrichmentWorkerError, LsstMatch, LsstPhotometry,
 };
@@ -1447,79 +1446,90 @@ impl ZtfEnrichmentWorker {
             return Ok(results);
         }
 
-        // AppleCiDER runs over every eligible alert in one dynamic-batch call,
-        // separately from the fixed-size ACAI/BTSbot chunks below.
+        // AppleCiDER, in fixed-size chunks like ACAI and BTSbot. The CUDA arena
+        // is pinned to SameAsRequested, which only stays bounded when every call
+        // uses one input shape, so a short chunk is padded out and the pad rows
+        // are dropped afterwards.
+        //
+        // Pad rows repeat the chunk's first alert rather than being zeroed: an
+        // all-padding `tempo_pad_mask` row makes the attention softmax divide by
+        // zero, and a NaN row is a worse thing to hand the runtime than one
+        // redundant alert.
         let cider_indices: Vec<usize> = selected
             .iter()
             .map(|&(idx, ..)| idx)
             .filter(|&i| work_items[i].cider_eligible())
             .collect();
         let cider_pos = position_index(&cider_indices);
-        let cider_batch: Option<(FusionOutputs, Vec<usize>)> = (!cider_indices.is_empty())
-            .then(|| -> Result<(FusionOutputs, Vec<usize>), ModelError> {
-                let cider_alerts: Vec<&ZtfAlertForEnrichment> = cider_indices
-                    .iter()
-                    .map(|&i| &work_items[i].alert)
-                    .collect();
-                let cider_cutouts: Vec<&AlertCutout> = cider_indices
-                    .iter()
-                    .map(|&i| &work_items[i].cutouts)
-                    .collect();
-                let cider_props: Vec<&AllBandsProperties> = cider_indices
-                    .iter()
-                    .map(|&i| &work_items[i].all_bands_properties)
-                    .collect();
 
+        type CiderRows = (Vec<(AppleCiderFusion, AppleCiderOutputs)>, Vec<Vec<f32>>);
+        let cider_rows: Option<CiderRows> = (!cider_indices.is_empty())
+            .then(|| -> Result<CiderRows, ModelError> {
+                let mut derived_all = Vec::with_capacity(cider_indices.len());
+                let mut embeddings_all: Vec<Vec<f32>> = Vec::with_capacity(cider_indices.len());
                 let mut cider = models.cider.lock().unwrap();
-                let cider_meta = cider.get_metadata(&cider_alerts, &cider_props)?;
-                let cider_image = cider.get_triplet(&cider_cutouts)?;
 
-                let phot: Vec<_> = cider_indices
-                    .iter()
-                    .map(|&i| cider.photometry_inputs(work_items[i].ztf_lightcurve.clone()))
-                    .collect::<Result<Vec<_>, _>>()?;
+                for chunk in cider_indices.chunks(self.batch_size) {
+                    let n_real = chunk.len();
+                    let mut rows: Vec<usize> = Vec::with_capacity(self.batch_size);
+                    rows.extend_from_slice(chunk);
+                    rows.resize(self.batch_size, chunk[0]);
 
-                let tx_views: Vec<_> = phot.iter().map(|(x, _, _, _)| x.view()).collect();
-                let tpm_views: Vec<_> = phot.iter().map(|(_, m, _, _)| m.view()).collect();
-                let tg_views: Vec<_> = phot.iter().map(|(_, _, g, _)| g.view()).collect();
-                let n_detections: Vec<usize> = phot.iter().map(|(_, _, _, n)| *n).collect();
+                    let alerts: Vec<&ZtfAlertForEnrichment> =
+                        rows.iter().map(|&i| &work_items[i].alert).collect();
+                    let cutouts: Vec<&AlertCutout> =
+                        rows.iter().map(|&i| &work_items[i].cutouts).collect();
+                    let props: Vec<&AllBandsProperties> = rows
+                        .iter()
+                        .map(|&i| &work_items[i].all_bands_properties)
+                        .collect();
 
-                let tx = ndarray::concatenate(ndarray::Axis(0), &tx_views)?;
-                let tpm = ndarray::concatenate(ndarray::Axis(0), &tpm_views)?;
-                let tg = ndarray::concatenate(ndarray::Axis(0), &tg_views)?;
+                    let meta = cider.get_metadata(&alerts, &props)?;
+                    let image = cider.get_triplet(&cutouts)?;
 
-                cider
-                    .predict(&tx, &tpm, &tg, &cider_meta, &cider_image)
-                    .map(|out| (out, n_detections))
+                    let phot: Vec<_> = rows
+                        .iter()
+                        .map(|&i| cider.photometry_inputs(work_items[i].ztf_lightcurve.clone()))
+                        .collect::<Result<Vec<_>, _>>()?;
+
+                    let tx_views: Vec<_> = phot.iter().map(|(x, _, _, _)| x.view()).collect();
+                    let tpm_views: Vec<_> = phot.iter().map(|(_, m, _, _)| m.view()).collect();
+                    let tg_views: Vec<_> = phot.iter().map(|(_, _, g, _)| g.view()).collect();
+                    let n_detections: Vec<usize> =
+                        phot[..n_real].iter().map(|(_, _, _, n)| *n).collect();
+
+                    let tx = ndarray::concatenate(ndarray::Axis(0), &tx_views)?;
+                    let tpm = ndarray::concatenate(ndarray::Axis(0), &tpm_views)?;
+                    let tg = ndarray::concatenate(ndarray::Axis(0), &tg_views)?;
+
+                    let out = cider.predict(&tx, &tpm, &tg, &meta, &image)?;
+
+                    // Drop the pad rows before anything downstream sees them.
+                    let n_cls = applecider_postprocess::CLASS_NAMES.len();
+                    let derived = applecider_postprocess::derive_batch(
+                        &out.alpha[..n_real * n_cls],
+                        &n_detections,
+                        APPLECIDER_MODALITIES,
+                    )
+                    .ok_or(ModelError::MissingFeature(
+                        "applecider: unexpected alpha batch shape",
+                    ))?;
+                    derived_all.extend(derived);
+
+                    let emb_dim = out.embedding.len() / self.batch_size;
+                    for row in 0..n_real {
+                        embeddings_all
+                            .push(out.embedding[row * emb_dim..(row + 1) * emb_dim].to_vec());
+                    }
+                }
+                Ok((derived_all, embeddings_all))
             })
             .and_then(|r| {
                 r.map_err(|e| {
-                    warn!("cider batch inference failed: {}", e);
+                    warn!("applecider batch inference failed: {}", e);
                 })
                 .ok()
             });
-
-        // One entry per row of `cider_indices`, in the same order. `None` means
-        // the batch came back a shape the postprocessing does not recognise.
-        let cider_derived = cider_batch.as_ref().and_then(|(out, n_detections)| {
-            let derived = applecider_postprocess::derive_batch(
-                &out.alpha,
-                n_detections,
-                APPLECIDER_MODALITIES,
-            );
-            if derived.is_none() {
-                warn!(
-                    alpha_len = out.alpha.len(),
-                    rows = cider_indices.len(),
-                    "applecider: unexpected alpha batch shape, skipping outputs"
-                );
-            }
-            derived
-        });
-        let cider_emb_dim = cider_batch
-            .as_ref()
-            .map(|(out, _)| out.embedding.len() / cider_indices.len())
-            .unwrap_or(0);
 
         // Fixed-size chunks: ORT needs one input shape, so the last is zero-padded.
         for chunk in selected.chunks(self.batch_size) {
@@ -1549,12 +1559,8 @@ impl ZtfEnrichmentWorker {
             let [acai_h, acai_n, acai_v, acai_o, acai_b, btsbot] = scores;
 
             for (batch_idx, &(item_idx, ..)) in chunk.iter().enumerate() {
-                let cider = cider_pos.get(&item_idx).copied().zip(cider_batch.as_ref());
-                let derived = cider_pos
-                    .get(&item_idx)
-                    .copied()
-                    .zip(cider_derived.as_ref())
-                    .map(|(row, rows)| &rows[row]);
+                let cider_row = cider_pos.get(&item_idx).copied().zip(cider_rows.as_ref());
+                let derived = cider_row.map(|(row, (derived, _))| &derived[row]);
                 results[item_idx] = Some(ZtfAlertClassifications {
                     acai_h: acai_h[batch_idx],
                     acai_n: acai_n[batch_idx],
@@ -1564,9 +1570,8 @@ impl ZtfEnrichmentWorker {
                     btsbot: btsbot[batch_idx],
                     applecider_fusion: derived.map(|(p, _)| p.clone()),
                     applecider_outputs: derived.map(|(_, o)| o.clone()),
-                    fusion_embedding: cider.map(|(row, (out, _))| {
-                        out.embedding[row * cider_emb_dim..(row + 1) * cider_emb_dim].to_vec()
-                    }),
+                    fusion_embedding: cider_row
+                        .map(|(row, (_, embeddings))| embeddings[row].clone()),
                 });
             }
         }
