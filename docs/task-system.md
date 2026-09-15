@@ -122,7 +122,7 @@ later.
 | `prepare_catalog` | Add spatial fields and a 2dsphere index to a hand-imported collection. |
 | `backfill_hpx` | Write `coordinates.hpx` onto alerts that predate the field, so MOC region queries can find them. |
 | `repair_photometry` | Rewrite `alerts_aux` timeseries arrays that are out of order, duplicated, or carry a non-numeric `jd`. Deletes the offending points — run with `dry_run` first. |
-| `enrich_reprocess` | Select alerts, queue them, and re-run enrichment over them. |
+| `enrich_reprocess` | Select alerts, queue them, and re-run enrichment over them. See [alert-processing.md](./alert-processing.md#re-enriching-alerts-after-a-change). |
 | `mpcorb_ingest` | Re-download MPC orbital elements and swap them into `MPC_orbits`. |
 | `sso_baselines` | Fit solar system phase-curve baselines from ZTF detections. |
 | `copy_cutouts` | Copy a survey's cutout collection between MongoDB deployments. |
@@ -188,8 +188,11 @@ Completion needs `LLEN == 0` twice in a row. A worker pops a batch of up to
 still in flight, and stopping there would count those alerts as reprocessed
 before they were.
 
-Selection is explicit rather than inferred: alerts missing a field, a candid
-range, or everything.
+Selection is explicit rather than inferred: everything not enriched by the
+current set (`stale`, the one to use after changing a model or a formula),
+alerts missing a field, a candid range, or everything. See
+[alert-processing.md](./alert-processing.md#re-enriching-alerts-after-a-change)
+for how staleness is recorded and why `missing_field` cannot express it.
 
 ### Credentials in parameters
 
@@ -231,9 +234,9 @@ One `task-worker` service, running one task at a time. It needs more than a
 database connection:
 
 - **The ONNX models**, bind-mounted read-only at `/app/data/models`.
-  `enrich_reprocess` builds a real enrichment worker, which loads them at
-  startup, so a worker without them fails before doing any work rather than
-  part way through a run.
+  `enrich_reprocess` builds a real enrichment worker, which loads every model in
+  `ZTF_MODELS` and hashes it for the enrichment set stamp, so a worker without
+  them fails at startup rather than part way through a run.
 - **boompy**, baked into the image, for the catalog downloaders.
 - **Valkey**, which the migration and reprocessing tasks use to drive and resume
   their work.
