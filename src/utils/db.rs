@@ -118,8 +118,12 @@ pub async fn initialize_survey_indexes(
     create_index(&alerts_aux_collection, index, false).await?;
 
     // A MOC is a set of HEALPix ranges, so a region search is a range scan here.
+    // The epoch follows it on alerts so a time window is applied to index keys,
+    // rather than to every document the region covers across the whole archive.
+    let index = doc! { "coordinates.hpx": 1, "candidate.jd": 1 };
+    create_index(&alerts_collection, index, false).await?;
+    // Aux documents hold no candidate, so the region key stands alone there.
     let index = doc! { "coordinates.hpx": 1 };
-    create_index(&alerts_collection, index.clone(), false).await?;
     create_index(&alerts_aux_collection, index, false).await?;
 
     // create a simple index on the objectId field of the alerts collection
@@ -476,6 +480,35 @@ pub async fn join_tasks<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The epoch must follow the region key: a time window is only applied to
+    /// index keys while it is the second component.
+    #[tokio::test]
+    async fn region_index_carries_the_epoch_as_its_second_key() {
+        use crate::conf;
+        use crate::utils::enums::Survey;
+        use futures::TryStreamExt;
+
+        let db = conf::get_test_db().await;
+        initialize_survey_indexes(&Survey::Ztf, &db).await.unwrap();
+
+        let keys: Vec<Document> = db
+            .collection::<Document>("ZTF_alerts")
+            .list_indexes()
+            .await
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|i| i.keys)
+            .collect();
+
+        assert!(
+            keys.contains(&doc! { "coordinates.hpx": 1, "candidate.jd": 1 }),
+            "no hpx/jd index among {keys:?}"
+        );
+    }
 
     fn bounds(values: &[i32]) -> Vec<Bson> {
         values.iter().map(|v| Bson::Int32(*v)).collect()
