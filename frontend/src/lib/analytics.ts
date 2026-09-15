@@ -1,4 +1,5 @@
 import posthog, { type Properties } from 'posthog-js';
+import type { Profile } from '@/lib/api';
 
 function event<P extends Properties>(name: string) {
   return (properties?: P) => posthog.capture(name, properties);
@@ -34,6 +35,17 @@ export function trackError(context: string, error: unknown, additionalInfo?: Pro
   });
 }
 
-export const identifyUser = (userId: string) => posthog.identify(userId);
+export function identifyUser(userId: string, username?: string) {
+  const previousId = posthog.get_distinct_id();
+  posthog.identify(userId);
+  // Alias after identify: identify skips its distinct_id switch when handed the registered __alias.
+  if (previousId && previousId === username && previousId !== userId) {
+    posthog.alias(userId, previousId);
+  }
+}
+
+export function identifyProfile(profile: NonNullable<Profile>) {
+  identifyUser(profile.id ?? profile.username, profile.username);
+}
 
 export const resetUser = () => posthog.reset();
