@@ -16,7 +16,16 @@
 //! bodies are therefore written to be **resumable**: re-running one continues
 //! rather than repeating.
 
-pub mod catalog_ingest;
+// The system: everything that runs a task, rather than being one.
+//
+// This directory is destined to become `src/task/`, with the modules below it
+// moving to `src/task/tasks/`: singular for the subsystem, as `alert`, `filter`
+// and `enrichment` already are, and plural only for the collection of runnable
+// things. A `tasks` module whose contents are mostly not tasks is the wrong
+// promise. The move waits until this work has landed --
+// these modules are spread across four layers of the stack it arrived in, and
+// renaming a path is the one edit that layering cannot absorb.
+pub mod batch;
 pub mod context;
 pub mod ledger;
 pub mod logs;
@@ -24,11 +33,30 @@ pub mod models;
 pub mod queue;
 pub mod redact;
 
+// The tasks: one module per entry in `TASKS` below, each with its own
+// `TASK_TYPE`, params type and `run`. These are what moves to `task/tasks/`.
+pub mod backfill_detection_span;
+pub mod backfill_host_galaxy;
+pub mod backfill_hpx;
+pub mod catalog_ingest;
+pub mod copy_cutouts;
+pub mod enrich_reprocess;
+pub mod export_catalog;
+pub mod link_tracks;
+pub mod migrate_fp_flux;
+pub mod migrate_snr;
+pub mod mpcorb_ingest;
+pub mod prepare_catalog;
+pub mod repair_photometry;
+pub mod reprocess_crossmatch;
+pub mod sso_baselines;
+pub mod stream_kowalski_alerts;
+
 pub use context::TaskContext;
 pub use models::{Actor, Task, TaskStatus, Trigger};
 
 use mongodb::bson::doc;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(thiserror::Error, Debug)]
 pub enum TaskError {
@@ -40,6 +68,85 @@ pub enum TaskError {
     UnknownType { id: String, known: String },
     #[error("invalid parameters: {0}")]
     InvalidParams(String),
+}
+
+/// A task type a client may ask for.
+///
+/// An enum at the API boundary, so the schema carries the values a client may
+/// send and an unknown one is refused by deserialization rather than several
+/// layers in. [`Task::task_type`] stays a string: a run outlives the
+/// release that defined its type, and a record of one has to read back and say
+/// what it was even after the type is gone.
+///
+/// Each variant resolves to its module's `TASK_TYPE` rather than repeating the
+/// string, so the two cannot disagree about spelling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskType {
+    CatalogIngest,
+    StreamKowalskiAlerts,
+    CopyCutouts,
+    SsoBaselines,
+    MpcorbIngest,
+    EnrichReprocess,
+    PrepareCatalog,
+    ExportCatalog,
+    LinkTracks,
+    BackfillDetectionSpan,
+    BackfillHostGalaxy,
+    BackfillHpx,
+    RepairPhotometry,
+    ReprocessCrossmatch,
+    MigrateSnr,
+    MigrateFpFlux,
+}
+
+impl TaskType {
+    pub const ALL: [TaskType; 16] = [
+        Self::CatalogIngest,
+        Self::StreamKowalskiAlerts,
+        Self::CopyCutouts,
+        Self::SsoBaselines,
+        Self::MpcorbIngest,
+        Self::EnrichReprocess,
+        Self::PrepareCatalog,
+        Self::ExportCatalog,
+        Self::LinkTracks,
+        Self::BackfillDetectionSpan,
+        Self::BackfillHostGalaxy,
+        Self::BackfillHpx,
+        Self::RepairPhotometry,
+        Self::ReprocessCrossmatch,
+        Self::MigrateSnr,
+        Self::MigrateFpFlux,
+    ];
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::CatalogIngest => catalog_ingest::TASK_TYPE,
+            Self::StreamKowalskiAlerts => stream_kowalski_alerts::TASK_TYPE,
+            Self::CopyCutouts => copy_cutouts::TASK_TYPE,
+            Self::SsoBaselines => sso_baselines::TASK_TYPE,
+            Self::MpcorbIngest => mpcorb_ingest::TASK_TYPE,
+            Self::EnrichReprocess => enrich_reprocess::TASK_TYPE,
+            Self::PrepareCatalog => prepare_catalog::TASK_TYPE,
+            Self::ExportCatalog => export_catalog::TASK_TYPE,
+            Self::LinkTracks => link_tracks::TASK_TYPE,
+            Self::BackfillDetectionSpan => backfill_detection_span::TASK_TYPE,
+            Self::BackfillHostGalaxy => backfill_host_galaxy::TASK_TYPE,
+            Self::BackfillHpx => backfill_hpx::TASK_TYPE,
+            Self::RepairPhotometry => repair_photometry::TASK_TYPE,
+            Self::ReprocessCrossmatch => reprocess_crossmatch::TASK_TYPE,
+            Self::MigrateSnr => migrate_snr::TASK_TYPE,
+            Self::MigrateFpFlux => migrate_fp_flux::TASK_TYPE,
+        }
+    }
+}
+
+impl std::fmt::Display for TaskType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// A declared kind of work.
@@ -103,16 +210,196 @@ fn schema_of<T: utoipa::PartialSchema>() -> serde_json::Value {
 // and `copy_cutouts` already covering most of the moving part.
 
 /// Every task type this release knows how to run.
-pub const TASKS: &[TaskSpec] = &[TaskSpec {
-    id: catalog_ingest::TASK_TYPE,
-    title: "Ingest an archival catalog",
-    description: "Download an archival catalog and insert it into MongoDB, one chunk at a \
+pub const TASKS: &[TaskSpec] = &[
+    TaskSpec {
+        id: catalog_ingest::TASK_TYPE,
+        title: "Ingest an archival catalog",
+        description: "Download an archival catalog and insert it into MongoDB, one chunk at a \
                       time. Resumable: re-running continues from the last completed chunk.",
-    idempotent: true,
-    // Only with drop_existing, which the client has to ask for explicitly.
-    destructive: true,
-    params_schema: || schema_of::<catalog_ingest::CatalogIngestParams>(),
-}];
+        idempotent: true,
+        // Only with drop_existing, which the client has to ask for explicitly.
+        destructive: true,
+        params_schema: || schema_of::<catalog_ingest::CatalogIngestParams>(),
+    },
+    TaskSpec {
+        id: stream_kowalski_alerts::TASK_TYPE,
+        title: "Back-fill BOOM from a Kowalski deployment",
+        description: "Stream Kowalski's ZTF_alerts into BOOM, importing alerts for objects \
+                      BOOM already knows and fetching cutouts only for what was new.",
+        // Unordered inserts skipping duplicates, so re-running resumes.
+        idempotent: true,
+        destructive: false,
+        params_schema: || schema_of::<stream_kowalski_alerts::StreamKowalskiParams>(),
+    },
+    TaskSpec {
+        id: copy_cutouts::TASK_TYPE,
+        title: "Copy alert cutouts between deployments",
+        description: "Copy a survey's cutout collection from one MongoDB to another, \
+                      typically before repointing BOOM at new storage. Re-run with \
+                      min_candid to catch up on what arrived during the first pass.",
+        // Keyed on candid; duplicates are counted rather than fatal.
+        idempotent: true,
+        destructive: false,
+        params_schema: || schema_of::<copy_cutouts::CopyCutoutsParams>(),
+    },
+    TaskSpec {
+        id: sso_baselines::TASK_TYPE,
+        title: "Fit solar system phase-curve baselines",
+        description: "Fit a phase curve per object per band from ZTF detections, giving \
+                      the baseline brightness that outburst detection is judged against.",
+        // Upserts keyed on designation, refit from the same detections.
+        idempotent: true,
+        destructive: false,
+        params_schema: || schema_of::<sso_baselines::SsoBaselinesParams>(),
+    },
+    TaskSpec {
+        id: mpcorb_ingest::TASK_TYPE,
+        title: "Refresh MPC orbital elements",
+        description: "Re-download MPCORB and swap it into MPC_orbits. The scheduler does \
+                      this on its own; use this to force a refresh or validate a parse.",
+        // Staged and swapped atomically, so a rerun replaces wholesale.
+        idempotent: true,
+        destructive: false,
+        params_schema: || schema_of::<mpcorb_ingest::MpcorbIngestParams>(),
+    },
+    TaskSpec {
+        id: enrich_reprocess::TASK_TYPE,
+        title: "Re-run enrichment over a selection of alerts",
+        description: "Select alerts, queue them, and run enrichment workers over them. \
+                      Babamul is disabled and nothing is forwarded to the filter queue, \
+                      so reprocessing does not re-alert anyone.",
+        // Scores are recomputed from the stored alert, so re-running converges.
+        idempotent: true,
+        destructive: false,
+        params_schema: || schema_of::<enrich_reprocess::EnrichReprocessParams>(),
+    },
+    TaskSpec {
+        id: prepare_catalog::TASK_TYPE,
+        title: "Prepare an imported collection for crossmatching",
+        description: "Add ra/dec, the GeoJSON point, galactic coordinates and a 2dsphere \
+                      index to a collection imported from a file, so it can be used as a \
+                      crossmatch catalog.",
+        // Documents that already carry coordinates are skipped unless forced,
+        // and index creation is a no-op when it already exists.
+        idempotent: true,
+        destructive: false,
+        params_schema: || schema_of::<prepare_catalog::PrepareCatalogParams>(),
+    },
+    TaskSpec {
+        id: export_catalog::TASK_TYPE,
+        title: "Export a catalog collection to files",
+        description: "Write a catalog collection to gzipped CSV chunks plus a manifest, so \
+                      a catalog BOOM cannot fetch again can be staged and ingested \
+                      elsewhere. Reads only; writes no documents.",
+        // Re-running overwrites the same files from the same collection.
+        idempotent: true,
+        destructive: false,
+        params_schema: || schema_of::<export_catalog::ExportCatalogParams>(),
+    },
+    TaskSpec {
+        id: link_tracks::TASK_TYPE,
+        title: "Link moving-object tracks",
+        description: "Find intra-night tracklets in a window of alerts and link them into \
+                      tracks. With `persist` it stores each track and stamps its member \
+                      alerts; with `dry_run` it reports what it would have written, which \
+                      is how the thresholds get calibrated without leaving a mark.",
+        // A track is identified by its members, so a repeated run extends or
+        // merges what is stored rather than duplicating it.
+        idempotent: true,
+        // It can merge two stored tracks into one, which cannot be undone by
+        // running it again.
+        destructive: true,
+        params_schema: || schema_of::<link_tracks::LinkTracksParams>(),
+    },
+    TaskSpec {
+        id: backfill_detection_span::TASK_TYPE,
+        title: "Backfill the activity span on existing alerts",
+        description: "Write first_activity_jd, last_detection_jd and n_forced_detections \
+                      onto alerts written before those fields existed. Until this has \
+                      covered a collection, a counterpart search reaching into the archive \
+                      reads the missing fields as null. ZTF and LSST only. Bounded by \
+                      days, so run it at 31 first, which is what those searches reach \
+                      back by default.",
+        // The span is recomputed from the arrays stored on the aux record, so a
+        // second pass writes the same values.
+        idempotent: true,
+        destructive: false,
+        params_schema: || schema_of::<backfill_detection_span::BackfillDetectionSpanParams>(),
+    },
+    TaskSpec {
+        id: backfill_host_galaxy::TASK_TYPE,
+        title: "Backfill host galaxy associations",
+        description: "Score each alerts_aux record's galaxy cross-matches and write \
+                      host_galaxy. Reads the matches already stored, so run \
+                      reprocess_crossmatch over the galaxy catalogs first if they were \
+                      added recently.",
+        // Association is a pure function of the stored cross-matches, so a
+        // resumed run rewrites the same values.
+        idempotent: true,
+        destructive: false,
+        params_schema: || schema_of::<backfill_host_galaxy::BackfillHostGalaxyParams>(),
+    },
+    TaskSpec {
+        id: backfill_hpx::TASK_TYPE,
+        title: "Backfill HEALPix indexes on existing alerts",
+        description: "Write coordinates.hpx onto alerts and alerts_aux documents written \
+                      before the field existed. Until this has covered a collection, MOC \
+                      region queries silently miss everything in it.",
+        // Only documents still missing the field are selected, and the index is
+        // a pure function of the stored position.
+        idempotent: true,
+        destructive: false,
+        params_schema: || schema_of::<backfill_hpx::BackfillHpxParams>(),
+    },
+    TaskSpec {
+        id: repair_photometry::TASK_TYPE,
+        title: "Repair out-of-order photometry timeseries",
+        description: "Rewrite alerts_aux timeseries arrays that are out of order by jd, hold \
+                      duplicate jds, or carry entries with a non-finite or non-numeric jd. \
+                      Run with dry_run first: the repair deletes the offending points.",
+        // A repaired array no longer looks broken, so a second run finds
+        // nothing to do.
+        idempotent: true,
+        // It deletes photometry points, and does not keep a copy.
+        destructive: true,
+        params_schema: || schema_of::<repair_photometry::RepairPhotometryParams>(),
+    },
+    TaskSpec {
+        id: reprocess_crossmatch::TASK_TYPE,
+        title: "Reprocess crossmatches against archival catalogs",
+        description: "Fill in or refresh crossmatches on a survey's alerts_aux records. \
+                      Needed after adding a catalog to crossmatch config, since the \
+                      scheduler only crossmatches at first insert.",
+        // Each write recomputes a record's matches from the catalog as it
+        // stands; watchlists use $addToSet, which is idempotent by construction.
+        idempotent: true,
+        destructive: false,
+        params_schema: || schema_of::<reprocess_crossmatch::ReprocessCrossmatchParams>(),
+    },
+    TaskSpec {
+        id: migrate_snr::TASK_TYPE,
+        title: "Recompute signal-to-noise for ZTF and LSST",
+        description: "Recompute snr_psf, snr_ap and (for ZTF) apFlux/apFluxErr on alerts \
+                      and their lightcurves, from the stored photometry.",
+        // Derived from stored photometry, never from a previous run's output.
+        idempotent: true,
+        destructive: false,
+        params_schema: || schema_of::<migrate_snr::MigrateSnrParams>(),
+    },
+    TaskSpec {
+        id: migrate_fp_flux::TASK_TYPE,
+        title: "Migrate ZTF forced photometry to a fixed zeropoint",
+        description: "Recompute psfFlux and psfFluxErr in ZTF_alerts_aux from the raw IPAC \
+                      flux fields, at the fixed ZTF_ZP zeropoint.",
+        // Always recomputed from the raw fields, never from the previous
+        // result, so re-running converges on the same values.
+        idempotent: true,
+        // It overwrites derived values, but the inputs it derives from are
+        // untouched, so nothing is lost that cannot be recomputed.
+        destructive: false,
+        params_schema: || schema_of::<migrate_fp_flux::MigrateFpFluxParams>(),
+    },
+];
 
 pub fn find(id: &str) -> Option<&'static TaskSpec> {
     TASKS.iter().find(|t| t.id == id)
@@ -156,6 +443,90 @@ pub fn validate_params(task_type: &str, params: &serde_json::Value) -> Result<()
                 .map(|_| ())
                 .map_err(|e| TaskError::InvalidParams(e.to_string()))
         }
+        stream_kowalski_alerts::TASK_TYPE => {
+            let parsed: stream_kowalski_alerts::StreamKowalskiParams =
+                serde_json::from_value(params.clone())
+                    .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            parsed.validate_params().map_err(TaskError::InvalidParams)
+        }
+        copy_cutouts::TASK_TYPE => {
+            let parsed: copy_cutouts::CopyCutoutsParams = serde_json::from_value(params.clone())
+                .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            parsed.validate_params().map_err(TaskError::InvalidParams)
+        }
+        sso_baselines::TASK_TYPE => {
+            let parsed: sso_baselines::SsoBaselinesParams = serde_json::from_value(params.clone())
+                .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            parsed.validate_params().map_err(TaskError::InvalidParams)
+        }
+        mpcorb_ingest::TASK_TYPE => {
+            let parsed: mpcorb_ingest::MpcorbIngestParams = serde_json::from_value(params.clone())
+                .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            parsed.validate_params().map_err(TaskError::InvalidParams)
+        }
+        enrich_reprocess::TASK_TYPE => {
+            let parsed: enrich_reprocess::EnrichReprocessParams =
+                serde_json::from_value(params.clone())
+                    .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            parsed.validate_params().map_err(TaskError::InvalidParams)
+        }
+        prepare_catalog::TASK_TYPE => {
+            let parsed: prepare_catalog::PrepareCatalogParams =
+                serde_json::from_value(params.clone())
+                    .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            parsed.validate_params().map_err(TaskError::InvalidParams)
+        }
+        reprocess_crossmatch::TASK_TYPE => {
+            let parsed: reprocess_crossmatch::ReprocessCrossmatchParams =
+                serde_json::from_value(params.clone())
+                    .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            parsed.validate_params().map_err(TaskError::InvalidParams)
+        }
+        migrate_snr::TASK_TYPE => {
+            let parsed: migrate_snr::MigrateSnrParams = serde_json::from_value(params.clone())
+                .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            parsed.validate_params().map_err(TaskError::InvalidParams)
+        }
+        migrate_fp_flux::TASK_TYPE => {
+            let parsed: migrate_fp_flux::MigrateFpFluxParams =
+                serde_json::from_value(params.clone())
+                    .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            parsed.validate_params().map_err(TaskError::InvalidParams)
+        }
+        export_catalog::TASK_TYPE => {
+            let parsed: export_catalog::ExportCatalogParams =
+                serde_json::from_value(params.clone())
+                    .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            parsed.validate_params().map_err(TaskError::InvalidParams)
+        }
+        link_tracks::TASK_TYPE => {
+            let parsed: link_tracks::LinkTracksParams = serde_json::from_value(params.clone())
+                .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            parsed.validate_params().map_err(TaskError::InvalidParams)
+        }
+        backfill_detection_span::TASK_TYPE => {
+            let parsed: backfill_detection_span::BackfillDetectionSpanParams =
+                serde_json::from_value(params.clone())
+                    .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            parsed.validate_params().map_err(TaskError::InvalidParams)
+        }
+        backfill_host_galaxy::TASK_TYPE => {
+            let parsed: backfill_host_galaxy::BackfillHostGalaxyParams =
+                serde_json::from_value(params.clone())
+                    .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            parsed.validate_params().map_err(TaskError::InvalidParams)
+        }
+        backfill_hpx::TASK_TYPE => {
+            let parsed: backfill_hpx::BackfillHpxParams = serde_json::from_value(params.clone())
+                .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            parsed.validate_params().map_err(TaskError::InvalidParams)
+        }
+        repair_photometry::TASK_TYPE => {
+            let parsed: repair_photometry::RepairPhotometryParams =
+                serde_json::from_value(params.clone())
+                    .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            parsed.validate_params().map_err(TaskError::InvalidParams)
+        }
         other => Err(TaskError::UnknownType {
             id: other.to_string(),
             known: known_types(),
@@ -177,6 +548,107 @@ pub fn single_flight_key(
             .get("catalog")
             .and_then(|c| c.as_str())
             .map(|catalog| doc! { "catalog": catalog }),
+        // One migration of a collection at a time: two concurrent runs would
+        // rewrite the same documents with the same pipeline, wasting a large
+        // amount of write throughput for no benefit.
+        migrate_fp_flux::TASK_TYPE => Some(doc! {}),
+        // Keyed by survey: migrating ZTF and LSST at once is fine, but two runs
+        // over the same survey would rewrite the same documents.
+        // Two imports into one BOOM would duplicate the whole stream's work.
+        stream_kowalski_alerts::TASK_TYPE => params
+            .get("boom_uri")
+            .and_then(|v| v.as_str())
+            .map(|uri| doc! { "boom_uri": uri }),
+        // Keyed by destination and survey: two copies into one collection would
+        // race, but different surveys or deployments are independent.
+        copy_cutouts::TASK_TYPE => {
+            let dst = params.get("dst_uri").and_then(|v| v.as_str());
+            let survey = params.get("survey").and_then(|v| v.as_str());
+            match (dst, survey) {
+                (Some(dst), Some(survey)) => Some(doc! { "dst_uri": dst, "survey": survey }),
+                _ => Some(doc! {}),
+            }
+        }
+        // Two would upsert the same baselines from the same detections.
+        sso_baselines::TASK_TYPE => Some(doc! {}),
+        // One refresh at a time: two would download the same file and race on
+        // the staging collection.
+        mpcorb_ingest::TASK_TYPE => Some(doc! {}),
+        // Keyed by survey: two reprocesses of one survey would contend for the
+        // same enrichment workers and GPU, but ZTF and LSST are independent.
+        enrich_reprocess::TASK_TYPE => Some(
+            params
+                .get("survey")
+                .and_then(|s| s.as_str())
+                .map(|survey| doc! { "survey": survey })
+                .unwrap_or_default(),
+        ),
+        // One preparation of a collection at a time; two would rewrite the same
+        // documents and race on creating the index.
+        prepare_catalog::TASK_TYPE => params
+            .get("catalog")
+            .and_then(|c| c.as_str())
+            .map(|catalog| doc! { "catalog": catalog }),
+        // Keyed by survey: two runs over the same alerts_aux would fight over
+        // the same records, but reprocessing ZTF and LSST at once is fine.
+        reprocess_crossmatch::TASK_TYPE => Some(
+            params
+                .get("survey")
+                .and_then(|s| s.as_str())
+                .map(|survey| doc! { "survey": survey })
+                .unwrap_or_default(),
+        ),
+        migrate_snr::TASK_TYPE => Some(
+            params
+                .get("survey")
+                .and_then(|s| s.as_str())
+                .map(|survey| doc! { "survey": survey })
+                .unwrap_or_default(),
+        ),
+        // Not keyed on anything: persisting merges tracks by shared members
+        // across the whole collection, so two runs at once could each decide a
+        // different survivor for the same merge. Keyed this way the second run
+        // waits in the queue rather than starting and failing on a lock.
+        link_tracks::TASK_TYPE => Some(doc! {}),
+        // Keyed by collection: two exports of the same one would write the same
+        // files over each other.
+        export_catalog::TASK_TYPE => Some(
+            params
+                .get("collection")
+                .and_then(|v| v.as_str())
+                .map(|collection| doc! { "collection": collection })
+                .unwrap_or_default(),
+        ),
+        // Keyed by survey: two runs over one alerts collection would recompute
+        // and rewrite the same spans.
+        backfill_detection_span::TASK_TYPE => Some(
+            params
+                .get("survey")
+                .and_then(|v| v.as_str())
+                .map(|survey| doc! { "survey": survey })
+                .unwrap_or_default(),
+        ),
+        // Keyed by survey: two runs over the same aux collection would rescore
+        // and rewrite the same records.
+        backfill_host_galaxy::TASK_TYPE => Some(
+            params
+                .get("survey")
+                .and_then(|v| v.as_str())
+                .map(|survey| doc! { "survey": survey })
+                .unwrap_or_default(),
+        ),
+        // One per deployment: an all-surveys run and a single-survey run would
+        // walk the same collections, and params cannot express that overlap.
+        backfill_hpx::TASK_TYPE => Some(doc! {}),
+        // Keyed by survey: two runs over the same aux collection would scan
+        // and rewrite the same documents.
+        repair_photometry::TASK_TYPE => Some(
+            params
+                .get("survey")
+                .and_then(|v| v.as_str())
+                .map(|survey| doc! { "survey": survey })
+                .unwrap_or_default(),
+        ),
         _ => None,
     }
 }
@@ -196,10 +668,135 @@ pub async fn dispatch(
                 .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
             catalog_ingest::run(ctx, params).await
         }
+        stream_kowalski_alerts::TASK_TYPE => {
+            let params = stream_kowalski_alerts::StreamKowalskiParams::deserialize(params)
+                .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            stream_kowalski_alerts::run(ctx, params).await
+        }
+        copy_cutouts::TASK_TYPE => {
+            let params = copy_cutouts::CopyCutoutsParams::deserialize(params)
+                .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            copy_cutouts::run(ctx, params).await
+        }
+        export_catalog::TASK_TYPE => {
+            let params = export_catalog::ExportCatalogParams::deserialize(params)
+                .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            export_catalog::run(ctx, params).await
+        }
+        link_tracks::TASK_TYPE => {
+            let params = link_tracks::LinkTracksParams::deserialize(params)
+                .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            link_tracks::run(ctx, params).await
+        }
+        backfill_detection_span::TASK_TYPE => {
+            let params = backfill_detection_span::BackfillDetectionSpanParams::deserialize(params)
+                .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            backfill_detection_span::run(ctx, params).await
+        }
+        backfill_host_galaxy::TASK_TYPE => {
+            let params = backfill_host_galaxy::BackfillHostGalaxyParams::deserialize(params)
+                .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            backfill_host_galaxy::run(ctx, params).await
+        }
+        backfill_hpx::TASK_TYPE => {
+            let params = backfill_hpx::BackfillHpxParams::deserialize(params)
+                .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            backfill_hpx::run(ctx, params).await
+        }
+        repair_photometry::TASK_TYPE => {
+            let params = repair_photometry::RepairPhotometryParams::deserialize(params)
+                .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            repair_photometry::run(ctx, params).await
+        }
+        sso_baselines::TASK_TYPE => {
+            let params = sso_baselines::SsoBaselinesParams::deserialize(params)
+                .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            sso_baselines::run(ctx, params).await
+        }
+        mpcorb_ingest::TASK_TYPE => {
+            let params = mpcorb_ingest::MpcorbIngestParams::deserialize(params)
+                .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            mpcorb_ingest::run(ctx, params).await
+        }
+        enrich_reprocess::TASK_TYPE => {
+            let params = enrich_reprocess::EnrichReprocessParams::deserialize(params)
+                .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            enrich_reprocess::run(ctx, params).await
+        }
+        prepare_catalog::TASK_TYPE => {
+            let params = prepare_catalog::PrepareCatalogParams::deserialize(params)
+                .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            prepare_catalog::run(ctx, params).await
+        }
+        reprocess_crossmatch::TASK_TYPE => {
+            let params = reprocess_crossmatch::ReprocessCrossmatchParams::deserialize(params)
+                .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            reprocess_crossmatch::run(ctx, params).await
+        }
+        migrate_snr::TASK_TYPE => {
+            let params = migrate_snr::MigrateSnrParams::deserialize(params)
+                .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            migrate_snr::run(ctx, params).await
+        }
+        migrate_fp_flux::TASK_TYPE => {
+            let params = migrate_fp_flux::MigrateFpFluxParams::deserialize(params)
+                .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            migrate_fp_flux::run(ctx, params).await
+        }
         other => Err(TaskError::UnknownType {
             id: other.to_string(),
             known: known_types(),
         }),
+    }
+}
+
+#[cfg(test)]
+mod task_type_tests {
+    use super::*;
+
+    #[test]
+    fn the_enum_and_the_registry_name_the_same_tasks() {
+        // Two lists of task types is one too many, so this is what keeps them
+        // from drifting: a type registered but missing from the enum could not
+        // be submitted, and a variant with no registration would be accepted
+        // at the boundary and then fail as unknown.
+        let mut from_enum: Vec<&str> = TaskType::ALL.iter().map(TaskType::as_str).collect();
+        let mut from_registry: Vec<&str> = TASKS.iter().map(|spec| spec.id).collect();
+        from_enum.sort_unstable();
+        from_registry.sort_unstable();
+        assert_eq!(from_enum, from_registry);
+    }
+
+    #[test]
+    fn the_wire_form_is_the_registered_id() {
+        // What a client sends has to be what the registry is keyed by. The
+        // variants resolve to the modules' constants, but serde derives the
+        // wire form from the variant name, so the two could still disagree --
+        // `MpcorbIngest` serializes as `mpcorb_ingest`, and would not if the
+        // variant were spelled `MPCORBIngest`.
+        for task_type in TaskType::ALL {
+            let wire = serde_json::to_value(task_type).expect("serializes");
+            assert_eq!(
+                wire.as_str(),
+                Some(task_type.as_str()),
+                "{task_type:?} serializes as {wire} but is registered as {}",
+                task_type.as_str()
+            );
+            let back: TaskType = serde_json::from_value(wire).expect("round trips");
+            assert_eq!(back, task_type);
+        }
+    }
+
+    #[test]
+    fn an_unknown_type_is_refused_by_deserialization() {
+        // The point of the enum: refused at the boundary rather than after a
+        // run has been written.
+        let err = serde_json::from_value::<TaskType>(serde_json::json!("drop_everything"))
+            .expect_err("must not deserialize");
+        assert!(
+            err.to_string().contains("drop_everything"),
+            "the error should name what was sent: {err}"
+        );
     }
 }
 
