@@ -657,7 +657,12 @@ pub struct ZtfEnrichmentWorker {
     /// so an outage there never stalls enrichment.
     milvus: MilvusSink,
     gpu_enabled: bool,
-    /// Alerts per batch; also the fixed ONNX input shape. See [`EnrichmentWorkerConfig::batch_size`].
+    /// Which models and derivation versions this worker is running, stamped
+    /// onto every alert it enriches so staleness is a query rather than a
+    /// guess. Resolved once at construction; see `enrichment::version`.
+    enrichment_set: i64,
+    /// Alerts per batch; also the fixed ONNX input shape. See
+    /// [`EnrichmentWorkerConfig::batch_size`].
     batch_size: usize,
 }
 
@@ -699,6 +704,36 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         let sso_baselines = db.collection(BASELINES_COLLECTION);
         let alert_cutout_storage = config.build_cutout_storage(&Survey::Ztf).await?;
 
+        // CPU workers each load their own models: no mutex contention. Loaded
+        // before the set is resolved, because resolving *publishes* the set as
+        // what this worker is running -- a model that fails to load after that
+        // would leave `enrichment_current` naming a set this process cannot
+        // produce.
+        let models = match shared_models {
+            Some(models) => models,
+            None => SharedModels::load(None)?,
+        };
+
+        // Resolved once per worker rather than per alert: it is a few megabytes
+        // of hashing, and the answer cannot change while the process runs.
+        crate::enrichment::version::initialize_indexes(&db).await?;
+        // Whether the GPU derivations will really run, which the build alone
+        // does not settle: a GPU image with the GPU off in config computes no
+        // `villar_fit`, and the set must not claim one.
+        #[cfg(feature = "gpu")]
+        let gpu_active = models.gpu_ctx.is_some();
+        #[cfg(not(feature = "gpu"))]
+        let gpu_active = false;
+        let enrichment_set = crate::enrichment::version::resolve_current_set(
+            &db,
+            "ztf",
+            crate::enrichment::version::ZTF_MODELS,
+            gpu_active,
+        )
+        .await?
+        .id;
+        tracing::info!(enrichment_set, "enrichment set resolved");
+
         let input_queue = "ZTF_alerts_enrichment_queue".to_string();
         let output_queue = "ZTF_alerts_filter_queue".to_string();
 
@@ -706,12 +741,6 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             Some(Babamul::new(&config))
         } else {
             None
-        };
-
-        // CPU workers each load their own models: no mutex contention.
-        let models = match shared_models {
-            Some(models) => models,
-            None => SharedModels::load(None)?,
         };
 
         let batch_size = config
@@ -744,6 +773,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         let milvus = MilvusSink::connect_or_degrade(&config.milvus, milvus_queue).await;
 
         Ok(ZtfEnrichmentWorker {
+            enrichment_set,
             input_queue,
             output_queue,
             client,
@@ -829,7 +859,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         );
 
         let batch_size = alerts.len();
-        let mut skipped_empty_lightcurve = 0usize;
+        let mut skipped_empty_lightcurve: Vec<i64> = Vec::new();
         let mut work_items: Vec<AlertWork> = Vec::with_capacity(alerts.len());
         #[cfg(feature = "gpu")]
         let mut villar_inputs: Vec<(i64, Vec<PhotometryMag>)> = Vec::new();
@@ -847,7 +877,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                     Ok(v) => v,
                     // Skip the alert instead of aborting the batch: the queue keeps draining.
                     Err(EnrichmentWorkerError::EmptyLightcurve(_)) => {
-                        skipped_empty_lightcurve += 1;
+                        skipped_empty_lightcurve.push(candid);
                         debug!(candid, "skipping alert: empty lightcurve after filtering");
                         continue;
                     }
@@ -869,13 +899,28 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             });
         }
 
-        if skipped_empty_lightcurve > 0 {
+        if !skipped_empty_lightcurve.is_empty() {
             warn!(
-                skipped = skipped_empty_lightcurve,
+                skipped = skipped_empty_lightcurve.len(),
                 enriched = work_items.len(),
                 batch_size,
                 "skipped alerts with empty lightcurves during enrichment"
             );
+            // Stamped although nothing was computed for them: the stamp says
+            // which enrichment ran, and these alerts ran through it. Left
+            // unstamped they would come back as stale on every run, filter to
+            // an empty light curve again and be skipped again. `properties`
+            // stays absent, which is what `MissingField` selects on once the
+            // photometry fills in.
+            updates.extend(skipped_empty_lightcurve.iter().map(|candid| {
+                WriteModel::UpdateOne(
+                    UpdateOneModel::builder()
+                        .namespace(self.alert_collection.namespace())
+                        .filter(doc! { "_id": *candid })
+                        .update(doc! { "$set": { "enrichment_set": self.enrichment_set } })
+                        .build(),
+                )
+            }));
         }
 
         let classifications_list = self.classify(&self.models, &work_items)?;
@@ -889,6 +934,15 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             let mut set_doc = doc! {
                 "properties": mongify(&item.properties),
                 "updated_at": now,
+                // Which enrichment ran over this alert, not which fields came
+                // out of it. A component that declines an alert -- AppleCiDER
+                // off its light curve, a classifier whose cutouts would not
+                // read -- leaves its own key absent, and `MissingField` is the
+                // selection that fills those in. Stamping only the alerts that
+                // came out complete left every declined one unstamped, so
+                // `stale` selected it on every run, failed the same way, and
+                // never cleared it.
+                "enrichment_set": self.enrichment_set,
             };
             if let Some(cls) = &classifications {
                 set_doc.insert("classifications", mongify(cls));
@@ -1014,6 +1068,10 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
 
             if !villar_updates.is_empty() {
                 if let Err(e) = self.client.bulk_write(villar_updates).await {
+                    // The alerts keep their stamp: it says this set ran, and
+                    // the missing `villar_fit` is what `MissingField` selects
+                    // on. Writing the fit is a second bulk write precisely so
+                    // a failure here does not cost the batch its enrichment.
                     warn!("failed to write Villar fit results: {}", e);
                 }
             }
@@ -1692,6 +1750,62 @@ impl ZtfEnrichmentWorker {
         }
 
         Ok(results)
+    }
+}
+
+#[cfg(test)]
+mod enrichment_stamp_tests {
+    use super::*;
+
+    /// Construct a real worker and read back the set it will stamp.
+    ///
+    /// This is the end of the chain the unit tests cannot reach: it loads the
+    /// actual ONNX models, hashes the actual files, and interns against a real
+    /// database. If the loader and the stamp ever disagreed about which file is
+    /// in use, this is where it would show.
+    #[tokio::test]
+    async fn a_worker_resolves_a_set_from_the_models_it_loaded() {
+        let config_path = crate::conf::test_config_path();
+        let worker = match ZtfEnrichmentWorker::new(&config_path, None).await {
+            Ok(worker) => worker,
+            // ONNX is not available on every machine that runs the suite, and
+            // that is the only reason to skip. Skipping on *any* construction
+            // error let this pass without ever reaching the path it exists to
+            // cover -- a database or config failure, or a regression in
+            // stamping itself, read as "no ONNX here" and went green.
+            Err(EnrichmentWorkerError::RunModelError(
+                ModelError::MissingOrtDylibPath
+                | ModelError::Ort(_)
+                | ModelError::OrtSessionBuilder(_),
+            )) => {
+                eprintln!("skipping: ONNX Runtime is not available on this machine");
+                return;
+            }
+            Err(e) => panic!("could not build an enrichment worker: {e}"),
+        };
+        assert!(worker.enrichment_set > 0, "a set id was never assigned");
+
+        let db = crate::conf::get_test_db().await;
+        let set = db
+            .collection::<crate::enrichment::version::EnrichmentSet>(
+                crate::enrichment::version::SETS_COLLECTION,
+            )
+            .find_one(mongodb::bson::doc! { "_id": worker.enrichment_set })
+            .await
+            .expect("queryable")
+            .expect("the worker's set was interned");
+
+        // Every declared model is recorded, with the hash of the file on disk.
+        assert_eq!(
+            set.models.len(),
+            crate::enrichment::version::ZTF_MODELS.len()
+        );
+        for m in crate::enrichment::version::ZTF_MODELS {
+            let recorded = set.models.get(m.field).expect("model recorded");
+            assert_eq!(recorded.name, m.version);
+            assert_eq!(recorded.sha256.len(), 64);
+        }
+        assert_eq!(set.survey, "ztf");
     }
 }
 
