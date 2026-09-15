@@ -5,9 +5,14 @@ use crate::api::{
     routes::users::User,
 };
 
+use crate::api::admin::require_admin;
+use crate::api::routes::babamul::BabamulUser;
+use crate::conf::AppConfig;
+
 use actix_web::{get, web, HttpResponse};
 use futures::StreamExt;
 use mongodb::{bson::doc, Database};
+use tokio::io::AsyncReadExt;
 
 #[derive(serde::Deserialize)]
 struct CatalogsQueryParams {
@@ -223,4 +228,185 @@ pub async fn get_catalog_sample(
         }
     }
     response::ok_ser("success", &docs)
+}
+
+/// Report which declared catalogs are actually present
+///
+/// The admin page reads this to decide which catalogs to offer an ingest for.
+/// It reports drift and never acts on it -- converging a catalog is an explicit,
+/// attributed task, because it is hours to days of work and a typo in the
+/// config must not be able to start one.
+#[utoipa::path(
+    get,
+    path = "/catalogs/status",
+    responses(
+        (status = 200, description = "State of each declared catalog", body = Vec<serde_json::Value>),
+        (status = 403, description = "Not an admin"),
+        (status = 500, description = "Internal server error")
+    ),
+    tags=["Catalogs"]
+)]
+#[get("/catalogs/status")]
+pub async fn get_catalog_status(
+    db: web::Data<Database>,
+    config: web::Data<AppConfig>,
+    current_user: Option<web::ReqData<User>>,
+    babamul_user: Option<web::ReqData<BabamulUser>>,
+) -> HttpResponse {
+    if let Err(e) = require_admin(&current_user, &babamul_user) {
+        return e;
+    }
+    let declared = crate::catalogs::declared(&config);
+    let crossmatched = crate::catalogs::crossmatched(&config);
+    match crate::catalogs::status(&db, &declared, &crossmatched).await {
+        Ok(statuses) => response::ok_ser("success", statuses),
+        Err(e) => response::internal_error(&format!("failed to read catalog status: {e}")),
+    }
+}
+
+/// Where `export_catalog` writes, and the only directory these routes serve.
+fn export_root() -> std::path::PathBuf {
+    std::path::PathBuf::from(
+        std::env::var("BOOM_CATALOG_DATA_PATH").unwrap_or_else(|_| "data/catalogs".into()),
+    )
+    .join("export")
+}
+
+/// Whether a path component is safe to join onto the export root.
+///
+/// An allowlist rather than a check for `..`: these routes serve files off the
+/// task worker's disk, and the only names that can appear there are collection
+/// names and the files `export_catalog` writes.
+fn safe_component(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 128
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+        && !name.starts_with('.')
+}
+
+/// List catalog exports available for download
+///
+/// `export_catalog` writes these so a catalog BOOM cannot fetch again can be
+/// published somewhere durable — an archive with a stable URL — and then
+/// ingested as an ordinary download.
+#[utoipa::path(
+    get,
+    path = "/catalogs/exports",
+    responses(
+        (status = 200, description = "Exports on this worker's disk", body = Vec<serde_json::Value>),
+        (status = 403, description = "Not an admin")
+    ),
+    tags=["Catalogs"]
+)]
+#[get("/catalogs/exports")]
+pub async fn get_catalog_exports(
+    current_user: Option<web::ReqData<User>>,
+    babamul_user: Option<web::ReqData<BabamulUser>>,
+) -> HttpResponse {
+    if let Err(e) = require_admin(&current_user, &babamul_user) {
+        return e;
+    }
+    let root = export_root();
+    let mut exports = Vec::new();
+    let Ok(dirs) = std::fs::read_dir(&root) else {
+        // Nothing exported yet is not an error: it is the normal state.
+        return response::ok_ser("success", exports);
+    };
+    for dir in dirs.flatten() {
+        let name = dir.file_name().to_string_lossy().to_string();
+        if !dir.path().is_dir() || !safe_component(&name) {
+            continue;
+        }
+        let mut files = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(dir.path()) {
+            for entry in entries.flatten() {
+                let file = entry.file_name().to_string_lossy().to_string();
+                if !safe_component(&file) {
+                    continue;
+                }
+                let bytes = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                files.push(serde_json::json!({ "name": file, "bytes": bytes }));
+            }
+        }
+        files.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+        let manifest = std::fs::read_to_string(dir.path().join("manifest.json"))
+            .ok()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok());
+        exports.push(serde_json::json!({
+            "collection": name,
+            "files": files,
+            "manifest": manifest,
+        }));
+    }
+    exports.sort_by(|a, b| a["collection"].as_str().cmp(&b["collection"].as_str()));
+    response::ok_ser("success", exports)
+}
+
+/// Download one exported catalog file
+///
+/// Streamed rather than buffered: an export chunk is hundreds of megabytes, and
+/// these are meant to be moved to an archive, not opened in a browser tab.
+#[utoipa::path(
+    get,
+    path = "/catalogs/exports/{collection}/{file}",
+    params(
+        ("collection" = String, Path, description = "Exported collection"),
+        ("file" = String, Path, description = "File within that export")
+    ),
+    responses(
+        (status = 200, description = "The file"),
+        (status = 403, description = "Not an admin"),
+        (status = 404, description = "No such export")
+    ),
+    tags=["Catalogs"]
+)]
+#[get("/catalogs/exports/{collection}/{file}")]
+pub async fn download_catalog_export(
+    path: web::Path<(String, String)>,
+    current_user: Option<web::ReqData<User>>,
+    babamul_user: Option<web::ReqData<BabamulUser>>,
+) -> HttpResponse {
+    if let Err(e) = require_admin(&current_user, &babamul_user) {
+        return e;
+    }
+    let (collection, file) = path.into_inner();
+    if !safe_component(&collection) || !safe_component(&file) {
+        return response::bad_request("invalid export path");
+    }
+    let candidate = export_root().join(&collection).join(&file);
+    // Canonicalized and checked against the root, so a symlink inside the
+    // export directory cannot reach outside it either.
+    let (Ok(resolved), Ok(root)) = (candidate.canonicalize(), export_root().canonicalize()) else {
+        return response::not_found("no such export");
+    };
+    if !resolved.starts_with(&root) || !resolved.is_file() {
+        return response::not_found("no such export");
+    }
+
+    let Ok(file_handle) = tokio::fs::File::open(&resolved).await else {
+        return response::not_found("no such export");
+    };
+    let stream = futures::stream::unfold(file_handle, |mut handle| async move {
+        let mut buf = vec![0u8; 64 * 1024];
+        match handle.read(&mut buf).await {
+            Ok(0) => None,
+            Ok(n) => {
+                buf.truncate(n);
+                Some((Ok::<_, actix_web::Error>(web::Bytes::from(buf)), handle))
+            }
+            Err(e) => Some((
+                Err(actix_web::error::ErrorInternalServerError(e.to_string())),
+                handle,
+            )),
+        }
+    });
+    HttpResponse::Ok()
+        .content_type("application/octet-stream")
+        .append_header((
+            "content-disposition",
+            format!("attachment; filename=\"{file}\""),
+        ))
+        .streaming(stream)
 }
