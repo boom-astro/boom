@@ -101,6 +101,46 @@ services:
       # Increase timeouts for slower CI environments
       KAFKA_SOCKET_CONNECTION_SETUP_TIMEOUT_MS: 30000
       KAFKA_SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS: 60000
+  # Runs queued tasks in dev, the same way the prod task-worker service does.
+  task-worker:
+    env_file:
+      - .env
+    profiles:
+      - dev
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: dev
+      args:
+        # `git rev-parse HEAD` at compose time; blank if unset, which the
+        # ledger records as an unknown commit rather than a fake one.
+        BOOM_GIT_SHA: ${BOOM_GIT_SHA:-}
+    working_dir: /app
+    command:
+      - cargo
+      - watch
+      - --watch
+      - src
+      - --watch
+      - apache-avro-macros
+      - --watch
+      - Cargo.toml
+      - --watch
+      - Cargo.lock
+      - --ignore
+      - target
+      - -x
+      - run --bin task_worker -- --config /app/config.yaml
+    volumes:
+      - ./src:/app/src
+      - ./apache-avro-macros:/app/apache-avro-macros
+      - ./Cargo.toml:/app/Cargo.toml
+      - ./Cargo.lock:/app/Cargo.lock
+      - cargo-registry:/usr/local/cargo/registry
+      - cargo-git:/usr/local/cargo/git
+      - target:/app/target
+      - ${BOOM_CONFIG_PATH:-./config.yaml}:/app/config.yaml
+
   # Overrides to run the API in dev mode with cargo-watch, which automatically
   # rebuilds and restarts the container when source files change.
   api:

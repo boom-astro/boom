@@ -60,6 +60,10 @@ api:
     admin_password: "" # Set via BOOM_API__AUTH__ADMIN_PASSWORD environment variable
     admin_email: admin@example.com
 babamul:
+  # Emails that are admins, granted at every API startup. Admins can also be
+  # appointed in the admin page, and startup never revokes. To remove one: take
+  # them off this list first, then revoke them in the admin page.
+  admin_emails: [] # BOOM_BABAMUL__ADMIN_EMAILS
   enabled: false # Set via BOOM_BABAMUL__ENABLED environment variable
   webapp_url: https://babamul.caltech.edu # Set via BOOM_BABAMUL__WEBAPP_URL environment variable
   retention_days: 7
