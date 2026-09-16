@@ -554,7 +554,8 @@ async fn run_catalog_driven(
 ) -> Result<(), TaskError> {
     let aux_collection: mongodb::Collection<Document> =
         db.collection(&format!("{}_alerts_aux", survey));
-    let cat_collection: mongodb::Collection<Document> = db.collection(&catalog_config.catalog);
+    let cat_collection: mongodb::Collection<Document> =
+        db.collection(catalog_config.collection_name());
     let live_field = format!("cross_matches.{}", catalog_config.catalog);
     let temp_field = format!("cross_matches.{}_temp", catalog_config.catalog);
     let run_start_jd = Time::now().to_jd();
@@ -942,7 +943,8 @@ async fn pick_direction(
 ) -> Direction {
     let aux_collection: mongodb::Collection<Document> =
         db.collection(&format!("{}_alerts_aux", survey));
-    let cat_collection: mongodb::Collection<Document> = db.collection(&catalog_config.catalog);
+    let cat_collection: mongodb::Collection<Document> =
+        db.collection(catalog_config.collection_name());
     let aux_count = aux_collection.estimated_document_count().await.unwrap_or(0);
     let cat_count = cat_collection.estimated_document_count().await.unwrap_or(0);
     info!(
