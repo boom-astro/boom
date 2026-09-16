@@ -188,9 +188,13 @@ pub fn track_to_psv(
     };
     let trk_sub = track_sub(first);
 
+    // Tracklets of one track can share a detection, and the MPC must not be
+    // sent the same observation twice.
+    let mut seen = std::collections::HashSet::new();
     let mut rows: Vec<&Detection> = ordered
         .iter()
         .flat_map(|t| t.ids.iter())
+        .filter(|id| seen.insert(**id))
         .filter_map(|id| by_id.get(id).copied())
         .collect();
     rows.sort_by(|a, b| a.jd.partial_cmp(&b.jd).unwrap_or(std::cmp::Ordering::Equal));
@@ -340,6 +344,27 @@ mod tests {
             .collect();
         assert_eq!(subs.len(), 1);
         assert!(subs.iter().next().unwrap().len() <= 8);
+    }
+
+    /// A detection shared by two tracklets is submitted once, not twice.
+    #[test]
+    fn test_a_shared_detection_is_not_submitted_twice() {
+        let a = Tracklet::from_motion(vec![1, 2], 2461292.78, 258.39, 54.38, 0.2, 0.02, 0.1);
+        let b = Tracklet::from_motion(vec![2, 3], 2461292.82, 258.40, 54.385, 0.2, 0.02, 0.1);
+        let psv = track_to_psv(
+            &[a, b],
+            &detections(),
+            &ztf_header("M. Coughlin", "ZTF"),
+            Uncertainty {
+                rms_ra_arcsec: 0.15,
+                rms_dec_arcsec: 0.15,
+            },
+        );
+        let rows: Vec<&str> = psv
+            .lines()
+            .filter(|l| !l.starts_with('#') && !l.starts_with('!') && !l.starts_with("trkSub"))
+            .collect();
+        assert_eq!(rows.len(), 3, "detection 2 was submitted twice: {rows:?}");
     }
 
     /// A track submits as one trkSub, however many nights it spans.

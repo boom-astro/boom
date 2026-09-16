@@ -6,14 +6,14 @@
 //! where anything new would be.
 
 use boom::conf::{load_dotenv, AppConfig};
-use boom::utils::heliolinc::{default_hypotheses, link_tracklets, LinkConfig};
+use boom::utils::heliolinc::{default_hypotheses, link_tracklets, LinkConfig, Track};
 use boom::utils::linking::{find_tracklets, Detection, Tracklet, TrackletConfig};
 use clap::Parser;
 use futures::StreamExt;
 use mongodb::bson::{doc, Document};
 use rayon::prelude::*;
 use std::collections::HashMap;
-use tracing::{info, Level};
+use tracing::{error, info, Level};
 use tracing_subscriber::FmtSubscriber;
 
 #[derive(Parser)]
@@ -67,6 +67,10 @@ struct Cli {
     /// Largest sky residual a fitted orbit may leave, arcseconds.
     #[arg(long, default_value_t = 2.0)]
     max_residual: f64,
+
+    /// Write the linked tracks here as JSON, one object per line.
+    #[arg(long, value_name = "FILE")]
+    out_tracks: Option<String>,
 
     /// Report at most this many tracklets.
     #[arg(long, default_value_t = 20)]
@@ -304,6 +308,60 @@ fn score(tracklets: &[Tracklet], labels: &HashMap<i64, String>) -> (usize, usize
     (pure, mixed, unlabelled)
 }
 
+/// Write each track as a JSON line: its orbit, and every detection under it.
+///
+/// Enough for a consumer to rebuild the track without reading the database --
+/// the epochs carry their own positions, which is what a reviewer needs.
+fn dump_tracks(
+    path: &str,
+    tracks: &[Track],
+    tracklets: &[Tracklet],
+    detections: &[Detection],
+    labels: &HashMap<i64, String>,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    use std::io::Write;
+    let by_id: HashMap<i64, &Detection> = detections.iter().map(|d| (d.id, d)).collect();
+    let mut file = std::io::BufWriter::new(std::fs::File::create(path)?);
+
+    for (i, track) in tracks.iter().enumerate() {
+        let mut epochs: Vec<serde_json::Value> = Vec::new();
+        for &m in &track.members {
+            for id in &tracklets[m].ids {
+                let Some(d) = by_id.get(id) else { continue };
+                epochs.push(serde_json::json!({
+                    "candid": d.id.to_string(),
+                    "jd": d.jd,
+                    "ra": d.ra,
+                    "dec": d.dec,
+                    "mag": d.mag,
+                    "band": d.band.map(|b| b.to_string()),
+                    "ssnamenr": labels.get(&d.id),
+                }));
+            }
+        }
+        epochs.sort_by(|a, b| {
+            a["jd"]
+                .as_f64()
+                .unwrap_or(0.0)
+                .partial_cmp(&b["jd"].as_f64().unwrap_or(0.0))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let line = serde_json::json!({
+            "track_id": format!("boom_trk_{i:06}"),
+            "n_tracklets": track.members.len(),
+            "nights": track.nights,
+            "residual_arcsec": track.residual_arcsec,
+            "rms_au": track.rms_au,
+            "hypothesis_r_au": track.hypothesis.r_au,
+            "hypothesis_rdot_au_per_day": track.hypothesis.rdot_au_per_day,
+            "epochs": epochs,
+        });
+        writeln!(file, "{line}")?;
+    }
+    file.flush()?;
+    Ok(tracks.len())
+}
+
 #[tokio::main]
 async fn main() {
     let subscriber = FmtSubscriber::builder()
@@ -418,6 +476,13 @@ async fn main() {
                 pure, mixed, recovered
             );
         }
+        if let Some(path) = &args.out_tracks {
+            match dump_tracks(path, &tracks, &tracklets, &detections, &labels) {
+                Ok(n) => info!("wrote {} tracks to {}", n, path),
+                Err(e) => error!("could not write tracks: {}", e),
+            }
+        }
+
         for track in tracks.iter().take(args.show) {
             let name = track
                 .members
