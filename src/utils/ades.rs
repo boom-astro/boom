@@ -158,6 +158,49 @@ pub fn to_psv(
     out
 }
 
+/// Render one track as ADES, every tracklet under a single `trkSub`.
+///
+/// The MPC links the observations of a submission by `trkSub`, so a track has
+/// to carry one across all its nights; emitting a `trkSub` per tracklet would
+/// present the track as unlinked pieces and discard the linkage.
+pub fn track_to_psv(
+    tracklets: &[Tracklet],
+    detections: &[Detection],
+    header: &SubmissionHeader,
+    uncertainty: Uncertainty,
+) -> String {
+    let by_id: HashMap<i64, &Detection> = detections.iter().map(|d| (d.id, d)).collect();
+
+    let mut out = header_block(header);
+    out.push_str(COLUMNS);
+    out.push('\n');
+
+    // Seeded from the earliest tracklet, so the identifier does not depend on
+    // the order the caller happens to hold them in.
+    let mut ordered: Vec<&Tracklet> = tracklets.iter().collect();
+    ordered.sort_by(|a, b| {
+        a.jd_ref
+            .partial_cmp(&b.jd_ref)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let Some(first) = ordered.first() else {
+        return out;
+    };
+    let trk_sub = track_sub(first);
+
+    let mut rows: Vec<&Detection> = ordered
+        .iter()
+        .flat_map(|t| t.ids.iter())
+        .filter_map(|id| by_id.get(id).copied())
+        .collect();
+    rows.sort_by(|a, b| a.jd.partial_cmp(&b.jd).unwrap_or(std::cmp::Ordering::Equal));
+    for detection in rows {
+        out.push_str(&row(&trk_sub, detection, header, uncertainty));
+        out.push('\n');
+    }
+    out
+}
+
 /// ZTF at Palomar, as the MPC lists it.
 pub fn ztf_header(submitter: &str, observers: &str) -> SubmissionHeader {
     SubmissionHeader {
@@ -297,6 +340,28 @@ mod tests {
             .collect();
         assert_eq!(subs.len(), 1);
         assert!(subs.iter().next().unwrap().len() <= 8);
+    }
+
+    /// A track submits as one trkSub, however many nights it spans.
+    #[test]
+    fn test_a_track_shares_one_trksub_across_tracklets() {
+        let a = tracklet();
+        let b = Tracklet::from_motion(vec![2, 3], 2461293.80, 258.5, 54.40, 0.2, 0.02, 0.1);
+        let psv = track_to_psv(
+            &[a, b],
+            &detections(),
+            &ztf_header("M. Coughlin", "ZTF"),
+            Uncertainty {
+                rms_ra_arcsec: 0.15,
+                rms_dec_arcsec: 0.15,
+            },
+        );
+        let subs: std::collections::HashSet<&str> = psv
+            .lines()
+            .filter(|l| !l.starts_with('#') && !l.starts_with('!') && !l.starts_with("trkSub"))
+            .map(|l| l.split('|').next().unwrap().trim())
+            .collect();
+        assert_eq!(subs.len(), 1, "track split across {subs:?}");
     }
 
     #[test]
