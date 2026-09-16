@@ -1,5 +1,6 @@
 pub mod ades;
 pub mod comets;
+pub mod cosmology;
 pub mod cutouts;
 pub mod data;
 pub mod db;
@@ -11,6 +12,7 @@ pub mod heliolinc;
 pub mod identify;
 pub mod lightcurves;
 pub mod linking;
+pub mod moc;
 pub mod mpcorb;
 pub mod o11y;
 pub mod orbit_fit;

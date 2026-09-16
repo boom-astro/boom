@@ -344,6 +344,40 @@ pub fn uses_field_in_filter(filter_pipeline: &[serde_json::Value], field: &str) 
     None
 }
 
+/// Joined documents the `$addFields` stages null out once their arrays have been
+/// flattened to the top level, so any path into one reads as empty rather than
+/// as the data it names.
+const NULLED_JOINS: [&str; 3] = ["aux", "ztf_aux", "lsst_aux"];
+
+/// The top-level name a path into a nulled join should have used, if it is one.
+fn flattened_name(path: &str) -> Option<&str> {
+    NULLED_JOINS.iter().find_map(|join| {
+        path.strip_prefix(join)
+            .and_then(|rest| rest.strip_prefix('.'))
+            .or(if path == *join { Some("") } else { None })
+    })
+}
+
+/// The first reference to a nulled join anywhere in `value`, as `(path, name)`.
+///
+/// Object keys are field paths; string values are only references when they are
+/// `$`-prefixed, so a literal naming one of these is left alone.
+fn find_nulled_join(value: &serde_json::Value) -> Option<(String, String)> {
+    match value {
+        serde_json::Value::String(s) => s
+            .strip_prefix('$')
+            .and_then(flattened_name)
+            .map(|name| (s.clone(), name.to_string())),
+        serde_json::Value::Array(items) => items.iter().find_map(find_nulled_join),
+        serde_json::Value::Object(map) => map.iter().find_map(|(key, nested)| {
+            flattened_name(key)
+                .map(|name| (key.clone(), name.to_string()))
+                .or_else(|| find_nulled_join(nested))
+        }),
+        _ => None,
+    }
+}
+
 /// Validates a MongoDB aggregation pipeline used as a filter.
 ///
 /// # Arguments
@@ -368,6 +402,19 @@ pub fn validate_filter_pipeline(filter_pipeline: &[serde_json::Value]) -> Result
         return Err(FilterError::InvalidFilterPipeline(
             "Filter pipeline cannot be empty".to_string(),
         ));
+    }
+    for stage in filter_pipeline {
+        if let Some((path, name)) = find_nulled_join(stage) {
+            let advice = if name.is_empty() {
+                "its arrays are available at the top level".to_string()
+            } else {
+                format!("use `{name}` instead")
+            };
+            return Err(FilterError::InvalidFilterPipeline(format!(
+                "`{path}` always reads as empty: a joined document is discarded once \
+                 its arrays are flattened, so {advice}."
+            )));
+        }
     }
     let mut nb_match_stages = 0;
     for (i, stage) in filter_pipeline.iter().enumerate() {
@@ -1304,6 +1351,54 @@ mod tests {
         // uses_field_in_filter should return false for "candidate.jd"
         let stage_index = uses_field_in_filter(&pipeline, "candidate.jd");
         assert!(stage_index.is_none());
+    }
+
+    /// A path into a joined document reads as empty rather than erroring, so it
+    /// is refused with the name that carries the data.
+    #[test]
+    fn nulled_join_paths_are_refused() {
+        for (stage, expected) in [
+            (
+                serde_json::json!({"$match": {"$expr": {"$gt": [{"$size": "$aux.fp_hists"}, 0]}}}),
+                "fp_hists",
+            ),
+            (
+                serde_json::json!({"$match": {"aux.prv_candidates.magpsf": {"$lt": 20}}}),
+                "prv_candidates.magpsf",
+            ),
+            (
+                serde_json::json!({"$project": {"x": "$ztf_aux.aliases"}}),
+                "aliases",
+            ),
+            (
+                serde_json::json!({"$match": {"lsst_aux.fp_hists": {"$exists": true}}}),
+                "fp_hists",
+            ),
+        ] {
+            let error = validate_filter_pipeline(&[stage.clone()])
+                .expect_err(&format!("{stage} should be refused"));
+            let message = error.to_string();
+            assert!(
+                message.contains(expected),
+                "{message} should name `{expected}`"
+            );
+        }
+    }
+
+    /// The flattened names, and fields that merely start with the same letters,
+    /// stay usable.
+    #[test]
+    fn flattened_and_lookalike_paths_are_allowed() {
+        assert!(
+            find_nulled_join(&serde_json::json!({"$match": {"fp_hists.jd": {"$gt": 0}}})).is_none()
+        );
+        assert!(find_nulled_join(&serde_json::json!({"$match": {"auxiliary": 1}})).is_none());
+        assert!(
+            find_nulled_join(&serde_json::json!({"$match": {"note": "aux.fp_hists"}})).is_none()
+        );
+        assert!(
+            find_nulled_join(&serde_json::json!({"$project": {"x": "$prv_candidates"}})).is_none()
+        );
     }
 
     #[tokio::test]
