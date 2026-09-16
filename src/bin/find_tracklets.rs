@@ -6,11 +6,12 @@
 //! where anything new would be.
 
 use boom::conf::{load_dotenv, AppConfig};
-use boom::utils::heliolinc::{link_tracklets, main_belt_hypotheses, LinkConfig};
+use boom::utils::heliolinc::{default_hypotheses, link_tracklets, LinkConfig};
 use boom::utils::linking::{find_tracklets, Detection, Tracklet, TrackletConfig};
 use clap::Parser;
 use futures::StreamExt;
 use mongodb::bson::{doc, Document};
+use rayon::prelude::*;
 use std::collections::HashMap;
 use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
@@ -41,6 +42,31 @@ struct Cli {
     /// Detections per tracklet.
     #[arg(long, default_value_t = 3)]
     min_detections: usize,
+
+    /// Fastest apparent motion a tracklet may have, degrees per day.
+    #[arg(long, default_value_t = 1.0)]
+    max_rate: f64,
+
+    /// Shortest on-sky arc a pair may span, arcseconds.
+    #[arg(long, default_value_t = 10.0)]
+    min_arc: f64,
+
+    /// Shortest time between two detections of a pair, days.
+    #[arg(long, default_value_t = 0.1 / 24.0)]
+    min_pair_dt: f64,
+
+    /// Longest a tracklet may span, days. Separate from `--span`, which is how
+    /// much data to read: widening it widens the pair search radius.
+    #[arg(long, default_value_t = 1.5 / 24.0)]
+    max_tracklet_span: f64,
+
+    /// Distinct nights a track must appear on.
+    #[arg(long, default_value_t = 2)]
+    min_nights: usize,
+
+    /// Largest sky residual a fitted orbit may leave, arcseconds.
+    #[arg(long, default_value_t = 2.0)]
+    max_residual: f64,
 
     /// Report at most this many tracklets.
     #[arg(long, default_value_t = 20)]
@@ -74,18 +100,21 @@ fn tracklets_per_night(detections: &[Detection], cfg: &TrackletConfig) -> Vec<Tr
     }
     let mut nights: Vec<_> = by_night.into_iter().collect();
     nights.sort_by_key(|(n, _)| *n);
-    let mut out = Vec::new();
-    for (night, dets) in nights {
-        let found = find_tracklets(&dets, cfg);
-        info!(
-            "night {}: {} detections -> {} tracklets",
-            night,
-            dets.len(),
-            found.len()
-        );
-        out.extend(found);
-    }
-    out
+    // Nights share nothing, and collecting in order keeps the result independent
+    // of which finishes first.
+    nights
+        .par_iter()
+        .flat_map(|(night, dets)| {
+            let found = find_tracklets(dets, cfg);
+            info!(
+                "night {}: {} detections -> {} tracklets",
+                night,
+                dets.len(),
+                found.len()
+            );
+            found
+        })
+        .collect()
 }
 
 /// How well tracks reproduce the labels: pure, mixed, and objects recovered.
@@ -319,7 +348,10 @@ async fn main() {
 
     let cfg = TrackletConfig {
         min_detections: args.min_detections,
-        max_span_days: args.span,
+        max_span_days: args.max_tracklet_span,
+        max_rate_deg_per_day: args.max_rate,
+        min_arc_arcsec: args.min_arc,
+        min_pair_dt_days: args.min_pair_dt,
         ..TrackletConfig::default()
     };
     let started = std::time::Instant::now();
@@ -363,11 +395,12 @@ async fn main() {
             + jds.iter().cloned().fold(f64::MIN, f64::max))
             / 2.0;
         let link_cfg = LinkConfig {
-            hypotheses: main_belt_hypotheses(),
+            hypotheses: default_hypotheses(),
             reference_jd,
             position_tol_au: args.position_tol,
             velocity_tol_au_per_day: args.velocity_tol,
-            min_nights: 2,
+            min_nights: args.min_nights,
+            max_residual_arcsec: args.max_residual,
         };
         let started = std::time::Instant::now();
         let tracks = link_tracklets(&tracklets, &link_cfg);

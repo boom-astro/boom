@@ -28,10 +28,15 @@ pub struct TrackletConfig {
     /// Search radius when attaching a detection to a seed's prediction.
     pub match_radius_arcsec: f64,
     pub min_detections: usize,
-    /// Guards against pairing across nights.
+    /// Longest a tracklet may span, days. Also bounds the pair search radius,
+    /// since two detections cannot be further apart than the fastest motion
+    /// carries in this time.
     pub max_span_days: f64,
     /// Two detections in the same exposure cannot constrain a rate.
     pub min_pair_dt_days: f64,
+    /// Shortest on-sky arc a pair may span, arcseconds. Below this the measured
+    /// rate is dominated by astrometric error rather than by motion.
+    pub min_arc_arcsec: f64,
 }
 
 impl Default for TrackletConfig {
@@ -40,13 +45,18 @@ impl Default for TrackletConfig {
             // A main-belt asteroid at opposition moves ~0.2 deg/day; this keeps
             // slow movers while rejecting the stationary field.
             min_rate_deg_per_day: 0.02,
-            // Fast enough for NEOs without pairing unrelated sources across the field.
-            max_rate_deg_per_day: 5.0,
+            // Matches the rate heliolinx's make_tracklets accepts: spurious pairs
+            // grow as the square of this, and genuinely faster movers trail.
+            max_rate_deg_per_day: 1.0,
             max_rms_arcsec: 1.5,
             match_radius_arcsec: 3.0,
             min_detections: 3,
-            max_span_days: 0.5,
-            min_pair_dt_days: 30.0 / 1440.0,
+            // heliolinx's maxtime, which it takes in hours: 1.5 hours.
+            max_span_days: 1.5 / 24.0,
+            // heliolinx's mintime, which it takes in hours, converted: 6 minutes.
+            min_pair_dt_days: 0.1 / 24.0,
+            // heliolinx's minarc: rejects the pairs a stationary star produces.
+            min_arc_arcsec: 10.0,
         }
     }
 }
@@ -245,6 +255,9 @@ pub fn find_tracklets(detections: &[Detection], cfg: &TrackletConfig) -> Vec<Tra
                 continue;
             }
             let sep = angular_separation_deg(a.ra, a.dec, b.ra, b.dec);
+            if sep * 3600.0 < cfg.min_arc_arcsec {
+                continue;
+            }
             let rate = sep / dt;
             if rate < cfg.min_rate_deg_per_day || rate > cfg.max_rate_deg_per_day {
                 continue;
@@ -337,7 +350,8 @@ mod tests {
             .collect()
     }
 
-    const NIGHT: [f64; 4] = [2460000.70, 2460000.75, 2460000.80, 2460000.85];
+    // Spaced so all four fit inside the pair window, as a real cadence does.
+    const NIGHT: [f64; 4] = [2460000.700, 2460000.715, 2460000.730, 2460000.745];
 
     #[test]
     fn test_angular_separation_is_symmetric_and_scaled() {
@@ -404,7 +418,8 @@ mod tests {
 
     #[test]
     fn test_honours_min_detections() {
-        let dets = mover(120.0, 20.0, 0.30, 0.0, &NIGHT[..2], 1);
+        // Far enough apart in time to clear the pair gate, which this is not about.
+        let dets = mover(120.0, 20.0, 0.30, 0.0, &[NIGHT[0], NIGHT[3]], 1);
         let strict = TrackletConfig::default();
         assert!(find_tracklets(&dets, &strict).is_empty());
         let pairs_ok = TrackletConfig {
@@ -442,7 +457,8 @@ mod tests {
 
     #[test]
     fn test_handles_the_ra_wrap() {
-        let dets = mover(359.98, 5.0, 0.30, 0.0, &NIGHT, 1);
+        // Close enough to 360 that the night's motion carries it past the wrap.
+        let dets = mover(359.995, 5.0, 0.30, 0.0, &NIGHT, 1);
         assert!(dets.iter().any(|d| d.ra < 1.0) && dets.iter().any(|d| d.ra > 359.0));
         let found = find_tracklets(&dets, &TrackletConfig::default());
         assert_eq!(found.len(), 1);

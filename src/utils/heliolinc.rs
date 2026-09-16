@@ -10,7 +10,9 @@
 //! propagated states is then the whole method (Holman et al. 2018).
 
 use crate::utils::linking::Tracklet;
+use crate::utils::orbit_fit::{fit_orbit, rms_arcsec, Observation};
 use crate::utils::sso_geometry::{earth_position, heliocentric_position, OrbitalElements};
+use rayon::prelude::*;
 use std::collections::HashMap;
 
 /// Heliocentric gravitational parameter, au^3/day^2.
@@ -49,6 +51,9 @@ pub struct Track {
     /// Spread of the member states about their mean position, au. Lower is a
     /// better fit, so it picks between hypotheses that both cluster a track.
     pub rms_au: f64,
+    /// How well a fitted orbit reproduces the members' positions, arcseconds.
+    /// `None` when there were too few to constrain one.
+    pub residual_arcsec: Option<f64>,
 }
 
 /// Bounds the search and how tightly propagated states must agree.
@@ -63,34 +68,78 @@ pub struct LinkConfig {
     pub velocity_tol_au_per_day: f64,
     /// Tracks must draw on at least this many distinct nights.
     pub min_nights: usize,
+    /// Largest sky residual a fitted orbit may leave, arcseconds. Candidates
+    /// that no orbit explains are rejected rather than ranked.
+    pub max_residual_arcsec: f64,
 }
 
-/// A grid over the main belt, the region most of the linkable population sits in.
-pub fn main_belt_hypotheses() -> Vec<Hypothesis> {
+/// Largest radial velocity a bound object can have at `r_au`, au/day.
+fn escape_speed(r_au: f64) -> f64 {
+    (2.0 * MU / r_au).sqrt()
+}
+
+/// Hypotheses over `distances` heliocentric distances from `first_au` to
+/// `last_au`, spaced geometrically so the closer, faster-changing region is
+/// sampled more finely.
+///
+/// Radial velocity carries the sampling: a wrong choice displaces a propagated
+/// state by its error times the baseline, so the step is set from the
+/// clustering tolerance and the longest baseline the search spans, while the
+/// range covers everything up to escape speed.
+fn hypothesis_grid(
+    first_au: f64,
+    last_au: f64,
+    distances: u32,
+    baseline_days: f64,
+    tol_au: f64,
+) -> Vec<Hypothesis> {
+    let step = (tol_au / baseline_days).max(f64::MIN_POSITIVE);
+    let ratio = (last_au / first_au).powf(1.0 / f64::from(distances.saturating_sub(1).max(1)));
     let mut out = Vec::new();
-    let mut r = 1.8;
-    while r <= 3.6 {
-        // Radial velocity is bounded by the circular speed at this distance.
-        let v_circ = (MU / r).sqrt();
-        for k in -2..=2 {
+    for i in 0..distances {
+        let r_au = first_au * ratio.powi(i as i32);
+        let limit = 0.98 * escape_speed(r_au);
+        let arms = (limit / step).floor() as i64;
+        for k in -arms..=arms {
             out.push(Hypothesis {
-                r_au: r,
-                rdot_au_per_day: 0.35 * v_circ * f64::from(k) / 2.0,
+                r_au,
+                rdot_au_per_day: step * k as f64,
             });
         }
-        r += 0.2;
     }
+    out
+}
+
+/// A grid over the main belt and beyond, matching the span heliolinx searches.
+pub fn main_belt_hypotheses() -> Vec<Hypothesis> {
+    hypothesis_grid(1.5, 9.5, 29, 7.0, 0.002)
+}
+
+/// A grid over the near-Earth region.
+///
+/// Overlaps the belt grid deliberately: an object's distance is unknown, and
+/// the two populations are separated by orbit rather than by where they happen
+/// to be when detected.
+pub fn neo_hypotheses() -> Vec<Hypothesis> {
+    hypothesis_grid(1.1, 5.6, 18, 7.0, 0.002)
+}
+
+/// Both populations, which is what a survey-wide search needs.
+pub fn default_hypotheses() -> Vec<Hypothesis> {
+    let mut out = neo_hypotheses();
+    out.extend(main_belt_hypotheses());
     out
 }
 
 impl Default for LinkConfig {
     fn default() -> Self {
         Self {
-            hypotheses: main_belt_hypotheses(),
+            hypotheses: default_hypotheses(),
             reference_jd: 0.0,
             position_tol_au: 0.002,
             velocity_tol_au_per_day: 0.0004,
             min_nights: 2,
+            max_residual_arcsec: 2.0,
         }
     }
 }
@@ -289,14 +338,78 @@ fn cell(pos: &[f64; 3], tol: f64) -> (i64, i64, i64) {
     )
 }
 
+/// Whether two propagated states agree closely enough to belong to one object.
+fn agree(a: &State, b: &State, cfg: &LinkConfig) -> bool {
+    let dp = [
+        b.pos[0] - a.pos[0],
+        b.pos[1] - a.pos[1],
+        b.pos[2] - a.pos[2],
+    ];
+    let dv = [
+        b.vel[0] - a.vel[0],
+        b.vel[1] - a.vel[1],
+        b.vel[2] - a.vel[2],
+    ];
+    norm(&dp) <= cfg.position_tol_au && norm(&dv) <= cfg.velocity_tol_au_per_day
+}
+
+/// Every state reachable from `seed` through chains of agreeing states.
+///
+/// Grown transitively rather than taken from the seed alone: an object observed
+/// over many nights spreads its propagated states further than one tolerance
+/// width, and collecting only the seed's own neighbours splits it into pieces.
+/// `used` members are skipped, so a group is never stolen from a kept track.
+fn connected_group(
+    seed: usize,
+    states: &[(usize, State)],
+    grid: &HashMap<(i64, i64, i64), Vec<usize>>,
+    used: &[bool],
+    cfg: &LinkConfig,
+) -> Vec<usize> {
+    let mut group = vec![seed];
+    let mut seen = std::collections::HashSet::from([seed]);
+    let mut queue = vec![seed];
+
+    while let Some(current) = queue.pop() {
+        let base = cell(&states[current].1.pos, cfg.position_tol_au);
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                for dz in -1..=1 {
+                    let Some(bucket) = grid.get(&(base.0 + dx, base.1 + dy, base.2 + dz)) else {
+                        continue;
+                    };
+                    for &m in bucket {
+                        if used[m] || seen.contains(&m) {
+                            continue;
+                        }
+                        if agree(&states[current].1, &states[m].1, cfg) {
+                            seen.insert(m);
+                            group.push(m);
+                            queue.push(m);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    group
+}
+
 /// Link tracklets into tracks, sweeping every hypothesis in `cfg`.
 ///
 /// A tracklet may appear in more than one track when several hypotheses fit it;
 /// the caller decides which to keep.
-pub fn link_tracklets(tracklets: &[Tracklet], cfg: &LinkConfig) -> Vec<Track> {
+/// Tracks this one hypothesis produces.
+///
+/// Each hypothesis is independent -- it propagates every tracklet under its own
+/// assumption and clusters the result -- so the sweep parallelises over them.
+fn tracks_for_hypothesis(
+    tracklets: &[Tracklet],
+    hypothesis: &Hypothesis,
+    cfg: &LinkConfig,
+) -> Vec<Track> {
     let mut tracks: Vec<Track> = Vec::new();
-
-    for hypothesis in &cfg.hypotheses {
+    {
         // Propagated state per tracklet under this hypothesis.
         let mut states: Vec<(usize, State)> = Vec::new();
         for (i, t) in tracklets.iter().enumerate() {
@@ -307,8 +420,9 @@ pub fn link_tracklets(tracklets: &[Tracklet], cfg: &LinkConfig) -> Vec<Track> {
                 states.push((i, p));
             }
         }
+        // Nothing can cluster with fewer than two states.
         if states.len() < 2 {
-            continue;
+            return tracks;
         }
 
         // Grid on position so only nearby states are compared.
@@ -319,44 +433,17 @@ pub fn link_tracklets(tracklets: &[Tracklet], cfg: &LinkConfig) -> Vec<Track> {
                 .push(k);
         }
 
+        // Marks a state's component as walked. Components are equivalence
+        // classes, so re-seeding from another member only rediscovers the same
+        // one; without this a rejected component is re-walked once per member.
         let mut used = vec![false; states.len()];
         for k in 0..states.len() {
             if used[k] {
                 continue;
             }
-            let (_, ref sk) = states[k];
-            let base = cell(&sk.pos, cfg.position_tol_au);
-            let mut group = vec![k];
-            for dx in -1..=1 {
-                for dy in -1..=1 {
-                    for dz in -1..=1 {
-                        let key = (base.0 + dx, base.1 + dy, base.2 + dz);
-                        let Some(bucket) = grid.get(&key) else {
-                            continue;
-                        };
-                        for &m in bucket {
-                            if m == k || used[m] {
-                                continue;
-                            }
-                            let (_, ref sm) = states[m];
-                            let dp = [
-                                sm.pos[0] - sk.pos[0],
-                                sm.pos[1] - sk.pos[1],
-                                sm.pos[2] - sk.pos[2],
-                            ];
-                            let dv = [
-                                sm.vel[0] - sk.vel[0],
-                                sm.vel[1] - sk.vel[1],
-                                sm.vel[2] - sk.vel[2],
-                            ];
-                            if norm(&dp) <= cfg.position_tol_au
-                                && norm(&dv) <= cfg.velocity_tol_au_per_day
-                            {
-                                group.push(m);
-                            }
-                        }
-                    }
-                }
+            let group = connected_group(k, &states, &grid, &used, cfg);
+            for &g in &group {
+                used[g] = true;
             }
             if group.len() < 2 {
                 continue;
@@ -370,9 +457,6 @@ pub fn link_tracklets(tracklets: &[Tracklet], cfg: &LinkConfig) -> Vec<Track> {
                 .len();
             if nights < cfg.min_nights {
                 continue;
-            }
-            for &g in &group {
-                used[g] = true;
             }
 
             let n = group.len() as f64;
@@ -398,21 +482,80 @@ pub fn link_tracklets(tracklets: &[Tracklet], cfg: &LinkConfig) -> Vec<Track> {
                 state: State { pos, vel },
                 nights,
                 rms_au: (sq / n).sqrt(),
+                residual_arcsec: None,
             });
         }
     }
 
-    // Longest first, then tightest, so deduplication keeps the best version.
+    tracks
+}
+
+/// Link tracklets into tracks, sweeping every hypothesis in `cfg`.
+///
+/// A tracklet may appear in more than one track when several hypotheses fit it;
+/// the caller decides which to keep.
+/// Score a candidate by how well one orbit reproduces its members' positions.
+///
+/// A cluster in state space is only a claim that the tracklets agree under some
+/// assumed distance; fitting the sky positions tests that claim against the
+/// astrometry itself, which is what separates a real track from tracklets that
+/// happen to land near each other.
+fn score(track: &mut Track, tracklets: &[Tracklet], cfg: &LinkConfig) {
+    let observations: Vec<Observation> = track
+        .members
+        .iter()
+        .map(|&m| Observation {
+            jd: tracklets[m].jd_ref,
+            ra: tracklets[m].ra_ref,
+            dec: tracklets[m].dec_ref,
+        })
+        .collect();
+
+    track.residual_arcsec = match fit_orbit(&observations, &track.state, cfg.reference_jd, 20) {
+        Some(fit) => {
+            track.state = fit.state;
+            Some(fit.rms_arcsec)
+        }
+        // Too few positions to refine six parameters, so take the state as it
+        // stands rather than discarding a candidate for being short.
+        None => rms_arcsec(&track.state, cfg.reference_jd, &observations),
+    };
+}
+
+/// Link tracklets into tracks, sweeping every hypothesis in `cfg`.
+///
+/// Every hypothesis contributes its candidates, and the orbit fit decides
+/// between those that overlap: a tracklet is reported in whichever surviving
+/// track explains its astrometry best, not whichever hypothesis reached it
+/// first.
+pub fn link_tracklets(tracklets: &[Tracklet], cfg: &LinkConfig) -> Vec<Track> {
+    // Collected in hypothesis order, so the result does not depend on thread
+    // scheduling and deduplication stays reproducible.
+    let mut tracks: Vec<Track> = cfg
+        .hypotheses
+        .par_iter()
+        .flat_map(|hypothesis| tracks_for_hypothesis(tracklets, hypothesis, cfg))
+        .collect();
+
+    tracks
+        .par_iter_mut()
+        .for_each(|track| score(track, tracklets, cfg));
+
+    // An orbit nothing explains is not a track, whatever its states did.
+    tracks.retain(|t| {
+        t.residual_arcsec
+            .is_some_and(|r| r <= cfg.max_residual_arcsec)
+    });
+
+    // Best-fitting first, then longest, so deduplication keeps the candidate
+    // the astrometry supports rather than the one found earliest.
     tracks.sort_by(|a, b| {
-        b.members
-            .len()
-            .cmp(&a.members.len())
+        a.residual_arcsec
+            .unwrap_or(f64::INFINITY)
+            .partial_cmp(&b.residual_arcsec.unwrap_or(f64::INFINITY))
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(b.members.len().cmp(&a.members.len()))
             .then(b.nights.cmp(&a.nights))
-            .then(
-                a.rms_au
-                    .partial_cmp(&b.rms_au)
-                    .unwrap_or(std::cmp::Ordering::Equal),
-            )
     });
     deduplicate(tracks)
 }
@@ -440,6 +583,213 @@ pub fn deduplicate(tracks: Vec<Track>) -> Vec<Track> {
 mod tests {
     use super::*;
     use crate::utils::sso_geometry::geometry_at;
+
+    /// The near-Earth grid starts inside the belt and overlaps it, since an
+    /// object's distance is not known before it is linked.
+    #[test]
+    fn neo_hypotheses_cover_the_near_earth_region() {
+        let neo = neo_hypotheses();
+        let closest = neo.iter().map(|h| h.r_au).fold(f64::INFINITY, f64::min);
+        assert!(closest <= 1.1, "closest hypothesis is {closest} au");
+        assert!(
+            neo.iter().any(|h| h.r_au < 1.3),
+            "nothing inside the NEO perihelion limit"
+        );
+    }
+
+    /// Radial velocity is sampled to escape speed: anything faster is unbound
+    /// and anything coarser lets a real object fall between hypotheses.
+    #[test]
+    fn rdot_spans_the_bound_range_at_each_distance() {
+        let belt = main_belt_hypotheses();
+        let inner = belt.iter().map(|h| h.r_au).fold(f64::INFINITY, f64::min);
+        let widest = belt
+            .iter()
+            .filter(|h| h.r_au == inner)
+            .map(|h| h.rdot_au_per_day.abs())
+            .fold(0.0, f64::max);
+        let escape = escape_speed(inner);
+        assert!(
+            widest > 0.9 * escape && widest <= escape,
+            "rdot reaches {widest} against escape speed {escape} at {inner} au"
+        );
+    }
+
+    /// The grid is fine enough to compete with the reference implementation,
+    /// which searches a few thousand hypotheses rather than a few dozen.
+    #[test]
+    fn the_grid_is_densely_sampled() {
+        let n = default_hypotheses().len();
+        assert!(n > 2000, "only {n} hypotheses");
+    }
+
+    /// Both grids reach their stated edges, so nothing is lost to the
+    /// accumulated error of a geometric progression.
+    #[test]
+    fn grids_reach_their_last_distance() {
+        for (label, grid, first, last) in [
+            ("belt", main_belt_hypotheses(), 1.5, 9.5),
+            ("neo", neo_hypotheses(), 1.1, 5.6),
+        ] {
+            let lo = grid.iter().map(|h| h.r_au).fold(f64::INFINITY, f64::min);
+            let hi = grid.iter().map(|h| h.r_au).fold(0.0, f64::max);
+            assert!((lo - first).abs() < 1e-6, "{label} starts at {lo}");
+            assert!((hi - last).abs() < 1e-6, "{label} stops at {hi}");
+        }
+    }
+
+    /// The default search covers both populations, not the belt alone.
+    #[test]
+    fn default_hypotheses_span_both_populations() {
+        let all = default_hypotheses();
+        assert!(all.iter().any(|h| h.r_au < 1.3), "no near-Earth hypotheses");
+        assert!(all.iter().any(|h| h.r_au > 3.0), "no outer-belt hypotheses");
+        assert_eq!(
+            all.len(),
+            neo_hypotheses().len() + main_belt_hypotheses().len()
+        );
+    }
+
+    /// States are grouped through chains, so a track spread over more than one
+    /// tolerance width stays whole instead of splitting.
+    #[test]
+    fn a_chain_of_states_forms_one_group() {
+        let cfg = LinkConfig {
+            position_tol_au: 0.01,
+            velocity_tol_au_per_day: 1.0,
+            ..Default::default()
+        };
+        // Each neighbour is within tolerance; the ends are three times beyond it.
+        let states: Vec<(usize, State)> = (0..4)
+            .map(|i| {
+                (
+                    i,
+                    State {
+                        pos: [0.009 * i as f64, 0.0, 0.0],
+                        vel: [0.0; 3],
+                    },
+                )
+            })
+            .collect();
+        let mut grid: HashMap<(i64, i64, i64), Vec<usize>> = HashMap::new();
+        for (k, (_, s)) in states.iter().enumerate() {
+            grid.entry(cell(&s.pos, cfg.position_tol_au))
+                .or_default()
+                .push(k);
+        }
+        let used = vec![false; states.len()];
+        let group = connected_group(0, &states, &grid, &used, &cfg);
+        assert_eq!(group.len(), 4, "chain split into {:?}", group);
+    }
+
+    /// A cluster the astrometry does not support is rejected, however tightly
+    /// its propagated states agreed.
+    #[test]
+    fn a_track_no_orbit_explains_is_rejected() {
+        let good = ceres_like();
+        let jds = [2460000.5, 2460002.5, 2460004.5];
+        let mut tracklets: Vec<Tracklet> = jds
+            .iter()
+            .enumerate()
+            .map(|(_, &jd)| tracklet_for(&good, jd))
+            .collect();
+        // Displace one member far off the orbit the others describe.
+        tracklets[2].dec_ref += 0.5;
+
+        let cfg = LinkConfig {
+            reference_jd: 2460002.5,
+            ..Default::default()
+        };
+        let strict = link_tracklets(&tracklets, &cfg);
+        assert!(
+            strict.iter().all(|t| t.members.len() < 3),
+            "a displaced member was kept in a track"
+        );
+
+        let loose = LinkConfig {
+            max_residual_arcsec: 1e9,
+            ..cfg.clone()
+        };
+        assert!(
+            link_tracklets(&tracklets, &loose).len() >= strict.len(),
+            "the gate should only ever remove candidates"
+        );
+    }
+
+    /// A large component that fails the night test is walked once, not once per
+    /// member: re-seeding into it is what made dense nights quadratic.
+    #[test]
+    fn a_rejected_component_is_not_rewalked() {
+        use std::time::Instant;
+
+        // One night only, so every group fails min_nights and none is kept.
+        let n = 4000;
+        let tracklets: Vec<Tracklet> = (0..n)
+            .map(|i| {
+                Tracklet::from_motion(
+                    vec![i as i64],
+                    2460000.5,
+                    10.0 + 1e-6 * i as f64,
+                    5.0,
+                    0.2,
+                    0.0,
+                    0.1,
+                )
+            })
+            .collect();
+        let cfg = LinkConfig {
+            hypotheses: vec![Hypothesis {
+                r_au: 2.5,
+                rdot_au_per_day: 0.0,
+            }],
+            reference_jd: 2460000.5,
+            position_tol_au: 1.0,
+            velocity_tol_au_per_day: 1.0,
+            min_nights: 2,
+            max_residual_arcsec: 2.0,
+        };
+
+        let started = Instant::now();
+        let tracks = link_tracklets(&tracklets, &cfg);
+        let elapsed = started.elapsed();
+
+        assert!(tracks.is_empty(), "one night cannot make a track");
+        // Quadratic re-walking of a 4000-state component takes far longer.
+        assert!(
+            elapsed.as_secs() < 5,
+            "linking took {elapsed:?}, suggesting the component is re-walked"
+        );
+    }
+
+    /// A state already claimed by a kept track is not pulled into another.
+    #[test]
+    fn used_states_are_left_alone() {
+        let cfg = LinkConfig {
+            position_tol_au: 0.01,
+            velocity_tol_au_per_day: 1.0,
+            ..Default::default()
+        };
+        let states: Vec<(usize, State)> = (0..3)
+            .map(|i| {
+                (
+                    i,
+                    State {
+                        pos: [0.005 * i as f64, 0.0, 0.0],
+                        vel: [0.0; 3],
+                    },
+                )
+            })
+            .collect();
+        let mut grid: HashMap<(i64, i64, i64), Vec<usize>> = HashMap::new();
+        for (k, (_, s)) in states.iter().enumerate() {
+            grid.entry(cell(&s.pos, cfg.position_tol_au))
+                .or_default()
+                .push(k);
+        }
+        let used = vec![false, true, false];
+        let group = connected_group(0, &states, &grid, &used, &cfg);
+        assert!(!group.contains(&1), "claimed state was taken: {group:?}");
+    }
 
     /// Elements roughly those of a main-belt asteroid.
     fn ceres_like() -> OrbitalElements {
@@ -566,6 +916,7 @@ mod tests {
             position_tol_au: 0.05,
             velocity_tol_au_per_day: 0.01,
             min_nights: 2,
+            max_residual_arcsec: 2.0,
         };
         let tracks = link_tracklets(&tracklets, &cfg);
         assert!(!tracks.is_empty(), "no track recovered");
@@ -611,6 +962,7 @@ mod tests {
             position_tol_au: 0.05,
             velocity_tol_au_per_day: 0.01,
             min_nights: 2,
+            max_residual_arcsec: 2.0,
         };
         let tracks = link_tracklets(&tracklets, &cfg);
         assert_eq!(tracks.len(), 1, "one object should yield one track");
