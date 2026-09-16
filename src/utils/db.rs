@@ -689,8 +689,7 @@ mod angular_size_index_tests {
 
     fn config(angular_size_key: Option<String>, radius_max: Option<f64>) -> CatalogXmatchConfig {
         CatalogXmatchConfig {
-            catalog: "NED_LVS".to_string(),
-            collection: Some("NED".to_string()),
+            catalog: "NED".to_string(),
             radius: arcsec_to_radians(300.0),
             angular_size_key,
             angular_size_scale: 5.0,

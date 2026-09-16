@@ -41,7 +41,7 @@ mod types;
 
 pub use associate::{associate_host, AssociationConfig, AssociationResult};
 pub use association::{HostGalaxyAssociation, StoredHostCandidate};
-pub use catalog::{collect_galaxies, galaxy_from_ls_dr10, galaxy_from_ned_lvs, LS_DR10, NED_LVS};
+pub use catalog::{collect_galaxies, galaxy_from_ls_dr10, galaxy_from_ned, LS_DR10, NED};
 pub use config::HostGalaxyConfig;
 pub use dlr::{compute_dlr, DlrResult};
 pub use ellipse::Ellipse;
@@ -107,7 +107,7 @@ mod tests {
     #[test]
     fn test_disabled_returns_none() {
         let mut xmatches = HashMap::new();
-        xmatches.insert(NED_LVS.to_string(), vec![ngc4321()]);
+        xmatches.insert(NED.to_string(), vec![ngc4321()]);
         assert!(associate_from_xmatches(
             185.728_75,
             15.822_3,
@@ -120,7 +120,7 @@ mod tests {
     #[test]
     fn test_end_to_end_from_crossmatch_documents() {
         let mut xmatches = HashMap::new();
-        xmatches.insert(NED_LVS.to_string(), vec![ngc4321()]);
+        xmatches.insert(NED.to_string(), vec![ngc4321()]);
 
         let assoc = associate_from_xmatches(
             185.728_75,
@@ -132,7 +132,7 @@ mod tests {
 
         let best = assoc.best_host.as_ref().unwrap();
         assert_eq!(best.objname.as_deref(), Some("NGC 4321"));
-        assert_eq!(best.catalog.as_deref(), Some(NED_LVS));
+        assert_eq!(best.catalog.as_deref(), Some(NED));
         assert_close!(best.sep_arcsec, 30.0, epsilon = 0.01);
         assert!(best.d_dlr < 1.0, "d_DLR was {}", best.d_dlr);
         assert!(best.posterior > 0.5);
@@ -152,7 +152,7 @@ mod tests {
     #[test]
     fn test_far_outside_every_galaxy_yields_no_host() {
         let mut xmatches = HashMap::new();
-        xmatches.insert(NED_LVS.to_string(), vec![ngc4321()]);
+        xmatches.insert(NED.to_string(), vec![ngc4321()]);
 
         let assoc =
             associate_from_xmatches(185.728_75, 15.822_3 + 1.0, &xmatches, &enabled_config())
@@ -178,7 +178,7 @@ mod tests {
             "DistMpc": 0.79_f64,
         };
         let mut xmatches = HashMap::new();
-        xmatches.insert(NED_LVS.to_string(), vec![m31]);
+        xmatches.insert(NED.to_string(), vec![m31]);
 
         // 0.4 deg north of centre = 1440 arcsec, far past any 100 arcsec circle.
         let assoc = associate_from_xmatches(10.684_7, 41.269_1 + 0.4, &xmatches, &enabled_config())

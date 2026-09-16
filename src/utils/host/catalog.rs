@@ -34,7 +34,7 @@ fn opt_objname(doc: &Document, key: &str) -> Option<String> {
 
 /// Every NED-LVS key the reader depends on, for the projection drift test.
 #[cfg(test)]
-pub const NED_LVS_REQUIRED_KEYS: &[&str] = &[
+pub const NED_REQUIRED_KEYS: &[&str] = &[
     "_id",
     "ra",
     "dec",
@@ -57,14 +57,14 @@ pub const NED_LVS_REQUIRED_KEYS: &[&str] = &[
 /// writes. `Diam` is the major-axis *diameter*, so the semi-major axis is
 /// `Diam / 2`; `Diam_ba` is the minor-to-major ratio; `Diam_pa` is degrees east
 /// of north.
-pub fn galaxy_from_ned_lvs(doc: &Document, config: &HostGalaxyConfig) -> Option<GalaxyCandidate> {
+pub fn galaxy_from_ned(doc: &Document, config: &HostGalaxyConfig) -> Option<GalaxyCandidate> {
     let ra = opt_f64(doc, "ra")?;
     let dec = opt_f64(doc, "dec")?;
 
     let objtype = opt_string(doc, "objtype");
     if let Some(t) = objtype.as_deref() {
         if config
-            .ned_lvs_excluded_objtypes
+            .ned_excluded_objtypes
             .iter()
             .any(|excluded| excluded.eq_ignore_ascii_case(t))
         {
@@ -100,7 +100,7 @@ pub fn galaxy_from_ned_lvs(doc: &Document, config: &HostGalaxyConfig) -> Option<
         mag_err: opt_f64(doc, "m_Ks_unc"),
         objtype,
         objname: opt_objname(doc, "_id"),
-        catalog: Some(NED_LVS.to_string()),
+        catalog: Some(NED.to_string()),
         size_is_isophotal: true,
         diam_survey,
         orientation_is_nominal,
@@ -216,7 +216,7 @@ pub fn galaxy_from_ls_dr10(doc: &Document, config: &HostGalaxyConfig) -> Option<
     })
 }
 
-pub const NED_LVS: &str = "NED_LVS";
+pub const NED: &str = "NED";
 pub const LS_DR10: &str = "LSDR10";
 
 /// NED-LVS comes first, for its curated diameters and redshift-independent
@@ -228,10 +228,10 @@ pub fn collect_galaxies(
     config: &HostGalaxyConfig,
 ) -> Vec<GalaxyCandidate> {
     let mut galaxies: Vec<GalaxyCandidate> = xmatches
-        .get(&config.ned_lvs_catalog)
+        .get(&config.ned_catalog)
         .map(|docs| {
             docs.iter()
-                .filter_map(|d| galaxy_from_ned_lvs(d, config))
+                .filter_map(|d| galaxy_from_ned(d, config))
                 .collect()
         })
         .unwrap_or_default();
@@ -281,7 +281,7 @@ mod tests {
     use mongodb::bson::doc;
     use std::collections::HashMap;
 
-    fn ned_lvs_doc() -> Document {
+    fn ned_doc() -> Document {
         doc! {
             "_id": "NGC 4321",
             "ra": 185.728_75,
@@ -309,77 +309,77 @@ mod tests {
     }
 
     #[test]
-    fn test_from_ned_lvs_maps_diameter_to_semi_major() {
-        let g = galaxy_from_ned_lvs(&ned_lvs_doc(), &HostGalaxyConfig::default()).unwrap();
+    fn test_from_ned_maps_diameter_to_semi_major() {
+        let g = galaxy_from_ned(&ned_doc(), &HostGalaxyConfig::default()).unwrap();
         assert_close!(g.a_arcsec, 222.0);
         assert_close!(g.b_arcsec, 222.0 * 0.87);
         assert_close!(g.pa_deg, 30.0);
         assert_close!(g.redshift.unwrap(), 0.005_24);
         assert_eq!(g.objname.as_deref(), Some("NGC 4321"));
-        assert_eq!(g.catalog.as_deref(), Some(NED_LVS));
+        assert_eq!(g.catalog.as_deref(), Some(NED));
     }
 
     #[test]
-    fn test_from_ned_lvs_rejects_rows_without_a_diameter() {
+    fn test_from_ned_rejects_rows_without_a_diameter() {
         // The ~19% of NED-LVS with no diameter arrives as explicit nulls.
-        let mut d = ned_lvs_doc();
+        let mut d = ned_doc();
         d.insert("Diam", Bson::Null);
         d.insert("Diam_ba", Bson::Null);
         d.insert("Diam_pa", Bson::Null);
-        assert!(galaxy_from_ned_lvs(&d, &HostGalaxyConfig::default()).is_none());
+        assert!(galaxy_from_ned(&d, &HostGalaxyConfig::default()).is_none());
 
-        let mut d = ned_lvs_doc();
+        let mut d = ned_doc();
         d.remove("Diam");
-        assert!(galaxy_from_ned_lvs(&d, &HostGalaxyConfig::default()).is_none());
+        assert!(galaxy_from_ned(&d, &HostGalaxyConfig::default()).is_none());
 
-        let mut d = ned_lvs_doc();
+        let mut d = ned_doc();
         d.insert("Diam", 0.0_f64);
-        assert!(galaxy_from_ned_lvs(&d, &HostGalaxyConfig::default()).is_none());
+        assert!(galaxy_from_ned(&d, &HostGalaxyConfig::default()).is_none());
     }
 
     #[test]
-    fn test_from_ned_lvs_missing_axis_ratio_is_circular() {
-        let mut d = ned_lvs_doc();
+    fn test_from_ned_missing_axis_ratio_is_circular() {
+        let mut d = ned_doc();
         d.insert("Diam_ba", Bson::Null);
         d.insert("Diam_pa", Bson::Null);
-        let g = galaxy_from_ned_lvs(&d, &HostGalaxyConfig::default()).unwrap();
+        let g = galaxy_from_ned(&d, &HostGalaxyConfig::default()).unwrap();
         assert_close!(g.b_arcsec, g.a_arcsec);
         assert_close!(g.pa_deg, 0.0);
     }
 
     #[test]
-    fn test_from_ned_lvs_requires_a_position() {
-        let mut d = ned_lvs_doc();
+    fn test_from_ned_requires_a_position() {
+        let mut d = ned_doc();
         d.insert("ra", Bson::Null);
-        assert!(galaxy_from_ned_lvs(&d, &HostGalaxyConfig::default()).is_none());
+        assert!(galaxy_from_ned(&d, &HostGalaxyConfig::default()).is_none());
     }
 
     #[test]
-    fn test_from_ned_lvs_empty_strings_are_absent() {
+    fn test_from_ned_empty_strings_are_absent() {
         // Absent string columns arrive as "" from the ingest.
-        let mut d = ned_lvs_doc();
+        let mut d = ned_doc();
         d.insert("objtype", "");
-        let g = galaxy_from_ned_lvs(&d, &HostGalaxyConfig::default()).unwrap();
+        let g = galaxy_from_ned(&d, &HostGalaxyConfig::default()).unwrap();
         assert!(g.objtype.is_none());
     }
 
     #[test]
-    fn test_from_ned_lvs_carries_distance_and_its_method() {
+    fn test_from_ned_carries_distance_and_its_method() {
         // NED-LVS fills dist_mpc for every row, only ~1% redshift-independently.
-        let mut d = ned_lvs_doc();
+        let mut d = ned_doc();
         d.insert("DistMpc", 16.8_f64);
         d.insert("DistMpc_method", "zIndependent");
-        let g = galaxy_from_ned_lvs(&d, &HostGalaxyConfig::default()).unwrap();
+        let g = galaxy_from_ned(&d, &HostGalaxyConfig::default()).unwrap();
         assert_close!(g.dist_mpc.unwrap(), 16.8);
         assert_eq!(g.dist_mpc_method.as_deref(), Some("zIndependent"));
 
-        let mut d = ned_lvs_doc();
+        let mut d = ned_doc();
         d.insert("DistMpc", 3200.0_f64);
         d.insert("DistMpc_method", "Redshift");
-        let g = galaxy_from_ned_lvs(&d, &HostGalaxyConfig::default()).unwrap();
+        let g = galaxy_from_ned(&d, &HostGalaxyConfig::default()).unwrap();
         assert_eq!(g.dist_mpc_method.as_deref(), Some("Redshift"));
 
-        let g = galaxy_from_ned_lvs(&ned_lvs_doc(), &HostGalaxyConfig::default()).unwrap();
+        let g = galaxy_from_ned(&ned_doc(), &HostGalaxyConfig::default()).unwrap();
         assert!(g.dist_mpc.is_none());
         assert!(g.dist_mpc_method.is_none());
     }
@@ -416,7 +416,7 @@ mod tests {
     }
 
     #[test]
-    fn test_collect_prefers_ned_lvs_and_drops_shredded_fragments() {
+    fn test_collect_prefers_ned_and_drops_shredded_fragments() {
         let config = HostGalaxyConfig::default();
         // NGC 4321 spans a = 222 arcsec, so rows landing inside it are fragments.
         let inside_a = ls_doc("frag-1", 185.728_75, 15.822_3 + 20.0 / 3600.0);
@@ -424,7 +424,7 @@ mod tests {
         let outside = ls_doc("other", 185.728_75 + 600.0 / 3600.0, 15.822_3);
 
         let mut xmatches = HashMap::new();
-        xmatches.insert(config.ned_lvs_catalog.clone(), vec![ned_lvs_doc()]);
+        xmatches.insert(config.ned_catalog.clone(), vec![ned_doc()]);
         xmatches.insert(
             config.ls_dr10_catalog.clone(),
             vec![inside_a, inside_b, outside],
@@ -433,18 +433,18 @@ mod tests {
         let galaxies = collect_galaxies(&xmatches, &config);
 
         assert_eq!(galaxies.len(), 2, "fragments should be absorbed");
-        assert_eq!(galaxies[0].catalog.as_deref(), Some(NED_LVS));
+        assert_eq!(galaxies[0].catalog.as_deref(), Some(NED));
         assert_eq!(galaxies[1].objname.as_deref(), Some("other"));
     }
 
     #[test]
     fn test_collect_falls_back_to_ls_when_ned_has_no_shape() {
         let config = HostGalaxyConfig::default();
-        let mut no_diam = ned_lvs_doc();
+        let mut no_diam = ned_doc();
         no_diam.insert("Diam", Bson::Null);
 
         let mut xmatches = HashMap::new();
-        xmatches.insert(config.ned_lvs_catalog.clone(), vec![no_diam]);
+        xmatches.insert(config.ned_catalog.clone(), vec![no_diam]);
         xmatches.insert(
             config.ls_dr10_catalog.clone(),
             vec![ls_doc("ls-1", 185.728_75, 15.822_3)],
@@ -464,7 +464,7 @@ mod tests {
 
 #[cfg(test)]
 mod projection_tests {
-    use super::NED_LVS_REQUIRED_KEYS;
+    use super::NED_REQUIRED_KEYS;
 
     /// Every config a deployment actually runs, not just the base one.
     fn deployment_configs() -> Vec<(String, String)> {
@@ -490,14 +490,14 @@ mod projection_tests {
     #[test]
     fn test_config_projects_every_key_the_reader_needs() {
         for (name, config) in deployment_configs() {
-            let Some(block) = config.split("- catalog: NED_LVS").nth(1) else {
+            let Some(block) = config.split("- catalog: NED").nth(1) else {
                 continue;
             };
             let projection = block.split("- catalog:").next().expect("entry body");
-            for key in NED_LVS_REQUIRED_KEYS {
+            for key in NED_REQUIRED_KEYS {
                 assert!(
                     projection.contains(&format!("{key}: 1")),
-                    "{name}: NED_LVS projection is missing `{key}`, which the reader depends on"
+                    "{name}: NED projection is missing `{key}`, which the reader depends on"
                 );
             }
         }
@@ -508,7 +508,7 @@ mod projection_tests {
     fn test_host_galaxy_keys_match_the_config_struct() {
         let known = [
             "enabled",
-            "ned_lvs_catalog",
+            "ned_catalog",
             "ls_dr10_catalog",
             "max_dlr",
             "min_axis_arcsec",
@@ -541,24 +541,6 @@ mod projection_tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn test_ned_lvs_entry_reads_the_ned_collection() {
-        let config = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/config.yaml"))
-            .expect("config.yaml");
-        let block = config
-            .split("- catalog: NED_LVS")
-            .nth(1)
-            .expect("a NED_LVS crossmatch entry");
-        assert!(
-            block
-                .split("- catalog:")
-                .next()
-                .unwrap()
-                .contains("collection: NED"),
-            "NED_LVS must read the NED collection; there is no NED_LVS collection"
-        );
     }
 }
 
@@ -704,24 +686,24 @@ mod review_tests {
         let config = HostGalaxyConfig::default();
         for objtype in ["QSO", "AbLS", "EmLS", "EmObj", "Q_Lens", "G_Lens"] {
             assert!(
-                galaxy_from_ned_lvs(&ned(objtype, 0.5, "SDSS"), &config).is_none(),
+                galaxy_from_ned(&ned(objtype, 0.5, "SDSS"), &config).is_none(),
                 "{objtype} should not be a host candidate"
             );
         }
-        assert!(galaxy_from_ned_lvs(&ned("G", 0.5, "SDSS"), &config).is_some());
+        assert!(galaxy_from_ned(&ned("G", 0.5, "SDSS"), &config).is_some());
     }
 
     #[test]
     fn test_axis_ratio_is_bounded_rather_than_the_minor_axis() {
         let config = HostGalaxyConfig::default();
 
-        assert!(galaxy_from_ned_lvs(&ned("G", 0.02, "SDSS"), &config).is_none());
+        assert!(galaxy_from_ned(&ned("G", 0.02, "SDSS"), &config).is_none());
 
-        let pinned = galaxy_from_ned_lvs(&ned("G", 0.07, "SDSS"), &config).expect("pinned");
+        let pinned = galaxy_from_ned(&ned("G", 0.07, "SDSS"), &config).expect("pinned");
         assert_close!(pinned.a_arcsec, 30.0);
         assert_close!(pinned.b_arcsec, 30.0 * config.pinned_axis_ratio);
 
-        let kept = galaxy_from_ned_lvs(&ned("G", 0.4, "SDSS"), &config).expect("kept");
+        let kept = galaxy_from_ned(&ned("G", 0.4, "SDSS"), &config).expect("kept");
         assert_close!(kept.b_arcsec, 30.0 * 0.4);
     }
 
@@ -729,15 +711,15 @@ mod review_tests {
     fn test_a_2mass_orientation_is_flagged_as_nominal() {
         let config = HostGalaxyConfig::default();
 
-        let two_mass = galaxy_from_ned_lvs(&ned("G", 0.4, "2MASS"), &config).expect("2mass");
+        let two_mass = galaxy_from_ned(&ned("G", 0.4, "2MASS"), &config).expect("2mass");
         assert_eq!(two_mass.diam_survey.as_deref(), Some("2MASS"));
         assert!(two_mass.orientation_is_nominal);
 
         // Round: the position angle carries no information either way.
-        let round = galaxy_from_ned_lvs(&ned("G", 1.0, "2MASS"), &config).expect("round");
+        let round = galaxy_from_ned(&ned("G", 1.0, "2MASS"), &config).expect("round");
         assert!(!round.orientation_is_nominal);
 
-        let sdss = galaxy_from_ned_lvs(&ned("G", 0.4, "SDSS"), &config).expect("sdss");
+        let sdss = galaxy_from_ned(&ned("G", 0.4, "SDSS"), &config).expect("sdss");
         assert!(!sdss.orientation_is_nominal);
     }
 

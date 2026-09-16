@@ -478,11 +478,11 @@ pub async fn xmatch(
 mod tests {
     use super::*;
 
-    /// NED_LVS-shaped config: 300" base cone, per-row radius from `diam`,
+    /// NED-shaped config: 300" base cone, per-row radius from `diam`,
     /// capped at 6 deg.
     fn angular_size_config() -> conf::CatalogXmatchConfig {
         conf::CatalogXmatchConfig {
-            catalog: "NED_LVS".to_string(),
+            catalog: "NED".to_string(),
             radius: conf::arcsec_to_radians(300.0),
             max_results: Some(50),
             angular_size_key: Some("diam".to_string()),

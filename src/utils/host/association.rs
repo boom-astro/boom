@@ -129,7 +129,7 @@ mod tests {
             mag_err: None,
             objtype: Some("G".to_string()),
             objname: Some("test-galaxy".to_string()),
-            catalog: Some("NED_LVS".to_string()),
+            catalog: Some("NED".to_string()),
             size_is_isophotal: true,
             diam_survey: None,
             orientation_is_nominal: false,
@@ -155,7 +155,7 @@ mod tests {
         assert_eq!(best, &stored.candidates[0]);
         assert!(best.posterior >= stored.candidates[1].posterior);
         assert_eq!(best.dlr_rank, 1);
-        assert_eq!(best.catalog.as_deref(), Some("NED_LVS"));
+        assert_eq!(best.catalog.as_deref(), Some("NED"));
     }
 
     #[test]

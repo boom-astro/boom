@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::associate::AssociationConfig;
-use super::catalog::{LS_DR10, NED_LVS};
+use super::catalog::{LS_DR10, NED};
 
 /// Host-galaxy association, read from `config.yaml` under `host_galaxy`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -11,7 +11,7 @@ pub struct HostGalaxyConfig {
     /// survey's crossmatch block.
     pub enabled: bool,
     /// Cross-match key supplying NED-LVS diameters.
-    pub ned_lvs_catalog: String,
+    pub ned_catalog: String,
     /// Cross-match key supplying Legacy Survey Tractor shapes.
     pub ls_dr10_catalog: String,
     /// Largest d_DLR still admitted as a candidate, deliberately looser than the
@@ -32,7 +32,7 @@ pub struct HostGalaxyConfig {
     pub star_type_values: Vec<String>,
     /// NED-LVS `objtype` values that are not host galaxies: quasars, line
     /// systems, and lensed systems whose shape describes the lens.
-    pub ned_lvs_excluded_objtypes: Vec<String>,
+    pub ned_excluded_objtypes: Vec<String>,
     /// Include the redshift term when both the transient and the galaxy have one.
     pub use_redshift: bool,
     /// Reject a REX row smaller than this, arcsec. The three REX cuts sit in
@@ -51,7 +51,7 @@ impl Default for HostGalaxyConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            ned_lvs_catalog: NED_LVS.to_string(),
+            ned_catalog: NED.to_string(),
             ls_dr10_catalog: LS_DR10.to_string(),
             max_dlr: 5.0,
             min_axis_arcsec: 0.05,
@@ -60,7 +60,7 @@ impl Default for HostGalaxyConfig {
             max_candidates: 10,
             exclude_star_like: true,
             star_type_values: vec!["PSF".to_string(), "DUP".to_string()],
-            ned_lvs_excluded_objtypes: ["QSO", "AbLS", "EmLS", "EmObj", "Q_Lens", "G_Lens"]
+            ned_excluded_objtypes: ["QSO", "AbLS", "EmLS", "EmObj", "Q_Lens", "G_Lens"]
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
@@ -114,7 +114,7 @@ mod tests {
             serde_json::from_str(r#"{"enabled": true, "max_dlr": 4.0}"#).unwrap();
         assert!(config.enabled);
         assert_close!(config.max_dlr, 4.0);
-        assert_eq!(config.ned_lvs_catalog, NED_LVS);
+        assert_eq!(config.ned_catalog, NED);
         assert_eq!(config.max_candidates, 10);
         assert!(config.exclude_star_like);
     }
