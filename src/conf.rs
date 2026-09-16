@@ -264,6 +264,17 @@ async fn build_cutout_storage(
     Ok(storage)
 }
 
+/// An explicit null unsets a field inherited from the base config, at any depth
+/// so a single projection entry can be dropped too.
+fn strip_nulls(table: &mut config::Map<String, Value>) {
+    table.retain(|_, value| !matches!(value.kind, ValueKind::Nil));
+    for value in table.values_mut() {
+        if let ValueKind::Table(inner) = &mut value.kind {
+            strip_nulls(inner);
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct CatalogXmatchConfig {
     pub catalog: String,
@@ -313,8 +324,7 @@ impl CatalogXmatchConfig {
         config_value: Value,
     ) -> Result<CatalogXmatchConfig, BoomConfigError> {
         let mut hashmap_xmatch = config_value.into_table()?;
-        // An explicit null unsets a field inherited from the base config.
-        hashmap_xmatch.retain(|_, value| !matches!(value.kind, ValueKind::Nil));
+        strip_nulls(&mut hashmap_xmatch);
         let required = |key: &str| {
             hashmap_xmatch
                 .get(key)
@@ -1502,6 +1512,16 @@ mod tests {
             "crossmatch:\n  ztf:\n    Gaia_DR3:\n      radius: 2.0\n      projection: {_id: 1}\n    PS1_DR2: null\n",
         );
         assert_eq!(catalog_names(&crossmatch[&Survey::Ztf]), ["Gaia_DR3"]);
+    }
+
+    #[test]
+    fn a_null_projection_field_unsets_the_one_inherited_from_the_base_config() {
+        let crossmatch = crossmatch_config(
+            "crossmatch:\n  ztf:\n    Gaia_DR3:\n      radius: 2.0\n      projection: {_id: 1, ruwe: null}\n",
+        );
+        let gaia = &crossmatch[&Survey::Ztf][0];
+        assert!(!gaia.projection.contains_key("ruwe"));
+        assert_eq!(gaia.projection.len(), 1);
     }
 
     #[test]
