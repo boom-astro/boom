@@ -7,8 +7,8 @@ use crate::enrichment::{
 use crate::utils::db::mongify;
 use crate::utils::enums::Survey;
 use crate::utils::lightcurves::{
-    analyze_photometry, prepare_photometry, ActivityMetrics, Band, DetectionHistory,
-    PerBandProperties, PhotometryMag,
+    analyze_photometry, prepare_photometry, summarise_detections, ActivityMetrics, Band,
+    DetectionHistory, EpisodeHistory, PerBandProperties, PhotometryMag, EPISODE_GAP_DAYS,
 };
 use apache_avro_derive::AvroSchema;
 use apache_avro_macros::serdavro;
@@ -253,6 +253,9 @@ pub struct LsstAlertProperties {
     /// `None` on alerts enriched before this field existed.
     #[serde(default)]
     pub detection_history: Option<DetectionHistory>,
+    /// Detection episodes, for finding sources that outburst more than once.
+    /// `None` on alerts enriched before this field existed.
+    pub episode_history: Option<EpisodeHistory>,
 }
 
 pub struct LsstEnrichmentWorker {
@@ -533,12 +536,13 @@ impl LsstEnrichmentWorker {
 
         // Per-object detection history for history-aware filters (positive/negative
         // by psfFlux sign; LSST difference psfFlux is signed natively).
-        let detection_history = DetectionHistory::from_points(
+        let (detection_history, episode_history) = summarise_detections(
             alert
                 .prv_candidates
                 .iter()
                 .map(|p| (p.jd, p.flux.filter(|f| !f.is_nan()).map(|f| f < 0.0))),
             alert.candidate.jd,
+            EPISODE_GAP_DAYS,
         );
 
         Ok(LsstAlertProperties {
@@ -551,6 +555,7 @@ impl LsstEnrichmentWorker {
             photstats,
             multisurvey_photstats,
             detection_history: Some(detection_history),
+            episode_history: Some(episode_history),
         })
     }
 }
