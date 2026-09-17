@@ -468,10 +468,6 @@ fn connected_group(
     group
 }
 
-/// Link tracklets into tracks, sweeping every hypothesis in `cfg`.
-///
-/// A tracklet may appear in more than one track when several hypotheses fit it;
-/// the caller decides which to keep.
 /// Tracks this one hypothesis produces.
 ///
 /// Each hypothesis is independent -- it propagates every tracklet under its own
@@ -482,91 +478,85 @@ fn tracks_for_hypothesis(
     cfg: &LinkConfig,
 ) -> Vec<Track> {
     let mut tracks: Vec<Track> = Vec::new();
-    {
-        // Propagated state per tracklet under this hypothesis.
-        let mut states: Vec<(usize, State)> = Vec::new();
-        for (i, t) in tracklets.iter().enumerate() {
-            let Some(s) = state_from_tracklet(t, hypothesis) else {
-                continue;
-            };
-            if let Some(p) = propagate(&s, t.jd_ref, cfg.reference_jd) {
-                states.push((i, p));
-            }
+    // Propagated state per tracklet under this hypothesis.
+    let mut states: Vec<(usize, State)> = Vec::new();
+    for (i, t) in tracklets.iter().enumerate() {
+        let Some(s) = state_from_tracklet(t, hypothesis) else {
+            continue;
+        };
+        if let Some(p) = propagate(&s, t.jd_ref, cfg.reference_jd) {
+            states.push((i, p));
         }
-        // Nothing can cluster with fewer than two states.
-        if states.len() < 2 {
-            return tracks;
+    }
+    // Nothing can cluster with fewer than two states.
+    if states.len() < 2 {
+        return tracks;
+    }
+
+    // Grid on position so only nearby states are compared.
+    let mut grid: HashMap<(i64, i64, i64), Vec<usize>> = HashMap::new();
+    for (k, (_, s)) in states.iter().enumerate() {
+        grid.entry(cell(&s.pos, cfg.position_tol_au))
+            .or_default()
+            .push(k);
+    }
+
+    // Marks a state's component as walked. Components are equivalence
+    // classes, so re-seeding from another member only rediscovers the same
+    // one; without this a rejected component is re-walked once per member.
+    let mut used = vec![false; states.len()];
+    for k in 0..states.len() {
+        if used[k] {
+            continue;
+        }
+        let group = connected_group(k, &states, &grid, &used, cfg);
+        for &g in &group {
+            used[g] = true;
+        }
+        if group.len() < 2 {
+            continue;
         }
 
-        // Grid on position so only nearby states are compared.
-        let mut grid: HashMap<(i64, i64, i64), Vec<usize>> = HashMap::new();
-        for (k, (_, s)) in states.iter().enumerate() {
-            grid.entry(cell(&s.pos, cfg.position_tol_au))
-                .or_default()
-                .push(k);
+        let members: Vec<usize> = group.iter().map(|&g| states[g].0).collect();
+        let nights = members
+            .iter()
+            .map(|&m| tracklets[m].jd_ref.floor() as i64)
+            .collect::<std::collections::HashSet<_>>()
+            .len();
+        if nights < cfg.min_nights {
+            continue;
         }
 
-        // Marks a state's component as walked. Components are equivalence
-        // classes, so re-seeding from another member only rediscovers the same
-        // one; without this a rejected component is re-walked once per member.
-        let mut used = vec![false; states.len()];
-        for k in 0..states.len() {
-            if used[k] {
-                continue;
+        let n = group.len() as f64;
+        let mut pos = [0.0; 3];
+        let mut vel = [0.0; 3];
+        for &g in &group {
+            let (_, ref s) = states[g];
+            for c in 0..3 {
+                pos[c] += s.pos[c] / n;
+                vel[c] += s.vel[c] / n;
             }
-            let group = connected_group(k, &states, &grid, &used, cfg);
-            for &g in &group {
-                used[g] = true;
-            }
-            if group.len() < 2 {
-                continue;
-            }
-
-            let members: Vec<usize> = group.iter().map(|&g| states[g].0).collect();
-            let nights = members
-                .iter()
-                .map(|&m| tracklets[m].jd_ref.floor() as i64)
-                .collect::<std::collections::HashSet<_>>()
-                .len();
-            if nights < cfg.min_nights {
-                continue;
-            }
-
-            let n = group.len() as f64;
-            let mut pos = [0.0; 3];
-            let mut vel = [0.0; 3];
-            for &g in &group {
-                let (_, ref s) = states[g];
-                for c in 0..3 {
-                    pos[c] += s.pos[c] / n;
-                    vel[c] += s.vel[c] / n;
-                }
-            }
-            let mut sq = 0.0;
-            for &g in &group {
-                let (_, ref s) = states[g];
-                sq += (s.pos[0] - pos[0]).powi(2)
-                    + (s.pos[1] - pos[1]).powi(2)
-                    + (s.pos[2] - pos[2]).powi(2);
-            }
-            tracks.push(Track {
-                members,
-                hypothesis: *hypothesis,
-                state: State { pos, vel },
-                nights,
-                rms_au: (sq / n).sqrt(),
-                residual_arcsec: None,
-            });
         }
+        let mut sq = 0.0;
+        for &g in &group {
+            let (_, ref s) = states[g];
+            sq += (s.pos[0] - pos[0]).powi(2)
+                + (s.pos[1] - pos[1]).powi(2)
+                + (s.pos[2] - pos[2]).powi(2);
+        }
+        tracks.push(Track {
+            members,
+            hypothesis: *hypothesis,
+            state: State { pos, vel },
+            nights,
+            rms_au: (sq / n).sqrt(),
+            residual_arcsec: None,
+        });
     }
 
     tracks
 }
 
-/// Link tracklets into tracks, sweeping every hypothesis in `cfg`.
-///
-/// A tracklet may appear in more than one track when several hypotheses fit it;
-/// the caller decides which to keep.
 /// Score a candidate by how well one orbit reproduces its members' positions.
 ///
 /// A cluster in state space is only a claim that the tracklets agree under some
@@ -655,7 +645,6 @@ pub fn deduplicate(tracks: Vec<Track>) -> Vec<Track> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utils::sso_geometry::geometry_at;
 
     /// Angular separation, degrees.
     fn angular_gap(ra1: f64, dec1: f64, ra2: f64, dec2: f64) -> f64 {
@@ -916,7 +905,6 @@ mod tests {
     fn tracklet_for(elements: &OrbitalElements, jd: f64) -> Tracklet {
         let step = 0.02;
         let at = |t: f64| {
-            let g = geometry_at(elements, t);
             let helio = heliocentric_position(elements, t);
             let earth = earth_position(t);
             let topo = [
@@ -933,7 +921,6 @@ mod tests {
             ];
             let ra = eq[1].atan2(eq[0]).to_degrees().rem_euclid(360.0);
             let dec = (eq[2] / norm(&eq)).asin().to_degrees();
-            let _ = g;
             (ra, dec)
         };
         let (ra, dec) = at(jd);

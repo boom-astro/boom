@@ -26,7 +26,6 @@ dotenvy = "0.15.7"
 fitsio = "0.21.10"
 flare = "0.2.0"
 futures = "0.3.32"
-rayon = "1.10"
 hifitime = "4.3.0"
 indicatif = "0.18.4"
 itertools = "0.14.0"
@@ -39,6 +38,7 @@ opentelemetry = "0.31.0"
 opentelemetry-otlp = { version = "0.31.0", features = ["grpc-tonic", "metrics", "trace"] }
 opentelemetry_sdk = { version = "0.31.0", features = ["rt-tokio"] }
 rand = "0.10.1"
+rayon = "1.10"
 rdkafka = { version = "0.39.0", features = ["gssapi", "ssl-vendored", "tracing", "sasl", "zstd"] }
 redis = { version = "1.2.1", features = ["tokio-comp"] }
 regex = "1.12.3"

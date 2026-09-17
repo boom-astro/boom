@@ -226,7 +226,7 @@ pub fn cluster(projected: &[Projected], cfg: &Config) -> Vec<Cluster> {
                 if nights < cfg.min_nights {
                     continue;
                 }
-                let candidate = summarise(&members, projected, t0, vx, vy);
+                let candidate = summarise(&members, projected, vx, vy);
                 if candidate.rms_arcsec <= cfg.max_rms_arcsec {
                     found.push(candidate);
                 }
@@ -263,7 +263,7 @@ fn rate_at(i: usize, steps: usize, span: f64) -> f64 {
 }
 
 /// Describe a cluster, refitting the drift from its own members.
-fn summarise(members: &[usize], projected: &[Projected], t0: f64, vx: f64, vy: f64) -> Cluster {
+fn summarise(members: &[usize], projected: &[Projected], vx: f64, vy: f64) -> Cluster {
     let n = members.len() as f64;
     let mean_t = members.iter().map(|&k| projected[k].jd).sum::<f64>() / n;
     let (mut sxx, mut sxy, mut syy) = (0.0, 0.0, 0.0);
@@ -295,7 +295,6 @@ fn summarise(members: &[usize], projected: &[Projected], t0: f64, vx: f64, vy: f
         .len();
     let mut ids: Vec<i64> = members.iter().map(|&k| projected[k].id).collect();
     ids.sort_unstable();
-    let _ = t0;
     Cluster {
         ids,
         rate_x_deg_per_day: fx,

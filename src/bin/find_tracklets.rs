@@ -527,7 +527,6 @@ fn run_thor(args: &Cli, detections: &[Detection], labels: &HashMap<i64, String>)
     let (mut pure, mut mixed) = (0usize, 0usize);
     let (mut pair_pure, mut pair_mixed) = (0usize, 0usize);
     let mut recovered = std::collections::HashSet::new();
-    let mut single_per_night = std::collections::HashSet::new();
     for (c, resid) in &kept {
         let names: std::collections::HashSet<&String> =
             c.ids.iter().filter_map(|id| labels.get(id)).collect();
@@ -535,15 +534,11 @@ fn run_thor(args: &Cli, detections: &[Detection], labels: &HashMap<i64, String>)
         match names.len() {
             0 => {}
             1 => {
-                let name = (*names.iter().next().unwrap()).clone();
-                recovered.insert(name.clone());
+                recovered.insert((*names.iter().next().unwrap()).clone());
                 if gated {
                     pure += 1;
                 } else {
                     pair_pure += 1;
-                }
-                if c.ids.len() == c.nights {
-                    single_per_night.insert(name);
                 }
             }
             _ => {
@@ -609,7 +604,6 @@ fn run_thor(args: &Cli, detections: &[Detection], labels: &HashMap<i64, String>)
         recovered_thor_only,
         thor_only.len()
     );
-    let _ = &single_per_night;
 }
 
 /// Attribute detections to catalogued objects, and score against `ssnamenr`.
