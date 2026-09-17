@@ -5,7 +5,6 @@ use crate::{
 };
 use flare::spatial::{great_circle_distance, radec2lb};
 use futures::stream::StreamExt;
-use itertools::Itertools;
 use mongodb::bson::{doc, Bson};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -17,14 +16,6 @@ pub enum XmatchError {
     BsonValueAccess(#[from] mongodb::bson::document::ValueAccessError),
     #[error("error from mongodb")]
     Mongodb(#[from] mongodb::error::Error),
-    #[error("distance_key field is null")]
-    NullDistanceKey,
-    #[error("distance_max field is null")]
-    NullDistanceMax,
-    #[error("distance_max_near field is null")]
-    NullDistanceMaxNear,
-    #[error("failed to convert the bson data into a document")]
-    AsDocumentError,
 }
 
 /// Field on a watchlist catalog document under which we record the alert
@@ -183,6 +174,49 @@ pub fn distance_kpc_from_arcsec(distance_arcsec: f64, z: f64) -> f64 {
     }
 }
 
+/// Redshift of a catalog row, for catalogs that match on distance.
+///
+/// Legacy writes -99 for "no photo-z"; fold it to 0 rather than drop the row,
+/// which would also discard any `z_spec` it carries.
+pub fn row_redshift(
+    config: &conf::CatalogXmatchConfig,
+    doc: &mongodb::bson::Document,
+) -> Option<f64> {
+    let key = config.distance_key.as_ref()?;
+    get_f64_from_doc(doc, key).map(|z| if z >= 0.0 { z } else { 0.0 })
+}
+
+/// Radius in arcsec within which one catalog row is accepted.
+///
+/// A catalog may declare both rules, and a row is kept if either reaches it:
+/// the distance rule covers rows with a redshift but no measured extent, the
+/// size rule covers large galaxies the distance rule cuts off too early.
+/// Neither can see past the cone the database was asked for.
+pub fn row_match_radius_arcsec(
+    config: &conf::CatalogXmatchConfig,
+    doc: &mongodb::bson::Document,
+) -> f64 {
+    let base = conf::radians_to_arcsec(config.radius);
+    let sized = config
+        .angular_size_key
+        .as_ref()
+        .map(|key| config.match_radius_arcsec(get_opt_f64_from_doc(doc, key)));
+    let distance = config.use_distance.then(|| {
+        let z = match row_redshift(config, doc) {
+            Some(z) => z,
+            // No redshift, so the distance rule says nothing about this row.
+            None => return 0.0,
+        };
+        let max = config.distance_max.expect("validated in config");
+        let max_near = config.distance_max_near.expect("validated in config");
+        cm_radius_arcsec(z, max, max_near).min(base)
+    });
+    match (sized, distance) {
+        (None, None) => base,
+        (a, b) => a.unwrap_or(0.0).max(b.unwrap_or(0.0)),
+    }
+}
+
 /// Whether a catalog row describes a star, per the catalog's own type column.
 ///
 /// Catalogs that do not label object type report `false`, which leaves their
@@ -309,134 +343,40 @@ pub async fn xmatch(
             .find(|x| x.catalog == catalog)
             .expect("this should never panic, the doc was derived from the catalogs");
 
-        if let Some(size_key) = &xmatch_config.angular_size_key {
-            let matches_filtered: Vec<mongodb::bson::Document> = matches
-                .iter()
-                .filter_map(|m| m.as_document().cloned())
-                .filter_map(|mut m| {
-                    let xmatch_ra = get_f64_from_doc(&m, "ra")?;
-                    let xmatch_dec = get_f64_from_doc(&m, "dec")?;
-                    let distance_arcsec =
-                        great_circle_distance(ra, dec, xmatch_ra, xmatch_dec) * 3600.0;
-                    let angular_size = get_opt_f64_from_doc(&m, size_key);
-                    if distance_arcsec > xmatch_config.match_radius_arcsec(angular_size) {
-                        return None;
-                    }
-                    m.insert("distance_arcsec", distance_arcsec);
-                    Some(m)
-                })
-                .sorted_by(|a, b| {
-                    let da = get_f64_from_doc(a, "distance_arcsec").unwrap_or(f64::INFINITY);
-                    let db = get_f64_from_doc(b, "distance_arcsec").unwrap_or(f64::INFINITY);
-                    da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
-                })
-                .take(xmatch_config.max_results.unwrap_or(usize::MAX))
-                .collect();
-            xmatch_results
-                .get_mut(catalog)
-                .unwrap()
-                .extend(matches_filtered);
-        } else if !xmatch_config.use_distance {
-            // to each document, add a distance_arcsec field
-            // and limit the number of results to max_results if specified
-            let matches_cloned: Vec<mongodb::bson::Document> = matches
-                .iter()
-                .filter_map(|m| m.as_document().cloned())
-                .filter_map(|mut m| {
-                    let xmatch_ra = match get_f64_from_doc(&m, "ra") {
-                        Some(v) => v,
-                        None => {
-                            return None;
-                        }
-                    };
-                    let xmatch_dec = match get_f64_from_doc(&m, "dec") {
-                        Some(v) => v,
-                        None => {
-                            return None;
-                        }
-                    };
-                    let distance_arcsec =
-                        great_circle_distance(ra, dec, xmatch_ra, xmatch_dec) * 3600.0; // convert to arcsec
-                    m.insert("distance_arcsec", distance_arcsec);
-                    Some(m)
-                })
-                .sorted_by(|a, b| {
-                    let da = get_f64_from_doc(a, "distance_arcsec").unwrap_or(f64::INFINITY);
-                    let db = get_f64_from_doc(b, "distance_arcsec").unwrap_or(f64::INFINITY);
-                    da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
-                })
-                .take(xmatch_config.max_results.unwrap_or(usize::MAX))
-                .collect();
-            xmatch_results
-                .get_mut(catalog)
-                .unwrap()
-                .extend(matches_cloned);
-        } else {
-            let distance_key = xmatch_config
-                .distance_key
-                .as_ref()
-                .ok_or(XmatchError::NullDistanceKey)?;
-            let distance_max = xmatch_config
-                .distance_max
-                .ok_or(XmatchError::NullDistanceMax)?;
-            let distance_max_near = xmatch_config
-                .distance_max_near
-                .ok_or(XmatchError::NullDistanceMaxNear)?;
-
-            let mut matches_filtered: Vec<mongodb::bson::Document> = vec![];
-            for xmatch_doc in matches.iter() {
-                let xmatch_doc = xmatch_doc
-                    .as_document()
-                    .ok_or(XmatchError::AsDocumentError)?;
-
-                let xmatch_ra = match get_f64_from_doc(&xmatch_doc, "ra") {
-                    Some(v) => v,
-                    None => {
-                        continue;
-                    }
-                };
-                let xmatch_dec = match get_f64_from_doc(&xmatch_doc, "dec") {
-                    Some(v) => v,
-                    None => {
-                        continue;
-                    }
-                };
-                // Legacy writes -99 for "no photo-z"; fold it to 0 rather than drop
-                // the row, which would also discard any z_spec it carries.
-                let doc_z = match get_f64_from_doc(&xmatch_doc, distance_key) {
-                    Some(v) if v >= 0.0 => v,
-                    Some(_) => 0.0,
-                    None => {
-                        continue;
-                    }
-                };
-
-                let cm_radius = cm_radius_arcsec(doc_z, distance_max, distance_max_near);
+        let type_key = xmatch_config.type_key.as_ref();
+        let stellar = xmatch_config.stellar_types.as_slice();
+        let mut matches_filtered: Vec<mongodb::bson::Document> = matches
+            .iter()
+            .filter_map(|m| m.as_document().cloned())
+            .filter_map(|mut m| {
+                let xmatch_ra = get_f64_from_doc(&m, "ra")?;
+                let xmatch_dec = get_f64_from_doc(&m, "dec")?;
                 let distance_arcsec =
                     great_circle_distance(ra, dec, xmatch_ra, xmatch_dec) * 3600.0;
-
-                if distance_arcsec < cm_radius {
-                    let distance_kpc = distance_kpc_from_arcsec(distance_arcsec, doc_z);
-                    let mut xmatch_doc = xmatch_doc.clone();
-                    xmatch_doc.insert("distance_arcsec", distance_arcsec);
-                    xmatch_doc.insert("distance_kpc", distance_kpc);
-                    matches_filtered.push(xmatch_doc);
+                if distance_arcsec > row_match_radius_arcsec(xmatch_config, &m) {
+                    return None;
                 }
-            }
-            let type_key = xmatch_config.type_key.as_ref();
-            let stellar = xmatch_config.stellar_types.as_slice();
-            matches_filtered.sort_by(|a, b| {
-                let (ra_, ka, aa) = host_sort_key(a, type_key, stellar);
-                let (rb, kb, ab) = host_sort_key(b, type_key, stellar);
-                ra_.cmp(&rb)
-                    .then_with(|| ka.partial_cmp(&kb).unwrap_or(std::cmp::Ordering::Equal))
-                    .then_with(|| aa.partial_cmp(&ab).unwrap_or(std::cmp::Ordering::Equal))
-            });
-            xmatch_results
-                .get_mut(catalog)
-                .unwrap()
-                .extend(matches_filtered);
-        }
+                m.insert("distance_arcsec", distance_arcsec);
+                // Written whenever the row carries a redshift, whatever rule
+                // matched it: how it was found must not decide what it stores.
+                if let Some(z) = row_redshift(xmatch_config, &m) {
+                    m.insert("distance_kpc", distance_kpc_from_arcsec(distance_arcsec, z));
+                }
+                Some(m)
+            })
+            .collect();
+        matches_filtered.sort_by(|a, b| {
+            let (ra_, ka, aa) = host_sort_key(a, type_key, stellar);
+            let (rb, kb, ab) = host_sort_key(b, type_key, stellar);
+            ra_.cmp(&rb)
+                .then_with(|| ka.partial_cmp(&kb).unwrap_or(std::cmp::Ordering::Equal))
+                .then_with(|| aa.partial_cmp(&ab).unwrap_or(std::cmp::Ordering::Equal))
+        });
+        matches_filtered.truncate(xmatch_config.max_results.unwrap_or(usize::MAX));
+        xmatch_results
+            .get_mut(catalog)
+            .unwrap()
+            .extend(matches_filtered);
     }
 
     // Watchlist catalogs are kept out of the alert _aux.cross_matches (they
@@ -547,6 +487,80 @@ mod tests {
         assert!((threshold - 300.0).abs() < 1e-6, "got {threshold}");
         assert!(config.match_radius_arcsec(Some(threshold - 1.0)) < 300.0);
         assert!(config.match_radius_arcsec(Some(threshold + 100.0)) > 300.0);
+    }
+
+    /// The real NED entry: both rules at once.
+    fn ned_config() -> conf::CatalogXmatchConfig {
+        conf::CatalogXmatchConfig {
+            use_distance: true,
+            distance_key: Some("z".to_string()),
+            distance_max: Some(30.0),
+            distance_max_near: Some(300.0),
+            ..angular_size_config()
+        }
+    }
+
+    #[test]
+    fn test_a_row_keeps_its_distance_radius_when_it_has_no_extent() {
+        let config = ned_config();
+        // Nearby, so the fixed near radius applies rather than 1.5 / z.
+        let near = doc! { "z": 0.001 };
+        assert!((row_match_radius_arcsec(&config, &near) - 300.0).abs() < 1e-6);
+        // Further out the radius shrinks with distance: 30 * 0.05 / 0.05.
+        let far = doc! { "z": 0.05 };
+        assert!((row_match_radius_arcsec(&config, &far) - 30.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_the_wider_of_the_two_rules_wins() {
+        let config = ned_config();
+        // M31-sized but far enough that the distance rule alone would cut it
+        // at 30": its own extent reaches much further.
+        let large = doc! { "z": 0.05, "diam": 11400.0 };
+        assert!((row_match_radius_arcsec(&config, &large) - 11400.0).abs() < 1e-6);
+        // And a small nearby galaxy keeps the 300" the distance rule gives it,
+        // which its 10" extent would have thrown away.
+        let small = doc! { "z": 0.001, "diam": 10.0 };
+        assert!((row_match_radius_arcsec(&config, &small) - 300.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_a_row_with_neither_rule_falls_back_to_the_floor() {
+        let config = ned_config();
+        assert!((row_match_radius_arcsec(&config, &doc! {}) - 5.0).abs() < 1e-6);
+    }
+
+    /// The database is only asked for the base cone, so a distance rule that
+    /// reaches past it would match rows that were never fetched.
+    #[test]
+    fn test_the_distance_rule_cannot_see_past_the_query_cone() {
+        let config = conf::CatalogXmatchConfig {
+            radius: conf::arcsec_to_radians(30.0),
+            angular_size_key: None,
+            angular_size_radius_max: None,
+            ..ned_config()
+        };
+        assert!((row_match_radius_arcsec(&config, &doc! { "z": 0.001 }) - 30.0).abs() < 1e-6);
+    }
+
+    /// Legacy writes -99 for "no photo-z". Folding it to 0 keeps the row, which
+    /// may still carry a spectroscopic redshift.
+    #[test]
+    fn test_the_absent_redshift_sentinel_is_folded_to_zero() {
+        let config = ned_config();
+        assert_eq!(row_redshift(&config, &doc! { "z": -99.0 }), Some(0.0));
+        assert_eq!(row_redshift(&config, &doc! { "z": 0.02 }), Some(0.02));
+        assert_eq!(row_redshift(&config, &doc! {}), None);
+    }
+
+    /// `distance_kpc` is written from the row's redshift, so a catalog that
+    /// also matches on size must not lose it.
+    #[test]
+    fn test_a_size_matched_row_still_reports_a_redshift() {
+        let config = ned_config();
+        let big_galaxy = doc! { "z": 0.02, "diam": 11400.0 };
+        assert!(row_match_radius_arcsec(&config, &big_galaxy) > 300.0);
+        assert_eq!(row_redshift(&config, &big_galaxy), Some(0.02));
     }
 
     #[test]

@@ -334,7 +334,7 @@ pub fn arcsec_to_radians(arcsec: f64) -> f64 {
     arcsec * std::f64::consts::PI / 180.0 / 3600.0
 }
 
-fn radians_to_arcsec(radians: f64) -> f64 {
+pub fn radians_to_arcsec(radians: f64) -> f64 {
     radians * 180.0 / std::f64::consts::PI * 3600.0
 }
 
@@ -344,11 +344,13 @@ impl CatalogXmatchConfig {
         self.collection.as_deref().unwrap_or(&self.catalog)
     }
 
-    /// Match radius in arcsec for one candidate row.
+    /// Match radius in arcsec for one candidate row, from its extent alone.
     ///
     /// `radius` is the cone the database is asked for, not the radius a row is
     /// accepted within: a sized catalog accepts each row within its own extent,
-    /// so a small galaxy far out in the cone is rejected here.
+    /// so a small galaxy far out in the cone is rejected here. See
+    /// [`crate::utils::spatial::row_match_radius_arcsec`] for the rule that
+    /// combines this with distance matching.
     pub fn match_radius_arcsec(&self, angular_size_arcsec: Option<f64>) -> f64 {
         let Some(max) = self.angular_size_radius_max else {
             return radians_to_arcsec(self.radius);
@@ -442,19 +444,12 @@ impl CatalogXmatchConfig {
             None => None,
         };
 
-        if max_results.is_some() && use_distance {
-            panic!("cannot use max_results with distance filtering");
-        }
-
         let angular_size_key = opt_string("angular_size_key")?;
         let angular_size_scale = opt_float("angular_size_scale")?.unwrap_or(1.0);
         let angular_size_radius_max = opt_float("angular_size_radius_max")?;
         let angular_size_radius_min = opt_float("angular_size_radius_min")?.unwrap_or(0.0);
 
         if angular_size_key.is_some() {
-            if use_distance {
-                panic!("cannot use angular_size_key with distance filtering");
-            }
             let Some(radius_max) = angular_size_radius_max else {
                 panic!("must provide an angular_size_radius_max if angular_size_key is set");
             };
