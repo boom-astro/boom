@@ -82,6 +82,14 @@ struct Cli {
     #[arg(long, value_delimiter = ',', default_value = "1.8,2.2,2.6,3.0,3.4")]
     thor_distances: Vec<f64>,
 
+    /// Attribute detections to catalogued objects and score against `ssnamenr`.
+    #[arg(long, default_value_t = false)]
+    identify: bool,
+
+    /// Radius a refined prediction must fall inside to count, arcseconds.
+    #[arg(long, default_value_t = 120.0)]
+    identify_radius: f64,
+
     /// Report at most this many tracklets.
     #[arg(long, default_value_t = 20)]
     show: usize,
@@ -604,6 +612,136 @@ fn run_thor(args: &Cli, detections: &[Detection], labels: &HashMap<i64, String>)
     let _ = &single_per_night;
 }
 
+/// Attribute detections to catalogued objects, and score against `ssnamenr`.
+///
+/// Every detection here already carries IPAC's identification, so the
+/// catalogue's answer can be checked directly: agreement measures whether
+/// propagating MPCORB to the detection epoch lands where the object was.
+async fn run_identify(args: &Cli, detections: &[Detection], labels: &HashMap<i64, String>) {
+    use boom::utils::identify::{identify, IdentifyConfig, OrbitEntry};
+    use boom::utils::mpcorb::{elements_from_document, normalize_ztf_ssnamenr, ORBITS_COLLECTION};
+    use futures::TryStreamExt;
+
+    let config_path = args
+        .config
+        .clone()
+        .unwrap_or_else(|| "config.yaml".to_string());
+    let config = AppConfig::from_path(&config_path).expect("failed to load config");
+    let db = config.build_db().await.expect("failed to connect to mongo");
+
+    let started = std::time::Instant::now();
+    let mut cursor = db
+        .collection::<Document>(ORBITS_COLLECTION)
+        .find(doc! {})
+        .await
+        .expect("failed to read MPC_orbits");
+    let mut orbits: Vec<OrbitEntry> = Vec::new();
+    let mut epochs: Vec<f64> = Vec::new();
+    while let Some(d) = cursor.try_next().await.expect("orbit cursor failed") {
+        let Ok(designation) = d.get_str("_id") else {
+            continue;
+        };
+        let Some(elements) = elements_from_document(&d) else {
+            continue;
+        };
+        epochs.push(elements.epoch_jd);
+        orbits.push(OrbitEntry {
+            designation: designation.to_string(),
+            elements,
+        });
+    }
+    let mid_jd = detections.iter().map(|d| d.jd).sum::<f64>() / detections.len() as f64;
+    epochs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let median_epoch = epochs.get(epochs.len() / 2).copied().unwrap_or(0.0);
+    info!(
+        "{} catalogue orbits in {:.1}s; median epoch JD {:.1}, {:.0} days from these detections",
+        orbits.len(),
+        started.elapsed().as_secs_f64(),
+        median_epoch,
+        (mid_jd - median_epoch).abs()
+    );
+
+    let cfg = IdentifyConfig {
+        match_radius_arcsec: args.identify_radius,
+        ..IdentifyConfig::default()
+    };
+    let started = std::time::Instant::now();
+    let matches = identify(detections, &orbits, &cfg);
+    info!(
+        "{} of {} detections attributed in {:.1}s",
+        matches.len(),
+        detections.len(),
+        started.elapsed().as_secs_f64()
+    );
+
+    if labels.is_empty() {
+        return;
+    }
+    let (mut agree, mut disagree, mut unlabelled) = (0usize, 0usize, 0usize);
+    let mut seps: Vec<f64> = Vec::new();
+    for m in &matches {
+        match labels
+            .get(&m.detection_id)
+            .and_then(|s| normalize_ztf_ssnamenr(s))
+        {
+            None => unlabelled += 1,
+            Some(truth) => {
+                if truth == m.designation {
+                    agree += 1;
+                    seps.push(m.separation_arcsec);
+                } else {
+                    disagree += 1;
+                }
+            }
+        }
+    }
+    let labelled: usize = detections
+        .iter()
+        .filter(|d| {
+            labels
+                .get(&d.id)
+                .and_then(|s| normalize_ztf_ssnamenr(s))
+                .is_some()
+        })
+        .count();
+    seps.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    info!(
+        "identify: {} agree with ssnamenr, {} disagree, {} matched an unnamed detection",
+        agree, disagree, unlabelled
+    );
+    info!(
+        "recall {:.1}% of {} normalisable detections; median separation of an agreeing match {:.2} arcsec",
+        100.0 * agree as f64 / labelled.max(1) as f64,
+        labelled,
+        seps.get(seps.len() / 2).copied().unwrap_or(f64::NAN)
+    );
+
+    // What each candidate radius would have bought, so the default is chosen
+    // from the curve rather than from whichever number happened to work.
+    let mut wrong: Vec<f64> = matches
+        .iter()
+        .filter(|m| {
+            labels
+                .get(&m.detection_id)
+                .and_then(|s| normalize_ztf_ssnamenr(s))
+                .is_some_and(|t| t != m.designation)
+        })
+        .map(|m| m.separation_arcsec)
+        .collect();
+    wrong.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    info!("radius  recall   false");
+    for r in [5.0, 10.0, 20.0, 30.0, 40.0, 60.0, 90.0, 120.0, 240.0, 600.0] {
+        let right = seps.partition_point(|&s| s <= r);
+        let bad = wrong.partition_point(|&s| s <= r);
+        info!(
+            "{:6.0}  {:5.1}%  {:5.2}%",
+            r,
+            100.0 * right as f64 / labelled.max(1) as f64,
+            100.0 * bad as f64 / (right + bad).max(1) as f64
+        );
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let subscriber = FmtSubscriber::builder()
@@ -656,6 +794,11 @@ async fn main() {
     };
     if args.thor {
         run_thor(&args, &detections, &labels);
+        return;
+    }
+
+    if args.identify {
+        run_identify(&args, &detections, &labels).await;
         return;
     }
 

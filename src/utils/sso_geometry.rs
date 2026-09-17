@@ -173,6 +173,65 @@ pub fn heliocentric_position(elements: &OrbitalElements, jd: f64) -> [f64; 3] {
     ]
 }
 
+/// Obliquity of the ecliptic at J2000, degrees.
+const OBLIQUITY_DEG: f64 = 23.439_281;
+/// Earth's equatorial radius, au. The unit the MPC tabulates sites in.
+const EARTH_RADIUS_AU: f64 = 4.263_521e-5;
+
+/// An observing site, in the parallax constants the MPC publishes for it.
+#[derive(Debug, Clone, Copy)]
+pub struct Site {
+    /// East longitude, degrees.
+    pub longitude_deg: f64,
+    /// Distance from the Earth's rotation axis, Earth radii.
+    pub rho_cos_phi: f64,
+    /// Distance from the equatorial plane, Earth radii. Negative in the south.
+    pub rho_sin_phi: f64,
+}
+
+/// ZTF at Palomar, MPC code I41.
+pub const ZTF: Site = Site {
+    longitude_deg: 243.140_22,
+    rho_cos_phi: 0.836_325,
+    rho_sin_phi: 0.546_877,
+};
+
+/// The Simonyi Survey Telescope at Rubin Observatory, MPC code X05.
+pub const RUBIN: Site = Site {
+    longitude_deg: 289.250_58,
+    rho_cos_phi: 0.864_981,
+    rho_sin_phi: -0.500_958,
+};
+
+/// Heliocentric ecliptic position of an observing site at `jd`, au.
+///
+/// An observation is made from a point on a spinning Earth, not from its
+/// centre. The offset is only an Earth radius, but against a main-belt asteroid
+/// a couple of au away that is still several arcseconds -- comparable to the
+/// error everything else in this module is trying to avoid.
+pub fn observer_position(jd: f64, site: &Site) -> [f64; 3] {
+    // Greenwich mean sidereal time, degrees. Good to well under a second of
+    // time over the decades a survey archive spans.
+    let d = jd - 2_451_545.0;
+    let gmst = (280.460_618_37 + 360.985_647_366_29 * d).rem_euclid(360.0);
+    let lst = (gmst + site.longitude_deg).to_radians();
+
+    // Geocentric, equatorial, in au.
+    let (x, y, z) = (
+        site.rho_cos_phi * lst.cos() * EARTH_RADIUS_AU,
+        site.rho_cos_phi * lst.sin() * EARTH_RADIUS_AU,
+        site.rho_sin_phi * EARTH_RADIUS_AU,
+    );
+    // Equatorial to ecliptic, then onto the Earth's own position.
+    let (s, c) = OBLIQUITY_DEG.to_radians().sin_cos();
+    let earth = earth_position(jd);
+    [
+        earth[0] + x,
+        earth[1] + c * y + s * z,
+        earth[2] - s * y + c * z,
+    ]
+}
+
 /// Earth's heliocentric ecliptic position at `jd`, au.
 ///
 /// Low-precision solar theory (Meeus ch. 25), good to ~1e-4 au. That is three
@@ -244,6 +303,54 @@ fn dot(a: &[f64; 3], b: &[f64; 3]) -> f64 {
 
 fn norm(v: &[f64; 3]) -> f64 {
     dot(v, v).sqrt()
+}
+
+#[cfg(test)]
+mod tests_observer {
+    use super::*;
+
+    /// The offset is an Earth radius, and it points somewhere.
+    #[test]
+    fn site_sits_an_earth_radius_from_the_centre() {
+        let jd = 2461286.8;
+        let earth = earth_position(jd);
+        let obs = observer_position(jd, &ZTF);
+        let d = ((obs[0] - earth[0]).powi(2)
+            + (obs[1] - earth[1]).powi(2)
+            + (obs[2] - earth[2]).powi(2))
+        .sqrt();
+        // Palomar is at 33 degrees north, so slightly inside the equatorial radius.
+        assert!(
+            (0.9 * EARTH_RADIUS_AU..=EARTH_RADIUS_AU).contains(&d),
+            "offset {d} au against an Earth radius of {EARTH_RADIUS_AU}"
+        );
+    }
+
+    /// Half a day apart the Earth has turned, so the site has moved.
+    #[test]
+    fn the_site_turns_with_the_earth() {
+        let jd = 2461286.8;
+        let a = observer_position(jd, &ZTF);
+        let b = observer_position(jd + 0.5, &ZTF);
+        let earth_a = earth_position(jd);
+        let earth_b = earth_position(jd + 0.5);
+        // Offsets relative to the Earth, so the orbit does not mask the spin.
+        let oa = [a[0] - earth_a[0], a[1] - earth_a[1], a[2] - earth_a[2]];
+        let ob = [b[0] - earth_b[0], b[1] - earth_b[1], b[2] - earth_b[2]];
+        let moved =
+            ((oa[0] - ob[0]).powi(2) + (oa[1] - ob[1]).powi(2) + (oa[2] - ob[2]).powi(2)).sqrt();
+        assert!(
+            moved > EARTH_RADIUS_AU,
+            "site moved only {moved} au in half a day"
+        );
+    }
+
+    /// Southern sites sit below the equatorial plane, northern ones above.
+    #[test]
+    fn hemispheres_are_the_right_way_up() {
+        assert!(ZTF.rho_sin_phi > 0.0, "Palomar should be north");
+        assert!(RUBIN.rho_sin_phi < 0.0, "Rubin should be south");
+    }
 }
 
 #[cfg(test)]
