@@ -711,6 +711,18 @@ pub struct ZtfAlert {
     pub updated_at: f64,
 }
 
+pub struct ZtfAlertInput {
+    pub candid: i64,
+    pub object_id: String,
+    pub candidate: ZtfCandidate,
+    pub prv_candidates: Vec<ZtfPrvCandidate>,
+    pub prv_nondetections: Vec<ZtfPrvCandidate>,
+    pub fp_hists: Vec<ZtfForcedPhot>,
+    pub cutout_science: Vec<u8>,
+    pub cutout_template: Vec<u8>,
+    pub cutout_difference: Vec<u8>,
+}
+
 #[derive(Deserialize, Serialize)]
 struct AlertAuxForUpdate {
     #[serde(default)]
@@ -919,79 +931,26 @@ impl ZtfAlertWorker {
             }
         }
     }
-}
 
-#[async_trait::async_trait]
-impl AlertWorker for ZtfAlertWorker {
-    #[instrument(err)]
-    async fn new(config_path: &str) -> Result<ZtfAlertWorker, AlertWorkerError> {
-        let config = AppConfig::from_path(config_path)?;
+    pub async fn ingest_alert(
+        &mut self,
+        input: ZtfAlertInput,
+    ) -> Result<ProcessAlertStatus, AlertError> {
+        let ZtfAlertInput {
+            candid,
+            object_id,
+            candidate,
+            mut prv_candidates,
+            mut prv_nondetections,
+            mut fp_hists,
+            cutout_science,
+            cutout_template,
+            cutout_difference,
+        } = input;
 
-        let xmatch_configs = config
-            .crossmatch
-            .get(&Survey::Ztf)
-            .cloned()
-            .unwrap_or_default();
-
-        let db: mongodb::Database = config
-            .build_db()
-            .await
-            .inspect_err(as_error!("failed to create mongo client"))?;
-
-        let alert_collection = db.collection(&ALERT_COLLECTION);
-        let alert_aux_collection = db.collection(&ALERT_AUX_COLLECTION);
-        let alert_cutout_storage = config
-            .build_cutout_storage(&Survey::Ztf)
-            .await
-            .inspect_err(as_error!("failed to create cutout storage"))?;
-        let alert_aux_collection_update = db.collection(&ALERT_AUX_COLLECTION);
-
-        let lsst_alert_aux_collection: mongodb::Collection<Document> =
-            db.collection(&lsst::ALERT_AUX_COLLECTION);
-
-        let decam_alert_aux_collection: mongodb::Collection<Document> =
-            db.collection(&decam::ALERT_AUX_COLLECTION);
-
-        let worker = ZtfAlertWorker {
-            xmatch_configs,
-            db,
-            alert_collection,
-            alert_aux_collection,
-            alert_cutout_storage,
-            schema_cache: SchemaCache::default(),
-            lsst_alert_aux_collection,
-            decam_alert_aux_collection,
-            alert_aux_collection_update,
-        };
-        Ok(worker)
-    }
-
-    fn survey() -> Survey {
-        Survey::Ztf
-    }
-
-    fn output_queue_name(&self) -> String {
-        format!("{}_alerts_enrichment_queue", ZtfAlertWorker::survey())
-    }
-
-    #[instrument(skip_all, err)]
-    async fn process_alert(&mut self, avro_bytes: &[u8]) -> Result<ProcessAlertStatus, AlertError> {
         let now = Time::now().to_jd();
-        let mut avro_alert: ZtfRawAvroAlert = self
-            .schema_cache
-            .alert_from_avro_bytes(avro_bytes)
-            .inspect_err(as_error!())?;
-
-        let candid = avro_alert.candid;
-        let object_id = avro_alert.object_id;
-        let ra = avro_alert.candidate.candidate.ra;
-        let dec = avro_alert.candidate.candidate.dec;
-
-        let candidate: ZtfCandidate = avro_alert.candidate;
-
-        let prv_candidates = avro_alert.prv_candidates.take().unwrap_or_default();
-        let (mut prv_candidates, mut prv_nondetections) = self.split_prv_candidates(prv_candidates);
-        let mut fp_hists = avro_alert.fp_hists.take().unwrap_or_default();
+        let ra = candidate.candidate.ra;
+        let dec = candidate.candidate.dec;
 
         // Add the current candidate as the last point in the prv_candidates, if it's not already there (based on jd)
         if !prv_candidates
@@ -1090,15 +1049,94 @@ impl AlertWorker for ZtfAlertWorker {
             .format_and_insert_cutouts(
                 candid,
                 &object_id,
-                avro_alert.cutout_science,
-                avro_alert.cutout_template,
-                avro_alert.cutout_difference,
+                cutout_science,
+                cutout_template,
+                cutout_difference,
                 &self.alert_cutout_storage,
             )
             .await
             .inspect_err(as_error!())?;
 
         Ok(status)
+    }
+}
+
+#[async_trait::async_trait]
+impl AlertWorker for ZtfAlertWorker {
+    #[instrument(err)]
+    async fn new(config_path: &str) -> Result<ZtfAlertWorker, AlertWorkerError> {
+        let config = AppConfig::from_path(config_path)?;
+
+        let xmatch_configs = config
+            .crossmatch
+            .get(&Survey::Ztf)
+            .cloned()
+            .unwrap_or_default();
+
+        let db: mongodb::Database = config
+            .build_db()
+            .await
+            .inspect_err(as_error!("failed to create mongo client"))?;
+
+        let alert_collection = db.collection(&ALERT_COLLECTION);
+        let alert_aux_collection = db.collection(&ALERT_AUX_COLLECTION);
+        let alert_cutout_storage = config
+            .build_cutout_storage(&Survey::Ztf)
+            .await
+            .inspect_err(as_error!("failed to create cutout storage"))?;
+        let alert_aux_collection_update = db.collection(&ALERT_AUX_COLLECTION);
+
+        let lsst_alert_aux_collection: mongodb::Collection<Document> =
+            db.collection(&lsst::ALERT_AUX_COLLECTION);
+
+        let decam_alert_aux_collection: mongodb::Collection<Document> =
+            db.collection(&decam::ALERT_AUX_COLLECTION);
+
+        let worker = ZtfAlertWorker {
+            xmatch_configs,
+            db,
+            alert_collection,
+            alert_aux_collection,
+            alert_cutout_storage,
+            schema_cache: SchemaCache::default(),
+            lsst_alert_aux_collection,
+            decam_alert_aux_collection,
+            alert_aux_collection_update,
+        };
+        Ok(worker)
+    }
+
+    fn survey() -> Survey {
+        Survey::Ztf
+    }
+
+    fn output_queue_name(&self) -> String {
+        format!("{}_alerts_enrichment_queue", ZtfAlertWorker::survey())
+    }
+
+    #[instrument(skip_all, err)]
+    async fn process_alert(&mut self, avro_bytes: &[u8]) -> Result<ProcessAlertStatus, AlertError> {
+        let mut avro_alert: ZtfRawAvroAlert = self
+            .schema_cache
+            .alert_from_avro_bytes(avro_bytes)
+            .inspect_err(as_error!())?;
+
+        let prv_candidates = avro_alert.prv_candidates.take().unwrap_or_default();
+        let fp_hists = avro_alert.fp_hists.take().unwrap_or_default();
+        let (prv_candidates, prv_nondetections) = self.split_prv_candidates(prv_candidates);
+
+        self.ingest_alert(ZtfAlertInput {
+            candid: avro_alert.candid,
+            object_id: avro_alert.object_id,
+            candidate: avro_alert.candidate,
+            prv_candidates,
+            prv_nondetections,
+            fp_hists,
+            cutout_science: avro_alert.cutout_science,
+            cutout_template: avro_alert.cutout_template,
+            cutout_difference: avro_alert.cutout_difference,
+        })
+        .await
     }
 }
 
