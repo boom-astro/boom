@@ -163,14 +163,17 @@ pub fn cm_radius_arcsec(z: f64, distance_max: f64, distance_max_near: f64) -> f6
 /// sits here too.
 pub const NEARBY_REDSHIFT: f64 = 0.005;
 
+/// Value of `distance_kpc` on a row below [`NEARBY_REDSHIFT`], where a
+/// projected physical distance is meaningless.
+pub const NO_PROJECTED_DISTANCE: f64 = -1.0;
+
 /// Projected distance in kpc from an angular separation (arcsec) at redshift
-/// `z`. Returns `-1.0` below [`NEARBY_REDSHIFT`], where the physical distance
-/// is meaningless.
+/// `z`. Returns [`NO_PROJECTED_DISTANCE`] below [`NEARBY_REDSHIFT`].
 pub fn distance_kpc_from_arcsec(distance_arcsec: f64, z: f64) -> f64 {
     if z > NEARBY_REDSHIFT {
         distance_arcsec * (z / 0.05)
     } else {
-        -1.0
+        NO_PROJECTED_DISTANCE
     }
 }
 
@@ -259,7 +262,7 @@ fn host_rank(doc: &mongodb::bson::Document, type_key: Option<&String>, stellar: 
         return 3;
     }
     let kpc = get_f64_from_doc(doc, "distance_kpc").unwrap_or(f64::INFINITY);
-    if kpc == -1.0 {
+    if kpc == NO_PROJECTED_DISTANCE {
         1
     } else {
         2
