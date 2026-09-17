@@ -40,8 +40,9 @@ struct Cli {
     #[arg(long, default_value_t = 0.8)]
     drb: f64,
 
-    /// Detections per tracklet.
-    #[arg(long, default_value_t = 3)]
+    /// Detections per tracklet. Two is the useful floor: ZTF's nominal cadence
+    /// is two visits to a field per night.
+    #[arg(long, default_value_t = 2)]
     min_detections: usize,
 
     /// Fastest apparent motion a tracklet may have, degrees per day.

@@ -61,7 +61,10 @@ impl Default for TrackletConfig {
             max_rate_deg_per_day: 1.0,
             max_rms_arcsec: 1.5,
             match_radius_arcsec: 3.0,
-            min_detections: 3,
+            // Two, not three: a survey revisiting a field twice a night is the
+            // nominal case, so requiring three discards most of the sky. Pairs
+            // are the less pure for it, which the orbit fit downstream settles.
+            min_detections: 2,
             // heliolinx's maxtime, which it takes in hours: 1.5 hours.
             max_span_days: 1.5 / 24.0,
             // heliolinx's mintime, which it takes in hours, converted: 6 minutes.
@@ -436,28 +439,31 @@ mod tests {
         let mut dets = mover(120.0, 20.0, 0.30, -0.10, &NIGHT, 1);
         dets.extend(mover(120.05, 20.02, -0.25, 0.15, &NIGHT, 100));
         let found = find_tracklets(&dets, &TrackletConfig::default());
-        assert_eq!(found.len(), 2);
-        assert!(found.iter().all(|t| t.ids.len() == 4));
-        // Each tracklet draws from one source, so its ids share a decade.
+        // Both sources come out whole, and no multi-point tracklet mixes them.
+        // Ids below 100 belong to one source and ids from 100 to the other.
+        let whole: Vec<&Tracklet> = found.iter().filter(|t| t.ids.len() == 4).collect();
+        assert_eq!(whole.len(), 2);
+        assert!(whole.iter().any(|t| t.ids.iter().all(|&id| id < 100)));
+        assert!(whole.iter().any(|t| t.ids.iter().all(|&id| id >= 100)));
         assert!(found
             .iter()
-            .any(|t| t.ids.contains(&1) && !t.ids.contains(&100)));
-        assert!(found
-            .iter()
-            .any(|t| t.ids.contains(&100) && !t.ids.contains(&1)));
+            .filter(|t| t.ids.len() > 2)
+            .all(|t| t.ids.iter().all(|&id| id < 100) || t.ids.iter().all(|&id| id >= 100)));
     }
 
+    /// A pair is a tracklet by default, since a survey visiting a field twice a
+    /// night gives nothing longer.
     #[test]
-    fn test_honours_min_detections() {
+    fn test_a_pair_is_a_tracklet_by_default() {
         // Far enough apart in time to clear the pair gate, which this is not about.
         let dets = mover(120.0, 20.0, 0.30, 0.0, &[NIGHT[0], NIGHT[3]], 1);
-        let strict = TrackletConfig::default();
-        assert!(find_tracklets(&dets, &strict).is_empty());
-        let pairs_ok = TrackletConfig {
-            min_detections: 2,
+        assert_eq!(find_tracklets(&dets, &TrackletConfig::default()).len(), 1);
+
+        let strict = TrackletConfig {
+            min_detections: 3,
             ..TrackletConfig::default()
         };
-        assert_eq!(find_tracklets(&dets, &pairs_ok).len(), 1);
+        assert!(find_tracklets(&dets, &strict).is_empty());
     }
 
     #[test]
