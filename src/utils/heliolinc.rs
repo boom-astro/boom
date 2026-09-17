@@ -329,6 +329,79 @@ pub fn propagate(state: &State, epoch_jd: f64, jd: f64) -> Option<State> {
     Some(State { pos, vel })
 }
 
+/// Where `state` appears on the sky at each of `jds`, degrees.
+///
+/// `None` if the orbit cannot be propagated to one of them, since a test orbit
+/// with a gap in its track cannot anchor a co-moving frame.
+pub fn sky_track(state: &State, epoch_jd: f64, jds: &[f64]) -> Option<(Vec<f64>, Vec<f64>)> {
+    let mut ras = Vec::with_capacity(jds.len());
+    let mut decs = Vec::with_capacity(jds.len());
+    for &jd in jds {
+        let p = propagate(state, epoch_jd, jd)?;
+        let e = earth_position(jd);
+        let (ra, dec) = radec_from_ecliptic(&[p.pos[0] - e[0], p.pos[1] - e[1], p.pos[2] - e[2]]);
+        ras.push(ra);
+        decs.push(dec);
+    }
+    Some((ras, decs))
+}
+
+/// Trial orbits through `(ra_deg, dec_deg)` at `epoch_jd`, one per heliocentric
+/// distance, each given the circular speed there.
+///
+/// A tracklet-less search needs whole orbits rather than the distance and
+/// radial velocity a tracklet's rate supplies, so the direction is taken from
+/// where the field is and the speed from what a bound orbit at that distance
+/// must have. Nearby real orbits drift slowly in the frame co-moving with one
+/// of these, which is what makes their detections cluster.
+pub fn test_orbits(
+    ra_deg: f64,
+    dec_deg: f64,
+    epoch_jd: f64,
+    distances_au: &[f64],
+) -> Vec<(State, f64)> {
+    let look = unit_vector(ra_deg, dec_deg);
+    let earth = earth_position(epoch_jd);
+    let mut out = Vec::new();
+
+    for &r_au in distances_au {
+        // Distance along the line of sight that puts the object at r_au from
+        // the Sun: solves |earth + d*look| = r_au.
+        let b = dot(&earth, &look);
+        let c = dot(&earth, &earth) - r_au * r_au;
+        let disc = b * b - c;
+        if disc < 0.0 {
+            continue;
+        }
+        let d = -b + disc.sqrt();
+        if d <= 0.0 {
+            continue;
+        }
+        let pos = [
+            earth[0] + d * look[0],
+            earth[1] + d * look[1],
+            earth[2] + d * look[2],
+        ];
+
+        // Circular speed, perpendicular to the radius and in the orbit plane
+        // closest to the ecliptic, which is where most of the population sits.
+        let speed = (MU / r_au).sqrt();
+        let up = [0.0, 0.0, 1.0];
+        let tangent = cross(&up, &pos);
+        let n = norm(&tangent);
+        if n < 1e-12 {
+            continue;
+        }
+        let vel = [
+            speed * tangent[0] / n,
+            speed * tangent[1] / n,
+            speed * tangent[2] / n,
+        ];
+        out.push((State { pos, vel }, r_au));
+    }
+    out
+}
+
 /// Bucket key placing a state in a grid cell of side `tol`.
 fn cell(pos: &[f64; 3], tol: f64) -> (i64, i64, i64) {
     (
@@ -584,6 +657,11 @@ mod tests {
     use super::*;
     use crate::utils::sso_geometry::geometry_at;
 
+    /// Angular separation, degrees.
+    fn angular_gap(ra1: f64, dec1: f64, ra2: f64, dec2: f64) -> f64 {
+        crate::utils::linking::angular_separation_deg(ra1, dec1, ra2, dec2)
+    }
+
     /// The near-Earth grid starts inside the belt and overlaps it, since an
     /// object's distance is not known before it is linked.
     #[test]
@@ -714,6 +792,44 @@ mod tests {
             link_tracklets(&tracklets, &loose).len() >= strict.len(),
             "the gate should only ever remove candidates"
         );
+    }
+
+    /// A trial orbit sits at the distance asked for and in the direction looked.
+    #[test]
+    fn test_orbits_are_placed_where_the_field_is() {
+        let (ra, dec, jd) = (100.0, 20.0, 2460000.5);
+        for (state, r_au) in test_orbits(ra, dec, jd, &[1.5, 2.5, 3.5]) {
+            assert!(
+                (norm(&state.pos) - r_au).abs() < 1e-6,
+                "{r_au} au orbit sits at {}",
+                norm(&state.pos)
+            );
+            // Seen from Earth it must lie in the direction that was searched.
+            let e = earth_position(jd);
+            let (sra, sdec) = radec_from_ecliptic(&[
+                state.pos[0] - e[0],
+                state.pos[1] - e[1],
+                state.pos[2] - e[2],
+            ]);
+            assert!(
+                angular_gap(sra, sdec, ra, dec) < 1e-4,
+                "points at {sra},{sdec}"
+            );
+        }
+    }
+
+    /// A trial orbit's sky track is continuous and moves like a real body.
+    #[test]
+    fn test_sky_track_follows_the_orbit() {
+        let jds: Vec<f64> = (0..5).map(|k| 2460000.5 + k as f64).collect();
+        let (state, _) = test_orbits(100.0, 20.0, 2460000.5, &[2.5]).remove(0);
+        let (ras, decs) = sky_track(&state, 2460000.5, &jds).expect("a track");
+        assert_eq!(ras.len(), jds.len());
+        // A main-belt body moves under a degree a day near opposition.
+        for k in 1..ras.len() {
+            let step = angular_gap(ras[k - 1], decs[k - 1], ras[k], decs[k]);
+            assert!(step > 0.0 && step < 1.0, "moved {step} deg in a day");
+        }
     }
 
     /// A large component that fails the night test is walked once, not once per

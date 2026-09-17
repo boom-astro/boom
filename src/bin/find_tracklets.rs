@@ -8,6 +8,7 @@
 use boom::conf::{load_dotenv, AppConfig};
 use boom::utils::heliolinc::{default_hypotheses, link_tracklets, LinkConfig, Track};
 use boom::utils::linking::{find_tracklets, Detection, Tracklet, TrackletConfig};
+use boom::utils::orbit_fit::{fit_orbit, Observation};
 use clap::Parser;
 use futures::StreamExt;
 use mongodb::bson::{doc, Document};
@@ -71,6 +72,15 @@ struct Cli {
     /// Write the linked tracks here as JSON, one object per line.
     #[arg(long, value_name = "FILE")]
     out_tracks: Option<String>,
+
+    /// Recover objects tracklet-lessly, in the manner of THOR, instead of
+    /// linking tracklets. Reaches objects detected only once a night.
+    #[arg(long, default_value_t = false)]
+    thor: bool,
+
+    /// Heliocentric distances to place trial orbits at, au.
+    #[arg(long, value_delimiter = ',', default_value = "1.8,2.2,2.6,3.0,3.4")]
+    thor_distances: Vec<f64>,
 
     /// Report at most this many tracklets.
     #[arg(long, default_value_t = 20)]
@@ -368,6 +378,232 @@ fn dump_tracks(
     Ok(tracks.len())
 }
 
+/// Recover objects without tracklets, sweeping trial orbits over sky patches.
+///
+/// A trial orbit only governs the detections near where it sits -- beyond a
+/// couple of degrees the co-moving frame no longer applies -- so the sky is
+/// divided into patches and each is searched with its own orbits. One orbit at
+/// the centre of a whole night's coverage governs almost nothing.
+fn run_thor(args: &Cli, detections: &[Detection], labels: &HashMap<i64, String>) {
+    use boom::utils::heliolinc::{sky_track, test_orbits};
+    use boom::utils::thor;
+    use rayon::prelude::*;
+
+    let cfg = thor::Config {
+        min_detections: args.min_detections.max(2),
+        min_nights: args.min_nights,
+        ..thor::Config::default()
+    };
+
+    let jds: Vec<f64> = detections.iter().map(|d| d.jd).collect();
+    let (lo, hi) = jds
+        .iter()
+        .fold((f64::MAX, f64::MIN), |(a, b), &j| (a.min(j), b.max(j)));
+    let epoch = 0.5 * (lo + hi);
+    let steps = (((hi - lo) / 0.5).ceil() as usize).max(2);
+    let sample: Vec<f64> = (0..=steps)
+        .map(|k| lo + (hi - lo) * k as f64 / steps as f64)
+        .collect();
+
+    // Patches a little smaller than the offset a trial orbit governs, so an
+    // object near a boundary is still covered by a neighbouring patch.
+    let patch_deg = cfg.max_offset_deg;
+    let mut patches: HashMap<(i64, i64), Vec<Detection>> = HashMap::new();
+    for d in detections {
+        let dy = (d.dec / patch_deg).floor() as i64;
+        // Widen in RA towards the poles so patches stay roughly equal-area.
+        let scale = d.dec.to_radians().cos().max(0.05);
+        let dx = (d.ra * scale / patch_deg).floor() as i64;
+        patches.entry((dx, dy)).or_default().push(*d);
+    }
+    let patches: Vec<Vec<Detection>> = patches
+        .into_values()
+        .filter(|v| v.len() >= cfg.min_detections)
+        .collect();
+    info!(
+        "{} sky patches of {:.1} deg, {} trial distances each",
+        patches.len(),
+        patch_deg,
+        args.thor_distances.len()
+    );
+
+    let started = std::time::Instant::now();
+    let clusters: Vec<(thor::Cluster, boom::utils::heliolinc::State)> = patches
+        .par_iter()
+        .flat_map(|patch| {
+            let ra0 = patch.iter().map(|d| d.ra).sum::<f64>() / patch.len() as f64;
+            let dec0 = patch.iter().map(|d| d.dec).sum::<f64>() / patch.len() as f64;
+            let mut found = Vec::new();
+            for (state, _r) in test_orbits(ra0, dec0, epoch, &args.thor_distances) {
+                let Some((ra, dec)) = sky_track(&state, epoch, &sample) else {
+                    continue;
+                };
+                let track = thor::TestOrbitTrack {
+                    jd: sample.clone(),
+                    ra,
+                    dec,
+                };
+                // The trial orbit seeds the fit: it is near the truth by
+                // construction, which is why the cluster formed around it.
+                found.extend(
+                    thor::recover(patch, &track, &cfg)
+                        .into_iter()
+                        .map(|c| (c, state)),
+                );
+            }
+            found
+        })
+        .collect();
+
+    info!(
+        "{} clusters from {} detections over {} patches in {:.1}s",
+        clusters.len(),
+        detections.len(),
+        patches.len(),
+        started.elapsed().as_secs_f64()
+    );
+
+    // Gate on how well one orbit reproduces the cluster's own positions, as the
+    // tracklet path does. Two points cannot constrain six parameters, so those
+    // pass through ungated and are reported separately rather than counted as
+    // though the astrometry had vouched for them.
+    let by_id: HashMap<i64, &Detection> = detections.iter().map(|d| (d.id, d)).collect();
+    let gate_start = std::time::Instant::now();
+    let mut scored: Vec<(thor::Cluster, Option<f64>)> = clusters
+        .into_par_iter()
+        .filter_map(|(c, seed)| {
+            let obs: Vec<Observation> = c
+                .ids
+                .iter()
+                .filter_map(|id| by_id.get(id))
+                .map(|d| Observation {
+                    jd: d.jd,
+                    ra: d.ra,
+                    dec: d.dec,
+                })
+                .collect();
+            if obs.len() < 3 {
+                return Some((c, None));
+            }
+            let fit = fit_orbit(&obs, &seed, epoch, 20)?;
+            (fit.rms_arcsec <= args.max_residual).then_some((c, Some(fit.rms_arcsec)))
+        })
+        .collect();
+
+    // Best-fitting first, so an overlapping cluster keeps the detections the
+    // astrometry supports. Ungated pairs rank last.
+    scored.sort_by(|a, b| {
+        a.1.unwrap_or(f64::INFINITY)
+            .partial_cmp(&b.1.unwrap_or(f64::INFINITY))
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(b.0.ids.len().cmp(&a.0.ids.len()))
+    });
+    let mut claimed: std::collections::HashSet<i64> = std::collections::HashSet::new();
+    let mut kept: Vec<(thor::Cluster, Option<f64>)> = Vec::new();
+    for (c, r) in scored {
+        if c.ids.iter().all(|id| claimed.contains(id)) {
+            continue;
+        }
+        claimed.extend(c.ids.iter().copied());
+        kept.push((c, r));
+    }
+    info!(
+        "{} clusters survive the orbit fit and deduplication in {:.1}s",
+        kept.len(),
+        gate_start.elapsed().as_secs_f64()
+    );
+
+    if labels.is_empty() {
+        return;
+    }
+    let (mut pure, mut mixed) = (0usize, 0usize);
+    let (mut pair_pure, mut pair_mixed) = (0usize, 0usize);
+    let mut recovered = std::collections::HashSet::new();
+    let mut single_per_night = std::collections::HashSet::new();
+    for (c, resid) in &kept {
+        let names: std::collections::HashSet<&String> =
+            c.ids.iter().filter_map(|id| labels.get(id)).collect();
+        let gated = resid.is_some();
+        match names.len() {
+            0 => {}
+            1 => {
+                let name = (*names.iter().next().unwrap()).clone();
+                recovered.insert(name.clone());
+                if gated {
+                    pure += 1;
+                } else {
+                    pair_pure += 1;
+                }
+                if c.ids.len() == c.nights {
+                    single_per_night.insert(name);
+                }
+            }
+            _ => {
+                if gated {
+                    mixed += 1;
+                } else {
+                    pair_mixed += 1;
+                }
+            }
+        }
+    }
+    // What each object's own cadence was, so "one detection per night" describes
+    // the object rather than the cluster THOR happened to build from it.
+    let mut per_object_night: HashMap<(&String, i64), usize> = HashMap::new();
+    for d in detections {
+        if let Some(name) = labels.get(&d.id) {
+            *per_object_night
+                .entry((name, (d.jd - 0.5).floor() as i64))
+                .or_default() += 1;
+        }
+    }
+    let mut busiest: HashMap<&String, usize> = HashMap::new();
+    let mut nights_of: HashMap<&String, usize> = HashMap::new();
+    for ((name, _), c) in &per_object_night {
+        let e = busiest.entry(name).or_insert(0);
+        *e = (*e).max(*c);
+        *nights_of.entry(name).or_default() += 1;
+    }
+    let thor_only: std::collections::HashSet<String> = busiest
+        .iter()
+        .filter(|(n, &m)| m == 1 && nights_of.get(*n).copied().unwrap_or(0) >= 2)
+        .map(|(n, _)| (*n).clone())
+        .collect();
+    let recovered_thor_only = recovered.iter().filter(|n| thor_only.contains(*n)).count();
+
+    let total: std::collections::HashSet<&String> = labels.values().collect();
+    let pct = |a: usize, b: usize| {
+        if a + b == 0 {
+            0.0
+        } else {
+            100.0 * a as f64 / (a + b) as f64
+        }
+    };
+    info!(
+        "thor gated (3+ detections): {} pure, {} mixed = {:.1}% purity",
+        pure,
+        mixed,
+        pct(pure, mixed)
+    );
+    info!(
+        "thor ungated (pairs):       {} pure, {} mixed = {:.1}% purity",
+        pair_pure,
+        pair_mixed,
+        pct(pair_pure, pair_mixed)
+    );
+    info!(
+        "thor: {} distinct objects of {}",
+        recovered.len(),
+        total.len()
+    );
+    info!(
+        "of those, {} never had more than one detection in a night, of {} such objects present -- the population tracklet linking cannot reach",
+        recovered_thor_only,
+        thor_only.len()
+    );
+    let _ = &single_per_night;
+}
+
 #[tokio::main]
 async fn main() {
     let subscriber = FmtSubscriber::builder()
@@ -418,6 +654,11 @@ async fn main() {
         min_pair_dt_days: args.min_pair_dt,
         ..TrackletConfig::default()
     };
+    if args.thor {
+        run_thor(&args, &detections, &labels);
+        return;
+    }
+
     let started = std::time::Instant::now();
     let tracklets = if args.link {
         tracklets_per_night(&detections, &cfg)
