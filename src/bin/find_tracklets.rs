@@ -63,8 +63,9 @@ struct Cli {
     min_pair_dt: f64,
 
     /// Longest a tracklet may span, days. Separate from `--span`, which is how
-    /// much data to read: widening it widens the pair search radius.
-    #[arg(long, default_value_t = 1.5 / 24.0)]
+    /// much data to read: widening it widens the pair search radius. Pass
+    /// 0.0625 to match heliolinx's 1.5 hour default when comparing against it.
+    #[arg(long, default_value_t = 3.0 / 24.0)]
     max_tracklet_span: f64,
 
     /// Distinct nights a track must appear on.

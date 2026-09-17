@@ -73,8 +73,10 @@ impl Default for TrackletConfig {
             // nominal case, so requiring three discards most of the sky. Pairs
             // are the less pure for it, which the orbit fit downstream settles.
             min_detections: 2,
-            // heliolinx's maxtime, which it takes in hours: 1.5 hours.
-            max_span_days: 1.5 / 24.0,
+            // Three hours, not heliolinx's 1.5: ZTF revisits a field slowly
+            // enough that the shorter window leaves roughly half the two-night
+            // objects unreachable, and widening it costs nothing in purity.
+            max_span_days: 3.0 / 24.0,
             // heliolinx's mintime, which it takes in hours, converted: 6 minutes.
             min_pair_dt_days: 0.1 / 24.0,
             // heliolinx's minarc: rejects the pairs a stationary star produces.
