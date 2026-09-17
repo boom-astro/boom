@@ -15,7 +15,7 @@
 //! it is self-contained enough to move into its own crate alongside
 //! `villar-pso` when the kernels are written.
 
-use crate::utils::linking::Detection;
+use crate::utils::linking::{tangent_plane, Detection};
 use serde::{Deserialize, Serialize};
 
 /// Where the test orbit appears, at each epoch the detections were taken.
@@ -120,20 +120,6 @@ pub struct Projected {
     pub y: f64,
 }
 
-/// Gnomonic projection of `(ra, dec)` about `(ra0, dec0)`, degrees.
-fn tangent_plane(ra: f64, dec: f64, ra0: f64, dec0: f64) -> Option<(f64, f64)> {
-    let (r, d) = (ra.to_radians(), dec.to_radians());
-    let (r0, d0) = (ra0.to_radians(), dec0.to_radians());
-    let cos_c = d0.sin() * d.sin() + d0.cos() * d.cos() * (r - r0).cos();
-    if cos_c <= 1e-12 {
-        return None;
-    }
-    Some((
-        (d.cos() * (r - r0).sin() / cos_c).to_degrees(),
-        ((d0.cos() * d.sin() - d0.sin() * d.cos() * (r - r0).cos()) / cos_c).to_degrees(),
-    ))
-}
-
 /// Project every detection into the frame co-moving with the test orbit.
 ///
 /// Detections outside `max_offset_deg` of the test orbit are dropped, since a
@@ -191,27 +177,40 @@ pub fn cluster(projected: &[Projected], cfg: &Config) -> Vec<Cluster> {
             }
 
             let mut groups: Vec<Vec<usize>> = Vec::new();
-            for (k, (x, y)) in shifted.iter().enumerate() {
-                let base = ((x / cell).floor() as i64, (y / cell).floor() as i64);
+            // Grown transitively: a detection stream spread over several nights
+            // reaches further than one cell, and taking only a seed's own
+            // neighbours would break one object into pieces.
+            let mut seen = vec![false; shifted.len()];
+            for k in 0..shifted.len() {
+                if seen[k] {
+                    continue;
+                }
                 let mut members = vec![k];
-                for dx in -1..=1 {
-                    for dy in -1..=1 {
-                        let Some(bucket) = grid.get(&(base.0 + dx, base.1 + dy)) else {
-                            continue;
-                        };
-                        for &m in bucket {
-                            if m == k {
+                let mut queue = vec![k];
+                seen[k] = true;
+                while let Some(current) = queue.pop() {
+                    let (cx, cy) = shifted[current];
+                    let base = ((cx / cell).floor() as i64, (cy / cell).floor() as i64);
+                    for dx in -1..=1 {
+                        for dy in -1..=1 {
+                            let Some(bucket) = grid.get(&(base.0 + dx, base.1 + dy)) else {
                                 continue;
-                            }
-                            let (mx, my) = shifted[m];
-                            if (mx - x).hypot(my - y) <= cell {
-                                members.push(m);
+                            };
+                            for &m in bucket {
+                                if seen[m] {
+                                    continue;
+                                }
+                                let (mx, my) = shifted[m];
+                                if (mx - cx).hypot(my - cy) <= cell {
+                                    seen[m] = true;
+                                    members.push(m);
+                                    queue.push(m);
+                                }
                             }
                         }
                     }
                 }
                 members.sort_unstable();
-                members.dedup();
                 groups.push(members);
             }
 

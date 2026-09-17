@@ -8,6 +8,7 @@
 
 use crate::utils::heliolinc::radec_from_ecliptic;
 use crate::utils::linking::{angular_separation_deg, Detection};
+pub use crate::utils::outburst::median;
 use crate::utils::sso_geometry::{earth_position, heliocentric_position, OrbitalElements};
 use std::collections::HashMap;
 
@@ -118,15 +119,6 @@ pub fn identify(
         }
     }
     matches
-}
-
-/// Median of a set of separations, arcseconds.
-pub fn median(values: &mut [f64]) -> Option<f64> {
-    if values.is_empty() {
-        return None;
-    }
-    values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    Some(values[values.len() / 2])
 }
 
 #[cfg(test)]

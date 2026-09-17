@@ -324,9 +324,15 @@ fn dump_tracks(
     let mut file = std::io::BufWriter::new(std::fs::File::create(path)?);
 
     for (i, track) in tracks.iter().enumerate() {
+        // Tracklets of one track can share a detection, so an epoch is reported
+        // once rather than once per tracklet that contains it.
         let mut epochs: Vec<serde_json::Value> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
         for &m in &track.members {
             for id in &tracklets[m].ids {
+                if !seen.insert(*id) {
+                    continue;
+                }
                 let Some(d) = by_id.get(id) else { continue };
                 epochs.push(serde_json::json!({
                     "candid": d.id.to_string(),

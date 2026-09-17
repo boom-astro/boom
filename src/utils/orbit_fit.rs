@@ -144,18 +144,29 @@ pub fn fit_orbit(
             VEL_STEP_AU_PER_DAY,
         ];
 
-        // Normal equations from the numerical Jacobian.
+        // Normal equations from the numerical Jacobian. A perturbed state can
+        // fall outside what the propagator handles, near escape speed; that is
+        // a step too large rather than a failed fit, so damp and retry instead
+        // of discarding the progress made so far.
         let mut ata = vec![vec![0.0; 6]; 6];
         let mut atb = vec![0.0; 6];
-        for obs in observations {
-            let (r_ra, r_dec) = residual(&state, epoch_jd, obs)?;
+        let mut usable = true;
+        'obs: for obs in observations {
+            let Some((r_ra, r_dec)) = residual(&state, epoch_jd, obs) else {
+                usable = false;
+                break 'obs;
+            };
             let mut jac_ra = [0.0; 6];
             let mut jac_dec = [0.0; 6];
             for (k, step) in steps.iter().enumerate() {
                 let up = perturb(&state, k, *step);
                 let down = perturb(&state, k, -*step);
-                let (ra_up, dec_up) = residual(&up, epoch_jd, obs)?;
-                let (ra_down, dec_down) = residual(&down, epoch_jd, obs)?;
+                let (Some((ra_up, dec_up)), Some((ra_down, dec_down))) =
+                    (residual(&up, epoch_jd, obs), residual(&down, epoch_jd, obs))
+                else {
+                    usable = false;
+                    break 'obs;
+                };
                 // Residual falls as the model improves, hence the sign.
                 jac_ra[k] = -(ra_up - ra_down) / (2.0 * step);
                 jac_dec[k] = -(dec_up - dec_down) / (2.0 * step);
@@ -166,6 +177,13 @@ pub fn fit_orbit(
                     ata[i][j] += jac_ra[i] * jac_ra[j] + jac_dec[i] * jac_dec[j];
                 }
             }
+        }
+        if !usable {
+            lambda *= 10.0;
+            if lambda > 1e8 {
+                break;
+            }
+            continue;
         }
 
         // Levenberg damping on the diagonal.
@@ -178,10 +196,15 @@ pub fn fit_orbit(
         };
 
         let mut candidate = state;
-        for (k, d) in delta.iter().enumerate() {
-            if !d.is_finite() {
-                return None;
+        // A non-finite step is the same kind of failure: damp rather than abort.
+        if delta.iter().any(|d| !d.is_finite()) {
+            lambda *= 10.0;
+            if lambda > 1e8 {
+                break;
             }
+            continue;
+        }
+        for (k, d) in delta.iter().enumerate() {
             candidate = perturb(&candidate, k, *d);
         }
 

@@ -125,7 +125,7 @@ pub fn angular_separation_deg(ra1: f64, dec1: f64, ra2: f64, dec2: f64) -> f64 {
 }
 
 /// Gnomonic projection about (ra0, dec0), degrees. `None` on the far hemisphere.
-fn tangent_plane(ra: f64, dec: f64, ra0: f64, dec0: f64) -> Option<(f64, f64)> {
+pub fn tangent_plane(ra: f64, dec: f64, ra0: f64, dec0: f64) -> Option<(f64, f64)> {
     let (r, d) = (ra.to_radians(), dec.to_radians());
     let (r0, d0) = (ra0.to_radians(), dec0.to_radians());
     let cos_c = d0.sin() * d.sin() + d0.cos() * d.cos() * (r - r0).cos();
