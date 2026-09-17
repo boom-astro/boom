@@ -11,8 +11,8 @@ use boom::{
         enums::Survey,
         parser::parse_positive_usize,
         spatial::{
-            cm_radius_arcsec, distance_kpc_from_arcsec, get_f64_from_doc, watchlist_match_field,
-            xmatch, Coordinates,
+            distance_kpc_from_arcsec, get_f64_from_doc, row_match_radius_arcsec, row_redshift,
+            watchlist_match_field, xmatch, Coordinates,
         },
     },
 };
@@ -796,28 +796,10 @@ async fn process_cat_doc(
         None => return Ok(Vec::new()),
     };
 
-    // A `use_distance` row's effective radius depends only on its own redshift, so query
-    // that instead of the configured maximum and discarding most of what comes back.
-    let mut search_radius = catalog_config.radius;
-    let use_distance_data: Option<(f64, f64)> = if catalog_config.use_distance {
-        let dk = catalog_config
-            .distance_key
-            .as_ref()
-            .expect("validated in config");
-        let z = match get_f64_from_doc(cat_doc, dk) {
-            Some(v) => v,
-            None => return Ok(Vec::new()),
-        };
-        let dmax = catalog_config.distance_max.expect("validated in config");
-        let dmax_near = catalog_config
-            .distance_max_near
-            .expect("validated in config");
-        let cm_radius = cm_radius_arcsec(z, dmax, dmax_near);
-        search_radius = search_radius.min(cm_radius * ARCSEC_TO_RAD);
-        Some((z, cm_radius))
-    } else {
-        None
-    };
+    // A row's effective radius depends only on the row itself, so query that
+    // instead of the configured maximum and discarding most of what comes back.
+    let search_radius = row_match_radius_arcsec(catalog_config, cat_doc) * ARCSEC_TO_RAD;
+    let row_z = row_redshift(catalog_config, cat_doc);
     if search_radius <= 0.0 {
         return Ok(Vec::new());
     }
@@ -852,10 +834,7 @@ async fn process_cat_doc(
         let mut match_doc = cat_doc.clone();
         match_doc.insert("distance_arcsec", distance_arcsec);
 
-        if let Some((z, cm_radius)) = use_distance_data {
-            if distance_arcsec >= cm_radius {
-                continue;
-            }
+        if let Some(z) = row_z {
             match_doc.insert("distance_kpc", distance_kpc_from_arcsec(distance_arcsec, z));
         }
 
