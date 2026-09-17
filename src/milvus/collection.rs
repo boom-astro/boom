@@ -11,12 +11,13 @@
 //! ingested embedding. `candid` and `jd` record which alert that was.
 
 use prost::Message;
-use tracing::{info, instrument};
+use tracing::{info, instrument, warn};
 
 use super::client::{check_status, MilvusClient, MilvusError};
 use super::proto::common::KeyValuePair;
 use super::proto::milvus::{
-    CreateCollectionRequest, CreateIndexRequest, HasCollectionRequest, LoadCollectionRequest,
+    CreateCollectionRequest, CreateIndexRequest, DescribeCollectionRequest, HasCollectionRequest,
+    LoadCollectionRequest,
 };
 use super::proto::schema::{CollectionSchema, DataType, FieldSchema};
 
@@ -31,6 +32,10 @@ pub const FIELD_JD: &str = "jd";
 
 const INDEX_NAME: &str = "embedding_idx";
 
+/// Every field an upsert sends. A collection missing any of these cannot accept
+/// BOOM's writes.
+const REQUIRED_FIELDS: [&str; 4] = [FIELD_OBJECT_ID, FIELD_EMBEDDING, FIELD_CANDID, FIELD_JD];
+
 impl MilvusClient {
     /// Create the embeddings collection, its vector index, and load it into
     /// memory. Does nothing if the collection already exists.
@@ -43,6 +48,11 @@ impl MilvusClient {
 
         if self.has_collection(&collection_name).await? {
             info!(collection = %collection_name, "collection already exists");
+            // A collection that exists is not necessarily one we can write to:
+            // if it was created by hand or by another project, its schema may
+            // not match ours and every upsert will fail. Warn rather than
+            // abort, so a mismatch does not take down alert ingestion.
+            self.warn_on_schema_mismatch().await;
             return Ok(false);
         }
 
@@ -88,6 +98,63 @@ impl MilvusClient {
         check_status(response.status.as_ref(), "HasCollection")?;
 
         Ok(response.value)
+    }
+
+    /// Warn if the collection is missing any field [`super::insert`] writes.
+    async fn warn_on_schema_mismatch(&mut self) {
+        let collection = self.config().collection.name.clone();
+
+        let schema = match self.describe_collection().await {
+            Ok(schema) => schema,
+            Err(error) => {
+                warn!(%collection, %error, "could not verify collection schema");
+                return;
+            }
+        };
+
+        let present: Vec<&str> = schema.fields.iter().map(|f| f.name.as_str()).collect();
+        let missing: Vec<&str> = REQUIRED_FIELDS
+            .iter()
+            .copied()
+            .filter(|name| !present.contains(name))
+            .collect();
+
+        if missing.is_empty() {
+            return;
+        }
+
+        warn!(
+            %collection,
+            missing = %missing.join(", "),
+            found = %present.join(", "),
+            "collection is missing fields BOOM writes to Milvus, so every upsert will fail."
+        );
+    }
+
+    /// The schema the server actually holds for the configured collection.
+    ///
+    /// Useful when a collection was provisioned by an older version of BOOM (or
+    /// by hand): the field names here must match what [`super::insert`] sends,
+    /// or every upsert fails with "fieldName ... not exist in collection schema".
+    #[instrument(skip_all, err)]
+    pub async fn describe_collection(&mut self) -> Result<CollectionSchema, MilvusError> {
+        let config = self.config().clone();
+        let request = DescribeCollectionRequest {
+            db_name: config.database.clone(),
+            collection_name: config.collection.name.clone(),
+            ..Default::default()
+        };
+
+        let response = self
+            .service()
+            .describe_collection(request)
+            .await?
+            .into_inner();
+        check_status(response.status.as_ref(), "DescribeCollection")?;
+
+        response
+            .schema
+            .ok_or(MilvusError::MissingStatus("DescribeCollection"))
     }
 
     /// Build the vector index on the embedding field.

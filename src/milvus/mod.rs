@@ -8,9 +8,11 @@ pub mod client;
 pub mod collection;
 pub mod insert;
 pub mod proto;
+pub mod search;
 
 pub use client::{MilvusClient, MilvusError};
 pub use collection::{
     embedding_collection_schema, FIELD_CANDID, FIELD_EMBEDDING, FIELD_JD, FIELD_OBJECT_ID,
 };
 pub use insert::EmbeddingRow;
+pub use search::SearchHit;

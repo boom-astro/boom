@@ -1182,3 +1182,37 @@ impl ZtfEnrichmentWorker {
         Ok(results)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_classifications() -> ZtfAlertClassifications {
+        ZtfAlertClassifications {
+            acai_h: 0.1,
+            acai_n: 0.2,
+            acai_v: 0.3,
+            acai_o: 0.4,
+            acai_b: 0.5,
+            btsbot: 0.6,
+            cider_fusion: None,
+            fusion_embedding: Some(vec![1.0, 2.0, 3.0]),
+        }
+    }
+
+    /// The enrichment worker takes the embedding out of the classifications
+    /// before building the Mongo document: the vector goes to Milvus, and the
+    /// document Mongo receives has no `fusion_embedding` key at all.
+    #[test]
+    fn mongo_document_never_carries_the_embedding() {
+        let mut cls = sample_classifications();
+        let embedding = cls.fusion_embedding.take();
+        let doc = mongify(&cls);
+
+        assert_eq!(embedding, Some(vec![1.0, 2.0, 3.0]));
+        assert!(doc.get("fusion_embedding").is_none());
+        assert!(doc.get("btsbot").is_some());
+        assert_eq!(cls.acai_h, 0.1);
+        assert_eq!(cls.btsbot, 0.6);
+    }
+}
