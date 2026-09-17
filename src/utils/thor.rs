@@ -345,6 +345,7 @@ mod tests {
                     ra: ra0 + x / dec0.to_radians().cos(),
                     dec: dec0 + y,
                     mag: None,
+                    mag_err: None,
                     band: None,
                 }
             })
@@ -418,6 +419,7 @@ mod tests {
                     ra: ra0 + wobble,
                     dec: dec0 - wobble,
                     mag: None,
+                    mag_err: None,
                     band: None,
                 }
             })

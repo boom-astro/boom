@@ -248,6 +248,7 @@ mod tests {
                 ra: 258.382572,
                 dec: 54.383199,
                 mag: Some(19.53),
+                mag_err: None,
                 band: Some('g'),
             },
             Detection {
@@ -256,6 +257,7 @@ mod tests {
                 ra: 258.392572,
                 dec: 54.384199,
                 mag: Some(19.61),
+                mag_err: None,
                 band: Some('g'),
             },
             Detection {
@@ -264,6 +266,7 @@ mod tests {
                 ra: 258.402572,
                 dec: 54.385199,
                 mag: None,
+                mag_err: None,
                 band: None,
             },
         ]

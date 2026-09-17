@@ -195,6 +195,7 @@ mod tests {
             ra,
             dec,
             mag: None,
+            mag_err: None,
             band: None,
         }
     }
@@ -225,6 +226,7 @@ mod tests {
             ra,
             dec: dec + 1.0,
             mag: None,
+            mag_err: None,
             band: None,
         }];
         assert!(identify(&dets, &catalogue(), &IdentifyConfig::default()).is_empty());

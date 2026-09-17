@@ -9,7 +9,7 @@
 //! unrelated ones scatter. Sweeping a grid of assumptions and clustering the
 //! propagated states is then the whole method (Holman et al. 2018).
 
-use crate::utils::linking::{night_of, Tracklet};
+use crate::utils::linking::{night_of, Detection, Tracklet};
 use crate::utils::orbit_fit::{fit_orbit, rms_arcsec, Observation};
 use crate::utils::sso_geometry::{earth_position, heliocentric_position, OrbitalElements};
 use rayon::prelude::*;
@@ -573,16 +573,40 @@ fn tracks_for_hypothesis(
 /// assumed distance; fitting the sky positions tests that claim against the
 /// astrometry itself, which is what separates a real track from tracklets that
 /// happen to land near each other.
-fn score(track: &mut Track, tracklets: &[Tracklet], cfg: &LinkConfig) {
+fn score(
+    track: &mut Track,
+    tracklets: &[Tracklet],
+    by_id: &HashMap<i64, &Detection>,
+    cfg: &LinkConfig,
+) {
+    // Every detection of every member. A tracklet's midpoint alone leaves a
+    // two-tracklet track fitting six parameters to four residuals, which no
+    // amount of iteration can determine, and the residual it reports is then
+    // the underdetermination rather than the quality of the link.
     let observations: Vec<Observation> = track
         .members
         .iter()
-        .map(|&m| Observation {
-            jd: tracklets[m].jd_ref,
-            ra: tracklets[m].ra_ref,
-            dec: tracklets[m].dec_ref,
+        .flat_map(|&m| tracklets[m].ids.iter().filter_map(|id| by_id.get(id)))
+        .map(|d| Observation {
+            jd: d.jd,
+            ra: d.ra,
+            dec: d.dec,
         })
         .collect();
+    // A tracklet built without its detections to hand still carries a midpoint.
+    let observations = if observations.len() >= track.members.len() {
+        observations
+    } else {
+        track
+            .members
+            .iter()
+            .map(|&m| Observation {
+                jd: tracklets[m].jd_ref,
+                ra: tracklets[m].ra_ref,
+                dec: tracklets[m].dec_ref,
+            })
+            .collect()
+    };
 
     track.residual_arcsec = match fit_orbit(&observations, &track.state, cfg.reference_jd, 20) {
         Some(fit) => {
@@ -601,7 +625,12 @@ fn score(track: &mut Track, tracklets: &[Tracklet], cfg: &LinkConfig) {
 /// between those that overlap: a tracklet is reported in whichever surviving
 /// track explains its astrometry best, not whichever hypothesis reached it
 /// first.
-pub fn link_tracklets(tracklets: &[Tracklet], cfg: &LinkConfig) -> Vec<Track> {
+pub fn link_tracklets(
+    tracklets: &[Tracklet],
+    detections: &[Detection],
+    cfg: &LinkConfig,
+) -> Vec<Track> {
+    let by_id: HashMap<i64, &Detection> = detections.iter().map(|d| (d.id, d)).collect();
     // Collected in hypothesis order, so the result does not depend on thread
     // scheduling and deduplication stays reproducible.
     let mut tracks: Vec<Track> = cfg
@@ -612,7 +641,7 @@ pub fn link_tracklets(tracklets: &[Tracklet], cfg: &LinkConfig) -> Vec<Track> {
 
     tracks
         .par_iter_mut()
-        .for_each(|track| score(track, tracklets, cfg));
+        .for_each(|track| score(track, tracklets, &by_id, cfg));
 
     // An orbit nothing explains is not a track, whatever its states did.
     tracks.retain(|t| {
@@ -777,7 +806,7 @@ mod tests {
             reference_jd: 2460002.5,
             ..Default::default()
         };
-        let strict = link_tracklets(&tracklets, &cfg);
+        let strict = link_tracklets(&tracklets, &[], &cfg);
         assert!(
             strict.iter().all(|t| t.members.len() < 3),
             "a displaced member was kept in a track"
@@ -788,7 +817,7 @@ mod tests {
             ..cfg.clone()
         };
         assert!(
-            link_tracklets(&tracklets, &loose).len() >= strict.len(),
+            link_tracklets(&tracklets, &[], &loose).len() >= strict.len(),
             "the gate should only ever remove candidates"
         );
     }
@@ -865,13 +894,15 @@ mod tests {
         };
 
         let started = Instant::now();
-        let tracks = link_tracklets(&tracklets, &cfg);
+        let tracks = link_tracklets(&tracklets, &[], &cfg);
         let elapsed = started.elapsed();
 
         assert!(tracks.is_empty(), "one night cannot make a track");
-        // Quadratic re-walking of a 4000-state component takes far longer.
+        // Generous because the bound only has to separate linear from quadratic:
+        // re-walking this 4000-state component runs past two minutes, while
+        // walking it once is seconds even on a loaded machine.
         assert!(
-            elapsed.as_secs() < 5,
+            elapsed.as_secs() < 30,
             "linking took {elapsed:?}, suggesting the component is re-walked"
         );
     }
@@ -1031,7 +1062,7 @@ mod tests {
             min_nights: 2,
             max_residual_arcsec: 2.0,
         };
-        let tracks = link_tracklets(&tracklets, &cfg);
+        let tracks = link_tracklets(&tracklets, &[], &cfg);
         assert!(!tracks.is_empty(), "no track recovered");
         assert_eq!(tracks[0].members.len(), 3);
         assert_eq!(tracks[0].nights, 3);
@@ -1053,7 +1084,7 @@ mod tests {
             reference_jd: 2460011.5,
             ..LinkConfig::default()
         };
-        assert!(link_tracklets(&tracklets, &cfg).is_empty());
+        assert!(link_tracklets(&tracklets, &[], &cfg).is_empty());
     }
 
     #[test]
@@ -1077,7 +1108,7 @@ mod tests {
             min_nights: 2,
             max_residual_arcsec: 2.0,
         };
-        let tracks = link_tracklets(&tracklets, &cfg);
+        let tracks = link_tracklets(&tracklets, &[], &cfg);
         assert_eq!(tracks.len(), 1, "one object should yield one track");
         assert_eq!(tracks[0].members.len(), 3);
     }

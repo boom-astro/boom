@@ -45,6 +45,11 @@ struct Cli {
     #[arg(long, default_value_t = 2)]
     min_detections: usize,
 
+    /// Reject a pair whose magnitudes disagree by more than this many combined
+    /// sigma. 0 disables the test.
+    #[arg(long, default_value_t = 5.0)]
+    max_mag_sigma: f64,
+
     /// Fastest apparent motion a tracklet may have, degrees per day.
     #[arg(long, default_value_t = 1.0)]
     max_rate: f64,
@@ -180,6 +185,8 @@ struct DumpRow {
     #[serde(default)]
     magpsf: Option<f64>,
     #[serde(default)]
+    sigmapsf: Option<f64>,
+    #[serde(default)]
     fid: Option<i32>,
 }
 
@@ -212,6 +219,7 @@ fn load_file(
             ra: row.ra,
             dec: row.dec,
             mag: row.magpsf,
+            mag_err: row.sigmapsf,
             band: ztf_band(row.fid),
         });
     }
@@ -251,6 +259,7 @@ async fn load(
         "candidate.dec": 1,
         "candidate.ssnamenr": 1,
         "candidate.magpsf": 1,
+        "candidate.sigmapsf": 1,
         "candidate.fid": 1,
     };
 
@@ -284,6 +293,7 @@ async fn load(
             ra,
             dec,
             mag: candidate.get_f64("magpsf").ok(),
+            mag_err: candidate.get_f64("sigmapsf").ok(),
             band: ztf_band(candidate.get_i32("fid").ok()),
         });
     }
@@ -793,6 +803,7 @@ async fn main() {
         max_rate_deg_per_day: args.max_rate,
         min_arc_arcsec: args.min_arc,
         min_pair_dt_days: args.min_pair_dt,
+        max_mag_sigma: (args.max_mag_sigma > 0.0).then_some(args.max_mag_sigma),
         ..TrackletConfig::default()
     };
     if args.thor {
@@ -854,7 +865,7 @@ async fn main() {
             max_residual_arcsec: args.max_residual,
         };
         let started = std::time::Instant::now();
-        let tracks = link_tracklets(&tracklets, &link_cfg);
+        let tracks = link_tracklets(&tracklets, &detections, &link_cfg);
         info!(
             "{} tracks from {} tracklets over {} hypotheses in {:.1}s",
             tracks.len(),

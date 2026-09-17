@@ -23,6 +23,8 @@ pub struct Detection {
     pub dec: f64,
     /// Apparent magnitude, when the survey reported one.
     pub mag: Option<f64>,
+    /// Uncertainty on `mag`, which sets how much of a difference is real.
+    pub mag_err: Option<f64>,
     /// Filter as a single letter, for reporting.
     pub band: Option<char>,
 }
@@ -48,6 +50,12 @@ pub struct TrackletConfig {
     /// Shortest on-sky arc a pair may span, arcseconds. Below this the measured
     /// rate is dominated by astrometric error rather than by motion.
     pub min_arc_arcsec: f64,
+    /// Reject a pair whose magnitudes differ by more than this many combined
+    /// sigma. `None` disables the test, as does a survey reporting no errors.
+    pub max_mag_sigma: Option<f64>,
+    /// Brightness change a real object may show within the window regardless of
+    /// measurement error, added in quadrature. Rotation is the bulk of it.
+    pub intrinsic_mag_scatter: f64,
 }
 
 impl Default for TrackletConfig {
@@ -71,6 +79,14 @@ impl Default for TrackletConfig {
             min_pair_dt_days: 0.1 / 24.0,
             // heliolinx's minarc: rejects the pairs a stationary star produces.
             min_arc_arcsec: 10.0,
+            // Nearly free rather than powerful: it removes a couple of percent
+            // of chance pairs at no measured cost in real ones. A magnitude
+            // limited survey piles most detections up where the errors are
+            // large, and there the test rightly abstains.
+            max_mag_sigma: Some(5.0),
+            // Typical rotational amplitude over an hour. Without it the test
+            // would reject real pairs hardest where the photometry is best.
+            intrinsic_mag_scatter: 0.15,
         }
     }
 }
@@ -182,6 +198,31 @@ fn fit_line(t: &[f64], v: &[f64]) -> Option<(f64, f64)> {
     Some((mv - b * mt, b))
 }
 
+/// Whether two detections are too different in brightness to be one object.
+///
+/// Measured in combined sigma rather than magnitudes: a fixed cut is severe on
+/// bright sources whose errors are millimagnitudes and vacuous on faint ones
+/// whose errors approach the cut itself. Anything the photometry cannot speak
+/// to -- a missing magnitude or error, or two different filters, where colour
+/// makes the difference meaningless -- passes rather than being rejected.
+fn photometry_disagrees(a: &Detection, b: &Detection, cfg: &TrackletConfig) -> bool {
+    let Some(limit) = cfg.max_mag_sigma else {
+        return false;
+    };
+    if a.band != b.band {
+        return false;
+    }
+    let (Some(ma), Some(mb)) = (a.mag, b.mag) else {
+        return false;
+    };
+    let (Some(sa), Some(sb)) = (a.mag_err, b.mag_err) else {
+        return false;
+    };
+    let floor = cfg.intrinsic_mag_scatter;
+    let sigma = (sa * sa + sb * sb + floor * floor).sqrt();
+    sigma.is_finite() && sigma > 0.0 && (ma - mb).abs() / sigma > limit
+}
+
 /// Fit constant motion to a set of detections, or `None` if it does not hold.
 fn fit_tracklet(dets: &[Detection], cfg: &TrackletConfig) -> Option<Tracklet> {
     if dets.len() < 2 {
@@ -279,6 +320,10 @@ pub fn find_tracklets(detections: &[Detection], cfg: &TrackletConfig) -> Vec<Tra
             if dt < cfg.min_pair_dt_days || dt > cfg.max_span_days {
                 continue;
             }
+            // Before the trigonometry, since it rejects a good share of pairs.
+            if photometry_disagrees(a, b, cfg) {
+                continue;
+            }
             let sep = angular_separation_deg(a.ra, a.dec, b.ra, b.dec);
             if sep * 3600.0 < cfg.min_arc_arcsec {
                 continue;
@@ -300,6 +345,9 @@ pub fn find_tracklets(detections: &[Detection], cfg: &TrackletConfig) -> Vec<Tra
             for &k in &order[lo..hi] {
                 let d = &detections[k];
                 if k == i || k == j || (d.jd - seed.jd_ref).abs() > cfg.max_span_days {
+                    continue;
+                }
+                if photometry_disagrees(a, d, cfg) {
                     continue;
                 }
                 let (pra, pdec) = predict(&seed, d.jd);
@@ -378,6 +426,7 @@ mod tests {
                     ra,
                     dec,
                     mag: None,
+                    mag_err: None,
                     band: None,
                 }
             })
@@ -475,6 +524,7 @@ mod tests {
             ra: 120.9,
             dec: 19.7,
             mag: None,
+            mag_err: None,
             band: None,
         });
         let found = find_tracklets(&dets, &TrackletConfig::default());
@@ -539,5 +589,73 @@ mod tests {
                 hi - lo
             );
         }
+    }
+
+    fn at_mag(mag: f64, err: f64, band: char) -> Detection {
+        Detection {
+            id: 1,
+            jd: 2_461_272.6,
+            ra: 180.0,
+            dec: 20.0,
+            mag: Some(mag),
+            mag_err: Some(err),
+            band: Some(band),
+        }
+    }
+
+    /// One magnitude difference, two verdicts: near the limit it is consistent
+    /// with noise, and on a well-measured pair it is not. A cut in magnitudes
+    /// rather than in sigma would have to answer both cases the same way.
+    #[test]
+    fn test_the_same_difference_is_judged_by_the_errors() {
+        let cfg = TrackletConfig::default();
+        let gap = 1.2;
+        let faint = (at_mag(20.5, 0.35, 'r'), at_mag(20.5 + gap, 0.40, 'r'));
+        let bright = (at_mag(16.0, 0.01, 'r'), at_mag(16.0 + gap, 0.01, 'r'));
+        assert!(!photometry_disagrees(&faint.0, &faint.1, &cfg));
+        assert!(photometry_disagrees(&bright.0, &bright.1, &cfg));
+    }
+
+    /// Rotation moves a bright asteroid by a couple of tenths within the
+    /// window, which a sigma-only test would call a five-sigma mismatch.
+    #[test]
+    fn test_rotation_is_not_a_mismatch() {
+        let cfg = TrackletConfig::default();
+        let a = at_mag(16.0, 0.01, 'r');
+        let b = at_mag(16.2, 0.01, 'r');
+        assert!(!photometry_disagrees(&a, &b, &cfg));
+
+        let no_floor = TrackletConfig {
+            intrinsic_mag_scatter: 0.0,
+            ..TrackletConfig::default()
+        };
+        assert!(photometry_disagrees(&a, &b, &no_floor));
+    }
+
+    /// Anything the photometry cannot speak to has to pass.
+    #[test]
+    fn test_photometry_test_abstains_without_information() {
+        let cfg = TrackletConfig::default();
+        let bright = at_mag(16.0, 0.01, 'r');
+        // Two filters: the difference is colour, not variability.
+        assert!(!photometry_disagrees(
+            &bright,
+            &at_mag(18.0, 0.01, 'g'),
+            &cfg
+        ));
+        // No uncertainty reported, so there is no scale to judge against.
+        let mut no_err = at_mag(18.0, 0.01, 'r');
+        no_err.mag_err = None;
+        assert!(!photometry_disagrees(&bright, &no_err, &cfg));
+        // And the test can be switched off outright.
+        let off = TrackletConfig {
+            max_mag_sigma: None,
+            ..TrackletConfig::default()
+        };
+        assert!(!photometry_disagrees(
+            &bright,
+            &at_mag(18.0, 0.01, 'r'),
+            &off
+        ));
     }
 }
