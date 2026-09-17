@@ -6,7 +6,7 @@
 //! with residuals taken on the sky, turns one into the other and yields the
 //! residual that says whether the track was real.
 
-use crate::utils::heliolinc::{propagate, radec_from_ecliptic, state_to_elements, State};
+use crate::utils::heliolinc::{propagate_position, radec_from_ecliptic, state_to_elements, State};
 use crate::utils::sso_geometry::{earth_position, OrbitalElements};
 
 /// One astrometric position.
@@ -30,19 +30,32 @@ pub struct OrbitFit {
     pub n_obs: usize,
 }
 
+/// Speed of light, au/day.
+pub const C_AU_PER_DAY: f64 = 173.144_632_674;
+
 /// Steps used to difference the state numerically.
 const POS_STEP_AU: f64 = 1e-6;
 const VEL_STEP_AU_PER_DAY: f64 = 1e-8;
 
 /// Where a state puts the object on the sky at `jd`, degrees.
+///
+/// Light-time corrected: the object is seen where it was when the light left
+/// it, which at 2 au is about 17 minutes and so tens of arcseconds of motion.
+/// One correction leaves well under a milliarcsecond, since the geocentric
+/// distance barely changes over the light time itself.
 pub fn predict_radec(state: &State, epoch_jd: f64, jd: f64) -> Option<(f64, f64)> {
-    let moved = propagate(state, epoch_jd, jd)?;
     let earth = earth_position(jd);
-    let topo = [
-        moved.pos[0] - earth[0],
-        moved.pos[1] - earth[1],
-        moved.pos[2] - earth[2],
-    ];
+    let mut tau = 0.0;
+    let mut topo = [0.0; 3];
+    for _ in 0..2 {
+        let moved = propagate_position(state, epoch_jd, jd - tau)?;
+        topo = [
+            moved[0] - earth[0],
+            moved[1] - earth[1],
+            moved[2] - earth[2],
+        ];
+        tau = (topo[0] * topo[0] + topo[1] * topo[1] + topo[2] * topo[2]).sqrt() / C_AU_PER_DAY;
+    }
     Some(radec_from_ecliptic(&topo))
 }
 

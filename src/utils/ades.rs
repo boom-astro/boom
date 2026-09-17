@@ -46,19 +46,22 @@ pub fn jd_to_iso8601(jd: f64) -> String {
     dt.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
 }
 
-/// A tracklet's temporary identifier, unique within a submission.
+/// A tracklet's temporary identifier, from its position in the submission.
 ///
-/// The MPC only requires it be consistent across the detections of one
-/// tracklet and distinct between them, so the first detection's id serves.
-pub fn track_sub(tracklet: &Tracklet) -> String {
-    let seed = tracklet.ids.first().copied().unwrap_or_default();
-    // Base-36 of the low bits keeps it inside the 8 characters ADES allows.
-    let mut n = (seed.unsigned_abs() % 36_u64.pow(7)).max(1);
+/// The MPC only requires it be consistent across the detections of one tracklet
+/// and distinct between them. A counter is exactly that; folding an observation
+/// id into the seven base-36 characters ADES leaves is not, and a collision
+/// would have the MPC merge two unrelated objects into one designation.
+pub fn track_sub(index: usize) -> String {
     let digits = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    let mut n = index as u64;
     let mut out = Vec::new();
-    while n > 0 {
+    loop {
         out.push(digits[(n % 36) as usize]);
         n /= 36;
+        if n == 0 {
+            break;
+        }
     }
     out.reverse();
     format!("t{}", String::from_utf8_lossy(&out))
@@ -139,8 +142,8 @@ pub fn to_psv(
     let mut out = header_block(header);
     out.push_str(COLUMNS);
     out.push('\n');
-    for tracklet in tracklets {
-        let trk_sub = track_sub(tracklet);
+    for (index, tracklet) in tracklets.iter().enumerate() {
+        let trk_sub = track_sub(index);
         let mut rows: Vec<&Detection> = tracklet
             .ids
             .iter()
@@ -183,10 +186,10 @@ pub fn track_to_psv(
             .partial_cmp(&b.jd_ref)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    let Some(first) = ordered.first() else {
+    if ordered.is_empty() {
         return out;
-    };
-    let trk_sub = track_sub(first);
+    }
+    let trk_sub = track_sub(0);
 
     // Tracklets of one track can share a detection, and the MPC must not be
     // sent the same observation twice.
@@ -391,9 +394,9 @@ mod tests {
 
     #[test]
     fn test_distinct_tracklets_get_distinct_trksubs() {
-        let a = tracklet();
-        let b = Tracklet::from_motion(vec![2, 3], 2461292.82, 258.4, 54.385, 0.2, 0.02, 0.1);
-        assert_ne!(track_sub(&a), track_sub(&b));
+        let subs: std::collections::HashSet<String> = (0..10_000).map(track_sub).collect();
+        assert_eq!(subs.len(), 10_000);
+        assert!(subs.iter().all(|s| s.len() <= 8));
     }
 
     #[test]

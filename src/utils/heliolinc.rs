@@ -9,7 +9,7 @@
 //! unrelated ones scatter. Sweeping a grid of assumptions and clustering the
 //! propagated states is then the whole method (Holman et al. 2018).
 
-use crate::utils::linking::Tracklet;
+use crate::utils::linking::{night_of, Tracklet};
 use crate::utils::orbit_fit::{fit_orbit, rms_arcsec, Observation};
 use crate::utils::sso_geometry::{earth_position, heliocentric_position, OrbitalElements};
 use rayon::prelude::*;
@@ -329,6 +329,16 @@ pub fn propagate(state: &State, epoch_jd: f64, jd: f64) -> Option<State> {
     Some(State { pos, vel })
 }
 
+/// Position alone, for callers that discard the velocity.
+///
+/// A third of the work of [`propagate`], which differences two extra positions
+/// to get the velocity. The orbit-fit Jacobian calls this per observation per
+/// parameter per iteration, so the saving is the bulk of a fit.
+pub fn propagate_position(state: &State, epoch_jd: f64, jd: f64) -> Option<[f64; 3]> {
+    let elements = state_to_elements(state, epoch_jd)?;
+    Some(heliocentric_position(&elements, jd))
+}
+
 /// Where `state` appears on the sky at each of `jds`, degrees.
 ///
 /// `None` if the orbit cannot be propagated to one of them, since a test orbit
@@ -337,9 +347,9 @@ pub fn sky_track(state: &State, epoch_jd: f64, jds: &[f64]) -> Option<(Vec<f64>,
     let mut ras = Vec::with_capacity(jds.len());
     let mut decs = Vec::with_capacity(jds.len());
     for &jd in jds {
-        let p = propagate(state, epoch_jd, jd)?;
+        let p = propagate_position(state, epoch_jd, jd)?;
         let e = earth_position(jd);
-        let (ra, dec) = radec_from_ecliptic(&[p.pos[0] - e[0], p.pos[1] - e[1], p.pos[2] - e[2]]);
+        let (ra, dec) = radec_from_ecliptic(&[p[0] - e[0], p[1] - e[1], p[2] - e[2]]);
         ras.push(ra);
         decs.push(dec);
     }
@@ -520,7 +530,7 @@ fn tracks_for_hypothesis(
         let members: Vec<usize> = group.iter().map(|&g| states[g].0).collect();
         let nights = members
             .iter()
-            .map(|&m| tracklets[m].jd_ref.floor() as i64)
+            .map(|&m| night_of(tracklets[m].jd_ref))
             .collect::<std::collections::HashSet<_>>()
             .len();
         if nights < cfg.min_nights {

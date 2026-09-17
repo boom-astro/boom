@@ -7,7 +7,7 @@
 
 use boom::conf::{load_dotenv, AppConfig};
 use boom::utils::heliolinc::{default_hypotheses, link_tracklets, LinkConfig, Track};
-use boom::utils::linking::{find_tracklets, Detection, Tracklet, TrackletConfig};
+use boom::utils::linking::{find_tracklets, night_of, Detection, Tracklet, TrackletConfig};
 use boom::utils::orbit_fit::{fit_orbit, Observation};
 use clap::Parser;
 use futures::StreamExt;
@@ -115,10 +115,7 @@ struct Cli {
 fn tracklets_per_night(detections: &[Detection], cfg: &TrackletConfig) -> Vec<Tracklet> {
     let mut by_night: HashMap<i64, Vec<Detection>> = HashMap::new();
     for d in detections {
-        by_night
-            .entry((d.jd - 0.5).floor() as i64)
-            .or_default()
-            .push(*d);
+        by_night.entry(night_of(d.jd)).or_default().push(*d);
     }
     let mut nights: Vec<_> = by_night.into_iter().collect();
     nights.sort_by_key(|(n, _)| *n);
@@ -303,7 +300,7 @@ async fn latest_night(db: &mongodb::Database) -> Result<f64, Box<dyn std::error:
         .ok_or("no alerts")?;
     let jd = doc.get_document("candidate")?.get_f64("jd")?;
     // Nights run across a JD boundary, so step back to the preceding noon.
-    Ok((jd - 0.5).floor() + 0.5)
+    Ok(night_of(jd) as f64 + 0.5)
 }
 
 /// How well the tracklets reproduce the `ssnamenr` labels.
@@ -413,23 +410,36 @@ fn run_thor(args: &Cli, detections: &[Detection], labels: &HashMap<i64, String>)
         .map(|k| lo + (hi - lo) * k as f64 / steps as f64)
         .collect();
 
-    // Patches a little smaller than the offset a trial orbit governs, so an
-    // object near a boundary is still covered by a neighbouring patch.
+    // Four grids, each shifted half a patch in RA, Dec or both. A single grid
+    // cuts objects on its boundaries in half, leaving each part below
+    // `min_detections`; with the shifts, any object spanning less than half a
+    // patch lies wholly inside one patch of at least one grid. The copies this
+    // makes are dropped by the deduplication after the orbit-fit gate.
     let patch_deg = cfg.max_offset_deg;
-    let mut patches: HashMap<(i64, i64), Vec<Detection>> = HashMap::new();
+    let mut patches: HashMap<(u8, i64, i64), Vec<Detection>> = HashMap::new();
     for d in detections {
-        let dy = (d.dec / patch_deg).floor() as i64;
-        // Widen in RA towards the poles so patches stay roughly equal-area.
-        let scale = d.dec.to_radians().cos().max(0.05);
-        let dx = (d.ra * scale / patch_deg).floor() as i64;
-        patches.entry((dx, dy)).or_default().push(*d);
+        for (grid, (ox, oy)) in [(0.0, 0.0), (0.5, 0.0), (0.0, 0.5), (0.5, 0.5)]
+            .into_iter()
+            .enumerate()
+        {
+            let dy = (d.dec / patch_deg + oy).floor() as i64;
+            // One RA cut per band, off the band centre rather than each
+            // detection's own dec, or the same RA lands in different patches at
+            // either edge of the band. Equal-area, so bands narrow to the poles.
+            let band_dec = ((dy as f64 - oy + 0.5) * patch_deg).clamp(-89.9, 89.9);
+            let scale = band_dec.to_radians().cos().max(0.05);
+            let bins = ((360.0 * scale / patch_deg).round() as i64).max(1);
+            // rem_euclid closes the band into a ring, so RA 0/360 is not a seam.
+            let dx = ((d.ra * bins as f64 / 360.0 + ox).floor() as i64).rem_euclid(bins);
+            patches.entry((grid as u8, dx, dy)).or_default().push(*d);
+        }
     }
     let patches: Vec<Vec<Detection>> = patches
         .into_values()
         .filter(|v| v.len() >= cfg.min_detections)
         .collect();
     info!(
-        "{} sky patches of {:.1} deg, {} trial distances each",
+        "{} sky patches of {:.1} deg over 4 offset grids, {} trial distances each",
         patches.len(),
         patch_deg,
         args.thor_distances.len()
@@ -555,9 +565,7 @@ fn run_thor(args: &Cli, detections: &[Detection], labels: &HashMap<i64, String>)
     let mut per_object_night: HashMap<(&String, i64), usize> = HashMap::new();
     for d in detections {
         if let Some(name) = labels.get(&d.id) {
-            *per_object_night
-                .entry((name, (d.jd - 0.5).floor() as i64))
-                .or_default() += 1;
+            *per_object_night.entry((name, night_of(d.jd))).or_default() += 1;
         }
     }
     let mut busiest: HashMap<&String, usize> = HashMap::new();

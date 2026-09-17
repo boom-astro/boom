@@ -1,6 +1,17 @@
 //! Intra-night tracklet finding: group a night's unassociated detections into
 //! sets consistent with a single source moving at a constant on-sky rate.
 
+use std::collections::HashSet;
+
+/// The night a Julian date falls in, as an integer.
+///
+/// JD rolls over at 12:00 UTC, which is the middle of the night for a site in
+/// the Americas: a ZTF night running past that boundary would otherwise count
+/// as two, and a single-night group would satisfy a two-night requirement.
+pub fn night_of(jd: f64) -> i64 {
+    (jd - 0.5).floor() as i64
+}
+
 /// One detection offered to the linker.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Detection {
@@ -173,6 +184,14 @@ fn fit_tracklet(dets: &[Detection], cfg: &TrackletConfig) -> Option<Tracklet> {
     if dets.len() < 2 {
         return None;
     }
+    // Growth bounds each detection against the seed's midpoint, which two
+    // detections either side of it can satisfy while spanning twice the window.
+    let (first, last) = dets.iter().fold((f64::MAX, f64::MIN), |(lo, hi), d| {
+        (lo.min(d.jd), hi.max(d.jd))
+    });
+    if last - first > cfg.max_span_days {
+        return None;
+    }
     let jd_ref = dets.iter().map(|d| d.jd).sum::<f64>() / dets.len() as f64;
     // Project about the first detection so the fit stays linear in the plane.
     let (ra0, dec0) = (dets[0].ra, dets[0].dec);
@@ -242,6 +261,9 @@ pub fn find_tracklets(detections: &[Detection], cfg: &TrackletConfig) -> Vec<Tra
 
     let max_sep = cfg.max_rate_deg_per_day * cfg.max_span_days;
     let match_radius = cfg.match_radius_arcsec / 3600.0;
+    // Declinations in `order`, so growth can binary-search the same band the
+    // pair search sweeps rather than rescanning every detection per seed.
+    let sorted_decs: Vec<f64> = order.iter().map(|&k| detections[k].dec).collect();
     let mut candidates: Vec<Tracklet> = Vec::new();
 
     for (oi, &i) in order.iter().enumerate() {
@@ -267,7 +289,13 @@ pub fn find_tracklets(detections: &[Detection], cfg: &TrackletConfig) -> Vec<Tra
                 continue;
             };
             let mut members = vec![*a, *b];
-            for (k, d) in detections.iter().enumerate() {
+            // A member sits within `match_radius` of the seed line, which over
+            // the window reaches at most `max_sep` from the pair in latitude.
+            let margin = max_sep + match_radius;
+            let lo = sorted_decs.partition_point(|&x| x < a.dec.min(b.dec) - margin);
+            let hi = sorted_decs.partition_point(|&x| x <= a.dec.max(b.dec) + margin);
+            for &k in &order[lo..hi] {
+                let d = &detections[k];
                 if k == i || k == j || (d.jd - seed.jd_ref).abs() > cfg.max_span_days {
                     continue;
                 }
@@ -298,11 +326,14 @@ pub fn find_tracklets(detections: &[Detection], cfg: &TrackletConfig) -> Vec<Tra
     });
 
     let mut kept: Vec<Tracklet> = Vec::new();
+    // Membership sets alongside `kept`: the subset test is the hot loop here.
+    let mut kept_ids: Vec<HashSet<i64>> = Vec::new();
     for c in candidates {
-        let covered = kept
+        let covered = kept_ids
             .iter()
-            .any(|k| c.ids.iter().all(|id| k.ids.contains(id)));
+            .any(|k| c.ids.iter().all(|id| k.contains(id)));
         if !covered {
+            kept_ids.push(c.ids.iter().copied().collect());
             kept.push(c);
         }
     }
@@ -463,5 +494,44 @@ mod tests {
         let found = find_tracklets(&dets, &TrackletConfig::default());
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].ids.len(), 4);
+    }
+
+    /// A Palomar night runs from about 02:00 to 14:00 UTC, straddling the JD
+    /// rollover at 12:00, and must still read as one night.
+    #[test]
+    fn test_one_night_across_the_jd_rollover_is_one_night() {
+        let evening: f64 = 2_461_272.6; // 02:24 UTC
+        let morning: f64 = 2_461_273.05; // 13:12 UTC, past the rollover
+        assert!(morning.floor() > evening.floor(), "the rollover is spanned");
+        assert_eq!(night_of(evening), night_of(morning));
+        // And a genuinely different night still separates.
+        assert_ne!(night_of(evening), night_of(evening + 1.0));
+    }
+
+    /// Growth measures each detection against the seed's midpoint, so without a
+    /// total-span bound a tracklet can reach twice `max_span_days`.
+    #[test]
+    fn test_a_tracklet_may_not_span_twice_the_window() {
+        let cfg = TrackletConfig::default();
+        let span = cfg.max_span_days;
+        // Evenly spread over twice the window, so every detection is within
+        // `span` of the midpoint while the set spans `2 * span`.
+        let jds = [0.0, 0.5 * span, 1.5 * span, 2.0 * span].map(|d| 2_461_272.6 + d);
+        let dets = mover(180.0, 20.0, 0.3, 0.05, &jds, 1);
+
+        for t in find_tracklets(&dets, &cfg) {
+            let times: Vec<f64> = t
+                .ids
+                .iter()
+                .map(|id| dets.iter().find(|d| d.id == *id).unwrap().jd)
+                .collect();
+            let lo = times.iter().cloned().fold(f64::MAX, f64::min);
+            let hi = times.iter().cloned().fold(f64::MIN, f64::max);
+            assert!(
+                hi - lo <= span + 1e-9,
+                "tracklet spans {} days against a {span} day window",
+                hi - lo
+            );
+        }
     }
 }

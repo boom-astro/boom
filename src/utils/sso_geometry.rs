@@ -583,6 +583,10 @@ mod horizons_validation {
         helio_dist: f64,
         topo_dist: f64,
         phase_angle: f64,
+        /// Astrometric RA/Dec, degrees: light-time corrected, no aberration,
+        /// which is the convention MPC astrometry is reported in.
+        ra: f64,
+        dec: f64,
     }
 
     fn cases() -> Vec<Case> {
@@ -601,6 +605,8 @@ mod horizons_validation {
                 helio_dist: 2.706853365104,
                 topo_dist: 3.16890538454643,
                 phase_angle: 17.6824,
+                ra: 92.50594,
+                dec: 22.52311,
             },
             // Much higher inclination and eccentricity, so a frame or rotation
             // error that survived Ceres would show here.
@@ -618,6 +624,8 @@ mod horizons_validation {
                 helio_dist: 2.915730582216,
                 topo_dist: 2.22979772666357,
                 phase_angle: 16.7833,
+                ra: 24.66921,
+                dec: -1.81445,
             },
         ]
     }
@@ -654,6 +662,8 @@ mod horizons_validation {
                     helio_dist: 1.298448154570,
                     topo_dist: 0.400169669522,
                     phase_angle: 33.1581,
+                    ra: 8.81256,
+                    dec: 43.28246,
                 },
                 2_461_000.5,
             ),
@@ -672,6 +682,8 @@ mod horizons_validation {
                     helio_dist: 1.700293597970,
                     topo_dist: 2.561134066572,
                     phase_angle: 14.0222,
+                    ra: 349.82626,
+                    dec: -0.16259,
                 },
                 2_461_500.5,
             ),
@@ -690,6 +702,8 @@ mod horizons_validation {
                     helio_dist: 0.824595526480,
                     topo_dist: 1.766171027568,
                     phase_angle: 14.2409,
+                    ra: 248.93646,
+                    dec: -20.65265,
                 },
                 2_461_000.5,
             ),
@@ -708,6 +722,8 @@ mod horizons_validation {
                     helio_dist: 1.080704644109,
                     topo_dist: 1.129927205505,
                     phase_angle: 53.7417,
+                    ra: 74.26769,
+                    dec: 19.54714,
                 },
                 2_461_500.5,
             ),
@@ -739,6 +755,36 @@ mod horizons_validation {
             assert!(d_helio < 1e-4, "{}: helio off by {d_helio} au", c.name);
             assert!(d_topo < 1e-3, "{}: topo off by {d_topo} au", c.name);
             assert!(d_phase < 0.01, "{}: phase off by {d_phase} deg", c.name);
+        }
+    }
+
+    /// Separation from the Horizons astrometric position, arcseconds.
+    fn sky_error_arcsec(c: &Case, jd: f64) -> f64 {
+        let (ra, dec) = crate::utils::identify::predict_radec(&c.elements, jd);
+        crate::utils::linking::angular_separation_deg(ra, dec, c.ra, c.dec) * 3600.0
+    }
+
+    /// Sky position, which the distance and phase-angle checks above leave
+    /// untested: both are nearly insensitive to the light-time correction, so
+    /// they passed while predicted positions were out by tens of arcseconds.
+    ///
+    /// 9 arcsec separates the two models rather than merely passing: dropping
+    /// the correction puts Ceres at 10.3 and Pallas at 16.7.
+    #[test]
+    fn test_matches_horizons_on_the_sky() {
+        for c in cases() {
+            let sep = sky_error_arcsec(&c, 2_461_272.5);
+            assert!(sep < 9.0, "{}: {sep:.1} arcsec from Horizons", c.name);
+        }
+    }
+
+    /// Far from epoch the error is two-body propagation, not the sky model, so
+    /// the tolerance is set by how long the lever arm is rather than by optics.
+    #[test]
+    fn test_matches_horizons_on_the_sky_far_from_epoch() {
+        for (c, jd) in far_from_epoch_cases() {
+            let sep = sky_error_arcsec(&c, jd);
+            assert!(sep < 60.0, "{}: {sep:.1} arcsec from Horizons", c.name);
         }
     }
 

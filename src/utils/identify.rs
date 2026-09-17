@@ -7,11 +7,13 @@
 //! leaves measures each survey's astrometry against the same reference.
 
 use crate::utils::heliolinc::radec_from_ecliptic;
-use crate::utils::linking::{angular_separation_deg, Detection};
+use crate::utils::linking::{angular_separation_deg, night_of, Detection};
+use crate::utils::orbit_fit::C_AU_PER_DAY;
 pub use crate::utils::outburst::median;
 use crate::utils::sso_geometry::{
     earth_position, heliocentric_position, observer_position, OrbitalElements, Site, ZTF,
 };
+use rayon::prelude::*;
 use std::collections::HashMap;
 
 /// One catalogued object.
@@ -65,26 +67,32 @@ impl Default for IdentifyConfig {
 ///
 /// Topocentric rather than geocentric: an Earth radius of offset is several
 /// arcseconds against a main-belt asteroid, which is a large share of the
-/// residual a catalogue match has to tolerate.
+/// residual a catalogue match has to tolerate. Light-time corrected for the
+/// same reason, that being the larger of the two at tens of arcseconds.
 pub fn predict_radec_from(elements: &OrbitalElements, jd: f64, site: &Site) -> (f64, f64) {
-    let helio = heliocentric_position(elements, jd);
     let observer = observer_position(jd, site);
-    radec_from_ecliptic(&[
-        helio[0] - observer[0],
-        helio[1] - observer[1],
-        helio[2] - observer[2],
-    ])
+    radec_from_ecliptic(&light_time_corrected(elements, jd, &observer))
+}
+
+/// Vector from `observer` to where `elements` was when its light left, au.
+fn light_time_corrected(elements: &OrbitalElements, jd: f64, observer: &[f64; 3]) -> [f64; 3] {
+    let mut tau = 0.0;
+    let mut los = [0.0; 3];
+    for _ in 0..2 {
+        let helio = heliocentric_position(elements, jd - tau);
+        los = [
+            helio[0] - observer[0],
+            helio[1] - observer[1],
+            helio[2] - observer[2],
+        ];
+        tau = (los[0] * los[0] + los[1] * los[1] + los[2] * los[2]).sqrt() / C_AU_PER_DAY;
+    }
+    los
 }
 
 /// Apparent position from the Earth's centre, degrees.
 pub fn predict_radec(elements: &OrbitalElements, jd: f64) -> (f64, f64) {
-    let helio = heliocentric_position(elements, jd);
-    let earth = earth_position(jd);
-    radec_from_ecliptic(&[
-        helio[0] - earth[0],
-        helio[1] - earth[1],
-        helio[2] - earth[2],
-    ])
+    radec_from_ecliptic(&light_time_corrected(elements, jd, &earth_position(jd)))
 }
 
 /// Attribute each detection to the catalogued object it sits closest to.
@@ -99,18 +107,19 @@ pub fn identify(
 ) -> Vec<Match> {
     let mut by_night: HashMap<i64, Vec<&Detection>> = HashMap::new();
     for d in detections {
-        by_night
-            .entry((d.jd - 0.5).floor() as i64)
-            .or_default()
-            .push(d);
+        by_night.entry(night_of(d.jd)).or_default().push(d);
     }
 
+    // Sorted, since a HashMap's order would carry into `matches`.
+    let mut nights: Vec<(i64, Vec<&Detection>)> = by_night.into_iter().collect();
+    nights.sort_by_key(|(night, _)| *night);
+
     let mut matches = Vec::new();
-    for (night, dets) in by_night {
+    for (night, dets) in nights {
         let epoch = night as f64 + 1.0;
         // Every object placed once, then sorted so a dec band can be swept.
         let mut predicted: Vec<(f64, f64, usize)> = orbits
-            .iter()
+            .par_iter()
             .enumerate()
             .map(|(i, o)| {
                 let (ra, dec) = predict_radec(&o.elements, epoch);
