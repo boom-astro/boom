@@ -45,6 +45,8 @@ pub enum MilvusError {
     MissingStatus(&'static str),
     #[error("milvus is not enabled in the configuration")]
     NotEnabled,
+    #[error("embedding has {got} dimensions but the collection expects {expected}")]
+    DimensionMismatch { expected: i64, got: usize },
 }
 
 /// Attaches credentials and the target database to every outgoing request.

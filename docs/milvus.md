@@ -183,6 +183,53 @@ left untouched):
 cargo run --bin milvus_check -- --create-collection
 ```
 
+## Writing embeddings
+
+Once `milvus.enabled` is true, the ZTF enrichment worker upserts each alert's
+`fusion_embedding` into the collection right after ML classification, keyed by
+`object_id` so a re-observed object overwrites its previous vector. The write is
+an `Upsert` RPC batched per enrichment batch.
+
+The worker **connects only** — it does not create the collection. Provision it
+once with `milvus_check --create-collection` before starting the workers, since
+several enrichment workers run in parallel and must not race to create it. If
+Milvus is enabled but unreachable at startup the worker fails fast; a failure
+during an individual upsert is logged and non-fatal (the alerts are already
+enriched and persisted in Mongo).
+
+### The embedding is never written to Mongo
+
+`milvus.enabled` is the only switch. The 384-float vector is stripped from the
+alert's Mongo `classifications` document in every case and there is no dual write:
+
+- **Milvus on** — the embedding is written to Milvus only.
+- **Milvus off** — the embedding is not stored anywhere; it is computed as part
+  of CIDER inference and dropped.
+
+Either way the CIDER class probabilities (`cider_fusion`) stay in the Mongo
+`classifications` document; only the vector itself is Milvus-only.
+
+## Reading embeddings
+
+`MilvusClient` also exposes the read/manage side of the collection
+(`src/milvus/search.rs`):
+
+- `search_embedding(query, top_k)` — similarity search: returns the `top_k`
+  nearest `object_id`s to a query vector with their scores (and stored
+  `candid`/`jd`), best-first. The query vector is wrapped in a protobuf
+  `PlaceholderGroup` (little-endian `f32` bytes) as Milvus requires.
+- `get_embeddings(&[object_id])` — fetch stored rows by id, with the vector
+  split back out of Milvus's flat column into per-row `Vec<f32>`.
+- `count()` — number of objects in the collection (`count(*)`).
+- `delete_embeddings(&[object_id])` — remove rows by id.
+- `flush()` — seal recent writes so they are immediately searchable (Milvus
+  otherwise flushes on its own schedule); handy for read-after-write in a smoke
+  test.
+
+Note that `search_embedding` requires the collection to have been **loaded**
+(done by `ensure_embedding_collection`), and only rows that have been flushed are
+visible to search.
+
 ## Regenerating the client
 
 The gRPC client is generated at build time from the protos vendored in
