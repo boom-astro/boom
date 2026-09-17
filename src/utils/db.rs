@@ -184,8 +184,14 @@ pub async fn initialize_survey_indexes(
     Ok(())
 }
 
-fn angular_size_index_name(size_key: &str) -> String {
-    format!("radec_2dsphere_large_{size_key}")
+/// A name that changes whenever the partial filter does.
+///
+/// Mongo refuses to recreate an index whose name matches but whose options do
+/// not, and the scheduler treats that as fatal. Since the filter threshold is
+/// derived from the configured radius and scale, the name has to carry it, or
+/// changing either bricks startup.
+fn angular_size_index_name(size_key: &str, threshold_arcsec: f64) -> String {
+    format!("radec_2dsphere_large_{size_key}_{:.4}", threshold_arcsec)
 }
 
 /// Partial 2dsphere indexes for catalogs matched by angular size. Without one
@@ -206,7 +212,10 @@ pub async fn initialize_angular_size_indexes(
             doc! { "coordinates.radec_geojson": "2dsphere" },
             false,
             Some(doc! { size_key: { "$gt": config.angular_size_threshold_arcsec() } }),
-            Some(angular_size_index_name(size_key)),
+            Some(angular_size_index_name(
+                size_key,
+                config.angular_size_threshold_arcsec(),
+            )),
         )
         .await?;
     }
@@ -708,8 +717,29 @@ mod angular_size_index_tests {
     #[test]
     fn test_index_name_does_not_collide_with_the_full_index() {
         assert_ne!(
-            angular_size_index_name("Diam"),
+            angular_size_index_name("Diam", 120.0),
             "coordinates.radec_geojson_2dsphere"
+        );
+    }
+
+    /// Changing the radius or the scale changes the partial filter, so it has
+    /// to change the name too: mongo rejects a rebuild under the same name with
+    /// different options, and the scheduler treats that as fatal.
+    #[test]
+    fn test_index_name_tracks_the_threshold() {
+        let wide = config(Some("Diam".to_string()), Some(21600.0));
+        let narrow = CatalogXmatchConfig {
+            angular_size_scale: 10.0,
+            ..config(Some("Diam".to_string()), Some(21600.0))
+        };
+        assert_ne!(
+            wide.angular_size_threshold_arcsec(),
+            narrow.angular_size_threshold_arcsec()
+        );
+        assert_ne!(
+            angular_size_index_name("Diam", wide.angular_size_threshold_arcsec()),
+            angular_size_index_name("Diam", narrow.angular_size_threshold_arcsec()),
+            "the same name would collide with different options"
         );
     }
 

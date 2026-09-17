@@ -124,8 +124,13 @@ fn rejected_as_marginal_rex(doc: &Document, config: &HostGalaxyConfig) -> bool {
         return true;
     }
     // Absent columns mean no S/N was measured, which must not reject the row.
+    // A measured flux at or below zero is different: the row was looked at and
+    // found to have no positive signal, so it cannot be a host.
     if let (Some(flux), Some(ivar)) = (opt_f64(doc, "flux_r"), opt_f64(doc, "flux_ivar_r")) {
-        if flux > 0.0 && ivar > 0.0 && flux * ivar.sqrt() < config.rex_min_snr {
+        if flux <= 0.0 {
+            return true;
+        }
+        if ivar > 0.0 && flux * ivar.sqrt() < config.rex_min_snr {
             return true;
         }
     }
@@ -268,6 +273,35 @@ pub fn collect_galaxies(
 mod tests {
     use super::*;
 
+    /// A measured non-positive flux is a row with no signal, not a row with no
+    /// measurement, so it must not pass the S/N cut by skipping it.
+    #[test]
+    fn test_rex_with_no_positive_flux_is_rejected() {
+        let config = HostGalaxyConfig::default();
+        let usable = doc! {
+            "shape_r": config.rex_min_shape_r_arcsec + 1.0,
+            "flux_r": 100.0,
+            "flux_ivar_r": 100.0,
+        };
+        assert!(
+            !rejected_as_marginal_rex(&usable, &config),
+            "a bright, well-measured REX should survive"
+        );
+
+        for flux in [0.0, -5.0] {
+            let mut doc = usable.clone();
+            doc.insert("flux_r", flux);
+            assert!(
+                rejected_as_marginal_rex(&doc, &config),
+                "flux_r {flux} was accepted"
+            );
+        }
+
+        // An absent measurement still must not reject the row.
+        let unmeasured = doc! { "shape_r": config.rex_min_shape_r_arcsec + 1.0 };
+        assert!(!rejected_as_marginal_rex(&unmeasured, &config));
+    }
+
     #[test]
     fn test_legacy_redshift_rejects_the_absent_sentinel() {
         let doc = doc! { "z_spec": -99.0, "z_phot_median": 0.21, "z_phot_std": -99.0 };
@@ -277,7 +311,6 @@ mod tests {
         assert_eq!(legacy_redshift(&doc, "missing"), None);
     }
 
-    use super::*;
     use mongodb::bson::doc;
     use std::collections::HashMap;
 
@@ -486,18 +519,60 @@ mod projection_tests {
         out
     }
 
+    /// Body of every `NED:` crossmatch entry, one per survey that declares it.
+    fn ned_entries(config: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut lines = config.lines();
+        while let Some(line) = lines.next() {
+            if line.trim_end() != "    NED:" {
+                continue;
+            }
+            let mut body = String::new();
+            for next in lines.by_ref() {
+                // The entry ends at the next key on the survey's own indent.
+                if !next.trim().is_empty() && !next.starts_with("      ") {
+                    break;
+                }
+                body.push_str(next);
+                body.push('\n');
+            }
+            out.push(body);
+        }
+        out
+    }
+
     // These drifted once (`diam` vs `Diam`) and nothing failed: absent reads as 0.
     #[test]
     fn test_config_projects_every_key_the_reader_needs() {
+        let mut checked = 0;
         for (name, config) in deployment_configs() {
-            let Some(block) = config.split("- catalog: NED").nth(1) else {
-                continue;
-            };
-            let projection = block.split("- catalog:").next().expect("entry body");
-            for key in NED_REQUIRED_KEYS {
+            for entry in ned_entries(&config) {
+                checked += 1;
+                for key in NED_REQUIRED_KEYS {
+                    assert!(
+                        entry.contains(&format!("{key}: 1")),
+                        "{name}: NED projection is missing `{key}`, which the reader depends on"
+                    );
+                }
+            }
+        }
+        // Without this the test passed by finding no entries at all.
+        assert!(checked > 0, "no NED crossmatch entries found to check");
+    }
+
+    /// Without a floor the per-row radius clamps up to the query cone, so every
+    /// row in it matches whatever its size.
+    #[test]
+    fn test_sized_entries_set_a_radius_floor() {
+        for (name, config) in deployment_configs() {
+            for entry in ned_entries(&config) {
+                if !entry.contains("angular_size_key:") {
+                    continue;
+                }
                 assert!(
-                    projection.contains(&format!("{key}: 1")),
-                    "{name}: NED projection is missing `{key}`, which the reader depends on"
+                    entry.contains("angular_size_radius_min:"),
+                    "{name}: NED scales its radius by size but sets no \
+                     angular_size_radius_min, so the cone becomes a flat floor"
                 );
             }
         }
@@ -515,7 +590,6 @@ mod projection_tests {
             "max_candidates",
             "exclude_star_like",
             "star_type_values",
-            "use_redshift",
             "rex_min_shape_r_arcsec",
             "rex_min_snr",
             "rex_max_fracflux",

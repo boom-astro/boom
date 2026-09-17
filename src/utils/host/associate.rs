@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use super::dlr::{compute_dlr, DlrResult};
 use super::ellipse::Ellipse;
 use super::error::HostError;
-use super::likelihood::{absmag_likelihood, offset_likelihood, redshift_likelihood};
+use super::likelihood::{absmag_likelihood, offset_likelihood};
 use super::prior;
 use super::types::{GalaxyCandidate, HostCandidate, Transient};
 
@@ -15,7 +15,6 @@ pub struct AssociationConfig {
     /// Floor on the semi-minor axis, arcsec, for degenerate shapes.
     pub min_b_arcsec: f64,
     pub max_candidates: usize,
-    pub use_redshift: bool,
     pub use_absmag: bool,
 }
 
@@ -25,7 +24,6 @@ impl Default for AssociationConfig {
             max_fractional_offset: 10.0,
             min_b_arcsec: 0.05,
             max_candidates: 10,
-            use_redshift: true,
             use_absmag: false,
         }
     }
@@ -48,7 +46,6 @@ struct Scored {
     dlr: DlrResult,
     dlr_rank: u32,
     posterior_offset: f64,
-    posterior_redshift: f64,
     posterior_absmag: f64,
     posterior: f64,
 }
@@ -94,16 +91,6 @@ pub fn associate_host(
             let galaxy = &candidates[index];
             let posterior_offset = offset_likelihood(dlr.fractional_offset)
                 * prior::offset_prior(dlr.fractional_offset, config.max_fractional_offset);
-            let posterior_redshift = if config.use_redshift {
-                redshift_likelihood(
-                    galaxy.redshift,
-                    galaxy.redshift_err,
-                    transient.redshift,
-                    transient.redshift_err,
-                )
-            } else {
-                1.0
-            };
             let posterior_absmag = if config.use_absmag {
                 absmag_likelihood(galaxy.mag, galaxy.mag_err, galaxy.redshift)
             } else {
@@ -114,9 +101,8 @@ pub fn associate_host(
                 dlr,
                 dlr_rank: (rank + 1) as u32,
                 posterior_offset,
-                posterior_redshift,
                 posterior_absmag,
-                posterior: posterior_offset * posterior_redshift * posterior_absmag,
+                posterior: posterior_offset * posterior_absmag,
             }
         })
         .collect();
@@ -143,7 +129,6 @@ pub fn associate_host(
                 0.0
             },
             posterior_offset: s.posterior_offset,
-            posterior_redshift: s.posterior_redshift,
             posterior_absmag: s.posterior_absmag,
         })
         .collect();
@@ -219,32 +204,6 @@ mod tests {
     }
 
     #[test]
-    fn test_associate_with_redshift() {
-        let transient = Transient::new(180.0, 45.0).with_redshift(0.05, 0.001);
-
-        let mut g1 = make_galaxy(180.0, 45.0 + 2.0 / 3600.0, 5.0, 3.0, 0.0);
-        g1.redshift = Some(0.05);
-        g1.redshift_err = Some(0.001);
-
-        let mut g2 = make_galaxy(180.0, 45.0 + 2.0 / 3600.0, 5.0, 3.0, 0.0);
-        g2.redshift = Some(0.5);
-        g2.redshift_err = Some(0.001);
-
-        let config = AssociationConfig {
-            use_redshift: true,
-            ..Default::default()
-        };
-        let result = associate_host(&transient, &[g1, g2], &config).unwrap();
-
-        assert!(result.candidates[0].posterior > result.candidates[1].posterior);
-        assert_close!(
-            result.candidates[0].galaxy.redshift.unwrap(),
-            0.05,
-            epsilon = 0.001
-        );
-    }
-
-    #[test]
     fn test_posteriors_sum_to_one() {
         let transient = Transient::new(180.0, 45.0);
         let galaxies: Vec<GalaxyCandidate> = (1..=5)
@@ -258,31 +217,17 @@ mod tests {
     }
 
     #[test]
-    fn test_dlr_rank_tracks_offset_not_posterior() {
-        let transient = Transient::new(180.0, 45.0).with_redshift(0.05, 0.001);
+    fn test_dlr_rank_numbers_candidates_by_offset() {
+        let transient = Transient::new(180.0, 45.0);
+        let near = make_galaxy(180.0, 45.0 + 1.0 / 3600.0, 5.0, 3.0, 0.0);
+        let far = make_galaxy(180.0, 45.0 + 4.0 / 3600.0, 5.0, 3.0, 0.0);
 
-        let mut near_wrong_z = make_galaxy(180.0, 45.0 + 1.0 / 3600.0, 5.0, 3.0, 0.0);
-        near_wrong_z.redshift = Some(0.5);
-        near_wrong_z.redshift_err = Some(0.001);
+        let result =
+            associate_host(&transient, &[far, near], &AssociationConfig::default()).unwrap();
 
-        let mut far_right_z = make_galaxy(180.0, 45.0 + 4.0 / 3600.0, 5.0, 3.0, 0.0);
-        far_right_z.redshift = Some(0.05);
-        far_right_z.redshift_err = Some(0.001);
-
-        let result = associate_host(
-            &transient,
-            &[near_wrong_z, far_right_z],
-            &AssociationConfig::default(),
-        )
-        .unwrap();
-
-        assert_close!(
-            result.candidates[0].galaxy.redshift.unwrap(),
-            0.05,
-            epsilon = 1e-9
-        );
-        assert_eq!(result.candidates[0].dlr_rank, 2);
-        assert_eq!(result.candidates[1].dlr_rank, 1);
+        // Input order does not set the rank; fractional offset does.
+        assert_eq!(result.candidates[0].dlr_rank, 1);
+        assert!(result.candidates[0].fractional_offset < result.candidates[1].fractional_offset);
     }
 
     #[test]

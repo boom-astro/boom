@@ -478,8 +478,8 @@ pub async fn xmatch(
 mod tests {
     use super::*;
 
-    /// NED-shaped config: 300" base cone, per-row radius from `diam`,
-    /// capped at 6 deg.
+    /// NED-shaped config: 300" query cone, per-row radius from `diam`,
+    /// floored at 5" and capped at 6 deg.
     fn angular_size_config() -> conf::CatalogXmatchConfig {
         conf::CatalogXmatchConfig {
             catalog: "NED".to_string(),
@@ -488,6 +488,7 @@ mod tests {
             angular_size_key: Some("diam".to_string()),
             angular_size_scale: 2.0,
             angular_size_radius_max: Some(conf::arcsec_to_radians(21600.0)),
+            angular_size_radius_min: conf::arcsec_to_radians(5.0),
             ..Default::default()
         }
     }
@@ -517,10 +518,18 @@ mod tests {
     }
 
     #[test]
-    fn test_small_galaxy_does_not_shrink_below_the_base_cone() {
+    fn test_small_galaxy_is_matched_within_its_own_extent() {
         let config = angular_size_config();
-        assert!((config.match_radius_arcsec(Some(10.0)) - 300.0).abs() < 1e-6);
-        assert!((config.match_radius_arcsec(None) - 300.0).abs() < 1e-6);
+        // diam 10" -> semi-major 5" -> 2x = 10", well inside the query cone.
+        assert!((config.match_radius_arcsec(Some(10.0)) - 10.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_a_row_with_no_size_falls_back_to_the_floor() {
+        let config = angular_size_config();
+        assert!((config.match_radius_arcsec(None) - 5.0).abs() < 1e-6);
+        assert!((config.match_radius_arcsec(Some(0.0)) - 5.0).abs() < 1e-6);
+        assert!((config.match_radius_arcsec(Some(f64::NAN)) - 5.0).abs() < 1e-6);
     }
 
     #[test]
@@ -536,7 +545,7 @@ mod tests {
         // scale * size / 2 > 300 <=> size > 300.
         let threshold = config.angular_size_threshold_arcsec();
         assert!((threshold - 300.0).abs() < 1e-6, "got {threshold}");
-        assert!((config.match_radius_arcsec(Some(threshold - 1.0)) - 300.0).abs() < 1e-6);
+        assert!(config.match_radius_arcsec(Some(threshold - 1.0)) < 300.0);
         assert!(config.match_radius_arcsec(Some(threshold + 100.0)) > 300.0);
     }
 

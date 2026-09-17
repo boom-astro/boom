@@ -298,6 +298,9 @@ pub struct CatalogXmatchConfig {
     pub angular_size_scale: f64,
     /// Cap on the per-row radius, in radians.
     pub angular_size_radius_max: Option<f64>,
+    /// Floor on the per-row radius, in radians. A row with no usable size is
+    /// matched within it, and nothing else reaches past its own scaled size.
+    pub angular_size_radius_min: f64,
     /// Field naming a row's object type, e.g. DESI's `spectype`.
     pub type_key: Option<String>,
     /// Values of `type_key` that mean the row is a star rather than a galaxy.
@@ -320,6 +323,7 @@ impl Default for CatalogXmatchConfig {
             // 1.0, not 0.0: `angular_size_threshold_arcsec` divides by it.
             angular_size_scale: 1.0,
             angular_size_radius_max: None,
+            angular_size_radius_min: 0.0,
             type_key: None,
             stellar_types: Vec::new(),
         }
@@ -341,16 +345,22 @@ impl CatalogXmatchConfig {
     }
 
     /// Match radius in arcsec for one candidate row.
+    ///
+    /// `radius` is the cone the database is asked for, not the radius a row is
+    /// accepted within: a sized catalog accepts each row within its own extent,
+    /// so a small galaxy far out in the cone is rejected here.
     pub fn match_radius_arcsec(&self, angular_size_arcsec: Option<f64>) -> f64 {
-        let base = radians_to_arcsec(self.radius);
         let Some(max) = self.angular_size_radius_max else {
-            return base;
+            return radians_to_arcsec(self.radius);
         };
         let scaled = angular_size_arcsec
             .filter(|s| s.is_finite() && *s > 0.0)
             .map(|s| self.angular_size_scale * s / 2.0)
             .unwrap_or(0.0);
-        scaled.clamp(base, radians_to_arcsec(max))
+        scaled.clamp(
+            radians_to_arcsec(self.angular_size_radius_min),
+            radians_to_arcsec(max),
+        )
     }
 
     /// Smallest angular size that reaches beyond the base cone, and so needs
@@ -439,6 +449,7 @@ impl CatalogXmatchConfig {
         let angular_size_key = opt_string("angular_size_key")?;
         let angular_size_scale = opt_float("angular_size_scale")?.unwrap_or(1.0);
         let angular_size_radius_max = opt_float("angular_size_radius_max")?;
+        let angular_size_radius_min = opt_float("angular_size_radius_min")?.unwrap_or(0.0);
 
         if angular_size_key.is_some() {
             if use_distance {
@@ -452,6 +463,9 @@ impl CatalogXmatchConfig {
             }
             if radius_max < radius {
                 panic!("angular_size_radius_max must be at least as large as radius");
+            }
+            if angular_size_radius_min > radius_max {
+                panic!("angular_size_radius_min must not exceed angular_size_radius_max");
             }
         }
 
@@ -478,6 +492,7 @@ impl CatalogXmatchConfig {
             angular_size_key,
             angular_size_scale,
             angular_size_radius_max: angular_size_radius_max.map(arcsec_to_radians),
+            angular_size_radius_min: arcsec_to_radians(angular_size_radius_min),
             type_key: opt_string("type_key")?,
             stellar_types,
         })

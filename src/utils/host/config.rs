@@ -33,8 +33,6 @@ pub struct HostGalaxyConfig {
     /// NED-LVS `objtype` values that are not host galaxies: quasars, line
     /// systems, and lensed systems whose shape describes the lens.
     pub ned_excluded_objtypes: Vec<String>,
-    /// Include the redshift term when both the transient and the galaxy have one.
-    pub use_redshift: bool,
     /// Reject a REX row smaller than this, arcsec. The three REX cuts sit in
     /// sensitive parts of the parameter space, so they are configurable.
     pub rex_min_shape_r_arcsec: f64,
@@ -64,7 +62,6 @@ impl Default for HostGalaxyConfig {
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
-            use_redshift: true,
             rex_min_shape_r_arcsec: 0.3,
             rex_min_snr: 5.0,
             rex_max_fracflux: 0.5,
@@ -79,7 +76,6 @@ impl HostGalaxyConfig {
             max_fractional_offset: self.max_dlr,
             min_b_arcsec: self.min_axis_arcsec,
             max_candidates: self.max_candidates,
-            use_redshift: self.use_redshift,
             use_absmag: false,
         }
     }
@@ -99,13 +95,11 @@ mod tests {
         let config = HostGalaxyConfig {
             max_dlr: 4.0,
             max_candidates: 3,
-            use_redshift: false,
             ..Default::default()
         };
         let association = config.association_config();
         assert_close!(association.max_fractional_offset, 4.0);
         assert_eq!(association.max_candidates, 3);
-        assert!(!association.use_redshift);
     }
 
     #[test]

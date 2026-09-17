@@ -6,24 +6,11 @@ pub struct Transient {
     pub ra: f64,
     /// Declination, degrees.
     pub dec: f64,
-    pub redshift: Option<f64>,
-    pub redshift_err: Option<f64>,
 }
 
 impl Transient {
     pub fn new(ra: f64, dec: f64) -> Self {
-        Self {
-            ra,
-            dec,
-            redshift: None,
-            redshift_err: None,
-        }
-    }
-
-    pub fn with_redshift(mut self, z: f64, z_err: f64) -> Self {
-        self.redshift = Some(z);
-        self.redshift_err = Some(z_err);
-        self
+        Self { ra, dec }
     }
 }
 
@@ -74,6 +61,5 @@ pub struct HostCandidate {
     pub dlr_rank: u32,
     pub posterior: f64,
     pub posterior_offset: f64,
-    pub posterior_redshift: f64,
     pub posterior_absmag: f64,
 }
