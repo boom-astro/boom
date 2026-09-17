@@ -256,12 +256,15 @@ crossmatch:
         dec: 1
     NED:
       radius: 300.0 # 300 arcseconds
-      use_distance: false
+      use_distance: true
+      distance_key: "z"
+      distance_max: 30.0
+      distance_max_near: 300.0
       angular_size_key: Diam
       # Must be >= host_galaxy.max_dlr: d_DLR <= N implies sep <= N * semi-major.
       angular_size_scale: 5.0
       angular_size_radius_max: 21600.0 # 6 deg, enough for the LMC
-      angular_size_radius_min: 5.0 # a row with no Diam is matched on astrometry alone
+      angular_size_radius_min: 5.0 # a row with neither Diam nor z, matched on astrometry alone
       max_results: 50
       projection:
         _id: 1
@@ -496,12 +499,15 @@ crossmatch:
         dec: 1
     NED:
       radius: 300.0 # 300 arcseconds
-      use_distance: false
+      use_distance: true
+      distance_key: "z"
+      distance_max: 30.0
+      distance_max_near: 300.0
       angular_size_key: Diam
       # Must be >= host_galaxy.max_dlr: d_DLR <= N implies sep <= N * semi-major.
       angular_size_scale: 5.0
       angular_size_radius_max: 21600.0 # 6 deg, enough for the LMC
-      angular_size_radius_min: 5.0 # a row with no Diam is matched on astrometry alone
+      angular_size_radius_min: 5.0 # a row with neither Diam nor z, matched on astrometry alone
       max_results: 50
       projection:
         _id: 1
@@ -727,12 +733,15 @@ crossmatch:
         dec: 1
     NED:
       radius: 300.0 # 300 arcseconds
-      use_distance: false
+      use_distance: true
+      distance_key: "z"
+      distance_max: 30.0
+      distance_max_near: 300.0
       angular_size_key: Diam
       # Must be >= host_galaxy.max_dlr: d_DLR <= N implies sep <= N * semi-major.
       angular_size_scale: 5.0
       angular_size_radius_max: 21600.0 # 6 deg, enough for the LMC
-      angular_size_radius_min: 5.0 # a row with no Diam is matched on astrometry alone
+      angular_size_radius_min: 5.0 # a row with neither Diam nor z, matched on astrometry alone
       max_results: 50
       projection:
         _id: 1

@@ -560,6 +560,25 @@ mod projection_tests {
         assert!(checked > 0, "no NED crossmatch entries found to check");
     }
 
+    /// Size matching was added for host association, but the same entry feeds
+    /// the filters, which read `distance_kpc` and expect a distance-scaled
+    /// radius. Dropping `use_distance` silently takes both away.
+    #[test]
+    fn test_sized_entries_still_match_on_distance() {
+        for (name, config) in deployment_configs() {
+            for entry in ned_entries(&config) {
+                if !entry.contains("angular_size_key:") {
+                    continue;
+                }
+                assert!(
+                    entry.contains("use_distance: true") && entry.contains("distance_key:"),
+                    "{name}: NED matches on size only, so rows with a redshift and no \
+                     measured extent are lost and no match carries distance_kpc"
+                );
+            }
+        }
+    }
+
     /// Without a floor the per-row radius clamps up to the query cone, so every
     /// row in it matches whatever its size.
     #[test]
