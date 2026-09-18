@@ -142,9 +142,6 @@ jobs:
       - name: Aggregate and compare results
         env:
           BASELINE_LINK: ${{ steps.baseline.outputs.link }}
-          # The head commit, not `github.sha`: on a pull_request run that is the
-          # ephemeral merge commit, which nobody can find again.
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           #!/usr/bin/env bash
           set -euo pipefail
@@ -190,18 +187,17 @@ jobs:
 
           cat results.txt || true
 
-          echo "${{ github.event.pull_request.number }}" > pr_number.txt
-          printf '%s' "${HEAD_SHA:0:7}" > sha.txt
           printf '%s' "$BASELINE_LINK" > baseline_link.txt
       - name: Upload PR body payload as artifact
         if: github.event_name == 'pull_request'
         uses: actions/upload-artifact@v4
         with:
           name: throughput-pr-body
+          # Which PR this belongs to is *not* carried here: the workflow that
+          # consumes this artifact is privileged, and on a fork PR everything in
+          # it is attacker-controlled. It resolves the PR from the event instead.
           path: |
             table.md
-            pr_number.txt
-            sha.txt
             baseline_link.txt
       - name: Fail if wall time increased too much (PR only)
         # Only PRs are gated: main's run has to succeed to serve as the

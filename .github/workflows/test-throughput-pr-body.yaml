@@ -16,6 +16,15 @@ on:
     types:
       - completed
 
+# Updating the body is a read-modify-write of one field, so two runs finishing
+# at once can clobber each other. One update at a time per branch; the older one
+# is dropped rather than canceled mid-PATCH.
+concurrency:
+  group: >-
+    ${{ github.workflow }}-${{ github.event.workflow_run.head_repository.full_name }}-${{
+    github.event.workflow_run.head_branch }}
+  cancel-in-progress: false
+
 jobs:
   update-body:
     name: Update PR body with throughput results
@@ -37,23 +46,45 @@ jobs:
           path: ./results
           run-id: ${{ github.event.workflow_run.id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Update PR body
+      - name: Resolve the pull request
+        id: pr
         if: steps.download.outcome == 'success'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # From the event payload, which a fork cannot forge — unlike anything
+          # inside the artifact, which is written by the PR's own code.
+          HEAD_REPO: ${{ github.event.workflow_run.head_repository.full_name }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          #!/usr/bin/env bash
+          set -euo pipefail
+          pr=$(gh api "repos/$GITHUB_REPOSITORY/pulls" \
+            -X GET -f state=open -f "head=${HEAD_REPO%%/*}:$HEAD_BRANCH" \
+            --jq 'first(.[]) | "\(.number) \(.head.sha)"')
+          if [ -z "$pr" ]; then
+            echo "::warning::no open PR for $HEAD_REPO:$HEAD_BRANCH; nothing to update"
+            exit 0
+          fi
+          read -r number sha <<< "$pr"
+          echo "number=$number" >> "$GITHUB_OUTPUT"
+          echo "sha=${sha:0:7}" >> "$GITHUB_OUTPUT"
+      - name: Update PR body
+        if: steps.pr.outputs.number != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          SHA: ${{ steps.pr.outputs.sha }}
         run: |
           #!/usr/bin/env bash
           set -euo pipefail
 
-          pr_number=$(cat ./results/pr_number.txt)
-          sha=$(cat ./results/sha.txt)
           baseline_link=$(cat ./results/baseline_link.txt)
 
           # Everything from this marker on belongs to the workflow: it is
           # rewritten on every run, so edits below it do not survive.
           marker="<!-- Don't edit below this line: this section is managed by the GitHub Actions bot. -->"
 
-          body=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$pr_number" --jq '.body // ""')
+          body=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.body // ""')
           # GitHub stores bodies with CRLF line endings; drop the CRs so the
           # marker match and the trailing-blank-line trim below behave.
           body=${body//$'\r'/}
@@ -68,10 +99,10 @@ jobs:
             fi
             printf '%s\n\n' "$marker"
             printf '## Throughput test results\n\n'
-            printf 'Results for `%s`:\n\n' "$sha"
+            printf 'Results for `%s`:\n\n' "$SHA"
             cat ./results/table.md
             printf '\nBaseline runs: %s\n' "$baseline_link"
           } > new_body.md
 
           jq -n --rawfile body new_body.md '{body: $body}' > payload.json
-          gh api --method PATCH "repos/$GITHUB_REPOSITORY/pulls/$pr_number" --input payload.json
+          gh api --method PATCH "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --input payload.json
