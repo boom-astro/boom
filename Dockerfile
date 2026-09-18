@@ -24,6 +24,11 @@ WORKDIR /app
 FROM base AS builder
 
 ARG ONNXRUNTIME_GPU_VERSION=1.24.4
+# Compiled into the binaries and recorded on every data mutation, so the ledger
+# can name the commit that produced a change. Absent when unset -- the ledger
+# records that honestly rather than inventing a value.
+ARG BOOM_GIT_SHA
+ENV BOOM_GIT_SHA=${BOOM_GIT_SHA}
 
 RUN python3 -m venv /opt/ort-py && \
     /opt/ort-py/bin/pip install --no-cache-dir "onnxruntime==${ONNXRUNTIME_GPU_VERSION}" && \
@@ -57,6 +62,7 @@ RUN --mount=type=cache,target=/app/target,sharing=locked \
        target/release/kafka_consumer \
        target/release/kafka_producer \
        target/release/api \
+       target/release/task_worker \
        target/release/migrate_fp_flux \
        target/release/migrate_snr \
        target/release/reprocess_crossmatch \
@@ -97,6 +103,7 @@ COPY --from=builder /app/bin/scheduler /app/scheduler
 COPY --from=builder /app/bin/kafka_consumer /app/kafka_consumer
 COPY --from=builder /app/bin/kafka_producer /app/kafka_producer
 COPY --from=builder /app/bin/api /app/boom-api
+COPY --from=builder /app/bin/task_worker /app/task_worker
 COPY --from=builder /app/bin/migrate_fp_flux /app/migrate_fp_flux
 COPY --from=builder /app/bin/migrate_snr /app/migrate_snr
 COPY --from=builder /app/bin/reprocess_crossmatch /app/reprocess_crossmatch

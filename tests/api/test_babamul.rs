@@ -38,6 +38,7 @@ mod tests {
             let id = uuid::Uuid::new_v4().to_string();
             let test_email = format!("test+{}@babamul.example.com", id);
             let test_user = BabamulUser {
+                is_admin: false,
                 id: id.clone(),
                 username: "testuser".to_string(),
                 email: test_email.clone(),
@@ -2716,6 +2717,7 @@ mod tests {
         let id_activated = uuid::Uuid::new_v4().to_string();
         let email_activated = format!("test+{}@babamul.example.com", id_activated);
         col.insert_one(&BabamulUser {
+            is_admin: false,
             id: id_activated.clone(),
             username: "resettest".to_string(),
             email: email_activated.clone(),
@@ -2786,6 +2788,7 @@ mod tests {
         let id_inactive = uuid::Uuid::new_v4().to_string();
         let email_inactive = format!("test+{}@babamul.example.com", id_inactive);
         col.insert_one(&BabamulUser {
+            is_admin: false,
             id: id_inactive.clone(),
             username: "notactivated".to_string(),
             email: email_inactive.clone(),
@@ -2830,6 +2833,7 @@ mod tests {
         let id_rl = uuid::Uuid::new_v4().to_string();
         let email_rl = format!("test+{}@babamul.example.com", id_rl);
         col.insert_one(&BabamulUser {
+            is_admin: false,
             id: id_rl.clone(),
             username: "ratelimitforgot".to_string(),
             email: email_rl.clone(),
@@ -2917,6 +2921,7 @@ mod tests {
         let now = flare::Time::now().to_utc().timestamp();
 
         let insert_user = |id: &str, email: &str, username: &str| BabamulUser {
+            is_admin: false,
             id: id.to_string(),
             username: username.to_string(),
             email: email.to_string(),
@@ -3877,6 +3882,7 @@ mod tests {
         let email = format!("test+{}@babamul.example.com", id);
         users
             .insert_one(&BabamulUser {
+                is_admin: false,
                 id: id.clone(),
                 username: "existing".to_string(),
                 email: email.clone(),
@@ -4079,6 +4085,7 @@ mod tests {
         let email = format!("test+{}@babamul.example.com", id);
         users
             .insert_one(&BabamulUser {
+                is_admin: false,
                 id: id.clone(),
                 username: format!("closed-{}", id),
                 email: email.clone(),
