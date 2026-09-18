@@ -35,6 +35,8 @@ pub enum BoomConfigError {
     InvalidSecretError(String),
     #[error("cutout storage error: {0}")]
     CutoutStorageError(#[from] crate::utils::cutouts::CutoutStorageError),
+    #[error("invalid crossmatch config: {0}")]
+    UnknownCrossmatchCatalog(String),
 }
 
 /// Load environment variables from a .env file if it exists.
@@ -1168,6 +1170,14 @@ pub struct AppConfig {
     #[serde(default)]
     pub posthog: PostHogConfig,
     pub kafka: KafkaConfig,
+    /// Archival catalogs this deployment should hold, as kebab-case slugs.
+    ///
+    /// Desired state, not actual: nothing converges automatically. See
+    /// `docs/catalogs.md`.
+    ///
+    /// Settable as `BOOM_CATALOGS`, comma-separated.
+    #[serde(default, deserialize_with = "comma_separated")]
+    pub catalogs: Vec<String>,
     #[serde(default, deserialize_with = "deserialize_crossmatch")]
     pub crossmatch: HashMap<Survey, Vec<CatalogXmatchConfig>>,
     #[serde(default)]
@@ -1291,6 +1301,13 @@ pub fn load_config(config_path: Option<&str>) -> Result<AppConfig, BoomConfigErr
 
     if let Err(e) = app_config.validate_secrets() {
         return Err(BoomConfigError::InvalidSecretError(e));
+    }
+
+    // A misspelled crossmatch catalog does not fail at query time -- it matches
+    // nothing, and the alerts come out looking confidently unmatched. Fail
+    // startup instead, where someone will see it.
+    if let Err(e) = crate::catalogs::validate_crossmatch(&app_config.crossmatch) {
+        return Err(BoomConfigError::UnknownCrossmatchCatalog(e));
     }
 
     debug!("Configuration loaded successfully");
@@ -1457,6 +1474,20 @@ mod tests {
         assert_eq!(
             conf.get::<AdminEmails>("babamul").unwrap().admin_emails,
             Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn the_catalog_inventory_can_be_set_as_a_comma_separated_env_var() {
+        let conf = config_with_env(&[("BOOM_CATALOGS", "2mass,ned-lvs")]);
+        #[derive(Deserialize)]
+        struct Root {
+            #[serde(default, deserialize_with = "comma_separated")]
+            catalogs: Vec<String>,
+        }
+        assert_eq!(
+            conf.try_deserialize::<Root>().unwrap().catalogs,
+            vec!["2mass", "ned-lvs"]
         );
     }
 

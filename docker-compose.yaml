@@ -3,6 +3,10 @@ name: boom
 volumes:
   mongodb:
   valkey:
+  # Staging area for catalog chunks. A named volume rather than the container's
+  # writable layer because a chunk can be a few hundred megabytes, and because
+  # a half-downloaded chunk should survive the task worker being replaced.
+  catalog_data:
   kafka_data:
   prometheus_data:
   grafana_data:
@@ -551,12 +555,14 @@ services:
       BOOM_CUTOUTS_STORAGE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
       BOOM_CUTOUTS_STORAGE__TYPE: mongo
       BOOM_CUTOUTS_STORAGE__HOST: mongo
+      BOOM_CATALOG_DATA_PATH: /app/data/catalogs
     networks:
       - boom
     profiles:
       - prod
     volumes:
       - ${BOOM_CONFIG_PATH:-./config.yaml}:/app/config.yaml
+      - catalog_data:/app/data/catalogs
     command:
       - /app/task_worker
 
