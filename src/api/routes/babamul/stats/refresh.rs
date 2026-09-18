@@ -3,6 +3,7 @@ use super::kafka::BABAMUL_KAFKA_TOPICS_CACHE_KEY;
 use super::nightly::NIGHTLY_STATS_CACHE_PREFIX;
 use super::STATS_COLLECTION;
 use crate::api::models::response;
+use crate::api::routes::babamul::BabamulUser;
 use actix_web::{post, web, HttpResponse};
 use chrono::{Months, NaiveDate, Utc};
 use mongodb::{
@@ -31,9 +32,10 @@ pub struct RefreshQuery {
 ///
 /// Removes the nightly alert counts cached for the given range, plus the
 /// collection and Kafka topic caches. The next call to the stats endpoints
-/// recounts from MongoDB and Kafka. The range cannot span more than 6 months,
-/// and refreshes are rate-limited globally to one every 5 minutes; a refusal
-/// carries a `Retry-After` header.
+/// recounts from MongoDB and Kafka. Requires a signed-in account: the stats
+/// themselves are public, but paying for a recount is not. The range cannot
+/// span more than 6 months, and refreshes are rate-limited globally to one
+/// every 5 minutes; a refusal carries a `Retry-After` header.
 #[utoipa::path(
     post,
     path = "/babamul/stats/refresh",
@@ -44,6 +46,7 @@ pub struct RefreshQuery {
     responses(
         (status = 200, description = "Caches dropped"),
         (status = 400, description = "Invalid parameters, or a range longer than 6 months"),
+        (status = 401, description = "Unauthorized"),
         (status = 429, description = "Another refresh happened too recently"),
         (status = 500, description = "Internal server error")
     ),
@@ -51,9 +54,14 @@ pub struct RefreshQuery {
 )]
 #[post("/stats/refresh")]
 pub async fn post_stats_refresh(
+    current_user: Option<web::ReqData<BabamulUser>>,
     query: web::Query<RefreshQuery>,
     db: web::Data<Database>,
 ) -> HttpResponse {
+    if current_user.is_none() {
+        return HttpResponse::Unauthorized().body("Unauthorized");
+    }
+
     let start_date = match NaiveDate::parse_from_str(&query.start_date, "%Y-%m-%d") {
         Ok(d) => d,
         Err(_) => return response::bad_request("Invalid start_date, expected YYYY-MM-DD"),

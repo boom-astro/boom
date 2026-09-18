@@ -4722,6 +4722,7 @@ mod tests {
         load_dotenv();
         let database: Database = get_test_db_api().await;
         let auth_app_data = get_test_auth(&database).await.unwrap();
+        let user = TestUser::create(&database, &auth_app_data).await;
         let app = test::init_service(
             App::new().service(
                 web::scope("/babamul")
@@ -4762,8 +4763,20 @@ mod tests {
                     "/babamul/stats/refresh?start_date={}&end_date=2024-06-30",
                     start
                 ))
+                .insert_header(("Authorization", format!("Bearer {}", user.token)))
                 .to_request()
         };
+
+        // The stats are public to read, but only a signed-in account can pay for a recount.
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/babamul/stats/refresh?start_date=2024-06-01&end_date=2024-06-30")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
         // Too long a range would recount hundreds of nights, so it is refused
         // before the cooldown is claimed.
         let resp = test::call_service(&app, refresh("2023-06-30")).await;

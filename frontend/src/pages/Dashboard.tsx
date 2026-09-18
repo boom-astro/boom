@@ -336,23 +336,26 @@ export default function Dashboard() {
   }
 
   const busy = loading || refreshing;
+  const isLoggedIn = !!api.getTokenRecord();
 
   return (
     <div className="px-4 lg:px-6 space-y-4">
       <div className="flex items-center justify-between gap-4">
         <h1 className="text-2xl font-bold">Dashboard</h1>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <Button variant="outline" size="sm" onClick={refreshCaches} disabled={busy}>
-              <IconRefresh className={busy ? "animate-spin" : ""} />
-              Refresh
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent side="left" className="max-w-xs">
-            Drop the cached stats and recount the collections, the Kafka topics, and the displayed
-            nights, up to the last {MAX_REFRESH_MONTHS} months.
-          </TooltipContent>
-        </Tooltip>
+        {isLoggedIn && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button variant="outline" size="sm" onClick={refreshCaches} disabled={busy}>
+                <IconRefresh className={busy ? "animate-spin" : ""} />
+                Refresh
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="left" className="max-w-xs">
+              Drop the cached stats and recount the collections, the Kafka topics, and the displayed
+              nights, up to the last {MAX_REFRESH_MONTHS} months.
+            </TooltipContent>
+          </Tooltip>
+        )}
       </div>
       {visibleData.length > 0 ? (
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
