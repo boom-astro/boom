@@ -921,9 +921,12 @@ pub const WITHOUT_DEFINITIONS: &[(&str, &str)] = &[
     ),
     (
         "LSPSC",
-        "no downloader or record type exists in boom or boom-catalogs -- the collection \
-         is created empty by the test workflow, and where its data comes from is not \
-         recorded",
+        "Legacy Survey point sources carrying the morphological resolved/unresolved \
+         score of Liu et al. 2025 (arXiv:2505.17174), which crossmatch config reads as \
+         `score` and `mag_white` to call an LSST object stellar or hosted. Built \
+         outside BOOM: that work scores ~3e9 Legacy Survey sources and does not say \
+         where the catalog itself is published, so there is nothing here to fetch. The \
+         test workflow creates the collection empty",
     ),
     (
         "TNS",
@@ -1139,7 +1142,7 @@ mod crossmatch_validation_tests {
 
     #[test]
     fn a_collection_we_cannot_build_is_accepted_by_name() {
-        // TNS is a live credentialed feed and LSPSC has no recorded source;
+        // TNS is a live credentialed feed and LSPSC is built outside BOOM;
         // both are real crossmatch targets and must not fail startup.
         assert!(validate_crossmatch(&crossmatch(&["TNS", "LSPSC"])).is_ok());
     }

@@ -143,13 +143,21 @@ staged file** — for a fetched catalog the chunk is a cache and deleting it is
 what keeps peak disk at one chunk; for a staged one the files *are* the artifact,
 and rebuilding one is hours of work over hundreds of gigabytes.
 
-Two crossmatch targets have no definition, and are listed in
+Three crossmatch targets have no definition, and are listed in
 `WITHOUT_DEFINITIONS` in `src/catalogs/mod.rs`. Config load rejects any name
 that is neither defined nor listed there:
 
-- **`LSPSC`** — no downloader or record type exists in either repo. The
-  collection is created empty by the test workflow and where its data comes from
-  is not recorded.
+- **`LSPSC`** — Legacy Survey point sources carrying the morphological
+  resolved/unresolved score of [Liu et al.
+  2025](https://arxiv.org/abs/2505.17174). The crossmatch projection reads
+  `score` and `mag_white` from it, and that is what classifies an LSST object as
+  stellar or hosted (see the Kafka topic rules page). Built outside BOOM: that
+  work scores ~3×10⁹ Legacy Survey sources and does not record where the catalog
+  is published, so there is nothing for BOOM to fetch. The test workflow creates
+  the collection empty.
+- **`LSDR10`** — Legacy Survey DR10 with photo-z posteriors, fluxes and shape
+  parameters, built outside BOOM. Not the `ls-dr10-photoz` dataset BOOM ingests
+  into `LS_DR10_PHOTOZ`, whose record carries `z_phot`/`z_phot_err` only.
 - **`TNS`** — a live, credentialed feed rather than an archival download,
   populated outside the catalog ingest path.
 
