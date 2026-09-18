@@ -66,17 +66,29 @@ pub enum Selection {
     MissingField { field: String },
     /// A candid range, for reprocessing a known import.
     CandidRange { from: i64, to: i64 },
+    /// Everything not enriched by what this release runs.
+    ///
+    /// The selection to reach for after changing a model or a derivation: it is
+    /// exact, where `MissingField` only finds alerts that never had the field
+    /// at all and silently misses every alert holding a stale value.
+    Stale,
 }
 
 impl Selection {
     /// The query that picks the alerts out of `<survey>_alerts`.
-    fn filter(&self) -> Document {
+    ///
+    /// `acceptable` is the current set plus any an operator has accepted; only
+    /// `Stale` uses it. Alerts with no `enrichment_set` at all are included,
+    /// because they were enriched before stamping existed and cannot be shown
+    /// to be current.
+    fn filter(&self, acceptable: &[i64]) -> Document {
         match self {
             Selection::All => doc! {},
             Selection::MissingField { field } => doc! { field: { "$exists": false } },
             Selection::CandidRange { from, to } => {
                 doc! { "_id": { "$gte": from, "$lte": to } }
             }
+            Selection::Stale => crate::enrichment::version::stale_filter(acceptable),
         }
     }
 
@@ -85,6 +97,7 @@ impl Selection {
             Selection::All => "every alert".to_string(),
             Selection::MissingField { field } => format!("alerts missing {field}"),
             Selection::CandidRange { from, to } => format!("candids {from}..={to}"),
+            Selection::Stale => "alerts not enriched by the current set".to_string(),
         }
     }
 }
@@ -145,6 +158,7 @@ async fn populate(
     ctx: &TaskContext,
     survey: &Survey,
     selection: &Selection,
+    acceptable: &[i64],
     queue: &str,
 ) -> Result<u64, super::TaskError> {
     let failed = |e: String| super::TaskError::Failed(e);
@@ -157,7 +171,7 @@ async fn populate(
         .map_err(|e| failed(e.to_string()))?;
 
     let mut cursor = alerts
-        .find(selection.filter())
+        .find(selection.filter(acceptable))
         .projection(doc! { "_id": 1 })
         .no_cursor_timeout(true)
         .await
@@ -219,6 +233,30 @@ pub async fn run(
         .unwrap_or(worker_config.enrichment.n_workers)
         .clamp(1, MAX_WORKERS);
 
+    // What this release would produce, so `Stale` can ask for everything else.
+    // Resolved before the workers start: they intern the same set, and running
+    // the query against a set that does not exist yet would select every alert.
+    let current_set = crate::enrichment::version::resolve_current_set(
+        ctx.db(),
+        &params.survey.to_string().to_lowercase(),
+        crate::enrichment::version::ZTF_MODELS,
+    )
+    .await
+    .map_err(|e| failed(e.to_string()))?;
+    let current_set_id = current_set.id;
+    // Includes sets an operator accepted, so a run does not redo work that was
+    // explicitly signed off as good enough.
+    let acceptable = crate::enrichment::version::acceptable_set_ids(
+        ctx.db(),
+        &params.survey.to_string().to_lowercase(),
+        current_set_id,
+    )
+    .await
+    .map_err(|e| failed(e.to_string()))?;
+    ctx.info(format!(
+        "current enrichment set is {current_set_id}; acceptable: {acceptable:?}"
+    ));
+
     // Owning the queue is what makes "empty" mean "done". A caller-supplied one
     // may still be filling, so the task only drains it and never deletes it.
     let owned = params.input_queue.is_none();
@@ -236,7 +274,7 @@ pub async fn run(
             params.selection.describe(),
             params.survey
         ));
-        let n = populate(ctx, &params.survey, &params.selection, &queue).await?;
+        let n = populate(ctx, &params.survey, &params.selection, &acceptable, &queue).await?;
         ctx.info(format!("queued {n} alerts on {queue}"));
         if n == 0 {
             // Nothing to do is a success, not a failure, but it is worth saying
@@ -340,6 +378,7 @@ pub async fn run(
         Operation::Recompute,
         doc! {
             "selection": params.selection.describe(),
+            "enrichment_set": current_set_id,
             "queued": queued as i64,
             "workers": n_workers as i64,
             "code_version": mongodb::bson::to_bson(&super::ledger::CodeVersion::current())
@@ -528,17 +567,54 @@ mod tests {
 
     #[test]
     fn each_selection_builds_the_query_it_describes() {
-        assert_eq!(Selection::All.filter(), doc! {});
+        assert_eq!(Selection::All.filter(&[7]), doc! {});
         assert_eq!(
             Selection::MissingField {
                 field: "classifications.acai_h".into()
             }
-            .filter(),
+            .filter(&[7]),
             doc! { "classifications.acai_h": { "$exists": false } }
         );
         assert_eq!(
-            Selection::CandidRange { from: 1, to: 9 }.filter(),
+            Selection::CandidRange { from: 1, to: 9 }.filter(&[7]),
             doc! { "_id": { "$gte": 1i64, "$lte": 9i64 } }
+        );
+    }
+
+    #[test]
+    fn stale_selects_everything_not_enriched_by_the_current_set() {
+        // Including alerts with no stamp at all: they were enriched before
+        // stamping existed, so they cannot be shown to be current. `$nin`
+        // matches a missing field, which is what makes that work.
+        assert_eq!(
+            Selection::Stale.filter(&[7]),
+            doc! { "enrichment_set": { "$nin": [7i64] } }
+        );
+    }
+
+    #[test]
+    fn stale_is_the_selection_that_finds_a_changed_model() {
+        // MissingField only finds alerts that never had the field. After a
+        // model changes, every alert still has `classifications.btsbot` -- the
+        // value is just stale -- so MissingField would select none of them.
+        let changed_model = Selection::MissingField {
+            field: "classifications.btsbot".into(),
+        };
+        assert_eq!(
+            changed_model.filter(&[7]),
+            doc! { "classifications.btsbot": { "$exists": false } },
+            "MissingField cannot express staleness, which is why Stale exists"
+        );
+        assert!(Selection::Stale.describe().contains("current set"));
+    }
+
+    #[test]
+    fn stale_skips_sets_an_operator_accepted() {
+        // Accepting a set is a decision that reprocessing it is unnecessary;
+        // a run that redid it anyway would waste days and ignore the decision.
+        assert_eq!(
+            Selection::Stale.filter(&[6, 7]),
+            doc! { "enrichment_set": { "$nin": [6i64, 7i64] } }
         );
     }
 
