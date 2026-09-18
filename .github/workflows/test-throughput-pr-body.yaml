@@ -1,8 +1,7 @@
 name: Throughput test PR body
 
-# Appends the throughput results to a managed section at the bottom of the PR
-# body: one row per storage type per commit, so the table is a history of the
-# branch rather than just its latest run.
+# Writes the throughput results into a managed section at the bottom of the PR
+# body, replacing whatever the previous run left there.
 #
 # This is split out from test-throughput.yaml on purpose: for pull requests
 # opened from a fork, the GITHUB_TOKEN of the `pull_request` workflow is forced
@@ -47,35 +46,19 @@ jobs:
           set -euo pipefail
 
           pr_number=$(cat ./results/pr_number.txt)
+          sha=$(cat ./results/sha.txt)
           baseline_link=$(cat ./results/baseline_link.txt)
 
           # Everything from this marker on belongs to the workflow: it is
           # rewritten on every run, so edits below it do not survive.
           marker="<!-- Don't edit below this line: this section is managed by the GitHub Actions bot. -->"
-          header="| Commit | Storage | Wall time | Baseline median | Difference |"
-          divider="| ------ | ------- | --------- | --------------- | ---------- |"
 
           body=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$pr_number" --jq '.body // ""')
           # GitHub stores bodies with CRLF line endings; drop the CRs so the
-          # marker match and the row parsing below behave.
+          # marker match and the trailing-blank-line trim below behave.
           body=${body//$'\r'/}
-
-          # Split the hand-written part from the section we manage.
-          managed=""
-          if [[ "$body" == *"$marker"* ]]; then
-            managed=${body#*"$marker"}
-            body=${body%%"$marker"*}
-          fi
-
-          # Keep the earlier commits' rows, minus any for the commits in this
-          # run, so a re-run replaces its own rows instead of duplicating them.
-          commits=$(awk -F'|' '{ gsub(/ /, "", $2); print $2 }' ./results/rows.md | sort -u)
-          previous=$(printf '%s\n' "$managed" | grep -E '^\| `[0-9a-f]+` \|' || true)
-          while read -r commit; do
-            [ -n "$commit" ] || continue
-            previous=$(printf '%s\n' "$previous" | grep -vF "| $commit |" || true)
-          done <<< "$commits"
-
+          # Drop the previous run's section, if any.
+          body=${body%%"$marker"*}
           # Trim trailing blank lines so the separator below is the only gap.
           body=$(printf '%s' "$body" | sed -e :a -e '/^[[:space:]]*$/{$d;N;ba' -e '}')
 
@@ -85,12 +68,9 @@ jobs:
             fi
             printf '%s\n\n' "$marker"
             printf '## Throughput test results\n\n'
-            printf '%s\n%s\n' "$header" "$divider"
-            if [ -n "$previous" ]; then
-              printf '%s\n' "$previous"
-            fi
-            cat ./results/rows.md
-            printf '\nBaseline runs (latest): %s\n' "$baseline_link"
+            printf 'Results for `%s`:\n\n' "$sha"
+            cat ./results/table.md
+            printf '\nBaseline runs: %s\n' "$baseline_link"
           } > new_body.md
 
           jq -n --rawfile body new_body.md '{body: $body}' > payload.json
