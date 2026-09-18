@@ -116,10 +116,80 @@ later.
 | Task | What it does |
 | --- | --- |
 | `catalog_ingest` | Download an archival catalog and insert it. See [catalogs.md](./catalogs.md). |
+| `migrate_fp_flux` | Recompute ZTF forced-photometry flux in `ZTF_alerts_aux` at a fixed zeropoint. |
+| `migrate_snr` | Recompute `snr_psf`, `snr_ap` and ZTF `apFlux` across alerts and lightcurves. |
+| `reprocess_crossmatch` | Fill in or refresh crossmatches on a survey's `alerts_aux` records. |
+| `prepare_catalog` | Add spatial fields and a 2dsphere index to a hand-imported collection. |
+| `backfill_hpx` | Write `coordinates.hpx` onto alerts that predate the field, so MOC region queries can find them. |
+| `repair_photometry` | Rewrite `alerts_aux` timeseries arrays that are out of order, duplicated, or carry a non-numeric `jd`. Deletes the offending points — run with `dry_run` first. |
+| `enrich_reprocess` | Select alerts, queue them, and re-run enrichment over them. |
+| `mpcorb_ingest` | Re-download MPC orbital elements and swap them into `MPC_orbits`. |
+| `sso_baselines` | Fit solar system phase-curve baselines from ZTF detections. |
+| `copy_cutouts` | Copy a survey's cutout collection between MongoDB deployments. |
+| `stream_kowalski_alerts` | Back-fill BOOM by streaming a Kowalski deployment's alerts. |
 
 Submission is single-flight per target, not per type: two ingests of the same
 catalog would race on the same collection and chunk state, but ingesting 2MASS
 should not block ingesting NED.
+
+**Every data-mutating binary is now a task.** `src/bin/` holds the services
+(`api`, `scheduler`, `kafka_consumer`, `kafka_producer`, `task_worker`) and two
+tools that change nothing (`check_config`, `add_filter`).
+
+That is the point the system was built for: there is no longer a binary an
+operator can run over SSH that mutates data without a record of who ran it, with
+what, under which release.
+
+### Porting a binary to a task
+
+A task body needs a params struct, an arm in `dispatch` and `validate_params`,
+an entry in `TASKS`, and a cancellation check in its batch loop. The ones that
+drive their work through Valkey already have the resumability a task needs.
+
+`migrate_fp_flux` shows the shape. Three things change when a one-shot binary
+becomes a task, and all three are about no longer owning the process:
+
+- **`process::exit` becomes an error.** Exiting would kill the worker and every
+  other run on it, and leave this run holding a lease until it expired.
+- **The batch loop checks for cancellation**, at batch boundaries — an
+  `update_many` is atomic per document, so a boundary is the only point where
+  stopping leaves a state that is easy to describe.
+- **Progress goes to the run**, not to a terminal progress bar nobody is
+  watching.
+
+A panicking task fails its own run rather than taking the worker down: the
+worker catches unwinds at the dispatch boundary. That matters precisely because
+these bodies come from binaries where an `unwrap` on unexpected data was a
+reasonable way to stop.
+
+**A ported task leaves no binary behind.** `migrate_fp_flux` and `migrate_snr`
+were briefly kept as thin wrappers and are now gone, the same way `add_catalog`
+was: a binary is precisely the thing this system exists to replace, and leaving
+one available means the untracked path stays the easy one.
+
+That does mean these can only be run against a database the API and a worker can
+both reach. The escape hatch, if a migration ever has to run somewhere the task
+system cannot, is a task body called from a one-off binary — but that should be
+a deliberate, temporary addition rather than a standing wrapper.
+
+### `enrich_reprocess`
+
+`enrich_reprocess` **populates the queue and then drains it**, rather than only
+draining one something else filled. That is what closes the loop the binary left
+open, and it is also what makes completion well-defined: because the task owns
+the queue, `LLEN == 0` means done rather than "nobody has pushed anything yet".
+
+The queue is scoped to the run — `<survey>_enrichment_queue_reprocess_<run_id>`
+— precisely so that holds. An `input_queue` parameter overrides it for a queue
+filled out of band; the task then only drains, and never deletes it.
+
+Completion needs `LLEN == 0` twice in a row. A worker pops a batch of up to
+1000 before processing it, so a single zero can be observed while a batch is
+still in flight, and stopping there would count those alerts as reprocessed
+before they were.
+
+Selection is explicit rather than inferred: alerts missing a field, a candid
+range, or everything.
 
 ### Credentials in parameters
 
@@ -154,6 +224,29 @@ Two things about the dev container specifically:
 
 Catalog chunks are staged in the `catalog_data` volume, mounted at
 `/app/data/catalogs`.
+
+## Where the worker runs
+
+One `task-worker` service, running one task at a time. It needs more than a
+database connection:
+
+- **The ONNX models**, bind-mounted read-only at `/app/data/models`.
+  `enrich_reprocess` builds a real enrichment worker, which loads them at
+  startup, so a worker without them fails before doing any work rather than
+  part way through a run.
+- **boompy**, baked into the image, for the catalog downloaders.
+- **Valkey**, which the migration and reprocessing tasks use to drive and resume
+  their work.
+
+On a GPU deployment, `docker-compose.cuda.yaml` moves the task worker onto the
+GPU image alongside the schedulers. That is not an optimisation: `enrich_reprocess`
+loads the models in-process rather than handing work to the enrichment workers,
+so on the CPU image it would re-enrich the archive without a GPU at all.
+
+The consequence is that a long catalog ingest occupies the GPU box for its
+duration, since a worker runs one task at a time and claims whatever is at the
+head of the queue. Acceptable while there is one worker; splitting CPU work from
+GPU work needs claim-time routing, which is listed below.
 
 ## Collections
 
@@ -298,3 +391,10 @@ moving part. The scheduling is the small half; the offload is the work.
   but do not write to it yet.
 - **Partitioned execution**, for tasks whose unit of work is a key range rather
   than a chunk.
+- **Claim-time routing.** `claim_next` takes the oldest queued run regardless of
+  type, so every worker is interchangeable. Once there is more than one — a GPU
+  worker for `enrich_reprocess` and a CPU worker for everything else — a worker
+  needs to declare what it will accept and the claim filter needs to honour it.
+  The guard rail that comes with it is starvation: an allowlist that no worker
+  covers leaves a run queued forever, so the admin page would need to say a
+  queued run has no worker willing to take it.

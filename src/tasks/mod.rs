@@ -16,13 +16,25 @@
 //! bodies are therefore written to be **resumable**: re-running one continues
 //! rather than repeating.
 
+pub mod backfill_hpx;
+pub mod batch;
 pub mod catalog_ingest;
 pub mod context;
+pub mod copy_cutouts;
+pub mod enrich_reprocess;
 pub mod ledger;
 pub mod logs;
+pub mod migrate_fp_flux;
+pub mod migrate_snr;
 pub mod models;
+pub mod mpcorb_ingest;
+pub mod prepare_catalog;
 pub mod queue;
 pub mod redact;
+pub mod repair_photometry;
+pub mod reprocess_crossmatch;
+pub mod sso_baselines;
+pub mod stream_kowalski_alerts;
 
 pub use context::TaskContext;
 pub use models::{Actor, TaskRun, TaskStatus, Trigger};
@@ -103,16 +115,142 @@ fn schema_of<T: utoipa::PartialSchema>() -> serde_json::Value {
 // and `copy_cutouts` already covering most of the moving part.
 
 /// Every task type this release knows how to run.
-pub const TASKS: &[TaskSpec] = &[TaskSpec {
-    id: catalog_ingest::TASK_TYPE,
-    title: "Ingest an archival catalog",
-    description: "Download an archival catalog and insert it into MongoDB, one chunk at a \
+pub const TASKS: &[TaskSpec] = &[
+    TaskSpec {
+        id: catalog_ingest::TASK_TYPE,
+        title: "Ingest an archival catalog",
+        description: "Download an archival catalog and insert it into MongoDB, one chunk at a \
                       time. Resumable: re-running continues from the last completed chunk.",
-    idempotent: true,
-    // Only with drop_existing, which the client has to ask for explicitly.
-    destructive: true,
-    params_schema: || schema_of::<catalog_ingest::CatalogIngestParams>(),
-}];
+        idempotent: true,
+        // Only with drop_existing, which the client has to ask for explicitly.
+        destructive: true,
+        params_schema: || schema_of::<catalog_ingest::CatalogIngestParams>(),
+    },
+    TaskSpec {
+        id: stream_kowalski_alerts::TASK_TYPE,
+        title: "Back-fill BOOM from a Kowalski deployment",
+        description: "Stream Kowalski's ZTF_alerts into BOOM, importing alerts for objects \
+                      BOOM already knows and fetching cutouts only for what was new.",
+        // Unordered inserts skipping duplicates, so re-running resumes.
+        idempotent: true,
+        destructive: false,
+        params_schema: || schema_of::<stream_kowalski_alerts::StreamKowalskiParams>(),
+    },
+    TaskSpec {
+        id: copy_cutouts::TASK_TYPE,
+        title: "Copy alert cutouts between deployments",
+        description: "Copy a survey's cutout collection from one MongoDB to another, \
+                      typically before repointing BOOM at new storage. Re-run with \
+                      min_candid to catch up on what arrived during the first pass.",
+        // Keyed on candid; duplicates are counted rather than fatal.
+        idempotent: true,
+        destructive: false,
+        params_schema: || schema_of::<copy_cutouts::CopyCutoutsParams>(),
+    },
+    TaskSpec {
+        id: sso_baselines::TASK_TYPE,
+        title: "Fit solar system phase-curve baselines",
+        description: "Fit a phase curve per object per band from ZTF detections, giving \
+                      the baseline brightness that outburst detection is judged against.",
+        // Upserts keyed on designation, refit from the same detections.
+        idempotent: true,
+        destructive: false,
+        params_schema: || schema_of::<sso_baselines::SsoBaselinesParams>(),
+    },
+    TaskSpec {
+        id: mpcorb_ingest::TASK_TYPE,
+        title: "Refresh MPC orbital elements",
+        description: "Re-download MPCORB and swap it into MPC_orbits. The scheduler does \
+                      this on its own; use this to force a refresh or validate a parse.",
+        // Staged and swapped atomically, so a rerun replaces wholesale.
+        idempotent: true,
+        destructive: false,
+        params_schema: || schema_of::<mpcorb_ingest::MpcorbIngestParams>(),
+    },
+    TaskSpec {
+        id: enrich_reprocess::TASK_TYPE,
+        title: "Re-run enrichment over a selection of alerts",
+        description: "Select alerts, queue them, and run enrichment workers over them. \
+                      Babamul is disabled and nothing is forwarded to the filter queue, \
+                      so reprocessing does not re-alert anyone.",
+        // Scores are recomputed from the stored alert, so re-running converges.
+        idempotent: true,
+        destructive: false,
+        params_schema: || schema_of::<enrich_reprocess::EnrichReprocessParams>(),
+    },
+    TaskSpec {
+        id: prepare_catalog::TASK_TYPE,
+        title: "Prepare an imported collection for crossmatching",
+        description: "Add ra/dec, the GeoJSON point, galactic coordinates and a 2dsphere \
+                      index to a collection imported from a file, so it can be used as a \
+                      crossmatch catalog.",
+        // Documents that already carry coordinates are skipped unless forced,
+        // and index creation is a no-op when it already exists.
+        idempotent: true,
+        destructive: false,
+        params_schema: || schema_of::<prepare_catalog::PrepareCatalogParams>(),
+    },
+    TaskSpec {
+        id: backfill_hpx::TASK_TYPE,
+        title: "Backfill HEALPix indexes on existing alerts",
+        description: "Write coordinates.hpx onto alerts and alerts_aux documents written \
+                      before the field existed. Until this has covered a collection, MOC \
+                      region queries silently miss everything in it.",
+        // Only documents still missing the field are selected, and the index is
+        // a pure function of the stored position.
+        idempotent: true,
+        destructive: false,
+        params_schema: || schema_of::<backfill_hpx::BackfillHpxParams>(),
+    },
+    TaskSpec {
+        id: repair_photometry::TASK_TYPE,
+        title: "Repair out-of-order photometry timeseries",
+        description: "Rewrite alerts_aux timeseries arrays that are out of order by jd, hold \
+                      duplicate jds, or carry entries with a non-finite or non-numeric jd. \
+                      Run with dry_run first: the repair deletes the offending points.",
+        // A repaired array no longer looks broken, so a second run finds
+        // nothing to do.
+        idempotent: true,
+        // It deletes photometry points, and does not keep a copy.
+        destructive: true,
+        params_schema: || schema_of::<repair_photometry::RepairPhotometryParams>(),
+    },
+    TaskSpec {
+        id: reprocess_crossmatch::TASK_TYPE,
+        title: "Reprocess crossmatches against archival catalogs",
+        description: "Fill in or refresh crossmatches on a survey's alerts_aux records. \
+                      Needed after adding a catalog to crossmatch config, since the \
+                      scheduler only crossmatches at first insert.",
+        // Each write recomputes a record's matches from the catalog as it
+        // stands; watchlists use $addToSet, which is idempotent by construction.
+        idempotent: true,
+        destructive: false,
+        params_schema: || schema_of::<reprocess_crossmatch::ReprocessCrossmatchParams>(),
+    },
+    TaskSpec {
+        id: migrate_snr::TASK_TYPE,
+        title: "Recompute signal-to-noise for ZTF and LSST",
+        description: "Recompute snr_psf, snr_ap and (for ZTF) apFlux/apFluxErr on alerts \
+                      and their lightcurves, from the stored photometry.",
+        // Derived from stored photometry, never from a previous run's output.
+        idempotent: true,
+        destructive: false,
+        params_schema: || schema_of::<migrate_snr::MigrateSnrParams>(),
+    },
+    TaskSpec {
+        id: migrate_fp_flux::TASK_TYPE,
+        title: "Migrate ZTF forced photometry to a fixed zeropoint",
+        description: "Recompute psfFlux and psfFluxErr in ZTF_alerts_aux from the raw IPAC \
+                      flux fields, at the fixed ZTF_ZP zeropoint.",
+        // Always recomputed from the raw fields, never from the previous
+        // result, so re-running converges on the same values.
+        idempotent: true,
+        // It overwrites derived values, but the inputs it derives from are
+        // untouched, so nothing is lost that cannot be recomputed.
+        destructive: false,
+        params_schema: || schema_of::<migrate_fp_flux::MigrateFpFluxParams>(),
+    },
+];
 
 pub fn find(id: &str) -> Option<&'static TaskSpec> {
     TASKS.iter().find(|t| t.id == id)
@@ -156,6 +294,67 @@ pub fn validate_params(task_type: &str, params: &serde_json::Value) -> Result<()
                 .map(|_| ())
                 .map_err(|e| TaskError::InvalidParams(e.to_string()))
         }
+        stream_kowalski_alerts::TASK_TYPE => {
+            let parsed: stream_kowalski_alerts::StreamKowalskiParams =
+                serde_json::from_value(params.clone())
+                    .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            parsed.validate_params().map_err(TaskError::InvalidParams)
+        }
+        copy_cutouts::TASK_TYPE => {
+            let parsed: copy_cutouts::CopyCutoutsParams = serde_json::from_value(params.clone())
+                .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            parsed.validate_params().map_err(TaskError::InvalidParams)
+        }
+        sso_baselines::TASK_TYPE => {
+            let parsed: sso_baselines::SsoBaselinesParams = serde_json::from_value(params.clone())
+                .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            parsed.validate_params().map_err(TaskError::InvalidParams)
+        }
+        mpcorb_ingest::TASK_TYPE => {
+            let parsed: mpcorb_ingest::MpcorbIngestParams = serde_json::from_value(params.clone())
+                .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            parsed.validate_params().map_err(TaskError::InvalidParams)
+        }
+        enrich_reprocess::TASK_TYPE => {
+            let parsed: enrich_reprocess::EnrichReprocessParams =
+                serde_json::from_value(params.clone())
+                    .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            parsed.validate_params().map_err(TaskError::InvalidParams)
+        }
+        prepare_catalog::TASK_TYPE => {
+            let parsed: prepare_catalog::PrepareCatalogParams =
+                serde_json::from_value(params.clone())
+                    .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            parsed.validate_params().map_err(TaskError::InvalidParams)
+        }
+        reprocess_crossmatch::TASK_TYPE => {
+            let parsed: reprocess_crossmatch::ReprocessCrossmatchParams =
+                serde_json::from_value(params.clone())
+                    .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            parsed.validate_params().map_err(TaskError::InvalidParams)
+        }
+        migrate_snr::TASK_TYPE => {
+            let parsed: migrate_snr::MigrateSnrParams = serde_json::from_value(params.clone())
+                .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            parsed.validate_params().map_err(TaskError::InvalidParams)
+        }
+        migrate_fp_flux::TASK_TYPE => {
+            let parsed: migrate_fp_flux::MigrateFpFluxParams =
+                serde_json::from_value(params.clone())
+                    .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            parsed.validate_params().map_err(TaskError::InvalidParams)
+        }
+        backfill_hpx::TASK_TYPE => {
+            let parsed: backfill_hpx::BackfillHpxParams = serde_json::from_value(params.clone())
+                .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            parsed.validate_params().map_err(TaskError::InvalidParams)
+        }
+        repair_photometry::TASK_TYPE => {
+            let parsed: repair_photometry::RepairPhotometryParams =
+                serde_json::from_value(params.clone())
+                    .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            parsed.validate_params().map_err(TaskError::InvalidParams)
+        }
         other => Err(TaskError::UnknownType {
             id: other.to_string(),
             known: known_types(),
@@ -177,6 +376,75 @@ pub fn single_flight_key(
             .get("catalog")
             .and_then(|c| c.as_str())
             .map(|catalog| doc! { "catalog": catalog }),
+        // One migration of a collection at a time: two concurrent runs would
+        // rewrite the same documents with the same pipeline, wasting a large
+        // amount of write throughput for no benefit.
+        migrate_fp_flux::TASK_TYPE => Some(doc! {}),
+        // Keyed by survey: migrating ZTF and LSST at once is fine, but two runs
+        // over the same survey would rewrite the same documents.
+        // Two imports into one BOOM would duplicate the whole stream's work.
+        stream_kowalski_alerts::TASK_TYPE => params
+            .get("boom_uri")
+            .and_then(|v| v.as_str())
+            .map(|uri| doc! { "boom_uri": uri }),
+        // Keyed by destination and survey: two copies into one collection would
+        // race, but different surveys or deployments are independent.
+        copy_cutouts::TASK_TYPE => {
+            let dst = params.get("dst_uri").and_then(|v| v.as_str());
+            let survey = params.get("survey").and_then(|v| v.as_str());
+            match (dst, survey) {
+                (Some(dst), Some(survey)) => Some(doc! { "dst_uri": dst, "survey": survey }),
+                _ => Some(doc! {}),
+            }
+        }
+        // Two would upsert the same baselines from the same detections.
+        sso_baselines::TASK_TYPE => Some(doc! {}),
+        // One refresh at a time: two would download the same file and race on
+        // the staging collection.
+        mpcorb_ingest::TASK_TYPE => Some(doc! {}),
+        // Keyed by survey: two reprocesses of one survey would contend for the
+        // same enrichment workers and GPU, but ZTF and LSST are independent.
+        enrich_reprocess::TASK_TYPE => Some(
+            params
+                .get("survey")
+                .and_then(|s| s.as_str())
+                .map(|survey| doc! { "survey": survey })
+                .unwrap_or_default(),
+        ),
+        // One preparation of a collection at a time; two would rewrite the same
+        // documents and race on creating the index.
+        prepare_catalog::TASK_TYPE => params
+            .get("catalog")
+            .and_then(|c| c.as_str())
+            .map(|catalog| doc! { "catalog": catalog }),
+        // Keyed by survey: two runs over the same alerts_aux would fight over
+        // the same records, but reprocessing ZTF and LSST at once is fine.
+        reprocess_crossmatch::TASK_TYPE => Some(
+            params
+                .get("survey")
+                .and_then(|s| s.as_str())
+                .map(|survey| doc! { "survey": survey })
+                .unwrap_or_default(),
+        ),
+        migrate_snr::TASK_TYPE => Some(
+            params
+                .get("survey")
+                .and_then(|s| s.as_str())
+                .map(|survey| doc! { "survey": survey })
+                .unwrap_or_default(),
+        ),
+        // One per deployment: an all-surveys run and a single-survey run would
+        // walk the same collections, and params cannot express that overlap.
+        backfill_hpx::TASK_TYPE => Some(doc! {}),
+        // Keyed by survey: two runs over the same aux collection would scan
+        // and rewrite the same documents.
+        repair_photometry::TASK_TYPE => Some(
+            params
+                .get("survey")
+                .and_then(|v| v.as_str())
+                .map(|survey| doc! { "survey": survey })
+                .unwrap_or_default(),
+        ),
         _ => None,
     }
 }
@@ -195,6 +463,61 @@ pub async fn dispatch(
             let params = catalog_ingest::CatalogIngestParams::deserialize(params)
                 .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
             catalog_ingest::run(ctx, params).await
+        }
+        stream_kowalski_alerts::TASK_TYPE => {
+            let params = stream_kowalski_alerts::StreamKowalskiParams::deserialize(params)
+                .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            stream_kowalski_alerts::run(ctx, params).await
+        }
+        copy_cutouts::TASK_TYPE => {
+            let params = copy_cutouts::CopyCutoutsParams::deserialize(params)
+                .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            copy_cutouts::run(ctx, params).await
+        }
+        backfill_hpx::TASK_TYPE => {
+            let params = backfill_hpx::BackfillHpxParams::deserialize(params)
+                .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            backfill_hpx::run(ctx, params).await
+        }
+        repair_photometry::TASK_TYPE => {
+            let params = repair_photometry::RepairPhotometryParams::deserialize(params)
+                .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            repair_photometry::run(ctx, params).await
+        }
+        sso_baselines::TASK_TYPE => {
+            let params = sso_baselines::SsoBaselinesParams::deserialize(params)
+                .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            sso_baselines::run(ctx, params).await
+        }
+        mpcorb_ingest::TASK_TYPE => {
+            let params = mpcorb_ingest::MpcorbIngestParams::deserialize(params)
+                .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            mpcorb_ingest::run(ctx, params).await
+        }
+        enrich_reprocess::TASK_TYPE => {
+            let params = enrich_reprocess::EnrichReprocessParams::deserialize(params)
+                .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            enrich_reprocess::run(ctx, params).await
+        }
+        prepare_catalog::TASK_TYPE => {
+            let params = prepare_catalog::PrepareCatalogParams::deserialize(params)
+                .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            prepare_catalog::run(ctx, params).await
+        }
+        reprocess_crossmatch::TASK_TYPE => {
+            let params = reprocess_crossmatch::ReprocessCrossmatchParams::deserialize(params)
+                .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            reprocess_crossmatch::run(ctx, params).await
+        }
+        migrate_snr::TASK_TYPE => {
+            let params = migrate_snr::MigrateSnrParams::deserialize(params)
+                .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            migrate_snr::run(ctx, params).await
+        }
+        migrate_fp_flux::TASK_TYPE => {
+            let params = migrate_fp_flux::MigrateFpFluxParams::deserialize(params)
+                .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            migrate_fp_flux::run(ctx, params).await
         }
         other => Err(TaskError::UnknownType {
             id: other.to_string(),
