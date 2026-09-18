@@ -197,9 +197,6 @@ services:
     restart: always
   api:
     image: ${BOOM_IMAGE:-ghcr.io/boom-astro/boom:latest}
-    # Built from this checkout, never pulled: with both an `image:` and a
-    # `build:`, compose pulls when the image is absent locally, which would
-    # silently run the registry's build instead of this working tree.
     pull_policy: ${BOOM_PULL_POLICY:-build}
     hostname: api
     build:
@@ -300,11 +297,8 @@ services:
       - traefik.http.routers.${STACK_NAME?Variable not set}-api-http.middlewares=https-redirect,${STACK_NAME?Variable not set}-www-redirect,${STACK_NAME?Variable not set}-api-ratelimit,${STACK_NAME?Variable not set}-api-compress
       - traefik.http.routers.${STACK_NAME?Variable not set}-api-https.middlewares=${STACK_NAME?Variable not set}-www-redirect,${STACK_NAME?Variable not set}-api-ratelimit,${STACK_NAME?Variable not set}-api-compress
   frontend:
-    # Built from this checkout for each deployment: frontend/Dockerfile bakes the
-    # VITE_* values and the nginx API origin into the image at build time, so
-    # there is no generic frontend image to pull. BOOM_FRONTEND_IMAGE together
-    # with BOOM_FRONTEND_PULL_POLICY runs one built elsewhere for this same
-    # deployment; setting the image alone still builds.
+    # Built per deployment: the VITE_* values and the nginx API origin are baked
+    # in at build time, so there is no generic image to pull.
     image: ${BOOM_FRONTEND_IMAGE:-boom-astro/boom-frontend:local}
     pull_policy: ${BOOM_FRONTEND_PULL_POLICY:-build}
     hostname: frontend
@@ -351,9 +345,6 @@ services:
     # (there appears to be an issue when one consumer reads from multiple topics, i.e. one group id with multiple topics)
     # TODO: investigate further and consider merging into single consumer with multiple topics if the issue is resolved
     image: ${BOOM_IMAGE:-ghcr.io/boom-astro/boom:latest}
-    # Built from this checkout, never pulled: with both an `image:` and a
-    # `build:`, compose pulls when the image is absent locally, which would
-    # silently run the registry's build instead of this working tree.
     pull_policy: ${BOOM_PULL_POLICY:-build}
     hostname: consumer-ztf-public
     restart: always
@@ -393,9 +384,6 @@ services:
       - public
   consumer-ztf-partnership:
     image: ${BOOM_IMAGE:-ghcr.io/boom-astro/boom:latest}
-    # Built from this checkout, never pulled: with both an `image:` and a
-    # `build:`, compose pulls when the image is absent locally, which would
-    # silently run the registry's build instead of this working tree.
     pull_policy: ${BOOM_PULL_POLICY:-build}
     hostname: consumer-ztf-partnership
     restart: always
@@ -435,9 +423,6 @@ services:
       - partnership
   consumer-ztf-caltech:
     image: ${BOOM_IMAGE:-ghcr.io/boom-astro/boom:latest}
-    # Built from this checkout, never pulled: with both an `image:` and a
-    # `build:`, compose pulls when the image is absent locally, which would
-    # silently run the registry's build instead of this working tree.
     pull_policy: ${BOOM_PULL_POLICY:-build}
     hostname: consumer-ztf-caltech
     restart: always
@@ -477,9 +462,6 @@ services:
       - caltech
   consumer-lsst:
     image: ${BOOM_IMAGE:-ghcr.io/boom-astro/boom:latest}
-    # Built from this checkout, never pulled: with both an `image:` and a
-    # `build:`, compose pulls when the image is absent locally, which would
-    # silently run the registry's build instead of this working tree.
     pull_policy: ${BOOM_PULL_POLICY:-build}
     hostname: consumer-lsst
     restart: always
@@ -514,9 +496,6 @@ services:
       - lsst
   consumer-winter:
     image: ${BOOM_IMAGE:-ghcr.io/boom-astro/boom:latest}
-    # Built from this checkout, never pulled: with both an `image:` and a
-    # `build:`, compose pulls when the image is absent locally, which would
-    # silently run the registry's build instead of this working tree.
     pull_policy: ${BOOM_PULL_POLICY:-build}
     hostname: consumer-winter
     restart: always
@@ -557,9 +536,6 @@ services:
   # resumes it.
   task-worker:
     image: ${BOOM_IMAGE:-ghcr.io/boom-astro/boom:latest}
-    # Built from this checkout, never pulled: with both an `image:` and a
-    # `build:`, compose pulls when the image is absent locally, which would
-    # silently run the registry's build instead of this working tree.
     pull_policy: ${BOOM_PULL_POLICY:-build}
     hostname: task-worker
     restart: always
@@ -599,9 +575,6 @@ services:
 
   scheduler-ztf:
     image: ${BOOM_IMAGE:-ghcr.io/boom-astro/boom:latest}
-    # Built from this checkout, never pulled: with both an `image:` and a
-    # `build:`, compose pulls when the image is absent locally, which would
-    # silently run the registry's build instead of this working tree.
     pull_policy: ${BOOM_PULL_POLICY:-build}
     hostname: scheduler-ztf
     restart: always
@@ -638,9 +611,6 @@ services:
       - ztf
   scheduler-lsst:
     image: ${BOOM_IMAGE:-ghcr.io/boom-astro/boom:latest}
-    # Built from this checkout, never pulled: with both an `image:` and a
-    # `build:`, compose pulls when the image is absent locally, which would
-    # silently run the registry's build instead of this working tree.
     pull_policy: ${BOOM_PULL_POLICY:-build}
     hostname: scheduler-lsst
     restart: always
@@ -677,9 +647,6 @@ services:
       - lsst
   scheduler-winter:
     image: ${BOOM_IMAGE:-ghcr.io/boom-astro/boom:latest}
-    # Built from this checkout, never pulled: with both an `image:` and a
-    # `build:`, compose pulls when the image is absent locally, which would
-    # silently run the registry's build instead of this working tree.
     pull_policy: ${BOOM_PULL_POLICY:-build}
     hostname: scheduler-winter
     restart: always
