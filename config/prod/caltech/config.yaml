@@ -136,6 +136,11 @@ kafka:
     winter:
       server: "localhost:9092"
       group_id: "" # Set via BOOM_KAFKA__CONSUMER__WINTER__GROUP_ID environment variable
+      # Wider than ZTF's 1 because WINTER publishes a night in one burst, hours
+      # after it ends, rather than continuously: a restart inside a one-day
+      # window drops a whole night, and nothing re-subscribes to it afterwards.
+      # A longer outage than this still needs `kafka_consumer winter --on DATE`.
+      subscription_window_days: 2
   producer:
     server: "broker:29092" # Only one global producer for now (filter worker output)
 workers:
