@@ -4767,15 +4767,19 @@ mod tests {
                 .to_request()
         };
 
-        // The stats are public to read, but only a signed-in account can pay for a recount.
-        let resp = test::call_service(
+        // The stats are public to read, but only a signed-in account can pay for a
+        // recount. The middleware rejects with an `Err`, hence `try_call_service`.
+        let resp = test::try_call_service(
             &app,
             test::TestRequest::post()
                 .uri("/babamul/stats/refresh?start_date=2024-06-01&end_date=2024-06-30")
                 .to_request(),
         )
         .await;
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            resp.err().unwrap().as_response_error().status_code(),
+            StatusCode::UNAUTHORIZED
+        );
 
         // Too long a range would recount hundreds of nights, so it is refused
         // before the cooldown is claimed.
