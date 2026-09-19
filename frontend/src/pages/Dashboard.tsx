@@ -5,13 +5,15 @@ import { Bar, BarChart, CartesianGrid, ReferenceArea, XAxis, YAxis } from "recha
 import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from "@/components/ui/chart";
 import { Toggle } from "@/components/ui/toggle";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
-import { IconInfoCircle, IconZoomReset } from "@tabler/icons-react";
+import { IconInfoCircle, IconRefresh, IconZoomReset } from "@tabler/icons-react";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import api, { CollectionEntry, fetchTopics, NightlyStat, type TopicInfo } from "@/lib/api";
 import { type Survey } from "@/lib/constants";
+import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch.tsx";
 import { Label } from "@/components/ui/label.tsx";
 import KafkaAlertCounts from "@/components/kafka/KafkaAlertCounts.tsx";
+import { toast } from "sonner";
 
 const SURVEY_ORDER = ["ztf", "lsst"] as const satisfies readonly Survey[];
 
@@ -27,6 +29,9 @@ const chartConfig = {
 
 const FIRST_NIGHT = "2018-01-01";
 
+// The API refuses to recount a longer range in one refresh.
+const MAX_REFRESH_MONTHS = 6;
+
 const NIGHT_CONVENTION =
   "Alerts are grouped by observing night, local noon to local noon at the " +
   "observatory (Palomar, UTC−7, for ZTF; Cerro Pachón, UTC−3, for LSST). " +
@@ -40,6 +45,12 @@ const ALERT_TYPE_LABELS: Record<string, string> = {
 
 function formatDate(d: Date): string {
   return d.toISOString().slice(0, 10);
+}
+
+function monthsBefore(date: string, months: number): string {
+  const d = new Date(`${date}T00:00:00Z`);
+  d.setUTCMonth(d.getUTCMonth() - months);
+  return formatDate(d);
 }
 
 function twoMonthsAgo(): string {
@@ -182,6 +193,8 @@ export default function Dashboard() {
   const [collections, setCollections] = useState<CollectionEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
 
   const [topics, setTopics] = useState<TopicInfo[]>([]);
   const [splitByMatch, setSplitByMatch] = useState(false);
@@ -203,20 +216,22 @@ export default function Dashboard() {
       .then(setStatsData)
       .catch((e) => setError(e instanceof Error ? e.message : "Failed to fetch stats"))
       .finally(() => setLoading(false));
-  }, [startDate, endDate]);
+  }, [startDate, endDate, reloadKey]);
 
   useEffect(() => {
     api.fetchCollectionStats()
       .then((s) => setCollections(s.collections.sort((a, b) => a.name.localeCompare(b.name))))
       .catch(() => {});
-  }, []);
+  }, [reloadKey]);
 
   useEffect(() => {
+    setTopicsLoading(true);
+    setTopicsError(null);
     fetchTopics()
       .then(setTopics)
       .catch((e) => setTopicsError(e instanceof Error ? e.message : "Failed to fetch topics"))
       .finally(() => setTopicsLoading(false));
-  }, []);
+  }, [reloadKey]);
 
   useEffect(() => {
     const el = chartRef.current;
@@ -270,6 +285,19 @@ export default function Dashboard() {
     return {total, nights, avg: nights ? Math.round(total / nights) : 0, peak};
   }, [visibleData]);
 
+  async function refreshCaches() {
+    setRefreshing(true);
+    const from = monthsBefore(endDate, MAX_REFRESH_MONTHS);
+    try {
+      await api.refreshStats(startDate > from ? startDate : from, endDate);
+      setReloadKey((k) => k + 1);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Failed to refresh the dashboard");
+    } finally {
+      setRefreshing(false);
+    }
+  }
+
   function toggleSurvey(s: Survey) {
     setSurveys(prev => new Set(prev.has(s) ? [...prev].filter(x => x !== s) : [...prev, s]));
   }
@@ -307,9 +335,28 @@ export default function Dashboard() {
     setZoomSlice(null);
   }
 
+  const busy = loading || refreshing;
+  const isLoggedIn = !!api.getTokenRecord();
+
   return (
     <div className="px-4 lg:px-6 space-y-4">
-      <h1 className="text-2xl font-bold">Dashboard</h1>
+      <div className="flex items-center justify-between gap-4">
+        <h1 className="text-2xl font-bold">Dashboard</h1>
+        {isLoggedIn && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button variant="outline" size="sm" onClick={refreshCaches} disabled={busy}>
+                <IconRefresh className={busy ? "animate-spin" : ""} />
+                Refresh
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="left" className="max-w-xs">
+              Drop the cached stats and recount the collections, the Kafka topics, and the displayed
+              nights, up to the last {MAX_REFRESH_MONTHS} months.
+            </TooltipContent>
+          </Tooltip>
+        )}
+      </div>
       {visibleData.length > 0 ? (
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
           <StatCard
