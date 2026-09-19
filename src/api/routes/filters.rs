@@ -13,7 +13,8 @@ use crate::{
     conf::{AppConfig, FilterWorkerConfig},
     enrichment::{LsstAlertProperties, ZtfAlertClassifications, ZtfAlertProperties},
     filter::{
-        build_filter_pipeline, Filter, FilterError, FilterVersion, SURVEYS_REQUIRING_PERMISSIONS,
+        build_filter_pipeline, reject_unknown_candidate_fields, Filter, FilterError, FilterVersion,
+        SURVEYS_REQUIRING_PERMISSIONS,
     },
     utils::{
         db::{count_alerts_for_night, mongify},
@@ -166,6 +167,7 @@ async fn build_and_test_filter_version(
     pipeline: &Vec<serde_json::Value>,
     permissions: &HashMap<Survey, Vec<i32>>,
 ) -> Result<(), FilterError> {
+    reject_unknown_candidate_fields(pipeline, survey)?;
     let test_pipeline = build_filter_pipeline(pipeline, permissions, survey).await?;
     run_test_pipeline(db, survey, test_pipeline).await
 }
@@ -1300,6 +1302,9 @@ pub struct LsstFilterMatch {
 /// ZTF data available at filtering time
 pub struct ZtfAlertToFilter {
     pub candid: i64,
+    /// Signal-to-noise a forced epoch had to clear for `isdiffpos` and
+    /// `snr_psf` to be set on it; below it those read as null.
+    pub snt: f32,
     #[serde(rename = "objectId")]
     pub object_id: String,
     pub candidate: ZtfCandidate,
@@ -1319,6 +1324,9 @@ pub struct ZtfAlertToFilter {
 /// LSST data available at filtering time
 pub struct LsstAlertToFilter {
     pub candid: i64,
+    /// Signal-to-noise a forced epoch had to clear for `isdiffpos` and
+    /// `snr_psf` to be set on it; below it those read as null.
+    pub snt: f32,
     #[serde(rename = "objectId")]
     pub object_id: String,
     pub candidate: LsstCandidate,

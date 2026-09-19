@@ -233,6 +233,8 @@ impl WinterEnrichmentWorker {
                 .prv_candidates
                 .iter()
                 .map(|p| (p.time, p.isdiffpos.map(|d| !d))),
+            // WINTER alerts carry no forced photometry.
+            std::iter::empty(),
             alert.candidate.jd,
             EPISODE_GAP_DAYS,
         );

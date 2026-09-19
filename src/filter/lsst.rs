@@ -1,3 +1,4 @@
+use crate::utils::lightcurves::SNT;
 use mongodb::bson::{doc, Document};
 use std::collections::HashMap;
 use tracing::{info, instrument, warn};
@@ -389,6 +390,10 @@ pub async fn build_lsst_filter_pipeline(
                 "ss_source": 1,
                 "properties": 1,
                 "coordinates": 1,
+                // The threshold a forced epoch had to clear for `isdiffpos` and
+                // `snr_psf` to be set, so a filter can say so rather than
+                // hard-coding the number.
+                "snt": doc! { "$literal": SNT },
             }
         },
     ];

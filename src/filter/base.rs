@@ -358,6 +358,73 @@ fn flattened_name(path: &str) -> Option<&str> {
     })
 }
 
+/// Field names the survey's `candidate` document defines.
+///
+/// Read from the Avro schema the filter runs against, so it follows the alert
+/// struct instead of a list that drifts from it.
+fn candidate_fields(survey: &Survey) -> std::collections::HashSet<String> {
+    let schema = match survey {
+        Survey::Ztf => crate::alert::ZtfCandidate::get_schema(),
+        Survey::Lsst => crate::alert::LsstCandidate::get_schema(),
+        Survey::Winter => crate::alert::WinterCandidate::get_schema(),
+        Survey::Decam => crate::alert::DecamCandidate::get_schema(),
+    };
+    match schema {
+        Schema::Record(record) => record.fields.iter().map(|f| f.name.clone()).collect(),
+        _ => std::collections::HashSet::new(),
+    }
+}
+
+/// The first `candidate.<field>` reference in `value` naming a field the survey
+/// does not define.
+///
+/// A missing field reads as null, and null orders below every bound, so a cut
+/// written on one admits every alert instead of rejecting them. Paths below a
+/// field that does exist are left alone, since only the first segment is known
+/// from the schema.
+fn find_unknown_candidate_field(
+    value: &serde_json::Value,
+    known: &std::collections::HashSet<String>,
+) -> Option<String> {
+    fn check(path: &str, known: &std::collections::HashSet<String>) -> Option<String> {
+        let field = path.strip_prefix("candidate.")?.split('.').next()?;
+        (!field.is_empty() && !known.contains(field)).then(|| path.to_string())
+    }
+    match value {
+        serde_json::Value::String(s) => s.strip_prefix('$').and_then(|p| check(p, known)),
+        serde_json::Value::Array(items) => items
+            .iter()
+            .find_map(|item| find_unknown_candidate_field(item, known)),
+        serde_json::Value::Object(map) => map.iter().find_map(|(key, nested)| {
+            check(key, known).or_else(|| find_unknown_candidate_field(nested, known))
+        }),
+        _ => None,
+    }
+}
+
+/// Reject a pipeline naming a `candidate.*` field the survey does not define.
+///
+/// Kept out of [`validate_filter_pipeline`] deliberately: that runs when the
+/// worker loads a stored filter, where a rejection silently stops a filter that
+/// is already running. Called on the paths that accept a filter instead, so the
+/// mistake cannot be saved, while the ones already saved keep running until
+/// their owners fix them.
+pub fn reject_unknown_candidate_fields(
+    filter_pipeline: &[serde_json::Value],
+    survey: &Survey,
+) -> Result<(), FilterError> {
+    let known = candidate_fields(survey);
+    for stage in filter_pipeline {
+        if let Some(path) = find_unknown_candidate_field(stage, &known) {
+            return Err(FilterError::InvalidFilterPipeline(format!(
+                "`{path}` is not a field of the {survey} candidate schema: it reads as null, \
+                 and null compares below any bound, so the cut would admit every alert."
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// The first reference to a nulled join anywhere in `value`, as `(path, name)`.
 ///
 /// Object keys are field paths; string values are only references when they are
@@ -776,6 +843,11 @@ pub async fn build_loaded_filter(
     }
 
     let pipeline = get_active_filter_pipeline(&filter)?;
+    // Warned about, not rejected: a filter saved before the check existed keeps
+    // running, and its owner sees which path needs fixing.
+    if let Err(error) = reject_unknown_candidate_fields(&pipeline, survey) {
+        warn!(filter_id, %error, "filter references a field the survey does not define");
+    }
     let mut pipeline =
         build_filter_pipeline(&pipeline, &filter.permissions, &filter.survey).await?;
 
@@ -1641,5 +1713,111 @@ mod tests {
         filter.active_fid = "v3".to_string(); // non-existent version
         let result = get_active_filter_pipeline(&filter);
         assert!(result.is_err());
+    }
+}
+
+#[cfg(test)]
+mod candidate_schema_tests {
+    use super::*;
+
+    /// `jdendhist` is a WINTER field, so a ZTF filter naming it is rejected
+    /// while the same path passes for WINTER. The check reads each survey's
+    /// schema rather than a list of banned names.
+    #[test]
+    fn test_a_field_of_another_survey_is_rejected() {
+        assert!(!candidate_fields(&Survey::Ztf).contains("jdendhist"));
+        assert!(candidate_fields(&Survey::Winter).contains("jdendhist"));
+
+        let span = serde_json::json!({"$match": {"$expr": {"$gt": [
+            {"$subtract": ["$candidate.jdendhist", "$candidate.jdstarthist"]}, 0.01]}}});
+        let error = find_unknown_candidate_field(&span, &candidate_fields(&Survey::Ztf));
+        assert_eq!(error.as_deref(), Some("candidate.jdendhist"));
+        assert!(find_unknown_candidate_field(&span, &candidate_fields(&Survey::Winter)).is_none());
+    }
+
+    /// Fields the survey does define pass, whether named as a key or a `$` ref.
+    #[test]
+    fn test_known_fields_pass() {
+        let known = candidate_fields(&Survey::Ztf);
+        assert!(known.contains("jdstarthist"));
+        for stage in [
+            serde_json::json!({"$match": {"candidate.jdstarthist": {"$gt": 2461000.0}}}),
+            serde_json::json!({"$project": {"x": "$candidate.magpsf"}}),
+            // A literal that merely looks like a path is not a reference.
+            serde_json::json!({"$match": {"note": "candidate.nonsense"}}),
+        ] {
+            assert!(
+                find_unknown_candidate_field(&stage, &known).is_none(),
+                "rejected {stage}"
+            );
+        }
+    }
+
+    /// Only the first segment is checked, since the schema does not describe
+    /// what sits below a field.
+    #[test]
+    fn test_paths_below_a_known_field_are_left_alone() {
+        let known = candidate_fields(&Survey::Ztf);
+        let stage = serde_json::json!({"$match": {"candidate.jdstarthist.whatever": {"$gt": 1}}});
+        assert!(find_unknown_candidate_field(&stage, &known).is_none());
+    }
+
+    /// Saving is refused, with the offending path named.
+    #[test]
+    fn test_saving_such_a_pipeline_is_rejected() {
+        let pipeline = vec![
+            serde_json::json!({"$match": {"candidate.jdendhist": {"$gt": 0}}}),
+            serde_json::json!({"$project": {"objectId": 1}}),
+        ];
+        let message = reject_unknown_candidate_fields(&pipeline, &Survey::Ztf)
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("candidate.jdendhist"), "{message}");
+        assert!(reject_unknown_candidate_fields(&pipeline, &Survey::Winter).is_ok());
+    }
+
+    /// Loading stays permissive, so deploying the check cannot stop the filters
+    /// already saved with one of these paths.
+    #[test]
+    fn test_loading_such_a_pipeline_is_not_rejected() {
+        let pipeline = vec![
+            serde_json::json!({"$match": {"candidate.jdendhist": {"$gt": 0}}}),
+            serde_json::json!({"$project": {"objectId": 1}}),
+        ];
+        assert!(validate_filter_pipeline(&pipeline).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod snt_payload_tests {
+    use super::*;
+    use crate::utils::lightcurves::SNT;
+
+    /// A filter can read the threshold rather than hard-coding 3.0, and it is
+    /// there whether or not the filter touches aux.
+    #[tokio::test]
+    async fn test_snt_reaches_the_filter() {
+        let mut permissions = HashMap::new();
+        permissions.insert(Survey::Ztf, vec![1]);
+        let pipeline = vec![
+            serde_json::json!({"$match": {"$expr": {"$gt": ["$candidate.snr_psf", "$snt"]}}}),
+            serde_json::json!({"$project": {"objectId": 1, "snt": 1}}),
+        ];
+        let built = crate::filter::build_ztf_filter_pipeline(&pipeline, &permissions)
+            .await
+            .expect("builds");
+        let projected = built
+            .iter()
+            .find_map(|stage| stage.get_document("$project").ok())
+            .expect("a project stage");
+        assert_eq!(
+            projected
+                .get_document("snt")
+                .unwrap()
+                .get_f64("$literal")
+                .ok(),
+            Some(SNT as f64),
+            "snt is not projected: {projected:?}"
+        );
     }
 }

@@ -1254,6 +1254,12 @@ impl ZtfEnrichmentWorker {
                 .prv_candidates
                 .iter()
                 .map(|p| (p.jd, p.flux.filter(|f| !f.is_nan()).map(|f| f < 0.0))),
+            // snr_psf is set only above SNT, so it marks a forced detection.
+            alert
+                .fp_hists
+                .iter()
+                .filter(|p| p.snr_psf.is_some())
+                .map(|p| p.jd),
             candidate.jd,
             EPISODE_GAP_DAYS,
         );
