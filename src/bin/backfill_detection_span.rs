@@ -315,9 +315,8 @@ async fn main() {
 mod tests {
     use super::*;
 
-    /// Pins the stored field names the span is read from. `snr_psf` is written
-    /// on a forced epoch only above threshold, and `psfFlux` carries the sign,
-    /// so a rename upstream would otherwise leave this silently reading zeros.
+    /// Pins the stored names: `snr_psf` marks a forced detection, `psfFlux`
+    /// carries the sign. A rename would otherwise read as zeros.
     #[test]
     fn test_history_is_read_from_the_stored_names() {
         let aux = doc! {

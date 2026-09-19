@@ -375,13 +375,8 @@ fn candidate_fields(survey: &Survey) -> std::collections::HashSet<String> {
     }
 }
 
-/// The first `candidate.<field>` reference in `value` naming a field the survey
-/// does not define.
-///
-/// A missing field reads as null, and null orders below every bound, so a cut
-/// written on one admits every alert instead of rejecting them. Paths below a
-/// field that does exist are left alone, since only the first segment is known
-/// from the schema.
+/// The first `candidate.<field>` reference naming a field the survey does not
+/// define. Only the first segment is checked; the schema stops there.
 fn find_unknown_candidate_field(
     value: &serde_json::Value,
     known: &std::collections::HashSet<String>,
@@ -402,13 +397,9 @@ fn find_unknown_candidate_field(
     }
 }
 
-/// Reject a pipeline naming a `candidate.*` field the survey does not define.
-///
-/// Kept out of [`validate_filter_pipeline`] deliberately: that runs when the
-/// worker loads a stored filter, where a rejection silently stops a filter that
-/// is already running. Called on the paths that accept a filter instead, so the
-/// mistake cannot be saved, while the ones already saved keep running until
-/// their owners fix them.
+/// Reject a pipeline naming a `candidate.*` field the survey does not define,
+/// which would read as null and so admit every alert. Called where a filter is
+/// accepted, not where one is loaded: rejecting on load stops a running filter.
 pub fn reject_unknown_candidate_fields(
     filter_pipeline: &[serde_json::Value],
     survey: &Survey,
