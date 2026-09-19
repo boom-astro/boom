@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use utoipa::ToSchema;
 
-const COLLECTION_STATS_CACHE_KEY: &str = "collection_stats";
+pub(super) const COLLECTION_STATS_CACHE_KEY: &str = "collection_stats";
 /// Cache collection stats for 5 days
 const COLLECTION_STATS_CACHE_SECS: f64 = 5.0 * 24.0 * 3600.0;
 
