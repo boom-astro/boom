@@ -99,3 +99,65 @@ impl AlertProducer for WinterAlertProducer {
         Ok(count as i64)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kafka::base::AlertConsumer;
+
+    /// 2026-09-17 00:00:00 UTC.
+    const T: i64 = 1_789_603_200;
+
+    #[test]
+    fn test_the_window_reaches_back_whole_nights() {
+        let consumer = WinterAlertConsumer::new(None);
+        let topics = consumer.subscription_topics(T, 2);
+        // The day itself plus the preceding two, oldest first.
+        assert_eq!(topics.len(), 3);
+        assert_eq!(topics.first().unwrap(), "winter_20260915");
+        assert_eq!(topics.last().unwrap(), "winter_20260917");
+        assert_eq!(consumer.topic_names(T), vec!["winter_20260917".to_string()]);
+    }
+
+    /// A one-day window steps over any night a restart sat through, and nothing
+    /// subscribes to it afterwards.
+    #[test]
+    fn test_a_one_day_window_cannot_reach_an_older_night() {
+        let consumer = WinterAlertConsumer::new(None);
+        let narrow = consumer.subscription_topics(T, 1);
+        assert!(!narrow.contains(&"winter_20260915".to_string()));
+        assert!(consumer
+            .subscription_topics(T, 2)
+            .contains(&"winter_20260915".to_string()));
+    }
+
+    /// Every deployment gives WINTER more room than the one-day default, or a
+    /// restart silently loses a night.
+    #[test]
+    fn test_deployments_widen_the_winter_window() {
+        let root = env!("CARGO_MANIFEST_DIR");
+        let mut checked = 0;
+        for name in [
+            "config.yaml",
+            "config/prod/caltech/config.yaml",
+            "config/prod/umn/config.yaml",
+        ] {
+            let text = std::fs::read_to_string(format!("{root}/{name}")).expect(name);
+            let Some(block) = text.split("\n    winter:\n").nth(1) else {
+                continue;
+            };
+            // The entry ends at the next key on the survey's own indent.
+            let entry: String = block
+                .lines()
+                .take_while(|l| l.trim().is_empty() || l.starts_with("      "))
+                .collect::<Vec<_>>()
+                .join("\n");
+            checked += 1;
+            assert!(
+                entry.contains("subscription_window_days:"),
+                "{name}: winter consumer leaves the window at the default"
+            );
+        }
+        assert!(checked > 0, "no winter consumer blocks found to check");
+    }
+}
