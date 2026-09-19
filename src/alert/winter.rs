@@ -23,7 +23,7 @@ use flare::Time;
 use mongodb::bson::{doc, Document};
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, skip_serializing_none};
-use tracing::{debug, error, instrument};
+use tracing::{debug, error, instrument, warn};
 
 pub const STREAM_NAME: &str = "WINTER";
 // WINTER observes from Palomar; it covers roughly the same northern sky as ZTF.
@@ -612,6 +612,8 @@ impl WinterAlertWorker {
             Err(e) => {
                 match &e {
                     AlertError::ConcurrentAuxUpdate(_) => debug!(error = %e),
+                    // The fallback below rewrites the array, so the alert still lands.
+                    AlertError::InvalidTimeseriesInput(_) => warn!(error = %e),
                     _ => error!(error = %e),
                 }
                 self.update_aux_fallback(object_id, prv_candidates, survey_matches, now)
