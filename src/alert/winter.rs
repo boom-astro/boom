@@ -612,7 +612,6 @@ impl WinterAlertWorker {
             Err(e) => {
                 match &e {
                     AlertError::ConcurrentAuxUpdate(_) => debug!(error = %e),
-                    // The fallback below rewrites the array, so the alert still lands.
                     AlertError::InvalidTimeseriesInput(_) => warn!(error = %e),
                     _ => error!(error = %e),
                 }
