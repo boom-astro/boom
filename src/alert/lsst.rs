@@ -25,7 +25,7 @@ use mongodb::bson::{doc, Document};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_with::{serde_as, skip_serializing_none};
 use std::collections::HashMap;
-use tracing::{debug, error, instrument};
+use tracing::{debug, error, instrument, warn};
 use utoipa::ToSchema;
 
 pub const STREAM_NAME: &str = "LSST";
@@ -1231,6 +1231,11 @@ impl LsstAlertWorker {
                 // we fallback to a full in-DB update, safe against concurrency and "self-healing", but less efficient
                 match &e {
                     AlertError::ConcurrentAuxUpdate(_) => debug!(error = %e),
+                    // A stored array that is out of order, or carries a duplicate
+                    // or non-finite jd, is rewritten by the fallback below, so the
+                    // alert lands either way. `prepare_timeseries_update` has
+                    // already logged which series and which side it came from.
+                    AlertError::InvalidTimeseriesInput(_) => warn!(error = %e),
                     _ => error!(error = %e),
                 }
                 self.update_aux_fallback(
