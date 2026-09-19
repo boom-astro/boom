@@ -612,10 +612,7 @@ impl WinterAlertWorker {
             Err(e) => {
                 match &e {
                     AlertError::ConcurrentAuxUpdate(_) => debug!(error = %e),
-                    // A stored array that is out of order, or carries a duplicate
-                    // or non-finite jd, is rewritten by the fallback below, so the
-                    // alert lands either way. `prepare_timeseries_update` has
-                    // already logged which series and which side it came from.
+                    // The fallback below rewrites the array, so the alert still lands.
                     AlertError::InvalidTimeseriesInput(_) => warn!(error = %e),
                     _ => error!(error = %e),
                 }
