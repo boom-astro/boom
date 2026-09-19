@@ -8,8 +8,8 @@ reconstructing the model curve yourself.
 
 The model is the piecewise analytic supernova light-curve function introduced by
 [Villar et al. (2019)](https://ui.adsabs.harvard.edu/abs/2019ApJ...884...83V/abstract).
-BOOM fits it jointly in ZTF *g* and *r* with a GPU particle-swarm optimiser
-([`villar-pso`](https://github.com/frenbox/villar-pso)), minimising a
+BOOM fits it jointly in ZTF *g* and *r* with a GPU particle-swarm optimizer
+([`villar-pso`](https://github.com/frenbox/villar-pso)), minimizing a
 band-balanced chi-squared with Gaussian priors.
 
 ## Quick reference
@@ -24,10 +24,10 @@ band-balanced chi-squared with Gaussian priors.
 | `villar_fit.tau_fall_ZTF_r` / `tau_fall_ZTF_g` | Decline e-folding time | days |
 | `villar_fit.extra_sigma_ZTF_r` / `extra_sigma_ZTF_g` | Fitted excess scatter | µJy |
 | `villar_fit.reduced_chi2` | Goodness of fit | dimensionless |
-| `villar_fit.peak_flux` | Normalisation scale used by the fit | µJy |
+| `villar_fit.peak_flux` | Normalization scale used by the fit | µJy |
 
 Sixteen fields in total: seven parameters × two bands, plus a fit statistic and
-the normalisation scale. Every field is a double, and **every field is `NaN`
+the normalization scale. Every field is a double, and **every field is `NaN`
 when the fit did not run or did not succeed** — see
 [When the fields are NaN](#when-the-fields-are-nan).
 
@@ -67,12 +67,12 @@ Two deliberate differences from the paper's Equation 1:
 - **No baseline term.** Villar et al. include a constant `c`. ZTF alert
   photometry is difference-image photometry, already baseline-subtracted, so
   BOOM fits without it.
-- **Reparametrised slope.** The paper writes the plateau as `A + β(t - t_0)`
+- **Reparametrized slope.** The paper writes the plateau as `A + β(t - t_0)`
   with `β` in flux/day. BOOM factors the amplitude out, `A(1 - β·p)`, so its
   `beta` is a *fractional* decline rate. The flux slope in the paper's sense is
   `-A * beta`.
 
-The *g*-band is fitted as an offset from *r* in the optimiser's internal space,
+The *g*-band is fitted as an offset from *r* in the optimizer's internal space,
 but **the stored values are absolute per band**. `gamma_ZTF_g` is the *g*-band
 plateau duration, not a difference.
 
@@ -89,7 +89,7 @@ mag   = 23.9 - 2.5 * log10(F_uJy)
 ### Physical validity constraints
 
 Parameter sets that produce unphysical curves are rejected outright by the
-optimiser, so a successful fit always satisfies all three of:
+optimizer, so a successful fit always satisfies all three of:
 
 ```
 gamma * beta                                   <= 1
@@ -104,8 +104,8 @@ beta * tau_fall + beta * gamma                 <= 1
 Scale of the light curve. With the sigmoid saturated and `beta` small, the
 plateau flux tends to `A`. Convert to a magnitude with the formula above.
 
-The *g*/*r* amplitude ratio `A_ZTF_g / A_ZTF_r` is a colour proxy:
-`-2.5 * log10(A_ZTF_g / A_ZTF_r)` is roughly the *g − r* colour at plateau.
+The *g*/*r* amplitude ratio `A_ZTF_g / A_ZTF_r` is a color proxy:
+`-2.5 * log10(A_ZTF_g / A_ZTF_r)` is roughly the *g − r* color at plateau.
 
 ### `beta` — plateau slope
 
@@ -124,9 +124,9 @@ Type IIP-like plateau. Bounded to roughly 6–100 days in *r*.
 
 ### `t_0` — reference time (days from peak)
 
-Where the sigmoid rise is centred, in days relative to the brightest *r*-band
+Where the sigmoid rise is centered, in days relative to the brightest *r*-band
 epoch. **It is not an absolute JD or MJD** — it is already a phase. Negative
-values (the usual case; the prior is centred at −12 days) put the rise before
+values (the usual case; the prior is centered at −12 days) put the rise before
 peak. To get an absolute epoch, add the JD of the brightest *r*-band point in
 the light curve.
 
@@ -160,7 +160,7 @@ inflating the errors. **Check `extra_sigma / A` alongside `reduced_chi2`.**
 
 ### `reduced_chi2`
 
-Chi-squared per degree of freedom of the best fit, computed on peak-normalised
+Chi-squared per degree of freedom of the best fit, computed on peak-normalized
 flux with `extra_sigma` included in the denominator, with
 `dof = max(n_points - 14, 1)`.
 
@@ -172,18 +172,18 @@ well above a few indicate the model genuinely failed.
 ### `peak_flux`
 
 The largest flux, in either band, among the points the fit actually saw — the
-scale everything was normalised by before fitting. It is stored because it is
+scale everything was normalized by before fitting. It is stored because it is
 not otherwise recoverable from the alert document alone: reproducing it means
 replaying the preprocessing over that object's `ZTF_alerts_aux` photometry,
 filtered to `jd <= ` the alert's own `jd`.
 
-Divide `A` or `extra_sigma` by it to recover the normalised (dimensionless)
-values the optimiser worked in, which is what you want when comparing fit
+Divide `A` or `extra_sigma` by it to recover the normalized (dimensionless)
+values the optimizer worked in, which is what you want when comparing fit
 *shapes* across objects of very different brightness.
 
 ## Parameter bounds
 
-The optimiser searches inside hard bounds, so stored values are always within
+The optimizer searches inside hard bounds, so stored values are always within
 these ranges. A parameter sitting exactly on a bound is a red flag: the fit
 wanted to go further and could not.
 
@@ -216,7 +216,7 @@ The fit does not see the raw alert history. Before fitting, `villar-pso`:
 5. Truncates to phase ∈ [−50, +100] days.
 6. Requires **more than two surviving points in each of *g* and *r***, or the
    fit is skipped.
-7. Normalises all fluxes by the global peak flux; parameters are converted back
+7. Normalizes all fluxes by the global peak flux; parameters are converted back
    to physical units afterwards.
 
 Step 5 is why `t_0` has a −50 day floor, and step 3 is why `t_0` is usually
@@ -330,7 +330,7 @@ A few combinations are more useful than the raw parameters:
 | --- | --- | --- |
 | Plateau slope, flux units | `-A * beta` | The paper's `β`, in µJy/day |
 | Peak magnitude | `23.9 - 2.5*log10(A)` | Comparable across objects |
-| Colour at plateau | `-2.5*log10(A_ZTF_g / A_ZTF_r)` | Approximate *g − r* |
+| Color at plateau | `-2.5*log10(A_ZTF_g / A_ZTF_r)` | Approximate *g − r* |
 | Rise/fall asymmetry | `tau_fall / tau_rise` | Separates fast transients |
 | Fractional scatter | `extra_sigma / A` | Sanity check on `reduced_chi2` |
 | Total duration proxy | `gamma + tau_fall` | Rough event timescale |
@@ -343,7 +343,7 @@ Worth knowing before you build science on these numbers.
 band to a common length and then evaluates the cost over the first `n_points`
 entries of a band-sorted array. When the *r*-band needs padding, that window
 includes some zero-weight padded entries and correspondingly excludes the
-latest *g*-band points. The padded entries carry an error of 1000 in normalised
+latest *g*-band points. The padded entries carry an error of 1000 in normalized
 flux and contribute essentially nothing, but a handful of late *g* points can
 be left out of both the fit and the reported chi-squared.
 
@@ -351,7 +351,7 @@ be left out of both the fit and the reported chi-squared.
 than 15 points gets `dof = 1`, so `reduced_chi2` is then just the total
 chi-squared. Compare fits with similar numbers of points.
 
-**`extra_sigma` can mask a bad fit.** Because it is free, the optimiser can
+**`extra_sigma` can mask a bad fit.** Because it is free, the optimizer can
 drive `reduced_chi2` towards 1 by inflating the errors. Always read
 `extra_sigma / A` alongside it.
 

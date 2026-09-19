@@ -827,7 +827,6 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         if let Some(gpu_ctx) = self.models.gpu_ctx.as_ref() {
             // Same keys as a successful fit, all NaN, so consumers see one schema.
             let nan_set_doc = {
-                // let mut d = doc! { "villar_fit.reduced_chi2": f64::NAN };
                 let mut d = doc! {
                     "villar_fit.reduced_chi2": f64::NAN,
                     "villar_fit.peak_flux": f64::NAN,
@@ -882,20 +881,13 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                     gpu_ctx.batch_pso_multi_seed(&batch, &source_refs, &pso_config)
                 }) {
                     Ok(results) => {
-                        for (result, candid) in results.iter().zip(candids) {
-                            // let mut set_doc = doc! {
-                            //     "villar_fit.reduced_chi2": result.reduced_chi2,
-                            // };
-                            // peak_flux is the normalisation scale: A and
-                            // extra_sigma are in units of it, and it is not
-                            // otherwise recoverable without replaying the
-                            // preprocessing over ZTF_alerts_aux.
+                        for (result, candid) in results.into_iter().zip(candids) {
                             let mut set_doc = doc! {
                                 "villar_fit.reduced_chi2": result.reduced_chi2,
                                 "villar_fit.peak_flux": result.peak_flux,
                             };
-                            for (key, val) in &result.params_unnorm.to_named_map() {
-                                set_doc.insert(format!("villar_fit.{}", key), *val);
+                            for (key, val) in result.params_unnorm.to_named_map() {
+                                set_doc.insert(format!("villar_fit.{}", key), val);
                             }
                             villar_updates.push(build_update(candid, set_doc));
                         }
