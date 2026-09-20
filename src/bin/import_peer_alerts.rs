@@ -1,3 +1,5 @@
+#![recursion_limit = "512"]
+
 use boom::{
     alert::{
         AlertWorker, ProcessAlertStatus, ZtfAlertInput, ZtfAlertWorker, ZtfCandidate,
