@@ -9,7 +9,7 @@ use crate::utils::moc::{
     parse_3d_skymap_bytes, select_covering_depth_bounded, Cone, CredibleVolumeIndex, HpxMoc,
     LIGO3dskymap, Skymap3dError,
 };
-use crate::utils::spatial::get_f64_from_doc;
+use crate::utils::skymap_search::extract_host_redshifts;
 use actix_web::{get, post, web, HttpResponse};
 use base64::prelude::*;
 use futures::TryStreamExt;
@@ -581,99 +581,6 @@ impl SkymapSearchMode {
             SkymapSearchMode::Skymap3d { moc_2d, .. } => moc_2d,
         }
     }
-}
-
-/// Host-galaxy redshifts from an alert's `cross_matches`, best-first and
-/// deduplicated by 3-arcsec proximity so one galaxy isn't counted per catalog.
-///
-/// Priority: 0 = DESI spec (zwarn=0), 1 = NED SPEC, 2 = DESI spec (zwarn!=0)
-/// and LSDR10 spec, 3 = NED PHOT, 4 = LSDR10 photo-z.
-fn extract_host_redshifts(cross_matches: Option<&Document>) -> Vec<f64> {
-    /// `priority` ranks a row (lower = better) or returns None to skip it.
-    fn extract_catalog_zs(
-        cross_matches: Option<&Document>,
-        catalog: &str,
-        z_field: &str,
-        priority: impl Fn(&Document) -> Option<u8>,
-        ranked: &mut Vec<(u8, f64, f64, f64)>,
-    ) {
-        let Some(arr) = cross_matches.and_then(|cm| cm.get_array(catalog).ok()) else {
-            return;
-        };
-        for v in arr {
-            let Some(m) = v.as_document() else { continue };
-            let Some(p) = priority(m) else { continue };
-            // Document::get_f64 rejects the Int32 these catalogs sometimes store.
-            let Some(z) = get_f64_from_doc(m, z_field).filter(|&z| z > 0.0) else {
-                continue;
-            };
-            let Some(ra) = get_f64_from_doc(m, "ra") else {
-                continue;
-            };
-            let Some(dec) = get_f64_from_doc(m, "dec") else {
-                continue;
-            };
-            ranked.push((p, ra, dec, z));
-        }
-    }
-
-    let mut ranked: Vec<(u8, f64, f64, f64)> = Vec::new(); // (priority, ra, dec, z)
-
-    extract_catalog_zs(
-        cross_matches,
-        "DESI_DR1",
-        "z",
-        |m| {
-            if m.get_str("spectype").map(|s| s == "STAR").unwrap_or(false) {
-                return None;
-            }
-            Some(if get_f64_from_doc(m, "zwarn").unwrap_or(1.0) == 0.0 {
-                0
-            } else {
-                2
-            })
-        },
-        &mut ranked,
-    );
-    extract_catalog_zs(
-        cross_matches,
-        "NED",
-        "z",
-        |m| {
-            Some(
-                if m.get_str("z_tech").map(|s| s == "SPEC").unwrap_or(false) {
-                    1
-                } else {
-                    3
-                },
-            )
-        },
-        &mut ranked,
-    );
-    // A Legacy row carrying both is deduplicated below, keeping the spectroscopic one.
-    extract_catalog_zs(cross_matches, "LSDR10", "z_spec", |_| Some(2), &mut ranked);
-    extract_catalog_zs(
-        cross_matches,
-        "LSDR10",
-        "z_phot_median",
-        |_| Some(4),
-        &mut ranked,
-    );
-
-    ranked.sort_by_key(|&(p, _, _, _)| p);
-    const DEDUP_ARCSEC: f64 = 3.0;
-    let mut kept: Vec<(f64, f64, f64)> = Vec::new(); // (ra, dec, z)
-    for (_, ra, dec, z) in ranked {
-        let is_dup = kept.iter().any(|&(kra, kdec, _)| {
-            let dra = (ra - kra) * dec.to_radians().cos();
-            let ddec = dec - kdec;
-            (dra * dra + ddec * ddec).sqrt() * 3600.0 < DEDUP_ARCSEC
-        });
-        if !is_dup {
-            kept.push((ra, dec, z));
-        }
-    }
-    kept.into_iter().map(|(_, _, z)| z).collect()
 }
 
 /// The spatial `$or` is only a covering-cone pre-filter, so each alert is re-tested

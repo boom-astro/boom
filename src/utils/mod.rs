@@ -16,6 +16,7 @@ pub mod outburst;
 pub mod parser;
 pub mod phase_curve;
 pub mod retry;
+pub mod skymap_search;
 pub mod spatial;
 pub mod sso_geometry;
 pub mod testing;
