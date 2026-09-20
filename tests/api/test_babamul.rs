@@ -4821,4 +4821,75 @@ mod tests {
             .await
             .unwrap();
     }
+
+    /// Watchlists are ACL-gated, so the public collection stats endpoint never
+    /// lists them even when they are configured as crossmatch catalogs.
+    #[actix_rt::test]
+    async fn test_babamul_collection_stats_excludes_watchlists() {
+        load_dotenv();
+        let database: Database = get_test_db_api().await;
+        let mut config = AppConfig::from_test_config().unwrap();
+
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let watchlist_name = format!("watchlist_stats_{}", suffix);
+        let catalog_name = format!("catalog_stats_{}", suffix);
+        for name in [&watchlist_name, &catalog_name] {
+            database
+                .collection::<mongodb::bson::Document>(name)
+                .insert_one(doc! { "ra": 0.0, "dec": 0.0 })
+                .await
+                .unwrap();
+        }
+        let xmatch = |name: &str| {
+            boom::conf::CatalogXmatchConfig::new(
+                name,
+                2.0,
+                doc! { "_id": 1 },
+                false,
+                None,
+                None,
+                None,
+                None,
+                None,
+                vec![],
+            )
+        };
+        config.crossmatch.insert(
+            Survey::Ztf,
+            vec![xmatch(&watchlist_name), xmatch(&catalog_name)],
+        );
+
+        let app = test::init_service(
+            App::new().service(
+                web::scope("/babamul")
+                    .app_data(web::Data::new(database.clone()))
+                    .app_data(web::Data::new(config))
+                    .service(routes::babamul::stats::get_collection_stats),
+            ),
+        )
+        .await;
+
+        let req = test::TestRequest::get()
+            .uri("/babamul/stats/collections")
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let resp = read_json_response(resp).await;
+        let names = resp["data"]["collections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["name"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+        assert!(names.contains(&catalog_name));
+        assert!(!names.contains(&watchlist_name));
+
+        for name in [&watchlist_name, &catalog_name] {
+            database
+                .collection::<mongodb::bson::Document>(name)
+                .drop()
+                .await
+                .unwrap();
+        }
+    }
 }

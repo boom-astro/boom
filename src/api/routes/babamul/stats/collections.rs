@@ -1,5 +1,5 @@
 use super::STATS_COLLECTION;
-use crate::api::db::PROTECTED_COLLECTION_NAMES;
+use crate::api::catalogs::is_catalog_name_visible;
 use crate::api::models::response;
 use crate::conf::AppConfig;
 use actix_web::{get, web, HttpResponse};
@@ -58,8 +58,9 @@ pub struct CollectionStats {
 
 /// Get statistics for catalogs declared under `crossmatch` in the application config,
 /// and survey alert collections matching `ZTF_*` / `LSST_*`.
-/// Names matching `system.*` or any `PROTECTED_COLLECTION_NAMES` entry are
-/// always excluded.
+/// Names matching `system.*`, any `PROTECTED_COLLECTION_NAMES` entry, or the
+/// `watchlist_` prefix are always excluded: the endpoint is public and
+/// watchlists are gated by a per-user ACL.
 /// By default, returns just the list of collection names. Use `count=true`
 /// and/or `size=true` query parameters to include document counts and storage
 /// sizes. Results with counts/sizes are cached for 5 days; the cache is
@@ -95,19 +96,16 @@ pub async fn get_collection_stats(
             return response::internal_error(&format!("Error listing collections: {}", e));
         }
     };
-    let is_safe = |name: &str| {
-        !name.is_empty()
-            && !name.starts_with("system.")
-            && !PROTECTED_COLLECTION_NAMES.contains(&name)
-    };
+    // Public endpoint: watchlists are ACL-gated, so only anonymous-visible names.
+    let is_public = |name: &str| is_catalog_name_visible(name, None);
     let mut expected: HashSet<String> = config
         .crossmatch
         .values()
         .flat_map(|cats| cats.iter().map(|c| c.catalog.clone()))
-        .filter(|name| is_safe(name))
+        .filter(|name| is_public(name))
         .collect();
     for name in &collection_names {
-        if (name.starts_with("ZTF_") || name.starts_with("LSST_")) && is_safe(name) {
+        if (name.starts_with("ZTF_") || name.starts_with("LSST_")) && is_public(name) {
             expected.insert(name.clone());
         }
     }
