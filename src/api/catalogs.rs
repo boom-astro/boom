@@ -95,4 +95,14 @@ mod tests {
         let admin = user(true, &[]);
         assert!(is_catalog_name_visible("watchlist_foo", Some(&admin)));
     }
+
+    #[test]
+    fn test_protected_collections_are_never_visible() {
+        let admin = user(true, &[]);
+        for name in PROTECTED_COLLECTION_NAMES {
+            assert!(!is_safe_catalog_name(name), "{name} is not protected");
+            assert!(!is_catalog_name_visible(name, None));
+            assert!(!is_catalog_name_visible(name, Some(&admin)));
+        }
+    }
 }
