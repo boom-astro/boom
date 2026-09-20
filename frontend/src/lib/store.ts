@@ -58,7 +58,10 @@ export const useAppStore = create<AppState>()(
 // play so callers don't need a second fetch to read it.
 export async function ensureProfileLoaded(options?: { force?: boolean }): Promise<Profile> {
   const token = api.getTokenRecord()
-  if (!token) return null
+  if (!token) {
+    if (useAppStore.getState().profile) useAppStore.getState().clearProfile()
+    return null
+  }
   const state = useAppStore.getState()
   if (
     !options?.force &&
