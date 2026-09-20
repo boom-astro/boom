@@ -10,6 +10,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use utoipa::ToSchema;
 
+/// Surveys whose alert collections are reported, and the collections each one owns.
+const ALERT_SURVEYS: [&str; 2] = ["ZTF", "LSST"];
+const ALERT_COLLECTION_SUFFIXES: [&str; 3] = ["alerts", "alerts_aux", "alerts_cutouts"];
+
 pub(super) const COLLECTION_STATS_CACHE_KEY: &str = "collection_stats";
 /// Cache collection stats for 5 days
 const COLLECTION_STATS_CACHE_SECS: f64 = 5.0 * 24.0 * 3600.0;
@@ -57,7 +61,7 @@ pub struct CollectionStats {
 }
 
 /// Get statistics for catalogs declared under `crossmatch` in the application config,
-/// and survey alert collections matching `ZTF_*` / `LSST_*`.
+/// and for the ZTF and LSST alert collections named in `ALERT_COLLECTION_SUFFIXES`.
 /// Names matching `system.*`, any `PROTECTED_COLLECTION_NAMES` entry, or the
 /// `watchlist_` prefix are always excluded: the endpoint is public and
 /// watchlists are gated by a per-user ACL.
@@ -88,8 +92,6 @@ pub async fn get_collection_stats(
     let include_size = query.size.unwrap_or(false);
     let now_ts = Utc::now().timestamp() as f64;
 
-    // Build the set of collections to expose:
-    // configured crossmatch catalogs + survey alert collections (`ZTF_*` / `LSST_*`)
     let collection_names = match db.list_collection_names().await {
         Ok(c) => c,
         Err(e) => {
@@ -104,8 +106,17 @@ pub async fn get_collection_stats(
         .flat_map(|cats| cats.iter().map(|c| c.catalog.clone()))
         .filter(|name| is_public(name))
         .collect();
+    // Named, not prefix-matched, so a leftover dump cannot list itself here.
+    let alert_collections: HashSet<String> = ALERT_SURVEYS
+        .iter()
+        .flat_map(|survey| {
+            ALERT_COLLECTION_SUFFIXES
+                .iter()
+                .map(move |suffix| format!("{}_{}", survey, suffix))
+        })
+        .collect();
     for name in &collection_names {
-        if (name.starts_with("ZTF_") || name.starts_with("LSST_")) && is_public(name) {
+        if alert_collections.contains(name) && is_public(name) {
             expected.insert(name.clone());
         }
     }

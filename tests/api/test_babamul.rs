@@ -4822,10 +4822,11 @@ mod tests {
             .unwrap();
     }
 
-    /// Watchlists are ACL-gated, so the public collection stats endpoint never
-    /// lists them even when they are configured as crossmatch catalogs.
+    /// The public collection stats endpoint lists only what it is meant to: no
+    /// watchlist, even configured as a crossmatch catalog, and no survey
+    /// collection outside the named alert ones.
     #[actix_rt::test]
-    async fn test_babamul_collection_stats_excludes_watchlists() {
+    async fn test_babamul_collection_stats_lists_only_public_collections() {
         load_dotenv();
         let database: Database = get_test_db_api().await;
         let mut config = AppConfig::from_test_config().unwrap();
@@ -4833,7 +4834,8 @@ mod tests {
         let suffix = uuid::Uuid::new_v4().simple().to_string();
         let watchlist_name = format!("watchlist_stats_{}", suffix);
         let catalog_name = format!("catalog_stats_{}", suffix);
-        for name in [&watchlist_name, &catalog_name] {
+        let scratch_name = format!("ZTF_scratch_{}", suffix);
+        for name in [&watchlist_name, &catalog_name, &scratch_name] {
             database
                 .collection::<mongodb::bson::Document>(name)
                 .insert_one(doc! { "ra": 0.0, "dec": 0.0 })
@@ -4883,8 +4885,9 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(names.contains(&catalog_name));
         assert!(!names.contains(&watchlist_name));
+        assert!(!names.contains(&scratch_name));
 
-        for name in [&watchlist_name, &catalog_name] {
+        for name in [&watchlist_name, &catalog_name, &scratch_name] {
             database
                 .collection::<mongodb::bson::Document>(name)
                 .drop()
