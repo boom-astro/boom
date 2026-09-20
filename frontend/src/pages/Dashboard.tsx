@@ -285,6 +285,14 @@ export default function Dashboard() {
     return {total, nights, avg: nights ? Math.round(total / nights) : 0, peak};
   }, [visibleData]);
 
+  const catalogs = useMemo(() =>
+      collections.filter((c) => !isAlertCollection(c.name)),
+    [collections]);
+
+  const alertCollections = useMemo(() =>
+      collections.filter((c) => isAlertCollection(c.name)),
+    [collections]);
+
   async function refreshCaches() {
     setRefreshing(true);
     const from = monthsBefore(endDate, MAX_REFRESH_MONTHS);
@@ -535,15 +543,15 @@ export default function Dashboard() {
 
       <CollectionsCard
         title="Catalogs"
-        description={`${collections.length} catalogs available`}
-        collections={collections.filter((c) => !isAlertCollection(c.name))}
+        description={`${catalogs.length} catalogs available`}
+        collections={catalogs}
         nameClassName="font-mono text-sm"
       />
 
       <CollectionsCard
         title="Alert Collections"
         description="ZTF and LSST collections"
-        collections={collections.filter((c) => isAlertCollection(c.name))}
+        collections={alertCollections}
         formatName={alertCollectionLabel}
       />
     </div>
