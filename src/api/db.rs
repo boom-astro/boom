@@ -1,4 +1,5 @@
 // Database related functionality
+use crate::api::routes::babamul::oauth::{OAUTH_STATES_COLLECTION, PENDING_IDENTITIES_COLLECTION};
 use crate::api::routes::babamul::stats::STATS_COLLECTION;
 use crate::api::routes::users::User;
 use crate::conf::{AppConfig, AuthConfig, BoomConfigError};
@@ -7,9 +8,20 @@ use mongodb::bson::doc;
 use mongodb::Database;
 
 /// Protected names for operational data collections, which should not be used
-/// for analytical data catalogs
-pub const PROTECTED_COLLECTION_NAMES: [&str; 4] =
-    ["filters", "babamul_users", "users", STATS_COLLECTION];
+/// for analytical data catalogs, and which the query routes must never expose.
+///
+/// The two OAuth collections matter most: a pending authorization holds the
+/// `state` and the PKCE verifier of a sign-in still in flight, which is enough
+/// to finish somebody else's login, and a pending identity holds the email and
+/// provider subject of an account being created.
+pub const PROTECTED_COLLECTION_NAMES: [&str; 6] = [
+    "filters",
+    "babamul_users",
+    "users",
+    STATS_COLLECTION,
+    OAUTH_STATES_COLLECTION,
+    PENDING_IDENTITIES_COLLECTION,
+];
 
 async fn init_api_admin_user(
     auth_config: &AuthConfig,
