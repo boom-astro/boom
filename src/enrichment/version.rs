@@ -143,6 +143,11 @@ pub const DERIVATIONS: &[(&str, u32)] = &[
     ("crossmatch_flags", 1),
     // detection_history: the per-object detection summary.
     ("detection_history", 1),
+    // hosted: whether a host galaxy was associated, read off the aux record's
+    // host_galaxy, which the DLR scoring writes. Bump it when those scoring
+    // parameters change: the association is rewritten in place, so a stale
+    // `hosted` looks exactly like a current one.
+    ("host_association", 1),
 ];
 
 /// A model as recorded on a set.

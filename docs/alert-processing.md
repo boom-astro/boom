@@ -148,6 +148,7 @@ the matching version in `DERIVATIONS`.** The components are deliberately coarse:
 | `sso` | `properties.sso`, and the activity metrics derived from it |
 | `crossmatch_flags` | `rock`, `star`, `near_brightstar`, `stationary` |
 | `detection_history` | `properties.detection_history` |
+| `host_association` | `properties.hosted`, from the `host_galaxy` the DLR scoring writes |
 
 Erring toward bumping costs a reprocessing run. Erring the other way leaves
 values that look current and are not — which is the failure this exists to
