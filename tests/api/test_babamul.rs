@@ -4849,19 +4849,11 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let xmatch = |name: &str| {
-            boom::conf::CatalogXmatchConfig::new(
-                name,
-                2.0,
-                doc! { "_id": 1 },
-                false,
-                None,
-                None,
-                None,
-                None,
-                None,
-                vec![],
-            )
+        let xmatch = |name: &str| boom::conf::CatalogXmatchConfig {
+            catalog: name.to_string(),
+            radius: boom::conf::arcsec_to_radians(2.0),
+            projection: doc! { "_id": 1 },
+            ..Default::default()
         };
         config.crossmatch.insert(
             Survey::Ztf,
