@@ -129,6 +129,7 @@ pub struct ApiDoc;
         routes::babamul::stats::collections::get_collection_stats,
         routes::babamul::stats::kafka::get_kafka_stats,
         routes::babamul::stats::nightly::get_nightly_stats,
+        routes::babamul::stats::refresh::post_stats_refresh,
         routes::babamul::surveys::alerts::skymap_search_alerts,
     ),
     components(schemas(

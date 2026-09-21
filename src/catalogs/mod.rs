@@ -1088,19 +1088,11 @@ mod crossmatch_validation_tests {
     fn crossmatch(names: &[&str]) -> HashMap<Survey, Vec<CatalogXmatchConfig>> {
         let entries = names
             .iter()
-            .map(|name| {
-                CatalogXmatchConfig::new(
-                    name,
-                    2.0,
-                    mongodb::bson::doc! {},
-                    false,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    Vec::new(),
-                )
+            .map(|name| CatalogXmatchConfig {
+                catalog: name.to_string(),
+                radius: crate::conf::arcsec_to_radians(2.0),
+                projection: mongodb::bson::doc! {},
+                ..Default::default()
             })
             .collect();
         HashMap::from([(Survey::Ztf, entries)])
