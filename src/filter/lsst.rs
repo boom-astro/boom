@@ -590,8 +590,6 @@ impl FilterWorker for LsstFilterWorker {
 mod host_galaxy_tests {
     use super::*;
 
-    /// `host_galaxy` lives on the aux document, so without the lookup and the
-    /// addFields a filter reading it silently matches nothing.
     #[tokio::test]
     async fn test_a_filter_reading_host_galaxy_receives_it() {
         let permissions = HashMap::from([(Survey::Lsst, vec![1])]);
@@ -613,7 +611,6 @@ mod host_galaxy_tests {
         );
     }
 
-    /// And a filter that does not ask for it is not made to pay for the lookup.
     #[tokio::test]
     async fn test_a_filter_ignoring_host_galaxy_gets_no_lookup() {
         let permissions = HashMap::from([(Survey::Lsst, vec![1])]);

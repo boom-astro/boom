@@ -106,8 +106,7 @@ pub struct WinterAlertForEnrichment {
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
 pub struct WinterAlertProperties {
     pub stationary: bool,
-    /// Absent means never evaluated for a host, which is not the same as
-    /// evaluated and hostless.
+    /// Absent means never evaluated for a host, not evaluated and hostless.
     #[serde(default)]
     pub hosted: Option<bool>,
     pub photstats: PerBandProperties,
@@ -246,11 +245,9 @@ impl WinterEnrichmentWorker {
             EPISODE_GAP_DAYS,
         );
 
-        let hosted = alert.host_galaxy.as_ref().map(|hg| hg.best_host.is_some());
-
         Ok(WinterAlertProperties {
             stationary,
-            hosted,
+            hosted: alert.host_galaxy.as_ref().map(|h| h.best_host.is_some()),
             photstats,
             detection_history: Some(detection_history),
             episode_history: Some(episode_history),

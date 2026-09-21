@@ -244,8 +244,7 @@ pub struct LsstAlertProperties {
     pub stationary: bool,
     pub star: Option<bool>,
     pub near_brightstar: Option<bool>,
-    /// Absent means never evaluated for a host, which is not the same as
-    /// evaluated and hostless.
+    /// Absent means never evaluated for a host, not evaluated and hostless.
     #[serde(default)]
     pub hosted: Option<bool>,
     pub photstats: PerBandProperties,
@@ -553,11 +552,9 @@ impl LsstEnrichmentWorker {
             EPISODE_GAP_DAYS,
         );
 
-        let hosted = alert.host_galaxy.as_ref().map(|hg| hg.best_host.is_some());
-
         Ok(LsstAlertProperties {
             rock: is_rock,
-            hosted,
+            hosted: alert.host_galaxy.as_ref().map(|h| h.best_host.is_some()),
             sso: Some(sso),
             activity: Some(activity),
             star: is_star,
