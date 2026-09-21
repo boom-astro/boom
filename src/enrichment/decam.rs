@@ -3,6 +3,7 @@ use crate::conf::AppConfig;
 use crate::enrichment::{fetch_alerts, EnrichmentWorker, EnrichmentWorkerError};
 use crate::utils::db::{fetch_timeseries_op, mongify};
 use crate::utils::enums::Survey;
+use crate::utils::host::HostGalaxyAssociation;
 use crate::utils::lightcurves::{
     analyze_photometry, prepare_photometry, summarise_detections, Band, DetectionHistory,
     EpisodeHistory, PerBandProperties, PhotometryMag, EPISODE_GAP_DAYS,
@@ -52,7 +53,8 @@ pub fn create_decam_alert_pipeline() -> Vec<Document> {
                             3.0
                         ]
                     }]),
-                )
+                ),
+                "host_galaxy": {"$arrayElemAt": ["$aux.host_galaxy", 0]},
             }
         },
         doc! {
@@ -69,6 +71,7 @@ pub fn create_decam_alert_pipeline() -> Vec<Document> {
                 "fp_hists.sigmagap": 1,
                 "fp_hists.band": 1,
                 "fp_hists.snr": 1,
+                "host_galaxy": 1,
             }
         },
     ]
@@ -114,6 +117,8 @@ pub struct DecamAlertForEnrichment {
     // Signed SNR is only needed here: detection history counts detections.
     pub prv_candidates: Vec<DecamPhotometry>,
     pub fp_hists: Vec<PhotometryMag>,
+    #[serde(default)]
+    pub host_galaxy: Option<HostGalaxyAssociation>,
 }
 
 /// DECAM alert properties computed during enrichment
@@ -121,6 +126,10 @@ pub struct DecamAlertForEnrichment {
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
 pub struct DecamAlertProperties {
     pub stationary: bool,
+    /// Absent means never evaluated for a host, which is not the same as
+    /// evaluated and hostless.
+    #[serde(default)]
+    pub hosted: Option<bool>,
     pub photstats: PerBandProperties,
     /// Per-object detection-history summary for history-aware filters.
     /// `None` on alerts enriched before this field existed.
@@ -261,8 +270,11 @@ impl DecamEnrichmentWorker {
             EPISODE_GAP_DAYS,
         );
 
+        let hosted = alert.host_galaxy.as_ref().map(|hg| hg.best_host.is_some());
+
         Ok(DecamAlertProperties {
             stationary,
+            hosted,
             photstats,
             detection_history: Some(detection_history),
             episode_history: Some(episode_history),
