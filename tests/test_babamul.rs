@@ -293,6 +293,7 @@ async fn create_mock_enriched_lsst_alert_with_matches(
         prv_candidates: vec![prv_candidate],
         fp_hists: vec![],
         cross_matches: cross_matches.clone(),
+        host_galaxy: None,
         survey_matches: survey_matches.clone(),
     };
 
