@@ -235,23 +235,28 @@ curl -s -X POST localhost:4000/tasks -H "Authorization: Bearer $TOKEN" \
 
 **4. Run it against real data, from your branch.** This is the part that used to
 mean `scp` and a shell. On the deployment host, from your branch's checkout,
-rebuild and restart *only* the task worker:
+rebuild the API and the task worker and restart just those two:
 
 ```sh
-BOOM_GIT_SHA=$(git rev-parse HEAD) docker compose --profile prod build task-worker
-docker compose --profile prod up -d task-worker
+export BOOM_GIT_SHA=$(git rev-parse HEAD)
+docker compose --profile prod build api task-worker
+docker compose --profile prod up -d api task-worker
 ```
 
-Nothing else restarts: the API, consumers and schedulers keep running the
-deployed release, and your branch's worker picks up the next queued run. Submit
-it from the admin page or the API as above. `BOOM_GIT_SHA` is compiled into the
-binary, so the ledger entry names the commit your code came from without anyone
-writing it down. To run an image someone already built, set `BOOM_IMAGE` and
-`BOOM_PULL_POLICY=always` instead of building.
+Both of them, because the API validates `task_type` against its own registry
+when you submit: a worker that knows your task and an API that does not gets you
+a 400, not a run. Everything else — consumers, schedulers, enrichment workers —
+keeps running the deployed release, so the pipeline is untouched. The API
+restart costs a few seconds of downtime on the web app, which is the price of
+not needing a shell on the box.
 
-Put the worker back on the release with
-`docker compose --profile prod up -d --force-recreate task-worker` from a clean
-checkout.
+Then submit it from the admin page or the API as above. `BOOM_GIT_SHA` is
+compiled into the binaries, so the ledger entry names the commit your code came
+from without anyone writing it down. To run an image someone already built, set
+`BOOM_IMAGE` and `BOOM_PULL_POLICY=always` instead of building.
+
+Put both back on the release with `docker compose --profile prod up -d
+--force-recreate api task-worker` from a clean checkout.
 
 **What you get without asking**, and what the SSH habit could not give:
 
