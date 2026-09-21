@@ -193,9 +193,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: throughput-pr-body
-          # Which PR this belongs to is *not* carried here: the workflow that
-          # consumes this artifact is privileged, and on a fork PR everything in
-          # it is attacker-controlled. It resolves the PR from the event instead.
+          # No PR number here: the consumer is privileged, and a fork PR
+          # controls this artifact. It resolves the PR from its own event.
           path: |
             table.md
             baseline_link.txt

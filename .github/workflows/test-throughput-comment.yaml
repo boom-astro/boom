@@ -1,7 +1,7 @@
 name: Throughput test PR body
 
-# Writes the throughput results into a managed section at the bottom of the PR
-# body, replacing whatever the previous run left there.
+# Rewrites a managed section at the bottom of the PR body with the throughput
+# results.
 #
 # This is split out from test-throughput.yaml on purpose: for pull requests
 # opened from a fork, the GITHUB_TOKEN of the `pull_request` workflow is forced
@@ -16,9 +16,7 @@ on:
     types:
       - completed
 
-# Updating the body is a read-modify-write of one field, so two runs finishing
-# at once can clobber each other. One update at a time per branch; the older one
-# is dropped rather than canceled mid-PATCH.
+# The body update is a read-modify-write, so runs must not overlap.
 concurrency:
   group: >-
     ${{ github.workflow }}-${{ github.event.workflow_run.head_repository.full_name }}-${{
@@ -51,8 +49,7 @@ jobs:
         if: steps.download.outcome == 'success'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # From the event payload, which a fork cannot forge — unlike anything
-          # inside the artifact, which is written by the PR's own code.
+          # From the event payload: a fork controls the artifact, not this.
           HEAD_REPO: ${{ github.event.workflow_run.head_repository.full_name }}
           HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
         run: |
@@ -80,17 +77,14 @@ jobs:
 
           baseline_link=$(cat ./results/baseline_link.txt)
 
-          # Everything from this marker on belongs to the workflow: it is
-          # rewritten on every run, so edits below it do not survive.
+          # Everything below the marker is rewritten on every run.
           marker="<!-- Don't edit below this line: this section is managed by the GitHub Actions bot. -->"
 
           body=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '.body // ""')
-          # GitHub stores bodies with CRLF line endings; drop the CRs so the
-          # marker match and the trailing-blank-line trim below behave.
+          # Bodies come back CRLF; the match and trim below assume LF.
           body=${body//$'\r'/}
-          # Drop the previous run's section, if any.
           body=${body%%"$marker"*}
-          # Trim trailing blank lines so the separator below is the only gap.
+          # Trailing blank lines would double up the separator below.
           body=$(printf '%s' "$body" | sed -e :a -e '/^[[:space:]]*$/{$d;N;ba' -e '}')
 
           {
