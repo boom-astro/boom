@@ -120,6 +120,7 @@ later.
 | `migrate_snr` | Recompute `snr_psf`, `snr_ap` and ZTF `apFlux` across alerts and lightcurves. |
 | `reprocess_crossmatch` | Fill in or refresh crossmatches on a survey's `alerts_aux` records. |
 | `prepare_catalog` | Add spatial fields and a 2dsphere index to a hand-imported collection. |
+| `backfill_host_galaxy` | Score stored galaxy cross-matches and write `host_galaxy` on `alerts_aux`. |
 | `backfill_hpx` | Write `coordinates.hpx` onto alerts that predate the field, so MOC region queries can find them. |
 | `repair_photometry` | Rewrite `alerts_aux` timeseries arrays that are out of order, duplicated, or carry a non-numeric `jd`. Deletes the offending points — run with `dry_run` first. |
 | `enrich_reprocess` | Select alerts, queue them, and re-run enrichment over them. See [alert-processing.md](./alert-processing.md#re-enriching-alerts-after-a-change). |

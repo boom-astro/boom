@@ -16,6 +16,7 @@
 //! bodies are therefore written to be **resumable**: re-running one continues
 //! rather than repeating.
 
+pub mod backfill_host_galaxy;
 pub mod backfill_hpx;
 pub mod batch;
 pub mod catalog_ingest;
@@ -191,6 +192,19 @@ pub const TASKS: &[TaskSpec] = &[
         params_schema: || schema_of::<prepare_catalog::PrepareCatalogParams>(),
     },
     TaskSpec {
+        id: backfill_host_galaxy::TASK_TYPE,
+        title: "Backfill host galaxy associations",
+        description: "Score each alerts_aux record's galaxy cross-matches and write \
+                      host_galaxy. Reads the matches already stored, so run \
+                      reprocess_crossmatch over the galaxy catalogs first if they were \
+                      added recently.",
+        // Association is a pure function of the stored cross-matches, so a
+        // resumed run rewrites the same values.
+        idempotent: true,
+        destructive: false,
+        params_schema: || schema_of::<backfill_host_galaxy::BackfillHostGalaxyParams>(),
+    },
+    TaskSpec {
         id: backfill_hpx::TASK_TYPE,
         title: "Backfill HEALPix indexes on existing alerts",
         description: "Write coordinates.hpx onto alerts and alerts_aux documents written \
@@ -344,6 +358,12 @@ pub fn validate_params(task_type: &str, params: &serde_json::Value) -> Result<()
                     .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
             parsed.validate_params().map_err(TaskError::InvalidParams)
         }
+        backfill_host_galaxy::TASK_TYPE => {
+            let parsed: backfill_host_galaxy::BackfillHostGalaxyParams =
+                serde_json::from_value(params.clone())
+                    .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            parsed.validate_params().map_err(TaskError::InvalidParams)
+        }
         backfill_hpx::TASK_TYPE => {
             let parsed: backfill_hpx::BackfillHpxParams = serde_json::from_value(params.clone())
                 .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
@@ -433,6 +453,15 @@ pub fn single_flight_key(
                 .map(|survey| doc! { "survey": survey })
                 .unwrap_or_default(),
         ),
+        // Keyed by survey: two runs over the same aux collection would rescore
+        // and rewrite the same records.
+        backfill_host_galaxy::TASK_TYPE => Some(
+            params
+                .get("survey")
+                .and_then(|v| v.as_str())
+                .map(|survey| doc! { "survey": survey })
+                .unwrap_or_default(),
+        ),
         // One per deployment: an all-surveys run and a single-survey run would
         // walk the same collections, and params cannot express that overlap.
         backfill_hpx::TASK_TYPE => Some(doc! {}),
@@ -473,6 +502,11 @@ pub async fn dispatch(
             let params = copy_cutouts::CopyCutoutsParams::deserialize(params)
                 .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
             copy_cutouts::run(ctx, params).await
+        }
+        backfill_host_galaxy::TASK_TYPE => {
+            let params = backfill_host_galaxy::BackfillHostGalaxyParams::deserialize(params)
+                .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            backfill_host_galaxy::run(ctx, params).await
         }
         backfill_hpx::TASK_TYPE => {
             let params = backfill_hpx::BackfillHpxParams::deserialize(params)
