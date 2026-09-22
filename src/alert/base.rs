@@ -25,7 +25,7 @@ use std::{
     collections::HashMap, fmt::Debug, future::Future, io::Read, sync::LazyLock, time::Instant,
 };
 
-use apache_avro::{from_avro_datum, from_value, Reader, Schema};
+use apache_avro::{from_avro_datum, from_value, Schema};
 use futures::future::join_all;
 use mongodb::{
     bson::{doc, Document},
@@ -119,14 +119,25 @@ fn decode_long<R: Read>(reader: &mut R) -> Result<i64, SchemaRegistryError> {
     Ok(zag_i64(reader)?)
 }
 
+/// Read a length-prefixed byte array, returning its range in the underlying slice.
 #[instrument(skip_all, err)]
-pub fn get_schema_and_startidx(avro_bytes: &[u8]) -> Result<(Schema, usize), SchemaRegistryError> {
-    // First, we extract the schema from the avro bytes
-    let cursor = std::io::Cursor::new(avro_bytes);
-    let reader = Reader::new(cursor)?;
-    let schema = reader.writer_schema();
+fn read_byte_range(
+    cursor: &mut std::io::Cursor<&[u8]>,
+) -> Result<std::ops::Range<usize>, SchemaRegistryError> {
+    let length =
+        usize::try_from(decode_long(cursor)?).map_err(|_| SchemaRegistryError::MalformedHeader)?;
+    let start = cursor.position() as usize;
+    let end = start
+        .checked_add(length)
+        .filter(|end| *end <= cursor.get_ref().len())
+        .ok_or(SchemaRegistryError::MalformedHeader)?;
+    cursor.set_position(end as u64);
+    Ok(start..end)
+}
 
-    // Then, we look for the index of the start of the data
+/// Read the avro container header, returning the writer schema as json and the index the data starts at.
+#[instrument(skip_all, err)]
+pub fn get_schema_and_startidx(avro_bytes: &[u8]) -> Result<(&str, usize), SchemaRegistryError> {
     // this is based on the Apache Avro specification 1.3.2
     // (https://avro.apache.org/docs/1.3.2/spec.html#Object+Container+Files)
     let mut cursor = std::io::Cursor::new(avro_bytes);
@@ -138,9 +149,27 @@ pub fn get_schema_and_startidx(avro_bytes: &[u8]) -> Result<(Schema, usize), Sch
         return Err(SchemaRegistryError::MagicBytesError);
     }
 
-    // Then there is the file metadata, including the schema
-    let meta_schema = Schema::map(Schema::Bytes);
-    from_avro_datum(&meta_schema, &mut cursor, None)?;
+    // Then there is the file metadata, a map of byte arrays holding the schema
+    let mut schema = None;
+    loop {
+        let mut nb_entries = decode_long(&mut cursor)?;
+        if nb_entries == 0 {
+            break;
+        }
+        // a negative entry count is followed by the size of the block in bytes
+        if nb_entries < 0 {
+            nb_entries = -nb_entries;
+            decode_long(&mut cursor)?;
+        }
+        for _ in 0..nb_entries {
+            let key = read_byte_range(&mut cursor)?;
+            let value = read_byte_range(&mut cursor)?;
+            if &avro_bytes[key] == b"avro.schema" {
+                schema = Some(value);
+            }
+        }
+    }
+    let schema = schema.ok_or(SchemaRegistryError::MalformedHeader)?;
 
     // Then the 16-byte, randomly-generated sync marker for this file.
     let mut buf = [0; 16];
@@ -153,12 +182,15 @@ pub fn get_schema_and_startidx(avro_bytes: &[u8]) -> Result<(Schema, usize), Sch
     if nb_records != 1 {
         return Err(SchemaRegistryError::InvalidRecordCount(nb_records as usize));
     }
-    let _ = decode_long(&mut cursor)?;
+    decode_long(&mut cursor)?;
 
     // we now have the start index of the data
     let start_idx = cursor.position();
 
-    Ok((schema.to_owned(), start_idx as usize))
+    Ok((
+        std::str::from_utf8(&avro_bytes[schema])?,
+        start_idx as usize,
+    ))
 }
 
 pub fn deserialize_mjd<'de, D>(deserializer: D) -> Result<f64, D::Error>
@@ -196,6 +228,10 @@ pub enum SchemaRegistryError {
     InvalidResponse,
     #[error("could not find avro magic bytes")]
     MagicBytesError,
+    #[error("malformed avro header")]
+    MalformedHeader,
+    #[error("invalid utf-8 string")]
+    Utf8(#[from] std::str::Utf8Error),
     #[error("incorrect number of records in the avro file")]
     InvalidRecordCount(usize),
     #[error("integer overflow")]
@@ -210,8 +246,6 @@ pub enum SchemaRegistryError {
 pub enum AlertError {
     #[error("error from avro")]
     Avro(#[from] apache_avro::Error),
-    #[error("no records in avro data")]
-    AvroNoRecords,
     #[error("value access error from bson")]
     BsonValueAccess(#[from] mongodb::bson::document::ValueAccessError),
     #[error("error from mongodb")]
@@ -570,9 +604,10 @@ impl SchemaRegistry {
     }
 }
 
+#[derive(Default)]
 pub struct SchemaCache {
     cached_schema: Option<Schema>,
-    cached_start_idx: Option<usize>,
+    cached_schema_json: Option<String>,
 }
 
 impl SchemaCache {
@@ -581,76 +616,24 @@ impl SchemaCache {
         &mut self,
         avro_bytes: &[u8],
     ) -> Result<T, AlertError> {
-        // if the schema is not cached, get it from the avro_bytes
-        let (schema_ref, start_idx) = match (self.cached_schema.as_ref(), self.cached_start_idx) {
-            (Some(schema), Some(start_idx)) => (schema, start_idx),
-            _ => {
-                let (schema, startidx) =
-                    get_schema_and_startidx(avro_bytes).inspect_err(as_error!())?;
-                self.cached_schema = Some(schema);
-                self.cached_start_idx = Some(startidx);
-                (self.cached_schema.as_ref().unwrap(), startidx)
-            }
-        };
+        // the header ends with the size of the data block, a variable-length integer whose
+        // width depends on the size of the alert, so the start index cannot be cached
+        let (schema_json, start_idx) =
+            get_schema_and_startidx(avro_bytes).inspect_err(as_error!())?;
 
-        let value = from_avro_datum(schema_ref, &mut &avro_bytes[start_idx..], None);
+        // parsing the schema is what costs, so it is only rebuilt when the schema changes
+        if self.cached_schema_json.as_deref() != Some(schema_json) {
+            self.cached_schema = Some(Schema::parse_str(schema_json).inspect_err(as_error!())?);
+            self.cached_schema_json = Some(schema_json.to_string());
+        }
+        let schema = self.cached_schema.as_ref().unwrap();
 
-        // if value is an error, try recomputing the schema from the avro_bytes
-        // as it could be that the schema has changed
-        let value = match value {
-            Ok(value) => value,
-            Err(error) => {
-                log_error!(
-                    WARN,
-                    error,
-                    "Error deserializing avro message with cached schema"
-                );
-                let (schema, startidx) =
-                    get_schema_and_startidx(avro_bytes).inspect_err(as_error!())?;
-
-                // try deserializing again with the schemaless approach
-                // Reader::new expects the full Avro container (header included),
-                // not the raw datum bytes, so pass the whole slice here.
-                let reader = apache_avro::Reader::new(avro_bytes)?;
-
-                let value = reader
-                    .into_iter()
-                    .next()
-                    .ok_or_else(|| AlertError::AvroNoRecords)??;
-
-                self.cached_schema = Some(schema);
-                self.cached_start_idx = Some(startidx);
-
-                value
-            }
-        };
+        let value = from_avro_datum(schema, &mut &avro_bytes[start_idx..], None)
+            .inspect_err(as_error!())?;
 
         let alert: T = from_value::<T>(&value).inspect_err(as_error!())?;
 
         Ok(alert)
-    }
-}
-
-impl Default for SchemaCache {
-    fn default() -> Self {
-        SchemaCache {
-            cached_schema: None,
-            cached_start_idx: None,
-        }
-    }
-}
-
-#[cfg(test)]
-impl SchemaCache {
-    /// Overwrite the cached start index with an arbitrary value to simulate a
-    /// schema-cache corruption for testing the fallback path.
-    pub fn set_cached_start_idx(&mut self, idx: usize) {
-        self.cached_start_idx = Some(idx);
-    }
-
-    /// Return the currently cached start index (for assertions in tests).
-    pub fn get_cached_start_idx(&self) -> Option<usize> {
-        self.cached_start_idx
     }
 }
 
