@@ -515,7 +515,7 @@ fn run_thor(args: &Cli, detections: &[Detection], labels: &HashMap<i64, String>)
             if obs.len() < 3 {
                 return Some((c, None));
             }
-            let fit = fit_orbit(&obs, &seed, epoch, 20)?;
+            let fit = fit_orbit(&obs, &seed, epoch, 20, &boom::utils::sso_geometry::ZTF)?;
             (fit.rms_arcsec <= args.max_residual).then_some((c, Some(fit.rms_arcsec)))
         })
         .collect();
@@ -651,7 +651,17 @@ async fn run_identify(args: &Cli, detections: &[Detection], labels: &HashMap<i64
         .expect("failed to read MPC_orbits");
     let mut orbits: Vec<OrbitEntry> = Vec::new();
     let mut epochs: Vec<f64> = Vec::new();
-    while let Some(d) = cursor.try_next().await.expect("orbit cursor failed") {
+    // A read failure part-way through leaves a truncated catalogue, which would
+    // silently score as a lower recall rather than as a failure.
+    loop {
+        let d = match cursor.try_next().await {
+            Ok(Some(d)) => d,
+            Ok(None) => break,
+            Err(error) => {
+                error!(%error, "reading MPC_orbits failed after {} orbits", orbits.len());
+                return;
+            }
+        };
         let Ok(designation) = d.get_str("_id") else {
             continue;
         };
@@ -864,6 +874,7 @@ async fn main() {
             velocity_tol_au_per_day: args.velocity_tol,
             min_nights: args.min_nights,
             max_residual_arcsec: args.max_residual,
+            site: boom::utils::sso_geometry::ZTF,
         };
         let started = std::time::Instant::now();
         let tracks = link_tracklets(&tracklets, &detections, &link_cfg);

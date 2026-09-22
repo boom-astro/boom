@@ -7,7 +7,7 @@
 //! residual that says whether the track was real.
 
 use crate::utils::heliolinc::{propagate_position, radec_from_ecliptic, state_to_elements, State};
-use crate::utils::sso_geometry::{earth_position, OrbitalElements};
+use crate::utils::sso_geometry::{observer_position, OrbitalElements, Site};
 
 /// One astrometric position.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -43,8 +43,10 @@ const VEL_STEP_AU_PER_DAY: f64 = 1e-8;
 /// it, which at 2 au is about 17 minutes and so tens of arcseconds of motion.
 /// One correction leaves well under a milliarcsecond, since the geocentric
 /// distance barely changes over the light time itself.
-pub fn predict_radec(state: &State, epoch_jd: f64, jd: f64) -> Option<(f64, f64)> {
-    let earth = earth_position(jd);
+pub fn predict_radec(state: &State, epoch_jd: f64, jd: f64, site: &Site) -> Option<(f64, f64)> {
+    // From the observer, not the Earth's centre: an Earth radius is several
+    // arcseconds at these distances, which the residual gate is tighter than.
+    let earth = observer_position(jd, site);
     let mut tau = 0.0;
     let mut topo = [0.0; 3];
     for _ in 0..2 {
@@ -60,8 +62,8 @@ pub fn predict_radec(state: &State, epoch_jd: f64, jd: f64) -> Option<(f64, f64)
 }
 
 /// Residual in arcseconds, as (RA on a great circle, Dec).
-fn residual(state: &State, epoch_jd: f64, obs: &Observation) -> Option<(f64, f64)> {
-    let (ra, dec) = predict_radec(state, epoch_jd, obs.jd)?;
+fn residual(state: &State, epoch_jd: f64, obs: &Observation, site: &Site) -> Option<(f64, f64)> {
+    let (ra, dec) = predict_radec(state, epoch_jd, obs.jd, site)?;
     // Fold the RA difference so a wrap does not read as a huge residual.
     let dra =
         ((obs.ra - ra + 540.0).rem_euclid(360.0) - 180.0) * obs.dec.to_radians().cos() * 3600.0;
@@ -115,13 +117,18 @@ fn solve(mut a: Vec<Vec<f64>>, mut b: Vec<f64>) -> Option<Vec<f64>> {
 }
 
 /// Root-mean-square residual over the observations, arcseconds.
-pub fn rms_arcsec(state: &State, epoch_jd: f64, observations: &[Observation]) -> Option<f64> {
+pub fn rms_arcsec(
+    state: &State,
+    epoch_jd: f64,
+    observations: &[Observation],
+    site: &Site,
+) -> Option<f64> {
     if observations.is_empty() {
         return None;
     }
     let mut sq = 0.0;
     for obs in observations {
-        let (dra, ddec) = residual(state, epoch_jd, obs)?;
+        let (dra, ddec) = residual(state, epoch_jd, obs, site)?;
         sq += dra * dra + ddec * ddec;
     }
     Some((sq / observations.len() as f64).sqrt())
@@ -137,12 +144,13 @@ pub fn fit_orbit(
     initial: &State,
     epoch_jd: f64,
     max_iterations: usize,
+    site: &Site,
 ) -> Option<OrbitFit> {
     if observations.len() < 3 {
         return None;
     }
     let mut state = *initial;
-    let mut best = rms_arcsec(&state, epoch_jd, observations)?;
+    let mut best = rms_arcsec(&state, epoch_jd, observations, site)?;
     let mut lambda = 1e-3;
     let mut iterations = 0;
 
@@ -165,7 +173,7 @@ pub fn fit_orbit(
         let mut atb = vec![0.0; 6];
         let mut usable = true;
         'obs: for obs in observations {
-            let Some((r_ra, r_dec)) = residual(&state, epoch_jd, obs) else {
+            let Some((r_ra, r_dec)) = residual(&state, epoch_jd, obs, site) else {
                 usable = false;
                 break 'obs;
             };
@@ -174,9 +182,10 @@ pub fn fit_orbit(
             for (k, step) in steps.iter().enumerate() {
                 let up = perturb(&state, k, *step);
                 let down = perturb(&state, k, -*step);
-                let (Some((ra_up, dec_up)), Some((ra_down, dec_down))) =
-                    (residual(&up, epoch_jd, obs), residual(&down, epoch_jd, obs))
-                else {
+                let (Some((ra_up, dec_up)), Some((ra_down, dec_down))) = (
+                    residual(&up, epoch_jd, obs, site),
+                    residual(&down, epoch_jd, obs, site),
+                ) else {
                     usable = false;
                     break 'obs;
                 };
@@ -221,7 +230,7 @@ pub fn fit_orbit(
             candidate = perturb(&candidate, k, *d);
         }
 
-        match rms_arcsec(&candidate, epoch_jd, observations) {
+        match rms_arcsec(&candidate, epoch_jd, observations, site) {
             Some(trial) if trial < best => {
                 let improvement = best - trial;
                 state = candidate;
@@ -256,6 +265,7 @@ pub fn fit_orbit(
 mod tests {
     use super::*;
     use crate::utils::sso_geometry::heliocentric_position;
+    use crate::utils::sso_geometry::ZTF;
 
     fn ceres_like() -> OrbitalElements {
         OrbitalElements::elliptical(2460000.5, 2.7658, 0.0785, 10.588, 80.25, 73.6, 100.0)
@@ -282,7 +292,7 @@ mod tests {
         let state = truth_state(elements, epoch);
         jds.iter()
             .map(|&jd| {
-                let (ra, dec) = predict_radec(&state, epoch, jd).expect("ephemeris");
+                let (ra, dec) = predict_radec(&state, epoch, jd, &ZTF).expect("ephemeris");
                 Observation { jd, ra, dec }
             })
             .collect()
@@ -311,8 +321,8 @@ mod tests {
                 truth.vel[2] + 5e-5,
             ],
         };
-        let before = rms_arcsec(&start, EPOCH, &obs).expect("residual");
-        let fit = fit_orbit(&obs, &start, EPOCH, 60).expect("fit");
+        let before = rms_arcsec(&start, EPOCH, &obs, &ZTF).expect("residual");
+        let fit = fit_orbit(&obs, &start, EPOCH, 60, &ZTF).expect("fit");
         assert!(before > 100.0, "start should be far off, was {before}");
         assert!(
             fit.rms_arcsec < 0.1,
@@ -336,7 +346,7 @@ mod tests {
             pos: [truth.pos[0] + 0.005, truth.pos[1], truth.pos[2]],
             vel: truth.vel,
         };
-        let fit = fit_orbit(&obs, &start, EPOCH, 60).expect("fit");
+        let fit = fit_orbit(&obs, &start, EPOCH, 60, &ZTF).expect("fit");
         assert!(
             (fit.elements.a - el.a).abs() < 0.02,
             "a {} vs {}",
@@ -356,7 +366,7 @@ mod tests {
             pos: [truth.pos[0] + 0.005, truth.pos[1], truth.pos[2]],
             vel: truth.vel,
         };
-        let fit = fit_orbit(&obs, &start, EPOCH, 60).expect("fit");
+        let fit = fit_orbit(&obs, &start, EPOCH, 60, &ZTF).expect("fit");
         // Ten days of arc leaves the semimajor axis loose even when the
         // positions are reproduced, so a track this short is not an orbit.
         assert!(
@@ -374,7 +384,7 @@ mod tests {
     fn test_rejects_too_few_observations() {
         let el = ceres_like();
         let obs = observations(&el, EPOCH, &NIGHTS[..2]);
-        assert!(fit_orbit(&obs, &truth_state(&el, EPOCH), EPOCH, 20).is_none());
+        assert!(fit_orbit(&obs, &truth_state(&el, EPOCH), EPOCH, 20, &ZTF).is_none());
     }
 
     #[test]
@@ -382,7 +392,7 @@ mod tests {
         let el = ceres_like();
         let obs = observations(&el, EPOCH, &NIGHTS);
         let truth = truth_state(&el, EPOCH);
-        let fit = fit_orbit(&obs, &truth, EPOCH, 20).expect("fit");
+        let fit = fit_orbit(&obs, &truth, EPOCH, 20, &ZTF).expect("fit");
         assert!(fit.rms_arcsec < 1e-3, "rms {}", fit.rms_arcsec);
     }
 
@@ -392,7 +402,7 @@ mod tests {
         let mut obs = observations(&el, EPOCH, &NIGHTS);
         // Push one position a degree away: no orbit passes through them all.
         obs[3].dec += 1.0;
-        let fit = fit_orbit(&obs, &truth_state(&el, EPOCH), EPOCH, 60).expect("fit");
+        let fit = fit_orbit(&obs, &truth_state(&el, EPOCH), EPOCH, 60, &ZTF).expect("fit");
         assert!(
             fit.rms_arcsec > 100.0,
             "a bad arc should not fit, rms {}",

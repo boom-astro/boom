@@ -297,11 +297,11 @@ pub fn geometry_at(elements: &OrbitalElements, jd: f64) -> Geometry {
     }
 }
 
-fn dot(a: &[f64; 3], b: &[f64; 3]) -> f64 {
+pub(crate) fn dot(a: &[f64; 3], b: &[f64; 3]) -> f64 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
-fn norm(v: &[f64; 3]) -> f64 {
+pub(crate) fn norm(v: &[f64; 3]) -> f64 {
     dot(v, v).sqrt()
 }
 

@@ -11,7 +11,9 @@
 
 use crate::utils::linking::{night_of, Detection, Tracklet};
 use crate::utils::orbit_fit::{fit_orbit, rms_arcsec, Observation};
-use crate::utils::sso_geometry::{earth_position, heliocentric_position, OrbitalElements};
+use crate::utils::sso_geometry::{
+    dot, earth_position, heliocentric_position, norm, OrbitalElements, Site, ZTF,
+};
 use rayon::prelude::*;
 use std::collections::HashMap;
 
@@ -71,6 +73,9 @@ pub struct LinkConfig {
     /// Largest sky residual a fitted orbit may leave, arcseconds. Candidates
     /// that no orbit explains are rejected rather than ranked.
     pub max_residual_arcsec: f64,
+    /// Where the astrometry was taken from. An Earth radius is several
+    /// arcseconds at these distances, so the fit is not site-independent.
+    pub site: Site,
 }
 
 /// Largest radial velocity a bound object can have at `r_au`, au/day.
@@ -140,6 +145,7 @@ impl Default for LinkConfig {
             velocity_tol_au_per_day: 0.0004,
             min_nights: 2,
             max_residual_arcsec: 2.0,
+            site: ZTF,
         }
     }
 }
@@ -182,20 +188,12 @@ fn unit_vector_rate(t: &Tracklet) -> [f64; 3] {
     ]
 }
 
-fn dot(a: &[f64; 3], b: &[f64; 3]) -> f64 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-}
-
 fn cross(a: &[f64; 3], b: &[f64; 3]) -> [f64; 3] {
     [
         a[1] * b[2] - a[2] * b[1],
         a[2] * b[0] - a[0] * b[2],
         a[0] * b[1] - a[1] * b[0],
     ]
-}
-
-fn norm(a: &[f64; 3]) -> f64 {
-    dot(a, a).sqrt()
 }
 
 /// Earth's heliocentric velocity, au/day, by central difference.
@@ -608,15 +606,16 @@ fn score(
             .collect()
     };
 
-    track.residual_arcsec = match fit_orbit(&observations, &track.state, cfg.reference_jd, 20) {
-        Some(fit) => {
-            track.state = fit.state;
-            Some(fit.rms_arcsec)
-        }
-        // Too few positions to refine six parameters, so take the state as it
-        // stands rather than discarding a candidate for being short.
-        None => rms_arcsec(&track.state, cfg.reference_jd, &observations),
-    };
+    track.residual_arcsec =
+        match fit_orbit(&observations, &track.state, cfg.reference_jd, 20, &cfg.site) {
+            Some(fit) => {
+                track.state = fit.state;
+                Some(fit.rms_arcsec)
+            }
+            // Too few positions to refine six parameters, so take the state as it
+            // stands rather than discarding a candidate for being short.
+            None => rms_arcsec(&track.state, cfg.reference_jd, &observations, &cfg.site),
+        };
 }
 
 /// Link tracklets into tracks, sweeping every hypothesis in `cfg`.
@@ -891,6 +890,7 @@ mod tests {
             velocity_tol_au_per_day: 1.0,
             min_nights: 2,
             max_residual_arcsec: 2.0,
+            site: ZTF,
         };
 
         let started = Instant::now();
@@ -1061,6 +1061,7 @@ mod tests {
             velocity_tol_au_per_day: 0.01,
             min_nights: 2,
             max_residual_arcsec: 2.0,
+            site: ZTF,
         };
         let tracks = link_tracklets(&tracklets, &[], &cfg);
         assert!(!tracks.is_empty(), "no track recovered");
@@ -1107,6 +1108,7 @@ mod tests {
             velocity_tol_au_per_day: 0.01,
             min_nights: 2,
             max_residual_arcsec: 2.0,
+            site: ZTF,
         };
         let tracks = link_tracklets(&tracklets, &[], &cfg);
         assert_eq!(tracks.len(), 1, "one object should yield one track");

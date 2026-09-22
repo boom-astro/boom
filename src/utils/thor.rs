@@ -91,7 +91,9 @@ impl Default for Config {
             max_residual_rate_deg_per_day: 0.05,
             rate_steps: 21,
             cluster_radius_arcsec: 30.0,
-            min_detections: 3,
+            // Two, matching the tracklet finder: THOR exists for the objects
+            // with one detection a night, so three would exclude what it is for.
+            min_detections: 2,
             min_nights: 3,
             max_offset_deg: 2.0,
             max_rms_arcsec: 2.0,
