@@ -161,10 +161,26 @@ an `Upsert` RPC batched per enrichment batch.
 
 The worker **connects only** — it does not create the collection. Provision it
 once with `milvus_check --create-collection` before starting the workers, since
-several enrichment workers run in parallel and must not race to create it. If
-Milvus is enabled but unreachable at startup the worker fails fast; a failure
-during an individual upsert is logged and non-fatal (the alerts are already
-enriched and persisted in Mongo).
+several enrichment workers run in parallel and must not race to create it.
+
+### A Milvus outage never stops enrichment
+
+Milvus is an optional add-on and Mongo holds the enriched alerts, so nothing in
+the Milvus path is fatal. Every failure — failing to connect at startup, or a
+failed upsert — is logged and trips a circuit breaker in `MilvusSink`
+(`src/milvus/sink.rs`):
+
+- Uploads pause for a backoff that doubles per consecutive failure, from 30s up
+  to a 5 minute ceiling. Without this, each batch would pay a full
+  `milvus.timeout_seconds` (30s by default) for as long as the outage lasted.
+- The connection is dropped and redialled on the first attempt after the pause,
+  so recovery needs no worker restart. A success resets the backoff.
+- Embeddings produced while the breaker is open are simply dropped. They are
+  recomputed the next time an object is observed.
+
+The scheduler's one-time collection provisioning is logged rather than fatal for
+the same reason, and the API degrades to "embedding endpoints disabled" when it
+cannot reach Milvus at startup.
 
 ### The embedding is never written to Mongo
 

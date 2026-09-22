@@ -9,6 +9,7 @@ pub mod collection;
 pub mod insert;
 pub mod proto;
 pub mod search;
+pub mod sink;
 
 pub use client::{MilvusClient, MilvusError};
 pub use collection::{
@@ -16,3 +17,4 @@ pub use collection::{
 };
 pub use insert::EmbeddingRow;
 pub use search::SearchHit;
+pub use sink::MilvusSink;

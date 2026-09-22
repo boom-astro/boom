@@ -9,7 +9,7 @@ use crate::enrichment::{
     },
     EnrichmentWorker, EnrichmentWorkerError, LsstMatch, LsstPhotometry,
 };
-use crate::milvus::{EmbeddingRow, MilvusClient};
+use crate::milvus::{EmbeddingRow, MilvusSink};
 use crate::utils::cutouts::{AlertCutout, CutoutStorage};
 use crate::utils::db::mongify;
 use crate::utils::enums::Survey;
@@ -632,9 +632,10 @@ pub struct ZtfEnrichmentWorker {
     /// villar-pso `GpuContext` so that PSO and ONNX inference share a stream.
     models: Arc<SharedModels>,
     babamul: Option<Babamul>,
-    /// Connected Milvus client, present only when `milvus.enabled` is true.
-    /// Fusion embeddings are upserted here after classification.
-    milvus: Option<MilvusClient>,
+    /// Sink for fusion embeddings, upserted after classification. Inert when
+    /// `milvus.enabled` is false, and self-pausing while Milvus is unreachable
+    /// so an outage there never stalls enrichment.
+    milvus: MilvusSink,
     gpu_enabled: bool,
     /// Alerts per batch; also the fixed ONNX input shape. See [`EnrichmentWorkerConfig::batch_size`].
     batch_size: usize,
@@ -704,11 +705,11 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         // collection itself must already be provisioned (via `milvus_check
         // --create-collection`); the worker never creates it, so that the many
         // enrichment workers don't race to create the same collection.
-        let milvus = if config.milvus.enabled {
-            Some(MilvusClient::connect(&config.milvus).await?)
-        } else {
-            None
-        };
+        //
+        // A connection failure degrades rather than propagating: Milvus is an
+        // optional add-on and Mongo holds the enriched alerts, so an outage
+        // must not take the enrichment worker (and with it the pool slot) down.
+        let milvus = MilvusSink::connect_or_degrade(&config.milvus).await;
 
         Ok(ZtfEnrichmentWorker {
             input_queue,
@@ -866,7 +867,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             ));
             processed_alerts.push(format!("{},{}", item.programid, item.candid));
 
-            if self.milvus.is_some() {
+            if self.milvus.is_enabled() {
                 if let Some(embedding) = fusion_embedding {
                     embedding_rows.push(EmbeddingRow {
                         object_id: item.alert.object_id.clone(),
@@ -890,23 +891,9 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             self.client.bulk_write(updates).await?;
         }
 
-        // Writing fusion embeddings to Milvus
-        if let Some(milvus) = self.milvus.as_mut() {
-            if !embedding_rows.is_empty() {
-                match milvus.upsert_embeddings(&embedding_rows).await {
-                    Ok(count) => {
-                        debug!("upserted {} fusion embeddings to milvus", count);
-                    }
-                    Err(e) => {
-                        warn!(
-                            "failed to upsert {} fusion embeddings to milvus: {}",
-                            embedding_rows.len(),
-                            e
-                        );
-                    }
-                }
-            }
-        }
+        // Writing fusion embeddings to Milvus. Never fails the batch: the
+        // alerts are already persisted in Mongo by this point.
+        self.milvus.upsert(&embedding_rows).await;
 
         // Villar fitting needs SharedModels loaded on a GPU device.
         #[cfg(feature = "gpu")]

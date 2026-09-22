@@ -232,14 +232,30 @@ async fn run(
 
     // Create the Milvus collection once, up front, to avoid workers racing to
     // create it themselves. Safe to call if it already exists. ZTF-only.
+    //
+    // Logged rather than fatal: Milvus is an optional add-on, so a provisioning
+    // failure must not stop the scheduler from ingesting alerts. The enrichment
+    // workers pause their uploads and retry, so this recovers on its own once
+    // Milvus is reachable and the collection exists.
     if config.milvus.enabled && args.survey == Survey::Ztf {
-        let mut milvus = MilvusClient::connect(&config.milvus)
-            .await
-            .expect("could not connect to milvus to provision the embeddings collection");
-        milvus
-            .ensure_embedding_collection()
-            .await
-            .expect("could not provision the milvus embeddings collection");
+        match MilvusClient::connect(&config.milvus).await {
+            Ok(mut milvus) => {
+                if let Err(error) = milvus.ensure_embedding_collection().await {
+                    log_error!(
+                        WARN,
+                        error,
+                        "could not provision the milvus embeddings collection; \
+                         embedding uploads will be paused until it exists"
+                    );
+                }
+            }
+            Err(error) => log_error!(
+                WARN,
+                error,
+                "could not connect to milvus to provision the embeddings collection; \
+                 embedding uploads will be paused until it is reachable"
+            ),
+        }
     }
 
     warn_if_missing_crossmatches(&args.survey, &db, &config).await;
