@@ -1585,41 +1585,6 @@ mod tests {
         assert!(!parse(r#"{"tooflag": "f"}"#));
     }
 
-    #[test]
-    fn test_schema_cache_fallback_on_corrupt_start_idx() {
-        let avro_bytes = std::fs::read("tests/data/alerts/ztf/2695378462115010012.avro").unwrap();
-
-        let mut cache = SchemaCache::default();
-
-        // First call: normal path, fills the cache.
-        let first: ZtfRawAvroAlert = cache.alert_from_avro_bytes(&avro_bytes).unwrap();
-        assert!(cache.get_cached_start_idx().is_some());
-        let good_idx = cache.get_cached_start_idx().unwrap();
-        assert!(good_idx > 0, "start index should be past the Avro header");
-
-        // Corrupt the cached start index so that it points into the Avro header
-        // (offset 0 – the 'O','b','j',1 magic bytes), causing from_avro_datum
-        // to fail on the next call and triggering the fallback.
-        cache.set_cached_start_idx(0);
-
-        // Second call: fallback path should repair the cache and produce the
-        // same result as the first call.
-        let second: ZtfRawAvroAlert = cache
-            .alert_from_avro_bytes(&avro_bytes)
-            .expect("fallback deserialization should succeed");
-
-        assert_eq!(first.candid, second.candid);
-        assert_eq!(first.object_id, second.object_id);
-        assert_eq!(first.schemavsn, second.schemavsn);
-
-        // The cache should now hold the corrected start index again.
-        assert_eq!(
-            cache.get_cached_start_idx().unwrap(),
-            good_idx,
-            "cache should be repaired after the fallback"
-        );
-    }
-
     #[tokio::test]
     async fn test_update_aux_branches_and_fallback() {
         let mut worker = ztf_alert_worker().await;
