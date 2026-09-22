@@ -56,6 +56,7 @@ impl Modify for BabamulSecurityAddon {
         routes::users::post_user,
         routes::users::get_users,
         routes::users::delete_user,
+        routes::users::patch_watchlist_access,
         routes::auth::post_auth,
         routes::catalogs::get_catalogs,
         routes::catalogs::get_catalog_indexes,
@@ -99,7 +100,13 @@ pub struct ApiDoc;
         routes::babamul::post_babamul_auth,
         routes::babamul::post_babamul_forgot_password,
         routes::babamul::post_babamul_reset_password,
+        routes::babamul::oauth::get_oauth_providers,
+        routes::babamul::oauth::get_oauth_start,
+        routes::babamul::oauth::get_oauth_callback,
+        routes::babamul::oauth::post_oauth_complete,
+        routes::babamul::oauth::post_oauth_verify,
         routes::babamul::get_babamul_profile,
+        routes::babamul::patch_babamul_profile,
         routes::babamul::post_kafka_credentials,
         routes::babamul::get_kafka_credentials,
         routes::babamul::surveys::schemas::get_babamul_schema,
@@ -114,7 +121,11 @@ pub struct ApiDoc;
         routes::babamul::stats::collections::get_collection_stats,
         routes::babamul::stats::kafka::get_kafka_stats,
         routes::babamul::stats::nightly::get_nightly_stats,
+        routes::babamul::surveys::alerts::skymap_search_alerts,
     ),
+    components(schemas(
+        routes::babamul::surveys::alerts::LsstAlertSkymapSearchResult
+    )),
     security(
         ("babamul_jwt_token" = [])
     ),

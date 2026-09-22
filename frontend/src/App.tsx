@@ -14,6 +14,8 @@ const ApiDocs = lazy(() => import("@/pages/ApiDocs"));
 const KafkaDocs = lazy(() => import("@/pages/KafkaDocs"));
 const KafkaAccessGuide = lazy(() => import("@/pages/KafkaAccessGuide"));
 const Login = lazy(() => import("@/pages/Login"));
+const OAuthCallback = lazy(() => import("@/pages/OAuthCallback"));
+const OAuthComplete = lazy(() => import("@/pages/OAuthComplete"));
 const ObjectPage = lazy(() => import("@/pages/ObjectPage"));
 const SignupPage = lazy(() => import("@/pages/Signup"));
 const Landing = lazy(() => import("@/pages/Landing"));
@@ -98,6 +100,8 @@ function LayoutRoutes() {
                   <Route path="/" element={<Landing />} />
                   <Route path="/landing" element={<Landing />} />
                   <Route path="/login" element={<LoginPageWrapper />} />
+                  <Route path="/oauth/callback" element={<OAuthCallback />} />
+                  <Route path="/oauth/complete" element={<OAuthComplete />} />
                   <Route path="/forgot-password" element={<ForgotPassword />} />
                   <Route path="/reset-password" element={<ResetPassword />} />
                   {!PRERELEASE_MODE && <Route path="/signup" element={<SignupPage />} />}

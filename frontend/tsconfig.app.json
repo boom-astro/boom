@@ -23,7 +23,8 @@
     "noUncheckedSideEffectImports": true,
 
     // additional options
-    "baseUrl": ".",
+    // No `baseUrl`: it is deprecated as of TypeScript 6 and removed in 7.
+    // `paths` doesn't need it — entries are resolved relative to this file.
     "paths": {
       "@/*": [
         "./src/*"

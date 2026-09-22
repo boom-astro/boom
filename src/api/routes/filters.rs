@@ -1,9 +1,11 @@
 use crate::{
     alert::{
-        LsstAliases, LsstCandidate, LsstForcedPhot, ZtfAliases, ZtfCandidate, ZtfForcedPhot,
-        ZtfPrvCandidate,
+        DecamAliases, DecamCandidate, DecamForcedPhot, LsstAliases, LsstCandidate, LsstForcedPhot,
+        WinterAliases, WinterCandidate, WinterPrvCandidate, ZtfAliases, ZtfCandidate,
+        ZtfForcedPhot, ZtfPrvCandidate,
     },
     api::{
+        catalogs::{catalog_accessible, WATCHLIST_PREFIX},
         filters::{doc2json, SortOrder},
         models::response,
         routes::users::User,
@@ -19,6 +21,44 @@ use crate::{
     },
 };
 
+/// Validates that a watchlist binding on a filter is well-formed and authorized:
+/// - the name starts with `watchlist_`
+/// - the catalog exists as a Mongo collection AND the user has access (admins bypass)
+/// - the catalog is configured for crossmatch on this survey (so it will actually be enriched)
+async fn validate_watchlist(
+    db: &Database,
+    watchlist: &str,
+    survey: &Survey,
+    user: &User,
+    config: &AppConfig,
+) -> Result<(), String> {
+    if !watchlist.starts_with(WATCHLIST_PREFIX) {
+        return Err(format!(
+            "watchlist catalog name must start with '{}'",
+            WATCHLIST_PREFIX
+        ));
+    }
+    if !catalog_accessible(db, watchlist, Some(user)).await {
+        return Err(format!(
+            "watchlist '{}' does not exist or is not accessible to the user",
+            watchlist
+        ));
+    }
+    let configured = config
+        .crossmatch
+        .get(survey)
+        .map(|cats| cats.iter().any(|c| c.catalog == watchlist))
+        .unwrap_or(false);
+    if !configured {
+        return Err(format!(
+            "watchlist '{}' is not configured for crossmatch on survey {:?}.",
+            watchlist, survey
+        ));
+    }
+    Ok(())
+}
+
+use crate::utils::moc::{moc_from_ascii, moc_hpx_stage};
 use actix_web::{get, patch, post, web, HttpResponse};
 use apache_avro::AvroSchema;
 use apache_avro_macros::serdavro;
@@ -42,6 +82,8 @@ pub struct FilterPublic {
     pub description: Option<String>,
     pub permissions: HashMap<Survey, Vec<i32>>,
     pub user_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watchlist: Option<String>,
     pub survey: Survey,
     pub active: bool,
     pub active_fid: String,
@@ -58,6 +100,7 @@ impl From<Filter> for FilterPublic {
             description: filter.description,
             permissions: filter.permissions,
             user_id: filter.user_id,
+            watchlist: filter.watchlist,
             survey: filter.survey,
             active: filter.active,
             active_fid: filter.active_fid,
@@ -361,6 +404,10 @@ pub struct FilterPost {
     pub pipeline: Vec<serde_json::Value>,
     pub permissions: HashMap<Survey, Vec<i32>>,
     pub survey: Survey,
+    /// Optional watchlist catalog name. Must start with "watchlist_", be present in
+    /// the crossmatch config for the survey, and be granted to the requesting user.
+    #[serde(default)]
+    pub watchlist: Option<String>,
 }
 
 /// Create a new filter
@@ -378,6 +425,7 @@ pub struct FilterPost {
 #[post("/filters")]
 pub async fn post_filter(
     db: web::Data<Database>,
+    config: web::Data<AppConfig>,
     body: web::Json<FilterPost>,
     current_user: Option<web::ReqData<User>>,
 ) -> HttpResponse {
@@ -396,6 +444,12 @@ pub async fn post_filter(
             "Filters running on survey {:?} must have permissions defined for that survey",
             survey
         ));
+    }
+    if let Some(ref watchlist) = body.watchlist {
+        if let Err(msg) = validate_watchlist(&db, watchlist, &survey, &current_user, &config).await
+        {
+            return response::bad_request(&msg);
+        }
     }
     let pipeline = body.pipeline;
 
@@ -432,6 +486,7 @@ pub async fn post_filter(
         survey,
         id: filter_id,
         user_id: current_user.id.clone(),
+        watchlist: body.watchlist,
         active: false,
         active_fid: filter_version.clone(),
         fv: vec![FilterVersion {
@@ -811,6 +866,8 @@ async fn build_test_filter_pipeline(
     end_jd: Option<f64>,
     object_ids: Option<Vec<String>>,
     candids: Option<Vec<String>>,
+    // Region conditions, merged into the leading $match below.
+    moc_conditions: Option<mongodb::bson::Array>,
 ) -> Result<Vec<Document>, FilterError> {
     if SURVEYS_REQUIRING_PERMISSIONS.contains(&survey) && permissions.get(&survey).is_none() {
         return Err(FilterError::InvalidFilterPipeline(format!(
@@ -906,6 +963,9 @@ async fn build_test_filter_pipeline(
             doc! { "$in": permissions.get(&survey).unwrap() },
         );
     }
+    if let Some(or) = moc_conditions {
+        match_stage.insert("$or", or);
+    }
     test_pipeline[0].insert("$match", match_stage);
     Ok(test_pipeline)
 }
@@ -913,6 +973,11 @@ async fn build_test_filter_pipeline(
 #[derive(serde::Deserialize, Clone, ToSchema)]
 pub struct FilterTestRequest {
     pub pipeline: Vec<serde_json::Value>,
+    /// A MOC in IVOA ASCII form, e.g. `"5/1-3 8 11/1234"`. When present the
+    /// region is prepended to `pipeline` as a match stage, so a skymap search
+    /// runs the filter's own cuts rather than a separate set. Matched exactly,
+    /// by HEALPix range.
+    pub moc_ascii: Option<String>,
     pub permissions: HashMap<Survey, Vec<i32>>,
     pub survey: Survey,
     pub start_jd: Option<f64>,
@@ -970,6 +1035,22 @@ pub async fn post_filter_test(
     let permissions = body.permissions;
     let pipeline = body.pipeline;
 
+    // Merged into the leading $match rather than prepended as its own stage: a
+    // $match after the $project cannot use the coordinates.hpx index.
+    let moc_conditions = match body.moc_ascii {
+        Some(moc_ascii) => match moc_from_ascii(&moc_ascii).and_then(|moc| moc_hpx_stage(&moc)) {
+            Ok(stage) => match stage
+                .get_document("$match")
+                .and_then(|m| m.get_array("$or"))
+            {
+                Ok(or) => Some(or.clone()),
+                Err(e) => return response::internal_error(&format!("malformed moc stage: {e}")),
+            },
+            Err(e) => return response::bad_request(&e),
+        },
+        None => None,
+    };
+
     let mut test_pipeline = match build_test_filter_pipeline(
         &survey,
         &permissions,
@@ -978,6 +1059,7 @@ pub async fn post_filter_test(
         body.end_jd,
         body.object_ids,
         body.candids,
+        moc_conditions,
     )
     .await
     {
@@ -1112,6 +1194,7 @@ pub async fn post_filter_test_count(
         body.end_jd,
         body.object_ids,
         body.candids,
+        None,
     )
     .await
     {
@@ -1231,6 +1314,33 @@ pub struct LsstAlertToFilter {
     pub ztf: Option<ZtfFilterMatch>,
 }
 
+#[serdavro]
+#[derive(Debug, Deserialize, Serialize)]
+/// WINTER data available at filtering time
+pub struct WinterAlertToFilter {
+    pub candid: i64,
+    #[serde(rename = "objectId")]
+    pub object_id: String,
+    pub candidate: WinterCandidate,
+    pub coordinates: GalacticCoordinates,
+    pub prv_candidates: Vec<WinterPrvCandidate>,
+    pub aliases: WinterAliases,
+}
+
+#[serdavro]
+#[derive(Debug, Deserialize, Serialize)]
+/// DECam data available at filtering time
+pub struct DecamAlertToFilter {
+    pub candid: i64,
+    #[serde(rename = "objectId")]
+    pub object_id: String,
+    pub candidate: DecamCandidate,
+    pub coordinates: GalacticCoordinates,
+    pub prv_candidates: Vec<DecamCandidate>,
+    pub fp_hists: Vec<DecamForcedPhot>,
+    pub aliases: DecamAliases,
+}
+
 /// Get a schema of a survey's data available at filtering time
 #[utoipa::path(
     get,
@@ -1251,15 +1361,119 @@ pub async fn get_filter_schema(path: web::Path<(Survey,)>) -> HttpResponse {
     let schema = match survey_name {
         Survey::Ztf => ZtfAlertToFilter::get_schema(),
         Survey::Lsst => LsstAlertToFilter::get_schema(),
-        _ => {
-            return response::not_found(&format!(
-                "no filter data schema found for survey {}",
-                survey_name
-            ));
-        }
+        Survey::Winter => WinterAlertToFilter::get_schema(),
+        Survey::Decam => DecamAlertToFilter::get_schema(),
     };
     response::ok(
         &format!("avro schema for survey {}", survey_name),
         serde_json::json!(schema),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::conf::{get_test_db, CatalogXmatchConfig};
+
+    fn admin() -> User {
+        User {
+            id: "admin".to_string(),
+            username: "admin".to_string(),
+            email: "admin@example.com".to_string(),
+            password: "x".to_string(),
+            is_admin: true,
+            watchlist_access: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn test_validate_watchlist() {
+        let db = get_test_db().await;
+        let mut config = AppConfig::from_test_config().unwrap();
+        let admin = admin();
+        let name = format!("watchlist_validate_{}", Uuid::new_v4().simple());
+
+        assert!(
+            validate_watchlist(&db, "not_a_watchlist", &Survey::Ztf, &admin, &config)
+                .await
+                .is_err()
+        );
+
+        let collection: Collection<Document> = db.collection(&name);
+        collection.insert_one(doc! { "x": 1 }).await.unwrap();
+
+        // Accessible and well-named, but not configured for crossmatch on the survey.
+        assert!(
+            validate_watchlist(&db, &name, &Survey::Ztf, &admin, &config)
+                .await
+                .is_err()
+        );
+
+        config
+            .crossmatch
+            .entry(Survey::Ztf)
+            .or_default()
+            .push(CatalogXmatchConfig::new(
+                &name,
+                2.0,
+                doc! { "_id": 1 },
+                false,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Vec::new(),
+            ));
+        let result = validate_watchlist(&db, &name, &Survey::Ztf, &admin, &config).await;
+
+        collection.drop().await.unwrap();
+        assert!(result.is_ok());
+    }
+}
+
+#[cfg(test)]
+mod schema_tests {
+    use super::*;
+
+    fn schema_str<T: AvroSchema>() -> String {
+        serde_json::to_string(&T::get_schema()).unwrap()
+    }
+
+    #[test]
+    fn decam_filter_schema_exposes_forced_phot_and_snr() {
+        // DECam does aperture difference-image forced photometry (magap/sigmagap)
+        // with a computed snr, and carries a forced-photometry history — all
+        // filterable, so the schema must surface them.
+        let s = schema_str::<DecamAlertToFilter>();
+        for field in [
+            "\"prv_candidates\"",
+            "\"fp_hists\"",
+            "\"magap\"",
+            "\"sigmagap\"",
+            "\"snr\"",
+        ] {
+            assert!(
+                s.contains(field),
+                "DECam filter schema missing {field}: {s}"
+            );
+        }
+    }
+
+    #[test]
+    fn winter_filter_schema_generates_without_forced_phot() {
+        // WINTER does PSF photometry (magpsf) and has no forced-photometry history,
+        // so its schema exposes candidate/prv_candidates but no fp_hists.
+        let s = schema_str::<WinterAlertToFilter>();
+        for field in ["\"candidate\"", "\"prv_candidates\"", "\"magpsf\""] {
+            assert!(
+                s.contains(field),
+                "WINTER filter schema missing {field}: {s}"
+            );
+        }
+        assert!(
+            !s.contains("\"fp_hists\""),
+            "WINTER has no forced photometry; schema should omit fp_hists: {s}"
+        );
+    }
 }

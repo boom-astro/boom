@@ -37,15 +37,14 @@ export default function Login({ onLoginSuccess }: Props) {
     try {
       await api.login(email, password);
       const profile = await api.fetchProfile().catch(() => null);
-      const identifiedEmail = profile?.email ?? email;
-      const identifiedUserId = profile?.id ?? profile?.username ?? identifiedEmail;
-      analytics.identifyUser(identifiedUserId, identifiedEmail);
-      analytics.trackLoginSuccess({ email });
+      const identifiedUserId = profile?.id ?? profile?.username;
+      if (identifiedUserId) analytics.identifyUser(identifiedUserId);
+      analytics.trackLoginSuccess();
       onLoginSuccess();
     } catch (err: unknown) {
       const msg = err && typeof err === 'object' && 'message' in err ? String((err as { message?: unknown }).message) : String(err);
       setError(msg);
-      analytics.trackError('login', err, { email });
+      analytics.trackError('login', err);
     } finally {
       setLoading(false);
     }

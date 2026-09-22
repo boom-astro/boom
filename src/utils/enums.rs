@@ -13,7 +13,7 @@ pub enum Survey {
     Lsst,
     #[serde(alias = "decam")]
     Decam,
-    #[serde(alias = "winter", alias = "wntr")]
+    #[serde(alias = "winter", alias = "wntr", alias = "WNTR")]
     Winter,
 }
 
@@ -25,6 +25,10 @@ impl Survey {
             Survey::Decam => "DECAM",
             Survey::Winter => "WINTER",
         }
+    }
+
+    pub fn alert_input_queue(&self) -> String {
+        format!("{}_alerts_packets_queue", self)
     }
 
     /// Observatory UTC offset in hours.

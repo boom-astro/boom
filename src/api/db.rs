@@ -38,6 +38,7 @@ async fn init_api_admin_user(
                 .expect("failed to hash password"),
             email: admin_email.clone(),
             is_admin: true, // Set the user as an admin
+            watchlist_access: Vec::new(),
         };
         match users_collection.insert_one(admin_user).await {
             Ok(_) => {
@@ -93,6 +94,7 @@ async fn init_api_admin_user(
                     .expect("failed to hash password"),
                 email: admin_email.clone(),
                 is_admin: true, // Ensure the user remains an admin
+                watchlist_access: existing_user.watchlist_access.clone(),
             };
             users_collection
                 .replace_one(doc! { "_id": &existing_user.id }, updated_user)
@@ -140,6 +142,60 @@ pub async fn build_db_api(conf: &AppConfig) -> Result<mongodb::Database, BoomCon
             .create_index(email_index)
             .await
             .expect("failed to create email index on babamul_users collection");
+
+        // Social sign-in resolves an account by the provider's stable user id
+        // on every login; without this that lookup scans the collection.
+        // Deliberately not unique: `identities` is empty for password-only
+        // accounts, and a unique multikey index would collide across all of
+        // them.
+        let identity_index = mongodb::IndexModel::builder()
+            .keys(doc! { "identities.provider": 1, "identities.subject": 1 })
+            .build();
+        let _ = babamul_users_collection
+            .create_index(identity_index)
+            .await
+            .expect("failed to create identities index on babamul_users collection");
+
+        // The same `(provider, subject)` must never end up on two accounts:
+        // sign-in looks it up with `find_one`, so a duplicate would resolve to
+        // whichever document the index happened to reach first — the same
+        // person landing in a different account run to run.
+        //
+        // This is a second index rather than making the one above unique.
+        // Uniqueness needs the partial filter, since every password-only
+        // account indexes `identities` as a single null entry and they would
+        // all collide with each other; the plain index stays behind so the
+        // `$elemMatch` lookup keeps an index it is guaranteed to be able to
+        // use, which a partial one it doesn't provably satisfy is not.
+        let unique_identity_index = mongodb::IndexModel::builder()
+            .keys(doc! { "identities.provider": 1, "identities.subject": 1 })
+            .options(
+                mongodb::options::IndexOptions::builder()
+                    .name("identities_provider_subject_unique".to_string())
+                    .unique(true)
+                    .partial_filter_expression(doc! { "identities.0": { "$exists": true } })
+                    .build(),
+            )
+            .build();
+        // Deliberately not fatal. A deployment that already carries a duplicate
+        // from before this index existed cannot build it, and refusing to start
+        // would take the whole API down over an inconsistency that only affects
+        // the accounts involved. Log loudly instead: the duplicates have to be
+        // merged by hand, and until they are the constraint simply isn't there.
+        if let Err(e) = babamul_users_collection
+            .create_index(unique_identity_index)
+            .await
+        {
+            tracing::error!(
+                "Could not create the unique identities index on babamul_users, so one \
+                 external identity may be linked to several accounts. Find them with \
+                 `db.babamul_users.aggregate([{{$unwind: '$identities'}}, {{$group: \
+                 {{_id: {{p: '$identities.provider', s: '$identities.subject'}}, \
+                 users: {{$addToSet: '$_id'}}}}}}, {{$match: {{'users.1': \
+                 {{$exists: true}}}}}}])`, merge them, and restart: {}",
+                e
+            );
+        }
 
         // Index on tokens.token_hash for efficient lookup
         let token_hash_index = mongodb::IndexModel::builder()

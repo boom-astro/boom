@@ -1,5 +1,6 @@
+use crate::enrichment::models::applecider_postprocess::HORIZON_DAYS;
 use crate::enrichment::models::{
-    load_model, load_model_on_device_with_cpu_fallback, FusionModel, ModelError,
+    load_model, load_model_on_device_with_cpu_fallback, FusionModel, FusionOutputs, ModelError,
 };
 use crate::enrichment::ZtfAlertForEnrichment;
 use crate::utils::cutouts::AlertCutout;
@@ -9,11 +10,8 @@ use ndarray::{Array, Array2, Array3, Dim};
 use ort::{inputs, session::Session, value::TensorRef};
 use tracing::instrument;
 
-// metadata missing value
 const METADATA_SENTINEL: f32 = -999.0;
 
-// This is mostly taken from BTSBot model since
-// both algorithms are close enough
 pub struct CiderFusionModel {
     model: Session,
 }
@@ -42,7 +40,7 @@ impl FusionModel for CiderFusionModel {
         tempo_global: &Array2<f32>,
         metadata: &Array<f32, Dim<[usize; 2]>>,
         image: &Array<f32, Dim<[usize; 4]>>,
-    ) -> Result<(Vec<f32>, Vec<f32>), ModelError> {
+    ) -> Result<FusionOutputs, ModelError> {
         let outputs = self.model.run(inputs! {
             "tempo_x"        => TensorRef::from_array_view(tempo_x.view())?,
             "tempo_pad_mask" => TensorRef::from_array_view(tempo_pad_mask.view())?,
@@ -54,10 +52,18 @@ impl FusionModel for CiderFusionModel {
         let (_, probs) = outputs["probs"]
             .try_extract_tensor::<f32>()
             .map_err(|_| ModelError::ModelOutputToVecError)?;
+        // alpha carries the evidence the calibrated outputs are derived from.
+        let (_, alpha) = outputs["alpha"]
+            .try_extract_tensor::<f32>()
+            .map_err(|_| ModelError::ModelOutputToVecError)?;
         let (_, embedding) = outputs["fusion_embedding"]
             .try_extract_tensor::<f32>()
             .map_err(|_| ModelError::ModelOutputToVecError)?;
-        Ok((probs.to_vec(), embedding.to_vec()))
+        Ok(FusionOutputs {
+            probs: probs.to_vec(),
+            alpha: alpha.to_vec(),
+            embedding: embedding.to_vec(),
+        })
     }
 }
 
@@ -80,7 +86,6 @@ fn safe_slope(ts: &[f32], ys: &[f32]) -> f32 {
 }
 
 /// Compute the 24-dim physics global feature vector from the encoded sequence.
-/// Mirrors `compute_global_features` in test.rs.
 fn compute_global_features(
     log1p_dt: &[f32],
     log1p_dt_prev: &[f32],
@@ -220,7 +225,6 @@ impl CiderFusionModel {
         alerts: &[&ZtfAlertForEnrichment],
         alert_properties: &[&AllBandsProperties],
     ) -> Result<Array<f32, Dim<[usize; 2]>>, ModelError> {
-        // mean for the data
         const META_MEAN: [f32; 55] = [
             0.24254899,
             0.41347787,
@@ -278,7 +282,6 @@ impl CiderFusionModel {
             0.000030636,
             -0.000020390,
         ];
-        // standard deviation for the data
         const META_STD: [f32; 55] = [
             0.27388790,
             0.33104500,
@@ -351,48 +354,37 @@ impl CiderFusionModel {
             let mut arr = [METADATA_SENTINEL; 55];
 
             // [0–5] host_environment
-            arr[0] = c.sgscore1.map(|v| v as f32).unwrap_or(METADATA_SENTINEL);
-            arr[1] = c.sgscore2.map(|v| v as f32).unwrap_or(METADATA_SENTINEL);
-            arr[2] = c.distpsnr1.map(|v| v as f32).unwrap_or(METADATA_SENTINEL);
-            arr[3] = c.distpsnr2.map(|v| v as f32).unwrap_or(METADATA_SENTINEL);
+            arr[0] = c.sgscore1.unwrap_or(METADATA_SENTINEL);
+            arr[1] = c.sgscore2.unwrap_or(METADATA_SENTINEL);
+            arr[2] = c.distpsnr1.unwrap_or(METADATA_SENTINEL);
+            arr[3] = c.distpsnr2.unwrap_or(METADATA_SENTINEL);
             arr[4] = c.nmtchps as f32;
-            arr[5] = c.sharpnr.map(|v| v as f32).unwrap_or(METADATA_SENTINEL);
-            // [6] scorr
+            arr[5] = c.sharpnr.unwrap_or(METADATA_SENTINEL);
             arr[6] = c.scorr.map(|v| v as f32).unwrap_or(METADATA_SENTINEL);
-            // [7, 8] ra, dec
             arr[7] = c.ra as f32;
             arr[8] = c.dec as f32;
-            // [9] diffmaglim
-            arr[9] = c.diffmaglim.map(|v| v as f32).unwrap_or(METADATA_SENTINEL);
-            // [10] sky
-            arr[10] = c.sky.map(|v| v as f32).unwrap_or(METADATA_SENTINEL);
-            // [11, 12] history counts
+            arr[9] = c.diffmaglim.unwrap_or(METADATA_SENTINEL);
+            arr[10] = c.sky.unwrap_or(METADATA_SENTINEL);
             arr[11] = ndethist;
             arr[12] = ncovhist;
-            // [13] sigmapsf
             arr[13] = c.sigmapsf;
-            // [14] chinr
-            arr[14] = c.chinr.map(|v| v as f32).unwrap_or(METADATA_SENTINEL);
-            // [15] magpsf
+            arr[14] = c.chinr.unwrap_or(METADATA_SENTINEL);
             arr[15] = c.magpsf;
-            // [16] nnondet
             arr[16] = ncovhist - ndethist;
-            // [17] classtar
-            arr[17] = c.classtar.map(|v| v as f32).unwrap_or(METADATA_SENTINEL);
-            // [18] fid
+            arr[17] = c.classtar.unwrap_or(METADATA_SENTINEL);
             arr[18] = c.fid as f32;
             // [19–24] temporal_shape
-            arr[19] = (p.last_jd - p.peak_jd) as f32; // days_since_peak
-            arr[20] = (p.peak_jd - p.first_jd) as f32; // days_to_peak
-            arr[21] = (p.last_jd - p.first_jd) as f32; // age_sum_days
-            arr[22] = peak_mag; // peakmag_so_far
-            arr[23] = faintest_mag; // maxmag_so_far
+            arr[19] = (p.last_jd - p.peak_jd) as f32;
+            arr[20] = (p.peak_jd - p.first_jd) as f32;
+            arr[21] = (p.last_jd - p.first_jd) as f32;
+            arr[22] = peak_mag;
+            arr[23] = faintest_mag;
             arr[24] = if peak_mag > 0.0 {
                 faintest_mag / peak_mag
             } else {
                 METADATA_SENTINEL
-            }; // max_over_peak_mag
-               // [25–28] per_filter_g
+            };
+            // [25–28] per_filter_g
             arr[25] = p.days_since_peak_g.unwrap_or(METADATA_SENTINEL);
             arr[26] = p.days_to_peak_g.unwrap_or(METADATA_SENTINEL);
             arr[27] = p.peakmag_g.unwrap_or(METADATA_SENTINEL);
@@ -402,39 +394,33 @@ impl CiderFusionModel {
             arr[30] = p.days_to_peak_r.unwrap_or(METADATA_SENTINEL);
             arr[31] = p.peakmag_r.unwrap_or(METADATA_SENTINEL);
             arr[32] = p.maxmag_r.unwrap_or(METADATA_SENTINEL);
-            // [33] alert_idx
             arr[33] = ndethist - 1.0;
-            // [34] rb
-            arr[34] = c.rb.map(|v| v as f32).unwrap_or(METADATA_SENTINEL);
-            // [35] chipsf
-            arr[35] = c.chipsf.map(|v| v as f32).unwrap_or(METADATA_SENTINEL);
-            // [36, 37] distnr, magnr
-            arr[36] = c.distnr.map(|v| v as f32).unwrap_or(METADATA_SENTINEL);
-            arr[37] = c.magnr.map(|v| v as f32).unwrap_or(METADATA_SENTINEL);
-            // [38, 39] ranr, decnr
+            arr[34] = c.rb.unwrap_or(METADATA_SENTINEL);
+            arr[35] = c.chipsf.unwrap_or(METADATA_SENTINEL);
+            arr[36] = c.distnr.unwrap_or(METADATA_SENTINEL);
+            arr[37] = c.magnr.unwrap_or(METADATA_SENTINEL);
             arr[38] = c.ranr as f32;
             arr[39] = c.decnr as f32;
-            // [40] fwhm
-            arr[40] = c.fwhm.map(|v| v as f32).unwrap_or(METADATA_SENTINEL);
+            arr[40] = c.fwhm.unwrap_or(METADATA_SENTINEL);
             // [41–48] PS1 reference magnitudes
-            arr[41] = c.srmag1.map(|v| v as f32).unwrap_or(METADATA_SENTINEL);
-            arr[42] = c.sgmag1.map(|v| v as f32).unwrap_or(METADATA_SENTINEL);
-            arr[43] = c.simag1.map(|v| v as f32).unwrap_or(METADATA_SENTINEL);
-            arr[44] = c.szmag1.map(|v| v as f32).unwrap_or(METADATA_SENTINEL);
-            arr[45] = c.srmag2.map(|v| v as f32).unwrap_or(METADATA_SENTINEL);
-            arr[46] = c.sgmag2.map(|v| v as f32).unwrap_or(METADATA_SENTINEL);
-            arr[47] = c.simag2.map(|v| v as f32).unwrap_or(METADATA_SENTINEL);
-            arr[48] = c.szmag2.map(|v| v as f32).unwrap_or(METADATA_SENTINEL);
+            arr[41] = c.srmag1.unwrap_or(METADATA_SENTINEL);
+            arr[42] = c.sgmag1.unwrap_or(METADATA_SENTINEL);
+            arr[43] = c.simag1.unwrap_or(METADATA_SENTINEL);
+            arr[44] = c.szmag1.unwrap_or(METADATA_SENTINEL);
+            arr[45] = c.srmag2.unwrap_or(METADATA_SENTINEL);
+            arr[46] = c.sgmag2.unwrap_or(METADATA_SENTINEL);
+            arr[47] = c.simag2.unwrap_or(METADATA_SENTINEL);
+            arr[48] = c.szmag2.unwrap_or(METADATA_SENTINEL);
             // [49–51] photometry counts
             arr[49] = p.n_photometry_total;
             arr[50] = p.n_photometry_g;
             arr[51] = p.n_photometry_r;
             // [52–54] color calibration
-            arr[52] = c.clrcoeff.map(|v| v as f32).unwrap_or(METADATA_SENTINEL);
-            arr[53] = c.clrcounc.map(|v| v as f32).unwrap_or(METADATA_SENTINEL);
+            arr[52] = c.clrcoeff.unwrap_or(METADATA_SENTINEL);
+            arr[53] = c.clrcounc.unwrap_or(METADATA_SENTINEL);
             arr[54] = METADATA_SENTINEL; // zpclrcov not present in alert packet
 
-            // z-score normalize; leave sentinel values unchanged
+            // Sentinels stay raw: they are the model's own missing-value encoding.
             for j in 0..55 {
                 if arr[j] != METADATA_SENTINEL {
                     arr[j] = (arr[j] - META_MEAN[j]) / META_STD[j].max(1e-8);
@@ -453,7 +439,6 @@ impl CiderFusionModel {
         &self,
         alert_cutouts: &[&AlertCutout],
     ) -> Result<Array<f32, Dim<[usize; 4]>>, ModelError> {
-        // let mut triplets = Array::zeros((alert_cutouts.len(), 3, 49, 49));
         let mut triplets = Array::zeros((alert_cutouts.len(), 3, 63, 63));
         for i in 0..alert_cutouts.len() {
             let (cutout_science, cutout_template, cutout_difference) =
@@ -479,27 +464,23 @@ impl CiderFusionModel {
             Array3<f32>,  // tempo_x       (1, 512, 5)
             Array2<bool>, // tempo_pad_mask (1, 512)
             Array2<f32>,  // tempo_global   (1, 24)
+            usize,        // detections actually fed to the model
         ),
         ModelError,
     > {
         const ZTF_ZP: f32 = 23.9;
         const SEQ_LEN: usize = 512;
+        const MAX_EVENTS: usize = 384;
         const NORM_MEAN: [f32; 4] = [3.2246506, 0.75406283, 1.8746188, 0.05986891];
         const NORM_STD: [f32; 4] = [1.1197281, 0.72683305, 0.41507009, 0.03053664];
 
-        // Sort, dedup, horizon-trim (100 days), cap at 256 events (keep most recent)
         photometry.sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap());
         photometry.dedup_by(|a, b| a.time == b.time && a.band == b.band);
-        if !photometry.is_empty() {
-            let t0 = photometry[0].time;
-            photometry.retain(|p| (p.time - t0) as f32 <= 100.0);
-        }
-        if photometry.len() > 256 {
-            photometry = photometry[photometry.len() - 256..].to_vec();
-        }
+        let t0 = photometry.first().map_or(0.0, |p| p.time);
+        photometry.retain(|p| (p.time - t0) as f32 <= HORIZON_DAYS);
 
-        let n = photometry.len();
-        let t0 = if n > 0 { photometry[0].time } else { 0.0 };
+        let start = photometry.len().saturating_sub(MAX_EVENTS);
+        let n = photometry.len() - start;
 
         let mut log1p_dt: Vec<f32> = Vec::with_capacity(n);
         let mut log1p_dt_prev: Vec<f32> = Vec::with_capacity(n);
@@ -507,7 +488,7 @@ impl CiderFusionModel {
         let mut log10_flux_err: Vec<f32> = Vec::with_capacity(n);
         let mut band_ids: Vec<usize> = Vec::with_capacity(n);
 
-        for (i, p) in photometry.iter().enumerate() {
+        for (i, p) in photometry.iter().enumerate().skip(start) {
             let dt = (p.time - t0) as f32;
             let dt_prev = if i == 0 {
                 0.0
@@ -525,10 +506,8 @@ impl CiderFusionModel {
             });
         }
 
-        // 24-dim physics global features
         let global = compute_global_features(&log1p_dt, &log1p_dt_prev, &log10_flux, &band_ids);
 
-        // tempo_x: normalize first 4 channels, append raw band_id as 5th, zero-pad to SEQ_LEN
         let n_real = n.min(SEQ_LEN);
         let mut tempo_flat: Vec<f32> = Vec::with_capacity(SEQ_LEN * 5);
         for i in 0..n_real {
@@ -552,6 +531,6 @@ impl CiderFusionModel {
         let pad_mask_arr = Array2::from_shape_vec((1, SEQ_LEN), pad_mask)?;
         let tempo_global = Array2::from_shape_vec((1, 24), global.to_vec())?;
 
-        Ok((tempo_x, pad_mask_arr, tempo_global))
+        Ok((tempo_x, pad_mask_arr, tempo_global, n_real))
     }
 }

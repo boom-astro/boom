@@ -38,7 +38,7 @@ use std::{num::NonZero, sync::Arc, thread, time::Duration};
 use clap::Parser;
 use redis::AsyncCommands;
 use tokio::sync::{mpsc, oneshot};
-use tracing::{debug, info, info_span, span, warn, Instrument};
+use tracing::{debug, error, info, info_span, span, warn, Instrument};
 
 #[derive(Parser)]
 #[command(
@@ -82,12 +82,19 @@ async fn run_enrich_only<T: EnrichmentWorker>(
     let worker_config = config
         .workers
         .get(&survey)
-        .ok_or(EnrichmentWorkerError::WorkerConfigMissing(survey))?;
+        .ok_or(EnrichmentWorkerError::WorkerConfigMissing(survey.clone()))?;
 
     let mut con = config.build_redis().await?;
 
     let command_interval = worker_config.command_interval;
     let mut command_check_countdown = command_interval;
+
+    let batch_size = NonZero::new(worker_config.enrichment.batch_size).ok_or_else(|| {
+        EnrichmentWorkerError::ConfigurationError(format!(
+            "enrichment batch_size must be non-zero for survey {}",
+            survey
+        ))
+    })?;
 
     loop {
         if command_check_countdown == 0 {
@@ -98,7 +105,7 @@ async fn run_enrich_only<T: EnrichmentWorker>(
         }
 
         let candids: Vec<i64> = con
-            .rpop::<&str, Vec<i64>>(&input_queue, NonZero::new(1000))
+            .rpop::<&str, Vec<i64>>(&input_queue, Some(batch_size))
             .await?;
 
         if candids.is_empty() {
@@ -109,8 +116,7 @@ async fn run_enrich_only<T: EnrichmentWorker>(
 
         command_check_countdown = command_check_countdown.saturating_sub(candids.len());
 
-        // Enrich alerts (writes ML scores + properties to MongoDB).
-        // Return value is discarded: we intentionally do not push to any output queue.
+        // Return value dropped on purpose: nothing is pushed to an output queue.
         worker.process_alerts(&candids).await?;
     }
 
@@ -138,7 +144,7 @@ async fn run(args: Cli) {
         .expect("GPU configuration is invalid for the survey");
 
     let shared_model_pool: Option<Arc<SharedModelPool>> =
-        if matches!(args.survey, Survey::Ztf) && config.gpu.enabled {
+        if matches!(args.survey, Survey::Ztf) && config.gpu.is_active() {
             Some(
                 SharedModelPool::load(&config.gpu.device_ids)
                     .expect("failed to load ONNX models on GPU"),
@@ -200,8 +206,7 @@ async fn run(args: Cli) {
         worker_handles.push((handle, sender));
     }
 
-    // Sigint handler
-    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
     tokio::spawn(
         async {
             info!("waiting for ctrl-c");
@@ -216,22 +221,35 @@ async fn run(args: Cli) {
         .instrument(info_span!("sigint handler")),
     );
 
-    let mut shutdown_rx = shutdown_rx;
     loop {
         tokio::select! {
             _ = &mut shutdown_rx => {
                 break;
             }
             _ = tokio::time::sleep(Duration::from_secs(60)) => {
+                let total = worker_handles.len();
                 let live = worker_handles
                     .iter()
                     .filter(|(h, _)| !h.is_finished())
                     .count();
-                info!(
-                    live,
-                    total = worker_handles.len(),
-                    "heartbeat: workers running"
-                );
+                let dead = total - live;
+                if live == 0 {
+                    // Nothing is draining the queue: shut down instead of idling.
+                    error!(
+                        total,
+                        "all enrichment-only workers have died; nothing is draining the queue, shutting down"
+                    );
+                    break;
+                } else if dead > 0 {
+                    warn!(
+                        live,
+                        dead,
+                        total,
+                        "heartbeat: some enrichment-only workers have died; queue is draining at reduced capacity"
+                    );
+                } else {
+                    info!(live, total, "heartbeat: workers running");
+                }
             }
         }
     }
@@ -258,6 +276,27 @@ async fn main() {
 
     let (subscriber, _guard) = build_subscriber().expect("failed to build subscriber");
     tracing::subscriber::set_global_default(subscriber).expect("failed to install subscriber");
+
+    // Worker threads panic to stderr only, so route panics through tracing too.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}", l.file(), l.line()))
+            .unwrap_or_else(|| "unknown".to_string());
+        let message = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "<non-string panic payload>".to_string());
+        error!(
+            panic.location = %location,
+            panic.message = %message,
+            "worker thread panicked"
+        );
+        default_hook(info);
+    }));
 
     run(args).await;
 }
