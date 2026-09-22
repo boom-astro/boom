@@ -548,7 +548,7 @@ services:
       BOOM_GPU__ENABLED: ${BOOM_GPU__ENABLED:-false}
       BOOM_GPU__DEVICE_IDS: ${BOOM_GPU__DEVICE_IDS:-}
       # Milvus vector database (optional; see docs/milvus.md).
-      # This scheduler runs the CIDER fusion model, so it is what produces the
+      # This scheduler runs the AppleCiDEr fusion model, so it is what produces the
       # embeddings. Reached over the public internet, so this works regardless
       # of where BOOM itself is deployed.
       BOOM_MILVUS__ENABLED: ${BOOM_MILVUS__ENABLED:-false}

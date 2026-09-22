@@ -1,17 +1,4 @@
-//! gRPC client for a Milvus vector database.
-//!
-//! NRP's managed Milvus exposes gRPC only — there is no REST port reachable
-//! from outside the cluster — so this talks the native protobuf API over TLS.
-//!
-//! Authentication and database selection are both carried as gRPC metadata on
-//! every request, applied by [`AuthInterceptor`]:
-//!
-//! - `authorization: <base64(username:password)>` (note: no `Basic ` prefix,
-//!   unlike HTTP basic auth)
-//! - `dbname: <database>`
-//!
-//! Sending the database per-request rather than holding it as mutable client
-//! state means a single client is safe to clone and share across workers.
+//! gRPC client for a Milvus vector database. See `docs/milvus.md`.
 
 use crate::conf::MilvusConfig;
 use base64::{engine::general_purpose, Engine as _};

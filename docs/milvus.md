@@ -1,6 +1,6 @@
 # Milvus vector database
 
-BOOM stores the CIDER fusion model's embeddings in [Milvus](https://milvus.io)
+BOOM stores the AppleCiDEr fusion model's embeddings in [Milvus](https://milvus.io)
 so that objects can be retrieved by similarity. The target deployment is the
 [NRP-managed Milvus](https://nrp.ai/documentation/userdocs/ai/vector-database/)
 service, which NRP runs for us.
@@ -65,10 +65,6 @@ BOOM_MILVUS__USERNAME=
 BOOM_MILVUS__PASSWORD=
 ```
 
-> **Never put a real password in `.env.example`.** That file is committed to
-> git; `.env` is not. `.env.example` carries the variable *names* with empty
-> values so that others know what to set.
-
 ### On a deployed BOOM server
 
 BOOM and Milvus are hosted separately: BOOM runs on our own servers, while
@@ -78,33 +74,6 @@ NRP's cluster, and nothing about this setup depends on where BOOM is deployed.
 
 However BOOM is launched, all that matters is that `BOOM_MILVUS__*` ends up in
 the process environment — `load_config` in `src/conf.rs` reads it from there.
-BOOM is deployed differently at different sites, so pick the section that
-matches yours.
-
-#### Apptainer on MSI (UMN)
-
-BOOM runs on Minnesota Supercomputing Institute HPC nodes, launched by
-`apptainer.sh` (branch `apptainer`; see the
-[boom-umn](https://github.com/boom-astro/boom-umn) repo for the deployment
-guide). There are no GitHub secrets involved.
-
-`apptainer.sh` has a `load_env()` that does:
-
-```bash
-set -a
-source "$BOOM_DIR/.env"
-set +a
-```
-
-`set -a` auto-exports every variable, and Apptainer inherits the host
-environment by default (the script uses no `--cleanenv`), so anything in that
-file reaches the BOOM processes. The administrative credentials therefore live
-in `$BOOM_DIR/.env` on the node — set `BOOM_MILVUS__ENABLED=true` alongside
-`BOOM_MILVUS__USERNAME` and `BOOM_MILVUS__PASSWORD`. The database name comes
-from `config.yaml` and needs no entry here.
-
-`chmod 600` it. No change to `apptainer.sh` is needed. Restart the affected
-services for the new values to be picked up.
 
 #### Docker Compose via GitHub Actions (Caltech)
 
@@ -142,7 +111,7 @@ than loudly:
    but missing from that block never reaches the runner.
 2. `docker-compose.yaml` does **not** blanket-forward `BOOM_*` into containers —
    each service enumerates what it wants under `environment:`. `BOOM_MILVUS__*`
-   is wired into **`scheduler-ztf`** (runs the CIDER fusion model, so it produces
+   is wired into **`scheduler-ztf`** (runs the AppleCiDEr fusion model, so it produces
    the embeddings) and **`api`** (for serving similarity queries). A new service
    needing Milvus must declare them too, or it falls back to the `config.yaml`
    defaults and quietly runs with Milvus disabled.
@@ -204,10 +173,11 @@ alert's Mongo `classifications` document in every case and there is no dual writ
 
 - **Milvus on** — the embedding is written to Milvus only.
 - **Milvus off** — the embedding is not stored anywhere; it is computed as part
-  of CIDER inference and dropped.
+  of AppleCiDEr inference and dropped.
 
-Either way the CIDER class probabilities (`cider_fusion`) stay in the Mongo
-`classifications` document; only the vector itself is Milvus-only.
+Either way the AppleCiDEr class probabilities (`applecider_fusion` and
+`applecider_outputs`) stay in the Mongo `classifications` document; only the
+vector itself is Milvus-only.
 
 ## Reading embeddings
 

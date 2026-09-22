@@ -1,4 +1,4 @@
-//! Writing CIDER fusion embeddings into the collection.
+//! Writing AppleCiDEr fusion embeddings into the collection.
 //!
 //! Uses Milvus's `Upsert` RPC rather than `Insert`: the primary key is the
 //! survey `object_id` and is supplied by BOOM (never auto-generated), so

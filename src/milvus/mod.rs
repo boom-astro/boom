@@ -1,6 +1,6 @@
 //! Milvus vector database integration.
 //!
-//! Used to store the CIDER fusion model's embeddings so that objects can be
+//! Used to store the AppleCiDEr fusion model's embeddings so that objects can be
 //! compared by similarity. The target deployment is NRP's managed Milvus, which
 //! is reachable over gRPC only — see `docs/milvus.md` for setup.
 

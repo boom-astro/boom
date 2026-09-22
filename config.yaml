@@ -107,10 +107,9 @@ redis:
   host: localhost
   port: 6379
 milvus:
-  # Vector database holding the CIDER fusion model's embeddings.
-  # Disabled by default; deployments that don't use it need no further setup.
+  # Vector database holding the AppleCiDEr fusion model's embeddings.
+  # See docs/milvus.md.
   enabled: false # Set via BOOM_MILVUS__ENABLED environment variable
-  # NRP exposes Milvus over gRPC only (no REST port), behind TLS.
   host: milvus.nrp-nautilus.io
   port: 50051
   tls: true
@@ -120,8 +119,6 @@ milvus:
   timeout_seconds: 30
   collection:
     name: boom_ztf_fusion_embeddings
-    # The CIDER fusion model (data/models/cider_fusion_plus_embedding.onnx)
-    # emits 384 floats, L2-normalized -- so COSINE and IP are equivalent.
     dim: 384
     metric_type: COSINE
     index_type: HNSW

@@ -1,14 +1,5 @@
-//! Schema for the collection holding CIDER fusion-model embeddings.
-//!
-//! The vectors come from `data/models/cider_fusion_plus_embedding.onnx`, whose
-//! `fusion_embedding` output is 384 floats. The model's final operation divides
-//! by the L2 norm, so the vectors are unit length — which is why the default
-//! metric is `COSINE` (equivalent to inner product for normalized vectors).
-//!
-//! The primary key is `object_id`, so the collection holds **one vector per
-//! astronomical object, not per alert**. Writing an object that already exists
-//! replaces its vector, so the collection tracks each object's most recently
-//! ingested embedding. `candid` and `jd` record which alert that was.
+//! Schema for the collection holding AppleCiDEr fusion-model embeddings.
+//! See `docs/milvus.md`.
 
 use prost::Message;
 use tracing::{info, instrument, warn};
@@ -25,7 +16,7 @@ use super::proto::schema::{CollectionSchema, DataType, FieldSchema};
 pub const FIELD_OBJECT_ID: &str = "object_id";
 /// The 384-dimensional fusion embedding.
 pub const FIELD_EMBEDDING: &str = "embedding";
-/// Candid of the alert the stored embedding was computed from.
+/// Candidate ID of the alert the stored embedding was computed from.
 pub const FIELD_CANDID: &str = "candid";
 /// Julian date of that alert.
 pub const FIELD_JD: &str = "jd";
@@ -222,7 +213,7 @@ pub fn embedding_collection_schema(
 ) -> CollectionSchema {
     CollectionSchema {
         name: name.to_string(),
-        description: "CIDER fusion model embeddings, one per object".to_string(),
+        description: "AppleCiDEr fusion model embeddings, one per object".to_string(),
         fields: vec![
             FieldSchema {
                 name: FIELD_OBJECT_ID.to_string(),
@@ -244,7 +235,7 @@ pub fn embedding_collection_schema(
             },
             FieldSchema {
                 name: FIELD_CANDID.to_string(),
-                description: "Candid of the alert this embedding came from".to_string(),
+                description: "Candidate ID of the alert this embedding came from".to_string(),
                 data_type: DataType::Int64 as i32,
                 ..Default::default()
             },
