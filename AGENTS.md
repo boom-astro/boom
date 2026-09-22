@@ -150,6 +150,22 @@ Two habits that go with it:
   '%(objecttype) %(objectsize) %(rest)' | awk '$1=="blob" && $2>1000000'`
   lists any blob over a megabyte in the unpushed range.
 
+## Data-mutating work is a task, not a binary
+
+Migrations, backfills, reprocessing and catalog ingests run through the task
+system, so they survive a deploy, stream their logs, can be cancelled, and leave
+a `data_mutations` entry naming the commit that ran. `src/bin/` holds services
+plus `check_config` and `add_filter`, which change nothing; a new data-mutating
+binary there is the one thing to avoid.
+
+Adding one: [`.agents/skills/add-data-task/SKILL.md`](.agents/skills/add-data-task/SKILL.md),
+with the reasoning in [docs/task-system.md](docs/task-system.md). Registration
+has five points in `src/tasks/mod.rs` and, like API routes, missing one fails
+quietly — `cargo test --lib tasks::tests` catches it.
+
+You can run a task against production data from a branch without merging, and
+the ledger still records which commit did it. The skill has the commands.
+
 ## Checks to run
 
 ```sh
