@@ -1115,6 +1115,7 @@ impl AlertWorker for ZtfAlertWorker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::alert::base::get_schema_and_startidx;
     use crate::utils::{
         enums::Survey,
         testing::{
@@ -1583,6 +1584,29 @@ mod tests {
         assert!(parse(r#"{"tooflag": true}"#));
         assert!(parse(r#"{"tooflag": "t"}"#));
         assert!(!parse(r#"{"tooflag": "f"}"#));
+    }
+
+    #[test]
+    fn test_schema_cache_reads_alerts_of_different_sizes() {
+        // 2991189033415010000 has a data block under 8192 bytes, so the integer holding that
+        // size is one byte shorter and its data starts one byte earlier than the other alert
+        let large = std::fs::read("tests/data/alerts/ztf/2695378462115010012.avro").unwrap();
+        let small = std::fs::read("tests/data/alerts/ztf/2991189033415010000.avro").unwrap();
+
+        let (large_schema, large_start_idx) = get_schema_and_startidx(&large).unwrap();
+        let (small_schema, small_start_idx) = get_schema_and_startidx(&small).unwrap();
+        assert_eq!(large_schema, small_schema);
+        assert_eq!(large_start_idx, small_start_idx + 1);
+
+        for (first, second) in [(&large, &small), (&small, &large)] {
+            let mut schema_cache = SchemaCache::default();
+            let first: ZtfRawAvroAlert = schema_cache.alert_from_avro_bytes(first).unwrap();
+            let second: ZtfRawAvroAlert = schema_cache.alert_from_avro_bytes(second).unwrap();
+
+            let mut candids = [first.candid, second.candid];
+            candids.sort();
+            assert_eq!(candids, [2695378462115010012, 2991189033415010000]);
+        }
     }
 
     #[tokio::test]
