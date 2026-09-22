@@ -166,6 +166,12 @@ quietly — `cargo test --lib tasks::tests` catches it.
 You can run a task against production data from a branch without merging, and
 the ledger still records which commit did it. The skill has the commands.
 
+Adding an archival catalog is its own path — a boompy downloader, a record type
+and a `CatalogDef`, ingested from the admin page *before* anything crossmatches
+against it:
+[`.agents/skills/add-data-catalog/SKILL.md`](.agents/skills/add-data-catalog/SKILL.md),
+with the reasoning in [docs/catalogs.md](docs/catalogs.md).
+
 ## Checks to run
 
 ```sh
