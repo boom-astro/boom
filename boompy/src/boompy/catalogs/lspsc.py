@@ -8,7 +8,7 @@ would be around a million requests and hundreds of gigabytes against someone
 else's research server, so BOOM does not.
 
 Instead BOOM ingests an export of the copy it already holds. The
-`export_catalog` task writes gzipped CSV chunks plus a `manifest.json` from the
+`export_catalog` task writes gzipped JSONL chunks plus a `manifest.json` from the
 `LSPSC` collection, and this module stages them: BOOM is the provenance for its
 own copy, and the manifest records which database and release produced it.
 
@@ -57,9 +57,9 @@ def list_chunks() -> list[Chunk]:
         # ingesting one silently loads a fraction of the catalog.
         raise _missing(directory, "no manifest.json")
     manifest = json.loads(manifest_path.read_text())
-    files = sorted(p.name for p in directory.glob("*.csv.gz"))
+    files = sorted(p.name for p in directory.glob("*.jsonl.gz"))
     if not files:
-        raise _missing(directory, "manifest.json lists an export but no .csv.gz files are")
+        raise _missing(directory, "manifest.json lists an export but no .jsonl.gz files are")
     log(
         f"LSPSC: {len(files)} exported chunk(s), {manifest.get('rows', 'unknown')} rows, "
         f"from {manifest.get('source_database', 'unknown')}"

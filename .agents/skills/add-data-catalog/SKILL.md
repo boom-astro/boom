@@ -40,9 +40,9 @@ A module defining `ID`, `list_chunks()` and `fetch_chunk()`, registered in
   its already-done list; unstable ids re-ingest everything.
 - **stdout is JSON, stderr is for humans.** The Rust side parses the first and
   forwards the second into the run's log live.
-- BOOM reads **delimited text and parquet only**. Convert anything else here —
-  `astropy` for FITS (`_fits.fits_to_parquet`), `lsdb` for HATS — rather than
-  teaching Rust a third format.
+- BOOM reads **delimited text, JSONL and parquet only**. Convert anything else
+  here — `astropy` for FITS (`_fits.fits_to_parquet`), `lsdb` for HATS — rather
+  than teaching Rust a fourth format.
 
 ## 2. The Rust half
 
@@ -52,7 +52,7 @@ A record type implementing the trait for its format, plus `HasCoordinates`:
 | --- | --- |
 | parquet | `FromRecordBatch` (`src/catalogs/arrow.rs`) |
 | delimited or fixed-width text | `FromAsciiRow` (`src/catalogs/ascii.rs`) |
-| CSV | serde's `Deserialize` |
+| CSV or JSONL | serde's `Deserialize` |
 
 Then an entry in `CATALOGS` in `src/catalogs/mod.rs`: `id` (kebab-case slug),
 `collection` (the MongoDB name crossmatch config uses), `title`, `description`,
@@ -107,6 +107,15 @@ silently matching nothing.
 Existing alerts are not re-crossmatched. `reprocess_crossmatch` with
 `skip_existing: true` fills in only the records that have no key for the new
 catalog, which is cheap and exact.
+
+## Catalogs with no upstream bulk copy
+
+Some catalogs are published only as a query service, so nobody can fetch them in
+bulk — but BOOM already holds the rows. Export them with the `export_catalog`
+task (gzipped JSONL plus a manifest), stage that as a `Source::Staged` catalog,
+then publish the chunks somewhere durable and switch the `CatalogDef` to
+`Source::Fetched`. `LSPSC` is the worked example; see **When BOOM is the
+provenance** in [`docs/catalogs.md`](../../../docs/catalogs.md).
 
 ## Catalogs BOOM does not build
 

@@ -124,7 +124,7 @@ still resolves to the same catalog definition.
 | `galex` | `GALEX` | gzipped CSV | per release | Ultraviolet FUV/NUV photometry from the All-Sky Imaging Survey. |
 | `vsx` | `VSX` | fixed-width text | 1 | Variability types, magnitudes, epochs and periods for known and suspected variable stars. |
 | `panstarrs` | `PS1_DR2` | parquet | HEALPix partitions | Mean PSF magnitudes in grizy, from the HATS mirror of the DR2 otmo table. Requester-pays S3. Does not include the PS1-STRM `strm_*` columns crossmatch config projects. |
-| `lspsc` | `LSPSC` | gzipped CSV, **staged** | one per exported chunk | Morphological resolved/unresolved scores for 3.1×10⁹ LS DR10 sources ([Liu et al. 2025](https://arxiv.org/abs/2505.17174)). Upstream is a cone-search API, so BOOM ingests an export of its own copy — see below. |
+| `lspsc` | `LSPSC` | gzipped JSONL, **staged** | one per exported chunk | Morphological resolved/unresolved scores for 3.1×10⁹ LS DR10 sources ([Liu et al. 2025](https://arxiv.org/abs/2505.17174)). Upstream is a cone-search API, so BOOM ingests an export of its own copy — see below. |
 | `ls-dr10-photoz` | `LS_DR10_PHOTOZ` | parquet, **staged** | one per hive partition | Tractor positions joined to photo-z on `lsid`. Built offline — see below. |
 
 ### Staged catalogs
@@ -166,10 +166,10 @@ already hold.
 
 So BOOM exports its own copy and ingests that:
 
-1. **`export_catalog`** writes the collection to gzipped CSV chunks and a
-   `manifest.json` naming the columns, the row count, the source database and
-   the release that wrote it. It is read-only — it writes files, never
-   documents, so there is no ledger entry.
+1. **`export_catalog`** writes the collection to gzipped JSONL chunks and a
+   `manifest.json` naming the format, the row count, the source database and the
+   release that wrote it. It is read-only — it writes files, never documents, so
+   there is no ledger entry.
 2. **Stage the directory** where the ingest expects it: `$BOOM_LSPSC_DIR`, or
    where the export already put it, `<catalog data path>/export/LSPSC`.
 3. **Ingest it** like any staged catalog. As with `ls-dr10-photoz`, BOOM never
@@ -194,10 +194,26 @@ Publishing also makes the provenance legible to people outside this repo: the
 manifest travels with the data and names the database and the release that
 produced it.
 
-The column list is a required parameter rather than something inferred from the
-first document, because a column only some rows carry would otherwise vanish
-from the export without anyone noticing. For `LSPSC` those columns are `_id`,
-`ra`, `dec`, `score` and `mag_white` — the names crossmatch config already
+**JSONL rather than CSV**, one document per line, because these are documents. A
+CSV cell cannot tell an integer from a float from a string, cannot hold a nested
+value, and cannot distinguish a field that was absent from one that was empty —
+and a column list read off whichever document happened to be first silently
+drops a field only some rows carry. JSONL needs no column list, so the default
+export is the whole document, and the lines are written as relaxed extended
+JSON: the same shape `mongoexport` writes, so the artifact loads with
+`mongoimport` too.
+
+```sh
+gunzip -kc part-0000.jsonl.gz | mongoimport --db boom --collection LSPSC
+```
+
+That is the same form as `BOOM.NED.json.gz`, the dump the throughput tests
+already download from a GitHub release and load this way.
+
+The `fields` parameter is an optional projection, for dropping what BOOM
+regenerates on ingest — the GeoJSON `coordinates` derived from `ra`/`dec`, say.
+Field names on the record type are still load-bearing: for `LSPSC` they are
+`_id`, `ra`, `dec`, `score` and `mag_white`, the names crossmatch config already
 projects, which are not the upstream service's names (`lsid`, `xgboost`,
 `white_mag`).
 
@@ -324,11 +340,11 @@ trade. Everything after the file lands on disk is Rust.
 
 The Rust side needs a record type implementing the trait for its format —
 `FromRecordBatch` for parquet, `FromAsciiRow` for delimited text, or serde's
-`Deserialize` for CSV — plus `HasCoordinates`, and an entry in `CATALOGS` in
+`Deserialize` for CSV and JSONL — plus `HasCoordinates`, and an entry in `CATALOGS` in
 `src/catalogs/mod.rs`. Field names on the record type are load-bearing: the
 `crossmatch` projections in `config.yaml` are written against them.
 
-**BOOM reads two formats: delimited text and parquet.** Anything else is
+**BOOM reads three formats: delimited text, JSONL and parquet.** Anything else is
 converted to parquet by boompy, where the library that reads it already lives —
 `astropy` for FITS, `lsdb` for HATS. That is why there is no FITS reader in the
 Rust tree: adding one meant linking cfitsio into every BOOM binary to answer

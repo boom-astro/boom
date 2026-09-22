@@ -18,6 +18,7 @@ pub mod ascii;
 pub mod csv;
 pub mod download;
 pub mod ingest;
+pub mod jsonl;
 pub mod types;
 
 use crate::tasks::TaskContext;
@@ -68,7 +69,7 @@ pub enum Reader {
     PanStarrs,
     /// Legacy Survey DR10 tractor joined to photo-z, staged parquet partitions.
     LsDr10PhotoZ,
-    /// Legacy Survey point-source scores, staged gzipped CSV exported from
+    /// Legacy Survey point-source scores, staged gzipped JSONL exported from
     /// BOOM's own copy.
     Lspsc,
 }
@@ -696,7 +697,7 @@ async fn ingest_file(
         Reader::Galex => Ok(csv::ingest_csv::<types::Galex>(inserter, path).await?),
         Reader::Vsx => Ok(ascii::ingest_ascii::<types::Vsx>(inserter, path).await?),
         Reader::PanStarrs => Ok(arrow::ingest_parquet::<types::PanStarrs>(inserter, path).await?),
-        Reader::Lspsc => Ok(csv::ingest_csv::<types::Lspsc>(inserter, path).await?),
+        Reader::Lspsc => Ok(jsonl::ingest_jsonl::<types::Lspsc>(inserter, path).await?),
         Reader::LsDr10PhotoZ => {
             Ok(arrow::ingest_parquet::<types::LsDr10PhotoZ>(inserter, path).await?)
         }

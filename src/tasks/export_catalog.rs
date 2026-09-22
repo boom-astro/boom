@@ -7,9 +7,14 @@
 //! the only bulk copy anyone has.
 //!
 //! Rather than reconstruct such a catalog by hammering someone's server, export
-//! what we already have. The output is gzipped CSV chunks plus a manifest, which
-//! is what a `Source::Staged` catalog ingests — so BOOM becomes the provenance
-//! for its own copy, and the next deployment ingests it the ordinary way.
+//! what we already have. The output is gzipped JSONL chunks plus a manifest —
+//! one document per line, which is what `mongoexport` writes and `mongoimport`
+//! reads, and what a `Source::Staged` catalog ingests. So BOOM becomes the
+//! provenance for its own copy, and the copy loads with or without BOOM.
+//!
+//! JSONL rather than CSV because these are documents. A CSV cell cannot tell an
+//! integer from a float from a string, cannot hold a nested value, and cannot
+//! distinguish a field that was absent from one that was empty.
 //!
 //! **Read-only.** It writes files, never documents, so there is no ledger entry:
 //! the ledger records mutations, and this mutates nothing.
@@ -18,6 +23,7 @@ use super::context::TaskContext;
 use futures::TryStreamExt;
 use mongodb::bson::{doc, Bson, Document};
 use serde::{Deserialize, Serialize};
+use std::io::Write;
 use std::path::PathBuf;
 use utoipa::ToSchema;
 
@@ -39,9 +45,10 @@ pub struct ExportCatalogParams {
     /// Collection to export, e.g. `LSPSC`. Must be a catalog: alert and user
     /// collections are refused.
     pub collection: String,
-    /// Columns to write, in order. Required rather than inferred: a column list
-    /// read off whichever document happened to be first is how an export ends
-    /// up missing a field that only some rows carry.
+    /// Fields to keep. Empty exports the whole document, which is the faithful
+    /// dump; name fields only to drop ones BOOM regenerates on ingest, such as
+    /// the GeoJSON coordinates derived from `ra`/`dec`.
+    #[serde(default)]
     pub fields: Vec<String>,
     /// Output files. Each is written in one pass, so this also decides how much
     /// work a failed run repeats.
@@ -56,9 +63,6 @@ impl ExportCatalogParams {
     pub fn validate_params(&self) -> Result<(), String> {
         if self.collection.trim().is_empty() {
             return Err("collection is required".to_string());
-        }
-        if self.fields.is_empty() {
-            return Err("fields is required: name the columns to export".to_string());
         }
         if self.shards == 0 || self.shards > MAX_SHARDS {
             return Err(format!("shards must be between 1 and {MAX_SHARDS}"));
@@ -81,23 +85,13 @@ impl ExportCatalogParams {
     }
 }
 
-/// One BSON value as a CSV cell.
+/// One document as a JSON line.
 ///
-/// Absent and null are both the empty string, which is what the CSV readers on
-/// the ingest side treat as "no value".
-fn cell(value: Option<&Bson>) -> String {
-    match value {
-        None | Some(Bson::Null) => String::new(),
-        Some(Bson::Double(v)) => v.to_string(),
-        Some(Bson::Int32(v)) => v.to_string(),
-        Some(Bson::Int64(v)) => v.to_string(),
-        Some(Bson::Boolean(v)) => v.to_string(),
-        Some(Bson::String(v)) => v.clone(),
-        Some(Bson::ObjectId(v)) => v.to_hex(),
-        // Anything structured is written as its extended-JSON form rather than
-        // silently flattened: a reader that meets one will fail loudly.
-        Some(other) => other.to_string(),
-    }
+/// Relaxed extended JSON, so a number stays a number rather than becoming a
+/// `{"$numberLong": "..."}` wrapper that an ordinary record type cannot
+/// deserialize. Mongo's own tools read this form back too.
+fn json_line(doc: Document) -> Result<String, super::TaskError> {
+    serde_json::to_string(&Bson::Document(doc).into_relaxed_extjson()).map_err(failed)
 }
 
 fn failed(e: impl std::fmt::Display) -> super::TaskError {
@@ -121,6 +115,8 @@ async fn write_shard(
     }
     let mut cursor = collection
         .find(filter)
+        // An empty projection is the whole document, which is the default and
+        // the faithful dump.
         .projection(projection)
         .no_cursor_timeout(true)
         .await
@@ -130,18 +126,18 @@ async fn write_shard(
         None
     } else {
         let file = std::fs::File::create(path).map_err(failed)?;
-        let gz = flate2::write::GzEncoder::new(file, flate2::Compression::default());
-        let mut w = csv::Writer::from_writer(gz);
-        w.write_record(fields).map_err(failed)?;
-        Some(w)
+        Some(flate2::write::GzEncoder::new(
+            file,
+            flate2::Compression::default(),
+        ))
     };
 
     let mut rows = 0u64;
     let mut last_reported = written_so_far;
     while let Some(doc) = cursor.try_next().await.map_err(failed)? {
         if let Some(w) = writer.as_mut() {
-            let record: Vec<String> = fields.iter().map(|f| cell(doc.get(f))).collect();
-            w.write_record(&record).map_err(failed)?;
+            w.write_all(json_line(doc)?.as_bytes()).map_err(failed)?;
+            w.write_all(b"\n").map_err(failed)?;
         }
         rows += 1;
 
@@ -171,7 +167,7 @@ async fn write_shard(
     }
 
     if let Some(w) = writer {
-        w.into_inner().map_err(failed)?.finish().map_err(failed)?;
+        w.finish().map_err(failed)?;
     }
     Ok(rows)
 }
@@ -215,7 +211,7 @@ pub async fn run(
     let mut files = Vec::new();
     let mut total = 0u64;
     for (i, filter) in shards.iter().enumerate() {
-        let name = format!("part-{i:04}.csv.gz");
+        let name = format!("part-{i:04}.jsonl.gz");
         let path = root.join(&name);
         let rows = write_shard(
             ctx,
@@ -234,10 +230,11 @@ pub async fn run(
     }
 
     // The manifest is what makes the directory an artifact rather than a pile of
-    // files: it names the columns, the row count, and the release that wrote it,
+    // files: it names the format, the row count, and the release that wrote it,
     // so whoever ingests it later can tell what they have.
     let manifest = serde_json::json!({
         "collection": params.collection,
+        "format": "jsonl.gz",
         "fields": params.fields,
         "rows": total,
         "files": files,
@@ -294,24 +291,34 @@ mod tests {
     }
 
     #[test]
-    fn the_column_list_is_required() {
-        let mut p = params("LSPSC");
-        p.fields.clear();
-        assert!(
-            p.validate_params().is_err(),
-            "inferring columns from the first document silently drops fields that only \
-             some rows carry"
-        );
+    fn the_whole_document_is_the_default() {
+        // No field list needed. JSONL carries whatever the document has, so the
+        // default is the faithful dump rather than a column list someone has to
+        // keep in step with the collection.
+        let p: ExportCatalogParams =
+            serde_json::from_value(serde_json::json!({ "collection": "LSPSC" })).unwrap();
+        assert!(p.fields.is_empty());
+        assert!(p.validate_params().is_ok());
     }
 
     #[test]
-    fn absent_and_null_both_write_an_empty_cell() {
-        let doc = doc! { "a": 1.5, "b": Bson::Null, "s": "x", "t": true };
-        assert_eq!(cell(doc.get("a")), "1.5");
-        assert_eq!(cell(doc.get("b")), "");
-        assert_eq!(cell(doc.get("missing")), "");
-        assert_eq!(cell(doc.get("s")), "x");
-        assert_eq!(cell(doc.get("t")), "true");
+    fn a_line_keeps_the_types_a_csv_cell_would_flatten() {
+        // Relaxed extended JSON: an integer stays an integer, a float stays a
+        // float, null stays null, and a nested value stays nested.
+        let line = json_line(doc! {
+            "_id": 10995475402457455i64,
+            "ra": 150.000443,
+            "score": Bson::Null,
+            "nested": doc! { "a": 1 },
+            "flag": true,
+        })
+        .unwrap();
+        let back: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(back["_id"], serde_json::json!(10995475402457455i64));
+        assert_eq!(back["ra"], serde_json::json!(150.000443));
+        assert!(back["score"].is_null());
+        assert_eq!(back["nested"]["a"], serde_json::json!(1));
+        assert_eq!(back["flag"], serde_json::json!(true));
     }
 
     #[test]

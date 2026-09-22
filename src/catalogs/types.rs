@@ -282,7 +282,7 @@ impl super::arrow::FromRecordBatch for Ned {
 impl HasCoordinates for Ned {}
 
 // ---------------------------------------------------------------------------
-// LSPSC -- gzipped CSV, exported from BOOM's own copy
+// LSPSC -- gzipped JSONL, exported from BOOM's own copy
 // ---------------------------------------------------------------------------
 
 /// One Legacy Survey point-source score.
