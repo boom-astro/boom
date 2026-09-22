@@ -923,10 +923,13 @@ pub const WITHOUT_DEFINITIONS: &[(&str, &str)] = &[
         "LSPSC",
         "Legacy Survey point sources carrying the morphological resolved/unresolved \
          score of Liu et al. 2025 (arXiv:2505.17174), which crossmatch config reads as \
-         `score` and `mag_white` to call an LSST object stellar or hosted. Built \
-         outside BOOM: that work scores ~3e9 Legacy Survey sources and does not say \
-         where the catalog itself is published, so there is nothing here to fetch. The \
-         test workflow creates the collection empty",
+         `score` and `mag_white` to call an LSST object stellar or hosted. Published as \
+         a query service rather than an archival download: ls-xgboost.lbl.gov answers \
+         cone searches (/getsources, radius <= 300 arcsec, optional mag_limit on \
+         white_mag), with the model code at github.com/slowdivePTG/LS-PSC. There is no \
+         bulk file set to list and fetch, so the collection is populated outside BOOM \
+         and the test workflow creates it empty. A bulk export would make this an \
+         ordinary CatalogDef",
     ),
     (
         "TNS",

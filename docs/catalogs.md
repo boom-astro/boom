@@ -149,12 +149,16 @@ that is neither defined nor listed there:
 
 - **`LSPSC`** — Legacy Survey point sources carrying the morphological
   resolved/unresolved score of [Liu et al.
-  2025](https://arxiv.org/abs/2505.17174). The crossmatch projection reads
-  `score` and `mag_white` from it, and that is what classifies an LSST object as
-  stellar or hosted (see the Kafka topic rules page). Built outside BOOM: that
-  work scores ~3×10⁹ Legacy Survey sources and does not record where the catalog
-  is published, so there is nothing for BOOM to fetch. The test workflow creates
-  the collection empty.
+  2025](https://arxiv.org/abs/2505.17174), which scores ~3×10⁹ sources. The
+  crossmatch projection reads `score` and `mag_white` from it, and that is what
+  classifies an LSST object as stellar or hosted (see the Kafka topic rules
+  page). It is published as a **query service, not an archival download**:
+  [ls-xgboost.lbl.gov](https://ls-xgboost.lbl.gov/) answers cone searches
+  (`/getsources`, radius ≤ 300″, optional `mag_limit` on `white_mag`), with the
+  model code at [LS-PSC](https://github.com/slowdivePTG/LS-PSC). There is no
+  bulk file set to list and fetch, so the collection is populated outside BOOM
+  and the test workflow creates it empty. If a bulk export appears, this becomes
+  an ordinary `CatalogDef`.
 - **`LSDR10`** — Legacy Survey DR10 with photo-z posteriors, fluxes and shape
   parameters, built outside BOOM. Not the `ls-dr10-photoz` dataset BOOM ingests
   into `LS_DR10_PHOTOZ`, whose record carries `z_phot`/`z_phot_err` only.
