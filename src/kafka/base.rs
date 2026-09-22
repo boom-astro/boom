@@ -452,9 +452,12 @@ pub enum ConsumerError {
 /// UTC dates a date-partitioned survey should currently be subscribed to, oldest
 /// first: the day containing `timestamp` plus the preceding `window_days`.
 ///
-/// Default 1 keeps yesterday, since a night straddles UTC midnight. Widening is
-/// temporary: upstream advertises names whose partitions it has expired, so each
-/// extra day risks partitions that fail every poll.
+/// Default 1 keeps yesterday, since a night straddles UTC midnight. How much
+/// further to reach is a property of the survey: a continuous stream needs no
+/// more, while one published in a nightly burst needs enough that a restart
+/// cannot step over a whole night. Upstream retention is the bound, since it
+/// advertises names whose partitions it has expired, and each extra day past
+/// that risks partitions that fail every poll.
 pub fn subscription_window(timestamp: i64, window_days: u64) -> Vec<chrono::NaiveDate> {
     let today = chrono::DateTime::from_timestamp(timestamp, 0)
         .map(|dt| dt.date_naive())

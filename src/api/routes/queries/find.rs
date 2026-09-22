@@ -108,7 +108,7 @@ pub async fn post_find_query(
     let injected = inject_geometry_inputs(&collection_name, projection.as_ref(), &mut find_options);
     let mut cursor = match collection.find(filter).with_options(find_options).await {
         Ok(cursor) => cursor,
-        Err(e) => return response::internal_error(&format!("Error finding documents: {}", e)),
+        Err(e) => return super::query_error(e, "Error finding documents"),
     };
     let mut docs = Vec::new();
     while let Some(result) = cursor.next().await {
@@ -116,7 +116,7 @@ pub async fn post_find_query(
             Ok(doc) => docs.push(doc),
             Err(e) => {
                 tracing::error!("Error retrieving document from the database: {}", e);
-                return response::internal_error("Error retrieving document from the database");
+                return super::query_error(e, "Error retrieving documents");
             }
         }
     }

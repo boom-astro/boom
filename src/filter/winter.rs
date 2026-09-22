@@ -235,6 +235,7 @@ pub async fn build_winter_filter_pipeline(
 
     let use_prv_candidates_index = uses_field_in_filter(filter_pipeline, "prv_candidates");
     let use_cross_matches_index = uses_field_in_filter(filter_pipeline, "cross_matches");
+    let use_host_galaxy_index = uses_field_in_filter(filter_pipeline, "host_galaxy");
     let use_aliases_index = uses_field_in_filter(filter_pipeline, "aliases");
 
     let mut aux_add_fields = doc! {
@@ -253,12 +254,19 @@ pub async fn build_winter_filter_pipeline(
             get_array_dict_element("aux.cross_matches"),
         );
     }
+    if use_host_galaxy_index.is_some() {
+        aux_add_fields.insert(
+            "host_galaxy".to_string(),
+            get_array_dict_element("aux.host_galaxy"),
+        );
+    }
     if use_aliases_index.is_some() {
         aux_add_fields.insert("aliases".to_string(), get_array_dict_element("aux.aliases"));
     }
 
     let insert_aux_pipeline = use_prv_candidates_index.is_some()
         || use_cross_matches_index.is_some()
+        || use_host_galaxy_index.is_some()
         || use_aliases_index.is_some();
 
     let mut insert_aux_index = usize::MAX;
@@ -266,6 +274,9 @@ pub async fn build_winter_filter_pipeline(
         insert_aux_index = insert_aux_index.min(index);
     }
     if let Some(index) = use_cross_matches_index {
+        insert_aux_index = insert_aux_index.min(index);
+    }
+    if let Some(index) = use_host_galaxy_index {
         insert_aux_index = insert_aux_index.min(index);
     }
     if let Some(index) = use_aliases_index {
@@ -459,5 +470,44 @@ impl FilterWorker for WinterFilterWorker {
         self.alert_cutout_storage.evict_from_cache(&candids).await;
 
         Ok(alerts_output)
+    }
+}
+
+#[cfg(test)]
+mod host_galaxy_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_a_filter_reading_host_galaxy_receives_it() {
+        let permissions = HashMap::from([(Survey::Winter, vec![1])]);
+        let pipeline = vec![
+            serde_json::json!({"$match": {"host_galaxy.best_host.d_dlr": {"$lt": 4.0}}}),
+            serde_json::json!({"$project": {"objectId": 1}}),
+        ];
+        let built = build_winter_filter_pipeline(&pipeline, &permissions)
+            .await
+            .expect("builds");
+        let rendered = format!("{built:?}");
+        assert!(
+            rendered.contains("WINTER_alerts_aux"),
+            "no aux lookup was inserted"
+        );
+        assert!(
+            rendered.contains("aux.host_galaxy"),
+            "host_galaxy was never projected out of aux"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_a_filter_ignoring_host_galaxy_gets_no_lookup() {
+        let permissions = HashMap::from([(Survey::Winter, vec![1])]);
+        let pipeline = vec![
+            serde_json::json!({"$match": {"candidate.jd": {"$gt": 0.0}}}),
+            serde_json::json!({"$project": {"objectId": 1}}),
+        ];
+        let built = build_winter_filter_pipeline(&pipeline, &permissions)
+            .await
+            .expect("builds");
+        assert!(!format!("{built:?}").contains("aux.host_galaxy"));
     }
 }

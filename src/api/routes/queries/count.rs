@@ -51,7 +51,7 @@ pub async fn post_count_query(
     let count = match collection.count_documents(filter).await {
         Ok(c) => c,
         Err(e) => {
-            return response::internal_error(&format!("Error counting documents: {}", e));
+            return super::query_error(e, "Error counting documents");
         }
     };
     // Return the count
