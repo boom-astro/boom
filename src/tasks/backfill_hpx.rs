@@ -12,25 +12,31 @@
 use super::context::TaskContext;
 use super::ledger::{MutationTarget, Operation};
 use crate::utils::{enums::Survey, spatial::HPX_DEPTH};
-use futures::TryStreamExt;
+use futures::{StreamExt, TryStreamExt};
 use mongodb::{
     bson::{doc, Bson, Document},
     options::{UpdateModifications, UpdateOneModel, WriteModel},
     Collection,
 };
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU64, Ordering};
 use utoipa::ToSchema;
 
 /// Stable identifier for this task type.
 pub const TASK_TYPE: &str = "backfill_hpx";
 
 const MAX_BATCH_SIZE: usize = 100_000;
+const MAX_PROCESSES: usize = 64;
 
 /// How many documents to scan between progress publishes.
 const PROGRESS_EVERY: u64 = 50_000;
 
 fn default_batch_size() -> usize {
     2_000
+}
+
+fn default_processes() -> usize {
+    1
 }
 
 /// What a client may ask for.
@@ -43,6 +49,11 @@ pub struct BackfillHpxParams {
     /// Documents per bulk write.
     #[serde(default = "default_batch_size")]
     pub batch_size: usize,
+    /// Parallel scan and write shards per collection. The filter is on
+    /// `coordinates.hpx`, which is not indexed, so one shard means one
+    /// single-threaded collection scan.
+    #[serde(default = "default_processes")]
+    pub processes: usize,
     /// Count what would be written without writing it.
     #[serde(default)]
     pub dry_run: bool,
@@ -52,6 +63,9 @@ impl BackfillHpxParams {
     pub fn validate_params(&self) -> Result<(), String> {
         if self.batch_size == 0 || self.batch_size > MAX_BATCH_SIZE {
             return Err(format!("batch_size must be between 1 and {MAX_BATCH_SIZE}"));
+        }
+        if self.processes == 0 || self.processes > MAX_PROCESSES {
+            return Err(format!("processes must be between 1 and {MAX_PROCESSES}"));
         }
         Ok(())
     }
@@ -90,16 +104,18 @@ fn failed(e: mongodb::error::Error) -> super::TaskError {
 async fn backfill(
     ctx: &TaskContext,
     collection: &Collection<Document>,
+    filter: Document,
     batch_size: usize,
     dry_run: bool,
-    done_before: u64,
+    progress: &AtomicU64,
     estimated_total: u64,
 ) -> Result<CollectionReport, super::TaskError> {
     let client = collection.client().clone();
-    // Only documents still missing the field, so a resumed run skips its own
-    // work -- which is also what makes the task idempotent.
+    // The caller passes one shard of the documents still missing the field, so
+    // a resumed run skips its own work -- which is also what makes the task
+    // idempotent.
     let mut cursor = collection
-        .find(doc! { "coordinates.hpx": { "$exists": false } })
+        .find(filter)
         .projection(doc! { "_id": 1, "coordinates.radec_geojson": 1 })
         .no_cursor_timeout(true)
         .await
@@ -108,7 +124,6 @@ async fn backfill(
     let mut batch: Vec<WriteModel> = Vec::with_capacity(batch_size);
     let mut written: u64 = 0;
     let mut skipped: u64 = 0;
-    let mut last_reported: u64 = 0;
 
     while let Some(d) = cursor.try_next().await.map_err(failed)? {
         let Some(id) = d.get("_id") else {
@@ -150,9 +165,10 @@ async fn backfill(
                     .map_err(failed)?;
             }
             written += n;
-            let seen = done_before + written;
-            if seen - last_reported >= PROGRESS_EVERY {
-                last_reported = seen;
+            // Shared across the shards, so progress is the run's rather than
+            // whichever shard happens to report.
+            let seen = progress.fetch_add(n, Ordering::Relaxed) + n;
+            if seen / PROGRESS_EVERY != (seen - n) / PROGRESS_EVERY {
                 ctx.progress(
                     seen,
                     estimated_total.max(seen),
@@ -218,18 +234,37 @@ pub async fn run(
         }
     ));
 
+    let missing = doc! { "coordinates.hpx": { "$exists": false } };
+    let progress = AtomicU64::new(0);
     let mut total = 0u64;
     let mut per_collection = serde_json::Map::new();
     for (survey, collection) in &targets {
-        let report = backfill(
-            ctx,
-            collection,
-            params.batch_size,
-            params.dry_run,
-            total,
-            estimated_total,
-        )
-        .await?;
+        // Cut on an indexed field and scan the pieces concurrently. The filter
+        // itself is on `coordinates.hpx`, which is exactly the field that does
+        // not exist yet, so a single cursor is a single-threaded collection
+        // scan of the whole archive.
+        let shard_key = crate::utils::db::shard_field(collection).await;
+        let shards =
+            crate::utils::db::range_shards(collection, params.processes, shard_key, &missing).await;
+        let reports: Vec<CollectionReport> =
+            futures::stream::iter(shards.into_iter().map(|shard| {
+                backfill(
+                    ctx,
+                    collection,
+                    crate::utils::db::merge_filters(&missing, &shard),
+                    params.batch_size,
+                    params.dry_run,
+                    &progress,
+                    estimated_total,
+                )
+            }))
+            .buffer_unordered(params.processes)
+            .try_collect()
+            .await?;
+        let report = CollectionReport {
+            written: reports.iter().map(|r| r.written).sum(),
+            skipped: reports.iter().map(|r| r.skipped).sum(),
+        };
         total += report.written;
 
         if report.written == 0 {

@@ -18,7 +18,6 @@ use super::context::TaskContext;
 use futures::TryStreamExt;
 use mongodb::bson::{doc, Bson, Document};
 use serde::{Deserialize, Serialize};
-use std::io::Write;
 use std::path::PathBuf;
 use utoipa::ToSchema;
 
