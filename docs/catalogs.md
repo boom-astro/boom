@@ -175,6 +175,25 @@ So BOOM exports its own copy and ingests that:
 3. **Ingest it** like any staged catalog. As with `ls-dr10-photoz`, BOOM never
    deletes a staged file: the files are the artifact, not a cache of one.
 
+That is enough for one deployment. To stop every deployment needing the same
+hand-staging, publish the export and point the code at it:
+
+4. **Download the chunks.** The admin page lists every export with its size and
+   an authenticated `curl` line per file (`GET /catalogs/exports` lists them,
+   `GET /catalogs/exports/{collection}/{file}` streams one). They are streamed
+   rather than offered as a browser download because a chunk is hundreds of
+   megabytes.
+5. **Put them somewhere durable** with stable URLs — a Zenodo record, an S3
+   bucket, a GitHub release.
+6. **Put the URLs in the boompy module** and change the `CatalogDef` from
+   `Source::Staged` to `Source::Fetched`. From then on it is an ordinary
+   download: chunked, resumable, deleted after ingest, and every deployment gets
+   it without anyone copying files by hand.
+
+Publishing also makes the provenance legible to people outside this repo: the
+manifest travels with the data and names the database and the release that
+produced it.
+
 The column list is a required parameter rather than something inferred from the
 first document, because a column only some rows carry would otherwise vanish
 from the export without anyone noticing. For `LSPSC` those columns are `_id`,

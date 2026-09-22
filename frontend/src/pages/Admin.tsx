@@ -9,6 +9,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   cancelTaskRun,
   acceptEnrichmentSet,
+  fetchCatalogExports,
   fetchCatalogStatus,
   fetchEnrichmentStatus,
   fetchTaskLogs,
@@ -19,6 +20,7 @@ import {
   submitTask,
   unacceptEnrichmentSet,
   type CatalogHealth,
+  type CatalogExport,
   type CatalogStatus,
   type EnrichmentDrift,
   type TaskLogLine,
@@ -579,6 +581,67 @@ function EnrichmentDriftTable({
  * Catalog ingests have their own row-level button above, because starting one
  * from the drift table needs no parameters. This is for everything else.
  */
+/** Human-readable file size. Exports run to hundreds of megabytes, so bytes
+ *  are useless and megabytes are what tells you whether this will upload. */
+function bytes(n: number): string {
+  if (n >= 1e9) return `${(n / 1e9).toFixed(1)} GB`;
+  if (n >= 1e6) return `${(n / 1e6).toFixed(1)} MB`;
+  if (n >= 1e3) return `${(n / 1e3).toFixed(0)} kB`;
+  return `${n} B`;
+}
+
+/**
+ * Catalog exports waiting to be published.
+ *
+ * Deliberately not a browser download button: a chunk is hundreds of megabytes
+ * and fetching it with an auth header means buffering the whole thing in the
+ * tab. The command below streams it to disk instead.
+ */
+function ExportsTable({ exports }: { exports: CatalogExport[] }) {
+  if (exports.length === 0) return null;
+  const origin = window.location.origin;
+  return (
+    <section className="mb-8">
+      <h2 className="text-lg font-semibold mb-1">Catalog exports</h2>
+      <p className="text-sm text-muted-foreground mb-3">
+        Written by the <code>export_catalog</code> task, for catalogs BOOM cannot
+        fetch again. Download these, publish them somewhere durable, then put the
+        URL in the catalog's boompy module so every deployment can ingest it.
+      </p>
+      {exports.map((exp) => (
+        <div key={exp.collection} className="border rounded-lg p-3 mb-3">
+          <div className="flex items-center justify-between gap-4 mb-2">
+            <span className="font-medium">{exp.collection}</span>
+            <span className="text-xs text-muted-foreground font-mono">
+              {exp.manifest?.rows?.toLocaleString() ?? "?"} rows
+              {exp.manifest?.source_database ? ` · from ${exp.manifest.source_database}` : ""}
+              {exp.manifest?.code_version?.git_sha
+                ? ` · ${exp.manifest.code_version.git_sha.slice(0, 8)}`
+                : ""}
+            </span>
+          </div>
+          <table className="w-full text-sm">
+            <tbody>
+              {exp.files.map((f) => (
+                <tr key={f.name} className="border-b last:border-0">
+                  <td className="py-1 pr-4 font-mono text-xs">{f.name}</td>
+                  <td className="py-1 pr-4 tabular-nums text-right w-24">{bytes(f.bytes)}</td>
+                  <td className="py-1">
+                    <code className="text-[11px] text-muted-foreground break-all">
+                      curl -H "Authorization: Bearer $TOKEN" -O{" "}
+                      {`${origin}/api/catalogs/exports/${exp.collection}/${f.name}`}
+                    </code>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ))}
+    </section>
+  );
+}
+
 function TaskCatalogue({
   types,
   onSubmit,
@@ -699,6 +762,7 @@ export default function Admin() {
   const [runs, setRuns] = useState<TaskRun[]>([]);
   const [taskTypes, setTaskTypes] = useState<TaskType[]>([]);
   const [enrichment, setEnrichment] = useState<EnrichmentDrift[]>([]);
+  const [exports, setExports] = useState<CatalogExport[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -706,16 +770,18 @@ export default function Admin() {
 
   const refresh = useCallback(async () => {
     try {
-      const [status, recent, types, drift] = await Promise.all([
+      const [status, recent, types, drift, exported] = await Promise.all([
         fetchCatalogStatus(),
         fetchTaskRuns(),
         fetchTaskTypes(),
         fetchEnrichmentStatus(),
+        fetchCatalogExports(),
       ]);
       setCatalogs(status);
       setRuns(recent);
       setTaskTypes(types);
       setEnrichment(drift);
+      setExports(exported);
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -849,6 +915,7 @@ export default function Admin() {
               busy={busy}
               error={error}
             />
+            <ExportsTable exports={exports} />
             {selected && <RunDetail runId={selected} onClose={() => setSelected(null)} />}
             <EnrichmentDriftTable
               drift={enrichment}

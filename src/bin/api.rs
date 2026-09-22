@@ -195,6 +195,8 @@ async fn main() -> std::io::Result<()> {
                 .service(routes::catalogs::get_catalog_indexes)
                 .service(routes::catalogs::get_catalog_sample)
                 .service(routes::catalogs::get_catalog_status)
+                .service(routes::catalogs::get_catalog_exports)
+                .service(routes::catalogs::download_catalog_export)
                 .service(routes::tasks::get_task_types)
                 .service(routes::tasks::submit_task)
                 .service(routes::tasks::get_tasks)

@@ -159,6 +159,23 @@ export function unacceptEnrichmentSet(setId: number): Promise<unknown> {
   return request<unknown>(`/enrichment/sets/${setId}/unaccept`, { method: "POST" }, null);
 }
 
+/** One catalog export sitting on the task worker's disk, written by
+ *  `export_catalog` and waiting to be published somewhere durable. */
+export type CatalogExport = {
+  collection: string;
+  files: { name: string; bytes: number }[];
+  manifest: {
+    rows?: number;
+    fields?: string[];
+    source_database?: string;
+    code_version?: { package_version: string; git_sha?: string };
+  } | null;
+};
+
+export function fetchCatalogExports(): Promise<CatalogExport[]> {
+  return request<CatalogExport[]>("/catalogs/exports", undefined, []);
+}
+
 export function fetchCatalogStatus(): Promise<CatalogStatus[]> {
   return request<CatalogStatus[]>("/catalogs/status", undefined, []);
 }
