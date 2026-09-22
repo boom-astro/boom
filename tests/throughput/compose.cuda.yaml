@@ -6,6 +6,7 @@ volumes:
 services:
   scheduler:
     image: boom-astro/boom-gpu:latest
+    pull_policy: build
     build:
       context: ${BOOM_REPO_ROOT:?Variable not set}
       dockerfile: ${BOOM_REPO_ROOT:?Variable not set}/Dockerfile.gpu
