@@ -504,3 +504,38 @@ Creating a user at Caltech does not itself create it at UMN, but the UMN side
 runs a recurring sync that carries accounts over, Babamul ones included, so
 both instances end up holding the same users.
 
+## Container images
+
+Release builds publish `ghcr.io/boom-astro/boom` (`.github/workflows/build.yaml`),
+multi-arch and with a build-provenance attestation. Nothing in it is specific to
+a deployment: everything comes from config and the environment at runtime.
+
+The deploy workflow **builds on the host** rather than pulling. Every compose
+service built from this repo sets `pull_policy: ${BOOM_PULL_POLICY:-build}`, so
+by default compose builds from the checkout even when an image of that name
+exists in a registry. With both an `image:` and a `build:` and no policy,
+compose pulls whenever the image is absent locally, which silently runs the
+registry's build instead of the checkout, and fails with "pull access denied"
+for an image that was never published.
+
+To run a published image instead, set both of these, in `.env` or as GitHub
+variables for the deploy workflow:
+
+- `BOOM_IMAGE` to the image, e.g. `ghcr.io/boom-astro/boom:v1.2.3`
+- `BOOM_PULL_POLICY` to `always` or `missing`
+
+Setting `BOOM_IMAGE` alone only changes the name the local build is tagged with.
+
+### The frontend is built per deployment
+
+No frontend image is published. `frontend/Dockerfile` bakes deployment-specific
+values in at build time: Vite inlines `VITE_PUBLIC_POSTHOG_KEY`,
+`VITE_PUBLIC_POSTHOG_HOST`, `VITE_PRERELEASE_MODE` and `VITE_KAFKA_DOMAIN` into
+the bundle, and the nginx API origin comes from the `BOOM_API__DOMAIN` build
+arg. An image built without them does not start: the entrypoint writes an empty
+origin into `proxy_pass`, which nginx rejects.
+
+`BOOM_FRONTEND_IMAGE` and `BOOM_FRONTEND_PULL_POLICY` are for running a frontend
+image built elsewhere *for the same deployment*. Making one image serve every
+deployment would mean building with placeholders and substituting them at
+container start, for the nginx origin and the bundle alike.
