@@ -23,6 +23,7 @@ pub mod catalog_ingest;
 pub mod context;
 pub mod copy_cutouts;
 pub mod enrich_reprocess;
+pub mod export_catalog;
 pub mod ledger;
 pub mod logs;
 pub mod migrate_fp_flux;
@@ -192,6 +193,17 @@ pub const TASKS: &[TaskSpec] = &[
         params_schema: || schema_of::<prepare_catalog::PrepareCatalogParams>(),
     },
     TaskSpec {
+        id: export_catalog::TASK_TYPE,
+        title: "Export a catalog collection to files",
+        description: "Write a catalog collection to gzipped CSV chunks plus a manifest, so \
+                      a catalog BOOM cannot fetch again can be staged and ingested \
+                      elsewhere. Reads only; writes no documents.",
+        // Re-running overwrites the same files from the same collection.
+        idempotent: true,
+        destructive: false,
+        params_schema: || schema_of::<export_catalog::ExportCatalogParams>(),
+    },
+    TaskSpec {
         id: backfill_host_galaxy::TASK_TYPE,
         title: "Backfill host galaxy associations",
         description: "Score each alerts_aux record's galaxy cross-matches and write \
@@ -358,6 +370,12 @@ pub fn validate_params(task_type: &str, params: &serde_json::Value) -> Result<()
                     .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
             parsed.validate_params().map_err(TaskError::InvalidParams)
         }
+        export_catalog::TASK_TYPE => {
+            let parsed: export_catalog::ExportCatalogParams =
+                serde_json::from_value(params.clone())
+                    .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            parsed.validate_params().map_err(TaskError::InvalidParams)
+        }
         backfill_host_galaxy::TASK_TYPE => {
             let parsed: backfill_host_galaxy::BackfillHostGalaxyParams =
                 serde_json::from_value(params.clone())
@@ -453,6 +471,15 @@ pub fn single_flight_key(
                 .map(|survey| doc! { "survey": survey })
                 .unwrap_or_default(),
         ),
+        // Keyed by collection: two exports of the same one would write the same
+        // files over each other.
+        export_catalog::TASK_TYPE => Some(
+            params
+                .get("collection")
+                .and_then(|v| v.as_str())
+                .map(|collection| doc! { "collection": collection })
+                .unwrap_or_default(),
+        ),
         // Keyed by survey: two runs over the same aux collection would rescore
         // and rewrite the same records.
         backfill_host_galaxy::TASK_TYPE => Some(
@@ -502,6 +529,11 @@ pub async fn dispatch(
             let params = copy_cutouts::CopyCutoutsParams::deserialize(params)
                 .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
             copy_cutouts::run(ctx, params).await
+        }
+        export_catalog::TASK_TYPE => {
+            let params = export_catalog::ExportCatalogParams::deserialize(params)
+                .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            export_catalog::run(ctx, params).await
         }
         backfill_host_galaxy::TASK_TYPE => {
             let params = backfill_host_galaxy::BackfillHostGalaxyParams::deserialize(params)

@@ -282,6 +282,33 @@ impl super::arrow::FromRecordBatch for Ned {
 impl HasCoordinates for Ned {}
 
 // ---------------------------------------------------------------------------
+// LSPSC -- gzipped CSV, exported from BOOM's own copy
+// ---------------------------------------------------------------------------
+
+/// One Legacy Survey point-source score.
+///
+/// The field names are the ones crossmatch config already projects (`score`,
+/// `mag_white`), not the ones the upstream service returns (`xgboost`,
+/// `white_mag`). The collection was loaded under these names before BOOM had a
+/// definition for it, and renaming them now would break every deployment's
+/// crossmatch projection and the filters reading them.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Lspsc {
+    /// The Legacy Survey id, which the upstream service calls `lsid`.
+    #[serde(rename = "_id")]
+    pub id: i64,
+    pub ra: f64,
+    pub dec: f64,
+    /// Probability the source is unresolved. Optional because an export of a
+    /// collection loaded before the column existed would leave it empty rather
+    /// than fail.
+    pub score: Option<f64>,
+    pub mag_white: Option<f64>,
+}
+
+impl HasCoordinates for Lspsc {}
+
+// ---------------------------------------------------------------------------
 // AllWISE -- parquet
 // ---------------------------------------------------------------------------
 

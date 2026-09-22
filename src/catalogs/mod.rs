@@ -68,6 +68,9 @@ pub enum Reader {
     PanStarrs,
     /// Legacy Survey DR10 tractor joined to photo-z, staged parquet partitions.
     LsDr10PhotoZ,
+    /// Legacy Survey point-source scores, staged gzipped CSV exported from
+    /// BOOM's own copy.
+    Lspsc,
 }
 
 /// Where a catalog's files come from, which decides whether BOOM may delete
@@ -225,6 +228,19 @@ pub const CATALOGS: &[CatalogDef] = &[
                       dataset but does not build it: the join is ~135 GB out-of-core and \
                       runs offline. Stage the built dataset before ingesting.",
         reader: Reader::LsDr10PhotoZ,
+        source: Source::Staged,
+        aliases: &[],
+    },
+    CatalogDef {
+        id: "lspsc",
+        collection: "LSPSC",
+        title: "Legacy Survey Point Source Catalog",
+        description: "Morphological resolved/unresolved scores for 3.1e9 LS DR10 sources \
+                      (Liu et al. 2025, arXiv:2505.17174). Published upstream as a \
+                      cone-search service rather than files, so BOOM ingests an export of \
+                      its own copy: run the export_catalog task, stage the result, ingest \
+                      it. See docs/catalogs.md.",
+        reader: Reader::Lspsc,
         source: Source::Staged,
         aliases: &[],
     },
@@ -680,6 +696,7 @@ async fn ingest_file(
         Reader::Galex => Ok(csv::ingest_csv::<types::Galex>(inserter, path).await?),
         Reader::Vsx => Ok(ascii::ingest_ascii::<types::Vsx>(inserter, path).await?),
         Reader::PanStarrs => Ok(arrow::ingest_parquet::<types::PanStarrs>(inserter, path).await?),
+        Reader::Lspsc => Ok(csv::ingest_csv::<types::Lspsc>(inserter, path).await?),
         Reader::LsDr10PhotoZ => {
             Ok(arrow::ingest_parquet::<types::LsDr10PhotoZ>(inserter, path).await?)
         }
@@ -920,18 +937,6 @@ pub const WITHOUT_DEFINITIONS: &[(&str, &str)] = &[
          silently match nothing",
     ),
     (
-        "LSPSC",
-        "Legacy Survey point sources carrying the morphological resolved/unresolved \
-         score of Liu et al. 2025 (arXiv:2505.17174), which crossmatch config reads as \
-         `score` and `mag_white` to call an LSST object stellar or hosted. Published as \
-         a query service rather than an archival download: ls-xgboost.lbl.gov answers \
-         cone searches (/getsources, radius <= 300 arcsec, optional mag_limit on \
-         white_mag), with the model code at github.com/slowdivePTG/LS-PSC. There is no \
-         bulk file set to list and fetch, so the collection is populated outside BOOM \
-         and the test workflow creates it empty. A bulk export would make this an \
-         ordinary CatalogDef",
-    ),
-    (
         "TNS",
         "the Transient Name Server is a live, credentialed feed rather than an archival \
          download, and is populated outside the catalog ingest path",
@@ -939,7 +944,7 @@ pub const WITHOUT_DEFINITIONS: &[(&str, &str)] = &[
 ];
 
 /// Names a crossmatch entry may use without having an ingest definition.
-fn is_known_without_definition(collection: &str) -> bool {
+pub fn is_known_without_definition(collection: &str) -> bool {
     WITHOUT_DEFINITIONS
         .iter()
         .any(|(name, _)| *name == collection)
@@ -1137,7 +1142,7 @@ mod crossmatch_validation_tests {
 
     #[test]
     fn a_collection_we_cannot_build_is_accepted_by_name() {
-        // TNS is a live credentialed feed and LSPSC is built outside BOOM;
+        // TNS is a live credentialed feed and LSDR10 is built outside BOOM;
         // both are real crossmatch targets and must not fail startup.
         assert!(validate_crossmatch(&crossmatch(&["TNS", "LSPSC"])).is_ok());
     }
@@ -1174,7 +1179,7 @@ mod source_tests {
     use super::*;
 
     #[test]
-    fn only_the_offline_built_catalog_is_staged() {
+    fn staged_catalogs_are_the_ones_boom_cannot_download() {
         // Everything else is fetched from an archive and its chunks are deleted
         // after ingest; getting this backwards for a fetched catalog would fill
         // the disk, and for a staged one would destroy the artifact.
@@ -1183,7 +1188,11 @@ mod source_tests {
             .filter(|c| c.source == Source::Staged)
             .map(|c| c.id)
             .collect();
-        assert_eq!(staged, vec!["ls-dr10-photoz"]);
+        // ls-dr10-photoz is built offline by a join too big to do chunk by chunk;
+        // lspsc is published upstream as a cone-search API, so BOOM ingests an
+        // export of its own copy. Neither can be fetched, and neither may have
+        // its files deleted after ingest.
+        assert_eq!(staged, vec!["ls-dr10-photoz", "lspsc"]);
     }
 
     #[test]

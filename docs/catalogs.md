@@ -124,6 +124,7 @@ still resolves to the same catalog definition.
 | `galex` | `GALEX` | gzipped CSV | per release | Ultraviolet FUV/NUV photometry from the All-Sky Imaging Survey. |
 | `vsx` | `VSX` | fixed-width text | 1 | Variability types, magnitudes, epochs and periods for known and suspected variable stars. |
 | `panstarrs` | `PS1_DR2` | parquet | HEALPix partitions | Mean PSF magnitudes in grizy, from the HATS mirror of the DR2 otmo table. Requester-pays S3. Does not include the PS1-STRM `strm_*` columns crossmatch config projects. |
+| `lspsc` | `LSPSC` | gzipped CSV, **staged** | one per exported chunk | Morphological resolved/unresolved scores for 3.1×10⁹ LS DR10 sources ([Liu et al. 2025](https://arxiv.org/abs/2505.17174)). Upstream is a cone-search API, so BOOM ingests an export of its own copy — see below. |
 | `ls-dr10-photoz` | `LS_DR10_PHOTOZ` | parquet, **staged** | one per hive partition | Tractor positions joined to photo-z on `lsid`. Built offline — see below. |
 
 ### Staged catalogs
@@ -143,27 +144,47 @@ staged file** — for a fetched catalog the chunk is a cache and deleting it is
 what keeps peak disk at one chunk; for a staged one the files *are* the artifact,
 and rebuilding one is hours of work over hundreds of gigabytes.
 
-Three crossmatch targets have no definition, and are listed in
+Two crossmatch targets have no definition, and are listed in
 `WITHOUT_DEFINITIONS` in `src/catalogs/mod.rs`. Config load rejects any name
 that is neither defined nor listed there:
 
-- **`LSPSC`** — Legacy Survey point sources carrying the morphological
-  resolved/unresolved score of [Liu et al.
-  2025](https://arxiv.org/abs/2505.17174), which scores ~3×10⁹ sources. The
-  crossmatch projection reads `score` and `mag_white` from it, and that is what
-  classifies an LSST object as stellar or hosted (see the Kafka topic rules
-  page). It is published as a **query service, not an archival download**:
-  [ls-xgboost.lbl.gov](https://ls-xgboost.lbl.gov/) answers cone searches
-  (`/getsources`, radius ≤ 300″, optional `mag_limit` on `white_mag`), with the
-  model code at [LS-PSC](https://github.com/slowdivePTG/LS-PSC). There is no
-  bulk file set to list and fetch, so the collection is populated outside BOOM
-  and the test workflow creates it empty. If a bulk export appears, this becomes
-  an ordinary `CatalogDef`.
 - **`LSDR10`** — Legacy Survey DR10 with photo-z posteriors, fluxes and shape
   parameters, built outside BOOM. Not the `ls-dr10-photoz` dataset BOOM ingests
   into `LS_DR10_PHOTOZ`, whose record carries `z_phot`/`z_phot_err` only.
 - **`TNS`** — a live, credentialed feed rather than an archival download,
   populated outside the catalog ingest path.
+
+## When BOOM is the provenance
+
+Some catalogs cannot be fetched again. `LSPSC` is the worked example: Liu et al.
+2025 publish the scores as a cone-search service
+([ls-xgboost.lbl.gov](https://ls-xgboost.lbl.gov/), `/getsources/{ra}/{dec}/{radius}`,
+radius capped at 300″) rather than as files. Reconstructing 3.1×10⁹ rows through
+that endpoint would be on the order of a million requests and hundreds of
+gigabytes against someone else's research server, to rebuild something we
+already hold.
+
+So BOOM exports its own copy and ingests that:
+
+1. **`export_catalog`** writes the collection to gzipped CSV chunks and a
+   `manifest.json` naming the columns, the row count, the source database and
+   the release that wrote it. It is read-only — it writes files, never
+   documents, so there is no ledger entry.
+2. **Stage the directory** where the ingest expects it: `$BOOM_LSPSC_DIR`, or
+   where the export already put it, `<catalog data path>/export/LSPSC`.
+3. **Ingest it** like any staged catalog. As with `ls-dr10-photoz`, BOOM never
+   deletes a staged file: the files are the artifact, not a cache of one.
+
+The column list is a required parameter rather than something inferred from the
+first document, because a column only some rows carry would otherwise vanish
+from the export without anyone noticing. For `LSPSC` those columns are `_id`,
+`ra`, `dec`, `score` and `mag_white` — the names crossmatch config already
+projects, which are not the upstream service's names (`lsid`, `xgboost`,
+`white_mag`).
+
+Only catalogs can be exported. Alert and user collections are refused: a task
+that writes any collection to a file on disk is an exfiltration primitive rather
+than a feature.
 
 ## The order of operations
 
