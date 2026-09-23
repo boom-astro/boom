@@ -58,6 +58,7 @@ async fn validate_watchlist(
     Ok(())
 }
 
+use crate::utils::enrichment_schema::enrichment_fields;
 use crate::utils::moc::{moc_from_ascii, moc_hpx_stage};
 use actix_web::{delete, get, patch, post, web, HttpResponse};
 use apache_avro::AvroSchema;
@@ -1401,6 +1402,36 @@ pub struct DecamAlertToFilter {
 }
 
 /// Get a schema of a survey's data available at filtering time
+/// Fields BOOM adds to an alert after ingestion
+///
+/// The Avro schema describes the packet IPAC ships. A filter runs against the
+/// enriched document, and these are the paths it can reference that the packet
+/// does not describe.
+#[utoipa::path(
+    get,
+    path = "/filters/enrichment/{survey_name}",
+    params(
+        ("survey_name" = Survey, Path, description = "Name of the survey (e.g., 'ZTF')"),
+    ),
+    responses(
+        (status = 200, description = "Enrichment fields returned", body = serde_json::Value),
+    ),
+    tags=["Filters"]
+)]
+#[get("/filters/enrichment/{survey_name}")]
+pub async fn get_filter_enrichment(
+    path: web::Path<(Survey,)>,
+    config: web::Data<AppConfig>,
+) -> HttpResponse {
+    let survey = path.into_inner().0;
+    let crossmatch = config.crossmatch.get(&survey).cloned().unwrap_or_default();
+    let fields = enrichment_fields(&survey, &crossmatch, config.host_galaxy.enabled);
+    response::ok(
+        &format!("enrichment fields for survey {}", survey),
+        serde_json::json!({ "survey": survey.to_string(), "fields": fields }),
+    )
+}
+
 #[utoipa::path(
     get,
     path = "/filters/schemas/{survey_name}",
