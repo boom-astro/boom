@@ -9,6 +9,13 @@
 //! Milvus is column-oriented on the wire: a batch of N rows is sent as one
 //! [`FieldData`] per column, each holding N values in row order. The embedding
 //! column is a single flat `FloatArray` of `N * dim` floats plus the `dim`.
+//!
+//! "Latest wins" has to be enforced here, not left to Milvus: a single batch
+//! can carry several alerts for one object, and duplicate primary keys within
+//! one `Upsert` resolve by position in the request, which is Kafka arrival
+//! order. See [`latest_per_object`].
+
+use std::collections::HashMap;
 
 use tracing::{debug, instrument};
 
@@ -37,7 +44,12 @@ pub struct EmbeddingRow {
 impl MilvusClient {
     /// Upsert a batch of fusion embeddings, one row per object. Existing rows
     /// with the same `object_id` are replaced. Returns the number of rows
-    /// Milvus reports as upserted.
+    /// Milvus reports as upserted, which is the deduplicated count and so may
+    /// be smaller than `rows.len()`.
+    ///
+    /// `rows` may hold several alerts for the same object; only the newest of
+    /// each is sent, so the stored vector never goes backwards in time within
+    /// a batch. See [`latest_per_object`].
     ///
     /// Every embedding must have exactly `collection.dim` floats; a mismatch
     /// is rejected before anything is sent, since Milvus would reject the whole
@@ -52,12 +64,21 @@ impl MilvusClient {
             return Ok(0);
         }
 
+        let deduped = latest_per_object(rows);
+        if deduped.len() < rows.len() {
+            debug!(
+                received = rows.len(),
+                sent = deduped.len(),
+                "batch held repeat alerts for some objects; keeping the newest of each"
+            );
+        }
+
         let config = self.config().clone();
         let request = build_upsert_request(
             &config.database,
             &config.collection.name,
             config.collection.dim,
-            rows,
+            &deduped,
         )?;
 
         let result = self.service().upsert(request).await?.into_inner();
@@ -69,13 +90,54 @@ impl MilvusClient {
     }
 }
 
+/// Reduce a batch to one row per `object_id`, keeping each object's newest
+/// alert.
+///
+/// The enrichment worker emits one row per alert, so a batch that happens to
+/// contain two alerts for the same object yields two rows sharing a primary
+/// key. Milvus applies those in request order, which is Kafka arrival order —
+/// close to `jd` order in practice, but not guaranteed, and reversed outright
+/// by a backfill. Picking the newest here makes the outcome depend on the data
+/// rather than on delivery order.
+///
+/// `candid` breaks ties so the choice stays deterministic when one object has
+/// two alerts at the same epoch. First-appearance order is preserved.
+fn latest_per_object(rows: &[EmbeddingRow]) -> Vec<&EmbeddingRow> {
+    // Each object's slot in `kept`, so a repeat replaces in place.
+    let mut slot: HashMap<&str, usize> = HashMap::with_capacity(rows.len());
+    let mut kept: Vec<&EmbeddingRow> = Vec::with_capacity(rows.len());
+
+    for row in rows {
+        match slot.get(row.object_id.as_str()) {
+            Some(&i) => {
+                if is_newer(row, kept[i]) {
+                    kept[i] = row;
+                }
+            }
+            None => {
+                slot.insert(row.object_id.as_str(), kept.len());
+                kept.push(row);
+            }
+        }
+    }
+
+    kept
+}
+
+/// Whether `a` supersedes `b`. `total_cmp` rather than `partial_cmp` so a NaN
+/// `jd` orders deterministically instead of making every comparison false and
+/// silently pinning whichever row landed first.
+fn is_newer(a: &EmbeddingRow, b: &EmbeddingRow) -> bool {
+    a.jd.total_cmp(&b.jd).then(a.candid.cmp(&b.candid)).is_gt()
+}
+
 /// Validate the embeddings and transpose the rows into Milvus's column-oriented
 /// `UpsertRequest`.
 fn build_upsert_request(
     db_name: &str,
     collection_name: &str,
     dim: i64,
-    rows: &[EmbeddingRow],
+    rows: &[&EmbeddingRow],
 ) -> Result<UpsertRequest, MilvusError> {
     for row in rows {
         if row.embedding.len() as i64 != dim {
@@ -205,6 +267,18 @@ mod tests {
         }
     }
 
+    fn refs(rows: &[EmbeddingRow]) -> Vec<&EmbeddingRow> {
+        rows.iter().collect()
+    }
+
+    /// The ids kept, in the order they will be sent.
+    fn kept_ids(rows: &[EmbeddingRow]) -> Vec<&str> {
+        latest_per_object(rows)
+            .iter()
+            .map(|r| r.object_id.as_str())
+            .collect()
+    }
+
     #[test]
     fn build_upsert_request_rejects_dimension_mismatch() {
         let rows = vec![
@@ -212,7 +286,7 @@ mod tests {
             row("ZTF_B", vec![0.1, 0.2], 2, 2400001.5), // wrong length
         ];
 
-        let err = build_upsert_request("db", "coll", 3, &rows).unwrap_err();
+        let err = build_upsert_request("db", "coll", 3, &refs(&rows)).unwrap_err();
         match err {
             MilvusError::DimensionMismatch { expected, got } => {
                 assert_eq!(expected, 3);
@@ -229,7 +303,7 @@ mod tests {
             row("ZTF_B", vec![3.0, 4.0], 20, 2400001.5),
         ];
 
-        let request = build_upsert_request("mydb", "mycoll", 2, &rows).unwrap();
+        let request = build_upsert_request("mydb", "mycoll", 2, &refs(&rows)).unwrap();
 
         assert_eq!(request.db_name, "mydb");
         assert_eq!(request.collection_name, "mycoll");
@@ -280,6 +354,150 @@ mod tests {
                 data: Some(scalar_field::Data::DoubleData(arr)),
             })) => assert_eq!(arr.data, vec![2400000.5, 2400001.5]),
             other => panic!("jd column malformed: {other:?}"),
+        }
+    }
+
+    /// A batch with no repeats must pass through untouched — dedup is not
+    /// allowed to reorder or drop anything in the common case.
+    #[test]
+    fn distinct_objects_pass_through_in_order() {
+        let rows = vec![
+            row("ZTF_A", vec![1.0], 10, 2400002.5),
+            row("ZTF_B", vec![2.0], 20, 2400000.5),
+            row("ZTF_C", vec![3.0], 30, 2400001.5),
+        ];
+
+        assert_eq!(kept_ids(&rows), vec!["ZTF_A", "ZTF_B", "ZTF_C"]);
+    }
+
+    /// The bug this guards: the newest alert arriving *first* in the batch.
+    /// Positional last-write-wins would store the stale vector.
+    #[test]
+    fn newest_jd_wins_when_it_arrives_first() {
+        let rows = vec![
+            row("ZTF_A", vec![9.0], 11, 2400009.5), // newest, but earlier in the batch
+            row("ZTF_A", vec![1.0], 12, 2400001.5),
+        ];
+
+        let kept = latest_per_object(&rows);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].jd, 2400009.5);
+        assert_eq!(kept[0].candid, 11);
+        assert_eq!(kept[0].embedding, vec![9.0]);
+    }
+
+    #[test]
+    fn newest_jd_wins_when_it_arrives_last() {
+        let rows = vec![
+            row("ZTF_A", vec![1.0], 11, 2400001.5),
+            row("ZTF_A", vec![9.0], 12, 2400009.5),
+        ];
+
+        let kept = latest_per_object(&rows);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].jd, 2400009.5);
+    }
+
+    /// Two alerts at the same epoch: `candid` decides, so the batch does not
+    /// resolve differently run to run.
+    #[test]
+    fn equal_jd_breaks_the_tie_on_candid() {
+        let rows = vec![
+            row("ZTF_A", vec![2.0], 200, 2400001.5),
+            row("ZTF_A", vec![1.0], 100, 2400001.5),
+        ];
+
+        let kept = latest_per_object(&rows);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].candid, 200);
+
+        // Same batch, opposite arrival order, same winner.
+        let flipped = vec![
+            row("ZTF_A", vec![1.0], 100, 2400001.5),
+            row("ZTF_A", vec![2.0], 200, 2400001.5),
+        ];
+        assert_eq!(latest_per_object(&flipped)[0].candid, 200);
+    }
+
+    /// Dedup is per object: repeats of one object must not disturb the others,
+    /// and the survivor keeps the deduplicated object's first position.
+    #[test]
+    fn dedup_is_per_object_and_holds_position() {
+        let rows = vec![
+            row("ZTF_A", vec![1.0], 10, 2400001.5),
+            row("ZTF_B", vec![2.0], 20, 2400002.5),
+            row("ZTF_A", vec![3.0], 30, 2400003.5), // newer A, arrives after B
+            row("ZTF_C", vec![4.0], 40, 2400004.5),
+        ];
+
+        let kept = latest_per_object(&rows);
+        assert_eq!(kept_ids(&rows), vec!["ZTF_A", "ZTF_B", "ZTF_C"]);
+        assert_eq!(kept[0].candid, 30, "A kept its slot but took the newer row");
+        assert_eq!(kept[1].candid, 20);
+        assert_eq!(kept[2].candid, 40);
+    }
+
+    /// Three alerts for one object, newest in the middle: the running maximum
+    /// must not be clobbered by the older row that follows it.
+    #[test]
+    fn a_later_older_row_does_not_displace_the_maximum() {
+        let rows = vec![
+            row("ZTF_A", vec![1.0], 10, 2400001.5),
+            row("ZTF_A", vec![9.0], 30, 2400009.5),
+            row("ZTF_A", vec![2.0], 20, 2400002.5),
+        ];
+
+        let kept = latest_per_object(&rows);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].jd, 2400009.5);
+    }
+
+    /// A NaN `jd` is a data bug, but it must not make the result depend on
+    /// arrival order: `total_cmp` sorts NaN above real values, either way round.
+    #[test]
+    fn nan_jd_resolves_deterministically() {
+        let nan_first = vec![
+            row("ZTF_A", vec![1.0], 10, f64::NAN),
+            row("ZTF_A", vec![2.0], 20, 2400001.5),
+        ];
+        let nan_last = vec![
+            row("ZTF_A", vec![2.0], 20, 2400001.5),
+            row("ZTF_A", vec![1.0], 10, f64::NAN),
+        ];
+
+        assert_eq!(latest_per_object(&nan_first).len(), 1);
+        assert!(latest_per_object(&nan_first)[0].jd.is_nan());
+        assert!(latest_per_object(&nan_last)[0].jd.is_nan());
+    }
+
+    /// End to end: the request Milvus receives carries one row per object.
+    #[test]
+    fn build_upsert_request_sends_one_row_per_object_after_dedup() {
+        let rows = vec![
+            row("ZTF_A", vec![1.0, 1.0], 10, 2400001.5),
+            row("ZTF_A", vec![9.0, 9.0], 30, 2400009.5),
+            row("ZTF_B", vec![2.0, 2.0], 20, 2400002.5),
+        ];
+
+        let deduped = latest_per_object(&rows);
+        let request = build_upsert_request("db", "coll", 2, &deduped).unwrap();
+
+        assert_eq!(request.num_rows, 2);
+
+        match &request.fields_data[0].field {
+            Some(Field::Scalars(ScalarField {
+                data: Some(scalar_field::Data::StringData(arr)),
+            })) => assert_eq!(arr.data, vec!["ZTF_A".to_string(), "ZTF_B".to_string()]),
+            other => panic!("object_id column malformed: {other:?}"),
+        }
+
+        // A's newer vector, not the stale one it arrived ahead of.
+        match &request.fields_data[1].field {
+            Some(Field::Vectors(VectorField {
+                data: Some(vector_field::Data::FloatVector(arr)),
+                ..
+            })) => assert_eq!(arr.data, vec![9.0, 9.0, 2.0, 2.0]),
+            other => panic!("embedding column malformed: {other:?}"),
         }
     }
 }
