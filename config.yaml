@@ -209,7 +209,7 @@ workers:
 # no `sersic` leaves a SER row on its half-light radius, no `flux_ivar_r` leaves
 # a REX row judged on size and blending alone, no `fracflux_r` reads as unblended.
 host_galaxy:
-  enabled: false
+  enabled: true
   ned_catalog: NED
   ls_dr10_catalog: LSDR10 # collection name as ingested; UMN uses LSDR10
   max_dlr: 5.0            # admission cutoff; filters should cut tighter (~4)
