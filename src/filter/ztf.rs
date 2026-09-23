@@ -640,6 +640,9 @@ pub async fn build_ztf_filter_pipeline(
                 "classifications": 1,
                 "properties": 1,
                 "coordinates": 1,
+                // Written onto the alert by the enrichment worker; without it
+                // here the fit is on the document but no filter can reach it.
+                "villar_fit": 1,
             }
         },
     ];

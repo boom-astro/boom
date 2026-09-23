@@ -1643,3 +1643,35 @@ mod tests {
         assert!(result.is_err());
     }
 }
+
+#[cfg(test)]
+mod enrichment_reachability_tests {
+    use super::*;
+
+    /// Every field the enrichment endpoint advertises has to survive the
+    /// prefix projection, or a filter on it matches nothing forever.
+    #[tokio::test]
+    async fn test_advertised_alert_fields_survive_the_projection() {
+        let mut permissions = HashMap::new();
+        permissions.insert(Survey::Ztf, vec![1]);
+        let pipeline = vec![
+            serde_json::json!({"$match": {"villar_fit.reduced_chi2": {"$lt": 2.0}}}),
+            serde_json::json!({"$project": {"objectId": 1}}),
+        ];
+        let built = crate::filter::build_ztf_filter_pipeline(&pipeline, &permissions)
+            .await
+            .expect("builds");
+        let projected = built
+            .iter()
+            .find_map(|stage| stage.get_document("$project").ok())
+            .expect("a project stage");
+
+        // The roots the endpoint advertises on the alert document itself.
+        for root in ["villar_fit", "properties", "classifications", "candidate"] {
+            assert!(
+                projected.contains_key(root),
+                "`{root}` is dropped before any filter stage runs: {projected:?}"
+            );
+        }
+    }
+}
