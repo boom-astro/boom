@@ -1550,6 +1550,7 @@ mod tests {
 #[cfg(test)]
 mod schema_tests {
     use super::*;
+    use crate::conf::{arcsec_to_radians, CatalogXmatchConfig};
 
     fn schema_str<T: AvroSchema>() -> String {
         serde_json::to_string(&T::get_schema()).unwrap()
@@ -1563,6 +1564,12 @@ mod schema_tests {
             host_galaxy: true,
             villar: true,
         };
+        let crossmatch = [CatalogXmatchConfig {
+            catalog: "NED".to_string(),
+            radius: arcsec_to_radians(300.0),
+            projection: doc! { "_id": 1, "z": 1 },
+            ..Default::default()
+        }];
         for (survey, schema) in [
             (Survey::Ztf, ZtfAlertToFilter::get_schema()),
             (Survey::Lsst, LsstAlertToFilter::get_schema()),
@@ -1576,7 +1583,7 @@ mod schema_tests {
                 .iter()
                 .map(|f| f["name"].as_str().unwrap().to_string())
                 .collect();
-            for field in enrichment_fields(&survey, &[], enabled) {
+            for field in enrichment_fields(&survey, &crossmatch, enabled) {
                 let root = field.path.split('.').next().unwrap();
                 assert!(
                     !declared.iter().any(|d| d == root),
