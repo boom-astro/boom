@@ -1,9 +1,5 @@
-//! The enrichment paths no Avro schema declares.
-//!
-//! `ZtfAlertToFilter` and its siblings already cover the enrichment that lands in
-//! a struct field: `properties`, `classifications`, the joined photometry arrays.
-//! What is left is `$set` as dotted paths whose shape depends on config or on what
-//! matched, so BOOM is the only place that can enumerate it.
+//! Enrichment paths no Avro schema declares: dotted paths whose shape follows the
+//! deployment's config and what matched, so only BOOM can enumerate them.
 
 use crate::conf::CatalogXmatchConfig;
 use crate::utils::enums::Survey;
@@ -11,12 +7,6 @@ use serde::Serialize;
 use utoipa::ToSchema;
 
 /// Villar fit parameters, in the order the fitter reports them.
-///
-/// Declared here rather than read from `villar_pso`, which sits behind the
-/// `gpu` feature that the API advertising these is not built with. The
-/// enrichment worker's skipped-fit path reads these same two arrays, so the
-/// advertised list and the written list cannot drift apart; a `gpu` build also
-/// runs a test pinning them to the crate's own constants.
 pub const VILLAR_PARAMS: [&str; 7] = [
     "A",
     "beta",
@@ -30,18 +20,13 @@ pub const VILLAR_PARAMS: [&str; 7] = [
 /// Bands the fit is run per.
 pub const VILLAR_BANDS: [&str; 2] = ["ZTF_r", "ZTF_g"];
 
-/// A field a filter can reference, and what its author has to know to use it.
 #[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
 pub struct EnrichmentField {
-    /// Dotted path exactly as a pipeline writes it.
     pub path: String,
-    /// BSON type of the value, or `object` where the shape is catalog-defined.
     pub value_type: &'static str,
-    /// Whether a document may not carry the field at all, which no comparison
-    /// matches and `$exists` reports.
+    /// Absent documents match no comparison, and `$exists` reports it.
     pub optional: bool,
-    /// Whether a present value can be NaN. NaN fails every comparison while
-    /// `$exists` still reports true, so absent and unavailable differ.
+    /// NaN fails every comparison while `$exists` still reports true.
     pub nan_possible: bool,
     pub description: String,
 }
@@ -64,11 +49,7 @@ impl EnrichmentField {
     }
 }
 
-/// Fields the Villar fitter writes onto a ZTF alert.
-///
-/// A fit that is skipped writes every one of these as NaN rather than leaving
-/// them out, so a filter comparing on one silently matches nothing for those
-/// alerts instead of erroring.
+/// A skipped fit writes every one of these as NaN rather than omitting them.
 fn villar_fields() -> Vec<EnrichmentField> {
     let mut out = vec![
         EnrichmentField::new(
@@ -100,14 +81,7 @@ fn villar_fields() -> Vec<EnrichmentField> {
     out
 }
 
-/// Cross-match fields, from the catalogs the survey is configured against.
-///
-/// Generated from each catalog's projection rather than listed, so a catalog
-/// added to the config appears here without anyone editing this file.
-///
-/// The join that brings these in flattens them to the top level, so a filter
-/// names `cross_matches.<catalog>`; a path through `aux` reads as empty and is
-/// rejected when the filter is saved.
+/// Generated from each catalog's projection, so config alone decides the list.
 fn cross_match_fields(crossmatch: &[CatalogXmatchConfig]) -> Vec<EnrichmentField> {
     let mut out = Vec::new();
     for catalog in crossmatch {
@@ -140,10 +114,8 @@ fn cross_match_fields(crossmatch: &[CatalogXmatchConfig]) -> Vec<EnrichmentField
     out
 }
 
-/// Association products, written as sub-documents rather than struct fields.
 fn association_fields(survey: &Survey, host_galaxy_enabled: bool) -> Vec<EnrichmentField> {
     let mut out = Vec::new();
-    // A path advertised but never written reads as an empty night, not a missing enricher.
     if host_galaxy_enabled {
         out.push(EnrichmentField::new(
             "host_galaxy.best_host.d_dlr",
@@ -162,8 +134,6 @@ fn association_fields(survey: &Survey, host_galaxy_enabled: bool) -> Vec<Enrichm
             "Past alerts sharing this alert's solar system designation, oldest \
              first, within a year and inside the association radius.",
         ));
-        // Each entry carries its own geometry, so a window statistic has one
-        // value per point rather than the alert's.
         for (leaf, value_type, nullable, what) in [
             (
                 "designation",
@@ -209,18 +179,13 @@ fn association_fields(survey: &Survey, host_galaxy_enabled: bool) -> Vec<Enrichm
     out
 }
 
-/// The enrichers a deployment runs, since a field exists only if one wrote it.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct EnabledEnrichers {
     pub host_galaxy: bool,
-    /// The fit runs on a GPU context, so this follows `gpu.is_active()`.
     pub villar: bool,
 }
 
 /// Every field a filter can reference that the Avro packet does not describe.
-/// Only what this deployment actually writes: a caller passes the flags that
-/// decide whether an enricher runs, so the list describes the alerts a filter
-/// will see rather than the alerts BOOM could produce under some config.
 pub fn enrichment_fields(
     survey: &Survey,
     crossmatch: &[CatalogXmatchConfig],
@@ -239,8 +204,6 @@ pub fn enrichment_fields(
 mod tests {
     use super::*;
 
-    /// The count is two plus one per parameter per band, and every one of them
-    /// can be NaN, which is the part a filter author gets wrong.
     #[test]
     fn test_villar_declares_every_field_the_fitter_writes() {
         let fields = villar_fields();
@@ -259,8 +222,6 @@ mod tests {
         }
     }
 
-    /// The names come from the crate that does the fitting, so a `gpu` build
-    /// fails here rather than letting the advertised list drift from it.
     #[cfg(feature = "gpu")]
     #[test]
     fn test_villar_names_match_the_fitter() {
@@ -268,7 +229,6 @@ mod tests {
         assert_eq!(VILLAR_BANDS, villar_pso::FILTERS);
     }
 
-    /// A catalog in the config appears without this file being edited.
     #[test]
     fn test_cross_matches_follow_the_configured_catalogs() {
         let catalog = CatalogXmatchConfig {
@@ -282,12 +242,9 @@ mod tests {
         assert!(paths.contains(&"cross_matches.NED"));
         assert!(paths.contains(&"cross_matches.NED.z"));
         assert!(paths.contains(&"cross_matches.NED.Diam"));
-        // `_id` is the catalog's own key, not something to filter on.
         assert!(!paths.contains(&"cross_matches.NED._id"));
     }
 
-    /// Advertising a field nothing writes is the ambiguity this endpoint exists
-    /// to remove: a filter on it matches nothing, which reads as a quiet night.
     #[test]
     fn test_host_galaxy_is_advertised_only_when_it_runs() {
         let off = enrichment_fields(&Survey::Ztf, &[], EnabledEnrichers::default());
@@ -301,11 +258,9 @@ mod tests {
         );
         assert!(!off.iter().any(|f| f.path.starts_with("host_galaxy")));
         assert!(on.iter().any(|f| f.path == "host_galaxy.best_host.d_dlr"));
-        // And it is the only difference the flag makes.
         assert_eq!(on.len(), off.len() + 1);
     }
 
-    /// The association runs on every survey, so none of them may omit the field.
     #[test]
     fn test_host_galaxy_is_advertised_for_every_survey() {
         let enabled = EnabledEnrichers {
@@ -323,8 +278,6 @@ mod tests {
         }
     }
 
-    /// The fit is ZTF-only and needs a GPU context, so a CPU deployment writes
-    /// none of these and must not offer them.
     #[test]
     fn test_villar_is_advertised_only_for_ztf_on_gpu() {
         let gpu = EnabledEnrichers {
