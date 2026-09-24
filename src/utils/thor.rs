@@ -94,7 +94,10 @@ impl Default for Config {
             // Two, matching the tracklet finder: THOR exists for the objects
             // with one detection a night, so three would exclude what it is for.
             min_detections: 2,
-            min_nights: 3,
+            // Two, as the tracklet linker uses: two nights already fixes an
+            // orbit well enough to score, and a two-night dataset is the
+            // common case a search is run over.
+            min_nights: 2,
             max_offset_deg: 2.0,
             max_rms_arcsec: 2.0,
         }

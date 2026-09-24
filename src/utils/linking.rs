@@ -3,6 +3,26 @@
 
 use std::collections::HashSet;
 
+/// Mean of angles in degrees, taken on the circle.
+///
+/// An arithmetic mean puts 359.9 and 0.1 at 180: the two are a fifth of a
+/// degree apart, and the answer is on the far side of the sky.
+///
+/// `None` when the directions cancel, which has no meaningful centre.
+pub fn circular_mean_deg(angles: impl IntoIterator<Item = f64>) -> Option<f64> {
+    let (mut sin_sum, mut cos_sum, mut n) = (0.0, 0.0, 0usize);
+    for angle in angles {
+        let radians = angle.to_radians();
+        sin_sum += radians.sin();
+        cos_sum += radians.cos();
+        n += 1;
+    }
+    if n == 0 || (sin_sum.abs() < 1e-12 && cos_sum.abs() < 1e-12) {
+        return None;
+    }
+    Some(sin_sum.atan2(cos_sum).to_degrees().rem_euclid(360.0))
+}
+
 /// The night a Julian date falls in, as an integer.
 ///
 /// JD rolls over at 12:00 UTC, which is the middle of the night for a site in
@@ -659,5 +679,38 @@ mod tests {
             &at_mag(18.0, 0.01, 'r'),
             &off
         ));
+    }
+
+    /// Thomas's case: two detections a fifth of a degree apart across the seam
+    /// average to 180 arithmetically, which is the opposite side of the sky.
+    #[test]
+    fn test_circular_mean_crosses_the_ra_seam() {
+        let across = [359.9, 0.1];
+        let arithmetic = across.iter().sum::<f64>() / across.len() as f64;
+        assert!((arithmetic - 180.0).abs() < 1e-9, "the bug being fixed");
+
+        let mean = circular_mean_deg(across).expect("a centre");
+        let offset = (mean - 360.0).abs().min(mean.abs());
+        assert!(offset < 1e-6, "circular mean landed at {mean}");
+    }
+
+    /// Away from the seam the two agree to far inside a patch. They are not
+    /// identical -- the circular mean pulls very slightly toward the centre of
+    /// the chord -- but over a patch-sized spread it is under a tenth of an
+    /// arcsecond, where the trial-orbit offset it feeds is degrees.
+    #[test]
+    fn test_circular_mean_matches_the_plain_one_away_from_the_seam() {
+        let angles = [120.0, 121.0, 122.5];
+        let plain = angles.iter().sum::<f64>() / angles.len() as f64;
+        let mean = circular_mean_deg(angles).expect("a centre");
+        let arcsec = (mean - plain).abs() * 3600.0;
+        assert!(arcsec < 0.1, "{mean} vs {plain} is {arcsec} arcsec apart");
+    }
+
+    /// Opposed directions cancel, and there is no centre to report.
+    #[test]
+    fn test_circular_mean_has_no_centre_when_directions_cancel() {
+        assert!(circular_mean_deg([0.0, 180.0]).is_none());
+        assert!(circular_mean_deg(std::iter::empty()).is_none());
     }
 }

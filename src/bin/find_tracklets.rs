@@ -7,7 +7,9 @@
 
 use boom::conf::{load_dotenv, AppConfig};
 use boom::utils::heliolinc::{default_hypotheses, link_tracklets, LinkConfig, Track};
-use boom::utils::linking::{find_tracklets, night_of, Detection, Tracklet, TrackletConfig};
+use boom::utils::linking::{
+    circular_mean_deg, find_tracklets, night_of, Detection, Tracklet, TrackletConfig,
+};
 use boom::utils::orbit_fit::{fit_orbit, Observation};
 use clap::Parser;
 use futures::StreamExt;
@@ -461,7 +463,12 @@ fn run_thor(args: &Cli, detections: &[Detection], labels: &HashMap<i64, String>)
     let clusters: Vec<(thor::Cluster, boom::utils::heliolinc::State)> = patches
         .par_iter()
         .flat_map(|patch| {
-            let ra0 = patch.iter().map(|d| d.ra).sum::<f64>() / patch.len() as f64;
+            // On the circle: a patch straddling RA 0 would otherwise centre on
+            // 180 and put every trial orbit on the far side of the sky.
+            let Some(ra0) = circular_mean_deg(patch.iter().map(|d| d.ra)) else {
+                return Vec::new();
+            };
+            // Declination does not wrap, so its mean is the ordinary one.
             let dec0 = patch.iter().map(|d| d.dec).sum::<f64>() / patch.len() as f64;
             let mut found = Vec::new();
             for (state, _r) in test_orbits(ra0, dec0, epoch, &args.thor_distances) {
