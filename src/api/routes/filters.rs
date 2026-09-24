@@ -1461,6 +1461,33 @@ mod schema_tests {
     }
 
     #[test]
+    fn ztf_filter_schema_uses_stored_applecider_names() {
+        // AppleCiDER fields are stored under their `#[serde(rename)]` names, so
+        // a filter written against the schema must see those, not the Rust ones.
+        let s = schema_str::<ZtfAlertToFilter>();
+        for field in [
+            "\"AGN-like\"",
+            "\"Superluminous SN\"",
+            "\"Variable\"",
+            "\"NuclearVariable\"",
+        ] {
+            assert!(s.contains(field), "ZTF filter schema missing {field}: {s}");
+        }
+        // The embedding goes to Milvus and is never stored in Mongo.
+        for field in [
+            "\"agn_like\"",
+            "\"variable\"",
+            "\"nuclear_variable\"",
+            "\"fusion_embedding\"",
+        ] {
+            assert!(
+                !s.contains(field),
+                "ZTF filter schema has {field}, which is not stored: {s}"
+            );
+        }
+    }
+
+    #[test]
     fn winter_filter_schema_generates_without_forced_phot() {
         // WINTER does PSF photometry (magpsf) and has no forced-photometry history,
         // so its schema exposes candidate/prv_candidates but no fp_hists.

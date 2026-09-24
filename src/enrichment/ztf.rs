@@ -511,7 +511,11 @@ pub struct ZtfAlertProperties {
 ///
 /// Used both for the calibrated leaf probabilities and for the raw Dirichlet
 /// `alpha`, which share these eight class keys.
-#[derive(Debug, Clone, Deserialize, Serialize, AvroSchema, utoipa::ToSchema)]
+///
+/// `#[serdavro]` rather than `AvroSchema`, so the filter schema carries the
+/// stored class names (`AGN-like`, ...) instead of the Rust field names.
+#[serdavro]
+#[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct AppleCiderClassProbs {
     #[serde(rename = "AGN-like")]
     pub agn_like: f32,
@@ -571,7 +575,9 @@ pub struct ZtfAlertClassifications {
     /// Evidence, hierarchy and abstention decision, all derived from `alpha`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub applecider_outputs: Option<AppleCiderOutputs>,
+    /// Goes to Milvus, never to Mongo, so it is kept out of the filter schema.
     #[serde(skip_serializing)]
+    #[avro(skip)]
     pub fusion_embedding: Option<Vec<f32>>,
 }
 

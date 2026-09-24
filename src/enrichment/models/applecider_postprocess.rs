@@ -647,8 +647,13 @@ pub fn calibrated_probs(alpha_raw: &[f32]) -> Option<Vec<f32>> {
 // -- output types -----------------------------------------------------------
 
 use apache_avro_derive::AvroSchema;
+use apache_avro_macros::serdavro;
 
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, AvroSchema, utoipa::ToSchema)]
+// `#[serdavro]` rather than `AvroSchema`: the derive ignores `#[serde(rename)]`,
+// so the filter schema would name these fields `variable`, `nuclear_variable`,
+// ... while Mongo stores `Variable`, `NuclearVariable`, ...
+#[serdavro]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, utoipa::ToSchema)]
 pub struct AppleCiderDomainProbs {
     #[serde(rename = "Variable")]
     pub variable: f32,
@@ -656,7 +661,8 @@ pub struct AppleCiderDomainProbs {
     pub transient: f32,
 }
 
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, AvroSchema, utoipa::ToSchema)]
+#[serdavro]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, utoipa::ToSchema)]
 pub struct AppleCiderFamilyProbs {
     #[serde(rename = "NuclearVariable")]
     pub nuclear_variable: f32,
