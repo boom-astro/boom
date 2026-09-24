@@ -1018,6 +1018,52 @@ impl FilterWorker for ZtfFilterWorker {
 }
 
 #[cfg(test)]
+mod enrichment_reachability_tests {
+    use super::*;
+    use crate::utils::enrichment_schema::{enrichment_fields, EnabledEnrichers};
+
+    // Roots a later stage joins in, so the prefix projection cannot carry them.
+    const JOINED: [&str; 3] = ["cross_matches", "host_galaxy", "sso_history"];
+
+    #[tokio::test]
+    async fn test_advertised_alert_fields_survive_the_projection() {
+        let built = build_ztf_filter_pipeline(
+            &vec![
+                serde_json::json!({"$match": {"candidate.drb": {"$gt": 0.5}}}),
+                serde_json::json!({"$project": {"objectId": 1}}),
+            ],
+            &HashMap::from([(Survey::Ztf, vec![1])]),
+        )
+        .await
+        .expect("builds");
+        let projected = built
+            .iter()
+            .find_map(|stage| stage.get_document("$project").ok())
+            .expect("a project stage");
+
+        let advertised = enrichment_fields(
+            &Survey::Ztf,
+            &[],
+            EnabledEnrichers {
+                host_galaxy: true,
+                villar: true,
+            },
+        );
+        assert!(advertised.iter().any(|f| f.path.starts_with("villar_fit.")));
+        for field in advertised {
+            let root = field.path.split('.').next().unwrap();
+            if JOINED.contains(&root) {
+                continue;
+            }
+            assert!(
+                projected.contains_key(root),
+                "`{root}` is dropped before any filter stage runs: {projected:?}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 mod sso_history_tests {
     use super::*;
 
