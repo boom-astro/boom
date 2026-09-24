@@ -25,6 +25,7 @@ const ResetPassword = lazy(() => import("@/pages/ResetPassword"))
 const Help = lazy(() => import("@/pages/Help"))
 const Acknowledgments = lazy(() => import("@/pages/Acknowledgments"))
 const Dashboard = lazy(() => import("@/pages/Dashboard"))
+const Embeddings = lazy(() => import("@/pages/Embeddings"))
 
 // Release mode flag - set VITE_PRERELEASE_MODE=true at build time to restrict app to landing page only
 const PRERELEASE_MODE = import.meta.env.VITE_PRERELEASE_MODE === 'true';
@@ -109,6 +110,9 @@ function LayoutRoutes() {
                   <Route path="/query" element={<ProtectedRoute><Query /></ProtectedRoute>} />
                   <Route path="/profile" element={<ProtectedRoute><Profile /></ProtectedRoute>} />
                   <Route path="/dashboard" element={<Dashboard />} />
+                  {/* Public like /dashboard. Search and count need no token; the
+                      delete form only renders for a signed-in admin. */}
+                  <Route path="/embeddings" element={<Embeddings />} />
                   <Route path="/docs/kafka" element={<KafkaDocs />} />
                   <Route path="/docs/kafka/access-guide" element={<KafkaAccessGuide />} />
                   <Route path="/docs/api" element={<ApiDocs />} />
