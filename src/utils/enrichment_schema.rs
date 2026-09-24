@@ -21,6 +21,79 @@ pub const VILLAR_PARAMS: [&str; 7] = [
 /// Bands the fit is run per.
 pub const VILLAR_BANDS: [&str; 2] = ["ZTF_r", "ZTF_g"];
 
+/// Leaf, type, nullable, description; carried by `best_host` and every `candidates` entry.
+const HOST_CANDIDATE_FIELDS: [(&str, &str, bool, &str); 19] = [
+    ("objname", "string", true, "name of the galaxy"),
+    ("catalog", "string", true, "catalog the row came from"),
+    (
+        "objtype",
+        "string",
+        true,
+        "morphological type as the catalog reports it",
+    ),
+    (
+        "size_is_isophotal",
+        "bool",
+        false,
+        "whether the size is an isophotal diameter rather than a half-light radius",
+    ),
+    (
+        "orientation_is_nominal",
+        "bool",
+        false,
+        "true when the position angle is a placeholder, which makes d_dlr directionally meaningless",
+    ),
+    ("ra", "double", false, "right ascension, degrees"),
+    ("dec", "double", false, "declination, degrees"),
+    (
+        "sep_arcsec",
+        "double",
+        false,
+        "angular separation from the transient, arcsec",
+    ),
+    ("sep_kpc", "double", true, "projected separation, kpc"),
+    (
+        "dlr_arcsec",
+        "double",
+        false,
+        "galaxy light radius toward the transient, arcsec",
+    ),
+    (
+        "d_dlr",
+        "double",
+        false,
+        "separation in units of dlr_arcsec, which is what filters cut on",
+    ),
+    (
+        "dlr_rank",
+        "int",
+        false,
+        "rank by d_dlr, 1 = the galaxy the transient sits deepest inside",
+    ),
+    (
+        "posterior",
+        "double",
+        false,
+        "normalised over all candidates considered, not just the stored ones",
+    ),
+    ("z", "double", true, "redshift"),
+    (
+        "dist_mpc",
+        "double",
+        true,
+        "adopted distance, Mpc, redshift-independent only when dist_mpc_method says so",
+    ),
+    (
+        "dist_mpc_method",
+        "string",
+        true,
+        "how dist_mpc was obtained",
+    ),
+    ("a_arcsec", "double", false, "semi-major axis, arcsec"),
+    ("b_arcsec", "double", false, "semi-minor axis, arcsec"),
+    ("pa_deg", "double", false, "position angle, degrees"),
+];
+
 #[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
 pub struct EnrichmentField {
     pub path: String,
@@ -119,16 +192,67 @@ fn cross_match_fields(crossmatch: &[CatalogXmatchConfig]) -> Vec<EnrichmentField
     out
 }
 
-fn association_fields(survey: &Survey, host_galaxy_enabled: bool) -> Vec<EnrichmentField> {
-    let mut out = Vec::new();
-    if host_galaxy_enabled {
-        out.push(EnrichmentField::new(
-            "host_galaxy.best_host.d_dlr",
+/// Everything `HostGalaxyAssociation` stores, not just the offset filters cut on.
+fn host_galaxy_fields() -> Vec<EnrichmentField> {
+    let mut out = vec![
+        EnrichmentField::new(
+            "host_galaxy.best_host",
+            "object",
+            true,
+            false,
+            "Highest-posterior candidate, duplicated from candidates[0]; null when none passed the cuts.",
+        ),
+        EnrichmentField::new(
+            "host_galaxy.candidates",
+            "array",
+            true,
+            false,
+            "Candidates that passed the d_DLR cut, best first.",
+        ),
+        EnrichmentField::new(
+            "host_galaxy.n_candidates_searched",
+            "int",
+            true,
+            false,
+            "Galaxies the cross-match supplied, before any shape or offset cut.",
+        ),
+        EnrichmentField::new(
+            "host_galaxy.n_candidates_after_dlr_cut",
+            "int",
+            true,
+            false,
+            "Galaxies surviving the d_DLR cut.",
+        ),
+        EnrichmentField::new(
+            "host_galaxy.p_host_none",
             "double",
             true,
             false,
-            "Directional light radius offset to the best host galaxy.",
-        ));
+            "Posterior that none of the candidates is the host.",
+        ),
+    ];
+    for parent in ["best_host", "candidates"] {
+        for (leaf, value_type, nullable, what) in HOST_CANDIDATE_FIELDS {
+            out.push(EnrichmentField::new(
+                format!("host_galaxy.{parent}.{leaf}"),
+                value_type,
+                true,
+                false,
+                if nullable {
+                    format!("{what}; null when the catalog did not give it.")
+                } else {
+                    format!("{what}.")
+                },
+            ));
+        }
+    }
+    out
+}
+
+fn association_fields(survey: &Survey, host_galaxy_enabled: bool) -> Vec<EnrichmentField> {
+    let mut out = Vec::new();
+    if host_galaxy_enabled {
+        out.extend(host_galaxy_fields());
     }
     if matches!(survey, Survey::Ztf) {
         out.push(EnrichmentField::new(
@@ -208,6 +332,8 @@ pub fn enrichment_fields(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::host::{HostGalaxyAssociation, StoredHostCandidate};
+    use std::collections::BTreeSet;
 
     fn xmatch_config(catalog: &str) -> CatalogXmatchConfig {
         CatalogXmatchConfig {
@@ -263,6 +389,68 @@ mod tests {
         assert!(fields.iter().any(|f| f.path == "cross_matches.NED"));
     }
 
+    fn written_paths(value: &serde_json::Value, prefix: &str, out: &mut BTreeSet<String>) {
+        match value {
+            serde_json::Value::Object(map) => {
+                for (key, child) in map {
+                    let path = format!("{prefix}.{key}");
+                    out.insert(path.clone());
+                    written_paths(child, &path, out);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    written_paths(item, prefix, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn test_host_galaxy_declares_every_stored_field() {
+        let candidate = StoredHostCandidate {
+            objname: Some("NGC 1234".to_string()),
+            catalog: Some("NED".to_string()),
+            objtype: Some("G".to_string()),
+            size_is_isophotal: true,
+            orientation_is_nominal: false,
+            ra: 1.0,
+            dec: 2.0,
+            sep_arcsec: 3.0,
+            sep_kpc: Some(4.0),
+            dlr_arcsec: 5.0,
+            d_dlr: 0.5,
+            dlr_rank: 1,
+            posterior: 0.9,
+            z: Some(0.05),
+            dist_mpc: Some(200.0),
+            dist_mpc_method: Some("z".to_string()),
+            a_arcsec: 6.0,
+            b_arcsec: 7.0,
+            pa_deg: 8.0,
+        };
+        let association = HostGalaxyAssociation {
+            best_host: Some(candidate.clone()),
+            candidates: vec![candidate],
+            n_candidates_searched: 3,
+            n_candidates_after_dlr_cut: 1,
+            p_host_none: 0.1,
+        };
+
+        let mut written = BTreeSet::new();
+        written_paths(
+            &serde_json::to_value(&association).unwrap(),
+            "host_galaxy",
+            &mut written,
+        );
+        let declared: BTreeSet<String> = host_galaxy_fields()
+            .iter()
+            .map(|f| f.path.clone())
+            .collect();
+        assert_eq!(declared, written);
+    }
+
     #[test]
     fn test_host_galaxy_is_advertised_only_when_it_runs() {
         let off = enrichment_fields(&Survey::Ztf, &[], EnabledEnrichers::default());
@@ -276,7 +464,7 @@ mod tests {
         );
         assert!(!off.iter().any(|f| f.path.starts_with("host_galaxy")));
         assert!(on.iter().any(|f| f.path == "host_galaxy.best_host.d_dlr"));
-        assert_eq!(on.len(), off.len() + 1);
+        assert_eq!(on.len(), off.len() + host_galaxy_fields().len());
     }
 
     #[test]
