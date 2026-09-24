@@ -17,6 +17,7 @@ use crate::{
     },
     utils::{
         db::{count_alerts_for_night, mongify},
+        enrichment_schema::{enrichment_fields, EnabledEnrichers, EnrichmentField},
         enums::Survey,
     },
 };
@@ -58,7 +59,6 @@ async fn validate_watchlist(
     Ok(())
 }
 
-use crate::utils::enrichment_schema::{enrichment_fields, EnabledEnrichers};
 use crate::utils::moc::{moc_from_ascii, moc_hpx_stage};
 use actix_web::{delete, get, patch, post, web, HttpResponse};
 use apache_avro::AvroSchema;
@@ -1401,6 +1401,13 @@ pub struct DecamAlertToFilter {
     pub aliases: DecamAliases,
 }
 
+#[derive(Debug, Serialize, ToSchema)]
+pub struct FilterSchemaResponse {
+    #[schema(value_type = Object)]
+    pub schema: serde_json::Value,
+    pub enrichment: Vec<EnrichmentField>,
+}
+
 /// Get the fields a survey's alerts carry at filtering time
 ///
 /// `schema` is the alert struct, fixed at compile time. `enrichment` is the rest:
@@ -1413,7 +1420,7 @@ pub struct DecamAlertToFilter {
         ("survey_name" = Survey, Path, description = "Name of the survey (e.g., 'ZTF')"),
     ),
     responses(
-        (status = 200, description = "Schema found", body = serde_json::Value),
+        (status = 200, description = "Avro schema and enrichment paths", body = FilterSchemaResponse),
         (status = 404, description = "Schema not found"),
     ),
     tags=["Filters"]
@@ -1433,19 +1440,22 @@ pub async fn get_filter_schema(
     let crossmatch = config
         .crossmatch
         .get(&survey_name)
-        .cloned()
+        .map(Vec::as_slice)
         .unwrap_or_default();
     let enrichment = enrichment_fields(
         &survey_name,
-        &crossmatch,
+        crossmatch,
         EnabledEnrichers {
             host_galaxy: config.host_galaxy.enabled,
             villar: config.gpu.is_active(),
         },
     );
-    response::ok(
+    response::ok_ser(
         &format!("filter fields for survey {}", survey_name),
-        serde_json::json!({ "schema": schema, "enrichment": enrichment }),
+        FilterSchemaResponse {
+            schema: serde_json::json!(schema),
+            enrichment,
+        },
     )
 }
 

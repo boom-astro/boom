@@ -78,6 +78,10 @@ impl Modify for BabamulSecurityAddon {
         routes::surveys::cutouts::get_cutouts,
         routes::queries::pipeline::post_pipeline_query
     ),
+    components(schemas(
+        routes::filters::FilterSchemaResponse,
+        crate::utils::enrichment_schema::EnrichmentField
+    )),
     security(
         ("api_jwt_token" = [])
     ),
