@@ -91,6 +91,10 @@ struct Cli {
     #[arg(long, value_delimiter = ',', default_value = "1.8,2.2,2.6,3.0,3.4")]
     thor_distances: Vec<f64>,
 
+    /// Distinct nights a THOR cluster must appear on. Two drops purity to 80%.
+    #[arg(long, default_value_t = 3)]
+    thor_min_nights: usize,
+
     /// Attribute detections to catalogued objects and score against `ssnamenr`.
     #[arg(long, default_value_t = false)]
     identify: bool,
@@ -410,7 +414,7 @@ fn run_thor(args: &Cli, detections: &[Detection], labels: &HashMap<i64, String>)
 
     let cfg = thor::Config {
         min_detections: args.min_detections.max(2),
-        min_nights: args.min_nights,
+        min_nights: args.thor_min_nights,
         ..thor::Config::default()
     };
 

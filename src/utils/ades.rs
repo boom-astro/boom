@@ -30,6 +30,15 @@ pub struct Uncertainty {
     pub rms_dec_arcsec: f64,
 }
 
+/// Survey floor, widened to the tracklet's own one-axis scatter where larger.
+fn quoted(floor: Uncertainty, tracklet_rms_arcsec: f64) -> Uncertainty {
+    let per_axis = tracklet_rms_arcsec / std::f64::consts::SQRT_2;
+    Uncertainty {
+        rms_ra_arcsec: floor.rms_ra_arcsec.max(per_axis),
+        rms_dec_arcsec: floor.rms_dec_arcsec.max(per_axis),
+    }
+}
+
 /// UTC timestamp for a Julian date, to millisecond precision.
 pub fn jd_to_iso8601(jd: f64) -> String {
     let unix_seconds = (jd - 2_440_587.5) * 86_400.0;
@@ -135,7 +144,7 @@ pub fn to_psv(
     tracklets: &[Tracklet],
     detections: &[Detection],
     header: &SubmissionHeader,
-    uncertainty: Uncertainty,
+    floor: Uncertainty,
 ) -> String {
     let by_id: HashMap<i64, &Detection> = detections.iter().map(|d| (d.id, d)).collect();
 
@@ -153,6 +162,7 @@ pub fn to_psv(
             continue;
         }
         rows.sort_by(|a, b| a.jd.partial_cmp(&b.jd).unwrap_or(std::cmp::Ordering::Equal));
+        let uncertainty = quoted(floor, tracklet.rms_arcsec);
         for detection in rows {
             out.push_str(&row(&trk_sub, detection, header, uncertainty));
             out.push('\n');
@@ -170,7 +180,7 @@ pub fn track_to_psv(
     tracklets: &[Tracklet],
     detections: &[Detection],
     header: &SubmissionHeader,
-    uncertainty: Uncertainty,
+    floor: Uncertainty,
 ) -> String {
     let by_id: HashMap<i64, &Detection> = detections.iter().map(|d| (d.id, d)).collect();
 
@@ -201,8 +211,17 @@ pub fn track_to_psv(
         .filter_map(|id| by_id.get(id).copied())
         .collect();
     rows.sort_by(|a, b| a.jd.partial_cmp(&b.jd).unwrap_or(std::cmp::Ordering::Equal));
+
+    let mut rms_by_id: HashMap<i64, f64> = HashMap::new();
+    for tracklet in &ordered {
+        for id in &tracklet.ids {
+            let widest = rms_by_id.entry(*id).or_insert(tracklet.rms_arcsec);
+            *widest = widest.max(tracklet.rms_arcsec);
+        }
+    }
     for detection in rows {
-        out.push_str(&row(&trk_sub, detection, header, uncertainty));
+        let rms = rms_by_id.get(&detection.id).copied().unwrap_or(0.0);
+        out.push_str(&row(&trk_sub, detection, header, quoted(floor, rms)));
         out.push('\n');
     }
     out
@@ -442,5 +461,49 @@ mod tests {
         assert!(fields[8].trim().is_empty(), "mag should be blank");
         assert!(fields[9].trim().is_empty(), "band should be blank");
         assert!(!fields[4].trim().is_empty(), "ra must still be present");
+    }
+
+    #[test]
+    fn test_a_scattered_tracklet_is_quoted_wider_than_the_floor() {
+        let floor = Uncertainty {
+            rms_ra_arcsec: 0.15,
+            rms_dec_arcsec: 0.15,
+        };
+        let header = ztf_header("M. Coughlin", "ZTF");
+        let scattered = Tracklet::from_motion(
+            vec![1, 2, 3],
+            2461292.80,
+            258.392572,
+            54.384199,
+            0.2,
+            0.02,
+            1.2,
+        );
+
+        let tight = to_psv(&[tracklet()], &detections(), &header, floor);
+        let loose = to_psv(&[scattered], &detections(), &header, floor);
+        let rms_of = |psv: &str| -> (f64, f64) {
+            let row = psv.lines().last().expect("a row");
+            let fields: Vec<&str> = row.split('|').collect();
+            (
+                fields[6].trim().parse().expect("rmsRA"),
+                fields[7].trim().parse().expect("rmsDec"),
+            )
+        };
+
+        assert_eq!(
+            rms_of(&tight),
+            (0.15, 0.15),
+            "a tight tracklet keeps the floor"
+        );
+        let (ra, dec) = rms_of(&loose);
+        assert!(
+            (ra - 1.2 / std::f64::consts::SQRT_2).abs() < 0.01,
+            "rmsRA {ra}"
+        );
+        assert!(
+            (dec - 1.2 / std::f64::consts::SQRT_2).abs() < 0.01,
+            "rmsDec {dec}"
+        );
     }
 }
