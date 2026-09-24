@@ -6,6 +6,9 @@ and reprocessing alerts already saved in the database, e.g., when a new
 catalog or enrichment step like an ML model classifier is added.
 It is important for us to be able to track what mutations were done to the
 data, at what time, and with what version of the code.
+It reaches past the alerts themselves: a schema change has to be carried into
+whatever references the old shape, such as the saved filters users run against
+it, and running more than one BOOM instance means moving data between them.
 
 BOOM's task system allows kicking off, monitoring, and querying the history
 of these tasks from the admin section of the front end.
