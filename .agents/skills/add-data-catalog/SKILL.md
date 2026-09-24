@@ -69,6 +69,11 @@ Then an entry in `CATALOGS` in `src/catalogs/mod.rs`: `id` (kebab-case slug),
 - **`aliases`** recognize a collection ingested under an older name (a release
   stamped into it, say). A new ingest always writes to `collection`.
 
+Give the record type `ra` and `dec` in **degrees**. Ingest skips any row whose
+position is off the sphere and fails the run after 100 of them, so a column in
+radians, or `ra`/`dec` the wrong way round, stops early rather than half-filling
+a collection.
+
 ## 3. Verify the column names against the published table
 
 Read the real schema — the published file, its documentation, a sample row.
@@ -119,7 +124,7 @@ provenance** in [`docs/catalogs.md`](../../../docs/catalogs.md).
 
 ## Catalogs BOOM does not build
 
-Some collections are produced outside BOOM (`LSPSC`, `TNS`, `LSDR10`). List them
+Some collections are produced outside BOOM (`TNS`, `LSDR10`). List them
 in `WITHOUT_DEFINITIONS` in `src/catalogs/mod.rs` **with the reason and, if you
 know it, the source**, so the next person is not left guessing. Config
 validation accepts those names; the admin page reports them as having no

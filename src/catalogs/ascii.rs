@@ -81,7 +81,9 @@ where
     }
 
     drop(sender);
-    report.inserted = inserter.finish(workers).await?;
+    let tally = inserter.finish(workers).await?;
+    report.inserted = tally.inserted;
+    report.skipped += tally.skipped;
     if let Some(e) = first_error {
         tracing::warn!(
             skipped = report.skipped,

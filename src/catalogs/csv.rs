@@ -44,6 +44,8 @@ where
     }
 
     drop(sender);
-    report.inserted = inserter.finish(workers).await?;
+    let tally = inserter.finish(workers).await?;
+    report.inserted = tally.inserted;
+    report.skipped += tally.skipped;
     Ok(report)
 }

@@ -67,8 +67,6 @@ pub enum Reader {
     Vsx,
     /// Pan-STARRS otmo, parquet partitions.
     PanStarrs,
-    /// Legacy Survey DR10 tractor joined to photo-z, staged parquet partitions.
-    LsDr10PhotoZ,
     /// Legacy Survey point-source scores, staged gzipped JSONL exported from
     /// BOOM's own copy.
     Lspsc,
@@ -220,17 +218,6 @@ pub const CATALOGS: &[CatalogDef] = &[
         source: Source::Fetched,
         // Configs named PS1_DR1 until #598, though the only mirror was ever DR2.
         aliases: &["PS1_DR1"],
-    },
-    CatalogDef {
-        id: "ls-dr10-photoz",
-        collection: "LS_DR10_PHOTOZ",
-        title: "Legacy Survey DR10 astrometry and photo-z",
-        description: "Tractor positions joined to photo-z on lsid. BOOM ingests this \
-                      dataset but does not build it: the join is ~135 GB out-of-core and \
-                      runs offline. Stage the built dataset before ingesting.",
-        reader: Reader::LsDr10PhotoZ,
-        source: Source::Staged,
-        aliases: &[],
     },
     CatalogDef {
         id: "lspsc",
@@ -571,6 +558,14 @@ pub async fn add_catalog(
             "chunk {} done ({}/{}): {} read, {} inserted",
             chunk.id, done_count, report.chunks_total, ingested.read, ingested.inserted
         ));
+        if ingested.skipped > 0 {
+            // Said here as well as in the ledger, because the difference between
+            // read and inserted is otherwise something you have to notice.
+            ctx.warn(format!(
+                "chunk {}: {} record(s) skipped and not in {}",
+                chunk.id, ingested.skipped, def.collection
+            ));
+        }
         ctx.progress(
             done_count,
             report.chunks_total as u64,
@@ -698,9 +693,6 @@ async fn ingest_file(
         Reader::Vsx => Ok(ascii::ingest_ascii::<types::Vsx>(inserter, path).await?),
         Reader::PanStarrs => Ok(arrow::ingest_parquet::<types::PanStarrs>(inserter, path).await?),
         Reader::Lspsc => Ok(jsonl::ingest_jsonl::<types::Lspsc>(inserter, path).await?),
-        Reader::LsDr10PhotoZ => {
-            Ok(arrow::ingest_parquet::<types::LsDr10PhotoZ>(inserter, path).await?)
-        }
     }
 }
 
@@ -931,11 +923,9 @@ pub const WITHOUT_DEFINITIONS: &[(&str, &str)] = &[
     (
         "LSDR10",
         "Legacy Survey DR10 with photo-z posteriors, fluxes and shape parameters \
-         (z_phot_mean, flux_*, shape_*, objtype, ebv), built outside BOOM. Not the \
-         ls-dr10-photoz dataset BOOM ingests into LS_DR10_PHOTOZ, whose record carries \
-         z_phot/z_phot_err only -- pointing that definition here would build a \
-         collection with no z_phot_mean, and the distance crossmatch keyed on it would \
-         silently match nothing",
+         (z_phot_mean, flux_*, shape_*, objtype, ebv), built outside BOOM with LSDB. A \
+         boompy module reading that HATS catalog the way allwise and panstarrs do would \
+         make this an ordinary definition; nobody has written one yet",
     ),
     (
         "TNS",
@@ -1189,20 +1179,19 @@ mod source_tests {
             .filter(|c| c.source == Source::Staged)
             .map(|c| c.id)
             .collect();
-        // ls-dr10-photoz is built offline by a join too big to do chunk by chunk;
         // lspsc is published upstream as a cone-search API, so BOOM ingests an
-        // export of its own copy. Neither can be fetched, and neither may have
-        // its files deleted after ingest.
-        assert_eq!(staged, vec!["ls-dr10-photoz", "lspsc"]);
+        // export of its own copy. It cannot be fetched, and its files must not
+        // be deleted after ingest.
+        assert_eq!(staged, vec!["lspsc"]);
     }
 
     #[test]
     fn a_staged_catalog_is_still_chunked_and_resumable() {
         // Staging changes where the files come from, not how they are ingested:
-        // the dataset is hive-partitioned, so progress is still per partition.
-        let def = find("ls-dr10-photoz").expect("defined");
+        // the export is written in parts, so progress is still per part.
+        let def = find("lspsc").expect("defined");
         assert_eq!(def.source, Source::Staged);
-        assert_eq!(def.collection, "LS_DR10_PHOTOZ");
+        assert_eq!(def.collection, "LSPSC");
     }
 }
 

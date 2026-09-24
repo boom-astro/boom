@@ -46,17 +46,41 @@ pub enum IngestError {
 /// f32, NED f64) and on whether the fields are renamed on the way out.
 fn to_catalog_document<T: Serialize + HasCoordinates>(
     record: &T,
-) -> Result<Document, mongodb::bson::ser::Error> {
+) -> Result<Rendered, mongodb::bson::ser::Error> {
     let mut doc = to_document(record)?;
     if T::has_coordinates() {
         if let (Ok(ra), Ok(dec)) = (doc.get_f64("ra"), doc.get_f64("dec")) {
             // Coordinates::new also derives galactic l/b, which is what the rest
             // of boom stores alongside radec_geojson.
-            doc.insert("coordinates", to_document(&Coordinates::new(ra, dec))?);
+            match Coordinates::try_new(ra, dec) {
+                Some(coordinates) => {
+                    doc.insert("coordinates", to_document(&coordinates)?);
+                }
+                None => return Ok(Rendered::OffSphere(doc)),
+            }
         }
     }
-    Ok(doc)
+    Ok(Rendered::Ready(doc))
 }
+
+/// A record rendered for storage, or rejected because its position is not on
+/// the sphere.
+///
+/// The rejected document is carried back rather than dropped here so the caller
+/// can say which row it was.
+enum Rendered {
+    Ready(Document),
+    OffSphere(Document),
+}
+
+/// How many off-sphere rows to tolerate before giving up on the catalog.
+///
+/// The same trade as the parse-error cap in `ascii.rs`: a handful of bad
+/// positions in a hundred-million-row catalog is upstream noise, while a file
+/// that is mostly rejects means the columns are not what the record type says
+/// they are -- degrees read as radians, or ra and dec the other way round --
+/// and ingesting the remainder would quietly install a half-empty catalog.
+const MAX_OFF_SPHERE: u64 = 100;
 
 /// A pool of insert workers fed by a bounded channel.
 pub struct Inserter {
@@ -71,6 +95,16 @@ pub struct Inserter {
     /// while a chunk is still running. A chunk of a large catalog takes minutes,
     /// and without this the only feedback until it finishes is the log.
     inserted: Arc<AtomicU64>,
+    /// Records the workers refused, across every worker. Shared so the cap in
+    /// [`MAX_OFF_SPHERE`] counts the catalog rather than one worker's share.
+    skipped: Arc<AtomicU64>,
+}
+
+/// What one pool of workers did, summed over the pool.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Tally {
+    pub inserted: u64,
+    pub skipped: u64,
 }
 
 /// What one file's ingest did.
@@ -108,6 +142,7 @@ impl Inserter {
             batch_size: batch_size.max(1),
             channel_capacity: channel_capacity.max(1),
             inserted: Arc::new(AtomicU64::new(0)),
+            skipped: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -144,8 +179,12 @@ impl Inserter {
             let collection = self.collection();
             let batch_size = self.batch_size;
             let inserted = self.inserted.clone();
+            let skipped = self.skipped.clone();
             workers.push(tokio::spawn(async move {
-                insert_worker(worker_id, receiver, collection, batch_size, inserted).await
+                insert_worker(
+                    worker_id, receiver, collection, batch_size, inserted, skipped,
+                )
+                .await
             }));
         }
         (sender, workers)
@@ -156,14 +195,17 @@ impl Inserter {
     /// A worker that failed is an error rather than a warning: a partially
     /// inserted chunk that reports success would be recorded as done and never
     /// retried.
-    pub async fn finish(&self, workers: Vec<InsertWorker>) -> Result<u64, IngestError> {
-        let mut inserted = 0;
+    pub async fn finish(&self, workers: Vec<InsertWorker>) -> Result<Tally, IngestError> {
+        let mut tally = Tally::default();
         let mut first_error = None;
         // Every handle is awaited even after one fails, so no worker is left
         // writing into a collection the caller believes it has finished with.
         for handle in workers {
             match handle.await {
-                Ok(Ok(n)) => inserted += n,
+                Ok(Ok(t)) => {
+                    tally.inserted += t.inserted;
+                    tally.skipped += t.skipped;
+                }
                 Ok(Err(e)) => first_error = first_error.or(Some(e)),
                 Err(e) => {
                     first_error = first_error.or(Some(IngestError::WorkerPanic(e.to_string())));
@@ -172,7 +214,7 @@ impl Inserter {
         }
         match first_error {
             Some(e) => Err(e),
-            None => Ok(inserted),
+            None => Ok(tally),
         }
     }
 
@@ -197,7 +239,7 @@ impl Inserter {
     }
 }
 
-pub type InsertWorker = tokio::task::JoinHandle<Result<u64, IngestError>>;
+pub type InsertWorker = tokio::task::JoinHandle<Result<Tally, IngestError>>;
 
 async fn insert_worker<T>(
     worker_id: usize,
@@ -205,17 +247,43 @@ async fn insert_worker<T>(
     collection: Collection<Document>,
     batch_size: usize,
     inserted_total: Arc<AtomicU64>,
-) -> Result<u64, IngestError>
+    skipped_total: Arc<AtomicU64>,
+) -> Result<Tally, IngestError>
 where
     T: Serialize + HasCoordinates,
 {
     let mut batch: Vec<Document> = Vec::with_capacity(batch_size);
-    let mut inserted = 0u64;
+    let mut tally = Tally::default();
 
     while let Ok(record) = receiver.recv().await {
-        batch.push(to_catalog_document(&record)?);
+        match to_catalog_document(&record)? {
+            Rendered::Ready(doc) => batch.push(doc),
+            Rendered::OffSphere(doc) => {
+                tally.skipped += 1;
+                let seen = skipped_total.fetch_add(1, Ordering::Relaxed) + 1;
+                // Only the first few: a catalog whose columns are wrong would
+                // otherwise write millions of identical lines into the run log.
+                if seen <= 5 {
+                    tracing::warn!(
+                        worker_id,
+                        id = ?doc.get("_id"),
+                        ra = ?doc.get("ra"),
+                        dec = ?doc.get("dec"),
+                        "record is not on the sphere, skipping it"
+                    );
+                }
+                if seen > MAX_OFF_SPHERE {
+                    return Err(IngestError::Read(format!(
+                        "gave up after {seen} records off the sphere; the last was {:?}. Check \
+                         that ra and dec are degrees, and the right way round",
+                        doc.get("_id")
+                    )));
+                }
+                continue;
+            }
+        }
         if batch.len() >= batch_size {
-            inserted += write_batch(
+            tally.inserted += write_batch(
                 &collection,
                 std::mem::take(&mut batch),
                 worker_id,
@@ -226,9 +294,9 @@ where
         }
     }
     if !batch.is_empty() {
-        inserted += write_batch(&collection, batch, worker_id, &inserted_total).await?;
+        tally.inserted += write_batch(&collection, batch, worker_id, &inserted_total).await?;
     }
-    Ok(inserted)
+    Ok(tally)
 }
 
 /// Insert one batch, tolerating duplicate keys but nothing else.
@@ -316,18 +384,25 @@ mod tests {
         }
     }
 
+    /// The rendered document, for a record expected to be on the sphere.
+    fn rendered<T: Serialize + HasCoordinates>(record: &T) -> Document {
+        match to_catalog_document(record).expect("serializes") {
+            Rendered::Ready(doc) => doc,
+            Rendered::OffSphere(doc) => panic!("unexpectedly off the sphere: {doc:?}"),
+        }
+    }
+
     #[test]
     fn a_positioned_record_gets_coordinates_in_boom_s_own_shape() {
         // The longitude is shifted by -180 because Mongo's 2dsphere index needs
         // [-180, 180], and galactic l/b come along -- the same shape the alert
         // pipeline writes, which is why this lives in Rust rather than being
         // rebuilt in the Python that fetches the files.
-        let doc = to_catalog_document(&Positioned {
+        let doc = rendered(&Positioned {
             id: "x",
             ra: 211.275,
             dec: 55.154,
-        })
-        .expect("serializes");
+        });
         let coords = doc.get_document("coordinates").expect("has coordinates");
         let point = coords
             .get_document("radec_geojson")
@@ -342,13 +417,41 @@ mod tests {
     fn a_catalog_that_declares_no_coordinates_gets_none() {
         // A catalog whose ra/dec mean something else must not silently acquire
         // a spatial index, which is why this is per-type rather than sniffed.
-        let doc = to_catalog_document(&Unpositioned {
+        let doc = rendered(&Unpositioned {
             id: "x",
             ra: 1.0,
             dec: 2.0,
-        })
-        .expect("serializes");
+        });
         assert!(!doc.contains_key("coordinates"));
+    }
+
+    #[test]
+    fn a_record_off_the_sphere_is_rejected_rather_than_stored() {
+        // Catalogs do contain these. Stored, a bad dec panics an insert worker
+        // and a bad ra fails the 2dsphere index build at the end of the run,
+        // which is hours of ingest thrown away for one row.
+        for (ra, dec) in [(400.0, 0.0), (-1.0, 0.0), (10.0, 91.0), (10.0, -91.0)] {
+            let record = Positioned { id: "x", ra, dec };
+            assert!(
+                matches!(
+                    to_catalog_document(&record).expect("serializes"),
+                    Rendered::OffSphere(_)
+                ),
+                "ra={ra} dec={dec} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn a_record_off_the_sphere_is_only_rejected_when_the_type_has_coordinates() {
+        // ra/dec that mean something else are not positions, so they are not
+        // range-checked either.
+        let doc = rendered(&Unpositioned {
+            id: "x",
+            ra: 4000.0,
+            dec: -999.0,
+        });
+        assert_eq!(doc.get_f64("ra").unwrap(), 4000.0);
     }
 
     /// A database handle that is never dialed -- these tests only need an

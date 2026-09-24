@@ -64,6 +64,19 @@ and both matter at this size:
   Since every catalog derives its `_id` from a stable source identifier, a chunk
   that was interrupted mid-write re-ingests without producing duplicates.
 
+**Rows that are not on the sky are skipped, not stored.** Bulk catalogs do
+contain them — an `ra` outside [0, 360] or a `dec` outside [-90, 90], usually a
+unit or column mix-up upstream. Stored, one of them either panics an insert
+worker or, worse, inserts happily and then fails the 2dsphere index build at the
+very end of the run, so a single bad row costs the whole ingest. They are
+counted instead: the run logs the first few with their ids, the chunk's log line
+says how many were skipped, and the ledger records the total. More than 100 in
+one run fails the ingest, because at that point the columns are not what the
+record type says they are and the rest of the catalog should not be trusted
+either. Skipped rather than wrapped, because a row whose position is out of
+range is a row whose position cannot be trusted, and folding `ra=400` to `40`
+invents one.
+
 The task takes a `drop_existing` parameter to start over instead of resuming,
 and a `max_chunks` one that stops after N chunks, which is how to smoke-test a
 new catalog end to end without ingesting all of it. The 2dsphere index is built
@@ -125,19 +138,13 @@ still resolves to the same catalog definition.
 | `vsx` | `VSX` | fixed-width text | 1 | Variability types, magnitudes, epochs and periods for known and suspected variable stars. |
 | `panstarrs` | `PS1_DR2` | parquet | HEALPix partitions | Mean PSF magnitudes in grizy, from the HATS mirror of the DR2 otmo table. Requester-pays S3. Does not include the PS1-STRM `strm_*` columns crossmatch config projects. |
 | `lspsc` | `LSPSC` | gzipped JSONL, **staged** | one per exported chunk | Morphological resolved/unresolved scores for 3.1×10⁹ LS DR10 sources ([Liu et al. 2025](https://arxiv.org/abs/2505.17174)). Upstream is a cone-search API, so BOOM ingests an export of its own copy — see below. |
-| `ls-dr10-photoz` | `LS_DR10_PHOTOZ` | parquet, **staged** | one per hive partition | Tractor positions joined to photo-z on `lsid`. Built offline — see below. |
 
 ### Staged catalogs
 
-`ls-dr10-photoz` is the one catalog BOOM ingests but does not fetch. Its table is
-a LEFT join of the minified LS DR10 tractor sweeps (~101 GB) onto the photo-z
-catalog (~34 GB) on `lsid`, done as a single out-of-core DuckDB hash join. That
-cannot be chunked — the inputs are partitioned differently and the join key is
-unique per source — so it runs offline, and BOOM reads the result.
-
-Stage the built dataset (the directory holding the `ra_deg=NN/` subdirectories)
-at `$BOOM_LS_DR10_PHOTOZ_DIR`, or at `<catalog data path>/ls-dr10-photoz`. Each
-parquet file is a chunk, so the ingest is still resumable and still bounded.
+A staged catalog is one BOOM ingests but does not fetch: the files are put in
+place beforehand — by hand, or by BOOM itself — and the ingest reads them where
+they are. `lspsc` is the one in the tree; see
+[When BOOM is the provenance](#when-boom-is-the-provenance).
 
 A definition declares `source: Source::Staged`, and **BOOM never deletes a
 staged file** — for a fetched catalog the chunk is a cache and deleting it is
@@ -149,8 +156,9 @@ Two crossmatch targets have no definition, and are listed in
 that is neither defined nor listed there:
 
 - **`LSDR10`** — Legacy Survey DR10 with photo-z posteriors, fluxes and shape
-  parameters, built outside BOOM. Not the `ls-dr10-photoz` dataset BOOM ingests
-  into `LS_DR10_PHOTOZ`, whose record carries `z_phot`/`z_phot_err` only.
+  parameters, built outside BOOM with LSDB. A boompy module reading that HATS
+  catalog the way `allwise` and `panstarrs` do would make this an ordinary
+  definition; nobody has written one yet.
 - **`TNS`** — a live, credentialed feed rather than an archival download,
   populated outside the catalog ingest path.
 
@@ -172,8 +180,8 @@ So BOOM exports its own copy and ingests that:
    there is no ledger entry.
 2. **Stage the directory** where the ingest expects it: `$BOOM_LSPSC_DIR`, or
    where the export already put it, `<catalog data path>/export/LSPSC`.
-3. **Ingest it** like any staged catalog. As with `ls-dr10-photoz`, BOOM never
-   deletes a staged file: the files are the artifact, not a cache of one.
+3. **Ingest it** like any staged catalog: BOOM never deletes a staged file,
+   because the files are the artifact rather than a cache of one.
 
 That is enough for one deployment. To stop every deployment needing the same
 hand-staging, publish the export and point the code at it:
