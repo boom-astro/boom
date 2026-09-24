@@ -58,7 +58,7 @@ async fn validate_watchlist(
     Ok(())
 }
 
-use crate::utils::enrichment_schema::enrichment_fields;
+use crate::utils::enrichment_schema::{enrichment_fields, EnabledEnrichers};
 use crate::utils::moc::{moc_from_ascii, moc_hpx_stage};
 use actix_web::{delete, get, patch, post, web, HttpResponse};
 use apache_avro::AvroSchema;
@@ -1401,7 +1401,6 @@ pub struct DecamAlertToFilter {
     pub aliases: DecamAliases,
 }
 
-/// Get a schema of a survey's data available at filtering time
 /// Fields BOOM adds to an alert after ingestion
 ///
 /// The Avro schema describes the packet IPAC ships. A filter runs against the
@@ -1425,13 +1424,21 @@ pub async fn get_filter_enrichment(
 ) -> HttpResponse {
     let survey = path.into_inner().0;
     let crossmatch = config.crossmatch.get(&survey).cloned().unwrap_or_default();
-    let fields = enrichment_fields(&survey, &crossmatch, config.host_galaxy.enabled);
+    let fields = enrichment_fields(
+        &survey,
+        &crossmatch,
+        EnabledEnrichers {
+            host_galaxy: config.host_galaxy.enabled,
+            villar: config.gpu.is_active(),
+        },
+    );
     response::ok(
         &format!("enrichment fields for survey {}", survey),
         serde_json::json!({ "survey": survey.to_string(), "fields": fields }),
     )
 }
 
+/// Get a schema of a survey's data available at filtering time
 #[utoipa::path(
     get,
     path = "/filters/schemas/{survey_name}",

@@ -177,10 +177,8 @@ fn joined_fields(survey: &Survey, host_galaxy_enabled: bool) -> Vec<EnrichmentFi
             "Forced photometry epochs; a detection is one carrying snr_psf.",
         ));
     }
-    // Only when the association is running: a path that is advertised but never
-    // written is indistinguishable from a night with no candidates, which is the
-    // ambiguity this endpoint exists to remove.
-    if matches!(survey, Survey::Ztf) && host_galaxy_enabled {
+    // A path advertised but never written reads as an empty night, not a missing enricher.
+    if host_galaxy_enabled {
         out.push(EnrichmentField::new(
             "host_galaxy.best_host.d_dlr",
             "double",
@@ -245,6 +243,14 @@ fn joined_fields(survey: &Survey, host_galaxy_enabled: bool) -> Vec<EnrichmentFi
     out
 }
 
+/// The enrichers a deployment runs, since a field exists only if one wrote it.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct EnabledEnrichers {
+    pub host_galaxy: bool,
+    /// The fit runs on a GPU context, so this follows `gpu.is_active()`.
+    pub villar: bool,
+}
+
 /// Every field a filter can reference that the Avro packet does not describe.
 /// Only what this deployment actually writes: a caller passes the flags that
 /// decide whether an enricher runs, so the list describes the alerts a filter
@@ -252,14 +258,14 @@ fn joined_fields(survey: &Survey, host_galaxy_enabled: bool) -> Vec<EnrichmentFi
 pub fn enrichment_fields(
     survey: &Survey,
     crossmatch: &[CatalogXmatchConfig],
-    host_galaxy_enabled: bool,
+    enabled: EnabledEnrichers,
 ) -> Vec<EnrichmentField> {
     let mut out = Vec::new();
-    if matches!(survey, Survey::Ztf) {
+    if matches!(survey, Survey::Ztf) && enabled.villar {
         out.extend(villar_fields());
     }
     out.extend(cross_match_fields(crossmatch));
-    out.extend(joined_fields(survey, host_galaxy_enabled));
+    out.extend(joined_fields(survey, enabled.host_galaxy));
     out
 }
 
@@ -318,20 +324,52 @@ mod tests {
     /// to remove: a filter on it matches nothing, which reads as a quiet night.
     #[test]
     fn test_host_galaxy_is_advertised_only_when_it_runs() {
-        let off = enrichment_fields(&Survey::Ztf, &[], false);
-        let on = enrichment_fields(&Survey::Ztf, &[], true);
+        let off = enrichment_fields(&Survey::Ztf, &[], EnabledEnrichers::default());
+        let on = enrichment_fields(
+            &Survey::Ztf,
+            &[],
+            EnabledEnrichers {
+                host_galaxy: true,
+                ..Default::default()
+            },
+        );
         assert!(!off.iter().any(|f| f.path.starts_with("host_galaxy")));
         assert!(on.iter().any(|f| f.path == "host_galaxy.best_host.d_dlr"));
         // And it is the only difference the flag makes.
         assert_eq!(on.len(), off.len() + 1);
     }
 
-    /// Only ZTF runs the Villar fit, so only ZTF should advertise it.
+    /// The association runs on every survey, so none of them may omit the field.
     #[test]
-    fn test_only_ztf_advertises_villar() {
-        let ztf = enrichment_fields(&Survey::Ztf, &[], false);
-        let lsst = enrichment_fields(&Survey::Lsst, &[], false);
+    fn test_host_galaxy_is_advertised_for_every_survey() {
+        let enabled = EnabledEnrichers {
+            host_galaxy: true,
+            ..Default::default()
+        };
+        for survey in [Survey::Ztf, Survey::Lsst, Survey::Decam, Survey::Winter] {
+            let fields = enrichment_fields(&survey, &[], enabled);
+            assert!(
+                fields
+                    .iter()
+                    .any(|f| f.path == "host_galaxy.best_host.d_dlr"),
+                "{survey:?} does not advertise host_galaxy"
+            );
+        }
+    }
+
+    /// The fit is ZTF-only and needs a GPU context, so a CPU deployment writes
+    /// none of these and must not offer them.
+    #[test]
+    fn test_villar_is_advertised_only_for_ztf_on_gpu() {
+        let gpu = EnabledEnrichers {
+            villar: true,
+            ..Default::default()
+        };
+        let ztf = enrichment_fields(&Survey::Ztf, &[], gpu);
+        let lsst = enrichment_fields(&Survey::Lsst, &[], gpu);
+        let cpu = enrichment_fields(&Survey::Ztf, &[], EnabledEnrichers::default());
         assert!(ztf.iter().any(|f| f.path.starts_with("villar_fit.")));
         assert!(!lsst.iter().any(|f| f.path.starts_with("villar_fit.")));
+        assert!(!cpu.iter().any(|f| f.path.starts_with("villar_fit.")));
     }
 }
