@@ -1,6 +1,7 @@
 //! Enrichment paths no Avro schema declares: dotted paths whose shape follows the
 //! deployment's config and what matched, so only BOOM can enumerate them.
 
+use crate::api::catalogs::WATCHLIST_PREFIX;
 use crate::conf::CatalogXmatchConfig;
 use crate::utils::enums::Survey;
 use serde::Serialize;
@@ -85,6 +86,10 @@ fn villar_fields() -> Vec<EnrichmentField> {
 fn cross_match_fields(crossmatch: &[CatalogXmatchConfig]) -> Vec<EnrichmentField> {
     let mut out = Vec::new();
     for catalog in crossmatch {
+        // Watchlist matches land on the watchlist document, never on the alert.
+        if catalog.catalog.starts_with(WATCHLIST_PREFIX) {
+            continue;
+        }
         out.push(EnrichmentField::new(
             format!("cross_matches.{}", catalog.catalog),
             "array",
@@ -204,6 +209,15 @@ pub fn enrichment_fields(
 mod tests {
     use super::*;
 
+    fn xmatch_config(catalog: &str) -> CatalogXmatchConfig {
+        CatalogXmatchConfig {
+            catalog: catalog.to_string(),
+            radius: crate::conf::arcsec_to_radians(300.0),
+            projection: mongodb::bson::doc! { "_id": 1, "z": 1, "Diam": 1 },
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn test_villar_declares_every_field_the_fitter_writes() {
         let fields = villar_fields();
@@ -231,18 +245,22 @@ mod tests {
 
     #[test]
     fn test_cross_matches_follow_the_configured_catalogs() {
-        let catalog = CatalogXmatchConfig {
-            catalog: "NED".to_string(),
-            radius: crate::conf::arcsec_to_radians(300.0),
-            projection: mongodb::bson::doc! { "_id": 1, "z": 1, "Diam": 1 },
-            ..Default::default()
-        };
-        let fields = cross_match_fields(&[catalog]);
+        let fields = cross_match_fields(&[xmatch_config("NED")]);
         let paths: Vec<&str> = fields.iter().map(|f| f.path.as_str()).collect();
         assert!(paths.contains(&"cross_matches.NED"));
         assert!(paths.contains(&"cross_matches.NED.z"));
         assert!(paths.contains(&"cross_matches.NED.Diam"));
         assert!(!paths.contains(&"cross_matches.NED._id"));
+    }
+
+    #[test]
+    fn test_watchlist_catalogs_are_not_advertised() {
+        let fields = cross_match_fields(&[
+            xmatch_config(&format!("{WATCHLIST_PREFIX}someone")),
+            xmatch_config("NED"),
+        ]);
+        assert!(fields.iter().all(|f| !f.path.contains(WATCHLIST_PREFIX)));
+        assert!(fields.iter().any(|f| f.path == "cross_matches.NED"));
     }
 
     #[test]
