@@ -120,9 +120,11 @@ later.
 | `migrate_snr` | Recompute `snr_psf`, `snr_ap` and ZTF `apFlux` across alerts and lightcurves. |
 | `reprocess_crossmatch` | Fill in or refresh crossmatches on a survey's `alerts_aux` records. |
 | `prepare_catalog` | Add spatial fields and a 2dsphere index to a hand-imported collection. |
+| `export_catalog` | Write a catalog collection to gzipped JSONL chunks plus a manifest, for a catalog BOOM cannot fetch again. Read-only. |
+| `backfill_host_galaxy` | Score stored galaxy cross-matches and write `host_galaxy` on `alerts_aux`. |
 | `backfill_hpx` | Write `coordinates.hpx` onto alerts that predate the field, so MOC region queries can find them. |
 | `repair_photometry` | Rewrite `alerts_aux` timeseries arrays that are out of order, duplicated, or carry a non-numeric `jd`. Deletes the offending points — run with `dry_run` first. |
-| `enrich_reprocess` | Select alerts, queue them, and re-run enrichment over them. |
+| `enrich_reprocess` | Select alerts, queue them, and re-run enrichment over them. See [alert-processing.md](./alert-processing.md#re-enriching-alerts-after-a-change). |
 | `mpcorb_ingest` | Re-download MPC orbital elements and swap them into `MPC_orbits`. |
 | `sso_baselines` | Fit solar system phase-curve baselines from ZTF detections. |
 | `copy_cutouts` | Copy a survey's cutout collection between MongoDB deployments. |
@@ -139,6 +141,134 @@ tools that change nothing (`check_config`, `add_filter`).
 That is the point the system was built for: there is no longer a binary an
 operator can run over SSH that mutates data without a record of who ran it, with
 what, under which release.
+
+### Adding a task
+
+The whole point is that this should be *less* work than writing a binary and
+running it over SSH, not more. A new task is one file plus four lines of
+registration, and running it needs no shell on the production host.
+
+**1. Write the body.** Copy this skeleton into `src/tasks/<your_task>.rs`:
+
+```rust
+use super::context::TaskContext;
+use super::ledger::{MutationTarget, Operation};
+use crate::utils::enums::Survey;
+use mongodb::bson::doc;
+use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
+
+/// Stable identifier. Historical runs are read back by it, so it never changes.
+pub const TASK_TYPE: &str = "your_task";
+
+/// What a client may ask for. Every doc comment here becomes help text on the
+/// admin page's form, and the JSON Schema comes from `ToSchema`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct YourTaskParams {
+    pub survey: Survey,
+    #[serde(default = "default_batch_size")]
+    pub batch_size: usize,
+}
+
+fn default_batch_size() -> usize {
+    5_000
+}
+
+impl YourTaskParams {
+    pub fn validate_params(&self) -> Result<(), String> {
+        if self.batch_size == 0 {
+            return Err("batch_size must be greater than zero".to_string());
+        }
+        Ok(())
+    }
+}
+
+pub async fn run(
+    ctx: &TaskContext,
+    params: YourTaskParams,
+) -> Result<serde_json::Value, super::TaskError> {
+    params
+        .validate_params()
+        .map_err(super::TaskError::InvalidParams)?;
+    let db = ctx.db().clone();
+    let mut done: u64 = 0;
+
+    // ... your batch loop ...
+    //   ctx.is_canceled()  -> stop at a batch boundary and return TaskError::Canceled
+    //   ctx.progress(done, total, "…").await
+    //   ctx.info("…") / ctx.warn("…")  -> streamed to the admin page
+
+    ctx.record_mutation(
+        MutationTarget {
+            database: db.name().to_string(),
+            collection: format!("{}_alerts_aux", params.survey),
+            catalog: None,
+            survey: Some(params.survey.to_string().to_lowercase()),
+        },
+        Operation::Recompute,
+        doc! { "updated": done as i64 },
+    )
+    .await;
+
+    Ok(serde_json::json!({ "updated": done }))
+}
+```
+
+**2. Register it,** all in [`src/tasks/mod.rs`](../src/tasks/mod.rs): a `pub mod`
+line, an entry in `TASKS`, an arm in `validate_params`, an arm in `dispatch`,
+and optionally one in `single_flight_key` if two concurrent runs would collide.
+Copy the `backfill_hpx` arms; they are the shortest. Forgetting an arm is caught
+by `every_registered_task_validates_and_dispatches`, so the test suite tells you
+rather than the admin page at 2am.
+
+**3. Run it locally.** `make dev` brings up a task worker under cargo-watch
+beside the API, so editing the body rebuilds it. The admin page at `/admin`
+lists every task with a form built from your params struct — no frontend work.
+By curl:
+
+```sh
+TOKEN=$(curl -s -X POST localhost:4000/auth \
+  -d "username=$ADMIN_USER&password=$ADMIN_PASSWORD" | jq -r .access_token)
+curl -s -X POST localhost:4000/tasks -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"task_type": "your_task", "params": {"survey": "ztf"}}'
+```
+
+**4. Run it against real data, from your branch.** This is the part that used to
+mean `scp` and a shell. On the deployment host, from your branch's checkout,
+rebuild the API and the task worker and restart just those two:
+
+```sh
+export BOOM_GIT_SHA=$(git rev-parse HEAD)
+docker compose --profile prod build api task-worker
+docker compose --profile prod up -d api task-worker
+```
+
+Both of them, because the API validates `task_type` against its own registry
+when you submit: a worker that knows your task and an API that does not gets you
+a 400, not a run. Everything else — consumers, schedulers, enrichment workers —
+keeps running the deployed release, so the pipeline is untouched. The API
+restart costs a few seconds of downtime on the web app, which is the price of
+not needing a shell on the box.
+
+Then submit it from the admin page or the API as above. `BOOM_GIT_SHA` is
+compiled into the binaries, so the ledger entry names the commit your code came
+from without anyone writing it down. To run an image someone already built, set
+`BOOM_IMAGE` and `BOOM_PULL_POLICY=always` instead of building.
+
+Put both back on the release with `docker compose --profile prod up -d
+--force-recreate api task-worker` from a clean checkout.
+
+**What you get without asking**, and what the SSH habit could not give:
+
+- The run record: who submitted it, with which parameters, when it started and
+  finished, and which commit ran it.
+- Logs streamed while it runs, readable by whoever is watching rather than only
+  by whoever owns the terminal.
+- Cancellation at a safe point, and resumption if the worker is deployed over
+  mid-run.
+- A `data_mutations` entry saying what changed, so the next person asking "why
+  does this collection look like this" has an answer.
 
 ### Porting a binary to a task
 
@@ -188,8 +318,11 @@ Completion needs `LLEN == 0` twice in a row. A worker pops a batch of up to
 still in flight, and stopping there would count those alerts as reprocessed
 before they were.
 
-Selection is explicit rather than inferred: alerts missing a field, a candid
-range, or everything.
+Selection is explicit rather than inferred: everything not enriched by the
+current set (`stale`, the one to use after changing a model or a formula),
+alerts missing a field, a candid range, or everything. See
+[alert-processing.md](./alert-processing.md#re-enriching-alerts-after-a-change)
+for how staleness is recorded and why `missing_field` cannot express it.
 
 ### Credentials in parameters
 
@@ -231,9 +364,9 @@ One `task-worker` service, running one task at a time. It needs more than a
 database connection:
 
 - **The ONNX models**, bind-mounted read-only at `/app/data/models`.
-  `enrich_reprocess` builds a real enrichment worker, which loads them at
-  startup, so a worker without them fails before doing any work rather than
-  part way through a run.
+  `enrich_reprocess` builds a real enrichment worker, which loads every model in
+  `ZTF_MODELS` and hashes it for the enrichment set stamp, so a worker without
+  them fails at startup rather than part way through a run.
 - **boompy**, baked into the image, for the catalog downloaders.
 - **Valkey**, which the migration and reprocessing tasks use to drive and resume
   their work.

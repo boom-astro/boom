@@ -202,6 +202,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # Compiled in, and recorded on every data mutation, so the ledger names
+        # the commit a change came from instead of "unknown".
+        BOOM_GIT_SHA: ${BOOM_GIT_SHA:-}
     command:
       - /app/boom-api
     environment:
@@ -351,6 +355,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # Compiled in, and recorded on every data mutation, so the ledger names
+        # the commit a change came from instead of "unknown".
+        BOOM_GIT_SHA: ${BOOM_GIT_SHA:-}
     environment:
       # Required secrets - must be set in environment
       BOOM_DATABASE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
@@ -390,6 +398,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # Compiled in, and recorded on every data mutation, so the ledger names
+        # the commit a change came from instead of "unknown".
+        BOOM_GIT_SHA: ${BOOM_GIT_SHA:-}
     environment:
       # Required secrets - must be set in environment
       BOOM_DATABASE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
@@ -429,6 +441,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # Compiled in, and recorded on every data mutation, so the ledger names
+        # the commit a change came from instead of "unknown".
+        BOOM_GIT_SHA: ${BOOM_GIT_SHA:-}
     environment:
       # Required secrets - must be set in environment
       BOOM_DATABASE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
@@ -468,6 +484,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # Compiled in, and recorded on every data mutation, so the ledger names
+        # the commit a change came from instead of "unknown".
+        BOOM_GIT_SHA: ${BOOM_GIT_SHA:-}
     environment:
       # Required secrets - must be set in environment
       BOOM_DATABASE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
@@ -502,6 +522,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # Compiled in, and recorded on every data mutation, so the ledger names
+        # the commit a change came from instead of "unknown".
+        BOOM_GIT_SHA: ${BOOM_GIT_SHA:-}
     environment:
       # Required secrets - must be set in environment
       BOOM_DATABASE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
@@ -542,6 +566,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # Compiled in, and recorded on every data mutation, so the ledger names
+        # the commit a change came from instead of "unknown".
+        BOOM_GIT_SHA: ${BOOM_GIT_SHA:-}
     environment:
       # Required secrets - must be set in environment
       BOOM_DATABASE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
@@ -565,9 +593,9 @@ services:
     volumes:
       - ${BOOM_CONFIG_PATH:-./config.yaml}:/app/config.yaml
       - catalog_data:/app/data/catalogs
-      # enrich_reprocess builds a real enrichment worker, which loads the ONNX
-      # models at startup. Without these the task fails before doing any work
-      # rather than part way through.
+      # enrich_reprocess builds a real enrichment worker, which loads every
+      # model in ZTF_MODELS and hashes it for the enrichment set stamp. Without
+      # these the task fails at startup rather than part way through.
       - ${PWD}/data/models:/app/data/models:ro
       - ${PWD}/data/ls_footprint_moc.fits:/app/data/ls_footprint_moc.fits:ro
     command:
@@ -581,6 +609,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # Compiled in, and recorded on every data mutation, so the ledger names
+        # the commit a change came from instead of "unknown".
+        BOOM_GIT_SHA: ${BOOM_GIT_SHA:-}
     environment:
       # Required secrets - must be set in environment
       BOOM_DATABASE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
@@ -617,6 +649,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # Compiled in, and recorded on every data mutation, so the ledger names
+        # the commit a change came from instead of "unknown".
+        BOOM_GIT_SHA: ${BOOM_GIT_SHA:-}
     environment:
       # Required secrets - must be set in environment
       BOOM_DATABASE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
@@ -653,6 +689,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # Compiled in, and recorded on every data mutation, so the ledger names
+        # the commit a change came from instead of "unknown".
+        BOOM_GIT_SHA: ${BOOM_GIT_SHA:-}
     environment:
       # Required secrets - must be set in environment
       BOOM_DATABASE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
