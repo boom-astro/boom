@@ -1,9 +1,9 @@
-//! The fields BOOM adds to an alert after ingestion.
+//! The enrichment paths no Avro schema declares.
 //!
-//! A filter runs against the enriched Mongo document, not the Avro packet, so
-//! the packet's schema describes a document that no longer exists by the time a
-//! pipeline sees it. This declares the rest, because BOOM writes it and so is
-//! the only place the list stays correct as enrichers change.
+//! `ZtfAlertToFilter` and its siblings already cover the enrichment that lands in
+//! a struct field: `properties`, `classifications`, the joined photometry arrays.
+//! What is left is `$set` as dotted paths whose shape depends on config or on what
+//! matched, so BOOM is the only place that can enumerate it.
 
 use crate::conf::CatalogXmatchConfig;
 use crate::utils::enums::Survey;
@@ -140,43 +140,9 @@ fn cross_match_fields(crossmatch: &[CatalogXmatchConfig]) -> Vec<EnrichmentField
     out
 }
 
-/// Arrays and documents the aux join makes reachable from a pipeline.
-///
-/// Named at the top level, never through `aux`: the joined document is nulled
-/// once its arrays are flattened, and a filter naming `aux.x` is refused.
-fn joined_fields(survey: &Survey, host_galaxy_enabled: bool) -> Vec<EnrichmentField> {
-    let mut out = vec![
-        EnrichmentField::new(
-            "prv_candidates",
-            "array",
-            true,
-            false,
-            "Past alert-level detections of the object, within a year of this alert.",
-        ),
-        EnrichmentField::new(
-            "prv_nondetections",
-            "array",
-            true,
-            false,
-            "Past non-detections of the object.",
-        ),
-        EnrichmentField::new(
-            "aliases",
-            "object",
-            true,
-            false,
-            "Identifiers this object carries in other surveys.",
-        ),
-    ];
-    if matches!(survey, Survey::Ztf | Survey::Lsst | Survey::Decam) {
-        out.push(EnrichmentField::new(
-            "fp_hists",
-            "array",
-            true,
-            false,
-            "Forced photometry epochs; a detection is one carrying snr_psf.",
-        ));
-    }
+/// Association products, written as sub-documents rather than struct fields.
+fn association_fields(survey: &Survey, host_galaxy_enabled: bool) -> Vec<EnrichmentField> {
+    let mut out = Vec::new();
     // A path advertised but never written reads as an empty night, not a missing enricher.
     if host_galaxy_enabled {
         out.push(EnrichmentField::new(
@@ -265,7 +231,7 @@ pub fn enrichment_fields(
         out.extend(villar_fields());
     }
     out.extend(cross_match_fields(crossmatch));
-    out.extend(joined_fields(survey, enabled.host_galaxy));
+    out.extend(association_fields(survey, enabled.host_galaxy));
     out
 }
 

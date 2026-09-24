@@ -58,6 +58,7 @@ async fn validate_watchlist(
     Ok(())
 }
 
+use crate::utils::enrichment_schema::{enrichment_fields, EnabledEnrichers};
 use crate::utils::moc::{moc_from_ascii, moc_hpx_stage};
 use actix_web::{delete, get, patch, post, web, HttpResponse};
 use apache_avro::AvroSchema;
@@ -1400,7 +1401,11 @@ pub struct DecamAlertToFilter {
     pub aliases: DecamAliases,
 }
 
-/// Get a schema of a survey's data available at filtering time
+/// Get the fields a survey's alerts carry at filtering time
+///
+/// `schema` is the alert struct, fixed at compile time. `enrichment` is the rest:
+/// paths written as sub-documents, whose membership follows this deployment's
+/// configured catalogs and enabled enrichers, so no static schema can carry them.
 #[utoipa::path(
     get,
     path = "/filters/schemas/{survey_name}",
@@ -1414,8 +1419,10 @@ pub struct DecamAlertToFilter {
     tags=["Filters"]
 )]
 #[get("/filters/schemas/{survey_name}")]
-pub async fn get_filter_schema(path: web::Path<(Survey,)>) -> HttpResponse {
-    // return the avro schema
+pub async fn get_filter_schema(
+    path: web::Path<(Survey,)>,
+    config: web::Data<AppConfig>,
+) -> HttpResponse {
     let survey_name = path.into_inner().0;
     let schema = match survey_name {
         Survey::Ztf => ZtfAlertToFilter::get_schema(),
@@ -1423,9 +1430,22 @@ pub async fn get_filter_schema(path: web::Path<(Survey,)>) -> HttpResponse {
         Survey::Winter => WinterAlertToFilter::get_schema(),
         Survey::Decam => DecamAlertToFilter::get_schema(),
     };
+    let crossmatch = config
+        .crossmatch
+        .get(&survey_name)
+        .cloned()
+        .unwrap_or_default();
+    let enrichment = enrichment_fields(
+        &survey_name,
+        &crossmatch,
+        EnabledEnrichers {
+            host_galaxy: config.host_galaxy.enabled,
+            villar: config.gpu.is_active(),
+        },
+    );
     response::ok(
-        &format!("avro schema for survey {}", survey_name),
-        serde_json::json!(schema),
+        &format!("filter fields for survey {}", survey_name),
+        serde_json::json!({ "schema": schema, "enrichment": enrichment }),
     )
 }
 
@@ -1523,6 +1543,37 @@ mod schema_tests {
 
     fn schema_str<T: AvroSchema>() -> String {
         serde_json::to_string(&T::get_schema()).unwrap()
+    }
+
+    /// The enrichment endpoint covers what the Avro schema cannot name. A path in
+    /// both is declared twice, and the two declarations drift independently.
+    #[test]
+    fn enrichment_declares_nothing_the_filter_schema_already_has() {
+        let enabled = EnabledEnrichers {
+            host_galaxy: true,
+            villar: true,
+        };
+        for (survey, schema) in [
+            (Survey::Ztf, ZtfAlertToFilter::get_schema()),
+            (Survey::Lsst, LsstAlertToFilter::get_schema()),
+            (Survey::Winter, WinterAlertToFilter::get_schema()),
+            (Survey::Decam, DecamAlertToFilter::get_schema()),
+        ] {
+            let value = serde_json::to_value(schema).unwrap();
+            let declared: Vec<String> = value["fields"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|f| f["name"].as_str().unwrap().to_string())
+                .collect();
+            for field in enrichment_fields(&survey, &[], enabled) {
+                let root = field.path.split('.').next().unwrap();
+                assert!(
+                    !declared.iter().any(|d| d == root),
+                    "{survey:?} already declares {root} in its filter Avro schema"
+                );
+            }
+        }
     }
 
     #[test]

@@ -1,7 +1,6 @@
 pub mod auth;
 pub mod babamul;
 pub mod catalogs;
-pub mod enrichments;
 pub mod filters;
 pub mod info;
 pub mod kafka;
