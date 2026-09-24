@@ -98,20 +98,36 @@ pub const EPISODE_GAP_DAYS: f64 = 30.0;
 
 /// Both light-curve summaries from a single pass over the detections.
 ///
+/// `forced` carries the JD of each forced epoch that reached the detection
+/// threshold; the caller applies that test, since only it knows how its survey
+/// records one.
+///
 /// The two are derived from the same points and are always wanted together, so
 /// iterating once keeps the enrichment worker from walking a long light curve
 /// twice.
-pub fn summarise_detections<I>(
+pub fn summarise_detections<I, F>(
     points: I,
+    forced: F,
     ref_jd: f64,
     gap_days: f64,
 ) -> (DetectionHistory, EpisodeHistory)
 where
     I: IntoIterator<Item = (f64, Option<bool>)>,
+    F: IntoIterator<Item = f64>,
 {
     let cutoff = ref_jd - 30.0;
     let mut detections = DetectionHistory::default();
     let mut positives: Vec<f64> = Vec::new();
+
+    // Forced epochs widen the activity span and are counted, but are kept out
+    // of the counts and episodes below, which filters already read.
+    for jd in forced {
+        if jd > ref_jd {
+            continue;
+        }
+        detections.n_forced_detections += 1;
+        detections.span(jd);
+    }
 
     for (jd, is_negative) in points {
         if jd > ref_jd {
@@ -120,6 +136,7 @@ where
         let Some(is_negative) = is_negative else {
             continue;
         };
+        detections.span(jd);
         detections.n_det += 1;
         let recent = jd >= cutoff;
         if is_negative {
@@ -245,7 +262,10 @@ impl EpisodeHistory {
 // #[skip_serializing_none]
 #[derive(Debug, PartialEq, Clone, Deserialize, Serialize, AvroSchema, ToSchema)]
 pub struct BandRateProperties {
+    /// Magnitudes per day, signed: `fading` positive, `rising` negative. An
+    /// afterglow fades at one to two a day; a supernova near peak is flat.
     pub rate: f32,
+    /// One-sigma uncertainty on `rate`, magnitudes per day.
     pub rate_error: f32,
     /// Chi-square of the fit. Exactly zero for a two-point fit, where the line
     /// passes through both points.
@@ -263,7 +283,9 @@ pub struct BandRateProperties {
     /// not "good" or "bad", and a range cut matches neither null nor absent --
     /// cut on `chi2`/`dof` to include sparse bands.
     pub red_chi2: Option<f32>,
+    /// Points the fit used.
     pub nb_data: i32,
+    /// Time those points span, days.
     pub dt: f32,
 }
 
@@ -616,9 +638,23 @@ pub struct DetectionHistory {
     pub n_pos_30d: i32,
     /// Negative detections in the 30 days ending at the alert epoch.
     pub n_neg_30d: i32,
+    /// JD the position first reached the detection threshold in any band,
+    /// forced photometry included. `jdstarthist` counts alert-level detections
+    /// only, so a position already varying below that threshold looks new.
+    pub first_activity_jd: Option<f64>,
+    /// JD of the latest such epoch, giving the span when paired with the first.
+    pub last_detection_jd: Option<f64>,
+    /// Forced epochs that reached the threshold, alongside `ndethist`.
+    pub n_forced_detections: i32,
 }
 
 impl DetectionHistory {
+    /// Widen the activity span to include `jd`.
+    fn span(&mut self, jd: f64) {
+        self.first_activity_jd = Some(self.first_activity_jd.map_or(jd, |j| j.min(jd)));
+        self.last_detection_jd = Some(self.last_detection_jd.map_or(jd, |j| j.max(jd)));
+    }
+
     /// Summarise detection history from `(jd, is_negative)` points, with windows
     /// measured back from the alert epoch `ref_jd`. Points after `ref_jd` (a
     /// concurrently-ingested newer alert) and points whose sign is unknown (`None`,
@@ -637,6 +673,7 @@ impl DetectionHistory {
                 Some(v) => v,
                 None => continue,
             };
+            h.span(jd);
             h.n_det += 1;
             let recent = jd >= cutoff;
             if is_negative {
@@ -664,6 +701,9 @@ impl DetectionHistory {
 // #[skip_serializing_none]
 #[serdavro]
 #[derive(Debug, PartialEq, Clone, Deserialize, Serialize, Default, ToSchema)]
+/// Per-band light-curve fits, reached at `properties.photstats.<band>` -- so a
+/// decline rate is `properties.photstats.r.fading.rate`. Null for a band the
+/// object has no detections in.
 pub struct PerBandProperties {
     pub g: Option<BandProperties>,
     pub r: Option<BandProperties>,
@@ -953,6 +993,88 @@ mod tests {
 
     const REF: f64 = 3000.0;
 
+    /// A position with forced flux before the alert is not new, which is what
+    /// `jdstarthist` cannot say: it counts alert-level detections only.
+    #[test]
+    fn test_forced_epochs_predate_the_first_alert_detection() {
+        use super::summarise_detections;
+        let alerts = vec![(2500.0, Some(false))];
+        let forced = vec![2486.45, 2494.37];
+        let (d, _) = summarise_detections(alerts, forced, REF, EPISODE_GAP_DAYS);
+
+        assert_eq!(d.first_activity_jd, Some(2486.45));
+        assert_eq!(d.last_detection_jd, Some(2500.0));
+        assert_eq!(d.n_forced_detections, 2);
+        // The alert-level counts and episodes are untouched by forced epochs.
+        assert_eq!(d.n_det, 1);
+        assert_eq!(d.n_pos, 1);
+    }
+
+    /// Without forced photometry the span still covers the alert detections.
+    #[test]
+    fn test_span_falls_back_to_the_alert_detections() {
+        use super::summarise_detections;
+        let alerts = vec![(2500.0, Some(false)), (2400.0, Some(true))];
+        let (d, _) = summarise_detections(alerts, std::iter::empty(), REF, EPISODE_GAP_DAYS);
+
+        assert_eq!(d.first_activity_jd, Some(2400.0));
+        assert_eq!(d.last_detection_jd, Some(2500.0));
+        assert_eq!(d.n_forced_detections, 0);
+    }
+
+    /// Nothing after the alert epoch counts, forced epochs included, or a
+    /// concurrently-ingested newer alert would move the span.
+    #[test]
+    fn test_forced_epochs_after_the_alert_epoch_are_ignored() {
+        use super::summarise_detections;
+        let alerts = vec![(2900.0, Some(false))];
+        let forced = vec![REF + 50.0];
+        let (d, _) = summarise_detections(alerts, forced, REF, EPISODE_GAP_DAYS);
+
+        assert_eq!(d.n_forced_detections, 0);
+        assert_eq!(d.last_detection_jd, Some(2900.0));
+    }
+
+    /// The sign says which way the object is going, which is what a filter
+    /// cutting on a decline rate depends on.
+    #[test]
+    fn test_rate_is_signed_magnitudes_per_day() {
+        use super::{analyze_photometry, Band, PhotometryMag};
+        // One magnitude per day up to a peak, then one back down.
+        let mags: Vec<PhotometryMag> = [
+            (0.0, 20.0),
+            (1.0, 19.0),
+            (2.0, 18.0),
+            (3.0, 19.0),
+            (4.0, 20.0),
+        ]
+        .iter()
+        .map(|&(t, m)| PhotometryMag {
+            time: 2_461_000.0 + t,
+            mag: m,
+            mag_err: 0.05,
+            band: Band::R,
+        })
+        .collect();
+        let r = analyze_photometry(&mags).0.r.expect("r band");
+
+        let rising = r.rising.expect("a rising fit");
+        let fading = r.fading.expect("a fading fit");
+        assert!(
+            rising.rate < 0.0,
+            "rising rate {} is not negative",
+            rising.rate
+        );
+        assert!(
+            fading.rate > 0.0,
+            "fading rate {} is not positive",
+            fading.rate
+        );
+        // One magnitude per day either side, as constructed.
+        assert!((rising.rate + 1.0).abs() < 1e-3, "rising {}", rising.rate);
+        assert!((fading.rate - 1.0).abs() < 1e-3, "fading {}", fading.rate);
+    }
+
     #[test]
     fn test_one_pass_matches_summarising_separately() {
         use super::{summarise_detections, DetectionHistory};
@@ -965,7 +1087,8 @@ mod tests {
             (REF + 10.0, Some(false)),
             (300.0, None),
         ];
-        let (detections, episodes) = summarise_detections(points.clone(), REF, EPISODE_GAP_DAYS);
+        let (detections, episodes) =
+            summarise_detections(points.clone(), std::iter::empty(), REF, EPISODE_GAP_DAYS);
         assert_eq!(
             detections,
             DetectionHistory::from_points(points.clone(), REF)

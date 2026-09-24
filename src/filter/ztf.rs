@@ -17,6 +17,7 @@ use crate::filter::{
 };
 use crate::utils::cutouts::CutoutStorage;
 use crate::utils::db::{fetch_timeseries_op, get_array_dict_element};
+use crate::utils::lightcurves::SNT;
 use crate::utils::mpcorb::{
     fill_geometry, has_geometry, normalize_ztf_ssnamenr, OrbitCache, ORBITS_COLLECTION,
 };
@@ -640,6 +641,10 @@ pub async fn build_ztf_filter_pipeline(
                 "classifications": 1,
                 "properties": 1,
                 "coordinates": 1,
+                // The threshold a forced epoch had to clear for `isdiffpos` and
+                // `snr_psf` to be set, so a filter can say so rather than
+                // hard-coding the number.
+                "snt": doc! { "$literal": SNT },
             }
         },
     ];
