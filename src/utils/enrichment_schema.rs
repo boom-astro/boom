@@ -21,6 +21,88 @@ pub const VILLAR_PARAMS: [&str; 7] = [
 /// Bands the fit is run per.
 pub const VILLAR_BANDS: [&str; 2] = ["ZTF_r", "ZTF_g"];
 
+/// Leaf, source path, type, nullable, description; `sso_history_lookup` projects from this.
+pub const SSO_HISTORY_FIELDS: [(&str, &str, &str, bool, &str); 12] = [
+    (
+        "designation",
+        "$candidate.ssnamenr",
+        "string",
+        false,
+        "MPC designation the entry matched on",
+    ),
+    ("jd", "$candidate.jd", "double", false, "epoch of the entry"),
+    (
+        "fid",
+        "$candidate.fid",
+        "int",
+        false,
+        "filter id of the entry",
+    ),
+    (
+        "magpsf",
+        "$candidate.magpsf",
+        "double",
+        false,
+        "PSF magnitude",
+    ),
+    (
+        "sigmapsf",
+        "$candidate.sigmapsf",
+        "double",
+        false,
+        "uncertainty on magpsf",
+    ),
+    (
+        "ra",
+        "$candidate.ra",
+        "double",
+        false,
+        "right ascension, degrees",
+    ),
+    (
+        "dec",
+        "$candidate.dec",
+        "double",
+        false,
+        "declination, degrees",
+    ),
+    (
+        "predicted_mag",
+        "$properties.sso.predicted_mag",
+        "double",
+        true,
+        "magnitude the ephemeris predicted",
+    ),
+    (
+        "separation_arcsec",
+        "$properties.sso.separation_arcsec",
+        "double",
+        true,
+        "offset from the predicted position",
+    ),
+    (
+        "helio_dist",
+        "$properties.sso.helio_dist",
+        "double",
+        true,
+        "heliocentric distance, au",
+    ),
+    (
+        "topo_dist",
+        "$properties.sso.topo_dist",
+        "double",
+        true,
+        "topocentric distance, au",
+    ),
+    (
+        "phase_angle",
+        "$properties.sso.phase_angle",
+        "double",
+        true,
+        "solar phase angle, degrees",
+    ),
+];
+
 /// Leaf, type, nullable, description; carried by `best_host` and every `candidates` entry.
 const HOST_CANDIDATE_FIELDS: [(&str, &str, bool, &str); 19] = [
     ("objname", "string", true, "name of the galaxy"),
@@ -263,35 +345,7 @@ fn association_fields(survey: &Survey, host_galaxy_enabled: bool) -> Vec<Enrichm
             "Past alerts sharing this alert's solar system designation, oldest \
              first, within a year and inside the association radius.",
         ));
-        for (leaf, value_type, nullable, what) in [
-            (
-                "designation",
-                "string",
-                false,
-                "MPC designation the entry matched on",
-            ),
-            ("jd", "double", false, "epoch of the entry"),
-            ("fid", "int", false, "filter id of the entry"),
-            ("magpsf", "double", false, "PSF magnitude"),
-            ("sigmapsf", "double", false, "uncertainty on magpsf"),
-            ("ra", "double", false, "right ascension, degrees"),
-            ("dec", "double", false, "declination, degrees"),
-            (
-                "predicted_mag",
-                "double",
-                true,
-                "magnitude the ephemeris predicted",
-            ),
-            (
-                "separation_arcsec",
-                "double",
-                true,
-                "offset from the predicted position",
-            ),
-            ("helio_dist", "double", true, "heliocentric distance, au"),
-            ("topo_dist", "double", true, "topocentric distance, au"),
-            ("phase_angle", "double", true, "solar phase angle, degrees"),
-        ] {
+        for (leaf, _, value_type, nullable, what) in SSO_HISTORY_FIELDS {
             out.push(EnrichmentField::new(
                 format!("sso_history.{leaf}"),
                 value_type,

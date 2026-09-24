@@ -17,6 +17,7 @@ use crate::filter::{
 };
 use crate::utils::cutouts::CutoutStorage;
 use crate::utils::db::{fetch_timeseries_op, get_array_dict_element};
+use crate::utils::enrichment_schema::SSO_HISTORY_FIELDS;
 use crate::utils::mpcorb::{
     fill_geometry, has_geometry, normalize_ztf_ssnamenr, OrbitCache, ORBITS_COLLECTION,
 };
@@ -443,6 +444,10 @@ pub async fn build_ztf_alerts(
 /// the elements here and would close that gap immediately, but any window
 /// shorter than the time since geometry shipped fills in on its own.
 fn sso_history_lookup(ztf_permissions: &Vec<i32>, window_days: f64) -> Document {
+    let mut entry_projection = doc! { "_id": 0 };
+    for (leaf, source, ..) in SSO_HISTORY_FIELDS {
+        entry_projection.insert(leaf, source);
+    }
     doc! {
         "$lookup": {
             "from": "ZTF_alerts",
@@ -459,30 +464,7 @@ fn sso_history_lookup(ztf_permissions: &Vec<i32>, window_days: f64) -> Document 
                     { "$gte": ["$candidate.ssdistnr", 0.0] },
                     { "$lt": ["$candidate.ssdistnr", MAX_SEPARATION_ARCSEC] },
                 ] } } },
-                doc! { "$project": {
-                    "_id": 0,
-                    // Carried per entry so the array is self-describing: geometry
-                    // is filled in after the pipeline runs, by which point the
-                    // outer document is whatever the filter chose to project.
-                    "designation": "$candidate.ssnamenr",
-                    "jd": "$candidate.jd",
-                    "fid": "$candidate.fid",
-                    "magpsf": "$candidate.magpsf",
-                    "sigmapsf": "$candidate.sigmapsf",
-                    "ra": "$candidate.ra",
-                    "dec": "$candidate.dec",
-                    "predicted_mag": "$properties.sso.predicted_mag",
-                    "separation_arcsec": "$properties.sso.separation_arcsec",
-                    // Each point carries the geometry at its own epoch, not the
-                    // alert's. Statistics that scale a window to a reference
-                    // point (e.g. an outburst statistic) need one value per
-                    // point, and these are the only photometry of the object
-                    // itself -- the positional light curve holds a single
-                    // detection for a mover.
-                    "helio_dist": "$properties.sso.helio_dist",
-                    "topo_dist": "$properties.sso.topo_dist",
-                    "phase_angle": "$properties.sso.phase_angle",
-                } },
+                doc! { "$project": entry_projection },
                 doc! { "$sort": { "jd": 1 } },
             ],
             "as": "sso_history",
