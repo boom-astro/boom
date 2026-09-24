@@ -183,6 +183,7 @@ async fn main() -> std::io::Result<()> {
                 .service(routes::filters::validate_filter)
                 .service(routes::filters::get_filters)
                 .service(routes::filters::get_filter)
+                .service(routes::filters::delete_filter)
                 .service(routes::filters::post_filter_version)
                 .service(routes::filters::post_filter_test)
                 .service(routes::filters::post_filter_test_count)

@@ -1120,6 +1120,7 @@ impl AlertWorker for ZtfAlertWorker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::alert::base::get_schema_and_startidx;
     use crate::utils::{
         enums::Survey,
         testing::{
@@ -1591,38 +1592,26 @@ mod tests {
     }
 
     #[test]
-    fn test_schema_cache_fallback_on_corrupt_start_idx() {
-        let avro_bytes = std::fs::read("tests/data/alerts/ztf/2695378462115010012.avro").unwrap();
+    fn test_schema_cache_reads_alerts_of_different_sizes() {
+        // 2991189033415010000 has a data block under 8192 bytes, so the integer holding that
+        // size is one byte shorter and its data starts one byte earlier than the other alert
+        let large = std::fs::read("tests/data/alerts/ztf/2695378462115010012.avro").unwrap();
+        let small = std::fs::read("tests/data/alerts/ztf/2991189033415010000.avro").unwrap();
 
-        let mut cache = SchemaCache::default();
+        let (large_schema, large_start_idx) = get_schema_and_startidx(&large).unwrap();
+        let (small_schema, small_start_idx) = get_schema_and_startidx(&small).unwrap();
+        assert_eq!(large_schema, small_schema);
+        assert_eq!(large_start_idx, small_start_idx + 1);
 
-        // First call: normal path, fills the cache.
-        let first: ZtfRawAvroAlert = cache.alert_from_avro_bytes(&avro_bytes).unwrap();
-        assert!(cache.get_cached_start_idx().is_some());
-        let good_idx = cache.get_cached_start_idx().unwrap();
-        assert!(good_idx > 0, "start index should be past the Avro header");
+        for (first, second) in [(&large, &small), (&small, &large)] {
+            let mut schema_cache = SchemaCache::default();
+            let first: ZtfRawAvroAlert = schema_cache.alert_from_avro_bytes(first).unwrap();
+            let second: ZtfRawAvroAlert = schema_cache.alert_from_avro_bytes(second).unwrap();
 
-        // Corrupt the cached start index so that it points into the Avro header
-        // (offset 0 – the 'O','b','j',1 magic bytes), causing from_avro_datum
-        // to fail on the next call and triggering the fallback.
-        cache.set_cached_start_idx(0);
-
-        // Second call: fallback path should repair the cache and produce the
-        // same result as the first call.
-        let second: ZtfRawAvroAlert = cache
-            .alert_from_avro_bytes(&avro_bytes)
-            .expect("fallback deserialization should succeed");
-
-        assert_eq!(first.candid, second.candid);
-        assert_eq!(first.object_id, second.object_id);
-        assert_eq!(first.schemavsn, second.schemavsn);
-
-        // The cache should now hold the corrected start index again.
-        assert_eq!(
-            cache.get_cached_start_idx().unwrap(),
-            good_idx,
-            "cache should be repaired after the fallback"
-        );
+            let mut candids = [first.candid, second.candid];
+            candids.sort();
+            assert_eq!(candids, [2695378462115010012, 2991189033415010000]);
+        }
     }
 
     #[tokio::test]

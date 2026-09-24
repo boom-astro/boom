@@ -79,6 +79,7 @@ impl Modify for BabamulSecurityAddon {
         routes::filters::validate_filter,
         routes::filters::get_filters,
         routes::filters::get_filter,
+        routes::filters::delete_filter,
         routes::filters::post_filter_version,
         routes::filters::post_filter_test,
         routes::filters::post_filter_test_count,
