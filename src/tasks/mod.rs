@@ -16,6 +16,7 @@
 //! bodies are therefore written to be **resumable**: re-running one continues
 //! rather than repeating.
 
+pub mod catalog_ingest;
 pub mod context;
 pub mod ledger;
 pub mod logs;
@@ -25,6 +26,9 @@ pub mod redact;
 
 pub use context::TaskContext;
 pub use models::{Actor, TaskRun, TaskStatus, Trigger};
+
+use mongodb::bson::doc;
+use serde::Deserialize;
 
 #[derive(thiserror::Error, Debug)]
 pub enum TaskError {
@@ -63,6 +67,11 @@ pub struct TaskSpec {
     pub params_schema: fn() -> serde_json::Value,
 }
 
+/// The schema of a params type, as JSON.
+fn schema_of<T: utoipa::PartialSchema>() -> serde_json::Value {
+    serde_json::to_value(T::schema()).unwrap_or_else(|_| serde_json::json!({}))
+}
+
 // TODO: recurring runs, for periodic maintenance such as the LSST cutout
 // retention policy (#518). The run document is already ready for them --
 // `Trigger::Schedule` and `Actor::system()` exist so a scheduled run is
@@ -94,7 +103,16 @@ pub struct TaskSpec {
 // and `copy_cutouts` already covering most of the moving part.
 
 /// Every task type this release knows how to run.
-pub const TASKS: &[TaskSpec] = &[];
+pub const TASKS: &[TaskSpec] = &[TaskSpec {
+    id: catalog_ingest::TASK_TYPE,
+    title: "Ingest an archival catalog",
+    description: "Download an archival catalog and insert it into MongoDB, one chunk at a \
+                      time. Resumable: re-running continues from the last completed chunk.",
+    idempotent: true,
+    // Only with drop_existing, which the client has to ask for explicitly.
+    destructive: true,
+    params_schema: || schema_of::<catalog_ingest::CatalogIngestParams>(),
+}];
 
 pub fn find(id: &str) -> Option<&'static TaskSpec> {
     TASKS.iter().find(|t| t.id == id)
@@ -127,11 +145,22 @@ fn known_types() -> String {
 ///
 /// Called by the API at submit time so a malformed request is a 400 rather than
 /// a run that fails minutes later on a worker.
-pub fn validate_params(task_type: &str, _params: &serde_json::Value) -> Result<(), TaskError> {
-    Err(TaskError::UnknownType {
-        id: task_type.to_string(),
-        known: known_types(),
-    })
+pub fn validate_params(task_type: &str, params: &serde_json::Value) -> Result<(), TaskError> {
+    match task_type {
+        catalog_ingest::TASK_TYPE => {
+            let parsed: catalog_ingest::CatalogIngestParams =
+                serde_json::from_value(params.clone())
+                    .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            parsed
+                .validate()
+                .map(|_| ())
+                .map_err(|e| TaskError::InvalidParams(e.to_string()))
+        }
+        other => Err(TaskError::UnknownType {
+            id: other.to_string(),
+            known: known_types(),
+        }),
+    }
 }
 
 /// Params that must not be concurrently active for a new run of this type.
@@ -140,10 +169,16 @@ pub fn validate_params(task_type: &str, _params: &serde_json::Value) -> Result<(
 /// same chunk state, so submission is single-flight per catalog rather than per
 /// task type -- ingesting 2MASS should not block ingesting NED.
 pub fn single_flight_key(
-    _task_type: &str,
-    _params: &serde_json::Value,
+    task_type: &str,
+    params: &serde_json::Value,
 ) -> Option<mongodb::bson::Document> {
-    None
+    match task_type {
+        catalog_ingest::TASK_TYPE => params
+            .get("catalog")
+            .and_then(|c| c.as_str())
+            .map(|catalog| doc! { "catalog": catalog }),
+        _ => None,
+    }
 }
 
 /// Run a task body by type.
@@ -151,14 +186,21 @@ pub fn single_flight_key(
 /// The one place a task type turns into work. Adding a task means a body, an
 /// arm here, an arm in [`validate_params`], and an entry in [`TASKS`].
 pub async fn dispatch(
-    _ctx: &TaskContext,
+    ctx: &TaskContext,
     task_type: &str,
-    _params: serde_json::Value,
+    params: serde_json::Value,
 ) -> Result<serde_json::Value, TaskError> {
-    Err(TaskError::UnknownType {
-        id: task_type.to_string(),
-        known: known_types(),
-    })
+    match task_type {
+        catalog_ingest::TASK_TYPE => {
+            let params = catalog_ingest::CatalogIngestParams::deserialize(params)
+                .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            catalog_ingest::run(ctx, params).await
+        }
+        other => Err(TaskError::UnknownType {
+            id: other.to_string(),
+            known: known_types(),
+        }),
+    }
 }
 
 #[cfg(test)]
@@ -178,6 +220,30 @@ mod tests {
                 .unwrap_or_else(|| panic!("{} has no properties", spec.id));
             assert!(!properties.is_empty(), "{} has an empty schema", spec.id);
         }
+    }
+
+    #[test]
+    fn a_schema_marks_the_fields_the_api_will_insist_on() {
+        // `required` is what stops the form submitting something validate_params
+        // would reject; catalog_ingest cannot run without a catalog.
+        let schema = (find(catalog_ingest::TASK_TYPE).unwrap().params_schema)();
+        let required: Vec<&str> = schema["required"]
+            .as_array()
+            .expect("required")
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(required.contains(&"catalog"), "{required:?}");
+    }
+
+    #[test]
+    fn field_descriptions_come_from_the_doc_comments() {
+        // Which is why they are worth writing: they are the form's help text.
+        let schema = (find(catalog_ingest::TASK_TYPE).unwrap().params_schema)();
+        let description = schema["properties"]["drop_existing"]["description"]
+            .as_str()
+            .expect("described");
+        assert!(description.contains("start over"), "{description}");
     }
 
     #[test]

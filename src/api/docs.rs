@@ -61,6 +61,7 @@ impl Modify for BabamulSecurityAddon {
         routes::catalogs::get_catalogs,
         routes::catalogs::get_catalog_indexes,
         routes::catalogs::get_catalog_sample,
+        routes::catalogs::get_catalog_status,
         routes::tasks::get_task_types,
         routes::tasks::submit_task,
         routes::tasks::get_tasks,
