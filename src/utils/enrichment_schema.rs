@@ -343,7 +343,9 @@ fn association_fields(survey: &Survey, host_galaxy_enabled: bool) -> Vec<Enrichm
             true,
             false,
             "Past alerts sharing this alert's solar system designation, oldest \
-             first, within a year and inside the association radius.",
+             first, within a year and inside the association radius. Referencing \
+             it restricts the filter to alerts carrying \
+             `properties.sso.designation`: the join is preceded by a match on it.",
         ));
         for (leaf, _, value_type, nullable, what) in SSO_HISTORY_FIELDS {
             out.push(EnrichmentField::new(
