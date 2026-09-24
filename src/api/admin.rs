@@ -5,6 +5,10 @@
 //! authenticates as the latter. Rather than merge the logins, both realms carry
 //! an `is_admin` flag and both are accepted here, so there is one authorization
 //! check and one shape of actor recorded on a run.
+//!
+//! One users collection with explicit permissions -- internal, external, admin
+//! -- would be cleaner than two realms carrying a boolean each, and is the
+//! direction to take whenever either login is next reworked.
 
 use crate::api::models::response;
 use crate::api::routes::{babamul::BabamulUser, users::User};

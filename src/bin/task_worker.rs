@@ -7,8 +7,9 @@
 //! Deliberately a separate service from the API: these jobs run for hours and
 //! are memory-hungry, and an API restart or deploy must not kill one. When this
 //! process does go away mid-run, the run's lease lapses and the next worker to
-//! start picks it back up -- which is why every task body is written to be
-//! resumable.
+//! start picks it back up -- for a task that declares itself `idempotent`.
+//! Every registered task does today, but the worker reads the flag rather than
+//! assuming it: a task that cannot be resumed is failed instead of retried.
 
 use boom::conf::{load_dotenv, AppConfig};
 use boom::tasks::{

@@ -3,14 +3,23 @@
 Operating a BOOM system typically involves adding new catalogs,
 changing the schema of alerts and object already in the database,
 and reprocessing alerts already saved in the database, e.g., when a new
-catalog or enrichment step, e.g., ML model classifier, is added.
+catalog or enrichment step like an ML model classifier is added.
 It is important for us to be able to track what mutations were done to the
-data when.
+data, at what time, and with what version of the code.
 
 BOOM's task system allows kicking off, monitoring, and querying the history
 of these tasks from the admin section of the front end.
 All tasks report what they've done to mutate the data system, and this
 changelog can be viewed from the admin page.
+
+The principle underneath all of it: **BOOM is responsible for its own data.**
+Another system can ask BOOM for a desired state, but it does not reach in and
+mutate the database itself. That is what makes the changelog a complete account
+of how the data got this way rather than a partial one.
+
+**Who this is for:** BOOM developers, and the admins who operate a deployment.
+None of it is visible to Babamul users, and a SkyPortal integrator only meets it
+if that account is also an admin.
 
 ## Why not just run a binary
 
@@ -28,9 +37,11 @@ starts over SSH:
   of the data, and that state is the raw stream plus a sequence of mutations. If
   those mutations are only in someone's shell history, the artifacts derived
   from them can't be reasoned about or reproduced.
-
-Access control is the fourth reason and the least interesting one: mutating
-production data should not require handing out root-adjacent shell access.
+- **It has to go through BOOM.** The application owns its database. Humans,
+  scripts and other apps should not be reaching into MongoDB to change it: what
+  kinds of access and actions are acceptable, and from whom, is exactly what an
+  API is for. MongoDB credentials are not an authorization system, and mutating
+  production data should not require handing out root-adjacent shell access.
 
 ## How a run flows
 

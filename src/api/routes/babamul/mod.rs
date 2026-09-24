@@ -188,7 +188,9 @@ pub struct BabamulUser {
     /// `username` it is free text, optional, and not unique.
     #[serde(default)]
     pub name: Option<String>,
-    /// Whether this account may run data-mutating tasks from the admin page.
+    /// Whether this account has elevated privileges. Today that means running
+    /// data-mutating tasks from the admin page; user management will land here
+    /// too.
     ///
     /// Reconciled from `babamul.admin_emails` at API startup, so config is the
     /// source of truth: removing someone from the list revokes their access on
@@ -213,10 +215,8 @@ pub struct BabamulUserPublic {
     pub orcid_id: Option<String>,
     /// Full name the user chose to display, if any
     pub name: Option<String>,
-    /// Whether this account may run data-mutating tasks. Read-only here: it is
-    /// reconciled from `babamul.admin_emails` at startup, never set through the
-    /// API. Exposed so the web app knows whether to offer the admin page --
-    /// authorization is still enforced server-side on every admin route.
+    /// Exposed so the web app knows whether to offer the admin page.
+    /// Authorization is enforced server-side on every admin route regardless.
     pub is_admin: bool,
 }
 
