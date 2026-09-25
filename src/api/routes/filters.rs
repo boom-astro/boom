@@ -1352,6 +1352,9 @@ pub struct ZtfAlertToFilter {
     pub prv_nondetections: Vec<ZtfPrvCandidate>,
     pub fp_hists: Vec<ZtfForcedPhot>,
     pub aliases: ZtfAliases,
+    /// The linked moving-object track this detection belongs to, on every
+    /// member rather than only the newest.
+    pub track: Option<crate::utils::tracks::AlertTrack>,
     #[serde(rename = "LSST")]
     pub lsst: Option<LsstFilterMatch>,
 }

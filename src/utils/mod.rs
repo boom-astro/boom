@@ -25,6 +25,7 @@ pub mod spatial;
 pub mod sso_geometry;
 pub mod testing;
 pub mod thor;
+pub mod tracks;
 pub mod worker;
 
 /// A BSON number as `f64`, whatever width it was written at.

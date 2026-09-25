@@ -640,6 +640,7 @@ pub async fn build_ztf_filter_pipeline(
                 "classifications": 1,
                 "properties": 1,
                 "coordinates": 1,
+                "track": 1,
             }
         },
     ];
