@@ -59,7 +59,7 @@ async fn validate_watchlist(
 }
 
 use crate::utils::moc::{moc_from_ascii, moc_hpx_stage};
-use actix_web::{get, patch, post, web, HttpResponse};
+use actix_web::{delete, get, patch, post, web, HttpResponse};
 use apache_avro::AvroSchema;
 use apache_avro_macros::serdavro;
 use flare::Time;
@@ -855,6 +855,48 @@ pub async fn get_filter(
         Ok(Some(filter)) => response::ok_ser("retrieved filter successfully", filter),
         Ok(None) => response::not_found(&format!("filter with id {} does not exist", filter_id)),
         Err(e) => response::internal_error(&format!("failed to query filter: {}", e)),
+    }
+}
+
+/// Delete a filter
+#[utoipa::path(
+    delete,
+    path = "/filters/{filter_id}",
+    responses(
+        (status = 200, description = "Filter deleted successfully"),
+        (status = 404, description = "Filter not found"),
+        (status = 500, description = "Internal server error")
+    ),
+    tags=["Filters"]
+)]
+#[delete("/filters/{filter_id}")]
+pub async fn delete_filter(
+    db: web::Data<Database>,
+    path: web::Path<String>,
+    current_user: Option<web::ReqData<User>>,
+) -> HttpResponse {
+    let current_user = match current_user {
+        Some(user) => user,
+        None => {
+            return HttpResponse::Unauthorized().body("Unauthorized");
+        }
+    };
+
+    let filter_id = path.into_inner();
+    let filter_query = if current_user.is_admin {
+        doc! { "_id": &filter_id }
+    } else {
+        doc! { "_id": &filter_id, "user_id": &current_user.id }
+    };
+    let filter_collection: Collection<Filter> = db.collection("filters");
+
+    match filter_collection.delete_one(filter_query).await {
+        Ok(result) if result.deleted_count > 0 => response::ok_no_data(&format!(
+            "filter with id {} deleted successfully",
+            filter_id
+        )),
+        Ok(_) => response::not_found(&format!("filter with id {} does not exist", filter_id)),
+        Err(e) => response::internal_error(&format!("failed to delete filter: {}", e)),
     }
 }
 
