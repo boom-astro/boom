@@ -497,9 +497,23 @@ mod tests {
                 .app_data(web::Data::new(auth_app_data.clone()))
                 .app_data(web::Data::new(config))
                 .wrap(from_fn(auth_middleware))
-                .service(routes::filters::get_filter_schema),
+                .service(routes::filters::get_filter_schema)
+                .service(routes::filters::get_filter_alert_schema),
         )
         .await;
+
+        // Both paths serve one implementation, so they must not diverge.
+        let mut both = Vec::new();
+        for uri in ["/filters/schemas/ZTF", "/filters/alert-schemas/ZTF"] {
+            let req = test::TestRequest::get()
+                .uri(uri)
+                .insert_header(("Authorization", format!("Bearer {}", token)))
+                .to_request();
+            let resp = test::call_service(&app, req).await;
+            assert_eq!(resp.status(), StatusCode::OK, "{uri} did not answer");
+            both.push(read_json_response(resp).await);
+        }
+        assert_eq!(both[0], both[1], "the alias and the old path diverged");
 
         // ZTF schema test
         let req = test::TestRequest::get()

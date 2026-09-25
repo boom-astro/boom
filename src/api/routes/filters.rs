@@ -1408,29 +1408,8 @@ pub struct FilterSchemaResponse {
     pub enrichment: Vec<EnrichmentField>,
 }
 
-/// Get the fields a survey's alerts carry at filtering time
-///
-/// `schema` is the alert struct, fixed at compile time. `enrichment` is the rest:
-/// paths written as sub-documents, whose membership follows this deployment's
-/// configured catalogs and enabled enrichers, so no static schema can carry them.
-#[utoipa::path(
-    get,
-    path = "/filters/schemas/{survey_name}",
-    params(
-        ("survey_name" = Survey, Path, description = "Name of the survey (e.g., 'ZTF')"),
-    ),
-    responses(
-        (status = 200, description = "Avro schema and enrichment paths", body = FilterSchemaResponse),
-        (status = 404, description = "Schema not found"),
-    ),
-    tags=["Filters"]
-)]
-#[get("/filters/schemas/{survey_name}")]
-pub async fn get_filter_schema(
-    path: web::Path<(Survey,)>,
-    config: web::Data<AppConfig>,
-) -> HttpResponse {
-    let survey_name = path.into_inner().0;
+/// The fields a survey's alerts carry at filtering time, for both paths.
+fn filter_alert_schema(survey_name: Survey, config: &AppConfig) -> HttpResponse {
     let schema = match survey_name {
         Survey::Ztf => ZtfAlertToFilter::get_schema(),
         Survey::Lsst => LsstAlertToFilter::get_schema(),
@@ -1457,6 +1436,54 @@ pub async fn get_filter_schema(
             enrichment,
         },
     )
+}
+
+/// Get the fields a survey's alerts carry at filtering time
+///
+/// `schema` is the alert struct, fixed at compile time. `enrichment` is the rest:
+/// paths written as sub-documents, whose membership follows this deployment's
+/// configured catalogs and enabled enrichers, so no static schema can carry them.
+#[utoipa::path(
+    get,
+    path = "/filters/alert-schemas/{survey_name}",
+    params(
+        ("survey_name" = Survey, Path, description = "Name of the survey (e.g., 'ZTF')"),
+    ),
+    responses(
+        (status = 200, description = "Avro schema and enrichment paths", body = FilterSchemaResponse),
+        (status = 404, description = "Schema not found"),
+    ),
+    tags=["Filters"]
+)]
+#[get("/filters/alert-schemas/{survey_name}")]
+pub async fn get_filter_alert_schema(
+    path: web::Path<(Survey,)>,
+    config: web::Data<AppConfig>,
+) -> HttpResponse {
+    filter_alert_schema(path.into_inner().0, &config)
+}
+
+/// Get the fields a survey's alerts carry at filtering time
+///
+/// The former path for the same response, kept so existing callers keep working.
+#[utoipa::path(
+    get,
+    path = "/filters/schemas/{survey_name}",
+    params(
+        ("survey_name" = Survey, Path, description = "Name of the survey (e.g., 'ZTF')"),
+    ),
+    responses(
+        (status = 200, description = "Avro schema and enrichment paths", body = FilterSchemaResponse),
+        (status = 404, description = "Schema not found"),
+    ),
+    tags=["Filters"]
+)]
+#[get("/filters/schemas/{survey_name}")]
+pub async fn get_filter_schema(
+    path: web::Path<(Survey,)>,
+    config: web::Data<AppConfig>,
+) -> HttpResponse {
+    filter_alert_schema(path.into_inner().0, &config)
 }
 
 #[cfg(test)]
