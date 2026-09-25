@@ -108,9 +108,7 @@ redis:
   host: localhost
   port: 6379
 milvus:
-  # Vector database holding the AppleCiDEr fusion model's embeddings.
-  # See docs/milvus.md.
-  enabled: false # Set via BOOM_MILVUS__ENABLED environment variable
+  enabled: true # Set via BOOM_MILVUS__ENABLED environment variable
   host: milvus.nrp-nautilus.io
   port: 50051
   tls: true

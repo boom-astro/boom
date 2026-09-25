@@ -8,6 +8,12 @@ gpu:
   enabled: true
   device_ids: [0, 1]
 
+# The NRP Milvus instance is UMN's, so this stays out of the base config.yaml:
+# Caltech has no credentials for it and would warn on every enrichment batch.
+# Credentials come from BOOM_MILVUS__USERNAME / __PASSWORD.
+milvus:
+  enabled: true
+
 workers:
   ztf:
     alert:
