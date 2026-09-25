@@ -26,14 +26,18 @@ use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use mongodb::{Collection, Database};
 use ndarray::Array;
+#[cfg(all(feature = "gpu", target_os = "linux"))]
+use sbpl_pso::gpu as sbpl_gpu;
+#[cfg(all(feature = "gpu", target_os = "macos"))]
+use sbpl_pso::gpu_metal as sbpl_gpu;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tracing::{debug, instrument, trace, warn};
 #[cfg(all(feature = "gpu", target_os = "linux"))]
-use villar_pso::gpu::{GpuBatchData, SourceData};
+use villar_pso::gpu::{GpuBatchData, GpuContext, SourceData};
 #[cfg(all(feature = "gpu", target_os = "macos"))]
-use villar_pso::gpu_metal::{GpuBatchData, SourceData};
+use villar_pso::gpu_metal::{GpuBatchData, GpuContext, SourceData};
 
 #[serdavro]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -603,7 +607,8 @@ pub struct ZtfEnrichmentWorker {
     alert_pipeline: Vec<Document>,
     /// Shared ONNX models (loaded once, shared across all enrichment workers
     /// via Arc). On Linux+`gpu` this also owns the per-device CUDA stream and
-    /// villar-pso `GpuContext` so that PSO and ONNX inference share a stream.
+    /// the villar-pso and sbpl-pso `GpuContext`s, so that the fits and ONNX
+    /// inference share a stream.
     models: Arc<SharedModels>,
     babamul: Option<Babamul>,
     gpu_enabled: bool,
@@ -632,6 +637,125 @@ fn to_villar_photometry(p: &PhotometryMag) -> Option<villar_pso::PhotometryMag> 
         mag_err: p.mag_err,
         band,
     })
+}
+
+/// The alert's own ZTF photometry up to its epoch, as the SBPL fit takes it:
+/// detections under the same SNR cuts as the rest of enrichment, keeping only
+/// positive-difference points.
+///
+/// Built from the alert rather than taken from the enrichment light curve,
+/// which also carries any matched LSST photometry. The sign is read from
+/// `psfFlux` because `magpsf` is the magnitude of its absolute value: without
+/// the test, a variable fading below its reference would read as a brightening.
+#[cfg_attr(not(feature = "gpu"), allow(dead_code))]
+fn sbpl_photometry(
+    prv_candidates: &[ZtfPhotometry],
+    fp_hists: &[ZtfPhotometry],
+    jd: f64,
+) -> Vec<PhotometryMag> {
+    let positive_by_jd = |p: &&ZtfPhotometry| p.jd <= jd && p.flux.is_some_and(|f| f > 0.0);
+    let mut lightcurve: Vec<PhotometryMag> = prv_candidates
+        .iter()
+        .filter(positive_by_jd)
+        .filter_map(|p| p.to_photometry_mag(None))
+        .chain(
+            fp_hists
+                .iter()
+                .filter(positive_by_jd)
+                .filter_map(|p| p.to_photometry_mag(Some(3.0))),
+        )
+        .collect();
+    // The sort is stable, so alert photometry stays ahead of forced photometry
+    // of the same epoch and is the copy deduplication keeps.
+    prepare_photometry(&mut lightcurve);
+    lightcurve
+}
+
+/// Group photometry into sbpl-pso's per-band flux map (µJy, zeropoint 23.9),
+/// keyed by the band names sbpl-pso looks effective frequencies up by.
+#[cfg(feature = "gpu")]
+fn to_sbpl_bands(lightcurve: &[PhotometryMag]) -> HashMap<String, sbpl_pso::BandData> {
+    let mut bands: HashMap<String, sbpl_pso::BandData> = HashMap::new();
+    for p in lightcurve {
+        let name = match p.band {
+            Band::G => "g",
+            Band::R => "r",
+            Band::I => "i",
+            _ => continue,
+        };
+        let (flux, flux_err) = sbpl_pso::mag_to_flux(p.mag as f64, p.mag_err as f64);
+        let band = bands.entry(name.to_string()).or_default();
+        band.times.push(p.time);
+        band.fluxes.push(flux);
+        band.flux_errs.push(flux_err);
+    }
+    bands
+}
+
+/// Peak-shaped SBPL fits: rising before the break (`alpha1 >= 0`) and declining
+/// after it (`alpha2 <= 0`), which puts the break at the light-curve peak. The
+/// other bounds and the search effort are sbpl-pso's defaults.
+#[cfg(feature = "gpu")]
+fn sbpl_pso_config() -> sbpl_pso::PsoConfig {
+    sbpl_pso::PsoConfig {
+        alpha1_min: 0.0,
+        alpha2_max: 0.0,
+        ..Default::default()
+    }
+}
+
+/// The `sbpl_fit.*` fields for one alert, NaN wherever the fit has no value.
+#[cfg(feature = "gpu")]
+fn sbpl_fit_doc(result: &sbpl_pso::SbplResult) -> Document {
+    let fields = [
+        ("alpha1", result.alpha1),
+        ("alpha2", result.alpha2),
+        ("beta", result.beta),
+        ("logd", result.logd),
+        ("loga", result.loga),
+        ("tb", result.tb),
+        ("t0", result.t0),
+        ("alpha1_err", result.alpha1_err),
+        ("alpha2_err", result.alpha2_err),
+        ("beta_err", result.beta_err),
+        ("logd_err", result.logd_err),
+        ("loga_err", result.loga_err),
+        ("tb_err", result.tb_err),
+        ("t0_err", result.t0_err),
+        ("reduced_chi2", result.reduced_chi2),
+    ];
+    let mut set_doc = doc! {
+        "sbpl_fit.n_obs": result.n_obs as i64,
+        "sbpl_fit.n_bands": result.n_bands as i64,
+    };
+    for (name, value) in fields {
+        set_doc.insert(format!("sbpl_fit.{}", name), value.unwrap_or(f64::NAN));
+    }
+    set_doc
+}
+
+/// A result with nothing fitted, for alerts the fit never ran on.
+#[cfg(feature = "gpu")]
+fn unfitted_sbpl(n_obs: usize, n_bands: usize) -> sbpl_pso::SbplResult {
+    sbpl_pso::SbplResult {
+        alpha1: None,
+        alpha2: None,
+        beta: None,
+        logd: None,
+        loga: None,
+        tb: None,
+        t0: None,
+        alpha1_err: None,
+        alpha2_err: None,
+        beta_err: None,
+        logd_err: None,
+        loga_err: None,
+        tb_err: None,
+        t0_err: None,
+        reduced_chi2: None,
+        n_obs,
+        n_bands,
+    }
 }
 
 #[async_trait::async_trait]
@@ -753,6 +877,8 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         let mut work_items: Vec<AlertWork> = Vec::with_capacity(alerts.len());
         #[cfg(feature = "gpu")]
         let mut villar_inputs: Vec<(i64, Vec<PhotometryMag>)> = Vec::new();
+        #[cfg(feature = "gpu")]
+        let mut sbpl_inputs: Vec<(i64, Vec<PhotometryMag>)> = Vec::new();
         for alert in alerts {
             let candid = alert.candid;
             let cutouts = candid_to_cutouts
@@ -775,6 +901,17 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             #[cfg(feature = "gpu")]
             if self.models.gpu_ctx.is_some() {
                 villar_inputs.push((candid, lightcurve));
+            }
+            #[cfg(feature = "gpu")]
+            if self.models.sbpl_ctx.is_some() {
+                sbpl_inputs.push((
+                    candid,
+                    sbpl_photometry(
+                        &alert.prv_candidates,
+                        &alert.fp_hists,
+                        alert.candidate.candidate.jd,
+                    ),
+                ));
             }
 
             work_items.push(AlertWork {
@@ -834,90 +971,20 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             let _ = self.client.bulk_write(updates).await?.modified_count;
         }
 
-        // Villar fitting needs SharedModels loaded on a GPU device.
+        // Light-curve fitting needs SharedModels loaded on a GPU device.
         #[cfg(feature = "gpu")]
-        if let Some(gpu_ctx) = self.models.gpu_ctx.as_ref() {
-            // Same keys as a successful fit, all NaN, so consumers see one schema.
-            let nan_set_doc = {
-                let mut d = doc! {
-                    "villar_fit.reduced_chi2": f64::NAN,
-                    "villar_fit.peak_flux": f64::NAN,
-                };
-                for filt in villar_pso::FILTERS {
-                    for pname in villar_pso::PARAM_NAMES {
-                        d.insert(format!("villar_fit.{}_{}", pname, filt), f64::NAN);
-                    }
-                }
-                d
-            };
-
-            let alert_collection = &self.alert_collection;
-            let build_update = |candid: i64, set_doc: Document| {
-                WriteModel::UpdateOne(
-                    UpdateOneModel::builder()
-                        .namespace(alert_collection.namespace())
-                        .filter(doc! { "_id": candid })
-                        .update(doc! { "$set": set_doc })
-                        .build(),
-                )
-            };
-
-            let mut villar_updates: Vec<WriteModel> = Vec::new();
-            let mut fittable: Vec<(i64, SourceData)> = Vec::new();
-            for (candid, lc) in &villar_inputs {
-                let villar_lc: Vec<villar_pso::PhotometryMag> =
-                    lc.iter().filter_map(to_villar_photometry).collect();
-                match villar_pso::preprocess_from_photometry(&villar_lc) {
-                    Ok(preproc) => fittable.push((
-                        *candid,
-                        SourceData {
-                            name: candid.to_string(),
-                            data: preproc,
-                        },
-                    )),
-                    Err(e) => {
-                        trace!(candid, "skipping Villar fit: {}", e);
-                        villar_updates.push(build_update(*candid, nan_set_doc.clone()));
-                    }
-                }
+        {
+            let mut fit_updates: Vec<WriteModel> = Vec::new();
+            if let Some(gpu_ctx) = self.models.gpu_ctx.as_ref() {
+                fit_updates.extend(self.villar_fit_updates(gpu_ctx, &villar_inputs));
+            }
+            if let Some(sbpl_ctx) = self.models.sbpl_ctx.as_ref() {
+                fit_updates.extend(self.sbpl_fit_updates(sbpl_ctx, &sbpl_inputs));
             }
 
-            if !fittable.is_empty() {
-                let (candids, sources): (Vec<i64>, Vec<SourceData>) = fittable.into_iter().unzip();
-                let source_refs: Vec<&SourceData> = sources.iter().collect();
-                let pso_config = villar_pso::PsoConfig::default();
-
-                let batch_result = GpuBatchData::new(gpu_ctx, &source_refs);
-
-                match batch_result.and_then(|batch| {
-                    gpu_ctx.batch_pso_multi_seed(&batch, &source_refs, &pso_config)
-                }) {
-                    Ok(results) => {
-                        for (result, candid) in results.into_iter().zip(candids) {
-                            let mut set_doc = doc! {
-                                "villar_fit.reduced_chi2": result.reduced_chi2,
-                                "villar_fit.peak_flux": result.peak_flux,
-                            };
-                            for (key, val) in result.params_unnorm.to_named_map() {
-                                set_doc.insert(format!("villar_fit.{}", key), val);
-                            }
-                            villar_updates.push(build_update(candid, set_doc));
-                        }
-                    }
-                    Err(e) => {
-                        warn!("GPU Villar batch fitting failed: {}", e);
-                        villar_updates.extend(
-                            candids
-                                .into_iter()
-                                .map(|c| build_update(c, nan_set_doc.clone())),
-                        );
-                    }
-                }
-            }
-
-            if !villar_updates.is_empty() {
-                if let Err(e) = self.client.bulk_write(villar_updates).await {
-                    warn!("failed to write Villar fit results: {}", e);
+            if !fit_updates.is_empty() {
+                if let Err(e) = self.client.bulk_write(fit_updates).await {
+                    warn!("failed to write light-curve fit results: {}", e);
                 }
             }
         }
@@ -927,6 +994,162 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         }
 
         Ok(processed_alerts)
+    }
+}
+
+#[cfg(feature = "gpu")]
+impl ZtfEnrichmentWorker {
+    /// `$set` of `fields` on one alert document.
+    fn set_update(&self, candid: i64, fields: Document) -> WriteModel {
+        WriteModel::UpdateOne(
+            UpdateOneModel::builder()
+                .namespace(self.alert_collection.namespace())
+                .filter(doc! { "_id": candid })
+                .update(doc! { "$set": fields })
+                .build(),
+        )
+    }
+
+    /// Villar fits for `inputs`, one update per alert (see docs/villar-fit.md).
+    #[instrument(skip_all, fields(n_alerts = inputs.len()))]
+    fn villar_fit_updates(
+        &self,
+        gpu_ctx: &GpuContext,
+        inputs: &[(i64, Vec<PhotometryMag>)],
+    ) -> Vec<WriteModel> {
+        // Same keys as a successful fit, all NaN, so consumers see one schema.
+        let nan_set_doc = {
+            let mut d = doc! {
+                "villar_fit.reduced_chi2": f64::NAN,
+                "villar_fit.peak_flux": f64::NAN,
+            };
+            for filt in villar_pso::FILTERS {
+                for pname in villar_pso::PARAM_NAMES {
+                    d.insert(format!("villar_fit.{}_{}", pname, filt), f64::NAN);
+                }
+            }
+            d
+        };
+
+        let mut villar_updates: Vec<WriteModel> = Vec::new();
+        let mut fittable: Vec<(i64, SourceData)> = Vec::new();
+        for (candid, lc) in inputs {
+            let villar_lc: Vec<villar_pso::PhotometryMag> =
+                lc.iter().filter_map(to_villar_photometry).collect();
+            match villar_pso::preprocess_from_photometry(&villar_lc) {
+                Ok(preproc) => fittable.push((
+                    *candid,
+                    SourceData {
+                        name: candid.to_string(),
+                        data: preproc,
+                    },
+                )),
+                Err(e) => {
+                    trace!(candid, "skipping Villar fit: {}", e);
+                    villar_updates.push(self.set_update(*candid, nan_set_doc.clone()));
+                }
+            }
+        }
+
+        if !fittable.is_empty() {
+            let (candids, sources): (Vec<i64>, Vec<SourceData>) = fittable.into_iter().unzip();
+            let source_refs: Vec<&SourceData> = sources.iter().collect();
+            let pso_config = villar_pso::PsoConfig::default();
+
+            let batch_result = GpuBatchData::new(gpu_ctx, &source_refs);
+
+            match batch_result
+                .and_then(|batch| gpu_ctx.batch_pso_multi_seed(&batch, &source_refs, &pso_config))
+            {
+                Ok(results) => {
+                    for (result, candid) in results.into_iter().zip(candids) {
+                        let mut set_doc = doc! {
+                            "villar_fit.reduced_chi2": result.reduced_chi2,
+                            "villar_fit.peak_flux": result.peak_flux,
+                        };
+                        for (key, val) in result.params_unnorm.to_named_map() {
+                            set_doc.insert(format!("villar_fit.{}", key), val);
+                        }
+                        villar_updates.push(self.set_update(candid, set_doc));
+                    }
+                }
+                Err(e) => {
+                    warn!("GPU Villar batch fitting failed: {}", e);
+                    villar_updates.extend(
+                        candids
+                            .into_iter()
+                            .map(|c| self.set_update(c, nan_set_doc.clone())),
+                    );
+                }
+            }
+        }
+
+        villar_updates
+    }
+
+    /// SBPL fits for `inputs`, one update per alert (see docs/sbpl-fit.md).
+    ///
+    /// An alert the fit skips, or one in a batch the GPU fails, is written with
+    /// NaN parameters, so consumers see one schema.
+    #[instrument(skip_all, fields(n_alerts = inputs.len()))]
+    fn sbpl_fit_updates(
+        &self,
+        sbpl_ctx: &sbpl_gpu::GpuContext,
+        inputs: &[(i64, Vec<PhotometryMag>)],
+    ) -> Vec<WriteModel> {
+        let config = sbpl_pso_config();
+
+        let mut sbpl_updates: Vec<WriteModel> = Vec::new();
+        let mut fittable: Vec<(i64, sbpl_gpu::SourceData)> = Vec::new();
+        for (candid, lc) in inputs {
+            match sbpl_pso::prepare_source(&to_sbpl_bands(lc), &config) {
+                sbpl_pso::Preparation::Ready(prepared) => fittable.push((
+                    *candid,
+                    sbpl_gpu::SourceData {
+                        name: candid.to_string(),
+                        prepared,
+                    },
+                )),
+                sbpl_pso::Preparation::Unfittable(result) => {
+                    trace!(
+                        candid,
+                        n_obs = result.n_obs,
+                        n_bands = result.n_bands,
+                        "skipping SBPL fit: too little data"
+                    );
+                    sbpl_updates.push(self.set_update(*candid, sbpl_fit_doc(&result)));
+                }
+                sbpl_pso::Preparation::Empty => {
+                    trace!(candid, "skipping SBPL fit: no g, r or i photometry");
+                    sbpl_updates.push(self.set_update(*candid, sbpl_fit_doc(&unfitted_sbpl(0, 0))));
+                }
+            }
+        }
+
+        if !fittable.is_empty() {
+            let (candids, sources): (Vec<i64>, Vec<sbpl_gpu::SourceData>) =
+                fittable.into_iter().unzip();
+
+            match sbpl_gpu::GpuBatchData::new(sbpl_ctx, &sources)
+                .and_then(|batch| sbpl_ctx.batch_fit(&batch, &config))
+            {
+                Ok(results) => {
+                    for (result, candid) in results.iter().zip(candids) {
+                        sbpl_updates.push(self.set_update(candid, sbpl_fit_doc(result)));
+                    }
+                }
+                Err(e) => {
+                    warn!("GPU SBPL batch fitting failed: {}", e);
+                    for (source, candid) in sources.iter().zip(candids) {
+                        let unfitted =
+                            unfitted_sbpl(source.prepared.n_obs, source.prepared.n_bands);
+                        sbpl_updates.push(self.set_update(candid, sbpl_fit_doc(&unfitted)));
+                    }
+                }
+            }
+        }
+
+        sbpl_updates
     }
 }
 
@@ -1701,5 +1924,152 @@ mod tests {
         };
         let (_, _, point) = history_point(&doc).expect("integer phase angle");
         assert_eq!(point.phase, 12.0);
+    }
+
+    fn ztf_point(jd: f64, band: Band, magpsf: f64, psf_flux: f64, snr: f64) -> ZtfPhotometry {
+        ZtfPhotometry {
+            jd,
+            magpsf: Some(magpsf),
+            sigmapsf: Some(0.05),
+            diffmaglim: 20.5,
+            flux: Some(psf_flux),
+            flux_err: 10.0,
+            band,
+            ra: None,
+            dec: None,
+            snr_psf: Some(snr),
+            programid: 1,
+        }
+    }
+
+    fn times(lightcurve: &[PhotometryMag]) -> Vec<f64> {
+        lightcurve.iter().map(|p| p.time).collect()
+    }
+
+    #[test]
+    fn test_sbpl_photometry_stops_at_alert_epoch() {
+        let prv = [
+            ztf_point(10.0, Band::G, 19.0, 1.0, 20.0),
+            ztf_point(12.0, Band::R, 18.8, 1.0, 20.0),
+        ];
+        let fp = [ztf_point(11.5, Band::R, 18.9, 1.0, 20.0)];
+        assert_eq!(times(&sbpl_photometry(&prv, &fp, 11.0)), [10.0]);
+    }
+
+    /// `magpsf` is the magnitude of `|psfFlux|`, so only the flux says a
+    /// detection is below the reference.
+    #[test]
+    fn test_sbpl_photometry_drops_negative_detections() {
+        let prv = [
+            ztf_point(10.0, Band::G, 19.0, 1.0, 20.0),
+            ztf_point(11.0, Band::G, 19.0, -1.0, 20.0),
+        ];
+        let fp = [ztf_point(12.0, Band::R, 19.5, -1.0, 8.0)];
+        assert_eq!(times(&sbpl_photometry(&prv, &fp, 20.0)), [10.0]);
+    }
+
+    /// Forced photometry needs SNR >= 3 to count; alert photometry is already a
+    /// detection, as in the enrichment light curve.
+    #[test]
+    fn test_sbpl_photometry_applies_forced_photometry_snr_cut() {
+        let prv = [ztf_point(10.0, Band::G, 20.5, 1.0, 2.0)];
+        let fp = [
+            ztf_point(11.0, Band::R, 20.5, 1.0, 2.0),
+            ztf_point(12.0, Band::I, 19.0, 1.0, 12.0),
+        ];
+        assert_eq!(times(&sbpl_photometry(&prv, &fp, 20.0)), [10.0, 12.0]);
+    }
+
+    #[test]
+    fn test_sbpl_photometry_prefers_alert_over_forced_photometry() {
+        let prv = [ztf_point(11.0, Band::R, 18.9, 1.0, 30.0)];
+        let fp = [
+            ztf_point(11.0, Band::R, 19.1, 1.0, 25.0),
+            ztf_point(10.0, Band::G, 19.3, 1.0, 20.0),
+        ];
+        let lightcurve = sbpl_photometry(&prv, &fp, 20.0);
+        assert_eq!(times(&lightcurve), [10.0, 11.0]);
+        assert_eq!(lightcurve[1].mag, 18.9, "the alert's own copy is kept");
+    }
+
+    #[cfg(feature = "gpu")]
+    fn mag_point(time: f64, band: Band, mag: f32) -> PhotometryMag {
+        PhotometryMag {
+            time,
+            mag,
+            mag_err: 0.05,
+            band,
+        }
+    }
+
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn test_sbpl_bands_are_ztf_filters_in_microjansky() {
+        let lightcurve = [
+            mag_point(1.0, Band::G, 23.9),
+            mag_point(2.0, Band::R, 21.4),
+            mag_point(3.0, Band::I, 21.4),
+            mag_point(4.0, Band::Z, 20.0),
+        ];
+        let bands = to_sbpl_bands(&lightcurve);
+        let mut names: Vec<&str> = bands.keys().map(String::as_str).collect();
+        names.sort_unstable();
+        assert_eq!(names, ["g", "i", "r"]);
+
+        let close = |got: f64, want: f64| (got - want).abs() < 1e-5 * want;
+        assert!(close(bands["g"].fluxes[0], 1.0), "23.9 mag is 1 µJy");
+        assert!(close(bands["r"].fluxes[0], 10.0), "2.5 mag brighter is 10x");
+        assert_eq!(bands["i"].times, [3.0]);
+    }
+
+    /// Skipped and failed fits carry the same keys as a successful one.
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn test_unfitted_sbpl_doc_has_the_fitted_schema() {
+        let unfitted = sbpl_fit_doc(&unfitted_sbpl(4, 1));
+        let fitted = sbpl_fit_doc(&sbpl_pso::SbplResult {
+            alpha1: Some(1.5),
+            reduced_chi2: Some(0.8),
+            ..unfitted_sbpl(20, 2)
+        });
+        let keys = |d: &Document| d.keys().cloned().collect::<Vec<_>>();
+        assert_eq!(keys(&unfitted), keys(&fitted));
+        assert_eq!(unfitted.len(), 17);
+        assert!(unfitted.get_f64("sbpl_fit.alpha1").unwrap().is_nan());
+        assert_eq!(unfitted.get_i64("sbpl_fit.n_obs").unwrap(), 4);
+        assert_eq!(fitted.get_f64("sbpl_fit.alpha1").unwrap(), 1.5);
+    }
+
+    /// The peak-shaped bounds reach the fit. Checked with sbpl-pso's CPU path,
+    /// which shares preparation and bounds with the GPU one. How closely the
+    /// fit converges is sbpl-pso's to test, not boom's.
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn test_sbpl_fit_is_peak_shaped() {
+        let (t0, tb) = (2_460_000.0, 10.0);
+        let mut lightcurve = Vec::new();
+        for (band, name) in [(Band::G, "g"), (Band::R, "r")] {
+            let nu_scaled = sbpl_pso::band_frequency_hz(name).unwrap() / 1e15;
+            for day in (2..40).step_by(3) {
+                let t = t0 + day as f64;
+                let flux = sbpl_pso::sbpl_model(t, nu_scaled, 2.0, -1.5, -0.5, -0.3, 2.0, tb, t0);
+                lightcurve.push(mag_point(
+                    t,
+                    band.clone(),
+                    (23.9 - 2.5 * flux.log10()) as f32,
+                ));
+            }
+        }
+
+        let result = sbpl_pso::fit_sbpl(&to_sbpl_bands(&lightcurve), &sbpl_pso_config())
+            .expect("non-empty band map");
+        let (alpha1, alpha2) = (result.alpha1.unwrap(), result.alpha2.unwrap());
+        assert!(alpha1 >= 0.0, "rising before the break, got {alpha1}");
+        assert!(alpha2 <= 0.0, "declining after the break, got {alpha2}");
+        assert!(result.reduced_chi2.is_some_and(f64::is_finite));
+        assert!(
+            result.t0.unwrap() <= t0 + 2.0,
+            "onset at or before the first point"
+        );
     }
 }
