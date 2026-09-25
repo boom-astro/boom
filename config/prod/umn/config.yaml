@@ -107,6 +107,26 @@ gpu:
 redis:
   host: localhost
   port: 6379
+# The NRP Milvus instance is UMN's, so this stays out of the base config.yaml:
+# Caltech has no credentials for it and would warn on every enrichment batch.
+# Credentials come from BOOM_MILVUS__USERNAME / __PASSWORD.
+milvus:
+  # Vector database holding the AppleCiDEr fusion model's embeddings.
+  # See docs/milvus.md.
+  enabled: true # Set via BOOM_MILVUS__ENABLED environment variable
+  host: milvus.nrp-nautilus.io
+  port: 50051
+  tls: true
+  username: "" # Set via BOOM_MILVUS__USERNAME environment variable
+  password: "" # Set via BOOM_MILVUS__PASSWORD environment variable
+  database: umn_babamul_vectordb # Override via BOOM_MILVUS__DATABASE environment variable
+  timeout_seconds: 30
+  collection:
+    name: boom_ztf_fusion_embeddings
+    dim: 384
+    metric_type: COSINE
+    index_type: HNSW
+    object_id_max_length: 64
 kafka:
   consumer:
     ztf:

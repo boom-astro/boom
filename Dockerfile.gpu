@@ -30,7 +30,10 @@ RUN ORT_CAPI_DIR="$('/opt/ort-py/bin/python' -c 'import pathlib, onnxruntime as 
 
 COPY data/models/btsbot-v2.0.0.onnx /app/data/models/btsbot-v2.0.0.onnx
 COPY apache-avro-macros /app/apache-avro-macros
-COPY Cargo.toml Cargo.lock /app/
+COPY Cargo.toml Cargo.lock build.rs /app/
+# build.rs generates the Milvus gRPC bindings from these vendored protos into
+# OUT_DIR; without them src/milvus/proto.rs has nothing to include!().
+COPY ./proto /app/proto
 COPY ./src /app/src
 
 # BuildKit cache mounts keep compiled crates (target/) and fetched deps between
@@ -50,6 +53,7 @@ RUN --mount=type=cache,target=/app/target,sharing=locked \
        target/release/repair_photometry_ordering \
        target/release/enrich_reprocess \
        /app/bin/
+RUN cargo build --release --features gpu --bin scheduler --bin migrate_fp_flux --bin migrate_snr --bin reprocess_crossmatch
 
 FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04 AS app
 

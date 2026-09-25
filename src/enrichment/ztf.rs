@@ -9,6 +9,7 @@ use crate::enrichment::{
     },
     EnrichmentWorker, EnrichmentWorkerError, LsstMatch, LsstPhotometry,
 };
+use crate::milvus::{EmbeddingRow, MilvusSink};
 use crate::utils::cutouts::{AlertCutout, CutoutStorage};
 use crate::utils::db::mongify;
 use crate::utils::enums::Survey;
@@ -637,6 +638,10 @@ pub struct ZtfEnrichmentWorker {
     /// villar-pso `GpuContext` so that PSO and ONNX inference share a stream.
     models: Arc<SharedModels>,
     babamul: Option<Babamul>,
+    /// Sink for fusion embeddings, upserted after classification. Inert when
+    /// `milvus.enabled` is false, and self-pausing while Milvus is unreachable
+    /// so an outage there never stalls enrichment.
+    milvus: MilvusSink,
     gpu_enabled: bool,
     /// Alerts per batch; also the fixed ONNX input shape. See [`EnrichmentWorkerConfig::batch_size`].
     batch_size: usize,
@@ -702,6 +707,16 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             .enrichment
             .batch_size;
 
+        // Connect to Milvus only when the integration is switched on. The
+        // collection itself must already be provisioned (via `milvus_check
+        // --create-collection`); the worker never creates it, so that the many
+        // enrichment workers don't race to create the same collection.
+        //
+        // A connection failure degrades rather than propagating: Milvus is an
+        // optional add-on and Mongo holds the enriched alerts, so an outage
+        // must not take the enrichment worker (and with it the pool slot) down.
+        let milvus = MilvusSink::connect_or_degrade(&config.milvus).await;
+
         Ok(ZtfEnrichmentWorker {
             input_queue,
             output_queue,
@@ -713,6 +728,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             alert_pipeline: create_ztf_alert_pipeline(false),
             models,
             babamul,
+            milvus,
             gpu_enabled: config.gpu.is_active(),
             batch_size,
         })
@@ -771,6 +787,9 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         let mut updates = Vec::new();
         let mut processed_alerts = Vec::new();
         let mut enriched_alerts: Vec<BabamulZtfAlert> = Vec::new();
+        // Fusion embeddings to write to Milvus, collected only when the
+        // integration is enabled and the alert produced an embedding.
+        let mut embedding_rows: Vec<EmbeddingRow> = Vec::new();
 
         // Independent reads: awaiting them in turn pays each round trip.
         let (orbits, sso_history, baselines) = tokio::join!(
@@ -831,7 +850,12 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
 
         let classifications_list = self.classify(&self.models, &work_items)?;
 
-        for (item, classifications) in work_items.into_iter().zip(classifications_list) {
+        for (item, mut classifications) in work_items.into_iter().zip(classifications_list) {
+            // Extracting the fusion embedding from the classifications
+            let fusion_embedding = classifications
+                .as_mut()
+                .and_then(|cls| cls.fusion_embedding.take());
+
             let mut set_doc = doc! {
                 "properties": mongify(&item.properties),
                 "updated_at": now,
@@ -849,6 +873,17 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             ));
             processed_alerts.push(format!("{},{}", item.programid, item.candid));
 
+            if self.milvus.is_enabled() {
+                if let Some(embedding) = fusion_embedding {
+                    embedding_rows.push(EmbeddingRow {
+                        object_id: item.alert.object_id.clone(),
+                        embedding,
+                        candid: item.candid,
+                        jd: item.alert.candidate.candidate.jd,
+                    });
+                }
+            }
+
             if self.babamul.is_some() {
                 enriched_alerts.push(BabamulZtfAlert::from_alert_and_properties(
                     item.alert,
@@ -861,6 +896,10 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         if !updates.is_empty() {
             self.client.bulk_write(updates).await?;
         }
+
+        // Writing fusion embeddings to Milvus. Never fails the batch: the
+        // alerts are already persisted in Mongo by this point.
+        self.milvus.upsert(&embedding_rows).await;
 
         // Villar fitting needs SharedModels loaded on a GPU device.
         #[cfg(feature = "gpu")]
@@ -1587,6 +1626,36 @@ impl ZtfEnrichmentWorker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sample_classifications() -> ZtfAlertClassifications {
+        ZtfAlertClassifications {
+            acai_h: 0.1,
+            acai_n: 0.2,
+            acai_v: 0.3,
+            acai_o: 0.4,
+            acai_b: 0.5,
+            btsbot: 0.6,
+            applecider_fusion: None,
+            applecider_outputs: None,
+            fusion_embedding: Some(vec![1.0, 2.0, 3.0]),
+        }
+    }
+
+    /// The enrichment worker takes the embedding out of the classifications
+    /// before building the Mongo document: the vector goes to Milvus, and the
+    /// document Mongo receives has no `fusion_embedding` key at all.
+    #[test]
+    fn mongo_document_never_carries_the_embedding() {
+        let mut cls = sample_classifications();
+        let embedding = cls.fusion_embedding.take();
+        let doc = mongify(&cls);
+
+        assert_eq!(embedding, Some(vec![1.0, 2.0, 3.0]));
+        assert!(doc.get("fusion_embedding").is_none());
+        assert!(doc.get("btsbot").is_some());
+        assert_eq!(cls.acai_h, 0.1);
+        assert_eq!(cls.btsbot, 0.6);
+    }
 
     #[test]
     fn test_sso_association_populated_when_identified() {
