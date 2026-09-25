@@ -502,6 +502,8 @@ async fn persist_clusters(
     detections: &[Detection],
     labels: &HashMap<i64, String>,
     dry_run: bool,
+    min_detections: usize,
+    min_nights: usize,
 ) {
     use boom::utils::tracks::{commit_upsert, plan_upsert, stamp_members};
     let by_id: HashMap<i64, &Detection> = detections.iter().map(|d| (d.id, d)).collect();
@@ -526,6 +528,15 @@ async fn persist_clusters(
                 continue;
             }
         };
+        if !plan.meets(min_detections, min_nights) {
+            info!(
+                "dropping a track: {} detections over {} nights after {} contested detection(s) were left with another track",
+                plan.n_detections,
+                plan.n_nights,
+                plan.contested.len()
+            );
+            continue;
+        }
         if dry_run {
             info!("would store {}", plan.describe());
             stored += 1;
@@ -562,6 +573,8 @@ async fn persist_tracks(
     detections: &[Detection],
     labels: &HashMap<i64, String>,
     dry_run: bool,
+    min_detections: usize,
+    min_nights: usize,
 ) {
     use boom::utils::tracks::{commit_upsert, plan_upsert, stamp_members};
     let by_id: HashMap<i64, &Detection> = detections.iter().map(|d| (d.id, d)).collect();
@@ -582,7 +595,12 @@ async fn persist_tracks(
         // A track of a known object records the designation, which is what tells
         // a consumer this is a recovery rather than a discovery candidate.
         let designation = members.iter().find_map(|id| labels.get(id)).cloned();
-        let fit = Some((BoundFit::Good, track.residual_arcsec));
+        // None means too few points to constrain an orbit; anything that
+        // survived with a residual already passed the gate.
+        let fit = Some(match track.residual_arcsec {
+            Some(r) => (BoundFit::Good, Some(r)),
+            None => (BoundFit::Ungated, None),
+        });
         let plan = match plan_upsert(db, &members, &jds, designation, fit).await {
             Ok(plan) => plan,
             Err(e) => {
@@ -590,6 +608,15 @@ async fn persist_tracks(
                 continue;
             }
         };
+        if !plan.meets(min_detections, min_nights) {
+            info!(
+                "dropping a track: {} detections over {} nights after {} contested detection(s) were left with another track",
+                plan.n_detections,
+                plan.n_nights,
+                plan.contested.len()
+            );
+            continue;
+        }
         if dry_run {
             info!("would store {}", plan.describe());
             stored += 1;
@@ -846,7 +873,11 @@ async fn run_thor(
     let mut claimed: std::collections::HashSet<i64> = std::collections::HashSet::new();
     let mut kept: Vec<(thor::Cluster, Verdict)> = Vec::new();
     for (c, r) in scored {
-        if c.ids.iter().all(|id| claimed.contains(id)) {
+        // Sharing this many detections with something already kept makes the two
+        // one track downstream, where the later one would extend the earlier and
+        // overwrite its verdict. Best-ranked first, so the one dropped is worse.
+        let shared = c.ids.iter().filter(|id| claimed.contains(id)).count();
+        if shared >= boom::utils::tracks::SHARED_FOR_IDENTITY {
             continue;
         }
         claimed.extend(c.ids.iter().copied());
@@ -866,7 +897,18 @@ async fn run_thor(
     }
     if args.persist || args.dry_run {
         match db {
-            Some(db) => persist_clusters(db, &kept, detections, labels, args.dry_run).await,
+            Some(db) => {
+                persist_clusters(
+                    db,
+                    &kept,
+                    detections,
+                    labels,
+                    args.dry_run,
+                    cfg.min_detections,
+                    cfg.min_nights,
+                )
+                .await
+            }
             None => error!("--persist needs a database, which was not built"),
         }
     }
@@ -1267,7 +1309,17 @@ async fn main() {
         }
         if args.persist || args.dry_run {
             let db = db.as_ref().expect("built when persisting");
-            persist_tracks(db, &tracks, &tracklets, &detections, &labels, args.dry_run).await;
+            persist_tracks(
+                db,
+                &tracks,
+                &tracklets,
+                &detections,
+                &labels,
+                args.dry_run,
+                args.min_detections,
+                args.min_nights,
+            )
+            .await;
         }
 
         for track in tracks.iter().take(args.show) {

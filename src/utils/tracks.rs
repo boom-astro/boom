@@ -248,6 +248,14 @@ pub struct UpsertPlan {
 }
 
 impl UpsertPlan {
+    /// Whether what is left still meets the thresholds the run was searched at.
+    ///
+    /// Dropping detections another track owns can leave too little behind, and a
+    /// remnant stored as a track is worse than no track at all.
+    pub fn meets(&self, min_detections: usize, min_nights: usize) -> bool {
+        self.n_detections as usize >= min_detections && self.n_nights as usize >= min_nights
+    }
+
     /// One line naming what the write would do, for a dry run's log.
     pub fn describe(&self) -> String {
         let what = match (&self.id, self.superseded.is_empty()) {
@@ -502,6 +510,41 @@ mod tests {
     fn test_minted_ids_fit_a_trksub() {
         assert_eq!(format_id(1), "BT000001");
         assert!(format_id(999_999).len() <= 8);
+    }
+
+    /// A track whittled down by contested detections must not be stored as a
+    /// remnant that the run's own thresholds would never have produced.
+    #[test]
+    fn test_a_plan_below_the_run_thresholds_is_not_viable() {
+        let plan = UpsertPlan {
+            id: None,
+            members: vec![10],
+            epochs: vec![2460000.0],
+            n_detections: 1,
+            n_nights: 1,
+            arc_days: 0.0,
+            first_jd: 2460000.0,
+            last_jd: 2460000.0,
+            bound_fit: None,
+            bound_fit_residual_arcsec: None,
+            designation: None,
+            superseded: Vec::new(),
+            contested: vec![11, 12],
+        };
+        assert!(
+            !plan.meets(2, 2),
+            "one detection on one night is not a track"
+        );
+        assert!(!plan.meets(2, 1), "still short on detections");
+        assert!(
+            plan.meets(1, 1),
+            "meets the thresholds it was measured against"
+        );
+        assert!(
+            plan.describe().contains("left with another track"),
+            "a dry run should say why it shrank: {}",
+            plan.describe()
+        );
     }
 
     /// A run that re-links only part of a track must not shrink its night count:
