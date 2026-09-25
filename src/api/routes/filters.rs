@@ -905,12 +905,28 @@ pub async fn delete_filter(
     }
 }
 
-/// HEALPix range conditions for a MOC, or the response explaining why it cannot
-/// be used. Merged into the leading `$match` rather than prepended as its own
-/// stage: a `$match` after the `$project` cannot use the `coordinates.hpx` index.
 /// Documents the count endpoint will score before giving up, so a wide
 /// localization cannot pull an unbounded set into memory.
 const CREDIBLE_LEVEL_COUNT_CAP: usize = 50_000;
+
+/// Why a localization cannot be used.
+///
+/// Separate from the response so the parse, which is slow CPU work, can run on
+/// a blocking thread: `HttpResponse` is not `Send`.
+#[derive(Debug)]
+enum SkymapRegionError {
+    BadRequest(String),
+    Internal(String),
+}
+
+impl From<SkymapRegionError> for HttpResponse {
+    fn from(e: SkymapRegionError) -> Self {
+        match e {
+            SkymapRegionError::BadRequest(m) => response::bad_request(&m),
+            SkymapRegionError::Internal(m) => response::internal_error(&m),
+        }
+    }
+}
 
 /// The localization to score against, and the region to search inside it.
 struct SkymapRegion {
@@ -927,30 +943,31 @@ struct SkymapRegion {
 fn skymap_region(
     skymap_fits_base64: Option<String>,
     credible_level: Option<f64>,
-) -> Result<Option<SkymapRegion>, HttpResponse> {
+) -> Result<Option<SkymapRegion>, SkymapRegionError> {
+    use SkymapRegionError::{BadRequest, Internal};
     let Some(encoded) = skymap_fits_base64 else {
         return Ok(None);
     };
     let credible_level = credible_level.unwrap_or(0.9);
     if !(0.0..=1.0).contains(&credible_level) {
-        return Err(response::bad_request("credible_level must be in [0, 1]"));
+        return Err(BadRequest("credible_level must be in [0, 1]".to_string()));
     }
-    let bytes = BASE64_STANDARD.decode(encoded).map_err(|e| {
-        response::bad_request(&format!("invalid base64 in skymap_fits_base64: {e}"))
-    })?;
+    let bytes = BASE64_STANDARD
+        .decode(encoded)
+        .map_err(|e| BadRequest(format!("invalid base64 in skymap_fits_base64: {e}")))?;
     let skymap = parse_3d_skymap_bytes(&bytes).map_err(|e| {
-        response::bad_request(&format!(
+        BadRequest(format!(
             "a distance-aware (3D) skymap is required to score a credible level: {e}"
         ))
     })?;
     let idx = CredibleVolumeIndex::build(&skymap, 200);
     let moc = credible_volume_to_2d_moc(&skymap, &idx, credible_level);
-    let stage = moc_hpx_stage(&moc).map_err(|e| response::bad_request(&e))?;
+    let stage = moc_hpx_stage(&moc).map_err(BadRequest)?;
     let conditions = stage
         .get_document("$match")
         .and_then(|m| m.get_array("$or"))
         .cloned()
-        .map_err(|e| response::internal_error(&format!("malformed moc stage: {e}")))?;
+        .map_err(|e| Internal(format!("malformed moc stage: {e}")))?;
     Ok(Some(SkymapRegion {
         skymap: Box::new(skymap),
         idx,
@@ -971,51 +988,81 @@ async fn score_credible_levels(
     region: &SkymapRegion,
     results: &mut Vec<Document>,
 ) -> Result<(), String> {
-    let object_ids: Vec<String> = results
-        .iter()
-        .filter_map(|d| d.get_str("objectId").ok().map(str::to_string))
-        .collect();
-    if object_ids.is_empty() {
+    if results.is_empty() {
         return Ok(());
+    }
+    // Keyed on the candid rather than the objectId: one document per result
+    // instead of every alert the object has, and the position of this epoch
+    // rather than an arbitrary one.
+    let candids: Vec<i64> = results
+        .iter()
+        .filter_map(|d| d.get_i64("_id").ok())
+        .collect();
+    if candids.len() != results.len() {
+        return Err(format!(
+            "{} of {} results carry no _id, so their credible level cannot be scored; \
+             the filter must not project it away",
+            results.len() - candids.len(),
+            results.len()
+        ));
     }
 
     let alerts: Collection<Document> = db.collection(&format!("{}_alerts", survey));
-    let mut positions: HashMap<String, (f64, f64)> = HashMap::new();
+    let mut positions: HashMap<i64, (String, f64, f64)> = HashMap::new();
     let mut cursor = alerts
-        .find(doc! { "objectId": { "$in": &object_ids } })
+        .find(doc! { "_id": { "$in": &candids } })
         .projection(doc! { "objectId": 1, "candidate.ra": 1, "candidate.dec": 1 })
         .await
         .map_err(|e| e.to_string())?;
     while let Some(d) = cursor.try_next().await.map_err(|e| e.to_string())? {
-        let (Ok(id), Ok(candidate)) = (d.get_str("objectId"), d.get_document("candidate")) else {
+        let (Ok(candid), Ok(object_id), Ok(candidate)) = (
+            d.get_i64("_id"),
+            d.get_str("objectId"),
+            d.get_document("candidate"),
+        ) else {
             continue;
         };
         if let (Ok(ra), Ok(dec)) = (candidate.get_f64("ra"), candidate.get_f64("dec")) {
-            positions.entry(id.to_string()).or_insert((ra, dec));
+            positions.insert(candid, (object_id.to_string(), ra, dec));
         }
     }
 
+    // Both come off the same aux document, so the host association costs no
+    // extra round trip.
+    let object_ids: Vec<&String> = positions.values().map(|(id, _, _)| id).collect();
     let aux: Collection<Document> = db.collection(&format!("{}_alerts_aux", survey));
     let mut cross_matches: HashMap<String, Document> = HashMap::new();
+    let mut host_galaxies: HashMap<String, Document> = HashMap::new();
     let mut cursor = aux
         .find(doc! { "_id": { "$in": &object_ids } })
-        .projection(doc! { "cross_matches": 1 })
+        .projection(doc! { "cross_matches": 1, "host_galaxy": 1 })
         .await
         .map_err(|e| e.to_string())?;
     while let Some(d) = cursor.try_next().await.map_err(|e| e.to_string())? {
-        if let (Ok(id), Ok(cm)) = (d.get_str("_id"), d.get_document("cross_matches")) {
+        let Ok(id) = d.get_str("_id") else { continue };
+        if let Ok(cm) = d.get_document("cross_matches") {
             cross_matches.insert(id.to_string(), cm.clone());
+        }
+        if let Ok(hg) = d.get_document("host_galaxy") {
+            host_galaxies.insert(id.to_string(), hg.clone());
         }
     }
 
     results.retain_mut(|alert| {
-        let Some(id) = alert.get_str("objectId").ok().map(str::to_string) else {
+        let Ok(candid) = alert.get_i64("_id") else {
             return true;
         };
-        let Some(&(ra, dec)) = positions.get(&id) else {
+        let Some((object_id, ra, dec)) = positions.get(&candid) else {
             return true;
         };
-        match credible_level_at(&region.skymap, &region.idx, ra, dec, cross_matches.get(&id)) {
+        match credible_level_at(
+            &region.skymap,
+            &region.idx,
+            *ra,
+            *dec,
+            host_galaxies.get(object_id),
+            cross_matches.get(object_id),
+        ) {
             Some(level) if level <= region.credible_level => {
                 alert.insert("credible_level", level);
                 true
@@ -1027,6 +1074,9 @@ async fn score_credible_levels(
     Ok(())
 }
 
+/// HEALPix range conditions for a MOC, or the response explaining why it cannot
+/// be used. Merged into the leading `$match` rather than prepended as its own
+/// stage: a `$match` after the `$project` cannot use the `coordinates.hpx` index.
 fn region_conditions(
     moc_ascii: Option<String>,
 ) -> Result<Option<mongodb::bson::Array>, HttpResponse> {
@@ -1226,9 +1276,13 @@ pub async fn post_filter_test(
     let permissions = body.permissions;
     let pipeline = body.pipeline;
 
-    let region = match skymap_region(body.skymap_fits_base64, body.credible_level) {
-        Ok(region) => region,
-        Err(response) => return response,
+    // Off the async thread: parsing a full-resolution skymap would otherwise
+    // block every other request sharing it.
+    let (encoded, level) = (body.skymap_fits_base64.clone(), body.credible_level);
+    let region = match web::block(move || skymap_region(encoded, level)).await {
+        Ok(Ok(region)) => region,
+        Ok(Err(e)) => return e.into(),
+        Err(e) => return response::internal_error(&format!("skymap parsing failed to run: {e}")),
     };
     let moc_conditions = match &region {
         // The localization supersedes a hand-supplied region.
@@ -1284,8 +1338,16 @@ pub async fn post_filter_test(
         if limit == 0 {
             return response::bad_request("limit must be greater than 0");
         }
-        let limit_stage = doc! { "$limit": limit as i64 };
-        test_pipeline.push(limit_stage);
+        // Scoring drops alerts outside the credible region, so limiting before
+        // it returns a short page. Over-fetch to the cap and truncate below.
+        let effective = if region.is_some() {
+            CREDIBLE_LEVEL_COUNT_CAP as i64
+        } else {
+            limit as i64
+        };
+        test_pipeline.push(doc! { "$limit": effective });
+    } else if region.is_some() {
+        test_pipeline.push(doc! { "$limit": CREDIBLE_LEVEL_COUNT_CAP as i64 });
     }
 
     let collection: Collection<Document> = db.collection(format!("{}_alerts", survey).as_str());
@@ -1313,7 +1375,10 @@ pub async fn post_filter_test(
     }
     if let Some(region) = &region {
         if let Err(e) = score_credible_levels(&db, &survey, region, &mut results).await {
-            return response::internal_error(&format!("failed to score credible levels: {e}"));
+            return response::bad_request(&format!("failed to score credible levels: {e}"));
+        }
+        if let Some(limit) = body.limit {
+            results.truncate(limit as usize);
         }
     }
 
@@ -1350,6 +1415,9 @@ pub struct FilterTestCountRequest {
 pub struct FilterTestCountResponse {
     pub count: i64,
     pub pipeline: Vec<serde_json::Value>,
+    /// Whether scoring stopped at the cap, which makes `count` a lower bound.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub capped: bool,
 }
 
 impl FilterTestCountResponse {
@@ -1357,7 +1425,13 @@ impl FilterTestCountResponse {
         Self {
             pipeline: doc2json(pipeline),
             count,
+            capped: false,
         }
+    }
+
+    fn capped(mut self, capped: bool) -> Self {
+        self.capped = capped;
+        self
     }
 }
 
@@ -1390,9 +1464,13 @@ pub async fn post_filter_test_count(
     let permissions = body.permissions;
     let pipeline = body.pipeline;
 
-    let region = match skymap_region(body.skymap_fits_base64, body.credible_level) {
-        Ok(region) => region,
-        Err(response) => return response,
+    // Off the async thread: parsing a full-resolution skymap would otherwise
+    // block every other request sharing it.
+    let (encoded, level) = (body.skymap_fits_base64.clone(), body.credible_level);
+    let region = match web::block(move || skymap_region(encoded, level)).await {
+        Ok(Ok(region)) => region,
+        Ok(Err(e)) => return e.into(),
+        Err(e) => return response::internal_error(&format!("skymap parsing failed to run: {e}")),
     };
     let moc_conditions = match &region {
         // The localization supersedes a hand-supplied region.
@@ -1466,7 +1544,7 @@ pub async fn post_filter_test_count(
         }
         let capped = scored.len() >= CREDIBLE_LEVEL_COUNT_CAP;
         if let Err(e) = score_credible_levels(&db, &survey, region, &mut scored).await {
-            return response::internal_error(&format!("failed to score credible levels: {e}"));
+            return response::bad_request(&format!("failed to score credible levels: {e}"));
         }
         let count = scored.len() as i64;
         let message = if capped {
@@ -1474,7 +1552,10 @@ pub async fn post_filter_test_count(
         } else {
             "filter test count executed successfully"
         };
-        return response::ok_ser(message, FilterTestCountResponse::new(test_pipeline, count));
+        return response::ok_ser(
+            message,
+            FilterTestCountResponse::new(test_pipeline, count).capped(capped),
+        );
     }
 
     // there is no Vec of results, just one document with the count
@@ -1843,5 +1924,22 @@ mod backward_compatibility_tests {
             .expect("the moc parses")
             .expect("conditions are produced");
         assert!(!conditions.is_empty());
+    }
+
+    /// A capped count is a lower bound, and a caller can only act on that if the
+    /// response says so. An uncapped one stays absent rather than noisy.
+    #[test]
+    fn test_only_a_capped_count_says_so() {
+        let plain = serde_json::to_value(FilterTestCountResponse::new(vec![], 7)).unwrap();
+        assert_eq!(plain["count"], 7);
+        assert!(
+            plain.get("capped").is_none(),
+            "an uncapped count should not carry the flag: {plain}"
+        );
+
+        let capped =
+            serde_json::to_value(FilterTestCountResponse::new(vec![], 50_000).capped(true))
+                .unwrap();
+        assert_eq!(capped["capped"], true);
     }
 }

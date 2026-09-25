@@ -117,13 +117,35 @@ pub fn credible_level_at(
     idx: &CredibleVolumeIndex,
     ra: f64,
     dec: f64,
+    host_galaxy: Option<&Document>,
     cross_matches: Option<&Document>,
 ) -> Option<f64> {
-    let best = extract_host_redshifts(cross_matches)
+    let best = host_redshifts(host_galaxy, cross_matches)
         .into_iter()
         .filter_map(|z| idx.searched_prob_vol_at(skymap, ra, dec, luminosity_distance_mpc(z)))
         .fold(f64::INFINITY, f64::min);
     best.is_finite().then_some(best)
+}
+
+/// The redshifts to place the alert at.
+///
+/// A directional-light-radius association names the galaxy the transient sits
+/// in, so where there is one its redshift is the only distance worth trying.
+/// Without one nothing says which neighbour is the host, and the level is taken
+/// at whichever catalogued redshift places the alert deepest in the volume --
+/// an upper bound on how well it fits, over every galaxy that could be the host.
+pub fn host_redshifts(
+    host_galaxy: Option<&Document>,
+    cross_matches: Option<&Document>,
+) -> Vec<f64> {
+    let dlr_z = host_galaxy
+        .and_then(|h| h.get_document("best_host").ok())
+        .and_then(|b| get_f64_from_doc(b, "z"))
+        .filter(|&z| z > 0.0);
+    match dlr_z {
+        Some(z) => vec![z],
+        None => extract_host_redshifts(cross_matches),
+    }
 }
 
 #[cfg(test)]
@@ -176,7 +198,7 @@ mod tests {
         };
 
         let with_host = doc! { "NED": [ doc! { "ra": ra, "dec": dec, "z": z, "z_tech": "SPEC" } ] };
-        let level = credible_level_at(&skymap, &idx, ra, dec, Some(&with_host))
+        let level = credible_level_at(&skymap, &idx, ra, dec, None, Some(&with_host))
             .expect("a host places the alert");
         assert!(
             (0.0..=1.0).contains(&level),
@@ -188,6 +210,49 @@ mod tests {
         );
 
         // No cross-matches at all: nothing to place it with.
-        assert!(credible_level_at(&skymap, &idx, ra, dec, None).is_none());
+        assert!(credible_level_at(&skymap, &idx, ra, dec, None, None).is_none());
+    }
+
+    /// A directional-light-radius association names the host, so its redshift is
+    /// used alone: the catalogue sweep would otherwise take whichever neighbour
+    /// places the alert deepest in the volume, which is a different question.
+    #[test]
+    fn test_the_dlr_host_overrides_the_catalogue_sweep() {
+        let cross_matches = doc! {
+            "NED": [ doc! { "ra": 10.0, "dec": 20.0, "z": 0.05, "z_tech": "SPEC" } ]
+        };
+        let host = doc! { "best_host": doc! { "ra": 10.0, "dec": 20.0, "z": 0.2 } };
+
+        assert_eq!(
+            host_redshifts(Some(&host), Some(&cross_matches)),
+            vec![0.2],
+            "the associated host's redshift should be the only one tried"
+        );
+        // And without an association every catalogued redshift is a candidate.
+        assert_eq!(
+            host_redshifts(None, Some(&cross_matches)),
+            vec![0.05],
+            "the sweep should still run when nothing is associated"
+        );
+    }
+
+    /// An association that never found a galaxy, or one carrying no redshift,
+    /// must not suppress the sweep -- that would lose the only distance there is.
+    #[test]
+    fn test_a_hostless_association_falls_back_to_the_sweep() {
+        let cross_matches = doc! {
+            "NED": [ doc! { "ra": 10.0, "dec": 20.0, "z": 0.05, "z_tech": "SPEC" } ]
+        };
+        for host in [
+            doc! {},
+            doc! { "best_host": doc! { "ra": 10.0, "dec": 20.0 } },
+            doc! { "best_host": doc! { "ra": 10.0, "dec": 20.0, "z": 0.0 } },
+        ] {
+            assert_eq!(
+                host_redshifts(Some(&host), Some(&cross_matches)),
+                vec![0.05],
+                "fell through to nothing for {host:?}"
+            );
+        }
     }
 }
