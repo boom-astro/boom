@@ -459,48 +459,95 @@ fn dump_tracks(
     Ok(tracks.len())
 }
 
-/// How well a bound orbit reproduces a cluster.
-///
-/// Propagation is Keplerian and bound-only -- `state_to_elements` refuses a
-/// non-negative energy -- so a hyperbolic object cannot fit however clean its
-/// astrometry. `Poor` and `Unbound` are where such an object shows up, which is
-/// why neither is discarded.
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum BoundFit {
-    /// Two points cannot constrain six parameters.
-    Ungated,
-    Good(f64),
-    Poor(f64),
-    /// No bound orbit exists for the fitted state.
-    Unbound,
-}
+use boom::utils::tracks::BoundFit;
 
-impl BoundFit {
+/// A bound-orbit verdict with the residual that produced it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Verdict(BoundFit, Option<f64>);
+
+impl Verdict {
     fn residual(&self) -> Option<f64> {
-        match self {
-            BoundFit::Good(r) | BoundFit::Poor(r) => Some(*r),
-            _ => None,
-        }
+        self.1
     }
 
     /// Sort key: a confident bound orbit first, then the ones worth a look.
     fn rank(&self) -> (u8, f64) {
-        match self {
-            BoundFit::Good(r) => (0, *r),
-            BoundFit::Poor(r) => (1, *r),
-            BoundFit::Unbound => (2, 0.0),
-            BoundFit::Ungated => (3, 0.0),
-        }
+        let order = match self.0 {
+            BoundFit::Good => 0,
+            BoundFit::Poor => 1,
+            BoundFit::None => 2,
+            BoundFit::Ungated => 3,
+        };
+        (order, self.1.unwrap_or(0.0))
     }
 
     fn label(&self) -> String {
-        match self {
-            BoundFit::Good(r) => format!("{r:.2}\""),
-            BoundFit::Poor(r) => format!("{r:.2}\" poor"),
-            BoundFit::Unbound => "no bound orbit".to_string(),
-            BoundFit::Ungated => "ungated".to_string(),
+        match (self.0, self.1) {
+            (BoundFit::Good, Some(r)) => format!("{r:.2}\""),
+            (BoundFit::Poor, Some(r)) => format!("{r:.2}\" poor"),
+            (BoundFit::None, _) => "no bound orbit".to_string(),
+            _ => "ungated".to_string(),
         }
     }
+}
+
+/// Store each THOR cluster the same way a linked track is stored.
+///
+/// The bound-fit verdict goes with it: a cluster no bound orbit reproduces is
+/// the interesting one, and persisting it as though it were clean would lose
+/// exactly what makes it worth looking at.
+async fn persist_clusters(
+    db: &mongodb::Database,
+    clusters: &[(boom::utils::thor::Cluster, Verdict)],
+    detections: &[Detection],
+    labels: &HashMap<i64, String>,
+    dry_run: bool,
+) {
+    use boom::utils::tracks::{commit_upsert, plan_upsert, stamp_members};
+    let by_id: HashMap<i64, &Detection> = detections.iter().map(|d| (d.id, d)).collect();
+    let (mut stored, mut stamped) = (0usize, 0u64);
+    for (cluster, verdict) in clusters {
+        let members: Vec<i64> = cluster.ids.clone();
+        let jds: Vec<f64> = members
+            .iter()
+            .filter_map(|id| by_id.get(id))
+            .map(|d| d.jd)
+            .collect();
+        if jds.len() != members.len() {
+            error!("a cluster references detections not in this run, skipping");
+            continue;
+        }
+        let designation = members.iter().find_map(|id| labels.get(id)).cloned();
+        let fit = Some((verdict.0, verdict.residual()));
+        let plan = match plan_upsert(db, &members, &jds, designation, fit).await {
+            Ok(plan) => plan,
+            Err(e) => {
+                error!("could not resolve a cluster: {}", e);
+                continue;
+            }
+        };
+        if dry_run {
+            info!("would store {}", plan.describe());
+            stored += 1;
+            stamped += plan.members.len() as u64;
+            continue;
+        }
+        match commit_upsert(db, plan).await {
+            Ok(up) => {
+                stored += 1;
+                match stamp_members(db, &up.track).await {
+                    Ok(n) => stamped += n,
+                    Err(e) => error!("could not stamp {}: {}", up.track.id, e),
+                }
+            }
+            Err(e) => error!("could not store a cluster: {}", e),
+        }
+    }
+    let what = if dry_run { "would store" } else { "stored" };
+    info!(
+        "{} {} thor clusters, {} alerts stamped",
+        what, stored, stamped
+    );
 }
 
 /// Store each track under a durable id and stamp it onto its member alerts.
@@ -535,7 +582,8 @@ async fn persist_tracks(
         // A track of a known object records the designation, which is what tells
         // a consumer this is a recovery rather than a discovery candidate.
         let designation = members.iter().find_map(|id| labels.get(id)).cloned();
-        let plan = match plan_upsert(db, &members, &jds, designation).await {
+        let fit = Some((BoundFit::Good, track.residual_arcsec));
+        let plan = match plan_upsert(db, &members, &jds, designation, fit).await {
             Ok(plan) => plan,
             Err(e) => {
                 error!("could not resolve a track: {}", e);
@@ -584,7 +632,7 @@ async fn persist_tracks(
 /// fit an orbit and so passes the gate unchecked rather than vouched for.
 fn dump_clusters(
     path: &str,
-    clusters: &[(boom::utils::thor::Cluster, BoundFit)],
+    clusters: &[(boom::utils::thor::Cluster, Verdict)],
     detections: &[Detection],
     labels: &HashMap<i64, String>,
 ) -> Result<usize, Box<dyn std::error::Error>> {
@@ -620,12 +668,7 @@ fn dump_clusters(
             "orbit_residual_arcsec": residual.residual(),
             // A coherent cluster with no good bound solution is what a distant
             // or unbound object looks like, so the reason is carried, not lost.
-            "bound_fit": match residual {
-                BoundFit::Good(_) => "good",
-                BoundFit::Poor(_) => "poor",
-                BoundFit::Unbound => "none",
-                BoundFit::Ungated => "ungated",
-            },
+            "bound_fit": residual.0.as_str(),
             "cluster_rms_arcsec": cluster.rms_arcsec,
             "rate_x_deg_per_day": cluster.rate_x_deg_per_day,
             "rate_y_deg_per_day": cluster.rate_y_deg_per_day,
@@ -643,7 +686,12 @@ fn dump_clusters(
 /// couple of degrees the co-moving frame no longer applies -- so the sky is
 /// divided into patches and each is searched with its own orbits. One orbit at
 /// the centre of a whole night's coverage governs almost nothing.
-fn run_thor(args: &Cli, detections: &[Detection], labels: &HashMap<i64, String>) {
+async fn run_thor(
+    args: &Cli,
+    detections: &[Detection],
+    labels: &HashMap<i64, String>,
+    db: Option<&mongodb::Database>,
+) {
     use boom::utils::heliolinc::{sky_track, test_orbits};
     use boom::utils::thor;
     use rayon::prelude::*;
@@ -758,7 +806,7 @@ fn run_thor(args: &Cli, detections: &[Detection], labels: &HashMap<i64, String>)
     // though the astrometry had vouched for them.
     let by_id: HashMap<i64, &Detection> = detections.iter().map(|d| (d.id, d)).collect();
     let gate_start = std::time::Instant::now();
-    let mut scored: Vec<(thor::Cluster, BoundFit)> = clusters
+    let mut scored: Vec<(thor::Cluster, Verdict)> = clusters
         .into_par_iter()
         .filter_map(|(c, seed)| {
             let obs: Vec<Observation> = c
@@ -772,15 +820,15 @@ fn run_thor(args: &Cli, detections: &[Detection], labels: &HashMap<i64, String>)
                 })
                 .collect();
             if obs.len() < 3 {
-                return Some((c, BoundFit::Ungated));
+                return Some((c, Verdict(BoundFit::Ungated, None)));
             }
             match fit_orbit(&obs, &seed, epoch, 20, &boom::utils::sso_geometry::ZTF) {
-                None => Some((c, BoundFit::Unbound)),
+                None => Some((c, Verdict(BoundFit::None, None))),
                 Some(fit) if fit.rms_arcsec <= args.max_residual => {
-                    Some((c, BoundFit::Good(fit.rms_arcsec)))
+                    Some((c, Verdict(BoundFit::Good, Some(fit.rms_arcsec))))
                 }
                 Some(fit) if fit.rms_arcsec <= args.max_unbound_residual => {
-                    Some((c, BoundFit::Poor(fit.rms_arcsec)))
+                    Some((c, Verdict(BoundFit::Poor, Some(fit.rms_arcsec))))
                 }
                 Some(_) => None,
             }
@@ -796,7 +844,7 @@ fn run_thor(args: &Cli, detections: &[Detection], labels: &HashMap<i64, String>)
             .then(b.0.ids.len().cmp(&a.0.ids.len()))
     });
     let mut claimed: std::collections::HashSet<i64> = std::collections::HashSet::new();
-    let mut kept: Vec<(thor::Cluster, BoundFit)> = Vec::new();
+    let mut kept: Vec<(thor::Cluster, Verdict)> = Vec::new();
     for (c, r) in scored {
         if c.ids.iter().all(|id| claimed.contains(id)) {
             continue;
@@ -814,6 +862,12 @@ fn run_thor(args: &Cli, detections: &[Detection], labels: &HashMap<i64, String>)
         match dump_clusters(path, &kept, detections, labels) {
             Ok(n) => info!("wrote {} clusters to {}", n, path),
             Err(e) => error!("could not write clusters: {}", e),
+        }
+    }
+    if args.persist || args.dry_run {
+        match db {
+            Some(db) => persist_clusters(db, &kept, detections, labels, args.dry_run).await,
+            None => error!("--persist needs a database, which was not built"),
         }
     }
 
@@ -838,25 +892,31 @@ fn run_thor(args: &Cli, detections: &[Detection], labels: &HashMap<i64, String>)
         return;
     }
     let (mut pure, mut mixed) = (0usize, 0usize);
+    let (mut poor_pure, mut poor_mixed) = (0usize, 0usize);
     let (mut pair_pure, mut pair_mixed) = (0usize, 0usize);
     let mut recovered = std::collections::HashSet::new();
     for (c, resid) in &kept {
         let names: std::collections::HashSet<&String> =
             c.ids.iter().filter_map(|id| labels.get(id)).collect();
+        let good = resid.0 == BoundFit::Good;
         let gated = resid.residual().is_some();
         match names.len() {
             0 => {}
             1 => {
                 recovered.insert((*names.iter().next().unwrap()).clone());
-                if gated {
+                if good {
                     pure += 1;
+                } else if gated {
+                    poor_pure += 1;
                 } else {
                     pair_pure += 1;
                 }
             }
             _ => {
-                if gated {
+                if good {
                     mixed += 1;
+                } else if gated {
+                    poor_mixed += 1;
                 } else {
                     pair_mixed += 1;
                 }
@@ -898,6 +958,12 @@ fn run_thor(args: &Cli, detections: &[Detection], labels: &HashMap<i64, String>)
         pure,
         mixed,
         pct(pure, mixed)
+    );
+    info!(
+        "thor poor bound fit:        {} pure, {} mixed = {:.1}% purity",
+        poor_pure,
+        poor_mixed,
+        pct(poor_pure, poor_mixed)
     );
     info!(
         "thor ungated (pairs):       {} pure, {} mixed = {:.1}% purity",
@@ -1119,7 +1185,7 @@ async fn main() {
         ..TrackletConfig::default()
     };
     if args.thor {
-        run_thor(&args, &detections, &labels);
+        run_thor(&args, &detections, &labels, db.as_ref()).await;
         return;
     }
 
