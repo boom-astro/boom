@@ -14,11 +14,17 @@ use apache_avro::{
     Reader, Schema, Writer,
 };
 use async_trait::async_trait;
-use mongodb::bson::doc;
+use mongodb::{
+    bson::{doc, Bson, Document},
+    event::{command::CommandEvent, EventHandler},
+};
 use rand::RngExt;
 use redis::AsyncCommands;
+use std::collections::BTreeMap;
 use std::fs;
+use std::future::Future;
 use std::io::Read;
+use std::sync::{Arc, Mutex};
 // Utility for unit tests
 
 pub const TEST_CONFIG_FILE: &str = "tests/config.test.yaml";
@@ -872,5 +878,165 @@ impl AlertRandomizer {
             Value::Double(d) => *d,
             _ => panic!("Not a double"),
         }
+    }
+}
+
+/// One command a worker sent to Mongo, as recorded by [`MongoCommandLog`].
+#[derive(Debug, Clone)]
+pub struct RecordedCommand {
+    pub name: String,
+    pub database: String,
+    pub collection: String,
+    pub command: Document,
+}
+
+impl RecordedCommand {
+    /// `"<command> <collection>"`, the key [`command_counts`] tallies by.
+    pub fn key(&self) -> String {
+        format!("{} {}", self.name, self.collection)
+            .trim_end()
+            .to_string()
+    }
+}
+
+/// Records every command sent by the Mongo clients that
+/// [`conf::AppConfig::build_db`] builds inside [`MongoCommandLog::observe`].
+///
+/// Round trips per alert are what decide whether the pipeline keeps up with
+/// a night of alerts, and unlike wall time they are exact, so a test can
+/// assert on them without a noisy tolerance.
+#[derive(Clone, Default)]
+pub struct MongoCommandLog {
+    commands: Arc<Mutex<Vec<RecordedCommand>>>,
+}
+
+impl MongoCommandLog {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Runs `f`, typically a worker constructor, so that the clients it
+    /// builds report their commands here for as long as they live.
+    pub async fn observe<F: Future>(&self, f: F) -> F::Output {
+        let commands = self.commands.clone();
+        let handler = EventHandler::callback(move |event: CommandEvent| {
+            let CommandEvent::Started(started) = event else {
+                return;
+            };
+            // The driver ends pooled sessions on its own schedule, not per alert.
+            if started.command_name == "endSessions" {
+                return;
+            }
+            // A getMore names its collection under `collection`; every
+            // other command names it under the command's own key.
+            let collection_key = if started.command_name == "getMore" {
+                "collection"
+            } else {
+                started.command_name.as_str()
+            };
+            let collection = started
+                .command
+                .get_str(collection_key)
+                .unwrap_or_default()
+                .to_string();
+            commands.lock().unwrap().push(RecordedCommand {
+                name: started.command_name,
+                database: started.db,
+                collection,
+                command: started.command,
+            });
+        });
+        conf::MONGO_COMMAND_EVENT_HANDLER.scope(handler, f).await
+    }
+
+    /// Returns the commands recorded so far and starts a fresh log.
+    pub fn take(&self) -> Vec<RecordedCommand> {
+        std::mem::take(&mut *self.commands.lock().unwrap())
+    }
+}
+
+/// Tallies `commands` by [`RecordedCommand::key`].
+pub fn command_counts(commands: &[RecordedCommand]) -> BTreeMap<String, usize> {
+    let mut counts = BTreeMap::new();
+    for command in commands {
+        *counts.entry(command.key()).or_insert(0) += 1;
+    }
+    counts
+}
+
+/// Runs `explain` on every query in `commands` and returns a description of
+/// each one Mongo would answer with a collection scan. Writes without a
+/// filter (inserts) have no plan and are skipped.
+///
+/// A missing index is invisible on a test collection of a few documents and
+/// ruinous on a production one, so any scan fails, whatever its size.
+pub async fn collection_scans(
+    client: &mongodb::Client,
+    commands: &[RecordedCommand],
+) -> Vec<String> {
+    let mut scans = Vec::new();
+    for command in commands {
+        for explainable in explainable_commands(command) {
+            let explain = client
+                .database(&command.database)
+                .run_command(doc! { "explain": explainable.clone(), "verbosity": "queryPlanner" })
+                .await
+                .unwrap_or_else(|e| panic!("failed to explain {}: {e}", command.key()));
+            if contains_collection_scan(&Bson::Document(explain)) {
+                scans.push(format!("{}: {}", command.key(), explainable));
+            }
+        }
+    }
+    scans
+}
+
+/// The commands `explain` accepts for `command`: one per statement for
+/// update and delete, which explain only one at a time, and none for
+/// commands without a query plan.
+fn explainable_commands(command: &RecordedCommand) -> Vec<Document> {
+    // Session, cluster-time, and write-concern fields belong to the original
+    // send, and explain rejects some of them.
+    let mut base = Document::new();
+    for (key, value) in &command.command {
+        if !key.starts_with('$')
+            && !matches!(
+                key.as_str(),
+                "lsid" | "txnNumber" | "writeConcern" | "readConcern"
+            )
+        {
+            base.insert(key.clone(), value.clone());
+        }
+    }
+    let per_statement = |statements_key: &str| -> Vec<Document> {
+        let statements = base.get_array(statements_key).cloned().unwrap_or_default();
+        statements
+            .into_iter()
+            .map(|statement| {
+                let mut single = base.clone();
+                single.insert(statements_key, vec![statement]);
+                single
+            })
+            .collect()
+    };
+    match command.name.as_str() {
+        "find" | "count" | "distinct" | "findAndModify" => vec![base],
+        // A database-level aggregate ($documents, $currentOp) names no collection.
+        "aggregate" if !command.collection.is_empty() => vec![base],
+        "update" => per_statement("updates"),
+        "delete" => per_statement("deletes"),
+        _ => vec![],
+    }
+}
+
+fn contains_collection_scan(value: &Bson) -> bool {
+    match value {
+        Bson::Document(document) => document.iter().any(|(key, value)| {
+            // Plans the optimizer rejected never run.
+            key != "rejectedPlans"
+                && ((key == "stage" && value.as_str() == Some("COLLSCAN"))
+                    || contains_collection_scan(value))
+        }),
+        Bson::Array(values) => values.iter().any(contains_collection_scan),
+        _ => false,
     }
 }

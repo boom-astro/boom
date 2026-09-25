@@ -170,6 +170,7 @@ Alert rules, contact points, and notification policies are provisioned from
 | `cpu-throttling` | >25% of CFS periods throttled for 15m |
 | `otel-collector-dropped-metrics` | OTel exporter is failing to send metric points |
 | `valkey-queue-backed-up` | Any worker queue >50k entries for 30m *and* flat or growing for 15m (slow drain is fine) |
+| `alerts-falling-behind` | Every live message the Kafka consumer read in the last 30m was >2h old, and it is still reading |
 | `api-down` | The API container is stopped, or running but failing its Docker healthcheck |
 | `observability-blind` | Prometheus cannot scrape `docker-metadata-exporter`, so `api-down` cannot fire |
 

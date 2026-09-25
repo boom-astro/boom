@@ -12,7 +12,10 @@ use crate::{
 use std::sync::{Arc, LazyLock};
 
 use indicatif::ProgressBar;
-use opentelemetry::{metrics::Counter, KeyValue};
+use opentelemetry::{
+    metrics::{Counter, Gauge},
+    KeyValue,
+};
 use rdkafka::{
     admin::{AdminClient, AdminOptions, NewTopic, TopicReplication},
     client::DefaultClientContext,
@@ -37,6 +40,26 @@ static ALERT_PROCESSED: LazyLock<Counter<u64>> = LazyLock::new(|| {
         .with_description("Number of alerts processed by the kafka consumer.")
         .build()
 });
+
+// Age of each live message when the consumer reads it. The consumer stops
+// reading while the pipeline's queue is full, so this grows whenever any
+// stage falls behind, and measures it in the terms that matter: how late
+// alerts are entering the pipeline. Replays are skipped, their messages being
+// old by design.
+static MESSAGE_AGE: LazyLock<Gauge<f64>> = LazyLock::new(|| {
+    CONSUMER_METER
+        .f64_gauge("kafka_consumer.message.age")
+        .with_unit("s")
+        .with_description("Seconds between a message's Kafka timestamp and its consumption.")
+        .build()
+});
+
+fn record_message_age<M: Message>(message: &M, attrs: &[KeyValue]) {
+    if let Some(timestamp_ms) = message.timestamp().to_millis() {
+        let age_ms = chrono::Utc::now().timestamp_millis() - timestamp_ms;
+        MESSAGE_AGE.record(age_ms as f64 / 1000.0, attrs);
+    }
+}
 
 const MAX_RETRIES_PRODUCER: usize = 6;
 const KAFKA_TIMEOUT_SECS: std::time::Duration = std::time::Duration::from_secs(30);
@@ -1223,6 +1246,7 @@ pub async fn consumer(
                         if let Err(error) = consumer.store_offset_from_message(&message) {
                             log_error!(error, "failed to store offset");
                         }
+                        record_message_age(&message, &consumer_attrs);
                     }
                     ALERT_PROCESSED.add(1, &ok_attrs);
                     total += 1;
@@ -1249,6 +1273,7 @@ pub async fn consumer(
                     if let Err(error) = consumer.store_offset_from_message(&message) {
                         log_error!(error, "failed to store offset");
                     }
+                    record_message_age(&message, &consumer_attrs);
                 }
                 ALERT_PROCESSED.add(1, &ok_attrs);
                 total += 1;

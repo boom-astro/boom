@@ -8,7 +8,11 @@ use chrono::NaiveDate;
 use config::{Config, File, Value, ValueKind};
 use dotenvy;
 use mongodb::bson::{doc, Document};
-use mongodb::Database;
+use mongodb::{
+    event::{command::CommandEvent, EventHandler},
+    options::ClientOptions,
+    Database,
+};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::sync::OnceLock;
@@ -96,8 +100,19 @@ fn env_source() -> config::Environment {
         .ignore_empty(true)
 }
 
+tokio::task_local! {
+    /// Command event handler attached to every client [`AppConfig::build_db`]
+    /// builds inside its `scope`. Tests use it to record the commands a worker
+    /// sends, so a change that multiplies round trips per alert fails a test
+    /// instead of slowing production. Unset otherwise.
+    pub static MONGO_COMMAND_EVENT_HANDLER: EventHandler<CommandEvent>;
+}
+
 #[instrument(skip_all, err)]
-async fn _build_db(db_conf: &DatabaseConfig) -> Result<Database, BoomConfigError> {
+async fn _build_db(
+    db_conf: &DatabaseConfig,
+    command_event_handler: Option<EventHandler<CommandEvent>>,
+) -> Result<Database, BoomConfigError> {
     let mut uri = if db_conf.srv {
         "mongodb+srv://".to_string()
     } else {
@@ -132,7 +147,9 @@ async fn _build_db(db_conf: &DatabaseConfig) -> Result<Database, BoomConfigError
 
     uri.push_str(&format!("&maxPoolSize={}", db_conf.max_pool_size));
 
-    let client_mongo = mongodb::Client::with_uri_str(&uri).await?;
+    let mut options = ClientOptions::parse(&uri).await?;
+    options.command_event_handler = command_event_handler;
+    let client_mongo = mongodb::Client::with_options(options)?;
     let db = client_mongo.database(&db_conf.name);
 
     Ok(db)
@@ -142,7 +159,10 @@ async fn _build_db(db_conf: &DatabaseConfig) -> Result<Database, BoomConfigError
 async fn build_db(conf: &AppConfig) -> Result<Database, BoomConfigError> {
     let db_conf = &conf.database;
 
-    _build_db(db_conf).await
+    // Cutout storage builds its own client and is left unobserved: the same
+    // tests run against S3 cutouts, where those calls never reach Mongo.
+    let command_event_handler = MONGO_COMMAND_EVENT_HANDLER.try_with(Clone::clone).ok();
+    _build_db(db_conf, command_event_handler).await
 }
 
 #[instrument(skip_all, err)]
@@ -257,7 +277,7 @@ async fn build_cutout_storage(
             .inspect_err(as_error!("failed to create cutout storage"))?
         }
         CutoutsStorage::Mongo(mongo_conf) => {
-            let db = _build_db(mongo_conf).await?;
+            let db = _build_db(mongo_conf, None).await?;
             CutoutStorage::from_mongo(db, survey).await
         }
     };

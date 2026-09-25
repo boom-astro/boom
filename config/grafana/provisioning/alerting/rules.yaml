@@ -417,6 +417,75 @@ groups:
           summary: 'Valkey queue {{ $labels.key }} stayed above 50k for 30m and stopped moving'
           description: 'A worker pool is making no headway on its upstream queue: the queue never dipped below 50k in the last 30m, and its depth has been flat or growing for the last 15m. Check scheduler logs/traces and worker health. A backlog that is draining slowly -- even one that will take days or weeks -- will not fire this; only one that has stopped going down.'
 
+      - uid: alerts-falling-behind
+        title: Live alerts are reaching the pipeline more than 2h late
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 1800
+              to: 0
+            datasourceUid: prometheus
+            model:
+              refId: A
+              # How far behind the live stream the pipeline is, in time rather
+              # than queue depth. The consumer stops reading while the packets
+              # queue is full, so the age of the messages it reads grows when
+              # any stage falls behind. Queue depth cannot say this: the backlog
+              # waits in Kafka, not Valkey, and reprocessing shares the queues.
+              #
+              #   1. min_over_time > 2h -- every message read in the last 30m was
+              #      over 2h old, so this is a sustained backlog, not the burst at
+              #      the start of a night.
+              #   2. rate(...) > 0 -- the consumer is still reading. The gauge
+              #      keeps its last value once the topic runs dry, so without this
+              #      a night that ended behind would fire all day after catching
+              #      up. A consumer that stops reading is a stall, which
+              #      valkey-queue-backed-up and scheduler-worker-pool-degraded
+              #      watch for.
+              #
+              # Replays (`--date-mode`) do not report the gauge.
+              expr: |
+                max by (survey) (
+                    (min_over_time(kafka_consumer_message_age_seconds[30m]) > 7200)
+                  and on (survey, messaging_client_id)
+                    (rate(kafka_consumer_alert_processed_total{status="ok"}[15m]) > 0)
+                )
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange:
+              from: 0
+              to: 0
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator:
+                    params: [0]
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params: [C]
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+        # The 30m min_over_time window already requires the lag to have held,
+        # so a short "for" is enough to debounce.
+        for: 5m
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: warning
+        annotations:
+          summary: '{{ $labels.survey }} alerts are reaching the pipeline more than 2h after they were issued'
+          description: 'Every {{ $labels.survey }} alert the Kafka consumer read in the last 30m was over 2h old, and it is still reading: the pipeline is processing but not keeping up with the live stream. Compare stage throughput on the BOOM overview dashboard to find the slow stage, and check whether a recent deploy changed it. If the backlog will clear before the next night, this can wait; if the lag keeps growing, add workers to the slow stage.'
+
       - uid: scheduler-worker-pool-degraded
         title: Scheduler worker pool degraded (dead workers)
         condition: C
