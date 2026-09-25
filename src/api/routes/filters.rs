@@ -909,6 +909,10 @@ pub async fn delete_filter(
 /// localization cannot pull an unbounded set into memory.
 const CREDIBLE_LEVEL_COUNT_CAP: usize = 50_000;
 
+/// Documents scored per round trip. Scoring costs two queries whatever the batch
+/// size, so this trades a few wasted rows against a round trip per alert.
+const CREDIBLE_LEVEL_BATCH: usize = 500;
+
 /// Why a localization cannot be used.
 ///
 /// Separate from the response so the parse, which is slow CPU work, can run on
@@ -1338,8 +1342,8 @@ pub async fn post_filter_test(
         if limit == 0 {
             return response::bad_request("limit must be greater than 0");
         }
-        // Scoring drops alerts outside the credible region, so limiting before
-        // it returns a short page. Over-fetch to the cap and truncate below.
+        // With a region the page is cut after scoring, so the stage is only the
+        // ceiling on what the server will produce; the cursor stops earlier.
         let effective = if region.is_some() {
             CREDIBLE_LEVEL_COUNT_CAP as i64
         } else {
@@ -1362,23 +1366,49 @@ pub async fn post_filter_test(
     };
 
     let mut results = Vec::new();
-    while let Some(result) = cursor.next().await {
-        match result {
-            Ok(doc) => results.push(doc),
-            Err(e) => {
-                return response::internal_error(&format!(
-                    "error retrieving test filter results: {}",
-                    e
-                ));
+    if let Some(region) = &region {
+        // Scoring is what decides which alerts count, so the page cannot be cut
+        // before it. Score a batch at a time and stop as soon as enough survive,
+        // rather than reading the cap into memory to return a handful.
+        let want = body.limit.map(|l| l as usize);
+        let mut batch: Vec<Document> = Vec::new();
+        let mut drained = false;
+        while !drained {
+            match cursor.next().await {
+                Some(Ok(doc)) => batch.push(doc),
+                Some(Err(e)) => {
+                    return response::internal_error(&format!(
+                        "error retrieving test filter results: {}",
+                        e
+                    ));
+                }
+                None => drained = true,
+            }
+            if !drained && batch.len() < CREDIBLE_LEVEL_BATCH {
+                continue;
+            }
+            if let Err(e) = score_credible_levels(&db, &survey, region, &mut batch).await {
+                return response::bad_request(&format!("failed to score credible levels: {e}"));
+            }
+            results.append(&mut batch);
+            if want.is_some_and(|w| results.len() >= w) {
+                break;
             }
         }
-    }
-    if let Some(region) = &region {
-        if let Err(e) = score_credible_levels(&db, &survey, region, &mut results).await {
-            return response::bad_request(&format!("failed to score credible levels: {e}"));
+        if let Some(want) = want {
+            results.truncate(want);
         }
-        if let Some(limit) = body.limit {
-            results.truncate(limit as usize);
+    } else {
+        while let Some(result) = cursor.next().await {
+            match result {
+                Ok(doc) => results.push(doc),
+                Err(e) => {
+                    return response::internal_error(&format!(
+                        "error retrieving test filter results: {}",
+                        e
+                    ));
+                }
+            }
         }
     }
 
