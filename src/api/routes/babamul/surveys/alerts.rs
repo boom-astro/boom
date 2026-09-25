@@ -9,7 +9,7 @@ use crate::utils::moc::{
     parse_3d_skymap_bytes, select_covering_depth_bounded, Cone, CredibleVolumeIndex, HpxMoc,
     LIGO3dskymap, Skymap3dError,
 };
-use crate::utils::skymap_search::extract_host_redshifts;
+use crate::utils::skymap_search::host_redshifts;
 use actix_web::{get, post, web, HttpResponse};
 use base64::prelude::*;
 use futures::TryStreamExt;
@@ -654,7 +654,7 @@ where
             let aux_col: Collection<Document> = db.collection(&format!("{}_alerts_aux", survey));
             let mut aux_cursor = aux_col
                 .find(doc! { "_id": { "$in": object_ids } })
-                .projection(doc! { "_id": 1, "cross_matches": 1 })
+                .projection(doc! { "_id": 1, "cross_matches": 1, "host_galaxy": 1 })
                 .await
                 .map_err(|e| response::internal_error(&format!("error querying aux: {}", e)))?;
 
@@ -665,7 +665,12 @@ where
                 let Ok(oid) = aux_doc.get_str("_id") else {
                     continue;
                 };
-                let z_values = extract_host_redshifts(aux_doc.get_document("cross_matches").ok());
+                // Same precedence as the filter test endpoints: an associated host
+                // names the galaxy, so the two cannot disagree about one alert.
+                let z_values = host_redshifts(
+                    aux_doc.get_document("host_galaxy").ok(),
+                    aux_doc.get_document("cross_matches").ok(),
+                );
                 host_z_map.insert(oid.to_string(), z_values);
             }
 
@@ -1073,6 +1078,8 @@ mod tests {
     use super::*;
     use mongodb::bson::{doc, Document};
 
+    use crate::utils::skymap_search::extract_host_redshifts;
+
     /// A cross-match block holding one row per catalog at the same position.
     fn cross_matches(rows: Vec<(&str, Document)>) -> Document {
         let mut d = Document::new();
@@ -1080,6 +1087,19 @@ mod tests {
             d.insert(catalog, vec![row]);
         }
         d
+    }
+
+    /// This endpoint and the filter test endpoints score the same alert, so they
+    /// take the host the same way: an association wins, the sweep is the fallback.
+    #[test]
+    fn test_the_skymap_search_prefers_the_associated_host() {
+        let cm = cross_matches(vec![(
+            "NED",
+            doc! { "ra": 10.0, "dec": 20.0, "z": 0.05, "z_tech": "SPEC" },
+        )]);
+        let host = doc! { "best_host": doc! { "ra": 10.0, "dec": 20.0, "z": 0.2 } };
+        assert_eq!(host_redshifts(Some(&host), Some(&cm)), vec![0.2]);
+        assert_eq!(host_redshifts(None, Some(&cm)), vec![0.05]);
     }
 
     #[test]
