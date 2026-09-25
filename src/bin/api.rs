@@ -179,8 +179,6 @@ async fn main() -> std::io::Result<()> {
                 .service(routes::filters::get_filter)
                 .service(routes::filters::delete_filter)
                 .service(routes::filters::post_filter_version)
-                .service(routes::filters::post_filter_test)
-                .service(routes::filters::post_filter_test_count)
                 .service(routes::filters::get_filter_schema)
                 .service(routes::users::post_user)
                 .service(routes::users::get_users)
@@ -195,6 +193,14 @@ async fn main() -> std::io::Result<()> {
                 .service(routes::queries::post_count_query)
                 .service(routes::queries::post_estimated_count_query)
                 .service(routes::queries::post_pipeline_query)
+                // Larger JSON limit for the skymap these accept (~130 MB base64).
+                // This prefix-less scope swallows any sibling after it, so keep it last.
+                .service(
+                    actix_web::web::scope("")
+                        .app_data(web::JsonConfig::default().limit(209_715_200))
+                        .service(routes::filters::post_filter_test)
+                        .service(routes::filters::post_filter_test_count),
+                )
                 .wrap(Logger::default()),
         )
     })
