@@ -7,6 +7,10 @@ pub use base::{load_model, load_model_on_device, Model, ModelError};
 pub use btsbot::BtsBotModel;
 
 #[cfg(all(feature = "gpu", target_os = "linux"))]
+use sbpl_pso::gpu as sbpl_gpu;
+#[cfg(all(feature = "gpu", target_os = "macos"))]
+use sbpl_pso::gpu_metal as sbpl_gpu;
+#[cfg(all(feature = "gpu", target_os = "linux"))]
 use villar_pso::gpu::{GpuContext, Stream};
 #[cfg(all(feature = "gpu", target_os = "macos"))]
 use villar_pso::gpu_metal::GpuContext;
@@ -24,8 +28,9 @@ const SESSIONS_PER_DEVICE: usize = 1;
 /// Concurrent workers will serialize on the mutex, but model weights are loaded
 /// only once in memory (and on GPU VRAM if using CUDA).
 ///
-/// On Linux+GPU all sessions and the villar-pso `GpuContext` share one CUDA
-/// stream, avoiding the legacy default stream's implicit cross-stream barriers.
+/// On Linux+GPU all sessions and the villar-pso and sbpl-pso `GpuContext`s share
+/// one CUDA stream, avoiding the legacy default stream's implicit cross-stream
+/// barriers.
 ///
 /// Fields drop in declaration order, so `_stream` must stay last: its
 /// `cudaStreamDestroy` has to run after everything that uses it.
@@ -40,6 +45,10 @@ pub struct SharedModels {
     /// `&self` methods with per-call buffers, and stream enqueue is thread-safe.
     #[cfg(feature = "gpu")]
     pub gpu_ctx: Option<GpuContext>,
+    /// SBPL-PSO context for the same device and stream; `None` for the CPU
+    /// set. Unsynchronized for the same reason as `gpu_ctx`.
+    #[cfg(feature = "gpu")]
+    pub sbpl_ctx: Option<sbpl_gpu::GpuContext>,
     /// CUDA stream shared with the ORT sessions above. Must be dropped last
     /// — see struct-level docstring.
     #[cfg(all(feature = "gpu", target_os = "linux"))]
@@ -54,7 +63,7 @@ impl std::fmt::Debug for SharedModels {
 
 impl SharedModels {
     /// Load all ONNX models, optionally on a specific CUDA device. On
-    /// Linux+`gpu` every session and the villar `GpuContext` share one stream.
+    /// Linux+`gpu` every session and both fitters' `GpuContext`s share one stream.
     pub fn load(device_id: Option<i32>) -> Result<Arc<Self>, ModelError> {
         info!(?device_id, "loading shared ONNX models");
 
@@ -135,6 +144,26 @@ impl SharedModels {
             None => None,
         };
 
+        // And the sbpl-pso one, on that same device + stream.
+        #[cfg(feature = "gpu")]
+        let sbpl_ctx: Option<sbpl_gpu::GpuContext> = match device_id {
+            #[cfg(target_os = "linux")]
+            Some(id) => Some(sbpl_gpu::GpuContext::new(id, stream_ptr).map_err(|e| {
+                ModelError::Ort(ort::Error::new(format!(
+                    "sbpl-pso GPU init failed for device {}: {}",
+                    id, e
+                )))
+            })?),
+            #[cfg(target_os = "macos")]
+            Some(id) => Some(sbpl_gpu::GpuContext::new(id).map_err(|e| {
+                ModelError::Ort(ort::Error::new(format!(
+                    "sbpl-pso GPU init failed for device {}: {}",
+                    id, e
+                )))
+            })?),
+            None => None,
+        };
+
         let models = Self {
             acai_h: Mutex::new(acai_h),
             acai_n: Mutex::new(acai_n),
@@ -144,6 +173,8 @@ impl SharedModels {
             btsbot: Mutex::new(btsbot),
             #[cfg(feature = "gpu")]
             gpu_ctx,
+            #[cfg(feature = "gpu")]
+            sbpl_ctx,
             #[cfg(all(feature = "gpu", target_os = "linux"))]
             _stream: stream,
         };
