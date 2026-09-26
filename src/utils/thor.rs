@@ -90,7 +90,9 @@ impl Default for Config {
         Self {
             max_residual_rate_deg_per_day: 0.05,
             rate_steps: 21,
-            cluster_radius_arcsec: 30.0,
+            // Wide enough to chain consecutive nights: the rate grid cancels the
+            // bulk of the residual drift but leaves tens of arcseconds per gap.
+            cluster_radius_arcsec: 120.0,
             // Two, matching the tracklet finder: THOR exists for the objects
             // with one detection a night, so three would exclude what it is for.
             min_detections: 2,
@@ -99,7 +101,9 @@ impl Default for Config {
             // common case a search is run over.
             min_nights: 2,
             max_offset_deg: 2.0,
-            max_rms_arcsec: 2.0,
+            // The residual motion is curved, so a straight line through several
+            // nights of it sits well above arcsecond scale even for a real object.
+            max_rms_arcsec: 10.0,
         }
     }
 }
@@ -360,6 +364,73 @@ mod tests {
     // One detection a night: exactly what a tracklet-based linker cannot use.
     const SPARSE: [f64; 4] = [2460001.2, 2460002.2, 2460003.2, 2460004.2];
 
+    /// The same test orbit, shifted so it drifts across RA 0.
+    fn shifted_track(ra_shift: f64) -> TestOrbitTrack {
+        let t = track();
+        TestOrbitTrack {
+            ra: t
+                .ra
+                .iter()
+                .map(|r| (r + ra_shift).rem_euclid(360.0))
+                .collect(),
+            ..t
+        }
+    }
+
+    /// Detections placed against an arbitrary test orbit.
+    fn object_on(
+        t: &TestOrbitTrack,
+        offset_x: f64,
+        offset_y: f64,
+        jds: &[f64],
+        id0: i64,
+    ) -> Vec<Detection> {
+        let t0 = jds.iter().sum::<f64>() / jds.len() as f64;
+        jds.iter()
+            .enumerate()
+            .map(|(k, &jd)| {
+                let (ra0, dec0) = t.at(jd).expect("inside the span");
+                let dt = jd - t0;
+                let x = offset_x + 0.004 * dt;
+                let y = offset_y - 0.002 * dt;
+                Detection {
+                    id: id0 + k as i64,
+                    jd,
+                    ra: (ra0 + x / dec0.to_radians().cos()).rem_euclid(360.0),
+                    dec: dec0 + y,
+                    mag: None,
+                    mag_err: None,
+                    band: None,
+                }
+            })
+            .collect()
+    }
+
+    /// An object whose residual motion curves, as a real one does when the test
+    /// orbit sits at a neighbouring distance rather than exactly its own.
+    fn curved_object(accel_x: f64, jds: &[f64], id0: i64) -> Vec<Detection> {
+        let t = track();
+        let t0 = jds.iter().sum::<f64>() / jds.len() as f64;
+        jds.iter()
+            .enumerate()
+            .map(|(k, &jd)| {
+                let (ra0, dec0) = t.at(jd).expect("inside the span");
+                let dt = jd - t0;
+                let x = 0.01 + 0.004 * dt + 0.5 * accel_x * dt * dt;
+                let y = -0.02 - 0.002 * dt;
+                Detection {
+                    id: id0 + k as i64,
+                    jd,
+                    ra: ra0 + x / dec0.to_radians().cos(),
+                    dec: dec0 + y,
+                    mag: None,
+                    mag_err: None,
+                    band: None,
+                }
+            })
+            .collect()
+    }
+
     #[test]
     fn test_track_interpolates_and_refuses_outside_its_span() {
         let t = track();
@@ -378,6 +449,52 @@ mod tests {
         assert_eq!(found[0].ids.len(), 4);
         assert_eq!(found[0].nights, 4);
         assert!(found[0].rms_arcsec < 1.0, "rms {}", found[0].rms_arcsec);
+    }
+
+    /// The rate grid cancels a straight drift exactly, so an object that moves
+    /// in a perfect line says nothing about the gates. This one curves.
+    #[test]
+    fn test_recovers_an_object_whose_residual_motion_curves() {
+        let dets = curved_object(0.003, &SPARSE, 1);
+        let found = recover(&dets, &track(), &Config::default());
+        assert_eq!(found.len(), 1, "expected one cluster, got {found:?}");
+        assert_eq!(found[0].ids.len(), 4);
+        assert_eq!(found[0].nights, 4);
+        // Guards the test itself: below this the object is effectively straight
+        // and would pass any gate.
+        assert!(
+            found[0].rms_arcsec > 2.0,
+            "rms {} -- not actually curved",
+            found[0].rms_arcsec
+        );
+    }
+
+    /// RA 0 is a seam only if the arithmetic treats it as one. Recovery must not
+    /// depend on where in RA the object happens to sit.
+    #[test]
+    fn test_a_track_across_ra_zero_measures_the_same() {
+        let plain = recover(
+            &object_on(&track(), 0.01, -0.02, &SPARSE, 1),
+            &track(),
+            &Config::default(),
+        );
+        // Put the same geometry astride RA 0; track() runs from RA 100 westward.
+        let shift = -100.2;
+        let seam = shifted_track(shift);
+        let across = recover(
+            &object_on(&seam, 0.01, -0.02, &SPARSE, 1),
+            &seam,
+            &Config::default(),
+        );
+        assert_eq!(plain.len(), 1, "control did not recover: {plain:?}");
+        assert_eq!(across.len(), plain.len(), "seam changed the cluster count");
+        assert_eq!(across[0].ids, plain[0].ids, "seam changed the membership");
+        assert!(
+            (across[0].rms_arcsec - plain[0].rms_arcsec).abs() < 1e-6,
+            "seam changed the rms: {} vs {}",
+            across[0].rms_arcsec,
+            plain[0].rms_arcsec
+        );
     }
 
     #[test]

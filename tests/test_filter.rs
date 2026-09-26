@@ -32,7 +32,7 @@ async fn test_build_filter() {
     let filter = filter_result.unwrap();
     let pipeline: Vec<Document> = vec![
         doc! { "$match": { "_id": { "$in": [] } } },
-        doc! { "$project": { "objectId": 1, "candidate": 1, "classifications": 1, "properties": 1, "coordinates": 1 } },
+        doc! { "$project": { "objectId": 1, "candidate": 1, "classifications": 1, "properties": 1, "coordinates": 1, "track": 1 } },
         doc! { "$lookup": { "from": "ZTF_alerts_aux", "localField": "objectId", "foreignField": "_id", "as": "aux" } },
         doc! {
             "$addFields": {
@@ -106,7 +106,7 @@ async fn test_build_multisurvey_filter() {
     let filter = filter_result.unwrap();
     let pipeline: Vec<Document> = vec![
         doc! { "$match": { "_id": { "$in": [] } } },
-        doc! { "$project": { "objectId": 1, "candidate": 1, "classifications": 1, "properties": 1, "coordinates": 1 } },
+        doc! { "$project": { "objectId": 1, "candidate": 1, "classifications": 1, "properties": 1, "coordinates": 1, "track": 1 } },
         doc! { "$match": {
             "candidate.drb": { "$gte": 0.5 },
             "candidate.magpsf": { "$lte": 18.5 }
