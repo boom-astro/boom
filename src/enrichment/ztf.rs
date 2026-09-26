@@ -843,8 +843,10 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                     "villar_fit.reduced_chi2": f64::NAN,
                     "villar_fit.peak_flux": f64::NAN,
                 };
-                for filt in villar_pso::FILTERS {
-                    for pname in villar_pso::PARAM_NAMES {
+                // The same arrays the API advertises, so what is written and
+                // what is declared cannot drift apart.
+                for filt in crate::utils::enrichment_schema::VILLAR_BANDS {
+                    for pname in crate::utils::enrichment_schema::VILLAR_PARAMS {
                         d.insert(format!("villar_fit.{}_{}", pname, filt), f64::NAN);
                     }
                 }
