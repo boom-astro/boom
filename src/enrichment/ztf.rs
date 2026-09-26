@@ -11,9 +11,9 @@ use crate::utils::db::mongify;
 use crate::utils::enums::Survey;
 use crate::utils::host::HostGalaxyAssociation;
 use crate::utils::lightcurves::{
-    analyze_photometry, prepare_photometry, summarise_detections, ActivityMetrics,
-    AllBandsProperties, Band, DetectionHistory, EpisodeHistory, Outburst, PerBandProperties,
-    PhotometryMag, EPISODE_GAP_DAYS, ZTF_ZP,
+    analyze_photometry, prepare_photometry, summarise_detections, ActivityMetrics, Band,
+    DetectionHistory, EpisodeHistory, Outburst, PerBandProperties, PhotometryMag, EPISODE_GAP_DAYS,
+    ZTF_ZP,
 };
 use crate::utils::mpcorb::{elements_from_document, normalize_ztf_ssnamenr, ORBITS_COLLECTION};
 use crate::utils::outburst::{Point, MAX_SEPARATION_ARCSEC};
@@ -759,7 +759,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                 .remove(&candid)
                 .ok_or_else(|| EnrichmentWorkerError::MissingCutouts(candid))?;
             #[cfg_attr(not(feature = "gpu"), allow(unused_variables))]
-            let (properties, all_bands_properties, programid, lightcurve) = match self
+            let (properties, programid, lightcurve) = match self
                 .get_alert_properties(&alert, &orbits, &sso_history, &baselines)
                 .await
             {
@@ -1146,15 +1146,7 @@ impl ZtfEnrichmentWorker {
         orbits: &HashMap<String, OrbitalElements>,
         sso_history: &HashMap<String, Vec<(f64, Point)>>,
         baselines: &HashMap<String, HashMap<u8, PhaseCurve>>,
-    ) -> Result<
-        (
-            ZtfAlertProperties,
-            AllBandsProperties,
-            i32,
-            Vec<PhotometryMag>,
-        ),
-        EnrichmentWorkerError,
-    > {
+    ) -> Result<(ZtfAlertProperties, i32, Vec<PhotometryMag>), EnrichmentWorkerError> {
         let candidate = &alert.candidate.candidate;
         let programid = candidate.programid;
         let ssdistnr = candidate.ssdistnr.unwrap_or(f32::INFINITY);
@@ -1236,7 +1228,7 @@ impl ZtfEnrichmentWorker {
         if lightcurve.is_empty() {
             return Err(EnrichmentWorkerError::EmptyLightcurve(alert.candid));
         }
-        let (photstats, all_bands_properties, stationary) = analyze_photometry(&lightcurve);
+        let (photstats, _, stationary) = analyze_photometry(&lightcurve);
 
         let mut has_matches = false;
         if let Some(survey_matches) = &alert.survey_matches {
@@ -1292,7 +1284,6 @@ impl ZtfEnrichmentWorker {
                 detection_history: Some(detection_history),
                 episode_history: Some(episode_history),
             },
-            all_bands_properties,
             programid,
             lightcurve,
         ))
