@@ -1,7 +1,11 @@
-use std::collections::VecDeque;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
-use std::time::Instant;
+use std::{
+    collections::VecDeque,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+    time::Instant,
+};
 
 use boom::{
     api::catalogs::WATCHLIST_PREFIX,
@@ -76,7 +80,7 @@ struct Cli {
     #[arg(long, default_value_t = 5000, value_parser = parse_positive_usize)]
     batch_size: usize,
 
-    /// Number of parallel worker tasks, and of cleanup shards run at once.
+    /// Number of parallel worker tasks, and of commit shards run at once.
     #[arg(long, default_value_t = 1, value_parser = parse_positive_usize)]
     processes: usize,
 
@@ -96,8 +100,7 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     skip_empty: bool,
 
-    /// Catalog-driven only: discard the progress of an interrupted run and start over,
-    /// e.g. after changing the catalog's matching parameters.
+    /// Catalog-driven only: discard the progress of an interrupted run and start over.
     #[arg(long, default_value_t = false)]
     restart: bool,
 }
@@ -125,10 +128,6 @@ struct AuxIdAndCoords {
     #[serde(rename = "_id")]
     object_id: String,
     coordinates: Coordinates,
-}
-
-fn aux_match_projection() -> Document {
-    doc! { "_id": 1, "coordinates.radec_geojson.coordinates": 1, "created_at": 1 }
 }
 
 async fn set_reprocess_state(
@@ -427,10 +426,10 @@ async fn process_watchlist_doc(
         .batch_size(CURSOR_BATCH_SIZE)
         .await?;
 
-    let mut object_ids: Vec<mongodb::bson::Bson> = Vec::new();
+    let mut object_ids: Vec<Bson> = Vec::new();
     while let Some(aux_doc) = aux_cursor.try_next().await? {
         if let Ok(id) = aux_doc.get_str("_id") {
-            object_ids.push(mongodb::bson::Bson::String(id.to_string()));
+            object_ids.push(Bson::String(id.to_string()));
         }
     }
     if object_ids.is_empty() {
@@ -447,9 +446,7 @@ async fn process_watchlist_doc(
 }
 
 // -----------------------------------------------------------------------------
-// catalog-driven: matches go to a buffer collection, alerts_aux is written once per
-// record at commit. Only records with `created_at < run_start_jd` are touched, and the
-// start is persisted so a resumed run keeps it.
+// catalog-driven: skips records created after run_start_jd; a resume reuses the stored value.
 // -----------------------------------------------------------------------------
 struct CatalogRun {
     run_start_jd: f64,
@@ -458,7 +455,7 @@ struct CatalogRun {
 }
 
 struct Page {
-    seq: u64,
+    index: u64,
     rows: Vec<Document>,
 }
 
@@ -505,7 +502,7 @@ async fn run_catalog_driven(
     skip_empty: bool,
     restart: bool,
 ) -> Result<(), TaskError> {
-    let label = format!("catalog\u{2192}{}", catalog_config.catalog);
+    let label = format!("catalog→{}", catalog_config.catalog);
     let state_id = format!("{}_alerts_aux:{}", survey, catalog_config.catalog);
     let buffer_name = format!(
         "reprocess_crossmatch_buffer_{}_{}",
@@ -525,7 +522,11 @@ async fn run_catalog_driven(
                 "[{}] resuming the run started at JD {} ({})",
                 label,
                 run.run_start_jd,
-                if run.committing { "commit" } else { "matching" }
+                if run.committing {
+                    STATUS_COMMITTING
+                } else {
+                    STATUS_MATCHING
+                }
             );
             run
         }
@@ -605,20 +606,23 @@ async fn match_catalog(
     concurrency: usize,
     label: &str,
 ) -> Result<(), TaskError> {
-    let cat_collection: mongodb::Collection<Document> =
+    let catalog_collection: mongodb::Collection<Document> =
         db.collection(catalog_config.collection_name());
-    let mut cat_projection = catalog_config.projection.clone();
-    cat_projection.insert("_id", 1);
-    cat_projection.insert("ra", 1);
-    cat_projection.insert("dec", 1);
-    if let Some(dk) = &catalog_config.distance_key {
-        cat_projection.insert(dk.as_str(), 1);
+    let mut catalog_projection = catalog_config.projection.clone();
+    catalog_projection.insert("_id", 1);
+    catalog_projection.insert("ra", 1);
+    catalog_projection.insert("dec", 1);
+    if let Some(distance_key) = &catalog_config.distance_key {
+        catalog_projection.insert(distance_key.as_str(), 1);
     }
 
-    let cat_estimated = cat_collection.estimated_document_count().await.unwrap_or(0);
-    let pb = make_progress_bar(cat_estimated, label.to_string());
+    let catalog_estimated = catalog_collection
+        .estimated_document_count()
+        .await
+        .unwrap_or(0);
+    let pb = make_progress_bar(catalog_estimated, label.to_string());
     if let Some(checkpoint) = &run.checkpoint {
-        let done = cat_collection
+        let done = catalog_collection
             .count_documents(doc! { "_id": { "$lte": checkpoint.clone() } })
             .await?;
         info!(
@@ -631,13 +635,14 @@ async fn match_catalog(
 
     let tracker: Arc<PageTracker> = Arc::default();
     let (tx, rx) = async_channel::bounded::<Page>(processes * QUEUE_MULTIPLIER);
+    let aux_collection: mongodb::Collection<Document> =
+        db.collection(&format!("{}_alerts_aux", survey));
     let mut workers = Vec::with_capacity(processes);
     for _ in 0..processes {
         let rx = rx.clone();
         let pb = pb.clone();
         let db = db.clone();
-        let aux_collection: mongodb::Collection<Document> =
-            db.collection(&format!("{}_alerts_aux", survey));
+        let aux_collection = aux_collection.clone();
         let buffer = buffer.clone();
         let catalog_config = catalog_config.clone();
         let tracker = Arc::clone(&tracker);
@@ -645,7 +650,7 @@ async fn match_catalog(
         let run_start_jd = run.run_start_jd;
         workers.push(tokio::spawn(async move {
             while let Ok(page) = rx.recv().await {
-                let docs = match_page(
+                let matches = match_page(
                     &aux_collection,
                     &catalog_config,
                     run_start_jd,
@@ -654,10 +659,10 @@ async fn match_catalog(
                     &pb,
                 )
                 .await?;
-                if !docs.is_empty() {
-                    insert_ignoring_duplicates(&buffer, docs).await?;
+                if !matches.is_empty() {
+                    insert_ignoring_duplicates(&buffer, matches).await?;
                 }
-                complete_page(&tracker, page.seq, &db, &state_id).await?;
+                complete_page(&tracker, page.index, &db, &state_id).await?;
             }
             Ok(())
         }));
@@ -666,24 +671,24 @@ async fn match_catalog(
 
     let produced: Result<(), mongodb::error::Error> = async {
         let mut last_id = run.checkpoint.clone();
-        for seq in 0.. {
+        for index in 0.. {
             let filter = match &last_id {
                 Some(id) => doc! { "_id": { "$gt": id.clone() } },
                 None => doc! {},
             };
-            let rows: Vec<Document> = cat_collection
+            let rows: Vec<Document> = catalog_collection
                 .find(filter)
                 .sort(doc! { "_id": 1 })
                 .limit(batch_size as i64)
-                .projection(cat_projection.clone())
+                .projection(catalog_projection.clone())
                 .await?
                 .try_collect()
                 .await?;
             let Some(id) = rows.last().and_then(|row| row.get("_id")).cloned() else {
                 break;
             };
-            tracker.lock().await.push_back((seq, id.clone(), false));
-            if tx.send(Page { seq, rows }).await.is_err() {
+            tracker.lock().await.push_back((index, id.clone(), false));
+            if tx.send(Page { index, rows }).await.is_err() {
                 break;
             }
             last_id = Some(id);
@@ -704,39 +709,39 @@ async fn match_page(
     aux_collection: &mongodb::Collection<Document>,
     catalog_config: &CatalogXmatchConfig,
     run_start_jd: f64,
-    mut rows: Vec<Document>,
+    rows: Vec<Document>,
     concurrency: usize,
     pb: &ProgressBar,
 ) -> Result<Vec<Document>, mongodb::error::Error> {
-    let mut stream = futures::stream::iter(rows.drain(..))
+    futures::stream::iter(rows)
         .map(|cat_doc| async move {
             let result =
                 process_cat_doc(aux_collection, catalog_config, run_start_jd, &cat_doc).await;
             pb.inc(1);
             result
         })
-        .buffer_unordered(concurrency);
-    let mut docs = Vec::new();
-    while let Some(matches) = stream.next().await {
-        docs.extend(matches?);
-    }
-    Ok(docs)
+        .buffer_unordered(concurrency)
+        .try_concat()
+        .await
 }
 
 /// The checkpoint only moves past a page once every page before it is done.
 async fn complete_page(
     tracker: &PageTracker,
-    seq: u64,
+    index: u64,
     db: &mongodb::Database,
     state_id: &str,
 ) -> Result<(), mongodb::error::Error> {
     let mut pending = tracker.lock().await;
-    if let Some(entry) = pending.iter_mut().find(|entry| entry.0 == seq) {
-        entry.2 = true;
+    if let Some((_, _, done)) = pending
+        .iter_mut()
+        .find(|(page_index, _, _)| *page_index == index)
+    {
+        *done = true;
     }
     let mut checkpoint = None;
-    while pending.front().is_some_and(|entry| entry.2) {
-        checkpoint = pending.pop_front().map(|entry| entry.1);
+    while pending.front().is_some_and(|(_, _, done)| *done) {
+        checkpoint = pending.pop_front().map(|(_, last_id, _)| last_id);
     }
     if let Some(checkpoint) = checkpoint {
         set_reprocess_state(db, state_id, doc! { "checkpoint": checkpoint }).await?;
@@ -746,23 +751,23 @@ async fn complete_page(
 
 async fn insert_ignoring_duplicates(
     collection: &mongodb::Collection<Document>,
-    docs: Vec<Document>,
+    documents: Vec<Document>,
 ) -> Result<(), mongodb::error::Error> {
-    match collection.insert_many(docs).ordered(false).await {
-        Ok(_) => Ok(()),
-        Err(e) => match e.kind.as_ref() {
-            ErrorKind::InsertMany(InsertManyError {
-                write_errors,
-                write_concern_error: None,
-                ..
-            }) if write_errors
-                .as_ref()
-                .is_some_and(|errors| errors.iter().all(|we| we.code == 11000)) =>
-            {
-                Ok(())
-            }
-            _ => Err(e),
-        },
+    let Err(error) = collection.insert_many(documents).ordered(false).await else {
+        return Ok(());
+    };
+    match error.kind.as_ref() {
+        ErrorKind::InsertMany(InsertManyError {
+            write_errors: Some(write_errors),
+            write_concern_error: None,
+            ..
+        }) if write_errors
+            .iter()
+            .all(|write_error| write_error.code == 11000) =>
+        {
+            Ok(())
+        }
+        _ => Err(error),
     }
 }
 
@@ -772,16 +777,14 @@ async fn process_cat_doc(
     run_start_jd: f64,
     cat_doc: &Document,
 ) -> Result<Vec<Document>, mongodb::error::Error> {
-    let Some(cat_id) = cat_doc.get("_id") else {
+    let Some(catalog_id) = cat_doc.get("_id") else {
         return Ok(Vec::new());
     };
-    let cat_ra = match get_f64_from_doc(cat_doc, "ra") {
-        Some(v) => v,
-        None => return Ok(Vec::new()),
+    let Some(cat_ra) = get_f64_from_doc(cat_doc, "ra") else {
+        return Ok(Vec::new());
     };
-    let cat_dec = match get_f64_from_doc(cat_doc, "dec") {
-        Some(v) => v,
-        None => return Ok(Vec::new()),
+    let Some(cat_dec) = get_f64_from_doc(cat_doc, "dec") else {
+        return Ok(Vec::new());
     };
 
     // A row's effective radius depends only on the row itself, so query that
@@ -803,22 +806,22 @@ async fn process_cat_doc(
     };
     let mut aux_cursor = aux_collection
         .find(aux_filter)
-        .projection(aux_match_projection())
+        .projection(doc! { "_id": 1, "coordinates.radec_geojson.coordinates": 1, "created_at": 1 })
         .batch_size(CURSOR_BATCH_SIZE)
         .await?;
 
     let mut matches = Vec::new();
     while let Some(aux_doc) = aux_cursor.try_next().await? {
-        if !get_f64_from_doc(&aux_doc, "created_at").is_some_and(|t| t < run_start_jd) {
+        if !get_f64_from_doc(&aux_doc, "created_at")
+            .is_some_and(|created_at| created_at < run_start_jd)
+        {
             continue;
         }
-        let aux_id = match aux_doc.get_str("_id") {
-            Ok(s) => s.to_string(),
-            Err(_) => continue,
+        let Ok(aux_id) = aux_doc.get_str("_id") else {
+            continue;
         };
-        let (aux_ra, aux_dec) = match extract_radec(&aux_doc) {
-            Some(v) => v,
-            None => continue,
+        let Some((aux_ra, aux_dec)) = extract_radec(&aux_doc) else {
+            continue;
         };
         let distance_arcsec = great_circle_distance(aux_ra, aux_dec, cat_ra, cat_dec) * 3600.0;
 
@@ -829,7 +832,7 @@ async fn process_cat_doc(
             match_doc.insert("distance_kpc", distance_kpc_from_arcsec(distance_arcsec, z));
         }
 
-        matches.push(doc! { "_id": { "a": aux_id, "c": cat_id.clone() }, "m": match_doc });
+        matches.push(doc! { "_id": { "a": aux_id, "c": catalog_id.clone() }, "m": match_doc });
     }
     Ok(matches)
 }
@@ -849,15 +852,26 @@ async fn commit_catalog(
     let aux_collection: mongodb::Collection<Document> =
         db.collection(&format!("{}_alerts_aux", survey));
     let live_field = format!("cross_matches.{}", catalog_config.catalog);
-    // Buffer of older versions, still on some alerts_aux records.
+    // Left by older versions of this binary, still present on some alerts_aux records.
     let legacy_temp_field = format!("cross_matches.{}_temp", catalog_config.catalog);
+    let merge_into_aux = |value: Bson| {
+        doc! { "$merge": {
+            "into": aux_collection.name(),
+            "on": "_id",
+            "whenMatched": [
+                { "$set": { &live_field: value } },
+                { "$unset": &legacy_temp_field },
+            ],
+            "whenNotMatched": "discard",
+        }}
+    };
 
-    let buffered = buffer.estimated_document_count().await.unwrap_or(0);
+    let buffered = buffer.estimated_document_count().await?;
     info!(
         "[{}] grouping, sorting and trimming {} matches per record",
         label, buffered
     );
-    let logger = spawn_elapsed_logger(label.to_string(), "still grouping".to_string());
+    let logger = spawn_elapsed_logger(label.to_string(), "still grouping");
     let grouping = buffer
         .aggregate(vec![
             doc! { "$group": { "_id": "$_id.a", "m": { "$push": "$m" } } },
@@ -881,15 +895,7 @@ async fn commit_catalog(
         &grouped_shards,
         processes,
         &Document::new(),
-        vec![doc! { "$merge": {
-            "into": aux_collection.name(),
-            "on": "_id",
-            "whenMatched": [
-                { "$set": { &live_field: "$$new.m" } },
-                { "$unset": &legacy_temp_field },
-            ],
-            "whenNotMatched": "discard",
-        }}],
+        vec![merge_into_aux(Bson::from("$$new.m"))],
         &format!("{} matched", label),
     )
     .await?;
@@ -927,15 +933,7 @@ async fn commit_catalog(
             }},
             doc! { "$match": { "hit": { "$size": 0 } } },
             doc! { "$project": { "_id": 1 } },
-            doc! { "$merge": {
-                "into": aux_collection.name(),
-                "on": "_id",
-                "whenMatched": [
-                    { "$set": { &live_field: [] } },
-                    { "$unset": &legacy_temp_field },
-                ],
-                "whenNotMatched": "discard",
-            }},
+            merge_into_aux(Bson::Array(Vec::new())),
         ],
         &format!("{} unmatched", label),
     )
@@ -951,9 +949,9 @@ async fn sharded_aggregate(
     stages: Vec<Document>,
     label: &str,
 ) -> Result<(), mongodb::error::Error> {
-    info!("[{}] running over {} shards", label, shards.len());
-    let done = Arc::new(AtomicUsize::new(0));
     let total = shards.len();
+    info!("[{}] running over {} shards", label, total);
+    let done = &AtomicUsize::new(0);
     let started = Instant::now();
     let results: Vec<_> = futures::stream::iter(shards.iter().enumerate().map(|(index, shard)| {
         let filter = merge_filters(base_filter, shard);
@@ -962,8 +960,6 @@ async fn sharded_aggregate(
             pipeline.push(doc! { "$match": filter });
         }
         pipeline.extend(stages.iter().cloned());
-        let collection = collection.clone();
-        let done = Arc::clone(&done);
         async move {
             let result = collection.aggregate(pipeline).allow_disk_use(true).await;
             let completed = done.fetch_add(1, Ordering::Relaxed) + 1;
@@ -985,8 +981,8 @@ async fn sharded_aggregate(
                     total,
                     progress
                 ),
-                Err(e) => warn!(
-                    error = %e,
+                Err(error) => warn!(
+                    %error,
                     "[{}] shard {}/{} failed ({})",
                     label,
                     index + 1,
@@ -1044,9 +1040,7 @@ fn stellar_expr(catalog_config: &CatalogXmatchConfig) -> Document {
     doc! { "$in": [{ "$toLower": { "$trim": { "input": value } } }, values] }
 }
 
-/// Mongo-aggregation mirror of the in-Rust sort/trim performed by
-/// `utils::spatial::xmatch` (see that function for the source of truth on
-/// ordering semantics).
+/// Mirrors the sort and trim of `utils::spatial::xmatch`; keep the two in sync.
 fn sorted_matches(catalog_config: &CatalogXmatchConfig, input: &str) -> Document {
     let rank = doc! { "$switch": {
         "branches": [
@@ -1287,7 +1281,7 @@ async fn main() {
 }
 
 #[cfg(test)]
-mod commit_pipeline_tests {
+mod sorted_matches_tests {
     use super::*;
 
     fn config(type_key: Option<&str>) -> CatalogXmatchConfig {
@@ -1304,20 +1298,19 @@ mod commit_pipeline_tests {
 
     #[test]
     fn test_a_catalog_without_a_type_column_ranks_nothing_as_stellar() {
-        let expr = stellar_expr(&config(None));
-        assert!(!expr.get_bool("$literal").unwrap());
+        let expression = stellar_expr(&config(None));
+        assert!(!expression.get_bool("$literal").unwrap());
     }
 
     #[test]
     fn test_stellar_values_are_compared_case_insensitively() {
-        let expr = stellar_expr(&config(Some("spectype")));
-        let args = expr.get_array("$in").unwrap();
+        let expression = stellar_expr(&config(Some("spectype")));
+        let args = expression.get_array("$in").unwrap();
         assert!(format!("{:?}", args[0]).contains("toLower"));
         assert_eq!(args[1].as_array().unwrap()[0].as_str().unwrap(), "star");
     }
 
-    /// The keys are the ones `host_sort_key` returns, in that order, and the
-    /// wrapper they live on is dropped before the array is stored.
+    /// Keys follow `host_sort_key`, and their wrapper is dropped before the array is stored.
     #[test]
     fn test_rows_are_sorted_on_rank_then_distance() {
         let rendered = format!("{:?}", sorted_matches(&config(None), "$m"));
@@ -1329,7 +1322,7 @@ mod commit_pipeline_tests {
 
     #[test]
     fn test_the_array_is_trimmed() {
-        let expr = sorted_matches(&config(None), "$m");
-        assert!(expr.contains_key("$slice"));
+        let expression = sorted_matches(&config(None), "$m");
+        assert!(expression.contains_key("$slice"));
     }
 }

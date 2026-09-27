@@ -1,7 +1,10 @@
 use futures::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
-use std::collections::VecDeque;
-use std::io::Write;
+use std::{
+    collections::VecDeque,
+    io::Write,
+    time::{Duration, Instant},
+};
 use tracing::info;
 
 const PROGRESS_LOG_SECS: u64 = 60;
@@ -28,8 +31,8 @@ fn windowed_rate(window: &VecDeque<(f64, u64)>, at: f64, pos: u64) -> f64 {
     }
 }
 
-pub fn format_duration(secs: u64) -> String {
-    format!("{}h{:02}m", secs / 3600, (secs % 3600) / 60)
+pub fn format_duration(seconds: u64) -> String {
+    format!("{}h{:02}m", seconds / 3600, (seconds % 3600) / 60)
 }
 
 pub fn format_eta(remaining: u64, rate: f64) -> String {
@@ -46,7 +49,7 @@ pub fn format_eta(remaining: u64, rate: f64) -> String {
 /// `RATE_WINDOW_SAMPLES` samples rather than over the whole run.
 pub fn spawn_progress_logger(pb: ProgressBar, label: String) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(PROGRESS_LOG_SECS));
+        let mut ticker = tokio::time::interval(Duration::from_secs(PROGRESS_LOG_SECS));
         ticker.tick().await;
         let mut window: VecDeque<(f64, u64)> = VecDeque::with_capacity(RATE_WINDOW_SAMPLES);
         window.push_back((pb.elapsed().as_secs_f64(), pb.position()));
@@ -80,11 +83,10 @@ pub fn spawn_progress_logger(pb: ProgressBar, label: String) -> tokio::task::Joi
     })
 }
 
-/// Logs every `PROGRESS_LOG_SECS` that a step with no measurable progress is still running.
-pub fn spawn_elapsed_logger(label: String, activity: String) -> tokio::task::JoinHandle<()> {
+pub fn spawn_elapsed_logger(label: String, activity: &'static str) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let started = std::time::Instant::now();
-        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(PROGRESS_LOG_SECS));
+        let started = Instant::now();
+        let mut ticker = tokio::time::interval(Duration::from_secs(PROGRESS_LOG_SECS));
         ticker.tick().await;
         loop {
             ticker.tick().await;
