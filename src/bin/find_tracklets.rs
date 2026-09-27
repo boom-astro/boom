@@ -97,9 +97,9 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     persist: bool,
 
-    /// Report what `--persist` would write without writing it. Resolves each
-    /// track against the stored ones, so the identity it reports is the one a
-    /// real run would use.
+    /// Report what `--persist` would write without writing it. Each track is
+    /// resolved against the stored ones only, so two tracks of one object in
+    /// the same run show as two new tracks where a real run merges them.
     #[arg(long, default_value_t = false)]
     dry_run: bool,
 
