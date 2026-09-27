@@ -592,6 +592,10 @@ async fn persist_tracks(
             .filter_map(|id| by_id.get(id))
             .map(|d| d.jd)
             .collect();
+        if jds.len() != members.len() {
+            error!("a track references detections not in this run, skipping");
+            continue;
+        }
         // A track of a known object records the designation, which is what tells
         // a consumer this is a recovery rather than a discovery candidate.
         let designation = members.iter().find_map(|id| labels.get(id)).cloned();
