@@ -58,54 +58,56 @@ async fn keep_mpc_orbits_fresh(db: Database) {
     loop {
         // Fires immediately on the first pass, so startup is covered.
         tick.tick().await;
+        refresh_mpc_orbits_if_due(&db).await;
+    }
+}
 
-        let now = chrono::Utc::now().timestamp() as f64;
-        let age = match mpcorb::orbits_age_seconds(&db, now).await {
-            Ok(age) => age,
-            // An unknown age is not an absent one: do not re-download on a blip.
-            Err(error) => {
-                log_error!(WARN, error, "could not read the age of MPC_orbits");
-                continue;
+/// Refresh `MPC_orbits` if it is stale or missing.
+async fn refresh_mpc_orbits_if_due(db: &Database) {
+    let now = chrono::Utc::now().timestamp() as f64;
+    let age = match mpcorb::orbits_age_seconds(db, now).await {
+        Ok(age) => age,
+        // An unknown age is not an absent one: do not re-download on a blip.
+        Err(error) => {
+            log_error!(WARN, error, "could not read the age of MPC_orbits");
+            return;
+        }
+    };
+    let count = db
+        .collection::<Document>(mpcorb::ORBITS_COLLECTION)
+        .estimated_document_count()
+        .await
+        .ok();
+    record_mpc_orbits_state(age, count);
+
+    if !mpc_orbits_needs_refresh(age, MPC_ORBITS_MAX_AGE) {
+        info!(
+            age_hours = age.unwrap_or(0.0) / 3600.0,
+            orbits = count.unwrap_or(0),
+            "MPC_orbits is current"
+        );
+        return;
+    }
+    match age {
+        Some(age) => info!(age_hours = age / 3600.0, "MPC_orbits is stale, refreshing"),
+        None => warn!("MPC_orbits is missing, populating it"),
+    }
+
+    // No progress bar: this output is a log, not a terminal.
+    match mpcorb::refresh_orbits(Some(db), mpcorb::DEFAULT_MPCORB_URL, 10_000, now, false).await {
+        Ok(report) => {
+            for sample in &report.rejected_samples {
+                warn!("rejected record-shaped line: {}", sample);
             }
-        };
-        let count = db
-            .collection::<Document>(mpcorb::ORBITS_COLLECTION)
-            .estimated_document_count()
-            .await
-            .ok();
-        record_mpc_orbits_state(age, count);
-
-        if !mpc_orbits_needs_refresh(age, MPC_ORBITS_MAX_AGE) {
             info!(
-                age_hours = age.unwrap_or(0.0) / 3600.0,
-                orbits = count.unwrap_or(0),
-                "MPC_orbits is current"
+                orbits = report.parsed,
+                skipped = report.skipped,
+                "MPC_orbits refreshed"
             );
-            continue;
+            record_mpc_orbits_state(Some(0.0), Some(report.parsed));
         }
-        match age {
-            Some(age) => info!(age_hours = age / 3600.0, "MPC_orbits is stale, refreshing"),
-            None => warn!("MPC_orbits is missing, populating it"),
-        }
-
-        // No progress bar: this output is a log, not a terminal.
-        match mpcorb::refresh_orbits(Some(&db), mpcorb::DEFAULT_MPCORB_URL, 10_000, now, false)
-            .await
-        {
-            Ok(report) => {
-                for sample in &report.rejected_samples {
-                    warn!("rejected record-shaped line: {}", sample);
-                }
-                info!(
-                    orbits = report.parsed,
-                    skipped = report.skipped,
-                    "MPC_orbits refreshed"
-                );
-                record_mpc_orbits_state(Some(0.0), Some(report.parsed));
-            }
-            // The previous catalogue survives a failure, so geometry keeps working.
-            Err(error) => log_error!(WARN, error, "failed to refresh MPC_orbits"),
-        }
+        // The previous catalogue survives a failure, so geometry keeps working.
+        Err(error) => log_error!(WARN, error, "failed to refresh MPC_orbits"),
     }
 }
 
