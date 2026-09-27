@@ -10,7 +10,6 @@
 //! because the contents are what changes. A run's track that shares detections
 //! with a stored one *is* that track, extended.
 
-use apache_avro::AvroSchema;
 use mongodb::bson::{doc, Document};
 use serde::{Deserialize, Serialize};
 
@@ -76,13 +75,10 @@ pub struct StoredTrack {
     pub designation: Option<String>,
 }
 
-/// What a filter sees on each member alert.
-///
-/// Every member carries this, not just the newest, so a filter matches on any
-/// epoch. The candids are deliberately not here: carrying every member on every
-/// member is quadratic on the stream, and a consumer that wants the other
-/// epochs looks the track up by id.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, AvroSchema, utoipa::ToSchema)]
+/// Stamped on every member alert. The candids are deliberately not here:
+/// carrying every member on every member is quadratic, and a client that wants
+/// the other epochs looks the track up by id.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AlertTrack {
     pub id: String,
     pub n_detections: i32,
