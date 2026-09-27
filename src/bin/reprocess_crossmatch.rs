@@ -1,12 +1,16 @@
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 use boom::{
     api::catalogs::WATCHLIST_PREFIX,
     conf::{load_dotenv, AppConfig, CatalogXmatchConfig},
     utils::{
-        data::{make_progress_bar, spawn_progress_logger},
+        data::{
+            format_duration, format_eta, make_progress_bar, spawn_elapsed_logger,
+            spawn_progress_logger,
+        },
         db::{join_tasks, merge_filters, range_shards, shard_field, TaskError, CURSOR_BATCH_SIZE},
         enums::Survey,
         parser::parse_positive_usize,
@@ -848,18 +852,22 @@ async fn commit_catalog(
     // Buffer of older versions, still on some alerts_aux records.
     let legacy_temp_field = format!("cross_matches.{}_temp", catalog_config.catalog);
 
+    let buffered = buffer.estimated_document_count().await.unwrap_or(0);
     info!(
-        "[{}] grouping, sorting and trimming the matches per record",
-        label
+        "[{}] grouping, sorting and trimming {} matches per record",
+        label, buffered
     );
-    buffer
+    let logger = spawn_elapsed_logger(label.to_string(), "still grouping".to_string());
+    let grouping = buffer
         .aggregate(vec![
             doc! { "$group": { "_id": "$_id.a", "m": { "$push": "$m" } } },
             doc! { "$set": { "m": sorted_matches(catalog_config, "$m") } },
             doc! { "$out": grouped.name() },
         ])
         .allow_disk_use(true)
-        .await?;
+        .await;
+    logger.abort();
+    grouping?;
 
     let grouped_shards = range_shards(
         grouped,
@@ -946,6 +954,7 @@ async fn sharded_aggregate(
     info!("[{}] running over {} shards", label, shards.len());
     let done = Arc::new(AtomicUsize::new(0));
     let total = shards.len();
+    let started = Instant::now();
     let results: Vec<_> = futures::stream::iter(shards.iter().enumerate().map(|(index, shard)| {
         let filter = merge_filters(base_filter, shard);
         let mut pipeline = Vec::with_capacity(stages.len() + 1);
@@ -958,21 +967,31 @@ async fn sharded_aggregate(
         async move {
             let result = collection.aggregate(pipeline).allow_disk_use(true).await;
             let completed = done.fetch_add(1, Ordering::Relaxed) + 1;
+            let elapsed = started.elapsed();
+            let progress = format!(
+                "{} shards complete, {} elapsed, eta {}",
+                completed,
+                format_duration(elapsed.as_secs()),
+                format_eta(
+                    (total - completed) as u64,
+                    completed as f64 / elapsed.as_secs_f64()
+                )
+            );
             match &result {
                 Ok(_) => info!(
-                    "[{}] shard {}/{} done ({} shards complete)",
+                    "[{}] shard {}/{} done ({})",
                     label,
                     index + 1,
                     total,
-                    completed
+                    progress
                 ),
                 Err(e) => warn!(
                     error = %e,
-                    "[{}] shard {}/{} failed ({} shards complete)",
+                    "[{}] shard {}/{} failed ({})",
                     label,
                     index + 1,
                     total,
-                    completed
+                    progress
                 ),
             }
             result.map(|_| ())

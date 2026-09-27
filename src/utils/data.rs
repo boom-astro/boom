@@ -28,15 +28,18 @@ fn windowed_rate(window: &VecDeque<(f64, u64)>, at: f64, pos: u64) -> f64 {
     }
 }
 
-fn format_eta(remaining: u64, rate: f64) -> String {
+pub fn format_duration(secs: u64) -> String {
+    format!("{}h{:02}m", secs / 3600, (secs % 3600) / 60)
+}
+
+pub fn format_eta(remaining: u64, rate: f64) -> String {
     if remaining == 0 {
-        return "0h00m".to_string();
+        return format_duration(0);
     }
     if rate <= 0.0 {
         return "unknown".to_string();
     }
-    let secs = (remaining as f64 / rate) as u64;
-    format!("{}h{:02}m", secs / 3600, (secs % 3600) / 60)
+    format_duration((remaining as f64 / rate) as u64)
 }
 
 /// Logs progress every `PROGRESS_LOG_SECS`, with a rate measured over the last
@@ -72,6 +75,24 @@ pub fn spawn_progress_logger(pb: ProgressBar, label: String) -> tokio::task::Joi
                 pct,
                 rate,
                 format_eta(len.saturating_sub(pos), rate),
+            );
+        }
+    })
+}
+
+/// Logs every `PROGRESS_LOG_SECS` that a step with no measurable progress is still running.
+pub fn spawn_elapsed_logger(label: String, activity: String) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let started = std::time::Instant::now();
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(PROGRESS_LOG_SECS));
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            info!(
+                "[{}] {}, {} elapsed",
+                label,
+                activity,
+                format_duration(started.elapsed().as_secs())
             );
         }
     })
