@@ -27,7 +27,10 @@ use mongodb::bson::{doc, Document};
 use mongodb::{Collection, Database};
 use opentelemetry_sdk::metrics::SdkMeterProvider;
 use opentelemetry_sdk::trace::SdkTracerProvider;
-use tokio::sync::oneshot;
+use tokio::{
+    sync::oneshot,
+    time::{sleep, timeout},
+};
 use tracing::{info, info_span, warn, Instrument};
 use uuid::Uuid;
 
@@ -38,7 +41,6 @@ const MPC_ORBITS_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 /// How often to re-check. Well inside the max age, so a single failed attempt
 /// still leaves several before the catalogue is actually stale.
 const MPC_ORBITS_CHECK_INTERVAL: Duration = Duration::from_secs(4 * 60 * 60);
-/// How long startup waits on a due refresh before starting the workers anyway.
 const MPC_ORBITS_STARTUP_WAIT: Duration = Duration::from_secs(5 * 60);
 
 fn pool_state(pool: &ThreadPool) -> String {
@@ -50,25 +52,15 @@ fn mpc_orbits_needs_refresh(age_seconds: Option<f64>, max_age: Duration) -> bool
     age_seconds.is_none_or(|age| age >= max_age.as_secs_f64())
 }
 
-/// Keep `MPC_orbits` fresh for as long as the scheduler runs.
-///
-/// A missing catalogue costs geometry silently -- the alert still enriches
-/// without it -- so this runs unattended, and the startup check covers a fresh
-/// deployment. A failed refresh leaves the previous catalogue in place.
 async fn keep_mpc_orbits_fresh(db: Database, first_check_done: oneshot::Sender<()>) {
     refresh_mpc_orbits_if_due(&db).await;
     let _ = first_check_done.send(());
-
-    let mut tick = tokio::time::interval(MPC_ORBITS_CHECK_INTERVAL);
-    // Drop the immediate first tick; the check above already covers startup.
-    tick.tick().await;
     loop {
-        tick.tick().await;
+        sleep(MPC_ORBITS_CHECK_INTERVAL).await;
         refresh_mpc_orbits_if_due(&db).await;
     }
 }
 
-/// Refresh `MPC_orbits` if it is stale or missing.
 async fn refresh_mpc_orbits_if_due(db: &Database) {
     let now = chrono::Utc::now().timestamp() as f64;
     let age = match mpcorb::orbits_age_seconds(db, now).await {
@@ -256,11 +248,8 @@ async fn run(
             keep_mpc_orbits_fresh(db.clone(), first_check_done)
                 .instrument(info_span!("mpc orbits refresh")),
         );
-        // Enrichment stores geometry for good, so do not start it on a stale catalogue.
-        if tokio::time::timeout(MPC_ORBITS_STARTUP_WAIT, first_check)
-            .await
-            .is_err()
-        {
+        // Enrichment stores geometry for good, so let a due refresh land before it starts.
+        if timeout(MPC_ORBITS_STARTUP_WAIT, first_check).await.is_err() {
             warn!(
                 waited_seconds = MPC_ORBITS_STARTUP_WAIT.as_secs(),
                 "MPC_orbits refresh is still running, starting the workers anyway"
