@@ -191,6 +191,7 @@ pub fn alert_update(track: &AlertTrack) -> Document {
 
 pub const TRACKS_COLLECTION: &str = "ZTF_tracks";
 const COUNTERS_COLLECTION: &str = "boom_counters";
+pub const ALIASES_COLLECTION: &str = "ZTF_tracks_aliases";
 
 /// Next sequence number, allocated atomically so concurrent runs cannot mint
 /// the same id.
@@ -422,6 +423,22 @@ pub async fn commit_upsert(
         collection
             .delete_many(doc! { "_id": { "$in": &plan.superseded } })
             .await?;
+        let aliases = db.collection::<Document>(ALIASES_COLLECTION);
+        aliases
+            .update_many(
+                doc! { "superseded_by": { "$in": &plan.superseded } },
+                doc! { "$set": { "superseded_by": &id } },
+            )
+            .await?;
+        for old in &plan.superseded {
+            aliases
+                .replace_one(
+                    doc! { "_id": old },
+                    doc! { "_id": old, "superseded_by": &id },
+                )
+                .upsert(true)
+                .await?;
+        }
     }
     Ok(Upserted {
         track: stored,
@@ -449,9 +466,18 @@ pub async fn track_by_id(
     db: &mongodb::Database,
     id: &str,
 ) -> Result<Option<StoredTrack>, mongodb::error::Error> {
-    db.collection::<StoredTrack>(TRACKS_COLLECTION)
+    let tracks = db.collection::<StoredTrack>(TRACKS_COLLECTION);
+    if let Some(track) = tracks.find_one(doc! { "_id": id }).await? {
+        return Ok(Some(track));
+    }
+    let alias = db
+        .collection::<Document>(ALIASES_COLLECTION)
         .find_one(doc! { "_id": id })
-        .await
+        .await?;
+    match alias.as_ref().and_then(|a| a.get_str("superseded_by").ok()) {
+        Some(survivor) => tracks.find_one(doc! { "_id": survivor }).await,
+        None => Ok(None),
+    }
 }
 
 pub async fn public_track_by_id(
