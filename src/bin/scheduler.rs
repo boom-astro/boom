@@ -38,6 +38,8 @@ const MPC_ORBITS_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 /// How often to re-check. Well inside the max age, so a single failed attempt
 /// still leaves several before the catalogue is actually stale.
 const MPC_ORBITS_CHECK_INTERVAL: Duration = Duration::from_secs(4 * 60 * 60);
+/// How long startup waits on a due refresh before starting the workers anyway.
+const MPC_ORBITS_STARTUP_WAIT: Duration = Duration::from_secs(5 * 60);
 
 fn pool_state(pool: &ThreadPool) -> String {
     format!("{}/{}", pool.live_worker_count(), pool.total_worker_count())
@@ -53,10 +55,14 @@ fn mpc_orbits_needs_refresh(age_seconds: Option<f64>, max_age: Duration) -> bool
 /// A missing catalogue costs geometry silently -- the alert still enriches
 /// without it -- so this runs unattended, and the startup check covers a fresh
 /// deployment. A failed refresh leaves the previous catalogue in place.
-async fn keep_mpc_orbits_fresh(db: Database) {
+async fn keep_mpc_orbits_fresh(db: Database, first_check_done: oneshot::Sender<()>) {
+    refresh_mpc_orbits_if_due(&db).await;
+    let _ = first_check_done.send(());
+
     let mut tick = tokio::time::interval(MPC_ORBITS_CHECK_INTERVAL);
+    // Drop the immediate first tick; the check above already covers startup.
+    tick.tick().await;
     loop {
-        // Fires immediately on the first pass, so startup is covered.
         tick.tick().await;
         refresh_mpc_orbits_if_due(&db).await;
     }
@@ -239,16 +245,28 @@ async fn run(
 
     warn_if_missing_crossmatches(&args.survey, &db, &config).await;
 
-    // Only ZTF needs these; LSST carries the vectors in its own packet.
-    if args.survey == Survey::Ztf {
-        tokio::spawn(
-            keep_mpc_orbits_fresh(db.clone()).instrument(info_span!("mpc orbits refresh")),
-        );
-    }
-
     #[cfg(target_os = "linux")]
     validate_gpu_configuration_for_survey(&args.survey, &config)
         .expect("GPU configuration is invalid for the survey");
+
+    // Only ZTF needs these; LSST carries the vectors in its own packet.
+    if args.survey == Survey::Ztf {
+        let (first_check_done, first_check) = oneshot::channel();
+        tokio::spawn(
+            keep_mpc_orbits_fresh(db.clone(), first_check_done)
+                .instrument(info_span!("mpc orbits refresh")),
+        );
+        // Enrichment stores geometry for good, so do not start it on a stale catalogue.
+        if tokio::time::timeout(MPC_ORBITS_STARTUP_WAIT, first_check)
+            .await
+            .is_err()
+        {
+            warn!(
+                waited_seconds = MPC_ORBITS_STARTUP_WAIT.as_secs(),
+                "MPC_orbits refresh is still running, starting the workers anyway"
+            );
+        }
+    }
 
     let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
     tokio::spawn(
