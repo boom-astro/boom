@@ -454,6 +454,54 @@ pub async fn track_by_id(
         .await
 }
 
+pub async fn public_track_by_id(
+    db: &mongodb::Database,
+    id: &str,
+) -> Result<Option<StoredTrack>, mongodb::error::Error> {
+    let Some(track) = track_by_id(db, id).await? else {
+        return Ok(None);
+    };
+    let mut cursor = db
+        .collection::<Document>("ZTF_alerts")
+        .find(doc! { "_id": { "$in": &track.members }, "candidate.programid": 1 })
+        .projection(doc! { "_id": 1 })
+        .await?;
+    let mut public = std::collections::HashSet::new();
+    while cursor.advance().await? {
+        if let Ok(id) = cursor.current().get_i64("_id") {
+            public.insert(id);
+        }
+    }
+    Ok(restrict_to(&track, &public))
+}
+
+pub fn restrict_to(
+    track: &StoredTrack,
+    keep: &std::collections::HashSet<i64>,
+) -> Option<StoredTrack> {
+    let (members, epochs): (Vec<i64>, Vec<f64>) = track
+        .members
+        .iter()
+        .zip(track.epochs.iter())
+        .filter(|(m, _)| keep.contains(m))
+        .map(|(m, j)| (*m, *j))
+        .unzip();
+    if members.is_empty() {
+        return None;
+    }
+    let (n_detections, n_nights, arc_days, first_jd, last_jd) = summarise(&members, &epochs);
+    Some(StoredTrack {
+        members,
+        epochs,
+        n_detections,
+        n_nights,
+        arc_days,
+        first_jd,
+        last_jd,
+        ..track.clone()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -612,6 +660,19 @@ mod tests {
         let mut t = stored("BT000001", &[10, 11]);
         t.bound_fit = Some(BoundFit::Poor.as_str().to_string());
         assert_eq!(AlertTrack::from(&t).bound_fit.as_deref(), Some("poor"));
+    }
+
+    #[test]
+    fn test_restricting_a_track_recounts_what_is_left() {
+        let t = stored("BT000001", &[10, 11, 12, 13]);
+        let kept = restrict_to(&t, &[11, 13].into_iter().collect()).expect("two remain");
+        assert_eq!(kept.members, vec![11, 13]);
+        assert_eq!(kept.epochs, vec![2460001.0, 2460003.0]);
+        assert_eq!(kept.n_detections, 2);
+        assert_eq!(kept.n_nights, 2);
+        assert_eq!(kept.first_jd, 2460001.0);
+        assert_eq!(kept.last_jd, 2460003.0);
+        assert!(restrict_to(&t, &[99].into_iter().collect()).is_none());
     }
 
     /// Epochs are quoted as MPC astrometry, where 1e-5 d is 0.86 s -- enough to
