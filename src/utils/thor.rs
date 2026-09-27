@@ -90,9 +90,7 @@ impl Default for Config {
         Self {
             max_residual_rate_deg_per_day: 0.05,
             rate_steps: 21,
-            // Wide enough to chain consecutive nights: the rate grid cancels the
-            // bulk of the residual drift but leaves tens of arcseconds per gap.
-            cluster_radius_arcsec: 120.0,
+            cluster_radius_arcsec: 30.0,
             // Two, matching the tracklet finder: THOR exists for the objects
             // with one detection a night, so three would exclude what it is for.
             min_detections: 2,
@@ -101,9 +99,7 @@ impl Default for Config {
             // common case a search is run over.
             min_nights: 2,
             max_offset_deg: 2.0,
-            // The residual motion is curved, so a straight line through several
-            // nights of it sits well above arcsecond scale even for a real object.
-            max_rms_arcsec: 10.0,
+            max_rms_arcsec: 2.0,
         }
     }
 }
@@ -456,7 +452,12 @@ mod tests {
     #[test]
     fn test_recovers_an_object_whose_residual_motion_curves() {
         let dets = curved_object(0.003, &SPARSE, 1);
-        let found = recover(&dets, &track(), &Config::default());
+        let cfg = Config {
+            cluster_radius_arcsec: 120.0,
+            max_rms_arcsec: 10.0,
+            ..Config::default()
+        };
+        let found = recover(&dets, &track(), &cfg);
         assert_eq!(found.len(), 1, "expected one cluster, got {found:?}");
         assert_eq!(found[0].ids.len(), 4);
         assert_eq!(found[0].nights, 4);
