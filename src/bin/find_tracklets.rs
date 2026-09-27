@@ -505,7 +505,22 @@ async fn persist_clusters(
     min_detections: usize,
     min_nights: usize,
 ) {
-    use boom::utils::tracks::{commit_upsert, plan_upsert, stamp_members};
+    use boom::utils::tracks::{
+        acquire_lock, commit_upsert, plan_upsert, release_lock, stamp_members,
+    };
+    if !dry_run {
+        match acquire_lock(db).await {
+            Ok(true) => {}
+            Ok(false) => {
+                error!("another run is persisting tracks, not writing");
+                return;
+            }
+            Err(e) => {
+                error!("could not take the tracks lock: {}", e);
+                return;
+            }
+        }
+    }
     let by_id: HashMap<i64, &Detection> = detections.iter().map(|d| (d.id, d)).collect();
     let (mut stored, mut stamped) = (0usize, 0u64);
     for (cluster, verdict) in clusters {
@@ -554,6 +569,11 @@ async fn persist_clusters(
             Err(e) => error!("could not store a cluster: {}", e),
         }
     }
+    if !dry_run {
+        if let Err(e) = release_lock(db).await {
+            error!("could not release the tracks lock: {}", e);
+        }
+    }
     let what = if dry_run { "would store" } else { "stored" };
     info!(
         "{} {} thor clusters, {} alerts stamped",
@@ -576,7 +596,22 @@ async fn persist_tracks(
     min_detections: usize,
     min_nights: usize,
 ) {
-    use boom::utils::tracks::{commit_upsert, plan_upsert, stamp_members};
+    use boom::utils::tracks::{
+        acquire_lock, commit_upsert, plan_upsert, release_lock, stamp_members,
+    };
+    if !dry_run {
+        match acquire_lock(db).await {
+            Ok(true) => {}
+            Ok(false) => {
+                error!("another run is persisting tracks, not writing");
+                return;
+            }
+            Err(e) => {
+                error!("could not take the tracks lock: {}", e);
+                return;
+            }
+        }
+    }
     let by_id: HashMap<i64, &Detection> = detections.iter().map(|d| (d.id, d)).collect();
     let (mut stored, mut stamped, mut merged) = (0usize, 0u64, 0usize);
     for track in tracks {
@@ -642,6 +677,11 @@ async fn persist_tracks(
                 }
             }
             Err(e) => error!("could not store a track: {}", e),
+        }
+    }
+    if !dry_run {
+        if let Err(e) = release_lock(db).await {
+            error!("could not release the tracks lock: {}", e);
         }
     }
     if dry_run {

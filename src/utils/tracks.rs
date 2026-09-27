@@ -204,6 +204,38 @@ async fn next_sequence(db: &mongodb::Database) -> Result<u64, mongodb::error::Er
     Ok(doc.and_then(|d| d.get_i64("seq").ok()).unwrap_or(1) as u64)
 }
 
+const LOCK_ID: &str = "tracks_lock";
+const LOCK_LEASE_HOURS: i64 = 6;
+
+pub async fn acquire_lock(db: &mongodb::Database) -> Result<bool, mongodb::error::Error> {
+    let collection = db.collection::<Document>(COUNTERS_COLLECTION);
+    let now = mongodb::bson::DateTime::now();
+    collection
+        .delete_one(doc! { "_id": LOCK_ID, "expires_at": { "$lt": now } })
+        .await?;
+    let expires_at =
+        mongodb::bson::DateTime::from_millis(now.timestamp_millis() + LOCK_LEASE_HOURS * 3_600_000);
+    match collection
+        .insert_one(doc! { "_id": LOCK_ID, "expires_at": expires_at })
+        .await
+    {
+        Ok(_) => Ok(true),
+        Err(error) => match *error.kind {
+            mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(
+                ref write_error,
+            )) if write_error.code == 11000 => Ok(false),
+            _ => Err(error),
+        },
+    }
+}
+
+pub async fn release_lock(db: &mongodb::Database) -> Result<(), mongodb::error::Error> {
+    db.collection::<Document>(COUNTERS_COLLECTION)
+        .delete_one(doc! { "_id": LOCK_ID })
+        .await?;
+    Ok(())
+}
+
 /// Stored tracks sharing any detection with `members`, which is the candidate
 /// set `identify` then applies its threshold to.
 async fn overlapping(
