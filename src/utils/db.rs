@@ -496,7 +496,6 @@ fn pick_cuts(bounds: &[Bson], parts: usize) -> Vec<Bson> {
         .collect()
 }
 
-/// Contiguous filters covering everything, one more than there are cuts.
 pub fn shard_filters(field: &str, cuts: &[Bson]) -> Vec<Document> {
     if cuts.is_empty() {
         return vec![Document::new()];

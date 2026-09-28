@@ -17,8 +17,9 @@ use futures::{future, StreamExt, TryStreamExt};
 use indicatif::ProgressBar;
 use mongodb::{
     bson::{doc, to_bson, Bson, Document},
+    error::Error,
     options::{ReturnDocument, UpdateOneModel, WriteModel},
-    Collection, Database,
+    Client, Collection, Database,
 };
 use tracing::{error, info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
@@ -104,7 +105,7 @@ struct ShardStats {
 async fn probe_catalogs(
     collection: &Collection<Document>,
     config: &HostGalaxyConfig,
-) -> Result<(), mongodb::error::Error> {
+) -> Result<(), Error> {
     let present = vec![
         doc! { format!("cross_matches.{}.Diam", config.ned_catalog): { "$exists": true } },
         doc! { format!("cross_matches.{}", config.ls_dr10_catalog): { "$exists": true } },
@@ -132,7 +133,7 @@ async fn unfinished_reprocesses(
     db: &Database,
     aux_name: &str,
     catalogs: &[&str],
-) -> Result<Vec<String>, mongodb::error::Error> {
+) -> Result<Vec<String>, Error> {
     let states = db.collection::<Document>(CROSSMATCH_STATE_COLLECTION);
     let mut unfinished = Vec::new();
     for catalog in catalogs {
@@ -149,18 +150,15 @@ async fn unfinished_reprocesses(
     Ok(unfinished)
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn start_or_resume(
     aux_collection: &Collection<Document>,
     states: &Collection<RunState>,
     state_id: &str,
     estimated: u64,
-    skip_existing: bool,
-    restart: bool,
-    dry_run: bool,
+    args: &Cli,
     label: &str,
-) -> Result<RunState, mongodb::error::Error> {
-    if !restart && !dry_run {
+) -> Result<RunState, Error> {
+    if !args.restart && !args.dry_run {
         if let Some(run) = states.find_one(doc! { "_id": state_id }).await? {
             if run.status == STATUS_RUNNING {
                 info!(
@@ -170,7 +168,7 @@ async fn start_or_resume(
                     run.done.len(),
                     run.cuts.len() + 1
                 );
-                if run.skip_existing != skip_existing {
+                if run.skip_existing != args.skip_existing {
                     warn!(
                         "[{}] keeping --skip-existing = {} from the interrupted run",
                         label, run.skip_existing
@@ -185,7 +183,7 @@ async fn start_or_resume(
     let field = shard_field(aux_collection).await;
     let cuts = index_cuts(aux_collection, parts, field, estimated).await?;
     if parts > 1 && cuts.is_empty() {
-        return Err(mongodb::error::Error::custom(format!(
+        return Err(Error::custom(format!(
             "could not cut shards on the '{}' index",
             field
         )));
@@ -195,7 +193,7 @@ async fn start_or_resume(
         id: state_id.to_string(),
         status: STATUS_RUNNING.to_string(),
         run_start_jd: now,
-        skip_existing,
+        skip_existing: args.skip_existing,
         shard_field: field.to_string(),
         cuts,
         done: Vec::new(),
@@ -204,7 +202,7 @@ async fn start_or_resume(
         unreadable: 0,
         updated_at: now,
     };
-    if !dry_run {
+    if !args.dry_run {
         states
             .replace_one(doc! { "_id": state_id }, &run)
             .upsert(true)
@@ -233,13 +231,12 @@ fn galaxy_matches(
     cross_matches: Option<Bson>,
     catalogs: &[&str],
 ) -> Option<HashMap<String, Vec<Document>>> {
+    let mut cross_matches = match cross_matches {
+        None => return Some(HashMap::new()),
+        Some(Bson::Document(cross_matches)) => cross_matches,
+        Some(_) => return None,
+    };
     let mut matches = HashMap::new();
-    let Some(cross_matches) = cross_matches else {
-        return Some(matches);
-    };
-    let Bson::Document(mut cross_matches) = cross_matches else {
-        return None;
-    };
     for catalog in catalogs {
         let Some(rows) = cross_matches.remove(*catalog) else {
             continue;
@@ -259,11 +256,7 @@ fn galaxy_matches(
     Some(matches)
 }
 
-async fn flush(
-    client: &mongodb::Client,
-    batch: &mut Vec<WriteModel>,
-    dry_run: bool,
-) -> Result<u64, mongodb::error::Error> {
+async fn flush(client: &Client, batch: &mut Vec<WriteModel>, dry_run: bool) -> Result<u64, Error> {
     let batch = std::mem::take(batch);
     let count = batch.len() as u64;
     if count > 0 && !dry_run {
@@ -284,7 +277,7 @@ async fn backfill_shard(
     batch_size: usize,
     dry_run: bool,
     pb: ProgressBar,
-) -> Result<ShardStats, mongodb::error::Error> {
+) -> Result<ShardStats, Error> {
     let client = aux_collection.client().clone();
     let namespace = aux_collection.namespace();
     let catalogs = [config.ned_catalog.as_str(), config.ls_dr10_catalog.as_str()];
@@ -299,7 +292,7 @@ async fn backfill_shard(
         .no_cursor_timeout(true)
         .await?;
 
-    let mut batch: Vec<WriteModel> = Vec::with_capacity(batch_size);
+    let mut batch = Vec::with_capacity(batch_size);
     let mut stats = ShardStats::default();
     while let Some(mut record) = cursor.try_next().await? {
         stats.scanned += 1;
@@ -358,7 +351,7 @@ async fn backfill_shard(
             )
             .await?;
         if recorded.matched_count == 0 {
-            return Err(mongodb::error::Error::custom(
+            return Err(Error::custom(
                 "the run state was replaced by another run".to_string(),
             ));
         }
@@ -441,9 +434,7 @@ async fn main() {
         &states,
         &aux_name,
         estimated,
-        args.skip_existing,
-        args.restart,
-        args.dry_run,
+        &args,
         &label,
     )
     .await
