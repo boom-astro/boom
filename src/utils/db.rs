@@ -439,8 +439,9 @@ pub async fn range_shards(
 
 /// Contiguous filters covering everything; expects `parts >= 2` and `bounds.len() >= parts`.
 fn shard_filters(field: &str, bounds: &[Bson], parts: usize) -> Vec<Document> {
-    let step = bounds.len() / parts;
-    let cuts: Vec<&Bson> = (1..parts).map(|i| &bounds[i * step]).collect();
+    let cuts: Vec<&Bson> = (1..parts)
+        .map(|i| &bounds[i * bounds.len() / parts])
+        .collect();
 
     let mut shards = Vec::with_capacity(parts);
     shards.push(doc! { "$or": [
@@ -626,6 +627,15 @@ mod tests {
         assert_eq!(shards.len(), 3);
         assert_eq!(upper(&shards[0], "_id"), Some(Bson::Int32(20)));
         assert_eq!(lower(&shards[2], "_id"), Some(Bson::Int32(30)));
+    }
+
+    #[test]
+    fn shard_filters_spreads_a_remainder_over_every_shard() {
+        let shards = shard_filters("_id", &bounds(&(0..10_000).collect::<Vec<_>>()), 1024);
+        let edge = |bound: Option<Bson>, open: i32| bound.map_or(open, |b| b.as_i32().unwrap());
+        assert!(shards
+            .iter()
+            .all(|shard| edge(upper(shard, "_id"), 10_000) - edge(lower(shard, "_id"), 0) <= 10));
     }
 
     #[test]
