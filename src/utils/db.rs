@@ -158,6 +158,13 @@ pub async fn initialize_survey_indexes(
             Some(doc! { "candidate.ssnamenr": { "$exists": true } }),
         )
         .await?;
+
+        let tracks_collection: Collection<Document> =
+            db.collection(crate::utils::tracks::TRACKS_COLLECTION);
+        create_index(&tracks_collection, doc! { "members": 1 }, false).await?;
+        let aliases_collection: Collection<Document> =
+            db.collection(crate::utils::tracks::ALIASES_COLLECTION);
+        create_index(&aliases_collection, doc! { "superseded_by": 1 }, false).await?;
     }
 
     // if survey is LSST, create an index on the ssObjectId field of the alerts collection,

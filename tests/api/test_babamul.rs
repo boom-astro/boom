@@ -20,6 +20,7 @@ mod tests {
         drop_alert_from_collections, lsst_alert_worker, ztf_alert_worker, AlertRandomizer,
         TEST_CONFIG_FILE,
     };
+    use boom::utils::tracks::{commit_upsert, plan_upsert, TRACKS_COLLECTION};
     use mongodb::bson::doc;
     use mongodb::Database;
     use std::collections::HashMap;
@@ -4893,5 +4894,92 @@ mod tests {
                 .await
                 .unwrap();
         }
+    }
+
+    #[actix_rt::test]
+    async fn test_get_track_keeps_only_public_detections() {
+        load_dotenv();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+        let test_user = TestUser::create(&database, &auth_app_data).await;
+
+        let base = (uuid::Uuid::new_v4().as_u128() as i64).abs() / 16;
+        let mixed = [base, base + 1, base + 2, base + 3];
+        let private = [base + 4, base + 5];
+        let alerts = database.collection::<mongodb::bson::Document>("ZTF_alerts");
+        for (candid, programid) in mixed
+            .iter()
+            .zip([1, 1, 2, 2])
+            .chain(private.iter().zip([2, 2]))
+        {
+            alerts
+                .insert_one(doc! { "_id": candid, "candidate": { "programid": programid } })
+                .await
+                .unwrap();
+        }
+        let mut ids = Vec::new();
+        for members in [&mixed[..], &private[..]] {
+            let jds: Vec<f64> = (0..members.len()).map(|k| 2460000.0 + k as f64).collect();
+            let plan = plan_upsert(&database, members, &jds, None, None)
+                .await
+                .unwrap();
+            ids.push(commit_upsert(&database, plan).await.unwrap().track.id);
+        }
+
+        let app = test::init_service(
+            App::new().service(
+                actix_web::web::scope("/babamul")
+                    .app_data(web::Data::new(database.clone()))
+                    .app_data(web::Data::new(auth_app_data.clone()))
+                    .wrap(from_fn(babamul_auth_middleware))
+                    .service(routes::babamul::surveys::get_track),
+            ),
+        )
+        .await;
+
+        let req = test::TestRequest::get()
+            .uri(&format!("/babamul/surveys/ztf/tracks/{}", ids[0]))
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "Should retrieve the mixed track: {}",
+            read_str_response(resp).await
+        );
+        let body = read_json_response(resp).await;
+        let members: Vec<i64> = body["data"]["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m.as_i64().unwrap())
+            .collect();
+        assert_eq!(members, vec![mixed[0], mixed[1]]);
+        assert_eq!(body["data"]["n_detections"].as_i64().unwrap(), 2);
+        assert_eq!(body["data"]["n_nights"].as_i64().unwrap(), 2);
+        assert_eq!(body["data"]["last_jd"].as_f64().unwrap(), 2460001.0);
+
+        let req = test::TestRequest::get()
+            .uri(&format!("/babamul/surveys/ztf/tracks/{}", ids[1]))
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "A track with no public detection should not be served"
+        );
+
+        let all: Vec<i64> = mixed.iter().chain(private.iter()).copied().collect();
+        alerts
+            .delete_many(doc! { "_id": { "$in": &all } })
+            .await
+            .unwrap();
+        database
+            .collection::<mongodb::bson::Document>(TRACKS_COLLECTION)
+            .delete_many(doc! { "_id": { "$in": &ids } })
+            .await
+            .unwrap();
     }
 }

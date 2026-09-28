@@ -68,6 +68,7 @@ RUN --mount=type=cache,target=/app/target,sharing=locked \
        target/release/mpcorb_ingest \
        target/release/backfill_hpx \
        target/release/backfill_host_galaxy \
+       target/release/find_tracklets \
        /app/bin/
 
 FROM builder AS dev
