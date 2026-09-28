@@ -885,7 +885,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                 .remove(&candid)
                 .ok_or_else(|| EnrichmentWorkerError::MissingCutouts(candid))?;
             #[cfg_attr(not(feature = "gpu"), allow(unused_variables))]
-            let (properties, all_bands_properties, programid, lightcurve) = match self
+            let (properties, _all_bands_properties, programid, lightcurve) = match self
                 .get_alert_properties(&alert, &orbits, &sso_history, &baselines)
                 .await
             {
