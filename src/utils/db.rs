@@ -96,6 +96,19 @@ pub async fn count_alerts_for_night(
     programids: Option<&[i32]>,
 ) -> Result<u64, mongodb::error::Error> {
     let (start_jd, end_jd) = survey.night_jd_window(date);
+    count_alerts_in_jd_window(db, survey, start_jd, end_jd, programids).await
+}
+
+/// Count the alerts of a survey with `candidate.jd` in `[start_jd, end_jd)`,
+/// with the same `programids` semantics as [`count_alerts_for_night`].
+#[instrument(skip(db), err)]
+pub async fn count_alerts_in_jd_window(
+    db: &Database,
+    survey: &Survey,
+    start_jd: f64,
+    end_jd: f64,
+    programids: Option<&[i32]>,
+) -> Result<u64, mongodb::error::Error> {
     let mut filter = doc! {
         "candidate.jd": { "$gte": start_jd, "$lt": end_jd },
     };
