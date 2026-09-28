@@ -43,31 +43,44 @@ fn test_sanitize_winter_avro_is_readable() {
     }
 }
 
-#[test]
-fn test_winter_candidate_missing_field_deserializes() {
-    // WINTER omits the candidate `field` entirely. It must deserialize with
-    // `field` defaulting rather than failing with "missing field `field`".
-    use apache_avro::types::Value;
-    let raw = std::fs::read("tests/data/alerts/winter/alert.avro").unwrap();
+fn read_winter_alert(path: &str) -> WinterRawAvroAlert {
+    let raw = std::fs::read(path).unwrap();
     let fixed = sanitize_winter_avro(&raw).unwrap();
     let reader = apache_avro::Reader::new(&fixed[..]).unwrap();
     let value = reader.into_iter().next().unwrap().unwrap();
+    apache_avro::from_value(&value).unwrap()
+}
 
-    let Value::Record(top) = &value else {
-        panic!("alert is not a record");
-    };
-    let Some(Value::Record(candidate)) = top.iter().find(|(k, _)| k == "candidate").map(|(_, v)| v)
-    else {
-        panic!("candidate is not a record");
-    };
-    assert!(
-        !candidate.iter().any(|(k, _)| k == "field"),
-        "packet is expected to omit `field`"
-    );
+#[test]
+fn test_winter_candidate_reads_schema_v0_4_fields() {
+    // v0.4 renamed `field` to `fieldid` and types some PS1-STRM fields as float, string or null.
+    let alert = read_winter_alert("tests/data/alerts/winter/alert.avro");
+    let candidate = &alert.candidate;
+    assert_eq!(candidate.field, 16409);
+    assert_eq!(candidate.boardid, 1);
+    assert!((candidate.xrb.unwrap() - 0.3775).abs() < 1e-4);
+    assert_eq!(candidate.xrbversion.as_deref(), Some("v2.0.0"));
+    assert!((candidate.ps1strmprobstar1.unwrap() - 0.8676).abs() < 1e-4);
+    assert_eq!(candidate.ps1strmclass2.as_deref(), Some("STAR"));
+    assert!((candidate.distgaia.unwrap() - 0.7474).abs() < 1e-4);
+    assert!((candidate.distgaiabright.unwrap() - 69.81).abs() < 1e-2);
+    assert_eq!(candidate.ztfname, None, "\"nan\" is not a ZTF name");
+    assert_eq!(candidate.neargaiabright, None);
 
-    let alert: WinterRawAvroAlert =
-        apache_avro::from_value(&value).expect("candidate without `field` should parse");
-    assert_eq!(alert.candidate.field, 0, "absent `field` defaults to 0");
+    let prv_candidates = alert.prv_candidates.unwrap();
+    assert!((prv_candidates[0].diffmaglim.unwrap() - 18.0535).abs() < 1e-4);
+}
+
+#[test]
+fn test_winter_candidate_reads_schema_v0_1_fields() {
+    let alert = read_winter_alert("tests/data/alerts/winter/alert_schemavsn_0.1.avro");
+    let candidate = &alert.candidate;
+    assert_eq!(candidate.field, 18156);
+    assert_eq!(candidate.boardid, 0);
+    assert_eq!(candidate.xrb, None);
+    assert_eq!(candidate.ps1strmclass2, None);
+    assert_eq!(candidate.distgaiabright, None);
+    assert_eq!(alert.prv_candidates.unwrap()[0].diffmaglim, None);
 }
 
 #[tokio::test]
@@ -202,11 +215,7 @@ fn test_real_alert_band_is_j() {
     // A genuine WINTER-mirar packet whose fid is 2. Kowalski reads the same
     // packets as 2massj and WINTER confirm the data is J, so this pins the whole
     // chain to a real alert.
-    let raw = std::fs::read("tests/data/alerts/winter/alert.avro").unwrap();
-    let fixed = sanitize_winter_avro(&raw).unwrap();
-    let reader = apache_avro::Reader::new(&fixed[..]).unwrap();
-    let value = reader.into_iter().next().unwrap().unwrap();
-    let alert: WinterRawAvroAlert = apache_avro::from_value(&value).unwrap();
+    let alert = read_winter_alert("tests/data/alerts/winter/alert.avro");
     assert_eq!(alert.candidate.fid, 2);
     assert_eq!(fid_to_band(alert.candidate.fid).unwrap(), Band::J);
 }
