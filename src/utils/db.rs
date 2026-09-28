@@ -434,16 +434,74 @@ pub async fn range_shards(
         );
         return vec![Document::new()];
     }
-    shard_filters(field, &bounds, parts)
+    shard_filters(field, &pick_cuts(&bounds, parts))
 }
 
-/// Contiguous filters covering everything; expects `parts >= 2` and `bounds.len() >= parts`.
-fn shard_filters(field: &str, bounds: &[Bson], parts: usize) -> Vec<Document> {
-    let cuts: Vec<&Bson> = (1..parts)
-        .map(|i| &bounds[i * bounds.len() / parts])
-        .collect();
+/// `$sample` is far from uniform on large collections: on ZTF it oversamples recent records ~100x.
+pub async fn index_cuts(
+    collection: &Collection<Document>,
+    parts: usize,
+    field: &str,
+    total: u64,
+) -> Result<Vec<Bson>, mongodb::error::Error> {
+    if parts <= 1 {
+        return Ok(Vec::new());
+    }
+    let index_keys = collection
+        .list_indexes()
+        .await?
+        .try_collect::<Vec<_>>()
+        .await?
+        .into_iter()
+        .map(|index| index.keys)
+        .find(|keys| keys.keys().next().is_some_and(|key| key == field))
+        .unwrap_or_else(|| doc! { field: 1 });
+    let mut projection = doc! { field: 1 };
+    if field != "_id" {
+        projection.insert("_id", 0);
+    }
+    info!("walking the '{}' index to cut {} shards", field, parts);
+    let mut cursor = collection
+        .find(doc! {})
+        .projection(projection)
+        .sort(doc! { field: 1 })
+        .hint(Hint::Keys(index_keys))
+        .batch_size(CURSOR_BATCH_SIZE)
+        .await?;
+    let step = (total / parts as u64).max(1);
+    let mut cuts = Vec::with_capacity(parts - 1);
+    let mut position = 0u64;
+    while let Some(record) = cursor.try_next().await? {
+        let Some(value) = record
+            .get(field)
+            .filter(|value| !matches!(value, Bson::Null))
+        else {
+            continue;
+        };
+        position += 1;
+        if position.is_multiple_of(step) {
+            cuts.push(value.clone());
+            if cuts.len() == parts - 1 {
+                break;
+            }
+        }
+    }
+    Ok(cuts)
+}
 
-    let mut shards = Vec::with_capacity(parts);
+/// Expects `parts >= 2` and `bounds.len() >= parts`.
+fn pick_cuts(bounds: &[Bson], parts: usize) -> Vec<Bson> {
+    (1..parts)
+        .map(|i| bounds[i * bounds.len() / parts].clone())
+        .collect()
+}
+
+/// Contiguous filters covering everything, one more than there are cuts.
+pub fn shard_filters(field: &str, cuts: &[Bson]) -> Vec<Document> {
+    if cuts.is_empty() {
+        return vec![Document::new()];
+    }
+    let mut shards = Vec::with_capacity(cuts.len() + 1);
     shards.push(doc! { "$or": [
         doc! { field: { "$lt": cuts[0].clone() } },
         doc! { field: { "$exists": false } },
@@ -578,7 +636,7 @@ mod tests {
         let b = bounds(&(0..100).collect::<Vec<_>>());
         for parts in 2..10 {
             assert_eq!(
-                shard_filters("_id", &b, parts).len(),
+                shard_filters("_id", &pick_cuts(&b, parts)).len(),
                 parts,
                 "parts={}",
                 parts
@@ -590,7 +648,7 @@ mod tests {
     fn shard_filters_covers_every_value_without_a_gap() {
         let b = bounds(&(0..100).collect::<Vec<_>>());
         for parts in 2..10 {
-            let shards = shard_filters("_id", &b, parts);
+            let shards = shard_filters("_id", &pick_cuts(&b, parts));
             assert!(
                 lower(&shards[0], "_id").is_none(),
                 "the first shard is open-ended"
@@ -612,7 +670,7 @@ mod tests {
 
     #[test]
     fn shard_filters_first_shard_also_takes_documents_without_the_field() {
-        let shards = shard_filters("created_at", &bounds(&[1, 2, 3, 4]), 2);
+        let shards = shard_filters("created_at", &pick_cuts(&bounds(&[1, 2, 3, 4]), 2));
         let branches = shards[0].get_array("$or").expect("first shard is an $or");
         assert_eq!(branches.len(), 2);
         assert_eq!(
@@ -623,7 +681,7 @@ mod tests {
 
     #[test]
     fn shard_filters_handles_a_sample_as_small_as_the_part_count() {
-        let shards = shard_filters("_id", &bounds(&[10, 20, 30]), 3);
+        let shards = shard_filters("_id", &pick_cuts(&bounds(&[10, 20, 30]), 3));
         assert_eq!(shards.len(), 3);
         assert_eq!(upper(&shards[0], "_id"), Some(Bson::Int32(20)));
         assert_eq!(lower(&shards[2], "_id"), Some(Bson::Int32(30)));
@@ -631,7 +689,10 @@ mod tests {
 
     #[test]
     fn shard_filters_spreads_a_remainder_over_every_shard() {
-        let shards = shard_filters("_id", &bounds(&(0..10_000).collect::<Vec<_>>()), 1024);
+        let shards = shard_filters(
+            "_id",
+            &pick_cuts(&bounds(&(0..10_000).collect::<Vec<_>>()), 1024),
+        );
         let edge = |bound: Option<Bson>, open: i32| bound.map_or(open, |b| b.as_i32().unwrap());
         assert!(shards
             .iter()
@@ -639,8 +700,13 @@ mod tests {
     }
 
     #[test]
+    fn shard_filters_without_cuts_is_one_unfiltered_shard() {
+        assert_eq!(shard_filters("_id", &[]), vec![Document::new()]);
+    }
+
+    #[test]
     fn shard_filters_keeps_covering_everything_when_cuts_repeat() {
-        let shards = shard_filters("_id", &bounds(&[7, 7, 7, 7]), 4);
+        let shards = shard_filters("_id", &pick_cuts(&bounds(&[7, 7, 7, 7]), 4));
         assert_eq!(shards.len(), 4);
         for pair in shards.windows(2) {
             assert_eq!(upper(&pair[0], "_id"), lower(&pair[1], "_id"));
