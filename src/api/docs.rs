@@ -71,6 +71,7 @@ impl Modify for BabamulSecurityAddon {
         routes::filters::post_filter_test,
         routes::filters::post_filter_test_count,
         routes::filters::get_filter_schema,
+        routes::filters::get_filter_alert_schema,
         routes::queries::count::post_count_query,
         routes::queries::count::post_estimated_count_query,
         routes::queries::find::post_find_query,
@@ -78,6 +79,10 @@ impl Modify for BabamulSecurityAddon {
         routes::surveys::cutouts::get_cutouts,
         routes::queries::pipeline::post_pipeline_query
     ),
+    components(schemas(
+        routes::filters::FilterSchemaResponse,
+        crate::utils::enrichment_schema::EnrichmentField
+    )),
     security(
         ("api_jwt_token" = [])
     ),

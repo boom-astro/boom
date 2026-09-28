@@ -489,15 +489,31 @@ mod tests {
         let database: Database = get_test_db_api().await;
         let token = create_admin_token(&database).await;
         let auth_app_data = get_test_auth(&database).await.unwrap();
+        let config = AppConfig::from_test_config().unwrap();
 
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(database.clone()))
                 .app_data(web::Data::new(auth_app_data.clone()))
+                .app_data(web::Data::new(config))
                 .wrap(from_fn(auth_middleware))
-                .service(routes::filters::get_filter_schema),
+                .service(routes::filters::get_filter_schema)
+                .service(routes::filters::get_filter_alert_schema),
         )
         .await;
+
+        // Both paths serve one implementation, so they must not diverge.
+        let mut both = Vec::new();
+        for uri in ["/filters/schemas/ZTF", "/filters/alert-schemas/ZTF"] {
+            let req = test::TestRequest::get()
+                .uri(uri)
+                .insert_header(("Authorization", format!("Bearer {}", token)))
+                .to_request();
+            let resp = test::call_service(&app, req).await;
+            assert_eq!(resp.status(), StatusCode::OK, "{uri} did not answer");
+            both.push(read_json_response(resp).await);
+        }
+        assert_eq!(both[0], both[1], "the alias and the old path diverged");
 
         // ZTF schema test
         let req = test::TestRequest::get()
@@ -515,12 +531,15 @@ mod tests {
 
         // let's just check we have a data field with type and fields keys
         let data = resp["data"].as_object().unwrap();
-        assert!(data.contains_key("type"));
-        assert!(data.contains_key("name"));
-        assert!(data.contains_key("fields"));
-        assert!(data["type"] == "record");
-        assert!(data["name"] == "ZtfAlertToFilter");
-        assert!(data["fields"].is_array());
+        let schema = data["schema"].as_object().unwrap();
+        assert!(schema.contains_key("type"));
+        assert!(schema.contains_key("name"));
+        assert!(schema.contains_key("fields"));
+        assert!(schema["type"] == "record");
+        assert!(schema["name"] == "ZtfAlertToFilter");
+        assert!(schema["fields"].is_array());
+        // The config-dependent half, which no static schema can carry.
+        assert!(data["enrichment"].is_array());
 
         // LSST schema test
         let req = test::TestRequest::get()
@@ -536,12 +555,15 @@ mod tests {
         );
         let resp = read_json_response(resp).await;
         let data = resp["data"].as_object().unwrap();
-        assert!(data.contains_key("type"));
-        assert!(data.contains_key("name"));
-        assert!(data.contains_key("fields"));
-        assert!(data["type"] == "record");
-        assert!(data["name"] == "LsstAlertToFilter");
-        assert!(data["fields"].is_array());
+        let schema = data["schema"].as_object().unwrap();
+        assert!(schema.contains_key("type"));
+        assert!(schema.contains_key("name"));
+        assert!(schema.contains_key("fields"));
+        assert!(schema["type"] == "record");
+        assert!(schema["name"] == "LsstAlertToFilter");
+        assert!(schema["fields"].is_array());
+        // The config-dependent half, which no static schema can carry.
+        assert!(data["enrichment"].is_array());
 
         // Invalid survey test (should return NOT_FOUND)
         let req = test::TestRequest::get()
