@@ -769,6 +769,12 @@ pub async fn cone_search_objects(
     let mut results: HashMap<String, Vec<SearchObjectResult>> = HashMap::new();
 
     let survey = path.into_inner();
+    if survey != Survey::Ztf && survey != Survey::Lsst {
+        return response::bad_request(&format!(
+            "Unsupported survey: {}. Supported surveys are: ztf, lsst",
+            survey
+        ));
+    }
     let collection = db.collection::<ObjectMini>(&format!("{}_alerts_aux", survey));
     for (object_name, radec) in coordinates {
         if radec.len() != 2 {

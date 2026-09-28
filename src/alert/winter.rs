@@ -800,3 +800,129 @@ impl AlertWorker for WinterAlertWorker {
         Ok(status)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::utils::testing::{
+        assert_update_aux_branches_and_fallback, drop_alert_from_collections, winter_alert_worker,
+        AlertRandomizer, AuxBranchSnapshot, AuxUpdateBranchTestAdapter,
+    };
+
+    async fn load_aux(worker: &WinterAlertWorker, object_id: &str) -> AlertAuxForUpdate {
+        worker.get_existing_aux(object_id).await.unwrap().unwrap()
+    }
+
+    async fn set_prv_candidates(worker: &WinterAlertWorker, object_id: &str, jds: &[f64]) {
+        let prv_candidates: Vec<Document> = jds.iter().map(|jd| doc! { "jd": jd }).collect();
+        worker
+            .alert_aux_collection
+            .update_one(
+                doc! { "_id": object_id },
+                doc! { "$set": { "prv_candidates": prv_candidates } },
+            )
+            .await
+            .unwrap();
+    }
+
+    struct WinterAuxBranchAdapter {
+        template: WinterPrvCandidate,
+    }
+
+    #[async_trait::async_trait]
+    impl AuxUpdateBranchTestAdapter for WinterAuxBranchAdapter {
+        type Worker = WinterAlertWorker;
+        type ExistingAux = AlertAuxForUpdate;
+        type SurveyMatches = Option<WinterAliases>;
+        type Updates = Vec<WinterPrvCandidate>;
+
+        async fn load_existing(&self, worker: &Self::Worker, object_id: &str) -> Self::ExistingAux {
+            load_aux(worker, object_id).await
+        }
+
+        fn snapshot(&self, existing_aux: &Self::ExistingAux) -> AuxBranchSnapshot {
+            AuxBranchSnapshot {
+                series: vec![existing_aux.prv_candidates.clone()],
+                version: existing_aux.version,
+            }
+        }
+
+        fn survey_matches(&self) -> Self::SurveyMatches {
+            Some(WinterAliases {
+                ztf: vec![],
+                lsst: vec![],
+            })
+        }
+
+        fn empty_updates(&self) -> Self::Updates {
+            vec![]
+        }
+
+        fn updates_at_jds(&mut self, jds: &[f64]) -> Self::Updates {
+            assert_eq!(jds.len(), 1);
+            let mut point = self.template.clone();
+            point.jd = jds[0];
+            vec![point]
+        }
+
+        async fn inject_corrupted_existing(&self, worker: &Self::Worker, object_id: &str) {
+            set_prv_candidates(worker, object_id, &[2.0, 1.0, 1.0]).await;
+        }
+
+        fn expected_repaired_jds(&self) -> Vec<Vec<f64>> {
+            vec![vec![1.0, 2.0]]
+        }
+
+        async fn inject_non_finite_existing(&self, worker: &Self::Worker, object_id: &str) {
+            set_prv_candidates(worker, object_id, &[f64::NAN, 1.0]).await;
+        }
+
+        fn expected_non_finite_repaired_jds(&self) -> Vec<Vec<f64>> {
+            vec![vec![1.0]]
+        }
+
+        async fn apply_update(
+            &self,
+            worker: &mut Self::Worker,
+            object_id: &str,
+            updates: Self::Updates,
+            survey_matches: &Self::SurveyMatches,
+            existing_aux: &Self::ExistingAux,
+        ) {
+            worker
+                .update_aux(
+                    object_id,
+                    &updates,
+                    survey_matches,
+                    Time::now().to_jd(),
+                    existing_aux,
+                )
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_update_aux_branches_and_fallback() {
+        let mut worker = winter_alert_worker().await;
+
+        let (candid, object_id, _ra, _dec, bytes_content) =
+            AlertRandomizer::new_randomized(Survey::Winter).get().await;
+        let status = worker.process_alert(&bytes_content).await.unwrap();
+        assert_eq!(status, ProcessAlertStatus::Added(candid));
+
+        let parsed_alert: WinterRawAvroAlert = worker
+            .schema_cache
+            .alert_from_avro_bytes(&sanitize_winter_avro(&bytes_content).unwrap())
+            .unwrap();
+        let mut adapter = WinterAuxBranchAdapter {
+            template: WinterPrvCandidate::from_candidate(&parsed_alert.candidate),
+        };
+
+        assert_update_aux_branches_and_fallback(&mut worker, &object_id, &mut adapter).await;
+
+        drop_alert_from_collections(candid, &Survey::Winter)
+            .await
+            .unwrap();
+    }
+}

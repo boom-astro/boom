@@ -8,6 +8,7 @@ use crate::utils::lightcurves::{
     analyze_photometry, prepare_photometry, summarise_detections, Band, DetectionHistory,
     EpisodeHistory, PerBandProperties, PhotometryMag, EPISODE_GAP_DAYS,
 };
+use apache_avro_derive::AvroSchema;
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use tracing::{instrument, warn};
@@ -103,7 +104,7 @@ pub struct WinterAlertForEnrichment {
 
 /// WINTER alert properties computed during enrichment and inserted back into the
 /// alert document.
-#[derive(Debug, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, serde::Deserialize, serde::Serialize, AvroSchema)]
 pub struct WinterAlertProperties {
     pub stationary: bool,
     /// Absent means never evaluated for a host, not evaluated and hostless.
