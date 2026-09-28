@@ -11,8 +11,8 @@ use boom::{
         enums::Survey,
         parser::parse_positive_usize,
         spatial::{
-            cm_radius_arcsec, distance_kpc_from_arcsec, get_f64_from_doc, watchlist_match_field,
-            xmatch, Coordinates,
+            distance_kpc_from_arcsec, get_f64_from_doc, row_match_radius_arcsec, row_redshift,
+            watchlist_match_field, xmatch, Coordinates, COINCIDENT_ARCSEC, NO_PROJECTED_DISTANCE,
         },
     },
 };
@@ -34,6 +34,7 @@ const STATE_COLLECTION: &str = "reprocess_crossmatch_state";
 const STATUS_MATCHING: &str = "matching";
 const STATUS_CLEAN: &str = "clean";
 const TEMP_PROBE_SAMPLE: i64 = 10_000;
+const SHARDS_PER_PROCESS: usize = 8;
 
 /// Catalog-driven costs extra full passes over alerts_aux, so it only wins when the
 /// catalog is substantially smaller, not merely smaller.
@@ -70,7 +71,7 @@ struct Cli {
     #[arg(long, default_value_t = 5000, value_parser = parse_positive_usize)]
     batch_size: usize,
 
-    /// Number of parallel worker tasks, and of shards the cleanup passes are split into.
+    /// Number of parallel worker tasks, and of cleanup shards run at once.
     #[arg(long, default_value_t = 1, value_parser = parse_positive_usize)]
     processes: usize,
 
@@ -183,13 +184,14 @@ async fn temp_needs_reset(
 async fn sharded_update_many(
     collection: &mongodb::Collection<Document>,
     shards: &[Document],
+    processes: usize,
     base_filter: &Document,
     update: UpdateModifications,
     label: &str,
 ) -> Result<u64, mongodb::error::Error> {
     let done = Arc::new(AtomicUsize::new(0));
     let total = shards.len();
-    let results = futures::future::join_all(shards.iter().enumerate().map(|(index, shard)| {
+    let results: Vec<_> = futures::stream::iter(shards.iter().enumerate().map(|(index, shard)| {
         let filter = merge_filters(base_filter, shard);
         let collection = collection.clone();
         let update = update.clone();
@@ -218,6 +220,8 @@ async fn sharded_update_many(
             result
         }
     }))
+    .buffer_unordered(processes)
+    .collect()
     .await;
 
     let mut modified = 0;
@@ -554,12 +558,19 @@ async fn run_catalog_driven(
 ) -> Result<(), TaskError> {
     let aux_collection: mongodb::Collection<Document> =
         db.collection(&format!("{}_alerts_aux", survey));
-    let cat_collection: mongodb::Collection<Document> = db.collection(&catalog_config.catalog);
+    let cat_collection: mongodb::Collection<Document> =
+        db.collection(catalog_config.collection_name());
     let live_field = format!("cross_matches.{}", catalog_config.catalog);
     let temp_field = format!("cross_matches.{}_temp", catalog_config.catalog);
     let run_start_jd = Time::now().to_jd();
     let shard_field = shard_field(&aux_collection).await;
-    let shards = range_shards(&aux_collection, processes, shard_field, &Document::new()).await;
+    let shards = range_shards(
+        &aux_collection,
+        processes * SHARDS_PER_PROCESS,
+        shard_field,
+        &Document::new(),
+    )
+    .await;
     info!(
         "[catalog\u{2192}{}] cleanup passes sharded on '{}' into {} ranges",
         catalog_config.catalog,
@@ -579,6 +590,7 @@ async fn run_catalog_driven(
         let cleared = sharded_update_many(
             &aux_collection,
             &shards,
+            processes,
             &doc! { &temp_field: { "$exists": true } },
             UpdateModifications::Document(doc! { "$unset": { &temp_field: "" } }),
             &format!("catalog→{} phase 1", catalog_config.catalog),
@@ -673,6 +685,7 @@ async fn run_catalog_driven(
     sharded_update_many(
         &aux_collection,
         &shards,
+        processes,
         &commit_filter,
         UpdateModifications::Pipeline(make_commit_pipeline(
             &catalog_config,
@@ -795,28 +808,10 @@ async fn process_cat_doc(
         None => return Ok(Vec::new()),
     };
 
-    // A `use_distance` row's effective radius depends only on its own redshift, so query
-    // that instead of the configured maximum and discarding most of what comes back.
-    let mut search_radius = catalog_config.radius;
-    let use_distance_data: Option<(f64, f64)> = if catalog_config.use_distance {
-        let dk = catalog_config
-            .distance_key
-            .as_ref()
-            .expect("validated in config");
-        let z = match get_f64_from_doc(cat_doc, dk) {
-            Some(v) => v,
-            None => return Ok(Vec::new()),
-        };
-        let dmax = catalog_config.distance_max.expect("validated in config");
-        let dmax_near = catalog_config
-            .distance_max_near
-            .expect("validated in config");
-        let cm_radius = cm_radius_arcsec(z, dmax, dmax_near);
-        search_radius = search_radius.min(cm_radius * ARCSEC_TO_RAD);
-        Some((z, cm_radius))
-    } else {
-        None
-    };
+    // A row's effective radius depends only on the row itself, so query that
+    // instead of the configured maximum and discarding most of what comes back.
+    let search_radius = row_match_radius_arcsec(catalog_config, cat_doc) * ARCSEC_TO_RAD;
+    let row_z = row_redshift(catalog_config, cat_doc);
     if search_radius <= 0.0 {
         return Ok(Vec::new());
     }
@@ -851,10 +846,7 @@ async fn process_cat_doc(
         let mut match_doc = cat_doc.clone();
         match_doc.insert("distance_arcsec", distance_arcsec);
 
-        if let Some((z, cm_radius)) = use_distance_data {
-            if distance_arcsec >= cm_radius {
-                continue;
-            }
+        if let Some(z) = row_z {
             match_doc.insert("distance_kpc", distance_kpc_from_arcsec(distance_arcsec, z));
         }
 
@@ -908,22 +900,66 @@ fn extract_radec(doc: &Document) -> Option<(f64, f64)> {
     Some((ra_geojson + 180.0, dec))
 }
 
+fn stellar_expr(catalog_config: &CatalogXmatchConfig) -> Document {
+    let (Some(type_key), false) = (
+        catalog_config.type_key.as_ref(),
+        catalog_config.stellar_types.is_empty(),
+    ) else {
+        return doc! { "$literal": false };
+    };
+    let values: Vec<String> = catalog_config
+        .stellar_types
+        .iter()
+        .map(|s| s.to_lowercase())
+        .collect();
+    let value = doc! { "$convert": {
+        "input": format!("$$this.{type_key}"),
+        "to": "string",
+        "onError": "",
+        "onNull": "",
+    }};
+    doc! { "$in": [{ "$toLower": { "$trim": { "input": value } } }, values] }
+}
+
 /// Mongo-aggregation mirror of the in-Rust sort/trim performed by
 /// `utils::spatial::xmatch` (see that function for the source of truth on
 /// ordering semantics), followed by the swap of the temp buffer into the live
-/// field. `use_distance` and `max_results` are mutually exclusive at config load.
+/// field.
 fn make_commit_pipeline(
     catalog_config: &CatalogXmatchConfig,
     temp_field: &str,
     live_field: &str,
 ) -> Vec<Document> {
-    let sort_by = if catalog_config.use_distance {
-        doc! { "distance_kpc": 1, "distance_arcsec": 1 }
-    } else {
-        doc! { "distance_arcsec": 1 }
-    };
-    let input = doc! { "$ifNull": [format!("${}", temp_field), []] };
-    let sorted = doc! { "$sortArray": { "input": input, "sortBy": sort_by } };
+    let rank = doc! { "$switch": {
+        "branches": [
+            { "case": { "$lt": ["$$a", COINCIDENT_ARCSEC] }, "then": 0 },
+            { "case": stellar_expr(catalog_config), "then": 3 },
+            { "case": { "$eq": ["$$k", NO_PROJECTED_DISTANCE] }, "then": 1 },
+        ],
+        "default": 2,
+    }};
+    let keyed = doc! { "$map": {
+        "input": { "$ifNull": [format!("${}", temp_field), []] },
+        "in": { "$let": {
+            "vars": {
+                "a": { "$ifNull": ["$$this.distance_arcsec", f64::MAX] },
+                "k": { "$ifNull": ["$$this.distance_kpc", f64::MAX] },
+            },
+            "in": { "$let": {
+                "vars": { "r": rank },
+                "in": {
+                    "r": "$$r",
+                    "k": { "$cond": [{ "$eq": ["$$r", 2] }, "$$k", 0.0] },
+                    "a": "$$a",
+                    "doc": "$$this",
+                },
+            }},
+        }},
+    }};
+    let sorted = doc! { "$map": {
+        "input": { "$sortArray": { "input": keyed, "sortBy": { "r": 1, "k": 1, "a": 1 } } },
+        "in": "$$this.doc",
+    }};
     let final_value: Document = if let Some(max) = catalog_config.max_results {
         doc! { "$slice": [sorted, max as i64] }
     } else {
@@ -942,7 +978,8 @@ async fn pick_direction(
 ) -> Direction {
     let aux_collection: mongodb::Collection<Document> =
         db.collection(&format!("{}_alerts_aux", survey));
-    let cat_collection: mongodb::Collection<Document> = db.collection(&catalog_config.catalog);
+    let cat_collection: mongodb::Collection<Document> =
+        db.collection(catalog_config.collection_name());
     let aux_count = aux_collection.estimated_document_count().await.unwrap_or(0);
     let cat_count = cat_collection.estimated_document_count().await.unwrap_or(0);
     info!(
@@ -1133,4 +1170,55 @@ async fn main() {
     }
 
     info!("reprocess_crossmatch complete.");
+}
+
+#[cfg(test)]
+mod commit_pipeline_tests {
+    use super::*;
+
+    fn config(type_key: Option<&str>) -> CatalogXmatchConfig {
+        CatalogXmatchConfig {
+            catalog: "NED".to_string(),
+            max_results: Some(50),
+            type_key: type_key.map(str::to_string),
+            stellar_types: type_key
+                .map(|_| vec!["STAR".to_string()])
+                .unwrap_or_default(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_a_catalog_without_a_type_column_ranks_nothing_as_stellar() {
+        let expr = stellar_expr(&config(None));
+        assert!(!expr.get_bool("$literal").unwrap());
+    }
+
+    #[test]
+    fn test_stellar_values_are_compared_case_insensitively() {
+        let expr = stellar_expr(&config(Some("spectype")));
+        let args = expr.get_array("$in").unwrap();
+        assert!(format!("{:?}", args[0]).contains("toLower"));
+        assert_eq!(args[1].as_array().unwrap()[0].as_str().unwrap(), "star");
+    }
+
+    /// The keys are the ones `host_sort_key` returns, in that order, and the
+    /// wrapper they live on is dropped before the array is stored.
+    #[test]
+    fn test_rows_are_sorted_on_rank_then_distance() {
+        let pipeline = make_commit_pipeline(&config(None), "tmp", "cross_matches.NED");
+        let rendered = format!("{:?}", pipeline);
+        assert!(rendered
+            .contains(r#""sortBy": Document({"r": Int32(1), "k": Int32(1), "a": Int32(1)})"#));
+        assert!(rendered.contains(r#""in": String("$$this.doc")"#));
+        assert!(!rendered.contains("distance_kpc\": Int32(1)"));
+    }
+
+    #[test]
+    fn test_the_temp_buffer_is_dropped_and_the_array_is_trimmed() {
+        let pipeline = make_commit_pipeline(&config(None), "tmp", "cross_matches.NED");
+        assert_eq!(pipeline.len(), 2);
+        assert!(format!("{:?}", pipeline[0]).contains("$slice"));
+        assert_eq!(pipeline[1].get_str("$unset").unwrap(), "tmp");
+    }
 }

@@ -59,7 +59,7 @@ async fn validate_watchlist(
 }
 
 use crate::utils::moc::{moc_from_ascii, moc_hpx_stage};
-use actix_web::{get, patch, post, web, HttpResponse};
+use actix_web::{delete, get, patch, post, web, HttpResponse};
 use apache_avro::AvroSchema;
 use apache_avro_macros::serdavro;
 use flare::Time;
@@ -858,6 +858,67 @@ pub async fn get_filter(
     }
 }
 
+/// Delete a filter
+#[utoipa::path(
+    delete,
+    path = "/filters/{filter_id}",
+    responses(
+        (status = 200, description = "Filter deleted successfully"),
+        (status = 404, description = "Filter not found"),
+        (status = 500, description = "Internal server error")
+    ),
+    tags=["Filters"]
+)]
+#[delete("/filters/{filter_id}")]
+pub async fn delete_filter(
+    db: web::Data<Database>,
+    path: web::Path<String>,
+    current_user: Option<web::ReqData<User>>,
+) -> HttpResponse {
+    let current_user = match current_user {
+        Some(user) => user,
+        None => {
+            return HttpResponse::Unauthorized().body("Unauthorized");
+        }
+    };
+
+    let filter_id = path.into_inner();
+    let filter_query = if current_user.is_admin {
+        doc! { "_id": &filter_id }
+    } else {
+        doc! { "_id": &filter_id, "user_id": &current_user.id }
+    };
+    let filter_collection: Collection<Filter> = db.collection("filters");
+
+    match filter_collection.delete_one(filter_query).await {
+        Ok(result) if result.deleted_count > 0 => response::ok_no_data(&format!(
+            "filter with id {} deleted successfully",
+            filter_id
+        )),
+        Ok(_) => response::not_found(&format!("filter with id {} does not exist", filter_id)),
+        Err(e) => response::internal_error(&format!("failed to delete filter: {}", e)),
+    }
+}
+
+/// HEALPix range conditions for a MOC, or the response explaining why it cannot
+/// be used. Merged into the leading `$match` rather than prepended as its own
+/// stage: a `$match` after the `$project` cannot use the `coordinates.hpx` index.
+fn region_conditions(
+    moc_ascii: Option<String>,
+) -> Result<Option<mongodb::bson::Array>, HttpResponse> {
+    let Some(moc_ascii) = moc_ascii else {
+        return Ok(None);
+    };
+    let stage = moc_from_ascii(&moc_ascii)
+        .and_then(|moc| moc_hpx_stage(&moc))
+        .map_err(|e| response::bad_request(&e))?;
+    stage
+        .get_document("$match")
+        .and_then(|m| m.get_array("$or"))
+        .map(|or| Some(or.clone()))
+        .map_err(|e| response::internal_error(&format!("malformed moc stage: {e}")))
+}
+
 async fn build_test_filter_pipeline(
     survey: &Survey,
     permissions: &HashMap<Survey, Vec<i32>>,
@@ -1035,20 +1096,9 @@ pub async fn post_filter_test(
     let permissions = body.permissions;
     let pipeline = body.pipeline;
 
-    // Merged into the leading $match rather than prepended as its own stage: a
-    // $match after the $project cannot use the coordinates.hpx index.
-    let moc_conditions = match body.moc_ascii {
-        Some(moc_ascii) => match moc_from_ascii(&moc_ascii).and_then(|moc| moc_hpx_stage(&moc)) {
-            Ok(stage) => match stage
-                .get_document("$match")
-                .and_then(|m| m.get_array("$or"))
-            {
-                Ok(or) => Some(or.clone()),
-                Err(e) => return response::internal_error(&format!("malformed moc stage: {e}")),
-            },
-            Err(e) => return response::bad_request(&e),
-        },
-        None => None,
+    let moc_conditions = match region_conditions(body.moc_ascii) {
+        Ok(conditions) => conditions,
+        Err(response) => return response,
     };
 
     let mut test_pipeline = match build_test_filter_pipeline(
@@ -1132,6 +1182,10 @@ pub async fn post_filter_test(
 #[derive(serde::Deserialize, Clone, ToSchema)]
 pub struct FilterTestCountRequest {
     pub pipeline: Vec<serde_json::Value>,
+    /// A MOC in IVOA ASCII form, e.g. `"5/1-3 8 11/1234"`. Counts alerts inside
+    /// the region, so the result can be compared against a test's `limit` to
+    /// tell a truncated result from a complete one.
+    pub moc_ascii: Option<String>,
     pub permissions: HashMap<Survey, Vec<i32>>,
     pub survey: Survey,
     pub start_jd: Option<f64>,
@@ -1186,6 +1240,11 @@ pub async fn post_filter_test_count(
     let permissions = body.permissions;
     let pipeline = body.pipeline;
 
+    let moc_conditions = match region_conditions(body.moc_ascii) {
+        Ok(conditions) => conditions,
+        Err(response) => return response,
+    };
+
     let mut test_pipeline = match build_test_filter_pipeline(
         &survey,
         &permissions,
@@ -1194,7 +1253,7 @@ pub async fn post_filter_test_count(
         body.end_jd,
         body.object_ids,
         body.candids,
-        None,
+        moc_conditions,
     )
     .await
     {
@@ -1373,7 +1432,39 @@ pub async fn get_filter_schema(path: web::Path<(Survey,)>) -> HttpResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::conf::{get_test_db, CatalogXmatchConfig};
+    use crate::conf::{arcsec_to_radians, get_test_db, CatalogXmatchConfig};
+
+    /// A count request must carry the region, so a count can be compared against
+    /// a test's `limit` to tell a truncated result from a complete one.
+    #[test]
+    fn count_request_keeps_the_moc() {
+        let body = serde_json::json!({
+            "pipeline": [{"$match": {}}],
+            "moc_ascii": "5/1-3 8 11/1234",
+            "permissions": {"ztf": [1]},
+            "survey": "ztf",
+        });
+        let parsed: FilterTestCountRequest = serde_json::from_value(body).expect("a request");
+        assert_eq!(parsed.moc_ascii.as_deref(), Some("5/1-3 8 11/1234"));
+    }
+
+    /// Both endpoints derive their region the same way, so they cannot disagree
+    /// about what a MOC covers.
+    #[test]
+    fn region_conditions_are_hpx_ranges() {
+        let conditions = region_conditions(Some("5/1-3 8 11/1234".to_string()))
+            .expect("a valid moc")
+            .expect("some conditions");
+        assert!(!conditions.is_empty());
+        for condition in &conditions {
+            assert!(condition
+                .as_document()
+                .expect("a document")
+                .contains_key("coordinates.hpx"));
+        }
+        assert!(region_conditions(None).expect("no moc").is_none());
+        assert!(region_conditions(Some("not a moc".to_string())).is_err());
+    }
 
     fn admin() -> User {
         User {
@@ -1413,18 +1504,12 @@ mod tests {
             .crossmatch
             .entry(Survey::Ztf)
             .or_default()
-            .push(CatalogXmatchConfig::new(
-                &name,
-                2.0,
-                doc! { "_id": 1 },
-                false,
-                None,
-                None,
-                None,
-                None,
-                None,
-                Vec::new(),
-            ));
+            .push(CatalogXmatchConfig {
+                catalog: name.clone(),
+                radius: arcsec_to_radians(2.0),
+                projection: doc! { "_id": 1 },
+                ..Default::default()
+            });
         let result = validate_watchlist(&db, &name, &Survey::Ztf, &admin, &config).await;
 
         collection.drop().await.unwrap();

@@ -3,6 +3,7 @@ use crate::conf::AppConfig;
 use crate::enrichment::{fetch_alerts, EnrichmentWorker, EnrichmentWorkerError};
 use crate::utils::db::{fetch_timeseries_op, mongify};
 use crate::utils::enums::Survey;
+use crate::utils::host::HostGalaxyAssociation;
 use crate::utils::lightcurves::{
     analyze_photometry, prepare_photometry, summarise_detections, Band, DetectionHistory,
     EpisodeHistory, PerBandProperties, PhotometryMag, EPISODE_GAP_DAYS,
@@ -42,6 +43,7 @@ pub fn create_winter_alert_pipeline() -> Vec<Document> {
                     1000,
                     None
                 ),
+                "host_galaxy": {"$arrayElemAt": ["$aux.host_galaxy", 0]},
             }
         },
         doc! {
@@ -53,6 +55,7 @@ pub fn create_winter_alert_pipeline() -> Vec<Document> {
                 "prv_candidates.sigmapsf": 1,
                 "prv_candidates.band": 1,
                 "prv_candidates.isdiffpos": 1,
+                "host_galaxy": 1,
             }
         },
     ]
@@ -94,6 +97,8 @@ pub struct WinterAlertForEnrichment {
     pub object_id: String,
     pub candidate: WinterCandidate,
     pub prv_candidates: Vec<WinterPhotometry>,
+    #[serde(default)]
+    pub host_galaxy: Option<HostGalaxyAssociation>,
 }
 
 /// WINTER alert properties computed during enrichment and inserted back into the
@@ -101,6 +106,9 @@ pub struct WinterAlertForEnrichment {
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
 pub struct WinterAlertProperties {
     pub stationary: bool,
+    /// Absent means never evaluated for a host, not evaluated and hostless.
+    #[serde(default)]
+    pub hosted: Option<bool>,
     pub photstats: PerBandProperties,
     /// Per-object detection-history summary for history-aware filters.
     /// `None` on alerts enriched before this field existed.
@@ -239,6 +247,7 @@ impl WinterEnrichmentWorker {
 
         Ok(WinterAlertProperties {
             stationary,
+            hosted: alert.host_galaxy.as_ref().map(|h| h.best_host.is_some()),
             photstats,
             detection_history: Some(detection_history),
             episode_history: Some(episode_history),

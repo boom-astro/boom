@@ -44,8 +44,15 @@ pub struct StatsQuery {
     pub survey: Option<BabamulSurvey>,
 }
 
+pub(super) const NIGHTLY_STATS_CACHE_PREFIX: &str = "nightly_stats_";
+
 fn cache_id(survey: &Survey, date: &NaiveDate) -> String {
-    format!("nightly_stats_{}_{}", survey, date.format("%Y-%m-%d"))
+    format!(
+        "{}{}_{}",
+        NIGHTLY_STATS_CACHE_PREFIX,
+        survey,
+        date.format("%Y-%m-%d")
+    )
 }
 
 /// Cache duration (in seconds) grows with the age of the night.

@@ -100,7 +100,7 @@ workers:
       reference_night:
 crossmatch:
   ztf:
-    - catalog: PS1_DR1
+    PS1_DR1:
       radius: 2.0 # 2 arcseconds
       use_distance: false
       projection:
@@ -117,7 +117,7 @@ crossmatch:
         yMeanPSFMagErr: 1
         ra: 1
         dec: 1
-    - catalog: Gaia_DR3
+    Gaia_DR3:
       radius: 2.0 # 2 arcseconds
       use_distance: false
       projection:
@@ -129,7 +129,7 @@ crossmatch:
         phot_rp_mean_mag: 1
         ra: 1
         dec: 1
-    - catalog: milliquas_v6
+    milliquas_v6:
       radius: 2.0 # 2 arcseconds
       use_distance: false
       projection:
@@ -139,7 +139,7 @@ crossmatch:
         Qpct: 1
         ra: 1
         dec: 1
-    - catalog: NED
+    NED:
       radius: 300.0 # 300 arcseconds
       use_distance: true
       distance_key: "z"
@@ -163,7 +163,7 @@ crossmatch:
         Mstar: 1
         Mstar_unc: 1
   lsst:
-    - catalog: LSPSC
+    LSPSC:
       radius: 30.0 # 30 arcseconds
       use_distance: false
       projection:
@@ -173,5 +173,5 @@ crossmatch:
         score: 1
         mag_white: 1
       max_results: 3
-  decam: []
-  winter: []
+  decam: {}
+  winter: {}

@@ -6,6 +6,7 @@ use crate::enrichment::{
 };
 use crate::utils::db::mongify;
 use crate::utils::enums::Survey;
+use crate::utils::host::HostGalaxyAssociation;
 use crate::utils::lightcurves::{
     analyze_photometry, prepare_photometry, summarise_detections, ActivityMetrics, Band,
     DetectionHistory, EpisodeHistory, PerBandProperties, PhotometryMag, EPISODE_GAP_DAYS,
@@ -111,6 +112,7 @@ pub fn create_lsst_alert_pipeline() -> Vec<Document> {
                 "prv_candidates": "$aux.prv_candidates",
                 "fp_hists": "$aux.fp_hists",
                 "cross_matches": "$aux.cross_matches",
+                "host_galaxy": "$aux.host_galaxy",
                 "survey_matches": {
                     "ztf": {
                         "$cond": {
@@ -167,6 +169,8 @@ pub struct LsstAlertForEnrichment {
     pub prv_candidates: Vec<LsstPhotometry>,
     pub fp_hists: Vec<LsstPhotometry>,
     pub cross_matches: Option<HashMap<String, Vec<serde_json::Value>>>,
+    #[serde(default)]
+    pub host_galaxy: Option<HostGalaxyAssociation>,
     pub survey_matches: Option<LsstSurveyMatches>,
 }
 
@@ -240,6 +244,9 @@ pub struct LsstAlertProperties {
     pub stationary: bool,
     pub star: Option<bool>,
     pub near_brightstar: Option<bool>,
+    /// Absent means never evaluated for a host, not evaluated and hostless.
+    #[serde(default)]
+    pub hosted: Option<bool>,
     pub photstats: PerBandProperties,
     pub multisurvey_photstats: PerBandProperties,
     /// `None` on alerts enriched before this existed: never evaluated, which is not
@@ -547,6 +554,7 @@ impl LsstEnrichmentWorker {
 
         Ok(LsstAlertProperties {
             rock: is_rock,
+            hosted: alert.host_galaxy.as_ref().map(|h| h.best_host.is_some()),
             sso: Some(sso),
             activity: Some(activity),
             star: is_star,
