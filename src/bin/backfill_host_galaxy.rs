@@ -17,7 +17,7 @@ use indicatif::ProgressBar;
 use mongodb::{
     bson::{doc, to_bson, Document},
     options::{UpdateOneModel, WriteModel},
-    Namespace,
+    Database, Namespace,
 };
 use tracing::{error, info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
@@ -25,6 +25,8 @@ use tracing_subscriber::FmtSubscriber;
 const QUEUE_MULTIPLIER: usize = 2;
 /// Sample size for the preflight check that the galaxy catalogs are present.
 const CATALOG_PROBE_SAMPLE: i64 = 1_000;
+const CROSSMATCH_STATE_COLLECTION: &str = "reprocess_crossmatch_state";
+const STATUS_CLEAN: &str = "clean";
 
 /// Fill in `host_galaxy` on a survey's alerts_aux records.
 ///
@@ -104,6 +106,27 @@ async fn probe_catalogs(
         );
     }
     Ok(())
+}
+
+async fn unfinished_reprocesses(
+    db: &Database,
+    aux_name: &str,
+    catalogs: &[&str],
+) -> Result<Vec<String>, mongodb::error::Error> {
+    let states = db.collection::<Document>(CROSSMATCH_STATE_COLLECTION);
+    let mut unfinished = Vec::new();
+    for catalog in catalogs {
+        let state = states
+            .find_one(doc! { "_id": format!("{}:{}", aux_name, catalog) })
+            .await?;
+        if let Some(state) = state {
+            let status = state.get_str("status").unwrap_or("unknown");
+            if status != STATUS_CLEAN {
+                unfinished.push(format!("{} ({})", catalog, status));
+            }
+        }
+    }
+    Ok(unfinished)
 }
 
 async fn worker(
@@ -197,6 +220,26 @@ async fn main() {
     };
 
     let aux_name = format!("{}_alerts_aux", args.survey);
+    let catalogs = [
+        config.host_galaxy.ned_catalog.as_str(),
+        config.host_galaxy.ls_dr10_catalog.as_str(),
+    ];
+    match unfinished_reprocesses(&db, &aux_name, &catalogs).await {
+        Ok(unfinished) if unfinished.is_empty() => {}
+        Ok(unfinished) => {
+            error!(
+                "reprocess_crossmatch has not finished on {} for {}; let it complete first",
+                aux_name,
+                unfinished.join(", ")
+            );
+            std::process::exit(1);
+        }
+        Err(e) => {
+            error!("failed to read {}: {}", CROSSMATCH_STATE_COLLECTION, e);
+            std::process::exit(1);
+        }
+    }
+
     let probe: mongodb::Collection<Document> = db.collection(&aux_name);
     if let Err(e) = probe_catalogs(&probe, &config.host_galaxy).await {
         warn!("catalog probe failed, continuing: {}", e);
