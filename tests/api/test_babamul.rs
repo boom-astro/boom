@@ -574,6 +574,21 @@ mod tests {
             StatusCode::NOT_FOUND,
             "Should return 404 for non-existent candid"
         );
+
+        let req = test::TestRequest::get()
+            .uri(&format!(
+                "/babamul/surveys/winter/cutouts?candid={}",
+                test_candid
+            ))
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "Should reject surveys other than ZTF and LSST"
+        );
     }
 
     #[actix_rt::test]
@@ -2535,6 +2550,24 @@ mod tests {
             resp.status(),
             StatusCode::BAD_REQUEST,
             "Should reject empty coordinates"
+        );
+
+        let req = test::TestRequest::post()
+            .uri("/babamul/surveys/winter/objects/cone-search")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .set_json(serde_json::json!({
+                "coordinates": {
+                    "search1": [125.0, -12.0]
+                },
+                "radius_arcsec": 60.0
+            }))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "Should reject surveys other than ZTF and LSST"
         );
 
         let req = test::TestRequest::post()
