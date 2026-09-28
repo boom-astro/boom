@@ -5072,7 +5072,7 @@ mod tests {
             patch(
                 &admin.token,
                 &user.user.id,
-                serde_json::json!({ "is_admin": true, "acls": ["ztf_caltech", "winter", "winter"] }),
+                serde_json::json!({ "is_admin": true, "acls": ["ztf_caltech", "winter", "ztf_partnership", "winter"] }),
             ),
         )
         .await;
@@ -5081,7 +5081,7 @@ mod tests {
         assert_eq!(body["data"]["is_admin"], true);
         assert_eq!(
             body["data"]["acls"],
-            serde_json::json!(["winter", "ztf_caltech"])
+            serde_json::json!(["winter", "ztf_partnership", "ztf_caltech"])
         );
 
         let resp = test::call_service(
@@ -5096,7 +5096,7 @@ mod tests {
         assert_eq!(body["data"]["is_admin"], true);
         assert_eq!(
             body["data"]["acls"],
-            serde_json::json!(["winter", "ztf_caltech"])
+            serde_json::json!(["winter", "ztf_partnership", "ztf_caltech"])
         );
 
         let resp = test::call_service(
@@ -5123,6 +5123,17 @@ mod tests {
 
         let resp = test::call_service(
             &app,
+            patch(
+                &admin.token,
+                &user.user.id,
+                serde_json::json!({ "acls": ["ztf_caltech"] }),
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        let resp = test::call_service(
+            &app,
             patch(&admin.token, "missing", serde_json::json!({ "acls": [] })),
         )
         .await;
@@ -5138,6 +5149,7 @@ mod tests {
             stored.acls,
             vec![
                 routes::babamul::BabamulAcl::Winter,
+                routes::babamul::BabamulAcl::ZtfPartnership,
                 routes::babamul::BabamulAcl::ZtfCaltech
             ]
         );

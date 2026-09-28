@@ -179,6 +179,9 @@ pub async fn patch_admin_user(
         set.insert("is_admin", is_admin);
     }
     if let Some(acls) = &body.acls {
+        if acls.contains(&BabamulAcl::ZtfCaltech) && !acls.contains(&BabamulAcl::ZtfPartnership) {
+            return response::bad_request("ztf_caltech requires ztf_partnership");
+        }
         let mut acls = acls.clone();
         acls.sort_by_key(|acl| BabamulAcl::ALL.iter().position(|a| a == acl));
         acls.dedup();

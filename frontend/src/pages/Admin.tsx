@@ -108,17 +108,29 @@ export default function Admin() {
   }
 
   function toggleAcl(user: AdminUser, acl: string, granted: boolean) {
-    const acls = granted ? [...user.acls, acl] : user.acls.filter((a) => a !== acl);
+    const linked =
+      granted && acl === "ztf_caltech" && !user.acls.includes("ztf_partnership")
+        ? "ztf_partnership"
+        : !granted && acl === "ztf_partnership" && user.acls.includes("ztf_caltech")
+          ? "ztf_caltech"
+          : null;
+    const changed = linked ? [acl, linked] : [acl];
+    const acls = granted
+      ? [...user.acls, ...changed]
+      : user.acls.filter((a) => !changed.includes(a));
+    const labels = changed.map(aclLabel).join(" and ");
     setPending({
       user,
       patch: { acls },
       grants: granted,
       title: granted
-        ? `Grant ${aclLabel(acl)} access to ${user.email}?`
-        : `Revoke ${aclLabel(acl)} access from ${user.email}?`,
-      description: granted
-        ? `This user will be able to see ${aclLabel(acl)} data.`
-        : `This user will no longer see ${aclLabel(acl)} data.`,
+        ? `Grant ${labels} access to ${user.email}?`
+        : `Revoke ${labels} access from ${user.email}?`,
+      description:
+        (granted
+          ? `This user will be able to see ${labels} data.`
+          : `This user will no longer see ${labels} data.`) +
+        (linked ? " ZTF Caltech access requires ZTF partnership access." : ""),
     });
   }
 
