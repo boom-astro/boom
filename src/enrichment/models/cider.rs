@@ -134,7 +134,7 @@ fn compute_global_features(
     let idx_peak = log_flux
         .iter()
         .enumerate()
-        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+        .max_by(|a, b| a.1.total_cmp(b.1))
         .map(|(i, _)| i)
         .unwrap_or(0);
     let peak_t = dt_first[idx_peak];
@@ -142,7 +142,7 @@ fn compute_global_features(
     let peak_flux = log_flux[idx_peak];
 
     let mut sorted_dt = dt_prev.clone();
-    sorted_dt.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    sorted_dt.sort_by(|a, b| a.total_cmp(b));
     let med_dt_prev = sorted_dt[sorted_dt.len() / 2];
 
     let mean_f: f32 = log_flux.iter().sum::<f32>() / n as f32;
@@ -153,7 +153,7 @@ fn compute_global_features(
     };
 
     let mut sorted_f = log_flux.to_vec();
-    sorted_f.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    sorted_f.sort_by(|a, b| a.total_cmp(b));
     let p10 = sorted_f[(n as f32 * 0.10) as usize];
     let p90 = sorted_f[((n as f32 * 0.90) as usize).min(n - 1)];
 
@@ -474,7 +474,7 @@ impl CiderFusionModel {
         const NORM_MEAN: [f32; 4] = [3.2246506, 0.75406283, 1.8746188, 0.05986891];
         const NORM_STD: [f32; 4] = [1.1197281, 0.72683305, 0.41507009, 0.03053664];
 
-        photometry.sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap());
+        photometry.sort_by(|a, b| a.time.total_cmp(&b.time));
         photometry.dedup_by(|a, b| a.time == b.time && a.band == b.band);
         let t0 = photometry.first().map_or(0.0, |p| p.time);
         photometry.retain(|p| (p.time - t0) as f32 <= HORIZON_DAYS);
