@@ -152,6 +152,8 @@ async fn main() -> std::io::Result<()> {
                     .service(routes::babamul::tokens::get_tokens)
                     .service(routes::babamul::tokens::post_token)
                     .service(routes::babamul::tokens::delete_token)
+                    .service(routes::babamul::admin::get_admin_users)
+                    .service(routes::babamul::admin::patch_admin_user)
                     // Larger JSON limit for skymap uploads (~130 MB base64). This
                     // prefix-less scope swallows any sibling after it, so keep it last.
                     .service(
