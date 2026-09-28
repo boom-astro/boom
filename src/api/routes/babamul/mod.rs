@@ -199,10 +199,16 @@ pub struct BabamulUser {
 #[serde(rename_all = "snake_case")]
 pub enum BabamulAcl {
     Winter,
+    ZtfPartnership,
+    ZtfCaltech,
 }
 
 impl BabamulAcl {
-    pub const ALL: [BabamulAcl; 1] = [BabamulAcl::Winter];
+    pub const ALL: [BabamulAcl; 3] = [
+        BabamulAcl::Winter,
+        BabamulAcl::ZtfPartnership,
+        BabamulAcl::ZtfCaltech,
+    ];
 }
 
 impl BabamulUser {
