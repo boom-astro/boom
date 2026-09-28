@@ -774,6 +774,15 @@ pub fn prepare_photometry(photometry: &mut Vec<PhotometryMag>) {
     photometry.dedup_by(|a, b| a.time == b.time && a.band == b.band);
 }
 
+pub const STATIONARY_MIN_FORCED_SNR: f64 = 5.0;
+
+pub fn is_stationary(times: impl IntoIterator<Item = f64>) -> bool {
+    let (first, last) = times
+        .into_iter()
+        .fold((f64::MAX, f64::MIN), |(lo, hi), t| (lo.min(t), hi.max(t)));
+    last - first > 0.01
+}
+
 // we want a function that takes a Vec of PhotometryMag and:
 // - sort by time (ascending)
 // - divide it by band
@@ -809,7 +818,7 @@ pub fn analyze_photometry(
     }
 
     // The empty case returned early above, so the slice is non-empty here.
-    let stationary = (sorted_photometry.last().unwrap().time - sorted_photometry[0].time) > 0.01;
+    let stationary = is_stationary(sorted_photometry.iter().map(|p| p.time));
 
     let mut global_peak_jd = sorted_photometry[0].time;
     let mut global_peak_mag = sorted_photometry[0].mag;
@@ -944,7 +953,16 @@ pub fn analyze_photometry(
 
 #[cfg(test)]
 mod tests {
-    use super::{EpisodeHistory, EPISODE_GAP_DAYS};
+    use super::{is_stationary, EpisodeHistory, EPISODE_GAP_DAYS};
+
+    #[test]
+    fn test_is_stationary_needs_a_span_beyond_a_quarter_hour() {
+        assert!(!is_stationary([]));
+        assert!(!is_stationary([2460000.5]));
+        assert!(!is_stationary([2460000.5, 2460000.505]));
+        assert!(is_stationary([2460000.5, 2460000.52]));
+        assert!(is_stationary([2460000.52, 2460000.5, 2460000.51]));
+    }
 
     /// Positive detections at the given epochs, as `from_points` takes them.
     fn pos(jds: &[f64]) -> Vec<(f64, Option<bool>)> {
