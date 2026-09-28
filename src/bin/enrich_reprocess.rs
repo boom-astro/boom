@@ -177,32 +177,18 @@ async fn run(args: Cli) {
             let tid = std::thread::current().id();
             span!(INFO, "enrich-only worker", ?tid, ?survey).in_scope(|| {
                 info!("starting enrichment-only worker");
-                let result = match survey {
-                    Survey::Ztf => run_enrich_only::<ZtfEnrichmentWorker>(
-                        receiver,
-                        &config_path_clone,
-                        shared_models,
-                        input_queue_clone,
-                    ),
-                    Survey::Lsst => run_enrich_only::<LsstEnrichmentWorker>(
-                        receiver,
-                        &config_path_clone,
-                        shared_models,
-                        input_queue_clone,
-                    ),
-                    Survey::Decam => run_enrich_only::<DecamEnrichmentWorker>(
-                        receiver,
-                        &config_path_clone,
-                        shared_models,
-                        input_queue_clone,
-                    ),
-                    Survey::Winter => run_enrich_only::<WinterEnrichmentWorker>(
-                        receiver,
-                        &config_path_clone,
-                        shared_models,
-                        input_queue_clone,
-                    ),
+                let run_worker = match survey {
+                    Survey::Ztf => run_enrich_only::<ZtfEnrichmentWorker>,
+                    Survey::Lsst => run_enrich_only::<LsstEnrichmentWorker>,
+                    Survey::Decam => run_enrich_only::<DecamEnrichmentWorker>,
+                    Survey::Winter => run_enrich_only::<WinterEnrichmentWorker>,
                 };
+                let result = run_worker(
+                    receiver,
+                    &config_path_clone,
+                    shared_models,
+                    input_queue_clone,
+                );
                 result.unwrap_or_else(as_error!("enrichment-only worker failed"));
             })
         });
