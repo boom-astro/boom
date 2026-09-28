@@ -8,14 +8,13 @@ use boom::{
         enums::Survey,
         host::{self, HostGalaxyConfig},
         parser::parse_positive_usize,
-        spatial::Coordinates,
     },
 };
 use clap::Parser;
 use futures::TryStreamExt;
 use indicatif::ProgressBar;
 use mongodb::{
-    bson::{doc, to_bson, Document},
+    bson::{doc, to_bson, Bson, Document},
     options::{UpdateOneModel, WriteModel},
     Database, Namespace,
 };
@@ -64,15 +63,6 @@ struct Cli {
     /// Report what would be written without writing it.
     #[arg(long, default_value_t = false)]
     dry_run: bool,
-}
-
-#[derive(serde::Deserialize)]
-struct AuxRecord {
-    #[serde(rename = "_id")]
-    object_id: String,
-    coordinates: Coordinates,
-    #[serde(default)]
-    cross_matches: HashMap<String, Vec<Document>>,
 }
 
 /// Warn when no sampled record carries a shape column, which produces a run
@@ -129,8 +119,54 @@ async fn unfinished_reprocesses(
     Ok(unfinished)
 }
 
+/// `coordinates.radec_geojson.coordinates` is `[ra - 180, dec]`.
+fn position(record: &Document) -> Option<(f64, f64)> {
+    let point = record
+        .get_document("coordinates")
+        .ok()?
+        .get_document("radec_geojson")
+        .ok()?
+        .get_array("coordinates")
+        .ok()?;
+    let [ra, dec] = point.as_slice() else {
+        return None;
+    };
+    let (ra, dec) = (ra.as_f64()? + 180.0, dec.as_f64()?);
+    (ra.is_finite() && dec.is_finite()).then_some((ra, dec))
+}
+
+fn galaxy_matches(
+    cross_matches: Option<Bson>,
+    catalogs: &[&str],
+) -> Option<HashMap<String, Vec<Document>>> {
+    let mut matches = HashMap::new();
+    let Some(cross_matches) = cross_matches else {
+        return Some(matches);
+    };
+    let Bson::Document(mut cross_matches) = cross_matches else {
+        return None;
+    };
+    for catalog in catalogs {
+        let Some(rows) = cross_matches.remove(*catalog) else {
+            continue;
+        };
+        let Bson::Array(rows) = rows else {
+            return None;
+        };
+        let rows = rows
+            .into_iter()
+            .map(|row| match row {
+                Bson::Document(row) => Some(row),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()?;
+        matches.insert(catalog.to_string(), rows);
+    }
+    Some(matches)
+}
+
 async fn worker(
-    rx: async_channel::Receiver<AuxRecord>,
+    rx: async_channel::Receiver<Document>,
     client: mongodb::Client,
     aux_ns: Namespace,
     config: HostGalaxyConfig,
@@ -138,28 +174,37 @@ async fn worker(
     dry_run: bool,
     pb: ProgressBar,
 ) -> Result<u64, mongodb::error::Error> {
+    let catalogs = [config.ned_catalog.as_str(), config.ls_dr10_catalog.as_str()];
     let mut batch: Vec<WriteModel> = Vec::with_capacity(batch_size);
     let mut written = 0u64;
-    while let Ok(record) = rx.recv().await {
+    while let Ok(mut record) = rx.recv().await {
         pb.inc(1);
-        let (ra, dec) = record.coordinates.get_radec();
+        let Some(object_id) = record.remove("_id") else {
+            continue;
+        };
+        let Some((ra, dec)) = position(&record) else {
+            warn!(object_id = %object_id, "unreadable coordinates, left without host_galaxy");
+            continue;
+        };
+        let Some(matches) = galaxy_matches(record.remove("cross_matches"), &catalogs) else {
+            warn!(object_id = %object_id, "unreadable cross_matches, left without host_galaxy");
+            continue;
+        };
         // `enabled` is checked once up front, so this is always `Some`.
-        let Some(association) =
-            host::associate_from_xmatches(ra, dec, &record.cross_matches, &config)
-        else {
+        let Some(association) = host::associate_from_xmatches(ra, dec, &matches, &config) else {
             continue;
         };
         let value = match to_bson(&association) {
-            Ok(v) => v,
+            Ok(value) => value,
             Err(e) => {
-                warn!(object_id = %record.object_id, error = %e, "failed to encode, skipping");
+                warn!(object_id = %object_id, error = %e, "failed to encode, left without host_galaxy");
                 continue;
             }
         };
         batch.push(WriteModel::UpdateOne(
             UpdateOneModel::builder()
                 .namespace(aux_ns.clone())
-                .filter(doc! { "_id": record.object_id })
+                .filter(doc! { "_id": object_id })
                 .update(doc! { "$set": { "host_galaxy": value } })
                 .build(),
         ));
@@ -240,19 +285,18 @@ async fn main() {
         }
     }
 
-    let probe: mongodb::Collection<Document> = db.collection(&aux_name);
-    if let Err(e) = probe_catalogs(&probe, &config.host_galaxy).await {
+    let aux_collection: mongodb::Collection<Document> = db.collection(&aux_name);
+    if let Err(e) = probe_catalogs(&aux_collection, &config.host_galaxy).await {
         warn!("catalog probe failed, continuing: {}", e);
     }
 
-    let aux_collection: mongodb::Collection<AuxRecord> = db.collection(&aux_name);
     let estimated = aux_collection.estimated_document_count().await.unwrap_or(0);
     let label = format!("host_galaxy→{}", aux_name);
     let pb = make_progress_bar(estimated, label.clone());
     let logger = spawn_progress_logger(pb.clone(), label);
 
     let queue_capacity = args.processes * args.batch_size * QUEUE_MULTIPLIER;
-    let (tx, rx) = async_channel::bounded::<AuxRecord>(queue_capacity);
+    let (tx, rx) = async_channel::bounded::<Document>(queue_capacity);
 
     let aux_ns = Namespace {
         db: db.name().to_string(),
@@ -281,7 +325,12 @@ async fn main() {
     let feed: Result<(), TaskError> = async {
         let mut cursor = aux_collection
             .find(find_filter)
-            .projection(doc! { "_id": 1, "coordinates": 1, "cross_matches": 1 })
+            .projection(doc! {
+                "_id": 1,
+                "coordinates.radec_geojson.coordinates": 1,
+                format!("cross_matches.{}", config.host_galaxy.ned_catalog): 1,
+                format!("cross_matches.{}", config.host_galaxy.ls_dr10_catalog): 1,
+            })
             .batch_size(CURSOR_BATCH_SIZE)
             .no_cursor_timeout(true)
             .await?;
@@ -315,6 +364,51 @@ async fn main() {
         Err(e) => {
             error!("backfill failed: {}", e);
             std::process::exit(1);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const CATALOGS: [&str; 2] = ["NED", "LSDR10"];
+
+    #[test]
+    fn test_position_undoes_the_geojson_offset() {
+        let record = doc! { "coordinates": { "radec_geojson": { "coordinates": [-170.0, 20.0] } } };
+        assert_eq!(position(&record), Some((10.0, 20.0)));
+    }
+
+    #[test]
+    fn test_position_rejects_a_malformed_point() {
+        for coordinates in [
+            Bson::Array(vec![Bson::Double(1.0)]),
+            Bson::Array(vec![Bson::Double(f64::NAN), Bson::Double(1.0)]),
+            Bson::Null,
+        ] {
+            let record =
+                doc! { "coordinates": { "radec_geojson": { "coordinates": coordinates } } };
+            assert_eq!(position(&record), None);
+        }
+    }
+
+    #[test]
+    fn test_missing_cross_matches_have_no_rows() {
+        assert!(galaxy_matches(None, &CATALOGS).unwrap().is_empty());
+        let matches = galaxy_matches(Some(Bson::Document(doc! { "NED": [] })), &CATALOGS).unwrap();
+        assert_eq!(matches.get("NED"), Some(&Vec::new()));
+        assert!(!matches.contains_key("LSDR10"));
+    }
+
+    #[test]
+    fn test_malformed_cross_matches_are_unreadable() {
+        for cross_matches in [
+            Bson::Null,
+            Bson::Document(doc! { "NED": Bson::Null }),
+            Bson::Document(doc! { "LSDR10": [1] }),
+        ] {
+            assert!(galaxy_matches(Some(cross_matches), &CATALOGS).is_none());
         }
     }
 }
