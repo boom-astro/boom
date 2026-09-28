@@ -11,9 +11,9 @@ use crate::utils::db::mongify;
 use crate::utils::enums::Survey;
 use crate::utils::host::HostGalaxyAssociation;
 use crate::utils::lightcurves::{
-    analyze_photometry, prepare_photometry, summarise_detections, ActivityMetrics, Band,
-    DetectionHistory, EpisodeHistory, Outburst, PerBandProperties, PhotometryMag, EPISODE_GAP_DAYS,
-    ZTF_ZP,
+    analyze_photometry, is_stationary, prepare_photometry, summarise_detections, ActivityMetrics,
+    Band, DetectionHistory, EpisodeHistory, Outburst, PerBandProperties, PhotometryMag,
+    EPISODE_GAP_DAYS, STATIONARY_MIN_FORCED_SNR, ZTF_ZP,
 };
 use crate::utils::mpcorb::{elements_from_document, normalize_ztf_ssnamenr, ORBITS_COLLECTION};
 use crate::utils::outburst::{Point, MAX_SEPARATION_ARCSEC};
@@ -1226,7 +1226,22 @@ impl ZtfEnrichmentWorker {
         if lightcurve.is_empty() {
             return Err(EnrichmentWorkerError::EmptyLightcurve(alert.candid));
         }
-        let (photstats, _, stationary) = analyze_photometry(&lightcurve);
+        let (photstats, _, _) = analyze_photometry(&lightcurve);
+        let stationary = is_stationary(
+            alert
+                .prv_candidates
+                .iter()
+                .filter(|p| p.jd <= alert.candidate.candidate.jd)
+                .filter_map(|p| p.to_photometry_mag(None))
+                .chain(
+                    alert
+                        .fp_hists
+                        .iter()
+                        .filter(|p| p.jd <= alert.candidate.candidate.jd)
+                        .filter_map(|p| p.to_photometry_mag(Some(STATIONARY_MIN_FORCED_SNR))),
+                )
+                .map(|p| p.time),
+        );
 
         let mut has_matches = false;
         if let Some(survey_matches) = &alert.survey_matches {

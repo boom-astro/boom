@@ -8,8 +8,9 @@ use crate::utils::db::mongify;
 use crate::utils::enums::Survey;
 use crate::utils::host::HostGalaxyAssociation;
 use crate::utils::lightcurves::{
-    analyze_photometry, prepare_photometry, summarise_detections, ActivityMetrics, Band,
-    DetectionHistory, EpisodeHistory, PerBandProperties, PhotometryMag, EPISODE_GAP_DAYS,
+    analyze_photometry, is_stationary, prepare_photometry, summarise_detections, ActivityMetrics,
+    Band, DetectionHistory, EpisodeHistory, PerBandProperties, PhotometryMag, EPISODE_GAP_DAYS,
+    STATIONARY_MIN_FORCED_SNR,
 };
 use apache_avro_derive::AvroSchema;
 use apache_avro_macros::serdavro;
@@ -511,7 +512,22 @@ impl LsstEnrichmentWorker {
         let mut lightcurve = [prv_candidates, fp_hists].concat();
 
         prepare_photometry(&mut lightcurve);
-        let (photstats, _, stationary) = analyze_photometry(&lightcurve);
+        let (photstats, _, _) = analyze_photometry(&lightcurve);
+        let stationary = is_stationary(
+            alert
+                .prv_candidates
+                .iter()
+                .filter(|p| p.jd <= alert.candidate.jd)
+                .filter_map(|p| p.to_photometry_mag(None))
+                .chain(
+                    alert
+                        .fp_hists
+                        .iter()
+                        .filter(|p| p.jd <= alert.candidate.jd)
+                        .filter_map(|p| p.to_photometry_mag(Some(STATIONARY_MIN_FORCED_SNR))),
+                )
+                .map(|p| p.time),
+        );
 
         // Compute multisurvey photstats (including ZTF if available, other surveys can be added later)
         let mut has_matches = false;
