@@ -377,7 +377,21 @@ pub fn find_tracklets(detections: &[Detection], cfg: &TrackletConfig) -> Vec<Tra
                     members.push(*d);
                 }
             }
-            members.sort_by(|p, q| p.jd.partial_cmp(&q.jd).unwrap_or(std::cmp::Ordering::Equal));
+            members.sort_by(|p, q| {
+                (p.jd - seed.jd_ref)
+                    .abs()
+                    .total_cmp(&(q.jd - seed.jd_ref).abs())
+            });
+            let (mut lo_jd, mut hi_jd) = (a.jd.min(b.jd), a.jd.max(b.jd));
+            members.retain(|d| {
+                let (lo, hi) = (lo_jd.min(d.jd), hi_jd.max(d.jd));
+                let fits = hi - lo <= cfg.max_span_days;
+                if fits {
+                    (lo_jd, hi_jd) = (lo, hi);
+                }
+                fits
+            });
+            members.sort_by(|p, q| p.jd.total_cmp(&q.jd));
             members.dedup_by_key(|d| d.id);
 
             if members.len() < cfg.min_detections {
@@ -611,6 +625,17 @@ mod tests {
                 hi - lo
             );
         }
+    }
+
+    #[test]
+    fn test_a_night_longer_than_the_window_still_yields_a_tracklet() {
+        let cfg = TrackletConfig::default();
+        let span = cfg.max_span_days;
+        let jds = [0.0, 0.367, 0.747, 0.787, 1.153].map(|f| 2_461_200.8 + f * span);
+        let dets = mover(291.7, 15.4, -0.12, 0.8, &jds, 1);
+
+        let found = find_tracklets(&dets, &cfg);
+        assert!(found.iter().any(|t| t.ids.len() >= 4), "{found:?}");
     }
 
     fn at_mag(mag: f64, err: f64, band: char) -> Detection {
