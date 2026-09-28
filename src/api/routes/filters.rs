@@ -16,7 +16,7 @@ use crate::{
         build_filter_pipeline, Filter, FilterError, FilterVersion, SURVEYS_REQUIRING_PERMISSIONS,
     },
     utils::{
-        db::{count_alerts_for_night, mongify},
+        db::{count_alerts_in_jd_window, mongify},
         enums::Survey,
     },
 };
@@ -170,9 +170,9 @@ async fn build_and_test_filter_version(
     run_test_pipeline(db, survey, test_pipeline).await
 }
 
-/// Validate that activating this filter is safe by running it against a
-/// reference observing night and ensuring the filter does not match more than
-/// `max_result_ratio_percent` of the alerts the filter has access to that night.
+/// Validate that activating this filter is safe by running it against the
+/// reference observing nights and ensuring the filter does not match more than
+/// `max_match_rate` percent of the alerts the filter has access to on those nights.
 async fn validate_filter_activation(
     db: &Database,
     config: &FilterWorkerConfig,
@@ -207,26 +207,33 @@ async fn validate_filter_activation(
     } else {
         None
     };
+    let first_night = night_date - chrono::Duration::days(config.reference_window_days as i64 - 1);
+    let period = if first_night == night_date {
+        format!("reference night {}", night_date)
+    } else {
+        format!("reference nights {} to {}", first_night, night_date)
+    };
+    let (start_jd, _) = survey.night_jd_window(&first_night);
+    let (_, end_jd) = survey.night_jd_window(&night_date);
+
     let pid_slice = permission_programids.as_deref();
-    let night_total = count_alerts_for_night(db, survey, &night_date, pid_slice)
+    let total = count_alerts_in_jd_window(db, survey, start_jd, end_jd, pid_slice)
         .await
-        .map_err(|e| format!("failed to count alerts for {}: {}", night_date, e))?;
-    if night_total == 0 {
+        .map_err(|e| format!("failed to count alerts for {}: {}", period, e))?;
+    if total == 0 {
         return Err(if pid_slice.is_some() {
             format!(
-                "no {} alerts accessible with the given permissions on reference night {}; cannot validate filter activation",
-                survey, night_date
+                "no {} alerts accessible with the given permissions on {}; cannot validate filter activation",
+                survey, period
             )
         } else {
             format!(
-                "no {} alerts on reference night {}; cannot validate filter activation",
-                survey, night_date
+                "no {} alerts on {}; cannot validate filter activation",
+                survey, period
             )
         });
     }
 
-    // Run the filter pipeline restricted to that night, count matches.
-    let (start_jd, end_jd) = survey.night_jd_window(&night_date);
     let mut test_pipeline = build_filter_pipeline(pipeline, permissions, survey)
         .await
         .map_err(|e| e.to_string())?;
@@ -248,7 +255,7 @@ async fn validate_filter_activation(
     let mut cursor = collection
         .aggregate(test_pipeline)
         .await
-        .map_err(|e| format!("failed to run filter on night {}: {}", night_date, e))?;
+        .map_err(|e| format!("failed to run filter on {}: {}", period, e))?;
     let matched = match cursor.next().await {
         Some(Ok(doc)) => match doc.get("count") {
             Some(mongodb::bson::Bson::Int32(c)) => *c as i64,
@@ -259,15 +266,15 @@ async fn validate_filter_activation(
         None => 0,
     };
 
-    let max_allowed = (night_total as f64 * max_match_rate as f64 / 100.0) as i64;
+    let max_allowed = (total as f64 * max_match_rate as f64 / 100.0) as i64;
     if matched > max_allowed {
         return Err(format!(
-            "filter matched {} of {} {} alerts ({:.1}%) on night {}, which exceeds the {}% limit",
+            "filter matched {} of {} {} alerts ({:.1}%) on {}, which exceeds the {}% limit",
             matched,
-            night_total,
+            total,
             survey,
-            (matched as f64 / night_total as f64) * 100.0,
-            night_date,
+            (matched as f64 / total as f64) * 100.0,
+            period,
             max_match_rate,
         ));
     }
