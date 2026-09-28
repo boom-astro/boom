@@ -34,6 +34,7 @@ const STATE_COLLECTION: &str = "reprocess_crossmatch_state";
 const STATUS_MATCHING: &str = "matching";
 const STATUS_CLEAN: &str = "clean";
 const TEMP_PROBE_SAMPLE: i64 = 10_000;
+const SHARDS_PER_PROCESS: usize = 8;
 
 /// Catalog-driven costs extra full passes over alerts_aux, so it only wins when the
 /// catalog is substantially smaller, not merely smaller.
@@ -70,7 +71,7 @@ struct Cli {
     #[arg(long, default_value_t = 5000, value_parser = parse_positive_usize)]
     batch_size: usize,
 
-    /// Number of parallel worker tasks, and of shards the cleanup passes are split into.
+    /// Number of parallel worker tasks, and of cleanup shards run at once.
     #[arg(long, default_value_t = 1, value_parser = parse_positive_usize)]
     processes: usize,
 
@@ -183,13 +184,14 @@ async fn temp_needs_reset(
 async fn sharded_update_many(
     collection: &mongodb::Collection<Document>,
     shards: &[Document],
+    processes: usize,
     base_filter: &Document,
     update: UpdateModifications,
     label: &str,
 ) -> Result<u64, mongodb::error::Error> {
     let done = Arc::new(AtomicUsize::new(0));
     let total = shards.len();
-    let results = futures::future::join_all(shards.iter().enumerate().map(|(index, shard)| {
+    let results: Vec<_> = futures::stream::iter(shards.iter().enumerate().map(|(index, shard)| {
         let filter = merge_filters(base_filter, shard);
         let collection = collection.clone();
         let update = update.clone();
@@ -218,6 +220,8 @@ async fn sharded_update_many(
             result
         }
     }))
+    .buffer_unordered(processes)
+    .collect()
     .await;
 
     let mut modified = 0;
@@ -560,7 +564,13 @@ async fn run_catalog_driven(
     let temp_field = format!("cross_matches.{}_temp", catalog_config.catalog);
     let run_start_jd = Time::now().to_jd();
     let shard_field = shard_field(&aux_collection).await;
-    let shards = range_shards(&aux_collection, processes, shard_field, &Document::new()).await;
+    let shards = range_shards(
+        &aux_collection,
+        processes * SHARDS_PER_PROCESS,
+        shard_field,
+        &Document::new(),
+    )
+    .await;
     info!(
         "[catalog\u{2192}{}] cleanup passes sharded on '{}' into {} ranges",
         catalog_config.catalog,
@@ -580,6 +590,7 @@ async fn run_catalog_driven(
         let cleared = sharded_update_many(
             &aux_collection,
             &shards,
+            processes,
             &doc! { &temp_field: { "$exists": true } },
             UpdateModifications::Document(doc! { "$unset": { &temp_field: "" } }),
             &format!("catalog→{} phase 1", catalog_config.catalog),
@@ -674,6 +685,7 @@ async fn run_catalog_driven(
     sharded_update_many(
         &aux_collection,
         &shards,
+        processes,
         &commit_filter,
         UpdateModifications::Pipeline(make_commit_pipeline(
             &catalog_config,
