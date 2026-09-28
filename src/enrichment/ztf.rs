@@ -579,7 +579,6 @@ pub struct ZtfAlertClassifications {
     pub acai_o: f32,
     pub acai_b: f32,
     pub btsbot: f32,
-    // pub cider_fusion: Option<CiderClassProbs>,
     /// Calibrated, prior-adjusted leaf probabilities. Previously the raw head
     /// output; `applecider_outputs.alpha` still recovers that exactly.
     #[serde(skip_serializing_if = "Option::is_none")]
