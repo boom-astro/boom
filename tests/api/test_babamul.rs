@@ -54,6 +54,8 @@ mod tests {
                 identities: vec![],
                 orcid_id: None,
                 name: None,
+                is_admin: false,
+                acls: vec![],
             };
 
             let babamul_users_collection: mongodb::Collection<BabamulUser> =
@@ -2739,6 +2741,8 @@ mod tests {
             identities: vec![],
             orcid_id: None,
             name: None,
+            is_admin: false,
+            acls: vec![],
         })
         .await
         .unwrap();
@@ -2809,6 +2813,8 @@ mod tests {
             identities: vec![],
             orcid_id: None,
             name: None,
+            is_admin: false,
+            acls: vec![],
         })
         .await
         .unwrap();
@@ -2856,6 +2862,8 @@ mod tests {
             identities: vec![],
             orcid_id: None,
             name: None,
+            is_admin: false,
+            acls: vec![],
         })
         .await
         .unwrap();
@@ -2940,6 +2948,8 @@ mod tests {
             identities: vec![],
             orcid_id: None,
             name: None,
+            is_admin: false,
+            acls: vec![],
         };
 
         let mut ids_to_cleanup: Vec<String> = Vec::new();
@@ -3900,6 +3910,8 @@ mod tests {
                 identities: vec![],
                 orcid_id: None,
                 name: None,
+                is_admin: false,
+                acls: vec![],
             })
             .await
             .unwrap();
@@ -4102,6 +4114,8 @@ mod tests {
                 identities: vec![],
                 orcid_id: None,
                 name: None,
+                is_admin: false,
+                acls: vec![],
             })
             .await
             .unwrap();
