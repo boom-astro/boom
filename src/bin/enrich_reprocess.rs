@@ -24,7 +24,8 @@ use boom::{
     conf::{load_dotenv, AppConfig},
     enrichment::{
         models::{SharedModelPool, SharedModels},
-        EnrichmentWorker, EnrichmentWorkerError, LsstEnrichmentWorker, ZtfEnrichmentWorker,
+        DecamEnrichmentWorker, EnrichmentWorker, EnrichmentWorkerError, LsstEnrichmentWorker,
+        WinterEnrichmentWorker, ZtfEnrichmentWorker,
     },
     utils::{
         enums::Survey,
@@ -165,14 +166,6 @@ async fn run(args: Cli) {
     let mut worker_handles: Vec<(thread::JoinHandle<()>, mpsc::Sender<WorkerCmd>)> =
         Vec::with_capacity(n_enrichment);
 
-    if !matches!(args.survey, Survey::Ztf | Survey::Lsst) {
-        eprintln!(
-            "error: enrichment-only reprocessing is not supported for survey {:?}",
-            args.survey
-        );
-        std::process::exit(1);
-    }
-
     for _ in 0..n_enrichment {
         let (sender, receiver) = mpsc::channel(1);
         let config_path_clone = config_path.clone();
@@ -197,7 +190,18 @@ async fn run(args: Cli) {
                         shared_models,
                         input_queue_clone,
                     ),
-                    _ => unreachable!("survey validated before spawn loop"),
+                    Survey::Decam => run_enrich_only::<DecamEnrichmentWorker>(
+                        receiver,
+                        &config_path_clone,
+                        shared_models,
+                        input_queue_clone,
+                    ),
+                    Survey::Winter => run_enrich_only::<WinterEnrichmentWorker>(
+                        receiver,
+                        &config_path_clone,
+                        shared_models,
+                        input_queue_clone,
+                    ),
                 };
                 result.unwrap_or_else(as_error!("enrichment-only worker failed"));
             })
