@@ -11,7 +11,9 @@ use crate::{
         routes::users::User,
     },
     conf::{AppConfig, FilterWorkerConfig},
-    enrichment::{LsstAlertProperties, ZtfAlertClassifications, ZtfAlertProperties},
+    enrichment::{
+        LsstAlertProperties, WinterAlertProperties, ZtfAlertClassifications, ZtfAlertProperties,
+    },
     filter::{
         build_filter_pipeline, Filter, FilterError, FilterVersion, SURVEYS_REQUIRING_PERMISSIONS,
     },
@@ -1381,6 +1383,7 @@ pub struct WinterAlertToFilter {
     #[serde(rename = "objectId")]
     pub object_id: String,
     pub candidate: WinterCandidate,
+    pub properties: WinterAlertProperties,
     pub coordinates: GalacticCoordinates,
     pub prv_candidates: Vec<WinterPrvCandidate>,
     pub aliases: WinterAliases,
@@ -1550,7 +1553,12 @@ mod schema_tests {
         // WINTER does PSF photometry (magpsf) and has no forced-photometry history,
         // so its schema exposes candidate/prv_candidates but no fp_hists.
         let s = schema_str::<WinterAlertToFilter>();
-        for field in ["\"candidate\"", "\"prv_candidates\"", "\"magpsf\""] {
+        for field in [
+            "\"candidate\"",
+            "\"properties\"",
+            "\"prv_candidates\"",
+            "\"magpsf\"",
+        ] {
             assert!(
                 s.contains(field),
                 "WINTER filter schema missing {field}: {s}"
