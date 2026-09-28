@@ -121,6 +121,9 @@ pub struct DiaSource {
     /// Effective mid-visit time for this diaSource, expressed as Modified Julian Date, International Atomic Time.
     #[serde(rename = "midpointMjdTai")]
     pub midpoint_mjd_tai: f64,
+    /// Effective exposure time for this diaSource [s].
+    #[serde(rename = "exposureTime")]
+    pub exposure_time: Option<f32>,
     /// Right ascension coordinate of the center of this diaSource.
     pub ra: f64,
     /// Uncertainty of ra.
@@ -211,6 +214,11 @@ pub struct DiaSource {
     pub trail_ndata: Option<i32>,
     /// This flag is set if a trailed source extends onto or past edge pixels.
     pub trail_flag_edge: Option<bool>,
+    /// The trailed source fitting algorithm failed.
+    pub trail_flag: Option<bool>,
+    /// Integer key indicating which algorithm was used to measure trailed source. 1=SDSSShape, 2=HSMShape.
+    #[serde(rename = "trailAlgorithm")]
+    pub trail_algorithm: Option<i32>,
     /// Forced photometry flux for a point source model measured on the visit image centered at DiaSource position
     #[serde(rename = "scienceFlux")]
     pub science_flux: Option<f32>,
@@ -244,6 +252,9 @@ pub struct DiaSource {
     pub extendedness: Option<f32>,
     /// A measure of reliability, computed using information from the source and image characterization, as well as the information on the Telescope and Camera system (e.g., ghost maps, defect maps, etc.).
     pub reliability: Option<f32>,
+    /// Version of the reliability model.
+    #[serde(rename = "reliabilityVersion")]
+    pub reliability_version: Option<String>,
     /// Filter band this source was observed with.
     pub band: Option<Band>,
     /// Source well fit by a dipole.
@@ -935,7 +946,7 @@ pub struct SsSource {
     pub dia_distance_rank: Option<i32>,
 }
 
-/// Rubin Avro alert schema v11.0 (minus the `mpc_orbits` orbital-elements record, which we do
+/// Rubin Avro alert schema v11.1 (minus the `mpc_orbits` orbital-elements record, which we do
 /// not use here yet)
 #[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
 pub struct LsstRawAvroAlert {
@@ -1852,6 +1863,37 @@ mod tests {
         assert_eq!(ss_source.helio_range, Some(2.5));
         assert_eq!(ss_source.topo_range, None);
         assert_eq!(ss_source.dia_distance_rank, Some(1));
+    }
+
+    #[test]
+    fn test_dia_source_v11_1_fields_from_avro_value() {
+        use apache_avro::{from_value, types::Value};
+
+        let value = Value::Record(vec![
+            ("diaSourceId".to_string(), Value::Long(123456789)),
+            (
+                "exposureTime".to_string(),
+                Value::Union(1, Box::new(Value::Float(30.0))),
+            ),
+            (
+                "trail_flag".to_string(),
+                Value::Union(1, Box::new(Value::Boolean(true))),
+            ),
+            (
+                "trailAlgorithm".to_string(),
+                Value::Union(1, Box::new(Value::Int(2))),
+            ),
+            (
+                "reliabilityVersion".to_string(),
+                Value::Union(1, Box::new(Value::String("0.3".to_string()))),
+            ),
+        ]);
+
+        let dia_source: DiaSource = from_value(&value).expect("failed to deserialize DiaSource");
+        assert_eq!(dia_source.exposure_time, Some(30.0));
+        assert_eq!(dia_source.trail_flag, Some(true));
+        assert_eq!(dia_source.trail_algorithm, Some(2));
+        assert_eq!(dia_source.reliability_version, Some("0.3".to_string()));
     }
 
     #[tokio::test]
