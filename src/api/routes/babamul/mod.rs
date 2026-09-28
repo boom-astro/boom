@@ -1,3 +1,4 @@
+pub mod embeddings;
 pub mod oauth;
 pub mod stats;
 pub mod surveys;
@@ -198,6 +199,14 @@ pub struct BabamulUser {
     /// `username` it is free text, optional, and not unique.
     #[serde(default)]
     pub name: Option<String>,
+    /// Whether this account may perform destructive operational actions, such
+    /// as deleting a stored embedding.
+    ///
+    /// `#[serde(default)]` so accounts created before this field existed read
+    /// back as non-admin rather than failing to deserialize. There is no
+    /// endpoint that grants it: set it directly on the user document.
+    #[serde(default)]
+    pub is_admin: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, ToSchema)]
@@ -213,6 +222,9 @@ pub struct BabamulUserPublic {
     pub orcid_id: Option<String>,
     /// Full name the user chose to display, if any
     pub name: Option<String>,
+    /// Whether the account may perform admin-only actions. Surfaced so the web
+    /// frontend can hide controls it would only be refused for.
+    pub is_admin: bool,
 }
 
 impl From<BabamulUser> for BabamulUserPublic {
@@ -229,6 +241,7 @@ impl From<BabamulUser> for BabamulUserPublic {
                 .collect(),
             orcid_id: user.orcid_id,
             name: user.name,
+            is_admin: user.is_admin,
         }
     }
 }
@@ -368,6 +381,7 @@ pub async fn post_babamul_signup(
                 identities: Vec::new(),
                 orcid_id: None,
                 name: None,
+                is_admin: false,
             };
 
             // Note: Kafka credentials will be created on demand via /babamul/kafka-credentials endpoint

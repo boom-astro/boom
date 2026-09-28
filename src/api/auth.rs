@@ -242,6 +242,11 @@ const BABAMUL_PUBLIC_ROUTES: &[&str] = &[
     "/babamul/stats/nightly",
     "/babamul/stats/collections",
     "/babamul/stats/kafka",
+    // Read-only similarity search, public like the stats behind /dashboard.
+    // The DELETE on /babamul/embeddings/{object_id} is deliberately absent:
+    // it is a different method on a different path and stays admin-only.
+    "/babamul/similarity/objects",
+    "/babamul/embeddings/count",
 ];
 
 /// Middleware for authenticating Babamul users

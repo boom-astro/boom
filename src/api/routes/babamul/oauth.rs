@@ -634,6 +634,7 @@ fn new_social_user(
         // Seeded from the provider so the profile isn't blank on day one; the
         // user can change or clear it via PATCH /babamul/profile.
         name,
+        is_admin: false,
     })
 }
 

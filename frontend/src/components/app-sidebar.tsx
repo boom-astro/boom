@@ -9,6 +9,7 @@ import {
   IconPackage,
   IconNotebook,
   IconBook,
+  IconVector,
 } from "@tabler/icons-react"
 
 import { NavDocuments } from "@/components/nav-documents"
@@ -37,6 +38,11 @@ const data = {
       title: "Dashboard",
       url: "/dashboard",
       icon: IconChartBar,
+    },
+    {
+      title: "Embeddings",
+      url: "/embeddings",
+      icon: IconVector,
     },
   ],
   navSecondary: [

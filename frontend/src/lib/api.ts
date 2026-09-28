@@ -21,6 +21,8 @@ export type Profile = {
   /** Provider slugs the account can sign in with, e.g. ["google", "orcid"] */
   identity_providers?: string[];
   orcid_id?: string | null;
+  /** Admin-only controls are hidden unless this is true. */
+  is_admin?: boolean;
 } | null;
 
 // A social sign-in provider advertised by `/oauth/providers`
@@ -585,6 +587,95 @@ export async function searchObjects(value: string, limit: number = 10): Promise<
     if (typeof m === 'string') message = m;
   }
   return { results, message };
+}
+
+/**
+ * One neighbor returned by a similarity search.
+ *
+ * `candid`/`jd` describe the alert the stored embedding was computed from, and
+ * are optional because Milvus only returns them when they were requested as
+ * output fields.
+ */
+export type SimilarObject = {
+  object_id: string;
+  /** Similarity under the collection's metric. COSINE, so higher is closer. */
+  score: number;
+  candid?: number | string | null;
+  jd?: number | null;
+};
+
+/**
+ * Objects whose AppleCiDEr fusion embedding is closest to this one's.
+ *
+ * The seed object is resolved to its stored vector server-side and stripped
+ * from the results, so every hit is a genuine neighbor.
+ *
+ * A 404 means the object has no embedding rather than that it doesn't exist —
+ * only ZTF alerts that pass the AppleCiDEr gate get one — so it is returned as
+ * an empty list with a message instead of thrown.
+ *
+ * Unauthenticated, like the dashboard stats: the endpoint is public so the page
+ * works without signing in.
+ */
+export async function fetchSimilarObjects(
+  objectId: string,
+  topK: number = 10
+): Promise<{ results: SimilarObject[]; message?: string }> {
+  const url = `${API_BASE}/similarity/objects`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ object_id: objectId, top_k: topK }),
+  });
+  const body = await parseResponseJson(res).catch(() => null);
+  const message =
+    body && typeof body === "object" && "message" in body
+      ? String((body as { message?: unknown }).message)
+      : undefined;
+
+  if (res.status === 404) {
+    return { results: [], message: message ?? `No embedding stored for ${objectId}` };
+  }
+  if (!res.ok) {
+    throw new Error(message ?? `Similarity search failed: ${res.status}`);
+  }
+
+  const result = unwrapData<unknown>(body, []);
+  return { results: Array.isArray(result) ? (result as SimilarObject[]) : [], message };
+}
+
+/** How many embeddings Milvus currently holds. Public, like the other stats. */
+export async function fetchEmbeddingsCount(): Promise<number> {
+  const url = `${API_BASE}/embeddings/count`;
+  const res = await fetch(url);
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`Fetch embedding count failed: ${res.status} ${txt}`);
+  }
+  const body = await parseResponseJson(res).catch(() => ({}));
+  const data = unwrapData<{ count?: number }>(body, {});
+  return typeof data.count === "number" ? data.count : 0;
+}
+
+/**
+ * Remove an object's stored embedding. Admin only; the server enforces it.
+ *
+ * Returns how many rows Milvus removed, so the caller can tell a real deletion
+ * from a no-op on an object that had nothing stored.
+ */
+export async function deleteObjectEmbedding(objectId: string): Promise<number> {
+  const url = `${API_BASE}/embeddings/${encodeURIComponent(objectId)}`;
+  const res = await fetchWithAuth(url, { method: "DELETE" });
+  const body = await parseResponseJson(res).catch(() => null);
+  if (!res.ok) {
+    const message =
+      body && typeof body === "object" && "message" in body
+        ? String((body as { message?: unknown }).message)
+        : `Delete embedding failed: ${res.status}`;
+    throw new Error(message);
+  }
+  const data = unwrapData<{ deleted?: number }>(body, {});
+  return typeof data.deleted === "number" ? data.deleted : 0;
 }
 
 export default {

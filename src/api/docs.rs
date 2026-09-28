@@ -122,6 +122,9 @@ pub struct ApiDoc;
         routes::babamul::stats::kafka::get_kafka_stats,
         routes::babamul::stats::nightly::get_nightly_stats,
         routes::babamul::surveys::alerts::skymap_search_alerts,
+        routes::babamul::embeddings::post_babamul_similar_objects,
+        routes::babamul::embeddings::get_babamul_embeddings_count,
+        routes::babamul::embeddings::delete_babamul_object_embedding,
     ),
     components(schemas(
         routes::babamul::surveys::alerts::LsstAlertSkymapSearchResult

@@ -216,6 +216,62 @@ Note that `search_embedding` requires the collection to have been **loaded**
 (done by `ensure_embedding_collection`), and only rows that have been flushed are
 visible to search.
 
+## HTTP endpoints
+
+The same three operations are exposed over HTTP, on both API surfaces. The
+handlers are thin wrappers over shared helpers in
+`src/api/routes/embeddings.rs`; the duplication is in the routing only, because
+the two surfaces authenticate differently and a token for one is not accepted by
+the other.
+
+| Operation | Internal API | Babamul API |
+| --- | --- | --- |
+| Similarity search | `POST /similarity/objects` | `POST /babamul/similarity/objects` |
+| Stored count | `GET /embeddings/count` | `GET /babamul/embeddings/count` |
+| Delete one (admin) | `DELETE /embeddings/{object_id}` | `DELETE /babamul/embeddings/{object_id}` |
+
+The search takes `{"object_id": ..., "top_k": ...}`. Callers pass an id rather
+than a raw 384-float vector: the seed object's stored embedding is resolved
+server-side, and the seed is stripped from its own results. `top_k` defaults to
+10 and is clamped to 100. A 404 means the object has no stored embedding, which
+is an ordinary outcome — only ZTF alerts that clear the AppleCiDEr gate get one.
+
+On the Babamul side, search and count are **public** (listed in
+`BABAMUL_PUBLIC_ROUTES`), matching the stats endpoints behind `/dashboard`:
+they are read-only and the page is reachable without signing in. The delete is
+not, and stays admin-only.
+
+The browser never talks to Milvus directly: it is gRPC on port 50051 behind
+credentials that must not ship to a client, so the path is always
+browser → BOOM API → Milvus.
+
+### Admins
+
+Deleting an embedding is admin-only on both surfaces, but "admin" means a
+different field on each: `User::is_admin` for the internal API, and
+`BabamulUser::is_admin` for Babamul. The latter is `#[serde(default)]`, so
+accounts predating it read back as non-admin, and there is **no endpoint that
+grants it** — set it on the user document directly:
+
+```js
+db.babamul_users.updateOne({ email: "someone@example.org" }, { $set: { is_admin: true } })
+```
+
+`BabamulUserPublic` carries the flag so the web frontend can hide controls the
+server would only refuse.
+
+## Web UI
+
+The frontend serves similarity search at `/embeddings`
+(`frontend/src/pages/Embeddings.tsx`): an object id plus neighbor count, results
+linking through to each object's page, and a tile showing the stored-embedding
+count. That count doubles as a health signal — enrichment pauses embedding
+uploads while Milvus is unreachable, and a count that stops growing is the
+visible symptom. The delete form renders only for admins.
+
+The page is public, like `/dashboard` — no sign-in needed to search. The delete
+form renders only for a signed-in admin.
+
 ## Regenerating the client
 
 The gRPC client is generated at build time from the protos vendored in
