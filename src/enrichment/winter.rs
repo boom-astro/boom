@@ -265,9 +265,9 @@ impl WinterEnrichmentWorker {
     }
 }
 
-// Schema v0.1 packets carry neither the PS1 nor the Gaia crossmatch.
+// Alerts stored before the v0.4 Gaia fields were read keep PS1 but lost Gaia.
 fn has_stellar_crossmatch(candidate: &WinterCandidate) -> bool {
-    candidate.sgscore1.is_some() || candidate.distgaia.is_some()
+    candidate.distgaia.is_some()
 }
 
 // ZTF's rule, except that a missing PS1 magnitude fails its cut instead of passing it.
@@ -335,8 +335,14 @@ mod tests {
     }
 
     #[test]
-    fn test_schema_v0_1_packet_has_no_stellar_crossmatch() {
+    fn test_stellar_crossmatch_needs_the_gaia_fields() {
         assert!(has_stellar_crossmatch(&packet_candidate()));
+        let mut candidate = packet_candidate();
+        candidate.distgaia = None;
+        assert!(
+            !has_stellar_crossmatch(&candidate),
+            "PS1 alone would hide Gaia bright stars"
+        );
         let alert = read_winter_test_alert("tests/data/alerts/winter/alert_schemavsn_0.1.avro");
         assert!(!has_stellar_crossmatch(&alert.candidate));
     }
