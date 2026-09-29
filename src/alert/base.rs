@@ -103,7 +103,7 @@ fn decode_variable<R: Read>(reader: &mut R) -> Result<u64, SchemaRegistryError> 
     Ok(i)
 }
 
-pub fn zag_i64<R: Read>(reader: &mut R) -> Result<i64, SchemaRegistryError> {
+fn decode_long<R: Read>(reader: &mut R) -> Result<i64, SchemaRegistryError> {
     let z = decode_variable(reader)?;
     if z & 0x1 == 0 {
         Ok((z >> 1) as i64)
@@ -112,11 +112,6 @@ pub fn zag_i64<R: Read>(reader: &mut R) -> Result<i64, SchemaRegistryError> {
     }
 }
 
-fn decode_long<R: Read>(reader: &mut R) -> Result<i64, SchemaRegistryError> {
-    zag_i64(reader)
-}
-
-/// Read a length-prefixed byte array, returning its range in the underlying slice.
 fn read_byte_range(
     cursor: &mut std::io::Cursor<&[u8]>,
 ) -> Result<std::ops::Range<usize>, SchemaRegistryError> {
