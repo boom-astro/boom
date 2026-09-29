@@ -95,9 +95,10 @@ where
     D: Deserializer<'de>,
 {
     Ok(match Option::<FloatOrString>::deserialize(deserializer)? {
-        Some(FloatOrString::String(text)) if text != "nan" => Some(text),
+        Some(FloatOrString::String(text)) => Some(text),
         _ => None,
-    })
+    }
+    .filter(|text| !text.is_empty() && !text.eq_ignore_ascii_case("nan")))
 }
 
 /// WINTER candidate record.
