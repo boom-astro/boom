@@ -1540,8 +1540,7 @@ mod schema_tests {
         serde_json::to_string(&T::get_schema()).unwrap()
     }
 
-    /// The record a field holds, looking through the `null` of an optional field.
-    fn field_record<'a>(record: &'a serde_json::Value, name: &str) -> &'a serde_json::Value {
+    fn field_type<'a>(record: &'a serde_json::Value, name: &str) -> &'a serde_json::Value {
         let field = record["fields"]
             .as_array()
             .and_then(|fields| fields.iter().find(|f| f["name"] == name))
@@ -1549,16 +1548,16 @@ mod schema_tests {
         match &field["type"] {
             serde_json::Value::Array(union) => union
                 .iter()
-                .find(|t| t.is_object())
-                .unwrap_or_else(|| panic!("`{name}` holds no record: {field}")),
+                .find(|t| *t != "null")
+                .unwrap_or_else(|| panic!("`{name}` is only null: {field}")),
             other => other,
         }
     }
 
     fn assert_exposes_best_host_d_dlr<T: AvroSchema>() {
         let schema = serde_json::to_value(T::get_schema()).unwrap();
-        let best_host = field_record(field_record(&schema, "host_galaxy"), "best_host");
-        field_record(best_host, "d_dlr");
+        let best_host = field_type(field_type(&schema, "host_galaxy"), "best_host");
+        field_type(best_host, "d_dlr");
     }
 
     #[test]
