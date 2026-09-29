@@ -123,6 +123,16 @@ milvus:
     metric_type: COSINE
     index_type: HNSW
     object_id_max_length: 64
+  # Embeddings rejected while Milvus is unreachable wait in Valkey instead of
+  # being dropped, since recomputing one means another GPU pass over the alert.
+  backup_queue:
+    enabled: true
+    # Past this, the oldest buffered rows are discarded. Comfortably above a
+    # night of ZTF alerts (500k-800k), so a night-long outage drops nothing.
+    # ~1.6 KB per row, so about 1.6 GB of Valkey if it ever fills.
+    max_rows: 1000000
+    # Rows replayed per successful batch, so catch-up cannot starve live work.
+    drain_rows: 500
 kafka:
   consumer:
     ztf:

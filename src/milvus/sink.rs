@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use tracing::{debug, info, warn};
 
+use super::backup::BackupQueue;
 use super::client::{MilvusClient, MilvusError};
 use super::insert::EmbeddingRow;
 use crate::conf::MilvusConfig;
@@ -41,6 +42,9 @@ pub struct MilvusSink {
     consecutive_failures: u32,
     /// While in the future, uploads are skipped without touching the network.
     retry_at: Option<Instant>,
+    /// Holds embeddings the breaker turned away. `None` when the backup
+    /// queue is off, in which case rejected rows are dropped.
+    queue: Option<BackupQueue>,
 }
 
 impl MilvusSink {
@@ -49,12 +53,13 @@ impl MilvusSink {
     ///
     /// This is deliberately infallible: an operator enabling Milvus must not be
     /// able to take enrichment down by pointing it at a server that is off.
-    pub async fn connect_or_degrade(config: &MilvusConfig) -> Self {
+    pub async fn connect_or_degrade(config: &MilvusConfig, queue: Option<BackupQueue>) -> Self {
         let mut sink = Self {
             config: config.clone(),
             client: None,
             consecutive_failures: 0,
             retry_at: None,
+            queue,
         };
 
         if !config.enabled {
@@ -110,12 +115,30 @@ impl MilvusSink {
         self.retry_at = None;
     }
 
-    /// Upsert a batch, skipping the attempt while the breaker is open.
+    /// Buffer rows the sink could not upload. A queue failure is swallowed:
+    /// Valkey being down too does not justify failing enrichment.
+    async fn buffer(&mut self, rows: &[EmbeddingRow]) {
+        let Some(queue) = self.queue.as_mut() else {
+            return;
+        };
+        match queue.push(rows).await {
+            Ok(()) => debug!(rows = rows.len(), "buffered embeddings for a later retry"),
+            Err(e) => warn!("could not buffer {} embeddings: {}", rows.len(), e),
+        }
+    }
+
+    /// Upsert a batch, buffering it instead while the breaker is open.
     ///
     /// Never returns an error: failures are recorded and logged, because the
     /// alerts these embeddings came from are already persisted in Mongo.
     pub async fn upsert(&mut self, rows: &[EmbeddingRow]) {
-        if rows.is_empty() || !self.is_ready() {
+        if rows.is_empty() || !self.config.enabled {
+            return;
+        }
+
+        // Breaker open: hold the rows rather than pay a timeout.
+        if !self.is_ready() {
+            self.buffer(rows).await;
             return;
         }
 
@@ -126,6 +149,7 @@ impl MilvusSink {
                 }
                 Err(e) => {
                     self.record_failure("reconnect to milvus", e);
+                    self.buffer(rows).await;
                     return;
                 }
             }
@@ -139,11 +163,62 @@ impl MilvusSink {
             Ok(count) => {
                 debug!("upserted {} fusion embeddings to milvus", count);
                 self.record_success();
+                // Milvus is answering, so spend the goodwill on the backlog.
+                self.drain_some().await;
             }
             Err(e) => {
                 let what = format!("upsert {} fusion embeddings", rows.len());
                 self.record_failure(&what, e);
+                self.buffer(rows).await;
             }
+        }
+    }
+
+    /// Replay `backup_queue.drain_rows` of the backlog after a successful
+    /// upload, so catching up cannot starve live batches. Rows that fail go
+    /// back on the tail, not their old position — harmless, because the `jd`
+    /// guard decides the winner by data rather than arrival order.
+    async fn drain_some(&mut self) {
+        let Some(queue) = self.queue.as_mut() else {
+            return;
+        };
+
+        let batch = match queue.take(self.config.backup_queue.drain_rows).await {
+            Ok(batch) if batch.is_empty() => return,
+            Ok(batch) => batch,
+            Err(e) => {
+                warn!("could not read the milvus backup queue: {}", e);
+                return;
+            }
+        };
+
+        let Some(client) = self.client.as_mut() else {
+            // Lost the connection between the upload and here; put them back.
+            self.buffer(&batch).await;
+            return;
+        };
+
+        match client.upsert_embeddings(&batch).await {
+            Ok(count) => {
+                let remaining = self.queue_len().await;
+                info!(
+                    replayed = count,
+                    remaining, "replayed buffered embeddings to milvus"
+                );
+            }
+            Err(e) => {
+                let what = format!("replay {} buffered embeddings", batch.len());
+                self.record_failure(&what, e);
+                self.buffer(&batch).await;
+            }
+        }
+    }
+
+    /// Rows still waiting. Reports 0 on failure; only used for a log line.
+    async fn queue_len(&mut self) -> usize {
+        match self.queue.as_mut() {
+            Some(queue) => queue.pending().await.unwrap_or(0),
+            None => 0,
         }
     }
 }
@@ -158,12 +233,14 @@ mod tests {
             .expect("milvus config defaults must deserialize")
     }
 
+    /// No queue: breaker state is independent of where rejected rows go.
     fn sink(enabled: bool) -> MilvusSink {
         MilvusSink {
             config: config(enabled),
             client: None,
             consecutive_failures: 0,
             retry_at: None,
+            queue: None,
         }
     }
 
