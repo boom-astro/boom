@@ -118,6 +118,12 @@ pub struct WinterAlertProperties {
     /// Detection episodes, for finding sources that outburst more than once.
     /// `None` on alerts enriched before this field existed.
     pub episode_history: Option<EpisodeHistory>,
+    /// ZTF's PS1 star rule, or a Gaia 5-sigma parallax within 2". `None` if not crossmatched.
+    #[serde(default)]
+    pub star: Option<bool>,
+    /// Within 20" of a Gaia G < 14 star or ZTF's PS1 bright star. `None` if not crossmatched.
+    #[serde(default)]
+    pub near_brightstar: Option<bool>,
 }
 
 pub struct WinterEnrichmentWorker {
@@ -246,12 +252,141 @@ impl WinterEnrichmentWorker {
             EPISODE_GAP_DAYS,
         );
 
+        let crossmatched = has_stellar_crossmatch(&alert.candidate);
         Ok(WinterAlertProperties {
             stationary,
             hosted: alert.host_galaxy.as_ref().map(|h| h.best_host.is_some()),
             photstats,
             detection_history: Some(detection_history),
             episode_history: Some(episode_history),
+            star: crossmatched.then(|| is_star(&alert.candidate)),
+            near_brightstar: crossmatched.then(|| is_near_brightstar(&alert.candidate)),
         })
+    }
+}
+
+// Alerts stored before the v0.4 Gaia fields were read keep PS1 but lost Gaia.
+fn has_stellar_crossmatch(candidate: &WinterCandidate) -> bool {
+    candidate.distgaia.is_some()
+}
+
+// ZTF's rule, except that a missing PS1 magnitude fails its cut instead of passing it.
+fn is_star(candidate: &WinterCandidate) -> bool {
+    let sgscore1 = candidate.sgscore1.unwrap_or(0.0);
+    let distpsnr1 = candidate.distpsnr1.unwrap_or(f32::INFINITY);
+    let red_color = |redder_band: Option<f32>| {
+        candidate
+            .srmag1
+            .zip(redder_band)
+            .is_some_and(|(r_band, redder_band)| {
+                r_band > 0.0 && redder_band > 0.0 && r_band - redder_band > 3.0
+            })
+    };
+    let gaia_parallax = candidate
+        .distgaia
+        .is_some_and(|distance| (0.0..=2.0).contains(&distance))
+        && candidate
+            .plxgaia
+            .is_some_and(|significance| significance >= 5.0)
+        && candidate.ruwegaia.is_some_and(|ruwe| ruwe < 1.4);
+    (sgscore1 > 0.76 && (0.0..=2.0).contains(&distpsnr1))
+        || (sgscore1 > 0.2
+            && (0.0..=1.0).contains(&distpsnr1)
+            && (red_color(candidate.szmag1) || red_color(candidate.simag1)))
+        || gaia_parallax
+}
+
+// ZTF's PS1 terms. The Gaia term uses `distgaiabright`, as v0.4 has no Gaia magnitude.
+fn is_near_brightstar(candidate: &WinterCandidate) -> bool {
+    let bright_ps1_star = |sgscore: Option<f32>, distpsnr: Option<f32>, srmag: Option<f32>| {
+        sgscore.unwrap_or(0.0) > 0.49
+            && distpsnr.unwrap_or(f32::INFINITY) <= 20.0
+            && srmag.is_some_and(|srmag| srmag > 0.0 && srmag <= 15.0)
+    };
+    let saturated_ps1_star = candidate.sgscore1 == Some(0.5)
+        && candidate.distpsnr1.is_some_and(|distance| distance < 0.5)
+        && [candidate.sgmag1, candidate.srmag1, candidate.simag1]
+            .into_iter()
+            .flatten()
+            .any(|magnitude| magnitude < 17.0);
+    candidate
+        .distgaiabright
+        .is_some_and(|distance| (0.0..=20.0).contains(&distance))
+        || bright_ps1_star(candidate.sgscore1, candidate.distpsnr1, candidate.srmag1)
+        || bright_ps1_star(candidate.sgscore2, candidate.distpsnr2, candidate.srmag2)
+        || bright_ps1_star(candidate.sgscore3, candidate.distpsnr3, candidate.srmag3)
+        || saturated_ps1_star
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::utils::testing::read_winter_test_alert;
+
+    fn packet_candidate() -> WinterCandidate {
+        read_winter_test_alert("tests/data/alerts/winter/alert.avro").candidate
+    }
+
+    #[test]
+    fn test_packet_is_not_a_star_nor_near_a_bright_star() {
+        let candidate = packet_candidate();
+        assert!(!is_star(&candidate));
+        assert!(!is_near_brightstar(&candidate));
+    }
+
+    #[test]
+    fn test_stellar_crossmatch_needs_the_gaia_fields() {
+        assert!(has_stellar_crossmatch(&packet_candidate()));
+        let mut candidate = packet_candidate();
+        candidate.distgaia = None;
+        assert!(
+            !has_stellar_crossmatch(&candidate),
+            "PS1 alone would hide Gaia bright stars"
+        );
+        let alert = read_winter_test_alert("tests/data/alerts/winter/alert_schemavsn_0.1.avro");
+        assert!(!has_stellar_crossmatch(&alert.candidate));
+    }
+
+    #[test]
+    fn test_is_star() {
+        let mut candidate = packet_candidate();
+        candidate.sgscore1 = Some(0.9);
+        assert!(is_star(&candidate));
+
+        let mut candidate = packet_candidate();
+        candidate.plxgaia = Some(8.0);
+        candidate.ruwegaia = Some(1.0);
+        assert!(is_star(&candidate));
+        candidate.ruwegaia = Some(2.0);
+        assert!(
+            !is_star(&candidate),
+            "a poor astrometric fit is not a parallax"
+        );
+
+        let mut candidate = packet_candidate();
+        candidate.szmag1 = Some(17.0);
+        assert!(is_star(&candidate));
+        candidate.srmag1 = None;
+        assert!(
+            !is_star(&candidate),
+            "a missing r magnitude is not a red color"
+        );
+    }
+
+    #[test]
+    fn test_is_near_brightstar() {
+        let mut candidate = packet_candidate();
+        candidate.distgaiabright = Some(15.0);
+        assert!(is_near_brightstar(&candidate));
+
+        let mut candidate = packet_candidate();
+        candidate.srmag2 = Some(14.0);
+        assert!(is_near_brightstar(&candidate));
+
+        let mut candidate = packet_candidate();
+        candidate.sgscore1 = Some(0.5);
+        candidate.distpsnr1 = Some(0.2);
+        candidate.simag1 = Some(16.0);
+        assert!(is_near_brightstar(&candidate));
     }
 }
