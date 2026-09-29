@@ -22,7 +22,7 @@ use crate::{
 use constcat::concat;
 use flare::Time;
 use mongodb::bson::{doc, Document};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_with::{serde_as, skip_serializing_none};
 use tracing::{debug, error, instrument, warn};
 
@@ -69,6 +69,38 @@ fn default_band() -> Band {
     Band::Y
 }
 
+// v0.4 types some PS1-STRM fields as float, string or null.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum FloatOrString {
+    Float(f32),
+    String(String),
+}
+
+fn deserialize_lenient_f32<'de, D>(deserializer: D) -> Result<Option<f32>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = match Option::<FloatOrString>::deserialize(deserializer)? {
+        Some(FloatOrString::Float(value)) => Some(value),
+        Some(FloatOrString::String(text)) => text.parse().ok(),
+        None => None,
+    };
+    Ok(value.filter(|value: &f32| value.is_finite()))
+}
+
+// WINTER writes the string "nan" for a missing class or ZTF name.
+fn deserialize_lenient_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(match Option::<FloatOrString>::deserialize(deserializer)? {
+        Some(FloatOrString::String(text)) => Some(text),
+        _ => None,
+    }
+    .filter(|text| !text.is_empty() && !text.eq_ignore_ascii_case("nan")))
+}
+
 /// WINTER candidate record.
 ///
 /// Mirrors the upstream `winter.alert.candidate` avro record (which is modelled
@@ -90,13 +122,11 @@ pub struct WinterCandidate {
     pub progname: String,
     pub programid: i32,
     pub isdiffpos: bool,
-    // Not all upstream WINTER packets carry `field`; tolerate its absence
-    // rather than failing the whole alert (missing field `field`). It stays a
-    // plain `i32` (not `Option`) because the writer schema types it as a bare
-    // `int` when present — an `Option` would make the deserializer demand a
-    // union and reject that. `#[serde(default)]` fills 0 only when it's absent.
-    #[serde(default)]
+    // Renamed `fieldid` in v0.4. A bare avro `int`, so `default` (an `Option` wants a union).
+    #[serde(default, alias = "fieldid")]
     pub field: i32,
+    #[serde(default)]
+    pub boardid: i32,
     pub ra: f64,
     pub dec: f64,
     pub magzpsci: Option<f32>,
@@ -142,6 +172,8 @@ pub struct WinterCandidate {
     pub clrrms: Option<f32>,
     pub rb: Option<f32>,
     pub rbversion: Option<String>,
+    pub xrb: Option<f32>,
+    pub xrbversion: Option<String>,
     pub ssdistnr: Option<f32>,
     pub ssmagnr: Option<f32>,
     pub ssnamenr: Option<String>,
@@ -156,6 +188,14 @@ pub struct WinterCandidate {
     pub szmag1: Option<f32>,
     pub sgscore1: Option<f32>,
     pub distpsnr1: Option<f32>,
+    #[serde(default, deserialize_with = "deserialize_lenient_string")]
+    pub ps1class1: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_lenient_f32")]
+    pub ps1strmprobstar1: Option<f32>,
+    pub ps1strmprobqso1: Option<f32>,
+    pub ps1strmprobgalaxy1: Option<f32>,
+    pub ps1strmphotoz1: Option<f32>,
+    pub ps1strmphotozerr1: Option<f32>,
     pub psobjectid2: Option<f32>,
     pub sgmag2: Option<f32>,
     pub srmag2: Option<f32>,
@@ -163,6 +203,13 @@ pub struct WinterCandidate {
     pub szmag2: Option<f32>,
     pub sgscore2: Option<f32>,
     pub distpsnr2: Option<f32>,
+    #[serde(default, deserialize_with = "deserialize_lenient_string")]
+    pub ps1strmclass2: Option<String>,
+    pub ps1strmprobstar2: Option<f32>,
+    pub ps1strmprobqso2: Option<f32>,
+    pub ps1strmprobgalaxy2: Option<f32>,
+    pub ps1strmphotoz2: Option<f32>,
+    pub ps1strmphotozerr2: Option<f32>,
     pub psobjectid3: Option<f32>,
     pub sgmag3: Option<f32>,
     pub srmag3: Option<f32>,
@@ -170,6 +217,13 @@ pub struct WinterCandidate {
     pub szmag3: Option<f32>,
     pub sgscore3: Option<f32>,
     pub distpsnr3: Option<f32>,
+    #[serde(default, deserialize_with = "deserialize_lenient_string")]
+    pub ps1strmclass3: Option<String>,
+    pub ps1strmprobstar3: Option<f32>,
+    pub ps1strmprobqso3: Option<f32>,
+    pub ps1strmprobgalaxy3: Option<f32>,
+    pub ps1strmphotoz3: Option<f32>,
+    pub ps1strmphotozerr3: Option<f32>,
     pub nmtchtm: i32,
     pub tmjmag1: Option<f32>,
     pub tmhmag1: Option<f32>,
@@ -187,6 +241,15 @@ pub struct WinterCandidate {
     pub neargaiabright: Option<f32>,
     pub maggaia: Option<f32>,
     pub maggaiabright: Option<f32>,
+    pub distgaia: Option<f32>,
+    pub plxgaia: Option<f32>,
+    pub ruwegaia: Option<f32>,
+    pub distgaiabright: Option<f32>,
+    pub plxgaiabright: Option<f32>,
+    pub ruwegaiabright: Option<f32>,
+    #[serde(default, deserialize_with = "deserialize_lenient_string")]
+    pub ztfname: Option<String>,
+    pub distztf: Option<f32>,
     // Not present in the avro packet; derived from `fid` during processing.
     #[serde(default = "default_band")]
     pub band: Band,
@@ -218,6 +281,7 @@ pub struct WinterPrvCandidate {
     pub dec: f64,
     pub magpsf: f32,
     pub sigmapsf: f32,
+    pub diffmaglim: Option<f32>,
     pub fwhm: Option<f32>,
     pub scorr: Option<f64>,
     #[serde(default = "default_band")]
@@ -245,6 +309,7 @@ impl WinterPrvCandidate {
             dec: c.dec,
             magpsf: c.magpsf,
             sigmapsf: c.sigmapsf,
+            diffmaglim: c.diffmaglim,
             fwhm: c.fwhm,
             scorr: c.scorr,
             band: c.band.clone(),
