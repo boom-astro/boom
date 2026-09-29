@@ -20,6 +20,7 @@ use crate::{
     utils::{
         db::{count_alerts_in_jd_window, mongify},
         enums::Survey,
+        host::HostGalaxyAssociation,
     },
 };
 
@@ -1363,6 +1364,7 @@ pub struct ZtfAlertToFilter {
     pub aliases: ZtfAliases,
     #[serde(rename = "LSST")]
     pub lsst: Option<LsstFilterMatch>,
+    pub host_galaxy: Option<HostGalaxyAssociation>,
 }
 
 #[serdavro]
@@ -1380,6 +1382,7 @@ pub struct LsstAlertToFilter {
     pub aliases: LsstAliases,
     #[serde(rename = "ZTF")]
     pub ztf: Option<ZtfFilterMatch>,
+    pub host_galaxy: Option<HostGalaxyAssociation>,
 }
 
 #[serdavro]
@@ -1394,6 +1397,7 @@ pub struct WinterAlertToFilter {
     pub coordinates: GalacticCoordinates,
     pub prv_candidates: Vec<WinterPrvCandidate>,
     pub aliases: WinterAliases,
+    pub host_galaxy: Option<HostGalaxyAssociation>,
 }
 
 #[serdavro]
@@ -1408,6 +1412,7 @@ pub struct DecamAlertToFilter {
     pub prv_candidates: Vec<DecamCandidate>,
     pub fp_hists: Vec<DecamForcedPhot>,
     pub aliases: DecamAliases,
+    pub host_galaxy: Option<HostGalaxyAssociation>,
 }
 
 /// Get a schema of a survey's data available at filtering time
@@ -1533,6 +1538,35 @@ mod schema_tests {
 
     fn schema_str<T: AvroSchema>() -> String {
         serde_json::to_string(&T::get_schema()).unwrap()
+    }
+
+    /// The record a field holds, looking through the `null` of an optional field.
+    fn field_record<'a>(record: &'a serde_json::Value, name: &str) -> &'a serde_json::Value {
+        let field = record["fields"]
+            .as_array()
+            .and_then(|fields| fields.iter().find(|f| f["name"] == name))
+            .unwrap_or_else(|| panic!("no `{name}` field in {record}"));
+        match &field["type"] {
+            serde_json::Value::Array(union) => union
+                .iter()
+                .find(|t| t.is_object())
+                .unwrap_or_else(|| panic!("`{name}` holds no record: {field}")),
+            other => other,
+        }
+    }
+
+    fn assert_exposes_best_host_d_dlr<T: AvroSchema>() {
+        let schema = serde_json::to_value(T::get_schema()).unwrap();
+        let best_host = field_record(field_record(&schema, "host_galaxy"), "best_host");
+        field_record(best_host, "d_dlr");
+    }
+
+    #[test]
+    fn every_filter_schema_exposes_the_host_galaxy_d_dlr() {
+        assert_exposes_best_host_d_dlr::<ZtfAlertToFilter>();
+        assert_exposes_best_host_d_dlr::<LsstAlertToFilter>();
+        assert_exposes_best_host_d_dlr::<WinterAlertToFilter>();
+        assert_exposes_best_host_d_dlr::<DecamAlertToFilter>();
     }
 
     #[test]
