@@ -241,6 +241,7 @@ pub async fn build_decam_alerts(
                 ztf: None,
                 lsst: None,
             },
+            host_galaxy: None,
         };
 
         alerts_output.push(alert);
