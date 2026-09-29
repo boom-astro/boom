@@ -252,15 +252,15 @@ impl WinterEnrichmentWorker {
             EPISODE_GAP_DAYS,
         );
 
+        let crossmatched = has_stellar_crossmatch(&alert.candidate);
         Ok(WinterAlertProperties {
             stationary,
             hosted: alert.host_galaxy.as_ref().map(|h| h.best_host.is_some()),
             photstats,
             detection_history: Some(detection_history),
             episode_history: Some(episode_history),
-            star: has_stellar_crossmatch(&alert.candidate).then(|| is_star(&alert.candidate)),
-            near_brightstar: has_stellar_crossmatch(&alert.candidate)
-                .then(|| is_near_brightstar(&alert.candidate)),
+            star: crossmatched.then(|| is_star(&alert.candidate)),
+            near_brightstar: crossmatched.then(|| is_near_brightstar(&alert.candidate)),
         })
     }
 }
@@ -321,20 +321,10 @@ fn is_near_brightstar(candidate: &WinterCandidate) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::alert::{sanitize_winter_avro, WinterRawAvroAlert};
+    use crate::utils::testing::read_winter_test_alert;
 
     fn packet_candidate() -> WinterCandidate {
-        read_candidate("tests/data/alerts/winter/alert.avro")
-    }
-
-    fn read_candidate(path: &str) -> WinterCandidate {
-        let raw = std::fs::read(path).unwrap();
-        let fixed = sanitize_winter_avro(&raw).unwrap();
-        let reader = apache_avro::Reader::new(&fixed[..]).unwrap();
-        let value = reader.into_iter().next().unwrap().unwrap();
-        apache_avro::from_value::<WinterRawAvroAlert>(&value)
-            .unwrap()
-            .candidate
+        read_winter_test_alert("tests/data/alerts/winter/alert.avro").candidate
     }
 
     #[test]
@@ -347,8 +337,8 @@ mod tests {
     #[test]
     fn test_schema_v0_1_packet_has_no_stellar_crossmatch() {
         assert!(has_stellar_crossmatch(&packet_candidate()));
-        let candidate = read_candidate("tests/data/alerts/winter/alert_schemavsn_0.1.avro");
-        assert!(!has_stellar_crossmatch(&candidate));
+        let alert = read_winter_test_alert("tests/data/alerts/winter/alert_schemavsn_0.1.avro");
+        assert!(!has_stellar_crossmatch(&alert.candidate));
     }
 
     #[test]

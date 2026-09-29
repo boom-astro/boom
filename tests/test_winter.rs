@@ -10,8 +10,8 @@ use boom::{
         enums::Survey,
         lightcurves::Band,
         testing::{
-            drop_alert_from_collections, insert_custom_test_filter, remove_test_filter,
-            winter_alert_worker, AlertRandomizer, TEST_CONFIG_FILE,
+            drop_alert_from_collections, insert_custom_test_filter, read_winter_test_alert,
+            remove_test_filter, winter_alert_worker, AlertRandomizer, TEST_CONFIG_FILE,
         },
     },
 };
@@ -43,18 +43,10 @@ fn test_sanitize_winter_avro_is_readable() {
     }
 }
 
-fn read_winter_alert(path: &str) -> WinterRawAvroAlert {
-    let raw = std::fs::read(path).unwrap();
-    let fixed = sanitize_winter_avro(&raw).unwrap();
-    let reader = apache_avro::Reader::new(&fixed[..]).unwrap();
-    let value = reader.into_iter().next().unwrap().unwrap();
-    apache_avro::from_value(&value).unwrap()
-}
-
 #[test]
 fn test_winter_candidate_reads_schema_v0_4_fields() {
     // v0.4 renamed `field` to `fieldid` and types some PS1-STRM fields as float, string or null.
-    let alert = read_winter_alert("tests/data/alerts/winter/alert.avro");
+    let alert = read_winter_test_alert("tests/data/alerts/winter/alert.avro");
     let candidate = &alert.candidate;
     assert_eq!(candidate.field, 16409);
     assert_eq!(candidate.boardid, 1);
@@ -73,7 +65,7 @@ fn test_winter_candidate_reads_schema_v0_4_fields() {
 
 #[test]
 fn test_winter_candidate_reads_schema_v0_1_fields() {
-    let alert = read_winter_alert("tests/data/alerts/winter/alert_schemavsn_0.1.avro");
+    let alert = read_winter_test_alert("tests/data/alerts/winter/alert_schemavsn_0.1.avro");
     let candidate = &alert.candidate;
     assert_eq!(candidate.field, 18156);
     assert_eq!(candidate.boardid, 0);
@@ -215,7 +207,7 @@ fn test_real_alert_band_is_j() {
     // A genuine WINTER-mirar packet whose fid is 2. Kowalski reads the same
     // packets as 2massj and WINTER confirm the data is J, so this pins the whole
     // chain to a real alert.
-    let alert = read_winter_alert("tests/data/alerts/winter/alert.avro");
+    let alert = read_winter_test_alert("tests/data/alerts/winter/alert.avro");
     assert_eq!(alert.candidate.fid, 2);
     assert_eq!(fid_to_band(alert.candidate.fid).unwrap(), Band::J);
 }
