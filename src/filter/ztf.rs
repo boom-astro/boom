@@ -11,12 +11,13 @@ use crate::enrichment::{
 use crate::filter::{
     build_loaded_filters, build_lsst_aux_data, insert_lsst_aux_pipeline_if_needed,
     parse_programid_candid_tuple, run_filter, update_aliases_index_multiple, uses_field_in_filter,
-    validate_filter_pipeline, watchlist_projections, Alert, Classification, Filter, FilterError,
-    FilterResults, FilterWorker, FilterWorkerError, LoadedFilter, Origin, Photometry, SurveyMatch,
-    SurveyMatches,
+    validate_filter_pipeline, watchlist_projections, Alert, AlertHostGalaxy, Classification,
+    Filter, FilterError, FilterResults, FilterWorker, FilterWorkerError, LoadedFilter, Origin,
+    Photometry, SurveyMatch, SurveyMatches,
 };
 use crate::utils::cutouts::CutoutStorage;
 use crate::utils::db::{fetch_timeseries_op, get_array_dict_element};
+use crate::utils::host::HostGalaxyAssociation;
 use crate::utils::mpcorb::{
     fill_geometry, has_geometry, normalize_ztf_ssnamenr, OrbitCache, ORBITS_COLLECTION,
 };
@@ -150,6 +151,8 @@ pub struct ZtfAlertEnriched {
     #[serde(deserialize_with = "deserialize_ztf_forced_lightcurve")]
     pub fp_hists: Vec<ZtfPhotometry>,
     pub survey_matches: Option<ZtfSurveyMatches>,
+    #[serde(default)]
+    pub host_galaxy: Option<HostGalaxyAssociation>,
 }
 
 /// Builds ZTF Alert objects from the provided filter results and alert collection.
@@ -392,6 +395,10 @@ pub async fn build_ztf_alerts(
             cutout_difference: cutouts.cutout_difference,
             survey: Survey::Ztf,
             survey_matches,
+            host_galaxy: alert
+                .host_galaxy
+                .as_ref()
+                .and_then(AlertHostGalaxy::from_association),
         };
 
         alerts_output.push(alert);
