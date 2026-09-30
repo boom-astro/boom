@@ -13,6 +13,7 @@ use crate::{
         cutouts::CutoutStorage,
         db::{mongify_vec, update_timeseries_op},
         enums::Survey,
+        host::{self, HostGalaxyAssociation, HostGalaxyConfig},
         lightcurves::Band,
         o11y::logging::as_error,
         spatial::{xmatch, Coordinates},
@@ -23,7 +24,7 @@ use flare::Time;
 use mongodb::bson::{doc, Document};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_with::{serde_as, skip_serializing_none};
-use tracing::{debug, error, instrument};
+use tracing::{debug, error, instrument, warn};
 
 pub const STREAM_NAME: &str = "DECAM";
 pub const DECAM_DEC_RANGE: (f64, f64) = (-90.0, 33.5);
@@ -207,6 +208,8 @@ pub struct DecamObject {
     pub prv_candidates: Vec<DecamCandidate>,
     pub fp_hists: Vec<DecamForcedPhot>,
     pub cross_matches: Option<HashMap<String, Vec<Document>>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_galaxy: Option<HostGalaxyAssociation>,
     pub aliases: Option<DecamAliases>,
     pub coordinates: Coordinates,
     pub created_at: f64,
@@ -236,6 +239,7 @@ struct AlertAuxForUpdate {
 
 pub struct DecamAlertWorker {
     xmatch_configs: Vec<conf::CatalogXmatchConfig>,
+    host_galaxy_config: HostGalaxyConfig,
     db: mongodb::Database,
     alert_collection: mongodb::Collection<DecamAlert>,
     alert_aux_collection: mongodb::Collection<DecamObject>,
@@ -375,6 +379,7 @@ impl DecamAlertWorker {
                 // we fallback to a full in-DB update, safe against concurrency and "self-healing", but less efficient
                 match &e {
                     AlertError::ConcurrentAuxUpdate(_) => debug!(error = %e),
+                    AlertError::InvalidTimeseriesInput(_) => warn!(error = %e),
                     _ => error!(error = %e),
                 }
                 self.update_aux_fallback(object_id, prv_candidates, fp_hists, survey_matches, now)
@@ -416,6 +421,7 @@ impl AlertWorker for DecamAlertWorker {
 
         let worker = DecamAlertWorker {
             xmatch_configs,
+            host_galaxy_config: config.host_galaxy.clone(),
             db,
             alert_collection,
             alert_aux_collection,
@@ -501,11 +507,14 @@ impl AlertWorker for DecamAlertWorker {
                 &self.db,
             )
             .await?;
+            let host_galaxy =
+                host::associate_from_xmatches(ra, dec, &xmatches, &self.host_galaxy_config);
             let obj = DecamObject {
                 object_id: object_id.clone(),
                 prv_candidates,
                 fp_hists,
                 cross_matches: Some(xmatches),
+                host_galaxy,
                 aliases: survey_matches,
                 coordinates: Coordinates::new(ra, dec),
                 created_at: now,

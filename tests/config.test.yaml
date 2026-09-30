@@ -98,6 +98,7 @@ workers:
       refresh_interval_minutes: 15
       max_match_rate: 5
       reference_night:
+      reference_window_days: 30
 crossmatch:
   ztf:
     PS1_DR1:

@@ -97,6 +97,7 @@ services:
   # Run the Kafka producer just once
   producer:
     image: boom-astro/boom:latest
+    pull_policy: build
     hostname: producer
     build:
       dockerfile: ${BOOM_REPO_ROOT:?Variable not set}/Dockerfile
@@ -122,6 +123,7 @@ services:
       - ${BOOM_REPO_ROOT:?Variable not set}/tests/throughput/config.yaml:/app/config.yaml
   consumer:
     image: boom-astro/boom:latest
+    pull_policy: build
     hostname: consumer
     build:
       dockerfile: ${BOOM_REPO_ROOT:?Variable not set}/Dockerfile
@@ -151,6 +153,7 @@ services:
       - ${BOOM_REPO_ROOT:?Variable not set}/tests/throughput/config.yaml:/app/config.yaml
   scheduler:
     image: boom-astro/boom:latest
+    pull_policy: build
     hostname: scheduler
     build:
       dockerfile: ${BOOM_REPO_ROOT:?Variable not set}/Dockerfile

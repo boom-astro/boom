@@ -9,6 +9,8 @@ mod tests {
     use boom::conf::AppConfig;
     use boom::utils::cutouts::{AlertCutout, CutoutStorage};
     use boom::utils::enums::Survey;
+    use boom::utils::tracks::{commit_upsert, plan_upsert, ALIASES_COLLECTION, TRACKS_COLLECTION};
+    use mongodb::bson::doc;
     use mongodb::Database;
     use std::collections::HashMap;
 
@@ -92,5 +94,73 @@ mod tests {
             StatusCode::NOT_FOUND,
             "Should return 404 for non-existent candid"
         );
+    }
+
+    async fn insert_track(database: &Database, members: &[i64]) -> String {
+        let jds: Vec<f64> = (0..members.len()).map(|k| 2460000.0 + k as f64).collect();
+        let plan = plan_upsert(database, members, &jds, None, None)
+            .await
+            .expect("Failed to plan track");
+        commit_upsert(database, plan)
+            .await
+            .expect("Failed to store track")
+            .track
+            .id
+    }
+
+    #[actix_rt::test]
+    async fn test_get_track_resolves_a_merged_id() {
+        let database: Database = get_test_db_api().await;
+        let base = (uuid::Uuid::new_v4().as_u128() as i64).abs() / 16;
+        let (a, b) = ([base, base + 1], [base + 2, base + 3]);
+        let first = insert_track(&database, &a).await;
+        let second = insert_track(&database, &b).await;
+        let survivor = insert_track(&database, &[a[0], a[1], b[0], b[1]]).await;
+        let absorbed = if survivor == first { &second } else { &first };
+        assert_ne!(
+            &survivor, absorbed,
+            "the merge should keep one of the two ids"
+        );
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(database.clone()))
+                .service(routes::surveys::tracks::get_track),
+        )
+        .await;
+
+        for (id, what) in [(&survivor, "surviving"), (absorbed, "absorbed")] {
+            let req = test::TestRequest::get()
+                .uri(&format!("/surveys/ztf/tracks/{}", id))
+                .to_request();
+            let resp = test::call_service(&app, req).await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "Should retrieve the {} id: {}",
+                what,
+                read_str_response(resp).await
+            );
+            let body = read_json_response(resp).await;
+            assert_eq!(body["data"]["_id"].as_str().unwrap(), survivor);
+            assert_eq!(body["data"]["n_detections"].as_i64().unwrap(), 4);
+        }
+
+        let req = test::TestRequest::get()
+            .uri("/surveys/ztf/tracks/BT_MISSING")
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        database
+            .collection::<mongodb::bson::Document>(TRACKS_COLLECTION)
+            .delete_one(doc! { "_id": &survivor })
+            .await
+            .unwrap();
+        database
+            .collection::<mongodb::bson::Document>(ALIASES_COLLECTION)
+            .delete_many(doc! { "superseded_by": &survivor })
+            .await
+            .unwrap();
     }
 }

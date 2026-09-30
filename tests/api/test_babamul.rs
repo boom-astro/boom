@@ -20,6 +20,7 @@ mod tests {
         drop_alert_from_collections, lsst_alert_worker, ztf_alert_worker, AlertRandomizer,
         TEST_CONFIG_FILE,
     };
+    use boom::utils::tracks::{commit_upsert, plan_upsert, TRACKS_COLLECTION};
     use mongodb::bson::doc;
     use mongodb::Database;
     use std::collections::HashMap;
@@ -573,6 +574,21 @@ mod tests {
             StatusCode::NOT_FOUND,
             "Should return 404 for non-existent candid"
         );
+
+        let req = test::TestRequest::get()
+            .uri(&format!(
+                "/babamul/surveys/winter/cutouts?candid={}",
+                test_candid
+            ))
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "Should reject surveys other than ZTF and LSST"
+        );
     }
 
     #[actix_rt::test]
@@ -970,6 +986,7 @@ mod tests {
                 created_at: 0.0,
                 updated_at: 0.0,
                 cross_matches: None,
+                host_galaxy: None,
             })
             .await
             .expect("Failed to insert ZTF test object");
@@ -986,6 +1003,7 @@ mod tests {
                 created_at: 0.0,
                 updated_at: 0.0,
                 cross_matches: None,
+                host_galaxy: None,
             })
             .await
             .expect("Failed to insert LSST test object");
@@ -2189,6 +2207,7 @@ mod tests {
             prv_nondetections: vec![],
             fp_hists: vec![],
             aliases: None,
+            host_galaxy: None,
             created_at: 0.0,
             updated_at: 0.0,
             cross_matches: Some(
@@ -2284,6 +2303,7 @@ mod tests {
                 prv_nondetections: vec![],
                 fp_hists: vec![],
                 aliases: None,
+                host_galaxy: None,
                 created_at: 0.0,
                 updated_at: 0.0,
                 cross_matches: Some(
@@ -2314,6 +2334,7 @@ mod tests {
                 prv_nondetections: vec![],
                 fp_hists: vec![],
                 aliases: None,
+                host_galaxy: None,
                 created_at: 0.0,
                 updated_at: 0.0,
                 cross_matches: Some(
@@ -2439,6 +2460,7 @@ mod tests {
                 created_at: 0.0,
                 updated_at: 0.0,
                 cross_matches: None,
+                host_galaxy: None,
             },
             boom::alert::ZtfObject {
                 object_id: format!("ZTF24obj002_{}", unique_suffix),
@@ -2450,6 +2472,7 @@ mod tests {
                 created_at: 0.0,
                 updated_at: 0.0,
                 cross_matches: None,
+                host_galaxy: None,
             },
         ];
 
@@ -2527,6 +2550,24 @@ mod tests {
             resp.status(),
             StatusCode::BAD_REQUEST,
             "Should reject empty coordinates"
+        );
+
+        let req = test::TestRequest::post()
+            .uri("/babamul/surveys/winter/objects/cone-search")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .set_json(serde_json::json!({
+                "coordinates": {
+                    "search1": [125.0, -12.0]
+                },
+                "radius_arcsec": 60.0
+            }))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "Should reject surveys other than ZTF and LSST"
         );
 
         let req = test::TestRequest::post()
@@ -4712,6 +4753,265 @@ mod tests {
             .await
             .unwrap();
         drop_alert_from_collections(out_candid, &Survey::Ztf)
+            .await
+            .unwrap();
+    }
+
+    /// POST /babamul/stats/refresh — drops the cached stats for the range, then rate-limits.
+    #[actix_rt::test]
+    async fn test_babamul_stats_refresh_drops_the_cached_range() {
+        load_dotenv();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+        let user = TestUser::create(&database, &auth_app_data).await;
+        let app = test::init_service(
+            App::new().service(
+                web::scope("/babamul")
+                    .app_data(web::Data::new(database.clone()))
+                    .app_data(web::Data::new(auth_app_data))
+                    .wrap(from_fn(babamul_auth_middleware))
+                    .service(routes::babamul::stats::post_stats_refresh),
+            ),
+        )
+        .await;
+
+        let stats: mongodb::Collection<mongodb::bson::Document> = database.collection("stats");
+        stats
+            .delete_one(doc! { "_id": "stats_refresh" })
+            .await
+            .unwrap();
+        for (id, date) in [
+            ("nightly_stats_ZTF_2024-06-10", "2024-06-10"),
+            ("nightly_stats_ZTF_2024-07-20", "2024-07-20"),
+        ] {
+            stats
+                .replace_one(doc! { "_id": id }, doc! { "_id": id, "date": date })
+                .upsert(true)
+                .await
+                .unwrap();
+        }
+        for id in ["collection_stats", "babamul_kafka_topics"] {
+            stats
+                .replace_one(doc! { "_id": id }, doc! { "_id": id })
+                .upsert(true)
+                .await
+                .unwrap();
+        }
+
+        let refresh = |start: &str| {
+            test::TestRequest::post()
+                .uri(&format!(
+                    "/babamul/stats/refresh?start_date={}&end_date=2024-06-30",
+                    start
+                ))
+                .insert_header(("Authorization", format!("Bearer {}", user.token)))
+                .to_request()
+        };
+
+        // The stats are public to read, but only a signed-in account can pay for a
+        // recount. The middleware rejects with an `Err`, hence `try_call_service`.
+        let resp = test::try_call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/babamul/stats/refresh?start_date=2024-06-01&end_date=2024-06-30")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(
+            resp.err().unwrap().as_response_error().status_code(),
+            StatusCode::UNAUTHORIZED
+        );
+
+        // Too long a range would recount hundreds of nights, so it is refused
+        // before the cooldown is claimed.
+        let resp = test::call_service(&app, refresh("2023-06-30")).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        let resp = test::call_service(&app, refresh("2024-06-01")).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        for id in [
+            "nightly_stats_ZTF_2024-06-10",
+            "collection_stats",
+            "babamul_kafka_topics",
+        ] {
+            assert!(
+                stats.find_one(doc! { "_id": id }).await.unwrap().is_none(),
+                "{} should have been dropped",
+                id
+            );
+        }
+        assert!(
+            stats
+                .find_one(doc! { "_id": "nightly_stats_ZTF_2024-07-20" })
+                .await
+                .unwrap()
+                .is_some(),
+            "a night outside the range should keep its cached count"
+        );
+
+        // The recount is expensive, so a second refresh has to wait out the cooldown.
+        let resp = test::call_service(&app, refresh("2024-06-01")).await;
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(resp.headers().get("Retry-After").is_some());
+
+        stats
+            .delete_many(
+                doc! { "_id": { "$in": ["nightly_stats_ZTF_2024-07-20", "stats_refresh"] } },
+            )
+            .await
+            .unwrap();
+    }
+
+    /// The public collection stats endpoint lists only what it is meant to: no
+    /// watchlist, even configured as a crossmatch catalog, and no survey
+    /// collection outside the named alert ones.
+    #[actix_rt::test]
+    async fn test_babamul_collection_stats_lists_only_public_collections() {
+        load_dotenv();
+        let database: Database = get_test_db_api().await;
+        let mut config = AppConfig::from_test_config().unwrap();
+
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let watchlist_name = format!("watchlist_stats_{}", suffix);
+        let catalog_name = format!("catalog_stats_{}", suffix);
+        let scratch_name = format!("ZTF_scratch_{}", suffix);
+        for name in [&watchlist_name, &catalog_name, &scratch_name] {
+            database
+                .collection::<mongodb::bson::Document>(name)
+                .insert_one(doc! { "ra": 0.0, "dec": 0.0 })
+                .await
+                .unwrap();
+        }
+        let xmatch = |name: &str| boom::conf::CatalogXmatchConfig {
+            catalog: name.to_string(),
+            radius: boom::conf::arcsec_to_radians(2.0),
+            projection: doc! { "_id": 1 },
+            ..Default::default()
+        };
+        config.crossmatch.insert(
+            Survey::Ztf,
+            vec![xmatch(&watchlist_name), xmatch(&catalog_name)],
+        );
+
+        let app = test::init_service(
+            App::new().service(
+                web::scope("/babamul")
+                    .app_data(web::Data::new(database.clone()))
+                    .app_data(web::Data::new(config))
+                    .service(routes::babamul::stats::get_collection_stats),
+            ),
+        )
+        .await;
+
+        let req = test::TestRequest::get()
+            .uri("/babamul/stats/collections")
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let resp = read_json_response(resp).await;
+        let names = resp["data"]["collections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["name"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+        assert!(names.contains(&catalog_name));
+        assert!(!names.contains(&watchlist_name));
+        assert!(!names.contains(&scratch_name));
+
+        for name in [&watchlist_name, &catalog_name, &scratch_name] {
+            database
+                .collection::<mongodb::bson::Document>(name)
+                .drop()
+                .await
+                .unwrap();
+        }
+    }
+
+    #[actix_rt::test]
+    async fn test_get_track_keeps_only_public_detections() {
+        load_dotenv();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+        let test_user = TestUser::create(&database, &auth_app_data).await;
+
+        let base = (uuid::Uuid::new_v4().as_u128() as i64).abs() / 16;
+        let mixed = [base, base + 1, base + 2, base + 3];
+        let private = [base + 4, base + 5];
+        let alerts = database.collection::<mongodb::bson::Document>("ZTF_alerts");
+        for (candid, programid) in mixed
+            .iter()
+            .zip([1, 1, 2, 2])
+            .chain(private.iter().zip([2, 2]))
+        {
+            alerts
+                .insert_one(doc! { "_id": candid, "candidate": { "programid": programid } })
+                .await
+                .unwrap();
+        }
+        let mut ids = Vec::new();
+        for members in [&mixed[..], &private[..]] {
+            let jds: Vec<f64> = (0..members.len()).map(|k| 2460000.0 + k as f64).collect();
+            let plan = plan_upsert(&database, members, &jds, None, None)
+                .await
+                .unwrap();
+            ids.push(commit_upsert(&database, plan).await.unwrap().track.id);
+        }
+
+        let app = test::init_service(
+            App::new().service(
+                actix_web::web::scope("/babamul")
+                    .app_data(web::Data::new(database.clone()))
+                    .app_data(web::Data::new(auth_app_data.clone()))
+                    .wrap(from_fn(babamul_auth_middleware))
+                    .service(routes::babamul::surveys::get_track),
+            ),
+        )
+        .await;
+
+        let req = test::TestRequest::get()
+            .uri(&format!("/babamul/surveys/ztf/tracks/{}", ids[0]))
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "Should retrieve the mixed track: {}",
+            read_str_response(resp).await
+        );
+        let body = read_json_response(resp).await;
+        let members: Vec<i64> = body["data"]["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m.as_i64().unwrap())
+            .collect();
+        assert_eq!(members, vec![mixed[0], mixed[1]]);
+        assert_eq!(body["data"]["n_detections"].as_i64().unwrap(), 2);
+        assert_eq!(body["data"]["n_nights"].as_i64().unwrap(), 2);
+        assert_eq!(body["data"]["last_jd"].as_f64().unwrap(), 2460001.0);
+
+        let req = test::TestRequest::get()
+            .uri(&format!("/babamul/surveys/ztf/tracks/{}", ids[1]))
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "A track with no public detection should not be served"
+        );
+
+        let all: Vec<i64> = mixed.iter().chain(private.iter()).copied().collect();
+        alerts
+            .delete_many(doc! { "_id": { "$in": &all } })
+            .await
+            .unwrap();
+        database
+            .collection::<mongodb::bson::Document>(TRACKS_COLLECTION)
+            .delete_many(doc! { "_id": { "$in": &ids } })
             .await
             .unwrap();
     }
