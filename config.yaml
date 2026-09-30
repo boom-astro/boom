@@ -152,7 +152,7 @@ workers:
       # Alerts per batch: the RPOP cap and the fixed ONNX input shape (CUDA pins SameAsRequested).
       # Lowered from main's 1000 because AppleCiDER runs a second, larger model
       # per alert: 250 measured ~12 GB VRAM on this stack.
-      batch_size: 250
+      batch_size: 750
     filter:
       n_workers: 3
       refresh_interval_minutes: 15
