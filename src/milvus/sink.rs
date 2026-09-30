@@ -175,9 +175,9 @@ impl MilvusSink {
     }
 
     /// Replay `backup_queue.drain_rows` of the backlog after a successful
-    /// upload, so catching up cannot starve live batches. Rows that fail go
-    /// back on the tail, not their old position — harmless, because the `jd`
-    /// guard decides the winner by data rather than arrival order.
+    /// upload, so catching up cannot starve live batches. Rows that fail are
+    /// re-buffered, where a newer alert for the same object may have landed
+    /// meanwhile and will win on `jd`.
     async fn drain_some(&mut self) {
         let Some(queue) = self.queue.as_mut() else {
             return;

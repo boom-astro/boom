@@ -128,9 +128,9 @@ milvus:
   # being dropped, since recomputing one means another GPU pass over the alert.
   backup_queue:
     enabled: true
-    # Past this, the oldest buffered rows are discarded. Comfortably above a
-    # night of ZTF alerts (500k-800k), so a night-long outage drops nothing.
-    # ~1.6 KB per row, so about 1.6 GB of Valkey if it ever fills.
+    # One row per object, newest alert only. Past this the lowest-jd entries
+    # are discarded. Comfortably above a night of ZTF alerts (500k-800k), so
+    # a night-long outage drops nothing. ~1.6 KB per row, ~1.6 GB if full.
     max_rows: 1000000
     # Rows replayed per successful batch, so catch-up cannot starve live work.
     drain_rows: 500

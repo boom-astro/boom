@@ -1105,9 +1105,10 @@ pub struct MilvusBackupQueueConfig {
     /// When false, a failed upload is dropped rather than buffered.
     #[serde(default = "default_milvus_backup_queue_enabled")]
     pub enabled: bool,
-    /// Cap on buffered rows; past this the oldest are discarded. Defaults to
-    /// comfortably above a night of ZTF alerts (500k-800k), so a night-long
-    /// outage loses nothing. At ~1.6 KB per row that is ~1.6 GB full.
+    /// Cap on buffered objects; past this the lowest-`jd` entries are
+    /// discarded. The queue holds one row per object, so this counts distinct
+    /// objects rather than alerts. Comfortably above a night of ZTF alerts
+    /// (500k-800k), so a night-long outage loses nothing; ~1.6 GB full.
     #[serde(default = "default_milvus_backup_queue_max_rows")]
     pub max_rows: usize,
     /// Rows drained per successful batch, bounding catch-up work so it does
