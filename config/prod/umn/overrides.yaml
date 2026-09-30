@@ -10,7 +10,6 @@ kafka:
   consumer:
     decam:
       server: "vm051.bridges2.psc.edu:9093"
-      security_protocol: "SASL_SSL"
 
 workers:
   ztf:
