@@ -58,8 +58,8 @@ pub struct StoredTrack {
     /// sees only part of the track can still count its nights and span.
     #[serde(default)]
     pub epochs: Vec<f64>,
-    /// `good`, `poor`, `none` or `ungated`; absent on tracks from the tracklet
-    /// path, which gates on its own residual.
+    /// `good`, `poor`, `none` or `ungated`. A track from the tracklet path is
+    /// `good`, with the residual its orbit fit left, or `ungated`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bound_fit: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -73,6 +73,11 @@ pub struct StoredTrack {
     /// distinguishes a recovery from a discovery candidate.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub designation: Option<String>,
+    /// When the track was last written, Unix seconds. A client polling for new
+    /// and extended tracks asks for the ones updated since its last look.
+    /// Zero on tracks written before the field existed.
+    #[serde(default)]
+    pub updated_at: f64,
 }
 
 /// Stamped on every member alert. The candids are deliberately not here:
@@ -409,6 +414,7 @@ pub async fn commit_upsert(
         first_jd: plan.first_jd,
         last_jd: plan.last_jd,
         designation: plan.designation,
+        updated_at: chrono::Utc::now().timestamp_millis() as f64 / 1000.0,
     };
     let collection = db.collection::<StoredTrack>(TRACKS_COLLECTION);
     collection
@@ -542,6 +548,7 @@ mod tests {
             first_jd: 2460000.0,
             last_jd: 2460001.0,
             designation: None,
+            updated_at: 0.0,
         }
     }
 
