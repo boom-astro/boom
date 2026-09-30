@@ -20,6 +20,7 @@ use crate::{
     utils::{
         db::{count_alerts_in_jd_window, mongify},
         enums::Survey,
+        host::HostGalaxyAssociation,
     },
 };
 
@@ -1363,6 +1364,7 @@ pub struct ZtfAlertToFilter {
     pub aliases: ZtfAliases,
     #[serde(rename = "LSST")]
     pub lsst: Option<LsstFilterMatch>,
+    pub host_galaxy: Option<HostGalaxyAssociation>,
 }
 
 #[serdavro]
@@ -1380,6 +1382,7 @@ pub struct LsstAlertToFilter {
     pub aliases: LsstAliases,
     #[serde(rename = "ZTF")]
     pub ztf: Option<ZtfFilterMatch>,
+    pub host_galaxy: Option<HostGalaxyAssociation>,
 }
 
 #[serdavro]
@@ -1394,6 +1397,7 @@ pub struct WinterAlertToFilter {
     pub coordinates: GalacticCoordinates,
     pub prv_candidates: Vec<WinterPrvCandidate>,
     pub aliases: WinterAliases,
+    pub host_galaxy: Option<HostGalaxyAssociation>,
 }
 
 #[serdavro]
@@ -1408,6 +1412,7 @@ pub struct DecamAlertToFilter {
     pub prv_candidates: Vec<DecamCandidate>,
     pub fp_hists: Vec<DecamForcedPhot>,
     pub aliases: DecamAliases,
+    pub host_galaxy: Option<HostGalaxyAssociation>,
 }
 
 /// Get a schema of a survey's data available at filtering time
@@ -1535,6 +1540,34 @@ mod schema_tests {
         serde_json::to_string(&T::get_schema()).unwrap()
     }
 
+    fn field_type<'a>(record: &'a serde_json::Value, name: &str) -> &'a serde_json::Value {
+        let field = record["fields"]
+            .as_array()
+            .and_then(|fields| fields.iter().find(|f| f["name"] == name))
+            .unwrap_or_else(|| panic!("no `{name}` field in {record}"));
+        match &field["type"] {
+            serde_json::Value::Array(union) => union
+                .iter()
+                .find(|t| *t != "null")
+                .unwrap_or_else(|| panic!("`{name}` is only null: {field}")),
+            other => other,
+        }
+    }
+
+    fn assert_exposes_best_host_d_dlr<T: AvroSchema>() {
+        let schema = serde_json::to_value(T::get_schema()).unwrap();
+        let best_host = field_type(field_type(&schema, "host_galaxy"), "best_host");
+        field_type(best_host, "d_dlr");
+    }
+
+    #[test]
+    fn every_filter_schema_exposes_the_host_galaxy_d_dlr() {
+        assert_exposes_best_host_d_dlr::<ZtfAlertToFilter>();
+        assert_exposes_best_host_d_dlr::<LsstAlertToFilter>();
+        assert_exposes_best_host_d_dlr::<WinterAlertToFilter>();
+        assert_exposes_best_host_d_dlr::<DecamAlertToFilter>();
+    }
+
     #[test]
     fn decam_filter_schema_exposes_forced_phot_and_snr() {
         // DECam does aperture difference-image forced photometry (magap/sigmagap)
@@ -1551,6 +1584,33 @@ mod schema_tests {
             assert!(
                 s.contains(field),
                 "DECam filter schema missing {field}: {s}"
+            );
+        }
+    }
+
+    #[test]
+    fn ztf_filter_schema_uses_stored_applecider_names() {
+        // AppleCiDER fields are stored under their `#[serde(rename)]` names, so
+        // a filter written against the schema must see those, not the Rust ones.
+        let s = schema_str::<ZtfAlertToFilter>();
+        for field in [
+            "\"AGN-like\"",
+            "\"Superluminous SN\"",
+            "\"Variable\"",
+            "\"NuclearVariable\"",
+        ] {
+            assert!(s.contains(field), "ZTF filter schema missing {field}: {s}");
+        }
+        // The embedding goes to Milvus and is never stored in Mongo.
+        for field in [
+            "\"agn_like\"",
+            "\"variable\"",
+            "\"nuclear_variable\"",
+            "\"fusion_embedding\"",
+        ] {
+            assert!(
+                !s.contains(field),
+                "ZTF filter schema has {field}, which is not stored: {s}"
             );
         }
     }
