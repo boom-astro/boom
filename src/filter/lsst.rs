@@ -7,8 +7,9 @@ use crate::enrichment::{create_lsst_alert_pipeline, fetch_alerts, LsstAlertForEn
 use crate::filter::{
     build_loaded_filters, build_ztf_aux_data, insert_ztf_aux_pipeline_if_needed, run_filter,
     update_aliases_index_multiple, uses_field_in_filter, validate_filter_pipeline,
-    watchlist_projections, Alert, Classification, Filter, FilterError, FilterResults, FilterWorker,
-    FilterWorkerError, LoadedFilter, Origin, Photometry, SurveyMatch, SurveyMatches,
+    watchlist_projections, Alert, AlertHostGalaxy, Classification, Filter, FilterError,
+    FilterResults, FilterWorker, FilterWorkerError, LoadedFilter, Origin, Photometry, SurveyMatch,
+    SurveyMatches,
 };
 use crate::utils::cutouts::CutoutStorage;
 use crate::utils::db::{fetch_timeseries_op, get_array_dict_element};
@@ -285,6 +286,10 @@ pub async fn build_lsst_alerts(
             cutout_difference: cutouts.cutout_difference,
             survey: Survey::Lsst,
             survey_matches,
+            host_galaxy: alert
+                .host_galaxy
+                .as_ref()
+                .and_then(AlertHostGalaxy::from_association),
         };
 
         alerts_output.push(alert);

@@ -157,7 +157,8 @@ workers:
     filter:
       n_workers: 4
       refresh_interval_minutes: 15
-      # On activation, filters are validated against a designated reference night.
+      # On activation, filters are validated against the reference_window_days nights
+      # (default 1) ending on reference_night.
       # If more than max_match_rate percent of alerts pass, the filter is not validated.
       max_match_rate: 5
       reference_night: "2026-03-16"
@@ -193,7 +194,8 @@ workers:
       n_workers: 1
       refresh_interval_minutes: 15
       max_match_rate: 100
-      reference_night: "2026-07-15"
+      reference_night: "2026-09-18"
+      reference_window_days: 30
 # Shape-aware host-galaxy association: scores each galaxy cross-match by its
 # directional light radius (d_DLR) instead of a fixed circular aperture. Stored
 # on the alert aux document under `host_galaxy`; filters cut on
@@ -771,6 +773,92 @@ crossmatch:
         Diam_pa: 1
         Diam_survey: 1
         DistMpc_method: 1
+    2MASS_PSC:
+      radius: 2.0
+      use_distance: false
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        j_m: 1
+        j_msigcom: 1
+        j_snr: 1
+        h_m: 1
+        h_msigcom: 1
+        h_snr: 1
+        k_m: 1
+        k_msigcom: 1
+        k_snr: 1
+        ndet: 1
+    GALEX:
+      radius: 2.0
+      use_distance: false
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        fuv_mag: 1
+        fuv_magerr: 1
+        nuv_mag: 1
+        nuv_magerr: 1
+        fuv_exp: 1
+        nuv_exp: 1
+        obstype: 1
+        band: 1
+    VSX:
+      radius: 2.0
+      use_distance: false
+      projection:
+        _id: 1
+        name: 1
+        var_flag: 1
+        ra: 1
+        dec: 1
+        types: 1
+        max: 1
+        max_band: 1
+        min_is_amplitude: 1
+        min: 1
+        min_band: 1
+        epoch: 1
+        period: 1
+        spectral_type: 1
+    CatWISE2020:
+      radius: 2.0
+      use_distance: false
+      projection:
+        _id: 1
+        source_name: 1
+        ra: 1
+        dec: 1
+        sigra: 1
+        sigdec: 1
+        w1mpro: 1
+        w2mpro: 1
+        w1sigmpro: 1
+        w2sigmpro: 1
+        w1rchi2: 1
+        w2rchi2: 1
+        pmra: 1
+        pmdec: 1
+        sigpmra: 1
+        sigpmdec: 1
+        unwise_objid: 1
+    TNS:
+      radius: 2.0
+      use_distance: false
+      projection:
+        _id: 1
+        name_prefix: 1
+        name: 1
+        ra: 1
+        dec: 1
+        type: 1
+        redshift: 1
+        discovery_mag: 1
+        discovery_jd: 1
+        internal_names: 1
+      max_results: 3
     DESI_DR1:
       radius: 30.0 # 30 arcseconds
       use_distance: true
