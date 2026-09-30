@@ -65,10 +65,11 @@ async fn test_process_decam_alert() {
     assert!(aux.is_some());
     let aux = aux.unwrap();
     assert_eq!(aux.get_str("_id").unwrap(), &object_id);
-    // check that we have the fp_hists array
-
+    // the 4 prvCandidates of the packet plus the detection itself
+    let prv_candidates = aux.get_array("prv_candidates").unwrap();
+    assert_eq!(prv_candidates.len(), 5);
     let fp_hists = aux.get_array("fp_hists").unwrap();
-    assert_eq!(fp_hists.len(), 1);
+    assert!(fp_hists.is_empty());
 
     drop_alert_from_collections(candid, &Survey::Decam)
         .await
@@ -101,15 +102,14 @@ async fn test_filter_decam_alert() {
     let alert = &alerts_output[0];
     assert_eq!(alert.candid, candid);
     assert_eq!(&alert.object_id, &object_id);
-    // one prv_candidate (the detection) + one fp_hist point
-    assert_eq!(alert.photometry.len(), 2);
+    assert_eq!(alert.photometry.len(), 5);
 
     let filter_passed = alert
         .filters
         .iter()
         .find(|f| f.filter_id == filter_id)
         .unwrap();
-    assert_eq!(filter_passed.annotations, "{\"mag_now\":23.55}");
+    assert_eq!(filter_passed.annotations, "{\"mag_now\":20.71}");
 
     // only the alert's real-bogus reliability score for now
     let classifications = &alert.classifications;
