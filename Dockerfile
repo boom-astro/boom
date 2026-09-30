@@ -69,6 +69,7 @@ RUN --mount=type=cache,target=/app/target,sharing=locked \
        target/release/backfill_hpx \
        target/release/backfill_host_galaxy \
        target/release/find_tracklets \
+       target/release/linker \
        /app/bin/
 
 FROM builder AS dev
@@ -108,6 +109,7 @@ COPY --from=builder /app/bin/mpcorb_ingest /app/mpcorb_ingest
 COPY --from=builder /app/bin/backfill_hpx /app/backfill_hpx
 COPY --from=builder /app/bin/backfill_host_galaxy /app/backfill_host_galaxy
 COPY --from=builder /app/bin/find_tracklets /app/find_tracklets
+COPY --from=builder /app/bin/linker /app/linker
 COPY --from=builder /opt/ort /opt/ort
 # Temporary
 COPY --from=builder /app/bin/copy_cutouts /app/copy_cutouts

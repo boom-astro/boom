@@ -232,6 +232,24 @@ pub struct ThorSearch {
     pub site: Site,
 }
 
+impl Default for ThorSearch {
+    /// The search `find_tracklets --thor` runs with its default flags.
+    fn default() -> Self {
+        ThorSearch {
+            config: thor::Config {
+                min_detections: 2,
+                // Two nights drop purity from 100% to 80%.
+                min_nights: 3,
+                ..thor::Config::default()
+            },
+            distances_au: vec![1.8, 2.2, 2.6, 3.0, 3.4],
+            max_residual_arcsec: 2.0,
+            max_unbound_residual_arcsec: 10.0,
+            site: crate::utils::sso_geometry::ZTF,
+        }
+    }
+}
+
 /// Recover objects without tracklets, sweeping trial orbits over sky patches,
 /// and keep the clusters one orbit reproduces.
 ///
