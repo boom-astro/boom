@@ -1,10 +1,11 @@
 use crate::utils::{
     cutouts::{CutoutCache, CutoutStorage},
     enums::Survey,
+    host::HostGalaxyConfig,
     o11y::logging::as_error,
 };
 use chrono::NaiveDate;
-use config::{Config, File, Value};
+use config::{Config, File, Value, ValueKind};
 use dotenvy;
 use mongodb::bson::{doc, Document};
 use mongodb::Database;
@@ -264,9 +265,25 @@ async fn build_cutout_storage(
     Ok(storage)
 }
 
+/// An explicit null unsets a field inherited from the base config, at any depth
+/// so a single projection entry can be dropped too.
+fn strip_nulls(table: &mut config::Map<String, Value>) {
+    table.retain(|_, value| !matches!(value.kind, ValueKind::Nil));
+    for value in table.values_mut() {
+        if let ValueKind::Table(inner) = &mut value.kind {
+            strip_nulls(inner);
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct CatalogXmatchConfig {
+    /// Key this catalog's matches appear under in `cross_matches`.
     pub catalog: String,
+    /// Collection actually queried, defaulting to `catalog`. Set it when two
+    /// entries read the same collection with different matching rules, since
+    /// the results are keyed by `catalog` and that key must stay unique.
+    pub collection: Option<String>,
     pub radius: f64, // in radians
     pub projection: Document,
     pub use_distance: bool,
@@ -274,42 +291,93 @@ pub struct CatalogXmatchConfig {
     pub distance_max: Option<f64>,      // in kpc
     pub distance_max_near: Option<f64>, // in arcsec
     pub max_results: Option<usize>,
+    /// Field holding the angular DIAMETER in arcsec. Setting it gives each row
+    /// its own match radius, scaled from that size.
+    pub angular_size_key: Option<String>,
+    /// Multiple of the semi-major axis to match within.
+    pub angular_size_scale: f64,
+    /// Cap on the per-row radius, in radians.
+    pub angular_size_radius_max: Option<f64>,
+    /// Floor on the per-row radius, in radians. A row with no usable size is
+    /// matched within it, and nothing else reaches past its own scaled size.
+    pub angular_size_radius_min: f64,
     /// Field naming a row's object type, e.g. DESI's `spectype`.
     pub type_key: Option<String>,
     /// Values of `type_key` that mean the row is a star rather than a galaxy.
     pub stellar_types: Vec<String>,
 }
 
-impl CatalogXmatchConfig {
-    pub fn new(
-        catalog: &str,
-        radius: f64,
-        projection: Document,
-        use_distance: bool,
-        distance_key: Option<String>,
-        distance_max: Option<f64>,
-        distance_max_near: Option<f64>,
-        max_results: Option<usize>,
-        type_key: Option<String>,
-        stellar_types: Vec<String>,
-    ) -> CatalogXmatchConfig {
-        CatalogXmatchConfig {
-            catalog: catalog.to_string(),
-            radius: radius * std::f64::consts::PI / 180.0 / 3600.0, // convert arcsec to radians
-            projection,
-            use_distance,
-            distance_key,
-            distance_max,
-            distance_max_near,
-            max_results,
-            type_key,
-            stellar_types,
+impl Default for CatalogXmatchConfig {
+    fn default() -> Self {
+        Self {
+            catalog: String::new(),
+            collection: None,
+            radius: 0.0,
+            projection: Document::new(),
+            use_distance: false,
+            distance_key: None,
+            distance_max: None,
+            distance_max_near: None,
+            max_results: None,
+            angular_size_key: None,
+            // 1.0, not 0.0: `angular_size_threshold_arcsec` divides by it.
+            angular_size_scale: 1.0,
+            angular_size_radius_max: None,
+            angular_size_radius_min: 0.0,
+            type_key: None,
+            stellar_types: Vec::new(),
         }
+    }
+}
+
+pub fn arcsec_to_radians(arcsec: f64) -> f64 {
+    arcsec * std::f64::consts::PI / 180.0 / 3600.0
+}
+
+pub fn radians_to_arcsec(radians: f64) -> f64 {
+    radians * 180.0 / std::f64::consts::PI * 3600.0
+}
+
+impl CatalogXmatchConfig {
+    /// Collection to query, which is the catalog name unless overridden.
+    pub fn collection_name(&self) -> &str {
+        self.collection.as_deref().unwrap_or(&self.catalog)
+    }
+
+    /// Match radius in arcsec for one candidate row, from its extent alone.
+    ///
+    /// `radius` is the cone the database is asked for, not the radius a row is
+    /// accepted within: a sized catalog accepts each row within its own extent,
+    /// so a small galaxy far out in the cone is rejected here. See
+    /// [`crate::utils::spatial::row_match_radius_arcsec`] for the rule that
+    /// combines this with distance matching.
+    pub fn match_radius_arcsec(&self, angular_size_arcsec: Option<f64>) -> f64 {
+        let Some(max) = self.angular_size_radius_max else {
+            return radians_to_arcsec(self.radius);
+        };
+        let scaled = angular_size_arcsec
+            .filter(|s| s.is_finite() && *s > 0.0)
+            .map(|s| self.angular_size_scale * s / 2.0)
+            .unwrap_or(0.0);
+        scaled.clamp(
+            radians_to_arcsec(self.angular_size_radius_min),
+            radians_to_arcsec(max),
+        )
+    }
+
+    /// Smallest angular size that reaches beyond the base cone, and so needs
+    /// the extended search.
+    pub fn angular_size_threshold_arcsec(&self) -> f64 {
+        2.0 * radians_to_arcsec(self.radius) / self.angular_size_scale
     }
 
     #[instrument(skip_all, err)]
-    fn from_config(config_value: Value) -> Result<CatalogXmatchConfig, BoomConfigError> {
-        let hashmap_xmatch = config_value.into_table()?;
+    fn from_config(
+        catalog: &str,
+        config_value: Value,
+    ) -> Result<CatalogXmatchConfig, BoomConfigError> {
+        let mut hashmap_xmatch = config_value.into_table()?;
+        strip_nulls(&mut hashmap_xmatch);
         let required = |key: &str| {
             hashmap_xmatch
                 .get(key)
@@ -317,7 +385,21 @@ impl CatalogXmatchConfig {
                 .ok_or_else(|| BoomConfigError::MissingKeyError(key.to_string()))
         };
 
-        let catalog = required("catalog")?.into_string()?;
+        let opt_string = |key: &str| -> Result<Option<String>, BoomConfigError> {
+            Ok(hashmap_xmatch
+                .get(key)
+                .cloned()
+                .map(Value::into_string)
+                .transpose()?)
+        };
+        let opt_float = |key: &str| -> Result<Option<f64>, BoomConfigError> {
+            Ok(hashmap_xmatch
+                .get(key)
+                .cloned()
+                .map(Value::into_float)
+                .transpose()?)
+        };
+
         let radius = required("radius")?.into_float()?;
         let projection = required("projection")?.into_table()?;
 
@@ -326,25 +408,11 @@ impl CatalogXmatchConfig {
             .cloned()
             .map(Value::into_bool)
             .transpose()?
-            .unwrap_or(false);
+            .unwrap_or_default();
 
-        let distance_key = hashmap_xmatch
-            .get("distance_key")
-            .cloned()
-            .map(Value::into_string)
-            .transpose()?;
-
-        let distance_max = hashmap_xmatch
-            .get("distance_max")
-            .cloned()
-            .map(Value::into_float)
-            .transpose()?;
-
-        let distance_max_near = hashmap_xmatch
-            .get("distance_max_near")
-            .cloned()
-            .map(Value::into_float)
-            .transpose()?;
+        let distance_key = opt_string("distance_key")?;
+        let distance_max = opt_float("distance_max")?;
+        let distance_max_near = opt_float("distance_max_near")?;
 
         let mut projection_doc = Document::new();
         for (key, value) in projection {
@@ -376,15 +444,25 @@ impl CatalogXmatchConfig {
             None => None,
         };
 
-        if max_results.is_some() && use_distance {
-            panic!("cannot use max_results with distance filtering");
-        }
+        let angular_size_key = opt_string("angular_size_key")?;
+        let angular_size_scale = opt_float("angular_size_scale")?.unwrap_or(1.0);
+        let angular_size_radius_max = opt_float("angular_size_radius_max")?;
+        let angular_size_radius_min = opt_float("angular_size_radius_min")?.unwrap_or(0.0);
 
-        let type_key = hashmap_xmatch
-            .get("type_key")
-            .cloned()
-            .map(Value::into_string)
-            .transpose()?;
+        if angular_size_key.is_some() {
+            let Some(radius_max) = angular_size_radius_max else {
+                panic!("must provide an angular_size_radius_max if angular_size_key is set");
+            };
+            if angular_size_scale <= 0.0 {
+                panic!("angular_size_scale must be greater than 0");
+            }
+            if radius_max < radius {
+                panic!("angular_size_radius_max must be at least as large as radius");
+            }
+            if angular_size_radius_min > radius_max {
+                panic!("angular_size_radius_min must not exceed angular_size_radius_max");
+            }
+        }
 
         let stellar_types = match hashmap_xmatch.get("stellar_types") {
             Some(values) => values
@@ -396,29 +474,77 @@ impl CatalogXmatchConfig {
             None => Vec::new(),
         };
 
-        Ok(CatalogXmatchConfig::new(
-            &catalog,
-            radius,
-            projection_doc,
+        Ok(CatalogXmatchConfig {
+            catalog: catalog.to_string(),
+            collection: opt_string("collection")?,
+            radius: arcsec_to_radians(radius),
+            projection: projection_doc,
             use_distance,
             distance_key,
             distance_max,
             distance_max_near,
             max_results,
-            type_key,
+            angular_size_key,
+            angular_size_scale,
+            angular_size_radius_max: angular_size_radius_max.map(arcsec_to_radians),
+            angular_size_radius_min: arcsec_to_radians(angular_size_radius_min),
+            type_key: opt_string("type_key")?,
             stellar_types,
-        ))
+        })
     }
 }
 
-impl<'de> Deserialize<'de> for CatalogXmatchConfig {
+/// Catalogs are keyed by name rather than listed, so a deployment override can
+/// add, retune or drop one without restating the whole set. A null value drops
+/// the catalog inherited from the base config.
+struct SurveyXmatchConfigs(Vec<CatalogXmatchConfig>);
+
+impl<'de> Deserialize<'de> for SurveyXmatchConfigs {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
-        let v = Value::deserialize(deserializer).map_err(serde::de::Error::custom)?;
-        CatalogXmatchConfig::from_config(v).map_err(serde::de::Error::custom)
+        struct CatalogMapVisitor;
+
+        impl<'de> de::Visitor<'de> for CatalogMapVisitor {
+            type Value = SurveyXmatchConfigs;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a map of catalog name to crossmatch settings")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: de::MapAccess<'de>,
+            {
+                let mut configs = Vec::new();
+                while let Some((catalog, value)) = map.next_entry::<String, Option<Value>>()? {
+                    let Some(value) = value else { continue };
+                    configs.push(
+                        CatalogXmatchConfig::from_config(&catalog, value)
+                            .map_err(de::Error::custom)?,
+                    );
+                }
+                Ok(SurveyXmatchConfigs(configs))
+            }
+        }
+
+        deserializer.deserialize_map(CatalogMapVisitor)
     }
+}
+
+fn deserialize_crossmatch<'de, D>(
+    deserializer: D,
+) -> Result<HashMap<Survey, Vec<CatalogXmatchConfig>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(
+        HashMap::<Survey, SurveyXmatchConfigs>::deserialize(deserializer)?
+            .into_iter()
+            .map(|(survey, configs)| (survey, configs.0))
+            .collect(),
+    )
 }
 
 fn default_bucket_name() -> String {
@@ -943,6 +1069,23 @@ where
     Ok(value)
 }
 
+fn default_reference_window_days() -> u32 {
+    1
+}
+
+fn deserialize_reference_window_days<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = u32::deserialize(deserializer)?;
+    if value == 0 {
+        return Err(serde::de::Error::custom(
+            "reference_window_days must be at least 1",
+        ));
+    }
+    Ok(value)
+}
+
 #[derive(Deserialize, Debug, Clone)]
 pub struct FilterWorkerConfig {
     pub n_workers: usize,
@@ -963,6 +1106,13 @@ pub struct FilterWorkerConfig {
     /// if either is missing, filters cannot be activated.
     #[serde(default)]
     pub reference_night: Option<NaiveDate>,
+    /// Number of consecutive nights, ending on `reference_night`, used to
+    /// gauge the filter. Raise it for surveys with few alerts per night.
+    #[serde(
+        default = "default_reference_window_days",
+        deserialize_with = "deserialize_reference_window_days"
+    )]
+    pub reference_window_days: u32,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -1063,12 +1213,14 @@ pub struct AppConfig {
     #[serde(default)]
     pub posthog: PostHogConfig,
     pub kafka: KafkaConfig,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_crossmatch")]
     pub crossmatch: HashMap<Survey, Vec<CatalogXmatchConfig>>,
     #[serde(default)]
     pub workers: HashMap<Survey, SurveyWorkerConfig>,
     #[serde(default)]
     pub gpu: GpuConfig,
+    #[serde(default)]
+    pub host_galaxy: HostGalaxyConfig,
     pub cutouts_storage: CutoutsStorage,
 }
 
@@ -1276,7 +1428,7 @@ mod tests {
     /// `from_test_config`, and would clobber any `BOOM_*` values a developer's
     /// `.env` had already loaded into the process.
     fn config_with_env(vars: &[(&str, &str)]) -> Config {
-        let env: HashMap<String, String> = vars
+        let env: config::Map<String, String> = vars
             .iter()
             .map(|(key, value)| (key.to_string(), value.to_string()))
             .collect();
@@ -1414,5 +1566,66 @@ mod tests {
         let no_device: GpuConfig =
             serde_json::from_str(r#"{"enabled": true, "device_ids": []}"#).unwrap();
         assert!(!no_device.is_active());
+    }
+
+    fn crossmatch_config(yaml: &str) -> HashMap<Survey, Vec<CatalogXmatchConfig>> {
+        #[derive(Deserialize)]
+        struct Wrapper {
+            #[serde(deserialize_with = "deserialize_crossmatch")]
+            crossmatch: HashMap<Survey, Vec<CatalogXmatchConfig>>,
+        }
+
+        let wrapper: Wrapper = Config::builder()
+            .add_source(File::from_str(yaml, config::FileFormat::Yaml))
+            .build()
+            .unwrap()
+            .try_deserialize()
+            .unwrap();
+        wrapper.crossmatch
+    }
+
+    fn catalog_names(configs: &[CatalogXmatchConfig]) -> Vec<&str> {
+        configs.iter().map(|c| c.catalog.as_str()).collect()
+    }
+
+    /// The first catalog drives the aggregation the others are unioned onto, so
+    /// the declared order has to survive deserialization.
+    #[test]
+    fn catalogs_keep_the_order_they_are_declared_in() {
+        let crossmatch = crossmatch_config(
+            "crossmatch:\n  ztf:\n    Gaia_DR3:\n      radius: 2.0\n      projection: {_id: 1}\n    NED:\n      radius: 300.0\n      projection: {_id: 1}\n    TNS:\n      radius: 2.0\n      projection: {_id: 1}\n",
+        );
+        assert_eq!(
+            catalog_names(&crossmatch[&Survey::Ztf]),
+            ["Gaia_DR3", "NED", "TNS"]
+        );
+    }
+
+    #[test]
+    fn a_null_catalog_drops_the_one_inherited_from_the_base_config() {
+        let crossmatch = crossmatch_config(
+            "crossmatch:\n  ztf:\n    Gaia_DR3:\n      radius: 2.0\n      projection: {_id: 1}\n    PS1_DR2: null\n",
+        );
+        assert_eq!(catalog_names(&crossmatch[&Survey::Ztf]), ["Gaia_DR3"]);
+    }
+
+    #[test]
+    fn a_null_projection_field_unsets_the_one_inherited_from_the_base_config() {
+        let crossmatch = crossmatch_config(
+            "crossmatch:\n  ztf:\n    Gaia_DR3:\n      radius: 2.0\n      projection: {_id: 1, ruwe: null}\n",
+        );
+        let gaia = &crossmatch[&Survey::Ztf][0];
+        assert!(!gaia.projection.contains_key("ruwe"));
+        assert_eq!(gaia.projection.len(), 1);
+    }
+
+    #[test]
+    fn a_null_field_unsets_the_one_inherited_from_the_base_config() {
+        let crossmatch = crossmatch_config(
+            "crossmatch:\n  ztf:\n    DESI_DR1:\n      radius: 30.0\n      projection: {_id: 1}\n      type_key: null\n      stellar_types: null\n",
+        );
+        let desi = &crossmatch[&Survey::Ztf][0];
+        assert_eq!(desi.type_key, None);
+        assert!(desi.stellar_types.is_empty());
     }
 }

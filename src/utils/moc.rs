@@ -530,6 +530,16 @@ pub fn moc_from_ascii(input: &str) -> Result<HpxMoc, String> {
 /// before this is trusted over the whole baseline.
 pub fn moc_hpx_stage(moc: &HpxMoc) -> Result<mongodb::bson::Document, String> {
     use mongodb::bson::doc;
+    Ok(doc! { "$match": moc_hpx_filter(moc)? })
+}
+
+/// The same region test as a `find` filter rather than a pipeline stage.
+///
+/// Combined with a `candidate.jd` bound this is served by the
+/// `{coordinates.hpx, candidate.jd}` index, where the 2dsphere index carries no
+/// time and so scans the whole baseline in the region before filtering by date.
+pub fn moc_hpx_filter(moc: &HpxMoc) -> Result<mongodb::bson::Document, String> {
+    use mongodb::bson::doc;
 
     // A RangeMOC already holds its coverage as minimal, ordered ranges at
     // Hpx<u64>'s maximum depth, which is HPX_DEPTH, so these are the index
@@ -549,7 +559,35 @@ pub fn moc_hpx_stage(moc: &HpxMoc) -> Result<mongodb::bson::Document, String> {
         .iter()
         .map(|r| doc! { "coordinates.hpx": { "$gte": r.start as i64, "$lt": r.end as i64 } })
         .collect();
-    Ok(doc! { "$match": { "$or": conditions } })
+    Ok(doc! { "$or": conditions })
+}
+
+/// Depth a cone is covered at. 12 is ~51 arcsec per cell, fine enough that the
+/// approximation costs little next to a search radius of arcminutes or more,
+/// and coarse enough to stay well inside the range limit.
+const CONE_DEPTH: u8 = 12;
+
+/// A MOC covering a cone, for a region-restricted query.
+///
+/// Approximate at the edge by a cell, so it returns a little more than the cone
+/// rather than less: a caller wanting the exact radius still tests separation.
+pub fn moc_from_cone(ra_deg: f64, dec_deg: f64, radius_deg: f64) -> Result<HpxMoc, String> {
+    if !(0.0..=180.0).contains(&radius_deg) || radius_deg <= 0.0 {
+        return Err(format!(
+            "cone radius {radius_deg} is not in (0, 180] degrees"
+        ));
+    }
+    if !(-90.0..=90.0).contains(&dec_deg) {
+        return Err(format!("declination {dec_deg} is outside [-90, 90]"));
+    }
+    Ok(HpxMoc::from_cone(
+        ra_deg.to_radians().rem_euclid(std::f64::consts::TAU),
+        dec_deg.to_radians(),
+        radius_deg.to_radians(),
+        CONE_DEPTH,
+        2,
+        moc::moc::range::CellSelection::All,
+    ))
 }
 
 /// A `$match` stage selecting alerts inside `moc`.
@@ -1478,6 +1516,75 @@ mod tests {
             cones.len() > 500,
             "a genuinely broad region should still exceed the cap at the floor, got {} cones",
             cones.len()
+        );
+    }
+
+    /// The stored index for a position, at the depth the ranges are expressed in.
+    fn hpx_at(ra: f64, dec: f64) -> i64 {
+        cdshealpix::nested::get(crate::utils::spatial::HPX_DEPTH)
+            .hash(ra.to_radians(), dec.to_radians()) as i64
+    }
+
+    fn covers(filter: &mongodb::bson::Document, hpx: i64) -> bool {
+        filter.get_array("$or").unwrap().iter().any(|c| {
+            let r = c
+                .as_document()
+                .unwrap()
+                .get_document("coordinates.hpx")
+                .unwrap();
+            hpx >= r.get_i64("$gte").unwrap() && hpx < r.get_i64("$lt").unwrap()
+        })
+    }
+
+    /// The ranges are index bounds, so what matters is which positions fall in
+    /// them, not how many there are.
+    #[test]
+    fn test_a_cone_covers_inside_and_not_outside() {
+        let (ra, dec) = (273.5, -18.7);
+        let filter = moc_hpx_filter(&moc_from_cone(ra, dec, 0.3).unwrap()).unwrap();
+        assert!(covers(&filter, hpx_at(ra, dec)), "centre is not covered");
+        // Just inside, and far outside along the same declination.
+        assert!(
+            covers(&filter, hpx_at(ra + 0.2, dec)),
+            "0.2 deg is not covered"
+        );
+        assert!(
+            !covers(&filter, hpx_at(ra + 3.0, dec)),
+            "3 deg should be outside"
+        );
+        assert!(
+            !covers(&filter, hpx_at(ra, dec + 5.0)),
+            "5 deg should be outside"
+        );
+    }
+
+    /// RA 0 is a seam only if the arithmetic makes it one.
+    #[test]
+    fn test_a_cone_spanning_ra_zero_covers_both_sides() {
+        let filter = moc_hpx_filter(&moc_from_cone(0.0, 10.0, 0.5).unwrap()).unwrap();
+        assert!(covers(&filter, hpx_at(0.2, 10.0)), "east of the seam");
+        assert!(covers(&filter, hpx_at(359.8, 10.0)), "west of the seam");
+        assert!(
+            !covers(&filter, hpx_at(180.0, 10.0)),
+            "the far side is not in the cone"
+        );
+    }
+
+    #[test]
+    fn test_a_cone_rejects_an_impossible_radius() {
+        assert!(moc_from_cone(10.0, 10.0, 0.0).is_err());
+        assert!(moc_from_cone(10.0, 10.0, -1.0).is_err());
+        assert!(moc_from_cone(10.0, 100.0, 1.0).is_err());
+    }
+
+    /// The stage is the filter under a `$match`, so the two cannot drift.
+    #[test]
+    fn test_the_stage_wraps_the_filter() {
+        let moc = moc_from_cone(120.0, 30.0, 0.2).unwrap();
+        let stage = moc_hpx_stage(&moc).unwrap();
+        assert_eq!(
+            stage.get_document("$match").unwrap(),
+            &moc_hpx_filter(&moc).unwrap()
         );
     }
 }
