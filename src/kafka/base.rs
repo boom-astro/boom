@@ -173,6 +173,17 @@ pub async fn delete_topic(bootstrap_servers: &str, topic_name: &str) -> Result<(
 
     let opts = AdminOptions::new().operation_timeout(Some(KAFKA_TIMEOUT_SECS));
     admin_client.delete_topics(&[topic_name], &opts).await?;
+
+    // Poll until the deletion reaches broker metadata, else count_messages() sees the old topic.
+    let consumer: BaseConsumer = ClientConfig::new()
+        .set("bootstrap.servers", bootstrap_servers)
+        .create()?;
+    for attempt in 0..20u64 {
+        if get_partition_ids(&consumer, topic_name)?.is_none() {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250 * (attempt + 1))).await;
+    }
     Ok(())
 }
 
@@ -1066,12 +1077,22 @@ pub async fn consumer(
             );
         }
         match consumer.poll(KAFKA_TIMEOUT_SECS) {
-            Some(Ok(_msg)) => {
+            Some(Ok(msg)) => {
                 debug!("Got initial assignment, positioning partitions...");
                 if replay {
                     // Replay: (re)read from the timestamp; `position_partitions` commits.
                     seek_to_timestamp(&consumer, plan.position_timestamp * 1000)?;
-                } else if !position_or_warn(&consumer, position_timestamp * 1000, &mut positioned) {
+                } else if positioned.contains(&(msg.topic().to_string(), msg.partition())) {
+                    consumer.seek(
+                        msg.topic(),
+                        msg.partition(),
+                        rdkafka::Offset::Offset(msg.offset()),
+                        KAFKA_TIMEOUT_SECS,
+                    )?;
+                }
+                if !replay
+                    && !position_or_warn(&consumer, position_timestamp * 1000, &mut positioned)
+                {
                     // Consuming unpositioned would replay an old night from
                     // `earliest`; poll again and retry.
                     continue;

@@ -77,7 +77,11 @@ services:
     <<: *s3_external_cutouts_env
   consumer-lsst:
     <<: *s3_external_cutouts_env
+  consumer-winter:
+    <<: *s3_external_cutouts_env
   scheduler-ztf:
     <<: *s3_external_cutouts_env
   scheduler-lsst:
+    <<: *s3_external_cutouts_env
+  scheduler-winter:
     <<: *s3_external_cutouts_env

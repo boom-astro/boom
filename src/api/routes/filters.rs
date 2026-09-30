@@ -11,13 +11,16 @@ use crate::{
         routes::users::User,
     },
     conf::{AppConfig, FilterWorkerConfig},
-    enrichment::{LsstAlertProperties, ZtfAlertClassifications, ZtfAlertProperties},
+    enrichment::{
+        LsstAlertProperties, WinterAlertProperties, ZtfAlertClassifications, ZtfAlertProperties,
+    },
     filter::{
         build_filter_pipeline, Filter, FilterError, FilterVersion, SURVEYS_REQUIRING_PERMISSIONS,
     },
     utils::{
-        db::{count_alerts_for_night, mongify},
+        db::{count_alerts_in_jd_window, mongify},
         enums::Survey,
+        host::HostGalaxyAssociation,
     },
 };
 
@@ -59,7 +62,7 @@ async fn validate_watchlist(
 }
 
 use crate::utils::moc::{moc_from_ascii, moc_hpx_stage};
-use actix_web::{get, patch, post, web, HttpResponse};
+use actix_web::{delete, get, patch, post, web, HttpResponse};
 use apache_avro::AvroSchema;
 use apache_avro_macros::serdavro;
 use flare::Time;
@@ -170,9 +173,9 @@ async fn build_and_test_filter_version(
     run_test_pipeline(db, survey, test_pipeline).await
 }
 
-/// Validate that activating this filter is safe by running it against a
-/// reference observing night and ensuring the filter does not match more than
-/// `max_result_ratio_percent` of the alerts the filter has access to that night.
+/// Validate that activating this filter is safe by running it against the
+/// reference observing nights and ensuring the filter does not match more than
+/// `max_match_rate` percent of the alerts the filter has access to on those nights.
 async fn validate_filter_activation(
     db: &Database,
     config: &FilterWorkerConfig,
@@ -207,26 +210,33 @@ async fn validate_filter_activation(
     } else {
         None
     };
+    let first_night = night_date - chrono::Duration::days(config.reference_window_days as i64 - 1);
+    let period = if first_night == night_date {
+        format!("reference night {}", night_date)
+    } else {
+        format!("reference nights {} to {}", first_night, night_date)
+    };
+    let (start_jd, _) = survey.night_jd_window(&first_night);
+    let (_, end_jd) = survey.night_jd_window(&night_date);
+
     let pid_slice = permission_programids.as_deref();
-    let night_total = count_alerts_for_night(db, survey, &night_date, pid_slice)
+    let total = count_alerts_in_jd_window(db, survey, start_jd, end_jd, pid_slice)
         .await
-        .map_err(|e| format!("failed to count alerts for {}: {}", night_date, e))?;
-    if night_total == 0 {
+        .map_err(|e| format!("failed to count alerts for {}: {}", period, e))?;
+    if total == 0 {
         return Err(if pid_slice.is_some() {
             format!(
-                "no {} alerts accessible with the given permissions on reference night {}; cannot validate filter activation",
-                survey, night_date
+                "no {} alerts accessible with the given permissions on {}; cannot validate filter activation",
+                survey, period
             )
         } else {
             format!(
-                "no {} alerts on reference night {}; cannot validate filter activation",
-                survey, night_date
+                "no {} alerts on {}; cannot validate filter activation",
+                survey, period
             )
         });
     }
 
-    // Run the filter pipeline restricted to that night, count matches.
-    let (start_jd, end_jd) = survey.night_jd_window(&night_date);
     let mut test_pipeline = build_filter_pipeline(pipeline, permissions, survey)
         .await
         .map_err(|e| e.to_string())?;
@@ -248,7 +258,7 @@ async fn validate_filter_activation(
     let mut cursor = collection
         .aggregate(test_pipeline)
         .await
-        .map_err(|e| format!("failed to run filter on night {}: {}", night_date, e))?;
+        .map_err(|e| format!("failed to run filter on {}: {}", period, e))?;
     let matched = match cursor.next().await {
         Some(Ok(doc)) => match doc.get("count") {
             Some(mongodb::bson::Bson::Int32(c)) => *c as i64,
@@ -259,15 +269,15 @@ async fn validate_filter_activation(
         None => 0,
     };
 
-    let max_allowed = (night_total as f64 * max_match_rate as f64 / 100.0) as i64;
+    let max_allowed = (total as f64 * max_match_rate as f64 / 100.0) as i64;
     if matched > max_allowed {
         return Err(format!(
-            "filter matched {} of {} {} alerts ({:.1}%) on night {}, which exceeds the {}% limit",
+            "filter matched {} of {} {} alerts ({:.1}%) on {}, which exceeds the {}% limit",
             matched,
-            night_total,
+            total,
             survey,
-            (matched as f64 / night_total as f64) * 100.0,
-            night_date,
+            (matched as f64 / total as f64) * 100.0,
+            period,
             max_match_rate,
         ));
     }
@@ -858,6 +868,48 @@ pub async fn get_filter(
     }
 }
 
+/// Delete a filter
+#[utoipa::path(
+    delete,
+    path = "/filters/{filter_id}",
+    responses(
+        (status = 200, description = "Filter deleted successfully"),
+        (status = 404, description = "Filter not found"),
+        (status = 500, description = "Internal server error")
+    ),
+    tags=["Filters"]
+)]
+#[delete("/filters/{filter_id}")]
+pub async fn delete_filter(
+    db: web::Data<Database>,
+    path: web::Path<String>,
+    current_user: Option<web::ReqData<User>>,
+) -> HttpResponse {
+    let current_user = match current_user {
+        Some(user) => user,
+        None => {
+            return HttpResponse::Unauthorized().body("Unauthorized");
+        }
+    };
+
+    let filter_id = path.into_inner();
+    let filter_query = if current_user.is_admin {
+        doc! { "_id": &filter_id }
+    } else {
+        doc! { "_id": &filter_id, "user_id": &current_user.id }
+    };
+    let filter_collection: Collection<Filter> = db.collection("filters");
+
+    match filter_collection.delete_one(filter_query).await {
+        Ok(result) if result.deleted_count > 0 => response::ok_no_data(&format!(
+            "filter with id {} deleted successfully",
+            filter_id
+        )),
+        Ok(_) => response::not_found(&format!("filter with id {} does not exist", filter_id)),
+        Err(e) => response::internal_error(&format!("failed to delete filter: {}", e)),
+    }
+}
+
 /// HEALPix range conditions for a MOC, or the response explaining why it cannot
 /// be used. Merged into the leading `$match` rather than prepended as its own
 /// stage: a `$match` after the `$project` cannot use the `coordinates.hpx` index.
@@ -1312,6 +1364,7 @@ pub struct ZtfAlertToFilter {
     pub aliases: ZtfAliases,
     #[serde(rename = "LSST")]
     pub lsst: Option<LsstFilterMatch>,
+    pub host_galaxy: Option<HostGalaxyAssociation>,
 }
 
 #[serdavro]
@@ -1329,6 +1382,7 @@ pub struct LsstAlertToFilter {
     pub aliases: LsstAliases,
     #[serde(rename = "ZTF")]
     pub ztf: Option<ZtfFilterMatch>,
+    pub host_galaxy: Option<HostGalaxyAssociation>,
 }
 
 #[serdavro]
@@ -1339,9 +1393,11 @@ pub struct WinterAlertToFilter {
     #[serde(rename = "objectId")]
     pub object_id: String,
     pub candidate: WinterCandidate,
+    pub properties: WinterAlertProperties,
     pub coordinates: GalacticCoordinates,
     pub prv_candidates: Vec<WinterPrvCandidate>,
     pub aliases: WinterAliases,
+    pub host_galaxy: Option<HostGalaxyAssociation>,
 }
 
 #[serdavro]
@@ -1356,6 +1412,7 @@ pub struct DecamAlertToFilter {
     pub prv_candidates: Vec<DecamCandidate>,
     pub fp_hists: Vec<DecamForcedPhot>,
     pub aliases: DecamAliases,
+    pub host_galaxy: Option<HostGalaxyAssociation>,
 }
 
 /// Get a schema of a survey's data available at filtering time
@@ -1390,7 +1447,7 @@ pub async fn get_filter_schema(path: web::Path<(Survey,)>) -> HttpResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::conf::{get_test_db, CatalogXmatchConfig};
+    use crate::conf::{arcsec_to_radians, get_test_db, CatalogXmatchConfig};
 
     /// A count request must carry the region, so a count can be compared against
     /// a test's `limit` to tell a truncated result from a complete one.
@@ -1462,18 +1519,12 @@ mod tests {
             .crossmatch
             .entry(Survey::Ztf)
             .or_default()
-            .push(CatalogXmatchConfig::new(
-                &name,
-                2.0,
-                doc! { "_id": 1 },
-                false,
-                None,
-                None,
-                None,
-                None,
-                None,
-                Vec::new(),
-            ));
+            .push(CatalogXmatchConfig {
+                catalog: name.clone(),
+                radius: arcsec_to_radians(2.0),
+                projection: doc! { "_id": 1 },
+                ..Default::default()
+            });
         let result = validate_watchlist(&db, &name, &Survey::Ztf, &admin, &config).await;
 
         collection.drop().await.unwrap();
@@ -1487,6 +1538,34 @@ mod schema_tests {
 
     fn schema_str<T: AvroSchema>() -> String {
         serde_json::to_string(&T::get_schema()).unwrap()
+    }
+
+    fn field_type<'a>(record: &'a serde_json::Value, name: &str) -> &'a serde_json::Value {
+        let field = record["fields"]
+            .as_array()
+            .and_then(|fields| fields.iter().find(|f| f["name"] == name))
+            .unwrap_or_else(|| panic!("no `{name}` field in {record}"));
+        match &field["type"] {
+            serde_json::Value::Array(union) => union
+                .iter()
+                .find(|t| *t != "null")
+                .unwrap_or_else(|| panic!("`{name}` is only null: {field}")),
+            other => other,
+        }
+    }
+
+    fn assert_exposes_best_host_d_dlr<T: AvroSchema>() {
+        let schema = serde_json::to_value(T::get_schema()).unwrap();
+        let best_host = field_type(field_type(&schema, "host_galaxy"), "best_host");
+        field_type(best_host, "d_dlr");
+    }
+
+    #[test]
+    fn every_filter_schema_exposes_the_host_galaxy_d_dlr() {
+        assert_exposes_best_host_d_dlr::<ZtfAlertToFilter>();
+        assert_exposes_best_host_d_dlr::<LsstAlertToFilter>();
+        assert_exposes_best_host_d_dlr::<WinterAlertToFilter>();
+        assert_exposes_best_host_d_dlr::<DecamAlertToFilter>();
     }
 
     #[test]
@@ -1510,11 +1589,43 @@ mod schema_tests {
     }
 
     #[test]
+    fn ztf_filter_schema_uses_stored_applecider_names() {
+        // AppleCiDER fields are stored under their `#[serde(rename)]` names, so
+        // a filter written against the schema must see those, not the Rust ones.
+        let s = schema_str::<ZtfAlertToFilter>();
+        for field in [
+            "\"AGN-like\"",
+            "\"Superluminous SN\"",
+            "\"Variable\"",
+            "\"NuclearVariable\"",
+        ] {
+            assert!(s.contains(field), "ZTF filter schema missing {field}: {s}");
+        }
+        // The embedding goes to Milvus and is never stored in Mongo.
+        for field in [
+            "\"agn_like\"",
+            "\"variable\"",
+            "\"nuclear_variable\"",
+            "\"fusion_embedding\"",
+        ] {
+            assert!(
+                !s.contains(field),
+                "ZTF filter schema has {field}, which is not stored: {s}"
+            );
+        }
+    }
+
+    #[test]
     fn winter_filter_schema_generates_without_forced_phot() {
         // WINTER does PSF photometry (magpsf) and has no forced-photometry history,
         // so its schema exposes candidate/prv_candidates but no fp_hists.
         let s = schema_str::<WinterAlertToFilter>();
-        for field in ["\"candidate\"", "\"prv_candidates\"", "\"magpsf\""] {
+        for field in [
+            "\"candidate\"",
+            "\"properties\"",
+            "\"prv_candidates\"",
+            "\"magpsf\"",
+        ] {
             assert!(
                 s.contains(field),
                 "WINTER filter schema missing {field}: {s}"

@@ -193,14 +193,14 @@ pub async fn post_cone_search_query(
         {
             Ok(c) => c,
             Err(e) => {
-                return response::internal_error(&format!("Error finding documents: {}", e));
+                return super::query_error(e, "Error finding documents");
             }
         };
         // Create map entry for this object's cone search
         let data = match cursor.try_collect::<Vec<mongodb::bson::Document>>().await {
             Ok(d) => d,
             Err(e) => {
-                return response::internal_error(&format!("Error collecting documents: {}", e));
+                return super::query_error(e, "Error collecting documents");
             }
         };
         docs.insert(object_name.clone(), data);
