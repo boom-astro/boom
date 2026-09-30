@@ -1094,6 +1094,27 @@ pub struct MilvusConfig {
     pub timeout_seconds: u64,
     #[serde(default)]
     pub collection: MilvusCollectionConfig,
+    #[serde(default)]
+    pub backup_queue: MilvusBackupQueueConfig,
+}
+
+/// Where embeddings wait while Milvus is unreachable, so an outage costs
+/// Valkey space instead of the GPU time to recompute them.
+#[derive(Deserialize, Debug, Clone)]
+pub struct MilvusBackupQueueConfig {
+    /// When false, a failed upload is dropped rather than buffered.
+    #[serde(default = "default_milvus_backup_queue_enabled")]
+    pub enabled: bool,
+    /// Cap on buffered objects; past this the lowest-`jd` entries are
+    /// discarded. The queue holds one row per object, so this counts distinct
+    /// objects rather than alerts. Comfortably above a night of ZTF alerts
+    /// (500k-800k), so a night-long outage loses nothing; ~1.6 GB full.
+    #[serde(default = "default_milvus_backup_queue_max_rows")]
+    pub max_rows: usize,
+    /// Rows drained per successful batch, bounding catch-up work so it does
+    /// not starve live enrichment.
+    #[serde(default = "default_milvus_backup_queue_drain_rows")]
+    pub drain_rows: usize,
 }
 
 /// Schema and index settings for the collection holding CIDER fusion embeddings.
@@ -1131,6 +1152,20 @@ fn default_milvus_timeout_seconds() -> u64 {
     30
 }
 
+fn default_milvus_backup_queue_enabled() -> bool {
+    true
+}
+
+fn default_milvus_backup_queue_max_rows() -> usize {
+    // Headroom over a night of ZTF alerts (500k-800k), so an outage spanning
+    // a full observing night drops nothing.
+    1_000_000
+}
+
+fn default_milvus_backup_queue_drain_rows() -> usize {
+    500
+}
+
 fn default_milvus_collection_name() -> String {
     "boom_ztf_fusion_embeddings".to_string()
 }
@@ -1163,6 +1198,17 @@ impl Default for MilvusConfig {
             database: String::new(),
             timeout_seconds: default_milvus_timeout_seconds(),
             collection: MilvusCollectionConfig::default(),
+            backup_queue: MilvusBackupQueueConfig::default(),
+        }
+    }
+}
+
+impl Default for MilvusBackupQueueConfig {
+    fn default() -> Self {
+        MilvusBackupQueueConfig {
+            enabled: default_milvus_backup_queue_enabled(),
+            max_rows: default_milvus_backup_queue_max_rows(),
+            drain_rows: default_milvus_backup_queue_drain_rows(),
         }
     }
 }
