@@ -10,12 +10,12 @@
 //! propagated states is then the whole method (Holman et al. 2018).
 
 use crate::utils::linking::{night_of, Detection, Tracklet};
-use crate::utils::orbit_fit::{fit_orbit, rms_arcsec, Observation};
+use crate::utils::orbit_fit::{fit_orbit_with, rms_arcsec, GiveUp, Observation};
 use crate::utils::sso_geometry::{
     dot, earth_position, heliocentric_position, norm, OrbitalElements, Site, ZTF,
 };
 use rayon::prelude::*;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// Heliocentric gravitational parameter, au^3/day^2.
 const MU: f64 = 0.017_202_098_95 * 0.017_202_098_95;
@@ -23,6 +23,11 @@ const MU: f64 = 0.017_202_098_95 * 0.017_202_098_95;
 const OBLIQUITY_DEG: f64 = 23.439_281;
 /// Step for differencing Earth's position, days.
 const EARTH_DERIV_STEP: f64 = 0.5;
+/// Iterations a candidate's orbit fit gets before it must be near the gate.
+const FIT_GIVE_UP_AFTER: usize = 8;
+/// How far above the residual gate a fit may still be after
+/// [`FIT_GIVE_UP_AFTER`] iterations and keep going.
+const FIT_GIVE_UP_FACTOR: f64 = 10.0;
 
 /// One assumed heliocentric distance and radial velocity.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -606,16 +611,52 @@ fn score(
             .collect()
     };
 
-    track.residual_arcsec =
-        match fit_orbit(&observations, &track.state, cfg.reference_jd, 20, &cfg.site) {
-            Some(fit) => {
-                track.state = fit.state;
-                Some(fit.rms_arcsec)
-            }
-            // Too few positions to refine six parameters, so take the state as it
-            // stands rather than discarding a candidate for being short.
-            None => rms_arcsec(&track.state, cfg.reference_jd, &observations, &cfg.site),
-        };
+    // A fit still far above the gate after a few iterations is not going to
+    // pass it, and most candidates are like that.
+    let give_up = GiveUp {
+        after_iterations: FIT_GIVE_UP_AFTER,
+        above_arcsec: FIT_GIVE_UP_FACTOR * cfg.max_residual_arcsec,
+    };
+    track.residual_arcsec = match fit_orbit_with(
+        &observations,
+        &track.state,
+        cfg.reference_jd,
+        20,
+        &cfg.site,
+        Some(give_up),
+    ) {
+        Some(fit) => {
+            track.state = fit.state;
+            Some(fit.rms_arcsec)
+        }
+        // Too few positions to refine six parameters, so take the state as it
+        // stands rather than discarding a candidate for being short.
+        None => rms_arcsec(&track.state, cfg.reference_jd, &observations, &cfg.site),
+    };
+}
+
+/// The first copy of one set of tracklets whose fitted orbit passes the gate.
+///
+/// Copies are tried tightest cluster first, which is the one most likely to
+/// seed a fit that converges. `None` when no copy passes.
+fn first_passing(
+    mut copies: Vec<Track>,
+    tracklets: &[Tracklet],
+    by_id: &HashMap<i64, &Detection>,
+    cfg: &LinkConfig,
+) -> Option<Track> {
+    // Stable, so equally tight copies keep their hypothesis order.
+    copies.sort_by(|a, b| {
+        a.rms_au
+            .partial_cmp(&b.rms_au)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    copies.into_iter().find_map(|mut copy| {
+        score(&mut copy, tracklets, by_id, cfg);
+        copy.residual_arcsec
+            .is_some_and(|r| r <= cfg.max_residual_arcsec)
+            .then_some(copy)
+    })
 }
 
 /// Link tracklets into tracks, sweeping every hypothesis in `cfg`.
@@ -632,21 +673,30 @@ pub fn link_tracklets(
     let by_id: HashMap<i64, &Detection> = detections.iter().map(|d| (d.id, d)).collect();
     // Collected in hypothesis order, so the result does not depend on thread
     // scheduling and deduplication stays reproducible.
-    let mut tracks: Vec<Track> = cfg
+    let candidates: Vec<Track> = cfg
         .hypotheses
         .par_iter()
         .flat_map(|hypothesis| tracks_for_hypothesis(tracklets, hypothesis, cfg))
         .collect();
 
-    tracks
-        .par_iter_mut()
-        .for_each(|track| score(track, tracklets, &by_id, cfg));
-
-    // An orbit nothing explains is not a track, whatever its states did.
-    tracks.retain(|t| {
-        t.residual_arcsec
-            .is_some_and(|r| r <= cfg.max_residual_arcsec)
-    });
+    // One object clusters under every hypothesis near its true distance, so the
+    // same set of tracklets arrives dozens to hundreds of times over, and
+    // fitting every copy was most of the cost of linking. Each distinct set
+    // fits its copies in turn and stops at the first that passes the gate. A
+    // BTreeMap keeps the order, and so deduplication, reproducible.
+    let mut sets: BTreeMap<Vec<usize>, Vec<Track>> = BTreeMap::new();
+    for candidate in candidates {
+        let mut key = candidate.members.clone();
+        key.sort_unstable();
+        sets.entry(key).or_default().push(candidate);
+    }
+    let sets: Vec<Vec<Track>> = sets.into_values().collect();
+    // Only sets whose orbit passes the gate come back: an orbit nothing
+    // explains is not a track, whatever its states did.
+    let mut tracks: Vec<Track> = sets
+        .into_par_iter()
+        .filter_map(|copies| first_passing(copies, tracklets, &by_id, cfg))
+        .collect();
 
     // Best-fitting first, then longest, so deduplication keeps the candidate
     // the astrometry supports rather than the one found earliest.
@@ -1067,6 +1117,103 @@ mod tests {
         assert!(!tracks.is_empty(), "no track recovered");
         assert_eq!(tracks[0].members.len(), 3);
         assert_eq!(tracks[0].nights, 3);
+    }
+
+    /// A small survey seen from the site the fit models: main-belt objects,
+    /// each visited twice a night on three nights. Every object that forms
+    /// tracklets on two nights must come back, and no track may mix objects.
+    /// This is the property the per-set early exit in `link_tracklets` must
+    /// not trade away for speed.
+    #[test]
+    fn test_links_every_linkable_object_of_a_small_survey() {
+        use crate::utils::identify::predict_radec_from;
+        use crate::utils::linking::{find_tracklets, TrackletConfig};
+        use std::collections::HashSet;
+
+        let nights = [2460010.70, 2460012.72, 2460015.68];
+        let mut detections = Vec::new();
+        let mut owner: HashMap<i64, usize> = HashMap::new();
+        for k in 0..12usize {
+            let el = OrbitalElements::elliptical(
+                2460012.0,
+                2.2 + 0.08 * k as f64,
+                0.05 + 0.01 * (k % 5) as f64,
+                3.0 + 1.5 * (k % 7) as f64,
+                (30.0 * k as f64) % 360.0,
+                (47.0 * k as f64) % 360.0,
+                (97.0 * k as f64) % 360.0,
+            );
+            for (n, &start) in nights.iter().enumerate() {
+                for visit in 0..2 {
+                    let jd = start + 0.06 * visit as f64 + 0.001 * k as f64;
+                    let (ra, dec) = predict_radec_from(&el, jd, &ZTF);
+                    let id = (k * 100 + n * 10 + visit) as i64;
+                    owner.insert(id, k);
+                    detections.push(Detection {
+                        id,
+                        jd,
+                        ra,
+                        dec,
+                        mag: Some(19.0),
+                        mag_err: Some(0.1),
+                        band: Some('r'),
+                    });
+                }
+            }
+        }
+
+        let mut tracklets = Vec::new();
+        for &start in &nights {
+            let night: Vec<Detection> = detections
+                .iter()
+                .filter(|d| (d.jd - start).abs() < 0.5)
+                .copied()
+                .collect();
+            tracklets.extend(find_tracklets(&night, &TrackletConfig::default()));
+        }
+        // What linking can reach: objects with a tracklet on two nights.
+        let mut nights_of: HashMap<usize, HashSet<i64>> = HashMap::new();
+        for t in &tracklets {
+            for id in &t.ids {
+                nights_of
+                    .entry(owner[id])
+                    .or_default()
+                    .insert(night_of(t.jd_ref));
+            }
+        }
+        let linkable: HashSet<usize> = nights_of
+            .iter()
+            .filter(|(_, n)| n.len() >= 2)
+            .map(|(&k, _)| k)
+            .collect();
+        assert!(
+            linkable.len() >= 8,
+            "only {} objects formed tracklets on two nights",
+            linkable.len()
+        );
+
+        let jds: Vec<f64> = tracklets.iter().map(|t| t.jd_ref).collect();
+        let cfg = LinkConfig {
+            reference_jd: (jds.iter().cloned().fold(f64::MAX, f64::min)
+                + jds.iter().cloned().fold(f64::MIN, f64::max))
+                / 2.0,
+            ..LinkConfig::default()
+        };
+        let tracks = link_tracklets(&tracklets, &detections, &cfg);
+
+        let mut recovered = HashSet::new();
+        for track in &tracks {
+            let objects: HashSet<usize> = track
+                .members
+                .iter()
+                .flat_map(|&m| tracklets[m].ids.iter())
+                .map(|id| owner[id])
+                .collect();
+            assert_eq!(objects.len(), 1, "a track mixes objects {objects:?}");
+            recovered.extend(objects);
+        }
+        let missed: Vec<&usize> = linkable.difference(&recovered).collect();
+        assert!(missed.is_empty(), "linkable objects not linked: {missed:?}");
     }
 
     #[test]
