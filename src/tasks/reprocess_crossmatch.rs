@@ -10,10 +10,17 @@
 //! `$addToSet`, which is idempotent by construction and safe alongside live
 //! ingest. That is what lets the queue resume a run whose lease lapsed.
 //!
-//! Ported from `src/bin/reprocess_crossmatch.rs`. The three `run_*_driven`
-//! functions already returned `Result`, so the move was mostly about giving the
-//! feeders a cancellation check and pointing progress at the run instead of a
-//! terminal.
+//! **Resumable without touching the records.** The catalog-driven path pages
+//! through the catalog by `_id` and records how far it got in
+//! `reprocess_crossmatch_state`, so an interrupted run continues from its
+//! checkpoint. It used to mark progress in a temporary field on `alerts_aux`
+//! itself, which meant a run wrote to the records twice and left a field
+//! behind if it died between the two passes (#694). `restart` discards the
+//! checkpoint and starts over.
+//!
+//! Ported from `src/bin/reprocess_crossmatch.rs`: the drivers already returned
+//! `Result`, so the move was about giving the feeders a cancellation check and
+//! pointing progress at the run rather than a terminal.
 
 use super::batch::PROGRESS_EVERY;
 use super::context::TaskContext;
@@ -22,7 +29,7 @@ use crate::{
     api::catalogs::WATCHLIST_PREFIX,
     conf::CatalogXmatchConfig,
     utils::{
-        data::{make_progress_bar, spawn_progress_logger},
+        data::{format_duration, format_eta, spawn_elapsed_logger},
         db::{join_tasks, merge_filters, range_shards, shard_field, TaskError, CURSOR_BATCH_SIZE},
         enums::Survey,
         spatial::{
@@ -33,21 +40,73 @@ use crate::{
 };
 use flare::{spatial::great_circle_distance, Time};
 use futures::{StreamExt, TryStreamExt};
-use indicatif::ProgressBar;
 use mongodb::{
-    bson::{doc, Document},
-    options::{UpdateModifications, UpdateOneModel, WriteModel},
+    bson::{doc, Bson, Document},
+    error::{ErrorKind, InsertManyError},
+    options::{UpdateOneModel, WriteModel},
     Namespace,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 use tracing::{info, warn};
 use utoipa::ToSchema;
 
 /// Stable identifier for this task type.
 pub const TASK_TYPE: &str = "reprocess_crossmatch";
+
+/// How often the progress ticker publishes while a driver runs.
+const PROGRESS_TICK: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Stands in for the binary's terminal progress bar.
+///
+/// The drivers thread one through their workers and `inc` it as records land.
+/// A task has no terminal, so this keeps the same call shape and sends the
+/// count to the run instead. It is separate from the publishing because `inc`
+/// is called from code that cannot await.
+#[derive(Clone)]
+struct Progress(Arc<std::sync::atomic::AtomicU64>);
+
+impl Progress {
+    fn new() -> Self {
+        Self(Arc::new(std::sync::atomic::AtomicU64::new(0)))
+    }
+
+    fn inc(&self, n: u64) {
+        self.0.fetch_add(n, Ordering::Relaxed);
+    }
+
+    fn set_position(&self, n: u64) {
+        self.0.store(n, Ordering::Relaxed);
+    }
+
+    fn count(&self) -> u64 {
+        self.0.load(Ordering::Relaxed)
+    }
+
+    /// No-op, kept so the call sites read as they do in the binary this came
+    /// from: there is nothing to tidy up on a counter.
+    fn finish(&self) {}
+}
+
+/// Publish a [`Progress`] to the run until the handle is aborted.
+fn spawn_progress_ticker(
+    ctx: TaskContext,
+    progress: Progress,
+    total: u64,
+    label: String,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(PROGRESS_TICK).await;
+            let done = progress.count();
+            ctx.progress(done, total.max(done), format!("{label}: {done}"))
+                .await;
+        }
+    })
+}
 
 /// What a client may ask for.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -79,9 +138,10 @@ pub struct ReprocessCrossmatchParams {
     /// not clear stale matches.
     #[serde(default)]
     pub skip_empty: bool,
-    /// Catalog-driven only: force the scan that clears the temp buffer.
+    /// Catalog-driven only: discard an interrupted run's progress and start
+    /// over. A resumed run otherwise picks up from the checkpoint it recorded.
     #[serde(default)]
-    pub reset_temp: bool,
+    pub restart: bool,
 }
 
 fn default_batch_size() -> usize {
@@ -93,6 +153,17 @@ fn default_processes() -> usize {
 fn default_concurrency() -> usize {
     8
 }
+const QUEUE_MULTIPLIER: usize = 2;
+const ARCSEC_TO_RAD: f64 = std::f64::consts::PI / 180.0 / 3600.0;
+const STATE_COLLECTION: &str = "reprocess_crossmatch_state";
+const STATUS_MATCHING: &str = "matching";
+const STATUS_COMMITTING: &str = "committing";
+const STATUS_CLEAN: &str = "clean";
+const SHARDS_PER_PROCESS: usize = 8;
+
+/// Catalog-driven costs extra full passes over alerts_aux, so it only wins when
+/// the catalog is substantially smaller, not merely smaller.
+const CATALOG_DRIVEN_MARGIN: u64 = 4;
 
 /// Guards against a submission that would exhaust the connection pool or build
 /// a write far larger than Mongo will accept.
@@ -258,7 +329,7 @@ pub async fn run(
             params.processes,
             params.concurrency,
             params.skip_empty,
-            params.reset_temp,
+            params.restart,
         )
         .await
         .map_err(failed)?;
@@ -302,17 +373,6 @@ pub async fn run(
     }))
 }
 
-const QUEUE_MULTIPLIER: usize = 2;
-const ARCSEC_TO_RAD: f64 = std::f64::consts::PI / 180.0 / 3600.0;
-const STATE_COLLECTION: &str = "reprocess_crossmatch_state";
-const STATUS_MATCHING: &str = "matching";
-const STATUS_CLEAN: &str = "clean";
-const TEMP_PROBE_SAMPLE: i64 = 10_000;
-
-/// Catalog-driven costs extra full passes over alerts_aux, so it only wins when
-/// the catalog is substantially smaller, not merely smaller.
-const CATALOG_DRIVEN_MARGIN: u64 = 4;
-
 /// Reprocessing can be done in two directions:
 /// - Checking the crossmatch catalogs for each alerts_aux record,
 /// - Checking the alerts_aux collection for each catalog record.
@@ -340,110 +400,17 @@ struct AuxIdAndCoords {
     coordinates: Coordinates,
 }
 
-fn aux_match_projection() -> Document {
-    doc! { "_id": 1, "coordinates.radec_geojson.coordinates": 1 }
-}
-
 async fn set_reprocess_state(
     db: &mongodb::Database,
     state_id: &str,
-    status: &str,
+    mut fields: Document,
 ) -> Result<(), mongodb::error::Error> {
+    fields.insert("updated_at", Time::now().to_jd());
     db.collection::<Document>(STATE_COLLECTION)
-        .update_one(
-            doc! { "_id": state_id },
-            doc! { "$set": { "status": status, "updated_at": Time::now().to_jd() } },
-        )
+        .update_one(doc! { "_id": state_id }, doc! { "$set": fields })
         .upsert(true)
         .await?;
     Ok(())
-}
-
-/// A run is bracketed by a state marker, so an interrupted one is known without touching
-/// alerts_aux. Versions before the marker wrote temp on *every* existing record, which is
-/// why a leftover from those is still caught by a small random sample.
-async fn temp_needs_reset(
-    db: &mongodb::Database,
-    aux_collection: &mongodb::Collection<Document>,
-    state_id: &str,
-    temp_field: &str,
-) -> Result<bool, mongodb::error::Error> {
-    let previous = db
-        .collection::<Document>(STATE_COLLECTION)
-        .find_one(doc! { "_id": state_id })
-        .await?;
-    if let Some(previous) = previous {
-        if previous.get_str("status").unwrap_or(STATUS_CLEAN) == STATUS_MATCHING {
-            warn!(
-                "previous run for '{}' was interrupted while matching",
-                state_id
-            );
-            return Ok(true);
-        }
-    }
-    let mut probe = aux_collection
-        .aggregate(vec![
-            doc! { "$sample": { "size": TEMP_PROBE_SAMPLE } },
-            doc! { "$match": { temp_field: { "$exists": true } } },
-            doc! { "$limit": 1 },
-        ])
-        .await?;
-    Ok(probe.try_next().await?.is_some())
-}
-
-// -----------------------------------------------------------------------------
-// Sharded full-collection updates: a single `update_many` runs as one server-side
-// operation, so splitting it into ranges is the only way to use more than one
-// thread for a pass over a billion documents. Ranges are cut on an indexed field
-// that tracks insertion order, so that each shard walks a roughly contiguous
-// region on disk rather than jumping around it.
-// -----------------------------------------------------------------------------
-
-async fn sharded_update_many(
-    collection: &mongodb::Collection<Document>,
-    shards: &[Document],
-    base_filter: &Document,
-    update: UpdateModifications,
-    label: &str,
-) -> Result<u64, mongodb::error::Error> {
-    let done = Arc::new(AtomicUsize::new(0));
-    let total = shards.len();
-    let results = futures::future::join_all(shards.iter().enumerate().map(|(index, shard)| {
-        let filter = merge_filters(base_filter, shard);
-        let collection = collection.clone();
-        let update = update.clone();
-        let done = Arc::clone(&done);
-        async move {
-            let result = collection.update_many(filter, update).await;
-            let completed = done.fetch_add(1, Ordering::Relaxed) + 1;
-            match &result {
-                Ok(outcome) => info!(
-                    "[{}] shard {}/{} done, {} modified ({} shards complete)",
-                    label,
-                    index + 1,
-                    total,
-                    outcome.modified_count,
-                    completed
-                ),
-                Err(e) => warn!(
-                    error = %e,
-                    "[{}] shard {}/{} failed ({} shards complete)",
-                    label,
-                    index + 1,
-                    total,
-                    completed
-                ),
-            }
-            result
-        }
-    }))
-    .await;
-
-    let mut modified = 0;
-    for result in results {
-        modified += result?.modified_count;
-    }
-    Ok(modified)
 }
 
 // -----------------------------------------------------------------------------
@@ -472,8 +439,8 @@ async fn run_objects_driven(
         .collect::<Vec<_>>()
         .join(",");
     let label = format!("objects→{}", label);
-    let pb = make_progress_bar(estimated, label.clone());
-    let logger = spawn_progress_logger(pb.clone(), label);
+    let pb = Progress::new();
+    let logger = spawn_progress_ticker(ctx.clone(), pb.clone(), estimated, label);
 
     let queue_capacity = processes * batch_size * QUEUE_MULTIPLIER;
     let (tx, rx) = async_channel::bounded::<AuxIdAndCoords>(queue_capacity);
@@ -543,7 +510,7 @@ async fn objects_worker(
     rx: async_channel::Receiver<AuxIdAndCoords>,
     batch_size: usize,
     concurrency: usize,
-    pb: ProgressBar,
+    pb: Progress,
 ) -> Result<(), mongodb::error::Error> {
     let client = db.client().clone();
     let aux_collection: mongodb::Collection<AuxIdAndCoords> =
@@ -592,7 +559,7 @@ async fn flush_objects_batch(
     catalogs: &[CatalogXmatchConfig],
     batch: &mut Vec<AuxIdAndCoords>,
     concurrency: usize,
-    pb: &ProgressBar,
+    pb: &Progress,
 ) -> Result<(), mongodb::error::Error> {
     let writes: Vec<WriteModel> = futures::stream::iter(batch.drain(..))
         .map(|obj| async move {
@@ -649,8 +616,8 @@ async fn run_watchlist_driven(
     let wl_collection: mongodb::Collection<Document> = db.collection(&watchlist_config.catalog);
     let estimated = wl_collection.estimated_document_count().await.unwrap_or(0);
     let label = format!("watchlist→{}", watchlist_config.catalog);
-    let pb = make_progress_bar(estimated, label.clone());
-    let logger = spawn_progress_logger(pb.clone(), label);
+    let pb = Progress::new();
+    let logger = spawn_progress_ticker(ctx.clone(), pb.clone(), estimated, label);
 
     let queue_capacity = processes * batch_size * QUEUE_MULTIPLIER;
     let (tx, rx) = async_channel::bounded::<Document>(queue_capacity);
@@ -710,7 +677,7 @@ async fn watchlist_worker(
     db: mongodb::Database,
     watchlist_config: CatalogXmatchConfig,
     rx: async_channel::Receiver<Document>,
-    pb: ProgressBar,
+    pb: Progress,
 ) -> Result<(), mongodb::error::Error> {
     let aux_collection: mongodb::Collection<Document> =
         db.collection(&format!("{}_alerts_aux", survey));
@@ -764,10 +731,10 @@ async fn process_watchlist_doc(
         .batch_size(CURSOR_BATCH_SIZE)
         .await?;
 
-    let mut object_ids: Vec<mongodb::bson::Bson> = Vec::new();
+    let mut object_ids: Vec<Bson> = Vec::new();
     while let Some(aux_doc) = aux_cursor.try_next().await? {
         if let Ok(id) = aux_doc.get_str("_id") {
-            object_ids.push(mongodb::bson::Bson::String(id.to_string()));
+            object_ids.push(Bson::String(id.to_string()));
         }
     }
     if object_ids.is_empty() {
@@ -784,17 +751,51 @@ async fn process_watchlist_doc(
 }
 
 // -----------------------------------------------------------------------------
-// catalog-driven: stream catalog rows, fan out to N workers that geo-lookup
-// matching alerts_aux records and accumulate $push updates. Uses a temp field
-// (`cross_matches.<catalog>_temp`) as a buffer so the `cross_matches.<catalog>` field is
-// never empty mid-run.
-//
-// Concurrency with the live ingest pipeline: every phase is gated on
-// `created_at < run_start_jd` so records inserted during the run are left
-// completely untouched (the scheduler pipeline already filled their cross_matches).
-// Without this guard, the final `$set live = $temp` would overwrite a new record's
-// field with a missing/partial temp and silently delete it.
+// catalog-driven: skips records created after run_start_jd; a resume reuses the stored value.
 // -----------------------------------------------------------------------------
+struct CatalogRun {
+    run_start_jd: f64,
+    checkpoint: Option<Bson>,
+    committing: bool,
+}
+
+struct Page {
+    index: u64,
+    rows: Vec<Document>,
+}
+
+type PageTracker = tokio::sync::Mutex<VecDeque<(u64, Bson, bool)>>;
+
+async fn load_catalog_run(
+    db: &mongodb::Database,
+    state_id: &str,
+) -> Result<Option<CatalogRun>, mongodb::error::Error> {
+    let Some(state) = db
+        .collection::<Document>(STATE_COLLECTION)
+        .find_one(doc! { "_id": state_id })
+        .await?
+    else {
+        return Ok(None);
+    };
+    let committing = match state.get_str("status") {
+        Ok(STATUS_MATCHING) => false,
+        Ok(STATUS_COMMITTING) => true,
+        _ => return Ok(None),
+    };
+    let Ok(run_start_jd) = state.get_f64("run_start_jd") else {
+        return Ok(None);
+    };
+    let checkpoint = state
+        .get("checkpoint")
+        .filter(|id| !matches!(id, Bson::Null))
+        .cloned();
+    Ok(Some(CatalogRun {
+        run_start_jd,
+        checkpoint,
+        committing,
+    }))
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_catalog_driven(
     ctx: &TaskContext,
@@ -805,250 +806,292 @@ async fn run_catalog_driven(
     processes: usize,
     concurrency: usize,
     skip_empty: bool,
-    reset_temp: bool,
+    restart: bool,
 ) -> Result<(), TaskError> {
-    let aux_collection: mongodb::Collection<Document> =
-        db.collection(&format!("{}_alerts_aux", survey));
-    let cat_collection: mongodb::Collection<Document> =
-        db.collection(catalog_config.collection_name());
-    let live_field = format!("cross_matches.{}", catalog_config.catalog);
-    let temp_field = format!("cross_matches.{}_temp", catalog_config.catalog);
-    let run_start_jd = Time::now().to_jd();
-    let shard_field = shard_field(&aux_collection).await;
-    let shards = range_shards(&aux_collection, processes, shard_field, &Document::new()).await;
-    info!(
-        "[catalog\u{2192}{}] cleanup passes sharded on '{}' into {} ranges",
-        catalog_config.catalog,
-        shard_field,
-        shards.len()
-    );
-
-    // Phase 1: drop temp left behind by an interrupted run. Nothing can be left behind
-    // after a run that reached phase 3, so the scan is skipped on the normal path.
+    let label = format!("catalog→{}", catalog_config.catalog);
     let state_id = format!("{}_alerts_aux:{}", survey, catalog_config.catalog);
-    if reset_temp || temp_needs_reset(&db, &aux_collection, &state_id, &temp_field).await? {
+    let buffer_name = format!(
+        "reprocess_crossmatch_buffer_{}_{}",
+        survey, catalog_config.catalog
+    );
+    let buffer: mongodb::Collection<Document> = db.collection(&buffer_name);
+    let grouped: mongodb::Collection<Document> = db.collection(&format!("{}_grouped", buffer_name));
+
+    let previous = if restart {
+        None
+    } else {
+        load_catalog_run(&db, &state_id).await?
+    };
+    let run = match previous {
+        Some(run) => {
+            info!(
+                "[{}] resuming the run started at JD {} ({})",
+                label,
+                run.run_start_jd,
+                if run.committing {
+                    STATUS_COMMITTING
+                } else {
+                    STATUS_MATCHING
+                }
+            );
+            run
+        }
+        None => {
+            buffer.drop().await?;
+            grouped.drop().await?;
+            let run = CatalogRun {
+                run_start_jd: Time::now().to_jd(),
+                checkpoint: None,
+                committing: false,
+            };
+            set_reprocess_state(
+                &db,
+                &state_id,
+                doc! {
+                    "status": STATUS_MATCHING,
+                    "run_start_jd": run.run_start_jd,
+                    "checkpoint": Bson::Null,
+                },
+            )
+            .await?;
+            run
+        }
+    };
+
+    if !run.committing {
         info!(
-            "[catalog→{}] phase 1/3: clearing leftover temp field ({} shards)",
-            catalog_config.catalog,
-            shards.len()
+            "[{}] phase 1/2: matching catalog rows into '{}'",
+            label, buffer_name
         );
-        let cleared = sharded_update_many(
-            &aux_collection,
-            &shards,
-            &doc! { &temp_field: { "$exists": true } },
-            UpdateModifications::Document(doc! { "$unset": { &temp_field: "" } }),
-            &format!("catalog→{} phase 1", catalog_config.catalog),
+        match_catalog(
+            ctx,
+            survey,
+            &catalog_config,
+            &db,
+            &buffer,
+            &state_id,
+            &run,
+            batch_size,
+            processes,
+            concurrency,
+            &label,
         )
         .await?;
-        info!(
-            "[catalog→{}] phase 1/3: cleared {} leftover temp fields",
-            catalog_config.catalog, cleared
-        );
-    } else {
-        info!(
-            "[catalog→{}] phase 1/3: no interrupted run to clean up, skipping the reset scan",
-            catalog_config.catalog
-        );
+        set_reprocess_state(&db, &state_id, doc! { "status": STATUS_COMMITTING }).await?;
     }
-    set_reprocess_state(&db, &state_id, STATUS_MATCHING).await?;
 
-    // Phase 2: stream catalog rows through a worker pool, $push matches to temp.
-    info!(
-        "[catalog→{}] phase 2/3: streaming catalog rows",
-        catalog_config.catalog
+    info!("[{}] phase 2/2: committing matches to alerts_aux", label);
+    commit_catalog(
+        survey,
+        &catalog_config,
+        &db,
+        &buffer,
+        &grouped,
+        run.run_start_jd,
+        processes,
+        skip_empty,
+        &label,
+    )
+    .await?;
+    set_reprocess_state(&db, &state_id, doc! { "status": STATUS_CLEAN }).await?;
+    buffer.drop().await?;
+    grouped.drop().await?;
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn match_catalog(
+    ctx: &TaskContext,
+    survey: &Survey,
+    catalog_config: &CatalogXmatchConfig,
+    db: &mongodb::Database,
+    buffer: &mongodb::Collection<Document>,
+    state_id: &str,
+    run: &CatalogRun,
+    batch_size: usize,
+    processes: usize,
+    concurrency: usize,
+    label: &str,
+) -> Result<(), TaskError> {
+    let catalog_collection: mongodb::Collection<Document> =
+        db.collection(catalog_config.collection_name());
+    let mut catalog_projection = catalog_config.projection.clone();
+    catalog_projection.insert("_id", 1);
+    catalog_projection.insert("ra", 1);
+    catalog_projection.insert("dec", 1);
+    if let Some(distance_key) = &catalog_config.distance_key {
+        catalog_projection.insert(distance_key.as_str(), 1);
+    }
+
+    let catalog_estimated = catalog_collection
+        .estimated_document_count()
+        .await
+        .unwrap_or(0);
+    let pb = Progress::new();
+    if let Some(checkpoint) = &run.checkpoint {
+        let done = catalog_collection
+            .count_documents(doc! { "_id": { "$lte": checkpoint.clone() } })
+            .await?;
+        info!(
+            "[{}] {} rows already matched, resuming after them",
+            label, done
+        );
+        pb.set_position(done);
+    }
+    let logger = spawn_progress_ticker(
+        ctx.clone(),
+        pb.clone(),
+        catalog_estimated,
+        label.to_string(),
     );
-    let mut cat_projection = catalog_config.projection.clone();
-    cat_projection.insert("_id", 1);
-    cat_projection.insert("ra", 1);
-    cat_projection.insert("dec", 1);
-    if let Some(dk) = &catalog_config.distance_key {
-        cat_projection.insert(dk.as_str(), 1);
-    }
 
-    let cat_estimated = cat_collection.estimated_document_count().await.unwrap_or(0);
-    let label = format!("catalog→{}", catalog_config.catalog);
-    let pb = make_progress_bar(cat_estimated, label.clone());
-    let logger = spawn_progress_logger(pb.clone(), label);
-    let queue_capacity = processes * batch_size * QUEUE_MULTIPLIER;
-    let (tx, rx) = async_channel::bounded::<Document>(queue_capacity);
-
+    let tracker: Arc<PageTracker> = Arc::default();
+    let (tx, rx) = async_channel::bounded::<Page>(processes * QUEUE_MULTIPLIER);
+    let aux_collection: mongodb::Collection<Document> =
+        db.collection(&format!("{}_alerts_aux", survey));
     let mut workers = Vec::with_capacity(processes);
     for _ in 0..processes {
         let rx = rx.clone();
         let pb = pb.clone();
-        let survey = survey.clone();
         let db = db.clone();
+        let aux_collection = aux_collection.clone();
+        let buffer = buffer.clone();
         let catalog_config = catalog_config.clone();
-        let temp_field = temp_field.clone();
+        let tracker = Arc::clone(&tracker);
+        let state_id = state_id.to_string();
+        let run_start_jd = run.run_start_jd;
         workers.push(tokio::spawn(async move {
-            catalog_worker(
-                survey,
-                db,
-                catalog_config,
-                temp_field,
-                run_start_jd,
-                rx,
-                batch_size,
-                concurrency,
-                pb,
-            )
-            .await
+            while let Ok(page) = rx.recv().await {
+                let matches = match_page(
+                    &aux_collection,
+                    &catalog_config,
+                    run_start_jd,
+                    page.rows,
+                    concurrency,
+                    &pb,
+                )
+                .await?;
+                if !matches.is_empty() {
+                    insert_ignoring_duplicates(&buffer, matches).await?;
+                }
+                complete_page(&tracker, page.index, &db, &state_id).await?;
+            }
+            Ok(())
         }));
     }
     drop(rx);
 
-    let mut cursor = cat_collection
-        .find(doc! {})
-        .projection(cat_projection)
-        .batch_size(CURSOR_BATCH_SIZE)
-        .no_cursor_timeout(true)
-        .await?;
-    let mut fed: u64 = 0;
-    let mut last_reported: u64 = 0;
-    while let Some(d) = cursor.try_next().await? {
-        // Cancelling here rather than inside the workers: they drain whatever is
-        // already queued and flush their batches, so a cancelled run leaves
-        // whole records written rather than a half-applied bulk write.
-        if ctx.is_canceled() {
-            ctx.warn("cancellation requested; no longer feeding workers");
-            break;
+    let produced: Result<(), mongodb::error::Error> = async {
+        let mut last_id = run.checkpoint.clone();
+        for index in 0.. {
+            // At the page boundary: a page's matches are buffered and its
+            // checkpoint recorded before the next is fed, so stopping here
+            // leaves a state the next run resumes from rather than repeats.
+            if ctx.is_canceled() {
+                ctx.warn(format!(
+                    "{label}: canceled while feeding catalog pages; the checkpoint records \
+                     what has been matched, so re-running continues from there"
+                ));
+                break;
+            }
+            let filter = match &last_id {
+                Some(id) => doc! { "_id": { "$gt": id.clone() } },
+                None => doc! {},
+            };
+            let rows: Vec<Document> = catalog_collection
+                .find(filter)
+                .sort(doc! { "_id": 1 })
+                .limit(batch_size as i64)
+                .projection(catalog_projection.clone())
+                .await?
+                .try_collect()
+                .await?;
+            let Some(id) = rows.last().and_then(|row| row.get("_id")).cloned() else {
+                break;
+            };
+            tracker.lock().await.push_back((index, id.clone(), false));
+            if tx.send(Page { index, rows }).await.is_err() {
+                break;
+            }
+            last_id = Some(id);
         }
-        if tx.send(d).await.is_err() {
-            break;
-        }
-        fed += 1;
-        if fed - last_reported >= PROGRESS_EVERY {
-            last_reported = fed;
-            ctx.progress(fed, cat_estimated.max(fed), format!("{fed} records queued"))
-                .await;
-        }
+        Ok(())
     }
+    .await;
     drop(tx);
     let outcome = join_tasks(workers, "worker").await;
     logger.abort();
     pb.finish();
-    // A partial temp must never reach phase 3: it commits empty match lists over valid ones.
+    produced?;
     outcome?;
-
-    // Phase 3: sort, trim and commit in a single pass. $ifNull gives records with no
-    // match the empty array that phase 1 used to pre-write on every record.
-    info!(
-        "[catalog→{}] phase 3/3: sorting, trimming and swapping temp into live ({} shards)",
-        catalog_config.catalog,
-        shards.len()
-    );
-    let mut commit_filter = doc! { "created_at": { "$lt": run_start_jd } };
-    if skip_empty {
-        commit_filter.insert(&temp_field, doc! { "$exists": true });
-    }
-    sharded_update_many(
-        &aux_collection,
-        &shards,
-        &commit_filter,
-        UpdateModifications::Pipeline(make_commit_pipeline(
-            &catalog_config,
-            &temp_field,
-            &live_field,
-        )),
-        &format!("catalog→{} phase 3", catalog_config.catalog),
-    )
-    .await?;
-    set_reprocess_state(&db, &state_id, STATUS_CLEAN).await?;
-
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn catalog_worker(
-    survey: Survey,
-    db: mongodb::Database,
-    catalog_config: CatalogXmatchConfig,
-    temp_field: String,
-    run_start_jd: f64,
-    rx: async_channel::Receiver<Document>,
-    batch_size: usize,
-    concurrency: usize,
-    pb: ProgressBar,
-) -> Result<(), mongodb::error::Error> {
-    let client = db.client().clone();
-    let aux_collection: mongodb::Collection<Document> =
-        db.collection(&format!("{}_alerts_aux", survey));
-    let aux_ns = aux_collection.namespace();
-
-    let mut rows = Vec::with_capacity(batch_size);
-    while let Ok(cat_doc) = rx.recv().await {
-        rows.push(cat_doc);
-        if rows.len() >= batch_size {
-            flush_catalog_batch(
-                &aux_collection,
-                &client,
-                &aux_ns,
-                &catalog_config,
-                &temp_field,
-                run_start_jd,
-                &mut rows,
-                concurrency,
-                &pb,
-            )
-            .await?;
-        }
-    }
-    if !rows.is_empty() {
-        flush_catalog_batch(
-            &aux_collection,
-            &client,
-            &aux_ns,
-            &catalog_config,
-            &temp_field,
-            run_start_jd,
-            &mut rows,
-            concurrency,
-            &pb,
-        )
-        .await?;
-    }
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn flush_catalog_batch(
+async fn match_page(
     aux_collection: &mongodb::Collection<Document>,
-    client: &mongodb::Client,
-    aux_ns: &Namespace,
     catalog_config: &CatalogXmatchConfig,
-    temp_field: &str,
     run_start_jd: f64,
-    rows: &mut Vec<Document>,
+    rows: Vec<Document>,
     concurrency: usize,
-    pb: &ProgressBar,
-) -> Result<(), mongodb::error::Error> {
-    let mut stream = futures::stream::iter(rows.drain(..))
+    pb: &Progress,
+) -> Result<Vec<Document>, mongodb::error::Error> {
+    futures::stream::iter(rows)
         .map(|cat_doc| async move {
             let result =
                 process_cat_doc(aux_collection, catalog_config, run_start_jd, &cat_doc).await;
             pb.inc(1);
-            match result {
-                Ok(matches) => matches,
-                Err(e) => {
-                    warn!(error = %e, "catalog row processing failed, skipping");
-                    Vec::new()
-                }
-            }
+            result
         })
-        .buffer_unordered(concurrency);
+        .buffer_unordered(concurrency)
+        .try_concat()
+        .await
+}
 
-    let mut pending: HashMap<String, Vec<Document>> = HashMap::new();
-    while let Some(matches) = stream.next().await {
-        for (aux_id, match_doc) in matches {
-            pending.entry(aux_id).or_default().push(match_doc);
-        }
+/// The checkpoint only moves past a page once every page before it is done.
+async fn complete_page(
+    tracker: &PageTracker,
+    index: u64,
+    db: &mongodb::Database,
+    state_id: &str,
+) -> Result<(), mongodb::error::Error> {
+    let mut pending = tracker.lock().await;
+    if let Some((_, _, done)) = pending
+        .iter_mut()
+        .find(|(page_index, _, _)| *page_index == index)
+    {
+        *done = true;
     }
-    drop(stream);
-
-    if !pending.is_empty() {
-        flush_pending(client, aux_ns, temp_field, &mut pending).await?;
+    let mut checkpoint = None;
+    while pending.front().is_some_and(|(_, _, done)| *done) {
+        checkpoint = pending.pop_front().map(|(_, last_id, _)| last_id);
+    }
+    if let Some(checkpoint) = checkpoint {
+        set_reprocess_state(db, state_id, doc! { "checkpoint": checkpoint }).await?;
     }
     Ok(())
+}
+
+async fn insert_ignoring_duplicates(
+    collection: &mongodb::Collection<Document>,
+    documents: Vec<Document>,
+) -> Result<(), mongodb::error::Error> {
+    let Err(error) = collection.insert_many(documents).ordered(false).await else {
+        return Ok(());
+    };
+    match error.kind.as_ref() {
+        ErrorKind::InsertMany(InsertManyError {
+            write_errors: Some(write_errors),
+            write_concern_error: None,
+            ..
+        }) if write_errors
+            .iter()
+            .all(|write_error| write_error.code == 11000) =>
+        {
+            Ok(())
+        }
+        _ => Err(error),
+    }
 }
 
 async fn process_cat_doc(
@@ -1056,14 +1099,15 @@ async fn process_cat_doc(
     catalog_config: &CatalogXmatchConfig,
     run_start_jd: f64,
     cat_doc: &Document,
-) -> Result<Vec<(String, Document)>, mongodb::error::Error> {
-    let cat_ra = match get_f64_from_doc(cat_doc, "ra") {
-        Some(v) => v,
-        None => return Ok(Vec::new()),
+) -> Result<Vec<Document>, mongodb::error::Error> {
+    let Some(catalog_id) = cat_doc.get("_id") else {
+        return Ok(Vec::new());
     };
-    let cat_dec = match get_f64_from_doc(cat_doc, "dec") {
-        Some(v) => v,
-        None => return Ok(Vec::new()),
+    let Some(cat_ra) = get_f64_from_doc(cat_doc, "ra") else {
+        return Ok(Vec::new());
+    };
+    let Some(cat_dec) = get_f64_from_doc(cat_doc, "dec") else {
+        return Ok(Vec::new());
     };
 
     // A row's effective radius depends only on the row itself, so query that
@@ -1074,6 +1118,7 @@ async fn process_cat_doc(
         return Ok(Vec::new());
     }
 
+    // No `created_at` in the filter, or the planner can pick its index over the 2dsphere one.
     let cat_ra_geojson = cat_ra - 180.0;
     let aux_filter = doc! {
         "coordinates.radec_geojson": {
@@ -1081,23 +1126,25 @@ async fn process_cat_doc(
                 "$centerSphere": [[cat_ra_geojson, cat_dec], search_radius]
             }
         },
-        "created_at": { "$lt": run_start_jd },
     };
     let mut aux_cursor = aux_collection
         .find(aux_filter)
-        .projection(aux_match_projection())
+        .projection(doc! { "_id": 1, "coordinates.radec_geojson.coordinates": 1, "created_at": 1 })
         .batch_size(CURSOR_BATCH_SIZE)
         .await?;
 
     let mut matches = Vec::new();
     while let Some(aux_doc) = aux_cursor.try_next().await? {
-        let aux_id = match aux_doc.get_str("_id") {
-            Ok(s) => s.to_string(),
-            Err(_) => continue,
+        if !get_f64_from_doc(&aux_doc, "created_at")
+            .is_some_and(|created_at| created_at < run_start_jd)
+        {
+            continue;
+        }
+        let Ok(aux_id) = aux_doc.get_str("_id") else {
+            continue;
         };
-        let (aux_ra, aux_dec) = match extract_radec(&aux_doc) {
-            Some(v) => v,
-            None => continue,
+        let Some((aux_ra, aux_dec)) = extract_radec(&aux_doc) else {
+            continue;
         };
         let distance_arcsec = great_circle_distance(aux_ra, aux_dec, cat_ra, cat_dec) * 3600.0;
 
@@ -1108,34 +1155,172 @@ async fn process_cat_doc(
             match_doc.insert("distance_kpc", distance_kpc_from_arcsec(distance_arcsec, z));
         }
 
-        matches.push((aux_id, match_doc));
+        matches.push(doc! { "_id": { "a": aux_id, "c": catalog_id.clone() }, "m": match_doc });
     }
     Ok(matches)
 }
 
-async fn flush_pending(
-    client: &mongodb::Client,
-    aux_ns: &Namespace,
-    field: &str,
-    pending: &mut HashMap<String, Vec<Document>>,
-) -> Result<(), mongodb::error::Error> {
-    let drained: Vec<(String, Vec<Document>)> = pending.drain().collect();
-    let models: Vec<WriteModel> = drained
-        .into_iter()
-        .map(|(aux_id, docs)| {
-            WriteModel::UpdateOne(
-                UpdateOneModel::builder()
-                    .namespace(aux_ns.clone())
-                    .filter(doc! { "_id": aux_id })
-                    .update(doc! { "$push": { field: { "$each": docs } } })
-                    .build(),
-            )
-        })
-        .collect();
-    if !models.is_empty() {
-        client.bulk_write(models).ordered(false).await?;
+#[allow(clippy::too_many_arguments)]
+async fn commit_catalog(
+    survey: &Survey,
+    catalog_config: &CatalogXmatchConfig,
+    db: &mongodb::Database,
+    buffer: &mongodb::Collection<Document>,
+    grouped: &mongodb::Collection<Document>,
+    run_start_jd: f64,
+    processes: usize,
+    skip_empty: bool,
+    label: &str,
+) -> Result<(), TaskError> {
+    let aux_collection: mongodb::Collection<Document> =
+        db.collection(&format!("{}_alerts_aux", survey));
+    let live_field = format!("cross_matches.{}", catalog_config.catalog);
+    // Left by the temp-field approach this replaced, still present on some
+    // alerts_aux records, so the merge clears it as it goes.
+    let legacy_temp_field = format!("cross_matches.{}_temp", catalog_config.catalog);
+    let merge_into_aux = |value: Bson| {
+        doc! { "$merge": {
+            "into": aux_collection.name(),
+            "on": "_id",
+            "whenMatched": [
+                { "$set": { &live_field: value } },
+                { "$unset": &legacy_temp_field },
+            ],
+            "whenNotMatched": "discard",
+        }}
+    };
+
+    let buffered = buffer.estimated_document_count().await?;
+    info!(
+        "[{}] grouping, sorting and trimming {} matches per record",
+        label, buffered
+    );
+    let logger = spawn_elapsed_logger(label.to_string(), "still grouping");
+    let grouping = buffer
+        .aggregate(vec![
+            doc! { "$group": { "_id": "$_id.a", "m": { "$push": "$m" } } },
+            doc! { "$set": { "m": sorted_matches(catalog_config, "$m") } },
+            doc! { "$out": grouped.name() },
+        ])
+        .allow_disk_use(true)
+        .await;
+    logger.abort();
+    grouping?;
+
+    let grouped_shards = range_shards(
+        grouped,
+        processes * SHARDS_PER_PROCESS,
+        "_id",
+        &Document::new(),
+    )
+    .await;
+    sharded_aggregate(
+        grouped,
+        &grouped_shards,
+        processes,
+        &Document::new(),
+        vec![merge_into_aux(Bson::from("$$new.m"))],
+        &format!("{} matched", label),
+    )
+    .await?;
+
+    if skip_empty {
+        return Ok(());
     }
+    let aux_shards = range_shards(
+        &aux_collection,
+        processes * SHARDS_PER_PROCESS,
+        shard_field(&aux_collection).await,
+        &Document::new(),
+    )
+    .await;
+    sharded_aggregate(
+        &aux_collection,
+        &aux_shards,
+        processes,
+        &doc! {
+            "created_at": { "$lt": run_start_jd },
+            "$or": [
+                { &live_field: { "$exists": false } },
+                { format!("{}.0", live_field): { "$exists": true } },
+                { &legacy_temp_field: { "$exists": true } },
+            ],
+        },
+        vec![
+            doc! { "$project": { "_id": 1 } },
+            doc! { "$lookup": {
+                "from": grouped.name(),
+                "localField": "_id",
+                "foreignField": "_id",
+                "pipeline": [{ "$project": { "_id": 1 } }],
+                "as": "hit",
+            }},
+            doc! { "$match": { "hit": { "$size": 0 } } },
+            doc! { "$project": { "_id": 1 } },
+            merge_into_aux(Bson::Array(Vec::new())),
+        ],
+        &format!("{} unmatched", label),
+    )
+    .await?;
     Ok(())
+}
+
+async fn sharded_aggregate(
+    collection: &mongodb::Collection<Document>,
+    shards: &[Document],
+    processes: usize,
+    base_filter: &Document,
+    stages: Vec<Document>,
+    label: &str,
+) -> Result<(), mongodb::error::Error> {
+    let total = shards.len();
+    info!("[{}] running over {} shards", label, total);
+    let done = &AtomicUsize::new(0);
+    let started = Instant::now();
+    let results: Vec<_> = futures::stream::iter(shards.iter().enumerate().map(|(index, shard)| {
+        let filter = merge_filters(base_filter, shard);
+        let mut pipeline = Vec::with_capacity(stages.len() + 1);
+        if !filter.is_empty() {
+            pipeline.push(doc! { "$match": filter });
+        }
+        pipeline.extend(stages.iter().cloned());
+        async move {
+            let result = collection.aggregate(pipeline).allow_disk_use(true).await;
+            let completed = done.fetch_add(1, Ordering::Relaxed) + 1;
+            let elapsed = started.elapsed();
+            let progress = format!(
+                "{} shards complete, {} elapsed, eta {}",
+                completed,
+                format_duration(elapsed.as_secs()),
+                format_eta(
+                    (total - completed) as u64,
+                    completed as f64 / elapsed.as_secs_f64()
+                )
+            );
+            match &result {
+                Ok(_) => info!(
+                    "[{}] shard {}/{} done ({})",
+                    label,
+                    index + 1,
+                    total,
+                    progress
+                ),
+                Err(error) => warn!(
+                    %error,
+                    "[{}] shard {}/{} failed ({})",
+                    label,
+                    index + 1,
+                    total,
+                    progress
+                ),
+            }
+            result.map(|_| ())
+        }
+    }))
+    .buffer_unordered(processes)
+    .collect()
+    .await;
+    results.into_iter().collect()
 }
 
 /// `coordinates.radec_geojson.coordinates` is `[ra - 180, dec]`.
@@ -1179,15 +1364,8 @@ fn stellar_expr(catalog_config: &CatalogXmatchConfig) -> Document {
     doc! { "$in": [{ "$toLower": { "$trim": { "input": value } } }, values] }
 }
 
-/// Mongo-aggregation mirror of the in-Rust sort/trim performed by
-/// `utils::spatial::xmatch` (see that function for the source of truth on
-/// ordering semantics), followed by the swap of the temp buffer into the live
-/// field.
-fn make_commit_pipeline(
-    catalog_config: &CatalogXmatchConfig,
-    temp_field: &str,
-    live_field: &str,
-) -> Vec<Document> {
+/// Mirrors the sort and trim of `utils::spatial::xmatch`; keep the two in sync.
+fn sorted_matches(catalog_config: &CatalogXmatchConfig, input: &str) -> Document {
     let rank = doc! { "$switch": {
         "branches": [
             { "case": { "$lt": ["$$a", COINCIDENT_ARCSEC] }, "then": 0 },
@@ -1197,7 +1375,7 @@ fn make_commit_pipeline(
         "default": 2,
     }};
     let keyed = doc! { "$map": {
-        "input": { "$ifNull": [format!("${}", temp_field), []] },
+        "input": { "$ifNull": [input, []] },
         "in": { "$let": {
             "vars": {
                 "a": { "$ifNull": ["$$this.distance_arcsec", f64::MAX] },
@@ -1218,15 +1396,11 @@ fn make_commit_pipeline(
         "input": { "$sortArray": { "input": keyed, "sortBy": { "r": 1, "k": 1, "a": 1 } } },
         "in": "$$this.doc",
     }};
-    let final_value: Document = if let Some(max) = catalog_config.max_results {
+    if let Some(max) = catalog_config.max_results {
         doc! { "$slice": [sorted, max as i64] }
     } else {
         sorted
-    };
-    vec![
-        doc! { "$set": { live_field: final_value } },
-        doc! { "$unset": temp_field },
-    ]
+    }
 }
 
 async fn pick_direction(
@@ -1266,7 +1440,7 @@ mod tests {
             concurrency: default_concurrency(),
             skip_existing: false,
             skip_empty: false,
-            reset_temp: false,
+            restart: false,
         }
     }
 
@@ -1362,7 +1536,7 @@ mod tests {
 }
 
 #[cfg(test)]
-mod commit_pipeline_tests {
+mod sorted_matches_tests {
     use super::*;
 
     fn config(type_key: Option<&str>) -> CatalogXmatchConfig {
@@ -1379,24 +1553,22 @@ mod commit_pipeline_tests {
 
     #[test]
     fn test_a_catalog_without_a_type_column_ranks_nothing_as_stellar() {
-        let expr = stellar_expr(&config(None));
-        assert!(!expr.get_bool("$literal").unwrap());
+        let expression = stellar_expr(&config(None));
+        assert!(!expression.get_bool("$literal").unwrap());
     }
 
     #[test]
     fn test_stellar_values_are_compared_case_insensitively() {
-        let expr = stellar_expr(&config(Some("spectype")));
-        let args = expr.get_array("$in").unwrap();
+        let expression = stellar_expr(&config(Some("spectype")));
+        let args = expression.get_array("$in").unwrap();
         assert!(format!("{:?}", args[0]).contains("toLower"));
         assert_eq!(args[1].as_array().unwrap()[0].as_str().unwrap(), "star");
     }
 
-    /// The keys are the ones `host_sort_key` returns, in that order, and the
-    /// wrapper they live on is dropped before the array is stored.
+    /// Keys follow `host_sort_key`, and their wrapper is dropped before the array is stored.
     #[test]
     fn test_rows_are_sorted_on_rank_then_distance() {
-        let pipeline = make_commit_pipeline(&config(None), "tmp", "cross_matches.NED");
-        let rendered = format!("{:?}", pipeline);
+        let rendered = format!("{:?}", sorted_matches(&config(None), "$m"));
         assert!(rendered
             .contains(r#""sortBy": Document({"r": Int32(1), "k": Int32(1), "a": Int32(1)})"#));
         assert!(rendered.contains(r#""in": String("$$this.doc")"#));
@@ -1404,10 +1576,8 @@ mod commit_pipeline_tests {
     }
 
     #[test]
-    fn test_the_temp_buffer_is_dropped_and_the_array_is_trimmed() {
-        let pipeline = make_commit_pipeline(&config(None), "tmp", "cross_matches.NED");
-        assert_eq!(pipeline.len(), 2);
-        assert!(format!("{:?}", pipeline[0]).contains("$slice"));
-        assert_eq!(pipeline[1].get_str("$unset").unwrap(), "tmp");
+    fn test_the_array_is_trimmed() {
+        let expression = sorted_matches(&config(None), "$m");
+        assert!(expression.contains_key("$slice"));
     }
 }
