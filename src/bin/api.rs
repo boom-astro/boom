@@ -67,7 +67,8 @@ async fn main() -> std::io::Result<()> {
         // Abandoned sign-in attempts are only cleaned up by this TTL index —
         // completed flows delete their own state, incomplete ones never do.
         if let Err(error) =
-            boom::api::admin::seed_babamul_admins(&database, &config.babamul.admin_emails).await
+            boom::api::admin::reconcile_babamul_admins(&database, &config.babamul.admin_emails)
+                .await
         {
             panic!("failed to seed babamul admins: {error}");
         }

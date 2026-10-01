@@ -103,7 +103,12 @@ pub fn require_admin(
     })
 }
 
-/// Seed `is_admin` on the Babamul accounts named in the configured list.
+/// Grant `is_admin` to the Babamul accounts named in the configured list.
+///
+/// Named "reconcile" for the layering's sake rather than its own: the call site
+/// lives in `src/bin/api.rs`, which a different layer of this stack owns, so
+/// renaming it here alone would break the layer that carries this file. It
+/// seeds; it does not reconcile.
 ///
 /// Runs at API startup, and only ever **grants**. This list exists to solve
 /// the bootstrap problem: admin is granted through
@@ -116,7 +121,7 @@ pub fn require_admin(
 /// un-admin everyone appointed since the last one. Revocation belongs with the
 /// grant, in the API.
 #[tracing::instrument(skip(db, admin_emails))]
-pub async fn seed_babamul_admins(
+pub async fn reconcile_babamul_admins(
     db: &mongodb::Database,
     admin_emails: &[String],
 ) -> Result<(), mongodb::error::Error> {
