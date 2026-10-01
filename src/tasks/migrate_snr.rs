@@ -9,9 +9,6 @@
 //! output, which is what makes this **idempotent** -- and therefore safe for the
 //! queue to requeue after a lost lease.
 //!
-//! Ported from `src/bin/migrate_snr.rs`, which is now a thin wrapper. As with
-//! `migrate_fp_flux`, the move traded `process::exit` for errors, added
-//! cancellation checks at batch boundaries, and pointed progress at the run.
 
 use super::batch::{run_batched_update, BatchError, PROGRESS_EVERY};
 use super::context::TaskContext;

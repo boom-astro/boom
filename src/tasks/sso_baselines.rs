@@ -8,9 +8,8 @@
 //! **Idempotent.** Each baseline is an upsert keyed on the designation, refit
 //! from the same detections, so re-running converges on the same values.
 //!
-//! Ported from `src/bin/sso_baselines.rs`. Beyond the mechanical move, a read
-//! or write failure now fails the run instead of being logged and stepped over
-//! -- a partial fit that reports success would leave baselines silently stale.
+//! A read or write failure fails the run rather than being logged and stepped
+//! over: a partial fit reporting success would leave baselines silently stale.
 
 use super::context::TaskContext;
 use super::ledger::{MutationTarget, Operation};

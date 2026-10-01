@@ -13,14 +13,8 @@
 //! **Resumable without touching the records.** The catalog-driven path pages
 //! through the catalog by `_id` and records how far it got in
 //! `reprocess_crossmatch_state`, so an interrupted run continues from its
-//! checkpoint. It used to mark progress in a temporary field on `alerts_aux`
-//! itself, which meant a run wrote to the records twice and left a field
-//! behind if it died between the two passes (#694). `restart` discards the
-//! checkpoint and starts over.
-//!
-//! Ported from `src/bin/reprocess_crossmatch.rs`: the drivers already returned
-//! `Result`, so the move was about giving the feeders a cancellation check and
-//! pointing progress at the run rather than a terminal.
+//! checkpoint, and `restart` discards it and starts over. Progress is not
+//! marked on the records themselves, so a run writes to `alerts_aux` once.
 
 use super::batch::PROGRESS_EVERY;
 use super::context::TaskContext;
@@ -1175,8 +1169,8 @@ async fn commit_catalog(
     let aux_collection: mongodb::Collection<Document> =
         db.collection(&format!("{}_alerts_aux", survey));
     let live_field = format!("cross_matches.{}", catalog_config.catalog);
-    // Left by the temp-field approach this replaced, still present on some
-    // alerts_aux records, so the merge clears it as it goes.
+    // Some alerts_aux records still carry a `_temp` field from an older
+    // scheme, so the merge clears it as it goes.
     let legacy_temp_field = format!("cross_matches.{}_temp", catalog_config.catalog);
     let merge_into_aux = |value: Bson| {
         doc! { "$merge": {

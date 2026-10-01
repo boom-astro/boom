@@ -1,174 +1,255 @@
-//! Run intra-night tracklet finding over one night of ZTF alerts.
+//! The `link_tracks` task: find intra-night tracklets and link them into
+//! moving-object tracks.
 //!
-//! Two modes. `--known` links the detections IPAC already matched to a solar
-//! system object and scores the result against those labels, which is how the
-//! thresholds get calibrated. The default links the unassociated detections,
-//! where anything new would be.
+//! Two things in one, because they share every threshold. A production run
+//! persists what it finds: each track lands in `<survey>_tracks` under a
+//! durable id short enough to quote as an MPC `trkSub`, and each member alert
+//! is stamped with a `track` block. A tuning run sets `dry_run` and
+//! writes nothing, reporting what it would have done in the run's result so
+//! the numbers can be read off the admin page rather than a terminal.
+//!
+//! Tuning is done here rather than on a terminal so the thresholds that
+//! produced a stored track are the run's recorded parameters.
+//!
+//! `input` names a **staged** dump under the shared data path rather than an
+//! arbitrary file, because the worker cannot see the operator's disk -- the
+//! same arrangement staged catalogs use. `out_tracks` names a file written
+//! into the export area, which the admin page lists and streams.
+//!
+//! The two file flags move accordingly. `input` names a **staged** dump under
+//! the shared data path rather than an arbitrary file, because the worker
+//! cannot see the operator's disk -- the same arrangement staged catalogs use.
+//! `out_tracks` names a file written into the export area, which the admin page
+//! already lists and streams.
 
-use boom::conf::{load_dotenv, AppConfig};
-use boom::utils::heliolinc::{default_hypotheses, link_tracklets, LinkConfig, Track};
-use boom::utils::linking::{
+use super::context::TaskContext;
+use super::ledger::{MutationTarget, Operation};
+use crate::utils::heliolinc::{default_hypotheses, link_tracklets, LinkConfig, Track};
+use crate::utils::linking::{
     circular_mean_deg, find_tracklets, night_of, Detection, Tracklet, TrackletConfig,
 };
-use boom::utils::orbit_fit::{fit_orbit, Observation};
-use clap::Parser;
+use crate::utils::orbit_fit::{fit_orbit, Observation};
 use futures::StreamExt;
 use mongodb::bson::{doc, Document};
 use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use tracing::{error, info, Level};
-use tracing_subscriber::FmtSubscriber;
+use std::path::PathBuf;
+use tracing::{error, info};
+use utoipa::ToSchema;
 
-#[derive(Parser)]
-#[command(about = "Find intra-night tracklets in one night of ZTF alerts")]
-struct Cli {
-    /// Path to the configuration file.
-    #[arg(long, value_name = "FILE")]
-    config: Option<String>,
+/// Stable identifier for this task type.
+pub const TASK_TYPE: &str = "link_tracks";
 
+/// Where a staged input dump and the written tracks live, under the shared
+/// data path the worker mounts.
+const DATA_PATH_ENV: &str = "BOOM_CATALOG_DATA_PATH";
+
+/// What a client may ask for.
+///
+/// Field names match the `find_tracklets` flags they came from, so a recipe
+/// someone had in their shell history transfers directly.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct LinkTracksParams {
     /// Start of the night, JD. Defaults to the most recent night with data.
-    #[arg(long)]
-    jd_start: Option<f64>,
-
+    #[serde(default)]
+    pub jd_start: Option<f64>,
     /// Length of the window, days.
-    #[arg(long, default_value_t = 0.5)]
-    span: f64,
-
+    #[serde(default = "d_span")]
+    pub span: f64,
     /// Link the known solar system detections and score against `ssnamenr`.
-    #[arg(long, default_value_t = false)]
-    known: bool,
-
+    /// This is how the thresholds get calibrated.
+    #[serde(default)]
+    pub known: bool,
     /// Minimum drb for a detection to be considered.
-    #[arg(long, default_value_t = 0.8)]
-    drb: f64,
-
+    #[serde(default = "d_drb")]
+    pub drb: f64,
     /// Restrict the search to a cone, degrees. All three are needed together;
-    /// the region is tested by HEALPix range, which the
-    /// `{coordinates.hpx, candidate.jd}` index serves.
-    #[arg(long, requires_all = ["dec", "radius"])]
-    ra: Option<f64>,
-    #[arg(long, requires_all = ["ra", "radius"])]
-    dec: Option<f64>,
-    #[arg(long, requires_all = ["ra", "dec"])]
-    radius: Option<f64>,
-
+    /// the region is tested by HEALPix range.
+    #[serde(default)]
+    pub ra: Option<f64>,
+    #[serde(default)]
+    pub dec: Option<f64>,
+    #[serde(default)]
+    pub radius: Option<f64>,
     /// Detections per tracklet. Two is the useful floor: ZTF's nominal cadence
     /// is two visits to a field per night.
-    #[arg(long, default_value_t = 2)]
-    min_detections: usize,
-
+    #[serde(default = "d_min_detections")]
+    pub min_detections: usize,
     /// Reject a pair whose magnitudes disagree by more than this many combined
     /// sigma. 0 disables the test.
-    #[arg(long, default_value_t = 5.0)]
-    max_mag_sigma: f64,
-
+    #[serde(default = "d_max_mag_sigma")]
+    pub max_mag_sigma: f64,
     /// Fastest apparent motion a tracklet may have, degrees per day.
-    #[arg(long, default_value_t = 1.0)]
-    max_rate: f64,
-
+    #[serde(default = "d_max_rate")]
+    pub max_rate: f64,
     /// Shortest on-sky arc a pair may span, arcseconds.
-    #[arg(long, default_value_t = 10.0)]
-    min_arc: f64,
-
+    #[serde(default = "d_min_arc")]
+    pub min_arc: f64,
     /// Shortest time between two detections of a pair, days.
-    #[arg(long, default_value_t = 0.1 / 24.0)]
-    min_pair_dt: f64,
-
-    /// Longest a tracklet may span, days. Separate from `--span`, which is how
-    /// much data to read: widening it widens the pair search radius. Pass
-    /// 0.0625 to match heliolinx's 1.5 hour default when comparing against it.
-    #[arg(long, default_value_t = 3.0 / 24.0)]
-    max_tracklet_span: f64,
-
+    #[serde(default = "d_min_pair_dt")]
+    pub min_pair_dt: f64,
+    /// Longest a tracklet may span, days. Separate from `span`, which is how
+    /// much data to read: widening this widens the pair search radius.
+    #[serde(default = "d_max_tracklet_span")]
+    pub max_tracklet_span: f64,
     /// Distinct nights a track must appear on.
-    #[arg(long, default_value_t = 2)]
-    min_nights: usize,
-
+    #[serde(default = "d_min_nights")]
+    pub min_nights: usize,
     /// Largest sky residual a fitted orbit may leave, arcseconds.
-    #[arg(long, default_value_t = 2.0)]
-    max_residual: f64,
-
-    /// Write the linked tracks here as JSON, one object per line.
-    #[arg(long, value_name = "FILE")]
-    out_tracks: Option<String>,
-
+    #[serde(default = "d_max_residual")]
+    pub max_residual: f64,
+    /// Write the tracks as JSON lines to this name in the export area, where
+    /// the admin page lists and streams them. A name, not a path.
+    #[serde(default)]
+    pub out_tracks: Option<String>,
     /// Store the tracks and stamp each onto its member alerts, so a filter can
-    /// match on them. Needs the database even when reading a dump.
-    #[arg(long, default_value_t = false)]
-    persist: bool,
-
-    /// Report what `--persist` would write without writing it. Each track is
+    /// match on them. Off by default: a tuning run should not write.
+    #[serde(default)]
+    pub persist: bool,
+    /// Report what `persist` would write without writing it. Each track is
     /// resolved against the stored ones only, so two tracks of one object in
     /// the same run show as two new tracks where a real run merges them.
-    #[arg(long, default_value_t = false)]
-    dry_run: bool,
-
+    #[serde(default)]
+    pub dry_run: bool,
     /// Recover objects tracklet-lessly, in the manner of THOR, instead of
     /// linking tracklets. Reaches objects detected only once a night.
-    #[arg(long, default_value_t = false)]
-    thor: bool,
-
+    #[serde(default)]
+    pub thor: bool,
     /// Heliocentric distances to place trial orbits at, au.
-    #[arg(long, value_delimiter = ',', default_value = "1.8,2.2,2.6,3.0,3.4")]
-    thor_distances: Vec<f64>,
-
+    #[serde(default = "d_thor_distances")]
+    pub thor_distances: Vec<f64>,
     /// Distinct nights a THOR cluster must appear on. Two drops purity to 80%.
-    #[arg(long, default_value_t = 3)]
-    thor_min_nights: usize,
-
-    /// THOR cluster cell size, arcseconds. Defaults to the library value.
-    #[arg(long)]
-    cluster_radius: Option<f64>,
-
+    #[serde(default = "d_thor_min_nights")]
+    pub thor_min_nights: usize,
+    /// THOR cluster cell size, arcseconds. Library default when unset.
+    #[serde(default)]
+    pub cluster_radius: Option<f64>,
     /// Largest scatter a THOR cluster may have about its refitted drift,
-    /// arcseconds. Defaults to the library value.
-    #[arg(long)]
-    max_cluster_rms: Option<f64>,
-
-    /// Largest residual rate THOR searches, degrees/day. Bounds how far a trial
-    /// orbit may be from the truth, so a distant or unbound object needs more
-    /// than the bound-orbit default. Defaults to the library value.
-    #[arg(long)]
-    max_residual_rate: Option<f64>,
-
+    /// arcseconds. Library default when unset.
+    #[serde(default)]
+    pub max_cluster_rms: Option<f64>,
+    /// Largest residual rate THOR searches, degrees/day. Library default when
+    /// unset.
+    #[serde(default)]
+    pub max_residual_rate: Option<f64>,
     /// Rate grid steps per axis. Widening the range without raising this
-    /// coarsens the grid. Defaults to the library value.
-    #[arg(long)]
-    rate_steps: Option<usize>,
-
+    /// coarsens the grid. Library default when unset.
+    #[serde(default)]
+    pub rate_steps: Option<usize>,
     /// Keep a THOR cluster whose best bound orbit leaves up to this residual,
-    /// arcseconds, reported as a poor fit. Only a bound orbit can be fitted, so
-    /// a distant or unbound object lands here rather than under --max-residual.
-    #[arg(long, default_value_t = 10.0)]
-    max_unbound_residual: f64,
-
-    /// Attribute detections to catalogued objects and score against `ssnamenr`.
-    #[arg(long, default_value_t = false)]
-    identify: bool,
-
-    /// Radius a refined prediction must fall inside to count, arcseconds.
-    #[arg(long, default_value_t = 120.0)]
-    identify_radius: f64,
-
-    /// Report at most this many tracklets.
-    #[arg(long, default_value_t = 20)]
-    show: usize,
-
-    /// Read detections from a JSONL dump instead of the database.
-    #[arg(long, value_name = "FILE")]
-    input: Option<String>,
-
+    /// arcseconds, reported as a poor fit.
+    #[serde(default = "d_max_unbound_residual")]
+    pub max_unbound_residual: f64,
+    /// Identify the detections against stored tracks instead of linking.
+    #[serde(default)]
+    pub identify: bool,
+    /// Identification radius, arcseconds.
+    #[serde(default = "d_identify_radius")]
+    pub identify_radius: f64,
+    /// How many tracklets or tracks to log individually.
+    #[serde(default = "d_show")]
+    pub show: usize,
+    /// Read detections from a staged JSONL dump instead of the database. A
+    /// name under `<data path>/link_tracks/`, not an arbitrary path: the worker
+    /// cannot read the operator's disk.
+    #[serde(default)]
+    pub input: Option<String>,
     /// Find tracklets per night, then link them across nights.
-    #[arg(long, default_value_t = false)]
-    link: bool,
+    #[serde(default)]
+    pub link: bool,
+    /// Position tolerance when clustering hypotheses, au.
+    #[serde(default = "d_position_tol")]
+    pub position_tol: f64,
+    /// Velocity tolerance when clustering hypotheses, au/day.
+    #[serde(default = "d_velocity_tol")]
+    pub velocity_tol: f64,
+}
 
-    /// Position agreement required to cluster propagated states, au.
-    #[arg(long, default_value_t = 0.002)]
-    position_tol: f64,
+fn d_span() -> f64 {
+    0.5
+}
+fn d_drb() -> f64 {
+    0.8
+}
+fn d_min_detections() -> usize {
+    2
+}
+fn d_max_mag_sigma() -> f64 {
+    5.0
+}
+fn d_max_rate() -> f64 {
+    1.0
+}
+fn d_min_arc() -> f64 {
+    10.0
+}
+fn d_min_pair_dt() -> f64 {
+    0.1 / 24.0
+}
+fn d_max_tracklet_span() -> f64 {
+    3.0 / 24.0
+}
+fn d_min_nights() -> usize {
+    2
+}
+fn d_max_residual() -> f64 {
+    2.0
+}
+fn d_thor_distances() -> Vec<f64> {
+    vec![1.8, 2.2, 2.6, 3.0, 3.4]
+}
+fn d_thor_min_nights() -> usize {
+    3
+}
+fn d_max_unbound_residual() -> f64 {
+    10.0
+}
+fn d_identify_radius() -> f64 {
+    120.0
+}
+fn d_show() -> usize {
+    20
+}
+fn d_position_tol() -> f64 {
+    0.002
+}
+fn d_velocity_tol() -> f64 {
+    0.0004
+}
 
-    /// Velocity agreement required to cluster propagated states, au/day.
-    #[arg(long, default_value_t = 0.0004)]
-    velocity_tol: f64,
+/// Guards against a submission that would read the whole archive into memory
+/// or write a file nobody asked for.
+const MAX_SPAN_DAYS: f64 = 30.0;
+
+impl LinkTracksParams {
+    pub fn validate_params(&self) -> Result<(), String> {
+        if !(self.span > 0.0 && self.span <= MAX_SPAN_DAYS) {
+            return Err(format!("span must be between 0 and {MAX_SPAN_DAYS} days"));
+        }
+        if self.min_detections < 2 {
+            return Err("min_detections must be at least 2: a tracklet is a pair".to_string());
+        }
+        // All three or none: a cone with one side missing silently searches the
+        // whole sky, which is the slow answer rather than the wrong one, but it
+        // is not what was asked for.
+        let cone = [self.ra, self.dec, self.radius];
+        if cone.iter().any(Option::is_some) && !cone.iter().all(Option::is_some) {
+            return Err("ra, dec and radius are needed together".to_string());
+        }
+        if self.persist && self.dry_run {
+            return Err("persist and dry_run are opposites; pick one".to_string());
+        }
+        for name in [&self.input, &self.out_tracks].into_iter().flatten() {
+            if name.contains('/') || name.contains("..") {
+                return Err(format!(
+                    "{name:?} must be a file name, not a path: the worker reads and writes \
+                     only under its own data directory"
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Tracklets found independently in each night the detections span.
@@ -198,7 +279,7 @@ fn tracklets_per_night(detections: &[Detection], cfg: &TrackletConfig) -> Vec<Tr
 
 /// How well tracks reproduce the labels: pure, mixed, and objects recovered.
 fn score_tracks(
-    tracks: &[boom::utils::heliolinc::Track],
+    tracks: &[crate::utils::heliolinc::Track],
     tracklets: &[Tracklet],
     labels: &HashMap<i64, String>,
 ) -> (usize, usize, usize) {
@@ -309,8 +390,8 @@ async fn load(
     // By HEALPix range rather than 2dsphere: that index carries no time, so it
     // scans the whole baseline in the region before the date is applied.
     if let Some((ra, dec, radius)) = region {
-        let moc = boom::utils::moc::moc_from_cone(ra, dec, radius)?;
-        let region_filter = boom::utils::moc::moc_hpx_filter(&moc)?;
+        let moc = crate::utils::moc::moc_from_cone(ra, dec, radius)?;
+        let region_filter = crate::utils::moc::moc_hpx_filter(&moc)?;
         for (k, v) in region_filter {
             filter.insert(k, v);
         }
@@ -459,7 +540,7 @@ fn dump_tracks(
     Ok(tracks.len())
 }
 
-use boom::utils::tracks::BoundFit;
+use crate::utils::tracks::BoundFit;
 
 /// A bound-orbit verdict with the residual that produced it.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -498,14 +579,14 @@ impl Verdict {
 /// exactly what makes it worth looking at.
 async fn persist_clusters(
     db: &mongodb::Database,
-    clusters: &[(boom::utils::thor::Cluster, Verdict)],
+    clusters: &[(crate::utils::thor::Cluster, Verdict)],
     detections: &[Detection],
     labels: &HashMap<i64, String>,
     dry_run: bool,
     min_detections: usize,
     min_nights: usize,
 ) {
-    use boom::utils::tracks::{
+    use crate::utils::tracks::{
         acquire_lock, commit_upsert, plan_upsert, release_lock, stamp_members,
     };
     if !dry_run {
@@ -596,7 +677,7 @@ async fn persist_tracks(
     min_detections: usize,
     min_nights: usize,
 ) {
-    use boom::utils::tracks::{
+    use crate::utils::tracks::{
         acquire_lock, commit_upsert, plan_upsert, release_lock, stamp_members,
     };
     if !dry_run {
@@ -703,7 +784,7 @@ async fn persist_tracks(
 /// fit an orbit and so passes the gate unchecked rather than vouched for.
 fn dump_clusters(
     path: &str,
-    clusters: &[(boom::utils::thor::Cluster, Verdict)],
+    clusters: &[(crate::utils::thor::Cluster, Verdict)],
     detections: &[Detection],
     labels: &HashMap<i64, String>,
 ) -> Result<usize, Box<dyn std::error::Error>> {
@@ -758,30 +839,30 @@ fn dump_clusters(
 /// divided into patches and each is searched with its own orbits. One orbit at
 /// the centre of a whole night's coverage governs almost nothing.
 async fn run_thor(
-    args: &Cli,
+    params: &LinkTracksParams,
     detections: &[Detection],
     labels: &HashMap<i64, String>,
     db: Option<&mongodb::Database>,
 ) {
-    use boom::utils::heliolinc::{sky_track, test_orbits};
-    use boom::utils::thor;
+    use crate::utils::heliolinc::{sky_track, test_orbits};
+    use crate::utils::thor;
     use rayon::prelude::*;
 
     let mut cfg = thor::Config {
-        min_detections: args.min_detections.max(2),
-        min_nights: args.thor_min_nights,
+        min_detections: params.min_detections.max(2),
+        min_nights: params.thor_min_nights,
         ..thor::Config::default()
     };
-    if let Some(v) = args.cluster_radius {
+    if let Some(v) = params.cluster_radius {
         cfg.cluster_radius_arcsec = v;
     }
-    if let Some(v) = args.max_cluster_rms {
+    if let Some(v) = params.max_cluster_rms {
         cfg.max_rms_arcsec = v;
     }
-    if let Some(v) = args.max_residual_rate {
+    if let Some(v) = params.max_residual_rate {
         cfg.max_residual_rate_deg_per_day = v;
     }
-    if let Some(v) = args.rate_steps {
+    if let Some(v) = params.rate_steps {
         cfg.rate_steps = v;
     }
 
@@ -827,11 +908,11 @@ async fn run_thor(
         "{} sky patches of {:.1} deg over 4 offset grids, {} trial distances each",
         patches.len(),
         patch_deg,
-        args.thor_distances.len()
+        params.thor_distances.len()
     );
 
     let started = std::time::Instant::now();
-    let clusters: Vec<(thor::Cluster, boom::utils::heliolinc::State)> = patches
+    let clusters: Vec<(thor::Cluster, crate::utils::heliolinc::State)> = patches
         .par_iter()
         .flat_map(|patch| {
             // On the circle: a patch straddling RA 0 would otherwise centre on
@@ -842,7 +923,7 @@ async fn run_thor(
             // Declination does not wrap, so its mean is the ordinary one.
             let dec0 = patch.iter().map(|d| d.dec).sum::<f64>() / patch.len() as f64;
             let mut found = Vec::new();
-            for (state, _r) in test_orbits(ra0, dec0, epoch, &args.thor_distances) {
+            for (state, _r) in test_orbits(ra0, dec0, epoch, &params.thor_distances) {
                 let Some((ra, dec)) = sky_track(&state, epoch, &sample) else {
                     continue;
                 };
@@ -893,12 +974,12 @@ async fn run_thor(
             if obs.len() < 3 {
                 return Some((c, Verdict(BoundFit::Ungated, None)));
             }
-            match fit_orbit(&obs, &seed, epoch, 20, &boom::utils::sso_geometry::ZTF) {
+            match fit_orbit(&obs, &seed, epoch, 20, &crate::utils::sso_geometry::ZTF) {
                 None => Some((c, Verdict(BoundFit::None, None))),
-                Some(fit) if fit.rms_arcsec <= args.max_residual => {
+                Some(fit) if fit.rms_arcsec <= params.max_residual => {
                     Some((c, Verdict(BoundFit::Good, Some(fit.rms_arcsec))))
                 }
-                Some(fit) if fit.rms_arcsec <= args.max_unbound_residual => {
+                Some(fit) if fit.rms_arcsec <= params.max_unbound_residual => {
                     Some((c, Verdict(BoundFit::Poor, Some(fit.rms_arcsec))))
                 }
                 Some(_) => None,
@@ -921,7 +1002,7 @@ async fn run_thor(
         // one track downstream, where the later one would extend the earlier and
         // overwrite its verdict. Best-ranked first, so the one dropped is worse.
         let shared = c.ids.iter().filter(|id| claimed.contains(id)).count();
-        if shared >= boom::utils::tracks::SHARED_FOR_IDENTITY {
+        if shared >= crate::utils::tracks::SHARED_FOR_IDENTITY {
             continue;
         }
         claimed.extend(c.ids.iter().copied());
@@ -933,13 +1014,13 @@ async fn run_thor(
         gate_start.elapsed().as_secs_f64()
     );
 
-    if let Some(path) = &args.out_tracks {
+    if let Some(path) = &params.out_tracks {
         match dump_clusters(path, &kept, detections, labels) {
             Ok(n) => info!("wrote {} clusters to {}", n, path),
             Err(e) => error!("could not write clusters: {}", e),
         }
     }
-    if args.persist || args.dry_run {
+    if params.persist || params.dry_run {
         match db {
             Some(db) => {
                 persist_clusters(
@@ -947,7 +1028,7 @@ async fn run_thor(
                     &kept,
                     detections,
                     labels,
-                    args.dry_run,
+                    params.dry_run,
                     cfg.min_detections,
                     cfg.min_nights,
                 )
@@ -957,7 +1038,7 @@ async fn run_thor(
         }
     }
 
-    for (c, resid) in kept.iter().take(args.show) {
+    for (c, resid) in kept.iter().take(params.show) {
         let name = c
             .ids
             .iter()
@@ -1074,17 +1155,15 @@ async fn run_thor(
 /// Every detection here already carries IPAC's identification, so the
 /// catalogue's answer can be checked directly: agreement measures whether
 /// propagating MPCORB to the detection epoch lands where the object was.
-async fn run_identify(args: &Cli, detections: &[Detection], labels: &HashMap<i64, String>) {
-    use boom::utils::identify::{identify, IdentifyConfig, OrbitEntry};
-    use boom::utils::mpcorb::{elements_from_document, normalize_ztf_ssnamenr, ORBITS_COLLECTION};
+async fn run_identify(
+    db: &mongodb::Database,
+    params: &LinkTracksParams,
+    detections: &[Detection],
+    labels: &HashMap<i64, String>,
+) {
+    use crate::utils::identify::{identify, IdentifyConfig, OrbitEntry};
+    use crate::utils::mpcorb::{elements_from_document, normalize_ztf_ssnamenr, ORBITS_COLLECTION};
     use futures::TryStreamExt;
-
-    let config_path = args
-        .config
-        .clone()
-        .unwrap_or_else(|| "config.yaml".to_string());
-    let config = AppConfig::from_path(&config_path).expect("failed to load config");
-    let db = config.build_db().await.expect("failed to connect to mongo");
 
     let started = std::time::Instant::now();
     let mut cursor = db
@@ -1129,7 +1208,7 @@ async fn run_identify(args: &Cli, detections: &[Detection], labels: &HashMap<i64
     );
 
     let cfg = IdentifyConfig {
-        match_radius_arcsec: args.identify_radius,
+        match_radius_arcsec: params.identify_radius,
         ..IdentifyConfig::default()
     };
     let started = std::time::Instant::now();
@@ -1209,199 +1288,341 @@ async fn run_identify(args: &Cli, detections: &[Detection], labels: &HashMap<i64
     }
 }
 
-#[tokio::main]
-async fn main() {
-    let subscriber = FmtSubscriber::builder()
-        .with_max_level(Level::INFO)
-        .finish();
-    tracing::subscriber::set_global_default(subscriber).expect("failed to set subscriber");
-    load_dotenv();
+fn failed(e: impl std::fmt::Display) -> super::TaskError {
+    super::TaskError::Failed(e.to_string())
+}
 
-    let args = Cli::parse();
-    // Persisting needs the database even when the detections came from a dump.
-    let db = if args.input.is_none() || args.persist || args.dry_run {
-        let config_path = args
-            .config
-            .clone()
-            .unwrap_or_else(|| "config.yaml".to_string());
-        let config = AppConfig::from_path(&config_path).expect("failed to load config");
-        Some(config.build_db().await.expect("failed to connect to mongo"))
-    } else {
-        None
-    };
-    let (detections, labels) = match &args.input {
-        Some(path) => load_file(path).expect("failed to read dump"),
+/// Where a staged dump is read from and a track dump is written to.
+///
+/// Under the shared data path, so both are visible to the worker rather than
+/// to whoever submitted the run. `export/` is the directory the admin page
+/// already lists and streams, so a written dump is downloadable without any
+/// new plumbing.
+fn staged_dir() -> PathBuf {
+    PathBuf::from(std::env::var(DATA_PATH_ENV).unwrap_or_else(|_| "data/catalogs".into()))
+        .join("link_tracks")
+}
+
+fn export_dir() -> PathBuf {
+    PathBuf::from(std::env::var(DATA_PATH_ENV).unwrap_or_else(|_| "data/catalogs".into()))
+        .join("export")
+        .join("link_tracks")
+}
+
+pub async fn run(
+    ctx: &TaskContext,
+    params: LinkTracksParams,
+) -> Result<serde_json::Value, super::TaskError> {
+    params
+        .validate_params()
+        .map_err(super::TaskError::InvalidParams)?;
+    let db = ctx.db().clone();
+
+    let (detections, labels) = match &params.input {
+        Some(name) => {
+            let path = staged_dir().join(name);
+            ctx.info(format!("reading staged detections from {}", path.display()));
+            load_file(&path.to_string_lossy()).map_err(failed)?
+        }
         None => {
-            let db = db.as_ref().expect("built when there is no dump");
-            let jd_start = match args.jd_start {
+            let jd_start = match params.jd_start {
                 Some(jd) => jd,
-                None => latest_night(db).await.expect("failed to find a night"),
+                None => latest_night(&db).await.map_err(failed)?,
             };
-            info!(
-                jd_start,
-                span = args.span,
-                known = args.known,
-                "loading detections"
-            );
-            let region = match (args.ra, args.dec, args.radius) {
+            let region = match (params.ra, params.dec, params.radius) {
                 (Some(ra), Some(dec), Some(radius)) => Some((ra, dec, radius)),
                 _ => None,
             };
-            load(db, jd_start, args.span, args.drb, args.known, region)
+            ctx.info(format!(
+                "loading detections from jd {jd_start} over {} day(s){}",
+                params.span,
+                if params.known {
+                    ", known objects only"
+                } else {
+                    ""
+                }
+            ));
+            load(&db, jd_start, params.span, params.drb, params.known, region)
                 .await
-                .expect("failed to load detections")
+                .map_err(failed)?
         }
     };
-    info!(
-        "{} detections, {} carrying an ssnamenr label",
+    ctx.info(format!(
+        "{} detection(s), {} carrying an ssnamenr label",
         detections.len(),
         labels.len()
-    );
+    ));
     if detections.is_empty() {
-        return;
+        // Not an error: an empty night is a fact about the night.
+        return Ok(serde_json::json!({ "detections": 0, "tracklets": 0, "tracks": 0 }));
     }
 
     let cfg = TrackletConfig {
-        min_detections: args.min_detections,
-        max_span_days: args.max_tracklet_span,
-        max_rate_deg_per_day: args.max_rate,
-        min_arc_arcsec: args.min_arc,
-        min_pair_dt_days: args.min_pair_dt,
-        max_mag_sigma: (args.max_mag_sigma > 0.0).then_some(args.max_mag_sigma),
+        min_detections: params.min_detections,
+        max_span_days: params.max_tracklet_span,
+        max_rate_deg_per_day: params.max_rate,
+        min_arc_arcsec: params.min_arc,
+        min_pair_dt_days: params.min_pair_dt,
+        max_mag_sigma: (params.max_mag_sigma > 0.0).then_some(params.max_mag_sigma),
         ..TrackletConfig::default()
     };
-    if args.thor {
-        run_thor(&args, &detections, &labels, db.as_ref()).await;
-        return;
+
+    // The two alternative modes report through the log as the binary did; their
+    // numbers are not yet summarised into the result.
+    if params.thor {
+        run_thor(&params, &detections, &labels, Some(&db)).await;
+        return Ok(serde_json::json!({ "mode": "thor", "detections": detections.len() }));
+    }
+    if params.identify {
+        run_identify(&db, &params, &detections, &labels).await;
+        return Ok(serde_json::json!({ "mode": "identify", "detections": detections.len() }));
     }
 
-    if args.identify {
-        run_identify(&args, &detections, &labels).await;
-        return;
+    if ctx.is_canceled() {
+        return Err(super::TaskError::Canceled);
     }
 
-    let started = std::time::Instant::now();
-    let tracklets = if args.link {
+    let tracklets = if params.link {
         tracklets_per_night(&detections, &cfg)
     } else {
         find_tracklets(&detections, &cfg)
     };
-    info!(
-        "{} tracklets from {} detections in {:.1}s",
+    ctx.info(format!(
+        "{} tracklet(s) from {} detection(s)",
         tracklets.len(),
-        detections.len(),
-        started.elapsed().as_secs_f64()
-    );
+        detections.len()
+    ));
 
-    if args.known {
+    // Everything worth reading off the admin page goes here rather than only
+    // into the log: tuning means comparing these numbers between runs, and a
+    // run's parameters are already stored beside them.
+    let mut result = serde_json::json!({
+        "detections": detections.len(),
+        "labelled": labels.len(),
+        "tracklets": tracklets.len(),
+    });
+    if params.known {
         let (pure, mixed, unlabelled) = score(&tracklets, &labels);
         let distinct: std::collections::HashSet<&String> = labels.values().collect();
-        info!(
-            "against ssnamenr: {} pure, {} mixed, {} unlabelled; {} distinct objects present",
-            pure,
-            mixed,
-            unlabelled,
-            distinct.len()
-        );
         let linked: std::collections::HashSet<&str> = tracklets
             .iter()
             .flat_map(|t| t.ids.iter())
             .filter_map(|id| labels.get(id).map(|s| s.as_str()))
             .collect();
-        info!(
-            "{} of {} objects appear in at least one tracklet",
+        ctx.info(format!(
+            "against ssnamenr: {pure} pure, {mixed} mixed, {unlabelled} unlabelled; \
+             {} of {} objects appear in at least one tracklet",
             linked.len(),
             distinct.len()
-        );
+        ));
+        result["tracklet_scoring"] = serde_json::json!({
+            "pure": pure,
+            "mixed": mixed,
+            "unlabelled": unlabelled,
+            "objects_present": distinct.len(),
+            "objects_in_a_tracklet": linked.len(),
+        });
     }
 
-    if args.link {
-        let jds: Vec<f64> = tracklets.iter().map(|t| t.jd_ref).collect();
-        let reference_jd = (jds.iter().cloned().fold(f64::MAX, f64::min)
-            + jds.iter().cloned().fold(f64::MIN, f64::max))
-            / 2.0;
-        let link_cfg = LinkConfig {
-            hypotheses: default_hypotheses(),
-            reference_jd,
-            position_tol_au: args.position_tol,
-            velocity_tol_au_per_day: args.velocity_tol,
-            min_nights: args.min_nights,
-            max_residual_arcsec: args.max_residual,
-            site: boom::utils::sso_geometry::ZTF,
-        };
-        let started = std::time::Instant::now();
-        let tracks = link_tracklets(&tracklets, &detections, &link_cfg);
-        info!(
-            "{} tracks from {} tracklets over {} hypotheses in {:.1}s",
-            tracks.len(),
-            tracklets.len(),
-            link_cfg.hypotheses.len(),
-            started.elapsed().as_secs_f64()
-        );
-        if !labels.is_empty() {
-            let (pure, mixed, recovered) = score_tracks(&tracks, &tracklets, &labels);
+    if !params.link {
+        for t in tracklets.iter().take(params.show) {
             info!(
-                "tracks: {} pure, {} mixed, {} distinct objects recovered",
-                pure, mixed, recovered
+                "n={} rate={:.4} deg/d rms={:.2}\" ra={:.5} dec={:.5}",
+                t.ids.len(),
+                t.rate_deg_per_day(),
+                t.rms_arcsec,
+                t.ra_ref,
+                t.dec_ref
             );
         }
-        if let Some(path) = &args.out_tracks {
-            match dump_tracks(path, &tracks, &tracklets, &detections, &labels) {
-                Ok(n) => info!("wrote {} tracks to {}", n, path),
-                Err(e) => error!("could not write tracks: {}", e),
+        return Ok(result);
+    }
+
+    if ctx.is_canceled() {
+        return Err(super::TaskError::Canceled);
+    }
+
+    let jds: Vec<f64> = tracklets.iter().map(|t| t.jd_ref).collect();
+    let reference_jd = (jds.iter().cloned().fold(f64::MAX, f64::min)
+        + jds.iter().cloned().fold(f64::MIN, f64::max))
+        / 2.0;
+    let link_cfg = LinkConfig {
+        hypotheses: default_hypotheses(),
+        reference_jd,
+        position_tol_au: params.position_tol,
+        velocity_tol_au_per_day: params.velocity_tol,
+        min_nights: params.min_nights,
+        max_residual_arcsec: params.max_residual,
+        site: crate::utils::sso_geometry::ZTF,
+    };
+    let tracks = link_tracklets(&tracklets, &detections, &link_cfg);
+    ctx.info(format!(
+        "{} track(s) from {} tracklet(s) over {} hypotheses",
+        tracks.len(),
+        tracklets.len(),
+        link_cfg.hypotheses.len()
+    ));
+    result["tracks"] = serde_json::json!(tracks.len());
+    if !labels.is_empty() {
+        let (pure, mixed, recovered) = score_tracks(&tracks, &tracklets, &labels);
+        ctx.info(format!(
+            "tracks: {pure} pure, {mixed} mixed, {recovered} distinct objects recovered"
+        ));
+        result["track_scoring"] =
+            serde_json::json!({ "pure": pure, "mixed": mixed, "recovered": recovered });
+    }
+
+    if let Some(name) = &params.out_tracks {
+        let dir = export_dir();
+        std::fs::create_dir_all(&dir).map_err(failed)?;
+        let path = dir.join(name);
+        match dump_tracks(
+            &path.to_string_lossy(),
+            &tracks,
+            &tracklets,
+            &detections,
+            &labels,
+        ) {
+            Ok(n) => {
+                ctx.info(format!("wrote {n} track(s) to {}", path.display()));
+                result["written_to"] = serde_json::json!(path.display().to_string());
             }
+            // Not fatal: the numbers above are the point of a tuning run, and
+            // losing the dump should not throw them away.
+            Err(e) => ctx.warn(format!("could not write the track dump: {e}")),
         }
-        if args.persist || args.dry_run {
-            let db = db.as_ref().expect("built when persisting");
-            persist_tracks(
-                db,
-                &tracks,
-                &tracklets,
-                &detections,
-                &labels,
-                args.dry_run,
-                args.min_detections,
-                args.min_nights,
-            )
-            .await;
-        }
-
-        for track in tracks.iter().take(args.show) {
-            let name = track
-                .members
-                .iter()
-                .find_map(|&m| tracklets[m].ids.iter().find_map(|id| labels.get(id)))
-                .map(|s| s.as_str())
-                .unwrap_or("-");
-            info!(
-                "track n={} nights={} r={:.2} au rdot={:+.5} label={}",
-                track.members.len(),
-                track.nights,
-                track.hypothesis.r_au,
-                track.hypothesis.rdot_au_per_day,
-                name
-            );
-        }
-        return;
     }
 
-    for t in tracklets.iter().take(args.show) {
-        let name = t
-            .ids
-            .iter()
-            .find_map(|id| labels.get(id))
-            .map(|s| s.as_str())
-            .unwrap_or("-");
+    if params.persist || params.dry_run {
+        persist_tracks(
+            &db,
+            &tracks,
+            &tracklets,
+            &detections,
+            &labels,
+            params.dry_run,
+            params.min_detections,
+            params.min_nights,
+        )
+        .await;
+        result["persisted"] = serde_json::json!(!params.dry_run);
+    }
+
+    if params.persist {
+        let survey = "ztf";
+        ctx.record_mutation(
+            MutationTarget {
+                database: db.name().to_string(),
+                collection: format!("{}_tracks", survey.to_uppercase()),
+                catalog: None,
+                survey: Some(survey.to_string()),
+            },
+            Operation::Backfill,
+            doc! {
+                "tracks": tracks.len() as i64,
+                "detections": detections.len() as i64,
+                "span": params.span,
+                "min_nights": params.min_nights as i64,
+                "max_residual": params.max_residual,
+                "thor": params.thor,
+                "code_version": mongodb::bson::to_bson(&super::ledger::CodeVersion::current())
+                    .unwrap_or(mongodb::bson::Bson::Null),
+            },
+        )
+        .await;
+    }
+
+    for track in tracks.iter().take(params.show) {
         info!(
-            "n={} rate={:.4} deg/d pa_ra={:.4} pa_dec={:.4} rms={:.2}\" ra={:.5} dec={:.5} label={}",
-            t.ids.len(),
-            t.rate_deg_per_day(),
-            t.ra_rate_deg_per_day,
-            t.dec_rate_deg_per_day,
-            t.rms_arcsec,
-            t.ra_ref,
-            t.dec_ref,
-            name
+            "track n={} nights={} r={:.2} au rdot={:+.5}",
+            track.members.len(),
+            track.nights,
+            track.hypothesis.r_au,
+            track.hypothesis.rdot_au_per_day
         );
+    }
+    Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn params() -> LinkTracksParams {
+        serde_json::from_value(serde_json::json!({})).expect("every field has a default")
+    }
+
+    #[test]
+    fn the_defaults_match_the_binary_this_replaced() {
+        // A recipe from somebody's shell history has to mean the same thing
+        // submitted here, or a tuning run is not comparable with the ones that
+        // calibrated the current thresholds.
+        let p = params();
+        assert_eq!(p.span, 0.5);
+        assert_eq!(p.drb, 0.8);
+        assert_eq!(p.min_detections, 2);
+        assert_eq!(p.min_nights, 2);
+        assert_eq!(p.max_residual, 2.0);
+        assert_eq!(p.thor_distances, vec![1.8, 2.2, 2.6, 3.0, 3.4]);
+        assert_eq!(p.thor_min_nights, 3);
+    }
+
+    #[test]
+    fn nothing_is_written_unless_asked() {
+        // The default is a tuning run. Persisting is the exception, because a
+        // run that merges stored tracks cannot be undone by running it again.
+        let p = params();
+        assert!(!p.persist);
+        assert!(!p.dry_run);
+    }
+
+    #[test]
+    fn persist_and_dry_run_are_not_both_allowed() {
+        let mut p = params();
+        p.persist = true;
+        p.dry_run = true;
+        assert!(p.validate_params().is_err());
+    }
+
+    #[test]
+    fn a_half_specified_cone_is_rejected() {
+        let mut p = params();
+        p.ra = Some(10.0);
+        assert!(
+            p.validate_params().is_err(),
+            "a cone missing its radius would quietly search the whole sky"
+        );
+        p.dec = Some(0.0);
+        p.radius = Some(1.0);
+        assert!(p.validate_params().is_ok());
+    }
+
+    #[test]
+    fn file_names_cannot_escape_the_data_directory() {
+        for name in ["../../etc/passwd", "sub/dir.jsonl"] {
+            let mut p = params();
+            p.out_tracks = Some(name.to_string());
+            assert!(p.validate_params().is_err(), "{name} should be rejected");
+        }
+        let mut p = params();
+        p.out_tracks = Some("tuning-run-1.jsonl".to_string());
+        assert!(p.validate_params().is_ok());
+    }
+
+    #[test]
+    fn an_unbounded_span_is_rejected() {
+        let mut p = params();
+        p.span = 365.0;
+        assert!(p.validate_params().is_err());
+        p.span = 0.0;
+        assert!(p.validate_params().is_err());
+    }
+
+    #[test]
+    fn two_runs_never_persist_at_once() {
+        // Merging is decided across the whole collection, so unlike the other
+        // tasks this one is keyed on nothing: any two runs conflict.
+        let key = crate::tasks::single_flight_key(TASK_TYPE, &serde_json::json!({}));
+        assert_eq!(key, Some(mongodb::bson::doc! {}));
     }
 }

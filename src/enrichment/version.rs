@@ -92,8 +92,8 @@ pub struct ModelFile {
 /// Every model the ZTF enrichment worker runs.
 pub const ZTF_MODELS: &[ModelFile] = &[
     ModelFile {
-        // Fusion model from #517. Declared here as well as loaded in
-        // models/mod.rs: a model the loader uses but this list omits is
+        // Declared here as well as loaded in models/mod.rs: a model the
+        // loader uses but this list omits is
         // invisible to the fingerprint, so changing it would leave every old
         // alert looking current.
         field: "cider",

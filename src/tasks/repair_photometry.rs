@@ -14,10 +14,8 @@
 //! retry. This repairs both, plus the objects that will never receive another
 //! alert.
 //!
-//! Ported from the `repair_photometry_ordering` binary. It deletes photometry
-//! points, so it runs through the task system where the run is recorded, its
-//! logs are kept, and it can be canceled -- not from a root shell. See
-//! `docs/task-system.md`.
+//! It deletes photometry points, so `dry_run` reports what it would remove and
+//! is the way to look before running it for real.
 
 use super::context::TaskContext;
 use super::ledger::{MutationTarget, Operation};

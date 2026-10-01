@@ -6,8 +6,6 @@
 //! query silently misses everything in it -- an absent index is
 //! indistinguishable from a position outside the region.
 //!
-//! Ported from the `backfill_hpx` binary (#653) so it runs through the task
-//! system rather than from a shell: recorded, cancellable, with its logs kept.
 
 use super::context::TaskContext;
 use super::ledger::{MutationTarget, Operation};

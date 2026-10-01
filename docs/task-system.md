@@ -191,6 +191,7 @@ later.
 | `reprocess_crossmatch` | Fill in or refresh crossmatches on a survey's `alerts_aux` records. |
 | `prepare_catalog` | Add spatial fields and a 2dsphere index to a hand-imported collection. |
 | `export_catalog` | Write a catalog collection to gzipped JSONL chunks plus a manifest, for a catalog BOOM cannot fetch again. Read-only. |
+| `link_tracks` | Find intra-night tracklets in a window of alerts and link them into moving-object tracks. Writes nothing unless `persist` is set; `dry_run` reports what it would have written. |
 | `backfill_host_galaxy` | Score stored galaxy cross-matches and write `host_galaxy` on `alerts_aux`. |
 | `backfill_hpx` | Write `coordinates.hpx` onto alerts that predate the field, so MOC region queries can find them. |
 | `repair_photometry` | Rewrite `alerts_aux` timeseries arrays that are out of order, duplicated, or carry a non-numeric `jd`. Deletes the offending points — run with `dry_run` first. |
@@ -204,9 +205,15 @@ Submission is single-flight per target, not per type: two ingests of the same
 catalog would race on the same collection and chunk state, but ingesting 2MASS
 should not block ingesting NED.
 
-**Every data-mutating binary is now a task.** `src/bin/` holds the services
+**Every data-mutating binary is a task.** `src/bin/` holds the services
 (`api`, `scheduler`, `kafka_consumer`, `kafka_producer`, `task_worker`) and two
 tools that change nothing (`check_config`, `add_filter`).
+
+That includes the ones whose main use is iterative: `link_tracks` carries every
+threshold the tracklet and THOR searches take, because tuning them on a
+terminal is how a stored track ends up with parameters that live only in
+somebody's shell history. A tuning run sets `dry_run`, reads its numbers off
+the run's result, and writes nothing.
 
 That is the point the system was built for: there is no longer a binary an
 operator can run over SSH that mutates data without a record of who ran it, with

@@ -13,9 +13,6 @@
 //! reported rather than guessed at -- the 2dsphere index would reject them, and
 //! a fabricated position is worse than an absent one.
 //!
-//! Ported from `src/bin/prepare_catalog.rs`. This one needed the least changing:
-//! it was already sharded, already had a dry run, and already returned reports
-//! rather than exiting from inside the work.
 
 use super::context::TaskContext;
 use super::ledger::{MutationTarget, Operation};

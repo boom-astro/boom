@@ -41,6 +41,7 @@ pub mod catalog_ingest;
 pub mod copy_cutouts;
 pub mod enrich_reprocess;
 pub mod export_catalog;
+pub mod link_tracks;
 pub mod migrate_fp_flux;
 pub mod migrate_snr;
 pub mod mpcorb_ingest;
@@ -216,6 +217,21 @@ pub const TASKS: &[TaskSpec] = &[
         params_schema: || schema_of::<export_catalog::ExportCatalogParams>(),
     },
     TaskSpec {
+        id: link_tracks::TASK_TYPE,
+        title: "Link moving-object tracks",
+        description: "Find intra-night tracklets in a window of alerts and link them into \
+                      tracks. With `persist` it stores each track and stamps its member \
+                      alerts; with `dry_run` it reports what it would have written, which \
+                      is how the thresholds get calibrated without leaving a mark.",
+        // A track is identified by its members, so a repeated run extends or
+        // merges what is stored rather than duplicating it.
+        idempotent: true,
+        // It can merge two stored tracks into one, which cannot be undone by
+        // running it again.
+        destructive: true,
+        params_schema: || schema_of::<link_tracks::LinkTracksParams>(),
+    },
+    TaskSpec {
         id: backfill_host_galaxy::TASK_TYPE,
         title: "Backfill host galaxy associations",
         description: "Score each alerts_aux record's galaxy cross-matches and write \
@@ -388,6 +404,11 @@ pub fn validate_params(task_type: &str, params: &serde_json::Value) -> Result<()
                     .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
             parsed.validate_params().map_err(TaskError::InvalidParams)
         }
+        link_tracks::TASK_TYPE => {
+            let parsed: link_tracks::LinkTracksParams = serde_json::from_value(params.clone())
+                .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            parsed.validate_params().map_err(TaskError::InvalidParams)
+        }
         backfill_host_galaxy::TASK_TYPE => {
             let parsed: backfill_host_galaxy::BackfillHostGalaxyParams =
                 serde_json::from_value(params.clone())
@@ -483,6 +504,11 @@ pub fn single_flight_key(
                 .map(|survey| doc! { "survey": survey })
                 .unwrap_or_default(),
         ),
+        // Not keyed on anything: persisting merges tracks by shared members
+        // across the whole collection, so two runs at once could each decide a
+        // different survivor for the same merge. Keyed this way the second run
+        // waits in the queue rather than starting and failing on a lock.
+        link_tracks::TASK_TYPE => Some(doc! {}),
         // Keyed by collection: two exports of the same one would write the same
         // files over each other.
         export_catalog::TASK_TYPE => Some(
@@ -546,6 +572,11 @@ pub async fn dispatch(
             let params = export_catalog::ExportCatalogParams::deserialize(params)
                 .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
             export_catalog::run(ctx, params).await
+        }
+        link_tracks::TASK_TYPE => {
+            let params = link_tracks::LinkTracksParams::deserialize(params)
+                .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            link_tracks::run(ctx, params).await
         }
         backfill_host_galaxy::TASK_TYPE => {
             let params = backfill_host_galaxy::BackfillHostGalaxyParams::deserialize(params)

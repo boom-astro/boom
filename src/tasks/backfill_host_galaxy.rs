@@ -10,15 +10,11 @@
 //! `reprocess_crossmatch` over NED and LSDR10 first: without those entries there
 //! is nothing to associate against and this writes an empty association.
 //!
-//! Ported from the `backfill_host_galaxy` binary (#566), so it runs through the
-//! task system: recorded in the ledger, cancellable, with its logs kept.
-//!
 //! Records are read as raw documents rather than deserialized into a typed
-//! struct, because a collection this old contains records whose `coordinates`
-//! or `cross_matches` do not have the shape the current code expects. Typed,
-//! one of those ends the whole run on a deserialization error; here it is
-//! counted, named in the log, and left without a `host_galaxy`. That tolerance
-//! comes from #696, which fixed it in the binary this replaced.
+//! struct, because the collection contains records whose `coordinates` or
+//! `cross_matches` are not the shape the current code expects. Typed, one of
+//! those ends the whole run on a deserialization error; here it is counted,
+//! named in the log, and left without a `host_galaxy`.
 
 use super::context::TaskContext;
 use super::ledger::{MutationTarget, Operation};

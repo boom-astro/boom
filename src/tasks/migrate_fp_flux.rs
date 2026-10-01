@@ -12,11 +12,6 @@
 //! from what it wrote last time -- which is what makes it safe for the task
 //! system to requeue after a lost lease.
 //!
-//! Ported from `src/bin/migrate_fp_flux.rs`, which is now a thin wrapper over
-//! this. Three things changed in the move: the batch loop checks for
-//! cancellation, failures return errors instead of calling `process::exit`
-//! (which would kill the whole worker and every other run on it), and progress
-//! is reported to the run rather than only to a terminal progress bar.
 
 use super::batch::{run_batched_update, BatchError, PROGRESS_EVERY};
 use super::context::TaskContext;
