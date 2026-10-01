@@ -6,7 +6,9 @@
 //! chunks -- a catalog ingest logs steadily for hours, and one document per
 //! line would be a lot of writes for something nobody reads most of the time.
 
-use super::models::{now, TaskLogChunk, TaskLogLine, LOGS_COLLECTION};
+use super::models::{
+    expires_in_days, now, TaskLogChunk, TaskLogLine, LOGS_COLLECTION, LOG_RETENTION_DAYS,
+};
 use mongodb::bson::doc;
 use mongodb::Database;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -134,6 +136,7 @@ impl LogSink {
             run_id: self.inner.run_id.clone(),
             seq: self.inner.seq.fetch_add(1, Ordering::Relaxed),
             ts: now(),
+            expires_at: expires_in_days(LOG_RETENTION_DAYS),
             lines,
         };
         if let Err(e) = db
@@ -165,6 +168,25 @@ pub async fn read_after(
         .sort(doc! { "seq": 1 })
         .await?;
     cursor.try_collect().await
+}
+
+/// Keep a run's logs longer, for a run that did not end well.
+///
+/// Called when a terminal status is recorded, so the window is set by the
+/// outcome rather than guessed at write time. Best-effort: failing to extend
+/// retention is not worth failing the outcome record over, and the logs are
+/// still there for the ordinary window.
+pub async fn extend_retention(db: &Database, run_id: &str, days: i64) {
+    let result = db
+        .collection::<TaskLogChunk>(LOGS_COLLECTION)
+        .update_many(
+            doc! { "run_id": run_id },
+            doc! { "$set": { "expires_at": expires_in_days(days) } },
+        )
+        .await;
+    if let Err(e) = result {
+        tracing::warn!(run_id, "failed to extend log retention: {}", e);
+    }
 }
 
 /// Drop a run's logs, for when the run itself is deleted.

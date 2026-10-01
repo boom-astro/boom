@@ -5,7 +5,7 @@
 //! so there is no separate broker to keep consistent with the run document. At
 //! a few runs a week that is the right trade -- see docs/task-system.md.
 
-use super::models::{now, TaskRun, TaskStatus, RUNS_COLLECTION};
+use super::models::{now, TaskRun, TaskStatus, FAILED_LOG_RETENTION_DAYS, RUNS_COLLECTION};
 use mongodb::bson::{doc, to_bson, Document};
 use mongodb::options::ReturnDocument;
 use mongodb::Database;
@@ -166,6 +166,11 @@ pub async fn finish_claimed(
             },
         )
         .await?;
+    if matches!(status, TaskStatus::Failed | TaskStatus::Canceled) {
+        // The outcome decides how long the logs are worth keeping, and this is
+        // the first point that knows it.
+        super::logs::extend_retention(db, run_id, FAILED_LOG_RETENTION_DAYS).await;
+    }
     Ok(result.matched_count == 1)
 }
 
@@ -270,9 +275,31 @@ pub async fn requeue_expired(db: &Database) -> Result<ReapReport, QueueError> {
         )
         .await?;
 
+    // Read the ids before the update, because `update_many` does not return
+    // them and these are the runs whose logs are worth keeping longest. A run
+    // that slips out of the filter in between just keeps its logs longer than
+    // it needed to, which is the harmless direction.
+    let failing = expired(doc! { "task_type": { "$nin": retryable.clone() } });
+    let failed_ids: Vec<String> = {
+        use futures::TryStreamExt;
+        // As `Document`, not `TaskRun`: a projection of `_id` alone cannot
+        // deserialize into the full type, and that failure would only show up
+        // at runtime.
+        runs(db)
+            .clone_with_type::<Document>()
+            .find(failing.clone())
+            .projection(doc! { "_id": 1 })
+            .await?
+            .try_collect::<Vec<Document>>()
+            .await?
+            .iter()
+            .filter_map(|d| d.get_str("_id").ok().map(str::to_string))
+            .collect()
+    };
+
     let failed = runs(db)
         .update_many(
-            expired(doc! { "task_type": { "$nin": retryable.clone() } }),
+            failing,
             doc! {
                 "$set": {
                     "status": TaskStatus::Failed.as_str(),
@@ -287,6 +314,14 @@ pub async fn requeue_expired(db: &Database) -> Result<ReapReport, QueueError> {
             },
         )
         .await?;
+
+    if failed.modified_count > 0 {
+        // Same reasoning as finish_claimed: these runs died without recording
+        // their own outcome, which makes their logs the most worth keeping.
+        for id in &failed_ids {
+            super::logs::extend_retention(db, id, FAILED_LOG_RETENTION_DAYS).await;
+        }
+    }
 
     if requeued.modified_count > 0 {
         tracing::warn!(

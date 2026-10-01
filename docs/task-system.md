@@ -463,6 +463,22 @@ GPU work needs claim-time routing, which is listed below.
 Loki through the normal container-log path. It is capped per run so a task
 logging in a loop cannot fill the disk.
 
+**Logs expire; the ledger does not.** Each chunk carries an `expires_at` date
+and `task_logs` has a TTL index on it, so MongoDB's own background monitor
+deletes them — there is no cron job and no loop in the worker to go wrong. The
+window is 90 days normally and a year for a run that failed or was canceled,
+set when the outcome is recorded, since those are the logs somebody comes back
+to. Loki holds the same lines for seven days, so the two together mean: recent
+firehose in Loki, per-run record here, permanent record of *what changed* in
+`data_mutations`.
+
+The index uses `expireAfterSeconds: 0` against a per-document date rather than
+a fixed window against a creation date, which is what makes the two retention
+periods expressible at all. One consequence worth knowing: the field has to be
+a BSON date. The TTL monitor ignores a document whose indexed field is a
+number, and does so silently, so hanging the index off the numeric `ts` would
+look installed and delete nothing.
+
 ## The ledger
 
 BOOM's scientific artifacts are a function of the *current state* of the
