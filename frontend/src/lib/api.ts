@@ -18,6 +18,8 @@ export type Profile = {
   /** Provider slugs the account can sign in with, e.g. ["google", "orcid"] */
   identity_providers?: string[];
   orcid_id?: string | null;
+  is_admin?: boolean;
+  acls?: string[];
 } | null;
 
 export type OAuthProvider = { id: string; name: string; start_url: string };
@@ -229,6 +231,38 @@ export async function updateProfileName(name: string): Promise<Profile> {
   const body = await readJson(res);
   if (!res.ok) throw new Error(messageOf(body) ?? `Update profile failed: ${res.status}`);
   return normalizeProfile(unwrapData<ProfileWire>(body, null));
+}
+
+export type AdminUser = {
+  id: string;
+  username: string;
+  email: string;
+  name: string | null;
+  created_at: number;
+  is_activated: boolean;
+  is_admin: boolean;
+  acls: string[];
+};
+
+export type AdminUsersPage = { users: AdminUser[]; total: number; available_acls: string[] };
+
+export async function fetchAdminUsers(search: string, limit: number, offset: number): Promise<AdminUsersPage> {
+  const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+  if (search.trim()) params.set("search", search.trim());
+  const res = await fetchWithAuth(`${API_BASE}/admin/users?${params}`);
+  await ensureOk(res, "Fetch users");
+  return unwrapData<AdminUsersPage>(await readJson(res), { users: [], total: 0, available_acls: [] });
+}
+
+export async function updateAdminUser(id: string, patch: { is_admin?: boolean; acls?: string[] }): Promise<AdminUser> {
+  const res = await fetchWithAuth(`${API_BASE}/admin/users/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+  const body = await readJson(res);
+  if (!res.ok) throw new Error(messageOf(body) ?? `Update user failed: ${res.status}`);
+  return unwrapData<AdminUser>(body, {} as AdminUser);
 }
 
 export async function fetchKafkaCredentials(): Promise<KafkaCredential[]> {

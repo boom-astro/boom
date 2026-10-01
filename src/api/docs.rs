@@ -106,6 +106,8 @@ pub struct ApiDoc;
         routes::babamul::oauth::post_oauth_verify,
         routes::babamul::get_babamul_profile,
         routes::babamul::patch_babamul_profile,
+        routes::babamul::admin::get_admin_users,
+        routes::babamul::admin::patch_admin_user,
         routes::babamul::post_kafka_credentials,
         routes::babamul::get_kafka_credentials,
         routes::babamul::surveys::schemas::get_babamul_schema,
