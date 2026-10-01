@@ -16,23 +16,35 @@
 //! bodies are therefore written to be **resumable**: re-running one continues
 //! rather than repeating.
 
+// The system: everything that runs a task, rather than being one.
+//
+// This directory is destined to become `src/task/`, with the modules below it
+// moving to `src/task/tasks/`: singular for the subsystem, as `alert`, `filter`
+// and `enrichment` already are, and plural only for the collection of runnable
+// things. A `tasks` module whose contents are mostly not tasks is the wrong
+// promise. The move waits until this work has landed --
+// these modules are spread across four layers of the stack it arrived in, and
+// renaming a path is the one edit that layering cannot absorb.
+pub mod batch;
+pub mod context;
+pub mod ledger;
+pub mod logs;
+pub mod models;
+pub mod queue;
+pub mod redact;
+
+// The tasks: one module per entry in `TASKS` below, each with its own
+// `TASK_TYPE`, params type and `run`. These are what moves to `task/tasks/`.
 pub mod backfill_host_galaxy;
 pub mod backfill_hpx;
-pub mod batch;
 pub mod catalog_ingest;
-pub mod context;
 pub mod copy_cutouts;
 pub mod enrich_reprocess;
 pub mod export_catalog;
-pub mod ledger;
-pub mod logs;
 pub mod migrate_fp_flux;
 pub mod migrate_snr;
-pub mod models;
 pub mod mpcorb_ingest;
 pub mod prepare_catalog;
-pub mod queue;
-pub mod redact;
 pub mod repair_photometry;
 pub mod reprocess_crossmatch;
 pub mod sso_baselines;
