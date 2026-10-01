@@ -41,6 +41,14 @@ use utoipa::ToSchema;
 /// Stable identifier for this task type.
 pub const TASK_TYPE: &str = "link_tracks";
 
+/// What a track has to clear to be stored, and whether to store it at all.
+#[derive(Debug, Clone, Copy)]
+struct PersistGates {
+    dry_run: bool,
+    min_detections: usize,
+    min_nights: usize,
+}
+
 /// Where a staged input dump and the written tracks live, under the shared
 /// data path the worker mounts.
 const DATA_PATH_ENV: &str = "BOOM_CATALOG_DATA_PATH";
@@ -335,10 +343,14 @@ fn ztf_band(fid: Option<i32>) -> Option<char> {
     }
 }
 
+/// Detections, and the `ssnamenr` label for those that carry one.
+///
+/// The labels are what a `known` run scores against, so they travel with the
+/// detections rather than being looked up again later.
+type Labelled = (Vec<Detection>, HashMap<i64, String>);
+
 /// Detections from a JSONL dump, with labels where the rows carry them.
-fn load_file(
-    path: &str,
-) -> Result<(Vec<Detection>, HashMap<i64, String>), Box<dyn std::error::Error>> {
+fn load_file(path: &str) -> Result<Labelled, Box<dyn std::error::Error>> {
     let text = std::fs::read_to_string(path)?;
     let mut detections = Vec::new();
     let mut labels = HashMap::new();
@@ -673,10 +685,13 @@ async fn persist_tracks(
     tracklets: &[Tracklet],
     detections: &[Detection],
     labels: &HashMap<i64, String>,
-    dry_run: bool,
-    min_detections: usize,
-    min_nights: usize,
+    gates: PersistGates,
 ) {
+    let PersistGates {
+        dry_run,
+        min_detections,
+        min_nights,
+    } = gates;
     use crate::utils::tracks::{
         acquire_lock, commit_upsert, plan_upsert, release_lock, stamp_members,
     };
@@ -1500,9 +1515,11 @@ pub async fn run(
             &tracklets,
             &detections,
             &labels,
-            params.dry_run,
-            params.min_detections,
-            params.min_nights,
+            PersistGates {
+                dry_run: params.dry_run,
+                min_detections: params.min_detections,
+                min_nights: params.min_nights,
+            },
         )
         .await;
         result["persisted"] = serde_json::json!(!params.dry_run);
