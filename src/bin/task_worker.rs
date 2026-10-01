@@ -12,11 +12,7 @@
 //! assuming it: a task that cannot be resumed is failed instead of retried.
 
 use boom::conf::{load_dotenv, AppConfig};
-use boom::tasks::{
-    self,
-    models::{self, TaskStatus},
-    queue, TaskContext, TaskError,
-};
+use boom::tasks::{self, models::TaskStatus, queue, TaskContext, TaskError};
 use boom::utils::o11y::logging::build_subscriber;
 use clap::Parser;
 use futures::FutureExt;
@@ -61,12 +57,9 @@ async fn main() {
     let config_path = Arc::new(config_path);
     let db = config.build_db().await.expect("failed to connect to mongo");
 
-    models::initialize_indexes(&db)
+    boom::tasks::initialize_indexes(&db)
         .await
-        .expect("failed to create task indexes");
-    boom::tasks::ledger::initialize_indexes(&db)
-        .await
-        .expect("failed to create ledger indexes");
+        .expect("failed to create task system indexes");
 
     let worker_label = args.name.unwrap_or_else(|| {
         std::env::var("HOSTNAME").unwrap_or_else(|_| format!("worker-{}", uuid::Uuid::new_v4()))

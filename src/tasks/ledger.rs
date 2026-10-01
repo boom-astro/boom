@@ -176,7 +176,9 @@ pub async fn history(
 }
 
 /// Indexes the ledger's read paths depend on.
-pub async fn initialize_indexes(db: &Database) -> Result<(), mongodb::error::Error> {
+///
+/// Called through [`crate::tasks::initialize_indexes`], not directly.
+pub(crate) async fn initialize_indexes(db: &Database) -> Result<(), mongodb::error::Error> {
     let collection = db.collection::<Document>(MUTATIONS_COLLECTION);
     // "What has been done to this collection?" is the question the ledger
     // exists to answer, so it gets the compound index.

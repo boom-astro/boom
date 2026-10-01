@@ -44,6 +44,19 @@ pub use models::{Actor, TaskRun, TaskStatus, Trigger};
 use mongodb::bson::doc;
 use serde::Deserialize;
 
+/// Create every index the task system's own collections need.
+///
+/// Three collections, one call: the run queue and its per-run logs
+/// (`models`), and the mutation ledger (`ledger`). The definitions stay in the
+/// modules whose queries they serve -- an index is only justified by the query
+/// that reads it, and splitting the two apart is how they drift -- but a
+/// service should not have to know how many modules that is.
+pub async fn initialize_indexes(db: &mongodb::Database) -> Result<(), mongodb::error::Error> {
+    models::initialize_indexes(db).await?;
+    ledger::initialize_indexes(db).await?;
+    Ok(())
+}
+
 #[derive(thiserror::Error, Debug)]
 pub enum TaskError {
     #[error("{0}")]

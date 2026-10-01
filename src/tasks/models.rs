@@ -153,12 +153,17 @@ pub fn now() -> f64 {
     chrono::Utc::now().timestamp_millis() as f64 / 1000.0
 }
 
-/// Indexes the queue depends on.
+/// Indexes the queue and the run logs depend on.
 ///
 /// The claim query sorts queued runs by submission time, and the reaper scans
 /// running runs by lease -- both are hot enough to matter once there is any
-/// history in the collection.
-pub async fn initialize_indexes(db: &mongodb::Database) -> Result<(), mongodb::error::Error> {
+/// history in the collection. The log index serves the admin page's tail,
+/// which polls `{run_id, seq}` every few seconds while a run is open.
+///
+/// Called through [`crate::tasks::initialize_indexes`], not directly.
+pub(crate) async fn initialize_indexes(
+    db: &mongodb::Database,
+) -> Result<(), mongodb::error::Error> {
     let runs = db.collection::<Document>(RUNS_COLLECTION);
     runs.create_index(
         mongodb::IndexModel::builder()
