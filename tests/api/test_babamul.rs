@@ -20,6 +20,7 @@ mod tests {
         drop_alert_from_collections, lsst_alert_worker, ztf_alert_worker, AlertRandomizer,
         TEST_CONFIG_FILE,
     };
+    use boom::utils::tracks::{commit_upsert, plan_upsert, TRACKS_COLLECTION};
     use mongodb::bson::doc;
     use mongodb::Database;
     use std::collections::HashMap;
@@ -53,6 +54,8 @@ mod tests {
                 identities: vec![],
                 orcid_id: None,
                 name: None,
+                is_admin: false,
+                acls: vec![],
             };
 
             let babamul_users_collection: mongodb::Collection<BabamulUser> =
@@ -572,6 +575,21 @@ mod tests {
             resp.status(),
             StatusCode::NOT_FOUND,
             "Should return 404 for non-existent candid"
+        );
+
+        let req = test::TestRequest::get()
+            .uri(&format!(
+                "/babamul/surveys/winter/cutouts?candid={}",
+                test_candid
+            ))
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "Should reject surveys other than ZTF and LSST"
         );
     }
 
@@ -2537,6 +2555,24 @@ mod tests {
         );
 
         let req = test::TestRequest::post()
+            .uri("/babamul/surveys/winter/objects/cone-search")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .set_json(serde_json::json!({
+                "coordinates": {
+                    "search1": [125.0, -12.0]
+                },
+                "radius_arcsec": 60.0
+            }))
+            .to_request();
+
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "Should reject surveys other than ZTF and LSST"
+        );
+
+        let req = test::TestRequest::post()
             .uri("/babamul/surveys/ztf/objects/cone-search")
             .set_json(serde_json::json!({
                 "coordinates": {
@@ -2738,6 +2774,8 @@ mod tests {
             identities: vec![],
             orcid_id: None,
             name: None,
+            is_admin: false,
+            acls: vec![],
         })
         .await
         .unwrap();
@@ -2808,6 +2846,8 @@ mod tests {
             identities: vec![],
             orcid_id: None,
             name: None,
+            is_admin: false,
+            acls: vec![],
         })
         .await
         .unwrap();
@@ -2855,6 +2895,8 @@ mod tests {
             identities: vec![],
             orcid_id: None,
             name: None,
+            is_admin: false,
+            acls: vec![],
         })
         .await
         .unwrap();
@@ -2939,6 +2981,8 @@ mod tests {
             identities: vec![],
             orcid_id: None,
             name: None,
+            is_admin: false,
+            acls: vec![],
         };
 
         let mut ids_to_cleanup: Vec<String> = Vec::new();
@@ -3899,6 +3943,8 @@ mod tests {
                 identities: vec![],
                 orcid_id: None,
                 name: None,
+                is_admin: false,
+                acls: vec![],
             })
             .await
             .unwrap();
@@ -4101,6 +4147,8 @@ mod tests {
                 identities: vec![],
                 orcid_id: None,
                 name: None,
+                is_admin: false,
+                acls: vec![],
             })
             .await
             .unwrap();
@@ -4893,5 +4941,250 @@ mod tests {
                 .await
                 .unwrap();
         }
+    }
+
+    #[actix_rt::test]
+    async fn test_get_track_keeps_only_public_detections() {
+        load_dotenv();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+        let test_user = TestUser::create(&database, &auth_app_data).await;
+
+        let base = (uuid::Uuid::new_v4().as_u128() as i64).abs() / 16;
+        let mixed = [base, base + 1, base + 2, base + 3];
+        let private = [base + 4, base + 5];
+        let alerts = database.collection::<mongodb::bson::Document>("ZTF_alerts");
+        for (candid, programid) in mixed
+            .iter()
+            .zip([1, 1, 2, 2])
+            .chain(private.iter().zip([2, 2]))
+        {
+            alerts
+                .insert_one(doc! { "_id": candid, "candidate": { "programid": programid } })
+                .await
+                .unwrap();
+        }
+        let mut ids = Vec::new();
+        for members in [&mixed[..], &private[..]] {
+            let jds: Vec<f64> = (0..members.len()).map(|k| 2460000.0 + k as f64).collect();
+            let plan = plan_upsert(&database, members, &jds, None, None)
+                .await
+                .unwrap();
+            ids.push(commit_upsert(&database, plan).await.unwrap().track.id);
+        }
+
+        let app = test::init_service(
+            App::new().service(
+                actix_web::web::scope("/babamul")
+                    .app_data(web::Data::new(database.clone()))
+                    .app_data(web::Data::new(auth_app_data.clone()))
+                    .wrap(from_fn(babamul_auth_middleware))
+                    .service(routes::babamul::surveys::get_track),
+            ),
+        )
+        .await;
+
+        let req = test::TestRequest::get()
+            .uri(&format!("/babamul/surveys/ztf/tracks/{}", ids[0]))
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "Should retrieve the mixed track: {}",
+            read_str_response(resp).await
+        );
+        let body = read_json_response(resp).await;
+        let members: Vec<i64> = body["data"]["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m.as_i64().unwrap())
+            .collect();
+        assert_eq!(members, vec![mixed[0], mixed[1]]);
+        assert_eq!(body["data"]["n_detections"].as_i64().unwrap(), 2);
+        assert_eq!(body["data"]["n_nights"].as_i64().unwrap(), 2);
+        assert_eq!(body["data"]["last_jd"].as_f64().unwrap(), 2460001.0);
+
+        let req = test::TestRequest::get()
+            .uri(&format!("/babamul/surveys/ztf/tracks/{}", ids[1]))
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "A track with no public detection should not be served"
+        );
+
+        let all: Vec<i64> = mixed.iter().chain(private.iter()).copied().collect();
+        alerts
+            .delete_many(doc! { "_id": { "$in": &all } })
+            .await
+            .unwrap();
+        database
+            .collection::<mongodb::bson::Document>(TRACKS_COLLECTION)
+            .delete_many(doc! { "_id": { "$in": &ids } })
+            .await
+            .unwrap();
+    }
+
+    #[actix_rt::test]
+    async fn test_babamul_admin_manages_user_access() {
+        load_dotenv();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+        let admin = TestUser::create(&database, &auth_app_data).await;
+        let user = TestUser::create(&database, &auth_app_data).await;
+        let users: mongodb::Collection<BabamulUser> = database.collection("babamul_users");
+        users
+            .update_one(
+                doc! { "_id": &admin.user.id },
+                doc! { "$set": { "is_admin": true } },
+            )
+            .await
+            .unwrap();
+
+        let app = test::init_service(
+            App::new().service(
+                web::scope("/babamul")
+                    .app_data(web::Data::new(database.clone()))
+                    .app_data(web::Data::new(auth_app_data))
+                    .wrap(from_fn(babamul_auth_middleware))
+                    .service(routes::babamul::get_babamul_profile)
+                    .service(routes::babamul::admin::get_admin_users)
+                    .service(routes::babamul::admin::patch_admin_user),
+            ),
+        )
+        .await;
+
+        let list = |token: &str| {
+            test::TestRequest::get()
+                .uri(&format!(
+                    "/babamul/admin/users?search={}",
+                    user.user.email.replace('+', "%2B")
+                ))
+                .insert_header(("Authorization", format!("Bearer {}", token)))
+                .to_request()
+        };
+        let patch = |token: &str, id: &str, body: serde_json::Value| {
+            test::TestRequest::patch()
+                .uri(&format!("/babamul/admin/users/{}", id))
+                .insert_header(("Authorization", format!("Bearer {}", token)))
+                .set_json(body)
+                .to_request()
+        };
+
+        let resp = test::call_service(&app, list(&user.token)).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let resp = test::call_service(
+            &app,
+            patch(
+                &user.token,
+                &user.user.id,
+                serde_json::json!({ "is_admin": true }),
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        let resp = test::call_service(&app, list(&admin.token)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = read_json_response(resp).await;
+        assert_eq!(body["data"]["total"], 1);
+        assert_eq!(body["data"]["users"][0]["id"], user.user.id.as_str());
+        assert_eq!(body["data"]["users"][0]["is_admin"], false);
+        assert_eq!(
+            body["data"]["available_acls"],
+            serde_json::json!(["winter", "ztf_partnership", "ztf_caltech"])
+        );
+
+        let resp = test::call_service(
+            &app,
+            patch(
+                &admin.token,
+                &user.user.id,
+                serde_json::json!({ "is_admin": true, "acls": ["ztf_caltech", "winter", "ztf_partnership", "winter"] }),
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = read_json_response(resp).await;
+        assert_eq!(body["data"]["is_admin"], true);
+        assert_eq!(
+            body["data"]["acls"],
+            serde_json::json!(["winter", "ztf_partnership", "ztf_caltech"])
+        );
+
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri("/babamul/profile")
+                .insert_header(("Authorization", format!("Bearer {}", user.token)))
+                .to_request(),
+        )
+        .await;
+        let body = read_json_response(resp).await;
+        assert_eq!(body["data"]["is_admin"], true);
+        assert_eq!(
+            body["data"]["acls"],
+            serde_json::json!(["winter", "ztf_partnership", "ztf_caltech"])
+        );
+
+        let resp = test::call_service(
+            &app,
+            patch(
+                &admin.token,
+                &admin.user.id,
+                serde_json::json!({ "is_admin": false }),
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        let resp = test::call_service(
+            &app,
+            patch(
+                &admin.token,
+                &user.user.id,
+                serde_json::json!({ "acls": ["nope"] }),
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        let resp = test::call_service(
+            &app,
+            patch(
+                &admin.token,
+                &user.user.id,
+                serde_json::json!({ "acls": ["ztf_caltech"] }),
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        let resp = test::call_service(
+            &app,
+            patch(&admin.token, "missing", serde_json::json!({ "acls": [] })),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        let stored = users
+            .find_one(doc! { "_id": &user.user.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(stored.is_admin);
+        assert_eq!(
+            stored.acls,
+            vec![
+                routes::babamul::BabamulAcl::Winter,
+                routes::babamul::BabamulAcl::ZtfPartnership,
+                routes::babamul::BabamulAcl::ZtfCaltech
+            ]
+        );
     }
 }
