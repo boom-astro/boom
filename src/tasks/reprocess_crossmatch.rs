@@ -1324,8 +1324,8 @@ mod tests {
             .and_then(|c| c.first())
             .map(|c| c.catalog.clone())
             .expect("the test config crossmatches ztf against something");
-        let resolved =
-            resolve_catalogs(&config, &Survey::Ztf, &[declared.clone()]).expect("resolves");
+        let resolved = resolve_catalogs(&config, &Survey::Ztf, std::slice::from_ref(&declared))
+            .expect("resolves");
         assert_eq!(resolved.len(), 1);
         assert_eq!(resolved[0].catalog, declared);
     }

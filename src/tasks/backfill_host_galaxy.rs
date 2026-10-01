@@ -198,7 +198,7 @@ async fn worker(
     let mut unreadable = 0u64;
     // Named in the log, but only the first few: a systematic problem would
     // otherwise write one line per record into the run's logs.
-    let mut say = |ctx: &TaskContext, unreadable: u64, msg: String| {
+    let say = |ctx: &TaskContext, unreadable: u64, msg: String| {
         if unreadable <= 5 {
             ctx.warn(msg);
         }

@@ -217,7 +217,7 @@ pub async fn auth_middleware(
                     req.extensions_mut().insert(user);
                 }
                 // Not a main-API credential. It may still be a Babamul one: the
-                // web app holds a Babamul token and reaches the admin routes on
+                // client holds a Babamul token and reaches the admin routes on
                 // this scope, and requiring a second login for them would mean
                 // two sessions in one page. Authorization is unchanged --
                 // `api::admin::require_admin` still gates every admin route on
@@ -262,14 +262,14 @@ async fn resolve_babamul_user(
 ) -> Result<Option<BabamulUser>, Error> {
     let collection: mongodb::Collection<BabamulUser> = db.collection("babamul_users");
 
-    let user = if token.starts_with("bbml_") {
-        // Expected format: "bbml_" (5 chars) + 36-char secret.
-        if token.len() != 41 {
+    let user = if let Some(secret) = token.strip_prefix("bbml_") {
+        // Expected format: the "bbml_" prefix plus a 36-char secret.
+        if secret.len() != 36 {
             return Err(actix_web::error::ErrorUnauthorized(
                 "Invalid Babamul personal access token",
             ));
         }
-        let token_hash = hash_token(&token[5..]);
+        let token_hash = hash_token(secret);
         let now = flare::Time::now().to_utc().timestamp();
         collection
             .find_one_and_update(

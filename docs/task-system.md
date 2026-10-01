@@ -46,6 +46,62 @@ starts over SSH:
   API is for. MongoDB credentials are not an authorization system, and mutating
   production data should not require handing out root-adjacent shell access.
 
+## Why not Temporal
+
+Building a task queue is the kind of thing a workflow engine already does, so
+the question deserves an answer rather than a shrug. [Temporal](https://temporal.io)
+is the closest fit, and adopting it would genuinely replace parts of this: its
+durable execution makes resumability a property of the runtime rather than a
+flag the task author sets, which is strictly stronger than `idempotent` — every
+task declares it and nothing verifies it. Activity heartbeats, retry policies
+and timeouts cover by configuration what `queue.rs` does by hand. Schedules
+would cover the periodic jobs below for free.
+
+It is not adopted here, for three reasons.
+
+**The ledger is not something it provides.** `data_mutations` answers "why does
+this collection look like this": the collection, the operation, the actor, and
+the commit that ran. Temporal's event history records what a workflow did, keyed
+by run, with retention limits and archival. That record would still have to be
+built on top of it, and it is the part that matters for explaining a result.
+
+**The shape fits badly.** Workflow code has to be replay-deterministic — no I/O,
+no clocks, and explicit versioning when a workflow changes while runs are in
+flight. A task here is one long loop over a MongoDB collection, so nearly all of
+it would have to be an activity with the workflow as a thin driver, at which
+point what durable execution buys is checkpointing between activities, which
+`record_chunk` and the resume filters already do. Histories also have event and
+size limits, so a task walking hundreds of millions of documents needs
+continue-as-new chunking designed around them.
+
+**It is another server to operate.** A Temporal server plus its persistence
+store, on deployments that today are MongoDB, Valkey, Kafka and a handful of
+Rust services on hardware the institutions run themselves — or a hosted
+dependency for metadata about data movements. The Rust SDK reached public
+preview in May 2026, so the language is no longer the obstacle it would have
+been; the operational weight is.
+
+Revisit it if tasks start spanning services and needing compensation when a
+later step fails, or if runs need to pause for human approval. Both are things a
+workflow engine is for and this is not.
+
+Worth taking from its design regardless, none of which needs Temporal:
+
+- **A checkpoint token on the run.** A Temporal activity heartbeats with a
+  payload that comes back to it on retry. Resume points here are re-derived from
+  the data every time; recording the last `_id` processed on the run would
+  generalize the per-task tricks and make resumability inspectable rather than
+  asserted.
+- **A test that kills a run and resumes it.** `idempotent: true` is a claim
+  about every task in `TASKS`, and nothing checks it.
+- **A retry policy per task** rather than one boolean: attempts, backoff, and
+  which errors are not worth retrying.
+- **Separate timeouts.** One lease TTL currently does the work that Temporal
+  splits into start-to-close, schedule-to-close and heartbeat timeouts, so a
+  task that hangs without dying is indistinguishable from one making progress.
+- **An overlap policy on schedules** — skip, buffer or allow — which is what a
+  periodic trim needs, and what `single_flight_key` only approximates.
+
 ## How a run flows
 
 ```text
@@ -262,7 +318,7 @@ Both of them, because the API validates `task_type` against its own registry
 when you submit: a worker that knows your task and an API that does not gets you
 a 400, not a run. Everything else — consumers, schedulers, enrichment workers —
 keeps running the deployed release, so the pipeline is untouched. The API
-restart costs a few seconds of downtime on the web app, which is the price of
+restart costs a few seconds of downtime for every client, which is the price of
 not needing a shell on the box.
 
 Then submit it from the admin page or the API as above. `BOOM_GIT_SHA` is

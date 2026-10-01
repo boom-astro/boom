@@ -1,7 +1,7 @@
 //! Authorization for the admin surface.
 //!
 //! BOOM has two login realms -- the original API's `users` and Babamul's
-//! `babamul_users` -- and the admin page is reached from the web app, which
+//! `babamul_users` -- and the admin page is reached from the client, which
 //! authenticates as the latter. Rather than merge the logins, both realms carry
 //! an `is_admin` flag and both are accepted here, so there is one authorization
 //! check and one shape of actor recorded on a run.

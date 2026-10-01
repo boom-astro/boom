@@ -103,14 +103,13 @@ async fn write_shard(
     ctx: &TaskContext,
     collection: &mongodb::Collection<Document>,
     filter: Document,
-    fields: &[String],
+    params: &ExportCatalogParams,
     path: &PathBuf,
-    dry_run: bool,
     written_so_far: u64,
     estimated: u64,
 ) -> Result<u64, super::TaskError> {
     let mut projection = doc! {};
-    for field in fields {
+    for field in &params.fields {
         projection.insert(field.as_str(), 1);
     }
     let mut cursor = collection
@@ -122,7 +121,7 @@ async fn write_shard(
         .await
         .map_err(failed)?;
 
-    let mut writer = if dry_run {
+    let mut writer = if params.dry_run {
         None
     } else {
         let file = std::fs::File::create(path).map_err(failed)?;
@@ -141,7 +140,7 @@ async fn write_shard(
         }
         rows += 1;
 
-        if rows % 10_000 == 0 {
+        if rows.is_multiple_of(10_000) {
             // Checked between blocks rather than per row: a cancelled export
             // leaves a partial file, which the manifest's absence marks as
             // unusable.
@@ -217,9 +216,8 @@ pub async fn run(
             ctx,
             &collection,
             filter.clone(),
-            &params.fields,
+            &params,
             &path,
-            params.dry_run,
             total,
             estimated,
         )
