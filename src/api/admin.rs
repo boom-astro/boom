@@ -110,16 +110,20 @@ pub fn require_admin(
 /// renaming it here alone would break the layer that carries this file. It
 /// seeds; it does not reconcile.
 ///
-/// Runs at API startup, and only ever **grants**. This list exists to solve
-/// the bootstrap problem: admin is granted through
+/// Runs at API startup, grants only, and only when the deployment has no
+/// admins at all. This list solves one problem: admin is granted through
 /// `PATCH /babamul/admin/users/{id}`, which only an admin may call, so a fresh
-/// deployment with no admins has no way to appoint its first one.
+/// deployment has no way to appoint its first one.
 ///
-/// It was two-way once -- anyone off the list was revoked, so config was the
-/// whole truth and removing a line was how you removed an admin. That cannot
-/// survive alongside granting through the API: every restart would silently
-/// un-admin everyone appointed since the last one. Revocation belongs with the
-/// grant, in the API.
+/// Both halves of that matter, because the API is the source of truth and a
+/// config list that keeps asserting itself would fight it. Revoking somebody
+/// would last until the next restart if they were still named here, which is a
+/// grant nobody made and nobody can see. And a two-way version would be worse:
+/// every restart would un-admin everyone appointed since the last one. So once
+/// an admin exists, this is inert, and admin is added and removed in one place.
+///
+/// Losing every admin is the one case it fires again, which is the recovery
+/// path: put an address here and restart.
 #[tracing::instrument(skip(db, admin_emails))]
 pub async fn reconcile_babamul_admins(
     db: &mongodb::Database,
@@ -128,6 +132,16 @@ pub async fn reconcile_babamul_admins(
     use mongodb::bson::doc;
 
     let collection = db.collection::<BabamulUser>("babamul_users");
+
+    // Inert once anyone is an admin, whoever made them one.
+    let existing = collection
+        .count_documents(doc! { "is_admin": true })
+        .await?;
+    if existing > 0 {
+        tracing::debug!(existing, "babamul admins exist already; not seeding");
+        return Ok(());
+    }
+
     // Emails are compared case-insensitively because that is how they are
     // matched at sign-in; a config entry that differs only in case should not
     // silently fail to grant access.
@@ -149,7 +163,7 @@ pub async fn reconcile_babamul_admins(
 
     if granted.modified_count > 0 {
         tracing::info!(
-            "babamul admins seeded: {} granted ({} configured)",
+            "no babamul admins existed: {} seeded from config ({} configured)",
             granted.modified_count,
             emails.len()
         );
@@ -166,6 +180,99 @@ pub async fn reconcile_babamul_admins(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mongodb::bson::doc;
+
+    /// Serializes the seeding tests: they share one `babamul_users` collection
+    /// and each one cares how many admins are in it.
+    static SEED_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+        std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+    async fn insert_user(db: &mongodb::Database, email: &str, is_admin: bool) -> String {
+        let id = uuid::Uuid::new_v4().to_string();
+        let mut user = babamul_user(is_admin);
+        user.id = id.clone();
+        user.email = email.to_string();
+        db.collection::<BabamulUser>("babamul_users")
+            .insert_one(&user)
+            .await
+            .expect("inserts");
+        id
+    }
+
+    async fn is_admin(db: &mongodb::Database, id: &str) -> bool {
+        db.collection::<BabamulUser>("babamul_users")
+            .find_one(doc! { "_id": id })
+            .await
+            .expect("reads")
+            .expect("present")
+            .is_admin
+    }
+
+    async fn clear(db: &mongodb::Database) {
+        db.collection::<BabamulUser>("babamul_users")
+            .delete_many(doc! {})
+            .await
+            .expect("clears");
+    }
+
+    #[tokio::test]
+    async fn the_first_admin_comes_from_config() {
+        let _seeding = SEED_LOCK.lock().await;
+        let db = crate::conf::get_test_db().await;
+        clear(&db).await;
+        let id = insert_user(&db, "first@example.org", false).await;
+
+        reconcile_babamul_admins(&db, &["First@Example.org".to_string()])
+            .await
+            .expect("seeds");
+
+        // Case-insensitively, because that is how sign-in matches an address.
+        assert!(is_admin(&db, &id).await);
+        clear(&db).await;
+    }
+
+    #[tokio::test]
+    async fn a_revoked_admin_is_not_handed_it_back_at_the_next_restart() {
+        let _seeding = SEED_LOCK.lock().await;
+        // The hazard this guards: an address stays in config after an admin
+        // revokes it through the API. Seeding again would be a grant nobody
+        // made, undone only by editing config, and invisible until someone
+        // noticed the admin page working for a person who should not have it.
+        let db = crate::conf::get_test_db().await;
+        clear(&db).await;
+        let keeper = insert_user(&db, "keeper@example.org", true).await;
+        let revoked = insert_user(&db, "revoked@example.org", false).await;
+
+        reconcile_babamul_admins(
+            &db,
+            &[
+                "keeper@example.org".to_string(),
+                "revoked@example.org".to_string(),
+            ],
+        )
+        .await
+        .expect("seeds");
+
+        assert!(is_admin(&db, &keeper).await, "untouched");
+        assert!(
+            !is_admin(&db, &revoked).await,
+            "a revocation through the API has to outlast a restart"
+        );
+        clear(&db).await;
+    }
+
+    #[tokio::test]
+    async fn an_empty_list_writes_nothing() {
+        let _seeding = SEED_LOCK.lock().await;
+        let db = crate::conf::get_test_db().await;
+        clear(&db).await;
+        let id = insert_user(&db, "nobody@example.org", false).await;
+
+        reconcile_babamul_admins(&db, &[]).await.expect("no-op");
+
+        assert!(!is_admin(&db, &id).await);
+        clear(&db).await;
+    }
 
     fn boom_user(is_admin: bool) -> User {
         User {

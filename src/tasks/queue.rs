@@ -442,12 +442,14 @@ mod tests {
         format!("test_{}", uuid::Uuid::new_v4().simple())
     }
 
-    /// Serializes the tests that call `claim_next`.
+    /// Serializes every test whose run has to stay queued.
     ///
     /// `claim_next` takes the oldest queued run in the database, whatever it is
-    /// -- that is the behavior under test, not an accident. Two such tests
-    /// running at once therefore claim each other's runs and both fail. The
-    /// lock is only held by tests that claim; the rest still run in parallel.
+    /// -- that is the behavior under test, not an accident. So the shared thing
+    /// this guards is the pool of queued runs, not the claim call: a test that
+    /// submits a run and then asserts anything about it being queued needs the
+    /// lock too, or a concurrent claim elsewhere moves it to running first.
+    /// Tests that only read, or that assert on queued-or-running, do not.
     static CLAIM_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
         std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
 
@@ -708,6 +710,10 @@ mod tests {
 
     #[tokio::test]
     async fn a_queued_run_is_canceled_outright() {
+        // Holds the lock because the run has to still be queued when
+        // `request_cancel` sees it: claimed first, it takes the running path
+        // and asks for cancellation instead of cancelling outright.
+        let _claiming = CLAIM_LOCK.lock().await;
         // Nothing has started, so there is no safe point to wait for.
         let db = crate::conf::get_test_db().await;
         let task_type = unique_type();
@@ -722,6 +728,32 @@ mod tests {
             get(&db, &run.id).await.unwrap().unwrap().status,
             TaskStatus::Canceled
         );
+        cleanup(&db, &task_type).await;
+    }
+
+    #[tokio::test]
+    async fn a_run_claimed_before_the_request_is_asked_to_stop() {
+        let _claiming = CLAIM_LOCK.lock().await;
+        // The window the queued path is guarded against: a worker can take a
+        // run between someone asking to cancel it and the request being
+        // served. Cancelling outright would mark a task canceled while it was
+        // still writing, so it is asked to stop and notices at its next
+        // boundary instead.
+        let db = crate::conf::get_test_db().await;
+        let task_type = unique_type();
+        let run = queued(&task_type, serde_json::json!({}));
+        submit(&db, &run).await.unwrap();
+        claim_ours(&db, "worker-a", &task_type)
+            .await
+            .expect("claimed");
+
+        assert_eq!(
+            request_cancel(&db, &run.id).await.unwrap(),
+            Some(TaskStatus::Running)
+        );
+        let after = get(&db, &run.id).await.unwrap().unwrap();
+        assert!(after.cancel_requested);
+        assert_eq!(after.status, TaskStatus::Running);
         cleanup(&db, &task_type).await;
     }
 
