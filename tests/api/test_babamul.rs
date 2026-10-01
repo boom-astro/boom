@@ -54,6 +54,8 @@ mod tests {
                 identities: vec![],
                 orcid_id: None,
                 name: None,
+                is_admin: false,
+                acls: vec![],
             };
 
             let babamul_users_collection: mongodb::Collection<BabamulUser> =
@@ -2772,6 +2774,8 @@ mod tests {
             identities: vec![],
             orcid_id: None,
             name: None,
+            is_admin: false,
+            acls: vec![],
         })
         .await
         .unwrap();
@@ -2842,6 +2846,8 @@ mod tests {
             identities: vec![],
             orcid_id: None,
             name: None,
+            is_admin: false,
+            acls: vec![],
         })
         .await
         .unwrap();
@@ -2889,6 +2895,8 @@ mod tests {
             identities: vec![],
             orcid_id: None,
             name: None,
+            is_admin: false,
+            acls: vec![],
         })
         .await
         .unwrap();
@@ -2973,6 +2981,8 @@ mod tests {
             identities: vec![],
             orcid_id: None,
             name: None,
+            is_admin: false,
+            acls: vec![],
         };
 
         let mut ids_to_cleanup: Vec<String> = Vec::new();
@@ -3933,6 +3943,8 @@ mod tests {
                 identities: vec![],
                 orcid_id: None,
                 name: None,
+                is_admin: false,
+                acls: vec![],
             })
             .await
             .unwrap();
@@ -4135,6 +4147,8 @@ mod tests {
                 identities: vec![],
                 orcid_id: None,
                 name: None,
+                is_admin: false,
+                acls: vec![],
             })
             .await
             .unwrap();
@@ -5014,5 +5028,163 @@ mod tests {
             .delete_many(doc! { "_id": { "$in": &ids } })
             .await
             .unwrap();
+    }
+
+    #[actix_rt::test]
+    async fn test_babamul_admin_manages_user_access() {
+        load_dotenv();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+        let admin = TestUser::create(&database, &auth_app_data).await;
+        let user = TestUser::create(&database, &auth_app_data).await;
+        let users: mongodb::Collection<BabamulUser> = database.collection("babamul_users");
+        users
+            .update_one(
+                doc! { "_id": &admin.user.id },
+                doc! { "$set": { "is_admin": true } },
+            )
+            .await
+            .unwrap();
+
+        let app = test::init_service(
+            App::new().service(
+                web::scope("/babamul")
+                    .app_data(web::Data::new(database.clone()))
+                    .app_data(web::Data::new(auth_app_data))
+                    .wrap(from_fn(babamul_auth_middleware))
+                    .service(routes::babamul::get_babamul_profile)
+                    .service(routes::babamul::admin::get_admin_users)
+                    .service(routes::babamul::admin::patch_admin_user),
+            ),
+        )
+        .await;
+
+        let list = |token: &str| {
+            test::TestRequest::get()
+                .uri(&format!(
+                    "/babamul/admin/users?search={}",
+                    user.user.email.replace('+', "%2B")
+                ))
+                .insert_header(("Authorization", format!("Bearer {}", token)))
+                .to_request()
+        };
+        let patch = |token: &str, id: &str, body: serde_json::Value| {
+            test::TestRequest::patch()
+                .uri(&format!("/babamul/admin/users/{}", id))
+                .insert_header(("Authorization", format!("Bearer {}", token)))
+                .set_json(body)
+                .to_request()
+        };
+
+        let resp = test::call_service(&app, list(&user.token)).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let resp = test::call_service(
+            &app,
+            patch(
+                &user.token,
+                &user.user.id,
+                serde_json::json!({ "is_admin": true }),
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        let resp = test::call_service(&app, list(&admin.token)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = read_json_response(resp).await;
+        assert_eq!(body["data"]["total"], 1);
+        assert_eq!(body["data"]["users"][0]["id"], user.user.id.as_str());
+        assert_eq!(body["data"]["users"][0]["is_admin"], false);
+        assert_eq!(
+            body["data"]["available_acls"],
+            serde_json::json!(["winter", "ztf_partnership", "ztf_caltech"])
+        );
+
+        let resp = test::call_service(
+            &app,
+            patch(
+                &admin.token,
+                &user.user.id,
+                serde_json::json!({ "is_admin": true, "acls": ["ztf_caltech", "winter", "ztf_partnership", "winter"] }),
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = read_json_response(resp).await;
+        assert_eq!(body["data"]["is_admin"], true);
+        assert_eq!(
+            body["data"]["acls"],
+            serde_json::json!(["winter", "ztf_partnership", "ztf_caltech"])
+        );
+
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri("/babamul/profile")
+                .insert_header(("Authorization", format!("Bearer {}", user.token)))
+                .to_request(),
+        )
+        .await;
+        let body = read_json_response(resp).await;
+        assert_eq!(body["data"]["is_admin"], true);
+        assert_eq!(
+            body["data"]["acls"],
+            serde_json::json!(["winter", "ztf_partnership", "ztf_caltech"])
+        );
+
+        let resp = test::call_service(
+            &app,
+            patch(
+                &admin.token,
+                &admin.user.id,
+                serde_json::json!({ "is_admin": false }),
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        let resp = test::call_service(
+            &app,
+            patch(
+                &admin.token,
+                &user.user.id,
+                serde_json::json!({ "acls": ["nope"] }),
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        let resp = test::call_service(
+            &app,
+            patch(
+                &admin.token,
+                &user.user.id,
+                serde_json::json!({ "acls": ["ztf_caltech"] }),
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        let resp = test::call_service(
+            &app,
+            patch(&admin.token, "missing", serde_json::json!({ "acls": [] })),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        let stored = users
+            .find_one(doc! { "_id": &user.user.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(stored.is_admin);
+        assert_eq!(
+            stored.acls,
+            vec![
+                routes::babamul::BabamulAcl::Winter,
+                routes::babamul::BabamulAcl::ZtfPartnership,
+                routes::babamul::BabamulAcl::ZtfCaltech
+            ]
+        );
     }
 }
