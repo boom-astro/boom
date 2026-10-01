@@ -1263,14 +1263,6 @@ pub struct AppConfig {
     #[serde(default)]
     pub posthog: PostHogConfig,
     pub kafka: KafkaConfig,
-    /// Archival catalogs this deployment should hold, as kebab-case slugs.
-    ///
-    /// Desired state, not actual: nothing converges automatically. See
-    /// `docs/catalogs.md`.
-    ///
-    /// Settable as `BOOM_CATALOGS`, comma-separated.
-    #[serde(default, deserialize_with = "comma_separated")]
-    pub catalogs: Vec<String>,
     #[serde(default, deserialize_with = "deserialize_crossmatch")]
     pub crossmatch: HashMap<Survey, Vec<CatalogXmatchConfig>>,
     #[serde(default)]
@@ -1573,20 +1565,6 @@ mod tests {
         assert_eq!(
             conf.get::<AdminEmails>("babamul").unwrap().admin_emails,
             Vec::<String>::new()
-        );
-    }
-
-    #[test]
-    fn the_catalog_inventory_can_be_set_as_a_comma_separated_env_var() {
-        let conf = config_with_env(&[("BOOM_CATALOGS", "2mass,ned-lvs")]);
-        #[derive(Deserialize)]
-        struct Root {
-            #[serde(default, deserialize_with = "comma_separated")]
-            catalogs: Vec<String>,
-        }
-        assert_eq!(
-            conf.try_deserialize::<Root>().unwrap().catalogs,
-            vec!["2mass", "ned-lvs"]
         );
     }
 

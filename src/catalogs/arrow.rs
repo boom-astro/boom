@@ -1,10 +1,14 @@
-//! Columnar catalogs, read a record batch at a time.
+//! Reading catalog data from parquet, through Arrow.
 //!
-//! Every catalog that is not plain text arrives here as parquet, because that
-//! is the one columnar format worth teaching Rust to read. Awkward source
-//! formats are converted on the Python side, where the library that reads them
-//! already lives: `astropy` turns a FITS table into parquet, `lsdb` hands us
-//! parquet directly. See `boompy/README.md`.
+//! Holds the [`FromRecordBatch`] trait a catalog's record type implements, and
+//! the typed column accessors it is built from: each one takes a record batch
+//! and a column name and hands back a vector of optional values, coercing
+//! across the widths and encodings the archives actually ship.
+//!
+//! Parquet is the only columnar format read here. Awkward source formats are
+//! converted on the Python side, where the library that reads them already
+//! lives: `astropy` turns a FITS table into parquet, `lsdb` hands us parquet
+//! directly. See `boompy/README.md`.
 //!
 //! The alternative -- a format engine in Rust per source format -- meant a
 //! dataframe engine and a C library linked into every BOOM binary to do work

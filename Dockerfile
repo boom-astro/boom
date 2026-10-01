@@ -1,14 +1,17 @@
 ARG KAFKA_VERSION=4.3.1
 ARG SCALA_VERSION=2.13
+ARG UV_VERSION=0.10.0
+
+# A stage of its own because `COPY --from` does not expand build args, and the
+# version belongs in one place. Both the dev and runtime stages copy uv out of
+# here: the task worker shells out to boompy for catalog sourcing, under
+# cargo-watch in dev exactly as from the release binary in prod.
+FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
 
 FROM rust:slim-trixie AS base
 
 ARG KAFKA_VERSION
 ARG SCALA_VERSION
-# Installed here rather than only in the runtime stage so the dev image has it
-# too: the task worker shells out to boompy for catalog sourcing, and it runs
-# under cargo-watch in dev exactly as it does from the release binary in prod.
-ARG UV_VERSION=0.10.0
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
@@ -20,8 +23,7 @@ RUN apt-get update && \
     ln -s /opt/kafka_${SCALA_VERSION}-${KAFKA_VERSION} /opt/kafka && \
     rm -f /tmp/kafka.tgz
 
-RUN curl -LsSf https://astral.sh/uv/${UV_VERSION}/install.sh | \
-    env UV_INSTALL_DIR=/usr/local/bin UV_UNMANAGED_INSTALL=1 sh
+COPY --from=uv /uv /uvx /usr/local/bin/
 
 ENV PATH="/opt/kafka/bin:${PATH}"
 ENV LIBCLANG_PATH=/usr/lib/llvm-19/lib
@@ -83,8 +85,6 @@ FROM debian:trixie-slim AS app
 ARG KAFKA_VERSION=4.3.1
 ARG SCALA_VERSION=2.13
 
-ARG UV_VERSION=0.10.0
-
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     ca-certificates curl bash libsasl2-2 default-jre-headless libcfitsio10t64 && \
@@ -93,8 +93,7 @@ RUN apt-get update && \
 # boompy fetches archival catalogs -- see boompy/README.md. uv manages both the
 # interpreter and the dependencies, so there is no system Python to keep in step
 # with the lockfile.
-RUN curl -LsSf https://astral.sh/uv/${UV_VERSION}/install.sh | \
-    env UV_INSTALL_DIR=/usr/local/bin UV_UNMANAGED_INSTALL=1 sh
+COPY --from=uv /uv /uvx /usr/local/bin/
 
 ENV ORT_DYLIB_PATH=/opt/ort/libonnxruntime.so
 ENV LD_LIBRARY_PATH=/opt/ort

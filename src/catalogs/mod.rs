@@ -359,9 +359,6 @@ pub fn declared(config: &crate::conf::AppConfig) -> Vec<String> {
             None => push(name.to_string()),
         }
     }
-    for id in &config.catalogs {
-        push(id.clone());
-    }
     declared
 }
 

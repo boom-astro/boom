@@ -3,9 +3,7 @@ name: boom
 volumes:
   mongodb:
   valkey:
-  # Staging area for catalog chunks. A named volume rather than the container's
-  # writable layer because a chunk can be a few hundred megabytes, and because
-  # a half-downloaded chunk should survive the task worker being replaced.
+  # Staging area for catalog chunks
   catalog_data:
   kafka_data:
   prometheus_data:

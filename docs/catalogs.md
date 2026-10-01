@@ -9,19 +9,12 @@ section.
 These are defined for each catalog and for each survey, so ZTF might
 cross-match against NED differently from how LSST cross-matches against NED.
 
-Which catalogs an instance should hold is derived from the ones it actually
-crossmatches against — the collection names under `crossmatch` — so there is one
-place to declare a catalog rather than two lists to keep in step. The optional
-`catalogs:` key adds any held for direct querying without being a crossmatch
-target, as kebab-case slugs:
-
-```yaml
-catalogs: [gaia-dr3, 2mass] # BOOM_CATALOGS, comma-separated
-```
-
-If a declared catalog does not exist, a warning will be shown on the admin
-page, and there will be a button to kick off and monitor an ingestion job
-within the [task system](./task-system.md).
+Which catalogs an instance holds is not declared in config at all. The set BOOM
+can build lives in the code, the ones the pipeline queries are the collection
+names under `crossmatch`, and the ones actually ingested are recorded in
+`catalog_state`. A catalog that is missing is shown as such on the admin page,
+with a button to kick off and monitor an ingestion job within the
+[task system](./task-system.md).
 
 Every name under `crossmatch` must be either a catalog BOOM can build, a
 watchlist, or listed in `WITHOUT_DEFINITIONS` in `src/catalogs/mod.rs` with the
