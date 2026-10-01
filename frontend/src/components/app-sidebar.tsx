@@ -9,7 +9,7 @@ import {
   IconPackage,
   IconNotebook,
   IconBook,
-  IconSettings,
+  IconShieldLock,
 } from "@tabler/icons-react"
 
 import useAppStore from "@/lib/store"
@@ -83,18 +83,18 @@ const data = {
 }
 
 export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
-  const profile = useAppStore((s) => s.profile)
+  const isAdmin = useAppStore((s) => s.profile?.is_admin === true)
   // Only polled for admins; for anyone else the hook is inert.
-  const issues = useCatalogIssues(!!profile?.is_admin)
+  const issues = useCatalogIssues(isAdmin)
   // Shown only to admins, but the page and every route behind it are enforced
   // server-side -- this just avoids offering a link that would 403.
-  const navMain = profile?.is_admin
+  const navMain = isAdmin
     ? [
         ...data.navMain,
         {
           title: "Admin",
           url: "/admin",
-          icon: IconSettings,
+          icon: IconShieldLock,
           badge: issues.count,
           badgeLabel: issues.label,
         },

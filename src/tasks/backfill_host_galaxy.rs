@@ -12,6 +12,13 @@
 //!
 //! Ported from the `backfill_host_galaxy` binary (#566), so it runs through the
 //! task system: recorded in the ledger, cancellable, with its logs kept.
+//!
+//! Records are read as raw documents rather than deserialized into a typed
+//! struct, because a collection this old contains records whose `coordinates`
+//! or `cross_matches` do not have the shape the current code expects. Typed,
+//! one of those ends the whole run on a deserialization error; here it is
+//! counted, named in the log, and left without a `host_galaxy`. That tolerance
+//! comes from #696, which fixed it in the binary this replaced.
 
 use super::context::TaskContext;
 use super::ledger::{MutationTarget, Operation};
@@ -19,11 +26,10 @@ use crate::utils::{
     db::CURSOR_BATCH_SIZE,
     enums::Survey,
     host::{self, HostGalaxyConfig},
-    spatial::Coordinates,
 };
 use futures::TryStreamExt;
 use mongodb::{
-    bson::{doc, to_bson, Document},
+    bson::{doc, to_bson, Bson, Document},
     options::{UpdateOneModel, WriteModel},
     Namespace,
 };
@@ -82,13 +88,59 @@ impl BackfillHostGalaxyParams {
     }
 }
 
-#[derive(Deserialize)]
-struct AuxRecord {
-    #[serde(rename = "_id")]
-    object_id: String,
-    coordinates: Coordinates,
-    #[serde(default)]
-    cross_matches: HashMap<String, Vec<Document>>,
+/// `coordinates.radec_geojson.coordinates` is `[ra - 180, dec]`.
+///
+/// `None` for a record whose position is missing, the wrong shape, or not
+/// finite, which is a record this task leaves alone rather than one that ends
+/// the run.
+fn position(record: &Document) -> Option<(f64, f64)> {
+    let point = record
+        .get_document("coordinates")
+        .ok()?
+        .get_document("radec_geojson")
+        .ok()?
+        .get_array("coordinates")
+        .ok()?;
+    let [ra, dec] = point.as_slice() else {
+        return None;
+    };
+    let (ra, dec) = (ra.as_f64()? + 180.0, dec.as_f64()?);
+    (ra.is_finite() && dec.is_finite()).then_some((ra, dec))
+}
+
+/// The galaxy catalogs' rows off a raw `cross_matches`, or `None` if the field
+/// is not the shape association expects.
+///
+/// An absent `cross_matches` is an empty map rather than a rejection: a record
+/// that has never been crossmatched has no host to find, and that is a fact
+/// about the record, not a defect in it.
+fn galaxy_matches(
+    cross_matches: Option<Bson>,
+    catalogs: &[&str],
+) -> Option<HashMap<String, Vec<Document>>> {
+    let mut cross_matches = match cross_matches {
+        None => return Some(HashMap::new()),
+        Some(Bson::Document(cross_matches)) => cross_matches,
+        Some(_) => return None,
+    };
+    let mut matches = HashMap::new();
+    for catalog in catalogs {
+        let Some(rows) = cross_matches.remove(*catalog) else {
+            continue;
+        };
+        let Bson::Array(rows) = rows else {
+            return None;
+        };
+        let rows = rows
+            .into_iter()
+            .map(|row| match row {
+                Bson::Document(row) => Some(row),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()?;
+        matches.insert(catalog.to_string(), rows);
+    }
+    Some(matches)
 }
 
 fn failed(e: impl std::fmt::Display) -> super::TaskError {
@@ -133,38 +185,67 @@ async fn probe_catalogs(
 /// Associate and write one worker's share of the stream.
 async fn worker(
     ctx: &TaskContext,
-    rx: async_channel::Receiver<AuxRecord>,
+    rx: async_channel::Receiver<Document>,
     client: mongodb::Client,
     aux_ns: Namespace,
     config: HostGalaxyConfig,
     batch_size: usize,
     dry_run: bool,
-) -> Result<u64, super::TaskError> {
+) -> Result<(u64, u64), super::TaskError> {
+    let catalogs = [config.ned_catalog.as_str(), config.ls_dr10_catalog.as_str()];
     let mut batch: Vec<WriteModel> = Vec::with_capacity(batch_size);
     let mut written = 0u64;
+    let mut unreadable = 0u64;
+    // Named in the log, but only the first few: a systematic problem would
+    // otherwise write one line per record into the run's logs.
+    let mut say = |ctx: &TaskContext, unreadable: u64, msg: String| {
+        if unreadable <= 5 {
+            ctx.warn(msg);
+        }
+    };
 
-    while let Ok(record) = rx.recv().await {
-        let (ra, dec) = record.coordinates.get_radec();
+    while let Ok(mut record) = rx.recv().await {
+        let Some(object_id) = record.remove("_id") else {
+            continue;
+        };
+        let Some((ra, dec)) = position(&record) else {
+            unreadable += 1;
+            say(
+                ctx,
+                unreadable,
+                format!("{object_id}: unreadable coordinates, left without host_galaxy"),
+            );
+            continue;
+        };
+        let Some(matches) = galaxy_matches(record.remove("cross_matches"), &catalogs) else {
+            unreadable += 1;
+            say(
+                ctx,
+                unreadable,
+                format!("{object_id}: unreadable cross_matches, left without host_galaxy"),
+            );
+            continue;
+        };
         // `enabled` is checked once up front, so this is always `Some`.
-        let Some(association) =
-            host::associate_from_xmatches(ra, dec, &record.cross_matches, &config)
-        else {
+        let Some(association) = host::associate_from_xmatches(ra, dec, &matches, &config) else {
             continue;
         };
         let value = match to_bson(&association) {
             Ok(v) => v,
             Err(e) => {
-                ctx.warn(format!(
-                    "{}: failed to encode the association, skipping: {e}",
-                    record.object_id
-                ));
+                unreadable += 1;
+                say(
+                    ctx,
+                    unreadable,
+                    format!("{object_id}: failed to encode the association, skipping: {e}"),
+                );
                 continue;
             }
         };
         batch.push(WriteModel::UpdateOne(
             UpdateOneModel::builder()
                 .namespace(aux_ns.clone())
-                .filter(doc! { "_id": record.object_id })
+                .filter(doc! { "_id": object_id })
                 .update(doc! { "$set": { "host_galaxy": value } })
                 .build(),
         ));
@@ -205,7 +286,7 @@ async fn worker(
         }
         written += n;
     }
-    Ok(written)
+    Ok((written, unreadable))
 }
 
 pub async fn run(
@@ -230,7 +311,7 @@ pub async fn run(
     let probe: mongodb::Collection<Document> = db.collection(&aux_name);
     probe_catalogs(ctx, &probe, &config).await;
 
-    let aux_collection: mongodb::Collection<AuxRecord> = db.collection(&aux_name);
+    let aux_collection: mongodb::Collection<Document> = db.collection(&aux_name);
     let estimated = aux_collection.estimated_document_count().await.unwrap_or(0);
     ctx.info(format!(
         "associating hosts on {aux_name}: ~{estimated} record(s), {} worker(s){}",
@@ -247,7 +328,7 @@ pub async fn run(
         coll: aux_name.clone(),
     };
     let queue_capacity = params.processes * params.batch_size * QUEUE_MULTIPLIER;
-    let (tx, rx) = async_channel::bounded::<AuxRecord>(queue_capacity);
+    let (tx, rx) = async_channel::bounded::<Document>(queue_capacity);
 
     // buffer_unordered over borrowed futures rather than tokio::spawn: the
     // workers borrow `ctx` to log and to check cancellation.
@@ -264,6 +345,11 @@ pub async fn run(
     }));
     drop(rx);
 
+    let mut projection = doc! { "_id": 1, "coordinates.radec_geojson.coordinates": 1 };
+    for catalog in [&config.ned_catalog, &config.ls_dr10_catalog] {
+        projection.insert(format!("cross_matches.{catalog}"), 1);
+    }
+
     let find_filter = if params.skip_existing {
         doc! { "host_galaxy": { "$exists": false } }
     } else {
@@ -273,7 +359,10 @@ pub async fn run(
     let feed = async {
         let mut cursor = aux_collection
             .find(find_filter)
-            .projection(doc! { "_id": 1, "coordinates": 1, "cross_matches": 1 })
+            // Only the galaxy catalogs' rows: `cross_matches` as a whole is
+            // every catalog the pipeline queries, which is far more BSON than
+            // association reads.
+            .projection(projection)
             .batch_size(CURSOR_BATCH_SIZE)
             .no_cursor_timeout(true)
             .await
@@ -299,8 +388,15 @@ pub async fn run(
         Ok::<u64, super::TaskError>(fed)
     };
 
-    let (fed, written) = futures::try_join!(feed, workers)?;
-    let total: u64 = written.iter().sum();
+    let (fed, per_worker) = futures::try_join!(feed, workers)?;
+    let total: u64 = per_worker.iter().map(|(written, _)| written).sum();
+    let unreadable: u64 = per_worker.iter().map(|(_, unreadable)| unreadable).sum();
+    if unreadable > 0 {
+        ctx.warn(format!(
+            "{unreadable} record(s) were left without a host_galaxy because their coordinates \
+             or cross_matches could not be read"
+        ));
+    }
 
     if !params.dry_run && total > 0 {
         ctx.record_mutation(
@@ -317,6 +413,7 @@ pub async fn run(
                 "field": "host_galaxy",
                 "scanned": fed as i64,
                 "written": total as i64,
+                "unreadable": unreadable as i64,
                 "skip_existing": params.skip_existing,
             },
         )
@@ -334,6 +431,7 @@ pub async fn run(
         "survey": params.survey.to_string(),
         "scanned": fed,
         "written": total,
+        "unreadable": unreadable,
         "skip_existing": params.skip_existing,
         "dry_run": params.dry_run,
     }))

@@ -89,6 +89,7 @@ impl Modify for BabamulSecurityAddon {
         routes::queries::find::post_find_query,
         routes::queries::cone_search::post_cone_search_query,
         routes::surveys::cutouts::get_cutouts,
+        routes::surveys::tracks::get_track,
         routes::queries::pipeline::post_pipeline_query
     ),
     security(
@@ -118,6 +119,8 @@ pub struct ApiDoc;
         routes::babamul::oauth::post_oauth_verify,
         routes::babamul::get_babamul_profile,
         routes::babamul::patch_babamul_profile,
+        routes::babamul::admin::get_admin_users,
+        routes::babamul::admin::patch_admin_user,
         routes::babamul::post_kafka_credentials,
         routes::babamul::get_kafka_credentials,
         routes::babamul::surveys::schemas::get_babamul_schema,
@@ -127,6 +130,7 @@ pub struct ApiDoc;
         routes::babamul::surveys::objects::get_object_xmatches,
         routes::babamul::surveys::objects::get_objects_xmatches,
         routes::babamul::surveys::cutouts::get_cutouts,
+        routes::babamul::surveys::tracks::get_track,
         routes::babamul::surveys::alerts::get_alerts,
         routes::babamul::surveys::alerts::cone_search_alerts,
         routes::babamul::stats::collections::get_collection_stats,

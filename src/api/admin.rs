@@ -103,14 +103,20 @@ pub fn require_admin(
     })
 }
 
-/// Reconcile `is_admin` on every Babamul account against the configured list.
+/// Seed `is_admin` on the Babamul accounts named in the configured list.
 ///
-/// Runs at API startup. Deliberately two-way: accounts on the list are granted,
-/// accounts not on it are revoked. A one-way grant would mean removing someone
-/// from the config left them an admin until somebody noticed, which is the
-/// failure mode that matters here.
+/// Runs at API startup, and only ever **grants**. This list exists to solve
+/// the bootstrap problem: admin is granted through
+/// `PATCH /babamul/admin/users/{id}`, which only an admin may call, so a fresh
+/// deployment with no admins has no way to appoint its first one.
+///
+/// It was two-way once -- anyone off the list was revoked, so config was the
+/// whole truth and removing a line was how you removed an admin. That cannot
+/// survive alongside granting through the API: every restart would silently
+/// un-admin everyone appointed since the last one. Revocation belongs with the
+/// grant, in the API.
 #[tracing::instrument(skip(db, admin_emails))]
-pub async fn reconcile_babamul_admins(
+pub async fn seed_babamul_admins(
     db: &mongodb::Database,
     admin_emails: &[String],
 ) -> Result<(), mongodb::error::Error> {
@@ -135,25 +141,19 @@ pub async fn reconcile_babamul_admins(
             doc! { "$set": { "is_admin": true } },
         )
         .await?;
-    let revoked = collection
-        .update_many(
-            doc! { "email": { "$nin": &matcher }, "is_admin": true },
-            doc! { "$set": { "is_admin": false } },
-        )
-        .await?;
 
-    if granted.modified_count > 0 || revoked.modified_count > 0 {
+    if granted.modified_count > 0 {
         tracing::info!(
-            "babamul admins reconciled: {} granted, {} revoked ({} configured)",
+            "babamul admins seeded: {} granted ({} configured)",
             granted.modified_count,
-            revoked.modified_count,
             emails.len()
         );
     }
-    // Worth saying out loud: with no admins configured, nobody can reach the
-    // admin page, and the symptom is a 403 that looks like a bug.
+    // Worth saying out loud on a deployment that has no admins yet: with none
+    // configured and none granted, nobody can reach the admin page, and the
+    // symptom is a 403 that looks like a bug.
     if emails.is_empty() {
-        tracing::warn!("no babamul.admin_emails configured; the admin page is closed to everyone");
+        tracing::debug!("no babamul.admin_emails configured; admins can only come from the API");
     }
     Ok(())
 }
@@ -191,6 +191,7 @@ mod tests {
             orcid_id: None,
             name: None,
             is_admin,
+            acls: Vec::new(),
         }
     }
 

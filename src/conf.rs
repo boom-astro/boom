@@ -1119,6 +1119,23 @@ where
     Ok(value)
 }
 
+fn default_reference_window_days() -> u32 {
+    1
+}
+
+fn deserialize_reference_window_days<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = u32::deserialize(deserializer)?;
+    if value == 0 {
+        return Err(serde::de::Error::custom(
+            "reference_window_days must be at least 1",
+        ));
+    }
+    Ok(value)
+}
+
 #[derive(Deserialize, Debug, Clone)]
 pub struct FilterWorkerConfig {
     pub n_workers: usize,
@@ -1139,6 +1156,13 @@ pub struct FilterWorkerConfig {
     /// if either is missing, filters cannot be activated.
     #[serde(default)]
     pub reference_night: Option<NaiveDate>,
+    /// Number of consecutive nights, ending on `reference_night`, used to
+    /// gauge the filter. Raise it for surveys with few alerts per night.
+    #[serde(
+        default = "default_reference_window_days",
+        deserialize_with = "deserialize_reference_window_days"
+    )]
+    pub reference_window_days: u32,
 }
 
 #[derive(Deserialize, Debug, Clone)]

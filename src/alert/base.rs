@@ -81,7 +81,6 @@ pub struct LightcurveJdOnly {
     pub jd: f64,
 }
 
-#[instrument(skip_all, err)]
 fn decode_variable<R: Read>(reader: &mut R) -> Result<u64, SchemaRegistryError> {
     let mut i = 0u64;
     let mut buf = [0u8; 1];
@@ -104,8 +103,7 @@ fn decode_variable<R: Read>(reader: &mut R) -> Result<u64, SchemaRegistryError> 
     Ok(i)
 }
 
-#[instrument(skip_all, err)]
-pub fn zag_i64<R: Read>(reader: &mut R) -> Result<i64, SchemaRegistryError> {
+fn decode_long<R: Read>(reader: &mut R) -> Result<i64, SchemaRegistryError> {
     let z = decode_variable(reader)?;
     if z & 0x1 == 0 {
         Ok((z >> 1) as i64)
@@ -114,13 +112,6 @@ pub fn zag_i64<R: Read>(reader: &mut R) -> Result<i64, SchemaRegistryError> {
     }
 }
 
-#[instrument(skip_all, err)]
-fn decode_long<R: Read>(reader: &mut R) -> Result<i64, SchemaRegistryError> {
-    Ok(zag_i64(reader)?)
-}
-
-/// Read a length-prefixed byte array, returning its range in the underlying slice.
-#[instrument(skip_all, err)]
 fn read_byte_range(
     cursor: &mut std::io::Cursor<&[u8]>,
 ) -> Result<std::ops::Range<usize>, SchemaRegistryError> {

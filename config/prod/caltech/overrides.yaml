@@ -16,7 +16,6 @@ workers:
       n_workers: 8
     enrichment:
       n_workers: 12
-      batch_size: 1000
     filter:
       n_workers: 4
   lsst:

@@ -1339,6 +1339,7 @@ dependencies = [
  "ort",
  "parquet",
  "rand 0.10.1",
+ "rayon",
  "rdkafka",
  "redis",
  "regex",

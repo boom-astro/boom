@@ -70,6 +70,7 @@ RUN --mount=type=cache,target=/app/target,sharing=locked \
        target/release/kafka_producer \
        target/release/api \
        target/release/task_worker \
+       target/release/find_tracklets \
        /app/bin/
 
 FROM builder AS dev

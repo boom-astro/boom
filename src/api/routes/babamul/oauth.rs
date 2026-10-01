@@ -635,6 +635,7 @@ fn new_social_user(
         // user can change or clear it via PATCH /babamul/profile.
         name,
         is_admin: false,
+        acls: vec![],
     })
 }
 

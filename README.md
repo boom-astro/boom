@@ -403,7 +403,7 @@ cargo run --release --bin scheduler ztf
 
 ### Using Docker
 
-In production, BOOM runs the default services alongside a set of dedicated services defined in `docker-compose.yaml` under the `prod` profile: `api`, `consumer-ztf`, `consumer-lsst`, `scheduler-ztf`, `scheduler-lsst`, and `frontend`. The Rust services each start their binary automatically at container startup; `frontend` builds the web app and serves it with nginx.
+In production, BOOM runs the default services alongside a set of dedicated services defined in `docker-compose.yaml` under the `prod` profile: `api`, `consumer-ztf-public`, `consumer-ztf-partnership`, `consumer-ztf-caltech`, `consumer-lsst`, `consumer-winter`, `scheduler-ztf`, `scheduler-lsst`, `scheduler-winter`, and `frontend`. The Rust services each start their binary automatically at container startup; `frontend` builds the web app and serves it with nginx.
 
 Bring up the full prod stack with:
 
@@ -414,7 +414,7 @@ docker compose --profile prod up -d
 Or start individual services:
 
 ```bash
-docker compose --profile prod up -d consumer-ztf scheduler-ztf
+docker compose --profile prod up -d consumer-ztf-public scheduler-ztf
 ```
 
 One-shot operational work — catalog ingests, migrations, reprocessing — runs through the [task system](docs/task-system.md) rather than as a binary. Start one from the admin page, or submit it to the API:

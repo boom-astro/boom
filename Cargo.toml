@@ -42,6 +42,7 @@ opentelemetry-otlp = { version = "0.31.0", features = ["grpc-tonic", "metrics", 
 opentelemetry_sdk = { version = "0.31.0", features = ["rt-tokio"] }
 parquet = { version = "59.3.0", default-features = false, features = ["arrow", "snap", "zstd", "brotli", "flate2", "flate2-rust_backend", "lz4"] }
 rand = "0.10.1"
+rayon = "1.10"
 rdkafka = { version = "0.39.0", features = ["gssapi", "ssl-vendored", "tracing", "sasl", "zstd"] }
 redis = { version = "1.2.1", features = ["tokio-comp"] }
 regex = "1.12.3"

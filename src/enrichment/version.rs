@@ -92,6 +92,15 @@ pub struct ModelFile {
 /// Every model the ZTF enrichment worker runs.
 pub const ZTF_MODELS: &[ModelFile] = &[
     ModelFile {
+        // Fusion model from #517. Declared here as well as loaded in
+        // models/mod.rs: a model the loader uses but this list omits is
+        // invisible to the fingerprint, so changing it would leave every old
+        // alert looking current.
+        field: "cider",
+        version: "plus_embedding",
+        path: "data/models/cider_fusion_plus_embedding.onnx",
+    },
+    ModelFile {
         field: "acai_h",
         version: "d1_dnn_20201130",
         path: "data/models/acai_h.d1_dnn_20201130.onnx",
@@ -148,6 +157,10 @@ pub const DERIVATIONS: &[(&str, u32)] = &[
     // parameters change: the association is rewritten in place, so a stale
     // `hosted` looks exactly like a current one.
     ("host_association", 1),
+    // applecider_fusion / applecider_outputs / fusion_embedding: BOOM's own
+    // postprocessing of the fusion model's alpha output, which is a derivation
+    // on top of the model rather than the model itself.
+    ("applecider_postprocess", 1),
 ];
 
 /// A model as recorded on a set.

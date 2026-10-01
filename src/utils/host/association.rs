@@ -1,12 +1,14 @@
 //! The stored form of a host association: the fields a filter cuts on, at the
 //! top level of each candidate rather than nested behind `galaxy`.
 
+use apache_avro_macros::serdavro;
 use serde::{Deserialize, Serialize};
 
 use super::associate::AssociationResult;
 
 const ARCSEC_PER_RADIAN: f64 = 206_264.806_247_096_36;
 
+#[serdavro]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StoredHostCandidate {
     pub objname: Option<String>,
@@ -42,6 +44,7 @@ pub struct StoredHostCandidate {
 }
 
 /// Host association for one object, as stored under `aux.host_galaxy`.
+#[serdavro]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HostGalaxyAssociation {
     /// Duplicate of `candidates[0]`, so consumers need not index the array.

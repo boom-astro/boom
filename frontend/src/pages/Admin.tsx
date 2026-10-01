@@ -27,6 +27,7 @@ import {
   type TaskRun,
   type TaskType,
 } from "@/lib/adminApi";
+import { AdminUsers } from "@/components/admin-users";
 import { TaskForm } from "@/components/task-form";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -901,6 +902,8 @@ export default function Admin() {
           This page is for administrative tasks like managing users, ingesting new catalogs, and
           kicking off reprocessing.
         </p>
+
+        <AdminUsers />
 
         {!loaded ? (
           <p className="text-sm text-muted-foreground">Loading…</p>

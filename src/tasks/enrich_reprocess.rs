@@ -29,7 +29,8 @@ use super::ledger::{MutationTarget, Operation};
 use crate::conf::AppConfig;
 use crate::enrichment::{
     models::{SharedModelPool, SharedModels},
-    EnrichmentWorker, EnrichmentWorkerError, LsstEnrichmentWorker, ZtfEnrichmentWorker,
+    DecamEnrichmentWorker, EnrichmentWorker, EnrichmentWorkerError, LsstEnrichmentWorker,
+    WinterEnrichmentWorker, ZtfEnrichmentWorker,
 };
 use crate::utils::{
     enums::Survey,
@@ -122,14 +123,6 @@ const MAX_WORKERS: usize = 32;
 
 impl EnrichReprocessParams {
     pub fn validate_params(&self) -> Result<(), String> {
-        // Only these two have enrichment workers; the others would fail after
-        // the queue had already been filled.
-        if !matches!(self.survey, Survey::Ztf | Survey::Lsst) {
-            return Err(format!(
-                "enrichment reprocessing is not supported for {}",
-                self.survey
-            ));
-        }
         if let Some(n) = self.n_workers {
             if n == 0 || n > MAX_WORKERS {
                 return Err(format!("n_workers must be between 1 and {MAX_WORKERS}"));
@@ -319,21 +312,15 @@ pub async fn run(
         let handle = thread::spawn(move || {
             let tid = std::thread::current().id();
             span!(Level::INFO, "enrich-only worker", ?tid, ?survey).in_scope(|| {
-                let result = match survey {
-                    Survey::Ztf => run_enrich_only::<ZtfEnrichmentWorker>(
-                        receiver,
-                        &config_path,
-                        shared_models,
-                        queue,
-                    ),
-                    Survey::Lsst => run_enrich_only::<LsstEnrichmentWorker>(
-                        receiver,
-                        &config_path,
-                        shared_models,
-                        queue,
-                    ),
-                    _ => unreachable!("survey validated at submit time"),
+                // Every survey has an enrichment worker since #704, so this
+                // is exhaustive rather than guarded at submit time.
+                let run_worker = match survey {
+                    Survey::Ztf => run_enrich_only::<ZtfEnrichmentWorker>,
+                    Survey::Lsst => run_enrich_only::<LsstEnrichmentWorker>,
+                    Survey::Decam => run_enrich_only::<DecamEnrichmentWorker>,
+                    Survey::Winter => run_enrich_only::<WinterEnrichmentWorker>,
                 };
+                let result = run_worker(receiver, &config_path, shared_models, queue);
                 result.unwrap_or_else(as_error!("enrichment worker failed"));
             })
         });
@@ -526,17 +513,18 @@ mod tests {
     }
 
     #[test]
-    fn only_surveys_with_enrichment_workers_are_accepted() {
-        // Rejected at submit rather than after the queue is already full.
-        assert!(params(Survey::Ztf, Selection::All)
-            .validate_params()
-            .is_ok());
-        assert!(params(Survey::Lsst, Selection::All)
-            .validate_params()
-            .is_ok());
-        assert!(params(Survey::Decam, Selection::All)
-            .validate_params()
-            .is_err());
+    fn every_survey_has_an_enrichment_worker() {
+        // This used to reject DECAM and WINTER, which had no enrichment worker
+        // to reprocess with. #704 gave them one, so the dispatch is exhaustive
+        // and there is nothing left to reject here.
+        for survey in [Survey::Ztf, Survey::Lsst, Survey::Decam, Survey::Winter] {
+            assert!(
+                params(survey.clone(), Selection::All)
+                    .validate_params()
+                    .is_ok(),
+                "{survey} should be accepted"
+            );
+        }
     }
 
     #[test]

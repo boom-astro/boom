@@ -215,6 +215,7 @@ pub async fn build_winter_alerts(
                 ztf: None,
                 lsst: None,
             },
+            host_galaxy: None,
         };
 
         alerts_output.push(alert);
