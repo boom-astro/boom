@@ -392,6 +392,7 @@ export type NightlyStat = {
   lsst?: number;
   decam?: number;
   winter?: number;
+  windows?: Record<string, { start: string; end: string }>;
 };
 
 function optionalAuthHeaders(): HeadersInit {
