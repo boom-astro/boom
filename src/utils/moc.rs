@@ -54,12 +54,12 @@ pub fn moc_from_skymap_bytes(bytes: &[u8], credible_level: f64) -> Result<HpxMoc
 }
 
 /// Underflows below UNIQ 4, which [`parse_3d_skymap`] rejects at load.
-fn uniq_to_order(uniq: u64) -> u8 {
+pub(crate) fn uniq_to_order(uniq: u64) -> u8 {
     debug_assert!(uniq >= 4, "invalid UNIQ index: {uniq} (minimum is 4)");
     ((63 - uniq.leading_zeros()) / 2 - 1) as u8
 }
 
-fn uniq_to_ipix(uniq: u64) -> u64 {
+pub(crate) fn uniq_to_ipix(uniq: u64) -> u64 {
     let order = uniq_to_order(uniq) as u32;
     uniq - (1u64 << (2 * order + 2))
 }

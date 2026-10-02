@@ -265,6 +265,8 @@ impl DecamEnrichmentWorker {
                 .prv_candidates
                 .iter()
                 .map(|p| (p.time, p.snr.filter(|s| !s.is_nan()).map(|s| s < 0.0))),
+            // Every stored forced epoch carries a magnitude, so it is a detection.
+            alert.fp_hists.iter().map(|p| p.time),
             alert.candidate.jd,
             EPISODE_GAP_DAYS,
         );

@@ -10,7 +10,7 @@ const getFieldDescriptions = (survey: Survey): Record<string, ReactNode> => ({
     <>
       <code className="text-chart-2">True</code> if the temporal baseline (last &minus; first
       observation) &gt; 0.01&nbsp;days (~14&nbsp;min).
-      Combines <code>prv_candidates</code> and <code>fp_hists</code> (forced photometry, SNR &ge; 3).
+      Combines <code>prv_candidates</code> and <code>fp_hists</code> (forced photometry, SNR &ge; 5).
     </>
   ),
   ...survey === ZTF ? {
