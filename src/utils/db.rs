@@ -157,6 +157,13 @@ pub async fn initialize_survey_indexes(
     };
     create_index(&alerts_collection, index, false).await?;
 
+    let index = if survey == &Survey::Ztf {
+        doc! { "candidate.jd": -1, "candidate.programid": 1 }
+    } else {
+        doc! { "candidate.jd": -1 }
+    };
+    create_index(&alerts_collection, index, false).await?;
+
     // ZTF joins a moving object's detections by MPC designation, since objectId is
     // positional. Indexes the raw field, which is present on the whole archive.
     if survey == &Survey::Ztf {
@@ -601,33 +608,42 @@ pub async fn join_tasks<T>(
 mod tests {
     use super::*;
 
+    async fn alert_index_keys(survey: &Survey) -> Vec<Document> {
+        let db = crate::conf::get_test_db().await;
+        initialize_survey_indexes(survey, &db).await.unwrap();
+        db.collection::<Document>(&format!("{}_alerts", survey))
+            .list_indexes()
+            .await
+            .unwrap()
+            .map_ok(|i| i.keys)
+            .try_collect()
+            .await
+            .unwrap()
+    }
+
     /// The epoch must follow the region key: a time window is only applied to
     /// index keys while it is the second component.
     #[tokio::test]
     async fn region_index_carries_the_epoch_as_its_second_key() {
-        use crate::conf;
-        use crate::utils::enums::Survey;
-        use futures::TryStreamExt;
-
-        let db = conf::get_test_db().await;
-        initialize_survey_indexes(&Survey::Ztf, &db).await.unwrap();
-
-        let keys: Vec<Document> = db
-            .collection::<Document>("ZTF_alerts")
-            .list_indexes()
-            .await
-            .unwrap()
-            .try_collect::<Vec<_>>()
-            .await
-            .unwrap()
-            .into_iter()
-            .map(|i| i.keys)
-            .collect();
-
+        let keys = alert_index_keys(&Survey::Ztf).await;
         assert!(
             keys.contains(&doc! { "coordinates.hpx": 1, "candidate.jd": 1 }),
             "no hpx/jd index among {keys:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn nightly_counts_have_an_epoch_index() {
+        for (survey, expected) in [
+            (
+                Survey::Ztf,
+                doc! { "candidate.jd": -1, "candidate.programid": 1 },
+            ),
+            (Survey::Decam, doc! { "candidate.jd": -1 }),
+        ] {
+            let keys = alert_index_keys(&survey).await;
+            assert!(keys.contains(&expected), "no {expected} among {keys:?}");
+        }
     }
 
     fn bounds(values: &[i32]) -> Vec<Bson> {
