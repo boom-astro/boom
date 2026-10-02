@@ -56,7 +56,7 @@ tracing-flame = "0.2.0"
 tracing-log = "0.2.0"
 tracing-opentelemetry = "0.32.0"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "registry"]}
-utoipa = { version = "5.5.0", features = ["actix_extras"] }
+utoipa = { version = "5.5.0", features = ["actix_extras", "chrono"] }
 utoipa-scalar = { version = "0.3.0", features = ["actix-web"] }
 url = "2.5"
 uuid = { version = "1.23", features = ["v4"] }

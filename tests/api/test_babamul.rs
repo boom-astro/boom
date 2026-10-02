@@ -5021,6 +5021,16 @@ mod tests {
             let stats = &body["data"][0];
             assert!(stats["decam"].as_u64().unwrap() >= 1, "{token:?}");
             assert_eq!(stats.get("winter").is_some(), sees_winter, "{token:?}");
+            assert_eq!(
+                stats["windows"]["decam"]["start"],
+                serde_json::json!(Survey::Decam.local_noon(&night)),
+                "{token:?}"
+            );
+            assert_eq!(
+                stats["windows"].get("winter").is_some(),
+                sees_winter,
+                "{token:?}"
+            );
 
             let resp =
                 test::call_service(&app, get("/babamul/stats/collections".to_string())).await;

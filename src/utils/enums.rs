@@ -1,5 +1,5 @@
 use apache_avro_macros::serdavro;
-use chrono::{Duration, NaiveDate, NaiveDateTime, NaiveTime, Offset, TimeZone};
+use chrono::{DateTime, Duration, NaiveDate, NaiveDateTime, NaiveTime, Offset, TimeZone, Utc};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -39,11 +39,15 @@ impl Survey {
         }
     }
 
-    pub fn date_to_jd_local_noon(&self, date: &NaiveDate) -> f64 {
+    pub fn local_noon(&self, date: &NaiveDate) -> DateTime<Utc> {
         let tz = self.observatory_timezone();
         let offset = |utc: NaiveDateTime| tz.offset_from_utc_datetime(&utc).fix();
         let noon = date.and_time(NaiveTime::MIN) + Duration::hours(12);
-        flare::Time::from_utc((noon - offset(noon - offset(noon))).and_utc()).to_jd()
+        (noon - offset(noon - offset(noon))).and_utc()
+    }
+
+    pub fn date_to_jd_local_noon(&self, date: &NaiveDate) -> f64 {
+        flare::Time::from_utc(self.local_noon(date)).to_jd()
     }
 
     /// JD window `[start, end)` for the observing night labelled by `date`,
@@ -100,11 +104,8 @@ mod tests {
             (Survey::Decam, (2026, 12, 1), 15),
         ] {
             let date = NaiveDate::from_ymd_opt(y, m, d).unwrap();
-            let expected = flare::Time::new(y, m, d, utc_hour, 0, 0).to_jd();
-            assert!(
-                (survey.date_to_jd_local_noon(&date) - expected).abs() < 1e-9,
-                "{survey} on {date}"
-            );
+            let expected = Utc.with_ymd_and_hms(y, m, d, utc_hour, 0, 0).unwrap();
+            assert_eq!(survey.local_noon(&date), expected, "{survey} on {date}");
         }
     }
 }
