@@ -4944,6 +4944,108 @@ mod tests {
     }
 
     #[actix_rt::test]
+    async fn test_babamul_stats_show_winter_only_with_the_winter_acl() {
+        load_dotenv();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+        let config = AppConfig::from_test_config().unwrap();
+        let plain = TestUser::create(&database, &auth_app_data).await;
+        let winter = TestUser::create(&database, &auth_app_data).await;
+        let admin = TestUser::create(&database, &auth_app_data).await;
+        let users: mongodb::Collection<BabamulUser> = database.collection("babamul_users");
+        for (user, update) in [
+            (&winter, doc! { "acls": ["winter"] }),
+            (&admin, doc! { "is_admin": true }),
+        ] {
+            users
+                .update_one(doc! { "_id": &user.user.id }, doc! { "$set": update })
+                .await
+                .unwrap();
+        }
+
+        let night = chrono::NaiveDate::from_ymd_opt(2018, 1, 1).unwrap()
+            + chrono::Duration::days((uuid::Uuid::new_v4().as_u128() % 2500) as i64);
+        let mut alerts = Vec::new();
+        for survey in [Survey::Decam, Survey::Winter] {
+            let (start_jd, _) = survey.night_jd_window(&night);
+            let id = uuid::Uuid::new_v4().to_string();
+            database
+                .collection::<mongodb::bson::Document>(&format!("{}_alerts", survey))
+                .insert_one(doc! { "_id": &id, "candidate": { "jd": start_jd + 0.25 } })
+                .await
+                .unwrap();
+            alerts.push((survey, id));
+        }
+
+        let app = test::init_service(
+            App::new().service(
+                web::scope("/babamul")
+                    .app_data(web::Data::new(database.clone()))
+                    .app_data(web::Data::new(auth_app_data))
+                    .app_data(web::Data::new(config))
+                    .wrap(from_fn(babamul_auth_middleware))
+                    .service(routes::babamul::stats::get_nightly_stats)
+                    .service(routes::babamul::stats::get_collection_stats),
+            ),
+        )
+        .await;
+
+        let date = night.format("%Y-%m-%d");
+        for (token, sees_winter) in [
+            (None, false),
+            (Some("invalid"), false),
+            (Some(plain.token.as_str()), false),
+            (Some(winter.token.as_str()), true),
+            (Some(admin.token.as_str()), true),
+        ] {
+            let get = |uri: String| {
+                let req = test::TestRequest::get().uri(&uri);
+                match token {
+                    Some(token) => {
+                        req.insert_header(("Authorization", format!("Bearer {}", token)))
+                    }
+                    None => req,
+                }
+                .to_request()
+            };
+
+            let resp = test::call_service(
+                &app,
+                get(format!(
+                    "/babamul/stats/nightly?start_date={date}&end_date={date}"
+                )),
+            )
+            .await;
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body = read_json_response(resp).await;
+            let stats = &body["data"][0];
+            assert!(stats["decam"].as_u64().unwrap() >= 1, "{token:?}");
+            assert_eq!(stats.get("winter").is_some(), sees_winter, "{token:?}");
+
+            let resp =
+                test::call_service(&app, get("/babamul/stats/collections".to_string())).await;
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body = read_json_response(resp).await;
+            let names = body["data"]["collections"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|c| c["name"].as_str().unwrap())
+                .collect::<Vec<_>>();
+            assert!(names.contains(&"DECAM_alerts"), "{token:?}");
+            assert_eq!(names.contains(&"WINTER_alerts"), sees_winter, "{token:?}");
+        }
+
+        for (survey, id) in alerts {
+            database
+                .collection::<mongodb::bson::Document>(&format!("{}_alerts", survey))
+                .delete_one(doc! { "_id": id })
+                .await
+                .unwrap();
+        }
+    }
+
+    #[actix_rt::test]
     async fn test_get_track_keeps_only_public_detections() {
         load_dotenv();
         let database: Database = get_test_db_api().await;
