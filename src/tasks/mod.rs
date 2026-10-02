@@ -55,7 +55,7 @@ pub use context::TaskContext;
 pub use models::{Actor, TaskRun, TaskStatus, Trigger};
 
 use mongodb::bson::doc;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(thiserror::Error, Debug)]
 pub enum TaskError {
@@ -67,6 +67,82 @@ pub enum TaskError {
     UnknownType { id: String, known: String },
     #[error("invalid parameters: {0}")]
     InvalidParams(String),
+}
+
+/// A task type a client may ask for.
+///
+/// An enum at the API boundary, so the schema carries the values a client may
+/// send and an unknown one is refused by deserialization rather than several
+/// layers in. [`TaskRun::task_type`] stays a string: a run outlives the
+/// release that defined its type, and a record of one has to read back and say
+/// what it was even after the type is gone.
+///
+/// Each variant resolves to its module's `TASK_TYPE` rather than repeating the
+/// string, so the two cannot disagree about spelling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskType {
+    CatalogIngest,
+    StreamKowalskiAlerts,
+    CopyCutouts,
+    SsoBaselines,
+    MpcorbIngest,
+    EnrichReprocess,
+    PrepareCatalog,
+    ExportCatalog,
+    LinkTracks,
+    BackfillHostGalaxy,
+    BackfillHpx,
+    RepairPhotometry,
+    ReprocessCrossmatch,
+    MigrateSnr,
+    MigrateFpFlux,
+}
+
+impl TaskType {
+    pub const ALL: [TaskType; 15] = [
+        Self::CatalogIngest,
+        Self::StreamKowalskiAlerts,
+        Self::CopyCutouts,
+        Self::SsoBaselines,
+        Self::MpcorbIngest,
+        Self::EnrichReprocess,
+        Self::PrepareCatalog,
+        Self::ExportCatalog,
+        Self::LinkTracks,
+        Self::BackfillHostGalaxy,
+        Self::BackfillHpx,
+        Self::RepairPhotometry,
+        Self::ReprocessCrossmatch,
+        Self::MigrateSnr,
+        Self::MigrateFpFlux,
+    ];
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::CatalogIngest => catalog_ingest::TASK_TYPE,
+            Self::StreamKowalskiAlerts => stream_kowalski_alerts::TASK_TYPE,
+            Self::CopyCutouts => copy_cutouts::TASK_TYPE,
+            Self::SsoBaselines => sso_baselines::TASK_TYPE,
+            Self::MpcorbIngest => mpcorb_ingest::TASK_TYPE,
+            Self::EnrichReprocess => enrich_reprocess::TASK_TYPE,
+            Self::PrepareCatalog => prepare_catalog::TASK_TYPE,
+            Self::ExportCatalog => export_catalog::TASK_TYPE,
+            Self::LinkTracks => link_tracks::TASK_TYPE,
+            Self::BackfillHostGalaxy => backfill_host_galaxy::TASK_TYPE,
+            Self::BackfillHpx => backfill_hpx::TASK_TYPE,
+            Self::RepairPhotometry => repair_photometry::TASK_TYPE,
+            Self::ReprocessCrossmatch => reprocess_crossmatch::TASK_TYPE,
+            Self::MigrateSnr => migrate_snr::TASK_TYPE,
+            Self::MigrateFpFlux => migrate_fp_flux::TASK_TYPE,
+        }
+    }
+}
+
+impl std::fmt::Display for TaskType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// A declared kind of work.
@@ -632,6 +708,56 @@ pub async fn dispatch(
             id: other.to_string(),
             known: known_types(),
         }),
+    }
+}
+
+#[cfg(test)]
+mod task_type_tests {
+    use super::*;
+
+    #[test]
+    fn the_enum_and_the_registry_name_the_same_tasks() {
+        // Two lists of task types is one too many, so this is what keeps them
+        // from drifting: a type registered but missing from the enum could not
+        // be submitted, and a variant with no registration would be accepted
+        // at the boundary and then fail as unknown.
+        let mut from_enum: Vec<&str> = TaskType::ALL.iter().map(TaskType::as_str).collect();
+        let mut from_registry: Vec<&str> = TASKS.iter().map(|spec| spec.id).collect();
+        from_enum.sort_unstable();
+        from_registry.sort_unstable();
+        assert_eq!(from_enum, from_registry);
+    }
+
+    #[test]
+    fn the_wire_form_is_the_registered_id() {
+        // What a client sends has to be what the registry is keyed by. The
+        // variants resolve to the modules' constants, but serde derives the
+        // wire form from the variant name, so the two could still disagree --
+        // `MpcorbIngest` serializes as `mpcorb_ingest`, and would not if the
+        // variant were spelled `MPCORBIngest`.
+        for task_type in TaskType::ALL {
+            let wire = serde_json::to_value(task_type).expect("serializes");
+            assert_eq!(
+                wire.as_str(),
+                Some(task_type.as_str()),
+                "{task_type:?} serializes as {wire} but is registered as {}",
+                task_type.as_str()
+            );
+            let back: TaskType = serde_json::from_value(wire).expect("round trips");
+            assert_eq!(back, task_type);
+        }
+    }
+
+    #[test]
+    fn an_unknown_type_is_refused_by_deserialization() {
+        // The point of the enum: refused at the boundary rather than after a
+        // run has been written.
+        let err = serde_json::from_value::<TaskType>(serde_json::json!("drop_everything"))
+            .expect_err("must not deserialize");
+        assert!(
+            err.to_string().contains("drop_everything"),
+            "the error should name what was sent: {err}"
+        );
     }
 }
 

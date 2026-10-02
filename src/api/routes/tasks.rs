@@ -12,7 +12,7 @@ use crate::api::{
 use crate::tasks::{
     self,
     models::{now, TaskRun, TaskStatus, Trigger},
-    queue, redact,
+    queue, redact, TaskType,
 };
 
 use actix_web::{get, post, web, HttpResponse};
@@ -25,8 +25,10 @@ const MAX_LIST_LIMIT: i64 = 500;
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct SubmitTaskBody {
-    /// Task type id, e.g. `catalog_ingest`.
-    pub task_type: String,
+    /// Which task to run. The schema carries the values this release accepts,
+    /// so an unknown one is refused here rather than after a run has been
+    /// written.
+    pub task_type: TaskType,
     /// Parameters for that task type, validated here rather than on the worker.
     pub params: serde_json::Value,
 }
@@ -34,7 +36,7 @@ pub struct SubmitTaskBody {
 #[derive(Debug, Deserialize, IntoParams)]
 pub struct ListTasksParams {
     /// Only runs of this task type.
-    pub task_type: Option<String>,
+    pub task_type: Option<TaskType>,
     pub limit: Option<i64>,
 }
 
@@ -125,15 +127,15 @@ pub async fn submit_task(
 
     // Validated here so a typo comes back as a 400 the client can act on,
     // rather than as a run that fails on a worker minutes later.
-    if let Err(e) = tasks::validate_params(&body.task_type, &body.params) {
+    if let Err(e) = tasks::validate_params(body.task_type.as_str(), &body.params) {
         return response::bad_request(&e.to_string());
     }
 
     // Single-flight: two ingests of the same catalog would race on the same
     // collection and the same chunk state. Returning the existing run rather
     // than a bare error lets the client jump straight to watching it.
-    if let Some(key) = tasks::single_flight_key(&body.task_type, &body.params) {
-        match queue::find_active(&db, &body.task_type, key).await {
+    if let Some(key) = tasks::single_flight_key(body.task_type.as_str(), &body.params) {
+        match queue::find_active(&db, body.task_type.as_str(), key).await {
             Ok(Some(existing)) => {
                 return HttpResponse::Conflict().json(response::ApiResponseBody::ok(
                     "an equivalent run is already queued or running",
@@ -149,7 +151,9 @@ pub async fn submit_task(
 
     let run = TaskRun {
         id: uuid::Uuid::new_v4().to_string(),
-        task_type: body.task_type,
+        // Stored as a string: a run outlives the release that defined its
+        // type, and the record still has to say what it was.
+        task_type: body.task_type.as_str().to_string(),
         params: body.params,
         status: TaskStatus::Queued,
         actor: admin.as_task_actor(),
@@ -204,7 +208,7 @@ pub async fn get_tasks(
         .limit
         .unwrap_or(DEFAULT_LIST_LIMIT)
         .clamp(1, MAX_LIST_LIMIT);
-    match queue::list(&db, params.task_type.as_deref(), limit).await {
+    match queue::list(&db, params.task_type.map(|t| t.as_str()), limit).await {
         Ok(runs) => response::ok_ser(
             "success",
             runs.into_iter().map(redacted).collect::<Vec<_>>(),
