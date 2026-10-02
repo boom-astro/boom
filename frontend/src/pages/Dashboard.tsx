@@ -66,12 +66,6 @@ function monthsBefore(date: string, months: number): string {
   return formatDate(d);
 }
 
-function twoMonthsAgo(): string {
-  const d = new Date();
-  d.setMonth(d.getMonth() - 2);
-  return formatDate(d);
-}
-
 const parseNight = (date: string) => new Date(`${date}T00:00:00`);
 
 const morningAfter = (evening: Date) =>
@@ -201,7 +195,7 @@ export default function Dashboard() {
   const todayUTC = formatDate(new Date());
 
   const [surveys, setSurveys] = useState<Set<Survey>>(new Set(SURVEY_ORDER));
-  const [startDate, setStartDate] = useState(twoMonthsAgo);
+  const [startDate, setStartDate] = useState(() => monthsBefore(todayUTC, 1));
   const [endDate, setEndDate] = useState(todayUTC);
   const [statsData, setStatsData] = useState<NightlyStat[]>([]);
   const [collections, setCollections] = useState<CollectionEntry[]>([]);
