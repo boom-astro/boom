@@ -5,8 +5,7 @@ use crate::api::{
     routes::users::User,
 };
 
-use crate::api::admin::require_admin;
-use crate::api::routes::babamul::BabamulUser;
+use crate::api::admin::AdminActor;
 use crate::conf::AppConfig;
 
 use actix_web::{get, web, HttpResponse};
@@ -250,12 +249,8 @@ pub async fn get_catalog_sample(
 pub async fn get_catalog_status(
     db: web::Data<Database>,
     config: web::Data<AppConfig>,
-    current_user: Option<web::ReqData<User>>,
-    babamul_user: Option<web::ReqData<BabamulUser>>,
+    _admin: AdminActor,
 ) -> HttpResponse {
-    if let Err(e) = require_admin(&current_user, &babamul_user) {
-        return e;
-    }
     let declared = crate::catalogs::declared(&config);
     let crossmatched = crate::catalogs::crossmatched(&config);
     match crate::catalogs::status(&db, &declared, &crossmatched).await {
@@ -301,13 +296,7 @@ fn safe_component(name: &str) -> bool {
     tags=["Catalogs"]
 )]
 #[get("/catalogs/exports")]
-pub async fn get_catalog_exports(
-    current_user: Option<web::ReqData<User>>,
-    babamul_user: Option<web::ReqData<BabamulUser>>,
-) -> HttpResponse {
-    if let Err(e) = require_admin(&current_user, &babamul_user) {
-        return e;
-    }
+pub async fn get_catalog_exports(_admin: AdminActor) -> HttpResponse {
     let root = export_root();
     let mut exports = Vec::new();
     let Ok(dirs) = std::fs::read_dir(&root) else {
@@ -365,12 +354,8 @@ pub async fn get_catalog_exports(
 #[get("/catalogs/exports/{collection}/{file}")]
 pub async fn download_catalog_export(
     path: web::Path<(String, String)>,
-    current_user: Option<web::ReqData<User>>,
-    babamul_user: Option<web::ReqData<BabamulUser>>,
+    _admin: AdminActor,
 ) -> HttpResponse {
-    if let Err(e) = require_admin(&current_user, &babamul_user) {
-        return e;
-    }
     let (collection, file) = path.into_inner();
     if !safe_component(&collection) || !safe_component(&file) {
         return response::bad_request("invalid export path");

@@ -4,14 +4,11 @@
 //! deliberately no binary an operator can run over SSH. See
 //! [`docs/task-system.md`](../../../docs/task-system.md).
 
-use crate::api::{
-    admin::require_admin,
-    models::response,
-    routes::{babamul::BabamulUser, users::User},
-};
+use crate::api::{admin::AdminActor, models::response};
 use crate::tasks::{
     self,
-    models::{now, TaskRun, TaskStatus, Trigger},
+    ledger::MutationRecord,
+    models::{now, TaskLogChunk, TaskRun, TaskStatus, Trigger},
     queue, redact, TaskType,
 };
 
@@ -78,13 +75,7 @@ fn redacted(mut run: TaskRun) -> TaskRun {
     tags=["Tasks"]
 )]
 #[get("/tasks/types")]
-pub async fn get_task_types(
-    current_user: Option<web::ReqData<User>>,
-    babamul_user: Option<web::ReqData<BabamulUser>>,
-) -> HttpResponse {
-    if let Err(e) = require_admin(&current_user, &babamul_user) {
-        return e;
-    }
+pub async fn get_task_types(_admin: AdminActor) -> HttpResponse {
     let types: Vec<serde_json::Value> = tasks::TASKS
         .iter()
         .map(|spec| {
@@ -120,13 +111,8 @@ pub async fn get_task_types(
 pub async fn submit_task(
     db: web::Data<mongodb::Database>,
     body: web::Json<SubmitTaskBody>,
-    current_user: Option<web::ReqData<User>>,
-    babamul_user: Option<web::ReqData<BabamulUser>>,
+    admin: AdminActor,
 ) -> HttpResponse {
-    let admin = match require_admin(&current_user, &babamul_user) {
-        Ok(admin) => admin,
-        Err(e) => return e,
-    };
     let body = body.into_inner();
 
     // Validated here so a typo comes back as a 400 the client can act on,
@@ -202,12 +188,8 @@ pub async fn submit_task(
 pub async fn get_tasks(
     db: web::Data<mongodb::Database>,
     params: web::Query<ListTasksParams>,
-    current_user: Option<web::ReqData<User>>,
-    babamul_user: Option<web::ReqData<BabamulUser>>,
+    _admin: AdminActor,
 ) -> HttpResponse {
-    if let Err(e) = require_admin(&current_user, &babamul_user) {
-        return e;
-    }
     let limit = params
         .limit
         .unwrap_or(DEFAULT_LIST_LIMIT)
@@ -237,12 +219,8 @@ pub async fn get_tasks(
 pub async fn get_task(
     db: web::Data<mongodb::Database>,
     run_id: web::Path<String>,
-    current_user: Option<web::ReqData<User>>,
-    babamul_user: Option<web::ReqData<BabamulUser>>,
+    _admin: AdminActor,
 ) -> HttpResponse {
-    if let Err(e) = require_admin(&current_user, &babamul_user) {
-        return e;
-    }
     match queue::get(&db, &run_id).await {
         Ok(Some(run)) => response::ok_ser("success", redacted(run)),
         Ok(None) => response::not_found("no such run"),
@@ -259,7 +237,7 @@ pub async fn get_task(
         LogsParams
     ),
     responses(
-        (status = 200, description = "Log chunks after after_seq", body = Vec<serde_json::Value>),
+        (status = 200, description = "Log chunks after after_seq", body = Vec<TaskLogChunk>),
         (status = 403, description = "Not an admin")
     ),
     tags=["Tasks"]
@@ -269,12 +247,8 @@ pub async fn get_task_logs(
     db: web::Data<mongodb::Database>,
     run_id: web::Path<String>,
     params: web::Query<LogsParams>,
-    current_user: Option<web::ReqData<User>>,
-    babamul_user: Option<web::ReqData<BabamulUser>>,
+    _admin: AdminActor,
 ) -> HttpResponse {
-    if let Err(e) = require_admin(&current_user, &babamul_user) {
-        return e;
-    }
     match tasks::logs::read_after(&db, &run_id, params.after_seq).await {
         Ok(chunks) => response::ok_ser("success", chunks),
         Err(e) => response::internal_error(&format!("failed to read logs: {e}")),
@@ -297,13 +271,8 @@ pub async fn get_task_logs(
 pub async fn cancel_task(
     db: web::Data<mongodb::Database>,
     run_id: web::Path<String>,
-    current_user: Option<web::ReqData<User>>,
-    babamul_user: Option<web::ReqData<BabamulUser>>,
+    admin: AdminActor,
 ) -> HttpResponse {
-    let admin = match require_admin(&current_user, &babamul_user) {
-        Ok(admin) => admin,
-        Err(e) => return e,
-    };
     match queue::request_cancel(&db, &run_id).await {
         Ok(None) => response::not_found("no such run"),
         Ok(Some(status)) => {
@@ -325,6 +294,11 @@ pub async fn cancel_task(
 
 /// Read the record of what has been done to the data
 ///
+/// A mutation is a change to the data, not a run of a task: one run records as
+/// many as it makes, and the alert pipeline or the scheduler can record one
+/// without being a task at all. A run is how work is started and watched; this
+/// is what happened to the data.
+///
 /// Append-only: entries are written when a mutation finishes and are never
 /// edited or removed. This is what makes "what has been done to this
 /// collection, by whom, under which release" an answerable question rather than
@@ -334,7 +308,7 @@ pub async fn cancel_task(
     path = "/data/mutations",
     params(MutationsParams),
     responses(
-        (status = 200, description = "Mutations, most recent first", body = Vec<serde_json::Value>),
+        (status = 200, description = "Mutations, most recent first", body = Vec<MutationRecord>),
         (status = 403, description = "Not an admin")
     ),
     tags=["Tasks"]
@@ -343,12 +317,8 @@ pub async fn cancel_task(
 pub async fn get_data_mutations(
     db: web::Data<mongodb::Database>,
     params: web::Query<MutationsParams>,
-    current_user: Option<web::ReqData<User>>,
-    babamul_user: Option<web::ReqData<BabamulUser>>,
+    _admin: AdminActor,
 ) -> HttpResponse {
-    if let Err(e) = require_admin(&current_user, &babamul_user) {
-        return e;
-    }
     let limit = params
         .limit
         .unwrap_or(DEFAULT_LIST_LIMIT)
@@ -383,12 +353,8 @@ pub struct AcceptSetBody {
 #[get("/enrichment/status")]
 pub async fn get_enrichment_status(
     db: web::Data<mongodb::Database>,
-    current_user: Option<web::ReqData<User>>,
-    babamul_user: Option<web::ReqData<BabamulUser>>,
+    _admin: AdminActor,
 ) -> HttpResponse {
-    if let Err(e) = require_admin(&current_user, &babamul_user) {
-        return e;
-    }
     // Only ZTF has enrichment models declared today; LSST joins the list when
     // it does, rather than reporting an empty status that reads as "no drift".
     match crate::enrichment::version::drift_status(&db, "ztf").await {
@@ -420,13 +386,8 @@ pub async fn accept_enrichment_set(
     db: web::Data<mongodb::Database>,
     set_id: web::Path<i64>,
     body: web::Json<AcceptSetBody>,
-    current_user: Option<web::ReqData<User>>,
-    babamul_user: Option<web::ReqData<BabamulUser>>,
+    admin: AdminActor,
 ) -> HttpResponse {
-    let admin = match require_admin(&current_user, &babamul_user) {
-        Ok(admin) => admin,
-        Err(e) => return e,
-    };
     let reason = body.reason.trim();
     if reason.is_empty() {
         return response::bad_request("a reason is required to accept a set");
@@ -507,12 +468,8 @@ pub async fn accept_enrichment_set(
 pub async fn unaccept_enrichment_set(
     db: web::Data<mongodb::Database>,
     set_id: web::Path<i64>,
-    current_user: Option<web::ReqData<User>>,
-    babamul_user: Option<web::ReqData<BabamulUser>>,
+    _admin: AdminActor,
 ) -> HttpResponse {
-    if let Err(e) = require_admin(&current_user, &babamul_user) {
-        return e;
-    }
     match crate::enrichment::version::unaccept_set(&db, *set_id).await {
         Ok(()) => response::ok_no_data("acceptance withdrawn"),
         Err(e) => response::internal_error(&format!("failed to withdraw: {e}")),

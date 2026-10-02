@@ -89,6 +89,34 @@ pub fn resolve_admin(
 
 /// Resolve an admin from the request, returning the response to send when the
 /// caller is not one, so handlers stay a single `match`.
+impl actix_web::FromRequest for AdminActor {
+    type Error = actix_web::Error;
+    type Future = std::future::Ready<Result<Self, Self::Error>>;
+
+    /// Resolve the admin from whichever realm authenticated, so a handler takes
+    /// one argument instead of one per realm and cannot forget to check.
+    ///
+    /// The middleware has already put a `User` or a `BabamulUser` in the
+    /// request's extensions; this decides whether either of them is an admin.
+    /// A handler that asks for an `AdminActor` is therefore admin-only by its
+    /// signature rather than by remembering to call something first.
+    fn from_request(
+        req: &actix_web::HttpRequest,
+        _payload: &mut actix_web::dev::Payload,
+    ) -> Self::Future {
+        use actix_web::HttpMessage as _;
+        let extensions = req.extensions();
+        let resolved = resolve_admin(extensions.get::<User>(), extensions.get::<BabamulUser>())
+            .map_err(|denied| match denied {
+                AdminDenied::NotAnAdmin => {
+                    actix_web::error::ErrorForbidden("Admin access required")
+                }
+                AdminDenied::Unauthenticated => actix_web::error::ErrorUnauthorized("Unauthorized"),
+            });
+        std::future::ready(resolved)
+    }
+}
+
 pub fn require_admin(
     boom_user: &Option<web::ReqData<User>>,
     babamul_user: &Option<web::ReqData<BabamulUser>>,
@@ -105,25 +133,19 @@ pub fn require_admin(
 
 /// Grant `is_admin` to the Babamul accounts named in the configured list.
 ///
-/// Named "reconcile" for the layering's sake rather than its own: the call site
-/// lives in `src/bin/api.rs`, which a different layer of this stack owns, so
-/// renaming it here alone would break the layer that carries this file. It
-/// seeds; it does not reconcile.
+/// Runs at API startup, every time, and grants only: everyone on the list is
+/// an admin afterwards. The list is the floor, enforced on every boot, which
+/// also solves the bootstrap problem -- appointing an admin through
+/// `PATCH /babamul/admin/users/{id}` requires already being one.
 ///
-/// Runs at API startup, grants only, and only when the deployment has no
-/// admins at all. This list solves one problem: admin is granted through
-/// `PATCH /babamul/admin/users/{id}`, which only an admin may call, so a fresh
-/// deployment has no way to appoint its first one.
+/// **Removing an admin is two steps, in this order:** take them off this list,
+/// then revoke them in the admin page. Revoking first leaves them named here,
+/// and the next restart grants it back.
 ///
-/// Both halves of that matter, because the API is the source of truth and a
-/// config list that keeps asserting itself would fight it. Revoking somebody
-/// would last until the next restart if they were still named here, which is a
-/// grant nobody made and nobody can see. And a two-way version would be worse:
-/// every restart would un-admin everyone appointed since the last one. So once
-/// an admin exists, this is inert, and admin is added and removed in one place.
-///
-/// Losing every admin is the one case it fires again, which is the recovery
-/// path: put an address here and restart.
+/// It never revokes. A two-way version would un-admin everyone appointed
+/// through the API since the last restart, which is the worse failure: the API
+/// is where admin is managed day to day, and config asserting itself over that
+/// would undo decisions config never recorded.
 #[tracing::instrument(skip(db, admin_emails))]
 pub async fn reconcile_babamul_admins(
     db: &mongodb::Database,
@@ -132,16 +154,6 @@ pub async fn reconcile_babamul_admins(
     use mongodb::bson::doc;
 
     let collection = db.collection::<BabamulUser>("babamul_users");
-
-    // Inert once anyone is an admin, whoever made them one.
-    let existing = collection
-        .count_documents(doc! { "is_admin": true })
-        .await?;
-    if existing > 0 {
-        tracing::debug!(existing, "babamul admins exist already; not seeding");
-        return Ok(());
-    }
-
     // Emails are compared case-insensitively because that is how they are
     // matched at sign-in; a config entry that differs only in case should not
     // silently fail to grant access.
@@ -163,7 +175,7 @@ pub async fn reconcile_babamul_admins(
 
     if granted.modified_count > 0 {
         tracing::info!(
-            "no babamul admins existed: {} seeded from config ({} configured)",
+            "babamul admins from config: {} of {} configured were not admins yet",
             granted.modified_count,
             emails.len()
         );
@@ -216,6 +228,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_admin_appointed_in_the_app_survives_a_restart() {
+        let _seeding = SEED_LOCK.lock().await;
+        // Grants only, so somebody appointed through the API keeps it without
+        // being named in config.
+        let db = crate::conf::get_test_db().await;
+        clear(&db).await;
+        let appointed = insert_user(&db, "appointed@example.org", true).await;
+
+        reconcile_babamul_admins(&db, &["someone-else@example.org".to_string()])
+            .await
+            .expect("seeds");
+
+        assert!(is_admin(&db, &appointed).await);
+        clear(&db).await;
+    }
+
+    #[tokio::test]
     async fn the_first_admin_comes_from_config() {
         let _seeding = SEED_LOCK.lock().await;
         let db = crate::conf::get_test_db().await;
@@ -232,12 +261,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_revoked_admin_is_not_handed_it_back_at_the_next_restart() {
+    async fn everyone_on_the_list_is_an_admin_after_startup() {
         let _seeding = SEED_LOCK.lock().await;
-        // The hazard this guards: an address stays in config after an admin
-        // revokes it through the API. Seeding again would be a grant nobody
-        // made, undone only by editing config, and invisible until someone
-        // noticed the admin page working for a person who should not have it.
+        // The list is a floor, enforced on every boot. The consequence worth
+        // pinning: revoking somebody still named here does not stick, which is
+        // why removing an admin means editing the list first and revoking
+        // second.
         let db = crate::conf::get_test_db().await;
         clear(&db).await;
         let keeper = insert_user(&db, "keeper@example.org", true).await;
@@ -253,10 +282,11 @@ mod tests {
         .await
         .expect("seeds");
 
-        assert!(is_admin(&db, &keeper).await, "untouched");
+        assert!(is_admin(&db, &keeper).await, "already an admin, untouched");
         assert!(
-            !is_admin(&db, &revoked).await,
-            "a revocation through the API has to outlast a restart"
+            is_admin(&db, &revoked).await,
+            "everyone on the list is an admin after startup, which is why removing \
+             one means editing the list first"
         );
         clear(&db).await;
     }

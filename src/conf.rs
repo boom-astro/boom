@@ -846,13 +846,14 @@ impl Default for CutoutCacheConfig {
 pub struct BabamulConfig {
     pub enabled: bool,
     pub webapp_url: Option<String>,
-    /// Emails made admin at API startup on a deployment that has no admins.
+    /// Emails that are admins. Granted at every API startup.
     ///
-    /// Not the answer to "who is an admin" -- that is
-    /// `PATCH /babamul/admin/users/{id}`, and `babamul_users.is_admin` is where
-    /// it is recorded. This list is only how the first one is appointed, since
-    /// appointing an admin requires being one. Once anyone is an admin it is
-    /// ignored, so neither adding nor removing an entry changes anything.
+    /// The floor rather than the whole answer: admin is also granted through
+    /// `PATCH /babamul/admin/users/{id}`, and startup never revokes. So
+    /// removing an admin is two steps, in this order -- take them off this
+    /// list, then revoke them in the admin page. Revoking first leaves them
+    /// named here and the next restart grants it back.
+    ///
     /// Emails rather than usernames because an email is what the account signs
     /// in with. See [`crate::api::admin::reconcile_babamul_admins`].
     ///
