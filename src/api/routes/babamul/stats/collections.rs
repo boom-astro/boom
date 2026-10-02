@@ -145,7 +145,7 @@ pub async fn get_collection_stats(
                 let collections = cached
                     .collections
                     .into_iter()
-                    .filter(|c| visible(c))
+                    .filter(visible)
                     .map(|c| CollectionEntry {
                         name: c.name,
                         count: if include_count { c.count } else { None },
@@ -248,7 +248,7 @@ pub async fn get_collection_stats(
 
     let collections: Vec<CollectionEntry> = collections
         .into_iter()
-        .filter(|c| visible(c))
+        .filter(visible)
         .map(|c| CollectionEntry {
             name: c.name,
             count: if include_count { c.count } else { None },

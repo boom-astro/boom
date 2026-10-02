@@ -187,11 +187,13 @@ export async function resetPassword(email: string, token: string, new_password: 
   await ensureOk(res, "Password reset");
 }
 
+const authorization = (token: TokenRecord) => `${token.token_type} ${token.access_token}`;
+
 async function fetchWithAuth(input: RequestInfo, init: RequestInit = {}) {
   const token = getTokenRecord();
   if (!token) throw new Error("Not authenticated");
   const headers = new Headers(init.headers || {});
-  headers.set("Authorization", `${token.token_type} ${token.access_token}`);
+  headers.set("Authorization", authorization(token));
   const res = await fetch(input, { ...init, headers });
   if (res.status === 401) {
     logout();
@@ -390,7 +392,7 @@ export type NightlyStat = {
 
 function optionalAuthHeaders(): HeadersInit {
   const token = getTokenRecord();
-  return token ? { Authorization: `${token.token_type} ${token.access_token}` } : {};
+  return token ? { Authorization: authorization(token) } : {};
 }
 
 export async function fetchStats(startDate: string, endDate: string, survey?: string): Promise<NightlyStat[]> {

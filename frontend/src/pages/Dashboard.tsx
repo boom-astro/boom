@@ -259,14 +259,16 @@ export default function Dashboard() {
       SURVEY_ORDER.filter((s) => statsData.some((d) => d[s] !== undefined)),
     [statsData]);
 
+  const shownSurveys = useMemo(() =>
+      availableSurveys.filter((s) => surveys.has(s)),
+    [availableSurveys, surveys]);
+
   const visibleData = useMemo(() =>
       statsData.map((d) => ({
         date: d.date,
-        ...Object.fromEntries(
-          availableSurveys.filter((s) => surveys.has(s)).map((s) => [s, d[s]]),
-        ),
+        ...Object.fromEntries(shownSurveys.map((s) => [s, d[s]])),
       }) as NightlyStat),
-    [statsData, surveys, availableSurveys]);
+    [statsData, shownSurveys]);
 
   const chartData = useMemo(() =>
       zoomSlice ? visibleData.slice(zoomSlice[0], zoomSlice[1] + 1) : visibleData,
@@ -442,7 +444,7 @@ export default function Dashboard() {
                       backgroundColor: `color-mix(in oklch, ${SURVEY_COLORS[s]} 15%, transparent)`,
                     } : {}}
                   >
-                    {chartConfig[s].label.toUpperCase()}
+                    {s.toUpperCase()}
                   </Toggle>
                 ))}
               </div>
@@ -528,7 +530,7 @@ export default function Dashboard() {
                     />
                   }
                 />
-                {availableSurveys.filter((s) => surveys.has(s)).map((s) => (
+                {shownSurveys.map((s) => (
                   <Bar key={s} dataKey={s} fill={`var(--color-${s})`} radius={[2, 2, 0, 0]}/>
                 ))}
                 {zoomLeft && zoomRight && (

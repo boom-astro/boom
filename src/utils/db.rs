@@ -608,29 +608,24 @@ pub async fn join_tasks<T>(
 mod tests {
     use super::*;
 
+    async fn alert_index_keys(survey: &Survey) -> Vec<Document> {
+        let db = crate::conf::get_test_db().await;
+        initialize_survey_indexes(survey, &db).await.unwrap();
+        db.collection::<Document>(&format!("{}_alerts", survey))
+            .list_indexes()
+            .await
+            .unwrap()
+            .map_ok(|i| i.keys)
+            .try_collect()
+            .await
+            .unwrap()
+    }
+
     /// The epoch must follow the region key: a time window is only applied to
     /// index keys while it is the second component.
     #[tokio::test]
     async fn region_index_carries_the_epoch_as_its_second_key() {
-        use crate::conf;
-        use crate::utils::enums::Survey;
-        use futures::TryStreamExt;
-
-        let db = conf::get_test_db().await;
-        initialize_survey_indexes(&Survey::Ztf, &db).await.unwrap();
-
-        let keys: Vec<Document> = db
-            .collection::<Document>("ZTF_alerts")
-            .list_indexes()
-            .await
-            .unwrap()
-            .try_collect::<Vec<_>>()
-            .await
-            .unwrap()
-            .into_iter()
-            .map(|i| i.keys)
-            .collect();
-
+        let keys = alert_index_keys(&Survey::Ztf).await;
         assert!(
             keys.contains(&doc! { "coordinates.hpx": 1, "candidate.jd": 1 }),
             "no hpx/jd index among {keys:?}"
@@ -639,11 +634,6 @@ mod tests {
 
     #[tokio::test]
     async fn nightly_counts_have_an_epoch_index() {
-        use crate::conf;
-        use crate::utils::enums::Survey;
-        use futures::TryStreamExt;
-
-        let db = conf::get_test_db().await;
         for (survey, expected) in [
             (
                 Survey::Ztf,
@@ -651,18 +641,7 @@ mod tests {
             ),
             (Survey::Decam, doc! { "candidate.jd": -1 }),
         ] {
-            initialize_survey_indexes(&survey, &db).await.unwrap();
-            let keys: Vec<Document> = db
-                .collection::<Document>(&format!("{}_alerts", survey))
-                .list_indexes()
-                .await
-                .unwrap()
-                .try_collect::<Vec<_>>()
-                .await
-                .unwrap()
-                .into_iter()
-                .map(|i| i.keys)
-                .collect();
+            let keys = alert_index_keys(&survey).await;
             assert!(keys.contains(&expected), "no {expected} among {keys:?}");
         }
     }
