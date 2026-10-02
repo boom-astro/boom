@@ -68,6 +68,8 @@ RUN --mount=type=cache,target=/app/target,sharing=locked \
        target/release/mpcorb_ingest \
        target/release/backfill_detection_span \
        target/release/backfill_hpx \
+       target/release/backfill_host_galaxy \
+       target/release/find_tracklets \
        /app/bin/
 
 FROM builder AS dev
@@ -106,6 +108,7 @@ COPY --from=builder /app/bin/repair_photometry_ordering /app/repair_photometry_o
 COPY --from=builder /app/bin/mpcorb_ingest /app/mpcorb_ingest
 COPY --from=builder /app/bin/backfill_detection_span /app/backfill_detection_span
 COPY --from=builder /app/bin/backfill_hpx /app/backfill_hpx
+COPY --from=builder /app/bin/backfill_host_galaxy /app/backfill_host_galaxy
 COPY --from=builder /opt/ort /opt/ort
 # Temporary
 COPY --from=builder /app/bin/copy_cutouts /app/copy_cutouts

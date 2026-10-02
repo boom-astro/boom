@@ -1146,6 +1146,7 @@ dependencies = [
  "opentelemetry_sdk",
  "ort",
  "rand 0.10.1",
+ "rayon",
  "rdkafka",
  "redis",
  "regex",

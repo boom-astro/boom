@@ -18,6 +18,8 @@ export type Profile = {
   /** Provider slugs the account can sign in with, e.g. ["google", "orcid"] */
   identity_providers?: string[];
   orcid_id?: string | null;
+  is_admin?: boolean;
+  acls?: string[];
 } | null;
 
 export type OAuthProvider = { id: string; name: string; start_url: string };
@@ -185,11 +187,13 @@ export async function resetPassword(email: string, token: string, new_password: 
   await ensureOk(res, "Password reset");
 }
 
+const authorization = (token: TokenRecord) => `${token.token_type} ${token.access_token}`;
+
 async function fetchWithAuth(input: RequestInfo, init: RequestInit = {}) {
   const token = getTokenRecord();
   if (!token) throw new Error("Not authenticated");
   const headers = new Headers(init.headers || {});
-  headers.set("Authorization", `${token.token_type} ${token.access_token}`);
+  headers.set("Authorization", authorization(token));
   const res = await fetch(input, { ...init, headers });
   if (res.status === 401) {
     logout();
@@ -229,6 +233,38 @@ export async function updateProfileName(name: string): Promise<Profile> {
   const body = await readJson(res);
   if (!res.ok) throw new Error(messageOf(body) ?? `Update profile failed: ${res.status}`);
   return normalizeProfile(unwrapData<ProfileWire>(body, null));
+}
+
+export type AdminUser = {
+  id: string;
+  username: string;
+  email: string;
+  name: string | null;
+  created_at: number;
+  is_activated: boolean;
+  is_admin: boolean;
+  acls: string[];
+};
+
+export type AdminUsersPage = { users: AdminUser[]; total: number; available_acls: string[] };
+
+export async function fetchAdminUsers(search: string, limit: number, offset: number): Promise<AdminUsersPage> {
+  const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+  if (search.trim()) params.set("search", search.trim());
+  const res = await fetchWithAuth(`${API_BASE}/admin/users?${params}`);
+  await ensureOk(res, "Fetch users");
+  return unwrapData<AdminUsersPage>(await readJson(res), { users: [], total: 0, available_acls: [] });
+}
+
+export async function updateAdminUser(id: string, patch: { is_admin?: boolean; acls?: string[] }): Promise<AdminUser> {
+  const res = await fetchWithAuth(`${API_BASE}/admin/users/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+  const body = await readJson(res);
+  if (!res.ok) throw new Error(messageOf(body) ?? `Update user failed: ${res.status}`);
+  return unwrapData<AdminUser>(body, {} as AdminUser);
 }
 
 export async function fetchKafkaCredentials(): Promise<KafkaCredential[]> {
@@ -350,12 +386,19 @@ export type NightlyStat = {
   date: string;
   ztf?: number;
   lsst?: number;
+  decam?: number;
+  winter?: number;
 };
+
+function optionalAuthHeaders(): HeadersInit {
+  const token = getTokenRecord();
+  return token ? { Authorization: authorization(token) } : {};
+}
 
 export async function fetchStats(startDate: string, endDate: string, survey?: string): Promise<NightlyStat[]> {
   const params = new URLSearchParams({ start_date: startDate, end_date: endDate });
   if (survey) params.set("survey", survey);
-  const res = await fetch(`${API_BASE}/stats/nightly?${params}`);
+  const res = await fetch(`${API_BASE}/stats/nightly?${params}`, { headers: optionalAuthHeaders() });
   await ensureOk(res, "Fetch stats");
   return readList<NightlyStat>(res);
 }
@@ -400,7 +443,7 @@ export type CollectionStats = {
 };
 
 export async function fetchCollectionStats(): Promise<CollectionStats> {
-  const res = await fetch(`${API_BASE}/stats/collections?count=true&size=true`);
+  const res = await fetch(`${API_BASE}/stats/collections?count=true&size=true`, { headers: optionalAuthHeaders() });
   await ensureOk(res, "Fetch collection stats");
   return unwrapData<CollectionStats>(await readJson(res), { n_collections: 0, collections: [] });
 }

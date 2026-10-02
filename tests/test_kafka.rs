@@ -792,7 +792,9 @@ fn test_widened_window_reaches_back_over_an_outage() {
 #[tokio::test]
 async fn test_consumer_started_with_no_data_still_consumes() {
     use boom::conf::{AppConfig, KafkaConsumerConfig};
-    use boom::kafka::{consumer, delete_topic, initialize_topic};
+    use boom::kafka::{consumer, delete_topic};
+    use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
+    use rdkafka::client::DefaultClientContext;
     use rdkafka::config::ClientConfig;
     use rdkafka::producer::{FutureProducer, FutureRecord};
     use std::time::Duration;
@@ -809,7 +811,17 @@ async fn test_consumer_started_with_no_data_still_consumes() {
     let _: () = con.del(&output_queue).await.unwrap_or(());
 
     // Topic exists but is completely empty — the between-nights state.
-    initialize_topic(server, &topic, 1).await.unwrap();
+    let admin: AdminClient<DefaultClientContext> = ClientConfig::new()
+        .set("bootstrap.servers", server)
+        .create()
+        .unwrap();
+    admin
+        .create_topics(
+            &[NewTopic::new(&topic, 1, TopicReplication::Fixed(1))],
+            &AdminOptions::new(),
+        )
+        .await
+        .unwrap();
 
     let cold_start_ts = now_ms / 1000 - 3600;
     let kafka_cfg = KafkaConsumerConfig {
@@ -855,7 +867,7 @@ async fn test_consumer_started_with_no_data_still_consumes() {
     };
 
     // Settle into the initial-assignment loop with nothing to read.
-    tokio::time::sleep(Duration::from_secs(10)).await;
+    tokio::time::sleep(Duration::from_secs(40)).await;
     assert!(
         con.llen::<&str, usize>(&output_queue).await.unwrap_or(0) == 0,
         "nothing should have been consumed yet"

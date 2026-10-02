@@ -13,6 +13,7 @@ use crate::{
         cutouts::CutoutStorage,
         db::{mongify_vec, update_timeseries_op},
         enums::Survey,
+        host::{self, HostGalaxyAssociation, HostGalaxyConfig},
         lightcurves::Band,
         o11y::logging::as_error,
         spatial::{xmatch, Coordinates},
@@ -70,6 +71,7 @@ pub struct Candidate {
     #[serde(alias = "forcediffimmagunc")]
     pub sigmagap: f64,
     pub band: Band,
+    #[serde(deserialize_with = "deserialize_diffmaglim")]
     pub diffmaglim: f64,
     pub ra: f64,
     pub dec: f64,
@@ -114,6 +116,15 @@ impl TimeSeries for DecamCandidate {
     }
 }
 
+// NaN in the candidate, null in prvCandidates.
+fn deserialize_diffmaglim<'de, D>(deserializer: D) -> Result<f64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = <serde_json::Value as Deserialize>::deserialize(deserializer)?;
+    Ok(value.as_f64().unwrap_or(f64::NAN))
+}
+
 fn deserialize_candidate<'de, D>(deserializer: D) -> Result<DecamCandidate, D::Error>
 where
     D: Deserializer<'de>,
@@ -122,12 +133,26 @@ where
     DecamCandidate::try_from(candidate).map_err(serde::de::Error::custom)
 }
 
+fn deserialize_prv_candidates<'de, D>(deserializer: D) -> Result<Vec<DecamCandidate>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let prv_candidates = <Option<Vec<Candidate>> as Deserialize>::deserialize(deserializer)?;
+    prv_candidates
+        .unwrap_or_default()
+        .into_iter()
+        .map(DecamCandidate::try_from)
+        .collect::<Result<Vec<DecamCandidate>, _>>()
+        .map_err(serde::de::Error::custom)
+}
+
 fn deserialize_fp_hists<'de, D>(deserializer: D) -> Result<Vec<DecamForcedPhot>, D::Error>
 where
     D: Deserializer<'de>,
 {
-    let fp_hists = <Vec<FpHist> as Deserialize>::deserialize(deserializer)?;
+    let fp_hists = <Option<Vec<FpHist>> as Deserialize>::deserialize(deserializer)?;
     fp_hists
+        .unwrap_or_default()
         .into_iter()
         .map(DecamForcedPhot::try_from)
         .collect::<Result<Vec<DecamForcedPhot>, _>>()
@@ -178,7 +203,13 @@ pub struct DecamRawAvroAlert {
     pub candid: i64,
     #[serde(deserialize_with = "deserialize_candidate")]
     pub candidate: DecamCandidate,
-    #[serde(deserialize_with = "deserialize_fp_hists")]
+    #[serde(
+        rename = "prvCandidates",
+        default,
+        deserialize_with = "deserialize_prv_candidates"
+    )]
+    pub prv_candidates: Vec<DecamCandidate>,
+    #[serde(default, deserialize_with = "deserialize_fp_hists")]
     pub fp_hists: Vec<DecamForcedPhot>,
     #[serde(rename = "cutoutScience")]
     #[serde(with = "apache_avro::serde_avro_bytes")]
@@ -207,6 +238,8 @@ pub struct DecamObject {
     pub prv_candidates: Vec<DecamCandidate>,
     pub fp_hists: Vec<DecamForcedPhot>,
     pub cross_matches: Option<HashMap<String, Vec<Document>>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_galaxy: Option<HostGalaxyAssociation>,
     pub aliases: Option<DecamAliases>,
     pub coordinates: Coordinates,
     pub created_at: f64,
@@ -236,6 +269,7 @@ struct AlertAuxForUpdate {
 
 pub struct DecamAlertWorker {
     xmatch_configs: Vec<conf::CatalogXmatchConfig>,
+    host_galaxy_config: HostGalaxyConfig,
     db: mongodb::Database,
     alert_collection: mongodb::Collection<DecamAlert>,
     alert_aux_collection: mongodb::Collection<DecamObject>,
@@ -417,6 +451,7 @@ impl AlertWorker for DecamAlertWorker {
 
         let worker = DecamAlertWorker {
             xmatch_configs,
+            host_galaxy_config: config.host_galaxy.clone(),
             db,
             alert_collection,
             alert_aux_collection,
@@ -449,10 +484,12 @@ impl AlertWorker for DecamAlertWorker {
         let ra = avro_alert.candidate.candidate.ra;
         let dec = avro_alert.candidate.candidate.dec;
 
-        let prv_candidates = vec![avro_alert.candidate.clone()];
+        let mut prv_candidates = avro_alert.prv_candidates;
+        prv_candidates.push(avro_alert.candidate.clone());
         let mut fp_hists = avro_alert.fp_hists;
 
         // Sort and deduplicate time series data by jd
+        DecamCandidate::sanitize_timeseries(&mut prv_candidates);
         DecamForcedPhot::sanitize_timeseries(&mut fp_hists);
 
         let alert = DecamAlert {
@@ -502,11 +539,14 @@ impl AlertWorker for DecamAlertWorker {
                 &self.db,
             )
             .await?;
+            let host_galaxy =
+                host::associate_from_xmatches(ra, dec, &xmatches, &self.host_galaxy_config);
             let obj = DecamObject {
                 object_id: object_id.clone(),
                 prv_candidates,
                 fp_hists,
                 cross_matches: Some(xmatches),
+                host_galaxy,
                 aliases: survey_matches,
                 coordinates: Coordinates::new(ra, dec),
                 created_at: now,
@@ -768,22 +808,23 @@ mod tests {
 
         // real-bogus reliability (CNN score) is carried on the candidate
         let reliability = alert.candidate.candidate.reliability.unwrap();
-        assert!((reliability - 0.93080384).abs() < 1e-6);
+        assert!((reliability - 0.41026598).abs() < 1e-6);
 
-        // validate the fp_hists
-        let fp_hists = alert.clone().fp_hists;
-        assert_eq!(fp_hists.len(), 1);
+        let prv_candidates = &alert.prv_candidates;
+        assert_eq!(prv_candidates.len(), 4);
+        let first = &prv_candidates[0];
+        assert!((first.candidate.magap - 20.47659).abs() < 1e-6);
+        assert!((first.candidate.sigmagap - 0.02946235).abs() < 1e-6);
+        assert!((first.jd - 2461284.59611032).abs() < 1e-6);
+        assert_eq!(first.candidate.band, Band::I);
+        assert_eq!(prv_candidates[1].candidate.band, Band::R);
 
-        let fp_positive_det = fp_hists.get(0).unwrap();
-        assert!((fp_positive_det.fp_hist.magap - 23.554045).abs() < 1e-6);
-        assert!((fp_positive_det.fp_hist.sigmagap - 0.2014992).abs() < 1e-6);
-        assert!((fp_positive_det.jd - 2461229.58006057).abs() < 1e-6);
-        assert_eq!(fp_positive_det.fp_hist.band, Band::G);
+        assert!(alert.fp_hists.is_empty());
 
         // validate the cutouts
-        assert_eq!(alert.cutout_science.clone().len(), 14984);
-        assert_eq!(alert.cutout_template.clone().len(), 13988);
-        assert_eq!(alert.cutout_difference.clone().len(), 14953);
+        assert_eq!(alert.cutout_science.clone().len(), 15021);
+        assert_eq!(alert.cutout_template.clone().len(), 15080);
+        assert_eq!(alert.cutout_difference.clone().len(), 14959);
     }
 
     #[tokio::test]
@@ -796,15 +837,21 @@ mod tests {
             .schema_cache
             .alert_from_avro_bytes(&bytes_content)
             .unwrap();
-        let mut adapter =
-            DecamAuxBranchAdapter {
-                prv_gen: DecamPrvLightcurveGen::new(parsed_alert.candidate),
-                fp_gen: DecamFpLightcurveGen::new(
-                    parsed_alert.fp_hists.first().cloned().expect(
-                        "test data should include at least one DECAM forced photometry point",
-                    ),
-                ),
-            };
+        let candidate = parsed_alert.candidate.candidate.clone();
+        let fp_template = DecamForcedPhot::try_from(FpHist {
+            mjd: candidate.mjd,
+            forcediffimflux: candidate.forcediffimflux,
+            forcediffimfluxunc: candidate.forcediffimfluxunc,
+            magap: candidate.magap,
+            sigmagap: candidate.sigmagap,
+            band: candidate.band,
+            diffmaglim: candidate.diffmaglim,
+        })
+        .unwrap();
+        let mut adapter = DecamAuxBranchAdapter {
+            prv_gen: DecamPrvLightcurveGen::new(parsed_alert.candidate),
+            fp_gen: DecamFpLightcurveGen::new(fp_template),
+        };
 
         assert_update_aux_branches_and_fallback(&mut worker, &object_id, &mut adapter).await;
 

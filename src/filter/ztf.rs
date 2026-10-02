@@ -11,12 +11,13 @@ use crate::enrichment::{
 use crate::filter::{
     build_loaded_filters, build_lsst_aux_data, insert_lsst_aux_pipeline_if_needed,
     parse_programid_candid_tuple, run_filter, update_aliases_index_multiple, uses_field_in_filter,
-    validate_filter_pipeline, watchlist_projections, Alert, Classification, Filter, FilterError,
-    FilterResults, FilterWorker, FilterWorkerError, LoadedFilter, Origin, Photometry, SurveyMatch,
-    SurveyMatches,
+    validate_filter_pipeline, watchlist_projections, Alert, AlertHostGalaxy, Classification,
+    Filter, FilterError, FilterResults, FilterWorker, FilterWorkerError, LoadedFilter, Origin,
+    Photometry, SurveyMatch, SurveyMatches,
 };
 use crate::utils::cutouts::CutoutStorage;
 use crate::utils::db::{fetch_timeseries_op, get_array_dict_element};
+use crate::utils::host::HostGalaxyAssociation;
 use crate::utils::lightcurves::SNT;
 use crate::utils::mpcorb::{
     fill_geometry, has_geometry, normalize_ztf_ssnamenr, OrbitCache, ORBITS_COLLECTION,
@@ -151,6 +152,8 @@ pub struct ZtfAlertEnriched {
     #[serde(deserialize_with = "deserialize_ztf_forced_lightcurve")]
     pub fp_hists: Vec<ZtfPhotometry>,
     pub survey_matches: Option<ZtfSurveyMatches>,
+    #[serde(default)]
+    pub host_galaxy: Option<HostGalaxyAssociation>,
 }
 
 /// Builds ZTF Alert objects from the provided filter results and alert collection.
@@ -393,6 +396,10 @@ pub async fn build_ztf_alerts(
             cutout_difference: cutouts.cutout_difference,
             survey: Survey::Ztf,
             survey_matches,
+            host_galaxy: alert
+                .host_galaxy
+                .as_ref()
+                .and_then(AlertHostGalaxy::from_association),
         };
 
         alerts_output.push(alert);
@@ -502,6 +509,7 @@ pub async fn build_ztf_filter_pipeline(
     let use_prv_nondetections_index = uses_field_in_filter(filter_pipeline, "prv_nondetections");
     let use_fp_hists_index = uses_field_in_filter(filter_pipeline, "fp_hists");
     let use_cross_matches_index = uses_field_in_filter(filter_pipeline, "cross_matches");
+    let use_host_galaxy_index = uses_field_in_filter(filter_pipeline, "host_galaxy");
     let use_aliases_index = uses_field_in_filter(filter_pipeline, "aliases");
     let use_sso_history_index = uses_field_in_filter(filter_pipeline, "sso_history");
 
@@ -577,6 +585,12 @@ pub async fn build_ztf_filter_pipeline(
             get_array_dict_element("aux.cross_matches"),
         );
     }
+    if use_host_galaxy_index.is_some() {
+        aux_add_fields.insert(
+            "host_galaxy".to_string(),
+            get_array_dict_element("aux.host_galaxy"),
+        );
+    }
     if use_aliases_index.is_some() {
         aux_add_fields.insert("aliases".to_string(), get_array_dict_element("aux.aliases"));
     }
@@ -584,6 +598,7 @@ pub async fn build_ztf_filter_pipeline(
     let mut insert_aux_pipeline = use_prv_candidates_index.is_some()
         || use_prv_nondetections_index.is_some()
         || use_cross_matches_index.is_some()
+        || use_host_galaxy_index.is_some()
         || use_fp_hists_index.is_some()
         || use_aliases_index.is_some();
 
@@ -598,6 +613,9 @@ pub async fn build_ztf_filter_pipeline(
         insert_aux_index = insert_aux_index.min(index);
     }
     if let Some(index) = use_cross_matches_index {
+        insert_aux_index = insert_aux_index.min(index);
+    }
+    if let Some(index) = use_host_galaxy_index {
         insert_aux_index = insert_aux_index.min(index);
     }
     if let Some(index) = use_aliases_index {
@@ -1314,5 +1332,43 @@ mod sso_history_tests {
             .expect("lookup present");
         let rendered = format!("{:?}", lookup);
         assert!(rendered.contains("candidate.programid"));
+    }
+
+    /// A filter that reads host_galaxy must actually be given it: the field
+    /// lives on the aux document, so without the lookup and the addFields the
+    /// condition silently matches nothing.
+    #[tokio::test]
+    async fn test_a_filter_reading_host_galaxy_receives_it() {
+        let permissions = HashMap::from([(Survey::Ztf, vec![1])]);
+        let pipeline = vec![
+            serde_json::json!({"$match": {"host_galaxy.best_host.d_dlr": {"$lt": 4.0}}}),
+            serde_json::json!({"$project": {"objectId": 1}}),
+        ];
+        let built = build_ztf_filter_pipeline(&pipeline, &permissions)
+            .await
+            .expect("builds");
+        let rendered = format!("{built:?}");
+        assert!(
+            rendered.contains("ZTF_alerts_aux"),
+            "no aux lookup was inserted"
+        );
+        assert!(
+            rendered.contains("aux.host_galaxy"),
+            "host_galaxy was never projected out of aux"
+        );
+    }
+
+    /// And a filter that does not ask for it is not made to pay for the lookup.
+    #[tokio::test]
+    async fn test_a_filter_ignoring_host_galaxy_gets_no_lookup() {
+        let permissions = HashMap::from([(Survey::Ztf, vec![1])]);
+        let pipeline = vec![
+            serde_json::json!({"$match": {"candidate.magpsf": {"$lt": 20.0}}}),
+            serde_json::json!({"$project": {"objectId": 1}}),
+        ];
+        let built = build_ztf_filter_pipeline(&pipeline, &permissions)
+            .await
+            .expect("builds");
+        assert!(!format!("{built:?}").contains("aux.host_galaxy"));
     }
 }

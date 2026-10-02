@@ -142,6 +142,7 @@ async fn main() -> std::io::Result<()> {
                     .service(routes::babamul::surveys::get_objects)
                     .service(routes::babamul::surveys::cone_search_objects)
                     .service(routes::babamul::surveys::get_cutouts)
+                    .service(routes::babamul::surveys::get_track)
                     .service(routes::babamul::surveys::get_alerts)
                     .service(routes::babamul::surveys::cone_search_alerts)
                     .service(routes::babamul::stats::get_nightly_stats)
@@ -151,6 +152,8 @@ async fn main() -> std::io::Result<()> {
                     .service(routes::babamul::tokens::get_tokens)
                     .service(routes::babamul::tokens::post_token)
                     .service(routes::babamul::tokens::delete_token)
+                    .service(routes::babamul::admin::get_admin_users)
+                    .service(routes::babamul::admin::patch_admin_user)
                     // Larger JSON limit for skymap uploads (~130 MB base64). This
                     // prefix-less scope swallows any sibling after it, so keep it last.
                     .service(
@@ -177,6 +180,7 @@ async fn main() -> std::io::Result<()> {
                 .service(routes::filters::validate_filter)
                 .service(routes::filters::get_filters)
                 .service(routes::filters::get_filter)
+                .service(routes::filters::delete_filter)
                 .service(routes::filters::post_filter_version)
                 .service(routes::filters::post_filter_test)
                 .service(routes::filters::post_filter_test_count)
@@ -191,6 +195,7 @@ async fn main() -> std::io::Result<()> {
                 .service(routes::queries::post_find_query)
                 .service(routes::queries::post_cone_search_query)
                 .service(routes::surveys::get_cutouts)
+                .service(routes::surveys::get_track)
                 .service(routes::queries::post_count_query)
                 .service(routes::queries::post_estimated_count_query)
                 .service(routes::queries::post_pipeline_query)

@@ -9,6 +9,7 @@ use crate::{
     utils::{
         cutouts::CutoutStorageError,
         enums::Survey,
+        host::HostGalaxyAssociation,
         o11y::metrics::SCHEDULER_METER,
         retry::{
             is_transient_redis_error, retry_transient, DEFAULT_BASE_BACKOFF, DEFAULT_MAX_RETRIES,
@@ -193,6 +194,40 @@ pub struct Alert {
     #[serde(with = "serde_avro_bytes", rename = "cutoutDifference")]
     pub cutout_difference: Vec<u8>,
     pub survey_matches: SurveyMatches,
+    pub host_galaxy: Option<AlertHostGalaxy>,
+}
+
+#[serdavro]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AlertHostGalaxy {
+    pub objname: Option<String>,
+    pub catalog: Option<String>,
+    pub z: Option<f64>,
+    pub dist_mpc: Option<f64>,
+    pub dist_mpc_method: Option<String>,
+    pub sep_arcsec: f64,
+    pub sep_kpc: Option<f64>,
+    pub d_dlr: f64,
+    pub posterior: f64,
+    pub p_host_none: f64,
+}
+
+impl AlertHostGalaxy {
+    pub fn from_association(association: &HostGalaxyAssociation) -> Option<Self> {
+        let best_host = association.best_host.as_ref()?;
+        Some(Self {
+            objname: best_host.objname.clone(),
+            catalog: best_host.catalog.clone(),
+            z: best_host.z,
+            dist_mpc: best_host.dist_mpc,
+            dist_mpc_method: best_host.dist_mpc_method.clone(),
+            sep_arcsec: best_host.sep_arcsec,
+            sep_kpc: best_host.sep_kpc,
+            d_dlr: best_host.d_dlr,
+            posterior: best_host.posterior,
+            p_host_none: association.p_host_none,
+        })
+    }
 }
 
 pub fn load_schema(schema_str: &str) -> Result<Schema, FilterWorkerError> {
@@ -1254,6 +1289,7 @@ pub async fn run_filter_worker<T: FilterWorker>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::host::StoredHostCandidate;
     use crate::{
         conf::{get_test_db, load_config, load_dotenv},
         utils::{enums::Survey, testing::TEST_CONFIG_FILE},
@@ -1296,6 +1332,52 @@ mod tests {
     }
 
     #[test]
+    fn test_alert_host_galaxy_from_association() {
+        let best_host = StoredHostCandidate {
+            objname: Some("NGC 4993".to_string()),
+            catalog: Some("NED".to_string()),
+            objtype: Some("G".to_string()),
+            size_is_isophotal: true,
+            orientation_is_nominal: false,
+            ra: 197.448,
+            dec: -23.384,
+            sep_arcsec: 10.6,
+            sep_kpc: Some(2.0),
+            dlr_arcsec: 35.0,
+            d_dlr: 0.3,
+            dlr_rank: 1,
+            posterior: 0.95,
+            z: Some(0.009727),
+            dist_mpc: Some(40.0),
+            dist_mpc_method: Some("zIndependent".to_string()),
+            a_arcsec: 60.0,
+            b_arcsec: 50.0,
+            pa_deg: 10.0,
+        };
+        let association = HostGalaxyAssociation {
+            best_host: Some(best_host.clone()),
+            candidates: vec![best_host],
+            n_candidates_searched: 1,
+            n_candidates_after_dlr_cut: 1,
+            p_host_none: 0.01,
+        };
+        let host = AlertHostGalaxy::from_association(&association).unwrap();
+        assert_eq!(host.objname.as_deref(), Some("NGC 4993"));
+        assert_eq!(host.dist_mpc, Some(40.0));
+        assert_eq!(host.z, Some(0.009727));
+        assert_eq!(host.p_host_none, 0.01);
+
+        let no_host = HostGalaxyAssociation {
+            best_host: None,
+            candidates: vec![],
+            n_candidates_searched: 0,
+            n_candidates_after_dlr_cut: 0,
+            p_host_none: 1.0,
+        };
+        assert!(AlertHostGalaxy::from_association(&no_host).is_none());
+    }
+
+    #[test]
     fn test_to_avro_bytes() {
         let alert = Alert {
             candid: 123456789,
@@ -1314,6 +1396,18 @@ mod tests {
                 ztf: None,
                 lsst: None,
             },
+            host_galaxy: Some(AlertHostGalaxy {
+                objname: Some("NGC 4993".to_string()),
+                catalog: Some("NED".to_string()),
+                z: Some(0.009727),
+                dist_mpc: Some(40.0),
+                dist_mpc_method: Some("zIndependent".to_string()),
+                sep_arcsec: 10.6,
+                sep_kpc: Some(2.0),
+                d_dlr: 0.3,
+                posterior: 0.95,
+                p_host_none: 0.01,
+            }),
         };
         let schema = load_alert_schema().unwrap();
         let avro_bytes = to_avro_bytes(&alert, &schema);
@@ -1350,6 +1444,7 @@ mod tests {
                 ztf: None,
                 lsst: None,
             },
+            host_galaxy: None,
         };
         let schema = load_alert_schema().unwrap();
         // generate a random topic name

@@ -6,9 +6,11 @@ use crate::enrichment::{
 };
 use crate::utils::db::mongify;
 use crate::utils::enums::Survey;
+use crate::utils::host::HostGalaxyAssociation;
 use crate::utils::lightcurves::{
-    analyze_photometry, prepare_photometry, summarise_detections, ActivityMetrics, Band,
-    DetectionHistory, EpisodeHistory, PerBandProperties, PhotometryMag, EPISODE_GAP_DAYS,
+    analyze_photometry, is_stationary, prepare_photometry, summarise_detections, ActivityMetrics,
+    Band, DetectionHistory, EpisodeHistory, PerBandProperties, PhotometryMag, EPISODE_GAP_DAYS,
+    STATIONARY_MIN_FORCED_SNR,
 };
 use apache_avro_derive::AvroSchema;
 use apache_avro_macros::serdavro;
@@ -111,6 +113,7 @@ pub fn create_lsst_alert_pipeline() -> Vec<Document> {
                 "prv_candidates": "$aux.prv_candidates",
                 "fp_hists": "$aux.fp_hists",
                 "cross_matches": "$aux.cross_matches",
+                "host_galaxy": "$aux.host_galaxy",
                 "survey_matches": {
                     "ztf": {
                         "$cond": {
@@ -167,6 +170,8 @@ pub struct LsstAlertForEnrichment {
     pub prv_candidates: Vec<LsstPhotometry>,
     pub fp_hists: Vec<LsstPhotometry>,
     pub cross_matches: Option<HashMap<String, Vec<serde_json::Value>>>,
+    #[serde(default)]
+    pub host_galaxy: Option<HostGalaxyAssociation>,
     pub survey_matches: Option<LsstSurveyMatches>,
 }
 
@@ -240,6 +245,9 @@ pub struct LsstAlertProperties {
     pub stationary: bool,
     pub star: Option<bool>,
     pub near_brightstar: Option<bool>,
+    /// Absent means never evaluated for a host, not evaluated and hostless.
+    #[serde(default)]
+    pub hosted: Option<bool>,
     pub photstats: PerBandProperties,
     pub multisurvey_photstats: PerBandProperties,
     /// `None` on alerts enriched before this existed: never evaluated, which is not
@@ -504,7 +512,22 @@ impl LsstEnrichmentWorker {
         let mut lightcurve = [prv_candidates, fp_hists].concat();
 
         prepare_photometry(&mut lightcurve);
-        let (photstats, _, stationary) = analyze_photometry(&lightcurve);
+        let (photstats, _, _) = analyze_photometry(&lightcurve);
+        let stationary = is_stationary(
+            alert
+                .prv_candidates
+                .iter()
+                .filter(|p| p.jd <= alert.candidate.jd)
+                .filter_map(|p| p.to_photometry_mag(None))
+                .chain(
+                    alert
+                        .fp_hists
+                        .iter()
+                        .filter(|p| p.jd <= alert.candidate.jd)
+                        .filter_map(|p| p.to_photometry_mag(Some(STATIONARY_MIN_FORCED_SNR))),
+                )
+                .map(|p| p.time),
+        );
 
         // Compute multisurvey photstats (including ZTF if available, other surveys can be added later)
         let mut has_matches = false;
@@ -553,6 +576,7 @@ impl LsstEnrichmentWorker {
 
         Ok(LsstAlertProperties {
             rock: is_rock,
+            hosted: alert.host_galaxy.as_ref().map(|h| h.best_host.is_some()),
             sso: Some(sso),
             activity: Some(activity),
             star: is_star,

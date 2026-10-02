@@ -6,6 +6,11 @@ babamul:
 gpu:
   device_ids: [0, 1]
 
+kafka:
+  consumer:
+    decam:
+      server: "vm051.bridges2.psc.edu:9093"
+
 workers:
   ztf:
     alert:
