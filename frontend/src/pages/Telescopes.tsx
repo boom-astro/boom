@@ -207,7 +207,7 @@ export default function Telescopes() {
             {!live && (
               <Button variant="outline" size="sm" onClick={goLive}>
                 <IconClock />
-                Back to now
+                Now
               </Button>
             )}
           </div>
