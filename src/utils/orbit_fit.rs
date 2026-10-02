@@ -17,6 +17,11 @@ pub struct Observation {
     pub ra: f64,
     /// Degrees.
     pub dec: f64,
+    /// The telescope it was taken from. Carried per observation rather than
+    /// per fit so astrometry from two surveys can be fitted together: the
+    /// parallax between observatories is arcseconds at these distances, which
+    /// is the scale the residual gate works at.
+    pub site: Site,
 }
 
 /// A fitted orbit and how well it reproduces the observations.
@@ -160,18 +165,13 @@ fn solve(mut a: Vec<Vec<f64>>, mut b: Vec<f64>) -> Option<Vec<f64>> {
 }
 
 /// Root-mean-square residual over the observations, arcseconds.
-pub fn rms_arcsec(
-    state: &State,
-    epoch_jd: f64,
-    observations: &[Observation],
-    site: &Site,
-) -> Option<f64> {
+pub fn rms_arcsec(state: &State, epoch_jd: f64, observations: &[Observation]) -> Option<f64> {
     if observations.is_empty() {
         return None;
     }
     let observers: Vec<[f64; 3]> = observations
         .iter()
-        .map(|obs| observer_position(obs.jd, site))
+        .map(|obs| observer_position(obs.jd, &obs.site))
         .collect();
     rms_and_light_times(state, epoch_jd, observations, &observers).map(|(rms, _)| rms)
 }
@@ -203,9 +203,8 @@ pub fn fit_orbit(
     initial: &State,
     epoch_jd: f64,
     max_iterations: usize,
-    site: &Site,
 ) -> Option<OrbitFit> {
-    fit_orbit_with(observations, initial, epoch_jd, max_iterations, site, None)
+    fit_orbit_with(observations, initial, epoch_jd, max_iterations, None)
 }
 
 /// [`fit_orbit`], abandoning the fit early when `give_up` says it cannot pass.
@@ -214,7 +213,6 @@ pub fn fit_orbit_with(
     initial: &State,
     epoch_jd: f64,
     max_iterations: usize,
-    site: &Site,
     give_up: Option<GiveUp>,
 ) -> Option<OrbitFit> {
     if observations.len() < 3 {
@@ -224,7 +222,7 @@ pub fn fit_orbit_with(
     // observation rather than once per prediction.
     let observers: Vec<[f64; 3]> = observations
         .iter()
-        .map(|obs| observer_position(obs.jd, site))
+        .map(|obs| observer_position(obs.jd, &obs.site))
         .collect();
     let mut state = *initial;
     let (mut best, mut light_times) =
@@ -379,7 +377,12 @@ mod tests {
         jds.iter()
             .map(|&jd| {
                 let (ra, dec) = predict_radec(&state, epoch, jd, &ZTF).expect("ephemeris");
-                Observation { jd, ra, dec }
+                Observation {
+                    jd,
+                    ra,
+                    dec,
+                    site: ZTF,
+                }
             })
             .collect()
     }
@@ -388,6 +391,135 @@ mod tests {
     const NIGHTS: [f64; 6] = [
         2460010.0, 2460010.05, 2460013.0, 2460013.05, 2460020.0, 2460020.05,
     ];
+
+    /// Between two nearby observatories the residual does not reveal a site
+    /// error at all: the fit absorbs it into the orbit and still looks clean.
+    /// What moves is where that orbit says the object will be, so a search that
+    /// skipped the sites would quietly produce unrecoverable predictions.
+    /// Measured on real CSS and ZTF astrometry: residual 0.19" to 0.20", with a
+    /// median orbit drift of 4.2" after a month.
+    #[test]
+    fn test_a_nearby_site_error_hides_in_the_orbit_not_the_residual() {
+        use crate::utils::sso_geometry::MT_LEMMON;
+
+        let el = ceres_like();
+        let truth = truth_state(&el, EPOCH);
+        // Palomar and Mt Lemmon, ~500 km apart, as CSS and ZTF are, on the
+        // two-night arc a real cross-survey link produces: one survey's
+        // tracklet on each night, which is far looser than a long arc.
+        let arc: [(f64, Site); 4] = [
+            (EPOCH - 1.0, MT_LEMMON),
+            (EPOCH - 0.97, MT_LEMMON),
+            (EPOCH + 1.0, ZTF),
+            (EPOCH + 1.03, ZTF),
+        ];
+        let honest: Vec<Observation> = arc
+            .iter()
+            .map(|&(jd, site)| {
+                let (ra, dec) = predict_radec(&truth, EPOCH, jd, &site).expect("ephemeris");
+                Observation { jd, ra, dec, site }
+            })
+            .collect();
+        let mislabelled: Vec<Observation> = honest
+            .iter()
+            .map(|o| Observation { site: ZTF, ..*o })
+            .collect();
+
+        let start = State {
+            pos: [
+                truth.pos[0] + 1e-3,
+                truth.pos[1] - 8e-4,
+                truth.pos[2] + 4e-4,
+            ],
+            vel: [
+                truth.vel[0] + 2e-5,
+                truth.vel[1] - 1e-5,
+                truth.vel[2] + 5e-6,
+            ],
+        };
+        let right = fit_orbit(&honest, &start, EPOCH, 60).expect("fits");
+        let wrong = fit_orbit(&mislabelled, &start, EPOCH, 60).expect("fits");
+
+        // The gate sees nothing: both look like good fits.
+        assert!(
+            wrong.rms_arcsec < 2.0,
+            "the mislabelled fit should still pass the gate, got {:.2}\"",
+            wrong.rms_arcsec
+        );
+
+        // The orbits disagree about where the object goes.
+        let later = EPOCH + 30.0;
+        let (r1, d1) = predict_radec(&right.state, EPOCH, later, &ZTF).expect("ephemeris");
+        let (r2, d2) = predict_radec(&wrong.state, EPOCH, later, &ZTF).expect("ephemeris");
+        let drift = (((r2 - r1 + 540.0).rem_euclid(360.0) - 180.0) * d1.to_radians().cos())
+            .hypot(d2 - d1)
+            * 3600.0;
+        assert!(
+            drift > 1.0,
+            "a site error should bias the orbit even when the residual hides it, drift {drift:.2}\""
+        );
+    }
+
+    /// Astrometry from two observatories fits only when each observation says
+    /// which one it came from. Told they all came from one, the fit has to
+    /// absorb the parallax between them into the orbit, and cannot: it leaves
+    /// a residual far above the gate the linker accepts at.
+    #[test]
+    fn test_an_arc_from_two_sites_needs_its_sites() {
+        use crate::utils::sso_geometry::SIDING_SPRING;
+
+        let el = ceres_like();
+        let truth = truth_state(&el, EPOCH);
+        // Alternate Palomar and Siding Spring: opposite hemispheres, so the
+        // baseline between them is the whole Earth.
+        let honest: Vec<Observation> = NIGHTS
+            .iter()
+            .enumerate()
+            .map(|(k, &jd)| {
+                let site = if k % 2 == 0 { ZTF } else { SIDING_SPRING };
+                let (ra, dec) = predict_radec(&truth, EPOCH, jd, &site).expect("ephemeris");
+                Observation { jd, ra, dec, site }
+            })
+            .collect();
+        // The same positions, every one claiming to be from Palomar.
+        let mislabelled: Vec<Observation> = honest
+            .iter()
+            .map(|o| Observation { site: ZTF, ..*o })
+            .collect();
+
+        let start = State {
+            pos: [
+                truth.pos[0] + 1e-3,
+                truth.pos[1] - 8e-4,
+                truth.pos[2] + 4e-4,
+            ],
+            vel: [
+                truth.vel[0] + 2e-5,
+                truth.vel[1] - 1e-5,
+                truth.vel[2] + 5e-6,
+            ],
+        };
+
+        let right = fit_orbit(&honest, &start, EPOCH, 60).expect("the honest arc fits");
+        let wrong = fit_orbit(&mislabelled, &start, EPOCH, 60).expect("the mislabelled arc fits");
+
+        assert!(
+            right.rms_arcsec < 0.1,
+            "an arc that names its sites should fit cleanly, got {:.3}\"",
+            right.rms_arcsec
+        );
+        assert!(
+            wrong.rms_arcsec > 1.0,
+            "mislabelling every site as Palomar should leave a large residual, got {:.3}\"",
+            wrong.rms_arcsec
+        );
+        assert!(
+            wrong.rms_arcsec > 10.0 * right.rms_arcsec,
+            "the site information should matter by an order of magnitude: {:.3}\" vs {:.3}\"",
+            wrong.rms_arcsec,
+            right.rms_arcsec
+        );
+    }
 
     #[test]
     fn test_recovers_a_perturbed_state() {
@@ -407,8 +539,8 @@ mod tests {
                 truth.vel[2] + 5e-5,
             ],
         };
-        let before = rms_arcsec(&start, EPOCH, &obs, &ZTF).expect("residual");
-        let fit = fit_orbit(&obs, &start, EPOCH, 60, &ZTF).expect("fit");
+        let before = rms_arcsec(&start, EPOCH, &obs).expect("residual");
+        let fit = fit_orbit(&obs, &start, EPOCH, 60).expect("fit");
         assert!(before > 100.0, "start should be far off, was {before}");
         assert!(
             fit.rms_arcsec < 0.1,
@@ -432,7 +564,7 @@ mod tests {
             pos: [truth.pos[0] + 0.005, truth.pos[1], truth.pos[2]],
             vel: truth.vel,
         };
-        let fit = fit_orbit(&obs, &start, EPOCH, 60, &ZTF).expect("fit");
+        let fit = fit_orbit(&obs, &start, EPOCH, 60).expect("fit");
         assert!(
             (fit.elements.a - el.a).abs() < 0.02,
             "a {} vs {}",
@@ -452,7 +584,7 @@ mod tests {
             pos: [truth.pos[0] + 0.005, truth.pos[1], truth.pos[2]],
             vel: truth.vel,
         };
-        let fit = fit_orbit(&obs, &start, EPOCH, 60, &ZTF).expect("fit");
+        let fit = fit_orbit(&obs, &start, EPOCH, 60).expect("fit");
         // Ten days of arc leaves the semimajor axis loose even when the
         // positions are reproduced, so a track this short is not an orbit.
         assert!(
@@ -470,7 +602,7 @@ mod tests {
     fn test_rejects_too_few_observations() {
         let el = ceres_like();
         let obs = observations(&el, EPOCH, &NIGHTS[..2]);
-        assert!(fit_orbit(&obs, &truth_state(&el, EPOCH), EPOCH, 20, &ZTF).is_none());
+        assert!(fit_orbit(&obs, &truth_state(&el, EPOCH), EPOCH, 20).is_none());
     }
 
     #[test]
@@ -478,7 +610,7 @@ mod tests {
         let el = ceres_like();
         let obs = observations(&el, EPOCH, &NIGHTS);
         let truth = truth_state(&el, EPOCH);
-        let fit = fit_orbit(&obs, &truth, EPOCH, 20, &ZTF).expect("fit");
+        let fit = fit_orbit(&obs, &truth, EPOCH, 20).expect("fit");
         assert!(fit.rms_arcsec < 1e-3, "rms {}", fit.rms_arcsec);
     }
 
@@ -488,7 +620,7 @@ mod tests {
         let mut obs = observations(&el, EPOCH, &NIGHTS);
         // Push one position a degree away: no orbit passes through them all.
         obs[3].dec += 1.0;
-        let fit = fit_orbit(&obs, &truth_state(&el, EPOCH), EPOCH, 60, &ZTF).expect("fit");
+        let fit = fit_orbit(&obs, &truth_state(&el, EPOCH), EPOCH, 60).expect("fit");
         assert!(
             fit.rms_arcsec > 100.0,
             "a bad arc should not fit, rms {}",

@@ -594,6 +594,9 @@ fn score(
             jd: d.jd,
             ra: d.ra,
             dec: d.dec,
+            // A detection that names its telescope overrides the run's, which
+            // is what lets one fit draw on two surveys.
+            site: d.site.unwrap_or(cfg.site),
         })
         .collect();
     // A tracklet built without its detections to hand still carries a midpoint.
@@ -607,6 +610,13 @@ fn score(
                 jd: tracklets[m].jd_ref,
                 ra: tracklets[m].ra_ref,
                 dec: tracklets[m].dec_ref,
+                // The midpoint has no detection of its own, so the site comes
+                // from any member that does.
+                site: tracklets[m]
+                    .ids
+                    .iter()
+                    .find_map(|id| by_id.get(id).and_then(|d| d.site))
+                    .unwrap_or(cfg.site),
             })
             .collect()
     };
@@ -622,7 +632,6 @@ fn score(
         &track.state,
         cfg.reference_jd,
         20,
-        &cfg.site,
         Some(give_up),
     ) {
         Some(fit) => {
@@ -631,7 +640,7 @@ fn score(
         }
         // Too few positions to refine six parameters, so take the state as it
         // stands rather than discarding a candidate for being short.
-        None => rms_arcsec(&track.state, cfg.reference_jd, &observations, &cfg.site),
+        None => rms_arcsec(&track.state, cfg.reference_jd, &observations),
     };
 }
 
@@ -1157,6 +1166,7 @@ mod tests {
                         mag: Some(19.0),
                         mag_err: Some(0.1),
                         band: Some('r'),
+                        site: None,
                     });
                 }
             }

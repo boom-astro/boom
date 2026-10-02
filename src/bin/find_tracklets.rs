@@ -158,6 +158,26 @@ struct Cli {
     #[arg(long, value_name = "FILE")]
     input: Option<String>,
 
+    /// Also link tracklets another survey published, from directories of CSS
+    /// `.mtds` files. The telescope is taken from each filename, so its
+    /// astrometry is fitted from the site it was actually observed at.
+    #[arg(long, value_name = "DIR")]
+    css: Vec<String>,
+
+    /// Fetch these nights from the public CSS archive before linking, as
+    /// YYYY-MM-DD. Downloads are cached, so a repeated run costs one listing.
+    #[arg(long, value_name = "DATE")]
+    css_fetch: Vec<chrono::NaiveDate>,
+
+    /// Telescopes to fetch, by MPC code. G96 is the deepest CSS survey
+    /// telescope and the one worth having if only one is taken.
+    #[arg(long, value_name = "CODE", default_values_t = [String::from("G96")])]
+    css_telescope: Vec<String>,
+
+    /// Where fetched nights are cached, one directory per telescope-night.
+    #[arg(long, value_name = "DIR", default_value = "css_cache")]
+    css_cache: String,
+
     /// Find tracklets per night, then link them across nights.
     #[arg(long, default_value_t = false)]
     link: bool,
@@ -169,6 +189,90 @@ struct Cli {
     /// Velocity agreement required to cluster propagated states, au/day.
     #[arg(long, default_value_t = 0.0004)]
     velocity_tol: f64,
+}
+
+/// Fetch the requested telescope-nights, returning the directories to read.
+///
+/// PDS ingest runs days to weeks behind observing, so a night that is not there
+/// is reported and skipped rather than failing the run: a nightly job asking
+/// for last night will usually find nothing and should still link what it has.
+async fn fetch_css(args: &Cli) -> Vec<String> {
+    let client = match reqwest::Client::builder().build() {
+        Ok(client) => client,
+        Err(e) => {
+            error!("could not build an http client: {e}");
+            return Vec::new();
+        }
+    };
+    let mut dirs = Vec::new();
+    for night in &args.css_fetch {
+        for code in &args.css_telescope {
+            let dir = std::path::Path::new(&args.css_cache)
+                .join(format!("{code}_{}", night.format("%Y%m%d")));
+            match boom::utils::css::fetch_night(&client, code, *night, &dir).await {
+                Ok(f) if f.found == 0 => info!("{code} {night}: not in the archive yet"),
+                Ok(f) => {
+                    info!(
+                        "{code} {night}: {} files, {} newly fetched",
+                        f.found, f.fetched
+                    );
+                    dirs.push(dir.to_string_lossy().into_owned());
+                }
+                Err(e) => error!("{code} {night}: {e}"),
+            }
+        }
+    }
+    dirs
+}
+
+/// Tracklets another survey already built, read from directories of CSS files.
+///
+/// The MPC code is the filename's first field -- `G96_20250930_...` -- which is
+/// also the archive's directory for that telescope, so a run over several
+/// telescopes keeps each one's site.
+fn load_css(dirs: &[String], cfg: &TrackletConfig) -> (Vec<Tracklet>, Vec<Detection>) {
+    let (mut tracklets, mut detections) = (Vec::new(), Vec::new());
+    for dir in dirs {
+        let entries = match std::fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(e) => {
+                error!("could not read {dir}: {e}");
+                continue;
+            }
+        };
+        let (mut files, mut parsed_tracklets) = (0usize, 0usize);
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("mtds") {
+                continue;
+            }
+            let Some(code) = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .and_then(|n| n.split('_').next())
+            else {
+                continue;
+            };
+            let text = match std::fs::read_to_string(&path) {
+                Ok(text) => text,
+                Err(e) => {
+                    error!("could not read {}: {e}", path.display());
+                    continue;
+                }
+            };
+            match boom::utils::css::parse_dets(&text, code, cfg) {
+                Ok(parsed) => {
+                    files += 1;
+                    parsed_tracklets += parsed.tracklets.len();
+                    tracklets.extend(parsed.tracklets);
+                    detections.extend(parsed.detections);
+                }
+                Err(e) => error!("could not parse {}: {e}", path.display()),
+            }
+        }
+        info!("{dir}: {parsed_tracklets} tracklets from {files} files");
+    }
+    (tracklets, detections)
 }
 
 /// Tracklets found independently in each night the detections span.
@@ -275,6 +379,7 @@ fn load_file(
             mag: row.magpsf,
             mag_err: row.sigmapsf,
             band: ztf_band(row.fid),
+            site: None,
         });
     }
     Ok((detections, labels))
@@ -360,6 +465,7 @@ async fn load(
             mag: candidate.get_f64("magpsf").ok(),
             mag_err: candidate.get_f64("sigmapsf").ok(),
             band: ztf_band(candidate.get_i32("fid").ok()),
+            site: None,
         });
     }
     Ok((detections, labels))
@@ -888,12 +994,13 @@ async fn run_thor(
                     jd: d.jd,
                     ra: d.ra,
                     dec: d.dec,
+                    site: d.site.unwrap_or(boom::utils::sso_geometry::ZTF),
                 })
                 .collect();
             if obs.len() < 3 {
                 return Some((c, Verdict(BoundFit::Ungated, None)));
             }
-            match fit_orbit(&obs, &seed, epoch, 20, &boom::utils::sso_geometry::ZTF) {
+            match fit_orbit(&obs, &seed, epoch, 20) {
                 None => Some((c, Verdict(BoundFit::None, None))),
                 Some(fit) if fit.rms_arcsec <= args.max_residual => {
                     Some((c, Verdict(BoundFit::Good, Some(fit.rms_arcsec))))
@@ -1229,7 +1336,7 @@ async fn main() {
     } else {
         None
     };
-    let (detections, labels) = match &args.input {
+    let (mut detections, labels) = match &args.input {
         Some(path) => load_file(path).expect("failed to read dump"),
         None => {
             let db = db.as_ref().expect("built when there is no dump");
@@ -1281,11 +1388,29 @@ async fn main() {
     }
 
     let started = std::time::Instant::now();
-    let tracklets = if args.link {
+    // Tracklets are found from this run's own detections only; a survey that
+    // publishes its groupings keeps them rather than having them rediscovered.
+    let mut tracklets = if args.link {
         tracklets_per_night(&detections, &cfg)
     } else {
         find_tracklets(&detections, &cfg)
     };
+    let mut css_dirs = args.css.clone();
+    if !args.css_fetch.is_empty() {
+        css_dirs.extend(fetch_css(&args).await);
+    }
+    if !css_dirs.is_empty() {
+        let (css_tracklets, css_detections) = load_css(&css_dirs, &cfg);
+        info!(
+            "{} tracklets and {} detections from another survey",
+            css_tracklets.len(),
+            css_detections.len()
+        );
+        tracklets.extend(css_tracklets);
+        // Into the same pool, so the linker can look their positions up.
+        detections.extend(css_detections);
+    }
+    let tracklets = tracklets;
     info!(
         "{} tracklets from {} detections in {:.1}s",
         tracklets.len(),

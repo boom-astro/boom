@@ -269,6 +269,7 @@ mod tests {
                 mag: Some(19.53),
                 mag_err: None,
                 band: Some('g'),
+                site: None,
             },
             Detection {
                 id: 2,
@@ -278,6 +279,7 @@ mod tests {
                 mag: Some(19.61),
                 mag_err: None,
                 band: Some('g'),
+                site: None,
             },
             Detection {
                 id: 3,
@@ -287,6 +289,7 @@ mod tests {
                 mag: None,
                 mag_err: None,
                 band: None,
+                site: None,
             },
         ]
     }

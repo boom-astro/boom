@@ -352,6 +352,7 @@ mod tests {
                     mag: None,
                     mag_err: None,
                     band: None,
+                    site: None,
                 }
             })
             .collect()
@@ -397,6 +398,7 @@ mod tests {
                     mag: None,
                     mag_err: None,
                     band: None,
+                    site: None,
                 }
             })
             .collect()
@@ -422,6 +424,7 @@ mod tests {
                     mag: None,
                     mag_err: None,
                     band: None,
+                    site: None,
                 }
             })
             .collect()
@@ -544,6 +547,7 @@ mod tests {
                     mag: None,
                     mag_err: None,
                     band: None,
+                    site: None,
                 }
             })
             .collect();
