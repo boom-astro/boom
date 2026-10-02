@@ -275,11 +275,8 @@ pub async fn get_nightly_stats(
                 windows: surveys
                     .iter()
                     .map(|survey| {
-                        let window = NightWindow {
-                            start: survey.local_noon(date),
-                            end: survey.local_noon(&(*date + Duration::days(1))),
-                        };
-                        (survey.as_str().to_lowercase(), window)
+                        let (start, end) = survey.night_window(date);
+                        (survey.as_str().to_lowercase(), NightWindow { start, end })
                     })
                     .collect(),
             }

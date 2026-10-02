@@ -5023,7 +5023,7 @@ mod tests {
             assert_eq!(stats.get("winter").is_some(), sees_winter, "{token:?}");
             assert_eq!(
                 stats["windows"]["decam"]["start"],
-                serde_json::json!(Survey::Decam.local_noon(&night)),
+                serde_json::json!(Survey::Decam.night_window(&night).0),
                 "{token:?}"
             );
             assert_eq!(

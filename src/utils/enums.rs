@@ -32,30 +32,31 @@ impl Survey {
         format!("{}_alerts_packets_queue", self)
     }
 
-    pub fn observatory_timezone(&self) -> Tz {
+    fn observatory_timezone(&self) -> Tz {
         match self {
             Survey::Ztf | Survey::Winter => Tz::America__Los_Angeles,
             Survey::Lsst | Survey::Decam => Tz::America__Santiago,
         }
     }
 
-    pub fn local_noon(&self, date: &NaiveDate) -> DateTime<Utc> {
+    fn local_noon(&self, date: &NaiveDate) -> DateTime<Utc> {
         let tz = self.observatory_timezone();
         let offset = |utc: NaiveDateTime| tz.offset_from_utc_datetime(&utc).fix();
         let noon = date.and_time(NaiveTime::MIN) + Duration::hours(12);
         (noon - offset(noon - offset(noon))).and_utc()
     }
 
-    pub fn date_to_jd_local_noon(&self, date: &NaiveDate) -> f64 {
-        flare::Time::from_utc(self.local_noon(date)).to_jd()
+    pub fn night_window(&self, date: &NaiveDate) -> (DateTime<Utc>, DateTime<Utc>) {
+        (
+            self.local_noon(date),
+            self.local_noon(&(*date + Duration::days(1))),
+        )
     }
 
-    /// JD window `[start, end)` for the observing night labelled by `date`,
-    /// running from local noon of `date` to local noon of `date + 1`.
     pub fn night_jd_window(&self, date: &NaiveDate) -> (f64, f64) {
-        let start = self.date_to_jd_local_noon(date);
-        let end = self.date_to_jd_local_noon(&(*date + Duration::days(1)));
-        (start, end)
+        let (start, end) = self.night_window(date);
+        let jd = |t| flare::Time::from_utc(t).to_jd();
+        (jd(start), jd(end))
     }
 }
 
