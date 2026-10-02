@@ -257,9 +257,20 @@ pub async fn babamul_auth_middleware(
     // than listed individually — the whole point of those endpoints is to run
     // before the caller has a token.
     if BABAMUL_PUBLIC_ROUTES.contains(&req.path()) || req.path().starts_with("/babamul/oauth/") {
+        if req.headers().contains_key("Authorization") {
+            if let Ok(user) = authenticate_babamul_user(&req).await {
+                req.extensions_mut().insert(user);
+            }
+        }
         return next.call(req).await;
     }
 
+    let user = authenticate_babamul_user(&req).await?;
+    req.extensions_mut().insert(user);
+    next.call(req).await
+}
+
+async fn authenticate_babamul_user(req: &ServiceRequest) -> Result<BabamulUser, Error> {
     let auth_app_data: &web::Data<AuthProvider> = match req.app_data() {
         Some(data) => data,
         None => {
@@ -333,8 +344,7 @@ pub async fn babamul_auth_middleware(
                                 "Account not activated. Please check your email for activation instructions.",
                             ));
                         }
-                        // Inject the user in the request
-                        req.extensions_mut().insert(user);
+                        return Ok(user);
                     }
                     Ok(None) => {
                         return Err(actix_web::error::ErrorUnauthorized(
@@ -376,8 +386,7 @@ pub async fn babamul_auth_middleware(
                                         "Account not activated. Please check your email for activation instructions.",
                                     ));
                                 }
-                                // Inject the user in the request
-                                req.extensions_mut().insert(user);
+                                return Ok(user);
                             }
                             Ok(None) => {
                                 return Err(actix_web::error::ErrorUnauthorized(
@@ -404,5 +413,4 @@ pub async fn babamul_auth_middleware(
             ));
         }
     }
-    next.call(req).await
 }
