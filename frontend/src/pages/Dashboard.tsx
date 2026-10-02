@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useRef } from "react";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { Bar, BarChart, CartesianGrid, ReferenceArea, XAxis, YAxis } from "recharts";
+import { Bar, BarChart, CartesianGrid, ReferenceArea, ReferenceLine, XAxis, YAxis } from "recharts";
 import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from "@/components/ui/chart";
 import { Toggle } from "@/components/ui/toggle";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
@@ -38,14 +38,14 @@ const FIRST_NIGHT = "2018-01-01";
 const MAX_REFRESH_MONTHS = 6;
 
 const OBSERVATORIES: Record<Survey, string> = {
-  ztf: "Palomar, UTC−7",
-  lsst: "Cerro Pachón, UTC−3",
-  decam: "Cerro Tololo, UTC−4",
-  winter: "Palomar, UTC−7",
+  ztf: "Palomar",
+  lsst: "Cerro Pachón",
+  decam: "Cerro Tololo",
+  winter: "Palomar",
 };
 
 function nightConvention(surveys: readonly Survey[]): string {
-  const sites = surveys.map((s) => `${OBSERVATORIES[s]}, for ${chartConfig[s].label}`).join("; ");
+  const sites = surveys.map((s) => `${OBSERVATORIES[s]} for ${chartConfig[s].label}`).join("; ");
   return "Alerts are grouped by observing night, local noon to local noon at the observatory" +
     (sites ? ` (${sites})` : "") + ". A night is labeled by its evening date.";
 }
@@ -63,12 +63,6 @@ function formatDate(d: Date): string {
 function monthsBefore(date: string, months: number): string {
   const d = new Date(`${date}T00:00:00Z`);
   d.setUTCMonth(d.getUTCMonth() - months);
-  return formatDate(d);
-}
-
-function twoMonthsAgo(): string {
-  const d = new Date();
-  d.setMonth(d.getMonth() - 2);
   return formatDate(d);
 }
 
@@ -201,7 +195,7 @@ export default function Dashboard() {
   const todayUTC = formatDate(new Date());
 
   const [surveys, setSurveys] = useState<Set<Survey>>(new Set(SURVEY_ORDER));
-  const [startDate, setStartDate] = useState(twoMonthsAgo);
+  const [startDate, setStartDate] = useState(() => monthsBefore(todayUTC, 1));
   const [endDate, setEndDate] = useState(todayUTC);
   const [statsData, setStatsData] = useState<NightlyStat[]>([]);
   const [collections, setCollections] = useState<CollectionEntry[]>([]);
@@ -222,6 +216,7 @@ export default function Dashboard() {
 
   const chartRef = useRef<HTMLDivElement>(null);
   const [chartWidth, setChartWidth] = useState(0);
+  const [now, setNow] = useState(Date.now);
 
   useEffect(() => {
     setLoading(true);
@@ -248,6 +243,11 @@ export default function Dashboard() {
   }, [reloadKey]);
 
   useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 60_000);
+    return () => clearInterval(id);
+  }, []);
+
+  useEffect(() => {
     const el = chartRef.current;
     if (!el) return;
     const observer = new ResizeObserver(([entry]) => setChartWidth(entry.contentRect.width));
@@ -266,6 +266,7 @@ export default function Dashboard() {
   const visibleData = useMemo(() =>
       statsData.map((d) => ({
         date: d.date,
+        windows: d.windows,
         ...Object.fromEntries(shownSurveys.map((s) => [s, d[s]])),
       }) as NightlyStat),
     [statsData, shownSurveys]);
@@ -280,6 +281,19 @@ export default function Dashboard() {
     const step = Math.max(1, Math.ceil(chartData.length / fits));
     return chartData.filter((_, i) => i % step === 0).map((d) => d.date);
   }, [chartData, chartWidth]);
+
+  const nowX = useMemo(() => {
+    const positions = shownSurveys.flatMap((s) =>
+      chartData.flatMap((d, i) => {
+        const window = d.windows?.[s];
+        if (!window) return [];
+        const start = Date.parse(window.start);
+        const end = Date.parse(window.end);
+        return start <= now && now < end ? [i + (now - start) / (end - start)] : [];
+      }),
+    );
+    return positions.length ? positions.reduce((sum, x) => sum + x, 0) / positions.length : null;
+  }, [chartData, shownSurveys, now]);
 
   const monthTicks = useMemo(() => {
     const months = new Map<string, string[]>();
@@ -508,6 +522,7 @@ export default function Dashboard() {
                   tick={{ style: { fill: "var(--foreground)" }, fontSize: 11 }}
                   tickFormatter={nightMonth}
                 />
+                <XAxis xAxisId="now" type="number" domain={[0, chartData.length]} allowDataOverflow hide />
                 <YAxis
                   tickLine={false}
                   axisLine={false}
@@ -533,6 +548,15 @@ export default function Dashboard() {
                 {shownSurveys.map((s) => (
                   <Bar key={s} dataKey={s} fill={`var(--color-${s})`} radius={[2, 2, 0, 0]}/>
                 ))}
+                {nowX !== null && (
+                  <ReferenceLine
+                    xAxisId="now"
+                    x={nowX}
+                    stroke="var(--destructive)"
+                    strokeWidth={2}
+                    label={{ value: "now", position: "insideTopRight", fill: "var(--destructive)", fontSize: 11 }}
+                  />
+                )}
                 {zoomLeft && zoomRight && (
                   <ReferenceArea x1={zoomLeft} x2={zoomRight} strokeOpacity={0.3} fill="hsl(var(--accent))" fillOpacity={0.3} />
                 )}
