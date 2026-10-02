@@ -1,8 +1,12 @@
-//! The `prepare_catalog` task: make a hand-imported collection crossmatchable.
+//! The `prepare_catalog` task: make a flat collection crossmatchable.
 //!
-//! A collection imported straight from a file (Compass' `Add Data`, `mongoimport`)
-//! has flat columns. Crossmatch and the cone-search endpoint need the same
-//! spatial fields the alert pipeline writes: `ra`/`dec` as degrees, a
+//! For collections that are already here without the spatial fields, from
+//! before catalogs were ingested through BOOM. It is not the way to add one: a
+//! catalog gets a definition and `catalog_ingest`, which writes those fields as
+//! it inserts and builds the index itself. Importing a collection from a file
+//! and fixing it up afterwards is the practice the task system replaces.
+//!
+//! What it adds is what the alert pipeline writes: `ra`/`dec` as degrees, a
 //! `coordinates.radec_geojson` point with longitude shifted to `ra - 180`,
 //! galactic `coordinates.l`/`b`, and a 2dsphere index.
 //!

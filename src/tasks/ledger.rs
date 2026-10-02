@@ -27,8 +27,8 @@ pub const MUTATIONS_COLLECTION: &str = "data_mutations";
 pub enum SourceKind {
     /// A task run, kicked off from the admin page or the API.
     Task,
-    /// A migration. Recorded as a task like any other, because that is how one
-    /// runs here; [`crate::tasks::migrations`] holds which have been applied.
+    /// A migration. Unused: a migration runs as a task like anything else, so
+    /// its entries are recorded as [`SourceKind::Task`].
     Migration,
     /// The live alert pipeline.
     Pipeline,
