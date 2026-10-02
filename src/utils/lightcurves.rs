@@ -1050,7 +1050,7 @@ mod tests {
     use super::{is_stationary, EpisodeHistory, EPISODE_GAP_DAYS};
 
     #[test]
-    fn test_is_stationary_needs_a_span_beyond_a_quarter_hour() {
+    fn test_is_stationary_needs_a_span_beyond_0_01_day() {
         assert!(!is_stationary([]));
         assert!(!is_stationary([2460000.5]));
         assert!(!is_stationary([2460000.5, 2460000.505]));
