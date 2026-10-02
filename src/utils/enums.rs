@@ -1,5 +1,5 @@
 use apache_avro_macros::serdavro;
-use chrono::{NaiveDate, NaiveDateTime, NaiveTime, Offset, TimeZone};
+use chrono::{Duration, NaiveDate, NaiveDateTime, NaiveTime, Offset, TimeZone};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -41,15 +41,8 @@ impl Survey {
 
     pub fn date_to_jd_local_noon(&self, date: &NaiveDate) -> f64 {
         let tz = self.observatory_timezone();
-        let offset = |utc: NaiveDateTime| {
-            chrono::Duration::seconds(
-                tz.offset_from_utc_datetime(&utc)
-                    .fix()
-                    .local_minus_utc()
-                    .into(),
-            )
-        };
-        let noon = date.and_time(NaiveTime::MIN) + chrono::Duration::hours(12);
+        let offset = |utc: NaiveDateTime| tz.offset_from_utc_datetime(&utc).fix();
+        let noon = date.and_time(NaiveTime::MIN) + Duration::hours(12);
         flare::Time::from_utc((noon - offset(noon - offset(noon))).and_utc()).to_jd()
     }
 
@@ -57,7 +50,7 @@ impl Survey {
     /// running from local noon of `date` to local noon of `date + 1`.
     pub fn night_jd_window(&self, date: &NaiveDate) -> (f64, f64) {
         let start = self.date_to_jd_local_noon(date);
-        let end = self.date_to_jd_local_noon(&(*date + chrono::Duration::days(1)));
+        let end = self.date_to_jd_local_noon(&(*date + Duration::days(1)));
         (start, end)
     }
 }
