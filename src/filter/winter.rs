@@ -6,9 +6,10 @@ use crate::alert::WinterCandidate;
 use crate::conf::AppConfig;
 use crate::enrichment::fetch_alerts;
 use crate::filter::{
-    build_loaded_filters, run_filter, uses_field_in_filter, validate_filter_pipeline,
-    watchlist_projections, Alert, Classification, Filter, FilterError, FilterResults, FilterWorker,
-    FilterWorkerError, LoadedFilter, Origin, Photometry, SurveyMatches,
+    build_loaded_filters, record_filter_result, run_filter, uses_field_in_filter,
+    validate_filter_pipeline, watchlist_projections, Alert, Classification, Filter, FilterError,
+    FilterResults, FilterWorker, FilterWorkerError, LoadedFilter, Origin, Photometry,
+    SurveyMatches,
 };
 use crate::utils::cutouts::CutoutStorage;
 use crate::utils::db::{fetch_timeseries_op, get_array_dict_element};
@@ -432,6 +433,7 @@ impl FilterWorker for WinterFilterWorker {
             )
             .await?;
 
+            record_filter_result(&Survey::Winter, filter, out_documents.len(), candids.len());
             debug!(
                 "{}/{} WINTER alerts passed filter {}",
                 out_documents.len(),

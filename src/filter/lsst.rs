@@ -6,11 +6,11 @@ use tracing::{debug, info, instrument, warn};
 use crate::conf::AppConfig;
 use crate::enrichment::{create_lsst_alert_pipeline, fetch_alerts, LsstAlertForEnrichment};
 use crate::filter::{
-    build_loaded_filters, build_ztf_aux_data, insert_ztf_aux_pipeline_if_needed, run_filter,
-    update_aliases_index_multiple, uses_field_in_filter, validate_filter_pipeline,
-    watchlist_projections, Alert, AlertHostGalaxy, Classification, Filter, FilterError,
-    FilterResults, FilterWorker, FilterWorkerError, LoadedFilter, Origin, Photometry, SurveyMatch,
-    SurveyMatches,
+    build_loaded_filters, build_ztf_aux_data, insert_ztf_aux_pipeline_if_needed,
+    record_filter_result, run_filter, update_aliases_index_multiple, uses_field_in_filter,
+    validate_filter_pipeline, watchlist_projections, Alert, AlertHostGalaxy, Classification,
+    Filter, FilterError, FilterResults, FilterWorker, FilterWorkerError, LoadedFilter, Origin,
+    Photometry, SurveyMatch, SurveyMatches,
 };
 use crate::utils::cutouts::CutoutStorage;
 use crate::utils::db::{fetch_timeseries_op, get_array_dict_element};
@@ -550,6 +550,7 @@ impl FilterWorker for LsstFilterWorker {
             )
             .await?;
 
+            record_filter_result(&Survey::Lsst, filter, out_documents.len(), candids.len());
             debug!(
                 "{}/{} LSST alerts passed filter {}",
                 out_documents.len(),

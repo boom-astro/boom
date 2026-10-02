@@ -67,6 +67,33 @@ static ALERT_PROCESSED: LazyLock<Counter<u64>> = LazyLock::new(|| {
         .build()
 });
 
+// Counter for the number of alerts each filter passed or rejected.
+static FILTER_ALERT: LazyLock<Counter<u64>> = LazyLock::new(|| {
+    SCHEDULER_METER
+        .u64_counter("filter_worker.filter.alert")
+        .with_unit("{alert}")
+        .with_description("Number of alerts run through each filter, by result.")
+        .build()
+});
+
+pub(crate) fn record_filter_result(
+    survey: &Survey,
+    filter: &LoadedFilter,
+    passed: usize,
+    total: usize,
+) {
+    let attributes = |result: &'static str| {
+        [
+            KeyValue::new("survey", survey.as_str()),
+            KeyValue::new("filter.id", filter.id.clone()),
+            KeyValue::new("filter.name", filter.name.clone()),
+            KeyValue::new("result", result),
+        ]
+    };
+    FILTER_ALERT.add(passed as u64, &attributes("passed"));
+    FILTER_ALERT.add(total.saturating_sub(passed) as u64, &attributes("rejected"));
+}
+
 // Surveys that require permissions to be defined in filters
 pub const SURVEYS_REQUIRING_PERMISSIONS: [Survey; 1] = [Survey::Ztf];
 
