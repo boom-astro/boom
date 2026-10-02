@@ -85,7 +85,3 @@ export function darkIntervals(
   }
   return intervals;
 }
-
-export function nightLabel(ms: number, utcOffsetHours: number): string {
-  return new Date(ms + (utcOffsetHours - 12) * 3_600_000).toISOString().slice(0, 10);
-}

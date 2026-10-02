@@ -8,7 +8,6 @@ export type Telescope = {
   survey: string;
   instrument: string;
   color: string;
-  utcOffset: number;
   acl?: string;
 };
 
@@ -37,7 +36,6 @@ export const SITES: Site[] = [
         survey: "Zwicky Transient Facility",
         instrument: "48-inch Samuel Oschin Schmidt telescope",
         color: "var(--ztf)",
-        utcOffset: -7,
       },
       {
         id: "winter",
@@ -45,7 +43,6 @@ export const SITES: Site[] = [
         survey: "Wide-field Infrared Transient Explorer",
         instrument: "1-m robotic infrared telescope",
         color: "var(--winter)",
-        utcOffset: -7,
         acl: "winter",
       },
     ],
@@ -64,7 +61,6 @@ export const SITES: Site[] = [
         survey: "Legacy Survey of Space and Time",
         instrument: "8.4-m Simonyi Survey Telescope, Vera C. Rubin Observatory",
         color: "var(--lsst)",
-        utcOffset: -3,
       },
       {
         id: "decam",
@@ -72,7 +68,6 @@ export const SITES: Site[] = [
         survey: "Dark Energy Camera",
         instrument: "4-m Víctor M. Blanco Telescope, CTIO",
         color: "var(--decam)",
-        utcOffset: -4,
       },
     ],
   },

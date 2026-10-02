@@ -9,7 +9,7 @@ import NightMap from "@/components/telescopes/NightMap";
 import NightTimeline from "@/components/telescopes/NightTimeline";
 import api, { type NightlyStat } from "@/lib/api";
 import { useAppStore } from "@/lib/store";
-import { nextCrossing, nightLabel, skyState, sunAltitudeAt, type SkyState } from "@/lib/sun";
+import { nextCrossing, skyState, sunAltitudeAt, type SkyState } from "@/lib/sun";
 import { formatClock, NIGHT_COLOR, SITES, type Site, type Telescope } from "@/lib/telescopes";
 
 const DAY_MS = 86_400_000;
@@ -148,7 +148,7 @@ function Legend() {
 
 export default function Telescopes() {
   const { timeRef, time, live, goLive, seek } = useClock();
-  const [stats, setStats] = useState<Map<string, NightlyStat>>(new Map());
+  const [nights, setNights] = useState<NightlyStat[]>([]);
   const profile = useAppStore((s) => s.profile);
 
   useEffect(() => {
@@ -156,9 +156,7 @@ export default function Telescopes() {
       const now = Date.now();
       const start = new Date(now - 2 * DAY_MS).toISOString().slice(0, 10);
       const end = new Date(now).toISOString().slice(0, 10);
-      api.fetchStats(start, end)
-        .then((nights) => setStats(new Map(nights.map((night) => [night.date, night]))))
-        .catch(() => {});
+      api.fetchStats(start, end).then(setNights).catch(() => {});
     };
     load();
     const id = setInterval(load, STATS_REFRESH_MS);
@@ -168,10 +166,14 @@ export default function Telescopes() {
   const now = Date.now();
   const canSee = (telescope: Telescope) =>
     !telescope.acl || profile?.is_admin === true || (profile?.acls ?? []).includes(telescope.acl);
-  const alerts = (telescope: Telescope, nightsAgo: number) =>
-    canSee(telescope)
-      ? stats.get(nightLabel(now - nightsAgo * DAY_MS, telescope.utcOffset))?.[telescope.id]
-      : undefined;
+  const alerts = (telescope: Telescope, nightsAgo: number) => {
+    if (!canSee(telescope)) return undefined;
+    const tonight = nights.findIndex((night) => {
+      const window = night.windows?.[telescope.id];
+      return window !== undefined && Date.parse(window.start) <= now && now < Date.parse(window.end);
+    });
+    return tonight < nightsAgo ? undefined : nights[tonight - nightsAgo][telescope.id];
+  };
 
   const states = new Map(SITES.map((site) => [site.id, siteState(site, time)]));
   const changes = new Map(SITES.map((site) => [site.id, nextCrossing(time, site.lat, site.lon)]));

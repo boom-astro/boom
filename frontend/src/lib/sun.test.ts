@@ -3,7 +3,6 @@ import {
   darkIntervals,
   nextCrossing,
   NIGHT_SUN_ALTITUDE,
-  nightLabel,
   skyState,
   subsolarPoint,
   sunAltitudeAt,
@@ -45,12 +44,5 @@ describe("sky state at Palomar", () => {
     expect(intervals).toHaveLength(2)
     expect(intervals[0].start).toBe(from)
     expect(intervals[1].end - intervals[1].start).toBeGreaterThan(9 * 3_600_000)
-  })
-})
-
-describe("nightLabel", () => {
-  it("labels a night by the date of its evening", () => {
-    expect(nightLabel(Date.UTC(2026, 9, 1, 5), -7)).toBe("2026-09-30")
-    expect(nightLabel(Date.UTC(2026, 9, 1, 19, 30), -7)).toBe("2026-10-01")
   })
 })
