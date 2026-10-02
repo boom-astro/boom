@@ -257,9 +257,18 @@ pub async fn babamul_auth_middleware(
     // than listed individually — the whole point of those endpoints is to run
     // before the caller has a token.
     if BABAMUL_PUBLIC_ROUTES.contains(&req.path()) || req.path().starts_with("/babamul/oauth/") {
+        if let Ok(user) = authenticate_babamul_user(&req).await {
+            req.extensions_mut().insert(user);
+        }
         return next.call(req).await;
     }
 
+    let user = authenticate_babamul_user(&req).await?;
+    req.extensions_mut().insert(user);
+    next.call(req).await
+}
+
+async fn authenticate_babamul_user(req: &ServiceRequest) -> Result<BabamulUser, Error> {
     let auth_app_data: &web::Data<AuthProvider> = match req.app_data() {
         Some(data) => data,
         None => {
@@ -333,17 +342,14 @@ pub async fn babamul_auth_middleware(
                                 "Account not activated. Please check your email for activation instructions.",
                             ));
                         }
-                        // Inject the user in the request
-                        req.extensions_mut().insert(user);
+                        Ok(user)
                     }
-                    Ok(None) => {
-                        return Err(actix_web::error::ErrorUnauthorized(
-                            "Invalid personal access token",
-                        ));
-                    }
+                    Ok(None) => Err(actix_web::error::ErrorUnauthorized(
+                        "Invalid personal access token",
+                    )),
                     Err(e) => {
                         tracing::error!("Database error looking up token: {}", e);
-                        return Err(actix_web::error::ErrorInternalServerError("Database error"));
+                        Err(actix_web::error::ErrorInternalServerError("Database error"))
                     }
                 }
             } else {
@@ -376,33 +382,23 @@ pub async fn babamul_auth_middleware(
                                         "Account not activated. Please check your email for activation instructions.",
                                     ));
                                 }
-                                // Inject the user in the request
-                                req.extensions_mut().insert(user);
+                                Ok(user)
                             }
-                            Ok(None) => {
-                                return Err(actix_web::error::ErrorUnauthorized(
-                                    "Babamul user not found",
-                                ));
-                            }
+                            Ok(None) => Err(actix_web::error::ErrorUnauthorized(
+                                "Babamul user not found",
+                            )),
                             Err(e) => {
                                 tracing::error!("Database error fetching babamul user: {}", e);
-                                return Err(actix_web::error::ErrorInternalServerError(
-                                    "Database error",
-                                ));
+                                Err(actix_web::error::ErrorInternalServerError("Database error"))
                             }
                         }
                     }
-                    Err(_) => {
-                        return Err(actix_web::error::ErrorUnauthorized("Invalid token"));
-                    }
+                    Err(_) => Err(actix_web::error::ErrorUnauthorized("Invalid token")),
                 }
             }
         }
-        _ => {
-            return Err(actix_web::error::ErrorUnauthorized(
-                "Missing or invalid Authorization header",
-            ));
-        }
+        _ => Err(actix_web::error::ErrorUnauthorized(
+            "Missing or invalid Authorization header",
+        )),
     }
-    next.call(req).await
 }

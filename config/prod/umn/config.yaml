@@ -131,8 +131,12 @@ kafka:
       username: "" # Set via BOOM_KAFKA__CONSUMER__LSST__USERNAME environment variable
       password: "" # Set via BOOM_KAFKA__CONSUMER__LSST__PASSWORD environment variable
     decam:
-      server: "localhost:9092"
+      server: "vm051.bridges2.psc.edu:9093"
       group_id: "" # Set via BOOM_KAFKA__CONSUMER__DECAM__GROUP_ID environment variable
+      security_protocol: "" # Set via BOOM_KAFKA__CONSUMER__DECAM__SECURITY_PROTOCOL environment variable
+      username: "" # Set via BOOM_KAFKA__CONSUMER__DECAM__USERNAME environment variable
+      password: "" # Set via BOOM_KAFKA__CONSUMER__DECAM__PASSWORD environment variable
+      ssl_ca_location: "" # Set via BOOM_KAFKA__CONSUMER__DECAM__SSL_CA_LOCATION environment variable
     winter:
       server: "localhost:9092"
       group_id: "" # Set via BOOM_KAFKA__CONSUMER__WINTER__GROUP_ID environment variable
