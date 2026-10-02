@@ -25,8 +25,6 @@ const SURVEY_COLORS: Record<Survey, string> = {
   winter: "var(--chart-4)",
 };
 
-const DAY_MS = 86_400_000;
-
 const chartConfig = {
   ztf: { label: "ZTF", color: SURVEY_COLORS.ztf },
   lsst: { label: "LSST", color: SURVEY_COLORS.lsst },
@@ -39,18 +37,15 @@ const FIRST_NIGHT = "2018-01-01";
 // The API refuses to recount a longer range in one refresh.
 const MAX_REFRESH_MONTHS = 6;
 
-const OBSERVATORIES: Record<Survey, { site: string; utcOffset: number }> = {
-  ztf: { site: "Palomar", utcOffset: -7 },
-  lsst: { site: "Cerro Pachón", utcOffset: -3 },
-  decam: { site: "Cerro Tololo", utcOffset: -4 },
-  winter: { site: "Palomar", utcOffset: -7 },
+const OBSERVATORIES: Record<Survey, string> = {
+  ztf: "Palomar",
+  lsst: "Cerro Pachón",
+  decam: "Cerro Tololo",
+  winter: "Palomar",
 };
 
 function nightConvention(surveys: readonly Survey[]): string {
-  const sites = surveys.map((s) => {
-    const { site, utcOffset } = OBSERVATORIES[s];
-    return `${site}, UTC${String(utcOffset).replace("-", "−")}, for ${chartConfig[s].label}`;
-  }).join("; ");
+  const sites = surveys.map((s) => `${OBSERVATORIES[s]} for ${chartConfig[s].label}`).join("; ");
   return "Alerts are grouped by observing night, local noon to local noon at the observatory" +
     (sites ? ` (${sites})` : "") + ". A night is labeled by its evening date.";
 }
@@ -271,6 +266,7 @@ export default function Dashboard() {
   const visibleData = useMemo(() =>
       statsData.map((d) => ({
         date: d.date,
+        windows: d.windows,
         ...Object.fromEntries(shownSurveys.map((s) => [s, d[s]])),
       }) as NightlyStat),
     [statsData, shownSurveys]);
@@ -287,9 +283,16 @@ export default function Dashboard() {
   }, [chartData, chartWidth]);
 
   const nowX = useMemo(() => {
-    if (!chartData.length || !shownSurveys.length) return null;
-    const offset = shownSurveys.reduce((sum, s) => sum + OBSERVATORIES[s].utcOffset, 0) / shownSurveys.length;
-    return (now - Date.parse(`${chartData[0].date}T12:00:00Z`)) / DAY_MS + offset / 24;
+    const positions = shownSurveys.flatMap((s) =>
+      chartData.flatMap((d, i) => {
+        const window = d.windows?.[s];
+        if (!window) return [];
+        const start = Date.parse(window.start);
+        const end = Date.parse(window.end);
+        return start <= now && now < end ? [i + (now - start) / (end - start)] : [];
+      }),
+    );
+    return positions.length ? positions.reduce((sum, x) => sum + x, 0) / positions.length : null;
   }, [chartData, shownSurveys, now]);
 
   const monthTicks = useMemo(() => {
