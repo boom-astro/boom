@@ -1285,14 +1285,16 @@ pub async fn post_filter_test(
             return HttpResponse::Unauthorized().body("Unauthorized");
         }
     };
-    let body = body.clone();
+    // Taken rather than cloned: a skymap can be most of the 200 MB this route
+    // accepts, and every copy of it is held for the life of the request.
+    let body = body.into_inner();
     let survey = body.survey;
     let permissions = body.permissions;
     let pipeline = body.pipeline;
 
     // Off the async thread: parsing a full-resolution skymap would otherwise
     // block every other request sharing it.
-    let (encoded, level) = (body.skymap_fits_base64.clone(), body.credible_level);
+    let (encoded, level) = (body.skymap_fits_base64, body.credible_level);
     let region = match web::block(move || skymap_region(encoded, level)).await {
         Ok(Ok(region)) => region,
         Ok(Err(e)) => return e.into(),
@@ -1499,14 +1501,16 @@ pub async fn post_filter_test_count(
             return HttpResponse::Unauthorized().body("Unauthorized");
         }
     };
-    let body = body.clone();
+    // Taken rather than cloned: a skymap can be most of the 200 MB this route
+    // accepts, and every copy of it is held for the life of the request.
+    let body = body.into_inner();
     let survey = body.survey;
     let permissions = body.permissions;
     let pipeline = body.pipeline;
 
     // Off the async thread: parsing a full-resolution skymap would otherwise
     // block every other request sharing it.
-    let (encoded, level) = (body.skymap_fits_base64.clone(), body.credible_level);
+    let (encoded, level) = (body.skymap_fits_base64, body.credible_level);
     let region = match web::block(move || skymap_region(encoded, level)).await {
         Ok(Ok(region)) => region,
         Ok(Err(e)) => return e.into(),
