@@ -37,11 +37,18 @@ const FIRST_NIGHT = "2018-01-01";
 // The API refuses to recount a longer range in one refresh.
 const MAX_REFRESH_MONTHS = 6;
 
-const NIGHT_CONVENTION =
-  "Alerts are grouped by observing night, local noon to local noon at the " +
-  "observatory (Palomar, UTC−7, for ZTF and WINTER; Cerro Pachón, UTC−3, for LSST; " +
-  "Cerro Tololo, UTC−4, for DECam). " +
-  "A night is labeled by its evening date.";
+const OBSERVATORIES: Record<Survey, string> = {
+  ztf: "Palomar, UTC−7",
+  lsst: "Cerro Pachón, UTC−3",
+  decam: "Cerro Tololo, UTC−4",
+  winter: "Palomar, UTC−7",
+};
+
+function nightConvention(surveys: readonly Survey[]): string {
+  const sites = surveys.map((s) => `${OBSERVATORIES[s]}, for ${chartConfig[s].label}`).join("; ");
+  return "Alerts are grouped by observing night, local noon to local noon at the observatory" +
+    (sites ? ` (${sites})` : "") + ". A night is labeled by its evening date.";
+}
 
 const ALERT_TYPE_LABELS: Record<string, string> = {
   alerts: "alerts",
@@ -413,7 +420,7 @@ export default function Dashboard() {
                   <TooltipTrigger asChild>
                     <IconInfoCircle className="text-muted-foreground size-4 cursor-help" />
                   </TooltipTrigger>
-                  <TooltipContent side="right" className="max-w-xs">{NIGHT_CONVENTION}</TooltipContent>
+                  <TooltipContent side="right" className="max-w-xs">{nightConvention(availableSurveys)}</TooltipContent>
                 </Tooltip>
               </CardTitle>
               <CardDescription>
