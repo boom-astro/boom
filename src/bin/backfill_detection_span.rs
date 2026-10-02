@@ -13,6 +13,13 @@
 //! The arrays are read straight from `<survey>_alerts_aux`: `snr_psf` is stored
 //! on a forced epoch only when it cleared the detection threshold, so its
 //! presence is the test, and no flux has to be reconverted here.
+//!
+//! ZTF and LSST only, which is what those field names belong to. WINTER stores
+//! no forced photometry at all, and DECam names the same quantities
+//! differently and computes `snr` on every epoch rather than only the
+//! significant ones, so presence would mark every point a detection. Reading
+//! either with these names yields a wrong answer rather than an empty one,
+//! which is why the survey is checked rather than left to the caller.
 
 use boom::{
     conf::{load_dotenv, AppConfig},
@@ -234,6 +241,15 @@ async fn main() {
         .finish();
     let _ = tracing::subscriber::set_global_default(subscriber);
     let args = Cli::parse();
+
+    if !matches!(args.survey, Survey::Ztf | Survey::Lsst) {
+        error!(
+            "{} is not supported: this reads psfFlux and snr_psf, which WINTER and DECam \
+             do not store under those names",
+            args.survey
+        );
+        std::process::exit(1);
+    }
 
     let config = match AppConfig::from_path(&args.config) {
         Ok(c) => c,
