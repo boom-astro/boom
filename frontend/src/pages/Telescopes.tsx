@@ -180,13 +180,11 @@ export default function Telescopes() {
 
   return (
     <div className="px-4 lg:px-6 space-y-4">
-      <h1 className="text-2xl font-bold">Telescopes</h1>
-
       <Card>
         <CardHeader>
           <div className="flex flex-wrap items-start justify-between gap-4">
             <div className="space-y-1.5">
-              <CardTitle>Day and Night</CardTitle>
+              <CardTitle>Telescopes</CardTitle>
               <CardDescription>Observatories whose alerts BOOM ingests</CardDescription>
             </div>
             <Legend />
