@@ -36,6 +36,40 @@ pub fn redact_uri(value: &str) -> String {
     format!("{scheme}://{user}:{MASK}@{host}{tail}")
 }
 
+/// Mask credentials anywhere they appear in free text.
+///
+/// Log lines and progress messages have no field names to key on, so this is
+/// value-based where [`is_uri_field`] is name-based: anything shaped like
+/// `scheme://user:password@host` is masked wherever it sits in the line. A URI
+/// without credentials passes through untouched, so a catalog source URL still
+/// reads in full.
+///
+/// A message is the one place a task can put a password somewhere it is read
+/// back, and those are served by the API and kept for months, so they are
+/// masked on the way out of the task rather than by trusting every future
+/// `ctx.info` to remember.
+pub fn redact_text(message: &str) -> String {
+    const DELIMITERS: &[char] = &[' ', '\t', '\n', '"', '\'', '(', ')', '<', '>', ',', ';'];
+    let mut out = String::with_capacity(message.len());
+    let mut rest = message;
+    while let Some(scheme_at) = rest.find("://") {
+        // Widen to the whole token the `://` sits in: back to the previous
+        // delimiter, forward to the next one.
+        let start = rest[..scheme_at].rfind(DELIMITERS).map_or(0, |i| {
+            i + rest[i..].chars().next().map_or(1, char::len_utf8)
+        });
+        let after = scheme_at + "://".len();
+        let end = rest[after..]
+            .find(DELIMITERS)
+            .map_or(rest.len(), |i| after + i);
+        out.push_str(&rest[..start]);
+        out.push_str(&redact_uri(&rest[start..end]));
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Whether a parameter name looks like it carries a connection string.
 ///
 /// Matching on the name rather than the value: a value that merely looks like a
@@ -87,6 +121,49 @@ pub fn redact_document(details: &Document) -> Document {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_credential_in_a_message_is_masked() {
+        // The hazard: a task writes a URI into a log line, which the API serves
+        // and `task_logs` keeps for months.
+        assert_eq!(
+            redact_text("connecting to mongodb://alice:hunter2@db:27017/boom now"),
+            "connecting to mongodb://alice:***@db:27017/boom now"
+        );
+        // Wherever it sits in the line, and more than once.
+        assert_eq!(
+            redact_text("mongodb://a:b@src/db -> mongodb://c:d@dst/db"),
+            "mongodb://a:***@src/db -> mongodb://c:***@dst/db"
+        );
+        // Including when punctuation hugs it.
+        assert_eq!(
+            redact_text("failed (mongodb://a:b@host/db), retrying"),
+            "failed (mongodb://a:***@host/db), retrying"
+        );
+    }
+
+    #[test]
+    fn a_url_without_credentials_reads_in_full() {
+        // Same philosophy as the field-name rule: a catalog source URL is not a
+        // secret and is most of why anyone reads the line.
+        for line in [
+            "downloading MPCORB from https://www.minorplanetcenter.net/iau/MPCORB.DAT",
+            "no uri here at all",
+            "s3://boom-cutouts/ztf/1.avro",
+        ] {
+            assert_eq!(redact_text(line), line);
+        }
+    }
+
+    #[test]
+    fn masking_text_leaves_the_rest_of_the_line_alone() {
+        // A line is read by a person, so it has to survive masking intact.
+        let line = "chunk 3 of 97 done: 1.2M rows, mongodb://u:p@h/d, 4m12s elapsed";
+        let masked = redact_text(line);
+        assert!(masked.starts_with("chunk 3 of 97 done: 1.2M rows, "));
+        assert!(masked.ends_with(", 4m12s elapsed"));
+        assert!(!masked.contains(":p@"));
+    }
 
     #[test]
     fn a_password_is_masked_but_the_endpoint_survives() {

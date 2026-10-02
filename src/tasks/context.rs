@@ -116,19 +116,19 @@ impl TaskContext {
     /// Both, deliberately: the run log is what the admin page tails, and the
     /// process log is what survives log retention and reaches Loki.
     pub fn info(&self, message: impl Into<String>) {
-        let message = message.into();
+        let message = super::redact::redact_text(&message.into());
         tracing::info!(run_id = %self.run_id, "{}", message);
         self.logs.info(message);
     }
 
     pub fn warn(&self, message: impl Into<String>) {
-        let message = message.into();
+        let message = super::redact::redact_text(&message.into());
         tracing::warn!(run_id = %self.run_id, "{}", message);
         self.logs.warn(message);
     }
 
     pub fn error(&self, message: impl Into<String>) {
-        let message = message.into();
+        let message = super::redact::redact_text(&message.into());
         tracing::error!(run_id = %self.run_id, "{}", message);
         self.logs.error(message);
     }

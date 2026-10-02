@@ -416,6 +416,15 @@ Redaction masks the password and leaves the rest — `mongodb://alice:***@host/d
 parameters back. It keys on the field *name* (`*_uri`, `uri`), not on whether a
 value looks like a URI, so a catalog source URL stays readable in full.
 
+A run's log lines and progress messages have no field names to key on, so they
+are masked by shape instead: anything of the form `scheme://user:password@host`
+is masked wherever it appears in the text, and a URI without credentials passes
+through whole. That happens as the message leaves the task, so it covers both
+the stored copy the admin page tails and the line that reaches Loki. It is
+there so that a task which writes a URI into a message does not put a password
+somewhere it is read back; the field-name rule above cannot see inside a
+sentence.
+
 ## Running it in dev
 
 `make dev` brings up a `task-worker` alongside the API, under cargo-watch like
