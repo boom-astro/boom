@@ -192,6 +192,7 @@ later.
 | `prepare_catalog` | Add spatial fields and a 2dsphere index to a hand-imported collection. |
 | `export_catalog` | Write a catalog collection to gzipped JSONL chunks plus a manifest, for a catalog BOOM cannot fetch again. Read-only. |
 | `link_tracks` | Find intra-night tracklets in a window of alerts and link them into moving-object tracks. Writes nothing unless `persist` is set; `dry_run` reports what it would have written. |
+| `backfill_detection_span` | Write `first_activity_jd`, `last_detection_jd` and `n_forced_detections` onto alerts written before those fields existed. ZTF and LSST. |
 | `backfill_host_galaxy` | Score stored galaxy cross-matches and write `host_galaxy` on `alerts_aux`. |
 | `backfill_hpx` | Write `coordinates.hpx` onto alerts that predate the field, so MOC region queries can find them. |
 | `repair_photometry` | Rewrite `alerts_aux` timeseries arrays that are out of order, duplicated, or carry a non-numeric `jd`. Deletes the offending points — run with `dry_run` first. |

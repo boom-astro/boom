@@ -35,6 +35,7 @@ pub mod redact;
 
 // The tasks: one module per entry in `TASKS` below, each with its own
 // `TASK_TYPE`, params type and `run`. These are what moves to `task/tasks/`.
+pub mod backfill_detection_span;
 pub mod backfill_host_galaxy;
 pub mod backfill_hpx;
 pub mod catalog_ingest;
@@ -91,6 +92,7 @@ pub enum TaskType {
     PrepareCatalog,
     ExportCatalog,
     LinkTracks,
+    BackfillDetectionSpan,
     BackfillHostGalaxy,
     BackfillHpx,
     RepairPhotometry,
@@ -100,7 +102,7 @@ pub enum TaskType {
 }
 
 impl TaskType {
-    pub const ALL: [TaskType; 15] = [
+    pub const ALL: [TaskType; 16] = [
         Self::CatalogIngest,
         Self::StreamKowalskiAlerts,
         Self::CopyCutouts,
@@ -110,6 +112,7 @@ impl TaskType {
         Self::PrepareCatalog,
         Self::ExportCatalog,
         Self::LinkTracks,
+        Self::BackfillDetectionSpan,
         Self::BackfillHostGalaxy,
         Self::BackfillHpx,
         Self::RepairPhotometry,
@@ -129,6 +132,7 @@ impl TaskType {
             Self::PrepareCatalog => prepare_catalog::TASK_TYPE,
             Self::ExportCatalog => export_catalog::TASK_TYPE,
             Self::LinkTracks => link_tracks::TASK_TYPE,
+            Self::BackfillDetectionSpan => backfill_detection_span::TASK_TYPE,
             Self::BackfillHostGalaxy => backfill_host_galaxy::TASK_TYPE,
             Self::BackfillHpx => backfill_hpx::TASK_TYPE,
             Self::RepairPhotometry => repair_photometry::TASK_TYPE,
@@ -308,6 +312,21 @@ pub const TASKS: &[TaskSpec] = &[
         params_schema: || schema_of::<link_tracks::LinkTracksParams>(),
     },
     TaskSpec {
+        id: backfill_detection_span::TASK_TYPE,
+        title: "Backfill the activity span on existing alerts",
+        description: "Write first_activity_jd, last_detection_jd and n_forced_detections \
+                      onto alerts written before those fields existed. Until this has \
+                      covered a collection, a counterpart search reaching into the archive \
+                      reads the missing fields as null. ZTF and LSST only. Bounded by \
+                      days, so run it at 31 first, which is what those searches reach \
+                      back by default.",
+        // The span is recomputed from the arrays stored on the aux record, so a
+        // second pass writes the same values.
+        idempotent: true,
+        destructive: false,
+        params_schema: || schema_of::<backfill_detection_span::BackfillDetectionSpanParams>(),
+    },
+    TaskSpec {
         id: backfill_host_galaxy::TASK_TYPE,
         title: "Backfill host galaxy associations",
         description: "Score each alerts_aux record's galaxy cross-matches and write \
@@ -485,6 +504,12 @@ pub fn validate_params(task_type: &str, params: &serde_json::Value) -> Result<()
                 .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
             parsed.validate_params().map_err(TaskError::InvalidParams)
         }
+        backfill_detection_span::TASK_TYPE => {
+            let parsed: backfill_detection_span::BackfillDetectionSpanParams =
+                serde_json::from_value(params.clone())
+                    .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            parsed.validate_params().map_err(TaskError::InvalidParams)
+        }
         backfill_host_galaxy::TASK_TYPE => {
             let parsed: backfill_host_galaxy::BackfillHostGalaxyParams =
                 serde_json::from_value(params.clone())
@@ -594,6 +619,15 @@ pub fn single_flight_key(
                 .map(|collection| doc! { "collection": collection })
                 .unwrap_or_default(),
         ),
+        // Keyed by survey: two runs over one alerts collection would recompute
+        // and rewrite the same spans.
+        backfill_detection_span::TASK_TYPE => Some(
+            params
+                .get("survey")
+                .and_then(|v| v.as_str())
+                .map(|survey| doc! { "survey": survey })
+                .unwrap_or_default(),
+        ),
         // Keyed by survey: two runs over the same aux collection would rescore
         // and rewrite the same records.
         backfill_host_galaxy::TASK_TYPE => Some(
@@ -653,6 +687,11 @@ pub async fn dispatch(
             let params = link_tracks::LinkTracksParams::deserialize(params)
                 .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
             link_tracks::run(ctx, params).await
+        }
+        backfill_detection_span::TASK_TYPE => {
+            let params = backfill_detection_span::BackfillDetectionSpanParams::deserialize(params)
+                .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            backfill_detection_span::run(ctx, params).await
         }
         backfill_host_galaxy::TASK_TYPE => {
             let params = backfill_host_galaxy::BackfillHostGalaxyParams::deserialize(params)
