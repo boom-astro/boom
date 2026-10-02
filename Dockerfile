@@ -72,6 +72,7 @@ RUN --mount=type=cache,target=/app/target,sharing=locked \
        target/release/kafka_producer \
        target/release/api \
        target/release/task_worker \
+       target/release/backfill_detection_span \
        /app/bin/
 
 FROM builder AS dev
@@ -108,6 +109,7 @@ COPY --from=builder /app/bin/kafka_consumer /app/kafka_consumer
 COPY --from=builder /app/bin/kafka_producer /app/kafka_producer
 COPY --from=builder /app/bin/api /app/boom-api
 COPY --from=builder /app/bin/task_worker /app/task_worker
+COPY --from=builder /app/bin/backfill_detection_span /app/backfill_detection_span
 COPY --from=builder /opt/ort /opt/ort
 
 # Resolved at build time from the committed lockfile, so a catalog ingest does
