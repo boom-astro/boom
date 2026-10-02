@@ -8,7 +8,6 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import NightMap from "@/components/telescopes/NightMap";
 import NightTimeline from "@/components/telescopes/NightTimeline";
 import api, { type NightlyStat } from "@/lib/api";
-import { useAppStore } from "@/lib/store";
 import { nextCrossing, skyState, sunAltitudeAt, type SkyState } from "@/lib/sun";
 import { formatClock, NIGHT_COLOR, SITES, type Site, type Telescope } from "@/lib/telescopes";
 
@@ -149,7 +148,6 @@ function Legend() {
 export default function Telescopes() {
   const { timeRef, time, live, goLive, seek } = useClock();
   const [nights, setNights] = useState<NightlyStat[]>([]);
-  const profile = useAppStore((s) => s.profile);
 
   useEffect(() => {
     const load = () => {
@@ -164,10 +162,7 @@ export default function Telescopes() {
   }, []);
 
   const now = Date.now();
-  const canSee = (telescope: Telescope) =>
-    !telescope.acl || profile?.is_admin === true || (profile?.acls ?? []).includes(telescope.acl);
   const alerts = (telescope: Telescope, nightsAgo: number) => {
-    if (!canSee(telescope)) return undefined;
     const tonight = nights.findIndex((night) => {
       const window = night.windows?.[telescope.id];
       return window !== undefined && Date.parse(window.start) <= now && now < Date.parse(window.end);
@@ -292,13 +287,16 @@ export default function Telescopes() {
                         </>
                       ) : "-"}
                     </TableCell>
-                    {[0, 1].map((nightsAgo) => (
-                      <TableCell key={nightsAgo} className="text-right tabular-nums">
-                        {canSee(telescope)
-                          ? alerts(telescope, nightsAgo)?.toLocaleString() ?? "-"
-                          : <PrivateCount name={telescope.name} />}
-                      </TableCell>
-                    ))}
+                    {[0, 1].map((nightsAgo) => {
+                      const count = alerts(telescope, nightsAgo);
+                      return (
+                        <TableCell key={nightsAgo} className="text-right tabular-nums">
+                          {count !== undefined
+                            ? count.toLocaleString()
+                            : telescope.private ? <PrivateCount name={telescope.name} /> : "-"}
+                        </TableCell>
+                      );
+                    })}
                   </TableRow>
                 );
               })}

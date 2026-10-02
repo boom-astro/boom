@@ -8,7 +8,7 @@ export type Telescope = {
   survey: string;
   instrument: string;
   color: string;
-  acl?: string;
+  private?: boolean;
 };
 
 export type Site = {
@@ -43,7 +43,7 @@ export const SITES: Site[] = [
         survey: "Wide-field Infrared Transient Explorer",
         instrument: "1-m robotic infrared telescope",
         color: "var(--winter)",
-        acl: "winter",
+        private: true,
       },
     ],
   },
