@@ -158,7 +158,7 @@ a `data_mutations` entry naming the commit that ran. `src/bin/` holds services
 plus `check_config` and `add_filter`, which change nothing; a new data-mutating
 binary there is the one thing to avoid.
 
-Adding one: [`.agents/skills/add-data-task/SKILL.md`](.agents/skills/add-data-task/SKILL.md),
+Adding one: [`.agents/skills/add-data-task-type/SKILL.md`](.agents/skills/add-data-task-type/SKILL.md),
 with the reasoning in [docs/task-system.md](docs/task-system.md). Registration
 has five points in `src/tasks/mod.rs` and, like API routes, missing one fails
 quietly — `cargo test --lib tasks::tests` catches it.

@@ -197,6 +197,7 @@ pub const PUBLIC_ROUTES: &[&str] = &["/docs", "/auth", "/"];
 /// itself through `api::admin::require_admin`.
 const BABAMUL_AUTHENTICATED_ROUTES: &[&str] = &[
     "/tasks",
+    "/task-types",
     "/data/mutations",
     "/enrichment/status",
     "/enrichment/sets",
@@ -528,7 +529,7 @@ mod tests {
         // these are the routes it reaches on this scope.
         for path in [
             "/tasks",
-            "/tasks/types",
+            "/task-types",
             "/tasks/abc123",
             "/tasks/abc123/logs",
             "/tasks/abc123/cancel",

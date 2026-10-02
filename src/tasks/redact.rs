@@ -5,7 +5,7 @@
 //! task parameters are stored on the run, rendered on the admin page, and
 //! copied into the append-only ledger.
 //!
-//! The worker needs the real value, so `task_runs.params` holds it as given.
+//! The worker needs the real value, so `tasks.params` holds it as given.
 //! Everywhere it is *read back* it goes through here first: the API responses
 //! the admin page renders, and the ledger, which is never edited or deleted and
 //! would otherwise archive a password forever.

@@ -41,7 +41,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use tracing::info;
 use utoipa::ToSchema;
 
 /// Stable identifier for this task type.

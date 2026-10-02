@@ -28,7 +28,7 @@ pub struct TaskContext {
     /// themselves from a path rather than from an `AppConfig` -- they run on
     /// their own threads with their own runtimes and load it again there.
     config_path: String,
-    run_id: String,
+    task_id: String,
     /// Who asked for this run, and how. Carried so a task body can attribute
     /// the mutations it records without the ledger having to re-read the run.
     actor: Actor,
@@ -44,18 +44,18 @@ impl TaskContext {
         db: Database,
         config: Arc<AppConfig>,
         config_path: impl Into<String>,
-        run_id: impl Into<String>,
+        task_id: impl Into<String>,
         actor: Actor,
         trigger: Trigger,
         canceled: Arc<AtomicBool>,
     ) -> Self {
-        let run_id = run_id.into();
+        let task_id = task_id.into();
         Self {
-            logs: LogSink::new(db.clone(), &run_id),
+            logs: LogSink::new(db.clone(), &task_id),
             db,
             config,
             config_path: config_path.into(),
-            run_id,
+            task_id,
             actor,
             trigger,
             canceled,
@@ -73,7 +73,7 @@ impl TaskContext {
             db,
             config,
             config_path: crate::conf::DEFAULT_CONFIG_PATH.to_string(),
-            run_id: String::new(),
+            task_id: String::new(),
             actor: Actor::system(),
             trigger: Trigger::Api,
             canceled: Arc::new(AtomicBool::new(false)),
@@ -95,8 +95,8 @@ impl TaskContext {
         &self.config_path
     }
 
-    pub fn run_id(&self) -> &str {
-        &self.run_id
+    pub fn task_id(&self) -> &str {
+        &self.task_id
     }
 
     pub fn logs(&self) -> &LogSink {
@@ -117,29 +117,29 @@ impl TaskContext {
     /// process log is what survives log retention and reaches Loki.
     pub fn info(&self, message: impl Into<String>) {
         let message = super::redact::redact_text(&message.into());
-        tracing::info!(run_id = %self.run_id, "{}", message);
+        tracing::info!(task_id = %self.task_id, "{}", message);
         self.logs.info(message);
     }
 
     pub fn warn(&self, message: impl Into<String>) {
         let message = super::redact::redact_text(&message.into());
-        tracing::warn!(run_id = %self.run_id, "{}", message);
+        tracing::warn!(task_id = %self.task_id, "{}", message);
         self.logs.warn(message);
     }
 
     pub fn error(&self, message: impl Into<String>) {
         let message = super::redact::redact_text(&message.into());
-        tracing::error!(run_id = %self.run_id, "{}", message);
+        tracing::error!(task_id = %self.task_id, "{}", message);
         self.logs.error(message);
     }
 
     /// Record how far along the run is. Best-effort.
     pub async fn progress(&self, done: u64, total: u64, message: impl Into<String>) {
-        if self.run_id.is_empty() {
+        if self.task_id.is_empty() {
             return;
         }
         let message = message.into();
-        if let Err(e) = queue::report_progress(&self.db, &self.run_id, done, total, &message).await
+        if let Err(e) = queue::report_progress(&self.db, &self.task_id, done, total, &message).await
         {
             tracing::warn!("failed to record progress: {}", e);
         }
@@ -161,12 +161,12 @@ impl TaskContext {
         operation: ledger::Operation,
         details: mongodb::bson::Document,
     ) {
-        if self.run_id.is_empty() {
+        if self.task_id.is_empty() {
             return;
         }
         let entry: MutationRecord = ledger::for_task(
-            &self.run_id,
-            task_type_of(&self.db, &self.run_id)
+            &self.task_id,
+            task_type_of(&self.db, &self.task_id)
                 .await
                 .as_deref()
                 .unwrap_or("unknown"),
@@ -183,10 +183,10 @@ impl TaskContext {
 }
 
 /// The task type of a run, for attributing its ledger entries.
-async fn task_type_of(db: &Database, run_id: &str) -> Option<String> {
-    queue::get(db, run_id)
+async fn task_type_of(db: &Database, task_id: &str) -> Option<String> {
+    queue::get(db, task_id)
         .await
         .ok()
         .flatten()
-        .map(|run| run.task_type)
+        .map(|task| task.task_type)
 }

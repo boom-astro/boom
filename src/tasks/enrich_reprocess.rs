@@ -257,7 +257,7 @@ pub async fn run(
         format!(
             "{}_enrichment_queue_reprocess_{}",
             params.survey,
-            ctx.run_id()
+            ctx.task_id()
         )
     });
 

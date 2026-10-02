@@ -2,10 +2,10 @@
 //!
 //! MongoDB is the queue as well as the record: an atomic `find_one_and_update`
 //! moves a run from `queued` to `running` and stamps a lease in one operation,
-//! so there is no separate broker to keep consistent with the run document. At
+//! so there is no separate broker to keep consistent with the task document. At
 //! a few runs a week that is the right trade -- see docs/task-system.md.
 
-use super::models::{now, TaskRun, TaskStatus, FAILED_LOG_RETENTION_DAYS, RUNS_COLLECTION};
+use super::models::{now, Task, TaskStatus, FAILED_LOG_RETENTION_DAYS, TASKS_COLLECTION};
 use mongodb::bson::{doc, to_bson, Document};
 use mongodb::options::ReturnDocument;
 use mongodb::Database;
@@ -28,13 +28,13 @@ pub enum QueueError {
     Deserialize(#[from] mongodb::bson::de::Error),
 }
 
-fn runs(db: &Database) -> mongodb::Collection<TaskRun> {
-    db.collection::<TaskRun>(RUNS_COLLECTION)
+fn collection(db: &Database) -> mongodb::Collection<Task> {
+    db.collection::<Task>(TASKS_COLLECTION)
 }
 
 /// Put a run on the queue.
-pub async fn submit(db: &Database, run: &TaskRun) -> Result<(), QueueError> {
-    runs(db).insert_one(run).await?;
+pub async fn submit(db: &Database, task: &Task) -> Result<(), QueueError> {
+    collection(db).insert_one(task).await?;
     Ok(())
 }
 
@@ -44,8 +44,8 @@ pub async fn submit(db: &Database, run: &TaskRun) -> Result<(), QueueError> {
 /// worker: two workers racing on the same document both match, but only the
 /// first update sees `status: "queued"`.
 #[instrument(skip(db), err)]
-pub async fn claim_next(db: &Database, worker: &str) -> Result<Option<TaskRun>, QueueError> {
-    let claimed = runs(db)
+pub async fn claim_next(db: &Database, worker: &str) -> Result<Option<Task>, QueueError> {
+    let claimed = collection(db)
         .find_one_and_update(
             doc! { "status": TaskStatus::Queued.as_str() },
             doc! {
@@ -77,30 +77,30 @@ pub async fn claim_next(db: &Database, worker: &str) -> Result<Option<TaskRun>, 
 /// workers ingesting the same catalog is exactly what the lease prevents.
 pub async fn heartbeat(
     db: &Database,
-    run_id: &str,
+    task_id: &str,
     worker: &str,
 ) -> Result<Option<bool>, QueueError> {
-    let updated = runs(db)
+    let updated = collection(db)
         .find_one_and_update(
-            doc! { "_id": run_id, "worker": worker, "status": TaskStatus::Running.as_str() },
+            doc! { "_id": task_id, "worker": worker, "status": TaskStatus::Running.as_str() },
             doc! { "$set": { "lease_expires_at": now() + LEASE_SECONDS } },
         )
         .return_document(ReturnDocument::After)
         .await?;
-    Ok(updated.map(|run| run.cancel_requested))
+    Ok(updated.map(|task| task.cancel_requested))
 }
 
 /// Record progress. Best-effort: a failed progress write must not fail the run.
 pub async fn report_progress(
     db: &Database,
-    run_id: &str,
+    task_id: &str,
     done: u64,
     total: u64,
     message: &str,
 ) -> Result<(), QueueError> {
-    runs(db)
+    collection(db)
         .update_one(
-            doc! { "_id": run_id },
+            doc! { "_id": task_id },
             doc! { "$set": { "progress": { "done": done as i64, "total": total as i64, "message": message } } },
         )
         .await?;
@@ -116,13 +116,13 @@ pub async fn report_progress(
 #[instrument(skip(db, error), fields(status = status.as_str()), err)]
 pub async fn finish(
     db: &Database,
-    run_id: &str,
+    task_id: &str,
     status: TaskStatus,
     error: Option<String>,
 ) -> Result<(), QueueError> {
-    runs(db)
+    collection(db)
         .update_one(
-            doc! { "_id": run_id },
+            doc! { "_id": task_id },
             doc! {
                 "$set": {
                     "status": status.as_str(),
@@ -144,15 +144,15 @@ pub async fn finish(
 /// lease as it winds down.
 pub async fn finish_claimed(
     db: &Database,
-    run_id: &str,
+    task_id: &str,
     worker: &str,
     status: TaskStatus,
     error: Option<String>,
 ) -> Result<bool, QueueError> {
-    let result = runs(db)
+    let result = collection(db)
         .update_one(
             doc! {
-                "_id": run_id,
+                "_id": task_id,
                 "worker": worker,
                 "status": TaskStatus::Running.as_str(),
             },
@@ -169,7 +169,7 @@ pub async fn finish_claimed(
     if matches!(status, TaskStatus::Failed | TaskStatus::Canceled) {
         // The outcome decides how long the logs are worth keeping, and this is
         // the first point that knows it.
-        super::logs::extend_retention(db, run_id, FAILED_LOG_RETENTION_DAYS).await;
+        super::logs::extend_retention(db, task_id, FAILED_LOG_RETENTION_DAYS).await;
     }
     Ok(result.matched_count == 1)
 }
@@ -180,13 +180,16 @@ pub async fn finish_claimed(
 /// chunk boundary and stops cleanly, leaving the chunks it finished recorded
 /// so a later run resumes rather than starting over. A queued run is canceled
 /// outright, since nothing has started.
-pub async fn request_cancel(db: &Database, run_id: &str) -> Result<Option<TaskStatus>, QueueError> {
+pub async fn request_cancel(
+    db: &Database,
+    task_id: &str,
+) -> Result<Option<TaskStatus>, QueueError> {
     // Each transition includes the observed status in its filter. A worker
     // can claim a queued run while this request is in flight, so a read then
     // unguarded write could otherwise mark an actively running task canceled.
-    if runs(db)
+    if collection(db)
         .update_one(
-            doc! { "_id": run_id, "status": TaskStatus::Queued.as_str() },
+            doc! { "_id": task_id, "status": TaskStatus::Queued.as_str() },
             doc! {
                 "$set": {
                     "status": TaskStatus::Canceled.as_str(),
@@ -203,9 +206,9 @@ pub async fn request_cancel(db: &Database, run_id: &str) -> Result<Option<TaskSt
         return Ok(Some(TaskStatus::Canceled));
     }
 
-    if runs(db)
+    if collection(db)
         .update_one(
-            doc! { "_id": run_id, "status": TaskStatus::Running.as_str() },
+            doc! { "_id": task_id, "status": TaskStatus::Running.as_str() },
             doc! { "$set": { "cancel_requested": true } },
         )
         .await?
@@ -215,10 +218,10 @@ pub async fn request_cancel(db: &Database, run_id: &str) -> Result<Option<TaskSt
         return Ok(Some(TaskStatus::Running));
     }
 
-    Ok(runs(db)
-        .find_one(doc! { "_id": run_id })
+    Ok(collection(db)
+        .find_one(doc! { "_id": task_id })
         .await?
-        .map(|run| run.status))
+        .map(|task| task.status))
 }
 
 /// What a sweep of expired leases did.
@@ -262,7 +265,7 @@ pub async fn requeue_expired(db: &Database) -> Result<ReapReport, QueueError> {
         filter
     };
 
-    let requeued = runs(db)
+    let requeued = collection(db)
         .update_many(
             expired(doc! { "task_type": { "$in": retryable.clone() } }),
             doc! {
@@ -282,10 +285,10 @@ pub async fn requeue_expired(db: &Database) -> Result<ReapReport, QueueError> {
     let failing = expired(doc! { "task_type": { "$nin": retryable.clone() } });
     let failed_ids: Vec<String> = {
         use futures::TryStreamExt;
-        // As `Document`, not `TaskRun`: a projection of `_id` alone cannot
+        // As `Document`, not `Task`: a projection of `_id` alone cannot
         // deserialize into the full type, and that failure would only show up
         // at runtime.
-        runs(db)
+        collection(db)
             .clone_with_type::<Document>()
             .find(failing.clone())
             .projection(doc! { "_id": 1 })
@@ -297,7 +300,7 @@ pub async fn requeue_expired(db: &Database) -> Result<ReapReport, QueueError> {
             .collect()
     };
 
-    let failed = runs(db)
+    let failed = collection(db)
         .update_many(
             failing,
             doc! {
@@ -349,10 +352,10 @@ pub async fn requeue_expired(db: &Database) -> Result<ReapReport, QueueError> {
 ///
 /// The caller must only use this for a task that is safe to retry; see
 /// [`super::is_retryable`].
-pub async fn release(db: &Database, run_id: &str, worker: &str) -> Result<(), QueueError> {
-    runs(db)
+pub async fn release(db: &Database, task_id: &str, worker: &str) -> Result<(), QueueError> {
+    collection(db)
         .update_one(
-            doc! { "_id": run_id, "worker": worker, "status": TaskStatus::Running.as_str() },
+            doc! { "_id": task_id, "worker": worker, "status": TaskStatus::Running.as_str() },
             doc! {
                 "$set": {
                     "status": TaskStatus::Queued.as_str(),
@@ -365,8 +368,8 @@ pub async fn release(db: &Database, run_id: &str, worker: &str) -> Result<(), Qu
     Ok(())
 }
 
-pub async fn get(db: &Database, run_id: &str) -> Result<Option<TaskRun>, QueueError> {
-    Ok(runs(db).find_one(doc! { "_id": run_id }).await?)
+pub async fn get(db: &Database, task_id: &str) -> Result<Option<Task>, QueueError> {
+    Ok(collection(db).find_one(doc! { "_id": task_id }).await?)
 }
 
 /// Most recent runs first, optionally filtered by task type.
@@ -374,13 +377,13 @@ pub async fn list(
     db: &Database,
     task_type: Option<&str>,
     limit: i64,
-) -> Result<Vec<TaskRun>, QueueError> {
+) -> Result<Vec<Task>, QueueError> {
     use futures::TryStreamExt;
     let filter: Document = match task_type {
         Some(t) => doc! { "task_type": t },
         None => doc! {},
     };
-    let cursor = runs(db)
+    let cursor = collection(db)
         .find(filter)
         .sort(doc! { "requested_at": -1 })
         .limit(limit)
@@ -396,7 +399,7 @@ pub async fn find_active(
     db: &Database,
     task_type: &str,
     params_match: Document,
-) -> Result<Option<TaskRun>, QueueError> {
+) -> Result<Option<Task>, QueueError> {
     let mut filter = doc! {
         "task_type": task_type,
         "status": { "$in": [TaskStatus::Queued.as_str(), TaskStatus::Running.as_str()] },
@@ -404,7 +407,7 @@ pub async fn find_active(
     for (key, value) in params_match {
         filter.insert(format!("params.{key}"), value);
     }
-    Ok(runs(db).find_one(filter).await?)
+    Ok(collection(db).find_one(filter).await?)
 }
 
 #[cfg(test)]
@@ -413,8 +416,8 @@ mod tests {
     use crate::tasks::models::{Actor, Progress, Trigger};
 
     /// A queued run, with a unique id so concurrent tests cannot collide.
-    fn queued(task_type: &str, params: serde_json::Value) -> TaskRun {
-        TaskRun {
+    fn queued(task_type: &str, params: serde_json::Value) -> Task {
+        Task {
             id: uuid::Uuid::new_v4().to_string(),
             task_type: task_type.to_string(),
             params,
@@ -459,15 +462,15 @@ mod tests {
     /// tests that never claim, so this still filters for its own. Foreign runs
     /// are parked (left claimed) and handed back afterwards, so each iteration
     /// makes progress instead of re-claiming the same run forever.
-    async fn claim_ours(db: &Database, worker: &str, task_type: &str) -> Option<TaskRun> {
+    async fn claim_ours(db: &Database, worker: &str, task_type: &str) -> Option<Task> {
         let mut parked: Vec<String> = Vec::new();
         let mut ours = None;
-        while let Some(run) = claim_next(db, worker).await.unwrap() {
-            if run.task_type == task_type {
-                ours = Some(run);
+        while let Some(task) = claim_next(db, worker).await.unwrap() {
+            if task.task_type == task_type {
+                ours = Some(task);
                 break;
             }
-            parked.push(run.id);
+            parked.push(task.id);
         }
         for id in parked {
             release(db, &id, worker).await.unwrap();
@@ -477,7 +480,7 @@ mod tests {
 
     async fn cleanup(db: &Database, task_type: &str) {
         let _ = db
-            .collection::<TaskRun>(RUNS_COLLECTION)
+            .collection::<Task>(TASKS_COLLECTION)
             .delete_many(doc! { "task_type": task_type })
             .await;
     }
@@ -487,8 +490,8 @@ mod tests {
         let _claiming = CLAIM_LOCK.lock().await;
         let db = crate::conf::get_test_db().await;
         let task_type = unique_type();
-        let run = queued(&task_type, serde_json::json!({}));
-        submit(&db, &run).await.unwrap();
+        let task = queued(&task_type, serde_json::json!({}));
+        submit(&db, &task).await.unwrap();
 
         let claimed = claim_ours(&db, "worker-a", &task_type)
             .await
@@ -555,18 +558,18 @@ mod tests {
         submit(&db, &queued(&task_type, serde_json::json!({})))
             .await
             .unwrap();
-        let run = claim_ours(&db, "worker-a", &task_type)
+        let task = claim_ours(&db, "worker-a", &task_type)
             .await
             .expect("claimed");
 
         assert_eq!(
-            heartbeat(&db, &run.id, "worker-a").await.unwrap(),
+            heartbeat(&db, &task.id, "worker-a").await.unwrap(),
             Some(false)
         );
-        request_cancel(&db, &run.id).await.unwrap();
+        request_cancel(&db, &task.id).await.unwrap();
         // This is how the flag reaches the running task.
         assert_eq!(
-            heartbeat(&db, &run.id, "worker-a").await.unwrap(),
+            heartbeat(&db, &task.id, "worker-a").await.unwrap(),
             Some(true)
         );
         cleanup(&db, &task_type).await;
@@ -582,11 +585,11 @@ mod tests {
         submit(&db, &queued(&task_type, serde_json::json!({})))
             .await
             .unwrap();
-        let run = claim_ours(&db, "worker-a", &task_type)
+        let task = claim_ours(&db, "worker-a", &task_type)
             .await
             .expect("claimed");
 
-        assert_eq!(heartbeat(&db, &run.id, "worker-b").await.unwrap(), None);
+        assert_eq!(heartbeat(&db, &task.id, "worker-b").await.unwrap(), None);
         cleanup(&db, &task_type).await;
     }
 
@@ -606,20 +609,20 @@ mod tests {
         )
         .await
         .unwrap();
-        let run = claim_ours(&db, "worker-a", &task_type)
+        let task = claim_ours(&db, "worker-a", &task_type)
             .await
             .expect("claimed");
 
         requeue_expired(&db).await.unwrap();
         assert_eq!(
-            get(&db, &run.id).await.unwrap().unwrap().status,
+            get(&db, &task.id).await.unwrap().unwrap().status,
             TaskStatus::Running,
             "a live lease must not be stolen"
         );
 
-        db.collection::<TaskRun>(RUNS_COLLECTION)
+        db.collection::<Task>(TASKS_COLLECTION)
             .update_one(
-                doc! { "_id": &run.id },
+                doc! { "_id": &task.id },
                 doc! { "$set": { "lease_expires_at": now() - 1.0 } },
             )
             .await
@@ -627,7 +630,7 @@ mod tests {
         let report = requeue_expired(&db).await.unwrap();
         assert!(report.requeued >= 1);
 
-        let reaped = get(&db, &run.id).await.unwrap().unwrap();
+        let reaped = get(&db, &task.id).await.unwrap().unwrap();
         assert_eq!(reaped.status, TaskStatus::Queued);
         assert!(reaped.worker.is_none());
         cleanup(&db, &task_type).await;
@@ -644,13 +647,13 @@ mod tests {
         submit(&db, &queued(&task_type, serde_json::json!({})))
             .await
             .unwrap();
-        let run = claim_ours(&db, "worker-a", &task_type)
+        let task = claim_ours(&db, "worker-a", &task_type)
             .await
             .expect("claimed");
 
-        db.collection::<TaskRun>(RUNS_COLLECTION)
+        db.collection::<Task>(TASKS_COLLECTION)
             .update_one(
-                doc! { "_id": &run.id },
+                doc! { "_id": &task.id },
                 doc! { "$set": { "lease_expires_at": now() - 1.0 } },
             )
             .await
@@ -658,7 +661,7 @@ mod tests {
         let report = requeue_expired(&db).await.unwrap();
         assert!(report.failed >= 1);
 
-        let reaped = get(&db, &run.id).await.unwrap().unwrap();
+        let reaped = get(&db, &task.id).await.unwrap().unwrap();
         assert_eq!(reaped.status, TaskStatus::Failed);
         // The message has to say why it was not retried, or the next person
         // just resubmits it and applies the change twice by hand.
@@ -680,16 +683,16 @@ mod tests {
             "catalog_ingest is the worked example of a resumable task"
         );
 
-        let run = queued(
+        let task = queued(
             crate::tasks::catalog_ingest::TASK_TYPE,
             serde_json::json!({ "catalog": "test-only" }),
         );
-        submit(&db, &run).await.unwrap();
+        submit(&db, &task).await.unwrap();
         let claimed = claim_ours(&db, "worker-a", crate::tasks::catalog_ingest::TASK_TYPE)
             .await
             .expect("claimed");
 
-        db.collection::<TaskRun>(RUNS_COLLECTION)
+        db.collection::<Task>(TASKS_COLLECTION)
             .update_one(
                 doc! { "_id": &claimed.id },
                 doc! { "$set": { "lease_expires_at": now() - 1.0 } },
@@ -703,7 +706,7 @@ mod tests {
             TaskStatus::Queued
         );
         let _ = db
-            .collection::<TaskRun>(RUNS_COLLECTION)
+            .collection::<Task>(TASKS_COLLECTION)
             .delete_one(doc! { "_id": &claimed.id })
             .await;
     }
@@ -717,15 +720,15 @@ mod tests {
         // Nothing has started, so there is no safe point to wait for.
         let db = crate::conf::get_test_db().await;
         let task_type = unique_type();
-        let run = queued(&task_type, serde_json::json!({}));
-        submit(&db, &run).await.unwrap();
+        let task = queued(&task_type, serde_json::json!({}));
+        submit(&db, &task).await.unwrap();
 
         assert_eq!(
-            request_cancel(&db, &run.id).await.unwrap(),
+            request_cancel(&db, &task.id).await.unwrap(),
             Some(TaskStatus::Canceled)
         );
         assert_eq!(
-            get(&db, &run.id).await.unwrap().unwrap().status,
+            get(&db, &task.id).await.unwrap().unwrap().status,
             TaskStatus::Canceled
         );
         cleanup(&db, &task_type).await;
@@ -741,17 +744,17 @@ mod tests {
         // boundary instead.
         let db = crate::conf::get_test_db().await;
         let task_type = unique_type();
-        let run = queued(&task_type, serde_json::json!({}));
-        submit(&db, &run).await.unwrap();
+        let task = queued(&task_type, serde_json::json!({}));
+        submit(&db, &task).await.unwrap();
         claim_ours(&db, "worker-a", &task_type)
             .await
             .expect("claimed");
 
         assert_eq!(
-            request_cancel(&db, &run.id).await.unwrap(),
+            request_cancel(&db, &task.id).await.unwrap(),
             Some(TaskStatus::Running)
         );
-        let after = get(&db, &run.id).await.unwrap().unwrap();
+        let after = get(&db, &task.id).await.unwrap().unwrap();
         assert!(after.cancel_requested);
         assert_eq!(after.status, TaskStatus::Running);
         cleanup(&db, &task_type).await;
@@ -773,12 +776,12 @@ mod tests {
         submit(&db, &queued(&task_type, serde_json::json!({})))
             .await
             .unwrap();
-        let run = claim_ours(&db, "worker-a", &task_type)
+        let task = claim_ours(&db, "worker-a", &task_type)
             .await
             .expect("claimed");
 
-        release(&db, &run.id, "worker-a").await.unwrap();
-        let back = get(&db, &run.id).await.unwrap().unwrap();
+        release(&db, &task.id, "worker-a").await.unwrap();
+        let back = get(&db, &task.id).await.unwrap().unwrap();
         assert_eq!(back.status, TaskStatus::Queued);
         assert!(back.lease_expires_at.is_none());
         cleanup(&db, &task_type).await;
@@ -792,14 +795,14 @@ mod tests {
         submit(&db, &queued(&task_type, serde_json::json!({})))
             .await
             .unwrap();
-        let run = claim_ours(&db, "worker-a", &task_type)
+        let task = claim_ours(&db, "worker-a", &task_type)
             .await
             .expect("claimed");
 
-        finish(&db, &run.id, TaskStatus::Failed, Some("boom".into()))
+        finish(&db, &task.id, TaskStatus::Failed, Some("boom".into()))
             .await
             .unwrap();
-        let done = get(&db, &run.id).await.unwrap().unwrap();
+        let done = get(&db, &task.id).await.unwrap().unwrap();
         assert_eq!(done.status, TaskStatus::Failed);
         assert_eq!(done.error.as_deref(), Some("boom"));
         assert!(done.lease_expires_at.is_none());
@@ -808,7 +811,7 @@ mod tests {
         // A terminal run is never claimed again.
         requeue_expired(&db).await.unwrap();
         assert_eq!(
-            get(&db, &run.id).await.unwrap().unwrap().status,
+            get(&db, &task.id).await.unwrap().unwrap().status,
             TaskStatus::Failed
         );
         cleanup(&db, &task_type).await;
@@ -842,9 +845,9 @@ mod tests {
     async fn a_finished_run_no_longer_blocks_a_new_one() {
         let db = crate::conf::get_test_db().await;
         let task_type = unique_type();
-        let run = queued(&task_type, serde_json::json!({ "catalog": "2mass" }));
-        submit(&db, &run).await.unwrap();
-        finish(&db, &run.id, TaskStatus::Succeeded, None)
+        let task = queued(&task_type, serde_json::json!({ "catalog": "2mass" }));
+        submit(&db, &task).await.unwrap();
+        finish(&db, &task.id, TaskStatus::Succeeded, None)
             .await
             .unwrap();
 

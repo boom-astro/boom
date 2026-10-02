@@ -9,7 +9,7 @@
 //! report their logs while running, and be cancellable, and they have to leave
 //! a record of who ran what, when, and with which parameters.
 //!
-//! A run is submitted through the API, written to `task_runs` with
+//! A run is submitted through the API, written to `tasks` with
 //! `status: queued`, and claimed by the task worker, which holds a lease on it
 //! and renews it with a heartbeat. A run whose lease lapses -- because the
 //! worker was deployed over or killed -- is requeued and picked up again. Task
@@ -53,7 +53,7 @@ pub mod sso_baselines;
 pub mod stream_kowalski_alerts;
 
 pub use context::TaskContext;
-pub use models::{Actor, TaskRun, TaskStatus, Trigger};
+pub use models::{Actor, Task, TaskStatus, Trigger};
 
 use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
@@ -74,7 +74,7 @@ pub enum TaskError {
 ///
 /// An enum at the API boundary, so the schema carries the values a client may
 /// send and an unknown one is refused by deserialization rather than several
-/// layers in. [`TaskRun::task_type`] stays a string: a run outlives the
+/// layers in. [`Task::task_type`] stays a string: a run outlives the
 /// release that defined its type, and a record of one has to read back and say
 /// what it was even after the type is gone.
 ///
@@ -180,7 +180,7 @@ fn schema_of<T: utoipa::PartialSchema>() -> serde_json::Value {
 }
 
 // TODO: recurring runs, for periodic maintenance such as the LSST cutout
-// retention policy (#518). The run document is already ready for them --
+// retention policy (#518). The task document is already ready for them --
 // `Trigger::Schedule` and `Actor::system()` exist so a scheduled run is
 // distinguishable from one a person asked for, and lease, heartbeat, cancel,
 // logs and the ledger are all keyed off the run rather than off what triggered
@@ -409,7 +409,7 @@ pub fn find(id: &str) -> Option<&'static TaskSpec> {
 ///
 /// An unknown type is treated as **not** idempotent. A run can outlive the
 /// release that created it -- a task type removed or renamed in a later version
-/// still has rows in `task_runs` -- and re-running something this build cannot
+/// still has rows in `tasks` -- and re-running something this build cannot
 /// even describe is exactly the case to be conservative about.
 pub fn is_retryable(task_type: &str) -> bool {
     find(task_type).is_some_and(|spec| spec.idempotent)

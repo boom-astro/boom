@@ -31,7 +31,7 @@ pub struct LogSink {
 
 struct Inner {
     db: Option<Database>,
-    run_id: String,
+    task_id: String,
     buffer: Mutex<Vec<TaskLogLine>>,
     /// Serializes sequence allocation and insertion. The client advances its
     /// cursor to the largest persisted sequence, so allowing a later chunk to
@@ -52,11 +52,11 @@ struct Inner {
 }
 
 impl LogSink {
-    pub fn new(db: Database, run_id: impl Into<String>) -> Self {
+    pub fn new(db: Database, task_id: impl Into<String>) -> Self {
         Self {
             inner: Arc::new(Inner {
                 db: Some(db),
-                run_id: run_id.into(),
+                task_id: task_id.into(),
                 buffer: Mutex::new(Vec::new()),
                 flush_lock: tokio::sync::Mutex::new(()),
                 seq: AtomicU64::new(0),
@@ -72,7 +72,7 @@ impl LogSink {
         Self {
             inner: Arc::new(Inner {
                 db: None,
-                run_id: String::new(),
+                task_id: String::new(),
                 buffer: Mutex::new(Vec::new()),
                 flush_lock: tokio::sync::Mutex::new(()),
                 seq: AtomicU64::new(0),
@@ -96,7 +96,7 @@ impl LogSink {
         if self.inner.written.load(Ordering::Relaxed) >= MAX_LINES_PER_RUN {
             if !self.inner.truncation_reported.swap(true, Ordering::Relaxed) {
                 tracing::warn!(
-                    run_id = %self.inner.run_id,
+                    task_id = %self.inner.task_id,
                     "task log truncated at {} lines; the full log is still in the container log",
                     MAX_LINES_PER_RUN
                 );
@@ -145,7 +145,7 @@ impl LogSink {
         };
         let count = lines.len() as u64;
         let chunk = TaskLogChunk {
-            run_id: self.inner.run_id.clone(),
+            task_id: self.inner.task_id.clone(),
             seq: self.inner.seq.fetch_add(1, Ordering::Relaxed),
             ts: now(),
             expires_at: expires_in_days(LOG_RETENTION_DAYS),
@@ -174,14 +174,14 @@ impl LogSink {
         }
         match db
             .collection::<TaskLogChunk>(LOGS_COLLECTION)
-            .find_one(doc! { "run_id": &self.inner.run_id })
+            .find_one(doc! { "task_id": &self.inner.task_id })
             .sort(doc! { "seq": -1 })
             .await
         {
             Ok(Some(chunk)) => {
                 self.inner.seq.store(chunk.seq + 1, Ordering::Relaxed);
                 tracing::info!(
-                    run_id = %self.inner.run_id,
+                    task_id = %self.inner.task_id,
                     "continuing this run's log from seq {}",
                     chunk.seq + 1
                 );
@@ -191,7 +191,7 @@ impl LogSink {
             // whose cursor is already past them, so say so rather than leaving
             // an empty tail to be puzzled over.
             Err(e) => tracing::warn!(
-                run_id = %self.inner.run_id,
+                task_id = %self.inner.task_id,
                 "could not read the last log sequence, starting from 0: {}",
                 e
             ),
@@ -202,11 +202,11 @@ impl LogSink {
 /// Read a run's log lines after `after_seq`, for the UI's tail.
 pub async fn read_after(
     db: &Database,
-    run_id: &str,
+    task_id: &str,
     after_seq: Option<u64>,
 ) -> Result<Vec<TaskLogChunk>, mongodb::error::Error> {
     use futures::TryStreamExt;
-    let mut filter = doc! { "run_id": run_id };
+    let mut filter = doc! { "task_id": task_id };
     if let Some(seq) = after_seq {
         filter.insert("seq", doc! { "$gt": seq as i64 });
     }
@@ -224,23 +224,23 @@ pub async fn read_after(
 /// outcome rather than guessed at write time. Best-effort: failing to extend
 /// retention is not worth failing the outcome record over, and the logs are
 /// still there for the ordinary window.
-pub async fn extend_retention(db: &Database, run_id: &str, days: i64) {
+pub async fn extend_retention(db: &Database, task_id: &str, days: i64) {
     let result = db
         .collection::<TaskLogChunk>(LOGS_COLLECTION)
         .update_many(
-            doc! { "run_id": run_id },
+            doc! { "task_id": task_id },
             doc! { "$set": { "expires_at": expires_in_days(days) } },
         )
         .await;
     if let Err(e) = result {
-        tracing::warn!(run_id, "failed to extend log retention: {}", e);
+        tracing::warn!(task_id, "failed to extend log retention: {}", e);
     }
 }
 
 /// Drop a run's logs, for when the run itself is deleted.
-pub async fn delete_for_run(db: &Database, run_id: &str) -> Result<(), mongodb::error::Error> {
+pub async fn delete_for_run(db: &Database, task_id: &str) -> Result<(), mongodb::error::Error> {
     db.collection::<TaskLogChunk>(LOGS_COLLECTION)
-        .delete_many(doc! { "run_id": run_id })
+        .delete_many(doc! { "task_id": task_id })
         .await?;
     Ok(())
 }

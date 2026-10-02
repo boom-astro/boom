@@ -1,9 +1,9 @@
 ---
-name: add-data-task
-description: Use when adding, porting or running a job that mutates BOOM's data outside the live alert pipeline — a migration, backfill, reprocess, catalog ingest or one-off fix. Covers writing the task, the five registration points, testing it locally, and running it against production data from a branch. Also use when tempted to add a binary under src/bin for such a job; that is what this replaces.
+name: add-data-task-type
+description: Use when adding, porting or running a kind of job that mutates BOOM's data outside the live alert pipeline — a migration, backfill, reprocess, catalog ingest or one-off fix. Covers writing the task, the five registration points, testing it locally, and running it against production data from a branch. Also use when tempted to add a binary under src/bin for such a job; that is what this replaces.
 ---
 
-# Adding a data task
+# Adding a data task type
 
 Anything that changes BOOM's data outside the alert pipeline runs as a **task**,
 not as a binary someone runs over SSH. `src/bin/` holds services (`api`,
@@ -16,7 +16,7 @@ Full reference, including why: [`docs/task-system.md`](../../../docs/task-system
 
 ## 1. Write the body
 
-Copy the skeleton in the **Adding a task** section of `docs/task-system.md` into
+Copy the skeleton in the **Adding a task type** section of `docs/task-system.md` into
 `src/tasks/<your_task>.rs`. Mirror an existing task close to your shape:
 
 | If the job… | Copy |

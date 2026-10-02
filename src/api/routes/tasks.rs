@@ -8,7 +8,7 @@ use crate::api::{admin::AdminActor, models::response};
 use crate::tasks::{
     self,
     ledger::MutationRecord,
-    models::{now, TaskLogChunk, TaskRun, TaskStatus, Trigger},
+    models::{now, Task, TaskLogChunk, TaskStatus, Trigger},
     queue, redact, TaskType,
 };
 
@@ -52,29 +52,29 @@ pub struct LogsParams {
 
 /// Mask connection credentials before a run leaves the API.
 ///
-/// The worker reads the real parameters straight from `task_runs`; nothing that
+/// The worker reads the real parameters straight from `tasks`; nothing that
 /// renders them needs the password, and the admin page is the most likely place
 /// for one to end up on a screen or in a screenshot.
-fn redacted(mut run: TaskRun) -> TaskRun {
-    run.params = redact::redact_params(&run.params);
+fn redacted(mut task: Task) -> Task {
+    task.params = redact::redact_params(&task.params);
     // The error too: a failure to connect usually quotes the whole URI back,
     // so the password would be rendered on the admin page beside the parameter
     // that was carefully masked. Masked by shape, since an error is free text.
-    run.error = run.error.as_deref().map(redact::redact_text);
-    run
+    task.error = task.error.as_deref().map(redact::redact_text);
+    task
 }
 
 /// List the task types this release can run
 #[utoipa::path(
     get,
-    path = "/tasks/types",
+    path = "/task-types",
     responses(
         (status = 200, description = "Available task types", body = Vec<serde_json::Value>),
         (status = 403, description = "Not an admin")
     ),
     tags=["Tasks"]
 )]
-#[get("/tasks/types")]
+#[get("/task-types")]
 pub async fn get_task_types(_admin: AdminActor) -> HttpResponse {
     let types: Vec<serde_json::Value> = tasks::TASKS
         .iter()
@@ -100,7 +100,7 @@ pub async fn get_task_types(_admin: AdminActor) -> HttpResponse {
     path = "/tasks",
     request_body = SubmitTaskBody,
     responses(
-        (status = 200, description = "The queued run", body = TaskRun),
+        (status = 200, description = "The queued task", body = Task),
         (status = 400, description = "Unknown task type or invalid parameters"),
         (status = 403, description = "Not an admin"),
         (status = 409, description = "An equivalent run is already queued or running")
@@ -139,7 +139,7 @@ pub async fn submit_task(
         }
     }
 
-    let run = TaskRun {
+    let task = Task {
         id: uuid::Uuid::new_v4().to_string(),
         // Stored as a string: a run outlives the release that defined its
         // type, and the record still has to say what it was.
@@ -159,17 +159,17 @@ pub async fn submit_task(
         attempts: 0,
     };
 
-    match queue::submit(&db, &run).await {
+    match queue::submit(&db, &task).await {
         Ok(()) => {
             tracing::info!(
-                run_id = %run.id,
-                task_type = %run.task_type,
+                task_id = %task.id,
+                task_type = %task.task_type,
                 "queued a run for {}",
-                run.actor.username
+                task.actor.username
             );
-            response::ok_ser("success", redacted(run))
+            response::ok_ser("success", redacted(task))
         }
-        Err(e) => response::internal_error(&format!("failed to queue the run: {e}")),
+        Err(e) => response::internal_error(&format!("failed to queue the task: {e}")),
     }
 }
 
@@ -179,7 +179,7 @@ pub async fn submit_task(
     path = "/tasks",
     params(ListTasksParams),
     responses(
-        (status = 200, description = "Task runs", body = Vec<TaskRun>),
+        (status = 200, description = "Tasks", body = Vec<Task>),
         (status = 403, description = "Not an admin")
     ),
     tags=["Tasks"]
@@ -206,34 +206,34 @@ pub async fn get_tasks(
 /// Get one task run
 #[utoipa::path(
     get,
-    path = "/tasks/{run_id}",
-    params(("run_id" = String, Path, description = "Task run id")),
+    path = "/tasks/{task_id}",
+    params(("task_id" = String, Path, description = "Task id")),
     responses(
-        (status = 200, description = "The run", body = TaskRun),
+        (status = 200, description = "The task", body = Task),
         (status = 403, description = "Not an admin"),
         (status = 404, description = "No such run")
     ),
     tags=["Tasks"]
 )]
-#[get("/tasks/{run_id}")]
+#[get("/tasks/{task_id}")]
 pub async fn get_task(
     db: web::Data<mongodb::Database>,
-    run_id: web::Path<String>,
+    task_id: web::Path<String>,
     _admin: AdminActor,
 ) -> HttpResponse {
-    match queue::get(&db, &run_id).await {
-        Ok(Some(run)) => response::ok_ser("success", redacted(run)),
+    match queue::get(&db, &task_id).await {
+        Ok(Some(task)) => response::ok_ser("success", redacted(task)),
         Ok(None) => response::not_found("no such run"),
-        Err(e) => response::internal_error(&format!("failed to read the run: {e}")),
+        Err(e) => response::internal_error(&format!("failed to read the task: {e}")),
     }
 }
 
 /// Tail a task run's logs
 #[utoipa::path(
     get,
-    path = "/tasks/{run_id}/logs",
+    path = "/tasks/{task_id}/logs",
     params(
-        ("run_id" = String, Path, description = "Task run id"),
+        ("task_id" = String, Path, description = "Task id"),
         LogsParams
     ),
     responses(
@@ -242,14 +242,14 @@ pub async fn get_task(
     ),
     tags=["Tasks"]
 )]
-#[get("/tasks/{run_id}/logs")]
+#[get("/tasks/{task_id}/logs")]
 pub async fn get_task_logs(
     db: web::Data<mongodb::Database>,
-    run_id: web::Path<String>,
+    task_id: web::Path<String>,
     params: web::Query<LogsParams>,
     _admin: AdminActor,
 ) -> HttpResponse {
-    match tasks::logs::read_after(&db, &run_id, params.after_seq).await {
+    match tasks::logs::read_after(&db, &task_id, params.after_seq).await {
         Ok(chunks) => response::ok_ser("success", chunks),
         Err(e) => response::internal_error(&format!("failed to read logs: {e}")),
     }
@@ -258,8 +258,8 @@ pub async fn get_task_logs(
 /// Request cancellation of a task run
 #[utoipa::path(
     post,
-    path = "/tasks/{run_id}/cancel",
-    params(("run_id" = String, Path, description = "Task run id")),
+    path = "/tasks/{task_id}/cancel",
+    params(("task_id" = String, Path, description = "Task id")),
     responses(
         (status = 200, description = "Cancellation requested or already terminal"),
         (status = 403, description = "Not an admin"),
@@ -267,16 +267,16 @@ pub async fn get_task_logs(
     ),
     tags=["Tasks"]
 )]
-#[post("/tasks/{run_id}/cancel")]
+#[post("/tasks/{task_id}/cancel")]
 pub async fn cancel_task(
     db: web::Data<mongodb::Database>,
-    run_id: web::Path<String>,
+    task_id: web::Path<String>,
     admin: AdminActor,
 ) -> HttpResponse {
-    match queue::request_cancel(&db, &run_id).await {
+    match queue::request_cancel(&db, &task_id).await {
         Ok(None) => response::not_found("no such run"),
         Ok(Some(status)) => {
-            tracing::info!(run_id = %*run_id, "cancel requested by {}", admin.username);
+            tracing::info!(task_id = %*task_id, "cancel requested by {}", admin.username);
             let message = match status {
                 // Running tasks stop at their next safe point rather than being
                 // killed, so this is a request, not a completed action.
@@ -294,7 +294,7 @@ pub async fn cancel_task(
 
 /// Read the record of what has been done to the data
 ///
-/// A mutation is a change to the data, not a run of a task: one run records as
+/// A mutation is a change to the data, not a run of a task: one task records as
 /// many as it makes, and the alert pipeline or the scheduler can record one
 /// without being a task at all. A run is how work is started and watched; this
 /// is what happened to the data.

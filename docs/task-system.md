@@ -20,6 +20,14 @@ Another system can ask BOOM for a desired state, but it does not reach in and
 mutate the database itself. That is what makes the changelog a complete account
 of how the data got this way rather than a partial one.
 
+**Two words, used precisely throughout.** A **task type** is a kind of work
+this release knows how to do -- `backfill_hpx`, `catalog_ingest` -- declared
+once in code and listed by `GET /task-types`. A **task** is one performance of
+one: a document in `tasks` with parameters, a status, a lease and a log.
+Adding a task type is a code change that ships in a release; creating a task is
+submitting the form. The code mirrors this -- `TaskType` and `TaskSpec` for the
+kind, `Task` for the performance.
+
 **Who this is for:** BOOM developers, and the admins who operate a deployment.
 None of it is visible to Babamul users, and a SkyPortal integrator only meets it
 if that account is also an admin.
@@ -105,7 +113,7 @@ Worth taking from its design regardless, none of which needs Temporal:
 ## How a run flows
 
 ```text
-   admin page ──POST /tasks──▶ boom-api ──▶ task_runs (status: queued)
+   admin page ──POST /tasks──▶ boom-api ──▶ tasks (status: queued)
                                                  │
                                     findOneAndUpdate(queued → running, +lease)
                                                  ▼
@@ -113,7 +121,7 @@ Worth taking from its design regardless, none of which needs Temporal:
                                                  │
                     ┌────────────────────────────┼───────────────────────┐
                     ▼                            ▼                       ▼
-             the data itself              task_runs.progress         task_logs
+             the data itself              tasks.progress         task_logs
                                           (+ lease heartbeat)     (tailed by the UI)
 ```
 
@@ -122,7 +130,7 @@ a run from `queued` to `running` and stamps a lease in one operation: two
 workers racing both match the filter, but only one update sees `queued`.
 
 **Why not Valkey**, which is already in the stack and is what the alert
-scheduler uses: the run record has to live in Mongo regardless — status, params,
+scheduler uses: the task record has to live in Mongo regardless — status, params,
 actor, progress and history are what the admin page and the provenance story
 read. Putting the queue elsewhere makes every state transition a dual write to
 two stores, and reconciling those when one fails mid-transition is a real source
@@ -132,7 +140,7 @@ the claim is one indexed lookup every couple of seconds.
 
 It also does not contend with alert writes. WiredTiger takes only *intent* locks
 at the database and collection level, and those are mutually compatible, so
-writes to `task_runs` never block writes to an alert collection. The thing that
+writes to `tasks` never block writes to an alert collection. The thing that
 *does* contend is a large ingest itself — which is why `catalog_ingest` exposes
 `num_workers` and `batch_size`, so a run can be turned down when it is hurting
 the pipeline.
@@ -220,7 +228,7 @@ That is the point the system was built for: there is no longer a binary an
 operator can run over SSH that mutates data without a record of who ran it, with
 what, under which release.
 
-### Adding a task
+### Adding a task type
 
 The whole point is that this should be *less* work than writing a binary and
 running it over SSH, not more. A new task is one file plus four lines of
@@ -339,7 +347,7 @@ Put both back on the release with `docker compose --profile prod up -d
 
 **What you get without asking**, and what the SSH habit could not give:
 
-- The run record: who submitted it, with which parameters, when it started and
+- The task record: who submitted it, with which parameters, when it started and
   finished, and which commit ran it.
 - Logs streamed while it runs, readable by whoever is watching rather than only
   by whoever owns the terminal.
@@ -348,7 +356,7 @@ Put both back on the release with `docker compose --profile prod up -d
 - A `data_mutations` entry saying what changed, so the next person asking "why
   does this collection look like this" has an answer.
 
-### Porting a binary to a task
+### Porting a binary to a task type
 
 A task body needs a params struct, an arm in `dispatch` and `validate_params`,
 an entry in `TASKS`, and a cancellation check in its batch loop. The ones that
@@ -387,7 +395,7 @@ draining one something else filled. That is what closes the loop the binary left
 open, and it is also what makes completion well-defined: because the task owns
 the queue, `LLEN == 0` means done rather than "nobody has pushed anything yet".
 
-The queue is scoped to the run — `<survey>_enrichment_queue_reprocess_<run_id>`
+The queue is scoped to the run — `<survey>_enrichment_queue_reprocess_<task_id>`
 — precisely so that holds. An `input_queue` parameter overrides it for a queue
 filled out of band; the task then only drains, and never deletes it.
 
@@ -408,7 +416,7 @@ A task may take a connection URI — a copy between two clusters has to name bot
 ends somehow. But parameters are stored on the run, rendered on the admin page,
 and copied into the ledger, so a URI carries a password into all three.
 
-The worker reads the real parameters from `task_runs`. Everywhere they are read
+The worker reads the real parameters from `tasks`. Everywhere they are read
 *back* they are redacted first: every API response, and the ledger, which is
 append-only and would otherwise archive a password permanently.
 
@@ -472,7 +480,7 @@ GPU work needs claim-time routing, which is listed below.
 
 | Collection | Holds |
 | --- | --- |
-| `task_runs` | One document per run: params, status, actor, progress, lease, error. Also the queue. |
+| `tasks` | One document per run: params, status, actor, progress, lease, error. Also the queue. |
 | `task_logs` | Log lines, batched — one document per flush, not per line. The UI tails by asking for `seq` greater than the last it saw. |
 | `data_mutations` | The append-only ledger: what changed, who changed it, and under which release. |
 
@@ -486,7 +494,7 @@ deletes them — there is no cron job and no loop in the worker to go wrong. The
 window is 90 days normally and a year for a run that failed or was canceled,
 set when the outcome is recorded, since those are the logs somebody comes back
 to. Loki holds the same lines for seven days, so the two together mean: recent
-firehose in Loki, per-run record here, permanent record of *what changed* in
+firehose in Loki, per-task record here, permanent record of *what changed* in
 `data_mutations`.
 
 The index uses `expireAfterSeconds: 0` against a per-document date rather than
@@ -529,7 +537,7 @@ logged loudly instead.
 ## The submission form
 
 The admin page renders a form for each task from the `params_schema` on
-`/tasks/types`. That schema is derived from the params struct's `ToSchema`
+`/task-types`. That schema is derived from the params struct's `ToSchema`
 derive, so it cannot drift from what the API will accept, and the help text
 under each field is the doc comment written on it — which is a reason to write
 them well.
@@ -564,7 +572,7 @@ the person up later.
 
 | Route | |
 | --- | --- |
-| `GET /tasks/types` | What this release can run, with a JSON Schema per task |
+| `GET /task-types` | What this release can run, with a JSON Schema per task type |
 | `POST /tasks` | Submit a run |
 | `GET /tasks` | Runs, most recent first |
 | `GET /tasks/{id}` | One run |
@@ -621,7 +629,7 @@ moving part. The scheduling is the small half; the offload is the work.
 ## Not yet built
 
 - **Recurring runs.** See [Scheduled tasks](#scheduled-tasks-when-we-build-them)
-  above — the run record is ready for them, the loop that fires them is not.
+  above — the task record is ready for them, the loop that fires them is not.
 - **Ledger coverage beyond tasks.** `data_mutations` records task runs today.
   Startup migrations and the live pipeline have `SourceKind` variants reserved
   but do not write to it yet.

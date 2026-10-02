@@ -1,6 +1,6 @@
 //! Runs queued tasks.
 //!
-//! Claims one run at a time from `task_runs`, holds a lease on it, renews that
+//! Claims one run at a time from `tasks`, holds a lease on it, renews that
 //! lease with a heartbeat, and streams progress and logs back to Mongo while
 //! the task runs. See [`docs/task-system.md`](../../docs/task-system.md).
 //!
@@ -94,12 +94,12 @@ async fn main() {
         let claimed = match queue::claim_next(&db, &worker_name).await {
             Ok(claimed) => claimed,
             Err(e) => {
-                error!("failed to claim a run: {}", e);
+                error!("failed to claim a task: {}", e);
                 tokio::time::sleep(POLL_INTERVAL).await;
                 continue;
             }
         };
-        let Some(run) = claimed else {
+        let Some(task) = claimed else {
             tokio::time::sleep(POLL_INTERVAL).await;
             continue;
         };
@@ -109,7 +109,7 @@ async fn main() {
             &config,
             &config_path,
             &worker_name,
-            run,
+            task,
             shutting_down.clone(),
         )
         .await;
@@ -124,21 +124,21 @@ async fn run_one(
     config: &Arc<AppConfig>,
     config_path: &str,
     worker_name: &str,
-    run: tasks::TaskRun,
+    task: tasks::Task,
     shutting_down: Arc<AtomicBool>,
 ) {
     info!(
-        run_id = %run.id,
-        task_type = %run.task_type,
-        attempt = run.attempts,
+        task_id = %task.id,
+        task_type = %task.task_type,
+        attempt = task.attempts,
         "starting run requested by {}",
-        run.actor.username
+        task.actor.username
     );
 
     let canceled = Arc::new(AtomicBool::new(false));
     let heartbeat = spawn_heartbeat(
         db.clone(),
-        run.id.clone(),
+        task.id.clone(),
         worker_name.to_string(),
         canceled.clone(),
         shutting_down.clone(),
@@ -148,14 +148,14 @@ async fn run_one(
         db.clone(),
         config.clone(),
         config_path,
-        &run.id,
-        run.actor.clone(),
-        run.trigger,
+        &task.id,
+        task.actor.clone(),
+        task.trigger,
         canceled.clone(),
     );
     ctx.info(format!(
         "run {} claimed by {} (attempt {})",
-        run.id, worker_name, run.attempts
+        task.id, worker_name, task.attempts
     ));
 
     // A panicking task must fail its own run, not the worker. Task bodies are
@@ -164,8 +164,8 @@ async fn run_one(
     // run on this worker and leave this one holding a lease until it expired.
     let result = match std::panic::AssertUnwindSafe(tasks::dispatch(
         &ctx,
-        &run.task_type,
-        run.params.clone(),
+        &task.task_type,
+        task.params.clone(),
     ))
     .catch_unwind()
     .await
@@ -193,28 +193,29 @@ async fn run_one(
     // because quietly doing half the work twice is the outcome nobody could
     // detect afterwards.
     if shutting_down.load(Ordering::Relaxed) && result.is_err() {
-        if tasks::is_retryable(&run.task_type) {
-            info!(run_id = %run.id, "shutting down; returning the run to the queue");
-            if let Err(e) = queue::release(db, &run.id, worker_name).await {
-                error!("failed to release run {}: {}", run.id, e);
+        if tasks::is_retryable(&task.task_type) {
+            info!(task_id = %task.id, "shutting down; returning the run to the queue");
+            if let Err(e) = queue::release(db, &task.id, worker_name).await {
+                error!("failed to release run {}: {}", task.id, e);
             }
         } else {
             warn!(
-                run_id = %run.id,
-                "shutting down mid-run, and {} is not declared idempotent; failing \
+                task_id = %task.id,
+                "shutting down mid-task, and {} is not declared idempotent; failing \
                  it rather than retrying automatically",
-                run.task_type
+                task.task_type
             );
             let error = Some(format!(
                 "the worker shut down while this was running, and {} is not \
                  declared idempotent, so it was not retried automatically. Check \
                  what it had already done before running it again.",
-                run.task_type
+                task.task_type
             ));
-            match queue::finish_claimed(db, &run.id, worker_name, TaskStatus::Failed, error).await {
+            match queue::finish_claimed(db, &task.id, worker_name, TaskStatus::Failed, error).await
+            {
                 Ok(true) => {}
-                Ok(false) => warn!(run_id = %run.id, "lost lease before recording failure"),
-                Err(e) => error!("failed to record the outcome of run {}: {}", run.id, e),
+                Ok(false) => warn!(task_id = %task.id, "lost lease before recording failure"),
+                Err(e) => error!("failed to record the outcome of run {}: {}", task.id, e),
             }
         }
         return;
@@ -235,10 +236,10 @@ async fn run_one(
         }
     };
     ctx.flush_logs().await;
-    match queue::finish_claimed(db, &run.id, worker_name, status, error).await {
+    match queue::finish_claimed(db, &task.id, worker_name, status, error).await {
         Ok(true) => {}
-        Ok(false) => warn!(run_id = %run.id, "lost lease before recording outcome"),
-        Err(e) => error!("failed to record the outcome of run {}: {}", run.id, e),
+        Ok(false) => warn!(task_id = %task.id, "lost lease before recording outcome"),
+        Err(e) => error!("failed to record the outcome of run {}: {}", task.id, e),
     }
 }
 
@@ -246,7 +247,7 @@ async fn run_one(
 /// polls.
 fn spawn_heartbeat(
     db: Database,
-    run_id: String,
+    task_id: String,
     worker_name: String,
     canceled: Arc<AtomicBool>,
     shutting_down: Arc<AtomicBool>,
@@ -257,9 +258,9 @@ fn spawn_heartbeat(
             if shutting_down.load(Ordering::Relaxed) {
                 canceled.store(true, Ordering::Relaxed);
             }
-            match queue::heartbeat(&db, &run_id, &worker_name).await {
+            match queue::heartbeat(&db, &task_id, &worker_name).await {
                 Ok(Some(true)) => {
-                    info!(run_id = %run_id, "cancellation requested");
+                    info!(task_id = %task_id, "cancellation requested");
                     canceled.store(true, Ordering::Relaxed);
                 }
                 Ok(Some(false)) => {}
@@ -267,11 +268,11 @@ fn spawn_heartbeat(
                 // worker claimed it. Two workers running the same task would
                 // race on the same collection, so stand down.
                 Ok(None) => {
-                    warn!(run_id = %run_id, "lost the lease on this run; stopping");
+                    warn!(task_id = %task_id, "lost the lease on this task; stopping");
                     canceled.store(true, Ordering::Relaxed);
                     return;
                 }
-                Err(e) => warn!("heartbeat failed for run {}: {}", run_id, e),
+                Err(e) => warn!("heartbeat failed for run {}: {}", task_id, e),
             }
         }
     })

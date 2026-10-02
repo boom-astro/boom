@@ -269,8 +269,8 @@ The admin page shows active runs with a progress bar and a live log tail. Or:
 
 ```bash
 curl -s .../tasks | jq '.data[] | {task_type, status, progress}'   # recent runs
-curl -s .../tasks/<run_id>/logs?after_seq=0                        # tail the log
-curl -X POST .../tasks/<run_id>/cancel                             # stop it
+curl -s .../tasks/<task_id>/logs?after_seq=0                        # tail the log
+curl -X POST .../tasks/<task_id>/cancel                             # stop it
 ```
 
 Cancelling stops the workers at a batch boundary rather than mid-alert. Because

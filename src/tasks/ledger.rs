@@ -132,7 +132,7 @@ pub async fn record(db: &Database, entry: MutationRecord) -> Result<(), LedgerEr
 /// Build an entry for a task that changed one collection.
 #[allow(clippy::too_many_arguments)]
 pub fn for_task(
-    run_id: &str,
+    task_id: &str,
     task_type: &str,
     actor: &Actor,
     trigger: Trigger,
@@ -143,7 +143,7 @@ pub fn for_task(
     MutationRecord {
         id: uuid::Uuid::new_v4().to_string(),
         source_kind: SourceKind::Task,
-        source_id: run_id.to_string(),
+        source_id: task_id.to_string(),
         task_type: Some(task_type.to_string()),
         actor: actor.clone(),
         trigger,

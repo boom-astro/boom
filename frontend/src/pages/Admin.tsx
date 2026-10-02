@@ -13,7 +13,7 @@ import {
   fetchCatalogStatus,
   fetchEnrichmentStatus,
   fetchTaskLogs,
-  fetchTaskRuns,
+  fetchTasks,
   fetchTaskTypes,
   isActive,
   submitCatalogIngest,
@@ -24,7 +24,7 @@ import {
   type CatalogStatus,
   type EnrichmentDrift,
   type TaskLogLine,
-  type TaskRun,
+  type Task,
   type TaskType,
 } from "@/lib/adminApi";
 import { AdminUsers } from "@/components/admin-users";
@@ -51,7 +51,7 @@ function healthLabel(health: CatalogHealth): { text: string; variant: "default" 
   }
 }
 
-function statusVariant(status: TaskRun["status"]): "default" | "secondary" | "destructive" | "outline" {
+function statusVariant(status: Task["status"]): "default" | "secondary" | "destructive" | "outline" {
   if (status === "succeeded") return "default";
   if (status === "failed") return "destructive";
   if (status === "running") return "secondary";
@@ -72,7 +72,7 @@ function CatalogsTable({
   error,
 }: {
   catalogs: CatalogStatus[];
-  runsByCatalog: Map<string, TaskRun>;
+  runsByCatalog: Map<string, Task>;
   onIngest: (id: string) => void;
   onSelect: (runId: string) => void;
   busy: string | null;
@@ -179,7 +179,7 @@ function CatalogsTable({
  * the admin page exists to remove.
  */
 function ActiveRuns({ runs, onSelect, onCancel }: {
-  runs: TaskRun[];
+  runs: Task[];
   onSelect: (id: string) => void;
   onCancel: (id: string) => void;
 }) {
@@ -258,7 +258,7 @@ function ActiveRuns({ runs, onSelect, onCancel }: {
 }
 
 function RunDetail({ runId, onClose }: { runId: string; onClose: () => void }) {
-  const [run, setRun] = useState<TaskRun | null>(null);
+  const [run, setRun] = useState<Task | null>(null);
   const [lines, setLines] = useState<TaskLogLine[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [canceling, setCanceling] = useState(false);
@@ -275,7 +275,7 @@ function RunDetail({ runId, onClose }: { runId: string; onClose: () => void }) {
     async function poll() {
       try {
         const [runs, chunks] = await Promise.all([
-          fetchTaskRuns(),
+          fetchTasks(),
           fetchTaskLogs(runId, lastSeq.current),
         ]);
         if (cancelled) return;
@@ -659,7 +659,7 @@ function TaskCatalogue({
     <section className="mb-8">
       <h2 className="text-lg font-semibold mb-1">Run a task</h2>
       <p className="text-sm text-muted-foreground mb-3">
-        Data-mutating work runs here rather than over SSH: every run records who
+        Data-mutating work runs here rather than over SSH: every task records who
         started it, with which parameters, under which release.
       </p>
 
@@ -711,7 +711,7 @@ function TaskCatalogue({
   );
 }
 
-function RunsTable({ runs, onSelect }: { runs: TaskRun[]; onSelect: (id: string) => void }) {
+function RunsTable({ runs, onSelect }: { runs: Task[]; onSelect: (id: string) => void }) {
   return (
     <section>
       <h2 className="text-lg font-semibold mb-1">Recent task runs</h2>
@@ -760,7 +760,7 @@ function RunsTable({ runs, onSelect }: { runs: TaskRun[]; onSelect: (id: string)
 
 export default function Admin() {
   const [catalogs, setCatalogs] = useState<CatalogStatus[]>([]);
-  const [runs, setRuns] = useState<TaskRun[]>([]);
+  const [runs, setTasks] = useState<Task[]>([]);
   const [taskTypes, setTaskTypes] = useState<TaskType[]>([]);
   const [enrichment, setEnrichment] = useState<EnrichmentDrift[]>([]);
   const [exports, setExports] = useState<CatalogExport[]>([]);
@@ -773,13 +773,13 @@ export default function Admin() {
     try {
       const [status, recent, types, drift, exported] = await Promise.all([
         fetchCatalogStatus(),
-        fetchTaskRuns(),
+        fetchTasks(),
         fetchTaskTypes(),
         fetchEnrichmentStatus(),
         fetchCatalogExports(),
       ]);
       setCatalogs(status);
-      setRuns(recent);
+      setTasks(recent);
       setTaskTypes(types);
       setEnrichment(drift);
       setExports(exported);
@@ -811,7 +811,7 @@ export default function Admin() {
   }, [refresh]);
 
   // The newest run per catalog, so the table can show one in flight.
-  const runsByCatalog = new Map<string, TaskRun>();
+  const runsByCatalog = new Map<string, Task>();
   for (const run of runs) {
     const catalog = typeof run.params.catalog === "string" ? run.params.catalog : null;
     if (catalog && !runsByCatalog.has(catalog)) runsByCatalog.set(catalog, run);

@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 /// Runs, and the queue they are claimed from. Mongo is both, so there is no
-/// second store to keep consistent with the run record.
-pub const RUNS_COLLECTION: &str = "task_runs";
+/// second store to keep consistent with the task record.
+pub const TASKS_COLLECTION: &str = "tasks";
 /// Log lines, chunked -- one document per flush rather than one per line.
 pub const LOGS_COLLECTION: &str = "task_logs";
 
@@ -68,7 +68,7 @@ impl Actor {
 
 /// What caused the run to be submitted.
 ///
-/// On the run document from the start: adding it later would leave every
+/// On the task document from the start: adding it later would leave every
 /// historical run unable to say where it came from, and the whole point of
 /// keeping these records is being able to read them back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, ToSchema)]
@@ -91,7 +91,7 @@ pub struct Progress {
 
 /// One execution of a task type with concrete parameters.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct TaskRun {
+pub struct Task {
     #[serde(rename = "_id")]
     pub id: String,
     pub task_type: String,
@@ -133,7 +133,7 @@ pub struct TaskRun {
 /// catalog ingest logs steadily for hours.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct TaskLogChunk {
-    pub run_id: String,
+    pub task_id: String,
     /// Monotonic per run. The client tails by asking for `seq` greater than the
     /// last one it saw, which is stable under concurrent writes in a way that
     /// a timestamp cursor is not.
@@ -168,7 +168,7 @@ pub fn now() -> f64 {
 
 /// How long a run's logs are kept.
 ///
-/// Loki holds the firehose for seven days; this copy is the per-run record the
+/// Loki holds the firehose for seven days; this copy is the per-task record the
 /// admin page reads, so it outlasts that by a margin wide enough for any audit
 /// anyone actually performs. The ledger has no expiry at all -- it is the
 /// permanent answer to "what changed", and logs are the evidence of how, which
@@ -195,7 +195,7 @@ pub fn expires_in_days(days: i64) -> mongodb::bson::DateTime {
 /// running runs by lease -- both are hot enough to matter once there is any
 /// history in the collection.
 pub async fn initialize_indexes(db: &mongodb::Database) -> Result<(), mongodb::error::Error> {
-    let runs = db.collection::<Document>(RUNS_COLLECTION);
+    let runs = db.collection::<Document>(TASKS_COLLECTION);
     runs.create_index(
         mongodb::IndexModel::builder()
             .keys(doc! { "status": 1, "requested_at": 1 })
@@ -217,7 +217,7 @@ pub async fn initialize_indexes(db: &mongodb::Database) -> Result<(), mongodb::e
     let logs = db.collection::<Document>(LOGS_COLLECTION);
     logs.create_index(
         mongodb::IndexModel::builder()
-            .keys(doc! { "run_id": 1, "seq": 1 })
+            .keys(doc! { "task_id": 1, "seq": 1 })
             .build(),
     )
     .await?;
@@ -251,7 +251,7 @@ mod tests {
         // document whose indexed field is not a date, silently, so if this ever
         // becomes a number the index stays installed and deletes nothing.
         let chunk = TaskLogChunk {
-            run_id: "r1".to_string(),
+            task_id: "r1".to_string(),
             seq: 0,
             ts: now(),
             expires_at: expires_in_days(LOG_RETENTION_DAYS),
@@ -284,7 +284,7 @@ mod tests {
     #[test]
     fn retention_outlasts_loki() {
         // Loki keeps the firehose for seven days (config/loki/loki-config.yaml).
-        // This copy is the per-run record, so it has to outlast that or the
+        // This copy is the per-task record, so it has to outlast that or the
         // division of labor between the two is pointless.
         assert!(LOG_RETENTION_DAYS > 7);
     }

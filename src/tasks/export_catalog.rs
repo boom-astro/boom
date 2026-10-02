@@ -237,7 +237,7 @@ pub async fn run(
         "rows": total,
         "files": files,
         "exported_at": super::models::now(),
-        "exported_by": ctx.run_id(),
+        "exported_by": ctx.task_id(),
         "code_version": super::ledger::CodeVersion::current(),
         "source_database": db.name(),
     });

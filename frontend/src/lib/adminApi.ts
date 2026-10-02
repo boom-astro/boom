@@ -73,7 +73,7 @@ export type EnrichmentDrift = {
 
 export type TaskStatus = "queued" | "running" | "succeeded" | "failed" | "canceled";
 
-export type TaskRun = {
+export type Task = {
   _id: string;
   task_type: string;
   params: Record<string, unknown>;
@@ -90,10 +90,10 @@ export type TaskRun = {
 };
 
 export type TaskLogLine = { ts: number; level: string; message: string };
-export type TaskLogChunk = { run_id: string; seq: number; ts: number; lines: TaskLogLine[] };
+export type TaskLogChunk = { task_id: string; seq: number; ts: number; lines: TaskLogLine[] };
 
 /** A run that is not finished, and so is worth polling. */
-export function isActive(run: TaskRun): boolean {
+export function isActive(run: Task): boolean {
   return run.status === "queued" || run.status === "running";
 }
 
@@ -114,22 +114,22 @@ async function request<T>(path: string, init: RequestInit | undefined, fallback:
 }
 
 export function fetchTaskTypes(): Promise<TaskType[]> {
-  return request<TaskType[]>("/tasks/types", undefined, []);
+  return request<TaskType[]>("/task-types", undefined, []);
 }
 
 /** Submit any task type. */
 export function submitTask(
   taskType: string,
   params: Record<string, unknown>,
-): Promise<TaskRun> {
-  return request<TaskRun>(
+): Promise<Task> {
+  return request<Task>(
     "/tasks",
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ task_type: taskType, params }),
     },
-    {} as TaskRun,
+    {} as Task,
   );
 }
 
@@ -180,14 +180,14 @@ export function fetchCatalogStatus(): Promise<CatalogStatus[]> {
   return request<CatalogStatus[]>("/catalogs/status", undefined, []);
 }
 
-export function fetchTaskRuns(taskType?: string, limit = 25): Promise<TaskRun[]> {
+export function fetchTasks(taskType?: string, limit = 25): Promise<Task[]> {
   const params = new URLSearchParams({ limit: String(limit) });
   if (taskType) params.set("task_type", taskType);
-  return request<TaskRun[]>(`/tasks?${params}`, undefined, []);
+  return request<Task[]>(`/tasks?${params}`, undefined, []);
 }
 
-export function fetchTaskRun(runId: string): Promise<TaskRun> {
-  return request<TaskRun>(`/tasks/${encodeURIComponent(runId)}`, undefined, {} as TaskRun);
+export function fetchTaskRun(runId: string): Promise<Task> {
+  return request<Task>(`/tasks/${encodeURIComponent(runId)}`, undefined, {} as Task);
 }
 
 /**
@@ -208,8 +208,8 @@ export function fetchTaskLogs(runId: string, afterSeq?: number): Promise<TaskLog
   );
 }
 
-export function submitCatalogIngest(catalog: string, dropExisting = false): Promise<TaskRun> {
-  return request<TaskRun>(
+export function submitCatalogIngest(catalog: string, dropExisting = false): Promise<Task> {
+  return request<Task>(
     "/tasks",
     {
       method: "POST",
@@ -219,7 +219,7 @@ export function submitCatalogIngest(catalog: string, dropExisting = false): Prom
         params: { catalog, drop_existing: dropExisting },
       }),
     },
-    {} as TaskRun,
+    {} as Task,
   );
 }
 
