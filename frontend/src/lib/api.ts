@@ -384,12 +384,19 @@ export type NightlyStat = {
   date: string;
   ztf?: number;
   lsst?: number;
+  decam?: number;
+  winter?: number;
 };
+
+function optionalAuthHeaders(): HeadersInit {
+  const token = getTokenRecord();
+  return token ? { Authorization: `${token.token_type} ${token.access_token}` } : {};
+}
 
 export async function fetchStats(startDate: string, endDate: string, survey?: string): Promise<NightlyStat[]> {
   const params = new URLSearchParams({ start_date: startDate, end_date: endDate });
   if (survey) params.set("survey", survey);
-  const res = await fetch(`${API_BASE}/stats/nightly?${params}`);
+  const res = await fetch(`${API_BASE}/stats/nightly?${params}`, { headers: optionalAuthHeaders() });
   await ensureOk(res, "Fetch stats");
   return readList<NightlyStat>(res);
 }
@@ -434,7 +441,7 @@ export type CollectionStats = {
 };
 
 export async function fetchCollectionStats(): Promise<CollectionStats> {
-  const res = await fetch(`${API_BASE}/stats/collections?count=true&size=true`);
+  const res = await fetch(`${API_BASE}/stats/collections?count=true&size=true`, { headers: optionalAuthHeaders() });
   await ensureOk(res, "Fetch collection stats");
   return unwrapData<CollectionStats>(await readJson(res), { n_collections: 0, collections: [] });
 }

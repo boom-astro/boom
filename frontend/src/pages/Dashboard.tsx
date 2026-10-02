@@ -8,23 +8,28 @@ import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip
 import { IconInfoCircle, IconRefresh, IconZoomReset } from "@tabler/icons-react";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import api, { CollectionEntry, fetchTopics, NightlyStat, type TopicInfo } from "@/lib/api";
-import { type Survey } from "@/lib/constants";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch.tsx";
 import { Label } from "@/components/ui/label.tsx";
 import KafkaAlertCounts from "@/components/kafka/KafkaAlertCounts.tsx";
 import { toast } from "sonner";
 
-const SURVEY_ORDER = ["ztf", "lsst"] as const satisfies readonly Survey[];
+const SURVEY_ORDER = ["ztf", "lsst", "decam", "winter"] as const;
+
+type Survey = (typeof SURVEY_ORDER)[number];
 
 const SURVEY_COLORS: Record<Survey, string> = {
   ztf: "var(--chart-1)",
   lsst: "var(--chart-2)",
+  decam: "var(--chart-3)",
+  winter: "var(--chart-4)",
 };
 
 const chartConfig = {
   ztf: { label: "ZTF", color: SURVEY_COLORS.ztf },
   lsst: { label: "LSST", color: SURVEY_COLORS.lsst },
+  decam: { label: "DECam", color: SURVEY_COLORS.decam },
+  winter: { label: "WINTER", color: SURVEY_COLORS.winter },
 } satisfies ChartConfig;
 
 const FIRST_NIGHT = "2018-01-01";
@@ -34,7 +39,8 @@ const MAX_REFRESH_MONTHS = 6;
 
 const NIGHT_CONVENTION =
   "Alerts are grouped by observing night, local noon to local noon at the " +
-  "observatory (Palomar, UTC−7, for ZTF; Cerro Pachón, UTC−3, for LSST). " +
+  "observatory (Palomar, UTC−7, for ZTF and WINTER; Cerro Pachón, UTC−3, for LSST; " +
+  "Cerro Tololo, UTC−4, for DECam). " +
   "A night is labeled by its evening date.";
 
 const ALERT_TYPE_LABELS: Record<string, string> = {
@@ -106,11 +112,12 @@ function formatBytes(bytes: number | undefined): string {
   return `${val < 10 ? val.toFixed(1) : Math.round(val)} ${units[i]}`;
 }
 
-const isAlertCollection = (name: string) =>
-  name.startsWith("ZTF_") || name.startsWith("LSST_");
+const ALERT_COLLECTION = /^(ZTF|LSST|DECAM|WINTER)_(.+)$/;
+
+const isAlertCollection = (name: string) => ALERT_COLLECTION.test(name);
 
 function alertCollectionLabel(name: string): string {
-  const m = name.match(/^(ZTF|LSST)_(.+)$/);
+  const m = name.match(ALERT_COLLECTION);
   if (!m) return name;
   return `${m[1]} ${ALERT_TYPE_LABELS[m[2]] ?? m[2]}`;
 }
@@ -241,13 +248,18 @@ export default function Dashboard() {
     return () => observer.disconnect();
   }, []);
 
+  const availableSurveys = useMemo(() =>
+      SURVEY_ORDER.filter((s) => statsData.some((d) => d[s] !== undefined)),
+    [statsData]);
+
   const visibleData = useMemo(() =>
       statsData.map((d) => ({
         date: d.date,
-        ...(surveys.has("ztf") ? {ztf: d.ztf} : {}),
-        ...(surveys.has("lsst") ? {lsst: d.lsst} : {}),
-      })),
-    [statsData, surveys]);
+        ...Object.fromEntries(
+          availableSurveys.filter((s) => surveys.has(s)).map((s) => [s, d[s]]),
+        ),
+      }) as NightlyStat),
+    [statsData, surveys, availableSurveys]);
 
   const chartData = useMemo(() =>
       zoomSlice ? visibleData.slice(zoomSlice[0], zoomSlice[1] + 1) : visibleData,
@@ -277,7 +289,7 @@ export default function Dashboard() {
     let nights = 0;
     let peak: { date: string; total: number } | null = null;
     for (const d of visibleData) {
-      const n = (d.ztf ?? 0) + (d.lsst ?? 0);
+      const n = SURVEY_ORDER.reduce((sum, s) => sum + (d[s] ?? 0), 0);
       total += n;
       if (n > 0) nights += 1;
       if (!peak || n > peak.total) peak = {date: d.date, total: n};
@@ -410,7 +422,7 @@ export default function Dashboard() {
             </div>
             <div className="flex flex-wrap items-center gap-6">
               <div className="flex flex-wrap items-center gap-3">
-                {SURVEY_ORDER.map((s) => (
+                {availableSurveys.map((s) => (
                   <Toggle
                     key={s}
                     variant="outline"
@@ -423,7 +435,7 @@ export default function Dashboard() {
                       backgroundColor: `color-mix(in oklch, ${SURVEY_COLORS[s]} 15%, transparent)`,
                     } : {}}
                   >
-                    {s.toUpperCase()}
+                    {chartConfig[s].label.toUpperCase()}
                   </Toggle>
                 ))}
               </div>
@@ -509,7 +521,7 @@ export default function Dashboard() {
                     />
                   }
                 />
-                {SURVEY_ORDER.filter((s) => surveys.has(s)).map((s) => (
+                {availableSurveys.filter((s) => surveys.has(s)).map((s) => (
                   <Bar key={s} dataKey={s} fill={`var(--color-${s})`} radius={[2, 2, 0, 0]}/>
                 ))}
                 {zoomLeft && zoomRight && (
@@ -550,7 +562,7 @@ export default function Dashboard() {
 
       <CollectionsCard
         title="Alert Collections"
-        description="ZTF and LSST collections"
+        description="Alerts, objects and cutouts per survey"
         collections={alertCollections}
         formatName={alertCollectionLabel}
       />
