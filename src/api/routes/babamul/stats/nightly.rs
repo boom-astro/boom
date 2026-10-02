@@ -1,6 +1,6 @@
 use super::STATS_COLLECTION;
 use crate::api::models::response;
-use crate::api::routes::babamul::BabamulSurvey;
+use crate::api::routes::babamul::{BabamulAcl, BabamulSurvey, BabamulUser};
 use crate::utils::db::count_alerts_for_night;
 use crate::utils::enums::Survey;
 use actix_web::{get, web, HttpResponse};
@@ -33,6 +33,10 @@ pub struct NightlyStat {
     pub ztf: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lsst: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decam: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub winter: Option<u64>,
 }
 
 /// Query parameters for the nightly stats endpoint: the date range (inclusive)
@@ -72,7 +76,8 @@ fn cache_duration_secs(date: &NaiveDate, today: &NaiveDate) -> f64 {
 /// Get nightly alert counts for a date range.
 ///
 /// Returns the number of alerts processed per night (noon-to-noon JD window).
-/// Without the `survey` query parameter, returns stats for all surveys (ZTF + LSST).
+/// Without the `survey` query parameter, returns stats for ZTF, LSST and DECam, plus
+/// WINTER for users with the `winter` ACL.
 /// ZTF counts only include public alerts (programid = 1).
 /// Results are cached in MongoDB; cache lifetime grows with the age of the night.
 #[utoipa::path(
@@ -92,13 +97,17 @@ fn cache_duration_secs(date: &NaiveDate, today: &NaiveDate) -> f64 {
 )]
 #[get("/stats/nightly")]
 pub async fn get_nightly_stats(
+    current_user: Option<web::ReqData<BabamulUser>>,
     query: web::Query<StatsQuery>,
     db: web::Data<Database>,
 ) -> HttpResponse {
-    let surveys: Vec<Survey> = query
-        .survey
-        .map(|s| vec![s.into()])
-        .unwrap_or(vec![Survey::Ztf, Survey::Lsst]);
+    let surveys: Vec<Survey> = query.survey.map(|s| vec![s.into()]).unwrap_or_else(|| {
+        let mut surveys = vec![Survey::Ztf, Survey::Lsst, Survey::Decam];
+        if current_user.is_some_and(|user| user.has_acl(BabamulAcl::Winter)) {
+            surveys.push(Survey::Winter);
+        }
+        surveys
+    });
 
     let start_date = match NaiveDate::parse_from_str(&query.start_date, "%Y-%m-%d") {
         Ok(d) => d,
@@ -240,6 +249,8 @@ pub async fn get_nightly_stats(
 
     let has_ztf = surveys.contains(&Survey::Ztf);
     let has_lsst = surveys.contains(&Survey::Lsst);
+    let has_decam = surveys.contains(&Survey::Decam);
+    let has_winter = surveys.contains(&Survey::Winter);
     let mut results: Vec<NightlyStat> = Vec::with_capacity(all_dates.len());
     for date in &all_dates {
         let lookup = |survey: Survey| {
@@ -251,10 +262,14 @@ pub async fn get_nightly_stats(
         };
         let ztf = has_ztf.then(|| lookup(Survey::Ztf));
         let lsst = has_lsst.then(|| lookup(Survey::Lsst));
+        let decam = has_decam.then(|| lookup(Survey::Decam));
+        let winter = has_winter.then(|| lookup(Survey::Winter));
         results.push(NightlyStat {
             date: date.format("%Y-%m-%d").to_string(),
             ztf,
             lsst,
+            decam,
+            winter,
         });
     }
 
