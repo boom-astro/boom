@@ -1,7 +1,7 @@
 use crate::utils::lightcurves::SNT;
 use mongodb::bson::{doc, Document};
 use std::collections::HashMap;
-use tracing::{info, instrument, warn};
+use tracing::{debug, info, instrument, warn};
 
 use crate::conf::AppConfig;
 use crate::enrichment::{create_lsst_alert_pipeline, fetch_alerts, LsstAlertForEnrichment};
@@ -550,17 +550,15 @@ impl FilterWorker for LsstFilterWorker {
             )
             .await?;
 
-            // if the array is empty, continue
+            debug!(
+                "{}/{} LSST alerts passed filter {}",
+                out_documents.len(),
+                candids.len(),
+                filter.id,
+            );
+
             if out_documents.is_empty() {
                 continue;
-            } else {
-                // if we have output documents, we need to process them
-                // and create filter results for each document (which contain annotations)
-                info!(
-                    "{} alerts passed lsst filter {}",
-                    out_documents.len(),
-                    filter.id,
-                );
             }
 
             let now_ts = chrono::Utc::now().timestamp_millis() as f64;

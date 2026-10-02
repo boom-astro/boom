@@ -1,6 +1,6 @@
 use mongodb::bson::{doc, Document};
 use std::collections::HashMap;
-use tracing::{info, instrument, warn};
+use tracing::{debug, info, instrument, warn};
 
 use crate::alert::WinterCandidate;
 use crate::conf::AppConfig;
@@ -432,14 +432,15 @@ impl FilterWorker for WinterFilterWorker {
             )
             .await?;
 
+            debug!(
+                "{}/{} WINTER alerts passed filter {}",
+                out_documents.len(),
+                candids.len(),
+                filter.id,
+            );
+
             if out_documents.is_empty() {
                 continue;
-            } else {
-                info!(
-                    "{} alerts passed winter filter {}",
-                    out_documents.len(),
-                    filter.id,
-                );
             }
 
             let now_ts = chrono::Utc::now().timestamp_millis() as f64;

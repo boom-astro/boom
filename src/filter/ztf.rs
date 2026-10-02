@@ -986,7 +986,7 @@ impl FilterWorker for ZtfFilterWorker {
                 )
                 .await?;
 
-                info!(
+                debug!(
                     "{}/{} ZTF alerts with programid {} passed filter {}",
                     out_documents.len(),
                     candids.len(),
@@ -994,9 +994,6 @@ impl FilterWorker for ZtfFilterWorker {
                     filter.id,
                 );
 
-                // If we have output documents, we need to process them
-                // and create filter results for each document (which contain annotations)
-                // however, if the array is empty, there's nothing to do
                 if out_documents.is_empty() {
                     continue;
                 }
