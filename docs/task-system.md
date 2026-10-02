@@ -471,6 +471,7 @@ GPU work needs claim-time routing, which is listed below.
 
 | Collection | Holds |
 | --- | --- |
+| `task_migrations` | One document per migration applied on this deployment: when, by which run, under which release. |
 | `task_runs` | One document per run: params, status, actor, progress, lease, error. Also the queue. |
 | `task_logs` | Log lines, batched — one document per flush, not per line. The UI tails by asking for `seq` greater than the last it saw. |
 | `data_mutations` | The append-only ledger: what changed, who changed it, and under which release. |
@@ -478,6 +479,30 @@ GPU work needs claim-time routing, which is listed below.
 `task_logs` is a convenience copy for the UI; the full firehose still reaches
 Loki through the normal container-log path. It is capped per run so a task
 logging in a loop cannot fill the disk.
+
+## Operations and migrations
+
+A task is one of two things, and `TaskSpec.kind` says which.
+
+An **operation** runs whenever it is needed — an ingest, a reprocess, the
+nightly orbital-element refresh. Running it again is the normal case.
+
+A **migration** runs once on a deployment, to move data from one shape to
+another: `migrate_snr`, `backfill_hpx`, the Kowalski back-fill. When one
+succeeds, `task_migrations` gets a document saying so, and the admin page lists
+the pending ones separately from the applied. Submitting an applied migration
+is refused unless the request sets `rerun`, because running one twice is rarely
+what anybody meant.
+
+The ledger cannot answer "has this run here?" on its own: it records mutations,
+and a migration that finds nothing left to change writes none, so an absent row
+means "nothing to do" and "never ran" alike. `task_migrations` is a fact about
+the deployment rather than about the data, which is why it is kept apart.
+
+What the split is really for is deletion. A migration's code is dead weight
+once every deployment has run it — `migrate_snr` is over a thousand lines — and
+nobody can argue for removing it while nobody can tell whether it has run. The
+record outlives the module, so the history survives deleting the code.
 
 **Logs expire; the ledger does not.** Each chunk carries an `expires_at` date
 and `task_logs` has a TTL index on it, so MongoDB's own background monitor

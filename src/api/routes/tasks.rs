@@ -10,9 +10,9 @@ use crate::api::{
     routes::{babamul::BabamulUser, users::User},
 };
 use crate::tasks::{
-    self,
+    self, migrations,
     models::{now, TaskRun, TaskStatus, Trigger},
-    queue, redact, TaskType,
+    queue, redact, TaskKind, TaskType,
 };
 
 use actix_web::{get, post, web, HttpResponse};
@@ -31,6 +31,13 @@ pub struct SubmitTaskBody {
     pub task_type: TaskType,
     /// Parameters for that task type, validated here rather than on the worker.
     pub params: serde_json::Value,
+    /// Run a migration that has already been applied here.
+    ///
+    /// Without it an applied migration is refused, because running one twice
+    /// is rarely what anybody meant and the first run is the one the record
+    /// describes. Ignored for an operation, which is expected to run again.
+    #[serde(default)]
+    pub rerun: bool,
 }
 
 #[derive(Debug, Deserialize, IntoParams)]
@@ -60,6 +67,10 @@ pub struct LogsParams {
 /// for one to end up on a screen or in a screenshot.
 fn redacted(mut run: TaskRun) -> TaskRun {
     run.params = redact::redact_params(&run.params);
+    // The error too: a failure to connect usually quotes the whole URI back,
+    // so the password would be rendered on the admin page beside the parameter
+    // that was carefully masked. Masked by shape, since an error is free text.
+    run.error = run.error.as_deref().map(redact::redact_text);
     run
 }
 
@@ -75,12 +86,25 @@ fn redacted(mut run: TaskRun) -> TaskRun {
 )]
 #[get("/tasks/types")]
 pub async fn get_task_types(
+    db: web::Data<mongodb::Database>,
     current_user: Option<web::ReqData<User>>,
     babamul_user: Option<web::ReqData<BabamulUser>>,
 ) -> HttpResponse {
     if let Err(e) = require_admin(&current_user, &babamul_user) {
         return e;
     }
+    // One read for the whole list: a migration's row is what tells the client
+    // whether it is still pending here.
+    let applied: std::collections::HashMap<String, migrations::AppliedMigration> =
+        match migrations::applied(&db).await {
+            Ok(rows) => rows
+                .into_iter()
+                .map(|row| (row.task_type.clone(), row))
+                .collect(),
+            Err(e) => {
+                return response::internal_error(&format!("failed to read applied migrations: {e}"))
+            }
+        };
     let types: Vec<serde_json::Value> = tasks::TASKS
         .iter()
         .map(|spec| {
@@ -90,6 +114,11 @@ pub async fn get_task_types(
                 "description": spec.description,
                 "idempotent": spec.idempotent,
                 "destructive": spec.destructive,
+                // `operation` or `migration`, so the client can group them
+                // rather than listing fifteen things of two different natures.
+                "kind": spec.kind,
+                // Present only for a migration, and only once it has run here.
+                "applied": applied.get(spec.id),
                 // The client renders its submission form from this, so the form
                 // and what the API accepts come from one definition.
                 "params_schema": (spec.params_schema)(),
@@ -129,6 +158,29 @@ pub async fn submit_task(
     // rather than as a run that fails on a worker minutes later.
     if let Err(e) = tasks::validate_params(body.task_type.as_str(), &body.params) {
         return response::bad_request(&e.to_string());
+    }
+
+    // A migration that has run here is refused unless the client says it
+    // means it. Checked before single-flight, because "this already happened"
+    // is a better answer than "something equivalent is running".
+    if !body.rerun
+        && tasks::find(body.task_type.as_str()).is_some_and(|spec| spec.kind == TaskKind::Migration)
+    {
+        match migrations::applied_one(&db, body.task_type.as_str()).await {
+            Ok(Some(applied)) => {
+                return HttpResponse::Conflict().json(response::ApiResponseBody::ok(
+                    "this migration has already been applied on this deployment; \
+                     submit it with rerun to run it again",
+                    serde_json::to_value(applied).unwrap_or_default(),
+                ));
+            }
+            Ok(None) => {}
+            Err(e) => {
+                return response::internal_error(&format!(
+                    "failed to check whether the migration has been applied: {e}"
+                ))
+            }
+        }
     }
 
     // Single-flight: two ingests of the same catalog would race on the same

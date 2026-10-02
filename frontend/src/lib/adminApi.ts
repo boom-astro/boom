@@ -41,12 +41,24 @@ export type SchemaField = {
   required?: string[];
 };
 
+/** One migration, as applied on this deployment. */
+export type AppliedMigration = {
+  task_type: string;
+  applied_at: number;
+  run_id: string;
+  code_version: { package_version: string; git_sha?: string | null };
+};
+
 export type TaskType = {
   id: string;
   title: string;
   description: string;
   idempotent: boolean;
   destructive: boolean;
+  /** `operation` runs whenever needed; `migration` runs once per deployment. */
+  kind: "operation" | "migration";
+  /** Set once a migration has succeeded here. Absent means still pending. */
+  applied?: AppliedMigration | null;
   params_schema: {
     properties?: Record<string, SchemaField>;
     required?: string[];
@@ -121,13 +133,15 @@ export function fetchTaskTypes(): Promise<TaskType[]> {
 export function submitTask(
   taskType: string,
   params: Record<string, unknown>,
+  /** Run a migration that has already been applied here. */
+  rerun = false,
 ): Promise<TaskRun> {
   return request<TaskRun>(
     "/tasks",
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ task_type: taskType, params }),
+      body: JSON.stringify({ task_type: taskType, params, rerun }),
     },
     {} as TaskRun,
   );

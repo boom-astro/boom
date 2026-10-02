@@ -201,11 +201,14 @@ async fn run_one(
         } else {
             warn!(
                 run_id = %run.id,
-                "shutting down mid-run, and {} is not declared idempotent;                  failing it rather than retrying automatically",
+                "shutting down mid-run, and {} is not declared idempotent; failing \
+                 it rather than retrying automatically",
                 run.task_type
             );
             let error = Some(format!(
-                "the worker shut down while this was running, and {} is not declared                  idempotent, so it was not retried automatically. Check what it had                  already done before running it again.",
+                "the worker shut down while this was running, and {} is not \
+                 declared idempotent, so it was not retried automatically. Check \
+                 what it had already done before running it again.",
                 run.task_type
             ));
             match queue::finish_claimed(db, &run.id, worker_name, TaskStatus::Failed, error).await {

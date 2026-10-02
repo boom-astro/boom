@@ -204,9 +204,11 @@ const BABAMUL_AUTHENTICATED_ROUTES: &[&str] = &[
     "/catalogs/exports",
 ];
 
-// Listed path by path rather than by their parents, so that widening the admin
-// page's surface is a deliberate edit here rather than a side effect of adding
-// a route under one of these prefixes.
+// Each entry covers that path and anything under it, so a route added at
+// `/tasks/{id}/something` is accepted without an edit here. That is deliberate
+// -- the admin page's surface grows under these prefixes -- but it means a
+// route added under one of them has to check `is_admin` for itself, because
+// reaching it needs only a Babamul account and signup is public.
 
 /// Whether a Babamul credential is accepted on this main-API path.
 fn accepts_babamul_credentials(path: &str) -> bool {
@@ -282,10 +284,12 @@ pub async fn auth_middleware(
 
 /// Resolve a Babamul credential -- personal access token or JWT -- to its user.
 ///
-/// Shared by the Babamul middleware and the main one, so the two cannot drift
-/// on what counts as a valid Babamul credential or on the activation check.
 /// `Ok(None)` means "not a Babamul credential"; an `Err` means it was one and
 /// was rejected, which the caller must not paper over by falling through.
+///
+/// `babamul_auth_middleware` still has its own copy of these rules. The two
+/// being parallel implementations of one thing is a standing invitation to
+/// drift, and the Babamul middleware should call this instead.
 async fn resolve_babamul_user(
     db: &web::Data<mongodb::Database>,
     auth: &web::Data<AuthProvider>,

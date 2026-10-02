@@ -103,24 +103,60 @@ pub fn redact_params(params: &serde_json::Value) -> serde_json::Value {
     }
 }
 
-/// The same, for the BSON documents the ledger stores.
+/// Redact one value, given the name it is stored under.
+///
+/// Recurses through documents and arrays, so a credential nested anywhere in a
+/// ledger entry is masked. The key travels with the recursion because the rule
+/// is name-based: the strings inside `endpoints: [...]` are judged by
+/// `endpoints`, which is what lets a list of URIs be masked and a list of
+/// catalog URLs not be.
+fn redact_value(key: &str, value: &Bson) -> Bson {
+    match value {
+        Bson::String(s) if is_uri_field(key) => Bson::String(redact_uri(s)),
+        Bson::Document(d) => Bson::Document(redact_document(d)),
+        Bson::Array(items) => {
+            Bson::Array(items.iter().map(|item| redact_value(key, item)).collect())
+        }
+        other => other.clone(),
+    }
+}
+
+/// Redact every connection URI in a ledger entry's details.
+///
+/// The ledger is append-only, so anything that reaches it is there for good.
 pub fn redact_document(details: &Document) -> Document {
     details
         .iter()
-        .map(|(key, value)| {
-            let value = match value {
-                Bson::String(s) if is_uri_field(key) => Bson::String(redact_uri(s)),
-                Bson::Document(d) => Bson::Document(redact_document(d)),
-                other => other.clone(),
-            };
-            (key.clone(), value)
-        })
+        .map(|(key, value)| (key.clone(), redact_value(key, value)))
         .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_credential_inside_an_array_reaches_the_ledger_masked() {
+        // `redact_params` always handled arrays and this did not, so a task
+        // recording a list of endpoints wrote a password into a collection that
+        // is never edited or deleted.
+        let details = mongodb::bson::doc! {
+            "endpoints": [
+                { "src_uri": "mongodb://alice:hunter2@a/db" },
+                { "src_uri": "mongodb://bob:s3cret@b/db" },
+            ],
+            "uri": ["mongodb://carol:pw@c/db"],
+            "catalog_urls": ["https://example.org/a.csv"],
+        };
+        let rendered = redact_document(&details).to_string();
+        assert!(!rendered.contains("hunter2"), "{rendered}");
+        assert!(!rendered.contains("s3cret"), "{rendered}");
+        assert!(!rendered.contains(":pw@"), "{rendered}");
+        // Still says which hosts were touched, and leaves a non-credential URL
+        // readable in full.
+        assert!(rendered.contains("alice:***@a/db"));
+        assert!(rendered.contains("https://example.org/a.csv"));
+    }
 
     #[test]
     fn a_credential_in_a_message_is_masked() {

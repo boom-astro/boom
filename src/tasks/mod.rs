@@ -29,6 +29,7 @@ pub mod batch;
 pub mod context;
 pub mod ledger;
 pub mod logs;
+pub mod migrations;
 pub mod models;
 pub mod queue;
 pub mod redact;
@@ -145,6 +146,23 @@ impl std::fmt::Display for TaskType {
     }
 }
 
+/// Whether a task is run again and again, or once and then never.
+///
+/// The distinction is not cosmetic. Half of these run once per deployment and
+/// are then dead weight -- `migrate_snr` is over a thousand lines carried
+/// forever unless somebody can show every deployment has run it. A migration
+/// records that it succeeded, so the admin page can say which are still
+/// pending, submitting an applied one needs `rerun`, and deleting the module
+/// becomes a decision somebody can actually make.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskKind {
+    /// Run whenever it is needed: an ingest, a reprocess, a nightly refresh.
+    Operation,
+    /// Run once per deployment, to move data from one shape to another.
+    Migration,
+}
+
 /// A declared kind of work.
 ///
 /// In code rather than in the database: a task type is a piece of the release,
@@ -154,6 +172,8 @@ impl std::fmt::Display for TaskType {
 pub struct TaskSpec {
     /// Stable identifier. Never changes -- historical runs are read back by it.
     pub id: &'static str,
+    /// Whether this runs repeatedly or once per deployment.
+    pub kind: TaskKind,
     pub title: &'static str,
     pub description: &'static str,
     /// Whether running it twice with the same parameters leaves the same state.
@@ -209,6 +229,7 @@ fn schema_of<T: utoipa::PartialSchema>() -> serde_json::Value {
 pub const TASKS: &[TaskSpec] = &[
     TaskSpec {
         id: catalog_ingest::TASK_TYPE,
+        kind: TaskKind::Operation,
         title: "Ingest an archival catalog",
         description: "Download an archival catalog and insert it into MongoDB, one chunk at a \
                       time. Resumable: re-running continues from the last completed chunk.",
@@ -219,6 +240,7 @@ pub const TASKS: &[TaskSpec] = &[
     },
     TaskSpec {
         id: stream_kowalski_alerts::TASK_TYPE,
+        kind: TaskKind::Migration,
         title: "Back-fill BOOM from a Kowalski deployment",
         description: "Stream Kowalski's ZTF_alerts into BOOM, importing alerts for objects \
                       BOOM already knows and fetching cutouts only for what was new.",
@@ -229,6 +251,7 @@ pub const TASKS: &[TaskSpec] = &[
     },
     TaskSpec {
         id: copy_cutouts::TASK_TYPE,
+        kind: TaskKind::Operation,
         title: "Copy alert cutouts between deployments",
         description: "Copy a survey's cutout collection from one MongoDB to another, \
                       typically before repointing BOOM at new storage. Re-run with \
@@ -240,6 +263,7 @@ pub const TASKS: &[TaskSpec] = &[
     },
     TaskSpec {
         id: sso_baselines::TASK_TYPE,
+        kind: TaskKind::Operation,
         title: "Fit solar system phase-curve baselines",
         description: "Fit a phase curve per object per band from ZTF detections, giving \
                       the baseline brightness that outburst detection is judged against.",
@@ -250,6 +274,7 @@ pub const TASKS: &[TaskSpec] = &[
     },
     TaskSpec {
         id: mpcorb_ingest::TASK_TYPE,
+        kind: TaskKind::Operation,
         title: "Refresh MPC orbital elements",
         description: "Re-download MPCORB and swap it into MPC_orbits. The scheduler does \
                       this on its own; use this to force a refresh or validate a parse.",
@@ -260,6 +285,7 @@ pub const TASKS: &[TaskSpec] = &[
     },
     TaskSpec {
         id: enrich_reprocess::TASK_TYPE,
+        kind: TaskKind::Operation,
         title: "Re-run enrichment over a selection of alerts",
         description: "Select alerts, queue them, and run enrichment workers over them. \
                       Babamul is disabled and nothing is forwarded to the filter queue, \
@@ -271,6 +297,7 @@ pub const TASKS: &[TaskSpec] = &[
     },
     TaskSpec {
         id: prepare_catalog::TASK_TYPE,
+        kind: TaskKind::Migration,
         title: "Prepare an imported collection for crossmatching",
         description: "Add ra/dec, the GeoJSON point, galactic coordinates and a 2dsphere \
                       index to a collection imported from a file, so it can be used as a \
@@ -283,6 +310,7 @@ pub const TASKS: &[TaskSpec] = &[
     },
     TaskSpec {
         id: export_catalog::TASK_TYPE,
+        kind: TaskKind::Operation,
         title: "Export a catalog collection to files",
         description: "Write a catalog collection to gzipped CSV chunks plus a manifest, so \
                       a catalog BOOM cannot fetch again can be staged and ingested \
@@ -294,6 +322,7 @@ pub const TASKS: &[TaskSpec] = &[
     },
     TaskSpec {
         id: link_tracks::TASK_TYPE,
+        kind: TaskKind::Operation,
         title: "Link moving-object tracks",
         description: "Find intra-night tracklets in a window of alerts and link them into \
                       tracks. With `persist` it stores each track and stamps its member \
@@ -309,6 +338,7 @@ pub const TASKS: &[TaskSpec] = &[
     },
     TaskSpec {
         id: backfill_host_galaxy::TASK_TYPE,
+        kind: TaskKind::Migration,
         title: "Backfill host galaxy associations",
         description: "Score each alerts_aux record's galaxy cross-matches and write \
                       host_galaxy. Reads the matches already stored, so run \
@@ -322,6 +352,7 @@ pub const TASKS: &[TaskSpec] = &[
     },
     TaskSpec {
         id: backfill_hpx::TASK_TYPE,
+        kind: TaskKind::Migration,
         title: "Backfill HEALPix indexes on existing alerts",
         description: "Write coordinates.hpx onto alerts and alerts_aux documents written \
                       before the field existed. Until this has covered a collection, MOC \
@@ -334,6 +365,7 @@ pub const TASKS: &[TaskSpec] = &[
     },
     TaskSpec {
         id: repair_photometry::TASK_TYPE,
+        kind: TaskKind::Migration,
         title: "Repair out-of-order photometry timeseries",
         description: "Rewrite alerts_aux timeseries arrays that are out of order by jd, hold \
                       duplicate jds, or carry entries with a non-finite or non-numeric jd. \
@@ -347,6 +379,7 @@ pub const TASKS: &[TaskSpec] = &[
     },
     TaskSpec {
         id: reprocess_crossmatch::TASK_TYPE,
+        kind: TaskKind::Operation,
         title: "Reprocess crossmatches against archival catalogs",
         description: "Fill in or refresh crossmatches on a survey's alerts_aux records. \
                       Needed after adding a catalog to crossmatch config, since the \
@@ -359,6 +392,7 @@ pub const TASKS: &[TaskSpec] = &[
     },
     TaskSpec {
         id: migrate_snr::TASK_TYPE,
+        kind: TaskKind::Migration,
         title: "Recompute signal-to-noise for ZTF and LSST",
         description: "Recompute snr_psf, snr_ap and (for ZTF) apFlux/apFluxErr on alerts \
                       and their lightcurves, from the stored photometry.",
@@ -369,6 +403,7 @@ pub const TASKS: &[TaskSpec] = &[
     },
     TaskSpec {
         id: migrate_fp_flux::TASK_TYPE,
+        kind: TaskKind::Migration,
         title: "Migrate ZTF forced photometry to a fixed zeropoint",
         description: "Recompute psfFlux and psfFluxErr in ZTF_alerts_aux from the raw IPAC \
                       flux fields, at the fixed ZTF_ZP zeropoint.",
@@ -628,6 +663,22 @@ pub async fn dispatch(
     task_type: &str,
     params: serde_json::Value,
 ) -> Result<serde_json::Value, TaskError> {
+    let outcome = dispatch_inner(ctx, task_type, params).await;
+    // Recorded here rather than where the run is marked succeeded, for two
+    // reasons: this is the layer that knows a task's kind, and what the record
+    // answers is whether the data has been migrated -- a run that finished the
+    // work and then lost its lease migrated it either way.
+    if outcome.is_ok() && find(task_type).is_some_and(|spec| spec.kind == TaskKind::Migration) {
+        migrations::record_applied(ctx.db(), task_type, ctx.run_id()).await;
+    }
+    outcome
+}
+
+async fn dispatch_inner(
+    ctx: &TaskContext,
+    task_type: &str,
+    params: serde_json::Value,
+) -> Result<serde_json::Value, TaskError> {
     match task_type {
         catalog_ingest::TASK_TYPE => {
             let params = catalog_ingest::CatalogIngestParams::deserialize(params)
@@ -802,6 +853,33 @@ mod tests {
             .as_str()
             .expect("described");
         assert!(description.contains("start over"), "{description}");
+    }
+
+    #[test]
+    fn the_one_shot_tasks_are_marked_as_migrations() {
+        // The split is what lets the admin page say which of these still need
+        // running here, and what makes deleting one defensible later. Getting
+        // it wrong in either direction is quiet: an operation marked as a
+        // migration is refused on its second legitimate run, and a migration
+        // marked as an operation never records that it has been applied.
+        let migrations: Vec<&str> = TASKS
+            .iter()
+            .filter(|spec| spec.kind == TaskKind::Migration)
+            .map(|spec| spec.id)
+            .collect();
+        let mut expected = vec![
+            "backfill_host_galaxy",
+            "backfill_hpx",
+            "migrate_fp_flux",
+            "migrate_snr",
+            "prepare_catalog",
+            "repair_photometry",
+            "stream_kowalski_alerts",
+        ];
+        let mut found = migrations.clone();
+        found.sort_unstable();
+        expected.sort_unstable();
+        assert_eq!(found, expected);
     }
 
     #[test]

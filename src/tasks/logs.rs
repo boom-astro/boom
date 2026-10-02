@@ -38,6 +38,15 @@ struct Inner {
     /// commit first would make an earlier delayed chunk invisible forever.
     flush_lock: tokio::sync::Mutex<()>,
     seq: AtomicU64,
+    /// Whether [`LogSink::seq`] has been set from what is already stored.
+    ///
+    /// A run that is requeued after a lost lease gets a new sink, and a
+    /// sequence restarting at 0 would be invisible to the admin page: its
+    /// cursor is already past those numbers, so it asks for `seq` greater than
+    /// what the first attempt reached and the second attempt's lines never
+    /// arrive. Seeded on the first flush rather than in the constructor, which
+    /// cannot await.
+    seq_seeded: std::sync::atomic::AtomicBool,
     written: AtomicU64,
     truncation_reported: std::sync::atomic::AtomicBool,
 }
@@ -51,6 +60,7 @@ impl LogSink {
                 buffer: Mutex::new(Vec::new()),
                 flush_lock: tokio::sync::Mutex::new(()),
                 seq: AtomicU64::new(0),
+                seq_seeded: std::sync::atomic::AtomicBool::new(false),
                 written: AtomicU64::new(0),
                 truncation_reported: std::sync::atomic::AtomicBool::new(false),
             }),
@@ -66,6 +76,7 @@ impl LogSink {
                 buffer: Mutex::new(Vec::new()),
                 flush_lock: tokio::sync::Mutex::new(()),
                 seq: AtomicU64::new(0),
+                seq_seeded: std::sync::atomic::AtomicBool::new(false),
                 written: AtomicU64::new(0),
                 truncation_reported: std::sync::atomic::AtomicBool::new(false),
             }),
@@ -124,6 +135,7 @@ impl LogSink {
     pub async fn flush(&self) {
         let Some(db) = &self.inner.db else { return };
         let _flush = self.inner.flush_lock.lock().await;
+        self.seed_sequence(db).await;
         let lines = {
             let mut buffer = self.inner.buffer.lock().expect("log buffer poisoned");
             if buffer.is_empty() {
@@ -148,6 +160,42 @@ impl LogSink {
             return;
         }
         self.inner.written.fetch_add(count, Ordering::Relaxed);
+    }
+
+    /// Continue the run's sequence rather than restarting it.
+    ///
+    /// Called under the flush lock, once per sink. A resumed run's first chunk
+    /// then follows the last one the previous attempt wrote, so the admin page
+    /// keeps tailing across a worker being replaced -- the case the task system
+    /// exists for.
+    async fn seed_sequence(&self, db: &Database) {
+        if self.inner.seq_seeded.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        match db
+            .collection::<TaskLogChunk>(LOGS_COLLECTION)
+            .find_one(doc! { "run_id": &self.inner.run_id })
+            .sort(doc! { "seq": -1 })
+            .await
+        {
+            Ok(Some(chunk)) => {
+                self.inner.seq.store(chunk.seq + 1, Ordering::Relaxed);
+                tracing::info!(
+                    run_id = %self.inner.run_id,
+                    "continuing this run's log from seq {}",
+                    chunk.seq + 1
+                );
+            }
+            Ok(None) => {}
+            // Starting from 0 would hide this attempt's lines from a client
+            // whose cursor is already past them, so say so rather than leaving
+            // an empty tail to be puzzled over.
+            Err(e) => tracing::warn!(
+                run_id = %self.inner.run_id,
+                "could not read the last log sequence, starting from 0: {}",
+                e
+            ),
+        }
     }
 }
 

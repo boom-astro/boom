@@ -649,11 +649,23 @@ function TaskCatalogue({
   busy,
 }: {
   types: TaskType[];
-  onSubmit: (taskType: string, params: Record<string, unknown>) => void;
+  onSubmit: (
+    taskType: string,
+    params: Record<string, unknown>,
+    rerun?: boolean,
+  ) => void;
   busy: string | null;
 }) {
   const [selected, setSelected] = useState<string | null>(null);
   const task = types.find((t) => t.id === selected) ?? null;
+
+  // Two different natures, so two lists. An operation is expected to run
+  // again; a migration runs once here and then wants to be left alone, which
+  // only reads as information if the applied ones are separated out.
+  const operations = types.filter((t) => t.kind !== "migration");
+  const migrations = types.filter((t) => t.kind === "migration");
+  const pending = migrations.filter((t) => !t.applied);
+  const applied = migrations.filter((t) => t.applied);
 
   return (
     <section className="mb-8">
@@ -664,14 +676,61 @@ function TaskCatalogue({
       </p>
 
       {task && (
-        <TaskForm
-          task={task}
-          busy={busy === task.id}
-          onCancel={() => setSelected(null)}
-          onSubmit={(params) => onSubmit(task.id, params)}
-        />
+        <>
+          {task.applied && (
+            <p className="text-sm text-muted-foreground mb-2">
+              Applied on{" "}
+              {new Date(task.applied.applied_at * 1000).toLocaleString()} by run{" "}
+              <span className="font-mono">{task.applied.run_id}</span>. Running
+              it again is recorded as a rerun.
+            </p>
+          )}
+          <TaskForm
+            task={task}
+            busy={busy === task.id}
+            onCancel={() => setSelected(null)}
+            onSubmit={(params) => onSubmit(task.id, params, !!task.applied)}
+          />
+        </>
       )}
 
+      <TaskGroup
+        heading="Operations"
+        blurb="Run whenever they are needed."
+        types={operations}
+        selected={selected}
+        onToggle={setSelected}
+      />
+      <TaskGroup
+        heading={`Migrations${pending.length > 0 ? ` — ${pending.length} pending` : ""}`}
+        blurb="Each runs once on this deployment. An applied one has to be submitted with rerun."
+        types={[...pending, ...applied]}
+        selected={selected}
+        onToggle={setSelected}
+      />
+    </section>
+  );
+}
+
+/** One titled list of task types, with its applied state where it has one. */
+function TaskGroup({
+  heading,
+  blurb,
+  types,
+  selected,
+  onToggle,
+}: {
+  heading: string;
+  blurb: string;
+  types: TaskType[];
+  selected: string | null;
+  onToggle: (id: string | null) => void;
+}) {
+  if (types.length === 0) return null;
+  return (
+    <div className="mb-6">
+      <h3 className="text-sm font-semibold">{heading}</h3>
+      <p className="text-xs text-muted-foreground mb-2">{blurb}</p>
       <div className="overflow-x-auto">
         <table className="w-full text-sm">
           <tbody>
@@ -682,22 +741,34 @@ function TaskCatalogue({
                     {type.title}{" "}
                     {type.destructive && (
                       <Badge variant="destructive">can destroy data</Badge>
-                    )}
+                    )}{" "}
+                    {type.kind === "migration" &&
+                      (type.applied ? (
+                        <Badge variant="secondary">
+                          applied{" "}
+                          {new Date(
+                            type.applied.applied_at * 1000,
+                          ).toLocaleDateString()}
+                        </Badge>
+                      ) : (
+                        <Badge variant="outline">pending</Badge>
+                      ))}
                   </div>
                   <div className="text-xs text-muted-foreground">
                     {type.description}
                   </div>
                   <div className="text-xs text-muted-foreground font-mono mt-0.5">
                     {type.id}
+                    {type.applied?.code_version.git_sha
+                      ? ` · applied by ${type.applied.code_version.git_sha.slice(0, 8)}`
+                      : ""}
                   </div>
                 </td>
                 <td className="py-2 w-24 text-right">
                   <Button
                     variant={selected === type.id ? "secondary" : "outline"}
                     size="sm"
-                    onClick={() =>
-                      setSelected(selected === type.id ? null : type.id)
-                    }
+                    onClick={() => onToggle(selected === type.id ? null : type.id)}
                   >
                     {selected === type.id ? "Close" : "Configure"}
                   </Button>
@@ -707,7 +778,7 @@ function TaskCatalogue({
           </tbody>
         </table>
       </div>
-    </section>
+    </div>
   );
 }
 
@@ -868,10 +939,14 @@ export default function Admin() {
     }
   }
 
-  async function onSubmitTask(taskType: string, params: Record<string, unknown>) {
+  async function onSubmitTask(
+    taskType: string,
+    params: Record<string, unknown>,
+    rerun = false,
+  ) {
     setBusy(taskType);
     try {
-      const run = await submitTask(taskType, params);
+      const run = await submitTask(taskType, params, rerun);
       setSelected(run._id);
       await refresh();
     } catch (e) {
