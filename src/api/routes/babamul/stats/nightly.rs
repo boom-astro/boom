@@ -171,8 +171,7 @@ pub async fn get_nightly_stats(
     }
 
     // For each missing (survey, night), count alerts in parallel.
-    // Relies on a compound index on (candidate.programid, candidate.jd) for ZTF
-    // and on candidate.jd for LSST so Mongo can satisfy the count via COUNT_SCAN.
+    // COUNT_SCAN on the candidate.jd indexes of initialize_survey_indexes.
     let mut fresh_counts: HashMap<(Survey, NaiveDate), u64> = HashMap::new();
     for survey in &surveys {
         let missing: Vec<NaiveDate> = all_dates
