@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useRef } from "react";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { Bar, BarChart, CartesianGrid, ReferenceArea, XAxis, YAxis } from "recharts";
+import { Bar, BarChart, CartesianGrid, ReferenceArea, ReferenceLine, XAxis, YAxis } from "recharts";
 import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from "@/components/ui/chart";
 import { Toggle } from "@/components/ui/toggle";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
@@ -25,6 +25,8 @@ const SURVEY_COLORS: Record<Survey, string> = {
   winter: "var(--chart-4)",
 };
 
+const DAY_MS = 86_400_000;
+
 const chartConfig = {
   ztf: { label: "ZTF", color: SURVEY_COLORS.ztf },
   lsst: { label: "LSST", color: SURVEY_COLORS.lsst },
@@ -37,15 +39,18 @@ const FIRST_NIGHT = "2018-01-01";
 // The API refuses to recount a longer range in one refresh.
 const MAX_REFRESH_MONTHS = 6;
 
-const OBSERVATORIES: Record<Survey, string> = {
-  ztf: "Palomar, UTC−7",
-  lsst: "Cerro Pachón, UTC−3",
-  decam: "Cerro Tololo, UTC−4",
-  winter: "Palomar, UTC−7",
+const OBSERVATORIES: Record<Survey, { site: string; utcOffset: number }> = {
+  ztf: { site: "Palomar", utcOffset: -7 },
+  lsst: { site: "Cerro Pachón", utcOffset: -3 },
+  decam: { site: "Cerro Tololo", utcOffset: -4 },
+  winter: { site: "Palomar", utcOffset: -7 },
 };
 
 function nightConvention(surveys: readonly Survey[]): string {
-  const sites = surveys.map((s) => `${OBSERVATORIES[s]}, for ${chartConfig[s].label}`).join("; ");
+  const sites = surveys.map((s) => {
+    const { site, utcOffset } = OBSERVATORIES[s];
+    return `${site}, UTC${String(utcOffset).replace("-", "−")}, for ${chartConfig[s].label}`;
+  }).join("; ");
   return "Alerts are grouped by observing night, local noon to local noon at the observatory" +
     (sites ? ` (${sites})` : "") + ". A night is labeled by its evening date.";
 }
@@ -216,6 +221,7 @@ export default function Dashboard() {
 
   const chartRef = useRef<HTMLDivElement>(null);
   const [chartWidth, setChartWidth] = useState(0);
+  const [now, setNow] = useState(Date.now);
 
   useEffect(() => {
     setLoading(true);
@@ -240,6 +246,11 @@ export default function Dashboard() {
       .catch((e) => setTopicsError(e instanceof Error ? e.message : "Failed to fetch topics"))
       .finally(() => setTopicsLoading(false));
   }, [reloadKey]);
+
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 60_000);
+    return () => clearInterval(id);
+  }, []);
 
   useEffect(() => {
     const el = chartRef.current;
@@ -274,6 +285,12 @@ export default function Dashboard() {
     const step = Math.max(1, Math.ceil(chartData.length / fits));
     return chartData.filter((_, i) => i % step === 0).map((d) => d.date);
   }, [chartData, chartWidth]);
+
+  const nowX = useMemo(() => {
+    if (!chartData.length || !shownSurveys.length) return null;
+    const offset = shownSurveys.reduce((sum, s) => sum + OBSERVATORIES[s].utcOffset, 0) / shownSurveys.length;
+    return (now - Date.parse(`${chartData[0].date}T12:00:00Z`)) / DAY_MS + offset / 24;
+  }, [chartData, shownSurveys, now]);
 
   const monthTicks = useMemo(() => {
     const months = new Map<string, string[]>();
@@ -502,6 +519,7 @@ export default function Dashboard() {
                   tick={{ style: { fill: "var(--foreground)" }, fontSize: 11 }}
                   tickFormatter={nightMonth}
                 />
+                <XAxis xAxisId="now" type="number" domain={[0, chartData.length]} allowDataOverflow hide />
                 <YAxis
                   tickLine={false}
                   axisLine={false}
@@ -527,6 +545,15 @@ export default function Dashboard() {
                 {shownSurveys.map((s) => (
                   <Bar key={s} dataKey={s} fill={`var(--color-${s})`} radius={[2, 2, 0, 0]}/>
                 ))}
+                {nowX !== null && (
+                  <ReferenceLine
+                    xAxisId="now"
+                    x={nowX}
+                    stroke="var(--destructive)"
+                    strokeWidth={2}
+                    label={{ value: "now", position: "insideTopRight", fill: "var(--destructive)", fontSize: 11 }}
+                  />
+                )}
                 {zoomLeft && zoomRight && (
                   <ReferenceArea x1={zoomLeft} x2={zoomRight} strokeOpacity={0.3} fill="hsl(var(--accent))" fillOpacity={0.3} />
                 )}
