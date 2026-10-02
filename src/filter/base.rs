@@ -67,7 +67,6 @@ static ALERT_PROCESSED: LazyLock<Counter<u64>> = LazyLock::new(|| {
         .build()
 });
 
-// Counter for the number of alerts each filter passed or rejected.
 static FILTER_ALERT: LazyLock<Counter<u64>> = LazyLock::new(|| {
     SCHEDULER_METER
         .u64_counter("filter_worker.filter.alert")
