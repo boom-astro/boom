@@ -584,6 +584,16 @@ services:
       # The migration and reprocessing tasks drive their work through Valkey.
       BOOM_REDIS__HOST: valkey
       BOOM_CATALOG_DATA_PATH: /app/data/catalogs
+      # Pan-STARRS is in a requester-pays bucket, so fetching it is billed to
+      # whoever asks and needs credentials that can pay. Unprefixed because
+      # boto reads them, not BOOM's config. Left empty for deployments that do
+      # not ingest it: an empty value is unset, and only that one catalog
+      # refuses to start without them. On AWS, leave these unset and give the
+      # instance a role instead -- boto finds that on its own.
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}
     networks:
       - boom
     profiles:

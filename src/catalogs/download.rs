@@ -17,6 +17,7 @@
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tracing::instrument;
@@ -66,20 +67,49 @@ pub enum DownloadError {
     },
     #[error("boompy reported fetching {path}, which does not exist")]
     MissingFile { path: PathBuf },
+    #[error("boompy returned {path}, which is outside the staging directory {dest}")]
+    OutsideDest { path: PathBuf, dest: PathBuf },
 }
 
+/// Where boompy's own output should go, besides the process log.
+///
+/// A download is most of the wall time of an ingest, and its only account of
+/// itself is what boompy writes to stderr. That reaches the process log and so
+/// Loki, but the task's log is a different stream -- fed by explicit calls, not
+/// by `tracing` -- and the task page reads the latter. Without this the page
+/// shows a row counter and nothing about the download that counter is waiting
+/// on.
+pub type LogLine = Arc<dyn Fn(String) + Send + Sync>;
+
 /// How to invoke boompy.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Boompy {
     /// Directory holding boompy's `pyproject.toml`.
     project_dir: PathBuf,
+    forward: Option<LogLine>,
+}
+
+impl std::fmt::Debug for Boompy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Boompy")
+            .field("project_dir", &self.project_dir)
+            .field("forward", &self.forward.is_some())
+            .finish()
+    }
 }
 
 impl Boompy {
     pub fn new(project_dir: impl Into<PathBuf>) -> Self {
         Self {
             project_dir: project_dir.into(),
+            forward: None,
         }
+    }
+
+    /// Send each line boompy writes to `forward` as well as to the log.
+    pub fn forwarding_to(mut self, forward: LogLine) -> Self {
+        self.forward = Some(forward);
+        self
     }
 
     /// `uv` resolves and caches the environment itself, so there is no separate
@@ -127,6 +157,21 @@ impl Boompy {
             if !path.exists() {
                 return Err(DownloadError::MissingFile { path: path.clone() });
             }
+            // The ingest deletes these files when it is done with them, so a
+            // path outside the staging directory is a delete outside it. Taking
+            // the subprocess at its word here would turn a path-join mistake in
+            // boompy into data loss somewhere else on the host.
+            let (resolved, root) = (path.canonicalize(), dest.canonicalize());
+            let contained = match (&resolved, &root) {
+                (Ok(resolved), Ok(root)) => resolved.starts_with(root),
+                _ => false,
+            };
+            if !contained {
+                return Err(DownloadError::OutsideDest {
+                    path: path.clone(),
+                    dest: dest.to_path_buf(),
+                });
+            }
         }
         Ok(output.files)
     }
@@ -148,11 +193,15 @@ impl Boompy {
         // reports progress while it is running, not once it is over.
         let stderr = child.stderr.take().expect("stderr was piped");
         let catalog_owned = catalog.to_string();
+        let forward = self.forward.clone();
         let stderr_task = tokio::spawn(async move {
             let mut tail = Vec::new();
             let mut lines = BufReader::new(stderr).lines();
             while let Ok(Some(line)) = lines.next_line().await {
                 tracing::info!(catalog = %catalog_owned, "boompy: {}", line);
+                if let Some(forward) = &forward {
+                    forward(format!("boompy: {line}"));
+                }
                 // Only the tail is kept for the error message; a failing
                 // download can produce a great deal of output.
                 tail.push(line);

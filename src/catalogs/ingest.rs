@@ -324,13 +324,19 @@ async fn write_batch(
         }
         Err(e) => match duplicate_key_count(&e) {
             Some(duplicates) => {
+                // Everything that was not a duplicate did land, and the
+                // duplicates were already there. Counting the whole batch as
+                // new would inflate the catalog's record count on every retry,
+                // which is the number the admin page shows.
+                let written = n.saturating_sub(duplicates as u64);
                 tracing::debug!(
                     worker_id,
                     duplicates,
-                    "batch had records already present, treating as written"
+                    written,
+                    "batch had records already present, counting only the new ones"
                 );
-                inserted_total.fetch_add(n, Ordering::Relaxed);
-                Ok(n)
+                inserted_total.fetch_add(written, Ordering::Relaxed);
+                Ok(written)
             }
             None => Err(e.into()),
         },

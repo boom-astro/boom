@@ -7,6 +7,11 @@ on:
     paths:
       - "boompy/**"
       - ".github/workflows/boompy.yaml"
+      # The registry test reads `src/catalogs/mod.rs` to catch a catalog that
+      # BOOM offers an Ingest button for but boompy cannot fetch. A Rust-only
+      # definition is exactly how that mismatch gets introduced, so this has to
+      # run for changes there too.
+      - "src/catalogs/**"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}

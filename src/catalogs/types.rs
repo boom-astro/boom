@@ -1144,4 +1144,55 @@ mod tests {
         assert!(doc.contains_key("w4sigmpro"));
         assert_eq!(doc.len(), 19);
     }
+
+    /// Every record type must serialize an `_id` taken from a source
+    /// identifier.
+    ///
+    /// The ingest's whole resume story rests on this: an interrupted chunk is
+    /// re-ingested from the start, and what makes that safe rather than
+    /// duplicating is that each record lands on the same `_id` and the
+    /// duplicate-key error is read as "already there". A record type that let
+    /// Mongo generate an `ObjectId` instead would resume by inserting every
+    /// row again, silently, with no error anywhere.
+    ///
+    /// Reads the source rather than instances because there is nothing
+    /// generic to iterate: the types share no trait, and a twelfth catalog is
+    /// added by writing a twelfth struct.
+    #[test]
+    fn every_record_type_serializes_an_id() {
+        let source = include_str!("types.rs");
+        let mut structs = Vec::new();
+        let mut current: Option<(&str, bool)> = None;
+        for line in source.lines() {
+            if let Some(rest) = line.strip_prefix("pub struct ") {
+                let name = rest.trim_end_matches(" {").trim_end_matches(';');
+                current = Some((name, false));
+                continue;
+            }
+            if let Some((name, found)) = current {
+                if line.contains(r#""_id""#) {
+                    current = Some((name, true));
+                } else if line == "}" {
+                    structs.push((name, found));
+                    current = None;
+                }
+            }
+        }
+
+        assert!(
+            structs.len() >= 11,
+            "expected a record type per catalog, found {}",
+            structs.len()
+        );
+        let missing: Vec<&str> = structs
+            .iter()
+            .filter(|(_, found)| !found)
+            .map(|(name, _)| *name)
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "these record types do not serialize an _id, so a resumed ingest \
+             would duplicate every row: {missing:?}"
+        );
+    }
 }

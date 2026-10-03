@@ -372,6 +372,16 @@ pub enum CatalogError {
     Ingest(#[from] IngestError),
     #[error(transparent)]
     Mongo(#[from] mongodb::error::Error),
+    #[error(
+        "{catalog} listed no chunks; refusing to record an empty catalog as ingested. \
+         The archive may be unreachable, or its metadata may declare no partitions"
+    )]
+    NothingToIngest { catalog: String },
+    #[error(
+        "another worker took over this run while chunk {chunk} was still being \
+         ingested; stopping so the two do not write {collection} at once"
+    )]
+    Preempted { chunk: String, collection: String },
     #[error("failed to prepare {path}: {source}")]
     Io {
         path: PathBuf,
@@ -466,20 +476,42 @@ pub async fn add_catalog(
     tracing::Span::current().record("collection", def.collection);
 
     let state = db.collection::<Document>(STATE_COLLECTION);
-    if params.drop_existing {
-        tracing::warn!("dropping {} and its ingest state", def.collection);
-        db.collection::<Document>(def.collection).drop().await?;
-        state.delete_one(doc! { "_id": def.collection }).await?;
-    }
-
     let download_dir = params.download_dir.join(def.id);
     std::fs::create_dir_all(&download_dir).map_err(|e| CatalogError::Io {
         path: download_dir.clone(),
         source: e,
     })?;
 
-    let boompy = Boompy::new(&params.boompy_dir);
+    // Listed before anything is dropped. Discovery is the step most likely to
+    // fail -- the archive is remote and boompy has to start -- and a
+    // `drop_existing` run that destroyed the collection first would leave
+    // nothing to serve and nothing to resume from.
+    let boompy = Boompy::new(&params.boompy_dir).forwarding_to({
+        let ctx = ctx.clone();
+        std::sync::Arc::new(move |line: String| ctx.info(line))
+    });
     let chunks = boompy.list_chunks(def.id).await?;
+    // An empty listing is a discovery failure, not an empty catalog: the
+    // completion check below counts chunks, so zero of zero would read as
+    // complete, build the indexes and report the catalog present without a
+    // single record in it.
+    if chunks.is_empty() {
+        return Err(CatalogError::NothingToIngest {
+            catalog: def.id.to_string(),
+        });
+    }
+
+    if params.drop_existing {
+        tracing::warn!("dropping {} and its ingest state", def.collection);
+        ctx.warn(format!(
+            "dropping {} and its ingest state before re-ingesting {} chunk(s)",
+            def.collection,
+            chunks.len()
+        ));
+        db.collection::<Document>(def.collection).drop().await?;
+        state.delete_one(doc! { "_id": def.collection }).await?;
+    }
+
     let done = chunks_done(&state, def.collection).await?;
     ctx.info(format!(
         "ingesting {} into {}: {} chunks, {} already done",
@@ -506,7 +538,7 @@ pub async fn add_catalog(
         complete: false,
         canceled: false,
     };
-    start_state(&state, def, chunks.len()).await?;
+    let claim = start_state(&state, def, chunks.len()).await?;
 
     for chunk in &chunks {
         if done.contains(&chunk.id) {
@@ -548,7 +580,12 @@ pub async fn add_catalog(
         let ingested = ingested?;
         report.records.merge(ingested);
         report.chunks_ingested += 1;
-        record_chunk(&state, def.collection, &chunk.id, ingested.inserted).await?;
+        if !record_chunk(&state, def.collection, &chunk.id, ingested.inserted, claim).await? {
+            return Err(CatalogError::Preempted {
+                chunk: chunk.id.clone(),
+                collection: def.collection.to_string(),
+            });
+        }
 
         let done_count = (report.chunks_ingested + report.chunks_resumed) as u64;
         ctx.info(format!(
@@ -578,7 +615,12 @@ pub async fn add_catalog(
         // catalog should not be servable anyway.
         ctx.info(format!("building indexes on {}", def.collection));
         inserter.create_indexes(true).await?;
-        finish_state(&state, def.collection).await?;
+        if !finish_state(&state, def.collection, claim).await? {
+            return Err(CatalogError::Preempted {
+                chunk: "the final state write".to_string(),
+                collection: def.collection.to_string(),
+            });
+        }
         ctx.info(format!(
             "{} complete: {} records in {}",
             def.id, report.records.inserted, def.collection
@@ -602,6 +644,13 @@ pub async fn add_catalog(
 const PROGRESS_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Publish the running row count until aborted.
+/// Report rows for the chunk now running, not for the catalog so far.
+///
+/// The counter is the inserter's and spans the whole ingest, so the count at
+/// the moment this starts is subtracted. Without that the message attributes
+/// every row inserted since the task began to the current chunk, and the
+/// "fetching" branch -- which the count being zero is what detects -- never
+/// fires again after the first chunk.
 fn spawn_progress_ticker(
     ctx: TaskContext,
     counter: std::sync::Arc<std::sync::atomic::AtomicU64>,
@@ -609,16 +658,25 @@ fn spawn_progress_ticker(
     total: u64,
     chunk_id: String,
 ) -> tokio::task::JoinHandle<()> {
+    let baseline = counter.load(std::sync::atomic::Ordering::Relaxed);
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(PROGRESS_INTERVAL).await;
-            let rows = counter.load(std::sync::atomic::Ordering::Relaxed);
+            let rows = counter
+                .load(std::sync::atomic::Ordering::Relaxed)
+                .saturating_sub(baseline);
             // Before the first batch lands the chunk is still downloading, which
             // is worth saying rather than showing a stuck row count.
             let message = if rows == 0 {
                 format!("chunk {} of {}: fetching {}", done + 1, total, chunk_id)
             } else {
-                format!("chunk {} of {}: {} rows inserted", done + 1, total, rows)
+                format!(
+                    "chunk {} of {}: {} rows inserted from {}",
+                    done + 1,
+                    total,
+                    rows,
+                    chunk_id
+                )
             };
             ctx.progress(done, total, message).await;
         }
@@ -715,11 +773,24 @@ fn now() -> f64 {
     chrono::Utc::now().timestamp_millis() as f64 / 1000.0
 }
 
+/// Claim the ingest and return the token that identifies this claim.
+///
+/// Every later write to the state document is conditional on the token, which
+/// is what keeps a worker that has lost its lease from writing to it. The same
+/// run can be claimed twice -- the lease lapses, the reaper requeues it, a
+/// second worker picks it up -- and the two workers share a task id, so the id
+/// cannot tell them apart. A fresh token per claim can, and because the
+/// conditional update is evaluated by the server there is no window between
+/// checking and writing.
+///
+/// Random rather than a counter: `drop_existing` deletes this document, so a
+/// counter would restart at the same value the evicted worker is still holding.
 async fn start_state(
     state: &mongodb::Collection<Document>,
     def: &CatalogDef,
     chunks_total: usize,
-) -> Result<(), CatalogError> {
+) -> Result<mongodb::bson::oid::ObjectId, CatalogError> {
+    let token = mongodb::bson::oid::ObjectId::new();
     state
         .update_one(
             doc! { "_id": def.collection },
@@ -728,6 +799,7 @@ async fn start_state(
                     "catalog": def.id,
                     "status": "ingesting",
                     "chunks_total": chunks_total as i64,
+                    "claim": token,
                     "updated_at": now(),
                 },
                 "$setOnInsert": { "started_at": now(), "n_records": 0i64 },
@@ -735,7 +807,7 @@ async fn start_state(
         )
         .upsert(true)
         .await?;
-    Ok(())
+    Ok(token)
 }
 
 /// Record a chunk as done, atomically with its record count.
@@ -747,32 +819,39 @@ async fn record_chunk(
     collection: &str,
     chunk_id: &str,
     inserted: u64,
-) -> Result<(), CatalogError> {
-    state
+    claim: mongodb::bson::oid::ObjectId,
+) -> Result<bool, CatalogError> {
+    // Not an upsert, and matched on the claim: if this run has been taken over
+    // the document either carries another token or has been dropped, and
+    // either way this write must not happen. Upserting would recreate the
+    // state document with one chunk marked done, and the worker that now owns
+    // the run would skip that chunk as already ingested -- losing its records
+    // from a catalog that reports itself complete.
+    let result = state
         .update_one(
-            doc! { "_id": collection },
+            doc! { "_id": collection, "claim": claim },
             doc! {
                 "$addToSet": { "chunks_done": chunk_id },
                 "$inc": { "n_records": inserted as i64 },
                 "$set": { "updated_at": now() },
             },
         )
-        .upsert(true)
         .await?;
-    Ok(())
+    Ok(result.matched_count == 1)
 }
 
 async fn finish_state(
     state: &mongodb::Collection<Document>,
     collection: &str,
-) -> Result<(), CatalogError> {
-    state
+    claim: mongodb::bson::oid::ObjectId,
+) -> Result<bool, CatalogError> {
+    let result = state
         .update_one(
-            doc! { "_id": collection },
+            doc! { "_id": collection, "claim": claim },
             doc! { "$set": { "status": "complete", "completed_at": now(), "updated_at": now() } },
         )
         .await?;
-    Ok(())
+    Ok(result.matched_count == 1)
 }
 
 /// How a declared catalog compares to what is actually in the database.
@@ -874,8 +953,45 @@ pub async fn status(
             });
             continue;
         };
-        let doc = state.find_one(doc! { "_id": def.collection }).await?;
+        // The canonical collection first, then any alias. A deployment whose
+        // crossmatch config still points at an older release of a catalog has
+        // that collection populated and no state document under the canonical
+        // name, and reporting it `missing` would invite a re-ingest of data
+        // that is already there and already being matched against.
+        let mut doc = state.find_one(doc! { "_id": def.collection }).await?;
+        let mut serving = def.collection.to_string();
+        if doc.is_none() {
+            for alias in def.aliases {
+                if let Some(found) = state.find_one(doc! { "_id": *alias }).await? {
+                    doc = Some(found);
+                    serving = (*alias).to_string();
+                    break;
+                }
+            }
+        }
+        // An alias populated before this release tracked ingest state has no
+        // state document at all, so the collection itself is the only evidence.
+        // Counted rather than assumed missing, because a populated alias is
+        // what the crossmatch is reading right now.
+        let mut untracked = 0i64;
+        if doc.is_none() {
+            for alias in def.aliases {
+                let count = db
+                    .collection::<Document>(alias)
+                    .estimated_document_count()
+                    .await
+                    .unwrap_or(0) as i64;
+                if count > 0 {
+                    serving = (*alias).to_string();
+                    untracked = count;
+                    break;
+                }
+            }
+        }
         let (health, chunks_done, chunks_total, n_records) = match &doc {
+            // Present on the strength of the documents in it; this release did
+            // not ingest it, so there are no chunk counts to report.
+            None if untracked > 0 => (CatalogHealth::Present, 0, 0, untracked),
             None => (CatalogHealth::Missing, 0, 0, 0),
             Some(doc) => {
                 let done = doc
@@ -895,7 +1011,9 @@ pub async fn status(
         };
         statuses.push(CatalogStatus {
             id: def.id.to_string(),
-            collection: Some(def.collection.to_string()),
+            // The collection actually serving the catalog, which is the alias
+            // when that is where the data is.
+            collection: Some(serving),
             title: Some(def.title.to_string()),
             health,
             chunks_done,
@@ -1163,6 +1281,84 @@ mod crossmatch_validation_tests {
 }
 
 #[cfg(test)]
+mod state_tests {
+    use super::*;
+
+    fn a_def() -> CatalogDef {
+        *find("milliquas").expect("milliquas is defined")
+    }
+
+    /// The takeover case: an evicted worker must not be able to mark a chunk
+    /// done after another worker has claimed the same run.
+    ///
+    /// Without the fence the stale write upserts `chunks_done`, the new owner
+    /// skips that chunk as already ingested, and the catalog reports itself
+    /// complete while missing those records.
+    #[tokio::test]
+    async fn a_chunk_is_not_recorded_after_the_run_is_taken_over() {
+        let db = crate::conf::get_test_db().await;
+        let state = db.collection::<Document>("test_catalog_state_takeover");
+        state.delete_many(doc! {}).await.unwrap();
+        let def = a_def();
+
+        let first = start_state(&state, &def, 10).await.unwrap();
+        // A second claim of the same run, as the reaper requeuing it produces.
+        let second = start_state(&state, &def, 10).await.unwrap();
+        assert_ne!(first, second, "each claim gets its own token");
+
+        let recorded = record_chunk(&state, def.collection, "chunk-1", 5, first)
+            .await
+            .unwrap();
+        assert!(!recorded, "the evicted claim must not write");
+        let completed = finish_state(&state, def.collection, first).await.unwrap();
+        assert!(!completed, "nor mark the catalog complete");
+
+        let doc = state
+            .find_one(doc! { "_id": def.collection })
+            .await
+            .unwrap()
+            .expect("state document exists");
+        assert!(
+            doc.get_array("chunks_done").is_err(),
+            "no chunk should be recorded: {doc:?}"
+        );
+        assert!(doc.get_str("status").is_ok_and(|s| s == "ingesting"));
+
+        // The claim that owns the run still works.
+        assert!(record_chunk(&state, def.collection, "chunk-1", 5, second)
+            .await
+            .unwrap());
+        state.delete_many(doc! {}).await.unwrap();
+    }
+
+    /// A claim deleted by `drop_existing` cannot be matched by a token minted
+    /// before it, even though the counter-like sequence would restart.
+    #[tokio::test]
+    async fn a_claim_does_not_survive_the_state_being_dropped() {
+        let db = crate::conf::get_test_db().await;
+        let state = db.collection::<Document>("test_catalog_state_dropped");
+        state.delete_many(doc! {}).await.unwrap();
+        let def = a_def();
+
+        let first = start_state(&state, &def, 3).await.unwrap();
+        state
+            .delete_one(doc! { "_id": def.collection })
+            .await
+            .unwrap();
+        let second = start_state(&state, &def, 3).await.unwrap();
+
+        assert_ne!(first, second);
+        assert!(
+            !record_chunk(&state, def.collection, "chunk-1", 1, first)
+                .await
+                .unwrap(),
+            "a token from before the drop must not match the new claim"
+        );
+        state.delete_many(doc! {}).await.unwrap();
+    }
+}
+
+#[cfg(test)]
 mod source_tests {
     use super::*;
 
@@ -1195,6 +1391,50 @@ mod source_tests {
 #[cfg(test)]
 mod status_tests {
     use super::*;
+
+    /// A deployment whose crossmatch config points at an older release of a
+    /// catalog has that collection populated and nothing under the canonical
+    /// name. Reporting it missing would invite a re-ingest of data that is
+    /// already there, and is already being matched against.
+    #[tokio::test]
+    async fn a_populated_alias_is_not_reported_missing() {
+        let db = crate::conf::get_test_db().await;
+        let def = *find("milliquas").expect("milliquas is defined");
+        let alias = def.aliases[0];
+        let aliased = db.collection::<Document>(alias);
+        aliased.delete_many(doc! {}).await.unwrap();
+        db.collection::<Document>(STATE_COLLECTION)
+            .delete_one(doc! { "_id": def.collection })
+            .await
+            .unwrap();
+
+        // Nothing anywhere: missing, which is the honest answer.
+        let before = status(&db, &[], &[alias.to_string()]).await.unwrap();
+        let row = before.iter().find(|s| s.id == def.id).expect("listed");
+        assert_eq!(row.health, CatalogHealth::Missing);
+
+        aliased
+            .insert_one(doc! { "_id": "QSO J0000+0000", "ra": 0.0, "dec": 0.0 })
+            .await
+            .unwrap();
+
+        let after = status(&db, &[], &[alias.to_string()]).await.unwrap();
+        let row = after.iter().find(|s| s.id == def.id).expect("listed");
+        assert_eq!(
+            row.health,
+            CatalogHealth::Present,
+            "the alias holds the data the crossmatch reads"
+        );
+        assert_eq!(
+            row.collection.as_deref(),
+            Some(alias),
+            "and the page should name the collection actually serving it"
+        );
+        assert_eq!(row.n_records, 1);
+        assert!(row.crossmatched);
+
+        aliased.delete_many(doc! {}).await.unwrap();
+    }
 
     #[tokio::test]
     async fn every_ingestable_catalog_is_listed_whether_or_not_config_names_it() {

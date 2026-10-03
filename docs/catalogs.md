@@ -55,7 +55,32 @@ and both matter at this size:
   picks up at the first one that did not finish, so a deploy or a reboot costs
   one chunk rather than the whole ingest.
   Since every catalog derives its `_id` from a stable source identifier, a chunk
-  that was interrupted mid-write re-ingests without producing duplicates.
+  that was interrupted mid-write re-ingests without producing duplicates. A test
+  reads the record types and fails if one of them stops declaring an `_id`,
+  because that is the assumption the whole resume story rests on and nothing
+  else would notice it breaking.
+
+**Chunks are fetched and ingested one at a time, on purpose.** Downloading
+several at once would be faster against an archive that throttles a single
+connection, but it multiplies the first property above: peak disk becomes one
+chunk *per* download in flight, and the ingest's reason for chunking is to keep
+that bounded on a worker that is also running the alert pipeline. The
+parallelism that pays is already there and is below this level — each chunk is
+inserted by `num_workers` tasks against Mongo, which is the usual bottleneck
+rather than the download. If a specific catalog turns out to be download-bound,
+the thing to add is a bounded prefetch of the *next* chunk only, which costs one
+extra chunk of disk rather than N.
+
+**A chunk is only recorded by the worker that still owns the run.** The state
+document carries a token minted when a worker claims the ingest, and every write
+to it is conditional on that token. This matters because the same run can be
+claimed twice: if a worker's lease lapses — a long Mongo stall is enough — the
+run is requeued and another worker picks it up, and the two share a task id, so
+the id cannot tell them apart. The evicted worker finishes the chunk it is on
+before it notices. Without the token its `chunks_done` write would land on the
+new owner's state, the new owner would skip that chunk as already ingested, and
+the catalog would report itself complete while missing those records. With it,
+the stale write matches nothing and the evicted run fails loudly instead.
 
 **Rows that are not on the sky are skipped, not stored.** Bulk catalogs do
 contain them — an `ra` outside [0, 360] or a `dec` outside [-90, 90], usually a

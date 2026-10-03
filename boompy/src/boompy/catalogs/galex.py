@@ -12,6 +12,13 @@ from .http import content_length, download, list_index, log
 
 ID = "galex"
 
+#: Plain HTTP because the host does not answer on 443 at all -- not a
+#: preference, and not an oversight. GUVcat publishes no checksum alongside the
+#: files either, so there is nothing to verify a download against. The rows
+#: become crossmatch data, so anyone able to alter the connection could alter
+#: what BOOM calls a match; a deployment that cannot accept that should fetch
+#: the files out of band, verify them however it likes, and ingest GALEX as a
+#: staged catalog instead.
 BASE_URL = "http://dolomiti.pha.jhu.edu/uvsky/GUVcat/"
 FILE_PATTERN = r".*\.csv\.gz"
 

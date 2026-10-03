@@ -39,11 +39,36 @@ COLUMNS = [
 ]
 
 
+def _require_credentials() -> None:
+    """Fail before the transfer starts if nothing can pay for it.
+
+    Requester-pays means an unauthenticated read is refused by S3, and the
+    error surfaces from inside lsdb after it has already spent a while on
+    partition metadata. Checked here so the ingest refuses immediately with
+    something that names the variables to set.
+
+    Only the presence of a credential source is checked; whether it is
+    *allowed* to pay is between the deployment and AWS.
+    """
+    import botocore.session
+
+    if botocore.session.get_session().get_credentials() is not None:
+        return
+    raise RuntimeError(
+        "Pan-STARRS is served requester-pays from s3://stpubdata, so fetching "
+        "it needs AWS credentials that can pay for the transfer, and none were "
+        "found. Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY (see "
+        ".env.example), or run the worker on an instance with a role that can. "
+        "No other catalog needs them."
+    )
+
+
 @functools.cache
 def _catalog():
     """Open the HATS catalog once per process; opening reads partition metadata."""
     import lsdb
 
+    _require_credentials()
     return lsdb.open_catalog(
         HATS_URL,
         columns=COLUMNS,
