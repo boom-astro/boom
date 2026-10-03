@@ -10,10 +10,10 @@ use crate::enrichment::{
 };
 use crate::filter::{
     build_loaded_filters, build_lsst_aux_data, insert_lsst_aux_pipeline_if_needed,
-    parse_programid_candid_tuple, run_filter, update_aliases_index_multiple, uses_field_in_filter,
-    validate_filter_pipeline, watchlist_projections, Alert, AlertHostGalaxy, Classification,
-    Filter, FilterError, FilterResults, FilterWorker, FilterWorkerError, LoadedFilter, Origin,
-    Photometry, SurveyMatch, SurveyMatches,
+    parse_programid_candid_tuple, record_filter_result, run_filter, update_aliases_index_multiple,
+    uses_field_in_filter, validate_filter_pipeline, watchlist_projections, Alert, AlertHostGalaxy,
+    Classification, Filter, FilterError, FilterResults, FilterWorker, FilterWorkerError,
+    LoadedFilter, Origin, Photometry, SurveyMatch, SurveyMatches,
 };
 use crate::utils::cutouts::CutoutStorage;
 use crate::utils::db::{fetch_timeseries_op, get_array_dict_element};
@@ -986,7 +986,8 @@ impl FilterWorker for ZtfFilterWorker {
                 )
                 .await?;
 
-                info!(
+                record_filter_result(&Survey::Ztf, filter, out_documents.len(), candids.len());
+                debug!(
                     "{}/{} ZTF alerts with programid {} passed filter {}",
                     out_documents.len(),
                     candids.len(),
@@ -994,9 +995,6 @@ impl FilterWorker for ZtfFilterWorker {
                     filter.id,
                 );
 
-                // If we have output documents, we need to process them
-                // and create filter results for each document (which contain annotations)
-                // however, if the array is empty, there's nothing to do
                 if out_documents.is_empty() {
                     continue;
                 }
