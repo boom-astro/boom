@@ -189,6 +189,14 @@ pub struct BabamulUser {
     /// `username` it is free text, optional, and not unique.
     #[serde(default)]
     pub name: Option<String>,
+    /// Whether this account has elevated privileges: managing other users, and
+    /// running data-mutating tasks from the admin page.
+    ///
+    /// Granted through `PATCH /babamul/admin/users/{id}`, and seeded at API
+    /// startup from `babamul.admin_emails` -- which is how a fresh deployment
+    /// gets its first admin, since nobody can grant admin through the admin
+    /// page until somebody is one. Seeding only grants, so a grant made
+    /// through the API survives a restart.
     #[serde(default)]
     pub is_admin: bool,
     #[serde(default)]
@@ -232,6 +240,8 @@ pub struct BabamulUserPublic {
     pub orcid_id: Option<String>,
     /// Full name the user chose to display, if any
     pub name: Option<String>,
+    /// Exposed so the client knows whether to offer the admin page.
+    /// Authorization is enforced server-side on every admin route regardless.
     #[serde(default)]
     pub is_admin: bool,
     #[serde(default)]

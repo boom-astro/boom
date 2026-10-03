@@ -6,4 +6,5 @@ pub mod info;
 pub mod kafka;
 pub mod queries;
 pub mod surveys;
+pub mod tasks;
 pub mod users;
