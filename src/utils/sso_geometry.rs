@@ -179,7 +179,7 @@ const OBLIQUITY_DEG: f64 = 23.439_281;
 const EARTH_RADIUS_AU: f64 = 4.263_521e-5;
 
 /// An observing site, in the parallax constants the MPC publishes for it.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Site {
     /// East longitude, degrees.
     pub longitude_deg: f64,
@@ -202,6 +202,67 @@ pub const RUBIN: Site = Site {
     rho_cos_phi: 0.864_981,
     rho_sin_phi: -0.500_958,
 };
+
+/// Catalina Sky Survey, the 0.7 m Schmidt on Mt Bigelow, MPC code 703.
+pub const CATALINA: Site = Site {
+    longitude_deg: 249.267_36,
+    rho_cos_phi: 0.845_311,
+    rho_sin_phi: 0.533_211,
+};
+
+/// Mt Lemmon Survey, the 1.5 m, MPC code G96. CSS's deepest survey telescope.
+pub const MT_LEMMON: Site = Site {
+    longitude_deg: 249.211_28,
+    rho_cos_phi: 0.845_107,
+    rho_sin_phi: 0.533_611,
+};
+
+/// Steward Observatory, Mt Lemmon Station, MPC code I52. CSS follow-up.
+pub const MT_LEMMON_STATION: Site = Site {
+    longitude_deg: 249.211_08,
+    rho_cos_phi: 0.845_109,
+    rho_sin_phi: 0.533_609,
+};
+
+/// Kitt Peak-Bok, the 2.3 m with 90Prime, MPC code V00.
+pub const BOK: Site = Site {
+    longitude_deg: 248.399_81,
+    rho_cos_phi: 0.849_456,
+    rho_sin_phi: 0.526_492,
+};
+
+/// Catalina Sky Survey-Kuiper, the 1.5 m on Mt Bigelow, MPC code V06.
+pub const KUIPER: Site = Site {
+    longitude_deg: 249.267_45,
+    rho_cos_phi: 0.845_313,
+    rho_sin_phi: 0.533_209,
+};
+
+/// Siding Spring Survey, MPC code E12. Southern, and the only CSS site there,
+/// so its parallax differs from the Arizona ones in sign as well as size.
+pub const SIDING_SPRING: Site = Site {
+    longitude_deg: 149.064_2,
+    rho_cos_phi: 0.855_63,
+    rho_sin_phi: -0.516_21,
+};
+
+impl Site {
+    /// The site an MPC observatory code names, for astrometry that says where it
+    /// was taken rather than being assumed to come from one telescope.
+    pub fn from_mpc_code(code: &str) -> Option<Self> {
+        Some(match code {
+            "I41" => ZTF,
+            "X05" => RUBIN,
+            "703" => CATALINA,
+            "G96" => MT_LEMMON,
+            "I52" => MT_LEMMON_STATION,
+            "V00" => BOK,
+            "V06" => KUIPER,
+            "E12" => SIDING_SPRING,
+            _ => return None,
+        })
+    }
+}
 
 /// Heliocentric ecliptic position of an observing site at `jd`, au.
 ///
@@ -803,5 +864,87 @@ mod horizons_validation {
                 (ours - truth).abs()
             );
         }
+    }
+
+    /// The parallax constants are a point on the ellipsoid, so the two must
+    /// square to very nearly one. A mistyped digit in a hand-copied site fails
+    /// here rather than becoming a quiet astrometric bias.
+    #[test]
+    fn test_every_site_lies_on_the_earth() {
+        for (code, site) in [
+            ("I41", ZTF),
+            ("X05", RUBIN),
+            ("703", CATALINA),
+            ("G96", MT_LEMMON),
+            ("I52", MT_LEMMON_STATION),
+            ("V00", BOK),
+            ("V06", KUIPER),
+            ("E12", SIDING_SPRING),
+        ] {
+            let r2 = site.rho_cos_phi * site.rho_cos_phi + site.rho_sin_phi * site.rho_sin_phi;
+            assert!(
+                (0.993..=1.0).contains(&r2),
+                "{code}: rho_cos_phi^2 + rho_sin_phi^2 = {r2:.6}, not on the ellipsoid"
+            );
+            assert!(
+                (0.0..360.0).contains(&site.longitude_deg),
+                "{code}: longitude {} is not east-of-Greenwich degrees",
+                site.longitude_deg
+            );
+            assert_eq!(
+                Site::from_mpc_code(code),
+                Some(site),
+                "{code} resolves wrong"
+            );
+        }
+        assert_eq!(Site::from_mpc_code("ZZZ"), None);
+        // The only southern site, so its sign is the one worth stating.
+        assert!(SIDING_SPRING.rho_sin_phi < 0.0, "E12 is in Australia");
+    }
+
+    /// Astrometry from two telescopes cannot be fitted as though it came from
+    /// one. Palomar to Arizona is most of the residual gate at inner-belt
+    /// distances, and Palomar to Siding Spring exceeds it outright -- so a
+    /// cross-survey fit has to carry the site each observation came from.
+    #[test]
+    fn test_sites_disagree_by_more_than_the_residual_gate() {
+        use crate::utils::heliolinc::test_orbits;
+        use crate::utils::orbit_fit::predict_radec;
+
+        const GATE_ARCSEC: f64 = 2.0;
+        let epoch = 2460948.72339281;
+        let offset = |r: f64, site: Site| -> Option<f64> {
+            let (state, _) = test_orbits(0.0, 30.0, epoch, &[r]).into_iter().next()?;
+            let (ra0, dec0) = predict_radec(&state, epoch, epoch, &ZTF)?;
+            let (ra1, dec1) = predict_radec(&state, epoch, epoch, &site)?;
+            Some(
+                (((ra1 - ra0 + 540.0).rem_euclid(360.0) - 180.0) * dec0.to_radians().cos())
+                    .hypot(dec1 - dec0)
+                    * 3600.0,
+            )
+        };
+
+        // Siding Spring against Palomar is a whole-Earth baseline.
+        let southern = offset(2.5, SIDING_SPRING).expect("a trial orbit at 2.5 au");
+        assert!(
+            southern > GATE_ARCSEC,
+            "E12 vs I41 at 2.5 au is {southern:.2}\", which should exceed the {GATE_ARCSEC}\" gate"
+        );
+
+        // Arizona against Palomar is smaller but not negligible: at inner-belt
+        // distances it already eats most of the budget a fit has to spend.
+        let inner = offset(1.5, MT_LEMMON).expect("a trial orbit at 1.5 au");
+        assert!(
+            inner > 0.5 * GATE_ARCSEC,
+            "G96 vs I41 at 1.5 au is {inner:.2}\", small enough to ignore?"
+        );
+
+        // Parallax grows as the object nears, so NEOs -- what CSS is for -- are
+        // worse still than any of these.
+        let outer = offset(3.5, MT_LEMMON).expect("a trial orbit at 3.5 au");
+        assert!(
+            inner > outer,
+            "the offset should grow as the object nears: {inner:.2}\" at 1.5 au vs {outer:.2}\" at 3.5 au"
+        );
     }
 }
