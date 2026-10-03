@@ -77,6 +77,8 @@ pub enum EnrichmentWorkerError {
     CutoutAccessError(#[from] CutoutError),
     #[error("json serialization error")]
     SerdeJson(#[from] serde_json::Error),
+    #[error("could not determine which models and derivations are running")]
+    EnrichmentVersion(#[from] crate::enrichment::version::VersionError),
     #[error("failed to deserialize from MongoDB")]
     MongoDeserializeError(#[from] mongodb::bson::de::Error),
     #[error("missing cutouts for candid {0}")]

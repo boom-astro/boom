@@ -3,6 +3,7 @@ mod base;
 mod decam;
 mod lsst;
 pub mod models;
+pub mod version;
 mod winter;
 mod ztf;
 pub use base::{fetch_alerts, run_enrichment_worker, EnrichmentWorker, EnrichmentWorkerError};
