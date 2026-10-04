@@ -4,7 +4,7 @@ use crate::utils::enums::Survey;
 use crate::utils::worker::WorkerCmd;
 use crate::{
     conf,
-    scheduler::{count_processed_alerts, record_worker_retry},
+    scheduler::{count_processed_alert, record_worker_retry},
     utils::{
         cutouts::{CutoutStorage, CutoutStorageError},
         db::mongify,
@@ -1538,7 +1538,7 @@ pub async fn run_alert_worker<T: AlertWorker>(
 
         ACTIVE.add(-1, &active_attrs);
         ALERT_PROCESSED.add(1, attributes);
-        count_processed_alerts(1);
+        count_processed_alert();
 
         handle_result?;
     }

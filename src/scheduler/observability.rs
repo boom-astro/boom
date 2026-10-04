@@ -112,8 +112,6 @@ pub fn record_kafka_alert_published(producer: &'static str, survey: &str, topic:
     KAFKA_ALERT_PUBLISHED.add(count, &attrs);
 }
 
-/// Alerts handled by each stage since the last heartbeat, summed over its workers.
-#[derive(Debug)]
 pub struct HeartbeatCounts {
     pub alert: u64,
     pub enrichment: u64,
@@ -126,8 +124,8 @@ static ALERTS_ENRICHED: AtomicU64 = AtomicU64::new(0);
 static ALERTS_FILTERED: AtomicU64 = AtomicU64::new(0);
 static ALERTS_PASSED: AtomicU64 = AtomicU64::new(0);
 
-pub fn count_processed_alerts(count: usize) {
-    ALERTS_PROCESSED.fetch_add(count as u64, Ordering::Relaxed);
+pub fn count_processed_alert() {
+    ALERTS_PROCESSED.fetch_add(1, Ordering::Relaxed);
 }
 
 pub fn count_enriched_alerts(count: usize) {
