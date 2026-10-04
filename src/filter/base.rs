@@ -5,7 +5,7 @@ use crate::{
         build_decam_filter_pipeline, build_lsst_filter_pipeline, build_winter_filter_pipeline,
         build_ztf_filter_pipeline,
     },
-    scheduler::{record_kafka_alert_published, record_worker_retry},
+    scheduler::{count_filtered_alerts, record_kafka_alert_published, record_worker_retry},
     utils::{
         cutouts::CutoutStorageError,
         enums::Survey,
@@ -1233,6 +1233,7 @@ pub async fn run_filter_worker<T: FilterWorker>(
             alerts.len().saturating_sub(matched_alerts.len()) as u64,
             &ok_excluded_attrs,
         );
+        count_filtered_alerts(alerts.len(), matched_alerts.len());
 
         let output_topic = filter_worker.output_topic_name();
         let mut total_enqueued = 0;

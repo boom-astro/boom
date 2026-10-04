@@ -1,7 +1,7 @@
 use crate::{
     conf::{self, AppConfig},
     enrichment::models::{ModelError, SharedModels},
-    scheduler::record_worker_retry,
+    scheduler::{count_enriched_alerts, record_worker_retry},
     utils::{
         cutouts::CutoutStorageError,
         enums::Survey,
@@ -277,6 +277,7 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker>(
             ACTIVE.add(-1, &active_attrs);
             BATCH_PROCESSED.add(1, attributes);
             ALERT_PROCESSED.add(candids.len() as u64, attributes);
+            count_enriched_alerts(candids.len());
             continue;
         }
         retry_transient(
@@ -302,6 +303,7 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker>(
         ACTIVE.add(-1, &active_attrs);
         BATCH_PROCESSED.add(1, attributes);
         ALERT_PROCESSED.add(candids.len() as u64, attributes);
+        count_enriched_alerts(candids.len());
     }
 
     Ok(())
