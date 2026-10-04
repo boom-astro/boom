@@ -21,9 +21,7 @@ use crate::{
 };
 
 use std::collections::HashSet;
-use std::{
-    collections::HashMap, fmt::Debug, future::Future, io::Read, sync::LazyLock, time::Instant,
-};
+use std::{collections::HashMap, fmt::Debug, future::Future, io::Read, sync::LazyLock};
 
 use apache_avro::{from_avro_datum, from_value, Schema};
 use futures::future::join_all;
@@ -38,7 +36,7 @@ use opentelemetry::{
 use redis::AsyncCommands;
 use serde::{de::Deserializer, Deserialize, Serialize};
 use tokio::sync::mpsc;
-use tracing::{debug, error, info, instrument, trace, warn};
+use tracing::{debug, error, instrument, trace, warn};
 use uuid::Uuid;
 
 const SCHEMA_REGISTRY_MAGIC_BYTE: u8 = 0;
@@ -1298,19 +1296,6 @@ pub trait AlertWorker {
     async fn process_alert(&mut self, avro_bytes: &[u8]) -> Result<ProcessAlertStatus, AlertError>;
 }
 
-#[instrument(skip_all)]
-fn report_progress(start: &Instant, stream: &Survey, count: u64, message: &str) {
-    let elapsed = start.elapsed().as_secs();
-    info!(
-        ?stream,
-        count,
-        elapsed,
-        average_rate = count as f64 / elapsed as f64,
-        "{}",
-        message,
-    );
-}
-
 pub fn alert_temp_queue_name(input_queue_name: &str) -> String {
     format!("{}_temp", input_queue_name)
 }
@@ -1463,9 +1448,7 @@ pub async fn run_alert_worker<T: AlertWorker>(
 
     let command_interval: usize = worker_config.command_interval;
     let mut command_check_countdown = command_interval;
-    let mut count = 0;
 
-    let start = std::time::Instant::now();
     let worker_id_attr = KeyValue::new("worker.id", worker_id.to_string());
     let survey_attr = KeyValue::new("survey", survey.to_string());
     let active_attrs = [worker_id_attr.clone(), survey_attr.clone()];
@@ -1558,11 +1541,6 @@ pub async fn run_alert_worker<T: AlertWorker>(
         count_processed_alerts(1);
 
         handle_result?;
-        if count > 0 && count % 1000 == 0 {
-            report_progress(&start, &survey, count, "progress");
-        }
-        count += 1;
     }
-    report_progress(&start, &survey, count, "summary");
     Ok(())
 }
