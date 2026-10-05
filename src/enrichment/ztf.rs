@@ -7,7 +7,7 @@ use crate::enrichment::{
         applecider_postprocess::{self, AppleCiderFusion, AppleCiderModalities},
         AcaiModel, AppleCiderOutputs, BtsBotModel, FusionModel, Model, ModelError, SharedModels,
     },
-    EnrichmentWorker, EnrichmentWorkerError, LsstMatch, LsstPhotometry,
+    EnrichmentWorker, EnrichmentWorkerError, LsstMatch,
 };
 use crate::utils::cutouts::{AlertCutout, CutoutStorage};
 use crate::utils::db::mongify;
@@ -16,7 +16,7 @@ use crate::utils::host::HostGalaxyAssociation;
 use crate::utils::lightcurves::{
     analyze_photometry, is_stationary, prepare_photometry, summarise_detections, ActivityMetrics,
     AllBandsProperties, Band, DetectionHistory, EpisodeHistory, Outburst, PerBandProperties,
-    PhotometryMag, EPISODE_GAP_DAYS, SNT, STATIONARY_MIN_FORCED_SNR, ZTF_ZP,
+    PhotometryMag, EPISODE_GAP_DAYS, STATIONARY_MIN_FORCED_SNR, ZTF_ZP,
 };
 use crate::utils::mpcorb::{elements_from_document, normalize_ztf_ssnamenr, ORBITS_COLLECTION};
 use crate::utils::outburst::{Point, MAX_SEPARATION_ARCSEC};
@@ -1254,7 +1254,7 @@ impl ZtfEnrichmentWorker {
             .fp_hists
             .iter()
             .filter(|p| p.jd <= alert.candidate.candidate.jd)
-            .filter_map(|p| p.to_photometry_mag(Some(f64::from(SNT))))
+            .filter_map(|p| p.to_photometry_mag(None))
             .collect();
 
         let mut lightcurve = [prv_candidates, fp_hists].concat();
@@ -1287,18 +1287,13 @@ impl ZtfEnrichmentWorker {
         let mut has_matches = false;
         if let Some(survey_matches) = &alert.survey_matches {
             if let Some(lsst_match) = &survey_matches.lsst {
-                let lsst_mags = |points: &[LsstPhotometry], min_snr| -> Vec<PhotometryMag> {
-                    points
-                        .iter()
-                        .filter(|p| p.jd <= candidate.jd)
-                        .filter_map(|p| p.to_photometry_mag(min_snr))
-                        .collect()
-                };
-                let mut lsst_lightcurve = [
-                    lsst_mags(&lsst_match.prv_candidates, None),
-                    lsst_mags(&lsst_match.fp_hists, Some(f64::from(SNT))),
-                ]
-                .concat();
+                let mut lsst_lightcurve: Vec<PhotometryMag> = lsst_match
+                    .prv_candidates
+                    .iter()
+                    .chain(&lsst_match.fp_hists)
+                    .filter(|p| p.jd <= candidate.jd)
+                    .filter_map(|p| p.to_photometry_mag(None))
+                    .collect();
                 prepare_photometry(&mut lsst_lightcurve);
                 lightcurve.extend(lsst_lightcurve);
                 has_matches = true;
