@@ -190,7 +190,7 @@ workers:
       n_workers: 1
       refresh_interval_minutes: 15
       max_match_rate: 5
-      reference_night:
+      reference_night: "2026-09-25"
   winter:
     command_interval: 500
     alert:

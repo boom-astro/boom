@@ -8,6 +8,7 @@ use crate::utils::lightcurves::{
     analyze_photometry, prepare_photometry, summarise_detections, Band, DetectionHistory,
     EpisodeHistory, PerBandProperties, PhotometryMag, EPISODE_GAP_DAYS, SNT,
 };
+use apache_avro_derive::AvroSchema;
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use tracing::{instrument, warn};
@@ -123,7 +124,7 @@ pub struct DecamAlertForEnrichment {
 
 /// DECAM alert properties computed during enrichment
 /// and inserted back into the alert document
-#[derive(Debug, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, serde::Deserialize, serde::Serialize, AvroSchema)]
 pub struct DecamAlertProperties {
     pub stationary: bool,
     /// Absent means never evaluated for a host, not evaluated and hostless.
