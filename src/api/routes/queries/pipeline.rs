@@ -1,7 +1,9 @@
 /// Endpoints for executing analytical queries.
 use crate::{
     api::{
-        catalogs::catalog_accessible, filters::parse_pipeline, models::response,
+        catalogs::{catalog_accessible, is_catalog_queryable},
+        filters::{joined_collections, parse_pipeline},
+        models::response,
         routes::users::User,
     },
     conf::AppConfig,
@@ -64,6 +66,16 @@ pub async fn post_pipeline_query(
         Ok(pipeline) => pipeline,
         Err(e) => return response::bad_request(&format!("Invalid filter: {}", e)),
     };
+    let joined = match joined_collections(&body.pipeline) {
+        Ok(names) => names,
+        Err(e) => return response::bad_request(&format!("Invalid pipeline: {}", e)),
+    };
+    if let Some(name) = joined
+        .into_iter()
+        .find(|name| !is_catalog_queryable(name, &current_user, &config))
+    {
+        return response::not_found(&format!("Catalog {} does not exist", name));
+    }
     let pipeline_options = body.to_pipeline_options();
     let mut cursor = match collection
         .aggregate(pipeline)

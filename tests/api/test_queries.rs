@@ -486,4 +486,72 @@ mod tests {
         delete_test_catalog(&database, &watchlist).await;
         delete_test_user(&database, &user).await;
     }
+
+    #[actix_rt::test]
+    async fn test_pipeline_cannot_join_collections_the_user_cannot_query() {
+        let database: Database = get_test_db_api().await;
+        let (auth, admin_token) = get_admin_auth(&database).await;
+        let (user, user_token) = create_test_user(&database, &auth, &[]).await;
+        let other_catalog = create_test_catalog(&database).await;
+        database.create_collection("ZTF_alerts").await.ok();
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(database.clone()))
+                .app_data(web::Data::new(auth))
+                .app_data(web::Data::new(AppConfig::from_test_config().unwrap()))
+                .wrap(from_fn(auth_middleware))
+                .service(routes::queries::pipeline::post_pipeline_query),
+        )
+        .await;
+        let pipeline_as = |token: &str, pipeline: serde_json::Value| {
+            test::TestRequest::post()
+                .uri("/queries/pipeline")
+                .insert_header(("Authorization", format!("Bearer {}", token)))
+                .set_json(serde_json::json!({ "catalog_name": "ZTF_alerts", "pipeline": pipeline }))
+                .to_request()
+        };
+        let lookup = |from: &str| serde_json::json!({ "$lookup": { "from": from, "pipeline": [{ "$limit": 1 }], "as": "joined" } });
+
+        for pipeline in [
+            serde_json::json!([lookup(&other_catalog)]),
+            serde_json::json!([{ "$unionWith": other_catalog }]),
+            serde_json::json!([{ "$lookup": {
+                "from": "LSPSC",
+                "pipeline": [{ "$unionWith": { "coll": "LSPSC", "pipeline": [lookup(&other_catalog)] } }],
+                "as": "joined",
+            } }]),
+            serde_json::json!([{ "$facet": { "joined": [lookup(&other_catalog)] } }]),
+        ] {
+            let resp = test::call_service(&app, pipeline_as(&user_token, pipeline.clone())).await;
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{pipeline}");
+            let resp = read_json_response(resp).await;
+            assert_eq!(
+                resp["message"],
+                format!("Catalog {} does not exist", other_catalog)
+            );
+        }
+
+        let pipeline = serde_json::json!([{ "$limit": 1 }, lookup("LSPSC")]);
+        let resp = test::call_service(&app, pipeline_as(&user_token, pipeline)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let pipeline = serde_json::json!([{ "$lookup": {
+            "from": { "db": "admin", "coll": "LSPSC" }, "pipeline": [], "as": "joined",
+        } }]);
+        let resp = test::call_service(&app, pipeline_as(&user_token, pipeline)).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        let pipeline = serde_json::json!([{ "$limit": 1 }, lookup(&other_catalog)]);
+        let resp = test::call_service(&app, pipeline_as(&admin_token, pipeline)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let resp = test::call_service(
+            &app,
+            pipeline_as(&admin_token, serde_json::json!([{ "$unionWith": "users" }])),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        delete_test_catalog(&database, &other_catalog).await;
+        delete_test_user(&database, &user).await;
+    }
 }
