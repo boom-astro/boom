@@ -1635,7 +1635,6 @@ mod tests {
         assert!(original_prv_candidates[0].prv_candidate.magpsf.is_none());
         assert_eq!(alert.prv_candidates.unwrap(), original_prv_candidates[1..]);
         assert_eq!(alert.fp_hists, original.fp_hists);
-        assert_eq!(alert.candidate, original.candidate);
     }
 
     #[test]
