@@ -6,7 +6,7 @@ use crate::utils::enums::Survey;
 use crate::utils::host::HostGalaxyAssociation;
 use crate::utils::lightcurves::{
     analyze_photometry, prepare_photometry, summarise_detections, Band, DetectionHistory,
-    EpisodeHistory, PerBandProperties, PhotometryMag, EPISODE_GAP_DAYS,
+    EpisodeHistory, PerBandProperties, PhotometryMag, EPISODE_GAP_DAYS, SNT,
 };
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
@@ -50,7 +50,7 @@ pub fn create_decam_alert_pipeline() -> Vec<Document> {
                     Some(vec![doc! {
                         "$gte": [
                             "$$x.snr",
-                            3.0
+                            SNT
                         ]
                     }]),
                 ),
