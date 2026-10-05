@@ -47,19 +47,6 @@ impl MilvusClient {
     /// Milvus reports as upserted, which is the deduplicated count and so may
     /// be smaller than `rows.len()`.
     ///
-    /// A stored embedding never moves backwards in time, under two guards:
-    /// `rows` may hold several alerts for one object, and only the newest of
-    /// each is sent ([`latest_per_object`]); and each survivor is compared
-    /// against what is already stored, so a batch replaying old alerts cannot
-    /// overwrite a newer vector ([`MilvusClient::stored_jds`]). Rows that lose
-    /// either comparison are dropped, so the returned count may be well below
-    /// `rows.len()`.
-    ///
-    /// The stored-version check costs one extra `Query` per call and is
-    /// best-effort: Milvus has no conditional write, so a concurrent writer can
-    /// still land between the query and the upsert. It closes the systematic
-    /// case (a reprocess run replaying old alerts), not the racy one.
-    ///
     /// Every embedding must have exactly `collection.dim` floats; a mismatch
     /// is rejected before anything is sent, since Milvus would reject the whole
     /// batch anyway.
@@ -82,9 +69,6 @@ impl MilvusClient {
             );
         }
 
-        // Cross-batch guard. A query failure propagates rather than falling
-        // back to an unguarded write: the caller is MilvusSink, which logs and
-        // retries the batch later, and embeddings are recomputable from Mongo.
         let object_ids: Vec<&str> = deduped.iter().map(|r| r.object_id.as_str()).collect();
         let stored = self.stored_jds(&object_ids).await?;
 
