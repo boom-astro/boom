@@ -4,12 +4,12 @@ use tracing::{debug, info, instrument, warn};
 
 use crate::alert::DecamCandidate;
 use crate::conf::AppConfig;
-use crate::enrichment::fetch_alerts;
+use crate::enrichment::{fetch_alerts, LsstMatch, ZtfMatch};
 use crate::filter::{
-    build_loaded_filters, record_filter_result, run_filter, uses_field_in_filter,
-    validate_filter_pipeline, watchlist_projections, Alert, Classification, Filter, FilterError,
-    FilterResults, FilterWorker, FilterWorkerError, LoadedFilter, Origin, Photometry,
-    SurveyMatches,
+    build_loaded_filters, lsst_survey_match, record_filter_result, run_filter,
+    uses_field_in_filter, validate_filter_pipeline, watchlist_projections, ztf_survey_match, Alert,
+    Classification, Filter, FilterError, FilterResults, FilterWorker, FilterWorkerError,
+    LoadedFilter, Origin, Photometry, SurveyMatches,
 };
 use crate::utils::cutouts::CutoutStorage;
 use crate::utils::db::{fetch_timeseries_op, get_array_dict_element};
@@ -45,6 +45,13 @@ impl DecamPhotometry {
     }
 }
 
+/// ZTF and LSST objects matched to a DECam alert, with their photometry.
+#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
+pub struct DecamSurveyMatches {
+    pub ztf: Option<ZtfMatch>,
+    pub lsst: Option<LsstMatch>,
+}
+
 /// DECam alert as fetched from the database to build the outgoing alert packet.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct DecamAlertForFilter {
@@ -57,6 +64,36 @@ pub struct DecamAlertForFilter {
     pub prv_candidates: Vec<DecamPhotometry>,
     #[serde(default)]
     pub fp_hists: Vec<DecamPhotometry>,
+    #[serde(default)]
+    pub survey_matches: Option<DecamSurveyMatches>,
+}
+
+/// The object matched in another survey, from its aux lookup, or null.
+fn survey_match_projection(aux_field: &str, with_nondetections: bool) -> Document {
+    let aux = format!("${}", aux_field);
+    let mut then = doc! {
+        "objectId": { "$arrayElemAt": [ format!("{}._id", aux), 0 ] },
+        "prv_candidates": { "$arrayElemAt": [ format!("{}.prv_candidates", aux), 0 ] },
+        "fp_hists": { "$arrayElemAt": [ format!("{}.fp_hists", aux), 0 ] },
+        "ra": { "$add": [
+            { "$arrayElemAt": [{ "$arrayElemAt": [ format!("{}.coordinates.radec_geojson.coordinates", aux), 0 ] }, 0]},
+            180
+        ]},
+        "dec": { "$arrayElemAt": [{ "$arrayElemAt": [ format!("{}.coordinates.radec_geojson.coordinates", aux), 0 ] }, 1]},
+    };
+    if with_nondetections {
+        then.insert(
+            "prv_nondetections",
+            doc! { "$arrayElemAt": [ format!("{}.prv_nondetections", aux), 0 ] },
+        );
+    }
+    doc! {
+        "$cond": {
+            "if": { "$gt": [ { "$size": &aux }, 0 ] },
+            "then": then,
+            "else": null
+        }
+    }
 }
 
 /// Pipeline used to fetch full DECam alert data (candidate + lightcurve) to
@@ -83,9 +120,35 @@ fn create_decam_filter_alert_pipeline() -> Vec<Document> {
             }
         },
         doc! {
+            "$addFields": {
+                "ztf_alias": { "$arrayElemAt": [{ "$arrayElemAt": [ "$aux.aliases.ZTF", 0 ] }, 0] },
+                "lsst_alias": { "$arrayElemAt": [{ "$arrayElemAt": [ "$aux.aliases.LSST", 0 ] }, 0] },
+            }
+        },
+        doc! {
+            "$lookup": {
+                "from": "ZTF_alerts_aux",
+                "localField": "ztf_alias",
+                "foreignField": "_id",
+                "as": "ztf_aux"
+            }
+        },
+        doc! {
+            "$lookup": {
+                "from": "LSST_alerts_aux",
+                "localField": "lsst_alias",
+                "foreignField": "_id",
+                "as": "lsst_aux"
+            }
+        },
+        doc! {
             "$project": doc! {
                 "objectId": 1,
                 "candidate": 1,
+                "survey_matches": {
+                    "ztf": survey_match_projection("ztf_aux", true),
+                    "lsst": survey_match_projection("lsst_aux", false),
+                },
                 "prv_candidates": fetch_timeseries_op(
                     "aux.prv_candidates",
                     "candidate.jd",
@@ -114,6 +177,7 @@ fn create_decam_filter_alert_pipeline() -> Vec<Document> {
                 "fp_hists.forcediffimflux": 1,
                 "fp_hists.forcediffimfluxunc": 1,
                 "fp_hists.band": 1,
+                "survey_matches": 1,
             }
         },
     ]
@@ -222,6 +286,7 @@ pub async fn build_decam_alerts(
             .remove(&candid)
             .ok_or_else(|| FilterWorkerError::MissingCutouts(candid))?;
 
+        let survey_matches = alert.survey_matches.unwrap_or_default();
         let alert = Alert {
             candid: alert.candid,
             object_id: alert.object_id,
@@ -239,8 +304,8 @@ pub async fn build_decam_alerts(
             cutout_difference: cutouts.cutout_difference,
             survey: Survey::Decam,
             survey_matches: SurveyMatches {
-                ztf: None,
-                lsst: None,
+                ztf: survey_matches.ztf.as_ref().map(ztf_survey_match),
+                lsst: survey_matches.lsst.as_ref().map(lsst_survey_match),
                 decam: None,
             },
             host_galaxy: None,
