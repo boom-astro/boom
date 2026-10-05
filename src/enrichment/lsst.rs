@@ -10,7 +10,7 @@ use crate::utils::host::HostGalaxyAssociation;
 use crate::utils::lightcurves::{
     analyze_photometry, is_stationary, prepare_photometry, summarise_detections, ActivityMetrics,
     Band, DetectionHistory, EpisodeHistory, PerBandProperties, PhotometryMag, EPISODE_GAP_DAYS,
-    STATIONARY_MIN_FORCED_SNR,
+    SNT, STATIONARY_MIN_FORCED_SNR,
 };
 use apache_avro_derive::AvroSchema;
 use apache_avro_macros::serdavro;
@@ -505,7 +505,7 @@ impl LsstEnrichmentWorker {
             .fp_hists
             .iter()
             .filter(|p| p.jd <= alert.candidate.jd)
-            .filter_map(|p| p.to_photometry_mag(Some(3.0)))
+            .filter_map(|p| p.to_photometry_mag(Some(f64::from(SNT))))
             .collect();
 
         // lightcurve is prv_candidates + fp_hists, no need for parse_photometry here
@@ -543,7 +543,7 @@ impl LsstEnrichmentWorker {
                     .fp_hists
                     .iter()
                     .filter(|p| p.jd <= alert.candidate.jd)
-                    .filter_map(|p| p.to_photometry_mag(Some(3.0)))
+                    .filter_map(|p| p.to_photometry_mag(Some(f64::from(SNT))))
                     .collect();
                 let mut ztf_lightcurve = [ztf_prv_candidates, ztf_fp_hists].concat();
                 prepare_photometry(&mut ztf_lightcurve);
