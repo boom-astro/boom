@@ -12,7 +12,7 @@ mod tests {
         get_admin_auth, read_json_response, test_config_with_crossmatch,
     };
     use boom::conf::AppConfig;
-    use mongodb::bson::doc;
+    use mongodb::bson::{doc, Document};
     use mongodb::{Collection, Database};
 
     /// Test GET /catalogs
@@ -510,14 +510,20 @@ mod tests {
                 .set_json(serde_json::json!({ "catalog_name": "ZTF_alerts", "pipeline": pipeline }))
                 .to_request()
         };
-        let lookup = |from: &str| serde_json::json!({ "$lookup": { "from": from, "pipeline": [{ "$limit": 1 }], "as": "joined" } });
+        let lookup = |from: &str| {
+            serde_json::json!({
+                "$lookup": { "from": from, "pipeline": [{ "$limit": 1 }], "as": "joined" }
+            })
+        };
 
         for pipeline in [
             serde_json::json!([lookup(&other_catalog)]),
             serde_json::json!([{ "$unionWith": other_catalog }]),
             serde_json::json!([{ "$lookup": {
                 "from": "LSPSC",
-                "pipeline": [{ "$unionWith": { "coll": "LSPSC", "pipeline": [lookup(&other_catalog)] } }],
+                "pipeline": [{
+                    "$unionWith": { "coll": "LSPSC", "pipeline": [lookup(&other_catalog)] }
+                }],
                 "as": "joined",
             } }]),
             serde_json::json!([{ "$facet": { "joined": [lookup(&other_catalog)] } }]),
@@ -588,7 +594,7 @@ mod tests {
                 assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{stage}");
             }
         }
-        let target_collection: Collection<mongodb::bson::Document> = database.collection(&target);
+        let target_collection: Collection<Document> = database.collection(&target);
         assert_eq!(target_collection.count_documents(doc! {}).await.unwrap(), 1);
 
         delete_test_catalog(&database, &target).await;

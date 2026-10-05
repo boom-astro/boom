@@ -1581,12 +1581,14 @@ mod tests {
     #[test]
     fn stages_reading_another_collection_are_refused() {
         for stage in [
-            serde_json::json!({"$lookup": {"from": "users", "localField": "a", "foreignField": "b", "as": "c"}}),
+            serde_json::json!({"$lookup": {"from": "users", "localField": "a",
+                "foreignField": "b", "as": "c"}}),
             serde_json::json!({"$graphLookup": {"from": "users", "startWith": "$a",
                 "connectFromField": "a", "connectToField": "b", "as": "c"}}),
             serde_json::json!({"$unionWith": "users"}),
             serde_json::json!({"$unionWith": {"coll": "users", "pipeline": []}}),
-            serde_json::json!({"$facet": {"x": [{"$lookup": {"from": "users", "pipeline": [], "as": "c"}}]}}),
+            serde_json::json!({"$facet": {"x": [{"$lookup": {"from": "users", "pipeline": [],
+                "as": "c"}}]}}),
         ] {
             let pipeline = [
                 serde_json::json!({"$match": {}}),
