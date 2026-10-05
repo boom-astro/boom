@@ -166,6 +166,12 @@ pub struct Photometry {
     pub dec: Option<f64>,
 }
 
+impl Photometry {
+    pub fn is_finite(&self) -> bool {
+        self.flux_err.is_finite() && self.flux.is_none_or(f64::is_finite)
+    }
+}
+
 #[serdavro]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Classification {
