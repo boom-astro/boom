@@ -12,7 +12,8 @@ use crate::{
     },
     conf::{AppConfig, FilterWorkerConfig},
     enrichment::{
-        LsstAlertProperties, WinterAlertProperties, ZtfAlertClassifications, ZtfAlertProperties,
+        DecamAlertProperties, LsstAlertProperties, WinterAlertProperties, ZtfAlertClassifications,
+        ZtfAlertProperties,
     },
     filter::{
         build_filter_pipeline, reject_unknown_candidate_fields, Filter, FilterError, FilterVersion,
@@ -1722,6 +1723,7 @@ pub struct DecamAlertToFilter {
     #[serde(rename = "objectId")]
     pub object_id: String,
     pub candidate: DecamCandidate,
+    pub properties: DecamAlertProperties,
     pub coordinates: GalacticCoordinates,
     pub prv_candidates: Vec<DecamCandidate>,
     pub fp_hists: Vec<DecamForcedPhot>,
@@ -1894,6 +1896,8 @@ mod schema_tests {
             "\"magap\"",
             "\"sigmagap\"",
             "\"snr\"",
+            "\"properties\"",
+            "\"photstats\"",
         ] {
             assert!(
                 s.contains(field),
