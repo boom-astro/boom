@@ -55,6 +55,31 @@ pub struct GiveUp {
     pub above_arcsec: f64,
 }
 
+/// Iterations a screening fit gets to pass its gate.
+pub const SCREEN_ITERATIONS: usize = 20;
+/// Iterations a fit that passed its gate gets to reach its minimum. A seed far
+/// down a short arc's valley takes a few dozen.
+pub const CONVERGE_ITERATIONS: usize = 100;
+/// Iterations a screening fit gets before [`GiveUp::for_gate`] checks it.
+pub const GIVE_UP_AFTER: usize = 8;
+/// How far above its gate a screening fit may still be at that check.
+pub const GIVE_UP_FACTOR: f64 = 10.0;
+
+impl GiveUp {
+    /// Abandon a fit still [`GIVE_UP_FACTOR`] times above `gate_arcsec` after
+    /// [`GIVE_UP_AFTER`] iterations.
+    ///
+    /// The tests in `heliolinc` measure this against the fits it must spare,
+    /// from tracklet states and from THOR's test orbits; tighten it only with
+    /// them passing.
+    pub fn for_gate(gate_arcsec: f64) -> Self {
+        GiveUp {
+            after_iterations: GIVE_UP_AFTER,
+            above_arcsec: GIVE_UP_FACTOR * gate_arcsec,
+        }
+    }
+}
+
 /// Where a state puts the object on the sky at `jd`, degrees.
 ///
 /// Light-time corrected: the object is seen where it was when the light left
@@ -217,6 +242,88 @@ pub fn fit_orbit_with(
     site: &Site,
     give_up: Option<GiveUp>,
 ) -> Option<OrbitFit> {
+    fit(
+        observations,
+        initial,
+        epoch_jd,
+        max_iterations,
+        site,
+        give_up,
+        MIN_IMPROVEMENT_ARCSEC,
+    )
+}
+
+/// [`fit_orbit`], run until no step improves the fit rather than until one
+/// improves it by little.
+///
+/// From a poor seed a short arc's fit can crawl along a curved valley, gaining
+/// less than [`MIN_IMPROVEMENT_ARCSEC`] an iteration for a while before it
+/// drops towards the minimum. [`fit_orbit`] reads the crawl as convergence and
+/// reports the rms where it stopped, which then says more about the seed than
+/// about the orbit. That is fine for screening candidates against a gate, but a
+/// residual that is reported or ranked on should come from here.
+pub fn converge_orbit(
+    observations: &[Observation],
+    initial: &State,
+    epoch_jd: f64,
+    max_iterations: usize,
+    site: &Site,
+) -> Option<OrbitFit> {
+    fit(
+        observations,
+        initial,
+        epoch_jd,
+        max_iterations,
+        site,
+        None,
+        0.0,
+    )
+}
+
+/// Fit `seed` against a residual gate: screened with [`GiveUp::for_gate`],
+/// and run to convergence if it passes.
+///
+/// The fit comes back whether or not it passed, so the caller compares its
+/// rms with the gate; one abandoned by the screen is simply above it. `None`
+/// when the observations cannot constrain an orbit.
+pub fn fit_within(
+    observations: &[Observation],
+    seed: &State,
+    epoch_jd: f64,
+    site: &Site,
+    gate_arcsec: f64,
+) -> Option<OrbitFit> {
+    let screened = fit_orbit_with(
+        observations,
+        seed,
+        epoch_jd,
+        SCREEN_ITERATIONS,
+        site,
+        Some(GiveUp::for_gate(gate_arcsec)),
+    )?;
+    if screened.rms_arcsec > gate_arcsec {
+        return Some(screened);
+    }
+    // Starts where the screen stopped, so it can only improve on it.
+    converge_orbit(
+        observations,
+        &screened.state,
+        epoch_jd,
+        CONVERGE_ITERATIONS,
+        site,
+    )
+    .or(Some(screened))
+}
+
+fn fit(
+    observations: &[Observation],
+    initial: &State,
+    epoch_jd: f64,
+    max_iterations: usize,
+    site: &Site,
+    give_up: Option<GiveUp>,
+    min_improvement_arcsec: f64,
+) -> Option<OrbitFit> {
     if observations.len() < 3 {
         return None;
     }
@@ -323,7 +430,7 @@ pub fn fit_orbit_with(
                 light_times = trial_light_times;
                 lambda = (lambda * 0.5).max(1e-9);
                 // Converged once the fit stops moving.
-                if improvement < MIN_IMPROVEMENT_ARCSEC {
+                if improvement < min_improvement_arcsec {
                     break;
                 }
             }
