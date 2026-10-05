@@ -554,4 +554,44 @@ mod tests {
         delete_test_catalog(&database, &other_catalog).await;
         delete_test_user(&database, &user).await;
     }
+
+    #[actix_rt::test]
+    async fn test_pipeline_cannot_write() {
+        let database: Database = get_test_db_api().await;
+        let (auth, admin_token) = get_admin_auth(&database).await;
+        let (user, user_token) = create_test_user(&database, &auth, &[]).await;
+        let target = create_test_catalog(&database).await;
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(database.clone()))
+                .app_data(web::Data::new(auth))
+                .app_data(web::Data::new(AppConfig::from_test_config().unwrap()))
+                .wrap(from_fn(auth_middleware))
+                .service(routes::queries::pipeline::post_pipeline_query),
+        )
+        .await;
+
+        for token in [&admin_token, &user_token] {
+            for stage in [
+                serde_json::json!({ "$out": target }),
+                serde_json::json!({ "$merge": { "into": target } }),
+            ] {
+                let req = test::TestRequest::post()
+                    .uri("/queries/pipeline")
+                    .insert_header(("Authorization", format!("Bearer {}", token)))
+                    .set_json(serde_json::json!({
+                        "catalog_name": "LSPSC",
+                        "pipeline": [{ "$limit": 1 }, stage],
+                    }))
+                    .to_request();
+                let resp = test::call_service(&app, req).await;
+                assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{stage}");
+            }
+        }
+        let target_collection: Collection<mongodb::bson::Document> = database.collection(&target);
+        assert_eq!(target_collection.count_documents(doc! {}).await.unwrap(), 1);
+
+        delete_test_catalog(&database, &target).await;
+        delete_test_user(&database, &user).await;
+    }
 }

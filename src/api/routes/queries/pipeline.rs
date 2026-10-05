@@ -66,6 +66,12 @@ pub async fn post_pipeline_query(
         Ok(pipeline) => pipeline,
         Err(e) => return response::bad_request(&format!("Invalid filter: {}", e)),
     };
+    if pipeline
+        .iter()
+        .any(|stage| stage.contains_key("$out") || stage.contains_key("$merge"))
+    {
+        return response::bad_request("$out and $merge stages are not allowed");
+    }
     let joined = match joined_collections(&body.pipeline) {
         Ok(names) => names,
         Err(e) => return response::bad_request(&format!("Invalid pipeline: {}", e)),
