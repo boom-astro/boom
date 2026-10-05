@@ -1,10 +1,17 @@
 /// Functionality for working with analytical data catalogs.
-use crate::api::{db::PROTECTED_COLLECTION_NAMES, routes::users::User};
+use crate::{
+    api::{db::PROTECTED_COLLECTION_NAMES, routes::users::User},
+    conf::AppConfig,
+    utils::enums::Survey,
+};
 
+use clap::ValueEnum;
 use mongodb::Database;
 
 /// Catalogs whose name starts with this prefix are watchlist, gated by per-user ACL.
 pub const WATCHLIST_PREFIX: &str = "watchlist_";
+
+const SURVEY_COLLECTION_SUFFIXES: [&str; 3] = ["alerts", "alerts_aux", "alerts_cutouts"];
 
 /// Whether the name is allowed to refer to a catalog. False if empty names,
 /// Mongo `system.*` internals or protected operational collections.
@@ -40,10 +47,43 @@ pub fn is_catalog_name_visible(catalog_name: &str, user: Option<&User>) -> bool 
     }
 }
 
-/// Whether the catalog is visible to the user AND exists as a Mongo collection.
-/// When `user` is `None`, watchlist catalogs are always rejected.
-pub async fn catalog_accessible(db: &Database, catalog_name: &str, user: Option<&User>) -> bool {
-    is_catalog_name_visible(catalog_name, user) && collection_exists(db, catalog_name).await
+fn survey_collection_suffix(catalog_name: &str) -> Option<&str> {
+    Survey::value_variants().iter().find_map(|survey| {
+        catalog_name
+            .strip_prefix(survey.as_str())?
+            .strip_prefix('_')
+            .filter(|suffix| SURVEY_COLLECTION_SUFFIXES.contains(suffix))
+    })
+}
+
+/// Whether the catalog is declared under `crossmatch`, for any survey.
+pub fn is_reference_catalog(catalog_name: &str, config: &AppConfig) -> bool {
+    // Watchlists are crossmatched too, but stay private behind their ACL.
+    !catalog_name.starts_with(WATCHLIST_PREFIX)
+        && config
+            .crossmatch
+            .values()
+            .flatten()
+            .any(|catalog| catalog.collection_name() == catalog_name)
+}
+
+/// Whether the user may query the catalog, without checking existence.
+pub fn is_catalog_queryable(catalog_name: &str, user: &User, config: &AppConfig) -> bool {
+    is_catalog_name_visible(catalog_name, Some(user))
+        && (user.is_admin
+            || catalog_name.starts_with(WATCHLIST_PREFIX)
+            || survey_collection_suffix(catalog_name).is_some()
+            || is_reference_catalog(catalog_name, config))
+}
+
+/// Whether the user may query the catalog AND it exists as a Mongo collection.
+pub async fn catalog_accessible(
+    db: &Database,
+    catalog_name: &str,
+    user: &User,
+    config: &AppConfig,
+) -> bool {
+    is_catalog_queryable(catalog_name, user, config) && collection_exists(db, catalog_name).await
 }
 
 /// Whether the catalog exists as a Mongo collection, without checking user access.
@@ -54,6 +94,7 @@ pub async fn catalog_exists(db: &Database, catalog_name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::test_utils::test_config_with_crossmatch;
 
     fn user(is_admin: bool, watchlist_access: &[&str]) -> User {
         User {
@@ -94,6 +135,47 @@ mod tests {
 
         let admin = user(true, &[]);
         assert!(is_catalog_name_visible("watchlist_foo", Some(&admin)));
+    }
+
+    #[test]
+    fn test_is_reference_catalog() {
+        let config = test_config_with_crossmatch(&["css_ref", "watchlist_foo"]);
+        assert!(is_reference_catalog("css_ref", &config));
+        assert!(is_reference_catalog("Gaia_DR3", &config));
+        assert!(!is_reference_catalog("watchlist_foo", &config));
+        assert!(!is_reference_catalog("css_dets", &config));
+        assert!(!is_reference_catalog("ZTF_alerts", &config));
+    }
+
+    #[test]
+    fn test_is_catalog_queryable() {
+        let config = test_config_with_crossmatch(&["watchlist_foo"]);
+        let member = user(false, &["watchlist_foo"]);
+        for name in [
+            "ZTF_alerts",
+            "LSST_alerts_aux",
+            "DECAM_alerts_cutouts",
+            "WINTER_alerts",
+            "Gaia_DR3",
+            "watchlist_foo",
+        ] {
+            assert!(is_catalog_queryable(name, &member, &config), "{name}");
+        }
+        for name in [
+            "css_dets",
+            "ZTF_alerts_cutouts_20260519",
+            "ZTF_tracks",
+            "ztf_alerts",
+            "watchlist_bar",
+            "users",
+        ] {
+            assert!(!is_catalog_queryable(name, &member, &config), "{name}");
+        }
+
+        let admin = user(true, &[]);
+        assert!(is_catalog_queryable("css_dets", &admin, &config));
+        assert!(is_catalog_queryable("watchlist_bar", &admin, &config));
+        assert!(!is_catalog_queryable("users", &admin, &config));
     }
 
     #[test]

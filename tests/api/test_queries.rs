@@ -8,8 +8,10 @@ mod tests {
     use boom::api::db::get_test_db_api;
     use boom::api::routes;
     use boom::api::test_utils::{
-        create_test_catalog, delete_test_catalog, get_admin_auth, read_json_response,
+        create_test_catalog, create_test_user, delete_test_catalog, delete_test_user,
+        get_admin_auth, read_json_response,
     };
+    use boom::conf::AppConfig;
     use mongodb::bson::doc;
     use mongodb::{Collection, Database};
 
@@ -23,6 +25,7 @@ mod tests {
             App::new()
                 .app_data(web::Data::new(database.clone()))
                 .app_data(web::Data::new(auth))
+                .app_data(web::Data::new(AppConfig::from_test_config().unwrap()))
                 .wrap(from_fn(auth_middleware))
                 .service(routes::queries::count::post_count_query),
         )
@@ -55,6 +58,7 @@ mod tests {
             App::new()
                 .app_data(web::Data::new(database.clone()))
                 .app_data(web::Data::new(auth))
+                .app_data(web::Data::new(AppConfig::from_test_config().unwrap()))
                 .wrap(from_fn(auth_middleware))
                 .service(routes::queries::count::post_estimated_count_query),
         )
@@ -85,6 +89,7 @@ mod tests {
             App::new()
                 .app_data(web::Data::new(database.clone()))
                 .app_data(web::Data::new(auth))
+                .app_data(web::Data::new(AppConfig::from_test_config().unwrap()))
                 .wrap(from_fn(auth_middleware))
                 .service(routes::queries::find::post_find_query),
         )
@@ -168,6 +173,7 @@ mod tests {
             App::new()
                 .app_data(web::Data::new(database.clone()))
                 .app_data(web::Data::new(auth))
+                .app_data(web::Data::new(AppConfig::from_test_config().unwrap()))
                 .wrap(from_fn(auth_middleware))
                 .service(routes::queries::cone_search::post_cone_search_query),
         )
@@ -223,6 +229,7 @@ mod tests {
             App::new()
                 .app_data(web::Data::new(database.clone()))
                 .app_data(web::Data::new(auth))
+                .app_data(web::Data::new(AppConfig::from_test_config().unwrap()))
                 .wrap(from_fn(auth_middleware))
                 .service(routes::queries::pipeline::post_pipeline_query),
         )
@@ -280,6 +287,7 @@ mod tests {
             App::new()
                 .app_data(web::Data::new(database.clone()))
                 .app_data(web::Data::new(auth.clone()))
+                .app_data(web::Data::new(AppConfig::from_test_config().unwrap()))
                 .wrap(from_fn(auth_middleware))
                 .service(routes::users::post_user)
                 .service(routes::users::patch_watchlist_access)
@@ -353,5 +361,59 @@ mod tests {
             .insert_header(("Authorization", format!("Bearer {}", admin_token)))
             .to_request();
         test::call_service(&app, req).await;
+    }
+
+    #[actix_rt::test]
+    async fn test_non_admin_queries_are_limited_to_queryable_catalogs() {
+        let database: Database = get_test_db_api().await;
+        let (auth, admin_token) = get_admin_auth(&database).await;
+        let (user, user_token) = create_test_user(&database, &auth, &[]).await;
+        let other_catalog = create_test_catalog(&database).await;
+        database.create_collection("ZTF_alerts").await.ok();
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(database.clone()))
+                .app_data(web::Data::new(auth))
+                .app_data(web::Data::new(AppConfig::from_test_config().unwrap()))
+                .wrap(from_fn(auth_middleware))
+                .service(routes::queries::find::post_find_query)
+                .service(routes::queries::count::post_count_query)
+                .service(routes::queries::count::post_estimated_count_query)
+                .service(routes::queries::pipeline::post_pipeline_query),
+        )
+        .await;
+        let query_as = |token: &str, route: &str, catalog_name: &str| {
+            test::TestRequest::post()
+                .uri(&format!("/queries/{}", route))
+                .insert_header(("Authorization", format!("Bearer {}", token)))
+                .set_json(serde_json::json!({
+                    "catalog_name": catalog_name,
+                    "filter": {},
+                    "limit": 1,
+                    "pipeline": [{ "$limit": 1 }],
+                }))
+                .to_request()
+        };
+
+        for route in ["find", "count", "estimated_count", "pipeline"] {
+            let resp = test::call_service(&app, query_as(&user_token, route, &other_catalog)).await;
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{route}");
+            let resp = read_json_response(resp).await;
+            assert_eq!(
+                resp["message"],
+                format!("Catalog {} does not exist", other_catalog)
+            );
+            for catalog_name in ["LSPSC", "ZTF_alerts"] {
+                let resp =
+                    test::call_service(&app, query_as(&user_token, route, catalog_name)).await;
+                assert_eq!(resp.status(), StatusCode::OK, "{route} on {catalog_name}");
+            }
+            let resp =
+                test::call_service(&app, query_as(&admin_token, route, &other_catalog)).await;
+            assert_eq!(resp.status(), StatusCode::OK, "{route} as admin");
+        }
+
+        delete_test_catalog(&database, &other_catalog).await;
+        delete_test_user(&database, &user).await;
     }
 }
