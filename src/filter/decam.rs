@@ -241,6 +241,7 @@ pub async fn build_decam_alerts(
             survey_matches: SurveyMatches {
                 ztf: None,
                 lsst: None,
+                decam: None,
             },
             host_galaxy: None,
         };

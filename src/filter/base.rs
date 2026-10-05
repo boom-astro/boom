@@ -204,6 +204,7 @@ pub struct SurveyMatch {
 pub struct SurveyMatches {
     pub ztf: Option<SurveyMatch>,
     pub lsst: Option<SurveyMatch>,
+    pub decam: Option<SurveyMatch>,
 }
 
 #[serdavro]
@@ -1428,6 +1429,7 @@ mod tests {
             survey_matches: SurveyMatches {
                 ztf: None,
                 lsst: None,
+                decam: None,
             },
             host_galaxy: Some(AlertHostGalaxy {
                 objname: Some("NGC 4993".to_string()),
@@ -1476,6 +1478,7 @@ mod tests {
             survey_matches: SurveyMatches {
                 ztf: None,
                 lsst: None,
+                decam: None,
             },
             host_galaxy: None,
         };

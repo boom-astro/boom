@@ -215,6 +215,7 @@ pub async fn build_winter_alerts(
             survey_matches: SurveyMatches {
                 ztf: None,
                 lsst: None,
+                decam: None,
             },
             host_galaxy: None,
         };

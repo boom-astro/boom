@@ -255,6 +255,7 @@ pub async fn build_lsst_alerts(
         let mut survey_matches = SurveyMatches {
             ztf: None,
             lsst: None,
+            decam: None,
         };
         if let Some(ztf_match) = alert.survey_matches.as_ref().and_then(|m| m.ztf.as_ref()) {
             survey_matches.ztf = Some(ztf_survey_match(ztf_match));
