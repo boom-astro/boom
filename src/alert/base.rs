@@ -255,6 +255,8 @@ pub enum AlertError {
     MissingFluxPSF,
     #[error("missing psf flux error")]
     MissingFluxPSFError,
+    #[error("non-finite psf flux")]
+    NonFiniteFluxPSF,
     #[error("missing ap flux")]
     MissingFluxAperture,
     #[error("missing ap flux error")]
