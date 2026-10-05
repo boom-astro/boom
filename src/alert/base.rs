@@ -271,6 +271,8 @@ pub enum AlertError {
     DarkFrame,
     #[error("missing diffmaglim value")]
     MissingDiffmaglim,
+    #[error("invalid diffmaglim value: {0}")]
+    InvalidDiffmaglim(f32),
     #[error("cutout storage error")]
     CutoutStorageError(#[from] CutoutStorageError),
     #[error("invalid timeseries input: {0}")]
