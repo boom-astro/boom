@@ -9,7 +9,7 @@ mod tests {
     use boom::api::routes;
     use boom::api::test_utils::{
         create_test_catalog, create_test_user, delete_test_catalog, delete_test_user,
-        get_admin_auth, read_json_response,
+        get_admin_auth, read_json_response, test_config_with_crossmatch,
     };
     use boom::conf::AppConfig;
     use mongodb::bson::doc;
@@ -173,7 +173,9 @@ mod tests {
             App::new()
                 .app_data(web::Data::new(database.clone()))
                 .app_data(web::Data::new(auth))
-                .app_data(web::Data::new(AppConfig::from_test_config().unwrap()))
+                .app_data(web::Data::new(test_config_with_crossmatch(&[
+                    &test_catalog_name,
+                ])))
                 .wrap(from_fn(auth_middleware))
                 .service(routes::queries::cone_search::post_cone_search_query),
         )
@@ -414,6 +416,74 @@ mod tests {
         }
 
         delete_test_catalog(&database, &other_catalog).await;
+        delete_test_user(&database, &user).await;
+    }
+
+    #[actix_rt::test]
+    async fn test_cone_search_is_limited_to_catalogs_with_coordinates() {
+        let database: Database = get_test_db_api().await;
+        let (auth, admin_token) = get_admin_auth(&database).await;
+        let (user, user_token) = create_test_user(&database, &auth, &[]).await;
+        let other_catalog = create_test_catalog(&database).await;
+        let reference_catalog = create_test_catalog(&database).await;
+        let watchlist = format!("watchlist_cone_{}", uuid::Uuid::new_v4().simple());
+        database
+            .collection(&watchlist)
+            .insert_one(doc! { "test_field": "test_value" })
+            .await
+            .unwrap();
+        database.create_collection("ZTF_alerts").await.ok();
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(database.clone()))
+                .app_data(web::Data::new(auth))
+                .app_data(web::Data::new(test_config_with_crossmatch(&[
+                    &reference_catalog,
+                ])))
+                .wrap(from_fn(auth_middleware))
+                .service(routes::queries::cone_search::post_cone_search_query),
+        )
+        .await;
+        let cone_search_as = |token: &str, catalog_name: &str| {
+            test::TestRequest::post()
+                .uri("/queries/cone_search")
+                .insert_header(("Authorization", format!("Bearer {}", token)))
+                .set_json(serde_json::json!({
+                    "catalog_name": catalog_name,
+                    "object_coordinates": { "test": [10.0, 20.0] },
+                    "radius": 1.0,
+                    "unit": "Degrees",
+                }))
+                .to_request()
+        };
+
+        for token in [&admin_token, &user_token] {
+            for catalog_name in [other_catalog.as_str(), "ZTF_alerts_cutouts"] {
+                let resp = test::call_service(&app, cone_search_as(token, catalog_name)).await;
+                assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{catalog_name}");
+                let resp = read_json_response(resp).await;
+                assert_eq!(
+                    resp["message"],
+                    format!("Catalog {} does not support cone search", catalog_name)
+                );
+            }
+            for catalog_name in [reference_catalog.as_str(), "ZTF_alerts"] {
+                let resp = test::call_service(&app, cone_search_as(token, catalog_name)).await;
+                assert_eq!(resp.status(), StatusCode::OK, "{catalog_name}");
+            }
+        }
+        let resp = test::call_service(&app, cone_search_as(&user_token, &reference_catalog)).await;
+        let resp = read_json_response(resp).await;
+        assert_eq!(resp["data"]["test"].as_array().unwrap().len(), 1);
+
+        let resp = test::call_service(&app, cone_search_as(&user_token, &watchlist)).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let resp = test::call_service(&app, cone_search_as(&admin_token, &watchlist)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        delete_test_catalog(&database, &other_catalog).await;
+        delete_test_catalog(&database, &reference_catalog).await;
+        delete_test_catalog(&database, &watchlist).await;
         delete_test_user(&database, &user).await;
     }
 }

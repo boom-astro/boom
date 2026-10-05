@@ -67,6 +67,16 @@ pub fn is_reference_catalog(catalog_name: &str, config: &AppConfig) -> bool {
             .any(|catalog| catalog.collection_name() == catalog_name)
 }
 
+/// Whether the catalog has coordinates to cone search, without checking user access.
+pub fn is_cone_searchable(catalog_name: &str, config: &AppConfig) -> bool {
+    catalog_name.starts_with(WATCHLIST_PREFIX)
+        || matches!(
+            survey_collection_suffix(catalog_name),
+            Some("alerts" | "alerts_aux")
+        )
+        || is_reference_catalog(catalog_name, config)
+}
+
 /// Whether the user may query the catalog, without checking existence.
 pub fn is_catalog_queryable(catalog_name: &str, user: &User, config: &AppConfig) -> bool {
     is_catalog_name_visible(catalog_name, Some(user))
@@ -176,6 +186,17 @@ mod tests {
         assert!(is_catalog_queryable("css_dets", &admin, &config));
         assert!(is_catalog_queryable("watchlist_bar", &admin, &config));
         assert!(!is_catalog_queryable("users", &admin, &config));
+    }
+
+    #[test]
+    fn test_is_cone_searchable() {
+        let config = test_config_with_crossmatch(&[]);
+        for name in ["ZTF_alerts", "LSST_alerts_aux", "Gaia_DR3", "watchlist_foo"] {
+            assert!(is_cone_searchable(name, &config), "{name}");
+        }
+        for name in ["ZTF_alerts_cutouts", "css_dets", "ZTF_alerts_aux_20260519"] {
+            assert!(!is_cone_searchable(name, &config), "{name}");
+        }
     }
 
     #[test]

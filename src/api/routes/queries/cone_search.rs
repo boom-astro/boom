@@ -1,7 +1,9 @@
 /// Endpoints for executing analytical queries.
 use crate::{
     api::{
-        catalogs::catalog_accessible, filters::parse_optional_filter, models::response,
+        catalogs::{catalog_accessible, is_cone_searchable},
+        filters::parse_optional_filter,
+        models::response,
         routes::users::User,
     },
     conf::AppConfig,
@@ -111,7 +113,7 @@ impl ConeSearchQuery {
     }
 }
 
-/// Run a cone search query on a catalog
+/// Run a cone search query on a survey alert collection, a reference catalog or a watchlist
 #[utoipa::path(
     post,
     path = "/queries/cone_search",
@@ -135,6 +137,12 @@ pub async fn post_cone_search_query(
         None => return HttpResponse::Unauthorized().body("Unauthorized"),
     };
     let catalog_name = body.catalog_name.trim();
+    if !is_cone_searchable(catalog_name, &config) {
+        return response::bad_request(&format!(
+            "Catalog {} does not support cone search",
+            catalog_name
+        ));
+    }
     if !catalog_accessible(&db, catalog_name, &current_user, &config).await {
         return response::not_found(&format!("Catalog {} does not exist", catalog_name));
     }
