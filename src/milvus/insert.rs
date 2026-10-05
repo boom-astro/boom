@@ -136,8 +136,7 @@ fn latest_per_object(rows: &[EmbeddingRow]) -> Vec<&EmbeddingRow> {
     kept
 }
 
-/// Whether the alert at `jd` supersedes the one at `stored_jd`. `total_cmp`
-/// rather than `partial_cmp` so a NaN `jd` still orders deterministically.
+/// Whether the alert at `jd` supersedes the one at `stored_jd`.
 pub(super) fn is_newer_jd(jd: f64, stored_jd: f64) -> bool {
     jd.total_cmp(&stored_jd).is_gt()
 }
