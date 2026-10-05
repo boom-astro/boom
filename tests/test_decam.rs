@@ -6,8 +6,9 @@ use boom::{
     utils::{
         enums::Survey,
         testing::{
-            decam_alert_worker, drop_alert_from_collections, insert_test_filter, lsst_alert_worker,
-            remove_test_filter, ztf_alert_worker, AlertRandomizer, TEST_CONFIG_FILE,
+            decam_alert_worker, drop_alert_from_collections, insert_custom_test_filter,
+            insert_test_filter, lsst_alert_worker, remove_test_filter, ztf_alert_worker,
+            AlertRandomizer, TEST_CONFIG_FILE,
         },
     },
 };
@@ -176,7 +177,12 @@ async fn test_filter_decam_alert_with_ztf_and_lsst_matches() {
     let status = alert_worker.process_alert(&bytes_content).await.unwrap();
     assert_eq!(status, ProcessAlertStatus::Added(candid));
 
-    let filter_id = insert_test_filter(&Survey::Decam, true).await.unwrap();
+    let filter_id = insert_custom_test_filter(
+        &Survey::Decam,
+        r#"[{"$match": {"aliases.ZTF.0": {"$exists": true}}}, {"$project": {"objectId": 1, "annotations.n_ztf": {"$size": "$ZTF.prv_candidates"}, "annotations.n_lsst": {"$size": "$LSST.prv_candidates"}}}]"#,
+    )
+    .await
+    .unwrap();
     let mut filter_worker = DecamFilterWorker::new(TEST_CONFIG_FILE, Some(vec![filter_id.clone()]))
         .await
         .unwrap();
@@ -191,6 +197,8 @@ async fn test_filter_decam_alert_with_ztf_and_lsst_matches() {
     assert_eq!(alerts_output.len(), 1);
     let alert = &alerts_output[0];
     assert_eq!(&alert.object_id, &object_id);
+    // The ZTF test alerts are older than the 365-day window filters read ZTF history over.
+    assert_eq!(alert.filters[0].annotations, "{\"n_ztf\":0,\"n_lsst\":1}");
 
     let ztf_match = alert
         .survey_matches

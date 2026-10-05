@@ -1728,6 +1728,10 @@ pub struct DecamAlertToFilter {
     pub prv_candidates: Vec<DecamCandidate>,
     pub fp_hists: Vec<DecamForcedPhot>,
     pub aliases: DecamAliases,
+    #[serde(rename = "ZTF")]
+    pub ztf: Option<ZtfFilterMatch>,
+    #[serde(rename = "LSST")]
+    pub lsst: Option<LsstFilterMatch>,
     pub host_galaxy: Option<HostGalaxyAssociation>,
 }
 
@@ -1898,6 +1902,8 @@ mod schema_tests {
             "\"snr\"",
             "\"properties\"",
             "\"photstats\"",
+            "\"ZTF\"",
+            "\"LSST\"",
         ] {
             assert!(
                 s.contains(field),

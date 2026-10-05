@@ -6,10 +6,12 @@ use crate::alert::DecamCandidate;
 use crate::conf::AppConfig;
 use crate::enrichment::{fetch_alerts, LsstMatch, ZtfMatch};
 use crate::filter::{
-    build_loaded_filters, lsst_survey_match, record_filter_result, run_filter,
-    uses_field_in_filter, validate_filter_pipeline, watchlist_projections, ztf_survey_match, Alert,
-    Classification, Filter, FilterError, FilterResults, FilterWorker, FilterWorkerError,
-    LoadedFilter, Origin, Photometry, SurveyMatches,
+    build_loaded_filters, build_lsst_aux_data, build_ztf_aux_data,
+    insert_lsst_aux_pipeline_if_needed, insert_ztf_aux_pipeline_if_needed, lsst_survey_match,
+    record_filter_result, run_filter, uses_field_in_filter, validate_filter_pipeline,
+    watchlist_projections, ztf_survey_match, Alert, Classification, Filter, FilterError,
+    FilterResults, FilterWorker, FilterWorkerError, LoadedFilter, Origin, Photometry,
+    SurveyMatches,
 };
 use crate::utils::cutouts::CutoutStorage;
 use crate::utils::db::{fetch_timeseries_op, get_array_dict_element};
@@ -320,11 +322,11 @@ pub async fn build_decam_alerts(
 /// Builds a MongoDB aggregation pipeline for DECam filter execution.
 ///
 /// Augments the user filter pipeline with DECam aux lookups (prv_candidates,
-/// fp_hists, cross_matches, aliases) based on which fields the filter
-/// references.
+/// fp_hists, cross_matches, aliases), and with the ZTF and LSST photometry of
+/// the matched objects, based on which fields the filter references.
 pub async fn build_decam_filter_pipeline(
     filter_pipeline: &Vec<serde_json::Value>,
-    _permissions: &HashMap<Survey, Vec<i32>>,
+    permissions: &HashMap<Survey, Vec<i32>>,
 ) -> Result<Vec<Document>, FilterError> {
     validate_filter_pipeline(&filter_pipeline)?;
 
@@ -333,6 +335,11 @@ pub async fn build_decam_filter_pipeline(
     let use_cross_matches_index = uses_field_in_filter(filter_pipeline, "cross_matches");
     let use_host_galaxy_index = uses_field_in_filter(filter_pipeline, "host_galaxy");
     let use_aliases_index = uses_field_in_filter(filter_pipeline, "aliases");
+
+    let (use_aliases_index, mut ztf_insert_aux_pipeline, ztf_aux_add_fields) =
+        build_ztf_aux_data(use_aliases_index, filter_pipeline, permissions);
+    let (use_aliases_index, mut lsst_insert_aux_pipeline, lsst_aux_add_fields) =
+        build_lsst_aux_data(use_aliases_index, filter_pipeline);
 
     let mut aux_add_fields = doc! {
         "aux": mongodb::bson::Bson::Null,
@@ -430,6 +437,17 @@ pub async fn build_decam_filter_pipeline(
                 "$addFields": &aux_add_fields
             });
             insert_aux_pipeline = false; // only insert once
+
+            insert_ztf_aux_pipeline_if_needed(
+                &mut pipeline,
+                &mut ztf_insert_aux_pipeline,
+                &ztf_aux_add_fields,
+            );
+            insert_lsst_aux_pipeline_if_needed(
+                &mut pipeline,
+                &mut lsst_insert_aux_pipeline,
+                &lsst_aux_add_fields,
+            );
         }
 
         pipeline.push(x);
@@ -617,5 +635,29 @@ mod host_galaxy_tests {
             .await
             .expect("builds");
         assert!(!format!("{built:?}").contains("aux.host_galaxy"));
+    }
+
+    #[tokio::test]
+    async fn test_a_filter_reading_ztf_and_lsst_gets_their_photometry() {
+        let permissions = HashMap::from([(Survey::Decam, vec![1])]);
+        let pipeline = vec![
+            serde_json::json!({"$match": {"ZTF.prv_candidates.0": {"$exists": true}}}),
+            serde_json::json!({"$match": {"LSST.fp_hists.0": {"$exists": true}}}),
+            serde_json::json!({"$project": {"objectId": 1}}),
+        ];
+        let built = build_decam_filter_pipeline(&pipeline, &permissions)
+            .await
+            .expect("builds");
+        let rendered = format!("{built:?}");
+        assert!(rendered.contains("ZTF_alerts_aux"), "no ZTF aux lookup");
+        assert!(rendered.contains("LSST_alerts_aux"), "no LSST aux lookup");
+        assert!(
+            rendered.contains("aux.aliases"),
+            "aliases were not projected"
+        );
+        assert!(
+            rendered.contains("$$x.programid"),
+            "ZTF points are not scoped"
+        );
     }
 }
