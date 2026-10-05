@@ -330,6 +330,7 @@ pub async fn build_ztf_alerts(
             });
         }
 
+        photometry.retain(Photometry::is_finite);
         photometry.sort_by(|a, b| a.jd.partial_cmp(&b.jd).unwrap());
 
         let mut survey_matches = SurveyMatches {

@@ -255,6 +255,8 @@ pub enum AlertError {
     MissingFluxPSF,
     #[error("missing psf flux error")]
     MissingFluxPSFError,
+    #[error("non-finite psf flux")]
+    NonFiniteFluxPSF,
     #[error("missing ap flux")]
     MissingFluxAperture,
     #[error("missing ap flux error")]
@@ -271,6 +273,8 @@ pub enum AlertError {
     DarkFrame,
     #[error("missing diffmaglim value")]
     MissingDiffmaglim,
+    #[error("invalid diffmaglim value: {0}")]
+    InvalidDiffmaglim(f32),
     #[error("cutout storage error")]
     CutoutStorageError(#[from] CutoutStorageError),
     #[error("invalid timeseries input: {0}")]
