@@ -11,7 +11,7 @@ mod tests {
         create_test_catalog, delete_test_catalog, get_admin_auth, read_json_response,
     };
     use mongodb::bson::doc;
-    use mongodb::{Collection, Database};
+    use mongodb::{options::IndexOptions, Collection, Database, IndexModel};
 
     /// Test GET /catalogs
     #[actix_rt::test]
@@ -211,6 +211,80 @@ mod tests {
         assert_eq!(resp["data"]["test"].as_array().unwrap().len(), 0);
         // clean up
         delete_test_catalog(&database, &test_catalog_name).await;
+    }
+
+    #[actix_rt::test]
+    async fn test_post_cone_search_query_requires_a_2dsphere_index() {
+        let database: Database = get_test_db_api().await;
+        let (auth, token) = get_admin_auth(&database).await;
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(database.clone()))
+                .app_data(web::Data::new(auth))
+                .wrap(from_fn(auth_middleware))
+                .service(routes::queries::cone_search::post_cone_search_query),
+        )
+        .await;
+
+        let catalog_name = format!("test_catalog_{}", uuid::Uuid::new_v4());
+        let collection: Collection<mongodb::bson::Document> = database.collection(&catalog_name);
+        collection
+            .insert_one(doc! {
+                "coordinates": { "radec_geojson": { "type": "Point", "coordinates": [-170.0, 20.0] } }
+            })
+            .await
+            .unwrap();
+        let cone_search = || {
+            test::TestRequest::post()
+                .uri("/queries/cone_search")
+                .insert_header(("Authorization", format!("Bearer {}", token)))
+                .set_json(serde_json::json!({
+                    "catalog_name": catalog_name,
+                    "object_coordinates": { "test": [10.0, 20.0] },
+                    "radius": 1.0,
+                    "unit": "Degrees"
+                }))
+                .to_request()
+        };
+
+        let resp = test::call_service(&app, cone_search()).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let resp = read_json_response(resp).await;
+        assert!(resp["message"]
+            .as_str()
+            .unwrap()
+            .contains("does not support cone search"));
+
+        collection
+            .create_index(
+                IndexModel::builder()
+                    .keys(doc! { "coordinates.radec_geojson": "2dsphere" })
+                    .options(
+                        IndexOptions::builder()
+                            .partial_filter_expression(doc! { "Diam": { "$gt": 120.0 } })
+                            .build(),
+                    )
+                    .build(),
+            )
+            .await
+            .unwrap();
+        let resp = test::call_service(&app, cone_search()).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        collection
+            .create_index(
+                IndexModel::builder()
+                    .keys(doc! { "coordinates.radec_geojson": "2dsphere", "_id": 1 })
+                    .build(),
+            )
+            .await
+            .unwrap();
+        let resp = test::call_service(&app, cone_search()).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let resp = read_json_response(resp).await;
+        assert_eq!(resp["data"]["test"].as_array().unwrap().len(), 1);
+
+        delete_test_catalog(&database, &catalog_name).await;
     }
 
     // last but not least, we test the /queries/pipeline endpoint

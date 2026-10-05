@@ -3,6 +3,7 @@ use crate::api::catalogs::catalog_accessible;
 use crate::api::filters::parse_optional_filter;
 use crate::api::models::response;
 use crate::api::routes::users::User;
+use crate::utils::db::has_2dsphere_index;
 
 use actix_web::{post, web, HttpResponse};
 use futures::TryStreamExt;
@@ -115,7 +116,7 @@ impl ConeSearchQuery {
     request_body = ConeSearchQuery,
     responses(
         (status = 200, description = "Cone search results", body = serde_json::Value),
-        (status = 400, description = "Bad request"),
+        (status = 400, description = "Bad request, or the catalog has no 2dsphere index on coordinates.radec_geojson"),
         (status = 500, description = "Internal server error")
     ),
     tags=["Queries"]
@@ -137,6 +138,16 @@ pub async fn post_cone_search_query(
     let collection_name = catalog_name.to_string();
     // Get the collection
     let collection = db.collection::<mongodb::bson::Document>(&collection_name);
+    match has_2dsphere_index(&collection, "coordinates.radec_geojson").await {
+        Ok(true) => {}
+        Ok(false) => {
+            return response::bad_request(&format!(
+                "Catalog {} does not support cone search (no 2dsphere index on coordinates.radec_geojson)",
+                catalog_name
+            ));
+        }
+        Err(e) => return response::internal_error(&format!("Error listing indexes: {}", e)),
+    }
     // Perform cone search over each set of object coordinates
     let find_options = match body.to_find_options() {
         Ok(options) => options,

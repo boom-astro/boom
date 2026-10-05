@@ -392,6 +392,24 @@ pub async fn collection_exists(db: &Database, name: &str) -> Result<bool, mongod
     Ok(db.list_collection_names().await?.iter().any(|n| n == name))
 }
 
+/// A partial index only serves queries that repeat its filter, so it does not count.
+pub async fn has_2dsphere_index(
+    collection: &Collection<Document>,
+    field: &str,
+) -> Result<bool, mongodb::error::Error> {
+    let indexes: Vec<IndexModel> = collection.list_indexes().await?.try_collect().await?;
+    Ok(indexes.iter().any(|index| {
+        index
+            .keys
+            .get_str(field)
+            .is_ok_and(|kind| kind == "2dsphere")
+            && index
+                .options
+                .as_ref()
+                .is_none_or(|options| options.partial_filter_expression.is_none())
+    }))
+}
+
 /// `created_at` is exactly insertion order, but it is only indexed if someone created
 /// that index; `_id` always is, and both ZTF object ids and LSST diaObject ids happen
 /// to be allocated in an order that correlates well with insertion.
