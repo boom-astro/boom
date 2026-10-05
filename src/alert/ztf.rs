@@ -21,12 +21,13 @@ use flare::Time;
 use mongodb::bson::{doc, Document};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_with::{serde_as, skip_serializing_none};
-use std::collections::HashMap;
+use std::{collections::HashMap, ops::RangeInclusive};
 use tracing::{debug, error, instrument, warn};
 use utoipa::ToSchema;
 
 pub const STREAM_NAME: &str = "ZTF";
 pub const ZTF_DEC_RANGE: (f64, f64) = (-30.0, 90.0);
+const ZTF_DIFFMAGLIM_RANGE: RangeInclusive<f32> = 10.0..=30.0;
 // Position uncertainty in arcsec (median FHWM from https://www.ztf.caltech.edu/ztf-camera.html)
 pub const ZTF_POSITION_UNCERTAINTY: f64 = 2.;
 pub const ALERT_COLLECTION: &str = concat!(STREAM_NAME, "_alerts");
@@ -159,6 +160,9 @@ impl TryFrom<PrvCandidate> for ZtfPrvCandidate {
             }
             (None, None, None, Some(diffmaglim)) => {
                 let flux_err = diffmaglim2fluxerr(diffmaglim, ZTF_ZP) * 1e9_f32; // convert to nJy
+                if !ZTF_DIFFMAGLIM_RANGE.contains(&diffmaglim) || !flux_err.is_finite() {
+                    return Err(AlertError::InvalidDiffmaglim(diffmaglim));
+                }
                 (None, Some(flux_err), None)
             }
             _ => {
@@ -324,12 +328,17 @@ impl TryFrom<FpHist> for ZtfForcedPhot {
             _ => (None, None, None, None, None),
         };
 
+        let psf_flux_err = (psf_flux_err as f64 * 1e9 * zp_scaling_factor) as f32; // convert to nJy and a fixed ZTF_ZP
+        if !psf_flux_err.is_finite() || !psf_flux.is_none_or(f32::is_finite) {
+            return Err(AlertError::NonFiniteFluxPSF);
+        }
+
         Ok(ZtfForcedPhot {
             fp_hist,
             magpsf,
             sigmapsf,
             psf_flux,
-            psf_flux_err: Some((psf_flux_err as f64 * 1e9 * zp_scaling_factor) as f32), // convert to nJy and a fixed ZTF_ZP
+            psf_flux_err: Some(psf_flux_err),
             isdiffpos,
             snr_psf,
             band,
@@ -1123,6 +1132,35 @@ mod tests {
             AlertRandomizer, AuxBranchSnapshot, AuxUpdateBranchTestAdapter,
         },
     };
+    use apache_avro::{from_value, types::Value, Reader};
+
+    fn read_test_alert_value() -> Value {
+        let avro_bytes = std::fs::read("tests/data/alerts/ztf/2695378462115010012.avro").unwrap();
+        Reader::new(&avro_bytes[..])
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+    }
+
+    fn corrupt_first_point(alert: &mut Value, series: &str, field: &str, corrupt: f32) {
+        let Value::Record(fields) = alert else {
+            panic!()
+        };
+        let (_, Value::Union(_, points)) =
+            fields.iter_mut().find(|(name, _)| name == series).unwrap()
+        else {
+            panic!()
+        };
+        let Value::Array(points) = points.as_mut() else {
+            panic!()
+        };
+        let Value::Record(point) = &mut points[0] else {
+            panic!()
+        };
+        let (_, value) = point.iter_mut().find(|(name, _)| name == field).unwrap();
+        *value = Value::Union(1, Box::new(Value::Float(corrupt)));
+    }
 
     struct ZtfPrvLightcurveGen {
         template: ZtfPrvCandidate,
@@ -1584,6 +1622,30 @@ mod tests {
         assert!(parse(r#"{"tooflag": true}"#));
         assert!(parse(r#"{"tooflag": "t"}"#));
         assert!(!parse(r#"{"tooflag": "f"}"#));
+    }
+
+    #[test]
+    fn test_implausible_diffmaglim_drops_only_that_nondetection() {
+        let mut value = read_test_alert_value();
+        let original: ZtfRawAvroAlert = from_value(&value).unwrap();
+        corrupt_first_point(&mut value, "prv_candidates", "diffmaglim", -253.757);
+        let alert: ZtfRawAvroAlert = from_value(&value).unwrap();
+
+        let original_prv_candidates = original.prv_candidates.unwrap();
+        assert!(original_prv_candidates[0].prv_candidate.magpsf.is_none());
+        assert_eq!(alert.prv_candidates.unwrap(), original_prv_candidates[1..]);
+        assert_eq!(alert.fp_hists, original.fp_hists);
+    }
+
+    #[test]
+    fn test_overflowing_forced_flux_drops_only_that_point() {
+        let mut value = read_test_alert_value();
+        let original: ZtfRawAvroAlert = from_value(&value).unwrap();
+        corrupt_first_point(&mut value, "fp_hists", "magzpsci", -247.979);
+        let alert: ZtfRawAvroAlert = from_value(&value).unwrap();
+
+        assert_eq!(alert.fp_hists.unwrap(), original.fp_hists.unwrap()[1..]);
+        assert_eq!(alert.prv_candidates, original.prv_candidates);
     }
 
     #[test]

@@ -16,7 +16,7 @@ use boom::{
         },
     },
 };
-use mongodb::bson::doc;
+use mongodb::bson::{doc, Document};
 
 #[tokio::test]
 async fn test_process_ztf_alert() {
@@ -578,6 +578,42 @@ async fn test_filter_ztf_alert() {
     // verify that we can convert the alert to avro bytes
     let schema = load_alert_schema().unwrap();
     let _ = alert_to_avro_bytes(&alert, &schema).unwrap();
+}
+
+#[tokio::test]
+async fn test_filter_ztf_alert_skips_non_finite_photometry() {
+    let mut alert_worker = ztf_alert_worker().await;
+    let (candid, object_id, _ra, _dec, bytes_content) =
+        AlertRandomizer::new_randomized(Survey::Ztf).get().await;
+    alert_worker.process_alert(&bytes_content).await.unwrap();
+
+    get_test_db()
+        .await
+        .collection::<Document>("ZTF_alerts_aux")
+        .update_one(
+            doc! {"_id": &object_id},
+            doc! {"$set": {"prv_nondetections.0.psfFluxErr": f64::INFINITY}},
+        )
+        .await
+        .unwrap();
+
+    let filter_id = insert_test_filter(&Survey::Ztf, true).await.unwrap();
+    let mut filter_worker = ZtfFilterWorker::new(TEST_CONFIG_FILE, Some(vec![filter_id.clone()]))
+        .await
+        .unwrap();
+    let result = filter_worker
+        .process_alerts(&[format!("1,{}", candid)])
+        .await;
+    remove_test_filter(&filter_id, &Survey::Ztf).await.unwrap();
+    drop_alert_from_collections(candid, &Survey::Ztf)
+        .await
+        .unwrap();
+
+    let alerts_output = result.unwrap();
+    assert_eq!(alerts_output.len(), 1);
+    let photometry = &alerts_output[0].photometry;
+    assert_eq!(photometry.len(), 20);
+    assert!(photometry.iter().all(|p| p.flux_err.is_finite()));
 }
 
 #[tokio::test]

@@ -10,7 +10,7 @@
 //! the whole history is done: run it at 31 days, which is what those searches
 //! reach back by default, then widen it.
 //!
-//! The arrays are read straight from `<survey>_alerts_aux`: `snr_psf` is stored
+//! The arrays are read straight from `<survey>_alerts_aux`: `magpsf` is stored
 //! on a forced epoch only when it cleared the detection threshold, so its
 //! presence is the test, and no flux has to be reconverted here.
 //!
@@ -118,8 +118,8 @@ fn history_from_aux(aux: &Document) -> ObjectHistory {
     }
     if let Ok(points) = aux.get_array("fp_hists") {
         for point in points.iter().filter_map(|p| p.as_document()) {
-            // snr_psf is written only above the threshold, so it marks a detection.
-            if point.get("snr_psf").is_none() {
+            // magpsf is written only above the threshold, so it marks a detection.
+            if f64_at(point, "magpsf").is_none() {
                 continue;
             }
             if let Some(jd) = f64_at(point, "jd") {
@@ -154,7 +154,7 @@ async fn flush(
         .find(doc! { "_id": { "$in": &object_ids } })
         .projection(doc! {
             "prv_candidates.jd": 1, "prv_candidates.psfFlux": 1,
-            "fp_hists.jd": 1, "fp_hists.snr_psf": 1,
+            "fp_hists.jd": 1, "fp_hists.magpsf": 1,
         })
         .batch_size(CURSOR_BATCH_SIZE)
         .await?;
@@ -244,7 +244,7 @@ async fn main() {
 
     if !matches!(args.survey, Survey::Ztf | Survey::Lsst) {
         error!(
-            "{} is not supported: this reads psfFlux and snr_psf, which WINTER and DECam \
+            "{} is not supported: this reads psfFlux and magpsf, which WINTER and DECam \
              do not store under those names",
             args.survey
         );
@@ -331,7 +331,7 @@ async fn main() {
 mod tests {
     use super::*;
 
-    /// Pins the stored names: `snr_psf` marks a forced detection, `psfFlux`
+    /// Pins the stored names: `magpsf` marks a forced detection, `psfFlux`
     /// carries the sign. A rename would otherwise read as zeros.
     #[test]
     fn test_history_is_read_from_the_stored_names() {
@@ -344,10 +344,12 @@ mod tests {
                 doc! { "jd": 2461003.5 },
             ],
             "fp_hists": [
-                // Above threshold: snr_psf is present.
-                doc! { "jd": 2460990.5, "psfFlux": 800.0, "snr_psf": 4.4 },
-                // Below: the converter leaves snr_psf off entirely.
+                // Above threshold: magpsf is present.
+                doc! { "jd": 2460990.5, "psfFlux": 800.0, "snr_psf": 4.4, "magpsf": 19.2 },
+                // Below: the converter leaves magpsf off entirely.
                 doc! { "jd": 2460995.5, "psfFlux": 50.0 },
+                // Below, but with the snr_psf an old migration wrote on every epoch.
+                doc! { "jd": 2460997.5, "psfFlux": 40.0, "snr_psf": 1.5 },
             ],
         };
         let history = history_from_aux(&aux);

@@ -256,6 +256,7 @@ pub async fn build_lsst_alerts(
                 });
             }
 
+            ztf_photometry.retain(Photometry::is_finite);
             ztf_photometry.sort_by(|a, b| a.jd.partial_cmp(&b.jd).unwrap());
 
             survey_matches.ztf = Some(SurveyMatch {
