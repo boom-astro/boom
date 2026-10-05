@@ -136,18 +136,8 @@ fn latest_per_object(rows: &[EmbeddingRow]) -> Vec<&EmbeddingRow> {
     kept
 }
 
-/// Whether the alert at `jd` supersedes the one at `stored_jd`.
-///
-/// The single ordering rule for embeddings, used both to pick a winner inside
-/// a batch ([`latest_per_object`]) and to compare a candidate against what is
-/// already stored ([`MilvusClient::stored_jds`]), so the two guards cannot
-/// disagree about which of two alerts is newer.
-///
-/// Two alerts for one object never share a `jd` — they are different epochs of
-/// the same object — so `jd` alone totally orders them and no tiebreak is
-/// needed. `total_cmp` rather than `partial_cmp` so a NaN `jd` still orders
-/// deterministically instead of making every comparison false and silently
-/// pinning whichever row was seen first.
+/// Whether the alert at `jd` supersedes the one at `stored_jd`. `total_cmp`
+/// rather than `partial_cmp` so a NaN `jd` still orders deterministically.
 pub(super) fn is_newer_jd(jd: f64, stored_jd: f64) -> bool {
     jd.total_cmp(&stored_jd).is_gt()
 }
@@ -156,12 +146,7 @@ fn is_newer(a: &EmbeddingRow, b: &EmbeddingRow) -> bool {
     is_newer_jd(a.jd, b.jd)
 }
 
-/// Drop rows that would move an object's stored embedding backwards in time.
-///
-/// `stored` is what the collection currently holds for these objects, keyed by
-/// `object_id`; an object missing from it has no row yet and so cannot regress.
-/// Equal versions are dropped too — re-sending the alert already stored is a
-/// write with no effect.
+/// Drop rows whose `jd` is not newer than the stored one for that object.
 fn drop_stale<'a>(
     rows: Vec<&'a EmbeddingRow>,
     stored: &HashMap<String, f64>,
@@ -441,9 +426,6 @@ mod tests {
         assert_eq!(kept[0].jd, 2400009.5);
     }
 
-    /// Two alerts for one object are different epochs, so equal `jd` means the
-    /// same alert arrived twice. Either copy is as good as the other; what
-    /// matters is that exactly one row is sent, since both carry the same key.
     #[test]
     fn a_repeated_alert_collapses_to_one_row() {
         let rows = vec![
@@ -511,8 +493,6 @@ mod tests {
         pairs.iter().map(|&(id, jd)| (id.to_string(), jd)).collect()
     }
 
-    /// The reprocess case: replaying an old alert must not overwrite the newer
-    /// vector the live worker already stored.
     #[test]
     fn an_alert_older_than_the_stored_one_is_dropped() {
         let rows = vec![row("ZTF_A", vec![1.0], 10, 2400001.5)];
@@ -531,8 +511,6 @@ mod tests {
         assert_eq!(kept[0].candid, 30);
     }
 
-    /// First time an object is seen there is nothing to regress, so the write
-    /// must go through — otherwise the collection could never be populated.
     #[test]
     fn an_object_with_no_stored_row_is_kept() {
         let rows = vec![row("ZTF_NEW", vec![1.0], 10, 2400001.5)];
@@ -542,8 +520,6 @@ mod tests {
         assert_eq!(kept[0].object_id, "ZTF_NEW");
     }
 
-    /// Re-sending exactly what is stored is a no-op write; dropping it keeps
-    /// a repeated reprocess run from churning the collection.
     #[test]
     fn re_sending_the_stored_alert_is_dropped() {
         let rows = vec![row("ZTF_A", vec![1.0], 10, 2400001.5)];
@@ -551,8 +527,6 @@ mod tests {
         assert!(drop_stale(refs(&rows), &stored(&[("ZTF_A", 2400001.5)])).is_empty());
     }
 
-    /// The guard is per object: one stale row must not suppress the rest of
-    /// the batch, and surviving order is preserved.
     #[test]
     fn stale_rows_do_not_suppress_the_rest_of_the_batch() {
         let rows = vec![
@@ -567,8 +541,6 @@ mod tests {
         assert_eq!(ids, vec!["ZTF_B", "ZTF_C"]);
     }
 
-    /// An empty `stored` map means the collection had none of these objects,
-    /// which must not be confused with "everything is stale".
     #[test]
     fn nothing_stored_keeps_the_whole_batch() {
         let rows = vec![
