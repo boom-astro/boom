@@ -180,7 +180,8 @@ pub fn galaxy_from_ls_dr10(doc: &Document, config: &HostGalaxyConfig) -> Option<
 
     let mut ellipse =
         Ellipse::from_tractor(shape_r, shape_e1, shape_e2, config.min_axis_arcsec).ok()?;
-    bounded_axis_ratio(ellipse.axis_ratio, config)?;
+    ellipse.axis_ratio = bounded_axis_ratio(ellipse.axis_ratio, config)?;
+    ellipse.b = ellipse.a * ellipse.axis_ratio;
 
     // A row that cannot be rescaled keeps R_e, undersized against NED-LVS D25.
     let size_is_isophotal = match isophotal_semi_major_for(doc, &ellipse, config) {
