@@ -1,5 +1,5 @@
 use crate::{
-    api::catalogs::WATCHLIST_PREFIX,
+    api::{catalogs::WATCHLIST_PREFIX, filters::joined_collections},
     conf::{self, AppConfig},
     filter::{
         build_decam_filter_pipeline, build_lsst_filter_pipeline, build_winter_filter_pipeline,
@@ -520,7 +520,7 @@ pub fn validate_filter_pipeline(filter_pipeline: &[serde_json::Value]) -> Result
     // - project stages that are an exclude stage (with "field: 0") do not mention objectId
     // - project stages do not exclude the _id field or objectId
     // - unset stages do not delete the objectId or _id fields
-    // - we don't have any group, unwind, or lookup stages
+    // - we don't have any group, unwind, or stages reading another collection
     // - that the last stage is a project that includes objectId
     let nb_stages = filter_pipeline.len();
     if nb_stages == 0 {
@@ -546,9 +546,11 @@ pub fn validate_filter_pipeline(filter_pipeline: &[serde_json::Value]) -> Result
         if stage.get("$group").is_some()
             || stage.get("$unwind").is_some()
             || stage.get("$lookup").is_some()
+            || !joined_collections(stage).is_ok_and(|names| names.is_empty())
         {
             return Err(FilterError::InvalidFilterPipeline(
-                "group, unwind, and lookup stages are not allowed".to_string(),
+                "group, unwind, lookup, graphLookup and unionWith stages are not allowed"
+                    .to_string(),
             ));
         }
         // check for project stages
@@ -1573,6 +1575,27 @@ mod tests {
                 message.contains(expected),
                 "{message} should name `{expected}`"
             );
+        }
+    }
+
+    #[test]
+    fn stages_reading_another_collection_are_refused() {
+        for stage in [
+            serde_json::json!({"$lookup": {"from": "users", "localField": "a",
+                "foreignField": "b", "as": "c"}}),
+            serde_json::json!({"$graphLookup": {"from": "users", "startWith": "$a",
+                "connectFromField": "a", "connectToField": "b", "as": "c"}}),
+            serde_json::json!({"$unionWith": "users"}),
+            serde_json::json!({"$unionWith": {"coll": "users", "pipeline": []}}),
+            serde_json::json!({"$facet": {"x": [{"$lookup": {"from": "users", "pipeline": [],
+                "as": "c"}}]}}),
+        ] {
+            let pipeline = [
+                serde_json::json!({"$match": {}}),
+                stage.clone(),
+                serde_json::json!({"$project": {"objectId": 1}}),
+            ];
+            assert!(validate_filter_pipeline(&pipeline).is_err(), "{stage}");
         }
     }
 

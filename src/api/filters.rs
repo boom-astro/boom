@@ -1,4 +1,6 @@
 use mongodb::bson::Document;
+use serde_json::Value;
+use std::io::{Error, ErrorKind};
 
 /// Functionality for working with filters
 
@@ -52,6 +54,47 @@ pub fn parse_pipeline(
             "Pipeline must be a JSON array",
         )),
     }
+}
+
+const JOIN_STAGES: [&str; 3] = ["$lookup", "$graphLookup", "$unionWith"];
+
+/// Collections a pipeline reads besides the one it runs on, at any depth.
+pub fn joined_collections(pipeline: &Value) -> Result<Vec<&str>, Error> {
+    let mut names = Vec::new();
+    collect_joined_collections(pipeline, &mut names)?;
+    Ok(names)
+}
+
+fn collect_joined_collections<'a>(value: &'a Value, names: &mut Vec<&'a str>) -> Result<(), Error> {
+    match value {
+        Value::Array(items) => {
+            for item in items {
+                collect_joined_collections(item, names)?;
+            }
+        }
+        Value::Object(map) => {
+            for (key, spec) in map {
+                if JOIN_STAGES.contains(&key.as_str()) {
+                    let targets = match spec {
+                        Value::Object(spec) => vec![spec.get("from"), spec.get("coll")],
+                        other => vec![Some(other)],
+                    };
+                    for target in targets.into_iter().flatten() {
+                        let name = target.as_str().ok_or_else(|| {
+                            Error::new(
+                                ErrorKind::InvalidInput,
+                                format!("{} must name a collection of this database", key),
+                            )
+                        })?;
+                        names.push(name);
+                    }
+                }
+                collect_joined_collections(spec, names)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 #[derive(Clone, utoipa::ToSchema)]
@@ -135,4 +178,44 @@ pub fn doc2json(docs: Vec<Document>) -> Vec<serde_json::Value> {
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_joined_collections() {
+        let pipeline = json!([
+            { "$match": { "from": "not_a_join" } },
+            { "$lookup": { "from": "a", "localField": "x", "foreignField": "y", "as": "z" } },
+            { "$graphLookup": { "from": "b", "startWith": "$x", "connectFromField": "x",
+                "connectToField": "y", "as": "z" } },
+            { "$unionWith": "c" },
+            { "$unionWith": { "coll": "d", "pipeline": [
+                { "$lookup": { "from": "e", "pipeline": [{ "$unionWith": "f" }], "as": "z" } },
+            ] } },
+            { "$facet": { "g": [{ "$lookup": { "from": "h", "pipeline": [], "as": "z" } }] } },
+            { "$lookup": { "pipeline": [{ "$documents": [{ "x": 1 }] }], "as": "z" } },
+        ]);
+        assert_eq!(
+            joined_collections(&pipeline).unwrap(),
+            ["a", "b", "c", "d", "e", "f", "h"]
+        );
+        assert!(joined_collections(&json!([{ "$match": {} }]))
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn test_joined_collections_must_be_named() {
+        for pipeline in [
+            json!([{ "$lookup": { "from": { "db": "admin", "coll": "x" }, "as": "z" } }]),
+            json!([{ "$unionWith": { "coll": 1 } }]),
+            json!([{ "$facet": { "g": [{ "$unionWith": ["x"] }] } }]),
+        ] {
+            assert!(joined_collections(&pipeline).is_err(), "{pipeline}");
+        }
+    }
 }

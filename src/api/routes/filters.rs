@@ -43,7 +43,7 @@ async fn validate_watchlist(
             WATCHLIST_PREFIX
         ));
     }
-    if !catalog_accessible(db, watchlist, Some(user)).await {
+    if !catalog_accessible(db, watchlist, user, config).await {
         return Err(format!(
             "watchlist '{}' does not exist or is not accessible to the user",
             watchlist
