@@ -10,6 +10,8 @@
 //! the `SearchRequest`. For a float vector each query vector is serialized as
 //! its little-endian `f32` bytes.
 
+use std::collections::HashMap;
+
 use prost::Message;
 use tracing::{debug, instrument};
 
@@ -120,6 +122,32 @@ impl MilvusClient {
         check_status(response.status.as_ref(), "Query")?;
 
         Ok(parse_embedding_rows(&response.fields_data))
+    }
+
+    /// Fetch the stored `jd` for each of `object_ids` that is in the collection.
+    #[instrument(skip_all, err, fields(collection = %self.config().collection.name, ids = object_ids.len()))]
+    pub(super) async fn stored_jds(
+        &mut self,
+        object_ids: &[&str],
+    ) -> Result<HashMap<String, f64>, MilvusError> {
+        if object_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let config = self.config().clone();
+
+        let request = QueryRequest {
+            db_name: config.database.clone(),
+            collection_name: config.collection.name.clone(),
+            expr: object_id_in_expr(object_ids),
+            output_fields: vec![FIELD_OBJECT_ID.to_string(), FIELD_JD.to_string()],
+            use_default_consistency: true,
+            ..Default::default()
+        };
+
+        let response = self.service().query(request).await?.into_inner();
+        check_status(response.status.as_ref(), "Query")?;
+
+        Ok(parse_jds(&response.fields_data))
     }
 
     /// Total number of rows (objects) currently in the collection.
@@ -254,6 +282,19 @@ fn parse_search_hits(data: Option<SearchResultData>) -> Vec<SearchHit> {
         .collect()
 }
 
+/// Transpose an `object_id`/`jd` query result into a map, skipping rows with
+/// no `jd`.
+fn parse_jds(fields: &[FieldData]) -> HashMap<String, f64> {
+    let object_ids = string_column(fields, FIELD_OBJECT_ID).unwrap_or_default();
+    let jds = double_column(fields, FIELD_JD).unwrap_or_default();
+
+    object_ids
+        .into_iter()
+        .enumerate()
+        .filter_map(|(i, object_id)| Some((object_id, *jds.get(i)?)))
+        .collect()
+}
+
 fn parse_embedding_rows(fields: &[FieldData]) -> Vec<EmbeddingRow> {
     let object_ids = string_column(fields, FIELD_OBJECT_ID).unwrap_or_default();
     let (dim, flat) = float_vector_column(fields, FIELD_EMBEDDING).unwrap_or((0, vec![]));
@@ -348,6 +389,58 @@ mod tests {
             field: Some(field_data::Field::Scalars(ScalarField { data: Some(data) })),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn parse_jds_pairs_each_object_with_its_jd() {
+        let fields = vec![
+            scalar(
+                FIELD_OBJECT_ID,
+                scalar_field::Data::StringData(StringArray {
+                    data: vec!["ZTF_A".into(), "ZTF_B".into()],
+                }),
+            ),
+            scalar(
+                FIELD_JD,
+                scalar_field::Data::DoubleData(DoubleArray {
+                    data: vec![2400001.5, 2400002.5],
+                }),
+            ),
+        ];
+
+        let jds = parse_jds(&fields);
+        assert_eq!(jds.len(), 2);
+        assert_eq!(jds["ZTF_A"], 2400001.5);
+        assert_eq!(jds["ZTF_B"], 2400002.5);
+    }
+
+    #[test]
+    fn parse_jds_skips_rows_missing_a_jd() {
+        let fields = vec![
+            scalar(
+                FIELD_OBJECT_ID,
+                scalar_field::Data::StringData(StringArray {
+                    data: vec!["ZTF_A".into(), "ZTF_B".into()],
+                }),
+            ),
+            // Only one jd for two objects.
+            scalar(
+                FIELD_JD,
+                scalar_field::Data::DoubleData(DoubleArray {
+                    data: vec![2400001.5],
+                }),
+            ),
+        ];
+
+        let jds = parse_jds(&fields);
+        assert_eq!(jds.len(), 1);
+        assert!(jds.contains_key("ZTF_A"));
+        assert!(!jds.contains_key("ZTF_B"));
+    }
+
+    #[test]
+    fn parse_jds_on_an_empty_result_is_empty() {
+        assert!(parse_jds(&[]).is_empty());
     }
 
     #[test]
