@@ -1102,17 +1102,10 @@ pub struct MilvusConfig {
 /// Valkey space instead of the GPU time to recompute them.
 #[derive(Deserialize, Debug, Clone)]
 pub struct MilvusBackupQueueConfig {
-    /// When false, a failed upload is dropped rather than buffered.
     #[serde(default = "default_milvus_backup_queue_enabled")]
     pub enabled: bool,
-    /// Cap on buffered objects; past this the lowest-`jd` entries are
-    /// discarded. The queue holds one row per object, so this counts distinct
-    /// objects rather than alerts. Comfortably above a night of ZTF alerts
-    /// (500k-800k), so a night-long outage loses nothing; ~1.6 GB full.
     #[serde(default = "default_milvus_backup_queue_max_rows")]
     pub max_rows: usize,
-    /// Rows drained per successful batch, bounding catch-up work so it does
-    /// not starve live enrichment.
     #[serde(default = "default_milvus_backup_queue_drain_rows")]
     pub drain_rows: usize,
 }
@@ -1157,8 +1150,6 @@ fn default_milvus_backup_queue_enabled() -> bool {
 }
 
 fn default_milvus_backup_queue_max_rows() -> usize {
-    // Headroom over a night of ZTF alerts (500k-800k), so an outage spanning
-    // a full observing night drops nothing.
     1_000_000
 }
 

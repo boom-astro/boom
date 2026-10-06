@@ -701,17 +701,6 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             .enrichment
             .batch_size;
 
-        // Connect to Milvus only when the integration is switched on. The
-        // collection itself must already be provisioned (via `milvus_check
-        // --create-collection`); the worker never creates it, so that the many
-        // enrichment workers don't race to create the same collection.
-        //
-        // A connection failure degrades rather than propagating: Milvus is an
-        // optional add-on and Mongo holds the enriched alerts, so an outage
-        // must not take the enrichment worker (and with it the pool slot) down.
-        // Rejected embeddings wait in Valkey rather than being recomputed on
-        // a GPU later. A Valkey failure only costs that buffering, so it
-        // degrades to dropping them rather than propagating.
         let milvus_queue = if config.milvus.enabled && config.milvus.backup_queue.enabled {
             match config.build_redis().await {
                 Ok(con) => Some(BackupQueue::new(

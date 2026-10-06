@@ -163,7 +163,6 @@ impl MilvusSink {
             Ok(count) => {
                 debug!("upserted {} fusion embeddings to milvus", count);
                 self.record_success();
-                // Milvus is answering, so spend the goodwill on the backlog.
                 self.drain_some().await;
             }
             Err(e) => {
@@ -233,7 +232,6 @@ mod tests {
             .expect("milvus config defaults must deserialize")
     }
 
-    /// No queue: breaker state is independent of where rejected rows go.
     fn sink(enabled: bool) -> MilvusSink {
         MilvusSink {
             config: config(enabled),
@@ -281,7 +279,6 @@ mod tests {
         assert!(sink.is_enabled());
     }
 
-    /// Recovery must not need a worker restart.
     #[test]
     fn the_breaker_closes_once_the_cooldown_passes() {
         let mut sink = sink(true);
