@@ -1,6 +1,6 @@
 use crate::utils::spatial::HPX_DEPTH;
 use cdshealpix::nested;
-use fitsio::FitsFile;
+use fitsio_pure::compat::fitsfile::FitsFile;
 use flare::spatial::great_circle_distance;
 use moc::deser::fits::skymap::from_fits_skymap;
 use moc::deser::fits::{from_fits_ivoa, MocIdxType, MocQtyType, MocType};
@@ -102,25 +102,36 @@ impl std::fmt::Display for Skymap3dError {
 }
 
 pub fn parse_3d_skymap(path: &str) -> Result<LIGO3dskymap, Skymap3dError> {
+    let fits = FitsFile::open(path).map_err(|e| Skymap3dError::Invalid(e.to_string()))?;
+    parse_3d_skymap_fits(&fits)
+}
+
+/// Parse a LIGO BAYESTAR 3D skymap from raw FITS bytes (e.g. from a base64-decoded upload),
+/// without writing them to disk.
+pub fn parse_3d_skymap_bytes(bytes: &[u8]) -> Result<LIGO3dskymap, Skymap3dError> {
+    let fits = FitsFile::from_bytes(bytes).map_err(|e| Skymap3dError::Invalid(e.to_string()))?;
+    parse_3d_skymap_fits(&fits)
+}
+
+fn parse_3d_skymap_fits(fits: &FitsFile) -> Result<LIGO3dskymap, Skymap3dError> {
     use Skymap3dError::{Invalid, NotThreeDimensional};
     let invalid = |e: String| Invalid(e);
 
-    let mut fits = FitsFile::open(path).map_err(|e| Invalid(e.to_string()))?;
     let hdu = fits.hdu(1).map_err(|e| Invalid(e.to_string()))?;
 
     // Read the distance columns first: only their absence may fall back to a 2D search.
     let distmu: Vec<f64> = hdu
-        .read_col(&mut fits, "DISTMU")
+        .read_col(fits, "DISTMU")
         .map_err(|_| NotThreeDimensional)?;
     let distsigma: Vec<f64> = hdu
-        .read_col(&mut fits, "DISTSIGMA")
+        .read_col(fits, "DISTSIGMA")
         .map_err(|_| NotThreeDimensional)?;
     let distnorm: Vec<f64> = hdu
-        .read_col(&mut fits, "DISTNORM")
+        .read_col(fits, "DISTNORM")
         .map_err(|_| NotThreeDimensional)?;
 
     let (uniq, pixel_area_sr, prob, uniq_to_row) =
-        if let Ok(uniq_i64) = hdu.read_col::<i64>(&mut fits, "UNIQ") {
+        if let Ok(uniq_i64) = hdu.read_col::<i64>(fits, "UNIQ") {
             let uniq: Vec<u64> = uniq_i64.iter().map(|&u| u as u64).collect();
             if let Some(&bad) = uniq.iter().find(|&&u| u < 4) {
                 return Err(invalid(format!(
@@ -131,7 +142,7 @@ pub fn parse_3d_skymap(path: &str) -> Result<LIGO3dskymap, Skymap3dError> {
                 .iter()
                 .map(|&u| pixel_area_from_order(uniq_to_order(u)))
                 .collect();
-            let probdensity: Vec<f64> = hdu.read_col(&mut fits, "PROBDENSITY").map_err(|e| {
+            let probdensity: Vec<f64> = hdu.read_col(fits, "PROBDENSITY").map_err(|e| {
                 invalid(format!(
                     "PROBDENSITY column missing from UNIQ skymap: {}",
                     e
@@ -145,7 +156,7 @@ pub fn parse_3d_skymap(path: &str) -> Result<LIGO3dskymap, Skymap3dError> {
             let rows = uniq.iter().enumerate().map(|(i, &u)| (u, i)).collect();
             (uniq, areas, prob, Some(rows))
         } else {
-            let ordering: String = hdu.read_key(&mut fits, "ORDERING").map_err(|e| {
+            let ordering: String = hdu.read_key(fits, "ORDERING").map_err(|e| {
                 invalid(format!(
                     "skymap has neither a readable int64 UNIQ column nor an ORDERING keyword: {}",
                     e
@@ -158,7 +169,7 @@ pub fn parse_3d_skymap(path: &str) -> Result<LIGO3dskymap, Skymap3dError> {
                 )));
             }
             let nside: i64 = hdu
-                .read_key(&mut fits, "NSIDE")
+                .read_key(fits, "NSIDE")
                 .map_err(|e| invalid(e.to_string()))?;
             let nside = nside as u32;
             if !nside.is_power_of_two() {
@@ -171,7 +182,7 @@ pub fn parse_3d_skymap(path: &str) -> Result<LIGO3dskymap, Skymap3dError> {
             let area = pixel_area_from_order(order);
             let npix = 12 * (nside as usize).pow(2);
             let prob: Vec<f64> = hdu
-                .read_col(&mut fits, "PROB")
+                .read_col(fits, "PROB")
                 .map_err(|e| invalid(e.to_string()))?;
             if prob.len() != npix {
                 return Err(invalid(format!(
@@ -206,24 +217,6 @@ pub fn parse_3d_skymap(path: &str) -> Result<LIGO3dskymap, Skymap3dError> {
         max_order,
         uniq_to_row,
     })
-}
-
-/// Parse a LIGO BAYESTAR 3D skymap from raw FITS bytes (e.g. from a base64-decoded upload).
-///
-/// Writes bytes to a temp file then delegates to `parse_3d_skymap`, because fitsio
-/// (based on cfitsio) requires a file path.
-pub fn parse_3d_skymap_bytes(bytes: &[u8]) -> Result<LIGO3dskymap, Skymap3dError> {
-    use std::io::Write;
-    let invalid = |e: std::io::Error| Skymap3dError::Invalid(e.to_string());
-    let mut tmp = tempfile::NamedTempFile::new().map_err(invalid)?;
-    tmp.write_all(bytes).map_err(invalid)?;
-    tmp.flush().map_err(invalid)?;
-    let path = tmp
-        .path()
-        .to_str()
-        .ok_or_else(|| Skymap3dError::Invalid("temp file path is not valid UTF-8".to_string()))?
-        .to_string();
-    parse_3d_skymap(&path)
 }
 
 impl LIGO3dskymap {
@@ -1419,39 +1412,50 @@ mod tests {
         );
     }
 
-    fn write_partial_flat_skymap(path: &str, nside: i64, n_rows: usize) {
-        use fitsio::tables::{ColumnDataType, ColumnDescription};
-        let columns: Vec<_> = ["PROB", "DISTMU", "DISTSIGMA", "DISTNORM"]
-            .iter()
-            .map(|name| {
-                ColumnDescription::new(*name)
-                    .with_type(ColumnDataType::Double)
-                    .create()
-                    .unwrap()
-            })
-            .collect();
-        let mut f = fitsio::FitsFile::create(path).overwrite().open().unwrap();
-        let hdu = f.create_table("SKYMAP", &columns).unwrap();
-        hdu.write_key(&mut f, "NSIDE", nside).unwrap();
-        hdu.write_key(&mut f, "ORDERING", "NESTED").unwrap();
-        for (name, value) in [
+    /// A flat NESTED skymap with `n_rows` rows, built in memory.
+    fn partial_flat_skymap(nside: i64, n_rows: usize) -> Vec<u8> {
+        use fitsio_pure::bintable::{
+            serialize_binary_table_hdu, BinaryColumnData, BinaryColumnDescriptor, BinaryColumnType,
+        };
+        let columns = [
             ("PROB", 0.1_f64),
             ("DISTMU", 100.0),
             ("DISTSIGMA", 10.0),
             ("DISTNORM", 1.0),
-        ] {
-            hdu.write_col(&mut f, name, &vec![value; n_rows]).unwrap();
-        }
+        ];
+        let descriptors: Vec<_> = columns
+            .iter()
+            .map(|(name, _)| BinaryColumnDescriptor {
+                name: Some(name.to_string()),
+                repeat: 1,
+                col_type: BinaryColumnType::Double,
+                byte_width: 8,
+                tdim: None,
+            })
+            .collect();
+        let data: Vec<_> = columns
+            .iter()
+            .map(|(_, value)| BinaryColumnData::Double(vec![*value; n_rows]))
+            .collect();
+        let table = serialize_binary_table_hdu(&descriptors, &data, n_rows).unwrap();
+
+        let mut f = FitsFile::create_in_memory().unwrap();
+        let mut bytes = f.data().to_vec();
+        bytes.extend_from_slice(&table);
+        f.set_data(bytes);
+        let hdu = f.hdu(1).unwrap();
+        hdu.write_key(&mut f, "NSIDE", &nside).unwrap();
+        hdu.write_key(&mut f, "ORDERING", &"NESTED".to_string())
+            .unwrap();
+        f.into_bytes().unwrap()
     }
 
     /// Accepting one would let `ang2pix` return a row past the end of the columns.
     #[test]
     fn test_parse_3d_skymap_rejects_partial_flat_map() {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let path = tmp.path().to_str().unwrap().to_string();
-        write_partial_flat_skymap(&path, 4, 10); // NSIDE=4 implies 192 pixels
+        let bytes = partial_flat_skymap(4, 10); // NSIDE=4 implies 192 pixels
 
-        match parse_3d_skymap(&path) {
+        match parse_3d_skymap_bytes(&bytes) {
             Err(Skymap3dError::Invalid(e)) => {
                 assert!(e.contains("10 rows"), "unexpected message: {e}")
             }
