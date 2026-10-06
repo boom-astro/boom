@@ -124,12 +124,7 @@ impl MilvusClient {
         Ok(parse_embedding_rows(&response.fields_data))
     }
 
-    /// Fetch the `jd` of each object's *stored* embedding, for ids that have
-    /// one. Ids absent from the collection are absent from the map.
-    ///
-    /// Requests only the two columns the caller orders on. Pulling
-    /// [`FIELD_EMBEDDING`] back — `dim` floats per object — just to discard it
-    /// would dominate the cost of this call.
+    /// Fetch the stored `jd` for each of `object_ids` that is in the collection.
     #[instrument(skip_all, err, fields(collection = %self.config().collection.name, ids = object_ids.len()))]
     pub(super) async fn stored_jds(
         &mut self,
@@ -287,11 +282,8 @@ fn parse_search_hits(data: Option<SearchResultData>) -> Vec<SearchHit> {
         .collect()
 }
 
-/// Transpose an `object_id`/`jd` query result into a lookup map.
-///
-/// A row whose `jd` is missing is skipped rather than defaulted: a zero `jd`
-/// would read as "very old" and wave through a write this guard exists to
-/// block.
+/// Transpose an `object_id`/`jd` query result into a map, skipping rows with
+/// no `jd`.
 fn parse_jds(fields: &[FieldData]) -> HashMap<String, f64> {
     let object_ids = string_column(fields, FIELD_OBJECT_ID).unwrap_or_default();
     let jds = double_column(fields, FIELD_JD).unwrap_or_default();
@@ -422,9 +414,6 @@ mod tests {
         assert_eq!(jds["ZTF_B"], 2400002.5);
     }
 
-    /// A short or absent `jd` column must drop the row, not default it to 0.0:
-    /// a zero jd reads as "very old" and would wave through the stale write
-    /// the caller's guard exists to block.
     #[test]
     fn parse_jds_skips_rows_missing_a_jd() {
         let fields = vec![
