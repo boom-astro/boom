@@ -6,9 +6,11 @@ use boom::{
     conf::{load_dotenv, AppConfig, CatalogXmatchConfig},
     enrichment::models::SharedModelPool,
     milvus::MilvusClient,
-    scheduler::{record_mpc_orbits_state, record_worker_pool_state, ThreadPool},
+    scheduler::{
+        record_mpc_orbits_state, record_worker_pool_state, take_heartbeat_counts, ThreadPool,
+    },
     utils::{
-        db::initialize_survey_indexes,
+        db::{initialize_angular_size_indexes, initialize_survey_indexes},
         enums::Survey,
         mpcorb,
         o11y::{
@@ -28,7 +30,10 @@ use mongodb::bson::{doc, Document};
 use mongodb::{Collection, Database};
 use opentelemetry_sdk::metrics::SdkMeterProvider;
 use opentelemetry_sdk::trace::SdkTracerProvider;
-use tokio::sync::oneshot;
+use tokio::{
+    sync::oneshot,
+    time::{sleep, timeout},
+};
 use tracing::{info, info_span, warn, Instrument};
 use uuid::Uuid;
 
@@ -39,6 +44,7 @@ const MPC_ORBITS_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 /// How often to re-check. Well inside the max age, so a single failed attempt
 /// still leaves several before the catalogue is actually stale.
 const MPC_ORBITS_CHECK_INTERVAL: Duration = Duration::from_secs(4 * 60 * 60);
+const MPC_ORBITS_STARTUP_WAIT: Duration = Duration::from_secs(5 * 60);
 
 fn pool_state(pool: &ThreadPool) -> String {
     format!("{}/{}", pool.live_worker_count(), pool.total_worker_count())
@@ -49,64 +55,60 @@ fn mpc_orbits_needs_refresh(age_seconds: Option<f64>, max_age: Duration) -> bool
     age_seconds.is_none_or(|age| age >= max_age.as_secs_f64())
 }
 
-/// Keep `MPC_orbits` fresh for as long as the scheduler runs.
-///
-/// A missing catalogue costs geometry silently -- the alert still enriches
-/// without it -- so this runs unattended, and the startup check covers a fresh
-/// deployment. A failed refresh leaves the previous catalogue in place.
-async fn keep_mpc_orbits_fresh(db: Database) {
-    let mut tick = tokio::time::interval(MPC_ORBITS_CHECK_INTERVAL);
+async fn keep_mpc_orbits_fresh(db: Database, first_check_done: oneshot::Sender<()>) {
+    refresh_mpc_orbits_if_due(&db).await;
+    let _ = first_check_done.send(());
     loop {
-        // Fires immediately on the first pass, so startup is covered.
-        tick.tick().await;
+        sleep(MPC_ORBITS_CHECK_INTERVAL).await;
+        refresh_mpc_orbits_if_due(&db).await;
+    }
+}
 
-        let now = chrono::Utc::now().timestamp() as f64;
-        let age = match mpcorb::orbits_age_seconds(&db, now).await {
-            Ok(age) => age,
-            // An unknown age is not an absent one: do not re-download on a blip.
-            Err(error) => {
-                log_error!(WARN, error, "could not read the age of MPC_orbits");
-                continue;
+async fn refresh_mpc_orbits_if_due(db: &Database) {
+    let now = chrono::Utc::now().timestamp() as f64;
+    let age = match mpcorb::orbits_age_seconds(db, now).await {
+        Ok(age) => age,
+        // An unknown age is not an absent one: do not re-download on a blip.
+        Err(error) => {
+            log_error!(WARN, error, "could not read the age of MPC_orbits");
+            return;
+        }
+    };
+    let count = db
+        .collection::<Document>(mpcorb::ORBITS_COLLECTION)
+        .estimated_document_count()
+        .await
+        .ok();
+    record_mpc_orbits_state(age, count);
+
+    if !mpc_orbits_needs_refresh(age, MPC_ORBITS_MAX_AGE) {
+        info!(
+            age_hours = age.unwrap_or(0.0) / 3600.0,
+            orbits = count.unwrap_or(0),
+            "MPC_orbits is current"
+        );
+        return;
+    }
+    match age {
+        Some(age) => info!(age_hours = age / 3600.0, "MPC_orbits is stale, refreshing"),
+        None => warn!("MPC_orbits is missing, populating it"),
+    }
+
+    // No progress bar: this output is a log, not a terminal.
+    match mpcorb::refresh_orbits(Some(db), mpcorb::DEFAULT_MPCORB_URL, 10_000, now, false).await {
+        Ok(report) => {
+            for sample in &report.rejected_samples {
+                warn!("rejected record-shaped line: {}", sample);
             }
-        };
-        let count = db
-            .collection::<Document>(mpcorb::ORBITS_COLLECTION)
-            .estimated_document_count()
-            .await
-            .ok();
-        record_mpc_orbits_state(age, count);
-
-        if !mpc_orbits_needs_refresh(age, MPC_ORBITS_MAX_AGE) {
             info!(
-                age_hours = age.unwrap_or(0.0) / 3600.0,
-                orbits = count.unwrap_or(0),
-                "MPC_orbits is current"
+                orbits = report.parsed,
+                skipped = report.skipped,
+                "MPC_orbits refreshed"
             );
-            continue;
+            record_mpc_orbits_state(Some(0.0), Some(report.parsed));
         }
-        match age {
-            Some(age) => info!(age_hours = age / 3600.0, "MPC_orbits is stale, refreshing"),
-            None => warn!("MPC_orbits is missing, populating it"),
-        }
-
-        // No progress bar: this output is a log, not a terminal.
-        match mpcorb::refresh_orbits(Some(&db), mpcorb::DEFAULT_MPCORB_URL, 10_000, now, false)
-            .await
-        {
-            Ok(report) => {
-                for sample in &report.rejected_samples {
-                    warn!("rejected record-shaped line: {}", sample);
-                }
-                info!(
-                    orbits = report.parsed,
-                    skipped = report.skipped,
-                    "MPC_orbits refreshed"
-                );
-                record_mpc_orbits_state(Some(0.0), Some(report.parsed));
-            }
-            // The previous catalogue survives a failure, so geometry keeps working.
-            Err(error) => log_error!(WARN, error, "failed to refresh MPC_orbits"),
-        }
+        // The previous catalogue survives a failure, so geometry keeps working.
+        Err(error) => log_error!(WARN, error, "failed to refresh MPC_orbits"),
     }
 }
 
@@ -258,18 +260,33 @@ async fn run(
         }
     }
 
-    warn_if_missing_crossmatches(&args.survey, &db, &config).await;
-
-    // Only ZTF needs these; LSST carries the vectors in its own packet.
-    if args.survey == Survey::Ztf {
-        tokio::spawn(
-            keep_mpc_orbits_fresh(db.clone()).instrument(info_span!("mpc orbits refresh")),
-        );
+    if let Some(xmatch_configs) = config.crossmatch.get(&args.survey) {
+        initialize_angular_size_indexes(xmatch_configs, &db)
+            .await
+            .expect("could not initialize angular-size catalog indexes");
     }
+
+    warn_if_missing_crossmatches(&args.survey, &db, &config).await;
 
     #[cfg(target_os = "linux")]
     validate_gpu_configuration_for_survey(&args.survey, &config)
         .expect("GPU configuration is invalid for the survey");
+
+    // Only ZTF needs these; LSST carries the vectors in its own packet.
+    if args.survey == Survey::Ztf {
+        let (first_check_done, first_check) = oneshot::channel();
+        tokio::spawn(
+            keep_mpc_orbits_fresh(db.clone(), first_check_done)
+                .instrument(info_span!("mpc orbits refresh")),
+        );
+        // Enrichment stores geometry for good, so let a due refresh land before it starts.
+        if timeout(MPC_ORBITS_STARTUP_WAIT, first_check).await.is_err() {
+            warn!(
+                waited_seconds = MPC_ORBITS_STARTUP_WAIT.as_secs(),
+                "MPC_orbits refresh is still running, starting the workers anyway"
+            );
+        }
+    }
 
     let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
     tokio::spawn(
@@ -369,10 +386,15 @@ async fn run(
             }
             _ = heartbeat_tick.tick() => {
                 record_pool_metrics(&args.survey, &alert_pool, &enrichment_pool, &filter_pool);
+                let counts = take_heartbeat_counts();
                 info!(
                     alert = %pool_state(&alert_pool),
                     enrichment = %pool_state(&enrichment_pool),
                     filter = %pool_state(&filter_pool),
+                    processed = counts.alert,
+                    enriched = counts.enrichment,
+                    filtered = counts.filter,
+                    passed = counts.passed,
                     "heartbeat: workers running"
                 );
             }

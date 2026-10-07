@@ -29,8 +29,8 @@ use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, skip_serializing_none};
 use utoipa::ToSchema;
 
-const OAUTH_STATES_COLLECTION: &str = "babamul_oauth_states";
-const PENDING_IDENTITIES_COLLECTION: &str = "babamul_pending_identities";
+pub const OAUTH_STATES_COLLECTION: &str = "babamul_oauth_states";
+pub const PENDING_IDENTITIES_COLLECTION: &str = "babamul_pending_identities";
 
 /// How long a user has to supply and confirm an email address after signing in
 /// with a provider that didn't give us one.
@@ -634,6 +634,8 @@ fn new_social_user(
         // Seeded from the provider so the profile isn't blank on day one; the
         // user can change or clear it via PATCH /babamul/profile.
         name,
+        is_admin: false,
+        acls: vec![],
     })
 }
 

@@ -1,14 +1,14 @@
 use super::STATS_COLLECTION;
 use crate::api::models::response;
-use crate::api::routes::babamul::BabamulSurvey;
+use crate::api::routes::babamul::{BabamulAcl, BabamulSurvey, BabamulUser};
 use crate::utils::db::count_alerts_for_night;
 use crate::utils::enums::Survey;
 use actix_web::{get, web, HttpResponse};
-use chrono::{NaiveDate, Utc};
+use chrono::{DateTime, Duration, NaiveDate, Utc};
 use futures::{StreamExt, TryStreamExt};
 use mongodb::{bson::doc, Collection, Database};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use utoipa::ToSchema;
 
 /// MongoDB cache document storing the alert count for a single survey/night,
@@ -33,6 +33,19 @@ pub struct NightlyStat {
     pub ztf: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lsst: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decam: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub winter: Option<u64>,
+    /// The night of each requested survey, keyed like the counts.
+    pub windows: BTreeMap<String, NightWindow>,
+}
+
+/// An observing night, from local noon to local noon at the observatory.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct NightWindow {
+    pub start: DateTime<Utc>,
+    pub end: DateTime<Utc>,
 }
 
 /// Query parameters for the nightly stats endpoint: the date range (inclusive)
@@ -44,8 +57,15 @@ pub struct StatsQuery {
     pub survey: Option<BabamulSurvey>,
 }
 
+pub(super) const NIGHTLY_STATS_CACHE_PREFIX: &str = "nightly_stats_";
+
 fn cache_id(survey: &Survey, date: &NaiveDate) -> String {
-    format!("nightly_stats_{}_{}", survey, date.format("%Y-%m-%d"))
+    format!(
+        "{}{}_{}",
+        NIGHTLY_STATS_CACHE_PREFIX,
+        survey,
+        date.format("%Y-%m-%d")
+    )
 }
 
 /// Cache duration (in seconds) grows with the age of the night.
@@ -65,7 +85,8 @@ fn cache_duration_secs(date: &NaiveDate, today: &NaiveDate) -> f64 {
 /// Get nightly alert counts for a date range.
 ///
 /// Returns the number of alerts processed per night (noon-to-noon JD window).
-/// Without the `survey` query parameter, returns stats for all surveys (ZTF + LSST).
+/// Without the `survey` query parameter, returns stats for ZTF, LSST and DECam, plus
+/// WINTER for admins and users with the `winter` ACL.
 /// ZTF counts only include public alerts (programid = 1).
 /// Results are cached in MongoDB; cache lifetime grows with the age of the night.
 #[utoipa::path(
@@ -85,13 +106,17 @@ fn cache_duration_secs(date: &NaiveDate, today: &NaiveDate) -> f64 {
 )]
 #[get("/stats/nightly")]
 pub async fn get_nightly_stats(
+    current_user: Option<web::ReqData<BabamulUser>>,
     query: web::Query<StatsQuery>,
     db: web::Data<Database>,
 ) -> HttpResponse {
-    let surveys: Vec<Survey> = query
-        .survey
-        .map(|s| vec![s.into()])
-        .unwrap_or(vec![Survey::Ztf, Survey::Lsst]);
+    let surveys: Vec<Survey> = query.survey.map(|s| vec![s.into()]).unwrap_or_else(|| {
+        let mut surveys = vec![Survey::Ztf, Survey::Lsst, Survey::Decam];
+        if current_user.is_some_and(|user| user.has_acl(BabamulAcl::Winter)) {
+            surveys.push(Survey::Winter);
+        }
+        surveys
+    });
 
     let start_date = match NaiveDate::parse_from_str(&query.start_date, "%Y-%m-%d") {
         Ok(d) => d,
@@ -124,7 +149,7 @@ pub async fn get_nightly_stats(
     let mut d = start_date;
     while d <= end_date {
         all_dates.push(d);
-        d += chrono::Duration::days(1);
+        d += Duration::days(1);
     }
 
     // Read all relevant cache entries in a single query
@@ -155,8 +180,6 @@ pub async fn get_nightly_stats(
     }
 
     // For each missing (survey, night), count alerts in parallel.
-    // Relies on a compound index on (candidate.programid, candidate.jd) for ZTF
-    // and on candidate.jd for LSST so Mongo can satisfy the count via COUNT_SCAN.
     let mut fresh_counts: HashMap<(Survey, NaiveDate), u64> = HashMap::new();
     for survey in &surveys {
         let missing: Vec<NaiveDate> = all_dates
@@ -231,25 +254,34 @@ pub async fn get_nightly_stats(
         .collect();
     futures::future::join_all(upserts).await;
 
-    let has_ztf = surveys.contains(&Survey::Ztf);
-    let has_lsst = surveys.contains(&Survey::Lsst);
-    let mut results: Vec<NightlyStat> = Vec::with_capacity(all_dates.len());
-    for date in &all_dates {
-        let lookup = |survey: Survey| {
-            let key = (survey, *date);
-            *cache_counts
-                .get(&key)
-                .or_else(|| fresh_counts.get(&key))
-                .unwrap_or(&0)
-        };
-        let ztf = has_ztf.then(|| lookup(Survey::Ztf));
-        let lsst = has_lsst.then(|| lookup(Survey::Lsst));
-        results.push(NightlyStat {
-            date: date.format("%Y-%m-%d").to_string(),
-            ztf,
-            lsst,
-        });
-    }
+    let results: Vec<NightlyStat> = all_dates
+        .iter()
+        .map(|date| {
+            let count = |survey: Survey| {
+                surveys.contains(&survey).then(|| {
+                    let key = (survey, *date);
+                    *cache_counts
+                        .get(&key)
+                        .or_else(|| fresh_counts.get(&key))
+                        .unwrap_or(&0)
+                })
+            };
+            NightlyStat {
+                date: date.format("%Y-%m-%d").to_string(),
+                ztf: count(Survey::Ztf),
+                lsst: count(Survey::Lsst),
+                decam: count(Survey::Decam),
+                winter: count(Survey::Winter),
+                windows: surveys
+                    .iter()
+                    .map(|survey| {
+                        let (start, end) = survey.night_window(date);
+                        (survey.as_str().to_lowercase(), NightWindow { start, end })
+                    })
+                    .collect(),
+            }
+        })
+        .collect();
 
     response::ok(
         &format!("nightly stats for {} nights", results.len()),
@@ -265,7 +297,7 @@ mod tests {
     #[test]
     fn test_cache_duration() {
         let today = NaiveDate::from_ymd_opt(2024, 6, 15).unwrap();
-        let days_ago = |n: i64| today - chrono::Duration::days(n);
+        let days_ago = |n: i64| today - Duration::days(n);
 
         // 0 days ago -> 30 min
         assert_eq!(cache_duration_secs(&days_ago(0), &today), 1800.0);

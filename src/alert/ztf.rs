@@ -8,6 +8,7 @@ use crate::{
         cutouts::CutoutStorage,
         db::{mongify_vec, update_timeseries_op},
         enums::Survey,
+        host::{self, HostGalaxyAssociation, HostGalaxyConfig},
         lightcurves::{diffmaglim2fluxerr, flux2mag, mag2flux, Band, SNT, ZTF_ZP},
         o11y::logging::as_error,
         spatial::{xmatch, Coordinates},
@@ -20,12 +21,13 @@ use flare::Time;
 use mongodb::bson::{doc, Document};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_with::{serde_as, skip_serializing_none};
-use std::collections::HashMap;
+use std::{collections::HashMap, ops::RangeInclusive};
 use tracing::{debug, error, instrument, warn};
 use utoipa::ToSchema;
 
 pub const STREAM_NAME: &str = "ZTF";
 pub const ZTF_DEC_RANGE: (f64, f64) = (-30.0, 90.0);
+const ZTF_DIFFMAGLIM_RANGE: RangeInclusive<f32> = 10.0..=30.0;
 // Position uncertainty in arcsec (median FHWM from https://www.ztf.caltech.edu/ztf-camera.html)
 pub const ZTF_POSITION_UNCERTAINTY: f64 = 2.;
 pub const ALERT_COLLECTION: &str = concat!(STREAM_NAME, "_alerts");
@@ -158,6 +160,9 @@ impl TryFrom<PrvCandidate> for ZtfPrvCandidate {
             }
             (None, None, None, Some(diffmaglim)) => {
                 let flux_err = diffmaglim2fluxerr(diffmaglim, ZTF_ZP) * 1e9_f32; // convert to nJy
+                if !ZTF_DIFFMAGLIM_RANGE.contains(&diffmaglim) || !flux_err.is_finite() {
+                    return Err(AlertError::InvalidDiffmaglim(diffmaglim));
+                }
                 (None, Some(flux_err), None)
             }
             _ => {
@@ -323,12 +328,17 @@ impl TryFrom<FpHist> for ZtfForcedPhot {
             _ => (None, None, None, None, None),
         };
 
+        let psf_flux_err = (psf_flux_err as f64 * 1e9 * zp_scaling_factor) as f32; // convert to nJy and a fixed ZTF_ZP
+        if !psf_flux_err.is_finite() || !psf_flux.is_none_or(f32::is_finite) {
+            return Err(AlertError::NonFiniteFluxPSF);
+        }
+
         Ok(ZtfForcedPhot {
             fp_hist,
             magpsf,
             sigmapsf,
             psf_flux,
-            psf_flux_err: Some((psf_flux_err as f64 * 1e9 * zp_scaling_factor) as f32), // convert to nJy and a fixed ZTF_ZP
+            psf_flux_err: Some(psf_flux_err),
             isdiffpos,
             snr_psf,
             band,
@@ -693,6 +703,9 @@ pub struct ZtfObject {
     pub prv_nondetections: Vec<ZtfPrvCandidate>,
     pub fp_hists: Vec<ZtfForcedPhot>,
     pub cross_matches: Option<HashMap<String, Vec<Document>>>,
+    /// `None` when host association is disabled in the config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_galaxy: Option<HostGalaxyAssociation>,
     pub aliases: Option<ZtfAliases>,
     pub coordinates: Coordinates,
     pub created_at: f64,
@@ -724,6 +737,7 @@ struct AlertAuxForUpdate {
 
 pub struct ZtfAlertWorker {
     xmatch_configs: Vec<conf::CatalogXmatchConfig>,
+    host_galaxy_config: HostGalaxyConfig,
     db: mongodb::Database,
     alert_collection: mongodb::Collection<ZtfAlert>,
     alert_aux_collection: mongodb::Collection<ZtfObject>,
@@ -905,6 +919,7 @@ impl ZtfAlertWorker {
                 // we fallback to a full in-DB update, safe against concurrency and "self-healing", but less efficient
                 match &e {
                     AlertError::ConcurrentAuxUpdate(_) => debug!(error = %e),
+                    AlertError::InvalidTimeseriesInput(_) => warn!(error = %e),
                     _ => error!(error = %e),
                 }
                 self.update_aux_fallback(
@@ -954,6 +969,7 @@ impl AlertWorker for ZtfAlertWorker {
 
         let worker = ZtfAlertWorker {
             xmatch_configs,
+            host_galaxy_config: config.host_galaxy.clone(),
             db,
             alert_collection,
             alert_aux_collection,
@@ -1054,12 +1070,15 @@ impl AlertWorker for ZtfAlertWorker {
                 &self.db,
             )
             .await?;
+            let host_galaxy =
+                host::associate_from_xmatches(ra, dec, &xmatches, &self.host_galaxy_config);
             let obj = ZtfObject {
                 object_id: object_id.clone(),
                 prv_candidates,
                 prv_nondetections,
                 fp_hists,
                 cross_matches: Some(xmatches),
+                host_galaxy,
                 aliases: survey_matches,
                 coordinates: Coordinates::new(ra, dec),
                 created_at: now,
@@ -1105,6 +1124,7 @@ impl AlertWorker for ZtfAlertWorker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::alert::base::get_schema_and_startidx;
     use crate::utils::{
         enums::Survey,
         testing::{
@@ -1112,6 +1132,35 @@ mod tests {
             AlertRandomizer, AuxBranchSnapshot, AuxUpdateBranchTestAdapter,
         },
     };
+    use apache_avro::{from_value, types::Value, Reader};
+
+    fn read_test_alert_value() -> Value {
+        let avro_bytes = std::fs::read("tests/data/alerts/ztf/2695378462115010012.avro").unwrap();
+        Reader::new(&avro_bytes[..])
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+    }
+
+    fn corrupt_first_point(alert: &mut Value, series: &str, field: &str, corrupt: f32) {
+        let Value::Record(fields) = alert else {
+            panic!()
+        };
+        let (_, Value::Union(_, points)) =
+            fields.iter_mut().find(|(name, _)| name == series).unwrap()
+        else {
+            panic!()
+        };
+        let Value::Array(points) = points.as_mut() else {
+            panic!()
+        };
+        let Value::Record(point) = &mut points[0] else {
+            panic!()
+        };
+        let (_, value) = point.iter_mut().find(|(name, _)| name == field).unwrap();
+        *value = Value::Union(1, Box::new(Value::Float(corrupt)));
+    }
 
     struct ZtfPrvLightcurveGen {
         template: ZtfPrvCandidate,
@@ -1576,38 +1625,50 @@ mod tests {
     }
 
     #[test]
-    fn test_schema_cache_fallback_on_corrupt_start_idx() {
-        let avro_bytes = std::fs::read("tests/data/alerts/ztf/2695378462115010012.avro").unwrap();
+    fn test_implausible_diffmaglim_drops_only_that_nondetection() {
+        let mut value = read_test_alert_value();
+        let original: ZtfRawAvroAlert = from_value(&value).unwrap();
+        corrupt_first_point(&mut value, "prv_candidates", "diffmaglim", -253.757);
+        let alert: ZtfRawAvroAlert = from_value(&value).unwrap();
 
-        let mut cache = SchemaCache::default();
+        let original_prv_candidates = original.prv_candidates.unwrap();
+        assert!(original_prv_candidates[0].prv_candidate.magpsf.is_none());
+        assert_eq!(alert.prv_candidates.unwrap(), original_prv_candidates[1..]);
+        assert_eq!(alert.fp_hists, original.fp_hists);
+    }
 
-        // First call: normal path, fills the cache.
-        let first: ZtfRawAvroAlert = cache.alert_from_avro_bytes(&avro_bytes).unwrap();
-        assert!(cache.get_cached_start_idx().is_some());
-        let good_idx = cache.get_cached_start_idx().unwrap();
-        assert!(good_idx > 0, "start index should be past the Avro header");
+    #[test]
+    fn test_overflowing_forced_flux_drops_only_that_point() {
+        let mut value = read_test_alert_value();
+        let original: ZtfRawAvroAlert = from_value(&value).unwrap();
+        corrupt_first_point(&mut value, "fp_hists", "magzpsci", -247.979);
+        let alert: ZtfRawAvroAlert = from_value(&value).unwrap();
 
-        // Corrupt the cached start index so that it points into the Avro header
-        // (offset 0 – the 'O','b','j',1 magic bytes), causing from_avro_datum
-        // to fail on the next call and triggering the fallback.
-        cache.set_cached_start_idx(0);
+        assert_eq!(alert.fp_hists.unwrap(), original.fp_hists.unwrap()[1..]);
+        assert_eq!(alert.prv_candidates, original.prv_candidates);
+    }
 
-        // Second call: fallback path should repair the cache and produce the
-        // same result as the first call.
-        let second: ZtfRawAvroAlert = cache
-            .alert_from_avro_bytes(&avro_bytes)
-            .expect("fallback deserialization should succeed");
+    #[test]
+    fn test_schema_cache_reads_alerts_of_different_sizes() {
+        // 2991189033415010000 has a data block under 8192 bytes, so the integer holding that
+        // size is one byte shorter and its data starts one byte earlier than the other alert
+        let large = std::fs::read("tests/data/alerts/ztf/2695378462115010012.avro").unwrap();
+        let small = std::fs::read("tests/data/alerts/ztf/2991189033415010000.avro").unwrap();
 
-        assert_eq!(first.candid, second.candid);
-        assert_eq!(first.object_id, second.object_id);
-        assert_eq!(first.schemavsn, second.schemavsn);
+        let (large_schema, large_start_idx) = get_schema_and_startidx(&large).unwrap();
+        let (small_schema, small_start_idx) = get_schema_and_startidx(&small).unwrap();
+        assert_eq!(large_schema, small_schema);
+        assert_eq!(large_start_idx, small_start_idx + 1);
 
-        // The cache should now hold the corrected start index again.
-        assert_eq!(
-            cache.get_cached_start_idx().unwrap(),
-            good_idx,
-            "cache should be repaired after the fallback"
-        );
+        for (first, second) in [(&large, &small), (&small, &large)] {
+            let mut schema_cache = SchemaCache::default();
+            let first: ZtfRawAvroAlert = schema_cache.alert_from_avro_bytes(first).unwrap();
+            let second: ZtfRawAvroAlert = schema_cache.alert_from_avro_bytes(second).unwrap();
+
+            let mut candids = [first.candid, second.candid];
+            candids.sort();
+            assert_eq!(candids, [2695378462115010012, 2991189033415010000]);
+        }
     }
 
     #[tokio::test]

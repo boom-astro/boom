@@ -3,10 +3,12 @@ use crate::conf::AppConfig;
 use crate::enrichment::{fetch_alerts, EnrichmentWorker, EnrichmentWorkerError};
 use crate::utils::db::{fetch_timeseries_op, mongify};
 use crate::utils::enums::Survey;
+use crate::utils::host::HostGalaxyAssociation;
 use crate::utils::lightcurves::{
     analyze_photometry, prepare_photometry, summarise_detections, Band, DetectionHistory,
-    EpisodeHistory, PerBandProperties, PhotometryMag, EPISODE_GAP_DAYS,
+    EpisodeHistory, PerBandProperties, PhotometryMag, EPISODE_GAP_DAYS, SNT,
 };
+use apache_avro_derive::AvroSchema;
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use tracing::{instrument, warn};
@@ -49,10 +51,11 @@ pub fn create_decam_alert_pipeline() -> Vec<Document> {
                     Some(vec![doc! {
                         "$gte": [
                             "$$x.snr",
-                            3.0
+                            SNT
                         ]
                     }]),
-                )
+                ),
+                "host_galaxy": {"$arrayElemAt": ["$aux.host_galaxy", 0]},
             }
         },
         doc! {
@@ -69,6 +72,7 @@ pub fn create_decam_alert_pipeline() -> Vec<Document> {
                 "fp_hists.sigmagap": 1,
                 "fp_hists.band": 1,
                 "fp_hists.snr": 1,
+                "host_galaxy": 1,
             }
         },
     ]
@@ -114,13 +118,18 @@ pub struct DecamAlertForEnrichment {
     // Signed SNR is only needed here: detection history counts detections.
     pub prv_candidates: Vec<DecamPhotometry>,
     pub fp_hists: Vec<PhotometryMag>,
+    #[serde(default)]
+    pub host_galaxy: Option<HostGalaxyAssociation>,
 }
 
 /// DECAM alert properties computed during enrichment
 /// and inserted back into the alert document
-#[derive(Debug, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, serde::Deserialize, serde::Serialize, AvroSchema)]
 pub struct DecamAlertProperties {
     pub stationary: bool,
+    /// Absent means never evaluated for a host, not evaluated and hostless.
+    #[serde(default)]
+    pub hosted: Option<bool>,
     pub photstats: PerBandProperties,
     /// Per-object detection-history summary for history-aware filters.
     /// `None` on alerts enriched before this field existed.
@@ -257,12 +266,15 @@ impl DecamEnrichmentWorker {
                 .prv_candidates
                 .iter()
                 .map(|p| (p.time, p.snr.filter(|s| !s.is_nan()).map(|s| s < 0.0))),
+            // Every stored forced epoch carries a magnitude, so it is a detection.
+            alert.fp_hists.iter().map(|p| p.time),
             alert.candidate.jd,
             EPISODE_GAP_DAYS,
         );
 
         Ok(DecamAlertProperties {
             stationary,
+            hosted: alert.host_galaxy.as_ref().map(|h| h.best_host.is_some()),
             photstats,
             detection_history: Some(detection_history),
             episode_history: Some(episode_history),

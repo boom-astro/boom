@@ -7,4 +7,5 @@ pub mod filter;
 pub mod kafka;
 pub mod milvus;
 pub mod scheduler;
+pub mod tasks;
 pub mod utils;

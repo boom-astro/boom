@@ -263,6 +263,11 @@ volume paths, and the specific env keys injected into containers) belong here.
 | `BOOM_KAFKA__CONSUMER__LSST__GROUP_ID` | Yes | LSST consumer group ID. |
 | `BOOM_KAFKA__CONSUMER__LSST__USERNAME` | Yes | LSST SASL username. |
 | `BOOM_KAFKA__CONSUMER__WINTER__GROUP_ID` | Yes | WINTER consumer group ID (the broker itself comes from `BOOM_KAFKA__CONSUMER__ZTF__SERVER`). Kept here, not in the committed config, because the repo is public and the group ID is what an attacker would reuse to join our group and disrupt ingestion on the unauthenticated broker. |
+| `BOOM_KAFKA__CONSUMER__DECAM__SERVER` | No | DECam (DESIRT) Kafka bootstrap server. Setting it is what turns DECam on: the workflow then adds the `decam` compose profile, which starts the DECam consumer and scheduler. |
+| `BOOM_KAFKA__CONSUMER__DECAM__GROUP_ID` | No | DECam consumer group ID. The broker only accepts group IDs that start with the account name and a dash, e.g. `caltech-boom`. |
+| `BOOM_KAFKA__CONSUMER__DECAM__SECURITY_PROTOCOL` | No | `SASL_SSL` for the DESIRT broker. |
+| `BOOM_KAFKA__CONSUMER__DECAM__USERNAME` | No | DECam SASL username. |
+| `BOOM_KAFKA__CONSUMER__DECAM__SSL_CA_FILE` | No | Host path of the CA certificate that signs the DECam broker's certificate. It is mounted read-only into the DECam consumer. The certificate stays on the host, never in the repo. |
 | `KAFKA_EXTERNAL_HOST` | No | Public Kafka hostname for the EXTERNAL listener; defaults to `localhost`. |
 | `PROMETHEUS_USER` | Yes | Basic-auth user for the Prometheus endpoint. |
 | `GRAFANA_ADMIN_USER` | No | Grafana admin user; defaults to `admin`. |
@@ -287,6 +292,7 @@ volume paths, and the specific env keys injected into containers) belong here.
 | `KAFKA_READONLY_PASSWORD` | Yes | SASL read-only password for external Kafka access. |
 | `BOOM_KAFKA__CONSUMER__LSST__PASSWORD` | Yes | LSST SASL password. |
 | `BOOM_KAFKA__CONSUMER__ZTF__PASSWORD` | No | ZTF SASL password. Required when `BOOM_KAFKA__CONSUMER__ZTF__SECURITY_PROTOCOL` is a `SASL_*` one. |
+| `BOOM_KAFKA__CONSUMER__DECAM__PASSWORD` | No | DECam SASL password. Required when `BOOM_KAFKA__CONSUMER__DECAM__SERVER` is set. |
 | `PROMETHEUS_HASHED_PASSWORD` | Yes | bcrypt hash for Prometheus basic auth (store the raw hash; do **not** `$$`-escape it as you would in a `.env`). |
 | `GRAFANA_ADMIN_PASSWORD` | Yes | Grafana admin password. |
 | `SLACK_WEBHOOK_URL` | No | Grafana alerting webhook; blank uses a placeholder (alerts still fire, POSTs 404). |
@@ -504,3 +510,38 @@ Creating a user at Caltech does not itself create it at UMN, but the UMN side
 runs a recurring sync that carries accounts over, Babamul ones included, so
 both instances end up holding the same users.
 
+## Container images
+
+Release builds publish `ghcr.io/boom-astro/boom` (`.github/workflows/build.yaml`),
+multi-arch and with a build-provenance attestation. Nothing in it is specific to
+a deployment: everything comes from config and the environment at runtime.
+
+The deploy workflow **builds on the host** rather than pulling. Every compose
+service built from this repo sets `pull_policy: ${BOOM_PULL_POLICY:-build}`, so
+by default compose builds from the checkout even when an image of that name
+exists in a registry. With both an `image:` and a `build:` and no policy,
+compose pulls whenever the image is absent locally, which silently runs the
+registry's build instead of the checkout, and fails with "pull access denied"
+for an image that was never published.
+
+To run a published image instead, set both of these, in `.env` or as GitHub
+variables for the deploy workflow:
+
+- `BOOM_IMAGE` to the image, e.g. `ghcr.io/boom-astro/boom:v1.2.3`
+- `BOOM_PULL_POLICY` to `always` or `missing`
+
+Setting `BOOM_IMAGE` alone only changes the name the local build is tagged with.
+
+### The frontend is built per deployment
+
+No frontend image is published. `frontend/Dockerfile` bakes deployment-specific
+values in at build time: Vite inlines `VITE_PUBLIC_POSTHOG_KEY`,
+`VITE_PUBLIC_POSTHOG_HOST`, `VITE_PRERELEASE_MODE` and `VITE_KAFKA_DOMAIN` into
+the bundle, and the nginx API origin comes from the `BOOM_API__DOMAIN` build
+arg. An image built without them does not start: the entrypoint writes an empty
+origin into `proxy_pass`, which nginx rejects.
+
+`BOOM_FRONTEND_IMAGE` and `BOOM_FRONTEND_PULL_POLICY` are for running a frontend
+image built elsewhere *for the same deployment*. Making one image serve every
+deployment would mean building with placeholders and substituting them at
+container start, for the nginx origin and the bundle alike.

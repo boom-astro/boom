@@ -185,6 +185,39 @@ pub async fn get_test_auth(db: &Database) -> Result<AuthProvider, std::io::Error
 
 pub const PUBLIC_ROUTES: &[&str] = &["/docs", "/auth", "/"];
 
+/// Main-API routes a Babamul credential may authenticate on.
+///
+/// The admin surface is reached from the client, which holds a Babamul token,
+/// and requiring a second login for it would mean two sessions in one page. It
+/// is an allowlist rather than a blanket fallback because most of this API
+/// authenticates by middleware alone: `GET /users` and the survey routes take
+/// no user argument, so accepting a Babamul credential everywhere would hand
+/// every BOOM account's email and every private cutout to anyone who signed
+/// up, and Babamul signup is public. Every route here checks `is_admin` for
+/// itself through `api::admin::require_admin`.
+const BABAMUL_AUTHENTICATED_ROUTES: &[&str] = &[
+    "/tasks",
+    "/task-types",
+    "/data/mutations",
+    "/enrichment/status",
+    "/enrichment/sets",
+    "/catalogs/status",
+    "/catalogs/exports",
+];
+
+// Each entry covers that path and anything under it, so a route added at
+// `/tasks/{id}/something` is accepted without an edit here. That is deliberate
+// -- the admin page's surface grows under these prefixes -- but it means a
+// route added under one of them has to check `is_admin` for itself, because
+// reaching it needs only a Babamul account and signup is public.
+
+/// Whether a Babamul credential is accepted on this main-API path.
+fn accepts_babamul_credentials(path: &str) -> bool {
+    BABAMUL_AUTHENTICATED_ROUTES
+        .iter()
+        .any(|allowed| path == *allowed || path.starts_with(&format!("{allowed}/")))
+}
+
 pub async fn auth_middleware(
     req: ServiceRequest,
     next: Next<impl MessageBody>,
@@ -216,8 +249,28 @@ pub async fn auth_middleware(
                     // inject the user in the request
                     req.extensions_mut().insert(user);
                 }
-                Err(_) => {
+                // Not a main-API credential. On the admin surface it may still
+                // be a Babamul one; everywhere else the rejection stands, since
+                // most routes here authenticate by middleware alone and would
+                // otherwise accept anyone who signed up for Babamul.
+                Err(_) if !accepts_babamul_credentials(req.path()) => {
                     return Err(actix_web::error::ErrorUnauthorized("Invalid token"));
+                }
+                Err(_) => {
+                    let db_app_data: Option<&web::Data<mongodb::Database>> = req.app_data();
+                    let Some(db) = db_app_data else {
+                        return Err(actix_web::error::ErrorInternalServerError(
+                            "Database connection not available",
+                        ));
+                    };
+                    match resolve_babamul_user(db, auth_app_data, token).await? {
+                        Some(user) => {
+                            req.extensions_mut().insert(user);
+                        }
+                        None => {
+                            return Err(actix_web::error::ErrorUnauthorized("Invalid token"));
+                        }
+                    }
                 }
             }
         }
@@ -228,6 +281,69 @@ pub async fn auth_middleware(
         }
     }
     next.call(req).await
+}
+
+/// Resolve a Babamul credential -- personal access token or JWT -- to its user.
+///
+/// `Ok(None)` means "not a Babamul credential"; an `Err` means it was one and
+/// was rejected, which the caller must not paper over by falling through.
+///
+/// `babamul_auth_middleware` still has its own copy of these rules. The two
+/// being parallel implementations of one thing is a standing invitation to
+/// drift, and the Babamul middleware should call this instead.
+async fn resolve_babamul_user(
+    db: &web::Data<mongodb::Database>,
+    auth: &web::Data<AuthProvider>,
+    token: &str,
+) -> Result<Option<BabamulUser>, Error> {
+    let collection: mongodb::Collection<BabamulUser> = db.collection("babamul_users");
+
+    let user = if let Some(secret) = token.strip_prefix("bbml_") {
+        // Expected format: the "bbml_" prefix plus a 36-char secret.
+        if secret.len() != 36 {
+            return Err(actix_web::error::ErrorUnauthorized(
+                "Invalid Babamul personal access token",
+            ));
+        }
+        let token_hash = hash_token(secret);
+        let now = flare::Time::now().to_utc().timestamp();
+        collection
+            .find_one_and_update(
+                doc! { "tokens.token_hash": &token_hash },
+                doc! { "$set": { "tokens.$[token].last_used_at": now } },
+            )
+            .with_options(
+                mongodb::options::FindOneAndUpdateOptions::builder()
+                    .array_filters(vec![doc! { "token.token_hash": &token_hash }])
+                    .build(),
+            )
+            .await
+            .map_err(|e| {
+                tracing::error!("Database error looking up token: {}", e);
+                actix_web::error::ErrorInternalServerError("Database error")
+            })?
+    } else {
+        let Ok(subject) = auth.validate_token(token).await else {
+            return Ok(None);
+        };
+        let Some(user_id) = subject.strip_prefix("babamul:") else {
+            return Ok(None);
+        };
+        collection
+            .find_one(doc! { "_id": user_id })
+            .await
+            .map_err(|e| {
+                tracing::error!("Database error fetching babamul user: {}", e);
+                actix_web::error::ErrorInternalServerError("Database error")
+            })?
+    };
+
+    match user {
+        Some(user) if !user.is_activated => Err(actix_web::error::ErrorForbidden(
+            "Account not activated. Please check your email for activation instructions.",
+        )),
+        other => Ok(other),
+    }
 }
 
 const BABAMUL_PUBLIC_ROUTES: &[&str] = &[
@@ -257,9 +373,18 @@ pub async fn babamul_auth_middleware(
     // than listed individually — the whole point of those endpoints is to run
     // before the caller has a token.
     if BABAMUL_PUBLIC_ROUTES.contains(&req.path()) || req.path().starts_with("/babamul/oauth/") {
+        if let Ok(user) = authenticate_babamul_user(&req).await {
+            req.extensions_mut().insert(user);
+        }
         return next.call(req).await;
     }
 
+    let user = authenticate_babamul_user(&req).await?;
+    req.extensions_mut().insert(user);
+    next.call(req).await
+}
+
+async fn authenticate_babamul_user(req: &ServiceRequest) -> Result<BabamulUser, Error> {
     let auth_app_data: &web::Data<AuthProvider> = match req.app_data() {
         Some(data) => data,
         None => {
@@ -333,17 +458,14 @@ pub async fn babamul_auth_middleware(
                                 "Account not activated. Please check your email for activation instructions.",
                             ));
                         }
-                        // Inject the user in the request
-                        req.extensions_mut().insert(user);
+                        Ok(user)
                     }
-                    Ok(None) => {
-                        return Err(actix_web::error::ErrorUnauthorized(
-                            "Invalid personal access token",
-                        ));
-                    }
+                    Ok(None) => Err(actix_web::error::ErrorUnauthorized(
+                        "Invalid personal access token",
+                    )),
                     Err(e) => {
                         tracing::error!("Database error looking up token: {}", e);
-                        return Err(actix_web::error::ErrorInternalServerError("Database error"));
+                        Err(actix_web::error::ErrorInternalServerError("Database error"))
                     }
                 }
             } else {
@@ -376,33 +498,89 @@ pub async fn babamul_auth_middleware(
                                         "Account not activated. Please check your email for activation instructions.",
                                     ));
                                 }
-                                // Inject the user in the request
-                                req.extensions_mut().insert(user);
+                                Ok(user)
                             }
-                            Ok(None) => {
-                                return Err(actix_web::error::ErrorUnauthorized(
-                                    "Babamul user not found",
-                                ));
-                            }
+                            Ok(None) => Err(actix_web::error::ErrorUnauthorized(
+                                "Babamul user not found",
+                            )),
                             Err(e) => {
                                 tracing::error!("Database error fetching babamul user: {}", e);
-                                return Err(actix_web::error::ErrorInternalServerError(
-                                    "Database error",
-                                ));
+                                Err(actix_web::error::ErrorInternalServerError("Database error"))
                             }
                         }
                     }
-                    Err(_) => {
-                        return Err(actix_web::error::ErrorUnauthorized("Invalid token"));
-                    }
+                    Err(_) => Err(actix_web::error::ErrorUnauthorized("Invalid token")),
                 }
             }
         }
-        _ => {
-            return Err(actix_web::error::ErrorUnauthorized(
-                "Missing or invalid Authorization header",
-            ));
+        _ => Err(actix_web::error::ErrorUnauthorized(
+            "Missing or invalid Authorization header",
+        )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_admin_surface_accepts_a_babamul_credential() {
+        // The reason the fallback exists: the client holds a Babamul token and
+        // these are the routes it reaches on this scope.
+        for path in [
+            "/tasks",
+            "/task-types",
+            "/tasks/abc123",
+            "/tasks/abc123/logs",
+            "/tasks/abc123/cancel",
+            "/data/mutations",
+            "/enrichment/status",
+            "/enrichment/sets/4/accept",
+            "/catalogs/status",
+            "/catalogs/exports",
+            "/catalogs/exports/LSPSC/part-0000.jsonl.gz",
+        ] {
+            assert!(
+                accepts_babamul_credentials(path),
+                "{path} is part of the admin surface"
+            );
         }
     }
-    next.call(req).await
+
+    #[test]
+    fn nothing_else_on_the_main_api_does() {
+        // These authenticate by middleware alone -- they take no user argument
+        // -- so accepting a Babamul credential here would hand every BOOM
+        // account's email and every private cutout to anyone who signed up.
+        for path in [
+            // These four took no user argument, so the middleware was the only
+            // thing standing in front of them.
+            "/users",
+            "/surveys/ztf/cutouts",
+            "/surveys/ztf/tracks/BT000001",
+            "/filters/schemas/ztf",
+            // And these check a main-API user, but there is still no reason for
+            // a Babamul credential to authenticate on them.
+            "/users/someone",
+            "/catalogs",
+            "/filters",
+            "/queries/count",
+            "/",
+        ] {
+            assert!(
+                !accepts_babamul_credentials(path),
+                "{path} must not accept a Babamul credential"
+            );
+        }
+    }
+
+    #[test]
+    fn a_prefix_is_not_a_path() {
+        // `/tasksomething` starts with `/tasks` as a string but is not under
+        // it, and a future `/catalogs/statuses` is not `/catalogs/status`.
+        assert!(!accepts_babamul_credentials("/tasksomething"));
+        assert!(!accepts_babamul_credentials("/catalogs/statuses"));
+        assert!(!accepts_babamul_credentials("/catalogs"));
+        assert!(!accepts_babamul_credentials("/enrichment"));
+    }
 }

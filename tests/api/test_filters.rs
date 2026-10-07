@@ -160,6 +160,49 @@ mod tests {
         cleanup_test_filter(&database, &filter_id).await;
     }
 
+    /// Test DELETE /filters/{id}
+    #[actix_rt::test]
+    async fn test_delete_filter() {
+        let (filter_id, token, database) = create_test_filter().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(database.clone()))
+                .app_data(web::Data::new(auth_app_data.clone()))
+                .wrap(from_fn(auth_middleware))
+                .service(routes::filters::delete_filter)
+                .service(routes::filters::get_filter),
+        )
+        .await;
+
+        let req = test::TestRequest::delete()
+            .uri(&format!("/filters/{}", filter_id))
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "Failed to delete filter: {:?}",
+            read_str_response(resp).await
+        );
+
+        let req = test::TestRequest::get()
+            .uri(&format!("/filters/{}", filter_id))
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        // Deleting it a second time finds nothing to delete.
+        let req = test::TestRequest::delete()
+            .uri(&format!("/filters/{}", filter_id))
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
     /// Test GET /filters/{id}
     #[actix_rt::test]
     async fn test_get_filter() {
