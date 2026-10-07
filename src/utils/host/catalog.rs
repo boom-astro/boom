@@ -104,6 +104,7 @@ pub fn galaxy_from_ned(doc: &Document, config: &HostGalaxyConfig) -> Option<Gala
         size_is_isophotal: true,
         diam_survey,
         orientation_is_nominal,
+        rex_snr_band: None,
     })
 }
 
@@ -119,22 +120,32 @@ const REX_TYPE: &str = "REX";
 
 /// Too small to separate from a point source, too faint to be reliably shaped,
 /// or blended enough to be a fragment of the galaxy it sits inside.
-fn rejected_as_marginal_rex(doc: &Document, config: &HostGalaxyConfig) -> bool {
+fn credible_rex_band(doc: &Document, config: &HostGalaxyConfig) -> Option<&'static str> {
     if opt_f64(doc, "shape_r").unwrap_or(0.0) < config.rex_min_shape_r_arcsec {
-        return true;
+        return None;
     }
-    // Absent columns mean no S/N was measured, which must not reject the row.
-    // A measured flux at or below zero is different: the row was looked at and
-    // found to have no positive signal, so it cannot be a host.
-    if let (Some(flux), Some(ivar)) = (opt_f64(doc, "flux_r"), opt_f64(doc, "flux_ivar_r")) {
-        if flux <= 0.0 {
-            return true;
-        }
-        if ivar > 0.0 && flux * ivar.sqrt() < config.rex_min_snr {
-            return true;
-        }
+    let (band, snr) = rex_snr_band(doc)?;
+    if snr <= 0.0 || snr < config.rex_min_snr {
+        return None;
     }
-    opt_f64(doc, "fracflux_r").is_some_and(|f| f > config.rex_max_fracflux)
+    if opt_f64(doc, &format!("fracflux_{band}")).is_some_and(|f| f > config.rex_max_fracflux) {
+        return None;
+    }
+    Some(band)
+}
+
+fn rex_snr_band(doc: &Document) -> Option<(&'static str, f64)> {
+    band_snr(doc, "r").map(|snr| ("r", snr)).or_else(|| {
+        ["g", "i", "z"]
+            .into_iter()
+            .filter_map(|band| band_snr(doc, band).map(|snr| (band, snr)))
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+    })
+}
+
+fn band_snr(doc: &Document, band: &str) -> Option<f64> {
+    let ivar = opt_f64(doc, &format!("flux_ivar_{band}")).filter(|v| *v > 0.0)?;
+    Some(opt_f64(doc, &format!("flux_{band}"))? * ivar.sqrt())
 }
 
 fn isophotal_semi_major_for(
@@ -174,9 +185,10 @@ pub fn galaxy_from_ls_dr10(doc: &Document, config: &HostGalaxyConfig) -> Option<
     let shape_e1 = opt_f64(doc, "shape_e1").unwrap_or(0.0);
     let shape_e2 = opt_f64(doc, "shape_e2").unwrap_or(0.0);
 
-    if objtype.as_deref() == Some(REX_TYPE) && rejected_as_marginal_rex(doc, config) {
-        return None;
-    }
+    let rex_snr_band = match objtype.as_deref() {
+        Some(REX_TYPE) => Some(credible_rex_band(doc, config)?.to_string()),
+        _ => None,
+    };
 
     let mut ellipse =
         Ellipse::from_tractor(shape_r, shape_e1, shape_e2, config.min_axis_arcsec).ok()?;
@@ -219,6 +231,7 @@ pub fn galaxy_from_ls_dr10(doc: &Document, config: &HostGalaxyConfig) -> Option<
         size_is_isophotal,
         diam_survey: None,
         orientation_is_nominal: false,
+        rex_snr_band,
     })
 }
 
@@ -284,8 +297,9 @@ mod tests {
             "flux_r": 100.0,
             "flux_ivar_r": 100.0,
         };
-        assert!(
-            !rejected_as_marginal_rex(&usable, &config),
+        assert_eq!(
+            credible_rex_band(&usable, &config),
+            Some("r"),
             "a bright, well-measured REX should survive"
         );
 
@@ -293,14 +307,13 @@ mod tests {
             let mut doc = usable.clone();
             doc.insert("flux_r", flux);
             assert!(
-                rejected_as_marginal_rex(&doc, &config),
+                credible_rex_band(&doc, &config).is_none(),
                 "flux_r {flux} was accepted"
             );
         }
 
-        // An absent measurement still must not reject the row.
         let unmeasured = doc! { "shape_r": config.rex_min_shape_r_arcsec + 1.0 };
-        assert!(!rejected_as_marginal_rex(&unmeasured, &config));
+        assert!(credible_rex_band(&unmeasured, &config).is_none());
     }
 
     #[test]
@@ -692,20 +705,20 @@ mod legacy_shape_tests {
     }
 
     #[test]
-    fn test_rex_without_a_signal_to_noise_measurement_is_still_judged_on_size() {
-        for key in ["flux_r", "flux_ivar_r"] {
-            let mut d = good_rex();
-            d.remove(key);
-            assert!(
-                accepted(&d),
-                "REX missing {key} has no S/N to judge, so size and blending decide"
-            );
-        }
+    fn test_rex_without_r_is_judged_in_its_best_other_band() {
+        let mut d = good_rex();
+        d.insert("flux_ivar_r", 0.0_f64);
+        assert!(!accepted(&d), "a REX observed in no band is dropped");
 
-        let mut small = good_rex();
-        small.remove("flux_ivar_r");
-        small.insert("shape_r", 0.05_f64);
-        assert!(!accepted(&small), "an unmeasurable REX is still too small");
+        d.insert("flux_g", 3.0_f64);
+        d.insert("flux_ivar_g", 1.0_f64);
+        d.insert("flux_z", 50.0_f64);
+        d.insert("flux_ivar_z", 1.0_f64);
+        let g = galaxy_from_ls_dr10(&d, &HostGalaxyConfig::default()).expect("kept on z");
+        assert_eq!(g.rex_snr_band.as_deref(), Some("z"));
+
+        d.insert("fracflux_z", 0.9_f64);
+        assert!(!accepted(&d), "blending is judged in the S/N band");
     }
 
     #[test]

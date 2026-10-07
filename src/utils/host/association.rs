@@ -19,6 +19,8 @@ pub struct StoredHostCandidate {
     /// False when the catalogue gave a real position angle. 2MASS diameters carry
     /// a fixed 90 degrees, which makes `d_dlr` directionally meaningless.
     pub orientation_is_nominal: bool,
+    /// REX only: band of the S/N and blending cuts, r unless r was not observed.
+    pub rex_snr_band: Option<String>,
     pub ra: f64,
     pub dec: f64,
     /// Angular separation from the transient, arcsec.
@@ -68,6 +70,7 @@ impl HostGalaxyAssociation {
                 objtype: c.galaxy.objtype.clone(),
                 size_is_isophotal: c.galaxy.size_is_isophotal,
                 orientation_is_nominal: c.galaxy.orientation_is_nominal,
+                rex_snr_band: c.galaxy.rex_snr_band.clone(),
                 ra: c.galaxy.ra,
                 dec: c.galaxy.dec,
                 sep_arcsec: c.separation_arcsec,
@@ -136,6 +139,7 @@ mod tests {
             size_is_isophotal: true,
             diam_survey: None,
             orientation_is_nominal: false,
+            rex_snr_band: None,
         }
     }
 
