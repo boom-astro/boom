@@ -215,11 +215,12 @@ workers:
 # stored as `objtype`):
 #   NED      -> Diam, Diam_ba, Diam_pa, Diam_survey, DistMpc, DistMpc_method, z
 #   LSDR10   -> shape_r, shape_e1, shape_e2, objtype, flux_r, and where the
-#               ingest provides them sersic, flux_ivar_r, fracflux_r
+#               ingest provides them sersic, flux_{g,i,z}, flux_ivar_{r,g,i,z},
+#               fracflux_{r,g,i,z}
 #
-# The three optional Legacy columns degrade one step each rather than failing:
-# no `sersic` leaves a SER row on its half-light radius, no `flux_ivar_r` leaves
-# a REX row judged on size and blending alone, no `fracflux_r` reads as unblended.
+# No `sersic` leaves a SER row on its half-light radius, no `fracflux_<band>`
+# reads as unblended. A REX row is judged in r, or in the best of g, i, z when r
+# was not observed, and is dropped when no band has a `flux_ivar_<band>`.
 host_galaxy:
   enabled: true
   ned_catalog: NED
@@ -470,6 +471,12 @@ crossmatch:
         sersic: 1
         flux_ivar_r: 1
         fracflux_r: 1
+        flux_ivar_g: 1
+        flux_ivar_i: 1
+        flux_ivar_z: 1
+        fracflux_g: 1
+        fracflux_i: 1
+        fracflux_z: 1
     AllWISE:
       radius: 2.0
       use_distance: false
@@ -724,6 +731,12 @@ crossmatch:
         sersic: 1
         flux_ivar_r: 1
         fracflux_r: 1
+        flux_ivar_g: 1
+        flux_ivar_i: 1
+        flux_ivar_z: 1
+        fracflux_g: 1
+        fracflux_i: 1
+        fracflux_z: 1
   decam: {}
   winter:
     Gaia_DR3:
@@ -958,6 +971,12 @@ crossmatch:
         sersic: 1
         flux_ivar_r: 1
         fracflux_r: 1
+        flux_ivar_g: 1
+        flux_ivar_i: 1
+        flux_ivar_z: 1
+        fracflux_g: 1
+        fracflux_i: 1
+        fracflux_z: 1
     watchlist_wtp:
       radius: 2.75 # 2.75 arcseconds, one WISE pixel
       use_distance: false
