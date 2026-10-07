@@ -35,8 +35,6 @@ workers:
 
 crossmatch:
   ztf:
-    # CatWISE2020 is post-cryogenic and carries only W1/W2; AllWISE is the source
-    # of W3/W4, which ORACLE's static feature vector expects.
     AllWISE:
       radius: 2.0
       use_distance: false
