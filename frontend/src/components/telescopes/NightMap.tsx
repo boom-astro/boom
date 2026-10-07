@@ -479,8 +479,8 @@ export default function NightMap({ sites, timeRef, time }: {
       {labels.map(({ site, left, top }) => (
         <div
           key={site.id}
-          className="pointer-events-none absolute hidden translate-x-4 -translate-y-1/2 sm:block"
-          style={{ left: `${left}%`, top: `${top}%` }}
+          className="pointer-events-none absolute mr-4 hidden -translate-y-1/2 sm:block"
+          style={{ right: `${100 - left}%`, top: `${top}%` }}
         >
           <div className="bg-background/80 text-foreground rounded-md border px-2 py-1 text-[11px] leading-tight shadow-lg backdrop-blur-sm">
             <div className="font-medium">{site.name}</div>
