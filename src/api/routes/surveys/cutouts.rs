@@ -1,4 +1,4 @@
-use crate::api::cutouts::{AlertCandidOnly, CutoutQuery, WhichCutouts};
+use crate::api::cutouts::{AlertJdOnly, CutoutQuery, WhichCutouts};
 use crate::api::models::response;
 use crate::utils::cutouts::{CutoutStorage, CutoutStorageError};
 use crate::utils::enums::Survey;
@@ -40,6 +40,7 @@ pub async fn get_cutouts(
             return response::internal_error("cutout storage not available for this survey");
         }
     };
+    let alert_collection = db.collection::<AlertJdOnly>(&format!("{}_alerts", survey));
 
     if let Some(candid) = query.candid {
         let cutouts = match cutout_storage.retrieve_cutouts(candid, false).await {
@@ -52,8 +53,19 @@ pub async fn get_cutouts(
                 return response::internal_error("error retrieving cutouts from storage");
             }
         };
+        let jd = match alert_collection
+            .find_one(doc! { "_id": candid })
+            .projection(doc! { "_id": 1, "candidate.jd": 1 })
+            .await
+        {
+            Ok(alert) => alert.map(|alert| alert.candidate.jd),
+            Err(error) => {
+                return response::internal_error(&format!("error getting documents: {}", error));
+            }
+        };
         let resp = serde_json::json!({
             "candid": candid,
+            "jd": jd,
             "cutoutScience": BASE64_STANDARD.encode(&cutouts.cutout_science),
             "cutoutTemplate": BASE64_STANDARD.encode(&cutouts.cutout_template),
             "cutoutDifference": BASE64_STANDARD.encode(&cutouts.cutout_difference),
@@ -62,7 +74,6 @@ pub async fn get_cutouts(
     }
 
     if let Some(object_id) = &query.object_id {
-        let alert_collection = db.collection::<AlertCandidOnly>(&format!("{}_alerts", survey));
         // here we first find the alerts matching the object id,
         // sorted according to the "which" parameter (default to brightest),
         // and finally we get the cutouts for the selected alert
@@ -94,13 +105,13 @@ pub async fn get_cutouts(
         if let Some(band) = &query.band {
             filter.insert("candidate.band", band.to_string());
         }
-        let candid = match alert_collection
+        let (candid, jd) = match alert_collection
             .find_one(filter)
-            .projection(doc! { "_id": 1 })
+            .projection(doc! { "_id": 1, "candidate.jd": 1 })
             .with_options(find_options)
             .await
         {
-            Ok(Some(alert)) => alert.candid,
+            Ok(Some(alert)) => (alert.candid, alert.candidate.jd),
             Ok(None) => {
                 return response::not_found(&format!("no alerts found for objectId {}", object_id));
             }
@@ -125,6 +136,7 @@ pub async fn get_cutouts(
 
         let resp = serde_json::json!({
             "candid": candid,
+            "jd": jd,
             "cutoutScience": BASE64_STANDARD.encode(&cutouts.cutout_science),
             "cutoutTemplate": BASE64_STANDARD.encode(&cutouts.cutout_template),
             "cutoutDifference": BASE64_STANDARD.encode(&cutouts.cutout_difference),

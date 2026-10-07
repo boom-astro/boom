@@ -19,6 +19,18 @@ pub struct AlertCandidOnly {
     pub candid: i64,
 }
 
+#[derive(Debug, serde::Deserialize)]
+pub struct AlertJdOnly {
+    #[serde(rename = "_id")]
+    pub candid: i64,
+    pub candidate: CandidateJdOnly,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct CandidateJdOnly {
+    pub jd: f64,
+}
+
 #[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
 pub struct CutoutQuery {
     pub candid: Option<i64>,
