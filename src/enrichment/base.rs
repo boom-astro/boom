@@ -119,6 +119,11 @@ pub trait EnrichmentWorker {
 
     /// Forcibly disable Babamul on this worker, regardless of config.
     fn disable_babamul(&mut self);
+
+    /// Called when the input queue comes up empty, before the worker sleeps.
+    /// Background catch-up that would otherwise compete with live batches
+    /// belongs here. Must not fail: an idle worker has nothing to report.
+    async fn on_idle(&mut self) {}
 }
 
 /// Fetch alerts from the database given a list of candids and an aggregation pipeline.
@@ -166,7 +171,7 @@ pub async fn fetch_alerts<T: for<'a> serde::Deserialize<'a>>(
 #[tokio::main]
 // No `#[instrument]`: this is the long-lived enrichment worker loop; a
 // wrapping span would put every per-alert span under a single root trace.
-pub async fn run_enrichment_worker<T: EnrichmentWorker>(
+pub async fn run_enrichment_worker<T: EnrichmentWorker + Send>(
     mut receiver: mpsc::Receiver<WorkerCmd>,
     config_path: &str,
     worker_id: Uuid,
@@ -259,6 +264,7 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker>(
         if candids.is_empty() {
             debug!(queue = %input_queue, "queue empty, sleeping 500ms");
             ACTIVE.add(-1, &active_attrs);
+            enrichment_worker.on_idle().await;
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             command_check_countdown = 0;
             continue;

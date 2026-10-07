@@ -28,16 +28,27 @@ use super::proto::schema::{
 };
 
 /// One embedding to be written — becomes one row in the collection.
-#[derive(Debug, Clone)]
+///
+/// Also a protobuf message, which is how [`super::backup`] stores it. The
+/// derive supplies `Debug` and `Default`.
+///
+/// Fields are encoded in tag order, so `object_id` and `embedding` take the
+/// last tags: a stored entry cut short anywhere is then missing one of them,
+/// which `backup::decode` rejects.
+#[derive(Clone, PartialEq, prost::Message)]
 pub struct EmbeddingRow {
     /// Survey object identifier, the collection's primary key.
+    #[prost(string, tag = "3")]
     pub object_id: String,
     /// The L2-normalized fusion embedding; its length must equal the
     /// collection's configured `dim`.
+    #[prost(float, repeated, tag = "4")]
     pub embedding: Vec<f32>,
     /// Candid of the alert this embedding was computed from.
+    #[prost(int64, tag = "1")]
     pub candid: i64,
     /// Julian date of that alert.
+    #[prost(double, tag = "2")]
     pub jd: f64,
 }
 
@@ -450,7 +461,10 @@ mod tests {
 
         let kept = latest_per_object(&rows);
         assert_eq!(kept_ids(&rows), vec!["ZTF_A", "ZTF_B", "ZTF_C"]);
-        assert_eq!(kept[0].candid, 30, "A kept its slot but took the newer row");
+        assert_eq!(
+            kept[0].candid, 30,
+            "A should keep its slot but take the newer row"
+        );
         assert_eq!(kept[1].candid, 20);
         assert_eq!(kept[2].candid, 40);
     }

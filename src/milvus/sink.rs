@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use tracing::{debug, info, warn};
 
+use super::backup::BackupQueue;
 use super::client::{MilvusClient, MilvusError};
 use super::insert::EmbeddingRow;
 use crate::conf::MilvusConfig;
@@ -18,6 +19,10 @@ const COOLDOWN_BASE: Duration = Duration::from_secs(30);
 
 /// Upper bound on the pause between attempts.
 const COOLDOWN_MAX: Duration = Duration::from_secs(300);
+
+/// How long an idle worker waits before checking the backup queue again
+/// after finding it empty, so idle workers do not poll Valkey every tick.
+const IDLE_DRAIN_PAUSE: Duration = Duration::from_secs(30);
 
 /// Pause before the Nth consecutive retry: 30s, 60s, 120s, 240s, capped at
 /// [`COOLDOWN_MAX`].
@@ -41,6 +46,12 @@ pub struct MilvusSink {
     consecutive_failures: u32,
     /// While in the future, uploads are skipped without touching the network.
     retry_at: Option<Instant>,
+    /// Holds embeddings the breaker turned away. `None` when the backup
+    /// queue is off, in which case rejected rows are dropped.
+    queue: Option<BackupQueue>,
+    /// While in the future, idle drains skip the queue: it was last found
+    /// empty or unreadable.
+    idle_drain_at: Option<Instant>,
 }
 
 impl MilvusSink {
@@ -49,12 +60,14 @@ impl MilvusSink {
     ///
     /// This is deliberately infallible: an operator enabling Milvus must not be
     /// able to take enrichment down by pointing it at a server that is off.
-    pub async fn connect_or_degrade(config: &MilvusConfig) -> Self {
+    pub async fn connect_or_degrade(config: &MilvusConfig, queue: Option<BackupQueue>) -> Self {
         let mut sink = Self {
             config: config.clone(),
             client: None,
             consecutive_failures: 0,
             retry_at: None,
+            queue,
+            idle_drain_at: None,
         };
 
         if !config.enabled {
@@ -110,40 +123,127 @@ impl MilvusSink {
         self.retry_at = None;
     }
 
-    /// Upsert a batch, skipping the attempt while the breaker is open.
+    /// Buffer rows the sink could not upload. A queue failure is swallowed:
+    /// Valkey being down too does not justify failing enrichment.
+    async fn buffer(&mut self, rows: &[EmbeddingRow]) {
+        let Some(queue) = self.queue.as_mut() else {
+            return;
+        };
+        match queue.push(rows).await {
+            Ok(()) => debug!(rows = rows.len(), "buffered embeddings for a later retry"),
+            Err(e) => warn!("could not buffer {} embeddings: {}", rows.len(), e),
+        }
+    }
+
+    /// Upsert a batch, buffering it instead while the breaker is open.
     ///
     /// Never returns an error: failures are recorded and logged, because the
     /// alerts these embeddings came from are already persisted in Mongo.
     pub async fn upsert(&mut self, rows: &[EmbeddingRow]) {
-        if rows.is_empty() || !self.is_ready() {
+        if rows.is_empty() || !self.config.enabled {
             return;
         }
 
-        if self.client.is_none() {
-            match MilvusClient::connect(&self.config).await {
-                Ok(client) => {
-                    self.client = Some(client);
-                }
-                Err(e) => {
-                    self.record_failure("reconnect to milvus", e);
-                    return;
-                }
-            }
+        // Breaker open: hold the rows rather than pay a timeout.
+        if !self.is_ready() {
+            self.buffer(rows).await;
+            return;
         }
 
-        let client = self
-            .client
-            .as_mut()
-            .expect("client was just connected above");
+        let Some(client) = self.connected().await else {
+            self.buffer(rows).await;
+            return;
+        };
         match client.upsert_embeddings(rows).await {
             Ok(count) => {
                 debug!("upserted {} fusion embeddings to milvus", count);
                 self.record_success();
+                self.drain_some().await;
             }
             Err(e) => {
                 let what = format!("upsert {} fusion embeddings", rows.len());
                 self.record_failure(&what, e);
+                self.buffer(rows).await;
             }
+        }
+    }
+
+    /// The live client, redialing if a failure dropped it. A failed redial
+    /// trips the breaker and returns `None`.
+    async fn connected(&mut self) -> Option<&mut MilvusClient> {
+        if self.client.is_none() {
+            match MilvusClient::connect(&self.config).await {
+                Ok(client) => self.client = Some(client),
+                Err(e) => {
+                    self.record_failure("reconnect to milvus", e);
+                    return None;
+                }
+            }
+        }
+        self.client.as_mut()
+    }
+
+    /// Replay part of the backlog while the worker has no live alerts.
+    /// Once the queue is found empty, further idle drains wait [`IDLE_DRAIN_PAUSE`].
+    pub async fn drain_when_idle(&mut self) {
+        if self.queue.is_none() || !self.is_ready() {
+            return;
+        }
+        if self.idle_drain_at.is_some_and(|at| Instant::now() < at) {
+            return;
+        }
+        if self.connected().await.is_none() {
+            return;
+        }
+        if !self.drain_some().await {
+            self.idle_drain_at = Some(Instant::now() + IDLE_DRAIN_PAUSE);
+        }
+    }
+
+    /// Replay a batch of embeddings from the Valkey backup queue.
+    ///
+    /// Returns whether the queue had rows to replay. True even when the replay
+    /// fails, since the rows are re-buffered and the breaker paces the retry.
+    /// False when nothing was found: the queue was empty or unreadable, or
+    /// there was no queue or client to drain with.
+    async fn drain_some(&mut self) -> bool {
+        let (Some(queue), Some(client)) = (self.queue.as_mut(), self.client.as_mut()) else {
+            return false;
+        };
+
+        let batch = match queue.take(self.config.backup_queue.drain_rows).await {
+            Ok(batch) if batch.is_empty() => return false,
+            Ok(batch) => batch,
+            Err(e) => {
+                warn!("could not read the milvus backup queue: {}", e);
+                return false;
+            }
+        };
+
+        match client.upsert_embeddings(&batch).await {
+            Ok(count) => {
+                // An idle drain can be the first call after an outage.
+                self.record_success();
+                let remaining = self.queue_len().await;
+                info!(
+                    replayed = count,
+                    remaining, "replayed buffered embeddings to milvus"
+                );
+            }
+            Err(e) => {
+                let what = format!("replay {} buffered embeddings", batch.len());
+                self.record_failure(&what, e);
+                self.buffer(&batch).await;
+            }
+        }
+        true
+    }
+
+    /// Rows still waiting. Reports 0 on failure; only used for a log line.
+    async fn queue_len(&mut self) -> usize {
+        match self.queue.as_mut() {
+            Some(queue) => queue.pending().await.unwrap_or(0),
+            None => 0,
         }
     }
 }
@@ -164,6 +264,8 @@ mod tests {
             client: None,
             consecutive_failures: 0,
             retry_at: None,
+            queue: None,
+            idle_drain_at: None,
         }
     }
 
@@ -193,7 +295,10 @@ mod tests {
     #[test]
     fn a_failure_pauses_further_attempts() {
         let mut sink = sink(true);
-        assert!(sink.is_ready(), "a fresh enabled sink attempts uploads");
+        assert!(
+            sink.is_ready(),
+            "a fresh enabled sink should attempt uploads"
+        );
 
         sink.record_failure("connect", MilvusError::NotEnabled);
         assert!(!sink.is_ready());
@@ -204,7 +309,6 @@ mod tests {
         assert!(sink.is_enabled());
     }
 
-    /// Recovery must not need a worker restart.
     #[test]
     fn the_breaker_closes_once_the_cooldown_passes() {
         let mut sink = sink(true);
@@ -212,7 +316,10 @@ mod tests {
         assert!(!sink.is_ready());
 
         sink.retry_at = Some(Instant::now() - Duration::from_secs(1));
-        assert!(sink.is_ready(), "the cooldown has elapsed");
+        assert!(
+            sink.is_ready(),
+            "the breaker should close once the cooldown has elapsed"
+        );
     }
 
     /// Consecutive failures back off; a success resets the budget so a later,
@@ -228,6 +335,19 @@ mod tests {
         assert_eq!(sink.consecutive_failures, 0);
         assert!(sink.retry_at.is_none());
         assert!(sink.is_ready());
+    }
+
+    /// Idle workers tick every 500ms; with nothing to replay they must not
+    /// dial Milvus, or an outage would trip the breaker with no live traffic.
+    #[tokio::test]
+    async fn an_idle_drain_without_a_queue_never_dials() {
+        let mut sink = sink(true);
+        sink.drain_when_idle().await;
+        assert!(sink.client.is_none(), "an idle drain should not connect");
+        assert_eq!(
+            sink.consecutive_failures, 0,
+            "an idle drain should not record a failure"
+        );
     }
 
     /// A failure drops the channel; a broken tonic channel does not heal, so

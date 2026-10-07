@@ -9,7 +9,7 @@ use crate::enrichment::{
     },
     EnrichmentWorker, EnrichmentWorkerError, LsstMatch, LsstPhotometry,
 };
-use crate::milvus::{EmbeddingRow, MilvusSink};
+use crate::milvus::{BackupQueue, EmbeddingRow, MilvusSink};
 use crate::utils::cutouts::{AlertCutout, CutoutStorage};
 use crate::utils::db::mongify;
 use crate::utils::enums::Survey;
@@ -701,15 +701,27 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             .enrichment
             .batch_size;
 
-        // Connect to Milvus only when the integration is switched on. The
-        // collection itself must already be provisioned (via `milvus_check
-        // --create-collection`); the worker never creates it, so that the many
-        // enrichment workers don't race to create the same collection.
-        //
-        // A connection failure degrades rather than propagating: Milvus is an
-        // optional add-on and Mongo holds the enriched alerts, so an outage
-        // must not take the enrichment worker (and with it the pool slot) down.
-        let milvus = MilvusSink::connect_or_degrade(&config.milvus).await;
+        let milvus_queue = if config.milvus.enabled && config.milvus.backup_queue.enabled {
+            match config.build_redis().await {
+                Ok(con) => Some(BackupQueue::new(
+                    con,
+                    "ZTF_milvus_embedding_backup_queue".to_string(),
+                    config.milvus.backup_queue.max_rows,
+                )),
+                Err(error) => {
+                    warn!(
+                        %error,
+                        "could not open the milvus backup queue; embeddings \
+                         rejected during an outage will be dropped"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        let milvus = MilvusSink::connect_or_degrade(&config.milvus, milvus_queue).await;
 
         Ok(ZtfEnrichmentWorker {
             input_queue,
@@ -742,6 +754,10 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
 
     fn output_queue_name(&self) -> String {
         self.output_queue.clone()
+    }
+
+    async fn on_idle(&mut self) {
+        self.milvus.drain_when_idle().await;
     }
 
     #[instrument(skip_all, err)]
