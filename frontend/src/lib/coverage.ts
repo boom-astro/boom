@@ -70,6 +70,7 @@ export const CATALOGS: Catalog[] = [
     extent: "All sky",
     footprint: {},
   },
+  { id: "AllWISE", name: "AllWISE", description: "Mid-infrared photometry from WISE", extent: "All sky", footprint: {} },
   {
     id: "GALEX",
     name: "GALEX",
