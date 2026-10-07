@@ -1658,6 +1658,13 @@ pub struct LsstFilterMatch {
 
 #[serdavro]
 #[derive(Debug, Deserialize, Serialize)]
+pub struct DecamFilterMatch {
+    pub prv_candidates: Vec<DecamCandidate>,
+    pub fp_hists: Vec<DecamForcedPhot>,
+}
+
+#[serdavro]
+#[derive(Debug, Deserialize, Serialize)]
 /// ZTF data available at filtering time
 pub struct ZtfAlertToFilter {
     pub candid: i64,
@@ -1676,6 +1683,8 @@ pub struct ZtfAlertToFilter {
     pub aliases: ZtfAliases,
     #[serde(rename = "LSST")]
     pub lsst: Option<LsstFilterMatch>,
+    #[serde(rename = "DECAM")]
+    pub decam: Option<DecamFilterMatch>,
     pub host_galaxy: Option<HostGalaxyAssociation>,
 }
 
@@ -1697,6 +1706,8 @@ pub struct LsstAlertToFilter {
     pub aliases: LsstAliases,
     #[serde(rename = "ZTF")]
     pub ztf: Option<ZtfFilterMatch>,
+    #[serde(rename = "DECAM")]
+    pub decam: Option<DecamFilterMatch>,
     pub host_galaxy: Option<HostGalaxyAssociation>,
 }
 

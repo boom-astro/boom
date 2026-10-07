@@ -9,12 +9,12 @@ use crate::enrichment::{
     create_lsst_alert_pipeline, fetch_alerts, LsstMatch, LsstPhotometry, ZtfMatch,
 };
 use crate::filter::{
-    add_decam_survey_match, build_loaded_filters, build_ztf_aux_data, decam_survey_match,
-    insert_ztf_aux_pipeline_if_needed, record_filter_result, run_filter,
-    update_aliases_index_multiple, uses_field_in_filter, validate_filter_pipeline,
-    watchlist_projections, ztf_survey_match, Alert, AlertHostGalaxy, Classification, DecamMatch,
-    Filter, FilterError, FilterResults, FilterWorker, FilterWorkerError, LoadedFilter, Origin,
-    Photometry, SurveyMatch, SurveyMatches,
+    add_decam_survey_match, build_decam_aux_data, build_loaded_filters, build_ztf_aux_data,
+    decam_survey_match, insert_decam_aux_pipeline_if_needed, insert_ztf_aux_pipeline_if_needed,
+    record_filter_result, run_filter, update_aliases_index_multiple, uses_field_in_filter,
+    validate_filter_pipeline, watchlist_projections, ztf_survey_match, Alert, AlertHostGalaxy,
+    Classification, DecamMatch, Filter, FilterError, FilterResults, FilterWorker,
+    FilterWorkerError, LoadedFilter, Origin, Photometry, SurveyMatch, SurveyMatches,
 };
 use crate::utils::cutouts::CutoutStorage;
 use crate::utils::db::{fetch_timeseries_op, get_array_dict_element};
@@ -350,6 +350,8 @@ pub async fn build_lsst_filter_pipeline(
     // ZTF data products
     let (use_aliases_index, mut ztf_insert_aux_pipeline, ztf_aux_add_fields) =
         build_ztf_aux_data(use_aliases_index, filter_pipeline, permissions);
+    let (use_aliases_index, mut decam_insert_aux_pipeline, decam_aux_add_fields) =
+        build_decam_aux_data(use_aliases_index, filter_pipeline, permissions);
 
     let mut aux_add_fields = doc! {
         "aux": mongodb::bson::Bson::Null,
@@ -460,6 +462,11 @@ pub async fn build_lsst_filter_pipeline(
                 &mut pipeline,
                 &mut ztf_insert_aux_pipeline,
                 &ztf_aux_add_fields,
+            );
+            insert_decam_aux_pipeline_if_needed(
+                &mut pipeline,
+                &mut decam_insert_aux_pipeline,
+                &decam_aux_add_fields,
             );
         }
 
