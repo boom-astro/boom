@@ -184,7 +184,7 @@ impl MilvusSink {
     }
 
     /// Replay part of the backlog while the worker has no live alerts.
-    /// Once the queue is found empty,further idle drains wait [`IDLE_DRAIN_PAUSE`].
+    /// Once the queue is found empty, further idle drains wait [`IDLE_DRAIN_PAUSE`].
     pub async fn drain_when_idle(&mut self) {
         if self.queue.is_none() || !self.is_ready() {
             return;
@@ -200,15 +200,14 @@ impl MilvusSink {
         }
     }
 
-    /// Replay `backup_queue.drain_rows` of the backlog, so catching up cannot
-    /// starve live batches. Rows that fail are re-buffered, where a newer
-    /// alert for the same object may have landed meanwhile and will win on
-    /// `jd`.
+    /// Replay a batch of embeddings from the Valkey backup queue.
     ///
-    /// Returns whether any rows were taken; false means the queue was empty
-    /// or unreadable.
+    /// Returns whether the queue had rows to replay. True even when the replay
+    /// fails, since the rows are re-buffered and the breaker paces the retry.
+    /// False when nothing was found: the queue was empty or unreadable, or
+    /// there was no queue or client to drain with.
     async fn drain_some(&mut self) -> bool {
-        let Some(queue) = self.queue.as_mut() else {
+        let (Some(queue), Some(client)) = (self.queue.as_mut(), self.client.as_mut()) else {
             return false;
         };
 
@@ -219,12 +218,6 @@ impl MilvusSink {
                 warn!("could not read the milvus backup queue: {}", e);
                 return false;
             }
-        };
-
-        let Some(client) = self.client.as_mut() else {
-            // Lost the connection between the upload and here; put them back.
-            self.buffer(&batch).await;
-            return true;
         };
 
         match client.upsert_embeddings(&batch).await {
