@@ -8,6 +8,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import NightMap from "@/components/telescopes/NightMap";
 import NightTimeline from "@/components/telescopes/NightTimeline";
 import api, { type NightlyStat } from "@/lib/api";
+import { CATALOG_COLOR, CATALOGS, type Coverage } from "@/lib/coverage";
 import { nextCrossing, skyState, sunAltitudeAt, type SkyState } from "@/lib/sun";
 import { formatClock, NIGHT_COLOR, SITES, type Site, type Telescope } from "@/lib/telescopes";
 
@@ -28,7 +29,27 @@ const NIGHT_CONVENTION =
   "Alerts are grouped by observing night, local noon to local noon at the observatory. " +
   "A night is labeled by its evening date.";
 
+const COVERAGE_CONVENTION =
+  "Click a telescope or a catalog to show the sky it covers. The map shades the places where " +
+  "that part of the sky is overhead at the selected time, so footprints that follow right ascension " +
+  "drift west as the Earth turns.";
+
 const TELESCOPES = SITES.flatMap((site) => site.telescopes.map((telescope) => ({ site, telescope })));
+
+const COVERAGES = new Map<string, Coverage>([
+  ...TELESCOPES.map(({ site, telescope }): [string, Coverage] => [telescope.id, {
+    id: telescope.id,
+    color: telescope.color,
+    origin: [site.lon, site.lat],
+    footprint: telescope.footprint,
+  }]),
+  ...CATALOGS.map((catalog): [string, Coverage] => [catalog.id, {
+    id: catalog.id,
+    color: CATALOG_COLOR,
+    origin: null,
+    footprint: catalog.footprint,
+  }]),
+]);
 
 const utcFormat = new Intl.DateTimeFormat("en-US", {
   timeZone: "UTC",
@@ -122,6 +143,71 @@ function SkyBadge({ state }: { state: SkyState }) {
   );
 }
 
+function CoverageChip({ name, color, detail, selected, onClick }: {
+  name: string;
+  color: string;
+  detail: string;
+  selected: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          type="button"
+          aria-pressed={selected}
+          onClick={onClick}
+          className="hover:bg-accent flex cursor-pointer items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-xs transition-colors"
+          style={selected ? {
+            borderColor: color,
+            backgroundColor: `color-mix(in oklch, ${color} 18%, transparent)`,
+          } : undefined}
+        >
+          <span className="size-1.5 shrink-0 rounded-full" style={{ backgroundColor: color }} />
+          {name}
+        </button>
+      </TooltipTrigger>
+      <TooltipContent side="bottom">{detail}</TooltipContent>
+    </Tooltip>
+  );
+}
+
+function CoverageLegend({ selected, onSelect }: { selected: string | null; onSelect: (id: string) => void }) {
+  return (
+    <div className="mt-4 space-y-2">
+      <div className="flex flex-wrap items-center gap-1.5 sm:hidden">
+        <span className="text-muted-foreground mr-1 text-xs">Telescopes</span>
+        {TELESCOPES.map(({ telescope }) => (
+          <CoverageChip
+            key={telescope.id}
+            name={telescope.name}
+            color={telescope.color}
+            detail={`${telescope.survey} · ${telescope.extent}`}
+            selected={selected === telescope.id}
+            onClick={() => onSelect(telescope.id)}
+          />
+        ))}
+      </div>
+      <div className="flex flex-wrap items-center gap-1.5">
+        <span className="text-muted-foreground mr-1 flex items-center gap-1 text-xs">
+          Crossmatched catalogs
+          <InfoTooltip>{COVERAGE_CONVENTION}</InfoTooltip>
+        </span>
+        {CATALOGS.map((catalog) => (
+          <CoverageChip
+            key={catalog.id}
+            name={catalog.name}
+            color={CATALOG_COLOR}
+            detail={`${catalog.description} · ${catalog.extent}`}
+            selected={selected === catalog.id}
+            onClick={() => onSelect(catalog.id)}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function Legend() {
   return (
     <div className="text-muted-foreground flex flex-wrap items-center gap-3 pt-0.5 text-xs">
@@ -148,6 +234,8 @@ function Legend() {
 export default function Telescopes() {
   const { timeRef, time, live, goLive, seek } = useClock();
   const [nights, setNights] = useState<NightlyStat[]>([]);
+  const [selected, setSelected] = useState<string | null>(null);
+  const select = useCallback((id: string) => setSelected((current) => (current === id ? null : id)), []);
 
   useEffect(() => {
     const load = () => {
@@ -188,7 +276,14 @@ export default function Telescopes() {
           </div>
         </CardHeader>
         <CardContent>
-          <NightMap sites={SITES} timeRef={timeRef} time={time} />
+          <NightMap
+            sites={SITES}
+            timeRef={timeRef}
+            time={time}
+            coverage={selected ? COVERAGES.get(selected) ?? null : null}
+            onSelect={select}
+          />
+          <CoverageLegend selected={selected} onSelect={select} />
         </CardContent>
       </Card>
 

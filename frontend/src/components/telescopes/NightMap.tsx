@@ -11,8 +11,10 @@ import {
 import type { LineString } from "geojson";
 import { feature } from "topojson-client";
 import landUrl from "world-atlas/land-110m.json?url";
+import { followsSiderealTime, footprintCoverage, type Coverage } from "@/lib/coverage";
 import {
   NIGHT_SUN_ALTITUDE,
+  siderealAngle,
   skyState,
   subsolarPoint,
   sunAltitude,
@@ -24,12 +26,24 @@ import boomLogo from "@/assets/boom-logo.png";
 const DEG = Math.PI / 180;
 const SPHERE: GeoSphere = { type: "Sphere" };
 const MASK_CELL = 4;
+const COVER_CELL = 2;
 const REPAINT_SIM_MS = 20_000;
 const DAYLIGHT_EDGES = [Math.sin(-16 * DEG), Math.sin(3 * DEG)] as const;
 const RINGS = 3;
 const RING_PERIOD_MS = 2600;
 const FLOW_PX_PER_SECOND = 70;
 const FLOW_DOT_SPACING = 56;
+const REVEAL_MS = 1600;
+const PING_MS = 5000;
+const FADE_MS = 400;
+const COVER_FILL = 0.24;
+const COVER_EDGE = 0.55;
+const COVER_RIM = 0.75;
+const COVER_PING = 0.22;
+const COVER_DIM = 0.55;
+const COVER_SHADE = [2, 6, 23] as const;
+const RIM_WIDTH = 7;
+const PING_WIDTH = 9;
 
 const PALETTES = {
   dark: {
@@ -70,23 +84,46 @@ type Point = [number, number];
 
 type Flow = { from: Point; control: Point; to: Point; length: number };
 
+type ActiveCoverage = { coverage: Coverage; since: number; endedAt?: number };
+
+type CoverageLayer = {
+  coverage: Coverage;
+  color: string;
+  rgb: Uint8ClampedArray;
+  distances: Float32Array;
+  reach: number;
+  values: Float32Array;
+  edges: Float32Array;
+  limits: LineString[];
+  computedAt: number;
+};
+
+type Grid = {
+  cell: number;
+  canvas: HTMLCanvasElement;
+  pixels: ImageData;
+  lat: Float32Array;
+  lon: Float32Array;
+  sinLat: Float32Array;
+  cosLat: Float32Array;
+  sinLon: Float32Array;
+  cosLon: Float32Array;
+};
+
 type Scene = {
   width: number;
   height: number;
   dpr: number;
   projection: GeoProjection;
   points: Point[];
+  hub: Point;
   flows: Flow[];
   night: HTMLCanvasElement;
   day: HTMLCanvasElement;
   work: HTMLCanvasElement;
   base: HTMLCanvasElement;
-  mask: HTMLCanvasElement;
-  maskPixels: ImageData;
-  sinLat: Float32Array;
-  cosLat: Float32Array;
-  sinLon: Float32Array;
-  cosLon: Float32Array;
+  daylight: Grid;
+  cover: Grid;
 };
 
 function createCanvas(width: number, height: number): HTMLCanvasElement {
@@ -103,6 +140,14 @@ function smoothstep(edge0: number, edge1: number, x: number): number {
 
 function finiteOr(value: number, fallback: number): number {
   return Number.isFinite(value) ? value : fallback;
+}
+
+function gaussian(x: number): number {
+  return Math.exp(-x * x);
+}
+
+function parallel(lat: number): LineString {
+  return { type: "LineString", coordinates: Array.from({ length: 361 }, (_, i) => [i - 180, lat]) };
 }
 
 function ring(center: [number, number], radius: number): LineString {
@@ -153,6 +198,41 @@ function landDots(projection: GeoProjection, land: GeoPermissibleObjects, width:
   return { dots, radius: spacing * 0.28 };
 }
 
+function projectGrid(projection: GeoProjection, width: number, height: number, cell: number): Grid {
+  const columns = Math.ceil(width / cell);
+  const rows = Math.ceil(height / cell);
+  const cells = columns * rows;
+  const lat = new Float32Array(cells);
+  const lon = new Float32Array(cells);
+  const sinLat = new Float32Array(cells);
+  const cosLat = new Float32Array(cells);
+  const sinLon = new Float32Array(cells);
+  const cosLon = new Float32Array(cells);
+  for (let j = 0; j < rows; j++) {
+    for (let i = 0; i < columns; i++) {
+      const k = j * columns + i;
+      const [x, y] = projection.invert!([(i + 0.5) * cell, (j + 0.5) * cell]) ?? [0, 0];
+      lat[k] = Math.max(-90, Math.min(90, finiteOr(y, 0)));
+      lon[k] = Math.max(-180, Math.min(180, finiteOr(x, 0)));
+      sinLat[k] = Math.sin(lat[k] * DEG);
+      cosLat[k] = Math.cos(lat[k] * DEG);
+      sinLon[k] = Math.sin(lon[k] * DEG);
+      cosLon[k] = Math.cos(lon[k] * DEG);
+    }
+  }
+  return {
+    cell,
+    canvas: createCanvas(columns, rows),
+    pixels: new ImageData(columns, rows),
+    lat,
+    lon,
+    sinLat,
+    cosLat,
+    sinLon,
+    cosLon,
+  };
+}
+
 function buildScene(width: number, land: GeoPermissibleObjects, sites: Site[], palette: Palette): Scene {
   const dpr = Math.max(1, window.devicePixelRatio || 1);
   const { projection, height } = fitProjection(width);
@@ -182,28 +262,8 @@ function buildScene(width: number, land: GeoPermissibleObjects, sites: Site[], p
     return canvas;
   };
 
-  const maskWidth = Math.ceil(width / MASK_CELL);
-  const maskHeight = Math.ceil(height / MASK_CELL);
-  const cells = maskWidth * maskHeight;
-  const sinLat = new Float32Array(cells);
-  const cosLat = new Float32Array(cells);
-  const sinLon = new Float32Array(cells);
-  const cosLon = new Float32Array(cells);
-  for (let j = 0; j < maskHeight; j++) {
-    for (let i = 0; i < maskWidth; i++) {
-      const k = j * maskWidth + i;
-      const [lon, lat] = projection.invert!([(i + 0.5) * MASK_CELL, (j + 0.5) * MASK_CELL]) ?? [0, 0];
-      const phi = Math.max(-90, Math.min(90, finiteOr(lat, 0))) * DEG;
-      const lambda = Math.max(-180, Math.min(180, finiteOr(lon, 0))) * DEG;
-      sinLat[k] = Math.sin(phi);
-      cosLat[k] = Math.cos(phi);
-      sinLon[k] = Math.sin(lambda);
-      cosLon[k] = Math.cos(lambda);
-    }
-  }
-  const mask = createCanvas(maskWidth, maskHeight);
-  const maskPixels = new ImageData(maskWidth, maskHeight);
-  maskPixels.data.fill(255);
+  const daylight = projectGrid(projection, width, height, MASK_CELL);
+  daylight.pixels.data.fill(255);
 
   const points = sites.map((site): Point => projection([site.lon, site.lat]) ?? [0, 0]);
   const hub: Point = [width / 2, height / 2];
@@ -214,17 +274,14 @@ function buildScene(width: number, land: GeoPermissibleObjects, sites: Site[], p
     dpr,
     projection,
     points,
+    hub,
     flows: points.map((point) => flowTo(point, hub)),
     night: layer(palette.nightOcean, palette.nightGrid, palette.nightLand),
     day: layer(palette.dayOcean, palette.dayGrid, palette.dayLand),
     work: createCanvas(Math.round(width * dpr), Math.round(height * dpr)),
     base: createCanvas(Math.round(width * dpr), Math.round(height * dpr)),
-    mask,
-    maskPixels,
-    sinLat,
-    cosLat,
-    sinLon,
-    cosLon,
+    daylight,
+    cover: projectGrid(projection, width, height, COVER_CELL),
   };
 }
 
@@ -235,21 +292,28 @@ function paintBase(scene: Scene, palette: Palette, ms: number) {
   const cosDec = Math.cos(sun.lat * DEG);
   const sinSunLon = Math.sin(sun.lon * DEG);
   const cosSunLon = Math.cos(sun.lon * DEG);
-  const data = scene.maskPixels.data;
-  for (let k = 0; k < scene.sinLat.length; k++) {
+  const { daylight } = scene;
+  const data = daylight.pixels.data;
+  for (let k = 0; k < daylight.sinLat.length; k++) {
     const sinAltitude =
-      scene.sinLat[k] * sinDec +
-      scene.cosLat[k] * cosDec * (scene.cosLon[k] * cosSunLon + scene.sinLon[k] * sinSunLon);
+      daylight.sinLat[k] * sinDec +
+      daylight.cosLat[k] * cosDec * (daylight.cosLon[k] * cosSunLon + daylight.sinLon[k] * sinSunLon);
     data[k * 4 + 3] = 255 * smoothstep(DAYLIGHT_EDGES[0], DAYLIGHT_EDGES[1], sinAltitude);
   }
-  scene.mask.getContext("2d")!.putImageData(scene.maskPixels, 0, 0);
+  daylight.canvas.getContext("2d")!.putImageData(daylight.pixels, 0, 0);
 
   const work = scene.work.getContext("2d")!;
   work.globalCompositeOperation = "copy";
   work.drawImage(scene.day, 0, 0);
   work.globalCompositeOperation = "destination-in";
   work.imageSmoothingQuality = "high";
-  work.drawImage(scene.mask, 0, 0, scene.mask.width * MASK_CELL * dpr, scene.mask.height * MASK_CELL * dpr);
+  work.drawImage(
+    daylight.canvas,
+    0,
+    0,
+    daylight.canvas.width * daylight.cell * dpr,
+    daylight.canvas.height * daylight.cell * dpr,
+  );
 
   const base = scene.base.getContext("2d")!;
   base.setTransform(1, 0, 0, 1, 0, 0);
@@ -300,27 +364,86 @@ function paintBase(scene: Scene, palette: Palette, ms: number) {
   base.stroke();
 }
 
-function resolveColors(container: HTMLElement, sites: Site[]): string[][] {
+function resolveColor(container: HTMLElement, color: string): string {
   const probe = document.createElement("span");
+  probe.style.color = color;
   container.appendChild(probe);
-  const colors = sites.map((site) =>
-    site.telescopes.map((telescope) => {
-      probe.style.color = telescope.color;
-      return getComputedStyle(probe).color;
-    }),
-  );
+  const resolved = getComputedStyle(probe).color;
   probe.remove();
-  return colors;
+  return resolved;
 }
 
-export default function NightMap({ sites, timeRef, time }: {
+function coverageLayer(scene: Scene, coverage: Coverage, color: string): CoverageLayer {
+  const swatch = createCanvas(1, 1).getContext("2d", { willReadFrequently: true })!;
+  swatch.fillStyle = color;
+  swatch.fillRect(0, 0, 1, 1);
+  const { cover } = scene;
+  const cells = cover.lat.length;
+  const columns = cover.canvas.width;
+  const [x0, y0] = coverage.origin ? scene.projection(coverage.origin) ?? scene.hub : scene.hub;
+  const distances = new Float32Array(cells);
+  let reach = 0;
+  for (let k = 0; k < cells; k++) {
+    const x = ((k % columns) + 0.5) * cover.cell;
+    const y = (Math.floor(k / columns) + 0.5) * cover.cell;
+    distances[k] = (Math.hypot(x - x0, y - y0) * 360) / scene.width;
+    reach = Math.max(reach, distances[k]);
+  }
+  const { decMin, decMax } = coverage.footprint;
+  const limits = followsSiderealTime(coverage.footprint)
+    ? []
+    : [decMin, decMax].filter((dec) => dec !== undefined).map(parallel);
+  return {
+    coverage,
+    color,
+    rgb: swatch.getImageData(0, 0, 1, 1).data,
+    distances,
+    reach: reach + 3 * RIM_WIDTH,
+    values: new Float32Array(cells),
+    edges: new Float32Array(cells),
+    limits,
+    computedAt: Number.NaN,
+  };
+}
+
+function computeCoverage(scene: Scene, layer: CoverageLayer, ms: number) {
+  const { values, edges } = layer;
+  const { cover } = scene;
+  const width = cover.canvas.width;
+  const sidereal = siderealAngle(ms);
+  for (let k = 0; k < values.length; k++) {
+    values[k] = footprintCoverage(layer.coverage.footprint, cover.lon[k] + sidereal, cover.lat[k]);
+  }
+  for (let k = 0; k < values.length; k++) {
+    const i = k % width;
+    const value = values[k];
+    let edge = 0;
+    if (i > 0) edge = Math.max(edge, Math.abs(value - values[k - 1]));
+    if (i < width - 1) edge = Math.max(edge, Math.abs(value - values[k + 1]));
+    if (k >= width) edge = Math.max(edge, Math.abs(value - values[k - width]));
+    if (k + width < values.length) edge = Math.max(edge, Math.abs(value - values[k + width]));
+    edges[k] = edge;
+  }
+  layer.computedAt = ms;
+}
+
+export default function NightMap({ sites, timeRef, time, coverage, onSelect }: {
   sites: Site[];
   timeRef: React.RefObject<number>;
   time: number;
+  coverage: Coverage | null;
+  onSelect: (id: string) => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const coverageRef = useRef<ActiveCoverage | null>(null);
   const [land, setLand] = useState<GeoPermissibleObjects | null>(null);
+
+  useEffect(() => {
+    const now = performance.now();
+    if (coverage) coverageRef.current = { coverage, since: now };
+    else if (coverageRef.current) coverageRef.current = { ...coverageRef.current, endedAt: now };
+  }, [coverage]);
 
   useEffect(() => {
     let cancelled = false;
@@ -350,6 +473,7 @@ export default function NightMap({ sites, timeRef, time }: {
     let palette = PALETTES.dark;
     let colors: string[][] = [];
     let scene: Scene | null = null;
+    let layer: CoverageLayer | null = null;
     let paintedAt = Number.NaN;
     let raf = 0;
 
@@ -357,8 +481,9 @@ export default function NightMap({ sites, timeRef, time }: {
       const width = Math.floor(container.clientWidth);
       if (width < 50) return;
       palette = document.documentElement.classList.contains("dark") ? PALETTES.dark : PALETTES.light;
-      colors = resolveColors(container, sites);
+      colors = sites.map((site) => site.telescopes.map((telescope) => resolveColor(container, telescope.color)));
       scene = buildScene(width, land, sites, palette);
+      layer = null;
       view.width = scene.base.width;
       view.height = scene.base.height;
       view.style.height = `${scene.height}px`;
@@ -390,6 +515,63 @@ export default function NightMap({ sites, timeRef, time }: {
         }
       });
       ctx.globalAlpha = 1;
+    }
+
+    function paintCoverage(scene: Scene, layer: CoverageLayer, active: ActiveCoverage, now: number) {
+      const elapsed = reducedMotion ? Number.POSITIVE_INFINITY : now - active.since;
+      const reveal = Math.min(1, elapsed / REVEAL_MS);
+      const front = layer.reach * (1 - (1 - reveal) ** 3);
+      const rim = COVER_RIM * (1 - reveal);
+      const pingAge = elapsed - REVEAL_MS;
+      const ping = Number.isFinite(pingAge) && pingAge > 0 ? ((pingAge / PING_MS) % 1) * layer.reach : 0;
+      const pulse = ping > 0 ? COVER_PING * (1 - ping / layer.reach) : 0;
+      const fade = active.endedAt === undefined ? 1 : Math.max(0, 1 - (now - active.endedAt) / FADE_MS);
+
+      const [red, green, blue] = layer.rgb;
+      const { cover } = scene;
+      const data = cover.pixels.data;
+      for (let k = 0; k < layer.values.length; k++) {
+        const value = layer.values[k];
+        const distance = layer.distances[k];
+        const shown = smoothstep(front, front - 12, distance) * fade;
+        let inside = shown * (COVER_FILL + COVER_EDGE * layer.edges[k]);
+        if (rim > 0 && Math.abs(distance - front) < 3 * RIM_WIDTH) {
+          inside += rim * fade * gaussian((distance - front) / RIM_WIDTH);
+        }
+        if (pulse > 0 && Math.abs(distance - ping) < 3 * PING_WIDTH) {
+          inside += pulse * fade * gaussian((distance - ping) / PING_WIDTH);
+        }
+        inside *= value;
+        const outside = (1 - value) * shown * COVER_DIM;
+        const total = inside + outside;
+        const mix = total > 0 ? inside / total : 0;
+        data[k * 4] = COVER_SHADE[0] + (red - COVER_SHADE[0]) * mix;
+        data[k * 4 + 1] = COVER_SHADE[1] + (green - COVER_SHADE[1]) * mix;
+        data[k * 4 + 2] = COVER_SHADE[2] + (blue - COVER_SHADE[2]) * mix;
+        data[k * 4 + 3] = 255 * Math.min(1, total);
+      }
+      cover.canvas.getContext("2d")!.putImageData(cover.pixels, 0, 0);
+
+      const path = geoPath(scene.projection, ctx);
+      ctx.save();
+      ctx.beginPath();
+      path(SPHERE);
+      ctx.clip();
+      ctx.imageSmoothingQuality = "high";
+      ctx.drawImage(cover.canvas, 0, 0, cover.canvas.width * cover.cell, cover.canvas.height * cover.cell);
+      ctx.restore();
+
+      if (layer.limits.length) {
+        ctx.globalAlpha = 0.9 * reveal * fade;
+        ctx.strokeStyle = layer.color;
+        ctx.lineWidth = 1;
+        ctx.setLineDash([4, 3]);
+        ctx.beginPath();
+        layer.limits.forEach((limit) => path(limit));
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.globalAlpha = 1;
+      }
     }
 
     function paintSites(scene: Scene, now: number) {
@@ -447,6 +629,21 @@ export default function NightMap({ sites, timeRef, time }: {
       ctx.drawImage(scene.base, 0, 0);
       ctx.globalCompositeOperation = "source-over";
       ctx.setTransform(scene.dpr, 0, 0, scene.dpr, 0, 0);
+
+      const active = coverageRef.current;
+      if (active?.endedAt !== undefined && now - active.endedAt > FADE_MS) {
+        coverageRef.current = null;
+      } else if (active) {
+        if (layer?.coverage !== active.coverage) {
+          layer = coverageLayer(scene, active.coverage, resolveColor(container!, active.coverage.color));
+        }
+        const stale = !(Math.abs(ms - layer.computedAt) < REPAINT_SIM_MS);
+        if (stale && (Number.isNaN(layer.computedAt) || followsSiderealTime(layer.coverage.footprint))) {
+          computeCoverage(scene, layer, ms);
+        }
+        paintCoverage(scene, layer, active, now);
+      }
+
       paintSites(scene, now);
     }
 
@@ -479,17 +676,27 @@ export default function NightMap({ sites, timeRef, time }: {
       {labels.map(({ site, left, top }) => (
         <div
           key={site.id}
-          className="pointer-events-none absolute mr-4 hidden -translate-y-1/2 sm:block"
+          className="absolute mr-4 hidden -translate-y-1/2 sm:block"
           style={{ right: `${100 - left}%`, top: `${top}%` }}
         >
-          <div className="bg-background/80 text-foreground rounded-md border px-2 py-1 text-[11px] leading-tight shadow-lg backdrop-blur-sm">
-            <div className="font-medium">{site.name}</div>
-            {site.telescopes.map((telescope) => (
-              <div key={telescope.id} className="mt-0.5 flex items-center gap-1">
-                <span className="size-1.5 rounded-full" style={{ backgroundColor: telescope.color }} />
-                {telescope.name}
-              </div>
-            ))}
+          <div className="bg-background/80 text-foreground rounded-md border px-1 py-1 text-[11px] leading-tight shadow-lg backdrop-blur-sm">
+            <div className="px-1 font-medium">{site.name}</div>
+            {site.telescopes.map((telescope) => {
+              const selected = coverage?.id === telescope.id;
+              return (
+                <button
+                  key={telescope.id}
+                  type="button"
+                  aria-pressed={selected}
+                  onClick={() => onSelect(telescope.id)}
+                  className="hover:bg-accent mt-0.5 flex w-full cursor-pointer items-center gap-1 rounded px-1 py-0.5 transition-colors"
+                  style={selected ? { backgroundColor: `color-mix(in oklch, ${telescope.color} 22%, transparent)` } : undefined}
+                >
+                  <span className="size-1.5 rounded-full" style={{ backgroundColor: telescope.color }} />
+                  {telescope.name}
+                </button>
+              );
+            })}
           </div>
         </div>
       ))}
