@@ -5,7 +5,7 @@ const NGP_RA = 192.85948;
 const NGP_DEC = 27.12825;
 const EDGE_SOFTNESS = 1.5;
 
-export const CATALOG_COLOR = "oklch(0.78 0.13 215)";
+export const CATALOG_COLORS = ["oklch(0.78 0.13 215)", "oklch(0.84 0.16 85)"];
 
 export type Footprint = {
   decMin?: number;

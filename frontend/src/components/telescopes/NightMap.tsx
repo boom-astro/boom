@@ -417,23 +417,30 @@ function computeCoverage(scene: Scene, layer: CoverageLayer, ms: number) {
   layer.computedAt = ms;
 }
 
-export default function NightMap({ sites, timeRef, hubRef, coverage, onSelect }: {
+export default function NightMap({ sites, timeRef, hubRef, coverages, onSelect }: {
   sites: Site[];
   timeRef: React.RefObject<number>;
   hubRef: React.RefObject<HTMLElement | null>;
-  coverage: Coverage | null;
+  coverages: Coverage[];
   onSelect: (id: string) => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const coverageRef = useRef<ActiveCoverage | null>(null);
+  const coverageRef = useRef<ActiveCoverage[]>([]);
   const [land, setLand] = useState<GeoPermissibleObjects | null>(null);
 
   useEffect(() => {
     const now = performance.now();
-    if (coverage) coverageRef.current = { coverage, since: now };
-    else if (coverageRef.current) coverageRef.current = { ...coverageRef.current, endedAt: now };
-  }, [coverage]);
+    const ids = new Set(coverages.map((coverage) => coverage.id));
+    const current = coverageRef.current.map((active) =>
+      active.endedAt === undefined && !ids.has(active.coverage.id) ? { ...active, endedAt: now } : active,
+    );
+    const shown = new Set(current.filter((active) => active.endedAt === undefined).map((active) => active.coverage.id));
+    coverageRef.current = [
+      ...current,
+      ...coverages.filter((coverage) => !shown.has(coverage.id)).map((coverage) => ({ coverage, since: now })),
+    ];
+  }, [coverages]);
 
   useEffect(() => {
     let cancelled = false;
@@ -463,7 +470,7 @@ export default function NightMap({ sites, timeRef, hubRef, coverage, onSelect }:
     let palette = PALETTES.dark;
     let colors: string[][] = [];
     let scene: Scene | null = null;
-    let layer: CoverageLayer | null = null;
+    const layers = new Map<Coverage, CoverageLayer>();
     let paintedAt = Number.NaN;
     let raf = 0;
 
@@ -478,7 +485,7 @@ export default function NightMap({ sites, timeRef, hubRef, coverage, onSelect }:
         ? [logo.left + logo.width / 2 - box.left, logo.top + logo.height / 2 - box.top]
         : [width / 2, 0];
       scene = buildScene(width, land, sites, palette, hub);
-      layer = null;
+      layers.clear();
       view.width = scene.base.width;
       view.height = scene.base.height + Math.round(scene.lift * scene.dpr);
       view.style.height = `${scene.height + scene.lift}px`;
@@ -513,37 +520,58 @@ export default function NightMap({ sites, timeRef, hubRef, coverage, onSelect }:
       ctx.globalAlpha = 1;
     }
 
-    function paintCoverage(scene: Scene, layer: CoverageLayer, active: ActiveCoverage, now: number) {
-      const elapsed = reducedMotion ? Number.POSITIVE_INFINITY : now - active.since;
-      const reveal = Math.min(1, elapsed / REVEAL_MS);
-      const front = layer.reach * (1 - (1 - reveal) ** 3);
-      const rim = COVER_RIM * (1 - reveal);
-      const pingAge = elapsed - REVEAL_MS;
-      const ping = Number.isFinite(pingAge) && pingAge > 0 ? ((pingAge / PING_MS) % 1) * layer.reach : 0;
-      const pulse = ping > 0 ? COVER_PING * (1 - ping / layer.reach) : 0;
-      const fade = active.endedAt === undefined ? 1 : Math.max(0, 1 - (now - active.endedAt) / FADE_MS);
+    function paintCoverages(scene: Scene, shown: { layer: CoverageLayer; active: ActiveCoverage }[], now: number) {
+      const waves = shown.map(({ layer, active }) => {
+        const elapsed = reducedMotion ? Number.POSITIVE_INFINITY : now - active.since;
+        const reveal = Math.min(1, elapsed / REVEAL_MS);
+        const pingAge = elapsed - REVEAL_MS;
+        const ping = Number.isFinite(pingAge) && pingAge > 0 ? ((pingAge / PING_MS) % 1) * layer.reach : 0;
+        return {
+          layer,
+          reveal,
+          front: layer.reach * (1 - (1 - reveal) ** 3),
+          rim: COVER_RIM * (1 - reveal),
+          ping,
+          pulse: ping > 0 ? COVER_PING * (1 - ping / layer.reach) : 0,
+          fade: active.endedAt === undefined ? 1 : Math.max(0, 1 - (now - active.endedAt) / FADE_MS),
+        };
+      });
 
-      const [red, green, blue] = layer.rgb;
       const { cover } = scene;
       const data = cover.pixels.data;
-      for (let k = 0; k < layer.values.length; k++) {
-        const value = layer.values[k];
-        const distance = layer.distances[k];
-        const shown = smoothstep(front, front - 12, distance) * fade;
-        let inside = shown * (COVER_FILL + COVER_EDGE * layer.edges[k]);
-        if (rim > 0 && Math.abs(distance - front) < 3 * RIM_WIDTH) {
-          inside += rim * fade * gaussian((distance - front) / RIM_WIDTH);
+      for (let k = 0; k < cover.lat.length; k++) {
+        let red = 0;
+        let green = 0;
+        let blue = 0;
+        let inside = 0;
+        let uncovered = 1;
+        let reached = 0;
+        for (const wave of waves) {
+          const { layer } = wave;
+          const value = layer.values[k];
+          const distance = layer.distances[k];
+          const shown = smoothstep(wave.front, wave.front - 12, distance) * wave.fade;
+          reached = Math.max(reached, shown);
+          if (value <= 0) continue;
+          uncovered *= 1 - value * shown;
+          let glow = shown * (COVER_FILL + COVER_EDGE * layer.edges[k]);
+          if (wave.rim > 0 && Math.abs(distance - wave.front) < 3 * RIM_WIDTH) {
+            glow += wave.rim * wave.fade * gaussian((distance - wave.front) / RIM_WIDTH);
+          }
+          if (wave.pulse > 0 && Math.abs(distance - wave.ping) < 3 * PING_WIDTH) {
+            glow += wave.pulse * wave.fade * gaussian((distance - wave.ping) / PING_WIDTH);
+          }
+          glow *= value;
+          red += layer.rgb[0] * glow;
+          green += layer.rgb[1] * glow;
+          blue += layer.rgb[2] * glow;
+          inside += glow;
         }
-        if (pulse > 0 && Math.abs(distance - ping) < 3 * PING_WIDTH) {
-          inside += pulse * fade * gaussian((distance - ping) / PING_WIDTH);
-        }
-        inside *= value;
-        const outside = (1 - value) * shown * COVER_DIM;
+        const outside = uncovered * reached * COVER_DIM;
         const total = inside + outside;
-        const mix = total > 0 ? inside / total : 0;
-        data[k * 4] = COVER_SHADE[0] + (red - COVER_SHADE[0]) * mix;
-        data[k * 4 + 1] = COVER_SHADE[1] + (green - COVER_SHADE[1]) * mix;
-        data[k * 4 + 2] = COVER_SHADE[2] + (blue - COVER_SHADE[2]) * mix;
+        data[k * 4] = total > 0 ? (red + COVER_SHADE[0] * outside) / total : 0;
+        data[k * 4 + 1] = total > 0 ? (green + COVER_SHADE[1] * outside) / total : 0;
+        data[k * 4 + 2] = total > 0 ? (blue + COVER_SHADE[2] * outside) / total : 0;
         data[k * 4 + 3] = 255 * Math.min(1, total);
       }
       cover.canvas.getContext("2d")!.putImageData(cover.pixels, 0, 0);
@@ -557,17 +585,18 @@ export default function NightMap({ sites, timeRef, hubRef, coverage, onSelect }:
       ctx.drawImage(cover.canvas, 0, 0, cover.canvas.width * cover.cell, cover.canvas.height * cover.cell);
       ctx.restore();
 
-      if (layer.limits.length) {
+      ctx.lineWidth = 1;
+      ctx.setLineDash([4, 3]);
+      for (const { layer, reveal, fade } of waves) {
+        if (!layer.limits.length) continue;
         ctx.globalAlpha = 0.9 * reveal * fade;
         ctx.strokeStyle = layer.color;
-        ctx.lineWidth = 1;
-        ctx.setLineDash([4, 3]);
         ctx.beginPath();
         layer.limits.forEach((limit) => path(limit));
         ctx.stroke();
-        ctx.setLineDash([]);
-        ctx.globalAlpha = 1;
       }
+      ctx.setLineDash([]);
+      ctx.globalAlpha = 1;
     }
 
     function paintSites(scene: Scene, now: number) {
@@ -612,6 +641,19 @@ export default function NightMap({ sites, timeRef, hubRef, coverage, onSelect }:
       });
     }
 
+    function layerFor(scene: Scene, coverage: Coverage, ms: number): CoverageLayer {
+      let layer = layers.get(coverage);
+      if (!layer) {
+        layer = coverageLayer(scene, coverage, resolveColor(container!, coverage.color));
+        layers.set(coverage, layer);
+      }
+      const stale = !(Math.abs(ms - layer.computedAt) < REPAINT_SIM_MS);
+      if (stale && (Number.isNaN(layer.computedAt) || followsSiderealTime(coverage.footprint))) {
+        computeCoverage(scene, layer, ms);
+      }
+      return layer;
+    }
+
     function frame(now: number) {
       raf = requestAnimationFrame(frame);
       if (!scene) return;
@@ -627,18 +669,15 @@ export default function NightMap({ sites, timeRef, hubRef, coverage, onSelect }:
       ctx.globalCompositeOperation = "source-over";
       ctx.setTransform(scene.dpr, 0, 0, scene.dpr, 0, lift);
 
-      const active = coverageRef.current;
-      if (active?.endedAt !== undefined && now - active.endedAt > FADE_MS) {
-        coverageRef.current = null;
-      } else if (active) {
-        if (layer?.coverage !== active.coverage) {
-          layer = coverageLayer(scene, active.coverage, resolveColor(container!, active.coverage.color));
-        }
-        const stale = !(Math.abs(ms - layer.computedAt) < REPAINT_SIM_MS);
-        if (stale && (Number.isNaN(layer.computedAt) || followsSiderealTime(layer.coverage.footprint))) {
-          computeCoverage(scene, layer, ms);
-        }
-        paintCoverage(scene, layer, active, now);
+      const active = coverageRef.current.filter((entry) => entry.endedAt === undefined || now - entry.endedAt <= FADE_MS);
+      if (active.length !== coverageRef.current.length) coverageRef.current = active;
+      for (const coverage of layers.keys()) {
+        if (!active.some((entry) => entry.coverage === coverage)) layers.delete(coverage);
+      }
+      if (active.length) {
+        const shown = [];
+        for (const entry of active) shown.push({ layer: layerFor(scene, entry.coverage, ms), active: entry });
+        paintCoverages(scene, shown, now);
       }
 
       paintSites(scene, now);
@@ -676,7 +715,7 @@ export default function NightMap({ sites, timeRef, hubRef, coverage, onSelect }:
           <div className="bg-background/80 text-foreground rounded-md border px-1 py-1 text-[11px] leading-tight shadow-lg backdrop-blur-sm">
             <div className="px-1 font-medium">{site.name}</div>
             {site.telescopes.map((telescope) => {
-              const selected = coverage?.id === telescope.id;
+              const selected = coverages.some((coverage) => coverage.id === telescope.id);
               return (
                 <button
                   key={telescope.id}

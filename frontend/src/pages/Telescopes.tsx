@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { IconClock, IconInfoCircle, IconLock, IconMoonStars, IconSun, IconSunset2 } from "@tabler/icons-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -9,11 +9,12 @@ import NightMap from "@/components/telescopes/NightMap";
 import NightTimeline from "@/components/telescopes/NightTimeline";
 import boomLogo from "@/assets/boom-logo.png";
 import api, { type NightlyStat } from "@/lib/api";
-import { CATALOG_COLOR, CATALOGS, type Coverage } from "@/lib/coverage";
+import { CATALOG_COLORS, CATALOGS, type Coverage } from "@/lib/coverage";
 import { nextCrossing, skyState, sunAltitudeAt, type SkyState } from "@/lib/sun";
 import { formatClock, NIGHT_COLOR, SITES, type Site, type Telescope } from "@/lib/telescopes";
 
 const DAY_MS = 86_400_000;
+const MAX_SELECTED = 2;
 const STATS_REFRESH_MS = 10 * 60_000;
 
 const STATES: Record<SkyState, { title: string; icon: typeof IconSun }> = {
@@ -31,7 +32,8 @@ const NIGHT_CONVENTION =
   "A night is labeled by its evening date.";
 
 const COVERAGE_CONVENTION =
-  "Click a telescope or a catalog to show the sky it covers. The map shades the places where " +
+  "Click a telescope or a catalog to show the sky it covers, and a second one to compare them. " +
+  "The map shades the places where " +
   "that part of the sky is overhead at the selected time, so footprints that follow right ascension " +
   "drift west as the Earth turns.";
 
@@ -46,7 +48,7 @@ const COVERAGES = new Map<string, Coverage>([
   }]),
   ...CATALOGS.map((catalog): [string, Coverage] => [catalog.id, {
     id: catalog.id,
-    color: CATALOG_COLOR,
+    color: CATALOG_COLORS[0],
     origin: null,
     footprint: catalog.footprint,
   }]),
@@ -173,7 +175,9 @@ function CoverageChip({ name, color, detail, selected, onClick }: {
   );
 }
 
-function CoverageLegend({ selected, onSelect }: { selected: string | null; onSelect: (id: string) => void }) {
+type Selection = { id: string; color: string };
+
+function CoverageLegend({ selected, onSelect }: { selected: Selection[]; onSelect: (id: string) => void }) {
   return (
     <div className="mt-4 space-y-2">
       <div className="flex flex-wrap items-center gap-1.5 sm:hidden">
@@ -184,7 +188,7 @@ function CoverageLegend({ selected, onSelect }: { selected: string | null; onSel
             name={telescope.name}
             color={telescope.color}
             detail={`${telescope.survey} · ${telescope.extent}`}
-            selected={selected === telescope.id}
+            selected={selected.some((selection) => selection.id === telescope.id)}
             onClick={() => onSelect(telescope.id)}
           />
         ))}
@@ -198,9 +202,9 @@ function CoverageLegend({ selected, onSelect }: { selected: string | null; onSel
           <CoverageChip
             key={catalog.id}
             name={catalog.name}
-            color={CATALOG_COLOR}
+            color={selected.find((selection) => selection.id === catalog.id)?.color ?? CATALOG_COLORS[0]}
             detail={`${catalog.description} · ${catalog.extent}`}
-            selected={selected === catalog.id}
+            selected={selected.some((selection) => selection.id === catalog.id)}
             onClick={() => onSelect(catalog.id)}
           />
         ))}
@@ -245,9 +249,19 @@ function Legend() {
 export default function Telescopes() {
   const { timeRef, time, live, goLive, seek } = useClock();
   const [nights, setNights] = useState<NightlyStat[]>([]);
-  const [selected, setSelected] = useState<string | null>(null);
+  const [selected, setSelected] = useState<Selection[]>([]);
   const hubRef = useRef<HTMLDivElement>(null);
-  const select = useCallback((id: string) => setSelected((current) => (current === id ? null : id)), []);
+  const select = useCallback((id: string) => setSelected((current) => {
+    if (current.some((selection) => selection.id === id)) return current.filter((selection) => selection.id !== id);
+    const kept = current.slice(1 - MAX_SELECTED);
+    const free = CATALOG_COLORS.find((color) => !kept.some((selection) => selection.color === color));
+    const isCatalog = CATALOGS.some((catalog) => catalog.id === id);
+    return [...kept, { id, color: isCatalog && free ? free : COVERAGES.get(id)!.color }];
+  }), []);
+  const coverages = useMemo(
+    () => selected.map(({ id, color }) => ({ ...COVERAGES.get(id)!, color })),
+    [selected],
+  );
 
   useEffect(() => {
     const load = () => {
@@ -294,7 +308,7 @@ export default function Telescopes() {
             sites={SITES}
             timeRef={timeRef}
             hubRef={hubRef}
-            coverage={selected ? COVERAGES.get(selected) ?? null : null}
+            coverages={coverages}
             onSelect={select}
           />
           <CoverageLegend selected={selected} onSelect={select} />
