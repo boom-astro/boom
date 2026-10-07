@@ -7,6 +7,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import NightMap from "@/components/telescopes/NightMap";
 import NightTimeline from "@/components/telescopes/NightTimeline";
+import boomLogo from "@/assets/boom-logo.png";
 import api, { type NightlyStat } from "@/lib/api";
 import { CATALOG_COLOR, CATALOGS, type Coverage } from "@/lib/coverage";
 import { nextCrossing, skyState, sunAltitudeAt, type SkyState } from "@/lib/sun";
@@ -208,9 +209,23 @@ function CoverageLegend({ selected, onSelect }: { selected: string | null; onSel
   );
 }
 
+function BoomHub({ receiving, ref }: { receiving: boolean; ref: React.Ref<HTMLDivElement> }) {
+  return (
+    <div ref={ref} className="relative z-10 size-9 shrink-0 justify-self-center max-sm:order-last">
+      <div
+        className={`absolute -inset-1 rounded-full blur-md transition-colors duration-700 ${receiving ? "bg-indigo-400/60" : "bg-indigo-400/25"}`}
+      />
+      {receiving && (
+        <div className="absolute inset-0 animate-ping rounded-full ring-2 ring-indigo-300/60 [animation-duration:2.4s]" />
+      )}
+      <img src={boomLogo} alt="BOOM" className="relative size-full rounded-full shadow-lg ring-2 ring-white/90" />
+    </div>
+  );
+}
+
 function Legend() {
   return (
-    <div className="text-muted-foreground flex flex-wrap items-center gap-3 pt-0.5 text-xs">
+    <div className="text-muted-foreground flex flex-wrap items-center gap-3 pt-0.5 text-xs sm:justify-end">
       <span className="flex items-center gap-1.5">
         <span className="inline-block size-3 shrink-0 rounded-full bg-amber-300" />
         Sun
@@ -231,6 +246,7 @@ export default function Telescopes() {
   const { timeRef, time, live, goLive, seek } = useClock();
   const [nights, setNights] = useState<NightlyStat[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
+  const hubRef = useRef<HTMLDivElement>(null);
   const select = useCallback((id: string) => setSelected((current) => (current === id ? null : id)), []);
 
   useEffect(() => {
@@ -256,6 +272,7 @@ export default function Telescopes() {
 
   const states = new Map(SITES.map((site) => [site.id, siteState(site, time)]));
   const changes = new Map(SITES.map((site) => [site.id, nextCrossing(time, site.lat, site.lon)]));
+  const receiving = SITES.some((site) => states.get(site.id) === "night");
   const counted = TELESCOPES.filter(({ telescope }) => alerts(telescope, 0) !== undefined);
   const tonight = counted.reduce((n, { telescope }) => n + (alerts(telescope, 0) ?? 0), 0);
 
@@ -263,11 +280,12 @@ export default function Telescopes() {
     <div className="px-4 lg:px-6 space-y-4">
       <Card>
         <CardHeader>
-          <div className="flex flex-wrap items-start justify-between gap-4">
+          <div className="grid items-center gap-4 sm:grid-cols-[1fr_auto_1fr]">
             <div className="space-y-1.5">
               <CardTitle>Telescopes</CardTitle>
               <CardDescription>Observatories whose alerts BOOM ingests</CardDescription>
             </div>
+            <BoomHub receiving={receiving} ref={hubRef} />
             <Legend />
           </div>
         </CardHeader>
@@ -275,7 +293,7 @@ export default function Telescopes() {
           <NightMap
             sites={SITES}
             timeRef={timeRef}
-            time={time}
+            hubRef={hubRef}
             coverage={selected ? COVERAGES.get(selected) ?? null : null}
             onSelect={select}
           />

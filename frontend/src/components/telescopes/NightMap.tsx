@@ -21,7 +21,6 @@ import {
   wrapLongitude,
 } from "@/lib/sun";
 import { type Site } from "@/lib/telescopes";
-import boomLogo from "@/assets/boom-logo.png";
 
 const DEG = Math.PI / 180;
 const SPHERE: GeoSphere = { type: "Sphere" };
@@ -117,6 +116,7 @@ type Scene = {
   projection: GeoProjection;
   points: Point[];
   hub: Point;
+  lift: number;
   flows: Flow[];
   night: HTMLCanvasElement;
   day: HTMLCanvasElement;
@@ -155,17 +155,7 @@ function ring(center: [number, number], radius: number): LineString {
 }
 
 function flowTo(from: Point, to: Point): Flow {
-  const dx = to[0] - from[0];
-  const dy = to[1] - from[1];
-  const length = Math.hypot(dx, dy) || 1;
-  const side = dx / length > 0 ? -1 : 1;
-  const bend = length * 0.18 * side;
-  return {
-    from,
-    control: [(from[0] + to[0]) / 2 - (dy / length) * bend, (from[1] + to[1]) / 2 + (dx / length) * bend],
-    to,
-    length,
-  };
+  return { from, control: [to[0], from[1]], to, length: Math.hypot(to[0] - from[0], to[1] - from[1]) || 1 };
 }
 
 function alongFlow({ from, control, to }: Flow, t: number): Point {
@@ -233,7 +223,7 @@ function projectGrid(projection: GeoProjection, width: number, height: number, c
   };
 }
 
-function buildScene(width: number, land: GeoPermissibleObjects, sites: Site[], palette: Palette): Scene {
+function buildScene(width: number, land: GeoPermissibleObjects, sites: Site[], palette: Palette, hub: Point): Scene {
   const dpr = Math.max(1, window.devicePixelRatio || 1);
   const { projection, height } = fitProjection(width);
   const { dots, radius } = landDots(projection, land, width, height);
@@ -266,7 +256,6 @@ function buildScene(width: number, land: GeoPermissibleObjects, sites: Site[], p
   daylight.pixels.data.fill(255);
 
   const points = sites.map((site): Point => projection([site.lon, site.lat]) ?? [0, 0]);
-  const hub: Point = [width / 2, height / 2];
 
   return {
     width,
@@ -275,6 +264,7 @@ function buildScene(width: number, land: GeoPermissibleObjects, sites: Site[], p
     projection,
     points,
     hub,
+    lift: Math.ceil(Math.max(0, -hub[1])),
     flows: points.map((point) => flowTo(point, hub)),
     night: layer(palette.nightOcean, palette.nightGrid, palette.nightLand),
     day: layer(palette.dayOcean, palette.dayGrid, palette.dayLand),
@@ -427,10 +417,10 @@ function computeCoverage(scene: Scene, layer: CoverageLayer, ms: number) {
   layer.computedAt = ms;
 }
 
-export default function NightMap({ sites, timeRef, time, coverage, onSelect }: {
+export default function NightMap({ sites, timeRef, hubRef, coverage, onSelect }: {
   sites: Site[];
   timeRef: React.RefObject<number>;
-  time: number;
+  hubRef: React.RefObject<HTMLElement | null>;
   coverage: Coverage | null;
   onSelect: (id: string) => void;
 }) {
@@ -482,11 +472,17 @@ export default function NightMap({ sites, timeRef, time, coverage, onSelect }: {
       if (width < 50) return;
       palette = document.documentElement.classList.contains("dark") ? PALETTES.dark : PALETTES.light;
       colors = sites.map((site) => site.telescopes.map((telescope) => resolveColor(container, telescope.color)));
-      scene = buildScene(width, land, sites, palette);
+      const box = container.getBoundingClientRect();
+      const logo = hubRef.current?.getBoundingClientRect();
+      const hub: Point = logo
+        ? [logo.left + logo.width / 2 - box.left, logo.top + logo.height / 2 - box.top]
+        : [width / 2, 0];
+      scene = buildScene(width, land, sites, palette, hub);
       layer = null;
       view.width = scene.base.width;
-      view.height = scene.base.height;
-      view.style.height = `${scene.height}px`;
+      view.height = scene.base.height + Math.round(scene.lift * scene.dpr);
+      view.style.height = `${scene.height + scene.lift}px`;
+      view.style.marginTop = `${-scene.lift}px`;
       paintedAt = Number.NaN;
     };
 
@@ -624,11 +620,12 @@ export default function NightMap({ sites, timeRef, time, coverage, onSelect }: {
         paintBase(scene, palette, ms);
         paintedAt = ms;
       }
+      const lift = Math.round(scene.lift * scene.dpr);
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.globalCompositeOperation = "copy";
-      ctx.drawImage(scene.base, 0, 0);
+      ctx.drawImage(scene.base, 0, lift);
       ctx.globalCompositeOperation = "source-over";
-      ctx.setTransform(scene.dpr, 0, 0, scene.dpr, 0, 0);
+      ctx.setTransform(scene.dpr, 0, 0, scene.dpr, 0, lift);
 
       const active = coverageRef.current;
       if (active?.endedAt !== undefined && now - active.endedAt > FADE_MS) {
@@ -665,14 +662,11 @@ export default function NightMap({ sites, timeRef, time, coverage, onSelect }: {
       resizeObserver.disconnect();
       themeObserver.disconnect();
     };
-  }, [land, sites, timeRef]);
-
-  const sun = subsolarPoint(time);
-  const receiving = sites.some((site) => skyState(sunAltitude(sun, site.lat, site.lon)) === "night");
+  }, [land, sites, timeRef, hubRef]);
 
   return (
-    <div ref={containerRef} className="relative">
-      <canvas ref={canvasRef} className="block w-full" style={{ aspectRatio: "1000 / 520" }} />
+    <div ref={containerRef} className="relative flow-root">
+      <canvas ref={canvasRef} className="pointer-events-none block w-full" style={{ aspectRatio: "1000 / 520" }} />
       {labels.map(({ site, left, top }) => (
         <div
           key={site.id}
@@ -700,20 +694,6 @@ export default function NightMap({ sites, timeRef, time, coverage, onSelect }: {
           </div>
         </div>
       ))}
-      <div className="pointer-events-none absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2">
-        <div className="bg-background/40 absolute -inset-4 rounded-full backdrop-blur-[3px] [mask-image:radial-gradient(closest-side,black_55%,transparent)] sm:-inset-6" />
-        <div
-          className={`absolute -inset-1 rounded-full blur-lg transition-colors duration-700 ${receiving ? "bg-indigo-400/60" : "bg-indigo-400/25"}`}
-        />
-        {receiving && (
-          <div className="absolute inset-0 animate-ping rounded-full ring-2 ring-indigo-300/60 [animation-duration:2.4s]" />
-        )}
-        <img
-          src={boomLogo}
-          alt="BOOM"
-          className="relative size-8 max-w-none rounded-full shadow-2xl ring-2 ring-white/90 sm:size-11 lg:size-14"
-        />
-      </div>
     </div>
   );
 }
