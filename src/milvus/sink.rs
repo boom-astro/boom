@@ -268,7 +268,10 @@ mod tests {
     #[test]
     fn a_failure_pauses_further_attempts() {
         let mut sink = sink(true);
-        assert!(sink.is_ready(), "a fresh enabled sink attempts uploads");
+        assert!(
+            sink.is_ready(),
+            "a fresh enabled sink should attempt uploads"
+        );
 
         sink.record_failure("connect", MilvusError::NotEnabled);
         assert!(!sink.is_ready());
@@ -286,7 +289,10 @@ mod tests {
         assert!(!sink.is_ready());
 
         sink.retry_at = Some(Instant::now() - Duration::from_secs(1));
-        assert!(sink.is_ready(), "the cooldown has elapsed");
+        assert!(
+            sink.is_ready(),
+            "the breaker should close once the cooldown has elapsed"
+        );
     }
 
     /// Consecutive failures back off; a success resets the budget so a later,

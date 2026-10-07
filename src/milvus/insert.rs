@@ -450,7 +450,10 @@ mod tests {
 
         let kept = latest_per_object(&rows);
         assert_eq!(kept_ids(&rows), vec!["ZTF_A", "ZTF_B", "ZTF_C"]);
-        assert_eq!(kept[0].candid, 30, "A kept its slot but took the newer row");
+        assert_eq!(
+            kept[0].candid, 30,
+            "A should keep its slot but take the newer row"
+        );
         assert_eq!(kept[1].candid, 20);
         assert_eq!(kept[2].candid, 40);
     }

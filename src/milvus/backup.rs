@@ -304,7 +304,10 @@ mod tests {
                 "truncating to {n} bytes should not decode"
             );
         }
-        assert!(decode(&encoded).is_some(), "the whole entry still decodes");
+        assert!(
+            decode(&encoded).is_some(),
+            "the whole entry should still decode"
+        );
     }
 
     #[test]
@@ -370,7 +373,10 @@ mod tests {
 
         let drained = q.take(10).await.unwrap();
         assert_eq!(drained.len(), 1);
-        assert_eq!(drained[0].jd, 2400009.0, "the newest alert is the survivor");
+        assert_eq!(
+            drained[0].jd, 2400009.0,
+            "the newest alert should be the survivor"
+        );
 
         cleanup(&mut q).await;
     }
@@ -476,7 +482,10 @@ mod tests {
         assert_eq!(q.pending().await.unwrap(), 6);
 
         let second = q.take(4).await.unwrap();
-        assert_eq!(second[0].object_id, "ZTF_4", "picks up where it left off");
+        assert_eq!(
+            second[0].object_id, "ZTF_4",
+            "should pick up where it left off"
+        );
 
         cleanup(&mut q).await;
     }
@@ -609,8 +618,8 @@ mod tests {
 
         let drained = q.take(10).await.unwrap();
         let ids: Vec<&str> = drained.iter().map(|r| r.object_id.as_str()).collect();
-        assert_eq!(ids, vec!["ZTF_B"], "the good row still comes back");
-        assert_eq!(q.pending().await.unwrap(), 0, "both were consumed");
+        assert_eq!(ids, vec!["ZTF_B"], "the good row should still come back");
+        assert_eq!(q.pending().await.unwrap(), 0, "both should be consumed");
 
         cleanup(&mut q).await;
     }
