@@ -470,6 +470,17 @@ crossmatch:
         sersic: 1
         flux_ivar_r: 1
         fracflux_r: 1
+    AllWISE:
+      radius: 2.0
+      use_distance: false
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        w1mpro: 1
+        w2mpro: 1
+        w3mpro: 1
+        w4mpro: 1
   lsst:
     LSPSC:
       radius: 30.0 # 30 arcseconds
