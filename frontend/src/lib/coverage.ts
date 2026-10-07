@@ -1,8 +1,12 @@
-import { LEGACY_SURVEYS_FOOTPRINT, LSDR10_FOOTPRINT } from "@/lib/footprints";
+import {
+  DESI_DR1_FOOTPRINT,
+  GALEX_FOOTPRINT,
+  LEGACY_SURVEYS_FOOTPRINT,
+  LSDR10_FOOTPRINT,
+  MILLIQUAS_FOOTPRINT,
+  NED_FOOTPRINT,
+} from "@/lib/footprints";
 
-const DEG = Math.PI / 180;
-const NGP_RA = 192.85948;
-const NGP_DEC = 27.12825;
 const EDGE_SOFTNESS = 1.5;
 
 export const CATALOG_COLORS = ["oklch(0.78 0.13 215)", "oklch(0.84 0.16 85)"];
@@ -10,7 +14,6 @@ export const CATALOG_COLORS = ["oklch(0.78 0.13 215)", "oklch(0.84 0.16 85)"];
 export type Footprint = {
   decMin?: number;
   decMax?: number;
-  minGalacticLatitude?: number;
   raster?: string;
 };
 
@@ -56,8 +59,8 @@ export const CATALOGS: Catalog[] = [
     id: "DESI_DR1",
     name: "DESI DR1",
     description: "DESI spectroscopic redshifts",
-    extent: "Legacy Surveys above δ −20° (approx.)",
-    footprint: { raster: LEGACY_SURVEYS_FOOTPRINT, decMin: -20 },
+    extent: "About 15,500 deg², none south of δ −30°",
+    footprint: { raster: DESI_DR1_FOOTPRINT },
   },
   { id: "2MASS_PSC", name: "2MASS PSC", description: "Near-infrared point sources", extent: "All sky", footprint: {} },
   {
@@ -71,11 +74,23 @@ export const CATALOGS: Catalog[] = [
     id: "GALEX",
     name: "GALEX",
     description: "Ultraviolet sources",
-    extent: "|b| > 15° (approx.)",
-    footprint: { minGalacticLatitude: 15 },
+    extent: "Mostly away from the Galactic plane",
+    footprint: { raster: GALEX_FOOTPRINT },
   },
-  { id: "NED", name: "NED-LVS", description: "Galaxies with distances from NED", extent: "All sky", footprint: {} },
-  { id: "milliquas_v8", name: "Milliquas v8", description: "Quasars and AGN", extent: "All sky", footprint: {} },
+  {
+    id: "NED",
+    name: "NED-LVS",
+    description: "Galaxies with distances from NED",
+    extent: "All sky except parts of the Galactic plane",
+    footprint: { raster: NED_FOOTPRINT },
+  },
+  {
+    id: "milliquas_v8",
+    name: "Milliquas v8",
+    description: "Quasars and AGN",
+    extent: "Patchy, sparse near the Galactic plane",
+    footprint: { raster: MILLIQUAS_FOOTPRINT },
+  },
   { id: "VSX", name: "VSX", description: "Known variable stars (AAVSO)", extent: "All sky", footprint: {} },
   { id: "TNS", name: "TNS", description: "Reported transients", extent: "All sky", footprint: {} },
 ];
@@ -112,24 +127,14 @@ function above(value: number, limit: number): number {
   return Math.min(1, Math.max(0, (value - limit) / EDGE_SOFTNESS + 0.5));
 }
 
-function galacticLatitude(ra: number, dec: number): number {
-  const sinB =
-    Math.sin(dec * DEG) * Math.sin(NGP_DEC * DEG) +
-    Math.cos(dec * DEG) * Math.cos(NGP_DEC * DEG) * Math.cos((ra - NGP_RA) * DEG);
-  return Math.asin(Math.max(-1, Math.min(1, sinB))) / DEG;
-}
-
 export function followsSiderealTime(footprint: Footprint): boolean {
-  return footprint.minGalacticLatitude !== undefined || footprint.raster !== undefined;
+  return footprint.raster !== undefined;
 }
 
 export function footprintCoverage(footprint: Footprint, ra: number, dec: number): number {
   let coverage = 1;
   if (footprint.decMin !== undefined) coverage *= above(dec, footprint.decMin);
   if (footprint.decMax !== undefined) coverage *= above(footprint.decMax, dec);
-  if (footprint.minGalacticLatitude !== undefined && coverage > 0) {
-    coverage *= above(Math.abs(galacticLatitude(ra, dec)), footprint.minGalacticLatitude);
-  }
   if (footprint.raster !== undefined && coverage > 0) coverage *= rasterCoverage(footprint.raster, ra, dec);
   return coverage;
 }
