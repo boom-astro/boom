@@ -132,7 +132,8 @@ milvus:
     # are discarded. Comfortably above a night of ZTF alerts (500k-800k), so
     # a night-long outage drops nothing. ~1.6 KB per row, ~1.6 GB if full.
     max_rows: 1000000
-    # Rows replayed per successful batch, so catch-up cannot starve live work.
+    # Rows replayed per successful batch, and per idle tick when a worker has
+    # no alerts, so catch-up cannot starve live work.
     drain_rows: 500
 kafka:
   consumer:
