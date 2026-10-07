@@ -20,6 +20,10 @@ const COOLDOWN_BASE: Duration = Duration::from_secs(30);
 /// Upper bound on the pause between attempts.
 const COOLDOWN_MAX: Duration = Duration::from_secs(300);
 
+/// How long an idle worker waits before checking the backup queue again
+/// after finding it empty, so idle workers do not poll Valkey every tick.
+const IDLE_DRAIN_PAUSE: Duration = Duration::from_secs(30);
+
 /// Pause before the Nth consecutive retry: 30s, 60s, 120s, 240s, capped at
 /// [`COOLDOWN_MAX`].
 fn cooldown(consecutive_failures: u32) -> Duration {
@@ -45,6 +49,9 @@ pub struct MilvusSink {
     /// Holds embeddings the breaker turned away. `None` when the backup
     /// queue is off, in which case rejected rows are dropped.
     queue: Option<BackupQueue>,
+    /// While in the future, idle drains skip the queue: it was last found
+    /// empty or unreadable.
+    idle_drain_at: Option<Instant>,
 }
 
 impl MilvusSink {
@@ -60,6 +67,7 @@ impl MilvusSink {
             consecutive_failures: 0,
             retry_at: None,
             queue,
+            idle_drain_at: None,
         };
 
         if !config.enabled {
@@ -142,23 +150,10 @@ impl MilvusSink {
             return;
         }
 
-        if self.client.is_none() {
-            match MilvusClient::connect(&self.config).await {
-                Ok(client) => {
-                    self.client = Some(client);
-                }
-                Err(e) => {
-                    self.record_failure("reconnect to milvus", e);
-                    self.buffer(rows).await;
-                    return;
-                }
-            }
-        }
-
-        let client = self
-            .client
-            .as_mut()
-            .expect("client was just connected above");
+        let Some(client) = self.connected().await else {
+            self.buffer(rows).await;
+            return;
+        };
         match client.upsert_embeddings(rows).await {
             Ok(count) => {
                 debug!("upserted {} fusion embeddings to milvus", count);
@@ -173,32 +168,73 @@ impl MilvusSink {
         }
     }
 
-    /// Replay `backup_queue.drain_rows` of the backlog after a successful
-    /// upload, so catching up cannot starve live batches. Rows that fail are
-    /// re-buffered, where a newer alert for the same object may have landed
-    /// meanwhile and will win on `jd`.
-    async fn drain_some(&mut self) {
-        let Some(queue) = self.queue.as_mut() else {
+    /// The live client, redialing if a failure dropped it. A failed redial
+    /// trips the breaker and returns `None`.
+    async fn connected(&mut self) -> Option<&mut MilvusClient> {
+        if self.client.is_none() {
+            match MilvusClient::connect(&self.config).await {
+                Ok(client) => self.client = Some(client),
+                Err(e) => {
+                    self.record_failure("reconnect to milvus", e);
+                    return None;
+                }
+            }
+        }
+        self.client.as_mut()
+    }
+
+    /// Replay part of the backlog while the worker has no live alerts.
+    ///
+    /// Without this, replay only follows a successful live upload, so an
+    /// outage that ends after the night's alerts stop leaves the whole
+    /// backlog waiting for the next night. Once the queue is found empty,
+    /// further idle drains wait [`IDLE_DRAIN_PAUSE`].
+    pub async fn drain_when_idle(&mut self) {
+        if self.queue.is_none() || !self.is_ready() {
             return;
+        }
+        if self.idle_drain_at.is_some_and(|at| Instant::now() < at) {
+            return;
+        }
+        if self.connected().await.is_none() {
+            return;
+        }
+        if !self.drain_some().await {
+            self.idle_drain_at = Some(Instant::now() + IDLE_DRAIN_PAUSE);
+        }
+    }
+
+    /// Replay `backup_queue.drain_rows` of the backlog, so catching up cannot
+    /// starve live batches. Rows that fail are re-buffered, where a newer
+    /// alert for the same object may have landed meanwhile and will win on
+    /// `jd`.
+    ///
+    /// Returns whether any rows were taken; false means the queue was empty
+    /// or unreadable.
+    async fn drain_some(&mut self) -> bool {
+        let Some(queue) = self.queue.as_mut() else {
+            return false;
         };
 
         let batch = match queue.take(self.config.backup_queue.drain_rows).await {
-            Ok(batch) if batch.is_empty() => return,
+            Ok(batch) if batch.is_empty() => return false,
             Ok(batch) => batch,
             Err(e) => {
                 warn!("could not read the milvus backup queue: {}", e);
-                return;
+                return false;
             }
         };
 
         let Some(client) = self.client.as_mut() else {
             // Lost the connection between the upload and here; put them back.
             self.buffer(&batch).await;
-            return;
+            return true;
         };
 
         match client.upsert_embeddings(&batch).await {
             Ok(count) => {
+                // An idle drain can be the first call after an outage.
+                self.record_success();
                 let remaining = self.queue_len().await;
                 info!(
                     replayed = count,
@@ -211,6 +247,7 @@ impl MilvusSink {
                 self.buffer(&batch).await;
             }
         }
+        true
     }
 
     /// Rows still waiting. Reports 0 on failure; only used for a log line.
@@ -239,6 +276,7 @@ mod tests {
             consecutive_failures: 0,
             retry_at: None,
             queue: None,
+            idle_drain_at: None,
         }
     }
 
@@ -308,6 +346,19 @@ mod tests {
         assert_eq!(sink.consecutive_failures, 0);
         assert!(sink.retry_at.is_none());
         assert!(sink.is_ready());
+    }
+
+    /// Idle workers tick every 500ms; with nothing to replay they must not
+    /// dial Milvus, or an outage would trip the breaker with no live traffic.
+    #[tokio::test]
+    async fn an_idle_drain_without_a_queue_never_dials() {
+        let mut sink = sink(true);
+        sink.drain_when_idle().await;
+        assert!(sink.client.is_none(), "an idle drain should not connect");
+        assert_eq!(
+            sink.consecutive_failures, 0,
+            "an idle drain should not record a failure"
+        );
     }
 
     /// A failure drops the channel; a broken tonic channel does not heal, so

@@ -756,6 +756,10 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         self.output_queue.clone()
     }
 
+    async fn on_idle(&mut self) {
+        self.milvus.drain_when_idle().await;
+    }
+
     #[instrument(skip_all, err)]
     async fn process_alerts(
         &mut self,
