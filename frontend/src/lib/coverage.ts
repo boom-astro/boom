@@ -1,4 +1,4 @@
-import { LEGACY_SURVEYS_FOOTPRINT } from "@/lib/legacySurveysFootprint";
+import { LEGACY_SURVEYS_FOOTPRINT, LSDR10_FOOTPRINT } from "@/lib/footprints";
 
 const DEG = Math.PI / 180;
 const NGP_RA = 192.85948;
@@ -11,7 +11,7 @@ export type Footprint = {
   decMin?: number;
   decMax?: number;
   minGalacticLatitude?: number;
-  legacySurveys?: boolean;
+  raster?: string;
 };
 
 export type Coverage = {
@@ -42,22 +42,22 @@ export const CATALOGS: Catalog[] = [
     id: "LSDR10",
     name: "Legacy Surveys DR10",
     description: "DESI Legacy Imaging Surveys",
-    extent: "Legacy Surveys footprint",
-    footprint: { legacySurveys: true },
+    extent: "DECam area only, up to δ ≈ +35°",
+    footprint: { raster: LSDR10_FOOTPRINT },
   },
   {
     id: "LSPSC",
     name: "LS PSC",
     description: "Legacy Surveys point-source catalog",
     extent: "Legacy Surveys footprint",
-    footprint: { legacySurveys: true },
+    footprint: { raster: LEGACY_SURVEYS_FOOTPRINT },
   },
   {
     id: "DESI_DR1",
     name: "DESI DR1",
     description: "DESI spectroscopic redshifts",
     extent: "Legacy Surveys above δ −20° (approx.)",
-    footprint: { legacySurveys: true, decMin: -20 },
+    footprint: { raster: LEGACY_SURVEYS_FOOTPRINT, decMin: -20 },
   },
   { id: "2MASS_PSC", name: "2MASS PSC", description: "Near-infrared point sources", extent: "All sky", footprint: {} },
   {
@@ -80,20 +80,21 @@ export const CATALOGS: Catalog[] = [
   { id: "TNS", name: "TNS", description: "Reported transients", extent: "All sky", footprint: {} },
 ];
 
-let legacySurveysGrid: Uint8Array | null = null;
+const rasters = new Map<string, Uint8Array>();
 
-function legacySurveys(ra: number, dec: number): number {
-  if (!legacySurveysGrid) {
-    const grid = new Uint8Array(360 * 180);
-    LEGACY_SURVEYS_FOOTPRINT.split(";").forEach((row, j) => {
+function rasterCoverage(raster: string, ra: number, dec: number): number {
+  let grid = rasters.get(raster);
+  if (!grid) {
+    const cells = new Uint8Array(360 * 180);
+    raster.split(";").forEach((row, j) => {
       for (const run of row ? row.split(",") : []) {
         const [start, end] = run.split("-").map(Number);
-        grid.fill(1, j * 360 + start, j * 360 + end);
+        cells.fill(1, j * 360 + start, j * 360 + end);
       }
     });
-    legacySurveysGrid = grid;
+    rasters.set(raster, cells);
+    grid = cells;
   }
-  const grid = legacySurveysGrid;
   const x = ((ra % 360) + 360) % 360 - 0.5;
   const y = Math.min(179, Math.max(0, dec + 89.5));
   const i = Math.floor(x);
@@ -119,7 +120,7 @@ function galacticLatitude(ra: number, dec: number): number {
 }
 
 export function followsSiderealTime(footprint: Footprint): boolean {
-  return footprint.minGalacticLatitude !== undefined || !!footprint.legacySurveys;
+  return footprint.minGalacticLatitude !== undefined || footprint.raster !== undefined;
 }
 
 export function footprintCoverage(footprint: Footprint, ra: number, dec: number): number {
@@ -129,6 +130,6 @@ export function footprintCoverage(footprint: Footprint, ra: number, dec: number)
   if (footprint.minGalacticLatitude !== undefined && coverage > 0) {
     coverage *= above(Math.abs(galacticLatitude(ra, dec)), footprint.minGalacticLatitude);
   }
-  if (footprint.legacySurveys && coverage > 0) coverage *= legacySurveys(ra, dec);
+  if (footprint.raster !== undefined && coverage > 0) coverage *= rasterCoverage(footprint.raster, ra, dec);
   return coverage;
 }
