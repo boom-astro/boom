@@ -32,3 +32,19 @@ workers:
       n_workers: 1
     filter:
       n_workers: 1
+
+crossmatch:
+  ztf:
+    # CatWISE2020 is post-cryogenic and carries only W1/W2; AllWISE is the source
+    # of W3/W4, which ORACLE's static feature vector expects.
+    AllWISE:
+      radius: 2.0
+      use_distance: false
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        w1mpro: 1
+        w2mpro: 1
+        w3mpro: 1
+        w4mpro: 1
