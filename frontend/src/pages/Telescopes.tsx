@@ -223,10 +223,6 @@ function Legend() {
         <span className="inline-block w-3 shrink-0 border-t border-dashed border-indigo-400" />
         Sun 12° below the horizon
       </span>
-      <span className="flex items-center gap-1.5">
-        <span className="bg-foreground inline-block size-1.5 shrink-0 rounded-full" />
-        Alerts sent to BOOM
-      </span>
     </div>
   );
 }
