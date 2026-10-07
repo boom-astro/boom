@@ -12,8 +12,9 @@
 //! a failure between the two writes would otherwise strand a payload with no
 //! index entry or the reverse.
 //!
-//! Rows use a compact binary encoding: JSON would inflate 384 floats by ~3x.
+//! Rows are stored as protobuf: JSON would inflate 384 floats by ~3x.
 
+use prost::Message;
 use redis::{aio::MultiplexedConnection, AsyncCommands, RedisError, Script};
 use tracing::{debug, warn};
 
@@ -104,7 +105,7 @@ impl BackupQueue {
             invocation
                 .arg(row.object_id.as_str())
                 .arg(row.jd.to_string())
-                .arg(encode(row));
+                .arg(row.encode_to_vec());
             queued += 1;
         }
         if rejected > 0 {
@@ -162,71 +163,19 @@ impl BackupQueue {
     }
 }
 
-/// Length-prefixed `object_id`, then `candid`, `jd`, and a length-prefixed
-/// embedding. Little-endian throughout.
-fn encode(row: &EmbeddingRow) -> Vec<u8> {
-    let id = row.object_id.as_bytes();
-    let mut out = Vec::with_capacity(2 + id.len() + 8 + 8 + 4 + row.embedding.len() * 4);
-
-    out.extend_from_slice(&(id.len() as u16).to_le_bytes());
-    out.extend_from_slice(id);
-    out.extend_from_slice(&row.candid.to_le_bytes());
-    out.extend_from_slice(&row.jd.to_le_bytes());
-    out.extend_from_slice(&(row.embedding.len() as u32).to_le_bytes());
-    for value in &row.embedding {
-        out.extend_from_slice(&value.to_le_bytes());
-    }
-
-    out
-}
-
-/// Inverse of [`encode`]. `None` for anything malformed, so a bad entry is
+/// Decode a stored row. `None` for anything malformed, so a bad entry is
 /// dropped rather than panicking a worker.
+///
+/// Protobuf fills absent fields with defaults, so an entry truncated at a
+/// field boundary (or an empty one) still decodes. A row without an id or an
+/// embedding is rejected here rather than sent to Milvus, where it would fail
+/// the whole upsert.
 fn decode(bytes: &[u8]) -> Option<EmbeddingRow> {
-    let mut cursor = Cursor { bytes, at: 0 };
-
-    let id_len = u16::from_le_bytes(cursor.take::<2>()?) as usize;
-    let object_id = String::from_utf8(cursor.take_slice(id_len)?.to_vec()).ok()?;
-    let candid = i64::from_le_bytes(cursor.take::<8>()?);
-    let jd = f64::from_le_bytes(cursor.take::<8>()?);
-
-    let dim = u32::from_le_bytes(cursor.take::<4>()?) as usize;
-    let mut embedding = Vec::with_capacity(dim.min(4096));
-    for _ in 0..dim {
-        embedding.push(f32::from_le_bytes(cursor.take::<4>()?));
-    }
-
-    // Trailing bytes mean it is not what it claims to be.
-    if cursor.at != bytes.len() {
+    let row = EmbeddingRow::decode(bytes).ok()?;
+    if row.object_id.is_empty() || row.embedding.is_empty() {
         return None;
     }
-
-    Some(EmbeddingRow {
-        object_id,
-        embedding,
-        candid,
-        jd,
-    })
-}
-
-/// Bounds-checked reader, so a truncated entry yields `None` instead of a panic.
-struct Cursor<'a> {
-    bytes: &'a [u8],
-    at: usize,
-}
-
-impl Cursor<'_> {
-    fn take<const N: usize>(&mut self) -> Option<[u8; N]> {
-        let slice = self.take_slice(N)?;
-        slice.try_into().ok()
-    }
-
-    fn take_slice(&mut self, n: usize) -> Option<&[u8]> {
-        let end = self.at.checked_add(n)?;
-        let slice = self.bytes.get(self.at..end)?;
-        self.at = end;
-        Some(slice)
-    }
+    Some(row)
 }
 
 #[cfg(test)]
@@ -256,7 +205,7 @@ mod tests {
     #[test]
     fn a_row_survives_a_round_trip() {
         let original = row("ZTF18abcdefg", 384);
-        let decoded = decode(&encode(&original)).expect("must decode");
+        let decoded = decode(&original.encode_to_vec()).expect("must decode");
 
         assert_eq!(decoded.object_id, original.object_id);
         assert_eq!(decoded.candid, original.candid);
@@ -266,14 +215,19 @@ mod tests {
 
     #[test]
     fn a_non_ascii_object_id_survives() {
-        let decoded = decode(&encode(&row("ZTF_αβγ_✓", 4))).expect("must decode");
+        let decoded = decode(&row("ZTF_αβγ_✓", 4).encode_to_vec()).expect("must decode");
         assert_eq!(decoded.object_id, "ZTF_αβγ_✓");
     }
 
+    /// Indistinguishable from an entry that lost its embedding.
     #[test]
-    fn an_empty_embedding_survives() {
-        let decoded = decode(&encode(&row("ZTF_A", 0))).expect("must decode");
-        assert!(decoded.embedding.is_empty());
+    fn an_empty_embedding_is_rejected() {
+        assert!(decode(&row("ZTF_A", 0).encode_to_vec()).is_none());
+    }
+
+    #[test]
+    fn an_empty_object_id_is_rejected() {
+        assert!(decode(&row("", 4).encode_to_vec()).is_none());
     }
 
     /// `jd` is compared with `total_cmp` downstream, so the bits matter.
@@ -285,7 +239,7 @@ mod tests {
             candid: -1,
             jd: f64::NAN,
         };
-        let decoded = decode(&encode(&original)).expect("must decode");
+        let decoded = decode(&original.encode_to_vec()).expect("must decode");
 
         assert!(decoded.jd.is_nan());
         assert!(decoded.embedding[0].is_nan());
@@ -297,7 +251,7 @@ mod tests {
     /// The case that would otherwise panic a worker on a corrupt entry.
     #[test]
     fn every_truncation_is_rejected() {
-        let encoded = encode(&row("ZTF_A", 8));
+        let encoded = row("ZTF_A", 8).encode_to_vec();
         for n in 0..encoded.len() {
             assert!(
                 decode(&encoded[..n]).is_none(),
@@ -312,16 +266,18 @@ mod tests {
 
     #[test]
     fn trailing_bytes_are_rejected() {
-        let mut encoded = encode(&row("ZTF_A", 4));
+        let mut encoded = row("ZTF_A", 4).encode_to_vec();
         encoded.push(0);
         assert!(decode(&encoded).is_none());
     }
 
     #[test]
     fn an_absurd_declared_length_is_rejected() {
-        let mut encoded = encode(&row("ZTF_A", 1));
-        let len_at = encoded.len() - 4 - 4;
-        encoded[len_at..len_at + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+        // The embedding is encoded last: its one-byte length, then 4 bytes.
+        let mut encoded = row("ZTF_A", 1).encode_to_vec();
+        let len_at = encoded.len() - 4 - 1;
+        assert_eq!(encoded[len_at], 4);
+        encoded[len_at] = 0x7f;
 
         assert!(decode(&encoded).is_none());
     }

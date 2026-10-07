@@ -184,11 +184,7 @@ impl MilvusSink {
     }
 
     /// Replay part of the backlog while the worker has no live alerts.
-    ///
-    /// Without this, replay only follows a successful live upload, so an
-    /// outage that ends after the night's alerts stop leaves the whole
-    /// backlog waiting for the next night. Once the queue is found empty,
-    /// further idle drains wait [`IDLE_DRAIN_PAUSE`].
+    /// Once the queue is found empty,further idle drains wait [`IDLE_DRAIN_PAUSE`].
     pub async fn drain_when_idle(&mut self) {
         if self.queue.is_none() || !self.is_ready() {
             return;
