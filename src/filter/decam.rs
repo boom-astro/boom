@@ -10,7 +10,7 @@ use crate::filter::{
     insert_lsst_aux_pipeline_if_needed, insert_ztf_aux_pipeline_if_needed, lsst_survey_match,
     record_filter_result, run_filter, uses_field_in_filter, validate_filter_pipeline,
     watchlist_projections, ztf_survey_match, Alert, Classification, Filter, FilterError,
-    FilterResults, FilterWorker, FilterWorkerError, LoadedFilter, Origin, Photometry,
+    FilterResults, FilterWorker, FilterWorkerError, LoadedFilter, Origin, Photometry, SurveyMatch,
     SurveyMatches,
 };
 use crate::utils::cutouts::CutoutStorage;
@@ -45,6 +45,82 @@ impl DecamPhotometry {
             self.forcediffimfluxunc * 1000.0,
         )
     }
+}
+
+/// DECam alert and forced photometry as output photometry, sorted by time.
+fn decam_photometry(
+    prv_candidates: &[DecamPhotometry],
+    fp_hists: &[DecamPhotometry],
+) -> Vec<Photometry> {
+    let mut photometry = Vec::new();
+    for (points, origin) in [
+        (prv_candidates, Origin::Alert),
+        (fp_hists, Origin::ForcedPhot),
+    ] {
+        for doc in points {
+            let (flux, flux_err) = doc.to_flux();
+            photometry.push(Photometry {
+                jd: doc.jd,
+                flux,
+                flux_err,
+                band: format!("decam{}", doc.band),
+                origin: origin.clone(),
+                programid: 1, // DECam has a single public stream
+                survey: Survey::Decam,
+                ra: doc.ra,
+                dec: doc.dec,
+            });
+        }
+    }
+    photometry.sort_by(|a, b| a.jd.partial_cmp(&b.jd).unwrap());
+    photometry
+}
+
+/// The DECam object matched to an alert of another survey, with its photometry.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct DecamMatch {
+    #[serde(rename = "objectId")]
+    pub object_id: String,
+    pub ra: f64,
+    pub dec: f64,
+    #[serde(default)]
+    pub prv_candidates: Vec<DecamPhotometry>,
+    #[serde(default)]
+    pub fp_hists: Vec<DecamPhotometry>,
+}
+
+/// Converts the DECam object matched to an alert of another survey into an output survey match.
+pub fn decam_survey_match(decam_match: &DecamMatch) -> SurveyMatch {
+    SurveyMatch {
+        object_id: decam_match.object_id.clone(),
+        ra: decam_match.ra,
+        dec: decam_match.dec,
+        photometry: decam_photometry(&decam_match.prv_candidates, &decam_match.fp_hists),
+    }
+}
+
+/// Adds the DECam object matched to the alert, if any, to the survey matches of
+/// another survey's alert pipeline, which must end with its `$project` stage.
+pub fn add_decam_survey_match(pipeline: &mut Vec<Document>) {
+    let project_index = pipeline.len() - 1;
+    if let Some(survey_matches) = pipeline[project_index]
+        .get_document_mut("$project")
+        .ok()
+        .and_then(|project| project.get_document_mut("survey_matches").ok())
+    {
+        survey_matches.insert("decam", survey_match_projection("decam_aux", false));
+    }
+    pipeline.insert(
+        project_index,
+        doc! {
+            "$lookup": {
+                "from": "DECAM_alerts_aux",
+                "localField": "aux.aliases.DECAM.0",
+                "foreignField": "_id",
+                "as": "decam_aux"
+            }
+        },
+    );
 }
 
 /// ZTF and LSST objects matched to a DECam alert, with their photometry.
@@ -253,36 +329,7 @@ pub async fn build_decam_alerts(
             });
         }
 
-        let mut photometry = Vec::new();
-        for doc in alert.prv_candidates.iter() {
-            let (flux, flux_err) = doc.to_flux();
-            photometry.push(Photometry {
-                jd: doc.jd,
-                flux,
-                flux_err,
-                band: format!("decam{}", doc.band),
-                origin: Origin::Alert,
-                programid: 1, // DECam has a single public stream
-                survey: Survey::Decam,
-                ra: doc.ra,
-                dec: doc.dec,
-            });
-        }
-        for doc in alert.fp_hists.iter() {
-            let (flux, flux_err) = doc.to_flux();
-            photometry.push(Photometry {
-                jd: doc.jd,
-                flux,
-                flux_err,
-                band: format!("decam{}", doc.band),
-                origin: Origin::ForcedPhot,
-                programid: 1,
-                survey: Survey::Decam,
-                ra: doc.ra,
-                dec: doc.dec,
-            });
-        }
-        photometry.sort_by(|a, b| a.jd.partial_cmp(&b.jd).unwrap());
+        let photometry = decam_photometry(&alert.prv_candidates, &alert.fp_hists);
 
         let cutouts = candid_to_cutouts
             .remove(&candid)

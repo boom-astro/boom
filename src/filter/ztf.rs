@@ -6,15 +6,15 @@ use crate::alert::ZtfCandidate;
 use crate::conf::AppConfig;
 use crate::enrichment::{
     create_ztf_alert_pipeline, deserialize_ztf_alert_lightcurve, deserialize_ztf_forced_lightcurve,
-    fetch_alerts, ZtfAlertClassifications, ZtfMatch, ZtfPhotometry, ZtfSurveyMatches,
+    fetch_alerts, LsstMatch, ZtfAlertClassifications, ZtfMatch, ZtfPhotometry,
 };
 use crate::filter::{
-    build_loaded_filters, build_lsst_aux_data, insert_lsst_aux_pipeline_if_needed,
-    lsst_survey_match, parse_programid_candid_tuple, record_filter_result, run_filter,
-    update_aliases_index_multiple, uses_field_in_filter, validate_filter_pipeline,
-    watchlist_projections, Alert, AlertHostGalaxy, Classification, Filter, FilterError,
-    FilterResults, FilterWorker, FilterWorkerError, LoadedFilter, Origin, Photometry, SurveyMatch,
-    SurveyMatches,
+    add_decam_survey_match, build_loaded_filters, build_lsst_aux_data, decam_survey_match,
+    insert_lsst_aux_pipeline_if_needed, lsst_survey_match, parse_programid_candid_tuple,
+    record_filter_result, run_filter, update_aliases_index_multiple, uses_field_in_filter,
+    validate_filter_pipeline, watchlist_projections, Alert, AlertHostGalaxy, Classification,
+    DecamMatch, Filter, FilterError, FilterResults, FilterWorker, FilterWorkerError, LoadedFilter,
+    Origin, Photometry, SurveyMatch, SurveyMatches,
 };
 use crate::utils::cutouts::CutoutStorage;
 use crate::utils::db::{fetch_timeseries_op, get_array_dict_element};
@@ -192,6 +192,14 @@ pub fn ztf_survey_match(ztf_match: &ZtfMatch) -> SurveyMatch {
     }
 }
 
+/// LSST and DECam objects matched to a ZTF alert, with their photometry.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct ZtfOutputSurveyMatches {
+    pub lsst: Option<LsstMatch>,
+    #[serde(default)]
+    pub decam: Option<DecamMatch>,
+}
+
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct ZtfAlertEnriched {
     #[serde(rename = "_id")]
@@ -206,7 +214,7 @@ pub struct ZtfAlertEnriched {
     pub prv_nondetections: Vec<ZtfPhotometry>,
     #[serde(deserialize_with = "deserialize_ztf_forced_lightcurve")]
     pub fp_hists: Vec<ZtfPhotometry>,
-    pub survey_matches: Option<ZtfSurveyMatches>,
+    pub survey_matches: Option<ZtfOutputSurveyMatches>,
     #[serde(default)]
     pub host_galaxy: Option<HostGalaxyAssociation>,
 }
@@ -395,6 +403,9 @@ pub async fn build_ztf_alerts(
         };
         if let Some(lsst_match) = alert.survey_matches.as_ref().and_then(|m| m.lsst.as_ref()) {
             survey_matches.lsst = Some(lsst_survey_match(lsst_match));
+        }
+        if let Some(decam_match) = alert.survey_matches.as_ref().and_then(|m| m.decam.as_ref()) {
+            survey_matches.decam = Some(decam_survey_match(decam_match));
         }
 
         let cutouts = candid_to_cutouts
@@ -890,8 +901,11 @@ impl FilterWorker for ZtfFilterWorker {
             }
         }
 
+        let mut alert_pipeline = create_ztf_alert_pipeline(true);
+        add_decam_survey_match(&mut alert_pipeline);
+
         Ok(ZtfFilterWorker {
-            alert_pipeline: create_ztf_alert_pipeline(true),
+            alert_pipeline,
             alert_collection,
             mpc_orbits,
             alert_cutout_storage,

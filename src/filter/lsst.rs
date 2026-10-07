@@ -3,20 +3,23 @@ use mongodb::bson::{doc, Document};
 use std::collections::HashMap;
 use tracing::{debug, info, instrument, warn};
 
+use crate::alert::LsstCandidate;
 use crate::conf::AppConfig;
 use crate::enrichment::{
-    create_lsst_alert_pipeline, fetch_alerts, LsstAlertForEnrichment, LsstMatch,
+    create_lsst_alert_pipeline, fetch_alerts, LsstMatch, LsstPhotometry, ZtfMatch,
 };
 use crate::filter::{
-    build_loaded_filters, build_ztf_aux_data, insert_ztf_aux_pipeline_if_needed,
-    record_filter_result, run_filter, update_aliases_index_multiple, uses_field_in_filter,
-    validate_filter_pipeline, watchlist_projections, ztf_survey_match, Alert, AlertHostGalaxy,
-    Classification, Filter, FilterError, FilterResults, FilterWorker, FilterWorkerError,
-    LoadedFilter, Origin, Photometry, SurveyMatch, SurveyMatches,
+    add_decam_survey_match, build_loaded_filters, build_ztf_aux_data, decam_survey_match,
+    insert_ztf_aux_pipeline_if_needed, record_filter_result, run_filter,
+    update_aliases_index_multiple, uses_field_in_filter, validate_filter_pipeline,
+    watchlist_projections, ztf_survey_match, Alert, AlertHostGalaxy, Classification, DecamMatch,
+    Filter, FilterError, FilterResults, FilterWorker, FilterWorkerError, LoadedFilter, Origin,
+    Photometry, SurveyMatch, SurveyMatches,
 };
 use crate::utils::cutouts::CutoutStorage;
 use crate::utils::db::{fetch_timeseries_op, get_array_dict_element};
 use crate::utils::enums::Survey;
+use crate::utils::host::HostGalaxyAssociation;
 
 /// For a filter running on another survey (e.g., ZTF), determine if we need to
 /// fetch LSST auxiliary data (prv_candidates, fp_hists) based on the fields
@@ -146,6 +149,29 @@ pub fn lsst_survey_match(lsst_match: &LsstMatch) -> SurveyMatch {
     }
 }
 
+/// ZTF and DECam objects matched to an LSST alert, with their photometry.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct LsstOutputSurveyMatches {
+    pub ztf: Option<ZtfMatch>,
+    #[serde(default)]
+    pub decam: Option<DecamMatch>,
+}
+
+/// LSST alert as fetched from the database to build the outgoing alert packet.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct LsstAlertForFilter {
+    #[serde(rename = "_id")]
+    pub candid: i64,
+    #[serde(rename = "objectId")]
+    pub object_id: String,
+    pub candidate: LsstCandidate,
+    pub prv_candidates: Vec<LsstPhotometry>,
+    pub fp_hists: Vec<LsstPhotometry>,
+    #[serde(default)]
+    pub host_galaxy: Option<HostGalaxyAssociation>,
+    pub survey_matches: Option<LsstOutputSurveyMatches>,
+}
+
 /// Builds LSST Alert objects from the provided filter results and alert collection.
 ///
 /// # Arguments
@@ -167,10 +193,9 @@ pub async fn build_lsst_alerts(
         return Ok(Vec::new());
     }
 
-    let alerts: Vec<LsstAlertForEnrichment> =
-        fetch_alerts(&candids, &alert_pipeline, alert_collection)
-            .await
-            .map_err(|e| FilterWorkerError::FetchAlertsError(e.to_string()))?;
+    let alerts: Vec<LsstAlertForFilter> = fetch_alerts(&candids, &alert_pipeline, alert_collection)
+        .await
+        .map_err(|e| FilterWorkerError::FetchAlertsError(e.to_string()))?;
 
     if alerts.len() != candids.len() {
         let nb_total = candids.len();
@@ -259,6 +284,9 @@ pub async fn build_lsst_alerts(
         };
         if let Some(ztf_match) = alert.survey_matches.as_ref().and_then(|m| m.ztf.as_ref()) {
             survey_matches.ztf = Some(ztf_survey_match(ztf_match));
+        }
+        if let Some(decam_match) = alert.survey_matches.as_ref().and_then(|m| m.decam.as_ref()) {
+            survey_matches.decam = Some(decam_survey_match(decam_match));
         }
 
         let cutouts = candid_to_cutouts
@@ -480,8 +508,11 @@ impl FilterWorker for LsstFilterWorker {
         )
         .await?;
 
+        let mut alert_pipeline = create_lsst_alert_pipeline();
+        add_decam_survey_match(&mut alert_pipeline);
+
         Ok(LsstFilterWorker {
-            alert_pipeline: create_lsst_alert_pipeline(),
+            alert_pipeline,
             alert_collection,
             alert_cutout_storage,
             filter_collection,

@@ -2,7 +2,11 @@
 use boom::{
     alert::{AlertWorker, ProcessAlertStatus, DECAM_LSST_XMATCH_RADIUS, DECAM_ZTF_XMATCH_RADIUS},
     conf::{get_test_cutout_storage, get_test_db},
-    filter::{alert_to_avro_bytes, load_alert_schema, DecamFilterWorker, FilterWorker},
+    enrichment::{EnrichmentWorker, ZtfEnrichmentWorker},
+    filter::{
+        alert_to_avro_bytes, load_alert_schema, DecamFilterWorker, FilterWorker, LsstFilterWorker,
+        ZtfFilterWorker,
+    },
     utils::{
         enums::Survey,
         testing::{
@@ -12,7 +16,7 @@ use boom::{
         },
     },
 };
-use mongodb::bson::doc;
+use mongodb::bson::{doc, Bson, Document};
 
 #[tokio::test]
 async fn test_process_decam_alert() {
@@ -225,6 +229,123 @@ async fn test_filter_decam_alert_with_ztf_and_lsst_matches() {
     let _ = alert_to_avro_bytes(&alert, &schema).unwrap();
 
     drop_alert_from_collections(candid, &Survey::Decam)
+        .await
+        .unwrap();
+    drop_alert_from_collections(ztf_candid, &Survey::Ztf)
+        .await
+        .unwrap();
+    drop_alert_from_collections(lsst_candid, &Survey::Lsst)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_ztf_and_lsst_alerts_carry_their_decam_match() {
+    let (decam_candid, decam_object_id, ra, dec, decam_bytes_content) =
+        AlertRandomizer::new_randomized(Survey::Decam)
+            .dec(0.0)
+            .get()
+            .await;
+
+    // The ZTF and LSST alerts come first, so their DECam alias can only come
+    // from the DECam alert.
+    let mut ztf_worker = ztf_alert_worker().await;
+    let (ztf_candid, ztf_object_id, _, _, ztf_bytes_content) =
+        AlertRandomizer::new_randomized(Survey::Ztf)
+            .ra(ra)
+            .dec(dec + 0.9 * DECAM_ZTF_XMATCH_RADIUS.to_degrees())
+            .get()
+            .await;
+    ztf_worker.process_alert(&ztf_bytes_content).await.unwrap();
+
+    let mut lsst_worker = lsst_alert_worker().await;
+    let (lsst_candid, lsst_object_id, _, _, lsst_bytes_content) =
+        AlertRandomizer::new_randomized(Survey::Lsst)
+            .ra(ra)
+            .dec(dec - 0.9 * DECAM_LSST_XMATCH_RADIUS.to_degrees())
+            .get()
+            .await;
+    lsst_worker
+        .process_alert(&lsst_bytes_content)
+        .await
+        .unwrap();
+
+    let mut decam_worker = decam_alert_worker().await;
+    decam_worker
+        .process_alert(&decam_bytes_content)
+        .await
+        .unwrap();
+
+    let db = get_test_db().await;
+    for (collection, object_id) in [
+        ("ZTF_alerts_aux", &ztf_object_id),
+        ("LSST_alerts_aux", &lsst_object_id),
+    ] {
+        let aux = db
+            .collection::<Document>(collection)
+            .find_one(doc! {"_id": object_id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            aux.get_document("aliases")
+                .unwrap()
+                .get_array("DECAM")
+                .unwrap(),
+            &vec![Bson::String(decam_object_id.clone())],
+            "{collection} was not linked to the DECam object"
+        );
+    }
+
+    let mut enrichment_worker = ZtfEnrichmentWorker::new(TEST_CONFIG_FILE, None)
+        .await
+        .unwrap();
+    let enrichment_output = enrichment_worker
+        .process_alerts(&[ztf_candid])
+        .await
+        .unwrap();
+    let filter_id = insert_test_filter(&Survey::Ztf, true).await.unwrap();
+    let mut filter_worker = ZtfFilterWorker::new(TEST_CONFIG_FILE, Some(vec![filter_id.clone()]))
+        .await
+        .unwrap();
+    let result = filter_worker.process_alerts(&enrichment_output).await;
+    remove_test_filter(&filter_id, &Survey::Ztf).await.unwrap();
+    let alerts_output = result.unwrap();
+    assert_eq!(alerts_output.len(), 1);
+    let decam_match = alerts_output[0]
+        .survey_matches
+        .decam
+        .as_ref()
+        .expect("ZTF survey_matches.decam should be Some when a DECam alias exists");
+    assert_eq!(decam_match.object_id, decam_object_id);
+    assert_eq!(decam_match.photometry.len(), 5);
+    assert!(decam_match
+        .photometry
+        .iter()
+        .all(|p| p.survey == Survey::Decam));
+
+    let filter_id = insert_test_filter(&Survey::Lsst, true).await.unwrap();
+    let mut filter_worker = LsstFilterWorker::new(TEST_CONFIG_FILE, Some(vec![filter_id.clone()]))
+        .await
+        .unwrap();
+    let result = filter_worker
+        .process_alerts(&[format!("{}", lsst_candid)])
+        .await;
+    remove_test_filter(&filter_id, &Survey::Lsst).await.unwrap();
+    let alerts_output = result.unwrap();
+    assert_eq!(alerts_output.len(), 1);
+    let decam_match = alerts_output[0]
+        .survey_matches
+        .decam
+        .as_ref()
+        .expect("LSST survey_matches.decam should be Some when a DECam alias exists");
+    assert_eq!(decam_match.object_id, decam_object_id);
+    assert_eq!(decam_match.photometry.len(), 5);
+
+    let schema = load_alert_schema().unwrap();
+    let _ = alert_to_avro_bytes(&alerts_output[0], &schema).unwrap();
+
+    drop_alert_from_collections(decam_candid, &Survey::Decam)
         .await
         .unwrap();
     drop_alert_from_collections(ztf_candid, &Survey::Ztf)

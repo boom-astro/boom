@@ -16,6 +16,7 @@ use base::{
     parse_programid_candid_tuple, record_filter_result, update_aliases_index_multiple,
     Classification,
 };
+use decam::{add_decam_survey_match, decam_survey_match, DecamMatch};
 pub use decam::{build_decam_filter_pipeline, DecamFilterWorker};
 use lsst::{build_lsst_aux_data, insert_lsst_aux_pipeline_if_needed, lsst_survey_match};
 pub use lsst::{build_lsst_filter_pipeline, LsstFilterWorker};
