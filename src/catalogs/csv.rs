@@ -26,17 +26,33 @@ pub async fn ingest_csv<T>(inserter: &Inserter, path: &Path) -> Result<IngestRep
 where
     T: Serialize + DeserializeOwned + HasCoordinates + Send + 'static,
 {
+    let mut reader = open_csv(path).map_err(|e| IngestError::Read(e.to_string()))?;
+
     let (sender, workers) = inserter.start::<T>();
     let mut report = IngestReport::default();
+    // The reader's errors are held rather than returned on the spot. Returning
+    // with `?` here drops the workers' join handles without awaiting them,
+    // which detaches tasks that go on inserting after the chunk has been
+    // reported failed -- and loses the counts of what they did write. Every
+    // exit from this function goes through the `finish` below.
+    let mut failure: Option<IngestError> = None;
 
-    let mut reader = open_csv(path).map_err(|e| IngestError::Read(e.to_string()))?;
     for (row, result) in reader.deserialize::<T>().enumerate() {
         // Unlike the ascii engine there is no tolerance here: a serde failure
         // against a declared header means the published schema moved, and every
         // subsequent row will fail the same way.
-        let record = result.map_err(|e| {
-            IngestError::Read(format!("{}: row {}: {}", path.display(), row + 1, e))
-        })?;
+        let record = match result {
+            Ok(record) => record,
+            Err(e) => {
+                failure = Some(IngestError::Read(format!(
+                    "{}: row {}: {}",
+                    path.display(),
+                    row + 1,
+                    e
+                )));
+                break;
+            }
+        };
         report.read += 1;
         if sender.send(record).await.is_err() {
             break;
@@ -44,7 +60,13 @@ where
     }
 
     drop(sender);
-    let tally = inserter.finish(workers).await?;
+    let tally = inserter.finish(workers).await;
+    // The read error is the cause, so it is reported in preference to whatever
+    // the workers then made of a truncated stream.
+    if let Some(e) = failure {
+        return Err(e);
+    }
+    let tally = tally?;
     report.inserted = tally.inserted;
     report.skipped += tally.skipped;
     Ok(report)

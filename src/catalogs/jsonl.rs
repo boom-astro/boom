@@ -30,23 +30,48 @@ pub async fn ingest_jsonl<T>(inserter: &Inserter, path: &Path) -> Result<IngestR
 where
     T: Serialize + DeserializeOwned + HasCoordinates + Send + 'static,
 {
+    let reader = open_lines(path).map_err(|e| IngestError::Read(e.to_string()))?;
+
     let (sender, workers) = inserter.start::<T>();
     let mut report = IngestReport::default();
+    // The reader's errors are held rather than returned on the spot. Returning
+    // with `?` here drops the workers' join handles without awaiting them,
+    // which detaches tasks that go on inserting after the chunk has been
+    // reported failed -- and loses the counts of what they did write. Every
+    // exit from this function goes through the `finish` below.
+    let mut failure: Option<IngestError> = None;
 
-    let reader = open_lines(path).map_err(|e| IngestError::Read(e.to_string()))?;
     for (index, line) in reader.lines().enumerate() {
-        let line = line.map_err(|e| {
-            IngestError::Read(format!("{}: line {}: {}", path.display(), index + 1, e))
-        })?;
+        let line = match line {
+            Ok(line) => line,
+            Err(e) => {
+                failure = Some(IngestError::Read(format!(
+                    "{}: line {}: {}",
+                    path.display(),
+                    index + 1,
+                    e
+                )));
+                break;
+            }
+        };
         if line.trim().is_empty() {
             continue;
         }
         // No tolerance for a bad line: a record that does not deserialize means
         // the export's schema and this release's record type disagree, and
         // every following line will disagree the same way.
-        let record: T = serde_json::from_str(&line).map_err(|e| {
-            IngestError::Read(format!("{}: line {}: {}", path.display(), index + 1, e))
-        })?;
+        let record: T = match serde_json::from_str(&line) {
+            Ok(record) => record,
+            Err(e) => {
+                failure = Some(IngestError::Read(format!(
+                    "{}: line {}: {}",
+                    path.display(),
+                    index + 1,
+                    e
+                )));
+                break;
+            }
+        };
         report.read += 1;
         if sender.send(record).await.is_err() {
             break;
@@ -54,7 +79,13 @@ where
     }
 
     drop(sender);
-    let tally = inserter.finish(workers).await?;
+    let tally = inserter.finish(workers).await;
+    // The read error is the cause, so it is reported in preference to whatever
+    // the workers then made of a truncated stream.
+    if let Some(e) = failure {
+        return Err(e);
+    }
+    let tally = tally?;
     report.inserted = tally.inserted;
     report.skipped += tally.skipped;
     Ok(report)
@@ -116,5 +147,50 @@ mod tests {
             assert!(serde_json::from_str::<super::super::types::Lspsc>(&lines[0]).is_ok());
         }
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A failure part way through a file must still leave the records already
+    /// sent in the collection.
+    ///
+    /// That is what proves the insert workers were awaited rather than
+    /// abandoned. Returning from the read loop through `?` drops their join
+    /// handles, which detaches the tasks: they keep writing after the chunk has
+    /// been reported failed, their counts are lost, and on a `drop_existing`
+    /// retry they can write into a collection that has just been emptied.
+    #[tokio::test]
+    async fn a_bad_line_still_leaves_the_good_ones_written() {
+        let db = crate::conf::get_test_db().await;
+        let name = "test_jsonl_partial_ingest";
+        let collection = db.collection::<mongodb::bson::Document>(name);
+        collection
+            .delete_many(mongodb::bson::doc! {})
+            .await
+            .unwrap();
+
+        let dir = std::env::temp_dir().join("boom_jsonl_partial");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("part-0000.jsonl");
+        let mut file = std::fs::File::create(&path).unwrap();
+        writeln!(file, "{LINE}").unwrap();
+        writeln!(file, "{{\"not\": \"an lspsc row\"}}").unwrap();
+        writeln!(file, "{LINE}").unwrap();
+        drop(file);
+
+        let inserter = Inserter::new(db.clone(), name, 2, 1, 4);
+        let outcome = ingest_jsonl::<super::super::types::Lspsc>(&inserter, &path).await;
+
+        assert!(outcome.is_err(), "the bad line must fail the file");
+        assert_eq!(
+            collection
+                .count_documents(mongodb::bson::doc! {})
+                .await
+                .unwrap(),
+            1,
+            "the line before the failure should be in the collection, which it \
+             is only if the workers were awaited"
+        );
+
+        collection.drop().await.unwrap();
+        let _ = std::fs::remove_file(&path);
     }
 }

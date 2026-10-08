@@ -213,10 +213,28 @@ where
     let (sender, workers) = inserter.start::<T>();
     let mut report = IngestReport::default();
 
+    // The reader's errors are held rather than returned on the spot. Returning
+    // with `?` here drops the workers' join handles without awaiting them,
+    // which detaches tasks that go on inserting after the chunk has been
+    // reported failed -- and loses the counts of what they did write. Every
+    // exit from this function goes through the `finish` below.
+    let mut failure: Option<IngestError> = None;
+
     for batch in reader {
-        let batch = batch.map_err(|e| IngestError::Read(format!("{}: {}", path.display(), e)))?;
-        let records = T::from_batch(&batch)
-            .map_err(|e| IngestError::Read(format!("{}: {}", path.display(), e)))?;
+        let batch = match batch {
+            Ok(batch) => batch,
+            Err(e) => {
+                failure = Some(IngestError::Read(format!("{}: {}", path.display(), e)));
+                break;
+            }
+        };
+        let records = match T::from_batch(&batch) {
+            Ok(records) => records,
+            Err(e) => {
+                failure = Some(IngestError::Read(format!("{}: {}", path.display(), e)));
+                break;
+            }
+        };
         // A row the reader rejected -- no id, no position -- is skipped rather
         // than failing the chunk, but it is counted so a file that is mostly
         // rejects is visible in the report.
@@ -230,7 +248,13 @@ where
     }
 
     drop(sender);
-    let tally = inserter.finish(workers).await?;
+    let tally = inserter.finish(workers).await;
+    // The read error is the cause, so it is reported in preference to whatever
+    // the workers then made of a truncated stream.
+    if let Some(e) = failure {
+        return Err(e);
+    }
+    let tally = tally?;
     report.inserted = tally.inserted;
     report.skipped += tally.skipped;
     Ok(report)

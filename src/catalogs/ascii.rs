@@ -37,11 +37,13 @@ pub async fn ingest_ascii<T>(inserter: &Inserter, path: &Path) -> Result<IngestR
 where
     T: Serialize + HasCoordinates + FromAsciiRow + Send + 'static,
 {
+    // Opened before the workers start: failing after that would drop their
+    // join handles without awaiting them.
+    let reader = open_lines(path).map_err(|e| IngestError::Read(e.to_string()))?;
+
     let (sender, workers) = inserter.start::<T>();
     let mut report = IngestReport::default();
     let mut first_error: Option<String> = None;
-
-    let reader = open_lines(path).map_err(|e| IngestError::Read(e.to_string()))?;
     for (line_number, line) in reader.lines().enumerate() {
         let line = match line {
             Ok(l) => l,
