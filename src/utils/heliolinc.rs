@@ -9,13 +9,13 @@
 //! unrelated ones scatter. Sweeping a grid of assumptions and clustering the
 //! propagated states is then the whole method (Holman et al. 2018).
 
-use crate::utils::linking::{Detection, Tracklet, angular_separation_deg, night_of};
+use crate::utils::linking::{angular_separation_deg, night_of, Detection, Tracklet};
 use crate::utils::orbit_fit::{
-    CONVERGE_ITERATIONS, GiveUp, Observation, SCREEN_ITERATIONS, converge_orbit, fit_orbit_with,
-    predict_radec, rms_arcsec,
+    converge_orbit, fit_orbit_with, predict_radec, rms_arcsec, GiveUp, Observation,
+    CONVERGE_ITERATIONS, SCREEN_ITERATIONS,
 };
 use crate::utils::sso_geometry::{
-    OrbitalElements, Site, ZTF, dot, earth_position, heliocentric_position, norm,
+    dot, earth_position, heliocentric_position, norm, OrbitalElements, Site, ZTF,
 };
 use rayon::prelude::*;
 use std::collections::{BTreeMap, HashMap};
@@ -725,9 +725,16 @@ fn best_passing(
             passes(&copy).then_some(copy)
         })?,
     };
+    converge(&mut track, &observations, cfg);
+    Some(track)
+}
+
+/// Run a track whose screening fit passed the gate on to convergence, so the
+/// residual it reports is its orbit's rather than one truncated fit's.
+fn converge(track: &mut Track, observations: &[Observation], cfg: &LinkConfig) {
     // Starts where the screening fit stopped, so it can only improve on it.
     if let Some(fit) = converge_orbit(
-        &observations,
+        observations,
         &track.state,
         cfg.reference_jd,
         CONVERGE_ITERATIONS,
@@ -736,7 +743,6 @@ fn best_passing(
         track.state = fit.state;
         track.residual_arcsec = Some(fit.rms_arcsec);
     }
-    Some(track)
 }
 
 /// Every candidate the hypothesis sweep produces, grouped by set of tracklets.
@@ -1033,7 +1039,9 @@ fn disjoint<T: Ord>(a: &[T], b: &[T]) -> bool {
     true
 }
 
-/// One track from two, if a single orbit fits both within the residual gate.
+/// One track from two, if a single orbit fits both within the residual gate,
+/// run to convergence like every other track so it ranks against them on its
+/// orbit's residual.
 ///
 /// Seeded from the piece with the longer arc first, since its orbit is the
 /// better constrained.
@@ -1063,22 +1071,26 @@ fn try_merge(
         .map(|&m| night_of(tracklets[m].jd_ref))
         .collect::<std::collections::HashSet<_>>()
         .len();
-    [first, second].into_iter().find_map(|seed| {
-        let mut union = Track {
-            members: members.clone(),
-            hypothesis: seed.hypothesis,
-            state: seed.state,
-            nights,
-            rms_au: seed.rms_au,
-            residual_arcsec: None,
-        };
-        let observations = observations_of(&union, tracklets, by_id);
-        score(&mut union, &observations, cfg);
-        union
+    let union = |seed: &Track| Track {
+        members: members.clone(),
+        hypothesis: seed.hypothesis,
+        state: seed.state,
+        nights,
+        rms_au: seed.rms_au,
+        residual_arcsec: None,
+    };
+    // Both seeds fit the same positions.
+    let observations = observations_of(&union(first), tracklets, by_id);
+    let mut track = [first, second].into_iter().find_map(|seed| {
+        let mut track = union(seed);
+        score(&mut track, &observations, cfg);
+        track
             .residual_arcsec
             .is_some_and(|r| r <= cfg.max_residual_arcsec)
-            .then_some(union)
-    })
+            .then_some(track)
+    })?;
+    converge(&mut track, &observations, cfg);
+    Some(track)
 }
 
 /// Link tracklets into tracks, sweeping every hypothesis in `cfg`.
@@ -1662,7 +1674,7 @@ mod tests {
 
     /// Tracklets per night, as the finder builds them.
     fn survey_tracklets(detections: &[Detection], nights: &[f64]) -> Vec<Tracklet> {
-        use crate::utils::linking::{TrackletConfig, find_tracklets};
+        use crate::utils::linking::{find_tracklets, TrackletConfig};
         let mut tracklets = Vec::new();
         for &start in nights {
             let night: Vec<Detection> = detections
