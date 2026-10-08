@@ -1444,6 +1444,7 @@ pub struct AppConfig {
     pub gpu: GpuConfig,
     #[serde(default)]
     pub milvus: MilvusConfig,
+    #[serde(default)]
     pub host_galaxy: HostGalaxyConfig,
     pub cutouts_storage: CutoutsStorage,
 }
