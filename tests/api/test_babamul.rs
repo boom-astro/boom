@@ -5328,8 +5328,9 @@ mod tests {
                 doc! { "_id": candid },
                 doc! { "$set": {
                     "villar_fit.reduced_chi2": 1.23,
-                    "villar_fit.amplitude_g": 4.56,
-                    "villar_fit.amplitude_r": f64::NAN,
+                    "villar_fit.peak_flux": 789.0,
+                    "villar_fit.A_ZTF_g": 4.56,
+                    "villar_fit.A_ZTF_r": f64::NAN,
                 }},
             )
             .await
@@ -5364,12 +5365,14 @@ mod tests {
         let body = read_json_response(resp).await;
         assert_eq!(body["data"]["candid"].as_i64().unwrap(), candid);
         assert_eq!(body["data"]["reduced_chi2"].as_f64().unwrap(), 1.23);
-        assert_eq!(
-            body["data"]["params"]["amplitude_g"].as_f64().unwrap(),
-            4.56
-        );
+        assert_eq!(body["data"]["peak_flux"].as_f64().unwrap(), 789.0);
         assert!(
-            body["data"]["params"]["amplitude_r"].is_null(),
+            body["data"]["params"].get("peak_flux").is_none(),
+            "peak_flux is not a model parameter"
+        );
+        assert_eq!(body["data"]["params"]["A_ZTF_g"].as_f64().unwrap(), 4.56);
+        assert!(
+            body["data"]["params"]["A_ZTF_r"].is_null(),
             "NaN values should serialize to null"
         );
 
@@ -5390,6 +5393,37 @@ mod tests {
         );
         let body = read_json_response(resp).await;
         assert_eq!(body["data"]["candid"].as_i64().unwrap(), candid);
+
+        // A newer alert for the same object that hasn't been fitted yet must not
+        // hide the fit of the older one.
+        let unfitted_candid = candid + 1;
+        alert_collection
+            .insert_one(doc! {
+                "_id": unfitted_candid,
+                "objectId": &object_id,
+                "candidate": { "jd": 9_999_999.0, "programid": 1, "magpsf": 15.0 },
+            })
+            .await
+            .expect("Failed to insert unfitted alert");
+        let req = test::TestRequest::get()
+            .uri(&format!(
+                "/babamul/surveys/ztf/villar-fit?objectId={}&which=last",
+                object_id
+            ))
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = read_json_response(resp).await;
+        assert_eq!(
+            body["data"]["candid"].as_i64().unwrap(),
+            candid,
+            "objectId lookup should skip alerts without a villar_fit"
+        );
+        alert_collection
+            .delete_one(doc! { "_id": unfitted_candid })
+            .await
+            .expect("Failed to delete unfitted alert");
 
         // Unsupported survey
         let req = test::TestRequest::get()

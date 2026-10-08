@@ -20,7 +20,9 @@ pub struct VillarFitResponse {
     pub candid: i64,
     /// Reduced chi-squared of the fit. `null` if no fit could be produced for this alert.
     pub reduced_chi2: Option<f64>,
-    /// Villar model parameters, keyed as `{param}_{filter}` (e.g. `amplitude_g`).
+    /// Flux normalization scale (µJy) used by the fit. `null` if no fit could be produced.
+    pub peak_flux: Option<f64>,
+    /// Villar model parameters, keyed as `{param}_{filter}` (e.g. `A_ZTF_g`).
     /// Values are `null` where a fit could not be produced.
     pub params: HashMap<String, f64>,
 }
@@ -76,15 +78,19 @@ pub async fn get_villar_fit(
         let find_options = match which {
             WhichCutouts::First => mongodb::options::FindOneOptions::builder()
                 .sort(doc! { "candidate.jd": 1 })
+                .projection(doc! { "_id": 1 })
                 .build(),
             WhichCutouts::Last => mongodb::options::FindOneOptions::builder()
                 .sort(doc! { "candidate.jd": -1 })
+                .projection(doc! { "_id": 1 })
                 .build(),
             WhichCutouts::Brightest => mongodb::options::FindOneOptions::builder()
                 .sort(doc! { "candidate.magpsf": 1 })
+                .projection(doc! { "_id": 1 })
                 .build(),
             WhichCutouts::Faintest => mongodb::options::FindOneOptions::builder()
                 .sort(doc! { "candidate.magpsf": -1 })
+                .projection(doc! { "_id": 1 })
                 .build(),
         };
 
@@ -92,14 +98,18 @@ pub async fn get_villar_fit(
             .find_one(doc! {
                 "objectId": object_id,
                 "candidate.programid": 1, // Babamul only returns public ZTF alerts
+                // skip alerts the GPU enrichment worker hasn't fitted (yet)
+                "villar_fit": { "$exists": true },
             })
-            .projection(doc! { "_id": 1 })
             .with_options(find_options)
             .await
         {
             Ok(Some(alert)) => alert.candid,
             Ok(None) => {
-                return response::not_found(&format!("no alerts found for objectId {}", object_id));
+                return response::not_found(&format!(
+                    "no alerts with a Villar fit found for objectId {}",
+                    object_id
+                ));
             }
             Err(error) => {
                 return response::internal_error(&format!("error getting documents: {}", error));
@@ -139,22 +149,26 @@ pub async fn get_villar_fit(
     };
 
     let mut reduced_chi2 = None;
+    let mut peak_flux = None;
     let mut params = HashMap::new();
     for (key, value) in villar_fit_doc.iter() {
         let value = match value.as_f64() {
             Some(v) => v,
             None => continue,
         };
-        if key == "reduced_chi2" {
-            reduced_chi2 = Some(value);
-        } else {
-            params.insert(key.clone(), value);
+        match key.as_str() {
+            "reduced_chi2" => reduced_chi2 = Some(value),
+            "peak_flux" => peak_flux = Some(value),
+            _ => {
+                params.insert(key.clone(), value);
+            }
         }
     }
 
     let response = VillarFitResponse {
         candid,
         reduced_chi2,
+        peak_flux,
         params,
     };
     response::ok_ser(&format!("found Villar fit for candid {}", candid), response)
