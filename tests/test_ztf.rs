@@ -16,7 +16,7 @@ use boom::{
         },
     },
 };
-use mongodb::bson::doc;
+use mongodb::bson::{doc, Document};
 
 #[tokio::test]
 async fn test_process_ztf_alert() {
@@ -337,7 +337,14 @@ async fn test_enrich_ztf_alert() {
     assert!(classifications.get_f64("acai_v").unwrap() > 0.99);
     assert!(classifications.get_f64("acai_o").unwrap() < 0.01);
     assert!(classifications.get_f64("acai_b").unwrap() < 0.01);
-    assert!(classifications.get_f64("btsbot").unwrap() < 0.01);
+    let btsbot = classifications.get_f64("btsbot").unwrap();
+    // Bounded as well as small: the model emits a logit, and a large negative
+    // one satisfies "< 0.01" just as well as a probability does.
+    assert!(
+        (0.0..=1.0).contains(&btsbot),
+        "btsbot {btsbot} is not a probability"
+    );
+    assert!(btsbot < 0.01);
 
     // the enrichment worker also adds "properties" to the alert
     let properties = alert.get_document("properties").unwrap();
@@ -404,11 +411,19 @@ async fn test_enrich_ztf_alert() {
     // r fading stats
     let fading = r_stats.get_document("fading").unwrap();
     let fading_rate = fading.get_f64("rate").unwrap();
-    let fading_red_chi2 = fading.get_f64("red_chi2").unwrap();
     let fading_dt = fading.get_f64("dt").unwrap();
     assert!((fading_rate - 0.063829).abs() < 1e-6);
-    assert!(fading_red_chi2.is_nan()); // only 2 points after peak
     assert!((fading_dt - 7.956157).abs() < 1e-6);
+    // Only 2 points after the peak, so red_chi2 is null. Explicitly null and not
+    // omitted: the avro schema requires the field to be present.
+    assert_eq!(
+        fading.get("red_chi2"),
+        Some(&mongodb::bson::Bson::Null),
+        "red_chi2 must be null when dof is 0"
+    );
+    assert_eq!(fading.get_i32("dof").unwrap(), 0);
+    assert_eq!(fading.get_i32("nb_data").unwrap(), 2);
+    assert!(fading.get_f64("chi2").unwrap().abs() < 1e-9);
 }
 
 #[tokio::test]
@@ -563,6 +578,42 @@ async fn test_filter_ztf_alert() {
     // verify that we can convert the alert to avro bytes
     let schema = load_alert_schema().unwrap();
     let _ = alert_to_avro_bytes(&alert, &schema).unwrap();
+}
+
+#[tokio::test]
+async fn test_filter_ztf_alert_skips_non_finite_photometry() {
+    let mut alert_worker = ztf_alert_worker().await;
+    let (candid, object_id, _ra, _dec, bytes_content) =
+        AlertRandomizer::new_randomized(Survey::Ztf).get().await;
+    alert_worker.process_alert(&bytes_content).await.unwrap();
+
+    get_test_db()
+        .await
+        .collection::<Document>("ZTF_alerts_aux")
+        .update_one(
+            doc! {"_id": &object_id},
+            doc! {"$set": {"prv_nondetections.0.psfFluxErr": f64::INFINITY}},
+        )
+        .await
+        .unwrap();
+
+    let filter_id = insert_test_filter(&Survey::Ztf, true).await.unwrap();
+    let mut filter_worker = ZtfFilterWorker::new(TEST_CONFIG_FILE, Some(vec![filter_id.clone()]))
+        .await
+        .unwrap();
+    let result = filter_worker
+        .process_alerts(&[format!("1,{}", candid)])
+        .await;
+    remove_test_filter(&filter_id, &Survey::Ztf).await.unwrap();
+    drop_alert_from_collections(candid, &Survey::Ztf)
+        .await
+        .unwrap();
+
+    let alerts_output = result.unwrap();
+    assert_eq!(alerts_output.len(), 1);
+    let photometry = &alerts_output[0].photometry;
+    assert_eq!(photometry.len(), 20);
+    assert!(photometry.iter().all(|p| p.flux_err.is_finite()));
 }
 
 #[tokio::test]

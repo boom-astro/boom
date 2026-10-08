@@ -403,7 +403,7 @@ cargo run --release --bin scheduler ztf
 
 ### Using Docker
 
-In production, BOOM runs the default services alongside a set of dedicated services defined in `docker-compose.yaml` under the `prod` profile: `api`, `consumer-ztf`, `consumer-lsst`, `scheduler-ztf`, `scheduler-lsst`, and `frontend`. The Rust services each start their binary automatically at container startup; `frontend` builds the web app and serves it with nginx.
+In production, BOOM runs the default services alongside a set of dedicated services defined in `docker-compose.yaml` under the `prod` profile: `api`, `consumer-ztf-public`, `consumer-ztf-partnership`, `consumer-ztf-caltech`, `consumer-lsst`, `consumer-winter`, `scheduler-ztf`, `scheduler-lsst`, `scheduler-winter`, and `frontend`. `consumer-decam` and `scheduler-decam` sit in a separate `decam` profile, which the deploy workflow adds only when `BOOM_KAFKA__CONSUMER__DECAM__SERVER` is set. The Rust services each start their binary automatically at container startup; `frontend` builds the web app and serves it with nginx.
 
 Bring up the full prod stack with:
 
@@ -414,7 +414,7 @@ docker compose --profile prod up -d
 Or start individual services:
 
 ```bash
-docker compose --profile prod up -d consumer-ztf scheduler-ztf
+docker compose --profile prod up -d consumer-ztf-public scheduler-ztf
 ```
 
 To run a one-shot operational task, override the service's command with `docker compose run`. This is typically used for database migrations such as `migrate_fp_flux` and `migrate_snr`:
@@ -507,7 +507,11 @@ curl -sL https://caltech.box.com/shared/static/qdois5qq2lmvp02ri50fum80vzr54505.
 
 Download the NED catalog for crossmatching.
 ```
-uvx gdown "https://drive.google.com/uc?id=1BG46oLMbONXhIqiPrepSnhKim1xfiVbB" -O ./data/alerts/kowalski.NED.json.gz
+wget -q https://github.com/boom-astro/boom/releases/download/test-data-v1/BOOM.NED.json.gz -O ./data/alerts/BOOM.NED.json.gz
+```
+**For macOS:**
+```
+curl -sL https://github.com/boom-astro/boom/releases/download/test-data-v1/BOOM.NED.json.gz -o ./data/alerts/BOOM.NED.json.gz
 ```
 
 ### Start Benchmark

@@ -1,5 +1,6 @@
 use apache_avro_macros::serdavro;
-use chrono::{Datelike, NaiveDate};
+use chrono::{DateTime, Duration, NaiveDate, NaiveDateTime, NaiveTime, Offset, TimeZone, Utc};
+use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -27,55 +28,35 @@ impl Survey {
         }
     }
 
-    /// Observatory UTC offset in hours.
-    ///
-    /// - ZTF    (Palomar, CA, USA)       : UTC−7
-    /// - LSST   (Cerro Pachón, CL, Chile): UTC−3
-    /// - DECam  (Cerro Tololo, CL, Chile): UTC−4
-    /// - WINTER (Palomar, CA, USA)       : UTC−7
-    pub fn observatory_utc_offset(&self) -> f64 {
+    pub fn alert_input_queue(&self) -> String {
+        format!("{}_alerts_packets_queue", self)
+    }
+
+    fn observatory_timezone(&self) -> Tz {
         match self {
-            Survey::Ztf => -7.0,
-            Survey::Lsst => -3.0,
-            Survey::Decam => -4.0,
-            Survey::Winter => -7.0,
+            Survey::Ztf | Survey::Winter => Tz::America__Los_Angeles,
+            Survey::Lsst | Survey::Decam => Tz::America__Santiago,
         }
     }
 
-    /// Convert a calendar date to Julian Date at **local noon** for the survey's
-    /// observatory.
-    ///
-    /// An astronomical "night" for date D spans from JD(D, local noon) to
-    /// JD(D+1, local noon).
-    pub fn date_to_jd_local_noon(&self, date: &NaiveDate) -> f64 {
-        let y = date.year() as f64;
-        let m = date.month() as f64;
-        let d = date.day() as f64;
-
-        let (y_adj, m_adj) = if m <= 2.0 {
-            (y - 1.0, m + 12.0)
-        } else {
-            (y, m)
-        };
-
-        let a = (y_adj / 100.0_f64).floor();
-        let b = 2.0_f64 - a + (a / 4.0_f64).floor();
-
-        // JD at 0h UT (midnight UTC)
-        let jd_midnight =
-            (365.25_f64 * (y_adj + 4716.0)).floor() + (30.6001_f64 * (m_adj + 1.0)).floor() + d + b
-                - 1524.5;
-
-        // Shift to local noon: local noon = (12 − utc_offset) hours UTC
-        jd_midnight + (12.0 - self.observatory_utc_offset()) / 24.0
+    fn local_noon(&self, date: &NaiveDate) -> DateTime<Utc> {
+        let tz = self.observatory_timezone();
+        let offset = |utc: NaiveDateTime| tz.offset_from_utc_datetime(&utc).fix();
+        let noon = date.and_time(NaiveTime::MIN) + Duration::hours(12);
+        (noon - offset(noon - offset(noon))).and_utc()
     }
 
-    /// JD window `[start, end)` for the observing night labelled by `date`,
-    /// running from local noon of `date` to local noon of `date + 1`.
+    pub fn night_window(&self, date: &NaiveDate) -> (DateTime<Utc>, DateTime<Utc>) {
+        (
+            self.local_noon(date),
+            self.local_noon(&(*date + Duration::days(1))),
+        )
+    }
+
     pub fn night_jd_window(&self, date: &NaiveDate) -> (f64, f64) {
-        let start = self.date_to_jd_local_noon(date);
-        let end = self.date_to_jd_local_noon(&(*date + chrono::Duration::days(1)));
-        (start, end)
+        let (start, end) = self.night_window(date);
+        let jd = |t| flare::Time::from_utc(t).to_jd();
+        (jd(start), jd(end))
     }
 }
 
@@ -103,6 +84,29 @@ impl std::fmt::Display for ProgramId {
             ProgramId::Public => write!(f, "1"),
             ProgramId::Partnership => write!(f, "2"),
             ProgramId::Caltech => write!(f, "3"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_noon_follows_daylight_saving() {
+        for (survey, (y, m, d), utc_hour) in [
+            (Survey::Ztf, (2026, 1, 15), 20),
+            (Survey::Ztf, (2026, 3, 8), 19),
+            (Survey::Ztf, (2026, 7, 1), 19),
+            (Survey::Winter, (2026, 11, 1), 20),
+            (Survey::Lsst, (2026, 4, 5), 16),
+            (Survey::Lsst, (2026, 7, 1), 16),
+            (Survey::Decam, (2026, 9, 6), 15),
+            (Survey::Decam, (2026, 12, 1), 15),
+        ] {
+            let date = NaiveDate::from_ymd_opt(y, m, d).unwrap();
+            let expected = Utc.with_ymd_and_hms(y, m, d, utc_hour, 0, 0).unwrap();
+            assert_eq!(survey.local_noon(&date), expected, "{survey} on {date}");
         }
     }
 }

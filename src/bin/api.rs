@@ -64,6 +64,31 @@ async fn main() -> std::io::Result<()> {
     let babamul_is_enabled = config.babamul.enabled;
     if babamul_is_enabled {
         tracing::info!("Babamul API endpoints are ENABLED");
+        // Abandoned sign-in attempts are only cleaned up by this TTL index —
+        // completed flows delete their own state, incomplete ones never do.
+        if let Err(error) =
+            boom::api::admin::reconcile_babamul_admins(&database, &config.babamul.admin_emails)
+                .await
+        {
+            panic!("failed to reconcile babamul admins: {error}");
+        }
+        if let Err(error) = routes::babamul::oauth::ensure_oauth_state_index(&database).await {
+            log_error!(WARN, error, "failed to create the OAuth TTL indexes");
+        }
+        // Same helper `/oauth/providers` uses, so this line always matches what
+        // the client is actually offered — credentials alone are not enough.
+        let providers: Vec<&str> = boom::api::oauth::enabled_providers(&config)
+            .iter()
+            .map(|provider| provider.as_str())
+            .collect();
+        if providers.is_empty() {
+            tracing::info!(
+                "No social sign-in providers are configured (needs a client ID and secret \
+                 per provider, plus babamul.webapp_url and babamul.oauth.redirect_base_url)"
+            );
+        } else {
+            tracing::info!("Social sign-in enabled for: {}", providers.join(", "));
+        }
     } else {
         tracing::info!("Babamul API endpoints are DISABLED");
     }
@@ -106,8 +131,14 @@ async fn main() -> std::io::Result<()> {
                     .service(routes::babamul::post_babamul_auth)
                     .service(routes::babamul::post_babamul_forgot_password)
                     .service(routes::babamul::post_babamul_reset_password)
+                    .service(routes::babamul::oauth::get_oauth_providers)
+                    .service(routes::babamul::oauth::get_oauth_start)
+                    .service(routes::babamul::oauth::get_oauth_callback)
+                    .service(routes::babamul::oauth::post_oauth_complete)
+                    .service(routes::babamul::oauth::post_oauth_verify)
                     // Protected routes
                     .service(routes::babamul::get_babamul_profile)
+                    .service(routes::babamul::patch_babamul_profile)
                     .service(routes::babamul::post_kafka_credentials)
                     .service(routes::babamul::get_kafka_credentials)
                     .service(routes::babamul::delete_kafka_credential)
@@ -117,15 +148,26 @@ async fn main() -> std::io::Result<()> {
                     .service(routes::babamul::surveys::get_objects)
                     .service(routes::babamul::surveys::cone_search_objects)
                     .service(routes::babamul::surveys::get_cutouts)
+                    .service(routes::babamul::surveys::get_track)
                     .service(routes::babamul::surveys::get_alerts)
                     .service(routes::babamul::surveys::cone_search_alerts)
                     .service(routes::babamul::surveys::get_villar_fit)
                     .service(routes::babamul::stats::get_nightly_stats)
                     .service(routes::babamul::stats::get_collection_stats)
                     .service(routes::babamul::stats::get_kafka_stats)
+                    .service(routes::babamul::stats::post_stats_refresh)
                     .service(routes::babamul::tokens::get_tokens)
                     .service(routes::babamul::tokens::post_token)
-                    .service(routes::babamul::tokens::delete_token),
+                    .service(routes::babamul::tokens::delete_token)
+                    .service(routes::babamul::admin::get_admin_users)
+                    .service(routes::babamul::admin::patch_admin_user)
+                    // Larger JSON limit for skymap uploads (~130 MB base64). This
+                    // prefix-less scope swallows any sibling after it, so keep it last.
+                    .service(
+                        actix_web::web::scope("")
+                            .app_data(web::JsonConfig::default().limit(209_715_200))
+                            .service(routes::babamul::surveys::skymap_search_alerts),
+                    ),
             )
         }
 
@@ -145,9 +187,8 @@ async fn main() -> std::io::Result<()> {
                 .service(routes::filters::validate_filter)
                 .service(routes::filters::get_filters)
                 .service(routes::filters::get_filter)
+                .service(routes::filters::delete_filter)
                 .service(routes::filters::post_filter_version)
-                .service(routes::filters::post_filter_test)
-                .service(routes::filters::post_filter_test_count)
                 .service(routes::filters::get_filter_schema)
                 .service(routes::users::post_user)
                 .service(routes::users::get_users)
@@ -156,12 +197,31 @@ async fn main() -> std::io::Result<()> {
                 .service(routes::catalogs::get_catalogs)
                 .service(routes::catalogs::get_catalog_indexes)
                 .service(routes::catalogs::get_catalog_sample)
+                .service(routes::tasks::get_task_types)
+                .service(routes::tasks::submit_task)
+                .service(routes::tasks::get_tasks)
+                .service(routes::tasks::get_task_logs)
+                .service(routes::tasks::cancel_task)
+                .service(routes::tasks::get_data_mutations)
+                // Registered after the more specific /tasks/... paths: actix
+                // matches in registration order, so a leading {task_id} route
+                // would swallow /tasks/types.
+                .service(routes::tasks::get_task)
                 .service(routes::queries::post_find_query)
                 .service(routes::queries::post_cone_search_query)
                 .service(routes::surveys::get_cutouts)
+                .service(routes::surveys::get_track)
                 .service(routes::queries::post_count_query)
                 .service(routes::queries::post_estimated_count_query)
                 .service(routes::queries::post_pipeline_query)
+                // Larger JSON limit for the skymap these accept (~130 MB base64).
+                // This prefix-less scope swallows any sibling after it, so keep it last.
+                .service(
+                    actix_web::web::scope("")
+                        .app_data(web::JsonConfig::default().limit(209_715_200))
+                        .service(routes::filters::post_filter_test)
+                        .service(routes::filters::post_filter_test_count),
+                )
                 .wrap(Logger::default()),
         )
     })

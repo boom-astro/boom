@@ -14,6 +14,8 @@ const ApiDocs = lazy(() => import("@/pages/ApiDocs"));
 const KafkaDocs = lazy(() => import("@/pages/KafkaDocs"));
 const KafkaAccessGuide = lazy(() => import("@/pages/KafkaAccessGuide"));
 const Login = lazy(() => import("@/pages/Login"));
+const OAuthCallback = lazy(() => import("@/pages/OAuthCallback"));
+const OAuthComplete = lazy(() => import("@/pages/OAuthComplete"));
 const ObjectPage = lazy(() => import("@/pages/ObjectPage"));
 const SignupPage = lazy(() => import("@/pages/Signup"));
 const Landing = lazy(() => import("@/pages/Landing"));
@@ -23,6 +25,8 @@ const ResetPassword = lazy(() => import("@/pages/ResetPassword"))
 const Help = lazy(() => import("@/pages/Help"))
 const Acknowledgments = lazy(() => import("@/pages/Acknowledgments"))
 const Dashboard = lazy(() => import("@/pages/Dashboard"))
+const Admin = lazy(() => import("@/pages/Admin"))
+const Telescopes = lazy(() => import("@/pages/Telescopes"))
 
 // Release mode flag - set VITE_PRERELEASE_MODE=true at build time to restrict app to landing page only
 const PRERELEASE_MODE = import.meta.env.VITE_PRERELEASE_MODE === 'true';
@@ -98,13 +102,17 @@ function LayoutRoutes() {
                   <Route path="/" element={<Landing />} />
                   <Route path="/landing" element={<Landing />} />
                   <Route path="/login" element={<LoginPageWrapper />} />
+                  <Route path="/oauth/callback" element={<OAuthCallback />} />
+                  <Route path="/oauth/complete" element={<OAuthComplete />} />
                   <Route path="/forgot-password" element={<ForgotPassword />} />
                   <Route path="/reset-password" element={<ResetPassword />} />
                   {!PRERELEASE_MODE && <Route path="/signup" element={<SignupPage />} />}
                   {!PRERELEASE_MODE && <Route path="/activate" element={<SignupPage />} />}
                   <Route path="/query" element={<ProtectedRoute><Query /></ProtectedRoute>} />
                   <Route path="/profile" element={<ProtectedRoute><Profile /></ProtectedRoute>} />
+                  <Route path="/admin" element={<ProtectedRoute><Admin /></ProtectedRoute>} />
                   <Route path="/dashboard" element={<Dashboard />} />
+                  <Route path="/telescopes" element={<Telescopes />} />
                   <Route path="/docs/kafka" element={<KafkaDocs />} />
                   <Route path="/docs/kafka/access-guide" element={<KafkaAccessGuide />} />
                   <Route path="/docs/api" element={<ApiDocs />} />

@@ -1,11 +1,12 @@
 use chrono::NaiveDate;
+use futures::TryStreamExt;
 use mongodb::{
-    bson::{doc, to_document, Document},
-    options::IndexOptions,
+    bson::{doc, to_document, Bson, Document},
+    options::{Hint, IndexOptions},
     Collection, Database, IndexModel,
 };
 use serde::Serialize;
-use tracing::instrument;
+use tracing::{error, info, instrument, warn};
 
 use crate::utils::enums::Survey;
 
@@ -13,7 +14,6 @@ use crate::utils::enums::Survey;
 #[error("failed to create index")]
 pub struct CreateIndexError(#[from] mongodb::error::Error);
 
-#[instrument(skip(collection, index), fields(collection = collection.name()), err)]
 pub async fn create_index(
     collection: &Collection<Document>,
     index: Document,
@@ -22,16 +22,28 @@ pub async fn create_index(
     create_partial_index(collection, index, unique, None).await
 }
 
-#[instrument(
-    skip(collection, index, partial_filter),
-    fields(collection = collection.name()),
-    err
-)]
 pub async fn create_partial_index(
     collection: &Collection<Document>,
     index: Document,
     unique: bool,
     partial_filter: Option<Document>,
+) -> Result<(), CreateIndexError> {
+    create_named_partial_index(collection, index, unique, partial_filter, None).await
+}
+
+/// As [`create_partial_index`], with an explicit index name: Mongo names an
+/// index after its keys, so two indexes over the same keys would collide.
+#[instrument(
+    skip(collection, index, partial_filter),
+    fields(collection = collection.name()),
+    err
+)]
+pub async fn create_named_partial_index(
+    collection: &Collection<Document>,
+    index: Document,
+    unique: bool,
+    partial_filter: Option<Document>,
+    name: Option<String>,
 ) -> Result<(), CreateIndexError> {
     let index_model = IndexModel::builder()
         .keys(index)
@@ -39,6 +51,7 @@ pub async fn create_partial_index(
             IndexOptions::builder()
                 .unique(unique)
                 .partial_filter_expression(partial_filter)
+                .name(name)
                 .build(),
         )
         .build();
@@ -83,6 +96,19 @@ pub async fn count_alerts_for_night(
     programids: Option<&[i32]>,
 ) -> Result<u64, mongodb::error::Error> {
     let (start_jd, end_jd) = survey.night_jd_window(date);
+    count_alerts_in_jd_window(db, survey, start_jd, end_jd, programids).await
+}
+
+/// Count the alerts of a survey with `candidate.jd` in `[start_jd, end_jd)`,
+/// with the same `programids` semantics as [`count_alerts_for_night`].
+#[instrument(skip(db), err)]
+pub async fn count_alerts_in_jd_window(
+    db: &Database,
+    survey: &Survey,
+    start_jd: f64,
+    end_jd: f64,
+    programids: Option<&[i32]>,
+) -> Result<u64, mongodb::error::Error> {
     let mut filter = doc! {
         "candidate.jd": { "$gte": start_jd, "$lt": end_jd },
     };
@@ -116,9 +142,25 @@ pub async fn initialize_survey_indexes(
     create_index(&alerts_collection, index.clone(), false).await?;
     create_index(&alerts_aux_collection, index, false).await?;
 
+    // A MOC is a set of HEALPix ranges, so a region search is a range scan here.
+    // The epoch follows it on alerts so a time window is applied to index keys,
+    // rather than to every document the region covers across the whole archive.
+    let index = doc! { "coordinates.hpx": 1, "candidate.jd": 1 };
+    create_index(&alerts_collection, index, false).await?;
+    // Aux documents hold no candidate, so the region key stands alone there.
+    let index = doc! { "coordinates.hpx": 1 };
+    create_index(&alerts_aux_collection, index, false).await?;
+
     // create a simple index on the objectId field of the alerts collection
     let index = doc! {
         "objectId": 1,
+    };
+    create_index(&alerts_collection, index, false).await?;
+
+    let index = if survey == &Survey::Ztf {
+        doc! { "candidate.jd": -1, "candidate.programid": 1 }
+    } else {
+        doc! { "candidate.jd": -1 }
     };
     create_index(&alerts_collection, index, false).await?;
 
@@ -136,6 +178,13 @@ pub async fn initialize_survey_indexes(
             Some(doc! { "candidate.ssnamenr": { "$exists": true } }),
         )
         .await?;
+
+        let tracks_collection: Collection<Document> =
+            db.collection(crate::utils::tracks::TRACKS_COLLECTION);
+        create_index(&tracks_collection, doc! { "members": 1 }, false).await?;
+        let aliases_collection: Collection<Document> =
+            db.collection(crate::utils::tracks::ALIASES_COLLECTION);
+        create_index(&aliases_collection, doc! { "superseded_by": 1 }, false).await?;
     }
 
     // if survey is LSST, create an index on the ssObjectId field of the alerts collection,
@@ -159,6 +208,44 @@ pub async fn initialize_survey_indexes(
         .await?;
     }
 
+    Ok(())
+}
+
+/// A name that changes whenever the partial filter does.
+///
+/// Mongo refuses to recreate an index whose name matches but whose options do
+/// not, and the scheduler treats that as fatal. Since the filter threshold is
+/// derived from the configured radius and scale, the name has to carry it, or
+/// changing either bricks startup.
+fn angular_size_index_name(size_key: &str, threshold_arcsec: f64) -> String {
+    format!("radec_2dsphere_large_{size_key}_{:.4}", threshold_arcsec)
+}
+
+/// Partial 2dsphere indexes for catalogs matched by angular size. Without one
+/// the wide branch of the `$or` scans every row inside several degrees.
+#[instrument(skip_all, err)]
+pub async fn initialize_angular_size_indexes(
+    xmatch_configs: &[crate::conf::CatalogXmatchConfig],
+    db: &Database,
+) -> Result<(), CreateIndexError> {
+    for config in xmatch_configs {
+        let (Some(size_key), Some(_)) = (&config.angular_size_key, config.angular_size_radius_max)
+        else {
+            continue;
+        };
+        let collection: Collection<Document> = db.collection(config.collection_name());
+        create_named_partial_index(
+            &collection,
+            doc! { "coordinates.radec_geojson": "2dsphere" },
+            false,
+            Some(doc! { size_key: { "$gt": config.angular_size_threshold_arcsec() } }),
+            Some(angular_size_index_name(
+                size_key,
+                config.angular_size_threshold_arcsec(),
+            )),
+        )
+        .await?;
+    }
     Ok(())
 }
 
@@ -280,5 +367,498 @@ pub fn fetch_timeseries_op(
                 "$and": conditions
             }
         }
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Range sharding: splitting a full-collection pass into contiguous ranges is the
+// only way to use more than one thread on it. Ranges are cut on an indexed field
+// that tracks insertion order, so that each shard walks a roughly contiguous
+// region on disk rather than jumping around it.
+// -----------------------------------------------------------------------------
+
+pub const CURSOR_BATCH_SIZE: u32 = 10_000;
+
+/// Without the hint the empty-filter count collection-scans instead of counting the _id index.
+pub async fn exact_count(collection: &Collection<Document>) -> Result<u64, mongodb::error::Error> {
+    info!("counting the documents in {}", collection.namespace());
+    collection
+        .count_documents(doc! {})
+        .hint(Hint::Keys(doc! { "_id": 1 }))
+        .await
+}
+
+pub async fn collection_exists(db: &Database, name: &str) -> Result<bool, mongodb::error::Error> {
+    Ok(db.list_collection_names().await?.iter().any(|n| n == name))
+}
+
+/// `created_at` is exactly insertion order, but it is only indexed if someone created
+/// that index; `_id` always is, and both ZTF object ids and LSST diaObject ids happen
+/// to be allocated in an order that correlates well with insertion.
+pub async fn shard_field(collection: &Collection<Document>) -> &'static str {
+    let indexed_on_created_at = match collection.list_indexes().await {
+        Ok(cursor) => match cursor.try_collect::<Vec<_>>().await {
+            Ok(indexes) => indexes
+                .iter()
+                .any(|index| index.keys.keys().next().is_some_and(|k| k == "created_at")),
+            Err(_) => false,
+        },
+        Err(_) => false,
+    };
+    if indexed_on_created_at {
+        "created_at"
+    } else {
+        "_id"
+    }
+}
+
+pub async fn range_shards(
+    collection: &Collection<Document>,
+    parts: usize,
+    field: &str,
+    base_filter: &Document,
+) -> Vec<Document> {
+    if parts <= 1 {
+        return vec![Document::new()];
+    }
+    // Behind a $match, $sample loses its random-cursor plan and collection-scans.
+    let sample_size = if base_filter.is_empty() {
+        (parts * 20).min(10_000)
+    } else {
+        10_000
+    };
+    info!(
+        "sampling {} bounds on '{}' to cut {} shards",
+        sample_size, field, parts
+    );
+    let mut pipeline = vec![doc! { "$sample": { "size": sample_size as i64 } }];
+    if !base_filter.is_empty() {
+        pipeline.push(doc! { "$match": base_filter.clone() });
+    }
+    pipeline.push(doc! { "$project": { field: 1 } });
+    pipeline.push(doc! { "$sort": { field: 1 } });
+
+    let bounds: Vec<Bson> = match collection.aggregate(pipeline).await {
+        Ok(cursor) => match cursor.try_collect::<Vec<Document>>().await {
+            Ok(docs) => docs.iter().filter_map(|d| d.get(field).cloned()).collect(),
+            Err(e) => {
+                warn!(error = %e, "could not sample {} bounds, falling back to a single shard", field);
+                Vec::new()
+            }
+        },
+        Err(e) => {
+            warn!(error = %e, "could not sample {} bounds, falling back to a single shard", field);
+            Vec::new()
+        }
+    };
+
+    if bounds.len() < parts {
+        warn!(
+            "only {} sampled bounds on '{}' for {} shards, running as a single shard",
+            bounds.len(),
+            field,
+            parts
+        );
+        return vec![Document::new()];
+    }
+    shard_filters(field, &pick_cuts(&bounds, parts))
+}
+
+/// `$sample` is far from uniform on large collections: on ZTF it oversamples recent records ~100x.
+pub async fn index_cuts(
+    collection: &Collection<Document>,
+    parts: usize,
+    field: &str,
+    total: u64,
+) -> Result<Vec<Bson>, mongodb::error::Error> {
+    if parts <= 1 {
+        return Ok(Vec::new());
+    }
+    let index_keys = collection
+        .list_indexes()
+        .await?
+        .try_collect::<Vec<_>>()
+        .await?
+        .into_iter()
+        .map(|index| index.keys)
+        .find(|keys| keys.keys().next().is_some_and(|key| key == field))
+        .unwrap_or_else(|| doc! { field: 1 });
+    let mut projection = doc! { field: 1 };
+    if field != "_id" {
+        projection.insert("_id", 0);
+    }
+    info!("walking the '{}' index to cut {} shards", field, parts);
+    let mut cursor = collection
+        .find(doc! {})
+        .projection(projection)
+        .sort(doc! { field: 1 })
+        .hint(Hint::Keys(index_keys))
+        .batch_size(CURSOR_BATCH_SIZE)
+        .await?;
+    let step = (total / parts as u64).max(1);
+    let mut cuts = Vec::with_capacity(parts - 1);
+    let mut position = 0u64;
+    while let Some(record) = cursor.try_next().await? {
+        let Some(value) = record
+            .get(field)
+            .filter(|value| !matches!(value, Bson::Null))
+        else {
+            continue;
+        };
+        position += 1;
+        if position.is_multiple_of(step) {
+            cuts.push(value.clone());
+            if cuts.len() == parts - 1 {
+                break;
+            }
+        }
+    }
+    Ok(cuts)
+}
+
+/// Expects `parts >= 2` and `bounds.len() >= parts`.
+fn pick_cuts(bounds: &[Bson], parts: usize) -> Vec<Bson> {
+    (1..parts)
+        .map(|i| bounds[i * bounds.len() / parts].clone())
+        .collect()
+}
+
+pub fn shard_filters(field: &str, cuts: &[Bson]) -> Vec<Document> {
+    if cuts.is_empty() {
+        return vec![Document::new()];
+    }
+    let mut shards = Vec::with_capacity(cuts.len() + 1);
+    shards.push(doc! { "$or": [
+        doc! { field: { "$lt": cuts[0].clone() } },
+        doc! { field: { "$exists": false } },
+    ] });
+    for pair in cuts.windows(2) {
+        shards.push(doc! { field: { "$gte": pair[0].clone(), "$lt": pair[1].clone() } });
+    }
+    shards.push(doc! { field: { "$gte": cuts[cuts.len() - 1].clone() } });
+    shards
+}
+
+/// False: the shards did not cover every document counted before the pass.
+pub fn check_shard_coverage(scanned: u64, total: u64, shard_count: usize) -> bool {
+    if scanned >= total {
+        true
+    } else if shard_count > 1 {
+        error!(
+            "only {} of the {} document(s) counted before the pass were scanned: the shards did \
+             not cover them all, re-run with --processes 1",
+            scanned, total
+        );
+        false
+    } else {
+        warn!(
+            "scanned {} of the {} document(s) counted before the pass: documents were modified \
+             or deleted while it ran",
+            scanned, total
+        );
+        true
+    }
+}
+
+pub fn merge_filters(base: &Document, shard: &Document) -> Document {
+    if shard.is_empty() {
+        base.clone()
+    } else if base.is_empty() {
+        shard.clone()
+    } else {
+        doc! { "$and": [base.clone(), shard.clone()] }
+    }
+}
+
+#[derive(thiserror::Error, Debug)]
+pub enum TaskError {
+    #[error("{0}")]
+    Failed(#[from] mongodb::error::Error),
+    #[error("task did not run to completion: {0}")]
+    Join(#[from] tokio::task::JoinError),
+}
+
+/// Ignoring a JoinError would report a run that covered only part of the collection as a success.
+pub async fn join_tasks<T>(
+    handles: Vec<tokio::task::JoinHandle<Result<T, mongodb::error::Error>>>,
+    label: &str,
+) -> Result<Vec<T>, TaskError> {
+    let mut results = Vec::with_capacity(handles.len());
+    let mut first_err: Option<TaskError> = None;
+    for handle in handles {
+        match handle.await {
+            Ok(Ok(value)) => results.push(value),
+            Ok(Err(e)) => {
+                error!("{} failed: {}", label, e);
+                first_err.get_or_insert(e.into());
+            }
+            Err(e) => {
+                error!("{} did not run to completion: {}", label, e);
+                first_err.get_or_insert(e.into());
+            }
+        }
+    }
+    match first_err {
+        Some(e) => Err(e),
+        None => Ok(results),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn alert_index_keys(survey: &Survey) -> Vec<Document> {
+        let db = crate::conf::get_test_db().await;
+        initialize_survey_indexes(survey, &db).await.unwrap();
+        db.collection::<Document>(&format!("{}_alerts", survey))
+            .list_indexes()
+            .await
+            .unwrap()
+            .map_ok(|i| i.keys)
+            .try_collect()
+            .await
+            .unwrap()
+    }
+
+    /// The epoch must follow the region key: a time window is only applied to
+    /// index keys while it is the second component.
+    #[tokio::test]
+    async fn region_index_carries_the_epoch_as_its_second_key() {
+        let keys = alert_index_keys(&Survey::Ztf).await;
+        assert!(
+            keys.contains(&doc! { "coordinates.hpx": 1, "candidate.jd": 1 }),
+            "no hpx/jd index among {keys:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn nightly_counts_have_an_epoch_index() {
+        for (survey, expected) in [
+            (
+                Survey::Ztf,
+                doc! { "candidate.jd": -1, "candidate.programid": 1 },
+            ),
+            (Survey::Decam, doc! { "candidate.jd": -1 }),
+        ] {
+            let keys = alert_index_keys(&survey).await;
+            assert!(keys.contains(&expected), "no {expected} among {keys:?}");
+        }
+    }
+
+    fn bounds(values: &[i32]) -> Vec<Bson> {
+        values.iter().map(|v| Bson::Int32(*v)).collect()
+    }
+
+    fn lower(shard: &Document, field: &str) -> Option<Bson> {
+        shard.get_document(field).ok()?.get("$gte").cloned()
+    }
+
+    fn upper(shard: &Document, field: &str) -> Option<Bson> {
+        match shard.get_array("$or") {
+            Ok(branches) => branches[0]
+                .as_document()?
+                .get_document(field)
+                .ok()?
+                .get("$lt")
+                .cloned(),
+            Err(_) => shard.get_document(field).ok()?.get("$lt").cloned(),
+        }
+    }
+
+    #[test]
+    fn shard_filters_builds_one_filter_per_part() {
+        let b = bounds(&(0..100).collect::<Vec<_>>());
+        for parts in 2..10 {
+            assert_eq!(
+                shard_filters("_id", &pick_cuts(&b, parts)).len(),
+                parts,
+                "parts={}",
+                parts
+            );
+        }
+    }
+
+    #[test]
+    fn shard_filters_covers_every_value_without_a_gap() {
+        let b = bounds(&(0..100).collect::<Vec<_>>());
+        for parts in 2..10 {
+            let shards = shard_filters("_id", &pick_cuts(&b, parts));
+            assert!(
+                lower(&shards[0], "_id").is_none(),
+                "the first shard is open-ended"
+            );
+            assert!(
+                upper(shards.last().unwrap(), "_id").is_none(),
+                "the last shard is open-ended"
+            );
+            for pair in shards.windows(2) {
+                assert_eq!(
+                    upper(&pair[0], "_id"),
+                    lower(&pair[1], "_id"),
+                    "parts={}, a value falls between two shards",
+                    parts
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn shard_filters_first_shard_also_takes_documents_without_the_field() {
+        let shards = shard_filters("created_at", &pick_cuts(&bounds(&[1, 2, 3, 4]), 2));
+        let branches = shards[0].get_array("$or").expect("first shard is an $or");
+        assert_eq!(branches.len(), 2);
+        assert_eq!(
+            branches[1].as_document().unwrap(),
+            &doc! { "created_at": { "$exists": false } }
+        );
+    }
+
+    #[test]
+    fn shard_filters_handles_a_sample_as_small_as_the_part_count() {
+        let shards = shard_filters("_id", &pick_cuts(&bounds(&[10, 20, 30]), 3));
+        assert_eq!(shards.len(), 3);
+        assert_eq!(upper(&shards[0], "_id"), Some(Bson::Int32(20)));
+        assert_eq!(lower(&shards[2], "_id"), Some(Bson::Int32(30)));
+    }
+
+    #[test]
+    fn shard_filters_spreads_a_remainder_over_every_shard() {
+        let shards = shard_filters(
+            "_id",
+            &pick_cuts(&bounds(&(0..10_000).collect::<Vec<_>>()), 1024),
+        );
+        let edge = |bound: Option<Bson>, open: i32| bound.map_or(open, |b| b.as_i32().unwrap());
+        assert!(shards
+            .iter()
+            .all(|shard| edge(upper(shard, "_id"), 10_000) - edge(lower(shard, "_id"), 0) <= 10));
+    }
+
+    #[test]
+    fn shard_filters_without_cuts_is_one_unfiltered_shard() {
+        assert_eq!(shard_filters("_id", &[]), vec![Document::new()]);
+    }
+
+    #[test]
+    fn shard_filters_keeps_covering_everything_when_cuts_repeat() {
+        let shards = shard_filters("_id", &pick_cuts(&bounds(&[7, 7, 7, 7]), 4));
+        assert_eq!(shards.len(), 4);
+        for pair in shards.windows(2) {
+            assert_eq!(upper(&pair[0], "_id"), lower(&pair[1], "_id"));
+        }
+    }
+
+    #[test]
+    fn merge_filters_keeps_whichever_side_is_present() {
+        let base = doc! { "coordinates": { "$exists": false } };
+        let shard = doc! { "_id": { "$gte": 1 } };
+        assert_eq!(merge_filters(&base, &Document::new()), base);
+        assert_eq!(merge_filters(&Document::new(), &shard), shard);
+        assert_eq!(
+            merge_filters(&base, &shard),
+            doc! { "$and": [base.clone(), shard.clone()] }
+        );
+        assert_eq!(
+            merge_filters(&Document::new(), &Document::new()),
+            Document::new()
+        );
+    }
+
+    fn io_error(message: &str) -> mongodb::error::Error {
+        std::io::Error::other(message.to_string()).into()
+    }
+
+    #[tokio::test]
+    async fn join_tasks_returns_every_value_when_all_succeed() {
+        let handles = vec![
+            tokio::spawn(async { Ok::<i32, mongodb::error::Error>(1) }),
+            tokio::spawn(async { Ok::<i32, mongodb::error::Error>(2) }),
+        ];
+        assert_eq!(join_tasks(handles, "task").await.unwrap(), vec![1, 2]);
+    }
+
+    #[tokio::test]
+    async fn join_tasks_reports_the_first_error() {
+        let handles = vec![
+            tokio::spawn(async { Err(io_error("first")) }),
+            tokio::spawn(async { Err(io_error("second")) }),
+        ];
+        let error = join_tasks::<i32>(handles, "task").await.unwrap_err();
+        assert!(error.to_string().contains("first"), "got {}", error);
+    }
+
+    #[tokio::test]
+    async fn join_tasks_does_not_swallow_a_panicking_task() {
+        let handles = vec![
+            tokio::spawn(async { Ok::<i32, mongodb::error::Error>(1) }),
+            tokio::spawn(async {
+                let ran = false;
+                assert!(ran, "panicking on purpose");
+                Ok::<i32, mongodb::error::Error>(2)
+            }),
+        ];
+        let error = join_tasks(handles, "task").await.unwrap_err();
+        assert!(matches!(error, TaskError::Join(_)), "got {:?}", error);
+    }
+}
+
+#[cfg(test)]
+mod angular_size_index_tests {
+    use super::angular_size_index_name;
+    use crate::conf::{arcsec_to_radians, CatalogXmatchConfig};
+
+    fn config(angular_size_key: Option<String>, radius_max: Option<f64>) -> CatalogXmatchConfig {
+        CatalogXmatchConfig {
+            catalog: "NED".to_string(),
+            radius: arcsec_to_radians(300.0),
+            angular_size_key,
+            angular_size_scale: 5.0,
+            angular_size_radius_max: radius_max.map(arcsec_to_radians),
+            ..Default::default()
+        }
+    }
+
+    // A threshold mismatch makes the index silently miss rows the query asks for.
+    #[test]
+    fn test_threshold_is_derived_from_the_same_config_as_the_query() {
+        let c = config(Some("Diam".to_string()), Some(21600.0));
+        assert!((c.angular_size_threshold_arcsec() - 120.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_index_name_does_not_collide_with_the_full_index() {
+        assert_ne!(
+            angular_size_index_name("Diam", 120.0),
+            "coordinates.radec_geojson_2dsphere"
+        );
+    }
+
+    /// Changing the radius or the scale changes the partial filter, so it has
+    /// to change the name too: mongo rejects a rebuild under the same name with
+    /// different options, and the scheduler treats that as fatal.
+    #[test]
+    fn test_index_name_tracks_the_threshold() {
+        let wide = config(Some("Diam".to_string()), Some(21600.0));
+        let narrow = CatalogXmatchConfig {
+            angular_size_scale: 10.0,
+            ..config(Some("Diam".to_string()), Some(21600.0))
+        };
+        assert_ne!(
+            wide.angular_size_threshold_arcsec(),
+            narrow.angular_size_threshold_arcsec()
+        );
+        assert_ne!(
+            angular_size_index_name("Diam", wide.angular_size_threshold_arcsec()),
+            angular_size_index_name("Diam", narrow.angular_size_threshold_arcsec()),
+            "the same name would collide with different options"
+        );
+    }
+
+    #[test]
+    fn test_catalogs_without_angular_size_matching_are_skipped() {
+        assert!(config(None, Some(21600.0)).angular_size_key.is_none());
+        assert!(config(Some("Diam".to_string()), None)
+            .angular_size_radius_max
+            .is_none());
     }
 }

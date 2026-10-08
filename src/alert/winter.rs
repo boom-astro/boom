@@ -13,6 +13,7 @@ use crate::{
         cutouts::CutoutStorage,
         db::{mongify_vec, update_timeseries_op},
         enums::Survey,
+        host::{self, HostGalaxyAssociation, HostGalaxyConfig},
         lightcurves::Band,
         o11y::logging::as_error,
         spatial::{xmatch, Coordinates},
@@ -21,7 +22,7 @@ use crate::{
 use constcat::concat;
 use flare::Time;
 use mongodb::bson::{doc, Document};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_with::{serde_as, skip_serializing_none};
 use tracing::{debug, error, instrument, warn};
 
@@ -39,17 +40,26 @@ pub const WINTER_ZTF_XMATCH_RADIUS: f64 =
 pub const WINTER_LSST_XMATCH_RADIUS: f64 =
     (WINTER_POSITION_UNCERTAINTY.max(lsst::LSST_POSITION_UNCERTAINTY) / 3600.0_f64).to_radians();
 
+/// The `fid` WINTER gives a dark frame, which is a calibration exposure rather
+/// than a measurement in any band.
+pub const DARK_FID: i32 = 4;
+
 /// Map a WINTER filter id to a photometric [`Band`].
 ///
-/// WINTER `fid` encoding (from the alert schema): 0=Y, 1=J, 2=H, 3=K.
-/// Unknown ids default to Y so ingestion never fails on an unexpected filter.
-pub fn fid_to_band(fid: i32) -> Band {
+/// `fid` is 1-indexed, as ZTF's is: 1=Y, 2=J, 3=H. The upstream schema's doc
+/// string says 0=Y, 1=J, 2=H, 3=K, which does not match the alerts it ships
+/// with -- WINTER's own J-band data carries fid 2.
+///
+/// An id outside the set is refused rather than resolved to a default: a band
+/// is what the photometry is later read as, so a guess is indistinguishable
+/// from a measurement.
+pub fn fid_to_band(fid: i32) -> Result<Band, AlertError> {
     match fid {
-        0 => Band::Y,
-        1 => Band::J,
-        2 => Band::H,
-        3 => Band::K,
-        _ => Band::Y,
+        1 => Ok(Band::Y),
+        2 => Ok(Band::J),
+        3 => Ok(Band::H),
+        DARK_FID => Err(AlertError::DarkFrame),
+        _ => Err(AlertError::UnknownFid(fid)),
     }
 }
 
@@ -57,6 +67,38 @@ pub fn fid_to_band(fid: i32) -> Band {
 // from `fid` during processing.
 fn default_band() -> Band {
     Band::Y
+}
+
+// v0.4 types some PS1-STRM fields as float, string or null.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum FloatOrString {
+    Float(f32),
+    String(String),
+}
+
+fn deserialize_lenient_f32<'de, D>(deserializer: D) -> Result<Option<f32>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = match Option::<FloatOrString>::deserialize(deserializer)? {
+        Some(FloatOrString::Float(value)) => Some(value),
+        Some(FloatOrString::String(text)) => text.parse().ok(),
+        None => None,
+    };
+    Ok(value.filter(|value: &f32| value.is_finite()))
+}
+
+// WINTER writes the string "nan" for a missing class or ZTF name.
+fn deserialize_lenient_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(match Option::<FloatOrString>::deserialize(deserializer)? {
+        Some(FloatOrString::String(text)) => Some(text),
+        _ => None,
+    }
+    .filter(|text| !text.is_empty() && !text.eq_ignore_ascii_case("nan")))
 }
 
 /// WINTER candidate record.
@@ -80,13 +122,11 @@ pub struct WinterCandidate {
     pub progname: String,
     pub programid: i32,
     pub isdiffpos: bool,
-    // Not all upstream WINTER packets carry `field`; tolerate its absence
-    // rather than failing the whole alert (missing field `field`). It stays a
-    // plain `i32` (not `Option`) because the writer schema types it as a bare
-    // `int` when present — an `Option` would make the deserializer demand a
-    // union and reject that. `#[serde(default)]` fills 0 only when it's absent.
-    #[serde(default)]
+    // Renamed `fieldid` in v0.4. A bare avro `int`, so `default` (an `Option` wants a union).
+    #[serde(default, alias = "fieldid")]
     pub field: i32,
+    #[serde(default)]
+    pub boardid: i32,
     pub ra: f64,
     pub dec: f64,
     pub magzpsci: Option<f32>,
@@ -132,6 +172,8 @@ pub struct WinterCandidate {
     pub clrrms: Option<f32>,
     pub rb: Option<f32>,
     pub rbversion: Option<String>,
+    pub xrb: Option<f32>,
+    pub xrbversion: Option<String>,
     pub ssdistnr: Option<f32>,
     pub ssmagnr: Option<f32>,
     pub ssnamenr: Option<String>,
@@ -146,6 +188,14 @@ pub struct WinterCandidate {
     pub szmag1: Option<f32>,
     pub sgscore1: Option<f32>,
     pub distpsnr1: Option<f32>,
+    #[serde(default, deserialize_with = "deserialize_lenient_string")]
+    pub ps1class1: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_lenient_f32")]
+    pub ps1strmprobstar1: Option<f32>,
+    pub ps1strmprobqso1: Option<f32>,
+    pub ps1strmprobgalaxy1: Option<f32>,
+    pub ps1strmphotoz1: Option<f32>,
+    pub ps1strmphotozerr1: Option<f32>,
     pub psobjectid2: Option<f32>,
     pub sgmag2: Option<f32>,
     pub srmag2: Option<f32>,
@@ -153,6 +203,13 @@ pub struct WinterCandidate {
     pub szmag2: Option<f32>,
     pub sgscore2: Option<f32>,
     pub distpsnr2: Option<f32>,
+    #[serde(default, deserialize_with = "deserialize_lenient_string")]
+    pub ps1strmclass2: Option<String>,
+    pub ps1strmprobstar2: Option<f32>,
+    pub ps1strmprobqso2: Option<f32>,
+    pub ps1strmprobgalaxy2: Option<f32>,
+    pub ps1strmphotoz2: Option<f32>,
+    pub ps1strmphotozerr2: Option<f32>,
     pub psobjectid3: Option<f32>,
     pub sgmag3: Option<f32>,
     pub srmag3: Option<f32>,
@@ -160,6 +217,13 @@ pub struct WinterCandidate {
     pub szmag3: Option<f32>,
     pub sgscore3: Option<f32>,
     pub distpsnr3: Option<f32>,
+    #[serde(default, deserialize_with = "deserialize_lenient_string")]
+    pub ps1strmclass3: Option<String>,
+    pub ps1strmprobstar3: Option<f32>,
+    pub ps1strmprobqso3: Option<f32>,
+    pub ps1strmprobgalaxy3: Option<f32>,
+    pub ps1strmphotoz3: Option<f32>,
+    pub ps1strmphotozerr3: Option<f32>,
     pub nmtchtm: i32,
     pub tmjmag1: Option<f32>,
     pub tmhmag1: Option<f32>,
@@ -177,6 +241,15 @@ pub struct WinterCandidate {
     pub neargaiabright: Option<f32>,
     pub maggaia: Option<f32>,
     pub maggaiabright: Option<f32>,
+    pub distgaia: Option<f32>,
+    pub plxgaia: Option<f32>,
+    pub ruwegaia: Option<f32>,
+    pub distgaiabright: Option<f32>,
+    pub plxgaiabright: Option<f32>,
+    pub ruwegaiabright: Option<f32>,
+    #[serde(default, deserialize_with = "deserialize_lenient_string")]
+    pub ztfname: Option<String>,
+    pub distztf: Option<f32>,
     // Not present in the avro packet; derived from `fid` during processing.
     #[serde(default = "default_band")]
     pub band: Band,
@@ -208,6 +281,7 @@ pub struct WinterPrvCandidate {
     pub dec: f64,
     pub magpsf: f32,
     pub sigmapsf: f32,
+    pub diffmaglim: Option<f32>,
     pub fwhm: Option<f32>,
     pub scorr: Option<f64>,
     #[serde(default = "default_band")]
@@ -235,6 +309,7 @@ impl WinterPrvCandidate {
             dec: c.dec,
             magpsf: c.magpsf,
             sigmapsf: c.sigmapsf,
+            diffmaglim: c.diffmaglim,
             fwhm: c.fwhm,
             scorr: c.scorr,
             band: c.band.clone(),
@@ -277,6 +352,8 @@ pub struct WinterObject {
     pub object_id: String,
     pub prv_candidates: Vec<WinterPrvCandidate>,
     pub cross_matches: Option<HashMap<String, Vec<Document>>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_galaxy: Option<HostGalaxyAssociation>,
     pub aliases: Option<WinterAliases>,
     pub coordinates: Coordinates,
     pub created_at: f64,
@@ -478,6 +555,7 @@ pub fn sanitize_winter_avro(bytes: &[u8]) -> Result<Vec<u8>, WinterAvroError> {
 
 pub struct WinterAlertWorker {
     xmatch_configs: Vec<conf::CatalogXmatchConfig>,
+    host_galaxy_config: HostGalaxyConfig,
     db: mongodb::Database,
     alert_collection: mongodb::Collection<WinterAlert>,
     alert_aux_collection: mongodb::Collection<WinterObject>,
@@ -603,6 +681,7 @@ impl WinterAlertWorker {
             Err(e) => {
                 match &e {
                     AlertError::ConcurrentAuxUpdate(_) => debug!(error = %e),
+                    AlertError::InvalidTimeseriesInput(_) => warn!(error = %e),
                     _ => error!(error = %e),
                 }
                 self.update_aux_fallback(object_id, prv_candidates, survey_matches, now)
@@ -644,6 +723,7 @@ impl AlertWorker for WinterAlertWorker {
 
         let worker = WinterAlertWorker {
             xmatch_configs,
+            host_galaxy_config: config.host_galaxy.clone(),
             db,
             alert_collection,
             alert_aux_collection,
@@ -658,10 +738,6 @@ impl AlertWorker for WinterAlertWorker {
 
     fn survey() -> Survey {
         Survey::Winter
-    }
-
-    fn input_queue_name(&self) -> String {
-        format!("{}_alerts_packets_queue", WinterAlertWorker::survey())
     }
 
     fn output_queue_name(&self) -> String {
@@ -681,8 +757,10 @@ impl AlertWorker for WinterAlertWorker {
             .alert_from_avro_bytes(&sanitized)
             .inspect_err(as_error!())?;
 
-        // Fill in derived bands from `fid` (not present in the avro packet).
-        avro_alert.candidate.band = fid_to_band(avro_alert.candidate.fid);
+        // Fill in derived bands from `fid` (not present in the avro packet). A
+        // dark frame or an unrecognised filter is not a detection, so the alert
+        // is refused rather than stored under a guessed band.
+        avro_alert.candidate.band = fid_to_band(avro_alert.candidate.fid)?;
 
         let candid = avro_alert.candid;
         let object_id = avro_alert.object_id;
@@ -691,11 +769,18 @@ impl AlertWorker for WinterAlertWorker {
 
         // Lightcurve = current detection + historical prv_candidates.
         let mut prv_candidates = vec![WinterPrvCandidate::from_candidate(&avro_alert.candidate)];
-        if let Some(mut history) = avro_alert.prv_candidates {
-            for p in history.iter_mut() {
-                p.band = fid_to_band(p.fid);
+        if let Some(history) = avro_alert.prv_candidates {
+            // One unusable point does not invalidate the rest of the history, so
+            // a dark frame or unrecognised filter drops that point alone.
+            for mut p in history {
+                match fid_to_band(p.fid) {
+                    Ok(band) => {
+                        p.band = band;
+                        prv_candidates.push(p);
+                    }
+                    Err(e) => debug!(fid = p.fid, error = %e, "dropping prv_candidate"),
+                }
             }
-            prv_candidates.extend(history);
         }
         WinterPrvCandidate::sanitize_timeseries(&mut prv_candidates);
 
@@ -739,10 +824,13 @@ impl AlertWorker for WinterAlertWorker {
                 &self.db,
             )
             .await?;
+            let host_galaxy =
+                host::associate_from_xmatches(ra, dec, &xmatches, &self.host_galaxy_config);
             let obj = WinterObject {
                 object_id: object_id.clone(),
                 prv_candidates,
                 cross_matches: Some(xmatches),
+                host_galaxy,
                 aliases: survey_matches,
                 coordinates: Coordinates::new(ra, dec),
                 created_at: now,
@@ -750,7 +838,7 @@ impl AlertWorker for WinterAlertWorker {
             };
             let result = self.insert_aux(&obj, &self.alert_aux_collection).await;
             if let Err(AlertError::AlertAuxExists) = result {
-                warn!(
+                debug!(
                     "Alert aux document for object_id {} already exists. Using fallback update.",
                     object_id
                 );
@@ -775,5 +863,131 @@ impl AlertWorker for WinterAlertWorker {
             .inspect_err(as_error!())?;
 
         Ok(status)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::utils::testing::{
+        assert_update_aux_branches_and_fallback, drop_alert_from_collections, winter_alert_worker,
+        AlertRandomizer, AuxBranchSnapshot, AuxUpdateBranchTestAdapter,
+    };
+
+    async fn load_aux(worker: &WinterAlertWorker, object_id: &str) -> AlertAuxForUpdate {
+        worker.get_existing_aux(object_id).await.unwrap().unwrap()
+    }
+
+    async fn set_prv_candidates(worker: &WinterAlertWorker, object_id: &str, jds: &[f64]) {
+        let prv_candidates: Vec<Document> = jds.iter().map(|jd| doc! { "jd": jd }).collect();
+        worker
+            .alert_aux_collection
+            .update_one(
+                doc! { "_id": object_id },
+                doc! { "$set": { "prv_candidates": prv_candidates } },
+            )
+            .await
+            .unwrap();
+    }
+
+    struct WinterAuxBranchAdapter {
+        template: WinterPrvCandidate,
+    }
+
+    #[async_trait::async_trait]
+    impl AuxUpdateBranchTestAdapter for WinterAuxBranchAdapter {
+        type Worker = WinterAlertWorker;
+        type ExistingAux = AlertAuxForUpdate;
+        type SurveyMatches = Option<WinterAliases>;
+        type Updates = Vec<WinterPrvCandidate>;
+
+        async fn load_existing(&self, worker: &Self::Worker, object_id: &str) -> Self::ExistingAux {
+            load_aux(worker, object_id).await
+        }
+
+        fn snapshot(&self, existing_aux: &Self::ExistingAux) -> AuxBranchSnapshot {
+            AuxBranchSnapshot {
+                series: vec![existing_aux.prv_candidates.clone()],
+                version: existing_aux.version,
+            }
+        }
+
+        fn survey_matches(&self) -> Self::SurveyMatches {
+            Some(WinterAliases {
+                ztf: vec![],
+                lsst: vec![],
+            })
+        }
+
+        fn empty_updates(&self) -> Self::Updates {
+            vec![]
+        }
+
+        fn updates_at_jds(&mut self, jds: &[f64]) -> Self::Updates {
+            assert_eq!(jds.len(), 1);
+            let mut point = self.template.clone();
+            point.jd = jds[0];
+            vec![point]
+        }
+
+        async fn inject_corrupted_existing(&self, worker: &Self::Worker, object_id: &str) {
+            set_prv_candidates(worker, object_id, &[2.0, 1.0, 1.0]).await;
+        }
+
+        fn expected_repaired_jds(&self) -> Vec<Vec<f64>> {
+            vec![vec![1.0, 2.0]]
+        }
+
+        async fn inject_non_finite_existing(&self, worker: &Self::Worker, object_id: &str) {
+            set_prv_candidates(worker, object_id, &[f64::NAN, 1.0]).await;
+        }
+
+        fn expected_non_finite_repaired_jds(&self) -> Vec<Vec<f64>> {
+            vec![vec![1.0]]
+        }
+
+        async fn apply_update(
+            &self,
+            worker: &mut Self::Worker,
+            object_id: &str,
+            updates: Self::Updates,
+            survey_matches: &Self::SurveyMatches,
+            existing_aux: &Self::ExistingAux,
+        ) {
+            worker
+                .update_aux(
+                    object_id,
+                    &updates,
+                    survey_matches,
+                    Time::now().to_jd(),
+                    existing_aux,
+                )
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_update_aux_branches_and_fallback() {
+        let mut worker = winter_alert_worker().await;
+
+        let (candid, object_id, _ra, _dec, bytes_content) =
+            AlertRandomizer::new_randomized(Survey::Winter).get().await;
+        let status = worker.process_alert(&bytes_content).await.unwrap();
+        assert_eq!(status, ProcessAlertStatus::Added(candid));
+
+        let parsed_alert: WinterRawAvroAlert = worker
+            .schema_cache
+            .alert_from_avro_bytes(&sanitize_winter_avro(&bytes_content).unwrap())
+            .unwrap();
+        let mut adapter = WinterAuxBranchAdapter {
+            template: WinterPrvCandidate::from_candidate(&parsed_alert.candidate),
+        };
+
+        assert_update_aux_branches_and_fallback(&mut worker, &object_id, &mut adapter).await;
+
+        drop_alert_from_collections(candid, &Survey::Winter)
+            .await
+            .unwrap();
     }
 }

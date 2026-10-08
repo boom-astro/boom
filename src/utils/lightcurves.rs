@@ -1,8 +1,11 @@
+use crate::utils::outburst::{
+    outburst_statistic, same_band_statistic, window_scatter, Point, DEFAULT_G12,
+};
+use crate::utils::phase_curve::{deviation, PhaseCurve};
 use apache_avro_derive::AvroSchema;
 use apache_avro_macros::serdavro;
 use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
-use serde_with::{serde_as, skip_serializing_none};
 use utoipa::ToSchema;
 
 pub const ZP_AB: f32 = 8.90; // Zero point for AB magnitude
@@ -49,7 +52,7 @@ pub enum Band {
     Y,
     #[serde(rename = "u")]
     U,
-    // Near-infrared bands (e.g. WINTER: fid 0=Y, 1=J, 2=H, 3=K)
+    // Near-infrared bands (e.g. WINTER: fid 1=Y, 2=J, 3=H)
     #[serde(rename = "j")]
     J,
     #[serde(rename = "h")]
@@ -85,17 +88,293 @@ pub struct PhotometryMag {
     pub band: Band,
 }
 
-#[serde_as]
-#[skip_serializing_none]
+/// Quiescent gap separating detection episodes, days.
+///
+/// Set to favour recall: at 30 days 80% of known recurrers reach two episodes
+/// against 10% of one-off transients, where 90 days gives 75% and 3%. Recorded
+/// on every result, since a filter reading `n_episodes` cannot otherwise tell
+/// which grouping produced it.
+pub const EPISODE_GAP_DAYS: f64 = 30.0;
+
+/// Both light-curve summaries from a single pass over the detections.
+///
+/// `forced` carries the JD of each forced epoch that reached the detection
+/// threshold; the caller applies that test, since only it knows how its survey
+/// records one.
+///
+/// The two are derived from the same points and are always wanted together, so
+/// iterating once keeps the enrichment worker from walking a long light curve
+/// twice.
+pub fn summarise_detections<I, F>(
+    points: I,
+    forced: F,
+    ref_jd: f64,
+    gap_days: f64,
+) -> (DetectionHistory, EpisodeHistory)
+where
+    I: IntoIterator<Item = (f64, Option<bool>)>,
+    F: IntoIterator<Item = f64>,
+{
+    let cutoff = ref_jd - 30.0;
+    let mut detections = DetectionHistory::default();
+    let mut positives: Vec<f64> = Vec::new();
+
+    // Forced epochs widen the activity span and are counted, but are kept out
+    // of the counts and episodes below, which filters already read.
+    for jd in forced {
+        if jd > ref_jd {
+            continue;
+        }
+        detections.n_forced_detections += 1;
+        detections.span(jd);
+    }
+
+    for (jd, is_negative) in points {
+        if jd > ref_jd {
+            continue;
+        }
+        let Some(is_negative) = is_negative else {
+            continue;
+        };
+        detections.span(jd);
+        detections.n_det += 1;
+        let recent = jd >= cutoff;
+        if is_negative {
+            detections.n_neg += 1;
+            if recent {
+                detections.n_neg_30d += 1;
+            }
+            detections.first_neg_jd = Some(detections.first_neg_jd.map_or(jd, |j| j.min(jd)));
+            detections.last_neg_jd = Some(detections.last_neg_jd.map_or(jd, |j| j.max(jd)));
+        } else {
+            detections.n_pos += 1;
+            if recent {
+                detections.n_pos_30d += 1;
+            }
+            positives.push(jd);
+        }
+    }
+
+    (
+        detections,
+        EpisodeHistory::from_positive_epochs(positives, gap_days),
+    )
+}
+
+/// Detection episodes in an object's light curve, for finding sources that
+/// outburst more than once.
+///
+/// An episode is a run of positive detections separated from the next run by
+/// more than [`EPISODE_GAP_DAYS`]. Recurrence is a statement about a whole
+/// light curve, and filter pipelines are strictly per-alert, so it is computed
+/// here alongside [`DetectionHistory`].
+///
+/// `n_episodes` measures when the object alerted, not when it was observed: a
+/// night the survey skipped is indistinguishable from one it was quiet, so a
+/// survey-wide outage adds an episode boundary to every densely sampled object
+/// at once. It separates recurrence from one-off transients well, and does not
+/// separate it from ordinary variability -- on 276 classified CVs, 80% of
+/// recurrers and 10% of one-off transients pass `n_episodes >= 2`, against 93%
+/// of variable stars, which a catalogue cross-match is what removes.
+///
+/// Gaps are quiescent intervals -- the end of one episode to the start of the
+/// next -- which is the same quantity `gap_days` thresholds on. An orbital
+/// period is that plus the episode's own duration, so comparing successive
+/// gaps tracks a lengthening period only while episode durations are similar.
+#[serdavro]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, Default, ToSchema)]
+pub struct EpisodeHistory {
+    /// Distinct detection episodes in the light curve.
+    pub n_episodes: i32,
+    /// The gap used to separate them, days.
+    pub gap_days: f64,
+    /// Quiescent gap between the two most recent episodes.
+    pub last_gap_days: Option<f64>,
+    /// Quiescent gap between the two episodes before those.
+    pub prev_gap_days: Option<f64>,
+    /// Longest quiescent gap between consecutive episodes.
+    pub longest_quiet_days: Option<f64>,
+    /// First detection of the earliest episode.
+    pub first_episode_jd: Option<f64>,
+    /// First detection of the most recent episode.
+    pub last_episode_jd: Option<f64>,
+}
+
+impl EpisodeHistory {
+    /// Group positive detections into episodes separated by more than `gap_days`.
+    ///
+    /// Takes the same `(jd, is_negative)` points as [`DetectionHistory`].
+    /// Negative detections are excluded: a source that goes negative against its
+    /// reference would otherwise manufacture episodes.
+    pub fn from_points<I>(points: I, ref_jd: f64, gap_days: f64) -> Self
+    where
+        I: IntoIterator<Item = (f64, Option<bool>)>,
+    {
+        let jds: Vec<f64> = points
+            .into_iter()
+            .filter(|&(jd, is_negative)| jd <= ref_jd && is_negative == Some(false))
+            .map(|(jd, _)| jd)
+            .collect();
+        Self::from_positive_epochs(jds, gap_days)
+    }
+
+    /// Group already-selected positive epochs, which need not be sorted.
+    fn from_positive_epochs(mut jds: Vec<f64>, gap_days: f64) -> Self {
+        jds.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+        let mut out = EpisodeHistory {
+            gap_days,
+            ..Default::default()
+        };
+        let Some(&first) = jds.first() else {
+            return out;
+        };
+
+        // Each episode as (start, end); a gap longer than `gap_days` starts a new one.
+        let mut episodes: Vec<(f64, f64)> = vec![(first, first)];
+        for &jd in jds.iter().skip(1) {
+            let last = episodes.last_mut().expect("seeded above");
+            if jd - last.1 > gap_days {
+                episodes.push((jd, jd));
+            } else {
+                last.1 = jd;
+            }
+        }
+
+        let gaps: Vec<f64> = episodes.windows(2).map(|w| w[1].0 - w[0].1).collect();
+
+        out.n_episodes = episodes.len() as i32;
+        out.first_episode_jd = Some(episodes[0].0);
+        out.last_episode_jd = Some(episodes[episodes.len() - 1].0);
+        out.last_gap_days = gaps.last().copied();
+        out.prev_gap_days = (gaps.len() >= 2).then(|| gaps[gaps.len() - 2]);
+        out.longest_quiet_days = gaps.iter().copied().fold(None, |acc: Option<f64>, g| {
+            Some(acc.map_or(g, |a| a.max(g)))
+        });
+        out
+    }
+}
+
+// TODO: avro serialization fail when we use skip_serializing_none,
+// since the optional fields are not just None but simply missing
+// (this needs to be fixed in the apache_avro-related crates)
+// #[serde_as]
+// #[skip_serializing_none]
 #[derive(Debug, PartialEq, Clone, Deserialize, Serialize, AvroSchema, ToSchema)]
 pub struct BandRateProperties {
+    /// Magnitudes per day, signed: `fading` positive, `rising` negative. An
+    /// afterglow fades at one to two a day; a supernova near peak is flat.
     pub rate: f32,
+    /// One-sigma uncertainty on `rate`, magnitudes per day.
     pub rate_error: f32,
-    pub red_chi2: f32,
+    /// Chi-square of the fit. Exactly zero for a two-point fit, where the line
+    /// passes through both points.
+    ///
+    /// `None` only on alerts enriched before this was reported; every fit
+    /// computed since defines it. It is not defaulted to zero, because zero is a
+    /// value a real two-point fit takes and the two must stay distinguishable.
+    pub chi2: Option<f32>,
+    /// Degrees of freedom, `nb_data - 2`. Zero for a two-point fit, which is
+    /// what makes `red_chi2` undefined there. `None` on the same alerts `chi2`
+    /// is, and for the same reason.
+    pub dof: Option<i32>,
+    /// Chi-square per degree of freedom, null when `dof` is zero: a two-point
+    /// fit leaves nothing to test goodness of fit against. Null means "unknown",
+    /// not "good" or "bad", and a range cut matches neither null nor absent --
+    /// cut on `chi2`/`dof` to include sparse bands.
+    pub red_chi2: Option<f32>,
+    /// Points the fit used.
     pub nb_data: i32,
+    /// Time those points span, days.
     pub dt: f32,
 }
 
+/// Window, in days before the object's latest detection, that `recent` covers.
+///
+/// The unbounded fit spans the whole light curve -- a median of ~1400 days in
+/// production -- so its rate describes a line drawn across years rather than
+/// what the object is doing now. Measured against real cadence, 7, 30 and 60 day
+/// windows all yield a fittable band for about a tenth of alerts, so the exact
+/// value matters far less than having a bound at all.
+pub const RECENT_WINDOW_DAYS: f64 = 30.0;
+
+/// Fit one monotonic segment, returning `None` when it cannot support a line.
+///
+/// Rejects a segment whose spread sits inside its own error bars: a fit through
+/// noise produces a confident-looking rate that means nothing.
+fn fit_segment(segment: &[&PhotometryMag]) -> Option<BandRateProperties> {
+    if segment.len() < 2 {
+        return None;
+    }
+    let t0 = segment[0].time;
+    if segment.last()?.time - t0 <= 0.01 {
+        return None;
+    }
+
+    let mut time = Vec::with_capacity(segment.len());
+    let mut mag = Vec::with_capacity(segment.len());
+    let mut mag_err = Vec::with_capacity(segment.len());
+    let (mut min_mag, mut min_mag_err) = (f32::INFINITY, f32::INFINITY);
+    let (mut max_mag, mut max_mag_err) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
+
+    for m in segment {
+        time.push((m.time - t0) as f32);
+        mag.push(m.mag);
+        mag_err.push(m.mag_err);
+        if m.mag < min_mag {
+            min_mag = m.mag;
+            min_mag_err = m.mag_err;
+        }
+        if m.mag > max_mag {
+            max_mag = m.mag;
+            max_mag_err = m.mag_err;
+        }
+    }
+
+    if min_mag + min_mag_err >= max_mag - max_mag_err {
+        return None;
+    }
+    weighted_least_squares_centered(&time, &mag, &mag_err)
+}
+
+/// Index of the brightest (numerically smallest magnitude) point.
+fn brightest_index(mags: &[&PhotometryMag]) -> Option<usize> {
+    (!mags.is_empty()).then(|| {
+        mags.iter().enumerate().fold(
+            0,
+            |best, (i, m)| if m.mag < mags[best].mag { i } else { best },
+        )
+    })
+}
+
+/// Split a band's points at its brightest and fit each side.
+fn fit_rising_and_fading(
+    mags: &[&PhotometryMag],
+) -> (Option<BandRateProperties>, Option<BandRateProperties>) {
+    let Some(peak) = brightest_index(mags) else {
+        return (None, None);
+    };
+    (fit_segment(&mags[0..=peak]), fit_segment(&mags[peak..]))
+}
+
+/// Fits over the last [`RECENT_WINDOW_DAYS`] only.
+///
+/// Present whenever the window holds any detection, so "no recent data" (null)
+/// stays distinguishable from "recent data that cannot be fit" (present, with
+/// `rising` and `fading` null). Most objects in the alert stream are sampled too
+/// sparsely for a windowed fit; that is a fact about the cadence, and reporting
+/// it as absent is the honest outcome rather than a defect.
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, AvroSchema, ToSchema)]
+pub struct RecentProperties {
+    /// Width of the window in days, so a consumer need not assume the constant.
+    pub window_days: f32,
+    /// Detections inside the window.
+    pub nb_data: i32,
+    pub peak_jd: f64,
+    pub peak_mag: f32,
+    pub rising: Option<BandRateProperties>,
+    pub fading: Option<BandRateProperties>,
+}
 // TODO: avro serialization fail when we use skip_serializing_none,
 // since the optional fields are not just None but simply missing
 // (this needs to be fixed in the apache_avro-related crates)
@@ -107,8 +386,14 @@ pub struct BandProperties {
     pub peak_mag: f32,
     pub peak_mag_err: f32,
     pub dt: f32,
+    /// Fits over the whole light curve. The window is unbounded, so on an object
+    /// with years of history these describe a line across all of it rather than
+    /// current behaviour -- see `recent` for that.
     pub rising: Option<BandRateProperties>,
     pub fading: Option<BandRateProperties>,
+    /// The same fits restricted to the last [`RECENT_WINDOW_DAYS`], or null when
+    /// the window holds no detection in this band.
+    pub recent: Option<RecentProperties>,
 }
 
 /// Morphological indicators of cometary activity, computed per survey but expressed
@@ -137,6 +422,152 @@ pub struct ActivityMetrics {
     /// abort the whole pipeline, and difference imaging produces such fluxes
     /// routinely. No threshold is applied — filters choose their own cut.
     pub aperture_excess: Option<f32>,
+    /// Photometric outburst statistic for a moving object, `None` for anything
+    /// else and for a mover with no usable earlier detection of its own.
+    pub outburst: Option<Outburst>,
+}
+
+/// How much brighter a moving object is than its own recent history, in sigma.
+///
+/// Every value compares the detection under test against an earlier detection of
+/// the same object, both scaled to the test epoch's observing geometry with an
+/// HG12 phase function. Positive means brighter than history.
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    serde::Deserialize,
+    serde::Serialize,
+    AvroSchema,
+    utoipa::ToSchema,
+)]
+#[serde(default)]
+pub struct Outburst {
+    /// Median over a 7 day window, colour corrected across bands.
+    pub d7: Option<f32>,
+    /// Median over 14 days.
+    pub d14: Option<f32>,
+    /// Median over 30 days.
+    pub d30: Option<f32>,
+    /// Per-point sigma against every earlier detection in the test point's own
+    /// band, over the longest window above.
+    ///
+    /// Deliberately not the same quantity as the medians: with one band there is
+    /// no colour term, which is what lets a value stand alone. Take a median of
+    /// these to score any window that suits, and expect it to sit near but not on
+    /// `d14` -- the medians carry a colour correction these do not.
+    pub points: Vec<OutburstPoint>,
+    /// Intrinsic variability used in every denominator above, magnitudes.
+    ///
+    /// From the object's fitted phase curve where it has one, otherwise from the
+    /// window itself. Without it a bright, well measured asteroid reports its own
+    /// rotation as a detection.
+    pub scatter: Option<f32>,
+    /// Sigma above the object's fitted phase curve, `None` without one.
+    ///
+    /// Unlike the medians this has no window: it compares against a baseline fitted
+    /// over the whole archive, so it keeps registering activity that outlasts a
+    /// month and would otherwise become the object's new normal. The medians catch
+    /// the onset; this catches the state.
+    pub baseline: Option<f32>,
+}
+
+impl Outburst {
+    /// Score `test` against earlier detections of the same object.
+    ///
+    /// `history` pairs each earlier detection's epoch with its point, ascending,
+    /// and must already be cut to the longest window. `None` when nothing in it
+    /// is usable, which is the common case: most objects are seen once.
+    pub fn from_history(
+        history: &[(f64, Point)],
+        test: Point,
+        test_jd: f64,
+        curve: Option<&PhaseCurve>,
+    ) -> Option<Self> {
+        let baseline = curve
+            .and_then(|c| deviation(c, &test))
+            .filter(|s| s.is_finite())
+            .map(|s| s as f32);
+
+        // A fitted slope describes this object; the default is the population
+        // average standing in for one, so prefer the fit wherever there is one.
+        let g12 = curve.map_or(DEFAULT_G12, |c| c.g12);
+
+        if history.is_empty() {
+            // A phase curve alone still scores the point, which is the whole
+            // reason for having one: a first detection has no window.
+            return baseline.map(|baseline| Outburst {
+                baseline: Some(baseline),
+                scatter: curve.map(|c| c.scatter as f32),
+                ..Default::default()
+            });
+        }
+
+        let mut all: Vec<Point> = history.iter().map(|(_, p)| *p).collect();
+        all.push(test);
+
+        // A fitted curve sees the whole archive; the window sees a month and
+        // rarely a full rotation, so it is only a fallback.
+        let scatter = match curve {
+            Some(c) => c.scatter,
+            None => window_scatter(&all, g12).unwrap_or(0.0),
+        };
+
+        let median_within = |days: f64| -> Option<f32> {
+            let mut window: Vec<Point> = history
+                .iter()
+                .filter(|(jd, _)| *jd >= test_jd - days)
+                .map(|(_, p)| *p)
+                .collect();
+            if window.is_empty() {
+                return None;
+            }
+            window.push(test);
+            let (_, median) = outburst_statistic(&window, g12, scatter).ok()?;
+            (median as f32).is_finite().then_some(median as f32)
+        };
+
+        let points = same_band_statistic(&all, g12, scatter)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(_, sigma)| sigma.is_finite())
+            .map(|(i, sigma)| OutburstPoint {
+                jd: history[i].0,
+                sigma: sigma as f32,
+            })
+            .collect::<Vec<_>>();
+
+        let outburst = Outburst {
+            d7: median_within(7.0),
+            d14: median_within(14.0),
+            d30: median_within(30.0),
+            points,
+            scatter: Some(scatter as f32),
+            baseline,
+        };
+        (outburst.d30.is_some() || !outburst.points.is_empty() || outburst.baseline.is_some())
+            .then_some(outburst)
+    }
+}
+
+/// One entry of `Outburst::points`.
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    serde::Deserialize,
+    serde::Serialize,
+    AvroSchema,
+    utoipa::ToSchema,
+)]
+#[serde(default)]
+pub struct OutburstPoint {
+    /// Epoch of the earlier detection being compared against.
+    pub jd: f64,
+    /// Sigma of the test point relative to it.
+    pub sigma: f32,
 }
 
 impl ActivityMetrics {
@@ -175,7 +606,91 @@ impl ActivityMetrics {
     fn from_excess(aperture_excess: Option<f32>) -> Self {
         ActivityMetrics {
             aperture_excess: aperture_excess.filter(|e| e.is_finite()),
+            outburst: None,
         }
+    }
+}
+
+/// Per-object detection-history summary, computed at enrichment from the object's
+/// accumulated light curve and written onto every alert so filters can make
+/// history-aware cuts (e.g. "steady star that just started going negative") with a
+/// plain `$match`. BOOM filter pipelines are strictly per-alert and reject
+/// `$group`/`$unwind`/`$lookup`, so the history has to be precomputed here.
+///
+/// Each survey feeds `(jd, is_negative)` points from its own light curve — sign
+/// from the psfFlux sign (ZTF/LSST), `isdiffpos` (WINTER), or the signed SNR
+/// (DECam). Windows are measured back from the alert epoch, keeping the values
+/// deterministic per alert rather than dependent on wall-clock time at enrichment.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize, AvroSchema, ToSchema)]
+#[serde(default)]
+pub struct DetectionHistory {
+    /// Detections with a known sign in the object's history (`n_pos + n_neg`).
+    pub n_det: i32,
+    /// Positive-difference detections (source brighter than the reference).
+    pub n_pos: i32,
+    /// Negative-difference detections (source fainter than the reference).
+    pub n_neg: i32,
+    /// JD of the object's first-ever negative detection; `None` if it has none.
+    pub first_neg_jd: Option<f64>,
+    /// JD of the object's most recent negative detection; `None` if it has none.
+    pub last_neg_jd: Option<f64>,
+    /// Positive detections in the 30 days ending at the alert epoch.
+    pub n_pos_30d: i32,
+    /// Negative detections in the 30 days ending at the alert epoch.
+    pub n_neg_30d: i32,
+    /// JD the position first reached the detection threshold in any band,
+    /// forced photometry included. `jdstarthist` counts alert-level detections
+    /// only, so a position already varying below that threshold looks new.
+    pub first_activity_jd: Option<f64>,
+    /// JD of the latest such epoch, giving the span when paired with the first.
+    pub last_detection_jd: Option<f64>,
+    /// Forced epochs that reached the threshold, alongside `ndethist`.
+    pub n_forced_detections: i32,
+}
+
+impl DetectionHistory {
+    /// Widen the activity span to include `jd`.
+    fn span(&mut self, jd: f64) {
+        self.first_activity_jd = Some(self.first_activity_jd.map_or(jd, |j| j.min(jd)));
+        self.last_detection_jd = Some(self.last_detection_jd.map_or(jd, |j| j.max(jd)));
+    }
+
+    /// Summarise detection history from `(jd, is_negative)` points, with windows
+    /// measured back from the alert epoch `ref_jd`. Points after `ref_jd` (a
+    /// concurrently-ingested newer alert) and points whose sign is unknown (`None`,
+    /// e.g. pre-migration) are skipped, so `n_det == n_pos + n_neg`.
+    pub fn from_points<I>(points: I, ref_jd: f64) -> Self
+    where
+        I: IntoIterator<Item = (f64, Option<bool>)>,
+    {
+        let cutoff = ref_jd - 30.0;
+        let mut h = DetectionHistory::default();
+        for (jd, is_negative) in points {
+            if jd > ref_jd {
+                continue;
+            }
+            let is_negative = match is_negative {
+                Some(v) => v,
+                None => continue,
+            };
+            h.span(jd);
+            h.n_det += 1;
+            let recent = jd >= cutoff;
+            if is_negative {
+                h.n_neg += 1;
+                if recent {
+                    h.n_neg_30d += 1;
+                }
+                h.first_neg_jd = Some(h.first_neg_jd.map_or(jd, |j| j.min(jd)));
+                h.last_neg_jd = Some(h.last_neg_jd.map_or(jd, |j| j.max(jd)));
+            } else {
+                h.n_pos += 1;
+                if recent {
+                    h.n_pos_30d += 1;
+                }
+            }
+        }
+        h
     }
 }
 
@@ -186,6 +701,9 @@ impl ActivityMetrics {
 // #[skip_serializing_none]
 #[serdavro]
 #[derive(Debug, PartialEq, Clone, Deserialize, Serialize, Default, ToSchema)]
+/// Per-band light-curve fits, reached at `properties.photstats.<band>` -- so a
+/// decline rate is `properties.photstats.r.fading.rate`. Null for a band the
+/// object has no detections in.
 pub struct PerBandProperties {
     pub g: Option<BandProperties>,
     pub r: Option<BandProperties>,
@@ -210,6 +728,17 @@ pub struct AllBandsProperties {
     pub faintest_band: Band,
     pub first_jd: f64,
     pub last_jd: f64,
+    pub days_since_peak_g: Option<f32>, // last_jd - peak_jd_g
+    pub days_to_peak_g: Option<f32>,    // peak_jd_g - first_jd_g
+    pub peakmag_g: Option<f32>,         // brightest (lowest) g-band mag
+    pub maxmag_g: Option<f32>,          // faintest (highest) g-band mag
+    pub days_since_peak_r: Option<f32>,
+    pub days_to_peak_r: Option<f32>,
+    pub peakmag_r: Option<f32>,
+    pub maxmag_r: Option<f32>,
+    pub n_photometry_total: f32,
+    pub n_photometry_g: f32,
+    pub n_photometry_r: f32,
 }
 
 /// Performs weighted least squares fit for y = a*x + b (centered for numerical stability)
@@ -273,15 +802,14 @@ fn weighted_least_squares_centered(
         chi2 += (residual / sigma[i]).powi(2);
     }
 
-    let reduced_chi2 = if n > 2 {
-        chi2 / (n - 2) as f32
-    } else {
-        f32::NAN
-    };
+    let dof = n.saturating_sub(2);
+    let reduced_chi2 = (dof > 0).then(|| chi2 / dof as f32);
 
     Some(BandRateProperties {
         rate: a,
         rate_error: a_err,
+        chi2: Some(chi2),
+        dof: Some(dof as i32),
         red_chi2: reduced_chi2,
         nb_data: n as i32,
         dt: x[n - 1] - x[0],
@@ -295,6 +823,15 @@ pub fn prepare_photometry(photometry: &mut Vec<PhotometryMag>) {
 
     // remove duplicates (same time and band)
     photometry.dedup_by(|a, b| a.time == b.time && a.band == b.band);
+}
+
+pub const STATIONARY_MIN_FORCED_SNR: f64 = 5.0;
+
+pub fn is_stationary(times: impl IntoIterator<Item = f64>) -> bool {
+    let (first, last) = times
+        .into_iter()
+        .fold((f64::MAX, f64::MIN), |(lo, hi), t| (lo.min(t), hi.max(t)));
+    last - first > 0.01
 }
 
 // we want a function that takes a Vec of PhotometryMag and:
@@ -326,13 +863,24 @@ pub fn analyze_photometry(
                 faintest_band: Band::G,
                 first_jd: 0.0,
                 last_jd: 0.0,
+                days_since_peak_g: None,
+                days_to_peak_g: None,
+                peakmag_g: None,
+                maxmag_g: None,
+                days_since_peak_r: None,
+                days_to_peak_r: None,
+                peakmag_r: None,
+                maxmag_r: None,
+                n_photometry_total: 0.0,
+                n_photometry_g: 0.0,
+                n_photometry_r: 0.0,
             },
             false,
         );
     }
 
     // The empty case returned early above, so the slice is non-empty here.
-    let stationary = (sorted_photometry.last().unwrap().time - sorted_photometry[0].time) > 0.01;
+    let stationary = is_stationary(sorted_photometry.iter().map(|p| p.time));
 
     let mut global_peak_jd = sorted_photometry[0].time;
     let mut global_peak_mag = sorted_photometry[0].mag;
@@ -355,6 +903,15 @@ pub fn analyze_photometry(
             .push(mag);
     }
 
+    let mut g_peak_jd: Option<f64> = None;
+    let mut g_first_jd: Option<f64> = None;
+    let mut g_peakmag: Option<f32> = None;
+    let mut g_maxmag: Option<f32> = None;
+    let mut r_peak_jd: Option<f64> = None;
+    let mut r_first_jd: Option<f64> = None;
+    let mut r_peakmag: Option<f32> = None;
+    let mut r_maxmag: Option<f32> = None;
+
     // let mut results = HashMap::new();
     let mut results: PerBandProperties = PerBandProperties {
         g: None,
@@ -367,7 +924,7 @@ pub fn analyze_photometry(
         h: None,
         k: None,
     };
-    for (band, mags) in bands {
+    for (band, mags) in &bands {
         if mags.is_empty() {
             continue;
         }
@@ -407,92 +964,26 @@ pub fn analyze_photometry(
             global_faintest_band = band.clone();
         }
 
-        let mut rising_properties = None;
-        let mut fading_properties = None;
-
-        // before is from 0 to peak_index inclusive, after is from peak_index inclusive to the end
-        let before = &mags[0..=peak_index];
-        let after = &mags[peak_index..];
-
-        // if there isn't enough time separation between the first and last point, we cannot do a linear fit
-        // so we will just return empty arrays
-        if before.len() > 1 && before.last().unwrap().time - before.first().unwrap().time > 0.01 {
-            let mut before_time = Vec::new();
-            let mut before_mag = Vec::new();
-            let mut before_mag_err = Vec::new();
-            let mut min_mag = f32::INFINITY;
-            let mut min_mag_err = f32::INFINITY;
-            let mut max_mag = f32::NEG_INFINITY;
-            let mut max_mag_err = f32::NEG_INFINITY;
-
-            // get the min time for the before and after segments
-            let before_min_time = before[0].time;
-
-            for m in before {
-                before_time.push((m.time - before_min_time) as f32);
-                before_mag.push(m.mag);
-                before_mag_err.push(m.mag_err);
-                if m.mag < min_mag {
-                    min_mag = m.mag;
-                    min_mag_err = m.mag_err;
-                }
-                if m.mag > max_mag {
-                    max_mag = m.mag;
-                    max_mag_err = m.mag_err;
-                }
-            }
-            // if min_mag + min_mag_err >= max_mag - max_mag_err, then we cannot do a linear fit
-            // as the data is just within the noise
-            // so when that happens, empty the before arrays
-            if min_mag + min_mag_err >= max_mag - max_mag_err {
-                before_time.clear();
-                before_mag.clear();
-                before_mag_err.clear();
-            }
-
-            rising_properties =
-                weighted_least_squares_centered(&before_time, &before_mag, &before_mag_err);
-        }
-
-        // same for after
-        if after.len() > 1 && after.last().unwrap().time - after.first().unwrap().time > 0.01 {
-            let mut after_time = Vec::new();
-            let mut after_mag = Vec::new();
-            let mut after_mag_err = Vec::new();
-            let mut min_mag = f32::INFINITY;
-            let mut min_mag_err = f32::INFINITY;
-            let mut max_mag = f32::NEG_INFINITY;
-            let mut max_mag_err = f32::NEG_INFINITY;
-
-            let after_min_time = after[0].time;
-
-            for m in after {
-                after_time.push((m.time - after_min_time) as f32);
-                after_mag.push(m.mag);
-                after_mag_err.push(m.mag_err);
-                if m.mag < min_mag {
-                    min_mag = m.mag;
-                    min_mag_err = m.mag_err;
-                }
-                if m.mag > max_mag {
-                    max_mag = m.mag;
-                    max_mag_err = m.mag_err;
-                }
-            }
-            // if min_mag + min_mag_err >= max_mag - max_mag_err, then we cannot do a linear fit
-            // as the data is just within the noise
-            // so when that happens, empty the after arrays
-            if min_mag + min_mag_err >= max_mag - max_mag_err {
-                after_time.clear();
-                after_mag.clear();
-                after_mag_err.clear();
-            }
-
-            fading_properties =
-                weighted_least_squares_centered(&after_time, &after_mag, &after_mag_err);
-        }
-
         let dt = (mags.last().unwrap().time - mags.first().unwrap().time) as f32;
+        let (rising_properties, fading_properties) = fit_rising_and_fading(&mags);
+
+        // Anchored to the object's newest detection in any band, so every band
+        // covers the same interval and a colour comparison stays meaningful.
+        let cutoff = last_jd - RECENT_WINDOW_DAYS;
+        let window: Vec<&PhotometryMag> =
+            mags.iter().copied().filter(|m| m.time >= cutoff).collect();
+        let recent = brightest_index(&window).map(|peak| {
+            let (rising, fading) = fit_rising_and_fading(&window);
+            RecentProperties {
+                window_days: RECENT_WINDOW_DAYS as f32,
+                nb_data: window.len() as i32,
+                peak_jd: window[peak].time,
+                peak_mag: window[peak].mag,
+                rising,
+                fading,
+            }
+        });
+
         let band_properties = BandProperties {
             peak_jd,
             peak_mag,
@@ -500,10 +991,23 @@ pub fn analyze_photometry(
             dt,
             rising: rising_properties,
             fading: fading_properties,
+            recent,
         };
         match band {
-            Band::G => results.g = Some(band_properties),
-            Band::R => results.r = Some(band_properties),
+            Band::G => {
+                g_peak_jd = Some(peak_jd);
+                g_first_jd = Some(mags.first().unwrap().time);
+                g_peakmag = Some(peak_mag);
+                g_maxmag = Some(faintest_mag);
+                results.g = Some(band_properties);
+            }
+            Band::R => {
+                r_peak_jd = Some(peak_jd);
+                r_first_jd = Some(mags.first().unwrap().time);
+                r_peakmag = Some(peak_mag);
+                r_maxmag = Some(faintest_mag);
+                results.r = Some(band_properties);
+            }
             Band::I => results.i = Some(band_properties),
             Band::Z => results.z = Some(band_properties),
             Band::Y => results.y = Some(band_properties),
@@ -525,6 +1029,17 @@ pub fn analyze_photometry(
         faintest_band: global_faintest_band,
         first_jd,
         last_jd,
+        days_since_peak_g: g_peak_jd.map(|p| (last_jd - p) as f32),
+        days_to_peak_g: g_peak_jd.zip(g_first_jd).map(|(p, f)| (p - f) as f32),
+        peakmag_g: g_peakmag,
+        maxmag_g: g_maxmag,
+        days_since_peak_r: r_peak_jd.map(|p| (last_jd - p) as f32),
+        days_to_peak_r: r_peak_jd.zip(r_first_jd).map(|(p, f)| (p - f) as f32),
+        peakmag_r: r_peakmag,
+        maxmag_r: r_maxmag,
+        n_photometry_total: sorted_photometry.len() as f32,
+        n_photometry_g: bands.get(&Band::G).map_or(0, |v| v.len()) as f32,
+        n_photometry_r: bands.get(&Band::R).map_or(0, |v| v.len()) as f32,
     };
 
     (results, all_bands_properties, stationary)
@@ -532,7 +1047,242 @@ pub fn analyze_photometry(
 
 #[cfg(test)]
 mod tests {
+    use super::{is_stationary, EpisodeHistory, EPISODE_GAP_DAYS};
+
+    #[test]
+    fn test_is_stationary_needs_a_span_beyond_0_01_day() {
+        assert!(!is_stationary([]));
+        assert!(!is_stationary([2460000.5]));
+        assert!(!is_stationary([2460000.5, 2460000.505]));
+        assert!(is_stationary([2460000.5, 2460000.52]));
+        assert!(is_stationary([2460000.52, 2460000.5, 2460000.51]));
+    }
+
+    /// Positive detections at the given epochs, as `from_points` takes them.
+    fn pos(jds: &[f64]) -> Vec<(f64, Option<bool>)> {
+        jds.iter().map(|&jd| (jd, Some(false))).collect()
+    }
+
+    const REF: f64 = 3000.0;
+
+    /// A position with forced flux before the alert is not new, which is what
+    /// `jdstarthist` cannot say: it counts alert-level detections only.
+    #[test]
+    fn test_forced_epochs_predate_the_first_alert_detection() {
+        use super::summarise_detections;
+        let alerts = vec![(2500.0, Some(false))];
+        let forced = vec![2486.45, 2494.37];
+        let (d, _) = summarise_detections(alerts, forced, REF, EPISODE_GAP_DAYS);
+
+        assert_eq!(d.first_activity_jd, Some(2486.45));
+        assert_eq!(d.last_detection_jd, Some(2500.0));
+        assert_eq!(d.n_forced_detections, 2);
+        // The alert-level counts and episodes are untouched by forced epochs.
+        assert_eq!(d.n_det, 1);
+        assert_eq!(d.n_pos, 1);
+    }
+
+    /// Without forced photometry the span still covers the alert detections.
+    #[test]
+    fn test_span_falls_back_to_the_alert_detections() {
+        use super::summarise_detections;
+        let alerts = vec![(2500.0, Some(false)), (2400.0, Some(true))];
+        let (d, _) = summarise_detections(alerts, std::iter::empty(), REF, EPISODE_GAP_DAYS);
+
+        assert_eq!(d.first_activity_jd, Some(2400.0));
+        assert_eq!(d.last_detection_jd, Some(2500.0));
+        assert_eq!(d.n_forced_detections, 0);
+    }
+
+    /// Nothing after the alert epoch counts, forced epochs included, or a
+    /// concurrently-ingested newer alert would move the span.
+    #[test]
+    fn test_forced_epochs_after_the_alert_epoch_are_ignored() {
+        use super::summarise_detections;
+        let alerts = vec![(2900.0, Some(false))];
+        let forced = vec![REF + 50.0];
+        let (d, _) = summarise_detections(alerts, forced, REF, EPISODE_GAP_DAYS);
+
+        assert_eq!(d.n_forced_detections, 0);
+        assert_eq!(d.last_detection_jd, Some(2900.0));
+    }
+
+    /// The sign says which way the object is going, which is what a filter
+    /// cutting on a decline rate depends on.
+    #[test]
+    fn test_rate_is_signed_magnitudes_per_day() {
+        use super::{analyze_photometry, Band, PhotometryMag};
+        // One magnitude per day up to a peak, then one back down.
+        let mags: Vec<PhotometryMag> = [
+            (0.0, 20.0),
+            (1.0, 19.0),
+            (2.0, 18.0),
+            (3.0, 19.0),
+            (4.0, 20.0),
+        ]
+        .iter()
+        .map(|&(t, m)| PhotometryMag {
+            time: 2_461_000.0 + t,
+            mag: m,
+            mag_err: 0.05,
+            band: Band::R,
+        })
+        .collect();
+        let r = analyze_photometry(&mags).0.r.expect("r band");
+
+        let rising = r.rising.expect("a rising fit");
+        let fading = r.fading.expect("a fading fit");
+        assert!(
+            rising.rate < 0.0,
+            "rising rate {} is not negative",
+            rising.rate
+        );
+        assert!(
+            fading.rate > 0.0,
+            "fading rate {} is not positive",
+            fading.rate
+        );
+        // One magnitude per day either side, as constructed.
+        assert!((rising.rate + 1.0).abs() < 1e-3, "rising {}", rising.rate);
+        assert!((fading.rate - 1.0).abs() < 1e-3, "fading {}", fading.rate);
+    }
+
+    #[test]
+    fn test_one_pass_matches_summarising_separately() {
+        use super::{summarise_detections, DetectionHistory};
+        // Positives, a negative, and a point past the alert epoch.
+        let points = vec![
+            (100.0, Some(false)),
+            (101.0, Some(false)),
+            (500.0, Some(false)),
+            (505.0, Some(true)),
+            (REF + 10.0, Some(false)),
+            (300.0, None),
+        ];
+        let (detections, episodes) =
+            summarise_detections(points.clone(), std::iter::empty(), REF, EPISODE_GAP_DAYS);
+        assert_eq!(
+            detections,
+            DetectionHistory::from_points(points.clone(), REF)
+        );
+        assert_eq!(
+            episodes,
+            EpisodeHistory::from_points(points, REF, EPISODE_GAP_DAYS)
+        );
+    }
+
+    #[test]
+    fn test_one_run_of_detections_is_one_episode() {
+        let h = EpisodeHistory::from_points(pos(&[100.0, 101.0, 130.0]), REF, EPISODE_GAP_DAYS);
+        assert_eq!(h.n_episodes, 1);
+        assert_eq!(h.last_gap_days, None);
+        assert_eq!(h.first_episode_jd, Some(100.0));
+        assert_eq!(h.last_episode_jd, Some(100.0));
+    }
+
+    #[test]
+    fn test_a_long_quiet_interval_splits_episodes() {
+        // 100..101, then 500 -- a 399 day gap, far beyond the 30 day threshold.
+        let h = EpisodeHistory::from_points(pos(&[100.0, 101.0, 500.0]), REF, EPISODE_GAP_DAYS);
+        assert_eq!(h.n_episodes, 2);
+        assert_eq!(h.last_gap_days, Some(399.0));
+        assert_eq!(h.longest_quiet_days, Some(399.0));
+        assert_eq!(h.last_episode_jd, Some(500.0));
+    }
+
+    #[test]
+    fn test_lengthening_period_is_visible_in_successive_gaps() {
+        // Episodes at 100, 400, 900: gaps of 300 then 500.
+        let h = EpisodeHistory::from_points(pos(&[100.0, 400.0, 900.0]), REF, EPISODE_GAP_DAYS);
+        assert_eq!(h.n_episodes, 3);
+        assert_eq!(h.prev_gap_days, Some(300.0));
+        assert_eq!(h.last_gap_days, Some(500.0));
+        assert!(
+            h.last_gap_days > h.prev_gap_days,
+            "the signature the search wants"
+        );
+    }
+
+    #[test]
+    fn test_negative_detections_do_not_make_episodes() {
+        let mut pts = pos(&[100.0]);
+        pts.push((600.0, Some(true)));
+        pts.push((1200.0, Some(true)));
+        let h = EpisodeHistory::from_points(pts, REF, EPISODE_GAP_DAYS);
+        assert_eq!(h.n_episodes, 1, "only the positive detection counts");
+    }
+
+    #[test]
+    fn test_points_after_the_alert_are_ignored() {
+        let h = EpisodeHistory::from_points(pos(&[100.0, REF + 500.0]), REF, EPISODE_GAP_DAYS);
+        assert_eq!(h.n_episodes, 1);
+    }
+
+    #[test]
+    fn test_unordered_input_gives_the_same_answer() {
+        let ordered =
+            EpisodeHistory::from_points(pos(&[100.0, 400.0, 900.0]), REF, EPISODE_GAP_DAYS);
+        let shuffled =
+            EpisodeHistory::from_points(pos(&[900.0, 100.0, 400.0]), REF, EPISODE_GAP_DAYS);
+        assert_eq!(ordered, shuffled);
+    }
+
+    #[test]
+    fn test_no_detections_reports_nothing_but_records_the_gap() {
+        let h = EpisodeHistory::from_points(pos(&[]), REF, EPISODE_GAP_DAYS);
+        assert_eq!(h.n_episodes, 0);
+        assert_eq!(h.first_episode_jd, None);
+        assert_eq!(h.gap_days, EPISODE_GAP_DAYS);
+    }
+
+    #[test]
+    fn test_the_gap_parameter_changes_the_grouping() {
+        // A 120 day separation is one episode at 180, two at 90.
+        let pts = pos(&[100.0, 220.0]);
+        assert_eq!(
+            EpisodeHistory::from_points(pts.clone(), REF, 180.0).n_episodes,
+            1
+        );
+        assert_eq!(EpisodeHistory::from_points(pts, REF, 90.0).n_episodes, 2);
+    }
+
     use super::*;
+
+    // pos/neg counts, first/last-neg epochs, and the 30-day windows measured back
+    // from the alert epoch. A point after the epoch (concurrent newer alert) and a
+    // sign-unknown point (`None`) are both excluded, so n_det == n_pos + n_neg.
+    #[test]
+    fn test_detection_history_counts_and_windows() {
+        let ref_jd = 2_461_300.0;
+        let points = vec![
+            (ref_jd - 200.0, Some(false)), // old positive
+            (ref_jd - 100.0, Some(true)),  // old negative (first neg)
+            (ref_jd - 20.0, Some(false)),  // recent positive
+            (ref_jd - 10.0, Some(true)),   // recent negative
+            (ref_jd - 2.0, Some(true)),    // recent negative (last neg)
+            (ref_jd - 5.0, None),          // unknown sign -> skipped
+            (ref_jd + 5.0, Some(true)),    // after epoch -> skipped
+        ];
+
+        let h = DetectionHistory::from_points(points, ref_jd);
+        assert_eq!(h.n_det, 5);
+        assert_eq!(h.n_pos, 2);
+        assert_eq!(h.n_neg, 3);
+        assert_eq!(h.first_neg_jd, Some(ref_jd - 100.0));
+        assert_eq!(h.last_neg_jd, Some(ref_jd - 2.0));
+        assert_eq!(h.n_pos_30d, 1);
+        assert_eq!(h.n_neg_30d, 2);
+    }
+
+    #[test]
+    fn test_detection_history_empty_when_never_negative() {
+        let ref_jd = 2_461_300.0;
+        let h = DetectionHistory::from_points(vec![(ref_jd - 3.0, Some(false))], ref_jd);
+        assert_eq!(h.n_pos, 1);
+        assert_eq!(h.n_neg, 0);
+        assert!(h.first_neg_jd.is_none());
+        assert!(h.last_neg_jd.is_none());
+    }
 
     #[test]
     fn test_flux2mag() {
@@ -575,7 +1325,7 @@ mod tests {
         let result = weighted_least_squares_centered(&x, &y, &sigma).unwrap();
         assert!((result.rate - 2.04).abs() < 1e-2);
         assert!((result.rate_error - 0.031623).abs() < 1e-6);
-        assert!((result.red_chi2 - 0.400001).abs() < 1e-6);
+        assert!((result.red_chi2.unwrap() - 0.400001).abs() < 1e-6);
         assert_eq!(result.nb_data, 5);
         assert!((result.dt - 4.0).abs() < 1e-5);
 
@@ -630,7 +1380,7 @@ mod tests {
         let y = vec![2.0, 8.0, 1.0, 7.0, 3.0];
         let sigma = vec![0.1, 0.1, 0.1, 0.1, 0.1];
         let result = weighted_least_squares_centered(&x, &y, &sigma).unwrap();
-        assert!((result.red_chi2 - 1290.0).abs() < 1e-1);
+        assert!((result.red_chi2.unwrap() - 1290.0).abs() < 1e-1);
 
         // Test case 9: exactly two data points
         let x = vec![1.0, 2.0];
@@ -639,7 +1389,11 @@ mod tests {
         let result = weighted_least_squares_centered(&x, &y, &sigma).unwrap();
         assert!((result.rate - 2.0).abs() < 1e-6);
         assert!((result.rate_error - 0.141421).abs() < 1e-6);
-        assert!(result.red_chi2.is_nan()); // for 2 data points, red_chi2 is NaN
+        // Two points define the line exactly: chi2 is 0 with no degrees of
+        // freedom left, so there is no reduced chi2 to report.
+        assert!(result.red_chi2.is_none());
+        assert_eq!(result.dof, Some(0));
+        assert!(result.chi2.expect("chi2").abs() < 1e-9);
         assert_eq!(result.nb_data, 2);
         assert!((result.dt - 1.0).abs() < 1e-6);
     }
@@ -770,7 +1524,7 @@ mod tests {
         let rising_nb_data = rising_stats.nb_data;
         let rising_dt = rising_stats.dt;
         assert!((rising_rate + 1.0).abs() < 1e-6); // should be -1 mag/day
-        assert!(rising_red_chi2.is_nan()); // for 2 data points, red_chi2 is NaN
+        assert!(rising_red_chi2.is_none()); // 2 points: exact line, no degrees of freedom
         assert_eq!(rising_nb_data, 2);
         assert!((rising_dt - 1.0).abs() < 1e-6);
 
@@ -821,7 +1575,7 @@ mod tests {
         let fading_nb_data = fading_stats.nb_data;
         let fading_dt = fading_stats.dt;
         assert!((fading_rate - 1.0).abs() < 1e-6); // should be 1 mag/day
-        assert!(red_chi2.is_nan()); // for 2 data points, red_chi2 is NaN
+        assert!(red_chi2.is_none()); // 2 points: exact line, no degrees of freedom
         assert_eq!(fading_nb_data, 2);
         assert!((fading_dt - 1.0).abs() < 1e-6);
         // the all band properties should also just match the one data point we have
@@ -877,7 +1631,7 @@ mod tests {
         let rising_nb_data = rising_stats.nb_data;
         let rising_dt = rising_stats.dt;
         assert!((rising_rate + 1.0).abs() < 1e-6); // should be -1 mag/day
-        assert!(rising_red_chi2.is_nan()); // for 2 data points, red_chi2 is NaN
+        assert!(rising_red_chi2.is_none()); // 2 points: exact line, no degrees of freedom
         assert_eq!(rising_nb_data, 2);
         assert!((rising_dt - 1.0).abs() < 1e-6);
 
@@ -887,7 +1641,7 @@ mod tests {
         let fading_nb_data = fading_stats.nb_data;
         let fading_dt = fading_stats.dt;
         assert!((fading_rate - 1.0).abs() < 1e-6); // should be 1 mag/day
-        assert!(fading_red_chi2.is_nan()); // for 2 data points, red_chi2 is NaN
+        assert!(fading_red_chi2.is_none()); // 2 points: exact line, no degrees of freedom
         assert_eq!(fading_nb_data, 2);
         assert!((fading_dt - 1.0).abs() < 1e-6);
 
@@ -963,7 +1717,7 @@ mod tests {
         let rising_nb_data = rising_stats.nb_data;
         let rising_dt = rising_stats.dt;
         assert!((rising_rate + 1.0).abs() < 1e-6); // should be -1 mag/day
-        assert!(rising_red_chi2.abs() < 1e-6); // perfect fit
+        assert!(rising_red_chi2.unwrap().abs() < 1e-6); // perfect fit
         assert_eq!(rising_nb_data, 3);
         assert!((rising_dt - 2.0).abs() < 1e-6);
 
@@ -988,7 +1742,7 @@ mod tests {
         let fading_nb_data = fading_stats.nb_data;
         let fading_dt = fading_stats.dt;
         assert!((fading_rate - 1.0).abs() < 1e-6); // should be 1 mag/day
-        assert!(fading_red_chi2.is_nan()); // for 2 data points, red_chi2 is NaN
+        assert!(fading_red_chi2.is_none()); // 2 points: exact line, no degrees of freedom
         assert_eq!(fading_nb_data, 2);
         assert!((fading_dt - 1.0).abs() < 1e-6);
 
@@ -1046,6 +1800,152 @@ mod tests {
         let rising_dt = rising_stats.dt;
         assert_eq!(rising_nb_data, 2);
         assert!((rising_dt - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_per_band_properties_both_bands() {
+        let mut data = vec![
+            PhotometryMag {
+                time: 2459000.5,
+                mag: 20.5,
+                mag_err: 0.1,
+                band: Band::G,
+            },
+            PhotometryMag {
+                time: 2459001.5,
+                mag: 18.0,
+                mag_err: 0.1,
+                band: Band::G,
+            }, // g peak
+            PhotometryMag {
+                time: 2459002.5,
+                mag: 19.5,
+                mag_err: 0.1,
+                band: Band::G,
+            },
+            PhotometryMag {
+                time: 2459001.0,
+                mag: 17.5,
+                mag_err: 0.1,
+                band: Band::R,
+            }, // r peak
+            PhotometryMag {
+                time: 2459003.5,
+                mag: 21.0,
+                mag_err: 0.1,
+                band: Band::R,
+            },
+        ];
+        prepare_photometry(&mut data);
+        let (_, props, _) = analyze_photometry(&data);
+
+        let last_jd = 2459003.5_f64;
+
+        assert!((props.peakmag_g.unwrap() - 18.0).abs() < 1e-5);
+        assert!((props.maxmag_g.unwrap() - 20.5).abs() < 1e-5);
+        assert!((props.days_to_peak_g.unwrap() - 1.0).abs() < 1e-4); // 2459001.5 - 2459000.5
+        assert!((props.days_since_peak_g.unwrap() - (last_jd - 2459001.5) as f32).abs() < 1e-4);
+
+        assert!((props.peakmag_r.unwrap() - 17.5).abs() < 1e-5);
+        assert!((props.maxmag_r.unwrap() - 21.0).abs() < 1e-5);
+        assert!((props.days_to_peak_r.unwrap() - 0.0).abs() < 1e-4); // peak == first r obs
+        assert!((props.days_since_peak_r.unwrap() - (last_jd - 2459001.0) as f32).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_per_band_properties_r_only() {
+        let mut data = vec![
+            PhotometryMag {
+                time: 2459000.5,
+                mag: 20.0,
+                mag_err: 0.1,
+                band: Band::R,
+            },
+            PhotometryMag {
+                time: 2459002.5,
+                mag: 18.5,
+                mag_err: 0.1,
+                band: Band::R,
+            },
+            PhotometryMag {
+                time: 2459004.5,
+                mag: 19.5,
+                mag_err: 0.1,
+                band: Band::R,
+            },
+        ];
+        prepare_photometry(&mut data);
+        let (_, props, _) = analyze_photometry(&data);
+
+        assert!(props.peakmag_g.is_none());
+        assert!(props.maxmag_g.is_none());
+        assert!(props.days_to_peak_g.is_none());
+        assert!(props.days_since_peak_g.is_none());
+
+        assert!((props.peakmag_r.unwrap() - 18.5).abs() < 1e-5);
+        assert!((props.maxmag_r.unwrap() - 20.0).abs() < 1e-5);
+        assert!((props.days_to_peak_r.unwrap() - 2.0).abs() < 1e-4);
+        assert!((props.days_since_peak_r.unwrap() - 2.0).abs() < 1e-4); // last_jd - peak = 4.5 - 2.5 = 2.0
+    }
+
+    #[test]
+    fn test_per_band_properties_g_only() {
+        let mut data = vec![
+            PhotometryMag {
+                time: 2459000.5,
+                mag: 21.0,
+                mag_err: 0.1,
+                band: Band::G,
+            },
+            PhotometryMag {
+                time: 2459001.5,
+                mag: 19.0,
+                mag_err: 0.1,
+                band: Band::G,
+            }, // peak
+        ];
+        prepare_photometry(&mut data);
+        let (_, props, _) = analyze_photometry(&data);
+
+        assert!(props.peakmag_r.is_none());
+        assert!(props.maxmag_r.is_none());
+        assert!(props.days_to_peak_r.is_none());
+        assert!(props.days_since_peak_r.is_none());
+
+        assert!((props.peakmag_g.unwrap() - 19.0).abs() < 1e-5);
+        assert!((props.maxmag_g.unwrap() - 21.0).abs() < 1e-5);
+        assert!((props.days_to_peak_g.unwrap() - 1.0).abs() < 1e-4);
+        assert!((props.days_since_peak_g.unwrap() - 0.0).abs() < 1e-4); // peak == last obs
+    }
+
+    #[test]
+    fn test_per_band_properties_single_obs_per_band() {
+        let mut data = vec![
+            PhotometryMag {
+                time: 2459000.5,
+                mag: 19.0,
+                mag_err: 0.1,
+                band: Band::G,
+            },
+            PhotometryMag {
+                time: 2459000.5,
+                mag: 18.5,
+                mag_err: 0.1,
+                band: Band::R,
+            },
+        ];
+        prepare_photometry(&mut data);
+        let (_, props, _) = analyze_photometry(&data);
+
+        assert!((props.days_to_peak_g.unwrap() - 0.0).abs() < 1e-4);
+        assert!((props.days_since_peak_g.unwrap() - 0.0).abs() < 1e-4);
+        assert!((props.days_to_peak_r.unwrap() - 0.0).abs() < 1e-4);
+        assert!((props.days_since_peak_r.unwrap() - 0.0).abs() < 1e-4);
+        assert!((props.peakmag_g.unwrap() - 19.0).abs() < 1e-5);
+        assert!((props.peakmag_r.unwrap() - 18.5).abs() < 1e-5);
+        // single obs: peakmag == maxmag
+        assert!((props.maxmag_g.unwrap() - 19.0).abs() < 1e-5);
+        assert!((props.maxmag_r.unwrap() - 18.5).abs() < 1e-5);
     }
 }
 
@@ -1161,5 +2061,491 @@ mod activity_tests {
     fn test_missing_magnitudes_yield_no_measurement() {
         let a = ActivityMetrics::from_magnitudes(Some(18.0), None);
         assert!(a.aperture_excess.is_none());
+    }
+}
+
+#[cfg(test)]
+mod goodness_of_fit_tests {
+    use super::*;
+
+    fn fit(x: &[f32], y: &[f32], s: &[f32]) -> BandRateProperties {
+        weighted_least_squares_centered(x, y, s).expect("fit")
+    }
+
+    // Two points define a line exactly, leaving no degrees of freedom.
+    /// Alerts enriched before chi2 and dof were reported have neither field.
+    /// They must still read back, or every query touching one fails.
+    #[test]
+    fn test_a_fit_written_before_chi2_existed_still_deserializes() {
+        // Copied from a production alert (ZTF25acjmhji, r.fading): `red_chi2`
+        // is present and null, `chi2` and `dof` are absent entirely.
+        let legacy = mongodb::bson::doc! {
+            "rate": 0.360_560_804_605_484,
+            "rate_error": 0.085_027_076_303_958_89,
+            "red_chi2": mongodb::bson::Bson::Null,
+            "nb_data": 2,
+            "dt": 0.977_847_218_513_488_8,
+        };
+        let fit: BandRateProperties =
+            mongodb::bson::from_document(legacy).expect("a pre-chi2 fit must still read");
+
+        assert!(fit.chi2.is_none());
+        assert!(fit.dof.is_none());
+        assert!(fit.red_chi2.is_none());
+        assert_eq!(fit.nb_data, 2);
+    }
+
+    /// A fit written since carries both, and zero stays distinguishable from
+    /// absent -- a two-point fit really does have chi2 zero.
+    #[test]
+    fn test_a_two_point_fit_reports_zero_rather_than_absent() {
+        let fit =
+            weighted_least_squares_centered(&[0.0, 1.0], &[20.0, 19.0], &[0.1, 0.1]).expect("fit");
+        assert_eq!(fit.dof, Some(0));
+        assert!(fit.chi2.expect("chi2 is reported").abs() < 1e-9);
+        assert!(fit.red_chi2.is_none());
+    }
+
+    #[test]
+    fn test_two_point_fit_has_no_reduced_chi2_but_a_real_chi2() {
+        let r = fit(&[0.0, 1.0], &[20.0, 19.0], &[0.1, 0.1]);
+        assert_eq!(r.dof, Some(0));
+        assert_eq!(r.nb_data, 2);
+        let chi2 = r.chi2.expect("chi2");
+        assert!(chi2.abs() < 1e-9, "exact fit, got chi2 = {}", chi2);
+        assert!(r.red_chi2.is_none());
+    }
+
+    // chi2 is defined at every point count, so a sparse band is still cuttable.
+    #[test]
+    fn test_chi2_is_defined_for_every_fit_including_two_point() {
+        for n in 2..6 {
+            let x: Vec<f32> = (0..n).map(|i| i as f32).collect();
+            let y: Vec<f32> = (0..n).map(|i| 20.0 - 0.1 * i as f32).collect();
+            let s = vec![0.1_f32; n];
+            let r = fit(&x, &y, &s);
+            assert!(
+                r.chi2.is_some_and(|c| c.is_finite()),
+                "chi2 must be defined at n = {n}"
+            );
+            assert_eq!(r.dof, Some((n as i32) - 2));
+            assert_eq!(r.red_chi2.is_some(), n > 2);
+        }
+    }
+
+    #[test]
+    fn test_reduced_chi2_is_chi2_over_dof() {
+        // Three points not on a line, so the fit leaves a residual.
+        let r = fit(&[0.0, 1.0, 2.0], &[20.0, 19.0, 19.5], &[0.1, 0.1, 0.1]);
+        assert_eq!(r.dof, Some(1));
+        let expected = r.chi2.expect("chi2") / r.dof.expect("dof") as f32;
+        assert!((r.red_chi2.unwrap() - expected).abs() < 1e-6);
+    }
+
+    // A range cut on red_chi2 alone excludes a two-point band; chi2/dof does not.
+    #[test]
+    fn test_a_range_cut_on_reduced_chi2_alone_excludes_two_point_bands() {
+        let sparse = fit(&[0.0, 1.0], &[20.0, 19.0], &[0.1, 0.1]);
+        let clean = fit(&[0.0, 1.0, 2.0], &[20.0, 19.9, 19.8], &[0.1, 0.1, 0.1]);
+
+        let passes_range_cut = |b: &BandRateProperties| b.red_chi2.is_some_and(|c| c <= 2.0);
+        assert!(passes_range_cut(&clean));
+        assert!(!passes_range_cut(&sparse), "this is the trap");
+
+        // With chi2/dof the same intent is expressible without dropping it.
+        let passes_with_dof = |b: &BandRateProperties| match (b.chi2, b.dof) {
+            (Some(chi2), Some(dof)) => dof == 0 || chi2 <= 2.0 * dof as f32,
+            _ => false,
+        };
+        assert!(passes_with_dof(&clean));
+        assert!(passes_with_dof(&sparse));
+    }
+}
+
+#[cfg(test)]
+mod recent_window_tests {
+    use super::*;
+
+    fn point(time: f64, mag: f32, band: Band) -> PhotometryMag {
+        PhotometryMag {
+            time,
+            mag,
+            mag_err: 0.05,
+            band,
+        }
+    }
+
+    /// Years of flat history, then a genuine rise in the last few days. This is
+    /// the case the unbounded fit gets wrong: it averages the real rise into a
+    /// baseline stretching back years and reports a rate near zero.
+    fn old_history_then_a_rise() -> Vec<PhotometryMag> {
+        let mut lc = Vec::new();
+        let mut t = 2_459_000.0;
+        while t < 2_459_000.0 + 1200.0 {
+            lc.push(point(t, 20.0, Band::G));
+            t += 20.0;
+        }
+        let last = 2_459_000.0 + 1200.0;
+        for (i, mag) in [19.5_f32, 19.0, 18.4, 17.9].iter().enumerate() {
+            lc.push(point(last + 2.0 * i as f64, *mag, Band::G));
+        }
+        lc.sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap());
+        lc
+    }
+
+    #[test]
+    fn test_recent_rate_is_steeper_than_the_whole_history_rate() {
+        let (props, _, _) = analyze_photometry(&old_history_then_a_rise());
+        let g = props.g.expect("g band");
+
+        let whole = g.rising.expect("unbounded rising fit").rate;
+        let recent = g
+            .recent
+            .as_ref()
+            .expect("recent block")
+            .rising
+            .as_ref()
+            .expect("recent rising fit")
+            .rate;
+
+        // Magnitudes fall as the object brightens, so a rise is a negative rate.
+        assert!(
+            recent < whole,
+            "recent rate {recent} should be steeper than whole-history {whole}"
+        );
+        assert!(
+            recent.abs() > 10.0 * whole.abs(),
+            "the whole-history rate is diluted by the baseline: {whole} vs {recent}"
+        );
+    }
+
+    #[test]
+    fn test_recent_window_only_covers_the_configured_span() {
+        let (props, _, _) = analyze_photometry(&old_history_then_a_rise());
+        let recent = props.g.unwrap().recent.expect("recent block");
+        assert_eq!(recent.window_days, RECENT_WINDOW_DAYS as f32);
+        // 4 points in the burst plus the couple of baseline points inside 30 d.
+        assert!(
+            recent.nb_data >= 4 && recent.nb_data <= 8,
+            "got {}",
+            recent.nb_data
+        );
+    }
+
+    /// Absence has to mean "no recent data", distinct from "recent data that
+    /// cannot be fit" -- which is present with null fits.
+    #[test]
+    fn test_single_recent_point_reports_the_block_without_a_fit() {
+        let lc = vec![
+            point(2_459_000.0, 20.0, Band::G),
+            point(2_459_400.0, 19.0, Band::G),
+        ];
+        let (props, _, _) = analyze_photometry(&lc);
+        let recent = props
+            .g
+            .unwrap()
+            .recent
+            .expect("window holds the last point");
+        assert_eq!(recent.nb_data, 1);
+        assert!(recent.rising.is_none());
+        assert!(recent.fading.is_none());
+    }
+
+    /// A band with nothing in the window gets no block at all, rather than a
+    /// block full of nulls that reads as a failed fit.
+    #[test]
+    fn test_band_with_no_recent_detection_has_no_block() {
+        let lc = vec![
+            point(2_459_000.0, 20.0, Band::R),
+            point(2_459_002.0, 19.5, Band::R),
+            point(2_459_400.0, 19.0, Band::G),
+        ];
+        let (props, _, _) = analyze_photometry(&lc);
+        assert!(
+            props.r.unwrap().recent.is_none(),
+            "r band last seen 400 d ago, well outside the window"
+        );
+        assert!(props.g.unwrap().recent.is_some());
+    }
+
+    /// The window is anchored to the newest detection in any band, so bands
+    /// stay directly comparable.
+    #[test]
+    fn test_window_is_shared_across_bands() {
+        let lc = vec![
+            point(2_459_400.0, 19.0, Band::G),
+            point(2_459_405.0, 18.5, Band::G),
+            point(2_459_402.0, 19.2, Band::R),
+            point(2_459_404.0, 18.9, Band::R),
+        ];
+        let (props, _, _) = analyze_photometry(&lc);
+        let g = props.g.unwrap().recent.expect("g recent");
+        let r = props.r.unwrap().recent.expect("r recent");
+        assert_eq!(g.window_days, r.window_days);
+        assert_eq!(g.nb_data, 2);
+        assert_eq!(r.nb_data, 2);
+    }
+}
+
+#[cfg(test)]
+mod recent_avro_tests {
+    use super::*;
+    use crate::utils::derive_avro_schema::SerdavroWriter;
+    use apache_avro::{AvroSchema, Writer};
+
+    /// These reach Babamul through `append_serdavro`, which resolves every field
+    /// the schema declares by name, so a nested optional that serializes as
+    /// missing rather than null fails there while BSON stays happy. Cover both
+    /// a populated and an absent `recent` block.
+    #[test]
+    fn test_recent_block_serializes_through_the_babamul_path() {
+        let schema = PerBandProperties::get_schema();
+        let band = weighted_least_squares_centered(
+            &[0.0, 1.0, 2.0],
+            &[20.0, 19.5, 19.0],
+            &[0.05, 0.05, 0.05],
+        );
+        for (label, recent) in [
+            ("recent absent", None),
+            (
+                "recent populated",
+                Some(RecentProperties {
+                    window_days: RECENT_WINDOW_DAYS as f32,
+                    nb_data: 3,
+                    peak_jd: 2_460_000.0,
+                    peak_mag: 19.0,
+                    rising: band.clone(),
+                    fading: None,
+                }),
+            ),
+        ] {
+            let props = PerBandProperties {
+                g: Some(BandProperties {
+                    peak_jd: 2_460_000.0,
+                    peak_mag: 19.0,
+                    peak_mag_err: 0.05,
+                    dt: 2.0,
+                    rising: band.clone(),
+                    fading: None,
+                    recent,
+                }),
+                ..Default::default()
+            };
+            let mut writer = Writer::new(&schema, Vec::new());
+            writer
+                .append_serdavro(&props)
+                .unwrap_or_else(|e| panic!("{label} failed to serialize to avro: {e}"));
+        }
+    }
+}
+
+#[cfg(test)]
+mod rate_avro_tests {
+    use super::*;
+    use crate::utils::derive_avro_schema::SerdavroWriter;
+    use apache_avro::{AvroSchema, Writer};
+
+    fn fit(x: &[f32], y: &[f32], s: &[f32]) -> BandRateProperties {
+        weighted_least_squares_centered(x, y, s).expect("fit")
+    }
+
+    // `append_serdavro` resolves every declared field by name, so a `None` that
+    // serializes as missing rather than null fails there while BSON accepts it.
+    #[test]
+    fn test_band_rate_properties_serialize_with_and_without_reduced_chi2() {
+        let schema = PerBandProperties::get_schema();
+        for (label, band) in [
+            (
+                "three points, red_chi2 defined",
+                fit(&[0.0, 1.0, 2.0], &[20.0, 19.0, 19.5], &[0.1; 3]),
+            ),
+            (
+                "two points, red_chi2 null",
+                fit(&[0.0, 1.0], &[20.0, 19.0], &[0.1; 2]),
+            ),
+        ] {
+            let props = PerBandProperties {
+                g: Some(BandProperties {
+                    peak_jd: 2_460_000.0,
+                    peak_mag: 19.0,
+                    peak_mag_err: 0.1,
+                    dt: 1.0,
+                    rising: Some(band.clone()),
+                    fading: Some(band),
+                    recent: None,
+                }),
+                ..Default::default()
+            };
+            let mut writer = Writer::new(&schema, Vec::new());
+            writer
+                .append_serdavro(&props)
+                .unwrap_or_else(|e| panic!("{label} failed to serialize to avro: {e}"));
+        }
+    }
+}
+
+#[cfg(test)]
+mod outburst_tests {
+    use super::*;
+    use crate::utils::derive_avro_schema::SerdavroWriter;
+    use apache_avro::{AvroSchema, Writer};
+
+    fn steady(jd: f64, mag: f64, band: u8) -> (f64, Point) {
+        (
+            jd,
+            Point {
+                rh: 2.5,
+                delta: 1.6,
+                phase: 12.0,
+                mag,
+                mag_err: 0.04,
+                band,
+            },
+        )
+    }
+
+    fn test_point(mag: f64, band: u8) -> Point {
+        Point {
+            rh: 2.5,
+            delta: 1.6,
+            phase: 12.0,
+            mag,
+            mag_err: 0.04,
+            band,
+        }
+    }
+
+    #[test]
+    fn test_windows_narrow_to_the_points_they_contain() {
+        let now = 2_460_000.0;
+        // Brighter only in the last few days, so the short window sees a signal
+        // the long one dilutes.
+        let history = [
+            steady(now - 25.0, 19.0, 1),
+            steady(now - 20.0, 19.0, 1),
+            steady(now - 3.0, 18.0, 1),
+        ];
+        let outburst =
+            Outburst::from_history(&history, test_point(18.0, 1), now, None).expect("outburst");
+
+        assert_eq!(outburst.d7, Some(0.0));
+        assert_eq!(outburst.d14, Some(0.0));
+        assert!(
+            outburst.d30.expect("d30") > 0.0,
+            "the wider window reaches the fainter history"
+        );
+        assert_eq!(outburst.points.len(), 3);
+    }
+
+    #[test]
+    fn test_history_outside_every_window_still_yields_points() {
+        let now = 2_460_000.0;
+        // The caller cuts history to 30 days, so this cannot happen in
+        // enrichment; it pins the behaviour if a caller ever passes more.
+        let history = [steady(now - 90.0, 19.0, 1)];
+        let outburst =
+            Outburst::from_history(&history, test_point(18.0, 1), now, None).expect("outburst");
+        assert!(outburst.d30.is_none());
+        assert_eq!(outburst.points.len(), 1);
+    }
+
+    #[test]
+    fn test_no_history_is_no_outburst() {
+        assert!(Outburst::from_history(&[], test_point(18.0, 1), 2_460_000.0, None).is_none());
+    }
+
+    /// Only the test point's own band contributes to `points`, which is what
+    /// makes each value independent of the window.
+    #[test]
+    fn test_points_hold_only_the_test_band() {
+        let now = 2_460_000.0;
+        let history = [steady(now - 1.0, 19.0, 2), steady(now - 2.0, 19.0, 1)];
+        let outburst =
+            Outburst::from_history(&history, test_point(18.0, 1), now, None).expect("outburst");
+        assert_eq!(outburst.points.len(), 1);
+        assert_eq!(outburst.points[0].jd, now - 2.0);
+    }
+
+    /// A fitted slope must actually reach the statistic. The geometry scaling
+    /// runs through the phase function, so a curve fitted far from the
+    /// population default has to give a different answer than the default does.
+    #[test]
+    fn test_a_fitted_slope_is_used_rather_than_the_default() {
+        let now = 2_460_000.0;
+        // Phase angles far apart, so the slope has something to act on.
+        let history = [(
+            now - 5.0,
+            Point {
+                rh: 2.5,
+                delta: 1.6,
+                phase: 3.0,
+                mag: 19.0,
+                mag_err: 0.04,
+                band: 1,
+            },
+        )];
+        let test = Point {
+            rh: 2.5,
+            delta: 1.6,
+            phase: 25.0,
+            mag: 19.0,
+            mag_err: 0.04,
+            band: 1,
+        };
+
+        let curve = PhaseCurve {
+            h: 15.0,
+            g12: 0.0,
+            scatter: 0.05,
+            n: 100,
+        };
+        let fitted = Outburst::from_history(&history, test, now, Some(&curve))
+            .expect("fitted")
+            .d7
+            .expect("d7");
+        let defaulted = Outburst::from_history(&history, test, now, None)
+            .expect("defaulted")
+            .d7
+            .expect("d7");
+
+        assert!(
+            (fitted - defaulted).abs() > 1e-3,
+            "g12 = {} gave the same answer as the default {DEFAULT_G12} ({fitted} vs {defaulted})",
+            curve.g12
+        );
+    }
+
+    /// `append_serdavro` resolves every declared field by name, so a nested
+    /// optional that serializes as missing rather than null fails on the Babamul
+    /// path while BSON accepts it. Cover both an absent and a populated block.
+    #[test]
+    fn test_outburst_serializes_through_the_babamul_path() {
+        let schema = ActivityMetrics::get_schema();
+        for (label, outburst) in [
+            ("outburst absent", None),
+            (
+                "outburst populated",
+                Some(Outburst {
+                    d7: Some(1.5),
+                    d14: None,
+                    d30: Some(0.9),
+                    points: vec![OutburstPoint {
+                        jd: 2_460_000.0,
+                        sigma: 1.5,
+                    }],
+                    scatter: Some(0.08),
+                    baseline: Some(4.2),
+                }),
+            ),
+        ] {
+            let metrics = ActivityMetrics {
+                aperture_excess: Some(0.1),
+                outburst,
+            };
+            let mut writer = Writer::new(&schema, Vec::new());
+            writer
+                .append_serdavro(&metrics)
+                .unwrap_or_else(|e| panic!("{label} failed to serialize to avro: {e}"));
+        }
     }
 }

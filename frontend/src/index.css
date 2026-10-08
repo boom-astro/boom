@@ -33,6 +33,8 @@
   --color-chart-5: var(--chart-5);
   --color-ztf: var(--ztf);
   --color-lsst: var(--lsst);
+  --color-decam: var(--decam);
+  --color-winter: var(--winter);
   --color-sidebar: var(--sidebar);
   --color-sidebar-foreground: var(--sidebar-foreground);
   --color-sidebar-primary: var(--sidebar-primary);
@@ -79,6 +81,8 @@
   --sidebar-ring: oklch(0.705 0.015 286.067);
   --ztf: oklch(0.6 0.142 253.497);
   --lsst: oklch(0.745 0.14 166.64);
+  --decam: oklch(0.6 0.2 303.9);
+  --winter: oklch(0.62 0.2 16.439);
 }
 
 .dark {
@@ -115,6 +119,8 @@
   --sidebar-ring: oklch(0.552 0.016 285.938);
   --ztf: oklch(0.623 0.188 259.815);
   --lsst: oklch(0.773 0.153 163.223);
+  --decam: oklch(0.7 0.18 303.9);
+  --winter: oklch(0.7 0.18 16.439);
 }
 
 @layer base {

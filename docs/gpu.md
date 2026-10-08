@@ -55,7 +55,7 @@ GPU inference requires additional system software beyond the ONNX Runtime wheel.
 1. NVIDIA driver installed and working.
 2. CUDA major version compatible with your driver. We recommend 12.8 (which is what we tested at the time of writing), but check ONNX Runtime GPU wheel requirements for your version if you run into issues.
 3. cuDNN 9 for that CUDA major version.
-4. At least 10 GiB of free VRAM on each configured CUDA device for ZTF enrichment.
+4. At least 10 GiB of free VRAM on each configured CUDA device for ZTF enrichment. Note the default `batch_size: 1000` is sized for a ~12 GB card; the 10 GiB startup check is only a floor, so on cards with less than ~12 GB free set `workers.ztf.enrichment.batch_size: 750`.
 
 On Linux, BOOM validates this at scheduler startup for ZTF with GPU enabled and fails fast if any configured device has less than 10240 MiB free. You can check free VRAM with:
 

@@ -11,6 +11,7 @@ use crate::{
         cutouts::CutoutStorage,
         db::{mongify_vec, update_timeseries_op},
         enums::Survey,
+        host::{self, HostGalaxyAssociation, HostGalaxyConfig},
         lightcurves::{flux2mag, fluxerr2diffmaglim, Band, LSST_ZP_AB_NJY, SNT},
         o11y::logging::as_error,
         spatial::{xmatch, Coordinates},
@@ -120,6 +121,9 @@ pub struct DiaSource {
     /// Effective mid-visit time for this diaSource, expressed as Modified Julian Date, International Atomic Time.
     #[serde(rename = "midpointMjdTai")]
     pub midpoint_mjd_tai: f64,
+    /// Effective exposure time for this diaSource [s].
+    #[serde(rename = "exposureTime")]
+    pub exposure_time: Option<f32>,
     /// Right ascension coordinate of the center of this diaSource.
     pub ra: f64,
     /// Uncertainty of ra.
@@ -210,6 +214,11 @@ pub struct DiaSource {
     pub trail_ndata: Option<i32>,
     /// This flag is set if a trailed source extends onto or past edge pixels.
     pub trail_flag_edge: Option<bool>,
+    /// The trailed source fitting algorithm failed.
+    pub trail_flag: Option<bool>,
+    /// Integer key indicating which algorithm was used to measure trailed source. 1=SDSSShape, 2=HSMShape.
+    #[serde(rename = "trailAlgorithm")]
+    pub trail_algorithm: Option<i32>,
     /// Forced photometry flux for a point source model measured on the visit image centered at DiaSource position
     #[serde(rename = "scienceFlux")]
     pub science_flux: Option<f32>,
@@ -243,6 +252,9 @@ pub struct DiaSource {
     pub extendedness: Option<f32>,
     /// A measure of reliability, computed using information from the source and image characterization, as well as the information on the Telescope and Camera system (e.g., ghost maps, defect maps, etc.).
     pub reliability: Option<f32>,
+    /// Version of the reliability model.
+    #[serde(rename = "reliabilityVersion")]
+    pub reliability_version: Option<String>,
     /// Filter band this source was observed with.
     pub band: Option<Band>,
     /// Source well fit by a dipole.
@@ -934,7 +946,7 @@ pub struct SsSource {
     pub dia_distance_rank: Option<i32>,
 }
 
-/// Rubin Avro alert schema v11.0 (minus the `mpc_orbits` orbital-elements record, which we do
+/// Rubin Avro alert schema v11.1 (minus the `mpc_orbits` orbital-elements record, which we do
 /// not use here yet)
 #[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
 pub struct LsstRawAvroAlert {
@@ -1036,6 +1048,8 @@ pub struct LsstObject {
     /// Persists regardless of whether a ZTF cross-match is ever found.
     pub designation: Option<String>,
     pub cross_matches: Option<HashMap<String, Vec<Document>>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_galaxy: Option<HostGalaxyAssociation>,
     pub aliases: Option<LsstAliases>,
     pub coordinates: Coordinates,
     pub created_at: f64,
@@ -1070,6 +1084,7 @@ struct AlertAuxForUpdate {
 pub struct LsstAlertWorker {
     schema_registry: SchemaRegistry,
     xmatch_configs: Vec<conf::CatalogXmatchConfig>,
+    host_galaxy_config: HostGalaxyConfig,
     db: mongodb::Database,
     alert_collection: mongodb::Collection<LsstAlert>,
     alert_aux_collection: mongodb::Collection<LsstObject>,
@@ -1231,6 +1246,7 @@ impl LsstAlertWorker {
                 // we fallback to a full in-DB update, safe against concurrency and "self-healing", but less efficient
                 match &e {
                     AlertError::ConcurrentAuxUpdate(_) => debug!(error = %e),
+                    AlertError::InvalidTimeseriesInput(_) => warn!(error = %e),
                     _ => error!(error = %e),
                 }
                 self.update_aux_fallback(
@@ -1305,6 +1321,7 @@ impl AlertWorker for LsstAlertWorker {
                 Some(github_fallback_url.to_string()),
             ),
             xmatch_configs,
+            host_galaxy_config: config.host_galaxy.clone(),
             db,
             alert_collection,
             alert_aux_collection,
@@ -1318,10 +1335,6 @@ impl AlertWorker for LsstAlertWorker {
 
     fn survey() -> Survey {
         Survey::Lsst
-    }
-
-    fn input_queue_name(&self) -> String {
-        format!("{}_alerts_packets_queue", LsstAlertWorker::survey())
     }
 
     fn output_queue_name(&self) -> String {
@@ -1417,6 +1430,8 @@ impl AlertWorker for LsstAlertWorker {
                 &self.db,
             )
             .await?;
+            let host_galaxy =
+                host::associate_from_xmatches(ra, dec, &xmatches, &self.host_galaxy_config);
             let obj = LsstObject {
                 object_id: object_id.clone(),
                 prv_candidates,
@@ -1424,6 +1439,7 @@ impl AlertWorker for LsstAlertWorker {
                 is_sso: ss_object_id.is_some(),
                 designation: designation.clone(),
                 cross_matches: Some(xmatches),
+                host_galaxy,
                 aliases: survey_matches,
                 coordinates: Coordinates::new(ra, dec),
                 created_at: now,
@@ -1431,8 +1447,7 @@ impl AlertWorker for LsstAlertWorker {
             };
             let result = self.insert_aux(&obj, &self.alert_aux_collection).await;
             if let Err(AlertError::AlertAuxExists) = result {
-                // use the race-condition free fallback update
-                warn!(
+                debug!(
                     "Alert aux document for object_id {} already exists. Using fallback update.",
                     object_id
                 );
@@ -1848,6 +1863,37 @@ mod tests {
         assert_eq!(ss_source.helio_range, Some(2.5));
         assert_eq!(ss_source.topo_range, None);
         assert_eq!(ss_source.dia_distance_rank, Some(1));
+    }
+
+    #[test]
+    fn test_dia_source_v11_1_fields_from_avro_value() {
+        use apache_avro::{from_value, types::Value};
+
+        let value = Value::Record(vec![
+            ("diaSourceId".to_string(), Value::Long(123456789)),
+            (
+                "exposureTime".to_string(),
+                Value::Union(1, Box::new(Value::Float(30.0))),
+            ),
+            (
+                "trail_flag".to_string(),
+                Value::Union(1, Box::new(Value::Boolean(true))),
+            ),
+            (
+                "trailAlgorithm".to_string(),
+                Value::Union(1, Box::new(Value::Int(2))),
+            ),
+            (
+                "reliabilityVersion".to_string(),
+                Value::Union(1, Box::new(Value::String("0.3".to_string()))),
+            ),
+        ]);
+
+        let dia_source: DiaSource = from_value(&value).expect("failed to deserialize DiaSource");
+        assert_eq!(dia_source.exposure_time, Some(30.0));
+        assert_eq!(dia_source.trail_flag, Some(true));
+        assert_eq!(dia_source.trail_algorithm, Some(2));
+        assert_eq!(dia_source.reliability_version, Some("0.3".to_string()));
     }
 
     #[tokio::test]

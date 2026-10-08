@@ -41,6 +41,12 @@ pub async fn get_cutouts(
         }
     };
     let survey = path.into_inner();
+    if survey != Survey::Ztf && survey != Survey::Lsst {
+        return response::bad_request(&format!(
+            "Unsupported survey: {}. Supported surveys are: ztf, lsst",
+            survey
+        ));
+    }
 
     let cutout_storage = match cutout_storages.get(&survey) {
         Some(storage) => storage,

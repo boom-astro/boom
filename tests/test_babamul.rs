@@ -52,7 +52,7 @@ fn create_lspsc_cross_matches(
         "dec": 30.002,
         "distance_arcsec": distance,
         "score": score,
-        "magwhite": 18.3
+        "mag_white": 18.3
     })];
 
     // Add additional matches unless single_match is true
@@ -64,7 +64,7 @@ fn create_lspsc_cross_matches(
                 "dec": 30.05,
                 "distance_arcsec": 1.5,  // Beyond stellar threshold
                 "score": 0.75,           // Above hosted threshold
-                "magwhite": 19.1
+                "mag_white": 19.1
             }),
             json!({
                 "_id": 1003,
@@ -72,7 +72,7 @@ fn create_lspsc_cross_matches(
                 "dec": 30.10,
                 "distance_arcsec": 5.0,  // Far match
                 "score": 0.45,           // Below hosted threshold
-                "magwhite": 20.2
+                "mag_white": 20.2
             }),
         ]);
     }
@@ -179,6 +179,7 @@ fn create_mock_enriched_ztf_alert(candid: i64, object_id: &str, is_rock: bool) -
             rock: is_rock,
             star: false,
             near_brightstar: false,
+            hosted: Some(false),
             stationary: false,
             photstats: PerBandProperties::default(),
             multisurvey_photstats: Some(PerBandProperties::default()),
@@ -190,6 +191,8 @@ fn create_mock_enriched_ztf_alert(candid: i64, object_id: &str, is_rock: bool) -
                 is_rock.then_some(18.1),
             )),
             activity: None,
+            detection_history: None,
+            episode_history: None,
         },
         survey_matches: BabamulSurveyMatches::default(),
     }
@@ -290,6 +293,7 @@ async fn create_mock_enriched_lsst_alert_with_matches(
         prv_candidates: vec![prv_candidate],
         fp_hists: vec![],
         cross_matches: cross_matches.clone(),
+        host_galaxy: None,
         survey_matches: survey_matches.clone(),
     };
 
@@ -1154,6 +1158,7 @@ async fn test_babamul_lsst_with_ztf_match() {
         prv_nondetections: Vec::new(),
         fp_hists: vec![ztf_forced_phot],
         cross_matches: None,
+        host_galaxy: None,
         aliases: Some(ZtfAliases {
             lsst: Vec::new(),
             decam: Vec::new(),
@@ -1270,6 +1275,7 @@ async fn test_babamul_lsst_with_ztf_match() {
         is_sso: false,
         designation: None,
         cross_matches: None,
+        host_galaxy: None,
         aliases: Some(LsstAliases {
             ztf: vec![ztf_match_id.clone()],
             decam: Vec::new(),
@@ -1510,6 +1516,7 @@ async fn test_babamul_ztf_with_lsst_match() {
         is_sso: false,
         designation: None,
         cross_matches: None,
+        host_galaxy: None,
         aliases: Some(LsstAliases {
             ztf: Vec::new(),
             decam: Vec::new(),

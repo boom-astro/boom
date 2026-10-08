@@ -5,6 +5,11 @@ on:
     branches: [ "main" ]
   pull_request:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
+  # Only PR runs are superseded; main keeps one run, and one status, per commit.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -25,7 +30,7 @@ jobs:
         clean: false
         lfs: 'true'
     - name: Setup System Dependencies
-      run: sudo apt-get install -y libsasl2-dev
+      run: sudo apt-get update && sudo apt-get install -y libsasl2-dev libcfitsio-dev
     - name: Setup Rust
       uses: dtolnay/rust-toolchain@stable
     - name: Configure cache

@@ -1,0 +1,58 @@
+babamul:
+  webapp_url: https://babamul.umn.edu
+  oauth:
+    redirect_base_url: https://babamul.umn.edu/api
+
+gpu:
+  device_ids: [0, 1]
+
+kafka:
+  consumer:
+    decam:
+      server: "vm051.bridges2.psc.edu:9093"
+
+workers:
+  ztf:
+    alert:
+      n_workers: 10
+    enrichment:
+      n_workers: 4
+      batch_size: 250
+    filter:
+      n_workers: 10
+  lsst:
+    alert:
+      n_workers: 10
+    enrichment:
+      n_workers: 9
+    filter:
+      n_workers: 3
+  decam:
+    alert:
+      n_workers: 1
+    enrichment:
+      n_workers: 1
+    filter:
+      n_workers: 1
+
+crossmatch:
+  ztf:
+    watchlist_supernovas:
+      radius: 2.0
+      use_distance: false
+      projection:
+        _id: 1
+        classification: 1
+        redshift: 1
+        distance_mpc: 1
+        discovery_date: 1
+  lsst:
+    watchlist_supernovas:
+      radius: 2.0
+      use_distance: false
+      projection:
+        _id: 1
+        classification: 1
+        redshift: 1
+        distance_mpc: 1
+        discovery_date: 1

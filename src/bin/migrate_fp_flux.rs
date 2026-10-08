@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use boom::conf::{load_dotenv, AppConfig};
 use boom::utils::data::make_progress_bar;
-use boom::utils::lightcurves::ZTF_ZP;
+use boom::utils::lightcurves::{SNT, ZTF_ZP};
 use boom::utils::parser::parse_positive_usize;
 use clap::Parser;
 use futures::TryStreamExt;
@@ -10,7 +10,7 @@ use mongodb::bson::{doc, Bson, Document};
 use tracing::{error, info, Level};
 use tracing_subscriber::FmtSubscriber;
 
-const FLUXERR2MAGERR_FACTOR: f64 = 2.5_f64 / 2.30258509299_f64;
+const FLUXERR2MAGERR_FACTOR: f64 = 2.5_f64 / std::f64::consts::LN_10;
 
 /// Fixed zeropoint for ZTF forced photometry.
 
@@ -350,7 +350,7 @@ async fn validate(collection: &mongodb::Collection<Document>) {
                 continue;
             }
             // check if an SNR is there, if not then skip
-            if fp.get("snr").is_none() || fp.get_f64("snr").unwrap().abs() <= 3.0 {
+            if fp.get("snr").is_none() || fp.get_f64("snr").unwrap().abs() <= f64::from(SNT) {
                 num_skipped += 1;
                 *skipped_by_reason.entry("low_snr").or_insert(0) += 1;
                 continue;

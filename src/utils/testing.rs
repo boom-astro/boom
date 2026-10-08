@@ -1,8 +1,8 @@
 use crate::{
     alert::{
-        sanitize_winter_avro, AlertWorker, DecamAlertWorker, LightcurveJdOnly, LsstAlertWorker,
-        SchemaRegistry, WinterAlertWorker, ZtfAlertWorker,
-        LSST_SCHEMA_REGISTRY_GITHUB_FALLBACK_URL, LSST_SCHEMA_REGISTRY_URL,
+        alert_temp_queue_name, sanitize_winter_avro, AlertWorker, DecamAlertWorker,
+        LightcurveJdOnly, LsstAlertWorker, SchemaRegistry, WinterAlertWorker, WinterRawAvroAlert,
+        ZtfAlertWorker, LSST_SCHEMA_REGISTRY_GITHUB_FALLBACK_URL, LSST_SCHEMA_REGISTRY_URL,
     },
     conf,
     filter::{Filter, FilterVersion},
@@ -45,6 +45,14 @@ pub async fn decam_alert_worker() -> DecamAlertWorker {
         .await
         .unwrap();
     DecamAlertWorker::new(TEST_CONFIG_FILE).await.unwrap()
+}
+
+pub fn read_winter_test_alert(path: &str) -> WinterRawAvroAlert {
+    let raw = fs::read(path).unwrap();
+    let fixed = sanitize_winter_avro(&raw).unwrap();
+    let reader = Reader::new(&fixed[..]).unwrap();
+    let value = reader.into_iter().next().unwrap().unwrap();
+    apache_avro::from_value(&value).unwrap()
 }
 
 pub async fn winter_alert_worker() -> WinterAlertWorker {
@@ -196,7 +204,9 @@ pub async fn empty_processed_alerts_queue(
     let config = conf::load_config(Some(TEST_CONFIG_FILE)).unwrap();
     let mut con = config.build_redis().await?;
     con.del::<&str, usize>(input_queue_name).await.unwrap();
-    con.del::<&str, usize>("{}_temp").await.unwrap();
+    con.del::<&str, usize>(&alert_temp_queue_name(input_queue_name))
+        .await
+        .unwrap();
     con.del::<&str, usize>(output_queue_name).await.unwrap();
 
     Ok(())
