@@ -191,7 +191,7 @@ workers:
       n_workers: 1
       refresh_interval_minutes: 15
       max_match_rate: 5
-      reference_night:
+      reference_night: "2026-09-25"
   winter:
     command_interval: 500
     alert:
@@ -267,6 +267,7 @@ crossmatch:
         _id: 1
         Name: 1
         Descrip: 1
+        objtype: 1
         Qpct: 1
         ra: 1
         dec: 1
@@ -530,6 +531,7 @@ crossmatch:
         _id: 1
         Name: 1
         Descrip: 1
+        objtype: 1
         Qpct: 1
         ra: 1
         dec: 1
@@ -773,6 +775,7 @@ crossmatch:
         _id: 1
         Name: 1
         Descrip: 1
+        objtype: 1
         Qpct: 1
         ra: 1
         dec: 1

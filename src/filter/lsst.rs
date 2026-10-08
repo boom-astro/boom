@@ -1,16 +1,18 @@
 use crate::utils::lightcurves::SNT;
 use mongodb::bson::{doc, Document};
 use std::collections::HashMap;
-use tracing::{info, instrument, warn};
+use tracing::{debug, info, instrument, warn};
 
 use crate::conf::AppConfig;
-use crate::enrichment::{create_lsst_alert_pipeline, fetch_alerts, LsstAlertForEnrichment};
+use crate::enrichment::{
+    create_lsst_alert_pipeline, fetch_alerts, LsstAlertForEnrichment, LsstMatch,
+};
 use crate::filter::{
-    build_loaded_filters, build_ztf_aux_data, insert_ztf_aux_pipeline_if_needed, run_filter,
-    update_aliases_index_multiple, uses_field_in_filter, validate_filter_pipeline,
-    watchlist_projections, Alert, AlertHostGalaxy, Classification, Filter, FilterError,
-    FilterResults, FilterWorker, FilterWorkerError, LoadedFilter, Origin, Photometry, SurveyMatch,
-    SurveyMatches,
+    build_loaded_filters, build_ztf_aux_data, insert_ztf_aux_pipeline_if_needed,
+    record_filter_result, run_filter, update_aliases_index_multiple, uses_field_in_filter,
+    validate_filter_pipeline, watchlist_projections, ztf_survey_match, Alert, AlertHostGalaxy,
+    Classification, Filter, FilterError, FilterResults, FilterWorker, FilterWorkerError,
+    LoadedFilter, Origin, Photometry, SurveyMatch, SurveyMatches,
 };
 use crate::utils::cutouts::CutoutStorage;
 use crate::utils::db::{fetch_timeseries_op, get_array_dict_element};
@@ -101,6 +103,46 @@ pub fn insert_lsst_aux_pipeline_if_needed(
             "$addFields": lsst_aux_add_fields
         });
         *lsst_insert_aux_pipeline = false; // only insert once
+    }
+}
+
+/// Converts the LSST object matched to an alert of another survey into an output survey match.
+pub fn lsst_survey_match(lsst_match: &LsstMatch) -> SurveyMatch {
+    let mut photometry = Vec::new();
+    for doc in lsst_match.prv_candidates.iter() {
+        photometry.push(Photometry {
+            jd: doc.jd,
+            flux: doc.flux,
+            flux_err: doc.flux_err,
+            band: format!("lsst{}", doc.band),
+            origin: Origin::Alert,
+            programid: 1,
+            survey: Survey::Lsst,
+            ra: doc.ra,
+            dec: doc.dec,
+        });
+    }
+    for doc in lsst_match.fp_hists.iter() {
+        photometry.push(Photometry {
+            jd: doc.jd,
+            flux: doc.flux,
+            flux_err: doc.flux_err,
+            band: format!("lsst{}", doc.band),
+            origin: Origin::ForcedPhot,
+            programid: 1,
+            survey: Survey::Lsst,
+            ra: None,
+            dec: None,
+        });
+    }
+
+    photometry.sort_by(|a, b| a.jd.partial_cmp(&b.jd).unwrap());
+
+    SurveyMatch {
+        object_id: lsst_match.object_id.clone(),
+        ra: lsst_match.ra,
+        dec: lsst_match.dec,
+        photometry,
     }
 }
 
@@ -213,57 +255,10 @@ pub async fn build_lsst_alerts(
         let mut survey_matches = SurveyMatches {
             ztf: None,
             lsst: None,
+            decam: None,
         };
         if let Some(ztf_match) = alert.survey_matches.as_ref().and_then(|m| m.ztf.as_ref()) {
-            let mut ztf_photometry = Vec::new();
-            for doc in ztf_match.prv_candidates.iter() {
-                ztf_photometry.push(Photometry {
-                    jd: doc.jd,
-                    flux: doc.flux,
-                    flux_err: doc.flux_err,
-                    band: format!("ztf{}", doc.band),
-                    origin: Origin::Alert,
-                    programid: doc.programid,
-                    survey: Survey::Ztf,
-                    ra: doc.ra,
-                    dec: doc.dec,
-                });
-            }
-            for doc in ztf_match.prv_nondetections.iter() {
-                ztf_photometry.push(Photometry {
-                    jd: doc.jd,
-                    flux: None,
-                    flux_err: doc.flux_err,
-                    band: format!("ztf{}", doc.band),
-                    origin: Origin::Alert,
-                    programid: doc.programid,
-                    survey: Survey::Ztf,
-                    ra: None,
-                    dec: None,
-                });
-            }
-            for doc in ztf_match.fp_hists.iter() {
-                ztf_photometry.push(Photometry {
-                    jd: doc.jd,
-                    flux: doc.flux,
-                    flux_err: doc.flux_err,
-                    band: format!("ztf{}", doc.band),
-                    origin: Origin::ForcedPhot,
-                    programid: doc.programid,
-                    survey: Survey::Ztf,
-                    ra: None,
-                    dec: None,
-                });
-            }
-
-            ztf_photometry.sort_by(|a, b| a.jd.partial_cmp(&b.jd).unwrap());
-
-            survey_matches.ztf = Some(SurveyMatch {
-                object_id: ztf_match.object_id.clone(),
-                ra: ztf_match.ra,
-                dec: ztf_match.dec,
-                photometry: ztf_photometry,
-            });
+            survey_matches.ztf = Some(ztf_survey_match(ztf_match));
         }
 
         let cutouts = candid_to_cutouts
@@ -550,17 +545,16 @@ impl FilterWorker for LsstFilterWorker {
             )
             .await?;
 
-            // if the array is empty, continue
+            record_filter_result(&Survey::Lsst, filter, out_documents.len(), candids.len());
+            debug!(
+                "{}/{} LSST alerts passed filter {}",
+                out_documents.len(),
+                candids.len(),
+                filter.id,
+            );
+
             if out_documents.is_empty() {
                 continue;
-            } else {
-                // if we have output documents, we need to process them
-                // and create filter results for each document (which contain annotations)
-                info!(
-                    "{} alerts passed lsst filter {}",
-                    out_documents.len(),
-                    filter.id,
-                );
             }
 
             let now_ts = chrono::Utc::now().timestamp_millis() as f64;

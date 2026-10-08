@@ -551,6 +551,42 @@ services:
     command:
       - /app/kafka_consumer
       - winter
+  consumer-decam:
+    image: ${BOOM_IMAGE:-ghcr.io/boom-astro/boom:latest}
+    pull_policy: ${BOOM_PULL_POLICY:-build}
+    hostname: consumer-decam
+    restart: always
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      BOOM_DATABASE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
+      BOOM_CUTOUTS_STORAGE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
+      BOOM_API__AUTH__SECRET_KEY: ${BOOM_API__AUTH__SECRET_KEY:?BOOM_API__AUTH__SECRET_KEY must be set}
+      BOOM_API__AUTH__ADMIN_PASSWORD: ${BOOM_API__AUTH__ADMIN_PASSWORD:?BOOM_API__AUTH__ADMIN_PASSWORD must be set}
+      BOOM_KAFKA__CONSUMER__DECAM__SERVER: ${BOOM_KAFKA__CONSUMER__DECAM__SERVER:-}
+      BOOM_KAFKA__CONSUMER__DECAM__GROUP_ID: ${BOOM_KAFKA__CONSUMER__DECAM__GROUP_ID:-}
+      BOOM_KAFKA__CONSUMER__DECAM__SECURITY_PROTOCOL: ${BOOM_KAFKA__CONSUMER__DECAM__SECURITY_PROTOCOL:-}
+      BOOM_KAFKA__CONSUMER__DECAM__USERNAME: ${BOOM_KAFKA__CONSUMER__DECAM__USERNAME:-}
+      BOOM_KAFKA__CONSUMER__DECAM__PASSWORD: ${BOOM_KAFKA__CONSUMER__DECAM__PASSWORD:-}
+      BOOM_KAFKA__CONSUMER__DECAM__SSL_CA_LOCATION: ${BOOM_KAFKA__CONSUMER__DECAM__SSL_CA_FILE:+/app/decam-ca.crt}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      BOOM_DATABASE__HOST: mongo
+      BOOM_DATABASE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
+      BOOM_CUTOUTS_STORAGE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
+      BOOM_CUTOUTS_STORAGE__TYPE: mongo
+      BOOM_CUTOUTS_STORAGE__HOST: mongo
+      BOOM_REDIS__HOST: valkey
+    networks:
+      - boom
+    profiles:
+      - decam
+    volumes:
+      - ${BOOM_CONFIG_PATH:-./config.yaml}:/app/config.yaml
+      - ${BOOM_KAFKA__CONSUMER__DECAM__SSL_CA_FILE:-/dev/null}:/app/decam-ca.crt:ro
+    command:
+      - /app/kafka_consumer
+      - decam
   # Runs queued tasks: catalog ingests, data migrations and reprocessing jobs.
   # Separate from the api service on purpose: these run for hours and are
   # memory-hungry, and an API restart or deploy must not kill one. A run
@@ -729,6 +765,35 @@ services:
   # MPC_orbits is refreshed by the ZTF scheduler on its own, and on demand by
   # the `mpcorb_ingest` task -- see docs/task-system.md. The one-shot service
   # that used to live here ran a binary that no longer exists.
+  scheduler-decam:
+    image: ${BOOM_IMAGE:-ghcr.io/boom-astro/boom:latest}
+    pull_policy: ${BOOM_PULL_POLICY:-build}
+    hostname: scheduler-decam
+    restart: always
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      BOOM_DATABASE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
+      BOOM_CUTOUTS_STORAGE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
+      BOOM_API__AUTH__SECRET_KEY: ${BOOM_API__AUTH__SECRET_KEY:?BOOM_API__AUTH__SECRET_KEY must be set}
+      BOOM_API__AUTH__ADMIN_PASSWORD: ${BOOM_API__AUTH__ADMIN_PASSWORD:?BOOM_API__AUTH__ADMIN_PASSWORD must be set}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      BOOM_DATABASE__HOST: mongo
+      BOOM_DATABASE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
+      BOOM_CUTOUTS_STORAGE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
+      BOOM_CUTOUTS_STORAGE__TYPE: mongo
+      BOOM_CUTOUTS_STORAGE__HOST: mongo
+      BOOM_REDIS__HOST: valkey
+    networks:
+      - boom
+    profiles:
+      - decam
+    volumes:
+      - ${BOOM_CONFIG_PATH:-./config.yaml}:/app/config.yaml
+    command:
+      - /app/scheduler
+      - decam
   otel-collector: # [^1]
     image: otel/opentelemetry-collector:0.131.1
     restart: always

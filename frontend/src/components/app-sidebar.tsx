@@ -10,6 +10,7 @@ import {
   IconNotebook,
   IconBook,
   IconShieldLock,
+  IconTelescope,
 } from "@tabler/icons-react"
 
 import useAppStore from "@/lib/store"
@@ -40,6 +41,11 @@ const data = {
       title: "Dashboard",
       url: "/dashboard",
       icon: IconChartBar,
+    },
+    {
+      title: "Telescopes",
+      url: "/telescopes",
+      icon: IconTelescope,
     },
   ],
   navSecondary: [

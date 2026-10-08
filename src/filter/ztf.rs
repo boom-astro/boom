@@ -6,14 +6,15 @@ use crate::alert::ZtfCandidate;
 use crate::conf::AppConfig;
 use crate::enrichment::{
     create_ztf_alert_pipeline, deserialize_ztf_alert_lightcurve, deserialize_ztf_forced_lightcurve,
-    fetch_alerts, ZtfAlertClassifications, ZtfPhotometry, ZtfSurveyMatches,
+    fetch_alerts, ZtfAlertClassifications, ZtfMatch, ZtfPhotometry, ZtfSurveyMatches,
 };
 use crate::filter::{
     build_loaded_filters, build_lsst_aux_data, insert_lsst_aux_pipeline_if_needed,
-    parse_programid_candid_tuple, run_filter, update_aliases_index_multiple, uses_field_in_filter,
-    validate_filter_pipeline, watchlist_projections, Alert, AlertHostGalaxy, Classification,
-    Filter, FilterError, FilterResults, FilterWorker, FilterWorkerError, LoadedFilter, Origin,
-    Photometry, SurveyMatch, SurveyMatches,
+    lsst_survey_match, parse_programid_candid_tuple, record_filter_result, run_filter,
+    update_aliases_index_multiple, uses_field_in_filter, validate_filter_pipeline,
+    watchlist_projections, Alert, AlertHostGalaxy, Classification, Filter, FilterError,
+    FilterResults, FilterWorker, FilterWorkerError, LoadedFilter, Origin, Photometry, SurveyMatch,
+    SurveyMatches,
 };
 use crate::utils::cutouts::CutoutStorage;
 use crate::utils::db::{fetch_timeseries_op, get_array_dict_element};
@@ -134,6 +135,60 @@ pub fn insert_ztf_aux_pipeline_if_needed(
             "$addFields": ztf_aux_add_fields
         });
         *ztf_insert_aux_pipeline = false; // only insert once
+    }
+}
+
+/// Converts the ZTF object matched to an alert of another survey into an output survey match.
+pub fn ztf_survey_match(ztf_match: &ZtfMatch) -> SurveyMatch {
+    let mut photometry = Vec::new();
+    for doc in ztf_match.prv_candidates.iter() {
+        photometry.push(Photometry {
+            jd: doc.jd,
+            flux: doc.flux,
+            flux_err: doc.flux_err,
+            band: format!("ztf{}", doc.band),
+            origin: Origin::Alert,
+            programid: doc.programid,
+            survey: Survey::Ztf,
+            ra: doc.ra,
+            dec: doc.dec,
+        });
+    }
+    for doc in ztf_match.prv_nondetections.iter() {
+        photometry.push(Photometry {
+            jd: doc.jd,
+            flux: None,
+            flux_err: doc.flux_err,
+            band: format!("ztf{}", doc.band),
+            origin: Origin::Alert,
+            programid: doc.programid,
+            survey: Survey::Ztf,
+            ra: None,
+            dec: None,
+        });
+    }
+    for doc in ztf_match.fp_hists.iter() {
+        photometry.push(Photometry {
+            jd: doc.jd,
+            flux: doc.flux,
+            flux_err: doc.flux_err,
+            band: format!("ztf{}", doc.band),
+            origin: Origin::ForcedPhot,
+            programid: doc.programid,
+            survey: Survey::Ztf,
+            ra: None,
+            dec: None,
+        });
+    }
+
+    photometry.retain(Photometry::is_finite);
+    photometry.sort_by(|a, b| a.jd.partial_cmp(&b.jd).unwrap());
+
+    SurveyMatch {
+        object_id: ztf_match.object_id.clone(),
+        ra: ztf_match.ra,
+        dec: ztf_match.dec,
+        photometry,
     }
 }
 
@@ -330,49 +385,16 @@ pub async fn build_ztf_alerts(
             });
         }
 
+        photometry.retain(Photometry::is_finite);
         photometry.sort_by(|a, b| a.jd.partial_cmp(&b.jd).unwrap());
 
         let mut survey_matches = SurveyMatches {
             ztf: None,
             lsst: None,
+            decam: None,
         };
         if let Some(lsst_match) = alert.survey_matches.as_ref().and_then(|m| m.lsst.as_ref()) {
-            let mut lsst_photometry = Vec::new();
-            for doc in lsst_match.prv_candidates.iter() {
-                lsst_photometry.push(Photometry {
-                    jd: doc.jd,
-                    flux: doc.flux,
-                    flux_err: doc.flux_err,
-                    band: format!("lsst{}", doc.band),
-                    origin: Origin::Alert,
-                    programid: 1,
-                    survey: Survey::Lsst,
-                    ra: doc.ra,
-                    dec: doc.dec,
-                });
-            }
-            for doc in lsst_match.fp_hists.iter() {
-                lsst_photometry.push(Photometry {
-                    jd: doc.jd,
-                    flux: doc.flux,
-                    flux_err: doc.flux_err,
-                    band: format!("lsst{}", doc.band),
-                    origin: Origin::ForcedPhot,
-                    programid: 1,
-                    survey: Survey::Lsst,
-                    ra: None,
-                    dec: None,
-                });
-            }
-
-            lsst_photometry.sort_by(|a, b| a.jd.partial_cmp(&b.jd).unwrap());
-
-            survey_matches.lsst = Some(SurveyMatch {
-                object_id: lsst_match.object_id.clone(),
-                ra: lsst_match.ra,
-                dec: lsst_match.dec,
-                photometry: lsst_photometry,
-            });
+            survey_matches.lsst = Some(lsst_survey_match(lsst_match));
         }
 
         let cutouts = candid_to_cutouts
@@ -986,7 +1008,8 @@ impl FilterWorker for ZtfFilterWorker {
                 )
                 .await?;
 
-                info!(
+                record_filter_result(&Survey::Ztf, filter, out_documents.len(), candids.len());
+                debug!(
                     "{}/{} ZTF alerts with programid {} passed filter {}",
                     out_documents.len(),
                     candids.len(),
@@ -994,9 +1017,6 @@ impl FilterWorker for ZtfFilterWorker {
                     filter.id,
                 );
 
-                // If we have output documents, we need to process them
-                // and create filter results for each document (which contain annotations)
-                // however, if the array is empty, there's nothing to do
                 if out_documents.is_empty() {
                     continue;
                 }

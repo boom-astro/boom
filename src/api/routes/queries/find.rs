@@ -1,11 +1,12 @@
 /// Endpoints for executing analytical queries.
-use crate::api::catalogs::catalog_accessible;
-use crate::api::filters::parse_filter;
-use crate::api::models::response;
-use crate::api::routes::users::User;
-
-use crate::utils::mpcorb::{
-    fetch_orbits, fill_geometry, normalize_ztf_ssnamenr, GEOMETRY_FIELDS, ORBITS_COLLECTION,
+use crate::{
+    api::{
+        catalogs::catalog_accessible, filters::parse_filter, models::response, routes::users::User,
+    },
+    conf::AppConfig,
+    utils::mpcorb::{
+        fetch_orbits, fill_geometry, normalize_ztf_ssnamenr, GEOMETRY_FIELDS, ORBITS_COLLECTION,
+    },
 };
 
 use actix_web::{post, web, HttpResponse};
@@ -80,13 +81,14 @@ pub async fn post_find_query(
     db: web::Data<Database>,
     body: web::Json<FindQuery>,
     current_user: Option<web::ReqData<User>>,
+    config: web::Data<AppConfig>,
 ) -> HttpResponse {
     let current_user = match current_user {
         Some(user) => user,
         None => return HttpResponse::Unauthorized().body("Unauthorized"),
     };
     let catalog_name = body.catalog_name.trim();
-    if !catalog_accessible(&db, catalog_name, Some(&current_user)).await {
+    if !catalog_accessible(&db, catalog_name, &current_user, &config).await {
         return response::not_found(&format!("Catalog {} does not exist", catalog_name));
     }
     let collection_name = catalog_name.to_string();

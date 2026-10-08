@@ -1,11 +1,11 @@
 use crate::{
-    api::catalogs::WATCHLIST_PREFIX,
+    api::{catalogs::WATCHLIST_PREFIX, filters::joined_collections},
     conf::{self, AppConfig},
     filter::{
         build_decam_filter_pipeline, build_lsst_filter_pipeline, build_winter_filter_pipeline,
         build_ztf_filter_pipeline,
     },
-    scheduler::{record_kafka_alert_published, record_worker_retry},
+    scheduler::{count_filtered_alerts, record_kafka_alert_published, record_worker_retry},
     utils::{
         cutouts::CutoutStorageError,
         enums::Survey,
@@ -66,6 +66,32 @@ static ALERT_PROCESSED: LazyLock<Counter<u64>> = LazyLock::new(|| {
         .with_description("Number of alerts processed by the filter worker.")
         .build()
 });
+
+static FILTER_ALERT: LazyLock<Counter<u64>> = LazyLock::new(|| {
+    SCHEDULER_METER
+        .u64_counter("filter_worker.filter.alert")
+        .with_unit("{alert}")
+        .with_description("Number of alerts run through each filter, by result.")
+        .build()
+});
+
+pub(crate) fn record_filter_result(
+    survey: &Survey,
+    filter: &LoadedFilter,
+    passed: usize,
+    total: usize,
+) {
+    let attributes = |result: &'static str| {
+        [
+            KeyValue::new("survey", survey.as_str()),
+            KeyValue::new("filter.id", filter.id.clone()),
+            KeyValue::new("filter.name", filter.name.clone()),
+            KeyValue::new("result", result),
+        ]
+    };
+    FILTER_ALERT.add(passed as u64, &attributes("passed"));
+    FILTER_ALERT.add(total.saturating_sub(passed) as u64, &attributes("rejected"));
+}
 
 // Surveys that require permissions to be defined in filters
 pub const SURVEYS_REQUIRING_PERMISSIONS: [Survey; 1] = [Survey::Ztf];
@@ -140,6 +166,12 @@ pub struct Photometry {
     pub dec: Option<f64>,
 }
 
+impl Photometry {
+    pub fn is_finite(&self) -> bool {
+        self.flux_err.is_finite() && self.flux.is_none_or(f64::is_finite)
+    }
+}
+
 #[serdavro]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Classification {
@@ -172,6 +204,7 @@ pub struct SurveyMatch {
 pub struct SurveyMatches {
     pub ztf: Option<SurveyMatch>,
     pub lsst: Option<SurveyMatch>,
+    pub decam: Option<SurveyMatch>,
 }
 
 #[serdavro]
@@ -488,7 +521,7 @@ pub fn validate_filter_pipeline(filter_pipeline: &[serde_json::Value]) -> Result
     // - project stages that are an exclude stage (with "field: 0") do not mention objectId
     // - project stages do not exclude the _id field or objectId
     // - unset stages do not delete the objectId or _id fields
-    // - we don't have any group, unwind, or lookup stages
+    // - we don't have any group, unwind, or stages reading another collection
     // - that the last stage is a project that includes objectId
     let nb_stages = filter_pipeline.len();
     if nb_stages == 0 {
@@ -514,9 +547,11 @@ pub fn validate_filter_pipeline(filter_pipeline: &[serde_json::Value]) -> Result
         if stage.get("$group").is_some()
             || stage.get("$unwind").is_some()
             || stage.get("$lookup").is_some()
+            || !joined_collections(stage).is_ok_and(|names| names.is_empty())
         {
             return Err(FilterError::InvalidFilterPipeline(
-                "group, unwind, and lookup stages are not allowed".to_string(),
+                "group, unwind, lookup, graphLookup and unionWith stages are not allowed"
+                    .to_string(),
             ));
         }
         // check for project stages
@@ -1207,6 +1242,7 @@ pub async fn run_filter_worker<T: FilterWorker>(
             alerts.len().saturating_sub(matched_alerts.len()) as u64,
             &ok_excluded_attrs,
         );
+        count_filtered_alerts(alerts.len(), matched_alerts.len());
 
         let output_topic = filter_worker.output_topic_name();
         let mut total_enqueued = 0;
@@ -1395,6 +1431,7 @@ mod tests {
             survey_matches: SurveyMatches {
                 ztf: None,
                 lsst: None,
+                decam: None,
             },
             host_galaxy: Some(AlertHostGalaxy {
                 objname: Some("NGC 4993".to_string()),
@@ -1443,6 +1480,7 @@ mod tests {
             survey_matches: SurveyMatches {
                 ztf: None,
                 lsst: None,
+                decam: None,
             },
             host_galaxy: None,
         };
@@ -1540,6 +1578,27 @@ mod tests {
                 message.contains(expected),
                 "{message} should name `{expected}`"
             );
+        }
+    }
+
+    #[test]
+    fn stages_reading_another_collection_are_refused() {
+        for stage in [
+            serde_json::json!({"$lookup": {"from": "users", "localField": "a",
+                "foreignField": "b", "as": "c"}}),
+            serde_json::json!({"$graphLookup": {"from": "users", "startWith": "$a",
+                "connectFromField": "a", "connectToField": "b", "as": "c"}}),
+            serde_json::json!({"$unionWith": "users"}),
+            serde_json::json!({"$unionWith": {"coll": "users", "pipeline": []}}),
+            serde_json::json!({"$facet": {"x": [{"$lookup": {"from": "users", "pipeline": [],
+                "as": "c"}}]}}),
+        ] {
+            let pipeline = [
+                serde_json::json!({"$match": {}}),
+                stage.clone(),
+                serde_json::json!({"$project": {"objectId": 1}}),
+            ];
+            assert!(validate_filter_pipeline(&pipeline).is_err(), "{stage}");
         }
     }
 

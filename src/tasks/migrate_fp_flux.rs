@@ -16,7 +16,7 @@
 use super::batch::{run_batched_update, BatchError, PROGRESS_EVERY};
 use super::context::TaskContext;
 use super::ledger::{MutationTarget, Operation};
-use crate::utils::lightcurves::ZTF_ZP;
+use crate::utils::lightcurves::{SNT, ZTF_ZP};
 use futures::TryStreamExt;
 use mongodb::bson::{doc, Bson, Document};
 use serde::{Deserialize, Serialize};

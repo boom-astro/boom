@@ -5,7 +5,9 @@ use boom::{
     api::catalogs::WATCHLIST_PREFIX,
     conf::{load_dotenv, AppConfig, CatalogXmatchConfig},
     enrichment::models::SharedModelPool,
-    scheduler::{record_mpc_orbits_state, record_worker_pool_state, ThreadPool},
+    scheduler::{
+        record_mpc_orbits_state, record_worker_pool_state, take_heartbeat_counts, ThreadPool,
+    },
     utils::{
         db::{initialize_angular_size_indexes, initialize_survey_indexes},
         enums::Survey,
@@ -355,10 +357,15 @@ async fn run(
             }
             _ = heartbeat_tick.tick() => {
                 record_pool_metrics(&args.survey, &alert_pool, &enrichment_pool, &filter_pool);
+                let counts = take_heartbeat_counts();
                 info!(
                     alert = %pool_state(&alert_pool),
                     enrichment = %pool_state(&enrichment_pool),
                     filter = %pool_state(&filter_pool),
+                    processed = counts.alert,
+                    enriched = counts.enrichment,
+                    filtered = counts.filter,
+                    passed = counts.passed,
                     "heartbeat: workers running"
                 );
             }

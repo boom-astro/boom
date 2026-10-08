@@ -37,6 +37,49 @@ pub const C_AU_PER_DAY: f64 = 173.144_632_674;
 const POS_STEP_AU: f64 = 1e-6;
 const VEL_STEP_AU_PER_DAY: f64 = 1e-8;
 
+/// A fit stops once an accepted step improves the rms by less than this,
+/// arcseconds. A thousandth of an arcsecond is far below any gate a fit feeds,
+/// and chasing smaller gains cost most of a fit's iterations.
+const MIN_IMPROVEMENT_ARCSEC: f64 = 1e-3;
+
+/// When to abandon a fit that is not going to pass the gate it feeds.
+///
+/// A candidate that no orbit explains keeps iterating until it runs out of
+/// iterations, and most candidates a search produces are like that. Checking
+/// after a few iterations spends the budget on the ones that can pass.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GiveUp {
+    /// Iterations to run before checking.
+    pub after_iterations: usize,
+    /// Abandon if the rms is still above this, arcseconds.
+    pub above_arcsec: f64,
+}
+
+/// Iterations a screening fit gets to pass its gate.
+pub const SCREEN_ITERATIONS: usize = 20;
+/// Iterations a fit that passed its gate gets to reach its minimum. A seed far
+/// down a short arc's valley takes a few dozen.
+pub const CONVERGE_ITERATIONS: usize = 100;
+/// Iterations a screening fit gets before [`GiveUp::for_gate`] checks it.
+pub const GIVE_UP_AFTER: usize = 8;
+/// How far above its gate a screening fit may still be at that check.
+pub const GIVE_UP_FACTOR: f64 = 10.0;
+
+impl GiveUp {
+    /// Abandon a fit still [`GIVE_UP_FACTOR`] times above `gate_arcsec` after
+    /// [`GIVE_UP_AFTER`] iterations.
+    ///
+    /// The tests in `heliolinc` measure this against the fits it must spare,
+    /// from tracklet states and from THOR's test orbits; tighten it only with
+    /// them passing.
+    pub fn for_gate(gate_arcsec: f64) -> Self {
+        GiveUp {
+            after_iterations: GIVE_UP_AFTER,
+            above_arcsec: GIVE_UP_FACTOR * gate_arcsec,
+        }
+    }
+}
+
 /// Where a state puts the object on the sky at `jd`, degrees.
 ///
 /// Light-time corrected: the object is seen where it was when the light left
@@ -46,28 +89,53 @@ const VEL_STEP_AU_PER_DAY: f64 = 1e-8;
 pub fn predict_radec(state: &State, epoch_jd: f64, jd: f64, site: &Site) -> Option<(f64, f64)> {
     // From the observer, not the Earth's centre: an Earth radius is several
     // arcseconds at these distances, which the residual gate is tighter than.
-    let earth = observer_position(jd, site);
-    let mut tau = 0.0;
-    let mut topo = [0.0; 3];
-    for _ in 0..2 {
-        let moved = propagate_position(state, epoch_jd, jd - tau)?;
-        topo = [
-            moved[0] - earth[0],
-            moved[1] - earth[1],
-            moved[2] - earth[2],
-        ];
-        tau = (topo[0] * topo[0] + topo[1] * topo[1] + topo[2] * topo[2]).sqrt() / C_AU_PER_DAY;
-    }
-    Some(radec_from_ecliptic(&topo))
+    let observer = observer_position(jd, site);
+    apparent(state, epoch_jd, jd, &observer, None).map(|(radec, _)| radec)
 }
 
-/// Residual in arcseconds, as (RA on a great circle, Dec).
-fn residual(state: &State, epoch_jd: f64, obs: &Observation, site: &Site) -> Option<(f64, f64)> {
-    let (ra, dec) = predict_radec(state, epoch_jd, obs.jd, site)?;
+/// Where `state` appears from `observer` at `jd`, and the light time used.
+///
+/// With `light_time` given, the object is placed at that retarded epoch in one
+/// propagation instead of iterating for it. A state nudged by a Jacobian step
+/// changes its light time by far less than a second, so the nominal state's
+/// light time serves every nudge of it.
+fn apparent(
+    state: &State,
+    epoch_jd: f64,
+    jd: f64,
+    observer: &[f64; 3],
+    light_time: Option<f64>,
+) -> Option<((f64, f64), f64)> {
+    let passes = if light_time.is_some() { 1 } else { 2 };
+    let mut tau = light_time.unwrap_or(0.0);
+    let mut topo = [0.0; 3];
+    for _ in 0..passes {
+        let moved = propagate_position(state, epoch_jd, jd - tau)?;
+        topo = [
+            moved[0] - observer[0],
+            moved[1] - observer[1],
+            moved[2] - observer[2],
+        ];
+        if light_time.is_none() {
+            tau = (topo[0] * topo[0] + topo[1] * topo[1] + topo[2] * topo[2]).sqrt() / C_AU_PER_DAY;
+        }
+    }
+    Some((radec_from_ecliptic(&topo), tau))
+}
+
+/// Residual in arcseconds, as (RA on a great circle, Dec), and the light time.
+fn residual(
+    state: &State,
+    epoch_jd: f64,
+    obs: &Observation,
+    observer: &[f64; 3],
+    light_time: Option<f64>,
+) -> Option<((f64, f64), f64)> {
+    let ((ra, dec), tau) = apparent(state, epoch_jd, obs.jd, observer, light_time)?;
     // Fold the RA difference so a wrap does not read as a huge residual.
     let dra =
         ((obs.ra - ra + 540.0).rem_euclid(360.0) - 180.0) * obs.dec.to_radians().cos() * 3600.0;
-    Some((dra, (obs.dec - dec) * 3600.0))
+    Some(((dra, (obs.dec - dec) * 3600.0), tau))
 }
 
 /// Nudge one component of a state.
@@ -126,12 +194,28 @@ pub fn rms_arcsec(
     if observations.is_empty() {
         return None;
     }
+    let observers: Vec<[f64; 3]> = observations
+        .iter()
+        .map(|obs| observer_position(obs.jd, site))
+        .collect();
+    rms_and_light_times(state, epoch_jd, observations, &observers).map(|(rms, _)| rms)
+}
+
+/// The rms residual, arcseconds, and each observation's light time.
+fn rms_and_light_times(
+    state: &State,
+    epoch_jd: f64,
+    observations: &[Observation],
+    observers: &[[f64; 3]],
+) -> Option<(f64, Vec<f64>)> {
     let mut sq = 0.0;
-    for obs in observations {
-        let (dra, ddec) = residual(state, epoch_jd, obs, site)?;
+    let mut light_times = Vec::with_capacity(observations.len());
+    for (obs, observer) in observations.iter().zip(observers) {
+        let ((dra, ddec), tau) = residual(state, epoch_jd, obs, observer, None)?;
         sq += dra * dra + ddec * ddec;
+        light_times.push(tau);
     }
-    Some((sq / observations.len() as f64).sqrt())
+    Some(((sq / observations.len() as f64).sqrt(), light_times))
 }
 
 /// Refine `initial` against `observations` by Gauss-Newton.
@@ -146,24 +230,130 @@ pub fn fit_orbit(
     max_iterations: usize,
     site: &Site,
 ) -> Option<OrbitFit> {
+    fit_orbit_with(observations, initial, epoch_jd, max_iterations, site, None)
+}
+
+/// [`fit_orbit`], abandoning the fit early when `give_up` says it cannot pass.
+pub fn fit_orbit_with(
+    observations: &[Observation],
+    initial: &State,
+    epoch_jd: f64,
+    max_iterations: usize,
+    site: &Site,
+    give_up: Option<GiveUp>,
+) -> Option<OrbitFit> {
+    fit(
+        observations,
+        initial,
+        epoch_jd,
+        max_iterations,
+        site,
+        give_up,
+        MIN_IMPROVEMENT_ARCSEC,
+    )
+}
+
+/// [`fit_orbit`], run until no step improves the fit rather than until one
+/// improves it by little.
+///
+/// From a poor seed a short arc's fit can crawl along a curved valley, gaining
+/// less than [`MIN_IMPROVEMENT_ARCSEC`] an iteration for a while before it
+/// drops towards the minimum. [`fit_orbit`] reads the crawl as convergence and
+/// reports the rms where it stopped, which then says more about the seed than
+/// about the orbit. That is fine for screening candidates against a gate, but a
+/// residual that is reported or ranked on should come from here.
+pub fn converge_orbit(
+    observations: &[Observation],
+    initial: &State,
+    epoch_jd: f64,
+    max_iterations: usize,
+    site: &Site,
+) -> Option<OrbitFit> {
+    fit(
+        observations,
+        initial,
+        epoch_jd,
+        max_iterations,
+        site,
+        None,
+        0.0,
+    )
+}
+
+/// Fit `seed` against a residual gate: screened with [`GiveUp::for_gate`],
+/// and run to convergence if it passes.
+///
+/// The fit comes back whether or not it passed, so the caller compares its
+/// rms with the gate; one abandoned by the screen is simply above it. `None`
+/// when the observations cannot constrain an orbit.
+pub fn fit_within(
+    observations: &[Observation],
+    seed: &State,
+    epoch_jd: f64,
+    site: &Site,
+    gate_arcsec: f64,
+) -> Option<OrbitFit> {
+    let screened = fit_orbit_with(
+        observations,
+        seed,
+        epoch_jd,
+        SCREEN_ITERATIONS,
+        site,
+        Some(GiveUp::for_gate(gate_arcsec)),
+    )?;
+    if screened.rms_arcsec > gate_arcsec {
+        return Some(screened);
+    }
+    // Starts where the screen stopped, so it can only improve on it.
+    converge_orbit(
+        observations,
+        &screened.state,
+        epoch_jd,
+        CONVERGE_ITERATIONS,
+        site,
+    )
+    .or(Some(screened))
+}
+
+fn fit(
+    observations: &[Observation],
+    initial: &State,
+    epoch_jd: f64,
+    max_iterations: usize,
+    site: &Site,
+    give_up: Option<GiveUp>,
+    min_improvement_arcsec: f64,
+) -> Option<OrbitFit> {
     if observations.len() < 3 {
         return None;
     }
+    // The observer depends only on the epoch, so it is placed once per
+    // observation rather than once per prediction.
+    let observers: Vec<[f64; 3]> = observations
+        .iter()
+        .map(|obs| observer_position(obs.jd, site))
+        .collect();
     let mut state = *initial;
-    let mut best = rms_arcsec(&state, epoch_jd, observations, site)?;
+    let (mut best, mut light_times) =
+        rms_and_light_times(&state, epoch_jd, observations, &observers)?;
     let mut lambda = 1e-3;
     let mut iterations = 0;
+    let steps = [
+        POS_STEP_AU,
+        POS_STEP_AU,
+        POS_STEP_AU,
+        VEL_STEP_AU_PER_DAY,
+        VEL_STEP_AU_PER_DAY,
+        VEL_STEP_AU_PER_DAY,
+    ];
 
     for _ in 0..max_iterations {
+        if let Some(give_up) = give_up {
+            if iterations >= give_up.after_iterations && best > give_up.above_arcsec {
+                break;
+            }
+        }
         iterations += 1;
-        let steps = [
-            POS_STEP_AU,
-            POS_STEP_AU,
-            POS_STEP_AU,
-            VEL_STEP_AU_PER_DAY,
-            VEL_STEP_AU_PER_DAY,
-            VEL_STEP_AU_PER_DAY,
-        ];
 
         // Normal equations from the numerical Jacobian. A perturbed state can
         // fall outside what the propagator handles, near escape speed; that is
@@ -172,8 +362,11 @@ pub fn fit_orbit(
         let mut ata = vec![vec![0.0; 6]; 6];
         let mut atb = vec![0.0; 6];
         let mut usable = true;
-        'obs: for obs in observations {
-            let Some((r_ra, r_dec)) = residual(&state, epoch_jd, obs, site) else {
+        'obs: for ((obs, observer), &tau) in observations.iter().zip(&observers).zip(&light_times) {
+            // The residual and every nudge of it share one light time, so the
+            // differences measure the state change and nothing else.
+            let Some(((r_ra, r_dec), _)) = residual(&state, epoch_jd, obs, observer, Some(tau))
+            else {
                 usable = false;
                 break 'obs;
             };
@@ -181,17 +374,16 @@ pub fn fit_orbit(
             let mut jac_dec = [0.0; 6];
             for (k, step) in steps.iter().enumerate() {
                 let up = perturb(&state, k, *step);
-                let down = perturb(&state, k, -*step);
-                let (Some((ra_up, dec_up)), Some((ra_down, dec_down))) = (
-                    residual(&up, epoch_jd, obs, site),
-                    residual(&down, epoch_jd, obs, site),
-                ) else {
+                let Some(((ra_up, dec_up), _)) = residual(&up, epoch_jd, obs, observer, Some(tau))
+                else {
                     usable = false;
                     break 'obs;
                 };
+                // Forward differences: half the predictions central ones take,
+                // and Gauss-Newton only needs the Jacobian to point the step.
                 // Residual falls as the model improves, hence the sign.
-                jac_ra[k] = -(ra_up - ra_down) / (2.0 * step);
-                jac_dec[k] = -(dec_up - dec_down) / (2.0 * step);
+                jac_ra[k] = -(ra_up - r_ra) / step;
+                jac_dec[k] = -(dec_up - r_dec) / step;
             }
             for i in 0..6 {
                 atb[i] += jac_ra[i] * r_ra + jac_dec[i] * r_dec;
@@ -230,14 +422,15 @@ pub fn fit_orbit(
             candidate = perturb(&candidate, k, *d);
         }
 
-        match rms_arcsec(&candidate, epoch_jd, observations, site) {
-            Some(trial) if trial < best => {
+        match rms_and_light_times(&candidate, epoch_jd, observations, &observers) {
+            Some((trial, trial_light_times)) if trial < best => {
                 let improvement = best - trial;
                 state = candidate;
                 best = trial;
+                light_times = trial_light_times;
                 lambda = (lambda * 0.5).max(1e-9);
                 // Converged once the fit stops moving.
-                if improvement < 1e-4 {
+                if improvement < min_improvement_arcsec {
                     break;
                 }
             }

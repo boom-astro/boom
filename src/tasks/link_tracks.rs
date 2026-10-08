@@ -28,7 +28,7 @@ use crate::utils::heliolinc::{default_hypotheses, link_tracklets, LinkConfig, Tr
 use crate::utils::linking::{
     circular_mean_deg, find_tracklets, night_of, Detection, Tracklet, TrackletConfig,
 };
-use crate::utils::orbit_fit::{fit_orbit, Observation};
+use crate::utils::orbit_fit::{fit_within, Observation};
 use futures::StreamExt;
 use mongodb::bson::{doc, Document};
 use rayon::prelude::*;
@@ -989,7 +989,16 @@ async fn run_thor(
             if obs.len() < 3 {
                 return Some((c, Verdict(BoundFit::Ungated, None)));
             }
-            match fit_orbit(&obs, &seed, epoch, 20, &crate::utils::sso_geometry::ZTF) {
+            // Screened against the looser gate, since a poor fit is still kept,
+            // and converged if it passes it, so the residual it is ranked and
+            // persisted on is the orbit's rather than where the fit stopped.
+            match fit_within(
+                &obs,
+                &seed,
+                epoch,
+                &crate::utils::sso_geometry::ZTF,
+                params.max_unbound_residual,
+            ) {
                 None => Some((c, Verdict(BoundFit::None, None))),
                 Some(fit) if fit.rms_arcsec <= params.max_residual => {
                     Some((c, Verdict(BoundFit::Good, Some(fit.rms_arcsec))))

@@ -12,7 +12,8 @@ use crate::{
     },
     conf::{AppConfig, FilterWorkerConfig},
     enrichment::{
-        LsstAlertProperties, WinterAlertProperties, ZtfAlertClassifications, ZtfAlertProperties,
+        DecamAlertProperties, LsstAlertProperties, WinterAlertProperties, ZtfAlertClassifications,
+        ZtfAlertProperties,
     },
     filter::{
         build_filter_pipeline, reject_unknown_candidate_fields, Filter, FilterError, FilterVersion,
@@ -42,7 +43,7 @@ async fn validate_watchlist(
             WATCHLIST_PREFIX
         ));
     }
-    if !catalog_accessible(db, watchlist, Some(user)).await {
+    if !catalog_accessible(db, watchlist, user, config).await {
         return Err(format!(
             "watchlist '{}' does not exist or is not accessible to the user",
             watchlist
@@ -1722,10 +1723,15 @@ pub struct DecamAlertToFilter {
     #[serde(rename = "objectId")]
     pub object_id: String,
     pub candidate: DecamCandidate,
+    pub properties: DecamAlertProperties,
     pub coordinates: GalacticCoordinates,
     pub prv_candidates: Vec<DecamCandidate>,
     pub fp_hists: Vec<DecamForcedPhot>,
     pub aliases: DecamAliases,
+    #[serde(rename = "ZTF")]
+    pub ztf: Option<ZtfFilterMatch>,
+    #[serde(rename = "LSST")]
+    pub lsst: Option<LsstFilterMatch>,
     pub host_galaxy: Option<HostGalaxyAssociation>,
 }
 
@@ -1894,6 +1900,10 @@ mod schema_tests {
             "\"magap\"",
             "\"sigmagap\"",
             "\"snr\"",
+            "\"properties\"",
+            "\"photstats\"",
+            "\"ZTF\"",
+            "\"LSST\"",
         ] {
             assert!(
                 s.contains(field),

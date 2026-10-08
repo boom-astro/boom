@@ -7,7 +7,7 @@ use crate::enrichment::{
         applecider_postprocess::{self, AppleCiderFusion, AppleCiderModalities},
         AcaiModel, AppleCiderOutputs, BtsBotModel, FusionModel, Model, ModelError, SharedModels,
     },
-    EnrichmentWorker, EnrichmentWorkerError, LsstMatch, LsstPhotometry,
+    EnrichmentWorker, EnrichmentWorkerError, LsstMatch,
 };
 use crate::utils::cutouts::{AlertCutout, CutoutStorage};
 use crate::utils::db::mongify;
@@ -1276,7 +1276,7 @@ impl ZtfEnrichmentWorker {
             .fp_hists
             .iter()
             .filter(|p| p.jd <= alert.candidate.candidate.jd)
-            .filter_map(|p| p.to_photometry_mag(Some(3.0)))
+            .filter_map(|p| p.to_photometry_mag(None))
             .collect();
 
         let mut lightcurve = [prv_candidates, fp_hists].concat();
@@ -1309,18 +1309,13 @@ impl ZtfEnrichmentWorker {
         let mut has_matches = false;
         if let Some(survey_matches) = &alert.survey_matches {
             if let Some(lsst_match) = &survey_matches.lsst {
-                let lsst_mags = |points: &[LsstPhotometry], min_snr| -> Vec<PhotometryMag> {
-                    points
-                        .iter()
-                        .filter(|p| p.jd <= candidate.jd)
-                        .filter_map(|p| p.to_photometry_mag(min_snr))
-                        .collect()
-                };
-                let mut lsst_lightcurve = [
-                    lsst_mags(&lsst_match.prv_candidates, None),
-                    lsst_mags(&lsst_match.fp_hists, Some(3.0)),
-                ]
-                .concat();
+                let mut lsst_lightcurve: Vec<PhotometryMag> = lsst_match
+                    .prv_candidates
+                    .iter()
+                    .chain(&lsst_match.fp_hists)
+                    .filter(|p| p.jd <= candidate.jd)
+                    .filter_map(|p| p.to_photometry_mag(None))
+                    .collect();
                 prepare_photometry(&mut lsst_lightcurve);
                 lightcurve.extend(lsst_lightcurve);
                 has_matches = true;
@@ -1341,11 +1336,11 @@ impl ZtfEnrichmentWorker {
                 .prv_candidates
                 .iter()
                 .map(|p| (p.jd, p.flux.filter(|f| !f.is_nan()).map(|f| f < 0.0))),
-            // snr_psf is set only above SNT, so it marks a forced detection.
+            // magpsf is set only above SNT, so it marks a forced detection.
             alert
                 .fp_hists
                 .iter()
-                .filter(|p| p.snr_psf.is_some())
+                .filter(|p| p.magpsf.is_some())
                 .map(|p| p.jd),
             candidate.jd,
             EPISODE_GAP_DAYS,
