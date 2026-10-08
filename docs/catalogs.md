@@ -155,7 +155,38 @@ still resolves to the same catalog definition.
 | `galex` | `GALEX` | gzipped CSV | per release | Ultraviolet FUV/NUV photometry from the All-Sky Imaging Survey. |
 | `vsx` | `VSX` | fixed-width text | 1 | Variability types, magnitudes, epochs and periods for known and suspected variable stars. |
 | `panstarrs` | `PS1_DR2` | parquet | HEALPix partitions | Mean PSF magnitudes in grizy, from the HATS mirror of the DR2 otmo table. Requester-pays S3. Does not include the PS1-STRM `strm_*` columns crossmatch config projects. |
+| `lsdr9` | `LSDR9` | parquet, from FITS pairs | one per `dr9/north` sweep file | Fluxes, Tractor shapes and photo-z posteriors for the BASS+MzLS reduction, which covers the sky DR10's DECam footprint does not reach. Each chunk is one published sweep file merged with its photo-z counterpart. No i-band: DR9 predates it. |
 | `lspsc` | `LSPSC` | gzipped JSONL, **staged** | one per exported chunk | Morphological resolved/unresolved scores for 3.1×10⁹ LS DR10 sources ([Liu et al. 2025](https://arxiv.org/abs/2505.17174)). Upstream is a cone-search API, so BOOM ingests an export of its own copy — see below. |
+
+### The two Legacy Survey releases
+
+DR9 and DR10 are separate collections, `LSDR9` and `LSDR10`, and only the first
+is ingested here. DR10.1 is mirrored as a HATS catalog, which is a column
+projection away from being an ordinary definition; DR9 is not, so it comes from
+the NERSC sweeps as FITS and is merged and converted chunk by chunk. `LSDR10`
+has no definition at all and is built outside BOOM — see below.
+
+Both pack `objid`, `brickid` and `release` into one `_id` with the release in the
+high bits, so the two releases cannot collide even where their footprints
+overlap, and a galaxy that appears in both is two documents in two collections
+rather than one overwriting the other.
+
+Two cuts narrow what DR9 contributes, both in
+`boompy/src/boompy/catalogs/lsdr9.py`:
+
+- **Only `dr9/north`.** It is the BASS+MzLS reduction, covering sky DR10 does
+  not. `dr9/south` is another terabyte re-reducing sky DR10 already has.
+- **Only Dec > 32.375**, the declination at which the survey switches
+  reductions. The survey's own rule for counting a source once also requires it
+  to be north of the Galactic plane, handing the rest to `dr9/south`. That half
+  is deliberately not applied: without `dr9/south` ingested, it would leave the
+  Dec > 32.375, b < 0 sky with no coverage at all rather than covering it from
+  the other reduction.
+
+A chunk is a sweep file and its photo-z file, which are row-matched rather than
+joined on an id. The ingest checks that before merging them, because a truncated
+download would otherwise attach each source to a different source's redshift and
+nothing downstream could tell.
 
 ### Staged catalogs
 

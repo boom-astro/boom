@@ -944,6 +944,188 @@ impl super::arrow::FromRecordBatch for PanStarrs {
 
 impl HasCoordinates for PanStarrs {}
 
+// ---------------------------------------------------------------------------
+// Legacy Survey DR9 -- parquet, merged from the published sweep and photo-z
+// FITS pairs by boompy
+// ---------------------------------------------------------------------------
+
+/// The Legacy Survey composite id: `objid + (brickid << N) + (release << 40)`.
+///
+/// A brick id occupies 16 bits before DR10 (release < 10000) and 20 from DR10
+/// on, which is the packing the `LSDR10` collection's ids were built with. The
+/// release sits above both, so a DR9 and a DR10 source sharing a brick and an
+/// object number still get different ids -- which is what lets a deployment
+/// hold both releases without either one's documents landing on the other's.
+fn legacy_survey_id(release: i64, brickid: i64, objid: i64) -> i64 {
+    let shift = if release >= 10_000 { 20 } else { 16 };
+    objid + (brickid << shift) + (release << 40)
+}
+
+/// One Legacy Survey DR9 source, with the photo-z columns merged in.
+///
+/// Field names are DR10's, because the crossmatch projections and the
+/// host-galaxy association are written against those and a DR9 row has to
+/// answer to the same names. `flux_i` is the exception and is absent rather
+/// than null: DR9 predates the i-band, so there is no such column upstream.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Serialize, Deserialize)]
+pub struct LsDr9 {
+    #[serde(rename(serialize = "_id"))]
+    pub id: i64,
+    pub ra: f64,
+    pub dec: f64,
+    /// Tractor morphological type: `PSF`, `REX`, `EXP`, `DEV`, `SER` or `DUP`.
+    /// Stored as `objtype` because `type` is what the sweeps call it and a
+    /// document key of that name reads as a BSON type to anyone skimming.
+    pub objtype: String,
+    pub ebv: Option<f64>,
+    pub z_spec: Option<f64>,
+    /// Which survey contributed the spectroscopic redshift, absent when none
+    /// did.
+    pub survey: Option<String>,
+    pub z_phot_mean: Option<f64>,
+    pub z_phot_median: Option<f64>,
+    pub z_phot_std: Option<f64>,
+    pub z_phot_l95: Option<f64>,
+    pub z_phot_u95: Option<f64>,
+    pub flux_g: Option<f64>,
+    pub flux_r: Option<f64>,
+    pub flux_z: Option<f64>,
+    pub flux_w1: Option<f64>,
+    pub flux_w2: Option<f64>,
+    pub flux_w3: Option<f64>,
+    pub flux_w4: Option<f64>,
+    /// Tractor ellipse: half-light radius in arcsec and the two ellipticity
+    /// components. `shape_r` is 0 for point sources, which have no extent.
+    pub shape_r: Option<f64>,
+    pub shape_e1: Option<f64>,
+    pub shape_e2: Option<f64>,
+    /// Sersic index, fit only for `SER` objects. Putting the half-light radius
+    /// on an isophotal scale needs it; `REX` and `EXP` are n = 1 and `DEV` is
+    /// n = 4 by definition, so its absence is not a missing measurement there.
+    pub sersic: Option<f64>,
+    /// Per-band inverse variances. `flux_r * sqrt(flux_ivar_r)` is the r-band
+    /// signal-to-noise that separates a marginal `REX` detection from a real
+    /// galaxy; g and z give that cut a fallback when r is missing.
+    pub flux_ivar_g: Option<f64>,
+    pub flux_ivar_r: Option<f64>,
+    pub flux_ivar_z: Option<f64>,
+    /// Fraction of the flux in this object's aperture contributed by its
+    /// neighbors. A high value marks a shredded fragment of a larger galaxy
+    /// rather than a host.
+    pub fracflux_g: Option<f64>,
+    pub fracflux_r: Option<f64>,
+    pub fracflux_z: Option<f64>,
+    /// Exposures per band. A zero distinguishes "not observed in this band"
+    /// from "observed and not detected", which otherwise both read as a
+    /// missing flux.
+    pub nobs_g: Option<i64>,
+    pub nobs_r: Option<i64>,
+    pub nobs_z: Option<i64>,
+}
+
+impl super::arrow::FromRecordBatch for LsDr9 {
+    fn from_batch(
+        batch: &::arrow::array::RecordBatch,
+    ) -> Result<Vec<Self>, super::arrow::ColumnError> {
+        use super::arrow::{f64_column, i64_column, string_column};
+
+        // boompy writes exactly these columns out of each sweep and photo-z
+        // pair. Naming them again here is how the reader says what it needs,
+        // and a column that stopped being written fails with its own name
+        // rather than becoming a collection of null fields.
+        let release = i64_column(batch, "release")?;
+        let brickid = i64_column(batch, "brickid")?;
+        let objid = i64_column(batch, "objid")?;
+        let ra = f64_column(batch, "ra")?;
+        let dec = f64_column(batch, "dec")?;
+        let objtype = string_column(batch, "type")?;
+        let ebv = f64_column(batch, "ebv")?;
+        let z_spec = f64_column(batch, "z_spec")?;
+        let survey = string_column(batch, "survey")?;
+        let z_phot_mean = f64_column(batch, "z_phot_mean")?;
+        let z_phot_median = f64_column(batch, "z_phot_median")?;
+        let z_phot_std = f64_column(batch, "z_phot_std")?;
+        let z_phot_l95 = f64_column(batch, "z_phot_l95")?;
+        let z_phot_u95 = f64_column(batch, "z_phot_u95")?;
+        let flux_g = f64_column(batch, "flux_g")?;
+        let flux_r = f64_column(batch, "flux_r")?;
+        let flux_z = f64_column(batch, "flux_z")?;
+        let flux_w1 = f64_column(batch, "flux_w1")?;
+        let flux_w2 = f64_column(batch, "flux_w2")?;
+        let flux_w3 = f64_column(batch, "flux_w3")?;
+        let flux_w4 = f64_column(batch, "flux_w4")?;
+        let shape_r = f64_column(batch, "shape_r")?;
+        let shape_e1 = f64_column(batch, "shape_e1")?;
+        let shape_e2 = f64_column(batch, "shape_e2")?;
+        let sersic = f64_column(batch, "sersic")?;
+        let flux_ivar_g = f64_column(batch, "flux_ivar_g")?;
+        let flux_ivar_r = f64_column(batch, "flux_ivar_r")?;
+        let flux_ivar_z = f64_column(batch, "flux_ivar_z")?;
+        let fracflux_g = f64_column(batch, "fracflux_g")?;
+        let fracflux_r = f64_column(batch, "fracflux_r")?;
+        let fracflux_z = f64_column(batch, "fracflux_z")?;
+        let nobs_g = i64_column(batch, "nobs_g")?;
+        let nobs_r = i64_column(batch, "nobs_r")?;
+        let nobs_z = i64_column(batch, "nobs_z")?;
+
+        let mut rows = Vec::with_capacity(batch.num_rows());
+        for row in 0..batch.num_rows() {
+            // Without all three id columns there is no stable `_id`, so a
+            // resumed ingest would duplicate the row rather than overwrite it;
+            // without a position it cannot be crossmatched at all. Skip either
+            // rather than fabricate the missing half.
+            let (Some(release), Some(brickid), Some(objid), Some(ra), Some(dec), Some(objtype)) = (
+                release[row],
+                brickid[row],
+                objid[row],
+                ra[row],
+                dec[row],
+                objtype[row].clone(),
+            ) else {
+                continue;
+            };
+            rows.push(LsDr9 {
+                id: legacy_survey_id(release, brickid, objid),
+                ra,
+                dec,
+                objtype,
+                ebv: ebv[row],
+                z_spec: z_spec[row],
+                survey: survey[row].clone(),
+                z_phot_mean: z_phot_mean[row],
+                z_phot_median: z_phot_median[row],
+                z_phot_std: z_phot_std[row],
+                z_phot_l95: z_phot_l95[row],
+                z_phot_u95: z_phot_u95[row],
+                flux_g: flux_g[row],
+                flux_r: flux_r[row],
+                flux_z: flux_z[row],
+                flux_w1: flux_w1[row],
+                flux_w2: flux_w2[row],
+                flux_w3: flux_w3[row],
+                flux_w4: flux_w4[row],
+                shape_r: shape_r[row],
+                shape_e1: shape_e1[row],
+                shape_e2: shape_e2[row],
+                sersic: sersic[row],
+                flux_ivar_g: flux_ivar_g[row],
+                flux_ivar_r: flux_ivar_r[row],
+                flux_ivar_z: flux_ivar_z[row],
+                fracflux_g: fracflux_g[row],
+                fracflux_r: fracflux_r[row],
+                fracflux_z: fracflux_z[row],
+                nobs_g: nobs_g[row],
+                nobs_r: nobs_r[row],
+                nobs_z: nobs_z[row],
+            });
+        }
+        Ok(rows)
+    }
+}
+
+impl HasCoordinates for LsDr9 {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1158,6 +1340,162 @@ mod tests {
     /// Reads the source rather than instances because there is nothing
     /// generic to iterate: the types share no trait, and a twelfth catalog is
     /// added by writing a twelfth struct.
+    /// One DR9 row with every column boompy writes, filled with plausible
+    /// values; the names in `absent` are written as nulls instead.
+    fn lsdr9_batch(absent: &[&str]) -> ::arrow::array::RecordBatch {
+        use ::arrow::array::{ArrayRef, Float64Array, Int64Array, RecordBatch, StringArray};
+        use ::arrow::datatypes::{Field, Schema};
+        use std::sync::Arc;
+
+        const INTS: [(&str, i64); 6] = [
+            ("release", 9011),
+            ("brickid", 7),
+            ("objid", 3),
+            ("nobs_g", 2),
+            ("nobs_r", 3),
+            ("nobs_z", 0),
+        ];
+        const STRINGS: [(&str, &str); 2] = [("type", "SER"), ("survey", "SDSS")];
+        const FLOATS: [(&str, f64); 26] = [
+            ("ra", 10.5),
+            ("dec", 40.25),
+            ("ebv", 0.02),
+            ("z_spec", 0.11),
+            ("z_phot_mean", 0.12),
+            ("z_phot_median", 0.13),
+            ("z_phot_std", 0.01),
+            ("z_phot_l95", 0.05),
+            ("z_phot_u95", 0.2),
+            ("flux_g", 10.0),
+            ("flux_r", 20.0),
+            ("flux_z", 30.0),
+            ("flux_w1", 40.0),
+            ("flux_w2", 41.0),
+            ("flux_w3", 42.0),
+            ("flux_w4", 43.0),
+            ("shape_r", 1.5),
+            ("shape_e1", 0.1),
+            ("shape_e2", -0.2),
+            ("sersic", 2.0),
+            ("flux_ivar_g", 100.0),
+            ("flux_ivar_r", 200.0),
+            ("flux_ivar_z", 300.0),
+            ("fracflux_g", 0.01),
+            ("fracflux_r", 0.02),
+            ("fracflux_z", 0.03),
+        ];
+
+        let mut fields = Vec::new();
+        let mut columns: Vec<ArrayRef> = Vec::new();
+        for (name, value) in INTS {
+            let value = (!absent.contains(&name)).then_some(value);
+            fields.push(Field::new(name, ::arrow::datatypes::DataType::Int64, true));
+            columns.push(Arc::new(Int64Array::from(vec![value])));
+        }
+        for (name, value) in STRINGS {
+            let value = (!absent.contains(&name)).then_some(value);
+            fields.push(Field::new(name, ::arrow::datatypes::DataType::Utf8, true));
+            columns.push(Arc::new(StringArray::from(vec![value])));
+        }
+        for (name, value) in FLOATS {
+            let value = (!absent.contains(&name)).then_some(value);
+            fields.push(Field::new(
+                name,
+                ::arrow::datatypes::DataType::Float64,
+                true,
+            ));
+            columns.push(Arc::new(Float64Array::from(vec![value])));
+        }
+        RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).expect("valid batch")
+    }
+
+    fn one_lsdr9_row(absent: &[&str]) -> Vec<LsDr9> {
+        use crate::catalogs::arrow::FromRecordBatch;
+        LsDr9::from_batch(&lsdr9_batch(absent)).expect("every column is present")
+    }
+
+    #[test]
+    fn lsdr9_id_keeps_the_releases_apart() {
+        // Same brick and object number in two releases: the shift rule is what
+        // makes those two different documents rather than one overwriting the
+        // other if a deployment holds both.
+        assert_ne!(
+            legacy_survey_id(9011, 7, 3),
+            legacy_survey_id(10000, 7, 3),
+            "DR9 and DR10 ids collide"
+        );
+        // The survey's own rule: 16 bits for the brick before DR10, 20 from
+        // DR10 on, and the release above both.
+        assert_eq!(legacy_survey_id(9011, 1, 3), 3 + (1 << 16) + (9011 << 40));
+        assert_eq!(legacy_survey_id(10000, 1, 3), 3 + (1 << 20) + (10000 << 40));
+    }
+
+    #[test]
+    fn lsdr9_document_keys_are_the_ones_the_crossmatch_projections_read() {
+        // These are DR10's column names, and config.yaml's LSDR10 projection
+        // plus the host-galaxy association are written against them. A DR9 row
+        // that answered to different names would store fine and then project
+        // to nothing.
+        let doc = mongodb::bson::to_document(&one_lsdr9_row(&[])[0]).expect("serializes");
+        for key in [
+            "_id",
+            "ra",
+            "dec",
+            "objtype",
+            "ebv",
+            "z_spec",
+            "z_phot_mean",
+            "z_phot_median",
+            "shape_r",
+            "shape_e1",
+            "shape_e2",
+            "sersic",
+            "flux_r",
+            "flux_ivar_r",
+            "fracflux_r",
+            "nobs_r",
+        ] {
+            assert!(doc.contains_key(key), "{key} is missing from the document");
+        }
+        // `type` is the sweep's name for it, and would read as a BSON type.
+        assert!(!doc.contains_key("type"));
+        // DR9 predates the i-band, so this is absent rather than null.
+        assert!(!doc.contains_key("flux_i"));
+        assert_eq!(doc.get_str("objtype").ok(), Some("SER"));
+        assert_eq!(doc.get_i64("_id").ok(), Some(legacy_survey_id(9011, 7, 3)));
+    }
+
+    #[test]
+    fn lsdr9_omits_a_measurement_the_survey_does_not_have() {
+        // boompy turns the photo-z sweeps' -99 into a null. Storing it as a key
+        // with no value would be read as a redshift by anything that projects
+        // the field and checks only for its presence.
+        let doc = mongodb::bson::to_document(&one_lsdr9_row(&["z_spec", "survey"])[0])
+            .expect("serializes");
+        assert!(!doc.contains_key("z_spec"));
+        assert!(!doc.contains_key("survey"));
+        assert!(doc.contains_key("z_phot_mean"));
+    }
+
+    #[test]
+    fn lsdr9_skips_a_row_that_cannot_be_identified_or_placed() {
+        // No id means a resumed chunk inserts the row again instead of
+        // overwriting it; no position means nothing can crossmatch against it.
+        for absent in [
+            vec!["objid"],
+            vec!["brickid"],
+            vec!["release"],
+            vec!["ra"],
+            vec!["dec"],
+            vec!["type"],
+        ] {
+            assert!(
+                one_lsdr9_row(&absent).is_empty(),
+                "a row with no {absent:?} was kept"
+            );
+        }
+    }
+
     #[test]
     fn every_record_type_serializes_an_id() {
         let source = include_str!("types.rs");

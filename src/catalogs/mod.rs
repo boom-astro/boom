@@ -67,6 +67,9 @@ pub enum Reader {
     Vsx,
     /// Pan-STARRS otmo, parquet partitions.
     PanStarrs,
+    /// Legacy Survey DR9, parquet merged from the published sweep and photo-z
+    /// FITS pairs.
+    LsDr9,
     /// Legacy Survey point-source scores, staged gzipped JSONL exported from
     /// BOOM's own copy.
     Lspsc,
@@ -218,6 +221,18 @@ pub const CATALOGS: &[CatalogDef] = &[
         source: Source::Fetched,
         // Configs named PS1_DR1 until #598, though the only mirror was ever DR2.
         aliases: &["PS1_DR1"],
+    },
+    CatalogDef {
+        id: "lsdr9",
+        collection: "LSDR9",
+        title: "Legacy Survey DR9 (north)",
+        description: "Fluxes, Tractor shapes and Zhou et al. photo-z posteriors for the \
+                      BASS+MzLS reduction, which covers the sky DR10's DECam footprint does \
+                      not reach. One chunk per published sweep file, paired with its photo-z \
+                      file. Carries no i-band: DR9 predates it.",
+        reader: Reader::LsDr9,
+        source: Source::Fetched,
+        aliases: &[],
     },
     CatalogDef {
         id: "lspsc",
@@ -747,6 +762,7 @@ async fn ingest_file(
         Reader::Galex => Ok(csv::ingest_csv::<types::Galex>(inserter, path).await?),
         Reader::Vsx => Ok(ascii::ingest_ascii::<types::Vsx>(inserter, path).await?),
         Reader::PanStarrs => Ok(arrow::ingest_parquet::<types::PanStarrs>(inserter, path).await?),
+        Reader::LsDr9 => Ok(arrow::ingest_parquet::<types::LsDr9>(inserter, path).await?),
         Reader::Lspsc => Ok(jsonl::ingest_jsonl::<types::Lspsc>(inserter, path).await?),
     }
 }
@@ -1145,14 +1161,17 @@ mod tests {
     /// The catalog names the shipped config actually crossmatches against.
     ///
     /// Read from `config.yaml` rather than hardcoded, so adding a crossmatch
-    /// entry without a definition shows up here.
+    /// entry without a definition shows up here. Through the config loader
+    /// rather than by scanning for a line pattern, because a pattern that stops
+    /// matching leaves the check passing with nothing to check.
     fn crossmatch_names() -> Vec<String> {
-        let config = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/config.yaml"))
-            .expect("config.yaml");
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/config.yaml");
+        let config = crate::conf::AppConfig::from_path(path).expect("config.yaml loads");
         config
-            .lines()
-            .filter_map(|line| line.trim().strip_prefix("- catalog: "))
-            .map(|name| name.trim().to_string())
+            .crossmatch
+            .values()
+            .flatten()
+            .map(|entry| entry.catalog.clone())
             .collect()
     }
 
@@ -1166,7 +1185,12 @@ mod tests {
             .iter()
             .map(|(name, _)| *name)
             .collect();
-        let unknown: Vec<String> = crossmatch_names()
+        let names = crossmatch_names();
+        assert!(
+            !names.is_empty(),
+            "no crossmatch entries were read from config.yaml, so this proves nothing"
+        );
+        let unknown: Vec<String> = names
             .into_iter()
             .filter(|name| !name.starts_with(crate::api::catalogs::WATCHLIST_PREFIX))
             .filter(|name| find_by_collection(name).is_none())

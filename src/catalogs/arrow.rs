@@ -83,6 +83,11 @@ pub fn f64_column(batch: &RecordBatch, name: &str) -> Result<Vec<Option<f64>>, C
     }
 
     match column.data_type() {
+        // A column no row in this file has a value for. Parquet types that as
+        // null rather than as the column's own type, and it is a real shape for
+        // real data: a Legacy Survey sweep with no photo-z writes every one of
+        // those columns empty.
+        DataType::Null => Ok(vec![None; column.len()]),
         DataType::Float64 => collect!(Float64Array, |v: f64| v),
         DataType::Float32 => collect!(Float32Array, |v: f32| v as f64),
         DataType::Int64 => collect!(Int64Array, |v: i64| v as f64),
@@ -116,6 +121,7 @@ pub fn i64_column(batch: &RecordBatch, name: &str) -> Result<Vec<Option<i64>>, C
     }
 
     match column.data_type() {
+        DataType::Null => Ok(vec![None; column.len()]),
         DataType::Int64 => collect!(Int64Array, |v: i64| v),
         DataType::Int32 => collect!(Int32Array, |v: i32| v as i64),
         DataType::Int16 => collect!(Int16Array, |v: i16| v as i64),
@@ -149,6 +155,7 @@ pub fn string_column(batch: &RecordBatch, name: &str) -> Result<Vec<Option<Strin
     }
 
     match column.data_type() {
+        DataType::Null => Ok(vec![None; column.len()]),
         DataType::Utf8 => collect!(StringArray),
         DataType::LargeUtf8 => collect!(LargeStringArray),
         DataType::Utf8View => collect!(StringViewArray),
@@ -286,6 +293,28 @@ mod tests {
             f64_column(&narrow, "ra").unwrap(),
             vec![Some(1.5), Some(2.5)]
         );
+    }
+
+    #[test]
+    fn a_column_no_row_has_a_value_for_reads_as_absent() {
+        // Parquet types a column that is null all the way down as null rather
+        // than as what it would have been. Rejecting that would fail a whole
+        // chunk over a quantity the archive simply does not have for any row in
+        // it -- which is how the Legacy Survey publishes a sweep with no
+        // photo-z.
+        let rows = 3;
+        let empty = batch(
+            "survey",
+            Arc::new(::arrow::array::NullArray::new(rows)) as arrow::array::ArrayRef,
+        );
+        assert_eq!(string_column(&empty, "survey").unwrap(), vec![None; rows]);
+        assert_eq!(f64_column(&empty, "survey").unwrap(), vec![None; rows]);
+        assert_eq!(i64_column(&empty, "survey").unwrap(), vec![None; rows]);
+        // Still distinguishable from a column that is not there at all.
+        assert!(matches!(
+            string_column(&empty, "absent"),
+            Err(ColumnError::Missing(_))
+        ));
     }
 
     #[test]
