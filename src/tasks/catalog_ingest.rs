@@ -59,6 +59,11 @@ pub enum ParamsError {
     WorkerCount { max: usize },
     #[error("batch_size must be between 1 and {max}")]
     BatchSize { max: usize },
+    #[error(
+        "num_workers x batch_size is {requested} records in flight, more than the {max} \
+         this worker will hold; lower either one"
+    )]
+    TooMuchInFlight { requested: usize, max: usize },
 }
 
 /// Caps on how much of the database one ingest may take.
@@ -67,6 +72,18 @@ pub enum ParamsError {
 /// able to submit a run that starves the alert pipeline.
 const MAX_WORKERS: usize = 16;
 const MAX_BATCH_SIZE: usize = 100_000;
+/// Records that may be in flight at once, across the channel and the batch
+/// each worker is accumulating.
+///
+/// Both limits above are fine on their own and ruinous together: 16 workers at
+/// a batch of 100,000, with a channel sized from the batch, is millions of
+/// records resident. NED and CatWISE rows are wide, so that is gigabytes in a
+/// worker that is also running the alert pipeline -- a request that passes
+/// validation should not be able to OOM it.
+const MAX_RECORDS_IN_FLIGHT: usize = 400_000;
+/// The channel only has to keep the workers fed while the reader parses, so it
+/// is capped outright rather than scaled with the batch.
+const MAX_CHANNEL_RECORDS: usize = 50_000;
 
 impl CatalogIngestParams {
     /// Reject what the worker would only fail on later.
@@ -84,6 +101,13 @@ impl CatalogIngestParams {
         if self.batch_size == 0 || self.batch_size > MAX_BATCH_SIZE {
             return Err(ParamsError::BatchSize {
                 max: MAX_BATCH_SIZE,
+            });
+        }
+        let in_flight = self.num_workers.saturating_mul(self.batch_size);
+        if in_flight > MAX_RECORDS_IN_FLIGHT {
+            return Err(ParamsError::TooMuchInFlight {
+                requested: in_flight,
+                max: MAX_RECORDS_IN_FLIGHT,
             });
         }
         catalogs::find(&self.catalog).ok_or_else(|| ParamsError::UnknownCatalog {
@@ -117,7 +141,7 @@ pub async fn run(
         boompy_dir: PathBuf::from(boompy_dir),
         num_workers: params.num_workers,
         batch_size: params.batch_size,
-        channel_capacity: params.batch_size * 10,
+        channel_capacity: (params.batch_size * 10).min(MAX_CHANNEL_RECORDS),
         max_chunks: params.max_chunks,
         keep_downloads: false,
     };
@@ -162,4 +186,90 @@ pub async fn run(
     }
 
     serde_json::to_value(&report).map_err(|e| super::TaskError::Failed(e.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn params() -> CatalogIngestParams {
+        CatalogIngestParams {
+            catalog: "2mass".to_string(),
+            drop_existing: false,
+            max_chunks: None,
+            num_workers: default_num_workers(),
+            batch_size: default_batch_size(),
+        }
+    }
+
+    #[test]
+    fn the_defaults_are_accepted() {
+        // The form submits these, so a default that fails validation would make
+        // the button unusable.
+        assert!(params().validate().is_ok());
+        assert!(
+            default_num_workers() * default_batch_size() <= MAX_RECORDS_IN_FLIGHT,
+            "the defaults have to sit inside the in-flight bound"
+        );
+    }
+
+    /// The two caps are each fine alone and ruinous together, which is the
+    /// combination a client can ask for while passing both.
+    #[test]
+    fn the_worst_legal_combination_is_rejected() {
+        let mut p = params();
+        p.num_workers = MAX_WORKERS;
+        p.batch_size = MAX_BATCH_SIZE;
+        // Each passes its own cap.
+        assert!(p.num_workers <= MAX_WORKERS && p.batch_size <= MAX_BATCH_SIZE);
+        assert!(matches!(
+            p.validate(),
+            Err(ParamsError::TooMuchInFlight { .. })
+        ));
+    }
+
+    #[test]
+    fn the_channel_does_not_grow_with_the_batch() {
+        // Sized from the batch it would be 10x a batch of 100,000, which is
+        // the allocation the bound above exists to prevent.
+        assert_eq!(
+            (MAX_BATCH_SIZE * 10).min(MAX_CHANNEL_RECORDS),
+            MAX_CHANNEL_RECORDS
+        );
+    }
+
+    #[test]
+    fn degenerate_and_unknown_requests_are_refused() {
+        let cases: Vec<(&str, Box<dyn Fn(&mut CatalogIngestParams)>)> = vec![
+            (
+                "no workers",
+                Box::new(|p: &mut CatalogIngestParams| p.num_workers = 0),
+            ),
+            (
+                "too many workers",
+                Box::new(|p: &mut CatalogIngestParams| p.num_workers = MAX_WORKERS + 1),
+            ),
+            (
+                "no batch",
+                Box::new(|p: &mut CatalogIngestParams| p.batch_size = 0),
+            ),
+            (
+                "batch too large",
+                Box::new(|p: &mut CatalogIngestParams| p.batch_size = MAX_BATCH_SIZE + 1),
+            ),
+            (
+                "zero chunks",
+                Box::new(|p: &mut CatalogIngestParams| p.max_chunks = Some(0)),
+            ),
+            (
+                "unknown catalog",
+                Box::new(|p: &mut CatalogIngestParams| p.catalog = "no-such-catalog".into()),
+            ),
+        ];
+        for (name, apply) in cases {
+            let mut p = params();
+            apply(&mut p);
+            assert!(p.validate().is_err(), "{name} should be refused at submit");
+        }
+    }
 }
