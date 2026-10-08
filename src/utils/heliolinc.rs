@@ -1866,23 +1866,54 @@ mod tests {
     /// Pieces of two different objects stay apart even when both fit alone.
     #[test]
     fn test_pieces_of_different_objects_are_not_joined() {
-        let objects = [survey_object(3), survey_object(4)];
-        let (detections, owner) = survey(&objects, &FOUR_NIGHTS);
+        let near = survey_object(3);
+        let twin = OrbitalElements::elliptical(
+            near.epoch_jd,
+            near.a,
+            near.e,
+            near.incl,
+            near.node,
+            near.peri,
+            near.mean_anomaly + 0.02,
+        );
+        let objects = [near, twin];
+        let first_night = night_of(FOUR_NIGHTS[0]);
+        let (all, owner) = survey(&objects, &FOUR_NIGHTS);
+        let detections: Vec<Detection> = all
+            .into_iter()
+            .filter(|d| {
+                let early = night_of(d.jd) - first_night < 3;
+                early == (owner[&d.id] == 0)
+            })
+            .collect();
         let tracklets = survey_tracklets(&detections, &FOUR_NIGHTS);
         let cfg = survey_config(&tracklets);
         let by_id: HashMap<i64, &Detection> = detections.iter().map(|d| (d.id, d)).collect();
-        let first_night = night_of(FOUR_NIGHTS[0]);
-        let pieces_of = |k: usize, nights: std::ops::Range<i64>| -> Vec<usize> {
+        let piece_of = |k: usize| -> Vec<usize> {
             (0..tracklets.len())
-                .filter(|&m| {
-                    owner[&tracklets[m].ids[0]] == k
-                        && nights.contains(&(night_of(tracklets[m].jd_ref) - first_night))
-                })
+                .filter(|&m| owner[&tracklets[m].ids[0]] == k)
                 .collect()
         };
-        let first = fitted_piece(&objects[0], pieces_of(0, 0..3), &tracklets, &by_id, &cfg);
-        let second = fitted_piece(&objects[1], pieces_of(1, 3..8), &tracklets, &by_id, &cfg);
-        let merged = merge_fragments(vec![first, second], &tracklets, &by_id, &cfg);
+        let pieces = vec![
+            fitted_piece(&objects[0], piece_of(0), &tracklets, &by_id, &cfg),
+            fitted_piece(&objects[1], piece_of(1), &tracklets, &by_id, &cfg),
+        ];
+        let members: Vec<Vec<usize>> = pieces.iter().map(sorted_members).collect();
+        let nights: Vec<Vec<i64>> = members
+            .iter()
+            .map(|m| {
+                let mut n: Vec<i64> = m.iter().map(|&k| night_of(tracklets[k].jd_ref)).collect();
+                n.sort_unstable();
+                n.dedup();
+                n
+            })
+            .collect();
+        assert_eq!(
+            merge_candidates(&pieces, &members, &nights, &tracklets, &cfg),
+            vec![(0, 1)],
+            "the neighbors should reach the joint fit"
+        );
+        let merged = merge_fragments(pieces, &tracklets, &by_id, &cfg);
         assert_eq!(merged.len(), 2, "different objects were joined");
     }
 
