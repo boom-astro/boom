@@ -295,6 +295,7 @@ crossmatch:
         _id: 1
         Name: 1
         Descrip: 1
+        objtype: 1
         Qpct: 1
         ra: 1
         dec: 1
@@ -549,6 +550,7 @@ crossmatch:
         _id: 1
         Name: 1
         Descrip: 1
+        objtype: 1
         Qpct: 1
         ra: 1
         dec: 1
@@ -783,6 +785,7 @@ crossmatch:
         _id: 1
         Name: 1
         Descrip: 1
+        objtype: 1
         Qpct: 1
         ra: 1
         dec: 1
