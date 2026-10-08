@@ -316,7 +316,7 @@ async fn validate(
                 continue;
             }
             // check if an SNR is there, if not then skip
-            if fp.get("snr").is_none() || fp.get_f64("snr").unwrap().abs() <= 3.0 {
+            if fp.get("snr").is_none() || fp.get_f64("snr").unwrap().abs() <= f64::from(SNT) {
                 num_skipped += 1;
                 *skipped_by_reason.entry("low_snr").or_insert(0) += 1;
                 continue;
