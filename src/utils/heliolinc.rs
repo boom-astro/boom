@@ -701,11 +701,7 @@ fn best_passing(
             .is_some_and(|r| r <= cfg.max_residual_arcsec)
     };
     // Stable, so equally tight copies keep their hypothesis order.
-    copies.sort_by(|a, b| {
-        a.rms_au
-            .partial_cmp(&b.rms_au)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    copies.sort_by(|a, b| a.rms_au.total_cmp(&b.rms_au));
     let mut distances = std::collections::HashSet::new();
     let (per_distance, rest): (Vec<Track>, Vec<Track>) = copies
         .into_iter()
