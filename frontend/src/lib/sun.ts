@@ -24,8 +24,11 @@ export function subsolarPoint(ms: number): SunPosition {
     Math.cos(eclipticLongitude),
   ) / DEG;
   const declination = Math.asin(Math.sin(obliquity) * Math.sin(eclipticLongitude)) / DEG;
-  const siderealTime = 280.46061837 + 360.98564736629 * d;
-  return { lat: declination, lon: wrapLongitude(rightAscension - siderealTime) };
+  return { lat: declination, lon: wrapLongitude(rightAscension - siderealAngle(ms)) };
+}
+
+export function siderealAngle(ms: number): number {
+  return wrapLongitude(280.46061837 + 360.98564736629 * ((ms - J2000_MS) / DAY_MS));
 }
 
 export function sunAltitude(sun: SunPosition, lat: number, lon: number): number {
