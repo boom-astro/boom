@@ -8,7 +8,12 @@ import pytest
 import requests
 import responses
 
-from boompy.catalog.http import content_length, download, list_index
+from boompy.catalog.http import (
+    content_length,
+    download,
+    list_index,
+    stays_inside,
+)
 
 INDEX_HTML = """
 <html><body>
@@ -130,3 +135,33 @@ def test_the_agent_is_sent_on_download_and_head(tmp_path):
     assert len(responses.calls) == 2
     for call in responses.calls:
         assert call.request.headers["User-Agent"] == USER_AGENT
+
+
+def test_a_listing_entry_cannot_escape_its_directory():
+    """Chunk ids come from the scraped index and are joined onto a destination
+    directory, so a traversal here is a file write outside the staging area.
+    `.` matches a slash, so any pattern using `.*` would admit these."""
+    assert stays_inside("psc_aaa.gz")
+    assert stays_inside("9.0/sweep-000.fits")
+    assert not stays_inside("../../../etc/cron.d/x.csv.gz")
+    assert not stays_inside("/etc/passwd")
+    assert not stays_inside("~/.ssh/authorized_keys")
+    assert not stays_inside("https://elsewhere.example/x.csv.gz")
+
+
+@responses.activate
+def test_list_index_drops_a_traversing_entry():
+    responses.add(
+        responses.GET,
+        "https://archive.example/",
+        body=(
+            '<a href="psc_aaa.gz">a</a><a href="../../etc/psc_evil.gz">b</a>'
+        ),
+    )
+    assert list_index("https://archive.example/", r"psc_[^/]*\.gz") == [
+        "psc_aaa.gz"
+    ]
+    # And it would have been dropped even by a pattern careless about slashes.
+    assert list_index("https://archive.example/", r".*psc_.*\.gz") == [
+        "psc_aaa.gz"
+    ]

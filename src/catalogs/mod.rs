@@ -264,22 +264,6 @@ pub fn find_by_collection(collection: &str) -> Option<&'static CatalogDef> {
         .find(|c| c.collection == collection || c.aliases.contains(&collection))
 }
 
-/// Which catalogs this deployment should hold.
-///
-/// Derived primarily from `crossmatch.<survey>[].catalog`, because that is
-/// where a catalog is actually put to use -- a deployment that crossmatches
-/// against NED needs NED, and having to say so twice is how the two lists drift
-/// apart. `catalogs:` in the config is additive, for catalogs held for direct
-/// querying without being crossmatch targets.
-///
-/// Entries are returned as slugs where the name maps to a known catalog, and as
-/// the raw collection name where it does not, so an unrecognized name surfaces
-/// in the drift table rather than being silently dropped. That is deliberate
-/// and must not become an error: `TNS`, hand-imported collections, and anything
-/// built by `prepare_catalog` are legitimate crossmatch targets that this
-/// registry has no definition for.
-///
-/// Watchlists are excluded -- they are user-managed, not archival catalogs.
 /// Warn about crossmatch collections that are configured but hold nothing.
 ///
 /// A missing collection is not an error in MongoDB: the `$geoWithin` stage and
@@ -348,6 +332,21 @@ pub fn crossmatched(config: &crate::conf::AppConfig) -> Vec<String> {
     names
 }
 
+/// Which catalogs this deployment should hold.
+///
+/// Derived from `crossmatch.<survey>[].catalog`, because that is where a
+/// catalog is actually put to use -- a deployment that crossmatches against
+/// NED needs NED, and having to say so twice is how two lists drift apart.
+///
+/// Entries are returned as slugs where the name maps to a known catalog, and as
+/// the raw collection name where it does not, so an unrecognized name surfaces
+/// in the drift table rather than being silently dropped. `TNS`, hand-imported
+/// collections, and anything built outside BOOM are legitimate crossmatch
+/// targets this registry has no definition for; they are accepted by name
+/// through `WITHOUT_DEFINITIONS`, which is what keeps them from being read as
+/// typos.
+///
+/// Watchlists are excluded -- they are user-managed, not archival catalogs.
 pub fn declared(config: &crate::conf::AppConfig) -> Vec<String> {
     let mut declared: Vec<String> = Vec::new();
     let mut push = |id: String| {
@@ -716,7 +715,15 @@ async fn ingest_chunk(
         label = chunk.label.as_deref().unwrap_or(""),
         "fetching"
     );
-    let files = boompy.fetch_chunk(def.id, &chunk.id, download_dir).await?;
+    // The same condition the deletion below uses: a staged catalog's files are
+    // the artifact, so they are neither confined to `download_dir` nor removed.
+    let cleanup = match def.source {
+        Source::Fetched => download::Cleanup::Deletes,
+        Source::Staged => download::Cleanup::Keeps,
+    };
+    let files = boompy
+        .fetch_chunk(def.id, &chunk.id, download_dir, cleanup)
+        .await?;
 
     let mut report = IngestReport::default();
     let mut result = Ok(());
@@ -1324,8 +1331,17 @@ mod crossmatch_validation_tests {
     #[test]
     fn a_collection_we_cannot_build_is_accepted_by_name() {
         // TNS is a live credentialed feed and LSDR10 is built outside BOOM;
-        // both are real crossmatch targets and must not fail startup.
-        assert!(validate_crossmatch(&crossmatch(&["TNS", "LSPSC"])).is_ok());
+        // both are real crossmatch targets and must not fail startup. Named
+        // from `WITHOUT_DEFINITIONS` rather than picked by hand -- `LSPSC`
+        // used to stand in here and proved nothing, because it is a defined
+        // catalog and so passes through `find_by_collection` instead. That
+        // these names stay undefined is asserted separately.
+        for name in WITHOUT_DEFINITIONS.iter().map(|(name, _)| *name) {
+            assert!(
+                validate_crossmatch(&crossmatch(&[name])).is_ok(),
+                "{name} is in WITHOUT_DEFINITIONS but was rejected"
+            );
+        }
     }
 
     #[test]

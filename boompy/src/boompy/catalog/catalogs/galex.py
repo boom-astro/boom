@@ -20,7 +20,7 @@ ID = "galex"
 #: the files out of band, verify them however it likes, and ingest GALEX as a
 #: staged catalog instead.
 BASE_URL = "http://dolomiti.pha.jhu.edu/uvsky/GUVcat/"
-FILE_PATTERN = r".*\.csv\.gz"
+FILE_PATTERN = r"[^/]+\.csv\.gz"
 
 
 def list_chunks() -> list[Chunk]:

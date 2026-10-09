@@ -17,7 +17,7 @@ BASE_URL = "https://irsa.ipac.caltech.edu/2MASS/download/allsky/"
 
 #: The index also lists checksums and the extended source catalog; only the
 #: point source files are wanted here.
-FILE_PATTERN = r"psc_.*\.gz"
+FILE_PATTERN = r"psc_[^/]*\.gz"
 
 
 ID = "2mass"

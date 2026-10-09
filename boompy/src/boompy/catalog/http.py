@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 import sys
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import requests
 
@@ -54,6 +54,22 @@ def log(message: str) -> None:
     print(message, file=sys.stderr, flush=True)
 
 
+def stays_inside(href: str) -> bool:
+    """Whether `href` names something at or below the listing it came from.
+
+    These names become chunk ids, and a catalog module joins a chunk id onto
+    the directory it was told to write into. The listing is scraped from the
+    archive's own HTML over plain HTTP for some catalogs, so an entry like
+    `../../../etc/cron.d/x.csv.gz` is not hypothetical -- and it matches any
+    pattern written with `.*`, because `.` matches a slash. Refused here rather
+    than relying on every module's pattern being careful, which is the kind of
+    thing that is right until someone adds the thirteenth catalog.
+    """
+    if href.startswith(("/", "~")) or "://" in href or "\\" in href:
+        return False
+    return ".." not in PurePosixPath(href).parts
+
+
 def list_index(url: str, pattern: str) -> list[str]:
     """Filenames in an Apache-style directory index matching `pattern`.
 
@@ -67,7 +83,7 @@ def list_index(url: str, pattern: str) -> list[str]:
     names = {
         href
         for href in re.findall(r'href="([^"]+)"', response.text)
-        if matcher.fullmatch(href)
+        if matcher.fullmatch(href) and stays_inside(href)
     }
     return sorted(names)
 

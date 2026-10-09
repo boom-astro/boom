@@ -98,6 +98,59 @@ impl std::fmt::Debug for Boompy {
     }
 }
 
+/// Whether the ingest will delete what boompy hands back.
+///
+/// This is what decides whether the fetched paths have to sit under `dest`.
+/// The containment check exists only because of the deletion -- a path outside
+/// `dest` would be a delete outside it -- so a catalog whose files BOOM never
+/// deletes must not be held to it. A staged catalog hands back the operator's
+/// own export, which lives wherever they staged it, and
+/// [`docs/catalogs.md`](../../docs/catalogs.md) tells them to stage it beside
+/// the download directory rather than inside it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cleanup {
+    /// The files are a cache of the archive. The ingest deletes them, so they
+    /// must be under `dest`.
+    Deletes,
+    /// The files are the artifact. The ingest leaves them alone, so they may
+    /// live anywhere the catalog module says they do.
+    Keeps,
+}
+
+/// Vet what boompy says it wrote before the ingest reads or deletes any of it.
+///
+/// Trusting the exit status alone would let an empty fetch look like an empty
+/// catalog, which the ingest would happily record as done.
+fn check_fetched(files: &[PathBuf], dest: &Path, cleanup: Cleanup) -> Result<(), DownloadError> {
+    for path in files {
+        if !path.exists() {
+            return Err(DownloadError::MissingFile { path: path.clone() });
+        }
+        // Containment applies only where the ingest deletes them: a path
+        // outside the staging directory would then be a delete outside it, and
+        // taking the subprocess at its word would turn a path-join mistake in
+        // boompy into data loss somewhere else on the host. A staged catalog is
+        // exempt because nothing is deleted -- its chunk ids come from listing
+        // the staged directory and are resolved against it, so the path is
+        // still not free-form.
+        if cleanup == Cleanup::Keeps {
+            continue;
+        }
+        let (resolved, root) = (path.canonicalize(), dest.canonicalize());
+        let contained = match (&resolved, &root) {
+            (Ok(resolved), Ok(root)) => resolved.starts_with(root),
+            _ => false,
+        };
+        if !contained {
+            return Err(DownloadError::OutsideDest {
+                path: path.clone(),
+                dest: dest.to_path_buf(),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Credentials for a requester-pays archive: what BOOM holds them under, and
 /// what boto reads them as.
 ///
@@ -185,6 +238,7 @@ impl Boompy {
         catalog: &str,
         chunk: &str,
         dest: &Path,
+        cleanup: Cleanup,
     ) -> Result<Vec<PathBuf>, DownloadError> {
         let mut cmd = self.command();
         cmd.arg("fetch-chunk")
@@ -194,28 +248,7 @@ impl Boompy {
             .arg("--dest")
             .arg(dest);
         let output: FetchChunkOutput = self.run(cmd, "fetch-chunk", catalog).await?;
-        // Trusting the exit status alone would let an empty fetch look like an
-        // empty catalog, which the ingest would happily record as done.
-        for path in &output.files {
-            if !path.exists() {
-                return Err(DownloadError::MissingFile { path: path.clone() });
-            }
-            // The ingest deletes these files when it is done with them, so a
-            // path outside the staging directory is a delete outside it. Taking
-            // the subprocess at its word here would turn a path-join mistake in
-            // boompy into data loss somewhere else on the host.
-            let (resolved, root) = (path.canonicalize(), dest.canonicalize());
-            let contained = match (&resolved, &root) {
-                (Ok(resolved), Ok(root)) => resolved.starts_with(root),
-                _ => false,
-            };
-            if !contained {
-                return Err(DownloadError::OutsideDest {
-                    path: path.clone(),
-                    dest: dest.to_path_buf(),
-                });
-            }
-        }
+        check_fetched(&output.files, dest, cleanup)?;
         Ok(output.files)
     }
 
@@ -292,6 +325,51 @@ mod tests {
                 .iter()
                 .find(|(k, _)| k == key)
                 .map(|(_, v)| v.to_string())
+        }
+    }
+
+    #[test]
+    fn a_staged_catalog_keeps_its_export_where_the_operator_put_it() {
+        // The regression: `lspsc` stages its export beside the download
+        // directory, exactly where docs/catalogs.md says to, and returns a path
+        // under it. Confining that rejected the only layout the one staged
+        // catalog in the tree has, so no `lspsc` ingest could start.
+        let root = tempfile::tempdir().expect("tempdir");
+        let dest = root.path().join("lspsc");
+        let staged = root.path().join("export/LSPSC");
+        std::fs::create_dir_all(&dest).expect("dest");
+        std::fs::create_dir_all(&staged).expect("staged");
+        let file = staged.join("part-0.parquet");
+        std::fs::write(&file, b"x").expect("write");
+
+        let files = vec![file];
+        assert!(check_fetched(&files, &dest, Cleanup::Keeps).is_ok());
+        // And the guard still holds for a catalog whose files get deleted.
+        assert!(matches!(
+            check_fetched(&files, &dest, Cleanup::Deletes),
+            Err(DownloadError::OutsideDest { .. })
+        ));
+    }
+
+    #[test]
+    fn a_fetched_file_under_dest_is_accepted() {
+        let dest = tempfile::tempdir().expect("tempdir");
+        let file = dest.path().join("chunk.parquet");
+        std::fs::write(&file, b"x").expect("write");
+        assert!(check_fetched(&[file], dest.path(), Cleanup::Deletes).is_ok());
+    }
+
+    #[test]
+    fn a_file_boompy_claimed_but_did_not_write_is_refused() {
+        // Either cleanup mode: an empty fetch recorded as done is how a
+        // catalog ends up silently short.
+        let dest = tempfile::tempdir().expect("tempdir");
+        let missing = vec![dest.path().join("nope.parquet")];
+        for cleanup in [Cleanup::Deletes, Cleanup::Keeps] {
+            assert!(matches!(
+                check_fetched(&missing, dest.path(), cleanup),
+                Err(DownloadError::MissingFile { .. })
+            ));
         }
     }
 

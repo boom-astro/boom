@@ -172,7 +172,7 @@ overlap, and a galaxy that appears in both is two documents in two collections
 rather than one overwriting the other.
 
 Two cuts narrow what DR9 contributes, both in
-`boompy/src/boompy/catalog/lsdr9.py`:
+`boompy/src/boompy/catalog/catalogs/lsdr9.py`:
 
 - **Only `dr9/north`.** It is the BASS+MzLS reduction, covering sky DR10 does
   not. `dr9/south` is another terabyte re-reducing sky DR10 already has.

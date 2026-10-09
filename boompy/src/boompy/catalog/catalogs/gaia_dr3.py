@@ -16,7 +16,7 @@ from ..http import content_length, download, list_index, log
 ID = "gaia-dr3"
 
 BASE_URL = "https://sdsc-users.flatironinstitute.org/~gaia/dr3/csv/GaiaSource/"
-FILE_PATTERN = r"GaiaSource_.*\.csv\.gz"
+FILE_PATTERN = r"GaiaSource_[^/]*\.csv\.gz"
 
 
 def list_chunks() -> list[Chunk]:

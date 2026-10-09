@@ -511,10 +511,17 @@ pub struct DesiDr1 {
     pub survey: String,
     pub program: String,
     pub z: f64,
-    pub zerr: f64,
+    /// Absent rather than `NaN` when the pipeline did not report one.
+    ///
+    /// MongoDB sorts `NaN` below every number, so storing it would make a
+    /// quality cut like `{zerr: {$lt: 0.001}}` match rows whose redshift error
+    /// was never measured -- the same trap `arrow::f64_column` exists to avoid
+    /// for every other column. Omitted from the document when absent, which is
+    /// what the struct's `skip_serializing_none` does for `subtype` too.
+    pub zerr: Option<f64>,
     pub zwarn: i64,
-    pub chi2: f64,
-    pub deltachi2: f64,
+    pub chi2: Option<f64>,
+    pub deltachi2: Option<f64>,
     pub spectype: String,
     pub subtype: Option<String>,
     pub zcat_nspec: i64,
@@ -553,10 +560,10 @@ impl super::arrow::FromRecordBatch for DesiDr1 {
                 survey: survey[i].clone().unwrap_or_default(),
                 program: program[i].clone().unwrap_or_default(),
                 z,
-                zerr: zerr[i].unwrap_or(f64::NAN),
+                zerr: zerr[i],
                 zwarn: zwarn[i].unwrap_or_default(),
-                chi2: chi2[i].unwrap_or(f64::NAN),
-                deltachi2: deltachi2[i].unwrap_or(f64::NAN),
+                chi2: chi2[i],
+                deltachi2: deltachi2[i],
                 spectype: spectype[i].clone().unwrap_or_default(),
                 subtype: subtype[i].clone().filter(|s| !s.is_empty()),
                 zcat_nspec: zcat_nspec[i].unwrap_or_default(),
@@ -1463,6 +1470,34 @@ mod tests {
         assert!(!doc.contains_key("flux_i"));
         assert_eq!(doc.get_str("objtype").ok(), Some("SER"));
         assert_eq!(doc.get_i64("_id").ok(), Some(legacy_survey_id(9011, 7, 3)));
+    }
+
+    #[test]
+    fn desi_omits_a_quality_figure_the_pipeline_did_not_report() {
+        // Not `NaN`: MongoDB sorts NaN below every number, so a cut like
+        // `{zerr: {$lt: 0.001}}` -- and `zerr` is projected by all three
+        // shipped crossmatch configs -- would match rows whose redshift error
+        // was never measured.
+        let row = DesiDr1 {
+            targetid: 1,
+            ra: 10.0,
+            dec: 20.0,
+            survey: "main".into(),
+            program: "dark".into(),
+            z: 0.5,
+            zerr: None,
+            zwarn: 0,
+            chi2: None,
+            deltachi2: None,
+            spectype: "GALAXY".into(),
+            subtype: None,
+            zcat_nspec: 1,
+        };
+        let doc = mongodb::bson::to_document(&row).expect("serializes");
+        for absent in ["zerr", "chi2", "deltachi2"] {
+            assert!(!doc.contains_key(absent), "{absent} was stored");
+        }
+        assert_eq!(doc.get_f64("z").expect("z is stored"), 0.5);
     }
 
     #[test]

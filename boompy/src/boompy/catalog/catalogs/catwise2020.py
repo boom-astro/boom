@@ -18,7 +18,7 @@ ID = "catwise2020"
 
 BASE_URL = "https://portal.nersc.gov/project/cosmo/data/CatWISE/2020/"
 DIR_PATTERN = r"\d+\.\d+/"
-FILE_PATTERN = r".*\.tbl\.gz"
+FILE_PATTERN = r"[^/]+\.tbl\.gz"
 
 COLUMNS = [
     "source_id",
