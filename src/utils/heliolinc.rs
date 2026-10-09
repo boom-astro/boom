@@ -571,11 +571,7 @@ fn tracks_for_hypothesis(
         }
 
         let members: Vec<usize> = group.iter().map(|&g| states[g].0).collect();
-        let nights = members
-            .iter()
-            .map(|&m| night_of(tracklets[m].jd_ref))
-            .collect::<std::collections::HashSet<_>>()
-            .len();
+        let nights = nights_of(&members, tracklets).len();
         if nights < cfg.min_nights {
             continue;
         }
@@ -777,6 +773,17 @@ fn sorted_members(track: &Track) -> Vec<usize> {
     members
 }
 
+/// The nights `members` draw on, by integer JD, ascending.
+fn nights_of(members: &[usize], tracklets: &[Tracklet]) -> Vec<i64> {
+    let mut nights: Vec<i64> = members
+        .iter()
+        .map(|&m| night_of(tracklets[m].jd_ref))
+        .collect();
+    nights.sort_unstable();
+    nights.dedup();
+    nights
+}
+
 /// Whether ascending `small` is contained in ascending `big`.
 fn is_subset(small: &[usize], big: &[usize]) -> bool {
     let mut rest = big.iter();
@@ -840,9 +847,6 @@ fn contained_sets(keys: &[Vec<usize>]) -> Vec<bool> {
         .collect()
 }
 
-/// Rounds of fragment merging. A round joins pairs, so a later round can join
-/// the pieces an earlier one assembled.
-const MERGE_ROUNDS: usize = 3;
 /// How far apart two disjoint fragments' orbits may place them at the
 /// reference epoch and still be compared, degrees. A fragment's orbit is fitted
 /// to a few nights, so it can mispredict the rest of the window by this much.
@@ -868,19 +872,40 @@ fn sky_motion(track: &Track, cfg: &LinkConfig) -> Option<[f64; 4]> {
 }
 
 /// The RA bin of `ra` in dec band `band`, and the band's bin count. Bands are
-/// `size` degrees in dec, and bins roughly `size` wide on the sky.
+/// `size` degrees in dec.
+///
+/// A bin spans at least the RA that `size` on the sky can cover anywhere a
+/// point in the band, or a neighbor within `size` of one, can be. Bins are
+/// therefore sized for the dec farthest from the equator, `size` beyond the
+/// band's poleward edge, and anything within `size` of a point lies in an
+/// adjacent bin of its own or a neighboring band.
 fn sky_cell(ra: f64, band: i64, size: f64) -> (i64, i64) {
-    let centre = ((band as f64 + 0.5) * size).clamp(-89.9, 89.9);
-    let bins = ((360.0 * centre.to_radians().cos() / size).floor() as i64).max(1);
+    let poleward = (band as f64 * size)
+        .abs()
+        .max(((band + 1) as f64 * size).abs());
+    let farthest = (poleward + size).min(90.0).to_radians();
+    // Exact rather than the small-angle `size / cos(dec)`, which falls short
+    // near the poles: haversine bounds the RA difference by this.
+    let half = (size / 2.0).to_radians().sin() / farthest.cos();
+    let width = if half >= 1.0 {
+        360.0
+    } else {
+        2.0 * half.asin().to_degrees()
+    };
+    let bins = ((360.0 / width).floor() as i64).max(1);
     (
         (ra.rem_euclid(360.0) / 360.0 * bins as f64).floor() as i64 % bins,
         bins,
     )
 }
 
-/// Whether `a`'s orbit passes near `b`'s first tracklet.
+/// Whether `a`'s orbit passes near `b`'s earliest tracklet.
 fn predicts(a: &Track, b_members: &[usize], tracklets: &[Tracklet], cfg: &LinkConfig) -> bool {
-    let Some(t) = b_members.first().map(|&m| &tracklets[m]) else {
+    let Some(t) = b_members
+        .iter()
+        .map(|&m| &tracklets[m])
+        .min_by(|x, y| x.jd_ref.total_cmp(&y.jd_ref))
+    else {
         return false;
     };
     predict_radec(&a.state, cfg.reference_jd, t.jd_ref, &cfg.site).is_some_and(|(ra, dec)| {
@@ -962,38 +987,61 @@ fn merge_candidates(
 /// often, since each piece can cluster under a different hypothesis. A track
 /// another one contains is absorbed; any other pair is joined only once its
 /// union is fitted and passes the gate.
+///
+/// Rounds run until one joins nothing. A round joins each track to at most one
+/// other, so a later round joins the pieces an earlier one assembled, and every
+/// round that joins anything leaves fewer tracks, so the rounds end.
 fn merge_fragments(
     mut tracks: Vec<Track>,
     tracklets: &[Tracklet],
     by_id: &HashMap<i64, &Detection>,
     cfg: &LinkConfig,
 ) -> Vec<Track> {
-    for _ in 0..MERGE_ROUNDS {
+    // Pairs whose union failed the gate, by their members. A track no round
+    // joins keeps its members, so its pairs would only be fitted again.
+    let mut failed: std::collections::HashSet<(Vec<usize>, Vec<usize>)> =
+        std::collections::HashSet::new();
+    // Indices change between rounds, so a pair is known by its members, in
+    // order so either way round finds it.
+    let pair_key = |a: &Vec<usize>, b: &Vec<usize>| {
+        if a <= b {
+            (a.clone(), b.clone())
+        } else {
+            (b.clone(), a.clone())
+        }
+    };
+    loop {
         let members: Vec<Vec<usize>> = tracks.iter().map(sorted_members).collect();
-        let nights: Vec<Vec<i64>> = members
-            .iter()
-            .map(|m| {
-                let mut n: Vec<i64> = m.iter().map(|&k| night_of(tracklets[k].jd_ref)).collect();
-                n.sort_unstable();
-                n.dedup();
-                n
-            })
-            .collect();
+        let nights: Vec<Vec<i64>> = members.iter().map(|m| nights_of(m, tracklets)).collect();
         let pairs = merge_candidates(&tracks, &members, &nights, tracklets, cfg);
 
-        let mut joined: Vec<(usize, usize, Track)> = pairs
+        let attempts: Vec<(usize, usize, Option<Track>)> = pairs
             .par_iter()
-            .filter_map(|&(i, j)| {
+            .filter(|&&(i, j)| !failed.contains(&pair_key(&members[i], &members[j])))
+            .map(|&(i, j)| {
                 // A track inside another adds nothing to it.
                 if is_subset(&members[i], &members[j]) {
-                    return Some((i, j, tracks[j].clone()));
+                    return (i, j, Some(tracks[j].clone()));
                 }
                 if is_subset(&members[j], &members[i]) {
-                    return Some((i, j, tracks[i].clone()));
+                    return (i, j, Some(tracks[i].clone()));
                 }
-                try_merge(&tracks[i], &tracks[j], tracklets, by_id, cfg).map(|t| (i, j, t))
+                (
+                    i,
+                    j,
+                    try_merge(&tracks[i], &tracks[j], tracklets, by_id, cfg),
+                )
             })
             .collect();
+        let mut joined: Vec<(usize, usize, Track)> = Vec::new();
+        for (i, j, track) in attempts {
+            match track {
+                Some(track) => joined.push((i, j, track)),
+                None => {
+                    failed.insert(pair_key(&members[i], &members[j]));
+                }
+            }
+        }
         if joined.is_empty() {
             break;
         }
@@ -1066,11 +1114,7 @@ fn try_merge(
         .collect();
     members.sort_unstable();
     members.dedup();
-    let nights = members
-        .iter()
-        .map(|&m| night_of(tracklets[m].jd_ref))
-        .collect::<std::collections::HashSet<_>>()
-        .len();
+    let nights = nights_of(&members, tracklets).len();
     let union = |seed: &Track| Track {
         members: members.clone(),
         hypothesis: seed.hypothesis,
@@ -1776,10 +1820,8 @@ mod tests {
     /// on its own, and overlapping versions of one object are joined.
     #[test]
     fn test_each_object_is_reported_as_one_track() {
-        let objects: Vec<OrbitalElements> = (0..12).map(survey_object).collect();
-        let (detections, owner) = survey(&objects, &SURVEY_NIGHTS);
-        let tracklets = survey_tracklets(&detections, &SURVEY_NIGHTS);
-        let tracks = link_tracklets(&tracklets, &detections, &survey_config(&tracklets));
+        let (detections, tracklets, owner, cfg) = small_survey();
+        let tracks = link_tracklets(&tracklets, &detections, &cfg);
         let mut per_object: HashMap<usize, usize> = HashMap::new();
         for track in &tracks {
             for k in owners_of(track, &tracklets, &owner) {
@@ -1809,11 +1851,7 @@ mod tests {
             (b[1] - a[1]) / 0.1,
             (b[2] - a[2]) / 0.1,
         ];
-        let nights = members
-            .iter()
-            .map(|&m| night_of(tracklets[m].jd_ref))
-            .collect::<std::collections::HashSet<_>>()
-            .len();
+        let nights = nights_of(&members, tracklets).len();
         let mut track = Track {
             members,
             hypothesis: Hypothesis {
@@ -1863,6 +1901,67 @@ mod tests {
         assert_eq!(merged[0].nights, 4);
     }
 
+    /// Every point within the merge radius of another lies in an adjacent cell,
+    /// including near a band's poleward edge, where the RA a radius covers is
+    /// widest.
+    #[test]
+    fn test_neighbors_on_the_sky_share_adjacent_cells() {
+        let size = MERGE_RADIUS_DEG;
+        let reach = size * 0.999;
+        let mut dec = -89.95;
+        while dec < 90.0 {
+            for ra in [0.0, 0.7, 123.4, 359.9] {
+                let band = (dec / size).floor() as i64;
+                for bearing in 0..72 {
+                    let theta = (bearing as f64 * 5.0).to_radians();
+                    // A point `reach` away along `theta`.
+                    let (d0, r) = (dec.to_radians(), reach.to_radians());
+                    let d1 = (d0.sin() * r.cos() + d0.cos() * r.sin() * theta.cos()).asin();
+                    let dra = (theta.sin() * r.sin() * d0.cos())
+                        .atan2(r.cos() - d0.sin() * d1.sin())
+                        .to_degrees();
+                    let (ra_j, dec_j) = ((ra + dra).rem_euclid(360.0), d1.to_degrees());
+                    assert!(angular_separation_deg(ra, dec, ra_j, dec_j) <= size);
+                    let band_j = (dec_j / size).floor() as i64;
+                    assert!((band_j - band).abs() <= 1, "dec {dec} -> {dec_j}");
+                    let (x_j, bins) = sky_cell(ra_j, band_j, size);
+                    let (x, _) = sky_cell(ra, band_j, size);
+                    let gap = (x_j - x).rem_euclid(bins).min((x - x_j).rem_euclid(bins));
+                    assert!(
+                        gap <= 1,
+                        "({ra}, {dec}) and ({ra_j}, {dec_j}) are {gap} bins apart"
+                    );
+                }
+            }
+            dec += 0.05;
+        }
+    }
+
+    /// An object split into more overlapping pieces than a few rounds of
+    /// pairwise joins can assemble still comes back as one track.
+    #[test]
+    fn test_a_long_chain_of_pieces_becomes_one_track() {
+        let el = survey_object(3);
+        let nights: Vec<f64> = (0..10).map(|k| 2460010.70 + 2.0 * k as f64).collect();
+        let (detections, _) = survey(std::slice::from_ref(&el), &nights);
+        let tracklets = survey_tracklets(&detections, &nights);
+        assert_eq!(tracklets.len(), nights.len(), "one tracklet a night");
+        let cfg = survey_config(&tracklets);
+        let by_id: HashMap<i64, &Detection> = detections.iter().map(|d| (d.id, d)).collect();
+
+        // Nine pieces, each sharing a night with the next: three rounds of
+        // pairwise joins assemble at most eight.
+        let pieces: Vec<Track> = (0..nights.len() - 1)
+            .map(|k| fitted_piece(&el, vec![k, k + 1], &tracklets, &by_id, &cfg))
+            .collect();
+        let merged = merge_fragments(pieces, &tracklets, &by_id, &cfg);
+        assert_eq!(merged.len(), 1, "pieces left apart: {}", merged.len());
+        assert_eq!(
+            sorted_members(&merged[0]),
+            (0..nights.len()).collect::<Vec<_>>()
+        );
+    }
+
     /// Pieces of two different objects stay apart even when both fit alone.
     #[test]
     fn test_pieces_of_different_objects_are_not_joined() {
@@ -1899,15 +1998,7 @@ mod tests {
             fitted_piece(&objects[1], piece_of(1), &tracklets, &by_id, &cfg),
         ];
         let members: Vec<Vec<usize>> = pieces.iter().map(sorted_members).collect();
-        let nights: Vec<Vec<i64>> = members
-            .iter()
-            .map(|m| {
-                let mut n: Vec<i64> = m.iter().map(|&k| night_of(tracklets[k].jd_ref)).collect();
-                n.sort_unstable();
-                n.dedup();
-                n
-            })
-            .collect();
+        let nights: Vec<Vec<i64>> = members.iter().map(|m| nights_of(m, &tracklets)).collect();
         assert_eq!(
             merge_candidates(&pieces, &members, &nights, &tracklets, &cfg),
             vec![(0, 1)],
