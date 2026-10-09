@@ -572,7 +572,7 @@ async fn persist_clusters(
         let designation = members
             .iter()
             .find_map(|id| labels.get(id))
-            .cloned()
+            .map(|l| boom::utils::mpcorb::normalize_ztf_ssnamenr(l).unwrap_or_else(|| l.clone()))
             .or_else(|| known.get(i).cloned().flatten());
         let fit = Some((verdict.0, verdict.residual()));
         let plan = match plan_upsert(db, &members, &jds, designation, fit).await {
@@ -679,7 +679,7 @@ async fn persist_tracks(
         let designation = members
             .iter()
             .find_map(|id| labels.get(id))
-            .cloned()
+            .map(|l| boom::utils::mpcorb::normalize_ztf_ssnamenr(l).unwrap_or_else(|| l.clone()))
             .or_else(|| known.get(i).cloned().flatten());
         // None means too few points to constrain an orbit; anything that
         // survived with a residual already passed the gate.
