@@ -238,6 +238,7 @@ pub struct KnownRule {
     /// unrelated neighbour moving almost in parallel drifts by tens of
     /// arcseconds a night.
     pub max_scatter_arcsec: f64,
+    pub max_drift_arcsec_per_day: f64,
 }
 
 impl Default for KnownRule {
@@ -251,6 +252,7 @@ impl Default for KnownRule {
             min_fraction: 2.0 / 3.0,
             min_nights: 2,
             max_scatter_arcsec: 10.0,
+            max_drift_arcsec_per_day: 2.0,
         }
     }
 }
@@ -279,9 +281,12 @@ pub fn track_designation(
     let nights: std::collections::BTreeSet<i64> = agreeing.iter().map(|m| night_of(m.jd)).collect();
     let separations: Vec<f64> = agreeing.iter().map(|m| m.separation_arcsec).collect();
     let centre = median(&separations)?;
-    let steady = separations
-        .iter()
-        .all(|s| (s - centre).abs() <= rule.max_scatter_arcsec);
+    let jds: Vec<f64> = agreeing.iter().map(|m| m.jd).collect();
+    let middle = median(&jds)?;
+    let steady = agreeing.iter().all(|m| {
+        (m.separation_arcsec - centre).abs()
+            <= rule.max_scatter_arcsec + rule.max_drift_arcsec_per_day * (m.jd - middle).abs()
+    });
     (agreeing.len() as f64 >= rule.min_fraction * n_detections as f64
         && nights.len() >= rule.min_nights
         && steady)

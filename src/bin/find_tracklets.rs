@@ -172,6 +172,13 @@ struct Cli {
     #[arg(long, default_value_t = 10.0)]
     known_max_scatter: f64,
 
+    #[arg(
+        long,
+        default_value_t = 2.0,
+        help = "How much further the separation may stray per day from the middle of the arc, arcseconds: a catalogued orbit's error drifts slowly over a long track"
+    )]
+    known_max_drift: f64,
+
     /// Report at most this many tracklets.
     #[arg(long, default_value_t = 20)]
     show: usize,
@@ -1176,6 +1183,7 @@ async fn match_known(
         min_fraction: args.known_fraction,
         min_nights: args.known_min_nights,
         max_scatter_arcsec: args.known_max_scatter,
+        max_drift_arcsec_per_day: args.known_max_drift,
     };
     let known: Vec<Option<String>> = groups
         .iter()
