@@ -1,6 +1,9 @@
 """Script to read the Kafka output from the BOOM throughput test."""
 # /// script
-# requires-python = ">=3.13"
+# # Capped below 3.15: confluent-kafka ships no wheels for it yet, so uv picks
+# # the newest interpreter it is allowed, falls back to building the sdist, and
+# # the build fails on a librdkafka header the runner does not have.
+# requires-python = ">=3.13,<3.15"
 # dependencies = [
 #     "confluent-kafka",
 # ]

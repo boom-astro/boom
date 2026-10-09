@@ -1,6 +1,9 @@
 """Script to benchmark BOOM."""
 # /// script
-# requires-python = ">=3.13"
+# # Capped below 3.15 for the same reason as read-kafka-output.py, which this
+# # script runs: the two should agree on an interpreter, and a dependency here
+# # losing its wheels would fail the benchmark the same way.
+# requires-python = ">=3.13,<3.15"
 # dependencies = [
 #     "pyyaml",
 #     "pandas>2",
