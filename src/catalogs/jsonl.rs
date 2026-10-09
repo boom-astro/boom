@@ -193,4 +193,60 @@ mod tests {
         collection.drop().await.unwrap();
         let _ = std::fs::remove_file(&path);
     }
+
+    /// One `Inserter` serves every chunk of a run, so the off-sphere cap has to
+    /// be scoped to the file rather than to the inserter.
+    ///
+    /// Counted run-wide it was an upstream-noise budget for the whole catalog:
+    /// Pan-STARRS lists thousands of files, and a steady handful of bad
+    /// positions per file -- well inside what any one file tolerates -- would
+    /// spend the allowance in the first few chunks and then fail every
+    /// subsequent run at whichever chunk happened to cross the line.
+    #[tokio::test]
+    async fn the_off_sphere_cap_is_spent_per_file_rather_than_per_run() {
+        let db = crate::conf::get_test_db().await;
+        let name = "test_jsonl_off_sphere_cap";
+        let collection = db.collection::<mongodb::bson::Document>(name);
+        collection
+            .delete_many(mongodb::bson::doc! {})
+            .await
+            .unwrap();
+
+        let dir = std::env::temp_dir().join("boom_jsonl_off_sphere");
+        std::fs::create_dir_all(&dir).unwrap();
+        // A row that parses and then turns out not to be on the sphere, which
+        // is the case the cap counts -- an unparseable line is `ascii.rs`'s.
+        let off_sphere = |id: u64| format!(r#"{{"_id":{id},"ra":150.0,"dec":91.0}}"#);
+        let write = |path: &std::path::Path, rows: u64, first_id: u64| {
+            let mut file = std::fs::File::create(path).unwrap();
+            for i in 0..rows {
+                writeln!(file, "{}", off_sphere(first_id + i)).unwrap();
+            }
+            writeln!(file, "{LINE}").unwrap();
+        };
+
+        // At the cap, twice over, through the one inserter a run would use.
+        let inserter = Inserter::new(db.clone(), name, 2, 1, 4);
+        for (n, first_id) in [(0u64, 0u64), (1, 1_000)] {
+            let path = dir.join(format!("part-{n:04}.jsonl"));
+            write(&path, super::super::ingest::MAX_OFF_SPHERE, first_id);
+            let report = ingest_jsonl::<super::super::types::Lspsc>(&inserter, &path)
+                .await
+                .unwrap_or_else(|e| panic!("file {n} should be inside the cap: {e}"));
+            assert_eq!(report.skipped, super::super::ingest::MAX_OFF_SPHERE);
+            let _ = std::fs::remove_file(&path);
+        }
+
+        // And the cap still bites within a file.
+        let path = dir.join("part-0002.jsonl");
+        write(&path, super::super::ingest::MAX_OFF_SPHERE + 1, 2_000);
+        let outcome = ingest_jsonl::<super::super::types::Lspsc>(&inserter, &path).await;
+        assert!(
+            outcome.is_err(),
+            "a file that is mostly off the sphere must still fail"
+        );
+        let _ = std::fs::remove_file(&path);
+
+        collection.drop().await.unwrap();
+    }
 }

@@ -80,6 +80,19 @@ describe("countIssues", () => {
     expect(countIssues([catalog("LSPSCC", "undeclared", false)]).count).toBe(1);
   });
 
+  it("does not count a collection that is built outside the ingest path", () => {
+    // LSDR10 and TNS have no definition on purpose, and every deployment
+    // crossmatches at least one of them. Counted, the badge would be lit on
+    // every deployment forever, which is how a real issue goes unread.
+    const { count, label } = countIssues([
+      catalog("LSDR10", "external"),
+      catalog("TNS", "external"),
+      catalog("2mass", "present"),
+    ]);
+    expect(count).toBe(0);
+    expect(label).toBe("Every crossmatched catalog is present");
+  });
+
   it("is zero for a deployment that declares nothing", () => {
     expect(countIssues([]).count).toBe(0);
   });

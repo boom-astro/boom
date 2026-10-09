@@ -55,6 +55,9 @@ export function countIssues(catalogs: CatalogStatus[]): CatalogIssues {
   const partial = configured.filter((c) => c.health === "partial").length;
   // An unknown slug cannot be fixed by clicking Ingest -- it needs a catalog
   // definition or a config correction -- but it is still something to address.
+  // A collection built outside the ingest path is not: it has no definition on
+  // purpose, so counting it would leave the badge permanently lit and the
+  // operator reading past it.
   const unknown = catalogs.filter((c) => c.health === "undeclared").length;
 
   const parts: string[] = [];

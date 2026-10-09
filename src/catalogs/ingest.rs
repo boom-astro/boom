@@ -73,14 +73,19 @@ enum Rendered {
     OffSphere(Document),
 }
 
-/// How many off-sphere rows to tolerate before giving up on the catalog.
+/// How many off-sphere rows to tolerate before giving up on a file.
 ///
 /// The same trade as the parse-error cap in `ascii.rs`: a handful of bad
 /// positions in a hundred-million-row catalog is upstream noise, while a file
 /// that is mostly rejects means the columns are not what the record type says
 /// they are -- degrees read as radians, or ra and dec the other way round --
 /// and ingesting the remainder would quietly install a half-empty catalog.
-const MAX_OFF_SPHERE: u64 = 100;
+///
+/// Per file, like that cap, because one [`Inserter`] serves every chunk of a
+/// run: a run-wide count would spend the whole allowance on the first few
+/// chunks and then fail a catalog of thousands of files for a rate of bad rows
+/// that any one file comfortably survives.
+pub(super) const MAX_OFF_SPHERE: u64 = 100;
 
 /// A pool of insert workers fed by a bounded channel.
 pub struct Inserter {
@@ -95,9 +100,6 @@ pub struct Inserter {
     /// while a chunk is still running. A chunk of a large catalog takes minutes,
     /// and without this the only feedback until it finishes is the log.
     inserted: Arc<AtomicU64>,
-    /// Records the workers refused, across every worker. Shared so the cap in
-    /// [`MAX_OFF_SPHERE`] counts the catalog rather than one worker's share.
-    skipped: Arc<AtomicU64>,
 }
 
 /// What one pool of workers did, summed over the pool.
@@ -142,7 +144,6 @@ impl Inserter {
             batch_size: batch_size.max(1),
             channel_capacity: channel_capacity.max(1),
             inserted: Arc::new(AtomicU64::new(0)),
-            skipped: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -174,15 +175,19 @@ impl Inserter {
     {
         let (sender, receiver) = async_channel::bounded::<T>(self.channel_capacity);
         let mut workers = Vec::with_capacity(self.num_workers);
+        // Per call rather than per `Inserter`: this is what scopes
+        // [`MAX_OFF_SPHERE`] to one file, and it is shared across the pool so
+        // the cap counts the file rather than one worker's share of it.
+        let off_sphere = Arc::new(AtomicU64::new(0));
         for worker_id in 0..self.num_workers {
             let receiver = receiver.clone();
             let collection = self.collection();
             let batch_size = self.batch_size;
             let inserted = self.inserted.clone();
-            let skipped = self.skipped.clone();
+            let off_sphere = off_sphere.clone();
             workers.push(tokio::spawn(async move {
                 insert_worker(
-                    worker_id, receiver, collection, batch_size, inserted, skipped,
+                    worker_id, receiver, collection, batch_size, inserted, off_sphere,
                 )
                 .await
             }));
@@ -247,7 +252,7 @@ async fn insert_worker<T>(
     collection: Collection<Document>,
     batch_size: usize,
     inserted_total: Arc<AtomicU64>,
-    skipped_total: Arc<AtomicU64>,
+    off_sphere: Arc<AtomicU64>,
 ) -> Result<Tally, IngestError>
 where
     T: Serialize + HasCoordinates,
@@ -260,7 +265,7 @@ where
             Rendered::Ready(doc) => batch.push(doc),
             Rendered::OffSphere(doc) => {
                 tally.skipped += 1;
-                let seen = skipped_total.fetch_add(1, Ordering::Relaxed) + 1;
+                let seen = off_sphere.fetch_add(1, Ordering::Relaxed) + 1;
                 // Only the first few: a catalog whose columns are wrong would
                 // otherwise write millions of identical lines into the run log.
                 if seen <= 5 {

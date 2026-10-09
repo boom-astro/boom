@@ -470,6 +470,11 @@ pub struct AddCatalogReport {
 /// rather than duplicates. A run cut short by a cancellation, a deploy or a
 /// crash therefore costs one chunk, not the whole catalog.
 ///
+/// `drop_existing` is re-run safe too, which is less obvious: a requeued run
+/// still carries it, so the drop is attributed to the run that performed it and
+/// a second attempt at the same run resumes rather than starting the catalog
+/// over.
+///
 /// Cancellation is checked at chunk boundaries. Stopping mid-chunk would leave
 /// a partially written chunk unrecorded, which the next run would redo anyway --
 /// so the wait is bounded by one chunk and buys a clean resume point.
@@ -515,7 +520,19 @@ pub async fn add_catalog(
         });
     }
 
-    if params.drop_existing {
+    // A requeued run is handed back its original parameters, so `drop_existing`
+    // is still set when the reaper gives this run to a second worker. Dropping
+    // a second time would discard every chunk the first attempt landed and
+    // restart a multi-day ingest from zero, which is the opposite of what
+    // resuming the run is for. The state document names the run that dropped
+    // it, so a retry recognizes its own work and resumes instead.
+    let run = ctx.task_id();
+    let dropped = should_drop(
+        params.drop_existing,
+        run,
+        dropped_by(&state, def.collection).await?.as_deref(),
+    );
+    if dropped {
         tracing::warn!("dropping {} and its ingest state", def.collection);
         ctx.warn(format!(
             "dropping {} and its ingest state before re-ingesting {} chunk(s)",
@@ -524,6 +541,12 @@ pub async fn add_catalog(
         ));
         db.collection::<Document>(def.collection).drop().await?;
         state.delete_one(doc! { "_id": def.collection }).await?;
+    } else if params.drop_existing {
+        ctx.info(format!(
+            "{} was already dropped by this run, so this attempt resumes the re-ingest \
+             rather than starting it over",
+            def.collection
+        ));
     }
 
     let done = chunks_done(&state, def.collection).await?;
@@ -552,7 +575,15 @@ pub async fn add_catalog(
         complete: false,
         canceled: false,
     };
-    let claim = start_state(&state, def, chunks.len()).await?;
+    // Attributed only when this attempt did the dropping: a run that merely
+    // resumed must leave the attribution to whichever run earned it.
+    let claim = start_state(
+        &state,
+        def,
+        chunks.len(),
+        dropped.then_some(run).filter(|r| !r.is_empty()),
+    )
+    .await?;
 
     for chunk in &chunks {
         if done.contains(&chunk.id) {
@@ -812,25 +843,55 @@ async fn start_state(
     state: &mongodb::Collection<Document>,
     def: &CatalogDef,
     chunks_total: usize,
+    dropped_by: Option<&str>,
 ) -> Result<mongodb::bson::oid::ObjectId, CatalogError> {
     let token = mongodb::bson::oid::ObjectId::new();
+    let mut set = doc! {
+        "catalog": def.id,
+        "status": "ingesting",
+        "chunks_total": chunks_total as i64,
+        "claim": token,
+        "updated_at": now(),
+    };
+    // Written only by the attempt that dropped, and never cleared here: a
+    // resumed attempt that overwrote it would make the next retry drop again.
+    if let Some(run) = dropped_by {
+        set.insert("dropped_by", run);
+    }
     state
         .update_one(
             doc! { "_id": def.collection },
             doc! {
-                "$set": {
-                    "catalog": def.id,
-                    "status": "ingesting",
-                    "chunks_total": chunks_total as i64,
-                    "claim": token,
-                    "updated_at": now(),
-                },
+                "$set": set,
                 "$setOnInsert": { "started_at": now(), "n_records": 0i64 },
             },
         )
         .upsert(true)
         .await?;
     Ok(token)
+}
+
+/// Whether this attempt should drop the collection, given what the state
+/// document already says about it.
+///
+/// A run with no id is a detached context, which no reaper requeues, so it
+/// always drops when asked.
+fn should_drop(requested: bool, run: &str, dropped_by: Option<&str>) -> bool {
+    requested && (run.is_empty() || dropped_by != Some(run))
+}
+
+/// The run that last dropped this collection, if the state document says.
+///
+/// Absent for a catalog nobody has re-ingested from scratch, and absent again
+/// after the next drop, which deletes the document along with the collection.
+async fn dropped_by(
+    state: &mongodb::Collection<Document>,
+    collection: &str,
+) -> Result<Option<String>, CatalogError> {
+    Ok(state
+        .find_one(doc! { "_id": collection })
+        .await?
+        .and_then(|doc| doc.get_str("dropped_by").ok().map(str::to_string)))
 }
 
 /// Record a chunk as done, atomically with its record count.
@@ -893,6 +954,12 @@ pub enum CatalogHealth {
     /// Declared in config, but this release has no definition for it. Almost
     /// always a typo in the slug.
     Undeclared,
+    /// Declared in config, has no definition, and is not meant to have one --
+    /// [`WITHOUT_DEFINITIONS`] names it and says why. Kept distinct from
+    /// `undeclared` so the two collections that are deliberately populated
+    /// elsewhere do not sit on the admin page as permanent typos, which is
+    /// exactly how a real typo would stop being noticed.
+    External,
 }
 
 /// The state of one catalog this release can ingest.
@@ -924,8 +991,10 @@ pub struct CatalogStatus {
 /// the window in which crossmatches silently return nothing.
 ///
 /// `declared` still contributes, so a name in config that this release has no
-/// definition for shows up as [`CatalogHealth::Undeclared`] rather than being
-/// dropped from the page.
+/// definition for shows up rather than being dropped from the page -- as
+/// [`CatalogHealth::Undeclared`] if it looks like a typo, or as
+/// [`CatalogHealth::External`] if [`WITHOUT_DEFINITIONS`] says it is populated
+/// outside the ingest path.
 ///
 /// Reports; never acts. Ingesting a catalog is hours to days of work and has to
 /// stay an explicit, attributed decision. See `docs/catalogs.md`.
@@ -964,11 +1033,18 @@ pub async fn status(
     let mut statuses = Vec::with_capacity(ids.len());
     for id in &ids {
         let Some(def) = find(id) else {
+            // A name this release deliberately cannot build reports why rather
+            // than reporting a typo; the explanation is the one config load
+            // already accepts it on.
+            let external = without_definition(id);
             statuses.push(CatalogStatus {
                 id: id.clone(),
                 collection: None,
-                title: None,
-                health: CatalogHealth::Undeclared,
+                title: external.map(str::to_string),
+                health: match external {
+                    Some(_) => CatalogHealth::External,
+                    None => CatalogHealth::Undeclared,
+                },
                 chunks_done: 0,
                 chunks_total: 0,
                 n_records: 0,
@@ -1074,9 +1150,19 @@ pub const WITHOUT_DEFINITIONS: &[(&str, &str)] = &[
 
 /// Names a crossmatch entry may use without having an ingest definition.
 pub fn is_known_without_definition(collection: &str) -> bool {
+    without_definition(collection).is_some()
+}
+
+/// Why this release has no definition for a collection it nonetheless allows.
+///
+/// The reason is carried rather than discarded because it is what the admin
+/// page shows in place of a title: "no definition" on its own reads as a bug,
+/// and the next person's first move is to go looking for the missing one.
+pub fn without_definition(collection: &str) -> Option<&'static str> {
     WITHOUT_DEFINITIONS
         .iter()
-        .any(|(name, _)| *name == collection)
+        .find(|(name, _)| *name == collection)
+        .map(|(_, why)| *why)
 }
 
 /// Reject crossmatch entries naming a catalog this release knows nothing about.
@@ -1391,9 +1477,9 @@ mod state_tests {
         state.delete_many(doc! {}).await.unwrap();
         let def = a_def();
 
-        let first = start_state(&state, &def, 10).await.unwrap();
+        let first = start_state(&state, &def, 10, None).await.unwrap();
         // A second claim of the same run, as the reaper requeuing it produces.
-        let second = start_state(&state, &def, 10).await.unwrap();
+        let second = start_state(&state, &def, 10, None).await.unwrap();
         assert_ne!(first, second, "each claim gets its own token");
 
         let recorded = record_chunk(&state, def.collection, "chunk-1", 5, first)
@@ -1421,6 +1507,50 @@ mod state_tests {
         state.delete_many(doc! {}).await.unwrap();
     }
 
+    /// The retry case for `drop_existing`: a requeued run is handed back its
+    /// original parameters, so the second attempt would drop the collection it
+    /// is halfway through ingesting and start the catalog over.
+    #[tokio::test]
+    async fn a_retried_drop_existing_run_keeps_what_it_has_already_ingested() {
+        let db = crate::conf::get_test_db().await;
+        let state = db.collection::<Document>("test_catalog_state_dropped_by");
+        state.delete_many(doc! {}).await.unwrap();
+        let def = a_def();
+
+        // Nothing has dropped this collection, so the first attempt must.
+        assert!(should_drop(true, "run-1", None));
+        let claim = start_state(&state, &def, 3, Some("run-1")).await.unwrap();
+        assert!(record_chunk(&state, def.collection, "chunk-1", 5, claim)
+            .await
+            .unwrap());
+
+        // The same run, claimed again after its lease lapsed. It recognizes its
+        // own drop and resumes.
+        let dropper = dropped_by(&state, def.collection).await.unwrap();
+        assert_eq!(dropper.as_deref(), Some("run-1"));
+        assert!(!should_drop(true, "run-1", dropper.as_deref()));
+        start_state(&state, &def, 3, None).await.unwrap();
+        assert_eq!(
+            chunks_done(&state, def.collection).await.unwrap().len(),
+            1,
+            "the chunk the first attempt landed has to survive the retry"
+        );
+        assert_eq!(
+            dropped_by(&state, def.collection).await.unwrap().as_deref(),
+            Some("run-1"),
+            "an attempt that only resumed must leave the attribution alone, or the \
+             attempt after it would drop again"
+        );
+
+        // A different run asking for the same thing is a fresh request, not a
+        // retry, and does drop.
+        assert!(should_drop(true, "run-2", Some("run-1")));
+        // And a run that never asked never drops.
+        assert!(!should_drop(false, "run-3", None));
+
+        state.delete_many(doc! {}).await.unwrap();
+    }
+
     /// A claim deleted by `drop_existing` cannot be matched by a token minted
     /// before it, even though the counter-like sequence would restart.
     #[tokio::test]
@@ -1430,12 +1560,12 @@ mod state_tests {
         state.delete_many(doc! {}).await.unwrap();
         let def = a_def();
 
-        let first = start_state(&state, &def, 3).await.unwrap();
+        let first = start_state(&state, &def, 3, None).await.unwrap();
         state
             .delete_one(doc! { "_id": def.collection })
             .await
             .unwrap();
-        let second = start_state(&state, &def, 3).await.unwrap();
+        let second = start_state(&state, &def, 3, None).await.unwrap();
 
         assert_ne!(first, second);
         assert!(
@@ -1601,5 +1731,33 @@ mod status_tests {
             .expect("listed");
         assert_eq!(row.health, CatalogHealth::Undeclared);
         assert!(row.collection.is_none());
+    }
+
+    /// The collections in `WITHOUT_DEFINITIONS` have no definition on purpose,
+    /// and every deployment crossmatches at least one of them.
+    ///
+    /// Reported as typos they are two rows of permanent false alarm on the
+    /// admin page, which is how a real typo stops being noticed.
+    #[tokio::test]
+    async fn a_name_that_is_meant_to_have_no_definition_says_so_instead() {
+        let db = crate::conf::get_test_db().await;
+        let declared: Vec<String> = WITHOUT_DEFINITIONS
+            .iter()
+            .map(|(name, _)| name.to_string())
+            .collect();
+        let statuses = status(&db, &declared, &declared).await.expect("reads");
+
+        for (name, why) in WITHOUT_DEFINITIONS {
+            let row = statuses
+                .iter()
+                .find(|s| s.id == *name)
+                .unwrap_or_else(|| panic!("{name} should be listed"));
+            assert_eq!(row.health, CatalogHealth::External, "{name} is not a typo");
+            // The reason travels with the row: "no definition" with nothing
+            // beside it sends the reader looking for one that was never meant
+            // to exist.
+            assert_eq!(row.title.as_deref(), Some(*why));
+            assert!(row.crossmatched, "{name} was declared as crossmatched");
+        }
     }
 }

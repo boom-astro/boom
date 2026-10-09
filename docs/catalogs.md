@@ -211,6 +211,12 @@ that is neither defined nor listed there:
 - **`TNS`** — a live, credentialed feed rather than an archival download,
   populated outside the catalog ingest path.
 
+The admin page lists both, with the reason from `WITHOUT_DEFINITIONS` in place
+of a title and a state of **Built elsewhere** rather than **Unknown slug**, and
+the drift badge does not count them. The distinction is the point: a name with
+no definition is otherwise reported as a probable typo, and two rows of
+permanent false alarm are how a real typo stops being noticed.
+
 ## When BOOM is the provenance
 
 Some catalogs cannot be fetched again. `LSPSC` is the worked example: Liu et al.

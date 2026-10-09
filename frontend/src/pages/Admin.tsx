@@ -48,6 +48,10 @@ function healthLabel(health: CatalogHealth): { text: string; variant: "default" 
       return { text: "Partial", variant: "destructive" };
     case "undeclared":
       return { text: "Unknown slug", variant: "outline" };
+    // Not a problem to fix: the collection is real and populated by something
+    // other than the ingest. The row's title says what.
+    case "external":
+      return { text: "Built elsewhere", variant: "secondary" };
   }
 }
 
@@ -142,9 +146,11 @@ function CatalogsTable({
                           {run!.status === "queued" ? "Queued…" : "Running…"}
                         </Button>
                       ) : (
-                        // An unknown slug is a config typo; there is nothing to
-                        // ingest and offering a button would be misleading.
+                        // Neither an unknown slug nor a collection built
+                        // elsewhere has anything to ingest, and offering a
+                        // button would be misleading.
                         catalog.health !== "undeclared" &&
+                        catalog.health !== "external" &&
                         catalog.health !== "present" && (
                           <Button
                             size="sm"

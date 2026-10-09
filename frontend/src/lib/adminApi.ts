@@ -8,8 +8,18 @@ import { fetchWithAuth, parseResponseJson, unwrapData } from "./api";
 
 const API_BASE = "/api";
 
-/** How a declared catalog compares to what is actually in the database. */
-export type CatalogHealth = "present" | "missing" | "partial" | "undeclared";
+/** How a declared catalog compares to what is actually in the database.
+ *
+ *  "undeclared" is a name config asks for that this release has no definition
+ *  for -- almost always a typo. "external" is one it deliberately has no
+ *  definition for, because the collection is populated outside the ingest path;
+ *  its `title` carries the reason. */
+export type CatalogHealth =
+  | "present"
+  | "missing"
+  | "partial"
+  | "undeclared"
+  | "external";
 
 export type CatalogStatus = {
   id: string;
