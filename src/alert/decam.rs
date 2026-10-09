@@ -308,6 +308,34 @@ impl DecamAlertWorker {
         })
     }
 
+    /// Points the matched ZTF and LSST objects back at this DECam object when
+    /// they have no DECam alias yet, rather than waiting for their next alert.
+    #[instrument(skip(self, aliases), err)]
+    async fn link_counterparts(
+        &self,
+        object_id: &str,
+        aliases: &DecamAliases,
+    ) -> Result<(), AlertError> {
+        for (ids, collection) in [
+            (&aliases.ztf, &self.ztf_alert_aux_collection),
+            (&aliases.lsst, &self.lsst_alert_aux_collection),
+        ] {
+            if let Some(id) = ids.first() {
+                collection
+                    .update_one(
+                        doc! {
+                            "_id": id,
+                            "aliases": { "$type": "object" },
+                            "aliases.DECAM.0": { "$exists": false },
+                        },
+                        doc! { "$set": { "aliases.DECAM": [object_id] } },
+                    )
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
     async fn get_existing_aux(
         &self,
         object_id: &str,
@@ -520,6 +548,11 @@ impl AlertWorker for DecamAlertWorker {
                 .await
                 .inspect_err(as_error!())?,
         );
+        if let Some(aliases) = &survey_matches {
+            self.link_counterparts(&object_id, aliases)
+                .await
+                .inspect_err(as_error!())?;
+        }
 
         let existing_alert_aux = self.get_existing_aux(&object_id).await?;
 
