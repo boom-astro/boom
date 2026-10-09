@@ -343,6 +343,14 @@ pub async fn plan_upsert(
     // belongs to one track, so it stays with the one that already holds it and
     // is dropped here rather than stamped over.
     let absorbed: Vec<&String> = id.iter().chain(superseded.iter()).collect();
+    let designation = designation.or_else(|| {
+        absorbed.iter().find_map(|a| {
+            existing
+                .iter()
+                .find(|t| &&t.id == a)
+                .and_then(|t| t.designation.clone())
+        })
+    });
     let mut owned_elsewhere: std::collections::HashSet<i64> = std::collections::HashSet::new();
     for t in existing.iter().filter(|t| !absorbed.contains(&&t.id)) {
         owned_elsewhere.extend(t.members.iter().copied());
