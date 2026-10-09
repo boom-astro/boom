@@ -2,13 +2,14 @@
 
 import json
 import pkgutil
+from pathlib import Path
 
 import pytest
 import responses
 
 from boompy.catalog import CATALOGS, catalogs, get, registry
 from boompy.catalog.base import CatalogModule, Chunk, already_complete
-from boompy.catalog.cli import main
+from boompy.catalog.cli import FetchChunkOutput, ListChunksOutput, main
 
 TWOMASS_INDEX = """
 <a href="psc_aaa.gz">psc_aaa.gz</a>
@@ -149,6 +150,26 @@ def test_cli_keeps_logs_off_stdout(capsys):
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "unknown catalog" in captured.err
+
+
+def test_output_json_shapes_match_the_rust_structs():
+    """`ListChunksOutput` and `FetchChunkOutput` exist on both sides of the
+    subprocess boundary, and only the key names hold them together."""
+    listing = ListChunksOutput(catalog="2mass", chunks=[Chunk(id="psc_aaa.gz")])
+    assert listing.as_json() == {
+        "catalog": "2mass",
+        "chunks": [{"id": "psc_aaa.gz", "label": None}],
+    }
+    fetched = FetchChunkOutput(
+        catalog="2mass", chunk="psc_aaa.gz", files=[Path("psc_aaa.gz")]
+    )
+    assert fetched.as_json() == {
+        "catalog": "2mass",
+        "chunk": "psc_aaa.gz",
+        # Resolved against the test's cwd, which is the point: the caller's is
+        # not ours.
+        "files": [str(Path("psc_aaa.gz").resolve())],
+    }
 
 
 def test_chunk_json_shape_matches_the_rust_struct():

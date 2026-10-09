@@ -41,6 +41,8 @@ class CatalogModule(Protocol):
     """What a module in this package has to define to be a catalog."""
 
     #: Kebab-case slug, matching the `CatalogDef.id` on the Rust side.
+    #: Uppercase because what this describes is a module-level constant
+    #: in each catalog file, not an attribute of an instance.
     ID: str
 
     def list_chunks(self) -> list[Chunk]:

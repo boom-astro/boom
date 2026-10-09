@@ -1148,6 +1148,23 @@ mod tests {
     }
 
     #[test]
+    fn no_catalog_claims_a_collection_the_api_protects() {
+        // `catalog_state` is this module's own bookkeeping, and the others hold
+        // filters, users and stats. A definition naming one of them would have
+        // an ingest writing catalog documents into it, and the collection is
+        // hidden from the catalogs listing, so nothing would show the clash.
+        for def in CATALOGS {
+            for name in std::iter::once(def.collection).chain(def.aliases.iter().copied()) {
+                assert!(
+                    !crate::api::db::PROTECTED_COLLECTION_NAMES.contains(&name),
+                    "catalog {} claims protected collection {name}",
+                    def.id
+                );
+            }
+        }
+    }
+
+    #[test]
     fn every_definition_is_reachable_by_both_keys() {
         for def in CATALOGS {
             assert_eq!(find(def.id).map(|d| d.collection), Some(def.collection));
