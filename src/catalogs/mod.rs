@@ -1112,6 +1112,40 @@ pub fn validate_crossmatch(
     ))
 }
 
+/// An `AppConfig` from `path`, with a stand-in environment.
+///
+/// Deserializing an `AppConfig` requires the secrets a deployment supplies
+/// -- the database password, the API keys, and, for any config with
+/// `milvus.enabled` (`config/prod/umn` has it), the milvus credentials. A
+/// substituted environment rather than `set_var` keeps that off the other
+/// tests in this binary and makes the result the same whether or not the
+/// developer has a `.env` loaded. Secret *validation* is `check_config`'s
+/// job, which `make check-configs` runs on every one of these files.
+#[cfg(test)]
+fn config_from(path: &str) -> crate::conf::AppConfig {
+    let env: config::Map<String, String> = [
+        ("BOOM_DATABASE__PASSWORD", "test-db-password"),
+        ("BOOM_API__AUTH__SECRET_KEY", "test-secret-key"),
+        ("BOOM_API__AUTH__ADMIN_PASSWORD", "test-admin-password"),
+        ("BOOM_MILVUS__USERNAME", "test-milvus-username"),
+        ("BOOM_MILVUS__PASSWORD", "test-milvus-password"),
+    ]
+    .iter()
+    .map(|(key, value)| (key.to_string(), value.to_string()))
+    .collect();
+    config::Config::builder()
+        .add_source(config::File::from(std::path::Path::new(path)))
+        .add_source(
+            config::Environment::with_prefix("boom")
+                .prefix_separator("_")
+                .separator("__")
+                .source(Some(env)),
+        )
+        .build()
+        .and_then(|built| built.try_deserialize())
+        .unwrap_or_else(|e| panic!("{path} failed to load: {e}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1183,7 +1217,7 @@ mod tests {
     /// matching leaves the check passing with nothing to check.
     fn crossmatch_names() -> Vec<String> {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/config.yaml");
-        let config = crate::conf::AppConfig::from_path(path).expect("config.yaml loads");
+        let config = config_from(path);
         config
             .crossmatch
             .values()
@@ -1311,8 +1345,7 @@ mod crossmatch_validation_tests {
                 env!("CARGO_MANIFEST_DIR"),
                 name
             );
-            let config = crate::conf::AppConfig::from_path(&path)
-                .unwrap_or_else(|e| panic!("{name} config failed to load: {e}"));
+            let config = config_from(&path);
             assert!(
                 validate_crossmatch(&config.crossmatch).is_ok(),
                 "{name} config was rejected"
