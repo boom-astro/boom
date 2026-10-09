@@ -9,7 +9,7 @@ use crate::utils::moc::{
     parse_3d_skymap_bytes, select_covering_depth_bounded, Cone, CredibleVolumeIndex, HpxMoc,
     LIGO3dskymap, Skymap3dError,
 };
-use crate::utils::spatial::get_f64_from_doc;
+use crate::utils::skymap_search::host_redshifts;
 use actix_web::{get, post, web, HttpResponse};
 use base64::prelude::*;
 use futures::TryStreamExt;
@@ -583,99 +583,6 @@ impl SkymapSearchMode {
     }
 }
 
-/// Host-galaxy redshifts from an alert's `cross_matches`, best-first and
-/// deduplicated by 3-arcsec proximity so one galaxy isn't counted per catalog.
-///
-/// Priority: 0 = DESI spec (zwarn=0), 1 = NED SPEC, 2 = DESI spec (zwarn!=0)
-/// and LSDR10 spec, 3 = NED PHOT, 4 = LSDR10 photo-z.
-fn extract_host_redshifts(cross_matches: Option<&Document>) -> Vec<f64> {
-    /// `priority` ranks a row (lower = better) or returns None to skip it.
-    fn extract_catalog_zs(
-        cross_matches: Option<&Document>,
-        catalog: &str,
-        z_field: &str,
-        priority: impl Fn(&Document) -> Option<u8>,
-        ranked: &mut Vec<(u8, f64, f64, f64)>,
-    ) {
-        let Some(arr) = cross_matches.and_then(|cm| cm.get_array(catalog).ok()) else {
-            return;
-        };
-        for v in arr {
-            let Some(m) = v.as_document() else { continue };
-            let Some(p) = priority(m) else { continue };
-            // Document::get_f64 rejects the Int32 these catalogs sometimes store.
-            let Some(z) = get_f64_from_doc(m, z_field).filter(|&z| z > 0.0) else {
-                continue;
-            };
-            let Some(ra) = get_f64_from_doc(m, "ra") else {
-                continue;
-            };
-            let Some(dec) = get_f64_from_doc(m, "dec") else {
-                continue;
-            };
-            ranked.push((p, ra, dec, z));
-        }
-    }
-
-    let mut ranked: Vec<(u8, f64, f64, f64)> = Vec::new(); // (priority, ra, dec, z)
-
-    extract_catalog_zs(
-        cross_matches,
-        "DESI_DR1",
-        "z",
-        |m| {
-            if m.get_str("spectype").map(|s| s == "STAR").unwrap_or(false) {
-                return None;
-            }
-            Some(if get_f64_from_doc(m, "zwarn").unwrap_or(1.0) == 0.0 {
-                0
-            } else {
-                2
-            })
-        },
-        &mut ranked,
-    );
-    extract_catalog_zs(
-        cross_matches,
-        "NED",
-        "z",
-        |m| {
-            Some(
-                if m.get_str("z_tech").map(|s| s == "SPEC").unwrap_or(false) {
-                    1
-                } else {
-                    3
-                },
-            )
-        },
-        &mut ranked,
-    );
-    // A Legacy row carrying both is deduplicated below, keeping the spectroscopic one.
-    extract_catalog_zs(cross_matches, "LSDR10", "z_spec", |_| Some(2), &mut ranked);
-    extract_catalog_zs(
-        cross_matches,
-        "LSDR10",
-        "z_phot_median",
-        |_| Some(4),
-        &mut ranked,
-    );
-
-    ranked.sort_by_key(|&(p, _, _, _)| p);
-    const DEDUP_ARCSEC: f64 = 3.0;
-    let mut kept: Vec<(f64, f64, f64)> = Vec::new(); // (ra, dec, z)
-    for (_, ra, dec, z) in ranked {
-        let is_dup = kept.iter().any(|&(kra, kdec, _)| {
-            let dra = (ra - kra) * dec.to_radians().cos();
-            let ddec = dec - kdec;
-            (dra * dra + ddec * ddec).sqrt() * 3600.0 < DEDUP_ARCSEC
-        });
-        if !is_dup {
-            kept.push((ra, dec, z));
-        }
-    }
-    kept.into_iter().map(|(_, _, z)| z).collect()
-}
-
 /// The spatial `$or` is only a covering-cone pre-filter, so each alert is re-tested
 /// against the real region here. `truncated` means `SKYMAP_3D_SPATIAL_CAP` was hit,
 /// not the caller's `limit`.
@@ -747,7 +654,7 @@ where
             let aux_col: Collection<Document> = db.collection(&format!("{}_alerts_aux", survey));
             let mut aux_cursor = aux_col
                 .find(doc! { "_id": { "$in": object_ids } })
-                .projection(doc! { "_id": 1, "cross_matches": 1 })
+                .projection(doc! { "_id": 1, "cross_matches": 1, "host_galaxy": 1 })
                 .await
                 .map_err(|e| response::internal_error(&format!("error querying aux: {}", e)))?;
 
@@ -758,7 +665,12 @@ where
                 let Ok(oid) = aux_doc.get_str("_id") else {
                     continue;
                 };
-                let z_values = extract_host_redshifts(aux_doc.get_document("cross_matches").ok());
+                // Same precedence as the filter test endpoints: an associated host
+                // names the galaxy, so the two cannot disagree about one alert.
+                let z_values = host_redshifts(
+                    aux_doc.get_document("host_galaxy").ok(),
+                    aux_doc.get_document("cross_matches").ok(),
+                );
                 host_z_map.insert(oid.to_string(), z_values);
             }
 
@@ -1166,6 +1078,8 @@ mod tests {
     use super::*;
     use mongodb::bson::{doc, Document};
 
+    use crate::utils::skymap_search::extract_host_redshifts;
+
     /// A cross-match block holding one row per catalog at the same position.
     fn cross_matches(rows: Vec<(&str, Document)>) -> Document {
         let mut d = Document::new();
@@ -1173,6 +1087,19 @@ mod tests {
             d.insert(catalog, vec![row]);
         }
         d
+    }
+
+    /// This endpoint and the filter test endpoints score the same alert, so they
+    /// take the host the same way: an association wins, the sweep is the fallback.
+    #[test]
+    fn test_the_skymap_search_prefers_the_associated_host() {
+        let cm = cross_matches(vec![(
+            "NED",
+            doc! { "ra": 10.0, "dec": 20.0, "z": 0.05, "z_tech": "SPEC" },
+        )]);
+        let host = doc! { "best_host": doc! { "ra": 10.0, "dec": 20.0, "z": 0.2 } };
+        assert_eq!(host_redshifts(Some(&host), Some(&cm)), vec![0.2]);
+        assert_eq!(host_redshifts(None, Some(&cm)), vec![0.05]);
     }
 
     #[test]

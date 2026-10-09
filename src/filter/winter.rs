@@ -1,14 +1,15 @@
 use mongodb::bson::{doc, Document};
 use std::collections::HashMap;
-use tracing::{info, instrument, warn};
+use tracing::{debug, info, instrument, warn};
 
 use crate::alert::WinterCandidate;
 use crate::conf::AppConfig;
 use crate::enrichment::fetch_alerts;
 use crate::filter::{
-    build_loaded_filters, run_filter, uses_field_in_filter, validate_filter_pipeline,
-    watchlist_projections, Alert, Classification, Filter, FilterError, FilterResults, FilterWorker,
-    FilterWorkerError, LoadedFilter, Origin, Photometry, SurveyMatches,
+    build_loaded_filters, record_filter_result, run_filter, uses_field_in_filter,
+    validate_filter_pipeline, watchlist_projections, Alert, Classification, Filter, FilterError,
+    FilterResults, FilterWorker, FilterWorkerError, LoadedFilter, Origin, Photometry,
+    SurveyMatches,
 };
 use crate::utils::cutouts::CutoutStorage;
 use crate::utils::db::{fetch_timeseries_op, get_array_dict_element};
@@ -214,6 +215,7 @@ pub async fn build_winter_alerts(
             survey_matches: SurveyMatches {
                 ztf: None,
                 lsst: None,
+                decam: None,
             },
             host_galaxy: None,
         };
@@ -432,14 +434,16 @@ impl FilterWorker for WinterFilterWorker {
             )
             .await?;
 
+            record_filter_result(&Survey::Winter, filter, out_documents.len(), candids.len());
+            debug!(
+                "{}/{} WINTER alerts passed filter {}",
+                out_documents.len(),
+                candids.len(),
+                filter.id,
+            );
+
             if out_documents.is_empty() {
                 continue;
-            } else {
-                info!(
-                    "{} alerts passed winter filter {}",
-                    out_documents.len(),
-                    filter.id,
-                );
             }
 
             let now_ts = chrono::Utc::now().timestamp_millis() as f64;

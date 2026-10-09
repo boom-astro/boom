@@ -6,16 +6,23 @@ mod ztf;
 
 pub use base::{
     alert_to_avro_bytes, build_filter_pipeline, build_loaded_filter, build_loaded_filters,
-    create_producer, load_alert_schema, load_schema, run_filter, run_filter_worker,
-    send_alert_to_kafka, to_avro_bytes, uses_field_in_filter, validate_filter_pipeline,
-    watchlist_projections, Alert, AlertHostGalaxy, Filter, FilterError, FilterResults,
-    FilterVersion, FilterWorker, FilterWorkerError, LoadedFilter, Origin, Photometry, SurveyMatch,
-    SurveyMatches, SURVEYS_REQUIRING_PERMISSIONS, VALID_ZTF_PROGRAMIDS,
+    create_producer, load_alert_schema, load_schema, reject_unknown_candidate_fields, run_filter,
+    run_filter_worker, send_alert_to_kafka, to_avro_bytes, uses_field_in_filter,
+    validate_filter_pipeline, watchlist_projections, Alert, AlertHostGalaxy, Filter, FilterError,
+    FilterResults, FilterVersion, FilterWorker, FilterWorkerError, LoadedFilter, Origin,
+    Photometry, SurveyMatch, SurveyMatches, SURVEYS_REQUIRING_PERMISSIONS, VALID_ZTF_PROGRAMIDS,
 };
-use base::{parse_programid_candid_tuple, update_aliases_index_multiple, Classification};
+use base::{
+    parse_programid_candid_tuple, record_filter_result, update_aliases_index_multiple,
+    Classification,
+};
+use decam::{
+    add_decam_survey_match, build_decam_aux_data, decam_survey_match,
+    insert_decam_aux_pipeline_if_needed, DecamMatch,
+};
 pub use decam::{build_decam_filter_pipeline, DecamFilterWorker};
-use lsst::{build_lsst_aux_data, insert_lsst_aux_pipeline_if_needed};
+use lsst::{build_lsst_aux_data, insert_lsst_aux_pipeline_if_needed, lsst_survey_match};
 pub use lsst::{build_lsst_filter_pipeline, LsstFilterWorker};
 pub use winter::{build_winter_filter_pipeline, WinterFilterWorker};
-use ztf::{build_ztf_aux_data, insert_ztf_aux_pipeline_if_needed};
+use ztf::{build_ztf_aux_data, insert_ztf_aux_pipeline_if_needed, ztf_survey_match};
 pub use ztf::{build_ztf_filter_pipeline, ZtfFilterWorker};

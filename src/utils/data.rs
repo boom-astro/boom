@@ -1,7 +1,10 @@
 use futures::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
-use std::collections::VecDeque;
-use std::io::Write;
+use std::{
+    collections::VecDeque,
+    io::Write,
+    time::{Duration, Instant},
+};
 use tracing::info;
 
 const PROGRESS_LOG_SECS: u64 = 60;
@@ -28,22 +31,25 @@ fn windowed_rate(window: &VecDeque<(f64, u64)>, at: f64, pos: u64) -> f64 {
     }
 }
 
-fn format_eta(remaining: u64, rate: f64) -> String {
+pub fn format_duration(seconds: u64) -> String {
+    format!("{}h{:02}m", seconds / 3600, (seconds % 3600) / 60)
+}
+
+pub fn format_eta(remaining: u64, rate: f64) -> String {
     if remaining == 0 {
-        return "0h00m".to_string();
+        return format_duration(0);
     }
     if rate <= 0.0 {
         return "unknown".to_string();
     }
-    let secs = (remaining as f64 / rate) as u64;
-    format!("{}h{:02}m", secs / 3600, (secs % 3600) / 60)
+    format_duration((remaining as f64 / rate) as u64)
 }
 
 /// Logs progress every `PROGRESS_LOG_SECS`, with a rate measured over the last
 /// `RATE_WINDOW_SAMPLES` samples rather than over the whole run.
 pub fn spawn_progress_logger(pb: ProgressBar, label: String) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(PROGRESS_LOG_SECS));
+        let mut ticker = tokio::time::interval(Duration::from_secs(PROGRESS_LOG_SECS));
         ticker.tick().await;
         let mut window: VecDeque<(f64, u64)> = VecDeque::with_capacity(RATE_WINDOW_SAMPLES);
         window.push_back((pb.elapsed().as_secs_f64(), pb.position()));
@@ -72,6 +78,23 @@ pub fn spawn_progress_logger(pb: ProgressBar, label: String) -> tokio::task::Joi
                 pct,
                 rate,
                 format_eta(len.saturating_sub(pos), rate),
+            );
+        }
+    })
+}
+
+pub fn spawn_elapsed_logger(label: String, activity: &'static str) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let started = Instant::now();
+        let mut ticker = tokio::time::interval(Duration::from_secs(PROGRESS_LOG_SECS));
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            info!(
+                "[{}] {}, {} elapsed",
+                label,
+                activity,
+                format_duration(started.elapsed().as_secs())
             );
         }
     })

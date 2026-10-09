@@ -10,7 +10,7 @@ use boom::utils::heliolinc::{default_hypotheses, link_tracklets, LinkConfig, Tra
 use boom::utils::linking::{
     circular_mean_deg, find_tracklets, night_of, Detection, Tracklet, TrackletConfig,
 };
-use boom::utils::orbit_fit::{fit_orbit, Observation};
+use boom::utils::orbit_fit::{fit_within, Observation};
 use clap::Parser;
 use futures::StreamExt;
 use mongodb::bson::{doc, Document};
@@ -936,7 +936,16 @@ async fn run_thor(
             if obs.len() < 3 {
                 return Some((c, Verdict(BoundFit::Ungated, None)));
             }
-            match fit_orbit(&obs, &seed, epoch, 20, &boom::utils::sso_geometry::ZTF) {
+            // Screened against the looser gate, since a poor fit is still kept,
+            // and converged if it passes it, so the residual it is ranked and
+            // persisted on is the orbit's rather than where the fit stopped.
+            match fit_within(
+                &obs,
+                &seed,
+                epoch,
+                &boom::utils::sso_geometry::ZTF,
+                args.max_unbound_residual,
+            ) {
                 None => Some((c, Verdict(BoundFit::None, None))),
                 Some(fit) if fit.rms_arcsec <= args.max_residual => {
                     Some((c, Verdict(BoundFit::Good, Some(fit.rms_arcsec))))

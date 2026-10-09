@@ -15,7 +15,8 @@ use std::sync::OnceLock;
 use std::{collections::HashMap, path::Path};
 use tracing::{debug, error, info, instrument, warn};
 
-const DEFAULT_CONFIG_PATH: &str = "config.yaml";
+/// Where config is loaded from when nothing names a path.
+pub const DEFAULT_CONFIG_PATH: &str = "config.yaml";
 
 static HASHED_SECRET_KEY: OnceLock<[u8; 32]> = OnceLock::new();
 
@@ -77,10 +78,54 @@ pub fn load_raw_config(filepath: &str) -> Result<Config, BoomConfigError> {
 
     let conf = Config::builder()
         .add_source(File::from(path))
+        .add_source(
+            config::Environment::with_prefix("boom")
+                .prefix_separator("_")
+                .separator("__")
+                // Compose and .env.example pass unset variables through as
+                // empty strings; without this they would wipe out the
+                // config.yaml defaults rather than leave them alone.
+                .ignore_empty(true),
+        )
         .add_source(env_source())
         .build()?;
 
     Ok(conf)
+}
+
+/// Accept a list as either a YAML sequence or a comma-separated string.
+///
+/// A list has no natural single-variable form, and these lists have to be
+/// settable from the environment -- `babamul.admin_emails` seeds who may
+/// mutate the data, so it belongs with the other deployment settings rather
+/// than only in a file.
+///
+/// Done as a field deserializer rather than by turning on the config crate's
+/// `list_separator`, which only takes effect with `try_parsing` and would then
+/// coerce *every* env value that looks numeric into an integer -- including a
+/// password that happens to be all digits.
+///
+/// Blank entries are dropped, so a trailing comma or a stray space is not a
+/// silent extra "" entry that matches nothing.
+fn comma_separated<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum SequenceOrString {
+        Sequence(Vec<String>),
+        String(String),
+    }
+
+    Ok(match SequenceOrString::deserialize(deserializer)? {
+        SequenceOrString::Sequence(items) => items,
+        SequenceOrString::String(value) => value
+            .split(',')
+            .map(|item| item.trim().to_string())
+            .filter(|item| !item.is_empty())
+            .collect(),
+    })
 }
 
 /// The `BOOM_*` environment overlay applied on top of `config.yaml`.
@@ -808,6 +853,20 @@ impl Default for CutoutCacheConfig {
 pub struct BabamulConfig {
     pub enabled: bool,
     pub webapp_url: Option<String>,
+    /// Emails that are admins. Granted at every API startup.
+    ///
+    /// The floor rather than the whole answer: admin is also granted through
+    /// `PATCH /babamul/admin/users/{id}`, and startup never revokes. So
+    /// removing an admin is two steps, in this order -- take them off this
+    /// list, then revoke them in the admin page. Revoking first leaves them
+    /// named here and the next restart grants it back.
+    ///
+    /// Emails rather than usernames because an email is what the account signs
+    /// in with. See [`crate::api::admin::reconcile_babamul_admins`].
+    ///
+    /// Settable as `BOOM_BABAMUL__ADMIN_EMAILS`, comma-separated.
+    #[serde(default, deserialize_with = "comma_separated")]
+    pub admin_emails: Vec<String>,
     /// Number of days to retain Kafka messages for Babamul topics
     #[serde(default = "default_babamul_retention_days")]
     pub retention_days: u32,
@@ -836,6 +895,7 @@ impl Default for BabamulConfig {
     fn default() -> Self {
         BabamulConfig {
             enabled: false,
+            admin_emails: Vec::new(),
             webapp_url: None,
             retention_days: default_babamul_retention_days(),
             password_reset_cooldown_minutes: default_password_reset_cooldown_minutes(),
@@ -1202,6 +1262,169 @@ fn default_gpu_device_ids() -> Vec<i32> {
     vec![0]
 }
 
+/// Connection settings for a Milvus vector database.
+///
+/// On the NRP platform Milvus is reachable only over gRPC (there is no REST
+/// port exposed), on `milvus.nrp-nautilus.io:50051`, behind TLS. BOOM connects
+/// with an administrative/user account supplied entirely through the environment.
+#[derive(Deserialize, Debug, Clone)]
+pub struct MilvusConfig {
+    /// When false, BOOM never opens a Milvus connection. Defaults to false so
+    /// that existing deployments are unaffected.
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_milvus_host")]
+    pub host: String,
+    #[serde(default = "default_milvus_port")]
+    pub port: u16,
+    /// Whether to use TLS. NRP terminates TLS with a standard Let's Encrypt
+    /// certificate, so the system root store is sufficient.
+    #[serde(default = "default_milvus_tls")]
+    pub tls: bool,
+    #[serde(default)]
+    pub username: String,
+    /// Set via `BOOM_MILVUS__PASSWORD`; never commit a real value.
+    #[serde(default)]
+    pub password: String,
+    /// Milvus database to operate in. One database serves the whole project, so
+    /// `config.yaml` carries the name; `BOOM_MILVUS__DATABASE` overrides it.
+    #[serde(default)]
+    pub database: String,
+    /// Per-RPC timeout in seconds.
+    #[serde(default = "default_milvus_timeout_seconds")]
+    pub timeout_seconds: u64,
+    #[serde(default)]
+    pub collection: MilvusCollectionConfig,
+    #[serde(default)]
+    pub backup_queue: MilvusBackupQueueConfig,
+}
+
+/// Where embeddings wait while Milvus is unreachable, so an outage costs
+/// Valkey space instead of the GPU time to recompute them.
+#[derive(Deserialize, Debug, Clone)]
+pub struct MilvusBackupQueueConfig {
+    #[serde(default = "default_milvus_backup_queue_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_milvus_backup_queue_max_rows")]
+    pub max_rows: usize,
+    #[serde(default = "default_milvus_backup_queue_drain_rows")]
+    pub drain_rows: usize,
+}
+
+/// Schema and index settings for the collection holding CIDER fusion embeddings.
+#[derive(Deserialize, Debug, Clone)]
+pub struct MilvusCollectionConfig {
+    #[serde(default = "default_milvus_collection_name")]
+    pub name: String,
+    /// Embedding width. The CIDER fusion model
+    /// (`data/models/cider_fusion_plus_embedding.onnx`) emits 384 floats.
+    #[serde(default = "default_milvus_dim")]
+    pub dim: i64,
+    /// The model L2-normalizes its output, so COSINE and IP are equivalent here.
+    #[serde(default = "default_milvus_metric_type")]
+    pub metric_type: String,
+    #[serde(default = "default_milvus_index_type")]
+    pub index_type: String,
+    /// Upper bound on the stored `objectId` primary key.
+    #[serde(default = "default_milvus_object_id_max_length")]
+    pub object_id_max_length: i64,
+}
+
+fn default_milvus_host() -> String {
+    "milvus.nrp-nautilus.io".to_string()
+}
+
+fn default_milvus_port() -> u16 {
+    50051
+}
+
+fn default_milvus_tls() -> bool {
+    true
+}
+
+fn default_milvus_timeout_seconds() -> u64 {
+    30
+}
+
+fn default_milvus_backup_queue_enabled() -> bool {
+    true
+}
+
+fn default_milvus_backup_queue_max_rows() -> usize {
+    1_000_000
+}
+
+fn default_milvus_backup_queue_drain_rows() -> usize {
+    500
+}
+
+fn default_milvus_collection_name() -> String {
+    "boom_ztf_fusion_embeddings".to_string()
+}
+
+fn default_milvus_dim() -> i64 {
+    384
+}
+
+fn default_milvus_metric_type() -> String {
+    "COSINE".to_string()
+}
+
+fn default_milvus_index_type() -> String {
+    "HNSW".to_string()
+}
+
+fn default_milvus_object_id_max_length() -> i64 {
+    64
+}
+
+impl Default for MilvusConfig {
+    fn default() -> Self {
+        MilvusConfig {
+            enabled: false,
+            host: default_milvus_host(),
+            port: default_milvus_port(),
+            tls: default_milvus_tls(),
+            username: String::new(),
+            password: String::new(),
+            database: String::new(),
+            timeout_seconds: default_milvus_timeout_seconds(),
+            collection: MilvusCollectionConfig::default(),
+            backup_queue: MilvusBackupQueueConfig::default(),
+        }
+    }
+}
+
+impl Default for MilvusBackupQueueConfig {
+    fn default() -> Self {
+        MilvusBackupQueueConfig {
+            enabled: default_milvus_backup_queue_enabled(),
+            max_rows: default_milvus_backup_queue_max_rows(),
+            drain_rows: default_milvus_backup_queue_drain_rows(),
+        }
+    }
+}
+
+impl Default for MilvusCollectionConfig {
+    fn default() -> Self {
+        MilvusCollectionConfig {
+            name: default_milvus_collection_name(),
+            dim: default_milvus_dim(),
+            metric_type: default_milvus_metric_type(),
+            index_type: default_milvus_index_type(),
+            object_id_max_length: default_milvus_object_id_max_length(),
+        }
+    }
+}
+
+impl MilvusConfig {
+    /// The gRPC endpoint to dial, e.g. `https://milvus.nrp-nautilus.io:50051`.
+    pub fn endpoint(&self) -> String {
+        let scheme = if self.tls { "https" } else { "http" };
+        format!("{}://{}:{}", scheme, self.host, self.port)
+    }
+}
+
 #[derive(Deserialize, Debug, Clone)]
 pub struct AppConfig {
     pub api: ApiConfig,
@@ -1219,6 +1442,8 @@ pub struct AppConfig {
     pub workers: HashMap<Survey, SurveyWorkerConfig>,
     #[serde(default)]
     pub gpu: GpuConfig,
+    #[serde(default)]
+    pub milvus: MilvusConfig,
     #[serde(default)]
     pub host_galaxy: HostGalaxyConfig,
     pub cutouts_storage: CutoutsStorage,
@@ -1292,6 +1517,35 @@ impl AppConfig {
                     survey.as_str(),
                     survey.as_str(),
                 ));
+            }
+        }
+
+        // Milvus settings are only required when the integration is switched on,
+        // so that deployments not using it need no extra configuration.
+        if self.milvus.enabled {
+            if self.milvus.username.is_empty() {
+                return Err(
+                    "Milvus username must be set via BOOM_MILVUS__USERNAME environment variable when milvus.enabled is true"
+                        .to_string(),
+                );
+            }
+
+            if self.milvus.password.is_empty() {
+                return Err(
+                    "Milvus password must be set via BOOM_MILVUS__PASSWORD environment variable when milvus.enabled is true"
+                        .to_string(),
+                );
+            }
+
+            if self.milvus.database.is_empty() {
+                return Err(
+                    "Milvus database must not be empty when milvus.enabled is true; config.yaml supplies a default, override it with BOOM_MILVUS__DATABASE"
+                        .to_string(),
+                );
+            }
+
+            if self.milvus.collection.dim <= 0 {
+                return Err("Milvus collection dimension must be greater than 0".to_string());
             }
         }
 
@@ -1440,6 +1694,78 @@ mod tests {
             .add_source(env_source().source(Some(env)))
             .build()
             .unwrap()
+    }
+
+    #[test]
+    fn admin_emails_can_be_set_as_a_comma_separated_env_var() {
+        // A list has no natural single-variable form, and this one has to be
+        // settable from the environment because it decides who may mutate the
+        // data -- see AGENTS.md on secrets and deployment settings.
+        let conf = config_with_env(&[(
+            "BOOM_BABAMUL__ADMIN_EMAILS",
+            "one@example.org,two@example.org",
+        )]);
+        assert_eq!(
+            conf.get::<AdminEmails>("babamul").unwrap().admin_emails,
+            vec!["one@example.org", "two@example.org"]
+        );
+    }
+
+    #[test]
+    fn a_single_admin_email_still_parses_as_a_list() {
+        let conf = config_with_env(&[("BOOM_BABAMUL__ADMIN_EMAILS", "solo@example.org")]);
+        assert_eq!(
+            conf.get::<AdminEmails>("babamul").unwrap().admin_emails,
+            vec!["solo@example.org"]
+        );
+    }
+
+    #[test]
+    fn admin_emails_tolerate_spacing_and_a_trailing_comma() {
+        // A blank entry would match no account, but it would also make the
+        // configured list look longer than it is.
+        let conf = config_with_env(&[(
+            "BOOM_BABAMUL__ADMIN_EMAILS",
+            " one@example.org , two@example.org ,",
+        )]);
+        assert_eq!(
+            conf.get::<AdminEmails>("babamul").unwrap().admin_emails,
+            vec!["one@example.org", "two@example.org"]
+        );
+    }
+
+    #[test]
+    fn admin_emails_still_accept_a_yaml_sequence() {
+        // The env form must not cost us the readable form in config.yaml.
+        let conf = Config::builder()
+            .add_source(File::from_str(
+                "babamul:\n  admin_emails:\n    - one@example.org\n    - two@example.org\n",
+                config::FileFormat::Yaml,
+            ))
+            .build()
+            .unwrap();
+        assert_eq!(
+            conf.get::<AdminEmails>("babamul").unwrap().admin_emails,
+            vec!["one@example.org", "two@example.org"]
+        );
+    }
+
+    #[test]
+    fn an_unset_admin_email_list_leaves_nobody_an_admin() {
+        // Failing closed matters here: the alternative to "no admins" must not
+        // be "everyone".
+        let conf = config_with_env(&[]);
+        assert_eq!(
+            conf.get::<AdminEmails>("babamul").unwrap().admin_emails,
+            Vec::<String>::new()
+        );
+    }
+
+    /// Just the field under test, so these do not need a whole valid AppConfig.
+    #[derive(Deserialize)]
+    struct AdminEmails {
+        #[serde(default, deserialize_with = "comma_separated")]
+        admin_emails: Vec<String>,
     }
 
     #[test]

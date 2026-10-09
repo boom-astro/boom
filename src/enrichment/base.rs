@@ -1,7 +1,7 @@
 use crate::{
     conf::{self, AppConfig},
     enrichment::models::{ModelError, SharedModels},
-    scheduler::record_worker_retry,
+    scheduler::{count_enriched_alerts, record_worker_retry},
     utils::{
         cutouts::CutoutStorageError,
         enums::Survey,
@@ -97,6 +97,8 @@ pub enum EnrichmentWorkerError {
     MissingFluxPSF,
     #[error("Empty lightcurve after preparation for candid {0}")]
     EmptyLightcurve(i64),
+    #[error("milvus error")]
+    Milvus(#[from] crate::milvus::MilvusError),
 }
 
 #[async_trait::async_trait]
@@ -117,6 +119,11 @@ pub trait EnrichmentWorker {
 
     /// Forcibly disable Babamul on this worker, regardless of config.
     fn disable_babamul(&mut self);
+
+    /// Called when the input queue comes up empty, before the worker sleeps.
+    /// Background catch-up that would otherwise compete with live batches
+    /// belongs here. Must not fail: an idle worker has nothing to report.
+    async fn on_idle(&mut self) {}
 }
 
 /// Fetch alerts from the database given a list of candids and an aggregation pipeline.
@@ -164,7 +171,7 @@ pub async fn fetch_alerts<T: for<'a> serde::Deserialize<'a>>(
 #[tokio::main]
 // No `#[instrument]`: this is the long-lived enrichment worker loop; a
 // wrapping span would put every per-alert span under a single root trace.
-pub async fn run_enrichment_worker<T: EnrichmentWorker>(
+pub async fn run_enrichment_worker<T: EnrichmentWorker + Send>(
     mut receiver: mpsc::Receiver<WorkerCmd>,
     config_path: &str,
     worker_id: Uuid,
@@ -243,9 +250,6 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker>(
             is_transient_redis_error,
             || record_worker_retry("enrichment", &survey, "valkey_rpop"),
             || {
-                // Clone the (cheaply-clonable) multiplexed connection so the
-                // future owns it, rather than borrowing `con` through the
-                // FnMut closure.
                 let mut con = con.clone();
                 let key: &str = &input_queue;
                 async move { con.rpop::<&str, Vec<i64>>(key, Some(batch_size)).await }
@@ -258,7 +262,9 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker>(
         })?;
 
         if candids.is_empty() {
+            debug!(queue = %input_queue, "queue empty, sleeping 500ms");
             ACTIVE.add(-1, &active_attrs);
+            enrichment_worker.on_idle().await;
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             command_check_countdown = 0;
             continue;
@@ -279,6 +285,7 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker>(
             ACTIVE.add(-1, &active_attrs);
             BATCH_PROCESSED.add(1, attributes);
             ALERT_PROCESSED.add(candids.len() as u64, attributes);
+            count_enriched_alerts(candids.len());
             continue;
         }
         retry_transient(
@@ -304,6 +311,7 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker>(
         ACTIVE.add(-1, &active_attrs);
         BATCH_PROCESSED.add(1, attributes);
         ALERT_PROCESSED.add(candids.len() as u64, attributes);
+        count_enriched_alerts(candids.len());
     }
 
     Ok(())

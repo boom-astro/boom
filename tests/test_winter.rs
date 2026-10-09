@@ -19,10 +19,7 @@ use mongodb::bson::doc;
 
 #[test]
 fn test_sanitize_winter_avro_is_readable() {
-    // WINTER's embedded schema declares `sgmag1` twice in the candidate record,
-    // which the strict avro Reader rejects. Both published schema versions carry
-    // the duplicate, so both must survive sanitising, and sanitising must be
-    // idempotent.
+    // Both published schemas declare `sgmag1` twice, which the strict avro Reader rejects.
     for path in [
         "tests/data/alerts/winter/alert.avro",
         "tests/data/alerts/winter/alert_schemavsn_0.1.avro",
@@ -204,9 +201,7 @@ fn test_fid_maps_to_band() {
 
 #[test]
 fn test_real_alert_band_is_j() {
-    // A genuine WINTER-mirar packet whose fid is 2. Kowalski reads the same
-    // packets as 2massj and WINTER confirm the data is J, so this pins the whole
-    // chain to a real alert.
+    // Kowalski reads these same fid=2 packets as 2massj, so the mapping is pinned to a real alert.
     let alert = read_winter_test_alert("tests/data/alerts/winter/alert.avro");
     assert_eq!(alert.candidate.fid, 2);
     assert_eq!(fid_to_band(alert.candidate.fid).unwrap(), Band::J);

@@ -59,6 +59,10 @@ api:
     admin_password: "" # Set via BOOM_API__AUTH__ADMIN_PASSWORD environment variable
     admin_email: admin@example.com
 babamul:
+  # Emails that are admins, granted at every API startup. Admins can also be
+  # appointed in the admin page, and startup never revokes. To remove one: take
+  # them off this list first, then revoke them in the admin page.
+  admin_emails: [] # BOOM_BABAMUL__ADMIN_EMAILS
   enabled: false # Set via BOOM_BABAMUL__ENABLED environment variable
   webapp_url: # Set via BOOM_BABAMUL__WEBAPP_URL environment variable
   retention_days: 7
@@ -106,6 +110,34 @@ gpu:
 redis:
   host: localhost
   port: 6379
+milvus:
+  # Vector database holding the AppleCiDEr fusion model's embeddings.
+  # See docs/milvus.md.
+  enabled: false # Set via BOOM_MILVUS__ENABLED environment variable
+  host: milvus.nrp-nautilus.io
+  port: 50051
+  tls: true
+  username: "" # Set via BOOM_MILVUS__USERNAME environment variable
+  password: "" # Set via BOOM_MILVUS__PASSWORD environment variable
+  database: umn_babamul_vectordb # Override via BOOM_MILVUS__DATABASE environment variable
+  timeout_seconds: 30
+  collection:
+    name: boom_ztf_fusion_embeddings
+    dim: 384
+    metric_type: COSINE
+    index_type: HNSW
+    object_id_max_length: 64
+  # Embeddings rejected while Milvus is unreachable wait in Valkey instead of
+  # being dropped, since recomputing one means another GPU pass over the alert.
+  backup_queue:
+    enabled: true
+    # One row per object, newest alert only. Past this the lowest-jd entries
+    # are discarded. Comfortably above a night of ZTF alerts (500k-800k), so
+    # a night-long outage drops nothing. ~1.6 KB per row, ~1.6 GB if full.
+    max_rows: 1000000
+    # Rows replayed per successful batch, and per idle tick when a worker has
+    # no alerts, so catch-up cannot starve live work.
+    drain_rows: 500
 kafka:
   consumer:
     ztf:
@@ -132,6 +164,10 @@ kafka:
     decam:
       server: "localhost:9092"
       group_id: "" # Set via BOOM_KAFKA__CONSUMER__DECAM__GROUP_ID environment variable
+      security_protocol: "" # Set via BOOM_KAFKA__CONSUMER__DECAM__SECURITY_PROTOCOL environment variable
+      username: "" # Set via BOOM_KAFKA__CONSUMER__DECAM__USERNAME environment variable
+      password: "" # Set via BOOM_KAFKA__CONSUMER__DECAM__PASSWORD environment variable
+      ssl_ca_location: "" # Set via BOOM_KAFKA__CONSUMER__DECAM__SSL_CA_LOCATION environment variable
     winter:
       server: "localhost:9092"
       group_id: "" # Set via BOOM_KAFKA__CONSUMER__WINTER__GROUP_ID environment variable
@@ -150,8 +186,9 @@ workers:
     enrichment:
       n_workers: 3
       # Alerts per batch: the RPOP cap and the fixed ONNX input shape (CUDA pins SameAsRequested).
-      # 1000 is sized for ~12GB cards; the 10GiB startup check is only a floor — use 750 below that.
-      batch_size: 1000
+      # Lowered from main's 1000 because AppleCiDER runs a second, larger model
+      # per alert: 250 measured ~12 GB VRAM on this stack.
+      batch_size: 750
     filter:
       n_workers: 3
       refresh_interval_minutes: 15
@@ -181,7 +218,7 @@ workers:
       n_workers: 1
       refresh_interval_minutes: 15
       max_match_rate: 5
-      reference_night:
+      reference_night: "2026-09-25"
   winter:
     command_interval: 500
     alert:
@@ -257,6 +294,7 @@ crossmatch:
         _id: 1
         Name: 1
         Descrip: 1
+        objtype: 1
         Qpct: 1
         ra: 1
         dec: 1
@@ -460,6 +498,17 @@ crossmatch:
         sersic: 1
         flux_ivar_r: 1
         fracflux_r: 1
+    AllWISE:
+      radius: 2.0
+      use_distance: false
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        w1mpro: 1
+        w2mpro: 1
+        w3mpro: 1
+        w4mpro: 1
   lsst:
     LSPSC:
       radius: 30.0 # 30 arcseconds
@@ -500,6 +549,7 @@ crossmatch:
         _id: 1
         Name: 1
         Descrip: 1
+        objtype: 1
         Qpct: 1
         ra: 1
         dec: 1
@@ -734,6 +784,7 @@ crossmatch:
         _id: 1
         Name: 1
         Descrip: 1
+        objtype: 1
         Qpct: 1
         ra: 1
         dec: 1

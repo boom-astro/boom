@@ -5,7 +5,10 @@ use boom::{
     api::catalogs::WATCHLIST_PREFIX,
     conf::{load_dotenv, AppConfig, CatalogXmatchConfig},
     enrichment::models::SharedModelPool,
-    scheduler::{record_mpc_orbits_state, record_worker_pool_state, ThreadPool},
+    milvus::MilvusClient,
+    scheduler::{
+        record_mpc_orbits_state, record_worker_pool_state, take_heartbeat_counts, ThreadPool,
+    },
     utils::{
         db::{initialize_angular_size_indexes, initialize_survey_indexes},
         enums::Survey,
@@ -229,6 +232,34 @@ async fn run(
         .await
         .expect("could not initialize indexes");
 
+    // Create the Milvus collection once, up front, to avoid workers racing to
+    // create it themselves. Safe to call if it already exists. ZTF-only.
+    //
+    // Logged rather than fatal: Milvus is an optional add-on, so a provisioning
+    // failure must not stop the scheduler from ingesting alerts. The enrichment
+    // workers pause their uploads and retry, so this recovers on its own once
+    // Milvus is reachable and the collection exists.
+    if config.milvus.enabled && args.survey == Survey::Ztf {
+        match MilvusClient::connect(&config.milvus).await {
+            Ok(mut milvus) => {
+                if let Err(error) = milvus.ensure_embedding_collection().await {
+                    log_error!(
+                        WARN,
+                        error,
+                        "could not provision the milvus embeddings collection; \
+                         embedding uploads will be paused until it exists"
+                    );
+                }
+            }
+            Err(error) => log_error!(
+                WARN,
+                error,
+                "could not connect to milvus to provision the embeddings collection; \
+                 embedding uploads will be paused until it is reachable"
+            ),
+        }
+    }
+
     if let Some(xmatch_configs) = config.crossmatch.get(&args.survey) {
         initialize_angular_size_indexes(xmatch_configs, &db)
             .await
@@ -355,10 +386,15 @@ async fn run(
             }
             _ = heartbeat_tick.tick() => {
                 record_pool_metrics(&args.survey, &alert_pool, &enrichment_pool, &filter_pool);
+                let counts = take_heartbeat_counts();
                 info!(
                     alert = %pool_state(&alert_pool),
                     enrichment = %pool_state(&enrichment_pool),
                     filter = %pool_state(&filter_pool),
+                    processed = counts.alert,
+                    enriched = counts.enrichment,
+                    filtered = counts.filter,
+                    passed = counts.passed,
                     "heartbeat: workers running"
                 );
             }

@@ -216,6 +216,15 @@ services:
       BOOM_CUTOUTS_STORAGE__TYPE: mongo
       BOOM_CUTOUTS_STORAGE__HOST: mongo
       BOOM_BABAMUL__ENABLED: ${BOOM_BABAMUL__ENABLED:-false}
+      # Milvus vector database (optional; see docs/milvus.md).
+      # Reached over the public internet, so this works regardless of where
+      # BOOM itself is deployed.
+      BOOM_MILVUS__ENABLED: ${BOOM_MILVUS__ENABLED:-false}
+      BOOM_MILVUS__HOST: ${BOOM_MILVUS__HOST:-milvus.nrp-nautilus.io}
+      BOOM_MILVUS__PORT: ${BOOM_MILVUS__PORT:-50051}
+      BOOM_MILVUS__USERNAME: ${BOOM_MILVUS__USERNAME:-}
+      BOOM_MILVUS__PASSWORD: ${BOOM_MILVUS__PASSWORD:-}
+      BOOM_MILVUS__DATABASE: ${BOOM_MILVUS__DATABASE:-}
       BOOM_BABAMUL__WEBAPP_URL: ${BOOM_BABAMUL__WEBAPP_URL:-}
       # Whether the API will create accounts. Pair it with VITE_PRERELEASE_MODE
       # below, which only decides what the web app offers.
@@ -230,6 +239,8 @@ services:
       BOOM_BABAMUL__OAUTH__ORCID__CLIENT_ID: ${BOOM_BABAMUL__OAUTH__ORCID__CLIENT_ID:-}
       BOOM_BABAMUL__OAUTH__ORCID__CLIENT_SECRET: ${BOOM_BABAMUL__OAUTH__ORCID__CLIENT_SECRET:-}
       BOOM_BABAMUL__OAUTH__ORCID_SANDBOX: ${BOOM_BABAMUL__OAUTH__ORCID_SANDBOX:-false}
+      # Comma-separated emails of the admins: user management, data-mutating tasks.
+      BOOM_BABAMUL__ADMIN_EMAILS: ${BOOM_BABAMUL__ADMIN_EMAILS:-}
       # Server-side PostHog analytics; blank disables analytics.
       BOOM_POSTHOG__PROJECT_API_KEY: ${BOOM_POSTHOG__PROJECT_API_KEY:-}
       BOOM_POSTHOG__HOST: ${BOOM_POSTHOG__HOST:-https://us.i.posthog.com}
@@ -523,6 +534,77 @@ services:
     command:
       - /app/kafka_consumer
       - winter
+  consumer-decam:
+    image: ${BOOM_IMAGE:-ghcr.io/boom-astro/boom:latest}
+    pull_policy: ${BOOM_PULL_POLICY:-build}
+    hostname: consumer-decam
+    restart: always
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      BOOM_DATABASE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
+      BOOM_CUTOUTS_STORAGE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
+      BOOM_API__AUTH__SECRET_KEY: ${BOOM_API__AUTH__SECRET_KEY:?BOOM_API__AUTH__SECRET_KEY must be set}
+      BOOM_API__AUTH__ADMIN_PASSWORD: ${BOOM_API__AUTH__ADMIN_PASSWORD:?BOOM_API__AUTH__ADMIN_PASSWORD must be set}
+      BOOM_KAFKA__CONSUMER__DECAM__SERVER: ${BOOM_KAFKA__CONSUMER__DECAM__SERVER:-}
+      BOOM_KAFKA__CONSUMER__DECAM__GROUP_ID: ${BOOM_KAFKA__CONSUMER__DECAM__GROUP_ID:-}
+      BOOM_KAFKA__CONSUMER__DECAM__SECURITY_PROTOCOL: ${BOOM_KAFKA__CONSUMER__DECAM__SECURITY_PROTOCOL:-}
+      BOOM_KAFKA__CONSUMER__DECAM__USERNAME: ${BOOM_KAFKA__CONSUMER__DECAM__USERNAME:-}
+      BOOM_KAFKA__CONSUMER__DECAM__PASSWORD: ${BOOM_KAFKA__CONSUMER__DECAM__PASSWORD:-}
+      BOOM_KAFKA__CONSUMER__DECAM__SSL_CA_LOCATION: ${BOOM_KAFKA__CONSUMER__DECAM__SSL_CA_FILE:+/app/decam-ca.crt}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      BOOM_DATABASE__HOST: mongo
+      BOOM_DATABASE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
+      BOOM_CUTOUTS_STORAGE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
+      BOOM_CUTOUTS_STORAGE__TYPE: mongo
+      BOOM_CUTOUTS_STORAGE__HOST: mongo
+      BOOM_REDIS__HOST: valkey
+    networks:
+      - boom
+    profiles:
+      - decam
+    volumes:
+      - ${BOOM_CONFIG_PATH:-./config.yaml}:/app/config.yaml
+      - ${BOOM_KAFKA__CONSUMER__DECAM__SSL_CA_FILE:-/dev/null}:/app/decam-ca.crt:ro
+    command:
+      - /app/kafka_consumer
+      - decam
+  # Runs queued tasks: catalog ingests, data migrations and reprocessing jobs.
+  # Separate from the api service on purpose: these run for hours and are
+  # memory-hungry, and an API restart or deploy must not kill one. A run
+  # interrupted by a deploy goes back on the queue and the replacement worker
+  # resumes it.
+  task-worker:
+    image: ${BOOM_IMAGE:-ghcr.io/boom-astro/boom:latest}
+    pull_policy: ${BOOM_PULL_POLICY:-build}
+    hostname: task-worker
+    restart: always
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      # Required secrets - must be set in environment
+      BOOM_DATABASE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
+      BOOM_CUTOUTS_STORAGE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
+      BOOM_API__AUTH__SECRET_KEY: ${BOOM_API__AUTH__SECRET_KEY:?BOOM_API__AUTH__SECRET_KEY must be set}
+      BOOM_API__AUTH__ADMIN_PASSWORD: ${BOOM_API__AUTH__ADMIN_PASSWORD:?BOOM_API__AUTH__ADMIN_PASSWORD must be set}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      # Optional overrides
+      BOOM_DATABASE__HOST: mongo
+      BOOM_DATABASE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
+      BOOM_CUTOUTS_STORAGE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
+      BOOM_CUTOUTS_STORAGE__TYPE: mongo
+      BOOM_CUTOUTS_STORAGE__HOST: mongo
+    networks:
+      - boom
+    profiles:
+      - prod
+    volumes:
+      - ${BOOM_CONFIG_PATH:-./config.yaml}:/app/config.yaml
+    command:
+      - /app/task_worker
+
   scheduler-ztf:
     image: ${BOOM_IMAGE:-ghcr.io/boom-astro/boom:latest}
     pull_policy: ${BOOM_PULL_POLICY:-build}
@@ -548,6 +630,16 @@ services:
       BOOM_REDIS__HOST: valkey
       BOOM_GPU__ENABLED: ${BOOM_GPU__ENABLED:-false}
       BOOM_GPU__DEVICE_IDS: ${BOOM_GPU__DEVICE_IDS:-}
+      # Milvus vector database (optional; see docs/milvus.md).
+      # This scheduler runs the AppleCiDEr fusion model, so it is what produces the
+      # embeddings. Reached over the public internet, so this works regardless
+      # of where BOOM itself is deployed.
+      BOOM_MILVUS__ENABLED: ${BOOM_MILVUS__ENABLED:-false}
+      BOOM_MILVUS__HOST: ${BOOM_MILVUS__HOST:-milvus.nrp-nautilus.io}
+      BOOM_MILVUS__PORT: ${BOOM_MILVUS__PORT:-50051}
+      BOOM_MILVUS__USERNAME: ${BOOM_MILVUS__USERNAME:-}
+      BOOM_MILVUS__PASSWORD: ${BOOM_MILVUS__PASSWORD:-}
+      BOOM_MILVUS__DATABASE: ${BOOM_MILVUS__DATABASE:-}
     networks:
       - boom
     profiles:
@@ -628,6 +720,35 @@ services:
     command:
       - /app/scheduler
       - winter
+  scheduler-decam:
+    image: ${BOOM_IMAGE:-ghcr.io/boom-astro/boom:latest}
+    pull_policy: ${BOOM_PULL_POLICY:-build}
+    hostname: scheduler-decam
+    restart: always
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      BOOM_DATABASE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
+      BOOM_CUTOUTS_STORAGE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
+      BOOM_API__AUTH__SECRET_KEY: ${BOOM_API__AUTH__SECRET_KEY:?BOOM_API__AUTH__SECRET_KEY must be set}
+      BOOM_API__AUTH__ADMIN_PASSWORD: ${BOOM_API__AUTH__ADMIN_PASSWORD:?BOOM_API__AUTH__ADMIN_PASSWORD must be set}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      BOOM_DATABASE__HOST: mongo
+      BOOM_DATABASE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
+      BOOM_CUTOUTS_STORAGE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
+      BOOM_CUTOUTS_STORAGE__TYPE: mongo
+      BOOM_CUTOUTS_STORAGE__HOST: mongo
+      BOOM_REDIS__HOST: valkey
+    networks:
+      - boom
+    profiles:
+      - decam
+    volumes:
+      - ${BOOM_CONFIG_PATH:-./config.yaml}:/app/config.yaml
+    command:
+      - /app/scheduler
+      - decam
   # Refreshes MPC_orbits, which ZTF enrichment reads to derive per-alert solar
   # system geometry. One-shot rather than long-running: it downloads ~316MB from
   # the MPC, parses it, and exits.

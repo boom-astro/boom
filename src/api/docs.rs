@@ -61,6 +61,13 @@ impl Modify for BabamulSecurityAddon {
         routes::catalogs::get_catalogs,
         routes::catalogs::get_catalog_indexes,
         routes::catalogs::get_catalog_sample,
+        routes::tasks::get_task_types,
+        routes::tasks::submit_task,
+        routes::tasks::get_tasks,
+        routes::tasks::get_task,
+        routes::tasks::get_task_logs,
+        routes::tasks::cancel_task,
+        routes::tasks::get_data_mutations,
         routes::filters::post_filter,
         routes::filters::patch_filter,
         routes::filters::validate_filter,
@@ -77,7 +84,10 @@ impl Modify for BabamulSecurityAddon {
         routes::queries::cone_search::post_cone_search_query,
         routes::surveys::cutouts::get_cutouts,
         routes::surveys::tracks::get_track,
-        routes::queries::pipeline::post_pipeline_query
+        routes::queries::pipeline::post_pipeline_query,
+        routes::embeddings::post_similar_objects,
+        routes::embeddings::get_embeddings_count,
+        routes::embeddings::delete_object_embedding
     ),
     security(
         ("api_jwt_token" = [])
@@ -106,6 +116,8 @@ pub struct ApiDoc;
         routes::babamul::oauth::post_oauth_verify,
         routes::babamul::get_babamul_profile,
         routes::babamul::patch_babamul_profile,
+        routes::babamul::admin::get_admin_users,
+        routes::babamul::admin::patch_admin_user,
         routes::babamul::post_kafka_credentials,
         routes::babamul::get_kafka_credentials,
         routes::babamul::surveys::schemas::get_babamul_schema,
@@ -118,6 +130,7 @@ pub struct ApiDoc;
         routes::babamul::surveys::tracks::get_track,
         routes::babamul::surveys::alerts::get_alerts,
         routes::babamul::surveys::alerts::cone_search_alerts,
+        routes::babamul::surveys::villar_fit::get_villar_fit,
         routes::babamul::stats::collections::get_collection_stats,
         routes::babamul::stats::kafka::get_kafka_stats,
         routes::babamul::stats::nightly::get_nightly_stats,

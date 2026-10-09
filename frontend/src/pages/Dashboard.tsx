@@ -1,30 +1,35 @@
 import { useState, useEffect, useMemo, useRef } from "react";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { Bar, BarChart, CartesianGrid, ReferenceArea, XAxis, YAxis } from "recharts";
+import { Bar, BarChart, CartesianGrid, ReferenceArea, ReferenceLine, XAxis, YAxis } from "recharts";
 import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from "@/components/ui/chart";
 import { Toggle } from "@/components/ui/toggle";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 import { IconInfoCircle, IconRefresh, IconZoomReset } from "@tabler/icons-react";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import api, { CollectionEntry, fetchTopics, NightlyStat, type TopicInfo } from "@/lib/api";
-import { type Survey } from "@/lib/constants";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch.tsx";
 import { Label } from "@/components/ui/label.tsx";
 import KafkaAlertCounts from "@/components/kafka/KafkaAlertCounts.tsx";
 import { toast } from "sonner";
 
-const SURVEY_ORDER = ["ztf", "lsst"] as const satisfies readonly Survey[];
+const SURVEY_ORDER = ["ztf", "lsst", "decam", "winter"] as const;
+
+type Survey = (typeof SURVEY_ORDER)[number];
 
 const SURVEY_COLORS: Record<Survey, string> = {
   ztf: "var(--chart-1)",
   lsst: "var(--chart-2)",
+  decam: "var(--chart-3)",
+  winter: "var(--chart-4)",
 };
 
 const chartConfig = {
   ztf: { label: "ZTF", color: SURVEY_COLORS.ztf },
   lsst: { label: "LSST", color: SURVEY_COLORS.lsst },
+  decam: { label: "DECam", color: SURVEY_COLORS.decam },
+  winter: { label: "WINTER", color: SURVEY_COLORS.winter },
 } satisfies ChartConfig;
 
 const FIRST_NIGHT = "2018-01-01";
@@ -32,10 +37,18 @@ const FIRST_NIGHT = "2018-01-01";
 // The API refuses to recount a longer range in one refresh.
 const MAX_REFRESH_MONTHS = 6;
 
-const NIGHT_CONVENTION =
-  "Alerts are grouped by observing night, local noon to local noon at the " +
-  "observatory (Palomar, UTC−7, for ZTF; Cerro Pachón, UTC−3, for LSST). " +
-  "A night is labeled by its evening date.";
+const OBSERVATORIES: Record<Survey, string> = {
+  ztf: "Palomar",
+  lsst: "Cerro Pachón",
+  decam: "Cerro Tololo",
+  winter: "Palomar",
+};
+
+function nightConvention(surveys: readonly Survey[]): string {
+  const sites = surveys.map((s) => `${OBSERVATORIES[s]} for ${chartConfig[s].label}`).join("; ");
+  return "Alerts are grouped by observing night, local noon to local noon at the observatory" +
+    (sites ? ` (${sites})` : "") + ". A night is labeled by its evening date.";
+}
 
 const ALERT_TYPE_LABELS: Record<string, string> = {
   alerts: "alerts",
@@ -50,12 +63,6 @@ function formatDate(d: Date): string {
 function monthsBefore(date: string, months: number): string {
   const d = new Date(`${date}T00:00:00Z`);
   d.setUTCMonth(d.getUTCMonth() - months);
-  return formatDate(d);
-}
-
-function twoMonthsAgo(): string {
-  const d = new Date();
-  d.setMonth(d.getMonth() - 2);
   return formatDate(d);
 }
 
@@ -106,11 +113,12 @@ function formatBytes(bytes: number | undefined): string {
   return `${val < 10 ? val.toFixed(1) : Math.round(val)} ${units[i]}`;
 }
 
-const isAlertCollection = (name: string) =>
-  name.startsWith("ZTF_") || name.startsWith("LSST_");
+const ALERT_COLLECTION = /^(ZTF|LSST|DECAM|WINTER)_(.+)$/;
+
+const isAlertCollection = (name: string) => ALERT_COLLECTION.test(name);
 
 function alertCollectionLabel(name: string): string {
-  const m = name.match(/^(ZTF|LSST)_(.+)$/);
+  const m = name.match(ALERT_COLLECTION);
   if (!m) return name;
   return `${m[1]} ${ALERT_TYPE_LABELS[m[2]] ?? m[2]}`;
 }
@@ -187,7 +195,7 @@ export default function Dashboard() {
   const todayUTC = formatDate(new Date());
 
   const [surveys, setSurveys] = useState<Set<Survey>>(new Set(SURVEY_ORDER));
-  const [startDate, setStartDate] = useState(twoMonthsAgo);
+  const [startDate, setStartDate] = useState(() => monthsBefore(todayUTC, 1));
   const [endDate, setEndDate] = useState(todayUTC);
   const [statsData, setStatsData] = useState<NightlyStat[]>([]);
   const [collections, setCollections] = useState<CollectionEntry[]>([]);
@@ -208,6 +216,7 @@ export default function Dashboard() {
 
   const chartRef = useRef<HTMLDivElement>(null);
   const [chartWidth, setChartWidth] = useState(0);
+  const [now, setNow] = useState(Date.now);
 
   useEffect(() => {
     setLoading(true);
@@ -234,6 +243,11 @@ export default function Dashboard() {
   }, [reloadKey]);
 
   useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 60_000);
+    return () => clearInterval(id);
+  }, []);
+
+  useEffect(() => {
     const el = chartRef.current;
     if (!el) return;
     const observer = new ResizeObserver(([entry]) => setChartWidth(entry.contentRect.width));
@@ -241,13 +255,21 @@ export default function Dashboard() {
     return () => observer.disconnect();
   }, []);
 
+  const availableSurveys = useMemo(() =>
+      SURVEY_ORDER.filter((s) => statsData.some((d) => d[s] !== undefined)),
+    [statsData]);
+
+  const shownSurveys = useMemo(() =>
+      availableSurveys.filter((s) => surveys.has(s)),
+    [availableSurveys, surveys]);
+
   const visibleData = useMemo(() =>
       statsData.map((d) => ({
         date: d.date,
-        ...(surveys.has("ztf") ? {ztf: d.ztf} : {}),
-        ...(surveys.has("lsst") ? {lsst: d.lsst} : {}),
-      })),
-    [statsData, surveys]);
+        windows: d.windows,
+        ...Object.fromEntries(shownSurveys.map((s) => [s, d[s]])),
+      }) as NightlyStat),
+    [statsData, shownSurveys]);
 
   const chartData = useMemo(() =>
       zoomSlice ? visibleData.slice(zoomSlice[0], zoomSlice[1] + 1) : visibleData,
@@ -259,6 +281,19 @@ export default function Dashboard() {
     const step = Math.max(1, Math.ceil(chartData.length / fits));
     return chartData.filter((_, i) => i % step === 0).map((d) => d.date);
   }, [chartData, chartWidth]);
+
+  const nowX = useMemo(() => {
+    const positions = shownSurveys.flatMap((s) =>
+      chartData.flatMap((d, i) => {
+        const window = d.windows?.[s];
+        if (!window) return [];
+        const start = Date.parse(window.start);
+        const end = Date.parse(window.end);
+        return start <= now && now < end ? [i + (now - start) / (end - start)] : [];
+      }),
+    );
+    return positions.length ? positions.reduce((sum, x) => sum + x, 0) / positions.length : null;
+  }, [chartData, shownSurveys, now]);
 
   const monthTicks = useMemo(() => {
     const months = new Map<string, string[]>();
@@ -277,7 +312,7 @@ export default function Dashboard() {
     let nights = 0;
     let peak: { date: string; total: number } | null = null;
     for (const d of visibleData) {
-      const n = (d.ztf ?? 0) + (d.lsst ?? 0);
+      const n = SURVEY_ORDER.reduce((sum, s) => sum + (d[s] ?? 0), 0);
       total += n;
       if (n > 0) nights += 1;
       if (!peak || n > peak.total) peak = {date: d.date, total: n};
@@ -401,7 +436,7 @@ export default function Dashboard() {
                   <TooltipTrigger asChild>
                     <IconInfoCircle className="text-muted-foreground size-4 cursor-help" />
                   </TooltipTrigger>
-                  <TooltipContent side="right" className="max-w-xs">{NIGHT_CONVENTION}</TooltipContent>
+                  <TooltipContent side="right" className="max-w-xs">{nightConvention(availableSurveys)}</TooltipContent>
                 </Tooltip>
               </CardTitle>
               <CardDescription>
@@ -410,7 +445,7 @@ export default function Dashboard() {
             </div>
             <div className="flex flex-wrap items-center gap-6">
               <div className="flex flex-wrap items-center gap-3">
-                {SURVEY_ORDER.map((s) => (
+                {availableSurveys.map((s) => (
                   <Toggle
                     key={s}
                     variant="outline"
@@ -487,6 +522,7 @@ export default function Dashboard() {
                   tick={{ style: { fill: "var(--foreground)" }, fontSize: 11 }}
                   tickFormatter={nightMonth}
                 />
+                <XAxis xAxisId="now" type="number" domain={[0, chartData.length]} allowDataOverflow hide />
                 <YAxis
                   tickLine={false}
                   axisLine={false}
@@ -509,9 +545,18 @@ export default function Dashboard() {
                     />
                   }
                 />
-                {SURVEY_ORDER.filter((s) => surveys.has(s)).map((s) => (
+                {shownSurveys.map((s) => (
                   <Bar key={s} dataKey={s} fill={`var(--color-${s})`} radius={[2, 2, 0, 0]}/>
                 ))}
+                {nowX !== null && (
+                  <ReferenceLine
+                    xAxisId="now"
+                    x={nowX}
+                    stroke="var(--destructive)"
+                    strokeWidth={2}
+                    label={{ value: "now", position: "insideTopRight", fill: "var(--destructive)", fontSize: 11 }}
+                  />
+                )}
                 {zoomLeft && zoomRight && (
                   <ReferenceArea x1={zoomLeft} x2={zoomRight} strokeOpacity={0.3} fill="hsl(var(--accent))" fillOpacity={0.3} />
                 )}
@@ -550,7 +595,7 @@ export default function Dashboard() {
 
       <CollectionsCard
         title="Alert Collections"
-        description="ZTF and LSST collections"
+        description="Alerts, objects and cutouts per survey"
         collections={alertCollections}
         formatName={alertCollectionLabel}
       />

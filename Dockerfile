@@ -24,6 +24,11 @@ WORKDIR /app
 FROM base AS builder
 
 ARG ONNXRUNTIME_GPU_VERSION=1.24.4
+# Compiled into the binaries and recorded on every data mutation, so the ledger
+# can name the commit that produced a change. Absent when unset -- the ledger
+# records that honestly rather than inventing a value.
+ARG BOOM_GIT_SHA
+ENV BOOM_GIT_SHA=${BOOM_GIT_SHA}
 
 RUN python3 -m venv /opt/ort-py && \
     /opt/ort-py/bin/pip install --no-cache-dir "onnxruntime==${ONNXRUNTIME_GPU_VERSION}" && \
@@ -36,7 +41,10 @@ RUN ORT_CAPI_DIR="$('/opt/ort-py/bin/python' -c 'import pathlib, onnxruntime as 
     rm -rf /opt/ort-py && ln -sf /opt/ort/libonnxruntime.so.${ONNXRUNTIME_GPU_VERSION} /opt/ort/libonnxruntime.so
 
 COPY apache-avro-macros /app/apache-avro-macros
-COPY Cargo.toml Cargo.lock /app/
+COPY Cargo.toml Cargo.lock build.rs /app/
+# build.rs generates the Milvus gRPC bindings from these vendored protos into
+# OUT_DIR; without them src/milvus/proto.rs has nothing to include!().
+COPY ./proto /app/proto
 COPY ./src /app/src
 
 # BuildKit cache mounts keep the compiled crates (target/) and the fetched
@@ -57,6 +65,7 @@ RUN --mount=type=cache,target=/app/target,sharing=locked \
        target/release/kafka_consumer \
        target/release/kafka_producer \
        target/release/api \
+       target/release/task_worker \
        target/release/migrate_fp_flux \
        target/release/migrate_snr \
        target/release/reprocess_crossmatch \
@@ -66,6 +75,7 @@ RUN --mount=type=cache,target=/app/target,sharing=locked \
        target/release/stream_kowalski_alerts \
        target/release/enrich_reprocess \
        target/release/mpcorb_ingest \
+       target/release/backfill_detection_span \
        target/release/backfill_hpx \
        target/release/backfill_host_galaxy \
        target/release/find_tracklets \
@@ -74,6 +84,13 @@ RUN --mount=type=cache,target=/app/target,sharing=locked \
 FROM builder AS dev
 
 RUN cargo install --locked cargo-watch
+
+# On Linux, `ort` uses the `load-dynamic` feature (Cargo.toml), so it looks up
+# libonnxruntime.so at runtime instead of linking it in. These tell it where.
+# The `app` stage repeats them; without them here the enrichment workers hang
+# in SharedModels::load and never reach their queue loop.
+ENV ORT_DYLIB_PATH=/opt/ort/libonnxruntime.so
+ENV LD_LIBRARY_PATH=/opt/ort
 
 CMD ["cargo", "watch", "-x", "run --bin api"]
 
@@ -99,15 +116,16 @@ COPY --from=builder /app/bin/scheduler /app/scheduler
 COPY --from=builder /app/bin/kafka_consumer /app/kafka_consumer
 COPY --from=builder /app/bin/kafka_producer /app/kafka_producer
 COPY --from=builder /app/bin/api /app/boom-api
+COPY --from=builder /app/bin/task_worker /app/task_worker
 COPY --from=builder /app/bin/migrate_fp_flux /app/migrate_fp_flux
 COPY --from=builder /app/bin/migrate_snr /app/migrate_snr
 COPY --from=builder /app/bin/reprocess_crossmatch /app/reprocess_crossmatch
 COPY --from=builder /app/bin/prepare_catalog /app/prepare_catalog
 COPY --from=builder /app/bin/repair_photometry_ordering /app/repair_photometry_ordering
 COPY --from=builder /app/bin/mpcorb_ingest /app/mpcorb_ingest
+COPY --from=builder /app/bin/backfill_detection_span /app/backfill_detection_span
 COPY --from=builder /app/bin/backfill_hpx /app/backfill_hpx
 COPY --from=builder /app/bin/backfill_host_galaxy /app/backfill_host_galaxy
-COPY --from=builder /app/bin/find_tracklets /app/find_tracklets
 COPY --from=builder /opt/ort /opt/ort
 # Temporary
 COPY --from=builder /app/bin/copy_cutouts /app/copy_cutouts

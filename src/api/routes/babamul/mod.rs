@@ -1,3 +1,4 @@
+pub mod admin;
 pub mod oauth;
 pub mod stats;
 pub mod surveys;
@@ -188,6 +189,40 @@ pub struct BabamulUser {
     /// `username` it is free text, optional, and not unique.
     #[serde(default)]
     pub name: Option<String>,
+    /// Whether this account has elevated privileges: managing other users, and
+    /// running data-mutating tasks from the admin page.
+    ///
+    /// Granted through `PATCH /babamul/admin/users/{id}`, and seeded at API
+    /// startup from `babamul.admin_emails` -- which is how a fresh deployment
+    /// gets its first admin, since nobody can grant admin through the admin
+    /// page until somebody is one. Seeding only grants, so a grant made
+    /// through the API survives a restart.
+    #[serde(default)]
+    pub is_admin: bool,
+    #[serde(default)]
+    pub acls: Vec<BabamulAcl>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, ToSchema, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum BabamulAcl {
+    Winter,
+    ZtfPartnership,
+    ZtfCaltech,
+}
+
+impl BabamulAcl {
+    pub const ALL: [BabamulAcl; 3] = [
+        BabamulAcl::Winter,
+        BabamulAcl::ZtfPartnership,
+        BabamulAcl::ZtfCaltech,
+    ];
+}
+
+impl BabamulUser {
+    pub fn has_acl(&self, acl: BabamulAcl) -> bool {
+        self.is_admin || self.acls.contains(&acl)
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, ToSchema)]
@@ -205,6 +240,12 @@ pub struct BabamulUserPublic {
     pub orcid_id: Option<String>,
     /// Full name the user chose to display, if any
     pub name: Option<String>,
+    /// Exposed so the client knows whether to offer the admin page.
+    /// Authorization is enforced server-side on every admin route regardless.
+    #[serde(default)]
+    pub is_admin: bool,
+    #[serde(default)]
+    pub acls: Vec<BabamulAcl>,
 }
 
 impl From<BabamulUser> for BabamulUserPublic {
@@ -221,6 +262,8 @@ impl From<BabamulUser> for BabamulUserPublic {
                 .collect(),
             orcid_id: user.orcid_id,
             name: user.name,
+            is_admin: user.is_admin,
+            acls: user.acls,
         }
     }
 }
@@ -328,6 +371,8 @@ pub async fn post_babamul_signup(
                 identities: Vec::new(),
                 orcid_id: None,
                 name: None,
+                is_admin: false,
+                acls: vec![],
             };
 
             if let Err(e) = babamul_users_collection.insert_one(&babamul_user).await {

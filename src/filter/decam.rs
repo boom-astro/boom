@@ -1,14 +1,17 @@
 use mongodb::bson::{doc, Document};
 use std::collections::HashMap;
-use tracing::{info, instrument, warn};
+use tracing::{debug, info, instrument, warn};
 
 use crate::alert::DecamCandidate;
 use crate::conf::AppConfig;
-use crate::enrichment::fetch_alerts;
+use crate::enrichment::{fetch_alerts, LsstMatch, ZtfMatch};
 use crate::filter::{
-    build_loaded_filters, run_filter, uses_field_in_filter, validate_filter_pipeline,
-    watchlist_projections, Alert, Classification, Filter, FilterError, FilterResults, FilterWorker,
-    FilterWorkerError, LoadedFilter, Origin, Photometry, SurveyMatches,
+    build_loaded_filters, build_lsst_aux_data, build_ztf_aux_data,
+    insert_lsst_aux_pipeline_if_needed, insert_ztf_aux_pipeline_if_needed, lsst_survey_match,
+    record_filter_result, run_filter, update_aliases_index_multiple, uses_field_in_filter,
+    validate_filter_pipeline, watchlist_projections, ztf_survey_match, Alert, Classification,
+    Filter, FilterError, FilterResults, FilterWorker, FilterWorkerError, LoadedFilter, Origin,
+    Photometry, SurveyMatch, SurveyMatches,
 };
 use crate::utils::cutouts::CutoutStorage;
 use crate::utils::db::{fetch_timeseries_op, get_array_dict_element};
@@ -44,6 +47,169 @@ impl DecamPhotometry {
     }
 }
 
+/// DECam alert and forced photometry as output photometry, sorted by time.
+fn decam_photometry(
+    prv_candidates: &[DecamPhotometry],
+    fp_hists: &[DecamPhotometry],
+) -> Vec<Photometry> {
+    let mut photometry = Vec::new();
+    for (points, origin) in [
+        (prv_candidates, Origin::Alert),
+        (fp_hists, Origin::ForcedPhot),
+    ] {
+        for doc in points {
+            let (flux, flux_err) = doc.to_flux();
+            photometry.push(Photometry {
+                jd: doc.jd,
+                flux,
+                flux_err,
+                band: format!("decam{}", doc.band),
+                origin: origin.clone(),
+                programid: 1, // DECam has a single public stream
+                survey: Survey::Decam,
+                ra: doc.ra,
+                dec: doc.dec,
+            });
+        }
+    }
+    photometry.sort_by(|a, b| a.jd.partial_cmp(&b.jd).unwrap());
+    photometry
+}
+
+/// The DECam object matched to an alert of another survey, with its photometry.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct DecamMatch {
+    #[serde(rename = "objectId")]
+    pub object_id: String,
+    pub ra: f64,
+    pub dec: f64,
+    #[serde(default)]
+    pub prv_candidates: Vec<DecamPhotometry>,
+    #[serde(default)]
+    pub fp_hists: Vec<DecamPhotometry>,
+}
+
+/// Converts the DECam object matched to an alert of another survey into an output survey match.
+pub fn decam_survey_match(decam_match: &DecamMatch) -> SurveyMatch {
+    SurveyMatch {
+        object_id: decam_match.object_id.clone(),
+        ra: decam_match.ra,
+        dec: decam_match.dec,
+        photometry: decam_photometry(&decam_match.prv_candidates, &decam_match.fp_hists),
+    }
+}
+
+/// Adds the DECam object matched to the alert, if any, to the survey matches of
+/// another survey's alert pipeline, which must end with its `$project` stage.
+pub fn add_decam_survey_match(pipeline: &mut Vec<Document>) {
+    let project_index = pipeline.len() - 1;
+    if let Some(survey_matches) = pipeline[project_index]
+        .get_document_mut("$project")
+        .ok()
+        .and_then(|project| project.get_document_mut("survey_matches").ok())
+    {
+        survey_matches.insert("decam", survey_match_projection("decam_aux", false));
+    }
+    pipeline.insert(
+        project_index,
+        doc! {
+            "$lookup": {
+                "from": "DECAM_alerts_aux",
+                "localField": "aux.aliases.DECAM.0",
+                "foreignField": "_id",
+                "as": "decam_aux"
+            }
+        },
+    );
+}
+
+/// For a filter running on another survey, the DECam aux data (prv_candidates,
+/// fp_hists) of the matched object it references, mirroring `build_lsst_aux_data`.
+pub fn build_decam_aux_data(
+    use_aliases_index: Option<usize>,
+    filter_pipeline: &Vec<serde_json::Value>,
+    permissions: &HashMap<Survey, Vec<i32>>,
+) -> (Option<usize>, bool, Document) {
+    let use_decam_prv_candidates_index =
+        uses_field_in_filter(filter_pipeline, "DECAM.prv_candidates");
+    let use_decam_fp_hists_index = uses_field_in_filter(filter_pipeline, "DECAM.fp_hists");
+
+    // DECam data is private: a filter without DECam permissions reads no points.
+    let has_decam_access = permissions
+        .get(&Survey::Decam)
+        .is_some_and(|programids| !programids.is_empty());
+    let permissions_check = (!has_decam_access).then(|| vec![doc! { "$literal": false }]);
+
+    let mut decam_aux_add_fields = doc! {
+        "decam_aux": mongodb::bson::Bson::Null,
+    };
+    if use_decam_prv_candidates_index.is_some() {
+        decam_aux_add_fields.insert(
+            "DECAM.prv_candidates".to_string(),
+            fetch_timeseries_op(
+                "decam_aux.prv_candidates",
+                "candidate.jd",
+                365,
+                permissions_check.clone(),
+            ),
+        );
+    }
+    if use_decam_fp_hists_index.is_some() {
+        decam_aux_add_fields.insert(
+            "DECAM.fp_hists".to_string(),
+            fetch_timeseries_op(
+                "decam_aux.fp_hists",
+                "candidate.jd",
+                365,
+                permissions_check.clone(),
+            ),
+        );
+    }
+
+    let decam_insert_aux_pipeline =
+        use_decam_prv_candidates_index.is_some() || use_decam_fp_hists_index.is_some();
+
+    let updated_use_aliases_index = update_aliases_index_multiple(
+        use_aliases_index,
+        vec![use_decam_prv_candidates_index, use_decam_fp_hists_index],
+    );
+
+    (
+        updated_use_aliases_index,
+        decam_insert_aux_pipeline,
+        decam_aux_add_fields,
+    )
+}
+
+/// Inserts the DECam aux data lookup into another survey's filter pipeline if needed.
+pub fn insert_decam_aux_pipeline_if_needed(
+    pipeline: &mut Vec<Document>,
+    decam_insert_aux_pipeline: &mut bool,
+    decam_aux_add_fields: &Document,
+) {
+    if *decam_insert_aux_pipeline {
+        pipeline.push(doc! {
+            "$lookup": doc! {
+                "from": "DECAM_alerts_aux",
+                "localField": "aliases.DECAM.0",
+                "foreignField": "_id",
+                "as": "decam_aux"
+            }
+        });
+        pipeline.push(doc! {
+            "$addFields": decam_aux_add_fields
+        });
+        *decam_insert_aux_pipeline = false;
+    }
+}
+
+/// ZTF and LSST objects matched to a DECam alert, with their photometry.
+#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
+pub struct DecamSurveyMatches {
+    pub ztf: Option<ZtfMatch>,
+    pub lsst: Option<LsstMatch>,
+}
+
 /// DECam alert as fetched from the database to build the outgoing alert packet.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct DecamAlertForFilter {
@@ -56,6 +222,36 @@ pub struct DecamAlertForFilter {
     pub prv_candidates: Vec<DecamPhotometry>,
     #[serde(default)]
     pub fp_hists: Vec<DecamPhotometry>,
+    #[serde(default)]
+    pub survey_matches: Option<DecamSurveyMatches>,
+}
+
+/// The object matched in another survey, from its aux lookup, or null.
+fn survey_match_projection(aux_field: &str, with_nondetections: bool) -> Document {
+    let aux = format!("${}", aux_field);
+    let mut then = doc! {
+        "objectId": { "$arrayElemAt": [ format!("{}._id", aux), 0 ] },
+        "prv_candidates": { "$arrayElemAt": [ format!("{}.prv_candidates", aux), 0 ] },
+        "fp_hists": { "$arrayElemAt": [ format!("{}.fp_hists", aux), 0 ] },
+        "ra": { "$add": [
+            { "$arrayElemAt": [{ "$arrayElemAt": [ format!("{}.coordinates.radec_geojson.coordinates", aux), 0 ] }, 0]},
+            180
+        ]},
+        "dec": { "$arrayElemAt": [{ "$arrayElemAt": [ format!("{}.coordinates.radec_geojson.coordinates", aux), 0 ] }, 1]},
+    };
+    if with_nondetections {
+        then.insert(
+            "prv_nondetections",
+            doc! { "$arrayElemAt": [ format!("{}.prv_nondetections", aux), 0 ] },
+        );
+    }
+    doc! {
+        "$cond": {
+            "if": { "$gt": [ { "$size": &aux }, 0 ] },
+            "then": then,
+            "else": null
+        }
+    }
 }
 
 /// Pipeline used to fetch full DECam alert data (candidate + lightcurve) to
@@ -82,9 +278,35 @@ fn create_decam_filter_alert_pipeline() -> Vec<Document> {
             }
         },
         doc! {
+            "$addFields": {
+                "ztf_alias": { "$arrayElemAt": [{ "$arrayElemAt": [ "$aux.aliases.ZTF", 0 ] }, 0] },
+                "lsst_alias": { "$arrayElemAt": [{ "$arrayElemAt": [ "$aux.aliases.LSST", 0 ] }, 0] },
+            }
+        },
+        doc! {
+            "$lookup": {
+                "from": "ZTF_alerts_aux",
+                "localField": "ztf_alias",
+                "foreignField": "_id",
+                "as": "ztf_aux"
+            }
+        },
+        doc! {
+            "$lookup": {
+                "from": "LSST_alerts_aux",
+                "localField": "lsst_alias",
+                "foreignField": "_id",
+                "as": "lsst_aux"
+            }
+        },
+        doc! {
             "$project": doc! {
                 "objectId": 1,
                 "candidate": 1,
+                "survey_matches": {
+                    "ztf": survey_match_projection("ztf_aux", true),
+                    "lsst": survey_match_projection("lsst_aux", false),
+                },
                 "prv_candidates": fetch_timeseries_op(
                     "aux.prv_candidates",
                     "candidate.jd",
@@ -113,6 +335,7 @@ fn create_decam_filter_alert_pipeline() -> Vec<Document> {
                 "fp_hists.forcediffimflux": 1,
                 "fp_hists.forcediffimfluxunc": 1,
                 "fp_hists.band": 1,
+                "survey_matches": 1,
             }
         },
     ]
@@ -186,41 +409,13 @@ pub async fn build_decam_alerts(
             });
         }
 
-        let mut photometry = Vec::new();
-        for doc in alert.prv_candidates.iter() {
-            let (flux, flux_err) = doc.to_flux();
-            photometry.push(Photometry {
-                jd: doc.jd,
-                flux,
-                flux_err,
-                band: format!("decam{}", doc.band),
-                origin: Origin::Alert,
-                programid: 1, // DECam has a single public stream
-                survey: Survey::Decam,
-                ra: doc.ra,
-                dec: doc.dec,
-            });
-        }
-        for doc in alert.fp_hists.iter() {
-            let (flux, flux_err) = doc.to_flux();
-            photometry.push(Photometry {
-                jd: doc.jd,
-                flux,
-                flux_err,
-                band: format!("decam{}", doc.band),
-                origin: Origin::ForcedPhot,
-                programid: 1,
-                survey: Survey::Decam,
-                ra: doc.ra,
-                dec: doc.dec,
-            });
-        }
-        photometry.sort_by(|a, b| a.jd.partial_cmp(&b.jd).unwrap());
+        let photometry = decam_photometry(&alert.prv_candidates, &alert.fp_hists);
 
         let cutouts = candid_to_cutouts
             .remove(&candid)
             .ok_or_else(|| FilterWorkerError::MissingCutouts(candid))?;
 
+        let survey_matches = alert.survey_matches.unwrap_or_default();
         let alert = Alert {
             candid: alert.candid,
             object_id: alert.object_id,
@@ -238,8 +433,9 @@ pub async fn build_decam_alerts(
             cutout_difference: cutouts.cutout_difference,
             survey: Survey::Decam,
             survey_matches: SurveyMatches {
-                ztf: None,
-                lsst: None,
+                ztf: survey_matches.ztf.as_ref().map(ztf_survey_match),
+                lsst: survey_matches.lsst.as_ref().map(lsst_survey_match),
+                decam: None,
             },
             host_galaxy: None,
         };
@@ -253,11 +449,11 @@ pub async fn build_decam_alerts(
 /// Builds a MongoDB aggregation pipeline for DECam filter execution.
 ///
 /// Augments the user filter pipeline with DECam aux lookups (prv_candidates,
-/// fp_hists, cross_matches, aliases) based on which fields the filter
-/// references.
+/// fp_hists, cross_matches, aliases), and with the ZTF and LSST photometry of
+/// the matched objects, based on which fields the filter references.
 pub async fn build_decam_filter_pipeline(
     filter_pipeline: &Vec<serde_json::Value>,
-    _permissions: &HashMap<Survey, Vec<i32>>,
+    permissions: &HashMap<Survey, Vec<i32>>,
 ) -> Result<Vec<Document>, FilterError> {
     validate_filter_pipeline(&filter_pipeline)?;
 
@@ -266,6 +462,11 @@ pub async fn build_decam_filter_pipeline(
     let use_cross_matches_index = uses_field_in_filter(filter_pipeline, "cross_matches");
     let use_host_galaxy_index = uses_field_in_filter(filter_pipeline, "host_galaxy");
     let use_aliases_index = uses_field_in_filter(filter_pipeline, "aliases");
+
+    let (use_aliases_index, mut ztf_insert_aux_pipeline, ztf_aux_add_fields) =
+        build_ztf_aux_data(use_aliases_index, filter_pipeline, permissions);
+    let (use_aliases_index, mut lsst_insert_aux_pipeline, lsst_aux_add_fields) =
+        build_lsst_aux_data(use_aliases_index, filter_pipeline);
 
     let mut aux_add_fields = doc! {
         "aux": mongodb::bson::Bson::Null,
@@ -363,6 +564,17 @@ pub async fn build_decam_filter_pipeline(
                 "$addFields": &aux_add_fields
             });
             insert_aux_pipeline = false; // only insert once
+
+            insert_ztf_aux_pipeline_if_needed(
+                &mut pipeline,
+                &mut ztf_insert_aux_pipeline,
+                &ztf_aux_add_fields,
+            );
+            insert_lsst_aux_pipeline_if_needed(
+                &mut pipeline,
+                &mut lsst_insert_aux_pipeline,
+                &lsst_aux_add_fields,
+            );
         }
 
         pipeline.push(x);
@@ -470,14 +682,16 @@ impl FilterWorker for DecamFilterWorker {
             )
             .await?;
 
+            record_filter_result(&Survey::Decam, filter, out_documents.len(), candids.len());
+            debug!(
+                "{}/{} DECAM alerts passed filter {}",
+                out_documents.len(),
+                candids.len(),
+                filter.id,
+            );
+
             if out_documents.is_empty() {
                 continue;
-            } else {
-                info!(
-                    "{} alerts passed decam filter {}",
-                    out_documents.len(),
-                    filter.id,
-                );
             }
 
             let now_ts = chrono::Utc::now().timestamp_millis() as f64;
@@ -548,5 +762,60 @@ mod host_galaxy_tests {
             .await
             .expect("builds");
         assert!(!format!("{built:?}").contains("aux.host_galaxy"));
+    }
+
+    #[tokio::test]
+    async fn test_a_filter_reading_ztf_and_lsst_gets_their_photometry() {
+        let permissions = HashMap::from([(Survey::Decam, vec![1])]);
+        let pipeline = vec![
+            serde_json::json!({"$match": {"ZTF.prv_candidates.0": {"$exists": true}}}),
+            serde_json::json!({"$match": {"LSST.fp_hists.0": {"$exists": true}}}),
+            serde_json::json!({"$project": {"objectId": 1}}),
+        ];
+        let built = build_decam_filter_pipeline(&pipeline, &permissions)
+            .await
+            .expect("builds");
+        let rendered = format!("{built:?}");
+        assert!(rendered.contains("ZTF_alerts_aux"), "no ZTF aux lookup");
+        assert!(rendered.contains("LSST_alerts_aux"), "no LSST aux lookup");
+        assert!(
+            rendered.contains("aux.aliases"),
+            "aliases were not projected"
+        );
+        assert!(
+            rendered.contains("$$x.programid"),
+            "ZTF points are not scoped"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ztf_and_lsst_filters_reading_decam_need_decam_access() {
+        let pipeline = vec![
+            serde_json::json!({"$match": {"DECAM.prv_candidates.0": {"$exists": true}}}),
+            serde_json::json!({"$project": {"objectId": 1}}),
+        ];
+        for decam in [vec![1], vec![]] {
+            let ztf = crate::filter::build_ztf_filter_pipeline(
+                &pipeline,
+                &HashMap::from([(Survey::Ztf, vec![1]), (Survey::Decam, decam.clone())]),
+            )
+            .await
+            .expect("builds");
+            let lsst = crate::filter::build_lsst_filter_pipeline(
+                &pipeline,
+                &HashMap::from([(Survey::Lsst, vec![1]), (Survey::Decam, decam.clone())]),
+            )
+            .await
+            .expect("builds");
+            for built in [ztf, lsst] {
+                let rendered = format!("{built:?}");
+                assert!(rendered.contains("DECAM_alerts_aux"), "no DECam aux lookup");
+                assert_eq!(
+                    rendered.contains("$literal\": Boolean(false)"),
+                    decam.is_empty(),
+                    "DECam points must be dropped exactly when the filter has no DECam access"
+                );
+            }
+        }
     }
 }
