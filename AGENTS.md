@@ -5,6 +5,18 @@ things that are easy to get wrong because nothing fails loudly when you do.
 For coding conventions (error handling, instrumentation, logging), see
 [CONTRIBUTING.md](CONTRIBUTING.md).
 
+## Skills live in `.agents/skills/`
+
+Step-by-step guidance for a particular kind of change — adding a data task
+type, adding an archival catalog — is in `.agents/skills/<name>/SKILL.md`. The
+sections below link the relevant one where it applies; read it before starting
+that kind of work, because what those files carry is the registration points
+and the order of operations that nothing fails loudly about.
+
+`.agents/` rather than a vendor's directory, so the guidance is not addressed
+to one tool. The trade is that a harness looking only in its own directory will
+not offer them as commands, so treat them as files to open.
+
 ## Production configs are generated — never edit them directly
 
 `config/prod/*/config.yaml` are **build artifacts**. Each one is the base
