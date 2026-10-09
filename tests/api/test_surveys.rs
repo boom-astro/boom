@@ -96,6 +96,83 @@ mod tests {
         );
     }
 
+    /// Test POST /surveys/{survey_name}/cutouts
+    #[actix_rt::test]
+    async fn test_get_batch_cutouts() {
+        let config = AppConfig::from_test_config().unwrap();
+        let database: Database = get_test_db_api().await;
+        let storage = config
+            .build_cutout_storage(&Survey::Ztf)
+            .await
+            .expect("Failed to build ZTF cutout storage");
+        let base = (uuid::Uuid::new_v4().as_u128() as i64).abs() / 16;
+        let (first, second, absent) = (base, base + 1, base + 2);
+        // Only `first` has an alert, so only it gets a jd.
+        let alerts =
+            database.collection::<mongodb::bson::Document>(&format!("{}_alerts", Survey::Ztf));
+        alerts
+            .insert_one(doc! { "_id": first, "candidate": { "jd": 2460000.5 } })
+            .await
+            .expect("Failed to insert test alert");
+        for candid in [first, second] {
+            storage
+                .insert_cutouts(AlertCutout {
+                    candid,
+                    cutout_science: vec![1, 2, 3],
+                    cutout_template: vec![4, 5, 6],
+                    cutout_difference: vec![7, 8, 9],
+                })
+                .await
+                .expect("Failed to store test cutout");
+        }
+
+        let mut cutout_storage_map: HashMap<Survey, CutoutStorage> = HashMap::new();
+        cutout_storage_map.insert(Survey::Ztf, storage);
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(database.clone()))
+                .app_data(web::Data::new(cutout_storage_map))
+                .service(routes::surveys::cutouts::get_batch_cutouts),
+        )
+        .await;
+
+        // Request order is kept, duplicates collapse, and an unknown candid is
+        // reported rather than failing the request.
+        let req = test::TestRequest::post()
+            .uri("/surveys/ztf/cutouts")
+            .set_json(serde_json::json!({ "candids": [second, absent, first, second] }))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = read_json_response(resp).await;
+        let candids: Vec<i64> = body["data"]["cutouts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["candid"].as_i64().unwrap())
+            .collect();
+        assert_eq!(candids, vec![second, first]);
+        assert_eq!(body["data"]["missing"], serde_json::json!([absent]));
+        assert_eq!(body["data"]["cutouts"][0]["cutoutScience"], "AQID");
+        assert!(body["data"]["cutouts"][0]["jd"].is_null());
+        assert_eq!(body["data"]["cutouts"][1]["jd"], 2460000.5);
+
+        for candids in [vec![], (0..101).collect::<Vec<i64>>()] {
+            let req = test::TestRequest::post()
+                .uri("/surveys/ztf/cutouts")
+                .set_json(serde_json::json!({ "candids": candids }))
+                .to_request();
+            let resp = test::call_service(&app, req).await;
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        }
+
+        alerts.delete_one(doc! { "_id": first }).await.unwrap();
+        let storage = config.build_cutout_storage(&Survey::Ztf).await.unwrap();
+        for candid in [first, second] {
+            storage.delete_cutouts(candid).await.unwrap();
+        }
+    }
+
     async fn insert_track(database: &Database, members: &[i64]) -> String {
         let jds: Vec<f64> = (0..members.len()).map(|k| 2460000.0 + k as f64).collect();
         let plan = plan_upsert(database, members, &jds, None, None)

@@ -1,13 +1,15 @@
-use crate::api::cutouts::{AlertCandidOnly, CutoutQuery, WhichCutouts};
+use crate::api::cutouts::{
+    cutouts_to_json, fetch_alert_jds, retrieve_batch_cutouts, validate_batch_candids,
+    AlertCandidOnly, AlertJdOnly, BatchCutoutQuery, CutoutQuery, WhichCutouts,
+};
 use crate::api::models::response;
 use crate::api::routes::babamul::BabamulUser;
 use crate::utils::cutouts::{CutoutStorage, CutoutStorageError};
 use crate::utils::enums::Survey;
 use crate::utils::lightcurves::Band;
-use actix_web::{get, web, HttpResponse};
-use base64::prelude::*;
+use actix_web::{get, post, web, HttpResponse};
 use mongodb::{bson::doc, Database};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[utoipa::path(
     get,
@@ -66,12 +68,7 @@ pub async fn get_cutouts(
                 return response::internal_error("error retrieving cutouts from storage");
             }
         };
-        let resp = serde_json::json!({
-            "candid": candid,
-            "cutoutScience": BASE64_STANDARD.encode(&cutouts.cutout_science),
-            "cutoutTemplate": BASE64_STANDARD.encode(&cutouts.cutout_template),
-            "cutoutDifference": BASE64_STANDARD.encode(&cutouts.cutout_difference),
-        });
+        let resp = cutouts_to_json(&cutouts);
         return response::ok(&format!("cutouts found for candid: {}", candid), resp);
     }
 
@@ -137,14 +134,116 @@ pub async fn get_cutouts(
             }
         };
 
-        let resp = serde_json::json!({
-            "candid": candid,
-            "cutoutScience": BASE64_STANDARD.encode(&cutouts.cutout_science),
-            "cutoutTemplate": BASE64_STANDARD.encode(&cutouts.cutout_template),
-            "cutoutDifference": BASE64_STANDARD.encode(&cutouts.cutout_difference),
-        });
+        let resp = cutouts_to_json(&cutouts);
         return response::ok(&format!("cutouts found for objectId: {}", object_id), resp);
     }
 
     response::bad_request("candid or objectId query parameter must be provided")
+}
+
+/// Get image cutouts for a batch of alerts
+///
+/// Returns the cutouts found, in request order, and lists the candids that
+/// have none under `missing` rather than failing the whole request. For ZTF,
+/// only public (programid 1) alerts are served; any other candid is reported
+/// as missing.
+#[utoipa::path(
+    post,
+    path = "/babamul/surveys/{survey}/cutouts",
+    params(
+        ("survey" = Survey, Path, description = "Name of the survey (e.g., ztf, lsst)"),
+    ),
+    request_body = BatchCutoutQuery,
+    responses(
+        (status = 200, description = "Cutouts retrieved successfully", body = serde_json::Value),
+        (status = 400, description = "Invalid request"),
+        (status = 500, description = "Internal server error")
+    ),
+    tags=["Surveys"]
+)]
+#[post("/surveys/{survey}/cutouts")]
+pub async fn get_batch_cutouts(
+    path: web::Path<Survey>,
+    body: web::Json<BatchCutoutQuery>,
+    current_user: Option<web::ReqData<BabamulUser>>,
+    db: web::Data<Database>,
+    cutout_storages: web::Data<HashMap<Survey, CutoutStorage>>,
+) -> HttpResponse {
+    if current_user.is_none() {
+        return HttpResponse::Unauthorized().body("Unauthorized");
+    }
+    let survey = path.into_inner();
+    if survey != Survey::Ztf && survey != Survey::Lsst {
+        return response::bad_request(&format!(
+            "Unsupported survey: {}. Supported surveys are: ztf, lsst",
+            survey
+        ));
+    }
+    let cutout_storage = match cutout_storages.get(&survey) {
+        Some(storage) => storage,
+        None => {
+            return response::internal_error("cutout storage not available for this survey");
+        }
+    };
+    let requested = match validate_batch_candids(&body.candids) {
+        Ok(candids) => candids,
+        Err(message) => return response::bad_request(&message),
+    };
+
+    // One alerts query gives each candid's jd and, for ZTF, doubles as the
+    // gate: only public alerts may be served. Candids that aren't are dropped
+    // before touching storage and reported as missing, so the response doesn't
+    // reveal whether a private alert exists.
+    let alert_collection = db.collection::<AlertJdOnly>(&format!("{}_alerts", survey));
+    let filter = if survey == Survey::Ztf {
+        doc! { "candidate.programid": 1 }
+    } else {
+        doc! {}
+    };
+    let jds = match fetch_alert_jds(&alert_collection, &requested, filter).await {
+        Ok(jds) => jds,
+        Err(error) => {
+            return response::internal_error(&format!("error getting documents: {}", error));
+        }
+    };
+    let allowed: Vec<i64> = if survey == Survey::Ztf {
+        requested
+            .iter()
+            .copied()
+            .filter(|c| jds.contains_key(c))
+            .collect()
+    } else {
+        requested.clone()
+    };
+
+    let mut data = if allowed.is_empty() {
+        serde_json::json!({ "cutouts": [], "missing": [] })
+    } else {
+        match retrieve_batch_cutouts(cutout_storage, &allowed, &jds).await {
+            Ok(data) => data,
+            Err(error) => {
+                tracing::error!("Error retrieving cutouts from storage: {}", error);
+                return response::internal_error("error retrieving cutouts from storage");
+            }
+        }
+    };
+    // Report every requested candid without cutouts, in request order,
+    // whether storage had none or it was filtered out above.
+    let served: HashSet<i64> = data["cutouts"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|c| c["candid"].as_i64())
+        .collect();
+    data["missing"] = requested
+        .iter()
+        .copied()
+        .filter(|c| !served.contains(c))
+        .collect::<Vec<_>>()
+        .into();
+
+    response::ok(
+        &format!("cutouts retrieved for {} candids", requested.len()),
+        data,
+    )
 }
