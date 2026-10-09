@@ -9,6 +9,8 @@ import {
   IconPackage,
   IconNotebook,
   IconBook,
+  IconShieldLock,
+  IconTelescope,
   IconVector,
 } from "@tabler/icons-react"
 
@@ -16,6 +18,7 @@ import { NavDocuments } from "@/components/nav-documents"
 import { NavMain } from "@/components/nav-main"
 import { NavSecondary } from "@/components/nav-secondary"
 import { NavUser } from "@/components/nav-user"
+import { useAppStore } from "@/lib/store"
 import {
   Sidebar,
   SidebarContent,
@@ -38,6 +41,11 @@ const data = {
       title: "Dashboard",
       url: "/dashboard",
       icon: IconChartBar,
+    },
+    {
+      title: "Telescopes",
+      url: "/telescopes",
+      icon: IconTelescope,
     },
     {
       title: "Embeddings",
@@ -86,6 +94,10 @@ const data = {
 }
 
 export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
+  const isAdmin = useAppStore((s) => s.profile?.is_admin === true)
+  const navMain = isAdmin
+    ? [...data.navMain, { title: "Admin", url: "/admin", icon: IconShieldLock }]
+    : data.navMain
   return (
     <Sidebar collapsible="icon" {...props}>
       <SidebarHeader>
@@ -110,7 +122,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
         </SidebarMenu>
       </SidebarHeader>
       <SidebarContent>
-        <NavMain items={data.navMain} />
+        <NavMain items={navMain} />
         <SidebarSeparator />
         <NavDocuments items={data.documentation} />
         <SidebarSeparator />

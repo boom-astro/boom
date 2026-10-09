@@ -44,6 +44,14 @@ generated config, and a comment in `overrides.yaml` *replaces* the base's for
 that key — so leave a key's comment out of the override unless you mean to
 shadow it.
 
+Lists are the exception to the deep merge: an array is replaced wholesale, not
+merged element by element. That is why `crossmatch.<survey>` is a map keyed by
+catalog name rather than a list. An override adds a catalog by naming it,
+retunes one by setting only the fields it changes, drops one inherited from the
+base with `PS1_DR2: null`, and unsets a single inherited field with
+`type_key: null`. Declaration order is preserved and it matters: the first
+catalog is the collection the others are `$unionWith`-ed onto.
+
 ## Secrets belong in the environment, not in YAML
 
 Every `*.yaml` in this repo is committed, including the generated production

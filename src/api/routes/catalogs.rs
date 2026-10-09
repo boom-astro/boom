@@ -1,8 +1,11 @@
 /// Routes for data catalogs.
-use crate::api::{
-    catalogs::{catalog_accessible, is_catalog_name_visible},
-    models::response,
-    routes::users::User,
+use crate::{
+    api::{
+        catalogs::{catalog_accessible, is_catalog_queryable, is_reference_catalog},
+        models::response,
+        routes::users::User,
+    },
+    conf::AppConfig,
 };
 
 use actix_web::{get, web, HttpResponse};
@@ -19,7 +22,10 @@ impl Default for CatalogsQueryParams {
     }
 }
 
-/// Get a list of catalogs
+/// Get the catalogs the current user can query
+///
+/// Each entry has the catalog `name` and a boolean `crossmatch`, true for the reference
+/// catalogs alerts are crossmatched against, plus `details` when `get_details` is set.
 #[utoipa::path(
     get,
     path = "/catalogs",
@@ -37,6 +43,7 @@ pub async fn get_catalogs(
     db: web::Data<Database>,
     params: Option<web::Query<CatalogsQueryParams>>,
     current_user: Option<web::ReqData<User>>,
+    config: web::Data<AppConfig>,
 ) -> HttpResponse {
     let current_user = match current_user {
         Some(user) => user,
@@ -49,11 +56,9 @@ pub async fn get_catalogs(
             return response::internal_error(&format!("Error getting catalog info: {}", e));
         }
     };
-    // Filters out empty names, Mongo system.* internals, protected operational
-    // collections, and watchlists the current user does not have access to.
     let mut catalog_names = collection_names
         .into_iter()
-        .filter(|name| is_catalog_name_visible(name, Some(&current_user)))
+        .filter(|name| is_catalog_queryable(name, &current_user, &config))
         .collect::<Vec<String>>();
     catalog_names.sort();
     let mut catalogs = Vec::new();
@@ -81,12 +86,13 @@ pub async fn get_catalogs(
                 .get_document("storageStats")
                 .cloned()
                 .unwrap_or_default();
-            catalogs.push(doc! {"name": catalog, "details": details});
+            let crossmatch = is_reference_catalog(&catalog, &config);
+            catalogs.push(doc! {"name": catalog, "crossmatch": crossmatch, "details": details});
         }
     } else {
-        // If no details requested, just return the names
         for catalog in catalog_names {
-            catalogs.push(doc! { "name": catalog });
+            let crossmatch = is_reference_catalog(&catalog, &config);
+            catalogs.push(doc! { "name": catalog, "crossmatch": crossmatch });
         }
     }
     // Serialize catalogs
@@ -117,12 +123,13 @@ pub async fn get_catalog_indexes(
     db: web::Data<Database>,
     catalog_name: web::Path<String>,
     current_user: Option<web::ReqData<User>>,
+    config: web::Data<AppConfig>,
 ) -> HttpResponse {
     let current_user = match current_user {
         Some(user) => user,
         None => return HttpResponse::Unauthorized().body("Unauthorized"),
     };
-    if !catalog_accessible(&db, &catalog_name, Some(&current_user)).await {
+    if !catalog_accessible(&db, &catalog_name, &current_user, &config).await {
         return response::not_found(&format!("Catalog {} does not exist", catalog_name));
     }
     let collection_name = catalog_name.to_string();
@@ -180,12 +187,13 @@ pub async fn get_catalog_sample(
     catalog_name: web::Path<String>,
     params: web::Query<SampleQuery>,
     current_user: Option<web::ReqData<User>>,
+    config: web::Data<AppConfig>,
 ) -> HttpResponse {
     let current_user = match current_user {
         Some(user) => user,
         None => return HttpResponse::Unauthorized().body("Unauthorized"),
     };
-    if !catalog_accessible(&db, &catalog_name, Some(&current_user)).await {
+    if !catalog_accessible(&db, &catalog_name, &current_user, &config).await {
         return response::not_found(&format!("Catalog {} does not exist", catalog_name));
     }
     let collection_name = catalog_name.to_string();

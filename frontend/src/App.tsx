@@ -25,6 +25,8 @@ const ResetPassword = lazy(() => import("@/pages/ResetPassword"))
 const Help = lazy(() => import("@/pages/Help"))
 const Acknowledgments = lazy(() => import("@/pages/Acknowledgments"))
 const Dashboard = lazy(() => import("@/pages/Dashboard"))
+const Admin = lazy(() => import("@/pages/Admin"))
+const Telescopes = lazy(() => import("@/pages/Telescopes"))
 const Embeddings = lazy(() => import("@/pages/Embeddings"))
 
 // Release mode flag - set VITE_PRERELEASE_MODE=true at build time to restrict app to landing page only
@@ -109,7 +111,9 @@ function LayoutRoutes() {
                   {!PRERELEASE_MODE && <Route path="/activate" element={<SignupPage />} />}
                   <Route path="/query" element={<ProtectedRoute><Query /></ProtectedRoute>} />
                   <Route path="/profile" element={<ProtectedRoute><Profile /></ProtectedRoute>} />
+                  <Route path="/admin" element={<ProtectedRoute><Admin /></ProtectedRoute>} />
                   <Route path="/dashboard" element={<Dashboard />} />
+                  <Route path="/telescopes" element={<Telescopes />} />
                   {/* Public like /dashboard. Search and count need no token; the
                       delete form only renders for a signed-in admin. */}
                   <Route path="/embeddings" element={<Embeddings />} />

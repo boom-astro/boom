@@ -60,6 +60,12 @@ jobs:
       BOOM_API__DOMAIN: ${{ vars.BOOM_API__DOMAIN }}
       BOOM_API__AUTH__SECRET_KEY: ${{ secrets.BOOM_API__AUTH__SECRET_KEY }}
       BOOM_API__AUTH__ADMIN_PASSWORD: ${{ secrets.BOOM_API__AUTH__ADMIN_PASSWORD }}
+      # Unset, compose builds every image from this checkout. See docs/deployment.md.
+      BOOM_IMAGE: ${{ vars.BOOM_IMAGE }}
+      BOOM_PULL_POLICY: ${{ vars.BOOM_PULL_POLICY }}
+      BOOM_GPU_IMAGE: ${{ vars.BOOM_GPU_IMAGE }}
+      BOOM_FRONTEND_IMAGE: ${{ vars.BOOM_FRONTEND_IMAGE }}
+      BOOM_FRONTEND_PULL_POLICY: ${{ vars.BOOM_FRONTEND_PULL_POLICY }}
       # Frontend (web app) settings: WEBAPP_DOMAIN sets the host the SPA is
       # served on (compose defaults to DOMAIN); the VITE_* values are baked into
       # the static bundle at build time by frontend/Dockerfile. All optional;
@@ -98,6 +104,12 @@ jobs:
       # real fix is broker-side ACLs on WINTER's end.
       BOOM_KAFKA__CONSUMER__WINTER__SERVER: ${{ vars.BOOM_KAFKA__CONSUMER__ZTF__SERVER }}
       BOOM_KAFKA__CONSUMER__WINTER__GROUP_ID: ${{ vars.BOOM_KAFKA__CONSUMER__WINTER__GROUP_ID }}
+      BOOM_KAFKA__CONSUMER__DECAM__SERVER: ${{ vars.BOOM_KAFKA__CONSUMER__DECAM__SERVER }}
+      BOOM_KAFKA__CONSUMER__DECAM__GROUP_ID: ${{ vars.BOOM_KAFKA__CONSUMER__DECAM__GROUP_ID }}
+      BOOM_KAFKA__CONSUMER__DECAM__SECURITY_PROTOCOL: ${{ vars.BOOM_KAFKA__CONSUMER__DECAM__SECURITY_PROTOCOL }}
+      BOOM_KAFKA__CONSUMER__DECAM__USERNAME: ${{ vars.BOOM_KAFKA__CONSUMER__DECAM__USERNAME }}
+      BOOM_KAFKA__CONSUMER__DECAM__PASSWORD: ${{ secrets.BOOM_KAFKA__CONSUMER__DECAM__PASSWORD }}
+      BOOM_KAFKA__CONSUMER__DECAM__SSL_CA_FILE: ${{ vars.BOOM_KAFKA__CONSUMER__DECAM__SSL_CA_FILE }}
       KAFKA_EXTERNAL_HOST: ${{ vars.KAFKA_EXTERNAL_HOST }}
       SMTP_SERVER: ${{ vars.SMTP_SERVER }}
       SMTP_FROM_ADDRESS: ${{ vars.SMTP_FROM_ADDRESS }}
@@ -180,6 +192,12 @@ jobs:
         with:
           ref: ${{ steps.deploy_tag.outputs.tag_ref }}
           lfs: true
+
+      - name: Record the deployed commit
+        # Compiled into the images built below and recorded on every data
+        # mutation, so the ledger names the commit rather than leaving it
+        # unknown. Nobody has to write the ref down.
+        run: echo "BOOM_GIT_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
       - name: Select GPU compose overlay
         id: gpu_compose
         run: |
@@ -189,13 +207,24 @@ jobs:
           else
             echo "args=" >> "$GITHUB_OUTPUT"
           fi
+      - name: Select DECam compose profile
+        id: decam_profile
+        run: |
+          if [ -n "${BOOM_KAFKA__CONSUMER__DECAM__SERVER}" ]; then
+            echo "Adding the decam profile (BOOM_KAFKA__CONSUMER__DECAM__SERVER is set)"
+            echo "args=--profile decam" >> "$GITHUB_OUTPUT"
+          else
+            echo "args=" >> "$GITHUB_OUTPUT"
+          fi
       - run: >
           docker compose --profile prod
+          ${{ steps.decam_profile.outputs.args }}
           -f docker-compose.yaml
           ${{ steps.gpu_compose.outputs.args }}
           build
       - run: >
           docker compose --profile prod
+          ${{ steps.decam_profile.outputs.args }}
           -f docker-compose.yaml
           -f docker-compose.cutouts-mongo.yaml
           ${{ steps.gpu_compose.outputs.args }} up -d

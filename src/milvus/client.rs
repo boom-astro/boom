@@ -1,5 +1,3 @@
-//! gRPC client for a Milvus vector database. See `docs/milvus.md`.
-
 use crate::conf::MilvusConfig;
 use base64::{engine::general_purpose, Engine as _};
 use std::time::Duration;

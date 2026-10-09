@@ -28,16 +28,27 @@ use super::proto::schema::{
 };
 
 /// One embedding to be written — becomes one row in the collection.
-#[derive(Debug, Clone)]
+///
+/// Also a protobuf message, which is how [`super::backup`] stores it. The
+/// derive supplies `Debug` and `Default`.
+///
+/// Fields are encoded in tag order, so `object_id` and `embedding` take the
+/// last tags: a stored entry cut short anywhere is then missing one of them,
+/// which `backup::decode` rejects.
+#[derive(Clone, PartialEq, prost::Message)]
 pub struct EmbeddingRow {
     /// Survey object identifier, the collection's primary key.
+    #[prost(string, tag = "3")]
     pub object_id: String,
     /// The L2-normalized fusion embedding; its length must equal the
     /// collection's configured `dim`.
+    #[prost(float, repeated, tag = "4")]
     pub embedding: Vec<f32>,
     /// Candid of the alert this embedding was computed from.
+    #[prost(int64, tag = "1")]
     pub candid: i64,
     /// Julian date of that alert.
+    #[prost(double, tag = "2")]
     pub jd: f64,
 }
 
@@ -46,10 +57,6 @@ impl MilvusClient {
     /// with the same `object_id` are replaced. Returns the number of rows
     /// Milvus reports as upserted, which is the deduplicated count and so may
     /// be smaller than `rows.len()`.
-    ///
-    /// `rows` may hold several alerts for the same object; only the newest of
-    /// each is sent, so the stored vector never goes backwards in time within
-    /// a batch. See [`latest_per_object`].
     ///
     /// Every embedding must have exactly `collection.dim` floats; a mismatch
     /// is rejected before anything is sent, since Milvus would reject the whole
@@ -73,12 +80,29 @@ impl MilvusClient {
             );
         }
 
+        let object_ids: Vec<&str> = deduped.iter().map(|r| r.object_id.as_str()).collect();
+        let stored = self.stored_jds(&object_ids).await?;
+
+        let fresh = drop_stale(deduped, &stored);
+
+        if fresh.is_empty() {
+            debug!("every embedding in the batch was stale; nothing to upsert");
+            return Ok(0);
+        }
+        if fresh.len() < object_ids.len() {
+            debug!(
+                candidates = object_ids.len(),
+                sent = fresh.len(),
+                "dropped embeddings older than the stored one"
+            );
+        }
+
         let config = self.config().clone();
         let request = build_upsert_request(
             &config.database,
             &config.collection.name,
             config.collection.dim,
-            &deduped,
+            &fresh,
         )?;
 
         let result = self.service().upsert(request).await?.into_inner();
@@ -100,8 +124,7 @@ impl MilvusClient {
 /// by a backfill. Picking the newest here makes the outcome depend on the data
 /// rather than on delivery order.
 ///
-/// `candid` breaks ties so the choice stays deterministic when one object has
-/// two alerts at the same epoch. First-appearance order is preserved.
+/// First-appearance order is preserved.
 fn latest_per_object(rows: &[EmbeddingRow]) -> Vec<&EmbeddingRow> {
     // Each object's slot in `kept`, so a repeat replaces in place.
     let mut slot: HashMap<&str, usize> = HashMap::with_capacity(rows.len());
@@ -124,11 +147,26 @@ fn latest_per_object(rows: &[EmbeddingRow]) -> Vec<&EmbeddingRow> {
     kept
 }
 
-/// Whether `a` supersedes `b`. `total_cmp` rather than `partial_cmp` so a NaN
-/// `jd` orders deterministically instead of making every comparison false and
-/// silently pinning whichever row landed first.
+/// Whether the alert at `jd` supersedes the one at `stored_jd`.
+pub(super) fn is_newer_jd(jd: f64, stored_jd: f64) -> bool {
+    jd.total_cmp(&stored_jd).is_gt()
+}
+
 fn is_newer(a: &EmbeddingRow, b: &EmbeddingRow) -> bool {
-    a.jd.total_cmp(&b.jd).then(a.candid.cmp(&b.candid)).is_gt()
+    is_newer_jd(a.jd, b.jd)
+}
+
+/// Drop rows whose `jd` is not newer than the stored one for that object.
+fn drop_stale<'a>(
+    rows: Vec<&'a EmbeddingRow>,
+    stored: &HashMap<String, f64>,
+) -> Vec<&'a EmbeddingRow> {
+    rows.into_iter()
+        .filter(|row| match stored.get(&row.object_id) {
+            Some(&stored_jd) => is_newer_jd(row.jd, stored_jd),
+            None => true,
+        })
+        .collect()
 }
 
 /// Validate the embeddings and transpose the rows into Milvus's column-oriented
@@ -398,25 +436,16 @@ mod tests {
         assert_eq!(kept[0].jd, 2400009.5);
     }
 
-    /// Two alerts at the same epoch: `candid` decides, so the batch does not
-    /// resolve differently run to run.
     #[test]
-    fn equal_jd_breaks_the_tie_on_candid() {
+    fn a_repeated_alert_collapses_to_one_row() {
         let rows = vec![
-            row("ZTF_A", vec![2.0], 200, 2400001.5),
+            row("ZTF_A", vec![1.0], 100, 2400001.5),
             row("ZTF_A", vec![1.0], 100, 2400001.5),
         ];
 
         let kept = latest_per_object(&rows);
         assert_eq!(kept.len(), 1);
-        assert_eq!(kept[0].candid, 200);
-
-        // Same batch, opposite arrival order, same winner.
-        let flipped = vec![
-            row("ZTF_A", vec![1.0], 100, 2400001.5),
-            row("ZTF_A", vec![2.0], 200, 2400001.5),
-        ];
-        assert_eq!(latest_per_object(&flipped)[0].candid, 200);
+        assert_eq!(kept[0].jd, 2400001.5);
     }
 
     /// Dedup is per object: repeats of one object must not disturb the others,
@@ -432,7 +461,10 @@ mod tests {
 
         let kept = latest_per_object(&rows);
         assert_eq!(kept_ids(&rows), vec!["ZTF_A", "ZTF_B", "ZTF_C"]);
-        assert_eq!(kept[0].candid, 30, "A kept its slot but took the newer row");
+        assert_eq!(
+            kept[0].candid, 30,
+            "A should keep its slot but take the newer row"
+        );
         assert_eq!(kept[1].candid, 20);
         assert_eq!(kept[2].candid, 40);
     }
@@ -468,6 +500,68 @@ mod tests {
         assert_eq!(latest_per_object(&nan_first).len(), 1);
         assert!(latest_per_object(&nan_first)[0].jd.is_nan());
         assert!(latest_per_object(&nan_last)[0].jd.is_nan());
+    }
+
+    fn stored(pairs: &[(&str, f64)]) -> HashMap<String, f64> {
+        pairs.iter().map(|&(id, jd)| (id.to_string(), jd)).collect()
+    }
+
+    #[test]
+    fn an_alert_older_than_the_stored_one_is_dropped() {
+        let rows = vec![row("ZTF_A", vec![1.0], 10, 2400001.5)];
+        let stored = stored(&[("ZTF_A", 2400009.5)]);
+
+        assert!(drop_stale(refs(&rows), &stored).is_empty());
+    }
+
+    #[test]
+    fn an_alert_newer_than_the_stored_one_is_kept() {
+        let rows = vec![row("ZTF_A", vec![9.0], 30, 2400009.5)];
+        let stored = stored(&[("ZTF_A", 2400001.5)]);
+
+        let kept = drop_stale(refs(&rows), &stored);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].candid, 30);
+    }
+
+    #[test]
+    fn an_object_with_no_stored_row_is_kept() {
+        let rows = vec![row("ZTF_NEW", vec![1.0], 10, 2400001.5)];
+
+        let kept = drop_stale(refs(&rows), &stored(&[("ZTF_OTHER", 2400009.5)]));
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].object_id, "ZTF_NEW");
+    }
+
+    #[test]
+    fn re_sending_the_stored_alert_is_dropped() {
+        let rows = vec![row("ZTF_A", vec![1.0], 10, 2400001.5)];
+
+        assert!(drop_stale(refs(&rows), &stored(&[("ZTF_A", 2400001.5)])).is_empty());
+    }
+
+    #[test]
+    fn stale_rows_do_not_suppress_the_rest_of_the_batch() {
+        let rows = vec![
+            row("ZTF_A", vec![1.0], 10, 2400001.5), // stale
+            row("ZTF_B", vec![2.0], 20, 2400009.5), // newer than stored
+            row("ZTF_C", vec![3.0], 30, 2400003.5), // not stored at all
+        ];
+        let stored = stored(&[("ZTF_A", 2400005.5), ("ZTF_B", 2400002.5)]);
+
+        let kept = drop_stale(refs(&rows), &stored);
+        let ids: Vec<&str> = kept.iter().map(|r| r.object_id.as_str()).collect();
+        assert_eq!(ids, vec!["ZTF_B", "ZTF_C"]);
+    }
+
+    #[test]
+    fn nothing_stored_keeps_the_whole_batch() {
+        let rows = vec![
+            row("ZTF_A", vec![1.0], 10, 2400001.5),
+            row("ZTF_B", vec![2.0], 20, 2400002.5),
+        ];
+
+        assert_eq!(drop_stale(refs(&rows), &HashMap::new()).len(), 2);
     }
 
     /// End to end: the request Milvus receives carries one row per object.

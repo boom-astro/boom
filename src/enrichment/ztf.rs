@@ -7,16 +7,17 @@ use crate::enrichment::{
         applecider_postprocess::{self, AppleCiderFusion, AppleCiderModalities},
         AcaiModel, AppleCiderOutputs, BtsBotModel, FusionModel, Model, ModelError, SharedModels,
     },
-    EnrichmentWorker, EnrichmentWorkerError, LsstMatch, LsstPhotometry,
+    EnrichmentWorker, EnrichmentWorkerError, LsstMatch,
 };
-use crate::milvus::{EmbeddingRow, MilvusSink};
+use crate::milvus::{BackupQueue, EmbeddingRow, MilvusSink};
 use crate::utils::cutouts::{AlertCutout, CutoutStorage};
 use crate::utils::db::mongify;
 use crate::utils::enums::Survey;
+use crate::utils::host::HostGalaxyAssociation;
 use crate::utils::lightcurves::{
-    analyze_photometry, prepare_photometry, summarise_detections, ActivityMetrics,
+    analyze_photometry, is_stationary, prepare_photometry, summarise_detections, ActivityMetrics,
     AllBandsProperties, Band, DetectionHistory, EpisodeHistory, Outburst, PerBandProperties,
-    PhotometryMag, EPISODE_GAP_DAYS, ZTF_ZP,
+    PhotometryMag, EPISODE_GAP_DAYS, STATIONARY_MIN_FORCED_SNR, ZTF_ZP,
 };
 use crate::utils::mpcorb::{elements_from_document, normalize_ztf_ssnamenr, ORBITS_COLLECTION};
 use crate::utils::outburst::{Point, MAX_SEPARATION_ARCSEC};
@@ -268,6 +269,7 @@ pub fn create_ztf_alert_pipeline(include_classifications: bool) -> Vec<Document>
                 "prv_candidates": "$aux.prv_candidates",
                 "prv_nondetections": "$aux.prv_nondetections",
                 "fp_hists": "$aux.fp_hists",
+                "host_galaxy": "$aux.host_galaxy",
                 "survey_matches": {
                     "lsst": {
                         "$cond": {
@@ -337,6 +339,8 @@ pub struct ZtfAlertForEnrichment {
     pub prv_nondetections: Vec<ZtfPhotometry>,
     #[serde(deserialize_with = "deserialize_ztf_forced_lightcurve")]
     pub fp_hists: Vec<ZtfPhotometry>,
+    #[serde(default)]
+    pub host_galaxy: Option<HostGalaxyAssociation>,
     pub survey_matches: Option<ZtfSurveyMatches>,
 }
 
@@ -490,6 +494,14 @@ pub struct ZtfAlertProperties {
     pub rock: bool,
     pub star: bool,
     pub near_brightstar: bool,
+    /// A host galaxy was associated within the configured `max_dlr`.
+    ///
+    /// `None` on alerts never evaluated for a host -- enriched before this
+    /// existed, or with host association disabled. That is not the same as
+    /// `Some(false)`, which means evaluated and nothing passed the cut, so a
+    /// filter must not read absence as "no host".
+    #[serde(default)]
+    pub hosted: Option<bool>,
     pub stationary: bool,
     pub photstats: PerBandProperties,
     pub multisurvey_photstats: Option<PerBandProperties>,
@@ -512,7 +524,11 @@ pub struct ZtfAlertProperties {
 ///
 /// Used both for the calibrated leaf probabilities and for the raw Dirichlet
 /// `alpha`, which share these eight class keys.
-#[derive(Debug, Clone, Deserialize, Serialize, AvroSchema, utoipa::ToSchema)]
+///
+/// `#[serdavro]` rather than `AvroSchema`, so the filter schema carries the
+/// stored class names (`AGN-like`, ...) instead of the Rust field names.
+#[serdavro]
+#[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct AppleCiderClassProbs {
     #[serde(rename = "AGN-like")]
     pub agn_like: f32,
@@ -564,7 +580,6 @@ pub struct ZtfAlertClassifications {
     pub acai_o: f32,
     pub acai_b: f32,
     pub btsbot: f32,
-    // pub cider_fusion: Option<CiderClassProbs>,
     /// Calibrated, prior-adjusted leaf probabilities. Previously the raw head
     /// output; `applecider_outputs.alpha` still recovers that exactly.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -572,7 +587,9 @@ pub struct ZtfAlertClassifications {
     /// Evidence, hierarchy and abstention decision, all derived from `alpha`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub applecider_outputs: Option<AppleCiderOutputs>,
+    /// Goes to Milvus, never to Mongo, so it is kept out of the filter schema.
     #[serde(skip_serializing)]
+    #[avro(skip)]
     pub fusion_embedding: Option<Vec<f32>>,
 }
 
@@ -701,15 +718,27 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             .enrichment
             .batch_size;
 
-        // Connect to Milvus only when the integration is switched on. The
-        // collection itself must already be provisioned (via `milvus_check
-        // --create-collection`); the worker never creates it, so that the many
-        // enrichment workers don't race to create the same collection.
-        //
-        // A connection failure degrades rather than propagating: Milvus is an
-        // optional add-on and Mongo holds the enriched alerts, so an outage
-        // must not take the enrichment worker (and with it the pool slot) down.
-        let milvus = MilvusSink::connect_or_degrade(&config.milvus).await;
+        let milvus_queue = if config.milvus.enabled && config.milvus.backup_queue.enabled {
+            match config.build_redis().await {
+                Ok(con) => Some(BackupQueue::new(
+                    con,
+                    "ZTF_milvus_embedding_backup_queue".to_string(),
+                    config.milvus.backup_queue.max_rows,
+                )),
+                Err(error) => {
+                    warn!(
+                        %error,
+                        "could not open the milvus backup queue; embeddings \
+                         rejected during an outage will be dropped"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        let milvus = MilvusSink::connect_or_degrade(&config.milvus, milvus_queue).await;
 
         Ok(ZtfEnrichmentWorker {
             input_queue,
@@ -742,6 +771,10 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
 
     fn output_queue_name(&self) -> String {
         self.output_queue.clone()
+    }
+
+    async fn on_idle(&mut self) {
+        self.milvus.drain_when_idle().await;
     }
 
     #[instrument(skip_all, err)]
@@ -900,7 +933,10 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         if let Some(gpu_ctx) = self.models.gpu_ctx.as_ref() {
             // Same keys as a successful fit, all NaN, so consumers see one schema.
             let nan_set_doc = {
-                let mut d = doc! { "villar_fit.reduced_chi2": f64::NAN };
+                let mut d = doc! {
+                    "villar_fit.reduced_chi2": f64::NAN,
+                    "villar_fit.peak_flux": f64::NAN,
+                };
                 for filt in villar_pso::FILTERS {
                     for pname in villar_pso::PARAM_NAMES {
                         d.insert(format!("villar_fit.{}_{}", pname, filt), f64::NAN);
@@ -951,12 +987,13 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                     gpu_ctx.batch_pso_multi_seed(&batch, &source_refs, &pso_config)
                 }) {
                     Ok(results) => {
-                        for (result, candid) in results.iter().zip(candids) {
+                        for (result, candid) in results.into_iter().zip(candids) {
                             let mut set_doc = doc! {
                                 "villar_fit.reduced_chi2": result.reduced_chi2,
+                                "villar_fit.peak_flux": result.peak_flux,
                             };
-                            for (key, val) in &result.params_unnorm.to_named_map() {
-                                set_doc.insert(format!("villar_fit.{}", key), *val);
+                            for (key, val) in result.params_unnorm.to_named_map() {
+                                set_doc.insert(format!("villar_fit.{}", key), val);
                             }
                             villar_updates.push(build_update(candid, set_doc));
                         }
@@ -1272,7 +1309,7 @@ impl ZtfEnrichmentWorker {
             .fp_hists
             .iter()
             .filter(|p| p.jd <= alert.candidate.candidate.jd)
-            .filter_map(|p| p.to_photometry_mag(Some(3.0)))
+            .filter_map(|p| p.to_photometry_mag(None))
             .collect();
 
         let mut lightcurve = [prv_candidates, fp_hists].concat();
@@ -1283,25 +1320,35 @@ impl ZtfEnrichmentWorker {
         if lightcurve.is_empty() {
             return Err(EnrichmentWorkerError::EmptyLightcurve(alert.candid));
         }
-        let (photstats, all_bands_properties, stationary) = analyze_photometry(&lightcurve);
+        let (photstats, all_bands_properties, _) = analyze_photometry(&lightcurve);
         // cider was trained on ZTF only, so snapshot before the cross-survey extend.
         let ztf_lightcurve = lightcurve.clone();
+        let stationary = is_stationary(
+            alert
+                .prv_candidates
+                .iter()
+                .filter(|p| p.jd <= alert.candidate.candidate.jd)
+                .filter_map(|p| p.to_photometry_mag(None))
+                .chain(
+                    alert
+                        .fp_hists
+                        .iter()
+                        .filter(|p| p.jd <= alert.candidate.candidate.jd)
+                        .filter_map(|p| p.to_photometry_mag(Some(STATIONARY_MIN_FORCED_SNR))),
+                )
+                .map(|p| p.time),
+        );
 
         let mut has_matches = false;
         if let Some(survey_matches) = &alert.survey_matches {
             if let Some(lsst_match) = &survey_matches.lsst {
-                let lsst_mags = |points: &[LsstPhotometry], min_snr| -> Vec<PhotometryMag> {
-                    points
-                        .iter()
-                        .filter(|p| p.jd <= candidate.jd)
-                        .filter_map(|p| p.to_photometry_mag(min_snr))
-                        .collect()
-                };
-                let mut lsst_lightcurve = [
-                    lsst_mags(&lsst_match.prv_candidates, None),
-                    lsst_mags(&lsst_match.fp_hists, Some(3.0)),
-                ]
-                .concat();
+                let mut lsst_lightcurve: Vec<PhotometryMag> = lsst_match
+                    .prv_candidates
+                    .iter()
+                    .chain(&lsst_match.fp_hists)
+                    .filter(|p| p.jd <= candidate.jd)
+                    .filter_map(|p| p.to_photometry_mag(None))
+                    .collect();
                 prepare_photometry(&mut lsst_lightcurve);
                 lightcurve.extend(lsst_lightcurve);
                 has_matches = true;
@@ -1313,6 +1360,8 @@ impl ZtfEnrichmentWorker {
             photstats.clone()
         };
 
+        let hosted = alert.host_galaxy.as_ref().map(|hg| hg.best_host.is_some());
+
         // Per-object detection history for history-aware filters, from the full
         // accumulated light curve (positive/negative by psfFlux sign).
         let (detection_history, episode_history) = summarise_detections(
@@ -1320,6 +1369,12 @@ impl ZtfEnrichmentWorker {
                 .prv_candidates
                 .iter()
                 .map(|p| (p.jd, p.flux.filter(|f| !f.is_nan()).map(|f| f < 0.0))),
+            // magpsf is set only above SNT, so it marks a forced detection.
+            alert
+                .fp_hists
+                .iter()
+                .filter(|p| p.magpsf.is_some())
+                .map(|p| p.jd),
             candidate.jd,
             EPISODE_GAP_DAYS,
         );
@@ -1329,6 +1384,7 @@ impl ZtfEnrichmentWorker {
                 rock: is_rock,
                 star: is_star,
                 near_brightstar: is_near_brightstar,
+                hosted,
                 stationary,
                 photstats,
                 multisurvey_photstats: Some(multisurvey_photstats),
@@ -1768,9 +1824,31 @@ mod tests {
             "absent means never evaluated, not evaluated-and-negative"
         );
         assert!(
+            props.hosted.is_none(),
+            "absent means never evaluated for a host, not evaluated-and-hostless"
+        );
+        assert!(
             props.detection_history.is_none(),
             "detection_history is absent on pre-existing alerts"
         );
+        assert!(props.activity.is_none());
+    }
+
+    // Or a filter cutting on `hosted == false` silently sweeps in every alert
+    // enriched before host association existed.
+    #[test]
+    fn test_evaluated_hostless_differs_from_unevaluated() {
+        let evaluated = serde_json::json!({
+            "rock": false,
+            "star": false,
+            "near_brightstar": false,
+            "stationary": true,
+            "hosted": false,
+            "photstats": PerBandProperties::default(),
+            "multisurvey_photstats": null,
+        });
+        let props: ZtfAlertProperties = serde_json::from_value(evaluated).expect("deserializes");
+        assert_eq!(props.hosted, Some(false));
     }
 
     #[test]

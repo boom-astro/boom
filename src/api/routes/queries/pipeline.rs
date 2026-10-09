@@ -1,8 +1,13 @@
 /// Endpoints for executing analytical queries.
-use crate::api::catalogs::catalog_accessible;
-use crate::api::filters::parse_pipeline;
-use crate::api::models::response;
-use crate::api::routes::users::User;
+use crate::{
+    api::{
+        catalogs::{catalog_accessible, is_catalog_queryable},
+        filters::{joined_collections, parse_pipeline},
+        models::response,
+        routes::users::User,
+    },
+    conf::AppConfig,
+};
 
 use actix_web::{post, web, HttpResponse};
 use futures::StreamExt;
@@ -43,13 +48,14 @@ pub async fn post_pipeline_query(
     db: web::Data<Database>,
     body: web::Json<PipelineQuery>,
     current_user: Option<web::ReqData<User>>,
+    config: web::Data<AppConfig>,
 ) -> HttpResponse {
     let current_user = match current_user {
         Some(user) => user,
         None => return HttpResponse::Unauthorized().body("Unauthorized"),
     };
     let catalog_name = body.catalog_name.trim();
-    if !catalog_accessible(&db, catalog_name, Some(&current_user)).await {
+    if !catalog_accessible(&db, catalog_name, &current_user, &config).await {
         return response::not_found(&format!("Catalog {} does not exist", catalog_name));
     }
     let collection_name = catalog_name.to_string();
@@ -60,6 +66,22 @@ pub async fn post_pipeline_query(
         Ok(pipeline) => pipeline,
         Err(e) => return response::bad_request(&format!("Invalid filter: {}", e)),
     };
+    if pipeline
+        .iter()
+        .any(|stage| stage.contains_key("$out") || stage.contains_key("$merge"))
+    {
+        return response::bad_request("$out and $merge stages are not allowed");
+    }
+    let joined = match joined_collections(&body.pipeline) {
+        Ok(names) => names,
+        Err(e) => return response::bad_request(&format!("Invalid pipeline: {}", e)),
+    };
+    if let Some(name) = joined
+        .into_iter()
+        .find(|name| !is_catalog_queryable(name, &current_user, &config))
+    {
+        return response::not_found(&format!("Catalog {} does not exist", name));
+    }
     let pipeline_options = body.to_pipeline_options();
     let mut cursor = match collection
         .aggregate(pipeline)
@@ -67,7 +89,7 @@ pub async fn post_pipeline_query(
         .await
     {
         Ok(cursor) => cursor,
-        Err(e) => return response::internal_error(&format!("Error executing pipeline: {}", e)),
+        Err(e) => return super::query_error(e, "Error executing pipeline"),
     };
     let mut docs = Vec::new();
     while let Some(result) = cursor.next().await {
@@ -75,7 +97,7 @@ pub async fn post_pipeline_query(
             Ok(doc) => docs.push(doc),
             Err(e) => {
                 tracing::error!("Error retrieving document from the database: {}", e);
-                return response::internal_error("Error retrieving document from the database");
+                return super::query_error(e, "Error executing pipeline");
             }
         }
     }

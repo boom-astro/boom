@@ -173,10 +173,12 @@ failed upsert — is logged and trips a circuit breaker in `MilvusSink`
 - Uploads pause for a backoff that doubles per consecutive failure, from 30s up
   to a 5 minute ceiling. Without this, each batch would pay a full
   `milvus.timeout_seconds` (30s by default) for as long as the outage lasted.
-- The connection is dropped and redialled on the first attempt after the pause,
+- The connection is dropped and redialed on the first attempt after the pause,
   so recovery needs no worker restart. A success resets the backoff.
-- Embeddings produced while the breaker is open are simply dropped. They are
-  recomputed the next time an object is observed.
+- Embeddings that cannot be uploaded wait in a Valkey backup queue
+  (`src/milvus/backup.rs`), keeping only each object's newest alert, and are
+  replayed `milvus.backup_queue.drain_rows` at a time once Milvus recovers.
+  Past `max_rows` the oldest are evicted.
 
 The scheduler's one-time collection provisioning is logged rather than fatal for
 the same reason, and the API degrades to "embedding endpoints disabled" when it

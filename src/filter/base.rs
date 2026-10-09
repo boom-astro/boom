@@ -1,14 +1,15 @@
 use crate::{
-    api::catalogs::WATCHLIST_PREFIX,
+    api::{catalogs::WATCHLIST_PREFIX, filters::joined_collections},
     conf::{self, AppConfig},
     filter::{
         build_decam_filter_pipeline, build_lsst_filter_pipeline, build_winter_filter_pipeline,
         build_ztf_filter_pipeline,
     },
-    scheduler::{record_kafka_alert_published, record_worker_retry},
+    scheduler::{count_filtered_alerts, record_kafka_alert_published, record_worker_retry},
     utils::{
         cutouts::CutoutStorageError,
         enums::Survey,
+        host::HostGalaxyAssociation,
         o11y::metrics::SCHEDULER_METER,
         retry::{
             is_transient_redis_error, retry_transient, DEFAULT_BASE_BACKOFF, DEFAULT_MAX_RETRIES,
@@ -65,6 +66,32 @@ static ALERT_PROCESSED: LazyLock<Counter<u64>> = LazyLock::new(|| {
         .with_description("Number of alerts processed by the filter worker.")
         .build()
 });
+
+static FILTER_ALERT: LazyLock<Counter<u64>> = LazyLock::new(|| {
+    SCHEDULER_METER
+        .u64_counter("filter_worker.filter.alert")
+        .with_unit("{alert}")
+        .with_description("Number of alerts run through each filter, by result.")
+        .build()
+});
+
+pub(crate) fn record_filter_result(
+    survey: &Survey,
+    filter: &LoadedFilter,
+    passed: usize,
+    total: usize,
+) {
+    let attributes = |result: &'static str| {
+        [
+            KeyValue::new("survey", survey.as_str()),
+            KeyValue::new("filter.id", filter.id.clone()),
+            KeyValue::new("filter.name", filter.name.clone()),
+            KeyValue::new("result", result),
+        ]
+    };
+    FILTER_ALERT.add(passed as u64, &attributes("passed"));
+    FILTER_ALERT.add(total.saturating_sub(passed) as u64, &attributes("rejected"));
+}
 
 // Surveys that require permissions to be defined in filters
 pub const SURVEYS_REQUIRING_PERMISSIONS: [Survey; 1] = [Survey::Ztf];
@@ -139,6 +166,12 @@ pub struct Photometry {
     pub dec: Option<f64>,
 }
 
+impl Photometry {
+    pub fn is_finite(&self) -> bool {
+        self.flux_err.is_finite() && self.flux.is_none_or(f64::is_finite)
+    }
+}
+
 #[serdavro]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Classification {
@@ -171,6 +204,7 @@ pub struct SurveyMatch {
 pub struct SurveyMatches {
     pub ztf: Option<SurveyMatch>,
     pub lsst: Option<SurveyMatch>,
+    pub decam: Option<SurveyMatch>,
 }
 
 #[serdavro]
@@ -193,6 +227,40 @@ pub struct Alert {
     #[serde(with = "serde_avro_bytes", rename = "cutoutDifference")]
     pub cutout_difference: Vec<u8>,
     pub survey_matches: SurveyMatches,
+    pub host_galaxy: Option<AlertHostGalaxy>,
+}
+
+#[serdavro]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AlertHostGalaxy {
+    pub objname: Option<String>,
+    pub catalog: Option<String>,
+    pub z: Option<f64>,
+    pub dist_mpc: Option<f64>,
+    pub dist_mpc_method: Option<String>,
+    pub sep_arcsec: f64,
+    pub sep_kpc: Option<f64>,
+    pub d_dlr: f64,
+    pub posterior: f64,
+    pub p_host_none: f64,
+}
+
+impl AlertHostGalaxy {
+    pub fn from_association(association: &HostGalaxyAssociation) -> Option<Self> {
+        let best_host = association.best_host.as_ref()?;
+        Some(Self {
+            objname: best_host.objname.clone(),
+            catalog: best_host.catalog.clone(),
+            z: best_host.z,
+            dist_mpc: best_host.dist_mpc,
+            dist_mpc_method: best_host.dist_mpc_method.clone(),
+            sep_arcsec: best_host.sep_arcsec,
+            sep_kpc: best_host.sep_kpc,
+            d_dlr: best_host.d_dlr,
+            posterior: best_host.posterior,
+            p_host_none: association.p_host_none,
+        })
+    }
 }
 
 pub fn load_schema(schema_str: &str) -> Result<Schema, FilterWorkerError> {
@@ -344,6 +412,98 @@ pub fn uses_field_in_filter(filter_pipeline: &[serde_json::Value], field: &str) 
     None
 }
 
+/// Joined documents the `$addFields` stages null out once their arrays have been
+/// flattened to the top level, so any path into one reads as empty rather than
+/// as the data it names.
+const NULLED_JOINS: [&str; 3] = ["aux", "ztf_aux", "lsst_aux"];
+
+/// The top-level name a path into a nulled join should have used, if it is one.
+fn flattened_name(path: &str) -> Option<&str> {
+    NULLED_JOINS.iter().find_map(|join| {
+        path.strip_prefix(join)
+            .and_then(|rest| rest.strip_prefix('.'))
+            .or(if path == *join { Some("") } else { None })
+    })
+}
+
+/// Field names the survey's `candidate` document defines.
+///
+/// Read from the Avro schema the filter runs against, so it follows the alert
+/// struct instead of a list that drifts from it.
+fn candidate_fields(survey: &Survey) -> std::collections::HashSet<String> {
+    let schema = match survey {
+        Survey::Ztf => crate::alert::ZtfCandidate::get_schema(),
+        Survey::Lsst => crate::alert::LsstCandidate::get_schema(),
+        Survey::Winter => crate::alert::WinterCandidate::get_schema(),
+        Survey::Decam => crate::alert::DecamCandidate::get_schema(),
+    };
+    match schema {
+        Schema::Record(record) => record.fields.iter().map(|f| f.name.clone()).collect(),
+        _ => std::collections::HashSet::new(),
+    }
+}
+
+/// The first `candidate.<field>` reference naming a field the survey does not
+/// define. Only the first segment is checked; the schema stops there.
+fn find_unknown_candidate_field(
+    value: &serde_json::Value,
+    known: &std::collections::HashSet<String>,
+) -> Option<String> {
+    fn check(path: &str, known: &std::collections::HashSet<String>) -> Option<String> {
+        let field = path.strip_prefix("candidate.")?.split('.').next()?;
+        (!field.is_empty() && !known.contains(field)).then(|| path.to_string())
+    }
+    match value {
+        serde_json::Value::String(s) => s.strip_prefix('$').and_then(|p| check(p, known)),
+        serde_json::Value::Array(items) => items
+            .iter()
+            .find_map(|item| find_unknown_candidate_field(item, known)),
+        serde_json::Value::Object(map) => map.iter().find_map(|(key, nested)| {
+            check(key, known).or_else(|| find_unknown_candidate_field(nested, known))
+        }),
+        _ => None,
+    }
+}
+
+/// Reject a pipeline naming a `candidate.*` field the survey does not define,
+/// which would read as null and so admit every alert. Called where a filter is
+/// accepted, not where one is loaded: rejecting on load stops a running filter.
+pub fn reject_unknown_candidate_fields(
+    filter_pipeline: &[serde_json::Value],
+    survey: &Survey,
+) -> Result<(), FilterError> {
+    let known = candidate_fields(survey);
+    for stage in filter_pipeline {
+        if let Some(path) = find_unknown_candidate_field(stage, &known) {
+            return Err(FilterError::InvalidFilterPipeline(format!(
+                "`{path}` is not a field of the {survey} candidate schema: it reads as null, \
+                 and null compares below any bound, so the cut would admit every alert."
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// The first reference to a nulled join anywhere in `value`, as `(path, name)`.
+///
+/// Object keys are field paths; string values are only references when they are
+/// `$`-prefixed, so a literal naming one of these is left alone.
+fn find_nulled_join(value: &serde_json::Value) -> Option<(String, String)> {
+    match value {
+        serde_json::Value::String(s) => s
+            .strip_prefix('$')
+            .and_then(flattened_name)
+            .map(|name| (s.clone(), name.to_string())),
+        serde_json::Value::Array(items) => items.iter().find_map(find_nulled_join),
+        serde_json::Value::Object(map) => map.iter().find_map(|(key, nested)| {
+            flattened_name(key)
+                .map(|name| (key.clone(), name.to_string()))
+                .or_else(|| find_nulled_join(nested))
+        }),
+        _ => None,
+    }
+}
+
 /// Validates a MongoDB aggregation pipeline used as a filter.
 ///
 /// # Arguments
@@ -361,7 +521,7 @@ pub fn validate_filter_pipeline(filter_pipeline: &[serde_json::Value]) -> Result
     // - project stages that are an exclude stage (with "field: 0") do not mention objectId
     // - project stages do not exclude the _id field or objectId
     // - unset stages do not delete the objectId or _id fields
-    // - we don't have any group, unwind, or lookup stages
+    // - we don't have any group, unwind, or stages reading another collection
     // - that the last stage is a project that includes objectId
     let nb_stages = filter_pipeline.len();
     if nb_stages == 0 {
@@ -369,14 +529,29 @@ pub fn validate_filter_pipeline(filter_pipeline: &[serde_json::Value]) -> Result
             "Filter pipeline cannot be empty".to_string(),
         ));
     }
+    for stage in filter_pipeline {
+        if let Some((path, name)) = find_nulled_join(stage) {
+            let advice = if name.is_empty() {
+                "its arrays are available at the top level".to_string()
+            } else {
+                format!("use `{name}` instead")
+            };
+            return Err(FilterError::InvalidFilterPipeline(format!(
+                "`{path}` always reads as empty: a joined document is discarded once \
+                 its arrays are flattened, so {advice}."
+            )));
+        }
+    }
     let mut nb_match_stages = 0;
     for (i, stage) in filter_pipeline.iter().enumerate() {
         if stage.get("$group").is_some()
             || stage.get("$unwind").is_some()
             || stage.get("$lookup").is_some()
+            || !joined_collections(stage).is_ok_and(|names| names.is_empty())
         {
             return Err(FilterError::InvalidFilterPipeline(
-                "group, unwind, and lookup stages are not allowed".to_string(),
+                "group, unwind, lookup, graphLookup and unionWith stages are not allowed"
+                    .to_string(),
             ));
         }
         // check for project stages
@@ -729,6 +904,11 @@ pub async fn build_loaded_filter(
     }
 
     let pipeline = get_active_filter_pipeline(&filter)?;
+    // Warned about, not rejected: a filter saved before the check existed keeps
+    // running, and its owner sees which path needs fixing.
+    if let Err(error) = reject_unknown_candidate_fields(&pipeline, survey) {
+        warn!(filter_id, %error, "filter references a field the survey does not define");
+    }
     let mut pipeline =
         build_filter_pipeline(&pipeline, &filter.permissions, &filter.survey).await?;
 
@@ -1062,6 +1242,7 @@ pub async fn run_filter_worker<T: FilterWorker>(
             alerts.len().saturating_sub(matched_alerts.len()) as u64,
             &ok_excluded_attrs,
         );
+        count_filtered_alerts(alerts.len(), matched_alerts.len());
 
         let output_topic = filter_worker.output_topic_name();
         let mut total_enqueued = 0;
@@ -1144,6 +1325,7 @@ pub async fn run_filter_worker<T: FilterWorker>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::host::StoredHostCandidate;
     use crate::{
         conf::{get_test_db, load_config, load_dotenv},
         utils::{enums::Survey, testing::TEST_CONFIG_FILE},
@@ -1186,6 +1368,52 @@ mod tests {
     }
 
     #[test]
+    fn test_alert_host_galaxy_from_association() {
+        let best_host = StoredHostCandidate {
+            objname: Some("NGC 4993".to_string()),
+            catalog: Some("NED".to_string()),
+            objtype: Some("G".to_string()),
+            size_is_isophotal: true,
+            orientation_is_nominal: false,
+            ra: 197.448,
+            dec: -23.384,
+            sep_arcsec: 10.6,
+            sep_kpc: Some(2.0),
+            dlr_arcsec: 35.0,
+            d_dlr: 0.3,
+            dlr_rank: 1,
+            posterior: 0.95,
+            z: Some(0.009727),
+            dist_mpc: Some(40.0),
+            dist_mpc_method: Some("zIndependent".to_string()),
+            a_arcsec: 60.0,
+            b_arcsec: 50.0,
+            pa_deg: 10.0,
+        };
+        let association = HostGalaxyAssociation {
+            best_host: Some(best_host.clone()),
+            candidates: vec![best_host],
+            n_candidates_searched: 1,
+            n_candidates_after_dlr_cut: 1,
+            p_host_none: 0.01,
+        };
+        let host = AlertHostGalaxy::from_association(&association).unwrap();
+        assert_eq!(host.objname.as_deref(), Some("NGC 4993"));
+        assert_eq!(host.dist_mpc, Some(40.0));
+        assert_eq!(host.z, Some(0.009727));
+        assert_eq!(host.p_host_none, 0.01);
+
+        let no_host = HostGalaxyAssociation {
+            best_host: None,
+            candidates: vec![],
+            n_candidates_searched: 0,
+            n_candidates_after_dlr_cut: 0,
+            p_host_none: 1.0,
+        };
+        assert!(AlertHostGalaxy::from_association(&no_host).is_none());
+    }
+
+    #[test]
     fn test_to_avro_bytes() {
         let alert = Alert {
             candid: 123456789,
@@ -1203,7 +1431,20 @@ mod tests {
             survey_matches: SurveyMatches {
                 ztf: None,
                 lsst: None,
+                decam: None,
             },
+            host_galaxy: Some(AlertHostGalaxy {
+                objname: Some("NGC 4993".to_string()),
+                catalog: Some("NED".to_string()),
+                z: Some(0.009727),
+                dist_mpc: Some(40.0),
+                dist_mpc_method: Some("zIndependent".to_string()),
+                sep_arcsec: 10.6,
+                sep_kpc: Some(2.0),
+                d_dlr: 0.3,
+                posterior: 0.95,
+                p_host_none: 0.01,
+            }),
         };
         let schema = load_alert_schema().unwrap();
         let avro_bytes = to_avro_bytes(&alert, &schema);
@@ -1239,7 +1480,9 @@ mod tests {
             survey_matches: SurveyMatches {
                 ztf: None,
                 lsst: None,
+                decam: None,
             },
+            host_galaxy: None,
         };
         let schema = load_alert_schema().unwrap();
         // generate a random topic name
@@ -1304,6 +1547,75 @@ mod tests {
         // uses_field_in_filter should return false for "candidate.jd"
         let stage_index = uses_field_in_filter(&pipeline, "candidate.jd");
         assert!(stage_index.is_none());
+    }
+
+    /// A path into a joined document reads as empty rather than erroring, so it
+    /// is refused with the name that carries the data.
+    #[test]
+    fn nulled_join_paths_are_refused() {
+        for (stage, expected) in [
+            (
+                serde_json::json!({"$match": {"$expr": {"$gt": [{"$size": "$aux.fp_hists"}, 0]}}}),
+                "fp_hists",
+            ),
+            (
+                serde_json::json!({"$match": {"aux.prv_candidates.magpsf": {"$lt": 20}}}),
+                "prv_candidates.magpsf",
+            ),
+            (
+                serde_json::json!({"$project": {"x": "$ztf_aux.aliases"}}),
+                "aliases",
+            ),
+            (
+                serde_json::json!({"$match": {"lsst_aux.fp_hists": {"$exists": true}}}),
+                "fp_hists",
+            ),
+        ] {
+            let error = validate_filter_pipeline(&[stage.clone()])
+                .expect_err(&format!("{stage} should be refused"));
+            let message = error.to_string();
+            assert!(
+                message.contains(expected),
+                "{message} should name `{expected}`"
+            );
+        }
+    }
+
+    #[test]
+    fn stages_reading_another_collection_are_refused() {
+        for stage in [
+            serde_json::json!({"$lookup": {"from": "users", "localField": "a",
+                "foreignField": "b", "as": "c"}}),
+            serde_json::json!({"$graphLookup": {"from": "users", "startWith": "$a",
+                "connectFromField": "a", "connectToField": "b", "as": "c"}}),
+            serde_json::json!({"$unionWith": "users"}),
+            serde_json::json!({"$unionWith": {"coll": "users", "pipeline": []}}),
+            serde_json::json!({"$facet": {"x": [{"$lookup": {"from": "users", "pipeline": [],
+                "as": "c"}}]}}),
+        ] {
+            let pipeline = [
+                serde_json::json!({"$match": {}}),
+                stage.clone(),
+                serde_json::json!({"$project": {"objectId": 1}}),
+            ];
+            assert!(validate_filter_pipeline(&pipeline).is_err(), "{stage}");
+        }
+    }
+
+    /// The flattened names, and fields that merely start with the same letters,
+    /// stay usable.
+    #[test]
+    fn flattened_and_lookalike_paths_are_allowed() {
+        assert!(
+            find_nulled_join(&serde_json::json!({"$match": {"fp_hists.jd": {"$gt": 0}}})).is_none()
+        );
+        assert!(find_nulled_join(&serde_json::json!({"$match": {"auxiliary": 1}})).is_none());
+        assert!(
+            find_nulled_join(&serde_json::json!({"$match": {"note": "aux.fp_hists"}})).is_none()
+        );
+        assert!(
+            find_nulled_join(&serde_json::json!({"$project": {"x": "$prv_candidates"}})).is_none()
+        );
     }
 
     #[tokio::test]
@@ -1546,5 +1858,111 @@ mod tests {
         filter.active_fid = "v3".to_string(); // non-existent version
         let result = get_active_filter_pipeline(&filter);
         assert!(result.is_err());
+    }
+}
+
+#[cfg(test)]
+mod candidate_schema_tests {
+    use super::*;
+
+    /// `jdendhist` is a WINTER field, so a ZTF filter naming it is rejected
+    /// while the same path passes for WINTER. The check reads each survey's
+    /// schema rather than a list of banned names.
+    #[test]
+    fn test_a_field_of_another_survey_is_rejected() {
+        assert!(!candidate_fields(&Survey::Ztf).contains("jdendhist"));
+        assert!(candidate_fields(&Survey::Winter).contains("jdendhist"));
+
+        let span = serde_json::json!({"$match": {"$expr": {"$gt": [
+            {"$subtract": ["$candidate.jdendhist", "$candidate.jdstarthist"]}, 0.01]}}});
+        let error = find_unknown_candidate_field(&span, &candidate_fields(&Survey::Ztf));
+        assert_eq!(error.as_deref(), Some("candidate.jdendhist"));
+        assert!(find_unknown_candidate_field(&span, &candidate_fields(&Survey::Winter)).is_none());
+    }
+
+    /// Fields the survey does define pass, whether named as a key or a `$` ref.
+    #[test]
+    fn test_known_fields_pass() {
+        let known = candidate_fields(&Survey::Ztf);
+        assert!(known.contains("jdstarthist"));
+        for stage in [
+            serde_json::json!({"$match": {"candidate.jdstarthist": {"$gt": 2461000.0}}}),
+            serde_json::json!({"$project": {"x": "$candidate.magpsf"}}),
+            // A literal that merely looks like a path is not a reference.
+            serde_json::json!({"$match": {"note": "candidate.nonsense"}}),
+        ] {
+            assert!(
+                find_unknown_candidate_field(&stage, &known).is_none(),
+                "rejected {stage}"
+            );
+        }
+    }
+
+    /// Only the first segment is checked, since the schema does not describe
+    /// what sits below a field.
+    #[test]
+    fn test_paths_below_a_known_field_are_left_alone() {
+        let known = candidate_fields(&Survey::Ztf);
+        let stage = serde_json::json!({"$match": {"candidate.jdstarthist.whatever": {"$gt": 1}}});
+        assert!(find_unknown_candidate_field(&stage, &known).is_none());
+    }
+
+    /// Saving is refused, with the offending path named.
+    #[test]
+    fn test_saving_such_a_pipeline_is_rejected() {
+        let pipeline = vec![
+            serde_json::json!({"$match": {"candidate.jdendhist": {"$gt": 0}}}),
+            serde_json::json!({"$project": {"objectId": 1}}),
+        ];
+        let message = reject_unknown_candidate_fields(&pipeline, &Survey::Ztf)
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("candidate.jdendhist"), "{message}");
+        assert!(reject_unknown_candidate_fields(&pipeline, &Survey::Winter).is_ok());
+    }
+
+    /// Loading stays permissive, so deploying the check cannot stop the filters
+    /// already saved with one of these paths.
+    #[test]
+    fn test_loading_such_a_pipeline_is_not_rejected() {
+        let pipeline = vec![
+            serde_json::json!({"$match": {"candidate.jdendhist": {"$gt": 0}}}),
+            serde_json::json!({"$project": {"objectId": 1}}),
+        ];
+        assert!(validate_filter_pipeline(&pipeline).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod snt_payload_tests {
+    use super::*;
+    use crate::utils::lightcurves::SNT;
+
+    /// A filter can read the threshold rather than hard-coding 3.0, and it is
+    /// there whether or not the filter touches aux.
+    #[tokio::test]
+    async fn test_snt_reaches_the_filter() {
+        let mut permissions = HashMap::new();
+        permissions.insert(Survey::Ztf, vec![1]);
+        let pipeline = vec![
+            serde_json::json!({"$match": {"$expr": {"$gt": ["$candidate.snr_psf", "$snt"]}}}),
+            serde_json::json!({"$project": {"objectId": 1, "snt": 1}}),
+        ];
+        let built = crate::filter::build_ztf_filter_pipeline(&pipeline, &permissions)
+            .await
+            .expect("builds");
+        let projected = built
+            .iter()
+            .find_map(|stage| stage.get_document("$project").ok())
+            .expect("a project stage");
+        assert_eq!(
+            projected
+                .get_document("snt")
+                .unwrap()
+                .get_f64("$literal")
+                .ok(),
+            Some(SNT as f64),
+            "snt is not projected: {projected:?}"
+        );
     }
 }
