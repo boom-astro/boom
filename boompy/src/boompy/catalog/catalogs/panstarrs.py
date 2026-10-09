@@ -57,9 +57,12 @@ def _require_credentials() -> None:
     raise RuntimeError(
         "Pan-STARRS is served requester-pays from s3://stpubdata, so fetching "
         "it needs AWS credentials that can pay for the transfer, and none were "
-        "found. Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY (see "
-        ".env.example), or run the worker on an instance with a role that can. "
-        "No other catalog needs them."
+        "found. Set BOOM_PANSTARRS_AWS_ACCESS_KEY_ID and "
+        "BOOM_PANSTARRS_AWS_SECRET_ACCESS_KEY (see .env.example), which BOOM "
+        "passes to this process under the names boto reads, or run the worker "
+        "on an instance with a role that can pay. Running this CLI directly, "
+        "the plain AWS_* names work as they always do. No other catalog needs "
+        "any of it."
     )
 
 

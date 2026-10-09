@@ -98,6 +98,46 @@ impl std::fmt::Debug for Boompy {
     }
 }
 
+/// Credentials for a requester-pays archive: what BOOM holds them under, and
+/// what boto reads them as.
+///
+/// Held under BOOM's own prefix rather than the plain `AWS_*` names, and put
+/// only on boompy's environment. The plain names are the AWS *default*
+/// credential chain, so setting them on the worker makes them the default for
+/// the whole process and everything it spawns: on an instance with a role they
+/// silently win over it, and anything added later that resolves credentials
+/// the usual way picks up a key that was meant for one catalog. A deployment
+/// that wants the instance role used sets none of these, and boto finds the
+/// role on its own.
+const REQUESTER_PAYS_ENV: &[(&str, &str)] = &[
+    ("BOOM_PANSTARRS_AWS_ACCESS_KEY_ID", "AWS_ACCESS_KEY_ID"),
+    (
+        "BOOM_PANSTARRS_AWS_SECRET_ACCESS_KEY",
+        "AWS_SECRET_ACCESS_KEY",
+    ),
+    ("BOOM_PANSTARRS_AWS_SESSION_TOKEN", "AWS_SESSION_TOKEN"),
+    ("BOOM_PANSTARRS_AWS_DEFAULT_REGION", "AWS_DEFAULT_REGION"),
+];
+
+/// The `AWS_*` variables to put on boompy's environment, from `lookup`.
+///
+/// Takes a lookup rather than reading the environment so it can be tested
+/// without `set_var`, which would race every other test in the binary.
+/// An empty value counts as unset, the way it does everywhere else here:
+/// compose renders `${VAR:-}` as `VAR=` for every deployment that does not set
+/// it, and passing that on would hand boto an empty key rather than letting it
+/// fall through to the instance role.
+fn requester_pays_env(lookup: impl Fn(&str) -> Option<String>) -> Vec<(&'static str, String)> {
+    REQUESTER_PAYS_ENV
+        .iter()
+        .filter_map(|(ours, theirs)| {
+            lookup(ours)
+                .filter(|value| !value.is_empty())
+                .map(|value| (*theirs, value))
+        })
+        .collect()
+}
+
 impl Boompy {
     pub fn new(project_dir: impl Into<PathBuf>) -> Self {
         Self {
@@ -123,6 +163,9 @@ impl Boompy {
             .arg("python")
             .arg("-m")
             .arg("boompy.catalog");
+        for (name, value) in requester_pays_env(|key| std::env::var(key).ok()) {
+            cmd.env(name, value);
+        }
         cmd
     }
 
@@ -232,5 +275,70 @@ impl Boompy {
             output: stdout.chars().take(500).collect(),
             source,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lookup_from(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let owned: Vec<(String, String)> = pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        move |key| {
+            owned
+                .iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v.to_string())
+        }
+    }
+
+    #[test]
+    fn credentials_reach_boompy_under_the_names_boto_reads() {
+        let env = requester_pays_env(lookup_from(&[
+            ("BOOM_PANSTARRS_AWS_ACCESS_KEY_ID", "key"),
+            ("BOOM_PANSTARRS_AWS_SECRET_ACCESS_KEY", "secret"),
+        ]));
+        assert_eq!(
+            env,
+            vec![
+                ("AWS_ACCESS_KEY_ID", "key".to_string()),
+                ("AWS_SECRET_ACCESS_KEY", "secret".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn nothing_is_set_when_the_deployment_sets_nothing() {
+        // The case that matters on AWS: with no variables, boto falls through
+        // to the instance role. Passing empty values would break that.
+        assert!(requester_pays_env(lookup_from(&[])).is_empty());
+    }
+
+    #[test]
+    fn an_empty_value_counts_as_unset() {
+        // Compose renders `${VAR:-}` as `VAR=` for every deployment that does
+        // not set it, so this is the common case, not an edge one.
+        let env = requester_pays_env(lookup_from(&[
+            ("BOOM_PANSTARRS_AWS_ACCESS_KEY_ID", ""),
+            ("BOOM_PANSTARRS_AWS_SECRET_ACCESS_KEY", ""),
+            ("BOOM_PANSTARRS_AWS_SESSION_TOKEN", ""),
+            ("BOOM_PANSTARRS_AWS_DEFAULT_REGION", ""),
+        ]));
+        assert!(env.is_empty(), "empty values were passed through: {env:?}");
+    }
+
+    #[test]
+    fn the_plain_aws_names_are_never_what_boom_reads() {
+        // The whole point of the prefix: a key sitting in the worker's
+        // environment under the default name is not picked up and forwarded as
+        // though BOOM had been configured with it.
+        let env = requester_pays_env(lookup_from(&[
+            ("AWS_ACCESS_KEY_ID", "key"),
+            ("AWS_SECRET_ACCESS_KEY", "secret"),
+        ]));
+        assert!(env.is_empty());
     }
 }
