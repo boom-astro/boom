@@ -90,7 +90,9 @@ Milliquas was ingested with `RXPCT`/`QPCT`, names that do not exist; the real
 ones are `R` and `B`. It failed at ingest time, against a 42 MB download. The
 fix was a test building a synthetic FITS table with *every* published column, so
 the projection is proven to select rather than to accept whatever it is handed
-(`boompy/tests/test_milliquas.py`). Write that test for a new catalog.
+(`boompy/tests/catalog/catalogs/test_milliquas.py`). Write that test for a new
+catalog; the test tree mirrors the package tree, so a new catalog's tests go in
+`boompy/tests/catalog/catalogs/test_<module>.py`.
 
 ## 4. Ingest it
 

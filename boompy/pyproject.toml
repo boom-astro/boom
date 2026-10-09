@@ -37,3 +37,8 @@ line-length = 80
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# The test tree mirrors the package tree, so two modules under different
+# packages can want the same test file name. `importlib` imports each by path
+# instead of by top-level module name, which is what makes that legal without
+# littering the tree with `__init__.py`.
+addopts = "--import-mode=importlib"

@@ -1,17 +1,36 @@
-"""The NED FITS-to-parquet conversion.
+"""NED-LVS: chunk enumeration and the FITS-to-parquet conversion.
 
-This is the seam between the two languages: BOOM's reader asks for these columns
-by name and expects text, floats and booleans. A synthetic FITS table is written
-here rather than downloading the real 1.2 GB one.
+The conversion is the seam between the two languages: BOOM's reader asks for
+these columns by name and expects text, floats and booleans. A synthetic FITS
+table is written here rather than downloading the real 1.2 GB one.
 """
 
 import numpy as np
 import pyarrow.parquet as pq
 import pytest
+import responses
 from astropy.io import fits
 from astropy.table import Table
 
+from boompy.catalog import get
 from boompy.catalog.catalogs.ned import COLUMNS, _to_parquet
+
+
+@responses.activate
+def test_ned_is_a_single_chunk_with_a_stable_id():
+    """The id stays `current` across releases: keying it on the release name
+    would make each new release look like an unfinished chunk of the last."""
+    responses.add(
+        responses.HEAD,
+        "https://ned.ipac.caltech.edu/NED::LVS/fits/Current/",
+        headers={
+            "content-length": "1234",
+            "content-disposition": "attachment; filename=NEDLVS_20260424.fits",
+        },
+    )
+    chunks = get("ned-lvs").list_chunks()
+    assert [c.id for c in chunks] == ["current"]
+    assert "NEDLVS_20260424.fits" in chunks[0].label
 
 
 def _fits_table(tmp_path, columns=None, rows=2):

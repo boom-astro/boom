@@ -54,3 +54,9 @@ uv run pytest
 
 The tests cover chunk enumeration and the fetch protocol against recorded
 fixtures; none of them touch the network.
+
+`tests/` mirrors `src/boompy/`, so a module's tests sit at the matching path --
+`catalog/http.py` is tested by `tests/catalog/test_http.py`, and each catalog by
+`tests/catalog/catalogs/test_<module>.py`. Pytest runs with
+`--import-mode=importlib` so the mirrored paths can reuse a file name without
+needing `__init__.py` anywhere.
