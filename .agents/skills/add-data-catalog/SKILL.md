@@ -9,7 +9,7 @@ A catalog is declared in two halves, both in this repo:
 
 | Where | Declares |
 | --- | --- |
-| `boompy/src/boompy/catalogs/<id>.py` | where the data lives and how to fetch one chunk of it |
+| `boompy/src/boompy/catalog/catalogs/<id>.py` | where the data lives and how to fetch one chunk of it |
 | `src/catalogs/` — a record type plus a `CatalogDef` | what the columns mean and how they are stored |
 
 Reference, with the reasoning: [`docs/catalogs.md`](../../../docs/catalogs.md).
@@ -29,9 +29,15 @@ page flags them, but no alert already written says it was under-matched.
 
 ## 1. The Python half
 
-A module defining `ID`, `list_chunks()` and `fetch_chunk()`, registered in
-`boompy/src/boompy/catalogs/__init__.py`. `base.CatalogModule` is a
-`typing.Protocol`, so there is nothing to inherit.
+A module defining `ID`, `list_chunks()` and `fetch_chunk()`, dropped into
+`boompy/src/boompy/catalog/catalogs/`. There is nothing to register: the
+registry is that directory listing, so the file being there is what makes the
+catalog exist on this side. `base.CatalogModule` is a `typing.Protocol`, so
+there is nothing to inherit either.
+
+Only catalogs go in that directory — a helper parked there is imported, asked
+for an `ID` it does not have, and refused by name. Shared machinery belongs one
+level up, in `boompy.catalog`.
 
 - A **chunk** is one independently fetchable, independently ingestable piece —
   usually one published file or partition. It is the unit of resumability and of

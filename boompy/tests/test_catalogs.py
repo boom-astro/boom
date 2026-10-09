@@ -1,13 +1,14 @@
 """Chunk enumeration and the CLI protocol the Rust side parses."""
 
 import json
+import pkgutil
 
 import pytest
 import responses
 
-from boompy.catalogs import CATALOGS, get
-from boompy.catalogs.base import CatalogModule, Chunk, already_complete
-from boompy.catalogs.cli import main
+from boompy.catalog import CATALOGS, catalogs, get, registry
+from boompy.catalog.base import CatalogModule, Chunk, already_complete
+from boompy.catalog.cli import main
 
 TWOMASS_INDEX = """
 <a href="psc_aaa.gz">psc_aaa.gz</a>
@@ -20,6 +21,26 @@ def test_every_catalog_id_matches_its_registry_key():
     here would make a catalog unreachable from one side only."""
     for key, catalog in CATALOGS.items():
         assert key == catalog.ID
+
+
+def test_every_module_in_the_catalogs_package_is_a_catalog():
+    """The registry is the directory listing, so a helper module parked in
+    there would be imported and asked for an `ID` it does not have. Machinery
+    belongs one level up, in `boompy.catalog`."""
+    names = {info.name for info in pkgutil.iter_modules(catalogs.__path__)}
+    assert names, "found no modules -- has the catalogs package moved?"
+    assert {c.__name__.rsplit(".", 1)[1] for c in CATALOGS.values()} == names
+
+
+def test_a_module_without_an_id_is_rejected_by_name(monkeypatch, tmp_path):
+    """The failure a mis-parked module produces has to say where it belongs,
+    not surface as an `AttributeError` on `ID` from inside the loop."""
+    (tmp_path / "helper.py").write_text("WIDTH = 3\n")
+    monkeypatch.setattr(catalogs, "__path__", [str(tmp_path)])
+    monkeypatch.setattr(catalogs, "__name__", "boompy.catalog.catalogs")
+    monkeypatch.syspath_prepend(tmp_path)
+    with pytest.raises(RuntimeError, match="defines no ID"):
+        registry._discover()
 
 
 def test_every_catalog_module_implements_the_interface():
@@ -105,7 +126,16 @@ def test_cli_fetch_chunk_returns_absolute_paths(tmp_path, capsys):
     responses.add(responses.HEAD, url, headers={"content-length": "7"})
     responses.add(responses.GET, url, body=b"payload")
 
-    main(["fetch-chunk", "2mass", "--chunk", "psc_aaa.gz", "--dest", str(tmp_path)])
+    main(
+        [
+            "fetch-chunk",
+            "2mass",
+            "--chunk",
+            "psc_aaa.gz",
+            "--dest",
+            str(tmp_path),
+        ]
+    )
     payload = json.loads(capsys.readouterr().out)
     # The caller resolves these against its own cwd, which is not ours.
     assert payload["files"] == [str((tmp_path / "psc_aaa.gz").resolve())]
@@ -137,7 +167,11 @@ def test_registry_matches_the_rust_side():
     from pathlib import Path
 
     mod = Path(__file__).resolve().parents[2] / "src" / "catalogs" / "mod.rs"
-    rust_slugs = set(re.findall(r'^\s*id: "([^"]+)",', mod.read_text(), re.MULTILINE))
+    rust_slugs = set(
+        re.findall(r'^\s*id: "([^"]+)",', mod.read_text(), re.MULTILINE)
+    )
     assert rust_slugs, "found no CatalogDef ids -- has mod.rs moved?"
     missing = rust_slugs - set(CATALOGS)
-    assert not missing, f"declared in Rust but not sourceable from boompy: {sorted(missing)}"
+    assert not missing, (
+        f"declared in Rust but not sourceable from boompy: {sorted(missing)}"
+    )

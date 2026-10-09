@@ -9,9 +9,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ._fits import fits_to_parquet
-from .base import Chunk, already_complete, ensure_dir
-from .http import content_length, download, log
+from .._fits import fits_to_parquet
+from ..base import Chunk, already_complete, ensure_dir
+from ..http import content_length, download, log
 
 ID = "desi-dr1"
 
@@ -22,8 +22,19 @@ URL = (
 FILENAME = "desi_dr1.parquet"
 
 COLUMNS = [
-    "TARGETID", "TARGET_RA", "TARGET_DEC", "SURVEY", "PROGRAM", "Z", "ZERR",
-    "ZWARN", "CHI2", "DELTACHI2", "SPECTYPE", "SUBTYPE", "ZCAT_NSPEC",
+    "TARGETID",
+    "TARGET_RA",
+    "TARGET_DEC",
+    "SURVEY",
+    "PROGRAM",
+    "Z",
+    "ZERR",
+    "ZWARN",
+    "CHI2",
+    "DELTACHI2",
+    "SPECTYPE",
+    "SUBTYPE",
+    "ZCAT_NSPEC",
 ]
 
 

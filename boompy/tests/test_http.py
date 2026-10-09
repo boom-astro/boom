@@ -8,7 +8,7 @@ import pytest
 import requests
 import responses
 
-from boompy.catalogs.http import content_length, download, list_index
+from boompy.catalog.http import content_length, download, list_index
 
 INDEX_HTML = """
 <html><body>
@@ -64,14 +64,16 @@ def test_download_rejects_a_short_transfer(tmp_path):
     responses.add(responses.GET, "https://example.test/f.gz", body=b"short")
     dest = tmp_path / "f.gz"
     with pytest.raises(RuntimeError, match="after 2 attempts"):
-        download("https://example.test/f.gz", dest, expected_size=999, attempts=2)
+        download(
+            "https://example.test/f.gz", dest, expected_size=999, attempts=2
+        )
     assert not dest.exists()
     assert not list(tmp_path.glob("*.part"))
 
 
 @responses.activate
 def test_download_retries_then_succeeds(tmp_path, monkeypatch):
-    monkeypatch.setattr("boompy.catalogs.http.time.sleep", lambda _: None)
+    monkeypatch.setattr("boompy.catalog.http.time.sleep", lambda _: None)
     responses.add(
         responses.GET,
         "https://example.test/f.gz",
@@ -88,12 +90,14 @@ def test_download_restarts_when_server_ignores_range(tmp_path, monkeypatch):
     """Appending a 200 response onto an existing `.part` would concatenate the
     whole file onto a prefix of itself, which no checksum downstream would
     catch."""
-    monkeypatch.setattr("boompy.catalogs.http.time.sleep", lambda _: None)
+    monkeypatch.setattr("boompy.catalog.http.time.sleep", lambda _: None)
     dest = tmp_path / "f.gz"
     partial = dest.with_suffix(dest.suffix + ".part")
     partial.write_bytes(b"pay")
 
-    responses.add(responses.GET, "https://example.test/f.gz", body=b"payload", status=200)
+    responses.add(
+        responses.GET, "https://example.test/f.gz", body=b"payload", status=200
+    )
     download("https://example.test/f.gz", dest, expected_size=7)
     assert dest.read_bytes() == b"payload"
 
@@ -102,7 +106,7 @@ def test_every_request_identifies_boom():
     """At least one archive (quasars.org) answers 406 to the default
     `python-requests/x.y` agent, so a valid download fails for no visible
     reason. The agent is load-bearing, not cosmetic."""
-    from boompy.catalogs.http import USER_AGENT, session
+    from boompy.catalog.http import USER_AGENT, session
 
     assert session().headers["User-Agent"] == USER_AGENT
     assert "python-requests" not in USER_AGENT
@@ -112,9 +116,13 @@ def test_every_request_identifies_boom():
 
 @responses.activate
 def test_the_agent_is_sent_on_download_and_head(tmp_path):
-    from boompy.catalogs.http import USER_AGENT, content_length, download
+    from boompy.catalog.http import USER_AGENT, content_length, download
 
-    responses.add(responses.HEAD, "https://example.test/f.gz", headers={"content-length": "7"})
+    responses.add(
+        responses.HEAD,
+        "https://example.test/f.gz",
+        headers={"content-length": "7"},
+    )
     responses.add(responses.GET, "https://example.test/f.gz", body=b"payload")
     content_length("https://example.test/f.gz")
     download("https://example.test/f.gz", tmp_path / "f.gz", expected_size=7)

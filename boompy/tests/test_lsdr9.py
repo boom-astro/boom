@@ -13,8 +13,8 @@ import responses
 from astropy.io import fits
 from astropy.table import Table
 
-from boompy.catalogs import get
-from boompy.catalogs.lsdr9 import (
+from boompy.catalog import get
+from boompy.catalog.catalogs.lsdr9 import (
     PHOTOZ_COLUMNS,
     PHOTOZ_KEY_COLUMNS,
     STORED_COLUMNS,
@@ -48,8 +48,15 @@ PUBLISHED_PHOTOZ = [c.upper() for c in PHOTOZ_KEY_COLUMNS + PHOTOZ_COLUMNS] + [
 
 TEXT_COLUMNS = {"TYPE", "SURVEY", "BRICKNAME"}
 INT_COLUMNS = {
-    "RELEASE", "BRICKID", "OBJID", "NOBS_G", "NOBS_R", "NOBS_Z", "MASKBITS",
-    "TRAINING", "KFOLD",
+    "RELEASE",
+    "BRICKID",
+    "OBJID",
+    "NOBS_G",
+    "NOBS_R",
+    "NOBS_Z",
+    "MASKBITS",
+    "TRAINING",
+    "KFOLD",
 }
 
 
@@ -61,7 +68,9 @@ def _write_fits(path, columns, rows, overrides=None):
         if name in overrides:
             data[name] = np.asarray(overrides[name])
         elif name in TEXT_COLUMNS:
-            data[name] = np.array([f"{name[:3]}" for _ in range(rows)], dtype="S10")
+            data[name] = np.array(
+                [f"{name[:3]}" for _ in range(rows)], dtype="S10"
+            )
         elif name in INT_COLUMNS:
             data[name] = np.arange(rows, dtype=np.int32)
         else:
@@ -84,10 +93,18 @@ def _pair(tmp_path, rows=4, sweep=None, photoz=None):
     }
     photoz_overrides = {**keys, **(photoz or {})}
     return (
-        _write_fits(tmp_path / "sweep-010p035-015p040.fits", PUBLISHED_SWEEP, rows,
-                    sweep_overrides),
-        _write_fits(tmp_path / "sweep-010p035-015p040-pz.fits", PUBLISHED_PHOTOZ, rows,
-                    photoz_overrides),
+        _write_fits(
+            tmp_path / "sweep-010p035-015p040.fits",
+            PUBLISHED_SWEEP,
+            rows,
+            sweep_overrides,
+        ),
+        _write_fits(
+            tmp_path / "sweep-010p035-015p040-pz.fits",
+            PUBLISHED_PHOTOZ,
+            rows,
+            photoz_overrides,
+        ),
     )
 
 
@@ -97,7 +114,9 @@ def test_the_projection_only_names_published_columns():
     unknown = {c.upper() for c in SWEEP_COLUMNS} - set(PUBLISHED_SWEEP)
     assert not unknown, f"the sweep projection names absent columns: {unknown}"
     unknown = {c.upper() for c in PHOTOZ_COLUMNS} - set(PUBLISHED_PHOTOZ)
-    assert not unknown, f"the photo-z projection names absent columns: {unknown}"
+    assert not unknown, (
+        f"the photo-z projection names absent columns: {unknown}"
+    )
 
 
 def test_dr9_has_no_i_band():
@@ -118,8 +137,12 @@ def test_the_merge_keeps_exactly_the_stored_columns(tmp_path):
 def test_a_dropped_published_column_fails_loudly(tmp_path):
     rows = 2
     without_sersic = [c for c in PUBLISHED_SWEEP if c != "SERSIC"]
-    sweep = _write_fits(tmp_path / "s.fits", without_sersic, rows,
-                        {"DEC": np.full(rows, 40.0, dtype=np.float32)})
+    sweep = _write_fits(
+        tmp_path / "s.fits",
+        without_sersic,
+        rows,
+        {"DEC": np.full(rows, 40.0, dtype=np.float32)},
+    )
     photoz = _write_fits(tmp_path / "s-pz.fits", PUBLISHED_PHOTOZ, rows)
     with pytest.raises(RuntimeError, match="sersic"):
         _merge_pair(sweep, photoz, tmp_path / "out.parquet")
@@ -127,8 +150,12 @@ def test_a_dropped_published_column_fails_loudly(tmp_path):
 
 def test_a_row_count_mismatch_is_refused(tmp_path):
     """A truncated download is the realistic way the two stop being aligned."""
-    sweep = _write_fits(tmp_path / "s.fits", PUBLISHED_SWEEP, 4,
-                        {"DEC": np.full(4, 40.0, dtype=np.float32)})
+    sweep = _write_fits(
+        tmp_path / "s.fits",
+        PUBLISHED_SWEEP,
+        4,
+        {"DEC": np.full(4, 40.0, dtype=np.float32)},
+    )
     photoz = _write_fits(tmp_path / "s-pz.fits", PUBLISHED_PHOTOZ, 3)
     with pytest.raises(RuntimeError, match="row count mismatch"):
         _merge_pair(sweep, photoz, tmp_path / "out.parquet")

@@ -9,8 +9,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .base import Chunk, already_complete, ensure_dir
-from .http import content_length, download, list_index, log
+from astropy.table import Table
+
+from ..base import Chunk, already_complete, ensure_dir
+from ..http import content_length, download, list_index, log
 
 ID = "catwise2020"
 
@@ -19,9 +21,23 @@ DIR_PATTERN = r"\d+\.\d+/"
 FILE_PATTERN = r".*\.tbl\.gz"
 
 COLUMNS = [
-    "source_id", "source_name", "ra", "dec", "sigra", "sigdec",
-    "w1mpro", "w2mpro", "w1sigmpro", "w2sigmpro", "w1rchi2", "w2rchi2",
-    "pmra", "pmdec", "sigpmra", "sigpmdec", "unwise_objid",
+    "source_id",
+    "source_name",
+    "ra",
+    "dec",
+    "sigra",
+    "sigdec",
+    "w1mpro",
+    "w2mpro",
+    "w1sigmpro",
+    "w2sigmpro",
+    "w1rchi2",
+    "w2rchi2",
+    "pmra",
+    "pmdec",
+    "sigpmra",
+    "sigpmdec",
+    "unwise_objid",
 ]
 
 
@@ -40,8 +56,6 @@ def list_chunks() -> list[Chunk]:
 
 
 def fetch_chunk(chunk_id: str, dest: Path) -> list[Path]:
-    from astropy.table import Table
-
     dest = ensure_dir(dest)
     name = chunk_id.rsplit("/", 1)[-1]
     tbl_path = dest / name

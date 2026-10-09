@@ -11,7 +11,7 @@ import pytest
 from astropy.io import fits
 from astropy.table import Table
 
-from boompy.catalogs.ned import COLUMNS, _to_parquet
+from boompy.catalog.catalogs.ned import COLUMNS, _to_parquet
 
 
 def _fits_table(tmp_path, columns=None, rows=2):
@@ -19,12 +19,23 @@ def _fits_table(tmp_path, columns=None, rows=2):
     columns = COLUMNS if columns is None else columns
     data = {}
     for name in columns:
-        if name in ("objname", "objtype", "z_tech", "z_refcode", "DistMpc_method",
-                    "Diam_survey", "Diam_filt", "Diam_refcode", "tMASSphot"):
+        if name in (
+            "objname",
+            "objtype",
+            "z_tech",
+            "z_refcode",
+            "DistMpc_method",
+            "Diam_survey",
+            "Diam_filt",
+            "Diam_refcode",
+            "tMASSphot",
+        ):
             # FITS pads character columns out to the declared width.
-            data[name] = np.array(["NGC 1234    "[: 12]] * rows, dtype="S12")
+            data[name] = np.array(["NGC 1234    "[:12]] * rows, dtype="S12")
         elif name in ("z_qual", "Diam_qual"):
-            data[name] = np.array([True, False][:rows] * (rows // 2 or 1), dtype=bool)
+            data[name] = np.array(
+                [True, False][:rows] * (rows // 2 or 1), dtype=bool
+            )
         else:
             data[name] = np.arange(rows, dtype=np.float64)
     path = tmp_path / "ned_lvs.fits"
@@ -58,7 +69,9 @@ def test_conversion_drops_columns_boom_does_not_store(tmp_path):
     """NED-LVS publishes ~30 columns and BOOM stores 28; carrying the rest
     through pandas costs memory for data dropped immediately."""
     extra = [*COLUMNS, "some_unused_column"]
-    out = _to_parquet(_fits_table(tmp_path, columns=extra), tmp_path / "ned.parquet")
+    out = _to_parquet(
+        _fits_table(tmp_path, columns=extra), tmp_path / "ned.parquet"
+    )
     assert "some_unused_column" not in pq.read_schema(out).names
 
 
@@ -67,4 +80,7 @@ def test_a_missing_published_column_fails_loudly(tmp_path):
     quietly produce a catalog with a column of nulls."""
     without_diam = [c for c in COLUMNS if c != "Diam_ba"]
     with pytest.raises(RuntimeError, match="Diam_ba"):
-        _to_parquet(_fits_table(tmp_path, columns=without_diam), tmp_path / "ned.parquet")
+        _to_parquet(
+            _fits_table(tmp_path, columns=without_diam),
+            tmp_path / "ned.parquet",
+        )

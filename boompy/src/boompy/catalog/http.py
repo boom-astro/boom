@@ -35,6 +35,7 @@ def session() -> requests.Session:
         _session.headers["User-Agent"] = USER_AGENT
     return _session
 
+
 #: Read in 1 MiB blocks -- these files are hundreds of megabytes each, and the
 #: default 1 KiB makes the syscall overhead visible.
 BLOCK_SIZE = 1024 * 1024
@@ -114,14 +115,16 @@ def download(
             )
             # A server that ignores Range answers 200 with the whole file, so
             # appending to what we have would corrupt it. Start over instead.
-            if downloaded and response.status_code != requests.codes.partial_content:
+            if (
+                downloaded
+                and response.status_code != requests.codes.partial_content
+            ):
                 log(f"{url}: server ignored Range, restarting the download")
                 downloaded = 0
             response.raise_for_status()
 
             with open(partial, "ab" if downloaded else "wb") as f:
-                for block in response.iter_content(chunk_size=BLOCK_SIZE):
-                    f.write(block)
+                f.writelines(response.iter_content(chunk_size=BLOCK_SIZE))
 
             size = partial.stat().st_size
             if expected_size is not None and size != expected_size:
@@ -133,8 +136,12 @@ def download(
             if attempt == attempts - 1:
                 break
             delay = 2**attempt
-            log(f"{url}: attempt {attempt + 1} failed ({e}); retrying in {delay}s")
+            log(
+                f"{url}: attempt {attempt + 1} failed ({e}); retrying in {delay}s"
+            )
             time.sleep(delay)
 
     partial.unlink(missing_ok=True)
-    raise RuntimeError(f"failed to download {url} after {attempts} attempts: {last_error}")
+    raise RuntimeError(
+        f"failed to download {url} after {attempts} attempts: {last_error}"
+    )

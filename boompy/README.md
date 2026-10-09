@@ -13,12 +13,12 @@ occasional format that only `astropy` reads. Everything else stays in Rust.
 
 ## Catalog sourcing
 
-`boompy.catalogs` is how BOOM gets archival catalog files onto disk. Rust drives
+`boompy.catalog` is how BOOM gets archival catalog files onto disk. Rust drives
 the loop; this package only knows how to enumerate and fetch.
 
 ```sh
-uv run --project boompy python -m boompy.catalogs list-chunks 2mass
-uv run --project boompy python -m boompy.catalogs fetch-chunk 2mass --chunk psc_aaa --dest /data/catalogs/2mass
+uv run --project boompy python -m boompy.catalog list-chunks 2mass
+uv run --project boompy python -m boompy.catalog fetch-chunk 2mass --chunk psc_aaa --dest /data/catalogs/2mass
 ```
 
 Both print one JSON object to **stdout**; everything human-readable goes to
@@ -31,12 +31,18 @@ so peak disk is one chunk rather than one catalog, and an interrupted run
 resumes rather than restarting. Chunk ids must be **stable across runs**, since
 that is what a resumed run matches against its already-done list.
 
-Adding a catalog means adding a module that defines `ID`, `list_chunks()` and
-`fetch_chunk()`, registering it in `boompy/catalogs/__init__.py`, and adding a
-record type and a `CatalogDef` on the Rust side in `src/catalogs/`. A catalog is
-a module rather than a class -- there is only ever one of each and they hold no
-state; `base.CatalogModule` is a `typing.Protocol` describing the shape, so
-there is nothing to inherit from and a type checker still verifies it.
+Adding a catalog means dropping a module that defines `ID`, `list_chunks()` and
+`fetch_chunk()` into `boompy/src/boompy/catalog/catalogs/`, and adding a record
+type and a `CatalogDef` on the Rust side in `src/catalogs/`. Nothing registers
+it: `catalog/catalogs/` holds one module per catalog and nothing else, and
+`registry` builds the index by listing it, so the file being there is the
+registration. Shared machinery -- the HTTP helpers, the FITS conversion, the
+chunk interface, the CLI -- lives one level up in `boompy.catalog`, which is
+what keeps that listing meaningful.
+
+A catalog is a module rather than a class -- there is only ever one of each and
+they hold no state; `base.CatalogModule` is a `typing.Protocol` describing the
+shape, so there is nothing to inherit from and a type checker still verifies it.
 
 ## Development
 

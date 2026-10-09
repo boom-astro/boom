@@ -9,9 +9,9 @@ from __future__ import annotations
 import zipfile
 from pathlib import Path
 
-from ._fits import fits_to_parquet
-from .base import Chunk, already_complete, ensure_dir
-from .http import content_length, download, log
+from .._fits import fits_to_parquet
+from ..base import Chunk, already_complete, ensure_dir
+from ..http import content_length, download, log
 
 ID = "milliquas"
 
@@ -22,8 +22,20 @@ FILENAME = "milliquas.parquet"
 #: broad-line classification flags -- short, unhelpful names, but they are what
 #: the file uses and renaming them here would only hide the mapping.
 COLUMNS = [
-    "NAME", "RA", "DEC", "TYPE", "RMAG", "BMAG", "COMMENT",
-    "R", "B", "Z", "XNAME", "RNAME", "LOBE1", "LOBE2",
+    "NAME",
+    "RA",
+    "DEC",
+    "TYPE",
+    "RMAG",
+    "BMAG",
+    "COMMENT",
+    "R",
+    "B",
+    "Z",
+    "XNAME",
+    "RNAME",
+    "LOBE1",
+    "LOBE2",
 ]
 
 

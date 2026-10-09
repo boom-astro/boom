@@ -15,10 +15,12 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-import requests
+from astropy.table import Table
 
-from .base import Chunk, already_complete, ensure_dir
-from .http import CONNECT_TIMEOUT, READ_TIMEOUT, download, log, session
+from ..base import Chunk, already_complete, ensure_dir
+from ..http import CONNECT_TIMEOUT, READ_TIMEOUT, download, log, session
+
+ID = "ned-lvs"
 
 URL = "https://ned.ipac.caltech.edu/NED::LVS/fits/Current/"
 FITS_FILENAME = "ned_lvs.fits"
@@ -66,8 +68,6 @@ def _to_parquet(fits_path: Path, out_path: Path) -> Path:
     million rows, and carrying every column through pandas costs memory for
     data that is dropped immediately.
     """
-    from astropy.table import Table
-
     table = Table.read(fits_path, hdu=1)
     missing = [c for c in COLUMNS if c not in table.colnames]
     if missing:
@@ -81,7 +81,9 @@ def _to_parquet(fits_path: Path, out_path: Path) -> Path:
     for name, dtype in frame.dtypes.items():
         if dtype == object:
             frame[name] = frame[name].apply(
-                lambda v: v.decode("utf-8", "replace") if isinstance(v, bytes) else v
+                lambda v: (
+                    v.decode("utf-8", "replace") if isinstance(v, bytes) else v
+                )
             )
     frame.to_parquet(out_path, index=False)
     log(f"NED LVS: converted {len(frame)} rows to {out_path.name}")
@@ -96,11 +98,10 @@ def _head() -> tuple[int | None, str | None]:
     response.raise_for_status()
     size = response.headers.get("content-length")
     # NED serves the release-stamped name (e.g. NEDLVS_20260424.fits) here.
-    match = re.search(r"filename=([^\s;]+)", response.headers.get("content-disposition", ""))
+    match = re.search(
+        r"filename=([^\s;]+)", response.headers.get("content-disposition", "")
+    )
     return (int(size) if size else None, match.group(1) if match else None)
-
-
-ID = "ned-lvs"
 
 
 def list_chunks() -> list[Chunk]:
@@ -119,7 +120,9 @@ def fetch_chunk(chunk_id: str, dest: Path) -> list[Path]:
     parquet_path = dest / FILENAME
 
     if not already_complete(fits_path, size):
-        log(f"NED LVS: downloading {release or FITS_FILENAME} ({size or 'unknown'} bytes)")
+        log(
+            f"NED LVS: downloading {release or FITS_FILENAME} ({size or 'unknown'} bytes)"
+        )
         download(URL, fits_path, expected_size=size)
     else:
         log(f"NED LVS: {release or FITS_FILENAME} already downloaded")

@@ -27,7 +27,9 @@ def _fetch_chunk(args: argparse.Namespace) -> dict:
     catalog = get(args.catalog)
     files = catalog.fetch_chunk(args.chunk, Path(args.dest))
     if not files:
-        raise RuntimeError(f"{catalog.ID}: chunk {args.chunk} produced no files")
+        raise RuntimeError(
+            f"{catalog.ID}: chunk {args.chunk} produced no files"
+        )
     # Absolute, because the caller resolves these against its own working
     # directory, which is not necessarily ours.
     return {
@@ -39,7 +41,7 @@ def _fetch_chunk(args: argparse.Namespace) -> dict:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="python -m boompy.catalogs",
+        prog="python -m boompy.catalog",
         description="Enumerate and fetch archival catalog source files for BOOM.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -52,7 +54,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     fetch = subparsers.add_parser("fetch-chunk", help="download one chunk")
     fetch.add_argument("catalog", help="catalog slug, e.g. 2mass")
-    fetch.add_argument("--chunk", required=True, help="chunk id from list-chunks")
+    fetch.add_argument(
+        "--chunk", required=True, help="chunk id from list-chunks"
+    )
     fetch.add_argument("--dest", required=True, help="directory to write into")
     fetch.set_defaults(handler=_fetch_chunk)
 

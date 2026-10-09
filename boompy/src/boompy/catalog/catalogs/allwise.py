@@ -15,8 +15,10 @@ from __future__ import annotations
 import functools
 from pathlib import Path
 
-from .base import Chunk, ensure_dir
-from .http import log
+from ..base import Chunk, ensure_dir
+from ..http import log
+
+ID = "allwise"
 
 HATS_URL = "https://data.lsdb.io/hats/wise/allwise"
 
@@ -53,6 +55,10 @@ def _catalog():
     Opening it reads the partition metadata over the network, and both
     list-chunks and fetch-chunk need it.
     """
+    # Deferred, unlike every other import here: `import lsdb` costs about two
+    # seconds, and the Rust side runs this CLI once per chunk for whichever
+    # catalog it is ingesting -- so a top-level import would charge every
+    # catalog for the two that read HATS.
     import lsdb
 
     return lsdb.open_catalog(HATS_URL, columns=COLUMNS)
@@ -68,9 +74,6 @@ def _parse_chunk_id(chunk_id: str) -> tuple[int, int]:
         return int(order.removeprefix("order")), int(pixel.removeprefix("pix"))
     except (ValueError, AttributeError) as e:
         raise ValueError(f"malformed AllWISE chunk id {chunk_id!r}") from e
-
-
-ID = "allwise"
 
 
 def list_chunks() -> list[Chunk]:

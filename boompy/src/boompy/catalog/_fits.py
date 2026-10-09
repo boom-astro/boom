@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from astropy.table import Table
+
 from .http import log
 
 
@@ -27,8 +29,6 @@ def fits_to_parquet(
     before conversion rather than after keeps the parquet, the transfer and the
     ingest all proportional to what is actually stored.
     """
-    from astropy.table import Table
-
     table = Table.read(fits_path, hdu=hdu)
     missing = [c for c in columns if c not in table.colnames]
     if missing:
@@ -47,7 +47,9 @@ def fits_to_parquet(
     for name, dtype in frame.dtypes.items():
         if dtype == object:
             frame[name] = frame[name].apply(
-                lambda v: v.decode("utf-8", "replace") if isinstance(v, bytes) else v
+                lambda v: (
+                    v.decode("utf-8", "replace") if isinstance(v, bytes) else v
+                )
             )
     frame.to_parquet(out_path, index=False)
     log(f"{label}: converted {len(frame)} rows to {out_path.name}")

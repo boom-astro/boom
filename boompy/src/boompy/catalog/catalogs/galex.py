@@ -7,8 +7,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .base import Chunk, already_complete, ensure_dir
-from .http import content_length, download, list_index, log
+from ..base import Chunk, already_complete, ensure_dir
+from ..http import content_length, download, list_index, log
 
 ID = "galex"
 

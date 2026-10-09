@@ -10,8 +10,8 @@
 //! logging to stderr:
 //!
 //! ```text
-//! python -m boompy.catalogs list-chunks <catalog>
-//! python -m boompy.catalogs fetch-chunk <catalog> --chunk <id> --dest <dir>
+//! python -m boompy.catalog list-chunks <catalog>
+//! python -m boompy.catalog fetch-chunk <catalog> --chunk <id> --dest <dir>
 //! ```
 
 use serde::Deserialize;
@@ -122,7 +122,7 @@ impl Boompy {
             .arg("--quiet")
             .arg("python")
             .arg("-m")
-            .arg("boompy.catalogs");
+            .arg("boompy.catalog");
         cmd
     }
 

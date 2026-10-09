@@ -14,8 +14,10 @@ from __future__ import annotations
 import functools
 from pathlib import Path
 
-from .base import Chunk, ensure_dir
-from .http import log
+import botocore.session
+
+from ..base import Chunk, ensure_dir
+from ..http import log
 
 ID = "panstarrs"
 
@@ -50,8 +52,6 @@ def _require_credentials() -> None:
     Only the presence of a credential source is checked; whether it is
     *allowed* to pay is between the deployment and AWS.
     """
-    import botocore.session
-
     if botocore.session.get_session().get_credentials() is not None:
         return
     raise RuntimeError(
@@ -66,6 +66,10 @@ def _require_credentials() -> None:
 @functools.cache
 def _catalog():
     """Open the HATS catalog once per process; opening reads partition metadata."""
+    # Deferred, unlike every other import here: `import lsdb` costs about two
+    # seconds, and the Rust side runs this CLI once per chunk for whichever
+    # catalog it is ingesting -- so a top-level import would charge every
+    # catalog for the two that read HATS.
     import lsdb
 
     _require_credentials()

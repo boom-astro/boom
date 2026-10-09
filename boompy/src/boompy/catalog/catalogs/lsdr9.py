@@ -25,8 +25,12 @@ import os
 import re
 from pathlib import Path
 
-from .base import Chunk, already_complete, ensure_dir
-from .http import content_length, download, list_index, log
+import numpy as np
+import pandas as pd
+from astropy.io import fits
+
+from ..base import Chunk, already_complete, ensure_dir
+from ..http import content_length, download, list_index, log
 
 ID = "lsdr9"
 
@@ -44,7 +48,9 @@ PHOTOZ_VERSION = "9.1-photo-z"
 
 #: sweep-<RAmin><p|m><Decmin>-<RAmax><p|m><Decmax>.fits, e.g.
 #: sweep-000m005-010p000.fits is RA 0..10, Dec -5..0.
-SWEEP_NAME = re.compile(r"sweep-(\d{3})([pm])(\d{3})-(\d{3})([pm])(\d{3})\.fits")
+SWEEP_NAME = re.compile(
+    r"sweep-(\d{3})([pm])(\d{3})-(\d{3})([pm])(\d{3})\.fits"
+)
 
 #: The Dec at which the Legacy Surveys switch from the DECam (south) reduction
 #: to the BASS+MzLS (north) one.
@@ -57,19 +63,38 @@ RESOLVE_DEC = 32.375
 #:
 #: No `flux_i`: DR9 predates the i-band entirely, so the column does not exist.
 SWEEP_COLUMNS = [
-    "release", "brickid", "objid",
-    "ra", "dec", "type", "ebv",
-    "flux_g", "flux_r", "flux_z",
-    "flux_w1", "flux_w2", "flux_w3", "flux_w4",
+    "release",
+    "brickid",
+    "objid",
+    "ra",
+    "dec",
+    "type",
+    "ebv",
+    "flux_g",
+    "flux_r",
+    "flux_z",
+    "flux_w1",
+    "flux_w2",
+    "flux_w3",
+    "flux_w4",
     # Tractor ellipse, plus the quality columns that separate a real galaxy from
     # a marginal or blended REX fit. g and z give those cuts a fallback when r
     # is missing.
-    "shape_r", "shape_e1", "shape_e2", "sersic",
-    "flux_ivar_g", "flux_ivar_r", "flux_ivar_z",
-    "fracflux_g", "fracflux_r", "fracflux_z",
+    "shape_r",
+    "shape_e1",
+    "shape_e2",
+    "sersic",
+    "flux_ivar_g",
+    "flux_ivar_r",
+    "flux_ivar_z",
+    "fracflux_g",
+    "fracflux_r",
+    "fracflux_z",
     # Exposures per band. A zero distinguishes "not observed in this band" from
     # "observed and not detected", which otherwise both read as a missing flux.
-    "nobs_g", "nobs_r", "nobs_z",
+    "nobs_g",
+    "nobs_r",
+    "nobs_z",
 ]
 
 #: Read from the photo-z sweep only to prove the two files are row-matched, then
@@ -77,8 +102,13 @@ SWEEP_COLUMNS = [
 PHOTOZ_KEY_COLUMNS = ["release", "brickid", "objid"]
 
 PHOTOZ_COLUMNS = [
-    "z_spec", "survey",
-    "z_phot_mean", "z_phot_median", "z_phot_std", "z_phot_l95", "z_phot_u95",
+    "z_spec",
+    "survey",
+    "z_phot_mean",
+    "z_phot_median",
+    "z_phot_std",
+    "z_phot_l95",
+    "z_phot_u95",
 ]
 
 STORED_COLUMNS = SWEEP_COLUMNS + PHOTOZ_COLUMNS
@@ -106,7 +136,9 @@ def list_chunks() -> list[Chunk]:
     listing = f"{BASE_URL}/{REGION}/sweep/{SWEEP_VERSION}/"
     names = list_index(listing, SWEEP_NAME.pattern)
     if not names:
-        raise RuntimeError(f"no files matching {SWEEP_NAME.pattern!r} at {listing}")
+        raise RuntimeError(
+            f"no files matching {SWEEP_NAME.pattern!r} at {listing}"
+        )
 
     # dr9/north reduces equatorial sky as well, which this catalog does not keep
     # (see `_resolve_mask`). The filename gives the Dec box, so a file that
@@ -149,10 +181,6 @@ def _read_columns(path: Path, columns: list[str]):
     so materializing the whole table would cost several times the memory for
     nothing.
     """
-    import numpy as np
-    import pandas as pd
-    from astropy.io import fits
-
     with fits.open(path, memmap=True) as hdul:
         data = hdul[1].data
         # The published columns are uppercase (RA, FLUX_G); astropy's field
@@ -194,9 +222,6 @@ def _resolve_mask(frame):
 
 def _merge_pair(sweep_path: Path, photoz_path: Path, out_path: Path) -> Path:
     """Merge one sweep/photo-z FITS pair into a single parquet file."""
-    import numpy as np
-    import pandas as pd
-
     sweep = _read_columns(sweep_path, SWEEP_COLUMNS)
     photoz = _read_columns(photoz_path, PHOTOZ_KEY_COLUMNS + PHOTOZ_COLUMNS)
 
@@ -221,7 +246,9 @@ def _merge_pair(sweep_path: Path, photoz_path: Path, out_path: Path) -> Path:
 
     before = len(frame)
     frame = frame[_resolve_mask(frame)].reset_index(drop=True)
-    log(f"Legacy Survey DR9: kept {len(frame)} of {before} rows in {sweep_path.name}")
+    log(
+        f"Legacy Survey DR9: kept {len(frame)} of {before} rows in {sweep_path.name}"
+    )
 
     for column in PHOTOZ_COLUMNS:
         if frame[column].dtype.kind == "f":
@@ -255,7 +282,10 @@ def fetch_chunk(chunk_id: str, dest: Path) -> list[Path]:
     photoz_path = region_dir / photoz_name
     for url, path in (
         (f"{BASE_URL}/{REGION}/sweep/{SWEEP_VERSION}/{name}", sweep_path),
-        (f"{BASE_URL}/{REGION}/sweep/{PHOTOZ_VERSION}/{photoz_name}", photoz_path),
+        (
+            f"{BASE_URL}/{REGION}/sweep/{PHOTOZ_VERSION}/{photoz_name}",
+            photoz_path,
+        ),
     ):
         size = content_length(url)
         if already_complete(path, size):

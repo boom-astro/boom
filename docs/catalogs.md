@@ -172,7 +172,7 @@ overlap, and a galaxy that appears in both is two documents in two collections
 rather than one overwriting the other.
 
 Two cuts narrow what DR9 contributes, both in
-`boompy/src/boompy/catalogs/lsdr9.py`:
+`boompy/src/boompy/catalog/lsdr9.py`:
 
 - **Only `dr9/north`.** It is the BASS+MzLS reduction, covering sky DR10 does
   not. `dr9/south` is another terabyte re-reducing sky DR10 already has.
@@ -386,11 +386,13 @@ A catalog is declared in two halves, and both are in this repo:
 
 | Where | What it declares |
 | --- | --- |
-| `boompy/src/boompy/catalogs/<id>.py` | where the data lives and how to fetch a chunk of it |
+| `boompy/src/boompy/catalog/catalogs/<id>.py` | where the data lives and how to fetch a chunk of it |
 | `src/catalogs/` — a record type plus a `CatalogDef` | what the columns mean and how they are stored |
 
 The Python side is a module defining `ID`, `list_chunks()` and `fetch_chunk()`
-(see [`boompy/README.md`](../boompy/README.md)). It is Python because the
+(see [`boompy/README.md`](../boompy/README.md)). Nothing registers it: that
+directory holds one module per catalog and nothing else, and boompy builds its
+index by listing it, so a new file is a new catalog. It is Python because the
 archives are: LSDB reads HATS partitioning, `astroquery` speaks to the archives
 directly, and reimplementing either in Rust to avoid a subprocess would be a bad
 trade. Everything after the file lands on disk is Rust.

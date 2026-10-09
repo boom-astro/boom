@@ -22,8 +22,8 @@ import json
 import os
 from pathlib import Path
 
-from .base import Chunk
-from .http import log
+from ..base import Chunk
+from ..http import log
 
 ID = "lspsc"
 
@@ -59,7 +59,10 @@ def list_chunks() -> list[Chunk]:
     manifest = json.loads(manifest_path.read_text())
     files = sorted(p.name for p in directory.glob("*.jsonl.gz"))
     if not files:
-        raise _missing(directory, "manifest.json lists an export but no .jsonl.gz files are")
+        raise _missing(
+            directory,
+            "manifest.json lists an export but no .jsonl.gz files are",
+        )
     log(
         f"LSPSC: {len(files)} exported chunk(s), {manifest.get('rows', 'unknown')} rows, "
         f"from {manifest.get('source_database', 'unknown')}"
@@ -72,5 +75,7 @@ def fetch_chunk(chunk_id: str, dest: Path) -> list[Path]:
     # double the disk for no benefit. BOOM never deletes a staged file.
     path = staged_dir() / chunk_id
     if not path.is_file():
-        raise RuntimeError(f"exported chunk {chunk_id} is missing from {staged_dir()}")
+        raise RuntimeError(
+            f"exported chunk {chunk_id} is missing from {staged_dir()}"
+        )
     return [path]
