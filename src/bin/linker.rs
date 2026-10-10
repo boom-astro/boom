@@ -19,17 +19,16 @@
 use boom::conf::{load_dotenv, AppConfig, LinkerConfig};
 use boom::utils::discovery::{
     designations, load_window, persist_clusters, persist_tracks, recall, reference_epoch,
-    thor_clusters, track_detections, tracklets_per_night, ThorSearch,
+    thor_clusters, track_detections, tracklets_per_night, Stop, ThorSearch,
 };
 use boom::utils::heliolinc::{link_tracklets, LinkConfig, Track};
 use boom::utils::identify::{IdentifyConfig, KnownRule, OrbitEntry};
 use boom::utils::linking::{night_of, Detection, Tracklet, TrackletConfig};
 use boom::utils::mpcorb::load_catalogue;
 use boom::utils::o11y::logging::build_subscriber;
-use boom::utils::tracks::COUNTERS_COLLECTION;
+use boom::utils::tracks::{lock_is_held, COUNTERS_COLLECTION};
 use clap::Parser;
 use mongodb::bson::{doc, Document};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Notify;
@@ -148,13 +147,23 @@ async fn record_night(db: &mongodb::Database, night: i64) {
 ///
 /// True when the night is done: its window loaded, and every pass that stores
 /// tracks stored them. A night that is not done is worth trying again.
-async fn run_night(
-    db: &mongodb::Database,
-    cfg: &LinkerConfig,
-    night: i64,
-    stop: &AtomicBool,
-) -> bool {
+async fn run_night(db: &mongodb::Database, cfg: &LinkerConfig, night: i64, stop: &Stop) -> bool {
     let started = Instant::now();
+    // Loading and linking take minutes, all wasted if the results cannot be
+    // stored, so a night waits for another run's lock before starting.
+    if cfg.persist && (cfg.link || cfg.thor) {
+        match lock_is_held(db).await {
+            Ok(false) => {}
+            Ok(true) => {
+                info!(night, "another run is persisting tracks, waiting for it");
+                return false;
+            }
+            Err(error) => {
+                error!(%error, "could not check the tracks lock");
+                return false;
+            }
+        }
+    }
     let (jd_start, span) = window(night, cfg.window_nights);
     info!(
         night,
@@ -195,7 +204,9 @@ async fn run_night(
     let dry_run = !cfg.persist;
     let mut done = true;
 
-    if cfg.link && !detections.is_empty() && !stop.load(Ordering::Relaxed) {
+    if cfg.link && !detections.is_empty() && stop.requested() {
+        done = false;
+    } else if cfg.link && !detections.is_empty() {
         let pass = Instant::now();
         let (tracklets, tracks) = link(&detections);
         let groups: Vec<Vec<i64>> = tracks
@@ -229,7 +240,9 @@ async fn run_night(
         );
     }
 
-    if cfg.thor && !detections.is_empty() && !stop.load(Ordering::Relaxed) {
+    if cfg.thor && !detections.is_empty() && stop.requested() {
+        done = false;
+    } else if cfg.thor && !detections.is_empty() {
         let pass = Instant::now();
         let (thor_start, _) = window(night, cfg.thor_window_nights);
         let recent: Vec<Detection> = detections
@@ -266,13 +279,11 @@ async fn run_night(
         );
     }
 
-    if stop.load(Ordering::Relaxed) {
-        info!(night, "asked to stop, leaving the night unfinished");
-        return false;
-    }
-
-    // Diagnostic only, so a recall that fails does not hold the night back.
-    if cfg.recall {
+    // Diagnostic only, so a recall that fails or is skipped does not hold the
+    // night back.
+    if cfg.recall && stop.requested() {
+        info!(night, "asked to stop, skipping the recall");
+    } else if cfg.recall {
         let pass = Instant::now();
         let (start, span) = window(night, cfg.recall_window_nights);
         match load_window(db, start, span, cfg.drb, true, None).await {
@@ -305,12 +316,12 @@ async fn run_night(
     done
 }
 
-/// Set `stop` and wake `wake` on SIGTERM or Ctrl-C.
+/// Request `stop` and wake `wake` on SIGTERM or Ctrl-C.
 ///
 /// Listening from the start, not only while waiting, so a shutdown mid-run is
 /// seen between tracks and the tracks lock is released rather than left held
 /// for its lease when Docker gives up and kills the process.
-fn listen_for_stop(stop: Arc<AtomicBool>, wake: Arc<Notify>) {
+fn listen_for_stop(stop: Arc<Stop>, wake: Arc<Notify>) {
     use tokio::signal::unix::{signal, SignalKind};
     tokio::spawn(async move {
         match signal(SignalKind::terminate()) {
@@ -326,19 +337,19 @@ fn listen_for_stop(stop: Arc<AtomicBool>, wake: Arc<Notify>) {
             }
         }
         info!("asked to stop");
-        stop.store(true, Ordering::Relaxed);
+        stop.request();
         // A permit, so a wait that starts after this still returns at once.
         wake.notify_one();
     });
 }
 
 /// Sleep for `duration`, or until asked to stop. True when asked to stop.
-async fn sleep_or_stop(duration: Duration, stop: &AtomicBool, wake: &Notify) -> bool {
-    if stop.load(Ordering::Relaxed) {
+async fn sleep_or_stop(duration: Duration, stop: &Stop, wake: &Notify) -> bool {
+    if stop.requested() {
         return true;
     }
     tokio::select! {
-        _ = tokio::time::sleep(duration) => stop.load(Ordering::Relaxed),
+        _ = tokio::time::sleep(duration) => stop.requested(),
         _ = wake.notified() => true,
     }
 }
@@ -349,7 +360,7 @@ async fn main() {
     tracing::subscriber::set_global_default(subscriber).expect("failed to set subscriber");
     load_dotenv();
 
-    let stop = Arc::new(AtomicBool::new(false));
+    let stop = Arc::new(Stop::default());
     let wake = Arc::new(Notify::new());
     listen_for_stop(stop.clone(), wake.clone());
 

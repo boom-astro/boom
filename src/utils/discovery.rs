@@ -16,8 +16,8 @@ use crate::utils::orbit_fit::{fit_within, Observation};
 use crate::utils::sso_geometry::Site;
 use crate::utils::thor;
 use crate::utils::tracks::{
-    acquire_lock, commit_upsert, plan_upsert, release_lock, stamp_members, BoundFit,
-    SHARED_FOR_IDENTITY,
+    acquire_lock, commit_upsert, plan_upsert, release_lock, renew_lock, stamp_members, BoundFit,
+    LOCK_RENEW_EVERY, SHARED_FOR_IDENTITY,
 };
 use futures::StreamExt;
 use mongodb::bson::{doc, Document};
@@ -470,7 +470,7 @@ pub struct PersistReport {
     /// Whether the pass held the tracks lock, or was a dry run. A pass that
     /// found another one writing stores nothing.
     pub ran: bool,
-    /// Whether the pass stopped early because the process was asked to stop.
+    /// Whether the pass stopped early: asked to stop, or it lost the lock.
     pub interrupted: bool,
     pub stored: usize,
     /// Of `stored`, tracks re-found exactly as they were and left alone.
@@ -484,6 +484,45 @@ impl PersistReport {
     /// Whether the pass did everything it set out to.
     pub fn complete(&self) -> bool {
         self.ran && !self.interrupted
+    }
+}
+
+/// A request to stop, shared between whatever receives the signal and the
+/// passes it should end.
+///
+/// A pass checks it between tracks, so a stop never cuts a write in half and
+/// the tracks lock is always released. It also records whether a pass is
+/// writing, so a signal handler can tell whether exiting at once would leave
+/// the lock held.
+#[derive(Debug)]
+pub struct Stop {
+    requested: AtomicBool,
+    writing: AtomicBool,
+}
+
+impl Stop {
+    pub const fn new() -> Self {
+        Stop {
+            requested: AtomicBool::new(false),
+            writing: AtomicBool::new(false),
+        }
+    }
+
+    /// Ask every pass to stop. True when one is writing and will stop at the
+    /// next track; false when nothing holds the lock and exiting is safe.
+    pub fn request(&self) -> bool {
+        self.requested.store(true, Ordering::Relaxed);
+        self.writing.load(Ordering::Relaxed)
+    }
+
+    pub fn requested(&self) -> bool {
+        self.requested.load(Ordering::Relaxed)
+    }
+}
+
+impl Default for Stop {
+    fn default() -> Self {
+        Stop::new()
     }
 }
 
@@ -508,7 +547,7 @@ pub async fn persist_tracks(
     dry_run: bool,
     min_detections: usize,
     min_nights: usize,
-    stop: &AtomicBool,
+    stop: &Stop,
 ) -> PersistReport {
     let candidates = tracks.iter().map(|track| Candidate {
         members: track_detections(track, tracklets),
@@ -550,7 +589,7 @@ pub async fn persist_clusters(
     dry_run: bool,
     min_detections: usize,
     min_nights: usize,
-    stop: &AtomicBool,
+    stop: &Stop,
 ) -> PersistReport {
     let candidates = clusters.iter().map(|(cluster, verdict)| Candidate {
         members: cluster.ids.clone(),
@@ -574,8 +613,9 @@ pub async fn persist_clusters(
 ///
 /// One at a time rather than in bulk: identity is decided against what is
 /// already stored, so two tracks of the same object in one run must see each
-/// other's writes. The lock is released however the pass ends, including when
-/// `stop` cuts it short, so a shutdown never leaves it held for its lease.
+/// other's writes. The lock is renewed as the pass goes and released however
+/// it ends, including when `stop` cuts it short, so a shutdown never leaves it
+/// held for its lease.
 #[allow(clippy::too_many_arguments)]
 async fn persist(
     db: &mongodb::Database,
@@ -586,29 +626,54 @@ async fn persist(
     known: &[Option<String>],
     dry_run: bool,
     (min_detections, min_nights): (usize, usize),
-    stop: &AtomicBool,
+    stop: &Stop,
 ) -> PersistReport {
     let mut report = PersistReport::default();
-    if !dry_run {
+    // Marked before the lock is taken, so a signal handler never exits between
+    // taking it and a pass that would have released it.
+    stop.writing.store(true, Ordering::Relaxed);
+    let lock = if dry_run {
+        None
+    } else {
         match acquire_lock(db).await {
-            Ok(true) => {}
-            Ok(false) => {
+            Ok(Some(lock)) => Some(lock),
+            Ok(None) => {
                 error!("another run is persisting tracks, not writing");
+                stop.writing.store(false, Ordering::Relaxed);
                 return report;
             }
             Err(e) => {
                 error!("could not take the tracks lock: {}", e);
+                stop.writing.store(false, Ordering::Relaxed);
                 return report;
             }
         }
-    }
+    };
     report.ran = true;
+    let mut renewed = std::time::Instant::now();
     let by_id: HashMap<i64, &Detection> = detections.iter().map(|d| (d.id, d)).collect();
     for (i, Candidate { members, fit }) in candidates.enumerate() {
-        if stop.load(Ordering::Relaxed) {
+        if stop.requested() {
             info!("asked to stop, leaving the rest of the {} unstored", what);
             report.interrupted = true;
             break;
+        }
+        if let Some(lock) = &lock {
+            if renewed.elapsed() >= LOCK_RENEW_EVERY {
+                match renew_lock(db, lock).await {
+                    Ok(true) => renewed = std::time::Instant::now(),
+                    Ok(false) => {
+                        error!(
+                            "lost the tracks lock, leaving the rest of the {} unstored",
+                            what
+                        );
+                        report.interrupted = true;
+                        break;
+                    }
+                    // The lease outlasts a few failed renewals.
+                    Err(e) => error!("could not renew the tracks lock: {}", e),
+                }
+            }
         }
         let jds: Vec<f64> = members
             .iter()
@@ -647,27 +712,29 @@ async fn persist(
             continue;
         }
         let unchanged = plan.unchanged_since.is_some();
-        if dry_run {
-            info!("would store {}", plan.describe());
+        let superseded = plan.superseded.clone();
+        let count = |report: &mut PersistReport| {
             report.stored += 1;
             report.unchanged += unchanged as usize;
-            report.absorbed += plan.superseded.len();
-            report.stamped += plan.members.len() as u64;
+            report.absorbed += superseded.len();
+        };
+        if dry_run {
+            info!("would store {}", plan.describe());
+            count(&mut report);
+            // A real run stamps nothing new on a track it leaves unchanged.
+            if !unchanged {
+                report.stamped += plan.members.len() as u64;
+            }
             continue;
         }
-        let superseded = plan.superseded.clone();
         match commit_upsert(db, plan).await {
             Ok(up) => {
-                report.stored += 1;
-                report.absorbed += superseded.len();
-                if unchanged {
-                    // Already stamped when it was last written.
-                    report.unchanged += 1;
-                    continue;
-                }
+                count(&mut report);
                 if !superseded.is_empty() {
                     info!("track {} absorbed {}", up.track.id, superseded.join(", "));
                 }
+                // Even when unchanged: stamping is idempotent, and it repairs a
+                // stamp that failed when the track was last written.
                 match stamp_members(db, &up.track).await {
                     Ok(n) => report.stamped += n,
                     Err(e) => error!("could not stamp {}: {}", up.track.id, e),
@@ -676,11 +743,12 @@ async fn persist(
             Err(e) => error!("could not store one of the {}: {}", what, e),
         }
     }
-    if !dry_run {
-        if let Err(e) = release_lock(db).await {
+    if let Some(lock) = &lock {
+        if let Err(e) = release_lock(db, lock).await {
             error!("could not release the tracks lock: {}", e);
         }
     }
+    stop.writing.store(false, Ordering::Relaxed);
     info!(
         "{} {} {} ({} unchanged), stamped {} alerts, absorbed {} superseded ids",
         if dry_run {
@@ -822,5 +890,121 @@ mod tests {
     fn test_track_detections_are_ascending_and_distinct() {
         let tracklets = vec![tracklet(&[5, 3], 2460010.8), tracklet(&[3, 9], 2460012.8)];
         assert_eq!(track_detections(&track(&[0, 1]), &tracklets), vec![3, 5, 9]);
+    }
+
+    fn detection(id: i64, jd: f64) -> Detection {
+        Detection {
+            id,
+            jd,
+            ra: 10.0,
+            dec: 10.0,
+            mag: None,
+            mag_err: None,
+            band: None,
+        }
+    }
+
+    /// A pass asked to stop must store nothing more and still release the
+    /// lock, or the next run would wait out the lease.
+    #[tokio::test]
+    async fn test_a_stopped_pass_releases_the_lock() {
+        let db = crate::utils::tracks::tests::private_db().await;
+        let base = (uuid::Uuid::new_v4().as_u128() as i64).abs() / 16;
+        let detections: Vec<Detection> = (0..4)
+            .map(|k| detection(base + k, 2460000.0 + k as f64))
+            .collect();
+        let candidates = || {
+            std::iter::once(Candidate {
+                members: detections.iter().map(|d| d.id).collect(),
+                fit: (BoundFit::Good, Some(0.5)),
+            })
+        };
+
+        let stop = Stop::new();
+        assert!(
+            !stop.request(),
+            "nothing is writing yet, so exiting is safe"
+        );
+        let report = persist(
+            &db,
+            "tracks",
+            candidates(),
+            &detections,
+            &HashMap::new(),
+            &[],
+            false,
+            (2, 2),
+            &stop,
+        )
+        .await;
+        assert!(report.ran && report.interrupted && !report.complete());
+        assert_eq!(report.stored, 0);
+        assert!(!crate::utils::tracks::lock_is_held(&db).await.unwrap());
+        assert!(!stop.writing.load(Ordering::Relaxed));
+
+        let report = persist(
+            &db,
+            "tracks",
+            candidates(),
+            &detections,
+            &HashMap::new(),
+            &[],
+            false,
+            (2, 2),
+            &Stop::new(),
+        )
+        .await;
+        assert!(report.complete());
+        assert_eq!((report.stored, report.unchanged, report.stamped), (1, 0, 0));
+
+        let again = persist(
+            &db,
+            "tracks",
+            candidates(),
+            &detections,
+            &HashMap::new(),
+            &[],
+            true,
+            (2, 2),
+            &Stop::new(),
+        )
+        .await;
+        assert_eq!(
+            (again.stored, again.unchanged, again.stamped),
+            (1, 1, 0),
+            "a dry run stamps nothing on a track a real run would leave unchanged"
+        );
+        db.drop().await.unwrap();
+    }
+
+    /// Another run holding the lock means this pass stores nothing and says so.
+    #[tokio::test]
+    async fn test_a_pass_without_the_lock_does_not_run() {
+        let db = crate::utils::tracks::tests::private_db().await;
+        let other = crate::utils::tracks::acquire_lock(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        let report = persist(
+            &db,
+            "tracks",
+            std::iter::empty(),
+            &[],
+            &HashMap::new(),
+            &[],
+            false,
+            (2, 2),
+            &Stop::new(),
+        )
+        .await;
+        assert!(!report.ran && !report.complete());
+        assert!(
+            crate::utils::tracks::lock_is_held(&db).await.unwrap(),
+            "left with its holder"
+        );
+        crate::utils::tracks::release_lock(&db, &other)
+            .await
+            .unwrap();
+        db.drop().await.unwrap();
     }
 }
