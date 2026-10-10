@@ -595,6 +595,18 @@ mod tests {
             catalog: watchlist.clone(),
             ..Default::default()
         });
+        // Mongo rejects mixing inclusion and exclusion, so this catalog can't be read.
+        let unreadable = format!("test_xmatch_unreadable_{}", uuid::Uuid::new_v4().simple());
+        database
+            .collection::<Document>(&unreadable)
+            .insert_one(doc! { "ra": 1.0, "dec": 2.0 })
+            .await
+            .unwrap();
+        ztf_catalogs.push(CatalogXmatchConfig {
+            catalog: unreadable.clone(),
+            projection: doc! { "ra": 1, "dec": 0 },
+            ..Default::default()
+        });
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(database.clone()))
@@ -612,12 +624,10 @@ mod tests {
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let resp = read_json_response(resp).await;
-        // Dropped before asserting, so a failure does not leave it behind.
-        database
-            .collection::<Document>(&catalog)
-            .drop()
-            .await
-            .unwrap();
+        // Dropped before asserting, so a failure does not leave them behind.
+        for name in [&catalog, &unreadable] {
+            database.collection::<Document>(name).drop().await.unwrap();
+        }
         let cross_matches = resp["data"]["fields"]
             .as_array()
             .unwrap()
@@ -650,7 +660,7 @@ mod tests {
         assert_eq!(type_of("ra"), Some(serde_json::json!(["null", "double"])));
         assert_eq!(type_of("nobs"), Some(serde_json::json!(["null", "int"])));
         assert_eq!(type_of("kind"), Some(serde_json::json!(["null", "string"])));
-        // Projected but absent from the sampled row.
+        // Projected but absent from the catalog row.
         assert_eq!(
             type_of("z"),
             Some(serde_json::json!([
@@ -666,6 +676,23 @@ mod tests {
         assert_eq!(
             type_of("distance_kpc"),
             Some(serde_json::json!(["null", "double"]))
+        );
+
+        // A catalog that can't be read is still listed, with generic types.
+        let unreadable_entry = catalogs
+            .iter()
+            .find(|c| c["name"] == unreadable.as_str())
+            .unwrap();
+        let unreadable_fields = unreadable_entry["type"]["items"]["fields"]
+            .as_array()
+            .unwrap();
+        let ra = unreadable_fields
+            .iter()
+            .find(|f| f["name"] == "ra")
+            .unwrap();
+        assert_eq!(
+            ra["type"],
+            serde_json::json!(["null", "boolean", "int", "long", "double", "string"])
         );
     }
 }
