@@ -60,13 +60,17 @@ const CATALOG_DRIVEN_MARGIN: u64 = 4;
 /// the watchlist document itself under `matching_<survey>_objects`. For those, this binary loops
 /// over the (small) watchlist entries and `$addToSet`s the object_ids of every alerts_aux record
 /// within radius. `$addToSet` is idempotent, so re-running is safe and concurrent with live ingest.
+///
+/// With `--remove`, the binary does the reverse: it unsets `cross_matches.<catalog>` from every
+/// alerts_aux record, for a catalog that has been dropped from `crossmatch.<survey>`.
 #[derive(Parser)]
 struct Cli {
     #[arg(long, value_enum)]
     survey: Survey,
 
     /// Each catalog must already be declared under `crossmatch.<survey>` in
-    /// config.yaml (radius / projection / etc. are read from there).
+    /// config.yaml (radius / projection / etc. are read from there). With
+    /// `--remove`, the opposite: it must no longer be declared there.
     #[arg(long, value_delimiter = ',', num_args = 1..)]
     catalogs: Vec<String>,
 
@@ -103,6 +107,21 @@ struct Cli {
     /// Catalog-driven only: discard the progress of an interrupted run and start over.
     #[arg(long, default_value_t = false)]
     restart: bool,
+
+    /// Unset `cross_matches.<catalog>` from every alerts_aux record instead of
+    /// computing matches, along with any state an earlier reprocess run left behind.
+    /// Idempotent, so an interrupted run can simply be rerun.
+    #[arg(
+        long,
+        default_value_t = false,
+        conflicts_with_all = ["direction", "batch_size", "concurrency", "skip_existing", "skip_empty", "restart"]
+    )]
+    remove: bool,
+
+    /// With `--remove`: proceed even if a catalog is still declared under
+    /// `crossmatch.<survey>`. Live ingest will keep writing it on new records.
+    #[arg(long, default_value_t = false, requires = "remove")]
+    force: bool,
 }
 
 /// Reprocessing can be done in two directions:
@@ -503,11 +522,8 @@ async fn run_catalog_driven(
     restart: bool,
 ) -> Result<(), TaskError> {
     let label = format!("catalog→{}", catalog_config.catalog);
-    let state_id = format!("{}_alerts_aux:{}", survey, catalog_config.catalog);
-    let buffer_name = format!(
-        "reprocess_crossmatch_buffer_{}_{}",
-        survey, catalog_config.catalog
-    );
+    let state_id = catalog_state_id(survey, &catalog_config.catalog);
+    let buffer_name = catalog_buffer_name(survey, &catalog_config.catalog);
     let buffer: mongodb::Collection<Document> = db.collection(&buffer_name);
     let grouped: mongodb::Collection<Document> = db.collection(&format!("{}_grouped", buffer_name));
 
@@ -941,6 +957,69 @@ async fn commit_catalog(
     Ok(())
 }
 
+fn catalog_state_id(survey: &Survey, catalog: &str) -> String {
+    format!("{}_alerts_aux:{}", survey, catalog)
+}
+
+fn catalog_buffer_name(survey: &Survey, catalog: &str) -> String {
+    format!("reprocess_crossmatch_buffer_{}_{}", survey, catalog)
+}
+
+// -----------------------------------------------------------------------------
+// remove: unset a dropped catalog's matches from alerts_aux, sharded like the commit
+// phase, then clear anything a catalog-driven run left behind for it.
+// -----------------------------------------------------------------------------
+async fn run_remove(
+    survey: &Survey,
+    catalog: &str,
+    db: mongodb::Database,
+    processes: usize,
+) -> Result<(), TaskError> {
+    let label = format!("remove→{}", catalog);
+    let aux_collection: mongodb::Collection<Document> =
+        db.collection(&format!("{}_alerts_aux", survey));
+    let live_field = format!("cross_matches.{}", catalog);
+    let legacy_temp_field = format!("cross_matches.{}_temp", catalog);
+
+    let shards = range_shards(
+        &aux_collection,
+        processes * SHARDS_PER_PROCESS,
+        shard_field(&aux_collection).await,
+        &Document::new(),
+    )
+    .await;
+    sharded_aggregate(
+        &aux_collection,
+        &shards,
+        processes,
+        &doc! { "$or": [
+            { &live_field: { "$exists": true } },
+            { &legacy_temp_field: { "$exists": true } },
+        ]},
+        vec![
+            doc! { "$project": { "_id": 1 } },
+            doc! { "$merge": {
+                "into": aux_collection.name(),
+                "on": "_id",
+                "whenMatched": [{ "$unset": [&live_field, &legacy_temp_field] }],
+                "whenNotMatched": "discard",
+            }},
+        ],
+        &label,
+    )
+    .await?;
+
+    db.collection::<Document>(STATE_COLLECTION)
+        .delete_one(doc! { "_id": catalog_state_id(survey, catalog) })
+        .await?;
+    let buffer_name = catalog_buffer_name(survey, catalog);
+    db.collection::<Document>(&buffer_name).drop().await?;
+    db.collection::<Document>(&format!("{}_grouped", buffer_name))
+        .drop()
+        .await?;
+    Ok(())
+}
+
 async fn sharded_aggregate(
     collection: &mongodb::Collection<Document>,
     shards: &[Document],
@@ -1142,6 +1221,11 @@ async fn main() {
         }
     };
 
+    if args.remove {
+        run_remove_mode(&args, &config, db).await;
+        return;
+    }
+
     let survey_configs: &Vec<CatalogXmatchConfig> = match config.crossmatch.get(&args.survey) {
         Some(v) => v,
         None => {
@@ -1278,6 +1362,52 @@ async fn main() {
     }
 
     info!("reprocess_crossmatch complete.");
+}
+
+async fn run_remove_mode(args: &Cli, config: &AppConfig, db: mongodb::Database) {
+    let declared = config.crossmatch.get(&args.survey);
+    let mut catalogs: Vec<&String> = Vec::with_capacity(args.catalogs.len());
+    for name in &args.catalogs {
+        if catalogs.contains(&name) {
+            warn!(
+                "catalog '{}' listed more than once, ignoring the copy",
+                name
+            );
+            continue;
+        }
+        // Watchlist matches live on the watchlist documents, not on alerts_aux.
+        if name.starts_with(WATCHLIST_PREFIX) {
+            error!(
+                "catalog '{}' is a watchlist; --remove only clears alerts_aux crossmatches",
+                name
+            );
+            std::process::exit(1);
+        }
+        let still_declared = declared.is_some_and(|c| c.iter().any(|c| &c.catalog == name));
+        if still_declared && !args.force {
+            error!(
+                "catalog '{}' is still declared under crossmatch.{} in {}, so live ingest would \
+                 keep writing it; remove it from the config first, or pass --force",
+                name,
+                args.survey.to_string().to_lowercase(),
+                args.config,
+            );
+            std::process::exit(1);
+        }
+        catalogs.push(name);
+    }
+
+    info!(
+        "starting remove: survey={} processes={} catalogs={:?}",
+        args.survey, args.processes, catalogs
+    );
+    for name in catalogs {
+        if let Err(e) = run_remove(&args.survey, name, db.clone(), args.processes).await {
+            error!("remove for '{}' failed: {}", name, e);
+            std::process::exit(1);
+        }
+    }
+    info!("reprocess_crossmatch remove complete.");
 }
 
 #[cfg(test)]
