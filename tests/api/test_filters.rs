@@ -612,6 +612,12 @@ mod tests {
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let resp = read_json_response(resp).await;
+        // Dropped before asserting, so a failure does not leave it behind.
+        database
+            .collection::<Document>(&catalog)
+            .drop()
+            .await
+            .unwrap();
         let cross_matches = resp["data"]["fields"]
             .as_array()
             .unwrap()
@@ -619,6 +625,12 @@ mod tests {
             .find(|f| f["name"] == "cross_matches")
             .unwrap()
             .clone();
+        // Only `cross_matches` is checked: the alert schema keeps stored names
+        // Avro rejects, like `AGN-like`.
+        apache_avro::Schema::parse(
+            &serde_json::json!({ "type": "record", "name": "T", "fields": [&cross_matches] }),
+        )
+        .expect("a valid Avro schema");
         let catalogs = cross_matches["type"]["fields"].as_array().unwrap();
         assert!(!catalogs.iter().any(|c| c["name"] == watchlist.as_str()));
         let entry = catalogs
@@ -633,6 +645,8 @@ mod tests {
                 .find(|f| f["name"] == name)
                 .map(|f| f["type"].clone())
         };
+        // Not projected, but `$project` keeps `_id` unless excluded.
+        assert_eq!(type_of("_id"), Some(serde_json::json!(["null", "string"])));
         assert_eq!(type_of("ra"), Some(serde_json::json!(["null", "double"])));
         assert_eq!(type_of("nobs"), Some(serde_json::json!(["null", "int"])));
         assert_eq!(type_of("kind"), Some(serde_json::json!(["null", "string"])));
@@ -653,11 +667,5 @@ mod tests {
             type_of("distance_kpc"),
             Some(serde_json::json!(["null", "double"]))
         );
-
-        database
-            .collection::<Document>(&catalog)
-            .drop()
-            .await
-            .unwrap();
     }
 }

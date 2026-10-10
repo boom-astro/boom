@@ -10,7 +10,7 @@ use crate::{
         models::response,
         routes::users::User,
     },
-    conf::{AppConfig, FilterWorkerConfig},
+    conf::{AppConfig, CatalogXmatchConfig, FilterWorkerConfig},
     enrichment::{
         DecamAlertProperties, LsstAlertProperties, WinterAlertProperties, ZtfAlertClassifications,
         ZtfAlertProperties,
@@ -67,6 +67,7 @@ use crate::utils::moc::{
     credible_volume_to_2d_moc, moc_from_ascii, moc_hpx_stage, parse_3d_skymap_bytes,
     CredibleVolumeIndex, LIGO3dskymap,
 };
+use crate::utils::o11y::logging::{log_error, WARN};
 use crate::utils::skymap_search::credible_level_at;
 use actix_web::{delete, get, patch, post, web, HttpResponse};
 use apache_avro::AvroSchema;
@@ -1788,62 +1789,138 @@ fn avro_record(document: &Document, name: &str) -> serde_json::Value {
     serde_json::json!({ "type": "record", "name": name, "fields": fields })
 }
 
-/// Type of a field the sampled catalog row did not carry, or carried as null.
+/// Type of a field no sampled catalog row carried, or only carried as null.
 fn unknown_avro_type() -> serde_json::Value {
     serde_json::json!(["null", "boolean", "int", "long", "double", "string"])
 }
 
+/// Rows sampled from each crossmatch catalog to type its fields.
+const CATALOG_SAMPLE_SIZE: i32 = 20;
+
+/// Whether a `$project` value keeps its field, as Mongo reads it.
+fn is_projected(value: &Bson) -> bool {
+    match value {
+        Bson::Int32(n) => *n != 0,
+        Bson::Int64(n) => *n != 0,
+        Bson::Double(n) => *n != 0.0,
+        Bson::Boolean(b) => *b,
+        // Anything else is an expression computing the field.
+        _ => true,
+    }
+}
+
+/// Fields `$project` leaves on a catalog row: an inclusion projection keeps
+/// the fields it lists plus `_id`, unless `_id` is excluded; an exclusion (or
+/// empty) projection keeps everything else, which only the rows can tell.
+fn projected_fields(projection: &Document, rows: &[Document]) -> Vec<String> {
+    let mut fields: Vec<String> = projection
+        .iter()
+        .filter(|(_, value)| is_projected(value))
+        .map(|(key, _)| key.clone())
+        .collect();
+    if fields.iter().all(|key| key == "_id") {
+        fields.clear();
+        for key in rows.iter().flat_map(|row| row.keys()) {
+            if !fields.contains(key) {
+                fields.push(key.clone());
+            }
+        }
+    } else if !projection.contains_key("_id") {
+        fields.insert(0, "_id".to_string());
+    }
+    fields
+}
+
+/// Avro type of `key` across sampled rows, from the first value that says
+/// something about it: not null, and not an empty array.
+fn sampled_avro_type(rows: &[Document], key: &str, name: &str) -> serde_json::Value {
+    let values = || rows.iter().filter_map(|row| row.get(key));
+    values()
+        .find(|value| match value {
+            Bson::Null => false,
+            Bson::Array(items) => !items.is_empty(),
+            _ => true,
+        })
+        .or_else(|| values().find(|value| !matches!(value, Bson::Null)))
+        .map(|value| avro_type_of(value, name))
+        .unwrap_or_else(unknown_avro_type)
+}
+
+/// Avro field for one crossmatch catalog under `cross_matches`: the list of
+/// matches, each with the catalog's projected fields plus `distance_arcsec`
+/// and, for catalogs with a `distance_key`, `distance_kpc`. Field types come
+/// from a few sampled rows; if sampling fails, the fields are still listed,
+/// with a union of scalar types.
+async fn catalog_avro_field(db: &Database, xmatch: &CatalogXmatchConfig) -> serde_json::Value {
+    let mut pipeline = vec![doc! { "$sample": { "size": CATALOG_SAMPLE_SIZE } }];
+    if !xmatch.projection.is_empty() {
+        pipeline.push(doc! { "$project": &xmatch.projection });
+    }
+    let rows: Vec<Document> = match db
+        .collection::<Document>(xmatch.collection_name())
+        .aggregate(pipeline)
+        .await
+    {
+        Ok(cursor) => cursor.try_collect().await,
+        Err(error) => Err(error),
+    }
+    .unwrap_or_else(|error| {
+        log_error!(
+            WARN,
+            error,
+            "could not sample catalog {} to type its filter schema",
+            xmatch.collection_name()
+        );
+        Vec::new()
+    });
+    catalog_avro_schema(xmatch, &rows)
+}
+
+/// The `cross_matches` entry of [`catalog_avro_field`], typed from `rows`.
+fn catalog_avro_schema(xmatch: &CatalogXmatchConfig, rows: &[Document]) -> serde_json::Value {
+    let record_name = format!("CrossMatch_{}", xmatch.catalog);
+    let mut fields: Vec<serde_json::Value> = projected_fields(&xmatch.projection, rows)
+        .into_iter()
+        .map(|key| {
+            let avro_type = sampled_avro_type(rows, &key, &format!("{}_{}", record_name, key));
+            serde_json::json!({ "name": key, "type": avro_type })
+        })
+        .collect();
+    fields.push(serde_json::json!({ "name": "distance_arcsec", "type": "double" }));
+    if xmatch.distance_key.is_some() {
+        fields.push(serde_json::json!({ "name": "distance_kpc", "type": ["null", "double"] }));
+    }
+    serde_json::json!({
+        "name": xmatch.catalog,
+        "type": {
+            "type": "array",
+            "items": { "type": "record", "name": record_name, "fields": fields },
+        },
+    })
+}
+
 /// Avro field for `cross_matches`, as the crossmatch step writes it on the aux
-/// document: per catalog configured for the survey, the list of matches with
-/// that catalog's `projection` fields, plus `distance_arcsec` and, for
-/// catalogs with a `distance_key`, `distance_kpc`. Field types are read off
-/// one row of each catalog; fields it lacks or leaves null get a union of
-/// scalar types.
-/// Watchlists are skipped, as crossmatch keeps them out of `cross_matches`.
+/// document: one entry per catalog configured for the survey. Watchlists are
+/// skipped, as crossmatch keeps them out of `cross_matches`.
 async fn cross_matches_avro_field(
     db: &Database,
     config: &AppConfig,
     survey: &Survey,
-) -> Result<serde_json::Value, mongodb::error::Error> {
-    let mut catalog_fields = Vec::new();
-    for xmatch in config.crossmatch.get(survey).into_iter().flatten() {
-        if xmatch.catalog.starts_with(WATCHLIST_PREFIX) {
-            continue;
-        }
-        let row = db
-            .collection::<Document>(xmatch.collection_name())
-            .find_one(doc! {})
-            .projection(xmatch.projection.clone())
-            .await?
-            .unwrap_or_default();
-        let record_name = format!("CrossMatch_{}", xmatch.catalog);
-        let mut fields: Vec<serde_json::Value> = xmatch
-            .projection
-            .keys()
-            .map(|key| {
-                let avro_type = match row.get(key) {
-                    Some(value) => avro_type_of(value, &format!("{}_{}", record_name, key)),
-                    None => unknown_avro_type(),
-                };
-                serde_json::json!({ "name": key, "type": avro_type })
-            })
-            .collect();
-        fields.push(serde_json::json!({ "name": "distance_arcsec", "type": "double" }));
-        if xmatch.distance_key.is_some() {
-            fields.push(serde_json::json!({ "name": "distance_kpc", "type": ["null", "double"] }));
-        }
-        catalog_fields.push(serde_json::json!({
-            "name": xmatch.catalog,
-            "type": {
-                "type": "array",
-                "items": { "type": "record", "name": record_name, "fields": fields },
-            },
-        }));
-    }
-    Ok(serde_json::json!({
+) -> serde_json::Value {
+    let catalog_fields = futures::future::join_all(
+        config
+            .crossmatch
+            .get(survey)
+            .into_iter()
+            .flatten()
+            .filter(|xmatch| !xmatch.catalog.starts_with(WATCHLIST_PREFIX))
+            .map(|xmatch| catalog_avro_field(db, xmatch)),
+    )
+    .await;
+    serde_json::json!({
         "name": "cross_matches",
         "type": { "type": "record", "name": "CrossMatches", "fields": catalog_fields },
-    }))
+    })
 }
 
 /// Get a schema of a survey's data available at filtering time
@@ -1860,7 +1937,6 @@ async fn cross_matches_avro_field(
     responses(
         (status = 200, description = "Schema found", body = serde_json::Value),
         (status = 404, description = "Schema not found"),
-        (status = 500, description = "Internal server error"),
     ),
     tags=["Filters"]
 )]
@@ -1878,15 +1954,7 @@ pub async fn get_filter_schema(
         Survey::Decam => DecamAlertToFilter::get_schema(),
     };
     let mut schema = serde_json::json!(schema);
-    let cross_matches = match cross_matches_avro_field(&db, &config, &survey_name).await {
-        Ok(field) => field,
-        Err(e) => {
-            return response::internal_error(&format!(
-                "Error reading crossmatch catalogs for survey {}: {}",
-                survey_name, e
-            ))
-        }
-    };
+    let cross_matches = cross_matches_avro_field(&db, &config, &survey_name).await;
     if let Some(fields) = schema["fields"].as_array_mut() {
         fields.push(cross_matches);
     }
@@ -1926,6 +1994,90 @@ mod tests {
             }])
         );
         assert_eq!(type_of("missing"), unknown_avro_type());
+    }
+
+    #[test]
+    fn projected_fields_follow_mongo_projection_rules() {
+        let rows = [doc! { "_id": 1, "ra": 1.0 }, doc! { "_id": 2, "dec": 2.0 }];
+        // Inclusion keeps `_id` unless told otherwise.
+        assert_eq!(
+            projected_fields(&doc! { "ra": 1, "dec": 1 }, &rows),
+            ["_id", "ra", "dec"]
+        );
+        assert_eq!(projected_fields(&doc! { "_id": 0, "ra": 1 }, &rows), ["ra"]);
+        assert_eq!(
+            projected_fields(&doc! { "ra": 1, "_id": 1 }, &rows),
+            ["ra", "_id"]
+        );
+        // Exclusion, or no projection, keeps whatever the rows carry.
+        assert_eq!(
+            projected_fields(&doc! { "secret": 0 }, &rows),
+            ["_id", "ra", "dec"]
+        );
+        assert_eq!(projected_fields(&doc! {}, &rows), ["_id", "ra", "dec"]);
+        assert!(projected_fields(&doc! { "_id": 0 }, &[]).is_empty());
+    }
+
+    #[test]
+    fn cross_matches_schema_is_valid_avro() {
+        let xmatch = CatalogXmatchConfig {
+            catalog: "NED".to_string(),
+            projection: doc! { "ra": 1, "z": 1, "names": 1, "phot": 1, "seen": 1 },
+            distance_key: Some("z".to_string()),
+            ..Default::default()
+        };
+        let rows = [doc! {
+            "_id": mongodb::bson::oid::ObjectId::new(),
+            "ra": 1.0,
+            "z": null,
+            "names": ["a"],
+            "phot": { "g": 18.0, "bands": [{ "band": "g" }] },
+            "seen": mongodb::bson::DateTime::now(),
+        }];
+        let empty = CatalogXmatchConfig {
+            catalog: "empty".to_string(),
+            projection: doc! { "_id": 1, "ra": 1 },
+            ..Default::default()
+        };
+        let cross_matches = serde_json::json!({
+            "name": "cross_matches",
+            "type": {
+                "type": "record",
+                "name": "CrossMatches",
+                "fields": [catalog_avro_schema(&xmatch, &rows), catalog_avro_schema(&empty, &[])],
+            },
+        });
+        // Only `cross_matches` is checked: the alert schema keeps stored names
+        // Avro rejects, like `AGN-like`, and so may catalog names.
+        let schema =
+            serde_json::json!({ "type": "record", "name": "T", "fields": [cross_matches] });
+        apache_avro::Schema::parse(&schema).expect("a valid Avro schema");
+    }
+
+    #[test]
+    fn sampled_type_skips_rows_that_say_nothing() {
+        let rows = [
+            doc! { "z": null, "names": [] },
+            doc! { "names": [] },
+            doc! { "z": 0.1, "names": ["SN 2026a"] },
+        ];
+        assert_eq!(
+            sampled_avro_type(&rows, "z", "T_z"),
+            serde_json::json!(["null", "double"])
+        );
+        assert_eq!(
+            sampled_avro_type(&rows, "names", "T_names"),
+            serde_json::json!(["null", { "type": "array", "items": ["null", "string"] }])
+        );
+        assert_eq!(
+            sampled_avro_type(&rows, "absent", "T_absent"),
+            unknown_avro_type()
+        );
+        // An empty array is still better than nothing.
+        assert_eq!(
+            sampled_avro_type(&rows[..2], "names", "T_names"),
+            serde_json::json!(["null", { "type": "array", "items": unknown_avro_type() }])
+        );
     }
 
     /// A count request must carry the region, so a count can be compared against
