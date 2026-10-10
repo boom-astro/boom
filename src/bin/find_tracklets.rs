@@ -989,6 +989,7 @@ async fn main() {
                 db,
                 &tracks,
                 &tracklets,
+                link_cfg.reference_jd,
                 &detections,
                 &labels,
                 &known,

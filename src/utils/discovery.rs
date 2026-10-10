@@ -5,6 +5,7 @@
 //! across nights or recovers objects tracklet-lessly with THOR, matches what it
 //! finds to the MPC catalog, and stores the result as tracks.
 
+use crate::utils::attach::{match_track, Pool, Target};
 use crate::utils::heliolinc::{sky_track, test_orbits, State, Track};
 use crate::utils::identify::{
     identify, track_designation, IdentifyConfig, KnownRule, Match, OrbitEntry,
@@ -12,12 +13,13 @@ use crate::utils::identify::{
 use crate::utils::linking::{
     circular_mean_deg, find_tracklets, night_of, Detection, Tracklet, TrackletConfig,
 };
-use crate::utils::orbit_fit::{fit_within, Observation};
+use crate::utils::orbit_fit::{fit_within, Observation, OrbitFit};
 use crate::utils::sso_geometry::Site;
 use crate::utils::thor;
 use crate::utils::tracks::{
     acquire_lock, commit_upsert, plan_upsert, release_lock, renew_lock, stamp_members,
-    stamp_missing, BoundFit, LOCK_LEASE, LOCK_RENEW_EVERY, SHARED_FOR_IDENTITY,
+    stamp_missing, BoundFit, StoredOrbit, StoredTrack, LOCK_LEASE, LOCK_RENEW_EVERY,
+    SHARED_FOR_IDENTITY, TRACKS_COLLECTION,
 };
 use futures::StreamExt;
 use mongodb::bson::{doc, Document};
@@ -115,31 +117,31 @@ pub async fn load_window(
     let mut labels = HashMap::new();
     while let Some(doc) = cursor.next().await {
         let doc = doc?;
-        let Ok(candidate) = doc.get_document("candidate") else {
+        let Some(detection) = detection_of(&doc) else {
             continue;
         };
-        let (Ok(id), Ok(jd), Ok(ra), Ok(dec)) = (
-            doc.get_i64("_id"),
-            candidate.get_f64("jd"),
-            candidate.get_f64("ra"),
-            candidate.get_f64("dec"),
-        ) else {
-            continue;
-        };
-        if let Ok(name) = candidate.get_str("ssnamenr") {
-            labels.insert(id, name.to_string());
+        if let Ok(name) = doc
+            .get_document("candidate")
+            .and_then(|c| c.get_str("ssnamenr"))
+        {
+            labels.insert(detection.id, name.to_string());
         }
-        detections.push(Detection {
-            id,
-            jd,
-            ra,
-            dec,
-            mag: candidate.get_f64("magpsf").ok(),
-            mag_err: candidate.get_f64("sigmapsf").ok(),
-            band: ztf_band(candidate.get_i32("fid").ok()),
-        });
+        detections.push(detection);
     }
     Ok((detections, labels))
+}
+
+fn detection_of(doc: &Document) -> Option<Detection> {
+    let candidate = doc.get_document("candidate").ok()?;
+    Some(Detection {
+        id: doc.get_i64("_id").ok()?,
+        jd: candidate.get_f64("jd").ok()?,
+        ra: candidate.get_f64("ra").ok()?,
+        dec: candidate.get_f64("dec").ok()?,
+        mag: candidate.get_f64("magpsf").ok(),
+        mag_err: candidate.get_f64("sigmapsf").ok(),
+        band: ztf_band(candidate.get_i32("fid").ok()),
+    })
 }
 
 /// The most recent JD with alerts, floored to the start of that night.
@@ -191,7 +193,7 @@ pub fn reference_epoch(tracklets: &[Tracklet]) -> f64 {
 
 /// A bound-orbit verdict with the residual that produced it.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Verdict(pub BoundFit, pub Option<f64>);
+pub struct Verdict(pub BoundFit, pub Option<f64>, pub Option<StoredOrbit>);
 
 impl Verdict {
     pub fn residual(&self) -> Option<f64> {
@@ -365,7 +367,7 @@ pub fn thor_clusters(
                 })
                 .collect();
             if obs.len() < 3 {
-                return Some((c, Verdict(BoundFit::Ungated, None)));
+                return Some((c, Verdict(BoundFit::Ungated, None, None)));
             }
             // Screened against the looser gate, since a poor fit is still kept,
             // and converged if it passes it, so the residual it is ranked and
@@ -377,12 +379,13 @@ pub fn thor_clusters(
                 &search.site,
                 search.max_unbound_residual_arcsec,
             ) {
-                None => Some((c, Verdict(BoundFit::None, None))),
-                Some(fit) if fit.rms_arcsec <= search.max_residual_arcsec => {
-                    Some((c, Verdict(BoundFit::Good, Some(fit.rms_arcsec))))
-                }
+                None => Some((c, Verdict(BoundFit::None, None, None))),
+                Some(fit) if fit.rms_arcsec <= search.max_residual_arcsec => Some((
+                    c,
+                    Verdict(BoundFit::Good, Some(fit.rms_arcsec), Some(orbit_of(&fit))),
+                )),
                 Some(fit) if fit.rms_arcsec <= search.max_unbound_residual_arcsec => {
-                    Some((c, Verdict(BoundFit::Poor, Some(fit.rms_arcsec))))
+                    Some((c, Verdict(BoundFit::Poor, Some(fit.rms_arcsec), None)))
                 }
                 Some(_) => None,
             }
@@ -533,6 +536,15 @@ impl Default for Stop {
 struct Candidate {
     members: Vec<i64>,
     fit: (BoundFit, Option<f64>),
+    orbit: Option<StoredOrbit>,
+}
+
+fn orbit_of(fit: &OrbitFit) -> StoredOrbit {
+    StoredOrbit {
+        epoch_jd: fit.epoch_jd,
+        pos: fit.state.pos,
+        vel: fit.state.vel,
+    }
 }
 
 /// Store each track under a durable id and stamp it onto its member alerts.
@@ -544,6 +556,7 @@ pub async fn persist_tracks(
     db: &mongodb::Database,
     tracks: &[Track],
     tracklets: &[Tracklet],
+    reference_jd: f64,
     detections: &[Detection],
     labels: &HashMap<i64, String>,
     known: &[Option<String>],
@@ -560,6 +573,11 @@ pub async fn persist_tracks(
             Some(r) => (BoundFit::Good, Some(r)),
             None => (BoundFit::Ungated, None),
         },
+        orbit: track.residual_arcsec.map(|_| StoredOrbit {
+            epoch_jd: reference_jd,
+            pos: track.state.pos,
+            vel: track.state.vel,
+        }),
     });
     persist(
         db,
@@ -569,6 +587,7 @@ pub async fn persist_tracks(
         labels,
         known,
         dry_run,
+        &HashMap::new(),
         (min_detections, min_nights),
         stop,
     )
@@ -597,6 +616,7 @@ pub async fn persist_clusters(
     let candidates = clusters.iter().map(|(cluster, verdict)| Candidate {
         members: cluster.ids.clone(),
         fit: (verdict.0, verdict.residual()),
+        orbit: verdict.2,
     });
     persist(
         db,
@@ -606,6 +626,7 @@ pub async fn persist_clusters(
         labels,
         known,
         dry_run,
+        &HashMap::new(),
         (min_detections, min_nights),
         stop,
     )
@@ -628,6 +649,7 @@ async fn persist(
     labels: &HashMap<i64, String>,
     known: &[Option<String>],
     dry_run: bool,
+    stored_jds: &HashMap<i64, f64>,
     (min_detections, min_nights): (usize, usize),
     stop: &Stop,
 ) -> PersistReport {
@@ -659,7 +681,15 @@ async fn persist(
     report.ran = true;
     let mut renewed = std::time::Instant::now();
     let by_id: HashMap<i64, &Detection> = detections.iter().map(|d| (d.id, d)).collect();
-    for (i, Candidate { members, fit }) in candidates.enumerate() {
+    for (
+        i,
+        Candidate {
+            members,
+            fit,
+            orbit,
+        },
+    ) in candidates.enumerate()
+    {
         if stop.requested() {
             info!("asked to stop, leaving the rest of the {} unstored", what);
             report.interrupted = true;
@@ -695,8 +725,12 @@ async fn persist(
         }
         let jds: Vec<f64> = members
             .iter()
-            .filter_map(|id| by_id.get(id))
-            .map(|d| d.jd)
+            .filter_map(|id| {
+                by_id
+                    .get(id)
+                    .map(|d| d.jd)
+                    .or_else(|| stored_jds.get(id).copied())
+            })
             .collect();
         if jds.len() != members.len() {
             error!(
@@ -713,7 +747,7 @@ async fn persist(
             .find_map(|id| labels.get(id))
             .map(|l| crate::utils::mpcorb::normalize_ztf_ssnamenr(l).unwrap_or_else(|| l.clone()))
             .or_else(|| known.get(i).cloned().flatten());
-        let plan = match plan_upsert(db, &members, &jds, designation, Some(fit)).await {
+        let plan = match plan_upsert(db, &members, &jds, designation, Some(fit), orbit).await {
             Ok(plan) => plan,
             Err(e) => {
                 error!("could not resolve one of the {}: {}", what, e);
@@ -794,6 +828,159 @@ async fn persist(
         report.absorbed
     );
     report
+}
+
+pub async fn load_targets(
+    db: &mongodb::Database,
+    since_jd: f64,
+) -> Result<(Vec<Target>, HashSet<i64>), DiscoveryError> {
+    let mut cursor = db
+        .collection::<StoredTrack>(TRACKS_COLLECTION)
+        .find(doc! { "last_jd": { "$gte": since_jd } })
+        .await?;
+    let mut stored = Vec::new();
+    while cursor.advance().await? {
+        if let Ok(t) = cursor.deserialize_current() {
+            stored.push(t);
+        }
+    }
+    let claimed: HashSet<i64> = stored
+        .iter()
+        .flat_map(|t| t.members.iter().copied())
+        .collect();
+    let fitted: Vec<&StoredTrack> = stored
+        .iter()
+        .filter(|t| t.orbit.is_some() && t.bound_fit.as_deref() == Some(BoundFit::Good.as_str()))
+        .collect();
+    let wanted: Vec<i64> = fitted
+        .iter()
+        .flat_map(|t| t.members.iter().copied())
+        .collect();
+    let mut positions: HashMap<i64, Detection> = HashMap::new();
+    for chunk in wanted.chunks(10_000) {
+        let mut cursor = db
+            .collection::<Document>(ALERTS_COLLECTION)
+            .find(doc! { "_id": { "$in": chunk } })
+            .projection(doc! {
+                "_id": 1,
+                "candidate.jd": 1,
+                "candidate.ra": 1,
+                "candidate.dec": 1,
+                "candidate.magpsf": 1,
+                "candidate.sigmapsf": 1,
+                "candidate.fid": 1,
+            })
+            .await?;
+        while let Some(doc) = cursor.next().await {
+            if let Some(d) = detection_of(&doc?) {
+                positions.insert(d.id, d);
+            }
+        }
+    }
+    let targets = fitted
+        .into_iter()
+        .filter_map(|t| {
+            let orbit = t.orbit?;
+            let members: Vec<Detection> = t
+                .members
+                .iter()
+                .filter_map(|m| positions.get(m).copied())
+                .collect();
+            (members.len() == t.members.len()).then(|| Target {
+                id: t.id.clone(),
+                state: State {
+                    pos: orbit.pos,
+                    vel: orbit.vel,
+                },
+                epoch_jd: orbit.epoch_jd,
+                members,
+            })
+        })
+        .collect();
+    Ok((targets, claimed))
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct AttachReport {
+    pub persist: PersistReport,
+    pub joined: usize,
+    pub attached: usize,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn attach_pass(
+    db: &mongodb::Database,
+    found: &[Vec<i64>],
+    detections: &[Detection],
+    since_jd: f64,
+    gate_arcsec: f64,
+    site: &Site,
+    dry_run: bool,
+    stop: &Stop,
+) -> Result<AttachReport, DiscoveryError> {
+    let (targets, claimed) = load_targets(db, since_jd).await?;
+    let by_id: HashMap<i64, Detection> = detections.iter().map(|d| (d.id, *d)).collect();
+    let stored_jds: HashMap<i64, f64> = targets
+        .iter()
+        .flat_map(|t| t.members.iter().map(|d| (d.id, d.jd)))
+        .collect();
+    let in_found: HashSet<i64> = found.iter().flatten().copied().collect();
+    let mut report = AttachReport::default();
+    let mut candidates = Vec::new();
+    let joined = |target: &Target, extra: &mut dyn Iterator<Item = i64>, fit: &OrbitFit| {
+        let mut members: Vec<i64> = target.members.iter().map(|d| d.id).chain(extra).collect();
+        members.sort_unstable();
+        members.dedup();
+        Candidate {
+            members,
+            fit: (BoundFit::Good, Some(fit.rms_arcsec)),
+            orbit: Some(orbit_of(fit)),
+        }
+    };
+
+    for group in found {
+        let dets: Vec<Detection> = group
+            .iter()
+            .filter_map(|id| by_id.get(id).copied())
+            .collect();
+        if dets.len() != group.len() {
+            continue;
+        }
+        if let Some((target, fit)) = match_track(&targets, &dets, site, gate_arcsec) {
+            report.joined += 1;
+            candidates.push(joined(target, &mut group.iter().copied(), &fit));
+        }
+    }
+
+    let mut pool = Pool::new(
+        detections
+            .iter()
+            .filter(|d| !claimed.contains(&d.id) && !in_found.contains(&d.id))
+            .copied(),
+    );
+    let mut order: Vec<&Target> = targets.iter().collect();
+    order.sort_by(|a, b| b.members.len().cmp(&a.members.len()).then(a.id.cmp(&b.id)));
+    for target in order {
+        if let Some((extra, fit)) = pool.attach(target, site, gate_arcsec) {
+            report.attached += extra.len();
+            candidates.push(joined(target, &mut extra.iter().map(|d| d.id), &fit));
+        }
+    }
+
+    report.persist = persist(
+        db,
+        "attachments",
+        candidates.into_iter(),
+        detections,
+        &HashMap::new(),
+        &[],
+        dry_run,
+        &stored_jds,
+        (1, 1),
+        stop,
+    )
+    .await;
+    Ok(report)
 }
 
 /// How much of what a search could have found it did find, against labels.
@@ -953,6 +1140,7 @@ mod tests {
             std::iter::once(Candidate {
                 members: detections.iter().map(|d| d.id).collect(),
                 fit: (BoundFit::Good, Some(0.5)),
+                orbit: None,
             })
         };
 
@@ -970,6 +1158,7 @@ mod tests {
             &HashMap::new(),
             &[],
             false,
+            &HashMap::new(),
             (2, 2),
             &stop,
         )
@@ -990,6 +1179,7 @@ mod tests {
             Candidate {
                 members: ds.iter().map(|d| d.id).collect(),
                 fit: (BoundFit::Good, Some(0.5)),
+                orbit: None,
             }
         });
         let report = persist(
@@ -1000,6 +1190,7 @@ mod tests {
             &HashMap::new(),
             &[],
             false,
+            &HashMap::new(),
             (2, 2),
             &stop,
         )
@@ -1017,6 +1208,7 @@ mod tests {
             &HashMap::new(),
             &[],
             false,
+            &HashMap::new(),
             (2, 2),
             &Stop::new(),
         )
@@ -1036,6 +1228,7 @@ mod tests {
             &HashMap::new(),
             &[],
             true,
+            &HashMap::new(),
             (2, 2),
             &Stop::new(),
         )
@@ -1064,6 +1257,7 @@ mod tests {
             &HashMap::new(),
             &[],
             false,
+            &HashMap::new(),
             (2, 2),
             &Stop::new(),
         )

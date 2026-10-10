@@ -184,6 +184,7 @@ pub async fn initialize_survey_indexes(
         create_index(&tracks_collection, doc! { "members": 1 }, false).await?;
         // A client polling for new and extended tracks asks by write time.
         create_index(&tracks_collection, doc! { "updated_at": 1 }, false).await?;
+        create_index(&tracks_collection, doc! { "last_jd": 1 }, false).await?;
         let aliases_collection: Collection<Document> =
             db.collection(crate::utils::tracks::ALIASES_COLLECTION);
         create_index(&aliases_collection, doc! { "superseded_by": 1 }, false).await?;

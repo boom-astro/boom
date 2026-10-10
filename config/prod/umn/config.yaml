@@ -294,6 +294,8 @@ linker:
   # Nights the recall pass reads. Most ZTF alerts are known asteroids, so this
   # pass can outweigh the search itself.
   recall_window_nights: 5
+  attach: true
+  attach_lookback_nights: 60
 crossmatch:
   ztf:
     Gaia_DR3:

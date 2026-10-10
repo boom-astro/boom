@@ -18,14 +18,15 @@
 
 use boom::conf::{load_dotenv, AppConfig, LinkerConfig};
 use boom::utils::discovery::{
-    designations, load_window, persist_clusters, persist_tracks, recall, reference_epoch,
-    thor_clusters, track_detections, tracklets_per_night, Stop, ThorSearch,
+    attach_pass, designations, load_window, persist_clusters, persist_tracks, recall,
+    reference_epoch, thor_clusters, track_detections, tracklets_per_night, Stop, ThorSearch,
 };
 use boom::utils::heliolinc::{link_tracklets, LinkConfig, Track};
 use boom::utils::identify::{IdentifyConfig, KnownRule, OrbitEntry};
 use boom::utils::linking::{night_of, Detection, Tracklet, TrackletConfig};
 use boom::utils::mpcorb::load_catalogue;
 use boom::utils::o11y::logging::build_subscriber;
+use boom::utils::sso_geometry::ZTF;
 use boom::utils::tracks::{lock_is_held, COUNTERS_COLLECTION};
 use clap::Parser;
 use mongodb::bson::{doc, Document};
@@ -82,17 +83,17 @@ fn window(night: i64, nights: u32) -> (f64, f64) {
 }
 
 /// Tracklets per night, linked across nights with the default search.
-fn link(detections: &[Detection]) -> (Vec<Tracklet>, Vec<Track>) {
+fn link(detections: &[Detection]) -> (Vec<Tracklet>, Vec<Track>, f64) {
     let tracklets = tracklets_per_night(detections, &TrackletConfig::default());
     if tracklets.is_empty() {
-        return (tracklets, Vec::new());
+        return (tracklets, Vec::new(), 0.0);
     }
     let cfg = LinkConfig {
         reference_jd: reference_epoch(&tracklets),
         ..LinkConfig::default()
     };
     let tracks = link_tracklets(&tracklets, detections, &cfg);
-    (tracklets, tracks)
+    (tracklets, tracks, cfg.reference_jd)
 }
 
 /// The designation of each group, or none at all without a catalog.
@@ -205,12 +206,13 @@ async fn run_night(db: &mongodb::Database, cfg: &LinkerConfig, night: i64, stop:
 
     let dry_run = !cfg.persist;
     let mut done = true;
+    let mut found: Vec<Vec<i64>> = Vec::new();
 
     if cfg.link && !detections.is_empty() && stop.requested() {
         done = false;
     } else if cfg.link && !detections.is_empty() {
         let pass = Instant::now();
-        let (tracklets, tracks) = link(&detections);
+        let (tracklets, tracks, reference_jd) = link(&detections);
         let groups: Vec<Vec<i64>> = tracks
             .iter()
             .map(|t| track_detections(t, &tracklets))
@@ -220,6 +222,7 @@ async fn run_night(db: &mongodb::Database, cfg: &LinkerConfig, night: i64, stop:
             db,
             &tracks,
             &tracklets,
+            reference_jd,
             &detections,
             &labels,
             &known,
@@ -230,6 +233,7 @@ async fn run_night(db: &mongodb::Database, cfg: &LinkerConfig, night: i64, stop:
         )
         .await;
         done &= report.complete();
+        found.extend(groups);
         info!(
             tracklets = tracklets.len(),
             tracks = tracks.len(),
@@ -269,6 +273,7 @@ async fn run_night(db: &mongodb::Database, cfg: &LinkerConfig, night: i64, stop:
         )
         .await;
         done &= report.complete();
+        found.extend(groups);
         info!(
             detections = recent.len(),
             clusters = clusters.len(),
@@ -281,6 +286,41 @@ async fn run_night(db: &mongodb::Database, cfg: &LinkerConfig, night: i64, stop:
         );
     }
 
+    if cfg.attach && !detections.is_empty() && stop.requested() {
+        done = false;
+    } else if cfg.attach && !detections.is_empty() {
+        let pass = Instant::now();
+        let since = jd_start - cfg.attach_lookback_nights as f64;
+        match attach_pass(
+            db,
+            &found,
+            &detections,
+            since,
+            LinkConfig::default().max_residual_arcsec,
+            &ZTF,
+            dry_run,
+            stop,
+        )
+        .await
+        {
+            Ok(report) => {
+                done &= report.persist.complete();
+                info!(
+                    joined = report.joined,
+                    attached = report.attached,
+                    stored = report.persist.stored,
+                    wrote = report.persist.ran && !dry_run,
+                    seconds = pass.elapsed().as_secs_f64(),
+                    "attach pass done"
+                );
+            }
+            Err(error) => {
+                error!(%error, "could not load the stored tracks to attach to");
+                done = false;
+            }
+        }
+    }
+
     // Diagnostic only, so a recall that fails or is skipped does not hold the
     // night back.
     if cfg.recall && stop.requested() {
@@ -290,7 +330,7 @@ async fn run_night(db: &mongodb::Database, cfg: &LinkerConfig, night: i64, stop:
         let (start, span) = window(night, cfg.recall_window_nights);
         match load_window(db, start, span, cfg.drb, true, None).await {
             Ok((identified, names)) => {
-                let (tracklets, tracks) = link(&identified);
+                let (tracklets, tracks, _) = link(&identified);
                 let r = recall(&tracks, &tracklets, &names);
                 info!(
                     detections = identified.len(),
