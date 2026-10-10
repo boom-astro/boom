@@ -8,14 +8,13 @@
 use boom::conf::{load_dotenv, AppConfig};
 use boom::utils::discovery::{
     latest_night, load_window, persist_clusters, persist_tracks, reference_epoch, thor_clusters,
-    tracklets_per_night, ztf_band, ThorSearch, Verdict,
+    tracklets_per_night, ztf_band, Stop, ThorSearch, Verdict,
 };
 use boom::utils::heliolinc::{default_hypotheses, link_tracklets, LinkConfig, Track};
 use boom::utils::linking::{find_tracklets, night_of, Detection, Tracklet, TrackletConfig};
 use boom::utils::tracks::BoundFit;
 use clap::Parser;
 use std::collections::HashMap;
-use std::sync::atomic::AtomicBool;
 use tracing::{error, info, Level};
 use tracing_subscriber::FmtSubscriber;
 
@@ -486,10 +485,10 @@ async fn run_thor(
                     args.dry_run,
                     cfg.min_detections,
                     cfg.min_nights,
-                    // Run by hand, so Ctrl-C ends it the ordinary way.
-                    &AtomicBool::new(false),
+                    &STOP,
                 )
                 .await;
+                exit_if_stopped();
             }
             None => error!("--persist needs a database, which was not built"),
         }
@@ -772,6 +771,33 @@ async fn run_identify(args: &Cli, detections: &[Detection], labels: &HashMap<i64
     }
 }
 
+/// Ctrl-C while tracks are being stored, which must stop between tracks so
+/// the tracks lock is released rather than held for its lease.
+static STOP: Stop = Stop::new();
+
+/// On Ctrl-C, exit at once unless a pass is storing tracks; then let it stop
+/// at the next track and release the lock. A second Ctrl-C exits regardless.
+fn exit_on_ctrl_c() {
+    tokio::spawn(async {
+        if tokio::signal::ctrl_c().await.is_err() {
+            return;
+        }
+        if !STOP.request() {
+            std::process::exit(130);
+        }
+        info!("stopping after the current track, so the tracks lock is released; Ctrl-C again to quit now");
+        let _ = tokio::signal::ctrl_c().await;
+        std::process::exit(130);
+    });
+}
+
+/// End the run once a pass has stopped and released the lock on Ctrl-C.
+fn exit_if_stopped() {
+    if STOP.requested() {
+        std::process::exit(130);
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let subscriber = FmtSubscriber::builder()
@@ -779,6 +805,7 @@ async fn main() {
         .finish();
     tracing::subscriber::set_global_default(subscriber).expect("failed to set subscriber");
     load_dotenv();
+    exit_on_ctrl_c();
 
     let args = Cli::parse();
     // Persisting and matching to the catalogue need the database even when the
@@ -943,9 +970,10 @@ async fn main() {
                 args.dry_run,
                 args.min_detections,
                 args.min_nights,
-                &AtomicBool::new(false),
+                &STOP,
             )
             .await;
+            exit_if_stopped();
         }
 
         for track in tracks.iter().take(args.show) {
