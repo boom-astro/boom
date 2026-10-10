@@ -15,6 +15,7 @@ use boom::utils::linking::{find_tracklets, night_of, Detection, Tracklet, Trackl
 use boom::utils::tracks::BoundFit;
 use clap::Parser;
 use std::collections::HashMap;
+use std::sync::atomic::AtomicBool;
 use tracing::{error, info, Level};
 use tracing_subscriber::FmtSubscriber;
 
@@ -485,6 +486,8 @@ async fn run_thor(
                     args.dry_run,
                     cfg.min_detections,
                     cfg.min_nights,
+                    // Run by hand, so Ctrl-C ends it the ordinary way.
+                    &AtomicBool::new(false),
                 )
                 .await;
             }
@@ -940,6 +943,7 @@ async fn main() {
                 args.dry_run,
                 args.min_detections,
                 args.min_nights,
+                &AtomicBool::new(false),
             )
             .await;
         }

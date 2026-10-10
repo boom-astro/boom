@@ -1427,7 +1427,7 @@ impl MilvusConfig {
 
 /// The `linker` service, which runs moving-object discovery over the last few
 /// nights of ZTF data once each night is over, and stores what it finds as
-/// tracks. It runs only where the `linker-ztf` compose service is started.
+/// tracks. The `linker-ztf` compose service runs it with the prod profile.
 #[derive(Debug, Clone, Deserialize)]
 pub struct LinkerConfig {
     /// Nights of detections a linking pass reads, ending with the night just
