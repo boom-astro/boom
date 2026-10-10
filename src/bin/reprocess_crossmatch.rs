@@ -119,33 +119,18 @@ struct Cli {
 
     /// Unset `cross_matches.<catalog>` from every alerts_aux record instead of
     /// computing matches, along with any state an earlier reprocess run left behind.
-    /// Point `--config` at the deployment's own config, which is what the safety
-    /// check reads. Idempotent, so an interrupted run can simply be rerun. Every
-    /// shard is one update over many records, so on a production replica set keep
-    /// `--processes` low to bound replication lag.
+    /// Refuses a catalog the config still uses, one an active filter reads, or one
+    /// with a catalog-driven reprocess still unfinished. Point `--config` at the
+    /// deployment's own config, which is what the check reads. Idempotent, so an
+    /// interrupted run can simply be rerun. Every shard is one update over many
+    /// records, so on a production replica set keep `--processes` low to bound
+    /// replication lag.
     #[arg(
         long,
         default_value_t = false,
         conflicts_with_all = ["direction", "batch_size", "concurrency", "skip_existing", "skip_empty", "restart"]
     )]
     remove: bool,
-
-    /// With `--remove`: proceed even if a catalog is still declared under
-    /// `crossmatch.<survey>` or used by `host_galaxy`. Live ingest will keep
-    /// writing it on new records.
-    #[arg(long, default_value_t = false, requires = "remove")]
-    force: bool,
-
-    /// With `--remove`: proceed even if active filters read a catalog. They will
-    /// stop matching on it.
-    #[arg(long, default_value_t = false, requires = "remove")]
-    ignore_filters: bool,
-
-    /// With `--remove`: proceed even if a catalog-driven reprocess of a catalog
-    /// has not finished, and discard its state. Only safe once that run is
-    /// known to be dead; a live one would write its matches back.
-    #[arg(long, default_value_t = false, requires = "remove")]
-    discard_unfinished_run: bool,
 }
 
 /// Reprocessing can be done in two directions:
@@ -1616,18 +1601,6 @@ async fn any_record_carries(
         .is_some())
 }
 
-/// Exits unless `overridden`, the flag `flag` that accepts this reason.
-fn exit_unless_overridden(overridden: bool, flag: &str, name: &str, reason: &str) {
-    if !overridden {
-        error!(
-            "catalog '{}': {}; pass {} to remove anyway",
-            name, reason, flag
-        );
-        std::process::exit(1);
-    }
-    warn!("{}: removing '{}' although {}", flag, name, reason);
-}
-
 async fn run_remove_mode(args: &Cli, config: &AppConfig, db: mongodb::Database) {
     // The safety check is only as good as the config it reads, so say which one.
     info!(
@@ -1649,42 +1622,43 @@ async fn run_remove_mode(args: &Cli, config: &AppConfig, db: mongodb::Database) 
         }
     };
 
-    // Each catalog with whether the config still references it.
-    let mut catalogs: Vec<(&str, bool)> = Vec::with_capacity(args.catalogs.len());
-    for name in dedup_catalogs(&args.catalogs) {
+    // Every reason to refuse, across all catalogs, so they can be fixed in one go.
+    let mut problems: Vec<String> = Vec::new();
+    let names: Vec<&str> = dedup_catalogs(&args.catalogs)
+        .into_iter()
+        .map(String::as_str)
+        .collect();
+    for &name in &names {
         // Watchlist matches live on the watchlist documents, not on alerts_aux.
         if name.starts_with(WATCHLIST_PREFIX) {
-            error!(
-                "catalog '{}' is a watchlist; --remove only clears alerts_aux crossmatches",
+            problems.push(format!(
+                "'{}' is a watchlist; --remove only clears alerts_aux crossmatches",
                 name
-            );
-            std::process::exit(1);
+            ));
+            continue;
         }
         let references = catalog_references(config, &args.survey, name);
         if !references.is_empty() {
-            exit_unless_overridden(
-                args.force,
-                "--force",
+            problems.push(format!(
+                "'{}' is still referenced by {} in {}; remove it from the config and \
+                 redeploy first",
                 name,
-                &format!(
-                    "{} in {} still references it",
-                    references.join(", "),
-                    args.config
-                ),
-            );
+                references.join(", "),
+                args.config
+            ));
         }
         // A run started before the catalog left the config still has it, and
         // would write its matches back after this one.
         match unfinished_run(&db, &args.survey, name).await {
-            Ok(Some(status)) => exit_unless_overridden(
-                args.discard_unfinished_run,
-                "--discard-unfinished-run",
+            Ok(Some(status)) => problems.push(format!(
+                "a catalog-driven reprocess of '{}' has not finished ({}); wait for it to \
+                 finish. If it died, it cannot resume once the catalog is out of the \
+                 config: delete '{}' from {} to clear it",
                 name,
-                &format!(
-                    "a catalog-driven reprocess of it is running or was interrupted ({})",
-                    status
-                ),
-            ),
+                status,
+                catalog_state_id(&args.survey, name),
+                STATE_COLLECTION
+            )),
             Ok(None) => {}
             Err(e) => {
                 error!("could not read the reprocess state for '{}': {}", name, e);
@@ -1693,19 +1667,20 @@ async fn run_remove_mode(args: &Cli, config: &AppConfig, db: mongodb::Database) 
         }
         let reading = filters_reading(&filters, name);
         if !reading.is_empty() {
-            exit_unless_overridden(
-                args.ignore_filters,
-                "--ignore-filters",
+            problems.push(format!(
+                "active filters read '{}' and would stop matching: {}",
                 name,
-                &format!(
-                    "active filters read it and would stop matching: {}",
-                    reading.join(", ")
-                ),
-            );
+                reading.join(", ")
+            ));
         }
-        catalogs.push((name, !references.is_empty()));
     }
-    let names: Vec<&str> = catalogs.iter().map(|(name, _)| *name).collect();
+    if !problems.is_empty() {
+        for problem in &problems {
+            error!("{}", problem);
+        }
+        error!("refusing to remove anything");
+        std::process::exit(1);
+    }
 
     let aux_collection: mongodb::Collection<Document> =
         db.collection(&format!("{}_alerts_aux", args.survey));
@@ -1793,9 +1768,8 @@ async fn run_remove_mode(args: &Cli, config: &AppConfig, db: mongodb::Database) 
         }
     }
 
-    // A catalog still in the config may have a catalog-driven run in flight,
-    // so its state is left alone.
-    for (name, _) in catalogs.iter().filter(|(_, referenced)| !referenced) {
+    // Any run for these catalogs has finished, so what is left is stale.
+    for name in &names {
         if let Err(e) = clear_reprocess_state(&db, &args.survey, name).await {
             error!("could not clear reprocess state for '{}': {}", name, e);
             std::process::exit(1);
