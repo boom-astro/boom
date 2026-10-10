@@ -45,11 +45,15 @@ const STATE_COLLECTION: &str = "reprocess_crossmatch_state";
 const STATUS_MATCHING: &str = "matching";
 const STATUS_COMMITTING: &str = "committing";
 const STATUS_CLEAN: &str = "clean";
+const STATUS_RUNNING: &str = "running";
 const SHARDS_PER_PROCESS: usize = 8;
 /// How long, in days, an alert can be in processing between ingest stamping its
 /// `created_at` and inserting its record. Records stamped this close before a
 /// remove run started may have been inserted after their shard was cleared.
 const IN_FLIGHT_MARGIN_JD: f64 = 10.0 / (24.0 * 60.0);
+/// How far back, in days, --remove looks for records ingest wrote with the
+/// catalog before it starts. A config change must have been live this long.
+const INGEST_CHECK_WINDOW_JD: f64 = 10.0 / (24.0 * 60.0);
 /// Walking back from the newest insert, this many records in a row older than
 /// the window means the walk has left it.
 const OLDER_RUN_TO_STOP: usize = 1000;
@@ -119,9 +123,10 @@ struct Cli {
 
     /// Unset `cross_matches.<catalog>` from every alerts_aux record instead of
     /// computing matches, along with any state an earlier reprocess run left behind.
-    /// Refuses a catalog the config still uses, one an active filter reads, or one
-    /// with a catalog-driven reprocess still unfinished. Point `--config` at the
-    /// deployment's own config, which is what the check reads. Idempotent, so an
+    /// Refuses a catalog the config still uses, one ingest wrote in the last ten
+    /// minutes, one an active filter reads, or one with a reprocess run still
+    /// unfinished. Point `--config` at the deployment's own config, which is
+    /// what the check reads. Idempotent, so an
     /// interrupted run can simply be rerun. Every shard is one update over many
     /// records, so on a production replica set keep `--processes` low to bound
     /// replication lag.
@@ -193,6 +198,16 @@ async fn run_objects_driven(
         .collect::<Vec<_>>()
         .join(",");
     let label = format!("objects→{}", label);
+    // Recorded so --remove can tell a run is still writing these catalogs.
+    let run_start_jd = Time::now().to_jd();
+    for cat in &catalogs {
+        set_reprocess_state(
+            &db,
+            &objects_state_id(survey, &cat.catalog),
+            doc! { "status": STATUS_RUNNING, "run_start_jd": run_start_jd },
+        )
+        .await?;
+    }
     let pb = make_progress_bar(estimated, label.clone());
     let logger = spawn_progress_logger(pb.clone(), label);
 
@@ -239,6 +254,14 @@ async fn run_objects_driven(
     logger.abort();
     pb.finish();
     outcome?;
+    for cat in &catalogs {
+        set_reprocess_state(
+            &db,
+            &objects_state_id(survey, &cat.catalog),
+            doc! { "status": STATUS_CLEAN },
+        )
+        .await?;
+    }
     Ok(())
 }
 
@@ -969,6 +992,12 @@ fn catalog_state_id(survey: &Survey, catalog: &str) -> String {
     format!("{}_alerts_aux:{}", survey, catalog)
 }
 
+/// State of an objects-driven run, kept apart from the catalog-driven one so
+/// neither overwrites the other's checkpoint.
+fn objects_state_id(survey: &Survey, catalog: &str) -> String {
+    format!("{}:objects", catalog_state_id(survey, catalog))
+}
+
 fn catalog_buffer_name(survey: &Survey, catalog: &str) -> String {
     format!("reprocess_crossmatch_buffer_{}_{}", survey, catalog)
 }
@@ -1102,15 +1131,18 @@ async fn count_recent_carriers(
     Ok(carriers)
 }
 
-/// Deletes what a catalog-driven run left behind for the catalog: its state
-/// document and its buffer collections.
+/// Deletes what reprocess runs left behind for the catalog: their state
+/// documents and the catalog-driven buffer collections.
 async fn clear_reprocess_state(
     db: &mongodb::Database,
     survey: &Survey,
     catalog: &str,
 ) -> Result<(), mongodb::error::Error> {
     db.collection::<Document>(STATE_COLLECTION)
-        .delete_one(doc! { "_id": catalog_state_id(survey, catalog) })
+        .delete_many(doc! { "_id": { "$in": [
+            catalog_state_id(survey, catalog),
+            objects_state_id(survey, catalog),
+        ]}})
         .await?;
     let buffer_name = catalog_buffer_name(survey, catalog);
     db.collection::<Document>(&buffer_name).drop().await?;
@@ -1557,37 +1589,67 @@ async fn active_filters(
         .collect())
 }
 
-/// Filters whose active pipeline reads the catalog, plus any whose pipeline
-/// could not be read, since they might.
+/// Whether any key or string value in the pipeline is exactly the catalog name,
+/// which is how `$getField` or a `$objectToArray` key comparison names it.
+fn mentions_catalog(value: &serde_json::Value, catalog: &str) -> bool {
+    match value {
+        serde_json::Value::String(s) => s.trim() == catalog,
+        serde_json::Value::Array(items) => items.iter().any(|v| mentions_catalog(v, catalog)),
+        serde_json::Value::Object(map) => map
+            .iter()
+            .any(|(k, v)| k.trim() == catalog || mentions_catalog(v, catalog)),
+        _ => false,
+    }
+}
+
+/// Filters whose active pipeline reads the catalog, by path or by name.
 fn filters_reading(filters: &[ActiveFilter], catalog: &str) -> Vec<String> {
     let field = xmatch_field(catalog);
     filters
         .iter()
-        .filter_map(|filter| match &filter.pipeline {
-            Some(stages) => uses_field_in_filter(stages, &field).map(|_| filter.label.clone()),
-            None => Some(format!("{} (unreadable pipeline)", filter.label)),
+        .filter(|filter| {
+            filter.pipeline.as_ref().is_some_and(|stages| {
+                uses_field_in_filter(stages, &field).is_some()
+                    || stages.iter().any(|stage| mentions_catalog(stage, catalog))
+            })
         })
+        .map(|filter| filter.label.clone())
         .collect()
 }
 
-/// Status of a catalog-driven run for the catalog that has not finished, if any.
-async fn unfinished_run(
+/// Reprocess runs for the catalog, of either direction, that have not finished:
+/// each state document's id and a description of where it stopped.
+async fn unfinished_runs(
     db: &mongodb::Database,
     survey: &Survey,
     catalog: &str,
-) -> Result<Option<String>, mongodb::error::Error> {
-    let state = db
+) -> Result<Vec<(String, String)>, mongodb::error::Error> {
+    let states: Vec<Document> = db
         .collection::<Document>(STATE_COLLECTION)
-        .find_one(doc! { "_id": catalog_state_id(survey, catalog) })
+        .find(doc! { "_id": { "$in": [
+            catalog_state_id(survey, catalog),
+            objects_state_id(survey, catalog),
+        ]}})
+        .await?
+        .try_collect()
         .await?;
-    Ok(state.and_then(|state| match state.get_str("status") {
-        Ok(STATUS_CLEAN) | Err(_) => None,
-        Ok(status) => Some(format!(
-            "{}, last updated at JD {}",
-            status,
-            state.get_f64("updated_at").unwrap_or(f64::NAN)
-        )),
-    }))
+    Ok(states
+        .iter()
+        .filter_map(|state| {
+            let status = state.get_str("status").ok()?;
+            if status == STATUS_CLEAN {
+                return None;
+            }
+            Some((
+                state.get_str("_id").ok()?.to_string(),
+                format!(
+                    "{}, last updated at JD {}",
+                    status,
+                    state.get_f64("updated_at").unwrap_or(f64::NAN)
+                ),
+            ))
+        })
+        .collect())
 }
 
 async fn any_record_carries(
@@ -1599,6 +1661,69 @@ async fn any_record_carries(
         .projection(doc! { "_id": 1 })
         .await?
         .is_some())
+}
+
+/// Every reason not to remove these catalogs, so they can all be fixed in one go.
+async fn removal_problems(
+    config: &AppConfig,
+    config_path: &str,
+    survey: &Survey,
+    names: &[&str],
+    filters: &[ActiveFilter],
+    db: &mongodb::Database,
+    aux_collection: &mongodb::Collection<Document>,
+) -> Result<Vec<String>, mongodb::error::Error> {
+    let mut problems = Vec::new();
+    let window_minutes = INGEST_CHECK_WINDOW_JD * 24.0 * 60.0;
+    let recent_since = Time::now().to_jd() - INGEST_CHECK_WINDOW_JD;
+    for &name in names {
+        // Watchlist matches live on the watchlist documents, not on alerts_aux.
+        if name.starts_with(WATCHLIST_PREFIX) {
+            problems.push(format!(
+                "'{}' is a watchlist; --remove only clears alerts_aux crossmatches",
+                name
+            ));
+            continue;
+        }
+        let references = catalog_references(config, survey, name);
+        if !references.is_empty() {
+            problems.push(format!(
+                "'{}' is still referenced by {} in {}; remove it from the config and \
+                 redeploy first",
+                name,
+                references.join(", "),
+                config_path
+            ));
+        }
+        // The file can be updated while ingest still runs the old config.
+        let recent = count_recent_carriers(aux_collection, &[name], recent_since).await?;
+        if recent > 0 {
+            problems.push(format!(
+                "{} records created in the last {} minutes carry '{}', so ingest is still \
+                 crossmatching it; redeploy with the new config and wait {} minutes",
+                recent, window_minutes, name, window_minutes
+            ));
+        }
+        // A run started before the catalog left the config still has it, and
+        // would write its matches back after this one.
+        for (state_id, status) in unfinished_runs(db, survey, name).await? {
+            problems.push(format!(
+                "a reprocess run of '{}' has not finished ({}); wait for it to finish. If \
+                 it died, it cannot resume once the catalog is out of the config: delete \
+                 '{}' from {} to clear it",
+                name, status, state_id, STATE_COLLECTION
+            ));
+        }
+        let reading = filters_reading(filters, name);
+        if !reading.is_empty() {
+            problems.push(format!(
+                "active filters read '{}' and would stop matching: {}",
+                name,
+                reading.join(", ")
+            ));
+        }
+    }
+    Ok(problems)
 }
 
 async fn run_remove_mode(args: &Cli, config: &AppConfig, db: mongodb::Database) {
@@ -1614,6 +1739,13 @@ async fn run_remove_mode(args: &Cli, config: &AppConfig, db: mongodb::Database) 
             .unwrap_or_default()
     );
 
+    let aux_collection: mongodb::Collection<Document> =
+        db.collection(&format!("{}_alerts_aux", args.survey));
+    let names: Vec<&str> = dedup_catalogs(&args.catalogs)
+        .into_iter()
+        .map(String::as_str)
+        .collect();
+
     let filters = match active_filters(&db, &args.survey).await {
         Ok(filters) => filters,
         Err(e) => {
@@ -1621,59 +1753,33 @@ async fn run_remove_mode(args: &Cli, config: &AppConfig, db: mongodb::Database) 
             std::process::exit(1);
         }
     };
-
-    // Every reason to refuse, across all catalogs, so they can be fixed in one go.
-    let mut problems: Vec<String> = Vec::new();
-    let names: Vec<&str> = dedup_catalogs(&args.catalogs)
-        .into_iter()
-        .map(String::as_str)
-        .collect();
-    for &name in &names {
-        // Watchlist matches live on the watchlist documents, not on alerts_aux.
-        if name.starts_with(WATCHLIST_PREFIX) {
-            problems.push(format!(
-                "'{}' is a watchlist; --remove only clears alerts_aux crossmatches",
-                name
-            ));
-            continue;
-        }
-        let references = catalog_references(config, &args.survey, name);
-        if !references.is_empty() {
-            problems.push(format!(
-                "'{}' is still referenced by {} in {}; remove it from the config and \
-                 redeploy first",
-                name,
-                references.join(", "),
-                args.config
-            ));
-        }
-        // A run started before the catalog left the config still has it, and
-        // would write its matches back after this one.
-        match unfinished_run(&db, &args.survey, name).await {
-            Ok(Some(status)) => problems.push(format!(
-                "a catalog-driven reprocess of '{}' has not finished ({}); wait for it to \
-                 finish. If it died, it cannot resume once the catalog is out of the \
-                 config: delete '{}' from {} to clear it",
-                name,
-                status,
-                catalog_state_id(&args.survey, name),
-                STATE_COLLECTION
-            )),
-            Ok(None) => {}
-            Err(e) => {
-                error!("could not read the reprocess state for '{}': {}", name, e);
-                std::process::exit(1);
-            }
-        }
-        let reading = filters_reading(&filters, name);
-        if !reading.is_empty() {
-            problems.push(format!(
-                "active filters read '{}' and would stop matching: {}",
-                name,
-                reading.join(", ")
-            ));
-        }
+    // A filter worker cannot load these either, so they return nothing today
+    // and removing a catalog cannot change that.
+    for filter in filters.iter().filter(|f| f.pipeline.is_none()) {
+        warn!(
+            "filter {} is active but its active version is missing or not valid JSON, so \
+             filter workers cannot run it; fix it before relying on it",
+            filter.label
+        );
     }
+
+    let problems = match removal_problems(
+        config,
+        &args.config,
+        &args.survey,
+        &names,
+        &filters,
+        &db,
+        &aux_collection,
+    )
+    .await
+    {
+        Ok(problems) => problems,
+        Err(e) => {
+            error!("could not run the checks: {}", e);
+            std::process::exit(1);
+        }
+    };
     if !problems.is_empty() {
         for problem in &problems {
             error!("{}", problem);
@@ -1682,8 +1788,6 @@ async fn run_remove_mode(args: &Cli, config: &AppConfig, db: mongodb::Database) 
         std::process::exit(1);
     }
 
-    let aux_collection: mongodb::Collection<Document> =
-        db.collection(&format!("{}_alerts_aux", args.survey));
     // A find_one stops at the first hit, so it only scans the whole collection
     // when nothing matches. One combined check settles the rerun case in a
     // single scan; the per-catalog checks run one at a time so a misspelled
@@ -1759,12 +1863,18 @@ async fn run_remove_mode(args: &Cli, config: &AppConfig, db: mongodb::Database) 
         .await
         {
             Ok(0) => {}
-            Ok(count) => warn!(
-                "{} records written around or during the run carry {:?} matches, so ingest is \
-                 still running with a config that crossmatches them; redeploy it, then rerun",
-                count, present
-            ),
-            Err(e) => warn!("could not check for records written during the run: {}", e),
+            Ok(count) => {
+                error!(
+                    "{} records written around or during the run carry {:?} matches, so \
+                     something is still crossmatching them; stop it, then rerun",
+                    count, present
+                );
+                std::process::exit(1);
+            }
+            Err(e) => {
+                error!("could not check for records written during the run: {}", e);
+                std::process::exit(1);
+            }
         }
     }
 
@@ -1873,33 +1983,47 @@ mod remove_tests {
     }
 
     #[test]
-    fn test_filters_reading_matches_the_catalog_path_only() {
+    fn test_filters_reading_finds_path_and_name_references() {
         let filter = |label: &str, pipeline: Option<serde_json::Value>| ActiveFilter {
             label: label.to_string(),
             pipeline: pipeline.map(|p| p.as_array().unwrap().clone()),
         };
         let filters = vec![
             filter(
-                "reads",
+                "path",
                 Some(
                     serde_json::json!([{ "$match": { "cross_matches.PS1_DR2.0": { "$exists": true } } }]),
                 ),
             ),
             filter(
-                "prefix",
+                "get_field",
+                Some(
+                    serde_json::json!([{ "$set": { "m": { "$getField": { "field": "PS1_DR2", "input": "$cross_matches" } } } }]),
+                ),
+            ),
+            filter(
+                "object_to_array",
+                Some(serde_json::json!([{ "$set": { "m": { "$filter": {
+                    "input": { "$objectToArray": "$cross_matches" },
+                    "cond": { "$eq": ["$$this.k", "PS1_DR2"] },
+                } } } }])),
+            ),
+            filter(
+                "longer_name",
                 Some(
                     serde_json::json!([{ "$project": { "n": { "$size": "$cross_matches.PS1_DR2_extra" } } }]),
                 ),
             ),
             filter(
-                "literal",
+                "inside_a_sentence",
                 Some(serde_json::json!([{ "$set": { "note": "see cross_matches.PS1_DR2 docs" } }])),
             ),
+            // Not loadable by a filter worker, so not running: not a reader.
             filter("broken", None),
         ];
         assert_eq!(
             filters_reading(&filters, "PS1_DR2"),
-            vec!["reads", "broken (unreadable pipeline)"]
+            vec!["path", "get_field", "object_to_array"]
         );
     }
 
@@ -1938,50 +2062,116 @@ mod remove_tests {
     }
 
     #[tokio::test]
-    async fn test_unfinished_run_reports_only_runs_not_marked_clean() {
+    async fn test_unfinished_runs_covers_both_directions_until_clean() {
         let db = get_test_db().await;
         let catalog = format!("remove_test_{}", uuid::Uuid::new_v4().simple());
         let survey = Survey::Winter;
-        assert!(unfinished_run(&db, &survey, &catalog)
-            .await
-            .unwrap()
-            .is_none());
+        let catalog_run = catalog_state_id(&survey, &catalog);
+        let objects_run = objects_state_id(&survey, &catalog);
+        let none = unfinished_runs(&db, &survey, &catalog).await.unwrap();
 
-        let state_id = catalog_state_id(&survey, &catalog);
-        set_reprocess_state(&db, &state_id, doc! { "status": STATUS_COMMITTING })
+        set_reprocess_state(&db, &catalog_run, doc! { "status": STATUS_COMMITTING })
             .await
             .unwrap();
-        let committing = unfinished_run(&db, &survey, &catalog).await.unwrap();
-        set_reprocess_state(&db, &state_id, doc! { "status": STATUS_CLEAN })
+        set_reprocess_state(&db, &objects_run, doc! { "status": STATUS_RUNNING })
             .await
             .unwrap();
-        let clean = unfinished_run(&db, &survey, &catalog).await.unwrap();
+        let both = unfinished_runs(&db, &survey, &catalog).await.unwrap();
+        set_reprocess_state(&db, &catalog_run, doc! { "status": STATUS_CLEAN })
+            .await
+            .unwrap();
+        let objects_only = unfinished_runs(&db, &survey, &catalog).await.unwrap();
         clear_reprocess_state(&db, &survey, &catalog).await.unwrap();
+        let cleared = db
+            .collection::<Document>(STATE_COLLECTION)
+            .count_documents(doc! { "_id": { "$in": [&catalog_run, &objects_run] } })
+            .await
+            .unwrap();
 
-        assert!(committing.unwrap().starts_with(STATUS_COMMITTING));
-        assert!(clean.is_none());
+        assert!(none.is_empty());
+        let mut ids: Vec<&str> = both.iter().map(|(id, _)| id.as_str()).collect();
+        ids.sort();
+        assert_eq!(ids, vec![catalog_run.as_str(), objects_run.as_str()]);
+        assert_eq!(objects_only.len(), 1);
+        assert_eq!(objects_only[0].0, objects_run);
+        assert!(objects_only[0].1.starts_with(STATUS_RUNNING));
+        assert_eq!(cleared, 0);
     }
 
     #[tokio::test]
-    async fn test_count_recent_carriers_stops_after_leaving_the_window() {
+    async fn test_removal_problems_reports_every_reason_and_spares_a_clean_catalog() {
         let db = get_test_db().await;
-        let aux: mongodb::Collection<Document> =
-            db.collection(&format!("remove_test_{}", uuid::Uuid::new_v4().simple()));
-        let since = 2_460_000.0;
-        let carrier = |id: String| doc! { "_id": id, "created_at": since + 0.1, "cross_matches": { "OLD": [] } };
-        // Inserted first, so the walk only reaches it if it fails to stop.
-        aux.insert_one(carrier("early".to_string())).await.unwrap();
-        let old: Vec<Document> = (0..OLDER_RUN_TO_STOP)
-            .map(|i| doc! { "_id": format!("old{}", i), "created_at": since - 1.0 })
-            .collect();
-        aux.insert_many(old).await.unwrap();
-        aux.insert_many((0..2).map(|i| carrier(format!("new{}", i))))
+        let survey = Survey::Winter;
+        let tag = uuid::Uuid::new_v4().simple().to_string();
+        let name = |what: &str| format!("{}_{}", what, tag);
+        let (configured, written, unfinished, read, clean) = (
+            name("configured"),
+            name("written"),
+            name("unfinished"),
+            name("read"),
+            name("clean"),
+        );
+
+        let mut config = AppConfig::from_test_config().unwrap();
+        config.crossmatch.insert(
+            survey.clone(),
+            vec![CatalogXmatchConfig {
+                catalog: configured.clone(),
+                ..Default::default()
+            }],
+        );
+        let aux: mongodb::Collection<Document> = db.collection(&format!("remove_test_{}", tag));
+        aux.insert_one(doc! {
+            "_id": "just_ingested",
+            "created_at": Time::now().to_jd(),
+            "cross_matches": { &written: [] },
+        })
+        .await
+        .unwrap();
+        set_reprocess_state(
+            &db,
+            &objects_state_id(&survey, &unfinished),
+            doc! { "status": STATUS_RUNNING },
+        )
+        .await
+        .unwrap();
+        let filters = vec![ActiveFilter {
+            label: "reader".to_string(),
+            pipeline: Some(vec![
+                serde_json::json!({ "$match": { format!("cross_matches.{}", read): { "$exists": true } } }),
+            ]),
+        }];
+        let names = [
+            configured.as_str(),
+            written.as_str(),
+            unfinished.as_str(),
+            read.as_str(),
+            clean.as_str(),
+            "watchlist_x",
+        ];
+
+        let problems =
+            removal_problems(&config, "test.yaml", &survey, &names, &filters, &db, &aux).await;
+        clear_reprocess_state(&db, &survey, &unfinished)
             .await
             .unwrap();
-
-        let count = count_recent_carriers(&aux, &["OLD"], since).await;
         aux.drop().await.unwrap();
-        assert_eq!(count.unwrap(), 2);
+        let problems = problems.unwrap();
+
+        assert_eq!(problems.len(), 5, "{:#?}", problems);
+        for culprit in [&configured, &written, &unfinished, &read] {
+            assert_eq!(
+                problems
+                    .iter()
+                    .filter(|p| p.contains(culprit.as_str()))
+                    .count(),
+                1,
+                "exactly one problem should name {}",
+                culprit
+            );
+        }
+        assert!(problems.iter().any(|p| p.contains("watchlist_x")));
+        assert!(!problems.iter().any(|p| p.contains(clean.as_str())));
     }
 
     #[tokio::test]
