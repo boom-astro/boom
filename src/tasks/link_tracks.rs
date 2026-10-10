@@ -155,6 +155,29 @@ pub struct LinkTracksParams {
     /// Identification radius, arcseconds.
     #[serde(default = "d_identify_radius")]
     pub identify_radius: f64,
+    /// Match each track to the MPC catalogue and record the designation of the
+    /// object it is, if any. A track with a designation is a recovery of a
+    /// known object rather than a discovery candidate. Reads MPC_orbits, so a
+    /// run needs the database even when the detections came from a dump.
+    #[serde(default)]
+    pub match_known: bool,
+    /// Share of a track's detections that must match one catalogued object for
+    /// the track to be that object.
+    #[serde(default = "d_known_fraction")]
+    pub known_fraction: f64,
+    /// Distinct nights those matching detections must span.
+    #[serde(default = "d_known_min_nights")]
+    pub known_min_nights: usize,
+    /// How far any matching detection's separation may stray from their
+    /// median, arcseconds. A catalogued object sits at a steady offset over a
+    /// few nights; an unrelated neighbor drifts.
+    #[serde(default = "d_known_max_scatter")]
+    pub known_max_scatter: f64,
+    /// How much further the separation may stray per day from the middle of
+    /// the arc, arcseconds: a catalogued orbit's error drifts slowly over a
+    /// long track.
+    #[serde(default = "d_known_max_drift")]
+    pub known_max_drift: f64,
     /// How many tracklets or tracks to log individually.
     #[serde(default = "d_show")]
     pub show: usize,
@@ -213,6 +236,22 @@ fn d_thor_min_nights() -> usize {
 fn d_max_unbound_residual() -> f64 {
     10.0
 }
+fn d_known_fraction() -> f64 {
+    2.0 / 3.0
+}
+
+fn d_known_min_nights() -> usize {
+    2
+}
+
+fn d_known_max_scatter() -> f64 {
+    10.0
+}
+
+fn d_known_max_drift() -> f64 {
+    2.0
+}
+
 fn d_identify_radius() -> f64 {
     120.0
 }
@@ -247,6 +286,21 @@ impl LinkTracksParams {
         }
         if self.persist && self.dry_run {
             return Err("persist and dry_run are opposites; pick one".to_string());
+        }
+        // The binary never needed these checked, because clap only ever handed
+        // it the declared defaults. A task takes whatever JSON a client sends,
+        // and both ends of this range fail quietly: above 1 no track can ever
+        // match, at or below 0 a single chance match names the track.
+        if self.match_known {
+            if !(self.known_fraction > 0.0 && self.known_fraction <= 1.0) {
+                return Err("known_fraction must be above 0 and at most 1".to_string());
+            }
+            if self.known_min_nights < 1 {
+                return Err("known_min_nights must be at least 1".to_string());
+            }
+            if self.known_max_scatter < 0.0 || self.known_max_drift < 0.0 {
+                return Err("known_max_scatter and known_max_drift cannot be negative".to_string());
+            }
         }
         for name in [&self.input, &self.out_tracks].into_iter().flatten() {
             if name.contains('/') || name.contains("..") {
@@ -496,12 +550,16 @@ fn score(tracklets: &[Tracklet], labels: &HashMap<i64, String>) -> (usize, usize
 ///
 /// Enough for a consumer to rebuild the track without reading the database --
 /// the epochs carry their own positions, which is what a reviewer needs.
+///
+/// `known` is parallel to `tracks`, or empty when tracks were not matched.
+#[allow(clippy::too_many_arguments)]
 fn dump_tracks(
     path: &str,
     tracks: &[Track],
     tracklets: &[Tracklet],
     detections: &[Detection],
     labels: &HashMap<i64, String>,
+    known: &[Option<String>],
 ) -> Result<usize, Box<dyn std::error::Error>> {
     use std::io::Write;
     let by_id: HashMap<i64, &Detection> = detections.iter().map(|d| (d.id, d)).collect();
@@ -544,6 +602,7 @@ fn dump_tracks(
             "rms_au": track.rms_au,
             "hypothesis_r_au": track.hypothesis.r_au,
             "hypothesis_rdot_au_per_day": track.hypothesis.rdot_au_per_day,
+            "known_designation": known.get(i).cloned().flatten(),
             "epochs": epochs,
         });
         writeln!(file, "{line}")?;
@@ -589,11 +648,13 @@ impl Verdict {
 /// The bound-fit verdict goes with it: a cluster no bound orbit reproduces is
 /// the interesting one, and persisting it as though it were clean would lose
 /// exactly what makes it worth looking at.
+#[allow(clippy::too_many_arguments)]
 async fn persist_clusters(
     db: &mongodb::Database,
     clusters: &[(crate::utils::thor::Cluster, Verdict)],
     detections: &[Detection],
     labels: &HashMap<i64, String>,
+    known: &[Option<String>],
     dry_run: bool,
     min_detections: usize,
     min_nights: usize,
@@ -616,7 +677,7 @@ async fn persist_clusters(
     }
     let by_id: HashMap<i64, &Detection> = detections.iter().map(|d| (d.id, d)).collect();
     let (mut stored, mut stamped) = (0usize, 0u64);
-    for (cluster, verdict) in clusters {
+    for (i, (cluster, verdict)) in clusters.iter().enumerate() {
         let members: Vec<i64> = cluster.ids.clone();
         let jds: Vec<f64> = members
             .iter()
@@ -627,7 +688,12 @@ async fn persist_clusters(
             error!("a cluster references detections not in this run, skipping");
             continue;
         }
-        let designation = members.iter().find_map(|id| labels.get(id)).cloned();
+        // The survey's own label comes first, then the catalogue match.
+        let designation = members
+            .iter()
+            .find_map(|id| labels.get(id))
+            .map(|l| crate::utils::mpcorb::normalize_ztf_ssnamenr(l).unwrap_or_else(|| l.clone()))
+            .or_else(|| known.get(i).cloned().flatten());
         let fit = Some((verdict.0, verdict.residual()));
         let plan = match plan_upsert(db, &members, &jds, designation, fit).await {
             Ok(plan) => plan,
@@ -679,12 +745,16 @@ async fn persist_clusters(
 /// One track at a time rather than in bulk: identity is decided against what is
 /// already stored, so two tracks of the same object in one run must see each
 /// other's writes.
+///
+/// `known` is parallel to `tracks`, or empty when tracks were not matched to
+/// the catalogue.
 async fn persist_tracks(
     db: &mongodb::Database,
     tracks: &[Track],
     tracklets: &[Tracklet],
     detections: &[Detection],
     labels: &HashMap<i64, String>,
+    known: &[Option<String>],
     gates: PersistGates,
 ) {
     let PersistGates {
@@ -710,7 +780,7 @@ async fn persist_tracks(
     }
     let by_id: HashMap<i64, &Detection> = detections.iter().map(|d| (d.id, d)).collect();
     let (mut stored, mut stamped, mut merged) = (0usize, 0u64, 0usize);
-    for track in tracks {
+    for (i, track) in tracks.iter().enumerate() {
         let mut members: Vec<i64> = track
             .members
             .iter()
@@ -728,8 +798,13 @@ async fn persist_tracks(
             continue;
         }
         // A track of a known object records the designation, which is what tells
-        // a consumer this is a recovery rather than a discovery candidate.
-        let designation = members.iter().find_map(|id| labels.get(id)).cloned();
+        // a consumer this is a recovery rather than a discovery candidate. The
+        // survey's own label comes first, then the catalogue match.
+        let designation = members
+            .iter()
+            .find_map(|id| labels.get(id))
+            .map(|l| crate::utils::mpcorb::normalize_ztf_ssnamenr(l).unwrap_or_else(|| l.clone()))
+            .or_else(|| known.get(i).cloned().flatten());
         // None means too few points to constrain an orbit; anything that
         // survived with a residual already passed the gate.
         let fit = Some(match track.residual_arcsec {
@@ -797,11 +872,13 @@ async fn persist_tracks(
 ///
 /// `orbit_residual_arcsec` is null on a pair, which carries too few points to
 /// fit an orbit and so passes the gate unchecked rather than vouched for.
+/// `known` is parallel to `clusters`, or empty when they were not matched.
 fn dump_clusters(
     path: &str,
     clusters: &[(crate::utils::thor::Cluster, Verdict)],
     detections: &[Detection],
     labels: &HashMap<i64, String>,
+    known: &[Option<String>],
 ) -> Result<usize, Box<dyn std::error::Error>> {
     use std::io::Write;
     let by_id: HashMap<i64, &Detection> = detections.iter().map(|d| (d.id, d)).collect();
@@ -839,6 +916,7 @@ fn dump_clusters(
             "cluster_rms_arcsec": cluster.rms_arcsec,
             "rate_x_deg_per_day": cluster.rate_x_deg_per_day,
             "rate_y_deg_per_day": cluster.rate_y_deg_per_day,
+            "known_designation": known.get(i).cloned().flatten(),
             "epochs": epochs,
         });
         writeln!(file, "{line}")?;
@@ -1038,8 +1116,21 @@ async fn run_thor(
         gate_start.elapsed().as_secs_f64()
     );
 
+    let known = if params.match_known {
+        let groups: Vec<Vec<i64>> = kept.iter().map(|(c, _)| c.ids.clone()).collect();
+        match db {
+            Some(db) => match_known(db, &groups, detections, params).await,
+            None => {
+                error!("match_known needs a database, which was not built");
+                Vec::new()
+            }
+        }
+    } else {
+        Vec::new()
+    };
+
     if let Some(path) = &params.out_tracks {
-        match dump_clusters(path, &kept, detections, labels) {
+        match dump_clusters(path, &kept, detections, labels, &known) {
             Ok(n) => info!("wrote {} clusters to {}", n, path),
             Err(e) => error!("could not write clusters: {}", e),
         }
@@ -1052,6 +1143,7 @@ async fn run_thor(
                     &kept,
                     detections,
                     labels,
+                    &known,
                     params.dry_run,
                     cfg.min_detections,
                     cfg.min_nights,
@@ -1174,6 +1266,69 @@ async fn run_thor(
     );
 }
 
+/// The catalogued object each group of detections is, if any, in the order of
+/// `groups`.
+///
+/// Every detection in a group is matched against the whole of MPC_orbits, and
+/// the group takes a designation only when most of its detections agree on one
+/// across nights: a single detection near some catalogued orbit is too often
+/// chance. Empty when the catalogue cannot be read, so the run goes on without
+/// designations instead of failing.
+async fn match_known(
+    db: &mongodb::Database,
+    groups: &[Vec<i64>],
+    detections: &[Detection],
+    params: &LinkTracksParams,
+) -> Vec<Option<String>> {
+    use crate::utils::identify::{identify, track_designation, IdentifyConfig, KnownRule, Match};
+
+    let started = std::time::Instant::now();
+    let orbits = match crate::utils::mpcorb::load_catalogue(db).await {
+        Ok(orbits) => orbits,
+        Err(error) => {
+            error!(%error, "could not read MPC_orbits, so tracks are not matched");
+            return Vec::new();
+        }
+    };
+    let wanted: std::collections::HashSet<i64> = groups.iter().flatten().copied().collect();
+    let mut members: Vec<Detection> = detections
+        .iter()
+        .filter(|d| wanted.contains(&d.id))
+        .copied()
+        .collect();
+    members.sort_by_key(|d| d.id);
+    let cfg = IdentifyConfig {
+        match_radius_arcsec: params.identify_radius,
+        ..IdentifyConfig::default()
+    };
+    let matches = identify(&members, &orbits, &cfg);
+    let by_detection: HashMap<i64, &Match> = matches.iter().map(|m| (m.detection_id, m)).collect();
+    let rule = KnownRule {
+        min_fraction: params.known_fraction,
+        min_nights: params.known_min_nights,
+        max_scatter_arcsec: params.known_max_scatter,
+        max_drift_arcsec_per_day: params.known_max_drift,
+    };
+    let known: Vec<Option<String>> = groups
+        .iter()
+        .map(|group| {
+            let found: Vec<&Match> = group
+                .iter()
+                .filter_map(|id| by_detection.get(id).copied())
+                .collect();
+            track_designation(&found, group.len(), &rule)
+        })
+        .collect();
+    info!(
+        "{} of {} tracks are catalogued objects ({} orbits, {:.1}s)",
+        known.iter().filter(|k| k.is_some()).count(),
+        known.len(),
+        orbits.len(),
+        started.elapsed().as_secs_f64()
+    );
+    known
+}
+
 /// Attribute detections to catalogued objects, and score against `ssnamenr`.
 ///
 /// Every detection here already carries IPAC's identification, so the
@@ -1185,41 +1340,20 @@ async fn run_identify(
     detections: &[Detection],
     labels: &HashMap<i64, String>,
 ) {
-    use crate::utils::identify::{identify, IdentifyConfig, OrbitEntry};
-    use crate::utils::mpcorb::{elements_from_document, normalize_ztf_ssnamenr, ORBITS_COLLECTION};
-    use futures::TryStreamExt;
+    use crate::utils::identify::{identify, IdentifyConfig};
+    use crate::utils::mpcorb::{load_catalogue, normalize_ztf_ssnamenr};
 
     let started = std::time::Instant::now();
-    let mut cursor = db
-        .collection::<Document>(ORBITS_COLLECTION)
-        .find(doc! {})
-        .await
-        .expect("failed to read MPC_orbits");
-    let mut orbits: Vec<OrbitEntry> = Vec::new();
-    let mut epochs: Vec<f64> = Vec::new();
-    // A read failure part-way through leaves a truncated catalogue, which would
-    // silently score as a lower recall rather than as a failure.
-    loop {
-        let d = match cursor.try_next().await {
-            Ok(Some(d)) => d,
-            Ok(None) => break,
-            Err(error) => {
-                error!(%error, "reading MPC_orbits failed after {} orbits", orbits.len());
-                return;
-            }
-        };
-        let Ok(designation) = d.get_str("_id") else {
-            continue;
-        };
-        let Some(elements) = elements_from_document(&d) else {
-            continue;
-        };
-        epochs.push(elements.epoch_jd);
-        orbits.push(OrbitEntry {
-            designation: designation.to_string(),
-            elements,
-        });
-    }
+    // A read failure part-way through would leave a truncated catalogue, which
+    // would silently score as a lower recall rather than as a failure.
+    let orbits = match load_catalogue(db).await {
+        Ok(orbits) => orbits,
+        Err(error) => {
+            error!(%error, "reading MPC_orbits failed");
+            return;
+        }
+    };
+    let mut epochs: Vec<f64> = orbits.iter().map(|o| o.elements.epoch_jd).collect();
     let mid_jd = detections.iter().map(|d| d.jd).sum::<f64>() / detections.len() as f64;
     epochs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let median_epoch = epochs.get(epochs.len() / 2).copied().unwrap_or(0.0);
@@ -1496,6 +1630,27 @@ pub async fn run(
             serde_json::json!({ "pure": pure, "mixed": mixed, "recovered": recovered });
     }
 
+    // Matched once here and shared by the dump and the store, so a track
+    // cannot be written to the two with different designations.
+    let known = if params.match_known {
+        let groups: Vec<Vec<i64>> = tracks
+            .iter()
+            .map(|track| {
+                let mut ids: Vec<i64> = track
+                    .members
+                    .iter()
+                    .flat_map(|&m| tracklets[m].ids.iter().copied())
+                    .collect();
+                ids.sort_unstable();
+                ids.dedup();
+                ids
+            })
+            .collect();
+        match_known(&db, &groups, &detections, &params).await
+    } else {
+        Vec::new()
+    };
+
     if let Some(name) = &params.out_tracks {
         let dir = export_dir();
         std::fs::create_dir_all(&dir).map_err(failed)?;
@@ -1506,6 +1661,7 @@ pub async fn run(
             &tracklets,
             &detections,
             &labels,
+            &known,
         ) {
             Ok(n) => {
                 ctx.info(format!("wrote {n} track(s) to {}", path.display()));
@@ -1524,6 +1680,7 @@ pub async fn run(
             &tracklets,
             &detections,
             &labels,
+            &known,
             PersistGates {
                 dry_run: params.dry_run,
                 min_detections: params.min_detections,
@@ -1591,6 +1748,34 @@ mod tests {
         assert_eq!(p.max_residual, 2.0);
         assert_eq!(p.thor_distances, vec![1.8, 2.2, 2.6, 3.0, 3.4]);
         assert_eq!(p.thor_min_nights, 3);
+        // The catalogue-matching gates, which arrived in find_tracklets after
+        // this task was split out of it.
+        assert!(!p.match_known);
+        assert_eq!(p.known_fraction, 2.0 / 3.0);
+        assert_eq!(p.known_min_nights, 2);
+        assert_eq!(p.known_max_scatter, 10.0);
+        assert_eq!(p.known_max_drift, 2.0);
+    }
+
+    #[test]
+    fn a_catalogue_match_that_could_never_hold_is_rejected() {
+        // Only checked when the matching is on, so a stored recipe that leaves
+        // these at nonsense while never asking for the match still runs.
+        let mut p = params();
+        p.known_fraction = 1.5;
+        assert!(p.validate_params().is_ok());
+        p.match_known = true;
+        assert!(
+            p.validate_params().is_err(),
+            "a fraction above 1 can never be met, so no track would be matched"
+        );
+        p.known_fraction = 0.0;
+        assert!(
+            p.validate_params().is_err(),
+            "a fraction of 0 would let one chance match name the track"
+        );
+        p.known_fraction = 2.0 / 3.0;
+        assert!(p.validate_params().is_ok());
     }
 
     #[test]

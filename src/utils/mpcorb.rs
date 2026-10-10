@@ -533,6 +533,37 @@ pub fn elements_from_document(doc: &Document) -> Option<OrbitalElements> {
     .map(|e: OrbitalElements| if e.tp == 0.0 { e.with_perihelion() } else { e })
 }
 
+/// Every orbit in `MPC_orbits`, for matching detections against the whole
+/// catalogue.
+///
+/// A read that fails part-way through is an error rather than a shorter list:
+/// a truncated catalogue would quietly pass for fewer known objects.
+pub async fn load_catalogue(
+    db: &mongodb::Database,
+) -> Result<Vec<crate::utils::identify::OrbitEntry>, mongodb::error::Error> {
+    let projection = doc! {
+        "epoch_jd": 1, "a": 1, "e": 1, "incl": 1, "node": 1, "peri": 1,
+        "mean_anomaly": 1, "q": 1, "tp": 1,
+    };
+    let mut cursor = db
+        .collection::<Document>(ORBITS_COLLECTION)
+        .find(doc! {})
+        .projection(projection)
+        .await?;
+    let mut orbits = Vec::new();
+    while let Some(d) = cursor.try_next().await? {
+        let (Ok(designation), Some(elements)) = (d.get_str("_id"), elements_from_document(&d))
+        else {
+            continue;
+        };
+        orbits.push(crate::utils::identify::OrbitEntry {
+            designation: designation.to_string(),
+            elements,
+        });
+    }
+    Ok(orbits)
+}
+
 /// Load elements for a set of MPCORB keys.
 pub async fn fetch_orbits(
     collection: &mongodb::Collection<Document>,

@@ -594,6 +594,104 @@ mod tests {
     }
 
     #[actix_rt::test]
+    async fn test_get_batch_cutouts_serves_only_public_ztf_alerts() {
+        load_dotenv();
+        let config = AppConfig::from_test_config().unwrap();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+        let test_user = TestUser::create(&database, &auth_app_data).await;
+
+        let base = (uuid::Uuid::new_v4().as_u128() as i64).abs() / 16;
+        // Public alert, private alert, and cutouts with no alert at all.
+        let (public, private, orphan) = (base, base + 1, base + 2);
+        let alerts =
+            database.collection::<mongodb::bson::Document>(&format!("{}_alerts", Survey::Ztf));
+        alerts
+            .insert_many([
+                doc! { "_id": public, "candidate": { "programid": 1, "jd": 2460000.5 } },
+                doc! { "_id": private, "candidate": { "programid": 2, "jd": 2460001.5 } },
+            ])
+            .await
+            .expect("Failed to insert test alerts");
+        let storage = config
+            .build_cutout_storage(&Survey::Ztf)
+            .await
+            .expect("Failed to build ZTF cutout storage");
+        for candid in [public, private, orphan] {
+            storage
+                .insert_cutouts(AlertCutout {
+                    candid,
+                    cutout_science: vec![1, 2, 3],
+                    cutout_template: vec![4, 5, 6],
+                    cutout_difference: vec![7, 8, 9],
+                })
+                .await
+                .expect("Failed to store test cutout");
+        }
+
+        let mut cutout_storage_map: HashMap<Survey, CutoutStorage> = HashMap::new();
+        cutout_storage_map.insert(Survey::Ztf, storage);
+        let app = test::init_service(
+            App::new().service(
+                actix_web::web::scope("/babamul")
+                    .app_data(web::Data::new(database.clone()))
+                    .app_data(web::Data::new(auth_app_data.clone()))
+                    .app_data(web::Data::new(cutout_storage_map))
+                    .wrap(from_fn(babamul_auth_middleware))
+                    .service(routes::babamul::surveys::get_batch_cutouts),
+            ),
+        )
+        .await;
+
+        let req = test::TestRequest::post()
+            .uri("/babamul/surveys/ztf/cutouts")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .set_json(serde_json::json!({ "candids": [private, public, orphan] }))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "{}",
+            read_str_response(resp).await
+        );
+        let body = read_json_response(resp).await;
+        let served: Vec<i64> = body["data"]["cutouts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["candid"].as_i64().unwrap())
+            .collect();
+        assert_eq!(served, vec![public], "only the public alert is served");
+        assert_eq!(body["data"]["cutouts"][0]["jd"], 2460000.5);
+        assert_eq!(
+            body["data"]["missing"],
+            serde_json::json!([private, orphan]),
+            "private and unknown candids are indistinguishable from missing ones"
+        );
+
+        let req = test::TestRequest::post()
+            .uri("/babamul/surveys/ztf/cutouts")
+            .set_json(serde_json::json!({ "candids": [public] }))
+            .to_request();
+        // The middleware rejects with an `Err`, not a response, hence `try_call_service`.
+        let resp = test::try_call_service(&app, req).await;
+        assert_eq!(
+            resp.err().unwrap().as_response_error().status_code(),
+            StatusCode::UNAUTHORIZED
+        );
+
+        alerts
+            .delete_many(doc! { "_id": { "$in": [public, private] } })
+            .await
+            .unwrap();
+        let storage = config.build_cutout_storage(&Survey::Ztf).await.unwrap();
+        for candid in [public, private, orphan] {
+            storage.delete_cutouts(candid).await.unwrap();
+        }
+    }
+
+    #[actix_rt::test]
     async fn test_get_lsst_alerts() {
         load_dotenv();
         let database: Database = get_test_db_api().await;
