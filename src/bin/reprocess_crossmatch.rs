@@ -11,7 +11,7 @@ use std::{
 use boom::{
     api::catalogs::WATCHLIST_PREFIX,
     conf::{load_dotenv, AppConfig, CatalogXmatchConfig},
-    filter::Filter,
+    filter::uses_field_in_filter,
     utils::{
         data::{
             format_duration, format_eta, make_progress_bar, spawn_elapsed_logger,
@@ -135,6 +135,17 @@ struct Cli {
     /// writing it on new records.
     #[arg(long, default_value_t = false, requires = "remove")]
     force: bool,
+
+    /// With `--remove`: proceed even if active filters read a catalog. They will
+    /// stop matching on it.
+    #[arg(long, default_value_t = false, requires = "remove")]
+    ignore_filters: bool,
+
+    /// With `--remove`: proceed even if a catalog-driven reprocess of a catalog
+    /// has not finished, and discard its state. Only safe once that run is
+    /// known to be dead; a live one would write its matches back.
+    #[arg(long, default_value_t = false, requires = "remove")]
+    discard_unfinished_run: bool,
 }
 
 /// Reprocessing can be done in two directions:
@@ -1012,18 +1023,6 @@ fn created_before(jd: f64) -> Document {
     ]}
 }
 
-/// Whether a stored filter pipeline reads `cross_matches.<catalog>`, as a whole
-/// path segment so `PS1` does not match `PS1_DR2`.
-fn pipeline_reads_catalog(pipeline: &str, catalog: &str) -> bool {
-    let needle = xmatch_field(catalog);
-    pipeline.match_indices(&needle).any(|(at, _)| {
-        !pipeline[at + needle.len()..]
-            .chars()
-            .next()
-            .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
-    })
-}
-
 fn shard_progress(completed: usize, total: usize, started: Instant) -> String {
     let elapsed = started.elapsed();
     format!(
@@ -1525,27 +1524,65 @@ fn catalog_references(config: &AppConfig, survey: &Survey, catalog: &str) -> Vec
     references
 }
 
-/// Active filters for the survey whose current version reads the catalog.
-async fn filters_reading(
+/// An active filter's label and the pipeline of its active version, parsed.
+struct ActiveFilter {
+    label: String,
+    pipeline: Option<Vec<serde_json::Value>>,
+}
+
+/// The survey's active filters. Only the fields the check needs are read, so a
+/// filter written under an older schema cannot fail it.
+async fn active_filters(
     db: &mongodb::Database,
     survey: &Survey,
-    catalog: &str,
-) -> Result<Vec<String>, mongodb::error::Error> {
+) -> Result<Vec<ActiveFilter>, mongodb::error::Error> {
     let survey = mongodb::bson::to_bson(survey).map_err(mongodb::error::Error::custom)?;
-    let filters: Vec<Filter> = db
-        .collection::<Filter>("filters")
+    let filters: Vec<Document> = db
+        .collection::<Document>("filters")
         .find(doc! { "survey": survey, "active": true })
+        .projection(doc! { "name": 1, "active_fid": 1, "fv.fid": 1, "fv.pipeline": 1 })
         .await?
         .try_collect()
         .await?;
     Ok(filters
-        .into_iter()
-        .filter(|f| {
-            f.fv.iter()
-                .any(|v| v.fid == f.active_fid && pipeline_reads_catalog(&v.pipeline, catalog))
+        .iter()
+        .map(|filter| {
+            let active_fid = filter.get_str("active_fid").ok();
+            let pipeline = filter
+                .get_array("fv")
+                .into_iter()
+                .flatten()
+                .filter_map(Bson::as_document)
+                .find(|version| version.get_str("fid").ok() == active_fid)
+                .and_then(|version| version.get_str("pipeline").ok())
+                .and_then(|pipeline| serde_json::from_str(pipeline).ok());
+            ActiveFilter {
+                label: format!(
+                    "{} ({})",
+                    filter.get_str("name").unwrap_or("unnamed"),
+                    match filter.get("_id") {
+                        Some(Bson::String(id)) => id.clone(),
+                        Some(id) => id.to_string(),
+                        None => String::new(),
+                    }
+                ),
+                pipeline,
+            }
         })
-        .map(|f| format!("{} ({})", f.name, f.id))
         .collect())
+}
+
+/// Filters whose active pipeline reads the catalog, plus any whose pipeline
+/// could not be read, since they might.
+fn filters_reading(filters: &[ActiveFilter], catalog: &str) -> Vec<String> {
+    let field = xmatch_field(catalog);
+    filters
+        .iter()
+        .filter_map(|filter| match &filter.pipeline {
+            Some(stages) => uses_field_in_filter(stages, &field).map(|_| filter.label.clone()),
+            None => Some(format!("{} (unreadable pipeline)", filter.label)),
+        })
+        .collect()
 }
 
 /// Status of a catalog-driven run for the catalog that has not finished, if any.
@@ -1579,15 +1616,16 @@ async fn any_record_carries(
         .is_some())
 }
 
-fn exit_unless_forced(args: &Cli, name: &str, reason: &str) {
-    if !args.force {
+/// Exits unless `overridden`, the flag `flag` that accepts this reason.
+fn exit_unless_overridden(overridden: bool, flag: &str, name: &str, reason: &str) {
+    if !overridden {
         error!(
-            "catalog '{}': {}; pass --force to remove anyway",
-            name, reason
+            "catalog '{}': {}; pass {} to remove anyway",
+            name, reason, flag
         );
         std::process::exit(1);
     }
-    warn!("--force: removing '{}' although {}", name, reason);
+    warn!("{}: removing '{}' although {}", flag, name, reason);
 }
 
 async fn run_remove_mode(args: &Cli, config: &AppConfig, db: mongodb::Database) {
@@ -1603,6 +1641,14 @@ async fn run_remove_mode(args: &Cli, config: &AppConfig, db: mongodb::Database) 
             .unwrap_or_default()
     );
 
+    let filters = match active_filters(&db, &args.survey).await {
+        Ok(filters) => filters,
+        Err(e) => {
+            error!("could not read the active filters: {}", e);
+            std::process::exit(1);
+        }
+    };
+
     // Each catalog with whether the config still references it.
     let mut catalogs: Vec<(&str, bool)> = Vec::with_capacity(args.catalogs.len());
     for name in dedup_catalogs(&args.catalogs) {
@@ -1616,8 +1662,9 @@ async fn run_remove_mode(args: &Cli, config: &AppConfig, db: mongodb::Database) 
         }
         let references = catalog_references(config, &args.survey, name);
         if !references.is_empty() {
-            exit_unless_forced(
-                args,
+            exit_unless_overridden(
+                args.force,
+                "--force",
                 name,
                 &format!(
                     "{} in {} still references it",
@@ -1629,8 +1676,9 @@ async fn run_remove_mode(args: &Cli, config: &AppConfig, db: mongodb::Database) 
         // A run started before the catalog left the config still has it, and
         // would write its matches back after this one.
         match unfinished_run(&db, &args.survey, name).await {
-            Ok(Some(status)) => exit_unless_forced(
-                args,
+            Ok(Some(status)) => exit_unless_overridden(
+                args.discard_unfinished_run,
+                "--discard-unfinished-run",
                 name,
                 &format!(
                     "a catalog-driven reprocess of it is running or was interrupted ({})",
@@ -1643,20 +1691,17 @@ async fn run_remove_mode(args: &Cli, config: &AppConfig, db: mongodb::Database) 
                 std::process::exit(1);
             }
         }
-        match filters_reading(&db, &args.survey, name).await {
-            Ok(filters) if !filters.is_empty() => exit_unless_forced(
-                args,
+        let reading = filters_reading(&filters, name);
+        if !reading.is_empty() {
+            exit_unless_overridden(
+                args.ignore_filters,
+                "--ignore-filters",
                 name,
                 &format!(
                     "active filters read it and would stop matching: {}",
-                    filters.join(", ")
+                    reading.join(", ")
                 ),
-            ),
-            Ok(_) => {}
-            Err(e) => {
-                error!("could not check the filters for '{}': {}", name, e);
-                std::process::exit(1);
-            }
+            );
         }
         catalogs.push((name, !references.is_empty()));
     }
@@ -1668,38 +1713,35 @@ async fn run_remove_mode(args: &Cli, config: &AppConfig, db: mongodb::Database) 
     // when nothing matches. One combined check settles the rerun case in a
     // single scan; the per-catalog checks run one at a time so a misspelled
     // name never puts several full scans on the database at once.
-    let mut present: Vec<&str> = Vec::with_capacity(names.len());
-    let anything = match any_record_carries(&aux_collection, &names).await {
-        Ok(found) => found,
+    let present: Vec<&str> = match any_record_carries(&aux_collection, &names).await {
+        Ok(false) => Vec::new(),
+        Ok(true) if names.len() == 1 => names.clone(),
+        Ok(true) => {
+            let mut present = Vec::with_capacity(names.len());
+            for &name in &names {
+                match any_record_carries(&aux_collection, &[name]).await {
+                    Ok(true) => present.push(name),
+                    Ok(false) => {}
+                    Err(e) => {
+                        error!("could not check for '{}' matches: {}", name, e);
+                        std::process::exit(1);
+                    }
+                }
+            }
+            present
+        }
         Err(e) => {
             error!("could not check for matches: {}", e);
             std::process::exit(1);
         }
     };
-    for &name in &names {
-        let found = if !anything {
-            false
-        } else if names.len() == 1 {
-            true
-        } else {
-            match any_record_carries(&aux_collection, &[name]).await {
-                Ok(found) => found,
-                Err(e) => {
-                    error!("could not check for '{}' matches: {}", name, e);
-                    std::process::exit(1);
-                }
-            }
-        };
-        if found {
-            present.push(name);
-        } else {
-            warn!(
-                "no {} record carries cross_matches.{}, nothing to remove (already removed, or \
-                 a misspelled catalog name)",
-                aux_collection.name(),
-                name
-            );
-        }
+    for name in names.iter().filter(|name| !present.contains(name)) {
+        warn!(
+            "no {} record carries cross_matches.{}, nothing to remove (already removed, or \
+             a misspelled catalog name)",
+            aux_collection.name(),
+            name
+        );
     }
 
     if !present.is_empty() {
@@ -1857,18 +1899,115 @@ mod remove_tests {
     }
 
     #[test]
-    fn test_pipeline_reads_catalog_only_as_a_whole_path_segment() {
-        let pipeline = r#"[{"$match":{"cross_matches.PS1_DR2.0":{"$exists":true}}}]"#;
-        assert!(pipeline_reads_catalog(pipeline, "PS1_DR2"));
-        assert!(!pipeline_reads_catalog(pipeline, "PS1"));
-        assert!(pipeline_reads_catalog(
-            r#"{"$size":"$cross_matches.NED"}"#,
-            "NED"
-        ));
-        assert!(!pipeline_reads_catalog(
-            r#"{"cross_matches.NED_LVS":1}"#,
-            "NED"
-        ));
+    fn test_filters_reading_matches_the_catalog_path_only() {
+        let filter = |label: &str, pipeline: Option<serde_json::Value>| ActiveFilter {
+            label: label.to_string(),
+            pipeline: pipeline.map(|p| p.as_array().unwrap().clone()),
+        };
+        let filters = vec![
+            filter(
+                "reads",
+                Some(
+                    serde_json::json!([{ "$match": { "cross_matches.PS1_DR2.0": { "$exists": true } } }]),
+                ),
+            ),
+            filter(
+                "prefix",
+                Some(
+                    serde_json::json!([{ "$project": { "n": { "$size": "$cross_matches.PS1_DR2_extra" } } }]),
+                ),
+            ),
+            filter(
+                "literal",
+                Some(serde_json::json!([{ "$set": { "note": "see cross_matches.PS1_DR2 docs" } }])),
+            ),
+            filter("broken", None),
+        ];
+        assert_eq!(
+            filters_reading(&filters, "PS1_DR2"),
+            vec!["reads", "broken (unreadable pipeline)"]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_active_filters_reads_old_schema_documents() {
+        let db = get_test_db().await;
+        let survey = Survey::Winter;
+        let collection = db.collection::<Document>("filters");
+        let id = format!("remove_test_{}", uuid::Uuid::new_v4().simple());
+        // No permissions, user_id or timestamps: a full `Filter` would not deserialize.
+        collection
+            .insert_one(doc! {
+                "_id": &id,
+                "name": "legacy",
+                "survey": "WINTER",
+                "active": true,
+                "active_fid": "v2",
+                "fv": [
+                    { "fid": "v1", "pipeline": "[]" },
+                    { "fid": "v2", "pipeline": r#"[{"$match":{"cross_matches.OLD":{"$size":1}}}]"# },
+                ],
+            })
+            .await
+            .unwrap();
+
+        let filters = active_filters(&db, &survey).await;
+        collection.delete_one(doc! { "_id": &id }).await.unwrap();
+        let filters: Vec<ActiveFilter> = filters
+            .unwrap()
+            .into_iter()
+            .filter(|f| f.label.contains(&id))
+            .collect();
+        assert_eq!(filters.len(), 1);
+        assert_eq!(filters_reading(&filters, "OLD").len(), 1);
+        assert!(filters_reading(&filters, "NEW").is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_unfinished_run_reports_only_runs_not_marked_clean() {
+        let db = get_test_db().await;
+        let catalog = format!("remove_test_{}", uuid::Uuid::new_v4().simple());
+        let survey = Survey::Winter;
+        assert!(unfinished_run(&db, &survey, &catalog)
+            .await
+            .unwrap()
+            .is_none());
+
+        let state_id = catalog_state_id(&survey, &catalog);
+        set_reprocess_state(&db, &state_id, doc! { "status": STATUS_COMMITTING })
+            .await
+            .unwrap();
+        let committing = unfinished_run(&db, &survey, &catalog).await.unwrap();
+        set_reprocess_state(&db, &state_id, doc! { "status": STATUS_CLEAN })
+            .await
+            .unwrap();
+        let clean = unfinished_run(&db, &survey, &catalog).await.unwrap();
+        clear_reprocess_state(&db, &survey, &catalog).await.unwrap();
+
+        assert!(committing.unwrap().starts_with(STATUS_COMMITTING));
+        assert!(clean.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_count_recent_carriers_stops_after_leaving_the_window() {
+        let db = get_test_db().await;
+        let aux: mongodb::Collection<Document> =
+            db.collection(&format!("remove_test_{}", uuid::Uuid::new_v4().simple()));
+        let since = 2_460_000.0;
+        let carrier = |id: String| doc! { "_id": id, "created_at": since + 0.1, "cross_matches": { "OLD": [] } };
+        // Inserted first, so the walk only reaches it if it fails to stop.
+        aux.insert_one(carrier("early".to_string())).await.unwrap();
+        let old: Vec<Document> = (0..OLDER_RUN_TO_STOP)
+            .map(|i| doc! { "_id": format!("old{}", i), "created_at": since - 1.0 })
+            .collect();
+        aux.insert_many(old).await.unwrap();
+        aux.insert_many((0..2).map(|i| carrier(format!("new{}", i))))
+            .await
+            .unwrap();
+
+        let count = count_recent_carriers(&aux, &["OLD"], since).await;
+        aux.drop().await.unwrap();
+        assert_eq!(count.unwrap(), 2);
     }
 
     #[tokio::test]
