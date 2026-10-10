@@ -773,6 +773,10 @@ services:
       BOOM_CUTOUTS_STORAGE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
       BOOM_CUTOUTS_STORAGE__TYPE: mongo
       BOOM_CUTOUTS_STORAGE__HOST: mongo
+    deploy:
+      resources:
+        limits:
+          memory: 16g
     networks:
       - boom
     profiles:
