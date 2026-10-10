@@ -150,6 +150,35 @@ struct Cli {
     #[arg(long, default_value_t = 120.0)]
     identify_radius: f64,
 
+    /// Match each track to the MPC catalogue and record the designation of the
+    /// object it is, if any. A track with a designation is a recovery of a known
+    /// object rather than a discovery candidate. Reads MPC_orbits, so it needs
+    /// the database even when reading a dump.
+    #[arg(long, default_value_t = false)]
+    match_known: bool,
+
+    /// Share of a track's detections that must match one catalogued object for
+    /// the track to be that object.
+    #[arg(long, default_value_t = 2.0 / 3.0)]
+    known_fraction: f64,
+
+    /// Distinct nights those matching detections must span.
+    #[arg(long, default_value_t = 2)]
+    known_min_nights: usize,
+
+    /// How far any matching detection's separation may stray from their
+    /// median, arcseconds. A catalogued object sits at a steady offset over a
+    /// few nights; an unrelated neighbour drifts.
+    #[arg(long, default_value_t = 10.0)]
+    known_max_scatter: f64,
+
+    #[arg(
+        long,
+        default_value_t = 2.0,
+        help = "How much further the separation may stray per day from the middle of the arc, arcseconds: a catalogued orbit's error drifts slowly over a long track"
+    )]
+    known_max_drift: f64,
+
     /// Report at most this many tracklets.
     #[arg(long, default_value_t = 20)]
     show: usize,
@@ -403,12 +432,14 @@ fn score(tracklets: &[Tracklet], labels: &HashMap<i64, String>) -> (usize, usize
 ///
 /// Enough for a consumer to rebuild the track without reading the database --
 /// the epochs carry their own positions, which is what a reviewer needs.
+/// `known` is parallel to `tracks`, or empty when tracks were not matched.
 fn dump_tracks(
     path: &str,
     tracks: &[Track],
     tracklets: &[Tracklet],
     detections: &[Detection],
     labels: &HashMap<i64, String>,
+    known: &[Option<String>],
 ) -> Result<usize, Box<dyn std::error::Error>> {
     use std::io::Write;
     let by_id: HashMap<i64, &Detection> = detections.iter().map(|d| (d.id, d)).collect();
@@ -451,6 +482,7 @@ fn dump_tracks(
             "rms_au": track.rms_au,
             "hypothesis_r_au": track.hypothesis.r_au,
             "hypothesis_rdot_au_per_day": track.hypothesis.rdot_au_per_day,
+            "known_designation": known.get(i).cloned().flatten(),
             "epochs": epochs,
         });
         writeln!(file, "{line}")?;
@@ -495,12 +527,15 @@ impl Verdict {
 ///
 /// The bound-fit verdict goes with it: a cluster no bound orbit reproduces is
 /// the interesting one, and persisting it as though it were clean would lose
-/// exactly what makes it worth looking at.
+/// exactly what makes it worth looking at. `known` is parallel to `clusters`,
+/// or empty when clusters were not matched to the catalogue.
+#[allow(clippy::too_many_arguments)]
 async fn persist_clusters(
     db: &mongodb::Database,
     clusters: &[(boom::utils::thor::Cluster, Verdict)],
     detections: &[Detection],
     labels: &HashMap<i64, String>,
+    known: &[Option<String>],
     dry_run: bool,
     min_detections: usize,
     min_nights: usize,
@@ -523,7 +558,7 @@ async fn persist_clusters(
     }
     let by_id: HashMap<i64, &Detection> = detections.iter().map(|d| (d.id, d)).collect();
     let (mut stored, mut stamped) = (0usize, 0u64);
-    for (cluster, verdict) in clusters {
+    for (i, (cluster, verdict)) in clusters.iter().enumerate() {
         let members: Vec<i64> = cluster.ids.clone();
         let jds: Vec<f64> = members
             .iter()
@@ -534,7 +569,11 @@ async fn persist_clusters(
             error!("a cluster references detections not in this run, skipping");
             continue;
         }
-        let designation = members.iter().find_map(|id| labels.get(id)).cloned();
+        let designation = members
+            .iter()
+            .find_map(|id| labels.get(id))
+            .map(|l| boom::utils::mpcorb::normalize_ztf_ssnamenr(l).unwrap_or_else(|| l.clone()))
+            .or_else(|| known.get(i).cloned().flatten());
         let fit = Some((verdict.0, verdict.residual()));
         let plan = match plan_upsert(db, &members, &jds, designation, fit).await {
             Ok(plan) => plan,
@@ -585,13 +624,16 @@ async fn persist_clusters(
 ///
 /// One track at a time rather than in bulk: identity is decided against what is
 /// already stored, so two tracks of the same object in one run must see each
-/// other's writes.
+/// other's writes. `known` is parallel to `tracks`, or empty when tracks were
+/// not matched to the catalogue.
+#[allow(clippy::too_many_arguments)]
 async fn persist_tracks(
     db: &mongodb::Database,
     tracks: &[Track],
     tracklets: &[Tracklet],
     detections: &[Detection],
     labels: &HashMap<i64, String>,
+    known: &[Option<String>],
     dry_run: bool,
     min_detections: usize,
     min_nights: usize,
@@ -614,7 +656,7 @@ async fn persist_tracks(
     }
     let by_id: HashMap<i64, &Detection> = detections.iter().map(|d| (d.id, d)).collect();
     let (mut stored, mut stamped, mut merged) = (0usize, 0u64, 0usize);
-    for track in tracks {
+    for (i, track) in tracks.iter().enumerate() {
         let mut members: Vec<i64> = track
             .members
             .iter()
@@ -632,8 +674,13 @@ async fn persist_tracks(
             continue;
         }
         // A track of a known object records the designation, which is what tells
-        // a consumer this is a recovery rather than a discovery candidate.
-        let designation = members.iter().find_map(|id| labels.get(id)).cloned();
+        // a consumer this is a recovery rather than a discovery candidate. The
+        // survey's own label comes first, then the catalogue match.
+        let designation = members
+            .iter()
+            .find_map(|id| labels.get(id))
+            .map(|l| boom::utils::mpcorb::normalize_ztf_ssnamenr(l).unwrap_or_else(|| l.clone()))
+            .or_else(|| known.get(i).cloned().flatten());
         // None means too few points to constrain an orbit; anything that
         // survived with a residual already passed the gate.
         let fit = Some(match track.residual_arcsec {
@@ -701,11 +748,13 @@ async fn persist_tracks(
 ///
 /// `orbit_residual_arcsec` is null on a pair, which carries too few points to
 /// fit an orbit and so passes the gate unchecked rather than vouched for.
+/// `known` is parallel to `clusters`, or empty when they were not matched.
 fn dump_clusters(
     path: &str,
     clusters: &[(boom::utils::thor::Cluster, Verdict)],
     detections: &[Detection],
     labels: &HashMap<i64, String>,
+    known: &[Option<String>],
 ) -> Result<usize, Box<dyn std::error::Error>> {
     use std::io::Write;
     let by_id: HashMap<i64, &Detection> = detections.iter().map(|d| (d.id, d)).collect();
@@ -743,6 +792,7 @@ fn dump_clusters(
             "cluster_rms_arcsec": cluster.rms_arcsec,
             "rate_x_deg_per_day": cluster.rate_x_deg_per_day,
             "rate_y_deg_per_day": cluster.rate_y_deg_per_day,
+            "known_designation": known.get(i).cloned().flatten(),
             "epochs": epochs,
         });
         writeln!(file, "{line}")?;
@@ -942,8 +992,21 @@ async fn run_thor(
         gate_start.elapsed().as_secs_f64()
     );
 
+    let known = if args.match_known {
+        let groups: Vec<Vec<i64>> = kept.iter().map(|(c, _)| c.ids.clone()).collect();
+        match db {
+            Some(db) => match_known(db, &groups, detections, args).await,
+            None => {
+                error!("--match-known needs a database, which was not built");
+                Vec::new()
+            }
+        }
+    } else {
+        Vec::new()
+    };
+
     if let Some(path) = &args.out_tracks {
-        match dump_clusters(path, &kept, detections, labels) {
+        match dump_clusters(path, &kept, detections, labels, &known) {
             Ok(n) => info!("wrote {} clusters to {}", n, path),
             Err(e) => error!("could not write clusters: {}", e),
         }
@@ -956,6 +1019,7 @@ async fn run_thor(
                     &kept,
                     detections,
                     labels,
+                    &known,
                     args.dry_run,
                     cfg.min_detections,
                     cfg.min_nights,
@@ -1078,15 +1142,77 @@ async fn run_thor(
     );
 }
 
+/// The catalogued object each group of detections is, if any, in the order of
+/// `groups`.
+///
+/// Every detection in a group is matched against the whole of MPC_orbits, and
+/// the group takes a designation only when most of its detections agree on one
+/// across nights: a single detection near some catalogued orbit is too often
+/// chance. Empty when the catalogue cannot be read, so the run goes on without
+/// designations instead of failing.
+async fn match_known(
+    db: &mongodb::Database,
+    groups: &[Vec<i64>],
+    detections: &[Detection],
+    args: &Cli,
+) -> Vec<Option<String>> {
+    use boom::utils::identify::{identify, track_designation, IdentifyConfig, KnownRule, Match};
+
+    let started = std::time::Instant::now();
+    let orbits = match boom::utils::mpcorb::load_catalogue(db).await {
+        Ok(orbits) => orbits,
+        Err(error) => {
+            error!(%error, "could not read MPC_orbits, so tracks are not matched");
+            return Vec::new();
+        }
+    };
+    let wanted: std::collections::HashSet<i64> = groups.iter().flatten().copied().collect();
+    let mut members: Vec<Detection> = detections
+        .iter()
+        .filter(|d| wanted.contains(&d.id))
+        .copied()
+        .collect();
+    members.sort_by_key(|d| d.id);
+    let cfg = IdentifyConfig {
+        match_radius_arcsec: args.identify_radius,
+        ..IdentifyConfig::default()
+    };
+    let matches = identify(&members, &orbits, &cfg);
+    let by_detection: HashMap<i64, &Match> = matches.iter().map(|m| (m.detection_id, m)).collect();
+    let rule = KnownRule {
+        min_fraction: args.known_fraction,
+        min_nights: args.known_min_nights,
+        max_scatter_arcsec: args.known_max_scatter,
+        max_drift_arcsec_per_day: args.known_max_drift,
+    };
+    let known: Vec<Option<String>> = groups
+        .iter()
+        .map(|group| {
+            let found: Vec<&Match> = group
+                .iter()
+                .filter_map(|id| by_detection.get(id).copied())
+                .collect();
+            track_designation(&found, group.len(), &rule)
+        })
+        .collect();
+    info!(
+        "{} of {} tracks are catalogued objects ({} orbits, {:.1}s)",
+        known.iter().filter(|k| k.is_some()).count(),
+        known.len(),
+        orbits.len(),
+        started.elapsed().as_secs_f64()
+    );
+    known
+}
+
 /// Attribute detections to catalogued objects, and score against `ssnamenr`.
 ///
 /// Every detection here already carries IPAC's identification, so the
 /// catalogue's answer can be checked directly: agreement measures whether
 /// propagating MPCORB to the detection epoch lands where the object was.
 async fn run_identify(args: &Cli, detections: &[Detection], labels: &HashMap<i64, String>) {
-    use boom::utils::identify::{identify, IdentifyConfig, OrbitEntry};
-    use boom::utils::mpcorb::{elements_from_document, normalize_ztf_ssnamenr, ORBITS_COLLECTION};
-    use futures::TryStreamExt;
+    use boom::utils::identify::{identify, IdentifyConfig};
+    use boom::utils::mpcorb::{load_catalogue, normalize_ztf_ssnamenr};
 
     let config_path = args
         .config
@@ -1096,36 +1222,16 @@ async fn run_identify(args: &Cli, detections: &[Detection], labels: &HashMap<i64
     let db = config.build_db().await.expect("failed to connect to mongo");
 
     let started = std::time::Instant::now();
-    let mut cursor = db
-        .collection::<Document>(ORBITS_COLLECTION)
-        .find(doc! {})
-        .await
-        .expect("failed to read MPC_orbits");
-    let mut orbits: Vec<OrbitEntry> = Vec::new();
-    let mut epochs: Vec<f64> = Vec::new();
-    // A read failure part-way through leaves a truncated catalogue, which would
-    // silently score as a lower recall rather than as a failure.
-    loop {
-        let d = match cursor.try_next().await {
-            Ok(Some(d)) => d,
-            Ok(None) => break,
-            Err(error) => {
-                error!(%error, "reading MPC_orbits failed after {} orbits", orbits.len());
-                return;
-            }
-        };
-        let Ok(designation) = d.get_str("_id") else {
-            continue;
-        };
-        let Some(elements) = elements_from_document(&d) else {
-            continue;
-        };
-        epochs.push(elements.epoch_jd);
-        orbits.push(OrbitEntry {
-            designation: designation.to_string(),
-            elements,
-        });
-    }
+    // A read failure part-way through would leave a truncated catalogue, which
+    // would silently score as a lower recall rather than as a failure.
+    let orbits = match load_catalogue(&db).await {
+        Ok(orbits) => orbits,
+        Err(error) => {
+            error!(%error, "reading MPC_orbits failed");
+            return;
+        }
+    };
+    let mut epochs: Vec<f64> = orbits.iter().map(|o| o.elements.epoch_jd).collect();
     let mid_jd = detections.iter().map(|d| d.jd).sum::<f64>() / detections.len() as f64;
     epochs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let median_epoch = epochs.get(epochs.len() / 2).copied().unwrap_or(0.0);
@@ -1227,8 +1333,9 @@ async fn main() {
     load_dotenv();
 
     let args = Cli::parse();
-    // Persisting needs the database even when the detections came from a dump.
-    let db = if args.input.is_none() || args.persist || args.dry_run {
+    // Persisting and matching to the catalogue need the database even when the
+    // detections came from a dump.
+    let db = if args.input.is_none() || args.persist || args.dry_run || args.match_known {
         let config_path = args
             .config
             .clone()
@@ -1354,8 +1461,27 @@ async fn main() {
                 pure, mixed, recovered
             );
         }
+        let known = match (args.match_known, db.as_ref()) {
+            (true, Some(db)) => {
+                let groups: Vec<Vec<i64>> = tracks
+                    .iter()
+                    .map(|track| {
+                        let mut ids: Vec<i64> = track
+                            .members
+                            .iter()
+                            .flat_map(|&m| tracklets[m].ids.iter().copied())
+                            .collect();
+                        ids.sort_unstable();
+                        ids.dedup();
+                        ids
+                    })
+                    .collect();
+                match_known(db, &groups, &detections, &args).await
+            }
+            _ => Vec::new(),
+        };
         if let Some(path) = &args.out_tracks {
-            match dump_tracks(path, &tracks, &tracklets, &detections, &labels) {
+            match dump_tracks(path, &tracks, &tracklets, &detections, &labels, &known) {
                 Ok(n) => info!("wrote {} tracks to {}", n, path),
                 Err(e) => error!("could not write tracks: {}", e),
             }
@@ -1368,6 +1494,7 @@ async fn main() {
                 &tracklets,
                 &detections,
                 &labels,
+                &known,
                 args.dry_run,
                 args.min_detections,
                 args.min_nights,
