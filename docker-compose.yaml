@@ -3,6 +3,8 @@ name: boom
 volumes:
   mongodb:
   valkey:
+  # Staging area for catalog chunks
+  catalog_data:
   kafka_data:
   prometheus_data:
   grafana_data:
@@ -596,12 +598,27 @@ services:
       BOOM_CUTOUTS_STORAGE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
       BOOM_CUTOUTS_STORAGE__TYPE: mongo
       BOOM_CUTOUTS_STORAGE__HOST: mongo
+      BOOM_CATALOG_DATA_PATH: /app/data/catalogs
+      # Pan-STARRS is in a requester-pays bucket, so fetching it is billed to
+      # whoever asks and needs credentials that can pay. Prefixed, and renamed
+      # to the plain AWS_* names on boompy's environment alone: those are the
+      # default credential chain, so setting them here would make a key meant
+      # for one catalog the default for this process and everything it spawns.
+      # Left empty for deployments that do not ingest it: an empty value is
+      # unset, and only that one catalog refuses to start without them. On AWS,
+      # leave these unset and give the instance a role instead -- boto finds
+      # that on its own.
+      BOOM_PANSTARRS_AWS_ACCESS_KEY_ID: ${BOOM_PANSTARRS_AWS_ACCESS_KEY_ID:-}
+      BOOM_PANSTARRS_AWS_SECRET_ACCESS_KEY: ${BOOM_PANSTARRS_AWS_SECRET_ACCESS_KEY:-}
+      BOOM_PANSTARRS_AWS_SESSION_TOKEN: ${BOOM_PANSTARRS_AWS_SESSION_TOKEN:-}
+      BOOM_PANSTARRS_AWS_DEFAULT_REGION: ${BOOM_PANSTARRS_AWS_DEFAULT_REGION:-us-east-1}
     networks:
       - boom
     profiles:
       - prod
     volumes:
       - ${BOOM_CONFIG_PATH:-./config.yaml}:/app/config.yaml
+      - catalog_data:/app/data/catalogs
     command:
       - /app/task_worker
 

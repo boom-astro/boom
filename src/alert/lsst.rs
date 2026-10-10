@@ -1081,6 +1081,21 @@ struct AlertAuxForUpdate {
     pub version: Option<i32>,
 }
 
+fn first_detection_jd(
+    prv_candidates: &[LsstPrvCandidate],
+    existing_aux: Option<&AlertAuxForUpdate>,
+) -> Option<f64> {
+    let stored = existing_aux
+        .into_iter()
+        .flat_map(|aux| aux.prv_candidates.iter().map(|pc| pc.jd));
+    prv_candidates
+        .iter()
+        .map(|pc| pc.jd)
+        .chain(stored)
+        .filter(|jd| jd.is_finite())
+        .reduce(f64::min)
+}
+
 pub struct LsstAlertWorker {
     schema_registry: SchemaRegistry,
     xmatch_configs: Vec<conf::CatalogXmatchConfig>,
@@ -1300,6 +1315,11 @@ impl AlertWorker for LsstAlertWorker {
             .await
             .inspect_err(as_error!("failed to create mongo client"))?;
 
+        // Warns rather than fails: a crossmatch catalog that is configured but
+        // empty produces zero matches on every alert, which is
+        // indistinguishable from a genuine non-match.
+        crate::catalogs::warn_on_empty_crossmatch_catalogs(&db, &xmatch_configs).await;
+
         let alert_collection = db.collection(&ALERT_COLLECTION);
         let alert_aux_collection = db.collection(&ALERT_AUX_COLLECTION);
         let alert_cutout_storage = config
@@ -1350,7 +1370,7 @@ impl AlertWorker for LsstAlertWorker {
             .await
             .inspect_err(as_error!())?;
 
-        let candidate = LsstCandidate::new(avro_alert.dia_source, avro_alert.dia_object)?;
+        let mut candidate = LsstCandidate::new(avro_alert.dia_source, avro_alert.dia_object)?;
 
         let candid = candidate.dia_source.candid;
         let object_id = candidate.object_id.clone();
@@ -1372,6 +1392,13 @@ impl AlertWorker for LsstAlertWorker {
         // Sort and deduplicate time series data by jd
         LsstPrvCandidate::sanitize_timeseries(&mut prv_candidates);
         LsstForcedPhot::sanitize_timeseries(&mut fp_hists);
+
+        let existing_alert_aux = self.get_existing_aux(&object_id).await?;
+
+        if candidate.jdstarthist.is_none() {
+            candidate.jdstarthist =
+                first_detection_jd(&prv_candidates, existing_alert_aux.as_ref());
+        }
 
         let alert = LsstAlert {
             candid,
@@ -1406,8 +1433,6 @@ impl AlertWorker for LsstAlertWorker {
         // so this only ever folds a `Some` designation into the same write as the
         // lightcurve/aliases update, in every branch below (fresh insert, versioned update, and
         // both DB-only fallbacks) instead of issuing a separate round trip.
-        let existing_alert_aux = self.get_existing_aux(&object_id).await?;
-
         if let Some(existing) = existing_alert_aux {
             self.update_aux(
                 &object_id,
