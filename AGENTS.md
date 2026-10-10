@@ -5,6 +5,18 @@ things that are easy to get wrong because nothing fails loudly when you do.
 For coding conventions (error handling, instrumentation, logging), see
 [CONTRIBUTING.md](CONTRIBUTING.md).
 
+## Skills live in `.agents/skills/`
+
+Step-by-step guidance for a particular kind of change — adding a data task
+type, adding an archival catalog — is in `.agents/skills/<name>/SKILL.md`. The
+sections below link the relevant one where it applies; read it before starting
+that kind of work, because what those files carry is the registration points
+and the order of operations that nothing fails loudly about.
+
+`.agents/` rather than a vendor's directory, so the guidance is not addressed
+to one tool. The trade is that a harness looking only in its own directory will
+not offer them as commands, so treat them as files to open.
+
 ## Production configs are generated — never edit them directly
 
 `config/prod/*/config.yaml` are **build artifacts**. Each one is the base
@@ -128,11 +140,56 @@ anywhere the repo writes English rather than code.
 
 Nothing enforces these, so they are worth a glance in review.
 
+## Bulk data never goes in git
+
+Catalog ingests, the boompy downloaders and the offline LS DR10 pipeline all
+write large binaries into the working tree — a chunk in flight, a converted
+parquet, a staged dataset. `.gitignore` excludes them **by extension**, not by
+directory, because the download path is configurable and listing directories
+only protects the ones someone thought of. The handful of binaries the repo does
+track (`data/models/`, `data/filters/`, `tests/data/`, the LS footprint) are
+re-included by explicit negation, so adding a new one means naming it there
+rather than reaching for `git add -f`.
+
+Two habits that go with it:
+
+- **Stage explicit paths.** `git add -A` in a tree where a background job is
+  writing will commit whatever it happened to produce. That is how a 42 MB
+  archive once ended up in a commit, with a 165 MB `.fits` queued to LFS behind
+  it.
+- **Check what a commit contains before pushing**, especially after running an
+  ingest: `git rev-list --objects @{u}..HEAD | git cat-file --batch-check=\
+  '%(objecttype) %(objectsize) %(rest)' | awk '$1=="blob" && $2>1000000'`
+  lists any blob over a megabyte in the unpushed range.
+
+## Data-mutating work is a task, not a binary
+
+Migrations, backfills, reprocessing and catalog ingests run through the task
+system, so they survive a deploy, stream their logs, can be cancelled, and leave
+a `data_mutations` entry naming the commit that ran. `src/bin/` holds services
+plus `check_config` and `add_filter`, which change nothing; a new data-mutating
+binary there is the one thing to avoid.
+
+Adding one: [`.agents/skills/add-data-task-type/SKILL.md`](.agents/skills/add-data-task-type/SKILL.md),
+with the reasoning in [docs/task-system.md](docs/task-system.md). Registration
+has five points in `src/tasks/mod.rs` and, like API routes, missing one fails
+quietly — `cargo test --lib tasks::tests` catches it.
+
+You can run a task against production data from a branch without merging, and
+the ledger still records which commit did it. The skill has the commands.
+
+Adding an archival catalog is its own path — a boompy downloader, a record type
+and a `CatalogDef`, ingested from the admin page *before* anything crossmatches
+against it:
+[`.agents/skills/add-data-catalog/SKILL.md`](.agents/skills/add-data-catalog/SKILL.md),
+with the reasoning in [docs/catalogs.md](docs/catalogs.md).
+
 ## Checks to run
 
 ```sh
 cargo fmt --all                 # or `make format` for pre-commit on everything
 cargo clippy --lib --bins --tests
+cd boompy && uv run pytest      # if you touched boompy
 make check-configs              # if you touched any config
 cd frontend && npx tsc --noEmit -p tsconfig.app.json && npm run build
 ```
