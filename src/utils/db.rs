@@ -604,6 +604,17 @@ pub async fn join_tasks<T>(
     }
 }
 
+/// Projection values MongoDB reads as "include".
+pub fn is_included(value: &Bson) -> bool {
+    match value {
+        Bson::Boolean(b) => *b,
+        Bson::Int32(i) => *i != 0,
+        Bson::Int64(i) => *i != 0,
+        Bson::Double(d) => *d != 0.0,
+        _ => true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
