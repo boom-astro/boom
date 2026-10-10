@@ -24,7 +24,7 @@ use boom::{
         },
     },
 };
-use clap::{Parser, ValueEnum};
+use clap::{parser::ValueSource, CommandFactory, FromArgMatches, Parser, ValueEnum};
 use flare::{spatial::great_circle_distance, Time};
 use futures::{StreamExt, TryStreamExt};
 use indicatif::ProgressBar;
@@ -70,7 +70,7 @@ struct Cli {
 
     /// Each catalog must already be declared under `crossmatch.<survey>` in
     /// config.yaml (radius / projection / etc. are read from there). With
-    /// `--remove`, the opposite: it must no longer be declared there.
+    /// `--remove`, the opposite: nothing in the config may still reference it.
     #[arg(long, value_delimiter = ',', num_args = 1..)]
     catalogs: Vec<String>,
 
@@ -110,7 +110,8 @@ struct Cli {
 
     /// Unset `cross_matches.<catalog>` from every alerts_aux record instead of
     /// computing matches, along with any state an earlier reprocess run left behind.
-    /// Idempotent, so an interrupted run can simply be rerun.
+    /// Requires an explicit `--config`, the deployment's own. Idempotent, so an
+    /// interrupted run can simply be rerun.
     #[arg(
         long,
         default_value_t = false,
@@ -119,7 +120,8 @@ struct Cli {
     remove: bool,
 
     /// With `--remove`: proceed even if a catalog is still declared under
-    /// `crossmatch.<survey>`. Live ingest will keep writing it on new records.
+    /// `crossmatch.<survey>` or used by `host_galaxy`. Live ingest will keep
+    /// writing it on new records.
     #[arg(long, default_value_t = false, requires = "remove")]
     force: bool,
 }
@@ -206,7 +208,7 @@ async fn run_objects_driven(
     let find_filter = if skip_existing {
         let missing: Vec<Document> = catalogs
             .iter()
-            .map(|c| doc! { format!("cross_matches.{}", c.catalog): { "$exists": false } })
+            .map(|c| doc! { xmatch_field(&c.catalog): { "$exists": false } })
             .collect();
         doc! { "$or": missing }
     } else {
@@ -306,7 +308,7 @@ async fn flush_objects_batch(
             let mut set_doc = Document::new();
             for cat in catalogs {
                 let matches = xmatches.remove(&cat.catalog).unwrap_or_default();
-                set_doc.insert(format!("cross_matches.{}", cat.catalog), matches);
+                set_doc.insert(xmatch_field(&cat.catalog), matches);
             }
             Some(WriteModel::UpdateOne(
                 UpdateOneModel::builder()
@@ -867,9 +869,8 @@ async fn commit_catalog(
 ) -> Result<(), TaskError> {
     let aux_collection: mongodb::Collection<Document> =
         db.collection(&format!("{}_alerts_aux", survey));
-    let live_field = format!("cross_matches.{}", catalog_config.catalog);
-    // Left by older versions of this binary, still present on some alerts_aux records.
-    let legacy_temp_field = format!("cross_matches.{}_temp", catalog_config.catalog);
+    let live_field = xmatch_field(&catalog_config.catalog);
+    let legacy_temp_field = legacy_temp_field(&catalog_config.catalog);
     let merge_into_aux = |value: Bson| {
         doc! { "$merge": {
             "into": aux_collection.name(),
@@ -965,50 +966,109 @@ fn catalog_buffer_name(survey: &Survey, catalog: &str) -> String {
     format!("reprocess_crossmatch_buffer_{}_{}", survey, catalog)
 }
 
+fn xmatch_field(catalog: &str) -> String {
+    format!("cross_matches.{}", catalog)
+}
+
+/// Left by older versions of this binary, still present on some alerts_aux records.
+fn legacy_temp_field(catalog: &str) -> String {
+    format!("cross_matches.{}_temp", catalog)
+}
+
+/// Matches records carrying any of the catalogs' live or legacy temp fields.
+fn has_any_field(catalogs: &[&str]) -> Document {
+    let clauses: Vec<Document> = catalogs
+        .iter()
+        .flat_map(|c| [xmatch_field(c), legacy_temp_field(c)])
+        .map(|field| doc! { field: { "$exists": true } })
+        .collect();
+    doc! { "$or": clauses }
+}
+
+fn shard_progress(completed: usize, total: usize, started: Instant) -> String {
+    let elapsed = started.elapsed();
+    format!(
+        "{} shards complete, {} elapsed, eta {}",
+        completed,
+        format_duration(elapsed.as_secs()),
+        format_eta(
+            (total - completed) as u64,
+            completed as f64 / elapsed.as_secs_f64()
+        )
+    )
+}
+
 // -----------------------------------------------------------------------------
-// remove: unset a dropped catalog's matches from alerts_aux, sharded like the commit
-// phase, then clear anything a catalog-driven run left behind for it.
+// remove: unset dropped catalogs' matches from alerts_aux in one sharded pass.
 // -----------------------------------------------------------------------------
-async fn run_remove(
-    survey: &Survey,
-    catalog: &str,
-    db: mongodb::Database,
+/// Returns the number of records modified.
+async fn remove_fields(
+    aux_collection: &mongodb::Collection<Document>,
+    catalogs: &[&str],
     processes: usize,
-) -> Result<(), TaskError> {
-    let label = format!("remove→{}", catalog);
-    let aux_collection: mongodb::Collection<Document> =
-        db.collection(&format!("{}_alerts_aux", survey));
-    let live_field = format!("cross_matches.{}", catalog);
-    let legacy_temp_field = format!("cross_matches.{}_temp", catalog);
+) -> Result<u64, mongodb::error::Error> {
+    let label = format!("remove→{}", catalogs.join(","));
+    let filter = has_any_field(catalogs);
+    let unset: Document = catalogs
+        .iter()
+        .flat_map(|c| [xmatch_field(c), legacy_temp_field(c)])
+        .map(|field| (field, Bson::String(String::new())))
+        .collect();
+    let update = doc! { "$unset": unset };
 
     let shards = range_shards(
-        &aux_collection,
+        aux_collection,
         processes * SHARDS_PER_PROCESS,
-        shard_field(&aux_collection).await,
+        shard_field(aux_collection).await,
         &Document::new(),
     )
     .await;
-    sharded_aggregate(
-        &aux_collection,
-        &shards,
-        processes,
-        &doc! { "$or": [
-            { &live_field: { "$exists": true } },
-            { &legacy_temp_field: { "$exists": true } },
-        ]},
-        vec![
-            doc! { "$project": { "_id": 1 } },
-            doc! { "$merge": {
-                "into": aux_collection.name(),
-                "on": "_id",
-                "whenMatched": [{ "$unset": [&live_field, &legacy_temp_field] }],
-                "whenNotMatched": "discard",
-            }},
-        ],
-        &label,
-    )
-    .await?;
+    let total = shards.len();
+    info!("[{}] running over {} shards", label, total);
+    let done = &AtomicUsize::new(0);
+    let started = Instant::now();
+    let results: Vec<_> = futures::stream::iter(shards.iter().enumerate().map(|(index, shard)| {
+        let filter = merge_filters(&filter, shard);
+        let update = update.clone();
+        let label = &label;
+        async move {
+            let result = aux_collection.update_many(filter, update).await;
+            let completed = done.fetch_add(1, Ordering::Relaxed) + 1;
+            let progress = shard_progress(completed, total, started);
+            match &result {
+                Ok(r) => info!(
+                    "[{}] shard {}/{} done, {} records modified ({})",
+                    label,
+                    index + 1,
+                    total,
+                    r.modified_count,
+                    progress
+                ),
+                Err(error) => warn!(
+                    %error,
+                    "[{}] shard {}/{} failed ({})",
+                    label,
+                    index + 1,
+                    total,
+                    progress
+                ),
+            }
+            result.map(|r| r.modified_count)
+        }
+    }))
+    .buffer_unordered(processes)
+    .collect()
+    .await;
+    results.into_iter().sum()
+}
 
+/// Deletes what a catalog-driven run left behind for the catalog: its state
+/// document and its buffer collections.
+async fn clear_reprocess_state(
+    db: &mongodb::Database,
+    survey: &Survey,
+    catalog: &str,
+) -> Result<(), mongodb::error::Error> {
     db.collection::<Document>(STATE_COLLECTION)
         .delete_one(doc! { "_id": catalog_state_id(survey, catalog) })
         .await?;
@@ -1042,16 +1102,7 @@ async fn sharded_aggregate(
         async move {
             let result = collection.aggregate(pipeline).allow_disk_use(true).await;
             let completed = done.fetch_add(1, Ordering::Relaxed) + 1;
-            let elapsed = started.elapsed();
-            let progress = format!(
-                "{} shards complete, {} elapsed, eta {}",
-                completed,
-                format_duration(elapsed.as_secs()),
-                format_eta(
-                    (total - completed) as u64,
-                    completed as f64 / elapsed.as_secs_f64()
-                )
-            );
+            let progress = shard_progress(completed, total, started);
             match &result {
                 Ok(_) => info!(
                     "[{}] shard {}/{} done ({})",
@@ -1189,7 +1240,18 @@ async fn main() {
         .finish();
     tracing::subscriber::set_global_default(subscriber).expect("setting subscriber failed");
 
-    let args = Cli::parse();
+    let matches = Cli::command().get_matches();
+    let args = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+
+    // The --remove safety check is only as good as the config it reads, and the
+    // base config.yaml is not what a deployment runs with.
+    if args.remove && matches.value_source("config") == Some(ValueSource::DefaultValue) {
+        error!(
+            "--remove checks the catalogs against the config, so pass the deployment's \
+             config explicitly with --config"
+        );
+        std::process::exit(1);
+    }
 
     if args.catalogs.is_empty() {
         error!("--catalogs requires at least one catalog name");
@@ -1239,14 +1301,7 @@ async fn main() {
         }
     };
     let mut resolved: Vec<CatalogXmatchConfig> = Vec::with_capacity(args.catalogs.len());
-    for name in &args.catalogs {
-        if resolved.iter().any(|c| &c.catalog == name) {
-            warn!(
-                "catalog '{}' listed more than once, ignoring the copy",
-                name
-            );
-            continue;
-        }
+    for name in dedup_catalogs(&args.catalogs) {
         match survey_configs.iter().find(|c| &c.catalog == name) {
             Some(c) => resolved.push(c.clone()),
             None => {
@@ -1364,17 +1419,43 @@ async fn main() {
     info!("reprocess_crossmatch complete.");
 }
 
-async fn run_remove_mode(args: &Cli, config: &AppConfig, db: mongodb::Database) {
-    let declared = config.crossmatch.get(&args.survey);
-    let mut catalogs: Vec<&String> = Vec::with_capacity(args.catalogs.len());
-    for name in &args.catalogs {
-        if catalogs.contains(&name) {
+fn dedup_catalogs(names: &[String]) -> Vec<&String> {
+    let mut unique: Vec<&String> = Vec::with_capacity(names.len());
+    for name in names {
+        if unique.contains(&name) {
             warn!(
                 "catalog '{}' listed more than once, ignoring the copy",
                 name
             );
             continue;
         }
+        unique.push(name);
+    }
+    unique
+}
+
+/// The config settings that still read or write the catalog's matches.
+fn catalog_references(config: &AppConfig, survey: &Survey, catalog: &str) -> Vec<String> {
+    let mut references = Vec::new();
+    if let Some(declared) = config.crossmatch.get(survey) {
+        if declared.iter().any(|c| c.catalog == catalog) {
+            references.push(format!("crossmatch.{}", survey.to_string().to_lowercase()));
+        }
+    }
+    let host = &config.host_galaxy;
+    if host.enabled && host.ned_catalog == catalog {
+        references.push("host_galaxy.ned_catalog".to_string());
+    }
+    if host.enabled && host.ls_dr10_catalog == catalog {
+        references.push("host_galaxy.ls_dr10_catalog".to_string());
+    }
+    references
+}
+
+async fn run_remove_mode(args: &Cli, config: &AppConfig, db: mongodb::Database) {
+    let mut catalogs: Vec<&str> = Vec::with_capacity(args.catalogs.len());
+    let mut still_referenced: Vec<&str> = Vec::new();
+    for name in dedup_catalogs(&args.catalogs) {
         // Watchlist matches live on the watchlist documents, not on alerts_aux.
         if name.starts_with(WATCHLIST_PREFIX) {
             error!(
@@ -1383,27 +1464,72 @@ async fn run_remove_mode(args: &Cli, config: &AppConfig, db: mongodb::Database) 
             );
             std::process::exit(1);
         }
-        let still_declared = declared.is_some_and(|c| c.iter().any(|c| &c.catalog == name));
-        if still_declared && !args.force {
-            error!(
-                "catalog '{}' is still declared under crossmatch.{} in {}, so live ingest would \
-                 keep writing it; remove it from the config first, or pass --force",
+        let references = catalog_references(config, &args.survey, name);
+        if !references.is_empty() {
+            if !args.force {
+                error!(
+                    "catalog '{}' is still referenced by {} in {}; remove it from the \
+                     config first, or pass --force",
+                    name,
+                    references.join(", "),
+                    args.config,
+                );
+                std::process::exit(1);
+            }
+            warn!(
+                "--force: removing '{}' although {} still references it",
                 name,
-                args.survey.to_string().to_lowercase(),
-                args.config,
+                references.join(", ")
             );
-            std::process::exit(1);
+            still_referenced.push(name);
         }
         catalogs.push(name);
     }
 
-    info!(
-        "starting remove: survey={} processes={} catalogs={:?}",
-        args.survey, args.processes, catalogs
-    );
-    for name in catalogs {
-        if let Err(e) = run_remove(&args.survey, name, db.clone(), args.processes).await {
-            error!("remove for '{}' failed: {}", name, e);
+    let aux_collection: mongodb::Collection<Document> =
+        db.collection(&format!("{}_alerts_aux", args.survey));
+    // Stops at the first hit, so this only scans the whole collection for a
+    // name that matches nothing, which is the case worth reporting.
+    let mut present: Vec<&str> = Vec::with_capacity(catalogs.len());
+    for &name in &catalogs {
+        match aux_collection
+            .find_one(has_any_field(&[name]))
+            .projection(doc! { "_id": 1 })
+            .await
+        {
+            Ok(Some(_)) => present.push(name),
+            Ok(None) => warn!(
+                "no {} record carries cross_matches.{}, nothing to remove (already removed, or \
+                 a misspelled catalog name)",
+                aux_collection.name(),
+                name
+            ),
+            Err(e) => {
+                error!("could not check for '{}' matches: {}", name, e);
+                std::process::exit(1);
+            }
+        }
+    }
+
+    if !present.is_empty() {
+        info!(
+            "starting remove: survey={} processes={} catalogs={:?}",
+            args.survey, args.processes, present
+        );
+        match remove_fields(&aux_collection, &present, args.processes).await {
+            Ok(modified) => info!("unset {:?} from {} records", present, modified),
+            Err(e) => {
+                error!("remove failed: {}", e);
+                std::process::exit(1);
+            }
+        }
+    }
+
+    // A catalog still in the config may have a catalog-driven run in flight,
+    // so its state is left alone.
+    for name in catalogs.iter().filter(|c| !still_referenced.contains(c)) {
+        if let Err(e) = clear_reprocess_state(&db, &args.survey, name).await {
+            error!("could not clear reprocess state for '{}': {}", name, e);
             std::process::exit(1);
         }
     }
@@ -1454,5 +1580,48 @@ mod sorted_matches_tests {
     fn test_the_array_is_trimmed() {
         let expression = sorted_matches(&config(None), "$m");
         assert!(expression.contains_key("$slice"));
+    }
+}
+
+#[cfg(test)]
+mod remove_tests {
+    use super::*;
+    use boom::conf::get_test_db;
+
+    #[tokio::test]
+    async fn test_remove_unsets_only_the_given_catalogs() {
+        let db = get_test_db().await;
+        let aux: mongodb::Collection<Document> =
+            db.collection(&format!("remove_test_{}", uuid::Uuid::new_v4().simple()));
+        aux.insert_many(vec![
+            doc! {
+                "_id": "a",
+                "cross_matches": { "OLD": [{ "id": 1 }], "OLD_temp": [], "KEEP": [{ "id": 2 }] },
+                "coordinates": { "ra": 1.0 },
+            },
+            doc! { "_id": "b", "cross_matches": { "OLD": [] } },
+            doc! { "_id": "c", "cross_matches": { "KEEP": [] } },
+        ])
+        .await
+        .unwrap();
+
+        let modified = remove_fields(&aux, &["OLD"], 2).await.unwrap();
+        assert_eq!(modified, 2);
+
+        let a = aux.find_one(doc! { "_id": "a" }).await.unwrap().unwrap();
+        let a_matches = a.get_document("cross_matches").unwrap();
+        assert!(!a_matches.contains_key("OLD"));
+        assert!(!a_matches.contains_key("OLD_temp"));
+        assert!(a_matches.contains_key("KEEP"));
+        assert!(a.contains_key("coordinates"));
+        let c = aux.find_one(doc! { "_id": "c" }).await.unwrap().unwrap();
+        assert!(c
+            .get_document("cross_matches")
+            .unwrap()
+            .contains_key("KEEP"));
+
+        // A rerun finds nothing left to do.
+        assert_eq!(remove_fields(&aux, &["OLD"], 2).await.unwrap(), 0);
+        aux.drop().await.unwrap();
     }
 }
