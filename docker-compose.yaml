@@ -766,6 +766,42 @@ services:
     command:
       - /app/scheduler
       - decam
+  # Moving-object discovery: once each ZTF night is over, links the last
+  # `linker.window_nights` nights of unassociated detections, stores the tracks
+  # in ZTF_tracks, and logs the recall on objects IPAC identified. Settings are
+  # in the `linker` section of the config.
+  linker-ztf:
+    image: ${BOOM_IMAGE:-ghcr.io/boom-astro/boom:latest}
+    pull_policy: ${BOOM_PULL_POLICY:-build}
+    hostname: linker-ztf
+    restart: always
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      # Required secrets - must be set in environment
+      BOOM_DATABASE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
+      BOOM_CUTOUTS_STORAGE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
+      BOOM_API__AUTH__SECRET_KEY: ${BOOM_API__AUTH__SECRET_KEY:?BOOM_API__AUTH__SECRET_KEY must be set}
+      BOOM_API__AUTH__ADMIN_PASSWORD: ${BOOM_API__AUTH__ADMIN_PASSWORD:?BOOM_API__AUTH__ADMIN_PASSWORD must be set}
+      # Optional overrides
+      BOOM_DATABASE__HOST: mongo
+      BOOM_DATABASE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
+      BOOM_CUTOUTS_STORAGE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
+      BOOM_CUTOUTS_STORAGE__TYPE: mongo
+      BOOM_CUTOUTS_STORAGE__HOST: mongo
+    deploy:
+      resources:
+        limits:
+          memory: 16g
+    networks:
+      - boom
+    profiles:
+      - prod
+    volumes:
+      - ${BOOM_CONFIG_PATH:-./config.yaml}:/app/config.yaml
+    command:
+      - /app/linker
   # Refreshes MPC_orbits, which ZTF enrichment reads to derive per-alert solar
   # system geometry. One-shot rather than long-running: it downloads ~316MB from
   # the MPC, parses it, and exits.

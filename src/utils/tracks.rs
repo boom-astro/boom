@@ -45,6 +45,37 @@ impl BoundFit {
             BoundFit::Ungated => "ungated",
         }
     }
+
+    pub fn parse(s: &str) -> Option<BoundFit> {
+        match s {
+            "good" => Some(BoundFit::Good),
+            "poor" => Some(BoundFit::Poor),
+            "none" => Some(BoundFit::None),
+            "ungated" => Some(BoundFit::Ungated),
+            _ => None,
+        }
+    }
+
+    /// Lower is better: a confident bound orbit first, then the ones worth a
+    /// look, then those too short to judge.
+    pub fn rank(&self) -> u8 {
+        match self {
+            BoundFit::Good => 0,
+            BoundFit::Poor => 1,
+            BoundFit::None => 2,
+            BoundFit::Ungated => 3,
+        }
+    }
+}
+
+/// Residuals closer than this are the same fit, refitted.
+const SAME_RESIDUAL_ARCSEC: f64 = 0.01;
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct StoredOrbit {
+    pub epoch_jd: f64,
+    pub pos: [f64; 3],
+    pub vel: [f64; 3],
 }
 
 /// A track as stored, keyed by an id that outlives any one linking run.
@@ -58,12 +89,16 @@ pub struct StoredTrack {
     /// sees only part of the track can still count its nights and span.
     #[serde(default)]
     pub epochs: Vec<f64>,
-    /// `good`, `poor`, `none` or `ungated`; absent on tracks from the tracklet
-    /// path, which gates on its own residual.
+    /// `good`, `poor`, `none` or `ungated`. A track from the tracklet path is
+    /// `good`, with the residual its orbit fit left, or `ungated`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bound_fit: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bound_fit_residual_arcsec: Option<f64>,
+    /// How many detections the verdict was fit on. Absent on tracks written
+    /// before it was recorded, where it is taken to be all of them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bound_fit_detections: Option<i32>,
     pub n_detections: i32,
     pub n_nights: i32,
     pub arc_days: f64,
@@ -73,6 +108,13 @@ pub struct StoredTrack {
     /// distinguishes a recovery from a discovery candidate.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub designation: Option<String>,
+    /// When the track was last written, Unix seconds. A client polling for new
+    /// and extended tracks asks for the ones updated since its last look.
+    /// Zero on tracks written before the field existed.
+    #[serde(default)]
+    pub updated_at: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub orbit: Option<StoredOrbit>,
 }
 
 /// Stamped on every member alert. The candids are deliberately not here:
@@ -186,7 +228,9 @@ pub fn alert_update(track: &AlertTrack) -> Document {
 }
 
 pub const TRACKS_COLLECTION: &str = "ZTF_tracks";
-const COUNTERS_COLLECTION: &str = "boom_counters";
+/// Small documents of shared state: id sequences, the tracks lock, and the
+/// last night the linker finished.
+pub const COUNTERS_COLLECTION: &str = "boom_counters";
 pub const ALIASES_COLLECTION: &str = "ZTF_tracks_aliases";
 
 /// Next sequence number, allocated atomically so concurrent runs cannot mint
@@ -202,35 +246,111 @@ async fn next_sequence(db: &mongodb::Database) -> Result<u64, mongodb::error::Er
 }
 
 const LOCK_ID: &str = "tracks_lock";
-const LOCK_LEASE_HOURS: i64 = 6;
+/// How long a lock outlives its holder's last renewal. Short, because a
+/// holder that dies keeps every other writer out until it lapses; a pass
+/// renews it as it goes, so the lease bounds the gap, not the run.
+pub const LOCK_LEASE: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+/// How often a pass renews the lock it holds.
+pub const LOCK_RENEW_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
 
-pub async fn acquire_lock(db: &mongodb::Database) -> Result<bool, mongodb::error::Error> {
-    let collection = db.collection::<Document>(COUNTERS_COLLECTION);
-    let now = mongodb::bson::DateTime::now();
-    collection
-        .delete_one(doc! { "_id": LOCK_ID, "expires_at": { "$lt": now } })
-        .await?;
-    let expires_at =
-        mongodb::bson::DateTime::from_millis(now.timestamp_millis() + LOCK_LEASE_HOURS * 3_600_000);
-    match collection
-        .insert_one(doc! { "_id": LOCK_ID, "expires_at": expires_at })
+/// The tracks lock, held. Only its holder can renew or release it, so a run
+/// whose lease lapsed cannot release the lock another run has since taken.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TracksLock {
+    owner: String,
+}
+
+/// The lease's end, computed by the server from its own clock, as an update
+/// pipeline stage. Every run reads and writes the lease against the same clock,
+/// so a run on a host whose clock runs ahead cannot judge a live lock expired.
+fn extend_lease() -> Vec<Document> {
+    vec![doc! { "$set": { "expires_at": { "$add": ["$$NOW", LOCK_LEASE.as_millis() as i64] } } }]
+}
+
+/// Take the tracks lock, or `None` when another run holds it.
+///
+/// One atomic update of the lock document, created if absent: it hands the
+/// lease to this run only when no live lease is recorded, judged by the
+/// server's clock, and the run holds the lock if it comes back as the owner.
+/// A document from before leases were recorded counts as lapsed.
+pub async fn acquire_lock(
+    db: &mongodb::Database,
+) -> Result<Option<TracksLock>, mongodb::error::Error> {
+    let lock = TracksLock {
+        owner: uuid::Uuid::new_v4().to_string(),
+    };
+    let update = vec![
+        // A missing lease compares as less than any time, so it is free too.
+        doc! { "$set": { "free": { "$lt": ["$expires_at", "$$NOW"] } } },
+        doc! { "$set": {
+            "owner": { "$cond": ["$free", &lock.owner, "$owner"] },
+            "expires_at": {
+                "$cond": ["$free", { "$add": ["$$NOW", LOCK_LEASE.as_millis() as i64] }, "$expires_at"]
+            },
+        } },
+        doc! { "$unset": "free" },
+    ];
+    let after = match db
+        .collection::<Document>(COUNTERS_COLLECTION)
+        .find_one_and_update(doc! { "_id": LOCK_ID }, update)
+        .upsert(true)
+        .return_document(mongodb::options::ReturnDocument::After)
         .await
     {
-        Ok(_) => Ok(true),
-        Err(error) => match *error.kind {
-            mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(
-                ref write_error,
-            )) if write_error.code == 11000 => Ok(false),
-            _ => Err(error),
-        },
+        Ok(after) => after,
+        // Two runs creating the document at once: the other one won.
+        Err(error) if is_duplicate_key(&error) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let owner = after.as_ref().and_then(|d| d.get_str("owner").ok());
+    Ok((owner == Some(lock.owner.as_str())).then_some(lock))
+}
+
+fn is_duplicate_key(error: &mongodb::error::Error) -> bool {
+    match &*error.kind {
+        mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(e)) => {
+            e.code == 11000
+        }
+        mongodb::error::ErrorKind::Command(e) => e.code == 11000,
+        _ => false,
     }
 }
 
-pub async fn release_lock(db: &mongodb::Database) -> Result<(), mongodb::error::Error> {
+/// Extend the lease. False when the lock is no longer this holder's: it
+/// lapsed and another run took it, so the caller must stop writing.
+pub async fn renew_lock(
+    db: &mongodb::Database,
+    lock: &TracksLock,
+) -> Result<bool, mongodb::error::Error> {
+    let result = db
+        .collection::<Document>(COUNTERS_COLLECTION)
+        .update_one(
+            doc! { "_id": LOCK_ID, "owner": &lock.owner },
+            extend_lease(),
+        )
+        .await?;
+    Ok(result.matched_count == 1)
+}
+
+/// Release the lock if this holder still has it, and never anyone else's.
+pub async fn release_lock(
+    db: &mongodb::Database,
+    lock: &TracksLock,
+) -> Result<(), mongodb::error::Error> {
     db.collection::<Document>(COUNTERS_COLLECTION)
-        .delete_one(doc! { "_id": LOCK_ID })
+        .delete_one(doc! { "_id": LOCK_ID, "owner": &lock.owner })
         .await?;
     Ok(())
+}
+
+/// Whether some run holds a live lock, so a caller can wait rather than do
+/// work it could not store.
+pub async fn lock_is_held(db: &mongodb::Database) -> Result<bool, mongodb::error::Error> {
+    let held = db
+        .collection::<Document>(COUNTERS_COLLECTION)
+        .find_one(doc! { "_id": LOCK_ID, "$expr": { "$gte": ["$expires_at", "$$NOW"] } })
+        .await?;
+    Ok(held.is_some())
 }
 
 /// Stored tracks sharing any detection with `members`, which is the candidate
@@ -269,11 +389,18 @@ pub struct UpsertPlan {
     pub last_jd: f64,
     pub bound_fit: Option<String>,
     pub bound_fit_residual_arcsec: Option<f64>,
+    pub bound_fit_detections: Option<i32>,
+    pub orbit: Option<StoredOrbit>,
     pub designation: Option<String>,
     /// Ids a merge would absorb and then delete.
     pub superseded: Vec<String>,
     /// Detections dropped because another track already owns them.
     pub contested: Vec<i64>,
+    /// When the stored track was last written, if this plan would write it
+    /// back exactly as it is. A nightly run re-finds every track still in its
+    /// window, and rewriting those would make each look new to a client
+    /// polling `updated_at`.
+    pub unchanged_since: Option<f64>,
 }
 
 impl UpsertPlan {
@@ -288,6 +415,7 @@ impl UpsertPlan {
     /// One line naming what the write would do, for a dry run's log.
     pub fn describe(&self) -> String {
         let what = match (&self.id, self.superseded.is_empty()) {
+            (Some(id), _) if self.unchanged_since.is_some() => format!("unchanged {id}"),
             (None, _) => "new".to_string(),
             (Some(id), true) => format!("extends {id}"),
             (Some(id), false) => {
@@ -317,6 +445,13 @@ pub struct Upserted {
     pub superseded: Vec<String>,
 }
 
+/// How many detections a stored verdict was fit on. A track written before
+/// that was recorded is taken to have been fit on all of them, which is what
+/// both the linking and THOR passes did.
+fn fit_detections(t: &StoredTrack) -> i32 {
+    t.bound_fit_detections.unwrap_or(t.n_detections)
+}
+
 /// Resolve a run's track against what is stored, without writing anything.
 ///
 /// `members` and `jds` are parallel and need not be sorted. A merge takes the
@@ -328,6 +463,7 @@ pub async fn plan_upsert(
     jds: &[f64],
     designation: Option<String>,
     bound_fit: Option<(BoundFit, Option<f64>)>,
+    orbit: Option<StoredOrbit>,
 ) -> Result<UpsertPlan, mongodb::error::Error> {
     let existing = overlapping(db, members).await?;
     let identity = identify(members, &existing);
@@ -376,9 +512,56 @@ pub async fn plan_upsert(
         .collect();
     contested.sort_unstable();
 
+    // The verdict fit on more of the track stands, whichever way it went: a
+    // THOR cluster over the last few nights of an object linked across two
+    // weeks does not overrule the two-week fit, and a longer arc no bound orbit
+    // fits replaces a good fit on fewer nights. A fit on as much of it is the
+    // newer one and replaces it. Without this the linking and THOR passes
+    // would overwrite each other's verdict every night.
+    //
+    // Counted over this run's own detections, not ones another track keeps.
+    let incoming_fit =
+        bound_fit.map(|(fit, r)| (fit, r, (members.len() - contested.len()) as i32, orbit));
+    let stored_fit = existing
+        .iter()
+        .filter(|t| absorbed.contains(&&t.id))
+        .filter_map(|t| {
+            let fit = BoundFit::parse(t.bound_fit.as_deref()?)?;
+            Some((fit, t.bound_fit_residual_arcsec, fit_detections(t), t.orbit))
+        })
+        .max_by_key(|&(fit, _, fit_on, _)| (fit_on, std::cmp::Reverse(fit.rank())));
+    let bound_fit = match (incoming_fit, stored_fit) {
+        (Some(new), Some(old)) if old.2 > new.2 => Some(old),
+        (None, old) => old,
+        (new, _) => new,
+    };
+
     let all: Vec<i64> = by_candid.keys().copied().collect();
     let epochs: Vec<f64> = by_candid.values().copied().collect();
     let (n_detections, n_nights, arc_days, first_jd, last_jd) = summarise(&all, &epochs);
+    let bound_fit_residual_arcsec = bound_fit.and_then(|(_, r, _, _)| r);
+    let bound_fit_detections = bound_fit.map(|(_, _, n, _)| n);
+    let orbit = bound_fit.and_then(|(_, _, _, o)| o);
+    let bound_fit = bound_fit.map(|(f, _, _, _)| f.as_str().to_string());
+    let unchanged_since = match (&id, superseded.is_empty()) {
+        (Some(id), true) => existing
+            .iter()
+            .find(|t| &t.id == id)
+            .filter(|t| {
+                t.members == all
+                    && t.epochs == epochs
+                    && t.designation == designation
+                    && t.bound_fit == bound_fit
+                    && (orbit.is_none() || t.orbit.is_some())
+                    && bound_fit_detections.is_none_or(|n| n == fit_detections(t))
+                    && match (t.bound_fit_residual_arcsec, bound_fit_residual_arcsec) {
+                        (Some(a), Some(b)) => (a - b).abs() < SAME_RESIDUAL_ARCSEC,
+                        (a, b) => a.is_none() && b.is_none(),
+                    }
+            })
+            .map(|t| t.updated_at),
+        _ => None,
+    };
     Ok(UpsertPlan {
         id,
         members: all,
@@ -388,15 +571,19 @@ pub async fn plan_upsert(
         arc_days,
         first_jd,
         last_jd,
-        bound_fit: bound_fit.map(|(f, _)| f.as_str().to_string()),
-        bound_fit_residual_arcsec: bound_fit.and_then(|(_, r)| r),
+        bound_fit,
+        bound_fit_residual_arcsec,
+        bound_fit_detections,
+        orbit,
         designation,
         superseded,
         contested,
+        unchanged_since,
     })
 }
 
-/// Write a plan, minting an id if it needs one.
+/// Write a plan, minting an id if it needs one. A plan that would write the
+/// stored track back unchanged writes nothing, so its `updated_at` stands.
 pub async fn commit_upsert(
     db: &mongodb::Database,
     plan: UpsertPlan,
@@ -411,13 +598,24 @@ pub async fn commit_upsert(
         epochs: plan.epochs,
         bound_fit: plan.bound_fit,
         bound_fit_residual_arcsec: plan.bound_fit_residual_arcsec,
+        bound_fit_detections: plan.bound_fit_detections,
         n_detections: plan.n_detections,
         n_nights: plan.n_nights,
         arc_days: plan.arc_days,
         first_jd: plan.first_jd,
         last_jd: plan.last_jd,
         designation: plan.designation,
+        orbit: plan.orbit,
+        updated_at: plan
+            .unchanged_since
+            .unwrap_or_else(|| chrono::Utc::now().timestamp_millis() as f64 / 1000.0),
     };
+    if plan.unchanged_since.is_some() {
+        return Ok(Upserted {
+            track: stored,
+            superseded: Vec::new(),
+        });
+    }
     let collection = db.collection::<StoredTrack>(TRACKS_COLLECTION);
     collection
         .replace_one(doc! { "_id": &id }, &stored)
@@ -460,6 +658,26 @@ pub async fn stamp_members(
     let result = db
         .collection::<Document>("ZTF_alerts")
         .update_many(doc! { "_id": { "$in": &stored.members } }, update)
+        .await?;
+    Ok(result.modified_count)
+}
+
+/// Stamp the track onto the members that do not carry it yet.
+///
+/// For a track re-found unchanged, whose members were stamped when it was
+/// written: this repairs a stamp that failed then, and otherwise matches and
+/// writes nothing.
+pub async fn stamp_missing(
+    db: &mongodb::Database,
+    stored: &StoredTrack,
+) -> Result<u64, mongodb::error::Error> {
+    let update = alert_update(&AlertTrack::from(stored));
+    let result = db
+        .collection::<Document>("ZTF_alerts")
+        .update_many(
+            doc! { "_id": { "$in": &stored.members }, "track.id": { "$ne": &stored.id } },
+            update,
+        )
         .await?;
     Ok(result.modified_count)
 }
@@ -520,7 +738,9 @@ pub fn restrict_to(
         return None;
     }
     let (n_detections, n_nights, arc_days, first_jd, last_jd) = summarise(&members, &epochs);
+    let orbit = track.orbit.filter(|_| members.len() == track.members.len());
     Some(StoredTrack {
+        orbit,
         members,
         epochs,
         n_detections,
@@ -533,7 +753,7 @@ pub fn restrict_to(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn stored(id: &str, members: &[i64]) -> StoredTrack {
@@ -544,12 +764,15 @@ mod tests {
             epochs: (0..members.len()).map(|k| 2460000.0 + k as f64).collect(),
             bound_fit: None,
             bound_fit_residual_arcsec: None,
+            bound_fit_detections: None,
             n_detections: members.len() as i32,
             n_nights: 2,
             arc_days: 1.0,
             first_jd: 2460000.0,
             last_jd: 2460001.0,
             designation: None,
+            updated_at: 0.0,
+            orbit: None,
         }
     }
 
@@ -637,9 +860,12 @@ mod tests {
             last_jd: 2460000.0,
             bound_fit: None,
             bound_fit_residual_arcsec: None,
+            bound_fit_detections: None,
+            orbit: None,
             designation: None,
             superseded: Vec::new(),
             contested: vec![11, 12],
+            unchanged_since: None,
         };
         assert!(
             !plan.meets(2, 2),
@@ -713,5 +939,252 @@ mod tests {
         t.first_jd = 2461293.8666435;
         let carried = AlertTrack::from(&t);
         assert_eq!(carried.first_jd, 2461293.8666435);
+    }
+
+    /// Candids no other test uses, so tests can share the database.
+    fn fresh_members(n: i64) -> Vec<i64> {
+        let base = (uuid::Uuid::new_v4().as_u128() as i64).abs() / 16;
+        (base..base + n).collect()
+    }
+
+    async fn store(
+        db: &mongodb::Database,
+        members: &[i64],
+        fit: (BoundFit, Option<f64>),
+    ) -> Upserted {
+        // Each detection's epoch follows from its id, as in a real run where a
+        // detection has one epoch however many tracks find it.
+        let jds: Vec<f64> = members
+            .iter()
+            .map(|m| 2460000.0 + m.rem_euclid(1000) as f64)
+            .collect();
+        let plan = plan_upsert(db, members, &jds, None, Some(fit), None)
+            .await
+            .unwrap();
+        commit_upsert(db, plan).await.unwrap()
+    }
+
+    /// A database of its own, for tests that take the tracks lock: it is
+    /// shared by everything writing to one database, so tests running in
+    /// parallel would otherwise find each other holding it.
+    ///
+    /// Named after the test rather than at random, and emptied before use, so
+    /// a run that fails before dropping it leaves one database to reuse, not a
+    /// new one every time.
+    pub(crate) async fn private_db(test: &str) -> mongodb::Database {
+        let db = crate::conf::get_test_db()
+            .await
+            .client()
+            .database(&format!("boom_test_lock_{test}"));
+        db.drop().await.unwrap();
+        db
+    }
+
+    #[tokio::test]
+    async fn test_only_the_holder_releases_or_renews_the_lock() {
+        let db = private_db("owner").await;
+        let held = acquire_lock(&db).await.unwrap().expect("the lock is free");
+        assert!(acquire_lock(&db).await.unwrap().is_none(), "already held");
+        assert!(lock_is_held(&db).await.unwrap());
+
+        let stale = TracksLock {
+            owner: "a run whose lease lapsed".to_string(),
+        };
+        release_lock(&db, &stale).await.unwrap();
+        assert!(
+            lock_is_held(&db).await.unwrap(),
+            "a former holder must not release the current holder's lock"
+        );
+        assert!(!renew_lock(&db, &stale).await.unwrap());
+        assert!(renew_lock(&db, &held).await.unwrap());
+
+        release_lock(&db, &held).await.unwrap();
+        assert!(!lock_is_held(&db).await.unwrap());
+        assert!(acquire_lock(&db).await.unwrap().is_some());
+        db.drop().await.unwrap();
+    }
+
+    /// A longer arc no bound orbit fits is the anomaly the verdict exists to
+    /// keep, so it replaces a better verdict fit on less of the track.
+    #[tokio::test]
+    async fn test_a_verdict_from_more_of_the_track_stands() {
+        let db = crate::conf::get_test_db().await;
+        let members = fresh_members(5);
+        let short = store(&db, &members[..3], (BoundFit::Good, Some(1.2))).await;
+        assert_eq!(short.track.bound_fit_detections, Some(3));
+        let longer = store(&db, &members, (BoundFit::None, None)).await;
+        assert_eq!(longer.track.id, short.track.id);
+        assert_eq!(longer.track.bound_fit.as_deref(), Some("none"));
+        assert_eq!(longer.track.bound_fit_residual_arcsec, None);
+        assert_eq!(longer.track.bound_fit_detections, Some(5));
+    }
+
+    /// A THOR pair over the last nights of a linked object must not wipe the
+    /// orbit the linking pass fit across the whole arc.
+    #[tokio::test]
+    async fn test_a_worse_verdict_does_not_overwrite_a_stored_one() {
+        let db = crate::conf::get_test_db().await;
+        let members = fresh_members(6);
+        let linked = store(&db, &members, (BoundFit::Good, Some(0.8))).await;
+        let pair = store(&db, &members[4..], (BoundFit::Ungated, None)).await;
+        assert_eq!(pair.track.id, linked.track.id, "the pair extends the track");
+        assert_eq!(pair.track.bound_fit.as_deref(), Some("good"));
+        assert_eq!(pair.track.bound_fit_residual_arcsec, Some(0.8));
+
+        let refit = store(&db, &members, (BoundFit::Good, Some(0.5))).await;
+        assert_eq!(
+            refit.track.bound_fit_residual_arcsec,
+            Some(0.5),
+            "an equally good verdict is the newer fit and replaces it"
+        );
+    }
+
+    /// Re-finding a track exactly as stored must not make it look new to a
+    /// client polling `updated_at`.
+    #[tokio::test]
+    async fn test_an_unchanged_track_keeps_its_updated_at() {
+        let db = crate::conf::get_test_db().await;
+        let members = fresh_members(4);
+        let first = store(&db, &members, (BoundFit::Good, Some(0.8))).await;
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let again = store(&db, &members, (BoundFit::Good, Some(0.8001))).await;
+        assert_eq!(again.track.updated_at, first.track.updated_at);
+        let stored = track_by_id(&db, &first.track.id).await.unwrap().unwrap();
+        assert_eq!(stored.updated_at, first.track.updated_at);
+
+        let mut longer = members.clone();
+        longer.extend(fresh_members(1));
+        let extended = store(&db, &longer, (BoundFit::Good, Some(0.8))).await;
+        assert_eq!(extended.track.id, first.track.id);
+        assert!(
+            extended.track.updated_at > first.track.updated_at,
+            "an extension is a change"
+        );
+    }
+
+    /// The linking pass fits a whole two weeks and THOR the last few nights,
+    /// both every night. Neither may overwrite the other's verdict in turn, or
+    /// every track both find would look updated every night.
+    #[tokio::test]
+    async fn test_the_linking_and_thor_verdicts_do_not_take_turns() {
+        let db = crate::conf::get_test_db().await;
+        let members = fresh_members(14);
+        let linked = store(&db, &members, (BoundFit::Good, Some(0.6))).await;
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let thor = store(&db, &members[9..], (BoundFit::Good, Some(1.1))).await;
+        assert_eq!(thor.track.id, linked.track.id);
+        assert_eq!(thor.track.bound_fit_residual_arcsec, Some(0.6));
+        assert_eq!(thor.track.bound_fit_detections, Some(14));
+        assert_eq!(thor.track.updated_at, linked.track.updated_at);
+
+        let relinked = store(&db, &members, (BoundFit::Good, Some(0.6))).await;
+        assert_eq!(relinked.track.updated_at, linked.track.updated_at);
+    }
+
+    /// A track stored before verdicts recorded their detection count was fit
+    /// on all of them; re-finding it unchanged must not rewrite it.
+    #[tokio::test]
+    async fn test_a_track_from_before_fit_counts_is_not_rewritten() {
+        let db = crate::conf::get_test_db().await;
+        let members = fresh_members(4);
+        let first = store(&db, &members, (BoundFit::Good, Some(0.8))).await;
+        db.collection::<Document>(TRACKS_COLLECTION)
+            .update_one(
+                doc! { "_id": &first.track.id },
+                doc! { "$unset": { "bound_fit_detections": "" } },
+            )
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let again = store(&db, &members, (BoundFit::Good, Some(0.8))).await;
+        assert_eq!(again.track.updated_at, first.track.updated_at);
+        let stored = track_by_id(&db, &first.track.id).await.unwrap().unwrap();
+        assert_eq!(stored.updated_at, first.track.updated_at);
+    }
+
+    /// Detections another track keeps are dropped from this one, so they are
+    /// no part of what its verdict rests on.
+    #[tokio::test]
+    async fn test_contested_detections_do_not_count_toward_a_verdict() {
+        let db = crate::conf::get_test_db().await;
+        let other = fresh_members(3);
+        store(&db, &other, (BoundFit::Good, Some(0.5))).await;
+        let own = fresh_members(4);
+        let mut found = own.clone();
+        found.push(other[0]);
+        let track = store(&db, &found, (BoundFit::Good, Some(0.9))).await;
+        assert_eq!(track.track.members, own);
+        assert_eq!(track.track.bound_fit_detections, Some(4));
+    }
+
+    /// A lease that ran out, or a lock document from before leases were
+    /// recorded, is taken over; a live one is not.
+    #[tokio::test]
+    async fn test_a_lapsed_lock_is_taken_over() {
+        let db = private_db("lapsed").await;
+        let counters = db.collection::<Document>(COUNTERS_COLLECTION);
+        let past = mongodb::bson::DateTime::from_millis(0);
+        counters
+            .insert_one(doc! { "_id": LOCK_ID, "owner": "gone", "expires_at": past })
+            .await
+            .unwrap();
+        assert!(!lock_is_held(&db).await.unwrap());
+        let taken = acquire_lock(&db)
+            .await
+            .unwrap()
+            .expect("a lapsed lease is free");
+        assert!(acquire_lock(&db).await.unwrap().is_none());
+        release_lock(&db, &taken).await.unwrap();
+
+        counters.insert_one(doc! { "_id": LOCK_ID }).await.unwrap();
+        assert!(
+            acquire_lock(&db).await.unwrap().is_some(),
+            "no lease recorded"
+        );
+        db.drop().await.unwrap();
+    }
+
+    /// Repairing an unchanged track's stamps touches only the alerts missing it.
+    #[tokio::test]
+    async fn test_stamp_missing_writes_only_unstamped_members() {
+        let db = crate::conf::get_test_db().await;
+        let alerts = db.collection::<Document>("ZTF_alerts");
+        let members = fresh_members(4);
+        for &id in &members {
+            alerts.insert_one(doc! { "_id": id }).await.unwrap();
+        }
+        let stored = stored(&format!("BT{}", members[0]), &members);
+        alerts
+            .update_many(
+                doc! { "_id": { "$in": &members[..3] } },
+                alert_update(&AlertTrack::from(&stored)),
+            )
+            .await
+            .unwrap();
+        assert_eq!(stamp_missing(&db, &stored).await.unwrap(), 1);
+        assert_eq!(stamp_missing(&db, &stored).await.unwrap(), 0);
+        alerts
+            .delete_many(doc! { "_id": { "$in": &members } })
+            .await
+            .unwrap();
+    }
+
+    /// However many runs ask at once, exactly one gets the lock.
+    #[tokio::test]
+    async fn test_one_of_many_concurrent_runs_takes_the_lock() {
+        let db = private_db("race").await;
+        let tries = (0..8).map(|_| {
+            let db = db.clone();
+            tokio::spawn(async move { acquire_lock(&db).await.unwrap() })
+        });
+        let mut held = 0;
+        for t in tries {
+            held += t.await.unwrap().is_some() as usize;
+        }
+        assert_eq!(held, 1);
+        db.drop().await.unwrap();
     }
 }

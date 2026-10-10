@@ -1427,6 +1427,125 @@ impl MilvusConfig {
     }
 }
 
+/// The `linker` service, which runs moving-object discovery over the last few
+/// nights of ZTF data once each night is over, and stores what it finds as
+/// tracks. The `linker-ztf` compose service runs it with the prod profile.
+#[derive(Debug, Clone, Deserialize)]
+pub struct LinkerConfig {
+    /// Nights of detections a linking pass reads, ending with the night just
+    /// over.
+    #[serde(default = "default_linker_window_nights")]
+    pub window_nights: u32,
+    /// Nights a THOR pass reads, the most recent of the linking window.
+    #[serde(default = "default_linker_thor_window_nights")]
+    pub thor_window_nights: u32,
+    /// UTC hour after which the night observed that morning counts as over.
+    #[serde(default = "default_linker_run_after_utc_hour")]
+    pub run_after_utc_hour: u32,
+    /// Minimum drb for a detection to be searched.
+    #[serde(default = "default_linker_drb")]
+    pub drb: f64,
+    /// Link tracklets across nights.
+    #[serde(default = "default_linker_pass")]
+    pub link: bool,
+    /// Recover objects seen once a night with THOR.
+    #[serde(default = "default_linker_pass")]
+    pub thor: bool,
+    /// Match tracks to MPC_orbits, so a known object is stored under its
+    /// designation as a recovery rather than as a discovery candidate.
+    #[serde(default = "default_linker_pass")]
+    pub match_known: bool,
+    /// Store tracks and stamp their alerts. Off, a run reports what it would
+    /// store and writes nothing.
+    #[serde(default = "default_linker_pass")]
+    pub persist: bool,
+    /// Also link the detections IPAC already identified, store nothing, and
+    /// report how many of those objects the search recovered.
+    #[serde(default = "default_linker_pass")]
+    pub recall: bool,
+    /// Nights the recall pass reads, the most recent of the window. Most ZTF
+    /// alerts are known asteroids, so this pass can far outweigh the search.
+    #[serde(default = "default_linker_recall_window_nights")]
+    pub recall_window_nights: u32,
+    #[serde(default = "default_linker_pass")]
+    pub attach: bool,
+    #[serde(default = "default_linker_attach_lookback_nights")]
+    pub attach_lookback_nights: u32,
+}
+
+impl LinkerConfig {
+    /// Settings no night could be searched with, which would otherwise shift
+    /// or empty every window without saying so.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.run_after_utc_hour > 23 {
+            return Err(format!(
+                "run_after_utc_hour is {}, not an hour of the day",
+                self.run_after_utc_hour
+            ));
+        }
+        if self.window_nights == 0 || self.recall_window_nights == 0 {
+            return Err("window_nights and recall_window_nights must be at least 1".to_string());
+        }
+        if self.thor_window_nights == 0 || self.thor_window_nights > self.window_nights {
+            return Err(format!(
+                "thor_window_nights is {}, but must be between 1 and window_nights ({})",
+                self.thor_window_nights, self.window_nights
+            ));
+        }
+        if !(0.0..=1.0).contains(&self.drb) {
+            return Err(format!("drb is {}, but scores run from 0 to 1", self.drb));
+        }
+        Ok(())
+    }
+}
+
+impl Default for LinkerConfig {
+    fn default() -> Self {
+        LinkerConfig {
+            window_nights: default_linker_window_nights(),
+            thor_window_nights: default_linker_thor_window_nights(),
+            run_after_utc_hour: default_linker_run_after_utc_hour(),
+            drb: default_linker_drb(),
+            link: default_linker_pass(),
+            thor: default_linker_pass(),
+            match_known: default_linker_pass(),
+            persist: default_linker_pass(),
+            recall: default_linker_pass(),
+            recall_window_nights: default_linker_recall_window_nights(),
+            attach: default_linker_pass(),
+            attach_lookback_nights: default_linker_attach_lookback_nights(),
+        }
+    }
+}
+
+fn default_linker_attach_lookback_nights() -> u32 {
+    60
+}
+
+fn default_linker_recall_window_nights() -> u32 {
+    5
+}
+
+fn default_linker_window_nights() -> u32 {
+    14
+}
+
+fn default_linker_thor_window_nights() -> u32 {
+    5
+}
+
+fn default_linker_run_after_utc_hour() -> u32 {
+    14
+}
+
+fn default_linker_drb() -> f64 {
+    0.8
+}
+
+fn default_linker_pass() -> bool {
+    true
+}
+
 #[derive(Deserialize, Debug, Clone)]
 pub struct AppConfig {
     pub api: ApiConfig,
@@ -1448,6 +1567,8 @@ pub struct AppConfig {
     pub milvus: MilvusConfig,
     #[serde(default)]
     pub host_galaxy: HostGalaxyConfig,
+    #[serde(default)]
+    pub linker: LinkerConfig,
     pub cutouts_storage: CutoutsStorage,
 }
 

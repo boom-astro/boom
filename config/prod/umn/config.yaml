@@ -267,6 +267,35 @@ host_galaxy:
   rex_min_snr: 5.0
   rex_max_fracflux: 0.5
   isophote_mag: 25.0 # puts Legacy R_e on the NED-LVS D25 scale
+# Moving-object discovery, run once each ZTF night is over by the linker-ztf
+# service, which deploys with the rest of the prod profile.
+# Tracks are stored in ZTF_tracks and stamped on their alerts; nothing is sent
+# anywhere else yet.
+linker:
+  # Nights of detections each linking pass reads, ending with the night just
+  # over. Recall on synthetic ZTF-like data rose from 87% at 7 nights to 94% at
+  # 14, at about twice the time.
+  window_nights: 14
+  # Nights THOR reads, the most recent of the window. Validated on 5.
+  thor_window_nights: 5
+  # UTC hour after which the night observed that morning counts as over.
+  # Palomar's nights end by about 13:00 UTC.
+  run_after_utc_hour: 14
+  drb: 0.8 # minimum drb for a detection to be searched
+  link: true # link tracklets across nights
+  thor: true # recover objects seen once a night
+  # Store known objects under their MPC designation, as recoveries rather
+  # than discovery candidates.
+  match_known: true
+  persist: true # false reports what would be stored and writes nothing
+  # Also link the detections IPAC already identified, store nothing, and log
+  # how many of those objects the search recovered.
+  recall: true
+  # Nights the recall pass reads. Most ZTF alerts are known asteroids, so this
+  # pass can outweigh the search itself.
+  recall_window_nights: 5
+  attach: true
+  attach_lookback_nights: 60
 crossmatch:
   ztf:
     Gaia_DR3:
