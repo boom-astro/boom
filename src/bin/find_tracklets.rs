@@ -771,27 +771,52 @@ async fn run_identify(args: &Cli, detections: &[Detection], labels: &HashMap<i64
     }
 }
 
-/// Ctrl-C while tracks are being stored, which must stop between tracks so
-/// the tracks lock is released rather than held for its lease.
+/// Ctrl-C or SIGTERM while tracks are being stored, which must stop between
+/// tracks so the tracks lock is released rather than held for its lease.
 static STOP: Stop = Stop::new();
 
-/// On Ctrl-C, exit at once unless a pass is storing tracks; then let it stop
-/// at the next track and release the lock. A second Ctrl-C exits regardless.
-fn exit_on_ctrl_c() {
-    tokio::spawn(async {
-        if tokio::signal::ctrl_c().await.is_err() {
-            return;
+/// Wait for Ctrl-C or SIGTERM, whichever comes first.
+async fn interrupted(terminate: &mut Option<tokio::signal::unix::Signal>) {
+    match terminate {
+        Some(terminate) => {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = terminate.recv() => {}
+            }
         }
+        None => {
+            let _ = tokio::signal::ctrl_c().await;
+        }
+    }
+}
+
+/// On Ctrl-C or SIGTERM, exit at once unless a pass is storing tracks; then
+/// let it stop at the next track and release the lock. A second signal exits
+/// regardless.
+fn exit_on_interrupt() {
+    use tokio::signal::unix::{signal, SignalKind};
+    let mut terminate = match signal(SignalKind::terminate()) {
+        Ok(terminate) => Some(terminate),
+        Err(e) => {
+            error!(
+                "cannot listen for SIGTERM, so only Ctrl-C releases the tracks lock: {}",
+                e
+            );
+            None
+        }
+    };
+    tokio::spawn(async move {
+        interrupted(&mut terminate).await;
         if !STOP.request() {
             std::process::exit(130);
         }
-        info!("stopping after the current track, so the tracks lock is released; Ctrl-C again to quit now");
-        let _ = tokio::signal::ctrl_c().await;
+        info!("stopping after the current track, so the tracks lock is released; interrupt again to quit now");
+        interrupted(&mut terminate).await;
         std::process::exit(130);
     });
 }
 
-/// End the run once a pass has stopped and released the lock on Ctrl-C.
+/// End the run once a pass has stopped and released the lock on an interrupt.
 fn exit_if_stopped() {
     if STOP.requested() {
         std::process::exit(130);
@@ -805,7 +830,7 @@ async fn main() {
         .finish();
     tracing::subscriber::set_global_default(subscriber).expect("failed to set subscriber");
     load_dotenv();
-    exit_on_ctrl_c();
+    exit_on_interrupt();
 
     let args = Cli::parse();
     // Persisting and matching to the catalogue need the database even when the
