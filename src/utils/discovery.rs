@@ -16,8 +16,8 @@ use crate::utils::orbit_fit::{fit_within, Observation};
 use crate::utils::sso_geometry::Site;
 use crate::utils::thor;
 use crate::utils::tracks::{
-    acquire_lock, commit_upsert, plan_upsert, release_lock, renew_lock, stamp_members, BoundFit,
-    LOCK_RENEW_EVERY, SHARED_FOR_IDENTITY,
+    acquire_lock, commit_upsert, plan_upsert, release_lock, renew_lock, stamp_members,
+    stamp_missing, BoundFit, LOCK_LEASE, LOCK_RENEW_EVERY, SHARED_FOR_IDENTITY,
 };
 use futures::StreamExt;
 use mongodb::bson::{doc, Document};
@@ -251,7 +251,7 @@ impl Default for ThorSearch {
 /// A trial orbit only governs the detections near where it sits -- beyond a
 /// couple of degrees the co-moving frame no longer applies -- so the sky is
 /// divided into patches and each is searched with its own orbits. One orbit at
-/// the centre of a whole night's coverage governs almost nothing.
+/// the center of a whole night's coverage governs almost nothing.
 pub fn thor_clusters(
     detections: &[Detection],
     search: &ThorSearch,
@@ -282,7 +282,7 @@ pub fn thor_clusters(
             .enumerate()
         {
             let dy = (d.dec / patch_deg + oy).floor() as i64;
-            // One RA cut per band, off the band centre rather than each
+            // One RA cut per band, off the band center rather than each
             // detection's own dec, or the same RA lands in different patches at
             // either edge of the band. Equal-area, so bands narrow to the poles.
             let band_dec = ((dy as f64 - oy + 0.5) * patch_deg).clamp(-89.9, 89.9);
@@ -308,7 +308,7 @@ pub fn thor_clusters(
     let clusters: Vec<(thor::Cluster, State)> = patches
         .par_iter()
         .flat_map(|patch| {
-            // On the circle: a patch straddling RA 0 would otherwise centre on
+            // On the circle: a patch straddling RA 0 would otherwise center on
             // 180 and put every trial orbit on the far side of the sky.
             let Some(ra0) = circular_mean_deg(patch.iter().map(|d| d.ra)) else {
                 return Vec::new();
@@ -472,6 +472,8 @@ pub struct PersistReport {
     pub ran: bool,
     /// Whether the pass stopped early: asked to stop, or it lost the lock.
     pub interrupted: bool,
+    /// Tracks that could not be resolved, stored or stamped.
+    pub failed: usize,
     pub stored: usize,
     /// Of `stored`, tracks re-found exactly as they were and left alone.
     pub unchanged: usize,
@@ -481,9 +483,10 @@ pub struct PersistReport {
 }
 
 impl PersistReport {
-    /// Whether the pass did everything it set out to.
+    /// Whether the pass did everything it set out to, so a run that stores
+    /// nightly can count the night done.
     pub fn complete(&self) -> bool {
-        self.ran && !self.interrupted
+        self.ran && !self.interrupted && self.failed == 0
     }
 }
 
@@ -629,6 +632,10 @@ async fn persist(
     stop: &Stop,
 ) -> PersistReport {
     let mut report = PersistReport::default();
+    if stop.requested() {
+        report.interrupted = true;
+        return report;
+    }
     // Marked before the lock is taken, so a signal handler never exits between
     // taking it and a pass that would have released it.
     stop.writing.store(true, Ordering::Relaxed);
@@ -670,8 +677,19 @@ async fn persist(
                         report.interrupted = true;
                         break;
                     }
-                    // The lease outlasts a few failed renewals.
-                    Err(e) => error!("could not renew the tracks lock: {}", e),
+                    // The lease outlasts a few failed renewals, but not so many
+                    // that it could lapse while this pass is still writing.
+                    Err(e) if renewed.elapsed() < LOCK_LEASE / 2 => {
+                        error!("could not renew the tracks lock: {}", e)
+                    }
+                    Err(e) => {
+                        error!(
+                            "could not renew the tracks lock before its lease could lapse, leaving the rest of the {} unstored: {}",
+                            what, e
+                        );
+                        report.interrupted = true;
+                        break;
+                    }
                 }
             }
         }
@@ -699,6 +717,7 @@ async fn persist(
             Ok(plan) => plan,
             Err(e) => {
                 error!("could not resolve one of the {}: {}", what, e);
+                report.failed += 1;
                 continue;
             }
         };
@@ -733,14 +752,25 @@ async fn persist(
                 if !superseded.is_empty() {
                     info!("track {} absorbed {}", up.track.id, superseded.join(", "));
                 }
-                // Even when unchanged: stamping is idempotent, and it repairs a
-                // stamp that failed when the track was last written.
-                match stamp_members(db, &up.track).await {
+                // An unchanged track's members were stamped when it was written;
+                // only one whose stamp failed then is written again.
+                let stamped = if unchanged {
+                    stamp_missing(db, &up.track).await
+                } else {
+                    stamp_members(db, &up.track).await
+                };
+                match stamped {
                     Ok(n) => report.stamped += n,
-                    Err(e) => error!("could not stamp {}: {}", up.track.id, e),
+                    Err(e) => {
+                        error!("could not stamp {}: {}", up.track.id, e);
+                        report.failed += 1;
+                    }
                 }
             }
-            Err(e) => error!("could not store one of the {}: {}", what, e),
+            Err(e) => {
+                error!("could not store one of the {}: {}", what, e);
+                report.failed += 1;
+            }
         }
     }
     if let Some(lock) = &lock {
@@ -750,7 +780,7 @@ async fn persist(
     }
     stop.writing.store(false, Ordering::Relaxed);
     info!(
-        "{} {} {} ({} unchanged), stamped {} alerts, absorbed {} superseded ids",
+        "{} {} {} ({} unchanged, {} failed), stamped {} alerts, absorbed {} superseded ids",
         if dry_run {
             "dry run: would store"
         } else {
@@ -759,6 +789,7 @@ async fn persist(
         report.stored,
         what,
         report.unchanged,
+        report.failed,
         report.stamped,
         report.absorbed
     );
@@ -904,15 +935,20 @@ mod tests {
         }
     }
 
+    /// Detections on consecutive nights, with ids no other test uses.
+    fn fresh_detections(n: i64) -> Vec<Detection> {
+        let base = (uuid::Uuid::new_v4().as_u128() as i64).abs() / 16;
+        (0..n)
+            .map(|k| detection(base + k, 2460000.0 + k as f64))
+            .collect()
+    }
+
     /// A pass asked to stop must store nothing more and still release the
     /// lock, or the next run would wait out the lease.
     #[tokio::test]
     async fn test_a_stopped_pass_releases_the_lock() {
-        let db = crate::utils::tracks::tests::private_db().await;
-        let base = (uuid::Uuid::new_v4().as_u128() as i64).abs() / 16;
-        let detections: Vec<Detection> = (0..4)
-            .map(|k| detection(base + k, 2460000.0 + k as f64))
-            .collect();
+        let db = crate::utils::tracks::tests::private_db("stop").await;
+        let detections = fresh_detections(4);
         let candidates = || {
             std::iter::once(Candidate {
                 members: detections.iter().map(|d| d.id).collect(),
@@ -920,6 +956,7 @@ mod tests {
             })
         };
 
+        // Asked before it starts, a pass does not even take the lock.
         let stop = Stop::new();
         assert!(
             !stop.request(),
@@ -937,8 +974,38 @@ mod tests {
             &stop,
         )
         .await;
-        assert!(report.ran && report.interrupted && !report.complete());
+        assert!(!report.ran && report.interrupted && !report.complete());
         assert_eq!(report.stored, 0);
+        assert!(!crate::utils::tracks::lock_is_held(&db).await.unwrap());
+
+        // Asked mid-pass, it finishes the track it is on, stores no more, and
+        // releases the lock.
+        let stop = Stop::new();
+        let more = fresh_detections(4);
+        let all: Vec<Detection> = detections.iter().chain(&more).copied().collect();
+        let two = [&detections, &more].into_iter().enumerate().map(|(k, ds)| {
+            if k == 1 {
+                assert!(stop.request(), "the first track is being written");
+            }
+            Candidate {
+                members: ds.iter().map(|d| d.id).collect(),
+                fit: (BoundFit::Good, Some(0.5)),
+            }
+        });
+        let report = persist(
+            &db,
+            "tracks",
+            two,
+            &all,
+            &HashMap::new(),
+            &[],
+            false,
+            (2, 2),
+            &stop,
+        )
+        .await;
+        assert!(report.ran && report.interrupted && !report.complete());
+        assert_eq!(report.stored, 1);
         assert!(!crate::utils::tracks::lock_is_held(&db).await.unwrap());
         assert!(!stop.writing.load(Ordering::Relaxed));
 
@@ -955,7 +1022,11 @@ mod tests {
         )
         .await;
         assert!(report.complete());
-        assert_eq!((report.stored, report.unchanged, report.stamped), (1, 0, 0));
+        assert_eq!(
+            (report.stored, report.unchanged, report.stamped),
+            (1, 1, 0),
+            "the first track was stored before the stop"
+        );
 
         let again = persist(
             &db,
@@ -980,7 +1051,7 @@ mod tests {
     /// Another run holding the lock means this pass stores nothing and says so.
     #[tokio::test]
     async fn test_a_pass_without_the_lock_does_not_run() {
-        let db = crate::utils::tracks::tests::private_db().await;
+        let db = crate::utils::tracks::tests::private_db("busy").await;
         let other = crate::utils::tracks::acquire_lock(&db)
             .await
             .unwrap()

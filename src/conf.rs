@@ -1467,6 +1467,32 @@ pub struct LinkerConfig {
     pub recall_window_nights: u32,
 }
 
+impl LinkerConfig {
+    /// Settings no night could be searched with, which would otherwise shift
+    /// or empty every window without saying so.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.run_after_utc_hour > 23 {
+            return Err(format!(
+                "run_after_utc_hour is {}, not an hour of the day",
+                self.run_after_utc_hour
+            ));
+        }
+        if self.window_nights == 0 || self.recall_window_nights == 0 {
+            return Err("window_nights and recall_window_nights must be at least 1".to_string());
+        }
+        if self.thor_window_nights == 0 || self.thor_window_nights > self.window_nights {
+            return Err(format!(
+                "thor_window_nights is {}, but must be between 1 and window_nights ({})",
+                self.thor_window_nights, self.window_nights
+            ));
+        }
+        if !(0.0..=1.0).contains(&self.drb) {
+            return Err(format!("drb is {}, but scores run from 0 to 1", self.drb));
+        }
+        Ok(())
+    }
+}
+
 impl Default for LinkerConfig {
     fn default() -> Self {
         LinkerConfig {

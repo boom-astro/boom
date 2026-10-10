@@ -164,6 +164,26 @@ async fn run_night(db: &mongodb::Database, cfg: &LinkerConfig, night: i64, stop:
             }
         }
     }
+    // One read of the catalog serves both passes. Without it every known
+    // object IPAC missed would be stored as a discovery candidate, so a run
+    // that should match and cannot does not store anything. Read before the
+    // window, so a night waiting on a missing catalog costs one quick read.
+    let catalog = if cfg.match_known && (cfg.link || cfg.thor) {
+        match load_catalogue(db).await {
+            Ok(orbits) if orbits.is_empty() => {
+                error!("MPC_orbits is empty, so tracks cannot be matched; run mpcorb_ingest");
+                return false;
+            }
+            Ok(orbits) => Some(orbits),
+            Err(error) => {
+                error!(%error, "could not read MPC_orbits, so tracks cannot be matched");
+                return false;
+            }
+        }
+    } else {
+        None
+    };
+
     let (jd_start, span) = window(night, cfg.window_nights);
     info!(
         night,
@@ -183,24 +203,6 @@ async fn run_night(db: &mongodb::Database, cfg: &LinkerConfig, night: i64, stop:
         "loaded the unassociated detections"
     );
 
-    // One read of the catalog serves both passes. Without it every known
-    // object IPAC missed would be stored as a discovery candidate, so a run
-    // that should match and cannot does not store anything.
-    let catalog = if cfg.match_known && (cfg.link || cfg.thor) && !detections.is_empty() {
-        match load_catalogue(db).await {
-            Ok(orbits) if orbits.is_empty() => {
-                error!("MPC_orbits is empty, so tracks cannot be matched; run mpcorb_ingest");
-                return false;
-            }
-            Ok(orbits) => Some(orbits),
-            Err(error) => {
-                error!(%error, "could not read MPC_orbits, so tracks cannot be matched");
-                return false;
-            }
-        }
-    } else {
-        None
-    };
     let dry_run = !cfg.persist;
     let mut done = true;
 
@@ -369,6 +371,10 @@ async fn main() {
     let config = AppConfig::from_path(&config_path).expect("failed to load config");
     let db = config.build_db().await.expect("failed to connect to mongo");
     let cfg = config.linker;
+    if let Err(problem) = cfg.validate() {
+        error!(problem, "the linker section of the config is invalid");
+        std::process::exit(1);
+    }
     info!(?cfg, "linker starting");
 
     if let Some(night) = cli.night {
@@ -453,5 +459,100 @@ mod tests {
             2461313,
             "the window stops at the night"
         );
+    }
+
+    /// A database of the test's own, emptied first: the linker reads and
+    /// writes shared documents (the tracks lock, the last night) that tests
+    /// running in parallel would otherwise trip over.
+    async fn private_db(test: &str) -> mongodb::Database {
+        let db = boom::conf::get_test_db()
+            .await
+            .client()
+            .database(&format!("boom_test_linker_{test}"));
+        db.drop().await.unwrap();
+        db
+    }
+
+    fn no_matching() -> LinkerConfig {
+        LinkerConfig {
+            match_known: false,
+            ..LinkerConfig::default()
+        }
+    }
+
+    #[test]
+    fn test_settings_no_night_could_use_are_refused() {
+        assert!(LinkerConfig::default().validate().is_ok());
+        for bad in [
+            LinkerConfig {
+                run_after_utc_hour: 24,
+                ..LinkerConfig::default()
+            },
+            LinkerConfig {
+                window_nights: 0,
+                ..LinkerConfig::default()
+            },
+            LinkerConfig {
+                thor_window_nights: 15,
+                ..LinkerConfig::default()
+            },
+            LinkerConfig {
+                drb: 1.5,
+                ..LinkerConfig::default()
+            },
+        ] {
+            assert!(bad.validate().is_err(), "{bad:?}");
+        }
+    }
+
+    /// With another run storing tracks, a night waits rather than loading and
+    /// linking work it could not store, and is left unfinished to retry.
+    #[tokio::test]
+    async fn test_a_night_waits_for_another_runs_lock() {
+        let db = private_db("busy").await;
+        let other = boom::utils::tracks::acquire_lock(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!run_night(&db, &no_matching(), 2461312, &Stop::new()).await);
+        boom::utils::tracks::release_lock(&db, &other)
+            .await
+            .unwrap();
+        assert!(run_night(&db, &no_matching(), 2461312, &Stop::new()).await);
+        db.drop().await.unwrap();
+    }
+
+    /// Without the catalog every known object would be stored as a discovery
+    /// candidate, so the night is left unfinished instead.
+    #[tokio::test]
+    async fn test_a_night_without_the_catalog_is_not_finished() {
+        let db = private_db("catalog").await;
+        assert!(!run_night(&db, &LinkerConfig::default(), 2461312, &Stop::new()).await);
+        db.drop().await.unwrap();
+    }
+
+    /// Asked to stop before storing, a night is unfinished and takes no lock.
+    #[tokio::test]
+    async fn test_a_stopped_night_is_not_finished() {
+        let db = private_db("stop").await;
+        let alerts = db.collection::<Document>("ZTF_alerts");
+        for k in 0..3 {
+            alerts
+                .insert_one(doc! {
+                    "_id": 1_000_000_i64 + k,
+                    "candidate": {
+                        "jd": 2461312.8 + k as f64 * 0.01, "ra": 10.0, "dec": 10.0,
+                        "drb": 0.99, "isdiffpos": true,
+                    },
+                    "properties": { "stationary": false, "rock": false },
+                })
+                .await
+                .unwrap();
+        }
+        let stop = Stop::new();
+        stop.request();
+        assert!(!run_night(&db, &no_matching(), 2461312, &stop).await);
+        assert!(!lock_is_held(&db).await.unwrap());
+        db.drop().await.unwrap();
     }
 }
