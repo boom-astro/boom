@@ -5177,7 +5177,7 @@ mod tests {
         let mut ids = Vec::new();
         for members in [&mixed[..], &private[..]] {
             let jds: Vec<f64> = (0..members.len()).map(|k| 2460000.0 + k as f64).collect();
-            let plan = plan_upsert(&database, members, &jds, None, None)
+            let plan = plan_upsert(&database, members, &jds, None, None, None)
                 .await
                 .unwrap();
             ids.push(commit_upsert(&database, plan).await.unwrap().track.id);

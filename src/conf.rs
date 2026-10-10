@@ -1465,6 +1465,10 @@ pub struct LinkerConfig {
     /// alerts are known asteroids, so this pass can far outweigh the search.
     #[serde(default = "default_linker_recall_window_nights")]
     pub recall_window_nights: u32,
+    #[serde(default = "default_linker_pass")]
+    pub attach: bool,
+    #[serde(default = "default_linker_attach_lookback_nights")]
+    pub attach_lookback_nights: u32,
 }
 
 impl LinkerConfig {
@@ -1506,8 +1510,14 @@ impl Default for LinkerConfig {
             persist: default_linker_pass(),
             recall: default_linker_pass(),
             recall_window_nights: default_linker_recall_window_nights(),
+            attach: default_linker_pass(),
+            attach_lookback_nights: default_linker_attach_lookback_nights(),
         }
     }
+}
+
+fn default_linker_attach_lookback_nights() -> u32 {
+    60
 }
 
 fn default_linker_recall_window_nights() -> u32 {

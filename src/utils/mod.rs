@@ -1,4 +1,5 @@
 pub mod ades;
+pub mod attach;
 pub mod comets;
 pub mod cosmology;
 pub mod cutouts;

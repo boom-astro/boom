@@ -71,6 +71,13 @@ impl BoundFit {
 /// Residuals closer than this are the same fit, refitted.
 const SAME_RESIDUAL_ARCSEC: f64 = 0.01;
 
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct StoredOrbit {
+    pub epoch_jd: f64,
+    pub pos: [f64; 3],
+    pub vel: [f64; 3],
+}
+
 /// A track as stored, keyed by an id that outlives any one linking run.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StoredTrack {
@@ -106,6 +113,8 @@ pub struct StoredTrack {
     /// Zero on tracks written before the field existed.
     #[serde(default)]
     pub updated_at: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub orbit: Option<StoredOrbit>,
 }
 
 /// Stamped on every member alert. The candids are deliberately not here:
@@ -381,6 +390,7 @@ pub struct UpsertPlan {
     pub bound_fit: Option<String>,
     pub bound_fit_residual_arcsec: Option<f64>,
     pub bound_fit_detections: Option<i32>,
+    pub orbit: Option<StoredOrbit>,
     pub designation: Option<String>,
     /// Ids a merge would absorb and then delete.
     pub superseded: Vec<String>,
@@ -453,6 +463,7 @@ pub async fn plan_upsert(
     jds: &[f64],
     designation: Option<String>,
     bound_fit: Option<(BoundFit, Option<f64>)>,
+    orbit: Option<StoredOrbit>,
 ) -> Result<UpsertPlan, mongodb::error::Error> {
     let existing = overlapping(db, members).await?;
     let identity = identify(members, &existing);
@@ -509,15 +520,16 @@ pub async fn plan_upsert(
     // would overwrite each other's verdict every night.
     //
     // Counted over this run's own detections, not ones another track keeps.
-    let incoming_fit = bound_fit.map(|(fit, r)| (fit, r, (members.len() - contested.len()) as i32));
+    let incoming_fit =
+        bound_fit.map(|(fit, r)| (fit, r, (members.len() - contested.len()) as i32, orbit));
     let stored_fit = existing
         .iter()
         .filter(|t| absorbed.contains(&&t.id))
         .filter_map(|t| {
             let fit = BoundFit::parse(t.bound_fit.as_deref()?)?;
-            Some((fit, t.bound_fit_residual_arcsec, fit_detections(t)))
+            Some((fit, t.bound_fit_residual_arcsec, fit_detections(t), t.orbit))
         })
-        .max_by_key(|&(fit, _, fit_on)| (fit_on, std::cmp::Reverse(fit.rank())));
+        .max_by_key(|&(fit, _, fit_on, _)| (fit_on, std::cmp::Reverse(fit.rank())));
     let bound_fit = match (incoming_fit, stored_fit) {
         (Some(new), Some(old)) if old.2 > new.2 => Some(old),
         (None, old) => old,
@@ -527,9 +539,10 @@ pub async fn plan_upsert(
     let all: Vec<i64> = by_candid.keys().copied().collect();
     let epochs: Vec<f64> = by_candid.values().copied().collect();
     let (n_detections, n_nights, arc_days, first_jd, last_jd) = summarise(&all, &epochs);
-    let bound_fit_residual_arcsec = bound_fit.and_then(|(_, r, _)| r);
-    let bound_fit_detections = bound_fit.map(|(_, _, n)| n);
-    let bound_fit = bound_fit.map(|(f, _, _)| f.as_str().to_string());
+    let bound_fit_residual_arcsec = bound_fit.and_then(|(_, r, _, _)| r);
+    let bound_fit_detections = bound_fit.map(|(_, _, n, _)| n);
+    let orbit = bound_fit.and_then(|(_, _, _, o)| o);
+    let bound_fit = bound_fit.map(|(f, _, _, _)| f.as_str().to_string());
     let unchanged_since = match (&id, superseded.is_empty()) {
         (Some(id), true) => existing
             .iter()
@@ -539,6 +552,7 @@ pub async fn plan_upsert(
                     && t.epochs == epochs
                     && t.designation == designation
                     && t.bound_fit == bound_fit
+                    && (orbit.is_none() || t.orbit.is_some())
                     && bound_fit_detections.is_none_or(|n| n == fit_detections(t))
                     && match (t.bound_fit_residual_arcsec, bound_fit_residual_arcsec) {
                         (Some(a), Some(b)) => (a - b).abs() < SAME_RESIDUAL_ARCSEC,
@@ -560,6 +574,7 @@ pub async fn plan_upsert(
         bound_fit,
         bound_fit_residual_arcsec,
         bound_fit_detections,
+        orbit,
         designation,
         superseded,
         contested,
@@ -590,6 +605,7 @@ pub async fn commit_upsert(
         first_jd: plan.first_jd,
         last_jd: plan.last_jd,
         designation: plan.designation,
+        orbit: plan.orbit,
         updated_at: plan
             .unchanged_since
             .unwrap_or_else(|| chrono::Utc::now().timestamp_millis() as f64 / 1000.0),
@@ -722,7 +738,9 @@ pub fn restrict_to(
         return None;
     }
     let (n_detections, n_nights, arc_days, first_jd, last_jd) = summarise(&members, &epochs);
+    let orbit = track.orbit.filter(|_| members.len() == track.members.len());
     Some(StoredTrack {
+        orbit,
         members,
         epochs,
         n_detections,
@@ -754,6 +772,7 @@ pub(crate) mod tests {
             last_jd: 2460001.0,
             designation: None,
             updated_at: 0.0,
+            orbit: None,
         }
     }
 
@@ -842,6 +861,7 @@ pub(crate) mod tests {
             bound_fit: None,
             bound_fit_residual_arcsec: None,
             bound_fit_detections: None,
+            orbit: None,
             designation: None,
             superseded: Vec::new(),
             contested: vec![11, 12],
@@ -938,7 +958,7 @@ pub(crate) mod tests {
             .iter()
             .map(|m| 2460000.0 + m.rem_euclid(1000) as f64)
             .collect();
-        let plan = plan_upsert(db, members, &jds, None, Some(fit))
+        let plan = plan_upsert(db, members, &jds, None, Some(fit), None)
             .await
             .unwrap();
         commit_upsert(db, plan).await.unwrap()
