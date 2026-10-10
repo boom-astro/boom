@@ -1,5 +1,6 @@
 use std::{
     collections::VecDeque,
+    future::Future,
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -24,7 +25,7 @@ use boom::{
         },
     },
 };
-use clap::{parser::ValueSource, CommandFactory, FromArgMatches, Parser, ValueEnum};
+use clap::{Parser, ValueEnum};
 use flare::{spatial::great_circle_distance, Time};
 use futures::{StreamExt, TryStreamExt};
 use indicatif::ProgressBar;
@@ -110,8 +111,10 @@ struct Cli {
 
     /// Unset `cross_matches.<catalog>` from every alerts_aux record instead of
     /// computing matches, along with any state an earlier reprocess run left behind.
-    /// Requires an explicit `--config`, the deployment's own. Idempotent, so an
-    /// interrupted run can simply be rerun.
+    /// Point `--config` at the deployment's own config, which is what the safety
+    /// check reads. Idempotent, so an interrupted run can simply be rerun. Every
+    /// shard is one update over many records, so on a production replica set keep
+    /// `--processes` low to bound replication lag.
     #[arg(
         long,
         default_value_t = false,
@@ -975,11 +978,18 @@ fn legacy_temp_field(catalog: &str) -> String {
     format!("cross_matches.{}_temp", catalog)
 }
 
-/// Matches records carrying any of the catalogs' live or legacy temp fields.
-fn has_any_field(catalogs: &[&str]) -> Document {
-    let clauses: Vec<Document> = catalogs
+/// Every field a catalog's matches can occupy on an alerts_aux record.
+fn catalog_fields(catalogs: &[&str]) -> Vec<String> {
+    catalogs
         .iter()
         .flat_map(|c| [xmatch_field(c), legacy_temp_field(c)])
+        .collect()
+}
+
+/// Matches records carrying any of the catalogs' fields.
+fn has_any_field(catalogs: &[&str]) -> Document {
+    let clauses: Vec<Document> = catalog_fields(catalogs)
+        .into_iter()
         .map(|field| doc! { field: { "$exists": true } })
         .collect();
     doc! { "$or": clauses }
@@ -1001,17 +1011,24 @@ fn shard_progress(completed: usize, total: usize, started: Instant) -> String {
 // -----------------------------------------------------------------------------
 // remove: unset dropped catalogs' matches from alerts_aux in one sharded pass.
 // -----------------------------------------------------------------------------
-/// Returns the number of records modified.
+/// Unsets the catalogs from records created before `run_start_jd`, leaving the
+/// newer ones as evidence of anything still writing them. Returns the number of
+/// records modified.
 async fn remove_fields(
     aux_collection: &mongodb::Collection<Document>,
     catalogs: &[&str],
+    run_start_jd: f64,
     processes: usize,
 ) -> Result<u64, mongodb::error::Error> {
-    let label = format!("remove→{}", catalogs.join(","));
-    let filter = has_any_field(catalogs);
-    let unset: Document = catalogs
-        .iter()
-        .flat_map(|c| [xmatch_field(c), legacy_temp_field(c)])
+    let filter = merge_filters(
+        &has_any_field(catalogs),
+        &doc! { "$or": [
+            { "created_at": { "$lt": run_start_jd } },
+            { "created_at": { "$exists": false } },
+        ]},
+    );
+    let unset: Document = catalog_fields(catalogs)
+        .into_iter()
         .map(|field| (field, Bson::String(String::new())))
         .collect();
     let update = doc! { "$unset": unset };
@@ -1023,43 +1040,21 @@ async fn remove_fields(
         &Document::new(),
     )
     .await;
-    let total = shards.len();
-    info!("[{}] running over {} shards", label, total);
-    let done = &AtomicUsize::new(0);
-    let started = Instant::now();
-    let results: Vec<_> = futures::stream::iter(shards.iter().enumerate().map(|(index, shard)| {
-        let filter = merge_filters(&filter, shard);
-        let update = update.clone();
-        let label = &label;
-        async move {
-            let result = aux_collection.update_many(filter, update).await;
-            let completed = done.fetch_add(1, Ordering::Relaxed) + 1;
-            let progress = shard_progress(completed, total, started);
-            match &result {
-                Ok(r) => info!(
-                    "[{}] shard {}/{} done, {} records modified ({})",
-                    label,
-                    index + 1,
-                    total,
-                    r.modified_count,
-                    progress
-                ),
-                Err(error) => warn!(
-                    %error,
-                    "[{}] shard {}/{} failed ({})",
-                    label,
-                    index + 1,
-                    total,
-                    progress
-                ),
+    let modified = run_sharded(
+        &shards,
+        processes,
+        &format!("remove→{}", catalogs.join(",")),
+        |shard| {
+            let filter = merge_filters(&filter, shard);
+            let update = update.clone();
+            async move {
+                let result = aux_collection.update_many(filter, update).await?;
+                Ok(result.modified_count)
             }
-            result.map(|r| r.modified_count)
-        }
-    }))
-    .buffer_unordered(processes)
-    .collect()
-    .await;
-    results.into_iter().sum()
+        },
+    )
+    .await?;
+    Ok(modified.into_iter().sum())
 }
 
 /// Deletes what a catalog-driven run left behind for the catalog: its state
@@ -1088,11 +1083,7 @@ async fn sharded_aggregate(
     stages: Vec<Document>,
     label: &str,
 ) -> Result<(), mongodb::error::Error> {
-    let total = shards.len();
-    info!("[{}] running over {} shards", label, total);
-    let done = &AtomicUsize::new(0);
-    let started = Instant::now();
-    let results: Vec<_> = futures::stream::iter(shards.iter().enumerate().map(|(index, shard)| {
+    run_sharded(shards, processes, label, |shard| {
         let filter = merge_filters(base_filter, shard);
         let mut pipeline = Vec::with_capacity(stages.len() + 1);
         if !filter.is_empty() {
@@ -1100,7 +1091,34 @@ async fn sharded_aggregate(
         }
         pipeline.extend(stages.iter().cloned());
         async move {
-            let result = collection.aggregate(pipeline).allow_disk_use(true).await;
+            collection.aggregate(pipeline).allow_disk_use(true).await?;
+            Ok(())
+        }
+    })
+    .await?;
+    Ok(())
+}
+
+/// Runs `op` on each shard filter, `processes` at a time, logging progress as
+/// shards complete. Fails with the first shard error once every shard has run.
+async fn run_sharded<T, F, Fut>(
+    shards: &[Document],
+    processes: usize,
+    label: &str,
+    op: F,
+) -> Result<Vec<T>, mongodb::error::Error>
+where
+    F: Fn(&Document) -> Fut,
+    Fut: Future<Output = Result<T, mongodb::error::Error>>,
+{
+    let total = shards.len();
+    info!("[{}] running over {} shards", label, total);
+    let done = &AtomicUsize::new(0);
+    let started = Instant::now();
+    let results: Vec<_> = futures::stream::iter(shards.iter().enumerate().map(|(index, shard)| {
+        let shard_op = op(shard);
+        async move {
+            let result = shard_op.await;
             let completed = done.fetch_add(1, Ordering::Relaxed) + 1;
             let progress = shard_progress(completed, total, started);
             match &result {
@@ -1120,7 +1138,7 @@ async fn sharded_aggregate(
                     progress
                 ),
             }
-            result.map(|_| ())
+            result
         }
     }))
     .buffer_unordered(processes)
@@ -1240,18 +1258,7 @@ async fn main() {
         .finish();
     tracing::subscriber::set_global_default(subscriber).expect("setting subscriber failed");
 
-    let matches = Cli::command().get_matches();
-    let args = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
-
-    // The --remove safety check is only as good as the config it reads, and the
-    // base config.yaml is not what a deployment runs with.
-    if args.remove && matches.value_source("config") == Some(ValueSource::DefaultValue) {
-        error!(
-            "--remove checks the catalogs against the config, so pass the deployment's \
-             config explicitly with --config"
-        );
-        std::process::exit(1);
-    }
+    let args = Cli::parse();
 
     if args.catalogs.is_empty() {
         error!("--catalogs requires at least one catalog name");
@@ -1266,10 +1273,15 @@ async fn main() {
         }
     };
 
-    let in_flight = args.processes * args.concurrency;
+    // --remove runs one update per shard, `processes` at a time.
+    let in_flight = if args.remove {
+        args.processes
+    } else {
+        args.processes * args.concurrency
+    };
     if in_flight > config.database.max_pool_size as usize {
         warn!(
-            "processes × concurrency = {} exceeds database.max_pool_size = {}; \
+            "{} concurrent queries exceed database.max_pool_size = {}; \
              workers will queue on the connection pool",
             in_flight, config.database.max_pool_size
         );
@@ -1453,6 +1465,18 @@ fn catalog_references(config: &AppConfig, survey: &Survey, catalog: &str) -> Vec
 }
 
 async fn run_remove_mode(args: &Cli, config: &AppConfig, db: mongodb::Database) {
+    // The safety check is only as good as the config it reads, so say which one.
+    info!(
+        "checking against {}: crossmatch.{} declares {:?}",
+        args.config,
+        args.survey.to_string().to_lowercase(),
+        config
+            .crossmatch
+            .get(&args.survey)
+            .map(|c| c.iter().map(|c| c.catalog.as_str()).collect::<Vec<_>>())
+            .unwrap_or_default()
+    );
+
     let mut catalogs: Vec<&str> = Vec::with_capacity(args.catalogs.len());
     let mut still_referenced: Vec<&str> = Vec::new();
     for name in dedup_catalogs(&args.catalogs) {
@@ -1488,15 +1512,22 @@ async fn run_remove_mode(args: &Cli, config: &AppConfig, db: mongodb::Database) 
 
     let aux_collection: mongodb::Collection<Document> =
         db.collection(&format!("{}_alerts_aux", args.survey));
-    // Stops at the first hit, so this only scans the whole collection for a
-    // name that matches nothing, which is the case worth reporting.
+    // Each check stops at the first hit, so it only scans the whole collection
+    // for a name that matches nothing, which is the case worth reporting.
+    let checks = futures::future::join_all(catalogs.iter().map(|&name| {
+        let aux_collection = &aux_collection;
+        async move {
+            let found = aux_collection
+                .find_one(has_any_field(&[name]))
+                .projection(doc! { "_id": 1 })
+                .await;
+            (name, found)
+        }
+    }))
+    .await;
     let mut present: Vec<&str> = Vec::with_capacity(catalogs.len());
-    for &name in &catalogs {
-        match aux_collection
-            .find_one(has_any_field(&[name]))
-            .projection(doc! { "_id": 1 })
-            .await
-        {
+    for (name, found) in checks {
+        match found {
             Ok(Some(_)) => present.push(name),
             Ok(None) => warn!(
                 "no {} record carries cross_matches.{}, nothing to remove (already removed, or \
@@ -1516,12 +1547,28 @@ async fn run_remove_mode(args: &Cli, config: &AppConfig, db: mongodb::Database) 
             "starting remove: survey={} processes={} catalogs={:?}",
             args.survey, args.processes, present
         );
-        match remove_fields(&aux_collection, &present, args.processes).await {
+        let run_start_jd = Time::now().to_jd();
+        match remove_fields(&aux_collection, &present, run_start_jd, args.processes).await {
             Ok(modified) => info!("unset {:?} from {} records", present, modified),
             Err(e) => {
                 error!("remove failed: {}", e);
                 std::process::exit(1);
             }
+        }
+        // The run leaves records created after it started untouched, so any of
+        // them carrying the field was written by something still crossmatching it.
+        let written_since = merge_filters(
+            &doc! { "created_at": { "$gte": run_start_jd } },
+            &has_any_field(&present),
+        );
+        match aux_collection.count_documents(written_since).await {
+            Ok(0) => {}
+            Ok(count) => warn!(
+                "{} records created during the run carry {:?} matches, so ingest is still \
+                 running with a config that crossmatches them; redeploy it, then rerun",
+                count, present
+            ),
+            Err(e) => warn!("could not check for records written during the run: {}", e),
         }
     }
 
@@ -1588,40 +1635,93 @@ mod remove_tests {
     use super::*;
     use boom::conf::get_test_db;
 
+    fn names(names: &[&str]) -> Vec<String> {
+        names.iter().map(|n| n.to_string()).collect()
+    }
+
+    #[test]
+    fn test_dedup_catalogs_keeps_first_occurrence_order() {
+        let input = names(&["A", "B", "A", "C", "B"]);
+        assert_eq!(dedup_catalogs(&input), vec!["A", "B", "C"]);
+    }
+
+    #[test]
+    fn test_catalog_references_lists_every_setting_using_the_catalog() {
+        let mut config = AppConfig::from_test_config().unwrap();
+        config.crossmatch.insert(
+            Survey::Ztf,
+            vec![CatalogXmatchConfig {
+                catalog: "NED".to_string(),
+                ..Default::default()
+            }],
+        );
+        config.host_galaxy.ned_catalog = "NED".to_string();
+        config.host_galaxy.ls_dr10_catalog = "LSDR10".to_string();
+
+        config.host_galaxy.enabled = false;
+        assert_eq!(
+            catalog_references(&config, &Survey::Ztf, "NED"),
+            vec!["crossmatch.ztf"]
+        );
+        assert!(catalog_references(&config, &Survey::Ztf, "LSDR10").is_empty());
+
+        config.host_galaxy.enabled = true;
+        assert_eq!(
+            catalog_references(&config, &Survey::Ztf, "NED"),
+            vec!["crossmatch.ztf", "host_galaxy.ned_catalog"]
+        );
+        assert_eq!(
+            catalog_references(&config, &Survey::Ztf, "LSDR10"),
+            vec!["host_galaxy.ls_dr10_catalog"]
+        );
+        assert!(catalog_references(&config, &Survey::Lsst, "OTHER").is_empty());
+    }
+
     #[tokio::test]
-    async fn test_remove_unsets_only_the_given_catalogs() {
+    async fn test_remove_unsets_only_the_given_catalogs_across_shards() {
         let db = get_test_db().await;
         let aux: mongodb::Collection<Document> =
             db.collection(&format!("remove_test_{}", uuid::Uuid::new_v4().simple()));
-        aux.insert_many(vec![
-            doc! {
-                "_id": "a",
-                "cross_matches": { "OLD": [{ "id": 1 }], "OLD_temp": [], "KEEP": [{ "id": 2 }] },
-                "coordinates": { "ra": 1.0 },
-            },
-            doc! { "_id": "b", "cross_matches": { "OLD": [] } },
-            doc! { "_id": "c", "cross_matches": { "KEEP": [] } },
-        ])
+        // Enough records for range_shards to cut real shards rather than fall
+        // back to one unfiltered pass.
+        let records: Vec<Document> = (0..1000)
+            .map(|i| {
+                let mut matches = doc! { "KEEP": [] };
+                if i % 2 == 0 {
+                    matches.insert("OLD", vec![doc! { "id": i }]);
+                }
+                if i % 5 == 0 {
+                    matches.insert("OLD_temp", Vec::<Document>::new());
+                }
+                doc! { "_id": format!("obj{:04}", i), "cross_matches": matches, "coordinates": {} }
+            })
+            .collect();
+        aux.insert_many(records).await.unwrap();
+        // Written by ingest after the run started, so it is left in place.
+        let run_start_jd = 2_460_000.0;
+        aux.insert_one(doc! {
+            "_id": "new",
+            "created_at": run_start_jd + 1.0,
+            "cross_matches": { "OLD": [] },
+        })
         .await
         .unwrap();
 
-        let modified = remove_fields(&aux, &["OLD"], 2).await.unwrap();
-        assert_eq!(modified, 2);
-
-        let a = aux.find_one(doc! { "_id": "a" }).await.unwrap().unwrap();
-        let a_matches = a.get_document("cross_matches").unwrap();
-        assert!(!a_matches.contains_key("OLD"));
-        assert!(!a_matches.contains_key("OLD_temp"));
-        assert!(a_matches.contains_key("KEEP"));
-        assert!(a.contains_key("coordinates"));
-        let c = aux.find_one(doc! { "_id": "c" }).await.unwrap().unwrap();
-        assert!(c
-            .get_document("cross_matches")
-            .unwrap()
-            .contains_key("KEEP"));
-
-        // A rerun finds nothing left to do.
-        assert_eq!(remove_fields(&aux, &["OLD"], 2).await.unwrap(), 0);
+        let first = remove_fields(&aux, &["OLD"], run_start_jd, 4).await;
+        let shards = range_shards(&aux, 4 * SHARDS_PER_PROCESS, "_id", &Document::new()).await;
+        let left = aux.count_documents(has_any_field(&["OLD"])).await.unwrap();
+        let kept = aux
+            .count_documents(doc! { "cross_matches.KEEP": { "$exists": true }, "coordinates": { "$exists": true } })
+            .await
+            .unwrap();
+        let rerun = remove_fields(&aux, &["OLD"], run_start_jd, 4).await;
         aux.drop().await.unwrap();
+
+        assert!(shards.len() > 1, "the test should exercise several shards");
+        // Every even record, plus the odd multiples of 5 that carry only OLD_temp.
+        assert_eq!(first.unwrap(), 600);
+        assert_eq!(left, 1, "only the record created after the run start");
+        assert_eq!(kept, 1000);
+        assert_eq!(rerun.unwrap(), 0);
     }
 }
