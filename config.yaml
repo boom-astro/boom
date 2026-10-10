@@ -264,8 +264,7 @@ host_galaxy:
   rex_max_fracflux: 0.5
   isophote_mag: 25.0 # puts Legacy R_e on the NED-LVS D25 scale
 # Moving-object discovery, run once each ZTF night is over by the linker-ztf
-# service. The service only runs where it is started explicitly:
-#   docker compose --profile linker up -d linker-ztf
+# service, which deploys with the rest of the prod profile.
 # Tracks are stored in ZTF_tracks and stamped on their alerts; nothing is sent
 # anywhere else yet.
 linker:

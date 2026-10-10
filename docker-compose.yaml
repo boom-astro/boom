@@ -753,10 +753,6 @@ services:
   # `linker.window_nights` nights of unassociated detections, stores the tracks
   # in ZTF_tracks, and logs the recall on objects IPAC identified. Settings are
   # in the `linker` section of the config.
-  #
-  # On its own profile so it runs only where it is started explicitly:
-  #
-  #   docker compose --profile linker up -d linker-ztf
   linker-ztf:
     image: ${BOOM_IMAGE:-ghcr.io/boom-astro/boom:latest}
     pull_policy: ${BOOM_PULL_POLICY:-build}
@@ -780,7 +776,7 @@ services:
     networks:
       - boom
     profiles:
-      - linker
+      - prod
     volumes:
       - ${BOOM_CONFIG_PATH:-./config.yaml}:/app/config.yaml
     command:
