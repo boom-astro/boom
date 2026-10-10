@@ -658,14 +658,13 @@ mod tests {
         // Not projected, but `$project` keeps `_id` unless excluded.
         assert_eq!(type_of("_id"), Some(serde_json::json!(["null", "string"])));
         assert_eq!(type_of("ra"), Some(serde_json::json!(["null", "double"])));
-        assert_eq!(type_of("nobs"), Some(serde_json::json!(["null", "int"])));
+        // Stored as an integer, reported as a number like any other.
+        assert_eq!(type_of("nobs"), Some(serde_json::json!(["null", "double"])));
         assert_eq!(type_of("kind"), Some(serde_json::json!(["null", "string"])));
         // Projected but absent from the catalog row.
         assert_eq!(
             type_of("z"),
-            Some(serde_json::json!([
-                "null", "boolean", "int", "long", "double", "string"
-            ]))
+            Some(serde_json::json!(["null", "boolean", "double", "string"]))
         );
         // In the collection but not projected, so out of reach of filters.
         assert_eq!(type_of("hidden"), None);
@@ -692,7 +691,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             ra["type"],
-            serde_json::json!(["null", "boolean", "int", "long", "double", "string"])
+            serde_json::json!(["null", "boolean", "double", "string"])
         );
     }
 }
