@@ -6,6 +6,12 @@
 //! [`MilvusClient`] takes `&mut self`, so each handler clones the shared client
 //! (cheap — the tonic `Channel` shares one connection pool) to get a local
 //! owned copy rather than serializing all requests through a lock.
+//!
+//! The handlers here serve the internal API. The same work is exposed to
+//! Babamul users under `/babamul` by [`crate::api::routes::babamul::embeddings`],
+//! which is a different auth surface with its own token and user type — so the
+//! actual logic lives in the `pub(crate)` helpers below and both route sets are
+//! thin wrappers over them.
 
 use crate::api::models::response;
 use crate::api::routes::users::User;
@@ -17,17 +23,17 @@ use actix_web::{delete, get, post, web, HttpResponse};
 #[derive(serde::Deserialize, utoipa::ToSchema)]
 pub struct SimilarObjectsQuery {
     /// The object whose stored embedding seeds the search.
-    object_id: String,
+    pub object_id: String,
     /// How many neighbors to return (default 10, capped at 100). The seed
     /// object itself is excluded, so at most `top_k` others come back.
-    top_k: Option<i64>,
+    pub top_k: Option<i64>,
 }
 
 const DEFAULT_TOP_K: i64 = 10;
 const MAX_TOP_K: i64 = 100;
 
 /// Grab the shared client, cloned for `&mut` use, or the "not enabled" reply.
-fn client_or_unavailable(
+pub(crate) fn client_or_unavailable(
     milvus: &web::Data<Option<MilvusClient>>,
 ) -> Result<MilvusClient, HttpResponse> {
     match milvus.get_ref() {
@@ -38,37 +44,24 @@ fn client_or_unavailable(
     }
 }
 
-/// Find the objects most similar to a given object.
+/// Resolve the seed object's embedding and return its nearest neighbors.
 ///
-/// Looks up the seed object's stored embedding, then runs a nearest-neighbor
-/// search with it. The seed object (which would otherwise be its own closest
-/// match) is filtered out of the results.
-#[utoipa::path(
-    post,
-    path = "/similarity/objects",
-    request_body = SimilarObjectsQuery,
-    responses(
-        (status = 200, description = "Nearest neighbors, best-first", body = serde_json::Value),
-        (status = 404, description = "No embedding stored for the object"),
-        (status = 500, description = "Milvus unavailable or search failed")
-    ),
-    tags=["Similarity"]
-)]
-#[post("/similarity/objects")]
-pub async fn post_similar_objects(
-    milvus: web::Data<Option<MilvusClient>>,
-    body: web::Json<SimilarObjectsQuery>,
+/// Shared by both API surfaces; see the module docs.
+pub(crate) async fn similar_objects_response(
+    milvus: &web::Data<Option<MilvusClient>>,
+    object_id: &str,
+    top_k: Option<i64>,
 ) -> HttpResponse {
-    let mut client = match client_or_unavailable(&milvus) {
+    let mut client = match client_or_unavailable(milvus) {
         Ok(client) => client,
         Err(resp) => return resp,
     };
 
-    let object_id = body.object_id.trim();
+    let object_id = object_id.trim();
     if object_id.is_empty() {
         return response::bad_request("object_id must not be empty");
     }
-    let top_k = body.top_k.unwrap_or(DEFAULT_TOP_K).clamp(1, MAX_TOP_K);
+    let top_k = top_k.unwrap_or(DEFAULT_TOP_K).clamp(1, MAX_TOP_K);
 
     // Fetch the seed object's embedding — the API caller supplies an id, not a
     // raw 384-float vector, so we resolve it here before searching.
@@ -96,6 +89,64 @@ pub async fn post_similar_objects(
     response::ok_ser("success", neighbors)
 }
 
+/// Count the stored embeddings. Shared by both API surfaces.
+pub(crate) async fn embeddings_count_response(
+    milvus: &web::Data<Option<MilvusClient>>,
+) -> HttpResponse {
+    let mut client = match client_or_unavailable(milvus) {
+        Ok(client) => client,
+        Err(resp) => return resp,
+    };
+
+    match client.count().await {
+        Ok(count) => response::ok("success", serde_json::json!({ "count": count })),
+        Err(e) => response::internal_error(&format!("Error counting embeddings: {}", e)),
+    }
+}
+
+/// Delete one object's stored embedding. Shared by both API surfaces.
+///
+/// Callers are responsible for the admin check: the two surfaces have separate
+/// user types, so there is no single notion of "admin" to test down here.
+pub(crate) async fn delete_embedding_response(
+    milvus: &web::Data<Option<MilvusClient>>,
+    object_id: &str,
+) -> HttpResponse {
+    let mut client = match client_or_unavailable(milvus) {
+        Ok(client) => client,
+        Err(resp) => return resp,
+    };
+
+    match client.delete_embeddings(&[object_id]).await {
+        Ok(deleted) => response::ok("success", serde_json::json!({ "deleted": deleted })),
+        Err(e) => response::internal_error(&format!("Error deleting embedding: {}", e)),
+    }
+}
+
+/// Find the objects most similar to a given object.
+///
+/// Looks up the seed object's stored embedding, then runs a nearest-neighbor
+/// search with it. The seed object (which would otherwise be its own closest
+/// match) is filtered out of the results.
+#[utoipa::path(
+    post,
+    path = "/similarity/objects",
+    request_body = SimilarObjectsQuery,
+    responses(
+        (status = 200, description = "Nearest neighbors, best-first", body = serde_json::Value),
+        (status = 404, description = "No embedding stored for the object"),
+        (status = 500, description = "Milvus unavailable or search failed")
+    ),
+    tags=["Similarity"]
+)]
+#[post("/similarity/objects")]
+pub async fn post_similar_objects(
+    milvus: web::Data<Option<MilvusClient>>,
+    body: web::Json<SimilarObjectsQuery>,
+) -> HttpResponse {
+    similar_objects_response(&milvus, &body.object_id, body.top_k).await
+}
+
 /// Get the number of embeddings currently stored.
 #[utoipa::path(
     get,
@@ -108,15 +159,7 @@ pub async fn post_similar_objects(
 )]
 #[get("/embeddings/count")]
 pub async fn get_embeddings_count(milvus: web::Data<Option<MilvusClient>>) -> HttpResponse {
-    let mut client = match client_or_unavailable(&milvus) {
-        Ok(client) => client,
-        Err(resp) => return resp,
-    };
-
-    match client.count().await {
-        Ok(count) => response::ok("success", serde_json::json!({ "count": count })),
-        Err(e) => response::internal_error(&format!("Error counting embeddings: {}", e)),
-    }
+    embeddings_count_response(&milvus).await
 }
 
 /// Delete the stored embedding for an object. Admin only.
@@ -144,14 +187,5 @@ pub async fn delete_object_embedding(
         return response::forbidden("Access denied: Admins only");
     }
 
-    let mut client = match client_or_unavailable(&milvus) {
-        Ok(client) => client,
-        Err(resp) => return resp,
-    };
-
-    let object_id = object_id.into_inner();
-    match client.delete_embeddings(&[&object_id]).await {
-        Ok(deleted) => response::ok("success", serde_json::json!({ "deleted": deleted })),
-        Err(e) => response::internal_error(&format!("Error deleting embedding: {}", e)),
-    }
+    delete_embedding_response(&milvus, &object_id.into_inner()).await
 }

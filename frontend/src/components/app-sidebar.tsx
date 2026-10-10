@@ -11,6 +11,7 @@ import {
   IconBook,
   IconShieldLock,
   IconTelescope,
+  IconVector,
 } from "@tabler/icons-react"
 
 import { NavDocuments } from "@/components/nav-documents"
@@ -45,6 +46,11 @@ const data = {
       title: "Telescopes",
       url: "/telescopes",
       icon: IconTelescope,
+    },
+    {
+      title: "Embeddings",
+      url: "/embeddings",
+      icon: IconVector,
     },
   ],
   navSecondary: [

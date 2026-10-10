@@ -1,4 +1,5 @@
 pub mod admin;
+pub mod embeddings;
 pub mod oauth;
 pub mod stats;
 pub mod surveys;
