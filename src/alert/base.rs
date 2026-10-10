@@ -1075,6 +1075,21 @@ pub trait AlertWorker {
             })?;
         Ok(())
     }
+    #[instrument(skip(self, alert_collection), err)]
+    async fn check_alert_exists<T>(
+        &self,
+        candid: i64,
+        alert_collection: &Collection<T>,
+    ) -> Result<bool, AlertError>
+    where
+        T: Send + Sync + Serialize,
+    {
+        let alert_exists = alert_collection
+            .count_documents(doc! { "_id": candid })
+            .await?
+            > 0;
+        Ok(alert_exists)
+    }
     #[instrument(skip(self, alert_aux_collection), err)]
     async fn check_alert_aux_exists<T>(
         &self,
@@ -1108,7 +1123,7 @@ pub trait AlertWorker {
         cutout_template: Vec<u8>,
         cutout_difference: Vec<u8>,
         cutout_storage: &CutoutStorage,
-    ) -> Result<ProcessAlertStatus, AlertError> {
+    ) -> Result<(), AlertError> {
         let cutouts = AlertCutout {
             candid: candid,
             cutout_science,
@@ -1116,10 +1131,7 @@ pub trait AlertWorker {
             cutout_difference,
         };
         match cutout_storage.insert_cutouts(cutouts).await {
-            Ok(_) => Ok(ProcessAlertStatus::Added(candid)),
-            Err(CutoutStorageError::CutoutAlreadyExists(_)) => {
-                Ok(ProcessAlertStatus::Exists(candid))
-            }
+            Ok(_) | Err(CutoutStorageError::CutoutAlreadyExists(_)) => Ok(()),
             Err(e) => Err(AlertError::from(e)),
         }
     }
