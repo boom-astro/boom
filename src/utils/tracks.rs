@@ -45,7 +45,31 @@ impl BoundFit {
             BoundFit::Ungated => "ungated",
         }
     }
+
+    pub fn parse(s: &str) -> Option<BoundFit> {
+        match s {
+            "good" => Some(BoundFit::Good),
+            "poor" => Some(BoundFit::Poor),
+            "none" => Some(BoundFit::None),
+            "ungated" => Some(BoundFit::Ungated),
+            _ => None,
+        }
+    }
+
+    /// Lower is better: a confident bound orbit first, then the ones worth a
+    /// look, then those too short to judge.
+    pub fn rank(&self) -> u8 {
+        match self {
+            BoundFit::Good => 0,
+            BoundFit::Poor => 1,
+            BoundFit::None => 2,
+            BoundFit::Ungated => 3,
+        }
+    }
 }
+
+/// Residuals closer than this are the same fit, refitted.
+const SAME_RESIDUAL_ARCSEC: f64 = 0.01;
 
 /// A track as stored, keyed by an id that outlives any one linking run.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -191,7 +215,9 @@ pub fn alert_update(track: &AlertTrack) -> Document {
 }
 
 pub const TRACKS_COLLECTION: &str = "ZTF_tracks";
-const COUNTERS_COLLECTION: &str = "boom_counters";
+/// Small documents of shared state: id sequences, the tracks lock, and the
+/// last night the linker finished.
+pub const COUNTERS_COLLECTION: &str = "boom_counters";
 pub const ALIASES_COLLECTION: &str = "ZTF_tracks_aliases";
 
 /// Next sequence number, allocated atomically so concurrent runs cannot mint
@@ -279,6 +305,11 @@ pub struct UpsertPlan {
     pub superseded: Vec<String>,
     /// Detections dropped because another track already owns them.
     pub contested: Vec<i64>,
+    /// When the stored track was last written, if this plan would write it
+    /// back exactly as it is. A nightly run re-finds every track still in its
+    /// window, and rewriting those would make each look new to a client
+    /// polling `updated_at`.
+    pub unchanged_since: Option<f64>,
 }
 
 impl UpsertPlan {
@@ -293,6 +324,7 @@ impl UpsertPlan {
     /// One line naming what the write would do, for a dry run's log.
     pub fn describe(&self) -> String {
         let what = match (&self.id, self.superseded.is_empty()) {
+            (Some(id), _) if self.unchanged_since.is_some() => format!("unchanged {id}"),
             (None, _) => "new".to_string(),
             (Some(id), true) => format!("extends {id}"),
             (Some(id), false) => {
@@ -381,9 +413,45 @@ pub async fn plan_upsert(
         .collect();
     contested.sort_unstable();
 
+    // A verdict drawn from part of a track does not overrule a better one
+    // already stored for it: a THOR cluster over the last few nights of an
+    // object linked across two weeks is often just an ungated pair.
+    let stored_fit = existing
+        .iter()
+        .filter(|t| absorbed.contains(&&t.id))
+        .filter_map(|t| {
+            let fit = BoundFit::parse(t.bound_fit.as_deref()?)?;
+            Some((fit, t.bound_fit_residual_arcsec))
+        })
+        .min_by_key(|(fit, _)| fit.rank());
+    let bound_fit = match (bound_fit, stored_fit) {
+        (Some(new), Some(old)) if old.0.rank() < new.0.rank() => Some(old),
+        (None, old) => old,
+        (new, _) => new,
+    };
+
     let all: Vec<i64> = by_candid.keys().copied().collect();
     let epochs: Vec<f64> = by_candid.values().copied().collect();
     let (n_detections, n_nights, arc_days, first_jd, last_jd) = summarise(&all, &epochs);
+    let bound_fit_residual_arcsec = bound_fit.and_then(|(_, r)| r);
+    let bound_fit = bound_fit.map(|(f, _)| f.as_str().to_string());
+    let unchanged_since = match (&id, superseded.is_empty()) {
+        (Some(id), true) => existing
+            .iter()
+            .find(|t| &t.id == id)
+            .filter(|t| {
+                t.members == all
+                    && t.epochs == epochs
+                    && t.designation == designation
+                    && t.bound_fit == bound_fit
+                    && match (t.bound_fit_residual_arcsec, bound_fit_residual_arcsec) {
+                        (Some(a), Some(b)) => (a - b).abs() < SAME_RESIDUAL_ARCSEC,
+                        (a, b) => a.is_none() && b.is_none(),
+                    }
+            })
+            .map(|t| t.updated_at),
+        _ => None,
+    };
     Ok(UpsertPlan {
         id,
         members: all,
@@ -393,15 +461,17 @@ pub async fn plan_upsert(
         arc_days,
         first_jd,
         last_jd,
-        bound_fit: bound_fit.map(|(f, _)| f.as_str().to_string()),
-        bound_fit_residual_arcsec: bound_fit.and_then(|(_, r)| r),
+        bound_fit,
+        bound_fit_residual_arcsec,
         designation,
         superseded,
         contested,
+        unchanged_since,
     })
 }
 
-/// Write a plan, minting an id if it needs one.
+/// Write a plan, minting an id if it needs one. A plan that would write the
+/// stored track back unchanged writes nothing, so its `updated_at` stands.
 pub async fn commit_upsert(
     db: &mongodb::Database,
     plan: UpsertPlan,
@@ -422,8 +492,16 @@ pub async fn commit_upsert(
         first_jd: plan.first_jd,
         last_jd: plan.last_jd,
         designation: plan.designation,
-        updated_at: chrono::Utc::now().timestamp_millis() as f64 / 1000.0,
+        updated_at: plan
+            .unchanged_since
+            .unwrap_or_else(|| chrono::Utc::now().timestamp_millis() as f64 / 1000.0),
     };
+    if plan.unchanged_since.is_some() {
+        return Ok(Upserted {
+            track: stored,
+            superseded: Vec::new(),
+        });
+    }
     let collection = db.collection::<StoredTrack>(TRACKS_COLLECTION);
     collection
         .replace_one(doc! { "_id": &id }, &stored)
@@ -647,6 +725,7 @@ mod tests {
             designation: None,
             superseded: Vec::new(),
             contested: vec![11, 12],
+            unchanged_since: None,
         };
         assert!(
             !plan.meets(2, 2),
@@ -720,5 +799,67 @@ mod tests {
         t.first_jd = 2461293.8666435;
         let carried = AlertTrack::from(&t);
         assert_eq!(carried.first_jd, 2461293.8666435);
+    }
+
+    /// Candids no other test uses, so tests can share the database.
+    fn fresh_members(n: i64) -> Vec<i64> {
+        let base = (uuid::Uuid::new_v4().as_u128() as i64).abs() / 16;
+        (base..base + n).collect()
+    }
+
+    async fn store(
+        db: &mongodb::Database,
+        members: &[i64],
+        fit: (BoundFit, Option<f64>),
+    ) -> Upserted {
+        let jds: Vec<f64> = (0..members.len()).map(|k| 2460000.0 + k as f64).collect();
+        let plan = plan_upsert(db, members, &jds, None, Some(fit))
+            .await
+            .unwrap();
+        commit_upsert(db, plan).await.unwrap()
+    }
+
+    /// A THOR pair over the last nights of a linked object must not wipe the
+    /// orbit the linking pass fit across the whole arc.
+    #[tokio::test]
+    async fn test_a_worse_verdict_does_not_overwrite_a_stored_one() {
+        let db = crate::conf::get_test_db().await;
+        let members = fresh_members(6);
+        let linked = store(&db, &members, (BoundFit::Good, Some(0.8))).await;
+        let pair = store(&db, &members[4..], (BoundFit::Ungated, None)).await;
+        assert_eq!(pair.track.id, linked.track.id, "the pair extends the track");
+        assert_eq!(pair.track.bound_fit.as_deref(), Some("good"));
+        assert_eq!(pair.track.bound_fit_residual_arcsec, Some(0.8));
+
+        let refit = store(&db, &members, (BoundFit::Good, Some(0.5))).await;
+        assert_eq!(
+            refit.track.bound_fit_residual_arcsec,
+            Some(0.5),
+            "an equally good verdict is the newer fit and replaces it"
+        );
+    }
+
+    /// Re-finding a track exactly as stored must not make it look new to a
+    /// client polling `updated_at`.
+    #[tokio::test]
+    async fn test_an_unchanged_track_keeps_its_updated_at() {
+        let db = crate::conf::get_test_db().await;
+        let members = fresh_members(4);
+        let first = store(&db, &members, (BoundFit::Good, Some(0.8))).await;
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let again = store(&db, &members, (BoundFit::Good, Some(0.8001))).await;
+        assert_eq!(again.track.updated_at, first.track.updated_at);
+        let stored = track_by_id(&db, &first.track.id).await.unwrap().unwrap();
+        assert_eq!(stored.updated_at, first.track.updated_at);
+
+        let mut longer = members.clone();
+        longer.extend(fresh_members(1));
+        let extended = store(&db, &longer, (BoundFit::Good, Some(0.8))).await;
+        assert_eq!(extended.track.id, first.track.id);
+        assert!(
+            extended.track.updated_at > first.track.updated_at,
+            "an extension is a change"
+        );
     }
 }

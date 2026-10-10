@@ -3,7 +3,7 @@
 //!
 //! A run loads a window of ZTF detections, finds tracklets and links them
 //! across nights or recovers objects tracklet-lessly with THOR, matches what it
-//! finds to the MPC catalogue, and stores the result as tracks.
+//! finds to the MPC catalog, and stores the result as tracks.
 
 use crate::utils::heliolinc::{sky_track, test_orbits, State, Track};
 use crate::utils::identify::{
@@ -23,6 +23,7 @@ use futures::StreamExt;
 use mongodb::bson::{doc, Document};
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::{error, info};
 
 const ALERTS_COLLECTION: &str = "ZTF_alerts";
@@ -199,13 +200,7 @@ impl Verdict {
 
     /// Sort key: a confident bound orbit first, then the ones worth a look.
     pub fn rank(&self) -> (u8, f64) {
-        let order = match self.0 {
-            BoundFit::Good => 0,
-            BoundFit::Poor => 1,
-            BoundFit::None => 2,
-            BoundFit::Ungated => 3,
-        };
-        (order, self.1.unwrap_or(0.0))
+        (self.0.rank(), self.1.unwrap_or(0.0))
     }
 
     pub fn label(&self) -> String {
@@ -423,12 +418,12 @@ pub fn thor_clusters(
     kept
 }
 
-/// The catalogued object each group of detections is, if any, in the order of
+/// The cataloged object each group of detections is, if any, in the order of
 /// `groups`.
 ///
-/// Every detection in a group is matched against the catalogue, and the group
+/// Every detection in a group is matched against the catalog, and the group
 /// takes a designation only under `rule`: a single detection near some
-/// catalogued orbit is too often chance.
+/// cataloged orbit is too often chance.
 pub fn designations(
     groups: &[Vec<i64>],
     detections: &[Detection],
@@ -475,18 +470,33 @@ pub struct PersistReport {
     /// Whether the pass held the tracks lock, or was a dry run. A pass that
     /// found another one writing stores nothing.
     pub ran: bool,
+    /// Whether the pass stopped early because the process was asked to stop.
+    pub interrupted: bool,
     pub stored: usize,
+    /// Of `stored`, tracks re-found exactly as they were and left alone.
+    pub unchanged: usize,
     pub stamped: u64,
     /// Stored ids absorbed by merges.
     pub absorbed: usize,
 }
 
+impl PersistReport {
+    /// Whether the pass did everything it set out to.
+    pub fn complete(&self) -> bool {
+        self.ran && !self.interrupted
+    }
+}
+
+/// One thing a pass found, ready to be stored as a track.
+struct Candidate {
+    members: Vec<i64>,
+    fit: (BoundFit, Option<f64>),
+}
+
 /// Store each track under a durable id and stamp it onto its member alerts.
 ///
-/// One track at a time rather than in bulk: identity is decided against what is
-/// already stored, so two tracks of the same object in one run must see each
-/// other's writes. `known` is parallel to `tracks`, or empty when tracks were
-/// not matched to the catalogue.
+/// `known` is parallel to `tracks`, or empty when tracks were not matched to
+/// the catalog. Stops between tracks once `stop` is set.
 #[allow(clippy::too_many_arguments)]
 pub async fn persist_tracks(
     db: &mongodb::Database,
@@ -498,104 +508,29 @@ pub async fn persist_tracks(
     dry_run: bool,
     min_detections: usize,
     min_nights: usize,
+    stop: &AtomicBool,
 ) -> PersistReport {
-    let mut report = PersistReport::default();
-    if !dry_run {
-        match acquire_lock(db).await {
-            Ok(true) => {}
-            Ok(false) => {
-                error!("another run is persisting tracks, not writing");
-                return report;
-            }
-            Err(e) => {
-                error!("could not take the tracks lock: {}", e);
-                return report;
-            }
-        }
-    }
-    report.ran = true;
-    let by_id: HashMap<i64, &Detection> = detections.iter().map(|d| (d.id, d)).collect();
-    for (i, track) in tracks.iter().enumerate() {
-        let members = track_detections(track, tracklets);
-        let jds: Vec<f64> = members
-            .iter()
-            .filter_map(|id| by_id.get(id))
-            .map(|d| d.jd)
-            .collect();
-        if jds.len() != members.len() {
-            error!("a track references detections not in this run, skipping");
-            continue;
-        }
-        // A track of a known object records the designation, which is what tells
-        // a consumer this is a recovery rather than a discovery candidate. The
-        // survey's own label comes first, then the catalogue match.
-        let designation = members
-            .iter()
-            .find_map(|id| labels.get(id))
-            .map(|l| crate::utils::mpcorb::normalize_ztf_ssnamenr(l).unwrap_or_else(|| l.clone()))
-            .or_else(|| known.get(i).cloned().flatten());
+    let candidates = tracks.iter().map(|track| Candidate {
+        members: track_detections(track, tracklets),
         // None means too few points to constrain an orbit; anything that
         // survived with a residual already passed the gate.
-        let fit = Some(match track.residual_arcsec {
+        fit: match track.residual_arcsec {
             Some(r) => (BoundFit::Good, Some(r)),
             None => (BoundFit::Ungated, None),
-        });
-        let plan = match plan_upsert(db, &members, &jds, designation, fit).await {
-            Ok(plan) => plan,
-            Err(e) => {
-                error!("could not resolve a track: {}", e);
-                continue;
-            }
-        };
-        if !plan.meets(min_detections, min_nights) {
-            info!(
-                "dropping a track: {} detections over {} nights after {} contested detection(s) were left with another track",
-                plan.n_detections,
-                plan.n_nights,
-                plan.contested.len()
-            );
-            continue;
-        }
-        if dry_run {
-            info!("would store {}", plan.describe());
-            report.stored += 1;
-            report.absorbed += plan.superseded.len();
-            report.stamped += plan.members.len() as u64;
-            continue;
-        }
-        let superseded = plan.superseded.clone();
-        match commit_upsert(db, plan).await {
-            Ok(up) => {
-                report.stored += 1;
-                report.absorbed += superseded.len();
-                if !superseded.is_empty() {
-                    info!("track {} absorbed {}", up.track.id, superseded.join(", "));
-                }
-                match stamp_members(db, &up.track).await {
-                    Ok(n) => report.stamped += n,
-                    Err(e) => error!("could not stamp {}: {}", up.track.id, e),
-                }
-            }
-            Err(e) => error!("could not store a track: {}", e),
-        }
-    }
-    if !dry_run {
-        if let Err(e) = release_lock(db).await {
-            error!("could not release the tracks lock: {}", e);
-        }
-    }
-    if dry_run {
-        info!(
-            "dry run: would store {} tracks, stamp {} alerts, absorb {} superseded ids",
-            report.stored, report.stamped, report.absorbed
-        );
-    } else {
-        info!(
-            "stored {} tracks, stamped {} alerts, absorbed {} superseded ids",
-            report.stored, report.stamped, report.absorbed
-        );
-    }
-    report
+        },
+    });
+    persist(
+        db,
+        "tracks",
+        candidates,
+        detections,
+        labels,
+        known,
+        dry_run,
+        (min_detections, min_nights),
+        stop,
+    )
+    .await
 }
 
 /// Store each THOR cluster the same way a linked track is stored.
@@ -603,7 +538,8 @@ pub async fn persist_tracks(
 /// The bound-fit verdict goes with it: a cluster no bound orbit reproduces is
 /// the interesting one, and persisting it as though it were clean would lose
 /// exactly what makes it worth looking at. `known` is parallel to `clusters`,
-/// or empty when clusters were not matched to the catalogue.
+/// or empty when clusters were not matched to the catalog. Stops between
+/// clusters once `stop` is set.
 #[allow(clippy::too_many_arguments)]
 pub async fn persist_clusters(
     db: &mongodb::Database,
@@ -614,6 +550,43 @@ pub async fn persist_clusters(
     dry_run: bool,
     min_detections: usize,
     min_nights: usize,
+    stop: &AtomicBool,
+) -> PersistReport {
+    let candidates = clusters.iter().map(|(cluster, verdict)| Candidate {
+        members: cluster.ids.clone(),
+        fit: (verdict.0, verdict.residual()),
+    });
+    persist(
+        db,
+        "THOR clusters",
+        candidates,
+        detections,
+        labels,
+        known,
+        dry_run,
+        (min_detections, min_nights),
+        stop,
+    )
+    .await
+}
+
+/// Store each candidate as a track, holding the tracks lock throughout.
+///
+/// One at a time rather than in bulk: identity is decided against what is
+/// already stored, so two tracks of the same object in one run must see each
+/// other's writes. The lock is released however the pass ends, including when
+/// `stop` cuts it short, so a shutdown never leaves it held for its lease.
+#[allow(clippy::too_many_arguments)]
+async fn persist(
+    db: &mongodb::Database,
+    what: &str,
+    candidates: impl Iterator<Item = Candidate>,
+    detections: &[Detection],
+    labels: &HashMap<i64, String>,
+    known: &[Option<String>],
+    dry_run: bool,
+    (min_detections, min_nights): (usize, usize),
+    stop: &AtomicBool,
 ) -> PersistReport {
     let mut report = PersistReport::default();
     if !dry_run {
@@ -631,27 +604,36 @@ pub async fn persist_clusters(
     }
     report.ran = true;
     let by_id: HashMap<i64, &Detection> = detections.iter().map(|d| (d.id, d)).collect();
-    for (i, (cluster, verdict)) in clusters.iter().enumerate() {
-        let members: Vec<i64> = cluster.ids.clone();
+    for (i, Candidate { members, fit }) in candidates.enumerate() {
+        if stop.load(Ordering::Relaxed) {
+            info!("asked to stop, leaving the rest of the {} unstored", what);
+            report.interrupted = true;
+            break;
+        }
         let jds: Vec<f64> = members
             .iter()
             .filter_map(|id| by_id.get(id))
             .map(|d| d.jd)
             .collect();
         if jds.len() != members.len() {
-            error!("a cluster references detections not in this run, skipping");
+            error!(
+                "one of the {} references detections not in this run, skipping",
+                what
+            );
             continue;
         }
+        // A track of a known object records the designation, which is what tells
+        // a consumer this is a recovery rather than a discovery candidate. The
+        // survey's own label comes first, then the catalog match.
         let designation = members
             .iter()
             .find_map(|id| labels.get(id))
             .map(|l| crate::utils::mpcorb::normalize_ztf_ssnamenr(l).unwrap_or_else(|| l.clone()))
             .or_else(|| known.get(i).cloned().flatten());
-        let fit = Some((verdict.0, verdict.residual()));
-        let plan = match plan_upsert(db, &members, &jds, designation, fit).await {
+        let plan = match plan_upsert(db, &members, &jds, designation, Some(fit)).await {
             Ok(plan) => plan,
             Err(e) => {
-                error!("could not resolve a cluster: {}", e);
+                error!("could not resolve one of the {}: {}", what, e);
                 continue;
             }
         };
@@ -664,21 +646,34 @@ pub async fn persist_clusters(
             );
             continue;
         }
+        let unchanged = plan.unchanged_since.is_some();
         if dry_run {
             info!("would store {}", plan.describe());
             report.stored += 1;
+            report.unchanged += unchanged as usize;
+            report.absorbed += plan.superseded.len();
             report.stamped += plan.members.len() as u64;
             continue;
         }
+        let superseded = plan.superseded.clone();
         match commit_upsert(db, plan).await {
             Ok(up) => {
                 report.stored += 1;
+                report.absorbed += superseded.len();
+                if unchanged {
+                    // Already stamped when it was last written.
+                    report.unchanged += 1;
+                    continue;
+                }
+                if !superseded.is_empty() {
+                    info!("track {} absorbed {}", up.track.id, superseded.join(", "));
+                }
                 match stamp_members(db, &up.track).await {
                     Ok(n) => report.stamped += n,
                     Err(e) => error!("could not stamp {}: {}", up.track.id, e),
                 }
             }
-            Err(e) => error!("could not store a cluster: {}", e),
+            Err(e) => error!("could not store one of the {}: {}", what, e),
         }
     }
     if !dry_run {
@@ -686,10 +681,18 @@ pub async fn persist_clusters(
             error!("could not release the tracks lock: {}", e);
         }
     }
-    let what = if dry_run { "would store" } else { "stored" };
     info!(
-        "{} {} thor clusters, {} alerts stamped",
-        what, report.stored, report.stamped
+        "{} {} {} ({} unchanged), stamped {} alerts, absorbed {} superseded ids",
+        if dry_run {
+            "dry run: would store"
+        } else {
+            "stored"
+        },
+        report.stored,
+        what,
+        report.unchanged,
+        report.stamped,
+        report.absorbed
     );
     report
 }
@@ -697,14 +700,14 @@ pub async fn persist_clusters(
 /// How much of what a search could have found it did find, against labels.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Recall {
-    /// Labelled objects with tracklets on at least two nights: what linking
+    /// Labeled objects with tracklets on at least two nights: what linking
     /// can reach.
     pub linkable: usize,
     /// Of those, the ones a track drawn from that object alone recovered.
     pub recovered: usize,
-    /// Tracks whose detections belong to one labelled object.
+    /// Tracks whose detections belong to one labeled object.
     pub pure_tracks: usize,
-    /// Tracks drawing on more than one labelled object.
+    /// Tracks drawing on more than one labeled object.
     pub mixed_tracks: usize,
 }
 

@@ -4,7 +4,7 @@
 //! `linker.window_nights` nights of unassociated detections, links tracklets
 //! across nights, recovers objects seen once a night with THOR over the most
 //! recent `linker.thor_window_nights`, matches what it finds to the MPC
-//! catalogue so a known object is stored as a recovery, and stores the tracks.
+//! catalog so a known object is stored as a recovery, and stores the tracks.
 //! Nothing is sent anywhere else: this is the loop that shows how fast and how
 //! complete the search is before anything depends on it.
 //!
@@ -12,6 +12,9 @@
 //! `linker.recall_window_nights`, stores nothing, and logs how many of those
 //! objects the search recovered. That recall says whether a change to the
 //! search misses things.
+//!
+//! The last night it finished is recorded in the database, so a restart does
+//! not search it again, and a night it could not finish is retried.
 
 use boom::conf::{load_dotenv, AppConfig, LinkerConfig};
 use boom::utils::discovery::{
@@ -23,9 +26,20 @@ use boom::utils::identify::{IdentifyConfig, KnownRule, OrbitEntry};
 use boom::utils::linking::{night_of, Detection, Tracklet, TrackletConfig};
 use boom::utils::mpcorb::load_catalogue;
 use boom::utils::o11y::logging::build_subscriber;
+use boom::utils::tracks::COUNTERS_COLLECTION;
 use clap::Parser;
+use mongodb::bson::{doc, Document};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::sync::Notify;
 use tracing::{error, info, warn};
+
+/// Where the last finished night is kept, in `COUNTERS_COLLECTION`.
+const LAST_NIGHT_ID: &str = "linker_last_night";
+
+/// How long to wait before trying an unfinished night again.
+const RETRY_AFTER: Duration = Duration::from_secs(30 * 60);
 
 #[derive(Parser)]
 #[command(about = "Run moving-object discovery once each ZTF night is over")]
@@ -47,7 +61,7 @@ struct Cli {
 
 /// The current Julian date.
 fn now_jd() -> f64 {
-    chrono::Utc::now().timestamp_millis() as f64 / 86_400_000.0 + 2_440_587.5
+    flare::Time::now().to_jd()
 }
 
 /// The last night that is over at `jd`: the latest UTC day whose
@@ -82,13 +96,13 @@ fn link(detections: &[Detection]) -> (Vec<Tracklet>, Vec<Track>) {
     (tracklets, tracks)
 }
 
-/// The designation of each group, or none at all without a catalogue.
+/// The designation of each group, or none at all without a catalog.
 fn known_objects(
     groups: &[Vec<i64>],
     detections: &[Detection],
-    catalogue: Option<&[OrbitEntry]>,
+    catalog: Option<&[OrbitEntry]>,
 ) -> Vec<Option<String>> {
-    match catalogue {
+    match catalog {
         Some(orbits) => designations(
             groups,
             detections,
@@ -100,9 +114,46 @@ fn known_objects(
     }
 }
 
+/// The last night a run finished, if any.
+async fn last_recorded_night(db: &mongodb::Database) -> Option<i64> {
+    match db
+        .collection::<Document>(COUNTERS_COLLECTION)
+        .find_one(doc! { "_id": LAST_NIGHT_ID })
+        .await
+    {
+        Ok(found) => found.and_then(|d| d.get_i64("night").ok()),
+        Err(error) => {
+            error!(%error, "could not read the last finished night");
+            None
+        }
+    }
+}
+
+async fn record_night(db: &mongodb::Database, night: i64) {
+    if let Err(error) = db
+        .collection::<Document>(COUNTERS_COLLECTION)
+        .replace_one(
+            doc! { "_id": LAST_NIGHT_ID },
+            doc! { "_id": LAST_NIGHT_ID, "night": night },
+        )
+        .upsert(true)
+        .await
+    {
+        error!(%error, night, "could not record the finished night");
+    }
+}
+
 /// Search the window ending with `night`, store what it finds, and report the
 /// recall on objects IPAC identified.
-async fn run_night(db: &mongodb::Database, cfg: &LinkerConfig, night: i64) {
+///
+/// True when the night is done: its window loaded, and every pass that stores
+/// tracks stored them. A night that is not done is worth trying again.
+async fn run_night(
+    db: &mongodb::Database,
+    cfg: &LinkerConfig,
+    night: i64,
+    stop: &AtomicBool,
+) -> bool {
     let started = Instant::now();
     let (jd_start, span) = window(night, cfg.window_nights);
     info!(
@@ -113,8 +164,8 @@ async fn run_night(db: &mongodb::Database, cfg: &LinkerConfig, night: i64) {
     let (detections, labels) = match load_window(db, jd_start, span, cfg.drb, false, None).await {
         Ok(found) => found,
         Err(error) => {
-            error!(%error, night, "could not load the window, skipping this night");
-            return;
+            error!(%error, night, "could not load the window");
+            return false;
         }
     };
     info!(
@@ -123,28 +174,35 @@ async fn run_night(db: &mongodb::Database, cfg: &LinkerConfig, night: i64) {
         "loaded the unassociated detections"
     );
 
-    // One read of the catalogue serves both passes.
-    let catalogue = if cfg.match_known && (cfg.link || cfg.thor) {
+    // One read of the catalog serves both passes. Without it every known
+    // object IPAC missed would be stored as a discovery candidate, so a run
+    // that should match and cannot does not store anything.
+    let catalog = if cfg.match_known && (cfg.link || cfg.thor) && !detections.is_empty() {
         match load_catalogue(db).await {
+            Ok(orbits) if orbits.is_empty() => {
+                error!("MPC_orbits is empty, so tracks cannot be matched; run mpcorb_ingest");
+                return false;
+            }
             Ok(orbits) => Some(orbits),
             Err(error) => {
-                error!(%error, "could not read MPC_orbits, so tracks are not matched");
-                None
+                error!(%error, "could not read MPC_orbits, so tracks cannot be matched");
+                return false;
             }
         }
     } else {
         None
     };
     let dry_run = !cfg.persist;
+    let mut done = true;
 
-    if cfg.link && !detections.is_empty() {
+    if cfg.link && !detections.is_empty() && !stop.load(Ordering::Relaxed) {
         let pass = Instant::now();
         let (tracklets, tracks) = link(&detections);
         let groups: Vec<Vec<i64>> = tracks
             .iter()
             .map(|t| track_detections(t, &tracklets))
             .collect();
-        let known = known_objects(&groups, &detections, catalogue.as_deref());
+        let known = known_objects(&groups, &detections, catalog.as_deref());
         let report = persist_tracks(
             db,
             &tracks,
@@ -155,20 +213,23 @@ async fn run_night(db: &mongodb::Database, cfg: &LinkerConfig, night: i64) {
             dry_run,
             TrackletConfig::default().min_detections,
             LinkConfig::default().min_nights,
+            stop,
         )
         .await;
+        done &= report.complete();
         info!(
             tracklets = tracklets.len(),
             tracks = tracks.len(),
             known = known.iter().filter(|k| k.is_some()).count(),
             stored = report.stored,
+            unchanged = report.unchanged,
             wrote = report.ran && !dry_run,
             seconds = pass.elapsed().as_secs_f64(),
             "linking pass done"
         );
     }
 
-    if cfg.thor && !detections.is_empty() {
+    if cfg.thor && !detections.is_empty() && !stop.load(Ordering::Relaxed) {
         let pass = Instant::now();
         let (thor_start, _) = window(night, cfg.thor_window_nights);
         let recent: Vec<Detection> = detections
@@ -179,7 +240,7 @@ async fn run_night(db: &mongodb::Database, cfg: &LinkerConfig, night: i64) {
         let search = ThorSearch::default();
         let clusters = thor_clusters(&recent, &search);
         let groups: Vec<Vec<i64>> = clusters.iter().map(|(c, _)| c.ids.clone()).collect();
-        let known = known_objects(&groups, &recent, catalogue.as_deref());
+        let known = known_objects(&groups, &recent, catalog.as_deref());
         let report = persist_clusters(
             db,
             &clusters,
@@ -189,19 +250,28 @@ async fn run_night(db: &mongodb::Database, cfg: &LinkerConfig, night: i64) {
             dry_run,
             search.config.min_detections,
             search.config.min_nights,
+            stop,
         )
         .await;
+        done &= report.complete();
         info!(
             detections = recent.len(),
             clusters = clusters.len(),
             known = known.iter().filter(|k| k.is_some()).count(),
             stored = report.stored,
+            unchanged = report.unchanged,
             wrote = report.ran && !dry_run,
             seconds = pass.elapsed().as_secs_f64(),
             "THOR pass done"
         );
     }
 
+    if stop.load(Ordering::Relaxed) {
+        info!(night, "asked to stop, leaving the night unfinished");
+        return false;
+    }
+
+    // Diagnostic only, so a recall that fails does not hold the night back.
     if cfg.recall {
         let pass = Instant::now();
         let (start, span) = window(night, cfg.recall_window_nights);
@@ -228,28 +298,48 @@ async fn run_night(db: &mongodb::Database, cfg: &LinkerConfig, night: i64) {
     }
     info!(
         night,
+        done,
         seconds = started.elapsed().as_secs_f64(),
-        "night done"
+        "night over"
     );
+    done
+}
+
+/// Set `stop` and wake `wake` on SIGTERM or Ctrl-C.
+///
+/// Listening from the start, not only while waiting, so a shutdown mid-run is
+/// seen between tracks and the tracks lock is released rather than left held
+/// for its lease when Docker gives up and kills the process.
+fn listen_for_stop(stop: Arc<AtomicBool>, wake: Arc<Notify>) {
+    use tokio::signal::unix::{signal, SignalKind};
+    tokio::spawn(async move {
+        match signal(SignalKind::terminate()) {
+            Ok(mut terminate) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = terminate.recv() => {}
+                }
+            }
+            Err(error) => {
+                warn!(%error, "cannot listen for SIGTERM, so only Ctrl-C stops the linker");
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+        info!("asked to stop");
+        stop.store(true, Ordering::Relaxed);
+        // A permit, so a wait that starts after this still returns at once.
+        wake.notify_one();
+    });
 }
 
 /// Sleep for `duration`, or until asked to stop. True when asked to stop.
-async fn sleep_or_stop(duration: Duration) -> bool {
-    use tokio::signal::unix::{signal, SignalKind};
-    let mut terminate = match signal(SignalKind::terminate()) {
-        Ok(terminate) => terminate,
-        Err(error) => {
-            warn!(%error, "cannot listen for SIGTERM, so only Ctrl-C stops a wait");
-            tokio::select! {
-                _ = tokio::time::sleep(duration) => return false,
-                _ = tokio::signal::ctrl_c() => return true,
-            }
-        }
-    };
+async fn sleep_or_stop(duration: Duration, stop: &AtomicBool, wake: &Notify) -> bool {
+    if stop.load(Ordering::Relaxed) {
+        return true;
+    }
     tokio::select! {
-        _ = tokio::time::sleep(duration) => false,
-        _ = tokio::signal::ctrl_c() => true,
-        _ = terminate.recv() => true,
+        _ = tokio::time::sleep(duration) => stop.load(Ordering::Relaxed),
+        _ = wake.notified() => true,
     }
 }
 
@@ -259,6 +349,10 @@ async fn main() {
     tracing::subscriber::set_global_default(subscriber).expect("failed to set subscriber");
     load_dotenv();
 
+    let stop = Arc::new(AtomicBool::new(false));
+    let wake = Arc::new(Notify::new());
+    listen_for_stop(stop.clone(), wake.clone());
+
     let cli = Cli::parse();
     let config_path = cli.config.unwrap_or_else(|| "config.yaml".to_string());
     let config = AppConfig::from_path(&config_path).expect("failed to load config");
@@ -267,28 +361,45 @@ async fn main() {
     info!(?cfg, "linker starting");
 
     if let Some(night) = cli.night {
-        run_night(&db, &cfg, night).await;
+        run_night(&db, &cfg, night, &stop).await;
+        return;
+    }
+    if cli.once {
+        let night = last_finished_night(now_jd(), cfg.run_after_utc_hour);
+        if run_night(&db, &cfg, night, &stop).await {
+            record_night(&db, night).await;
+        }
         return;
     }
 
-    let mut done: Option<i64> = None;
+    let mut done = last_recorded_night(&db).await;
+    if let Some(night) = done {
+        info!(night, "resuming after the last finished night");
+    }
     loop {
         let night = last_finished_night(now_jd(), cfg.run_after_utc_hour);
-        if done != Some(night) {
-            run_night(&db, &cfg, night).await;
+        let wait = if done.is_some_and(|d| d >= night) {
+            let days = (finished_at(night + 1, cfg.run_after_utc_hour) - now_jd()).max(0.0);
+            info!(
+                next_night = night + 1,
+                wait_hours = days * 24.0,
+                "waiting for the next night to end"
+            );
+            // A minute late, so the night is over by any clock's reckoning.
+            Duration::from_secs_f64(days * 86_400.0 + 60.0)
+        } else if run_night(&db, &cfg, night, &stop).await {
+            record_night(&db, night).await;
             done = Some(night);
-            if cli.once {
-                return;
-            }
-        }
-        let wait_days = (finished_at(night + 1, cfg.run_after_utc_hour) - now_jd()).max(0.0);
-        info!(
-            next_night = night + 1,
-            wait_hours = wait_days * 24.0,
-            "waiting for the next night to end"
-        );
-        // A minute late, so the night is over by any clock's reckoning.
-        if sleep_or_stop(Duration::from_secs_f64(wait_days * 86_400.0 + 60.0)).await {
+            continue;
+        } else {
+            info!(
+                night,
+                retry_minutes = RETRY_AFTER.as_secs() / 60,
+                "night not finished, will try again"
+            );
+            RETRY_AFTER
+        };
+        if sleep_or_stop(wait, &stop, &wake).await {
             info!("stopping");
             return;
         }
