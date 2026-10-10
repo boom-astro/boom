@@ -1793,9 +1793,10 @@ fn avro_record(document: &Document, name: &str) -> serde_json::Value {
     serde_json::json!({ "type": "record", "name": name, "fields": fields })
 }
 
-/// Type of a field the catalog row read did not carry, or carried as null.
+/// Type of a field no catalog row read carried, or carried only as null.
 fn unknown_avro_type() -> serde_json::Value {
-    serde_json::json!(["null", "boolean", "double", "string"])
+    // Clients take the first non-null branch, and catalog columns are mostly numbers.
+    serde_json::json!(["null", "double", "string", "boolean"])
 }
 
 /// Fields crossmatch stores on each match: the ones its projection includes,
@@ -1813,61 +1814,97 @@ fn projected_fields(projection: &Document) -> Vec<String> {
     fields
 }
 
-/// Value at a projection path such as `coordinates.l`, through subdocuments.
-fn value_at<'a>(row: &'a Document, path: &str) -> Option<&'a Bson> {
-    let mut parts = path.split('.');
-    let mut value = row.get(parts.next()?)?;
-    for part in parts {
-        value = value.as_document()?.get(part)?;
+const CATALOG_SCHEMA_ROWS: i64 = 100;
+
+fn projected_avro_fields(
+    paths: &[String],
+    rows: &[&Document],
+    name: &str,
+) -> Vec<serde_json::Value> {
+    let mut heads: Vec<(&str, Vec<String>)> = Vec::new();
+    for path in paths {
+        let (head, rest) = match path.split_once('.') {
+            Some((head, rest)) => (head, Some(rest.to_string())),
+            None => (path.as_str(), None),
+        };
+        let index = match heads.iter().position(|(h, _)| *h == head) {
+            Some(index) => index,
+            None => {
+                heads.push((head, Vec::new()));
+                heads.len() - 1
+            }
+        };
+        heads[index].1.extend(rest);
     }
-    Some(value)
+    heads
+        .into_iter()
+        .enumerate()
+        .map(|(index, (head, rest))| {
+            let name = format!("{}_{}", name, index);
+            let avro_type = if rest.is_empty() {
+                rows.iter()
+                    .filter_map(|row| row.get(head))
+                    .find(|value| !matches!(value, Bson::Null))
+                    .map(|value| avro_type_of(value, &name))
+                    .unwrap_or_else(unknown_avro_type)
+            } else {
+                let rows: Vec<&Document> = rows
+                    .iter()
+                    .filter_map(|row| row.get_document(head).ok())
+                    .collect();
+                serde_json::json!(["null", {
+                    "type": "record",
+                    "name": name,
+                    "fields": projected_avro_fields(&rest, &rows, &name),
+                }])
+            };
+            serde_json::json!({ "name": head, "type": avro_type })
+        })
+        .collect()
 }
 
 /// Avro field for one crossmatch catalog under `cross_matches`: the list of
 /// matches, each with the catalog's projected fields plus `distance_arcsec`
 /// and, for catalogs with a `distance_key`, `distance_kpc`. Field types are
-/// read off the catalog's first row by `_id`, so the same row every time; if
-/// it can't be read, the fields are still listed, with a union of types.
+/// read off the catalog's first rows by `_id`, so the same rows every time; if
+/// they can't be read, the fields are still listed, with a union of types.
 async fn catalog_avro_field(
     db: &Database,
     xmatch: &CatalogXmatchConfig,
     record_name: String,
 ) -> serde_json::Value {
-    let row = db
-        .collection::<Document>(xmatch.collection_name())
-        .find_one(doc! {})
-        .sort(doc! { "_id": 1 })
-        .projection(xmatch.projection.clone())
-        .await
-        .unwrap_or_else(|error| {
-            log_error!(
-                WARN,
-                error,
-                "could not read catalog {} to type its filter schema",
-                xmatch.collection_name()
-            );
-            None
-        });
-    catalog_avro_schema(xmatch, &row.unwrap_or_default(), &record_name)
+    let rows = async {
+        db.collection::<Document>(xmatch.collection_name())
+            .find(doc! {})
+            .sort(doc! { "_id": 1 })
+            .limit(CATALOG_SCHEMA_ROWS)
+            .projection(xmatch.projection.clone())
+            .await?
+            .try_collect::<Vec<Document>>()
+            .await
+    }
+    .await
+    .unwrap_or_else(|error| {
+        log_error!(
+            WARN,
+            error,
+            "could not read catalog {} to type its filter schema",
+            xmatch.collection_name()
+        );
+        Vec::new()
+    });
+    catalog_avro_schema(xmatch, &rows, &record_name)
 }
 
-/// The `cross_matches` entry of [`catalog_avro_field`], typed from `row`.
+/// The `cross_matches` entry of [`catalog_avro_field`], typed from `rows`.
 fn catalog_avro_schema(
     xmatch: &CatalogXmatchConfig,
-    row: &Document,
+    rows: &[Document],
     record_name: &str,
 ) -> serde_json::Value {
-    let mut fields: Vec<serde_json::Value> = projected_fields(&xmatch.projection)
-        .into_iter()
-        .enumerate()
-        .map(|(index, key)| {
-            let avro_type = match value_at(row, &key) {
-                Some(value) => avro_type_of(value, &format!("{}_{}", record_name, index)),
-                None => unknown_avro_type(),
-            };
-            serde_json::json!({ "name": key, "type": avro_type })
-        })
-        .collect();
+    let rows: Vec<&Document> = rows.iter().collect();
+    let mut fields =
+        projected_avro_fields(&projected_fields(&xmatch.projection), &rows, record_name);
     fields.push(serde_json::json!({ "name": "distance_arcsec", "type": "double" }));
     if xmatch.distance_key.is_some() {
         fields.push(serde_json::json!({ "name": "distance_kpc", "type": ["null", "double"] }));
@@ -2000,17 +2037,30 @@ mod tests {
     }
 
     #[test]
-    fn dotted_projection_keys_are_typed_through_subdocuments() {
+    fn dotted_projection_keys_are_nested_and_typed_past_null_rows() {
         let xmatch = CatalogXmatchConfig {
             catalog: "C".to_string(),
-            projection: doc! { "_id": 0_i64, "coordinates.l": 1_i64 },
+            projection: doc! { "_id": 0_i64, "coordinates.l": 1_i64, "coordinates.b": 1_i64 },
             ..Default::default()
         };
-        let row = doc! { "coordinates": { "l": 12.5 } };
-        let entry = catalog_avro_schema(&xmatch, &row, "R");
+        let rows = [
+            doc! { "coordinates": { "l": null, "b": 1.0 } },
+            doc! { "coordinates": { "l": 12.5 } },
+        ];
+        let entry = catalog_avro_schema(&xmatch, &rows, "R");
         assert_eq!(
             entry["type"]["items"]["fields"][0],
-            serde_json::json!({ "name": "coordinates.l", "type": ["null", "double"] })
+            serde_json::json!({
+                "name": "coordinates",
+                "type": ["null", {
+                    "type": "record",
+                    "name": "R_0",
+                    "fields": [
+                        { "name": "l", "type": ["null", "double"] },
+                        { "name": "b", "type": ["null", "double"] },
+                    ],
+                }],
+            })
         );
     }
 
@@ -2020,7 +2070,7 @@ mod tests {
             catalog: "NED".to_string(),
             projection: doc! {
                 "ra": 1_i64, "z": 1_i64, "names": 1_i64, "phot": 1_i64,
-                "phot_g": 1_i64, "seen": 1_i64,
+                "phot_g": 1_i64, "seen": 1_i64, "coordinates.l": 1_i64,
             },
             distance_key: Some("z".to_string()),
             ..Default::default()
@@ -2035,6 +2085,7 @@ mod tests {
             "phot": { "g": { "mag": 18.0 }, "bands": [{ "band": "g" }] },
             "phot_g": { "mag": 18.0 },
             "seen": mongodb::bson::DateTime::now(),
+            "coordinates": { "l": 12.5 },
         };
         let empty = CatalogXmatchConfig {
             catalog: "empty".to_string(),
@@ -2047,8 +2098,8 @@ mod tests {
                 "type": "record",
                 "name": "CrossMatches",
                 "fields": [
-                    catalog_avro_schema(&xmatch, &row, "CrossMatch_0"),
-                    catalog_avro_schema(&empty, &doc! {}, "CrossMatch_1"),
+                    catalog_avro_schema(&xmatch, &[row], "CrossMatch_0"),
+                    catalog_avro_schema(&empty, &[], "CrossMatch_1"),
                 ],
             },
         });

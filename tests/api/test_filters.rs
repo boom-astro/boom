@@ -664,7 +664,7 @@ mod tests {
         // Projected but absent from the catalog row.
         assert_eq!(
             type_of("z"),
-            Some(serde_json::json!(["null", "boolean", "double", "string"]))
+            Some(serde_json::json!(["null", "double", "string", "boolean"]))
         );
         // In the collection but not projected, so out of reach of filters.
         assert_eq!(type_of("hidden"), None);
@@ -691,7 +691,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             ra["type"],
-            serde_json::json!(["null", "boolean", "double", "string"])
+            serde_json::json!(["null", "double", "string", "boolean"])
         );
     }
 }
