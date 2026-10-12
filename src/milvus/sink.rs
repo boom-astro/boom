@@ -14,8 +14,8 @@ use super::client::{MilvusClient, MilvusError};
 use super::insert::EmbeddingRow;
 use crate::conf::MilvusConfig;
 
-/// Pause after the first failed attempt. Each further failure adds another 15 minutes.
-const COOLDOWN_STEP: Duration = Duration::from_secs(15 * 60);
+/// Pause after the first failed attempt. Each further failure doubles it.
+const COOLDOWN_BASE: Duration = Duration::from_secs(30);
 
 /// Upper bound on the pause between attempts, held until a success resets it.
 const COOLDOWN_MAX: Duration = Duration::from_secs(60 * 60);
@@ -24,11 +24,12 @@ const COOLDOWN_MAX: Duration = Duration::from_secs(60 * 60);
 /// after finding it empty, so idle workers do not poll Valkey every tick.
 const IDLE_DRAIN_PAUSE: Duration = Duration::from_secs(30);
 
-/// Pause before the Nth consecutive retry: 15m, 30m, 45m, then
-/// [`COOLDOWN_MAX`] for every retry after that.
+/// Pause before the Nth consecutive retry: 30s, 1m, 2m, 4m, 8m, 16m, 32m,
+/// then [`COOLDOWN_MAX`] for every retry after that.
 fn cooldown(consecutive_failures: u32) -> Duration {
-    COOLDOWN_STEP
-        .saturating_mul(consecutive_failures.max(1))
+    let shift = consecutive_failures.saturating_sub(1).min(7);
+    COOLDOWN_BASE
+        .saturating_mul(1u32 << shift)
         .min(COOLDOWN_MAX)
 }
 
@@ -270,14 +271,19 @@ mod tests {
 
     #[test]
     fn cooldown_grows_then_caps() {
-        assert_eq!(cooldown(1), Duration::from_secs(15 * 60));
-        assert_eq!(cooldown(2), Duration::from_secs(30 * 60));
-        assert_eq!(cooldown(3), Duration::from_secs(45 * 60));
-        assert_eq!(cooldown(4), Duration::from_secs(60 * 60));
+        // A failure count of 0 never reaches here, but must not underflow.
+        assert_eq!(cooldown(0), Duration::from_secs(30));
+        assert_eq!(cooldown(1), Duration::from_secs(30));
+        assert_eq!(cooldown(2), Duration::from_secs(60));
+        assert_eq!(cooldown(3), Duration::from_secs(120));
+        assert_eq!(cooldown(4), Duration::from_secs(240));
+        assert_eq!(cooldown(7), Duration::from_secs(32 * 60));
+        // 30s << 7 == 64m, clamped to the ceiling.
+        assert_eq!(cooldown(8), COOLDOWN_MAX);
         // Held at the ceiling for as long as the failures continue.
-        assert_eq!(cooldown(5), COOLDOWN_MAX);
+        assert_eq!(cooldown(9), COOLDOWN_MAX);
         assert_eq!(cooldown(100), COOLDOWN_MAX);
-        // Large inputs stay clamped, and never panic via overflow.
+        // Large inputs stay clamped, and never panic via shift overflow.
         assert_eq!(cooldown(u32::MAX), COOLDOWN_MAX);
     }
 
