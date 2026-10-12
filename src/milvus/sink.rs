@@ -14,7 +14,7 @@ use super::client::{MilvusClient, MilvusError};
 use super::insert::EmbeddingRow;
 use crate::conf::MilvusConfig;
 
-/// Pause after the first failed attempt. Each further failure adds another.
+/// Pause after the first failed attempt. Each further failure adds another 15 minutes.
 const COOLDOWN_STEP: Duration = Duration::from_secs(15 * 60);
 
 /// Upper bound on the pause between attempts, held until a success resets it.
