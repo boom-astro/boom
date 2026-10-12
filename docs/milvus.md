@@ -170,9 +170,10 @@ the Milvus path is fatal. Every failure — failing to connect at startup, or a
 failed upsert — is logged and trips a circuit breaker in `MilvusSink`
 (`src/milvus/sink.rs`):
 
-- Uploads pause for a backoff that doubles per consecutive failure, from 30s up
-  to a 5 minute ceiling. Without this, each batch would pay a full
-  `milvus.timeout_seconds` (30s by default) for as long as the outage lasted.
+- Uploads pause for a backoff that grows by 15 minutes per consecutive failure
+  (15, 30, 45 minutes), then holds at 1 hour until an upload succeeds. Without
+  this, each batch would pay a full `milvus.timeout_seconds` (30s by default)
+  for as long as the outage lasted.
 - The connection is dropped and redialed on the first attempt after the pause,
   so recovery needs no worker restart. A success resets the backoff.
 - Embeddings that cannot be uploaded wait in a Valkey backup queue
