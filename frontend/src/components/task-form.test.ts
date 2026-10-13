@@ -30,6 +30,15 @@ describe("coerce", () => {
     expect(coerce({ type: "number" }, "2460000.5")).toBe(2460000.5);
   });
 
+  it("omits numeric text that is not a number", () => {
+    // A number input can hold "-" or "e" mid-edit. NaN serializes to JSON as
+    // null, which reaches the API as an explicit null instead of the omission
+    // the blank case is careful to produce.
+    expect(coerce({ type: "integer" }, "-")).toBeUndefined();
+    expect(coerce({ type: "number" }, "e")).toBeUndefined();
+    expect(coerce({ type: "number" }, "abc")).toBeUndefined();
+  });
+
   it("keeps booleans as booleans, including false", () => {
     // `false` is meaningful — it is not the same as leaving the field unset.
     expect(coerce({ type: "boolean" }, false)).toBe(false);

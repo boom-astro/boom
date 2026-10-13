@@ -29,16 +29,22 @@ function isRequired(schema: TaskType["params_schema"], name: string): boolean {
  * server applies the default from the params struct rather than the form
  * inventing one. An empty numeric input must not become 0, which for most of
  * these fields is a value `validate_params` rejects.
+ *
+ * Unparseable numeric text is treated the same way. A number input can hold
+ * text that is not a number — `-` or `e` on its own, mid-edit — and `NaN`
+ * serializes to JSON as `null`, which reaches the API as an explicit null
+ * rather than as the omission the blank case is careful to produce.
  */
 export function coerce(field: SchemaField, raw: string | boolean): unknown {
   if (typeof raw === "boolean") return raw;
   const text = raw.trim();
   if (text === "") return undefined;
+  const numeric = (parsed: number) => (Number.isNaN(parsed) ? undefined : parsed);
   switch (baseType(field)) {
     case "integer":
-      return Number.parseInt(text, 10);
+      return numeric(Number.parseInt(text, 10));
     case "number":
-      return Number.parseFloat(text);
+      return numeric(Number.parseFloat(text));
     case "array":
       // Comma-separated, which is how a catalog list reads most naturally.
       return text

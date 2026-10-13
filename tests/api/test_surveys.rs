@@ -175,7 +175,7 @@ mod tests {
 
     async fn insert_track(database: &Database, members: &[i64]) -> String {
         let jds: Vec<f64> = (0..members.len()).map(|k| 2460000.0 + k as f64).collect();
-        let plan = plan_upsert(database, members, &jds, None, None)
+        let plan = plan_upsert(database, members, &jds, None, None, None)
             .await
             .expect("Failed to plan track");
         commit_upsert(database, plan)

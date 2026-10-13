@@ -775,7 +775,11 @@ export default function Admin() {
   const [error, setError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
 
-  const refresh = useCallback(async () => {
+  // Returns the runs it fetched. The poll below needs them before React has
+  // re-rendered with the new state, and reading `runs` there instead would read
+  // the value captured when the effect was created -- which, with an empty
+  // dependency list, is the initial empty array forever.
+  const refresh = useCallback(async (): Promise<Task[]> => {
     try {
       const [status, recent, types, drift, exported] = await Promise.all([
         fetchCatalogStatus(),
@@ -790,8 +794,10 @@ export default function Admin() {
       setEnrichment(drift);
       setExports(exported);
       setError(null);
+      return recent;
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+      return [];
     } finally {
       setLoaded(true);
     }
@@ -801,11 +807,11 @@ export default function Admin() {
     let cancelled = false;
     let timer: number;
     async function tick() {
-      await refresh();
+      const recent = await refresh();
       if (cancelled) return;
       // Keep polling only while something is in flight, so an idle admin page
       // is not hitting the API every few seconds forever.
-      const active = runs.some(isActive);
+      const active = recent.some(isActive);
       timer = window.setTimeout(tick, active ? POLL_MS : POLL_MS * 5);
     }
     tick();
@@ -813,7 +819,6 @@ export default function Admin() {
       cancelled = true;
       window.clearTimeout(timer);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refresh]);
 
   // The newest run per catalog, so the table can show one in flight.

@@ -91,13 +91,17 @@ function ProtectedRoute({ children }: { children: React.ReactElement }) {
  * 403 from the API rather than a working page.
  */
 function AdminRoute({ children }: { children: React.ReactElement }) {
-  const profile = useAppStore((s) => s.profile);
-  const token = api.getTokenRecord();
+  // Wrapped rather than guarded first: `ProtectedRoute` is what loads the
+  // profile, so checking `is_admin` ahead of it would hold a loader on a page
+  // whose profile nothing had asked for.
+  return <ProtectedRoute><AdminOnly>{children}</AdminOnly></ProtectedRoute>;
+}
 
-  if (!token) return <Navigate to="/login" replace />;
-  if (!profile) return <Loader />;
-  if (!profile.is_admin) return <Navigate to="/" replace />;
-  return <ProtectedRoute>{children}</ProtectedRoute>;
+/** Inside `ProtectedRoute`, so the profile has already loaded. */
+function AdminOnly({ children }: { children: React.ReactElement }) {
+  const profile = useAppStore((s) => s.profile);
+  if (!profile?.is_admin) return <Navigate to="/" replace />;
+  return children;
 }
 
 function LayoutRoutes() {

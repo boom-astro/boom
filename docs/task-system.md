@@ -196,7 +196,7 @@ later.
 | `catalog_ingest` | Download an archival catalog and insert it. See [catalogs.md](./catalogs.md). |
 | `migrate_fp_flux` | Recompute ZTF forced-photometry flux in `ZTF_alerts_aux` at a fixed zeropoint. |
 | `migrate_snr` | Recompute `snr_psf`, `snr_ap` and ZTF `apFlux` across alerts and lightcurves. |
-| `reprocess_crossmatch` | Fill in or refresh crossmatches on a survey's `alerts_aux` records. |
+| `reprocess_crossmatch` | Fill in or refresh crossmatches on a survey's `alerts_aux` records, or with `remove` unset a dropped catalog's matches. |
 | `prepare_catalog` | Add spatial fields and a 2dsphere index to a hand-imported collection. |
 | `export_catalog` | Write a catalog collection to gzipped JSONL chunks plus a manifest, for a catalog BOOM cannot fetch again. Read-only. |
 | `link_tracks` | Find intra-night tracklets in a window of alerts and link them into moving-object tracks. Writes nothing unless `persist` is set; `dry_run` reports what it would have written. |

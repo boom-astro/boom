@@ -15,6 +15,12 @@
 //! `reprocess_crossmatch_state`, so an interrupted run continues from its
 //! checkpoint, and `restart` discards it and starts over. Progress is not
 //! marked on the records themselves, so a run writes to `alerts_aux` once.
+//!
+//! **`remove` goes the other way**, unsetting `cross_matches.<catalog>` from
+//! every record for a catalog that has been dropped from the config. It
+//! refuses a catalog the config still declares or an active filter still
+//! reads, because removing one of those is how a filter silently stops
+//! matching -- so the config change comes first, this run second.
 
 use super::batch::PROGRESS_EVERY;
 use super::context::TaskContext;
@@ -42,6 +48,7 @@ use mongodb::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
+use std::future::Future;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -136,6 +143,16 @@ pub struct ReprocessCrossmatchParams {
     /// over. A resumed run otherwise picks up from the checkpoint it recorded.
     #[serde(default)]
     pub restart: bool,
+    /// Unset `cross_matches.<catalog>` from every alerts_aux record instead of
+    /// computing matches, along with any state an earlier reprocess run left
+    /// behind. Refuses a catalog the deployment's config still declares or an
+    /// active filter reads, so drop it from `crossmatch.<survey>` and redeploy
+    /// first -- otherwise newly ingested records keep getting it. Idempotent,
+    /// so an interrupted run can simply be resubmitted. Each shard is one
+    /// update over many records, so keep `processes` low on a production
+    /// replica set to bound replication lag.
+    #[serde(default)]
+    pub remove: bool,
 }
 
 fn default_batch_size() -> usize {
@@ -180,6 +197,31 @@ impl ReprocessCrossmatchParams {
             return Err(format!(
                 "concurrency must be between 1 and {MAX_CONCURRENCY}"
             ));
+        }
+        if self.remove {
+            // The binary spelled this as clap's `conflicts_with_all`. Here the
+            // parameters have defaults and a form submits the whole struct, so
+            // "was it passed" is not answerable -- "is it still the default"
+            // is, and a parameter left alone is one nobody is relying on.
+            let ignored: Vec<&str> = [
+                ("direction", self.direction != Direction::default()),
+                ("batch_size", self.batch_size != default_batch_size()),
+                ("concurrency", self.concurrency != default_concurrency()),
+                ("skip_existing", self.skip_existing),
+                ("skip_empty", self.skip_empty),
+                ("restart", self.restart),
+            ]
+            .into_iter()
+            .filter(|(_, set)| *set)
+            .map(|(name, _)| name)
+            .collect();
+            if !ignored.is_empty() {
+                return Err(format!(
+                    "remove does not compute matches, so {} would have no effect; \
+                     leave them at their defaults",
+                    ignored.join(", ")
+                ));
+            }
         }
         Ok(())
     }
@@ -226,6 +268,10 @@ pub async fn run(
 ) -> Result<serde_json::Value, super::TaskError> {
     let db = ctx.db().clone();
     let config = ctx.config();
+
+    if params.remove {
+        return run_remove(ctx, &params, db).await;
+    }
 
     let resolved = resolve_catalogs(config, &params.survey, &params.catalogs)
         .map_err(super::TaskError::InvalidParams)?;
@@ -803,11 +849,8 @@ async fn run_catalog_driven(
     restart: bool,
 ) -> Result<(), TaskError> {
     let label = format!("catalog→{}", catalog_config.catalog);
-    let state_id = format!("{}_alerts_aux:{}", survey, catalog_config.catalog);
-    let buffer_name = format!(
-        "reprocess_crossmatch_buffer_{}_{}",
-        survey, catalog_config.catalog
-    );
+    let state_id = catalog_state_id(survey, &catalog_config.catalog);
+    let buffer_name = catalog_buffer_name(survey, &catalog_config.catalog);
     let buffer: mongodb::Collection<Document> = db.collection(&buffer_name);
     let grouped: mongodb::Collection<Document> = db.collection(&format!("{}_grouped", buffer_name));
 
@@ -1259,6 +1302,349 @@ async fn commit_catalog(
     Ok(())
 }
 
+fn catalog_state_id(survey: &Survey, catalog: &str) -> String {
+    format!("{}_alerts_aux:{}", survey, catalog)
+}
+
+fn catalog_buffer_name(survey: &Survey, catalog: &str) -> String {
+    format!("reprocess_crossmatch_buffer_{}_{}", survey, catalog)
+}
+
+// -----------------------------------------------------------------------------
+// remove: unset dropped catalogs' matches from alerts_aux in one sharded pass.
+// -----------------------------------------------------------------------------
+
+/// Every field a catalog's matches can occupy on an alerts_aux record.
+fn catalog_fields(catalogs: &[&str]) -> Vec<String> {
+    catalogs
+        .iter()
+        .flat_map(|c| {
+            [
+                format!("cross_matches.{}", c),
+                format!("cross_matches.{}_temp", c),
+            ]
+        })
+        .collect()
+}
+
+/// Matches records carrying any of the catalogs' fields.
+fn has_any_field(catalogs: &[&str]) -> Document {
+    let clauses: Vec<Document> = catalog_fields(catalogs)
+        .into_iter()
+        .map(|field| doc! { field: { "$exists": true } })
+        .collect();
+    doc! { "$or": clauses }
+}
+
+async fn remove_fields(
+    aux_collection: &mongodb::Collection<Document>,
+    catalogs: &[&str],
+    shards: &[Document],
+    processes: usize,
+) -> Result<u64, mongodb::error::Error> {
+    let filter = has_any_field(catalogs);
+    let unset: Document = catalog_fields(catalogs)
+        .into_iter()
+        .map(|field| (field, Bson::String(String::new())))
+        .collect();
+    let update = doc! { "$unset": unset };
+
+    let modified = run_sharded(
+        shards,
+        processes,
+        &format!("remove→{}", catalogs.join(",")),
+        |shard| {
+            let filter = merge_filters(&filter, shard);
+            let update = update.clone();
+            async move {
+                let result = aux_collection.update_many(filter, update).await?;
+                Ok(result.modified_count)
+            }
+        },
+    )
+    .await?;
+    Ok(modified.into_iter().sum())
+}
+
+async fn clear_reprocess_state(
+    db: &mongodb::Database,
+    survey: &Survey,
+    catalog: &str,
+) -> Result<(), mongodb::error::Error> {
+    db.collection::<Document>(STATE_COLLECTION)
+        .delete_one(doc! { "_id": catalog_state_id(survey, catalog) })
+        .await?;
+    let buffer_name = catalog_buffer_name(survey, catalog);
+    db.collection::<Document>(&buffer_name).drop().await?;
+    db.collection::<Document>(&format!("{}_grouped", buffer_name))
+        .drop()
+        .await?;
+    Ok(())
+}
+
+/// The requested names with repeats dropped, first mention winning.
+fn dedup_catalogs(names: &[String]) -> Vec<&String> {
+    let mut unique: Vec<&String> = Vec::with_capacity(names.len());
+    for name in names {
+        if !unique.contains(&name) {
+            unique.push(name);
+        }
+    }
+    unique
+}
+
+/// The config settings that still read or write the catalog's matches.
+fn catalog_references(
+    config: &crate::conf::AppConfig,
+    survey: &Survey,
+    catalog: &str,
+) -> Vec<String> {
+    let mut references = Vec::new();
+    if let Some(declared) = config.crossmatch.get(survey) {
+        if declared.iter().any(|c| c.catalog == catalog) {
+            references.push(format!("crossmatch.{}", survey.to_string().to_lowercase()));
+        }
+    }
+    let host = &config.host_galaxy;
+    if host.enabled && host.ned_catalog == catalog {
+        references.push("host_galaxy.ned_catalog".to_string());
+    }
+    if host.enabled && host.ls_dr10_catalog == catalog {
+        references.push("host_galaxy.ls_dr10_catalog".to_string());
+    }
+    references
+}
+
+/// An active filter's label and the pipeline of its active version, parsed.
+struct ActiveFilter {
+    label: String,
+    pipeline: Option<Vec<serde_json::Value>>,
+}
+
+/// The survey's active filters. Only the fields the check needs are read, so a
+/// filter written under an older schema cannot fail it.
+async fn active_filters(
+    db: &mongodb::Database,
+    survey: &Survey,
+) -> Result<Vec<ActiveFilter>, mongodb::error::Error> {
+    let survey = mongodb::bson::to_bson(survey).map_err(mongodb::error::Error::custom)?;
+    let filters: Vec<Document> = db
+        .collection::<Document>("filters")
+        .find(doc! { "survey": survey, "active": true })
+        .projection(doc! { "name": 1, "active_fid": 1, "fv.fid": 1, "fv.pipeline": 1 })
+        .await?
+        .try_collect()
+        .await?;
+    Ok(filters
+        .iter()
+        .map(|filter| {
+            let active_fid = filter.get_str("active_fid").ok();
+            let pipeline = filter
+                .get_array("fv")
+                .into_iter()
+                .flatten()
+                .filter_map(Bson::as_document)
+                .find(|version| version.get_str("fid").ok() == active_fid)
+                .and_then(|version| version.get_str("pipeline").ok())
+                .and_then(|pipeline| serde_json::from_str(pipeline).ok());
+            ActiveFilter {
+                label: format!(
+                    "{} ({})",
+                    filter.get_str("name").unwrap_or("unnamed"),
+                    match filter.get("_id") {
+                        Some(Bson::String(id)) => id.clone(),
+                        Some(id) => id.to_string(),
+                        None => String::new(),
+                    }
+                ),
+                pipeline,
+            }
+        })
+        .collect())
+}
+
+/// Whether any key or string value in the pipeline is exactly the catalog name,
+/// which is how `$getField` or a `$objectToArray` key comparison names it.
+fn mentions_catalog(value: &serde_json::Value, catalog: &str) -> bool {
+    match value {
+        serde_json::Value::String(s) => s.trim() == catalog,
+        serde_json::Value::Array(items) => items.iter().any(|v| mentions_catalog(v, catalog)),
+        serde_json::Value::Object(map) => map
+            .iter()
+            .any(|(k, v)| k.trim() == catalog || mentions_catalog(v, catalog)),
+        _ => false,
+    }
+}
+
+/// Filters whose active pipeline reads the catalog, by path or by name.
+fn filters_reading(filters: &[ActiveFilter], catalog: &str) -> Vec<String> {
+    let field = format!("cross_matches.{}", catalog);
+    filters
+        .iter()
+        .filter(|filter| {
+            filter.pipeline.as_ref().is_some_and(|stages| {
+                crate::filter::uses_field_in_filter(stages, &field).is_some()
+                    || stages.iter().any(|stage| mentions_catalog(stage, catalog))
+            })
+        })
+        .map(|filter| filter.label.clone())
+        .collect()
+}
+
+/// Every reason not to remove these catalogs, so they can all be fixed in one go.
+fn removal_problems(
+    config: &crate::conf::AppConfig,
+    survey: &Survey,
+    names: &[&str],
+    filters: &[ActiveFilter],
+) -> Vec<String> {
+    let mut problems = Vec::new();
+    for &name in names {
+        // Watchlist matches live on the watchlist documents, not on alerts_aux.
+        if name.starts_with(WATCHLIST_PREFIX) {
+            problems.push(format!(
+                "'{}' is a watchlist; remove only clears alerts_aux crossmatches",
+                name
+            ));
+            continue;
+        }
+        let references = catalog_references(config, survey, name);
+        if !references.is_empty() {
+            problems.push(format!(
+                "'{}' is still referenced by {}; drop it from the config and redeploy first",
+                name,
+                references.join(", ")
+            ));
+        }
+        let reading = filters_reading(filters, name);
+        if !reading.is_empty() {
+            problems.push(format!(
+                "active filters read '{}' and would stop matching: {}",
+                name,
+                reading.join(", ")
+            ));
+        }
+    }
+    problems
+}
+
+/// Unset the catalogs' matches from alerts_aux, with the state an earlier
+/// reprocess left behind.
+async fn run_remove(
+    ctx: &TaskContext,
+    params: &ReprocessCrossmatchParams,
+    db: mongodb::Database,
+) -> Result<serde_json::Value, super::TaskError> {
+    let config = ctx.config();
+    let survey = &params.survey;
+    let lowercase = survey.to_string().to_lowercase();
+
+    // The check is only as good as the config the worker loaded, so say what
+    // that config declares before refusing or proceeding on it.
+    ctx.info(format!(
+        "crossmatch.{} declares {:?}",
+        lowercase,
+        config
+            .crossmatch
+            .get(survey)
+            .map(|c| c.iter().map(|c| c.catalog.as_str()).collect::<Vec<_>>())
+            .unwrap_or_default()
+    ));
+
+    let aux = format!("{}_alerts_aux", survey);
+    let aux_collection: mongodb::Collection<Document> = db.collection(&aux);
+    let names: Vec<&str> = dedup_catalogs(&params.catalogs)
+        .into_iter()
+        .map(String::as_str)
+        .collect();
+
+    let filters = active_filters(&db, survey)
+        .await
+        .map_err(|e| super::TaskError::Failed(format!("could not read the active filters: {e}")))?;
+    // A filter worker cannot load these either, so they return nothing today
+    // and removing a catalog cannot change that.
+    for filter in filters.iter().filter(|f| f.pipeline.is_none()) {
+        ctx.warn(format!(
+            "filter {} is active but its active version is missing or not valid JSON, so \
+             filter workers cannot run it; fix it before relying on it",
+            filter.label
+        ));
+    }
+
+    let problems = removal_problems(config, survey, &names, &filters);
+    if !problems.is_empty() {
+        for problem in &problems {
+            ctx.warn(problem.clone());
+        }
+        return Err(super::TaskError::InvalidParams(format!(
+            "refusing to remove anything: {}",
+            problems.join("; ")
+        )));
+    }
+
+    ctx.info(format!(
+        "removing {names:?} from {aux} with {} processes",
+        params.processes
+    ));
+    let shards = range_shards(
+        &aux_collection,
+        params.processes * SHARDS_PER_PROCESS,
+        shard_field(&aux_collection).await,
+        &Document::new(),
+    )
+    .await;
+    let modified = remove_fields(&aux_collection, &names, &shards, params.processes)
+        .await
+        .map_err(|e| super::TaskError::Failed(format!("remove failed: {e}")))?;
+    if modified == 0 {
+        ctx.warn(format!(
+            "no {aux} record carries {names:?}, nothing to remove (already removed, or a \
+             misspelled catalog name)"
+        ));
+    } else {
+        ctx.info(format!("unset {names:?} from {modified} records"));
+    }
+
+    for name in &names {
+        clear_reprocess_state(&db, survey, name)
+            .await
+            .map_err(|e| {
+                super::TaskError::Failed(format!(
+                    "could not clear reprocess state for '{name}': {e}"
+                ))
+            })?;
+    }
+
+    ctx.record_mutation(
+        MutationTarget {
+            database: db.name().to_string(),
+            collection: aux.clone(),
+            catalog: None,
+            survey: Some(lowercase),
+        },
+        // Delete rather than Backfill: the fields are gone, and no amount of
+        // rereading the record brings them back -- only a reprocess does.
+        Operation::Delete,
+        doc! {
+            "catalogs": names.iter().map(|n| n.to_string()).collect::<Vec<_>>(),
+            "remove": true,
+            "processes": params.processes as i64,
+            "records_modified": modified as i64,
+            "code_version": mongodb::bson::to_bson(&super::ledger::CodeVersion::current())
+                .unwrap_or(mongodb::bson::Bson::Null),
+        },
+    )
+    .await;
+
+    ctx.info(format!("remove complete for {names:?}"));
+    Ok(serde_json::json!({
+        "survey": survey.to_string(),
+        "collection": aux,
+        "catalogs": names,
+        "records_modified": modified,
+    }))
+}
+
 async fn sharded_aggregate(
     collection: &mongodb::Collection<Document>,
     shards: &[Document],
@@ -1267,11 +1653,7 @@ async fn sharded_aggregate(
     stages: Vec<Document>,
     label: &str,
 ) -> Result<(), mongodb::error::Error> {
-    let total = shards.len();
-    info!("[{}] running over {} shards", label, total);
-    let done = &AtomicUsize::new(0);
-    let started = Instant::now();
-    let results: Vec<_> = futures::stream::iter(shards.iter().enumerate().map(|(index, shard)| {
+    run_sharded(shards, processes, label, |shard| {
         let filter = merge_filters(base_filter, shard);
         let mut pipeline = Vec::with_capacity(stages.len() + 1);
         if !filter.is_empty() {
@@ -1279,18 +1661,36 @@ async fn sharded_aggregate(
         }
         pipeline.extend(stages.iter().cloned());
         async move {
-            let result = collection.aggregate(pipeline).allow_disk_use(true).await;
+            collection.aggregate(pipeline).allow_disk_use(true).await?;
+            Ok(())
+        }
+    })
+    .await?;
+    Ok(())
+}
+
+/// Runs `op` on each shard filter, `processes` at a time, logging progress as
+/// shards complete. Fails with the first shard error once every shard has run.
+async fn run_sharded<T, F, Fut>(
+    shards: &[Document],
+    processes: usize,
+    label: &str,
+    op: F,
+) -> Result<Vec<T>, mongodb::error::Error>
+where
+    F: Fn(&Document) -> Fut,
+    Fut: Future<Output = Result<T, mongodb::error::Error>>,
+{
+    let total = shards.len();
+    info!("[{}] running over {} shards", label, total);
+    let done = &AtomicUsize::new(0);
+    let started = Instant::now();
+    let results: Vec<_> = futures::stream::iter(shards.iter().enumerate().map(|(index, shard)| {
+        let shard_op = op(shard);
+        async move {
+            let result = shard_op.await;
             let completed = done.fetch_add(1, Ordering::Relaxed) + 1;
-            let elapsed = started.elapsed();
-            let progress = format!(
-                "{} shards complete, {} elapsed, eta {}",
-                completed,
-                format_duration(elapsed.as_secs()),
-                format_eta(
-                    (total - completed) as u64,
-                    completed as f64 / elapsed.as_secs_f64()
-                )
-            );
+            let progress = shard_progress(completed, total, started);
             match &result {
                 Ok(_) => info!(
                     "[{}] shard {}/{} done ({})",
@@ -1308,13 +1708,26 @@ async fn sharded_aggregate(
                     progress
                 ),
             }
-            result.map(|_| ())
+            result
         }
     }))
     .buffer_unordered(processes)
     .collect()
     .await;
     results.into_iter().collect()
+}
+
+fn shard_progress(completed: usize, total: usize, started: Instant) -> String {
+    let elapsed = started.elapsed();
+    format!(
+        "{} shards complete, {} elapsed, eta {}",
+        completed,
+        format_duration(elapsed.as_secs()),
+        format_eta(
+            (total - completed) as u64,
+            completed as f64 / elapsed.as_secs_f64()
+        )
+    )
 }
 
 /// `coordinates.radec_geojson.coordinates` is `[ra - 180, dec]`.
@@ -1435,6 +1848,7 @@ mod tests {
             skip_existing: false,
             skip_empty: false,
             restart: false,
+            remove: false,
         }
     }
 
@@ -1527,6 +1941,31 @@ mod tests {
             Some(mongodb::bson::doc! { "survey": "ztf" })
         );
     }
+
+    /// A remove run computes nothing, so a parameter that only shapes the
+    /// matching pass is a request the submitter has misunderstood -- better a
+    /// 400 than a run that silently ignores half of what was asked for.
+    #[test]
+    fn remove_refuses_the_parameters_it_would_ignore() {
+        let mut p = params(&["OLD"]);
+        p.remove = true;
+        assert!(p.validate_params().is_ok());
+
+        for set in [
+            (|p: &mut ReprocessCrossmatchParams| p.direction = Direction::Catalog)
+                as fn(&mut ReprocessCrossmatchParams),
+            |p| p.skip_existing = true,
+            |p| p.skip_empty = true,
+            |p| p.restart = true,
+            |p| p.batch_size = default_batch_size() + 1,
+            |p| p.concurrency = default_concurrency() + 1,
+        ] {
+            let mut p = params(&["OLD"]);
+            p.remove = true;
+            set(&mut p);
+            assert!(p.validate_params().is_err(), "{p:?}");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1573,5 +2012,186 @@ mod sorted_matches_tests {
     fn test_the_array_is_trimmed() {
         let expression = sorted_matches(&config(None), "$m");
         assert!(expression.contains_key("$slice"));
+    }
+}
+
+#[cfg(test)]
+mod remove_tests {
+    use super::*;
+    use crate::conf::{get_test_db, AppConfig};
+
+    #[test]
+    fn a_catalog_named_twice_is_removed_once() {
+        let input: Vec<String> = ["A", "B", "A", "C", "B"]
+            .iter()
+            .map(|n| n.to_string())
+            .collect();
+        assert_eq!(dedup_catalogs(&input), vec!["A", "B", "C"]);
+    }
+
+    /// All of them, not the first found: an operator who drops a catalog from
+    /// one setting and not the other should hear about both in one go.
+    #[test]
+    fn every_setting_still_using_the_catalog_is_listed() {
+        let mut config = AppConfig::from_test_config().unwrap();
+        config.crossmatch.insert(
+            Survey::Ztf,
+            vec![CatalogXmatchConfig {
+                catalog: "NED".to_string(),
+                ..Default::default()
+            }],
+        );
+        config.host_galaxy.ned_catalog = "NED".to_string();
+        config.host_galaxy.ls_dr10_catalog = "LSDR10".to_string();
+
+        config.host_galaxy.enabled = false;
+        assert_eq!(
+            catalog_references(&config, &Survey::Ztf, "NED"),
+            vec!["crossmatch.ztf"]
+        );
+        assert!(catalog_references(&config, &Survey::Ztf, "LSDR10").is_empty());
+
+        config.host_galaxy.enabled = true;
+        assert_eq!(
+            catalog_references(&config, &Survey::Ztf, "NED"),
+            vec!["crossmatch.ztf", "host_galaxy.ned_catalog"]
+        );
+        assert_eq!(
+            catalog_references(&config, &Survey::Ztf, "LSDR10"),
+            vec!["host_galaxy.ls_dr10_catalog"]
+        );
+        assert!(catalog_references(&config, &Survey::Lsst, "OTHER").is_empty());
+    }
+
+    /// A filter can name a catalog by field path or as a bare key, and a name
+    /// that merely has the catalog as a prefix is a different field.
+    #[test]
+    fn a_filter_reading_the_catalog_is_found_by_path_or_by_name() {
+        let filter = |label: &str, pipeline: Option<serde_json::Value>| ActiveFilter {
+            label: label.to_string(),
+            pipeline: pipeline.map(|p| p.as_array().unwrap().clone()),
+        };
+        let filters = vec![
+            filter(
+                "path",
+                Some(
+                    serde_json::json!([{ "$match": { "cross_matches.PS1_DR2.0": { "$exists": true } } }]),
+                ),
+            ),
+            filter(
+                "get_field",
+                Some(
+                    serde_json::json!([{ "$set": { "m": { "$getField": { "field": "PS1_DR2", "input": "$cross_matches" } } } }]),
+                ),
+            ),
+            filter(
+                "object_to_array",
+                Some(serde_json::json!([{ "$set": { "m": { "$filter": {
+                    "input": { "$objectToArray": "$cross_matches" },
+                    "cond": { "$eq": ["$$this.k", "PS1_DR2"] },
+                } } } }])),
+            ),
+            filter(
+                "longer_name",
+                Some(
+                    serde_json::json!([{ "$project": { "n": { "$size": "$cross_matches.PS1_DR2_extra" } } }]),
+                ),
+            ),
+            filter(
+                "inside_a_sentence",
+                Some(serde_json::json!([{ "$set": { "note": "see cross_matches.PS1_DR2 docs" } }])),
+            ),
+            // Not loadable by a filter worker, so not running: not a reader.
+            filter("broken", None),
+        ];
+        assert_eq!(
+            filters_reading(&filters, "PS1_DR2"),
+            vec!["path", "get_field", "object_to_array"]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_filter_stored_under_an_older_schema_is_still_read() {
+        let db = get_test_db().await;
+        let survey = Survey::Winter;
+        let collection = db.collection::<Document>("filters");
+        let id = format!("remove_test_{}", uuid::Uuid::new_v4().simple());
+        // No permissions, user_id or timestamps: a full `Filter` would not
+        // deserialize, and a check that fails on one is a check that blocks a
+        // removal for an unrelated reason.
+        collection
+            .insert_one(doc! {
+                "_id": &id,
+                "name": "legacy",
+                "survey": "WINTER",
+                "active": true,
+                "active_fid": "v2",
+                "fv": [
+                    { "fid": "v1", "pipeline": "[]" },
+                    { "fid": "v2", "pipeline": r#"[{"$match":{"cross_matches.OLD":{"$size":1}}}]"# },
+                ],
+            })
+            .await
+            .unwrap();
+
+        let filters = active_filters(&db, &survey).await;
+        collection.delete_one(doc! { "_id": &id }).await.unwrap();
+        let filters: Vec<ActiveFilter> = filters
+            .unwrap()
+            .into_iter()
+            .filter(|f| f.label.contains(&id))
+            .collect();
+        assert_eq!(filters.len(), 1);
+        assert_eq!(filters_reading(&filters, "OLD").len(), 1);
+        assert!(filters_reading(&filters, "NEW").is_empty());
+    }
+
+    #[test]
+    fn a_clean_catalog_is_spared_while_the_others_are_refused() {
+        let survey = Survey::Winter;
+        let (configured, read, clean) = ("configured", "read", "clean");
+
+        let mut config = AppConfig::from_test_config().unwrap();
+        config.crossmatch.insert(
+            survey.clone(),
+            vec![CatalogXmatchConfig {
+                catalog: configured.to_string(),
+                ..Default::default()
+            }],
+        );
+        let filters = vec![ActiveFilter {
+            label: "reader".to_string(),
+            pipeline: Some(vec![
+                serde_json::json!({ "$match": { format!("cross_matches.{}", read): { "$exists": true } } }),
+            ]),
+        }];
+        let names = [configured, read, clean, "watchlist_x"];
+
+        let problems = removal_problems(&config, &survey, &names, &filters);
+
+        assert_eq!(problems.len(), 3, "{problems:#?}");
+        for culprit in [configured, read, "watchlist_x"] {
+            assert_eq!(
+                problems.iter().filter(|p| p.contains(culprit)).count(),
+                1,
+                "exactly one problem should name {culprit}"
+            );
+        }
+        assert!(
+            !problems.iter().any(|p| p.contains(clean)),
+            "a catalog nothing uses should not be refused"
+        );
+    }
+
+    /// `_temp` is where a committing catalog-driven run parks its matches, so a
+    /// removal that skipped it would leave the catalog half present.
+    #[test]
+    fn the_temp_field_is_removed_along_with_the_real_one() {
+        assert_eq!(
+            catalog_fields(&["OLD"]),
+            vec!["cross_matches.OLD", "cross_matches.OLD_temp"]
+        );
+        let clauses = has_any_field(&["OLD"]).get_array("$or").unwrap().clone();
+        assert_eq!(clauses.len(), 2);
     }
 }

@@ -46,7 +46,13 @@ export function NavMain({
                       {!!item.badge && (
                         <span
                           title={item.badgeLabel}
-                          aria-label={item.badgeLabel}
+                          // The visible text caps at "9+", and a bare count
+                          // read on its own says nothing about what needs
+                          // attention, so the label carries both even when the
+                          // caller supplied no reason.
+                          aria-label={
+                            item.badgeLabel ?? `${item.title}: ${item.badge}`
+                          }
                           className="absolute -right-1 -top-1 flex h-3.5 min-w-3.5 items-center
                                      justify-center rounded-full bg-destructive px-[3px]
                                      text-[9px] font-semibold leading-none text-white
