@@ -168,4 +168,23 @@ describe("an expired session", () => {
     await expect(fetchProfile()).rejects.toBeInstanceOf(UnauthorizedError)
     expect(fetchMock).not.toHaveBeenCalled()
   })
+
+  it("tears down the session when the token has expired on its own", async () => {
+    // The common way a session ends: nothing returns 401 because the request is
+    // never made -- `getTokenRecord` finds an expired record and drops it. That
+    // still has to clear the rest of the session, or a page polling directly
+    // stays rendered on a profile whose credential is gone.
+    const torn = vi.fn()
+    setLogoutHandler(torn)
+    localStorage.setItem(
+      TOKEN_KEY,
+      JSON.stringify({ access_token: "stale", token_type: "Bearer", expires_at: Date.now() - 1000 })
+    )
+    const fetchMock = stubFetch({ message: "unreachable" })
+
+    await expect(fetchProfile()).rejects.toBeInstanceOf(UnauthorizedError)
+
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(torn).toHaveBeenCalledTimes(1)
+  })
 })

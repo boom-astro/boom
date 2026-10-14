@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { ensureProfileLoaded, useAppStore } from "@/lib/store"
-import { logout, TOKEN_KEY } from "@/lib/api"
+import { fetchProfile, logout, TOKEN_KEY } from "@/lib/api"
 
 const PROFILE = {
   id: "1",
@@ -74,6 +74,20 @@ describe("ensureProfileLoaded", () => {
     // The profile is persisted, so without this a signed-out admin's
     // `is_admin` survives in localStorage and the admin shell still renders.
     logout()
+    expect(useAppStore.getState().profile).toBeNull()
+  })
+
+  it("drops a profile left behind by an expired token on a direct call", async () => {
+    // Not through ensureProfileLoaded: a page polling the API directly is the
+    // case that used to keep the profile and stay rendered.
+    localStorage.setItem(
+      TOKEN_KEY,
+      JSON.stringify({ access_token: "stale", token_type: "Bearer", expires_at: Date.now() - 1000 })
+    )
+    stubFetch({ message: "unreachable" })
+
+    await expect(fetchProfile()).rejects.toThrow()
+
     expect(useAppStore.getState().profile).toBeNull()
   })
 

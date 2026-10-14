@@ -224,7 +224,16 @@ const authorization = (token: TokenRecord) => `${token.token_type} ${token.acces
 
 async function fetchWithAuth(input: RequestInfo, init: RequestInit = {}) {
   const token = getTokenRecord();
-  if (!token) throw new UnauthorizedError("Not authenticated");
+  if (!token) {
+    // Through `logout` rather than straight to the throw: the usual way to get
+    // here is `getTokenRecord` finding an expired record and dropping it, which
+    // is a session ending and has to tear down the rest of one. Only
+    // `ensureProfileLoaded` used to notice, so a page polling directly -- the
+    // admin page does, on two timers -- kept its persisted profile and stayed
+    // rendered over a session that had already gone.
+    logout();
+    throw new UnauthorizedError("Not authenticated");
+  }
   const headers = new Headers(init.headers || {});
   headers.set("Authorization", authorization(token));
   const res = await fetch(input, { ...init, headers });
