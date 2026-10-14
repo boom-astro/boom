@@ -50,6 +50,12 @@ pub fn request_timeout(message: &str) -> HttpResponse {
     HttpResponse::RequestTimeout().json(ApiResponseBody::error(message))
 }
 
+/// A request that is well-formed and permitted but conflicts with the state it
+/// found, so retrying it against fresh state is the right next move.
+pub fn conflict(message: &str) -> HttpResponse {
+    HttpResponse::Conflict().json(ApiResponseBody::error(message))
+}
+
 pub fn forbidden(message: &str) -> HttpResponse {
     HttpResponse::Forbidden().json(ApiResponseBody::error(message))
 }

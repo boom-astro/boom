@@ -5398,6 +5398,160 @@ mod tests {
         );
     }
 
+    /// An ACL edit applies as a delta, so a second admin editing the same user
+    /// does not revert the first one's change.
+    ///
+    /// The whole-list form is still accepted and is still last-write-wins; what
+    /// this covers is that the delta form keeps what it was not asked about.
+    #[actix_rt::test]
+    async fn test_babamul_admin_acl_edits_apply_as_a_delta() {
+        load_dotenv();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+        let admin = TestUser::create(&database, &auth_app_data).await;
+        let user = TestUser::create(&database, &auth_app_data).await;
+        let users: mongodb::Collection<BabamulUser> = database.collection("babamul_users");
+        users
+            .update_one(
+                doc! { "_id": &admin.user.id },
+                doc! { "$set": { "is_admin": true } },
+            )
+            .await
+            .unwrap();
+
+        let app = test::init_service(
+            App::new().service(
+                web::scope("/babamul")
+                    .app_data(web::Data::new(database.clone()))
+                    .app_data(web::Data::new(auth_app_data))
+                    .wrap(from_fn(babamul_auth_middleware))
+                    .service(routes::babamul::admin::patch_admin_user),
+            ),
+        )
+        .await;
+
+        let patch = |id: &str, body: serde_json::Value| {
+            test::TestRequest::patch()
+                .uri(&format!("/babamul/admin/users/{}", id))
+                .insert_header(("Authorization", format!("Bearer {}", admin.token)))
+                .set_json(body)
+                .to_request()
+        };
+        let acls_of = |resp_body: &serde_json::Value| resp_body["data"]["acls"].clone();
+
+        // Somebody else grants partnership access while this admin's page still
+        // shows an empty row.
+        users
+            .update_one(
+                doc! { "_id": &user.user.id },
+                doc! { "$set": { "acls": ["ztf_partnership"] } },
+            )
+            .await
+            .unwrap();
+
+        let resp = test::call_service(
+            &app,
+            patch(
+                &user.user.id,
+                serde_json::json!({ "grant_acls": ["winter"] }),
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = read_json_response(resp).await;
+        assert_eq!(
+            acls_of(&body),
+            serde_json::json!(["winter", "ztf_partnership"]),
+            "granting WINTER must not revert the partnership grant it never saw"
+        );
+
+        // Granting Caltech access brings the partnership access it requires.
+        let resp = test::call_service(
+            &app,
+            patch(
+                &user.user.id,
+                serde_json::json!({ "grant_acls": ["ztf_caltech"] }),
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            acls_of(&read_json_response(resp).await),
+            serde_json::json!(["winter", "ztf_partnership", "ztf_caltech"])
+        );
+
+        // Revoking it takes the Caltech access that depends on it, rather than
+        // refusing over a combination the caller did not ask for.
+        let resp = test::call_service(
+            &app,
+            patch(
+                &user.user.id,
+                serde_json::json!({ "revoke_acls": ["ztf_partnership"] }),
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            acls_of(&read_json_response(resp).await),
+            serde_json::json!(["winter"])
+        );
+
+        // Replacing the list and editing it mean different things when two
+        // admins edit at once, so one request may not ask for both.
+        let resp = test::call_service(
+            &app,
+            patch(
+                &user.user.id,
+                serde_json::json!({ "acls": [], "grant_acls": ["winter"] }),
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        let resp = test::call_service(
+            &app,
+            patch(
+                &user.user.id,
+                serde_json::json!({ "grant_acls": ["winter"], "revoke_acls": ["winter"] }),
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        let resp = test::call_service(
+            &app,
+            patch("missing", serde_json::json!({ "grant_acls": ["winter"] })),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        // Demoting one of several admins is an ordinary edit; only the last one
+        // is refused, and the count is deployment-wide so this suite -- which
+        // shares a database -- cannot assert that case.
+        users
+            .update_one(
+                doc! { "_id": &user.user.id },
+                doc! { "$set": { "is_admin": true } },
+            )
+            .await
+            .unwrap();
+        let resp = test::call_service(
+            &app,
+            patch(&user.user.id, serde_json::json!({ "is_admin": false })),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(read_json_response(resp).await["data"]["is_admin"], false);
+
+        let stored = users
+            .find_one(doc! { "_id": &user.user.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!stored.is_admin);
+        assert_eq!(stored.acls, vec![routes::babamul::BabamulAcl::Winter]);
+    }
+
     /// Test GET /babamul/surveys/ztf/villar-fit
     #[actix_rt::test]
     async fn test_get_villar_fit() {

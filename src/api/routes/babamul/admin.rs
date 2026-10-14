@@ -54,7 +54,77 @@ pub struct AdminUsersResponse {
 #[derive(Deserialize, ToSchema)]
 pub struct AdminUserPatch {
     pub is_admin: Option<bool>,
+    /// Replace the whole ACL list. Last write wins, so two admins editing one
+    /// user at the same time lose one of the two edits; `grant_acls` and
+    /// `revoke_acls` apply as a delta and do not.
     pub acls: Option<Vec<BabamulAcl>>,
+    /// ACLs to add, leaving every other ACL the user has alone.
+    pub grant_acls: Option<Vec<BabamulAcl>>,
+    /// ACLs to remove, leaving every other ACL the user has alone.
+    pub revoke_acls: Option<Vec<BabamulAcl>>,
+}
+
+/// Put an ACL list in a stable order, drop duplicates, and enforce that ZTF
+/// Caltech access implies ZTF partnership access.
+fn normalize_acls(acls: &[BabamulAcl]) -> Result<Vec<BabamulAcl>, HttpResponse> {
+    if acls.contains(&BabamulAcl::ZtfCaltech) && !acls.contains(&BabamulAcl::ZtfPartnership) {
+        return Err(response::bad_request(
+            "ztf_caltech requires ztf_partnership",
+        ));
+    }
+    let mut acls = acls.to_vec();
+    acls.sort_by_key(|acl| BabamulAcl::ALL.iter().position(|a| a == acl));
+    acls.dedup();
+    Ok(acls)
+}
+
+/// Apply a grant/revoke delta to the ACLs a user actually has.
+fn apply_acl_delta(
+    current: &[BabamulAcl],
+    grant: &[BabamulAcl],
+    revoke: &[BabamulAcl],
+) -> Result<Vec<BabamulAcl>, HttpResponse> {
+    if let Some(acl) = grant.iter().find(|acl| revoke.contains(acl)) {
+        return Err(response::bad_request(&format!(
+            "{acl:?} is in both grant_acls and revoke_acls"
+        )));
+    }
+    let mut next: Vec<BabamulAcl> = current
+        .iter()
+        .chain(grant)
+        .filter(|acl| !revoke.contains(acl))
+        .copied()
+        .collect();
+    // Revoking partnership access revokes the Caltech access that depends on
+    // it, rather than refusing the request over a combination the caller did
+    // not ask for.
+    if revoke.contains(&BabamulAcl::ZtfPartnership) {
+        next.retain(|acl| *acl != BabamulAcl::ZtfCaltech);
+    }
+    // Granting Caltech access grants the partnership access it requires.
+    if next.contains(&BabamulAcl::ZtfCaltech) {
+        next.push(BabamulAcl::ZtfPartnership);
+    }
+    normalize_acls(&next)
+}
+
+/// Attempts at the compare-and-swap below before the caller is told to retry.
+///
+/// Three is enough for contention between two admins on one user; past that the
+/// conflict is not transient and a 409 is more use than a longer spin.
+const ACL_WRITE_ATTEMPTS: usize = 3;
+
+async fn count_admins(collection: &Collection<BabamulUser>) -> Result<u64, mongodb::error::Error> {
+    collection.count_documents(doc! { "is_admin": true }).await
+}
+
+/// Whether this patch would take the deployment's last admin away.
+///
+/// Demoting somebody who is not an admin is not a demotion, and demoting one of
+/// several is fine; only the last one leaves a deployment that cannot appoint
+/// another through this route.
+fn would_orphan(patch_is_admin: Option<bool>, target_is_admin: bool, admins: u64) -> bool {
+    patch_is_admin == Some(false) && target_is_admin && admins <= 1
 }
 
 fn require_admin(
@@ -150,10 +220,11 @@ pub async fn get_admin_users(
     params(("user_id" = String, Path, description = "Babamul user id")),
     responses(
         (status = 200, description = "User updated", body = BabamulAdminUser),
-        (status = 400, description = "An admin cannot remove their own admin status"),
+        (status = 400, description = "An admin cannot remove their own admin status, or the patch is invalid"),
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Not an admin"),
         (status = 404, description = "User not found"),
+        (status = 409, description = "Another admin changed this user first, or this is the last admin"),
         (status = 500, description = "Internal server error")
     ),
     tags=["Babamul"]
@@ -174,54 +245,259 @@ pub async fn patch_admin_user(
         return response::bad_request("You cannot remove your own admin status");
     }
 
-    let mut set = Document::new();
-    if let Some(is_admin) = body.is_admin {
-        set.insert("is_admin", is_admin);
+    let replace = body.acls.as_deref();
+    let grant = body.grant_acls.as_deref().unwrap_or(&[]);
+    let revoke = body.revoke_acls.as_deref().unwrap_or(&[]);
+    if replace.is_some() && !(grant.is_empty() && revoke.is_empty()) {
+        return response::bad_request(
+            "send either acls or grant_acls/revoke_acls, not both: replacing the list and \
+             editing it mean different things when two admins edit one user at once",
+        );
     }
-    if let Some(acls) = &body.acls {
-        if acls.contains(&BabamulAcl::ZtfCaltech) && !acls.contains(&BabamulAcl::ZtfPartnership) {
-            return response::bad_request("ztf_caltech requires ztf_partnership");
+    let delta = !grant.is_empty() || !revoke.is_empty();
+
+    let collection: Collection<BabamulUser> = db.collection("babamul_users");
+
+    // Read before writing, so a demotion knows whether it is taking away the
+    // last admin and a delta knows what it is being applied to.
+    let mut current = match collection.find_one(doc! { "_id": &user_id }).await {
+        Ok(Some(user)) => user,
+        Ok(None) => return response::not_found("User not found"),
+        Err(e) => {
+            tracing::error!("Failed to read babamul user {}: {}", user_id, e);
+            return response::internal_error("Failed to update user");
         }
-        let mut acls = acls.clone();
-        acls.sort_by_key(|acl| BabamulAcl::ALL.iter().position(|a| a == acl));
-        acls.dedup();
-        match mongodb::bson::to_bson(&acls) {
-            Ok(acls) => set.insert("acls", acls),
+    };
+
+    // The demotion that would leave nobody able to administer the deployment.
+    // Recovery from zero admins is an edit to BOOM_BABAMUL__ADMIN_EMAILS and an
+    // API restart, because appointing one through this route requires already
+    // being one -- so it is worth refusing rather than reporting afterwards.
+    if body.is_admin == Some(false) && current.is_admin {
+        match count_admins(&collection).await {
+            Ok(admins) if would_orphan(body.is_admin, current.is_admin, admins) => {
+                return response::conflict(
+                    "This is the deployment's last admin. Appoint another one first, or \
+                     nobody will be able to manage users.",
+                );
+            }
+            Ok(_) => {}
             Err(e) => {
-                tracing::error!("Failed to serialize ACLs: {}", e);
+                tracing::error!("Failed to count babamul admins: {}", e);
+                return response::internal_error("Failed to update user");
+            }
+        }
+    }
+
+    for attempt in 1..=ACL_WRITE_ATTEMPTS {
+        let mut set = Document::new();
+        if let Some(is_admin) = body.is_admin {
+            set.insert("is_admin", is_admin);
+        }
+        let next_acls = match replace {
+            Some(acls) => match normalize_acls(acls) {
+                Ok(acls) => Some(acls),
+                Err(resp) => return resp,
+            },
+            None if delta => match apply_acl_delta(&current.acls, grant, revoke) {
+                Ok(acls) => Some(acls),
+                Err(resp) => return resp,
+            },
+            None => None,
+        };
+        if let Some(acls) = &next_acls {
+            match mongodb::bson::to_bson(acls) {
+                Ok(acls) => set.insert("acls", acls),
+                Err(e) => {
+                    tracing::error!("Failed to serialize ACLs: {}", e);
+                    return response::internal_error("Failed to update user");
+                }
+            };
+        }
+
+        // Compare and swap, for a delta only: the filter names the ACLs the
+        // delta was computed from, so an edit that landed in between fails to
+        // match and is recomputed against what is now there instead of
+        // reverting it. A wholesale replacement is last-write-wins by
+        // definition and has nothing to compare against.
+        let mut filter = doc! { "_id": &user_id };
+        if delta {
+            match mongodb::bson::to_bson(&current.acls) {
+                Ok(bson) => filter.insert("acls", bson),
+                Err(e) => {
+                    tracing::error!("Failed to serialize ACLs: {}", e);
+                    return response::internal_error("Failed to update user");
+                }
+            };
+        }
+
+        let result = if set.is_empty() {
+            Ok(Some(current.clone()))
+        } else {
+            collection
+                .find_one_and_update(filter, doc! { "$set": set })
+                .with_options(
+                    FindOneAndUpdateOptions::builder()
+                        .return_document(ReturnDocument::After)
+                        .build(),
+                )
+                .await
+        };
+
+        let user = match result {
+            Ok(Some(user)) => user,
+            // The filter did not match, so either the user is gone or another
+            // admin wrote first. Re-reading tells us which.
+            Ok(None) if delta && attempt < ACL_WRITE_ATTEMPTS => {
+                match collection.find_one(doc! { "_id": &user_id }).await {
+                    Ok(Some(fresh)) => {
+                        current = fresh;
+                        continue;
+                    }
+                    Ok(None) => return response::not_found("User not found"),
+                    Err(e) => {
+                        tracing::error!("Failed to re-read babamul user {}: {}", user_id, e);
+                        return response::internal_error("Failed to update user");
+                    }
+                }
+            }
+            Ok(None) if delta => {
+                return response::conflict(
+                    "Another admin kept changing this user's access. Reload and try again.",
+                );
+            }
+            Ok(None) => return response::not_found("User not found"),
+            Err(e) => {
+                tracing::error!("Failed to update babamul user {}: {}", user_id, e);
                 return response::internal_error("Failed to update user");
             }
         };
+
+        // Undoes its own write rather than leaving a deployment nobody can
+        // administer. The check above cannot see a demotion running at the same
+        // time -- two admins demoting each other both pass it -- so this is the
+        // one that actually holds the invariant.
+        if body.is_admin == Some(false) {
+            match count_admins(&collection).await {
+                Ok(0) => {
+                    if let Err(e) = collection
+                        .update_one(
+                            doc! { "_id": &user_id },
+                            doc! { "$set": { "is_admin": true } },
+                        )
+                        .await
+                    {
+                        tracing::error!(
+                            user = %user_id,
+                            "left the deployment with no admin and could not undo it: {}",
+                            e
+                        );
+                        return response::internal_error(
+                            "This demotion left the deployment with no admin and could not be \
+                             undone. Restore one through BOOM_BABAMUL__ADMIN_EMAILS.",
+                        );
+                    }
+                    tracing::warn!(
+                        admin = %admin.id,
+                        user = %user_id,
+                        "refused a demotion that raced another one down to zero admins"
+                    );
+                    return response::conflict(
+                        "Another admin was demoted at the same time, which would have left the \
+                         deployment with none. This change was undone.",
+                    );
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::error!("Failed to re-count babamul admins: {}", e);
+                }
+            }
+        }
+
+        tracing::info!(
+            admin = %admin.id,
+            user = %user.id,
+            is_admin = user.is_admin,
+            acls = ?user.acls,
+            "Babamul user access updated"
+        );
+        return response::ok_ser("success", BabamulAdminUser::from(user));
     }
 
-    let collection: Collection<BabamulUser> = db.collection("babamul_users");
-    let result = if set.is_empty() {
-        collection.find_one(doc! { "_id": &user_id }).await
-    } else {
-        collection
-            .find_one_and_update(doc! { "_id": &user_id }, doc! { "$set": set })
-            .with_options(
-                FindOneAndUpdateOptions::builder()
-                    .return_document(ReturnDocument::After)
-                    .build(),
-            )
-            .await
-    };
-    match result {
-        Ok(Some(user)) => {
-            tracing::info!(
-                admin = %admin.id,
-                user = %user.id,
-                is_admin = user.is_admin,
-                acls = ?user.acls,
-                "Babamul user access updated"
-            );
-            response::ok_ser("success", BabamulAdminUser::from(user))
-        }
-        Ok(None) => response::not_found("User not found"),
-        Err(e) => {
-            tracing::error!("Failed to update babamul user {}: {}", user_id, e);
-            response::internal_error("Failed to update user")
-        }
+    response::conflict("Another admin kept changing this user's access. Reload and try again.")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const WINTER: BabamulAcl = BabamulAcl::Winter;
+    const PARTNERSHIP: BabamulAcl = BabamulAcl::ZtfPartnership;
+    const CALTECH: BabamulAcl = BabamulAcl::ZtfCaltech;
+
+    #[test]
+    fn a_delta_keeps_the_acls_it_does_not_mention() {
+        // The point of applying a delta: the admin granting WINTER has no idea
+        // the user was given partnership access since the page was loaded, and
+        // sending the whole list back would revert it.
+        assert_eq!(
+            apply_acl_delta(&[PARTNERSHIP], &[WINTER], &[]).unwrap(),
+            vec![WINTER, PARTNERSHIP]
+        );
+        assert_eq!(
+            apply_acl_delta(&[WINTER, PARTNERSHIP], &[], &[WINTER]).unwrap(),
+            vec![PARTNERSHIP]
+        );
+    }
+
+    #[test]
+    fn a_delta_carries_the_ztf_interlock_both_ways() {
+        // Granting Caltech access grants the partnership access it requires,
+        // and revoking partnership access takes Caltech access with it --
+        // rather than refusing over a combination the caller never asked for.
+        assert_eq!(
+            apply_acl_delta(&[], &[CALTECH], &[]).unwrap(),
+            vec![PARTNERSHIP, CALTECH]
+        );
+        assert_eq!(
+            apply_acl_delta(&[PARTNERSHIP, CALTECH], &[], &[PARTNERSHIP]).unwrap(),
+            vec![]
+        );
+    }
+
+    #[test]
+    fn granting_and_revoking_the_same_acl_is_refused() {
+        // Ambiguous rather than harmless: whichever one won would be arbitrary.
+        assert!(apply_acl_delta(&[], &[WINTER], &[WINTER]).is_err());
+    }
+
+    #[test]
+    fn a_delta_is_idempotent_and_deduplicated() {
+        assert_eq!(
+            apply_acl_delta(&[WINTER], &[WINTER, WINTER], &[]).unwrap(),
+            vec![WINTER]
+        );
+        assert_eq!(apply_acl_delta(&[], &[], &[WINTER]).unwrap(), vec![]);
+    }
+
+    #[test]
+    fn a_wholesale_list_is_ordered_and_still_checks_the_interlock() {
+        assert_eq!(
+            normalize_acls(&[CALTECH, WINTER, PARTNERSHIP, WINTER]).unwrap(),
+            vec![WINTER, PARTNERSHIP, CALTECH]
+        );
+        assert!(normalize_acls(&[CALTECH]).is_err());
+    }
+
+    /// Only the last admin is protected. The other cases are ordinary edits,
+    /// and refusing them would make the admin page unusable.
+    #[test]
+    fn only_the_last_admin_is_protected() {
+        assert!(would_orphan(Some(false), true, 1));
+        assert!(would_orphan(Some(false), true, 0));
+        assert!(!would_orphan(Some(false), true, 2));
+        assert!(!would_orphan(Some(false), false, 1));
+        assert!(!would_orphan(Some(true), true, 1));
+        assert!(!would_orphan(None, true, 1));
     }
 }
