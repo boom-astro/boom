@@ -1699,13 +1699,44 @@ mod status_tests {
             finished_at: None,
             progress: Default::default(),
             worker: None,
-            lease_expires_at: None,
+            // A live lease, because that is what makes the run count: a worker
+            // that died leaves its run `Running` until the reaper gets to it,
+            // and the reaper only runs in a worker's between-run loop.
+            lease_expires_at: Some(now() + crate::tasks::queue::LEASE_SECONDS),
             cancel_requested: false,
             error: None,
             attempts: 1,
         };
         tasks.insert_one(&run).await.expect("queues a run");
 
+        let statuses = status(&db, &declared, &[]).await.expect("reads status");
+        assert_eq!(health_of(&statuses), CatalogHealth::Ingesting);
+
+        // An abandoned worker's run must not go on claiming to be working on
+        // the catalog, or a genuinely stuck ingest loses its warning for as
+        // long as no worker is up to reap it.
+        tasks
+            .update_one(
+                doc! { "_id": &run.id },
+                doc! { "$set": { "lease_expires_at": now() - 1.0 } },
+            )
+            .await
+            .expect("expires the lease");
+        let statuses = status(&db, &declared, &[]).await.expect("reads status");
+        assert_eq!(
+            health_of(&statuses),
+            CatalogHealth::Partial,
+            "a dead worker's run does not count as work in progress"
+        );
+
+        // A run still waiting for a worker has no lease and does count.
+        tasks
+            .update_one(
+                doc! { "_id": &run.id },
+                doc! { "$set": { "status": "queued" }, "$unset": { "lease_expires_at": "" } },
+            )
+            .await
+            .expect("requeues");
         let statuses = status(&db, &declared, &[]).await.expect("reads status");
         assert_eq!(health_of(&statuses), CatalogHealth::Ingesting);
 
