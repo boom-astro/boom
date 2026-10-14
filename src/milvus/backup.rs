@@ -85,7 +85,9 @@ impl BackupQueue {
     /// Dropping the lowest `jd` is the right way round: those are the rows a
     /// later alert for the same object supersedes, so they would lose the `jd`
     /// comparison even if kept.
-    pub async fn push(&mut self, rows: &[EmbeddingRow]) -> Result<(), RedisError> {
+    ///
+    /// Returns how many objects the queue holds afterwards.
+    pub async fn push(&mut self, rows: &[EmbeddingRow]) -> Result<usize, RedisError> {
         let script = Script::new(PUSH);
         let mut invocation = script.prepare_invoke();
         invocation
@@ -112,12 +114,12 @@ impl BackupQueue {
             warn!(rejected, "skipped buffering embeddings with a NaN jd");
         }
         if queued == 0 {
-            return Ok(());
+            return self.pending().await;
         }
 
         let held: usize = invocation.invoke_async(&mut self.con).await?;
         debug!(queued, held, "buffered embeddings for a later retry");
-        Ok(())
+        Ok(held)
     }
 
     /// Remove and return up to `max` rows, oldest `jd` first.
