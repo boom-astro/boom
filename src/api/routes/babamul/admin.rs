@@ -89,6 +89,18 @@ fn apply_acl_delta(
             "{acl:?} is in both grant_acls and revoke_acls"
         )));
     }
+    // The same contradiction reached through the interlock rather than
+    // directly: Caltech access requires partnership access, so granting the
+    // first while revoking the second asks for a state that cannot exist.
+    // Resolving it either way silently drops half of what was asked for -- the
+    // delta below would have removed the Caltech access it was just told to
+    // grant and reported success.
+    if grant.contains(&BabamulAcl::ZtfCaltech) && revoke.contains(&BabamulAcl::ZtfPartnership) {
+        return Err(response::bad_request(
+            "granting ztf_caltech while revoking ztf_partnership asks for a combination that \
+             cannot exist: ztf_caltech requires ztf_partnership",
+        ));
+    }
     let mut next: Vec<BabamulAcl> = current
         .iter()
         .chain(grant)
@@ -114,6 +126,24 @@ fn apply_acl_delta(
 /// conflict is not transient and a 409 is more use than a longer spin.
 const ACL_WRITE_ATTEMPTS: usize = 3;
 
+/// Match the ACL list a delta was computed from.
+///
+/// `BabamulUser` reads a missing `acls` field as an empty list, but MongoDB
+/// does not consider the two equal -- so an equality on `[]` matches no
+/// document at all for an account created before the field existed, and every
+/// delta against one of those would have exhausted its retries and returned a
+/// conflict that nothing could resolve.
+fn matching_acls(
+    observed: &[BabamulAcl],
+) -> Result<mongodb::bson::Bson, mongodb::bson::ser::Error> {
+    let stored = mongodb::bson::to_bson(observed)?;
+    Ok(if observed.is_empty() {
+        mongodb::bson::bson!({ "$in": [stored, mongodb::bson::Bson::Null] })
+    } else {
+        mongodb::bson::bson!({ "$eq": stored })
+    })
+}
+
 async fn count_admins(collection: &Collection<BabamulUser>) -> Result<u64, mongodb::error::Error> {
     collection.count_documents(doc! { "is_admin": true }).await
 }
@@ -125,6 +155,92 @@ async fn count_admins(collection: &Collection<BabamulUser>) -> Result<u64, mongo
 /// another through this route.
 fn would_orphan(patch_is_admin: Option<bool>, target_is_admin: bool, admins: u64) -> bool {
     patch_is_admin == Some(false) && target_is_admin && admins <= 1
+}
+
+const LOCK_COLLECTION: &str = "locks";
+/// The lock every demotion is taken under.
+const DEMOTION_LOCK: &str = "babamul_admin_demotion";
+/// How long a holder may keep it.
+///
+/// Covers a count and an update with room to spare, and short enough that an
+/// API instance killed mid-demotion stops blocking the next one quickly. A
+/// demotion is a deliberate act a person is waiting on, so a few seconds of
+/// contention is invisible and a wedged check would not be.
+const DEMOTION_LOCK_SECONDS: f64 = 10.0;
+
+fn seconds_since_epoch() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
+/// Take the demotion lock, or report that somebody else holds it.
+///
+/// "At least one admin remains" spans documents, so no conditional update can
+/// express it, and the deployment runs a standalone MongoDB where a transaction
+/// is not available either. Serializing the demotions themselves is what is
+/// left: with only one in flight at a time, counting the admins and then
+/// writing is sound, because the only thing that could invalidate the count is
+/// another demotion.
+///
+/// Expressed as an upsert whose filter requires the lock to be free. If it is
+/// held, the filter matches nothing, the upsert tries to insert, and the
+/// duplicate `_id` is the refusal.
+async fn take_demotion_lock(
+    db: &Database,
+    token: mongodb::bson::oid::ObjectId,
+) -> Result<bool, mongodb::error::Error> {
+    let free = doc! {
+        "_id": DEMOTION_LOCK,
+        "expires_at": { "$lt": seconds_since_epoch() },
+    };
+    let held = doc! {
+        "$set": {
+            "expires_at": seconds_since_epoch() + DEMOTION_LOCK_SECONDS,
+            "token": token,
+        },
+    };
+    match db
+        .collection::<Document>(LOCK_COLLECTION)
+        .update_one(free, held)
+        .upsert(true)
+        .await
+    {
+        Ok(_) => Ok(true),
+        // The document exists and the filter did not match it, so the upsert
+        // collided with the holder's `_id`. That is the lock being held, not a
+        // failure to talk to the database.
+        Err(e) if is_duplicate_key(&e) => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
+/// Release the lock, but only if we still hold it.
+///
+/// Matched on the token: a release that did not check could drop a lock the
+/// lease had already handed to somebody else.
+async fn release_demotion_lock(db: &Database, token: mongodb::bson::oid::ObjectId) {
+    if let Err(e) = db
+        .collection::<Document>(LOCK_COLLECTION)
+        .update_one(
+            doc! { "_id": DEMOTION_LOCK, "token": token },
+            doc! { "$set": { "expires_at": 0.0 } },
+        )
+        .await
+    {
+        // Not worth failing the request it guarded: the lease expires on its
+        // own, so the cost is a few seconds of contention.
+        tracing::warn!("could not release the demotion lock: {e}");
+    }
+}
+
+fn is_duplicate_key(e: &mongodb::error::Error) -> bool {
+    matches!(
+        *e.kind,
+        mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(ref w))
+            if w.code == 11000
+    )
 }
 
 fn require_admin(
@@ -245,6 +361,59 @@ pub async fn patch_admin_user(
         return response::bad_request("You cannot remove your own admin status");
     }
 
+    let collection: Collection<BabamulUser> = db.collection("babamul_users");
+
+    // Read before writing, so a demotion knows whether it is taking away the
+    // last admin and a delta knows what it is being applied to.
+    let current = match collection.find_one(doc! { "_id": &user_id }).await {
+        Ok(Some(user)) => user,
+        Ok(None) => return response::not_found("User not found"),
+        Err(e) => {
+            tracing::error!("Failed to read babamul user {}: {}", user_id, e);
+            return response::internal_error("Failed to update user");
+        }
+    };
+
+    // A demotion holds the lock for the whole of its count-then-write. Without
+    // it the count is only advice: two admins demoting each other both see two
+    // admins, both write, and the deployment is left with none -- which nothing
+    // can appoint its way out of, since this route requires already being an
+    // admin and the startup reconciliation only grants.
+    let demoting = body.is_admin == Some(false) && current.is_admin;
+    let lock = mongodb::bson::oid::ObjectId::new();
+    if demoting {
+        match take_demotion_lock(&db, lock).await {
+            Ok(true) => {}
+            Ok(false) => {
+                return response::conflict(
+                    "Another admin's access is being changed right now. Try again in a moment.",
+                );
+            }
+            Err(e) => {
+                tracing::error!("Failed to take the demotion lock: {}", e);
+                return response::internal_error("Failed to update user");
+            }
+        }
+    }
+
+    let response = apply_patch(&collection, &admin, &user_id, &body, current, demoting).await;
+
+    if demoting {
+        release_demotion_lock(&db, lock).await;
+    }
+    response
+}
+
+/// The body of the patch, with the demotion lock already held where one is
+/// needed, so every exit from here releases it in the caller.
+async fn apply_patch(
+    collection: &Collection<BabamulUser>,
+    admin: &BabamulUser,
+    user_id: &str,
+    body: &AdminUserPatch,
+    mut current: BabamulUser,
+    demoting: bool,
+) -> HttpResponse {
     let replace = body.acls.as_deref();
     let grant = body.grant_acls.as_deref().unwrap_or(&[]);
     let revoke = body.revoke_acls.as_deref().unwrap_or(&[]);
@@ -256,25 +425,11 @@ pub async fn patch_admin_user(
     }
     let delta = !grant.is_empty() || !revoke.is_empty();
 
-    let collection: Collection<BabamulUser> = db.collection("babamul_users");
-
-    // Read before writing, so a demotion knows whether it is taking away the
-    // last admin and a delta knows what it is being applied to.
-    let mut current = match collection.find_one(doc! { "_id": &user_id }).await {
-        Ok(Some(user)) => user,
-        Ok(None) => return response::not_found("User not found"),
-        Err(e) => {
-            tracing::error!("Failed to read babamul user {}: {}", user_id, e);
-            return response::internal_error("Failed to update user");
-        }
-    };
-
-    // The demotion that would leave nobody able to administer the deployment.
-    // Recovery from zero admins is an edit to BOOM_BABAMUL__ADMIN_EMAILS and an
-    // API restart, because appointing one through this route requires already
-    // being one -- so it is worth refusing rather than reporting afterwards.
-    if body.is_admin == Some(false) && current.is_admin {
-        match count_admins(&collection).await {
+    // Counted under the lock, so nothing can demote another admin between here
+    // and the write below. That is what makes this a guard rather than advice,
+    // and why there is no compensating rollback afterwards.
+    if demoting {
+        match count_admins(collection).await {
             Ok(admins) if would_orphan(body.is_admin, current.is_admin, admins) => {
                 return response::conflict(
                     "This is the deployment's last admin. Appoint another one first, or \
@@ -320,9 +475,9 @@ pub async fn patch_admin_user(
         // match and is recomputed against what is now there instead of
         // reverting it. A wholesale replacement is last-write-wins by
         // definition and has nothing to compare against.
-        let mut filter = doc! { "_id": &user_id };
+        let mut filter = doc! { "_id": user_id };
         if delta {
-            match mongodb::bson::to_bson(&current.acls) {
+            match matching_acls(&current.acls) {
                 Ok(bson) => filter.insert("acls", bson),
                 Err(e) => {
                     tracing::error!("Failed to serialize ACLs: {}", e);
@@ -349,7 +504,7 @@ pub async fn patch_admin_user(
             // The filter did not match, so either the user is gone or another
             // admin wrote first. Re-reading tells us which.
             Ok(None) if delta && attempt < ACL_WRITE_ATTEMPTS => {
-                match collection.find_one(doc! { "_id": &user_id }).await {
+                match collection.find_one(doc! { "_id": user_id }).await {
                     Ok(Some(fresh)) => {
                         current = fresh;
                         continue;
@@ -372,47 +527,6 @@ pub async fn patch_admin_user(
                 return response::internal_error("Failed to update user");
             }
         };
-
-        // Undoes its own write rather than leaving a deployment nobody can
-        // administer. The check above cannot see a demotion running at the same
-        // time -- two admins demoting each other both pass it -- so this is the
-        // one that actually holds the invariant.
-        if body.is_admin == Some(false) {
-            match count_admins(&collection).await {
-                Ok(0) => {
-                    if let Err(e) = collection
-                        .update_one(
-                            doc! { "_id": &user_id },
-                            doc! { "$set": { "is_admin": true } },
-                        )
-                        .await
-                    {
-                        tracing::error!(
-                            user = %user_id,
-                            "left the deployment with no admin and could not undo it: {}",
-                            e
-                        );
-                        return response::internal_error(
-                            "This demotion left the deployment with no admin and could not be \
-                             undone. Restore one through BOOM_BABAMUL__ADMIN_EMAILS.",
-                        );
-                    }
-                    tracing::warn!(
-                        admin = %admin.id,
-                        user = %user_id,
-                        "refused a demotion that raced another one down to zero admins"
-                    );
-                    return response::conflict(
-                        "Another admin was demoted at the same time, which would have left the \
-                         deployment with none. This change was undone.",
-                    );
-                }
-                Ok(_) => {}
-                Err(e) => {
-                    tracing::error!("Failed to re-count babamul admins: {}", e);
-                }
-            }
-        }
 
         tracing::info!(
             admin = %admin.id,
@@ -469,6 +583,43 @@ mod tests {
     fn granting_and_revoking_the_same_acl_is_refused() {
         // Ambiguous rather than harmless: whichever one won would be arbitrary.
         assert!(apply_acl_delta(&[], &[WINTER], &[WINTER]).is_err());
+    }
+
+    /// The same contradiction reached through the interlock instead of
+    /// directly, which is the one that used to slip past.
+    #[test]
+    fn granting_caltech_while_revoking_partnership_is_refused() {
+        // It passed the overlap check, and then the interlock removed the
+        // Caltech access the request had just asked to grant -- reporting
+        // success having done the opposite of half of what was asked.
+        assert!(apply_acl_delta(&[], &[CALTECH], &[PARTNERSHIP]).is_err());
+        assert!(apply_acl_delta(&[PARTNERSHIP], &[CALTECH], &[PARTNERSHIP]).is_err());
+    }
+
+    /// The compare-and-swap filter is the whole protection, so it is worth
+    /// testing as a filter rather than inferring it from a race.
+    #[test]
+    fn the_swap_matches_only_the_list_the_delta_was_computed_from() {
+        let eq = |acls: &[BabamulAcl]| mongodb::bson::bson!({ "$eq": mongodb::bson::to_bson(&acls.to_vec()).unwrap() });
+        assert_eq!(matching_acls(&[WINTER]).unwrap(), eq(&[WINTER]));
+        assert_ne!(matching_acls(&[WINTER]).unwrap(), eq(&[PARTNERSHIP]));
+    }
+
+    /// An account from before the field existed has no `acls` at all, and
+    /// MongoDB does not consider a missing field equal to `[]`.
+    ///
+    /// Without this the swap could never match such a document: all three
+    /// attempts would see the same empty list, and every delta against one of
+    /// those accounts would end in a conflict nothing could resolve.
+    #[test]
+    fn the_swap_also_matches_a_list_that_was_never_written() {
+        let matcher = matching_acls(&[]).unwrap();
+        let alternatives = matcher
+            .as_document()
+            .and_then(|d| d.get_array("$in").ok())
+            .expect("an empty list matches either shape");
+        assert!(alternatives.contains(&mongodb::bson::Bson::Null));
+        assert!(alternatives.contains(&mongodb::bson::Bson::Array(vec![])));
     }
 
     #[test]
