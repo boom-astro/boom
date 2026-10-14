@@ -96,9 +96,42 @@ function saveToken(body: TokenBody) {
   localStorage.setItem(TOKEN_KEY, JSON.stringify(rec));
 }
 
+/**
+ * An authentication failure, as opposed to a request that merely failed.
+ *
+ * The difference decides whether the user gets signed out, so it has to be a
+ * type rather than a message a caller matches on: a transient 500 and an
+ * expired token both arrive at a caller as a rejected promise, and treating
+ * them the same means a blip on one request signs somebody out mid-page.
+ */
+export class UnauthorizedError extends Error {
+  constructor(message = "Unauthorized") {
+    super(message);
+    this.name = "UnauthorizedError";
+  }
+}
+
+/** Notified whenever the stored credential is dropped. */
+let onLogout: (() => void) | null = null;
+
+/**
+ * Register what else to tear down when the token goes.
+ *
+ * The token is only half of a session -- the rest is the profile the store
+ * keeps, which is persisted to localStorage and so outlives the token. Clearing
+ * the token alone leaves a page that was gated on that profile fully rendered
+ * and quietly broken, every request on it failing before it reaches the
+ * network. The store registers itself here rather than being imported, because
+ * it imports this module.
+ */
+export function setLogoutHandler(handler: (() => void) | null) {
+  onLogout = handler;
+}
+
 export function logout() {
   localStorage.removeItem(TOKEN_KEY);
   localStorage.removeItem(USERNAME_KEY);
+  onLogout?.();
 }
 
 export function getTokenRecord(): TokenRecord | null {
@@ -191,13 +224,13 @@ const authorization = (token: TokenRecord) => `${token.token_type} ${token.acces
 
 async function fetchWithAuth(input: RequestInfo, init: RequestInit = {}) {
   const token = getTokenRecord();
-  if (!token) throw new Error("Not authenticated");
+  if (!token) throw new UnauthorizedError("Not authenticated");
   const headers = new Headers(init.headers || {});
   headers.set("Authorization", authorization(token));
   const res = await fetch(input, { ...init, headers });
   if (res.status === 401) {
     logout();
-    throw new Error("Unauthorized");
+    throw new UnauthorizedError();
   }
   return res;
 }
@@ -481,6 +514,7 @@ export async function searchObjects(value: string, limit: number = 10): Promise<
 export default {
   login,
   logout,
+  setLogoutHandler,
   getTokenRecord,
   fetchOAuthProviders,
   startOAuthLogin,
