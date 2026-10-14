@@ -6,15 +6,14 @@
 //! where anything new would be.
 
 use boom::conf::{load_dotenv, AppConfig};
-use boom::utils::heliolinc::{default_hypotheses, link_tracklets, LinkConfig, Track};
-use boom::utils::linking::{
-    circular_mean_deg, find_tracklets, night_of, Detection, Tracklet, TrackletConfig,
+use boom::utils::discovery::{
+    latest_night, load_window, persist_clusters, persist_tracks, reference_epoch, thor_clusters,
+    tracklets_per_night, ztf_band, Stop, ThorSearch, Verdict,
 };
-use boom::utils::orbit_fit::{fit_within, Observation};
+use boom::utils::heliolinc::{default_hypotheses, link_tracklets, LinkConfig, Track};
+use boom::utils::linking::{find_tracklets, night_of, Detection, Tracklet, TrackletConfig};
+use boom::utils::tracks::BoundFit;
 use clap::Parser;
-use futures::StreamExt;
-use mongodb::bson::{doc, Document};
-use rayon::prelude::*;
 use std::collections::HashMap;
 use tracing::{error, info, Level};
 use tracing_subscriber::FmtSubscriber;
@@ -200,31 +199,6 @@ struct Cli {
     velocity_tol: f64,
 }
 
-/// Tracklets found independently in each night the detections span.
-fn tracklets_per_night(detections: &[Detection], cfg: &TrackletConfig) -> Vec<Tracklet> {
-    let mut by_night: HashMap<i64, Vec<Detection>> = HashMap::new();
-    for d in detections {
-        by_night.entry(night_of(d.jd)).or_default().push(*d);
-    }
-    let mut nights: Vec<_> = by_night.into_iter().collect();
-    nights.sort_by_key(|(n, _)| *n);
-    // Nights share nothing, and collecting in order keeps the result independent
-    // of which finishes first.
-    nights
-        .par_iter()
-        .flat_map(|(night, dets)| {
-            let found = find_tracklets(dets, cfg);
-            info!(
-                "night {}: {} detections -> {} tracklets",
-                night,
-                dets.len(),
-                found.len()
-            );
-            found
-        })
-        .collect()
-}
-
 /// How well tracks reproduce the labels: pure, mixed, and objects recovered.
 fn score_tracks(
     tracks: &[boom::utils::heliolinc::Track],
@@ -273,16 +247,6 @@ struct DumpRow {
     fid: Option<i32>,
 }
 
-/// ZTF filter id as the single letter ADES wants.
-fn ztf_band(fid: Option<i32>) -> Option<char> {
-    match fid {
-        Some(1) => Some('g'),
-        Some(2) => Some('r'),
-        Some(3) => Some('i'),
-        _ => None,
-    }
-}
-
 /// Detections from a JSONL dump, with labels where the rows carry them.
 fn load_file(
     path: &str,
@@ -307,105 +271,6 @@ fn load_file(
         });
     }
     Ok((detections, labels))
-}
-
-/// Detections for the window, with the `ssnamenr` label when there is one.
-async fn load(
-    db: &mongodb::Database,
-    jd_start: f64,
-    span: f64,
-    drb: f64,
-    known: bool,
-    region: Option<(f64, f64, f64)>,
-) -> Result<(Vec<Detection>, HashMap<i64, String>), Box<dyn std::error::Error>> {
-    // Absent on an unassociated detection, so $exists rather than a null type.
-    let association = if known {
-        doc! { "$type": "string" }
-    } else {
-        doc! { "$exists": false }
-    };
-    let mut filter = doc! {
-        "candidate.jd": { "$gte": jd_start, "$lt": jd_start + span },
-        "candidate.ssnamenr": association,
-        "candidate.drb": { "$gt": drb },
-        "candidate.isdiffpos": true,
-    };
-    // A mover lands on fresh sky each exposure, so nothing persistent sits there.
-    if !known {
-        filter.insert("properties.stationary", false);
-        filter.insert("properties.rock", false);
-    }
-    // By HEALPix range rather than 2dsphere: that index carries no time, so it
-    // scans the whole baseline in the region before the date is applied.
-    if let Some((ra, dec, radius)) = region {
-        let moc = boom::utils::moc::moc_from_cone(ra, dec, radius)?;
-        let region_filter = boom::utils::moc::moc_hpx_filter(&moc)?;
-        for (k, v) in region_filter {
-            filter.insert(k, v);
-        }
-        info!(ra, dec, radius, "restricting to a cone");
-    }
-
-    let projection = doc! {
-        "_id": 1,
-        "candidate.jd": 1,
-        "candidate.ra": 1,
-        "candidate.dec": 1,
-        "candidate.ssnamenr": 1,
-        "candidate.magpsf": 1,
-        "candidate.sigmapsf": 1,
-        "candidate.fid": 1,
-    };
-
-    let mut cursor = db
-        .collection::<Document>("ZTF_alerts")
-        .find(filter)
-        .projection(projection)
-        .await?;
-
-    let mut detections = Vec::new();
-    let mut labels = HashMap::new();
-    while let Some(doc) = cursor.next().await {
-        let doc = doc?;
-        let Ok(candidate) = doc.get_document("candidate") else {
-            continue;
-        };
-        let (Ok(id), Ok(jd), Ok(ra), Ok(dec)) = (
-            doc.get_i64("_id"),
-            candidate.get_f64("jd"),
-            candidate.get_f64("ra"),
-            candidate.get_f64("dec"),
-        ) else {
-            continue;
-        };
-        if let Ok(name) = candidate.get_str("ssnamenr") {
-            labels.insert(id, name.to_string());
-        }
-        detections.push(Detection {
-            id,
-            jd,
-            ra,
-            dec,
-            mag: candidate.get_f64("magpsf").ok(),
-            mag_err: candidate.get_f64("sigmapsf").ok(),
-            band: ztf_band(candidate.get_i32("fid").ok()),
-        });
-    }
-    Ok((detections, labels))
-}
-
-/// The most recent JD with alerts, floored to the start of that night.
-async fn latest_night(db: &mongodb::Database) -> Result<f64, Box<dyn std::error::Error>> {
-    let doc = db
-        .collection::<Document>("ZTF_alerts")
-        .find_one(doc! {})
-        .sort(doc! { "candidate.jd": -1 })
-        .projection(doc! { "candidate.jd": 1 })
-        .await?
-        .ok_or("no alerts")?;
-    let jd = doc.get_document("candidate")?.get_f64("jd")?;
-    // Nights run across a JD boundary, so step back to the preceding noon.
-    Ok(night_of(jd) as f64 + 0.5)
 }
 
 /// How well the tracklets reproduce the `ssnamenr` labels.
@@ -491,259 +356,6 @@ fn dump_tracks(
     Ok(tracks.len())
 }
 
-use boom::utils::tracks::BoundFit;
-
-/// A bound-orbit verdict with the residual that produced it.
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct Verdict(BoundFit, Option<f64>);
-
-impl Verdict {
-    fn residual(&self) -> Option<f64> {
-        self.1
-    }
-
-    /// Sort key: a confident bound orbit first, then the ones worth a look.
-    fn rank(&self) -> (u8, f64) {
-        let order = match self.0 {
-            BoundFit::Good => 0,
-            BoundFit::Poor => 1,
-            BoundFit::None => 2,
-            BoundFit::Ungated => 3,
-        };
-        (order, self.1.unwrap_or(0.0))
-    }
-
-    fn label(&self) -> String {
-        match (self.0, self.1) {
-            (BoundFit::Good, Some(r)) => format!("{r:.2}\""),
-            (BoundFit::Poor, Some(r)) => format!("{r:.2}\" poor"),
-            (BoundFit::None, _) => "no bound orbit".to_string(),
-            _ => "ungated".to_string(),
-        }
-    }
-}
-
-/// Store each THOR cluster the same way a linked track is stored.
-///
-/// The bound-fit verdict goes with it: a cluster no bound orbit reproduces is
-/// the interesting one, and persisting it as though it were clean would lose
-/// exactly what makes it worth looking at. `known` is parallel to `clusters`,
-/// or empty when clusters were not matched to the catalogue.
-#[allow(clippy::too_many_arguments)]
-async fn persist_clusters(
-    db: &mongodb::Database,
-    clusters: &[(boom::utils::thor::Cluster, Verdict)],
-    detections: &[Detection],
-    labels: &HashMap<i64, String>,
-    known: &[Option<String>],
-    dry_run: bool,
-    min_detections: usize,
-    min_nights: usize,
-) {
-    use boom::utils::tracks::{
-        acquire_lock, commit_upsert, plan_upsert, release_lock, stamp_members,
-    };
-    if !dry_run {
-        match acquire_lock(db).await {
-            Ok(true) => {}
-            Ok(false) => {
-                error!("another run is persisting tracks, not writing");
-                return;
-            }
-            Err(e) => {
-                error!("could not take the tracks lock: {}", e);
-                return;
-            }
-        }
-    }
-    let by_id: HashMap<i64, &Detection> = detections.iter().map(|d| (d.id, d)).collect();
-    let (mut stored, mut stamped) = (0usize, 0u64);
-    for (i, (cluster, verdict)) in clusters.iter().enumerate() {
-        let members: Vec<i64> = cluster.ids.clone();
-        let jds: Vec<f64> = members
-            .iter()
-            .filter_map(|id| by_id.get(id))
-            .map(|d| d.jd)
-            .collect();
-        if jds.len() != members.len() {
-            error!("a cluster references detections not in this run, skipping");
-            continue;
-        }
-        let designation = members
-            .iter()
-            .find_map(|id| labels.get(id))
-            .map(|l| boom::utils::mpcorb::normalize_ztf_ssnamenr(l).unwrap_or_else(|| l.clone()))
-            .or_else(|| known.get(i).cloned().flatten());
-        let fit = Some((verdict.0, verdict.residual()));
-        let plan = match plan_upsert(db, &members, &jds, designation, fit).await {
-            Ok(plan) => plan,
-            Err(e) => {
-                error!("could not resolve a cluster: {}", e);
-                continue;
-            }
-        };
-        if !plan.meets(min_detections, min_nights) {
-            info!(
-                "dropping a track: {} detections over {} nights after {} contested detection(s) were left with another track",
-                plan.n_detections,
-                plan.n_nights,
-                plan.contested.len()
-            );
-            continue;
-        }
-        if dry_run {
-            info!("would store {}", plan.describe());
-            stored += 1;
-            stamped += plan.members.len() as u64;
-            continue;
-        }
-        match commit_upsert(db, plan).await {
-            Ok(up) => {
-                stored += 1;
-                match stamp_members(db, &up.track).await {
-                    Ok(n) => stamped += n,
-                    Err(e) => error!("could not stamp {}: {}", up.track.id, e),
-                }
-            }
-            Err(e) => error!("could not store a cluster: {}", e),
-        }
-    }
-    if !dry_run {
-        if let Err(e) = release_lock(db).await {
-            error!("could not release the tracks lock: {}", e);
-        }
-    }
-    let what = if dry_run { "would store" } else { "stored" };
-    info!(
-        "{} {} thor clusters, {} alerts stamped",
-        what, stored, stamped
-    );
-}
-
-/// Store each track under a durable id and stamp it onto its member alerts.
-///
-/// One track at a time rather than in bulk: identity is decided against what is
-/// already stored, so two tracks of the same object in one run must see each
-/// other's writes. `known` is parallel to `tracks`, or empty when tracks were
-/// not matched to the catalogue.
-#[allow(clippy::too_many_arguments)]
-async fn persist_tracks(
-    db: &mongodb::Database,
-    tracks: &[Track],
-    tracklets: &[Tracklet],
-    detections: &[Detection],
-    labels: &HashMap<i64, String>,
-    known: &[Option<String>],
-    dry_run: bool,
-    min_detections: usize,
-    min_nights: usize,
-) {
-    use boom::utils::tracks::{
-        acquire_lock, commit_upsert, plan_upsert, release_lock, stamp_members,
-    };
-    if !dry_run {
-        match acquire_lock(db).await {
-            Ok(true) => {}
-            Ok(false) => {
-                error!("another run is persisting tracks, not writing");
-                return;
-            }
-            Err(e) => {
-                error!("could not take the tracks lock: {}", e);
-                return;
-            }
-        }
-    }
-    let by_id: HashMap<i64, &Detection> = detections.iter().map(|d| (d.id, d)).collect();
-    let (mut stored, mut stamped, mut merged) = (0usize, 0u64, 0usize);
-    for (i, track) in tracks.iter().enumerate() {
-        let mut members: Vec<i64> = track
-            .members
-            .iter()
-            .flat_map(|&m| tracklets[m].ids.iter().copied())
-            .collect();
-        members.sort_unstable();
-        members.dedup();
-        let jds: Vec<f64> = members
-            .iter()
-            .filter_map(|id| by_id.get(id))
-            .map(|d| d.jd)
-            .collect();
-        if jds.len() != members.len() {
-            error!("a track references detections not in this run, skipping");
-            continue;
-        }
-        // A track of a known object records the designation, which is what tells
-        // a consumer this is a recovery rather than a discovery candidate. The
-        // survey's own label comes first, then the catalogue match.
-        let designation = members
-            .iter()
-            .find_map(|id| labels.get(id))
-            .map(|l| boom::utils::mpcorb::normalize_ztf_ssnamenr(l).unwrap_or_else(|| l.clone()))
-            .or_else(|| known.get(i).cloned().flatten());
-        // None means too few points to constrain an orbit; anything that
-        // survived with a residual already passed the gate.
-        let fit = Some(match track.residual_arcsec {
-            Some(r) => (BoundFit::Good, Some(r)),
-            None => (BoundFit::Ungated, None),
-        });
-        let plan = match plan_upsert(db, &members, &jds, designation, fit).await {
-            Ok(plan) => plan,
-            Err(e) => {
-                error!("could not resolve a track: {}", e);
-                continue;
-            }
-        };
-        if !plan.meets(min_detections, min_nights) {
-            info!(
-                "dropping a track: {} detections over {} nights after {} contested detection(s) were left with another track",
-                plan.n_detections,
-                plan.n_nights,
-                plan.contested.len()
-            );
-            continue;
-        }
-        if dry_run {
-            info!("would store {}", plan.describe());
-            stored += 1;
-            merged += plan.superseded.len();
-            stamped += plan.members.len() as u64;
-            continue;
-        }
-        let superseded = plan.superseded.clone();
-        match commit_upsert(db, plan).await {
-            Ok(up) => {
-                stored += 1;
-                merged += superseded.len();
-                if !superseded.is_empty() {
-                    info!("track {} absorbed {}", up.track.id, superseded.join(", "));
-                }
-                match stamp_members(db, &up.track).await {
-                    Ok(n) => stamped += n,
-                    Err(e) => error!("could not stamp {}: {}", up.track.id, e),
-                }
-            }
-            Err(e) => error!("could not store a track: {}", e),
-        }
-    }
-    if !dry_run {
-        if let Err(e) = release_lock(db).await {
-            error!("could not release the tracks lock: {}", e);
-        }
-    }
-    if dry_run {
-        info!(
-            "dry run: would store {} tracks, stamp {} alerts, absorb {} superseded ids",
-            stored, stamped, merged
-        );
-    } else {
-        info!(
-            "stored {} tracks, stamped {} alerts, absorbed {} superseded ids",
-            stored, stamped, merged
-        );
-    }
-}
-
 /// Write each THOR cluster as a JSON line, mirroring `dump_tracks`.
 ///
 /// `orbit_residual_arcsec` is null on a pair, which carries too few points to
@@ -813,9 +425,7 @@ async fn run_thor(
     labels: &HashMap<i64, String>,
     db: Option<&mongodb::Database>,
 ) {
-    use boom::utils::heliolinc::{sky_track, test_orbits};
     use boom::utils::thor;
-    use rayon::prelude::*;
 
     let mut cfg = thor::Config {
         min_detections: args.min_detections.max(2),
@@ -834,163 +444,15 @@ async fn run_thor(
     if let Some(v) = args.rate_steps {
         cfg.rate_steps = v;
     }
-
-    let jds: Vec<f64> = detections.iter().map(|d| d.jd).collect();
-    let (lo, hi) = jds
-        .iter()
-        .fold((f64::MAX, f64::MIN), |(a, b), &j| (a.min(j), b.max(j)));
-    let epoch = 0.5 * (lo + hi);
-    let steps = (((hi - lo) / 0.5).ceil() as usize).max(2);
-    let sample: Vec<f64> = (0..=steps)
-        .map(|k| lo + (hi - lo) * k as f64 / steps as f64)
-        .collect();
-
-    // Four grids, each shifted half a patch in RA, Dec or both. A single grid
-    // cuts objects on its boundaries in half, leaving each part below
-    // `min_detections`; with the shifts, any object spanning less than half a
-    // patch lies wholly inside one patch of at least one grid. The copies this
-    // makes are dropped by the deduplication after the orbit-fit gate.
-    let patch_deg = cfg.max_offset_deg;
-    let mut patches: HashMap<(u8, i64, i64), Vec<Detection>> = HashMap::new();
-    for d in detections {
-        for (grid, (ox, oy)) in [(0.0, 0.0), (0.5, 0.0), (0.0, 0.5), (0.5, 0.5)]
-            .into_iter()
-            .enumerate()
-        {
-            let dy = (d.dec / patch_deg + oy).floor() as i64;
-            // One RA cut per band, off the band centre rather than each
-            // detection's own dec, or the same RA lands in different patches at
-            // either edge of the band. Equal-area, so bands narrow to the poles.
-            let band_dec = ((dy as f64 - oy + 0.5) * patch_deg).clamp(-89.9, 89.9);
-            let scale = band_dec.to_radians().cos().max(0.05);
-            let bins = ((360.0 * scale / patch_deg).round() as i64).max(1);
-            // rem_euclid closes the band into a ring, so RA 0/360 is not a seam.
-            let dx = ((d.ra * bins as f64 / 360.0 + ox).floor() as i64).rem_euclid(bins);
-            patches.entry((grid as u8, dx, dy)).or_default().push(*d);
-        }
-    }
-    let patches: Vec<Vec<Detection>> = patches
-        .into_values()
-        .filter(|v| v.len() >= cfg.min_detections)
-        .collect();
-    info!(
-        "{} sky patches of {:.1} deg over 4 offset grids, {} trial distances each",
-        patches.len(),
-        patch_deg,
-        args.thor_distances.len()
-    );
-
-    let started = std::time::Instant::now();
-    let clusters: Vec<(thor::Cluster, boom::utils::heliolinc::State)> = patches
-        .par_iter()
-        .flat_map(|patch| {
-            // On the circle: a patch straddling RA 0 would otherwise centre on
-            // 180 and put every trial orbit on the far side of the sky.
-            let Some(ra0) = circular_mean_deg(patch.iter().map(|d| d.ra)) else {
-                return Vec::new();
-            };
-            // Declination does not wrap, so its mean is the ordinary one.
-            let dec0 = patch.iter().map(|d| d.dec).sum::<f64>() / patch.len() as f64;
-            let mut found = Vec::new();
-            for (state, _r) in test_orbits(ra0, dec0, epoch, &args.thor_distances) {
-                let Some((ra, dec)) = sky_track(&state, epoch, &sample) else {
-                    continue;
-                };
-                let track = thor::TestOrbitTrack {
-                    jd: sample.clone(),
-                    ra,
-                    dec,
-                };
-                // The trial orbit seeds the fit: it is near the truth by
-                // construction, which is why the cluster formed around it.
-                found.extend(
-                    thor::recover(patch, &track, &cfg)
-                        .into_iter()
-                        .map(|c| (c, state)),
-                );
-            }
-            found
-        })
-        .collect();
-
-    info!(
-        "{} clusters from {} detections over {} patches in {:.1}s",
-        clusters.len(),
-        detections.len(),
-        patches.len(),
-        started.elapsed().as_secs_f64()
-    );
-
-    // Gate on how well one orbit reproduces the cluster's own positions, as the
-    // tracklet path does. Two points cannot constrain six parameters, so those
-    // pass through ungated and are reported separately rather than counted as
-    // though the astrometry had vouched for them.
-    let by_id: HashMap<i64, &Detection> = detections.iter().map(|d| (d.id, d)).collect();
-    let gate_start = std::time::Instant::now();
-    let mut scored: Vec<(thor::Cluster, Verdict)> = clusters
-        .into_par_iter()
-        .filter_map(|(c, seed)| {
-            let obs: Vec<Observation> = c
-                .ids
-                .iter()
-                .filter_map(|id| by_id.get(id))
-                .map(|d| Observation {
-                    jd: d.jd,
-                    ra: d.ra,
-                    dec: d.dec,
-                })
-                .collect();
-            if obs.len() < 3 {
-                return Some((c, Verdict(BoundFit::Ungated, None)));
-            }
-            // Screened against the looser gate, since a poor fit is still kept,
-            // and converged if it passes it, so the residual it is ranked and
-            // persisted on is the orbit's rather than where the fit stopped.
-            match fit_within(
-                &obs,
-                &seed,
-                epoch,
-                &boom::utils::sso_geometry::ZTF,
-                args.max_unbound_residual,
-            ) {
-                None => Some((c, Verdict(BoundFit::None, None))),
-                Some(fit) if fit.rms_arcsec <= args.max_residual => {
-                    Some((c, Verdict(BoundFit::Good, Some(fit.rms_arcsec))))
-                }
-                Some(fit) if fit.rms_arcsec <= args.max_unbound_residual => {
-                    Some((c, Verdict(BoundFit::Poor, Some(fit.rms_arcsec))))
-                }
-                Some(_) => None,
-            }
-        })
-        .collect();
-
-    // Best-fitting first, so an overlapping cluster keeps the detections the
-    // astrometry supports. Ungated pairs rank last.
-    scored.sort_by(|a, b| {
-        let (ka, kb) = (a.1.rank(), b.1.rank());
-        ka.0.cmp(&kb.0)
-            .then(ka.1.partial_cmp(&kb.1).unwrap_or(std::cmp::Ordering::Equal))
-            .then(b.0.ids.len().cmp(&a.0.ids.len()))
-    });
-    let mut claimed: std::collections::HashSet<i64> = std::collections::HashSet::new();
-    let mut kept: Vec<(thor::Cluster, Verdict)> = Vec::new();
-    for (c, r) in scored {
-        // Sharing this many detections with something already kept makes the two
-        // one track downstream, where the later one would extend the earlier and
-        // overwrite its verdict. Best-ranked first, so the one dropped is worse.
-        let shared = c.ids.iter().filter(|id| claimed.contains(id)).count();
-        if shared >= boom::utils::tracks::SHARED_FOR_IDENTITY {
-            continue;
-        }
-        claimed.extend(c.ids.iter().copied());
-        kept.push((c, r));
-    }
-    info!(
-        "{} clusters survive the orbit fit and deduplication in {:.1}s",
-        kept.len(),
-        gate_start.elapsed().as_secs_f64()
-    );
+    let search = ThorSearch {
+        config: cfg,
+        distances_au: args.thor_distances.clone(),
+        max_residual_arcsec: args.max_residual,
+        max_unbound_residual_arcsec: args.max_unbound_residual,
+        site: boom::utils::sso_geometry::ZTF,
+    };
+    let cfg = &search.config;
+    let kept: Vec<(thor::Cluster, Verdict)> = thor_clusters(detections, &search);
 
     let known = if args.match_known {
         let groups: Vec<Vec<i64>> = kept.iter().map(|(c, _)| c.ids.clone()).collect();
@@ -1023,8 +485,10 @@ async fn run_thor(
                     args.dry_run,
                     cfg.min_detections,
                     cfg.min_nights,
+                    &STOP,
                 )
-                .await
+                .await;
+                exit_if_stopped();
             }
             None => error!("--persist needs a database, which was not built"),
         }
@@ -1156,7 +620,7 @@ async fn match_known(
     detections: &[Detection],
     args: &Cli,
 ) -> Vec<Option<String>> {
-    use boom::utils::identify::{identify, track_designation, IdentifyConfig, KnownRule, Match};
+    use boom::utils::identify::{IdentifyConfig, KnownRule};
 
     let started = std::time::Instant::now();
     let orbits = match boom::utils::mpcorb::load_catalogue(db).await {
@@ -1166,35 +630,18 @@ async fn match_known(
             return Vec::new();
         }
     };
-    let wanted: std::collections::HashSet<i64> = groups.iter().flatten().copied().collect();
-    let mut members: Vec<Detection> = detections
-        .iter()
-        .filter(|d| wanted.contains(&d.id))
-        .copied()
-        .collect();
-    members.sort_by_key(|d| d.id);
-    let cfg = IdentifyConfig {
+    let identify_cfg = IdentifyConfig {
         match_radius_arcsec: args.identify_radius,
         ..IdentifyConfig::default()
     };
-    let matches = identify(&members, &orbits, &cfg);
-    let by_detection: HashMap<i64, &Match> = matches.iter().map(|m| (m.detection_id, m)).collect();
     let rule = KnownRule {
         min_fraction: args.known_fraction,
         min_nights: args.known_min_nights,
         max_scatter_arcsec: args.known_max_scatter,
         max_drift_arcsec_per_day: args.known_max_drift,
     };
-    let known: Vec<Option<String>> = groups
-        .iter()
-        .map(|group| {
-            let found: Vec<&Match> = group
-                .iter()
-                .filter_map(|id| by_detection.get(id).copied())
-                .collect();
-            track_designation(&found, group.len(), &rule)
-        })
-        .collect();
+    let known =
+        boom::utils::discovery::designations(groups, detections, &orbits, &identify_cfg, &rule);
     info!(
         "{} of {} tracks are catalogued objects ({} orbits, {:.1}s)",
         known.iter().filter(|k| k.is_some()).count(),
@@ -1324,6 +771,58 @@ async fn run_identify(args: &Cli, detections: &[Detection], labels: &HashMap<i64
     }
 }
 
+/// Ctrl-C or SIGTERM while tracks are being stored, which must stop between
+/// tracks so the tracks lock is released rather than held for its lease.
+static STOP: Stop = Stop::new();
+
+/// Wait for Ctrl-C or SIGTERM, whichever comes first.
+async fn interrupted(terminate: &mut Option<tokio::signal::unix::Signal>) {
+    match terminate {
+        Some(terminate) => {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = terminate.recv() => {}
+            }
+        }
+        None => {
+            let _ = tokio::signal::ctrl_c().await;
+        }
+    }
+}
+
+/// On Ctrl-C or SIGTERM, exit at once unless a pass is storing tracks; then
+/// let it stop at the next track and release the lock. A second signal exits
+/// regardless.
+fn exit_on_interrupt() {
+    use tokio::signal::unix::{signal, SignalKind};
+    let mut terminate = match signal(SignalKind::terminate()) {
+        Ok(terminate) => Some(terminate),
+        Err(e) => {
+            error!(
+                "cannot listen for SIGTERM, so only Ctrl-C releases the tracks lock: {}",
+                e
+            );
+            None
+        }
+    };
+    tokio::spawn(async move {
+        interrupted(&mut terminate).await;
+        if !STOP.request() {
+            std::process::exit(130);
+        }
+        info!("stopping after the current track, so the tracks lock is released; interrupt again to quit now");
+        interrupted(&mut terminate).await;
+        std::process::exit(130);
+    });
+}
+
+/// End the run once a pass has stopped and released the lock on an interrupt.
+fn exit_if_stopped() {
+    if STOP.requested() {
+        std::process::exit(130);
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let subscriber = FmtSubscriber::builder()
@@ -1331,6 +830,7 @@ async fn main() {
         .finish();
     tracing::subscriber::set_global_default(subscriber).expect("failed to set subscriber");
     load_dotenv();
+    exit_on_interrupt();
 
     let args = Cli::parse();
     // Persisting and matching to the catalogue need the database even when the
@@ -1363,7 +863,7 @@ async fn main() {
                 (Some(ra), Some(dec), Some(radius)) => Some((ra, dec, radius)),
                 _ => None,
             };
-            load(db, jd_start, args.span, args.drb, args.known, region)
+            load_window(db, jd_start, args.span, args.drb, args.known, region)
                 .await
                 .expect("failed to load detections")
         }
@@ -1432,10 +932,7 @@ async fn main() {
     }
 
     if args.link {
-        let jds: Vec<f64> = tracklets.iter().map(|t| t.jd_ref).collect();
-        let reference_jd = (jds.iter().cloned().fold(f64::MAX, f64::min)
-            + jds.iter().cloned().fold(f64::MIN, f64::max))
-            / 2.0;
+        let reference_jd = reference_epoch(&tracklets);
         let link_cfg = LinkConfig {
             hypotheses: default_hypotheses(),
             reference_jd,
@@ -1492,14 +989,17 @@ async fn main() {
                 db,
                 &tracks,
                 &tracklets,
+                link_cfg.reference_jd,
                 &detections,
                 &labels,
                 &known,
                 args.dry_run,
                 args.min_detections,
                 args.min_nights,
+                &STOP,
             )
             .await;
+            exit_if_stopped();
         }
 
         for track in tracks.iter().take(args.show) {

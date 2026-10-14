@@ -345,10 +345,17 @@ pub struct LsstCandidate {
     pub snr_ap: Option<f32>,
     pub jdstarthist: Option<f64>,
     pub ndethist: Option<i32>,
+    pub observation_reason: Option<String>,
+    pub target_name: Option<String>,
 }
 
 impl LsstCandidate {
-    fn new(dia_source: DiaSource, dia_object: Option<DiaObject>) -> Result<Self, AlertError> {
+    fn new(
+        dia_source: DiaSource,
+        dia_object: Option<DiaObject>,
+        observation_reason: Option<String>,
+        target_name: Option<String>,
+    ) -> Result<Self, AlertError> {
         let jd = Epoch::from_mjd_tai(dia_source.midpoint_mjd_tai).to_jde_utc_days();
         let psf_flux = dia_source.psf_flux.ok_or(AlertError::MissingFluxPSF)?;
         let psf_flux_err = dia_source.psf_flux_err.ok_or(AlertError::MissingFluxPSF)?;
@@ -389,11 +396,10 @@ impl LsstCandidate {
 
         let (jdstarthist, ndethist) = match dia_object {
             Some(obj) => {
-                let jdstarthist = if obj.first_dia_source_mjd_tai > 0.0 {
-                    Some(Epoch::from_mjd_tai(obj.first_dia_source_mjd_tai).to_jde_utc_days())
-                } else {
-                    None
-                };
+                let jdstarthist = obj
+                    .first_dia_source_mjd_tai
+                    .filter(|mjd| *mjd > 0.0)
+                    .map(|mjd| Epoch::from_mjd_tai(mjd).to_jde_utc_days());
                 (jdstarthist, Some(obj.n_dia_sources))
             }
             None => (None, None),
@@ -414,6 +420,8 @@ impl LsstCandidate {
             snr_ap: Some(ap_flux_abs / ap_flux_err),
             jdstarthist,
             ndethist,
+            observation_reason,
+            target_name,
         })
     }
 }
@@ -723,10 +731,10 @@ pub struct DiaObject {
     pub y_science_flux_mean_err: Option<f32>,
     /// Time of the first diaSource, expressed as Modified Julian Date, International Atomic Time.
     #[serde(rename = "firstDiaSourceMjdTai")]
-    pub first_dia_source_mjd_tai: f64,
+    pub first_dia_source_mjd_tai: Option<f64>,
     /// Last time when non-forced DIASource was seen for this object.
     #[serde(rename = "lastDiaSourceMjdTai")]
-    pub last_dia_source_mjd_tai: f64,
+    pub last_dia_source_mjd_tai: Option<f64>,
     /// Total number of DiaSources associated with this DiaObject.
     #[serde(rename = "nDiaSources")]
     pub n_dia_sources: i32,
@@ -952,6 +960,8 @@ pub struct SsSource {
 pub struct LsstRawAvroAlert {
     #[serde(rename(deserialize = "diaSourceId"))]
     pub candid: i64,
+    pub observation_reason: Option<String>,
+    pub target_name: Option<String>,
     #[serde(rename(deserialize = "diaSource"))]
     pub dia_source: DiaSource,
     #[serde(rename = "prvDiaSources")]
@@ -1370,7 +1380,12 @@ impl AlertWorker for LsstAlertWorker {
             .await
             .inspect_err(as_error!())?;
 
-        let mut candidate = LsstCandidate::new(avro_alert.dia_source, avro_alert.dia_object)?;
+        let mut candidate = LsstCandidate::new(
+            avro_alert.dia_source,
+            avro_alert.dia_object,
+            avro_alert.observation_reason,
+            avro_alert.target_name,
+        )?;
 
         let candid = candidate.dia_source.candid;
         let object_id = candidate.object_id.clone();
@@ -1699,7 +1714,13 @@ mod tests {
         // validate the alert
         let alert: LsstRawAvroAlert = alert.unwrap();
         assert_eq!(alert.candid, candid);
-        let candidate = LsstCandidate::new(alert.dia_source, alert.dia_object).unwrap();
+        let candidate = LsstCandidate::new(
+            alert.dia_source,
+            alert.dia_object,
+            alert.observation_reason,
+            alert.target_name,
+        )
+        .unwrap();
         assert_eq!(candidate.object_id, object_id);
         assert!((candidate.dia_source.ra - ra).abs() < 1e-6);
         assert!((candidate.dia_source.dec - dec).abs() < 1e-6);

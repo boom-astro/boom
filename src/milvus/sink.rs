@@ -17,17 +17,17 @@ use crate::conf::MilvusConfig;
 /// Pause after the first failed attempt. Each further failure doubles it.
 const COOLDOWN_BASE: Duration = Duration::from_secs(30);
 
-/// Upper bound on the pause between attempts.
-const COOLDOWN_MAX: Duration = Duration::from_secs(300);
+/// Upper bound on the pause between attempts, held until a success resets it.
+const COOLDOWN_MAX: Duration = Duration::from_secs(60 * 60);
 
 /// How long an idle worker waits before checking the backup queue again
 /// after finding it empty, so idle workers do not poll Valkey every tick.
 const IDLE_DRAIN_PAUSE: Duration = Duration::from_secs(30);
 
-/// Pause before the Nth consecutive retry: 30s, 60s, 120s, 240s, capped at
-/// [`COOLDOWN_MAX`].
+/// Pause before the Nth consecutive retry: 30s, 1m, 2m, 4m, 8m, 16m, 32m,
+/// then [`COOLDOWN_MAX`] for every retry after that.
 fn cooldown(consecutive_failures: u32) -> Duration {
-    let shift = consecutive_failures.saturating_sub(1).min(5);
+    let shift = consecutive_failures.saturating_sub(1).min(7);
     COOLDOWN_BASE
         .saturating_mul(1u32 << shift)
         .min(COOLDOWN_MAX)
@@ -319,12 +319,18 @@ mod tests {
 
     #[test]
     fn cooldown_grows_then_caps() {
+        // A failure count of 0 never reaches here, but must not underflow.
+        assert_eq!(cooldown(0), Duration::from_secs(30));
         assert_eq!(cooldown(1), Duration::from_secs(30));
         assert_eq!(cooldown(2), Duration::from_secs(60));
         assert_eq!(cooldown(3), Duration::from_secs(120));
         assert_eq!(cooldown(4), Duration::from_secs(240));
-        // 30s << 4 == 480s, clamped to the ceiling.
-        assert_eq!(cooldown(5), COOLDOWN_MAX);
+        assert_eq!(cooldown(7), Duration::from_secs(32 * 60));
+        // 30s << 7 == 64m, clamped to the ceiling.
+        assert_eq!(cooldown(8), COOLDOWN_MAX);
+        // Held at the ceiling for as long as the failures continue.
+        assert_eq!(cooldown(9), COOLDOWN_MAX);
+        assert_eq!(cooldown(100), COOLDOWN_MAX);
         // Large inputs stay clamped, and never panic via shift overflow.
         assert_eq!(cooldown(u32::MAX), COOLDOWN_MAX);
     }
@@ -371,7 +377,7 @@ mod tests {
     }
 
     /// Consecutive failures back off; a success resets the budget so a later,
-    /// unrelated blip starts from the short pause again.
+    /// unrelated blip starts from the first pause again.
     #[test]
     fn success_resets_the_backoff() {
         let mut sink = sink(true);
