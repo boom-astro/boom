@@ -63,7 +63,7 @@ pub const CONVERGE_ITERATIONS: usize = 100;
 /// Iterations a screening fit gets before [`GiveUp::for_gate`] checks it.
 pub const GIVE_UP_AFTER: usize = 8;
 /// How far above its gate a screening fit may still be at that check.
-pub const GIVE_UP_FACTOR: f64 = 10.0;
+pub const GIVE_UP_FACTOR: f64 = 18.0;
 
 impl GiveUp {
     /// Abandon a fit still [`GIVE_UP_FACTOR`] times above `gate_arcsec` after
