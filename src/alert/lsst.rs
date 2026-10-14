@@ -396,11 +396,10 @@ impl LsstCandidate {
 
         let (jdstarthist, ndethist) = match dia_object {
             Some(obj) => {
-                let jdstarthist = if obj.first_dia_source_mjd_tai > 0.0 {
-                    Some(Epoch::from_mjd_tai(obj.first_dia_source_mjd_tai).to_jde_utc_days())
-                } else {
-                    None
-                };
+                let jdstarthist = obj
+                    .first_dia_source_mjd_tai
+                    .filter(|mjd| *mjd > 0.0)
+                    .map(|mjd| Epoch::from_mjd_tai(mjd).to_jde_utc_days());
                 (jdstarthist, Some(obj.n_dia_sources))
             }
             None => (None, None),
@@ -732,10 +731,10 @@ pub struct DiaObject {
     pub y_science_flux_mean_err: Option<f32>,
     /// Time of the first diaSource, expressed as Modified Julian Date, International Atomic Time.
     #[serde(rename = "firstDiaSourceMjdTai")]
-    pub first_dia_source_mjd_tai: f64,
+    pub first_dia_source_mjd_tai: Option<f64>,
     /// Last time when non-forced DIASource was seen for this object.
     #[serde(rename = "lastDiaSourceMjdTai")]
-    pub last_dia_source_mjd_tai: f64,
+    pub last_dia_source_mjd_tai: Option<f64>,
     /// Total number of DiaSources associated with this DiaObject.
     #[serde(rename = "nDiaSources")]
     pub n_dia_sources: i32,
