@@ -13,7 +13,7 @@
 use crate::api::models::response;
 use crate::api::routes::{babamul::BabamulUser, users::User};
 use crate::tasks::Actor;
-use actix_web::{web, HttpResponse};
+use actix_web::{web, HttpResponse, ResponseError as _};
 
 /// An authenticated admin, whichever realm they came from.
 #[derive(Debug)]
@@ -56,8 +56,10 @@ const ADMIN_REQUIRED: &str = "Admin access required";
 const UNAUTHENTICATED: &str = "Unauthorized";
 
 impl AdminDenied {
-    /// The refusal as an error carrying the API's JSON envelope, so an
-    /// extractor refuses in the same shape a handler would.
+    /// The refusal as an error carrying the API's JSON envelope.
+    ///
+    /// The one place the decision becomes a status and a message, so an
+    /// extractor and a handler cannot refuse the same caller differently.
     pub fn as_error(&self) -> response::ApiError {
         match self {
             AdminDenied::NotAnAdmin => response::ApiError::forbidden(ADMIN_REQUIRED),
@@ -134,10 +136,11 @@ pub fn require_admin(
         boom_user.as_ref().map(|u| &**u),
         babamul_user.as_ref().map(|u| &**u),
     )
-    .map_err(|denied| match denied {
-        AdminDenied::NotAnAdmin => response::forbidden(ADMIN_REQUIRED),
-        AdminDenied::Unauthenticated => response::unauthorized(UNAUTHENTICATED),
-    })
+    // Rendered through the same `ApiError` as the extractor rather than mapped
+    // again here. Two mappings agreeing today is not the same as one mapping:
+    // the point of centralizing it is that a later change to either status or
+    // wording cannot move one and leave the other.
+    .map_err(|denied| denied.as_error().error_response())
 }
 
 /// Grant `is_admin` to the Babamul accounts named in the configured list.
@@ -244,7 +247,6 @@ mod tests {
     #[tokio::test]
     async fn a_refusal_says_why_in_json() {
         use actix_web::body::MessageBody as _;
-        use actix_web::ResponseError as _;
 
         for (denied, status) in [
             (
@@ -274,8 +276,22 @@ mod tests {
             );
         }
 
-        // Both paths to the same decision refuse with the same wording, so the
-        // extractor and the helper cannot drift apart.
+        // The helper refuses through the same rendering as the extractor, so
+        // there is one mapping rather than two that happen to agree.
+        for denied in [AdminDenied::NotAnAdmin, AdminDenied::Unauthenticated] {
+            let via_helper = require_admin(&None, &None);
+            let expected = denied.as_error().error_response();
+            if denied == AdminDenied::Unauthenticated {
+                let actual = via_helper.expect_err("no credential is refused");
+                assert_eq!(actual.status(), expected.status());
+                assert_eq!(
+                    actual.headers().get(actix_web::http::header::CONTENT_TYPE),
+                    expected
+                        .headers()
+                        .get(actix_web::http::header::CONTENT_TYPE),
+                );
+            }
+        }
         assert_eq!(
             AdminDenied::NotAnAdmin.as_error().to_string(),
             ADMIN_REQUIRED
