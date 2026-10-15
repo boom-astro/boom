@@ -199,7 +199,19 @@ pub fn resolve_merge(ids: &[String]) -> Option<(String, Vec<String>)> {
 /// Format a minted id. Sequential and short enough to quote as an MPC `trkSub`,
 /// which is limited to 8 characters.
 pub fn format_id(n: u64) -> String {
-    format!("BT{n:06}")
+    // MPC-style number packing: ids stay 8 characters and sort as strings in minting order.
+    const BASE62: &[u8; 62] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    if n < 6_200_000 {
+        let lead = BASE62[(n / 100_000) as usize] as char;
+        return format!("BT{lead}{:05}", n % 100_000);
+    }
+    let mut rest = n - 6_200_000;
+    let mut tail = [b'0'; 5];
+    for digit in tail.iter_mut().rev() {
+        *digit = BASE62[(rest % 62) as usize];
+        rest /= 62;
+    }
+    format!("BT~{}", String::from_utf8_lossy(&tail))
 }
 
 /// Summarise a track's detections, given their epochs.
@@ -842,7 +854,15 @@ pub(crate) mod tests {
     #[test]
     fn test_minted_ids_fit_a_trksub() {
         assert_eq!(format_id(1), "BT000001");
-        assert!(format_id(999_999).len() <= 8);
+        assert_eq!(format_id(999_999), "BT999999");
+        assert_eq!(format_id(1_000_000), "BTA00000");
+        assert_eq!(format_id(6_200_000), "BT~00000");
+        let ids: Vec<String> = [1, 999_999, 1_000_000, 6_199_999, 6_200_000, 900_000_000]
+            .into_iter()
+            .map(format_id)
+            .collect();
+        assert!(ids.iter().all(|id| id.len() == 8), "{ids:?}");
+        assert!(ids.windows(2).all(|w| w[0] < w[1]), "{ids:?}");
     }
 
     /// A track whittled down by contested detections must not be stored as a
