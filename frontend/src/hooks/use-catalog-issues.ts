@@ -52,6 +52,12 @@ export function countIssues(catalogs: CatalogStatus[]): CatalogIssues {
   // Partial is counted too, and is arguably the worse state: the collection
   // exists, so a crossmatch against it succeeds and quietly returns fewer
   // matches than it should rather than failing.
+  //
+  // "ingesting" is the same shortfall with a run working on it, and is not
+  // counted. Counting it would light this badge for the hours an ingest takes,
+  // every time somebody started one from the page the badge points at -- which
+  // is how an operator learns to read past it, the same reason `external` is
+  // left out below.
   const partial = configured.filter((c) => c.health === "partial").length;
   // An unknown slug cannot be fixed by clicking Ingest -- it needs a catalog
   // definition or a config correction -- but it is still something to address.

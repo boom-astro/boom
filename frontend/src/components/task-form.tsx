@@ -18,41 +18,113 @@ export function baseType(field: SchemaField): string {
   return t ?? "string";
 }
 
+/**
+ * Unwrap the `oneOf` that some optional fields arrive as.
+ *
+ * utoipa writes `Option<T>` two ways depending on what `T` is: a type pair like
+ * `["integer", "null"]`, or a two-arm `oneOf`. Only the first is a flat field
+ * on its face, so taking any `oneOf` as a tagged union sent the whole form to
+ * the JSON escape hatch over one optional parameter — and with it every other
+ * field on that task.
+ *
+ * The outer description is kept: the doc comment is written on the field, and
+ * the arm it resolves to carries none.
+ */
+export function unwrapOptional(field: SchemaField): SchemaField {
+  if (!field.oneOf) return field;
+  const arms = field.oneOf.filter((arm) => baseType(arm) !== "null" || arm.$ref);
+  if (arms.length !== 1) return field;
+  return { description: field.description, ...arms[0] };
+}
+
+/**
+ * Whether a field has to be entered as JSON rather than as one input.
+ *
+ * A struct or enum parameter arrives as a `$ref` into a definitions section
+ * that `schema_of` does not emit, so there is nothing to render and nothing to
+ * follow. Such a field used to render as a text box, because `$ref` carries no
+ * `type` and the fallback is "string" — which quietly accepted a string for a
+ * parameter that is not one, and meant the escape hatch this check exists for
+ * never opened.
+ */
+export function isStructured(field: SchemaField): boolean {
+  const resolved = unwrapOptional(field);
+  if (resolved.$ref || resolved.oneOf) return true;
+  return baseType(resolved) === "object" || !!resolved.properties;
+}
+
 function isRequired(schema: TaskType["params_schema"], name: string): boolean {
   return (schema.required ?? []).includes(name);
 }
 
+/** A form value coerced for the API, or the reason it could not be. */
+export type Parsed = { value?: unknown; error?: string };
+
 /**
- * Coerce a form value to what the API expects.
+ * Coerce a form value to what the API expects, or say why it cannot be.
  *
- * Returns `undefined` for a field left blank, and the caller omits it — so the
+ * A blank field comes back with neither, and the caller omits it — so the
  * server applies the default from the params struct rather than the form
  * inventing one. An empty numeric input must not become 0, which for most of
  * these fields is a value `validate_params` rejects.
  *
- * Unparseable numeric text is treated the same way. A number input can hold
- * text that is not a number — `-` or `e` on its own, mid-edit — and `NaN`
- * serializes to JSON as `null`, which reaches the API as an explicit null
- * rather than as the omission the blank case is careful to produce.
+ * Numeric text that is not the number it looks like is an error rather than an
+ * omission, and the difference matters: `parseInt` took the leading digits and
+ * discarded the rest, so `1e9` became 1, `2.5` became 2 and `1,000` became 1,
+ * all of them passing a check for `NaN`. An ingest asked for with a batch size
+ * of `1e9` ran with a batch size of 1 and reported nothing wrong.
+ *
+ * The bounds in the schema are applied here too. They come from the same struct
+ * the server validates against, so a value outside them is a 400 waiting to
+ * happen, and saying so next to the field beats saying it after a round trip.
  */
-export function coerce(field: SchemaField, raw: string | boolean): unknown {
-  if (typeof raw === "boolean") return raw;
+export function parseField(field: SchemaField, raw: string | boolean): Parsed {
+  if (typeof raw === "boolean") return { value: raw };
   const text = raw.trim();
-  if (text === "") return undefined;
-  const numeric = (parsed: number) => (Number.isNaN(parsed) ? undefined : parsed);
-  switch (baseType(field)) {
+  if (text === "") return {};
+  const resolved = unwrapOptional(field);
+  const type = baseType(resolved);
+
+  switch (type) {
     case "integer":
-      return numeric(Number.parseInt(text, 10));
-    case "number":
-      return numeric(Number.parseFloat(text));
-    case "array":
+    case "number": {
+      // `Number` rejects what it cannot represent exactly, where `parseInt`
+      // and `parseFloat` take a prefix and silently drop the remainder.
+      const parsed = Number(text);
+      if (!Number.isFinite(parsed)) return { error: "not a number" };
+      if (type === "integer" && !Number.isInteger(parsed)) {
+        return { error: "whole numbers only" };
+      }
+      if (resolved.minimum !== undefined && parsed < resolved.minimum) {
+        return { error: `at least ${resolved.minimum}` };
+      }
+      if (resolved.maximum !== undefined && parsed > resolved.maximum) {
+        return { error: `at most ${resolved.maximum}` };
+      }
+      return { value: parsed };
+    }
+    case "array": {
       // Comma-separated, which is how a catalog list reads most naturally.
-      return text
+      const entries = text
         .split(",")
         .map((s) => s.trim())
         .filter(Boolean);
+      const items = resolved.items;
+      // A list of numbers is coerced per entry rather than sent as strings,
+      // which serde would reject for the whole list on the first one.
+      if (!items || !["integer", "number"].includes(baseType(items))) {
+        return { value: entries };
+      }
+      const values: unknown[] = [];
+      for (const entry of entries) {
+        const parsed = parseField(items, entry);
+        if (parsed.error) return { error: `${entry}: ${parsed.error}` };
+        values.push(parsed.value);
+      }
+      return { value: values };
+    }
     default:
-      return text;
+      return { value: text };
   }
 }
 
@@ -75,12 +147,25 @@ export function TaskForm({
   const [confirmed, setConfirmed] = useState(false);
 
   // A task whose parameters cannot be expressed as flat fields — a tagged union
-  // like enrich_reprocess's selection — is submitted as JSON rather than
-  // guessed at with a half-working widget.
-  const nested = fields.filter(([, f]) => f.oneOf || baseType(f) === "object");
+  // like a selection, or a struct the schema only references — is submitted as
+  // JSON rather than guessed at with a half-working widget.
   const [rawJson, setRawJson] = useState("{}");
   const [jsonError, setJsonError] = useState<string | null>(null);
-  const useRawJson = nested.length > 0;
+  const useRawJson = fields.some(([, field]) => isStructured(field));
+
+  // Parsed once per render and read everywhere below, so what the button
+  // decides from and what the request carries cannot disagree. Reading the raw
+  // text instead is how "-" counted as a filled-in required field: it enabled
+  // Run and was then dropped from the payload.
+  const parsed = useMemo(
+    () =>
+      fields.map(
+        ([name, field]) =>
+          [name, field, parseField(field, values[name] ?? "")] as const,
+      ),
+    [fields, values],
+  );
+  const invalid = parsed.filter(([, , result]) => result.error);
 
   // Structured tasks are entered as one JSON value, so their required fields
   // do not live in the flat form state. Validation for those happens when the
@@ -89,28 +174,33 @@ export function TaskForm({
   const missing = useRawJson
     ? []
     : (task.params_schema.required ?? []).filter((name) => {
-        const v = values[name];
-        return v === undefined || (typeof v === "string" && v.trim() === "");
+        const entry = parsed.find(([field]) => field === name);
+        return !entry || entry[2].value === undefined;
       });
 
   function submit() {
     if (useRawJson) {
+      let value: unknown;
       try {
-        const parsed = JSON.parse(rawJson);
-        setJsonError(null);
-        onSubmit(parsed);
+        value = JSON.parse(rawJson);
       } catch (e) {
         setJsonError(e instanceof Error ? e.message : String(e));
+        return;
       }
+      // `JSON.parse` is happy with `7` or `null`, which reach the API as a
+      // body it cannot deserialize into a params struct at all.
+      if (value === null || typeof value !== "object" || Array.isArray(value)) {
+        setJsonError("parameters have to be a JSON object");
+        return;
+      }
+      setJsonError(null);
+      onSubmit(value as Record<string, unknown>);
       return;
     }
     const params: Record<string, unknown> = {};
-    for (const [name, field] of fields) {
-      const raw = values[name];
-      if (raw === undefined) continue;
-      const value = coerce(field, raw);
+    for (const [name, , result] of parsed) {
       // Omitted rather than sent as null: the server fills in the default.
-      if (value !== undefined) params[name] = value;
+      if (result.value !== undefined) params[name] = result.value;
     }
     onSubmit(params);
   }
@@ -139,16 +229,22 @@ export function TaskForm({
             className="w-full rounded border bg-background p-2 font-mono text-xs"
             rows={6}
             value={rawJson}
-            onChange={(e) => setRawJson(e.target.value)}
+            onChange={(e) => {
+              setRawJson(e.target.value);
+              // Cleared on edit: the old message described text that is no
+              // longer there, and pointed at a column that had moved.
+              setJsonError(null);
+            }}
             spellCheck={false}
           />
           {jsonError && <p className="text-xs text-destructive mt-1">{jsonError}</p>}
         </div>
       ) : (
         <div className="grid gap-3 mb-3 sm:grid-cols-2">
-          {fields.map(([name, field]) => {
+          {parsed.map(([name, field, result]) => {
             const required = isRequired(task.params_schema, name);
-            const type = baseType(field);
+            const resolved = unwrapOptional(field);
+            const type = baseType(resolved);
             return (
               <div key={name} className={type === "boolean" ? "sm:col-span-2" : ""}>
                 <Label htmlFor={name} className="text-xs">
@@ -165,12 +261,12 @@ export function TaskForm({
                       }
                     />
                     <span className="text-xs text-muted-foreground">
-                      {field.description}
+                      {resolved.description}
                     </span>
                   </div>
                 ) : (
                   <>
-                    {field.enum ? (
+                    {resolved.enum ? (
                       <select
                         id={name}
                         className="w-full rounded border bg-background p-2 text-sm"
@@ -182,7 +278,7 @@ export function TaskForm({
                         <option value="">
                           {required ? "select…" : "(default)"}
                         </option>
-                        {field.enum.map((choice) => (
+                        {resolved.enum.map((choice) => (
                           <option key={choice} value={choice}>
                             {choice}
                           </option>
@@ -192,17 +288,30 @@ export function TaskForm({
                       <Input
                         id={name}
                         type={type === "integer" || type === "number" ? "number" : "text"}
+                        // The same bounds the parse applies, so the number box
+                        // offers its own stepper and warning for them.
+                        min={resolved.minimum}
+                        max={resolved.maximum}
+                        step={type === "integer" ? 1 : undefined}
                         value={String(values[name] ?? "")}
                         placeholder={required ? "" : "(default)"}
+                        aria-invalid={result.error ? true : undefined}
+                        aria-describedby={result.error ? `${name}-error` : undefined}
                         onChange={(e) =>
                           setValues((v) => ({ ...v, [name]: e.target.value }))
                         }
                       />
                     )}
-                    {field.description && (
-                      <p className="text-xs text-muted-foreground mt-1">
-                        {field.description}
+                    {result.error ? (
+                      <p id={`${name}-error`} className="text-xs text-destructive mt-1">
+                        {result.error}
                       </p>
+                    ) : (
+                      resolved.description && (
+                        <p className="text-xs text-muted-foreground mt-1">
+                          {resolved.description}
+                        </p>
+                      )
                     )}
                   </>
                 )}
@@ -228,7 +337,12 @@ export function TaskForm({
       <div className="flex items-center gap-2">
         <Button
           size="sm"
-          disabled={busy || missing.length > 0 || (task.destructive && !confirmed)}
+          disabled={
+            busy ||
+            missing.length > 0 ||
+            invalid.length > 0 ||
+            (task.destructive && !confirmed)
+          }
           onClick={submit}
         >
           {busy ? "Starting…" : "Run task"}
@@ -239,6 +353,11 @@ export function TaskForm({
         {missing.length > 0 && (
           <span className="text-xs text-muted-foreground">
             required: {missing.join(", ")}
+          </span>
+        )}
+        {missing.length === 0 && invalid.length > 0 && (
+          <span className="text-xs text-destructive">
+            fix: {invalid.map(([name]) => name).join(", ")}
           </span>
         )}
       </div>

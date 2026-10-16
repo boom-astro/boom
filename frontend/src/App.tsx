@@ -1,7 +1,7 @@
 import { BrowserRouter, Routes, Route, useNavigate, Navigate, useLocation } from "react-router-dom";
 import api from "@/lib/api";
 import useAppStore, { ensureProfileLoaded } from "@/lib/store";
-import { Suspense, lazy, useEffect } from "react";
+import { Suspense, lazy, useEffect, useState } from "react";
 import { AppSidebar } from "@/components/app-sidebar"
 import { SiteHeader } from "@/components/site-header"
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar"
@@ -97,10 +97,39 @@ function AdminRoute({ children }: { children: React.ReactElement }) {
   return <ProtectedRoute><AdminOnly>{children}</AdminOnly></ProtectedRoute>;
 }
 
-/** Inside `ProtectedRoute`, so the profile has already loaded. */
+/**
+ * Inside `ProtectedRoute`, so a profile is loaded -- but not necessarily one
+ * that is still true.
+ *
+ * The store persists the profile to localStorage, so `is_admin` read out of it
+ * is a hint and not a fact: it survives a reload, it can be edited there by
+ * hand, and it goes stale the moment somebody's admin status is revoked
+ * elsewhere. Nothing leaks either way, because every route behind this is
+ * enforced server-side and answers 403 -- but a page that renders in full and
+ * then fails every request on it is a worse answer than the redirect, and a
+ * guard that cannot tell is not really a guard.
+ *
+ * So the profile is re-read from the API before deciding. The admin page did
+ * already force a re-read, from inside one card on it; a route guard's
+ * correctness should not depend on which of its children happen to be mounted.
+ */
 function AdminOnly({ children }: { children: React.ReactElement }) {
   const profile = useAppStore((s) => s.profile);
-  if (!profile?.is_admin) return <Navigate to="/" replace />;
+  const [checked, setChecked] = useState(false);
+
+  useEffect(() => {
+    let mounted = true;
+    ensureProfileLoaded({ force: true }).finally(() => {
+      if (mounted) setChecked(true);
+    });
+    return () => { mounted = false };
+  }, []);
+
+  if (!checked) return <Loader />;
+  // `/query` rather than `/`: the landing page sends a signed-in user straight
+  // back to `/query` anyway, so routing a denied admin through it bought a
+  // flash of the marketing page and a second redirect.
+  if (!profile?.is_admin) return <Navigate to="/query" replace />;
   return children;
 }
 

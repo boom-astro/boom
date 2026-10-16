@@ -63,7 +63,7 @@ pub const CONVERGE_ITERATIONS: usize = 100;
 /// Iterations a screening fit gets before [`GiveUp::for_gate`] checks it.
 pub const GIVE_UP_AFTER: usize = 8;
 /// How far above its gate a screening fit may still be at that check.
-pub const GIVE_UP_FACTOR: f64 = 10.0;
+pub const GIVE_UP_FACTOR: f64 = 18.0;
 
 impl GiveUp {
     /// Abandon a fit still [`GIVE_UP_FACTOR`] times above `gate_arcsec` after
@@ -355,10 +355,6 @@ fn fit(
         }
         iterations += 1;
 
-        // Normal equations from the numerical Jacobian. A perturbed state can
-        // fall outside what the propagator handles, near escape speed; that is
-        // a step too large rather than a failed fit, so damp and retry instead
-        // of discarding the progress made so far.
         let mut ata = vec![vec![0.0; 6]; 6];
         let mut atb = vec![0.0; 6];
         let mut usable = true;
@@ -393,11 +389,7 @@ fn fit(
             }
         }
         if !usable {
-            lambda *= 10.0;
-            if lambda > 1e8 {
-                break;
-            }
-            continue;
+            break;
         }
 
         // Levenberg damping on the diagonal.

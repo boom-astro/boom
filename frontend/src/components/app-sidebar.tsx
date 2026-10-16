@@ -13,12 +13,12 @@ import {
   IconTelescope,
 } from "@tabler/icons-react"
 
-import useAppStore from "@/lib/store"
 import { useCatalogIssues } from "@/hooks/use-catalog-issues"
 import { NavDocuments } from "@/components/nav-documents"
 import { NavMain } from "@/components/nav-main"
 import { NavSecondary } from "@/components/nav-secondary"
 import { NavUser } from "@/components/nav-user"
+import { useAppStore } from "@/lib/store"
 import {
   Sidebar,
   SidebarContent,

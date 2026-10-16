@@ -1,5 +1,11 @@
-import { describe, expect, it } from "vitest";
-import { countEnrichmentIssues, countIssues } from "./use-catalog-issues";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { act, renderHook, waitFor } from "@testing-library/react";
+import {
+  countEnrichmentIssues,
+  countIssues,
+  useCatalogIssues,
+} from "./use-catalog-issues";
+import * as adminApi from "@/lib/adminApi";
 import type { CatalogStatus, CatalogHealth } from "@/lib/adminApi";
 
 function catalog(
@@ -147,5 +153,117 @@ describe("countEnrichmentIssues", () => {
     expect(
       countEnrichmentIssues([{ ...clean, accepted_sets: [6] }]).count,
     ).toBe(0);
+  });
+});
+
+describe("countIssues and an ingest in flight", () => {
+  it("does not count a catalog a run is working on", () => {
+    // Counting it would light the badge for the hours an ingest takes, every
+    // time one was started from the page the badge points at.
+    const { count, label } = countIssues([catalog("ned-lvs", "ingesting")]);
+    expect(count).toBe(0);
+    expect(label).toBe("Every crossmatched catalog is present");
+  });
+
+  it("still counts one that was left half done", () => {
+    // Same shortfall, nothing working on it: this is the one to act on.
+    const { count, label } = countIssues([catalog("ned-lvs", "partial")]);
+    expect(count).toBe(1);
+    expect(label).toContain("1 partially ingested");
+  });
+});
+
+describe("useCatalogIssues", () => {
+  let status: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    // `shouldAdvanceTime` so testing-library's `waitFor`, which polls on real
+    // timers, still makes progress while the hook's own minute-long interval
+    // is under our control.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    status = vi.spyOn(adminApi, "fetchCatalogStatus");
+    // The hook reads enrichment drift in the same `Promise.all`, so leaving it
+    // unstubbed makes every poll reject and the count read a misleading zero.
+    vi.spyOn(adminApi, "fetchEnrichmentStatus").mockResolvedValue([]);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it("does not poll at all for a non-admin", async () => {
+    // Every caller of this hook is in the sidebar, which renders for everybody.
+    // A non-admin polling an admin-only route would be 403 every minute.
+    status.mockResolvedValue([catalog("ned-lvs", "missing")]);
+
+    const { result } = renderHook(() => useCatalogIssues(false));
+
+    expect(status).not.toHaveBeenCalled();
+    expect(result.current.count).toBe(0);
+  });
+
+  it("clears the count when it stops being enabled", async () => {
+    // An admin whose status is revoked mid-session must not be left with a
+    // badge from the last poll they were allowed to make.
+    status.mockResolvedValue([catalog("ned-lvs", "missing")]);
+    const { result, rerender } = renderHook(
+      ({ enabled }) => useCatalogIssues(enabled),
+      { initialProps: { enabled: true } },
+    );
+    await waitFor(() => expect(result.current.count).toBe(1));
+
+    rerender({ enabled: false });
+
+    expect(result.current.count).toBe(0);
+    expect(result.current.label).toBe("");
+  });
+
+  it("keeps the previous count when a poll fails", async () => {
+    // Deliberate: a failed check must not render a misleading zero, which on
+    // this badge reads as "every crossmatched catalog is present".
+    status.mockResolvedValueOnce([catalog("ned-lvs", "missing")]);
+    const { result } = renderHook(() => useCatalogIssues(true));
+    await waitFor(() => expect(result.current.count).toBe(1));
+
+    status.mockRejectedValueOnce(new Error("gone"));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+
+    expect(result.current.count).toBe(1);
+    expect(result.current.label).toContain("1 missing");
+  });
+
+  it("re-checks on its own interval", async () => {
+    status.mockResolvedValue([catalog("ned-lvs", "missing")]);
+    const { result } = renderHook(() => useCatalogIssues(true));
+    await waitFor(() => expect(status).toHaveBeenCalledTimes(1));
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+    expect(status).toHaveBeenCalledTimes(2);
+
+    // Drift changes on the order of hours, so the interval is a minute and not
+    // a second: three minutes is three checks, not a hundred and eighty.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(120_000);
+    });
+    expect(status).toHaveBeenCalledTimes(4);
+    expect(result.current.count).toBe(1);
+  });
+
+  it("stops polling once unmounted", async () => {
+    status.mockResolvedValue([catalog("ned-lvs", "missing")]);
+    const { unmount } = renderHook(() => useCatalogIssues(true));
+    await waitFor(() => expect(status).toHaveBeenCalledTimes(1));
+
+    unmount();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(180_000);
+    });
+
+    expect(status).toHaveBeenCalledTimes(1);
   });
 });

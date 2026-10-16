@@ -9,8 +9,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Spinner } from "@/components/ui/spinner";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { fetchAdminUsers, updateAdminUser, type AdminUser } from "@/lib/api";
-import { ensureProfileLoaded, useAppStore } from "@/lib/store";
-import { Loader } from "@/components/ui/loader";
+import { useAppStore } from "@/lib/store";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 
 const PAGE_SIZE = 50;
@@ -31,9 +30,9 @@ type PendingChange = {
   grants: boolean;
 };
 
-/// User management, lifted out of the page it used to be so that the admin
-/// page can hold the catalog and task surfaces alongside it. The guard lives on
-/// the route (`AdminRoute`); every route this calls is enforced server-side.
+// User management: one card on the admin page, beside the catalog and task
+// surfaces. The route guard checks `is_admin` and re-reads the profile to do
+// it; every route called from here is enforced server-side as well.
 export function AdminUsers() {
   const profile = useAppStore((s) => s.profile);
   const [search, setSearch] = useState("");
@@ -44,23 +43,22 @@ export function AdminUsers() {
   const [availableAcls, setAvailableAcls] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState<Set<string>>(new Set());
-  const [profileChecked, setProfileChecked] = useState(false);
+  const [failed, setFailed] = useState(false);
   const [pending, setPending] = useState<PendingChange | null>(null);
-
-  useEffect(() => {
-    ensureProfileLoaded({ force: true }).finally(() => setProfileChecked(true));
-  }, []);
 
   useEffect(() => {
     const timer = setTimeout(() => {
       setQuery(search);
-      setOffset(0);
+      // Only when the search actually changed. Typing a character and deleting
+      // it fires this effect twice with the same text, and resetting the offset
+      // on the second one threw the reader back to page 1.
+      if (search !== query) setOffset(0);
     }, 300);
     return () => clearTimeout(timer);
-  }, [search]);
+  }, [search, query]);
 
   useEffect(() => {
-    if (!profileChecked || !profile?.is_admin) return;
+    if (!profile?.is_admin) return;
     let active = true;
     setLoading(true);
     fetchAdminUsers(query, PAGE_SIZE, offset)
@@ -69,15 +67,27 @@ export function AdminUsers() {
         setUsers(page.users);
         setTotal(page.total);
         setAvailableAcls(page.available_acls);
+        setFailed(false);
       })
-      .catch((err) => active && toast.error(`Failed to load users: ${err.message ?? err}`))
+      .catch((err) => {
+        if (!active) return;
+        // The rows on screen belong to the page that was asked for before this
+        // one, and `offset` has already moved: left in place they sat under a
+        // footer reading "51 to 100 of 120" while showing rows 1 to 50.
+        setUsers([]);
+        setTotal(0);
+        setFailed(true);
+        toast.error(`Failed to load users: ${err.message ?? err}`);
+      })
       .finally(() => active && setLoading(false));
     return () => {
       active = false;
     };
-  }, [profileChecked, profile?.is_admin, query, offset]);
+  }, [profile?.is_admin, query, offset]);
 
-  if (!profileChecked) return <Loader />;
+  // The route guard has already decided this, having re-read the profile to do
+  // it. Kept because `profile.id` is read below and the rows mean nothing
+  // without it.
   if (!profile?.is_admin) return null;
 
   async function update(user: AdminUser, patch: { is_admin?: boolean; acls?: string[] }) {
@@ -183,7 +193,7 @@ export function AdminUsers() {
                 ) : users.length === 0 ? (
                   <TableRow>
                     <TableCell colSpan={3 + availableAcls.length} className="h-24 text-center text-muted-foreground">
-                      No users found
+                      {failed ? "Users could not be read" : "No users found"}
                     </TableCell>
                   </TableRow>
                 ) : (

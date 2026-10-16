@@ -268,7 +268,16 @@ export async function updateAdminUser(id: string, patch: { is_admin?: boolean; a
   });
   const body = await readJson(res);
   if (!res.ok) throw new Error(messageOf(body) ?? `Update user failed: ${res.status}`);
-  return unwrapData<AdminUser>(body, {} as AdminUser);
+  const updated = unwrapData<AdminUser | null>(body, null);
+  // `readJson` swallows a parse failure to null, and the `{} as AdminUser`
+  // this used to fall back to left every field undefined: no row matched the
+  // id, so the table went on showing the old values while the toast said
+  // "Updated undefined". The change did land -- the status says so -- but the
+  // page can no longer say what it landed as.
+  if (!updated || typeof updated.id !== "string") {
+    throw new Error("The change was saved but the response could not be read. Reload to see it.");
+  }
+  return updated;
 }
 
 export async function fetchKafkaCredentials(): Promise<KafkaCredential[]> {

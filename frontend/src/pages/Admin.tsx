@@ -7,12 +7,14 @@
 // running, and be cancellable, and they have to leave a record of who ran what.
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  ApiRequestError,
   cancelTaskRun,
   acceptEnrichmentSet,
   fetchCatalogExports,
   fetchCatalogStatus,
   fetchEnrichmentStatus,
   fetchTaskLogs,
+  fetchTaskRun,
   fetchTasks,
   fetchTaskTypes,
   isActive,
@@ -32,9 +34,32 @@ import { TaskForm } from "@/components/task-form";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 
 /** How often to re-poll while anything is still running. */
 const POLL_MS = 3000;
+/** Consecutive failed polls before the page stops and says so. */
+const MAX_POLL_FAILURES = 5;
+/**
+ * Runs fetched per poll.
+ *
+ * Larger than what the table shows, because the "In progress" section is
+ * filtered out of the same list and the API has no status filter: at a page of
+ * 25 a long ingest dropped out of it as soon as 25 newer runs existed, and the
+ * catalog row went back to offering Ingest for a catalog already being
+ * ingested. The server's single-flight check is what actually prevents the
+ * second run; this is so the page stops inviting it.
+ */
+const RUNS_FETCHED = 100;
+/** Runs listed under "Recent task runs". */
+const RUNS_SHOWN = 25;
 
 function healthLabel(health: CatalogHealth): { text: string; variant: "default" | "secondary" | "destructive" | "outline" } {
   switch (health) {
@@ -46,6 +71,10 @@ function healthLabel(health: CatalogHealth): { text: string; variant: "default" 
     // fewer matches rather than failing, so it is called out separately.
     case "partial":
       return { text: "Partial", variant: "destructive" };
+    // Also partly ingested, but because a run is part way through it. Not a
+    // problem to fix, and not counted on the badge.
+    case "ingesting":
+      return { text: "Ingesting", variant: "secondary" };
     case "undeclared":
       return { text: "Unknown slug", variant: "outline" };
     // Not a problem to fix: the collection is real and populated by something
@@ -63,7 +92,10 @@ function statusVariant(status: Task["status"]): "default" | "secondary" | "destr
 }
 
 function formatTime(seconds?: number | null): string {
-  if (!seconds) return "—";
+  // Not `!seconds`: 0 is a real timestamp, and it turns up on exactly the
+  // records written before a field existed -- which is when rendering it as
+  // "not set" hides the thing worth noticing.
+  if (seconds === undefined || seconds === null) return "—";
   return new Date(seconds * 1000).toLocaleString();
 }
 
@@ -71,6 +103,7 @@ function CatalogsTable({
   catalogs,
   runsByCatalog,
   onIngest,
+  onReingest,
   onSelect,
   busy,
   error,
@@ -78,6 +111,7 @@ function CatalogsTable({
   catalogs: CatalogStatus[];
   runsByCatalog: Map<string, Task>;
   onIngest: (id: string) => void;
+  onReingest: (catalog: CatalogStatus) => void;
   onSelect: (runId: string) => void;
   busy: string | null;
   error: string | null;
@@ -88,7 +122,12 @@ function CatalogsTable({
       {error && <p className="text-sm text-destructive mb-3">{error}</p>}
       {catalogs.length === 0 ? (
         <p className="text-sm text-muted-foreground">
-          This release defines no catalogs.
+          {/* A read that failed and a release with no catalogs both leave this
+              list empty, and they call for opposite responses -- one is a thing
+              to go and fix, the other is nothing at all. */}
+          {error
+            ? "Catalog status could not be read, so nothing is known about what is ingested."
+            : "This release defines no catalogs."}
         </p>
       ) : (
         <div className="overflow-x-auto">
@@ -145,25 +184,44 @@ function CatalogsTable({
                         <Button variant="outline" size="sm" onClick={() => onSelect(run!._id)}>
                           {run!.status === "queued" ? "Queued…" : "Running…"}
                         </Button>
+                      ) : // Neither an unknown slug nor a collection built
+                      // elsewhere has anything to ingest, and offering a
+                      // button would be misleading. Neither has one that is
+                      // being ingested right now by a run too old to be in the
+                      // page of runs this view fetched -- the server would
+                      // refuse the submit anyway, but the button should not
+                      // invite it.
+                      catalog.health === "undeclared" ||
+                        catalog.health === "external" ? null : catalog.health ===
+                        "ingesting" ? (
+                        <span className="text-xs text-muted-foreground">in progress</span>
+                      ) : catalog.health === "present" ? (
+                        // A present catalog has every chunk, so resuming would
+                        // do nothing: the only re-ingest that means anything
+                        // drops the collection and rebuilds it. That is
+                        // destructive, so it goes through a confirmation --
+                        // which is also what the task form demands of a
+                        // destructive task, and this row used to skip.
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          disabled={busy === catalog.id}
+                          onClick={() => onReingest(catalog)}
+                        >
+                          {busy === catalog.id ? "Starting…" : "Re-ingest"}
+                        </Button>
                       ) : (
-                        // Neither an unknown slug nor a collection built
-                        // elsewhere has anything to ingest, and offering a
-                        // button would be misleading.
-                        catalog.health !== "undeclared" &&
-                        catalog.health !== "external" &&
-                        catalog.health !== "present" && (
-                          <Button
-                            size="sm"
-                            disabled={busy === catalog.id}
-                            onClick={() => onIngest(catalog.id)}
-                          >
-                            {busy === catalog.id
-                              ? "Starting…"
-                              : catalog.health === "partial"
-                                ? "Resume ingest"
-                                : "Ingest"}
-                          </Button>
-                        )
+                        <Button
+                          size="sm"
+                          disabled={busy === catalog.id}
+                          onClick={() => onIngest(catalog.id)}
+                        >
+                          {busy === catalog.id
+                            ? "Starting…"
+                            : catalog.health === "partial"
+                              ? "Resume ingest"
+                              : "Ingest"}
+                        </Button>
                       )}
                     </td>
                   </tr>
@@ -267,25 +325,41 @@ function RunDetail({ runId, onClose }: { runId: string; onClose: () => void }) {
   const [run, setRun] = useState<Task | null>(null);
   const [lines, setLines] = useState<TaskLogLine[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [canceling, setCanceling] = useState(false);
   // Tail cursor: the server returns only chunks after this, so a long-running
   // ingest is not re-fetched in full on every poll.
   const lastSeq = useRef<number | undefined>(undefined);
-  const logEnd = useRef<HTMLDivElement | null>(null);
+  const logBox = useRef<HTMLDivElement | null>(null);
+  // Whether the operator is reading the end of the log. Scrolling up is a
+  // deliberate act and new output must not undo it.
+  const following = useRef(true);
 
   useEffect(() => {
     let cancelled = false;
     lastSeq.current = undefined;
+    following.current = true;
+    // Everything the previous run left behind goes, not just its log. Opening a
+    // second run from the table used to show the first one's type, status,
+    // actor and error until the next poll came back -- and if that poll failed,
+    // for as long as the panel stayed open.
     setLines([]);
+    setRun(null);
+    setError(null);
+    setNotice(null);
+    setCanceling(false);
 
     async function poll() {
       try {
-        const [runs, chunks] = await Promise.all([
-          fetchTasks(),
+        // Read by id. Looking for the run in the most recent page meant a run
+        // that had dropped off that page was simply never found: the header
+        // stayed blank, nothing ever satisfied `isActive`, and the poll ran
+        // until the panel was closed.
+        const [current, chunks] = await Promise.all([
+          fetchTaskRun(runId),
           fetchTaskLogs(runId, lastSeq.current),
         ]);
         if (cancelled) return;
-        const current = runs.find((r) => r._id === runId) ?? null;
         setRun(current);
         if (chunks.length > 0) {
           lastSeq.current = Math.max(...chunks.map((c) => c.seq));
@@ -293,9 +367,13 @@ function RunDetail({ runId, onClose }: { runId: string; onClose: () => void }) {
         }
         setError(null);
         // Stop polling once the run is over; the logs are complete at that point.
-        if (current && !isActive(current)) return;
+        if (!isActive(current)) return;
       } catch (e) {
-        if (!cancelled) setError(e instanceof Error ? e.message : String(e));
+        if (cancelled) return;
+        setError(e instanceof Error ? e.message : String(e));
+        // A run the API does not have is not going to appear, so there is
+        // nothing left to poll for. Anything else may well be transient.
+        if (e instanceof ApiRequestError && e.status === 404) return;
       }
       if (!cancelled) timer = window.setTimeout(poll, POLL_MS);
     }
@@ -308,13 +386,22 @@ function RunDetail({ runId, onClose }: { runId: string; onClose: () => void }) {
   }, [runId]);
 
   useEffect(() => {
-    logEnd.current?.scrollIntoView({ block: "end" });
+    const box = logBox.current;
+    // The log box is scrolled, not the page. `scrollIntoView` moved the whole
+    // document to bring the log's end into view, which on a page this long
+    // yanked it away from whatever was being read -- every three seconds,
+    // because a running ingest appends a line that often.
+    if (box && following.current) box.scrollTop = box.scrollHeight;
   }, [lines.length]);
 
   async function onCancel() {
     setCanceling(true);
     try {
-      await cancelTaskRun(runId);
+      // A running task stops at its next safe point rather than being killed,
+      // so the button cannot report a completed cancellation. The server says
+      // which of the two happened and that is what gets shown.
+      setNotice(await cancelTaskRun(runId));
+      setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -325,6 +412,7 @@ function RunDetail({ runId, onClose }: { runId: string; onClose: () => void }) {
   const progress = run?.progress;
   const pct =
     progress && progress.total > 0 ? Math.round((progress.done / progress.total) * 100) : null;
+  const stopping = run?.cancel_requested && isActive(run);
 
   return (
     <section className="mb-8 border rounded-lg p-4">
@@ -332,7 +420,8 @@ function RunDetail({ runId, onClose }: { runId: string; onClose: () => void }) {
         <div>
           <h2 className="text-lg font-semibold">
             {run?.task_type ?? "Run"}{" "}
-            {run && <Badge variant={statusVariant(run.status)}>{run.status}</Badge>}
+            {run && <Badge variant={statusVariant(run.status)}>{run.status}</Badge>}{" "}
+            {stopping && <Badge variant="outline">stopping</Badge>}
           </h2>
           <p className="text-xs text-muted-foreground font-mono">{runId}</p>
           {run && (
@@ -344,8 +433,13 @@ function RunDetail({ runId, onClose }: { runId: string; onClose: () => void }) {
         </div>
         <div className="flex gap-2">
           {run && isActive(run) && (
-            <Button variant="destructive" size="sm" disabled={canceling} onClick={onCancel}>
-              {canceling ? "Canceling…" : "Cancel"}
+            <Button
+              variant="destructive"
+              size="sm"
+              disabled={canceling || run.cancel_requested}
+              onClick={onCancel}
+            >
+              {canceling ? "Canceling…" : run.cancel_requested ? "Cancel requested" : "Cancel"}
             </Button>
           )}
           <Button variant="outline" size="sm" onClick={onClose}>
@@ -376,10 +470,20 @@ function RunDetail({ runId, onClose }: { runId: string; onClose: () => void }) {
         </div>
       )}
 
+      {notice && <p className="text-sm text-muted-foreground mb-3">{notice}</p>}
       {run?.error && <p className="text-sm text-destructive mb-3">{run.error}</p>}
       {error && <p className="text-sm text-destructive mb-3">{error}</p>}
 
-      <div className="max-h-80 overflow-y-auto rounded bg-muted/50 p-3 font-mono text-xs">
+      <div
+        ref={logBox}
+        // Following is given up the moment the operator scrolls away from the
+        // end, and taken back when they return to it.
+        onScroll={(e) => {
+          const box = e.currentTarget;
+          following.current = box.scrollHeight - box.scrollTop - box.clientHeight < 24;
+        }}
+        className="max-h-80 overflow-y-auto rounded bg-muted/50 p-3 font-mono text-xs"
+      >
         {lines.length === 0 ? (
           <p className="text-muted-foreground">No log output yet.</p>
         ) : (
@@ -401,7 +505,6 @@ function RunDetail({ runId, onClose }: { runId: string; onClose: () => void }) {
             </div>
           ))
         )}
-        <div ref={logEnd} />
       </div>
     </section>
   );
@@ -649,7 +752,7 @@ function ExportsTable({ exports }: { exports: CatalogExport[] }) {
   );
 }
 
-function TaskCatalogue({
+function TaskCatalog({
   types,
   onSubmit,
   busy,
@@ -670,7 +773,12 @@ function TaskCatalogue({
       </p>
 
       {task && (
+        // Keyed by task, so switching between two tasks starts a fresh form
+        // rather than carrying the previous one's state across -- including the
+        // "I understand this can destroy data" box, which would otherwise
+        // arrive already checked on the next task.
         <TaskForm
+          key={task.id}
           task={task}
           busy={busy === task.id}
           onCancel={() => setSelected(null)}
@@ -717,12 +825,23 @@ function TaskCatalogue({
   );
 }
 
-function RunsTable({ runs, onSelect }: { runs: Task[]; onSelect: (id: string) => void }) {
+function RunsTable({
+  runs,
+  onSelect,
+  error,
+}: {
+  runs: Task[];
+  onSelect: (id: string) => void;
+  error: string | null;
+}) {
+  const shown = runs.slice(0, RUNS_SHOWN);
   return (
     <section>
       <h2 className="text-lg font-semibold mb-1">Recent task runs</h2>
       {runs.length === 0 ? (
-        <p className="text-sm text-muted-foreground">Nothing has been run yet.</p>
+        <p className="text-sm text-muted-foreground">
+          {error ? "Task runs could not be read." : "Nothing has been run yet."}
+        </p>
       ) : (
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
@@ -736,7 +855,7 @@ function RunsTable({ runs, onSelect }: { runs: Task[]; onSelect: (id: string) =>
               </tr>
             </thead>
             <tbody>
-              {runs.map((run) => (
+              {shown.map((run) => (
                 <tr key={run._id} className="border-b last:border-0">
                   <td className="py-2 pr-4">
                     <div className="font-medium">{run.task_type}</div>
@@ -758,10 +877,23 @@ function RunsTable({ runs, onSelect }: { runs: Task[]; onSelect: (id: string) =>
               ))}
             </tbody>
           </table>
+          {runs.length > shown.length && (
+            <p className="text-xs text-muted-foreground mt-2">
+              Showing the {shown.length} most recent of {runs.length} fetched. Older runs are in{" "}
+              <code>/docs</code> under <code>GET /tasks</code>.
+            </p>
+          )}
         </div>
       )}
     </section>
   );
+}
+
+/** The run a single-flight conflict carries, if that is what this failure is. */
+function conflictingRun(e: unknown): Task | null {
+  if (!(e instanceof ApiRequestError) || e.status !== 409) return null;
+  const run = e.data;
+  return run && typeof run === "object" && "_id" in run ? (run as Task) : null;
 }
 
 export default function Admin() {
@@ -772,8 +904,22 @@ export default function Admin() {
   const [exports, setExports] = useState<CatalogExport[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  // Two kinds of failure, kept apart because they have different lifetimes. A
+  // load failure describes the page and the next successful poll replaces it;
+  // an action failure describes something the operator just did, and clearing
+  // it on the next poll is how a 400 naming the parameter it rejected used to
+  // disappear three seconds later, before anyone could read it.
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
+  // Consecutive failed polls. The page gives up rather than backing off
+  // forever: one that has quietly stopped updating looks exactly like an idle
+  // one, which on a page whose whole job is showing what is happening now is
+  // the worst of the three states it could be in.
+  const failures = useRef(0);
+  const [attempt, setAttempt] = useState(0);
+  const [reingesting, setReingesting] = useState<CatalogStatus | null>(null);
 
   // Returns the runs it fetched. The poll below needs them before React has
   // re-rendered with the new state, and reading `runs` there instead would read
@@ -783,7 +929,7 @@ export default function Admin() {
     try {
       const [status, recent, types, drift, exported] = await Promise.all([
         fetchCatalogStatus(),
-        fetchTasks(),
+        fetchTasks(undefined, RUNS_FETCHED),
         fetchTaskTypes(),
         fetchEnrichmentStatus(),
         fetchCatalogExports(),
@@ -793,10 +939,12 @@ export default function Admin() {
       setTaskTypes(types);
       setEnrichment(drift);
       setExports(exported);
-      setError(null);
+      setLoadError(null);
+      failures.current = 0;
       return recent;
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setLoadError(e instanceof Error ? e.message : String(e));
+      failures.current += 1;
       return [];
     } finally {
       setLoaded(true);
@@ -809,6 +957,9 @@ export default function Admin() {
     async function tick() {
       const recent = await refresh();
       if (cancelled) return;
+      // Stop after enough consecutive failures rather than retrying forever on
+      // an API that is refusing. Picked back up by the Retry button below.
+      if (failures.current >= MAX_POLL_FAILURES) return;
       // Keep polling only while something is in flight, so an idle admin page
       // is not hitting the API every few seconds forever.
       const active = recent.some(isActive);
@@ -819,7 +970,14 @@ export default function Admin() {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [refresh]);
+  }, [refresh, attempt]);
+
+  const stalled = loadError !== null && failures.current >= MAX_POLL_FAILURES;
+
+  function retry() {
+    failures.current = 0;
+    setAttempt((n) => n + 1);
+  }
 
   // The newest run per catalog, so the table can show one in flight.
   const runsByCatalog = new Map<string, Task>();
@@ -829,44 +987,35 @@ export default function Admin() {
   }
 
   async function onCancelRun(runId: string) {
+    setActionError(null);
     try {
-      await cancelTaskRun(runId);
+      // A running task stops at its next safe point, so this reports what the
+      // server says it did rather than implying the run has stopped.
+      setNotice(await cancelTaskRun(runId));
       await refresh();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setNotice(null);
+      setActionError(e instanceof Error ? e.message : String(e));
     }
   }
 
-  async function onReprocessStale(survey: string) {
-    await onSubmitTaskFor(survey, "enrich_reprocess", {
+  const onReprocessStale = (survey: string) =>
+    start(
       survey,
-      selection: { kind: "stale" },
-    });
-  }
-
-  async function onSubmitTaskFor(
-    busyKey: string,
-    taskType: string,
-    params: Record<string, unknown>,
-  ) {
-    setBusy(busyKey);
-    try {
-      const run = await submitTask(taskType, params);
-      setSelected(run._id);
-      await refresh();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(null);
-    }
-  }
+      () =>
+        submitTask("enrich_reprocess", {
+          survey,
+          selection: { kind: "stale" },
+        }),
+      `${survey} enrichment is already being reprocessed. Showing that run.`,
+    );
 
   async function onAcceptSet(setId: number, reason: string) {
     try {
       await acceptEnrichmentSet(setId, reason);
       await refresh();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setActionError(e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -875,34 +1024,62 @@ export default function Admin() {
       await unacceptEnrichmentSet(setId);
       await refresh();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setActionError(e instanceof Error ? e.message : String(e));
     }
   }
 
-  async function onSubmitTask(taskType: string, params: Record<string, unknown>) {
-    setBusy(taskType);
+  /** Submit, and treat an equivalent run already in flight as the answer. */
+  async function start(key: string, submit: () => Promise<Task>, already: string) {
+    setBusy(key);
+    setActionError(null);
+    setNotice(null);
     try {
-      const run = await submitTask(taskType, params);
+      const run = await submit();
       setSelected(run._id);
       await refresh();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      const existing = conflictingRun(e);
+      // The server returns the run that is already in flight rather than a
+      // bare error, specifically so the client can jump straight to watching
+      // it. Discarding that and reporting a conflict left the operator to go
+      // and find a run the page was already holding.
+      if (!existing) {
+        setActionError(e instanceof Error ? e.message : String(e));
+        return;
+      }
+      setSelected(existing._id);
+      setNotice(already);
+      await refresh();
     } finally {
       setBusy(null);
     }
   }
 
-  async function onIngest(catalogId: string) {
-    setBusy(catalogId);
-    try {
-      const run = await submitCatalogIngest(catalogId);
-      setSelected(run._id);
-      await refresh();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(null);
-    }
+  const onSubmitTask = (taskType: string, params: Record<string, unknown>) =>
+    start(
+      taskType,
+      () => submitTask(taskType, params),
+      `An equivalent ${taskType} run is already in flight. Showing that one.`,
+    );
+
+  const onIngest = (catalogId: string) =>
+    start(
+      catalogId,
+      () => submitCatalogIngest(catalogId),
+      `${catalogId} is already being ingested. Showing that run.`,
+    );
+
+  function confirmReingest() {
+    const catalog = reingesting;
+    setReingesting(null);
+    if (!catalog) return;
+    // `drop_existing`, which is the only thing a re-ingest of a complete
+    // catalog can usefully mean.
+    void start(
+      catalog.id,
+      () => submitCatalogIngest(catalog.id, true),
+      `${catalog.id} is already being ingested. Showing that run.`,
+    );
   }
 
   return (
@@ -916,6 +1093,29 @@ export default function Admin() {
 
         <AdminUsers />
 
+        {/* Above everything, and not cleared by the next poll: this is the
+            answer to something the operator just asked for, and it is the one
+            message on the page they are actually waiting on. */}
+        {actionError && (
+          <div className="mb-4 rounded-lg border border-destructive/50 p-3">
+            <p className="text-sm text-destructive">{actionError}</p>
+          </div>
+        )}
+        {notice && !actionError && (
+          <p className="mb-4 text-sm text-muted-foreground">{notice}</p>
+        )}
+        {stalled && (
+          <div className="mb-4 flex items-center justify-between gap-4 rounded-lg border p-3">
+            <p className="text-sm text-muted-foreground">
+              This page has stopped refreshing after {MAX_POLL_FAILURES} failed attempts, so what
+              it shows may be out of date.
+            </p>
+            <Button variant="outline" size="sm" onClick={retry}>
+              Retry
+            </Button>
+          </div>
+        )}
+
         {!loaded ? (
           <p className="text-sm text-muted-foreground">Loading…</p>
         ) : (
@@ -925,9 +1125,10 @@ export default function Admin() {
               catalogs={catalogs}
               runsByCatalog={runsByCatalog}
               onIngest={onIngest}
+              onReingest={setReingesting}
               onSelect={setSelected}
               busy={busy}
-              error={error}
+              error={loadError}
             />
             <ExportsTable exports={exports} />
             {selected && <RunDetail runId={selected} onClose={() => setSelected(null)} />}
@@ -938,11 +1139,37 @@ export default function Admin() {
               onUnaccept={onUnacceptSet}
               busy={busy}
             />
-            <TaskCatalogue types={taskTypes} onSubmit={onSubmitTask} busy={busy} />
-            <RunsTable runs={runs} onSelect={setSelected} />
+            <TaskCatalog types={taskTypes} onSubmit={onSubmitTask} busy={busy} />
+            <RunsTable runs={runs} onSelect={setSelected} error={loadError} />
           </>
         )}
       </div>
+
+      <Dialog
+        open={reingesting !== null}
+        onOpenChange={(open) => !open && setReingesting(null)}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Re-ingest {reingesting?.id}?</DialogTitle>
+            <DialogDescription>
+              {reingesting?.collection ?? "The collection"} is dropped and
+              rebuilt from the archive, which takes hours.
+              {reingesting?.crossmatched
+                ? " The alert pipeline queries this catalog, and until the ingest finishes it will match against whatever has been inserted so far rather than failing — so alerts processed during the run will be under-matched."
+                : " Nothing crossmatches against it, so the alert pipeline is unaffected."}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setReingesting(null)}>
+              Cancel
+            </Button>
+            <Button variant="destructive" onClick={confirmReingest}>
+              Drop and re-ingest
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

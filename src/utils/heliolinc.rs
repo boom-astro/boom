@@ -30,7 +30,7 @@ const EARTH_DERIV_STEP: f64 = 0.5;
 /// a main-belt position by well under a milliarcsecond.
 const CIRCULAR_ECCENTRICITY: f64 = 1e-10;
 
-/// One assumed heliocentric distance and radial velocity.
+/// One assumed heliocentric distance and radial velocity at the reference epoch.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Hypothesis {
     /// Heliocentric distance, au.
@@ -534,7 +534,15 @@ fn tracks_for_hypothesis(
     // Propagated state per tracklet under this hypothesis.
     let mut states: Vec<(usize, State)> = Vec::new();
     for (i, t) in tracklets.iter().enumerate() {
-        let Some(s) = state_from_tracklet(t, hypothesis) else {
+        let r_au = hypothesis.r_au + hypothesis.rdot_au_per_day * (t.jd_ref - cfg.reference_jd);
+        if r_au <= 0.0 {
+            continue;
+        }
+        let at_tracklet = Hypothesis {
+            r_au,
+            ..*hypothesis
+        };
+        let Some(s) = state_from_tracklet(t, &at_tracklet) else {
             continue;
         };
         if let Some(p) = propagate(&s, t.jd_ref, cfg.reference_jd) {
@@ -1816,6 +1824,52 @@ mod tests {
         assert!(missed.is_empty(), "linkable objects not linked: {missed:?}");
     }
 
+    #[test]
+    fn test_links_objects_whose_distance_changes_over_the_arc() {
+        use std::collections::HashSet;
+
+        let objects: Vec<OrbitalElements> = (0..36)
+            .map(|k| {
+                OrbitalElements::elliptical(
+                    2460012.0,
+                    [1.3, 1.7, 2.1][k / 12],
+                    [0.4, 0.5, 0.6][(k / 4) % 3],
+                    4.0 + 2.0 * (k % 5) as f64,
+                    (37.0 * k as f64) % 360.0,
+                    (53.0 * k as f64) % 360.0,
+                    45.0 + 90.0 * (k % 4) as f64,
+                )
+            })
+            .collect();
+        let nights = [2460009.70, 2460012.72, 2460016.68];
+        let (detections, owner) = survey(&objects, &nights);
+        let tracklets = survey_tracklets(&detections, &nights);
+        let cfg = survey_config(&tracklets);
+        let mut nights_of: HashMap<usize, HashSet<i64>> = HashMap::new();
+        for t in &tracklets {
+            for id in &t.ids {
+                nights_of
+                    .entry(owner[id])
+                    .or_default()
+                    .insert(night_of(t.jd_ref));
+            }
+        }
+        let linkable: HashSet<usize> = nights_of
+            .iter()
+            .filter(|(_, n)| n.len() >= 2)
+            .map(|(&k, _)| k)
+            .collect();
+
+        let mut recovered = HashSet::new();
+        for track in link_tracklets(&tracklets, &detections, &cfg) {
+            let objects = owners_of(&track, &tracklets, &owner);
+            assert_eq!(objects.len(), 1, "a track mixes objects {objects:?}");
+            recovered.extend(objects);
+        }
+        let missed: Vec<&usize> = linkable.difference(&recovered).collect();
+        assert!(missed.is_empty(), "linkable objects not linked: {missed:?}");
+    }
+
     /// Each object comes back once: a subset of a passing track is not fitted
     /// on its own, and overlapping versions of one object are joined.
     #[test]
@@ -2058,8 +2112,8 @@ mod tests {
     ///
     /// Every copy in [`small_survey`] whose fit passes the gate within the
     /// screening budget is run to [`GiveUp::for_gate`]'s check and must be
-    /// comfortably below its line by then. The worst such fit sits near 12
-    /// arcsec at the default 2 arcsec gate, against a line at 20; the margin
+    /// comfortably below its line by then. The worst such fit sits near 22
+    /// arcsec at the default 2 arcsec gate, against a line at 36; the margin
     /// asserted here is what stops the line being tightened until it abandons
     /// fits that would have passed.
     #[test]
