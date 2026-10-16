@@ -189,12 +189,12 @@ struct Cli {
     /// Also link tracklets another survey published, from directories of CSS
     /// `.mtds` files. The telescope is taken from each filename, so its
     /// astrometry is fitted from the site it was actually observed at.
-    #[arg(long, value_name = "DIR")]
+    #[arg(long, value_name = "DIR", conflicts_with = "persist")]
     css: Vec<String>,
 
     /// Fetch these nights from the public CSS archive before linking, as
     /// YYYY-MM-DD. Downloads are cached, so a repeated run costs one listing.
-    #[arg(long, value_name = "DATE")]
+    #[arg(long, value_name = "DATE", conflicts_with = "persist")]
     css_fetch: Vec<chrono::NaiveDate>,
 
     /// Telescopes to fetch, by MPC code. G96 is the deepest CSS survey
