@@ -38,6 +38,10 @@ pub fn parse_dets(
 ) -> Result<CssTracklets, String> {
     let site = Site::from_mpc_code(mpc_code)
         .ok_or_else(|| format!("unknown MPC observatory code {mpc_code}"))?;
+    let cfg = TrackletConfig {
+        max_rms_arcsec: cfg.max_rms_arcsec.max(3.0 * site.astrometric_sigma_arcsec),
+        ..cfg.clone()
+    };
     let mut lines = text.lines();
     let header = lines.next().unwrap_or_default().trim();
     if !header.starts_with("DETSV") {
@@ -95,7 +99,7 @@ pub fn parse_dets(
         .into_iter()
         .filter_map(|(_, mut members)| {
             members.sort_by(|a, b| a.jd.partial_cmp(&b.jd).unwrap_or(std::cmp::Ordering::Equal));
-            fit_tracklet(&members, cfg)
+            fit_tracklet(&members, &cfg)
         })
         .collect();
 
