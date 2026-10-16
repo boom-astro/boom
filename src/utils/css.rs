@@ -158,18 +158,33 @@ pub async fn fetch_night(
     dir: &std::path::Path,
 ) -> Result<Fetched, String> {
     let prefix = archive_prefix(mpc_code, night);
-    let listing = client
-        .get(format!(
-            "{ARCHIVE}/?list-type=2&max-keys=1000&prefix={prefix}/"
-        ))
-        .send()
-        .await
-        .map_err(|e| format!("listing {prefix}: {e}"))?
-        .text()
-        .await
-        .map_err(|e| format!("listing {prefix}: {e}"))?;
+    let mut keys = Vec::new();
+    let mut token: Option<String> = None;
+    loop {
+        let mut params = vec![
+            ("list-type", "2".to_string()),
+            ("prefix", format!("{prefix}/")),
+        ];
+        if let Some(token) = token {
+            params.push(("continuation-token", token));
+        }
+        let url = reqwest::Url::parse_with_params(&format!("{ARCHIVE}/"), &params)
+            .map_err(|e| format!("listing {prefix}: {e}"))?;
+        let listing = client
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| format!("listing {prefix}: {e}"))?
+            .text()
+            .await
+            .map_err(|e| format!("listing {prefix}: {e}"))?;
+        keys.extend(mtds_keys(&listing));
+        token = next_token(&listing);
+        if token.is_none() {
+            break;
+        }
+    }
 
-    let keys = mtds_keys(&listing);
     if keys.is_empty() {
         return Ok(Fetched {
             found: 0,
@@ -201,6 +216,18 @@ pub async fn fetch_night(
         found: keys.len(),
         fetched,
     })
+}
+
+fn next_token(listing: &str) -> Option<String> {
+    if !listing.contains("<IsTruncated>true</IsTruncated>") {
+        return None;
+    }
+    listing
+        .split("<NextContinuationToken>")
+        .nth(1)?
+        .split("</NextContinuationToken>")
+        .next()
+        .map(str::to_string)
 }
 
 /// The `.mtds` keys in an S3 listing.
@@ -339,6 +366,16 @@ G96_20250930_2B_FHAUM2_01_0002.arch.fz 2460948.73249624
         assert_eq!(mtds_keys(listing), vec!["a/b/G96_1.mtds", "a/b/G96_2.mtds"]);
         assert!(mtds_keys("").is_empty());
         assert!(mtds_keys("<ListBucketResult></ListBucketResult>").is_empty());
+    }
+
+    #[test]
+    fn test_a_truncated_listing_names_the_next_page() {
+        let truncated = "<ListBucketResult><IsTruncated>true</IsTruncated>\
+            <Contents><Key>a/b/G96_1.mtds</Key></Contents>\
+            <NextContinuationToken>1x/Ab+c=</NextContinuationToken></ListBucketResult>";
+        assert_eq!(next_token(truncated).as_deref(), Some("1x/Ab+c="));
+        let last = "<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>";
+        assert_eq!(next_token(last), None);
     }
 
     #[test]
