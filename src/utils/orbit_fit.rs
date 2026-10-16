@@ -7,7 +7,7 @@
 //! residual that says whether the track was real.
 
 use crate::utils::heliolinc::{propagate_position, radec_from_ecliptic, state_to_elements, State};
-use crate::utils::sso_geometry::{observer_position, OrbitalElements, Site};
+use crate::utils::sso_geometry::{observer_position, OrbitalElements, Site, ZTF};
 
 /// One astrometric position.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -18,6 +18,10 @@ pub struct Observation {
     /// Degrees.
     pub dec: f64,
     pub site: Site,
+}
+
+fn weight(obs: &Observation) -> f64 {
+    ZTF.astrometric_sigma_arcsec / obs.site.astrometric_sigma_arcsec
 }
 
 /// A fitted orbit and how well it reproduces the observations.
@@ -208,7 +212,7 @@ fn rms_and_light_times(
     let mut light_times = Vec::with_capacity(observations.len());
     for (obs, observer) in observations.iter().zip(observers) {
         let ((dra, ddec), tau) = residual(state, epoch_jd, obs, observer, None)?;
-        sq += dra * dra + ddec * ddec;
+        sq += weight(obs).powi(2) * (dra * dra + ddec * ddec);
         light_times.push(tau);
     }
     Some(((sq / observations.len() as f64).sqrt(), light_times))
@@ -355,10 +359,11 @@ fn fit(
                 jac_ra[k] = -(ra_up - r_ra) / step;
                 jac_dec[k] = -(dec_up - r_dec) / step;
             }
+            let w2 = weight(obs).powi(2);
             for i in 0..6 {
-                atb[i] += jac_ra[i] * r_ra + jac_dec[i] * r_dec;
+                atb[i] += w2 * (jac_ra[i] * r_ra + jac_dec[i] * r_dec);
                 for j in 0..6 {
-                    ata[i][j] += jac_ra[i] * jac_ra[j] + jac_dec[i] * jac_dec[j];
+                    ata[i][j] += w2 * (jac_ra[i] * jac_ra[j] + jac_dec[i] * jac_dec[j]);
                 }
             }
         }
