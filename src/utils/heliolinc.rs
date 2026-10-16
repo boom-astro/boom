@@ -382,6 +382,58 @@ pub fn propagate_position(state: &State, epoch_jd: f64, jd: f64) -> Option<[f64;
     pos.iter().all(|c| c.is_finite()).then_some(pos)
 }
 
+const MAX_NIGHT_MAG_SPREAD: f64 = 2.5;
+
+pub fn night_magnitude_spread(
+    state: &State,
+    epoch_jd: f64,
+    detections: &[&Detection],
+) -> Option<f64> {
+    let mut by_night: BTreeMap<i64, Vec<f64>> = BTreeMap::new();
+    for d in detections {
+        let (Some(mag), Some(p)) = (d.mag, propagate_position(state, epoch_jd, d.jd)) else {
+            continue;
+        };
+        let e = earth_position(d.jd);
+        let delta = norm(&[p[0] - e[0], p[1] - e[1], p[2] - e[2]]);
+        by_night
+            .entry(night_of(d.jd))
+            .or_default()
+            .push(mag - 5.0 * (norm(&p) * delta).log10());
+    }
+    let medians: Vec<f64> = by_night
+        .into_values()
+        .map(|mut v| {
+            v.sort_by(f64::total_cmp);
+            let n = v.len();
+            (v[(n - 1) / 2] + v[n / 2]) / 2.0
+        })
+        .collect();
+    let lo = medians.iter().copied().reduce(f64::min)?;
+    let hi = medians.iter().copied().reduce(f64::max)?;
+    (medians.len() > 1).then_some(hi - lo)
+}
+
+fn photometry_agrees(
+    track: &Track,
+    tracklets: &[Tracklet],
+    by_id: &HashMap<i64, &Detection>,
+    cfg: &LinkConfig,
+) -> bool {
+    let detections: Vec<&Detection> = track
+        .members
+        .iter()
+        .flat_map(|&m| {
+            tracklets[m]
+                .ids
+                .iter()
+                .filter_map(|id| by_id.get(id).copied())
+        })
+        .collect();
+    night_magnitude_spread(&track.state, cfg.reference_jd, &detections)
+        .is_none_or(|spread| spread <= MAX_NIGHT_MAG_SPREAD)
+}
+
 /// Where `state` appears on the sky at each of `jds`, degrees.
 ///
 /// `None` if the orbit cannot be propagated to one of them, since a test orbit
@@ -736,7 +788,7 @@ fn best_passing(
         })?,
     };
     converge(&mut track, &observations, cfg);
-    Some(track)
+    photometry_agrees(&track, tracklets, by_id, cfg).then_some(track)
 }
 
 /// Run a track whose screening fit passed the gate on to convergence, so the
@@ -1147,7 +1199,7 @@ fn try_merge(
             .then_some(track)
     })?;
     converge(&mut track, &observations, cfg);
-    Some(track)
+    photometry_agrees(&track, tracklets, by_id, cfg).then_some(track)
 }
 
 /// Link tracklets into tracks, sweeping every hypothesis in `cfg`.
@@ -1731,6 +1783,33 @@ mod tests {
     }
 
     /// Tracklets per night, as the finder builds them.
+    #[test]
+    fn test_a_night_far_brighter_than_the_others_is_another_object() {
+        let el = OrbitalElements::elliptical(2460012.0, 2.5, 0.1, 5.0, 40.0, 60.0, 30.0);
+        let nights = [2460009.70, 2460012.72, 2460016.68];
+        let (mut detections, _) = survey(&[el], &nights);
+        let epoch = nights[1];
+        let at = |jd: f64| heliocentric_position(&el, jd);
+        let (a, b) = (at(epoch - 0.05), at(epoch + 0.05));
+        let state = State {
+            pos: at(epoch),
+            vel: [
+                (b[0] - a[0]) / 0.1,
+                (b[1] - a[1]) / 0.1,
+                (b[2] - a[2]) / 0.1,
+            ],
+        };
+        let spread = |dets: &[Detection]| {
+            night_magnitude_spread(&state, epoch, &dets.iter().collect::<Vec<_>>())
+                .expect("three nights with magnitudes")
+        };
+        assert!(spread(&detections) < 0.5);
+        for d in detections.iter_mut().filter(|d| d.jd >= nights[2]) {
+            d.mag = Some(15.5);
+        }
+        assert!(spread(&detections) > MAX_NIGHT_MAG_SPREAD);
+    }
+
     fn survey_tracklets(detections: &[Detection], nights: &[f64]) -> Vec<Tracklet> {
         use crate::utils::linking::{find_tracklets, TrackletConfig};
         let mut tracklets = Vec::new();

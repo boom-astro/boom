@@ -120,7 +120,7 @@ pub fn parse_dets(
             dec,
             mag: f[8].parse::<f64>().ok().filter(|m| *m > 0.0 && *m < 40.0),
             mag_err: None,
-            band: None,
+            band: Some('G'),
             // From the archive path, not the file: this is the whole point.
             site: Some(site),
         };
