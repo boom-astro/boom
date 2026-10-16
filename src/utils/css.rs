@@ -108,11 +108,12 @@ pub fn parse_dets(
 ///
 /// CSS source ids repeat between exposures, so the epoch is mixed in. The
 /// epoch is quantised to a millisecond, which is far finer than any cadence and
-/// keeps the id reproducible across reads of the same file.
+/// keeps the id reproducible across reads of the same file. Negative, so it
+/// can never be a ZTF candid.
 fn detection_id(source_id: i64, jd: f64) -> i64 {
     let millis = (jd * 86_400_000.0).round() as i64;
     // Keeps both parts in range: a CSS source id fits well inside 2^24.
-    (millis.rem_euclid(1 << 39)) << 24 | (source_id.rem_euclid(1 << 24))
+    -1 - ((millis.rem_euclid(1 << 39)) << 24 | (source_id.rem_euclid(1 << 24)))
 }
 
 /// The public PDS mirror of the CSS archive, which needs no credentials.
@@ -308,6 +309,7 @@ G96_20250930_2B_FHAUM2_01_0002.arch.fz 2460948.73249624
         let unique: std::collections::HashSet<i64> =
             parsed.detections.iter().map(|d| d.id).collect();
         assert_eq!(unique.len(), parsed.detections.len());
+        assert!(parsed.detections.iter().all(|d| d.id < 0));
         // The same source id at two epochs is two detections.
         assert_ne!(
             detection_id(46753, 2460948.72339281),
