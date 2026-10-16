@@ -63,6 +63,9 @@ pub fn parse_dets(
         ) else {
             continue;
         };
+        if source_id == 0 {
+            continue;
+        }
         // RA is in hours here, Dec in degrees; confirmed against the matching
         // `.mpcd`, whose sexagesimal RA is the same angle.
         let ra = ra_hours * 15.0;
@@ -259,6 +262,7 @@ G96_20250930_2B_FHAUM2_01_0002.arch.fz 2460948.73249624
 0001      2      50142 2460948.73249624 23.970900  42.76982   2822.627   2554.892  20.80     1.45    1.125   6.5
 0002      1      97313 2460948.72339281 23.897884  43.80877   4732.821   4902.604  21.62     0.54    1.015 -72.4
 0002      2     105048 2460948.73249624 23.897713  43.80590   4732.590   4999.934  22.40     0.10    1.999   0.0
+0002      3          0 2460948.74194118 23.897547  43.80302   4722.612   5078.380   0.00     1.00    1.000   0.0
 ";
 
     /// The archived `.mpcd` for this detection reads 23 58 15.39 +42 46 25.9,
