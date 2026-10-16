@@ -316,19 +316,20 @@ impl DecamAlertWorker {
         object_id: &str,
         aliases: &DecamAliases,
     ) -> Result<(), AlertError> {
-        for (ids, collection) in [
-            (&aliases.ztf, &self.ztf_alert_aux_collection),
-            (&aliases.lsst, &self.lsst_alert_aux_collection),
+        for (ids, collection, other_survey) in [
+            (&aliases.ztf, &self.ztf_alert_aux_collection, "LSST"),
+            (&aliases.lsst, &self.lsst_alert_aux_collection, "ZTF"),
         ] {
             if let Some(id) = ids.first() {
+                let decam = doc! { "$literal": [object_id] };
                 collection
                     .update_one(
-                        doc! {
-                            "_id": id,
-                            "aliases": { "$type": "object" },
-                            "aliases.DECAM.0": { "$exists": false },
-                        },
-                        doc! { "$set": { "aliases.DECAM": [object_id] } },
+                        doc! { "_id": id, "aliases.DECAM.0": { "$exists": false } },
+                        vec![doc! { "$set": { "aliases": { "$cond": [
+                            { "$eq": [{ "$type": "$aliases" }, "object"] },
+                            { "$mergeObjects": ["$aliases", { "DECAM": &decam }] },
+                            { other_survey: [], "DECAM": &decam },
+                        ] } } }],
                     )
                     .await?;
             }
