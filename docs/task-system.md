@@ -267,6 +267,47 @@ done so, and failing the run because the bookkeeping write failed would leave
 the data changed *and* the run marked failed — the worst of both. The failure is
 logged loudly instead.
 
+## The submission form
+
+The admin page renders a form for each task from the `params_schema` on
+`/tasks/types`. That schema is derived from the params struct's `ToSchema`
+derive, so it cannot drift from what the API will accept, and the help text
+under each field is the doc comment written on it — which is a reason to write
+them well.
+
+Adding a parameter to a task therefore puts it on the form with no frontend
+change. What the schema says about a field is what the form does with it:
+
+- **A blank field is omitted, not sent as zero or null.** The server then
+  applies the struct's `#[serde(default)]`. An empty number box becoming `0` is
+  a value `validate_params` rejects for most of these fields — `num_workers`
+  and `batch_size` among them — and it would be rejected for a reason nobody
+  asked about.
+- **Numeric text is either the number it looks like or an error.** Not a prefix
+  of it: `1e9` and `2.5` in an integer box are reported next to the field, where
+  taking the leading digits would have run the task with `1` and `2`.
+- **`minimum` and `maximum` are applied.** They come from the same struct the
+  server validates against, so a value outside them is a 400 waiting to happen
+  and the form says so first. Declare them with `#[schema(minimum = …)]` where
+  `validate_params` has a bound, and the form enforces it for free.
+- **A closed set renders as a dropdown.** A Rust enum arrives in the schema as
+  `enum` and so cannot be mistyped. A `String` field over a closed set — a
+  catalog slug, say — does not, and comes back as a 400 listing what was
+  allowed; making it an enum is the better fix.
+
+A parameter the form cannot offer as a single input falls back to a JSON field
+for the whole task, rather than a half-working widget guessing at a shape. Two
+kinds reach that path: a tagged union, which arrives as a multi-arm `oneOf`,
+and a struct or enum field, which arrives as a `$ref`. The `$ref` cannot be
+followed — [`schema_of`](../src/tasks/mod.rs) serializes one type and keeps no
+definitions registry, so the reference dangles — which is why the fallback is
+keyed on recognizing it rather than on resolving it. A task with such a
+parameter is worth a look at `/docs` before it is submitted from the page.
+
+Note that `Option<T>` is *not* one of those: utoipa writes it either as a type
+pair like `["integer", "null"]` or as a two-arm `oneOf`, depending on `T`, and
+both stay on the form.
+
 ## Access
 
 Admin-only, and both login realms are accepted: the BOOM API's `users` and
