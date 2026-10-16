@@ -7,7 +7,7 @@
 //! residual that says whether the track was real.
 
 use crate::utils::heliolinc::{propagate_position, radec_from_ecliptic, state_to_elements, State};
-use crate::utils::sso_geometry::{observer_position, OrbitalElements, Site, ZTF};
+use crate::utils::sso_geometry::{observer_position, OrbitalElements, Site};
 
 /// One astrometric position.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -20,8 +20,13 @@ pub struct Observation {
     pub site: Site,
 }
 
-fn weight(obs: &Observation) -> f64 {
-    ZTF.astrometric_sigma_arcsec / obs.site.astrometric_sigma_arcsec
+fn weights(observations: &[Observation]) -> Vec<f64> {
+    let inverse: Vec<f64> = observations
+        .iter()
+        .map(|obs| 1.0 / obs.site.astrometric_sigma_arcsec)
+        .collect();
+    let scale = (inverse.iter().map(|w| w * w).sum::<f64>() / inverse.len() as f64).sqrt();
+    inverse.iter().map(|w| w / scale).collect()
 }
 
 /// A fitted orbit and how well it reproduces the observations.
@@ -198,24 +203,36 @@ pub fn rms_arcsec(state: &State, epoch_jd: f64, observations: &[Observation]) ->
         .iter()
         .map(|obs| observer_position(obs.jd, &obs.site))
         .collect();
-    rms_and_light_times(state, epoch_jd, observations, &observers).map(|(rms, _)| rms)
+    rms_and_light_times(
+        state,
+        epoch_jd,
+        observations,
+        &observers,
+        &weights(observations),
+    )
+    .map(|(_, rms, _)| rms)
 }
 
-/// The rms residual, arcseconds, and each observation's light time.
+/// The weighted and plain rms residuals, arcseconds, and each observation's
+/// light time.
 fn rms_and_light_times(
     state: &State,
     epoch_jd: f64,
     observations: &[Observation],
     observers: &[[f64; 3]],
-) -> Option<(f64, Vec<f64>)> {
-    let mut sq = 0.0;
+    weights: &[f64],
+) -> Option<(f64, f64, Vec<f64>)> {
+    let (mut weighted, mut plain) = (0.0, 0.0);
     let mut light_times = Vec::with_capacity(observations.len());
-    for (obs, observer) in observations.iter().zip(observers) {
+    for ((obs, observer), w) in observations.iter().zip(observers).zip(weights) {
         let ((dra, ddec), tau) = residual(state, epoch_jd, obs, observer, None)?;
-        sq += weight(obs).powi(2) * (dra * dra + ddec * ddec);
+        let sq = dra * dra + ddec * ddec;
+        weighted += w * w * sq;
+        plain += sq;
         light_times.push(tau);
     }
-    Some(((sq / observations.len() as f64).sqrt(), light_times))
+    let n = observations.len() as f64;
+    Some(((weighted / n).sqrt(), (plain / n).sqrt(), light_times))
 }
 
 /// Refine `initial` against `observations` by Gauss-Newton.
@@ -311,9 +328,10 @@ fn fit(
         .iter()
         .map(|obs| observer_position(obs.jd, &obs.site))
         .collect();
+    let weights = weights(observations);
     let mut state = *initial;
-    let (mut best, mut light_times) =
-        rms_and_light_times(&state, epoch_jd, observations, &observers)?;
+    let (mut best, mut plain, mut light_times) =
+        rms_and_light_times(&state, epoch_jd, observations, &observers, &weights)?;
     let mut lambda = 1e-3;
     let mut iterations = 0;
     let steps = [
@@ -327,7 +345,7 @@ fn fit(
 
     for _ in 0..max_iterations {
         if let Some(give_up) = give_up {
-            if iterations >= give_up.after_iterations && best > give_up.above_arcsec {
+            if iterations >= give_up.after_iterations && plain > give_up.above_arcsec {
                 break;
             }
         }
@@ -336,7 +354,12 @@ fn fit(
         let mut ata = vec![vec![0.0; 6]; 6];
         let mut atb = vec![0.0; 6];
         let mut usable = true;
-        'obs: for ((obs, observer), &tau) in observations.iter().zip(&observers).zip(&light_times) {
+        'obs: for (((obs, observer), &tau), w) in observations
+            .iter()
+            .zip(&observers)
+            .zip(&light_times)
+            .zip(&weights)
+        {
             // The residual and every nudge of it share one light time, so the
             // differences measure the state change and nothing else.
             let Some(((r_ra, r_dec), _)) = residual(&state, epoch_jd, obs, observer, Some(tau))
@@ -359,7 +382,7 @@ fn fit(
                 jac_ra[k] = -(ra_up - r_ra) / step;
                 jac_dec[k] = -(dec_up - r_dec) / step;
             }
-            let w2 = weight(obs).powi(2);
+            let w2 = w * w;
             for i in 0..6 {
                 atb[i] += w2 * (jac_ra[i] * r_ra + jac_dec[i] * r_dec);
                 for j in 0..6 {
@@ -393,11 +416,12 @@ fn fit(
             candidate = perturb(&candidate, k, *d);
         }
 
-        match rms_and_light_times(&candidate, epoch_jd, observations, &observers) {
-            Some((trial, trial_light_times)) if trial < best => {
+        match rms_and_light_times(&candidate, epoch_jd, observations, &observers, &weights) {
+            Some((trial, trial_plain, trial_light_times)) if trial < best => {
                 let improvement = best - trial;
                 state = candidate;
                 best = trial;
+                plain = trial_plain;
                 light_times = trial_light_times;
                 lambda = (lambda * 0.5).max(1e-9);
                 // Converged once the fit stops moving.
@@ -419,7 +443,7 @@ fn fit(
         state,
         epoch_jd,
         elements,
-        rms_arcsec: best,
+        rms_arcsec: plain,
         iterations,
         n_obs: observations.len(),
     })
