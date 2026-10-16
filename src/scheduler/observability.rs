@@ -1,6 +1,9 @@
 use crate::utils::{enums::Survey, o11y::metrics::SCHEDULER_METER};
 
-use std::sync::LazyLock;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    LazyLock,
+};
 
 use opentelemetry::{
     metrics::{Counter, Gauge, Meter},
@@ -107,6 +110,41 @@ pub fn record_kafka_alert_published(producer: &'static str, survey: &str, topic:
         KeyValue::new("topic", topic.to_string()),
     ];
     KAFKA_ALERT_PUBLISHED.add(count, &attrs);
+}
+
+pub struct HeartbeatCounts {
+    pub alert: u64,
+    pub enrichment: u64,
+    pub filter: u64,
+    pub passed: u64,
+}
+
+static ALERTS_PROCESSED: AtomicU64 = AtomicU64::new(0);
+static ALERTS_ENRICHED: AtomicU64 = AtomicU64::new(0);
+static ALERTS_FILTERED: AtomicU64 = AtomicU64::new(0);
+static ALERTS_PASSED: AtomicU64 = AtomicU64::new(0);
+
+pub fn count_processed_alert() {
+    ALERTS_PROCESSED.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn count_enriched_alerts(count: usize) {
+    ALERTS_ENRICHED.fetch_add(count as u64, Ordering::Relaxed);
+}
+
+pub fn count_filtered_alerts(filtered: usize, passed: usize) {
+    ALERTS_FILTERED.fetch_add(filtered as u64, Ordering::Relaxed);
+    ALERTS_PASSED.fetch_add(passed as u64, Ordering::Relaxed);
+}
+
+/// Read and reset the counts, so each heartbeat reports only its own interval.
+pub fn take_heartbeat_counts() -> HeartbeatCounts {
+    HeartbeatCounts {
+        alert: ALERTS_PROCESSED.swap(0, Ordering::Relaxed),
+        enrichment: ALERTS_ENRICHED.swap(0, Ordering::Relaxed),
+        filter: ALERTS_FILTERED.swap(0, Ordering::Relaxed),
+        passed: ALERTS_PASSED.swap(0, Ordering::Relaxed),
+    }
 }
 
 fn scheduler_meter() -> &'static Meter {

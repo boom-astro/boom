@@ -707,6 +707,11 @@ impl AlertWorker for WinterAlertWorker {
             .await
             .inspect_err(as_error!("failed to create mongo client"))?;
 
+        // Warns rather than fails: a crossmatch catalog that is configured but
+        // empty produces zero matches on every alert, which is
+        // indistinguishable from a genuine non-match.
+        crate::catalogs::warn_on_empty_crossmatch_catalogs(&db, &xmatch_configs).await;
+
         let alert_collection = db.collection(&ALERT_COLLECTION);
         let alert_aux_collection = db.collection(&ALERT_AUX_COLLECTION);
         let alert_cutout_storage = config
@@ -793,13 +798,12 @@ impl AlertWorker for WinterAlertWorker {
             updated_at: now,
         };
 
-        let status = self
-            .format_and_insert_alert(candid, &alert, &self.alert_collection)
+        if self
+            .check_alert_exists(candid, &self.alert_collection)
             .await
-            .inspect_err(as_error!())?;
-
-        if let ProcessAlertStatus::Exists(_) = status {
-            return Ok(status);
+            .inspect_err(as_error!())?
+        {
+            return Ok(ProcessAlertStatus::Exists(candid));
         }
 
         let survey_matches = Some(
@@ -850,15 +854,20 @@ impl AlertWorker for WinterAlertWorker {
             }
         }
 
+        self.format_and_insert_cutouts(
+            candid,
+            &object_id,
+            avro_alert.cutout_science,
+            avro_alert.cutout_template,
+            avro_alert.cutout_difference,
+            &self.alert_cutout_storage,
+        )
+        .await
+        .inspect_err(as_error!())?;
+
+        // Inserted last: an alert in the database implies its aux and cutouts are there too.
         let status = self
-            .format_and_insert_cutouts(
-                candid,
-                &object_id,
-                avro_alert.cutout_science,
-                avro_alert.cutout_template,
-                avro_alert.cutout_difference,
-                &self.alert_cutout_storage,
-            )
+            .format_and_insert_alert(candid, &alert, &self.alert_collection)
             .await
             .inspect_err(as_error!())?;
 

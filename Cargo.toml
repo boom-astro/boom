@@ -8,6 +8,7 @@ actix-rt = "2.11.0"
 actix-web = "4.13.0"
 aes-gcm = "0.10.3"
 anyhow = "1.0.102"
+arrow = { version = "59.3.0", default-features = false }
 apache-avro = { version = "0.21.0", features = ["snappy", "derive"] }
 apache-avro-derive = "0.21.0"
 apache-avro-macros = { version = "1", path = "apache-avro-macros" }
@@ -19,12 +20,15 @@ base64 = "0.22.1"
 bcrypt = "0.19.1"
 cdshealpix = "0.9.1"
 chrono = { version = "0.4.44", features = ["serde"] }
+chrono-tz = "0.10.4"
 clap = { version = "4", features = ["derive", "env"] }
 config = { version = "0.15.23", features = ["preserve_order"] }
 constcat = "0.6.1"
+csv = "1.3.1"
 dotenvy = "0.15.7"
 fitsio = "0.21.10"
 flare = "0.2.0"
+flate2 = "1.1.5"
 futures = "0.3.32"
 hifitime = "4.3.0"
 indicatif = "0.18.4"
@@ -37,6 +41,8 @@ ndarray = "0.17.2"
 opentelemetry = "0.31.0"
 opentelemetry-otlp = { version = "0.31.0", features = ["grpc-tonic", "metrics", "trace"] }
 opentelemetry_sdk = { version = "0.31.0", features = ["rt-tokio"] }
+parquet = { version = "59.3.0", default-features = false, features = ["arrow", "snap", "zstd", "brotli", "flate2", "flate2-rust_backend", "lz4"] }
+prost = "0.14.3"
 rand = "0.10.1"
 rayon = "1.10"
 rdkafka = { version = "0.39.0", features = ["gssapi", "ssl-vendored", "tracing", "sasl", "zstd"] }
@@ -49,13 +55,19 @@ serde_with = { version = "3.20.0", features = ["base64"] }
 sha2 = "0.11.0"
 tempfile = "3.27.0"
 thiserror = "2.0.18"
-tokio = { version = "1.52.3", features = ["rt", "rt-multi-thread", "time", "macros", "sync", "signal"] }
+tokio = { version = "1.52.3", features = ["rt", "rt-multi-thread", "time", "macros", "sync", "signal", "process"] }
+# Milvus is reached over gRPC only (NRP exposes no REST port), so we talk to it
+# with the same tonic stack that opentelemetry-otlp already pulls in. `tls-aws-lc`
+# matches the aws_lc_rs provider used by jsonwebtoken; `tls-native-roots` is enough
+# for NRP, which serves a standard Let's Encrypt certificate.
+tonic = { version = "0.14.6", features = ["tls-aws-lc", "tls-native-roots"] }
+tonic-prost = "0.14.6"
 tracing = "0.1.44"
 tracing-flame = "0.2.0"
 tracing-log = "0.2.0"
 tracing-opentelemetry = "0.32.0"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "registry"]}
-utoipa = { version = "5.5.0", features = ["actix_extras"] }
+utoipa = { version = "5.5.0", features = ["actix_extras", "chrono"] }
 utoipa-scalar = { version = "0.3.0", features = ["actix-web"] }
 url = "2.5"
 uuid = { version = "1.23", features = ["v4"] }
@@ -65,6 +77,13 @@ zune-inflate = { version = "0.2", default-features = false, features = [
     "gzip",
     "std",
 ] }
+
+[build-dependencies]
+# Generates the Milvus gRPC client from the protos vendored in proto/milvus.
+# protoc-bin-vendored ships the compiler itself, so neither CI nor the Dockerfile
+# needs a system protoc package.
+protoc-bin-vendored = "3.2.0"
+tonic-prost-build = "0.14.6"
 
 [features]
 default = []

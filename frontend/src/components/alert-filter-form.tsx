@@ -163,7 +163,7 @@ function propertyTooltips(survey: 'ZTF' | 'LSST') {
   const stationary = (
     <>
       <span className={T.green}>True</span> if the temporal baseline (last &minus; first observation) &gt;&nbsp;0.01&nbsp;days (~14&nbsp;min).
-      Combines <code>prv_candidates</code> and <code>fp_hists</code> (forced photometry, SNR&nbsp;&ge;&nbsp;3).
+      Combines <code>prv_candidates</code> and <code>fp_hists</code> (forced photometry, SNR&nbsp;&ge;&nbsp;5).
     </>
   );
 

@@ -137,15 +137,11 @@ fn rejected_as_marginal_rex(doc: &Document, config: &HostGalaxyConfig) -> bool {
     opt_f64(doc, "fracflux_r").is_some_and(|f| f > config.rex_max_fracflux)
 }
 
-fn isophotal_semi_major_for(
-    doc: &Document,
-    ellipse: &Ellipse,
-    config: &HostGalaxyConfig,
-) -> Option<f64> {
+fn sersic_profile(doc: &Document) -> Option<(f64, f64)> {
     let objtype = opt_string(doc, "objtype")?;
     let n = sersic_index_for_type(&objtype, opt_f64(doc, "sersic"))?;
     let m_tot = total_mag(opt_f64(doc, "flux_r")?)?;
-    isophotal_semi_major(ellipse.a, ellipse.axis_ratio, n, m_tot, config.isophote_mag)
+    Some((n, m_tot))
 }
 
 /// A Legacy redshift column, or `None` where it holds the -99 that means absent.
@@ -180,11 +176,14 @@ pub fn galaxy_from_ls_dr10(doc: &Document, config: &HostGalaxyConfig) -> Option<
 
     let mut ellipse =
         Ellipse::from_tractor(shape_r, shape_e1, shape_e2, config.min_axis_arcsec).ok()?;
-    bounded_axis_ratio(ellipse.axis_ratio, config)?;
+    ellipse.axis_ratio = bounded_axis_ratio(ellipse.axis_ratio, config)?;
+    ellipse.b = ellipse.a * ellipse.axis_ratio;
 
     // A row that cannot be rescaled keeps R_e, undersized against NED-LVS D25.
-    let size_is_isophotal = match isophotal_semi_major_for(doc, &ellipse, config) {
-        Some(a25) => {
+    let size_is_isophotal = match sersic_profile(doc) {
+        Some((n, m_tot)) => {
+            let a25 =
+                isophotal_semi_major(ellipse.a, ellipse.axis_ratio, n, m_tot, config.isophote_mag)?;
             ellipse = ellipse.scaled_to_semi_major(a25, config.min_axis_arcsec);
             true
         }

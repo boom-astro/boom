@@ -345,10 +345,17 @@ pub struct LsstCandidate {
     pub snr_ap: Option<f32>,
     pub jdstarthist: Option<f64>,
     pub ndethist: Option<i32>,
+    pub observation_reason: Option<String>,
+    pub target_name: Option<String>,
 }
 
 impl LsstCandidate {
-    fn new(dia_source: DiaSource, dia_object: Option<DiaObject>) -> Result<Self, AlertError> {
+    fn new(
+        dia_source: DiaSource,
+        dia_object: Option<DiaObject>,
+        observation_reason: Option<String>,
+        target_name: Option<String>,
+    ) -> Result<Self, AlertError> {
         let jd = Epoch::from_mjd_tai(dia_source.midpoint_mjd_tai).to_jde_utc_days();
         let psf_flux = dia_source.psf_flux.ok_or(AlertError::MissingFluxPSF)?;
         let psf_flux_err = dia_source.psf_flux_err.ok_or(AlertError::MissingFluxPSF)?;
@@ -389,11 +396,10 @@ impl LsstCandidate {
 
         let (jdstarthist, ndethist) = match dia_object {
             Some(obj) => {
-                let jdstarthist = if obj.first_dia_source_mjd_tai > 0.0 {
-                    Some(Epoch::from_mjd_tai(obj.first_dia_source_mjd_tai).to_jde_utc_days())
-                } else {
-                    None
-                };
+                let jdstarthist = obj
+                    .first_dia_source_mjd_tai
+                    .filter(|mjd| *mjd > 0.0)
+                    .map(|mjd| Epoch::from_mjd_tai(mjd).to_jde_utc_days());
                 (jdstarthist, Some(obj.n_dia_sources))
             }
             None => (None, None),
@@ -414,6 +420,8 @@ impl LsstCandidate {
             snr_ap: Some(ap_flux_abs / ap_flux_err),
             jdstarthist,
             ndethist,
+            observation_reason,
+            target_name,
         })
     }
 }
@@ -723,10 +731,10 @@ pub struct DiaObject {
     pub y_science_flux_mean_err: Option<f32>,
     /// Time of the first diaSource, expressed as Modified Julian Date, International Atomic Time.
     #[serde(rename = "firstDiaSourceMjdTai")]
-    pub first_dia_source_mjd_tai: f64,
+    pub first_dia_source_mjd_tai: Option<f64>,
     /// Last time when non-forced DIASource was seen for this object.
     #[serde(rename = "lastDiaSourceMjdTai")]
-    pub last_dia_source_mjd_tai: f64,
+    pub last_dia_source_mjd_tai: Option<f64>,
     /// Total number of DiaSources associated with this DiaObject.
     #[serde(rename = "nDiaSources")]
     pub n_dia_sources: i32,
@@ -952,6 +960,8 @@ pub struct SsSource {
 pub struct LsstRawAvroAlert {
     #[serde(rename(deserialize = "diaSourceId"))]
     pub candid: i64,
+    pub observation_reason: Option<String>,
+    pub target_name: Option<String>,
     #[serde(rename(deserialize = "diaSource"))]
     pub dia_source: DiaSource,
     #[serde(rename = "prvDiaSources")]
@@ -1079,6 +1089,21 @@ struct AlertAuxForUpdate {
     #[serde(default)]
     pub fp_hists: Vec<LightcurveJdOnly>,
     pub version: Option<i32>,
+}
+
+fn first_detection_jd(
+    prv_candidates: &[LsstPrvCandidate],
+    existing_aux: Option<&AlertAuxForUpdate>,
+) -> Option<f64> {
+    let stored = existing_aux
+        .into_iter()
+        .flat_map(|aux| aux.prv_candidates.iter().map(|pc| pc.jd));
+    prv_candidates
+        .iter()
+        .map(|pc| pc.jd)
+        .chain(stored)
+        .filter(|jd| jd.is_finite())
+        .reduce(f64::min)
 }
 
 pub struct LsstAlertWorker {
@@ -1300,6 +1325,11 @@ impl AlertWorker for LsstAlertWorker {
             .await
             .inspect_err(as_error!("failed to create mongo client"))?;
 
+        // Warns rather than fails: a crossmatch catalog that is configured but
+        // empty produces zero matches on every alert, which is
+        // indistinguishable from a genuine non-match.
+        crate::catalogs::warn_on_empty_crossmatch_catalogs(&db, &xmatch_configs).await;
+
         let alert_collection = db.collection(&ALERT_COLLECTION);
         let alert_aux_collection = db.collection(&ALERT_AUX_COLLECTION);
         let alert_cutout_storage = config
@@ -1350,7 +1380,12 @@ impl AlertWorker for LsstAlertWorker {
             .await
             .inspect_err(as_error!())?;
 
-        let candidate = LsstCandidate::new(avro_alert.dia_source, avro_alert.dia_object)?;
+        let mut candidate = LsstCandidate::new(
+            avro_alert.dia_source,
+            avro_alert.dia_object,
+            avro_alert.observation_reason,
+            avro_alert.target_name,
+        )?;
 
         let candid = candidate.dia_source.candid;
         let object_id = candidate.object_id.clone();
@@ -1373,6 +1408,13 @@ impl AlertWorker for LsstAlertWorker {
         LsstPrvCandidate::sanitize_timeseries(&mut prv_candidates);
         LsstForcedPhot::sanitize_timeseries(&mut fp_hists);
 
+        let existing_alert_aux = self.get_existing_aux(&object_id).await?;
+
+        if candidate.jdstarthist.is_none() {
+            candidate.jdstarthist =
+                first_detection_jd(&prv_candidates, existing_alert_aux.as_ref());
+        }
+
         let alert = LsstAlert {
             candid,
             object_id: object_id.clone(),
@@ -1384,13 +1426,12 @@ impl AlertWorker for LsstAlertWorker {
             updated_at: now,
         };
 
-        let status = self
-            .format_and_insert_alert(candid, &alert, &self.alert_collection)
+        if self
+            .check_alert_exists(candid, &self.alert_collection)
             .await
-            .inspect_err(as_error!())?;
-
-        if let ProcessAlertStatus::Exists(_) = status {
-            return Ok(status);
+            .inspect_err(as_error!())?
+        {
+            return Ok(ProcessAlertStatus::Exists(candid));
         }
 
         let survey_matches = Some(
@@ -1406,8 +1447,6 @@ impl AlertWorker for LsstAlertWorker {
         // so this only ever folds a `Some` designation into the same write as the
         // lightcurve/aliases update, in every branch below (fresh insert, versioned update, and
         // both DB-only fallbacks) instead of issuing a separate round trip.
-        let existing_alert_aux = self.get_existing_aux(&object_id).await?;
-
         if let Some(existing) = existing_alert_aux {
             self.update_aux(
                 &object_id,
@@ -1466,15 +1505,20 @@ impl AlertWorker for LsstAlertWorker {
             }
         }
 
+        self.format_and_insert_cutouts(
+            candid,
+            &object_id,
+            avro_alert.cutout_science,
+            avro_alert.cutout_template,
+            avro_alert.cutout_difference,
+            &self.alert_cutout_storage,
+        )
+        .await
+        .inspect_err(as_error!())?;
+
+        // Inserted last: an alert in the database implies its aux and cutouts are there too.
         let status = self
-            .format_and_insert_cutouts(
-                candid,
-                &object_id,
-                avro_alert.cutout_science,
-                avro_alert.cutout_template,
-                avro_alert.cutout_difference,
-                &self.alert_cutout_storage,
-            )
+            .format_and_insert_alert(candid, &alert, &self.alert_collection)
             .await
             .inspect_err(as_error!())?;
 
@@ -1670,7 +1714,13 @@ mod tests {
         // validate the alert
         let alert: LsstRawAvroAlert = alert.unwrap();
         assert_eq!(alert.candid, candid);
-        let candidate = LsstCandidate::new(alert.dia_source, alert.dia_object).unwrap();
+        let candidate = LsstCandidate::new(
+            alert.dia_source,
+            alert.dia_object,
+            alert.observation_reason,
+            alert.target_name,
+        )
+        .unwrap();
         assert_eq!(candidate.object_id, object_id);
         assert!((candidate.dia_source.ra - ra).abs() < 1e-6);
         assert!((candidate.dia_source.dec - dec).abs() < 1e-6);

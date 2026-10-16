@@ -53,6 +53,10 @@ jobs:
       BOOM_BABAMUL__OAUTH__ORCID__CLIENT_ID: ${{ secrets.BOOM_BABAMUL__OAUTH__ORCID__CLIENT_ID }}
       BOOM_BABAMUL__OAUTH__ORCID__CLIENT_SECRET: ${{ secrets.BOOM_BABAMUL__OAUTH__ORCID__CLIENT_SECRET }}
       BOOM_DATABASE__PASSWORD: ${{ secrets.BOOM_DATABASE__PASSWORD }}
+      BOOM_MILVUS__ENABLED: ${{ vars.BOOM_MILVUS__ENABLED }}
+      BOOM_MILVUS__USERNAME: ${{ vars.BOOM_MILVUS__USERNAME }}
+      BOOM_MILVUS__PASSWORD: ${{ secrets.BOOM_MILVUS__PASSWORD }}
+      BOOM_MILVUS__DATABASE: ${{ vars.BOOM_MILVUS__DATABASE }}
       BOOM_API__DOMAIN: ${{ vars.BOOM_API__DOMAIN }}
       BOOM_API__AUTH__SECRET_KEY: ${{ secrets.BOOM_API__AUTH__SECRET_KEY }}
       BOOM_API__AUTH__ADMIN_PASSWORD: ${{ secrets.BOOM_API__AUTH__ADMIN_PASSWORD }}
@@ -100,6 +104,12 @@ jobs:
       # real fix is broker-side ACLs on WINTER's end.
       BOOM_KAFKA__CONSUMER__WINTER__SERVER: ${{ vars.BOOM_KAFKA__CONSUMER__ZTF__SERVER }}
       BOOM_KAFKA__CONSUMER__WINTER__GROUP_ID: ${{ vars.BOOM_KAFKA__CONSUMER__WINTER__GROUP_ID }}
+      BOOM_KAFKA__CONSUMER__DECAM__SERVER: ${{ vars.BOOM_KAFKA__CONSUMER__DECAM__SERVER }}
+      BOOM_KAFKA__CONSUMER__DECAM__GROUP_ID: ${{ vars.BOOM_KAFKA__CONSUMER__DECAM__GROUP_ID }}
+      BOOM_KAFKA__CONSUMER__DECAM__SECURITY_PROTOCOL: ${{ vars.BOOM_KAFKA__CONSUMER__DECAM__SECURITY_PROTOCOL }}
+      BOOM_KAFKA__CONSUMER__DECAM__USERNAME: ${{ vars.BOOM_KAFKA__CONSUMER__DECAM__USERNAME }}
+      BOOM_KAFKA__CONSUMER__DECAM__PASSWORD: ${{ secrets.BOOM_KAFKA__CONSUMER__DECAM__PASSWORD }}
+      BOOM_KAFKA__CONSUMER__DECAM__SSL_CA_FILE: ${{ vars.BOOM_KAFKA__CONSUMER__DECAM__SSL_CA_FILE }}
       KAFKA_EXTERNAL_HOST: ${{ vars.KAFKA_EXTERNAL_HOST }}
       SMTP_SERVER: ${{ vars.SMTP_SERVER }}
       SMTP_FROM_ADDRESS: ${{ vars.SMTP_FROM_ADDRESS }}
@@ -197,13 +207,24 @@ jobs:
           else
             echo "args=" >> "$GITHUB_OUTPUT"
           fi
+      - name: Select DECam compose profile
+        id: decam_profile
+        run: |
+          if [ -n "${BOOM_KAFKA__CONSUMER__DECAM__SERVER}" ]; then
+            echo "Adding the decam profile (BOOM_KAFKA__CONSUMER__DECAM__SERVER is set)"
+            echo "args=--profile decam" >> "$GITHUB_OUTPUT"
+          else
+            echo "args=" >> "$GITHUB_OUTPUT"
+          fi
       - run: >
           docker compose --profile prod
+          ${{ steps.decam_profile.outputs.args }}
           -f docker-compose.yaml
           ${{ steps.gpu_compose.outputs.args }}
           build
       - run: >
           docker compose --profile prod
+          ${{ steps.decam_profile.outputs.args }}
           -f docker-compose.yaml
           -f docker-compose.cutouts-mongo.yaml
           ${{ steps.gpu_compose.outputs.args }} up -d

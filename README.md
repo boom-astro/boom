@@ -284,6 +284,27 @@ gpu:
 
 See [docs/gpu.md](docs/gpu.md) for container-vs-native details, troubleshooting, and version notes.
 
+### Milvus vector database (optional)
+
+BOOM can store the CIDER fusion model's embeddings in a
+[Milvus](https://milvus.io) vector database, so that objects can be retrieved by
+similarity. This is disabled by default; deployments that don't use it need no
+configuration.
+
+Enable it with `BOOM_MILVUS__ENABLED=true`. One vector database serves the whole
+project, so `config.yaml` already names it. BOOM connects with an administrative
+account, so only the username and password come from the environment — they go
+in `.env` (gitignored) or the deployment's secret store, never in `config.yaml`
+or `.env.example`, both of which are committed. Once set, verify the connection
+without writing any data:
+
+```bash
+cargo run --bin milvus_check
+```
+
+See [docs/milvus.md](docs/milvus.md) for the collection schema and how each
+deployment supplies those settings.
+
 ### Start services for local development
 
 1. Install lfs and pull the large files:
@@ -403,7 +424,7 @@ cargo run --release --bin scheduler ztf
 
 ### Using Docker
 
-In production, BOOM runs the default services alongside a set of dedicated services defined in `docker-compose.yaml` under the `prod` profile: `api`, `consumer-ztf-public`, `consumer-ztf-partnership`, `consumer-ztf-caltech`, `consumer-lsst`, `consumer-winter`, `scheduler-ztf`, `scheduler-lsst`, `scheduler-winter`, and `frontend`. The Rust services each start their binary automatically at container startup; `frontend` builds the web app and serves it with nginx.
+In production, BOOM runs the default services alongside a set of dedicated services defined in `docker-compose.yaml` under the `prod` profile: `api`, `consumer-ztf-public`, `consumer-ztf-partnership`, `consumer-ztf-caltech`, `consumer-lsst`, `consumer-winter`, `scheduler-ztf`, `scheduler-lsst`, `scheduler-winter`, and `frontend`. `consumer-decam` and `scheduler-decam` sit in a separate `decam` profile, which the deploy workflow adds only when `BOOM_KAFKA__CONSUMER__DECAM__SERVER` is set. The Rust services each start their binary automatically at container startup; `frontend` builds the web app and serves it with nginx.
 
 Bring up the full prod stack with:
 

@@ -66,11 +66,15 @@ services:
     <<: *mongo_cutouts_env
   consumer-winter:
     <<: *mongo_cutouts_env
+  consumer-decam:
+    <<: *mongo_cutouts_env
   scheduler-ztf:
     <<: *mongo_cutouts_env
   scheduler-lsst:
     <<: *mongo_cutouts_env
   scheduler-winter:
+    <<: *mongo_cutouts_env
+  scheduler-decam:
     <<: *mongo_cutouts_env
   # Dev-only single ZTF consumer, defined in docker-compose.override.yaml.
   # Gated to the dev profile so it isn't an orphan (no image/build) in prod,

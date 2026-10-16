@@ -8,9 +8,11 @@ mod tests {
     use boom::api::db::get_test_db_api;
     use boom::api::routes;
     use boom::api::test_utils::{
-        create_test_catalog, delete_test_catalog, get_admin_auth, read_json_response,
+        create_test_catalog, create_test_user, delete_test_catalog, delete_test_user,
+        get_admin_auth, read_json_response, test_config_with_crossmatch,
     };
-    use mongodb::bson::doc;
+    use boom::conf::AppConfig;
+    use mongodb::bson::{doc, Document};
     use mongodb::{Collection, Database};
 
     /// Test GET /catalogs
@@ -23,6 +25,7 @@ mod tests {
             App::new()
                 .app_data(web::Data::new(database.clone()))
                 .app_data(web::Data::new(auth))
+                .app_data(web::Data::new(AppConfig::from_test_config().unwrap()))
                 .wrap(from_fn(auth_middleware))
                 .service(routes::queries::count::post_count_query),
         )
@@ -55,6 +58,7 @@ mod tests {
             App::new()
                 .app_data(web::Data::new(database.clone()))
                 .app_data(web::Data::new(auth))
+                .app_data(web::Data::new(AppConfig::from_test_config().unwrap()))
                 .wrap(from_fn(auth_middleware))
                 .service(routes::queries::count::post_estimated_count_query),
         )
@@ -85,6 +89,7 @@ mod tests {
             App::new()
                 .app_data(web::Data::new(database.clone()))
                 .app_data(web::Data::new(auth))
+                .app_data(web::Data::new(AppConfig::from_test_config().unwrap()))
                 .wrap(from_fn(auth_middleware))
                 .service(routes::queries::find::post_find_query),
         )
@@ -168,6 +173,9 @@ mod tests {
             App::new()
                 .app_data(web::Data::new(database.clone()))
                 .app_data(web::Data::new(auth))
+                .app_data(web::Data::new(test_config_with_crossmatch(&[
+                    &test_catalog_name,
+                ])))
                 .wrap(from_fn(auth_middleware))
                 .service(routes::queries::cone_search::post_cone_search_query),
         )
@@ -223,6 +231,7 @@ mod tests {
             App::new()
                 .app_data(web::Data::new(database.clone()))
                 .app_data(web::Data::new(auth))
+                .app_data(web::Data::new(AppConfig::from_test_config().unwrap()))
                 .wrap(from_fn(auth_middleware))
                 .service(routes::queries::pipeline::post_pipeline_query),
         )
@@ -280,6 +289,7 @@ mod tests {
             App::new()
                 .app_data(web::Data::new(database.clone()))
                 .app_data(web::Data::new(auth.clone()))
+                .app_data(web::Data::new(AppConfig::from_test_config().unwrap()))
                 .wrap(from_fn(auth_middleware))
                 .service(routes::users::post_user)
                 .service(routes::users::patch_watchlist_access)
@@ -353,5 +363,241 @@ mod tests {
             .insert_header(("Authorization", format!("Bearer {}", admin_token)))
             .to_request();
         test::call_service(&app, req).await;
+    }
+
+    #[actix_rt::test]
+    async fn test_non_admin_queries_are_limited_to_queryable_catalogs() {
+        let database: Database = get_test_db_api().await;
+        let (auth, admin_token) = get_admin_auth(&database).await;
+        let (user, user_token) = create_test_user(&database, &auth, &[]).await;
+        let other_catalog = create_test_catalog(&database).await;
+        database.create_collection("ZTF_alerts").await.ok();
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(database.clone()))
+                .app_data(web::Data::new(auth))
+                .app_data(web::Data::new(AppConfig::from_test_config().unwrap()))
+                .wrap(from_fn(auth_middleware))
+                .service(routes::queries::find::post_find_query)
+                .service(routes::queries::count::post_count_query)
+                .service(routes::queries::count::post_estimated_count_query)
+                .service(routes::queries::pipeline::post_pipeline_query),
+        )
+        .await;
+        let query_as = |token: &str, route: &str, catalog_name: &str| {
+            test::TestRequest::post()
+                .uri(&format!("/queries/{}", route))
+                .insert_header(("Authorization", format!("Bearer {}", token)))
+                .set_json(serde_json::json!({
+                    "catalog_name": catalog_name,
+                    "filter": {},
+                    "limit": 1,
+                    "pipeline": [{ "$limit": 1 }],
+                }))
+                .to_request()
+        };
+
+        for route in ["find", "count", "estimated_count", "pipeline"] {
+            let resp = test::call_service(&app, query_as(&user_token, route, &other_catalog)).await;
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{route}");
+            let resp = read_json_response(resp).await;
+            assert_eq!(
+                resp["message"],
+                format!("Catalog {} does not exist", other_catalog)
+            );
+            for catalog_name in ["LSPSC", "ZTF_alerts"] {
+                let resp =
+                    test::call_service(&app, query_as(&user_token, route, catalog_name)).await;
+                assert_eq!(resp.status(), StatusCode::OK, "{route} on {catalog_name}");
+            }
+            let resp =
+                test::call_service(&app, query_as(&admin_token, route, &other_catalog)).await;
+            assert_eq!(resp.status(), StatusCode::OK, "{route} as admin");
+        }
+
+        delete_test_catalog(&database, &other_catalog).await;
+        delete_test_user(&database, &user).await;
+    }
+
+    #[actix_rt::test]
+    async fn test_cone_search_is_limited_to_catalogs_with_coordinates() {
+        let database: Database = get_test_db_api().await;
+        let (auth, admin_token) = get_admin_auth(&database).await;
+        let (user, user_token) = create_test_user(&database, &auth, &[]).await;
+        let other_catalog = create_test_catalog(&database).await;
+        let reference_catalog = create_test_catalog(&database).await;
+        let watchlist = format!("watchlist_cone_{}", uuid::Uuid::new_v4().simple());
+        database
+            .collection(&watchlist)
+            .insert_one(doc! { "test_field": "test_value" })
+            .await
+            .unwrap();
+        database.create_collection("ZTF_alerts").await.ok();
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(database.clone()))
+                .app_data(web::Data::new(auth))
+                .app_data(web::Data::new(test_config_with_crossmatch(&[
+                    &reference_catalog,
+                ])))
+                .wrap(from_fn(auth_middleware))
+                .service(routes::queries::cone_search::post_cone_search_query),
+        )
+        .await;
+        let cone_search_as = |token: &str, catalog_name: &str| {
+            test::TestRequest::post()
+                .uri("/queries/cone_search")
+                .insert_header(("Authorization", format!("Bearer {}", token)))
+                .set_json(serde_json::json!({
+                    "catalog_name": catalog_name,
+                    "object_coordinates": { "test": [10.0, 20.0] },
+                    "radius": 1.0,
+                    "unit": "Degrees",
+                }))
+                .to_request()
+        };
+
+        for token in [&admin_token, &user_token] {
+            for catalog_name in [other_catalog.as_str(), "ZTF_alerts_cutouts"] {
+                let resp = test::call_service(&app, cone_search_as(token, catalog_name)).await;
+                assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{catalog_name}");
+                let resp = read_json_response(resp).await;
+                assert_eq!(
+                    resp["message"],
+                    format!("Catalog {} does not support cone search", catalog_name)
+                );
+            }
+            for catalog_name in [reference_catalog.as_str(), "ZTF_alerts"] {
+                let resp = test::call_service(&app, cone_search_as(token, catalog_name)).await;
+                assert_eq!(resp.status(), StatusCode::OK, "{catalog_name}");
+            }
+        }
+        let resp = test::call_service(&app, cone_search_as(&user_token, &reference_catalog)).await;
+        let resp = read_json_response(resp).await;
+        assert_eq!(resp["data"]["test"].as_array().unwrap().len(), 1);
+
+        let resp = test::call_service(&app, cone_search_as(&user_token, &watchlist)).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let resp = test::call_service(&app, cone_search_as(&admin_token, &watchlist)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        delete_test_catalog(&database, &other_catalog).await;
+        delete_test_catalog(&database, &reference_catalog).await;
+        delete_test_catalog(&database, &watchlist).await;
+        delete_test_user(&database, &user).await;
+    }
+
+    #[actix_rt::test]
+    async fn test_pipeline_cannot_join_collections_the_user_cannot_query() {
+        let database: Database = get_test_db_api().await;
+        let (auth, admin_token) = get_admin_auth(&database).await;
+        let (user, user_token) = create_test_user(&database, &auth, &[]).await;
+        let other_catalog = create_test_catalog(&database).await;
+        database.create_collection("ZTF_alerts").await.ok();
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(database.clone()))
+                .app_data(web::Data::new(auth))
+                .app_data(web::Data::new(AppConfig::from_test_config().unwrap()))
+                .wrap(from_fn(auth_middleware))
+                .service(routes::queries::pipeline::post_pipeline_query),
+        )
+        .await;
+        let pipeline_as = |token: &str, pipeline: serde_json::Value| {
+            test::TestRequest::post()
+                .uri("/queries/pipeline")
+                .insert_header(("Authorization", format!("Bearer {}", token)))
+                .set_json(serde_json::json!({ "catalog_name": "ZTF_alerts", "pipeline": pipeline }))
+                .to_request()
+        };
+        let lookup = |from: &str| {
+            serde_json::json!({
+                "$lookup": { "from": from, "pipeline": [{ "$limit": 1 }], "as": "joined" }
+            })
+        };
+
+        for pipeline in [
+            serde_json::json!([lookup(&other_catalog)]),
+            serde_json::json!([{ "$unionWith": other_catalog }]),
+            serde_json::json!([{ "$lookup": {
+                "from": "LSPSC",
+                "pipeline": [{
+                    "$unionWith": { "coll": "LSPSC", "pipeline": [lookup(&other_catalog)] }
+                }],
+                "as": "joined",
+            } }]),
+            serde_json::json!([{ "$facet": { "joined": [lookup(&other_catalog)] } }]),
+        ] {
+            let resp = test::call_service(&app, pipeline_as(&user_token, pipeline.clone())).await;
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{pipeline}");
+            let resp = read_json_response(resp).await;
+            assert_eq!(
+                resp["message"],
+                format!("Catalog {} does not exist", other_catalog)
+            );
+        }
+
+        let pipeline = serde_json::json!([{ "$limit": 1 }, lookup("LSPSC")]);
+        let resp = test::call_service(&app, pipeline_as(&user_token, pipeline)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let pipeline = serde_json::json!([{ "$lookup": {
+            "from": { "db": "admin", "coll": "LSPSC" }, "pipeline": [], "as": "joined",
+        } }]);
+        let resp = test::call_service(&app, pipeline_as(&user_token, pipeline)).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        let pipeline = serde_json::json!([{ "$limit": 1 }, lookup(&other_catalog)]);
+        let resp = test::call_service(&app, pipeline_as(&admin_token, pipeline)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let resp = test::call_service(
+            &app,
+            pipeline_as(&admin_token, serde_json::json!([{ "$unionWith": "users" }])),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        delete_test_catalog(&database, &other_catalog).await;
+        delete_test_user(&database, &user).await;
+    }
+
+    #[actix_rt::test]
+    async fn test_pipeline_cannot_write() {
+        let database: Database = get_test_db_api().await;
+        let (auth, admin_token) = get_admin_auth(&database).await;
+        let (user, user_token) = create_test_user(&database, &auth, &[]).await;
+        let target = create_test_catalog(&database).await;
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(database.clone()))
+                .app_data(web::Data::new(auth))
+                .app_data(web::Data::new(AppConfig::from_test_config().unwrap()))
+                .wrap(from_fn(auth_middleware))
+                .service(routes::queries::pipeline::post_pipeline_query),
+        )
+        .await;
+
+        for token in [&admin_token, &user_token] {
+            for stage in [
+                serde_json::json!({ "$out": target }),
+                serde_json::json!({ "$merge": { "into": target } }),
+            ] {
+                let req = test::TestRequest::post()
+                    .uri("/queries/pipeline")
+                    .insert_header(("Authorization", format!("Bearer {}", token)))
+                    .set_json(serde_json::json!({
+                        "catalog_name": "LSPSC",
+                        "pipeline": [{ "$limit": 1 }, stage],
+                    }))
+                    .to_request();
+                let resp = test::call_service(&app, req).await;
+                assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{stage}");
+            }
+        }
+        let target_collection: Collection<Document> = database.collection(&target);
+        assert_eq!(target_collection.count_documents(doc! {}).await.unwrap(), 1);
+
+        delete_test_catalog(&database, &target).await;
+        delete_test_user(&database, &user).await;
     }
 }

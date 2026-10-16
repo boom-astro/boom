@@ -4,7 +4,7 @@ use crate::utils::enums::Survey;
 use crate::utils::worker::WorkerCmd;
 use crate::{
     conf,
-    scheduler::record_worker_retry,
+    scheduler::{count_processed_alert, record_worker_retry},
     utils::{
         cutouts::{CutoutStorage, CutoutStorageError},
         db::mongify,
@@ -21,9 +21,7 @@ use crate::{
 };
 
 use std::collections::HashSet;
-use std::{
-    collections::HashMap, fmt::Debug, future::Future, io::Read, sync::LazyLock, time::Instant,
-};
+use std::{collections::HashMap, fmt::Debug, future::Future, io::Read, sync::LazyLock};
 
 use apache_avro::{from_avro_datum, from_value, Schema};
 use futures::future::join_all;
@@ -38,7 +36,7 @@ use opentelemetry::{
 use redis::AsyncCommands;
 use serde::{de::Deserializer, Deserialize, Serialize};
 use tokio::sync::mpsc;
-use tracing::{debug, error, info, instrument, trace, warn};
+use tracing::{debug, error, instrument, trace, warn};
 use uuid::Uuid;
 
 const SCHEMA_REGISTRY_MAGIC_BYTE: u8 = 0;
@@ -257,6 +255,8 @@ pub enum AlertError {
     MissingFluxPSF,
     #[error("missing psf flux error")]
     MissingFluxPSFError,
+    #[error("non-finite psf flux")]
+    NonFiniteFluxPSF,
     #[error("missing ap flux")]
     MissingFluxAperture,
     #[error("missing ap flux error")]
@@ -273,6 +273,8 @@ pub enum AlertError {
     DarkFrame,
     #[error("missing diffmaglim value")]
     MissingDiffmaglim,
+    #[error("invalid diffmaglim value: {0}")]
+    InvalidDiffmaglim(f32),
     #[error("cutout storage error")]
     CutoutStorageError(#[from] CutoutStorageError),
     #[error("invalid timeseries input: {0}")]
@@ -1073,6 +1075,21 @@ pub trait AlertWorker {
             })?;
         Ok(())
     }
+    #[instrument(skip(self, alert_collection), err)]
+    async fn check_alert_exists<T>(
+        &self,
+        candid: i64,
+        alert_collection: &Collection<T>,
+    ) -> Result<bool, AlertError>
+    where
+        T: Send + Sync + Serialize,
+    {
+        let alert_exists = alert_collection
+            .count_documents(doc! { "_id": candid })
+            .await?
+            > 0;
+        Ok(alert_exists)
+    }
     #[instrument(skip(self, alert_aux_collection), err)]
     async fn check_alert_aux_exists<T>(
         &self,
@@ -1106,7 +1123,7 @@ pub trait AlertWorker {
         cutout_template: Vec<u8>,
         cutout_difference: Vec<u8>,
         cutout_storage: &CutoutStorage,
-    ) -> Result<ProcessAlertStatus, AlertError> {
+    ) -> Result<(), AlertError> {
         let cutouts = AlertCutout {
             candid: candid,
             cutout_science,
@@ -1114,10 +1131,7 @@ pub trait AlertWorker {
             cutout_difference,
         };
         match cutout_storage.insert_cutouts(cutouts).await {
-            Ok(_) => Ok(ProcessAlertStatus::Added(candid)),
-            Err(CutoutStorageError::CutoutAlreadyExists(_)) => {
-                Ok(ProcessAlertStatus::Exists(candid))
-            }
+            Ok(_) | Err(CutoutStorageError::CutoutAlreadyExists(_)) => Ok(()),
             Err(e) => Err(AlertError::from(e)),
         }
     }
@@ -1298,19 +1312,6 @@ pub trait AlertWorker {
     async fn process_alert(&mut self, avro_bytes: &[u8]) -> Result<ProcessAlertStatus, AlertError>;
 }
 
-#[instrument(skip_all)]
-fn report_progress(start: &Instant, stream: &Survey, count: u64, message: &str) {
-    let elapsed = start.elapsed().as_secs();
-    info!(
-        ?stream,
-        count,
-        elapsed,
-        average_rate = count as f64 / elapsed as f64,
-        "{}",
-        message,
-    );
-}
-
 pub fn alert_temp_queue_name(input_queue_name: &str) -> String {
     format!("{}_temp", input_queue_name)
 }
@@ -1463,9 +1464,7 @@ pub async fn run_alert_worker<T: AlertWorker>(
 
     let command_interval: usize = worker_config.command_interval;
     let mut command_check_countdown = command_interval;
-    let mut count = 0;
 
-    let start = std::time::Instant::now();
     let worker_id_attr = KeyValue::new("worker.id", worker_id.to_string());
     let survey_attr = KeyValue::new("survey", survey.to_string());
     let active_attrs = [worker_id_attr.clone(), survey_attr.clone()];
@@ -1555,13 +1554,9 @@ pub async fn run_alert_worker<T: AlertWorker>(
 
         ACTIVE.add(-1, &active_attrs);
         ALERT_PROCESSED.add(1, attributes);
+        count_processed_alert();
 
         handle_result?;
-        if count > 0 && count % 1000 == 0 {
-            report_progress(&start, &survey, count, "progress");
-        }
-        count += 1;
     }
-    report_progress(&start, &survey, count, "summary");
     Ok(())
 }

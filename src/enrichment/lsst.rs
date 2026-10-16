@@ -505,7 +505,7 @@ impl LsstEnrichmentWorker {
             .fp_hists
             .iter()
             .filter(|p| p.jd <= alert.candidate.jd)
-            .filter_map(|p| p.to_photometry_mag(Some(3.0)))
+            .filter_map(|p| p.to_photometry_mag(None))
             .collect();
 
         // lightcurve is prv_candidates + fp_hists, no need for parse_photometry here
@@ -543,7 +543,7 @@ impl LsstEnrichmentWorker {
                     .fp_hists
                     .iter()
                     .filter(|p| p.jd <= alert.candidate.jd)
-                    .filter_map(|p| p.to_photometry_mag(Some(3.0)))
+                    .filter_map(|p| p.to_photometry_mag(None))
                     .collect();
                 let mut ztf_lightcurve = [ztf_prv_candidates, ztf_fp_hists].concat();
                 prepare_photometry(&mut ztf_lightcurve);
@@ -564,6 +564,12 @@ impl LsstEnrichmentWorker {
                 .prv_candidates
                 .iter()
                 .map(|p| (p.jd, p.flux.filter(|f| !f.is_nan()).map(|f| f < 0.0))),
+            // magpsf is set only above SNT, so it marks a forced detection.
+            alert
+                .fp_hists
+                .iter()
+                .filter(|p| p.magpsf.is_some())
+                .map(|p| p.jd),
             alert.candidate.jd,
             EPISODE_GAP_DAYS,
         );

@@ -4,11 +4,11 @@ use crate::api::routes::babamul::{BabamulAcl, BabamulSurvey, BabamulUser};
 use crate::utils::db::count_alerts_for_night;
 use crate::utils::enums::Survey;
 use actix_web::{get, web, HttpResponse};
-use chrono::{NaiveDate, Utc};
+use chrono::{DateTime, Duration, NaiveDate, Utc};
 use futures::{StreamExt, TryStreamExt};
 use mongodb::{bson::doc, Collection, Database};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use utoipa::ToSchema;
 
 /// MongoDB cache document storing the alert count for a single survey/night,
@@ -37,6 +37,15 @@ pub struct NightlyStat {
     pub decam: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub winter: Option<u64>,
+    /// The night of each requested survey, keyed like the counts.
+    pub windows: BTreeMap<String, NightWindow>,
+}
+
+/// An observing night, from local noon to local noon at the observatory.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct NightWindow {
+    pub start: DateTime<Utc>,
+    pub end: DateTime<Utc>,
 }
 
 /// Query parameters for the nightly stats endpoint: the date range (inclusive)
@@ -140,7 +149,7 @@ pub async fn get_nightly_stats(
     let mut d = start_date;
     while d <= end_date {
         all_dates.push(d);
-        d += chrono::Duration::days(1);
+        d += Duration::days(1);
     }
 
     // Read all relevant cache entries in a single query
@@ -263,6 +272,13 @@ pub async fn get_nightly_stats(
                 lsst: count(Survey::Lsst),
                 decam: count(Survey::Decam),
                 winter: count(Survey::Winter),
+                windows: surveys
+                    .iter()
+                    .map(|survey| {
+                        let (start, end) = survey.night_window(date);
+                        (survey.as_str().to_lowercase(), NightWindow { start, end })
+                    })
+                    .collect(),
             }
         })
         .collect();
@@ -281,7 +297,7 @@ mod tests {
     #[test]
     fn test_cache_duration() {
         let today = NaiveDate::from_ymd_opt(2024, 6, 15).unwrap();
-        let days_ago = |n: i64| today - chrono::Duration::days(n);
+        let days_ago = |n: i64| today - Duration::days(n);
 
         // 0 days ago -> 30 min
         assert_eq!(cache_duration_secs(&days_ago(0), &today), 1800.0);
