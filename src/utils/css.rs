@@ -1,8 +1,9 @@
 //! Catalina Sky Survey tracklets, as archived in the PDS bundle.
 //!
 //! CSS publishes the output of its own moving-object search, not just images:
-//! `.mtds` files hold the tracklets its pipeline built, `.dets` the ones that
-//! survived validation and `.rjct` the ones that did not. Reading them lets a
+//! `.mtds` files hold the tracklets its pipeline built, `.dets` the ones put to
+//! validation, and `.rjct` and `.fail` the ones validation turned down, which
+//! CSS never reported to the MPC. Reading them lets a
 //! search link CSS tracklets alongside tracklets found here, which reaches
 //! objects neither survey sees often enough on its own.
 //!
@@ -11,6 +12,41 @@
 
 use crate::utils::linking::{fit_tracklet, Detection, Tracklet, TrackletConfig};
 use crate::utils::sso_geometry::Site;
+use std::collections::HashSet;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum Products {
+    Unreported,
+    Dets,
+    Mtds,
+}
+
+impl Products {
+    pub fn extensions(self) -> &'static [&'static str] {
+        match self {
+            Products::Unreported => &["dets", "rjct", "fail"],
+            Products::Dets => &["dets"],
+            Products::Mtds => &["mtds"],
+        }
+    }
+
+    pub fn tracklet_file(self) -> &'static str {
+        match self {
+            Products::Mtds => "mtds",
+            Products::Unreported | Products::Dets => "dets",
+        }
+    }
+}
+
+/// Tracklet numbers named in a `.rjct` or `.fail` file, which are MPC
+/// 80-column lines.
+pub fn unreported_tracklets(text: &str) -> HashSet<String> {
+    text.lines()
+        .filter(|line| line.len() >= 80)
+        .filter_map(|line| line.get(8..12))
+        .map(str::to_string)
+        .collect()
+}
 
 /// One night's tracklets from one CSS field.
 #[derive(Debug, Clone)]
@@ -35,6 +71,7 @@ pub fn parse_dets(
     text: &str,
     mpc_code: &str,
     cfg: &TrackletConfig,
+    keep: Option<&HashSet<String>>,
 ) -> Result<CssTracklets, String> {
     let site = Site::from_mpc_code(mpc_code)
         .ok_or_else(|| format!("unknown MPC observatory code {mpc_code}"))?;
@@ -67,7 +104,7 @@ pub fn parse_dets(
         ) else {
             continue;
         };
-        if source_id == 0 {
+        if source_id == 0 || keep.is_some_and(|keep| !keep.contains(f[0])) {
             continue;
         }
         // RA is in hours here, Dec in degrees; confirmed against the matching
@@ -151,8 +188,8 @@ pub struct Fetched {
     pub fetched: usize,
 }
 
-/// Download one telescope-night's `.mtds` files into `dir`, skipping any
-/// already there.
+/// Download one telescope-night's files with `extensions` into `dir`, skipping
+/// any already there.
 ///
 /// A night absent from the archive returns `found: 0` rather than an error:
 /// PDS ingest lags observing by days to weeks, so most nights a nightly job
@@ -164,6 +201,7 @@ pub async fn fetch_night(
     mpc_code: &str,
     night: chrono::NaiveDate,
     dir: &std::path::Path,
+    extensions: &[&str],
 ) -> Result<Fetched, String> {
     let prefix = archive_prefix(mpc_code, night);
     let mut keys = Vec::new();
@@ -186,7 +224,7 @@ pub async fn fetch_night(
             .text()
             .await
             .map_err(|e| format!("listing {prefix}: {e}"))?;
-        keys.extend(mtds_keys(&listing));
+        keys.extend(keys_with(&listing, extensions));
         token = next_token(&listing);
         if token.is_none() {
             break;
@@ -238,16 +276,19 @@ fn next_token(listing: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// The `.mtds` keys in an S3 listing.
+/// The keys in an S3 listing with one of `extensions`.
 ///
 /// Scanned rather than parsed as XML: the listing has one element worth
 /// reading and a parser would be a dependency for nothing.
-fn mtds_keys(listing: &str) -> Vec<String> {
+fn keys_with(listing: &str, extensions: &[&str]) -> Vec<String> {
     listing
         .split("<Key>")
         .skip(1)
         .filter_map(|chunk| chunk.split("</Key>").next())
-        .filter(|key| key.ends_with(".mtds"))
+        .filter(|key| {
+            key.rsplit_once('.')
+                .is_some_and(|(_, ext)| extensions.contains(&ext))
+        })
         .map(str::to_string)
         .collect()
 }
@@ -274,7 +315,7 @@ G96_20250930_2B_FHAUM2_01_0002.arch.fz 2460948.73249624
     #[test]
     fn test_ra_is_read_as_hours() {
         let parsed =
-            parse_dets(SAMPLE, "G96", &TrackletConfig::default()).expect("the sample parses");
+            parse_dets(SAMPLE, "G96", &TrackletConfig::default(), None).expect("the sample parses");
         let first = &parsed.detections[0];
         let mpcd_ra = (23.0 + 58.0 / 60.0 + 15.39 / 3600.0) * 15.0;
         let mpcd_dec = 42.0 + 46.0 / 60.0 + 25.9 / 3600.0;
@@ -289,7 +330,7 @@ G96_20250930_2B_FHAUM2_01_0002.arch.fz 2460948.73249624
     #[test]
     fn test_groups_detections_into_tracklets() {
         let parsed =
-            parse_dets(SAMPLE, "G96", &TrackletConfig::default()).expect("the sample parses");
+            parse_dets(SAMPLE, "G96", &TrackletConfig::default(), None).expect("the sample parses");
         assert_eq!(parsed.detections.len(), 4);
         assert_eq!(parsed.tracklets.len(), 2);
         assert!(parsed.tracklets.iter().all(|t| t.ids.len() == 2));
@@ -300,11 +341,11 @@ G96_20250930_2B_FHAUM2_01_0002.arch.fz 2460948.73249624
     #[test]
     fn test_the_site_is_the_telescope_that_observed() {
         let parsed =
-            parse_dets(SAMPLE, "G96", &TrackletConfig::default()).expect("the sample parses");
+            parse_dets(SAMPLE, "G96", &TrackletConfig::default(), None).expect("the sample parses");
         assert_eq!(parsed.site, crate::utils::sso_geometry::MT_LEMMON);
         assert_ne!(parsed.site, crate::utils::sso_geometry::ZTF);
         assert!(
-            parse_dets(SAMPLE, "ZZZ", &TrackletConfig::default()).is_err(),
+            parse_dets(SAMPLE, "ZZZ", &TrackletConfig::default(), None).is_err(),
             "an unknown code is an error"
         );
     }
@@ -313,7 +354,7 @@ G96_20250930_2B_FHAUM2_01_0002.arch.fz 2460948.73249624
     #[test]
     fn test_detection_ids_are_unique_across_a_night() {
         let parsed =
-            parse_dets(SAMPLE, "G96", &TrackletConfig::default()).expect("the sample parses");
+            parse_dets(SAMPLE, "G96", &TrackletConfig::default(), None).expect("the sample parses");
         let unique: std::collections::HashSet<i64> =
             parsed.detections.iter().map(|d| d.id).collect();
         assert_eq!(unique.len(), parsed.detections.len());
@@ -330,7 +371,7 @@ G96_20250930_2B_FHAUM2_01_0002.arch.fz 2460948.73249624
     #[test]
     fn test_rates_are_on_the_sky() {
         let parsed =
-            parse_dets(SAMPLE, "G96", &TrackletConfig::default()).expect("the sample parses");
+            parse_dets(SAMPLE, "G96", &TrackletConfig::default(), None).expect("the sample parses");
         let t = &parsed.tracklets[0];
         let dt = 2460948.73249624 - 2460948.72339281;
         let expected_dec = (42.76982 - 42.77386) / dt;
@@ -373,9 +414,16 @@ G96_20250930_2B_FHAUM2_01_0002.arch.fz 2460948.73249624
             <Contents><Key>a/b/G96_1.rjct</Key></Contents>\
             <Contents><Key>a/b/G96_2.mtds</Key></Contents>\
             </ListBucketResult>";
-        assert_eq!(mtds_keys(listing), vec!["a/b/G96_1.mtds", "a/b/G96_2.mtds"]);
-        assert!(mtds_keys("").is_empty());
-        assert!(mtds_keys("<ListBucketResult></ListBucketResult>").is_empty());
+        assert_eq!(
+            keys_with(listing, &["mtds"]),
+            vec!["a/b/G96_1.mtds", "a/b/G96_2.mtds"]
+        );
+        assert_eq!(
+            keys_with(listing, Products::Unreported.extensions()),
+            vec!["a/b/G96_1.rjct"]
+        );
+        assert!(keys_with("", &["mtds"]).is_empty());
+        assert!(keys_with("<ListBucketResult></ListBucketResult>", &["mtds"]).is_empty());
     }
 
     #[test]
@@ -389,7 +437,25 @@ G96_20250930_2B_FHAUM2_01_0002.arch.fz 2460948.73249624
     }
 
     #[test]
+    fn test_unreported_keeps_only_the_tracklets_validation_turned_down() {
+        let rjct =
+            "1FHAUM210002  C2025 09 30.22339 23 53 52.38 +43 48 31.6          21.6 G      G96 \n";
+        let keep = unreported_tracklets(rjct);
+        assert_eq!(keep, HashSet::from(["0002".to_string()]));
+        let parsed = parse_dets(SAMPLE, "G96", &TrackletConfig::default(), Some(&keep))
+            .expect("the sample parses");
+        assert_eq!(parsed.tracklets.len(), 1);
+        assert_eq!(parsed.detections.len(), 2);
+    }
+
+    #[test]
     fn test_a_non_dets_file_is_refused() {
-        assert!(parse_dets("something else\n1 2 3\n", "G96", &TrackletConfig::default()).is_err());
+        assert!(parse_dets(
+            "something else\n1 2 3\n",
+            "G96",
+            &TrackletConfig::default(),
+            None
+        )
+        .is_err());
     }
 }

@@ -6,6 +6,7 @@
 //! where anything new would be.
 
 use boom::conf::{load_dotenv, AppConfig};
+use boom::utils::css::{unreported_tracklets, Products};
 use boom::utils::discovery::{
     latest_night, load_window, persist_clusters, persist_tracks, reference_epoch, thor_clusters,
     tracklets_per_night, ztf_band, Stop, ThorSearch, Verdict,
@@ -187,8 +188,8 @@ struct Cli {
     input: Option<String>,
 
     /// Also link tracklets another survey published, from directories of CSS
-    /// `.mtds` files. The telescope is taken from each filename, so its
-    /// astrometry is fitted from the site it was actually observed at.
+    /// files. The telescope is taken from each filename, so its astrometry is
+    /// fitted from the site it was actually observed at.
     #[arg(long, value_name = "DIR", conflicts_with = "persist")]
     css: Vec<String>,
 
@@ -205,6 +206,12 @@ struct Cli {
     /// Where fetched nights are cached, one directory per telescope-night.
     #[arg(long, value_name = "DIR", default_value = "css_cache")]
     css_cache: String,
+
+    /// Which CSS tracklets to link: unreported (turned down by CSS validation,
+    /// never sent to the MPC), dets (everything put to validation) or mtds
+    /// (every tracklet the pipeline built).
+    #[arg(long, value_enum, default_value_t = Products::Unreported)]
+    css_products: Products,
 
     /// Find tracklets per night, then link them across nights.
     #[arg(long, default_value_t = false)]
@@ -237,7 +244,15 @@ async fn fetch_css(args: &Cli) -> Vec<String> {
         for code in &args.css_telescope {
             let dir = std::path::Path::new(&args.css_cache)
                 .join(format!("{code}_{}", night.format("%Y%m%d")));
-            match boom::utils::css::fetch_night(&client, code, *night, &dir).await {
+            match boom::utils::css::fetch_night(
+                &client,
+                code,
+                *night,
+                &dir,
+                args.css_products.extensions(),
+            )
+            .await
+            {
                 Ok(f) if f.found == 0 => info!("{code} {night}: not in the archive yet"),
                 Ok(f) => {
                     info!(
@@ -258,7 +273,11 @@ async fn fetch_css(args: &Cli) -> Vec<String> {
 /// The MPC code is the filename's first field -- `G96_20250930_...` -- which is
 /// also the archive's directory for that telescope, so a run over several
 /// telescopes keeps each one's site.
-fn load_css(dirs: &[String], cfg: &TrackletConfig) -> (Vec<Tracklet>, Vec<Detection>) {
+fn load_css(
+    dirs: &[String],
+    products: Products,
+    cfg: &TrackletConfig,
+) -> (Vec<Tracklet>, Vec<Detection>) {
     let (mut tracklets, mut detections) = (Vec::new(), Vec::new());
     for dir in dirs {
         let entries = match std::fs::read_dir(dir) {
@@ -271,7 +290,7 @@ fn load_css(dirs: &[String], cfg: &TrackletConfig) -> (Vec<Tracklet>, Vec<Detect
         let (mut files, mut parsed_tracklets) = (0usize, 0usize);
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("mtds") {
+            if path.extension().and_then(|e| e.to_str()) != Some(products.tracklet_file()) {
                 continue;
             }
             let Some(code) = path
@@ -288,7 +307,17 @@ fn load_css(dirs: &[String], cfg: &TrackletConfig) -> (Vec<Tracklet>, Vec<Detect
                     continue;
                 }
             };
-            match boom::utils::css::parse_dets(&text, code, cfg) {
+            let keep = (products == Products::Unreported).then(|| {
+                ["rjct", "fail"]
+                    .iter()
+                    .filter_map(|ext| std::fs::read_to_string(path.with_extension(ext)).ok())
+                    .flat_map(|text| unreported_tracklets(&text))
+                    .collect::<std::collections::HashSet<String>>()
+            });
+            if keep.as_ref().is_some_and(|keep| keep.is_empty()) {
+                continue;
+            }
+            match boom::utils::css::parse_dets(&text, code, cfg, keep.as_ref()) {
                 Ok(parsed) => {
                     files += 1;
                     parsed_tracklets += parsed.tracklets.len();
@@ -1014,7 +1043,7 @@ async fn main() {
         css_dirs.extend(fetch_css(&args).await);
     }
     if !css_dirs.is_empty() {
-        let (css_tracklets, css_detections) = load_css(&css_dirs, &cfg);
+        let (css_tracklets, css_detections) = load_css(&css_dirs, args.css_products, &cfg);
         info!(
             "{} tracklets and {} detections from another survey",
             css_tracklets.len(),
