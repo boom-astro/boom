@@ -264,6 +264,8 @@ host_galaxy:
   rex_min_snr: 5.0
   rex_max_fracflux: 0.5
   isophote_mag: 25.0 # puts Legacy R_e on the NED-LVS D25 scale
+  ps1_catalog: PS1_DR2 # host photometry fallback, queried at the host's position
+  photometry_match_arcsec: 2.0
 # Moving-object discovery, run once each ZTF night is over by the linker-ztf
 # service, which deploys with the rest of the prod profile.
 # Tracks are stored in ZTF_tracks and stamped on their alerts; nothing is sent
