@@ -337,9 +337,10 @@ position on the sky.
 
 Crossmatches are computed **once**, when an alert is first ingested. Nothing
 revisits them. So a change on the catalog side leaves existing alerts holding
-matches computed against something that no longer exists — the same problem the
-[enrichment set](./alert-processing.md#re-enriching-alerts-after-a-change)
-solves for models and derivations, and it is *not* solved here.
+matches computed against something that no longer exists — the same gap the
+[enrichment set](./alert-processing.md#the-enrichment-set-and-what-happens-when-it-changes)
+has for models and derivations, where a component that is added can be found by
+the absence of its key but a component that changes leaves no trace.
 
 **What is handled: adding a new catalog.** `xmatch` writes a key for every
 configured catalog, including an empty array when nothing matched, so an alert
@@ -367,8 +368,8 @@ single hash over the whole `crossmatch` block is too coarse: adding NED would
 invalidate every Gaia match too, and the reprocessing run is exactly the thing
 worth keeping small.
 
-The shape that fits is the one the enrichment set already uses — intern per
-component, diff to see what moved — applied per catalog rather than per survey:
+The shape that fits is per-component interning with a diff to see what moved,
+applied per catalog rather than per survey:
 
 - Version each catalog's crossmatch settings (`radius`, `use_distance`,
   `max_results`, `projection`) *together with* an identity for the catalog
@@ -396,7 +397,7 @@ A catalog is declared in two halves, and both are in this repo:
 | `src/catalogs/` — a record type plus a `CatalogDef` | what the columns mean and how they are stored |
 
 The Python side is a module defining `ID`, `list_chunks()` and `fetch_chunk()`
-(see [`boompy/README.md`](../boompy/README.md)). Nothing registers it: that
+(see [`boompy/README.md`](https://github.com/boom-astro/boom/blob/main/boompy/README.md)). Nothing registers it: that
 directory holds one module per catalog and nothing else, and boompy builds its
 index by listing it, so a new file is a new catalog. It is Python because the
 archives are: LSDB reads HATS partitioning, `astroquery` speaks to the archives

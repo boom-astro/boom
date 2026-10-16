@@ -84,3 +84,26 @@ each one will have its own:
 - Object collection
 - Image collection
 - Output stream
+
+## The enrichment set, and what happens when it changes
+
+The enrichment worker writes a fixed set of named quantities onto each alert:
+the ACAI scores (`acai_h`, `acai_n`, `acai_v`, `acai_o`, `acai_b`), `btsbot`,
+and the AppleCiDER outputs (`applecider_fusion`, `applecider_outputs`) under
+`classifications`, alongside the Villar light-curve fit and the photometric
+properties under `properties`.
+
+Adding a component is detectable after the fact. Outputs that can be absent are
+skipped rather than written as null, so an alert carrying no `applecider_fusion`
+key provably predates AppleCiDER being deployed, in the same way that an alert
+whose `cross_matches` has no key for a catalog predates that catalog being
+configured. Selecting those alerts and pushing their candids onto a reprocessing
+queue is how a new component is filled in; `enrich_reprocess` drains that queue,
+computes the scores and writes them back without forwarding anything to the
+filter queue.
+
+Changing a component is not detectable. Nothing records which model version
+produced a score, so a retrained model that keeps the same field name leaves no
+trace in the document, and an alert scored by the old weights cannot be told
+apart from one scored by the new. Re-running after a retrain means selecting the
+alerts by some other means, usually a date range.

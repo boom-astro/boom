@@ -370,8 +370,8 @@ specifically want the historical view.
 | What | Where |
 | --- | --- |
 | Model, priors, PSO, preprocessing | [`villar-pso`](https://github.com/frenbox/villar-pso) |
-| Batch fitting and Mongo writes | [`src/enrichment/ztf.rs`](../src/enrichment/ztf.rs) |
-| GPU context setup | [`src/enrichment/models/mod.rs`](../src/enrichment/models/mod.rs) |
+| Batch fitting and Mongo writes | [`src/enrichment/ztf.rs`](https://github.com/boom-astro/boom/blob/main/src/enrichment/ztf.rs) |
+| GPU context setup | [`src/enrichment/models/mod.rs`](https://github.com/boom-astro/boom/blob/main/src/enrichment/models/mod.rs) |
 
 ## References
 
