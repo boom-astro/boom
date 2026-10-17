@@ -410,6 +410,51 @@ pub async fn find_active(
     Ok(collection(db).find_one(filter).await?)
 }
 
+/// Values of one parameter across every run of a task type that is still
+/// queued or running.
+///
+/// For deciding whether a thing is being worked on right now, which is a
+/// different question from what state it is in. A catalog that is half
+/// ingested because a run is part way through it and one that is half ingested
+/// because a run died look identical in the catalog's own state document, and
+/// only one of them is something to go and do anything about.
+pub async fn active_param_values(
+    db: &Database,
+    task_type: &str,
+    param: &str,
+) -> Result<std::collections::HashSet<String>, QueueError> {
+    // A running run counts only while its lease is live. A worker that died
+    // leaves its run `Running` until `requeue_expired` gets to it, and that
+    // runs in the task worker's between-run loop -- so with no worker up, or
+    // with every worker busy, an abandoned run would go on claiming to be
+    // working on something indefinitely. The lease is the thing that actually
+    // expires on its own.
+    let filter = doc! {
+        "task_type": task_type,
+        "$or": [
+            { "status": TaskStatus::Queued.as_str() },
+            {
+                "status": TaskStatus::Running.as_str(),
+                "lease_expires_at": { "$gt": now() },
+            },
+        ],
+        format!("params.{param}"): { "$type": "string" },
+    };
+    let mut cursor = collection(db).find(filter).await?;
+    let mut values = std::collections::HashSet::new();
+    while cursor.advance().await? {
+        if let Some(value) = cursor
+            .deserialize_current()?
+            .params
+            .get(param)
+            .and_then(|v| v.as_str())
+        {
+            values.insert(value.to_string());
+        }
+    }
+    Ok(values)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -482,6 +527,19 @@ mod tests {
         let _ = db
             .collection::<Task>(TASKS_COLLECTION)
             .delete_many(doc! { "task_type": task_type })
+            .await;
+    }
+
+    /// Clean up one run by id.
+    ///
+    /// For the two tests here that use a *registered* task type rather than a
+    /// unique one: deleting every run of `catalog_ingest` reaches runs this
+    /// module did not create, and `catalogs::status` reads that type from the
+    /// same database.
+    async fn cleanup_run(db: &Database, id: &str) {
+        let _ = db
+            .collection::<Task>(TASKS_COLLECTION)
+            .delete_one(doc! { "_id": id })
             .await;
     }
 
@@ -633,7 +691,7 @@ mod tests {
         let reaped = get(&db, &task.id).await.unwrap().unwrap();
         assert_eq!(reaped.status, TaskStatus::Queued);
         assert!(reaped.worker.is_none());
-        cleanup(&db, &task_type).await;
+        cleanup_run(&db, &task.id).await;
     }
 
     #[tokio::test]

@@ -29,15 +29,18 @@ pub struct CatalogIngestParams {
     pub drop_existing: bool,
     /// Stop after this many chunks, for smoke-testing a catalog end to end.
     #[serde(default)]
+    #[schema(minimum = 1)]
     pub max_chunks: Option<usize>,
     /// Concurrent insert workers. Lower this to leave more of the database to
     /// the alert pipeline: an ingest at full tilt competes with live alert
     /// writes for WiredTiger cache and write tickets, and it is the ingest --
     /// not the task queue -- that is heavy enough to notice.
     #[serde(default = "default_num_workers")]
+    #[schema(minimum = 1, maximum = 16)]
     pub num_workers: usize,
     /// Documents per insert batch. Same trade as `num_workers`.
     #[serde(default = "default_batch_size")]
+    #[schema(minimum = 1, maximum = 100000)]
     pub batch_size: usize,
 }
 
@@ -200,6 +203,23 @@ mod tests {
             num_workers: default_num_workers(),
             batch_size: default_batch_size(),
         }
+    }
+
+    /// The bounds in the schema and the bounds `validate` enforces have to
+    /// agree: the admin form renders from the schema, so a mismatch means the
+    /// form either refuses a value the API accepts or offers one it rejects.
+    #[test]
+    fn the_schema_declares_the_bounds_validate_enforces() {
+        use utoipa::PartialSchema as _;
+        let schema = serde_json::to_value(CatalogIngestParams::schema()).unwrap();
+        let bound = |field: &str, key: &str| schema["properties"][field][key].as_u64();
+
+        assert_eq!(bound("num_workers", "minimum"), Some(1));
+        assert_eq!(bound("num_workers", "maximum"), Some(MAX_WORKERS as u64));
+        assert_eq!(bound("batch_size", "minimum"), Some(1));
+        assert_eq!(bound("batch_size", "maximum"), Some(MAX_BATCH_SIZE as u64));
+        // Zero chunks is refused by `validate`, so the form should not offer it.
+        assert_eq!(bound("max_chunks", "minimum"), Some(1));
     }
 
     #[test]
