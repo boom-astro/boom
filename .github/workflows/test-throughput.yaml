@@ -65,18 +65,27 @@ jobs:
       # `cargo build --release` in the Dockerfile's `builder` stage, and
       # `mode=min` stores only the layers of the final `app` image, which would
       # leave every run recompiling the workspace.
+      #
+      # Only main publishes the cache; every other run reads it. A registry tag
+      # is a single mutable manifest with none of the Actions cache's per-branch
+      # isolation, so letting branches export would have them overwrite each
+      # other and main on one shared tag: one pull request that recompiles the
+      # workspace would replace main's records with its own, and the next build
+      # off main would go cold. Reading main and never writing also keeps the
+      # runs whose token is read-only -- forks, and Dependabot, whose branch
+      # lives in this repository and so cannot be told apart by looking for a
+      # fork -- from failing on a denied export, since a cache import that
+      # finds nothing is merely a warning while a denied export fails the build.
+      #
+      # `github.ref` is `refs/pull/<n>/merge` on every pull request, so this is
+      # exactly a push to main or a manual run on it.
       - name: Choose the layer cache
         run: |
           ref=ghcr.io/${{ github.repository }}-cache:throughput
           {
             echo 'BAKE_CACHE<<EOF'
             echo "*.cache-from=type=registry,ref=$ref"
-            # A pull request from a fork gets a read-only token, so it reads
-            # whatever the base branch published and exports nothing; exporting
-            # would be denied and take the build down with it. An import that
-            # finds nothing is only a warning, so the worst case there is the
-            # cold build such a run gets today.
-            if [ "${{ github.event.pull_request.head.repo.fork }}" != "true" ]; then
+            if [ "${{ github.ref }}" = "refs/heads/main" ]; then
               echo "*.cache-to=type=registry,ref=$ref,mode=max"
             fi
             echo EOF
