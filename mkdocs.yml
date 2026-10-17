@@ -1,0 +1,77 @@
+site_name: BOOM
+site_description: A next generation astronomical alert broker written in Rust.
+site_url: https://boom-astro.github.io/boom/
+repo_url: https://github.com/boom-astro/boom
+repo_name: boom-astro/boom
+edit_uri: edit/main/docs/
+
+# Warnings become errors, so a link that no longer resolves fails CI rather than
+# reaching the published site. Links into the source tree must be absolute.
+strict: true
+
+# Default severity for these three is INFO, which strict mode ignores. A heading
+# that is renamed out from under a cross-reference, or a path written relative to
+# the repository root rather than to the page, is a link that 404s on the site.
+validation:
+  anchors: warn
+  absolute_links: warn
+  unrecognized_links: warn
+  omitted_files: warn
+
+theme:
+  name: material
+  logo: boom_logo.png
+  favicon: boom_logo.png
+  features:
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+    - search.highlight
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.highlight:
+      anchor_linenums: true
+
+nav:
+  - Home: index.md
+  - Running a system:
+      - Deployment: deployment.md
+      - GPU and ONNX Runtime: gpu.md
+      - Kafka authentication: kafka-auth.md
+      - Observability: observability.md
+  - Alert pipeline:
+      - Alert processing: alert-processing.md
+      - Data model: data-model.md
+      - Task system: task-system.md
+      - Archival catalogs: catalogs.md
+  - Classification and fits:
+      - AppleCiDER: applecider.md
+      - Villar light-curve fits: villar-fit.md
+      - Milvus vector database: milvus.md
+  - Babamul:
+      - Babamul: babamul.md
+      - Usage analytics: analytics.md
+  - Measurements:
+      - Tracing throughput test: tracing-throughput-test/tracing-throughput-test.md
