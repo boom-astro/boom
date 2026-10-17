@@ -54,14 +54,9 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Setup Docker buildx
         uses: docker/setup-buildx-action@v3
-      # The layer cache lives in the registry, not the Actions cache: GitHub caps
-      # a repository at 10 GB and evicts LRU, and this build's export held 8.5 GB
-      # of it, starving the cargo caches test.yaml and build.yaml restore.
-      # `mode=max` stays -- the expensive layer is in the Dockerfile's `builder`
-      # stage, which `mode=min` would not store. Only main exports: a registry
-      # tag is one mutable manifest, so branches would overwrite each other, and
-      # a read-only token (forks, Dependabot) fails on a denied export while an
-      # import that finds nothing is only a warning.
+      # In the registry rather than the Actions cache, whose 10 GB cap this
+      # build's export was filling at the cost of the cargo caches, and exported
+      # from main only, since one tag cannot hold two branches.
       - name: Choose the layer cache
         run: |
           ref=ghcr.io/${{ github.repository }}-cache:throughput
