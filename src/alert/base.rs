@@ -300,6 +300,7 @@ pub struct SchemaRegistry {
     cache: HashMap<String, Schema>,
     url: String,
     github_fallback_url: Option<String>,
+    parsed_version: Option<u32>,
 }
 
 impl SchemaRegistry {
@@ -313,7 +314,13 @@ impl SchemaRegistry {
             cache,
             url: url.to_string(),
             github_fallback_url,
+            parsed_version: None,
         }
+    }
+
+    pub fn with_parsed_version(mut self, version: u32) -> Self {
+        self.parsed_version = Some(version);
+        self
     }
 
     #[instrument(skip(self), err)]
@@ -571,6 +578,12 @@ impl SchemaRegistry {
             let schema = self
                 ._get_schema_by_id_with_fallback(subject, version)
                 .await?;
+            if let Some(parsed_version) = self.parsed_version.filter(|v| version > *v) {
+                warn!(
+                    "{} alerts use schema version {} of subject {}, newer than the version {} we parse: fields it adds are dropped",
+                    self.survey, version, subject, parsed_version
+                );
+            }
             self.cache.insert(key.clone(), schema);
         }
         Ok(self.cache.get(&key).unwrap())

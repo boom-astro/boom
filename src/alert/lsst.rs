@@ -44,6 +44,7 @@ pub const LSST_SCHEMA_REGISTRY_URL: &str =
     "https://rubin-alert-schemas.slac.stanford.edu/schema-registry";
 pub const LSST_SCHEMA_REGISTRY_GITHUB_FALLBACK_URL: &str =
     "https://github.com/lsst/alert_packet/tree/main/python/lsst/alert/packet/schema";
+pub const LSST_PARSED_SCHEMA_VERSION: u32 = 1101;
 
 /// Serde-with adapter that accepts both an Avro union (nullable field) and a plain Avro value
 /// (non-optional field), deserializing both into `Option<T>`. This preserves backwards
@@ -1349,7 +1350,8 @@ impl AlertWorker for LsstAlertWorker {
                 Survey::Lsst,
                 schema_registry_url,
                 Some(github_fallback_url.to_string()),
-            ),
+            )
+            .with_parsed_version(LSST_PARSED_SCHEMA_VERSION),
             xmatch_configs,
             host_galaxy_config: config.host_galaxy.clone(),
             db,
