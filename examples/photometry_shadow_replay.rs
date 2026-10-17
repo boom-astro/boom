@@ -167,6 +167,8 @@ async fn main() -> Result<()> {
     );
     let shadow = Shadow::new(&config.photometry_shadow, db.clone()).await?;
     let outcome:Result<()>=async {
+    // Match the scheduler's production ZTF index setup before measuring storage.
+    boom::utils::db::initialize_survey_indexes(&Survey::Ztf,&db).await?;
     shadow.store.initialize().await?;
     let fixture_dir = PathBuf::from(&args[1]);
     let mut fixtures = std::fs::read_dir(fixture_dir)?
@@ -468,6 +470,8 @@ async fn main() -> Result<()> {
     let mongo_storage = db
         .run_command(doc! {"collStats":"ZTF_alerts_aux","scale":1})
         .await?;
+    let outbox_storage=db.run_command(doc! {"collStats":OUTBOX,"scale":1}).await?;
+    let parity_storage=db.run_command(doc! {"collStats":STATUS,"scale":1}).await?;
     let statuses = db
         .collection::<Document>(STATUS)
         .count_documents(doc! {"report.histories_equal":true,"report.features_equal":true})
@@ -478,7 +482,7 @@ async fn main() -> Result<()> {
             "outage_packets_per_second":(fixtures.len()+1) as f64/ingest_seconds,
             "concurrent":{"healthy_packets":healthy_packets,"producer_interval_ms":75,"elapsed_seconds":concurrent_seconds,
             "read_ms":concurrent_reads_ms,"max_pending":max_pending}},
-        "storage":{"mongo_aux":mongo_storage,"clickhouse":shadow.store.storage().await?},
+        "storage":{"mongo_aux":mongo_storage,"mongo_outbox":outbox_storage,"mongo_parity":parity_storage,"clickhouse":shadow.store.storage().await?},
         "limitations":["tiny fixture workload; not a production capacity benchmark", "no Kafka broker or rebalance is exercised", "full Mongo histories retained", "filter window sizes require manual review", "no ML, host, or cross-survey feature parity"]});
     std::fs::write(&args[3], serde_json::to_vec_pretty(&report)?)?;
     println!("PASS: real-alert worker replay, durable recovery, history and feature parity, filter inventory");
