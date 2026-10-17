@@ -18,7 +18,12 @@ jobs:
     name: Build & Test
     runs-on: ubuntu-latest
     permissions: write-all
-    timeout-minutes: 30
+    # `cargo test --release` is around twenty minutes of this job and the rest
+    # is under two, so a thirty minute cap sat close enough to the typical run
+    # that an ordinarily slow runner was cancelled rather than reported. The
+    # ceiling is here to stop a hung test burning an hour, not to bound a
+    # healthy run.
+    timeout-minutes: 60
     strategy:
       matrix:
         cutouts_storage_type: [mongo, s3]

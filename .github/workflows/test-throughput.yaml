@@ -31,7 +31,9 @@ jobs:
     name: Run throughput test
     runs-on: ubuntu-latest
     permissions: write-all
-    timeout-minutes: 30
+    # Same reasoning as the unit test job: the cap catches a hang, and leaves
+    # room for a slow runner rather than cancelling one.
+    timeout-minutes: 60
     strategy:
       matrix:
         cutouts_storage_type: [mongo, s3]
