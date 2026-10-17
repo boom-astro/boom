@@ -13,7 +13,7 @@
 use crate::api::models::response;
 use crate::api::routes::{babamul::BabamulUser, users::User};
 use crate::tasks::Actor;
-use actix_web::{web, HttpResponse};
+use actix_web::{web, HttpResponse, ResponseError as _};
 
 /// An authenticated admin, whichever realm they came from.
 #[derive(Debug)]
@@ -50,6 +50,22 @@ pub enum AdminDenied {
     NotAnAdmin,
     /// No recognized credential in either realm.
     Unauthenticated,
+}
+
+const ADMIN_REQUIRED: &str = "Admin access required";
+const UNAUTHENTICATED: &str = "Unauthorized";
+
+impl AdminDenied {
+    /// The refusal as an error carrying the API's JSON envelope.
+    ///
+    /// The one place the decision becomes a status and a message, so an
+    /// extractor and a handler cannot refuse the same caller differently.
+    pub fn as_error(&self) -> response::ApiError {
+        match self {
+            AdminDenied::NotAnAdmin => response::ApiError::forbidden(ADMIN_REQUIRED),
+            AdminDenied::Unauthenticated => response::ApiError::unauthorized(UNAUTHENTICATED),
+        }
+    }
 }
 
 /// Resolve an admin from whichever realm authenticated the request.
@@ -107,12 +123,7 @@ impl actix_web::FromRequest for AdminActor {
         use actix_web::HttpMessage as _;
         let extensions = req.extensions();
         let resolved = resolve_admin(extensions.get::<User>(), extensions.get::<BabamulUser>())
-            .map_err(|denied| match denied {
-                AdminDenied::NotAnAdmin => {
-                    actix_web::error::ErrorForbidden("Admin access required")
-                }
-                AdminDenied::Unauthenticated => actix_web::error::ErrorUnauthorized("Unauthorized"),
-            });
+            .map_err(|denied| actix_web::Error::from(denied.as_error()));
         std::future::ready(resolved)
     }
 }
@@ -125,10 +136,11 @@ pub fn require_admin(
         boom_user.as_ref().map(|u| &**u),
         babamul_user.as_ref().map(|u| &**u),
     )
-    .map_err(|denied| match denied {
-        AdminDenied::NotAnAdmin => response::forbidden("Admin access required"),
-        AdminDenied::Unauthenticated => HttpResponse::Unauthorized().body("Unauthorized"),
-    })
+    // Rendered through the same `ApiError` as the extractor rather than mapped
+    // again here. Two mappings agreeing today is not the same as one mapping:
+    // the point of centralizing it is that a later change to either status or
+    // wording cannot move one and leave the other.
+    .map_err(|denied| denied.as_error().error_response())
 }
 
 /// Grant `is_admin` to the Babamul accounts named in the configured list.
@@ -225,6 +237,65 @@ mod tests {
             .delete_many(doc! {})
             .await
             .expect("clears");
+    }
+
+    /// Every refusal carries the API's JSON envelope.
+    ///
+    /// The client reads the reason out of `message`; a `text/plain` body left
+    /// it with nothing to read, so the admin page showed a sentence for a
+    /// refusal from one route and "failed: 403" for the next one.
+    #[tokio::test]
+    async fn a_refusal_says_why_in_json() {
+        use actix_web::body::MessageBody as _;
+
+        for (denied, status) in [
+            (
+                AdminDenied::NotAnAdmin,
+                actix_web::http::StatusCode::FORBIDDEN,
+            ),
+            (
+                AdminDenied::Unauthenticated,
+                actix_web::http::StatusCode::UNAUTHORIZED,
+            ),
+        ] {
+            let error = denied.as_error();
+            let response = error.error_response();
+            assert_eq!(response.status(), status);
+            assert_eq!(
+                response
+                    .headers()
+                    .get(actix_web::http::header::CONTENT_TYPE)
+                    .and_then(|v| v.to_str().ok()),
+                Some("application/json")
+            );
+            let body = response.into_body().try_into_bytes().expect("one chunk");
+            let parsed: serde_json::Value = serde_json::from_slice(&body).expect("json");
+            assert!(
+                parsed["message"].as_str().is_some_and(|m| !m.is_empty()),
+                "a refusal has to say why: {parsed}"
+            );
+        }
+
+        // The helper refuses through the same rendering as the extractor, so
+        // there is one mapping rather than two that happen to agree.
+        for denied in [AdminDenied::NotAnAdmin, AdminDenied::Unauthenticated] {
+            let via_helper = require_admin(&None, &None);
+            let expected = denied.as_error().error_response();
+            if denied == AdminDenied::Unauthenticated {
+                let actual = via_helper.expect_err("no credential is refused");
+                assert_eq!(actual.status(), expected.status());
+                assert_eq!(
+                    actual.headers().get(actix_web::http::header::CONTENT_TYPE),
+                    expected
+                        .headers()
+                        .get(actix_web::http::header::CONTENT_TYPE),
+                );
+            }
+        }
+        assert_eq!(
+            AdminDenied::NotAnAdmin.as_error().to_string(),
+            ADMIN_REQUIRED
+        );
     }
 
     #[tokio::test]
