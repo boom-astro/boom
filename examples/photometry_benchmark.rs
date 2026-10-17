@@ -334,6 +334,12 @@ async fn phase(config_path: &Path, raw: &Value, workload: &Workload, name: &str)
         .remove("name");
     let baseline = name == "baseline";
     let recovery = name == "recovery";
+    if recovery {
+        raw["photometry_shadow"]["url"] = raw
+            .get("benchmark_fault_proxy_url")
+            .context("benchmark controller fault proxy is required")?
+            .clone();
+    }
     if baseline {
         raw["photometry_shadow"]["url"] = json!("");
     }
