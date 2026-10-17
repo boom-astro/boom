@@ -4,8 +4,11 @@ use crate::{
         catalogs::catalog_accessible, filters::parse_filter, models::response, routes::users::User,
     },
     conf::AppConfig,
-    utils::mpcorb::{
-        fetch_orbits, fill_geometry, normalize_ztf_ssnamenr, GEOMETRY_FIELDS, ORBITS_COLLECTION,
+    utils::{
+        db::is_included,
+        mpcorb::{
+            fetch_orbits, fill_geometry, normalize_ztf_ssnamenr, GEOMETRY_FIELDS, ORBITS_COLLECTION,
+        },
     },
 };
 
@@ -344,17 +347,6 @@ fn strip_prefix_path<'a>(path: &'a str, key: &str) -> Option<&'a str> {
         return Some("");
     }
     path.strip_prefix(key)?.strip_prefix('.')
-}
-
-/// Projection values MongoDB reads as "include".
-fn is_included(value: &Bson) -> bool {
-    match value {
-        Bson::Boolean(b) => *b,
-        Bson::Int32(i) => *i != 0,
-        Bson::Int64(i) => *i != 0,
-        Bson::Double(d) => *d != 0.0,
-        _ => true,
-    }
 }
 
 #[cfg(test)]

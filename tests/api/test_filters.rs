@@ -8,7 +8,8 @@ mod tests {
     use boom::api::db::get_test_db_api;
     use boom::api::routes;
     use boom::api::test_utils::{read_json_response, read_str_response};
-    use boom::conf::{load_dotenv, AppConfig};
+    use boom::conf::{load_dotenv, AppConfig, CatalogXmatchConfig};
+    use boom::utils::enums::Survey;
     use mongodb::bson::{doc, Document};
     use mongodb::{Collection, Database};
 
@@ -494,6 +495,7 @@ mod tests {
             App::new()
                 .app_data(web::Data::new(database.clone()))
                 .app_data(web::Data::new(auth_app_data.clone()))
+                .app_data(web::Data::new(AppConfig::from_test_config().unwrap()))
                 .wrap(from_fn(auth_middleware))
                 .service(routes::filters::get_filter_schema),
         )
@@ -521,6 +523,14 @@ mod tests {
         assert!(data["type"] == "record");
         assert!(data["name"] == "ZtfAlertToFilter");
         assert!(data["fields"].is_array());
+        let cross_matches = data["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["name"] == "cross_matches")
+            .expect("a cross_matches field");
+        let catalogs = cross_matches["type"]["fields"].as_array().unwrap();
+        assert!(catalogs.iter().any(|c| c["name"] == "PS1_DR1"));
 
         // LSST schema test
         let req = test::TestRequest::get()
@@ -554,6 +564,134 @@ mod tests {
             StatusCode::NOT_FOUND,
             "Expected NOT_FOUND for invalid survey, got: {:?}",
             read_str_response(resp).await
+        );
+    }
+
+    /// `cross_matches` follows the deployment's crossmatch config: the
+    /// projected fields typed from a catalog row, the distances crossmatch
+    /// adds, and no watchlists.
+    #[actix_rt::test]
+    async fn test_filter_schema_cross_matches_follow_config() {
+        load_dotenv();
+        let database: Database = get_test_db_api().await;
+        let token = create_admin_token(&database).await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+        let catalog = format!("test_xmatch_schema_{}", uuid::Uuid::new_v4().simple());
+        let watchlist = format!("watchlist_xmatch_schema_{}", uuid::Uuid::new_v4().simple());
+        database
+            .collection::<Document>(&catalog)
+            .insert_one(doc! { "ra": 10.5, "nobs": 3, "kind": "QSO", "hidden": 1.0 })
+            .await
+            .unwrap();
+        let mut config = AppConfig::from_test_config().unwrap();
+        let ztf_catalogs = config.crossmatch.entry(Survey::Ztf).or_default();
+        ztf_catalogs.push(CatalogXmatchConfig {
+            catalog: catalog.clone(),
+            projection: doc! { "ra": 1, "nobs": 1, "kind": 1, "z": 1 },
+            distance_key: Some("z".to_string()),
+            ..Default::default()
+        });
+        ztf_catalogs.push(CatalogXmatchConfig {
+            catalog: watchlist.clone(),
+            ..Default::default()
+        });
+        // Mongo rejects mixing inclusion and exclusion, so this catalog can't be read.
+        let unreadable = format!("test_xmatch_unreadable_{}", uuid::Uuid::new_v4().simple());
+        database
+            .collection::<Document>(&unreadable)
+            .insert_one(doc! { "ra": 1.0, "dec": 2.0 })
+            .await
+            .unwrap();
+        ztf_catalogs.push(CatalogXmatchConfig {
+            catalog: unreadable.clone(),
+            projection: doc! { "ra": 1, "dec": 0 },
+            ..Default::default()
+        });
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(database.clone()))
+                .app_data(web::Data::new(auth_app_data))
+                .app_data(web::Data::new(config))
+                .wrap(from_fn(auth_middleware))
+                .service(routes::filters::get_filter_schema),
+        )
+        .await;
+
+        let req = test::TestRequest::get()
+            .uri("/filters/schemas/ZTF")
+            .insert_header(("Authorization", format!("Bearer {}", token)))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let resp = read_json_response(resp).await;
+        // Dropped before asserting, so a failure does not leave them behind.
+        for name in [&catalog, &unreadable] {
+            database.collection::<Document>(name).drop().await.unwrap();
+        }
+        let cross_matches = resp["data"]["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["name"] == "cross_matches")
+            .unwrap()
+            .clone();
+        // Only `cross_matches` is checked: the alert schema keeps stored names
+        // Avro rejects, like `AGN-like`.
+        apache_avro::Schema::parse(
+            &serde_json::json!({ "type": "record", "name": "T", "fields": [&cross_matches] }),
+        )
+        .expect("a valid Avro schema");
+        let catalogs = cross_matches["type"]["fields"].as_array().unwrap();
+        assert!(!catalogs.iter().any(|c| c["name"] == watchlist.as_str()));
+        let entry = catalogs
+            .iter()
+            .find(|c| c["name"] == catalog.as_str())
+            .unwrap();
+        assert_eq!(entry["type"]["type"], "array");
+        let fields = entry["type"]["items"]["fields"].as_array().unwrap();
+        let type_of = |name: &str| {
+            fields
+                .iter()
+                .find(|f| f["name"] == name)
+                .map(|f| f["type"].clone())
+        };
+        // Not projected, but `$project` keeps `_id` unless excluded.
+        assert_eq!(type_of("_id"), Some(serde_json::json!(["null", "string"])));
+        assert_eq!(type_of("ra"), Some(serde_json::json!(["null", "double"])));
+        // Stored as an integer, reported as a number like any other.
+        assert_eq!(type_of("nobs"), Some(serde_json::json!(["null", "double"])));
+        assert_eq!(type_of("kind"), Some(serde_json::json!(["null", "string"])));
+        // Projected but absent from the catalog row.
+        assert_eq!(
+            type_of("z"),
+            Some(serde_json::json!(["null", "double", "string", "boolean"]))
+        );
+        // In the collection but not projected, so out of reach of filters.
+        assert_eq!(type_of("hidden"), None);
+        assert_eq!(
+            type_of("distance_arcsec"),
+            Some(serde_json::json!("double"))
+        );
+        assert_eq!(
+            type_of("distance_kpc"),
+            Some(serde_json::json!(["null", "double"]))
+        );
+
+        // A catalog that can't be read is still listed, with generic types.
+        let unreadable_entry = catalogs
+            .iter()
+            .find(|c| c["name"] == unreadable.as_str())
+            .unwrap();
+        let unreadable_fields = unreadable_entry["type"]["items"]["fields"]
+            .as_array()
+            .unwrap();
+        let ra = unreadable_fields
+            .iter()
+            .find(|f| f["name"] == "ra")
+            .unwrap();
+        assert_eq!(
+            ra["type"],
+            serde_json::json!(["null", "double", "string", "boolean"])
         );
     }
 }
