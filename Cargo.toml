@@ -87,8 +87,7 @@ tonic-prost-build = "0.14.6"
 
 [features]
 default = []
-# Optional demo requires a sibling boom-clickhouse checkout. Keep it out of
-# default builds and tests, which run without that repository.
+# Opt-in CLI demonstration of the native photometry shadow adapter.
 clickhouse-example = []
 # The `gpu` feature only controls villar-pso. ONNX GPU is already enabled
 # unconditionally on Linux via ort's `cuda` + `load-dynamic` features below,

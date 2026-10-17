@@ -1,18 +1,23 @@
 //! Run with `cargo run --features clickhouse-example --example clickhouse_shadow -- prepare FILE 1`.
-//! Uses the actual BOOM ZTF record types; the shared adapter is also independently
-//! buildable in ../boom-clickhouse/examples/boom for fast iteration.
-#[allow(dead_code)]
-mod clickhouse {
-    include!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../boom-clickhouse/examples/boom/src/lib.rs"
-    ));
-}
+//! Uses BOOM's native shadow adapter and ZTF record types.
 
 use anyhow::{bail, Result};
 use boom::alert::{ZtfForcedPhot, ZtfPrvCandidate};
-use clickhouse::{PreparedBatch, Store};
+use boom::conf::PhotometryShadowConfig;
+use boom::photometry::store::{PreparedBatch, Store};
 use serde::Deserialize;
+
+// Keep the standalone demo's environment names for CLI compatibility.
+fn store_from_env() -> Result<Store> {
+    Store::new(&PhotometryShadowConfig {
+        url: std::env::var("BOOM_CLICKHOUSE_URL")
+            .unwrap_or_else(|_| "http://127.0.0.1:8123".into()),
+        database: std::env::var("BOOM_CLICKHOUSE_DATABASE").unwrap_or_else(|_| "default".into()),
+        username: std::env::var("BOOM_CLICKHOUSE_USER").unwrap_or_else(|_| "default".into()),
+        password: std::env::var("BOOM_CLICKHOUSE_PASSWORD").unwrap_or_default(),
+        ..Default::default()
+    })
+}
 
 #[derive(Deserialize)]
 struct Input {
@@ -42,12 +47,12 @@ async fn main() -> Result<()> {
             if command == "prepare" {
                 print!("{}", batch.body);
             } else {
-                Store::from_env()?.insert(&batch).await?;
+                store_from_env()?.insert(&batch).await?;
                 eprintln!("Inserted {} normalized BOOM records", batch.rows);
             }
         }
         Some("read") if args.len() == 2 => {
-            let history = Store::from_env()?.history(&args[1]).await?;
+            let history = store_from_env()?.history(&args[1]).await?;
             // Deserialization restores fields needed by BOOM's enrichment
             // pipelines, including raw forced flux, zero point and programid.
             let detections: Vec<ZtfPrvCandidate> =

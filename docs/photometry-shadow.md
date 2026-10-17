@@ -100,7 +100,8 @@ not add Kafka exactly-once delivery or cross-store transactions.
 
 The `photometry_shadow_replay` example is a development test harness with guards
 for loopback services and isolated database names. Its controller lives in the
-sibling `boom-clickhouse/examples/boom/tests/proposal.py`.
+`boom-clickhouse/examples/boom/tests/proposal.py` checkout. Set `BOOM_SOURCE`
+to this checkout when the repositories are not siblings.
 
 It uses the real Avro fixtures in `tests/data/alerts/ztf`, the actual Redis alert
 worker, Mongo aux/cutout/alert writes, and the actual enrichment aggregation and
