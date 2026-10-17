@@ -54,14 +54,39 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Setup Docker buildx
         uses: docker/setup-buildx-action@v3
+      # The layer cache lives in the registry rather than the Actions cache.
+      # GitHub caps a repository at 10 GB of Actions cache and evicts least
+      # recently used, and `mode=max` on this build alone held 8.5 GB of it --
+      # enough to evict the cargo caches `test.yaml` and `build.yaml` restore,
+      # so what this workflow saved was paid back with interest in cold Rust
+      # builds elsewhere. The registry has no such budget.
+      #
+      # `mode=max` is not the part to economize on: the expensive layer is the
+      # `cargo build --release` in the Dockerfile's `builder` stage, and
+      # `mode=min` stores only the layers of the final `app` image, which would
+      # leave every run recompiling the workspace.
+      - name: Choose the layer cache
+        run: |
+          ref=ghcr.io/${{ github.repository }}-cache:throughput
+          {
+            echo 'BAKE_CACHE<<EOF'
+            echo "*.cache-from=type=registry,ref=$ref"
+            # A pull request from a fork gets a read-only token, so it reads
+            # whatever the base branch published and exports nothing; exporting
+            # would be denied and take the build down with it. An import that
+            # finds nothing is only a warning, so the worst case there is the
+            # cold build such a run gets today.
+            if [ "${{ github.event.pull_request.head.repo.fork }}" != "true" ]; then
+              echo "*.cache-to=type=registry,ref=$ref,mode=max"
+            fi
+            echo EOF
+          } >> "$GITHUB_ENV"
       - name: Build & Cache Docker images
         uses: docker/bake-action@v2
         with:
           workdir: ./tests/throughput
           load: true
-          set: |
-            *.cache-to=type=gha,mode=max
-            *.cache-from=type=gha
+          set: ${{ env.BAKE_CACHE }}
         env:
           PWD: ${{ github.workspace }}
           BOOM_REPO_ROOT: ${{ github.workspace }}
