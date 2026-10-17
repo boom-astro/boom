@@ -374,6 +374,7 @@ mod tests {
             mag: None,
             mag_err: None,
             band: None,
+            site: None,
         }
     }
 
@@ -405,6 +406,7 @@ mod tests {
             mag: None,
             mag_err: None,
             band: None,
+            site: None,
         }];
         assert!(identify(&dets, &catalogue(), &IdentifyConfig::default()).is_empty());
     }
@@ -548,6 +550,7 @@ mod tests {
                 mag: None,
                 mag_err: None,
                 band: None,
+                site: None,
             });
         }
         assert!(
