@@ -54,9 +54,14 @@ measurement identity. A higher accepted Mongo version can replace a record.
 Deletions or changes to identity fields are not implemented: extra sink rows
 produce a visible parity failure instead of being silently accepted.
 
-Raw reads and on-demand nightly bins use `FINAL`. Bins keep measurement kinds
-and programs separate and exclude upper limits and missing flux. They use UTC
-calendar days and currently apply no additional quality-mask policy. There is
+Raw reads and on-demand bins use `FINAL`. `Store::bins(object_id, cadence_seconds)`
+reads normalized columns without parsing payloads. Fixed UTC buckets support
+1–31536000 seconds; 86400 seconds gives UTC calendar days. Measurement kinds,
+bands and programs stay separate. Inverse-variance flux and uncertainty exclude
+upper limits and missing flux, which remain visible in record counts. Negative
+flux is valid. No additional quality-mask policy is applied. The native example
+exposes `bins OBJECT_ID CADENCE_SECONDS`; this internal method does not implement
+public program authorization or a persisted bin cache. There is
 no incremental sum materialized view that could count overlapping packets twice.
 
 This copies full object histories per delivered reference, so write amplification
@@ -132,6 +137,14 @@ controller, corpus preparation and decision-report documentation are in
 `boom-clickhouse/examples/boom/BENCHMARK.md`. Model comparisons run after timed
 ingestion; these are ingestion/shadow measurements, not full classification
 throughput. Captured content with synthetic pacing is labeled accordingly.
+
+After validation, the example drops each completed disposable Mongo database to
+bound disk usage (`keep_phase_data: true` opts out). Failures preserve their phase
+data and partial report. `recovery_only: true` runs an independent outage/recovery
+experiment without inferring baseline overhead or healthy throughput. Storage
+snapshots include per-column compressed/uncompressed bytes, logical payload bytes,
+and cumulative dedicated-server insert/merge counters. Counter deltas must be
+attributed between phases; file-write counters are not physical device writes.
 
 ## The filter boundary remains a decision
 

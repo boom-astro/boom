@@ -6,6 +6,7 @@ use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, time::Duration};
 
 pub const SCHEMA: &str = include_str!("schema.sql");
+pub const BINNED_SQL: &str = include_str!("bins.sql");
 pub const READ_SQL: &str = "SELECT kind, payload FROM boom_photometry FINAL \
     WHERE object_id = {object_id:String} ORDER BY jd, band, kind, programid FORMAT JSONEachRow";
 // Aggregate AFTER FINAL; do not feed an incremental sum MV from overlapping
@@ -287,6 +288,31 @@ impl Store {
         .await
     }
 
+    /// On-demand fixed-width UTC bins. Upper limits and missing flux contribute
+    /// counts, never weighted flux. Programs and measurement kinds stay separate.
+    /// Raw histories remain authoritative; this is not a persisted bin cache.
+    pub async fn bins(&self, object_id: &str, cadence_seconds: u32) -> Result<Vec<Value>> {
+        ensure!(
+            (1..=31_536_000).contains(&cadence_seconds),
+            "cadence must be 1..31536000 seconds"
+        );
+        let cadence = cadence_seconds.to_string();
+        let body = self
+            .execute(
+                BINNED_SQL,
+                &[
+                    ("param_object_id", object_id),
+                    ("param_cadence_seconds", &cadence),
+                ],
+                String::new(),
+            )
+            .await?;
+        body.lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| Ok(serde_json::from_str(line)?))
+            .collect()
+    }
+
     pub async fn storage(&self) -> Result<Value> {
         let body = self.execute("SELECT sum(rows) AS physical_rows, sum(data_compressed_bytes) AS compressed_column_bytes, \
             sum(bytes_on_disk) AS bytes_on_disk FROM system.parts WHERE active AND database=currentDatabase() \
@@ -301,6 +327,29 @@ impl Store {
             .await?;
         physical["unique_rows"] =
             serde_json::from_str::<Value>(logical.trim())?["unique_rows"].clone();
+        let columns=self.execute("SELECT name, type, data_compressed_bytes, data_uncompressed_bytes, marks_bytes \
+            FROM system.columns WHERE database=currentDatabase() AND table='boom_photometry' ORDER BY position FORMAT JSONEachRow",&[],String::new()).await?;
+        physical["columns"] = serde_json::to_value(
+            columns
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .map(serde_json::from_str::<Value>)
+                .collect::<std::result::Result<Vec<_>, _>>()?,
+        )?;
+        let logical_payload=self.execute("SELECT sum(length(payload)) AS bytes FROM boom_photometry FINAL FORMAT JSONEachRow",&[],String::new()).await?;
+        physical["logical_payload_bytes"] =
+            serde_json::from_str::<Value>(logical_payload.trim())?["bytes"].clone();
+        let events=self.execute("SELECT event, value, description FROM system.events WHERE event IN \
+            ('InsertedRows','InsertedBytes','DuplicatedInsertedBlocks','MergedRows','MergedUncompressedBytes', \
+             'MergeTreeDataWriterRows','MergeTreeDataWriterUncompressedBytes','MergeTreeDataWriterCompressedBytes', \
+             'WriteBufferFromFileDescriptorWriteBytes') FORMAT JSONEachRow",&[],String::new()).await?;
+        physical["server_profile_events"] = serde_json::to_value(
+            events
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .map(serde_json::from_str::<Value>)
+                .collect::<std::result::Result<Vec<_>, _>>()?,
+        )?;
         Ok(physical)
     }
 }

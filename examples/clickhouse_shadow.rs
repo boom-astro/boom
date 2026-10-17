@@ -51,6 +51,9 @@ async fn main() -> Result<()> {
                 eprintln!("Inserted {} normalized BOOM records", batch.rows);
             }
         }
+        Some("bins") if args.len()==3 => {
+            println!("{}",serde_json::to_string_pretty(&store_from_env()?.bins(&args[1],args[2].parse()?).await?)?);
+        }
         Some("read") if args.len() == 2 => {
             let history = store_from_env()?.history(&args[1]).await?;
             // Deserialization restores fields needed by BOOM's enrichment
@@ -71,7 +74,7 @@ async fn main() -> Result<()> {
             );
         }
         _ => bail!(
-            "usage: clickhouse_shadow prepare FILE REVISION | write FILE REVISION | read OBJECT_ID"
+            "usage: clickhouse_shadow prepare FILE REVISION | write FILE REVISION | read OBJECT_ID | bins OBJECT_ID CADENCE_SECONDS"
         ),
     }
     Ok(())

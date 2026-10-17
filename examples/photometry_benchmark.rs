@@ -11,7 +11,7 @@ use boom::{
     photometry::{audit, Shadow, STATUS},
     utils::{db::initialize_survey_indexes, enums::Survey},
 };
-use futures::TryStreamExt;
+use futures::{StreamExt, TryStreamExt};
 use mongodb::bson::{self, doc, Document};
 use photometry_support::{spawn_worker, stop_worker};
 use redis::AsyncCommands;
@@ -63,6 +63,10 @@ struct Plan {
     enrichment_samples: usize,
     #[serde(default)]
     filters_are_deployed_export: bool,
+    #[serde(default)]
+    recovery_only: bool,
+    #[serde(default)]
+    keep_phase_data: bool,
     #[serde(default)]
     target_packets_per_second: Option<f64>,
     #[serde(default)]
@@ -529,12 +533,14 @@ async fn phase(config_path: &Path, raw: &Value, workload: &Workload, name: &str)
     let mut histories = Vec::new();
     let mut enrichment = Vec::new();
     if let Some(shadow) = &shadow {
-        for object in &workload.objects {
+        histories=futures::stream::iter(workload.objects.iter().cloned()).map(|object| {
+            let shadow=shadow.clone();
+            tokio::spawn(async move {
             let t = Instant::now();
-            let (revision, history) = shadow.snapshot(object).await?;
+            let (revision, history) = shadow.snapshot(&object).await?;
             let mongo_ms = t.elapsed().as_secs_f64() * 1000.0;
             let t = Instant::now();
-            let mirrored = shadow.store.history(object).await?;
+            let mirrored = shadow.store.history(&object).await?;
             let read_ms = t.elapsed().as_secs_f64() * 1000.0;
             let report =
                 boom::photometry::parity::compare(&history, &mirrored, revision, 0.0, read_ms)?;
@@ -555,9 +561,12 @@ async fn phase(config_path: &Path, raw: &Value, workload: &Workload, name: &str)
                 .reduce(f64::max)
                 .zip(epochs.iter().copied().reduce(f64::min))
                 .map(|(last, first)| last - first);
-            histories.push(json!({"object_id":object,"source_counts":report.source_counts,"revision":report.revision,"history_span_days":span,
-                "mongo_ms":mongo_ms,"read_ms":read_ms,"validation":"read_only; no sink repair"}));
-        }
+                Ok::<_,anyhow::Error>(json!({"object_id":object,"source_counts":report.source_counts,"revision":report.revision,"history_span_days":span,
+                "mongo_ms":mongo_ms,"read_ms":read_ms,"validation":"read_only; no sink repair"}))
+            })
+        }).buffer_unordered(4).map(|joined|joined.map_err(anyhow::Error::from).and_then(|report|report))
+          .try_collect::<Vec<_>>().await?;
+        histories.sort_by(|a, b| a["object_id"].as_str().cmp(&b["object_id"].as_str()));
         let worker = ZtfEnrichmentWorker::new(path.to_str().unwrap(), None)
             .await
             .map_err(|error| anyhow::anyhow!("{error}"))?;
@@ -605,7 +614,19 @@ async fn phase(config_path: &Path, raw: &Value, workload: &Workload, name: &str)
                 parity["equal"] == true,
                 "full enrichment parity failed for candid {candid}"
             );
-            enrichment.push(json!({"candid":candid,"object_id":object,"pair_ms":started.elapsed().as_secs_f64()*1000.0,"parity":parity}));
+            let pair_ms = started.elapsed().as_secs_f64() * 1000.0;
+            let (revision, source_history) = shadow.snapshot(object).await?;
+            let mut source_history = serde_json::to_value(source_history)?;
+            source_history["_id"] = json!(object);
+            source_history["version"] = json!(revision);
+            let mut binned = Vec::new();
+            for cadence in [900, 3600, 86400] {
+                binned.push(json!({"cadence_seconds":cadence,"rows":shadow.store.bins(object,cadence).await?}));
+            }
+            enrichment.push(
+                json!({"candid":candid,"object_id":object,"pair_ms":pair_ms,"parity":parity,
+                "binning":{"mongo_history":source_history,"cadences":binned}}),
+            );
         }
     }
     let mongo = db.run_command(doc! {"dbStats":1,"scale":1}).await?;
@@ -643,13 +664,17 @@ async fn phase(config_path: &Path, raw: &Value, workload: &Workload, name: &str)
         redis::cmd("DBSIZE").query_async::<u64>(&mut redis).await? == 0,
         "phase left unexpected Redis keys"
     );
-    Ok(
-        json!({"phase":name,"packets":workload.count,"unique_alerts":workload.unique_alerts,"objects":workload.objects.len(),
+    let report = json!({"phase":name,"packets":workload.count,"unique_alerts":workload.unique_alerts,"objects":workload.objects.len(),
         "ingest_seconds":ingest_seconds,"settled_seconds":settled_seconds,"ingest_packets_per_second":workload.count as f64/ingest_seconds,
         "settled_packets_per_second":workload.count as f64/settled_seconds,"producer":produced,"samples":samples,"concurrent_read_ms":reads,"empty_history_reads":empty_reads,
         "concurrent_read_backend":if baseline {"mongo"} else {"clickhouse"},
-        "recovery":recovery_result,"histories":histories,"enrichment":enrichment,"storage":{"mongo_database":mongo,"mongo_aux":aux,"clickhouse":sink}}),
-    )
+        "recovery":recovery_result,"histories":histories,"enrichment":enrichment,"storage":{"mongo_database":mongo,"mongo_aux":aux,"clickhouse":sink}});
+    if !workload.plan.keep_phase_data {
+        db.drop()
+            .await
+            .context("dropping disposable completed-phase database")?;
+    }
+    Ok(report)
 }
 
 #[tokio::main]
@@ -670,13 +695,20 @@ async fn main() -> Result<()> {
     let raw: Value = serde_json::from_slice(&std::fs::read(&args[0])?)?;
     let mut phases = BTreeMap::new();
     let result: Result<()> = async {
-        for name in ["baseline", "shadow", "recovery"] {
+        let selected = if workload.plan.recovery_only {
+            vec!["recovery"]
+        } else {
+            vec!["baseline", "shadow", "recovery"]
+        };
+        for name in selected {
             println!(
                 "Starting {name}: {} packets / {} objects",
                 workload.count,
                 workload.objects.len()
             );
-            let report = phase(Path::new(&args[0]), &raw, &workload, name).await?;
+            let report = phase(Path::new(&args[0]), &raw, &workload, name)
+                .await
+                .with_context(|| format!("benchmark phase {name}"))?;
             phases.insert(name, report);
             std::fs::write(
                 &args[3],
@@ -710,6 +742,8 @@ mod tests {
             timeout_seconds: 60,
             enrichment_samples: 4,
             filters_are_deployed_export: false,
+            recovery_only: false,
+            keep_phase_data: false,
             target_packets_per_second: None,
             max_lag_seconds: None,
         }
