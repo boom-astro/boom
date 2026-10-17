@@ -1,0 +1,319 @@
+//! Experimental ZTF shadow storage. MongoDB remains authoritative.
+pub mod audit;
+pub mod parity;
+pub mod store;
+
+use anyhow::{ensure, Context, Result};
+use mongodb::{
+    bson::{doc, DateTime, Document},
+    options::{CollectionOptions, Hint, ReturnDocument, WriteConcern},
+    Collection, Database, IndexModel,
+};
+use serde::Serialize;
+use std::{
+    sync::LazyLock,
+    time::{Duration, Instant},
+};
+use tokio::task::JoinHandle;
+use tracing::{info, warn};
+use uuid::Uuid;
+
+use crate::conf::PhotometryShadowConfig;
+use store::{PreparedBatch, Store, ZtfHistory};
+
+pub const OUTBOX: &str = "photometry_shadow_outbox";
+pub const STATUS: &str = "photometry_shadow_status";
+const LEASE_MS: i64 = 180_000;
+static PENDING: LazyLock<opentelemetry::metrics::Gauge<u64>> = LazyLock::new(|| {
+    crate::utils::o11y::metrics::SCHEDULER_METER
+        .u64_gauge("photometry_shadow.pending")
+        .build()
+});
+static OLDEST: LazyLock<opentelemetry::metrics::Gauge<f64>> = LazyLock::new(|| {
+    crate::utils::o11y::metrics::SCHEDULER_METER
+        .f64_gauge("photometry_shadow.oldest_age_seconds")
+        .build()
+});
+
+#[derive(Clone)]
+pub struct Shadow {
+    pub store: Store,
+    db: Database,
+    outbox: Collection<Document>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn defaults_are_disabled_and_credentials_are_redacted() {
+        let mut config = PhotometryShadowConfig::default();
+        assert!(config.url.is_empty());
+        config.password = "private-value".into();
+        assert!(!format!("{config:?}").contains("private-value"));
+        config.url = "http://user:private-value@localhost:8123".into();
+        assert!(Store::new(&config).is_err());
+    }
+}
+
+pub struct ShadowWorker {
+    shadow: Shadow,
+    task: JoinHandle<()>,
+}
+
+impl Drop for ShadowWorker {
+    fn drop(&mut self) {
+        self.task.abort(); // An interrupted lease expires; its entry is not lost.
+    }
+}
+
+impl ShadowWorker {
+    pub async fn enqueue(&self, candid: i64, object_id: &str) -> mongodb::error::Result<()> {
+        self.shadow.enqueue(candid, object_id).await
+    }
+}
+
+#[derive(Debug, Default, Serialize)]
+pub struct DrainReport {
+    pub delivered: usize,
+    pub waiting_for_mongo: usize,
+    pub failed: usize,
+}
+
+impl Shadow {
+    pub async fn new(config: &PhotometryShadowConfig, db: Database) -> Result<Self> {
+        ensure!(!config.url.is_empty(), "shadow URL is not configured");
+        ensure!(
+            config.poll_seconds > 0 && config.drain_rows > 0,
+            "shadow poll_seconds and drain_rows must be positive"
+        );
+        let store = Store::new(config)?;
+        let outbox = db.collection_with_options(
+            OUTBOX,
+            CollectionOptions::builder()
+                .write_concern(WriteConcern::majority())
+                .build(),
+        );
+        outbox
+            .create_indexes([
+                IndexModel::builder()
+                    .keys(doc! {"next_attempt":1,"_id":1})
+                    .build(),
+                IndexModel::builder().keys(doc! {"created_at":1}).build(),
+            ])
+            .await?;
+        Ok(Self { store, db, outbox })
+    }
+
+    pub async fn start(
+        config: &PhotometryShadowConfig,
+        db: Database,
+    ) -> Result<Option<ShadowWorker>> {
+        if config.url.is_empty() {
+            return Ok(None);
+        }
+        let shadow = Self::new(config, db).await?;
+        let drainer = shadow.clone();
+        let poll_seconds = config.poll_seconds;
+        let limit = config.drain_rows;
+        let task = tokio::spawn(async move {
+            loop {
+                match drainer.drain(limit).await {
+                    Ok(report) => {
+                        if report.delivered + report.failed > 0 {
+                            info!(
+                                delivered = report.delivered,
+                                failed = report.failed,
+                                "photometry shadow drain"
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        warn!(error = %error, "photometry shadow drain failed; durable entries retained")
+                    }
+                }
+                if let Ok(lag) = drainer.lag().await {
+                    PENDING.record(lag["pending"].as_u64().unwrap_or(0), &[]);
+                    OLDEST.record(lag["oldest_age_seconds"].as_f64().unwrap_or(0.0), &[]);
+                }
+                tokio::time::sleep(Duration::from_secs(poll_seconds)).await;
+            }
+        });
+        Ok(Some(ShadowWorker { shadow, task }))
+    }
+
+    /// Write ahead of the authoritative Mongo alert. Only a completed Mongo
+    /// alert makes this reference eligible for delivery. No photometry is
+    /// duplicated in the outbox, and an exact retry keeps the original entry.
+    pub async fn enqueue(&self, candid: i64, object_id: &str) -> mongodb::error::Result<()> {
+        self.outbox.update_one(doc! {"_id": candid}, doc! {"$setOnInsert": {
+            "object_id": object_id, "created_at": DateTime::now(),
+            "next_attempt": DateTime::from_millis(0), "lease_until": DateTime::from_millis(0), "attempts": 0_i64, "state":"pending"
+        }}).upsert(true).await?;
+        Ok(())
+    }
+
+    pub async fn snapshot(&self, object_id: &str) -> Result<(u64, ZtfHistory)> {
+        let source = self
+            .db
+            .collection::<Document>("ZTF_alerts_aux")
+            .find_one(doc! {"_id": object_id})
+            .await?
+            .context("Mongo aux is missing")?;
+        let version = match source.get("version") {
+            None | Some(mongodb::bson::Bson::Null) => 0,
+            Some(value) => value
+                .as_i64()
+                .or_else(|| value.as_i32().map(i64::from))
+                .context("Mongo aux version must be an integer")?,
+        };
+        ensure!(version >= 0, "negative Mongo aux version");
+        let value = serde_json::to_value(source)?;
+        let history = ZtfHistory {
+            prv_candidates: serde_json::from_value(
+                value
+                    .get("prv_candidates")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!([])),
+            )?,
+            prv_nondetections: serde_json::from_value(
+                value
+                    .get("prv_nondetections")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!([])),
+            )?,
+            fp_hists: serde_json::from_value(
+                value
+                    .get("fp_hists")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!([])),
+            )?,
+        };
+        Ok((version as u64, history))
+    }
+
+    /// Replay the currently accepted Mongo snapshot, using its atomic aux
+    /// version rather than Kafka offsets, alert IDs, or the retry time.
+    pub async fn copy_object(&self, object_id: &str) -> Result<parity::ParityReport> {
+        let source_started = Instant::now();
+        let (revision, source) = self.snapshot(object_id).await?;
+        let mongo_snapshot_ms = source_started.elapsed().as_secs_f64() * 1000.0;
+        let batch = PreparedBatch::ztf(
+            object_id,
+            revision,
+            &source.prv_candidates,
+            &source.prv_nondetections,
+            &source.fp_hists,
+        )?;
+        let started = Instant::now();
+        self.store.insert(&batch).await?;
+        let write_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let started = Instant::now();
+        let target = self.store.history(object_id).await?;
+        let read_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let (current_revision, _) = self.snapshot(object_id).await?;
+        ensure!(
+            current_revision == revision,
+            "Mongo aux changed during comparison; retrying latest snapshot"
+        );
+        let mut report = parity::compare(&source, &target, revision, write_ms, read_ms)?;
+        report.mongo_snapshot_ms = mongo_snapshot_ms;
+        // Keep mismatches visible even while the outbox is retrying them.
+        let report_doc = mongodb::bson::to_document(&report)?;
+        self.db
+            .collection::<Document>(STATUS)
+            .update_one(
+                doc! {"_id": object_id},
+                doc! {"$set": {"report": report_doc, "checked_at": DateTime::now()}},
+            )
+            .upsert(true)
+            .await?;
+        ensure!(
+            report.histories_equal && report.features_equal,
+            "photometry shadow parity mismatch for object {object_id}"
+        );
+        Ok(report)
+    }
+
+    pub async fn drain(&self, limit: usize) -> Result<DrainReport> {
+        let mut report = DrainReport::default();
+        for _ in 0..limit {
+            let now = DateTime::now();
+            let owner = Uuid::new_v4().to_string();
+            let entry = self.outbox.find_one_and_update(doc! {
+                "next_attempt": {"$lte": now}, "lease_until": {"$lte": now}
+            }, doc! {"$set": {"lease_owner": &owner, "lease_until": DateTime::from_millis(now.timestamp_millis() + LEASE_MS), "last_attempt": now, "state":"delivering", "next_attempt":DateTime::from_millis(now.timestamp_millis()+LEASE_MS)},
+                      "$inc": {"attempts": 1_i64}})
+                .sort(doc! {"next_attempt": 1, "_id": 1}).return_document(ReturnDocument::After).await?;
+            let Some(entry) = entry else {
+                break;
+            };
+            let candid = entry.get_i64("_id")?;
+            let object_id = entry.get_str("object_id")?;
+            let owned = doc! {"_id": candid, "lease_owner": &owner};
+            let delivered = async {
+                let alert = self
+                    .db
+                    .collection::<Document>("ZTF_alerts")
+                    .find_one(doc! {"_id": candid, "objectId": object_id})
+                    .await?;
+                if alert.is_none() {
+                    return Ok::<_, anyhow::Error>(false);
+                }
+                self.copy_object(object_id).await?;
+                Ok(true)
+            }
+            .await;
+            match delivered {
+                Ok(true) => {
+                    // Ack only after ClickHouse readback, parity, and the status
+                    // record succeed. Lease ownership fences a delayed worker.
+                    let ack = self.outbox.delete_one(owned).await?;
+                    report.delivered += ack.deleted_count as usize;
+                }
+                outcome => {
+                    let (state, error) = match outcome {
+                        Ok(false) => {
+                            report.waiting_for_mongo += 1;
+                            (
+                                "waiting_for_mongo",
+                                "authoritative alert not complete".to_owned(),
+                            )
+                        }
+                        Err(error) => {
+                            report.failed += 1;
+                            ("retry", error.to_string())
+                        }
+                        Ok(true) => unreachable!(),
+                    };
+                    let attempts = entry.get_i64("attempts").unwrap_or(1);
+                    let delay_ms = (1_i64 << attempts.clamp(1, 8)) * 1000;
+                    self.outbox.update_one(owned, doc! {"$set": {
+                        "state": state, "last_error": error, "next_attempt": DateTime::from_millis(DateTime::now().timestamp_millis() + delay_ms),
+                        "lease_until": DateTime::from_millis(0)
+                    }, "$unset": {"lease_owner": ""}}).await?;
+                }
+            }
+        }
+        Ok(report)
+    }
+
+    pub async fn lag(&self) -> Result<serde_json::Value> {
+        let pending = self
+            .outbox
+            .count_documents(doc! {})
+            .hint(Hint::Name("_id_".into()))
+            .await?;
+        let oldest = self
+            .outbox
+            .find_one(doc! {})
+            .sort(doc! {"created_at": 1})
+            .await?;
+        let oldest_age_seconds = oldest.and_then(|d| {
+            d.get_datetime("created_at").ok().map(|t| {
+                (DateTime::now().timestamp_millis() - t.timestamp_millis()) as f64 / 1000.0
+            })
+        });
+        Ok(serde_json::json!({"pending": pending, "oldest_age_seconds": oldest_age_seconds}))
+    }
+}
