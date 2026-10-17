@@ -119,6 +119,7 @@ photometry_shadow:
   password: "" # Environment only: BOOM_PHOTOMETRY_SHADOW__PASSWORD
   poll_seconds: 5
   drain_rows: 4
+  concurrent_deliveries: 1 # Bounded 1..32; opt-in tuning, total work remains limited by drain_rows.
 milvus:
   # Vector database holding the AppleCiDEr fusion model's embeddings.
   # See docs/milvus.md.

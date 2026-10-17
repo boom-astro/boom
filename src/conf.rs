@@ -1275,6 +1275,7 @@ pub struct PhotometryShadowConfig {
     pub password: String,
     pub poll_seconds: u64,
     pub drain_rows: usize,
+    pub concurrent_deliveries: usize,
 }
 
 impl Default for PhotometryShadowConfig {
@@ -1286,6 +1287,7 @@ impl Default for PhotometryShadowConfig {
             password: String::new(),
             poll_seconds: 5,
             drain_rows: 4,
+            concurrent_deliveries: 1,
         }
     }
 }

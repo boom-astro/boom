@@ -40,6 +40,7 @@ pub struct Shadow {
     pub store: Store,
     db: Database,
     outbox: Collection<Document>,
+    concurrent_deliveries: usize,
 }
 
 #[cfg(test)]
@@ -49,6 +50,7 @@ mod tests {
     fn defaults_are_disabled_and_credentials_are_redacted() {
         let mut config = PhotometryShadowConfig::default();
         assert!(config.url.is_empty());
+        assert_eq!(config.concurrent_deliveries, 1);
         config.password = "private-value".into();
         assert!(!format!("{config:?}").contains("private-value"));
         config.url = "http://user:private-value@localhost:8123".into();
@@ -87,6 +89,10 @@ impl Shadow {
             config.poll_seconds > 0 && config.drain_rows > 0,
             "shadow poll_seconds and drain_rows must be positive"
         );
+        ensure!(
+            (1..=32).contains(&config.concurrent_deliveries),
+            "shadow concurrent_deliveries must be between 1 and 32"
+        );
         let store = Store::new(config)?;
         let outbox = db.collection_with_options(
             OUTBOX,
@@ -102,7 +108,12 @@ impl Shadow {
                 IndexModel::builder().keys(doc! {"created_at":1}).build(),
             ])
             .await?;
-        Ok(Self { store, db, outbox })
+        Ok(Self {
+            store,
+            db,
+            outbox,
+            concurrent_deliveries: config.concurrent_deliveries,
+        })
     }
 
     pub async fn start(
@@ -236,66 +247,91 @@ impl Shadow {
     }
 
     pub async fn drain(&self, limit: usize) -> Result<DrainReport> {
+        if limit == 0 {
+            return Ok(DrainReport::default());
+        }
+        let concurrency = self.concurrent_deliveries.min(limit);
+        let reports = futures::future::try_join_all((0..concurrency).map(|lane| async move {
+            let mut total = DrainReport::default();
+            for _ in (lane..limit).step_by(concurrency) {
+                let Some(report) = self.deliver_one().await? else {
+                    break;
+                };
+                total.delivered += report.delivered;
+                total.waiting_for_mongo += report.waiting_for_mongo;
+                total.failed += report.failed;
+            }
+            Ok::<_, anyhow::Error>(total)
+        }))
+        .await?;
+        let mut total = DrainReport::default();
+        for report in reports {
+            total.delivered += report.delivered;
+            total.waiting_for_mongo += report.waiting_for_mongo;
+            total.failed += report.failed;
+        }
+        Ok(total)
+    }
+
+    async fn deliver_one(&self) -> Result<Option<DrainReport>> {
         let mut report = DrainReport::default();
-        for _ in 0..limit {
-            let now = DateTime::now();
-            let owner = Uuid::new_v4().to_string();
-            let entry = self.outbox.find_one_and_update(doc! {
+        let now = DateTime::now();
+        let owner = Uuid::new_v4().to_string();
+        let entry = self.outbox.find_one_and_update(doc! {
                 "next_attempt": {"$lte": now}, "lease_until": {"$lte": now}
             }, doc! {"$set": {"lease_owner": &owner, "lease_until": DateTime::from_millis(now.timestamp_millis() + LEASE_MS), "last_attempt": now, "state":"delivering", "next_attempt":DateTime::from_millis(now.timestamp_millis()+LEASE_MS)},
                       "$inc": {"attempts": 1_i64}})
                 .sort(doc! {"next_attempt": 1, "_id": 1}).return_document(ReturnDocument::After).await?;
-            let Some(entry) = entry else {
-                break;
-            };
-            let candid = entry.get_i64("_id")?;
-            let object_id = entry.get_str("object_id")?;
-            let owned = doc! {"_id": candid, "lease_owner": &owner};
-            let delivered = async {
-                let alert = self
-                    .db
-                    .collection::<Document>("ZTF_alerts")
-                    .find_one(doc! {"_id": candid, "objectId": object_id})
-                    .await?;
-                if alert.is_none() {
-                    return Ok::<_, anyhow::Error>(false);
-                }
-                self.copy_object(object_id).await?;
-                Ok(true)
+        let Some(entry) = entry else {
+            return Ok(None);
+        };
+        let candid = entry.get_i64("_id")?;
+        let object_id = entry.get_str("object_id")?;
+        let owned = doc! {"_id": candid, "lease_owner": &owner};
+        let delivered = async {
+            let alert = self
+                .db
+                .collection::<Document>("ZTF_alerts")
+                .find_one(doc! {"_id": candid, "objectId": object_id})
+                .await?;
+            if alert.is_none() {
+                return Ok::<_, anyhow::Error>(false);
             }
-            .await;
-            match delivered {
-                Ok(true) => {
-                    // Ack only after ClickHouse readback, parity, and the status
-                    // record succeed. Lease ownership fences a delayed worker.
-                    let ack = self.outbox.delete_one(owned).await?;
-                    report.delivered += ack.deleted_count as usize;
-                }
-                outcome => {
-                    let (state, error) = match outcome {
-                        Ok(false) => {
-                            report.waiting_for_mongo += 1;
-                            (
-                                "waiting_for_mongo",
-                                "authoritative alert not complete".to_owned(),
-                            )
-                        }
-                        Err(error) => {
-                            report.failed += 1;
-                            ("retry", error.to_string())
-                        }
-                        Ok(true) => unreachable!(),
-                    };
-                    let attempts = entry.get_i64("attempts").unwrap_or(1);
-                    let delay_ms = (1_i64 << attempts.clamp(1, 8)) * 1000;
-                    self.outbox.update_one(owned, doc! {"$set": {
+            self.copy_object(object_id).await?;
+            Ok(true)
+        }
+        .await;
+        match delivered {
+            Ok(true) => {
+                // Ack only after ClickHouse readback, parity, and the status
+                // record succeed. Lease ownership fences a delayed worker.
+                let ack = self.outbox.delete_one(owned).await?;
+                report.delivered += ack.deleted_count as usize;
+            }
+            outcome => {
+                let (state, error) = match outcome {
+                    Ok(false) => {
+                        report.waiting_for_mongo += 1;
+                        (
+                            "waiting_for_mongo",
+                            "authoritative alert not complete".to_owned(),
+                        )
+                    }
+                    Err(error) => {
+                        report.failed += 1;
+                        ("retry", error.to_string())
+                    }
+                    Ok(true) => unreachable!(),
+                };
+                let attempts = entry.get_i64("attempts").unwrap_or(1);
+                let delay_ms = (1_i64 << attempts.clamp(1, 8)) * 1000;
+                self.outbox.update_one(owned, doc! {"$set": {
                         "state": state, "last_error": error, "next_attempt": DateTime::from_millis(DateTime::now().timestamp_millis() + delay_ms),
                         "lease_until": DateTime::from_millis(0)
                     }, "$unset": {"lease_owner": ""}}).await?;
-                }
             }
         }
-        Ok(report)
+        Ok(Some(report))
     }
 
     pub async fn lag(&self) -> Result<serde_json::Value> {

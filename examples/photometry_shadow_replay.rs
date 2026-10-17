@@ -1,11 +1,11 @@
 //! Development-only replay against isolated services. Never a production backfill.
 use anyhow::{ensure, Context, Result};
 use boom::{
-    alert::{alert_temp_queue_name, run_alert_worker, ZtfAlertWorker},
+    alert::alert_temp_queue_name,
     conf::AppConfig,
     enrichment::{create_ztf_alert_pipeline, ZtfAlertForEnrichment},
     photometry::{audit, Shadow, OUTBOX, STATUS},
-    utils::{enums::Survey, worker::WorkerCmd},
+    utils::enums::Survey,
 };
 use futures::TryStreamExt;
 use mongodb::bson::{self, doc, DateTime, Document};
@@ -15,8 +15,8 @@ use std::{
     path::PathBuf,
     time::{Duration, Instant},
 };
-use tokio::sync::mpsc;
-use uuid::Uuid;
+mod photometry_support;
+use photometry_support::{spawn_worker, stop_worker, wait_for_alerts};
 
 fn with_late_history(bytes: &[u8], ordinal: i64) -> Result<Vec<u8>> {
     use apache_avro::{types::Value as Avro, Reader, Writer};
@@ -80,46 +80,6 @@ fn with_late_history(bytes: &[u8], ordinal: i64) -> Result<Vec<u8>> {
     Ok(writer.into_inner()?)
 }
 
-async fn wait_for_alerts(db: &mongodb::Database, count: u64) -> Result<()> {
-    let deadline = Instant::now() + Duration::from_secs(60);
-    while db
-        .collection::<Document>("ZTF_alerts")
-        .count_documents(doc! {})
-        .await?
-        < count
-    {
-        ensure!(
-            Instant::now() < deadline,
-            "worker did not ingest fixture alerts in time"
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    Ok(())
-}
-
-fn spawn_worker(
-    path: &str,
-) -> (
-    mpsc::Sender<WorkerCmd>,
-    tokio::task::JoinHandle<Result<(), boom::alert::AlertWorkerError>>,
-) {
-    let (sender, receiver) = mpsc::channel(1);
-    let path = path.to_owned();
-    let task = tokio::task::spawn_blocking(move || {
-        run_alert_worker::<ZtfAlertWorker>(receiver, &path, Uuid::new_v4())
-    });
-    (sender, task)
-}
-
-async fn stop_worker(
-    sender: mpsc::Sender<WorkerCmd>,
-    task: tokio::task::JoinHandle<Result<(), boom::alert::AlertWorkerError>>,
-) -> Result<()> {
-    sender.send(WorkerCmd::TERM).await?;
-    tokio::time::timeout(Duration::from_secs(10), task).await???;
-    Ok(())
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
@@ -128,30 +88,7 @@ async fn main() -> Result<()> {
         "usage: photometry_shadow_replay CONFIG FIXTURE_DIR FILTER_DIR REPORT_JSON"
     );
     let config = AppConfig::from_path(&args[0])?;
-    // Fail closed if ambient .env/BOOM variables override the disposable config.
-    ensure!(
-        config.database.host == "127.0.0.1"
-            && config.database.name.starts_with("boom_shadow_replay_"),
-        "requires an isolated local replay database"
-    );
-    ensure!(
-        matches!(&config.cutouts_storage, boom::conf::CutoutsStorage::Mongo(m)
-        if m.host==config.database.host && m.port==config.database.port && m.name==config.database.name),
-        "cutouts must use the same disposable local Mongo database"
-    );
-    ensure!(
-        config.redis.host == "127.0.0.1" && config.redis.port != 6379,
-        "requires a dedicated local Redis port"
-    );
-    let url: reqwest::Url = config.photometry_shadow.url.parse()?;
-    ensure!(
-        url.host_str() == Some("127.0.0.1"),
-        "replay ClickHouse must be loopback-only"
-    );
-    ensure!(
-        config.photometry_shadow.database == config.database.name,
-        "ClickHouse must use the same isolated replay database name"
-    );
+    photometry_support::validate(&config)?;
     let db = config.build_db().await?;
     ensure!(
         db.collection::<Document>("ZTF_alerts")
@@ -456,17 +393,7 @@ async fn main() -> Result<()> {
         json!({"scenario":"existing-alert shortcut preserves shadow delivery", "result":"PASS"}),
     );
 
-    let mut filters = Vec::new();
-    for entry in std::fs::read_dir(&args[2])? {
-        let path = entry?.path();
-        if path.extension().is_some_and(|ext| ext == "json") {
-            let export:Value=serde_json::from_str(&std::fs::read_to_string(&path)?)?;
-            for mut row in audit::exported(&export)? {
-                row["filter"]=json!(path.file_name().and_then(|n|n.to_str()));
-                filters.push(row);
-            }
-        }
-    }
+    let filters=audit::inventory(std::path::Path::new(&args[2]))?;
     let mongo_storage = db
         .run_command(doc! {"collStats":"ZTF_alerts_aux","scale":1})
         .await?;

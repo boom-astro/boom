@@ -4,6 +4,52 @@ use serde::Serialize;
 use serde_json::Value;
 use std::collections::BTreeSet;
 
+/// Read a pipeline/export JSON file, a JSONL export, or a directory of either.
+/// Only summaries leave this function; pipeline bodies stay in the input files.
+pub fn inventory(path: &std::path::Path) -> anyhow::Result<Vec<Value>> {
+    use anyhow::Context;
+    let mut paths = if path.is_dir() {
+        std::fs::read_dir(path)?
+            .map(|entry| entry.map(|entry| entry.path()))
+            .collect::<std::io::Result<Vec<_>>>()?
+    } else {
+        vec![path.to_owned()]
+    };
+    paths.retain(|path| {
+        path.extension()
+            .is_some_and(|ext| ext == "json" || ext == "jsonl")
+    });
+    paths.sort();
+    let mut result = Vec::new();
+    for path in paths {
+        let text = std::fs::read_to_string(&path)?;
+        let values: Vec<Value> = if path.extension().is_some_and(|ext| ext == "jsonl") {
+            text.lines()
+                .enumerate()
+                .filter(|(_, line)| !line.trim().is_empty())
+                .map(|(index, line)| {
+                    serde_json::from_str(line)
+                        .with_context(|| format!("{}:{}", path.display(), index + 1))
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?
+        } else {
+            vec![serde_json::from_str(&text).with_context(|| path.display().to_string())?]
+        };
+        for value in values {
+            for mut row in exported(&value)? {
+                let name = path
+                    .file_name()
+                    .context("missing filter file name")?
+                    .to_string_lossy();
+                row["file"] = serde_json::json!(name);
+                row["filter"] = serde_json::json!(name);
+                result.push(row);
+            }
+        }
+    }
+    Ok(result)
+}
+
 #[derive(Debug, Serialize)]
 pub struct FilterAudit {
     pub classification: &'static str,
@@ -140,6 +186,29 @@ pub fn pipeline(stages: &[Value]) -> FilterAudit {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn jsonl_inventory_selects_active_versions_and_skips_inactive_filters() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("active.jsonl");
+        let active = json!({"active":true,"active_fid":"current","fv":[
+            {"fid":"old","pipeline":"[{\"$set\":{\"x\":\"$fp_hists\"}}]"},
+            {"fid":"current","pipeline":"[{\"$match\":{\"candidate.drb\":{\"$gt\":0.9}}}]"}]});
+        let inactive = json!({"active":false});
+        std::fs::write(&path, format!("{active}\n\n{inactive}\n")).unwrap();
+        let rows = inventory(&path).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0]["audit"]["classification"],
+            "no_history_reference_detected"
+        );
+        assert_eq!(rows[0]["file"], "active.jsonl");
+        std::fs::write(&path, "invalid export\n").unwrap();
+        assert!(inventory(&path)
+            .unwrap_err()
+            .to_string()
+            .ends_with("active.jsonl:1"));
+    }
+
     #[test]
     fn inventory_is_conservative_about_windows_and_dynamic_access() {
         let ordinary = pipeline(&[json!({"$match":{"candidate.drb":{"$gt":0.9}}})]);

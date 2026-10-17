@@ -123,6 +123,16 @@ stores, pending lag, and a filter dependency inventory. The bundled fixtures are
 tiny. These measurements are development evidence, not production capacity or
 latency forecasts; Mongo aux also contains non-photometry metadata.
 
+The `photometry_benchmark` example extends this into separate baseline, healthy
+shadow, and sink-outage phases using a timestamped, checksum-verified Avro
+manifest or a labeled fixture-derived workload. It validates all sink histories
+without repairing them and compares a deterministic sample through actual CPU
+enrichment properties, model input tensors, predictions, and embeddings. Its
+controller, corpus preparation and decision-report documentation are in
+`boom-clickhouse/examples/boom/BENCHMARK.md`. Model comparisons run after timed
+ingestion; these are ingestion/shadow measurements, not full classification
+throughput. Captured content with synthetic pacing is labeled accordingly.
+
 ## The filter boundary remains a decision
 
 The audit uses BOOM's existing field-dependency detector and conservatively flags
@@ -138,6 +148,13 @@ The repository's sample pipelines are only an initial inventory. Run the same
 audit on an export of deployed active pipelines before proposing a recent-window
 size. Existing Mongo filter execution and program authorization remain in place.
 The internal ClickHouse client returns all programs and is not a public API.
+
+Delivery defaults to serial execution. `photometry_shadow.concurrent_deliveries`
+(or `BOOM_PHOTOMETRY_SHADOW__CONCURRENT_DELIVERIES`) permits 1–32 parallel
+lease-owned deliveries, still capped by `drain_rows` total claims per poll. Each
+claim retains its own acknowledgement fence and retry state. The benchmark
+records this tuning explicitly; enabling parallel delivery does not change row
+revision ordering or source authority.
 
 ## What would justify the next phase
 

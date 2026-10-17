@@ -1,6 +1,6 @@
 //! Read-only inventory of exported active filters; no service connections.
 use anyhow::{ensure, Result};
-use serde_json::{json, Value};
+use serde_json::json;
 
 fn main() -> Result<()> {
     let paths: Vec<_> = std::env::args().skip(1).collect();
@@ -10,8 +10,8 @@ fn main() -> Result<()> {
     );
     let mut reports = Vec::new();
     for path in paths {
-        let value: Value = serde_json::from_str(&std::fs::read_to_string(&path)?)?;
-        reports.push(json!({"file":path,"filters":boom::photometry::audit::exported(&value)?}));
+        let filters = boom::photometry::audit::inventory(std::path::Path::new(&path))?;
+        reports.push(json!({"file":path,"filters":filters}));
     }
     println!("{}", serde_json::to_string_pretty(&reports)?);
     Ok(())
