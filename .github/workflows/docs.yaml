@@ -4,10 +4,9 @@ on:
   push:
     branches: ["main"]
   pull_request:
-    paths:
-      - "docs/**"
-      - "mkdocs.yml"
-      - ".github/workflows/docs.yaml"
+
+permissions:
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
@@ -35,6 +34,14 @@ jobs:
           uv run --with mkdocs-material==9.7.7 mkdocs build --strict
           --site-dir _site
 
+      - name: Check links into the source tree
+        run: |
+          status=0
+          for path in $(grep -rhoE 'https://github\.com/boom-astro/boom/blob/main/[^)#[:space:]]+' docs | sed 's|.*/blob/main/||' | sort -u); do
+            [ -e "$path" ] || { echo "::error::docs link to a missing file: $path"; status=1; }
+          done
+          exit $status
+
       - name: Upload artifact
         if: github.ref == 'refs/heads/main'
         uses: actions/upload-pages-artifact@v3
@@ -47,6 +54,9 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    concurrency:
+      group: pages
+      cancel-in-progress: false
     permissions:
       pages: write
       id-token: write

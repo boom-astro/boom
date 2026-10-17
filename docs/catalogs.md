@@ -339,8 +339,7 @@ Crossmatches are computed **once**, when an alert is first ingested. Nothing
 revisits them. So a change on the catalog side leaves existing alerts holding
 matches computed against something that no longer exists — the same gap the
 [enrichment set](./alert-processing.md#the-enrichment-set-and-what-happens-when-it-changes)
-has for models and derivations, where a component that is added can be found by
-the absence of its key but a component that changes leaves no trace.
+has for models and derivations, where a component that changes leaves no trace.
 
 **What is handled: adding a new catalog.** `xmatch` writes a key for every
 configured catalog, including an empty array when nothing matched, so an alert
