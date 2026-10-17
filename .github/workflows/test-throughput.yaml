@@ -54,31 +54,14 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Setup Docker buildx
         uses: docker/setup-buildx-action@v3
-      # The layer cache lives in the registry rather than the Actions cache.
-      # GitHub caps a repository at 10 GB of Actions cache and evicts least
-      # recently used, and `mode=max` on this build alone held 8.5 GB of it --
-      # enough to evict the cargo caches `test.yaml` and `build.yaml` restore,
-      # so what this workflow saved was paid back with interest in cold Rust
-      # builds elsewhere. The registry has no such budget.
-      #
-      # `mode=max` is not the part to economize on: the expensive layer is the
-      # `cargo build --release` in the Dockerfile's `builder` stage, and
-      # `mode=min` stores only the layers of the final `app` image, which would
-      # leave every run recompiling the workspace.
-      #
-      # Only main publishes the cache; every other run reads it. A registry tag
-      # is a single mutable manifest with none of the Actions cache's per-branch
-      # isolation, so letting branches export would have them overwrite each
-      # other and main on one shared tag: one pull request that recompiles the
-      # workspace would replace main's records with its own, and the next build
-      # off main would go cold. Reading main and never writing also keeps the
-      # runs whose token is read-only -- forks, and Dependabot, whose branch
-      # lives in this repository and so cannot be told apart by looking for a
-      # fork -- from failing on a denied export, since a cache import that
-      # finds nothing is merely a warning while a denied export fails the build.
-      #
-      # `github.ref` is `refs/pull/<n>/merge` on every pull request, so this is
-      # exactly a push to main or a manual run on it.
+      # The layer cache lives in the registry, not the Actions cache: GitHub caps
+      # a repository at 10 GB and evicts LRU, and this build's export held 8.5 GB
+      # of it, starving the cargo caches test.yaml and build.yaml restore.
+      # `mode=max` stays -- the expensive layer is in the Dockerfile's `builder`
+      # stage, which `mode=min` would not store. Only main exports: a registry
+      # tag is one mutable manifest, so branches would overwrite each other, and
+      # a read-only token (forks, Dependabot) fails on a denied export while an
+      # import that finds nothing is only a warning.
       - name: Choose the layer cache
         run: |
           ref=ghcr.io/${{ github.repository }}-cache:throughput
