@@ -225,6 +225,23 @@ pub enum VersionError {
     IdAllocationFailed,
     #[error("failed to intern the enrichment set: {0}")]
     InternFailed(String),
+    #[error("no enrichment set {set_id} for survey {survey}")]
+    UnknownSet { set_id: i64, survey: String },
+    #[error("enrichment set {0} is the current one, so there is nothing to accept")]
+    AcceptCurrent(i64),
+}
+
+impl VersionError {
+    /// Whether this is the caller's mistake rather than ours.
+    ///
+    /// The acceptance routes turn it into a 4xx; everything else here is a
+    /// failure of ours and stays a 500.
+    pub fn is_bad_request(&self) -> bool {
+        matches!(
+            self,
+            VersionError::UnknownSet { .. } | VersionError::AcceptCurrent(_)
+        )
+    }
 }
 
 /// Hash a model file.
@@ -291,6 +308,16 @@ pub fn fingerprint(
         hasher.update(version.to_string().as_bytes());
     }
     hex(&hasher.finalize())
+}
+
+/// Whether this survey's enrichment worker stamps the set that produced an alert.
+///
+/// Only ZTF declares models today. The distinction matters because a survey
+/// that does not stamp cannot be asked for `stale` work: the selection would
+/// return every alert, reprocess them, leave them unstamped, and select exactly
+/// the same alerts next time.
+pub fn stamps_enrichment_set(survey: &str) -> bool {
+    survey.eq_ignore_ascii_case("ztf")
 }
 
 /// The set id for what this process is about to run, interning it if new.
@@ -401,6 +428,14 @@ pub fn diff(from: &EnrichmentSet, to: &EnrichmentSet) -> Vec<String> {
     }
     for (name, version) in &to.derivations {
         if from.derivations.get(name) != Some(version) {
+            changed.push(name.clone());
+        }
+    }
+    // Same as for models: a derivation that is no longer declared changed the
+    // fingerprint, so the alerts are stale, and naming nothing as the cause
+    // would leave the admin page reporting drift it cannot explain.
+    for name in from.derivations.keys() {
+        if !to.derivations.contains_key(name) {
             changed.push(name.clone());
         }
     }
@@ -595,6 +630,7 @@ pub async fn drift_status(
 /// it does not have.
 pub async fn accept_set(
     db: &mongodb::Database,
+    survey: &str,
     set_id: i64,
     current: i64,
     actor: &str,
@@ -603,9 +639,10 @@ pub async fn accept_set(
     use mongodb::bson::doc;
 
     if set_id == current {
-        // Nothing to accept, and recording it would imply the current set was
-        // in some way doubtful.
-        return Ok(());
+        // Rejected rather than silently accepted: the caller gets told, and the
+        // route does not write a ledger entry implying the current set was in
+        // some way doubtful.
+        return Err(VersionError::AcceptCurrent(set_id));
     }
     let acceptance = Acceptance {
         actor: actor.to_string(),
@@ -613,25 +650,51 @@ pub async fn accept_set(
         accepted_at: chrono::Utc::now().timestamp() as f64,
         accepted_against: current,
     };
-    db.collection::<EnrichmentSet>(SETS_COLLECTION)
+    // Scoped to the survey, and the match is checked: `acceptable_set_ids`
+    // filters on survey, so accepting another survey's id would write an
+    // acceptance that can never take effect, and an id that exists nowhere
+    // would report success having changed nothing.
+    let outcome = db
+        .collection::<EnrichmentSet>(SETS_COLLECTION)
         .update_one(
-            doc! { "_id": set_id },
+            doc! { "_id": set_id, "survey": survey },
             doc! { "$set": { "accepted": mongodb::bson::to_bson(&acceptance)
             .map_err(|e| VersionError::InternFailed(e.to_string()))? } },
         )
         .await?;
+    if outcome.matched_count == 0 {
+        return Err(VersionError::UnknownSet {
+            set_id,
+            survey: survey.to_string(),
+        });
+    }
     Ok(())
 }
 
 /// Withdraw an acceptance, so the set is reported as drift again.
-pub async fn unaccept_set(db: &mongodb::Database, set_id: i64) -> Result<(), VersionError> {
+///
+/// Withdrawing from a set that was never accepted succeeds: the caller asked
+/// for it not to be accepted, and it is not. A set that does not exist for this
+/// survey is a different thing, and says so.
+pub async fn unaccept_set(
+    db: &mongodb::Database,
+    survey: &str,
+    set_id: i64,
+) -> Result<(), VersionError> {
     use mongodb::bson::doc;
-    db.collection::<EnrichmentSet>(SETS_COLLECTION)
+    let outcome = db
+        .collection::<EnrichmentSet>(SETS_COLLECTION)
         .update_one(
-            doc! { "_id": set_id },
+            doc! { "_id": set_id, "survey": survey },
             doc! { "$unset": { "accepted": "" } },
         )
         .await?;
+    if outcome.matched_count == 0 {
+        return Err(VersionError::UnknownSet {
+            set_id,
+            survey: survey.to_string(),
+        });
+    }
     Ok(())
 }
 
@@ -777,6 +840,16 @@ mod tests {
         // any more, so they can never be refreshed in place.
         let before = set(1, &[("acai_h", "aa"), ("retired", "bb")], &[]);
         let after = set(2, &[("acai_h", "aa")], &[]);
+        assert_eq!(diff(&before, &after), vec!["retired"]);
+    }
+
+    #[test]
+    fn a_derivation_that_stopped_being_declared_counts_as_changed() {
+        // The mirror of the model case above. Dropping a derivation moves the
+        // fingerprint and makes the alerts stale either way; without this the
+        // admin page reports drift it cannot name a cause for.
+        let before = set(1, &[], &[("sso", 1), ("retired", 1)]);
+        let after = set(2, &[], &[("sso", 1)]);
         assert_eq!(diff(&before, &after), vec!["retired"]);
     }
 
@@ -967,6 +1040,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_acceptance_must_name_a_set_of_this_survey() {
+        // `acceptable_set_ids` filters on survey, so accepting another
+        // survey's id -- or one that exists nowhere -- would report success
+        // having changed nothing that can ever take effect, and the route would
+        // write a ledger entry saying a decision had been recorded.
+        let db = crate::conf::get_test_db().await;
+        let mine = format!("mine_{}", uuid::Uuid::new_v4().simple());
+        let theirs = format!("theirs_{}", uuid::Uuid::new_v4().simple());
+
+        let current = resolve_current_set(&db, &mine, ZTF_MODELS)
+            .await
+            .expect("resolves");
+        let other = resolve_current_set(&db, &theirs, ZTF_MODELS)
+            .await
+            .expect("resolves");
+
+        for (set_id, label) in [
+            (current.id + 9_999, "an id that exists nowhere"),
+            (other.id, "another survey's set"),
+        ] {
+            let outcome =
+                accept_set(&db, &mine, set_id, current.id, "babamul:someone", "why").await;
+            assert!(
+                matches!(outcome, Err(VersionError::UnknownSet { .. })),
+                "{label} was accepted: {outcome:?}"
+            );
+        }
+
+        // And the current set is not a thing to accept.
+        let outcome =
+            accept_set(&db, &mine, current.id, current.id, "babamul:someone", "why").await;
+        assert!(
+            matches!(outcome, Err(VersionError::AcceptCurrent(_))),
+            "accepting the current set was allowed: {outcome:?}"
+        );
+
+        // Withdrawing is scoped the same way.
+        assert!(matches!(
+            unaccept_set(&db, &mine, other.id).await,
+            Err(VersionError::UnknownSet { .. })
+        ));
+    }
+
+    #[tokio::test]
     async fn accepting_a_set_changes_no_alert() {
         // The point of accepting rather than restamping: an alert stamped with
         // a set that did not produce it would claim provenance it does not
@@ -996,6 +1113,7 @@ mod tests {
 
         accept_set(
             &db,
+            &survey,
             older.id,
             current.id,
             "babamul:someone",
@@ -1025,7 +1143,9 @@ mod tests {
         assert_eq!(acceptance.accepted_against, current.id);
 
         // Withdrawing puts it back into drift.
-        unaccept_set(&db, older.id).await.expect("withdrawn");
+        unaccept_set(&db, &survey, older.id)
+            .await
+            .expect("withdrawn");
         assert_eq!(
             acceptable_set_ids(&db, &survey, current.id).await.unwrap(),
             vec![current.id]
@@ -1057,9 +1177,16 @@ mod tests {
         .await
         .expect("interned");
 
-        accept_set(&db, older.id, current.id, "babamul:someone", "fine for now")
-            .await
-            .expect("accepted");
+        accept_set(
+            &db,
+            &survey,
+            older.id,
+            current.id,
+            "babamul:someone",
+            "fine for now",
+        )
+        .await
+        .expect("accepted");
 
         // A later current set: the old acceptance no longer applies.
         let moved_on = current.id + 1000;

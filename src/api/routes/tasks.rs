@@ -376,7 +376,7 @@ pub async fn get_enrichment_status(
     request_body = AcceptSetBody,
     responses(
         (status = 200, description = "Accepted"),
-        (status = 400, description = "No reason given"),
+        (status = 400, description = "No reason given, no such set, or the set is current"),
         (status = 403, description = "Not an admin")
     ),
     tags=["Tasks"]
@@ -408,10 +408,21 @@ pub async fn accept_enrichment_set(
     };
 
     let actor = admin.as_task_actor();
-    if let Err(e) =
-        crate::enrichment::version::accept_set(&db, *set_id, current_id, &actor.user_id, reason)
-            .await
+    if let Err(e) = crate::enrichment::version::accept_set(
+        &db,
+        "ztf",
+        *set_id,
+        current_id,
+        &actor.user_id,
+        reason,
+    )
+    .await
     {
+        // An unknown id, or the current set, is the caller's mistake: it must
+        // not reach the ledger below as though a decision had been recorded.
+        if e.is_bad_request() {
+            return response::bad_request(&e.to_string());
+        }
         return response::internal_error(&format!("failed to accept the set: {e}"));
     }
 
@@ -460,6 +471,7 @@ pub async fn accept_enrichment_set(
     params(("set_id" = i64, Path, description = "The set to stop accepting")),
     responses(
         (status = 200, description = "Acceptance withdrawn"),
+        (status = 400, description = "No such set for this survey"),
         (status = 403, description = "Not an admin")
     ),
     tags=["Tasks"]
@@ -468,10 +480,44 @@ pub async fn accept_enrichment_set(
 pub async fn unaccept_enrichment_set(
     db: web::Data<mongodb::Database>,
     set_id: web::Path<i64>,
-    _admin: AdminActor,
+    admin: AdminActor,
 ) -> HttpResponse {
-    match crate::enrichment::version::unaccept_set(&db, *set_id).await {
-        Ok(()) => response::ok_no_data("acceptance withdrawn"),
-        Err(e) => response::internal_error(&format!("failed to withdraw: {e}")),
+    let actor = admin.as_task_actor();
+    if let Err(e) = crate::enrichment::version::unaccept_set(&db, "ztf", *set_id).await {
+        if e.is_bad_request() {
+            return response::bad_request(&e.to_string());
+        }
+        return response::internal_error(&format!("failed to withdraw: {e}"));
     }
+
+    // Withdrawing is as much a decision as accepting. Recording only one side
+    // leaves a ledger that says a set was signed off and never that it stopped
+    // being, so nothing explains why those alerts are drift again.
+    let entry = tasks::ledger::MutationRecord {
+        id: uuid::Uuid::new_v4().to_string(),
+        source_kind: tasks::ledger::SourceKind::Task,
+        source_id: format!("enrichment-unaccept-{}", *set_id),
+        task_type: None,
+        actor,
+        trigger: Trigger::Api,
+        target: tasks::ledger::MutationTarget {
+            database: db.name().to_string(),
+            collection: "ZTF_alerts".to_string(),
+            catalog: None,
+            survey: Some("ztf".to_string()),
+        },
+        operation: tasks::ledger::Operation::Index,
+        details: mongodb::bson::doc! { "withdrawn_set": *set_id },
+        recorded_at: now(),
+    };
+    if let Err(e) = tasks::ledger::record(&db, entry).await {
+        tracing::warn!("failed to record the withdrawal in the ledger: {}", e);
+    }
+
+    tracing::info!(
+        set_id = *set_id,
+        "enrichment set acceptance withdrawn by {}",
+        admin.username
+    );
+    response::ok_no_data("acceptance withdrawn")
 }

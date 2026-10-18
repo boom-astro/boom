@@ -701,6 +701,16 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         let sso_baselines = db.collection(BASELINES_COLLECTION);
         let alert_cutout_storage = config.build_cutout_storage(&Survey::Ztf).await?;
 
+        // CPU workers each load their own models: no mutex contention. Loaded
+        // before the set is resolved, because resolving *publishes* the set as
+        // what this worker is running -- a model that fails to load after that
+        // would leave `enrichment_current` naming a set this process cannot
+        // produce.
+        let models = match shared_models {
+            Some(models) => models,
+            None => SharedModels::load(None)?,
+        };
+
         // Resolved once per worker rather than per alert: it is a few megabytes
         // of hashing, and the answer cannot change while the process runs.
         crate::enrichment::version::initialize_indexes(&db).await?;
@@ -720,12 +730,6 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             Some(Babamul::new(&config))
         } else {
             None
-        };
-
-        // CPU workers each load their own models: no mutex contention.
-        let models = match shared_models {
-            Some(models) => models,
-            None => SharedModels::load(None)?,
         };
 
         let batch_size = config
@@ -903,14 +907,16 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
 
             let mut set_doc = doc! {
                 "properties": mongify(&item.properties),
-                // What produced the properties and the classifications below.
-                // Without it, a changed model or formula leaves values that
-                // look current and are not.
-                "enrichment_set": self.enrichment_set,
                 "updated_at": now,
             };
             if let Some(cls) = &classifications {
                 set_doc.insert("classifications", mongify(cls));
+                // Stamped only where the models actually ran. A set names its
+                // models as well as its derivations, so stamping an alert whose
+                // inference was skipped -- unreadable cutouts, missing features
+                // -- would have it claim scores it does not carry, and a later
+                // `stale` run would pass over it as already current.
+                set_doc.insert("enrichment_set", self.enrichment_set);
             }
 
             updates.push(WriteModel::UpdateOne(
@@ -1710,11 +1716,20 @@ mod enrichment_stamp_tests {
         let config_path = crate::conf::test_config_path();
         let worker = match ZtfEnrichmentWorker::new(&config_path, None).await {
             Ok(worker) => worker,
-            // ONNX is not available on every machine that runs the suite.
-            Err(e) => {
-                eprintln!("skipping: could not build an enrichment worker: {e}");
+            // ONNX is not available on every machine that runs the suite, and
+            // that is the only reason to skip. Skipping on *any* construction
+            // error let this pass without ever reaching the path it exists to
+            // cover -- a database or config failure, or a regression in
+            // stamping itself, read as "no ONNX here" and went green.
+            Err(EnrichmentWorkerError::RunModelError(
+                ModelError::MissingOrtDylibPath
+                | ModelError::Ort(_)
+                | ModelError::OrtSessionBuilder(_),
+            )) => {
+                eprintln!("skipping: ONNX Runtime is not available on this machine");
                 return;
             }
+            Err(e) => panic!("could not build an enrichment worker: {e}"),
         };
         assert!(worker.enrichment_set > 0, "a set id was never assigned");
 

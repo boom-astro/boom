@@ -138,6 +138,19 @@ impl EnrichReprocessParams {
                 return Err("selection.from must not exceed selection.to".to_string());
             }
         }
+        if matches!(self.selection, Selection::Stale)
+            && !crate::enrichment::version::stamps_enrichment_set(
+                &self.survey.to_string().to_lowercase(),
+            )
+        {
+            // Refused rather than run: this survey's worker writes no
+            // enrichment_set, so `stale` would select every alert, reprocess
+            // them all, leave them unstamped, and select the same alerts again.
+            return Err(format!(
+                "selection 'stale' needs a survey whose worker stamps the enrichment set,                  and {} does not; only ztf does today",
+                self.survey
+            ));
+        }
         Ok(())
     }
 }
@@ -226,29 +239,59 @@ pub async fn run(
         .unwrap_or(worker_config.enrichment.n_workers)
         .clamp(1, MAX_WORKERS);
 
-    // What this release would produce, so `Stale` can ask for everything else.
-    // Resolved before the workers start: they intern the same set, and running
-    // the query against a set that does not exist yet would select every alert.
-    let current_set = crate::enrichment::version::resolve_current_set(
-        ctx.db(),
-        &params.survey.to_string().to_lowercase(),
-        crate::enrichment::version::ZTF_MODELS,
-    )
-    .await
-    .map_err(|e| failed(e.to_string()))?;
-    let current_set_id = current_set.id;
-    // Includes sets an operator accepted, so a run does not redo work that was
-    // explicitly signed off as good enough.
-    let acceptable = crate::enrichment::version::acceptable_set_ids(
-        ctx.db(),
-        &params.survey.to_string().to_lowercase(),
-        current_set_id,
-    )
-    .await
-    .map_err(|e| failed(e.to_string()))?;
-    ctx.info(format!(
-        "current enrichment set is {current_set_id}; acceptable: {acceptable:?}"
-    ));
+    // Loaded before the set is resolved, because resolving *publishes* the set
+    // as what the workers are running. A model that fails to load after that
+    // would leave `enrichment_current` naming a set no worker can produce, and
+    // every alert in the survey reported stale against it.
+    let shared_model_pool: Option<Arc<SharedModelPool>> =
+        if matches!(params.survey, Survey::Ztf) && config.gpu.is_active() {
+            Some(
+                SharedModelPool::load(&config.gpu.device_ids)
+                    .map_err(|e| failed(format!("failed to load ONNX models on GPU: {e}")))?,
+            )
+        } else {
+            None
+        };
+
+    let survey_key = params.survey.to_string().to_lowercase();
+    // Only for a survey that stamps. `ZTF_MODELS` is the only model list there
+    // is, so resolving for any other survey would hash the ZTF ONNX files --
+    // work, and a hard error when they are absent, for a set id that survey's
+    // worker never writes.
+    let (current_set_id, acceptable) =
+        if crate::enrichment::version::stamps_enrichment_set(&survey_key) {
+            // What this release would produce, so `Stale` can ask for everything
+            // else. Resolved before the workers start: they intern the same set,
+            // and running the query against a set that does not exist yet would
+            // select every alert.
+            let current_set = crate::enrichment::version::resolve_current_set(
+                ctx.db(),
+                &survey_key,
+                crate::enrichment::version::ZTF_MODELS,
+            )
+            .await
+            .map_err(|e| failed(e.to_string()))?;
+            // Includes sets an operator accepted, so a run does not redo work
+            // that was explicitly signed off as good enough.
+            let acceptable = crate::enrichment::version::acceptable_set_ids(
+                ctx.db(),
+                &survey_key,
+                current_set.id,
+            )
+            .await
+            .map_err(|e| failed(e.to_string()))?;
+            ctx.info(format!(
+                "current enrichment set is {}; acceptable: {acceptable:?}",
+                current_set.id
+            ));
+            (Some(current_set.id), acceptable)
+        } else {
+            ctx.info(format!(
+                "{} does not stamp an enrichment set; reprocessing without one",
+                params.survey
+            ));
+            (None, Vec::new())
+        };
 
     // Owning the queue is what makes "empty" mean "done". A caller-supplied one
     // may still be filling, so the task only drains it and never deletes it.
@@ -296,16 +339,6 @@ pub async fn run(
         ctx.info(format!("draining externally populated queue {queue}"));
         0
     };
-
-    let shared_model_pool: Option<Arc<SharedModelPool>> =
-        if matches!(params.survey, Survey::Ztf) && config.gpu.is_active() {
-            Some(
-                SharedModelPool::load(&config.gpu.device_ids)
-                    .map_err(|e| failed(format!("failed to load ONNX models on GPU: {e}")))?,
-            )
-        } else {
-            None
-        };
 
     ctx.info(format!(
         "starting {n_workers} enrichment worker(s) (Babamul disabled, no filter forwarding)"
@@ -559,6 +592,25 @@ mod tests {
             field: "  ".to_string(),
         };
         assert!(params(Survey::Ztf, blank).validate_params().is_err());
+    }
+
+    #[test]
+    fn stale_is_refused_for_a_survey_that_does_not_stamp() {
+        // Only ZTF's worker writes enrichment_set. Elsewhere a stale run would
+        // select every alert, reprocess them, leave them unstamped, and select
+        // exactly the same alerts the next time it ran.
+        for survey in [Survey::Lsst, Survey::Decam, Survey::Winter] {
+            let message = params(survey.clone(), Selection::Stale)
+                .validate_params()
+                .expect_err("stale must be refused for a survey that does not stamp");
+            assert!(message.contains("stamp"), "unhelpful message: {message}");
+        }
+        assert!(
+            params(Survey::Ztf, Selection::Stale)
+                .validate_params()
+                .is_ok(),
+            "ztf does stamp, so stale is the whole point there"
+        );
     }
 
     #[test]

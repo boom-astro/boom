@@ -616,6 +616,7 @@ function EnrichmentDriftTable({
                           <div className="mt-2 flex items-center gap-2">
                             <Input
                               autoFocus
+                              aria-label={`Why is set ${stale.id} acceptable?`}
                               placeholder="Why is this acceptable?"
                               value={reason}
                               onChange={(e) => setReason(e.target.value)}

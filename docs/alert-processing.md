@@ -159,12 +159,19 @@ prevent, and the one nobody notices.
 
 ### Adding or swapping a model
 
-Adding a classifier, or pointing an existing one at retrained weights, means
-one edit here: the entry in `ZTF_MODELS`. That is the whole registration — the
-worker loads the file through `model_path`, which reads this list, and the same
-list is what gets hashed into the fingerprint. A new or changed entry moves the
-fingerprint, which interns a new set, which is what makes every previously
-enriched alert show up as stale on the admin page.
+**Pointing an existing model at retrained weights** is one edit: its entry in
+`ZTF_MODELS`. The worker loads the file through `model_path`, which reads this
+list, and the same list is hashed into the fingerprint, so a changed entry moves
+the fingerprint, interns a new set, and makes every previously enriched alert
+show up as stale on the admin page.
+
+**Adding a new classifier is not**, and the entry is the last step rather than
+the whole job. `SharedModels` holds one named field per model and `classify`
+makes a fixed set of inference calls, so a new entry on its own declares a file
+and hashes it without ever loading or running it — which stamps alerts with a
+set naming a model that never scored them. The wiring it also needs: a field on
+`SharedModels`, its load in `SharedModels::load`, an inference call in
+`classify`, and a field on `ZtfAlertClassifications` for the score to land in.
 
 **Skipping it is silent.** The model runs, scores get written, and the
 fingerprint does not move — so no alert is marked stale, the admin page shows
