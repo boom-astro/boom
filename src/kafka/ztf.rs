@@ -76,6 +76,7 @@ pub struct ZtfAlertProducer {
     server_url: String,
     verbose: bool,
     working_dir: String,
+    archive_base_url: Option<String>,
 }
 
 impl ZtfAlertProducer {
@@ -111,12 +112,22 @@ impl ZtfAlertProducer {
             server_url: server_url.to_string(),
             verbose,
             working_dir: ".".to_string(),
+            archive_base_url: None,
         }
     }
 
     pub fn with_working_dir(self, working_dir: &str) -> Self {
         Self {
             working_dir: working_dir.to_string(),
+            ..self
+        }
+    }
+
+    /// Fetch from somewhere other than ztf.uw.edu. The file name is unchanged,
+    /// so a mirror need only serve `ztf_<program>_<date>.tar.gz` at this prefix.
+    pub fn with_archive_base_url(self, archive_base_url: &str) -> Self {
+        Self {
+            archive_base_url: Some(archive_base_url.to_string()),
             ..self
         }
     }
@@ -163,7 +174,7 @@ impl AlertProducer for ZtfAlertProducer {
             date_str, self.program_id
         );
 
-        let (file_name, base_url) = match self.program_id {
+        let (file_name, default_base_url) = match self.program_id {
             ProgramId::Public => (
                 format!("ztf_public_{}.tar.gz", date_str),
                 "https://ztf.uw.edu/alerts/public/".to_string(),
@@ -174,6 +185,7 @@ impl AlertProducer for ZtfAlertProducer {
             ),
             _ => return Err("Unsupported program ID for ZTF alerts".into()),
         };
+        let base_url = self.archive_base_url.clone().unwrap_or(default_base_url);
 
         let data_folder = self.data_directory();
         std::fs::create_dir_all(&data_folder)?;

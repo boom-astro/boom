@@ -18,6 +18,8 @@ use utoipa::openapi::schema::{ObjectBuilder, Schema};
 use utoipa::openapi::RefOr;
 use utoipa::{PartialSchema, ToSchema};
 
+const MAX_CONE_SEARCH_RESULTS: usize = 100_000;
+
 #[derive(serde::Deserialize, Clone)]
 pub enum Unit {
     Degrees,
@@ -113,7 +115,8 @@ impl ConeSearchQuery {
     }
 }
 
-/// Run a cone search query on a survey alert collection, a reference catalog or a watchlist
+/// Run a cone search query on a survey alert collection, a reference catalog or a watchlist.
+/// A request matching more than 100000 documents is rejected; use a smaller radius or paginate with limit and skip.
 #[utoipa::path(
     post,
     path = "/queries/cone_search",
@@ -165,6 +168,7 @@ pub async fn post_cone_search_query(
     }
     let object_coordinates = &body.object_coordinates;
     let mut docs: HashMap<String, Vec<mongodb::bson::Document>> = HashMap::new();
+    let mut n_results = 0;
     let filter = match parse_optional_filter(&body.filter) {
         Ok(f) => f,
         Err(e) => return response::bad_request(&format!("Invalid filter: {}", e)),
@@ -198,7 +202,7 @@ pub async fn post_cone_search_query(
         };
         let mut conesearch_filter = filter.clone();
         conesearch_filter.insert("coordinates.radec_geojson", geo_within);
-        let cursor = match collection
+        let mut cursor = match collection
             .find(conesearch_filter)
             .with_options(find_options.clone())
             .await
@@ -208,13 +212,23 @@ pub async fn post_cone_search_query(
                 return super::query_error(e, "Error finding documents");
             }
         };
-        // Create map entry for this object's cone search
-        let data = match cursor.try_collect::<Vec<mongodb::bson::Document>>().await {
-            Ok(d) => d,
-            Err(e) => {
-                return super::query_error(e, "Error collecting documents");
+        let mut data = Vec::new();
+        loop {
+            match cursor.try_next().await {
+                Ok(Some(doc)) => {
+                    n_results += 1;
+                    if n_results > MAX_CONE_SEARCH_RESULTS {
+                        return response::bad_request(&format!(
+                            "Cone search matched more than {} documents; use a smaller radius or paginate with limit and skip",
+                            MAX_CONE_SEARCH_RESULTS
+                        ));
+                    }
+                    data.push(doc);
+                }
+                Ok(None) => break,
+                Err(e) => return super::query_error(e, "Error collecting documents"),
             }
-        };
+        }
         docs.insert(object_name.clone(), data);
     }
     return response::ok(

@@ -185,7 +185,7 @@ flag the task polls. A queued run is canceled outright, since nothing started.
 
 ## Task types
 
-Declared in code, in `TASKS` in [`src/tasks/mod.rs`](../src/tasks/mod.rs) —
+Declared in code, in `TASKS` in [`src/tasks/mod.rs`](https://github.com/boom-astro/boom/blob/main/src/tasks/mod.rs) —
 a task type is part of the release, so pinning the code version pins what it
 does. Parameters are validated by the API at submit time, so a bad request is a
 400 the client can act on rather than a run that fails on a worker minutes
@@ -567,7 +567,7 @@ for the whole task, rather than a half-working widget guessing at a shape. Two
 kinds reach that path: a tagged union — `enrich_reprocess`'s `selection` —
 which arrives as a multi-arm `oneOf`,
 and a struct or enum field, which arrives as a `$ref`. The `$ref` cannot be
-followed — [`schema_of`](../src/tasks/mod.rs) serializes one type and keeps no
+followed — [`schema_of`](https://github.com/boom-astro/boom/blob/main/src/tasks/mod.rs) serializes one type and keeps no
 definitions registry, so the reference dangles — which is why the fallback is
 keyed on recognizing it rather than on resolving it. A task with such a
 parameter is worth a look at `/docs` before it is submitted from the page.
@@ -580,7 +580,7 @@ both stay on the form.
 
 Admin-only, and both login realms are accepted: the BOOM API's `users` and
 Babamul's `babamul_users` both carry `is_admin`, and
-[`src/api/admin.rs`](../src/api/admin.rs) is the one check. Babamul admins are
+[`src/api/admin.rs`](https://github.com/boom-astro/boom/blob/main/src/api/admin.rs) is the one check. Babamul admins are
 declared in config as `babamul.admin_emails` and reconciled onto accounts at API
 startup — in both directions, so removing someone from the list revokes their
 access on the next restart rather than leaving a grant nobody remembers making.

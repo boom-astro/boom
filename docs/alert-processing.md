@@ -150,6 +150,9 @@ the matching version in `DERIVATIONS`.** The components are deliberately coarse:
 | `detection_history` | `properties.detection_history` |
 | `host_association` | `properties.hosted`, from the `host_galaxy` the DLR scoring writes |
 
+These are the ZTF worker's. The LSST, DECam and WINTER workers write
+`properties` only, so a set of theirs names no models.
+
 Erring toward bumping costs a reprocessing run. Erring the other way leaves
 values that look current and are not — which is the failure this exists to
 prevent, and the one nobody notices.
@@ -258,6 +261,12 @@ curl -X POST http://localhost:4000/tasks \
 Prefer `stale` after a change. `missing_field` only finds alerts that never had
 the field, so after a model changes it selects **none of them** — every alert
 still has the field, just with an old value.
+
+`missing_field` also selects alerts a component skipped deliberately: an output
+that can be absent is skipped rather than written as null, so `classifications`
+is omitted when the cutouts cannot be read and the AppleCiDER keys are omitted
+for light curves it does not cover. `cross_matches` is the exception — a missing
+catalog key there does mean the alert predates that catalog being configured.
 
 The task selects the alerts, queues them, runs the enrichment workers over them,
 and finishes when the queue drains. It disables Babamul and does not forward to

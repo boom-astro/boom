@@ -18,6 +18,7 @@
 
 use super::context::TaskContext;
 use super::ledger::{MutationTarget, Operation};
+use crate::conf::CatalogXmatchConfig;
 use crate::utils::{
     db::CURSOR_BATCH_SIZE,
     enums::Survey,
@@ -25,9 +26,9 @@ use crate::utils::{
 };
 use futures::TryStreamExt;
 use mongodb::{
-    bson::{doc, to_bson, Bson, Document},
-    options::{UpdateOneModel, WriteModel},
     Namespace,
+    bson::{Bson, Document, doc, to_bson},
+    options::{UpdateOneModel, WriteModel},
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -179,16 +180,21 @@ async fn probe_catalogs(
 }
 
 /// Associate and write one worker's share of the stream.
+#[allow(clippy::too_many_arguments)]
 async fn worker(
     ctx: &TaskContext,
     rx: async_channel::Receiver<Document>,
     client: mongodb::Client,
     aux_ns: Namespace,
     config: HostGalaxyConfig,
+    xmatch_configs: Vec<CatalogXmatchConfig>,
+    survey: Survey,
     batch_size: usize,
     dry_run: bool,
 ) -> Result<(u64, u64), super::TaskError> {
     let catalogs = [config.ned_catalog.as_str(), config.ls_dr10_catalog.as_str()];
+    // Photometry is read from the same database the records come from.
+    let db = client.database(&aux_ns.db);
     let mut batch: Vec<WriteModel> = Vec::with_capacity(batch_size);
     let mut written = 0u64;
     let mut unreadable = 0u64;
@@ -222,8 +228,23 @@ async fn worker(
             );
             continue;
         };
+        let object_name = match &object_id {
+            Bson::String(name) => name.clone(),
+            other => other.to_string(),
+        };
         // `enabled` is checked once up front, so this is always `Some`.
-        let Some(association) = host::associate_from_xmatches(ra, dec, &matches, &config) else {
+        let Some(association) = host::associate_with_photometry(
+            ra,
+            dec,
+            &matches,
+            &config,
+            &xmatch_configs,
+            &survey,
+            &object_name,
+            &db,
+        )
+        .await
+        else {
             continue;
         };
         let value = match to_bson(&association) {
@@ -323,6 +344,12 @@ pub async fn run(
         db: db.name().to_string(),
         coll: aux_name.clone(),
     };
+    let xmatch_configs = ctx
+        .config()
+        .crossmatch
+        .get(&params.survey)
+        .cloned()
+        .unwrap_or_default();
     let queue_capacity = params.processes * params.batch_size * QUEUE_MULTIPLIER;
     let (tx, rx) = async_channel::bounded::<Document>(queue_capacity);
 
@@ -335,6 +362,8 @@ pub async fn run(
             db.client().clone(),
             aux_ns.clone(),
             config.clone(),
+            xmatch_configs.clone(),
+            params.survey.clone(),
             params.batch_size,
             params.dry_run,
         )
