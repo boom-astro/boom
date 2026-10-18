@@ -86,6 +86,20 @@ jobs:
           wget -q https://github.com/boom-astro/boom/releases/download/test-data-v1/BOOM.NED.json.gz -O ./data/alerts/BOOM.NED.json.gz
       - name: Download auxiliary ZTF alerts from Caltech Box
         run: wget -q https://caltech.box.com/shared/static/qdois5qq2lmvp02ri50fum80vzr54505.gz -O ./data/alerts/boom_throughput.ZTF_alerts_aux.dump.gz
+      # Seeded from our own release so a run does not depend on ztf.uw.edu being
+      # up; the producer downloads from there only when this directory is empty.
+      - name: Seed the alerts the producer replays
+        run: |
+          dir=./data/alerts/ztf/20250311/public
+          mkdir -p "$dir"
+          if curl -fsSL --retry 3 -o /tmp/ztf_public.tar.gz \
+              "https://github.com/boom-astro/boom/releases/download/test-data-v1/ztf_public_20250311.tar.gz"; then
+            tar -xzf "/tmp/ztf_public.tar.gz" -C "$dir"
+            rm -f /tmp/ztf_public.tar.gz
+            echo "Seeded $(find "$dir" -name '*.avro' | wc -l | tr -d ' ') alerts"
+          else
+            echo "::warning::No pinned alert archive on test-data-v1; falling back to ztf.uw.edu"
+          fi
       - name: Run test
         run: |
           uv run tests/throughput/run.py \
