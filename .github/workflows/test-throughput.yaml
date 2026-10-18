@@ -92,7 +92,7 @@ jobs:
         run: |
           dir=./data/alerts/ztf/public/20250311
           mkdir -p "$dir"
-          curl -fsSL --retry 3 -o /tmp/ztf_public.tar.gz \
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/ztf_public.tar.gz \
             "https://github.com/boom-astro/boom/releases/download/test-data-v1/ztf_public_20250311.tar.gz"
           tar -xzf /tmp/ztf_public.tar.gz -C "$dir"
           rm -f /tmp/ztf_public.tar.gz
