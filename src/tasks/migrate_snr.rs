@@ -1323,12 +1323,19 @@ mod tests {
     }
 
     #[test]
-    fn single_flight_is_keyed_by_survey() {
-        // Migrating ZTF and LSST at once is fine; two runs over the same survey
-        // would rewrite the same documents.
-        assert_eq!(
-            crate::tasks::single_flight_key(TASK_TYPE, &serde_json::json!({ "survey": "ztf" })),
-            Some(mongodb::bson::doc! { "survey": "ztf" })
-        );
+    fn single_flight_serializes_every_survey() {
+        // `all` is the default and rewrites both surveys' collections, so a key
+        // on the survey string would let it run alongside a `ztf` migration
+        // over the same documents.
+        for survey in ["all", "ztf", "lsst"] {
+            assert_eq!(
+                crate::tasks::single_flight_key(
+                    TASK_TYPE,
+                    &serde_json::json!({ "survey": survey })
+                ),
+                Some(mongodb::bson::doc! {}),
+                "{survey} must contend with every other SNR migration"
+            );
+        }
     }
 }

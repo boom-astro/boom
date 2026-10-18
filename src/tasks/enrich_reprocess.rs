@@ -267,12 +267,23 @@ pub async fn run(
             params.selection.describe(),
             params.survey
         ));
-        let n = populate(ctx, &params.survey, &params.selection, &acceptable, &queue).await?;
+        let n = match populate(ctx, &params.survey, &params.selection, &acceptable, &queue).await {
+            Ok(n) => n,
+            Err(e) => {
+                // Population pushes in batches, so a failure or cancellation
+                // part way through leaves candids on a queue only this run
+                // knows the name of. Repeated failed submissions would pile
+                // those up in Valkey with nothing ever reading them.
+                discard_owned_queue(config, &queue).await;
+                return Err(e);
+            }
+        };
         ctx.info(format!("queued {n} alerts on {queue}"));
         if n == 0 {
             // Nothing to do is a success, not a failure, but it is worth saying
             // out loud -- an empty selection usually means the filter was wrong.
             ctx.warn("the selection matched no alerts; nothing to reprocess");
+            discard_owned_queue(config, &queue).await;
             return Ok(serde_json::json!({
                 "survey": params.survey.to_string(),
                 "selection": params.selection.describe(),
@@ -345,11 +356,7 @@ pub async fn run(
     }
 
     if owned {
-        // The run-scoped queue is ours; leaving it behind would accumulate keys
-        // in Valkey that nothing will ever read.
-        if let Ok(mut con) = config.build_redis().await {
-            let _ = con.del::<&str, ()>(&queue).await;
-        }
+        discard_owned_queue(config, &queue).await;
     }
 
     let processed = outcome?;
@@ -382,6 +389,16 @@ pub async fn run(
     }))
 }
 
+/// Drop a queue this run created.
+///
+/// Best effort: the outcome does not depend on it, but a run-scoped queue that
+/// outlives its run is a key in Valkey that nothing will ever read again.
+async fn discard_owned_queue(config: &AppConfig, queue: &str) {
+    if let Ok(mut con) = config.build_redis().await {
+        let _ = con.del::<&str, ()>(queue).await;
+    }
+}
+
 /// Wait for the queue to drain, reporting progress.
 ///
 /// Returns how many were consumed. Completion is `LLEN == 0` observed twice in
@@ -409,11 +426,18 @@ async fn drain(
             return Err(super::TaskError::Canceled);
         }
 
-        // Nothing is draining the queue any more, so waiting would hang the run.
-        if workers.iter().all(|(h, _)| h.is_finished()) {
-            return Err(super::TaskError::Failed(
-                "every enrichment worker exited before the queue drained".to_string(),
-            ));
+        // A worker exits only on TERM, which is sent after this returns, so one
+        // finishing here has died. Tolerating it while others run is what makes
+        // a lost batch look processed: the dead worker's RPOP already removed
+        // its candids, the survivors drain the rest, and `queued - 0` then
+        // counts the batch that went with it.
+        let exited = workers.iter().filter(|(h, _)| h.is_finished()).count();
+        if exited > 0 {
+            return Err(super::TaskError::Failed(format!(
+                "{exited} enrichment worker(s) exited before the queue drained; a batch \
+                 already popped may have been lost, so this run is not complete -- \
+                 resubmitting reprocesses whatever is still stale"
+            )));
         }
 
         let remaining: u64 = con
@@ -471,6 +495,10 @@ async fn run_enrich_only<T: EnrichmentWorker>(
 
     let command_interval = worker_config.command_interval;
     let mut command_check_countdown = command_interval;
+    // The deployment's tuning rather than a constant, so a reprocess batches
+    // the GPU and memory footprint exactly as the live worker does. Zero would
+    // read as "pop one", so it floors at a single element.
+    let batch_size = NonZero::new(worker_config.enrichment.batch_size.max(1));
 
     loop {
         if command_check_countdown == 0 {
@@ -480,9 +508,7 @@ async fn run_enrich_only<T: EnrichmentWorker>(
             command_check_countdown = command_interval;
         }
 
-        let candids: Vec<i64> = con
-            .rpop::<&str, Vec<i64>>(&input_queue, NonZero::new(1000))
-            .await?;
+        let candids: Vec<i64> = con.rpop::<&str, Vec<i64>>(&input_queue, batch_size).await?;
 
         if candids.is_empty() {
             tokio::time::sleep(Duration::from_millis(500)).await;

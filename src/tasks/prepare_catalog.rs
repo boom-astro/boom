@@ -37,6 +37,8 @@ use mongodb::{
     Collection,
 };
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use utoipa::ToSchema;
 
@@ -123,7 +125,7 @@ pub async fn run(
                 "collection {} does not exist in {}; import it first",
                 params.catalog,
                 db.name()
-            )))
+            )));
         }
         Err(e) => return Err(failed(e.to_string())),
     }
@@ -175,8 +177,12 @@ pub async fn run(
             let dec_field = params.dec_field.clone();
             let batch_size = params.batch_size;
             let dry_run = params.dry_run;
+            let canceled = ctx.cancel_flag();
             handles.push(tokio::spawn(async move {
-                process_shard(collection, filter, ra_field, dec_field, batch_size, dry_run).await
+                process_shard(
+                    collection, filter, ra_field, dec_field, batch_size, dry_run, canceled,
+                )
+                .await
             }));
         }
 
@@ -187,6 +193,18 @@ pub async fn run(
                 }
             }
             Err(e) => return Err(failed(e.to_string())),
+        }
+
+        if report.canceled {
+            // Whatever each shard had already batched is flushed before it
+            // returns, so the updates stand; what is not safe is the index,
+            // which would claim a coverage the scan never reached.
+            ctx.warn(format!(
+                "canceled after updating {} document(s); the 2dsphere index was not created, \
+                 so this catalog still needs a full run",
+                report.updated
+            ));
+            return Err(super::TaskError::Canceled);
         }
     }
 
@@ -303,6 +321,10 @@ struct Report {
     missing: u64,
     out_of_range: u64,
     samples: Vec<String>,
+    /// Set by a shard that stopped early. The run has to fail on it: the
+    /// documents it never reached still have no coordinates, so the index the
+    /// run would go on to build would not cover the collection.
+    canceled: bool,
 }
 
 impl Report {
@@ -316,6 +338,7 @@ impl Report {
         self.updated += other.updated;
         self.missing += other.missing;
         self.out_of_range += other.out_of_range;
+        self.canceled |= other.canceled;
         for sample in other.samples {
             if self.samples.len() < MAX_SAMPLES {
                 self.samples.push(sample);
@@ -332,6 +355,7 @@ async fn process_shard(
     dec_field: String,
     batch_size: usize,
     dry_run: bool,
+    canceled: Arc<AtomicBool>,
 ) -> Result<Report, mongodb::error::Error> {
     let client = collection.client().clone();
     let namespace = collection.namespace();
@@ -346,6 +370,14 @@ async fn process_shard(
     let mut writes: Vec<WriteModel> = Vec::with_capacity(batch_size);
 
     while let Some(doc) = cursor.try_next().await? {
+        // Per document rather than per write batch: the load is nothing beside
+        // decoding one, and a shard that skips most of what it reads -- or runs
+        // with `dry_run`, which queues no writes at all -- would otherwise only
+        // notice at a boundary it may never reach.
+        if canceled.load(Ordering::Relaxed) {
+            report.canceled = true;
+            break;
+        }
         let id = match doc.get("_id") {
             Some(id) => id.clone(),
             None => continue,

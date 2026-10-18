@@ -26,9 +26,9 @@ use crate::utils::{
 };
 use futures::TryStreamExt;
 use mongodb::{
-    Namespace,
-    bson::{Bson, Document, doc, to_bson},
+    bson::{doc, to_bson, Bson, Document},
     options::{UpdateOneModel, WriteModel},
+    Namespace,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

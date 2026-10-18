@@ -211,6 +211,10 @@ pub async fn run(
 
     let mut read: u64 = 0;
     let mut last_reported: u64 = 0;
+    // Why the reader never returns from inside this loop: every exit has to go
+    // through the one shutdown below, or a writer keeps inserting into a
+    // destination the caller has already been told the run failed on.
+    let mut read_error: Option<super::TaskError> = None;
 
     loop {
         // Cancelling in the reader rather than the writers: they drain what is
@@ -220,11 +224,8 @@ pub async fn run(
             ctx.warn(format!(
                 "canceled after reading {read} document(s); resume with min_candid                  {max_candid_read}"
             ));
-            drop(tx);
-            for h in writer_handles {
-                let _ = h.await;
-            }
-            return Err(super::TaskError::Canceled);
+            read_error = Some(super::TaskError::Canceled);
+            break;
         }
 
         match cursor.try_next().await {
@@ -236,10 +237,11 @@ pub async fn run(
                         // Every document in the batch is keyed on candid; one
                         // that is not means the wrong collection, and copying
                         // it would produce a destination nothing can read back.
-                        return Err(failed(format!(
+                        read_error = Some(failed(format!(
                             "_id is missing or not an integer (got {other:?}); the source \
                              collection may have the wrong _id type"
                         )));
+                        break;
                     }
                 };
                 if batch.is_empty() {
@@ -269,9 +271,10 @@ pub async fn run(
                     if tx.send((ready, start)).await.is_err() {
                         // Every writer has exited; the failure that killed them
                         // is collected when the handles are awaited below.
-                        return Err(failed(format!(
+                        read_error = Some(failed(format!(
                             "all writers stopped; resume with min_candid {start}"
                         )));
+                        break;
                     }
                 }
             }
@@ -279,7 +282,7 @@ pub async fn run(
                 if !batch.is_empty() {
                     let start = batch_start;
                     if tx.send((batch, start)).await.is_err() {
-                        return Err(failed(format!(
+                        read_error = Some(failed(format!(
                             "all writers stopped; resume with min_candid {start}"
                         )));
                     }
@@ -294,11 +297,12 @@ pub async fn run(
                 } else {
                     max_candid_read
                 };
-                return Err(failed(if resume == i64::MIN {
+                read_error = Some(failed(if resume == i64::MIN {
                     format!("cursor error before any document was read: {e}")
                 } else {
                     format!("cursor error: {e}; resume with min_candid {resume}")
                 }));
+                break;
             }
         }
     }
@@ -315,8 +319,17 @@ pub async fn run(
             Err(e) => writer_error = writer_error.or(Some(format!("writer panicked: {e}"))),
         }
     }
+    // Cancellation is the caller's own decision, so it outranks anything the
+    // shutdown turned up. Otherwise the writers' error is the more specific
+    // one: a send failure only means the reader noticed they had already gone.
+    if matches!(read_error, Some(super::TaskError::Canceled)) {
+        return Err(super::TaskError::Canceled);
+    }
     if let Some(e) = writer_error {
         return Err(failed(e));
+    }
+    if let Some(e) = read_error {
+        return Err(e);
     }
 
     let inserted = total_inserted.load(Ordering::Relaxed);

@@ -552,8 +552,6 @@ pub fn single_flight_key(
         // rewrite the same documents with the same pipeline, wasting a large
         // amount of write throughput for no benefit.
         migrate_fp_flux::TASK_TYPE => Some(doc! {}),
-        // Keyed by survey: migrating ZTF and LSST at once is fine, but two runs
-        // over the same survey would rewrite the same documents.
         // Two imports into one BOOM would duplicate the whole stream's work.
         stream_kowalski_alerts::TASK_TYPE => params
             .get("boom_uri")
@@ -598,13 +596,12 @@ pub fn single_flight_key(
                 .map(|survey| doc! { "survey": survey })
                 .unwrap_or_default(),
         ),
-        migrate_snr::TASK_TYPE => Some(
-            params
-                .get("survey")
-                .and_then(|s| s.as_str())
-                .map(|survey| doc! { "survey": survey })
-                .unwrap_or_default(),
-        ),
+        // Not keyed by survey, even though it takes one: `all` is the default
+        // and rewrites the ZTF and LSST collections both, so a key on the survey
+        // string would let an `all` run and a `ztf` run race over the same
+        // documents. An exact-match key cannot express that overlap, so every
+        // SNR migration waits for the one ahead of it.
+        migrate_snr::TASK_TYPE => Some(doc! {}),
         // Not keyed on anything: persisting merges tracks by shared members
         // across the whole collection, so two runs at once could each decide a
         // different survivor for the same merge. Keyed this way the second run

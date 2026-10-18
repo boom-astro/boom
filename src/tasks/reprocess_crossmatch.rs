@@ -254,7 +254,7 @@ fn resolve_catalogs(
                 return Err(format!(
                     "catalog {name:?} is not declared under crossmatch.{} in the config",
                     survey.to_string().to_lowercase()
-                ))
+                ));
             }
         }
     }

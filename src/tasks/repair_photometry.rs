@@ -332,7 +332,7 @@ pub async fn run(
                 "collection {} does not exist in database {}",
                 aux_name,
                 db.name()
-            )))
+            )));
         }
         Err(e) => return Err(super::TaskError::Failed(e.to_string())),
     }
