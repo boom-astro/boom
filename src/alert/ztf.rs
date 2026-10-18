@@ -1088,8 +1088,17 @@ impl AlertWorker for ZtfAlertWorker {
                 &self.db,
             )
             .await?;
-            let host_galaxy =
-                host::associate_from_xmatches(ra, dec, &xmatches, &self.host_galaxy_config);
+            let host_galaxy = host::associate_with_photometry(
+                ra,
+                dec,
+                &xmatches,
+                &self.host_galaxy_config,
+                &self.xmatch_configs,
+                &Survey::Ztf,
+                &object_id,
+                &self.db,
+            )
+            .await;
             let obj = ZtfObject {
                 object_id: object_id.clone(),
                 prv_candidates,

@@ -577,8 +577,17 @@ impl AlertWorker for DecamAlertWorker {
                 &self.db,
             )
             .await?;
-            let host_galaxy =
-                host::associate_from_xmatches(ra, dec, &xmatches, &self.host_galaxy_config);
+            let host_galaxy = host::associate_with_photometry(
+                ra,
+                dec,
+                &xmatches,
+                &self.host_galaxy_config,
+                &self.xmatch_configs,
+                &Survey::Decam,
+                &object_id,
+                &self.db,
+            )
+            .await;
             let obj = DecamObject {
                 object_id: object_id.clone(),
                 prv_candidates,

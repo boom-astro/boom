@@ -1389,6 +1389,7 @@ mod tests {
             a_arcsec: 60.0,
             b_arcsec: 50.0,
             pa_deg: 10.0,
+            photometry: None,
         };
         let association = HostGalaxyAssociation {
             best_host: Some(best_host.clone()),
