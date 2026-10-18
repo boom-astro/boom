@@ -21,6 +21,10 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     time::{Duration, Instant},
 };
 
@@ -65,6 +69,8 @@ struct Plan {
     filters_are_deployed_export: bool,
     #[serde(default)]
     recovery_only: bool,
+    #[serde(default)]
+    recovery_overlap: bool,
     #[serde(default)]
     keep_phase_data: bool,
     #[serde(default)]
@@ -392,24 +398,50 @@ async fn phase(config_path: &Path, raw: &Value, workload: &Workload, name: &str)
     let mut producer = redis.clone();
     let producing_workload = workload.clone();
     let producer_input = input.clone();
+    let overlap = recovery && workload.plan.recovery_overlap;
+    ensure!(
+        !overlap || workload.count >= 4,
+        "overlap recovery requires at least four packets"
+    );
+    let split = workload.count / 2;
+    let paused = Arc::new(AtomicBool::new(false));
+    let resume = Arc::new(tokio::sync::Notify::new());
+    let producer_paused = paused.clone();
+    let producer_resume = resume.clone();
     let producing = tokio::spawn(async move {
         let mut lateness = Vec::new();
         let mut bytes_sent = 0_u64;
+        let mut segment_started = started;
+        let mut segment_offset = 0;
+        let mut dispatch_seconds = Vec::new();
         for i in 0..producing_workload.count {
-            let due = started + Duration::from_millis(producing_workload.at_ms(i));
+            if overlap && i == split {
+                producer_paused.store(true, Ordering::Release);
+                producer_resume.notified().await;
+                segment_started = Instant::now();
+                segment_offset = producing_workload.at_ms(i);
+            }
+            let due = segment_started
+                + Duration::from_millis(producing_workload.at_ms(i) - segment_offset);
             tokio::time::sleep_until(tokio::time::Instant::from_std(due)).await;
             let bytes = producing_workload.packet(i)?;
             bytes_sent += bytes.len() as u64;
-            lateness.push(
-                started.elapsed().as_secs_f64() * 1000.0 - producing_workload.at_ms(i) as f64,
-            );
-            let _: i64 = producer.lpush(&producer_input, bytes).await?;
+            lateness.push(Instant::now().saturating_duration_since(due).as_secs_f64() * 1000.0);
+            let _: i64 = producer
+                .lpush(&producer_input, bytes)
+                .await
+                .context("dispatching replay packet to Redis")?;
+            dispatch_seconds.push(started.elapsed().as_secs_f64());
         }
-        Ok::<_, anyhow::Error>(json!({"bytes":bytes_sent,"dispatch_lateness_ms":lateness}))
+        Ok::<_, anyhow::Error>(json!({"bytes":bytes_sent,"dispatch_lateness_ms":lateness,
+            "last_dispatch_seconds":dispatch_seconds.last(),"dispatch_seconds":dispatch_seconds,
+            "timing_policy":if overlap {"two manifest-paced segments with a controlled pause before restoration"}else{"manifest schedule"}}))
     });
     let mut samples = Vec::new();
     let mut reads = Vec::new();
     let mut empty_reads = 0_u64;
+    let mut restoration: Option<(Instant, Value, u64)> = None;
+    let mut recovery_samples = Vec::new();
     loop {
         ensure!(
             Instant::now() < deadline,
@@ -422,15 +454,42 @@ async fn phase(config_path: &Path, raw: &Value, workload: &Workload, name: &str)
         let committed = db
             .collection::<Document>("ZTF_alerts")
             .count_documents(doc! {})
-            .await?;
-        let queue = redis.llen::<_, u64>(&input).await?;
-        let in_flight = redis.llen::<_, u64>(&temp).await?;
+            .await
+            .context("counting committed replay alerts")?;
+        let queue = redis
+            .llen::<_, u64>(&input)
+            .await
+            .context("reading replay input queue")?;
+        let in_flight = redis
+            .llen::<_, u64>(&temp)
+            .await
+            .context("reading replay temporary queue")?;
         let lag = if let Some(shadow) = &shadow {
             shadow.lag().await?
         } else {
             json!({"pending":0,"oldest_age_seconds":0})
         };
         samples.push(json!({"seconds":started.elapsed().as_secs_f64(),"committed":committed,"queue":queue,"in_flight":in_flight,"lag":lag}));
+        if overlap
+            && restoration.is_none()
+            && paused.load(Ordering::Acquire)
+            && queue == 0
+            && in_flight == 0
+        {
+            ensure!(
+                committed > 0 && lag["pending"].as_u64() == Some(committed),
+                "outage lost durable references before restoration"
+            );
+            let restored = Instant::now();
+            set_outage(&config, false).await?;
+            restoration = Some((restored, lag.clone(), committed));
+            resume.notify_one();
+        }
+        if let Some((restored, _, _)) = &restoration {
+            recovery_samples.push(json!({"seconds":restored.elapsed().as_secs_f64(),
+                "since_phase_start_seconds":started.elapsed().as_secs_f64(),"committed":committed,
+                "queue":queue,"in_flight":in_flight,"producer_finished":producing.is_finished(),"lag":lag}));
+        }
         if !recovery {
             if baseline {
                 let object = &workload.objects[samples.len() % workload.objects.len()];
@@ -438,7 +497,8 @@ async fn phase(config_path: &Path, raw: &Value, workload: &Workload, name: &str)
                 let history = db
                     .collection::<Document>("ZTF_alerts_aux")
                     .find_one(doc! {"_id":object})
-                    .await?;
+                    .await
+                    .context("reading baseline Mongo history")?;
                 let ms = t.elapsed().as_secs_f64() * 1000.0;
                 if history.is_some() {
                     reads.push(ms);
@@ -470,19 +530,26 @@ async fn phase(config_path: &Path, raw: &Value, workload: &Workload, name: &str)
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    let produced = producing.await??;
+    let produced = producing
+        .await
+        .context("joining replay producer")?
+        .context("replay producer failed")?;
     let ingest_seconds = started.elapsed().as_secs_f64();
     let mut recovery_result = Value::Null;
     if recovery {
         let shadow = shadow.as_ref().unwrap();
-        let initial = shadow.lag().await?;
-        ensure!(
-            initial["pending"].as_u64() == Some(workload.unique_alerts as u64),
-            "outage lost durable references"
-        );
-        let restored = Instant::now();
-        set_outage(&config, false).await?;
-        let mut recovery_samples = Vec::new();
+        let (restored, initial, committed_at_restore) = if let Some(restoration) = restoration {
+            restoration
+        } else {
+            let initial = shadow.lag().await?;
+            ensure!(
+                initial["pending"].as_u64() == Some(workload.unique_alerts as u64),
+                "outage lost durable references"
+            );
+            let restored = Instant::now();
+            set_outage(&config, false).await?;
+            (restored, initial, workload.unique_alerts as u64)
+        };
         loop {
             let lag = shadow.lag().await?;
             recovery_samples.push(json!({"seconds":restored.elapsed().as_secs_f64(),"lag":lag}));
@@ -497,9 +564,58 @@ async fn phase(config_path: &Path, raw: &Value, workload: &Workload, name: &str)
         }
         let seconds = restored.elapsed().as_secs_f64();
         stop_worker(sender, task).await?;
-        recovery_result = json!({"pending_at_restore":initial["pending"],"seconds":seconds,
-            "references_per_second":initial["pending"].as_u64().unwrap() as f64/seconds,"samples":recovery_samples,
-            "fault":"HTTP 503 via loopback proxy; same worker throughout; no new input during recovery"});
+        let restore_seconds = restored.duration_since(started).as_secs_f64();
+        let last_dispatch = produced["last_dispatch_seconds"]
+            .as_f64()
+            .context("missing producer completion")?;
+        let arrivals_after_restore = produced["dispatch_seconds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|t| t.as_f64().is_some_and(|t| t > restore_seconds))
+            .count();
+        let overlap_seconds = (last_dispatch - restore_seconds).max(0.0);
+        let live_samples: Vec<_> = recovery_samples
+            .iter()
+            .filter(|s| {
+                s["since_phase_start_seconds"]
+                    .as_f64()
+                    .is_some_and(|t| t < last_dispatch)
+            })
+            .collect();
+        let completed_during_arrivals = live_samples
+            .iter()
+            .filter_map(|s| {
+                Some(
+                    s["committed"]
+                        .as_u64()?
+                        .saturating_sub(s["lag"]["pending"].as_u64()?),
+                )
+            })
+            .max()
+            .unwrap_or(0);
+        let caught_up_during_arrivals = live_samples.iter().any(|s| {
+            s["lag"]["pending"] == 0
+                && s["queue"] == 0
+                && s["committed"]
+                    .as_u64()
+                    .is_some_and(|n| n > committed_at_restore)
+        });
+        ensure!(
+            !overlap
+                || (arrivals_after_restore > 0
+                    && overlap_seconds > 0.0
+                    && !live_samples.is_empty()),
+            "recovery did not overlap observed arrivals"
+        );
+        recovery_result = json!({"mode":if overlap {"with_arrivals"}else{"idle"},
+            "pending_at_restore":initial["pending"],"source_alerts_at_restore":committed_at_restore,"restore_seconds":restore_seconds,
+            "seconds":seconds,"initial_backlog_net_drain_per_second":initial["pending"].as_u64().unwrap() as f64/seconds,
+            "references_per_second":if overlap {Value::Null}else{json!(initial["pending"].as_u64().unwrap() as f64/seconds)},
+            "packets_dispatched_after_restore":arrivals_after_restore,"arrival_overlap_seconds":overlap_seconds,
+            "completed_reference_lower_bound_during_arrivals":completed_during_arrivals,
+            "caught_up_during_arrivals":caught_up_during_arrivals,"samples":recovery_samples,
+            "fault":if overlap {"HTTP 503; same worker; second manifest-paced segment continues after restoring sink"}else{"HTTP 503 via loopback proxy; same worker throughout; no new input during recovery"}});
     } else {
         if let Some(shadow) = &shadow {
             while shadow.lag().await?["pending"].as_u64() != Some(0) {
@@ -649,6 +765,15 @@ async fn phase(config_path: &Path, raw: &Value, workload: &Workload, name: &str)
             "sink has missing or extra normalized rows"
         );
     }
+    if baseline {
+        let collections = db.list_collection_names().await?;
+        ensure!(
+            !collections
+                .iter()
+                .any(|name| name == boom::photometry::OUTBOX || name == STATUS),
+            "disabled integration created shadow collections"
+        );
+    }
     let status_count = db
         .collection::<Document>(STATUS)
         .count_documents(doc! {"report.histories_equal":true,"report.features_equal":true})
@@ -743,6 +868,7 @@ mod tests {
             enrichment_samples: 4,
             filters_are_deployed_export: false,
             recovery_only: false,
+            recovery_overlap: false,
             keep_phase_data: false,
             target_packets_per_second: None,
             max_lag_seconds: None,

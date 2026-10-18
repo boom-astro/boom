@@ -64,10 +64,21 @@ exposes `bins OBJECT_ID CADENCE_SECONDS`; this internal method does not implemen
 public program authorization or a persisted bin cache. There is
 no incremental sum materialized view that could count overlapping packets twice.
 
-This copies full object histories per delivered reference, so write amplification
-is part of what the experiment must measure. Batching, coalescing references,
-and incremental accepted-point extraction are follow-up optimizations after the
-recovery and parity contract is established. The old seven-column compression
+Each drain claims at most `drain_rows` references and checks their own completed
+Mongo alerts in one query. Completed references for the same object share one
+source snapshot and verification. Snapshots stream into inserts capped at 4 MiB;
+a larger source snapshot is sent alone. Each row retains its source revision.
+A shared insert failure acknowledges nothing; a bad source is isolated from
+other objects. Successful references are deleted with individual lease-owner
+fences only after parity and status persistence.
+
+Full productive batches drain again without an idle sleep. The poll interval
+controls idle/error polling and bounds lag-metric refresh frequency. Source
+preparation and verification use `concurrent_deliveries` bounded concurrency.
+These limits are per alert worker, not a deployment-wide budget.
+
+Full histories are still copied per selected object snapshot. Measure insert
+counts, merge work and source overhead before considering incremental extraction. The old seven-column compression
 benchmark does not describe the size of these full records.
 
 ## Enable in a development stack
@@ -165,9 +176,10 @@ The internal ClickHouse client returns all programs and is not a public API.
 Delivery defaults to serial execution. `photometry_shadow.concurrent_deliveries`
 (or `BOOM_PHOTOMETRY_SHADOW__CONCURRENT_DELIVERIES`) permits 1–32 parallel
 lease-owned deliveries, still capped by `drain_rows` total claims per poll. Each
-claim retains its own acknowledgement fence and retry state. The benchmark
-records this tuning explicitly; enabling parallel delivery does not change row
-revision ordering or source authority.
+claim retains its own acknowledgement fence and retry state. Preparation and
+verification run concurrently; each chunk is inserted as one synchronous
+request. The benchmark records this tuning explicitly; row revision ordering
+and source authority are unchanged.
 
 ## What would justify the next phase
 
@@ -182,3 +194,21 @@ Only then propose Mongo's retained recent window and which filters need a
 separate full-history execution path. Retention, deletes/tombstones, a durable
 backfill task, schema evolution, and operational ownership must be resolved
 before making ClickHouse authoritative for photometry.
+
+## BOOM-owned integration gate
+
+`.github/workflows/photometry-shadow.yaml` runs on PRs and the `clickhouse`/`main`
+branches with dedicated Mongo/Redis and a checksum-verified ClickHouse binary.
+`python3 tests/photometry_shadow.py` needs no companion repository. It exercises
+11 failure/batching scenarios, a disabled baseline with no shadow collections,
+all mirrored fixture-derived histories, actual CPU model parity and independent
+15-minute/hour/day bin references. It also restores the sink before sending the
+second half of the workload and requires measured delivery during new arrivals.
+This establishes behavior, not production capacity or permission to trim Mongo.
+
+The benchmark plan's `recovery_overlap: true` uses two manifest-paced segments
+separated by a controlled pause. Once the first segment is committed in Mongo,
+the sink is restored and the second segment is sent at its relative manifest
+spacing. Reports retain actual dispatch times, overlapping source commits and
+pending counts. Idle backlog-drain rates are not reported as capacity for this
+mode; sampled catch-up during arrivals is a separate observation.

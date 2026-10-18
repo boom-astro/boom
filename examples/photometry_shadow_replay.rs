@@ -393,6 +393,33 @@ async fn main() -> Result<()> {
         json!({"scenario":"existing-alert shortcut preserves shadow delivery", "result":"PASS"}),
     );
 
+    // Requeue actual completed alerts together: shared objects must be copied
+    // once, but an incomplete reference for an existing object stays pending.
+    let accepted = db.collection::<Document>("ZTF_alerts").find(doc!{}).sort(doc!{"_id":1}).await?.try_collect::<Vec<_>>().await?;
+    for alert in &accepted { shadow.enqueue(alert.get_i64("_id")?,alert.get_str("objectId")?).await?; }
+    let object_a = accepted[0].get_str("objectId")?;
+    let other = accepted.iter().find(|a|a.get_str("objectId").ok()!=Some(object_a)).context("batch test needs two real fixture objects")?;
+    shadow.enqueue(-2,object_a).await?;
+    let batch = shadow.drain(256).await?;
+    ensure!(batch.delivered==accepted.len() && batch.objects>=2 && batch.objects<batch.delivered && batch.insert_requests==1,
+        "references were not coalesced into one multi-object insert: {batch:?}");
+    ensure!(db.collection::<Document>(OUTBOX).find_one(doc!{"_id":-2_i64}).await?.is_some(),"uncommitted reference was acknowledged through a shared object");
+    cases.push(json!({"scenario":"batched insert coalesces completed references with individual Mongo gates","result":"PASS","drain":batch}));
+
+    // One invalid source snapshot must not poison another object's delivery.
+    let source = db.collection::<Document>("ZTF_alerts_aux").find_one(doc!{"_id":object_a}).await?.context("missing source")?;
+    let original = source.get("prv_candidates").context("missing detections")?.clone();
+    db.collection::<Document>("ZTF_alerts_aux").update_one(doc!{"_id":object_a},doc!{"$set":{"prv_candidates.0.psfFluxErr":-1.0}}).await?;
+    shadow.enqueue(accepted[0].get_i64("_id")?,object_a).await?;
+    shadow.enqueue(other.get_i64("_id")?,other.get_str("objectId")?).await?;
+    let isolated = shadow.drain(256).await?;
+    ensure!(isolated.delivered==1 && isolated.failed==1,"invalid object poisoned unrelated delivery: {isolated:?}");
+    db.collection::<Document>("ZTF_alerts_aux").update_one(doc!{"_id":object_a},doc!{"$set":{"prv_candidates":original}}).await?;
+    db.collection::<Document>(OUTBOX).update_one(doc!{"_id":accepted[0].get_i64("_id")?},doc!{"$set":{"next_attempt":DateTime::from_millis(0)}}).await?;
+    let repaired_source = shadow.drain(256).await?;
+    ensure!(repaired_source.delivered==1 && repaired_source.failed==0,"corrected invalid source did not retry");
+    cases.push(json!({"scenario":"invalid source is isolated from a healthy batch and retries after source repair","result":"PASS","drain":isolated}));
+
     let filters=audit::inventory(std::path::Path::new(&args[2]))?;
     let mongo_storage = db
         .run_command(doc! {"collStats":"ZTF_alerts_aux","scale":1})

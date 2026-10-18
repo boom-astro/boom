@@ -4,6 +4,7 @@ pub mod parity;
 pub mod store;
 
 use anyhow::{ensure, Context, Result};
+use futures::{StreamExt, TryStreamExt};
 use mongodb::{
     bson::{doc, DateTime, Document},
     options::{CollectionOptions, Hint, ReturnDocument, WriteConcern},
@@ -11,6 +12,7 @@ use mongodb::{
 };
 use serde::Serialize;
 use std::{
+    collections::BTreeMap,
     sync::LazyLock,
     time::{Duration, Instant},
 };
@@ -24,6 +26,18 @@ use store::{PreparedBatch, Store, ZtfHistory};
 pub const OUTBOX: &str = "photometry_shadow_outbox";
 pub const STATUS: &str = "photometry_shadow_status";
 const LEASE_MS: i64 = 180_000;
+// A single source document larger than this is delivered alone. Preparation is
+// streamed with bounded concurrency rather than retaining every source history.
+const INSERT_BYTES: usize = 4 * 1024 * 1024;
+
+struct Delivery {
+    object_id: String,
+    entries: Vec<Document>,
+    revision: u64,
+    source: ZtfHistory,
+    batch: PreparedBatch,
+    mongo_snapshot_ms: f64,
+}
 static PENDING: LazyLock<opentelemetry::metrics::Gauge<u64>> = LazyLock::new(|| {
     crate::utils::o11y::metrics::SCHEDULER_METER
         .u64_gauge("photometry_shadow.pending")
@@ -77,6 +91,10 @@ impl ShadowWorker {
 
 #[derive(Debug, Default, Serialize)]
 pub struct DrainReport {
+    pub claimed: usize,
+    pub objects: usize,
+    pub insert_requests: usize,
+    pub inserted_rows_attempted: usize,
     pub delivered: usize,
     pub waiting_for_mongo: usize,
     pub failed: usize,
@@ -128,26 +146,41 @@ impl Shadow {
         let poll_seconds = config.poll_seconds;
         let limit = config.drain_rows;
         let task = tokio::spawn(async move {
+            let mut last_metrics = Instant::now() - Duration::from_secs(poll_seconds);
             loop {
-                match drainer.drain(limit).await {
+                let busy = match drainer.drain(limit).await {
                     Ok(report) => {
                         if report.delivered + report.failed > 0 {
                             info!(
                                 delivered = report.delivered,
                                 failed = report.failed,
+                                claimed = report.claimed,
+                                objects = report.objects,
+                                insert_requests = report.insert_requests,
                                 "photometry shadow drain"
                             );
                         }
+                        // A full, productive batch means backlog may remain.
+                        // Poll delay is for idle/error recovery, not throughput.
+                        report.claimed == limit && report.delivered > 0
                     }
                     Err(error) => {
-                        warn!(error = %error, "photometry shadow drain failed; durable entries retained")
+                        warn!(error = %error, "photometry shadow drain failed; durable entries retained");
+                        false
                     }
+                };
+                if last_metrics.elapsed() >= Duration::from_secs(poll_seconds) {
+                    if let Ok(lag) = drainer.lag().await {
+                        PENDING.record(lag["pending"].as_u64().unwrap_or(0), &[]);
+                        OLDEST.record(lag["oldest_age_seconds"].as_f64().unwrap_or(0.0), &[]);
+                    }
+                    last_metrics = Instant::now();
                 }
-                if let Ok(lag) = drainer.lag().await {
-                    PENDING.record(lag["pending"].as_u64().unwrap_or(0), &[]);
-                    OLDEST.record(lag["oldest_age_seconds"].as_f64().unwrap_or(0.0), &[]);
+                if busy {
+                    tokio::task::yield_now().await;
+                } else {
+                    tokio::time::sleep(Duration::from_secs(poll_seconds)).await;
                 }
-                tokio::time::sleep(Duration::from_secs(poll_seconds)).await;
             }
         });
         Ok(Some(ShadowWorker { shadow, task }))
@@ -219,6 +252,18 @@ impl Shadow {
         let started = Instant::now();
         self.store.insert(&batch).await?;
         let write_ms = started.elapsed().as_secs_f64() * 1000.0;
+        self.verify_snapshot(object_id, revision, &source, mongo_snapshot_ms, write_ms)
+            .await
+    }
+
+    async fn verify_snapshot(
+        &self,
+        object_id: &str,
+        revision: u64,
+        source: &ZtfHistory,
+        mongo_snapshot_ms: f64,
+        write_ms: f64,
+    ) -> Result<parity::ParityReport> {
         let started = Instant::now();
         let target = self.store.history(object_id).await?;
         let read_ms = started.elapsed().as_secs_f64() * 1000.0;
@@ -227,7 +272,7 @@ impl Shadow {
             current_revision == revision,
             "Mongo aux changed during comparison; retrying latest snapshot"
         );
-        let mut report = parity::compare(&source, &target, revision, write_ms, read_ms)?;
+        let mut report = parity::compare(source, &target, revision, write_ms, read_ms)?;
         report.mongo_snapshot_ms = mongo_snapshot_ms;
         // Keep mismatches visible even while the outbox is retrying them.
         let report_doc = mongodb::bson::to_document(&report)?;
@@ -247,91 +292,189 @@ impl Shadow {
     }
 
     pub async fn drain(&self, limit: usize) -> Result<DrainReport> {
-        if limit == 0 {
-            return Ok(DrainReport::default());
+        let mut report = DrainReport::default();
+        let mut entries = Vec::new();
+        for _ in 0..limit {
+            let now = DateTime::now();
+            let owner = Uuid::new_v4().to_string();
+            let entry = self.outbox.find_one_and_update(doc! {
+                "next_attempt":{"$lte":now}, "lease_until":{"$lte":now}
+            },doc! {"$set":{"lease_owner":owner,"lease_until":DateTime::from_millis(now.timestamp_millis()+LEASE_MS),
+                "last_attempt":now,"state":"delivering","next_attempt":DateTime::from_millis(now.timestamp_millis()+LEASE_MS)},
+                "$inc":{"attempts":1_i64}})
+                .sort(doc!{"next_attempt":1,"_id":1}).return_document(ReturnDocument::After).await?;
+            let Some(entry) = entry else {
+                break;
+            };
+            entries.push(entry);
         }
-        let concurrency = self.concurrent_deliveries.min(limit);
-        let reports = futures::future::try_join_all((0..concurrency).map(|lane| async move {
-            let mut total = DrainReport::default();
-            for _ in (lane..limit).step_by(concurrency) {
-                let Some(report) = self.deliver_one().await? else {
-                    break;
-                };
-                total.delivered += report.delivered;
-                total.waiting_for_mongo += report.waiting_for_mongo;
-                total.failed += report.failed;
+        report.claimed = entries.len();
+        if entries.is_empty() {
+            return Ok(report);
+        }
+        let candids = entries
+            .iter()
+            .map(|e| e.get_i64("_id"))
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        // Gate every reference on its own completed alert before coalescing.
+        let accepted = self
+            .db
+            .collection::<Document>("ZTF_alerts")
+            .find(doc! {"_id":{"$in":candids}})
+            .projection(doc! {"_id":1,"objectId":1})
+            .await?
+            .try_collect::<Vec<_>>()
+            .await?;
+        let accepted = accepted
+            .iter()
+            .map(|d| Ok((d.get_i64("_id")?, d.get_str("objectId")?.to_owned())))
+            .collect::<Result<BTreeMap<_, _>>>()?;
+        let mut groups: BTreeMap<String, Vec<Document>> = BTreeMap::new();
+        for entry in entries {
+            let object_id = entry.get_str("object_id")?;
+            if accepted.get(&entry.get_i64("_id")?).map(String::as_str) == Some(object_id) {
+                groups.entry(object_id.to_owned()).or_default().push(entry);
+            } else {
+                self.retry(
+                    &entry,
+                    "waiting_for_mongo",
+                    "authoritative alert not complete",
+                )
+                .await?;
+                report.waiting_for_mongo += 1;
             }
-            Ok::<_, anyhow::Error>(total)
-        }))
-        .await?;
-        let mut total = DrainReport::default();
-        for report in reports {
-            total.delivered += report.delivered;
-            total.waiting_for_mongo += report.waiting_for_mongo;
-            total.failed += report.failed;
         }
-        Ok(total)
+        let preparing = futures::stream::iter(groups)
+            .map(|(object_id, entries)| async move {
+                let started = Instant::now();
+                let prepared = async {
+                    let (revision, source) = self.snapshot(&object_id).await?;
+                    let mongo_snapshot_ms = started.elapsed().as_secs_f64() * 1000.0;
+                    let batch = PreparedBatch::ztf(
+                        &object_id,
+                        revision,
+                        &source.prv_candidates,
+                        &source.prv_nondetections,
+                        &source.fp_hists,
+                    )?;
+                    Ok::<_, anyhow::Error>((revision, source, batch, mongo_snapshot_ms))
+                }
+                .await;
+                (object_id, entries, prepared)
+            })
+            .buffer_unordered(self.concurrent_deliveries);
+        futures::pin_mut!(preparing);
+        let mut chunk: Vec<Delivery> = Vec::new();
+        let mut bytes = 0;
+        while let Some((object_id, entries, prepared)) = preparing.next().await {
+            match prepared {
+                Ok((revision, source, batch, mongo_snapshot_ms)) => {
+                    if !chunk.is_empty() && bytes + batch.body.len() > INSERT_BYTES {
+                        self.deliver_batch(std::mem::take(&mut chunk), &mut report)
+                            .await?;
+                        bytes = 0;
+                    }
+                    report.objects += 1;
+                    bytes += batch.body.len();
+                    chunk.push(Delivery {
+                        object_id,
+                        entries,
+                        revision,
+                        source,
+                        batch,
+                        mongo_snapshot_ms,
+                    });
+                }
+                Err(error) => {
+                    for entry in entries {
+                        self.retry(&entry, "retry", &error.to_string()).await?;
+                        report.failed += 1;
+                    }
+                }
+            }
+        }
+        if !chunk.is_empty() {
+            self.deliver_batch(chunk, &mut report).await?;
+        }
+        Ok(report)
     }
 
-    async fn deliver_one(&self) -> Result<Option<DrainReport>> {
-        let mut report = DrainReport::default();
-        let now = DateTime::now();
-        let owner = Uuid::new_v4().to_string();
-        let entry = self.outbox.find_one_and_update(doc! {
-                "next_attempt": {"$lte": now}, "lease_until": {"$lte": now}
-            }, doc! {"$set": {"lease_owner": &owner, "lease_until": DateTime::from_millis(now.timestamp_millis() + LEASE_MS), "last_attempt": now, "state":"delivering", "next_attempt":DateTime::from_millis(now.timestamp_millis()+LEASE_MS)},
-                      "$inc": {"attempts": 1_i64}})
-                .sort(doc! {"next_attempt": 1, "_id": 1}).return_document(ReturnDocument::After).await?;
-        let Some(entry) = entry else {
-            return Ok(None);
-        };
-        let candid = entry.get_i64("_id")?;
-        let object_id = entry.get_str("object_id")?;
-        let owned = doc! {"_id": candid, "lease_owner": &owner};
-        let delivered = async {
-            let alert = self
-                .db
-                .collection::<Document>("ZTF_alerts")
-                .find_one(doc! {"_id": candid, "objectId": object_id})
-                .await?;
-            if alert.is_none() {
-                return Ok::<_, anyhow::Error>(false);
-            }
-            self.copy_object(object_id).await?;
-            Ok(true)
+    async fn deliver_batch(
+        &self,
+        mut deliveries: Vec<Delivery>,
+        report: &mut DrainReport,
+    ) -> Result<()> {
+        deliveries.sort_by(|a, b| a.object_id.cmp(&b.object_id));
+        let batch =
+            PreparedBatch::combine(&deliveries.iter().map(|d| &d.batch).collect::<Vec<_>>());
+        let started = Instant::now();
+        if batch.rows > 0 {
+            report.insert_requests += 1;
         }
-        .await;
-        match delivered {
-            Ok(true) => {
-                // Ack only after ClickHouse readback, parity, and the status
-                // record succeed. Lease ownership fences a delayed worker.
-                let ack = self.outbox.delete_one(owned).await?;
-                report.delivered += ack.deleted_count as usize;
+        report.inserted_rows_attempted += batch.rows;
+        if let Err(error) = self.store.insert(&batch).await {
+            // Ambiguous insert outcomes acknowledge nothing. A regrouped retry
+            // may have a different token; revisioned FINAL reads still dedupe.
+            for delivery in deliveries {
+                for entry in delivery.entries {
+                    self.retry(&entry, "retry", &error.to_string()).await?;
+                    report.failed += 1;
+                }
             }
-            outcome => {
-                let (state, error) = match outcome {
-                    Ok(false) => {
-                        report.waiting_for_mongo += 1;
-                        (
-                            "waiting_for_mongo",
-                            "authoritative alert not complete".to_owned(),
+            return Ok(());
+        }
+        let write_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let mut checking = futures::stream::iter(deliveries)
+            .map(|delivery| async move {
+                let result = self
+                    .verify_snapshot(
+                        &delivery.object_id,
+                        delivery.revision,
+                        &delivery.source,
+                        delivery.mongo_snapshot_ms,
+                        write_ms,
+                    )
+                    .await;
+                let mut delivered = 0;
+                let mut failed = 0;
+                for entry in delivery.entries {
+                    if result.is_ok() {
+                        // Fence each acknowledgement independently, even when
+                        // several references share one source snapshot and insert.
+                        delivered +=
+                            self.outbox.delete_one(owned(&entry)?).await?.deleted_count as usize;
+                    } else {
+                        self.retry(
+                            &entry,
+                            "retry",
+                            &result
+                                .as_ref()
+                                .err()
+                                .context("missing delivery error")?
+                                .to_string(),
                         )
+                        .await?;
+                        failed += 1;
                     }
-                    Err(error) => {
-                        report.failed += 1;
-                        ("retry", error.to_string())
-                    }
-                    Ok(true) => unreachable!(),
-                };
-                let attempts = entry.get_i64("attempts").unwrap_or(1);
-                let delay_ms = (1_i64 << attempts.clamp(1, 8)) * 1000;
-                self.outbox.update_one(owned, doc! {"$set": {
-                        "state": state, "last_error": error, "next_attempt": DateTime::from_millis(DateTime::now().timestamp_millis() + delay_ms),
-                        "lease_until": DateTime::from_millis(0)
-                    }, "$unset": {"lease_owner": ""}}).await?;
-            }
+                }
+                Ok::<_, anyhow::Error>((delivered, failed))
+            })
+            .buffer_unordered(self.concurrent_deliveries);
+        while let Some(result) = checking.next().await {
+            let (delivered, failed) = result?;
+            report.delivered += delivered;
+            report.failed += failed;
         }
-        Ok(Some(report))
+        Ok(())
+    }
+
+    async fn retry(&self, entry: &Document, state: &str, error: &str) -> Result<()> {
+        let attempts = entry.get_i64("attempts").unwrap_or(1);
+        let delay_ms = (1_i64 << attempts.clamp(1, 8)) * 1000;
+        self.outbox.update_one(owned(entry)?,doc!{"$set":{
+            "state":state,"last_error":error,"next_attempt":DateTime::from_millis(DateTime::now().timestamp_millis()+delay_ms),
+            "lease_until":DateTime::from_millis(0)},"$unset":{"lease_owner":""}}).await?;
+        Ok(())
     }
 
     pub async fn lag(&self) -> Result<serde_json::Value> {
@@ -352,4 +495,8 @@ impl Shadow {
         });
         Ok(serde_json::json!({"pending": pending, "oldest_age_seconds": oldest_age_seconds}))
     }
+}
+
+fn owned(entry: &Document) -> Result<Document> {
+    Ok(doc! {"_id":entry.get_i64("_id")?,"lease_owner":entry.get_str("lease_owner")?})
 }

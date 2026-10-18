@@ -40,6 +40,25 @@ pub struct PreparedBatch {
 }
 
 impl PreparedBatch {
+    /// Combine already normalized snapshots in a stable object order. Each row
+    /// retains its source revision; the retry token covers the exact body.
+    pub fn combine(batches: &[&Self]) -> Self {
+        let mut body = String::with_capacity(batches.iter().map(|b| b.body.len()).sum());
+        for batch in batches {
+            body.push_str(&batch.body);
+        }
+        let digest: String = Sha256::digest(body.as_bytes())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        let token = format!("boom-ztf-v1:{digest}");
+        Self {
+            body,
+            token,
+            rows: batches.iter().map(|b| b.rows).sum(),
+        }
+    }
+
     /// `revision` is a source-assigned monotonic version, NOT the retry time.
     /// A fixed zero is sufficient only for immutable measurement records.
     pub fn ztf<D: Serialize, U: Serialize, F: Serialize>(
