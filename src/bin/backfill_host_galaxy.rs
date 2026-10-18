@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use boom::{
-    conf::{load_dotenv, AppConfig},
+    conf::{load_dotenv, AppConfig, CatalogXmatchConfig},
     utils::{
         data::{make_progress_bar, spawn_progress_logger},
         db::{index_cuts, merge_filters, shard_field, shard_filters, TaskError, CURSOR_BATCH_SIZE},
@@ -274,6 +274,9 @@ async fn backfill_shard(
     index: usize,
     filter: Document,
     config: HostGalaxyConfig,
+    xmatch_configs: Vec<CatalogXmatchConfig>,
+    survey: Survey,
+    db: Database,
     batch_size: usize,
     dry_run: bool,
     pb: ProgressBar,
@@ -311,7 +314,22 @@ async fn backfill_shard(
             continue;
         };
         // `enabled` is checked once up front, so this is always `Some`.
-        let Some(association) = host::associate_from_xmatches(ra, dec, &matches, &config) else {
+        let object_name = match &object_id {
+            Bson::String(name) => name.clone(),
+            other => other.to_string(),
+        };
+        let Some(association) = host::associate_with_photometry(
+            ra,
+            dec,
+            &matches,
+            &config,
+            &xmatch_configs,
+            &survey,
+            &object_name,
+            &db,
+        )
+        .await
+        else {
             continue;
         };
         let value = match to_bson(&association) {
@@ -417,6 +435,11 @@ async fn main() {
     }
 
     let aux_collection: Collection<Document> = db.collection(&aux_name);
+    let xmatch_configs = config
+        .crossmatch
+        .get(&args.survey)
+        .cloned()
+        .unwrap_or_default();
     if let Err(e) = probe_catalogs(&aux_collection, &config.host_galaxy).await {
         warn!("catalog probe failed, continuing: {}", e);
     }
@@ -490,6 +513,9 @@ async fn main() {
                     index,
                     filter,
                     config.host_galaxy.clone(),
+                    xmatch_configs.clone(),
+                    args.survey.clone(),
+                    db.clone(),
                     args.batch_size,
                     args.dry_run,
                     pb.clone(),

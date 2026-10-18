@@ -43,6 +43,9 @@ pub struct HostGalaxyConfig {
     pub rex_max_fracflux: f64,
     /// Isophote the Legacy half-light radius is converted to, mag/arcsec^2.
     pub isophote_mag: f64,
+    /// Cross-match catalog searched at the host's position when no Legacy row is on it.
+    pub ps1_catalog: String,
+    pub photometry_match_arcsec: f64,
 }
 
 impl Default for HostGalaxyConfig {
@@ -66,6 +69,8 @@ impl Default for HostGalaxyConfig {
             rex_min_snr: 5.0,
             rex_max_fracflux: 0.5,
             isophote_mag: super::sersic::MU_25,
+            ps1_catalog: "PS1_DR2".to_string(),
+            photometry_match_arcsec: 2.0,
         }
     }
 }
