@@ -123,7 +123,10 @@ docker compose "${COMPOSE_CONFIG[@]}" down
 # Spin up BOOM services with Docker Compose
 if ! docker compose "${COMPOSE_CONFIG[@]}" up --build -d; then
     echo "$(current_datetime) - ERROR: Failed to start Docker Compose services"
-    docker compose "${COMPOSE_CONFIG[@]}" logs mongo-init || true
+    # Every service, not just mongo-init: whichever one exited is the one whose
+    # log says why, and naming a single service hides exactly that.
+    docker compose "${COMPOSE_CONFIG[@]}" ps --all || true
+    docker compose "${COMPOSE_CONFIG[@]}" logs --no-color || true
     exit 1
 fi
 
