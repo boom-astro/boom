@@ -222,3 +222,11 @@ SHA-256 and compares every mirrored history after convergence. Archive pacing is
 synthetic unless an explicit arrival schedule is supplied; live recovery inserts
 a controlled boundary pause. `boom-clickhouse` remains optional research/reporting
 material and is not a BOOM build, test, deployment or runtime dependency.
+
+Replay control/upload connections use a 30-second Redis response timeout for
+large packets crossing local Docker networking; the alert worker keeps BOOM's
+production timeout policy. A failed producer is surfaced before waiting for an
+unreachable committed-alert count, and outstanding dispatch is aborted on exit.
+Reports of incomplete runs are not capacity evidence. These examples use debug
+builds unless explicitly rebuilt otherwise; production acceptance needs the
+production build profile and deployment resource limits.

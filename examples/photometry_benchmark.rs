@@ -35,6 +35,33 @@ fn digest(bytes: &[u8]) -> String {
         .collect()
 }
 
+// Surface dispatch errors before waiting for an unreachable source count.
+struct Producer {
+    task: tokio::task::JoinHandle<Result<Value>>,
+    result: Option<Value>,
+}
+impl Producer {
+    async fn poll(&mut self) -> Result<()> {
+        if self.result.is_none() && self.task.is_finished() {
+            self.result = Some(
+                (&mut self.task)
+                    .await
+                    .context("joining replay producer")?
+                    .context("replay producer failed")?,
+            );
+        }
+        Ok(())
+    }
+    fn is_finished(&self) -> bool {
+        self.result.is_some()
+    }
+}
+impl Drop for Producer {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Packet {
@@ -375,6 +402,9 @@ async fn phase(config_path: &Path, raw: &Value, workload: &Workload, name: &str)
         "phase database is not empty"
     );
     let mut redis = config.build_redis().await?;
+    // Test control/upload connections may carry large packets across Docker.
+    // Worker connection policy remains BOOM's unchanged production default.
+    redis.set_response_timeout(Duration::from_secs(30));
     ensure!(
         redis::cmd("DBSIZE").query_async::<u64>(&mut redis).await? == 0,
         "dedicated Redis is not empty"
@@ -408,7 +438,7 @@ async fn phase(config_path: &Path, raw: &Value, workload: &Workload, name: &str)
     let resume = Arc::new(tokio::sync::Notify::new());
     let producer_paused = paused.clone();
     let producer_resume = resume.clone();
-    let producing = tokio::spawn(async move {
+    let producing_task = tokio::spawn(async move {
         let mut lateness = Vec::new();
         let mut bytes_sent = 0_u64;
         let mut segment_started = started;
@@ -437,12 +467,17 @@ async fn phase(config_path: &Path, raw: &Value, workload: &Workload, name: &str)
             "last_dispatch_seconds":dispatch_seconds.last(),"dispatch_seconds":dispatch_seconds,
             "timing_policy":if overlap {"two manifest-paced segments with a controlled pause before restoration"}else{"manifest schedule"}}))
     });
+    let mut producing = Producer {
+        task: producing_task,
+        result: None,
+    };
     let mut samples = Vec::new();
     let mut reads = Vec::new();
     let mut empty_reads = 0_u64;
     let mut restoration: Option<(Instant, Value, u64)> = None;
     let mut recovery_samples = Vec::new();
     loop {
+        producing.poll().await?;
         ensure!(
             Instant::now() < deadline,
             "phase {name} timed out while ingesting"
@@ -531,9 +566,9 @@ async fn phase(config_path: &Path, raw: &Value, workload: &Workload, name: &str)
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     let produced = producing
-        .await
-        .context("joining replay producer")?
-        .context("replay producer failed")?;
+        .result
+        .take()
+        .context("producer did not complete")?;
     let ingest_seconds = started.elapsed().as_secs_f64();
     let mut recovery_result = Value::Null;
     if recovery {
@@ -861,6 +896,20 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn producer_failure_is_reported_before_waiting_for_all_alerts() {
+        let mut producer = Producer {
+            task: tokio::spawn(async { anyhow::bail!("injected dispatch failure") }),
+            result: None,
+        };
+        while !producer.task.is_finished() {
+            tokio::task::yield_now().await;
+        }
+        let error = producer.poll().await.unwrap_err();
+        assert!(format!("{error:#}").contains("injected dispatch failure"));
+        assert!(producer.result.is_none());
+    }
+
     fn plan(corpus: Corpus) -> Plan {
         Plan {
             corpus,
