@@ -300,7 +300,7 @@ pub async fn run(
 }
 ```
 
-**2. Register it,** all in [`src/tasks/mod.rs`](../src/tasks/mod.rs): a `pub mod`
+**2. Register it,** all in [`src/tasks/mod.rs`](https://github.com/boom-astro/boom/blob/main/src/tasks/mod.rs): a `pub mod`
 line, an entry in `TASKS`, an arm in `validate_params`, an arm in `dispatch`,
 and optionally one in `single_flight_key` if two concurrent runs would collide.
 Copy the `backfill_hpx` arms; they are the shortest. Forgetting an arm is caught
