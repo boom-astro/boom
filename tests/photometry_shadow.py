@@ -7,11 +7,13 @@ The native drivers reject production endpoints and non-isolated databases.
 """
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import argparse
 import collections
 import hashlib
 import json
 import math
 import os
+import platform
 from pathlib import Path
 import shutil
 import socket
@@ -147,16 +149,16 @@ def configuration(port, database):
                 "password": "", "poll_seconds": 1, "drain_rows": 64, "concurrent_deliveries": 4}}
 
 
-def run_driver(example, args, cwd):
+def run_driver(example, args, cwd, timeout=900):
     env = {k: v for k, v in os.environ.items() if not k.startswith("BOOM_")}
     env["OTEL_SDK_DISABLED"] = "true"
     with (ARTIFACTS / f"{example}.stdout.log").open("w") as stdout, (ARTIFACTS / f"{example}.stderr.log").open("w") as stderr:
         result = subprocess.run([str(TARGET / "debug/examples" / example), *map(str, args)], cwd=cwd,
-                                env=env, stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr, timeout=900)
+                                env=env, stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr, timeout=timeout)
     assert result.returncode == 0, (ARTIFACTS / f"{example}.stderr.log").read_text()[-6000:]
 
 
-def exercise(directory, port):
+def exercise(directory, port, args):
     base = "boom_shadow_replay_" + directory.name.replace("-", "_")
     def create_database(name):
         with urllib.request.urlopen(urllib.request.Request(f"http://127.0.0.1:{port}", data=f"CREATE DATABASE `{name}`".encode()), timeout=10) as response:
@@ -170,29 +172,48 @@ def exercise(directory, port):
     worker = directory / "worker"
     (worker / "data").mkdir(parents=True)
     (worker / "data/models").symlink_to(ROOT / "data/models", target_is_directory=True)
-    run_driver("photometry_shadow_replay", [config, ROOT / "tests/data/alerts/ztf", ROOT / "data/filters", ARTIFACTS / "recovery.json"], worker)
-    recovery = json.loads((ARTIFACTS / "recovery.json").read_text())
-    assert recovery["status"] == "PASS" and len(recovery["cases"]) >= 11
-    assert all(case["result"] == "PASS" for case in recovery["cases"])
-    assert redis_command(redis_port, "FLUSHDB") == "+OK"
+    provenance = {"source_revision": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
+                  "platform": platform.platform(), "cpu_count": os.cpu_count(),
+                  "models": {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted((ROOT / "data/models").glob("*.onnx"))},
+                  "clickhouse_version": subprocess.check_output([CH,"local","--version"],stdin=subprocess.DEVNULL,text=True).strip(),
+                  "source_dirty": bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT, text=True).strip()),
+                  "binaries": {name: hashlib.sha256((TARGET / "debug/examples" / name).read_bytes()).hexdigest()
+                               for name in ["photometry_benchmark", "photometry_shadow_replay"]}}
+    (ARTIFACTS / "provenance.json").write_text(json.dumps(provenance, indent=2) + "\n")
+    recovery = {"cases": []}
+    if not args.benchmark_only:
+        run_driver("photometry_shadow_replay", [config, ROOT / "tests/data/alerts/ztf", ROOT / "data/filters", ARTIFACTS / "recovery.json"], worker)
+        recovery = json.loads((ARTIFACTS / "recovery.json").read_text())
+        assert recovery["status"] == "PASS" and len(recovery["cases"]) >= 11
+        assert all(case["result"] == "PASS" for case in recovery["cases"])
+        assert redis_command(redis_port, "FLUSHDB") == "+OK"
     for phase in ["baseline", "shadow", "recovery"]:
         create_database(base + "_" + phase)
     with fault_gate(port) as proxy:
         raw["benchmark_fault_proxy_url"] = f"http://127.0.0.1:{proxy}"
         config.write_text(json.dumps(raw))
-        plan = {"corpus": {"kind": "fixture_derived", "templates": [str(p) for p in sorted((ROOT / "tests/data/alerts/ztf").glob("*.avro"))],
-                            "objects": 32, "epochs": 4, "interval_ms": 30},
-                "timeout_seconds": 240, "enrichment_samples": 16, "recovery_overlap": True}
+        corpus = {"kind": "fixture_derived", "templates": [str(p) for p in sorted((ROOT / "tests/data/alerts/ztf").glob("*.avro"))],
+                  "objects": 32, "epochs": 4, "interval_ms": 30}
+        if args.manifest:
+            manifest = args.manifest.resolve()
+            corpus = json.loads(manifest.read_text())
+            assert corpus.get("kind") == "captured", "manifest must identify captured packets"
+            for packet in corpus["packets"]:
+                packet["path"] = str((manifest.parent / packet["path"]).resolve())
+        plan = {"corpus": corpus, "timeout_seconds": args.timeout_seconds,
+                "enrichment_samples": args.enrichment_samples, "recovery_overlap": True,
+                "filters_are_deployed_export": args.deployed_filters,
+                "target_packets_per_second": args.target_rate, "max_lag_seconds": args.max_lag_seconds}
         plan_path = directory / "plan.json"
         plan_path.write_text(json.dumps(plan))
-        run_driver("photometry_benchmark", [config, plan_path, ROOT / "data/filters", ARTIFACTS / "benchmark.json"], worker)
+        run_driver("photometry_benchmark", [config, plan_path, args.filters.resolve(), ARTIFACTS / "benchmark.json"], worker, timeout=args.timeout_seconds * 6 + 180)
     benchmark = json.loads((ARTIFACTS / "benchmark.json").read_text())
     assert benchmark["status"] == "PASS"
     comparisons = 0
     models = 0
     for name in ["shadow", "recovery"]:
         phase = benchmark["phases"][name]
-        assert len(phase["histories"]) == 32
+        assert len(phase["histories"]) == benchmark["workload"]["objects"]
         assert phase["enrichment"] and all(sample["parity"]["equal"] for sample in phase["enrichment"])
         models += sum(sample["parity"]["source"]["status"] == "evaluated" for sample in phase["enrichment"])
         for sample in phase["enrichment"]:
@@ -203,21 +224,28 @@ def exercise(directory, port):
     live = benchmark["phases"]["recovery"]["recovery"]
     assert live["mode"] == "with_arrivals" and live["packets_dispatched_after_restore"] > 0
     assert live["arrival_overlap_seconds"] > 0 and live["completed_reference_lower_bound_during_arrivals"] > 0
-    assert models > 0 and comparisons == 96
-    provenance = {"source_revision": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
-                  "binaries": {name: hashlib.sha256((TARGET / "debug/examples" / name).read_bytes()).hexdigest()
-                               for name in ["photometry_benchmark", "photometry_shadow_replay"]}}
-    (ARTIFACTS / "provenance.json").write_text(json.dumps(provenance, indent=2) + "\n")
+    sample_count = min(args.enrichment_samples, benchmark["workload"]["unique_alerts"])
+    assert models > 0 and comparisons == sample_count * 6
     summary = (f"## Native photometry shadow: PASS\n\n"
                f"{len(recovery['cases'])} recovery/batching scenarios; {models} sampled CPU model pairs; {comparisons} independent bin comparisons.\n\n"
                f"Recovery overlapped {live['packets_dispatched_after_restore']} new packet dispatches for {live['arrival_overlap_seconds']:.2f} s. "
                f"At least {live['completed_reference_lower_bound_during_arrivals']} references completed during arrivals.\n\n"
-               "Fixture-derived CI evidence; production capacity and retention are not established.\n")
+               f"{benchmark['workload']['kind']} workload; production capacity and retention are not established.\n")
     (ARTIFACTS / "summary.md").write_text(summary)
     print(summary)
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--manifest", type=Path, help="Captured packet manifest produced by prepare_photometry_capture.py")
+    parser.add_argument("--filters", type=Path, default=ROOT / "data/filters")
+    parser.add_argument("--deployed-filters", action="store_true")
+    parser.add_argument("--benchmark-only", action="store_true", help="Skip fixture fault cases; still run baseline, shadow and live recovery")
+    parser.add_argument("--enrichment-samples", type=int, default=16)
+    parser.add_argument("--timeout-seconds", type=int, default=240)
+    parser.add_argument("--target-rate", type=float)
+    parser.add_argument("--max-lag-seconds", type=float)
+    args = parser.parse_args()
     ARTIFACTS.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="boom-shadow-ci-") as tmp:
         directory = Path(tmp)
@@ -251,7 +279,7 @@ def main():
                         pass
                     assert time.monotonic() < deadline, "ClickHouse startup timed out"
                     time.sleep(0.1)
-                exercise(directory, port)
+                exercise(directory, port, args)
             finally:
                 process.terminate()
                 try:

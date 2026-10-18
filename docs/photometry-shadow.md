@@ -212,3 +212,13 @@ the sink is restored and the second segment is sent at its relative manifest
 spacing. Reports retain actual dispatch times, overlapping source commits and
 pending counts. Idle backlog-drain rates are not reported as capacity for this
 mode; sampled catch-up during arrivals is a separate observation.
+
+Captured replay is also owned by BOOM. Index unchanged packets with
+`python3 tests/prepare_photometry_capture.py CORPUS MANIFEST_JSON --spacing-ms 10`,
+then run `python3 tests/photometry_shadow.py --benchmark-only --manifest MANIFEST_JSON
+--filters FILTER_EXPORT --deployed-filters --enrichment-samples 32 --timeout-seconds 3600`
+against exclusive local test services. The native driver verifies every packet's
+SHA-256 and compares every mirrored history after convergence. Archive pacing is
+synthetic unless an explicit arrival schedule is supplied; live recovery inserts
+a controlled boundary pause. `boom-clickhouse` remains optional research/reporting
+material and is not a BOOM build, test, deployment or runtime dependency.
