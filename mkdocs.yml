@@ -64,6 +64,7 @@ nav:
   - Alert pipeline:
       - Alert processing: alert-processing.md
       - Data model: data-model.md
+      - Photometry points experiment: photometry-points.md
       - Task system: task-system.md
       - Archival catalogs: catalogs.md
   - Classification and fits:
