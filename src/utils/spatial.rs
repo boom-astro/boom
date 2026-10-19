@@ -47,6 +47,12 @@ pub struct Coordinates {
 pub const HPX_DEPTH: u8 = 29;
 
 impl Coordinates {
+    /// Panics when `dec` is outside [-90, 90]: `cdshealpix` checks the latitude
+    /// with a plain `assert!`, which is compiled into release builds too. A
+    /// longitude outside [0, 360] is not checked at all and produces GeoJSON
+    /// that MongoDB rejects when a 2dsphere index is built over it. Use
+    /// [`Coordinates::try_new`] wherever the numbers come from a file rather
+    /// than from BOOM.
     pub fn new(ra: f64, dec: f64) -> Self {
         let (l, b) = radec2lb(ra, dec);
         Coordinates {
@@ -60,6 +66,22 @@ impl Coordinates {
                 cdshealpix::nested::get(HPX_DEPTH).hash(ra.to_radians(), dec.to_radians()) as i64,
             ),
         }
+    }
+
+    /// The same as [`Coordinates::new`], but `None` for a position that is not
+    /// on the sphere, including NaN.
+    ///
+    /// Bulk catalogs do contain such rows. Built through `new`, one of them
+    /// either panics an insert worker (`dec`) or lands in the collection and
+    /// fails the 2dsphere index build at the very end of the run (`ra`), so the
+    /// cost of one bad row is the whole ingest.
+    pub fn try_new(ra: f64, dec: f64) -> Option<Self> {
+        // 360 is allowed: it maps to longitude 180, which is in range, and a
+        // catalog that writes 360 for 0 should not lose those rows.
+        if !(0.0..=360.0).contains(&ra) || !(-90.0..=90.0).contains(&dec) {
+            return None;
+        }
+        Some(Self::new(ra, dec))
     }
 
     /// The stored HEALPix index, absent on alerts written before it existed.
@@ -420,6 +442,41 @@ pub async fn xmatch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn try_new_accepts_the_sphere_and_nothing_else() {
+        assert!(Coordinates::try_new(0.0, 0.0).is_some());
+        assert!(Coordinates::try_new(359.999, -89.999).is_some());
+        // 360 maps to longitude 180, which GeoJSON accepts.
+        assert!(Coordinates::try_new(360.0, 90.0).is_some());
+
+        assert!(Coordinates::try_new(360.001, 0.0).is_none());
+        assert!(Coordinates::try_new(-0.001, 0.0).is_none());
+        assert!(Coordinates::try_new(10.0, 90.001).is_none());
+        assert!(Coordinates::try_new(10.0, -90.001).is_none());
+        assert!(Coordinates::try_new(f64::NAN, 0.0).is_none());
+        assert!(Coordinates::try_new(0.0, f64::NAN).is_none());
+        assert!(Coordinates::try_new(f64::INFINITY, 0.0).is_none());
+    }
+
+    #[test]
+    fn try_new_agrees_with_new_where_both_are_defined() {
+        let checked = Coordinates::try_new(150.5, -12.25).unwrap();
+        let unchecked = Coordinates::new(150.5, -12.25);
+        assert_eq!(
+            checked.radec_geojson.coordinates,
+            unchecked.radec_geojson.coordinates
+        );
+        assert_eq!(checked.hpx(), unchecked.hpx());
+    }
+
+    #[test]
+    #[should_panic]
+    fn new_panics_on_a_latitude_off_the_sphere() {
+        // Not a wish, a warning: this is why try_new exists, and why every
+        // caller reading numbers out of a file should use it.
+        let _ = Coordinates::new(10.0, 91.0);
+    }
 
     /// NED-shaped config: 300" query cone, per-row radius from `diam`,
     /// floored at 5" and capped at 6 deg.

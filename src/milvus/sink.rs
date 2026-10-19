@@ -7,7 +7,7 @@
 
 use std::time::{Duration, Instant};
 
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use super::backup::BackupQueue;
 use super::client::{MilvusClient, MilvusError};
@@ -17,17 +17,17 @@ use crate::conf::MilvusConfig;
 /// Pause after the first failed attempt. Each further failure doubles it.
 const COOLDOWN_BASE: Duration = Duration::from_secs(30);
 
-/// Upper bound on the pause between attempts.
-const COOLDOWN_MAX: Duration = Duration::from_secs(300);
+/// Upper bound on the pause between attempts, held until a success resets it.
+const COOLDOWN_MAX: Duration = Duration::from_secs(60 * 60);
 
 /// How long an idle worker waits before checking the backup queue again
 /// after finding it empty, so idle workers do not poll Valkey every tick.
 const IDLE_DRAIN_PAUSE: Duration = Duration::from_secs(30);
 
-/// Pause before the Nth consecutive retry: 30s, 60s, 120s, 240s, capped at
-/// [`COOLDOWN_MAX`].
+/// Pause before the Nth consecutive retry: 30s, 1m, 2m, 4m, 8m, 16m, 32m,
+/// then [`COOLDOWN_MAX`] for every retry after that.
 fn cooldown(consecutive_failures: u32) -> Duration {
-    let shift = consecutive_failures.saturating_sub(1).min(5);
+    let shift = consecutive_failures.saturating_sub(1).min(7);
     COOLDOWN_BASE
         .saturating_mul(1u32 << shift)
         .min(COOLDOWN_MAX)
@@ -77,7 +77,10 @@ impl MilvusSink {
         // A failure here is recorded like any other, so the first batch does not
         // immediately redial a server we already know is down.
         match MilvusClient::connect(config).await {
-            Ok(client) => sink.client = Some(client),
+            Ok(client) => {
+                sink.client = Some(client);
+                sink.log_connected();
+            }
             Err(e) => sink.record_failure("connect to milvus at startup", e),
         }
         sink
@@ -96,6 +99,21 @@ impl MilvusSink {
         self.config.enabled && self.retry_at.is_none_or(|at| Instant::now() >= at)
     }
 
+    /// Time left before the breaker allows another attempt; zero once closed.
+    fn retry_in(&self) -> Duration {
+        self.retry_at.map_or(Duration::ZERO, |at| {
+            at.saturating_duration_since(Instant::now())
+        })
+    }
+
+    fn log_connected(&self) {
+        info!(
+            endpoint = %self.config.endpoint(),
+            timeout_secs = self.config.timeout_seconds,
+            "milvus connection active"
+        );
+    }
+
     fn record_failure(&mut self, what: &str, e: MilvusError) {
         // Drop the channel so the next attempt redials; a broken connection
         // never recovers on its own.
@@ -106,7 +124,8 @@ impl MilvusSink {
         warn!(
             failures = self.consecutive_failures,
             pause_secs = pause.as_secs(),
-            "failed to {}: {}; pausing embedding uploads",
+            timeout_secs = self.config.timeout_seconds,
+            "failed to {}: {}; milvus breaker open, pausing embedding uploads",
             what,
             e
         );
@@ -123,14 +142,32 @@ impl MilvusSink {
         self.retry_at = None;
     }
 
-    /// Buffer rows the sink could not upload. A queue failure is swallowed:
-    /// Valkey being down too does not justify failing enrichment.
+    /// Buffer rows the sink could not upload, logging the breaker state and
+    /// how many rows Valkey now holds. A queue failure is swallowed: Valkey
+    /// being down too does not justify failing enrichment.
     async fn buffer(&mut self, rows: &[EmbeddingRow]) {
+        let failures = self.consecutive_failures;
+        let retry_in_secs = self.retry_in().as_secs();
+        let timeout_secs = self.config.timeout_seconds;
         let Some(queue) = self.queue.as_mut() else {
+            warn!(
+                rows = rows.len(),
+                failures,
+                retry_in_secs,
+                timeout_secs,
+                "milvus breaker open and the backup queue is off; dropped embeddings"
+            );
             return;
         };
         match queue.push(rows).await {
-            Ok(()) => debug!(rows = rows.len(), "buffered embeddings for a later retry"),
+            Ok(queued) => warn!(
+                rows = rows.len(),
+                queued,
+                failures,
+                retry_in_secs,
+                timeout_secs,
+                "milvus breaker open; buffered embeddings in valkey"
+            ),
             Err(e) => warn!("could not buffer {} embeddings: {}", rows.len(), e),
         }
     }
@@ -156,9 +193,10 @@ impl MilvusSink {
         };
         match client.upsert_embeddings(rows).await {
             Ok(count) => {
-                debug!("upserted {} fusion embeddings to milvus", count);
                 self.record_success();
                 self.drain_some().await;
+                let queued = self.queue_len().await;
+                info!(upserted = count, queued, "milvus upsert succeeded");
             }
             Err(e) => {
                 let what = format!("upsert {} fusion embeddings", rows.len());
@@ -173,7 +211,10 @@ impl MilvusSink {
     async fn connected(&mut self) -> Option<&mut MilvusClient> {
         if self.client.is_none() {
             match MilvusClient::connect(&self.config).await {
-                Ok(client) => self.client = Some(client),
+                Ok(client) => {
+                    self.client = Some(client);
+                    self.log_connected();
+                }
                 Err(e) => {
                     self.record_failure("reconnect to milvus", e);
                     return None;
@@ -196,6 +237,12 @@ impl MilvusSink {
             return;
         }
         if !self.drain_some().await {
+            let queued = self.queue_len().await;
+            info!(
+                queued,
+                next_check_secs = IDLE_DRAIN_PAUSE.as_secs(),
+                "nothing to replay from the milvus backup queue"
+            );
             self.idle_drain_at = Some(Instant::now() + IDLE_DRAIN_PAUSE);
         }
     }
@@ -227,7 +274,8 @@ impl MilvusSink {
                 let remaining = self.queue_len().await;
                 info!(
                     replayed = count,
-                    remaining, "replayed buffered embeddings to milvus"
+                    queued = remaining,
+                    "milvus upsert succeeded for embeddings drained from valkey"
                 );
             }
             Err(e) => {
@@ -271,12 +319,18 @@ mod tests {
 
     #[test]
     fn cooldown_grows_then_caps() {
+        // A failure count of 0 never reaches here, but must not underflow.
+        assert_eq!(cooldown(0), Duration::from_secs(30));
         assert_eq!(cooldown(1), Duration::from_secs(30));
         assert_eq!(cooldown(2), Duration::from_secs(60));
         assert_eq!(cooldown(3), Duration::from_secs(120));
         assert_eq!(cooldown(4), Duration::from_secs(240));
-        // 30s << 4 == 480s, clamped to the ceiling.
-        assert_eq!(cooldown(5), COOLDOWN_MAX);
+        assert_eq!(cooldown(7), Duration::from_secs(32 * 60));
+        // 30s << 7 == 64m, clamped to the ceiling.
+        assert_eq!(cooldown(8), COOLDOWN_MAX);
+        // Held at the ceiling for as long as the failures continue.
+        assert_eq!(cooldown(9), COOLDOWN_MAX);
+        assert_eq!(cooldown(100), COOLDOWN_MAX);
         // Large inputs stay clamped, and never panic via shift overflow.
         assert_eq!(cooldown(u32::MAX), COOLDOWN_MAX);
     }
@@ -323,7 +377,7 @@ mod tests {
     }
 
     /// Consecutive failures back off; a success resets the budget so a later,
-    /// unrelated blip starts from the short pause again.
+    /// unrelated blip starts from the first pause again.
     #[test]
     fn success_resets_the_backoff() {
         let mut sink = sink(true);

@@ -222,7 +222,7 @@ const PROGRESS_INTERVAL: u64 = 200_000;
 
 #[derive(thiserror::Error, Debug)]
 pub enum RefreshError {
-    #[error("failed to download MPCORB: {0}")]
+    #[error("failed to download {0}")]
     Download(String),
     #[error("failed to read the download: {0}")]
     Io(#[from] std::io::Error),
@@ -338,8 +338,8 @@ async fn refresh_into_staging(
         crate::utils::data::download_to_file(tmp.as_file_mut(), url, None, None, show_progress),
     )
     .await
-    .map_err(|_| RefreshError::Download(format!("timed out after {DOWNLOAD_TIMEOUT:?}")))?
-    .map_err(|e| RefreshError::Download(e.to_string()))?;
+    .map_err(|_| RefreshError::Download(format!("MPCORB: timed out after {DOWNLOAD_TIMEOUT:?}")))?
+    .map_err(|e| RefreshError::Download(format!("MPCORB: {e}")))?;
 
     let file = std::fs::File::open(tmp.path())?;
     let mut batch: Vec<Document> = Vec::with_capacity(batch_size);
@@ -445,11 +445,7 @@ async fn refresh_comets_into_staging(
         Err(_) => Some(format!("timed out after {DOWNLOAD_TIMEOUT:?}")),
     };
     if let Some(why) = failure {
-        tracing::warn!(
-            "comet elements unavailable, continuing without them: {}",
-            why
-        );
-        return Ok(0);
+        return Err(RefreshError::Download(format!("comet elements: {why}")));
     }
 
     let file = std::fs::File::open(tmp.path())?;
@@ -531,6 +527,37 @@ pub fn elements_from_document(doc: &Document) -> Option<OrbitalElements> {
         tp: doc.get_f64("tp").ok().unwrap_or(0.0),
     })
     .map(|e: OrbitalElements| if e.tp == 0.0 { e.with_perihelion() } else { e })
+}
+
+/// Every orbit in `MPC_orbits`, for matching detections against the whole
+/// catalogue.
+///
+/// A read that fails part-way through is an error rather than a shorter list:
+/// a truncated catalogue would quietly pass for fewer known objects.
+pub async fn load_catalogue(
+    db: &mongodb::Database,
+) -> Result<Vec<crate::utils::identify::OrbitEntry>, mongodb::error::Error> {
+    let projection = doc! {
+        "epoch_jd": 1, "a": 1, "e": 1, "incl": 1, "node": 1, "peri": 1,
+        "mean_anomaly": 1, "q": 1, "tp": 1,
+    };
+    let mut cursor = db
+        .collection::<Document>(ORBITS_COLLECTION)
+        .find(doc! {})
+        .projection(projection)
+        .await?;
+    let mut orbits = Vec::new();
+    while let Some(d) = cursor.try_next().await? {
+        let (Ok(designation), Some(elements)) = (d.get_str("_id"), elements_from_document(&d))
+        else {
+            continue;
+        };
+        orbits.push(crate::utils::identify::OrbitEntry {
+            designation: designation.to_string(),
+            elements,
+        });
+    }
+    Ok(orbits)
 }
 
 /// Load elements for a set of MPCORB keys.

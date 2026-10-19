@@ -23,7 +23,7 @@ fn opt_string(doc: &Document, key: &str) -> Option<String> {
 
 /// An object's catalogue name. NED names its rows with a string, Legacy with a
 /// numeric id, so both spellings have to be accepted.
-fn opt_objname(doc: &Document, key: &str) -> Option<String> {
+pub(super) fn opt_objname(doc: &Document, key: &str) -> Option<String> {
     match doc.get(key) {
         Some(Bson::String(s)) if !s.is_empty() => Some(s.clone()),
         Some(Bson::Int64(v)) => Some(v.to_string()),
@@ -612,6 +612,8 @@ mod projection_tests {
             "rex_min_snr",
             "rex_max_fracflux",
             "isophote_mag",
+            "ps1_catalog",
+            "photometry_match_arcsec",
         ];
         for (name, config) in deployment_configs() {
             let Some(block) = config.split("\nhost_galaxy:").nth(1) else {

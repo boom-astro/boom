@@ -22,7 +22,7 @@ pub enum MilvusError {
     InvalidCredentials,
     #[error("failed to connect to milvus")]
     ConnectError(#[source] tonic::transport::Error),
-    #[error("milvus rpc failed")]
+    #[error("milvus rpc failed: {0}")]
     RpcError(#[from] Status),
     #[error("milvus returned an error (code {code}): {reason}")]
     ServerError { code: i32, reason: String },
