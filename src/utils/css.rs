@@ -104,7 +104,7 @@ pub fn parse_dets(
         ) else {
             continue;
         };
-        if source_id == 0 || keep.is_some_and(|keep| !keep.contains(f[0])) {
+        if source_id <= 0 || keep.is_some_and(|keep| !keep.contains(f[0])) {
             continue;
         }
         // RA is in hours here, Dec in degrees; confirmed against the matching
