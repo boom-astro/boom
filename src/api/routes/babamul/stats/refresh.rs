@@ -4,6 +4,7 @@ use super::nightly::NIGHTLY_STATS_CACHE_PREFIX;
 use super::STATS_COLLECTION;
 use crate::api::models::response;
 use crate::api::routes::babamul::BabamulUser;
+use crate::utils::enums::Survey;
 use actix_web::{post, web, HttpResponse};
 use chrono::{Months, NaiveDate, Utc};
 use mongodb::{
@@ -21,11 +22,12 @@ const REFRESH_COOLDOWN_SECS: i64 = 5 * 60;
 const MAX_REFRESH_MONTHS: u32 = 6;
 
 /// Query parameters for the stats refresh endpoint: the night range (inclusive)
-/// whose cached counts should be dropped.
+/// whose cached counts should be dropped, optionally for a single survey.
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct RefreshQuery {
     pub start_date: String,
     pub end_date: String,
+    pub survey: Option<Survey>,
 }
 
 /// Drop the cached dashboard stats so the next read recomputes them.
@@ -33,15 +35,17 @@ pub struct RefreshQuery {
 /// Removes the nightly alert counts cached for the given range, plus the
 /// collection and Kafka topic caches. The next call to the stats endpoints
 /// recounts from MongoDB and Kafka. Requires a signed-in account: the stats
-/// themselves are public, but paying for a recount is not. The range cannot
-/// span more than 6 months, and refreshes are rate-limited globally to one
-/// every 5 minutes; a refusal carries a `Retry-After` header.
+/// themselves are public, but paying for a recount is not. With `survey`, only
+/// that survey's nightly counts are dropped. The range cannot span more than 6
+/// months, and refreshes are rate-limited globally to one every 5 minutes; a
+/// refusal carries a `Retry-After` header.
 #[utoipa::path(
     post,
     path = "/babamul/stats/refresh",
     params(
         ("start_date" = String, Query, description = "First night whose cached count is dropped (YYYY-MM-DD); at most 6 months before end_date."),
         ("end_date" = String, Query, description = "Last night whose cached count is dropped (YYYY-MM-DD)."),
+        ("survey" = Option<Survey>, Query, description = "Only drop the nightly counts of this survey."),
     ),
     responses(
         (status = 200, description = "Caches dropped"),
@@ -105,7 +109,10 @@ pub async fn post_stats_refresh(
         }
     }
 
-    let nightly_prefix = format!("^{}", NIGHTLY_STATS_CACHE_PREFIX);
+    let nightly_prefix = match &query.survey {
+        Some(survey) => format!("^{}{}_", NIGHTLY_STATS_CACHE_PREFIX, survey),
+        None => format!("^{}", NIGHTLY_STATS_CACHE_PREFIX),
+    };
     let deleted = match stats_collection
         .delete_many(doc! {
             "$or": [
