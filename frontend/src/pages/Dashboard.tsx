@@ -334,7 +334,8 @@ export default function Dashboard() {
     setRefreshing(true);
     const from = isAdmin ? startDate : monthsBefore(endDate, MAX_REFRESH_MONTHS);
     try {
-      await api.refreshStats(startDate > from ? startDate : from, endDate);
+      const only = surveys.size === 1 ? [...surveys][0] : undefined;
+      await api.refreshStats(startDate > from ? startDate : from, endDate, only);
       setReloadKey((k) => k + 1);
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Failed to refresh the dashboard");

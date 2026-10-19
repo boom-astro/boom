@@ -417,8 +417,9 @@ export async function fetchStats(startDate: string, endDate: string, survey?: st
   return readList<NightlyStat>(res);
 }
 
-export async function refreshStats(startDate: string, endDate: string): Promise<void> {
+export async function refreshStats(startDate: string, endDate: string, survey?: string): Promise<void> {
   const params = new URLSearchParams({ start_date: startDate, end_date: endDate });
+  if (survey) params.set("survey", survey);
   const res = await fetchWithAuth(`${API_BASE}/stats/refresh?${params}`, { method: "POST" });
   if (res.ok) return;
   throw new Error(messageOf(await readJson(res)) ?? `Refresh stats failed: ${res.status}`);
