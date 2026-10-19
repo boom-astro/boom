@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { deleteObjectEmbedding, fetchEmbeddingsCount, fetchSimilarObjects } from "@/lib/api"
+import { fetchEmbeddingsCount, fetchSimilarObjects } from "@/lib/api"
 
 /**
  * Similarity search is the one place the UI asks Milvus a question directly, so
@@ -118,35 +118,5 @@ describe("fetchEmbeddingsCount", () => {
 
     await expect(fetchEmbeddingsCount()).resolves.toBe(4211)
     expect(lastRequest(fetchMock).url).toBe("/api/babamul/embeddings/count")
-  })
-})
-
-describe("deleteObjectEmbedding", () => {
-  it("DELETEs the object and reports how many rows went", async () => {
-    const fetchMock = vi.fn(async () => jsonResponse({ message: "success", data: { deleted: 1 } }))
-    vi.stubGlobal("fetch", fetchMock)
-
-    const deleted = await deleteObjectEmbedding("ZTF18abcdefg")
-
-    const { url, init } = lastRequest(fetchMock)
-    expect(url).toBe("/api/babamul/embeddings/ZTF18abcdefg")
-    expect(init.method).toBe("DELETE")
-    expect(deleted).toBe(1)
-  })
-
-  it("reports 0 when the object had nothing stored", async () => {
-    // Milvus deletes by key without checking existence, so a no-op comes back
-    // as a success with deleted: 0 — the caller has to tell the two apart.
-    const fetchMock = vi.fn(async () => jsonResponse({ message: "success", data: { deleted: 0 } }))
-    vi.stubGlobal("fetch", fetchMock)
-
-    await expect(deleteObjectEmbedding("ZTF18abcdefg")).resolves.toBe(0)
-  })
-
-  it("surfaces the server's refusal for a non-admin", async () => {
-    const fetchMock = vi.fn(async () => jsonResponse({ message: "Access denied: Admins only" }, 403))
-    vi.stubGlobal("fetch", fetchMock)
-
-    await expect(deleteObjectEmbedding("ZTF18abcdefg")).rejects.toThrow("Access denied: Admins only")
   })
 })

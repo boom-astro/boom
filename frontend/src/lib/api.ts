@@ -559,27 +559,6 @@ export async function fetchEmbeddingsCount(): Promise<number> {
   return typeof data.count === "number" ? data.count : 0;
 }
 
-/**
- * Remove an object's stored embedding. Admin only; the server enforces it.
- *
- * Returns how many rows Milvus removed, so the caller can tell a real deletion
- * from a no-op on an object that had nothing stored.
- */
-export async function deleteObjectEmbedding(objectId: string): Promise<number> {
-  const url = `${API_BASE}/embeddings/${encodeURIComponent(objectId)}`;
-  const res = await fetchWithAuth(url, { method: "DELETE" });
-  const body = await parseResponseJson(res).catch(() => null);
-  if (!res.ok) {
-    const message =
-      body && typeof body === "object" && "message" in body
-        ? String((body as { message?: unknown }).message)
-        : `Delete embedding failed: ${res.status}`;
-    throw new Error(message);
-  }
-  const data = unwrapData<{ deleted?: number }>(body, {});
-  return typeof data.deleted === "number" ? data.deleted : 0;
-}
-
 export default {
   login,
   logout,

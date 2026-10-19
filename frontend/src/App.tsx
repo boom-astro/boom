@@ -164,8 +164,8 @@ function LayoutRoutes() {
                   <Route path="/admin" element={<AdminRoute><Admin /></AdminRoute>} />
                   <Route path="/dashboard" element={<Dashboard />} />
                   <Route path="/telescopes" element={<Telescopes />} />
-                  {/* Public like /dashboard. Search and count need no token; the
-                      delete form only renders for a signed-in admin. */}
+                  {/* Public like /dashboard: search and count are read-only and
+                      need no token. */}
                   <Route path="/embeddings" element={<Embeddings />} />
                   <Route path="/docs/kafka" element={<KafkaDocs />} />
                   <Route path="/docs/kafka/access-guide" element={<KafkaAccessGuide />} />

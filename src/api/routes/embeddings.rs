@@ -14,10 +14,9 @@
 //! thin wrappers over them.
 
 use crate::api::models::response;
-use crate::api::routes::users::User;
 use crate::milvus::MilvusClient;
 
-use actix_web::{delete, get, post, web, HttpResponse};
+use actix_web::{get, post, web, HttpResponse};
 
 /// Request body for a similarity search seeded by a known object.
 #[derive(serde::Deserialize, utoipa::ToSchema)]
@@ -104,25 +103,6 @@ pub(crate) async fn embeddings_count_response(
     }
 }
 
-/// Delete one object's stored embedding. Shared by both API surfaces.
-///
-/// Callers are responsible for the admin check: the two surfaces have separate
-/// user types, so there is no single notion of "admin" to test down here.
-pub(crate) async fn delete_embedding_response(
-    milvus: &web::Data<Option<MilvusClient>>,
-    object_id: &str,
-) -> HttpResponse {
-    let mut client = match client_or_unavailable(milvus) {
-        Ok(client) => client,
-        Err(resp) => return resp,
-    };
-
-    match client.delete_embeddings(&[object_id]).await {
-        Ok(deleted) => response::ok("success", serde_json::json!({ "deleted": deleted })),
-        Err(e) => response::internal_error(&format!("Error deleting embedding: {}", e)),
-    }
-}
-
 /// Find the objects most similar to a given object.
 ///
 /// Looks up the seed object's stored embedding, then runs a nearest-neighbor
@@ -160,32 +140,4 @@ pub async fn post_similar_objects(
 #[get("/embeddings/count")]
 pub async fn get_embeddings_count(milvus: web::Data<Option<MilvusClient>>) -> HttpResponse {
     embeddings_count_response(&milvus).await
-}
-
-/// Delete the stored embedding for an object. Admin only.
-///
-/// Operational use — e.g. purging a retracted or spurious object so it stops
-/// polluting similarity results, or keeping Milvus in sync with Mongo.
-#[utoipa::path(
-    delete,
-    path = "/embeddings/{object_id}",
-    params(("object_id" = String, Path, description = "Object whose embedding to delete")),
-    responses(
-        (status = 200, description = "Deletion issued; reports how many rows were removed"),
-        (status = 403, description = "Admins only"),
-        (status = 500, description = "Milvus unavailable or delete failed")
-    ),
-    tags=["Similarity"]
-)]
-#[delete("/embeddings/{object_id}")]
-pub async fn delete_object_embedding(
-    milvus: web::Data<Option<MilvusClient>>,
-    current_user: web::ReqData<User>,
-    object_id: web::Path<String>,
-) -> HttpResponse {
-    if !current_user.is_admin {
-        return response::forbidden("Access denied: Admins only");
-    }
-
-    delete_embedding_response(&milvus, &object_id.into_inner()).await
 }

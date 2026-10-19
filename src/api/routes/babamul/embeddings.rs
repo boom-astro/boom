@@ -13,17 +13,14 @@
 //!
 //! Search and count are public (listed in `BABAMUL_PUBLIC_ROUTES`), matching
 //! the stats endpoints behind `/dashboard`: they are read-only and the web page
-//! is reachable without signing in. Deleting stays authenticated and admin-only.
+//! is reachable without signing in.
 
-use crate::api::models::response;
-use crate::api::routes::babamul::BabamulUser;
 use crate::api::routes::embeddings::{
-    delete_embedding_response, embeddings_count_response, similar_objects_response,
-    SimilarObjectsQuery,
+    embeddings_count_response, similar_objects_response, SimilarObjectsQuery,
 };
 use crate::milvus::MilvusClient;
 
-use actix_web::{delete, get, post, web, HttpResponse};
+use actix_web::{get, post, web, HttpResponse};
 
 /// Find the objects most similar to a given object.
 ///
@@ -66,37 +63,4 @@ pub async fn post_babamul_similar_objects(
 #[get("/embeddings/count")]
 pub async fn get_babamul_embeddings_count(milvus: web::Data<Option<MilvusClient>>) -> HttpResponse {
     embeddings_count_response(&milvus).await
-}
-
-/// Delete the stored embedding for an object. Admin only.
-///
-/// Operational use — e.g. purging a retracted or spurious object so it stops
-/// polluting similarity results.
-#[utoipa::path(
-    delete,
-    path = "/babamul/embeddings/{object_id}",
-    params(("object_id" = String, Path, description = "Object whose embedding to delete")),
-    responses(
-        (status = 200, description = "Deletion issued; reports how many rows were removed"),
-        (status = 401, description = "Unauthorized"),
-        (status = 403, description = "Admins only"),
-        (status = 500, description = "Milvus unavailable or delete failed")
-    ),
-    security(("babamul_jwt_token" = [])),
-    tags=["Babamul"]
-)]
-#[delete("/embeddings/{object_id}")]
-pub async fn delete_babamul_object_embedding(
-    milvus: web::Data<Option<MilvusClient>>,
-    current_user: Option<web::ReqData<BabamulUser>>,
-    object_id: web::Path<String>,
-) -> HttpResponse {
-    let Some(current_user) = current_user else {
-        return HttpResponse::Unauthorized().body("Unauthorized");
-    };
-    if !current_user.is_admin {
-        return response::forbidden("Access denied: Admins only");
-    }
-
-    delete_embedding_response(&milvus, &object_id.into_inner()).await
 }

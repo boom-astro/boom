@@ -5,14 +5,11 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { toast } from "sonner";
 import {
-  deleteObjectEmbedding,
   fetchEmbeddingsCount,
   fetchSimilarObjects,
   type SimilarObject,
 } from "@/lib/api";
-import useAppStore from "@/lib/store";
 
 /** Matches the server's clamp, so the UI can't ask for something it won't get. */
 const MAX_TOP_K = 100;
@@ -34,9 +31,6 @@ function formatJd(jd: number | null | undefined): string {
 }
 
 export default function Embeddings() {
-  const profile = useAppStore((s) => s.profile);
-  const isAdmin = profile?.is_admin === true;
-
   const [objectId, setObjectId] = useState("");
   const [topK, setTopK] = useState(DEFAULT_TOP_K);
   const [results, setResults] = useState<SimilarObject[] | null>(null);
@@ -47,9 +41,6 @@ export default function Embeddings() {
 
   const [count, setCount] = useState<number | null>(null);
   const [countError, setCountError] = useState<string | null>(null);
-
-  const [deleteId, setDeleteId] = useState("");
-  const [deleting, setDeleting] = useState(false);
 
   const loadCount = useCallback(() => {
     fetchEmbeddingsCount()
@@ -84,30 +75,6 @@ export default function Embeddings() {
       setResults(null);
     } finally {
       setLoading(false);
-    }
-  }
-
-  async function runDelete(e: React.FormEvent) {
-    e.preventDefault();
-    const trimmed = deleteId.trim();
-    if (!trimmed) return;
-
-    setDeleting(true);
-    try {
-      const deleted = await deleteObjectEmbedding(trimmed);
-      // Milvus reports 0 when the key wasn't there; saying so beats a success
-      // toast for something that didn't happen.
-      toast.success(
-        deleted > 0
-          ? `Deleted the embedding for ${trimmed}`
-          : `No embedding was stored for ${trimmed}`
-      );
-      setDeleteId("");
-      loadCount();
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Delete failed");
-    } finally {
-      setDeleting(false);
     }
   }
 
@@ -223,35 +190,6 @@ export default function Embeddings() {
         </CardContent>
       </Card>
 
-      {isAdmin && (
-        <Card>
-          <CardHeader>
-            <CardTitle>Delete an Embedding</CardTitle>
-            <CardDescription>
-              Admins only. Removes an object's stored vector so it stops appearing in
-              similarity results. It will be recomputed the next time the object is observed.
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <form onSubmit={runDelete} className="flex flex-wrap items-end gap-3">
-              <div className="flex flex-col gap-1.5">
-                <Label htmlFor="delete-object-id">Object ID</Label>
-                <Input
-                  id="delete-object-id"
-                  value={deleteId}
-                  onChange={(e) => setDeleteId(e.target.value)}
-                  placeholder="ZTF18abcdefg"
-                  className="w-60 font-mono"
-                  autoComplete="off"
-                />
-              </div>
-              <Button type="submit" variant="destructive" disabled={deleting || !deleteId.trim()}>
-                {deleting ? "Deleting…" : "Delete"}
-              </Button>
-            </form>
-          </CardContent>
-        </Card>
-      )}
     </div>
   );
 }
