@@ -9,7 +9,9 @@ use crate::{
     conf::AppConfig,
 };
 
-use crate::api::limits::{large_query_slot, next_result, too_large, ResultError};
+use crate::api::limits::{
+    large_query_slot, next_result, too_large, ResultError, DEFAULT_QUERY_MAX_TIME,
+};
 use actix_web::{post, web, HttpResponse};
 use mongodb::{bson::doc, Database};
 use std::collections::HashMap;
@@ -106,9 +108,11 @@ impl ConeSearchQuery {
                 }
             }
         }
-        if let Some(max_time_ms) = self.max_time_ms {
-            options.max_time = Some(std::time::Duration::from_millis(max_time_ms));
-        }
+        options.max_time = Some(
+            self.max_time_ms
+                .map(std::time::Duration::from_millis)
+                .unwrap_or(DEFAULT_QUERY_MAX_TIME),
+        );
         Ok(options)
     }
 }

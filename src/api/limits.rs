@@ -7,6 +7,7 @@ use std::time::Duration;
 use tokio::sync::{Semaphore, SemaphorePermit};
 
 pub const MAX_RESULT_BYTES: usize = 256 * 1024 * 1024;
+pub const DEFAULT_QUERY_MAX_TIME: Duration = Duration::from_secs(30);
 
 const MAX_CONCURRENT_LARGE_QUERIES: usize = 8;
 const LARGE_QUERY_WAIT: Duration = Duration::from_secs(60);
