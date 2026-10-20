@@ -926,6 +926,34 @@ const CREDIBLE_LEVEL_COUNT_CAP: usize = 50_000;
 /// size, so this trades a few wasted rows against a round trip per alert.
 const CREDIBLE_LEVEL_BATCH: usize = 500;
 
+const MAX_FILTER_TEST_RESULT_BYTES: usize = 256 * 1024 * 1024;
+
+async fn next_test_result(
+    cursor: &mut mongodb::Cursor<Document>,
+    total_bytes: &mut usize,
+) -> Result<Option<Document>, HttpResponse> {
+    match cursor.advance().await {
+        Ok(true) => {}
+        Ok(false) => return Ok(None),
+        Err(e) => {
+            return Err(response::internal_error(&format!(
+                "error retrieving test filter results: {}",
+                e
+            )));
+        }
+    }
+    *total_bytes += cursor.current().as_bytes().len();
+    if *total_bytes > MAX_FILTER_TEST_RESULT_BYTES {
+        return Err(response::bad_request(&format!(
+            "Filter test results exceed {} MB; add a limit, narrow the time range or project fewer fields",
+            MAX_FILTER_TEST_RESULT_BYTES / (1024 * 1024)
+        )));
+    }
+    cursor.deserialize_current().map(Some).map_err(|e| {
+        response::internal_error(&format!("error retrieving test filter results: {}", e))
+    })
+}
+
 /// Why a localization cannot be used.
 ///
 /// Separate from the response so the parse, which is slow CPU work, can run on
@@ -1381,6 +1409,7 @@ pub async fn post_filter_test(
     };
 
     let mut results = Vec::new();
+    let mut total_bytes = 0;
     if let Some(region) = &region {
         // Scoring is what decides which alerts count, so the page cannot be cut
         // before it. Score a batch at a time and stop as soon as enough survive,
@@ -1389,15 +1418,10 @@ pub async fn post_filter_test(
         let mut batch: Vec<Document> = Vec::new();
         let mut drained = false;
         while !drained {
-            match cursor.next().await {
-                Some(Ok(doc)) => batch.push(doc),
-                Some(Err(e)) => {
-                    return response::internal_error(&format!(
-                        "error retrieving test filter results: {}",
-                        e
-                    ));
-                }
-                None => drained = true,
+            match next_test_result(&mut cursor, &mut total_bytes).await {
+                Ok(Some(doc)) => batch.push(doc),
+                Ok(None) => drained = true,
+                Err(response) => return response,
             }
             if !drained && batch.len() < CREDIBLE_LEVEL_BATCH {
                 continue;
@@ -1414,15 +1438,11 @@ pub async fn post_filter_test(
             results.truncate(want);
         }
     } else {
-        while let Some(result) = cursor.next().await {
-            match result {
-                Ok(doc) => results.push(doc),
-                Err(e) => {
-                    return response::internal_error(&format!(
-                        "error retrieving test filter results: {}",
-                        e
-                    ));
-                }
+        loop {
+            match next_test_result(&mut cursor, &mut total_bytes).await {
+                Ok(Some(doc)) => results.push(doc),
+                Ok(None) => break,
+                Err(response) => return response,
             }
         }
     }
