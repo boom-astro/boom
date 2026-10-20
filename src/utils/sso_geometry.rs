@@ -188,6 +188,7 @@ pub struct Site {
     /// Distance from the equatorial plane, Earth radii. Negative in the south.
     pub rho_sin_phi: f64,
     pub astrometric_sigma_arcsec: f64,
+    pub mpc_code: &'static str,
 }
 
 /// ZTF at Palomar, MPC code I41.
@@ -196,6 +197,7 @@ pub const ZTF: Site = Site {
     rho_cos_phi: 0.836_325,
     rho_sin_phi: 0.546_877,
     astrometric_sigma_arcsec: 0.25,
+    mpc_code: "I41",
 };
 
 /// The Simonyi Survey Telescope at Rubin Observatory, MPC code X05.
@@ -204,6 +206,7 @@ pub const RUBIN: Site = Site {
     rho_cos_phi: 0.864_981,
     rho_sin_phi: -0.500_958,
     astrometric_sigma_arcsec: 0.09,
+    mpc_code: "X05",
 };
 
 /// Catalina Sky Survey, the 0.7 m Schmidt on Mt Bigelow, MPC code 703.
@@ -212,6 +215,7 @@ pub const CATALINA: Site = Site {
     rho_cos_phi: 0.845_311,
     rho_sin_phi: 0.533_211,
     astrometric_sigma_arcsec: 1.97,
+    mpc_code: "703",
 };
 
 /// Mt Lemmon Survey, the 1.5 m, MPC code G96. CSS's deepest survey telescope.
@@ -220,6 +224,7 @@ pub const MT_LEMMON: Site = Site {
     rho_cos_phi: 0.845_107,
     rho_sin_phi: 0.533_611,
     astrometric_sigma_arcsec: 0.48,
+    mpc_code: "G96",
 };
 
 /// Steward Observatory, Mt Lemmon Station, MPC code I52. CSS follow-up.
@@ -228,6 +233,7 @@ pub const MT_LEMMON_STATION: Site = Site {
     rho_cos_phi: 0.845_109,
     rho_sin_phi: 0.533_609,
     astrometric_sigma_arcsec: 0.48,
+    mpc_code: "I52",
 };
 
 /// Kitt Peak-Bok, the 2.3 m with 90Prime, MPC code V00.
@@ -236,6 +242,7 @@ pub const BOK: Site = Site {
     rho_cos_phi: 0.849_456,
     rho_sin_phi: 0.526_492,
     astrometric_sigma_arcsec: 0.24,
+    mpc_code: "V00",
 };
 
 /// Catalina Sky Survey-Kuiper, the 1.5 m on Mt Bigelow, MPC code V06.
@@ -244,6 +251,7 @@ pub const KUIPER: Site = Site {
     rho_cos_phi: 0.845_313,
     rho_sin_phi: 0.533_209,
     astrometric_sigma_arcsec: 0.48,
+    mpc_code: "V06",
 };
 
 /// Siding Spring Survey, MPC code E12. Southern, and the only CSS site there,
@@ -253,6 +261,7 @@ pub const SIDING_SPRING: Site = Site {
     rho_cos_phi: 0.855_63,
     rho_sin_phi: -0.516_21,
     astrometric_sigma_arcsec: 1.36,
+    mpc_code: "E12",
 };
 
 impl Site {

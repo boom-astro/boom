@@ -186,6 +186,8 @@ pub struct Fetched {
     pub found: usize,
     /// Of those, the ones downloaded now rather than already present.
     pub fetched: usize,
+    /// Of those, the ones that could not be downloaded, left for the next run.
+    pub failed: usize,
 }
 
 /// Download one telescope-night's files with `extensions` into `dir`, skipping
@@ -220,6 +222,7 @@ pub async fn fetch_night(
             .get(url)
             .send()
             .await
+            .and_then(reqwest::Response::error_for_status)
             .map_err(|e| format!("listing {prefix}: {e}"))?
             .text()
             .await
@@ -235,33 +238,52 @@ pub async fn fetch_night(
         return Ok(Fetched {
             found: 0,
             fetched: 0,
+            failed: 0,
         });
     }
     std::fs::create_dir_all(dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
-    let mut fetched = 0;
+    let (mut fetched, mut failed) = (0, 0);
     for key in keys.iter() {
         let Some(name) = key.rsplit('/').next() else {
             continue;
         };
-        let path = dir.join(name);
-        if path.exists() {
+        if dir.join(name).exists() {
             continue;
         }
-        let body = client
-            .get(format!("{ARCHIVE}/{key}"))
-            .send()
-            .await
-            .map_err(|e| format!("fetching {key}: {e}"))?
-            .bytes()
-            .await
-            .map_err(|e| format!("fetching {key}: {e}"))?;
-        std::fs::write(&path, &body).map_err(|e| format!("writing {}: {e}", path.display()))?;
-        fetched += 1;
+        match download(client, key, dir, name).await {
+            Ok(()) => fetched += 1,
+            Err(e) => {
+                tracing::warn!("{e}");
+                failed += 1;
+            }
+        }
     }
     Ok(Fetched {
         found: keys.len(),
         fetched,
+        failed,
     })
+}
+
+async fn download(
+    client: &reqwest::Client,
+    key: &str,
+    dir: &std::path::Path,
+    name: &str,
+) -> Result<(), String> {
+    let body = client
+        .get(format!("{ARCHIVE}/{key}"))
+        .send()
+        .await
+        .and_then(reqwest::Response::error_for_status)
+        .map_err(|e| format!("fetching {key}: {e}"))?
+        .bytes()
+        .await
+        .map_err(|e| format!("fetching {key}: {e}"))?;
+    let partial = dir.join(format!("{name}.part"));
+    std::fs::write(&partial, &body)
+        .and_then(|()| std::fs::rename(&partial, dir.join(name)))
+        .map_err(|e| format!("writing {}: {e}", partial.display()))
 }
 
 fn next_token(listing: &str) -> Option<String> {

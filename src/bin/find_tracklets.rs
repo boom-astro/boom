@@ -190,12 +190,12 @@ struct Cli {
     /// Also link tracklets another survey published, from directories of CSS
     /// files. The telescope is taken from each filename, so its astrometry is
     /// fitted from the site it was actually observed at.
-    #[arg(long, value_name = "DIR", conflicts_with = "persist")]
+    #[arg(long, value_name = "DIR", conflicts_with_all = ["persist", "dry_run", "thor", "identify"])]
     css: Vec<String>,
 
     /// Fetch these nights from the public CSS archive before linking, as
     /// YYYY-MM-DD. Downloads are cached, so a repeated run costs one listing.
-    #[arg(long, value_name = "DATE", conflicts_with = "persist")]
+    #[arg(long, value_name = "DATE", conflicts_with_all = ["persist", "dry_run", "thor", "identify"])]
     css_fetch: Vec<chrono::NaiveDate>,
 
     /// Telescopes to fetch, by MPC code. G96 is the deepest CSS survey
@@ -232,7 +232,11 @@ struct Cli {
 /// is reported and skipped rather than failing the run: a nightly job asking
 /// for last night will usually find nothing and should still link what it has.
 async fn fetch_css(args: &Cli) -> Vec<String> {
-    let client = match reqwest::Client::builder().build() {
+    let client = match reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .read_timeout(std::time::Duration::from_secs(60))
+        .build()
+    {
         Ok(client) => client,
         Err(e) => {
             error!("could not build an http client: {e}");
@@ -244,24 +248,29 @@ async fn fetch_css(args: &Cli) -> Vec<String> {
         for code in &args.css_telescope {
             let dir = std::path::Path::new(&args.css_cache)
                 .join(format!("{code}_{}", night.format("%Y%m%d")));
-            match boom::utils::css::fetch_night(
+            let fetched = boom::utils::css::fetch_night(
                 &client,
                 code,
                 *night,
                 &dir,
                 args.css_products.extensions(),
             )
-            .await
-            {
-                Ok(f) if f.found == 0 => info!("{code} {night}: not in the archive yet"),
-                Ok(f) => {
+            .await;
+            match fetched {
+                Ok(f) if f.found > 0 => {
                     info!(
-                        "{code} {night}: {} files, {} newly fetched",
-                        f.found, f.fetched
+                        "{code} {night}: {} files, {} newly fetched, {} failed",
+                        f.found, f.fetched, f.failed
                     );
                     dirs.push(dir.to_string_lossy().into_owned());
+                    continue;
                 }
+                Ok(_) => info!("{code} {night}: not in the archive yet"),
                 Err(e) => error!("{code} {night}: {e}"),
+            }
+            if dir.is_dir() {
+                info!("{code} {night}: using the cached copy");
+                dirs.push(dir.to_string_lossy().into_owned());
             }
         }
     }
@@ -457,6 +466,7 @@ fn dump_tracks(
                 let Some(d) = by_id.get(id) else { continue };
                 epochs.push(serde_json::json!({
                     "candid": d.id.to_string(),
+                    "stn": d.site.unwrap_or(boom::utils::sso_geometry::ZTF).mpc_code,
                     "jd": d.jd,
                     "ra": d.ra,
                     "dec": d.dec,
@@ -1007,7 +1017,7 @@ async fn main() {
         detections.len(),
         labels.len()
     );
-    if detections.is_empty() {
+    if detections.is_empty() && args.css.is_empty() && args.css_fetch.is_empty() {
         return;
     }
 

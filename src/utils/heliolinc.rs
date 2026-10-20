@@ -14,6 +14,7 @@ use crate::utils::orbit_fit::{
     converge_orbit, fit_orbit_with, predict_radec, rms_arcsec, GiveUp, Observation,
     CONVERGE_ITERATIONS, SCREEN_ITERATIONS,
 };
+use crate::utils::outburst::{hg12, DEFAULT_G12};
 use crate::utils::sso_geometry::{
     dot, earth_position, heliocentric_position, norm, OrbitalElements, Site, ZTF,
 };
@@ -384,6 +385,19 @@ pub fn propagate_position(state: &State, epoch_jd: f64, jd: f64) -> Option<[f64;
 
 const MAX_NIGHT_MAG_SPREAD: f64 = 2.5;
 
+/// MPC offsets taking a band to V, so nights observed in different bands compare.
+fn v_offset(band: Option<char>) -> f64 {
+    match band {
+        Some('g') => -0.35,
+        Some('r') => 0.14,
+        Some('i') => 0.32,
+        Some('z') => 0.26,
+        Some('y') => 0.32,
+        Some('G') => 0.28,
+        _ => 0.0,
+    }
+}
+
 pub fn night_magnitude_spread(
     state: &State,
     epoch_jd: f64,
@@ -395,11 +409,16 @@ pub fn night_magnitude_spread(
             continue;
         };
         let e = earth_position(d.jd);
-        let delta = norm(&[p[0] - e[0], p[1] - e[1], p[2] - e[2]]);
-        by_night
-            .entry(night_of(d.jd))
-            .or_default()
-            .push(mag - 5.0 * (norm(&p) * delta).log10());
+        let to_object = [p[0] - e[0], p[1] - e[1], p[2] - e[2]];
+        let (r, delta) = (norm(&p), norm(&to_object));
+        let phase_deg = (dot(&p, &to_object) / (r * delta))
+            .clamp(-1.0, 1.0)
+            .acos()
+            .to_degrees()
+            .min(150.0);
+        by_night.entry(night_of(d.jd)).or_default().push(
+            mag + v_offset(d.band) - 5.0 * (r * delta).log10() - hg12(phase_deg, DEFAULT_G12),
+        );
     }
     let medians: Vec<f64> = by_night
         .into_values()
@@ -718,7 +737,7 @@ fn observations_of(
 fn score(track: &mut Track, observations: &[Observation], cfg: &LinkConfig) {
     // A fit still far above the gate after a few iterations is not going to
     // pass it, and most candidates are like that.
-    let give_up = GiveUp::for_gate(cfg.max_residual_arcsec);
+    let give_up = GiveUp::for_gate(gate_arcsec(observations, cfg));
     track.residual_arcsec = match fit_orbit_with(
         observations,
         &track.state,
@@ -757,11 +776,8 @@ fn best_passing(
 ) -> Option<Track> {
     // Every copy has the same members, so the same positions to fit.
     let observations = observations_of(copies.first()?, tracklets, by_id, &cfg.site);
-    let passes = |track: &Track| {
-        track
-            .residual_arcsec
-            .is_some_and(|r| r <= cfg.max_residual_arcsec)
-    };
+    let gate = gate_arcsec(&observations, cfg);
+    let passes = |track: &Track| track.residual_arcsec.is_some_and(|r| r <= gate);
     // Stable, so equally tight copies keep their hypothesis order.
     copies.sort_by(|a, b| a.rms_au.total_cmp(&b.rms_au));
     let mut distances = std::collections::HashSet::new();
@@ -794,16 +810,35 @@ fn best_passing(
 /// Run a track whose screening fit passed the gate on to convergence, so the
 /// residual it reports is its orbit's rather than one truncated fit's.
 fn converge(track: &mut Track, observations: &[Observation], cfg: &LinkConfig) {
-    // Starts where the screening fit stopped, so it can only improve on it.
+    // The weighted optimum can raise the plain residual past the gate.
     if let Some(fit) = converge_orbit(
         observations,
         &track.state,
         cfg.reference_jd,
         CONVERGE_ITERATIONS,
-    ) {
+    )
+    .filter(|fit| fit.rms_arcsec <= gate_arcsec(observations, cfg))
+    {
         track.state = fit.state;
         track.residual_arcsec = Some(fit.rms_arcsec);
     }
+}
+
+/// The residual gate for `observations`: the configured one, widened to three
+/// sigma at any site whose astrometry is coarser, as its tracklets are.
+fn gate_arcsec(observations: &[Observation], cfg: &LinkConfig) -> f64 {
+    if observations.is_empty() {
+        return cfg.max_residual_arcsec;
+    }
+    let sum: f64 = observations
+        .iter()
+        .map(|obs| {
+            cfg.max_residual_arcsec
+                .max(3.0 * obs.site.astrometric_sigma_arcsec)
+                .powi(2)
+        })
+        .sum();
+    (sum / observations.len() as f64).sqrt()
 }
 
 /// Every candidate the hypothesis sweep produces, grouped by set of tracklets.
@@ -1190,12 +1225,13 @@ fn try_merge(
     };
     // Both seeds fit the same positions.
     let observations = observations_of(&union(first), tracklets, by_id, &cfg.site);
+    let gate = gate_arcsec(&observations, cfg);
     let mut track = [first, second].into_iter().find_map(|seed| {
         let mut track = union(seed);
         score(&mut track, &observations, cfg);
         track
             .residual_arcsec
-            .is_some_and(|r| r <= cfg.max_residual_arcsec)
+            .is_some_and(|r| r <= gate)
             .then_some(track)
     })?;
     converge(&mut track, &observations, cfg);

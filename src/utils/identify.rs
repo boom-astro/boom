@@ -245,7 +245,11 @@ pub fn identify(
                     {
                         continue;
                     }
-                    let (pra, pdec) = predict_radec_from(&orbits[idx].elements, d.jd, &cfg.site);
+                    let (pra, pdec) = predict_radec_from(
+                        &orbits[idx].elements,
+                        d.jd,
+                        d.site.as_ref().unwrap_or(&cfg.site),
+                    );
                     let sep = angular_separation_deg(d.ra, d.dec, pra, pdec) * 3600.0;
                     // Ties go to the lower index, so the result does not
                     // depend on the order the grid returns candidates in.
@@ -506,7 +510,8 @@ mod tests {
             .filter_map(|d| {
                 let mut best: Option<(f64, usize)> = None;
                 for (idx, o) in orbits.iter().enumerate() {
-                    let (pra, pdec) = predict_radec_from(&o.elements, d.jd, &cfg.site);
+                    let (pra, pdec) =
+                        predict_radec_from(&o.elements, d.jd, d.site.as_ref().unwrap_or(&cfg.site));
                     let sep = angular_separation_deg(d.ra, d.dec, pra, pdec) * 3600.0;
                     if sep <= cfg.match_radius_arcsec
                         && best.is_none_or(|(b, i)| sep < b || (sep == b && idx < i))
