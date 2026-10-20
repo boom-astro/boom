@@ -10,6 +10,7 @@
 //! start picks it back up -- for a task that declares itself `idempotent`.
 //! Every registered task does today, but the worker reads the flag rather than
 //! assuming it: a task that cannot be resumed is failed instead of retried.
+#![recursion_limit = "256"]
 
 use boom::conf::{load_dotenv, AppConfig};
 use boom::tasks::{

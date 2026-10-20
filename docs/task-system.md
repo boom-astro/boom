@@ -186,6 +186,7 @@ later.
 | Task | What it does |
 | --- | --- |
 | `catalog_ingest` | Download an archival catalog and insert it. See [catalogs.md](./catalogs.md). |
+| `reorient_decam_cutouts` | Reflect the stored DECam cutouts of a candid range so they are north up. |
 
 Submission is single-flight per target, not per type: two ingests of the same
 catalog would race on the same collection and chunk state, but ingesting 2MASS

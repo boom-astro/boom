@@ -755,6 +755,14 @@ impl CutoutStorage {
         Ok(CutoutStorage::S3(s3_storage))
     }
 
+    /// The underlying collection, when cutouts are stored in MongoDB.
+    pub fn mongo_collection(&self) -> Option<mongodb::Collection<mongodb::bson::Document>> {
+        match self {
+            CutoutStorage::Mongo(s) => Some(s.collection.clone_with_type()),
+            CutoutStorage::S3(_) => None,
+        }
+    }
+
     pub async fn from_mongo(db: mongodb::Database, survey: &Survey) -> Self {
         CutoutStorage::Mongo(MongoCutoutStorage::new(db, survey))
     }
