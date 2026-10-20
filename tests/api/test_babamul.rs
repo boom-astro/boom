@@ -5426,7 +5426,7 @@ mod tests {
                 doc! { "_id": candid },
                 doc! { "$set": {
                     "villar_fit.reduced_chi2": 1.23,
-                    "villar_fit.peak_flux": 789.0,
+                    "villar_fit.peak_mag": 16.58,
                     "villar_fit.A_ZTF_g": 4.56,
                     "villar_fit.A_ZTF_r": f64::NAN,
                 }},
@@ -5463,10 +5463,10 @@ mod tests {
         let body = read_json_response(resp).await;
         assert_eq!(body["data"]["candid"].as_i64().unwrap(), candid);
         assert_eq!(body["data"]["reduced_chi2"].as_f64().unwrap(), 1.23);
-        assert_eq!(body["data"]["peak_flux"].as_f64().unwrap(), 789.0);
+        assert_eq!(body["data"]["peak_mag"].as_f64().unwrap(), 16.58);
         assert!(
-            body["data"]["params"].get("peak_flux").is_none(),
-            "peak_flux is not a model parameter"
+            body["data"]["params"].get("peak_mag").is_none(),
+            "peak_mag is not a model parameter"
         );
         assert_eq!(body["data"]["params"]["A_ZTF_g"].as_f64().unwrap(), 4.56);
         assert!(
