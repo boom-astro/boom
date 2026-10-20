@@ -519,11 +519,11 @@ mkdir -p ./data/alerts
 
 **For Linux:**
 ```
-wget -q https://caltech.box.com/shared/static/qdois5qq2lmvp02ri50fum80vzr54505.gz -O ./data/alerts/boom_throughput.ZTF_alerts_aux.dump.gz
+wget -q https://github.com/boom-astro/boom/releases/download/test-data-v1/boom_throughput.ZTF_alerts_aux.dump.gz -O ./data/alerts/boom_throughput.ZTF_alerts_aux.dump.gz
 ```
 **For macOS:**
 ```
-curl -sL https://caltech.box.com/shared/static/qdois5qq2lmvp02ri50fum80vzr54505.gz -o ./data/alerts/boom_throughput.ZTF_alerts_aux.dump.gz
+curl -sL https://github.com/boom-astro/boom/releases/download/test-data-v1/boom_throughput.ZTF_alerts_aux.dump.gz -o ./data/alerts/boom_throughput.ZTF_alerts_aux.dump.gz
 ```
 
 Download the NED catalog for crossmatching.
