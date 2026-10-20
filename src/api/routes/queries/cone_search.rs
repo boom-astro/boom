@@ -20,6 +20,8 @@ use utoipa::openapi::schema::{ObjectBuilder, Schema};
 use utoipa::openapi::RefOr;
 use utoipa::{PartialSchema, ToSchema};
 
+const MAX_CONE_SEARCH_COORDINATES: usize = 10_000;
+
 #[derive(serde::Deserialize, Clone)]
 pub enum Unit {
     Degrees,
@@ -173,6 +175,12 @@ pub async fn post_cone_search_query(
         Unit::Radians => {}
     }
     let object_coordinates = &body.object_coordinates;
+    if object_coordinates.len() > MAX_CONE_SEARCH_COORDINATES {
+        return response::bad_request(&format!(
+            "object_coordinates holds more than {} entries; split the request",
+            MAX_CONE_SEARCH_COORDINATES
+        ));
+    }
     let mut docs: HashMap<String, Vec<mongodb::bson::Document>> = HashMap::new();
     let mut bytes_read = 0;
     let filter = match parse_optional_filter(&body.filter) {
