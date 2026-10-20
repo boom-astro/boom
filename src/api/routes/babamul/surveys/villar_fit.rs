@@ -161,9 +161,6 @@ pub async fn get_villar_fit(
         match key.as_str() {
             "reduced_chi2" => reduced_chi2 = Some(value),
             "peak_mag" => peak_mag = Some(value),
-            // Written by fits from before the switch to AB magnitudes; not a
-            // model parameter.
-            "peak_flux" => {}
             _ => {
                 params.insert(key.clone(), value);
             }

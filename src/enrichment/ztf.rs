@@ -935,7 +935,6 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             let nan_set_doc = {
                 let mut d = doc! {
                     "villar_fit.reduced_chi2": f64::NAN,
-                    // "villar_fit.peak_flux": f64::NAN,
                     "villar_fit.peak_mag": f64::NAN,
                 };
                 for filt in villar_pso::FILTERS {
@@ -991,12 +990,8 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                         for (result, candid) in results.into_iter().zip(candids) {
                             let mut set_doc = doc! {
                                 "villar_fit.reduced_chi2": result.reduced_chi2,
-                                // "villar_fit.peak_flux": result.peak_flux,
                                 "villar_fit.peak_mag": result.peak_mag,
                             };
-                            // A and extra_sigma on the AB magnitude scale; the
-                            // other five parameters are the same in every unit.
-                            // for (key, val) in result.params_unnorm.to_named_map() {
                             for (key, val) in result.params_mag.to_named_map() {
                                 set_doc.insert(format!("villar_fit.{}", key), val);
                             }

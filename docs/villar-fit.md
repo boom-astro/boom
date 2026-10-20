@@ -33,10 +33,6 @@ the normalization scale. Every field is a double, and **every field is `NaN`
 when the fit did not run or did not succeed** — see
 [When the fields are NaN](#when-the-fields-are-nan).
 
-Alerts fitted before the switch to magnitudes carry `peak_flux` instead of
-`peak_mag`, with `A` and `extra_sigma` in µJy under the same keys — see
-[Fits from before the switch to magnitudes](#fits-from-before-the-switch-to-magnitudes).
-
 Fits are stored **per alert**, not per object. A well-observed object has one
 `villar_fit` per `candid`, each computed from the light curve as it stood at
 that alert's epoch. The most recent `candid` has the most complete light curve
@@ -293,29 +289,6 @@ In MongoDB, `NaN` compares false against every range predicate, so a query like
 `{"villar_fit.reduced_chi2": {"$lt": 3}}` already excludes unfitted alerts. To
 check explicitly, use `{"villar_fit.A_ZTF_r": {"$gte": 0}}`, which is false for
 `NaN`; `$exists` will **not** work, because the field is present.
-
-## Fits from before the switch to magnitudes
-
-Alerts enriched before BOOM picked up villar-pso `9113d92` (October 2026) were
-fitted by an earlier version of the optimizer and stored on the flux scale:
-
-- `A` and `extra_sigma` are in µJy under the same keys, and the fit carries
-  `peak_flux` (µJy) where newer fits have `peak_mag`.
-- The cost had no `ln sigma_total^2` term, so it fell steadily as `extra_sigma`
-  grew and drove fits towards `extra_sigma`'s upper bound.
-- When the *r* band needed padding, the cost was evaluated over padded entries
-  in place of the latest *g*-band points, so a handful of late *g* points could
-  be left out of both the fit and `reduced_chi2`.
-- Seeds were compared by `reduced_chi2`, and there was no Nelder-Mead polish.
-
-A query over `A` or `extra_sigma` mixes the two unit systems unless it excludes
-these fits. Every newer fit writes `peak_mag`, NaN or not, so
-`{"villar_fit.peak_mag": {"$exists": true}}` keeps only them. Test for
-`peak_mag` rather than `peak_flux`: refitting an old alert sets the new keys but
-does not remove `peak_flux`.
-
-The Babamul `villar-fit` endpoint returns these fits as stored, so their
-`params` are in µJy and `peak_mag` is `null`.
 
 ## Using the fits
 
