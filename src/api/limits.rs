@@ -2,8 +2,26 @@ use crate::api::models::response;
 use actix_web::HttpResponse;
 use mongodb::Cursor;
 use serde::de::DeserializeOwned;
+use std::sync::LazyLock;
+use std::time::Duration;
+use tokio::sync::{Semaphore, SemaphorePermit};
 
 pub const MAX_RESULT_BYTES: usize = 256 * 1024 * 1024;
+
+const MAX_CONCURRENT_LARGE_QUERIES: usize = 8;
+const LARGE_QUERY_WAIT: Duration = Duration::from_secs(60);
+
+static LARGE_QUERIES: LazyLock<Semaphore> =
+    LazyLock::new(|| Semaphore::new(MAX_CONCURRENT_LARGE_QUERIES));
+
+pub async fn large_query_slot() -> Result<SemaphorePermit<'static>, HttpResponse> {
+    match tokio::time::timeout(LARGE_QUERY_WAIT, LARGE_QUERIES.acquire()).await {
+        Ok(Ok(permit)) => Ok(permit),
+        _ => Err(response::service_unavailable(
+            "Too many large queries are running; retry in a minute",
+        )),
+    }
+}
 
 pub enum ResultError {
     TooLarge,

@@ -50,6 +50,10 @@ pub fn request_timeout(message: &str) -> HttpResponse {
     HttpResponse::RequestTimeout().json(ApiResponseBody::error(message))
 }
 
+pub fn service_unavailable(message: &str) -> HttpResponse {
+    HttpResponse::ServiceUnavailable().json(ApiResponseBody::error(message))
+}
+
 pub fn forbidden(message: &str) -> HttpResponse {
     HttpResponse::Forbidden().json(ApiResponseBody::error(message))
 }

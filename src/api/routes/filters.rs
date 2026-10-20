@@ -63,7 +63,7 @@ async fn validate_watchlist(
     Ok(())
 }
 
-use crate::api::limits::next_result;
+use crate::api::limits::{large_query_slot, next_result};
 use crate::utils::moc::{
     credible_volume_to_2d_moc, moc_from_ascii, moc_hpx_stage, parse_3d_skymap_bytes,
     CredibleVolumeIndex, LIGO3dskymap,
@@ -1288,6 +1288,10 @@ pub async fn post_filter_test(
         None => {
             return HttpResponse::Unauthorized().body("Unauthorized");
         }
+    };
+    let _slot = match large_query_slot().await {
+        Ok(slot) => slot,
+        Err(response) => return response,
     };
     // Taken rather than cloned: a skymap can be most of the 200 MB this route
     // accepts, and every copy of it is held for the life of the request.

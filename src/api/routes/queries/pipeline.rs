@@ -9,7 +9,7 @@ use crate::{
     conf::AppConfig,
 };
 
-use crate::api::limits::{next_result, too_large, ResultError};
+use crate::api::limits::{large_query_slot, next_result, too_large, ResultError};
 use actix_web::{post, web, HttpResponse};
 use mongodb::{bson::doc, Database};
 use utoipa::ToSchema;
@@ -53,6 +53,10 @@ pub async fn post_pipeline_query(
     let current_user = match current_user {
         Some(user) => user,
         None => return HttpResponse::Unauthorized().body("Unauthorized"),
+    };
+    let _slot = match large_query_slot().await {
+        Ok(slot) => slot,
+        Err(response) => return response,
     };
     let catalog_name = body.catalog_name.trim();
     if !catalog_accessible(&db, catalog_name, &current_user, &config).await {

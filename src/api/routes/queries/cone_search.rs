@@ -9,7 +9,7 @@ use crate::{
     conf::AppConfig,
 };
 
-use crate::api::limits::{next_result, too_large, ResultError};
+use crate::api::limits::{large_query_slot, next_result, too_large, ResultError};
 use actix_web::{post, web, HttpResponse};
 use mongodb::{bson::doc, Database};
 use std::collections::HashMap;
@@ -136,6 +136,10 @@ pub async fn post_cone_search_query(
     let current_user = match current_user {
         Some(user) => user,
         None => return HttpResponse::Unauthorized().body("Unauthorized"),
+    };
+    let _slot = match large_query_slot().await {
+        Ok(slot) => slot,
+        Err(response) => return response,
     };
     let catalog_name = body.catalog_name.trim();
     if !is_cone_searchable(catalog_name, &config) {

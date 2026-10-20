@@ -1,5 +1,5 @@
 use crate::alert::{LsstCandidate, ZtfCandidate};
-use crate::api::limits::next_result;
+use crate::api::limits::{large_query_slot, next_result};
 use crate::api::models::response;
 use crate::api::routes::babamul::BabamulUser;
 use crate::enrichment::{LsstAlertProperties, ZtfAlertClassifications, ZtfAlertProperties};
@@ -115,6 +115,10 @@ pub async fn get_alerts(
         }
     };
     let survey = path.into_inner();
+    let _slot = match large_query_slot().await {
+        Ok(slot) => slot,
+        Err(response) => return response,
+    };
 
     let limit = query.limit.unwrap_or(100000);
     if limit == 0 || limit > 100000 {
@@ -448,6 +452,10 @@ pub async fn cone_search_alerts(
         }
     };
     let survey = path.into_inner();
+    let _slot = match large_query_slot().await {
+        Ok(slot) => slot,
+        Err(response) => return response,
+    };
     let coordinates = &query.coordinates;
     // we must have more than 0 and less than 1000 coordinate pairs
     // to prevent expensive queries that could potentially timeout the server
