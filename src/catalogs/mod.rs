@@ -36,6 +36,9 @@ use tracing::instrument;
 /// its own right.
 pub const STATE_COLLECTION: &str = "catalog_state";
 
+/// The task type whose runs populate these collections.
+const TASK_TYPE_CATALOG_INGEST: &str = crate::tasks::catalog_ingest::TASK_TYPE;
+
 /// Which reader turns this catalog's source files into documents.
 ///
 /// One variant per catalog rather than one per format: the format only says how
@@ -946,11 +949,20 @@ pub enum CatalogHealth {
     Present,
     /// Declared, but the collection has never been ingested.
     Missing,
-    /// Declared and started, but not every chunk is in. The collection exists
-    /// and is partly populated, so a crossmatch against it silently returns
-    /// fewer matches than it should -- worse than absent, which at least fails
-    /// loudly.
+    /// Declared and started, but not every chunk is in, and nothing is
+    /// working on it. The collection exists and is partly populated, so a
+    /// crossmatch against it silently returns fewer matches than it should --
+    /// worse than absent, which at least fails loudly.
     Partial,
+    /// Partly ingested because a run is part way through it right now.
+    ///
+    /// Indistinguishable from `Partial` in the catalog's own state document,
+    /// and a different thing entirely: one is work in progress and the other
+    /// is work that stopped. Reported apart so the admin badge does not count
+    /// an ingest somebody started a minute ago -- a badge that lights up for
+    /// hours whenever the page is used as intended is a badge people learn to
+    /// read past, which is the failure `External` exists to avoid as well.
+    Ingesting,
     /// Declared in config, but this release has no definition for it. Almost
     /// always a typo in the slug.
     Undeclared,
@@ -1005,6 +1017,20 @@ pub async fn status(
     crossmatched: &[String],
 ) -> Result<Vec<CatalogStatus>, CatalogError> {
     let state = db.collection::<Document>(STATE_COLLECTION);
+
+    // Asked of the task queue rather than inferred from the state document's
+    // timestamps: `updated_at` advances once per chunk, and a chunk of a large
+    // catalog can take long enough that any staleness threshold would report a
+    // healthy ingest as abandoned. The queue knows for certain.
+    let ingesting =
+        crate::tasks::queue::active_param_values(db, TASK_TYPE_CATALOG_INGEST, "catalog")
+            .await
+            .unwrap_or_else(|e| {
+                // Not fatal: without it a running ingest reads as `Partial`, which is
+                // what it did before and is still true enough to act on.
+                tracing::warn!("could not read active ingests: {e}");
+                Default::default()
+            });
 
     // Everything the release can build, then anything config names that it
     // cannot -- the second group is almost always a typo, and hiding it would
@@ -1102,6 +1128,8 @@ pub async fn status(
                 let complete = doc.get_str("status").is_ok_and(|s| s == "complete");
                 let health = if complete {
                     CatalogHealth::Present
+                } else if ingesting.contains(def.id) {
+                    CatalogHealth::Ingesting
                 } else {
                     CatalogHealth::Partial
                 };
@@ -1610,6 +1638,117 @@ mod source_tests {
 
 #[cfg(test)]
 mod status_tests {
+
+    /// A half-ingested catalog with a run working on it and one with nothing
+    /// working on it look identical in the state document, and only one of
+    /// them is something to act on.
+    ///
+    /// The distinction exists for the admin badge: it counts partially
+    /// ingested catalogs, so without this an ingest somebody started a minute
+    /// ago lit the badge for the hours it ran -- training the operator to read
+    /// past a badge that is meant to mean something.
+    #[tokio::test]
+    async fn an_ingest_in_flight_is_not_reported_as_abandoned() {
+        let db = crate::conf::get_test_db().await;
+        let def = CATALOGS[0];
+        let state = db.collection::<Document>(STATE_COLLECTION);
+        let tasks = db.collection::<crate::tasks::models::Task>("tasks");
+
+        let half_ingested = doc! {
+            "catalog": def.id,
+            "status": "ingesting",
+            "chunks_total": 4i64,
+            "chunks_done": ["0"],
+            "n_records": 1i64,
+            "updated_at": now(),
+        };
+        state
+            .update_one(
+                doc! { "_id": def.collection },
+                doc! { "$set": half_ingested },
+            )
+            .upsert(true)
+            .await
+            .expect("writes state");
+
+        let health_of = |statuses: &[CatalogStatus]| {
+            statuses
+                .iter()
+                .find(|s| s.id == def.id)
+                .expect("the catalog is listed")
+                .health
+        };
+
+        let declared = vec![def.id.to_string()];
+        let statuses = status(&db, &declared, &[]).await.expect("reads status");
+        assert_eq!(
+            health_of(&statuses),
+            CatalogHealth::Partial,
+            "nothing is running, so this one is stopped part way through"
+        );
+
+        let run = crate::tasks::models::Task {
+            id: uuid::Uuid::new_v4().to_string(),
+            task_type: TASK_TYPE_CATALOG_INGEST.to_string(),
+            params: serde_json::json!({ "catalog": def.id }),
+            status: crate::tasks::models::TaskStatus::Running,
+            actor: crate::tasks::models::Actor::system(),
+            trigger: crate::tasks::models::Trigger::Api,
+            requested_at: now(),
+            started_at: Some(now()),
+            finished_at: None,
+            progress: Default::default(),
+            worker: None,
+            // A live lease, because that is what makes the run count: a worker
+            // that died leaves its run `Running` until the reaper gets to it,
+            // and the reaper only runs in a worker's between-run loop.
+            lease_expires_at: Some(now() + crate::tasks::queue::LEASE_SECONDS),
+            cancel_requested: false,
+            error: None,
+            attempts: 1,
+        };
+        tasks.insert_one(&run).await.expect("queues a run");
+
+        let statuses = status(&db, &declared, &[]).await.expect("reads status");
+        assert_eq!(health_of(&statuses), CatalogHealth::Ingesting);
+
+        // An abandoned worker's run must not go on claiming to be working on
+        // the catalog, or a genuinely stuck ingest loses its warning for as
+        // long as no worker is up to reap it.
+        tasks
+            .update_one(
+                doc! { "_id": &run.id },
+                doc! { "$set": { "lease_expires_at": now() - 1.0 } },
+            )
+            .await
+            .expect("expires the lease");
+        let statuses = status(&db, &declared, &[]).await.expect("reads status");
+        assert_eq!(
+            health_of(&statuses),
+            CatalogHealth::Partial,
+            "a dead worker's run does not count as work in progress"
+        );
+
+        // A run still waiting for a worker has no lease and does count.
+        tasks
+            .update_one(
+                doc! { "_id": &run.id },
+                doc! { "$set": { "status": "queued" }, "$unset": { "lease_expires_at": "" } },
+            )
+            .await
+            .expect("requeues");
+        let statuses = status(&db, &declared, &[]).await.expect("reads status");
+        assert_eq!(health_of(&statuses), CatalogHealth::Ingesting);
+
+        tasks
+            .delete_one(doc! { "_id": &run.id })
+            .await
+            .expect("cleans up");
+        state
+            .delete_one(doc! { "_id": def.collection })
+            .await
+            .expect("cleans up");
+    }
     use super::*;
 
     /// A deployment whose crossmatch config points at an older release of a
