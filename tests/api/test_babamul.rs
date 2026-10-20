@@ -25,6 +25,17 @@ mod tests {
     use mongodb::Database;
     use std::collections::HashMap;
 
+    /// Serializes the tests that demote an admin.
+    ///
+    /// Demotions are serialized in the API by a lock document, deliberately:
+    /// "at least one admin remains" spans documents, so counting and then
+    /// writing is only sound while nothing else is doing the same. That lock is
+    /// deployment-wide, and this suite shares one database -- so a test that
+    /// holds it on purpose would make a concurrent demotion elsewhere fail with
+    /// the 409 it is designed to give.
+    static DEMOTION_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+        std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
     struct TestUser {
         pub user: BabamulUser,
         pub token: String,
@@ -591,6 +602,104 @@ mod tests {
             StatusCode::BAD_REQUEST,
             "Should reject surveys other than ZTF and LSST"
         );
+    }
+
+    #[actix_rt::test]
+    async fn test_get_batch_cutouts_serves_only_public_ztf_alerts() {
+        load_dotenv();
+        let config = AppConfig::from_test_config().unwrap();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+        let test_user = TestUser::create(&database, &auth_app_data).await;
+
+        let base = (uuid::Uuid::new_v4().as_u128() as i64).abs() / 16;
+        // Public alert, private alert, and cutouts with no alert at all.
+        let (public, private, orphan) = (base, base + 1, base + 2);
+        let alerts =
+            database.collection::<mongodb::bson::Document>(&format!("{}_alerts", Survey::Ztf));
+        alerts
+            .insert_many([
+                doc! { "_id": public, "candidate": { "programid": 1, "jd": 2460000.5 } },
+                doc! { "_id": private, "candidate": { "programid": 2, "jd": 2460001.5 } },
+            ])
+            .await
+            .expect("Failed to insert test alerts");
+        let storage = config
+            .build_cutout_storage(&Survey::Ztf)
+            .await
+            .expect("Failed to build ZTF cutout storage");
+        for candid in [public, private, orphan] {
+            storage
+                .insert_cutouts(AlertCutout {
+                    candid,
+                    cutout_science: vec![1, 2, 3],
+                    cutout_template: vec![4, 5, 6],
+                    cutout_difference: vec![7, 8, 9],
+                })
+                .await
+                .expect("Failed to store test cutout");
+        }
+
+        let mut cutout_storage_map: HashMap<Survey, CutoutStorage> = HashMap::new();
+        cutout_storage_map.insert(Survey::Ztf, storage);
+        let app = test::init_service(
+            App::new().service(
+                actix_web::web::scope("/babamul")
+                    .app_data(web::Data::new(database.clone()))
+                    .app_data(web::Data::new(auth_app_data.clone()))
+                    .app_data(web::Data::new(cutout_storage_map))
+                    .wrap(from_fn(babamul_auth_middleware))
+                    .service(routes::babamul::surveys::get_batch_cutouts),
+            ),
+        )
+        .await;
+
+        let req = test::TestRequest::post()
+            .uri("/babamul/surveys/ztf/cutouts")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .set_json(serde_json::json!({ "candids": [private, public, orphan] }))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "{}",
+            read_str_response(resp).await
+        );
+        let body = read_json_response(resp).await;
+        let served: Vec<i64> = body["data"]["cutouts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["candid"].as_i64().unwrap())
+            .collect();
+        assert_eq!(served, vec![public], "only the public alert is served");
+        assert_eq!(body["data"]["cutouts"][0]["jd"], 2460000.5);
+        assert_eq!(
+            body["data"]["missing"],
+            serde_json::json!([private, orphan]),
+            "private and unknown candids are indistinguishable from missing ones"
+        );
+
+        let req = test::TestRequest::post()
+            .uri("/babamul/surveys/ztf/cutouts")
+            .set_json(serde_json::json!({ "candids": [public] }))
+            .to_request();
+        // The middleware rejects with an `Err`, not a response, hence `try_call_service`.
+        let resp = test::try_call_service(&app, req).await;
+        assert_eq!(
+            resp.err().unwrap().as_response_error().status_code(),
+            StatusCode::UNAUTHORIZED
+        );
+
+        alerts
+            .delete_many(doc! { "_id": { "$in": [public, private] } })
+            .await
+            .unwrap();
+        let storage = config.build_cutout_storage(&Survey::Ztf).await.unwrap();
+        for candid in [public, private, orphan] {
+            storage.delete_cutouts(candid).await.unwrap();
+        }
     }
 
     #[actix_rt::test]
@@ -5079,7 +5188,7 @@ mod tests {
         let mut ids = Vec::new();
         for members in [&mixed[..], &private[..]] {
             let jds: Vec<f64> = (0..members.len()).map(|k| 2460000.0 + k as f64).collect();
-            let plan = plan_upsert(&database, members, &jds, None, None)
+            let plan = plan_upsert(&database, members, &jds, None, None, None)
                 .await
                 .unwrap();
             ids.push(commit_upsert(&database, plan).await.unwrap().track.id);
@@ -5144,6 +5253,7 @@ mod tests {
 
     #[actix_rt::test]
     async fn test_babamul_admin_manages_user_access() {
+        let _demoting = DEMOTION_LOCK.lock().await;
         load_dotenv();
         let database: Database = get_test_db_api().await;
         let auth_app_data = get_test_auth(&database).await.unwrap();
@@ -5298,5 +5408,499 @@ mod tests {
                 routes::babamul::BabamulAcl::ZtfCaltech
             ]
         );
+    }
+
+    /// An ACL edit applies as a delta, so a second admin editing the same user
+    /// does not revert the first one's change.
+    ///
+    /// The whole-list form is still accepted and is still last-write-wins; what
+    /// this covers is that the delta form keeps what it was not asked about.
+    #[actix_rt::test]
+    async fn test_babamul_admin_acl_edits_apply_as_a_delta() {
+        let _demoting = DEMOTION_LOCK.lock().await;
+        load_dotenv();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+        let admin = TestUser::create(&database, &auth_app_data).await;
+        let user = TestUser::create(&database, &auth_app_data).await;
+        let users: mongodb::Collection<BabamulUser> = database.collection("babamul_users");
+        users
+            .update_one(
+                doc! { "_id": &admin.user.id },
+                doc! { "$set": { "is_admin": true } },
+            )
+            .await
+            .unwrap();
+
+        let app = test::init_service(
+            App::new().service(
+                web::scope("/babamul")
+                    .app_data(web::Data::new(database.clone()))
+                    .app_data(web::Data::new(auth_app_data))
+                    .wrap(from_fn(babamul_auth_middleware))
+                    .service(routes::babamul::admin::patch_admin_user),
+            ),
+        )
+        .await;
+
+        let patch = |id: &str, body: serde_json::Value| {
+            test::TestRequest::patch()
+                .uri(&format!("/babamul/admin/users/{}", id))
+                .insert_header(("Authorization", format!("Bearer {}", admin.token)))
+                .set_json(body)
+                .to_request()
+        };
+        let acls_of = |resp_body: &serde_json::Value| resp_body["data"]["acls"].clone();
+
+        // Somebody else grants partnership access while this admin's page still
+        // shows an empty row.
+        users
+            .update_one(
+                doc! { "_id": &user.user.id },
+                doc! { "$set": { "acls": ["ztf_partnership"] } },
+            )
+            .await
+            .unwrap();
+
+        let resp = test::call_service(
+            &app,
+            patch(
+                &user.user.id,
+                serde_json::json!({ "grant_acls": ["winter"] }),
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = read_json_response(resp).await;
+        assert_eq!(
+            acls_of(&body),
+            serde_json::json!(["winter", "ztf_partnership"]),
+            "granting WINTER must not revert the partnership grant it never saw"
+        );
+
+        // Granting Caltech access brings the partnership access it requires.
+        let resp = test::call_service(
+            &app,
+            patch(
+                &user.user.id,
+                serde_json::json!({ "grant_acls": ["ztf_caltech"] }),
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            acls_of(&read_json_response(resp).await),
+            serde_json::json!(["winter", "ztf_partnership", "ztf_caltech"])
+        );
+
+        // Revoking it takes the Caltech access that depends on it, rather than
+        // refusing over a combination the caller did not ask for.
+        let resp = test::call_service(
+            &app,
+            patch(
+                &user.user.id,
+                serde_json::json!({ "revoke_acls": ["ztf_partnership"] }),
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            acls_of(&read_json_response(resp).await),
+            serde_json::json!(["winter"])
+        );
+
+        // Replacing the list and editing it mean different things when two
+        // admins edit at once, so one request may not ask for both.
+        let resp = test::call_service(
+            &app,
+            patch(
+                &user.user.id,
+                serde_json::json!({ "acls": [], "grant_acls": ["winter"] }),
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        let resp = test::call_service(
+            &app,
+            patch(
+                &user.user.id,
+                serde_json::json!({ "grant_acls": ["winter"], "revoke_acls": ["winter"] }),
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        let resp = test::call_service(
+            &app,
+            patch("missing", serde_json::json!({ "grant_acls": ["winter"] })),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        // Demoting one of several admins is an ordinary edit; only the last one
+        // is refused, and the count is deployment-wide so this suite -- which
+        // shares a database -- cannot assert that case.
+        users
+            .update_one(
+                doc! { "_id": &user.user.id },
+                doc! { "$set": { "is_admin": true } },
+            )
+            .await
+            .unwrap();
+        let resp = test::call_service(
+            &app,
+            patch(&user.user.id, serde_json::json!({ "is_admin": false })),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(read_json_response(resp).await["data"]["is_admin"], false);
+
+        let stored = users
+            .find_one(doc! { "_id": &user.user.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!stored.is_admin);
+        assert_eq!(stored.acls, vec![routes::babamul::BabamulAcl::Winter]);
+    }
+
+    /// The two protections that are only protections if they actually bite.
+    ///
+    /// Each of these fails if the guard it covers is removed, which the
+    /// delta-semantics test above does not: that one interleaves its competing
+    /// write before the request, so the handler's first read already sees it.
+    #[actix_rt::test]
+    async fn test_babamul_admin_guards_bite() {
+        let _demoting = DEMOTION_LOCK.lock().await;
+        load_dotenv();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+        let admin = TestUser::create(&database, &auth_app_data).await;
+        let user = TestUser::create(&database, &auth_app_data).await;
+        let users: mongodb::Collection<BabamulUser> = database.collection("babamul_users");
+        users
+            .update_one(
+                doc! { "_id": &admin.user.id },
+                doc! { "$set": { "is_admin": true } },
+            )
+            .await
+            .unwrap();
+
+        let app = test::init_service(
+            App::new().service(
+                web::scope("/babamul")
+                    .app_data(web::Data::new(database.clone()))
+                    .app_data(web::Data::new(auth_app_data))
+                    .wrap(from_fn(babamul_auth_middleware))
+                    .service(routes::babamul::admin::patch_admin_user),
+            ),
+        )
+        .await;
+
+        let patch = |id: &str, body: serde_json::Value| {
+            test::TestRequest::patch()
+                .uri(&format!("/babamul/admin/users/{}", id))
+                .insert_header(("Authorization", format!("Bearer {}", admin.token)))
+                .set_json(body)
+                .to_request()
+        };
+
+        // An account from before the acls field existed has no acls at all,
+        // and MongoDB does not consider a missing field equal to []. Matching
+        // only [] in the compare-and-swap would make every delta against one
+        // of these exhaust its retries and return a conflict nothing could
+        // resolve.
+        users
+            .update_one(
+                doc! { "_id": &user.user.id },
+                doc! { "$unset": { "acls": "" } },
+            )
+            .await
+            .unwrap();
+        let resp = test::call_service(
+            &app,
+            patch(
+                &user.user.id,
+                serde_json::json!({ "grant_acls": ["winter"] }),
+            ),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "a delta has to reach an account whose acls field was never written"
+        );
+        assert_eq!(
+            read_json_response(resp).await["data"]["acls"],
+            serde_json::json!(["winter"])
+        );
+
+        // Granting Caltech access while revoking the partnership access it
+        // requires asks for a state that cannot exist. It passed the overlap
+        // check and the interlock then removed the Caltech access the request
+        // had just asked to grant, reporting success.
+        let resp = test::call_service(
+            &app,
+            patch(
+                &user.user.id,
+                serde_json::json!({
+                    "grant_acls": ["ztf_caltech"],
+                    "revoke_acls": ["ztf_partnership"],
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Demotions are serialized by a lock, because "at least one admin
+        // remains" spans documents: counting and then writing without one
+        // lets two admins demote each other down to zero. Held here by hand,
+        // which is what another API instance mid-demotion looks like.
+        let locks = database.collection::<mongodb::bson::Document>("locks");
+        let held_until = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64()
+            + 30.0;
+        users
+            .update_one(
+                doc! { "_id": &user.user.id },
+                doc! { "$set": { "is_admin": true } },
+            )
+            .await
+            .unwrap();
+        locks
+            .update_one(
+                doc! { "_id": "babamul_admin_demotion" },
+                doc! { "$set": { "expires_at": held_until, "token": mongodb::bson::oid::ObjectId::new() } },
+            )
+            .upsert(true)
+            .await
+            .unwrap();
+
+        let resp = test::call_service(
+            &app,
+            patch(&user.user.id, serde_json::json!({ "is_admin": false })),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::CONFLICT,
+            "a demotion must not proceed while another one holds the lock"
+        );
+        assert!(
+            users
+                .find_one(doc! { "_id": &user.user.id })
+                .await
+                .unwrap()
+                .unwrap()
+                .is_admin
+        );
+
+        // Released, and the same demotion goes through -- so the 409 above was
+        // the lock and not something else refusing.
+        locks
+            .update_one(
+                doc! { "_id": "babamul_admin_demotion" },
+                doc! { "$set": { "expires_at": 0.0 } },
+            )
+            .await
+            .unwrap();
+        let resp = test::call_service(
+            &app,
+            patch(&user.user.id, serde_json::json!({ "is_admin": false })),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(read_json_response(resp).await["data"]["is_admin"], false);
+    }
+
+    /// Test GET /babamul/surveys/ztf/villar-fit
+    #[actix_rt::test]
+    async fn test_get_villar_fit() {
+        load_dotenv();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+        let test_user = TestUser::create(&database, &auth_app_data).await;
+
+        let mut alert_worker = ztf_alert_worker().await;
+        let (candid, object_id, _, _, bytes_content) =
+            AlertRandomizer::new_randomized(Survey::Ztf).get().await;
+        let status = alert_worker.process_alert(&bytes_content).await.unwrap();
+        assert_eq!(status, ProcessAlertStatus::Added(candid));
+        let mut enrichment_worker = ZtfEnrichmentWorker::new(TEST_CONFIG_FILE, None)
+            .await
+            .unwrap();
+        let result = enrichment_worker.process_alerts(&[candid]).await;
+        assert!(result.is_ok(), "Enrichment failed: {:?}", result.err());
+
+        // Simulate what the GPU-enabled enrichment worker writes, since the
+        // `gpu` feature isn't necessarily enabled for this test run.
+        let alert_collection: mongodb::Collection<mongodb::bson::Document> =
+            database.collection("ZTF_alerts");
+        alert_collection
+            .update_one(
+                doc! { "_id": candid },
+                doc! { "$set": {
+                    "villar_fit.reduced_chi2": 1.23,
+                    "villar_fit.peak_mag": 16.58,
+                    "villar_fit.A_ZTF_g": 4.56,
+                    "villar_fit.A_ZTF_r": f64::NAN,
+                }},
+            )
+            .await
+            .expect("Failed to set villar_fit");
+
+        let app = test::init_service(
+            App::new().service(
+                actix_web::web::scope("/babamul")
+                    .app_data(web::Data::new(database.clone()))
+                    .app_data(web::Data::new(auth_app_data.clone()))
+                    .wrap(from_fn(babamul_auth_middleware))
+                    .service(routes::babamul::surveys::get_villar_fit),
+            ),
+        )
+        .await;
+
+        // Lookup by candid
+        let req = test::TestRequest::get()
+            .uri(&format!(
+                "/babamul/surveys/ztf/villar-fit?candid={}",
+                candid
+            ))
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "Should successfully retrieve villar fit by candid (error: {})",
+            read_str_response(resp).await
+        );
+        let body = read_json_response(resp).await;
+        assert_eq!(body["data"]["candid"].as_i64().unwrap(), candid);
+        assert_eq!(body["data"]["reduced_chi2"].as_f64().unwrap(), 1.23);
+        assert_eq!(body["data"]["peak_mag"].as_f64().unwrap(), 16.58);
+        assert!(
+            body["data"]["params"].get("peak_mag").is_none(),
+            "peak_mag is not a model parameter"
+        );
+        assert_eq!(body["data"]["params"]["A_ZTF_g"].as_f64().unwrap(), 4.56);
+        assert!(
+            body["data"]["params"]["A_ZTF_r"].is_null(),
+            "NaN values should serialize to null"
+        );
+
+        // Lookup by objectId
+        let req = test::TestRequest::get()
+            .uri(&format!(
+                "/babamul/surveys/ztf/villar-fit?objectId={}&which=last",
+                object_id
+            ))
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "Should successfully retrieve villar fit by objectId (error: {})",
+            read_str_response(resp).await
+        );
+        let body = read_json_response(resp).await;
+        assert_eq!(body["data"]["candid"].as_i64().unwrap(), candid);
+
+        // A newer alert for the same object that hasn't been fitted yet must not
+        // hide the fit of the older one.
+        let unfitted_candid = candid + 1;
+        alert_collection
+            .insert_one(doc! {
+                "_id": unfitted_candid,
+                "objectId": &object_id,
+                "candidate": { "jd": 9_999_999.0, "programid": 1, "magpsf": 15.0 },
+            })
+            .await
+            .expect("Failed to insert unfitted alert");
+        let req = test::TestRequest::get()
+            .uri(&format!(
+                "/babamul/surveys/ztf/villar-fit?objectId={}&which=last",
+                object_id
+            ))
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = read_json_response(resp).await;
+        assert_eq!(
+            body["data"]["candid"].as_i64().unwrap(),
+            candid,
+            "objectId lookup should skip alerts without a villar_fit"
+        );
+        alert_collection
+            .delete_one(doc! { "_id": unfitted_candid })
+            .await
+            .expect("Failed to delete unfitted alert");
+
+        // Unsupported survey
+        let req = test::TestRequest::get()
+            .uri(&format!(
+                "/babamul/surveys/lsst/villar-fit?candid={}",
+                candid
+            ))
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Non-existent candid
+        let req = test::TestRequest::get()
+            .uri("/babamul/surveys/ztf/villar-fit?candid=999999999999")
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        // Private-program alerts (programid != 1) must not be exposed via Babamul,
+        // same as every other Babamul survey endpoint.
+        alert_collection
+            .update_one(
+                doc! { "_id": candid },
+                doc! { "$set": { "candidate.programid": 2 } },
+            )
+            .await
+            .expect("Failed to set programid");
+
+        let req = test::TestRequest::get()
+            .uri(&format!(
+                "/babamul/surveys/ztf/villar-fit?candid={}",
+                candid
+            ))
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "private-program alert must not be retrievable by candid via Babamul"
+        );
+
+        let req = test::TestRequest::get()
+            .uri(&format!(
+                "/babamul/surveys/ztf/villar-fit?objectId={}",
+                object_id
+            ))
+            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "private-program alert must not be retrievable by objectId via Babamul"
+        );
+
+        // Clean up
+        drop_alert_from_collections(candid, &Survey::Ztf)
+            .await
+            .unwrap();
     }
 }

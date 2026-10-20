@@ -18,6 +18,8 @@ export type Profile = {
   /** Provider slugs the account can sign in with, e.g. ["google", "orcid"] */
   identity_providers?: string[];
   orcid_id?: string | null;
+  /** Whether this account may reach the admin page. Server-enforced on every
+   * admin route regardless; this only decides what the UI offers. */
   is_admin?: boolean;
   acls?: string[];
 } | null;
@@ -32,7 +34,7 @@ export type TokenResponse = { id: string; name: string; access_token: string; cr
 export const TOKEN_KEY = "api_token";
 export const USERNAME_KEY = "api_user";
 
-async function parseResponseJson(res: Response): Promise<unknown> {
+export async function parseResponseJson(res: Response): Promise<unknown> {
   const text = await res.text();
   // Quote 16+ digit integers: `JSON.parse` would round them and lose candid precision.
   const safeText = text.replace(/:\s*(-?\d{16,})(?![\d]*["])/g, (_, numStr) => `:"${numStr}"`);
@@ -41,7 +43,7 @@ async function parseResponseJson(res: Response): Promise<unknown> {
 
 type DataEnvelope<T> = { data?: T };
 
-function unwrapData<T>(body: unknown, fallback: T): T {
+export function unwrapData<T>(body: unknown, fallback: T): T {
   if (body && typeof body === "object" && "data" in body) {
     const dataVal = (body as DataEnvelope<unknown>).data;
     if (dataVal !== undefined) return dataVal as T;
@@ -189,7 +191,9 @@ export async function resetPassword(email: string, token: string, new_password: 
 
 const authorization = (token: TokenRecord) => `${token.token_type} ${token.access_token}`;
 
-async function fetchWithAuth(input: RequestInfo, init: RequestInit = {}) {
+// Exported for the admin client, which shares this request path rather than
+// carrying a second copy of the auth handling.
+export async function fetchWithAuth(input: RequestInfo, init: RequestInit = {}) {
   const token = getTokenRecord();
   if (!token) throw new Error("Not authenticated");
   const headers = new Headers(init.headers || {});
@@ -256,7 +260,9 @@ export async function fetchAdminUsers(search: string, limit: number, offset: num
   return unwrapData<AdminUsersPage>(await readJson(res), { users: [], total: 0, available_acls: [] });
 }
 
-export async function updateAdminUser(id: string, patch: { is_admin?: boolean; acls?: string[] }): Promise<AdminUser> {
+export type AdminUserPatch = { is_admin?: boolean; grant_acls?: string[]; revoke_acls?: string[] };
+
+export async function updateAdminUser(id: string, patch: AdminUserPatch): Promise<AdminUser> {
   const res = await fetchWithAuth(`${API_BASE}/admin/users/${encodeURIComponent(id)}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
@@ -264,7 +270,16 @@ export async function updateAdminUser(id: string, patch: { is_admin?: boolean; a
   });
   const body = await readJson(res);
   if (!res.ok) throw new Error(messageOf(body) ?? `Update user failed: ${res.status}`);
-  return unwrapData<AdminUser>(body, {} as AdminUser);
+  const updated = unwrapData<AdminUser | null>(body, null);
+  // `readJson` swallows a parse failure to null, and the `{} as AdminUser`
+  // this used to fall back to left every field undefined: no row matched the
+  // id, so the table went on showing the old values while the toast said
+  // "Updated undefined". The change did land -- the status says so -- but the
+  // page can no longer say what it landed as.
+  if (!updated || typeof updated.id !== "string") {
+    throw new Error("The change was saved but the response could not be read. Reload to see it.");
+  }
+  return updated;
 }
 
 export async function fetchKafkaCredentials(): Promise<KafkaCredential[]> {
@@ -404,8 +419,9 @@ export async function fetchStats(startDate: string, endDate: string, survey?: st
   return readList<NightlyStat>(res);
 }
 
-export async function refreshStats(startDate: string, endDate: string): Promise<void> {
+export async function refreshStats(startDate: string, endDate: string, survey?: string): Promise<void> {
   const params = new URLSearchParams({ start_date: startDate, end_date: endDate });
+  if (survey) params.set("survey", survey);
   const res = await fetchWithAuth(`${API_BASE}/stats/refresh?${params}`, { method: "POST" });
   if (res.ok) return;
   throw new Error(messageOf(await readJson(res)) ?? `Refresh stats failed: ${res.status}`);

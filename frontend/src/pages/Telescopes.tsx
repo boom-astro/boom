@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { IconClock, IconInfoCircle, IconLock, IconMoonStars, IconSun, IconSunset2 } from "@tabler/icons-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -7,11 +7,14 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import NightMap from "@/components/telescopes/NightMap";
 import NightTimeline from "@/components/telescopes/NightTimeline";
+import boomLogo from "@/assets/boom-logo.png";
 import api, { type NightlyStat } from "@/lib/api";
+import { CATALOG_COLORS, CATALOGS, type Coverage } from "@/lib/coverage";
 import { nextCrossing, skyState, sunAltitudeAt, type SkyState } from "@/lib/sun";
 import { formatClock, NIGHT_COLOR, SITES, type Site, type Telescope } from "@/lib/telescopes";
 
 const DAY_MS = 86_400_000;
+const MAX_SELECTED = 2;
 const STATS_REFRESH_MS = 10 * 60_000;
 
 const STATES: Record<SkyState, { title: string; icon: typeof IconSun }> = {
@@ -28,7 +31,28 @@ const NIGHT_CONVENTION =
   "Alerts are grouped by observing night, local noon to local noon at the observatory. " +
   "A night is labeled by its evening date.";
 
+const COVERAGE_CONVENTION =
+  "Click a telescope or a catalog to show the sky it covers, and a second one to compare them. " +
+  "The map shades the places where " +
+  "that part of the sky is overhead at the selected time, so footprints that follow right ascension " +
+  "drift west as the Earth turns.";
+
 const TELESCOPES = SITES.flatMap((site) => site.telescopes.map((telescope) => ({ site, telescope })));
+
+const COVERAGES = new Map<string, Coverage>([
+  ...TELESCOPES.map(({ site, telescope }): [string, Coverage] => [telescope.id, {
+    id: telescope.id,
+    color: telescope.color,
+    origin: [site.lon, site.lat],
+    footprint: telescope.footprint,
+  }]),
+  ...CATALOGS.map((catalog): [string, Coverage] => [catalog.id, {
+    id: catalog.id,
+    color: CATALOG_COLORS[0],
+    origin: null,
+    footprint: catalog.footprint,
+  }]),
+]);
 
 const utcFormat = new Intl.DateTimeFormat("en-US", {
   timeZone: "UTC",
@@ -122,9 +146,90 @@ function SkyBadge({ state }: { state: SkyState }) {
   );
 }
 
+function CoverageChip({ name, color, detail, selected, onClick }: {
+  name: string;
+  color: string;
+  detail: string;
+  selected: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          type="button"
+          aria-pressed={selected}
+          onClick={onClick}
+          className="hover:bg-accent flex cursor-pointer items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-xs transition-colors"
+          style={selected ? {
+            borderColor: color,
+            backgroundColor: `color-mix(in oklch, ${color} 18%, transparent)`,
+          } : undefined}
+        >
+          <span className="size-1.5 shrink-0 rounded-full" style={{ backgroundColor: color }} />
+          {name}
+        </button>
+      </TooltipTrigger>
+      <TooltipContent side="bottom">{detail}</TooltipContent>
+    </Tooltip>
+  );
+}
+
+type Selection = { id: string; color: string };
+
+function CoverageLegend({ selected, onSelect }: { selected: Selection[]; onSelect: (id: string) => void }) {
+  return (
+    <div className="mt-4 space-y-2">
+      <div className="flex flex-wrap items-center gap-1.5 sm:hidden">
+        <span className="text-muted-foreground mr-1 text-xs">Telescopes</span>
+        {TELESCOPES.map(({ telescope }) => (
+          <CoverageChip
+            key={telescope.id}
+            name={telescope.name}
+            color={telescope.color}
+            detail={`${telescope.survey} · ${telescope.extent}`}
+            selected={selected.some((selection) => selection.id === telescope.id)}
+            onClick={() => onSelect(telescope.id)}
+          />
+        ))}
+      </div>
+      <div className="flex flex-wrap items-center gap-1.5">
+        <span className="text-muted-foreground mr-1 flex items-center gap-1 text-xs">
+          Crossmatched catalogs
+          <InfoTooltip>{COVERAGE_CONVENTION}</InfoTooltip>
+        </span>
+        {CATALOGS.map((catalog) => (
+          <CoverageChip
+            key={catalog.id}
+            name={catalog.name}
+            color={selected.find((selection) => selection.id === catalog.id)?.color ?? CATALOG_COLORS[0]}
+            detail={`${catalog.description} · ${catalog.extent}`}
+            selected={selected.some((selection) => selection.id === catalog.id)}
+            onClick={() => onSelect(catalog.id)}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function BoomHub({ receiving, ref }: { receiving: boolean; ref: React.Ref<HTMLDivElement> }) {
+  return (
+    <div ref={ref} className="relative z-10 size-9 shrink-0 justify-self-center max-sm:order-last">
+      <div
+        className={`absolute -inset-1 rounded-full blur-md transition-colors duration-700 ${receiving ? "bg-indigo-400/60" : "bg-indigo-400/25"}`}
+      />
+      {receiving && (
+        <div className="absolute inset-0 animate-ping rounded-full ring-2 ring-indigo-300/60 [animation-duration:2.4s]" />
+      )}
+      <img src={boomLogo} alt="BOOM" className="relative size-full rounded-full shadow-lg ring-2 ring-white/90" />
+    </div>
+  );
+}
+
 function Legend() {
   return (
-    <div className="text-muted-foreground flex flex-wrap items-center gap-3 pt-0.5 text-xs">
+    <div className="text-muted-foreground flex flex-wrap items-center gap-3 pt-0.5 text-xs sm:justify-end">
       <span className="flex items-center gap-1.5">
         <span className="inline-block size-3 shrink-0 rounded-full bg-amber-300" />
         Sun
@@ -137,10 +242,6 @@ function Legend() {
         <span className="inline-block w-3 shrink-0 border-t border-dashed border-indigo-400" />
         Sun 12° below the horizon
       </span>
-      <span className="flex items-center gap-1.5">
-        <span className="bg-foreground inline-block size-1.5 shrink-0 rounded-full" />
-        Alerts sent to BOOM
-      </span>
     </div>
   );
 }
@@ -148,6 +249,19 @@ function Legend() {
 export default function Telescopes() {
   const { timeRef, time, live, goLive, seek } = useClock();
   const [nights, setNights] = useState<NightlyStat[]>([]);
+  const [selected, setSelected] = useState<Selection[]>([]);
+  const hubRef = useRef<HTMLDivElement>(null);
+  const select = useCallback((id: string) => setSelected((current) => {
+    if (current.some((selection) => selection.id === id)) return current.filter((selection) => selection.id !== id);
+    const kept = current.slice(1 - MAX_SELECTED);
+    const free = CATALOG_COLORS.find((color) => !kept.some((selection) => selection.color === color));
+    const isCatalog = CATALOGS.some((catalog) => catalog.id === id);
+    return [...kept, { id, color: isCatalog && free ? free : COVERAGES.get(id)!.color }];
+  }), []);
+  const coverages = useMemo(
+    () => selected.map(({ id, color }) => ({ ...COVERAGES.get(id)!, color })),
+    [selected],
+  );
 
   useEffect(() => {
     const load = () => {
@@ -172,6 +286,7 @@ export default function Telescopes() {
 
   const states = new Map(SITES.map((site) => [site.id, siteState(site, time)]));
   const changes = new Map(SITES.map((site) => [site.id, nextCrossing(time, site.lat, site.lon)]));
+  const receiving = SITES.some((site) => states.get(site.id) === "night");
   const counted = TELESCOPES.filter(({ telescope }) => alerts(telescope, 0) !== undefined);
   const tonight = counted.reduce((n, { telescope }) => n + (alerts(telescope, 0) ?? 0), 0);
 
@@ -179,16 +294,24 @@ export default function Telescopes() {
     <div className="px-4 lg:px-6 space-y-4">
       <Card>
         <CardHeader>
-          <div className="flex flex-wrap items-start justify-between gap-4">
+          <div className="grid items-center gap-4 sm:grid-cols-[1fr_auto_1fr]">
             <div className="space-y-1.5">
               <CardTitle>Telescopes</CardTitle>
               <CardDescription>Observatories whose alerts BOOM ingests</CardDescription>
             </div>
+            <BoomHub receiving={receiving} ref={hubRef} />
             <Legend />
           </div>
         </CardHeader>
         <CardContent>
-          <NightMap sites={SITES} timeRef={timeRef} time={time} />
+          <NightMap
+            sites={SITES}
+            timeRef={timeRef}
+            hubRef={hubRef}
+            coverages={coverages}
+            onSelect={select}
+          />
+          <CoverageLegend selected={selected} onSelect={select} />
         </CardContent>
       </Card>
 

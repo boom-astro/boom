@@ -1,6 +1,7 @@
 //! Intra-night tracklet finding: group a night's unassociated detections into
 //! sets consistent with a single source moving at a constant on-sky rate.
 
+use crate::utils::sso_geometry::Site;
 use std::collections::HashSet;
 
 /// Mean of angles in degrees, taken on the circle.
@@ -47,6 +48,12 @@ pub struct Detection {
     pub mag_err: Option<f64>,
     /// Filter as a single letter, for reporting.
     pub band: Option<char>,
+    /// Where it was observed from, when that is not the run's default site.
+    ///
+    /// A fit drawing on two observatories has to know which is which: the
+    /// parallax between them is arcseconds against a main-belt object, and
+    /// whole arcminutes against a near-Earth one.
+    pub site: Option<Site>,
 }
 
 /// Bounds a tracklet must satisfy to be believable.
@@ -246,7 +253,11 @@ fn photometry_disagrees(a: &Detection, b: &Detection, cfg: &TrackletConfig) -> b
 }
 
 /// Fit constant motion to a set of detections, or `None` if it does not hold.
-fn fit_tracklet(dets: &[Detection], cfg: &TrackletConfig) -> Option<Tracklet> {
+///
+/// Public so a survey that publishes its own groupings -- CSS archives the
+/// tracklets its pipeline built -- can be fitted into the same representation
+/// the linker consumes, rather than having its grouping rediscovered here.
+pub fn fit_tracklet(dets: &[Detection], cfg: &TrackletConfig) -> Option<Tracklet> {
     if dets.len() < 2 {
         return None;
     }
@@ -464,6 +475,7 @@ mod tests {
                     mag: None,
                     mag_err: None,
                     band: None,
+                    site: None,
                 }
             })
             .collect()
@@ -562,6 +574,7 @@ mod tests {
             mag: None,
             mag_err: None,
             band: None,
+            site: None,
         });
         let found = find_tracklets(&dets, &TrackletConfig::default());
         assert_eq!(found.len(), 1);
@@ -647,6 +660,7 @@ mod tests {
             mag: Some(mag),
             mag_err: Some(err),
             band: Some(band),
+            site: None,
         }
     }
 

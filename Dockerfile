@@ -1,5 +1,12 @@
 ARG KAFKA_VERSION=4.3.1
 ARG SCALA_VERSION=2.13
+ARG UV_VERSION=0.10.0
+
+# A stage of its own because `COPY --from` does not expand build args, and the
+# version belongs in one place. Both the dev and runtime stages copy uv out of
+# here: the task worker shells out to boompy for catalog sourcing, under
+# cargo-watch in dev exactly as from the release binary in prod.
+FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
 
 FROM rust:slim-trixie AS base
 
@@ -15,6 +22,8 @@ RUN apt-get update && \
     tar -xzf /tmp/kafka.tgz -C /opt && \
     ln -s /opt/kafka_${SCALA_VERSION}-${KAFKA_VERSION} /opt/kafka && \
     rm -f /tmp/kafka.tgz
+
+COPY --from=uv /uv /uvx /usr/local/bin/
 
 ENV PATH="/opt/kafka/bin:${PATH}"
 ENV LIBCLANG_PATH=/usr/lib/llvm-19/lib
@@ -41,7 +50,10 @@ RUN ORT_CAPI_DIR="$('/opt/ort-py/bin/python' -c 'import pathlib, onnxruntime as 
     rm -rf /opt/ort-py && ln -sf /opt/ort/libonnxruntime.so.${ONNXRUNTIME_GPU_VERSION} /opt/ort/libonnxruntime.so
 
 COPY apache-avro-macros /app/apache-avro-macros
-COPY Cargo.toml Cargo.lock /app/
+COPY Cargo.toml Cargo.lock build.rs /app/
+# build.rs generates the Milvus gRPC bindings from these vendored protos into
+# OUT_DIR; without them src/milvus/proto.rs has nothing to include!().
+COPY ./proto /app/proto
 COPY ./src /app/src
 
 # BuildKit cache mounts keep the compiled crates (target/) and the fetched
@@ -76,11 +88,19 @@ RUN --mount=type=cache,target=/app/target,sharing=locked \
        target/release/backfill_hpx \
        target/release/backfill_host_galaxy \
        target/release/find_tracklets \
+       target/release/linker \
        /app/bin/
 
 FROM builder AS dev
 
 RUN cargo install --locked cargo-watch
+
+# On Linux, `ort` uses the `load-dynamic` feature (Cargo.toml), so it looks up
+# libonnxruntime.so at runtime instead of linking it in. These tell it where.
+# The `app` stage repeats them; without them here the enrichment workers hang
+# in SharedModels::load and never reach their queue loop.
+ENV ORT_DYLIB_PATH=/opt/ort/libonnxruntime.so
+ENV LD_LIBRARY_PATH=/opt/ort
 
 CMD ["cargo", "watch", "-x", "run --bin api"]
 
@@ -93,6 +113,11 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     ca-certificates curl bash libsasl2-2 default-jre-headless libcfitsio10t64 && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# boompy fetches archival catalogs -- see boompy/README.md. uv manages both the
+# interpreter and the dependencies, so there is no system Python to keep in step
+# with the lockfile.
+COPY --from=uv /uv /uvx /usr/local/bin/
 
 ENV ORT_DYLIB_PATH=/opt/ort/libonnxruntime.so
 ENV LD_LIBRARY_PATH=/opt/ort
@@ -116,7 +141,17 @@ COPY --from=builder /app/bin/mpcorb_ingest /app/mpcorb_ingest
 COPY --from=builder /app/bin/backfill_detection_span /app/backfill_detection_span
 COPY --from=builder /app/bin/backfill_hpx /app/backfill_hpx
 COPY --from=builder /app/bin/backfill_host_galaxy /app/backfill_host_galaxy
+COPY --from=builder /app/bin/find_tracklets /app/find_tracklets
+COPY --from=builder /app/bin/linker /app/linker
 COPY --from=builder /opt/ort /opt/ort
+
+# Resolved at build time from the committed lockfile, so a catalog ingest does
+# not depend on PyPI being reachable -- or on resolving to different versions
+# than the ones the tests ran against.
+COPY boompy /app/boompy
+ENV UV_PROJECT_ENVIRONMENT=/app/boompy/.venv
+ENV BOOM_BOOMPY_PATH=/app/boompy
+RUN uv sync --project /app/boompy --frozen --no-dev
 # Temporary
 COPY --from=builder /app/bin/copy_cutouts /app/copy_cutouts
 COPY --from=builder /app/bin/stream_kowalski_alerts /app/stream_kowalski_alerts

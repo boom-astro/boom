@@ -32,9 +32,16 @@ jobs:
       BOOM_CUTOUTS_STORAGE__PASSWORD: ${{ secrets.BOOM_CUTOUTS_STORAGE__PASSWORD }}
       # Toggles babamul on without editing config.yaml; compose injects it into
       # the api and schedulers. Other babamul settings (webapp_url, etc.) and the
-      # admin username/email are read from config/prod/<deployment>/config.yaml
-      # and don't need env vars here.
+      # BOOM API admin username/email are read from
+      # config/prod/<deployment>/config.yaml and don't need env vars here.
       BOOM_BABAMUL__ENABLED: ${{ vars.BOOM_BABAMUL__ENABLED }}
+      # Who is a Babamul admin, comma-separated. Granted at every API startup
+      # and never revoked by it, so removing an admin is two steps in this
+      # order: take them out of this variable, then revoke them in the admin
+      # page. Revoking first leaves them listed and the next deploy grants it
+      # back. Empty counts as unset, which leaves whatever
+      # babamul.admin_emails holds in config.yaml.
+      BOOM_BABAMUL__ADMIN_EMAILS: ${{ vars.BOOM_BABAMUL__ADMIN_EMAILS }}
       # Whether the API will create new accounts. Pair it with
       # VITE_PRERELEASE_MODE below: that decides what the web app offers, this
       # decides what the API allows. Unset leaves compose's default (true).
@@ -53,6 +60,10 @@ jobs:
       BOOM_BABAMUL__OAUTH__ORCID__CLIENT_ID: ${{ secrets.BOOM_BABAMUL__OAUTH__ORCID__CLIENT_ID }}
       BOOM_BABAMUL__OAUTH__ORCID__CLIENT_SECRET: ${{ secrets.BOOM_BABAMUL__OAUTH__ORCID__CLIENT_SECRET }}
       BOOM_DATABASE__PASSWORD: ${{ secrets.BOOM_DATABASE__PASSWORD }}
+      BOOM_MILVUS__ENABLED: ${{ vars.BOOM_MILVUS__ENABLED }}
+      BOOM_MILVUS__USERNAME: ${{ vars.BOOM_MILVUS__USERNAME }}
+      BOOM_MILVUS__PASSWORD: ${{ secrets.BOOM_MILVUS__PASSWORD }}
+      BOOM_MILVUS__DATABASE: ${{ vars.BOOM_MILVUS__DATABASE }}
       BOOM_API__DOMAIN: ${{ vars.BOOM_API__DOMAIN }}
       BOOM_API__AUTH__SECRET_KEY: ${{ secrets.BOOM_API__AUTH__SECRET_KEY }}
       BOOM_API__AUTH__ADMIN_PASSWORD: ${{ secrets.BOOM_API__AUTH__ADMIN_PASSWORD }}

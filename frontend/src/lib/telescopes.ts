@@ -1,4 +1,5 @@
 import { type NightlyStat } from "@/lib/api";
+import { type Footprint } from "@/lib/coverage";
 
 export const NIGHT_COLOR = "var(--chart-1)";
 
@@ -8,6 +9,8 @@ export type Telescope = {
   survey: string;
   instrument: string;
   color: string;
+  extent: string;
+  footprint: Footprint;
   private?: boolean;
 };
 
@@ -36,6 +39,8 @@ export const SITES: Site[] = [
         survey: "Zwicky Transient Facility",
         instrument: "48-inch Samuel Oschin Schmidt telescope",
         color: "var(--ztf)",
+        extent: "δ > −31°",
+        footprint: { decMin: -31 },
       },
       {
         id: "winter",
@@ -43,6 +48,8 @@ export const SITES: Site[] = [
         survey: "Wide-field Infrared Transient Explorer",
         instrument: "1-m robotic infrared telescope",
         color: "var(--winter)",
+        extent: "δ > −31°",
+        footprint: { decMin: -31 },
         private: true,
       },
     ],
@@ -61,6 +68,8 @@ export const SITES: Site[] = [
         survey: "Legacy Survey of Space and Time",
         instrument: "8.4-m Simonyi Survey Telescope, Vera C. Rubin Observatory",
         color: "var(--lsst)",
+        extent: "δ < +32°",
+        footprint: { decMax: 32 },
       },
       {
         id: "decam",
@@ -68,6 +77,8 @@ export const SITES: Site[] = [
         survey: "Dark Energy Camera",
         instrument: "4-m Víctor M. Blanco Telescope, CTIO",
         color: "var(--decam)",
+        extent: "δ < +32°",
+        footprint: { decMax: 32 },
       },
     ],
   },

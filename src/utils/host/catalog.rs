@@ -23,7 +23,7 @@ fn opt_string(doc: &Document, key: &str) -> Option<String> {
 
 /// An object's catalogue name. NED names its rows with a string, Legacy with a
 /// numeric id, so both spellings have to be accepted.
-fn opt_objname(doc: &Document, key: &str) -> Option<String> {
+pub(super) fn opt_objname(doc: &Document, key: &str) -> Option<String> {
     match doc.get(key) {
         Some(Bson::String(s)) if !s.is_empty() => Some(s.clone()),
         Some(Bson::Int64(v)) => Some(v.to_string()),
@@ -148,15 +148,11 @@ fn band_snr(doc: &Document, band: &str) -> Option<f64> {
     Some(opt_f64(doc, &format!("flux_{band}"))? * ivar.sqrt())
 }
 
-fn isophotal_semi_major_for(
-    doc: &Document,
-    ellipse: &Ellipse,
-    config: &HostGalaxyConfig,
-) -> Option<f64> {
+fn sersic_profile(doc: &Document) -> Option<(f64, f64)> {
     let objtype = opt_string(doc, "objtype")?;
     let n = sersic_index_for_type(&objtype, opt_f64(doc, "sersic"))?;
     let m_tot = total_mag(opt_f64(doc, "flux_r")?)?;
-    isophotal_semi_major(ellipse.a, ellipse.axis_ratio, n, m_tot, config.isophote_mag)
+    Some((n, m_tot))
 }
 
 /// A Legacy redshift column, or `None` where it holds the -99 that means absent.
@@ -196,8 +192,10 @@ pub fn galaxy_from_ls_dr10(doc: &Document, config: &HostGalaxyConfig) -> Option<
     ellipse.b = ellipse.a * ellipse.axis_ratio;
 
     // A row that cannot be rescaled keeps R_e, undersized against NED-LVS D25.
-    let size_is_isophotal = match isophotal_semi_major_for(doc, &ellipse, config) {
-        Some(a25) => {
+    let size_is_isophotal = match sersic_profile(doc) {
+        Some((n, m_tot)) => {
+            let a25 =
+                isophotal_semi_major(ellipse.a, ellipse.axis_ratio, n, m_tot, config.isophote_mag)?;
             ellipse = ellipse.scaled_to_semi_major(a25, config.min_axis_arcsec);
             true
         }
@@ -627,6 +625,8 @@ mod projection_tests {
             "rex_min_snr",
             "rex_max_fracflux",
             "isophote_mag",
+            "ps1_catalog",
+            "photometry_match_arcsec",
         ];
         for (name, config) in deployment_configs() {
             let Some(block) = config.split("\nhost_galaxy:").nth(1) else {
