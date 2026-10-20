@@ -1,13 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { fetchEmbeddingsCount, fetchSimilarObjects } from "@/lib/api"
 
-/**
- * Similarity search is the one place the UI asks Milvus a question directly, so
- * what matters is that a "nothing stored" answer stays distinguishable from a
- * failure: an object with no embedding is a normal outcome (only ZTF alerts
- * that pass the AppleCiDEr gate get one), not an error the user should chase.
- */
-
 function jsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
@@ -60,8 +53,6 @@ describe("fetchSimilarObjects", () => {
   })
 
   it("treats 404 as an empty result with the server's explanation, not an error", async () => {
-    // Only ZTF alerts that clear the AppleCiDEr gate get an embedding, so
-    // "no embedding stored" is an ordinary answer about an object that exists.
     const fetchMock = vi.fn(async () =>
       jsonResponse({ message: "No embedding stored for object ZTF18abcdefg" }, 404)
     )
@@ -85,8 +76,6 @@ describe("fetchSimilarObjects", () => {
   })
 
   it("works signed out, and sends no Authorization header", async () => {
-    // The page is public like /dashboard, so a signed-out visitor must get
-    // results rather than the "Not authenticated" throw fetchWithAuth raises.
     localStorage.clear()
     const fetchMock = vi.fn(async () =>
       jsonResponse({ message: "success", data: [{ object_id: "ZTF21aaa", score: 0.9 }] })

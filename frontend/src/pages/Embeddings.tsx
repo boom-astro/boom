@@ -11,14 +11,10 @@ import {
   type SimilarObject,
 } from "@/lib/api";
 
-/** Matches the server's clamp, so the UI can't ask for something it won't get. */
+/** Matches the server's clamp. */
 const MAX_TOP_K = 100;
 const DEFAULT_TOP_K = 10;
 
-/**
- * Embeddings live in Milvus keyed by object_id, and only ZTF alerts that pass
- * the AppleCiDEr gate get one — so results always link to the ZTF object page.
- */
 const EMBEDDING_SURVEY = "ztf";
 
 function formatScore(score: number): string {
@@ -67,8 +63,7 @@ export default function Embeddings() {
       const { results, message } = await fetchSimilarObjects(trimmed, topK);
       setResults(results);
       setSearchedId(trimmed);
-      // An empty list is a normal answer here (no embedding stored), so the
-      // server's explanation is shown rather than treated as a failure.
+      // No embedding stored is a normal answer, shown as a notice, not an error.
       if (results.length === 0) setNotice(message ?? `No neighbors found for ${trimmed}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Similarity search failed");

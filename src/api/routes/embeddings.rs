@@ -7,11 +7,8 @@
 //! (cheap — the tonic `Channel` shares one connection pool) to get a local
 //! owned copy rather than serializing all requests through a lock.
 //!
-//! The handlers here serve the internal API. The same work is exposed to
-//! Babamul users under `/babamul` by [`crate::api::routes::babamul::embeddings`],
-//! which is a different auth surface with its own token and user type — so the
-//! actual logic lives in the `pub(crate)` helpers below and both route sets are
-//! thin wrappers over them.
+//! The logic lives in the `pub(crate)` helpers so that
+//! [`crate::api::routes::babamul::embeddings`] can share it.
 
 use crate::api::models::response;
 use crate::milvus::MilvusClient;
@@ -44,8 +41,6 @@ pub(crate) fn client_or_unavailable(
 }
 
 /// Resolve the seed object's embedding and return its nearest neighbors.
-///
-/// Shared by both API surfaces; see the module docs.
 pub(crate) async fn similar_objects_response(
     milvus: &web::Data<Option<MilvusClient>>,
     object_id: &str,
@@ -88,7 +83,7 @@ pub(crate) async fn similar_objects_response(
     response::ok_ser("success", neighbors)
 }
 
-/// Count the stored embeddings. Shared by both API surfaces.
+/// Count the stored embeddings.
 pub(crate) async fn embeddings_count_response(
     milvus: &web::Data<Option<MilvusClient>>,
 ) -> HttpResponse {

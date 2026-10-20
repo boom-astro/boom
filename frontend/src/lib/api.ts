@@ -491,33 +491,19 @@ export async function searchObjects(value: string, limit: number = 10): Promise<
   };
 }
 
-/**
- * One neighbor returned by a similarity search.
- *
- * `candid`/`jd` describe the alert the stored embedding was computed from, and
- * are optional because Milvus only returns them when they were requested as
- * output fields.
- */
 export type SimilarObject = {
   object_id: string;
-  /** Similarity under the collection's metric. COSINE, so higher is closer. */
+  /** COSINE similarity, so higher is closer. */
   score: number;
+  /** The alert the embedding came from; present only if requested from Milvus. */
   candid?: number | string | null;
   jd?: number | null;
 };
 
 /**
- * Objects whose AppleCiDEr fusion embedding is closest to this one's.
- *
- * The seed object is resolved to its stored vector server-side and stripped
- * from the results, so every hit is a genuine neighbor.
- *
- * A 404 means the object has no embedding rather than that it doesn't exist —
- * only ZTF alerts that pass the AppleCiDEr gate get one — so it is returned as
- * an empty list with a message instead of thrown.
- *
- * Unauthenticated, like the dashboard stats: the endpoint is public so the page
- * works without signing in.
+ * Objects whose AppleCiDEr fusion embedding is closest to this one's, excluding
+ * itself. A 404 means no embedding is stored (only ZTF alerts that pass the
+ * AppleCiDEr gate get one), so it returns an empty list rather than throwing.
  */
 export async function fetchSimilarObjects(
   objectId: string,
@@ -546,7 +532,6 @@ export async function fetchSimilarObjects(
   return { results: Array.isArray(result) ? (result as SimilarObject[]) : [], message };
 }
 
-/** How many embeddings Milvus currently holds. Public, like the other stats. */
 export async function fetchEmbeddingsCount(): Promise<number> {
   const url = `${API_BASE}/embeddings/count`;
   const res = await fetch(url);

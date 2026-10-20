@@ -1,19 +1,8 @@
 //! Babamul-facing similarity search over the AppleCiDEr fusion embeddings.
 //!
-//! These mirror [`crate::api::routes::embeddings`] onto the `/babamul` scope.
-//! They exist separately because the two surfaces authenticate differently:
-//! the internal API uses `auth_middleware` and [`crate::api::routes::users::User`],
-//! while Babamul uses `babamul_auth_middleware` and [`BabamulUser`]. A Babamul
-//! token is not accepted by the internal scope, so the web frontend could not
-//! reach the similarity endpoints at all without these.
-//!
-//! The search logic itself is not duplicated — it lives in the shared helpers
-//! in the internal module and these handlers only do auth and argument
-//! plumbing.
-//!
-//! Search and count are public (listed in `BABAMUL_PUBLIC_ROUTES`), matching
-//! the stats endpoints behind `/dashboard`: they are read-only and the web page
-//! is reachable without signing in.
+//! Thin wrappers over the helpers in [`crate::api::routes::embeddings`]: the
+//! internal scope rejects Babamul tokens, so clients need these routes. Both
+//! are public (`BABAMUL_PUBLIC_ROUTES`), like the `/dashboard` stats.
 
 use crate::api::routes::embeddings::{
     embeddings_count_response, similar_objects_response, SimilarObjectsQuery,
