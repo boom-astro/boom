@@ -383,7 +383,7 @@ pub fn propagate_position(state: &State, epoch_jd: f64, jd: f64) -> Option<[f64;
     pos.iter().all(|c| c.is_finite()).then_some(pos)
 }
 
-const MAX_NIGHT_MAG_SPREAD: f64 = 2.5;
+const MAX_NIGHT_MAG_SPREAD: f64 = 3.0;
 
 /// MPC offsets taking a band to V, so nights observed in different bands compare.
 fn v_offset(band: Option<char>) -> f64 {
