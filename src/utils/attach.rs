@@ -46,6 +46,7 @@ impl Target {
     }
 
     fn separation_arcsec(&self, d: &Detection, site: &Site) -> Option<f64> {
+        let site = d.site.as_ref().unwrap_or(site);
         let (ra, dec) = predict_radec(&self.state, self.epoch_jd, d.jd, site)?;
         Some(angular_separation_deg(ra, dec, d.ra, d.dec) * 3600.0)
     }
@@ -64,9 +65,10 @@ impl Target {
                 jd: d.jd,
                 ra: d.ra,
                 dec: d.dec,
+                site: d.site.unwrap_or(*site),
             })
             .collect();
-        fit_within(&observations, &self.state, self.epoch_jd, site, gate_arcsec)
+        fit_within(&observations, &self.state, self.epoch_jd, gate_arcsec)
     }
 }
 
@@ -225,6 +227,7 @@ mod tests {
                         mag: Some(19.0),
                         mag_err: Some(0.1),
                         band: Some('r'),
+                        site: None,
                     }
                 })
             })
@@ -250,9 +253,10 @@ mod tests {
                 jd: d.jd,
                 ra: d.ra,
                 dec: d.dec,
+                site: ZTF,
             })
             .collect();
-        let fit = fit_orbit(&observations, &truth, epoch, 60, &ZTF).expect("fits");
+        let fit = fit_orbit(&observations, &truth, epoch, 60).expect("fits");
         Target {
             id: "BT000001".to_string(),
             state: fit.state,

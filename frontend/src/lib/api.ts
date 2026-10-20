@@ -260,7 +260,9 @@ export async function fetchAdminUsers(search: string, limit: number, offset: num
   return unwrapData<AdminUsersPage>(await readJson(res), { users: [], total: 0, available_acls: [] });
 }
 
-export async function updateAdminUser(id: string, patch: { is_admin?: boolean; acls?: string[] }): Promise<AdminUser> {
+export type AdminUserPatch = { is_admin?: boolean; grant_acls?: string[]; revoke_acls?: string[] };
+
+export async function updateAdminUser(id: string, patch: AdminUserPatch): Promise<AdminUser> {
   const res = await fetchWithAuth(`${API_BASE}/admin/users/${encodeURIComponent(id)}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },

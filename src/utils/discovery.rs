@@ -141,6 +141,7 @@ fn detection_of(doc: &Document) -> Option<Detection> {
         mag: candidate.get_f64("magpsf").ok(),
         mag_err: candidate.get_f64("sigmapsf").ok(),
         band: ztf_band(candidate.get_i32("fid").ok()),
+        site: None,
     })
 }
 
@@ -364,6 +365,7 @@ pub fn thor_clusters(
                     jd: d.jd,
                     ra: d.ra,
                     dec: d.dec,
+                    site: d.site.unwrap_or(search.site),
                 })
                 .collect();
             if obs.len() < 3 {
@@ -372,13 +374,7 @@ pub fn thor_clusters(
             // Screened against the looser gate, since a poor fit is still kept,
             // and converged if it passes it, so the residual it is ranked and
             // persisted on is the orbit's rather than where the fit stopped.
-            match fit_within(
-                &obs,
-                &seed,
-                epoch,
-                &search.site,
-                search.max_unbound_residual_arcsec,
-            ) {
+            match fit_within(&obs, &seed, epoch, search.max_unbound_residual_arcsec) {
                 None => Some((c, Verdict(BoundFit::None, None, None))),
                 Some(fit) if fit.rms_arcsec <= search.max_residual_arcsec => Some((
                     c,
@@ -1119,6 +1115,7 @@ mod tests {
             mag: None,
             mag_err: None,
             band: None,
+            site: None,
         }
     }
 
