@@ -9,8 +9,8 @@ use crate::{
     conf::AppConfig,
 };
 
+use crate::api::limits::{next_result, too_large, ResultError};
 use actix_web::{post, web, HttpResponse};
-use futures::StreamExt;
 use mongodb::{bson::doc, Database};
 use utoipa::ToSchema;
 
@@ -92,10 +92,13 @@ pub async fn post_pipeline_query(
         Err(e) => return super::query_error(e, "Error executing pipeline"),
     };
     let mut docs = Vec::new();
-    while let Some(result) = cursor.next().await {
-        match result {
-            Ok(doc) => docs.push(doc),
-            Err(e) => {
+    let mut bytes_read = 0;
+    loop {
+        match next_result(&mut cursor, &mut bytes_read).await {
+            Ok(Some(doc)) => docs.push(doc),
+            Ok(None) => break,
+            Err(ResultError::TooLarge) => return too_large(),
+            Err(ResultError::Database(e)) => {
                 tracing::error!("Error retrieving document from the database: {}", e);
                 return super::query_error(e, "Error executing pipeline");
             }
