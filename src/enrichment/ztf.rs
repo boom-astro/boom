@@ -12,7 +12,7 @@ use crate::enrichment::{
 use crate::milvus::{BackupQueue, EmbeddingRow, MilvusSink};
 use crate::utils::cutouts::{AlertCutout, CutoutStorage};
 use crate::utils::db::mongify;
-use crate::utils::enums::Survey;
+use crate::utils::enums::{ProgramId, Survey};
 use crate::utils::host::HostGalaxyAssociation;
 use crate::utils::lightcurves::{
     analyze_photometry, is_stationary, prepare_photometry, summarise_detections, ActivityMetrics,
@@ -900,7 +900,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             ));
             processed_alerts.push(format!("{},{}", item.programid, item.candid));
 
-            if self.milvus.is_enabled() {
+            if self.milvus.is_enabled() && item.programid == ProgramId::Public as i32 {
                 if let Some(embedding) = fusion_embedding {
                     embedding_rows.push(EmbeddingRow {
                         object_id: item.alert.object_id.clone(),
