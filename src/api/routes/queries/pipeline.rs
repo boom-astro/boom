@@ -9,8 +9,10 @@ use crate::{
     conf::AppConfig,
 };
 
+use crate::api::limits::{
+    large_query_slot, next_result, too_large, ResultError, DEFAULT_QUERY_MAX_TIME,
+};
 use actix_web::{post, web, HttpResponse};
-use futures::StreamExt;
 use mongodb::{bson::doc, Database};
 use utoipa::ToSchema;
 
@@ -24,9 +26,11 @@ impl PipelineQuery {
     /// Convert to MongoDB Find options
     fn to_pipeline_options(&self) -> mongodb::options::AggregateOptions {
         let mut options = mongodb::options::AggregateOptions::default();
-        if let Some(max_time_ms) = self.max_time_ms {
-            options.max_time = Some(std::time::Duration::from_millis(max_time_ms));
-        }
+        options.max_time = Some(
+            self.max_time_ms
+                .map(std::time::Duration::from_millis)
+                .unwrap_or(DEFAULT_QUERY_MAX_TIME),
+        );
         options
     }
 }
@@ -53,6 +57,10 @@ pub async fn post_pipeline_query(
     let current_user = match current_user {
         Some(user) => user,
         None => return HttpResponse::Unauthorized().body("Unauthorized"),
+    };
+    let _slot = match large_query_slot().await {
+        Ok(slot) => slot,
+        Err(response) => return response,
     };
     let catalog_name = body.catalog_name.trim();
     if !catalog_accessible(&db, catalog_name, &current_user, &config).await {
@@ -92,10 +100,13 @@ pub async fn post_pipeline_query(
         Err(e) => return super::query_error(e, "Error executing pipeline"),
     };
     let mut docs = Vec::new();
-    while let Some(result) = cursor.next().await {
-        match result {
-            Ok(doc) => docs.push(doc),
-            Err(e) => {
+    let mut bytes_read = 0;
+    loop {
+        match next_result(&mut cursor, &mut bytes_read).await {
+            Ok(Some(doc)) => docs.push(doc),
+            Ok(None) => break,
+            Err(ResultError::TooLarge) => return too_large(),
+            Err(ResultError::Database(e)) => {
                 tracing::error!("Error retrieving document from the database: {}", e);
                 return super::query_error(e, "Error executing pipeline");
             }
