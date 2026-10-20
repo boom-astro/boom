@@ -222,7 +222,7 @@ const PROGRESS_INTERVAL: u64 = 200_000;
 
 #[derive(thiserror::Error, Debug)]
 pub enum RefreshError {
-    #[error("failed to download MPCORB: {0}")]
+    #[error("failed to download {0}")]
     Download(String),
     #[error("failed to read the download: {0}")]
     Io(#[from] std::io::Error),
@@ -338,8 +338,8 @@ async fn refresh_into_staging(
         crate::utils::data::download_to_file(tmp.as_file_mut(), url, None, None, show_progress),
     )
     .await
-    .map_err(|_| RefreshError::Download(format!("timed out after {DOWNLOAD_TIMEOUT:?}")))?
-    .map_err(|e| RefreshError::Download(e.to_string()))?;
+    .map_err(|_| RefreshError::Download(format!("MPCORB: timed out after {DOWNLOAD_TIMEOUT:?}")))?
+    .map_err(|e| RefreshError::Download(format!("MPCORB: {e}")))?;
 
     let file = std::fs::File::open(tmp.path())?;
     let mut batch: Vec<Document> = Vec::with_capacity(batch_size);
@@ -445,11 +445,7 @@ async fn refresh_comets_into_staging(
         Err(_) => Some(format!("timed out after {DOWNLOAD_TIMEOUT:?}")),
     };
     if let Some(why) = failure {
-        tracing::warn!(
-            "comet elements unavailable, continuing without them: {}",
-            why
-        );
-        return Ok(0);
+        return Err(RefreshError::Download(format!("comet elements: {why}")));
     }
 
     let file = std::fs::File::open(tmp.path())?;

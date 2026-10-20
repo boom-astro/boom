@@ -355,3 +355,55 @@ async fn test_ztf_and_lsst_alerts_carry_their_decam_match() {
         .await
         .unwrap();
 }
+
+#[tokio::test]
+async fn test_decam_alert_links_a_ztf_object_without_aliases() {
+    let (decam_candid, decam_object_id, ra, dec, decam_bytes_content) =
+        AlertRandomizer::new_randomized(Survey::Decam)
+            .dec(0.0)
+            .get()
+            .await;
+
+    let mut ztf_worker = ztf_alert_worker().await;
+    let (ztf_candid, ztf_object_id, _, _, ztf_bytes_content) =
+        AlertRandomizer::new_randomized(Survey::Ztf)
+            .ra(ra)
+            .dec(dec + 0.9 * DECAM_ZTF_XMATCH_RADIUS.to_degrees())
+            .get()
+            .await;
+    ztf_worker.process_alert(&ztf_bytes_content).await.unwrap();
+
+    // Older ZTF objects have no aliases field at all.
+    let db = get_test_db().await;
+    let ztf_aux = db.collection::<Document>("ZTF_alerts_aux");
+    ztf_aux
+        .update_one(
+            doc! {"_id": &ztf_object_id},
+            doc! {"$unset": {"aliases": ""}},
+        )
+        .await
+        .unwrap();
+
+    let mut decam_worker = decam_alert_worker().await;
+    decam_worker
+        .process_alert(&decam_bytes_content)
+        .await
+        .unwrap();
+
+    let aux = ztf_aux
+        .find_one(doc! {"_id": &ztf_object_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        aux.get_document("aliases").unwrap(),
+        &doc! {"LSST": [], "DECAM": [&decam_object_id]}
+    );
+
+    drop_alert_from_collections(decam_candid, &Survey::Decam)
+        .await
+        .unwrap();
+    drop_alert_from_collections(ztf_candid, &Survey::Ztf)
+        .await
+        .unwrap();
+}

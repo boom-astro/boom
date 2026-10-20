@@ -35,8 +35,7 @@ pub struct Match {
 /// How wide to search, at each of the two stages.
 #[derive(Debug, Clone)]
 pub struct IdentifyConfig {
-    /// Shortlisting radius, degrees. Must exceed a night's motion, since the
-    /// coarse pass places every object at one epoch per night.
+    /// Shortlisting radius around each object's path through the night, degrees.
     pub coarse_radius_deg: f64,
     /// Where the observations were made from, for the parallax correction.
     pub site: Site,
@@ -95,7 +94,7 @@ pub fn predict_radec(elements: &OrbitalElements, jd: f64) -> (f64, f64) {
     radec_from_ecliptic(&light_time_corrected(elements, jd, &earth_position(jd)))
 }
 
-/// Catalogued objects placed on the sky at one epoch, bucketed so a position's
+/// Catalogued objects' paths on the sky, bucketed so a position's
 /// neighbours are found without scanning the catalogue.
 ///
 /// Cells are `size` degrees in dec. Each dec band is cut into RA bins at least
@@ -107,14 +106,24 @@ struct SkyGrid {
 }
 
 impl SkyGrid {
-    fn new(positions: &[(f64, f64)], size: f64) -> Self {
+    fn along(start: &[(f64, f64)], end: &[(f64, f64)], spacing: f64, size: f64) -> Self {
         let mut cells: HashMap<(i64, i64), Vec<usize>> = HashMap::new();
-        for (i, &(ra, dec)) in positions.iter().enumerate() {
-            let band = Self::band(dec, size);
-            cells
-                .entry((band, Self::bin(ra, band, size)))
-                .or_default()
-                .push(i);
+        for (i, (&a, &b)) in start.iter().zip(end).enumerate() {
+            let steps = (angular_separation_deg(a.0, a.1, b.0, b.1) / spacing)
+                .ceil()
+                .max(1.0) as usize;
+            let mut keys: Vec<(i64, i64)> = Vec::new();
+            for step in 0..=steps {
+                let (ra, dec) = interpolate(a, b, step as f64 / steps as f64);
+                let band = Self::band(dec, size);
+                let key = (band, Self::bin(ra, band, size));
+                if !keys.contains(&key) {
+                    keys.push(key);
+                }
+            }
+            for key in keys {
+                cells.entry(key).or_default().push(i);
+            }
         }
         SkyGrid { size, cells }
     }
@@ -150,21 +159,43 @@ impl SkyGrid {
                 }
             }
         }
-        keys.iter()
+        let mut out: Vec<usize> = keys
+            .iter()
             .filter_map(|k| self.cells.get(k))
             .flatten()
             .copied()
-            .collect()
+            .collect();
+        out.sort_unstable();
+        out.dedup();
+        out
     }
+}
+
+fn interpolate(a: (f64, f64), b: (f64, f64), f: f64) -> (f64, f64) {
+    let unit = |(ra, dec): (f64, f64)| {
+        let (ra, dec) = (ra.to_radians(), dec.to_radians());
+        [dec.cos() * ra.cos(), dec.cos() * ra.sin(), dec.sin()]
+    };
+    let (u, v) = (unit(a), unit(b));
+    let p = [
+        u[0] + f * (v[0] - u[0]),
+        u[1] + f * (v[1] - u[1]),
+        u[2] + f * (v[2] - u[2]),
+    ];
+    let n = (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt();
+    (
+        p[1].atan2(p[0]).to_degrees().rem_euclid(360.0),
+        (p[2] / n).clamp(-1.0, 1.0).asin().to_degrees(),
+    )
 }
 
 /// Attribute each detection to the catalogued object it sits closest to.
 ///
 /// Two stages, because propagating the whole catalogue per detection is
-/// wasteful: every object is placed once per night to shortlist candidates,
-/// then only those are recomputed at the detection's own epoch. The shortlist
-/// comes from a sky grid rather than a dec band spanning every RA, and the
-/// detections of a night are matched in parallel.
+/// wasteful: every object is placed at the night's first and last epochs to
+/// shortlist candidates, then only those are recomputed at the detection's
+/// own epoch. The shortlist comes from a sky grid rather than a dec band
+/// spanning every RA, and the detections of a night are matched in parallel.
 pub fn identify(
     detections: &[Detection],
     orbits: &[OrbitEntry],
@@ -180,21 +211,33 @@ pub fn identify(
     nights.sort_by_key(|(night, _)| *night);
 
     let mut matches = Vec::new();
-    for (night, dets) in nights {
-        let epoch = night as f64 + 1.0;
-        // Every object placed once for the night.
-        let placed: Vec<(f64, f64)> = orbits
-            .par_iter()
-            .map(|o| predict_radec(&o.elements, epoch))
-            .collect();
-        let grid = SkyGrid::new(&placed, cfg.coarse_radius_deg);
+    for (_, dets) in nights {
+        let first = dets.iter().map(|d| d.jd).fold(f64::INFINITY, f64::min);
+        let last = dets.iter().map(|d| d.jd).fold(f64::NEG_INFINITY, f64::max);
+        let place = |jd: f64| -> Vec<(f64, f64)> {
+            orbits
+                .par_iter()
+                .map(|o| predict_radec(&o.elements, jd))
+                .collect()
+        };
+        let start = place(first);
+        let end = (last > first).then(|| place(last));
+        let end = end.as_deref().unwrap_or(&start);
+        let spacing = cfg.coarse_radius_deg / 2.0;
+        // Widened by the spacing, so a path point between two samples is still found.
+        let grid = SkyGrid::along(&start, end, spacing, cfg.coarse_radius_deg + spacing);
 
         let found: Vec<Match> = dets
             .par_iter()
             .filter_map(|d| {
                 let mut best: Option<(f64, usize)> = None;
+                let f = if last > first {
+                    (d.jd - first) / (last - first)
+                } else {
+                    0.0
+                };
                 for idx in grid.near(d.ra, d.dec) {
-                    let (night_ra, night_dec) = placed[idx];
+                    let (night_ra, night_dec) = interpolate(start[idx], end[idx], f);
                     // The grid overreaches, so gate on the separation before
                     // paying for a second propagation.
                     if angular_separation_deg(d.ra, d.dec, night_ra, night_dec)
@@ -382,6 +425,38 @@ mod tests {
     }
 
     #[test]
+    fn test_matches_an_object_too_fast_for_one_placement_a_night() {
+        use crate::utils::heliolinc::{state_to_elements, State};
+
+        let jd = 2460010.6;
+        let earth = earth_position(jd);
+        let (before, after) = (earth_position(jd - 0.5), earth_position(jd + 0.5));
+        let r = (earth[0] * earth[0] + earth[1] * earth[1] + earth[2] * earth[2]).sqrt();
+        let state = State {
+            pos: [0, 1, 2].map(|k| earth[k] * (1.0 + 0.03 / r)),
+            vel: [
+                after[0] - before[0],
+                after[1] - before[1],
+                after[2] - before[2] + 0.01,
+            ],
+        };
+        let fast = vec![OrbitEntry {
+            designation: "fast".to_string(),
+            elements: state_to_elements(&state, jd).expect("a bound orbit"),
+        }];
+        let dets = vec![
+            detection_of(&fast[0].elements, 2460010.62, 1),
+            detection_of(&fast[0].elements, 2460010.95, 2),
+        ];
+        assert!(
+            angular_separation_deg(dets[0].ra, dets[0].dec, dets[1].ra, dets[1].dec) > 5.0,
+            "the fixture should move several degrees within the night"
+        );
+        let found = identify(&dets, &fast, &IdentifyConfig::default());
+        assert_eq!(found.len(), 2);
+    }
+
+    #[test]
     fn test_matches_across_separate_nights() {
         let dets = vec![
             detection_of(&ceres_like(), 2460010.3, 1),
@@ -427,13 +502,8 @@ mod tests {
         detections
             .iter()
             .filter_map(|d| {
-                let epoch = night_of(d.jd) as f64 + 1.0;
                 let mut best: Option<(f64, usize)> = None;
                 for (idx, o) in orbits.iter().enumerate() {
-                    let (ra, dec) = predict_radec(&o.elements, epoch);
-                    if angular_separation_deg(d.ra, d.dec, ra, dec) > cfg.coarse_radius_deg {
-                        continue;
-                    }
                     let (pra, pdec) = predict_radec_from(&o.elements, d.jd, &cfg.site);
                     let sep = angular_separation_deg(d.ra, d.dec, pra, pdec) * 3600.0;
                     if sep <= cfg.match_radius_arcsec

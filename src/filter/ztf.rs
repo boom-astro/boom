@@ -524,6 +524,8 @@ fn sso_history_lookup(ztf_permissions: &Vec<i32>, window_days: f64) -> Document 
                     "helio_dist": "$properties.sso.helio_dist",
                     "topo_dist": "$properties.sso.topo_dist",
                     "phase_angle": "$properties.sso.phase_angle",
+                    "true_anomaly": "$properties.sso.true_anomaly",
+                    "perihelion_time": "$properties.sso.perihelion_time",
                 } },
                 doc! { "$sort": { "jd": 1 } },
             ],
@@ -1089,6 +1091,7 @@ impl FilterWorker for ZtfFilterWorker {
 #[cfg(test)]
 mod sso_history_tests {
     use super::*;
+    use crate::utils::mpcorb::GEOMETRY_FIELDS;
 
     fn pipeline_from(json: &str) -> Vec<serde_json::Value> {
         serde_json::from_str(json).unwrap()
@@ -1313,7 +1316,7 @@ mod sso_history_tests {
             .find_map(|s| s.as_document()?.get_document("$project").ok())
             .expect("projection present");
 
-        for field in ["helio_dist", "topo_dist", "phase_angle"] {
+        for field in GEOMETRY_FIELDS {
             assert_eq!(
                 projection.get_str(field).ok(),
                 Some(format!("$properties.sso.{}", field).as_str()),
