@@ -1,5 +1,5 @@
 use crate::api::auth::AuthProvider;
-use actix_web::{post, web, HttpResponse};
+use actix_web::{post, web, HttpRequest, HttpResponse};
 use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, skip_serializing_none};
@@ -39,19 +39,30 @@ pub struct FailedAuthResponse {
     tags=["Auth"]
 )]
 #[post("/auth")]
-pub async fn post_auth(auth: web::Data<AuthProvider>, body: web::Form<AuthPost>) -> HttpResponse {
+pub async fn post_auth(
+    req: HttpRequest,
+    auth: web::Data<AuthProvider>,
+    body: web::Form<AuthPost>,
+) -> HttpResponse {
     // Check if the user exists and the password matches
     match auth
         .create_token_for_user(&body.username, &body.password)
         .await
     {
-        Ok((token, expires_in)) => HttpResponse::Ok()
-            .insert_header(("Cache-Control", "no-store"))
-            .json(AuthResponse {
-                access_token: token,
-                token_type: "Bearer".into(),
-                expires_in,
-            }),
+        Ok((token, expires_in)) => {
+            tracing::info!(
+                username = %body.username,
+                client_ip = req.connection_info().realip_remote_addr().unwrap_or("unknown"),
+                "issued access token"
+            );
+            HttpResponse::Ok()
+                .insert_header(("Cache-Control", "no-store"))
+                .json(AuthResponse {
+                    access_token: token,
+                    token_type: "Bearer".into(),
+                    expires_in,
+                })
+        }
         Err(e) => {
             if e.kind() == std::io::ErrorKind::NotFound
                 || e.kind() == std::io::ErrorKind::InvalidInput
