@@ -6,6 +6,7 @@ use mongodb::bson::{doc, Document};
 use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument};
 use mongodb::{Collection, Database};
 use serde::{Deserialize, Serialize};
+use std::time::{Duration, Instant};
 use utoipa::{IntoParams, ToSchema};
 
 const MAX_LIMIT: u64 = 200;
@@ -145,7 +146,10 @@ fn matching_acls(
 }
 
 async fn count_admins(collection: &Collection<BabamulUser>) -> Result<u64, mongodb::error::Error> {
-    collection.count_documents(doc! { "is_admin": true }).await
+    collection
+        .count_documents(doc! { "is_admin": true })
+        .max_time(QUERY_TIME)
+        .await
 }
 
 /// Whether this patch would take the deployment's last admin away.
@@ -157,16 +161,21 @@ fn would_orphan(patch_is_admin: Option<bool>, target_is_admin: bool, admins: u64
     patch_is_admin == Some(false) && target_is_admin && admins <= 1
 }
 
-const LOCK_COLLECTION: &str = "locks";
+pub const LOCK_COLLECTION: &str = "locks";
 /// The lock every demotion is taken under.
 const DEMOTION_LOCK: &str = "babamul_admin_demotion";
 /// How long a holder may keep it.
 ///
-/// Covers a count and an update with room to spare, and short enough that an
-/// API instance killed mid-demotion stops blocking the next one quickly. A
-/// demotion is a deliberate act a person is waiting on, so a few seconds of
-/// contention is invisible and a wedged check would not be.
-const DEMOTION_LOCK_SECONDS: f64 = 10.0;
+/// Longer than [`DEMOTION_DEADLINE`] plus the driver's 30 s server selection
+/// and a [`QUERY_TIME`], so a write that started in time lands before the lease
+/// can pass to another demotion.
+const DEMOTION_LOCK_SECONDS: f64 = 60.0;
+/// A demotion that has not written by then gives up instead.
+const DEMOTION_DEADLINE: Duration = Duration::from_secs(20);
+/// Server-side budget of each query on this route.
+const QUERY_TIME: Duration = Duration::from_secs(5);
+/// How long a demotion waits for another one to finish.
+const DEMOTION_LOCK_WAIT: Duration = Duration::from_secs(2);
 
 fn seconds_since_epoch() -> f64 {
     std::time::SystemTime::now()
@@ -232,6 +241,23 @@ async fn release_demotion_lock(db: &Database, token: mongodb::bson::oid::ObjectI
         // Not worth failing the request it guarded: the lease expires on its
         // own, so the cost is a few seconds of contention.
         tracing::warn!("could not release the demotion lock: {e}");
+    }
+}
+
+/// Take the demotion lock, waiting [`DEMOTION_LOCK_WAIT`] for its holder.
+async fn wait_for_demotion_lock(
+    db: &Database,
+    token: mongodb::bson::oid::ObjectId,
+) -> Result<bool, mongodb::error::Error> {
+    let give_up = Instant::now() + DEMOTION_LOCK_WAIT;
+    loop {
+        if take_demotion_lock(db, token).await? {
+            return Ok(true);
+        }
+        if Instant::now() >= give_up {
+            return Ok(false);
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -363,27 +389,15 @@ pub async fn patch_admin_user(
 
     let collection: Collection<BabamulUser> = db.collection("babamul_users");
 
-    // Read before writing, so a demotion knows whether it is taking away the
-    // last admin and a delta knows what it is being applied to.
-    let current = match collection.find_one(doc! { "_id": &user_id }).await {
-        Ok(Some(user)) => user,
-        Ok(None) => return response::not_found("User not found"),
-        Err(e) => {
-            tracing::error!("Failed to read babamul user {}: {}", user_id, e);
-            return response::internal_error("Failed to update user");
-        }
-    };
-
-    // A demotion holds the lock for the whole of its count-then-write. Without
+    // A demotion holds the lock for the whole of its read-count-write. Without
     // it the count is only advice: two admins demoting each other both see two
     // admins, both write, and the deployment is left with none -- which nothing
     // can appoint its way out of, since this route requires already being an
     // admin and the startup reconciliation only grants.
-    let demoting = body.is_admin == Some(false) && current.is_admin;
     let lock = mongodb::bson::oid::ObjectId::new();
-    if demoting {
-        match take_demotion_lock(&db, lock).await {
-            Ok(true) => {}
+    let locked_at = if body.is_admin == Some(false) {
+        match wait_for_demotion_lock(&db, lock).await {
+            Ok(true) => Some(Instant::now()),
             Ok(false) => {
                 return response::conflict(
                     "Another admin's access is being changed right now. Try again in a moment.",
@@ -394,11 +408,13 @@ pub async fn patch_admin_user(
                 return response::internal_error("Failed to update user");
             }
         }
-    }
+    } else {
+        None
+    };
 
-    let response = apply_patch(&collection, &admin, &user_id, &body, current, demoting).await;
+    let response = apply_patch(&collection, &admin, &user_id, &body, locked_at).await;
 
-    if demoting {
+    if locked_at.is_some() {
         release_demotion_lock(&db, lock).await;
     }
     response
@@ -411,9 +427,24 @@ async fn apply_patch(
     admin: &BabamulUser,
     user_id: &str,
     body: &AdminUserPatch,
-    mut current: BabamulUser,
-    demoting: bool,
+    locked_at: Option<Instant>,
 ) -> HttpResponse {
+    // Read under the lock, so a demotion sees the target as it is when it
+    // writes, and a delta knows what it is being applied to.
+    let mut current = match collection
+        .find_one(doc! { "_id": user_id })
+        .max_time(QUERY_TIME)
+        .await
+    {
+        Ok(Some(user)) => user,
+        Ok(None) => return response::not_found("User not found"),
+        Err(e) => {
+            tracing::error!("Failed to read babamul user {}: {}", user_id, e);
+            return response::internal_error("Failed to update user");
+        }
+    };
+    let demoting = locked_at.is_some() && current.is_admin;
+
     let replace = body.acls.as_deref();
     let grant = body.grant_acls.as_deref().unwrap_or(&[]);
     let revoke = body.revoke_acls.as_deref().unwrap_or(&[]);
@@ -445,6 +476,9 @@ async fn apply_patch(
     }
 
     for attempt in 1..=ACL_WRITE_ATTEMPTS {
+        if locked_at.is_some_and(|at| at.elapsed() > DEMOTION_DEADLINE) {
+            return response::request_timeout("The database is slow right now. Try again.");
+        }
         let mut set = Document::new();
         if let Some(is_admin) = body.is_admin {
             set.insert("is_admin", is_admin);
@@ -494,6 +528,7 @@ async fn apply_patch(
                 .with_options(
                     FindOneAndUpdateOptions::builder()
                         .return_document(ReturnDocument::After)
+                        .max_time(QUERY_TIME)
                         .build(),
                 )
                 .await
@@ -504,7 +539,11 @@ async fn apply_patch(
             // The filter did not match, so either the user is gone or another
             // admin wrote first. Re-reading tells us which.
             Ok(None) if delta && attempt < ACL_WRITE_ATTEMPTS => {
-                match collection.find_one(doc! { "_id": user_id }).await {
+                match collection
+                    .find_one(doc! { "_id": user_id })
+                    .max_time(QUERY_TIME)
+                    .await
+                {
                     Ok(Some(fresh)) => {
                         current = fresh;
                         continue;
