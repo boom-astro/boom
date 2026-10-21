@@ -1342,15 +1342,15 @@ impl ZtfEnrichmentWorker {
         let mut has_matches = false;
         if let Some(survey_matches) = &alert.survey_matches {
             if let Some(lsst_match) = &survey_matches.lsst {
-                let mut lsst_lightcurve: Vec<PhotometryMag> = lsst_match
+                let lsst_lightcurve: Vec<PhotometryMag> = lsst_match
                     .prv_candidates
                     .iter()
                     .chain(&lsst_match.fp_hists)
                     .filter(|p| p.jd <= candidate.jd)
                     .filter_map(|p| p.to_photometry_mag(None))
                     .collect();
-                prepare_photometry(&mut lsst_lightcurve);
                 lightcurve.extend(lsst_lightcurve);
+                prepare_photometry(&mut lightcurve);
                 has_matches = true;
             }
         }

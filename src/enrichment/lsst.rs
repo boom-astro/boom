@@ -545,9 +545,8 @@ impl LsstEnrichmentWorker {
                     .filter(|p| p.jd <= alert.candidate.jd)
                     .filter_map(|p| p.to_photometry_mag(None))
                     .collect();
-                let mut ztf_lightcurve = [ztf_prv_candidates, ztf_fp_hists].concat();
-                prepare_photometry(&mut ztf_lightcurve);
-                lightcurve.extend(ztf_lightcurve);
+                lightcurve.extend([ztf_prv_candidates, ztf_fp_hists].concat());
+                prepare_photometry(&mut lightcurve);
                 has_matches = true;
             }
         }
