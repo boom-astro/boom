@@ -53,7 +53,7 @@ pub struct EmbeddingRow {
     /// Julian date of that alert.
     #[prost(double, tag = "2")]
     pub jd: f64,
-    /// ZTF program ID of that alert.
+    /// The object's program: 1 if any of its detections is public, else 3.
     #[prost(int32, tag = "3")]
     pub programid: i32,
 }

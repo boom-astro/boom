@@ -20,7 +20,7 @@ pub const FIELD_EMBEDDING: &str = "embedding";
 pub const FIELD_CANDID: &str = "candid";
 /// Julian date of that alert.
 pub const FIELD_JD: &str = "jd";
-/// ZTF program ID of that alert.
+/// The object's program: 1 if any of its detections is public, else 3.
 pub const FIELD_PROGRAMID: &str = "programid";
 
 const INDEX_NAME: &str = "embedding_idx";
@@ -255,7 +255,7 @@ pub fn embedding_collection_schema(
             },
             FieldSchema {
                 name: FIELD_PROGRAMID.to_string(),
-                description: "ZTF program ID of that alert".to_string(),
+                description: "1 if any detection of the object is public, else 3".to_string(),
                 data_type: DataType::Int32 as i32,
                 ..Default::default()
             },

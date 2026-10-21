@@ -609,6 +609,19 @@ const CIDER_MIN_PHOTOMETRY_POINTS: usize = 2;
 
 const ACAI_BTS_NAMES: [&str; 6] = ["acai_h", "acai_n", "acai_v", "acai_o", "acai_b", "btsbot"];
 
+/// The program an object is stored under in Milvus, which is per object rather
+/// than per alert: public if this alert or any detection in the object's
+/// history (`ZTF_alerts_aux.prv_candidates`) is public, otherwise Caltech,
+/// which for now stands for every non-public program.
+fn milvus_programid(alert_programid: i32, prv_candidates: &[ZtfPhotometry]) -> i32 {
+    let public = ProgramId::Public as i32;
+    if alert_programid == public || prv_candidates.iter().any(|p| p.programid == public) {
+        public
+    } else {
+        ProgramId::Caltech as i32
+    }
+}
+
 struct AlertWork {
     candid: i64,
     programid: i32,
@@ -900,14 +913,14 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             ));
             processed_alerts.push(format!("{},{}", item.programid, item.candid));
 
-            if self.milvus.is_enabled() && item.programid == ProgramId::Public as i32 {
+            if self.milvus.is_enabled() {
                 if let Some(embedding) = fusion_embedding {
                     embedding_rows.push(EmbeddingRow {
                         object_id: item.alert.object_id.clone(),
                         embedding,
                         candid: item.candid,
                         jd: item.alert.candidate.candidate.jd,
-                        programid: item.programid,
+                        programid: milvus_programid(item.programid, &item.alert.prv_candidates),
                     });
                 }
             }
@@ -1690,6 +1703,41 @@ mod tests {
             applecider_outputs: None,
             fusion_embedding: Some(vec![1.0, 2.0, 3.0]),
         }
+    }
+
+    fn detection(programid: i32) -> ZtfPhotometry {
+        ZtfPhotometry {
+            jd: 2460000.5,
+            magpsf: Some(19.0),
+            sigmapsf: Some(0.1),
+            diffmaglim: 20.5,
+            flux: Some(1000.0),
+            flux_err: 50.0,
+            band: Band::G,
+            ra: None,
+            dec: None,
+            snr_psf: None,
+            programid,
+        }
+    }
+
+    #[test]
+    fn a_public_alert_makes_the_object_public() {
+        assert_eq!(milvus_programid(1, &[]), 1);
+        assert_eq!(milvus_programid(1, &[detection(2), detection(3)]), 1);
+    }
+
+    #[test]
+    fn any_public_detection_in_the_history_makes_the_object_public() {
+        assert_eq!(milvus_programid(2, &[detection(2), detection(1)]), 1);
+        assert_eq!(milvus_programid(3, &[detection(1)]), 1);
+    }
+
+    #[test]
+    fn an_object_with_no_public_detection_is_grouped_under_3() {
+        assert_eq!(milvus_programid(2, &[]), 3);
+        assert_eq!(milvus_programid(2, &[detection(2)]), 3);
+        assert_eq!(milvus_programid(3, &[detection(2), detection(3)]), 3);
     }
 
     /// The enrichment worker takes the embedding out of the classifications
