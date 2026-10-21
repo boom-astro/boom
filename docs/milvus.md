@@ -18,7 +18,7 @@ metric is `COSINE` (for normalized vectors this is equivalent to inner product).
 The collection's primary key is `object_id`, so it holds **one vector per
 object, not per alert**. Writing an object that already exists replaces its
 vector, meaning the collection tracks each object's most recently ingested
-embedding. The `candid` and `jd` fields record which alert that was.
+embedding. The `candid`, `jd` and `programid` fields record which alert that was.
 
 | Field | Type | Notes |
 |---|---|---|
@@ -26,6 +26,7 @@ embedding. The `candid` and `jd` fields record which alert that was.
 | `embedding` | `FloatVector` (dim 384) | L2-normalized fusion embedding |
 | `candid` | `Int64` | Alert the stored embedding came from |
 | `jd` | `Double` | Julian date of that alert |
+| `programid` | `Int32` | ZTF program ID of that alert |
 
 ## Credentials
 

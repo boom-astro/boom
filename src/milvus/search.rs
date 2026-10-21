@@ -16,7 +16,9 @@ use prost::Message;
 use tracing::{debug, instrument};
 
 use super::client::{check_status, MilvusClient, MilvusError};
-use super::collection::{FIELD_CANDID, FIELD_EMBEDDING, FIELD_JD, FIELD_OBJECT_ID};
+use super::collection::{
+    FIELD_CANDID, FIELD_EMBEDDING, FIELD_JD, FIELD_OBJECT_ID, FIELD_PROGRAMID,
+};
 use super::insert::EmbeddingRow;
 use super::proto::common::{
     DslType, KeyValuePair, PlaceholderGroup, PlaceholderType, PlaceholderValue,
@@ -113,6 +115,7 @@ impl MilvusClient {
                 FIELD_EMBEDDING.to_string(),
                 FIELD_CANDID.to_string(),
                 FIELD_JD.to_string(),
+                FIELD_PROGRAMID.to_string(),
             ],
             use_default_consistency: true,
             ..Default::default()
@@ -300,6 +303,7 @@ fn parse_embedding_rows(fields: &[FieldData]) -> Vec<EmbeddingRow> {
     let (dim, flat) = float_vector_column(fields, FIELD_EMBEDDING).unwrap_or((0, vec![]));
     let candids = long_column(fields, FIELD_CANDID).unwrap_or_default();
     let jds = double_column(fields, FIELD_JD).unwrap_or_default();
+    let programids = int_column(fields, FIELD_PROGRAMID).unwrap_or_default();
 
     object_ids
         .into_iter()
@@ -318,6 +322,7 @@ fn parse_embedding_rows(fields: &[FieldData]) -> Vec<EmbeddingRow> {
                 embedding,
                 candid: candids.get(i).copied().unwrap_or_default(),
                 jd: jds.get(i).copied().unwrap_or_default(),
+                programid: programids.get(i).copied().unwrap_or_default(),
             }
         })
         .collect()
@@ -325,6 +330,16 @@ fn parse_embedding_rows(fields: &[FieldData]) -> Vec<EmbeddingRow> {
 
 fn find_field<'a>(fields: &'a [FieldData], name: &str) -> Option<&'a FieldData> {
     fields.iter().find(|f| f.field_name == name)
+}
+
+fn int_column(fields: &[FieldData], name: &str) -> Option<Vec<i32>> {
+    match &find_field(fields, name)?.field {
+        Some(field_data::Field::Scalars(s)) => match &s.data {
+            Some(scalar_field::Data::IntData(a)) => Some(a.data.clone()),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 fn long_column(fields: &[FieldData], name: &str) -> Option<Vec<i64>> {
@@ -379,8 +394,8 @@ fn kv(key: &str, value: &str) -> KeyValuePair {
 mod tests {
     use super::*;
     use crate::milvus::proto::schema::{
-        i_ds, scalar_field, DoubleArray, FloatArray, IDs, LongArray, ScalarField, StringArray,
-        VectorField,
+        i_ds, scalar_field, DoubleArray, FloatArray, IDs, IntArray, LongArray, ScalarField,
+        StringArray, VectorField,
     };
 
     fn scalar(name: &str, data: scalar_field::Data) -> FieldData {
@@ -539,6 +554,10 @@ mod tests {
                     data: vec![2400000.5, 2400001.5],
                 }),
             ),
+            scalar(
+                FIELD_PROGRAMID,
+                scalar_field::Data::IntData(IntArray { data: vec![1, 1] }),
+            ),
         ];
 
         let rows = parse_embedding_rows(&fields);
@@ -548,5 +567,6 @@ mod tests {
         assert_eq!(rows[1].embedding, vec![3.0, 4.0]);
         assert_eq!(rows[1].candid, 20);
         assert_eq!(rows[1].jd, 2400001.5);
+        assert_eq!(rows[1].programid, 1);
     }
 }

@@ -907,6 +907,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                         embedding,
                         candid: item.candid,
                         jd: item.alert.candidate.candidate.jd,
+                        programid: item.programid,
                     });
                 }
             }
