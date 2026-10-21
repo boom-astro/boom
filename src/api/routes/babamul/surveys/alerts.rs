@@ -28,6 +28,7 @@ pub struct EnrichedZtfAlert {
     #[serde(rename = "objectId")]
     pub object_id: String,
     pub candidate: ZtfCandidate,
+    #[serde(default, deserialize_with = "public_ztf_properties")]
     pub properties: Option<ZtfAlertProperties>,
     pub classifications: Option<ZtfAlertClassifications>,
 }
@@ -39,7 +40,22 @@ pub struct EnrichedLsstAlert {
     #[serde(rename = "objectId")]
     pub object_id: String,
     pub candidate: LsstCandidate,
+    #[serde(default, deserialize_with = "public_lsst_properties")]
     pub properties: Option<LsstAlertProperties>,
+}
+
+fn public_ztf_properties<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<ZtfAlertProperties>, D::Error> {
+    let properties: Option<ZtfAlertProperties> = serde::Deserialize::deserialize(deserializer)?;
+    Ok(properties.map(ZtfAlertProperties::into_public))
+}
+
+fn public_lsst_properties<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<LsstAlertProperties>, D::Error> {
+    let properties: Option<LsstAlertProperties> = serde::Deserialize::deserialize(deserializer)?;
+    Ok(properties.map(LsstAlertProperties::into_public))
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ToSchema)]

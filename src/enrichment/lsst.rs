@@ -2,6 +2,7 @@ use crate::alert::{LsstCandidate, SsSource};
 use crate::conf::AppConfig;
 use crate::enrichment::{
     babamul::{Babamul, BabamulLsstAlert},
+    decam::{add_decam_match, DecamMatch},
     fetch_alerts, EnrichmentWorker, EnrichmentWorkerError, ZtfMatch,
 };
 use crate::utils::db::mongify;
@@ -173,6 +174,8 @@ pub struct LsstAlertForEnrichment {
     #[serde(default)]
     pub host_galaxy: Option<HostGalaxyAssociation>,
     pub survey_matches: Option<LsstSurveyMatches>,
+    #[serde(default)]
+    pub decam_match: Option<DecamMatch>,
 }
 
 /// Solar system association for a single LSST detection, mirroring the ZTF block so
@@ -250,6 +253,11 @@ pub struct LsstAlertProperties {
     pub hosted: Option<bool>,
     pub photstats: PerBandProperties,
     pub multisurvey_photstats: PerBandProperties,
+    /// Without the private DECam points, for Babamul. `None` when there are none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[avro(skip)]
+    #[schema(ignore)]
+    pub public_multisurvey_photstats: Option<PerBandProperties>,
     /// `None` on alerts enriched before this existed: never evaluated, which is not
     /// the same as evaluated and found not to be a solar system object.
     #[serde(default)]
@@ -264,6 +272,15 @@ pub struct LsstAlertProperties {
     /// Detection episodes, for finding sources that outburst more than once.
     /// `None` on alerts enriched before this field existed.
     pub episode_history: Option<EpisodeHistory>,
+}
+
+impl LsstAlertProperties {
+    pub fn into_public(mut self) -> Self {
+        if let Some(public) = self.public_multisurvey_photstats.take() {
+            self.multisurvey_photstats = public;
+        }
+        self
+    }
 }
 
 pub struct LsstEnrichmentWorker {
@@ -331,7 +348,7 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
             output_queue,
             client,
             alert_collection,
-            alert_pipeline: create_lsst_alert_pipeline(),
+            alert_pipeline: add_decam_match(create_lsst_alert_pipeline()),
             babamul,
         })
     }
@@ -555,6 +572,21 @@ impl LsstEnrichmentWorker {
         } else {
             photstats.clone()
         };
+        let decam_lightcurve = alert
+            .decam_match
+            .as_ref()
+            .map(|m| m.lightcurve(alert.candidate.jd))
+            .unwrap_or_default();
+        let (multisurvey_photstats, public_multisurvey_photstats) = if decam_lightcurve.is_empty() {
+            (multisurvey_photstats, None)
+        } else {
+            let mut with_decam = [lightcurve, decam_lightcurve].concat();
+            prepare_photometry(&mut with_decam);
+            (
+                analyze_photometry(&with_decam).0,
+                Some(multisurvey_photstats),
+            )
+        };
 
         // Per-object detection history for history-aware filters (positive/negative
         // by psfFlux sign; LSST difference psfFlux is signed natively).
@@ -583,6 +615,7 @@ impl LsstEnrichmentWorker {
             stationary,
             photstats,
             multisurvey_photstats,
+            public_multisurvey_photstats,
             detection_history: Some(detection_history),
             episode_history: Some(episode_history),
         })
