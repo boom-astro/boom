@@ -2,10 +2,10 @@
 //! the alert under `gp_fit`. See `docs/gp-fit.md` for the stored fields.
 
 use crate::utils::lightcurves::Band;
+use mongodb::bson::{doc, Document};
 use rayon::prelude::*;
 use rust_gp::features::{light_curve_features, BandFeatures, FeatureConfig};
-use rust_gp::{fit_robust, mag_to_flux, GpConfig, GpResult, Obs};
-use serde::{Deserialize, Serialize};
+use rust_gp::{fit_robust, mag_to_flux, FitQuality, GpConfig, Obs};
 use std::collections::HashSet;
 use tracing::{instrument, trace, warn};
 
@@ -107,8 +107,12 @@ fn detection_window(obs: &[Obs]) -> (f64, f64) {
         })
 }
 
-/// Fit with outlier clipping, then measure each band's features.
-pub fn fit(obs: &[Obs], config: &GpConfig) -> Result<GpFit, String> {
+/// ZTF's bands, as only ZTF is fitted.
+const BANDS: [&str; 3] = ["g", "r", "i"];
+
+/// Fit with outlier clipping, then measure each band, as the document stored
+/// under `gp_fit`.
+pub fn fit(obs: &[Obs], config: &GpConfig) -> Result<Document, String> {
     let (first, last) = detection_window(obs);
     if last - first >= MAX_DETECTION_SPAN_DAYS {
         return Err(format!(
@@ -122,13 +126,58 @@ pub fn fit(obs: &[Obs], config: &GpConfig) -> Result<GpFit, String> {
         &fitted.result.hyper,
         &FeatureConfig::default(),
     );
-    Ok(GpFit::new(&fitted.result, &features))
+    Ok(to_document(&fitted.result.fit_quality, &features))
+}
+
+/// A stored field's name and where rust-gp keeps its value.
+type Field = (&'static str, fn(&BandFeatures) -> Option<f64>);
+
+/// Flat, one key per field and band (`peak_mag_r`), like `villar_fit`. Every
+/// key is written, null where a band has no value, so the schema is fixed.
+///
+/// The reduced χ² is over the detections left after outlier clipping, with the
+/// GP's effective number of parameters taken off the degrees of freedom.
+fn to_document(quality: &FitQuality, features: &[BandFeatures]) -> Document {
+    let fields: [Field; 10] = [
+        ("peak_jd", |f| f.peak_time),
+        ("peak_jd_err", |f| f.peak_time_err),
+        ("peak_mag", |f| f.peak_mag),
+        ("peak_mag_err", |f| f.peak_mag_err),
+        ("fwhm", |f| f.fwhm),
+        ("fwhm_err", |f| f.fwhm_err),
+        ("rise_rate", |f| f.rise_rate),
+        ("rise_rate_err", |f| f.rise_rate_err),
+        ("fade_rate", |f| f.fade_rate),
+        ("fade_rate_err", |f| f.fade_rate_err),
+    ];
+    let per_band: Vec<Option<&BandFeatures>> = BANDS
+        .iter()
+        .map(|band| features.iter().find(|f| f.band == *band))
+        .collect();
+
+    let mut doc = doc! {
+        // "chi2": quality.chi2,
+        // "dof": quality.dof,
+        "reduced_chi2": quality.reduced_chi2,
+    };
+    for (name, value) in fields {
+        for (band, f) in BANDS.iter().zip(&per_band) {
+            doc.insert(format!("{name}_{band}"), f.and_then(value));
+        }
+    }
+    for (band, f) in BANDS.iter().zip(&per_band) {
+        doc.insert(
+            format!("n_detections_{band}"),
+            f.map_or(0, |f| f.n_points as i32),
+        );
+    }
+    doc
 }
 
 /// Fits each `(candid, observations)` on the Rayon pool, in input order. `None`
 /// where a source is not fitted, which for most alerts means too few detections.
 #[instrument(skip_all, fields(sources = sources.len()))]
-pub fn fit_many(sources: &[(i64, Vec<Obs>)], config: &GpConfig) -> Vec<Option<GpFit>> {
+pub fn fit_many(sources: &[(i64, Vec<Obs>)], config: &GpConfig) -> Vec<Option<Document>> {
     sources
         .par_iter()
         .map(|(candid, obs)| {
@@ -148,139 +197,10 @@ pub fn fit_many(sources: &[(i64, Vec<Obs>)], config: &GpConfig) -> Vec<Option<Gp
         .collect()
 }
 
-/// A fit as stored under `gp_fit`. Times are JD, fluxes µJy (AB zero point 23.9).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GpFit {
-    /// Matérn-3/2 time scale up to `warp_start`, days.
-    pub length_scale: f64,
-    /// How strongly the bands are tied, Å. The larger, the closer the bands
-    /// are to one shared curve shape.
-    pub wavelength_scale: f64,
-    /// White noise added to every point.
-    pub jitter: f64,
-    /// How fast the time scale grows after `warp_start`; 0 is stationary.
-    pub warp_strength: Option<f64>,
-    pub warp_start: Option<f64>,
-    pub log_likelihood: f64,
-    pub log_posterior: f64,
-    /// Detections fitted, after cleaning and outlier clipping.
-    pub n_detections: i32,
-    pub n_limits: i32,
-    /// Detections clipped as leave-one-out outliers beyond 5σ.
-    pub n_outliers: i32,
-    /// Stationary starts, of three, that reached the best optimum. Fewer flags
-    /// a short and a long time scale explaining the data about equally well.
-    pub n_starts_agree: i32,
-    pub converged: bool,
-    pub bands: GpPerBand,
-}
-
-impl GpFit {
-    fn new(result: &GpResult, features: &[BandFeatures]) -> Self {
-        let hyper = &result.hyper;
-        let mut bands = GpPerBand::default();
-        for f in features {
-            let Some(&(_, amplitude)) = hyper.amplitudes.iter().find(|(b, _)| *b == f.band) else {
-                continue;
-            };
-            let Some(slot) = bands.get_mut(&f.band) else {
-                continue;
-            };
-            *slot = Some(GpBandFit {
-                amplitude,
-                n_detections: f.n_points as i32,
-                peak_bracketed: f.peak_bracketed,
-                peak_jd: f.peak_time,
-                peak_mag: f.peak_mag,
-                peak_flux: f.peak_flux,
-                t_rise: f.t_rise,
-                t_fade: f.t_fade,
-                fwhm: f.fwhm,
-                rise_rate: f.rise_rate,
-                fade_rate: f.fade_rate,
-                peak_jd_err: f.peak_time_err,
-                peak_mag_err: f.peak_mag_err,
-                t_rise_err: f.t_rise_err,
-                t_fade_err: f.t_fade_err,
-                fwhm_err: f.fwhm_err,
-                rise_rate_err: f.rise_rate_err,
-                fade_rate_err: f.fade_rate_err,
-            });
-        }
-        GpFit {
-            length_scale: hyper.length_scale,
-            wavelength_scale: hyper.wavelength_scale,
-            jitter: hyper.jitter,
-            warp_strength: hyper.warp_strength,
-            warp_start: hyper.warp_start,
-            log_likelihood: result.log_likelihood,
-            log_posterior: result.log_posterior,
-            n_detections: result.n_obs as i32,
-            n_limits: result.n_limits as i32,
-            n_outliers: result.n_outliers as i32,
-            n_starts_agree: result.n_starts_agree as i32,
-            converged: result.converged,
-            bands,
-        }
-    }
-}
-
-/// Keyed by band, so a fade rate is `gp_fit.bands.r.fade_rate`. Null for a
-/// band without detections. ZTF's bands only, as only ZTF is fitted.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct GpPerBand {
-    pub g: Option<GpBandFit>,
-    pub r: Option<GpBandFit>,
-    pub i: Option<GpBandFit>,
-}
-
-impl GpPerBand {
-    fn get_mut(&mut self, band: &str) -> Option<&mut Option<GpBandFit>> {
-        match band {
-            "g" => Some(&mut self.g),
-            "r" => Some(&mut self.r),
-            "i" => Some(&mut self.i),
-            _ => None,
-        }
-    }
-}
-
-/// One band's GP amplitude and the shape of its posterior mean curve.
-///
-/// The features need three detections in the band and a peak inside its data
-/// (`peak_bracketed`), or they are all null; a rise or fade not observed down
-/// to half maximum is null on its own. Errors are a robust 1σ over 100
-/// posterior draws, conditional on the fitted hyperparameters.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GpBandFit {
-    pub amplitude: f64,
-    pub n_detections: i32,
-    pub peak_bracketed: bool,
-    pub peak_jd: Option<f64>,
-    pub peak_mag: Option<f64>,
-    pub peak_flux: Option<f64>,
-    /// Days from the half-maximum crossing to the peak.
-    pub t_rise: Option<f64>,
-    /// Days from the peak to the half-maximum crossing.
-    pub t_fade: Option<f64>,
-    /// `t_rise + t_fade`, days.
-    pub fwhm: Option<f64>,
-    /// Mean rate over the 0.753 mag between half maximum and peak, mag/day.
-    pub rise_rate: Option<f64>,
-    pub fade_rate: Option<f64>,
-    pub peak_jd_err: Option<f64>,
-    pub peak_mag_err: Option<f64>,
-    pub t_rise_err: Option<f64>,
-    pub t_fade_err: Option<f64>,
-    pub fwhm_err: Option<f64>,
-    pub rise_rate_err: Option<f64>,
-    pub fade_rate_err: Option<f64>,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utils::db::mongify;
+    use mongodb::bson::Bson;
 
     fn detection(jd: f64, mag: f64, band: Band) -> GpPoint {
         GpPoint {
@@ -384,21 +304,39 @@ mod tests {
     #[test]
     fn fits_a_two_band_transient() {
         let config = gp_config();
-        let fit = fit(&observations(bazin_points(), &config), &config).expect("fittable");
-        assert!(fit.n_limits > 0, "pre-explosion limits reach the fit");
+        let obs = observations(bazin_points(), &config);
+        assert!(obs.iter().any(|o| o.upper_limit), "pre-explosion limits");
+        let doc = fit(&obs, &config).expect("fittable");
+        assert_eq!(
+            doc.len(),
+            34,
+            "1 for the fit, 11 for each of g, r and i: {doc}"
+        );
+
+        // Noiseless points against errors floored at 0.1 mag.
+        let reduced_chi2 = doc.get_f64("reduced_chi2").unwrap();
+        assert!((0.0..1.0).contains(&reduced_chi2), "{doc}");
 
         // Bazin peak: t0 + τ_rise ln(τ_fall / τ_rise - 1).
-        let r = fit.bands.r.as_ref().expect("r is fitted");
         let peak_jd = 2_460_000.0 + 3.0 * (20.0f64 / 3.0 - 1.0).ln();
-        assert!(r.peak_bracketed);
-        assert!((r.peak_jd.unwrap() - peak_jd).abs() < 1.5, "{r:?}");
-        assert!(r.t_rise.is_some() && r.t_fade.is_some(), "{r:?}");
-        assert!(fit.bands.i.is_none());
+        assert!(
+            (doc.get_f64("peak_jd_r").unwrap() - peak_jd).abs() < 1.5,
+            "{doc}"
+        );
+        for key in [
+            "peak_mag_g",
+            "peak_mag_err_g",
+            "fwhm_r",
+            "rise_rate_r",
+            "fade_rate_r",
+        ] {
+            assert!(doc.get_f64(key).is_ok(), "{key} in {doc}");
+        }
+        assert!(doc.get_i32("n_detections_r").unwrap() > 0);
 
-        let doc = mongify(&fit);
-        let bands = doc.get_document("bands").unwrap();
-        assert!(bands.get_document("g").unwrap().get_f64("peak_mag").is_ok());
-        assert_eq!(bands.get("i"), Some(&mongodb::bson::Bson::Null));
+        // No i-band data: counted as zero, every value null.
+        assert_eq!(doc.get_i32("n_detections_i"), Ok(0));
+        assert_eq!(doc.get("peak_mag_i"), Some(&Bson::Null));
     }
 
     #[test]

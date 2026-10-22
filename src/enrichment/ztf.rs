@@ -935,7 +935,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             // Null when the light curve could not be fitted, absent when fitting
             // never ran, so a backfill can select on the missing key.
             if let Some(fit) = gp_fits.as_mut().and_then(Iterator::next) {
-                set_doc.insert("gp_fit", fit.as_ref().map(mongify));
+                set_doc.insert("gp_fit", fit);
             }
 
             updates.push(WriteModel::UpdateOne(
