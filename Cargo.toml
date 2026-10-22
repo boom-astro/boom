@@ -49,6 +49,8 @@ rdkafka = { version = "0.39.0", features = ["gssapi", "ssl-vendored", "tracing",
 redis = { version = "1.2.1", features = ["tokio-comp"] }
 regex = "1.12.3"
 reqwest = { version = "0.13.3", features = ["form", "json", "stream"] }
+# CPU-only Gaussian-process light-curve fits, stored under `gp_fit` by the ZTF enrichment worker.
+rust-gp = { git = "https://github.com/frenbox/rust-gp", rev = "1cc84cc0508798665b023d772c537e0afc9b29cb" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0.149"
 serde_with = { version = "3.20.0", features = ["base64"] }

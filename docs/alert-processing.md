@@ -90,9 +90,10 @@ each one will have its own:
 The ZTF enrichment worker writes a fixed set of named quantities onto each
 alert: the ACAI scores (`acai_h`, `acai_n`, `acai_v`, `acai_o`, `acai_b`),
 `btsbot` and the AppleCiDER outputs (`applecider_fusion`, `applecider_outputs`)
-under `classifications`, the photometric properties under `properties`, and, on
-GPU builds, the Villar light-curve fit under `villar_fit`. The LSST, DECam and
-WINTER workers write `properties` only.
+under `classifications`, the photometric properties under `properties`, the
+Gaussian-process light-curve fit under `gp_fit`, and, on GPU builds, the Villar
+light-curve fit under `villar_fit`. The LSST, DECam and WINTER workers write
+`properties` only.
 
 Adding a component is only partly detectable after the fact. Outputs that can be
 absent are skipped rather than written as null, but a missing key does not prove
@@ -103,7 +104,9 @@ curves it does not cover or when inference fails (see
 key alone also picks up every alert the component skipped on purpose, so the
 selection has to be limited to alerts enriched before the component was
 deployed. Crossmatches do not have this problem: an alert whose `cross_matches`
-has no key for a catalog predates that catalog being configured. Pushing the
+has no key for a catalog predates that catalog being configured. Nor does
+`gp_fit`, which is written with every key null for a light curve it cannot fit (see
+[Gaussian-process fits](gp-fit.md#when-fields-are-null)). Pushing the
 selected candids onto a reprocessing queue is how a new component is filled in;
 `enrich_reprocess` drains that queue, computes the scores and writes them back
 without forwarding anything to the filter queue.

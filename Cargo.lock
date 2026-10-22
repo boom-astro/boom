@@ -1390,6 +1390,7 @@ dependencies = [
  "redis",
  "regex",
  "reqwest 0.13.3",
+ "rust-gp",
  "serde",
  "serde_json",
  "serde_with",
@@ -5270,6 +5271,16 @@ dependencies = [
  "serde_derive",
  "typeid",
  "unicode-ident",
+]
+
+[[package]]
+name = "rust-gp"
+version = "0.1.0"
+source = "git+https://github.com/frenbox/rust-gp?rev=1cc84cc0508798665b023d772c537e0afc9b29cb#1cc84cc0508798665b023d772c537e0afc9b29cb"
+dependencies = [
+ "csv",
+ "rayon",
+ "serde",
 ]
 
 [[package]]

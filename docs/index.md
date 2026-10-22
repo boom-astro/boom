@@ -29,7 +29,8 @@ how reference catalogs are ingested and cross-matched.
 ## Classification and fits
 
 [AppleCiDER](applecider.md) describes the fusion classifier,
-[Villar light-curve fits](villar-fit.md) the parametric light-curve model, and
+[Villar light-curve fits](villar-fit.md) the parametric light-curve model,
+[Gaussian-process light-curve fits](gp-fit.md) the non-parametric one, and
 [Milvus vector database](milvus.md) the embedding store used for similarity
 search.
 
