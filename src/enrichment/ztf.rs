@@ -932,8 +932,8 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             if let Some(cls) = &classifications {
                 set_doc.insert("classifications", mongify(cls));
             }
-            // Null when the light curve could not be fitted, absent when fitting
-            // never ran, so a backfill can select on the missing key.
+            // Every key null when the light curve could not be fitted, absent
+            // when fitting never ran, so a backfill can select on the missing key.
             if let Some(fit) = gp_fits.as_mut().and_then(Iterator::next) {
                 set_doc.insert("gp_fit", fit);
             }

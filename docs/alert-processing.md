@@ -105,7 +105,7 @@ key alone also picks up every alert the component skipped on purpose, so the
 selection has to be limited to alerts enriched before the component was
 deployed. Crossmatches do not have this problem: an alert whose `cross_matches`
 has no key for a catalog predates that catalog being configured. Nor does
-`gp_fit`, which is written as null for a light curve it cannot fit (see
+`gp_fit`, which is written with every key null for a light curve it cannot fit (see
 [Gaussian-process fits](gp-fit.md#when-fields-are-null)). Pushing the
 selected candids onto a reprocessing queue is how a new component is filled in;
 `enrich_reprocess` drains that queue, computes the scores and writes them back

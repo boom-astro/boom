@@ -2,7 +2,7 @@
 //! the alert under `gp_fit`. See `docs/gp-fit.md` for the stored fields.
 
 use crate::utils::lightcurves::Band;
-use mongodb::bson::{doc, Document};
+use mongodb::bson::{doc, Bson, Document};
 use rayon::prelude::*;
 use rust_gp::features::{light_curve_features, BandFeatures, FeatureConfig};
 use rust_gp::{fit_robust, mag_to_flux, FitQuality, GpConfig, Obs};
@@ -174,23 +174,33 @@ fn to_document(quality: &FitQuality, features: &[BandFeatures]) -> Document {
     doc
 }
 
-/// Fits each `(candid, observations)` on the Rayon pool, in input order. `None`
-/// where a source is not fitted, which for most alerts means too few detections.
+/// Every key a fit writes, all null, so a light curve that was not fitted has
+/// the same schema as one that was.
+pub fn unfitted() -> Document {
+    to_document(&FitQuality::default(), &[])
+        .into_iter()
+        .map(|(key, _)| (key, Bson::Null))
+        .collect()
+}
+
+/// Fits each `(candid, observations)` on the Rayon pool, in input order. A
+/// source that is not fitted, which for most alerts means too few detections,
+/// gets [`unfitted`].
 #[instrument(skip_all, fields(sources = sources.len()))]
-pub fn fit_many(sources: &[(i64, Vec<Obs>)], config: &GpConfig) -> Vec<Option<Document>> {
+pub fn fit_many(sources: &[(i64, Vec<Obs>)], config: &GpConfig) -> Vec<Document> {
     sources
         .par_iter()
         .map(|(candid, obs)| {
             // Caught here, or one bad light curve would lose the batch every fit.
             match std::panic::catch_unwind(|| fit(obs, config)) {
-                Ok(Ok(fit)) => Some(fit),
+                Ok(Ok(fit)) => fit,
                 Ok(Err(e)) => {
                     trace!(candid, "skipping GP fit: {}", e);
-                    None
+                    unfitted()
                 }
                 Err(_) => {
                     warn!(candid, "GP fit panicked");
-                    None
+                    unfitted()
                 }
             }
         })
@@ -353,7 +363,18 @@ mod tests {
         ];
 
         let fits = fit_many(&sources, &config);
-        assert!(fits[0].is_none() && fits[1].is_none());
-        assert!(fits[2].is_some(), "order follows the input");
+        for not_fitted in &fits[..2] {
+            assert!(
+                not_fitted.values().all(|v| *v == Bson::Null),
+                "{not_fitted}"
+            );
+        }
+        assert!(
+            fits[2].get_f64("reduced_chi2").is_ok(),
+            "order follows the input"
+        );
+
+        let keys = |d: &Document| d.keys().cloned().collect::<Vec<_>>();
+        assert_eq!(keys(&fits[0]), keys(&fits[2]), "one schema, fitted or not");
     }
 }
