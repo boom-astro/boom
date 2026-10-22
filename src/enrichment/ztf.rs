@@ -1042,6 +1042,141 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
 }
 
 impl ZtfEnrichmentWorker {
+    /// Evaluate two histories against the same external context, cutouts and CPU
+    /// models. Read-only: no Mongo updates, queues, Kafka or Milvus writes.
+    /// This is an experiment interface, not the production history read path.
+    pub async fn compare_shadow_enrichment(
+        &self,
+        source: ZtfAlertForEnrichment,
+        target: ZtfAlertForEnrichment,
+    ) -> Result<serde_json::Value, EnrichmentWorkerError> {
+        use serde_json::json;
+        use sha2::{Digest, Sha256};
+        fn tensor<'a>(shape: &[usize], values: impl Iterator<Item = &'a f32>) -> serde_json::Value {
+            let mut hash = Sha256::new();
+            for value in values {
+                hash.update(value.to_bits().to_le_bytes());
+            }
+            json!({"shape":shape,"sha256":hash.finalize().iter().map(|byte| format!("{byte:02x}")).collect::<String>()})
+        }
+        if self.gpu_enabled || source.candid != target.candid {
+            return Err(EnrichmentWorkerError::ConfigurationError(
+                "shadow comparison requires CPU models and the same candid".into(),
+            ));
+        }
+        let candid = source.candid;
+        let mut cutouts = self
+            .alert_cutout_storage
+            .retrieve_multiple_cutouts(&[candid], false)
+            .await?;
+        let cutouts = cutouts
+            .remove(&candid)
+            .ok_or(EnrichmentWorkerError::MissingCutouts(candid))?;
+        let alerts = [source, target];
+        let (orbits, sso_history, baselines) = tokio::join!(
+            self.fetch_orbits(&alerts[..1]),
+            self.fetch_sso_history(&alerts[..1]),
+            self.fetch_baselines(&alerts[..1]),
+        );
+        let mut outputs = Vec::new();
+        for alert in alerts {
+            let (properties, all_bands_properties, programid, _, ztf_lightcurve) = match self
+                .get_alert_properties(&alert, &orbits, &sso_history, &baselines)
+                .await
+            {
+                Ok(value) => value,
+                Err(EnrichmentWorkerError::EmptyLightcurve(_)) => {
+                    outputs.push(json!({"status":"empty_lightcurve"}));
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            let item = AlertWork {
+                candid,
+                programid,
+                properties,
+                all_bands_properties,
+                cutouts: cutouts.clone(),
+                alert,
+                ztf_lightcurve,
+            };
+            let prepared = (|| -> Result<_, ModelError> {
+                Ok((
+                    AcaiModel::get_metadata(&[&item.alert])?,
+                    BtsBotModel::get_metadata(&[&item.alert])?,
+                    AcaiModel::get_triplet(&[&item.cutouts])?,
+                ))
+            })();
+            let (metadata, bts_metadata, image) = match prepared {
+                Ok(inputs) => inputs,
+                Err(error) => {
+                    outputs.push(json!({"status":"model_input_unavailable","properties":item.properties,"reason":error.to_string()}));
+                    continue;
+                }
+            };
+            let mut inputs = json!({"acai":tensor(metadata.shape(),metadata.iter()),
+                "btsbot":tensor(bts_metadata.shape(),bts_metadata.iter()),
+                "triplet":tensor(image.shape(),image.iter())});
+            let eligible = item.cider_eligible();
+            if eligible {
+                let model = self.models.cider.lock().unwrap();
+                let metadata = model.get_metadata(&[&item.alert], &[&item.all_bands_properties])?;
+                let image = model.get_triplet(&[&item.cutouts])?;
+                let (sequence, mask, global, detections) =
+                    model.photometry_inputs(item.ztf_lightcurve.clone())?;
+                let mask: Vec<f32> = mask
+                    .iter()
+                    .map(|value| if *value { 1.0 } else { 0.0 })
+                    .collect();
+                inputs["applecider"] = json!({"metadata":tensor(metadata.shape(),metadata.iter()),
+                    "image":tensor(image.shape(),image.iter()),"sequence":tensor(sequence.shape(),sequence.iter()),
+                    "mask":tensor(&[1,mask.len()],mask.iter()),"global":tensor(global.shape(),global.iter()),"detections":detections});
+            }
+            let mut classifications =
+                Self::classify_per_item(&self.models, std::slice::from_ref(&item))?;
+            let classifications = classifications.pop().flatten().ok_or_else(|| {
+                EnrichmentWorkerError::ConfigurationError(
+                    "shadow comparison produced no model scores".into(),
+                )
+            })?;
+            let scores = [
+                classifications.acai_h,
+                classifications.acai_n,
+                classifications.acai_v,
+                classifications.acai_o,
+                classifications.acai_b,
+                classifications.btsbot,
+            ];
+            if scores.iter().any(|value| !value.is_finite())
+                || classifications
+                    .fusion_embedding
+                    .as_ref()
+                    .is_some_and(|values| values.iter().any(|value| !value.is_finite()))
+            {
+                return Err(EnrichmentWorkerError::ConfigurationError(
+                    "nonfinite shadow model output".into(),
+                ));
+            }
+            if eligible && classifications.applecider_outputs.is_none() {
+                return Err(EnrichmentWorkerError::ConfigurationError(
+                    "eligible AppleCiDER inference failed".into(),
+                ));
+            }
+            outputs.push(
+                json!({"status":"evaluated","properties":item.properties,"inputs":inputs,
+                "classifications":classifications,"embedding":classifications.fusion_embedding,
+                "applecider_eligible":eligible}),
+            );
+        }
+        Ok(
+            json!({"properties_equal":outputs[0].get("properties")==outputs[1].get("properties"),
+            "model_inputs_equal":outputs[0].get("inputs")==outputs[1].get("inputs"),
+            "predictions_equal":outputs[0].get("classifications")==outputs[1].get("classifications")
+                && outputs[0].get("embedding")==outputs[1].get("embedding"),
+            "equal":outputs[0]==outputs[1],"source":outputs[0],"target":outputs[1]}),
+        )
+    }
+
     /// Keyed by `ssnamenr` as the alert carries it, not by the MPCORB key.
     async fn fetch_orbits(
         &self,

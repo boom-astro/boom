@@ -1,0 +1,87 @@
+name: Photometry shadow integration
+
+on:
+  pull_request:
+  push:
+    branches: [main, clickhouse]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  shadow:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_BUILD_JOBS: "2"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CH: ${{ github.workspace }}/.tools/clickhouse/clickhouse
+      DEMO_ARTIFACTS: /tmp/boom-photometry-shadow-ci
+    services:
+      mongo:
+        image: mongo:8.2
+        env:
+          MONGO_INITDB_ROOT_USERNAME: shadow
+          MONGO_INITDB_ROOT_PASSWORD: shadow-test-only
+        ports: ["37117:27017"]
+        options: >-
+          --health-cmd "mongosh --quiet --username shadow --password shadow-test-only --authenticationDatabase admin --eval 'db.adminCommand({ping:1}).ok'"
+          --health-interval 2s --health-timeout 5s --health-retries 30
+      redis:
+        image: redis:7-alpine
+        ports: ["37179:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s --health-timeout 5s --health-retries 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          lfs: true
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: photometry-shadow
+      - name: Install native dependencies and CPU inference runtime
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libsasl2-dev libcfitsio-dev libkrb5-dev cmake clang pkg-config libssl-dev
+          python3 -m pip install onnxruntime==1.24.4
+          python3 - <<'PY'
+          import os
+          import pathlib
+          import onnxruntime
+          library = next((pathlib.Path(onnxruntime.__file__).parent / "capi").glob("libonnxruntime.so.*"))
+          with open(os.environ["GITHUB_ENV"], "a") as env:
+              env.write(f"ORT_DYLIB_PATH={library}\n")
+          PY
+      - name: Install verified ClickHouse
+        run: bash .github/scripts/install-shadow-clickhouse.sh "$(dirname "$CH")"
+      - name: Check and build the native shadow
+        run: |
+          cargo fmt --all --check
+          cargo test --locked --lib photometry::
+          cargo test --locked --example photometry_benchmark
+          cargo build --locked --example photometry_shadow_replay --example photometry_benchmark
+      - name: Replay recovery, batching, CPU models and bins with continued arrivals
+        run: python3 tests/photometry_shadow.py
+      - name: Publish results
+        if: always()
+        run: |
+          if [ -f "$DEMO_ARTIFACTS/summary.md" ]; then
+            cat "$DEMO_ARTIFACTS/summary.md" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: photometry-shadow
+          path: ${{ env.DEMO_ARTIFACTS }}
+          if-no-files-found: ignore

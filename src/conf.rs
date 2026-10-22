@@ -1264,6 +1264,44 @@ fn default_gpu_device_ids() -> Vec<i32> {
     vec![0]
 }
 
+/// Opt-in ZTF shadow store. A nonempty URL enables the durable Mongo outbox.
+/// Credentials are environment-only; the default never connects to ClickHouse.
+#[derive(Deserialize, Clone)]
+#[serde(default)]
+pub struct PhotometryShadowConfig {
+    pub url: String,
+    pub database: String,
+    pub username: String,
+    pub password: String,
+    pub poll_seconds: u64,
+    pub drain_rows: usize,
+    pub concurrent_deliveries: usize,
+}
+
+impl Default for PhotometryShadowConfig {
+    fn default() -> Self {
+        Self {
+            url: String::new(),
+            database: "boom_photometry_shadow".into(),
+            username: "default".into(),
+            password: String::new(),
+            poll_seconds: 5,
+            drain_rows: 4,
+            concurrent_deliveries: 1,
+        }
+    }
+}
+
+impl std::fmt::Debug for PhotometryShadowConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PhotometryShadowConfig")
+            .field("configured", &!self.url.is_empty())
+            .field("database", &self.database)
+            .field("password", &"[redacted]")
+            .finish()
+    }
+}
+
 /// Connection settings for a Milvus vector database.
 ///
 /// On the NRP platform Milvus is reachable only over gRPC (there is no REST
@@ -1548,6 +1586,8 @@ fn default_linker_pass() -> bool {
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct AppConfig {
+    #[serde(default)]
+    pub photometry_shadow: PhotometryShadowConfig,
     pub api: ApiConfig,
     pub database: DatabaseConfig,
     #[serde(default)]

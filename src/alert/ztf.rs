@@ -753,6 +753,7 @@ struct AlertAuxForUpdate {
 }
 
 pub struct ZtfAlertWorker {
+    photometry_shadow: Option<crate::photometry::ShadowWorker>,
     xmatch_configs: Vec<conf::CatalogXmatchConfig>,
     host_galaxy_config: HostGalaxyConfig,
     db: mongodb::Database,
@@ -990,6 +991,12 @@ impl AlertWorker for ZtfAlertWorker {
             db.collection(&decam::ALERT_AUX_COLLECTION);
 
         let worker = ZtfAlertWorker {
+            photometry_shadow: crate::photometry::Shadow::start(
+                &config.photometry_shadow,
+                db.clone(),
+            )
+            .await
+            .map_err(AlertWorkerError::PhotometryShadow)?,
             xmatch_configs,
             host_galaxy_config: config.host_galaxy.clone(),
             db,
@@ -1043,6 +1050,13 @@ impl AlertWorker for ZtfAlertWorker {
         ZtfPrvCandidate::sanitize_timeseries(&mut prv_candidates);
         ZtfPrvCandidate::sanitize_timeseries(&mut prv_nondetections);
         ZtfForcedPhot::sanitize_timeseries(&mut fp_hists);
+
+        // Durable reference precedes Mongo ingestion and the Exists shortcut.
+        // The background drainer waits for a complete authoritative alert and
+        // reads the accepted aux snapshot; ClickHouse outages do not block it.
+        if let Some(shadow) = &self.photometry_shadow {
+            shadow.enqueue(candid, &object_id).await?;
+        }
 
         let alert = ZtfAlert {
             candid,
