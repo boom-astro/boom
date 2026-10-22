@@ -1,3 +1,4 @@
+use crate::api::models::response::ApiError;
 use crate::api::routes::babamul::BabamulUser;
 use crate::api::routes::users::User;
 use crate::conf::AppConfig;
@@ -10,6 +11,16 @@ use mongodb::bson::doc;
 use mongodb::Database;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+
+/// Refuse a request in the API's JSON envelope.
+///
+/// These messages are written to be read -- "check your email for activation
+/// instructions" is the whole point of the refusal -- and `ErrorForbidden`
+/// would send them as `text/plain`, where the client finds no `message` field
+/// and shows the status code instead.
+fn forbidden(message: &str) -> Error {
+    ApiError::forbidden(message).into()
+}
 
 // sha2 0.11 moved to hybrid-array::Array which dropped the LowerHex impl that
 // GenericArray had. Centralise the byte-level hex encoding here so callers
@@ -339,7 +350,7 @@ async fn resolve_babamul_user(
     };
 
     match user {
-        Some(user) if !user.is_activated => Err(actix_web::error::ErrorForbidden(
+        Some(user) if !user.is_activated => Err(forbidden(
             "Account not activated. Please check your email for activation instructions.",
         )),
         other => Ok(other),
@@ -454,7 +465,7 @@ async fn authenticate_babamul_user(req: &ServiceRequest) -> Result<BabamulUser, 
                     Ok(Some(user)) => {
                         // Check if user is activated
                         if !user.is_activated {
-                            return Err(actix_web::error::ErrorForbidden(
+                            return Err(forbidden(
                                 "Account not activated. Please check your email for activation instructions.",
                             ));
                         }
@@ -475,7 +486,7 @@ async fn authenticate_babamul_user(req: &ServiceRequest) -> Result<BabamulUser, 
                     Ok(user_id) => {
                         // Check if this is a babamul user
                         if !user_id.starts_with("babamul:") {
-                            return Err(actix_web::error::ErrorForbidden(
+                            return Err(forbidden(
                                 "Main API users cannot access Babamul endpoints",
                             ));
                         }
@@ -494,7 +505,7 @@ async fn authenticate_babamul_user(req: &ServiceRequest) -> Result<BabamulUser, 
                             Ok(Some(user)) => {
                                 // Check if user is activated
                                 if !user.is_activated {
-                                    return Err(actix_web::error::ErrorForbidden(
+                                    return Err(forbidden(
                                         "Account not activated. Please check your email for activation instructions.",
                                     ));
                                 }

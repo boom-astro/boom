@@ -64,6 +64,58 @@ pub fn forbidden(message: &str) -> HttpResponse {
     HttpResponse::Forbidden().json(ApiResponseBody::error(message))
 }
 
+pub fn unauthorized(message: &str) -> HttpResponse {
+    HttpResponse::Unauthorized().json(ApiResponseBody::error(message))
+}
+
+/// A refusal in the API's own JSON envelope, for the places that have to hand
+/// back an `actix_web::Error` rather than an `HttpResponse` -- a `FromRequest`
+/// extractor or a middleware.
+///
+/// `actix_web::error::ErrorForbidden` and its siblings send the message as
+/// `text/plain`. A client that reads `message` out of the body finds nothing
+/// there and falls back to the bare status code, so the same UI showed a
+/// sentence for a refusal from one route and "failed: 403" for the next one --
+/// and messages written to be read, like the one telling somebody their account
+/// is not activated yet, never reached anybody.
+#[derive(Debug)]
+pub struct ApiError {
+    status: actix_web::http::StatusCode,
+    message: String,
+}
+
+impl ApiError {
+    pub fn forbidden(message: impl Into<String>) -> Self {
+        Self {
+            status: actix_web::http::StatusCode::FORBIDDEN,
+            message: message.into(),
+        }
+    }
+
+    pub fn unauthorized(message: impl Into<String>) -> Self {
+        Self {
+            status: actix_web::http::StatusCode::UNAUTHORIZED,
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for ApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl actix_web::ResponseError for ApiError {
+    fn status_code(&self) -> actix_web::http::StatusCode {
+        self.status
+    }
+
+    fn error_response(&self) -> HttpResponse {
+        HttpResponse::build(self.status).json(ApiResponseBody::error(&self.message))
+    }
+}
+
 // have an ok_ser() that takes a serializable object and converts it to serde_json::Value
 pub fn ok_ser<T: serde::Serialize>(message: &str, data: T) -> HttpResponse {
     match serde_json::to_value(data) {

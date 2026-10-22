@@ -50,7 +50,7 @@ pub async fn get_catalogs(
 ) -> HttpResponse {
     let current_user = match current_user {
         Some(user) => user,
-        None => return HttpResponse::Unauthorized().body("Unauthorized"),
+        None => return response::unauthorized("Unauthorized"),
     };
     // Get collection names in alphabetical order
     let collection_names = match db.list_collection_names().await {
@@ -130,7 +130,7 @@ pub async fn get_catalog_indexes(
 ) -> HttpResponse {
     let current_user = match current_user {
         Some(user) => user,
-        None => return HttpResponse::Unauthorized().body("Unauthorized"),
+        None => return response::unauthorized("Unauthorized"),
     };
     if !catalog_accessible(&db, &catalog_name, &current_user, &config).await {
         return response::not_found(&format!("Catalog {} does not exist", catalog_name));
@@ -194,7 +194,7 @@ pub async fn get_catalog_sample(
 ) -> HttpResponse {
     let current_user = match current_user {
         Some(user) => user,
-        None => return HttpResponse::Unauthorized().body("Unauthorized"),
+        None => return response::unauthorized("Unauthorized"),
     };
     if !catalog_accessible(&db, &catalog_name, &current_user, &config).await {
         return response::not_found(&format!("Catalog {} does not exist", catalog_name));
