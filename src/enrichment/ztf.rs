@@ -610,9 +610,9 @@ const CIDER_MIN_PHOTOMETRY_POINTS: usize = 2;
 const ACAI_BTS_NAMES: [&str; 6] = ["acai_h", "acai_n", "acai_v", "acai_o", "acai_b", "btsbot"];
 
 /// Per-object program for Milvus, from this alert and every prior detection:
-/// public (1) if any is public, partnership (2) if all are partnership,
-/// otherwise private (3). Program IDs other than these are ignored, and `None`
-/// means none was left.
+/// public (1) if any detection is public, partnership (2) if only partnership
+/// in history, otherwise private (3). Other values are ignored; `None` means
+/// none of these was found, and the object is not stored.
 fn milvus_programid(alert_programid: i32, prv_candidates: &[ZtfPhotometry]) -> Option<i32> {
     const PUBLIC: i32 = ProgramId::Public as i32;
     const PARTNERSHIP: i32 = ProgramId::Partnership as i32;
