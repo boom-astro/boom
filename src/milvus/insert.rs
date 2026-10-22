@@ -36,8 +36,8 @@ use super::proto::schema::{
 ///
 /// Fields are encoded in tag order, so `object_id` and `embedding` take the
 /// last tags: a stored entry cut short anywhere is then missing one of them,
-/// which `backup::decode` rejects. Adding `programid` at tag 3 moved them up,
-/// so entries queued before it no longer decode and are dropped.
+/// which `backup::decode` rejects. Entries queued before `programid` no longer
+/// decode.
 #[derive(Clone, PartialEq, prost::Message)]
 pub struct EmbeddingRow {
     /// Survey object identifier, the collection's primary key.

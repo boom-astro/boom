@@ -609,10 +609,8 @@ const CIDER_MIN_PHOTOMETRY_POINTS: usize = 2;
 
 const ACAI_BTS_NAMES: [&str; 6] = ["acai_h", "acai_n", "acai_v", "acai_o", "acai_b", "btsbot"];
 
-/// The program an object is stored under in Milvus, which is per object rather
-/// than per alert: public if this alert or any detection in the object's
-/// history (`ZTF_alerts_aux.prv_candidates`) is public, otherwise Caltech,
-/// which for now stands for every non-public program.
+/// Per-object program for Milvus: public if this alert or any prior detection
+/// is, otherwise 3, which stands for every non-public program.
 fn milvus_programid(alert_programid: i32, prv_candidates: &[ZtfPhotometry]) -> i32 {
     let public = ProgramId::Public as i32;
     if alert_programid == public || prv_candidates.iter().any(|p| p.programid == public) {
