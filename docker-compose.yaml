@@ -651,6 +651,7 @@ services:
       BOOM_REDIS__HOST: valkey
       BOOM_GPU__ENABLED: ${BOOM_GPU__ENABLED:-false}
       BOOM_GPU__DEVICE_IDS: ${BOOM_GPU__DEVICE_IDS:-}
+      BOOM_PHOTOMETRY_POINTS__MODE: ${BOOM_PHOTOMETRY_POINTS__MODE:-}
       # Milvus vector database (optional; see docs/milvus.md).
       # This scheduler runs the AppleCiDEr fusion model, so it is what produces the
       # embeddings. Reached over the public internet, so this works regardless

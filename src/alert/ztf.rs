@@ -763,9 +763,19 @@ pub struct ZtfAlertWorker {
     schema_cache: SchemaCache,
     lsst_alert_aux_collection: mongodb::Collection<Document>,
     decam_alert_aux_collection: mongodb::Collection<Document>,
+    photometry_points: Option<crate::photometry::mongo::MongoPoints>,
 }
 
 impl ZtfAlertWorker {
+    async fn compare_points(&self, candid: i64, object_id: &str) -> Result<(), AlertError> {
+        if let Some(store) = &self.photometry_points {
+            crate::photometry::compare::mirror_and_compare(&self.db, store, candid, object_id)
+                .await
+                .map_err(AlertError::PhotometryPoints)?;
+        }
+        Ok(())
+    }
+
     #[instrument(skip_all)]
     fn split_prv_candidates(
         &self,
@@ -989,6 +999,18 @@ impl AlertWorker for ZtfAlertWorker {
         let decam_alert_aux_collection: mongodb::Collection<Document> =
             db.collection(&decam::ALERT_AUX_COLLECTION);
 
+        let photometry_points =
+            if config.photometry_points.mode == conf::PhotometryPointsMode::Compare {
+                let store = crate::photometry::mongo::MongoPoints::new(db.clone());
+                store
+                    .initialize()
+                    .await
+                    .map_err(AlertWorkerError::PhotometryPoints)?;
+                Some(store)
+            } else {
+                None
+            };
+
         let worker = ZtfAlertWorker {
             xmatch_configs,
             host_galaxy_config: config.host_galaxy.clone(),
@@ -1000,6 +1022,7 @@ impl AlertWorker for ZtfAlertWorker {
             lsst_alert_aux_collection,
             decam_alert_aux_collection,
             alert_aux_collection_update,
+            photometry_points,
         };
         Ok(worker)
     }
@@ -1058,6 +1081,7 @@ impl AlertWorker for ZtfAlertWorker {
             .await
             .inspect_err(as_error!())?
         {
+            self.compare_points(candid, &object_id).await?;
             return Ok(ProcessAlertStatus::Exists(candid));
         }
 
@@ -1152,6 +1176,7 @@ impl AlertWorker for ZtfAlertWorker {
             .await
             .inspect_err(as_error!())?;
 
+        self.compare_points(candid, &object_id).await?;
         Ok(status)
     }
 }
