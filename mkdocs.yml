@@ -69,6 +69,7 @@ nav:
   - Classification and fits:
       - AppleCiDER: applecider.md
       - Villar light-curve fits: villar-fit.md
+      - Gaussian-process light-curve fits: gp-fit.md
       - Milvus vector database: milvus.md
   - Babamul:
       - Babamul: babamul.md

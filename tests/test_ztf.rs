@@ -353,6 +353,9 @@ async fn test_enrich_ztf_alert() {
     assert_eq!(properties.get_bool("near_brightstar").unwrap(), true);
     assert_eq!(properties.get_bool("stationary").unwrap(), true);
 
+    // Written for every enriched alert, as null when the light curve cannot be fitted.
+    assert!(alert.contains_key("gp_fit"), "gp_fit must be written");
+
     // the properties also include "photstats, a document with bands as keys and
     // as values the rate of evolution (mag/day) before and after peak
     let photstats = properties.get_document("photstats").unwrap();
