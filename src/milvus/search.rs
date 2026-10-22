@@ -47,11 +47,15 @@ pub struct SearchHit {
 impl MilvusClient {
     /// Find the `top_k` objects whose stored embeddings are most similar.
     /// Results are ordered best-first.
+    ///
+    /// `programids` restricts the search to those programs; `None` searches
+    /// every row.
     #[instrument(skip_all, err, fields(collection = %self.config().collection.name, top_k))]
     pub async fn search_embedding(
         &mut self,
         query: &[f32],
         top_k: i64,
+        programids: Option<&[i32]>,
     ) -> Result<Vec<SearchHit>, MilvusError> {
         let config = self.config().clone();
 
@@ -74,7 +78,8 @@ impl MilvusClient {
         let request = SearchRequest {
             db_name: config.database.clone(),
             collection_name: config.collection.name.clone(),
-            dsl: String::new(),
+            // Applied during the ANN search, so top_k counts only allowed rows.
+            dsl: programids.map(programid_in_expr).unwrap_or_default(),
             dsl_type: DslType::BoolExprV1 as i32,
             search_input: Some(SearchInput::PlaceholderGroup(encode_float_placeholder(&[
                 query,
@@ -96,20 +101,28 @@ impl MilvusClient {
 
     /// Fetch the stored rows for the given `object_ids`. Missing ids are simply
     /// absent from the result; order is not guaranteed to match the input.
+    ///
+    /// Rows outside `programids` are left out as if missing; `None` returns all.
     #[instrument(skip_all, err, fields(collection = %self.config().collection.name, ids = object_ids.len()))]
     pub async fn get_embeddings(
         &mut self,
         object_ids: &[&str],
+        programids: Option<&[i32]>,
     ) -> Result<Vec<EmbeddingRow>, MilvusError> {
         if object_ids.is_empty() {
             return Ok(vec![]);
         }
         let config = self.config().clone();
 
+        let mut expr = object_id_in_expr(object_ids);
+        if let Some(programids) = programids {
+            expr = format!("{expr} and {}", programid_in_expr(programids));
+        }
+
         let request = QueryRequest {
             db_name: config.database.clone(),
             collection_name: config.collection.name.clone(),
-            expr: object_id_in_expr(object_ids),
+            expr,
             output_fields: vec![
                 FIELD_OBJECT_ID.to_string(),
                 FIELD_EMBEDDING.to_string(),
@@ -230,6 +243,16 @@ fn object_id_in_expr(object_ids: &[&str]) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     format!("{FIELD_OBJECT_ID} in [{list}]")
+}
+
+/// Build a `programid in [1, 3]` boolean expression.
+fn programid_in_expr(programids: &[i32]) -> String {
+    let list = programids
+        .iter()
+        .map(i32::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{FIELD_PROGRAMID} in [{list}]")
 }
 
 /// Serialize float query vectors into a Milvus `PlaceholderGroup` (each vector
@@ -466,6 +489,12 @@ mod tests {
         );
         // Quotes/backslashes are stripped, so the expression stays well-formed.
         assert_eq!(object_id_in_expr(&["ev\"il"]), r#"object_id in ["evil"]"#);
+    }
+
+    #[test]
+    fn programid_in_expr_lists_the_programs() {
+        assert_eq!(programid_in_expr(&[1]), "programid in [1]");
+        assert_eq!(programid_in_expr(&[1, 3]), "programid in [1, 3]");
     }
 
     #[test]

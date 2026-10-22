@@ -109,7 +109,7 @@ async fn test_ztf_alert_to_milvus_e2e() {
     // 5. Similarity search with the stored vector must find the object itself, at
     //    a near-perfect score (COSINE self-match on an L2-normalized vector).
     let hits = client
-        .search_embedding(&row.embedding, 5)
+        .search_embedding(&row.embedding, 5, None)
         .await
         .expect("similarity search failed");
     let self_hit = hits
@@ -126,6 +126,19 @@ async fn test_ztf_alert_to_milvus_e2e() {
         Some(candid),
         "search hit should carry the stored candid"
     );
+
+    // A programid filter keeps the row only when its program is allowed.
+    let other_program = if row.programid == 1 { 3 } else { 1 };
+    let allowed = client
+        .search_embedding(&row.embedding, 5, Some(&[row.programid]))
+        .await
+        .expect("filtered search failed");
+    assert!(allowed.iter().any(|h| h.object_id == object_id));
+    let excluded = client
+        .search_embedding(&row.embedding, 5, Some(&[other_program]))
+        .await
+        .expect("filtered search failed");
+    assert!(excluded.iter().all(|h| h.object_id != object_id));
 
     // The collection now holds at least our row.
     assert!(
@@ -151,7 +164,7 @@ async fn read_embedding_with_retry(client: &mut MilvusClient, object_id: &str) -
     const ATTEMPTS: usize = 20;
     for _ in 0..ATTEMPTS {
         let rows = client
-            .get_embeddings(&[object_id])
+            .get_embeddings(&[object_id], None)
             .await
             .expect("get_embeddings failed");
         if let Some(row) = rows.into_iter().find(|r| r.object_id == object_id) {
