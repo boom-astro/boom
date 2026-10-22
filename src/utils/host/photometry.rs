@@ -209,6 +209,7 @@ mod tests {
             objtype: Some("G".to_string()),
             size_is_isophotal: true,
             orientation_is_nominal: false,
+            rex_snr_band: None,
             ra,
             dec,
             sep_arcsec: 10.0,
