@@ -494,6 +494,59 @@ export async function searchObjects(value: string, limit: number = 10): Promise<
   };
 }
 
+export type SimilarObject = {
+  object_id: string;
+  /** COSINE similarity, so higher is closer. */
+  score: number;
+  /** The alert the embedding came from; present only if requested from Milvus. */
+  candid?: number | string | null;
+  jd?: number | null;
+};
+
+/**
+ * Objects whose AppleCiDEr fusion embedding is closest to this one's, excluding
+ * itself. A 404 means no embedding is stored (only ZTF alerts that pass the
+ * AppleCiDEr gate get one), so it returns an empty list rather than throwing.
+ */
+export async function fetchSimilarObjects(
+  objectId: string,
+  topK: number = 10
+): Promise<{ results: SimilarObject[]; message?: string }> {
+  const url = `${API_BASE}/similarity/objects`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ object_id: objectId, top_k: topK }),
+  });
+  const body = await parseResponseJson(res).catch(() => null);
+  const message =
+    body && typeof body === "object" && "message" in body
+      ? String((body as { message?: unknown }).message)
+      : undefined;
+
+  if (res.status === 404) {
+    return { results: [], message: message ?? `No embedding stored for ${objectId}` };
+  }
+  if (!res.ok) {
+    throw new Error(message ?? `Similarity search failed: ${res.status}`);
+  }
+
+  const result = unwrapData<unknown>(body, []);
+  return { results: Array.isArray(result) ? (result as SimilarObject[]) : [], message };
+}
+
+export async function fetchEmbeddingsCount(): Promise<number> {
+  const url = `${API_BASE}/embeddings/count`;
+  const res = await fetch(url);
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`Fetch embedding count failed: ${res.status} ${txt}`);
+  }
+  const body = await parseResponseJson(res).catch(() => ({}));
+  const data = unwrapData<{ count?: number }>(body, {});
+  return typeof data.count === "number" ? data.count : 0;
+}
+
 export default {
   login,
   logout,

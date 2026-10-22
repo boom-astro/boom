@@ -91,7 +91,6 @@ impl Modify for BabamulSecurityAddon {
         routes::queries::pipeline::post_pipeline_query,
         routes::embeddings::post_similar_objects,
         routes::embeddings::get_embeddings_count,
-        routes::embeddings::delete_object_embedding
     ),
     security(
         ("api_jwt_token" = [])
@@ -141,6 +140,8 @@ pub struct ApiDoc;
         routes::babamul::stats::nightly::get_nightly_stats,
         routes::babamul::stats::refresh::post_stats_refresh,
         routes::babamul::surveys::alerts::skymap_search_alerts,
+        routes::babamul::embeddings::post_babamul_similar_objects,
+        routes::babamul::embeddings::get_babamul_embeddings_count,
     ),
     components(schemas(
         routes::babamul::surveys::alerts::LsstAlertSkymapSearchResult
