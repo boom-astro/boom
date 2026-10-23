@@ -399,19 +399,12 @@ fn fit(
         for (i, row) in damped.iter_mut().enumerate() {
             row[i] *= 1.0 + lambda;
         }
-        let Some(delta) = solve(damped, atb.clone()) else {
+        let Some(delta) = solve(damped, atb.clone()).filter(|d| d.iter().all(|x| x.is_finite()))
+        else {
             break;
         };
 
         let mut candidate = state;
-        // A non-finite step is the same kind of failure: damp rather than abort.
-        if delta.iter().any(|d| !d.is_finite()) {
-            lambda *= 10.0;
-            if lambda > 1e8 {
-                break;
-            }
-            continue;
-        }
         for (k, d) in delta.iter().enumerate() {
             candidate = perturb(&candidate, k, *d);
         }
