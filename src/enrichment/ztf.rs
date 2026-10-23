@@ -2,6 +2,7 @@ use crate::alert::{Candidate, ZtfCandidate};
 use crate::conf::AppConfig;
 use crate::enrichment::{
     babamul::{Babamul, BabamulZtfAlert},
+    decam::{add_decam_match, DecamMatch},
     fetch_alerts,
     models::{
         applecider_postprocess::{self, AppleCiderFusion, AppleCiderModalities},
@@ -342,6 +343,8 @@ pub struct ZtfAlertForEnrichment {
     #[serde(default)]
     pub host_galaxy: Option<HostGalaxyAssociation>,
     pub survey_matches: Option<ZtfSurveyMatches>,
+    #[serde(default)]
+    pub decam_match: Option<DecamMatch>,
 }
 
 /// Longest window `Outburst` scores over, so also how far back history is read.
@@ -505,6 +508,11 @@ pub struct ZtfAlertProperties {
     pub stationary: bool,
     pub photstats: PerBandProperties,
     pub multisurvey_photstats: Option<PerBandProperties>,
+    /// Without the private DECam points, for Babamul. `None` when there are none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[avro(skip)]
+    #[schema(ignore)]
+    pub public_multisurvey_photstats: Option<PerBandProperties>,
     /// `None` means never evaluated, not "not an asteroid".
     #[serde(default)]
     pub sso: Option<ZtfSsoAssociation>,
@@ -518,6 +526,15 @@ pub struct ZtfAlertProperties {
     /// Detection episodes, for finding sources that outburst more than once.
     /// `None` on alerts enriched before this field existed.
     pub episode_history: Option<EpisodeHistory>,
+}
+
+impl ZtfAlertProperties {
+    pub fn into_public(mut self) -> Self {
+        if let Some(public) = self.public_multisurvey_photstats.take() {
+            self.multisurvey_photstats = Some(public);
+        }
+        self
+    }
 }
 
 /// Field order matches the ONNX output index (0-7).
@@ -776,7 +793,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             mpc_orbits,
             sso_baselines,
             alert_cutout_storage,
-            alert_pipeline: create_ztf_alert_pipeline(false),
+            alert_pipeline: add_decam_match(create_ztf_alert_pipeline(false)),
             models,
             babamul,
             milvus,
@@ -1372,15 +1389,15 @@ impl ZtfEnrichmentWorker {
         let mut has_matches = false;
         if let Some(survey_matches) = &alert.survey_matches {
             if let Some(lsst_match) = &survey_matches.lsst {
-                let mut lsst_lightcurve: Vec<PhotometryMag> = lsst_match
+                let lsst_lightcurve: Vec<PhotometryMag> = lsst_match
                     .prv_candidates
                     .iter()
                     .chain(&lsst_match.fp_hists)
                     .filter(|p| p.jd <= candidate.jd)
                     .filter_map(|p| p.to_photometry_mag(None))
                     .collect();
-                prepare_photometry(&mut lsst_lightcurve);
                 lightcurve.extend(lsst_lightcurve);
+                prepare_photometry(&mut lightcurve);
                 has_matches = true;
             }
         }
@@ -1388,6 +1405,21 @@ impl ZtfEnrichmentWorker {
             analyze_photometry(&lightcurve).0
         } else {
             photstats.clone()
+        };
+        let decam_lightcurve = alert
+            .decam_match
+            .as_ref()
+            .map(|m| m.lightcurve(candidate.jd))
+            .unwrap_or_default();
+        let (multisurvey_photstats, public_multisurvey_photstats) = if decam_lightcurve.is_empty() {
+            (multisurvey_photstats, None)
+        } else {
+            let mut with_decam = [lightcurve.clone(), decam_lightcurve].concat();
+            prepare_photometry(&mut with_decam);
+            (
+                analyze_photometry(&with_decam).0,
+                Some(multisurvey_photstats),
+            )
         };
 
         let hosted = alert.host_galaxy.as_ref().map(|hg| hg.best_host.is_some());
@@ -1418,6 +1450,7 @@ impl ZtfEnrichmentWorker {
                 stationary,
                 photstats,
                 multisurvey_photstats: Some(multisurvey_photstats),
+                public_multisurvey_photstats,
                 sso: Some(sso),
                 activity: Some(activity),
                 detection_history: Some(detection_history),

@@ -250,7 +250,7 @@ impl BabamulLsstAlert {
                         band: p.band,
                     })
                     .collect(),
-                properties,
+                properties: properties.into_public(),
                 survey_matches: alert.survey_matches.into(),
             },
             alert.cross_matches.unwrap_or_default(),
@@ -369,7 +369,7 @@ impl BabamulZtfAlert {
                     band: p.band,
                 })
                 .collect(),
-            properties,
+            properties: properties.into_public(),
             survey_matches: alert.survey_matches.into(),
         }
     }
