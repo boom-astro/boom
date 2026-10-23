@@ -627,9 +627,9 @@ const CIDER_MIN_PHOTOMETRY_POINTS: usize = 2;
 const ACAI_BTS_NAMES: [&str; 6] = ["acai_h", "acai_n", "acai_v", "acai_o", "acai_b", "btsbot"];
 
 /// Per-object program for Milvus, from this alert and every prior detection:
-/// public (1) if any detection is public, partnership (2) if only partnership
-/// in history, otherwise private (3). Other values are ignored; `None` means
-/// none of these was found, and the object is not stored.
+/// public (1) if any detection is public, else partnership (2) if any is
+/// partnership, else private (3). Other values are ignored; `None` means none
+/// of these was found, and the object is not stored.
 fn milvus_programid(alert_programid: i32, prv_candidates: &[ZtfPhotometry]) -> Option<i32> {
     const PUBLIC: i32 = ProgramId::Public as i32;
     const PARTNERSHIP: i32 = ProgramId::Partnership as i32;
@@ -647,7 +647,7 @@ fn milvus_programid(alert_programid: i32, prv_candidates: &[ZtfPhotometry]) -> O
         None
     } else if programids().any(|pid| pid == PUBLIC) {
         Some(PUBLIC)
-    } else if programids().all(|pid| pid == PARTNERSHIP) {
+    } else if programids().any(|pid| pid == PARTNERSHIP) {
         Some(PARTNERSHIP)
     } else {
         Some(PRIVATE)
@@ -1783,16 +1783,17 @@ mod tests {
     }
 
     #[test]
-    fn an_object_with_only_partnership_detections_is_partnership() {
+    fn any_partnership_detection_without_a_public_one_makes_the_object_partnership() {
         assert_eq!(milvus_programid(2, &[]), Some(2));
         assert_eq!(milvus_programid(2, &[detection(2), detection(2)]), Some(2));
+        assert_eq!(milvus_programid(2, &[detection(2), detection(3)]), Some(2));
+        assert_eq!(milvus_programid(3, &[detection(2)]), Some(2));
     }
 
     #[test]
-    fn any_private_detection_without_a_public_one_makes_the_object_private() {
+    fn an_object_with_only_private_detections_is_private() {
         assert_eq!(milvus_programid(3, &[]), Some(3));
-        assert_eq!(milvus_programid(2, &[detection(2), detection(3)]), Some(3));
-        assert_eq!(milvus_programid(3, &[detection(2)]), Some(3));
+        assert_eq!(milvus_programid(3, &[detection(3), detection(3)]), Some(3));
     }
 
     #[test]

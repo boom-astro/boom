@@ -20,9 +20,9 @@ pub const FIELD_EMBEDDING: &str = "embedding";
 pub const FIELD_CANDID: &str = "candid";
 /// Julian date of that alert.
 pub const FIELD_JD: &str = "jd";
-/// The object's program: 1 (public) if any detection is public, 2
-/// (partnership) if only partnership in history, otherwise 3 (private). Other
-/// values are ignored; an object with none of these is not stored.
+/// The object's program: 1 (public) if any detection is public, else 2
+/// (partnership) if any is partnership, else 3 (private). Other values are
+/// ignored; an object with none of these is not stored.
 pub const FIELD_PROGRAMID: &str = "programid";
 
 const INDEX_NAME: &str = "embedding_idx";
@@ -257,9 +257,8 @@ pub fn embedding_collection_schema(
             },
             FieldSchema {
                 name: FIELD_PROGRAMID.to_string(),
-                description:
-                    "1 if any detection is public, 2 if only partnership in history, else 3"
-                        .to_string(),
+                description: "1 if any detection is public, else 2 if any is partnership, else 3"
+                    .to_string(),
                 data_type: DataType::Int32 as i32,
                 ..Default::default()
             },
