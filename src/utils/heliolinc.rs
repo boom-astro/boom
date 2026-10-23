@@ -16,7 +16,7 @@ use crate::utils::orbit_fit::{
 };
 use crate::utils::outburst::{hg12, DEFAULT_G12};
 use crate::utils::sso_geometry::{
-    dot, earth_position, heliocentric_position, norm, OrbitalElements, Site, ZTF,
+    dot, earth_position, norm, OrbitalElements, Site, PARABOLIC_TOLERANCE, ZTF,
 };
 use rayon::prelude::*;
 use std::collections::{BTreeMap, HashMap};
@@ -30,6 +30,10 @@ const EARTH_DERIV_STEP: f64 = 0.5;
 /// Eccentricity below which an orbit is treated as circular. Ignoring it moves
 /// a main-belt position by well under a milliarcsecond.
 const CIRCULAR_ECCENTRICITY: f64 = 1e-10;
+/// Kilometers per second in one au/day.
+pub const KM_S_PER_AU_DAY: f64 = 1_731.456_829;
+const UNIVERSAL_TOLERANCE: f64 = 1e-13;
+const UNIVERSAL_MAX_ITER: usize = 100;
 
 /// One assumed heliocentric distance and radial velocity at the reference epoch.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -45,6 +49,32 @@ pub struct Hypothesis {
 pub struct State {
     pub pos: [f64; 3],
     pub vel: [f64; 3],
+}
+
+fn energy(state: &State) -> f64 {
+    dot(&state.vel, &state.vel) / 2.0 - MU / norm(&state.pos)
+}
+
+pub fn is_bound(state: &State) -> bool {
+    energy(state) < 0.0
+}
+
+/// The orbits a search or a fit may use.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub enum Conics {
+    #[default]
+    Bound,
+    /// Up to this hyperbolic excess speed, au/day.
+    Unbound(f64),
+}
+
+impl Conics {
+    pub fn admits(self, state: &State) -> bool {
+        match self {
+            Conics::Bound => is_bound(state),
+            Conics::Unbound(vinf) => energy(state) < vinf * vinf / 2.0,
+        }
+    }
 }
 
 /// Tracklets that agree on a state once propagated to a common epoch.
@@ -83,6 +113,8 @@ pub struct LinkConfig {
     /// Where the astrometry was taken from. An Earth radius is several
     /// arcseconds at these distances, so the fit is not site-independent.
     pub site: Site,
+    /// Which states are clustered and which orbits their fits may reach.
+    pub conics: Conics,
 }
 
 /// Largest radial velocity a bound object can have at `r_au`, au/day.
@@ -105,20 +137,50 @@ fn hypothesis_grid(
     baseline_days: f64,
     tol_au: f64,
 ) -> Vec<Hypothesis> {
+    radial_grid(
+        first_au,
+        last_au,
+        distances,
+        baseline_days,
+        tol_au,
+        |r_au| (None, 0.98 * escape_speed(r_au)),
+    )
+}
+
+fn radial_grid(
+    first_au: f64,
+    last_au: f64,
+    distances: u32,
+    baseline_days: f64,
+    tol_au: f64,
+    band: impl Fn(f64) -> (Option<f64>, f64),
+) -> Vec<Hypothesis> {
     let step = (tol_au / baseline_days).max(f64::MIN_POSITIVE);
     let ratio = (last_au / first_au).powf(1.0 / f64::from(distances.saturating_sub(1).max(1)));
     let mut out = Vec::new();
     for i in 0..distances {
         let r_au = first_au * ratio.powi(i as i32);
-        let limit = 0.98 * escape_speed(r_au);
+        let (above, limit) = band(r_au);
         let arms = (limit / step).floor() as i64;
-        for k in -arms..=arms {
+        let inner = above.map_or(-1, |lo| (lo / step).floor() as i64);
+        for k in (-arms..=arms).filter(|k| k.abs() > inner) {
             out.push(Hypothesis {
                 r_au,
                 rdot_au_per_day: step * k as f64,
             });
         }
     }
+    out
+}
+
+/// Radial velocities past the bound grids, up to excess speed `vinf_au_per_day`.
+pub fn unbound_hypotheses(vinf_au_per_day: f64) -> Vec<Hypothesis> {
+    let band = |r_au: f64| {
+        let escape = escape_speed(r_au);
+        (Some(0.98 * escape), escape.hypot(vinf_au_per_day.max(0.0)))
+    };
+    let mut out = radial_grid(1.1, 5.6, 18, 7.0, 0.002, band);
+    out.extend(radial_grid(1.5, 9.5, 29, 7.0, 0.002, band));
     out
 }
 
@@ -153,7 +215,18 @@ impl Default for LinkConfig {
             min_nights: 2,
             max_residual_arcsec: 2.0,
             site: ZTF,
+            conics: Conics::Bound,
         }
+    }
+}
+
+impl LinkConfig {
+    pub fn with_unbound(mut self, vinf_au_per_day: f64) -> Self {
+        if vinf_au_per_day > 0.0 {
+            self.hypotheses.extend(unbound_hypotheses(vinf_au_per_day));
+            self.conics = Conics::Unbound(vinf_au_per_day);
+        }
+        self
     }
 }
 
@@ -211,48 +284,108 @@ fn earth_velocity(jd: f64) -> [f64; 3] {
     [(b[0] - a[0]) / d, (b[1] - a[1]) / d, (b[2] - a[2]) / d]
 }
 
-/// The heliocentric state a tracklet implies under `h`.
-///
-/// The distance along the line of sight follows from placing the object on a
-/// sphere of radius `r_au`; the range rate then follows from requiring the
-/// heliocentric radial velocity to be `rdot_au_per_day`.
-pub fn state_from_tracklet(t: &Tracklet, h: &Hypothesis) -> Option<State> {
-    let rho = unit_vector(t.ra_ref, t.dec_ref);
-    let rho_dot = unit_vector_rate(t);
-    let e_pos = earth_position(t.jd_ref);
-    let e_vel = earth_velocity(t.jd_ref);
-
-    // |E + d rho| = r, taking the root in front of the observer.
-    let b = dot(&e_pos, &rho);
-    let c = dot(&e_pos, &e_pos) - h.r_au * h.r_au;
-    let disc = b * b - c;
-    if disc < 0.0 {
-        return None;
-    }
-    let d = -b + disc.sqrt();
-    if d <= 0.0 {
-        return None;
-    }
-
-    let pos = [
-        e_pos[0] + d * rho[0],
-        e_pos[1] + d * rho[1],
-        e_pos[2] + d * rho[2],
-    ];
-    let denom = dot(&pos, &rho);
-    if denom.abs() < 1e-9 {
-        return None;
-    }
-    let d_dot = (h.r_au * h.rdot_au_per_day - dot(&pos, &e_vel) - d * dot(&pos, &rho_dot)) / denom;
-    let vel = [
-        e_vel[0] + d_dot * rho[0] + d * rho_dot[0],
-        e_vel[1] + d_dot * rho[1] + d * rho_dot[1],
-        e_vel[2] + d_dot * rho[2] + d * rho_dot[2],
-    ];
-    Some(State { pos, vel })
+struct Sight {
+    rho: [f64; 3],
+    rho_dot: [f64; 3],
+    earth: [f64; 3],
+    earth_vel: [f64; 3],
 }
 
-/// Osculating elements for a bound state, or `None` when it is not an ellipse.
+impl Sight {
+    fn of(t: &Tracklet) -> Self {
+        Sight {
+            rho: unit_vector(t.ra_ref, t.dec_ref),
+            rho_dot: unit_vector_rate(t),
+            earth: earth_position(t.jd_ref),
+            earth_vel: earth_velocity(t.jd_ref),
+        }
+    }
+
+    /// The heliocentric state at distance `r_au` and radial velocity
+    /// `rdot_au_per_day`.
+    ///
+    /// The distance along the line of sight follows from placing the object on
+    /// a sphere of radius `r_au`; the range rate then follows from requiring the
+    /// heliocentric radial velocity.
+    fn state(&self, r_au: f64, rdot_au_per_day: f64) -> Option<State> {
+        let (rho, rho_dot, e_pos, e_vel) = (&self.rho, &self.rho_dot, &self.earth, &self.earth_vel);
+        // |E + d rho| = r, taking the root in front of the observer.
+        let b = dot(e_pos, rho);
+        let c = dot(e_pos, e_pos) - r_au * r_au;
+        let disc = b * b - c;
+        if disc < 0.0 {
+            return None;
+        }
+        let d = -b + disc.sqrt();
+        if d <= 0.0 {
+            return None;
+        }
+
+        let pos = [
+            e_pos[0] + d * rho[0],
+            e_pos[1] + d * rho[1],
+            e_pos[2] + d * rho[2],
+        ];
+        let denom = dot(&pos, rho);
+        if denom.abs() < 1e-9 {
+            return None;
+        }
+        let d_dot = (r_au * rdot_au_per_day - dot(&pos, e_vel) - d * dot(&pos, rho_dot)) / denom;
+        let vel = [
+            e_vel[0] + d_dot * rho[0] + d * rho_dot[0],
+            e_vel[1] + d_dot * rho[1] + d * rho_dot[1],
+            e_vel[2] + d_dot * rho[2] + d * rho_dot[2],
+        ];
+        Some(State { pos, vel })
+    }
+
+    /// The state under `h`, which holds at the reference epoch `dt` days away.
+    /// L^2 is solved by secant: plain iteration oscillates for nearby objects.
+    fn state_under(&self, h: &Hypothesis, dt: f64) -> Option<State> {
+        let (r0, rdot0) = (h.r_au, h.rdot_au_per_day);
+        let at = |l2: f64| {
+            let accel = (l2 / r0 - MU) / (r0 * r0);
+            let jerk = (2.0 * MU - 3.0 * l2 / r0) / r0.powi(3) * rdot0;
+            let r = r0 + dt * (rdot0 + dt * (accel / 2.0 + dt * jerk / 6.0));
+            if r <= 0.0 {
+                return None;
+            }
+            self.state(r, rdot0 + dt * (accel + dt * jerk / 2.0))
+        };
+        let excess = |l2: f64, s: &State| {
+            let h_vec = cross(&s.pos, &s.vel);
+            dot(&h_vec, &h_vec) - l2
+        };
+        if dt == 0.0 {
+            return at(0.0);
+        }
+        let (mut x0, s0) = (0.0, at(0.0)?);
+        let mut f0 = excess(x0, &s0);
+        let mut x1 = f0;
+        let Some(mut s1) = at(x1) else {
+            return Some(s0);
+        };
+        for _ in 0..4 {
+            let f1 = excess(x1, &s1);
+            if f1 == f0 || f1.abs() <= 1e-9 * x1 {
+                break;
+            }
+            let x2 = (x1 - f1 * (x1 - x0) / (f1 - f0)).max(0.0);
+            let Some(s2) = at(x2) else {
+                break;
+            };
+            (x0, f0, x1, s1) = (x1, f1, x2, s2);
+        }
+        Some(s1)
+    }
+}
+
+/// The heliocentric state a tracklet implies under `h` at its own epoch.
+pub fn state_from_tracklet(t: &Tracklet, h: &Hypothesis) -> Option<State> {
+    Sight::of(t).state(h.r_au, h.rdot_au_per_day)
+}
+
+/// Osculating elements for a state on any conic, or `None` when it is degenerate.
 pub fn state_to_elements(state: &State, epoch_jd: f64) -> Option<OrbitalElements> {
     let r = norm(&state.pos);
     let v2 = dot(&state.vel, &state.vel);
@@ -260,10 +393,6 @@ pub fn state_to_elements(state: &State, epoch_jd: f64) -> Option<OrbitalElements
         return None;
     }
     let energy = v2 / 2.0 - MU / r;
-    if energy >= 0.0 {
-        return None;
-    }
-    let a = -MU / (2.0 * energy);
 
     let h_vec = cross(&state.pos, &state.vel);
     let h_norm = norm(&h_vec);
@@ -278,7 +407,7 @@ pub fn state_to_elements(state: &State, epoch_jd: f64) -> Option<OrbitalElements
         (v2 - MU / r) * state.pos[2] / MU - rv * state.vel[2] / MU,
     ];
     let e = norm(&e_vec);
-    if !(0.0..1.0).contains(&e) {
+    if !e.is_finite() {
         return None;
     }
 
@@ -294,6 +423,7 @@ pub fn state_to_elements(state: &State, epoch_jd: f64) -> Option<OrbitalElements
     // on the origin of longitude when the node is undefined too, and measure
     // the anomaly from there.
     if e < CIRCULAR_ECCENTRICITY {
+        let a = -MU / (2.0 * energy);
         let two_pi = 2.0 * std::f64::consts::PI;
         let (node, nu) = if equatorial {
             // Retrograde, the rotation into the ecliptic mirrors y.
@@ -335,52 +465,165 @@ pub fn state_to_elements(state: &State, epoch_jd: f64) -> Option<OrbitalElements
     if rv < 0.0 {
         nu = 2.0 * std::f64::consts::PI - nu;
     }
-    // True to eccentric to mean anomaly.
-    let ecc_anom =
-        2.0 * ((1.0 - e).sqrt() * (nu / 2.0).sin()).atan2((1.0 + e).sqrt() * (nu / 2.0).cos());
-    let mean_anom = ecc_anom - e * ecc_anom.sin();
 
-    Some(OrbitalElements::elliptical(
+    if e < 1.0 - PARABOLIC_TOLERANCE {
+        let a = -MU / (2.0 * energy);
+        // True to eccentric to mean anomaly.
+        let ecc_anom =
+            2.0 * ((1.0 - e).sqrt() * (nu / 2.0).sin()).atan2((1.0 + e).sqrt() * (nu / 2.0).cos());
+        let mean_anom = ecc_anom - e * ecc_anom.sin();
+        return Some(OrbitalElements::elliptical(
+            epoch_jd,
+            a,
+            e,
+            incl.to_degrees(),
+            node.to_degrees().rem_euclid(360.0),
+            peri.to_degrees().rem_euclid(360.0),
+            mean_anom.to_degrees().rem_euclid(360.0),
+        ));
+    }
+
+    let q = h_norm * h_norm / (MU * (1.0 + e));
+    let k = MU.sqrt();
+    let half = (nu / 2.0).tan();
+    let (a, mean_anom, since_perihelion) = if e <= 1.0 + PARABOLIC_TOLERANCE {
+        (
+            f64::INFINITY,
+            0.0,
+            (2.0 * q.powi(3)).sqrt() * (half + half.powi(3) / 3.0) / k,
+        )
+    } else {
+        let a = -MU / (2.0 * energy);
+        let hyp_anom = 2.0 * (((e - 1.0) / (e + 1.0)).sqrt() * half).atanh();
+        let mean_anom = e * hyp_anom.sinh() - hyp_anom;
+        (a, mean_anom, mean_anom * (-a).powf(1.5) / k)
+    };
+    if !since_perihelion.is_finite() {
+        return None;
+    }
+    Some(OrbitalElements {
         epoch_jd,
         a,
         e,
-        incl.to_degrees(),
-        node.to_degrees().rem_euclid(360.0),
-        peri.to_degrees().rem_euclid(360.0),
-        mean_anom.to_degrees().rem_euclid(360.0),
-    ))
+        incl: incl.to_degrees(),
+        node: node.to_degrees().rem_euclid(360.0),
+        peri: peri.to_degrees().rem_euclid(360.0),
+        mean_anomaly: mean_anom.to_degrees(),
+        q,
+        tp: epoch_jd - since_perihelion,
+    })
 }
 
-/// Propagate a state to `jd` on its own two-body orbit.
-pub fn propagate(state: &State, epoch_jd: f64, jd: f64) -> Option<State> {
-    let elements = state_to_elements(state, epoch_jd)?;
-    let pos = heliocentric_position(&elements, jd);
-    // Velocity by central difference, so one propagator serves both.
-    let step = 0.05;
-    let before = heliocentric_position(&elements, jd - step);
-    let after = heliocentric_position(&elements, jd + step);
-    let vel = [
-        (after[0] - before[0]) / (2.0 * step),
-        (after[1] - before[1]) / (2.0 * step),
-        (after[2] - before[2]) / (2.0 * step),
+/// Stumpff's c2 and c3.
+fn stumpff(z: f64) -> (f64, f64) {
+    if z.abs() < 0.1 {
+        // The closed forms cancel near zero.
+        let (mut c2, mut c3, mut t2, mut t3) = (0.0, 0.0, 0.5, 1.0 / 6.0);
+        for k in 0..7 {
+            c2 += t2;
+            c3 += t3;
+            let k = f64::from(k);
+            t2 *= -z / ((2.0 * k + 3.0) * (2.0 * k + 4.0));
+            t3 *= -z / ((2.0 * k + 4.0) * (2.0 * k + 5.0));
+        }
+        (c2, c3)
+    } else if z > 0.0 {
+        let s = z.sqrt();
+        ((1.0 - s.cos()) / z, (s - s.sin()) / (z * s))
+    } else {
+        let s = (-z).sqrt();
+        ((s.cosh() - 1.0) / -z, (s.sinh() - s) / (-z * s))
+    }
+}
+
+/// Two-body state `dt` days on, by universal variables.
+fn kepler(state: &State, dt: f64) -> Option<State> {
+    let (r0v, v0v) = (&state.pos, &state.vel);
+    let r0 = norm(r0v);
+    if r0.is_nan() || r0 <= 0.0 {
+        return None;
+    }
+    let k = MU.sqrt();
+    let sigma = dot(r0v, v0v) / k;
+    let alpha = 2.0 / r0 - dot(v0v, v0v) / MU;
+    let target = k * dt;
+    let (mut lo, mut hi) = if dt >= 0.0 {
+        (0.0, f64::INFINITY)
+    } else {
+        (f64::NEG_INFINITY, 0.0)
+    };
+    let mut chi = target / r0;
+    let mut converged = dt == 0.0;
+    for _ in 0..UNIVERSAL_MAX_ITER {
+        if converged {
+            break;
+        }
+        let z = alpha * chi * chi;
+        let (c2, c3) = stumpff(z);
+        let f = sigma * chi * chi * c2 + (1.0 - alpha * r0) * chi.powi(3) * c3 + r0 * chi - target;
+        if f == 0.0 {
+            converged = true;
+            break;
+        }
+        // Overflow only happens beyond the root.
+        if !f.is_finite() {
+            if dt >= 0.0 {
+                hi = chi;
+            } else {
+                lo = chi;
+            }
+        } else if f < 0.0 {
+            lo = chi;
+        } else {
+            hi = chi;
+        }
+        let slope = chi * chi * c2 + sigma * chi * (1.0 - z * c3) + r0 * (1.0 - z * c2);
+        let mut next = chi - f / slope;
+        if !(next > lo && next < hi) {
+            if !(lo.is_finite() && hi.is_finite()) {
+                return None;
+            }
+            next = 0.5 * (lo + hi);
+        }
+        converged = (next - chi).abs() <= UNIVERSAL_TOLERANCE * (1.0 + chi.abs());
+        chi = next;
+    }
+    if !converged {
+        return None;
+    }
+
+    let z = alpha * chi * chi;
+    let (c2, c3) = stumpff(z);
+    let f = 1.0 - chi * chi * c2 / r0;
+    let g = dt - chi.powi(3) * c3 / k;
+    let pos = [
+        f * r0v[0] + g * v0v[0],
+        f * r0v[1] + g * v0v[1],
+        f * r0v[2] + g * v0v[2],
     ];
-    // A state the elements cannot place is no orbit, not one at NaN.
+    let r = norm(&pos);
+    let f_dot = k * chi * (z * c3 - 1.0) / (r * r0);
+    let g_dot = 1.0 - chi * chi * c2 / r;
+    let vel = [
+        f_dot * r0v[0] + g_dot * v0v[0],
+        f_dot * r0v[1] + g_dot * v0v[1],
+        f_dot * r0v[2] + g_dot * v0v[2],
+    ];
+    // A state the conic cannot place is no orbit, not one at NaN.
     pos.iter()
         .chain(&vel)
         .all(|c| c.is_finite())
         .then_some(State { pos, vel })
 }
 
+/// Propagate a state to `jd` on its own two-body orbit.
+pub fn propagate(state: &State, epoch_jd: f64, jd: f64) -> Option<State> {
+    kepler(state, jd - epoch_jd)
+}
+
 /// Position alone, for callers that discard the velocity.
-///
-/// A third of the work of [`propagate`], which differences two extra positions
-/// to get the velocity. The orbit-fit Jacobian calls this per observation per
-/// parameter per iteration, so the saving is the bulk of a fit.
 pub fn propagate_position(state: &State, epoch_jd: f64, jd: f64) -> Option<[f64; 3]> {
-    let elements = state_to_elements(state, epoch_jd)?;
-    let pos = heliocentric_position(&elements, jd);
-    // A state the elements cannot place is no orbit, not one at NaN.
-    pos.iter().all(|c| c.is_finite()).then_some(pos)
+    kepler(state, jd - epoch_jd).map(|s| s.pos)
 }
 
 const MAX_NIGHT_MAG_SPREAD: f64 = 3.0;
@@ -598,24 +841,20 @@ fn connected_group(
 /// assumption and clusters the result -- so the sweep parallelises over them.
 fn tracks_for_hypothesis(
     tracklets: &[Tracklet],
+    sights: &[Sight],
     hypothesis: &Hypothesis,
     cfg: &LinkConfig,
 ) -> Vec<Track> {
     let mut tracks: Vec<Track> = Vec::new();
     // Propagated state per tracklet under this hypothesis.
     let mut states: Vec<(usize, State)> = Vec::new();
-    for (i, t) in tracklets.iter().enumerate() {
-        let r_au = hypothesis.r_au + hypothesis.rdot_au_per_day * (t.jd_ref - cfg.reference_jd);
-        if r_au <= 0.0 {
+    for (i, (t, sight)) in tracklets.iter().zip(sights).enumerate() {
+        let Some(s) = sight.state_under(hypothesis, t.jd_ref - cfg.reference_jd) else {
+            continue;
+        };
+        if !cfg.conics.admits(&s) {
             continue;
         }
-        let at_tracklet = Hypothesis {
-            r_au,
-            ..*hypothesis
-        };
-        let Some(s) = state_from_tracklet(t, &at_tracklet) else {
-            continue;
-        };
         if let Some(p) = propagate(&s, t.jd_ref, cfg.reference_jd) {
             states.push((i, p));
         }
@@ -744,6 +983,7 @@ fn score(track: &mut Track, observations: &[Observation], cfg: &LinkConfig) {
         cfg.reference_jd,
         SCREEN_ITERATIONS,
         Some(give_up),
+        cfg.conics,
     ) {
         Some(fit) => {
             track.state = fit.state;
@@ -751,7 +991,10 @@ fn score(track: &mut Track, observations: &[Observation], cfg: &LinkConfig) {
         }
         // Too few positions to refine six parameters, so take the state as it
         // stands rather than discarding a candidate for being short.
-        None => rms_arcsec(&track.state, cfg.reference_jd, observations),
+        None if cfg.conics.admits(&track.state) => {
+            rms_arcsec(&track.state, cfg.reference_jd, observations)
+        }
+        None => None,
     };
 }
 
@@ -816,6 +1059,7 @@ fn converge(track: &mut Track, observations: &[Observation], cfg: &LinkConfig) {
         &track.state,
         cfg.reference_jd,
         CONVERGE_ITERATIONS,
+        cfg.conics,
     )
     .filter(|fit| fit.rms_arcsec <= gate_arcsec(observations, cfg))
     {
@@ -850,10 +1094,11 @@ fn gate_arcsec(observations: &[Observation], cfg: &LinkConfig) -> f64 {
 fn candidate_sets(tracklets: &[Tracklet], cfg: &LinkConfig) -> Vec<Vec<Track>> {
     // Collected in hypothesis order, so the result does not depend on thread
     // scheduling and deduplication stays reproducible.
+    let sights: Vec<Sight> = tracklets.par_iter().map(Sight::of).collect();
     let candidates: Vec<Track> = cfg
         .hypotheses
         .par_iter()
-        .flat_map(|hypothesis| tracks_for_hypothesis(tracklets, hypothesis, cfg))
+        .flat_map(|hypothesis| tracks_for_hypothesis(tracklets, &sights, hypothesis, cfg))
         .collect();
     // A BTreeMap keeps the order, and so deduplication, reproducible.
     let mut sets: BTreeMap<Vec<usize>, Vec<Track>> = BTreeMap::new();
@@ -1325,6 +1570,7 @@ pub fn deduplicate(tracks: Vec<Track>) -> Vec<Track> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::sso_geometry::heliocentric_position;
 
     /// Angular separation, degrees.
     fn angular_gap(ra1: f64, dec1: f64, ra2: f64, dec2: f64) -> f64 {
@@ -1533,6 +1779,7 @@ mod tests {
             min_nights: 2,
             max_residual_arcsec: 2.0,
             site: ZTF,
+            conics: Conics::Bound,
         };
 
         let started = Instant::now();
@@ -1763,6 +2010,7 @@ mod tests {
             min_nights: 2,
             max_residual_arcsec: 2.0,
             site: ZTF,
+            conics: Conics::Bound,
         };
         let tracks = link_tracklets(&tracklets, &[], &cfg);
         assert!(!tracks.is_empty(), "no track recovered");
@@ -2223,6 +2471,7 @@ mod tests {
             min_nights: 2,
             max_residual_arcsec: 2.0,
             site: ZTF,
+            conics: Conics::Bound,
         };
         let tracks = link_tracklets(&tracklets, &[], &cfg);
         assert_eq!(tracks.len(), 1, "one object should yield one track");
@@ -2383,11 +2632,13 @@ mod tests {
                         epoch,
                         SCREEN_ITERATIONS,
                         Some(half_line),
+                        Conics::Bound,
                     )
                     .map(|f| f.rms_arcsec)
                 });
                 let gated = best(&|seed| {
-                    fit_within(&observations, seed, epoch, poor).map(|f| f.rms_arcsec)
+                    fit_within(&observations, seed, epoch, poor, Conics::Bound)
+                        .map(|f| f.rms_arcsec)
                 });
                 assert_eq!(
                     tight, plain,
@@ -2401,6 +2652,157 @@ mod tests {
             }
         }
         assert!(judged >= 30, "only {judged} object fits passed a gate");
+    }
+
+    /// 2I/Borisov's orbit, JPL's elements: q 2.007 au, e 3.357, v_inf 32 km/s.
+    fn borisov() -> OrbitalElements {
+        let (q, e) = (2.006_548, 3.356_633);
+        OrbitalElements {
+            epoch_jd: 2458826.0536,
+            a: q / (1.0 - e),
+            e,
+            incl: 44.0526,
+            node: 308.1489,
+            peri: 209.1243,
+            mean_anomaly: 0.0,
+            q,
+            tp: 2458826.0536,
+        }
+    }
+
+    /// Tracklets a week either side of the reference epoch propagate back to the hypothesis state.
+    #[test]
+    fn test_a_hypothesis_holds_at_the_reference_epoch() {
+        for (el, mid) in [
+            (
+                OrbitalElements::elliptical(2460012.0, 2.5, 0.1, 5.0, 40.0, 60.0, 30.0),
+                2460012.0,
+            ),
+            (
+                OrbitalElements::elliptical(2460012.0, 1.3, 0.4, 8.0, 40.0, 60.0, 45.0),
+                2460012.0,
+            ),
+            (borisov(), 2458753.5),
+        ] {
+            let at = |jd: f64| heliocentric_position(&el, jd);
+            let (pos, a, b) = (at(mid), at(mid - 0.01), at(mid + 0.01));
+            let vel = [
+                (b[0] - a[0]) / 0.02,
+                (b[1] - a[1]) / 0.02,
+                (b[2] - a[2]) / 0.02,
+            ];
+            let h = Hypothesis {
+                r_au: norm(&pos),
+                rdot_au_per_day: dot(&pos, &vel) / norm(&pos),
+            };
+            for dt in [-7.0, -3.0, 3.0, 7.0] {
+                let sight = Sight::of(&tracklet_for(&el, mid + dt));
+                let back = sight
+                    .state_under(&h, dt)
+                    .and_then(|s| propagate(&s, mid + dt, mid))
+                    .expect("a state");
+                let off = norm(&[
+                    back.pos[0] - pos[0],
+                    back.pos[1] - pos[1],
+                    back.pos[2] - pos[2],
+                ]);
+                assert!(off < 1e-4, "e = {} at {dt} days: {off:.1e} au off", el.e);
+            }
+        }
+    }
+
+    /// A Borisov-like object is linked whole only once unbound orbits are searched.
+    #[test]
+    fn test_an_interstellar_object_is_linked_on_a_hyperbola() {
+        let nights = [2458746.70, 2458749.72, 2458753.68, 2458756.71, 2458760.69];
+        let belt = OrbitalElements::elliptical(2458753.5, 2.6, 0.12, 8.0, 150.0, 70.0, 40.0);
+        let (mut detections, mut owner) = survey(&[borisov(), belt], &nights);
+        let mut seed: u64 = 7;
+        let mut uniform = || {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (seed >> 11) as f64 / (1u64 << 53) as f64
+        };
+        // Movers seen on one night only, around where the interstellar object is.
+        let around: Vec<(f64, f64)> = detections
+            .iter()
+            .filter(|d| owner[&d.id] == 0)
+            .map(|d| (d.ra, d.dec))
+            .collect();
+        for (n, &start) in nights.iter().enumerate() {
+            let (ra0, dec0) = around[2 * n];
+            for k in 0..20 {
+                let (ra, dec) = (
+                    ra0 + 4.0 * (uniform() - 0.5),
+                    dec0 + 4.0 * (uniform() - 0.5),
+                );
+                let (rate, angle) = (0.05 + 0.75 * uniform(), std::f64::consts::TAU * uniform());
+                let jd = start + 0.02 * uniform();
+                for visit in 0..2 {
+                    let dt = 0.06 * visit as f64;
+                    let id = 100_000 + (n * 1000 + k * 10 + visit) as i64;
+                    owner.insert(id, 2 + n * 100 + k);
+                    detections.push(Detection {
+                        id,
+                        jd: jd + dt,
+                        ra: ra + rate * dt * angle.cos() / dec.to_radians().cos(),
+                        dec: dec + rate * dt * angle.sin(),
+                        mag: Some(19.0),
+                        mag_err: Some(0.1),
+                        band: Some('r'),
+                        site: None,
+                    });
+                }
+            }
+        }
+        let tracklets = survey_tracklets(&detections, &nights);
+        let of = |k: usize| -> Vec<usize> {
+            (0..tracklets.len())
+                .filter(|&m| tracklets[m].ids.iter().all(|id| owner[id] == k))
+                .collect()
+        };
+        assert_eq!(of(0).len(), nights.len(), "one tracklet a night");
+        assert_eq!(of(1).len(), nights.len(), "one tracklet a night");
+        assert!(
+            tracklets.len() > 50,
+            "the movers made {} tracklets",
+            tracklets.len()
+        );
+        let whole = |tracks: &[Track], k: usize| -> Option<Track> {
+            tracks.iter().find(|t| sorted_members(t) == of(k)).cloned()
+        };
+
+        let bound = survey_config(&tracklets);
+        let tracks = link_tracklets(&tracklets, &detections, &bound);
+        assert!(
+            whole(&tracks, 0).is_none(),
+            "a bound orbit fitted the whole interstellar arc"
+        );
+        assert!(tracks.iter().all(|t| is_bound(&t.state)));
+        let belt_bound = whole(&tracks, 1).expect("the main-belt object is linked");
+
+        let unbound = survey_config(&tracklets).with_unbound(40.0 / KM_S_PER_AU_DAY);
+        let tracks = link_tracklets(&tracklets, &detections, &unbound);
+        for track in &tracks {
+            let objects = owners_of(track, &tracklets, &owner);
+            assert_eq!(objects.len(), 1, "a track mixes objects {objects:?}");
+        }
+        let iso = whole(&tracks, 0).expect("the interstellar object is linked whole");
+        let residual = iso.residual_arcsec.expect("fitted");
+        let el = state_to_elements(&iso.state, unbound.reference_jd).expect("an orbit");
+        assert!(residual < 0.1, "residual {residual}\"");
+        assert!(
+            el.e > 1.0 && (el.e - borisov().e).abs() < 0.1,
+            "fitted e = {}",
+            el.e
+        );
+        let belt_unbound = whole(&tracks, 1).expect("the main-belt object is still linked");
+        assert!(is_bound(&belt_unbound.state));
+        assert!(
+            (belt_unbound.residual_arcsec.unwrap() - belt_bound.residual_arcsec.unwrap()).abs()
+                < 0.01
+        );
     }
 
     #[test]

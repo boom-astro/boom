@@ -6,7 +6,7 @@
 //! finds to the MPC catalog, and stores the result as tracks.
 
 use crate::utils::attach::{match_track, Pool, Target};
-use crate::utils::heliolinc::{sky_track, test_orbits, State, Track};
+use crate::utils::heliolinc::{sky_track, test_orbits, Conics, State, Track};
 use crate::utils::identify::{
     identify, track_designation, IdentifyConfig, KnownRule, Match, OrbitEntry,
 };
@@ -374,7 +374,13 @@ pub fn thor_clusters(
             // Screened against the looser gate, since a poor fit is still kept,
             // and converged if it passes it, so the residual it is ranked and
             // persisted on is the orbit's rather than where the fit stopped.
-            match fit_within(&obs, &seed, epoch, search.max_unbound_residual_arcsec) {
+            match fit_within(
+                &obs,
+                &seed,
+                epoch,
+                search.max_unbound_residual_arcsec,
+                Conics::Bound,
+            ) {
                 None => Some((c, Verdict(BoundFit::None, None, None))),
                 Some(fit) if fit.rms_arcsec <= search.max_residual_arcsec => Some((
                     c,

@@ -11,7 +11,9 @@ use boom::utils::discovery::{
     latest_night, load_window, persist_clusters, persist_tracks, reference_epoch, thor_clusters,
     tracklets_per_night, ztf_band, Stop, ThorSearch, Verdict,
 };
-use boom::utils::heliolinc::{default_hypotheses, link_tracklets, LinkConfig, Track};
+use boom::utils::heliolinc::{
+    default_hypotheses, link_tracklets, Conics, LinkConfig, Track, KM_S_PER_AU_DAY,
+};
 use boom::utils::linking::{find_tracklets, night_of, Detection, Tracklet, TrackletConfig};
 use boom::utils::tracks::BoundFit;
 use clap::Parser;
@@ -224,6 +226,10 @@ struct Cli {
     /// Velocity agreement required to cluster propagated states, au/day.
     #[arg(long, default_value_t = 0.0004)]
     velocity_tol: f64,
+
+    /// Also link unbound orbits, up to this hyperbolic excess speed, km/s.
+    #[arg(long, default_value_t = 0.0)]
+    max_vinf: f64,
 }
 
 /// Fetch the requested telescope-nights, returning the directories to read.
@@ -1103,7 +1109,9 @@ async fn main() {
             min_nights: args.min_nights,
             max_residual_arcsec: args.max_residual,
             site: boom::utils::sso_geometry::ZTF,
-        };
+            conics: Conics::Bound,
+        }
+        .with_unbound(args.max_vinf / KM_S_PER_AU_DAY);
         let started = std::time::Instant::now();
         let tracks = link_tracklets(&tracklets, &detections, &link_cfg);
         info!(

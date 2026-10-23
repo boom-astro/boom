@@ -6,7 +6,9 @@
 //! with residuals taken on the sky, turns one into the other and yields the
 //! residual that says whether the track was real.
 
-use crate::utils::heliolinc::{propagate_position, radec_from_ecliptic, state_to_elements, State};
+use crate::utils::heliolinc::{
+    propagate_position, radec_from_ecliptic, state_to_elements, Conics, State,
+};
 use crate::utils::sso_geometry::{observer_position, OrbitalElements, Site};
 
 /// One astrometric position.
@@ -99,8 +101,16 @@ impl GiveUp {
 pub fn predict_radec(state: &State, epoch_jd: f64, jd: f64, site: &Site) -> Option<(f64, f64)> {
     // From the observer, not the Earth's centre: an Earth radius is several
     // arcseconds at these distances, which the residual gate is tighter than.
-    let observer = observer_position(jd, site);
-    apparent(state, epoch_jd, jd, &observer, None).map(|(radec, _)| radec)
+    predict_radec_seen_from(state, epoch_jd, jd, &observer_position(jd, site))
+}
+
+pub fn predict_radec_seen_from(
+    state: &State,
+    epoch_jd: f64,
+    jd: f64,
+    observer: &[f64; 3],
+) -> Option<(f64, f64)> {
+    apparent(state, epoch_jd, jd, observer, None).map(|(radec, _)| radec)
 }
 
 /// Where `state` appears from `observer` at `jd`, and the light time used.
@@ -246,7 +256,14 @@ pub fn fit_orbit(
     epoch_jd: f64,
     max_iterations: usize,
 ) -> Option<OrbitFit> {
-    fit_orbit_with(observations, initial, epoch_jd, max_iterations, None)
+    fit_orbit_with(
+        observations,
+        initial,
+        epoch_jd,
+        max_iterations,
+        None,
+        Conics::Bound,
+    )
 }
 
 /// [`fit_orbit`], abandoning the fit early when `give_up` says it cannot pass.
@@ -256,6 +273,7 @@ pub fn fit_orbit_with(
     epoch_jd: f64,
     max_iterations: usize,
     give_up: Option<GiveUp>,
+    conics: Conics,
 ) -> Option<OrbitFit> {
     fit(
         observations,
@@ -264,6 +282,7 @@ pub fn fit_orbit_with(
         max_iterations,
         give_up,
         MIN_IMPROVEMENT_ARCSEC,
+        conics,
     )
 }
 
@@ -281,8 +300,17 @@ pub fn converge_orbit(
     initial: &State,
     epoch_jd: f64,
     max_iterations: usize,
+    conics: Conics,
 ) -> Option<OrbitFit> {
-    fit(observations, initial, epoch_jd, max_iterations, None, 0.0)
+    fit(
+        observations,
+        initial,
+        epoch_jd,
+        max_iterations,
+        None,
+        0.0,
+        conics,
+    )
 }
 
 /// Fit `seed` against a residual gate: screened with [`GiveUp::for_gate`],
@@ -296,6 +324,7 @@ pub fn fit_within(
     seed: &State,
     epoch_jd: f64,
     gate_arcsec: f64,
+    conics: Conics,
 ) -> Option<OrbitFit> {
     let screened = fit_orbit_with(
         observations,
@@ -303,12 +332,20 @@ pub fn fit_within(
         epoch_jd,
         SCREEN_ITERATIONS,
         Some(GiveUp::for_gate(gate_arcsec)),
+        conics,
     )?;
     if screened.rms_arcsec > gate_arcsec {
         return Some(screened);
     }
     // Starts where the screen stopped, so it can only improve on it.
-    converge_orbit(observations, &screened.state, epoch_jd, CONVERGE_ITERATIONS).or(Some(screened))
+    converge_orbit(
+        observations,
+        &screened.state,
+        epoch_jd,
+        CONVERGE_ITERATIONS,
+        conics,
+    )
+    .or(Some(screened))
 }
 
 fn fit(
@@ -318,8 +355,9 @@ fn fit(
     max_iterations: usize,
     give_up: Option<GiveUp>,
     min_improvement_arcsec: f64,
+    conics: Conics,
 ) -> Option<OrbitFit> {
-    if observations.len() < 3 {
+    if observations.len() < 3 || !conics.admits(initial) {
         return None;
     }
     // The observer depends only on the epoch, so it is placed once per
@@ -371,6 +409,10 @@ fn fit(
             let mut jac_dec = [0.0; 6];
             for (k, step) in steps.iter().enumerate() {
                 let up = perturb(&state, k, *step);
+                if !conics.admits(&up) {
+                    usable = false;
+                    break 'obs;
+                }
                 let Some(((ra_up, dec_up), _)) = residual(&up, epoch_jd, obs, observer, Some(tau))
                 else {
                     usable = false;
@@ -416,7 +458,11 @@ fn fit(
             candidate = perturb(&candidate, k, *d);
         }
 
-        match rms_and_light_times(&candidate, epoch_jd, observations, &observers, &weights) {
+        let trial = conics
+            .admits(&candidate)
+            .then(|| rms_and_light_times(&candidate, epoch_jd, observations, &observers, &weights))
+            .flatten();
+        match trial {
             Some((trial, trial_plain, trial_light_times)) if trial < best => {
                 let improvement = best - trial;
                 state = candidate;
