@@ -10,8 +10,12 @@
 //! because the contents are what changes. A run's track that shares detections
 //! with a stored one *is* that track, extended.
 
+use crate::utils::enums::Survey;
+use crate::utils::linking::night_at;
+use crate::utils::sso_geometry::{Site, DECAM, RUBIN, WINTER};
 use mongodb::bson::{doc, Document};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// Detections two tracks must share to be judged the same object.
 ///
@@ -83,7 +87,7 @@ pub struct StoredOrbit {
 pub struct StoredTrack {
     #[serde(rename = "_id")]
     pub id: String,
-    /// Candids, ascending. The identity of the track.
+    /// Ids from `member_id`, ascending. The identity of the track.
     pub members: Vec<i64>,
     /// Epoch of each member, parallel to `members`. Held so a later run that
     /// sees only part of the track can still count its nights and span.
@@ -214,14 +218,57 @@ pub fn format_id(n: u64) -> String {
     format!("BT~{}", String::from_utf8_lossy(&tail))
 }
 
+const WINTER_IDS: i64 = 51_000_000_000_000_000;
+const DECAM_IDS: i64 = 52_000_000_000_000_000;
+const LSST_IDS: i64 = 53_000_000_000_000_000;
+const ZTF_IDS: i64 = 400_000_000_000_000_000;
+
+/// ZTF and LSST ids as they are, DECam and WINTER ids offset into blocks of their own.
+pub fn member_id(survey: &Survey, alert_id: i64) -> i64 {
+    match survey {
+        Survey::Ztf | Survey::Lsst => alert_id,
+        Survey::Decam => DECAM_IDS + alert_id,
+        Survey::Winter => WINTER_IDS + alert_id,
+    }
+}
+
+pub fn member_alert(id: i64) -> (Survey, i64) {
+    match id {
+        WINTER_IDS..DECAM_IDS => (Survey::Winter, id - WINTER_IDS),
+        DECAM_IDS..LSST_IDS => (Survey::Decam, id - DECAM_IDS),
+        LSST_IDS..ZTF_IDS => (Survey::Lsst, id),
+        _ => (Survey::Ztf, id),
+    }
+}
+
+/// `None` for ZTF, the default site of every fit.
+pub fn survey_site(survey: &Survey) -> Option<Site> {
+    match survey {
+        Survey::Ztf => None,
+        Survey::Lsst => Some(RUBIN),
+        Survey::Decam => Some(DECAM),
+        Survey::Winter => Some(WINTER),
+    }
+}
+
+pub fn alerts_by_survey(members: &[i64]) -> HashMap<Survey, Vec<i64>> {
+    let mut out: HashMap<Survey, Vec<i64>> = HashMap::new();
+    for &m in members {
+        let (survey, id) = member_alert(m);
+        out.entry(survey).or_default().push(id);
+    }
+    out
+}
+
 /// Summarise a track's detections, given their epochs.
 ///
 /// `nights` counts distinct local nights, so a pair split either side of
 /// midnight UTC is still one night.
 pub fn summarise(members: &[i64], jds: &[f64]) -> (i32, i32, f64, f64, f64) {
-    let nights: std::collections::HashSet<i64> = jds
+    let nights: std::collections::HashSet<i64> = members
         .iter()
-        .map(|&jd| crate::utils::linking::night_of(jd))
+        .zip(jds)
+        .map(|(&m, &jd)| night_at(jd, survey_site(&member_alert(m).0).as_ref()))
         .collect();
     let first = jds.iter().cloned().fold(f64::MAX, f64::min);
     let last = jds.iter().cloned().fold(f64::MIN, f64::max);
@@ -666,12 +713,7 @@ pub async fn stamp_members(
     db: &mongodb::Database,
     stored: &StoredTrack,
 ) -> Result<u64, mongodb::error::Error> {
-    let update = alert_update(&AlertTrack::from(stored));
-    let result = db
-        .collection::<Document>("ZTF_alerts")
-        .update_many(doc! { "_id": { "$in": &stored.members } }, update)
-        .await?;
-    Ok(result.modified_count)
+    stamp(db, stored, false).await
 }
 
 /// Stamp the track onto the members that do not carry it yet.
@@ -683,15 +725,28 @@ pub async fn stamp_missing(
     db: &mongodb::Database,
     stored: &StoredTrack,
 ) -> Result<u64, mongodb::error::Error> {
+    stamp(db, stored, true).await
+}
+
+async fn stamp(
+    db: &mongodb::Database,
+    stored: &StoredTrack,
+    missing_only: bool,
+) -> Result<u64, mongodb::error::Error> {
     let update = alert_update(&AlertTrack::from(stored));
-    let result = db
-        .collection::<Document>("ZTF_alerts")
-        .update_many(
-            doc! { "_id": { "$in": &stored.members }, "track.id": { "$ne": &stored.id } },
-            update,
-        )
-        .await?;
-    Ok(result.modified_count)
+    let mut modified = 0;
+    for (survey, ids) in alerts_by_survey(&stored.members) {
+        let mut filter = doc! { "_id": { "$in": ids } };
+        if missing_only {
+            filter.insert("track.id", doc! { "$ne": &stored.id });
+        }
+        modified += db
+            .collection::<Document>(&format!("{survey}_alerts"))
+            .update_many(filter, update.clone())
+            .await?
+            .modified_count;
+    }
+    Ok(modified)
 }
 
 /// One track by id, which is how a consumer reaches the epochs the alert block
@@ -963,7 +1018,7 @@ pub(crate) mod tests {
 
     /// Candids no other test uses, so tests can share the database.
     fn fresh_members(n: i64) -> Vec<i64> {
-        let base = (uuid::Uuid::new_v4().as_u128() as i64).abs() / 16;
+        let base = ZTF_IDS + (uuid::Uuid::new_v4().as_u128() as i64).abs() / 64;
         (base..base + n).collect()
     }
 

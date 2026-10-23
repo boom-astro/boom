@@ -280,6 +280,7 @@ linker:
   # Palomar's nights end by about 13:00 UTC.
   run_after_utc_hour: 14
   drb: 0.8 # minimum drb for a detection to be searched
+  surveys: [ztf] # linked together, any of ztf, lsst, decam, winter
   link: true # link tracklets across nights
   thor: true # recover objects seen once a night
   # Store known objects under their MPC designation, as recoveries rather

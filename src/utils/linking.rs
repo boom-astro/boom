@@ -33,6 +33,19 @@ pub fn night_of(jd: f64) -> i64 {
     (jd - 0.5).floor() as i64
 }
 
+fn night_offset(site: Option<&Site>) -> f64 {
+    site.map_or(0.5, |s| (-s.longitude_deg / 360.0).rem_euclid(1.0))
+}
+
+/// Split at local mean noon, numbered as Palomar's nights; `None` is `night_of`.
+pub fn night_at(jd: f64, site: Option<&Site>) -> i64 {
+    (jd - night_offset(site)).floor() as i64
+}
+
+pub fn night_start(night: i64, site: Option<&Site>) -> f64 {
+    night as f64 + night_offset(site)
+}
+
 /// One detection offered to the linker.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Detection {
@@ -54,6 +67,12 @@ pub struct Detection {
     /// parallax between them is arcseconds against a main-belt object, and
     /// whole arcminutes against a near-Earth one.
     pub site: Option<Site>,
+}
+
+impl Detection {
+    pub fn night(&self) -> i64 {
+        night_at(self.jd, self.site.as_ref())
+    }
 }
 
 /// Bounds a tracklet must satisfy to be believable.
@@ -138,6 +157,7 @@ pub struct Tracklet {
     /// Plane position at `jd_ref`, degrees.
     xi0: f64,
     eta0: f64,
+    site: Option<Site>,
 }
 
 impl Tracklet {
@@ -165,12 +185,17 @@ impl Tracklet {
             dec_center: dec,
             xi0: 0.0,
             eta0: 0.0,
+            site: None,
         }
     }
 
     /// Total on-sky rate, degrees/day.
     pub fn rate_deg_per_day(&self) -> f64 {
         self.ra_rate_deg_per_day.hypot(self.dec_rate_deg_per_day)
+    }
+
+    pub fn night(&self) -> i64 {
+        night_at(self.jd_ref, self.site.as_ref())
     }
 }
 
@@ -314,6 +339,7 @@ pub fn fit_tracklet(dets: &[Detection], cfg: &TrackletConfig) -> Option<Tracklet
         dec_center: dec0,
         xi0: x0,
         eta0: y0,
+        site: dets[0].site,
     })
 }
 

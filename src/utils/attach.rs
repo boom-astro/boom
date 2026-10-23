@@ -34,7 +34,7 @@ impl Target {
     pub fn nights(&self) -> usize {
         self.members
             .iter()
-            .map(|d| night_of(d.jd))
+            .map(Detection::night)
             .collect::<HashSet<_>>()
             .len()
     }
@@ -116,7 +116,7 @@ impl Pool {
     pub fn new(detections: impl IntoIterator<Item = Detection>) -> Self {
         let mut nights: BTreeMap<i64, Vec<Detection>> = BTreeMap::new();
         for d in detections {
-            nights.entry(night_of(d.jd)).or_default().push(d);
+            nights.entry(d.night()).or_default().push(d);
         }
         for dets in nights.values_mut() {
             dets.sort_by(|a, b| a.dec.total_cmp(&b.dec));
@@ -128,7 +128,7 @@ impl Pool {
     }
 
     fn candidates(&self, target: &Target, site: &Site) -> Vec<Detection> {
-        let covered: HashSet<i64> = target.members.iter().map(|d| night_of(d.jd)).collect();
+        let covered: HashSet<i64> = target.members.iter().map(Detection::night).collect();
         let mut out = Vec::new();
         for (night, dets) in &self.nights {
             if covered.contains(night) || dets.is_empty() {
@@ -169,7 +169,7 @@ impl Pool {
         let (first, last) = (night_of(first), night_of(last));
         let mut candidates = self.candidates(target, site);
         candidates.sort_by_key(|d| {
-            let night = night_of(d.jd);
+            let night = d.night();
             (night - last).max(first - night)
         });
         let mut grown = target.clone();
