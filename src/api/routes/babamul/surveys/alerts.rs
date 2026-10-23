@@ -290,9 +290,9 @@ pub async fn get_alerts(
             } {
                 results.push(alert_doc);
             }
-            return response::ok(
+            return response::ok_ser(
                 &format!("found {} alerts matching query", results.len()),
-                serde_json::json!(results),
+                &results,
             );
         }
         Survey::Lsst => {
@@ -323,9 +323,9 @@ pub async fn get_alerts(
             } {
                 results.push(alert_doc);
             }
-            return response::ok(
+            return response::ok_ser(
                 &format!("found {} alerts matching query", results.len()),
-                serde_json::json!(results),
+                &results,
             );
         }
         _ => {
@@ -429,14 +429,14 @@ where
         }
         results.insert(object_name.clone(), alert_results);
     }
-    response::ok(
+    response::ok_ser(
         &format!(
             "found cross-matches for {}/{} coordinates, with a total {} alerts",
             coordinates_with_matches_count,
             coordinates.len(),
             alert_count
         ),
-        serde_json::json!(results),
+        &results,
     )
 }
 

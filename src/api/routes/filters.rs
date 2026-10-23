@@ -1253,14 +1253,15 @@ pub struct FilterTestRequest {
 #[derive(serde::Serialize, ToSchema)]
 pub struct FilterTestResponse {
     pub pipeline: Vec<serde_json::Value>,
-    pub results: Vec<serde_json::Value>,
+    #[schema(value_type = Vec<Object>)]
+    pub results: Vec<Document>,
 }
 
 impl FilterTestResponse {
     pub fn new(pipeline: Vec<Document>, results: Vec<Document>) -> Self {
         Self {
             pipeline: doc2json(pipeline),
-            results: doc2json(results),
+            results,
         }
     }
 }

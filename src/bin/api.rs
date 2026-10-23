@@ -22,6 +22,10 @@ use utoipa::OpenApi;
 use utoipa_scalar::{Scalar, Servable};
 use uuid::Uuid;
 
+// glibc keeps freed memory in per-thread arenas; jemalloc reuses it across workers and returns it to the OS.
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     // Load environment variables from .env file before anything else
