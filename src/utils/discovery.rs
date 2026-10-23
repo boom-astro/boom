@@ -11,16 +11,17 @@ use crate::utils::identify::{
     identify, track_designation, IdentifyConfig, KnownRule, Match, OrbitEntry,
 };
 use crate::utils::linking::{
-    circular_mean_deg, find_tracklets, night_of, Detection, Tracklet, TrackletConfig,
+    angular_separation_deg, circular_mean_deg, find_tracklets, night_of, night_start, Detection,
+    Tracklet, TrackletConfig,
 };
 use crate::utils::orbit_fit::{fit_within, Observation, OrbitFit};
-use crate::utils::sso_geometry::Site;
 use crate::utils::thor;
 use crate::utils::tracks::{
-    acquire_lock, commit_upsert, plan_upsert, release_lock, renew_lock, stamp_members,
-    stamp_missing, BoundFit, StoredOrbit, StoredTrack, LOCK_LEASE, LOCK_RENEW_EVERY,
-    SHARED_FOR_IDENTITY, TRACKS_COLLECTION,
+    acquire_lock, alerts_by_survey, commit_upsert, member_id, plan_upsert, release_lock,
+    renew_lock, stamp_members, stamp_missing, survey_site, BoundFit, StoredOrbit, StoredTrack,
+    LOCK_LEASE, LOCK_RENEW_EVERY, SHARED_FOR_IDENTITY, TRACKS_COLLECTION,
 };
+use crate::utils::{enums::Survey, sso_geometry::Site};
 use futures::StreamExt;
 use mongodb::bson::{doc, Document};
 use rayon::prelude::*;
@@ -29,6 +30,17 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::{error, info};
 
 const ALERTS_COLLECTION: &str = "ZTF_alerts";
+
+const LSST_DEEP_FIELDS: [(f64, f64); 6] = [
+    (150.11, 2.18),
+    (35.71, -4.75),
+    (53.13, -28.10),
+    (9.45, -44.0),
+    (58.90, -49.32),
+    (63.6, -47.6),
+];
+const DEEP_FIELD_RADIUS_DEG: f64 = 2.0;
+const TAI_MINUS_UTC_DAYS: f64 = 37.0 / 86_400.0;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DiscoveryError {
@@ -131,6 +143,121 @@ pub async fn load_window(
     Ok((detections, labels))
 }
 
+/// Unassociated, fresh detections from `survey` over nights `first..=last` of its site.
+pub async fn load_unknown(
+    db: &mongodb::Database,
+    survey: &Survey,
+    first: i64,
+    last: i64,
+    drb: f64,
+) -> Result<Vec<Detection>, DiscoveryError> {
+    let site = survey_site(survey);
+    let start = night_start(first, site.as_ref());
+    let end = night_start(last + 1, site.as_ref());
+    let jd = doc! { "$gte": start, "$lt": end };
+    let filter = match survey {
+        Survey::Ztf => {
+            let (detections, _) = load_window(db, start, end - start, drb, false, None).await?;
+            return Ok(detections);
+        }
+        Survey::Lsst => doc! {
+            "candidate.jd": jd,
+            "ssObjectId": null,
+            "properties.rock": false,
+            "properties.stationary": false,
+            "candidate.reliability": { "$gte": 0.5 },
+            "candidate.isDipole": { "$ne": true },
+            "candidate.psfFlux": { "$gt": 0.0 },
+            "candidate.pixelFlags_saturatedCenter": { "$ne": true },
+            "candidate.pixelFlags_crCenter": { "$ne": true },
+            "candidate.pixelFlags_bad": { "$ne": true },
+            "candidate.pixelFlags_streakCenter": { "$ne": true },
+            "candidate.glint_trail": { "$ne": true },
+            "candidate.ndethist": { "$lte": 1 },
+        },
+        Survey::Decam => doc! {
+            "candidate.jd": jd,
+            "candidate.reliability": { "$gte": 0.5 },
+            "candidate.snr": { "$gte": 5.0 },
+            "properties.stationary": false,
+            "properties.detection_history.n_det": { "$lte": 1 },
+        },
+        Survey::Winter => doc! {
+            "candidate.jd": jd,
+            "candidate.isdiffpos": true,
+            "candidate.rb": { "$gte": 0.5 },
+            "$expr": { "$lt": [{ "$subtract": ["$candidate.jd", "$candidate.jdstarthist"] }, 0.5] },
+        },
+    };
+    let mut cursor = db
+        .collection::<Document>(&format!("{survey}_alerts"))
+        .find(filter)
+        .projection(projection(survey))
+        .await?;
+    let mut detections = Vec::new();
+    while let Some(doc) = cursor.next().await {
+        if let Some(d) = detection_from(survey, &doc?) {
+            detections.push(d);
+        }
+    }
+    if *survey == Survey::Lsst {
+        detections.retain(|d| {
+            LSST_DEEP_FIELDS.iter().all(|&(ra, dec)| {
+                angular_separation_deg(d.ra, d.dec, ra, dec) > DEEP_FIELD_RADIUS_DEG
+            })
+        });
+    }
+    Ok(detections)
+}
+
+fn projection(survey: &Survey) -> Document {
+    let (jd, mag, mag_err, band) = match survey {
+        Survey::Ztf => ("jd", "magpsf", "sigmapsf", "fid"),
+        Survey::Lsst => ("midpointMjdTai", "magpsf", "sigmapsf", "band"),
+        Survey::Decam => ("jd", "magap", "sigmagap", "band"),
+        Survey::Winter => ("jd", "magpsf", "sigmapsf", "band"),
+    };
+    let mut projection = doc! { "_id": 1, "candidate.ra": 1, "candidate.dec": 1 };
+    for field in [jd, mag, mag_err, band] {
+        projection.insert(format!("candidate.{field}"), 1);
+    }
+    if *survey == Survey::Winter {
+        projection.insert("candidate.exptime", 1);
+    }
+    projection
+}
+
+fn detection_from(survey: &Survey, doc: &Document) -> Option<Detection> {
+    let candidate = doc.get_document("candidate").ok()?;
+    let (jd, mag, mag_err) = match survey {
+        Survey::Ztf => return detection_of(doc),
+        Survey::Lsst => (
+            candidate.get_f64("midpointMjdTai").ok()? + 2_400_000.5 - TAI_MINUS_UTC_DAYS,
+            "magpsf",
+            "sigmapsf",
+        ),
+        Survey::Decam => (candidate.get_f64("jd").ok()?, "magap", "sigmagap"),
+        Survey::Winter => (
+            candidate.get_f64("jd").ok()? + candidate.get_f64("exptime").ok()? / 2.0 / 86_400.0,
+            "magpsf",
+            "sigmapsf",
+        ),
+    };
+    Some(Detection {
+        id: member_id(survey, doc.get_i64("_id").ok()?),
+        jd,
+        ra: candidate.get_f64("ra").ok()?,
+        dec: candidate.get_f64("dec").ok()?,
+        mag: candidate.get_f64(mag).ok(),
+        mag_err: candidate.get_f64(mag_err).ok(),
+        band: candidate
+            .get_str("band")
+            .ok()
+            .and_then(|b| b.chars().next()),
+        site: survey_site(survey),
+    })
+}
+
 fn detection_of(doc: &Document) -> Option<Detection> {
     let candidate = doc.get_document("candidate").ok()?;
     Some(Detection {
@@ -161,9 +288,12 @@ pub async fn latest_night(db: &mongodb::Database) -> Result<f64, DiscoveryError>
 
 /// Tracklets found independently in each night the detections span.
 pub fn tracklets_per_night(detections: &[Detection], cfg: &TrackletConfig) -> Vec<Tracklet> {
-    let mut by_night: HashMap<i64, Vec<Detection>> = HashMap::new();
+    let mut by_night: HashMap<(i64, Option<&str>), Vec<Detection>> = HashMap::new();
     for d in detections {
-        by_night.entry(night_of(d.jd)).or_default().push(*d);
+        by_night
+            .entry((d.night(), d.site.map(|s| s.mpc_code)))
+            .or_default()
+            .push(*d);
     }
     let mut nights: Vec<_> = by_night.into_iter().collect();
     nights.sort_by_key(|(n, _)| *n);
@@ -171,11 +301,12 @@ pub fn tracklets_per_night(detections: &[Detection], cfg: &TrackletConfig) -> Ve
     // of which finishes first.
     nights
         .par_iter()
-        .flat_map(|(night, dets)| {
+        .flat_map(|((night, site), dets)| {
             let found = find_tracklets(dets, cfg);
             info!(
-                "night {}: {} detections -> {} tracklets",
+                "night {}{}: {} detections -> {} tracklets",
                 night,
+                site.map(|code| format!(" at {code}")).unwrap_or_default(),
                 dets.len(),
                 found.len()
             );
@@ -853,23 +984,17 @@ pub async fn load_targets(
         .flat_map(|t| t.members.iter().copied())
         .collect();
     let mut positions: HashMap<i64, Detection> = HashMap::new();
-    for chunk in wanted.chunks(10_000) {
-        let mut cursor = db
-            .collection::<Document>(ALERTS_COLLECTION)
-            .find(doc! { "_id": { "$in": chunk } })
-            .projection(doc! {
-                "_id": 1,
-                "candidate.jd": 1,
-                "candidate.ra": 1,
-                "candidate.dec": 1,
-                "candidate.magpsf": 1,
-                "candidate.sigmapsf": 1,
-                "candidate.fid": 1,
-            })
-            .await?;
-        while let Some(doc) = cursor.next().await {
-            if let Some(d) = detection_of(&doc?) {
-                positions.insert(d.id, d);
+    for (survey, ids) in alerts_by_survey(&wanted) {
+        for chunk in ids.chunks(10_000) {
+            let mut cursor = db
+                .collection::<Document>(&format!("{survey}_alerts"))
+                .find(doc! { "_id": { "$in": chunk } })
+                .projection(projection(&survey))
+                .await?;
+            while let Some(doc) = cursor.next().await {
+                if let Some(d) = detection_from(&survey, &doc?) {
+                    positions.insert(d.id, d);
+                }
             }
         }
     }
@@ -1010,7 +1135,7 @@ pub fn recall(tracks: &[Track], tracklets: &[Tracklet], labels: &HashMap<i64, St
     let mut nights: HashMap<&String, HashSet<i64>> = HashMap::new();
     for t in tracklets {
         if let Some(name) = label_of(t) {
-            nights.entry(name).or_default().insert(night_of(t.jd_ref));
+            nights.entry(name).or_default().insert(t.night());
         }
     }
     let linkable: HashSet<&String> = nights
@@ -1104,6 +1229,60 @@ mod tests {
     fn test_track_detections_are_ascending_and_distinct() {
         let tracklets = vec![tracklet(&[5, 3], 2460010.8), tracklet(&[3, 9], 2460012.8)];
         assert_eq!(track_detections(&track(&[0, 1]), &tracklets), vec![3, 5, 9]);
+    }
+
+    /// Rubin's visits straddle 00:00 UTC, so only Chile's own night joins them.
+    #[test]
+    fn test_ztf_and_rubin_nights_link_into_one_track() {
+        use crate::utils::heliolinc::{link_tracklets, LinkConfig};
+        use crate::utils::identify::predict_radec_from;
+        use crate::utils::sso_geometry::{OrbitalElements, RUBIN, ZTF};
+
+        let el = OrbitalElements::elliptical(2460012.0, 2.5, 0.1, 5.0, 40.0, 60.0, 30.0);
+        let visits = [
+            (2460010.80, None),
+            (2460010.86, None),
+            (2460012.47, Some(RUBIN)),
+            (2460012.53, Some(RUBIN)),
+            (2460015.47, Some(RUBIN)),
+            (2460015.53, Some(RUBIN)),
+            (2460017.80, None),
+            (2460017.86, None),
+        ];
+        let detections: Vec<Detection> = visits
+            .iter()
+            .enumerate()
+            .map(|(k, &(jd, site))| {
+                let (ra, dec) = predict_radec_from(&el, jd, site.as_ref().unwrap_or(&ZTF));
+                Detection {
+                    id: k as i64,
+                    jd,
+                    ra,
+                    dec,
+                    mag: Some(19.0),
+                    mag_err: Some(0.1),
+                    band: Some('r'),
+                    site,
+                }
+            })
+            .collect();
+        let cfg = TrackletConfig::default();
+        let tracklets = tracklets_per_night(&detections, &cfg);
+        assert_eq!(tracklets.len(), 4);
+        let link = LinkConfig {
+            reference_jd: reference_epoch(&tracklets),
+            ..LinkConfig::default()
+        };
+        let tracks = link_tracklets(&tracklets, &detections, &link);
+        assert_eq!(tracks.len(), 1, "{tracks:?}");
+        assert_eq!(tracks[0].nights, 4);
+        assert_eq!(track_detections(&tracks[0], &tracklets).len(), 8);
+
+        let at_utc_midnight: Vec<Detection> = detections
+            .iter()
+            .map(|d| Detection { site: None, ..*d })
+            .collect();
+        assert_eq!(tracklets_per_night(&at_utc_midnight, &cfg).len(), 2);
     }
 
     fn detection(id: i64, jd: f64) -> Detection {

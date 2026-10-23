@@ -264,6 +264,22 @@ pub const SIDING_SPRING: Site = Site {
     mpc_code: "E12",
 };
 
+pub const DECAM: Site = Site {
+    longitude_deg: 289.193_58,
+    rho_cos_phi: 0.865_572,
+    rho_sin_phi: -0.499_793,
+    astrometric_sigma_arcsec: 0.15,
+    mpc_code: "W84",
+};
+
+pub const WINTER: Site = Site {
+    longitude_deg: 243.137_46,
+    rho_cos_phi: 0.836_357,
+    rho_sin_phi: 0.546_831,
+    astrometric_sigma_arcsec: 0.5,
+    mpc_code: "675",
+};
+
 impl Site {
     /// The site an MPC observatory code names, for astrometry that says where it
     /// was taken rather than being assumed to come from one telescope.
@@ -277,6 +293,8 @@ impl Site {
             "V00" => BOK,
             "V06" => KUIPER,
             "E12" => SIDING_SPRING,
+            "W84" => DECAM,
+            "675" => WINTER,
             _ => return None,
         })
     }

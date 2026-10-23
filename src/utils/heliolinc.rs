@@ -9,7 +9,7 @@
 //! unrelated ones scatter. Sweeping a grid of assumptions and clustering the
 //! propagated states is then the whole method (Holman et al. 2018).
 
-use crate::utils::linking::{angular_separation_deg, night_of, Detection, Tracklet};
+use crate::utils::linking::{angular_separation_deg, Detection, Tracklet};
 use crate::utils::orbit_fit::{
     converge_orbit, fit_orbit_with, predict_radec, rms_arcsec, GiveUp, Observation,
     CONVERGE_ITERATIONS, SCREEN_ITERATIONS,
@@ -416,7 +416,7 @@ pub fn night_magnitude_spread(
             .acos()
             .to_degrees()
             .min(150.0);
-        by_night.entry(night_of(d.jd)).or_default().push(
+        by_night.entry(d.night()).or_default().push(
             mag + v_offset(d.band) - 5.0 * (r * delta).log10() - hg12(phase_deg, DEFAULT_G12),
         );
     }
@@ -875,10 +875,7 @@ fn sorted_members(track: &Track) -> Vec<usize> {
 
 /// The nights `members` draw on, by integer JD, ascending.
 fn nights_of(members: &[usize], tracklets: &[Tracklet]) -> Vec<i64> {
-    let mut nights: Vec<i64> = members
-        .iter()
-        .map(|&m| night_of(tracklets[m].jd_ref))
-        .collect();
+    let mut nights: Vec<i64> = members.iter().map(|&m| tracklets[m].night()).collect();
     nights.sort_unstable();
     nights.dedup();
     nights
@@ -1916,10 +1913,7 @@ mod tests {
         let mut nights_of: HashMap<usize, HashSet<i64>> = HashMap::new();
         for t in &tracklets {
             for id in &t.ids {
-                nights_of
-                    .entry(owner[id])
-                    .or_default()
-                    .insert(night_of(t.jd_ref));
+                nights_of.entry(owner[id]).or_default().insert(t.night());
             }
         }
         let linkable: HashSet<usize> = nights_of
@@ -1969,10 +1963,7 @@ mod tests {
         let mut nights_of: HashMap<usize, HashSet<i64>> = HashMap::new();
         for t in &tracklets {
             for id in &t.ids {
-                nights_of
-                    .entry(owner[id])
-                    .or_default()
-                    .insert(night_of(t.jd_ref));
+                nights_of.entry(owner[id]).or_default().insert(t.night());
             }
         }
         let linkable: HashSet<usize> = nights_of
@@ -2151,12 +2142,12 @@ mod tests {
             near.mean_anomaly + 0.02,
         );
         let objects = [near, twin];
-        let first_night = night_of(FOUR_NIGHTS[0]);
+        let first_night = crate::utils::linking::night_of(FOUR_NIGHTS[0]);
         let (all, owner) = survey(&objects, &FOUR_NIGHTS);
         let detections: Vec<Detection> = all
             .into_iter()
             .filter(|d| {
-                let early = night_of(d.jd) - first_night < 3;
+                let early = d.night() - first_night < 3;
                 early == (owner[&d.id] == 0)
             })
             .collect();

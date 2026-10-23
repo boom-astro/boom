@@ -7,7 +7,7 @@
 //! leaves measures each survey's astrometry against the same reference.
 
 use crate::utils::heliolinc::radec_from_ecliptic;
-use crate::utils::linking::{angular_separation_deg, night_of, Detection};
+use crate::utils::linking::{angular_separation_deg, Detection};
 use crate::utils::orbit_fit::C_AU_PER_DAY;
 pub use crate::utils::outburst::median;
 use crate::utils::sso_geometry::{
@@ -30,6 +30,7 @@ pub struct Match {
     pub designation: String,
     pub separation_arcsec: f64,
     pub jd: f64,
+    pub night: i64,
 }
 
 /// How wide to search, at each of the two stages.
@@ -203,7 +204,7 @@ pub fn identify(
 ) -> Vec<Match> {
     let mut by_night: HashMap<i64, Vec<&Detection>> = HashMap::new();
     for d in detections {
-        by_night.entry(night_of(d.jd)).or_default().push(d);
+        by_night.entry(d.night()).or_default().push(d);
     }
 
     // Sorted, since a HashMap's order would carry into `matches`.
@@ -264,6 +265,7 @@ pub fn identify(
                     designation: orbits[idx].designation.clone(),
                     separation_arcsec: sep,
                     jd: d.jd,
+                    night: d.night(),
                 })
             })
             .collect();
@@ -325,7 +327,7 @@ pub fn track_designation(
         .into_iter()
         // Most detections first; the designation breaks a tie reproducibly.
         .max_by(|a, b| a.1.len().cmp(&b.1.len()).then(b.0.cmp(a.0)))?;
-    let nights: std::collections::BTreeSet<i64> = agreeing.iter().map(|m| night_of(m.jd)).collect();
+    let nights: std::collections::BTreeSet<i64> = agreeing.iter().map(|m| m.night).collect();
     let separations: Vec<f64> = agreeing.iter().map(|m| m.separation_arcsec).collect();
     let centre = median(&separations)?;
     let jds: Vec<f64> = agreeing.iter().map(|m| m.jd).collect();
@@ -584,6 +586,7 @@ mod tests {
             designation: designation.to_string(),
             separation_arcsec: 30.0,
             jd,
+            night: crate::utils::linking::night_of(jd),
         }
     }
 

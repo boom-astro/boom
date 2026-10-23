@@ -1445,6 +1445,8 @@ pub struct LinkerConfig {
     /// Minimum drb for a detection to be searched.
     #[serde(default = "default_linker_drb")]
     pub drb: f64,
+    #[serde(default = "default_linker_surveys")]
+    pub surveys: Vec<Survey>,
     /// Link tracklets across nights.
     #[serde(default = "default_linker_pass")]
     pub link: bool,
@@ -1477,6 +1479,9 @@ impl LinkerConfig {
     /// Settings no night could be searched with, which would otherwise shift
     /// or empty every window without saying so.
     pub fn validate(&self) -> Result<(), String> {
+        if self.surveys.is_empty() {
+            return Err("surveys must name at least one survey".to_string());
+        }
         if self.run_after_utc_hour > 23 {
             return Err(format!(
                 "run_after_utc_hour is {}, not an hour of the day",
@@ -1506,6 +1511,7 @@ impl Default for LinkerConfig {
             thor_window_nights: default_linker_thor_window_nights(),
             run_after_utc_hour: default_linker_run_after_utc_hour(),
             drb: default_linker_drb(),
+            surveys: default_linker_surveys(),
             link: default_linker_pass(),
             thor: default_linker_pass(),
             match_known: default_linker_pass(),
@@ -1540,6 +1546,10 @@ fn default_linker_run_after_utc_hour() -> u32 {
 
 fn default_linker_drb() -> f64 {
     0.8
+}
+
+fn default_linker_surveys() -> Vec<Survey> {
+    vec![Survey::Ztf]
 }
 
 fn default_linker_pass() -> bool {

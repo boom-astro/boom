@@ -18,7 +18,7 @@
 
 use boom::conf::{load_dotenv, AppConfig, LinkerConfig};
 use boom::utils::discovery::{
-    attach_pass, designations, load_window, persist_clusters, persist_tracks, recall,
+    attach_pass, designations, load_unknown, load_window, persist_clusters, persist_tracks, recall,
     reference_epoch, thor_clusters, track_detections, tracklets_per_night, Stop, ThorSearch,
 };
 use boom::utils::heliolinc::{link_tracklets, LinkConfig, Track};
@@ -30,6 +30,7 @@ use boom::utils::sso_geometry::ZTF;
 use boom::utils::tracks::{lock_is_held, COUNTERS_COLLECTION};
 use clap::Parser;
 use mongodb::bson::{doc, Document};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Notify;
@@ -191,13 +192,21 @@ async fn run_night(db: &mongodb::Database, cfg: &LinkerConfig, night: i64, stop:
         jd_start, span, "searching the window ending with this night"
     );
 
-    let (detections, labels) = match load_window(db, jd_start, span, cfg.drb, false, None).await {
-        Ok(found) => found,
-        Err(error) => {
-            error!(%error, night, "could not load the window");
-            return false;
+    let first = night - cfg.window_nights as i64 + 1;
+    let mut detections = Vec::new();
+    for survey in &cfg.surveys {
+        match load_unknown(db, survey, first, night, cfg.drb).await {
+            Ok(found) => {
+                info!(%survey, detections = found.len(), "loaded a survey's window");
+                detections.extend(found);
+            }
+            Err(error) => {
+                error!(%error, night, %survey, "could not load the window");
+                return false;
+            }
         }
-    };
+    }
+    let labels = HashMap::new();
     info!(
         detections = detections.len(),
         seconds = started.elapsed().as_secs_f64(),
@@ -250,10 +259,10 @@ async fn run_night(db: &mongodb::Database, cfg: &LinkerConfig, night: i64, stop:
         done = false;
     } else if cfg.thor && !detections.is_empty() {
         let pass = Instant::now();
-        let (thor_start, _) = window(night, cfg.thor_window_nights);
+        let thor_first = night - cfg.thor_window_nights as i64 + 1;
         let recent: Vec<Detection> = detections
             .iter()
-            .filter(|d| d.jd >= thor_start)
+            .filter(|d| d.night() >= thor_first)
             .copied()
             .collect();
         let search = ThorSearch::default();
