@@ -2,6 +2,7 @@ use crate::alert::{Candidate, ZtfCandidate};
 use crate::conf::AppConfig;
 use crate::enrichment::{
     babamul::{Babamul, BabamulZtfAlert},
+    decam::{add_decam_match, DecamMatch},
     fetch_alerts,
     models::{
         applecider_postprocess::{self, AppleCiderFusion, AppleCiderModalities},
@@ -342,6 +343,8 @@ pub struct ZtfAlertForEnrichment {
     #[serde(default)]
     pub host_galaxy: Option<HostGalaxyAssociation>,
     pub survey_matches: Option<ZtfSurveyMatches>,
+    #[serde(default)]
+    pub decam_match: Option<DecamMatch>,
 }
 
 /// Longest window `Outburst` scores over, so also how far back history is read.
@@ -505,6 +508,11 @@ pub struct ZtfAlertProperties {
     pub stationary: bool,
     pub photstats: PerBandProperties,
     pub multisurvey_photstats: Option<PerBandProperties>,
+    /// Without the private DECam points, for Babamul. `None` when there are none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[avro(skip)]
+    #[schema(ignore)]
+    pub public_multisurvey_photstats: Option<PerBandProperties>,
     /// `None` means never evaluated, not "not an asteroid".
     #[serde(default)]
     pub sso: Option<ZtfSsoAssociation>,
@@ -518,6 +526,15 @@ pub struct ZtfAlertProperties {
     /// Detection episodes, for finding sources that outburst more than once.
     /// `None` on alerts enriched before this field existed.
     pub episode_history: Option<EpisodeHistory>,
+}
+
+impl ZtfAlertProperties {
+    pub fn into_public(mut self) -> Self {
+        if let Some(public) = self.public_multisurvey_photstats.take() {
+            self.multisurvey_photstats = Some(public);
+        }
+        self
+    }
 }
 
 /// Field order matches the ONNX output index (0-7).
@@ -609,14 +626,31 @@ const CIDER_MIN_PHOTOMETRY_POINTS: usize = 2;
 
 const ACAI_BTS_NAMES: [&str; 6] = ["acai_h", "acai_n", "acai_v", "acai_o", "acai_b", "btsbot"];
 
-/// Per-object program for Milvus: public if this alert or any prior detection
-/// is, otherwise 3, which stands for every non-public program.
-fn milvus_programid(alert_programid: i32, prv_candidates: &[ZtfPhotometry]) -> i32 {
-    let public = ProgramId::Public as i32;
-    if alert_programid == public || prv_candidates.iter().any(|p| p.programid == public) {
-        public
+/// Per-object program for Milvus, from this alert and every prior detection:
+/// public (1) if any detection is public, else partnership (2) if any is
+/// partnership, else private (3). Other values are ignored; `None` means none
+/// of these was found, and the object is not stored.
+fn milvus_programid(alert_programid: i32, prv_candidates: &[ZtfPhotometry]) -> Option<i32> {
+    const PUBLIC: i32 = ProgramId::Public as i32;
+    const PARTNERSHIP: i32 = ProgramId::Partnership as i32;
+    // `ProgramId` names 3 after Caltech, but it holds every private program.
+    const PRIVATE: i32 = ProgramId::Caltech as i32;
+
+    let programids = || {
+        prv_candidates
+            .iter()
+            .map(|p| p.programid)
+            .chain([alert_programid])
+            .filter(|pid| matches!(*pid, PUBLIC | PARTNERSHIP | PRIVATE))
+    };
+    if programids().next().is_none() {
+        None
+    } else if programids().any(|pid| pid == PUBLIC) {
+        Some(PUBLIC)
+    } else if programids().any(|pid| pid == PARTNERSHIP) {
+        Some(PARTNERSHIP)
     } else {
-        ProgramId::Caltech as i32
+        Some(PRIVATE)
     }
 }
 
@@ -759,7 +793,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             mpc_orbits,
             sso_baselines,
             alert_cutout_storage,
-            alert_pipeline: create_ztf_alert_pipeline(false),
+            alert_pipeline: add_decam_match(create_ztf_alert_pipeline(false)),
             models,
             babamul,
             milvus,
@@ -912,13 +946,14 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             processed_alerts.push(format!("{},{}", item.programid, item.candid));
 
             if self.milvus.is_enabled() {
-                if let Some(embedding) = fusion_embedding {
+                let programid = milvus_programid(item.programid, &item.alert.prv_candidates);
+                if let (Some(embedding), Some(programid)) = (fusion_embedding, programid) {
                     embedding_rows.push(EmbeddingRow {
                         object_id: item.alert.object_id.clone(),
                         embedding,
                         candid: item.candid,
                         jd: item.alert.candidate.candidate.jd,
-                        programid: milvus_programid(item.programid, &item.alert.prv_candidates),
+                        programid,
                     });
                 }
             }
@@ -1354,15 +1389,15 @@ impl ZtfEnrichmentWorker {
         let mut has_matches = false;
         if let Some(survey_matches) = &alert.survey_matches {
             if let Some(lsst_match) = &survey_matches.lsst {
-                let mut lsst_lightcurve: Vec<PhotometryMag> = lsst_match
+                let lsst_lightcurve: Vec<PhotometryMag> = lsst_match
                     .prv_candidates
                     .iter()
                     .chain(&lsst_match.fp_hists)
                     .filter(|p| p.jd <= candidate.jd)
                     .filter_map(|p| p.to_photometry_mag(None))
                     .collect();
-                prepare_photometry(&mut lsst_lightcurve);
                 lightcurve.extend(lsst_lightcurve);
+                prepare_photometry(&mut lightcurve);
                 has_matches = true;
             }
         }
@@ -1370,6 +1405,21 @@ impl ZtfEnrichmentWorker {
             analyze_photometry(&lightcurve).0
         } else {
             photstats.clone()
+        };
+        let decam_lightcurve = alert
+            .decam_match
+            .as_ref()
+            .map(|m| m.lightcurve(candidate.jd))
+            .unwrap_or_default();
+        let (multisurvey_photstats, public_multisurvey_photstats) = if decam_lightcurve.is_empty() {
+            (multisurvey_photstats, None)
+        } else {
+            let mut with_decam = [lightcurve.clone(), decam_lightcurve].concat();
+            prepare_photometry(&mut with_decam);
+            (
+                analyze_photometry(&with_decam).0,
+                Some(multisurvey_photstats),
+            )
         };
 
         let hosted = alert.host_galaxy.as_ref().map(|hg| hg.best_host.is_some());
@@ -1400,6 +1450,7 @@ impl ZtfEnrichmentWorker {
                 stationary,
                 photstats,
                 multisurvey_photstats: Some(multisurvey_photstats),
+                public_multisurvey_photstats,
                 sso: Some(sso),
                 activity: Some(activity),
                 detection_history: Some(detection_history),
@@ -1721,21 +1772,40 @@ mod tests {
 
     #[test]
     fn a_public_alert_makes_the_object_public() {
-        assert_eq!(milvus_programid(1, &[]), 1);
-        assert_eq!(milvus_programid(1, &[detection(2), detection(3)]), 1);
+        assert_eq!(milvus_programid(1, &[]), Some(1));
+        assert_eq!(milvus_programid(1, &[detection(2), detection(3)]), Some(1));
     }
 
     #[test]
     fn any_public_detection_in_the_history_makes_the_object_public() {
-        assert_eq!(milvus_programid(2, &[detection(2), detection(1)]), 1);
-        assert_eq!(milvus_programid(3, &[detection(1)]), 1);
+        assert_eq!(milvus_programid(2, &[detection(2), detection(1)]), Some(1));
+        assert_eq!(milvus_programid(3, &[detection(1)]), Some(1));
     }
 
     #[test]
-    fn an_object_with_no_public_detection_is_grouped_under_3() {
-        assert_eq!(milvus_programid(2, &[]), 3);
-        assert_eq!(milvus_programid(2, &[detection(2)]), 3);
-        assert_eq!(milvus_programid(3, &[detection(2), detection(3)]), 3);
+    fn any_partnership_detection_without_a_public_one_makes_the_object_partnership() {
+        assert_eq!(milvus_programid(2, &[]), Some(2));
+        assert_eq!(milvus_programid(2, &[detection(2), detection(2)]), Some(2));
+        assert_eq!(milvus_programid(2, &[detection(2), detection(3)]), Some(2));
+        assert_eq!(milvus_programid(3, &[detection(2)]), Some(2));
+    }
+
+    #[test]
+    fn an_object_with_only_private_detections_is_private() {
+        assert_eq!(milvus_programid(3, &[]), Some(3));
+        assert_eq!(milvus_programid(3, &[detection(3), detection(3)]), Some(3));
+    }
+
+    #[test]
+    fn unknown_programs_are_ignored() {
+        assert_eq!(milvus_programid(2, &[detection(0), detection(4)]), Some(2));
+        assert_eq!(milvus_programid(0, &[detection(1)]), Some(1));
+    }
+
+    #[test]
+    fn an_object_with_no_known_program_is_not_classified() {
+        assert_eq!(milvus_programid(0, &[]), None);
+        assert_eq!(milvus_programid(0, &[detection(0), detection(7)]), None);
     }
 
     /// The enrichment worker takes the embedding out of the classifications
