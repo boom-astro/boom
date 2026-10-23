@@ -10,6 +10,8 @@
 //! because the contents are what changes. A run's track that shares detections
 //! with a stored one *is* that track, extended.
 
+use crate::utils::heliolinc::MU;
+use crate::utils::sso_geometry::{dot, norm};
 use mongodb::bson::{doc, Document};
 use serde::{Deserialize, Serialize};
 
@@ -764,6 +766,107 @@ pub fn restrict_to(
     })
 }
 
+pub fn conic(orbit: &StoredOrbit) -> (f64, f64) {
+    let r = norm(&orbit.pos);
+    let v2 = dot(&orbit.vel, &orbit.vel);
+    let rv = dot(&orbit.pos, &orbit.vel);
+    let h2 = r * r * v2 - rv * rv;
+    let e = (1.0 + (v2 - 2.0 * MU / r) * h2 / (MU * MU)).max(0.0).sqrt();
+    (e, h2 / (MU * (1.0 + e)))
+}
+
+#[derive(Debug, Default)]
+pub struct TrackQuery {
+    pub updated_since: f64,
+    pub after_id: Option<String>,
+    pub unknown_only: bool,
+    pub min_e: Option<f64>,
+    pub max_q: Option<f64>,
+    pub min_nights: Option<i32>,
+}
+
+impl TrackQuery {
+    fn cuts_orbit(&self) -> bool {
+        self.min_e.is_some() || self.max_q.is_some()
+    }
+
+    pub fn filter(&self) -> Document {
+        let mut filter = doc! { "updated_at": { "$gte": self.updated_since } };
+        if let Some(after_id) = &self.after_id {
+            filter.insert(
+                "$nor",
+                vec![doc! { "updated_at": self.updated_since, "_id": { "$lte": after_id } }],
+            );
+        }
+        if self.unknown_only {
+            filter.insert("designation", mongodb::bson::Bson::Null);
+        }
+        if let Some(min_nights) = self.min_nights {
+            filter.insert("n_nights", doc! { "$gte": min_nights });
+        }
+        if self.cuts_orbit() {
+            filter.insert("orbit", doc! { "$type": "object" });
+        }
+        filter
+    }
+
+    pub fn keeps(&self, track: &StoredTrack) -> bool {
+        if !self.cuts_orbit() {
+            return true;
+        }
+        let Some(orbit) = &track.orbit else {
+            return false;
+        };
+        let (e, q) = conic(orbit);
+        self.min_e.is_none_or(|min_e| e >= min_e) && self.max_q.is_none_or(|max_q| q <= max_q)
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct TrackCursor {
+    pub updated_since: f64,
+    pub after_id: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TrackPage {
+    pub tracks: Vec<StoredTrack>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next: Option<TrackCursor>,
+}
+
+pub async fn list_tracks(
+    db: &mongodb::Database,
+    query: &TrackQuery,
+    limit: usize,
+) -> Result<TrackPage, mongodb::error::Error> {
+    let tracks = db.collection::<StoredTrack>(TRACKS_COLLECTION);
+    let mut find = tracks
+        .find(query.filter())
+        .sort(doc! { "updated_at": 1, "_id": 1 });
+    if !query.cuts_orbit() {
+        find = find.limit(limit as i64);
+    }
+    let mut cursor = find.await?;
+    let mut page = TrackPage {
+        tracks: Vec::new(),
+        next: None,
+    };
+    while page.tracks.len() < limit && cursor.advance().await? {
+        let Ok(track) = cursor.deserialize_current() else {
+            continue;
+        };
+        page.next = Some(TrackCursor {
+            updated_since: track.updated_at,
+            after_id: track.id.clone(),
+        });
+        if query.keeps(&track) {
+            page.tracks.push(track);
+        }
+    }
+    Ok(page)
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -959,6 +1062,87 @@ pub(crate) mod tests {
         t.first_jd = 2461293.8666435;
         let carried = AlertTrack::from(&t);
         assert_eq!(carried.first_jd, 2461293.8666435);
+    }
+
+    fn orbit_at(e: f64, q: f64, nu_deg: f64) -> StoredOrbit {
+        let p = q * (1.0 + e);
+        let nu = nu_deg.to_radians();
+        let r = p / (1.0 + e * nu.cos());
+        let speed = (MU / p).sqrt();
+        StoredOrbit {
+            epoch_jd: 2460000.0,
+            pos: [r * nu.cos(), r * nu.sin(), 0.0],
+            vel: [-speed * nu.sin(), speed * (e + nu.cos()), 0.0],
+        }
+    }
+
+    #[test]
+    fn test_conic_recovers_eccentricity_and_perihelion() {
+        for (e, q, nu) in [
+            (0.0, 2.5, 0.0),
+            (0.1, 2.2, 130.0),
+            (0.6, 0.9, -40.0),
+            (1.0, 1.0, 50.0),
+            (3.36, 2.0, 70.0),
+        ] {
+            let (got_e, got_q) = conic(&orbit_at(e, q, nu));
+            assert!((got_e - e).abs() < 1e-6, "e {e}: {got_e}");
+            assert!((got_q - q).abs() < 1e-9, "q {q}: {got_q}");
+        }
+    }
+
+    #[test]
+    fn test_a_track_query_filters_on_updated_at_first() {
+        let query = TrackQuery {
+            updated_since: 1.7e9,
+            after_id: Some("BT000009".to_string()),
+            unknown_only: true,
+            min_e: Some(1.0),
+            min_nights: Some(3),
+            ..Default::default()
+        };
+        let filter = query.filter();
+        assert_eq!(filter.keys().next().map(String::as_str), Some("updated_at"));
+        assert_eq!(
+            filter.get_document("updated_at").unwrap(),
+            &doc! { "$gte": 1.7e9 }
+        );
+        assert_eq!(
+            filter.get_array("$nor").unwrap()[0],
+            doc! { "updated_at": 1.7e9, "_id": { "$lte": "BT000009" } }.into()
+        );
+        assert_eq!(filter.get("designation"), Some(&mongodb::bson::Bson::Null));
+        assert_eq!(
+            filter.get_document("n_nights").unwrap(),
+            &doc! { "$gte": 3 }
+        );
+        assert!(filter.contains_key("orbit"));
+        assert_eq!(
+            TrackQuery::default().filter(),
+            doc! { "updated_at": { "$gte": 0.0 } }
+        );
+    }
+
+    #[test]
+    fn test_orbit_cuts_never_keep_a_track_without_an_orbit() {
+        let unbound = TrackQuery {
+            min_e: Some(1.0),
+            ..Default::default()
+        };
+        let near_earth = TrackQuery {
+            max_q: Some(1.3),
+            ..Default::default()
+        };
+        let mut t = stored("BT000001", &[10, 11]);
+        assert!(TrackQuery::default().keeps(&t));
+        assert!(!unbound.keeps(&t));
+        assert!(!near_earth.keeps(&t));
+        t.orbit = Some(orbit_at(3.36, 2.0, 30.0));
+        assert!(unbound.keeps(&t));
+        assert!(!near_earth.keeps(&t));
+        t.orbit = Some(orbit_at(0.5, 1.1, 30.0));
+        assert!(!unbound.keeps(&t));
+        assert!(near_earth.keeps(&t));
     }
 
     /// Candids no other test uses, so tests can share the database.
