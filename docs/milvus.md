@@ -26,6 +26,7 @@ embedding. The `candid` and `jd` fields record which alert that was.
 | `embedding` | `FloatVector` (dim 384) | L2-normalized fusion embedding |
 | `candid` | `Int64` | Alert the stored embedding came from |
 | `jd` | `Double` | Julian date of that alert |
+| `programid` | `Int32` | Per object: `1` (public) if any detection is public, else `2` (partnership) if any is partnership, else `3` (private). Other values are ignored; an object with none of these is not stored |
 
 ## Credentials
 
