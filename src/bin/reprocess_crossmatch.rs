@@ -5,7 +5,7 @@ use std::{
         atomic::{AtomicUsize, Ordering},
         Arc,
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use boom::{
@@ -46,6 +46,8 @@ const STATUS_MATCHING: &str = "matching";
 const STATUS_COMMITTING: &str = "committing";
 const STATUS_CLEAN: &str = "clean";
 const SHARDS_PER_PROCESS: usize = 8;
+const XMATCH_ATTEMPTS: u32 = 3;
+const XMATCH_RETRY_DELAY: Duration = Duration::from_secs(5);
 
 /// Catalog-driven costs extra full passes over alerts_aux, so it only wins when the
 /// catalog is substantially smaller, not merely smaller.
@@ -176,7 +178,7 @@ async fn run_objects_driven(
     processes: usize,
     concurrency: usize,
     skip_existing: bool,
-) -> Result<(), TaskError> {
+) -> Result<usize, TaskError> {
     let aux_collection: mongodb::Collection<AuxIdAndCoords> =
         db.collection(&format!("{}_alerts_aux", survey));
     let estimated = aux_collection.estimated_document_count().await.unwrap_or(0);
@@ -192,6 +194,7 @@ async fn run_objects_driven(
     let queue_capacity = processes * batch_size * QUEUE_MULTIPLIER;
     let (tx, rx) = async_channel::bounded::<AuxIdAndCoords>(queue_capacity);
 
+    let skipped = Arc::new(AtomicUsize::new(0));
     let mut workers = Vec::with_capacity(processes);
     for _ in 0..processes {
         let rx = rx.clone();
@@ -199,8 +202,19 @@ async fn run_objects_driven(
         let survey = survey.clone();
         let db = db.clone();
         let catalogs = catalogs.clone();
+        let skipped = skipped.clone();
         workers.push(tokio::spawn(async move {
-            objects_worker(survey, db, catalogs, rx, batch_size, concurrency, pb).await
+            objects_worker(
+                survey,
+                db,
+                catalogs,
+                rx,
+                batch_size,
+                concurrency,
+                pb,
+                skipped,
+            )
+            .await
         }));
     }
     drop(rx);
@@ -232,9 +246,10 @@ async fn run_objects_driven(
     logger.abort();
     pb.finish();
     outcome?;
-    Ok(())
+    Ok(skipped.load(Ordering::Relaxed))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn objects_worker(
     survey: Survey,
     db: mongodb::Database,
@@ -243,6 +258,7 @@ async fn objects_worker(
     batch_size: usize,
     concurrency: usize,
     pb: ProgressBar,
+    skipped: Arc<AtomicUsize>,
 ) -> Result<(), mongodb::error::Error> {
     let client = db.client().clone();
     let aux_collection: mongodb::Collection<AuxIdAndCoords> =
@@ -262,6 +278,7 @@ async fn objects_worker(
                 &mut batch,
                 concurrency,
                 &pb,
+                &skipped,
             )
             .await?;
         }
@@ -276,6 +293,7 @@ async fn objects_worker(
             &mut batch,
             concurrency,
             &pb,
+            &skipped,
         )
         .await?;
     }
@@ -292,16 +310,28 @@ async fn flush_objects_batch(
     batch: &mut Vec<AuxIdAndCoords>,
     concurrency: usize,
     pb: &ProgressBar,
+    skipped: &AtomicUsize,
 ) -> Result<(), mongodb::error::Error> {
     let writes: Vec<WriteModel> = futures::stream::iter(batch.drain(..))
         .map(|obj| async move {
             let (ra, dec) = obj.coordinates.get_radec();
-            let result = xmatch(ra, dec, &obj.object_id, survey, catalogs, db).await;
+            let mut attempt = 1;
+            let result = loop {
+                match xmatch(ra, dec, &obj.object_id, survey, catalogs, db).await {
+                    Err(e) if attempt < XMATCH_ATTEMPTS => {
+                        warn!(object_id = %obj.object_id, attempt, error = %e, "xmatch failed, retrying");
+                        tokio::time::sleep(XMATCH_RETRY_DELAY * attempt).await;
+                        attempt += 1;
+                    }
+                    result => break result,
+                }
+            };
             pb.inc(1);
             let mut xmatches = match result {
                 Ok(r) => r,
                 Err(e) => {
-                    warn!(object_id = %obj.object_id, error = %e, "xmatch failed, skipping");
+                    skipped.fetch_add(1, Ordering::Relaxed);
+                    warn!(object_id = %obj.object_id, error = %e, "xmatch failed {} times, skipping", XMATCH_ATTEMPTS);
                     return None;
                 }
             };
@@ -1368,8 +1398,9 @@ async fn main() {
         }
     }
 
+    let mut skipped = 0;
     if !objects_catalogs.is_empty() {
-        if let Err(e) = run_objects_driven(
+        match run_objects_driven(
             &args.survey,
             objects_catalogs,
             db.clone(),
@@ -1380,8 +1411,11 @@ async fn main() {
         )
         .await
         {
-            error!("objects-driven run failed: {}", e);
-            std::process::exit(1);
+            Ok(n) => skipped = n,
+            Err(e) => {
+                error!("objects-driven run failed: {}", e);
+                std::process::exit(1);
+            }
         }
     }
 
@@ -1404,6 +1438,13 @@ async fn main() {
         }
     }
 
+    if skipped > 0 {
+        error!(
+            "{} records were skipped after {} failed xmatch attempts each; rerun with --skip-existing to fill them in",
+            skipped, XMATCH_ATTEMPTS
+        );
+        std::process::exit(1);
+    }
     info!("reprocess_crossmatch complete.");
 }
 
