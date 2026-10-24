@@ -50,6 +50,7 @@ pub fn night_start(night: i64, site: Option<&Site>) -> f64 {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Detection {
     pub id: i64,
+    /// Mid-exposure, UTC.
     pub jd: f64,
     /// Degrees.
     pub ra: f64,
