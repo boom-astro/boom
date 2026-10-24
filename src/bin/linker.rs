@@ -18,9 +18,11 @@
 
 use boom::conf::{load_dotenv, AppConfig, LinkerConfig};
 use boom::utils::discovery::{
-    attach_pass, designations, load_unknown, load_window, persist_clusters, persist_tracks, recall,
-    reference_epoch, thor_clusters, track_detections, tracklets_per_night, Stop, ThorSearch,
+    attach_pass, designations, load_unknown, load_window, persist_clusters, persist_fast,
+    persist_tracks, recall, reference_epoch, thor_clusters, track_detections, tracklets_per_night,
+    Stop, ThorSearch,
 };
+use boom::utils::fast::{fast_tracks, lsst_trails, FastSearch};
 use boom::utils::heliolinc::{link_tracklets, LinkConfig, Track};
 use boom::utils::identify::{IdentifyConfig, KnownRule, OrbitEntry};
 use boom::utils::linking::{night_of, Detection, Tracklet, TrackletConfig};
@@ -153,7 +155,7 @@ async fn run_night(db: &mongodb::Database, cfg: &LinkerConfig, night: i64, stop:
     let started = Instant::now();
     // Loading and linking take minutes, all wasted if the results cannot be
     // stored, so a night waits for another run's lock before starting.
-    if cfg.persist && (cfg.link || cfg.thor) {
+    if cfg.persist && (cfg.link || cfg.thor || cfg.fast) {
         match lock_is_held(db).await {
             Ok(false) => {}
             Ok(true) => {
@@ -170,7 +172,7 @@ async fn run_night(db: &mongodb::Database, cfg: &LinkerConfig, night: i64, stop:
     // object IPAC missed would be stored as a discovery candidate, so a run
     // that should match and cannot does not store anything. Read before the
     // window, so a night waiting on a missing catalog costs one quick read.
-    let catalog = if cfg.match_known && (cfg.link || cfg.thor) {
+    let catalog = if cfg.match_known && (cfg.link || cfg.thor || cfg.fast) {
         match load_catalogue(db).await {
             Ok(orbits) if orbits.is_empty() => {
                 error!("MPC_orbits is empty, so tracks cannot be matched; run mpcorb_ingest");
@@ -293,6 +295,60 @@ async fn run_night(db: &mongodb::Database, cfg: &LinkerConfig, night: i64, stop:
             seconds = pass.elapsed().as_secs_f64(),
             "THOR pass done"
         );
+    }
+
+    if cfg.fast && !detections.is_empty() && stop.requested() {
+        done = false;
+    } else if cfg.fast && !detections.is_empty() {
+        let pass = Instant::now();
+        let fast_first = night - cfg.fast_window_nights as i64 + 1;
+        let recent: Vec<Detection> = detections
+            .iter()
+            .filter(|d| d.night() >= fast_first)
+            .copied()
+            .collect();
+        match lsst_trails(db, &recent).await {
+            Ok(trails) => {
+                let search = FastSearch {
+                    min_rate_deg_per_day: cfg.fast_min_rate_deg_per_day,
+                    max_rate_deg_per_day: cfg.fast_max_rate_deg_per_day,
+                    dense_detections: cfg.fast_dense_detections,
+                    ..FastSearch::default()
+                };
+                let tracks = fast_tracks(&recent, &trails, &search);
+                let groups: Vec<Vec<i64>> = tracks.iter().map(|t| t.members.clone()).collect();
+                let known = known_objects(&groups, &recent, catalog.as_deref());
+                let report = persist_fast(
+                    db,
+                    &tracks,
+                    &recent,
+                    &labels,
+                    &known,
+                    dry_run,
+                    search.min_detections,
+                    search.min_nights,
+                    stop,
+                )
+                .await;
+                done &= report.complete();
+                found.extend(groups);
+                info!(
+                    detections = recent.len(),
+                    trailed = trails.len(),
+                    tracks = tracks.len(),
+                    known = known.iter().filter(|k| k.is_some()).count(),
+                    stored = report.stored,
+                    unchanged = report.unchanged,
+                    wrote = report.ran && !dry_run,
+                    seconds = pass.elapsed().as_secs_f64(),
+                    "fast pass done"
+                );
+            }
+            Err(error) => {
+                error!(%error, "could not read Rubin's trail lengths for the fast pass");
+                done = false;
+            }
+        }
     }
 
     if cfg.attach && !detections.is_empty() && stop.requested() {
