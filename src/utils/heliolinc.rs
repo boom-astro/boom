@@ -11,7 +11,7 @@
 
 use crate::utils::linking::{angular_separation_deg, night_of, Detection, Tracklet};
 use crate::utils::orbit_fit::{
-    bound_suffices, converge_orbit, fit_orbit_with, predict_radec, rms_arcsec, GiveUp, Observation,
+    converge_orbit, fit_orbit_with, keeps_unbound, predict_radec, rms_arcsec, GiveUp, Observation,
     CONVERGE_ITERATIONS, SCREEN_ITERATIONS,
 };
 use crate::utils::outburst::{hg12, DEFAULT_G12};
@@ -64,15 +64,34 @@ pub fn is_bound(state: &State) -> bool {
 pub enum Conics {
     #[default]
     Bound,
-    /// Up to this hyperbolic excess speed, au/day.
-    Unbound(f64),
+    /// Hyperbolae too, up to `vinf_au_per_day` of excess speed, an unbound fit
+    /// standing only if it leaves at most `max_rms_arcsec`.
+    Unbound {
+        vinf_au_per_day: f64,
+        max_rms_arcsec: f64,
+    },
 }
 
 impl Conics {
+    /// Unbound for a positive `vinf_au_per_day`, bound otherwise.
+    pub fn up_to(vinf_au_per_day: f64, max_rms_arcsec: f64) -> Self {
+        if vinf_au_per_day > 0.0 {
+            Conics::Unbound {
+                vinf_au_per_day,
+                max_rms_arcsec,
+            }
+        } else {
+            Conics::Bound
+        }
+    }
+
     pub fn admits(self, state: &State) -> bool {
         match self {
             Conics::Bound => is_bound(state),
-            Conics::Unbound(vinf) => energy(state) < vinf * vinf / 2.0,
+            Conics::Unbound {
+                vinf_au_per_day: vinf,
+                ..
+            } => energy(state) < vinf * vinf / 2.0,
         }
     }
 }
@@ -231,11 +250,15 @@ impl Default for LinkConfig {
 }
 
 impl LinkConfig {
-    pub fn with_unbound(mut self, vinf_au_per_day: f64) -> Self {
-        if vinf_au_per_day > 0.0 {
+    /// Search `conics`, adding the unbound hypotheses when they are unbound.
+    pub fn with_conics(mut self, conics: Conics) -> Self {
+        if let Conics::Unbound {
+            vinf_au_per_day, ..
+        } = conics
+        {
             self.hypotheses.extend(unbound_hypotheses(vinf_au_per_day));
-            self.conics = Conics::Unbound(vinf_au_per_day);
         }
+        self.conics = conics;
         self
     }
 }
@@ -1044,7 +1067,7 @@ fn best_passing(
             .collect()
     };
     let fallback = match cfg.conics {
-        Conics::Unbound(_) => Some((bound_copies(&first), bound_copies(&rest))),
+        Conics::Unbound { .. } => Some((bound_copies(&first), bound_copies(&rest))),
         Conics::Bound => None,
     };
     let (track, screened) = settle(first, rest, &observations, cfg, cfg.conics);
@@ -1067,7 +1090,7 @@ fn best_passing(
             cfg,
             Conics::Bound,
         );
-        track = bound_unless_worse(track, bound, &observations, cfg)?;
+        track = choose_conic(track, bound, &observations, cfg)?;
     }
     photometry_agrees(&track, tracklets, by_id, cfg).then_some(track)
 }
@@ -1117,22 +1140,19 @@ fn settle(
     (track, states)
 }
 
-/// `track`, unless it is unbound and `bound` [`bound_suffices`] in its place,
-/// in which case `bound` if it passes the gate.
-fn bound_unless_worse(
+/// `track` if it is bound or [`keeps_unbound`] lets it stand against `bound`,
+/// otherwise `bound` if it passes the gate.
+fn choose_conic(
     track: Track,
     bound: Option<Track>,
     observations: &[Observation],
     cfg: &LinkConfig,
 ) -> Option<Track> {
-    match (track.residual_arcsec, bound) {
-        (Some(rms), Some(bound))
-            if !is_bound(&track.state) && bound_suffices(rms, residual(&bound), &bound.state) =>
-        {
-            (residual(&bound) <= gate_arcsec(observations, cfg)).then_some(bound)
-        }
-        _ => Some(track),
+    let against = bound.as_ref().map(|b| (residual(b), &b.state));
+    if is_bound(&track.state) || keeps_unbound(cfg.conics, residual(&track), against) {
+        return Some(track);
     }
+    bound.filter(|b| residual(b) <= gate_arcsec(observations, cfg))
 }
 
 /// Run a track whose screening fit passed the gate on to convergence, so the
@@ -1576,7 +1596,7 @@ fn try_merge(
             }])
             .collect();
         let (bound, _) = settle(seeds, Vec::new(), &observations, cfg, Conics::Bound);
-        track = bound_unless_worse(track, bound, &observations, cfg)?;
+        track = choose_conic(track, bound, &observations, cfg)?;
     }
     photometry_agrees(&track, tracklets, by_id, cfg).then_some(track)
 }
@@ -2680,7 +2700,7 @@ mod tests {
         use crate::utils::identify::predict_radec_from;
         use crate::utils::orbit_fit::{fit_orbit, fit_orbit_with, fit_within};
 
-        // `find_tracklets` defaults: --max-residual, --max-unbound-residual,
+        // `find_tracklets` defaults: --max-residual, --max-poor-residual,
         // --thor-distances.
         let (good, poor) = (2.0, 10.0);
         let distances = [1.8, 2.2, 2.6, 3.0, 3.4];
@@ -2880,7 +2900,8 @@ mod tests {
         assert!(tracks.iter().all(|t| is_bound(&t.state)));
         let belt_bound = whole(&tracks, 1).expect("the main-belt object is linked");
 
-        let unbound = survey_config(&tracklets).with_unbound(40.0 / KM_S_PER_AU_DAY);
+        let unbound =
+            survey_config(&tracklets).with_conics(Conics::up_to(40.0 / KM_S_PER_AU_DAY, 0.5));
         let tracks = link_tracklets(&tracklets, &detections, &unbound);
         for track in &tracks {
             let objects = owners_of(track, &tracklets, &owner);
@@ -2910,7 +2931,7 @@ mod tests {
         let objects: Vec<OrbitalElements> = (0..SURVEY_OBJECTS).map(survey_object).collect();
         let (detections, _) = survey(&objects, &nights);
         let tracklets = survey_tracklets(&detections, &nights);
-        let cfg = survey_config(&tracklets).with_unbound(40.0 / KM_S_PER_AU_DAY);
+        let cfg = survey_config(&tracklets).with_conics(Conics::up_to(40.0 / KM_S_PER_AU_DAY, 0.5));
         let tracks = link_tracklets(&tracklets, &detections, &cfg);
         assert!(
             tracks.len() >= SURVEY_OBJECTS - 1,

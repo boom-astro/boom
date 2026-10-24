@@ -141,8 +141,8 @@ struct Cli {
     /// Keep a THOR cluster whose best bound orbit leaves up to this residual,
     /// arcseconds, reported as a poor fit. Only a bound orbit can be fitted, so
     /// a distant or unbound object lands here rather than under --max-residual.
-    #[arg(long, default_value_t = 10.0)]
-    max_unbound_residual: f64,
+    #[arg(long, alias = "max-unbound-residual", default_value_t = 10.0)]
+    max_poor_residual: f64,
 
     /// Attribute detections to catalogued objects and score against `ssnamenr`.
     #[arg(long, default_value_t = false)]
@@ -230,6 +230,10 @@ struct Cli {
     /// Also link unbound orbits, up to this hyperbolic excess speed, km/s.
     #[arg(long, default_value_t = 0.0)]
     max_vinf: f64,
+
+    /// Largest residual an unbound orbit may leave and stand, arcseconds.
+    #[arg(long, default_value_t = 0.5)]
+    max_unbound_rms: f64,
 }
 
 /// Fetch the requested telescope-nights, returning the directories to read.
@@ -598,7 +602,7 @@ async fn run_thor(
         config: cfg,
         distances_au: args.thor_distances.clone(),
         max_residual_arcsec: args.max_residual,
-        max_unbound_residual_arcsec: args.max_unbound_residual,
+        max_poor_residual_arcsec: args.max_poor_residual,
         site: boom::utils::sso_geometry::ZTF,
     };
     let cfg = &search.config;
@@ -1111,7 +1115,10 @@ async fn main() {
             site: boom::utils::sso_geometry::ZTF,
             conics: Conics::Bound,
         }
-        .with_unbound(args.max_vinf / KM_S_PER_AU_DAY);
+        .with_conics(Conics::up_to(
+            args.max_vinf / KM_S_PER_AU_DAY,
+            args.max_unbound_rms,
+        ));
         let started = std::time::Instant::now();
         let tracks = link_tracklets(&tracklets, &detections, &link_cfg);
         info!(

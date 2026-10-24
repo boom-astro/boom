@@ -318,8 +318,8 @@ pub fn converge_orbit(
 ///
 /// The fit comes back whether or not it passed, so the caller compares its
 /// rms with the gate; one abandoned by the screen is simply above it. `None`
-/// when the observations cannot constrain an orbit. An unbound fit gives way to
-/// a bound one that [`bound_suffices`].
+/// when the observations cannot constrain an orbit. An unbound fit that
+/// [`keeps_unbound`] rejects gives way to the best bound one.
 pub fn fit_within(
     observations: &[Observation],
     seed: &State,
@@ -335,12 +335,23 @@ pub fn fit_within(
         .iter()
         .filter_map(|s| screen_then_converge(observations, s, epoch_jd, gate_arcsec, Conics::Bound))
         .min_by(|a, b| a.rms_arcsec.total_cmp(&b.rms_arcsec));
-    match bound {
-        Some(bound) if bound_suffices(fit.rms_arcsec, bound.rms_arcsec, &bound.state) => {
-            Some(bound)
-        }
-        _ => Some(fit),
+    let against = bound.as_ref().map(|b| (b.rms_arcsec, &b.state));
+    if keeps_unbound(conics, fit.rms_arcsec, against) {
+        Some(fit)
+    } else {
+        bound
     }
+}
+
+/// Whether an unbound fit leaving `rms` arcseconds stands against `bound`, the
+/// best bound fit of the same astrometry (its rms and state): it must be
+/// within the limit `conics` sets, and `bound` must not [`bound_suffices`].
+pub fn keeps_unbound(conics: Conics, rms: f64, bound: Option<(f64, &State)>) -> bool {
+    let Conics::Unbound { max_rms_arcsec, .. } = conics else {
+        return false;
+    };
+    rms <= max_rms_arcsec
+        && !bound.is_some_and(|(bound_rms, state)| bound_suffices(rms, bound_rms, state))
 }
 
 /// Eccentricity past which a bound fit is pressed against e = 1, where one kept
@@ -349,7 +360,7 @@ const PINNED_ECCENTRICITY: f64 = 0.99;
 
 /// Whether a bound fit at `bound_rms` arcseconds should replace an unbound one
 /// at `rms`: it fits as well, or within twice and not pressed against e = 1.
-pub fn bound_suffices(rms: f64, bound_rms: f64, bound: &State) -> bool {
+fn bound_suffices(rms: f64, bound_rms: f64, bound: &State) -> bool {
     bound_rms <= rms
         || (bound_rms <= 2.0 * rms
             && state_to_elements(bound, 0.0).is_some_and(|el| el.e < PINNED_ECCENTRICITY))

@@ -1474,6 +1474,10 @@ pub struct LinkerConfig {
     /// Also link unbound orbits, up to this hyperbolic excess speed, km/s.
     #[serde(default)]
     pub max_vinf_km_s: f64,
+    /// Largest residual an unbound orbit may leave and stand, arcseconds. A
+    /// track fitting worse keeps its bound fit if that passes, or is dropped.
+    #[serde(default = "default_linker_max_unbound_rms_arcsec")]
+    pub max_unbound_rms_arcsec: f64,
 }
 
 impl LinkerConfig {
@@ -1504,6 +1508,12 @@ impl LinkerConfig {
                 self.max_vinf_km_s
             ));
         }
+        if !self.max_unbound_rms_arcsec.is_finite() || self.max_unbound_rms_arcsec <= 0.0 {
+            return Err(format!(
+                "max_unbound_rms_arcsec is {}, but must be a positive residual",
+                self.max_unbound_rms_arcsec
+            ));
+        }
         Ok(())
     }
 }
@@ -1524,8 +1534,13 @@ impl Default for LinkerConfig {
             attach: default_linker_pass(),
             attach_lookback_nights: default_linker_attach_lookback_nights(),
             max_vinf_km_s: 0.0,
+            max_unbound_rms_arcsec: default_linker_max_unbound_rms_arcsec(),
         }
     }
+}
+
+fn default_linker_max_unbound_rms_arcsec() -> f64 {
+    0.5
 }
 
 fn default_linker_attach_lookback_nights() -> u32 {
