@@ -22,7 +22,7 @@ use rayon::prelude::*;
 use std::collections::{BTreeMap, HashMap};
 
 /// Heliocentric gravitational parameter, au^3/day^2.
-const MU: f64 = 0.017_202_098_95 * 0.017_202_098_95;
+pub(crate) const MU: f64 = 0.017_202_098_95 * 0.017_202_098_95;
 /// Obliquity of the ecliptic at J2000, degrees.
 const OBLIQUITY_DEG: f64 = 23.439_281;
 /// Step for differencing Earth's position, days.
