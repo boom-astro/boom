@@ -5,7 +5,7 @@ use std::{
         atomic::{AtomicUsize, Ordering},
         Arc,
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use boom::{
@@ -46,6 +46,8 @@ const STATUS_MATCHING: &str = "matching";
 const STATUS_COMMITTING: &str = "committing";
 const STATUS_CLEAN: &str = "clean";
 const SHARDS_PER_PROCESS: usize = 8;
+const XMATCH_ATTEMPTS: u32 = 3;
+const XMATCH_RETRY_DELAY: Duration = Duration::from_secs(5);
 
 /// Catalog-driven costs extra full passes over alerts_aux, so it only wins when the
 /// catalog is substantially smaller, not merely smaller.
@@ -296,12 +298,22 @@ async fn flush_objects_batch(
     let writes: Vec<WriteModel> = futures::stream::iter(batch.drain(..))
         .map(|obj| async move {
             let (ra, dec) = obj.coordinates.get_radec();
-            let result = xmatch(ra, dec, &obj.object_id, survey, catalogs, db).await;
+            let mut attempt = 1;
+            let result = loop {
+                match xmatch(ra, dec, &obj.object_id, survey, catalogs, db).await {
+                    Err(e) if attempt < XMATCH_ATTEMPTS => {
+                        warn!(object_id = %obj.object_id, attempt, error = %e, "xmatch failed, retrying");
+                        tokio::time::sleep(XMATCH_RETRY_DELAY * attempt).await;
+                        attempt += 1;
+                    }
+                    result => break result,
+                }
+            };
             pb.inc(1);
             let mut xmatches = match result {
                 Ok(r) => r,
                 Err(e) => {
-                    warn!(object_id = %obj.object_id, error = %e, "xmatch failed, skipping");
+                    warn!(object_id = %obj.object_id, error = %e, "xmatch failed {} times, skipping", XMATCH_ATTEMPTS);
                     return None;
                 }
             };
