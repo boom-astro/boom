@@ -261,7 +261,10 @@ async fn run_night(db: &mongodb::Database, cfg: &LinkerConfig, night: i64, stop:
             .filter(|d| d.jd >= thor_start)
             .copied()
             .collect();
-        let search = ThorSearch::default();
+        let search = ThorSearch {
+            conics,
+            ..ThorSearch::default()
+        };
         let clusters = thor_clusters(&recent, &search);
         let groups: Vec<Vec<i64>> = clusters.iter().map(|(c, _)| c.ids.clone()).collect();
         let known = known_objects(&groups, &recent, catalog.as_deref());

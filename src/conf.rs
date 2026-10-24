@@ -1471,7 +1471,8 @@ pub struct LinkerConfig {
     pub attach: bool,
     #[serde(default = "default_linker_attach_lookback_nights")]
     pub attach_lookback_nights: u32,
-    /// Also link unbound orbits, up to this hyperbolic excess speed, km/s.
+    /// Also link and recover unbound orbits, up to this hyperbolic excess
+    /// speed, km/s.
     #[serde(default)]
     pub max_vinf_km_s: f64,
     /// Largest residual an unbound orbit may leave and stand, arcseconds. A

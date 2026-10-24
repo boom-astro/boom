@@ -295,7 +295,8 @@ linker:
   recall_window_nights: 5
   attach: true
   attach_lookback_nights: 60
-  # Also link unbound orbits up to this hyperbolic excess speed (km/s), 0 is off.
+  # Also link and recover unbound orbits up to this hyperbolic excess speed
+  # (km/s), 0 is off. THOR then runs about 30 times longer.
   max_vinf_km_s: 0.0
   # Largest residual an unbound orbit may leave (arcsec); a track fitting worse
   # keeps its bound fit if that passes, or is dropped.

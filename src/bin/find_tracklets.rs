@@ -138,9 +138,10 @@ struct Cli {
     #[arg(long)]
     rate_steps: Option<usize>,
 
-    /// Keep a THOR cluster whose best bound orbit leaves up to this residual,
-    /// arcseconds, reported as a poor fit. Only a bound orbit can be fitted, so
-    /// a distant or unbound object lands here rather than under --max-residual.
+    /// Keep a THOR cluster whose best orbit leaves up to this residual,
+    /// arcseconds, reported as a poor fit. Without --max-vinf only a bound orbit
+    /// can be fitted, so an unbound object lands here rather than under
+    /// --max-residual.
     #[arg(long, alias = "max-unbound-residual", default_value_t = 10.0)]
     max_poor_residual: f64,
 
@@ -227,7 +228,9 @@ struct Cli {
     #[arg(long, default_value_t = 0.0004)]
     velocity_tol: f64,
 
-    /// Also link unbound orbits, up to this hyperbolic excess speed, km/s.
+    /// Also link and recover unbound orbits, up to this hyperbolic excess
+    /// speed, km/s. THOR then also sweeps unbound trial orbits, about 30 times
+    /// its bound cost.
     #[arg(long, default_value_t = 0.0)]
     max_vinf: f64,
 
@@ -604,6 +607,7 @@ async fn run_thor(
         max_residual_arcsec: args.max_residual,
         max_poor_residual_arcsec: args.max_poor_residual,
         site: boom::utils::sso_geometry::ZTF,
+        conics: Conics::up_to(args.max_vinf / KM_S_PER_AU_DAY, args.max_unbound_rms),
     };
     let cfg = &search.config;
     let kept: Vec<(thor::Cluster, Verdict)> = thor_clusters(detections, &search);

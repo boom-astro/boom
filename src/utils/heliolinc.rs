@@ -802,6 +802,115 @@ pub fn test_orbits(
     out
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SkyResolution {
+    pub rate_step_deg_per_day: f64,
+    pub max_rate_deg_per_day: f64,
+    pub curvature_deg_per_day2: f64,
+}
+
+const UNBOUND_TRIAL_AU: (f64, f64) = (2.5, 6.0);
+
+fn cell_centers(lo: f64, hi: f64, step: f64) -> impl Iterator<Item = f64> {
+    let n = ((hi - lo) / step).ceil().max(1.0) as usize;
+    (0..n).map(move |k| lo + (k as f64 + 0.5) * (hi - lo) / n as f64)
+}
+
+/// Unbound trial orbits through `(ra_deg, dec_deg)`, spaced as finely as `res` resolves.
+pub fn unbound_test_orbits(
+    ra_deg: f64,
+    dec_deg: f64,
+    epoch_jd: f64,
+    vinf_au_per_day: f64,
+    res: &SkyResolution,
+) -> Vec<State> {
+    let look = unit_vector(ra_deg, dec_deg);
+    let east = cross(&unit_vector(0.0, 90.0), &look);
+    let n = norm(&east);
+    if n < 1e-9 {
+        return Vec::new();
+    }
+    let east = [east[0] / n, east[1] / n, east[2] / n];
+    let north = cross(&look, &east);
+    let earth = earth_position(epoch_jd);
+    let earth_vel = earth_velocity(epoch_jd);
+    let along = dot(&earth, &look);
+    let range = |r_au: f64| -along + (along * along - dot(&earth, &earth) + r_au * r_au).sqrt();
+    let (near, far) = (range(UNBOUND_TRIAL_AU.0), range(UNBOUND_TRIAL_AU.1));
+    if !(near > 0.0 && far > near) {
+        return Vec::new();
+    }
+
+    let step = res.rate_step_deg_per_day.to_radians();
+    let max_rate = res.max_rate_deg_per_day.to_radians();
+    let curvature = res.curvature_deg_per_day2.to_radians();
+    if !(step > 0.0 && curvature > 0.0) {
+        return Vec::new();
+    }
+    let reflex = MU * (dot(&earth, &earth) - along * along).max(0.0).sqrt() / norm(&earth).powi(3);
+    let inverse: Vec<f64> = cell_centers(1.0 / far, 1.0 / near, 4.0 * curvature / reflex).collect();
+    let across_earth = {
+        let a = dot(&earth_vel, &look);
+        [
+            earth_vel[0] - a * look[0],
+            earth_vel[1] - a * look[1],
+            earth_vel[2] - a * look[2],
+        ]
+    };
+
+    let reach = (max_rate / step).floor() as i64;
+    let mut out = Vec::new();
+    for i in -reach..=reach {
+        for j in -reach..=reach {
+            let (rate_e, rate_n) = (i as f64 * step, j as f64 * step);
+            let rate = rate_e.hypot(rate_n);
+            if rate > max_rate {
+                continue;
+            }
+            let range_rate_step = 2.0 * curvature / rate.max(step / 2.0);
+            for &x in &inverse {
+                let d = 1.0 / x;
+                let pos = [
+                    earth[0] + d * look[0],
+                    earth[1] + d * look[1],
+                    earth[2] + d * look[2],
+                ];
+                let across = [
+                    across_earth[0] + d * (rate_e * east[0] + rate_n * north[0]),
+                    across_earth[1] + d * (rate_e * east[1] + rate_n * north[1]),
+                    across_earth[2] + d * (rate_e * east[2] + rate_n * north[2]),
+                ];
+                let across2 = dot(&across, &across);
+                let escape2 = 2.0 * MU / norm(&pos);
+                let limit2 = escape2 + vinf_au_per_day * vinf_au_per_day;
+                if across2 >= limit2 {
+                    continue;
+                }
+                let (lo, hi) = (
+                    (escape2 - across2).max(0.0).sqrt(),
+                    (limit2 - across2).sqrt(),
+                );
+                let bands: &[(f64, f64)] = if lo > 0.0 {
+                    &[(-hi, -lo), (lo, hi)]
+                } else {
+                    &[(-hi, hi)]
+                };
+                for &(a, b) in bands {
+                    for v in cell_centers(a, b, range_rate_step * d) {
+                        let vel = [
+                            across[0] + v * look[0],
+                            across[1] + v * look[1],
+                            across[2] + v * look[2],
+                        ];
+                        out.push(State { pos, vel });
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Bucket key placing a state in a grid cell of side `tol`.
 fn cell(pos: &[f64; 3], tol: f64) -> (i64, i64, i64) {
     (
@@ -2946,6 +3055,98 @@ mod tests {
                 track.residual_arcsec
             );
         }
+    }
+
+    #[test]
+    fn test_thor_recovers_an_interstellar_object_seen_once_a_night() {
+        use crate::utils::discovery::{thor_clusters, ThorSearch};
+        use crate::utils::identify::predict_radec_from;
+        use crate::utils::tracks::BoundFit;
+
+        let nights = [2458945.70, 2458946.71, 2458947.69, 2458948.72, 2458949.70];
+        let mut detections: Vec<Detection> = nights
+            .iter()
+            .enumerate()
+            .map(|(n, &jd)| {
+                let (ra, dec) = predict_radec_from(&borisov(), jd, &ZTF);
+                Detection {
+                    id: n as i64,
+                    jd,
+                    ra,
+                    dec,
+                    mag: Some(19.0),
+                    mag_err: Some(0.1),
+                    band: Some('r'),
+                    site: None,
+                }
+            })
+            .collect();
+        let iso: Vec<i64> = detections.iter().map(|d| d.id).collect();
+        let (ra0, dec0) = (detections[2].ra, detections[2].dec);
+        let mut seed: u64 = 7;
+        let mut uniform = || {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (seed >> 11) as f64 / (1u64 << 53) as f64
+        };
+        for (n, &jd) in nights.iter().enumerate() {
+            for k in 0..6 {
+                let dec = dec0 + 2.0 * (uniform() - 0.5);
+                detections.push(Detection {
+                    id: 1000 + (10 * n + k) as i64,
+                    jd: jd + 0.02 * uniform(),
+                    ra: ra0 + 2.0 * (uniform() - 0.5) / dec.to_radians().cos(),
+                    dec,
+                    mag: Some(19.0),
+                    mag_err: Some(0.1),
+                    band: Some('r'),
+                    site: None,
+                });
+            }
+        }
+
+        let bound = thor_clusters(&detections, &ThorSearch::default());
+        assert!(
+            bound
+                .iter()
+                .all(|(c, v)| v.0 != BoundFit::Good || c.ids.iter().all(|id| !iso.contains(id))),
+            "a bound orbit fitted the interstellar object: {bound:?}"
+        );
+
+        let unbound = thor_clusters(
+            &detections,
+            &ThorSearch {
+                conics: Conics::up_to(40.0 / KM_S_PER_AU_DAY, 0.5),
+                ..ThorSearch::default()
+            },
+        );
+        for (c, _) in &unbound {
+            let ours = c.ids.iter().filter(|id| iso.contains(id)).count();
+            assert!(
+                ours == 0 || ours == c.ids.len(),
+                "a cluster mixes objects {c:?}"
+            );
+        }
+        let (_, verdict) = unbound
+            .iter()
+            .find(|(c, _)| c.ids == iso)
+            .expect("the interstellar object is recovered whole");
+        assert_eq!(verdict.0, BoundFit::Good, "{verdict:?}");
+        let orbit = verdict.2.expect("an orbit is stored");
+        let el = state_to_elements(
+            &State {
+                pos: orbit.pos,
+                vel: orbit.vel,
+            },
+            orbit.epoch_jd,
+        )
+        .expect("elements");
+        assert!(
+            el.e > 1.0 && (el.e - borisov().e).abs() < 0.1,
+            "fitted e = {}",
+            el.e
+        );
     }
 
     #[test]
