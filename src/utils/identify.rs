@@ -11,7 +11,8 @@ use crate::utils::linking::{angular_separation_deg, tangent_plane, Detection, Tr
 use crate::utils::orbit_fit::C_AU_PER_DAY;
 pub use crate::utils::outburst::median;
 use crate::utils::sso_geometry::{
-    earth_position, heliocentric_position, observer_position, OrbitalElements, Site, ZTF,
+    earth_position_utc, heliocentric_position, observer_position, OrbitalElements, Site,
+    TT_MINUS_UTC_DAYS, ZTF,
 };
 use rayon::prelude::*;
 use std::collections::HashMap;
@@ -63,7 +64,7 @@ impl Default for IdentifyConfig {
     }
 }
 
-/// Apparent position of `elements` at `jd` as seen from `site`, degrees.
+/// Apparent position of `elements` at `jd` (UTC) as seen from `site`, degrees.
 ///
 /// Topocentric rather than geocentric: an Earth radius of offset is several
 /// arcseconds against a main-belt asteroid, which is a large share of the
@@ -79,7 +80,7 @@ fn light_time_corrected(elements: &OrbitalElements, jd: f64, observer: &[f64; 3]
     let mut tau = 0.0;
     let mut los = [0.0; 3];
     for _ in 0..2 {
-        let helio = heliocentric_position(elements, jd - tau);
+        let helio = heliocentric_position(elements, jd + TT_MINUS_UTC_DAYS - tau);
         los = [
             helio[0] - observer[0],
             helio[1] - observer[1],
@@ -92,7 +93,7 @@ fn light_time_corrected(elements: &OrbitalElements, jd: f64, observer: &[f64; 3]
 
 /// Apparent position from the Earth's centre, degrees.
 pub fn predict_radec(elements: &OrbitalElements, jd: f64) -> (f64, f64) {
-    radec_from_ecliptic(&light_time_corrected(elements, jd, &earth_position(jd)))
+    radec_from_ecliptic(&light_time_corrected(elements, jd, &earth_position_utc(jd)))
 }
 
 /// Catalogued objects' paths on the sky, bucketed so a position's
@@ -184,9 +185,10 @@ struct NightPaths {
 impl NightPaths {
     fn new(orbits: &[OrbitEntry], first: f64, last: f64, radius_deg: f64) -> Self {
         let place = |jd: f64| -> Vec<(f64, f64)> {
+            let earth = earth_position_utc(jd);
             orbits
                 .par_iter()
-                .map(|o| predict_radec(&o.elements, jd))
+                .map(|o| radec_from_ecliptic(&light_time_corrected(&o.elements, jd, &earth)))
                 .collect()
         };
         let start = place(first);
@@ -274,12 +276,13 @@ pub fn identify(
             .par_iter()
             .filter_map(|d| {
                 let mut best: Option<(f64, usize)> = None;
+                let observer = observer_position(d.jd, d.site.as_ref().unwrap_or(&cfg.site));
                 for idx in paths.near(d.ra, d.dec, d.jd) {
-                    let (pra, pdec) = predict_radec_from(
+                    let (pra, pdec) = radec_from_ecliptic(&light_time_corrected(
                         &orbits[idx].elements,
                         d.jd,
-                        d.site.as_ref().unwrap_or(&cfg.site),
-                    );
+                        &observer,
+                    ));
                     let sep = angular_separation_deg(d.ra, d.dec, pra, pdec) * 3600.0;
                     // Ties go to the lower index, so the result does not
                     // depend on the order the grid returns candidates in.
@@ -447,19 +450,21 @@ fn moving_with(
         crate::utils::linking::predict(t, t.jd_ref - half),
         crate::utils::linking::predict(t, t.jd_ref + half),
     );
+    let [now, before, after] =
+        [t.jd_ref, t.jd_ref - half, t.jd_ref + half].map(|jd| (jd, observer_position(jd, &site)));
+    let seen = |elements: &OrbitalElements, (jd, observer): &(f64, [f64; 3])| {
+        radec_from_ecliptic(&light_time_corrected(elements, *jd, observer))
+    };
     paths
         .near(t.ra_ref, t.dec_ref, t.jd_ref)
         .filter_map(|idx| {
             let elements = &orbits[idx].elements;
-            let center = predict_radec_from(elements, t.jd_ref, &site);
+            let center = seen(elements, &now);
             let sep = angular_separation_deg(t.ra_ref, t.dec_ref, center.0, center.1) * 3600.0;
             if sep > rule.radius_arcsec {
                 return None;
             }
-            let predicted = (
-                predict_radec_from(elements, t.jd_ref - half, &site),
-                predict_radec_from(elements, t.jd_ref + half, &site),
-            );
+            let predicted = (seen(elements, &before), seen(elements, &after));
             let (ox, oy) = displacement(observed, center)?;
             let (px, py) = displacement(predicted, center)?;
             let gap = (ox - px).hypot(oy - py) * 3600.0 / RATE_STEP_DAYS;
@@ -570,8 +575,8 @@ mod tests {
         use crate::utils::heliolinc::{state_to_elements, State};
 
         let jd = 2460010.6;
-        let earth = earth_position(jd);
-        let (before, after) = (earth_position(jd - 0.5), earth_position(jd + 0.5));
+        let earth = earth_position_utc(jd);
+        let (before, after) = (earth_position_utc(jd - 0.5), earth_position_utc(jd + 0.5));
         let r = (earth[0] * earth[0] + earth[1] * earth[1] + earth[2] * earth[2]).sqrt();
         let state = State {
             pos: [0, 1, 2].map(|k| earth[k] * (1.0 + 0.03 / r)),

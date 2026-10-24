@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use futures::TryStreamExt;
 use mongodb::bson::{doc, Document};
 
-use crate::utils::sso_geometry::{geometry_at, OrbitalElements};
+use crate::utils::sso_geometry::{geometry_at, OrbitalElements, ZTF};
 
 /// One MPCORB record.
 #[derive(Debug, Clone, PartialEq)]
@@ -655,7 +655,7 @@ pub fn fill_geometry(
     let Some(elements) = elements.get(key) else {
         return false;
     };
-    let geometry = geometry_at(elements, jd);
+    let geometry = geometry_at(elements, jd, &ZTF);
     target.insert("helio_dist", geometry.helio_dist);
     target.insert("topo_dist", geometry.topo_dist);
     target.insert("phase_angle", geometry.phase_angle);

@@ -7,7 +7,10 @@
 
 use crate::utils::attach::{match_track, Pool, Target};
 use crate::utils::enums::Survey;
-use crate::utils::heliolinc::{sky_track, test_orbits, State, Track};
+use crate::utils::heliolinc::{
+    sky_track, test_orbits, unbound_test_orbits, Conics, SkyResolution, State, Track,
+    KM_S_PER_AU_DAY,
+};
 use crate::utils::identify::{
     identify, known_tracklets, predict_radec, track_designation, IdentifyConfig, KnownRule, Match,
     MotionRule, OrbitEntry,
@@ -28,7 +31,7 @@ use futures::StreamExt;
 use mongodb::bson::{doc, Document};
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tracing::{error, info};
 
 const ALERTS_COLLECTION: &str = "ZTF_alerts";
@@ -67,6 +70,10 @@ pub fn ztf_band(fid: Option<i32>) -> Option<char> {
         Some(3) => Some('i'),
         _ => None,
     }
+}
+
+pub fn ztf_mid_exposure(jd: f64, exptime: Option<f64>) -> f64 {
+    jd + exptime.unwrap_or(30.0) / 2.0 / 86_400.0
 }
 
 /// Detections for the window, with the `ssnamenr` label when there is one.
@@ -122,6 +129,7 @@ pub async fn load_window(
         "candidate.magpsf": 1,
         "candidate.sigmapsf": 1,
         "candidate.fid": 1,
+        "candidate.exptime": 1,
     };
 
     let mut cursor = db
@@ -251,7 +259,7 @@ fn projection(survey: &Survey) -> Document {
     for field in [jd, mag, mag_err, band] {
         projection.insert(format!("candidate.{field}"), 1);
     }
-    if *survey == Survey::Winter {
+    if matches!(survey, Survey::Ztf | Survey::Winter) {
         projection.insert("candidate.exptime", 1);
     }
     projection
@@ -292,7 +300,10 @@ fn detection_of(doc: &Document) -> Option<Detection> {
     let candidate = doc.get_document("candidate").ok()?;
     Some(Detection {
         id: doc.get_i64("_id").ok()?,
-        jd: candidate.get_f64("jd").ok()?,
+        jd: ztf_mid_exposure(
+            candidate.get_f64("jd").ok()?,
+            candidate.get_f64("exptime").ok(),
+        ),
         ra: candidate.get_f64("ra").ok()?,
         dec: candidate.get_f64("dec").ok()?,
         mag: candidate.get_f64("magpsf").ok(),
@@ -385,10 +396,12 @@ pub struct ThorSearch {
     pub distances_au: Vec<f64>,
     /// Largest sky residual a good bound orbit may leave, arcseconds.
     pub max_residual_arcsec: f64,
-    /// Largest residual a cluster may leave and still be kept as a poor fit.
-    pub max_unbound_residual_arcsec: f64,
+    /// Largest residual a cluster may leave and still be kept as a poor fit,
+    /// where one no orbit fits within `max_residual_arcsec` lands.
+    pub max_poor_residual_arcsec: f64,
     /// Where the astrometry was taken from.
     pub site: Site,
+    pub conics: Conics,
 }
 
 impl Default for ThorSearch {
@@ -403,9 +416,23 @@ impl Default for ThorSearch {
             },
             distances_au: vec![1.8, 2.2, 2.6, 3.0, 3.4],
             max_residual_arcsec: 2.0,
-            max_unbound_residual_arcsec: 10.0,
+            max_poor_residual_arcsec: 10.0,
             site: crate::utils::sso_geometry::ZTF,
+            conics: Conics::Bound,
         }
+    }
+}
+
+// Three positions fix an unbound orbit exactly, so its fit could not reject them.
+const UNBOUND_MIN_NIGHTS: usize = 4;
+
+fn resolution(cfg: &thor::Config, span_days: f64) -> SkyResolution {
+    SkyResolution {
+        rate_step_deg_per_day: 2.0 * cfg.max_residual_rate_deg_per_day,
+        max_rate_deg_per_day: cfg.max_offset_deg / (2.0 * span_days),
+        // A drift a t^2 scatters by a L^2 / (6 sqrt 5) about its best line over L days.
+        curvature_deg_per_day2: cfg.max_rms_arcsec / 3600.0 * 6.0 * 5f64.sqrt()
+            / (span_days * span_days),
     }
 }
 
@@ -432,6 +459,20 @@ pub fn thor_clusters(
     let sample: Vec<f64> = (0..=steps)
         .map(|k| lo + (hi - lo) * k as f64 / steps as f64)
         .collect();
+    let unbound = match search.conics {
+        Conics::Unbound {
+            vinf_au_per_day, ..
+        } if hi > lo => Some((
+            vinf_au_per_day,
+            resolution(cfg, hi - lo),
+            thor::Config {
+                min_nights: cfg.min_nights.max(UNBOUND_MIN_NIGHTS),
+                ..cfg.clone()
+            },
+        )),
+        _ => None,
+    };
+    let unbound_orbits = AtomicUsize::new(0);
 
     // Four grids, each shifted half a patch in RA, Dec or both. A single grid
     // cuts objects on its boundaries in half, leaving each part below
@@ -479,8 +520,21 @@ pub fn thor_clusters(
             };
             // Declination does not wrap, so its mean is the ordinary one.
             let dec0 = patch.iter().map(|d| d.dec).sum::<f64>() / patch.len() as f64;
+            let mut seeds: Vec<(State, &thor::Config)> =
+                test_orbits(ra0, dec0, epoch, &search.distances_au)
+                    .into_iter()
+                    .map(|(state, _r)| (state, cfg))
+                    .collect();
+            if let Some((vinf, res, unbound_cfg)) = &unbound {
+                let nights: HashSet<i64> = patch.iter().map(|d| d.night()).collect();
+                if nights.len() >= unbound_cfg.min_nights {
+                    let extra = unbound_test_orbits(ra0, dec0, epoch, *vinf, res);
+                    unbound_orbits.fetch_add(extra.len(), Ordering::Relaxed);
+                    seeds.extend(extra.into_iter().map(|state| (state, unbound_cfg)));
+                }
+            }
             let mut found = Vec::new();
-            for (state, _r) in test_orbits(ra0, dec0, epoch, &search.distances_au) {
+            for (state, cfg) in seeds {
                 let Some((ra, dec)) = sky_track(&state, epoch, &sample) else {
                     continue;
                 };
@@ -508,6 +562,13 @@ pub fn thor_clusters(
         patches.len(),
         started.elapsed().as_secs_f64()
     );
+    if let Some((vinf, _, _)) = unbound {
+        info!(
+            "{} unbound trial orbits up to {:.0} km/s",
+            unbound_orbits.into_inner(),
+            vinf * KM_S_PER_AU_DAY
+        );
+    }
 
     // Gate on how well one orbit reproduces the cluster's own positions, as the
     // tracklet path does. Two points cannot constrain six parameters, so those
@@ -535,13 +596,17 @@ pub fn thor_clusters(
             // Screened against the looser gate, since a poor fit is still kept,
             // and converged if it passes it, so the residual it is ranked and
             // persisted on is the orbit's rather than where the fit stopped.
-            match fit_within(&obs, &seed, epoch, search.max_unbound_residual_arcsec) {
+            let conics = match search.conics {
+                Conics::Unbound { .. } if c.nights >= UNBOUND_MIN_NIGHTS => search.conics,
+                _ => Conics::Bound,
+            };
+            match fit_within(&obs, &seed, epoch, search.max_poor_residual_arcsec, conics) {
                 None => Some((c, Verdict(BoundFit::None, None, None))),
                 Some(fit) if fit.rms_arcsec <= search.max_residual_arcsec => Some((
                     c,
                     Verdict(BoundFit::Good, Some(fit.rms_arcsec), Some(orbit_of(&fit))),
                 )),
-                Some(fit) if fit.rms_arcsec <= search.max_unbound_residual_arcsec => {
+                Some(fit) if fit.rms_arcsec <= search.max_poor_residual_arcsec => {
                     Some((c, Verdict(BoundFit::Poor, Some(fit.rms_arcsec), None)))
                 }
                 Some(_) => None,
@@ -1107,6 +1172,7 @@ pub async fn attach_pass(
     since_jd: f64,
     gate_arcsec: f64,
     site: &Site,
+    conics: Conics,
     dry_run: bool,
     stop: &Stop,
 ) -> Result<AttachReport, DiscoveryError> {
@@ -1138,7 +1204,7 @@ pub async fn attach_pass(
         if dets.len() != group.len() {
             continue;
         }
-        if let Some((target, fit)) = match_track(&targets, &dets, site, gate_arcsec) {
+        if let Some((target, fit)) = match_track(&targets, &dets, site, gate_arcsec, conics) {
             report.joined += 1;
             candidates.push(joined(target, &mut group.iter().copied(), &fit));
         }
@@ -1153,7 +1219,7 @@ pub async fn attach_pass(
     let mut order: Vec<&Target> = targets.iter().collect();
     order.sort_by(|a, b| b.members.len().cmp(&a.members.len()).then(a.id.cmp(&b.id)));
     for target in order {
-        if let Some((extra, fit)) = pool.attach(target, site, gate_arcsec) {
+        if let Some((extra, fit)) = pool.attach(target, site, gate_arcsec, conics) {
             report.attached += extra.len();
             candidates.push(joined(target, &mut extra.iter().map(|d| d.id), &fit));
         }
