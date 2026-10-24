@@ -11,7 +11,8 @@ use crate::utils::linking::{angular_separation_deg, Detection};
 use crate::utils::orbit_fit::C_AU_PER_DAY;
 pub use crate::utils::outburst::median;
 use crate::utils::sso_geometry::{
-    earth_position, heliocentric_position, observer_position, OrbitalElements, Site, ZTF,
+    earth_position_utc, heliocentric_position, observer_position, OrbitalElements, Site,
+    TT_MINUS_UTC_DAYS, ZTF,
 };
 use rayon::prelude::*;
 use std::collections::HashMap;
@@ -63,7 +64,7 @@ impl Default for IdentifyConfig {
     }
 }
 
-/// Apparent position of `elements` at `jd` as seen from `site`, degrees.
+/// Apparent position of `elements` at `jd` (UTC) as seen from `site`, degrees.
 ///
 /// Topocentric rather than geocentric: an Earth radius of offset is several
 /// arcseconds against a main-belt asteroid, which is a large share of the
@@ -79,7 +80,7 @@ fn light_time_corrected(elements: &OrbitalElements, jd: f64, observer: &[f64; 3]
     let mut tau = 0.0;
     let mut los = [0.0; 3];
     for _ in 0..2 {
-        let helio = heliocentric_position(elements, jd - tau);
+        let helio = heliocentric_position(elements, jd + TT_MINUS_UTC_DAYS - tau);
         los = [
             helio[0] - observer[0],
             helio[1] - observer[1],
@@ -92,7 +93,7 @@ fn light_time_corrected(elements: &OrbitalElements, jd: f64, observer: &[f64; 3]
 
 /// Apparent position from the Earth's centre, degrees.
 pub fn predict_radec(elements: &OrbitalElements, jd: f64) -> (f64, f64) {
-    radec_from_ecliptic(&light_time_corrected(elements, jd, &earth_position(jd)))
+    radec_from_ecliptic(&light_time_corrected(elements, jd, &earth_position_utc(jd)))
 }
 
 /// Catalogued objects' paths on the sky, bucketed so a position's
@@ -437,8 +438,8 @@ mod tests {
         use crate::utils::heliolinc::{state_to_elements, State};
 
         let jd = 2460010.6;
-        let earth = earth_position(jd);
-        let (before, after) = (earth_position(jd - 0.5), earth_position(jd + 0.5));
+        let earth = earth_position_utc(jd);
+        let (before, after) = (earth_position_utc(jd - 0.5), earth_position_utc(jd + 0.5));
         let r = (earth[0] * earth[0] + earth[1] * earth[1] + earth[2] * earth[2]).sqrt();
         let state = State {
             pos: [0, 1, 2].map(|k| earth[k] * (1.0 + 0.03 / r)),

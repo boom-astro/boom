@@ -175,6 +175,8 @@ pub fn heliocentric_position(elements: &OrbitalElements, jd: f64) -> [f64; 3] {
 
 /// Obliquity of the ecliptic at J2000, degrees.
 const OBLIQUITY_DEG: f64 = 23.439_281;
+/// Constant since the leap second of 2017 January 1.
+pub const TT_MINUS_UTC_DAYS: f64 = 69.184 / 86_400.0;
 /// Earth's equatorial radius, au. The unit the MPC tabulates sites in.
 const EARTH_RADIUS_AU: f64 = 4.263_521e-5;
 
@@ -300,7 +302,7 @@ impl Site {
     }
 }
 
-/// Heliocentric ecliptic position of an observing site at `jd`, au.
+/// Heliocentric ecliptic position of an observing site at `jd` (UTC), au.
 ///
 /// An observation is made from a point on a spinning Earth, not from its
 /// centre. The offset is only an Earth radius, but against a main-belt asteroid
@@ -321,7 +323,7 @@ pub fn observer_position(jd: f64, site: &Site) -> [f64; 3] {
     );
     // Equatorial to ecliptic, then onto the Earth's own position.
     let (s, c) = OBLIQUITY_DEG.to_radians().sin_cos();
-    let earth = earth_position(jd);
+    let earth = earth_position_utc(jd);
     [
         earth[0] + x,
         earth[1] + c * y + s * z,
@@ -361,10 +363,15 @@ pub fn earth_position(jd: f64) -> [f64; 3] {
     ]
 }
 
-/// Observing geometry for `elements` at `jd`.
+pub fn earth_position_utc(jd: f64) -> [f64; 3] {
+    earth_position(jd + TT_MINUS_UTC_DAYS)
+}
+
+/// Observing geometry for `elements` at `jd` (UTC).
 pub fn geometry_at(elements: &OrbitalElements, jd: f64) -> Geometry {
-    let helio = heliocentric_position(elements, jd);
-    let earth = earth_position(jd);
+    let tt = jd + TT_MINUS_UTC_DAYS;
+    let helio = heliocentric_position(elements, tt);
+    let earth = earth_position(tt);
     let topo = [
         helio[0] - earth[0],
         helio[1] - earth[1],
@@ -382,7 +389,7 @@ pub fn geometry_at(elements: &OrbitalElements, jd: f64) -> Geometry {
         helio_dist,
         topo_dist,
         true_anomaly: {
-            let nu = true_anomaly(elements, jd).to_degrees().rem_euclid(360.0);
+            let nu = true_anomaly(elements, tt).to_degrees().rem_euclid(360.0);
             if nu > 180.0 {
                 nu - 360.0
             } else {
@@ -410,7 +417,7 @@ mod tests_observer {
     #[test]
     fn site_sits_an_earth_radius_from_the_centre() {
         let jd = 2461286.8;
-        let earth = earth_position(jd);
+        let earth = earth_position_utc(jd);
         let obs = observer_position(jd, &ZTF);
         let d = ((obs[0] - earth[0]).powi(2)
             + (obs[1] - earth[1]).powi(2)
@@ -429,8 +436,8 @@ mod tests_observer {
         let jd = 2461286.8;
         let a = observer_position(jd, &ZTF);
         let b = observer_position(jd + 0.5, &ZTF);
-        let earth_a = earth_position(jd);
-        let earth_b = earth_position(jd + 0.5);
+        let earth_a = earth_position_utc(jd);
+        let earth_b = earth_position_utc(jd + 0.5);
         // Offsets relative to the Earth, so the orbit does not mask the spin.
         let oa = [a[0] - earth_a[0], a[1] - earth_a[1], a[2] - earth_a[2]];
         let ob = [b[0] - earth_b[0], b[1] - earth_b[1], b[2] - earth_b[2]];
@@ -673,7 +680,7 @@ mod horizons_validation {
     use super::*;
 
     /// Elements as MPCORB distributes them at epoch K2669 (2026 June 9), checked
-    /// against JPL Horizons at JD 2461272.5 (2026 Aug 20, geocentric).
+    /// against JPL Horizons at JD 2461272.5 UT (2026 Aug 20, geocentric).
     struct Case {
         name: &'static str,
         elements: OrbitalElements,
@@ -736,7 +743,7 @@ mod horizons_validation {
     /// nightly. First, two-body propagation accumulates error with time from
     /// epoch. Second, NEOs are the objects planetary perturbations act on most.
     ///
-    /// Reference values are JPL Horizons (geocentric, quantities 19/20/43);
+    /// Reference values are JPL Horizons (geocentric, UT, quantities 19/20/43);
     /// elements are the MPCORB records for the same epoch.
     ///
     /// Note what this does *not* cover: none of these windows contains a close

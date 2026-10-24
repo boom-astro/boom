@@ -9,7 +9,7 @@ use boom::conf::{load_dotenv, AppConfig};
 use boom::utils::css::{unreported_tracklets, Products};
 use boom::utils::discovery::{
     latest_night, load_window, persist_clusters, persist_tracks, reference_epoch, thor_clusters,
-    tracklets_per_night, ztf_band, Stop, ThorSearch, Verdict,
+    tracklets_per_night, ztf_band, ztf_mid_exposure, Stop, ThorSearch, Verdict,
 };
 use boom::utils::heliolinc::{default_hypotheses, link_tracklets, LinkConfig, Track};
 use boom::utils::linking::{find_tracklets, night_of, Detection, Tracklet, TrackletConfig};
@@ -387,6 +387,8 @@ struct DumpRow {
     sigmapsf: Option<f64>,
     #[serde(default)]
     fid: Option<i32>,
+    #[serde(default)]
+    exptime: Option<f64>,
 }
 
 /// Detections from a JSONL dump, with labels where the rows carry them.
@@ -404,7 +406,7 @@ fn load_file(
         }
         detections.push(Detection {
             id,
-            jd: row.jd,
+            jd: ztf_mid_exposure(row.jd, row.exptime),
             ra: row.ra,
             dec: row.dec,
             mag: row.magpsf,

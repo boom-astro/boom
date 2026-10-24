@@ -64,6 +64,10 @@ pub fn ztf_band(fid: Option<i32>) -> Option<char> {
     }
 }
 
+pub fn ztf_mid_exposure(jd: f64, exptime: Option<f64>) -> f64 {
+    jd + exptime.unwrap_or(30.0) / 2.0 / 86_400.0
+}
+
 /// Detections for the window, with the `ssnamenr` label when there is one.
 ///
 /// `known` selects the detections IPAC already matched to a solar system
@@ -117,6 +121,7 @@ pub async fn load_window(
         "candidate.magpsf": 1,
         "candidate.sigmapsf": 1,
         "candidate.fid": 1,
+        "candidate.exptime": 1,
     };
 
     let mut cursor = db
@@ -221,7 +226,7 @@ fn projection(survey: &Survey) -> Document {
     for field in [jd, mag, mag_err, band] {
         projection.insert(format!("candidate.{field}"), 1);
     }
-    if *survey == Survey::Winter {
+    if matches!(survey, Survey::Ztf | Survey::Winter) {
         projection.insert("candidate.exptime", 1);
     }
     projection
@@ -262,7 +267,10 @@ fn detection_of(doc: &Document) -> Option<Detection> {
     let candidate = doc.get_document("candidate").ok()?;
     Some(Detection {
         id: doc.get_i64("_id").ok()?,
-        jd: candidate.get_f64("jd").ok()?,
+        jd: ztf_mid_exposure(
+            candidate.get_f64("jd").ok()?,
+            candidate.get_f64("exptime").ok(),
+        ),
         ra: candidate.get_f64("ra").ok()?,
         dec: candidate.get_f64("dec").ok()?,
         mag: candidate.get_f64("magpsf").ok(),

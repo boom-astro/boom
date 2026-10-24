@@ -77,6 +77,7 @@ const SAME_RESIDUAL_ARCSEC: f64 = 0.01;
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct StoredOrbit {
+    /// UTC, like the detections.
     pub epoch_jd: f64,
     pub pos: [f64; 3],
     pub vel: [f64; 3],
