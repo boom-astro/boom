@@ -7,7 +7,7 @@
 //! leaves measures each survey's astrometry against the same reference.
 
 use crate::utils::heliolinc::radec_from_ecliptic;
-use crate::utils::linking::{angular_separation_deg, night_of, Detection};
+use crate::utils::linking::{angular_separation_deg, Detection};
 use crate::utils::orbit_fit::C_AU_PER_DAY;
 pub use crate::utils::outburst::median;
 use crate::utils::sso_geometry::{
@@ -30,6 +30,7 @@ pub struct Match {
     pub designation: String,
     pub separation_arcsec: f64,
     pub jd: f64,
+    pub night: i64,
 }
 
 /// How wide to search, at each of the two stages.
@@ -203,7 +204,7 @@ pub fn identify(
 ) -> Vec<Match> {
     let mut by_night: HashMap<i64, Vec<&Detection>> = HashMap::new();
     for d in detections {
-        by_night.entry(night_of(d.jd)).or_default().push(d);
+        by_night.entry(d.night()).or_default().push(d);
     }
 
     // Sorted, since a HashMap's order would carry into `matches`.
@@ -215,9 +216,10 @@ pub fn identify(
         let first = dets.iter().map(|d| d.jd).fold(f64::INFINITY, f64::min);
         let last = dets.iter().map(|d| d.jd).fold(f64::NEG_INFINITY, f64::max);
         let place = |jd: f64| -> Vec<(f64, f64)> {
+            let earth = earth_position(jd);
             orbits
                 .par_iter()
-                .map(|o| predict_radec(&o.elements, jd))
+                .map(|o| radec_from_ecliptic(&light_time_corrected(&o.elements, jd, &earth)))
                 .collect()
         };
         let start = place(first);
@@ -236,6 +238,7 @@ pub fn identify(
                 } else {
                     0.0
                 };
+                let observer = observer_position(d.jd, d.site.as_ref().unwrap_or(&cfg.site));
                 for idx in grid.near(d.ra, d.dec) {
                     let (night_ra, night_dec) = interpolate(start[idx], end[idx], f);
                     // The grid overreaches, so gate on the separation before
@@ -245,11 +248,11 @@ pub fn identify(
                     {
                         continue;
                     }
-                    let (pra, pdec) = predict_radec_from(
+                    let (pra, pdec) = radec_from_ecliptic(&light_time_corrected(
                         &orbits[idx].elements,
                         d.jd,
-                        d.site.as_ref().unwrap_or(&cfg.site),
-                    );
+                        &observer,
+                    ));
                     let sep = angular_separation_deg(d.ra, d.dec, pra, pdec) * 3600.0;
                     // Ties go to the lower index, so the result does not
                     // depend on the order the grid returns candidates in.
@@ -264,6 +267,7 @@ pub fn identify(
                     designation: orbits[idx].designation.clone(),
                     separation_arcsec: sep,
                     jd: d.jd,
+                    night: d.night(),
                 })
             })
             .collect();
@@ -325,7 +329,7 @@ pub fn track_designation(
         .into_iter()
         // Most detections first; the designation breaks a tie reproducibly.
         .max_by(|a, b| a.1.len().cmp(&b.1.len()).then(b.0.cmp(a.0)))?;
-    let nights: std::collections::BTreeSet<i64> = agreeing.iter().map(|m| night_of(m.jd)).collect();
+    let nights: std::collections::BTreeSet<i64> = agreeing.iter().map(|m| m.night).collect();
     let separations: Vec<f64> = agreeing.iter().map(|m| m.separation_arcsec).collect();
     let centre = median(&separations)?;
     let jds: Vec<f64> = agreeing.iter().map(|m| m.jd).collect();
@@ -584,6 +588,7 @@ mod tests {
             designation: designation.to_string(),
             separation_arcsec: 30.0,
             jd,
+            night: crate::utils::linking::night_of(jd),
         }
     }
 

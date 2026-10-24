@@ -7,6 +7,7 @@
 //! perturbed integrator would be needed to predict *where* an object is, not to
 //! say how far away it was.
 
+use crate::utils::orbit_fit::C_AU_PER_DAY;
 use std::f64::consts::PI;
 
 /// Gaussian gravitational constant, rad/day.
@@ -14,7 +15,7 @@ const GAUSS_K: f64 = 0.017_202_098_95;
 /// Obliquity is not applied: everything here stays in the ecliptic frame.
 const KEPLER_TOLERANCE: f64 = 1e-12;
 /// Where both the elliptical and hyperbolic solutions go numerically unusable.
-const PARABOLIC_TOLERANCE: f64 = 1e-8;
+pub(crate) const PARABOLIC_TOLERANCE: f64 = 1e-8;
 const KEPLER_MAX_ITER: usize = 64;
 
 /// Heliocentric osculating elements at `epoch_jd`, as MPCORB distributes them.
@@ -264,6 +265,22 @@ pub const SIDING_SPRING: Site = Site {
     mpc_code: "E12",
 };
 
+pub const DECAM: Site = Site {
+    longitude_deg: 289.193_58,
+    rho_cos_phi: 0.865_572,
+    rho_sin_phi: -0.499_793,
+    astrometric_sigma_arcsec: 0.15,
+    mpc_code: "W84",
+};
+
+pub const WINTER: Site = Site {
+    longitude_deg: 243.137_46,
+    rho_cos_phi: 0.836_357,
+    rho_sin_phi: 0.546_831,
+    astrometric_sigma_arcsec: 0.5,
+    mpc_code: "675",
+};
+
 impl Site {
     /// The site an MPC observatory code names, for astrometry that says where it
     /// was taken rather than being assumed to come from one telescope.
@@ -277,6 +294,8 @@ impl Site {
             "V00" => BOK,
             "V06" => KUIPER,
             "E12" => SIDING_SPRING,
+            "W84" => DECAM,
+            "675" => WINTER,
             _ => return None,
         })
     }
@@ -311,47 +330,22 @@ pub fn observer_position(jd: f64, site: &Site) -> [f64; 3] {
     ]
 }
 
-/// Earth's heliocentric ecliptic position at `jd`, au.
+/// Earth's heliocentric ecliptic position at `jd` (TT), au.
 ///
-/// Low-precision solar theory (Meeus ch. 25), good to ~1e-4 au. That is three
-/// orders of magnitude finer than this module needs.
+/// VSOP87A, within 4e-7 au of DE441 over 1990-2040.
 pub fn earth_position(jd: f64) -> [f64; 3] {
-    let t = (jd - 2_451_545.0) / 36_525.0;
-
-    let mean_long = (280.464_66 + 36_000.769_83 * t + 0.000_303_2 * t * t).to_radians();
-    let mean_anomaly = (357.529_11 + 35_999.050_29 * t - 0.000_153_7 * t * t).to_radians();
-    let e = 0.016_708_634 - 0.000_042_037 * t - 0.000_000_126_7 * t * t;
-
-    // Equation of the centre.
-    let centre = ((1.914_602 - 0.004_817 * t - 0.000_014 * t * t) * mean_anomaly.sin()
-        + (0.019_993 - 0.000_101 * t) * (2.0 * mean_anomaly).sin()
-        + 0.000_289 * (3.0 * mean_anomaly).sin())
-    .to_radians();
-
-    // Meeus gives longitude referred to the mean equinox of date; MPCORB elements
-    // are J2000, so precess back (0.01397 deg/yr).
-    let true_long = mean_long + centre - (1.397 * t).to_radians();
-    let true_anomaly = mean_anomaly + centre;
-    let sun_dist = 1.000_001_018 * (1.0 - e * e) / (1.0 + e * true_anomaly.cos());
-
-    // Earth is opposite the Sun as seen from the barycentre; ecliptic latitude
-    // is negligible at this precision.
-    [
-        -sun_dist * true_long.cos(),
-        -sun_dist * true_long.sin(),
-        0.0,
-    ]
+    let eq = crate::utils::vsop87::earth_equatorial(jd);
+    let (s, c) = OBLIQUITY_DEG.to_radians().sin_cos();
+    [eq[0], c * eq[1] + s * eq[2], -s * eq[1] + c * eq[2]]
 }
 
 /// Observing geometry for `elements` at `jd`.
-pub fn geometry_at(elements: &OrbitalElements, jd: f64) -> Geometry {
-    let helio = heliocentric_position(elements, jd);
-    let earth = earth_position(jd);
-    let topo = [
-        helio[0] - earth[0],
-        helio[1] - earth[1],
-        helio[2] - earth[2],
-    ];
+pub fn geometry_at(elements: &OrbitalElements, jd: f64, site: &Site) -> Geometry {
+    let observer = observer_position(jd, site);
+    let from_observer = |p: [f64; 3]| [p[0] - observer[0], p[1] - observer[1], p[2] - observer[2]];
+    let emitted = jd - norm(&from_observer(heliocentric_position(elements, jd))) / C_AU_PER_DAY;
+    let helio = heliocentric_position(elements, emitted);
+    let topo = from_observer(helio);
 
     let helio_dist = norm(&helio);
     let topo_dist = norm(&topo);
@@ -364,7 +358,9 @@ pub fn geometry_at(elements: &OrbitalElements, jd: f64) -> Geometry {
         helio_dist,
         topo_dist,
         true_anomaly: {
-            let nu = true_anomaly(elements, jd).to_degrees().rem_euclid(360.0);
+            let nu = true_anomaly(elements, emitted)
+                .to_degrees()
+                .rem_euclid(360.0);
             if nu > 180.0 {
                 nu - 360.0
             } else {
@@ -601,7 +597,7 @@ mod tests {
     fn test_geometry_is_physically_bounded() {
         let el = main_belt();
         for days in 0..365 {
-            let g = geometry_at(&el, el.epoch_jd + days as f64);
+            let g = geometry_at(&el, el.epoch_jd + days as f64, &ZTF);
             assert!(g.phase_angle >= 0.0 && g.phase_angle <= 180.0);
             // The observer is inside the object's orbit, so the object is never
             // closer than helio_dist minus Earth's distance, nor further than the sum.
@@ -618,7 +614,7 @@ mod tests {
         let limit = (1.017_f64 / (el.a * (1.0 - el.e))).asin().to_degrees();
         let mut seen_max: f64 = 0.0;
         for days in 0..2000 {
-            let g = geometry_at(&el, el.epoch_jd + days as f64 * 2.0);
+            let g = geometry_at(&el, el.epoch_jd + days as f64 * 2.0, &ZTF);
             seen_max = seen_max.max(g.phase_angle);
             assert!(
                 g.phase_angle <= limit + 0.5,
@@ -641,7 +637,7 @@ mod tests {
         let mut best = (f64::MAX, f64::MAX, 0.0_f64);
         for days in 0..800 {
             let jd = el.epoch_jd + days as f64;
-            let g = geometry_at(&el, jd);
+            let g = geometry_at(&el, jd, &ZTF);
             if g.topo_dist < best.0 {
                 best = (g.topo_dist, g.phase_angle, jd);
             }
@@ -812,13 +808,13 @@ mod horizons_validation {
     #[test]
     fn test_matches_horizons_far_from_epoch() {
         for (c, jd) in far_from_epoch_cases() {
-            let g = geometry_at(&c.elements, jd);
+            let g = geometry_at(&c.elements, jd, &ZTF);
             let d_helio = (g.helio_dist - c.helio_dist).abs();
             let d_topo = (g.topo_dist - c.topo_dist).abs();
             let d_phase = (g.phase_angle - c.phase_angle).abs();
 
             assert!(d_helio < 1e-3, "{}: helio off by {d_helio} au", c.name);
-            assert!(d_topo < 1e-3, "{}: topo off by {d_topo} au", c.name);
+            assert!(d_topo < 3e-4, "{}: topo off by {d_topo} au", c.name);
             assert!(d_phase < 0.02, "{}: phase off by {d_phase} deg", c.name);
         }
     }
@@ -826,14 +822,59 @@ mod horizons_validation {
     #[test]
     fn test_matches_horizons() {
         for c in cases() {
-            let g = geometry_at(&c.elements, 2_461_272.5);
+            let g = geometry_at(&c.elements, 2_461_272.5, &ZTF);
             let d_helio = (g.helio_dist - c.helio_dist).abs();
             let d_topo = (g.topo_dist - c.topo_dist).abs();
             let d_phase = (g.phase_angle - c.phase_angle).abs();
 
             assert!(d_helio < 1e-4, "{}: helio off by {d_helio} au", c.name);
-            assert!(d_topo < 1e-3, "{}: topo off by {d_topo} au", c.name);
+            assert!(d_topo < 1e-4, "{}: topo off by {d_topo} au", c.name);
             assert!(d_phase < 0.01, "{}: phase off by {d_phase} deg", c.name);
+        }
+    }
+
+    /// Against JPL Horizons (geocenter, ICRF equator, TDB), 1990 to 2041.
+    #[test]
+    fn test_earth_matches_horizons() {
+        let (s, c) = OBLIQUITY_DEG.to_radians().sin_cos();
+        for (jd, eq) in [
+            (
+                2_447_892.5,
+                [-0.178_287_922_704, 0.887_231_821_652, 0.384_685_522_567],
+            ),
+            (
+                2_451_545.0,
+                [-0.177_135_099_273, 0.887_428_522_326, 0.384_742_899_088],
+            ),
+            (
+                2_455_362.5,
+                [-0.112_008_465_385, -0.926_256_114_347, -0.401_554_039_367],
+            ),
+            (
+                2_458_928.5,
+                [-0.995_844_117_444, 0.006_876_306_663, 0.002_985_547_201],
+            ),
+            (
+                2_461_272.5,
+                [0.845_273_411_844, -0.510_433_911_434, -0.221_265_991_387],
+            ),
+            (
+                2_464_632.5,
+                [0.783_457_740_640, 0.559_496_990_829, 0.242_507_278_738],
+            ),
+            (
+                2_466_154.5,
+                [-0.164_118_011_456, 0.889_552_170_674, 0.385_572_051_864],
+            ),
+        ] {
+            let truth = [eq[0], c * eq[1] + s * eq[2], -s * eq[1] + c * eq[2]];
+            let earth = earth_position(jd);
+            let off = norm(&[
+                earth[0] - truth[0],
+                earth[1] - truth[1],
+                earth[2] - truth[2],
+            ]);
+            assert!(off < 5e-7, "JD {jd}: {off:.2e} au from Horizons");
         }
     }
 
@@ -847,13 +888,13 @@ mod horizons_validation {
     /// untested: both are nearly insensitive to the light-time correction, so
     /// they passed while predicted positions were out by tens of arcseconds.
     ///
-    /// 9 arcsec separates the two models rather than merely passing: dropping
-    /// the correction puts Ceres at 10.3 and Pallas at 16.7.
+    /// 3 arcsec separates the two models rather than merely passing: dropping
+    /// the correction puts Ceres at 10.3 and Pallas at 12.4.
     #[test]
     fn test_matches_horizons_on_the_sky() {
         for c in cases() {
             let sep = sky_error_arcsec(&c, 2_461_272.5);
-            assert!(sep < 9.0, "{}: {sep:.1} arcsec from Horizons", c.name);
+            assert!(sep < 3.0, "{}: {sep:.1} arcsec from Horizons", c.name);
         }
     }
 
@@ -872,7 +913,7 @@ mod horizons_validation {
     #[test]
     fn test_distance_error_is_negligible_in_magnitudes() {
         for c in cases() {
-            let g = geometry_at(&c.elements, 2_461_272.5);
+            let g = geometry_at(&c.elements, 2_461_272.5, &ZTF);
             let ours = 5.0 * (g.helio_dist * g.topo_dist).log10();
             let truth = 5.0 * (c.helio_dist * c.topo_dist).log10();
             assert!(

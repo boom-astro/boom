@@ -1445,6 +1445,8 @@ pub struct LinkerConfig {
     /// Minimum drb for a detection to be searched.
     #[serde(default = "default_linker_drb")]
     pub drb: f64,
+    #[serde(default = "default_linker_surveys")]
+    pub surveys: Vec<Survey>,
     /// Link tracklets across nights.
     #[serde(default = "default_linker_pass")]
     pub link: bool,
@@ -1471,12 +1473,22 @@ pub struct LinkerConfig {
     pub attach: bool,
     #[serde(default = "default_linker_attach_lookback_nights")]
     pub attach_lookback_nights: u32,
+    /// Also link unbound orbits, up to this hyperbolic excess speed, km/s.
+    #[serde(default)]
+    pub max_vinf_km_s: f64,
+    /// Largest residual an unbound orbit may leave and stand, arcseconds. A
+    /// track fitting worse keeps its bound fit if that passes, or is dropped.
+    #[serde(default = "default_linker_max_unbound_rms_arcsec")]
+    pub max_unbound_rms_arcsec: f64,
 }
 
 impl LinkerConfig {
     /// Settings no night could be searched with, which would otherwise shift
     /// or empty every window without saying so.
     pub fn validate(&self) -> Result<(), String> {
+        if self.surveys.is_empty() {
+            return Err("surveys must name at least one survey".to_string());
+        }
         if self.run_after_utc_hour > 23 {
             return Err(format!(
                 "run_after_utc_hour is {}, not an hour of the day",
@@ -1495,6 +1507,18 @@ impl LinkerConfig {
         if !(0.0..=1.0).contains(&self.drb) {
             return Err(format!("drb is {}, but scores run from 0 to 1", self.drb));
         }
+        if !(0.0..f64::INFINITY).contains(&self.max_vinf_km_s) {
+            return Err(format!(
+                "max_vinf_km_s is {}, but must be zero or a positive speed",
+                self.max_vinf_km_s
+            ));
+        }
+        if !self.max_unbound_rms_arcsec.is_finite() || self.max_unbound_rms_arcsec <= 0.0 {
+            return Err(format!(
+                "max_unbound_rms_arcsec is {}, but must be a positive residual",
+                self.max_unbound_rms_arcsec
+            ));
+        }
         Ok(())
     }
 }
@@ -1506,6 +1530,7 @@ impl Default for LinkerConfig {
             thor_window_nights: default_linker_thor_window_nights(),
             run_after_utc_hour: default_linker_run_after_utc_hour(),
             drb: default_linker_drb(),
+            surveys: default_linker_surveys(),
             link: default_linker_pass(),
             thor: default_linker_pass(),
             match_known: default_linker_pass(),
@@ -1514,8 +1539,14 @@ impl Default for LinkerConfig {
             recall_window_nights: default_linker_recall_window_nights(),
             attach: default_linker_pass(),
             attach_lookback_nights: default_linker_attach_lookback_nights(),
+            max_vinf_km_s: 0.0,
+            max_unbound_rms_arcsec: default_linker_max_unbound_rms_arcsec(),
         }
     }
+}
+
+fn default_linker_max_unbound_rms_arcsec() -> f64 {
+    0.5
 }
 
 fn default_linker_attach_lookback_nights() -> u32 {
@@ -1540,6 +1571,10 @@ fn default_linker_run_after_utc_hour() -> u32 {
 
 fn default_linker_drb() -> f64 {
     0.8
+}
+
+fn default_linker_surveys() -> Vec<Survey> {
+    vec![Survey::Ztf]
 }
 
 fn default_linker_pass() -> bool {

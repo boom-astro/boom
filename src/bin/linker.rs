@@ -18,10 +18,10 @@
 
 use boom::conf::{load_dotenv, AppConfig, LinkerConfig};
 use boom::utils::discovery::{
-    attach_pass, designations, load_window, persist_clusters, persist_tracks, recall,
+    attach_pass, designations, load_unknown, load_window, persist_clusters, persist_tracks, recall,
     reference_epoch, thor_clusters, track_detections, tracklets_per_night, Stop, ThorSearch,
 };
-use boom::utils::heliolinc::{link_tracklets, LinkConfig, Track};
+use boom::utils::heliolinc::{link_tracklets, Conics, LinkConfig, Track, KM_S_PER_AU_DAY};
 use boom::utils::identify::{IdentifyConfig, KnownRule, OrbitEntry};
 use boom::utils::linking::{night_of, Detection, Tracklet, TrackletConfig};
 use boom::utils::mpcorb::load_catalogue;
@@ -30,6 +30,7 @@ use boom::utils::sso_geometry::ZTF;
 use boom::utils::tracks::{lock_is_held, COUNTERS_COLLECTION};
 use clap::Parser;
 use mongodb::bson::{doc, Document};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Notify;
@@ -83,7 +84,7 @@ fn window(night: i64, nights: u32) -> (f64, f64) {
 }
 
 /// Tracklets per night, linked across nights with the default search.
-fn link(detections: &[Detection]) -> (Vec<Tracklet>, Vec<Track>, f64) {
+fn link(detections: &[Detection], conics: Conics) -> (Vec<Tracklet>, Vec<Track>, f64) {
     let tracklets = tracklets_per_night(detections, &TrackletConfig::default());
     if tracklets.is_empty() {
         return (tracklets, Vec::new(), 0.0);
@@ -91,7 +92,8 @@ fn link(detections: &[Detection]) -> (Vec<Tracklet>, Vec<Track>, f64) {
     let cfg = LinkConfig {
         reference_jd: reference_epoch(&tracklets),
         ..LinkConfig::default()
-    };
+    }
+    .with_conics(conics);
     let tracks = link_tracklets(&tracklets, detections, &cfg);
     (tracklets, tracks, cfg.reference_jd)
 }
@@ -191,13 +193,21 @@ async fn run_night(db: &mongodb::Database, cfg: &LinkerConfig, night: i64, stop:
         jd_start, span, "searching the window ending with this night"
     );
 
-    let (detections, labels) = match load_window(db, jd_start, span, cfg.drb, false, None).await {
-        Ok(found) => found,
-        Err(error) => {
-            error!(%error, night, "could not load the window");
-            return false;
+    let first = night - cfg.window_nights as i64 + 1;
+    let mut detections = Vec::new();
+    for survey in &cfg.surveys {
+        match load_unknown(db, survey, first, night, cfg.drb).await {
+            Ok(found) => {
+                info!(%survey, detections = found.len(), "loaded a survey's window");
+                detections.extend(found);
+            }
+            Err(error) => {
+                error!(%error, night, %survey, "could not load the window");
+                return false;
+            }
         }
-    };
+    }
+    let labels = HashMap::new();
     info!(
         detections = detections.len(),
         seconds = started.elapsed().as_secs_f64(),
@@ -205,6 +215,10 @@ async fn run_night(db: &mongodb::Database, cfg: &LinkerConfig, night: i64, stop:
     );
 
     let dry_run = !cfg.persist;
+    let conics = Conics::up_to(
+        cfg.max_vinf_km_s / KM_S_PER_AU_DAY,
+        cfg.max_unbound_rms_arcsec,
+    );
     let mut done = true;
     let mut found: Vec<Vec<i64>> = Vec::new();
 
@@ -212,7 +226,7 @@ async fn run_night(db: &mongodb::Database, cfg: &LinkerConfig, night: i64, stop:
         done = false;
     } else if cfg.link && !detections.is_empty() {
         let pass = Instant::now();
-        let (tracklets, tracks, reference_jd) = link(&detections);
+        let (tracklets, tracks, reference_jd) = link(&detections, conics);
         let groups: Vec<Vec<i64>> = tracks
             .iter()
             .map(|t| track_detections(t, &tracklets))
@@ -250,10 +264,10 @@ async fn run_night(db: &mongodb::Database, cfg: &LinkerConfig, night: i64, stop:
         done = false;
     } else if cfg.thor && !detections.is_empty() {
         let pass = Instant::now();
-        let (thor_start, _) = window(night, cfg.thor_window_nights);
+        let thor_first = night - cfg.thor_window_nights as i64 + 1;
         let recent: Vec<Detection> = detections
             .iter()
-            .filter(|d| d.jd >= thor_start)
+            .filter(|d| d.night() >= thor_first)
             .copied()
             .collect();
         let search = ThorSearch::default();
@@ -298,6 +312,7 @@ async fn run_night(db: &mongodb::Database, cfg: &LinkerConfig, night: i64, stop:
             since,
             LinkConfig::default().max_residual_arcsec,
             &ZTF,
+            conics,
             dry_run,
             stop,
         )
@@ -330,7 +345,7 @@ async fn run_night(db: &mongodb::Database, cfg: &LinkerConfig, night: i64, stop:
         let (start, span) = window(night, cfg.recall_window_nights);
         match load_window(db, start, span, cfg.drb, true, None).await {
             Ok((identified, names)) => {
-                let (tracklets, tracks, _) = link(&identified);
+                let (tracklets, tracks, _) = link(&identified, conics);
                 let r = recall(&tracks, &tracklets, &names);
                 info!(
                     detections = identified.len(),
@@ -538,6 +553,14 @@ mod tests {
             },
             LinkerConfig {
                 drb: 1.5,
+                ..LinkerConfig::default()
+            },
+            LinkerConfig {
+                max_vinf_km_s: -1.0,
+                ..LinkerConfig::default()
+            },
+            LinkerConfig {
+                max_unbound_rms_arcsec: 0.0,
                 ..LinkerConfig::default()
             },
         ] {
