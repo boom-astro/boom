@@ -11,7 +11,7 @@
 
 use crate::utils::linking::{angular_separation_deg, night_of, Detection, Tracklet};
 use crate::utils::orbit_fit::{
-    converge_orbit, fit_orbit_with, predict_radec, rms_arcsec, GiveUp, Observation,
+    converge_orbit, fit_orbit_with, keeps_unbound, predict_radec, rms_arcsec, GiveUp, Observation,
     CONVERGE_ITERATIONS, SCREEN_ITERATIONS,
 };
 use crate::utils::outburst::{hg12, DEFAULT_G12};
@@ -64,15 +64,34 @@ pub fn is_bound(state: &State) -> bool {
 pub enum Conics {
     #[default]
     Bound,
-    /// Up to this hyperbolic excess speed, au/day.
-    Unbound(f64),
+    /// Hyperbolae too, up to `vinf_au_per_day` of excess speed, an unbound fit
+    /// standing only if it leaves at most `max_rms_arcsec`.
+    Unbound {
+        vinf_au_per_day: f64,
+        max_rms_arcsec: f64,
+    },
 }
 
 impl Conics {
+    /// Unbound for a positive `vinf_au_per_day`, bound otherwise.
+    pub fn up_to(vinf_au_per_day: f64, max_rms_arcsec: f64) -> Self {
+        if vinf_au_per_day > 0.0 {
+            Conics::Unbound {
+                vinf_au_per_day,
+                max_rms_arcsec,
+            }
+        } else {
+            Conics::Bound
+        }
+    }
+
     pub fn admits(self, state: &State) -> bool {
         match self {
             Conics::Bound => is_bound(state),
-            Conics::Unbound(vinf) => energy(state) < vinf * vinf / 2.0,
+            Conics::Unbound {
+                vinf_au_per_day: vinf,
+                ..
+            } => energy(state) < vinf * vinf / 2.0,
         }
     }
 }
@@ -120,6 +139,16 @@ pub struct LinkConfig {
 /// Largest radial velocity a bound object can have at `r_au`, au/day.
 fn escape_speed(r_au: f64) -> f64 {
     (2.0 * MU / r_au).sqrt()
+}
+
+/// `state` slowed to just under escape speed, to seed a bound fit.
+pub fn bound_seed(state: &State) -> State {
+    let limit = 0.98 * escape_speed(norm(&state.pos));
+    let scale = (limit / norm(&state.vel)).min(1.0);
+    State {
+        pos: state.pos,
+        vel: state.vel.map(|v| v * scale),
+    }
 }
 
 /// Hypotheses over `distances` heliocentric distances from `first_au` to
@@ -221,11 +250,15 @@ impl Default for LinkConfig {
 }
 
 impl LinkConfig {
-    pub fn with_unbound(mut self, vinf_au_per_day: f64) -> Self {
-        if vinf_au_per_day > 0.0 {
+    /// Search `conics`, adding the unbound hypotheses when they are unbound.
+    pub fn with_conics(mut self, conics: Conics) -> Self {
+        if let Conics::Unbound {
+            vinf_au_per_day, ..
+        } = conics
+        {
             self.hypotheses.extend(unbound_hypotheses(vinf_au_per_day));
-            self.conics = Conics::Unbound(vinf_au_per_day);
         }
+        self.conics = conics;
         self
     }
 }
@@ -1082,7 +1115,7 @@ fn observations_of(
 /// assumed distance; fitting the sky positions tests that claim against the
 /// astrometry itself, which is what separates a real track from tracklets that
 /// happen to land near each other.
-fn score(track: &mut Track, observations: &[Observation], cfg: &LinkConfig) {
+fn score(track: &mut Track, observations: &[Observation], cfg: &LinkConfig, conics: Conics) {
     // A fit still far above the gate after a few iterations is not going to
     // pass it, and most candidates are like that.
     let give_up = GiveUp::for_gate(gate_arcsec(observations, cfg));
@@ -1092,7 +1125,7 @@ fn score(track: &mut Track, observations: &[Observation], cfg: &LinkConfig) {
         cfg.reference_jd,
         SCREEN_ITERATIONS,
         Some(give_up),
-        cfg.conics,
+        conics,
     ) {
         Some(fit) => {
             track.state = fit.state;
@@ -1100,7 +1133,7 @@ fn score(track: &mut Track, observations: &[Observation], cfg: &LinkConfig) {
         }
         // Too few positions to refine six parameters, so take the state as it
         // stands rather than discarding a candidate for being short.
-        None if cfg.conics.admits(&track.state) => {
+        None if conics.admits(&track.state) => {
             rms_arcsec(&track.state, cfg.reference_jd, observations)
         }
         None => None,
@@ -1129,46 +1162,118 @@ fn best_passing(
     // Every copy has the same members, so the same positions to fit.
     let observations = observations_of(copies.first()?, tracklets, by_id, &cfg.site);
     let gate = gate_arcsec(&observations, cfg);
-    let passes = |track: &Track| track.residual_arcsec.is_some_and(|r| r <= gate);
     // Stable, so equally tight copies keep their hypothesis order.
     copies.sort_by(|a, b| a.rms_au.total_cmp(&b.rms_au));
     let mut distances = std::collections::HashSet::new();
-    let (per_distance, rest): (Vec<Track>, Vec<Track>) = copies
-        .into_iter()
-        .partition(|copy| distances.insert(copy.hypothesis.r_au.to_bits()));
-    let best = per_distance
+    let (first, rest): (Vec<Track>, Vec<Track>) = copies.into_iter().partition(|copy| {
+        distances.insert((copy.hypothesis.r_au.to_bits(), is_bound(&copy.state)))
+    });
+    let bound_copies = |copies: &[Track]| -> Vec<Track> {
+        copies
+            .iter()
+            .filter(|copy| is_bound(&copy.state))
+            .cloned()
+            .collect()
+    };
+    let fallback = match cfg.conics {
+        Conics::Unbound { .. } => Some((bound_copies(&first), bound_copies(&rest))),
+        Conics::Bound => None,
+    };
+    let (track, screened) = settle(first, rest, &observations, cfg, cfg.conics);
+    let mut track = track.filter(|track| residual(track) <= gate)?;
+    if let Some((first, rest)) = fallback.filter(|_| !is_bound(&track.state)) {
+        // A search kept to ellipses screens these same bound copies.
+        let slowed: Vec<Track> = screened
+            .iter()
+            .chain([&track.state])
+            .filter(|state| !is_bound(state))
+            .map(|state| Track {
+                state: bound_seed(state),
+                ..track.clone()
+            })
+            .collect();
+        let (bound, _) = settle(
+            first.into_iter().chain(slowed).collect(),
+            rest,
+            &observations,
+            cfg,
+            Conics::Bound,
+        );
+        track = choose_conic(track, bound, &observations, cfg)?;
+    }
+    photometry_agrees(&track, tracklets, by_id, cfg).then_some(track)
+}
+
+fn residual(track: &Track) -> f64 {
+    track.residual_arcsec.unwrap_or(f64::INFINITY)
+}
+
+/// The copy of `first` that fits best under `conics`, or when it fails the gate
+/// the first of `rest` to pass, converged if it passes; and the states `first`
+/// screened to.
+fn settle(
+    first: Vec<Track>,
+    rest: Vec<Track>,
+    observations: &[Observation],
+    cfg: &LinkConfig,
+    conics: Conics,
+) -> (Option<Track>, Vec<State>) {
+    let gate = gate_arcsec(observations, cfg);
+    let screened: Vec<Track> = first
         .into_iter()
         .map(|mut copy| {
-            score(&mut copy, &observations, cfg);
+            score(&mut copy, observations, cfg, conics);
             copy
         })
-        .filter(passes)
-        .min_by(|a, b| {
-            a.residual_arcsec
-                .partial_cmp(&b.residual_arcsec)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-    let mut track = match best {
-        Some(track) => track,
-        None => rest.into_iter().find_map(|mut copy| {
-            score(&mut copy, &observations, cfg);
-            passes(&copy).then_some(copy)
-        })?,
+        .collect();
+    let states = screened.iter().map(|copy| copy.state).collect();
+    let best = screened
+        .into_iter()
+        .min_by(|a, b| residual(a).total_cmp(&residual(b)));
+    let track = match best {
+        Some(track) if residual(&track) <= gate => Some(track),
+        best => rest
+            .into_iter()
+            .find_map(|mut copy| {
+                score(&mut copy, observations, cfg, conics);
+                (residual(&copy) <= gate).then_some(copy)
+            })
+            .or(best),
     };
-    converge(&mut track, &observations, cfg);
-    photometry_agrees(&track, tracklets, by_id, cfg).then_some(track)
+    let track = track.map(|mut track| {
+        if residual(&track) <= gate {
+            converge(&mut track, observations, cfg, conics);
+        }
+        track
+    });
+    (track, states)
+}
+
+/// `track` if it is bound or [`keeps_unbound`] lets it stand against `bound`,
+/// otherwise `bound` if it passes the gate.
+fn choose_conic(
+    track: Track,
+    bound: Option<Track>,
+    observations: &[Observation],
+    cfg: &LinkConfig,
+) -> Option<Track> {
+    let against = bound.as_ref().map(|b| (residual(b), &b.state));
+    if is_bound(&track.state) || keeps_unbound(cfg.conics, residual(&track), against) {
+        return Some(track);
+    }
+    bound.filter(|b| residual(b) <= gate_arcsec(observations, cfg))
 }
 
 /// Run a track whose screening fit passed the gate on to convergence, so the
 /// residual it reports is its orbit's rather than one truncated fit's.
-fn converge(track: &mut Track, observations: &[Observation], cfg: &LinkConfig) {
+fn converge(track: &mut Track, observations: &[Observation], cfg: &LinkConfig, conics: Conics) {
     // The weighted optimum can raise the plain residual past the gate.
     if let Some(fit) = converge_orbit(
         observations,
         &track.state,
         cfg.reference_jd,
         CONVERGE_ITERATIONS,
-        cfg.conics,
+        conics,
     )
     .filter(|fit| fit.rms_arcsec <= gate_arcsec(observations, cfg))
     {
@@ -1582,13 +1687,26 @@ fn try_merge(
     let gate = gate_arcsec(&observations, cfg);
     let mut track = [first, second].into_iter().find_map(|seed| {
         let mut track = union(seed);
-        score(&mut track, &observations, cfg);
+        score(&mut track, &observations, cfg, cfg.conics);
         track
             .residual_arcsec
             .is_some_and(|r| r <= gate)
             .then_some(track)
     })?;
-    converge(&mut track, &observations, cfg);
+    converge(&mut track, &observations, cfg, cfg.conics);
+    if !is_bound(&track.state) {
+        let seeds = [first, second]
+            .into_iter()
+            .filter(|seed| is_bound(&seed.state))
+            .map(union)
+            .chain([Track {
+                state: bound_seed(&track.state),
+                ..track.clone()
+            }])
+            .collect();
+        let (bound, _) = settle(seeds, Vec::new(), &observations, cfg, Conics::Bound);
+        track = choose_conic(track, bound, &observations, cfg)?;
+    }
     photometry_agrees(&track, tracklets, by_id, cfg).then_some(track)
 }
 
@@ -2396,7 +2514,7 @@ mod tests {
             residual_arcsec: None,
         };
         let observations = observations_of(&track, tracklets, by_id, &cfg.site);
-        score(&mut track, &observations, cfg);
+        score(&mut track, &observations, cfg, cfg.conics);
         track
     }
 
@@ -2691,7 +2809,7 @@ mod tests {
         use crate::utils::identify::predict_radec_from;
         use crate::utils::orbit_fit::{fit_orbit, fit_orbit_with, fit_within};
 
-        // `find_tracklets` defaults: --max-residual, --max-unbound-residual,
+        // `find_tracklets` defaults: --max-residual, --max-poor-residual,
         // --thor-distances.
         let (good, poor) = (2.0, 10.0);
         let distances = [1.8, 2.2, 2.6, 3.0, 3.4];
@@ -2891,7 +3009,8 @@ mod tests {
         assert!(tracks.iter().all(|t| is_bound(&t.state)));
         let belt_bound = whole(&tracks, 1).expect("the main-belt object is linked");
 
-        let unbound = survey_config(&tracklets).with_unbound(40.0 / KM_S_PER_AU_DAY);
+        let unbound =
+            survey_config(&tracklets).with_conics(Conics::up_to(40.0 / KM_S_PER_AU_DAY, 0.5));
         let tracks = link_tracklets(&tracklets, &detections, &unbound);
         for track in &tracks {
             let objects = owners_of(track, &tracklets, &owner);
@@ -2912,6 +3031,30 @@ mod tests {
             (belt_unbound.residual_arcsec.unwrap() - belt_bound.residual_arcsec.unwrap()).abs()
                 < 0.01
         );
+    }
+
+    /// An unbound search keeps main-belt tracks on ellipses, even one a hyperbola fits as well.
+    #[test]
+    fn test_an_unbound_search_keeps_main_belt_objects_bound() {
+        let nights = [2460005.70, 2460008.72, 2460012.68, 2460015.71, 2460018.69];
+        let objects: Vec<OrbitalElements> = (0..SURVEY_OBJECTS).map(survey_object).collect();
+        let (detections, _) = survey(&objects, &nights);
+        let tracklets = survey_tracklets(&detections, &nights);
+        let cfg = survey_config(&tracklets).with_conics(Conics::up_to(40.0 / KM_S_PER_AU_DAY, 0.5));
+        let tracks = link_tracklets(&tracklets, &detections, &cfg);
+        assert!(
+            tracks.len() >= SURVEY_OBJECTS - 1,
+            "only {} tracks",
+            tracks.len()
+        );
+        for track in &tracks {
+            assert!(
+                is_bound(&track.state),
+                "{:?} kept unbound at {:?}\"",
+                track.members,
+                track.residual_arcsec
+            );
+        }
     }
 
     #[test]
@@ -2973,7 +3116,10 @@ mod tests {
 
         let unbound = thor_clusters(
             &detections,
-            &ThorSearch::default().with_unbound(40.0 / KM_S_PER_AU_DAY),
+            &ThorSearch {
+                conics: Conics::up_to(40.0 / KM_S_PER_AU_DAY, 0.5),
+                ..ThorSearch::default()
+            },
         );
         for (c, _) in &unbound {
             let ours = c.ids.iter().filter(|id| iso.contains(id)).count();

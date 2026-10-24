@@ -227,20 +227,12 @@ pub struct ThorSearch {
     pub distances_au: Vec<f64>,
     /// Largest sky residual a good bound orbit may leave, arcseconds.
     pub max_residual_arcsec: f64,
-    /// Largest residual a cluster may leave and still be kept as a poor fit.
-    pub max_unbound_residual_arcsec: f64,
+    /// Largest residual a cluster may leave and still be kept as a poor fit,
+    /// where one no orbit fits within `max_residual_arcsec` lands.
+    pub max_poor_residual_arcsec: f64,
     /// Where the astrometry was taken from.
     pub site: Site,
     pub conics: Conics,
-}
-
-impl ThorSearch {
-    pub fn with_unbound(mut self, vinf_au_per_day: f64) -> Self {
-        if vinf_au_per_day > 0.0 {
-            self.conics = Conics::Unbound(vinf_au_per_day);
-        }
-        self
-    }
 }
 
 impl Default for ThorSearch {
@@ -255,7 +247,7 @@ impl Default for ThorSearch {
             },
             distances_au: vec![1.8, 2.2, 2.6, 3.0, 3.4],
             max_residual_arcsec: 2.0,
-            max_unbound_residual_arcsec: 10.0,
+            max_poor_residual_arcsec: 10.0,
             site: crate::utils::sso_geometry::ZTF,
             conics: Conics::Bound,
         }
@@ -299,8 +291,10 @@ pub fn thor_clusters(
         .map(|k| lo + (hi - lo) * k as f64 / steps as f64)
         .collect();
     let unbound = match search.conics {
-        Conics::Unbound(vinf) if hi > lo => Some((
-            vinf,
+        Conics::Unbound {
+            vinf_au_per_day, ..
+        } if hi > lo => Some((
+            vinf_au_per_day,
             resolution(cfg, hi - lo),
             thor::Config {
                 min_nights: cfg.min_nights.max(UNBOUND_MIN_NIGHTS),
@@ -434,22 +428,16 @@ pub fn thor_clusters(
             // and converged if it passes it, so the residual it is ranked and
             // persisted on is the orbit's rather than where the fit stopped.
             let conics = match search.conics {
-                Conics::Unbound(_) if c.nights >= UNBOUND_MIN_NIGHTS => search.conics,
+                Conics::Unbound { .. } if c.nights >= UNBOUND_MIN_NIGHTS => search.conics,
                 _ => Conics::Bound,
             };
-            match fit_within(
-                &obs,
-                &seed,
-                epoch,
-                search.max_unbound_residual_arcsec,
-                conics,
-            ) {
+            match fit_within(&obs, &seed, epoch, search.max_poor_residual_arcsec, conics) {
                 None => Some((c, Verdict(BoundFit::None, None, None))),
                 Some(fit) if fit.rms_arcsec <= search.max_residual_arcsec => Some((
                     c,
                     Verdict(BoundFit::Good, Some(fit.rms_arcsec), Some(orbit_of(&fit))),
                 )),
-                Some(fit) if fit.rms_arcsec <= search.max_unbound_residual_arcsec => {
+                Some(fit) if fit.rms_arcsec <= search.max_poor_residual_arcsec => {
                     Some((c, Verdict(BoundFit::Poor, Some(fit.rms_arcsec), None)))
                 }
                 Some(_) => None,
@@ -980,6 +968,7 @@ pub async fn attach_pass(
     since_jd: f64,
     gate_arcsec: f64,
     site: &Site,
+    conics: Conics,
     dry_run: bool,
     stop: &Stop,
 ) -> Result<AttachReport, DiscoveryError> {
@@ -1011,7 +1000,7 @@ pub async fn attach_pass(
         if dets.len() != group.len() {
             continue;
         }
-        if let Some((target, fit)) = match_track(&targets, &dets, site, gate_arcsec) {
+        if let Some((target, fit)) = match_track(&targets, &dets, site, gate_arcsec, conics) {
             report.joined += 1;
             candidates.push(joined(target, &mut group.iter().copied(), &fit));
         }
@@ -1026,7 +1015,7 @@ pub async fn attach_pass(
     let mut order: Vec<&Target> = targets.iter().collect();
     order.sort_by(|a, b| b.members.len().cmp(&a.members.len()).then(a.id.cmp(&b.id)));
     for target in order {
-        if let Some((extra, fit)) = pool.attach(target, site, gate_arcsec) {
+        if let Some((extra, fit)) = pool.attach(target, site, gate_arcsec, conics) {
             report.attached += extra.len();
             candidates.push(joined(target, &mut extra.iter().map(|d| d.id), &fit));
         }

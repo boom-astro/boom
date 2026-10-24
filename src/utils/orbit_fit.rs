@@ -7,7 +7,7 @@
 //! residual that says whether the track was real.
 
 use crate::utils::heliolinc::{
-    propagate_position, radec_from_ecliptic, state_to_elements, Conics, State,
+    bound_seed, is_bound, propagate_position, radec_from_ecliptic, state_to_elements, Conics, State,
 };
 use crate::utils::sso_geometry::{observer_position, OrbitalElements, Site};
 
@@ -318,8 +318,55 @@ pub fn converge_orbit(
 ///
 /// The fit comes back whether or not it passed, so the caller compares its
 /// rms with the gate; one abandoned by the screen is simply above it. `None`
-/// when the observations cannot constrain an orbit.
+/// when the observations cannot constrain an orbit. An unbound fit that
+/// [`keeps_unbound`] rejects gives way to the best bound one.
 pub fn fit_within(
+    observations: &[Observation],
+    seed: &State,
+    epoch_jd: f64,
+    gate_arcsec: f64,
+    conics: Conics,
+) -> Option<OrbitFit> {
+    let fit = screen_then_converge(observations, seed, epoch_jd, gate_arcsec, conics)?;
+    if is_bound(&fit.state) {
+        return Some(fit);
+    }
+    let bound = [*seed, bound_seed(&fit.state)]
+        .iter()
+        .filter_map(|s| screen_then_converge(observations, s, epoch_jd, gate_arcsec, Conics::Bound))
+        .min_by(|a, b| a.rms_arcsec.total_cmp(&b.rms_arcsec));
+    let against = bound.as_ref().map(|b| (b.rms_arcsec, &b.state));
+    if keeps_unbound(conics, fit.rms_arcsec, against) {
+        Some(fit)
+    } else {
+        bound
+    }
+}
+
+/// Whether an unbound fit leaving `rms` arcseconds stands against `bound`, the
+/// best bound fit of the same astrometry (its rms and state): it must be
+/// within the limit `conics` sets, and `bound` must not [`bound_suffices`].
+pub fn keeps_unbound(conics: Conics, rms: f64, bound: Option<(f64, &State)>) -> bool {
+    let Conics::Unbound { max_rms_arcsec, .. } = conics else {
+        return false;
+    };
+    rms <= max_rms_arcsec
+        && !bound.is_some_and(|(bound_rms, state)| bound_suffices(rms, bound_rms, state))
+}
+
+/// Eccentricity past which a bound fit is pressed against e = 1, where one kept
+/// off hyperbolae stops when it wants one.
+const PINNED_ECCENTRICITY: f64 = 0.99;
+
+/// Whether a bound fit at `bound_rms` arcseconds should replace an unbound one
+/// at `rms`: it fits as well, or within twice and not pressed against e = 1.
+fn bound_suffices(rms: f64, bound_rms: f64, bound: &State) -> bool {
+    bound_rms <= rms
+        || (bound_rms <= 2.0 * rms
+            && state_to_elements(bound, 0.0).is_some_and(|el| el.e < PINNED_ECCENTRICITY))
+}
+
+fn screen_then_converge(
     observations: &[Observation],
     seed: &State,
     epoch_jd: f64,
@@ -762,6 +809,22 @@ mod tests {
         let truth = truth_state(&el, EPOCH);
         let fit = fit_orbit(&obs, &truth, EPOCH, 20).expect("fit");
         assert!(fit.rms_arcsec < 1e-3, "rms {}", fit.rms_arcsec);
+    }
+
+    /// A bound fit pressed against e = 1 does not displace a better hyperbola.
+    #[test]
+    fn test_a_bound_fit_at_e_1_leaves_a_better_hyperbola() {
+        let (r, mu) = (2.0, 0.017_202_098_95_f64.powi(2));
+        let at = |speed: f64| State {
+            pos: [r, 0.0, 0.0],
+            vel: [0.0, speed, 0.0],
+        };
+        let pinned = at(0.999 * (2.0 * mu / r).sqrt());
+        let circular = at((mu / r).sqrt());
+        assert!(!bound_suffices(0.1, 0.15, &pinned));
+        assert!(bound_suffices(0.1, 0.09, &pinned));
+        assert!(bound_suffices(0.1, 0.15, &circular));
+        assert!(!bound_suffices(0.1, 0.25, &circular));
     }
 
     #[test]
