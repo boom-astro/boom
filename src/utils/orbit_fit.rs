@@ -336,15 +336,23 @@ pub fn fit_within(
         .filter_map(|s| screen_then_converge(observations, s, epoch_jd, gate_arcsec, Conics::Bound))
         .min_by(|a, b| a.rms_arcsec.total_cmp(&b.rms_arcsec));
     match bound {
-        Some(bound) if bound_suffices(fit.rms_arcsec, bound.rms_arcsec) => Some(bound),
+        Some(bound) if bound_suffices(fit.rms_arcsec, bound.rms_arcsec, &bound.state) => {
+            Some(bound)
+        }
         _ => Some(fit),
     }
 }
 
-/// Whether a bound fit at `bound_rms` arcseconds explains the astrometry
-/// nearly as well as an unbound one at `rms`, so the unbound one is not kept.
-pub fn bound_suffices(rms: f64, bound_rms: f64) -> bool {
-    bound_rms <= (2.0 * rms).max(rms + 1.0)
+/// Eccentricity past which a bound fit is pressed against e = 1, where one kept
+/// off hyperbolae stops when it wants one.
+const PINNED_ECCENTRICITY: f64 = 0.99;
+
+/// Whether a bound fit at `bound_rms` arcseconds should replace an unbound one
+/// at `rms`: it fits as well, or within twice and not pressed against e = 1.
+pub fn bound_suffices(rms: f64, bound_rms: f64, bound: &State) -> bool {
+    bound_rms <= rms
+        || (bound_rms <= 2.0 * rms
+            && state_to_elements(bound, 0.0).is_some_and(|el| el.e < PINNED_ECCENTRICITY))
 }
 
 fn screen_then_converge(
@@ -790,6 +798,22 @@ mod tests {
         let truth = truth_state(&el, EPOCH);
         let fit = fit_orbit(&obs, &truth, EPOCH, 20).expect("fit");
         assert!(fit.rms_arcsec < 1e-3, "rms {}", fit.rms_arcsec);
+    }
+
+    /// A bound fit pressed against e = 1 does not displace a better hyperbola.
+    #[test]
+    fn test_a_bound_fit_at_e_1_leaves_a_better_hyperbola() {
+        let (r, mu) = (2.0, 0.017_202_098_95_f64.powi(2));
+        let at = |speed: f64| State {
+            pos: [r, 0.0, 0.0],
+            vel: [0.0, speed, 0.0],
+        };
+        let pinned = at(0.999 * (2.0 * mu / r).sqrt());
+        let circular = at((mu / r).sqrt());
+        assert!(!bound_suffices(0.1, 0.15, &pinned));
+        assert!(bound_suffices(0.1, 0.09, &pinned));
+        assert!(bound_suffices(0.1, 0.15, &circular));
+        assert!(!bound_suffices(0.1, 0.25, &circular));
     }
 
     #[test]

@@ -1030,73 +1030,106 @@ fn best_passing(
     // Every copy has the same members, so the same positions to fit.
     let observations = observations_of(copies.first()?, tracklets, by_id, &cfg.site);
     let gate = gate_arcsec(&observations, cfg);
-    let passes = |track: &Track| track.residual_arcsec.is_some_and(|r| r <= gate);
     // Stable, so equally tight copies keep their hypothesis order.
     copies.sort_by(|a, b| a.rms_au.total_cmp(&b.rms_au));
     let mut distances = std::collections::HashSet::new();
-    let (per_distance, rest): (Vec<Track>, Vec<Track>) = copies.into_iter().partition(|copy| {
+    let (first, rest): (Vec<Track>, Vec<Track>) = copies.into_iter().partition(|copy| {
         distances.insert((copy.hypothesis.r_au.to_bits(), is_bound(&copy.state)))
     });
-    let bound_seeds: Vec<Track> = per_distance
-        .iter()
-        .filter(|copy| is_bound(&copy.state))
-        .cloned()
-        .collect();
-    let best = per_distance
-        .into_iter()
-        .map(|mut copy| {
-            score(&mut copy, &observations, cfg, cfg.conics);
-            copy
-        })
-        .filter(passes)
-        .min_by(|a, b| {
-            a.residual_arcsec
-                .partial_cmp(&b.residual_arcsec)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-    let mut track = match best {
-        Some(track) => track,
-        None => rest.into_iter().find_map(|mut copy| {
-            score(&mut copy, &observations, cfg, cfg.conics);
-            passes(&copy).then_some(copy)
-        })?,
+    let bound_copies = |copies: &[Track]| -> Vec<Track> {
+        copies
+            .iter()
+            .filter(|copy| is_bound(&copy.state))
+            .cloned()
+            .collect()
     };
-    converge(&mut track, &observations, cfg, cfg.conics);
-    let track = bound_unless_worse(track, bound_seeds, &observations, cfg)?;
+    let fallback = match cfg.conics {
+        Conics::Unbound(_) => Some((bound_copies(&first), bound_copies(&rest))),
+        Conics::Bound => None,
+    };
+    let (track, screened) = settle(first, rest, &observations, cfg, cfg.conics);
+    let mut track = track.filter(|track| residual(track) <= gate)?;
+    if let Some((first, rest)) = fallback.filter(|_| !is_bound(&track.state)) {
+        // A search kept to ellipses screens these same bound copies.
+        let slowed: Vec<Track> = screened
+            .iter()
+            .chain([&track.state])
+            .filter(|state| !is_bound(state))
+            .map(|state| Track {
+                state: bound_seed(state),
+                ..track.clone()
+            })
+            .collect();
+        let (bound, _) = settle(
+            first.into_iter().chain(slowed).collect(),
+            rest,
+            &observations,
+            cfg,
+            Conics::Bound,
+        );
+        track = bound_unless_worse(track, bound, &observations, cfg)?;
+    }
     photometry_agrees(&track, tracklets, by_id, cfg).then_some(track)
 }
 
-/// `track`, unless it is unbound and the best bound fit from `seeds` is
-/// nearly as good, in which case that fit if it passes the gate.
+fn residual(track: &Track) -> f64 {
+    track.residual_arcsec.unwrap_or(f64::INFINITY)
+}
+
+/// The copy of `first` that fits best under `conics`, or when it fails the gate
+/// the first of `rest` to pass, converged if it passes; and the states `first`
+/// screened to.
+fn settle(
+    first: Vec<Track>,
+    rest: Vec<Track>,
+    observations: &[Observation],
+    cfg: &LinkConfig,
+    conics: Conics,
+) -> (Option<Track>, Vec<State>) {
+    let gate = gate_arcsec(observations, cfg);
+    let screened: Vec<Track> = first
+        .into_iter()
+        .map(|mut copy| {
+            score(&mut copy, observations, cfg, conics);
+            copy
+        })
+        .collect();
+    let states = screened.iter().map(|copy| copy.state).collect();
+    let best = screened
+        .into_iter()
+        .min_by(|a, b| residual(a).total_cmp(&residual(b)));
+    let track = match best {
+        Some(track) if residual(&track) <= gate => Some(track),
+        best => rest
+            .into_iter()
+            .find_map(|mut copy| {
+                score(&mut copy, observations, cfg, conics);
+                (residual(&copy) <= gate).then_some(copy)
+            })
+            .or(best),
+    };
+    let track = track.map(|mut track| {
+        if residual(&track) <= gate {
+            converge(&mut track, observations, cfg, conics);
+        }
+        track
+    });
+    (track, states)
+}
+
+/// `track`, unless it is unbound and `bound` [`bound_suffices`] in its place,
+/// in which case `bound` if it passes the gate.
 fn bound_unless_worse(
     track: Track,
-    seeds: Vec<Track>,
+    bound: Option<Track>,
     observations: &[Observation],
     cfg: &LinkConfig,
 ) -> Option<Track> {
-    let Some(rms) = track.residual_arcsec.filter(|_| !is_bound(&track.state)) else {
-        return Some(track);
-    };
-    let slowed = Track {
-        state: bound_seed(&track.state),
-        ..track.clone()
-    };
-    let Some(mut bound) = seeds
-        .into_iter()
-        .chain([slowed])
-        .filter_map(|mut seed| {
-            score(&mut seed, observations, cfg, Conics::Bound);
-            seed.residual_arcsec.map(|r| (r, seed))
-        })
-        .min_by(|a, b| a.0.total_cmp(&b.0))
-        .map(|(_, seed)| seed)
-    else {
-        return Some(track);
-    };
-    converge(&mut bound, observations, cfg, Conics::Bound);
-    match bound.residual_arcsec {
-        Some(bound_rms) if bound_suffices(rms, bound_rms) => {
-            (bound_rms <= gate_arcsec(observations, cfg)).then_some(bound)
+    match (track.residual_arcsec, bound) {
+        (Some(rms), Some(bound))
+            if !is_bound(&track.state) && bound_suffices(rms, residual(&bound), &bound.state) =>
+        {
+            (residual(&bound) <= gate_arcsec(observations, cfg)).then_some(bound)
         }
         _ => Some(track),
     }
@@ -1532,12 +1565,19 @@ fn try_merge(
             .then_some(track)
     })?;
     converge(&mut track, &observations, cfg, cfg.conics);
-    let bound_seeds = [first, second]
-        .into_iter()
-        .filter(|seed| is_bound(&seed.state))
-        .map(union)
-        .collect();
-    let track = bound_unless_worse(track, bound_seeds, &observations, cfg)?;
+    if !is_bound(&track.state) {
+        let seeds = [first, second]
+            .into_iter()
+            .filter(|seed| is_bound(&seed.state))
+            .map(union)
+            .chain([Track {
+                state: bound_seed(&track.state),
+                ..track.clone()
+            }])
+            .collect();
+        let (bound, _) = settle(seeds, Vec::new(), &observations, cfg, Conics::Bound);
+        track = bound_unless_worse(track, bound, &observations, cfg)?;
+    }
     photometry_agrees(&track, tracklets, by_id, cfg).then_some(track)
 }
 
