@@ -6,22 +6,24 @@
 //! finds to the MPC catalog, and stores the result as tracks.
 
 use crate::utils::attach::{match_track, Pool, Target};
+use crate::utils::enums::Survey;
 use crate::utils::heliolinc::{sky_track, test_orbits, State, Track};
 use crate::utils::identify::{
-    identify, track_designation, IdentifyConfig, KnownRule, Match, OrbitEntry,
+    identify, known_tracklets, predict_radec, track_designation, IdentifyConfig, KnownRule, Match,
+    MotionRule, OrbitEntry,
 };
 use crate::utils::linking::{
     angular_separation_deg, circular_mean_deg, find_tracklets, night_of, night_start, Detection,
     Tracklet, TrackletConfig,
 };
 use crate::utils::orbit_fit::{fit_within, Observation, OrbitFit};
+use crate::utils::sso_geometry::{Planet, Site, JUPITER, NEPTUNE, SATURN, URANUS};
 use crate::utils::thor;
 use crate::utils::tracks::{
     acquire_lock, alerts_by_survey, commit_upsert, member_id, plan_upsert, release_lock,
     renew_lock, stamp_members, stamp_missing, survey_site, BoundFit, StoredOrbit, StoredTrack,
     LOCK_LEASE, LOCK_RENEW_EVERY, SHARED_FOR_IDENTITY, TRACKS_COLLECTION,
 };
-use crate::utils::{enums::Survey, sso_geometry::Site};
 use futures::StreamExt;
 use mongodb::bson::{doc, Document};
 use rayon::prelude::*;
@@ -41,6 +43,9 @@ const LSST_DEEP_FIELDS: [(f64, f64); 6] = [
 ];
 const DEEP_FIELD_RADIUS_DEG: f64 = 2.0;
 const TAI_MINUS_UTC_DAYS: f64 = 37.0 / 86_400.0;
+
+const SATELLITE_RADII_DEG: [(Planet, f64); 4] =
+    [(JUPITER, 2.0), (SATURN, 1.5), (URANUS, 0.5), (NEPTUNE, 0.5)];
 
 #[derive(Debug, thiserror::Error)]
 pub enum DiscoveryError {
@@ -208,6 +213,31 @@ pub async fn load_unknown(
         });
     }
     Ok(detections)
+}
+
+pub fn associates_known(survey: &Survey) -> bool {
+    matches!(survey, Survey::Ztf | Survey::Lsst)
+}
+
+pub fn known_movers(
+    detections: &[Detection],
+    orbits: &[OrbitEntry],
+    rule: &MotionRule,
+) -> HashSet<i64> {
+    let tracklets = tracklets_per_night(detections, &TrackletConfig::default());
+    let known = known_tracklets(
+        &tracklets,
+        detections,
+        orbits,
+        &IdentifyConfig::default(),
+        rule,
+    );
+    tracklets
+        .iter()
+        .zip(known)
+        .filter(|(_, k)| k.is_some())
+        .flat_map(|(t, _)| t.ids.iter().copied())
+        .collect()
 }
 
 fn projection(survey: &Survey) -> Document {
@@ -582,6 +612,31 @@ pub fn designations(
         .collect()
 }
 
+pub fn satellites(groups: &[Vec<i64>], detections: &[Detection]) -> Vec<Option<&'static str>> {
+    let by_id: HashMap<i64, &Detection> = detections.iter().map(|d| (d.id, d)).collect();
+    groups
+        .iter()
+        .map(|group| {
+            let members: Vec<&Detection> = group
+                .iter()
+                .filter_map(|id| by_id.get(id).copied())
+                .collect();
+            if members.is_empty() {
+                return None;
+            }
+            SATELLITE_RADII_DEG
+                .iter()
+                .find(|(planet, radius)| {
+                    members.iter().all(|d| {
+                        let (ra, dec) = predict_radec(&planet.elements_at(d.jd), d.jd);
+                        angular_separation_deg(d.ra, d.dec, ra, dec) <= *radius
+                    })
+                })
+                .map(|(planet, _)| planet.name)
+        })
+        .collect()
+}
+
 /// The detections a linked track is made of, ascending.
 pub fn track_detections(track: &Track, tracklets: &[Tracklet]) -> Vec<i64> {
     let mut ids: Vec<i64> = track
@@ -687,6 +742,7 @@ pub async fn persist_tracks(
     detections: &[Detection],
     labels: &HashMap<i64, String>,
     known: &[Option<String>],
+    planets: &[Option<&'static str>],
     dry_run: bool,
     min_detections: usize,
     min_nights: usize,
@@ -713,6 +769,7 @@ pub async fn persist_tracks(
         detections,
         labels,
         known,
+        planets,
         dry_run,
         &HashMap::new(),
         (min_detections, min_nights),
@@ -735,6 +792,7 @@ pub async fn persist_clusters(
     detections: &[Detection],
     labels: &HashMap<i64, String>,
     known: &[Option<String>],
+    planets: &[Option<&'static str>],
     dry_run: bool,
     min_detections: usize,
     min_nights: usize,
@@ -752,6 +810,7 @@ pub async fn persist_clusters(
         detections,
         labels,
         known,
+        planets,
         dry_run,
         &HashMap::new(),
         (min_detections, min_nights),
@@ -775,6 +834,7 @@ async fn persist(
     detections: &[Detection],
     labels: &HashMap<i64, String>,
     known: &[Option<String>],
+    planets: &[Option<&'static str>],
     dry_run: bool,
     stored_jds: &HashMap<i64, f64>,
     (min_detections, min_nights): (usize, usize),
@@ -874,7 +934,18 @@ async fn persist(
             .find_map(|id| labels.get(id))
             .map(|l| crate::utils::mpcorb::normalize_ztf_ssnamenr(l).unwrap_or_else(|| l.clone()))
             .or_else(|| known.get(i).cloned().flatten());
-        let plan = match plan_upsert(db, &members, &jds, designation, Some(fit), orbit).await {
+        let near_planet = planets.get(i).copied().flatten().map(str::to_string);
+        let plan = match plan_upsert(
+            db,
+            &members,
+            &jds,
+            designation,
+            near_planet,
+            Some(fit),
+            orbit,
+        )
+        .await
+        {
             Ok(plan) => plan,
             Err(e) => {
                 error!("could not resolve one of the {}: {}", what, e);
@@ -1095,6 +1166,7 @@ pub async fn attach_pass(
         detections,
         &HashMap::new(),
         &[],
+        &[],
         dry_run,
         &stored_jds,
         (1, 1),
@@ -1298,6 +1370,29 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_a_group_that_stays_next_to_saturn_is_flagged() {
+        use crate::utils::sso_geometry::SATURN;
+
+        let near = |id: i64, jd: f64, north_deg: f64| {
+            let (ra, dec) = predict_radec(&SATURN.elements_at(jd), jd);
+            Detection {
+                ra,
+                dec: dec + north_deg,
+                ..detection(id, jd)
+            }
+        };
+        let detections = vec![
+            near(1, 2461337.7, 0.5),
+            near(2, 2461339.7, -0.8),
+            near(3, 2461339.7, 3.0),
+        ];
+        assert_eq!(
+            satellites(&[vec![1, 2], vec![1, 3]], &detections),
+            vec![Some("saturn"), None]
+        );
+    }
+
     /// Detections on consecutive nights, with ids no other test uses.
     fn fresh_detections(n: i64) -> Vec<Detection> {
         let base = (uuid::Uuid::new_v4().as_u128() as i64).abs() / 16;
@@ -1333,6 +1428,7 @@ mod tests {
             &detections,
             &HashMap::new(),
             &[],
+            &[],
             false,
             &HashMap::new(),
             (2, 2),
@@ -1365,6 +1461,7 @@ mod tests {
             &all,
             &HashMap::new(),
             &[],
+            &[],
             false,
             &HashMap::new(),
             (2, 2),
@@ -1382,6 +1479,7 @@ mod tests {
             candidates(),
             &detections,
             &HashMap::new(),
+            &[],
             &[],
             false,
             &HashMap::new(),
@@ -1402,6 +1500,7 @@ mod tests {
             candidates(),
             &detections,
             &HashMap::new(),
+            &[],
             &[],
             true,
             &HashMap::new(),
@@ -1431,6 +1530,7 @@ mod tests {
             std::iter::empty(),
             &[],
             &HashMap::new(),
+            &[],
             &[],
             false,
             &HashMap::new(),
