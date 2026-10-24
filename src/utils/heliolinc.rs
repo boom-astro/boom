@@ -832,7 +832,7 @@ pub fn unbound_test_orbits(
     }
     let east = [east[0] / n, east[1] / n, east[2] / n];
     let north = cross(&look, &east);
-    let earth = earth_position(epoch_jd);
+    let earth = earth_position_utc(epoch_jd);
     let earth_vel = earth_velocity(epoch_jd);
     let along = dot(&earth, &look);
     let range = |r_au: f64| -along + (along * along - dot(&earth, &earth) + r_au * r_au).sqrt();
