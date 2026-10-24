@@ -6,7 +6,7 @@
 //! finds to the MPC catalog, and stores the result as tracks.
 
 use crate::utils::attach::{match_track, Pool, Target};
-use crate::utils::heliolinc::{sky_track, test_orbits, State, Track};
+use crate::utils::heliolinc::{sky_track, test_orbits, Conics, State, Track};
 use crate::utils::identify::{
     identify, track_designation, IdentifyConfig, KnownRule, Match, OrbitEntry,
 };
@@ -224,8 +224,9 @@ pub struct ThorSearch {
     pub distances_au: Vec<f64>,
     /// Largest sky residual a good bound orbit may leave, arcseconds.
     pub max_residual_arcsec: f64,
-    /// Largest residual a cluster may leave and still be kept as a poor fit.
-    pub max_unbound_residual_arcsec: f64,
+    /// Largest residual a cluster may leave and still be kept as a poor fit,
+    /// where one no orbit fits within `max_residual_arcsec` lands.
+    pub max_poor_residual_arcsec: f64,
     /// Where the astrometry was taken from.
     pub site: Site,
 }
@@ -242,7 +243,7 @@ impl Default for ThorSearch {
             },
             distances_au: vec![1.8, 2.2, 2.6, 3.0, 3.4],
             max_residual_arcsec: 2.0,
-            max_unbound_residual_arcsec: 10.0,
+            max_poor_residual_arcsec: 10.0,
             site: crate::utils::sso_geometry::ZTF,
         }
     }
@@ -374,13 +375,19 @@ pub fn thor_clusters(
             // Screened against the looser gate, since a poor fit is still kept,
             // and converged if it passes it, so the residual it is ranked and
             // persisted on is the orbit's rather than where the fit stopped.
-            match fit_within(&obs, &seed, epoch, search.max_unbound_residual_arcsec) {
+            match fit_within(
+                &obs,
+                &seed,
+                epoch,
+                search.max_poor_residual_arcsec,
+                Conics::Bound,
+            ) {
                 None => Some((c, Verdict(BoundFit::None, None, None))),
                 Some(fit) if fit.rms_arcsec <= search.max_residual_arcsec => Some((
                     c,
                     Verdict(BoundFit::Good, Some(fit.rms_arcsec), Some(orbit_of(&fit))),
                 )),
-                Some(fit) if fit.rms_arcsec <= search.max_unbound_residual_arcsec => {
+                Some(fit) if fit.rms_arcsec <= search.max_poor_residual_arcsec => {
                     Some((c, Verdict(BoundFit::Poor, Some(fit.rms_arcsec), None)))
                 }
                 Some(_) => None,
@@ -911,6 +918,7 @@ pub async fn attach_pass(
     since_jd: f64,
     gate_arcsec: f64,
     site: &Site,
+    conics: Conics,
     dry_run: bool,
     stop: &Stop,
 ) -> Result<AttachReport, DiscoveryError> {
@@ -942,7 +950,7 @@ pub async fn attach_pass(
         if dets.len() != group.len() {
             continue;
         }
-        if let Some((target, fit)) = match_track(&targets, &dets, site, gate_arcsec) {
+        if let Some((target, fit)) = match_track(&targets, &dets, site, gate_arcsec, conics) {
             report.joined += 1;
             candidates.push(joined(target, &mut group.iter().copied(), &fit));
         }
@@ -957,7 +965,7 @@ pub async fn attach_pass(
     let mut order: Vec<&Target> = targets.iter().collect();
     order.sort_by(|a, b| b.members.len().cmp(&a.members.len()).then(a.id.cmp(&b.id)));
     for target in order {
-        if let Some((extra, fit)) = pool.attach(target, site, gate_arcsec) {
+        if let Some((extra, fit)) = pool.attach(target, site, gate_arcsec, conics) {
             report.attached += extra.len();
             candidates.push(joined(target, &mut extra.iter().map(|d| d.id), &fit));
         }
