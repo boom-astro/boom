@@ -14,7 +14,7 @@ use boom::{
     alert::{AlertWorker, ProcessAlertStatus},
     conf::{self},
     enrichment::{EnrichmentWorker, ZtfEnrichmentWorker},
-    milvus::{EmbeddingRow, MilvusClient},
+    milvus::{EmbeddingRow, MilvusClient, SearchHit},
     utils::{
         enums::Survey,
         testing::{
@@ -134,11 +134,14 @@ async fn test_ztf_alert_to_milvus_e2e() {
         .await
         .expect("filtered search failed");
     assert!(allowed.iter().any(|h| h.object_id == object_id));
+    // Every hit, not only ours, must come from the allowed program.
+    assert_hits_in_program(&mut client, &allowed, row.programid).await;
     let excluded = client
         .search_embedding(&row.embedding, 5, &[other_program])
         .await
         .expect("filtered search failed");
     assert!(excluded.iter().all(|h| h.object_id != object_id));
+    assert_hits_in_program(&mut client, &excluded, other_program).await;
     // No allowed programs means no results.
     let none_allowed = client
         .search_embedding(&row.embedding, 5, &[])
@@ -161,6 +164,23 @@ async fn test_ztf_alert_to_milvus_e2e() {
     drop_alert_from_collections(candid, &Survey::Ztf)
         .await
         .unwrap();
+}
+
+/// Search hits carry no `programid`, so look each one up in Milvus and check it.
+async fn assert_hits_in_program(client: &mut MilvusClient, hits: &[SearchHit], programid: i32) {
+    let ids: Vec<&str> = hits.iter().map(|h| h.object_id.as_str()).collect();
+    let rows = client
+        .get_embeddings(&ids, &[1, 2, 3])
+        .await
+        .expect("get_embeddings failed");
+    assert_eq!(rows.len(), hits.len(), "every hit should have a stored row");
+    for r in rows {
+        assert_eq!(
+            r.programid, programid,
+            "search filtered to programid {programid} returned {} with programid {}",
+            r.object_id, r.programid
+        );
+    }
 }
 
 /// Poll `get_embeddings` until the row for `object_id` is visible, or give up.
