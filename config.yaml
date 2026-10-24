@@ -295,6 +295,11 @@ linker:
   recall_window_nights: 5
   attach: true
   attach_lookback_nights: 60
+  fast: false # link movers too fast for the linking pass
+  fast_window_nights: 7
+  fast_min_rate_deg_per_day: 1.0
+  fast_max_rate_deg_per_day: 25.0
+  fast_dense_detections: 10000 # above this a night keeps no untrailed pairs
 crossmatch:
   ztf:
     Gaia_DR3:

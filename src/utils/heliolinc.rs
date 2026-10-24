@@ -158,7 +158,7 @@ impl Default for LinkConfig {
 }
 
 /// Equatorial degrees to an ecliptic unit vector.
-fn unit_vector(ra_deg: f64, dec_deg: f64) -> [f64; 3] {
+pub(crate) fn unit_vector(ra_deg: f64, dec_deg: f64) -> [f64; 3] {
     let (ra, dec) = (ra_deg.to_radians(), dec_deg.to_radians());
     let (x, y, z) = (dec.cos() * ra.cos(), dec.cos() * ra.sin(), dec.sin());
     let (s, c) = OBLIQUITY_DEG.to_radians().sin_cos();

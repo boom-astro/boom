@@ -9,6 +9,7 @@ pub mod db;
 pub mod derive_avro_schema;
 pub mod discovery;
 pub mod enums;
+pub mod fast;
 pub mod fits;
 pub mod gpu;
 pub mod heliolinc;
