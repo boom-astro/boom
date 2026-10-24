@@ -48,15 +48,18 @@ impl MilvusClient {
     /// Find the `top_k` objects whose stored embeddings are most similar.
     /// Results are ordered best-first.
     ///
-    /// `programids` restricts the search to those programs; `None` searches
-    /// every row.
+    /// Only rows whose `programid` is in `programids` can match; an empty list
+    /// matches nothing.
     #[instrument(skip_all, err, fields(collection = %self.config().collection.name, top_k))]
     pub async fn search_embedding(
         &mut self,
         query: &[f32],
         top_k: i64,
-        programids: Option<&[i32]>,
+        programids: &[i32],
     ) -> Result<Vec<SearchHit>, MilvusError> {
+        if programids.is_empty() {
+            return Ok(vec![]);
+        }
         let config = self.config().clone();
 
         if query.len() as i64 != config.collection.dim {
@@ -79,7 +82,7 @@ impl MilvusClient {
             db_name: config.database.clone(),
             collection_name: config.collection.name.clone(),
             // Applied during the ANN search, so top_k counts only allowed rows.
-            dsl: programids.map(programid_in_expr).unwrap_or_default(),
+            dsl: programid_in_expr(programids),
             dsl_type: DslType::BoolExprV1 as i32,
             search_input: Some(SearchInput::PlaceholderGroup(encode_float_placeholder(&[
                 query,
@@ -102,22 +105,24 @@ impl MilvusClient {
     /// Fetch the stored rows for the given `object_ids`. Missing ids are simply
     /// absent from the result; order is not guaranteed to match the input.
     ///
-    /// Rows outside `programids` are left out as if missing; `None` returns all.
+    /// Rows outside `programids` are left out as if missing; an empty list
+    /// returns nothing.
     #[instrument(skip_all, err, fields(collection = %self.config().collection.name, ids = object_ids.len()))]
     pub async fn get_embeddings(
         &mut self,
         object_ids: &[&str],
-        programids: Option<&[i32]>,
+        programids: &[i32],
     ) -> Result<Vec<EmbeddingRow>, MilvusError> {
-        if object_ids.is_empty() {
+        if object_ids.is_empty() || programids.is_empty() {
             return Ok(vec![]);
         }
         let config = self.config().clone();
 
-        let mut expr = object_id_in_expr(object_ids);
-        if let Some(programids) = programids {
-            expr = format!("{expr} and {}", programid_in_expr(programids));
-        }
+        let expr = format!(
+            "{} and {}",
+            object_id_in_expr(object_ids),
+            programid_in_expr(programids)
+        );
 
         let request = QueryRequest {
             db_name: config.database.clone(),
