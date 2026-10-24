@@ -294,6 +294,11 @@ linker:
   recall_window_nights: 5
   attach: true
   attach_lookback_nights: 60
+  # Also link unbound orbits up to this hyperbolic excess speed (km/s), 0 is off.
+  max_vinf_km_s: 0.0
+  # Largest residual an unbound orbit may leave (arcsec); a track fitting worse
+  # keeps its bound fit if that passes, or is dropped.
+  max_unbound_rms_arcsec: 0.5
 crossmatch:
   ztf:
     Gaia_DR3:

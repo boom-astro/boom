@@ -14,7 +14,7 @@ const GAUSS_K: f64 = 0.017_202_098_95;
 /// Obliquity is not applied: everything here stays in the ecliptic frame.
 const KEPLER_TOLERANCE: f64 = 1e-12;
 /// Where both the elliptical and hyperbolic solutions go numerically unusable.
-const PARABOLIC_TOLERANCE: f64 = 1e-8;
+pub(crate) const PARABOLIC_TOLERANCE: f64 = 1e-8;
 const KEPLER_MAX_ITER: usize = 64;
 
 /// Heliocentric osculating elements at `epoch_jd`, as MPCORB distributes them.
@@ -311,36 +311,13 @@ pub fn observer_position(jd: f64, site: &Site) -> [f64; 3] {
     ]
 }
 
-/// Earth's heliocentric ecliptic position at `jd`, au.
+/// Earth's heliocentric ecliptic position at `jd` (TT), au.
 ///
-/// Low-precision solar theory (Meeus ch. 25), good to ~1e-4 au. That is three
-/// orders of magnitude finer than this module needs.
+/// VSOP87A, within 4e-7 au of DE441 over 1990-2040.
 pub fn earth_position(jd: f64) -> [f64; 3] {
-    let t = (jd - 2_451_545.0) / 36_525.0;
-
-    let mean_long = (280.464_66 + 36_000.769_83 * t + 0.000_303_2 * t * t).to_radians();
-    let mean_anomaly = (357.529_11 + 35_999.050_29 * t - 0.000_153_7 * t * t).to_radians();
-    let e = 0.016_708_634 - 0.000_042_037 * t - 0.000_000_126_7 * t * t;
-
-    // Equation of the centre.
-    let centre = ((1.914_602 - 0.004_817 * t - 0.000_014 * t * t) * mean_anomaly.sin()
-        + (0.019_993 - 0.000_101 * t) * (2.0 * mean_anomaly).sin()
-        + 0.000_289 * (3.0 * mean_anomaly).sin())
-    .to_radians();
-
-    // Meeus gives longitude referred to the mean equinox of date; MPCORB elements
-    // are J2000, so precess back (0.01397 deg/yr).
-    let true_long = mean_long + centre - (1.397 * t).to_radians();
-    let true_anomaly = mean_anomaly + centre;
-    let sun_dist = 1.000_001_018 * (1.0 - e * e) / (1.0 + e * true_anomaly.cos());
-
-    // Earth is opposite the Sun as seen from the barycentre; ecliptic latitude
-    // is negligible at this precision.
-    [
-        -sun_dist * true_long.cos(),
-        -sun_dist * true_long.sin(),
-        0.0,
-    ]
+    let eq = crate::utils::vsop87::earth_equatorial(jd);
+    let (s, c) = OBLIQUITY_DEG.to_radians().sin_cos();
+    [eq[0], c * eq[1] + s * eq[2], -s * eq[1] + c * eq[2]]
 }
 
 /// Observing geometry for `elements` at `jd`.
@@ -818,7 +795,7 @@ mod horizons_validation {
             let d_phase = (g.phase_angle - c.phase_angle).abs();
 
             assert!(d_helio < 1e-3, "{}: helio off by {d_helio} au", c.name);
-            assert!(d_topo < 1e-3, "{}: topo off by {d_topo} au", c.name);
+            assert!(d_topo < 3e-4, "{}: topo off by {d_topo} au", c.name);
             assert!(d_phase < 0.02, "{}: phase off by {d_phase} deg", c.name);
         }
     }
@@ -832,8 +809,53 @@ mod horizons_validation {
             let d_phase = (g.phase_angle - c.phase_angle).abs();
 
             assert!(d_helio < 1e-4, "{}: helio off by {d_helio} au", c.name);
-            assert!(d_topo < 1e-3, "{}: topo off by {d_topo} au", c.name);
+            assert!(d_topo < 1e-4, "{}: topo off by {d_topo} au", c.name);
             assert!(d_phase < 0.01, "{}: phase off by {d_phase} deg", c.name);
+        }
+    }
+
+    /// Against JPL Horizons (geocenter, ICRF equator, TDB), 1990 to 2041.
+    #[test]
+    fn test_earth_matches_horizons() {
+        let (s, c) = OBLIQUITY_DEG.to_radians().sin_cos();
+        for (jd, eq) in [
+            (
+                2_447_892.5,
+                [-0.178_287_922_704, 0.887_231_821_652, 0.384_685_522_567],
+            ),
+            (
+                2_451_545.0,
+                [-0.177_135_099_273, 0.887_428_522_326, 0.384_742_899_088],
+            ),
+            (
+                2_455_362.5,
+                [-0.112_008_465_385, -0.926_256_114_347, -0.401_554_039_367],
+            ),
+            (
+                2_458_928.5,
+                [-0.995_844_117_444, 0.006_876_306_663, 0.002_985_547_201],
+            ),
+            (
+                2_461_272.5,
+                [0.845_273_411_844, -0.510_433_911_434, -0.221_265_991_387],
+            ),
+            (
+                2_464_632.5,
+                [0.783_457_740_640, 0.559_496_990_829, 0.242_507_278_738],
+            ),
+            (
+                2_466_154.5,
+                [-0.164_118_011_456, 0.889_552_170_674, 0.385_572_051_864],
+            ),
+        ] {
+            let truth = [eq[0], c * eq[1] + s * eq[2], -s * eq[1] + c * eq[2]];
+            let earth = earth_position(jd);
+            let off = norm(&[
+                earth[0] - truth[0],
+                earth[1] - truth[1],
+                earth[2] - truth[2],
+            ]);
+            assert!(off < 5e-7, "JD {jd}: {off:.2e} au from Horizons");
         }
     }
 
@@ -847,13 +869,13 @@ mod horizons_validation {
     /// untested: both are nearly insensitive to the light-time correction, so
     /// they passed while predicted positions were out by tens of arcseconds.
     ///
-    /// 9 arcsec separates the two models rather than merely passing: dropping
-    /// the correction puts Ceres at 10.3 and Pallas at 16.7.
+    /// 3 arcsec separates the two models rather than merely passing: dropping
+    /// the correction puts Ceres at 10.3 and Pallas at 12.4.
     #[test]
     fn test_matches_horizons_on_the_sky() {
         for c in cases() {
             let sep = sky_error_arcsec(&c, 2_461_272.5);
-            assert!(sep < 9.0, "{}: {sep:.1} arcsec from Horizons", c.name);
+            assert!(sep < 3.0, "{}: {sep:.1} arcsec from Horizons", c.name);
         }
     }
 

@@ -6,7 +6,9 @@
 //! with residuals taken on the sky, turns one into the other and yields the
 //! residual that says whether the track was real.
 
-use crate::utils::heliolinc::{propagate_position, radec_from_ecliptic, state_to_elements, State};
+use crate::utils::heliolinc::{
+    bound_seed, is_bound, propagate_position, radec_from_ecliptic, state_to_elements, Conics, State,
+};
 use crate::utils::sso_geometry::{observer_position, OrbitalElements, Site};
 
 /// One astrometric position.
@@ -99,8 +101,16 @@ impl GiveUp {
 pub fn predict_radec(state: &State, epoch_jd: f64, jd: f64, site: &Site) -> Option<(f64, f64)> {
     // From the observer, not the Earth's centre: an Earth radius is several
     // arcseconds at these distances, which the residual gate is tighter than.
-    let observer = observer_position(jd, site);
-    apparent(state, epoch_jd, jd, &observer, None).map(|(radec, _)| radec)
+    predict_radec_seen_from(state, epoch_jd, jd, &observer_position(jd, site))
+}
+
+pub fn predict_radec_seen_from(
+    state: &State,
+    epoch_jd: f64,
+    jd: f64,
+    observer: &[f64; 3],
+) -> Option<(f64, f64)> {
+    apparent(state, epoch_jd, jd, observer, None).map(|(radec, _)| radec)
 }
 
 /// Where `state` appears from `observer` at `jd`, and the light time used.
@@ -246,7 +256,14 @@ pub fn fit_orbit(
     epoch_jd: f64,
     max_iterations: usize,
 ) -> Option<OrbitFit> {
-    fit_orbit_with(observations, initial, epoch_jd, max_iterations, None)
+    fit_orbit_with(
+        observations,
+        initial,
+        epoch_jd,
+        max_iterations,
+        None,
+        Conics::Bound,
+    )
 }
 
 /// [`fit_orbit`], abandoning the fit early when `give_up` says it cannot pass.
@@ -256,6 +273,7 @@ pub fn fit_orbit_with(
     epoch_jd: f64,
     max_iterations: usize,
     give_up: Option<GiveUp>,
+    conics: Conics,
 ) -> Option<OrbitFit> {
     fit(
         observations,
@@ -264,6 +282,7 @@ pub fn fit_orbit_with(
         max_iterations,
         give_up,
         MIN_IMPROVEMENT_ARCSEC,
+        conics,
     )
 }
 
@@ -281,8 +300,17 @@ pub fn converge_orbit(
     initial: &State,
     epoch_jd: f64,
     max_iterations: usize,
+    conics: Conics,
 ) -> Option<OrbitFit> {
-    fit(observations, initial, epoch_jd, max_iterations, None, 0.0)
+    fit(
+        observations,
+        initial,
+        epoch_jd,
+        max_iterations,
+        None,
+        0.0,
+        conics,
+    )
 }
 
 /// Fit `seed` against a residual gate: screened with [`GiveUp::for_gate`],
@@ -290,12 +318,60 @@ pub fn converge_orbit(
 ///
 /// The fit comes back whether or not it passed, so the caller compares its
 /// rms with the gate; one abandoned by the screen is simply above it. `None`
-/// when the observations cannot constrain an orbit.
+/// when the observations cannot constrain an orbit. An unbound fit that
+/// [`keeps_unbound`] rejects gives way to the best bound one.
 pub fn fit_within(
     observations: &[Observation],
     seed: &State,
     epoch_jd: f64,
     gate_arcsec: f64,
+    conics: Conics,
+) -> Option<OrbitFit> {
+    let fit = screen_then_converge(observations, seed, epoch_jd, gate_arcsec, conics)?;
+    if is_bound(&fit.state) {
+        return Some(fit);
+    }
+    let bound = [*seed, bound_seed(&fit.state)]
+        .iter()
+        .filter_map(|s| screen_then_converge(observations, s, epoch_jd, gate_arcsec, Conics::Bound))
+        .min_by(|a, b| a.rms_arcsec.total_cmp(&b.rms_arcsec));
+    let against = bound.as_ref().map(|b| (b.rms_arcsec, &b.state));
+    if keeps_unbound(conics, fit.rms_arcsec, against) {
+        Some(fit)
+    } else {
+        bound
+    }
+}
+
+/// Whether an unbound fit leaving `rms` arcseconds stands against `bound`, the
+/// best bound fit of the same astrometry (its rms and state): it must be
+/// within the limit `conics` sets, and `bound` must not [`bound_suffices`].
+pub fn keeps_unbound(conics: Conics, rms: f64, bound: Option<(f64, &State)>) -> bool {
+    let Conics::Unbound { max_rms_arcsec, .. } = conics else {
+        return false;
+    };
+    rms <= max_rms_arcsec
+        && !bound.is_some_and(|(bound_rms, state)| bound_suffices(rms, bound_rms, state))
+}
+
+/// Eccentricity past which a bound fit is pressed against e = 1, where one kept
+/// off hyperbolae stops when it wants one.
+const PINNED_ECCENTRICITY: f64 = 0.99;
+
+/// Whether a bound fit at `bound_rms` arcseconds should replace an unbound one
+/// at `rms`: it fits as well, or within twice and not pressed against e = 1.
+fn bound_suffices(rms: f64, bound_rms: f64, bound: &State) -> bool {
+    bound_rms <= rms
+        || (bound_rms <= 2.0 * rms
+            && state_to_elements(bound, 0.0).is_some_and(|el| el.e < PINNED_ECCENTRICITY))
+}
+
+fn screen_then_converge(
+    observations: &[Observation],
+    seed: &State,
+    epoch_jd: f64,
+    gate_arcsec: f64,
+    conics: Conics,
 ) -> Option<OrbitFit> {
     let screened = fit_orbit_with(
         observations,
@@ -303,12 +379,20 @@ pub fn fit_within(
         epoch_jd,
         SCREEN_ITERATIONS,
         Some(GiveUp::for_gate(gate_arcsec)),
+        conics,
     )?;
     if screened.rms_arcsec > gate_arcsec {
         return Some(screened);
     }
     // Starts where the screen stopped, so it can only improve on it.
-    converge_orbit(observations, &screened.state, epoch_jd, CONVERGE_ITERATIONS).or(Some(screened))
+    converge_orbit(
+        observations,
+        &screened.state,
+        epoch_jd,
+        CONVERGE_ITERATIONS,
+        conics,
+    )
+    .or(Some(screened))
 }
 
 fn fit(
@@ -318,8 +402,9 @@ fn fit(
     max_iterations: usize,
     give_up: Option<GiveUp>,
     min_improvement_arcsec: f64,
+    conics: Conics,
 ) -> Option<OrbitFit> {
-    if observations.len() < 3 {
+    if observations.len() < 3 || !conics.admits(initial) {
         return None;
     }
     // The observer depends only on the epoch, so it is placed once per
@@ -371,6 +456,10 @@ fn fit(
             let mut jac_dec = [0.0; 6];
             for (k, step) in steps.iter().enumerate() {
                 let up = perturb(&state, k, *step);
+                if !conics.admits(&up) {
+                    usable = false;
+                    break 'obs;
+                }
                 let Some(((ra_up, dec_up), _)) = residual(&up, epoch_jd, obs, observer, Some(tau))
                 else {
                     usable = false;
@@ -416,7 +505,11 @@ fn fit(
             candidate = perturb(&candidate, k, *d);
         }
 
-        match rms_and_light_times(&candidate, epoch_jd, observations, &observers, &weights) {
+        let trial = conics
+            .admits(&candidate)
+            .then(|| rms_and_light_times(&candidate, epoch_jd, observations, &observers, &weights))
+            .flatten();
+        match trial {
             Some((trial, trial_plain, trial_light_times)) if trial < best => {
                 let improvement = best - trial;
                 state = candidate;
@@ -716,6 +809,22 @@ mod tests {
         let truth = truth_state(&el, EPOCH);
         let fit = fit_orbit(&obs, &truth, EPOCH, 20).expect("fit");
         assert!(fit.rms_arcsec < 1e-3, "rms {}", fit.rms_arcsec);
+    }
+
+    /// A bound fit pressed against e = 1 does not displace a better hyperbola.
+    #[test]
+    fn test_a_bound_fit_at_e_1_leaves_a_better_hyperbola() {
+        let (r, mu) = (2.0, 0.017_202_098_95_f64.powi(2));
+        let at = |speed: f64| State {
+            pos: [r, 0.0, 0.0],
+            vel: [0.0, speed, 0.0],
+        };
+        let pinned = at(0.999 * (2.0 * mu / r).sqrt());
+        let circular = at((mu / r).sqrt());
+        assert!(!bound_suffices(0.1, 0.15, &pinned));
+        assert!(bound_suffices(0.1, 0.09, &pinned));
+        assert!(bound_suffices(0.1, 0.15, &circular));
+        assert!(!bound_suffices(0.1, 0.25, &circular));
     }
 
     #[test]

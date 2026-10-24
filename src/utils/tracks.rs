@@ -21,8 +21,8 @@ pub const SHARED_FOR_IDENTITY: usize = 2;
 
 /// How well a bound orbit reproduces a track.
 ///
-/// Propagation is Keplerian and bound-only, so a hyperbolic object cannot fit
-/// however clean its astrometry. `Poor` and `None` are where a distant or
+/// Fits stay bound unless `max_vinf_km_s` is set, so a hyperbolic object cannot
+/// fit however clean its astrometry. `Poor` and `None` are where a distant or
 /// unbound object shows up, so the distinction has to survive persistence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BoundFit {

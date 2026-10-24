@@ -215,9 +215,10 @@ pub fn identify(
         let first = dets.iter().map(|d| d.jd).fold(f64::INFINITY, f64::min);
         let last = dets.iter().map(|d| d.jd).fold(f64::NEG_INFINITY, f64::max);
         let place = |jd: f64| -> Vec<(f64, f64)> {
+            let earth = earth_position(jd);
             orbits
                 .par_iter()
-                .map(|o| predict_radec(&o.elements, jd))
+                .map(|o| radec_from_ecliptic(&light_time_corrected(&o.elements, jd, &earth)))
                 .collect()
         };
         let start = place(first);
@@ -236,6 +237,7 @@ pub fn identify(
                 } else {
                     0.0
                 };
+                let observer = observer_position(d.jd, d.site.as_ref().unwrap_or(&cfg.site));
                 for idx in grid.near(d.ra, d.dec) {
                     let (night_ra, night_dec) = interpolate(start[idx], end[idx], f);
                     // The grid overreaches, so gate on the separation before
@@ -245,11 +247,11 @@ pub fn identify(
                     {
                         continue;
                     }
-                    let (pra, pdec) = predict_radec_from(
+                    let (pra, pdec) = radec_from_ecliptic(&light_time_corrected(
                         &orbits[idx].elements,
                         d.jd,
-                        d.site.as_ref().unwrap_or(&cfg.site),
-                    );
+                        &observer,
+                    ));
                     let sep = angular_separation_deg(d.ra, d.dec, pra, pdec) * 3600.0;
                     // Ties go to the lower index, so the result does not
                     // depend on the order the grid returns candidates in.

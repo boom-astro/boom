@@ -1,7 +1,9 @@
-use crate::utils::heliolinc::State;
+use crate::utils::heliolinc::{is_bound, Conics, State};
 use crate::utils::linking::{angular_separation_deg, night_of, Detection};
-use crate::utils::orbit_fit::{fit_within, predict_radec, Observation, OrbitFit};
-use crate::utils::sso_geometry::Site;
+use crate::utils::orbit_fit::{
+    fit_within, predict_radec, predict_radec_seen_from, Observation, OrbitFit,
+};
+use crate::utils::sso_geometry::{observer_position, Site};
 use std::collections::{BTreeMap, HashSet};
 
 const BASE_RADIUS_ARCSEC: f64 = 60.0;
@@ -46,8 +48,11 @@ impl Target {
     }
 
     fn separation_arcsec(&self, d: &Detection, site: &Site) -> Option<f64> {
-        let site = d.site.as_ref().unwrap_or(site);
-        let (ra, dec) = predict_radec(&self.state, self.epoch_jd, d.jd, site)?;
+        self.separation_seen_from(d, &observer_of(d, site))
+    }
+
+    fn separation_seen_from(&self, d: &Detection, observer: &[f64; 3]) -> Option<f64> {
+        let (ra, dec) = predict_radec_seen_from(&self.state, self.epoch_jd, d.jd, observer)?;
         Some(angular_separation_deg(ra, dec, d.ra, d.dec) * 3600.0)
     }
 
@@ -56,7 +61,13 @@ impl Target {
             .filter(|&sep| sep <= self.radius_arcsec(d.jd))
     }
 
-    fn joint_fit(&self, extra: &[Detection], site: &Site, gate_arcsec: f64) -> Option<OrbitFit> {
+    fn joint_fit(
+        &self,
+        extra: &[Detection],
+        site: &Site,
+        gate_arcsec: f64,
+        conics: Conics,
+    ) -> Option<OrbitFit> {
         let observations: Vec<Observation> = self
             .members
             .iter()
@@ -68,8 +79,23 @@ impl Target {
                 site: d.site.unwrap_or(*site),
             })
             .collect();
-        fit_within(&observations, &self.state, self.epoch_jd, gate_arcsec)
+        let conics = if is_bound(&self.state) {
+            Conics::Bound
+        } else {
+            conics
+        };
+        fit_within(
+            &observations,
+            &self.state,
+            self.epoch_jd,
+            gate_arcsec,
+            conics,
+        )
     }
+}
+
+fn observer_of(d: &Detection, site: &Site) -> [f64; 3] {
+    observer_position(d.jd, d.site.as_ref().unwrap_or(site))
 }
 
 pub fn match_track<'a>(
@@ -77,13 +103,15 @@ pub fn match_track<'a>(
     track: &[Detection],
     site: &Site,
     gate_arcsec: f64,
+    conics: Conics,
 ) -> Option<(&'a Target, OrbitFit)> {
     let ids: HashSet<i64> = track.iter().map(|d| d.id).collect();
     let middle = track.get(track.len() / 2)?;
+    let observer = observer_of(middle, site);
     let mut scored: Vec<(usize, &Target)> = targets
         .iter()
         .filter(|t| {
-            t.separation_arcsec(middle, site)
+            t.separation_seen_from(middle, &observer)
                 .is_some_and(|sep| sep <= PREFILTER_RADII * t.radius_arcsec(middle.jd))
         })
         .filter(|t| t.members.iter().all(|m| !ids.contains(&m.id)))
@@ -101,7 +129,7 @@ pub fn match_track<'a>(
         .into_iter()
         .take(TARGETS_FITTED_PER_TRACK)
         .find_map(|(_, t)| {
-            t.joint_fit(track, site, gate_arcsec)
+            t.joint_fit(track, site, gate_arcsec, conics)
                 .filter(|f| f.rms_arcsec <= gate_arcsec)
                 .map(|f| (t, f))
         })
@@ -161,6 +189,7 @@ impl Pool {
         target: &Target,
         site: &Site,
         gate_arcsec: f64,
+        conics: Conics,
     ) -> Option<(Vec<Detection>, OrbitFit)> {
         if target.nights() < MIN_TARGET_NIGHTS {
             return None;
@@ -180,7 +209,7 @@ impl Pool {
                 continue;
             }
             let Some(f) = grown
-                .joint_fit(&[d], site, gate_arcsec)
+                .joint_fit(&[d], site, gate_arcsec, conics)
                 .filter(|f| f.rms_arcsec <= gate_arcsec)
             else {
                 continue;
@@ -274,8 +303,8 @@ mod tests {
         let same = seen(&object(291.0), &LATER_NIGHTS, 100);
         let neighbor = seen(&object(291.05), &LATER_NIGHTS, 200);
         let targets = [target];
-        assert!(match_track(&targets, &same, &ZTF, 2.0).is_some());
-        assert!(match_track(&targets, &neighbor, &ZTF, 2.0).is_none());
+        assert!(match_track(&targets, &same, &ZTF, 2.0, Conics::Bound).is_some());
+        assert!(match_track(&targets, &neighbor, &ZTF, 2.0, Conics::Bound).is_none());
     }
 
     #[test]
@@ -284,7 +313,9 @@ mod tests {
         let same = seen(&object(291.0), &LATER_NIGHTS[..1], 100);
         let neighbor = seen(&object(291.05), &LATER_NIGHTS[1..], 200);
         let mut pool = Pool::new(same.iter().chain(&neighbor).copied());
-        let (attached, fit) = pool.attach(&target, &ZTF, 2.0).expect("attaches");
+        let (attached, fit) = pool
+            .attach(&target, &ZTF, 2.0, Conics::Bound)
+            .expect("attaches");
         let ids: HashSet<i64> = attached.iter().map(|d| d.id).collect();
         assert_eq!(ids, same.iter().map(|d| d.id).collect());
         assert!(fit.rms_arcsec <= 2.0);

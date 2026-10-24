@@ -21,7 +21,7 @@ use boom::utils::discovery::{
     attach_pass, designations, load_window, persist_clusters, persist_tracks, recall,
     reference_epoch, thor_clusters, track_detections, tracklets_per_night, Stop, ThorSearch,
 };
-use boom::utils::heliolinc::{link_tracklets, LinkConfig, Track};
+use boom::utils::heliolinc::{link_tracklets, Conics, LinkConfig, Track, KM_S_PER_AU_DAY};
 use boom::utils::identify::{IdentifyConfig, KnownRule, OrbitEntry};
 use boom::utils::linking::{night_of, Detection, Tracklet, TrackletConfig};
 use boom::utils::mpcorb::load_catalogue;
@@ -83,7 +83,7 @@ fn window(night: i64, nights: u32) -> (f64, f64) {
 }
 
 /// Tracklets per night, linked across nights with the default search.
-fn link(detections: &[Detection]) -> (Vec<Tracklet>, Vec<Track>, f64) {
+fn link(detections: &[Detection], conics: Conics) -> (Vec<Tracklet>, Vec<Track>, f64) {
     let tracklets = tracklets_per_night(detections, &TrackletConfig::default());
     if tracklets.is_empty() {
         return (tracklets, Vec::new(), 0.0);
@@ -91,7 +91,8 @@ fn link(detections: &[Detection]) -> (Vec<Tracklet>, Vec<Track>, f64) {
     let cfg = LinkConfig {
         reference_jd: reference_epoch(&tracklets),
         ..LinkConfig::default()
-    };
+    }
+    .with_conics(conics);
     let tracks = link_tracklets(&tracklets, detections, &cfg);
     (tracklets, tracks, cfg.reference_jd)
 }
@@ -205,6 +206,10 @@ async fn run_night(db: &mongodb::Database, cfg: &LinkerConfig, night: i64, stop:
     );
 
     let dry_run = !cfg.persist;
+    let conics = Conics::up_to(
+        cfg.max_vinf_km_s / KM_S_PER_AU_DAY,
+        cfg.max_unbound_rms_arcsec,
+    );
     let mut done = true;
     let mut found: Vec<Vec<i64>> = Vec::new();
 
@@ -212,7 +217,7 @@ async fn run_night(db: &mongodb::Database, cfg: &LinkerConfig, night: i64, stop:
         done = false;
     } else if cfg.link && !detections.is_empty() {
         let pass = Instant::now();
-        let (tracklets, tracks, reference_jd) = link(&detections);
+        let (tracklets, tracks, reference_jd) = link(&detections, conics);
         let groups: Vec<Vec<i64>> = tracks
             .iter()
             .map(|t| track_detections(t, &tracklets))
@@ -298,6 +303,7 @@ async fn run_night(db: &mongodb::Database, cfg: &LinkerConfig, night: i64, stop:
             since,
             LinkConfig::default().max_residual_arcsec,
             &ZTF,
+            conics,
             dry_run,
             stop,
         )
@@ -330,7 +336,7 @@ async fn run_night(db: &mongodb::Database, cfg: &LinkerConfig, night: i64, stop:
         let (start, span) = window(night, cfg.recall_window_nights);
         match load_window(db, start, span, cfg.drb, true, None).await {
             Ok((identified, names)) => {
-                let (tracklets, tracks, _) = link(&identified);
+                let (tracklets, tracks, _) = link(&identified, conics);
                 let r = recall(&tracks, &tracklets, &names);
                 info!(
                     detections = identified.len(),
@@ -538,6 +544,14 @@ mod tests {
             },
             LinkerConfig {
                 drb: 1.5,
+                ..LinkerConfig::default()
+            },
+            LinkerConfig {
+                max_vinf_km_s: -1.0,
+                ..LinkerConfig::default()
+            },
+            LinkerConfig {
+                max_unbound_rms_arcsec: 0.0,
                 ..LinkerConfig::default()
             },
         ] {
