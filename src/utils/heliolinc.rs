@@ -16,7 +16,7 @@ use crate::utils::orbit_fit::{
 };
 use crate::utils::outburst::{hg12, DEFAULT_G12};
 use crate::utils::sso_geometry::{
-    dot, earth_position, norm, OrbitalElements, Site, PARABOLIC_TOLERANCE, ZTF,
+    dot, earth_position_utc, norm, OrbitalElements, Site, PARABOLIC_TOLERANCE, ZTF,
 };
 use rayon::prelude::*;
 use std::collections::{BTreeMap, HashMap};
@@ -311,8 +311,8 @@ fn cross(a: &[f64; 3], b: &[f64; 3]) -> [f64; 3] {
 
 /// Earth's heliocentric velocity, au/day, by central difference.
 fn earth_velocity(jd: f64) -> [f64; 3] {
-    let a = earth_position(jd - EARTH_DERIV_STEP);
-    let b = earth_position(jd + EARTH_DERIV_STEP);
+    let a = earth_position_utc(jd - EARTH_DERIV_STEP);
+    let b = earth_position_utc(jd + EARTH_DERIV_STEP);
     let d = 2.0 * EARTH_DERIV_STEP;
     [(b[0] - a[0]) / d, (b[1] - a[1]) / d, (b[2] - a[2]) / d]
 }
@@ -329,7 +329,7 @@ impl Sight {
         Sight {
             rho: unit_vector(t.ra_ref, t.dec_ref),
             rho_dot: unit_vector_rate(t),
-            earth: earth_position(t.jd_ref),
+            earth: earth_position_utc(t.jd_ref),
             earth_vel: earth_velocity(t.jd_ref),
         }
     }
@@ -684,7 +684,7 @@ pub fn night_magnitude_spread(
         let (Some(mag), Some(p)) = (d.mag, propagate_position(state, epoch_jd, d.jd)) else {
             continue;
         };
-        let e = earth_position(d.jd);
+        let e = earth_position_utc(d.jd);
         let to_object = [p[0] - e[0], p[1] - e[1], p[2] - e[2]];
         let (r, delta) = (norm(&p), norm(&to_object));
         let phase_deg = (dot(&p, &to_object) / (r * delta))
@@ -738,7 +738,7 @@ pub fn sky_track(state: &State, epoch_jd: f64, jds: &[f64]) -> Option<(Vec<f64>,
     let mut decs = Vec::with_capacity(jds.len());
     for &jd in jds {
         let p = propagate_position(state, epoch_jd, jd)?;
-        let e = earth_position(jd);
+        let e = earth_position_utc(jd);
         let (ra, dec) = radec_from_ecliptic(&[p[0] - e[0], p[1] - e[1], p[2] - e[2]]);
         ras.push(ra);
         decs.push(dec);
@@ -761,7 +761,7 @@ pub fn test_orbits(
     distances_au: &[f64],
 ) -> Vec<(State, f64)> {
     let look = unit_vector(ra_deg, dec_deg);
-    let earth = earth_position(epoch_jd);
+    let earth = earth_position_utc(epoch_jd);
     let mut out = Vec::new();
 
     for &r_au in distances_au {
@@ -1794,7 +1794,7 @@ pub fn deduplicate(tracks: Vec<Track>) -> Vec<Track> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utils::sso_geometry::heliocentric_position;
+    use crate::utils::sso_geometry::{heliocentric_position, TT_MINUS_UTC_DAYS};
 
     /// Angular separation, degrees.
     fn angular_gap(ra1: f64, dec1: f64, ra2: f64, dec2: f64) -> f64 {
@@ -1944,7 +1944,7 @@ mod tests {
                 norm(&state.pos)
             );
             // Seen from Earth it must lie in the direction that was searched.
-            let e = earth_position(jd);
+            let e = earth_position_utc(jd);
             let (sra, sdec) = radec_from_ecliptic(&[
                 state.pos[0] - e[0],
                 state.pos[1] - e[1],
@@ -2059,8 +2059,8 @@ mod tests {
     fn tracklet_for(elements: &OrbitalElements, jd: f64) -> Tracklet {
         let step = 0.02;
         let at = |t: f64| {
-            let helio = heliocentric_position(elements, t);
-            let earth = earth_position(t);
+            let helio = heliocentric_position(elements, t + TT_MINUS_UTC_DAYS);
+            let earth = earth_position_utc(t);
             let topo = [
                 helio[0] - earth[0],
                 helio[1] - earth[1],
@@ -2902,7 +2902,7 @@ mod tests {
             ),
             (borisov(), 2458753.5),
         ] {
-            let at = |jd: f64| heliocentric_position(&el, jd);
+            let at = |jd: f64| heliocentric_position(&el, jd + TT_MINUS_UTC_DAYS);
             let (pos, a, b) = (at(mid), at(mid - 0.01), at(mid + 0.01));
             let vel = [
                 (b[0] - a[0]) / 0.02,

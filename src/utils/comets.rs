@@ -100,7 +100,7 @@ pub fn parse_line(line: &str) -> Option<CometEntry> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utils::sso_geometry::{geometry_at, true_anomaly, ZTF};
+    use crate::utils::sso_geometry::{geometry_at, true_anomaly, TT_MINUS_UTC_DAYS, ZTF};
 
     // Real lines from CometEls.txt.
     const HALLEY: &str = "0001P         2061 08  2.8739  0.571098  0.968021  112.1899   59.2896  162.1880  20260905   5.5  3.2  1P/Halley";
@@ -152,7 +152,7 @@ mod tests {
         let c = parse_line(HALLEY).expect("parses");
         let tp = c.elements.tp;
 
-        let at_perihelion = geometry_at(&c.elements, tp, &ZTF);
+        let at_perihelion = geometry_at(&c.elements, tp - TT_MINUS_UTC_DAYS, &ZTF);
         assert!(
             (-0.05..0.0).contains(&at_perihelion.true_anomaly),
             "the light seen at tp left before perihelion, true anomaly was {}",
