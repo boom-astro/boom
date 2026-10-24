@@ -1473,6 +1473,14 @@ pub struct LinkerConfig {
     pub attach: bool,
     #[serde(default = "default_linker_attach_lookback_nights")]
     pub attach_lookback_nights: u32,
+    /// Also link and recover unbound orbits, up to this hyperbolic excess
+    /// speed, km/s.
+    #[serde(default)]
+    pub max_vinf_km_s: f64,
+    /// Largest residual an unbound orbit may leave and stand, arcseconds. A
+    /// track fitting worse keeps its bound fit if that passes, or is dropped.
+    #[serde(default = "default_linker_max_unbound_rms_arcsec")]
+    pub max_unbound_rms_arcsec: f64,
     #[serde(default)]
     pub fast: bool,
     #[serde(default = "default_linker_fast_window_nights")]
@@ -1510,6 +1518,18 @@ impl LinkerConfig {
         if !(0.0..=1.0).contains(&self.drb) {
             return Err(format!("drb is {}, but scores run from 0 to 1", self.drb));
         }
+        if !(0.0..f64::INFINITY).contains(&self.max_vinf_km_s) {
+            return Err(format!(
+                "max_vinf_km_s is {}, but must be zero or a positive speed",
+                self.max_vinf_km_s
+            ));
+        }
+        if !self.max_unbound_rms_arcsec.is_finite() || self.max_unbound_rms_arcsec <= 0.0 {
+            return Err(format!(
+                "max_unbound_rms_arcsec is {}, but must be a positive residual",
+                self.max_unbound_rms_arcsec
+            ));
+        }
         if self.fast_window_nights == 0 || self.fast_window_nights > self.window_nights {
             return Err(format!(
                 "fast_window_nights is {}, but must be between 1 and window_nights ({})",
@@ -1544,6 +1564,8 @@ impl Default for LinkerConfig {
             recall_window_nights: default_linker_recall_window_nights(),
             attach: default_linker_pass(),
             attach_lookback_nights: default_linker_attach_lookback_nights(),
+            max_vinf_km_s: 0.0,
+            max_unbound_rms_arcsec: default_linker_max_unbound_rms_arcsec(),
             fast: false,
             fast_window_nights: default_linker_fast_window_nights(),
             fast_min_rate_deg_per_day: default_linker_fast_min_rate(),
@@ -1551,6 +1573,10 @@ impl Default for LinkerConfig {
             fast_dense_detections: default_linker_fast_dense_detections(),
         }
     }
+}
+
+fn default_linker_max_unbound_rms_arcsec() -> f64 {
+    0.5
 }
 
 fn default_linker_attach_lookback_nights() -> u32 {

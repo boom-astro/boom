@@ -2,7 +2,7 @@
 
 use crate::utils::discovery::DiscoveryError;
 use crate::utils::enums::Survey;
-use crate::utils::heliolinc::{unit_vector, State};
+use crate::utils::heliolinc::{is_bound, unit_vector, Conics, State};
 use crate::utils::linking::{find_tracklets, predict, Detection, Tracklet, TrackletConfig};
 use crate::utils::orbit_fit::{
     converge_orbit, fit_within, rms_arcsec, Observation, OrbitFit, CONVERGE_ITERATIONS,
@@ -41,6 +41,7 @@ pub struct FastSearch {
     pub min_detections: usize,
     pub max_chain_tracklets: usize,
     pub max_residual_arcsec: f64,
+    pub conics: Conics,
 }
 
 impl Default for FastSearch {
@@ -56,6 +57,7 @@ impl Default for FastSearch {
             min_detections: 5,
             max_chain_tracklets: 60,
             max_residual_arcsec: 3.0,
+            conics: Conics::Bound,
         }
     }
 }
@@ -609,6 +611,7 @@ fn fit_path(
         .unwrap_or(ZTF);
     let mut seeds: Vec<(f64, State)> = seed_states(seed, &site)
         .into_iter()
+        .filter(|s| search.conics.admits(s))
         .filter_map(|s| Some((rms_arcsec(&s, seed.jd_ref, &observations)?, s)))
         .filter(|(rms, _)| rms.is_finite())
         .collect();
@@ -618,7 +621,7 @@ fn fit_path(
         .into_iter()
         .take(SEEDS_FITTED)
         .filter_map(|(_, s)| {
-            let screened = fit_within(&observations, &s, seed.jd_ref, gate)?;
+            let screened = fit_within(&observations, &s, seed.jd_ref, gate, search.conics)?;
             if screened.rms_arcsec <= gate || screened.rms_arcsec > GIVE_UP_FACTOR * gate {
                 return Some(screened);
             }
@@ -628,6 +631,11 @@ fn fit_path(
                 &screened.state,
                 seed.jd_ref,
                 CONVERGE_ITERATIONS,
+                if is_bound(&screened.state) {
+                    Conics::Bound
+                } else {
+                    search.conics
+                },
             )
             .or(Some(screened))
         })
@@ -705,7 +713,7 @@ mod tests {
     use super::*;
     use crate::utils::heliolinc::state_to_elements;
     use crate::utils::orbit_fit::predict_radec;
-    use crate::utils::sso_geometry::earth_position;
+    use crate::utils::sso_geometry::earth_position_utc;
     use rand::rngs::StdRng;
     use rand::{RngExt, SeedableRng};
 
@@ -713,11 +721,11 @@ mod tests {
     fn test_a_fast_neo_among_random_detections_is_linked_and_fitted() {
         let epoch = 2_461_300.75;
         let step = 0.01;
-        let earth = earth_position(epoch);
+        let earth = earth_position_utc(epoch);
         let earth_velocity = combine(
-            &earth_position(epoch + step),
+            &earth_position_utc(epoch + step),
             0.5 / step,
-            &earth_position(epoch - step),
+            &earth_position_utc(epoch - step),
             -0.5 / step,
         );
         let look = unit_vector(40.0, 15.0);
