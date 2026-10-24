@@ -74,10 +74,33 @@ impl BoundFit {
 const SAME_RESIDUAL_ARCSEC: f64 = 0.01;
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(into = "OrbitWithElements")]
 pub struct StoredOrbit {
     pub epoch_jd: f64,
     pub pos: [f64; 3],
     pub vel: [f64; 3],
+}
+
+#[derive(Serialize)]
+struct OrbitWithElements {
+    epoch_jd: f64,
+    pos: [f64; 3],
+    vel: [f64; 3],
+    e: f64,
+    q: f64,
+}
+
+impl From<StoredOrbit> for OrbitWithElements {
+    fn from(orbit: StoredOrbit) -> Self {
+        let (e, q) = conic(&orbit);
+        OrbitWithElements {
+            epoch_jd: orbit.epoch_jd,
+            pos: orbit.pos,
+            vel: orbit.vel,
+            e,
+            q,
+        }
+    }
 }
 
 /// A track as stored, keyed by an id that outlives any one linking run.
@@ -786,11 +809,7 @@ pub struct TrackQuery {
 }
 
 impl TrackQuery {
-    fn cuts_orbit(&self) -> bool {
-        self.min_e.is_some() || self.max_q.is_some()
-    }
-
-    pub fn filter(&self) -> Document {
+    fn window(&self) -> Document {
         let mut filter = doc! { "updated_at": { "$gte": self.updated_since } };
         if let Some(after_id) = &self.after_id {
             filter.insert(
@@ -798,27 +817,24 @@ impl TrackQuery {
                 vec![doc! { "updated_at": self.updated_since, "_id": { "$lte": after_id } }],
             );
         }
+        filter
+    }
+
+    pub fn filter(&self) -> Document {
+        let mut filter = self.window();
         if self.unknown_only {
             filter.insert("designation", mongodb::bson::Bson::Null);
         }
         if let Some(min_nights) = self.min_nights {
             filter.insert("n_nights", doc! { "$gte": min_nights });
         }
-        if self.cuts_orbit() {
-            filter.insert("orbit", doc! { "$type": "object" });
+        if let Some(min_e) = self.min_e {
+            filter.insert("orbit.e", doc! { "$gte": min_e });
+        }
+        if let Some(max_q) = self.max_q {
+            filter.insert("orbit.q", doc! { "$lte": max_q });
         }
         filter
-    }
-
-    pub fn keeps(&self, track: &StoredTrack) -> bool {
-        if !self.cuts_orbit() {
-            return true;
-        }
-        let Some(orbit) = &track.orbit else {
-            return false;
-        };
-        let (e, q) = conic(orbit);
-        self.min_e.is_none_or(|min_e| e >= min_e) && self.max_q.is_none_or(|max_q| q <= max_q)
     }
 }
 
@@ -841,28 +857,40 @@ pub async fn list_tracks(
     limit: usize,
 ) -> Result<TrackPage, mongodb::error::Error> {
     let tracks = db.collection::<StoredTrack>(TRACKS_COLLECTION);
-    let mut find = tracks
+    // Read before the page, so a short page moves the cursor past what the cuts rejected.
+    let newest = tracks
+        .clone_with_type::<Document>()
+        .find_one(query.window())
+        .sort(doc! { "updated_at": -1, "_id": -1 })
+        .projection(doc! { "updated_at": 1 })
+        .await?
+        .and_then(|d| {
+            Some(TrackCursor {
+                updated_since: d.get_f64("updated_at").ok()?,
+                after_id: d.get_str("_id").ok()?.to_string(),
+            })
+        });
+    let mut cursor = tracks
         .find(query.filter())
-        .sort(doc! { "updated_at": 1, "_id": 1 });
-    if !query.cuts_orbit() {
-        find = find.limit(limit as i64);
-    }
-    let mut cursor = find.await?;
+        .sort(doc! { "updated_at": 1, "_id": 1 })
+        .limit(limit as i64)
+        .await?;
     let mut page = TrackPage {
         tracks: Vec::new(),
-        next: None,
+        next: newest,
     };
-    while page.tracks.len() < limit && cursor.advance().await? {
-        let Ok(track) = cursor.deserialize_current() else {
-            continue;
-        };
-        page.next = Some(TrackCursor {
+    let mut scanned = 0;
+    while cursor.advance().await? {
+        scanned += 1;
+        if let Ok(track) = cursor.deserialize_current() {
+            page.tracks.push(track);
+        }
+    }
+    if scanned == limit {
+        page.next = page.tracks.last().map(|track| TrackCursor {
             updated_since: track.updated_at,
             after_id: track.id.clone(),
         });
-        if query.keeps(&track) {
-            page.tracks.push(track);
-        }
     }
     Ok(page)
 }
@@ -1077,7 +1105,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn test_conic_recovers_eccentricity_and_perihelion() {
+    fn test_an_orbit_is_written_with_its_eccentricity_and_perihelion() {
         for (e, q, nu) in [
             (0.0, 2.5, 0.0),
             (0.1, 2.2, 130.0),
@@ -1085,9 +1113,15 @@ pub(crate) mod tests {
             (1.0, 1.0, 50.0),
             (3.36, 2.0, 70.0),
         ] {
-            let (got_e, got_q) = conic(&orbit_at(e, q, nu));
+            let orbit = orbit_at(e, q, nu);
+            let written = mongodb::bson::to_document(&orbit).unwrap();
+            let (got_e, got_q) = (written.get_f64("e").unwrap(), written.get_f64("q").unwrap());
             assert!((got_e - e).abs() < 1e-6, "e {e}: {got_e}");
             assert!((got_q - q).abs() < 1e-9, "q {q}: {got_q}");
+            assert_eq!(
+                mongodb::bson::from_document::<StoredOrbit>(written).unwrap(),
+                orbit
+            );
         }
     }
 
@@ -1098,8 +1132,8 @@ pub(crate) mod tests {
             after_id: Some("BT000009".to_string()),
             unknown_only: true,
             min_e: Some(1.0),
+            max_q: Some(1.3),
             min_nights: Some(3),
-            ..Default::default()
         };
         let filter = query.filter();
         assert_eq!(filter.keys().next().map(String::as_str), Some("updated_at"));
@@ -1116,33 +1150,18 @@ pub(crate) mod tests {
             filter.get_document("n_nights").unwrap(),
             &doc! { "$gte": 3 }
         );
-        assert!(filter.contains_key("orbit"));
+        assert_eq!(
+            filter.get_document("orbit.e").unwrap(),
+            &doc! { "$gte": 1.0 }
+        );
+        assert_eq!(
+            filter.get_document("orbit.q").unwrap(),
+            &doc! { "$lte": 1.3 }
+        );
         assert_eq!(
             TrackQuery::default().filter(),
             doc! { "updated_at": { "$gte": 0.0 } }
         );
-    }
-
-    #[test]
-    fn test_orbit_cuts_never_keep_a_track_without_an_orbit() {
-        let unbound = TrackQuery {
-            min_e: Some(1.0),
-            ..Default::default()
-        };
-        let near_earth = TrackQuery {
-            max_q: Some(1.3),
-            ..Default::default()
-        };
-        let mut t = stored("BT000001", &[10, 11]);
-        assert!(TrackQuery::default().keeps(&t));
-        assert!(!unbound.keeps(&t));
-        assert!(!near_earth.keeps(&t));
-        t.orbit = Some(orbit_at(3.36, 2.0, 30.0));
-        assert!(unbound.keeps(&t));
-        assert!(!near_earth.keeps(&t));
-        t.orbit = Some(orbit_at(0.5, 1.1, 30.0));
-        assert!(!unbound.keeps(&t));
-        assert!(near_earth.keeps(&t));
     }
 
     /// Candids no other test uses, so tests can share the database.
