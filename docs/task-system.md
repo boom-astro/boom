@@ -186,6 +186,7 @@ later.
 | Task | What it does |
 | --- | --- |
 | `catalog_ingest` | Download an archival catalog and insert it. See [catalogs.md](./catalogs.md). |
+| `backfill_track_elements` | Write `orbit.e` and `orbit.q` onto tracks stored before they were. |
 
 Submission is single-flight per target, not per type: two ingests of the same
 catalog would race on the same collection and chunk state, but ingesting 2MASS

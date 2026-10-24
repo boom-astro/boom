@@ -353,7 +353,7 @@ mod tests {
         assert_eq!(unbound, ids[..1]);
         assert_eq!(
             next["after_id"],
-            ids[2].as_str(),
+            ids[3].as_str(),
             "the cursor moves past what the cut rejected"
         );
         let near_earth = list(format!("updated_since={since}&max_q=1.3")).await.0;

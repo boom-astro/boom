@@ -16,6 +16,7 @@
 //! bodies are therefore written to be **resumable**: re-running one continues
 //! rather than repeating.
 
+pub mod backfill_track_elements;
 pub mod catalog_ingest;
 pub mod context;
 pub mod ledger;
@@ -103,16 +104,28 @@ fn schema_of<T: utoipa::PartialSchema>() -> serde_json::Value {
 // and `copy_cutouts` already covering most of the moving part.
 
 /// Every task type this release knows how to run.
-pub const TASKS: &[TaskSpec] = &[TaskSpec {
-    id: catalog_ingest::TASK_TYPE,
-    title: "Ingest an archival catalog",
-    description: "Download an archival catalog and insert it into MongoDB, one chunk at a \
+pub const TASKS: &[TaskSpec] = &[
+    TaskSpec {
+        id: catalog_ingest::TASK_TYPE,
+        title: "Ingest an archival catalog",
+        description: "Download an archival catalog and insert it into MongoDB, one chunk at a \
                       time. Resumable: re-running continues from the last completed chunk.",
-    idempotent: true,
-    // Only with drop_existing, which the client has to ask for explicitly.
-    destructive: true,
-    params_schema: || schema_of::<catalog_ingest::CatalogIngestParams>(),
-}];
+        idempotent: true,
+        // Only with drop_existing, which the client has to ask for explicitly.
+        destructive: true,
+        params_schema: || schema_of::<catalog_ingest::CatalogIngestParams>(),
+    },
+    TaskSpec {
+        id: backfill_track_elements::TASK_TYPE,
+        title: "Backfill track orbital elements",
+        description: "Write the eccentricity and perihelion distance next to the orbit of \
+                      tracks stored before they were. Resumable: re-running picks up the \
+                      tracks still missing them.",
+        idempotent: true,
+        destructive: false,
+        params_schema: || schema_of::<backfill_track_elements::BackfillTrackElementsParams>(),
+    },
+];
 
 pub fn find(id: &str) -> Option<&'static TaskSpec> {
     TASKS.iter().find(|t| t.id == id)
@@ -156,6 +169,12 @@ pub fn validate_params(task_type: &str, params: &serde_json::Value) -> Result<()
                 .map(|_| ())
                 .map_err(|e| TaskError::InvalidParams(e.to_string()))
         }
+        backfill_track_elements::TASK_TYPE => {
+            let parsed: backfill_track_elements::BackfillTrackElementsParams =
+                serde_json::from_value(params.clone())
+                    .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            parsed.validate().map_err(TaskError::InvalidParams)
+        }
         other => Err(TaskError::UnknownType {
             id: other.to_string(),
             known: known_types(),
@@ -177,6 +196,7 @@ pub fn single_flight_key(
             .get("catalog")
             .and_then(|c| c.as_str())
             .map(|catalog| doc! { "catalog": catalog }),
+        backfill_track_elements::TASK_TYPE => Some(doc! {}),
         _ => None,
     }
 }
@@ -195,6 +215,11 @@ pub async fn dispatch(
             let params = catalog_ingest::CatalogIngestParams::deserialize(params)
                 .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
             catalog_ingest::run(ctx, params).await
+        }
+        backfill_track_elements::TASK_TYPE => {
+            let params = backfill_track_elements::BackfillTrackElementsParams::deserialize(params)
+                .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            backfill_track_elements::run(ctx, params).await
         }
         other => Err(TaskError::UnknownType {
             id: other.to_string(),
