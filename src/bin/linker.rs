@@ -18,13 +18,13 @@
 
 use boom::conf::{load_dotenv, AppConfig, LinkerConfig};
 use boom::utils::discovery::{
-    attach_pass, designations, load_unknown, load_window, persist_clusters, persist_fast,
-    persist_tracks, recall, reference_epoch, thor_clusters, track_detections, tracklets_per_night,
-    Stop, ThorSearch,
+    associates_known, attach_pass, designations, known_movers, load_unknown, load_window,
+    persist_clusters, persist_fast, persist_tracks, recall, reference_epoch, satellites,
+    thor_clusters, track_detections, tracklets_per_night, Stop, ThorSearch,
 };
 use boom::utils::fast::{fast_tracks, lsst_trails, FastSearch};
 use boom::utils::heliolinc::{link_tracklets, Conics, LinkConfig, Track, KM_S_PER_AU_DAY};
-use boom::utils::identify::{IdentifyConfig, KnownRule, OrbitEntry};
+use boom::utils::identify::{IdentifyConfig, KnownRule, MotionRule, OrbitEntry};
 use boom::utils::linking::{night_of, Detection, Tracklet, TrackletConfig};
 use boom::utils::mpcorb::load_catalogue;
 use boom::utils::o11y::logging::build_subscriber;
@@ -118,6 +118,18 @@ fn known_objects(
     }
 }
 
+fn planets(
+    groups: &[Vec<i64>],
+    detections: &[Detection],
+    cfg: &LinkerConfig,
+) -> Vec<Option<&'static str>> {
+    if cfg.flag_satellites {
+        satellites(groups, detections)
+    } else {
+        Vec::new()
+    }
+}
+
 /// The last night a run finished, if any.
 async fn last_recorded_night(db: &mongodb::Database) -> Option<i64> {
     match db
@@ -199,8 +211,21 @@ async fn run_night(db: &mongodb::Database, cfg: &LinkerConfig, night: i64, stop:
     let mut detections = Vec::new();
     for survey in &cfg.surveys {
         match load_unknown(db, survey, first, night, cfg.drb).await {
-            Ok(found) => {
-                info!(%survey, detections = found.len(), "loaded a survey's window");
+            Ok(mut found) => {
+                let loaded = found.len();
+                if let Some(orbits) = catalog
+                    .as_deref()
+                    .filter(|_| cfg.reject_known && !associates_known(survey))
+                {
+                    let known = known_movers(&found, orbits, &MotionRule::default());
+                    found.retain(|d| !known.contains(&d.id));
+                }
+                info!(
+                    %survey,
+                    detections = found.len(),
+                    known = loaded - found.len(),
+                    "loaded a survey's window"
+                );
                 detections.extend(found);
             }
             Err(error) => {
@@ -234,6 +259,7 @@ async fn run_night(db: &mongodb::Database, cfg: &LinkerConfig, night: i64, stop:
             .map(|t| track_detections(t, &tracklets))
             .collect();
         let known = known_objects(&groups, &detections, catalog.as_deref());
+        let near = planets(&groups, &detections, cfg);
         let report = persist_tracks(
             db,
             &tracks,
@@ -242,6 +268,7 @@ async fn run_night(db: &mongodb::Database, cfg: &LinkerConfig, night: i64, stop:
             &detections,
             &labels,
             &known,
+            &near,
             dry_run,
             TrackletConfig::default().min_detections,
             LinkConfig::default().min_nights,
@@ -254,6 +281,7 @@ async fn run_night(db: &mongodb::Database, cfg: &LinkerConfig, night: i64, stop:
             tracklets = tracklets.len(),
             tracks = tracks.len(),
             known = known.iter().filter(|k| k.is_some()).count(),
+            satellites = near.iter().filter(|p| p.is_some()).count(),
             stored = report.stored,
             unchanged = report.unchanged,
             wrote = report.ran && !dry_run,
@@ -279,12 +307,14 @@ async fn run_night(db: &mongodb::Database, cfg: &LinkerConfig, night: i64, stop:
         let clusters = thor_clusters(&recent, &search);
         let groups: Vec<Vec<i64>> = clusters.iter().map(|(c, _)| c.ids.clone()).collect();
         let known = known_objects(&groups, &recent, catalog.as_deref());
+        let near = planets(&groups, &recent, cfg);
         let report = persist_clusters(
             db,
             &clusters,
             &recent,
             &labels,
             &known,
+            &near,
             dry_run,
             search.config.min_detections,
             search.config.min_nights,
@@ -297,6 +327,7 @@ async fn run_night(db: &mongodb::Database, cfg: &LinkerConfig, night: i64, stop:
             detections = recent.len(),
             clusters = clusters.len(),
             known = known.iter().filter(|k| k.is_some()).count(),
+            satellites = near.iter().filter(|p| p.is_some()).count(),
             stored = report.stored,
             unchanged = report.unchanged,
             wrote = report.ran && !dry_run,
@@ -327,12 +358,14 @@ async fn run_night(db: &mongodb::Database, cfg: &LinkerConfig, night: i64, stop:
                 let tracks = fast_tracks(&recent, &trails, &search);
                 let groups: Vec<Vec<i64>> = tracks.iter().map(|t| t.members.clone()).collect();
                 let known = known_objects(&groups, &recent, catalog.as_deref());
+                let near = planets(&groups, &recent, cfg);
                 let report = persist_fast(
                     db,
                     &tracks,
                     &recent,
                     &labels,
                     &known,
+                    &near,
                     dry_run,
                     search.min_detections,
                     search.min_nights,
