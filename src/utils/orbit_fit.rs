@@ -7,7 +7,7 @@
 //! residual that says whether the track was real.
 
 use crate::utils::heliolinc::{
-    propagate_position, radec_from_ecliptic, state_to_elements, Conics, State,
+    bound_seed, is_bound, propagate_position, radec_from_ecliptic, state_to_elements, Conics, State,
 };
 use crate::utils::sso_geometry::{observer_position, OrbitalElements, Site};
 
@@ -318,8 +318,36 @@ pub fn converge_orbit(
 ///
 /// The fit comes back whether or not it passed, so the caller compares its
 /// rms with the gate; one abandoned by the screen is simply above it. `None`
-/// when the observations cannot constrain an orbit.
+/// when the observations cannot constrain an orbit. An unbound fit gives way to
+/// a bound one that [`bound_suffices`].
 pub fn fit_within(
+    observations: &[Observation],
+    seed: &State,
+    epoch_jd: f64,
+    gate_arcsec: f64,
+    conics: Conics,
+) -> Option<OrbitFit> {
+    let fit = screen_then_converge(observations, seed, epoch_jd, gate_arcsec, conics)?;
+    if is_bound(&fit.state) {
+        return Some(fit);
+    }
+    let bound = [*seed, bound_seed(&fit.state)]
+        .iter()
+        .filter_map(|s| screen_then_converge(observations, s, epoch_jd, gate_arcsec, Conics::Bound))
+        .min_by(|a, b| a.rms_arcsec.total_cmp(&b.rms_arcsec));
+    match bound {
+        Some(bound) if bound_suffices(fit.rms_arcsec, bound.rms_arcsec) => Some(bound),
+        _ => Some(fit),
+    }
+}
+
+/// Whether a bound fit at `bound_rms` arcseconds explains the astrometry
+/// nearly as well as an unbound one at `rms`, so the unbound one is not kept.
+pub fn bound_suffices(rms: f64, bound_rms: f64) -> bool {
+    bound_rms <= (2.0 * rms).max(rms + 1.0)
+}
+
+fn screen_then_converge(
     observations: &[Observation],
     seed: &State,
     epoch_jd: f64,

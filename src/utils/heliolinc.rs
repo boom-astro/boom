@@ -11,7 +11,7 @@
 
 use crate::utils::linking::{angular_separation_deg, night_of, Detection, Tracklet};
 use crate::utils::orbit_fit::{
-    converge_orbit, fit_orbit_with, predict_radec, rms_arcsec, GiveUp, Observation,
+    bound_suffices, converge_orbit, fit_orbit_with, predict_radec, rms_arcsec, GiveUp, Observation,
     CONVERGE_ITERATIONS, SCREEN_ITERATIONS,
 };
 use crate::utils::outburst::{hg12, DEFAULT_G12};
@@ -120,6 +120,16 @@ pub struct LinkConfig {
 /// Largest radial velocity a bound object can have at `r_au`, au/day.
 fn escape_speed(r_au: f64) -> f64 {
     (2.0 * MU / r_au).sqrt()
+}
+
+/// `state` slowed to just under escape speed, to seed a bound fit.
+pub fn bound_seed(state: &State) -> State {
+    let limit = 0.98 * escape_speed(norm(&state.pos));
+    let scale = (limit / norm(&state.vel)).min(1.0);
+    State {
+        pos: state.pos,
+        vel: state.vel.map(|v| v * scale),
+    }
 }
 
 /// Hypotheses over `distances` heliocentric distances from `first_au` to
@@ -973,7 +983,7 @@ fn observations_of(
 /// assumed distance; fitting the sky positions tests that claim against the
 /// astrometry itself, which is what separates a real track from tracklets that
 /// happen to land near each other.
-fn score(track: &mut Track, observations: &[Observation], cfg: &LinkConfig) {
+fn score(track: &mut Track, observations: &[Observation], cfg: &LinkConfig, conics: Conics) {
     // A fit still far above the gate after a few iterations is not going to
     // pass it, and most candidates are like that.
     let give_up = GiveUp::for_gate(gate_arcsec(observations, cfg));
@@ -983,7 +993,7 @@ fn score(track: &mut Track, observations: &[Observation], cfg: &LinkConfig) {
         cfg.reference_jd,
         SCREEN_ITERATIONS,
         Some(give_up),
-        cfg.conics,
+        conics,
     ) {
         Some(fit) => {
             track.state = fit.state;
@@ -991,7 +1001,7 @@ fn score(track: &mut Track, observations: &[Observation], cfg: &LinkConfig) {
         }
         // Too few positions to refine six parameters, so take the state as it
         // stands rather than discarding a candidate for being short.
-        None if cfg.conics.admits(&track.state) => {
+        None if conics.admits(&track.state) => {
             rms_arcsec(&track.state, cfg.reference_jd, observations)
         }
         None => None,
@@ -1024,13 +1034,18 @@ fn best_passing(
     // Stable, so equally tight copies keep their hypothesis order.
     copies.sort_by(|a, b| a.rms_au.total_cmp(&b.rms_au));
     let mut distances = std::collections::HashSet::new();
-    let (per_distance, rest): (Vec<Track>, Vec<Track>) = copies
-        .into_iter()
-        .partition(|copy| distances.insert(copy.hypothesis.r_au.to_bits()));
+    let (per_distance, rest): (Vec<Track>, Vec<Track>) = copies.into_iter().partition(|copy| {
+        distances.insert((copy.hypothesis.r_au.to_bits(), is_bound(&copy.state)))
+    });
+    let bound_seeds: Vec<Track> = per_distance
+        .iter()
+        .filter(|copy| is_bound(&copy.state))
+        .cloned()
+        .collect();
     let best = per_distance
         .into_iter()
         .map(|mut copy| {
-            score(&mut copy, &observations, cfg);
+            score(&mut copy, &observations, cfg, cfg.conics);
             copy
         })
         .filter(passes)
@@ -1042,24 +1057,61 @@ fn best_passing(
     let mut track = match best {
         Some(track) => track,
         None => rest.into_iter().find_map(|mut copy| {
-            score(&mut copy, &observations, cfg);
+            score(&mut copy, &observations, cfg, cfg.conics);
             passes(&copy).then_some(copy)
         })?,
     };
-    converge(&mut track, &observations, cfg);
+    converge(&mut track, &observations, cfg, cfg.conics);
+    let track = bound_unless_worse(track, bound_seeds, &observations, cfg)?;
     photometry_agrees(&track, tracklets, by_id, cfg).then_some(track)
+}
+
+/// `track`, unless it is unbound and the best bound fit from `seeds` is
+/// nearly as good, in which case that fit if it passes the gate.
+fn bound_unless_worse(
+    track: Track,
+    seeds: Vec<Track>,
+    observations: &[Observation],
+    cfg: &LinkConfig,
+) -> Option<Track> {
+    let Some(rms) = track.residual_arcsec.filter(|_| !is_bound(&track.state)) else {
+        return Some(track);
+    };
+    let slowed = Track {
+        state: bound_seed(&track.state),
+        ..track.clone()
+    };
+    let Some(mut bound) = seeds
+        .into_iter()
+        .chain([slowed])
+        .filter_map(|mut seed| {
+            score(&mut seed, observations, cfg, Conics::Bound);
+            seed.residual_arcsec.map(|r| (r, seed))
+        })
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, seed)| seed)
+    else {
+        return Some(track);
+    };
+    converge(&mut bound, observations, cfg, Conics::Bound);
+    match bound.residual_arcsec {
+        Some(bound_rms) if bound_suffices(rms, bound_rms) => {
+            (bound_rms <= gate_arcsec(observations, cfg)).then_some(bound)
+        }
+        _ => Some(track),
+    }
 }
 
 /// Run a track whose screening fit passed the gate on to convergence, so the
 /// residual it reports is its orbit's rather than one truncated fit's.
-fn converge(track: &mut Track, observations: &[Observation], cfg: &LinkConfig) {
+fn converge(track: &mut Track, observations: &[Observation], cfg: &LinkConfig, conics: Conics) {
     // The weighted optimum can raise the plain residual past the gate.
     if let Some(fit) = converge_orbit(
         observations,
         &track.state,
         cfg.reference_jd,
         CONVERGE_ITERATIONS,
-        cfg.conics,
+        conics,
     )
     .filter(|fit| fit.rms_arcsec <= gate_arcsec(observations, cfg))
     {
@@ -1473,13 +1525,19 @@ fn try_merge(
     let gate = gate_arcsec(&observations, cfg);
     let mut track = [first, second].into_iter().find_map(|seed| {
         let mut track = union(seed);
-        score(&mut track, &observations, cfg);
+        score(&mut track, &observations, cfg, cfg.conics);
         track
             .residual_arcsec
             .is_some_and(|r| r <= gate)
             .then_some(track)
     })?;
-    converge(&mut track, &observations, cfg);
+    converge(&mut track, &observations, cfg, cfg.conics);
+    let bound_seeds = [first, second]
+        .into_iter()
+        .filter(|seed| is_bound(&seed.state))
+        .map(union)
+        .collect();
+    let track = bound_unless_worse(track, bound_seeds, &observations, cfg)?;
     photometry_agrees(&track, tracklets, by_id, cfg).then_some(track)
 }
 
@@ -2287,7 +2345,7 @@ mod tests {
             residual_arcsec: None,
         };
         let observations = observations_of(&track, tracklets, by_id, &cfg.site);
-        score(&mut track, &observations, cfg);
+        score(&mut track, &observations, cfg, cfg.conics);
         track
     }
 
@@ -2803,6 +2861,30 @@ mod tests {
             (belt_unbound.residual_arcsec.unwrap() - belt_bound.residual_arcsec.unwrap()).abs()
                 < 0.01
         );
+    }
+
+    /// An unbound search keeps main-belt tracks on ellipses, even one a hyperbola fits as well.
+    #[test]
+    fn test_an_unbound_search_keeps_main_belt_objects_bound() {
+        let nights = [2460005.70, 2460008.72, 2460012.68, 2460015.71, 2460018.69];
+        let objects: Vec<OrbitalElements> = (0..SURVEY_OBJECTS).map(survey_object).collect();
+        let (detections, _) = survey(&objects, &nights);
+        let tracklets = survey_tracklets(&detections, &nights);
+        let cfg = survey_config(&tracklets).with_unbound(40.0 / KM_S_PER_AU_DAY);
+        let tracks = link_tracklets(&tracklets, &detections, &cfg);
+        assert!(
+            tracks.len() >= SURVEY_OBJECTS - 1,
+            "only {} tracks",
+            tracks.len()
+        );
+        for track in &tracks {
+            assert!(
+                is_bound(&track.state),
+                "{:?} kept unbound at {:?}\"",
+                track.members,
+                track.residual_arcsec
+            );
+        }
     }
 
     #[test]
