@@ -323,7 +323,7 @@ pub fn observer_position(jd: f64, site: &Site) -> [f64; 3] {
     );
     // Equatorial to ecliptic, then onto the Earth's own position.
     let (s, c) = OBLIQUITY_DEG.to_radians().sin_cos();
-    let earth = earth_position(jd + TT_MINUS_UTC_DAYS);
+    let earth = earth_position_utc(jd);
     [
         earth[0] + x,
         earth[1] + c * y + s * z,
@@ -361,6 +361,10 @@ pub fn earth_position(jd: f64) -> [f64; 3] {
         -sun_dist * true_long.sin(),
         0.0,
     ]
+}
+
+pub fn earth_position_utc(jd: f64) -> [f64; 3] {
+    earth_position(jd + TT_MINUS_UTC_DAYS)
 }
 
 /// Observing geometry for `elements` at `jd` (UTC).
@@ -413,7 +417,7 @@ mod tests_observer {
     #[test]
     fn site_sits_an_earth_radius_from_the_centre() {
         let jd = 2461286.8;
-        let earth = earth_position(jd + TT_MINUS_UTC_DAYS);
+        let earth = earth_position_utc(jd);
         let obs = observer_position(jd, &ZTF);
         let d = ((obs[0] - earth[0]).powi(2)
             + (obs[1] - earth[1]).powi(2)
@@ -432,8 +436,8 @@ mod tests_observer {
         let jd = 2461286.8;
         let a = observer_position(jd, &ZTF);
         let b = observer_position(jd + 0.5, &ZTF);
-        let earth_a = earth_position(jd + TT_MINUS_UTC_DAYS);
-        let earth_b = earth_position(jd + 0.5 + TT_MINUS_UTC_DAYS);
+        let earth_a = earth_position_utc(jd);
+        let earth_b = earth_position_utc(jd + 0.5);
         // Offsets relative to the Earth, so the orbit does not mask the spin.
         let oa = [a[0] - earth_a[0], a[1] - earth_a[1], a[2] - earth_a[2]];
         let ob = [b[0] - earth_b[0], b[1] - earth_b[1], b[2] - earth_b[2]];
