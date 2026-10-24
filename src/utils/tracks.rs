@@ -112,6 +112,9 @@ pub struct StoredTrack {
     /// distinguishes a recovery from a discovery candidate.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub designation: Option<String>,
+    /// The giant planet every detection sat next to: likely one of its satellites.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub near_planet: Option<String>,
     /// When the track was last written, Unix seconds. A client polling for new
     /// and extended tracks asks for the ones updated since its last look.
     /// Zero on tracks written before the field existed.
@@ -141,6 +144,8 @@ pub struct AlertTrack {
     /// recovery from a discovery candidate.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub designation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub near_planet: Option<String>,
 }
 
 impl From<&StoredTrack> for AlertTrack {
@@ -154,6 +159,7 @@ impl From<&StoredTrack> for AlertTrack {
             last_jd: t.last_jd,
             bound_fit: t.bound_fit.clone(),
             designation: t.designation.clone(),
+            near_planet: t.near_planet.clone(),
         }
     }
 }
@@ -451,6 +457,7 @@ pub struct UpsertPlan {
     pub bound_fit_detections: Option<i32>,
     pub orbit: Option<StoredOrbit>,
     pub designation: Option<String>,
+    pub near_planet: Option<String>,
     /// Ids a merge would absorb and then delete.
     pub superseded: Vec<String>,
     /// Detections dropped because another track already owns them.
@@ -521,6 +528,7 @@ pub async fn plan_upsert(
     members: &[i64],
     jds: &[f64],
     designation: Option<String>,
+    near_planet: Option<String>,
     bound_fit: Option<(BoundFit, Option<f64>)>,
     orbit: Option<StoredOrbit>,
 ) -> Result<UpsertPlan, mongodb::error::Error> {
@@ -538,14 +546,13 @@ pub async fn plan_upsert(
     // belongs to one track, so it stays with the one that already holds it and
     // is dropped here rather than stamped over.
     let absorbed: Vec<&String> = id.iter().chain(superseded.iter()).collect();
-    let designation = designation.or_else(|| {
-        absorbed.iter().find_map(|a| {
-            existing
-                .iter()
-                .find(|t| &&t.id == a)
-                .and_then(|t| t.designation.clone())
-        })
-    });
+    let carried = |field: fn(&StoredTrack) -> Option<String>| {
+        absorbed
+            .iter()
+            .find_map(|a| existing.iter().find(|t| &&t.id == a).and_then(field))
+    };
+    let designation = designation.or_else(|| carried(|t| t.designation.clone()));
+    let near_planet = near_planet.or_else(|| carried(|t| t.near_planet.clone()));
     let mut owned_elsewhere: std::collections::HashSet<i64> = std::collections::HashSet::new();
     for t in existing.iter().filter(|t| !absorbed.contains(&&t.id)) {
         owned_elsewhere.extend(t.members.iter().copied());
@@ -610,6 +617,7 @@ pub async fn plan_upsert(
                 t.members == all
                     && t.epochs == epochs
                     && t.designation == designation
+                    && t.near_planet == near_planet
                     && t.bound_fit == bound_fit
                     && (orbit.is_none() || t.orbit.is_some())
                     && bound_fit_detections.is_none_or(|n| n == fit_detections(t))
@@ -635,6 +643,7 @@ pub async fn plan_upsert(
         bound_fit_detections,
         orbit,
         designation,
+        near_planet,
         superseded,
         contested,
         unchanged_since,
@@ -664,6 +673,7 @@ pub async fn commit_upsert(
         first_jd: plan.first_jd,
         last_jd: plan.last_jd,
         designation: plan.designation,
+        near_planet: plan.near_planet,
         orbit: plan.orbit,
         updated_at: plan
             .unchanged_since
@@ -838,6 +848,7 @@ pub(crate) mod tests {
             first_jd: 2460000.0,
             last_jd: 2460001.0,
             designation: None,
+            near_planet: None,
             updated_at: 0.0,
             orbit: None,
         }
@@ -938,6 +949,7 @@ pub(crate) mod tests {
             bound_fit_detections: None,
             orbit: None,
             designation: None,
+            near_planet: None,
             superseded: Vec::new(),
             contested: vec![11, 12],
             unchanged_since: None,
@@ -1033,7 +1045,7 @@ pub(crate) mod tests {
             .iter()
             .map(|m| 2460000.0 + m.rem_euclid(1000) as f64)
             .collect();
-        let plan = plan_upsert(db, members, &jds, None, Some(fit), None)
+        let plan = plan_upsert(db, members, &jds, None, None, Some(fit), None)
             .await
             .unwrap();
         commit_upsert(db, plan).await.unwrap()

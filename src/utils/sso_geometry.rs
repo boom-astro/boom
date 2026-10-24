@@ -361,6 +361,103 @@ pub fn earth_position(jd: f64) -> [f64; 3] {
     ]
 }
 
+/// JPL's approximate elements for 1800-2050.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Planet {
+    pub name: &'static str,
+    elements: [f64; 6],
+    rates: [f64; 6],
+}
+
+pub const JUPITER: Planet = Planet {
+    name: "jupiter",
+    elements: [
+        5.202_887,
+        0.048_386_24,
+        1.304_396_95,
+        34.396_440_51,
+        14.728_479_83,
+        100.473_909_09,
+    ],
+    rates: [
+        -0.000_116_07,
+        -0.000_132_53,
+        -0.001_837_14,
+        3_034.746_127_75,
+        0.212_526_68,
+        0.204_691_06,
+    ],
+};
+
+pub const SATURN: Planet = Planet {
+    name: "saturn",
+    elements: [
+        9.536_675_94,
+        0.053_861_79,
+        2.485_991_87,
+        49.954_244_23,
+        92.598_878_31,
+        113.662_424_48,
+    ],
+    rates: [
+        -0.001_250_6,
+        -0.000_509_91,
+        0.001_936_09,
+        1_222.493_622_01,
+        -0.418_972_16,
+        -0.288_677_94,
+    ],
+};
+
+pub const URANUS: Planet = Planet {
+    name: "uranus",
+    elements: [
+        19.189_164_64,
+        0.047_257_44,
+        0.772_637_83,
+        313.238_104_51,
+        170.954_276_3,
+        74.016_925_03,
+    ],
+    rates: [
+        -0.001_961_76,
+        -0.000_043_97,
+        -0.002_429_39,
+        428.482_027_85,
+        0.408_052_81,
+        0.042_405_89,
+    ],
+};
+
+pub const NEPTUNE: Planet = Planet {
+    name: "neptune",
+    elements: [
+        30.069_922_76,
+        0.008_590_48,
+        1.770_043_47,
+        -55.120_029_69,
+        44.964_762_27,
+        131.784_225_74,
+    ],
+    rates: [
+        0.000_262_91,
+        0.000_051_05,
+        0.000_353_72,
+        218.459_453_25,
+        -0.322_414_64,
+        -0.005_086_64,
+    ],
+};
+
+impl Planet {
+    pub fn elements_at(&self, jd: f64) -> OrbitalElements {
+        let t = (jd - 2_451_545.0) / 36_525.0;
+        let [a, e, incl, long, peri_long, node]: [f64; 6] =
+            std::array::from_fn(|k| self.elements[k] + self.rates[k] * t);
+        OrbitalElements::elliptical(jd, a, e, incl, node, peri_long - node, long - peri_long)
+    }
+}
+
 /// Observing geometry for `elements` at `jd`.
 pub fn geometry_at(elements: &OrbitalElements, jd: f64) -> Geometry {
     let helio = heliocentric_position(elements, jd);
@@ -982,5 +1079,23 @@ mod horizons_validation {
             inner > outer,
             "the offset should grow as the object nears: {inner:.2}\" at 1.5 au vs {outer:.2}\" at 3.5 au"
         );
+    }
+
+    #[test]
+    fn test_giant_planets_match_astropy() {
+        use crate::utils::identify::predict_radec;
+        use crate::utils::linking::angular_separation_deg;
+
+        let jd = 2461337.75;
+        for (planet, ra, dec) in [
+            (JUPITER, 145.498, 14.498),
+            (SATURN, 9.729, 1.252),
+            (URANUS, 62.63, 20.9),
+            (NEPTUNE, 2.289, -0.553),
+        ] {
+            let (pra, pdec) = predict_radec(&planet.elements_at(jd), jd);
+            let sep = angular_separation_deg(pra, pdec, ra, dec);
+            assert!(sep < 0.25, "{} is {sep:.3} deg off", planet.name);
+        }
     }
 }

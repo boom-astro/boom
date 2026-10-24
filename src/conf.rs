@@ -1457,6 +1457,10 @@ pub struct LinkerConfig {
     /// designation as a recovery rather than as a discovery candidate.
     #[serde(default = "default_linker_pass")]
     pub match_known: bool,
+    #[serde(default = "default_linker_pass")]
+    pub reject_known: bool,
+    #[serde(default)]
+    pub flag_satellites: bool,
     /// Store tracks and stamp their alerts. Off, a run reports what it would
     /// store and writes nothing.
     #[serde(default = "default_linker_pass")]
@@ -1515,6 +1519,8 @@ impl Default for LinkerConfig {
             link: default_linker_pass(),
             thor: default_linker_pass(),
             match_known: default_linker_pass(),
+            reject_known: default_linker_pass(),
+            flag_satellites: false,
             persist: default_linker_pass(),
             recall: default_linker_pass(),
             recall_window_nights: default_linker_recall_window_nights(),

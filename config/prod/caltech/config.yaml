@@ -287,6 +287,8 @@ linker:
   # Store known objects under their MPC designation, as recoveries rather
   # than discovery candidates.
   match_known: true
+  reject_known: true # drop DECam and WINTER tracklets moving as a known object
+  flag_satellites: false # mark tracks that stay next to a giant planet
   persist: true # false reports what would be stored and writes nothing
   # Also link the detections IPAC already identified, store nothing, and log
   # how many of those objects the search recovered.
