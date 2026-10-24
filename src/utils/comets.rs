@@ -100,7 +100,7 @@ pub fn parse_line(line: &str) -> Option<CometEntry> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utils::sso_geometry::{geometry_at, true_anomaly};
+    use crate::utils::sso_geometry::{geometry_at, true_anomaly, ZTF};
 
     // Real lines from CometEls.txt.
     const HALLEY: &str = "0001P         2061 08  2.8739  0.571098  0.968021  112.1899   59.2896  162.1880  20260905   5.5  3.2  1P/Halley";
@@ -136,7 +136,7 @@ mod tests {
         let c = parse_line(NEARLY_PARABOLIC).expect("parses");
         assert!(c.elements.e > 0.999);
 
-        let g = geometry_at(&c.elements, c.elements.tp);
+        let g = geometry_at(&c.elements, c.elements.tp, &ZTF);
         assert!(
             (g.helio_dist - c.elements.q).abs() < 1e-4,
             "at perihelion r was {} against q {}",
@@ -152,17 +152,21 @@ mod tests {
         let c = parse_line(HALLEY).expect("parses");
         let tp = c.elements.tp;
 
-        let at_perihelion = geometry_at(&c.elements, tp);
-        assert!(at_perihelion.true_anomaly.abs() < 1e-4);
+        let at_perihelion = geometry_at(&c.elements, tp, &ZTF);
+        assert!(
+            (-0.05..0.0).contains(&at_perihelion.true_anomaly),
+            "the light seen at tp left before perihelion, true anomaly was {}",
+            at_perihelion.true_anomaly
+        );
         assert!((at_perihelion.perihelion_time - tp).abs() < 1e-9);
 
         // Inbound is negative, outbound positive, so the legs separate.
-        assert!(geometry_at(&c.elements, tp - 400.0).true_anomaly < 0.0);
-        assert!(geometry_at(&c.elements, tp + 400.0).true_anomaly > 0.0);
+        assert!(geometry_at(&c.elements, tp - 400.0, &ZTF).true_anomaly < 0.0);
+        assert!(geometry_at(&c.elements, tp + 400.0, &ZTF).true_anomaly > 0.0);
 
         // And the object is further out on both sides than at perihelion.
-        assert!(geometry_at(&c.elements, tp - 400.0).helio_dist > c.elements.q);
-        assert!(geometry_at(&c.elements, tp + 400.0).helio_dist > c.elements.q);
+        assert!(geometry_at(&c.elements, tp - 400.0, &ZTF).helio_dist > c.elements.q);
+        assert!(geometry_at(&c.elements, tp + 400.0, &ZTF).helio_dist > c.elements.q);
     }
 
     /// Headers, rules and short lines appear in the file and are not records.

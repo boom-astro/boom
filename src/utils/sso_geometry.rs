@@ -7,6 +7,7 @@
 //! perturbed integrator would be needed to predict *where* an object is, not to
 //! say how far away it was.
 
+use crate::utils::orbit_fit::C_AU_PER_DAY;
 use std::f64::consts::PI;
 
 /// Gaussian gravitational constant, rad/day.
@@ -344,14 +345,12 @@ pub fn earth_position(jd: f64) -> [f64; 3] {
 }
 
 /// Observing geometry for `elements` at `jd`.
-pub fn geometry_at(elements: &OrbitalElements, jd: f64) -> Geometry {
-    let helio = heliocentric_position(elements, jd);
-    let earth = earth_position(jd);
-    let topo = [
-        helio[0] - earth[0],
-        helio[1] - earth[1],
-        helio[2] - earth[2],
-    ];
+pub fn geometry_at(elements: &OrbitalElements, jd: f64, site: &Site) -> Geometry {
+    let observer = observer_position(jd, site);
+    let from_observer = |p: [f64; 3]| [p[0] - observer[0], p[1] - observer[1], p[2] - observer[2]];
+    let emitted = jd - norm(&from_observer(heliocentric_position(elements, jd))) / C_AU_PER_DAY;
+    let helio = heliocentric_position(elements, emitted);
+    let topo = from_observer(helio);
 
     let helio_dist = norm(&helio);
     let topo_dist = norm(&topo);
@@ -364,7 +363,9 @@ pub fn geometry_at(elements: &OrbitalElements, jd: f64) -> Geometry {
         helio_dist,
         topo_dist,
         true_anomaly: {
-            let nu = true_anomaly(elements, jd).to_degrees().rem_euclid(360.0);
+            let nu = true_anomaly(elements, emitted)
+                .to_degrees()
+                .rem_euclid(360.0);
             if nu > 180.0 {
                 nu - 360.0
             } else {
@@ -601,7 +602,7 @@ mod tests {
     fn test_geometry_is_physically_bounded() {
         let el = main_belt();
         for days in 0..365 {
-            let g = geometry_at(&el, el.epoch_jd + days as f64);
+            let g = geometry_at(&el, el.epoch_jd + days as f64, &ZTF);
             assert!(g.phase_angle >= 0.0 && g.phase_angle <= 180.0);
             // The observer is inside the object's orbit, so the object is never
             // closer than helio_dist minus Earth's distance, nor further than the sum.
@@ -618,7 +619,7 @@ mod tests {
         let limit = (1.017_f64 / (el.a * (1.0 - el.e))).asin().to_degrees();
         let mut seen_max: f64 = 0.0;
         for days in 0..2000 {
-            let g = geometry_at(&el, el.epoch_jd + days as f64 * 2.0);
+            let g = geometry_at(&el, el.epoch_jd + days as f64 * 2.0, &ZTF);
             seen_max = seen_max.max(g.phase_angle);
             assert!(
                 g.phase_angle <= limit + 0.5,
@@ -641,7 +642,7 @@ mod tests {
         let mut best = (f64::MAX, f64::MAX, 0.0_f64);
         for days in 0..800 {
             let jd = el.epoch_jd + days as f64;
-            let g = geometry_at(&el, jd);
+            let g = geometry_at(&el, jd, &ZTF);
             if g.topo_dist < best.0 {
                 best = (g.topo_dist, g.phase_angle, jd);
             }
@@ -812,7 +813,7 @@ mod horizons_validation {
     #[test]
     fn test_matches_horizons_far_from_epoch() {
         for (c, jd) in far_from_epoch_cases() {
-            let g = geometry_at(&c.elements, jd);
+            let g = geometry_at(&c.elements, jd, &ZTF);
             let d_helio = (g.helio_dist - c.helio_dist).abs();
             let d_topo = (g.topo_dist - c.topo_dist).abs();
             let d_phase = (g.phase_angle - c.phase_angle).abs();
@@ -826,7 +827,7 @@ mod horizons_validation {
     #[test]
     fn test_matches_horizons() {
         for c in cases() {
-            let g = geometry_at(&c.elements, 2_461_272.5);
+            let g = geometry_at(&c.elements, 2_461_272.5, &ZTF);
             let d_helio = (g.helio_dist - c.helio_dist).abs();
             let d_topo = (g.topo_dist - c.topo_dist).abs();
             let d_phase = (g.phase_angle - c.phase_angle).abs();
@@ -872,7 +873,7 @@ mod horizons_validation {
     #[test]
     fn test_distance_error_is_negligible_in_magnitudes() {
         for c in cases() {
-            let g = geometry_at(&c.elements, 2_461_272.5);
+            let g = geometry_at(&c.elements, 2_461_272.5, &ZTF);
             let ours = 5.0 * (g.helio_dist * g.topo_dist).log10();
             let truth = 5.0 * (c.helio_dist * c.topo_dist).log10();
             assert!(
