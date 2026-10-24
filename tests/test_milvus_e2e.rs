@@ -127,14 +127,12 @@ async fn test_ztf_alert_to_milvus_e2e() {
         "search hit should carry the stored candid"
     );
 
-    // A programid filter keeps the row only when its program is allowed.
     let other_program = if row.programid == 1 { 3 } else { 1 };
     let allowed = client
         .search_embedding(&row.embedding, 5, &[row.programid])
         .await
         .expect("filtered search failed");
     assert!(allowed.iter().any(|h| h.object_id == object_id));
-    // Every hit, not only ours, must come from the allowed program.
     assert_hits_in_program(&mut client, &allowed, row.programid).await;
     let excluded = client
         .search_embedding(&row.embedding, 5, &[other_program])
@@ -142,7 +140,6 @@ async fn test_ztf_alert_to_milvus_e2e() {
         .expect("filtered search failed");
     assert!(excluded.iter().all(|h| h.object_id != object_id));
     assert_hits_in_program(&mut client, &excluded, other_program).await;
-    // No allowed programs means no results.
     let none_allowed = client
         .search_embedding(&row.embedding, 5, &[])
         .await

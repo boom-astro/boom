@@ -250,7 +250,6 @@ fn object_id_in_expr(object_ids: &[&str]) -> String {
     format!("{FIELD_OBJECT_ID} in [{list}]")
 }
 
-/// Build a `programid in [1, 3]` boolean expression.
 fn programid_in_expr(programids: &[i32]) -> String {
     let list = programids
         .iter()
