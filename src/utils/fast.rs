@@ -134,7 +134,10 @@ fn fast_tracklets(
     search: &FastSearch,
 ) -> Vec<Tracklet> {
     let mut by_night: BTreeMap<(i64, Option<&str>), Vec<Detection>> = BTreeMap::new();
-    for d in detections {
+    for d in detections
+        .iter()
+        .filter(|d| member_alert(d.id).0 != Survey::Lsst || trails.contains_key(&d.id))
+    {
         by_night
             .entry((d.night(), d.site.map(|s| s.mpc_code)))
             .or_default()

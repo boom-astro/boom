@@ -1445,6 +1445,9 @@ pub struct LinkerConfig {
     /// Minimum drb for a detection to be searched.
     #[serde(default = "default_linker_drb")]
     pub drb: f64,
+    /// Minimum reliability for an LSST detection to be searched.
+    #[serde(default = "default_linker_lsst_min_reliability")]
+    pub lsst_min_reliability: f64,
     #[serde(default = "default_linker_surveys")]
     pub surveys: Vec<Survey>,
     /// Link tracklets across nights.
@@ -1522,6 +1525,12 @@ impl LinkerConfig {
         if !(0.0..=1.0).contains(&self.drb) {
             return Err(format!("drb is {}, but scores run from 0 to 1", self.drb));
         }
+        if !(0.0..=1.0).contains(&self.lsst_min_reliability) {
+            return Err(format!(
+                "lsst_min_reliability is {}, but scores run from 0 to 1",
+                self.lsst_min_reliability
+            ));
+        }
         if !(0.0..f64::INFINITY).contains(&self.max_vinf_km_s) {
             return Err(format!(
                 "max_vinf_km_s is {}, but must be zero or a positive speed",
@@ -1559,6 +1568,7 @@ impl Default for LinkerConfig {
             thor_window_nights: default_linker_thor_window_nights(),
             run_after_utc_hour: default_linker_run_after_utc_hour(),
             drb: default_linker_drb(),
+            lsst_min_reliability: default_linker_lsst_min_reliability(),
             surveys: default_linker_surveys(),
             link: default_linker_pass(),
             thor: default_linker_pass(),
@@ -1623,6 +1633,10 @@ fn default_linker_run_after_utc_hour() -> u32 {
 
 fn default_linker_drb() -> f64 {
     0.8
+}
+
+fn default_linker_lsst_min_reliability() -> f64 {
+    0.6
 }
 
 fn default_linker_surveys() -> Vec<Survey> {
