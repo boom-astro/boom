@@ -32,8 +32,3 @@ workers:
       n_workers: 1
     filter:
       n_workers: 1
-linker:
-  surveys: [ztf, decam, winter]
-  flag_satellites: true
-  max_vinf_km_s: 100.0
-  fast: true
