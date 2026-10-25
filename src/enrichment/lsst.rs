@@ -9,9 +9,9 @@ use crate::utils::db::mongify;
 use crate::utils::enums::Survey;
 use crate::utils::host::HostGalaxyAssociation;
 use crate::utils::lightcurves::{
-    analyze_photometry, is_stationary, prepare_photometry, summarise_detections, ActivityMetrics,
-    Band, DetectionHistory, EpisodeHistory, PerBandProperties, PhotometryMag, EPISODE_GAP_DAYS,
-    STATIONARY_MIN_FORCED_SNR,
+    analyze_photometry, is_stationary, prepare_photometry, signed_snr, summarise_detections,
+    ActivityMetrics, Band, DetectionHistory, EpisodeHistory, PerBandProperties, PhotometryMag,
+    EPISODE_GAP_DAYS, STATIONARY_MIN_FORCED_SNR,
 };
 use apache_avro_derive::AvroSchema;
 use apache_avro_macros::serdavro;
@@ -253,11 +253,6 @@ pub struct LsstAlertProperties {
     pub hosted: Option<bool>,
     pub photstats: PerBandProperties,
     pub multisurvey_photstats: PerBandProperties,
-    /// Without the private DECam points, for Babamul. `None` when there are none.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[avro(skip)]
-    #[schema(ignore)]
-    pub public_multisurvey_photstats: Option<PerBandProperties>,
     /// `None` on alerts enriched before this existed: never evaluated, which is not
     /// the same as evaluated and found not to be a solar system object.
     #[serde(default)]
@@ -272,15 +267,6 @@ pub struct LsstAlertProperties {
     /// Detection episodes, for finding sources that outburst more than once.
     /// `None` on alerts enriched before this field existed.
     pub episode_history: Option<EpisodeHistory>,
-}
-
-impl LsstAlertProperties {
-    pub fn into_public(mut self) -> Self {
-        if let Some(public) = self.public_multisurvey_photstats.take() {
-            self.multisurvey_photstats = public;
-        }
-        self
-    }
 }
 
 pub struct LsstEnrichmentWorker {
@@ -577,15 +563,12 @@ impl LsstEnrichmentWorker {
             .as_ref()
             .map(|m| m.lightcurve(alert.candidate.jd))
             .unwrap_or_default();
-        let (multisurvey_photstats, public_multisurvey_photstats) = if decam_lightcurve.is_empty() {
-            (multisurvey_photstats, None)
+        let multisurvey_photstats = if decam_lightcurve.is_empty() {
+            multisurvey_photstats
         } else {
             let mut with_decam = [lightcurve, decam_lightcurve].concat();
             prepare_photometry(&mut with_decam);
-            (
-                analyze_photometry(&with_decam).0,
-                Some(multisurvey_photstats),
-            )
+            analyze_photometry(&with_decam).0
         };
 
         // Per-object detection history for history-aware filters (positive/negative
@@ -600,7 +583,7 @@ impl LsstEnrichmentWorker {
                 .fp_hists
                 .iter()
                 .filter(|p| p.magpsf.is_some())
-                .map(|p| p.jd),
+                .map(|p| (p.jd, signed_snr(p.snr_psf, p.flux))),
             alert.candidate.jd,
             EPISODE_GAP_DAYS,
         );
@@ -615,7 +598,6 @@ impl LsstEnrichmentWorker {
             stationary,
             photstats,
             multisurvey_photstats,
-            public_multisurvey_photstats,
             detection_history: Some(detection_history),
             episode_history: Some(episode_history),
         })
