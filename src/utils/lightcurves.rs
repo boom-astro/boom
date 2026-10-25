@@ -312,9 +312,27 @@ pub struct BandRateProperties {
 /// value matters far less than having a bound at all.
 pub const RECENT_WINDOW_DAYS: f64 = 30.0;
 
+pub const LAST_DAY_WINDOW_DAYS: f64 = 1.0;
+
 /// The stored SNR is unsigned; the flux carries the sign.
 pub fn signed_snr(snr: Option<f64>, flux: Option<f64>) -> Option<f64> {
     snr.map(|s| if flux.is_some_and(|f| f < 0.0) { -s } else { s })
+}
+
+fn window_properties(mags: &[&PhotometryMag], last_jd: f64, days: f64) -> Option<RecentProperties> {
+    let cutoff = last_jd - days;
+    let window: Vec<&PhotometryMag> = mags.iter().copied().filter(|m| m.time >= cutoff).collect();
+    brightest_index(&window).map(|peak| {
+        let (rising, fading) = fit_rising_and_fading(&window);
+        RecentProperties {
+            window_days: days as f32,
+            nb_data: window.len() as i32,
+            peak_jd: window[peak].time,
+            peak_mag: window[peak].mag,
+            rising,
+            fading,
+        }
+    })
 }
 
 /// Fit one monotonic segment, returning `None` when it cannot support a line.
@@ -413,6 +431,11 @@ pub struct BandProperties {
     /// The same fits restricted to the last [`RECENT_WINDOW_DAYS`], or null when
     /// the window holds no detection in this band.
     pub recent: Option<RecentProperties>,
+    /// Like `recent`, over the last [`LAST_DAY_WINDOW_DAYS`].
+    #[serde(default)]
+    pub last_day: Option<RecentProperties>,
+    #[serde(default)]
+    pub nb_data: i32,
 }
 
 /// Morphological indicators of cometary activity, computed per survey but expressed
@@ -999,20 +1022,8 @@ pub fn analyze_photometry(
 
         // Anchored to the object's newest detection in any band, so every band
         // covers the same interval and a colour comparison stays meaningful.
-        let cutoff = last_jd - RECENT_WINDOW_DAYS;
-        let window: Vec<&PhotometryMag> =
-            mags.iter().copied().filter(|m| m.time >= cutoff).collect();
-        let recent = brightest_index(&window).map(|peak| {
-            let (rising, fading) = fit_rising_and_fading(&window);
-            RecentProperties {
-                window_days: RECENT_WINDOW_DAYS as f32,
-                nb_data: window.len() as i32,
-                peak_jd: window[peak].time,
-                peak_mag: window[peak].mag,
-                rising,
-                fading,
-            }
-        });
+        let recent = window_properties(mags, last_jd, RECENT_WINDOW_DAYS);
+        let last_day = window_properties(mags, last_jd, LAST_DAY_WINDOW_DAYS);
 
         let band_properties = BandProperties {
             peak_jd,
@@ -1022,6 +1033,8 @@ pub fn analyze_photometry(
             rising: rising_properties,
             fading: fading_properties,
             recent,
+            last_day,
+            nb_data: mags.len() as i32,
         };
         match band {
             Band::G => {
@@ -2367,6 +2380,8 @@ mod recent_avro_tests {
                     rising: band.clone(),
                     fading: None,
                     recent,
+                    last_day: None,
+                    nb_data: 3,
                 }),
                 ..Default::default()
             };
@@ -2412,6 +2427,8 @@ mod rate_avro_tests {
                     rising: Some(band.clone()),
                     fading: Some(band),
                     recent: None,
+                    last_day: None,
+                    nb_data: 3,
                 }),
                 ..Default::default()
             };
