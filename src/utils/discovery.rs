@@ -164,6 +164,7 @@ pub async fn load_unknown(
     first: i64,
     last: i64,
     drb: f64,
+    lsst_min_reliability: f64,
 ) -> Result<Vec<Detection>, DiscoveryError> {
     let site = survey_site(survey);
     let start = night_start(first, site.as_ref());
@@ -179,7 +180,7 @@ pub async fn load_unknown(
             "ssObjectId": null,
             "properties.rock": false,
             "properties.stationary": false,
-            "candidate.reliability": { "$gte": 0.5 },
+            "candidate.reliability": { "$gte": lsst_min_reliability },
             "candidate.isDipole": { "$ne": true },
             "candidate.psfFlux": { "$gt": 0.0 },
             "candidate.pixelFlags_saturatedCenter": { "$ne": true },
