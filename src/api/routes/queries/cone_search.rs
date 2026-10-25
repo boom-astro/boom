@@ -239,8 +239,5 @@ pub async fn post_cone_search_query(
         }
         docs.insert(object_name.clone(), data);
     }
-    return response::ok(
-        &format!("Cone Search on {} completed", catalog_name),
-        serde_json::json!(docs),
-    );
+    return response::ok_ser(&format!("Cone Search on {} completed", catalog_name), &docs);
 }
