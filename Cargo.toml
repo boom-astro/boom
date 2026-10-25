@@ -98,12 +98,12 @@ gpu = ["dep:villar-pso"]
 # villar-pso with the metal feature for Apple Silicon GPU light curve fitting
 [target.'cfg(target_os = "macos")'.dependencies]
 ort = { version = "=2.0.0-rc.12", features = ["coreml"] }
-villar-pso = { git = "https://github.com/frenbox/villar-pso", rev = "9113d92564c9d6b20079a27121686324a7e832e0", features = ["metal"], optional = true }
+villar-pso = { git = "https://github.com/antoine-le-calloch/villar-pso", rev = "ccd4635740d9bc2d56c2c23e6efe0de1c5a7bc99", features = ["metal"], optional = true }
 
 # Linux: ort with cuda + load-dynamic, villar-pso with the CUDA backend.
 [target.'cfg(target_os = "linux")'.dependencies]
 ort = { version = "=2.0.0-rc.12", features = ["cuda", "load-dynamic"] }
-villar-pso = { git = "https://github.com/frenbox/villar-pso", rev = "9113d92564c9d6b20079a27121686324a7e832e0", features = ["cuda"], optional = true }
+villar-pso = { git = "https://github.com/antoine-le-calloch/villar-pso", rev = "ccd4635740d9bc2d56c2c23e6efe0de1c5a7bc99", features = ["cuda"], optional = true }
 
 [workspace]
 members = ["apache-avro-macros"]

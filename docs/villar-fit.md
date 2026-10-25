@@ -27,10 +27,11 @@ flux; the two flux-valued parameters are reported on the AB magnitude scale.
 | `villar_fit.extra_sigma_ZTF_r` / `extra_sigma_ZTF_g` | Fitted excess scatter, as a magnitude error at `A` | mag |
 | `villar_fit.reduced_chi2` | Goodness of fit | dimensionless |
 | `villar_fit.peak_mag` | Normalization scale used by the fit | AB mag |
+| `villar_fit.t_peak` | Epoch of the brightest *r*-band point, where phase is zero | JD |
 
-Sixteen fields in total: seven parameters × two bands, plus a fit statistic and
-the normalization scale. Every field is a double, and **every field is `NaN`
-when the fit did not run or did not succeed** — see
+Seventeen fields in total: seven parameters × two bands, plus a fit statistic,
+the normalization scale and the phase reference. Every field is a double, and
+**every field is `NaN` when the fit did not run or did not succeed** — see
 [When the fields are NaN](#when-the-fields-are-nan).
 
 Fits are stored **per alert**, not per object. A well-observed object has one
@@ -41,7 +42,8 @@ and therefore the most trustworthy fit.
 ## The model
 
 Let `t` be time in days and let `t_peak` be the epoch of the brightest *r*-band
-detection in the light curve. The fit works in **phase**:
+point the fit saw, stored as `villar_fit.t_peak` (JD; absent on fits stored
+before it was added). The fit works in **phase**:
 
 ```
 phase = t - t_peak
@@ -154,8 +156,7 @@ Type IIP-like plateau. Bounded to roughly 6–100 days in *r*.
 Where the sigmoid rise is centered, in days relative to the brightest *r*-band
 epoch. **It is not an absolute JD or MJD** — it is already a phase. Negative
 values (the usual case; the prior is centered at −12 days) put the rise before
-peak. To get an absolute epoch, add the JD of the brightest *r*-band point in
-the light curve.
+peak. To get an absolute epoch, add `t_peak`.
 
 `t_0` is the closest thing the model has to an explosion-time proxy, but it is
 the half-maximum point of the rise, not first light.
@@ -271,7 +272,7 @@ negative.
 
 ## When the fields are NaN
 
-All sixteen fields are written as `NaN` — never omitted — whenever a fit is not
+All seventeen fields are written as `NaN` — never omitted — whenever a fit is not
 produced, so consumers always see one schema. This happens when:
 
 - The light curve has ≤ 2 points in *g* or in *r* after preprocessing. This is
@@ -379,7 +380,7 @@ def model_lightcurve(villar_fit, band="ZTF_r", phases=None):
 ```
 
 To overlay this on observed photometry, plot the data against
-`jd - jd_of_brightest_r_band_point` so both are on the same phase axis.
+`jd - villar_fit.t_peak` so both are on the same phase axis.
 
 ### Derived quantities
 
