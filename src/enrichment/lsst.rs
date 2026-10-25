@@ -9,9 +9,9 @@ use crate::utils::db::mongify;
 use crate::utils::enums::Survey;
 use crate::utils::host::HostGalaxyAssociation;
 use crate::utils::lightcurves::{
-    analyze_photometry, is_stationary, prepare_photometry, summarise_detections, ActivityMetrics,
-    Band, DetectionHistory, EpisodeHistory, PerBandProperties, PhotometryMag, EPISODE_GAP_DAYS,
-    STATIONARY_MIN_FORCED_SNR,
+    analyze_photometry, is_stationary, prepare_photometry, signed_snr, summarise_detections,
+    ActivityMetrics, Band, DetectionHistory, EpisodeHistory, PerBandProperties, PhotometryMag,
+    EPISODE_GAP_DAYS, STATIONARY_MIN_FORCED_SNR,
 };
 use apache_avro_derive::AvroSchema;
 use apache_avro_macros::serdavro;
@@ -583,7 +583,7 @@ impl LsstEnrichmentWorker {
                 .fp_hists
                 .iter()
                 .filter(|p| p.magpsf.is_some())
-                .map(|p| p.jd),
+                .map(|p| (p.jd, signed_snr(p.snr_psf, p.flux))),
             alert.candidate.jd,
             EPISODE_GAP_DAYS,
         );
