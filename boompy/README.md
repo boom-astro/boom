@@ -3,7 +3,8 @@
 **Internal package. Not a client library.**
 
 If you are looking for a Python package to *use* BOOM's data from the outside,
-you want [babamul](https://github.com/boom-astro/babamul) instead. `boompy` runs
+you want [babamul](https://github.com/boom-astro/babamul) for the public Babamul API, or
+[boom-client](https://github.com/boom-astro/boom-client) for the private BOOM API. `boompy` runs
 inside the BOOM cluster, is invoked by the Rust services as a subprocess, and
 has no stable public API — it changes with the BOOM release it ships in.
 
