@@ -878,6 +878,7 @@ pub async fn persist_clusters(
         detections,
         labels,
         known,
+        planets,
         dry_run,
         &HashMap::new(),
         (min_detections, min_nights),
