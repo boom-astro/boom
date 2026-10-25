@@ -16,9 +16,9 @@ use crate::utils::db::mongify;
 use crate::utils::enums::{ProgramId, Survey};
 use crate::utils::host::HostGalaxyAssociation;
 use crate::utils::lightcurves::{
-    analyze_photometry, is_stationary, prepare_photometry, summarise_detections, ActivityMetrics,
-    AllBandsProperties, Band, DetectionHistory, EpisodeHistory, Outburst, PerBandProperties,
-    PhotometryMag, EPISODE_GAP_DAYS, STATIONARY_MIN_FORCED_SNR, ZTF_ZP,
+    analyze_photometry, is_stationary, prepare_photometry, signed_snr, summarise_detections,
+    ActivityMetrics, AllBandsProperties, Band, DetectionHistory, EpisodeHistory, Outburst,
+    PerBandProperties, PhotometryMag, EPISODE_GAP_DAYS, STATIONARY_MIN_FORCED_SNR, ZTF_ZP,
 };
 use crate::utils::mpcorb::{elements_from_document, normalize_ztf_ssnamenr, ORBITS_COLLECTION};
 use crate::utils::outburst::{Point, MAX_SEPARATION_ARCSEC};
@@ -1396,7 +1396,7 @@ impl ZtfEnrichmentWorker {
 
         // Per-object detection history for history-aware filters, from the full
         // accumulated light curve (positive/negative by psfFlux sign).
-        let (detection_history, episode_history) = summarise_detections(
+        let (mut detection_history, episode_history) = summarise_detections(
             alert
                 .prv_candidates
                 .iter()
@@ -1406,9 +1406,16 @@ impl ZtfEnrichmentWorker {
                 .fp_hists
                 .iter()
                 .filter(|p| p.magpsf.is_some())
-                .map(|p| p.jd),
+                .map(|p| (p.jd, signed_snr(p.snr_psf, p.flux))),
             candidate.jd,
             EPISODE_GAP_DAYS,
+        );
+        detection_history.add_nondetections(
+            alert
+                .prv_nondetections
+                .iter()
+                .map(|p| (p.jd, p.diffmaglim as f32)),
+            candidate.jd,
         );
 
         Ok((

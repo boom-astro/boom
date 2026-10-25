@@ -172,7 +172,7 @@ async fn flush(
         };
         let (summary, _) = summarise_detections(
             history.detections.iter().copied(),
-            history.forced.iter().copied(),
+            history.forced.iter().map(|&jd| (jd, None)),
             alert.candidate.jd,
             EPISODE_GAP_DAYS,
         );
@@ -366,7 +366,7 @@ mod tests {
         // And the summary a backfilled alert would be given.
         let (summary, _) = summarise_detections(
             history.detections.iter().copied(),
-            history.forced.iter().copied(),
+            history.forced.iter().map(|&jd| (jd, None)),
             2461002.5,
             EPISODE_GAP_DAYS,
         );

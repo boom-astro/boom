@@ -98,9 +98,9 @@ pub const EPISODE_GAP_DAYS: f64 = 30.0;
 
 /// Both light-curve summaries from a single pass over the detections.
 ///
-/// `forced` carries the JD of each forced epoch that reached the detection
-/// threshold; the caller applies that test, since only it knows how its survey
-/// records one.
+/// `forced` carries the JD and signed SNR of each forced epoch that reached the
+/// detection threshold; the caller applies that test, since only it knows how its
+/// survey records one.
 ///
 /// The two are derived from the same points and are always wanted together, so
 /// iterating once keeps the enrichment worker from walking a long light curve
@@ -113,7 +113,7 @@ pub fn summarise_detections<I, F>(
 ) -> (DetectionHistory, EpisodeHistory)
 where
     I: IntoIterator<Item = (f64, Option<bool>)>,
-    F: IntoIterator<Item = f64>,
+    F: IntoIterator<Item = (f64, Option<f64>)>,
 {
     let cutoff = ref_jd - 30.0;
     let mut detections = DetectionHistory::default();
@@ -121,12 +121,15 @@ where
 
     // Forced epochs widen the activity span and are counted, but are kept out
     // of the counts and episodes below, which filters already read.
-    for jd in forced {
+    for (jd, snr) in forced {
         if jd > ref_jd {
             continue;
         }
         detections.n_forced_detections += 1;
         detections.span(jd);
+        if snr.is_some_and(|s| s >= STATIONARY_MIN_FORCED_SNR) {
+            detections.first_forced_jd = Some(detections.first_forced_jd.map_or(jd, |j| j.min(jd)));
+        }
     }
 
     for (jd, is_negative) in points {
@@ -155,10 +158,21 @@ where
         }
     }
 
+    detections.first_pos_jd = positives.iter().copied().reduce(f64::min);
+    let mut nights: Vec<i64> = positives.iter().map(|jd| night_of(*jd)).collect();
+    nights.sort_unstable();
+    nights.dedup();
+    detections.n_nights = nights.len() as i32;
+
     (
         detections,
         EpisodeHistory::from_positive_epochs(positives, gap_days),
     )
+}
+
+/// Nights split at 18:00 UTC, daytime at Palomar and in Chile.
+fn night_of(jd: f64) -> i64 {
+    (jd - 0.25).floor() as i64
 }
 
 /// Detection episodes in an object's light curve, for finding sources that
@@ -297,6 +311,11 @@ pub struct BandRateProperties {
 /// windows all yield a fittable band for about a tenth of alerts, so the exact
 /// value matters far less than having a bound at all.
 pub const RECENT_WINDOW_DAYS: f64 = 30.0;
+
+/// The stored SNR is unsigned; the flux carries the sign.
+pub fn signed_snr(snr: Option<f64>, flux: Option<f64>) -> Option<f64> {
+    snr.map(|s| if flux.is_some_and(|f| f < 0.0) { -s } else { s })
+}
 
 /// Fit one monotonic segment, returning `None` when it cannot support a line.
 ///
@@ -646,6 +665,18 @@ pub struct DetectionHistory {
     pub last_detection_jd: Option<f64>,
     /// Forced epochs that reached the threshold, alongside `ndethist`.
     pub n_forced_detections: i32,
+    /// JD of the first positive alert-level detection.
+    pub first_pos_jd: Option<f64>,
+    /// JD of the first positive forced epoch at or above [`STATIONARY_MIN_FORCED_SNR`].
+    pub first_forced_jd: Option<f64>,
+    /// Distinct nights with a positive alert-level detection.
+    pub n_nights: i32,
+    /// Latest non-detection up to the alert epoch.
+    pub last_nondet_jd: Option<f64>,
+    pub last_nondet_maglim: Option<f32>,
+    /// Latest non-detection before `first_pos_jd`.
+    pub prediscovery_nondet_jd: Option<f64>,
+    pub prediscovery_nondet_maglim: Option<f32>,
 }
 
 impl DetectionHistory {
@@ -653,6 +684,26 @@ impl DetectionHistory {
     fn span(&mut self, jd: f64) {
         self.first_activity_jd = Some(self.first_activity_jd.map_or(jd, |j| j.min(jd)));
         self.last_detection_jd = Some(self.last_detection_jd.map_or(jd, |j| j.max(jd)));
+    }
+
+    pub fn add_nondetections<I>(&mut self, nondetections: I, ref_jd: f64)
+    where
+        I: IntoIterator<Item = (f64, f32)>,
+    {
+        for (jd, maglim) in nondetections {
+            if jd > ref_jd || !maglim.is_finite() {
+                continue;
+            }
+            if self.last_nondet_jd.is_none_or(|j| jd > j) {
+                self.last_nondet_jd = Some(jd);
+                self.last_nondet_maglim = Some(maglim);
+            }
+            let before_first = self.first_pos_jd.is_some_and(|first| jd < first);
+            if before_first && self.prediscovery_nondet_jd.is_none_or(|j| jd > j) {
+                self.prediscovery_nondet_jd = Some(jd);
+                self.prediscovery_nondet_maglim = Some(maglim);
+            }
+        }
     }
 
     /// Summarise detection history from `(jd, is_negative)` points, with windows
@@ -663,34 +714,13 @@ impl DetectionHistory {
     where
         I: IntoIterator<Item = (f64, Option<bool>)>,
     {
-        let cutoff = ref_jd - 30.0;
-        let mut h = DetectionHistory::default();
-        for (jd, is_negative) in points {
-            if jd > ref_jd {
-                continue;
-            }
-            let is_negative = match is_negative {
-                Some(v) => v,
-                None => continue,
-            };
-            h.span(jd);
-            h.n_det += 1;
-            let recent = jd >= cutoff;
-            if is_negative {
-                h.n_neg += 1;
-                if recent {
-                    h.n_neg_30d += 1;
-                }
-                h.first_neg_jd = Some(h.first_neg_jd.map_or(jd, |j| j.min(jd)));
-                h.last_neg_jd = Some(h.last_neg_jd.map_or(jd, |j| j.max(jd)));
-            } else {
-                h.n_pos += 1;
-                if recent {
-                    h.n_pos_30d += 1;
-                }
-            }
-        }
-        h
+        summarise_detections(
+            points,
+            std::iter::empty::<(f64, Option<f64>)>(),
+            ref_jd,
+            EPISODE_GAP_DAYS,
+        )
+        .0
     }
 }
 
@@ -1071,7 +1101,7 @@ mod tests {
     fn test_forced_epochs_predate_the_first_alert_detection() {
         use super::summarise_detections;
         let alerts = vec![(2500.0, Some(false))];
-        let forced = vec![2486.45, 2494.37];
+        let forced = vec![(2486.45, Some(6.0)), (2494.37, Some(-6.0))];
         let (d, _) = summarise_detections(alerts, forced, REF, EPISODE_GAP_DAYS);
 
         assert_eq!(d.first_activity_jd, Some(2486.45));
@@ -1087,7 +1117,12 @@ mod tests {
     fn test_span_falls_back_to_the_alert_detections() {
         use super::summarise_detections;
         let alerts = vec![(2500.0, Some(false)), (2400.0, Some(true))];
-        let (d, _) = summarise_detections(alerts, std::iter::empty(), REF, EPISODE_GAP_DAYS);
+        let (d, _) = summarise_detections(
+            alerts,
+            std::iter::empty::<(f64, Option<f64>)>(),
+            REF,
+            EPISODE_GAP_DAYS,
+        );
 
         assert_eq!(d.first_activity_jd, Some(2400.0));
         assert_eq!(d.last_detection_jd, Some(2500.0));
@@ -1100,7 +1135,7 @@ mod tests {
     fn test_forced_epochs_after_the_alert_epoch_are_ignored() {
         use super::summarise_detections;
         let alerts = vec![(2900.0, Some(false))];
-        let forced = vec![REF + 50.0];
+        let forced = vec![(REF + 50.0, Some(6.0))];
         let (d, _) = summarise_detections(alerts, forced, REF, EPISODE_GAP_DAYS);
 
         assert_eq!(d.n_forced_detections, 0);
@@ -1159,8 +1194,12 @@ mod tests {
             (REF + 10.0, Some(false)),
             (300.0, None),
         ];
-        let (detections, episodes) =
-            summarise_detections(points.clone(), std::iter::empty(), REF, EPISODE_GAP_DAYS);
+        let (detections, episodes) = summarise_detections(
+            points.clone(),
+            std::iter::empty::<(f64, Option<f64>)>(),
+            REF,
+            EPISODE_GAP_DAYS,
+        );
         assert_eq!(
             detections,
             DetectionHistory::from_points(points.clone(), REF)
