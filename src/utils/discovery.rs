@@ -7,6 +7,7 @@
 
 use crate::utils::attach::{match_track, Pool, Target};
 use crate::utils::enums::Survey;
+use crate::utils::fast::{FastTrack, FAST_KIND};
 use crate::utils::heliolinc::{
     sky_track, test_orbits, unbound_test_orbits, Conics, SkyResolution, State, Track,
     KM_S_PER_AU_DAY,
@@ -830,6 +831,7 @@ pub async fn persist_tracks(
     persist(
         db,
         "tracks",
+        None,
         candidates,
         detections,
         labels,
@@ -871,6 +873,42 @@ pub async fn persist_clusters(
     persist(
         db,
         "THOR clusters",
+        None,
+        candidates,
+        detections,
+        labels,
+        known,
+        planets,
+        dry_run,
+        &HashMap::new(),
+        (min_detections, min_nights),
+        stop,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn persist_fast(
+    db: &mongodb::Database,
+    tracks: &[FastTrack],
+    detections: &[Detection],
+    labels: &HashMap<i64, String>,
+    known: &[Option<String>],
+    planets: &[Option<&'static str>],
+    dry_run: bool,
+    min_detections: usize,
+    min_nights: usize,
+    stop: &Stop,
+) -> PersistReport {
+    let candidates = tracks.iter().map(|track| Candidate {
+        members: track.members.clone(),
+        fit: (BoundFit::Good, Some(track.fit.rms_arcsec)),
+        orbit: Some(orbit_of(&track.fit)),
+    });
+    persist(
+        db,
+        "fast tracks",
+        Some(FAST_KIND),
         candidates,
         detections,
         labels,
@@ -895,6 +933,7 @@ pub async fn persist_clusters(
 async fn persist(
     db: &mongodb::Database,
     what: &str,
+    kind: Option<&str>,
     candidates: impl Iterator<Item = Candidate>,
     detections: &[Detection],
     labels: &HashMap<i64, String>,
@@ -1011,7 +1050,10 @@ async fn persist(
         )
         .await
         {
-            Ok(plan) => plan,
+            Ok(plan) => match kind {
+                Some(kind) => plan.with_kind(kind),
+                None => plan,
+            },
             Err(e) => {
                 error!("could not resolve one of the {}: {}", what, e);
                 report.failed += 1;
@@ -1228,6 +1270,7 @@ pub async fn attach_pass(
     report.persist = persist(
         db,
         "attachments",
+        None,
         candidates.into_iter(),
         detections,
         &HashMap::new(),
@@ -1490,6 +1533,7 @@ mod tests {
         let report = persist(
             &db,
             "tracks",
+            None,
             candidates(),
             &detections,
             &HashMap::new(),
@@ -1523,6 +1567,7 @@ mod tests {
         let report = persist(
             &db,
             "tracks",
+            None,
             two,
             &all,
             &HashMap::new(),
@@ -1542,6 +1587,7 @@ mod tests {
         let report = persist(
             &db,
             "tracks",
+            None,
             candidates(),
             &detections,
             &HashMap::new(),
@@ -1563,6 +1609,7 @@ mod tests {
         let again = persist(
             &db,
             "tracks",
+            None,
             candidates(),
             &detections,
             &HashMap::new(),
@@ -1593,6 +1640,7 @@ mod tests {
         let report = persist(
             &db,
             "tracks",
+            None,
             std::iter::empty(),
             &[],
             &HashMap::new(),

@@ -272,6 +272,7 @@ mod tests {
             first_jd: 2460000.0,
             last_jd: 2460001.0,
             designation: designation.map(str::to_string),
+            kind: None,
             near_planet: None,
             updated_at,
             orbit,

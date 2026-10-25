@@ -1485,6 +1485,16 @@ pub struct LinkerConfig {
     /// track fitting worse keeps its bound fit if that passes, or is dropped.
     #[serde(default = "default_linker_max_unbound_rms_arcsec")]
     pub max_unbound_rms_arcsec: f64,
+    #[serde(default)]
+    pub fast: bool,
+    #[serde(default = "default_linker_fast_window_nights")]
+    pub fast_window_nights: u32,
+    #[serde(default = "default_linker_fast_min_rate")]
+    pub fast_min_rate_deg_per_day: f64,
+    #[serde(default = "default_linker_fast_max_rate")]
+    pub fast_max_rate_deg_per_day: f64,
+    #[serde(default = "default_linker_fast_dense_detections")]
+    pub fast_dense_detections: usize,
 }
 
 impl LinkerConfig {
@@ -1524,6 +1534,20 @@ impl LinkerConfig {
                 self.max_unbound_rms_arcsec
             ));
         }
+        if self.fast_window_nights == 0 || self.fast_window_nights > self.window_nights {
+            return Err(format!(
+                "fast_window_nights is {}, but must be between 1 and window_nights ({})",
+                self.fast_window_nights, self.window_nights
+            ));
+        }
+        if !(self.fast_min_rate_deg_per_day > 0.0
+            && self.fast_min_rate_deg_per_day < self.fast_max_rate_deg_per_day)
+        {
+            return Err(format!(
+                "fast rates run from {} to {} deg/day, which is no range",
+                self.fast_min_rate_deg_per_day, self.fast_max_rate_deg_per_day
+            ));
+        }
         Ok(())
     }
 }
@@ -1548,6 +1572,11 @@ impl Default for LinkerConfig {
             attach_lookback_nights: default_linker_attach_lookback_nights(),
             max_vinf_km_s: 0.0,
             max_unbound_rms_arcsec: default_linker_max_unbound_rms_arcsec(),
+            fast: false,
+            fast_window_nights: default_linker_fast_window_nights(),
+            fast_min_rate_deg_per_day: default_linker_fast_min_rate(),
+            fast_max_rate_deg_per_day: default_linker_fast_max_rate(),
+            fast_dense_detections: default_linker_fast_dense_detections(),
         }
     }
 }
@@ -1558,6 +1587,22 @@ fn default_linker_max_unbound_rms_arcsec() -> f64 {
 
 fn default_linker_attach_lookback_nights() -> u32 {
     60
+}
+
+fn default_linker_fast_window_nights() -> u32 {
+    7
+}
+
+fn default_linker_fast_min_rate() -> f64 {
+    1.0
+}
+
+fn default_linker_fast_max_rate() -> f64 {
+    25.0
+}
+
+fn default_linker_fast_dense_detections() -> usize {
+    10_000
 }
 
 fn default_linker_recall_window_nights() -> u32 {

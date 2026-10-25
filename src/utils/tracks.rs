@@ -137,6 +137,8 @@ pub struct StoredTrack {
     /// distinguishes a recovery from a discovery candidate.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub designation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
     /// The giant planet every detection sat next to: likely one of its satellites.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub near_planet: Option<String>,
@@ -170,6 +172,7 @@ pub struct AlertTrack {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub designation: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
     pub near_planet: Option<String>,
 }
 
@@ -184,6 +187,7 @@ impl From<&StoredTrack> for AlertTrack {
             last_jd: t.last_jd,
             bound_fit: t.bound_fit.clone(),
             designation: t.designation.clone(),
+            kind: t.kind.clone(),
             near_planet: t.near_planet.clone(),
         }
     }
@@ -482,6 +486,7 @@ pub struct UpsertPlan {
     pub bound_fit_detections: Option<i32>,
     pub orbit: Option<StoredOrbit>,
     pub designation: Option<String>,
+    pub kind: Option<String>,
     pub near_planet: Option<String>,
     /// Ids a merge would absorb and then delete.
     pub superseded: Vec<String>,
@@ -501,6 +506,14 @@ impl UpsertPlan {
     /// remnant stored as a track is worse than no track at all.
     pub fn meets(&self, min_detections: usize, min_nights: usize) -> bool {
         self.n_detections as usize >= min_detections && self.n_nights as usize >= min_nights
+    }
+
+    pub fn with_kind(mut self, kind: &str) -> Self {
+        if self.kind.as_deref() != Some(kind) {
+            self.kind = Some(kind.to_string());
+            self.unchanged_since = None;
+        }
+        self
     }
 
     /// One line naming what the write would do, for a dry run's log.
@@ -578,6 +591,7 @@ pub async fn plan_upsert(
     };
     let designation = designation.or_else(|| carried(|t| t.designation.clone()));
     let near_planet = near_planet.or_else(|| carried(|t| t.near_planet.clone()));
+    let kind = carried(|t| t.kind.clone());
     let mut owned_elsewhere: std::collections::HashSet<i64> = std::collections::HashSet::new();
     for t in existing.iter().filter(|t| !absorbed.contains(&&t.id)) {
         owned_elsewhere.extend(t.members.iter().copied());
@@ -668,6 +682,7 @@ pub async fn plan_upsert(
         bound_fit_detections,
         orbit,
         designation,
+        kind,
         near_planet,
         superseded,
         contested,
@@ -698,6 +713,7 @@ pub async fn commit_upsert(
         first_jd: plan.first_jd,
         last_jd: plan.last_jd,
         designation: plan.designation,
+        kind: plan.kind,
         near_planet: plan.near_planet,
         orbit: plan.orbit,
         updated_at: plan
@@ -979,6 +995,7 @@ pub(crate) mod tests {
             first_jd: 2460000.0,
             last_jd: 2460001.0,
             designation: None,
+            kind: None,
             near_planet: None,
             updated_at: 0.0,
             orbit: None,
@@ -1080,6 +1097,7 @@ pub(crate) mod tests {
             bound_fit_detections: None,
             orbit: None,
             designation: None,
+            kind: None,
             near_planet: None,
             superseded: Vec::new(),
             contested: vec![11, 12],
