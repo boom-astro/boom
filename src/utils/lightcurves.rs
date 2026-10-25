@@ -38,7 +38,7 @@ pub fn diffmaglim2fluxerr(diffmaglim: f32, zp: f32) -> f32 {
 }
 
 #[apache_avro_macros::serdavro]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, Eq, Hash, ToSchema)]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, Eq, Hash, PartialOrd, Ord, ToSchema)]
 pub enum Band {
     #[serde(rename = "g")]
     G,
@@ -818,10 +818,13 @@ fn weighted_least_squares_centered(
 
 /// Prepares photometry data by sorting and removing duplicates
 pub fn prepare_photometry(photometry: &mut Vec<PhotometryMag>) {
-    // sort by time
-    photometry.sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap());
-
-    // remove duplicates (same time and band)
+    photometry.sort_by(|a, b| {
+        a.time
+            .partial_cmp(&b.time)
+            .unwrap()
+            .then_with(|| a.band.cmp(&b.band))
+            .then_with(|| a.mag_err.total_cmp(&b.mag_err))
+    });
     photometry.dedup_by(|a, b| a.time == b.time && a.band == b.band);
 }
 
@@ -1412,17 +1415,18 @@ mod tests {
                 mag: 20.0,
                 mag_err: 0.1,
                 band: Band::R,
-            }, // earlier point that should be sorted up
+            }, // less precise duplicate that should be removed
             PhotometryMag {
                 time: 2459000.5,
-                mag: 20.0,
-                mag_err: 0.1,
+                mag: 19.9,
+                mag_err: 0.02,
                 band: Band::R,
-            }, // duplicate that should be removed
+            }, // earlier point that should be sorted up
         ];
         prepare_photometry(&mut photometry);
         assert_eq!(photometry.len(), 2);
         assert_eq!(photometry[0].time, 2459000.5);
+        assert_eq!(photometry[0].mag_err, 0.02);
         assert_eq!(photometry[1].time, 2459001.5);
     }
 
