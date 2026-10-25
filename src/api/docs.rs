@@ -46,6 +46,7 @@ impl Modify for BabamulSecurityAddon {
         title = "BOOM API",
         version = "0.1.0",
         description = "An HTTP REST interface to BOOM.\n\n\
+        **Python client**: [boom-client](https://github.com/boom-astro/boom-client) (`pip install boom-client`).\n\n\
         **Note**: For the public Babamul API, see the separate documentation at `/babamul/docs`."
     ),
     paths(

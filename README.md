@@ -23,7 +23,7 @@ BOOM is an alert broker. What sets it apart from other alert brokers is that it 
 Workers are managed by a Scheduler that can spawn or kill workers of each type.
 Currently, the number of workers is static, but we are working on dynamically scaling the number of workers based on the load of the system.
 
-BOOM also comes with an HTTP API, under development, which will allow users to query the `MongoDB` database, to define their own filters, and to have those filters run on alerts in real-time.
+BOOM also comes with an HTTP API, under development, which will allow users to query the `MongoDB` database, to define their own filters, and to have those filters run on alerts in real-time. Its Python client is [boom-client](https://github.com/boom-astro/boom-client).
 
 ## System Requirements
 
