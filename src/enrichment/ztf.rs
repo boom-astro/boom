@@ -508,11 +508,6 @@ pub struct ZtfAlertProperties {
     pub stationary: bool,
     pub photstats: PerBandProperties,
     pub multisurvey_photstats: Option<PerBandProperties>,
-    /// Without the private DECam points, for Babamul. `None` when there are none.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[avro(skip)]
-    #[schema(ignore)]
-    pub public_multisurvey_photstats: Option<PerBandProperties>,
     /// `None` means never evaluated, not "not an asteroid".
     #[serde(default)]
     pub sso: Option<ZtfSsoAssociation>,
@@ -526,15 +521,6 @@ pub struct ZtfAlertProperties {
     /// Detection episodes, for finding sources that outburst more than once.
     /// `None` on alerts enriched before this field existed.
     pub episode_history: Option<EpisodeHistory>,
-}
-
-impl ZtfAlertProperties {
-    pub fn into_public(mut self) -> Self {
-        if let Some(public) = self.public_multisurvey_photstats.take() {
-            self.multisurvey_photstats = Some(public);
-        }
-        self
-    }
 }
 
 /// Field order matches the ONNX output index (0-7).
@@ -1381,15 +1367,12 @@ impl ZtfEnrichmentWorker {
             .as_ref()
             .map(|m| m.lightcurve(candidate.jd))
             .unwrap_or_default();
-        let (multisurvey_photstats, public_multisurvey_photstats) = if decam_lightcurve.is_empty() {
-            (multisurvey_photstats, None)
+        let multisurvey_photstats = if decam_lightcurve.is_empty() {
+            multisurvey_photstats
         } else {
             let mut with_decam = [lightcurve.clone(), decam_lightcurve].concat();
             prepare_photometry(&mut with_decam);
-            (
-                analyze_photometry(&with_decam).0,
-                Some(multisurvey_photstats),
-            )
+            analyze_photometry(&with_decam).0
         };
 
         let hosted = alert.host_galaxy.as_ref().map(|hg| hg.best_host.is_some());
@@ -1420,7 +1403,6 @@ impl ZtfEnrichmentWorker {
                 stationary,
                 photstats,
                 multisurvey_photstats: Some(multisurvey_photstats),
-                public_multisurvey_photstats,
                 sso: Some(sso),
                 activity: Some(activity),
                 detection_history: Some(detection_history),
