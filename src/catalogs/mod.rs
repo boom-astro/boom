@@ -57,6 +57,8 @@ pub enum Reader {
     Milliquas,
     /// DESI DR1 redshifts, converted and filtered from the iron zcatalog.
     DesiDr1,
+    /// DESI DR1 dwarf galaxies, converted from a staged FITS table.
+    DesiDr1Dwarfs,
     /// CatWISE2020, converted from the published IPAC tables.
     CatWise2020,
     /// Gaia DR3, read straight from the published gzipped CSV.
@@ -167,6 +169,17 @@ pub const CATALOGS: &[CatalogDef] = &[
                       primary spectrum of each science target.",
         reader: Reader::DesiDr1,
         source: Source::Fetched,
+        aliases: &[],
+    },
+    CatalogDef {
+        id: "desi-dr1-dwarfs",
+        collection: "DESI_DR1_dwarfs",
+        title: "DESI DR1 dwarf galaxies",
+        description: "Dwarf galaxies from DESI DR1 with stellar masses, distances and \
+                      half-light radii, one row per galaxy. The DESIRT compilation, which \
+                      is not published: stage the FITS file by hand, see docs/catalogs.md.",
+        reader: Reader::DesiDr1Dwarfs,
+        source: Source::Staged,
         aliases: &[],
     },
     CatalogDef {
@@ -793,6 +806,9 @@ async fn ingest_file(
         Reader::AllWise => Ok(arrow::ingest_parquet::<types::AllWise>(inserter, path).await?),
         Reader::Milliquas => Ok(arrow::ingest_parquet::<types::Milliquas>(inserter, path).await?),
         Reader::DesiDr1 => Ok(arrow::ingest_parquet::<types::DesiDr1>(inserter, path).await?),
+        Reader::DesiDr1Dwarfs => {
+            Ok(arrow::ingest_parquet::<types::DesiDr1Dwarf>(inserter, path).await?)
+        }
         Reader::CatWise2020 => {
             Ok(arrow::ingest_parquet::<types::CatWise2020>(inserter, path).await?)
         }
@@ -1592,10 +1608,9 @@ mod source_tests {
             .filter(|c| c.source == Source::Staged)
             .map(|c| c.id)
             .collect();
-        // lspsc is published upstream as a cone-search API, so BOOM ingests an
-        // export of its own copy. It cannot be fetched, and its files must not
-        // be deleted after ingest.
-        assert_eq!(staged, vec!["lspsc"]);
+        // lspsc is an export of BOOM's own copy and the DESI DR1 dwarfs are not
+        // published: neither can be fetched, and their files must not be deleted.
+        assert_eq!(staged, vec!["desi-dr1-dwarfs", "lspsc"]);
     }
 
     #[test]
