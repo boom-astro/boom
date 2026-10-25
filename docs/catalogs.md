@@ -150,6 +150,7 @@ still resolves to the same catalog definition.
 | `allwise` | `AllWISE` | parquet | ~1000 HEALPix partitions | Mid-infrared W1–W4 photometry and proper motions for 748 million sources, from the LSDB HATS mirror. |
 | `milliquas` | `milliquas_v8` | parquet, from FITS | 1 | Quasars and candidates with redshifts and radio/X-ray associations. |
 | `desi-dr1` | `DESI_DR1` | parquet, from FITS | 1 | Spectroscopic redshifts from the iron zcatalog, filtered to the primary spectrum per science target. |
+| `desi-dr1-dwarfs` | `DESI_DR1_dwarfs` | parquet, from FITS, **staged** | 1 | Dwarf galaxies from DESI DR1 with stellar masses, distances and half-light radii, one row per galaxy. The DESIRT compilation, which is not published: stage `desi_dr1_dwarf_catalog.fits` at `<catalog data path>/staged/desi-dr1-dwarfs/`. Not the public DR1 dwarf value-added catalog. |
 | `catwise2020` | `CatWISE2020` | parquet, from IPAC tables | ~700 files | Mid-infrared W1/W2 photometry and proper motions. |
 | `gaia-dr3` | `Gaia_DR3` | gzipped CSV | ~3400 files | Astrometry, parallaxes, proper motions and G/BP/RP photometry for 1.8 billion sources. |
 | `galex` | `GALEX` | gzipped CSV | per release | Ultraviolet FUV/NUV photometry from the All-Sky Imaging Survey. |
@@ -192,8 +193,9 @@ nothing downstream could tell.
 
 A staged catalog is one BOOM ingests but does not fetch: the files are put in
 place beforehand — by hand, or by BOOM itself — and the ingest reads them where
-they are. `lspsc` is the one in the tree; see
-[When BOOM is the provenance](#when-boom-is-the-provenance).
+they are. `lspsc` is one, see
+[When BOOM is the provenance](#when-boom-is-the-provenance); `desi-dr1-dwarfs`,
+which has no public copy, is the other.
 
 A definition declares `source: Source::Staged`, and **BOOM never deletes a
 staged file** — for a fetched catalog the chunk is a cache and deleting it is
