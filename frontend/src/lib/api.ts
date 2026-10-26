@@ -495,9 +495,6 @@ export type SimilarObject = {
   object_id: string;
   /** COSINE similarity, so higher is closer. */
   score: number;
-  /** The alert the embedding came from; present only if requested from Milvus. */
-  candid?: number | string | null;
-  jd?: number | null;
 };
 
 /**

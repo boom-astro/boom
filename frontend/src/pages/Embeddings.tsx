@@ -21,11 +21,6 @@ function formatScore(score: number): string {
   return score.toFixed(4);
 }
 
-function formatJd(jd: number | null | undefined): string {
-  if (jd === null || jd === undefined) return "-";
-  return jd.toFixed(5);
-}
-
 export default function Embeddings() {
   const [objectId, setObjectId] = useState("");
   const [topK, setTopK] = useState(DEFAULT_TOP_K);
@@ -150,8 +145,6 @@ export default function Embeddings() {
                 <TableRow>
                   <TableHead>Object</TableHead>
                   <TableHead className="text-right">Similarity</TableHead>
-                  <TableHead className="text-right">Candid</TableHead>
-                  <TableHead className="text-right">JD</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -166,10 +159,6 @@ export default function Embeddings() {
                       </Link>
                     </TableCell>
                     <TableCell className="text-right tabular-nums">{formatScore(hit.score)}</TableCell>
-                    <TableCell className="text-right tabular-nums font-mono text-sm">
-                      {hit.candid ?? "-"}
-                    </TableCell>
-                    <TableCell className="text-right tabular-nums">{formatJd(hit.jd)}</TableCell>
                   </TableRow>
                 ))}
               </TableBody>

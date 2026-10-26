@@ -35,8 +35,8 @@ describe("fetchSimilarObjects", () => {
       jsonResponse({
         message: "success",
         data: [
-          { object_id: "ZTF21aaa", score: 0.98, candid: 123, jd: 2460000.5 },
-          { object_id: "ZTF21bbb", score: 0.91, candid: 456, jd: 2460001.5 },
+          { object_id: "ZTF21aaa", score: 0.98 },
+          { object_id: "ZTF21bbb", score: 0.91 },
         ],
       })
     )
