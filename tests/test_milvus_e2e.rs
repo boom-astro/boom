@@ -14,7 +14,7 @@ use boom::{
     alert::{AlertWorker, ProcessAlertStatus},
     conf::{self},
     enrichment::{EnrichmentWorker, ZtfEnrichmentWorker},
-    milvus::{EmbeddingRow, MilvusClient},
+    milvus::{EmbeddingRow, MilvusClient, SearchHit},
     utils::{
         enums::Survey,
         testing::{
@@ -109,7 +109,7 @@ async fn test_ztf_alert_to_milvus_e2e() {
     // 5. Similarity search with the stored vector must find the object itself, at
     //    a near-perfect score (COSINE self-match on an L2-normalized vector).
     let hits = client
-        .search_embedding(&row.embedding, 5)
+        .search_embedding(&row.embedding, 5, &[1, 2, 3])
         .await
         .expect("similarity search failed");
     let self_hit = hits
@@ -126,6 +126,25 @@ async fn test_ztf_alert_to_milvus_e2e() {
         Some(candid),
         "search hit should carry the stored candid"
     );
+
+    let other_program = if row.programid == 1 { 3 } else { 1 };
+    let allowed = client
+        .search_embedding(&row.embedding, 5, &[row.programid])
+        .await
+        .expect("filtered search failed");
+    assert!(allowed.iter().any(|h| h.object_id == object_id));
+    assert_hits_in_program(&mut client, &allowed, row.programid).await;
+    let excluded = client
+        .search_embedding(&row.embedding, 5, &[other_program])
+        .await
+        .expect("filtered search failed");
+    assert!(excluded.iter().all(|h| h.object_id != object_id));
+    assert_hits_in_program(&mut client, &excluded, other_program).await;
+    let none_allowed = client
+        .search_embedding(&row.embedding, 5, &[])
+        .await
+        .expect("filtered search failed");
+    assert!(none_allowed.is_empty());
 
     // The collection now holds at least our row.
     assert!(
@@ -144,6 +163,23 @@ async fn test_ztf_alert_to_milvus_e2e() {
         .unwrap();
 }
 
+/// Search hits carry no `programid`, so look each one up in Milvus and check it.
+async fn assert_hits_in_program(client: &mut MilvusClient, hits: &[SearchHit], programid: i32) {
+    let ids: Vec<&str> = hits.iter().map(|h| h.object_id.as_str()).collect();
+    let rows = client
+        .get_embeddings(&ids, &[1, 2, 3])
+        .await
+        .expect("get_embeddings failed");
+    assert_eq!(rows.len(), hits.len(), "every hit should have a stored row");
+    for r in rows {
+        assert_eq!(
+            r.programid, programid,
+            "search filtered to programid {programid} returned {} with programid {}",
+            r.object_id, r.programid
+        );
+    }
+}
+
 /// Poll `get_embeddings` until the row for `object_id` is visible, or give up.
 /// A just-upserted vector is not always readable on the first attempt because
 /// Milvus applies writes asynchronously.
@@ -151,7 +187,7 @@ async fn read_embedding_with_retry(client: &mut MilvusClient, object_id: &str) -
     const ATTEMPTS: usize = 20;
     for _ in 0..ATTEMPTS {
         let rows = client
-            .get_embeddings(&[object_id])
+            .get_embeddings(&[object_id], &[1, 2, 3])
             .await
             .expect("get_embeddings failed");
         if let Some(row) = rows.into_iter().find(|r| r.object_id == object_id) {
