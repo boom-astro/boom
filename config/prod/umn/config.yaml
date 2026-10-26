@@ -284,9 +284,9 @@ linker:
   # Palomar's nights end by about 13:00 UTC.
   run_after_utc_hour: 14
   drb: 0.8 # minimum drb for a detection to be searched
-  # Minimum reliability for an LSST detection to be searched. On 14 nights,
-  # 0.5 took four times as long for 93.7% recall rather than 92.3%.
-  lsst_min_reliability: 0.6
+  # Minimum reliability for an LSST detection to be searched. On 14 nights, 0.6
+  # instead of 0.5 runs four times faster but links a quarter fewer faint objects.
+  lsst_min_reliability: 0.5
   surveys: [ztf, lsst, decam, winter] # linked together, any of ztf, lsst, decam, winter
   link: true # link tracklets across nights
   thor: true # recover objects seen once a night
