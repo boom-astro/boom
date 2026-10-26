@@ -797,7 +797,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 16g
+          memory: ${BOOM_LINKER_MEM_LIMIT:-48g}
     networks:
       - boom
     profiles:

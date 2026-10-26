@@ -1636,7 +1636,7 @@ fn default_linker_drb() -> f64 {
 }
 
 fn default_linker_lsst_min_reliability() -> f64 {
-    0.6
+    0.5
 }
 
 fn default_linker_surveys() -> Vec<Survey> {
