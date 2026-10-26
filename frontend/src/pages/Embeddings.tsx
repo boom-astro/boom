@@ -23,7 +23,7 @@ function formatScore(score: number): string {
 
 export default function Embeddings() {
   const [objectId, setObjectId] = useState("");
-  const [topK, setTopK] = useState(DEFAULT_TOP_K);
+  const [topK, setTopK] = useState(String(DEFAULT_TOP_K));
   const [results, setResults] = useState<SimilarObject[] | null>(null);
   const [searchedId, setSearchedId] = useState("");
   const [loading, setLoading] = useState(false);
@@ -50,12 +50,14 @@ export default function Embeddings() {
     e.preventDefault();
     const trimmed = objectId.trim();
     if (!trimmed) return;
+    const k = Math.min(Math.max(Math.round(Number(topK)) || DEFAULT_TOP_K, 1), MAX_TOP_K);
+    setTopK(String(k));
 
     setLoading(true);
     setError(null);
     setNotice(null);
     try {
-      const { results, message } = await fetchSimilarObjects(trimmed, topK);
+      const { results, message } = await fetchSimilarObjects(trimmed, k);
       setResults(results);
       setSearchedId(trimmed);
       // No embedding stored is a normal answer, shown as a notice, not an error.
@@ -124,10 +126,7 @@ export default function Embeddings() {
                 min={1}
                 max={MAX_TOP_K}
                 value={topK}
-                onChange={(e) => {
-                  const n = Number(e.target.value);
-                  if (Number.isFinite(n)) setTopK(Math.min(Math.max(Math.round(n), 1), MAX_TOP_K));
-                }}
+                onChange={(e) => setTopK(e.target.value)}
                 className="w-24"
               />
             </div>
