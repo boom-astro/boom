@@ -260,7 +260,9 @@ export async function fetchAdminUsers(search: string, limit: number, offset: num
   return unwrapData<AdminUsersPage>(await readJson(res), { users: [], total: 0, available_acls: [] });
 }
 
-export async function updateAdminUser(id: string, patch: { is_admin?: boolean; acls?: string[] }): Promise<AdminUser> {
+export type AdminUserPatch = { is_admin?: boolean; grant_acls?: string[]; revoke_acls?: string[] };
+
+export async function updateAdminUser(id: string, patch: AdminUserPatch): Promise<AdminUser> {
   const res = await fetchWithAuth(`${API_BASE}/admin/users/${encodeURIComponent(id)}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
@@ -417,8 +419,9 @@ export async function fetchStats(startDate: string, endDate: string, survey?: st
   return readList<NightlyStat>(res);
 }
 
-export async function refreshStats(startDate: string, endDate: string): Promise<void> {
+export async function refreshStats(startDate: string, endDate: string, survey?: string): Promise<void> {
   const params = new URLSearchParams({ start_date: startDate, end_date: endDate });
+  if (survey) params.set("survey", survey);
   const res = await fetchWithAuth(`${API_BASE}/stats/refresh?${params}`, { method: "POST" });
   if (res.ok) return;
   throw new Error(messageOf(await readJson(res)) ?? `Refresh stats failed: ${res.status}`);

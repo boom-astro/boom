@@ -575,6 +575,97 @@ impl super::arrow::FromRecordBatch for DesiDr1 {
 
 impl HasCoordinates for DesiDr1 {}
 
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DesiDr1Dwarf {
+    #[serde(rename(serialize = "_id"))]
+    pub targetid: i64,
+    pub ra: f64,
+    pub dec: f64,
+    pub desiname: String,
+    pub survey: String,
+    pub program: String,
+    pub z: f64,
+    pub z_cmb: Option<f64>,
+    pub zwarn: i64,
+    pub deltachi2: Option<f64>,
+    pub lumi_dist_mpc: Option<f64>,
+    pub dist_source: String,
+    pub log_mstar_m24: Option<f64>,
+    pub log_mstar_m24_err: Option<f64>,
+    pub mag_g: Option<f64>,
+    pub mag_r: Option<f64>,
+    pub mag_z: Option<f64>,
+    pub r50_r: Option<f64>,
+    pub dwarf_maskbit: i64,
+    pub mstar_maskbit: i64,
+    pub in_sga_2020: bool,
+}
+
+impl super::arrow::FromRecordBatch for DesiDr1Dwarf {
+    fn from_batch(
+        batch: &::arrow::array::RecordBatch,
+    ) -> Result<Vec<Self>, super::arrow::ColumnError> {
+        use super::arrow::{bool_column, f64_column, i64_column, string_column};
+
+        let targetid = i64_column(batch, "TARGETID")?;
+        let ra = f64_column(batch, "RA")?;
+        let dec = f64_column(batch, "DEC")?;
+        let desiname = string_column(batch, "DESINAME")?;
+        let survey = string_column(batch, "SURVEY")?;
+        let program = string_column(batch, "PROGRAM")?;
+        let z = f64_column(batch, "Z")?;
+        let z_cmb = f64_column(batch, "Z_CMB")?;
+        let zwarn = i64_column(batch, "ZWARN")?;
+        let deltachi2 = f64_column(batch, "DELTACHI2")?;
+        let lumi_dist_mpc = f64_column(batch, "LUMI_DIST_MPC")?;
+        let dist_source = string_column(batch, "DIST_SOURCE")?;
+        let log_mstar_m24 = f64_column(batch, "LOG_MSTAR_M24")?;
+        let log_mstar_m24_err = f64_column(batch, "LOG_MSTAR_M24_ERR")?;
+        let mag_g = f64_column(batch, "MAG_G")?;
+        let mag_r = f64_column(batch, "MAG_R")?;
+        let mag_z = f64_column(batch, "MAG_Z")?;
+        let r50_r = f64_column(batch, "R50_R")?;
+        let dwarf_maskbit = i64_column(batch, "DWARF_MASKBIT")?;
+        let mstar_maskbit = i64_column(batch, "MSTAR_MASKBIT")?;
+        let in_sga_2020 = bool_column(batch, "IN_SGA_2020")?;
+
+        let mut rows = Vec::with_capacity(batch.num_rows());
+        for i in 0..batch.num_rows() {
+            let (Some(targetid), Some(ra), Some(dec), Some(z)) = (targetid[i], ra[i], dec[i], z[i])
+            else {
+                continue;
+            };
+            rows.push(DesiDr1Dwarf {
+                targetid,
+                ra,
+                dec,
+                desiname: desiname[i].clone().unwrap_or_default(),
+                survey: survey[i].clone().unwrap_or_default(),
+                program: program[i].clone().unwrap_or_default(),
+                z,
+                z_cmb: z_cmb[i],
+                zwarn: zwarn[i].unwrap_or_default(),
+                deltachi2: deltachi2[i],
+                lumi_dist_mpc: lumi_dist_mpc[i],
+                dist_source: dist_source[i].clone().unwrap_or_default(),
+                log_mstar_m24: log_mstar_m24[i],
+                log_mstar_m24_err: log_mstar_m24_err[i],
+                mag_g: mag_g[i],
+                mag_r: mag_r[i],
+                mag_z: mag_z[i],
+                r50_r: r50_r[i],
+                dwarf_maskbit: dwarf_maskbit[i].unwrap_or_default(),
+                mstar_maskbit: mstar_maskbit[i].unwrap_or_default(),
+                in_sga_2020: in_sga_2020[i].unwrap_or_default(),
+            });
+        }
+        Ok(rows)
+    }
+}
+
+impl HasCoordinates for DesiDr1Dwarf {}
+
 // ---------------------------------------------------------------------------
 // CatWISE2020 -- parquet, converted from the published .tbl tables by boompy
 // ---------------------------------------------------------------------------

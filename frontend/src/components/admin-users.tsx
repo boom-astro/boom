@@ -8,7 +8,7 @@ import { Switch } from "@/components/ui/switch";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Spinner } from "@/components/ui/spinner";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { fetchAdminUsers, updateAdminUser, type AdminUser } from "@/lib/api";
+import { fetchAdminUsers, updateAdminUser, type AdminUser, type AdminUserPatch } from "@/lib/api";
 import { useAppStore } from "@/lib/store";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 
@@ -24,7 +24,7 @@ const aclLabel = (acl: string) => ACL_LABELS[acl] ?? acl;
 
 type PendingChange = {
   user: AdminUser;
-  patch: { is_admin?: boolean; acls?: string[] };
+  patch: AdminUserPatch;
   title: string;
   description: string;
   grants: boolean;
@@ -90,7 +90,7 @@ export function AdminUsers() {
   // without it.
   if (!profile?.is_admin) return null;
 
-  async function update(user: AdminUser, patch: { is_admin?: boolean; acls?: string[] }) {
+  async function update(user: AdminUser, patch: AdminUserPatch) {
     setSaving((s) => new Set(s).add(user.id));
     try {
       const updated = await updateAdminUser(user.id, patch);
@@ -127,13 +127,10 @@ export function AdminUsers() {
           ? "ztf_caltech"
           : null;
     const changed = linked ? [acl, linked] : [acl];
-    const acls = granted
-      ? [...user.acls, ...changed]
-      : user.acls.filter((a) => !changed.includes(a));
     const labels = changed.map(aclLabel).join(" and ");
     setPending({
       user,
-      patch: { acls },
+      patch: granted ? { grant_acls: [acl] } : { revoke_acls: [acl] },
       grants: granted,
       title: granted
         ? `Grant ${labels} access to ${user.email}?`

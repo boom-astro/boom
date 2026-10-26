@@ -2,6 +2,7 @@ use crate::alert::{Candidate, ZtfCandidate};
 use crate::conf::AppConfig;
 use crate::enrichment::{
     babamul::{Babamul, BabamulZtfAlert},
+    decam::{add_decam_match, DecamMatch},
     fetch_alerts,
     models::{
         applecider_postprocess::{self, AppleCiderFusion, AppleCiderModalities},
@@ -12,17 +13,17 @@ use crate::enrichment::{
 use crate::milvus::{BackupQueue, EmbeddingRow, MilvusSink};
 use crate::utils::cutouts::{AlertCutout, CutoutStorage};
 use crate::utils::db::mongify;
-use crate::utils::enums::Survey;
+use crate::utils::enums::{ProgramId, Survey};
 use crate::utils::host::HostGalaxyAssociation;
 use crate::utils::lightcurves::{
-    analyze_photometry, is_stationary, prepare_photometry, summarise_detections, ActivityMetrics,
-    AllBandsProperties, Band, DetectionHistory, EpisodeHistory, Outburst, PerBandProperties,
-    PhotometryMag, EPISODE_GAP_DAYS, STATIONARY_MIN_FORCED_SNR, ZTF_ZP,
+    analyze_photometry, is_stationary, prepare_photometry, signed_snr, summarise_detections,
+    ActivityMetrics, AllBandsProperties, Band, DetectionHistory, EpisodeHistory, Outburst,
+    PerBandProperties, PhotometryMag, EPISODE_GAP_DAYS, STATIONARY_MIN_FORCED_SNR, ZTF_ZP,
 };
 use crate::utils::mpcorb::{elements_from_document, normalize_ztf_ssnamenr, ORBITS_COLLECTION};
 use crate::utils::outburst::{Point, MAX_SEPARATION_ARCSEC};
 use crate::utils::phase_curve::{curves_from_document, PhaseCurve, BASELINES_COLLECTION};
-use crate::utils::sso_geometry::{geometry_at, OrbitalElements};
+use crate::utils::sso_geometry::{geometry_at, OrbitalElements, ZTF};
 use apache_avro_derive::AvroSchema;
 use apache_avro_macros::serdavro;
 use futures::TryStreamExt;
@@ -342,6 +343,8 @@ pub struct ZtfAlertForEnrichment {
     #[serde(default)]
     pub host_galaxy: Option<HostGalaxyAssociation>,
     pub survey_matches: Option<ZtfSurveyMatches>,
+    #[serde(default)]
+    pub decam_match: Option<DecamMatch>,
 }
 
 /// Longest window `Outburst` scores over, so also how far back history is read.
@@ -476,7 +479,7 @@ impl ZtfSsoAssociation {
 
     pub fn with_geometry(mut self, elements: Option<&OrbitalElements>, jd: f64) -> Self {
         if let Some(elements) = elements {
-            let geometry = geometry_at(elements, jd);
+            let geometry = geometry_at(elements, jd, &ZTF);
             self.helio_dist = Some(geometry.helio_dist as f32);
             self.topo_dist = Some(geometry.topo_dist as f32);
             self.phase_angle = Some(geometry.phase_angle as f32);
@@ -748,7 +751,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             mpc_orbits,
             sso_baselines,
             alert_cutout_storage,
-            alert_pipeline: create_ztf_alert_pipeline(false),
+            alert_pipeline: add_decam_match(create_ztf_alert_pipeline(false)),
             models,
             babamul,
             milvus,
@@ -900,7 +903,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             ));
             processed_alerts.push(format!("{},{}", item.programid, item.candid));
 
-            if self.milvus.is_enabled() {
+            if self.milvus.is_enabled() && item.programid == ProgramId::Public as i32 {
                 if let Some(embedding) = fusion_embedding {
                     embedding_rows.push(EmbeddingRow {
                         object_id: item.alert.object_id.clone(),
@@ -935,7 +938,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             let nan_set_doc = {
                 let mut d = doc! {
                     "villar_fit.reduced_chi2": f64::NAN,
-                    "villar_fit.peak_flux": f64::NAN,
+                    "villar_fit.peak_mag": f64::NAN,
                 };
                 for filt in villar_pso::FILTERS {
                     for pname in villar_pso::PARAM_NAMES {
@@ -990,9 +993,9 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                         for (result, candid) in results.into_iter().zip(candids) {
                             let mut set_doc = doc! {
                                 "villar_fit.reduced_chi2": result.reduced_chi2,
-                                "villar_fit.peak_flux": result.peak_flux,
+                                "villar_fit.peak_mag": result.peak_mag,
                             };
-                            for (key, val) in result.params_unnorm.to_named_map() {
+                            for (key, val) in result.params_mag.to_named_map() {
                                 set_doc.insert(format!("villar_fit.{}", key), val);
                             }
                             villar_updates.push(build_update(candid, set_doc));
@@ -1342,15 +1345,15 @@ impl ZtfEnrichmentWorker {
         let mut has_matches = false;
         if let Some(survey_matches) = &alert.survey_matches {
             if let Some(lsst_match) = &survey_matches.lsst {
-                let mut lsst_lightcurve: Vec<PhotometryMag> = lsst_match
+                let lsst_lightcurve: Vec<PhotometryMag> = lsst_match
                     .prv_candidates
                     .iter()
                     .chain(&lsst_match.fp_hists)
                     .filter(|p| p.jd <= candidate.jd)
                     .filter_map(|p| p.to_photometry_mag(None))
                     .collect();
-                prepare_photometry(&mut lsst_lightcurve);
                 lightcurve.extend(lsst_lightcurve);
+                prepare_photometry(&mut lightcurve);
                 has_matches = true;
             }
         }
@@ -1359,12 +1362,24 @@ impl ZtfEnrichmentWorker {
         } else {
             photstats.clone()
         };
+        let decam_lightcurve = alert
+            .decam_match
+            .as_ref()
+            .map(|m| m.lightcurve(candidate.jd))
+            .unwrap_or_default();
+        let multisurvey_photstats = if decam_lightcurve.is_empty() {
+            multisurvey_photstats
+        } else {
+            let mut with_decam = [lightcurve.clone(), decam_lightcurve].concat();
+            prepare_photometry(&mut with_decam);
+            analyze_photometry(&with_decam).0
+        };
 
         let hosted = alert.host_galaxy.as_ref().map(|hg| hg.best_host.is_some());
 
         // Per-object detection history for history-aware filters, from the full
         // accumulated light curve (positive/negative by psfFlux sign).
-        let (detection_history, episode_history) = summarise_detections(
+        let (mut detection_history, episode_history) = summarise_detections(
             alert
                 .prv_candidates
                 .iter()
@@ -1374,9 +1389,16 @@ impl ZtfEnrichmentWorker {
                 .fp_hists
                 .iter()
                 .filter(|p| p.magpsf.is_some())
-                .map(|p| p.jd),
+                .map(|p| (p.jd, signed_snr(p.snr_psf, p.flux))),
             candidate.jd,
             EPISODE_GAP_DAYS,
+        );
+        detection_history.add_nondetections(
+            alert
+                .prv_nondetections
+                .iter()
+                .map(|p| (p.jd, p.diffmaglim as f32)),
+            candidate.jd,
         );
 
         Ok((

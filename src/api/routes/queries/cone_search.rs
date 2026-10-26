@@ -9,8 +9,10 @@ use crate::{
     conf::AppConfig,
 };
 
+use crate::api::limits::{
+    large_query_slot, next_result, too_large, ResultError, DEFAULT_QUERY_MAX_TIME,
+};
 use actix_web::{post, web, HttpResponse};
-use futures::TryStreamExt;
 use mongodb::{bson::doc, Database};
 use std::collections::HashMap;
 use std::fmt;
@@ -18,7 +20,7 @@ use utoipa::openapi::schema::{ObjectBuilder, Schema};
 use utoipa::openapi::RefOr;
 use utoipa::{PartialSchema, ToSchema};
 
-const MAX_CONE_SEARCH_RESULTS: usize = 100_000;
+const MAX_CONE_SEARCH_COORDINATES: usize = 10_000;
 
 #[derive(serde::Deserialize, Clone)]
 pub enum Unit {
@@ -108,15 +110,17 @@ impl ConeSearchQuery {
                 }
             }
         }
-        if let Some(max_time_ms) = self.max_time_ms {
-            options.max_time = Some(std::time::Duration::from_millis(max_time_ms));
-        }
+        options.max_time = Some(
+            self.max_time_ms
+                .map(std::time::Duration::from_millis)
+                .unwrap_or(DEFAULT_QUERY_MAX_TIME),
+        );
         Ok(options)
     }
 }
 
 /// Run a cone search query on a survey alert collection, a reference catalog or a watchlist.
-/// A request matching more than 100000 documents is rejected; use a smaller radius or paginate with limit and skip.
+/// A request whose results exceed 256 MB is rejected; use a smaller radius, paginate with limit and skip, or project fewer fields.
 #[utoipa::path(
     post,
     path = "/queries/cone_search",
@@ -138,6 +142,10 @@ pub async fn post_cone_search_query(
     let current_user = match current_user {
         Some(user) => user,
         None => return HttpResponse::Unauthorized().body("Unauthorized"),
+    };
+    let _slot = match large_query_slot().await {
+        Ok(slot) => slot,
+        Err(response) => return response,
     };
     let catalog_name = body.catalog_name.trim();
     if !is_cone_searchable(catalog_name, &config) {
@@ -167,8 +175,14 @@ pub async fn post_cone_search_query(
         Unit::Radians => {}
     }
     let object_coordinates = &body.object_coordinates;
+    if object_coordinates.len() > MAX_CONE_SEARCH_COORDINATES {
+        return response::bad_request(&format!(
+            "object_coordinates holds more than {} entries; split the request",
+            MAX_CONE_SEARCH_COORDINATES
+        ));
+    }
     let mut docs: HashMap<String, Vec<mongodb::bson::Document>> = HashMap::new();
-    let mut n_results = 0;
+    let mut bytes_read = 0;
     let filter = match parse_optional_filter(&body.filter) {
         Ok(f) => f,
         Err(e) => return response::bad_request(&format!("Invalid filter: {}", e)),
@@ -214,25 +228,16 @@ pub async fn post_cone_search_query(
         };
         let mut data = Vec::new();
         loop {
-            match cursor.try_next().await {
-                Ok(Some(doc)) => {
-                    n_results += 1;
-                    if n_results > MAX_CONE_SEARCH_RESULTS {
-                        return response::bad_request(&format!(
-                            "Cone search matched more than {} documents; use a smaller radius or paginate with limit and skip",
-                            MAX_CONE_SEARCH_RESULTS
-                        ));
-                    }
-                    data.push(doc);
-                }
+            match next_result(&mut cursor, &mut bytes_read).await {
+                Ok(Some(doc)) => data.push(doc),
                 Ok(None) => break,
-                Err(e) => return super::query_error(e, "Error collecting documents"),
+                Err(ResultError::TooLarge) => return too_large(),
+                Err(ResultError::Database(e)) => {
+                    return super::query_error(e, "Error collecting documents")
+                }
             }
         }
         docs.insert(object_name.clone(), data);
     }
-    return response::ok(
-        &format!("Cone Search on {} completed", catalog_name),
-        serde_json::json!(docs),
-    );
+    return response::ok_ser(&format!("Cone Search on {} completed", catalog_name), &docs);
 }

@@ -1,4 +1,5 @@
 use crate::alert::{LsstCandidate, ZtfCandidate};
+use crate::api::limits::{large_query_slot, next_result};
 use crate::api::models::response;
 use crate::api::routes::babamul::BabamulUser;
 use crate::enrichment::{LsstAlertProperties, ZtfAlertClassifications, ZtfAlertProperties};
@@ -90,7 +91,7 @@ enum AlertsQueryResult {
         ("is_star" = Option<bool>, Query, description = "Whether to filter for likely star candidates"),
         ("is_near_brightstar" = Option<bool>, Query, description = "Whether to filter for candidates near bright stars"),
         ("is_stationary" = Option<bool>, Query, description = "Whether to filter for stationary candidates"),
-        ("limit" = Option<u32>, Query, description = "Maximum number of alerts to return"),
+        ("limit" = Option<u32>, Query, description = "Maximum number of alerts to return (1-100000, default 1000)"),
         ("skip" = Option<u64>, Query, description = "Number of alerts to skip (for pagination)"),
     ),
     responses(
@@ -114,8 +115,12 @@ pub async fn get_alerts(
         }
     };
     let survey = path.into_inner();
+    let _slot = match large_query_slot().await {
+        Ok(slot) => slot,
+        Err(response) => return response,
+    };
 
-    let limit = query.limit.unwrap_or(100000);
+    let limit = query.limit.unwrap_or(1000);
     if limit == 0 || limit > 100000 {
         return response::bad_request("Invalid limit, must be between 1 and 100000");
     }
@@ -261,21 +266,17 @@ pub async fn get_alerts(
             };
 
             let mut results: Vec<EnrichedZtfAlert> = Vec::new();
-            while let Some(alert_doc) = match alert_cursor.try_next().await {
-                Ok(Some(doc)) => Some(doc),
-                Ok(None) => None,
-                Err(error) => {
-                    return response::internal_error(&format!(
-                        "error getting documents: {}",
-                        error
-                    ));
-                }
+            let mut bytes_read = 0;
+            while let Some(alert_doc) = match next_result(&mut alert_cursor, &mut bytes_read).await
+            {
+                Ok(doc) => doc,
+                Err(e) => return e.into_response("error getting documents"),
             } {
                 results.push(alert_doc);
             }
-            return response::ok(
+            return response::ok_ser(
                 &format!("found {} alerts matching query", results.len()),
-                serde_json::json!(results),
+                &results,
             );
         }
         Survey::Lsst => {
@@ -298,21 +299,17 @@ pub async fn get_alerts(
             };
 
             let mut results: Vec<EnrichedLsstAlert> = Vec::new();
-            while let Some(alert_doc) = match alert_cursor.try_next().await {
-                Ok(Some(doc)) => Some(doc),
-                Ok(None) => None,
-                Err(error) => {
-                    return response::internal_error(&format!(
-                        "error getting documents: {}",
-                        error
-                    ));
-                }
+            let mut bytes_read = 0;
+            while let Some(alert_doc) = match next_result(&mut alert_cursor, &mut bytes_read).await
+            {
+                Ok(doc) => doc,
+                Err(e) => return e.into_response("error getting documents"),
             } {
                 results.push(alert_doc);
             }
-            return response::ok(
+            return response::ok_ser(
                 &format!("found {} alerts matching query", results.len()),
-                serde_json::json!(results),
+                &results,
             );
         }
         _ => {
@@ -361,6 +358,7 @@ where
     let mut results: HashMap<String, Vec<T>> = HashMap::new();
     let mut alert_count = 0;
     let mut coordinates_with_matches_count = 0;
+    let mut bytes_read = 0;
     for (object_name, radec) in coordinates {
         let ra = radec[0];
         let dec = radec[1];
@@ -403,12 +401,9 @@ where
         };
 
         let mut alert_results: Vec<T> = Vec::new();
-        while let Some(alert_doc) = match alert_cursor.try_next().await {
-            Ok(Some(doc)) => Some(doc),
-            Ok(None) => None,
-            Err(error) => {
-                return response::internal_error(&format!("error getting documents: {}", error));
-            }
+        while let Some(alert_doc) = match next_result(&mut alert_cursor, &mut bytes_read).await {
+            Ok(doc) => doc,
+            Err(e) => return e.into_response("error getting documents"),
         } {
             alert_results.push(alert_doc);
             alert_count += 1;
@@ -418,14 +413,14 @@ where
         }
         results.insert(object_name.clone(), alert_results);
     }
-    response::ok(
+    response::ok_ser(
         &format!(
             "found cross-matches for {}/{} coordinates, with a total {} alerts",
             coordinates_with_matches_count,
             coordinates.len(),
             alert_count
         ),
-        serde_json::json!(results),
+        &results,
     )
 }
 
@@ -457,6 +452,10 @@ pub async fn cone_search_alerts(
         }
     };
     let survey = path.into_inner();
+    let _slot = match large_query_slot().await {
+        Ok(slot) => slot,
+        Err(response) => return response,
+    };
     let coordinates = &query.coordinates;
     // we must have more than 0 and less than 1000 coordinate pairs
     // to prevent expensive queries that could potentially timeout the server
