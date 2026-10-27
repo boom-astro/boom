@@ -489,6 +489,33 @@ crossmatch:
         deltachi2: 1
         spectype: 1
         zcat_nspec: 1
+    DESI_DR1_dwarfs:
+      radius: 300.0 # 300 arcseconds
+      use_distance: true
+      distance_key: "z"
+      distance_max: 30.0
+      distance_max_near: 300.0
+      angular_size_key: r50_r
+      # r50_r is a radius, not a diameter: 10.0 matches within 5 half-light radii.
+      angular_size_scale: 10.0
+      angular_size_radius_max: 1800.0
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        z: 1
+        zwarn: 1
+        lumi_dist_mpc: 1
+        dist_source: 1
+        log_mstar_m24: 1
+        log_mstar_m24_err: 1
+        mag_g: 1
+        mag_r: 1
+        mag_z: 1
+        r50_r: 1
+        dwarf_maskbit: 1
+        mstar_maskbit: 1
+        in_sga_2020: 1
     PS1_DR2:
       radius: 2.0
       use_distance: false
@@ -744,6 +771,33 @@ crossmatch:
         deltachi2: 1
         spectype: 1
         zcat_nspec: 1
+    DESI_DR1_dwarfs:
+      radius: 300.0 # 300 arcseconds
+      use_distance: true
+      distance_key: "z"
+      distance_max: 30.0
+      distance_max_near: 300.0
+      angular_size_key: r50_r
+      # r50_r is a radius, not a diameter: 10.0 matches within 5 half-light radii.
+      angular_size_scale: 10.0
+      angular_size_radius_max: 1800.0
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        z: 1
+        zwarn: 1
+        lumi_dist_mpc: 1
+        dist_source: 1
+        log_mstar_m24: 1
+        log_mstar_m24_err: 1
+        mag_g: 1
+        mag_r: 1
+        mag_z: 1
+        r50_r: 1
+        dwarf_maskbit: 1
+        mstar_maskbit: 1
+        in_sga_2020: 1
     PS1_DR2:
       radius: 2.0
       use_distance: false
@@ -999,6 +1053,33 @@ crossmatch:
         deltachi2: 1
         spectype: 1
         zcat_nspec: 1
+    DESI_DR1_dwarfs:
+      radius: 300.0 # 300 arcseconds
+      use_distance: true
+      distance_key: "z"
+      distance_max: 30.0
+      distance_max_near: 300.0
+      angular_size_key: r50_r
+      # r50_r is a radius, not a diameter: 10.0 matches within 5 half-light radii.
+      angular_size_scale: 10.0
+      angular_size_radius_max: 1800.0
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        z: 1
+        zwarn: 1
+        lumi_dist_mpc: 1
+        dist_source: 1
+        log_mstar_m24: 1
+        log_mstar_m24_err: 1
+        mag_g: 1
+        mag_r: 1
+        mag_z: 1
+        r50_r: 1
+        dwarf_maskbit: 1
+        mstar_maskbit: 1
+        in_sga_2020: 1
     PS1_DR2:
       radius: 2.0
       use_distance: false
@@ -1244,6 +1325,33 @@ crossmatch:
         deltachi2: 1
         spectype: 1
         zcat_nspec: 1
+    DESI_DR1_dwarfs:
+      radius: 300.0 # 300 arcseconds
+      use_distance: true
+      distance_key: "z"
+      distance_max: 30.0
+      distance_max_near: 300.0
+      angular_size_key: r50_r
+      # r50_r is a radius, not a diameter: 10.0 matches within 5 half-light radii.
+      angular_size_scale: 10.0
+      angular_size_radius_max: 1800.0
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        z: 1
+        zwarn: 1
+        lumi_dist_mpc: 1
+        dist_source: 1
+        log_mstar_m24: 1
+        log_mstar_m24_err: 1
+        mag_g: 1
+        mag_r: 1
+        mag_z: 1
+        r50_r: 1
+        dwarf_maskbit: 1
+        mstar_maskbit: 1
+        in_sga_2020: 1
     PS1_DR2:
       radius: 2.0
       use_distance: false
