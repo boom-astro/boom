@@ -6,6 +6,7 @@
 //! finds to the MPC catalog, and stores the result as tracks.
 
 use crate::utils::attach::{match_track, reproduced, Pool, Target};
+use crate::utils::digest2::neo_score_of;
 use crate::utils::enums::Survey;
 use crate::utils::fast::{FastTrack, FAST_KIND};
 use crate::utils::heliolinc::{
@@ -1278,6 +1279,13 @@ async fn persist(
             }
         };
         off_orbit += plan.dropped.len();
+        let plan = match kind
+            .filter(|k| *k == FAST_KIND)
+            .and_then(|_| neo_score_of(&found))
+        {
+            Some(score) => plan.with_neo_score(score.noid),
+            None => plan,
+        };
         if !plan.meets(min_detections, min_nights) {
             info!(
                 "dropping a track: {} detections over {} nights after {} contested detection(s) were left with another track and {} were off its orbit",
