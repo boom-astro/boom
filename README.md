@@ -23,7 +23,7 @@ BOOM is an alert broker. What sets it apart from other alert brokers is that it 
 Workers are managed by a Scheduler that can spawn or kill workers of each type.
 Currently, the number of workers is static, but we are working on dynamically scaling the number of workers based on the load of the system.
 
-BOOM also comes with an HTTP API, under development, which will allow users to query the `MongoDB` database, to define their own filters, and to have those filters run on alerts in real-time.
+BOOM also comes with an HTTP API, under development, which will allow users to query the `MongoDB` database, to define their own filters, and to have those filters run on alerts in real-time. Its Python client is [boom-client](https://github.com/boom-astro/boom-client).
 
 ## System Requirements
 
@@ -438,12 +438,15 @@ Or start individual services:
 docker compose --profile prod up -d consumer-ztf-public scheduler-ztf
 ```
 
-To run a one-shot operational task, override the service's command with `docker compose run`. This is typically used for database migrations such as `migrate_fp_flux` and `migrate_snr`:
+One-shot operational work — catalog ingests, migrations, reprocessing — runs through the [task system](docs/task-system.md) rather than as a binary. Start one from the admin page, or submit it to the API:
 
 ```bash
-docker compose --profile prod run --rm scheduler-ztf /app/migrate_fp_flux
-docker compose --profile prod run --rm scheduler-ztf /app/migrate_snr
+curl -X POST http://localhost:4000/tasks \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"task_type": "migrate_snr", "params": {"survey": "ztf"}}'
 ```
+
+There is deliberately no binary to run over SSH. These jobs take hours, so they have to survive a deploy, stream their logs while running, and be cancellable — and each one records who ran it, with which parameters, under which release, in the append-only `data_mutations` ledger. None of that is available to a process started from a shell.
 
 To tail logs or open a shell in a running container:
 
@@ -519,11 +522,11 @@ mkdir -p ./data/alerts
 
 **For Linux:**
 ```
-wget -q https://caltech.box.com/shared/static/qdois5qq2lmvp02ri50fum80vzr54505.gz -O ./data/alerts/boom_throughput.ZTF_alerts_aux.dump.gz
+wget -q https://github.com/boom-astro/boom/releases/download/test-data-v1/boom_throughput.ZTF_alerts_aux.dump.gz -O ./data/alerts/boom_throughput.ZTF_alerts_aux.dump.gz
 ```
 **For macOS:**
 ```
-curl -sL https://caltech.box.com/shared/static/qdois5qq2lmvp02ri50fum80vzr54505.gz -o ./data/alerts/boom_throughput.ZTF_alerts_aux.dump.gz
+curl -sL https://github.com/boom-astro/boom/releases/download/test-data-v1/boom_throughput.ZTF_alerts_aux.dump.gz -o ./data/alerts/boom_throughput.ZTF_alerts_aux.dump.gz
 ```
 
 Download the NED catalog for crossmatching.

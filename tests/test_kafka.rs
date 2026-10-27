@@ -11,6 +11,11 @@ use std::path::{Path, PathBuf};
 use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
 
+/// Our own mirror of the public ZTF archive, pinned on the `test-data-v1`
+/// release. The download path is worth exercising, but not against a third
+/// party whose outage then reads as our failure.
+const ARCHIVE_MIRROR: &str = "https://github.com/boom-astro/boom/releases/download/test-data-v1/";
+
 fn naive(date: &str) -> chrono::NaiveDateTime {
     chrono::NaiveDate::parse_from_str(date, "%Y%m%d")
         .unwrap()
@@ -23,36 +28,29 @@ async fn test_download_from_archive() {
     let date_str = "20231118";
     let expected_count = 271u32;
 
+    // An empty working directory, or this takes the early return that a
+    // pre-seeded checkout sets up and never exercises the download at all.
+    let tmp_dir = tempfile::tempdir().unwrap();
     let producer = ZtfAlertProducer::new(
         naive(date_str).date(),
         0,
         ProgramId::Public,
         "localhost:9092",
         false,
-    );
+    )
+    .with_working_dir(tmp_dir.path().to_str().unwrap())
+    .with_archive_base_url(ARCHIVE_MIRROR);
     let result = producer.download_alerts_from_archive().await;
 
-    // Verify the producer succeeded and reports the expected count
-    // Sometimes this is a little flaky and is one off; handle that case too
-    assert!(result.is_ok());
-    let downloaded_count = result.unwrap();
-    assert!(
-        downloaded_count.abs_diff(expected_count as i64) <= 2,
-        "expected {} ± 2, got {}",
-        expected_count,
-        downloaded_count
-    );
+    // Exact counts, unlike the live archive: the mirrored asset is pinned.
+    assert!(result.is_ok(), "{:?}", result.err());
+    assert_eq!(result.unwrap(), expected_count as i64);
 
     // Verify the data directory exists and has the right number of avro files:
-    let data_directory = Path::new("data/alerts/ztf/public").join(date_str);
-    assert!(data_directory.exists());
-    let avro_count = count_files_in_dir(data_directory.to_str().unwrap(), Some(&["avro"])).unwrap();
-    assert!(
-        avro_count.abs_diff(expected_count as usize) <= 2,
-        "expected {} ± 2, got {}",
-        expected_count,
-        avro_count
-    );
+    let data_directory = producer.data_directory();
+    assert!(Path::new(&data_directory).exists());
+    let avro_count = count_files_in_dir(&data_directory, Some(&["avro"])).unwrap();
+    assert_eq!(avro_count, expected_count as usize);
 }
 
 #[tokio::test]

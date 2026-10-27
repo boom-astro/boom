@@ -36,10 +36,6 @@ pub struct SearchHit {
     /// Similarity score under the collection's metric (higher is closer for
     /// `COSINE`/inner-product).
     pub score: f32,
-    /// Candid stored with the matched embedding, if requested/available.
-    pub candid: Option<i64>,
-    /// Julian date stored with the matched embedding, if requested/available.
-    pub jd: Option<f64>,
 }
 
 impl MilvusClient {
@@ -77,7 +73,7 @@ impl MilvusClient {
             search_input: Some(SearchInput::PlaceholderGroup(encode_float_placeholder(&[
                 query,
             ]))),
-            output_fields: vec![FIELD_CANDID.to_string(), FIELD_JD.to_string()],
+            output_fields: vec![],
             search_params,
             nq: 1,
             use_default_consistency: true,
@@ -267,17 +263,12 @@ fn parse_search_hits(data: Option<SearchResultData>) -> Vec<SearchHit> {
         _ => return vec![],
     };
 
-    let candids = long_column(&data.fields_data, FIELD_CANDID);
-    let jds = double_column(&data.fields_data, FIELD_JD);
-
     object_ids
         .into_iter()
         .enumerate()
         .map(|(i, object_id)| SearchHit {
             object_id,
             score: data.scores.get(i).copied().unwrap_or(f32::NAN),
-            candid: candids.as_ref().and_then(|c| c.get(i).copied()),
-            jd: jds.as_ref().and_then(|j| j.get(i).copied()),
         })
         .collect()
 }
@@ -467,7 +458,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_search_hits_zips_ids_scores_and_metadata() {
+    fn parse_search_hits_zips_ids_and_scores() {
         let data = SearchResultData {
             scores: vec![0.9, 0.8],
             ids: Some(IDs {
@@ -475,18 +466,6 @@ mod tests {
                     data: vec!["ZTF_A".into(), "ZTF_B".into()],
                 })),
             }),
-            fields_data: vec![
-                scalar(
-                    FIELD_CANDID,
-                    scalar_field::Data::LongData(LongArray { data: vec![10, 20] }),
-                ),
-                scalar(
-                    FIELD_JD,
-                    scalar_field::Data::DoubleData(DoubleArray {
-                        data: vec![2400000.5, 2400001.5],
-                    }),
-                ),
-            ],
             ..Default::default()
         };
 
@@ -497,14 +476,10 @@ mod tests {
                 SearchHit {
                     object_id: "ZTF_A".into(),
                     score: 0.9,
-                    candid: Some(10),
-                    jd: Some(2400000.5),
                 },
                 SearchHit {
                     object_id: "ZTF_B".into(),
                     score: 0.8,
-                    candid: Some(20),
-                    jd: Some(2400001.5),
                 },
             ]
         );

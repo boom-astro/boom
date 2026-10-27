@@ -425,6 +425,14 @@ pub struct Candidate {
     pub sgscore3: Option<f32>,
     pub distpsnr3: Option<f32>,
     pub nmtchps: i32,
+    #[serde(deserialize_with = "deserialize_some")]
+    pub rfid: Option<i64>,
+    #[serde(deserialize_with = "deserialize_some")]
+    pub jdstartref: Option<f64>,
+    #[serde(deserialize_with = "deserialize_some")]
+    pub jdendref: Option<f64>,
+    #[serde(deserialize_with = "deserialize_some")]
+    pub nframesref: Option<i32>,
     pub dsnrms: Option<f32>,
     pub ssnrms: Option<f32>,
     pub dsdiff: Option<f32>,
@@ -505,6 +513,15 @@ where
         .collect();
 
     Ok(Some(fp_hists))
+}
+
+/// Plain in the IPAC schema, but missing from alerts stored before BOOM kept them.
+fn deserialize_some<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
 }
 
 fn deserialize_ssnamenr<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
@@ -1074,8 +1091,17 @@ impl AlertWorker for ZtfAlertWorker {
                 &self.db,
             )
             .await?;
-            let host_galaxy =
-                host::associate_from_xmatches(ra, dec, &xmatches, &self.host_galaxy_config);
+            let host_galaxy = host::associate_with_photometry(
+                ra,
+                dec,
+                &xmatches,
+                &self.host_galaxy_config,
+                &self.xmatch_configs,
+                &Survey::Ztf,
+                &object_id,
+                &self.db,
+            )
+            .await;
             let obj = ZtfObject {
                 object_id: object_id.clone(),
                 prv_candidates,

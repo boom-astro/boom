@@ -18,11 +18,13 @@
 
 use boom::conf::{load_dotenv, AppConfig, LinkerConfig};
 use boom::utils::discovery::{
-    attach_pass, designations, load_window, persist_clusters, persist_tracks, recall,
-    reference_epoch, thor_clusters, track_detections, tracklets_per_night, Stop, ThorSearch,
+    associates_known, attach_pass, designations, known_movers, load_unknown, load_window,
+    persist_clusters, persist_fast, persist_tracks, recall, reference_epoch, satellites,
+    thor_clusters, track_detections, tracklets_per_night, Stop, ThorSearch,
 };
-use boom::utils::heliolinc::{link_tracklets, LinkConfig, Track};
-use boom::utils::identify::{IdentifyConfig, KnownRule, OrbitEntry};
+use boom::utils::fast::{fast_tracks, lsst_trails, FastSearch};
+use boom::utils::heliolinc::{link_tracklets, Conics, LinkConfig, Track, KM_S_PER_AU_DAY};
+use boom::utils::identify::{IdentifyConfig, KnownRule, MotionRule, OrbitEntry};
 use boom::utils::linking::{night_of, Detection, Tracklet, TrackletConfig};
 use boom::utils::mpcorb::load_catalogue;
 use boom::utils::o11y::logging::build_subscriber;
@@ -30,6 +32,7 @@ use boom::utils::sso_geometry::ZTF;
 use boom::utils::tracks::{lock_is_held, COUNTERS_COLLECTION};
 use clap::Parser;
 use mongodb::bson::{doc, Document};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Notify;
@@ -83,7 +86,7 @@ fn window(night: i64, nights: u32) -> (f64, f64) {
 }
 
 /// Tracklets per night, linked across nights with the default search.
-fn link(detections: &[Detection]) -> (Vec<Tracklet>, Vec<Track>, f64) {
+fn link(detections: &[Detection], conics: Conics) -> (Vec<Tracklet>, Vec<Track>, f64) {
     let tracklets = tracklets_per_night(detections, &TrackletConfig::default());
     if tracklets.is_empty() {
         return (tracklets, Vec::new(), 0.0);
@@ -91,7 +94,8 @@ fn link(detections: &[Detection]) -> (Vec<Tracklet>, Vec<Track>, f64) {
     let cfg = LinkConfig {
         reference_jd: reference_epoch(&tracklets),
         ..LinkConfig::default()
-    };
+    }
+    .with_conics(conics);
     let tracks = link_tracklets(&tracklets, detections, &cfg);
     (tracklets, tracks, cfg.reference_jd)
 }
@@ -111,6 +115,18 @@ fn known_objects(
             &KnownRule::default(),
         ),
         None => Vec::new(),
+    }
+}
+
+fn planets(
+    groups: &[Vec<i64>],
+    detections: &[Detection],
+    cfg: &LinkerConfig,
+) -> Vec<Option<&'static str>> {
+    if cfg.flag_satellites {
+        satellites(groups, detections)
+    } else {
+        Vec::new()
     }
 }
 
@@ -152,7 +168,7 @@ async fn run_night(db: &mongodb::Database, cfg: &LinkerConfig, night: i64, stop:
     let started = Instant::now();
     // Loading and linking take minutes, all wasted if the results cannot be
     // stored, so a night waits for another run's lock before starting.
-    if cfg.persist && (cfg.link || cfg.thor) {
+    if cfg.persist && (cfg.link || cfg.thor || cfg.fast) {
         match lock_is_held(db).await {
             Ok(false) => {}
             Ok(true) => {
@@ -169,7 +185,7 @@ async fn run_night(db: &mongodb::Database, cfg: &LinkerConfig, night: i64, stop:
     // object IPAC missed would be stored as a discovery candidate, so a run
     // that should match and cannot does not store anything. Read before the
     // window, so a night waiting on a missing catalog costs one quick read.
-    let catalog = if cfg.match_known && (cfg.link || cfg.thor) {
+    let catalog = if cfg.match_known && (cfg.link || cfg.thor || cfg.fast) {
         match load_catalogue(db).await {
             Ok(orbits) if orbits.is_empty() => {
                 error!("MPC_orbits is empty, so tracks cannot be matched; run mpcorb_ingest");
@@ -191,13 +207,34 @@ async fn run_night(db: &mongodb::Database, cfg: &LinkerConfig, night: i64, stop:
         jd_start, span, "searching the window ending with this night"
     );
 
-    let (detections, labels) = match load_window(db, jd_start, span, cfg.drb, false, None).await {
-        Ok(found) => found,
-        Err(error) => {
-            error!(%error, night, "could not load the window");
-            return false;
+    let first = night - cfg.window_nights as i64 + 1;
+    let mut detections = Vec::new();
+    for survey in &cfg.surveys {
+        match load_unknown(db, survey, first, night, cfg.drb, cfg.lsst_min_reliability).await {
+            Ok(mut found) => {
+                let loaded = found.len();
+                if let Some(orbits) = catalog
+                    .as_deref()
+                    .filter(|_| cfg.reject_known && !associates_known(survey))
+                {
+                    let known = known_movers(&found, orbits, &MotionRule::default());
+                    found.retain(|d| !known.contains(&d.id));
+                }
+                info!(
+                    %survey,
+                    detections = found.len(),
+                    known = loaded - found.len(),
+                    "loaded a survey's window"
+                );
+                detections.extend(found);
+            }
+            Err(error) => {
+                error!(%error, night, %survey, "could not load the window");
+                return false;
+            }
         }
-    };
+    }
+    let labels = HashMap::new();
     info!(
         detections = detections.len(),
         seconds = started.elapsed().as_secs_f64(),
@@ -205,6 +242,10 @@ async fn run_night(db: &mongodb::Database, cfg: &LinkerConfig, night: i64, stop:
     );
 
     let dry_run = !cfg.persist;
+    let conics = Conics::up_to(
+        cfg.max_vinf_km_s / KM_S_PER_AU_DAY,
+        cfg.max_unbound_rms_arcsec,
+    );
     let mut done = true;
     let mut found: Vec<Vec<i64>> = Vec::new();
 
@@ -212,12 +253,13 @@ async fn run_night(db: &mongodb::Database, cfg: &LinkerConfig, night: i64, stop:
         done = false;
     } else if cfg.link && !detections.is_empty() {
         let pass = Instant::now();
-        let (tracklets, tracks, reference_jd) = link(&detections);
+        let (tracklets, tracks, reference_jd) = link(&detections, conics);
         let groups: Vec<Vec<i64>> = tracks
             .iter()
             .map(|t| track_detections(t, &tracklets))
             .collect();
         let known = known_objects(&groups, &detections, catalog.as_deref());
+        let near = planets(&groups, &detections, cfg);
         let report = persist_tracks(
             db,
             &tracks,
@@ -226,6 +268,7 @@ async fn run_night(db: &mongodb::Database, cfg: &LinkerConfig, night: i64, stop:
             &detections,
             &labels,
             &known,
+            &near,
             dry_run,
             TrackletConfig::default().min_detections,
             LinkConfig::default().min_nights,
@@ -238,6 +281,7 @@ async fn run_night(db: &mongodb::Database, cfg: &LinkerConfig, night: i64, stop:
             tracklets = tracklets.len(),
             tracks = tracks.len(),
             known = known.iter().filter(|k| k.is_some()).count(),
+            satellites = near.iter().filter(|p| p.is_some()).count(),
             stored = report.stored,
             unchanged = report.unchanged,
             wrote = report.ran && !dry_run,
@@ -250,22 +294,27 @@ async fn run_night(db: &mongodb::Database, cfg: &LinkerConfig, night: i64, stop:
         done = false;
     } else if cfg.thor && !detections.is_empty() {
         let pass = Instant::now();
-        let (thor_start, _) = window(night, cfg.thor_window_nights);
+        let thor_first = night - cfg.thor_window_nights as i64 + 1;
         let recent: Vec<Detection> = detections
             .iter()
-            .filter(|d| d.jd >= thor_start)
+            .filter(|d| d.night() >= thor_first)
             .copied()
             .collect();
-        let search = ThorSearch::default();
+        let search = ThorSearch {
+            conics,
+            ..ThorSearch::default()
+        };
         let clusters = thor_clusters(&recent, &search);
         let groups: Vec<Vec<i64>> = clusters.iter().map(|(c, _)| c.ids.clone()).collect();
         let known = known_objects(&groups, &recent, catalog.as_deref());
+        let near = planets(&groups, &recent, cfg);
         let report = persist_clusters(
             db,
             &clusters,
             &recent,
             &labels,
             &known,
+            &near,
             dry_run,
             search.config.min_detections,
             search.config.min_nights,
@@ -278,12 +327,70 @@ async fn run_night(db: &mongodb::Database, cfg: &LinkerConfig, night: i64, stop:
             detections = recent.len(),
             clusters = clusters.len(),
             known = known.iter().filter(|k| k.is_some()).count(),
+            satellites = near.iter().filter(|p| p.is_some()).count(),
             stored = report.stored,
             unchanged = report.unchanged,
             wrote = report.ran && !dry_run,
             seconds = pass.elapsed().as_secs_f64(),
             "THOR pass done"
         );
+    }
+
+    if cfg.fast && !detections.is_empty() && stop.requested() {
+        done = false;
+    } else if cfg.fast && !detections.is_empty() {
+        let pass = Instant::now();
+        let fast_first = night - cfg.fast_window_nights as i64 + 1;
+        let recent: Vec<Detection> = detections
+            .iter()
+            .filter(|d| d.night() >= fast_first)
+            .copied()
+            .collect();
+        match lsst_trails(db, &recent).await {
+            Ok(trails) => {
+                let search = FastSearch {
+                    min_rate_deg_per_day: cfg.fast_min_rate_deg_per_day,
+                    max_rate_deg_per_day: cfg.fast_max_rate_deg_per_day,
+                    dense_detections: cfg.fast_dense_detections,
+                    conics,
+                    ..FastSearch::default()
+                };
+                let tracks = fast_tracks(&recent, &trails, &search);
+                let groups: Vec<Vec<i64>> = tracks.iter().map(|t| t.members.clone()).collect();
+                let known = known_objects(&groups, &recent, catalog.as_deref());
+                let near = planets(&groups, &recent, cfg);
+                let report = persist_fast(
+                    db,
+                    &tracks,
+                    &recent,
+                    &labels,
+                    &known,
+                    &near,
+                    dry_run,
+                    search.min_detections,
+                    search.min_nights,
+                    stop,
+                )
+                .await;
+                done &= report.complete();
+                found.extend(groups);
+                info!(
+                    detections = recent.len(),
+                    trailed = trails.len(),
+                    tracks = tracks.len(),
+                    known = known.iter().filter(|k| k.is_some()).count(),
+                    stored = report.stored,
+                    unchanged = report.unchanged,
+                    wrote = report.ran && !dry_run,
+                    seconds = pass.elapsed().as_secs_f64(),
+                    "fast pass done"
+                );
+            }
+            Err(error) => {
+                error!(%error, "could not read Rubin's trail lengths for the fast pass");
+                done = false;
+            }
+        }
     }
 
     if cfg.attach && !detections.is_empty() && stop.requested() {
@@ -298,6 +405,7 @@ async fn run_night(db: &mongodb::Database, cfg: &LinkerConfig, night: i64, stop:
             since,
             LinkConfig::default().max_residual_arcsec,
             &ZTF,
+            conics,
             dry_run,
             stop,
         )
@@ -330,7 +438,7 @@ async fn run_night(db: &mongodb::Database, cfg: &LinkerConfig, night: i64, stop:
         let (start, span) = window(night, cfg.recall_window_nights);
         match load_window(db, start, span, cfg.drb, true, None).await {
             Ok((identified, names)) => {
-                let (tracklets, tracks, _) = link(&identified);
+                let (tracklets, tracks, _) = link(&identified, Conics::Bound);
                 let r = recall(&tracks, &tracklets, &names);
                 info!(
                     detections = identified.len(),
@@ -538,6 +646,14 @@ mod tests {
             },
             LinkerConfig {
                 drb: 1.5,
+                ..LinkerConfig::default()
+            },
+            LinkerConfig {
+                max_vinf_km_s: -1.0,
+                ..LinkerConfig::default()
+            },
+            LinkerConfig {
+                max_unbound_rms_arcsec: 0.0,
                 ..LinkerConfig::default()
             },
         ] {

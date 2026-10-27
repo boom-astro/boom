@@ -1445,6 +1445,11 @@ pub struct LinkerConfig {
     /// Minimum drb for a detection to be searched.
     #[serde(default = "default_linker_drb")]
     pub drb: f64,
+    /// Minimum reliability for an LSST detection to be searched.
+    #[serde(default = "default_linker_lsst_min_reliability")]
+    pub lsst_min_reliability: f64,
+    #[serde(default = "default_linker_surveys")]
+    pub surveys: Vec<Survey>,
     /// Link tracklets across nights.
     #[serde(default = "default_linker_pass")]
     pub link: bool,
@@ -1455,6 +1460,10 @@ pub struct LinkerConfig {
     /// designation as a recovery rather than as a discovery candidate.
     #[serde(default = "default_linker_pass")]
     pub match_known: bool,
+    #[serde(default = "default_linker_pass")]
+    pub reject_known: bool,
+    #[serde(default)]
+    pub flag_satellites: bool,
     /// Store tracks and stamp their alerts. Off, a run reports what it would
     /// store and writes nothing.
     #[serde(default = "default_linker_pass")]
@@ -1471,12 +1480,33 @@ pub struct LinkerConfig {
     pub attach: bool,
     #[serde(default = "default_linker_attach_lookback_nights")]
     pub attach_lookback_nights: u32,
+    /// Also link and recover unbound orbits, up to this hyperbolic excess
+    /// speed, km/s.
+    #[serde(default)]
+    pub max_vinf_km_s: f64,
+    /// Largest residual an unbound orbit may leave and stand, arcseconds. A
+    /// track fitting worse keeps its bound fit if that passes, or is dropped.
+    #[serde(default = "default_linker_max_unbound_rms_arcsec")]
+    pub max_unbound_rms_arcsec: f64,
+    #[serde(default)]
+    pub fast: bool,
+    #[serde(default = "default_linker_fast_window_nights")]
+    pub fast_window_nights: u32,
+    #[serde(default = "default_linker_fast_min_rate")]
+    pub fast_min_rate_deg_per_day: f64,
+    #[serde(default = "default_linker_fast_max_rate")]
+    pub fast_max_rate_deg_per_day: f64,
+    #[serde(default = "default_linker_fast_dense_detections")]
+    pub fast_dense_detections: usize,
 }
 
 impl LinkerConfig {
     /// Settings no night could be searched with, which would otherwise shift
     /// or empty every window without saying so.
     pub fn validate(&self) -> Result<(), String> {
+        if self.surveys.is_empty() {
+            return Err("surveys must name at least one survey".to_string());
+        }
         if self.run_after_utc_hour > 23 {
             return Err(format!(
                 "run_after_utc_hour is {}, not an hour of the day",
@@ -1495,6 +1525,38 @@ impl LinkerConfig {
         if !(0.0..=1.0).contains(&self.drb) {
             return Err(format!("drb is {}, but scores run from 0 to 1", self.drb));
         }
+        if !(0.0..=1.0).contains(&self.lsst_min_reliability) {
+            return Err(format!(
+                "lsst_min_reliability is {}, but scores run from 0 to 1",
+                self.lsst_min_reliability
+            ));
+        }
+        if !(0.0..f64::INFINITY).contains(&self.max_vinf_km_s) {
+            return Err(format!(
+                "max_vinf_km_s is {}, but must be zero or a positive speed",
+                self.max_vinf_km_s
+            ));
+        }
+        if !self.max_unbound_rms_arcsec.is_finite() || self.max_unbound_rms_arcsec <= 0.0 {
+            return Err(format!(
+                "max_unbound_rms_arcsec is {}, but must be a positive residual",
+                self.max_unbound_rms_arcsec
+            ));
+        }
+        if self.fast_window_nights == 0 || self.fast_window_nights > self.window_nights {
+            return Err(format!(
+                "fast_window_nights is {}, but must be between 1 and window_nights ({})",
+                self.fast_window_nights, self.window_nights
+            ));
+        }
+        if !(self.fast_min_rate_deg_per_day > 0.0
+            && self.fast_min_rate_deg_per_day < self.fast_max_rate_deg_per_day)
+        {
+            return Err(format!(
+                "fast rates run from {} to {} deg/day, which is no range",
+                self.fast_min_rate_deg_per_day, self.fast_max_rate_deg_per_day
+            ));
+        }
         Ok(())
     }
 }
@@ -1506,20 +1568,51 @@ impl Default for LinkerConfig {
             thor_window_nights: default_linker_thor_window_nights(),
             run_after_utc_hour: default_linker_run_after_utc_hour(),
             drb: default_linker_drb(),
+            lsst_min_reliability: default_linker_lsst_min_reliability(),
+            surveys: default_linker_surveys(),
             link: default_linker_pass(),
             thor: default_linker_pass(),
             match_known: default_linker_pass(),
+            reject_known: default_linker_pass(),
+            flag_satellites: false,
             persist: default_linker_pass(),
             recall: default_linker_pass(),
             recall_window_nights: default_linker_recall_window_nights(),
             attach: default_linker_pass(),
             attach_lookback_nights: default_linker_attach_lookback_nights(),
+            max_vinf_km_s: 0.0,
+            max_unbound_rms_arcsec: default_linker_max_unbound_rms_arcsec(),
+            fast: false,
+            fast_window_nights: default_linker_fast_window_nights(),
+            fast_min_rate_deg_per_day: default_linker_fast_min_rate(),
+            fast_max_rate_deg_per_day: default_linker_fast_max_rate(),
+            fast_dense_detections: default_linker_fast_dense_detections(),
         }
     }
 }
 
+fn default_linker_max_unbound_rms_arcsec() -> f64 {
+    0.5
+}
+
 fn default_linker_attach_lookback_nights() -> u32 {
     60
+}
+
+fn default_linker_fast_window_nights() -> u32 {
+    7
+}
+
+fn default_linker_fast_min_rate() -> f64 {
+    1.0
+}
+
+fn default_linker_fast_max_rate() -> f64 {
+    25.0
+}
+
+fn default_linker_fast_dense_detections() -> usize {
+    10_000
 }
 
 fn default_linker_recall_window_nights() -> u32 {
@@ -1540,6 +1633,14 @@ fn default_linker_run_after_utc_hour() -> u32 {
 
 fn default_linker_drb() -> f64 {
     0.8
+}
+
+fn default_linker_lsst_min_reliability() -> f64 {
+    0.5
+}
+
+fn default_linker_surveys() -> Vec<Survey> {
+    vec![Survey::Ztf]
 }
 
 fn default_linker_pass() -> bool {

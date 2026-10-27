@@ -22,6 +22,10 @@ use utoipa::OpenApi;
 use utoipa_scalar::{Scalar, Servable};
 use uuid::Uuid;
 
+// glibc keeps freed memory in per-thread arenas; jemalloc reuses it across workers and returns it to the OS.
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     // Load environment variables from .env file before anything else
@@ -189,6 +193,8 @@ async fn main() -> std::io::Result<()> {
                     .service(routes::babamul::tokens::delete_token)
                     .service(routes::babamul::admin::get_admin_users)
                     .service(routes::babamul::admin::patch_admin_user)
+                    .service(routes::babamul::embeddings::post_babamul_similar_objects)
+                    .service(routes::babamul::embeddings::get_babamul_embeddings_count)
                     // Larger JSON limit for skymap uploads (~130 MB base64). This
                     // prefix-less scope swallows any sibling after it, so keep it last.
                     .service(
@@ -242,13 +248,13 @@ async fn main() -> std::io::Result<()> {
                 .service(routes::queries::post_cone_search_query)
                 .service(routes::surveys::get_cutouts)
                 .service(routes::surveys::get_batch_cutouts)
+                .service(routes::surveys::get_tracks)
                 .service(routes::surveys::get_track)
                 .service(routes::queries::post_count_query)
                 .service(routes::queries::post_estimated_count_query)
                 .service(routes::queries::post_pipeline_query)
                 .service(routes::embeddings::post_similar_objects)
                 .service(routes::embeddings::get_embeddings_count)
-                .service(routes::embeddings::delete_object_embedding)
                 // Larger JSON limit for the skymap these accept (~130 MB base64).
                 // This prefix-less scope swallows any sibling after it, so keep it last.
                 .service(

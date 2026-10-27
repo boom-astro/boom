@@ -129,6 +129,11 @@ in isolation before chasing one.
 These apply to comments, doc comments, log lines, and user-facing strings —
 anywhere the repo writes English rather than code.
 
+- **Terse but accurate.** Say what the code cannot — the constraint, the
+  failure being avoided, why the obvious alternative is wrong — and stop. A
+  sentence or two usually does it. A comment longer than the code it explains
+  means the reasoning belongs in the commit message or a doc, with a pointer
+  to it here if it needs one.
 - **US spelling.** `normalized`, not `normalised`; `honored`, `canceled`,
   `catalog`, `center`, `labeled`. The `-ize`/`-or` forms throughout.
 - **One space after a period.** Not two.

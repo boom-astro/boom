@@ -1,4 +1,4 @@
-use actix_web::HttpResponse;
+use actix_web::{http::header::ContentType, HttpResponse};
 use serde_with::{serde_as, skip_serializing_none};
 
 #[serde_as]
@@ -50,16 +50,34 @@ pub fn request_timeout(message: &str) -> HttpResponse {
     HttpResponse::RequestTimeout().json(ApiResponseBody::error(message))
 }
 
+pub fn service_unavailable(message: &str) -> HttpResponse {
+    HttpResponse::ServiceUnavailable().json(ApiResponseBody::error(message))
+}
+
+/// A request that is well-formed and permitted but conflicts with the state it
+/// found, so retrying it against fresh state is the right next move.
+pub fn conflict(message: &str) -> HttpResponse {
+    HttpResponse::Conflict().json(ApiResponseBody::error(message))
+}
+
 pub fn forbidden(message: &str) -> HttpResponse {
     HttpResponse::Forbidden().json(ApiResponseBody::error(message))
 }
 
-// have an ok_ser() that takes a serializable object and converts it to serde_json::Value
+#[derive(serde::Serialize)]
+struct SerializedResponseBody<'a, T> {
+    message: &'a str,
+    data: T,
+}
+
+/// Same body as `ok`, written straight from `data` without building a `serde_json::Value` first.
 pub fn ok_ser<T: serde::Serialize>(message: &str, data: T) -> HttpResponse {
-    match serde_json::to_value(data) {
-        Ok(data_value) => HttpResponse::Ok().json(ApiResponseBody::ok(message, data_value)),
+    match serde_json::to_vec(&SerializedResponseBody { message, data }) {
+        Ok(body) => HttpResponse::Ok()
+            .content_type(ContentType::json())
+            .body(body),
         Err(e) => {
-            tracing::info!("Serialization error: {}", e); // TODO: replace with tracing once integrated
+            tracing::error!("Serialization error: {}", e);
             HttpResponse::InternalServerError()
                 .json(ApiResponseBody::error("Failed to serialize response data"))
         }

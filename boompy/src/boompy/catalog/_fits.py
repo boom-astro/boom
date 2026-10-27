@@ -18,7 +18,7 @@ def fits_to_parquet(
     fits_path: Path,
     out_path: Path,
     columns: list[str],
-    hdu: int = 1,
+    hdu: int | str = 1,
     row_filter=None,
     label: str = "",
 ) -> Path:

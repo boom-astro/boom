@@ -121,11 +121,6 @@ async fn test_ztf_alert_to_milvus_e2e() {
         "self-similarity should be ~1.0 under COSINE, got {}",
         self_hit.score
     );
-    assert_eq!(
-        self_hit.candid,
-        Some(candid),
-        "search hit should carry the stored candid"
-    );
 
     // The collection now holds at least our row.
     assert!(

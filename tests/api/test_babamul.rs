@@ -25,6 +25,17 @@ mod tests {
     use mongodb::Database;
     use std::collections::HashMap;
 
+    /// Serializes the tests that demote an admin.
+    ///
+    /// Demotions are serialized in the API by a lock document, deliberately:
+    /// "at least one admin remains" spans documents, so counting and then
+    /// writing is only sound while nothing else is doing the same. That lock is
+    /// deployment-wide, and this suite shares one database -- so a test that
+    /// holds it on purpose would make a concurrent demotion elsewhere fail with
+    /// the 409 it is designed to give.
+    static DEMOTION_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+        std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
     struct TestUser {
         pub user: BabamulUser,
         pub token: String,
@@ -5177,7 +5188,7 @@ mod tests {
         let mut ids = Vec::new();
         for members in [&mixed[..], &private[..]] {
             let jds: Vec<f64> = (0..members.len()).map(|k| 2460000.0 + k as f64).collect();
-            let plan = plan_upsert(&database, members, &jds, None, None, None)
+            let plan = plan_upsert(&database, members, &jds, None, None, None, None)
                 .await
                 .unwrap();
             ids.push(commit_upsert(&database, plan).await.unwrap().track.id);
@@ -5242,6 +5253,7 @@ mod tests {
 
     #[actix_rt::test]
     async fn test_babamul_admin_manages_user_access() {
+        let _demoting = DEMOTION_LOCK.lock().await;
         load_dotenv();
         let database: Database = get_test_db_api().await;
         let auth_app_data = get_test_auth(&database).await.unwrap();
@@ -5398,6 +5410,312 @@ mod tests {
         );
     }
 
+    /// An ACL edit applies as a delta, so a second admin editing the same user
+    /// does not revert the first one's change.
+    ///
+    /// The whole-list form is still accepted and is still last-write-wins; what
+    /// this covers is that the delta form keeps what it was not asked about.
+    #[actix_rt::test]
+    async fn test_babamul_admin_acl_edits_apply_as_a_delta() {
+        let _demoting = DEMOTION_LOCK.lock().await;
+        load_dotenv();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+        let admin = TestUser::create(&database, &auth_app_data).await;
+        let user = TestUser::create(&database, &auth_app_data).await;
+        let users: mongodb::Collection<BabamulUser> = database.collection("babamul_users");
+        users
+            .update_one(
+                doc! { "_id": &admin.user.id },
+                doc! { "$set": { "is_admin": true } },
+            )
+            .await
+            .unwrap();
+
+        let app = test::init_service(
+            App::new().service(
+                web::scope("/babamul")
+                    .app_data(web::Data::new(database.clone()))
+                    .app_data(web::Data::new(auth_app_data))
+                    .wrap(from_fn(babamul_auth_middleware))
+                    .service(routes::babamul::admin::patch_admin_user),
+            ),
+        )
+        .await;
+
+        let patch = |id: &str, body: serde_json::Value| {
+            test::TestRequest::patch()
+                .uri(&format!("/babamul/admin/users/{}", id))
+                .insert_header(("Authorization", format!("Bearer {}", admin.token)))
+                .set_json(body)
+                .to_request()
+        };
+        let acls_of = |resp_body: &serde_json::Value| resp_body["data"]["acls"].clone();
+
+        // Somebody else grants partnership access while this admin's page still
+        // shows an empty row.
+        users
+            .update_one(
+                doc! { "_id": &user.user.id },
+                doc! { "$set": { "acls": ["ztf_partnership"] } },
+            )
+            .await
+            .unwrap();
+
+        let resp = test::call_service(
+            &app,
+            patch(
+                &user.user.id,
+                serde_json::json!({ "grant_acls": ["winter"] }),
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = read_json_response(resp).await;
+        assert_eq!(
+            acls_of(&body),
+            serde_json::json!(["winter", "ztf_partnership"]),
+            "granting WINTER must not revert the partnership grant it never saw"
+        );
+
+        // Granting Caltech access brings the partnership access it requires.
+        let resp = test::call_service(
+            &app,
+            patch(
+                &user.user.id,
+                serde_json::json!({ "grant_acls": ["ztf_caltech"] }),
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            acls_of(&read_json_response(resp).await),
+            serde_json::json!(["winter", "ztf_partnership", "ztf_caltech"])
+        );
+
+        // Revoking it takes the Caltech access that depends on it, rather than
+        // refusing over a combination the caller did not ask for.
+        let resp = test::call_service(
+            &app,
+            patch(
+                &user.user.id,
+                serde_json::json!({ "revoke_acls": ["ztf_partnership"] }),
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            acls_of(&read_json_response(resp).await),
+            serde_json::json!(["winter"])
+        );
+
+        // Replacing the list and editing it mean different things when two
+        // admins edit at once, so one request may not ask for both.
+        let resp = test::call_service(
+            &app,
+            patch(
+                &user.user.id,
+                serde_json::json!({ "acls": [], "grant_acls": ["winter"] }),
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        let resp = test::call_service(
+            &app,
+            patch(
+                &user.user.id,
+                serde_json::json!({ "grant_acls": ["winter"], "revoke_acls": ["winter"] }),
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        let resp = test::call_service(
+            &app,
+            patch("missing", serde_json::json!({ "grant_acls": ["winter"] })),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        // Demoting one of several admins is an ordinary edit; only the last one
+        // is refused, and the count is deployment-wide so this suite -- which
+        // shares a database -- cannot assert that case.
+        users
+            .update_one(
+                doc! { "_id": &user.user.id },
+                doc! { "$set": { "is_admin": true } },
+            )
+            .await
+            .unwrap();
+        let resp = test::call_service(
+            &app,
+            patch(&user.user.id, serde_json::json!({ "is_admin": false })),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(read_json_response(resp).await["data"]["is_admin"], false);
+
+        let stored = users
+            .find_one(doc! { "_id": &user.user.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!stored.is_admin);
+        assert_eq!(stored.acls, vec![routes::babamul::BabamulAcl::Winter]);
+    }
+
+    /// The two protections that are only protections if they actually bite.
+    ///
+    /// Each of these fails if the guard it covers is removed, which the
+    /// delta-semantics test above does not: that one interleaves its competing
+    /// write before the request, so the handler's first read already sees it.
+    #[actix_rt::test]
+    async fn test_babamul_admin_guards_bite() {
+        let _demoting = DEMOTION_LOCK.lock().await;
+        load_dotenv();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+        let admin = TestUser::create(&database, &auth_app_data).await;
+        let user = TestUser::create(&database, &auth_app_data).await;
+        let users: mongodb::Collection<BabamulUser> = database.collection("babamul_users");
+        users
+            .update_one(
+                doc! { "_id": &admin.user.id },
+                doc! { "$set": { "is_admin": true } },
+            )
+            .await
+            .unwrap();
+
+        let app = test::init_service(
+            App::new().service(
+                web::scope("/babamul")
+                    .app_data(web::Data::new(database.clone()))
+                    .app_data(web::Data::new(auth_app_data))
+                    .wrap(from_fn(babamul_auth_middleware))
+                    .service(routes::babamul::admin::patch_admin_user),
+            ),
+        )
+        .await;
+
+        let patch = |id: &str, body: serde_json::Value| {
+            test::TestRequest::patch()
+                .uri(&format!("/babamul/admin/users/{}", id))
+                .insert_header(("Authorization", format!("Bearer {}", admin.token)))
+                .set_json(body)
+                .to_request()
+        };
+
+        // An account from before the acls field existed has no acls at all,
+        // and MongoDB does not consider a missing field equal to []. Matching
+        // only [] in the compare-and-swap would make every delta against one
+        // of these exhaust its retries and return a conflict nothing could
+        // resolve.
+        users
+            .update_one(
+                doc! { "_id": &user.user.id },
+                doc! { "$unset": { "acls": "" } },
+            )
+            .await
+            .unwrap();
+        let resp = test::call_service(
+            &app,
+            patch(
+                &user.user.id,
+                serde_json::json!({ "grant_acls": ["winter"] }),
+            ),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "a delta has to reach an account whose acls field was never written"
+        );
+        assert_eq!(
+            read_json_response(resp).await["data"]["acls"],
+            serde_json::json!(["winter"])
+        );
+
+        // Granting Caltech access while revoking the partnership access it
+        // requires asks for a state that cannot exist. It passed the overlap
+        // check and the interlock then removed the Caltech access the request
+        // had just asked to grant, reporting success.
+        let resp = test::call_service(
+            &app,
+            patch(
+                &user.user.id,
+                serde_json::json!({
+                    "grant_acls": ["ztf_caltech"],
+                    "revoke_acls": ["ztf_partnership"],
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Demotions are serialized by a lock, because "at least one admin
+        // remains" spans documents: counting and then writing without one
+        // lets two admins demote each other down to zero. Held here by hand,
+        // which is what another API instance mid-demotion looks like.
+        let locks = database.collection::<mongodb::bson::Document>("locks");
+        let held_until = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64()
+            + 30.0;
+        users
+            .update_one(
+                doc! { "_id": &user.user.id },
+                doc! { "$set": { "is_admin": true } },
+            )
+            .await
+            .unwrap();
+        locks
+            .update_one(
+                doc! { "_id": "babamul_admin_demotion" },
+                doc! { "$set": { "expires_at": held_until, "token": mongodb::bson::oid::ObjectId::new() } },
+            )
+            .upsert(true)
+            .await
+            .unwrap();
+
+        let resp = test::call_service(
+            &app,
+            patch(&user.user.id, serde_json::json!({ "is_admin": false })),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::CONFLICT,
+            "a demotion must not proceed while another one holds the lock"
+        );
+        assert!(
+            users
+                .find_one(doc! { "_id": &user.user.id })
+                .await
+                .unwrap()
+                .unwrap()
+                .is_admin
+        );
+
+        // Released, and the same demotion goes through -- so the 409 above was
+        // the lock and not something else refusing.
+        locks
+            .update_one(
+                doc! { "_id": "babamul_admin_demotion" },
+                doc! { "$set": { "expires_at": 0.0 } },
+            )
+            .await
+            .unwrap();
+        let resp = test::call_service(
+            &app,
+            patch(&user.user.id, serde_json::json!({ "is_admin": false })),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(read_json_response(resp).await["data"]["is_admin"], false);
+    }
+
     /// Test GET /babamul/surveys/ztf/villar-fit
     #[actix_rt::test]
     async fn test_get_villar_fit() {
@@ -5426,7 +5744,7 @@ mod tests {
                 doc! { "_id": candid },
                 doc! { "$set": {
                     "villar_fit.reduced_chi2": 1.23,
-                    "villar_fit.peak_flux": 789.0,
+                    "villar_fit.peak_mag": 16.58,
                     "villar_fit.A_ZTF_g": 4.56,
                     "villar_fit.A_ZTF_r": f64::NAN,
                 }},
@@ -5463,10 +5781,10 @@ mod tests {
         let body = read_json_response(resp).await;
         assert_eq!(body["data"]["candid"].as_i64().unwrap(), candid);
         assert_eq!(body["data"]["reduced_chi2"].as_f64().unwrap(), 1.23);
-        assert_eq!(body["data"]["peak_flux"].as_f64().unwrap(), 789.0);
+        assert_eq!(body["data"]["peak_mag"].as_f64().unwrap(), 16.58);
         assert!(
-            body["data"]["params"].get("peak_flux").is_none(),
-            "peak_flux is not a model parameter"
+            body["data"]["params"].get("peak_mag").is_none(),
+            "peak_mag is not a model parameter"
         );
         assert_eq!(body["data"]["params"]["A_ZTF_g"].as_f64().unwrap(), 4.56);
         assert!(

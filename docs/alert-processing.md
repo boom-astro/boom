@@ -84,3 +84,32 @@ each one will have its own:
 - Object collection
 - Image collection
 - Output stream
+
+## The enrichment set, and what happens when it changes
+
+The ZTF enrichment worker writes a fixed set of named quantities onto each
+alert: the ACAI scores (`acai_h`, `acai_n`, `acai_v`, `acai_o`, `acai_b`),
+`btsbot` and the AppleCiDER outputs (`applecider_fusion`, `applecider_outputs`)
+under `classifications`, the photometric properties under `properties`, and, on
+GPU builds, the Villar light-curve fit under `villar_fit`. The LSST, DECam and
+WINTER workers write `properties` only.
+
+Adding a component is only partly detectable after the fact. Outputs that can be
+absent are skipped rather than written as null, but a missing key does not prove
+that the alert predates the component: `classifications` is left out when the
+cutouts cannot be read, and the AppleCiDER keys are also left out for light
+curves it does not cover or when inference fails (see
+[AppleCiDER](applecider.md#when-the-fields-are-absent)). Selecting on a missing
+key alone also picks up every alert the component skipped on purpose, so the
+selection has to be limited to alerts enriched before the component was
+deployed. Crossmatches do not have this problem: an alert whose `cross_matches`
+has no key for a catalog predates that catalog being configured. Pushing the
+selected candids onto a reprocessing queue is how a new component is filled in;
+`enrich_reprocess` drains that queue, computes the scores and writes them back
+without forwarding anything to the filter queue.
+
+Changing a component is not detectable. Nothing records which model version
+produced a score, so a retrained model that keeps the same field name leaves no
+trace in the document, and an alert scored by the old weights cannot be told
+apart from one scored by the new. Re-running after a retrain means selecting the
+alerts by some other means, usually a date range.

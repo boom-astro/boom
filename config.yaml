@@ -263,6 +263,8 @@ host_galaxy:
   rex_min_snr: 5.0
   rex_max_fracflux: 0.5
   isophote_mag: 25.0 # puts Legacy R_e on the NED-LVS D25 scale
+  ps1_catalog: PS1_DR2 # host photometry fallback, queried at the host's position
+  photometry_match_arcsec: 2.0
 # Moving-object discovery, run once each ZTF night is over by the linker-ztf
 # service, which deploys with the rest of the prod profile.
 # Tracks are stored in ZTF_tracks and stamped on their alerts; nothing is sent
@@ -278,11 +280,17 @@ linker:
   # Palomar's nights end by about 13:00 UTC.
   run_after_utc_hour: 14
   drb: 0.8 # minimum drb for a detection to be searched
+  # Minimum reliability for an LSST detection to be searched. On 14 nights, 0.6
+  # instead of 0.5 runs four times faster but links a quarter fewer faint objects.
+  lsst_min_reliability: 0.5
+  surveys: [ztf, lsst, decam, winter] # linked together, any of ztf, lsst, decam, winter
   link: true # link tracklets across nights
   thor: true # recover objects seen once a night
   # Store known objects under their MPC designation, as recoveries rather
   # than discovery candidates.
   match_known: true
+  reject_known: true # drop DECam and WINTER tracklets moving as a known object
+  flag_satellites: true # mark tracks that stay next to a giant planet
   persist: true # false reports what would be stored and writes nothing
   # Also link the detections IPAC already identified, store nothing, and log
   # how many of those objects the search recovered.
@@ -292,6 +300,17 @@ linker:
   recall_window_nights: 5
   attach: true
   attach_lookback_nights: 60
+  # Also link and recover unbound orbits up to this hyperbolic excess speed
+  # (km/s), 0 is off. THOR then runs about 30 times longer.
+  max_vinf_km_s: 100.0
+  # Largest residual an unbound orbit may leave (arcsec); a track fitting worse
+  # keeps its bound fit if that passes, or is dropped.
+  max_unbound_rms_arcsec: 0.5
+  fast: false # link movers too fast for the linking pass
+  fast_window_nights: 7
+  fast_min_rate_deg_per_day: 1.0
+  fast_max_rate_deg_per_day: 25.0
+  fast_dense_detections: 10000 # above this a night keeps no untrailed pairs
 crossmatch:
   ztf:
     Gaia_DR3:

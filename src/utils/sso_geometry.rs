@@ -7,6 +7,7 @@
 //! perturbed integrator would be needed to predict *where* an object is, not to
 //! say how far away it was.
 
+use crate::utils::orbit_fit::C_AU_PER_DAY;
 use std::f64::consts::PI;
 
 /// Gaussian gravitational constant, rad/day.
@@ -14,7 +15,7 @@ const GAUSS_K: f64 = 0.017_202_098_95;
 /// Obliquity is not applied: everything here stays in the ecliptic frame.
 const KEPLER_TOLERANCE: f64 = 1e-12;
 /// Where both the elliptical and hyperbolic solutions go numerically unusable.
-const PARABOLIC_TOLERANCE: f64 = 1e-8;
+pub(crate) const PARABOLIC_TOLERANCE: f64 = 1e-8;
 const KEPLER_MAX_ITER: usize = 64;
 
 /// Heliocentric osculating elements at `epoch_jd`, as MPCORB distributes them.
@@ -175,11 +176,13 @@ pub fn heliocentric_position(elements: &OrbitalElements, jd: f64) -> [f64; 3] {
 
 /// Obliquity of the ecliptic at J2000, degrees.
 const OBLIQUITY_DEG: f64 = 23.439_281;
+/// Constant since the leap second of 2017 January 1.
+pub const TT_MINUS_UTC_DAYS: f64 = 69.184 / 86_400.0;
 /// Earth's equatorial radius, au. The unit the MPC tabulates sites in.
 const EARTH_RADIUS_AU: f64 = 4.263_521e-5;
 
 /// An observing site, in the parallax constants the MPC publishes for it.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Site {
     /// East longitude, degrees.
     pub longitude_deg: f64,
@@ -187,6 +190,8 @@ pub struct Site {
     pub rho_cos_phi: f64,
     /// Distance from the equatorial plane, Earth radii. Negative in the south.
     pub rho_sin_phi: f64,
+    pub astrometric_sigma_arcsec: f64,
+    pub mpc_code: &'static str,
 }
 
 /// ZTF at Palomar, MPC code I41.
@@ -194,6 +199,8 @@ pub const ZTF: Site = Site {
     longitude_deg: 243.140_22,
     rho_cos_phi: 0.836_325,
     rho_sin_phi: 0.546_877,
+    astrometric_sigma_arcsec: 0.25,
+    mpc_code: "I41",
 };
 
 /// The Simonyi Survey Telescope at Rubin Observatory, MPC code X05.
@@ -201,9 +208,102 @@ pub const RUBIN: Site = Site {
     longitude_deg: 289.250_58,
     rho_cos_phi: 0.864_981,
     rho_sin_phi: -0.500_958,
+    astrometric_sigma_arcsec: 0.09,
+    mpc_code: "X05",
 };
 
-/// Heliocentric ecliptic position of an observing site at `jd`, au.
+/// Catalina Sky Survey, the 0.7 m Schmidt on Mt Bigelow, MPC code 703.
+pub const CATALINA: Site = Site {
+    longitude_deg: 249.267_36,
+    rho_cos_phi: 0.845_311,
+    rho_sin_phi: 0.533_211,
+    astrometric_sigma_arcsec: 1.97,
+    mpc_code: "703",
+};
+
+/// Mt Lemmon Survey, the 1.5 m, MPC code G96. CSS's deepest survey telescope.
+pub const MT_LEMMON: Site = Site {
+    longitude_deg: 249.211_28,
+    rho_cos_phi: 0.845_107,
+    rho_sin_phi: 0.533_611,
+    astrometric_sigma_arcsec: 0.48,
+    mpc_code: "G96",
+};
+
+/// Steward Observatory, Mt Lemmon Station, MPC code I52. CSS follow-up.
+pub const MT_LEMMON_STATION: Site = Site {
+    longitude_deg: 249.211_08,
+    rho_cos_phi: 0.845_109,
+    rho_sin_phi: 0.533_609,
+    astrometric_sigma_arcsec: 0.48,
+    mpc_code: "I52",
+};
+
+/// Kitt Peak-Bok, the 2.3 m with 90Prime, MPC code V00.
+pub const BOK: Site = Site {
+    longitude_deg: 248.399_81,
+    rho_cos_phi: 0.849_456,
+    rho_sin_phi: 0.526_492,
+    astrometric_sigma_arcsec: 0.24,
+    mpc_code: "V00",
+};
+
+/// Catalina Sky Survey-Kuiper, the 1.5 m on Mt Bigelow, MPC code V06.
+pub const KUIPER: Site = Site {
+    longitude_deg: 249.267_45,
+    rho_cos_phi: 0.845_313,
+    rho_sin_phi: 0.533_209,
+    astrometric_sigma_arcsec: 0.48,
+    mpc_code: "V06",
+};
+
+/// Siding Spring Survey, MPC code E12. Southern, and the only CSS site there,
+/// so its parallax differs from the Arizona ones in sign as well as size.
+pub const SIDING_SPRING: Site = Site {
+    longitude_deg: 149.064_2,
+    rho_cos_phi: 0.855_63,
+    rho_sin_phi: -0.516_21,
+    astrometric_sigma_arcsec: 1.36,
+    mpc_code: "E12",
+};
+
+pub const DECAM: Site = Site {
+    longitude_deg: 289.193_58,
+    rho_cos_phi: 0.865_572,
+    rho_sin_phi: -0.499_793,
+    astrometric_sigma_arcsec: 0.15,
+    mpc_code: "W84",
+};
+
+pub const WINTER: Site = Site {
+    longitude_deg: 243.137_46,
+    rho_cos_phi: 0.836_357,
+    rho_sin_phi: 0.546_831,
+    astrometric_sigma_arcsec: 0.5,
+    mpc_code: "675",
+};
+
+impl Site {
+    /// The site an MPC observatory code names, for astrometry that says where it
+    /// was taken rather than being assumed to come from one telescope.
+    pub fn from_mpc_code(code: &str) -> Option<Self> {
+        Some(match code {
+            "I41" => ZTF,
+            "X05" => RUBIN,
+            "703" => CATALINA,
+            "G96" => MT_LEMMON,
+            "I52" => MT_LEMMON_STATION,
+            "V00" => BOK,
+            "V06" => KUIPER,
+            "E12" => SIDING_SPRING,
+            "W84" => DECAM,
+            "675" => WINTER,
+            _ => return None,
+        })
+    }
+}
+
+/// Heliocentric ecliptic position of an observing site at `jd` (UTC), au.
 ///
 /// An observation is made from a point on a spinning Earth, not from its
 /// centre. The offset is only an Earth radius, but against a main-belt asteroid
@@ -224,7 +324,7 @@ pub fn observer_position(jd: f64, site: &Site) -> [f64; 3] {
     );
     // Equatorial to ecliptic, then onto the Earth's own position.
     let (s, c) = OBLIQUITY_DEG.to_radians().sin_cos();
-    let earth = earth_position(jd);
+    let earth = earth_position_utc(jd);
     [
         earth[0] + x,
         earth[1] + c * y + s * z,
@@ -232,47 +332,124 @@ pub fn observer_position(jd: f64, site: &Site) -> [f64; 3] {
     ]
 }
 
-/// Earth's heliocentric ecliptic position at `jd`, au.
+/// Earth's heliocentric ecliptic position at `jd` (TT), au.
 ///
-/// Low-precision solar theory (Meeus ch. 25), good to ~1e-4 au. That is three
-/// orders of magnitude finer than this module needs.
+/// VSOP87A, within 4e-7 au of DE441 over 1990-2040.
 pub fn earth_position(jd: f64) -> [f64; 3] {
-    let t = (jd - 2_451_545.0) / 36_525.0;
-
-    let mean_long = (280.464_66 + 36_000.769_83 * t + 0.000_303_2 * t * t).to_radians();
-    let mean_anomaly = (357.529_11 + 35_999.050_29 * t - 0.000_153_7 * t * t).to_radians();
-    let e = 0.016_708_634 - 0.000_042_037 * t - 0.000_000_126_7 * t * t;
-
-    // Equation of the centre.
-    let centre = ((1.914_602 - 0.004_817 * t - 0.000_014 * t * t) * mean_anomaly.sin()
-        + (0.019_993 - 0.000_101 * t) * (2.0 * mean_anomaly).sin()
-        + 0.000_289 * (3.0 * mean_anomaly).sin())
-    .to_radians();
-
-    // Meeus gives longitude referred to the mean equinox of date; MPCORB elements
-    // are J2000, so precess back (0.01397 deg/yr).
-    let true_long = mean_long + centre - (1.397 * t).to_radians();
-    let true_anomaly = mean_anomaly + centre;
-    let sun_dist = 1.000_001_018 * (1.0 - e * e) / (1.0 + e * true_anomaly.cos());
-
-    // Earth is opposite the Sun as seen from the barycentre; ecliptic latitude
-    // is negligible at this precision.
-    [
-        -sun_dist * true_long.cos(),
-        -sun_dist * true_long.sin(),
-        0.0,
-    ]
+    let eq = crate::utils::vsop87::earth_equatorial(jd);
+    let (s, c) = OBLIQUITY_DEG.to_radians().sin_cos();
+    [eq[0], c * eq[1] + s * eq[2], -s * eq[1] + c * eq[2]]
 }
 
-/// Observing geometry for `elements` at `jd`.
-pub fn geometry_at(elements: &OrbitalElements, jd: f64) -> Geometry {
-    let helio = heliocentric_position(elements, jd);
-    let earth = earth_position(jd);
-    let topo = [
-        helio[0] - earth[0],
-        helio[1] - earth[1],
-        helio[2] - earth[2],
-    ];
+/// JPL's approximate elements for 1800-2050.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Planet {
+    pub name: &'static str,
+    elements: [f64; 6],
+    rates: [f64; 6],
+}
+
+pub const JUPITER: Planet = Planet {
+    name: "jupiter",
+    elements: [
+        5.202_887,
+        0.048_386_24,
+        1.304_396_95,
+        34.396_440_51,
+        14.728_479_83,
+        100.473_909_09,
+    ],
+    rates: [
+        -0.000_116_07,
+        -0.000_132_53,
+        -0.001_837_14,
+        3_034.746_127_75,
+        0.212_526_68,
+        0.204_691_06,
+    ],
+};
+
+pub const SATURN: Planet = Planet {
+    name: "saturn",
+    elements: [
+        9.536_675_94,
+        0.053_861_79,
+        2.485_991_87,
+        49.954_244_23,
+        92.598_878_31,
+        113.662_424_48,
+    ],
+    rates: [
+        -0.001_250_6,
+        -0.000_509_91,
+        0.001_936_09,
+        1_222.493_622_01,
+        -0.418_972_16,
+        -0.288_677_94,
+    ],
+};
+
+pub const URANUS: Planet = Planet {
+    name: "uranus",
+    elements: [
+        19.189_164_64,
+        0.047_257_44,
+        0.772_637_83,
+        313.238_104_51,
+        170.954_276_3,
+        74.016_925_03,
+    ],
+    rates: [
+        -0.001_961_76,
+        -0.000_043_97,
+        -0.002_429_39,
+        428.482_027_85,
+        0.408_052_81,
+        0.042_405_89,
+    ],
+};
+
+pub const NEPTUNE: Planet = Planet {
+    name: "neptune",
+    elements: [
+        30.069_922_76,
+        0.008_590_48,
+        1.770_043_47,
+        -55.120_029_69,
+        44.964_762_27,
+        131.784_225_74,
+    ],
+    rates: [
+        0.000_262_91,
+        0.000_051_05,
+        0.000_353_72,
+        218.459_453_25,
+        -0.322_414_64,
+        -0.005_086_64,
+    ],
+};
+
+impl Planet {
+    pub fn elements_at(&self, jd: f64) -> OrbitalElements {
+        let t = (jd - 2_451_545.0) / 36_525.0;
+        let [a, e, incl, long, peri_long, node]: [f64; 6] =
+            std::array::from_fn(|k| self.elements[k] + self.rates[k] * t);
+        OrbitalElements::elliptical(jd, a, e, incl, node, peri_long - node, long - peri_long)
+    }
+}
+
+pub fn earth_position_utc(jd: f64) -> [f64; 3] {
+    earth_position(jd + TT_MINUS_UTC_DAYS)
+}
+
+/// Observing geometry for `elements` at `jd` (UTC).
+pub fn geometry_at(elements: &OrbitalElements, jd: f64, site: &Site) -> Geometry {
+    let observer = observer_position(jd, site);
+    let from_observer = |p: [f64; 3]| [p[0] - observer[0], p[1] - observer[1], p[2] - observer[2]];
+    let tt = jd + TT_MINUS_UTC_DAYS;
+    let emitted = tt - norm(&from_observer(heliocentric_position(elements, tt))) / C_AU_PER_DAY;
+    let helio = heliocentric_position(elements, emitted);
+    let topo = from_observer(helio);
 
     let helio_dist = norm(&helio);
     let topo_dist = norm(&topo);
@@ -285,7 +462,9 @@ pub fn geometry_at(elements: &OrbitalElements, jd: f64) -> Geometry {
         helio_dist,
         topo_dist,
         true_anomaly: {
-            let nu = true_anomaly(elements, jd).to_degrees().rem_euclid(360.0);
+            let nu = true_anomaly(elements, emitted)
+                .to_degrees()
+                .rem_euclid(360.0);
             if nu > 180.0 {
                 nu - 360.0
             } else {
@@ -313,7 +492,7 @@ mod tests_observer {
     #[test]
     fn site_sits_an_earth_radius_from_the_centre() {
         let jd = 2461286.8;
-        let earth = earth_position(jd);
+        let earth = earth_position_utc(jd);
         let obs = observer_position(jd, &ZTF);
         let d = ((obs[0] - earth[0]).powi(2)
             + (obs[1] - earth[1]).powi(2)
@@ -332,8 +511,8 @@ mod tests_observer {
         let jd = 2461286.8;
         let a = observer_position(jd, &ZTF);
         let b = observer_position(jd + 0.5, &ZTF);
-        let earth_a = earth_position(jd);
-        let earth_b = earth_position(jd + 0.5);
+        let earth_a = earth_position_utc(jd);
+        let earth_b = earth_position_utc(jd + 0.5);
         // Offsets relative to the Earth, so the orbit does not mask the spin.
         let oa = [a[0] - earth_a[0], a[1] - earth_a[1], a[2] - earth_a[2]];
         let ob = [b[0] - earth_b[0], b[1] - earth_b[1], b[2] - earth_b[2]];
@@ -522,7 +701,7 @@ mod tests {
     fn test_geometry_is_physically_bounded() {
         let el = main_belt();
         for days in 0..365 {
-            let g = geometry_at(&el, el.epoch_jd + days as f64);
+            let g = geometry_at(&el, el.epoch_jd + days as f64, &ZTF);
             assert!(g.phase_angle >= 0.0 && g.phase_angle <= 180.0);
             // The observer is inside the object's orbit, so the object is never
             // closer than helio_dist minus Earth's distance, nor further than the sum.
@@ -539,7 +718,7 @@ mod tests {
         let limit = (1.017_f64 / (el.a * (1.0 - el.e))).asin().to_degrees();
         let mut seen_max: f64 = 0.0;
         for days in 0..2000 {
-            let g = geometry_at(&el, el.epoch_jd + days as f64 * 2.0);
+            let g = geometry_at(&el, el.epoch_jd + days as f64 * 2.0, &ZTF);
             seen_max = seen_max.max(g.phase_angle);
             assert!(
                 g.phase_angle <= limit + 0.5,
@@ -562,7 +741,7 @@ mod tests {
         let mut best = (f64::MAX, f64::MAX, 0.0_f64);
         for days in 0..800 {
             let jd = el.epoch_jd + days as f64;
-            let g = geometry_at(&el, jd);
+            let g = geometry_at(&el, jd, &ZTF);
             if g.topo_dist < best.0 {
                 best = (g.topo_dist, g.phase_angle, jd);
             }
@@ -576,7 +755,7 @@ mod horizons_validation {
     use super::*;
 
     /// Elements as MPCORB distributes them at epoch K2669 (2026 June 9), checked
-    /// against JPL Horizons at JD 2461272.5 (2026 Aug 20, geocentric).
+    /// against JPL Horizons at JD 2461272.5 UT (2026 Aug 20, geocentric).
     struct Case {
         name: &'static str,
         elements: OrbitalElements,
@@ -639,7 +818,7 @@ mod horizons_validation {
     /// nightly. First, two-body propagation accumulates error with time from
     /// epoch. Second, NEOs are the objects planetary perturbations act on most.
     ///
-    /// Reference values are JPL Horizons (geocentric, quantities 19/20/43);
+    /// Reference values are JPL Horizons (geocentric, UT, quantities 19/20/43);
     /// elements are the MPCORB records for the same epoch.
     ///
     /// Note what this does *not* cover: none of these windows contains a close
@@ -733,13 +912,13 @@ mod horizons_validation {
     #[test]
     fn test_matches_horizons_far_from_epoch() {
         for (c, jd) in far_from_epoch_cases() {
-            let g = geometry_at(&c.elements, jd);
+            let g = geometry_at(&c.elements, jd, &ZTF);
             let d_helio = (g.helio_dist - c.helio_dist).abs();
             let d_topo = (g.topo_dist - c.topo_dist).abs();
             let d_phase = (g.phase_angle - c.phase_angle).abs();
 
             assert!(d_helio < 1e-3, "{}: helio off by {d_helio} au", c.name);
-            assert!(d_topo < 1e-3, "{}: topo off by {d_topo} au", c.name);
+            assert!(d_topo < 3e-4, "{}: topo off by {d_topo} au", c.name);
             assert!(d_phase < 0.02, "{}: phase off by {d_phase} deg", c.name);
         }
     }
@@ -747,14 +926,59 @@ mod horizons_validation {
     #[test]
     fn test_matches_horizons() {
         for c in cases() {
-            let g = geometry_at(&c.elements, 2_461_272.5);
+            let g = geometry_at(&c.elements, 2_461_272.5, &ZTF);
             let d_helio = (g.helio_dist - c.helio_dist).abs();
             let d_topo = (g.topo_dist - c.topo_dist).abs();
             let d_phase = (g.phase_angle - c.phase_angle).abs();
 
             assert!(d_helio < 1e-4, "{}: helio off by {d_helio} au", c.name);
-            assert!(d_topo < 1e-3, "{}: topo off by {d_topo} au", c.name);
+            assert!(d_topo < 1e-4, "{}: topo off by {d_topo} au", c.name);
             assert!(d_phase < 0.01, "{}: phase off by {d_phase} deg", c.name);
+        }
+    }
+
+    /// Against JPL Horizons (geocenter, ICRF equator, TDB), 1990 to 2041.
+    #[test]
+    fn test_earth_matches_horizons() {
+        let (s, c) = OBLIQUITY_DEG.to_radians().sin_cos();
+        for (jd, eq) in [
+            (
+                2_447_892.5,
+                [-0.178_287_922_704, 0.887_231_821_652, 0.384_685_522_567],
+            ),
+            (
+                2_451_545.0,
+                [-0.177_135_099_273, 0.887_428_522_326, 0.384_742_899_088],
+            ),
+            (
+                2_455_362.5,
+                [-0.112_008_465_385, -0.926_256_114_347, -0.401_554_039_367],
+            ),
+            (
+                2_458_928.5,
+                [-0.995_844_117_444, 0.006_876_306_663, 0.002_985_547_201],
+            ),
+            (
+                2_461_272.5,
+                [0.845_273_411_844, -0.510_433_911_434, -0.221_265_991_387],
+            ),
+            (
+                2_464_632.5,
+                [0.783_457_740_640, 0.559_496_990_829, 0.242_507_278_738],
+            ),
+            (
+                2_466_154.5,
+                [-0.164_118_011_456, 0.889_552_170_674, 0.385_572_051_864],
+            ),
+        ] {
+            let truth = [eq[0], c * eq[1] + s * eq[2], -s * eq[1] + c * eq[2]];
+            let earth = earth_position(jd);
+            let off = norm(&[
+                earth[0] - truth[0],
+                earth[1] - truth[1],
+                earth[2] - truth[2],
+            ]);
+            assert!(off < 5e-7, "JD {jd}: {off:.2e} au from Horizons");
         }
     }
 
@@ -768,13 +992,13 @@ mod horizons_validation {
     /// untested: both are nearly insensitive to the light-time correction, so
     /// they passed while predicted positions were out by tens of arcseconds.
     ///
-    /// 9 arcsec separates the two models rather than merely passing: dropping
-    /// the correction puts Ceres at 10.3 and Pallas at 16.7.
+    /// 3 arcsec separates the two models rather than merely passing: dropping
+    /// the correction puts Ceres at 10.3 and Pallas at 12.4.
     #[test]
     fn test_matches_horizons_on_the_sky() {
         for c in cases() {
             let sep = sky_error_arcsec(&c, 2_461_272.5);
-            assert!(sep < 9.0, "{}: {sep:.1} arcsec from Horizons", c.name);
+            assert!(sep < 3.0, "{}: {sep:.1} arcsec from Horizons", c.name);
         }
     }
 
@@ -793,7 +1017,7 @@ mod horizons_validation {
     #[test]
     fn test_distance_error_is_negligible_in_magnitudes() {
         for c in cases() {
-            let g = geometry_at(&c.elements, 2_461_272.5);
+            let g = geometry_at(&c.elements, 2_461_272.5, &ZTF);
             let ours = 5.0 * (g.helio_dist * g.topo_dist).log10();
             let truth = 5.0 * (c.helio_dist * c.topo_dist).log10();
             assert!(
@@ -802,6 +1026,106 @@ mod horizons_validation {
                 c.name,
                 (ours - truth).abs()
             );
+        }
+    }
+
+    /// The parallax constants are a point on the ellipsoid, so the two must
+    /// square to very nearly one. A mistyped digit in a hand-copied site fails
+    /// here rather than becoming a quiet astrometric bias.
+    #[test]
+    fn test_every_site_lies_on_the_earth() {
+        for (code, site) in [
+            ("I41", ZTF),
+            ("X05", RUBIN),
+            ("703", CATALINA),
+            ("G96", MT_LEMMON),
+            ("I52", MT_LEMMON_STATION),
+            ("V00", BOK),
+            ("V06", KUIPER),
+            ("E12", SIDING_SPRING),
+        ] {
+            let r2 = site.rho_cos_phi * site.rho_cos_phi + site.rho_sin_phi * site.rho_sin_phi;
+            assert!(
+                (0.993..=1.0).contains(&r2),
+                "{code}: rho_cos_phi^2 + rho_sin_phi^2 = {r2:.6}, not on the ellipsoid"
+            );
+            assert!(
+                (0.0..360.0).contains(&site.longitude_deg),
+                "{code}: longitude {} is not east-of-Greenwich degrees",
+                site.longitude_deg
+            );
+            assert_eq!(
+                Site::from_mpc_code(code),
+                Some(site),
+                "{code} resolves wrong"
+            );
+        }
+        assert_eq!(Site::from_mpc_code("ZZZ"), None);
+        // The only southern site, so its sign is the one worth stating.
+        assert!(SIDING_SPRING.rho_sin_phi < 0.0, "E12 is in Australia");
+    }
+
+    /// Astrometry from two telescopes cannot be fitted as though it came from
+    /// one. Palomar to Arizona is most of the residual gate at inner-belt
+    /// distances, and Palomar to Siding Spring exceeds it outright -- so a
+    /// cross-survey fit has to carry the site each observation came from.
+    #[test]
+    fn test_sites_disagree_by_more_than_the_residual_gate() {
+        use crate::utils::heliolinc::test_orbits;
+        use crate::utils::orbit_fit::predict_radec;
+
+        const GATE_ARCSEC: f64 = 2.0;
+        let epoch = 2460948.72339281;
+        let offset = |r: f64, site: Site| -> Option<f64> {
+            let (state, _) = test_orbits(0.0, 30.0, epoch, &[r]).into_iter().next()?;
+            let (ra0, dec0) = predict_radec(&state, epoch, epoch, &ZTF)?;
+            let (ra1, dec1) = predict_radec(&state, epoch, epoch, &site)?;
+            Some(
+                (((ra1 - ra0 + 540.0).rem_euclid(360.0) - 180.0) * dec0.to_radians().cos())
+                    .hypot(dec1 - dec0)
+                    * 3600.0,
+            )
+        };
+
+        // Siding Spring against Palomar is a whole-Earth baseline.
+        let southern = offset(2.5, SIDING_SPRING).expect("a trial orbit at 2.5 au");
+        assert!(
+            southern > GATE_ARCSEC,
+            "E12 vs I41 at 2.5 au is {southern:.2}\", which should exceed the {GATE_ARCSEC}\" gate"
+        );
+
+        // Arizona against Palomar is smaller but not negligible: at inner-belt
+        // distances it already eats most of the budget a fit has to spend.
+        let inner = offset(1.5, MT_LEMMON).expect("a trial orbit at 1.5 au");
+        assert!(
+            inner > 0.5 * GATE_ARCSEC,
+            "G96 vs I41 at 1.5 au is {inner:.2}\", small enough to ignore?"
+        );
+
+        // Parallax grows as the object nears, so NEOs -- what CSS is for -- are
+        // worse still than any of these.
+        let outer = offset(3.5, MT_LEMMON).expect("a trial orbit at 3.5 au");
+        assert!(
+            inner > outer,
+            "the offset should grow as the object nears: {inner:.2}\" at 1.5 au vs {outer:.2}\" at 3.5 au"
+        );
+    }
+
+    #[test]
+    fn test_giant_planets_match_astropy() {
+        use crate::utils::identify::predict_radec;
+        use crate::utils::linking::angular_separation_deg;
+
+        let jd = 2461337.75;
+        for (planet, ra, dec) in [
+            (JUPITER, 145.498, 14.498),
+            (SATURN, 9.729, 1.252),
+            (URANUS, 62.63, 20.9),
+            (NEPTUNE, 2.289, -0.553),
+        ] {
+            let (pra, pdec) = predict_radec(&planet.elements_at(jd), jd);
+            let sep = angular_separation_deg(pra, pdec, ra, dec);
+            assert!(sep < 0.25, "{} is {sep:.3} deg off", planet.name);
         }
     }
 }
