@@ -11,6 +11,7 @@ import {
   IconBook,
   IconShieldLock,
   IconTelescope,
+  IconVector,
 } from "@tabler/icons-react"
 
 import { useCatalogIssues } from "@/hooks/use-catalog-issues"
@@ -46,6 +47,11 @@ const data = {
       title: "Telescopes",
       url: "/telescopes",
       icon: IconTelescope,
+    },
+    {
+      title: "Embeddings",
+      url: "/embeddings",
+      icon: IconVector,
     },
   ],
   navSecondary: [
