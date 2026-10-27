@@ -36,6 +36,7 @@ pub struct FastSearch {
     pub max_span_days: f64,
     pub max_tracklet_rms_arcsec: f64,
     pub dense_detections: usize,
+    pub dense_max_rate_deg_per_day: f64,
     pub max_gap_nights: i64,
     pub min_nights: usize,
     pub min_detections: usize,
@@ -52,6 +53,7 @@ impl Default for FastSearch {
             max_span_days: 2.5 / 24.0,
             max_tracklet_rms_arcsec: 1.0,
             dense_detections: 10_000,
+            dense_max_rate_deg_per_day: 5.0,
             max_gap_nights: 5,
             min_nights: 3,
             min_detections: 5,
@@ -63,10 +65,10 @@ impl Default for FastSearch {
 }
 
 impl FastSearch {
-    fn tracklets(&self, min_detections: usize) -> TrackletConfig {
+    fn tracklets(&self, min_detections: usize, max_rate_deg_per_day: f64) -> TrackletConfig {
         TrackletConfig {
             min_rate_deg_per_day: self.min_rate_deg_per_day,
-            max_rate_deg_per_day: self.max_rate_deg_per_day,
+            max_rate_deg_per_day,
             max_rms_arcsec: self.max_tracklet_rms_arcsec,
             max_span_days: self.max_span_days,
             min_detections,
@@ -148,7 +150,17 @@ fn fast_tracklets(
         .par_iter()
         .flat_map(|((night, site), dets)| {
             let dense = dets.len() > search.dense_detections;
-            let mut found = tiled(dets, &search.tracklets(if dense { 3 } else { 2 }));
+            let untrailed = if dense {
+                search.tracklets(
+                    3,
+                    search
+                        .max_rate_deg_per_day
+                        .min(search.dense_max_rate_deg_per_day),
+                )
+            } else {
+                search.tracklets(2, search.max_rate_deg_per_day)
+            };
+            let mut found = tiled(dets, &untrailed);
             if dense {
                 let trailed: Vec<Detection> = dets
                     .iter()
@@ -156,7 +168,7 @@ fn fast_tracklets(
                     .copied()
                     .collect();
                 found.extend(
-                    tiled(&trailed, &search.tracklets(2))
+                    tiled(&trailed, &search.tracklets(2, search.max_rate_deg_per_day))
                         .into_iter()
                         .filter(|t| t.ids.len() == 2 && trailed_like(t, trails)),
                 );

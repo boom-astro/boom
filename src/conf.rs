@@ -1498,6 +1498,8 @@ pub struct LinkerConfig {
     pub fast_max_rate_deg_per_day: f64,
     #[serde(default = "default_linker_fast_dense_detections")]
     pub fast_dense_detections: usize,
+    #[serde(default = "default_linker_fast_dense_max_rate")]
+    pub fast_dense_max_rate_deg_per_day: f64,
 }
 
 impl LinkerConfig {
@@ -1557,6 +1559,12 @@ impl LinkerConfig {
                 self.fast_min_rate_deg_per_day, self.fast_max_rate_deg_per_day
             ));
         }
+        if self.fast_dense_max_rate_deg_per_day <= self.fast_min_rate_deg_per_day {
+            return Err(format!(
+                "fast_dense_max_rate_deg_per_day is {}, but must exceed fast_min_rate_deg_per_day ({})",
+                self.fast_dense_max_rate_deg_per_day, self.fast_min_rate_deg_per_day
+            ));
+        }
         Ok(())
     }
 }
@@ -1587,6 +1595,7 @@ impl Default for LinkerConfig {
             fast_min_rate_deg_per_day: default_linker_fast_min_rate(),
             fast_max_rate_deg_per_day: default_linker_fast_max_rate(),
             fast_dense_detections: default_linker_fast_dense_detections(),
+            fast_dense_max_rate_deg_per_day: default_linker_fast_dense_max_rate(),
         }
     }
 }
@@ -1613,6 +1622,10 @@ fn default_linker_fast_max_rate() -> f64 {
 
 fn default_linker_fast_dense_detections() -> usize {
     10_000
+}
+
+fn default_linker_fast_dense_max_rate() -> f64 {
+    5.0
 }
 
 fn default_linker_recall_window_nights() -> u32 {
