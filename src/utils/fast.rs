@@ -10,7 +10,7 @@ use crate::utils::orbit_fit::{
 };
 use crate::utils::outburst::median;
 use crate::utils::sso_geometry::{dot, norm, observer_position, Site, ZTF};
-use crate::utils::tracks::{member_alert, member_id};
+use crate::utils::tracks::{detection_id, member_of, site_survey};
 use futures::StreamExt;
 use mongodb::bson::{doc, Document};
 use rayon::prelude::*;
@@ -91,8 +91,8 @@ pub async fn lsst_trails(
 ) -> Result<HashMap<i64, f64>, DiscoveryError> {
     let ids: Vec<i64> = detections
         .iter()
-        .filter_map(|d| match member_alert(d.id) {
-            (Survey::Lsst, id) => Some(id),
+        .filter_map(|d| match member_of(d) {
+            Some((Survey::Lsst, id)) => Some(id),
             _ => None,
         })
         .collect();
@@ -110,7 +110,7 @@ pub async fn lsst_trails(
                 .get_document("candidate")
                 .and_then(|c| c.get_f64("trailLength"));
             if let (Ok(id), Ok(length)) = (doc.get_i64("_id"), length) {
-                trails.insert(member_id(&Survey::Lsst, id), length);
+                trails.insert(detection_id(&Survey::Lsst, id), length);
             }
         }
     }
@@ -134,10 +134,9 @@ fn fast_tracklets(
     search: &FastSearch,
 ) -> Vec<Tracklet> {
     let mut by_night: BTreeMap<(i64, Option<&str>), Vec<Detection>> = BTreeMap::new();
-    for d in detections
-        .iter()
-        .filter(|d| member_alert(d.id).0 != Survey::Lsst || trails.contains_key(&d.id))
-    {
+    for d in detections.iter().filter(|d| {
+        site_survey(d.site.as_ref()) != Some(Survey::Lsst) || trails.contains_key(&d.id)
+    }) {
         by_night
             .entry((d.night(), d.site.map(|s| s.mpc_code)))
             .or_default()

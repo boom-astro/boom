@@ -24,9 +24,9 @@ use crate::utils::orbit_fit::{fit_within, Observation, OrbitFit};
 use crate::utils::sso_geometry::{Planet, Site, JUPITER, NEPTUNE, SATURN, URANUS};
 use crate::utils::thor;
 use crate::utils::tracks::{
-    acquire_lock, alerts_by_survey, commit_upsert, member_id, plan_upsert, release_lock,
-    renew_lock, stamp_members, stamp_missing, survey_site, BoundFit, StoredOrbit, StoredTrack,
-    LOCK_LEASE, LOCK_RENEW_EVERY, SHARED_FOR_IDENTITY, TRACKS_COLLECTION,
+    acquire_lock, alerts_by_survey, commit_upsert, detection_id, member_of, plan_upsert,
+    release_lock, renew_lock, stamp_members, stamp_missing, survey_site, BoundFit, Member,
+    StoredOrbit, StoredTrack, LOCK_LEASE, LOCK_RENEW_EVERY, SHARED_FOR_IDENTITY, TRACKS_COLLECTION,
 };
 use futures::StreamExt;
 use mongodb::bson::{doc, Document};
@@ -284,7 +284,7 @@ fn detection_from(survey: &Survey, doc: &Document) -> Option<Detection> {
         ),
     };
     Some(Detection {
-        id: member_id(survey, doc.get_i64("_id").ok()?),
+        id: detection_id(survey, doc.get_i64("_id").ok()?),
         jd,
         ra: candidate.get_f64("ra").ok()?,
         dec: candidate.get_f64("dec").ok()?,
@@ -941,7 +941,7 @@ async fn persist(
     known: &[Option<String>],
     planets: &[Option<&'static str>],
     dry_run: bool,
-    stored_jds: &HashMap<i64, f64>,
+    stored: &HashMap<i64, Detection>,
     (min_detections, min_nights): (usize, usize),
     stop: &Stop,
 ) -> PersistReport {
@@ -1015,22 +1015,29 @@ async fn persist(
                 }
             }
         }
-        let jds: Vec<f64> = members
+        let found: Vec<&Detection> = members
             .iter()
-            .filter_map(|id| {
-                by_id
-                    .get(id)
-                    .map(|d| d.jd)
-                    .or_else(|| stored_jds.get(id).copied())
-            })
+            .filter_map(|id| by_id.get(id).copied().or_else(|| stored.get(id)))
             .collect();
-        if jds.len() != members.len() {
+        if found.len() != members.len() {
             error!(
                 "one of the {} references detections not in this run, skipping",
                 what
             );
             continue;
         }
+        let Some(keys) = found
+            .iter()
+            .map(|d| member_of(d))
+            .collect::<Option<Vec<Member>>>()
+        else {
+            error!(
+                "one of the {} has a detection from a site with no alerts, skipping",
+                what
+            );
+            continue;
+        };
+        let jds: Vec<f64> = found.iter().map(|d| d.jd).collect();
         // A track of a known object records the designation, which is what tells
         // a consumer this is a recovery rather than a discovery candidate. The
         // survey's own label comes first, then the catalog match.
@@ -1040,27 +1047,18 @@ async fn persist(
             .map(|l| crate::utils::mpcorb::normalize_ztf_ssnamenr(l).unwrap_or_else(|| l.clone()))
             .or_else(|| known.get(i).cloned().flatten());
         let near_planet = planets.get(i).copied().flatten().map(str::to_string);
-        let plan = match plan_upsert(
-            db,
-            &members,
-            &jds,
-            designation,
-            near_planet,
-            Some(fit),
-            orbit,
-        )
-        .await
-        {
-            Ok(plan) => match kind {
-                Some(kind) => plan.with_kind(kind),
-                None => plan,
-            },
-            Err(e) => {
-                error!("could not resolve one of the {}: {}", what, e);
-                report.failed += 1;
-                continue;
-            }
-        };
+        let plan =
+            match plan_upsert(db, &keys, &jds, designation, near_planet, Some(fit), orbit).await {
+                Ok(plan) => match kind {
+                    Some(kind) => plan.with_kind(kind),
+                    None => plan,
+                },
+                Err(e) => {
+                    error!("could not resolve one of the {}: {}", what, e);
+                    report.failed += 1;
+                    continue;
+                }
+            };
         if !plan.meets(min_detections, min_nights) {
             info!(
                 "dropping a track: {} detections over {} nights after {} contested detection(s) were left with another track",
@@ -1152,16 +1150,14 @@ pub async fn load_targets(
     }
     let claimed: HashSet<i64> = stored
         .iter()
-        .flat_map(|t| t.members.iter().copied())
+        .flat_map(|t| t.member_keys())
+        .map(|(survey, id)| detection_id(&survey, id))
         .collect();
     let fitted: Vec<&StoredTrack> = stored
         .iter()
         .filter(|t| t.orbit.is_some() && t.bound_fit.as_deref() == Some(BoundFit::Good.as_str()))
         .collect();
-    let wanted: Vec<i64> = fitted
-        .iter()
-        .flat_map(|t| t.members.iter().copied())
-        .collect();
+    let wanted: Vec<Member> = fitted.iter().flat_map(|t| t.member_keys()).collect();
     let mut positions: HashMap<i64, Detection> = HashMap::new();
     for (survey, ids) in alerts_by_survey(&wanted) {
         for chunk in ids.chunks(10_000) {
@@ -1182,9 +1178,9 @@ pub async fn load_targets(
         .filter_map(|t| {
             let orbit = t.orbit?;
             let members: Vec<Detection> = t
-                .members
+                .member_keys()
                 .iter()
-                .filter_map(|m| positions.get(m).copied())
+                .filter_map(|(survey, id)| positions.get(&detection_id(survey, *id)).copied())
                 .collect();
             (members.len() == t.members.len()).then(|| Target {
                 id: t.id.clone(),
@@ -1221,9 +1217,9 @@ pub async fn attach_pass(
 ) -> Result<AttachReport, DiscoveryError> {
     let (targets, claimed) = load_targets(db, since_jd).await?;
     let by_id: HashMap<i64, Detection> = detections.iter().map(|d| (d.id, *d)).collect();
-    let stored_jds: HashMap<i64, f64> = targets
+    let stored: HashMap<i64, Detection> = targets
         .iter()
-        .flat_map(|t| t.members.iter().map(|d| (d.id, d.jd)))
+        .flat_map(|t| t.members.iter().map(|d| (d.id, *d)))
         .collect();
     let in_found: HashSet<i64> = found.iter().flatten().copied().collect();
     let mut report = AttachReport::default();
@@ -1278,7 +1274,7 @@ pub async fn attach_pass(
         &[],
         &[],
         dry_run,
-        &stored_jds,
+        &stored,
         (1, 1),
         stop,
     )
