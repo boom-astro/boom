@@ -128,9 +128,26 @@ export async function login(email: string, password: string): Promise<TokenRecor
   return getTokenRecord();
 }
 
+/**
+ * The providers could not be asked for, as distinct from there being none.
+ *
+ * Only this is worth retrying. A usable answer is final, including an empty
+ * one: that is a deployment that configured no provider.
+ */
+export class OAuthProvidersUnavailable extends Error {}
+
 export async function fetchOAuthProviders(): Promise<OAuthProvider[]> {
-  const res = await fetch(`${API_BASE}/oauth/providers`);
-  if (!res.ok) return [];
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE}/oauth/providers`);
+  } catch {
+    throw new OAuthProvidersUnavailable("the API could not be reached");
+  }
+  if (!res.ok) {
+    throw new OAuthProvidersUnavailable(`the API answered ${res.status}`);
+  }
+  // A 200 whose body is not a list reads as none: the API disagreeing with us
+  // is not a blip, and retrying it would spin.
   return readList<OAuthProvider>(res);
 }
 

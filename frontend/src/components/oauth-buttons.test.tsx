@@ -76,6 +76,50 @@ describe("OAuthButtons", () => {
     }
   })
 
+  it("comes back on its own once the API is reachable again", async () => {
+    // The API restarts on every source edit in development, and a login page
+    // that gave up on the first failure showed a password-only form until
+    // someone reloaded it by hand.
+    vi.useFakeTimers()
+    let attempts = 0
+    const fetchMock = vi.fn(async () => {
+      attempts += 1
+      if (attempts === 1) throw new TypeError("API restarting")
+      return new Response(
+        JSON.stringify({
+          message: "success",
+          data: [{ id: "github", name: "GitHub", start_url: "/babamul/oauth/github/start" }],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      )
+    })
+    vi.stubGlobal("fetch", fetchMock)
+
+    renderButtons()
+
+    // Nothing is shown while it cannot ask -- failing closed still holds.
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+    expect(buttonFor("GitHub")).toBeNull()
+
+    await vi.advanceTimersByTimeAsync(1000)
+    await vi.waitFor(() => expect(buttonFor("GitHub")).not.toBeNull())
+    vi.useRealTimers()
+  })
+
+  it("does not retry an answer it could read", async () => {
+    // An empty list is this deployment saying it has no provider, which is
+    // final. Retrying it would poll a healthy API forever.
+    vi.useFakeTimers()
+    const fetchMock = mockApi({ message: "success", data: [] })
+
+    renderButtons()
+
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+    await vi.advanceTimersByTimeAsync(30_000)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    vi.useRealTimers()
+  })
+
   it.each([
     ["the API returns an error", () => mockApi({ message: "boom" }, 500)],
     ["the response is not a provider list", () => mockApi({ message: "success", data: { google: true } })],
