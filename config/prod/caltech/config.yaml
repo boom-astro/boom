@@ -307,7 +307,7 @@ linker:
   # Largest residual an unbound orbit may leave (arcsec); a track fitting worse
   # keeps its bound fit if that passes, or is dropped.
   max_unbound_rms_arcsec: 0.5
-  fast: false # link movers too fast for the linking pass
+  fast: true # link movers too fast for the linking pass
   fast_window_nights: 7
   fast_min_rate_deg_per_day: 1.0
   fast_max_rate_deg_per_day: 25.0
