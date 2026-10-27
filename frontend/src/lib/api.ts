@@ -34,11 +34,15 @@ export type TokenResponse = { id: string; name: string; access_token: string; cr
 export const TOKEN_KEY = "api_token";
 export const USERNAME_KEY = "api_user";
 
-export async function parseResponseJson(res: Response): Promise<unknown> {
-  const text = await res.text();
+/** Parse a body that has already been read, throwing if it is not JSON. */
+export function parseJsonText(text: string): unknown {
   // Quote 16+ digit integers: `JSON.parse` would round them and lose candid precision.
   const safeText = text.replace(/:\s*(-?\d{16,})(?![\d]*["])/g, (_, numStr) => `:"${numStr}"`);
   return JSON.parse(safeText);
+}
+
+export async function parseResponseJson(res: Response): Promise<unknown> {
+  return parseJsonText(await res.text());
 }
 
 type DataEnvelope<T> = { data?: T };
@@ -146,9 +150,25 @@ export async function fetchOAuthProviders(): Promise<OAuthProvider[]> {
   if (!res.ok) {
     throw new OAuthProvidersUnavailable(`the API answered ${res.status}`);
   }
-  // A 200 whose body is not a list reads as none: the API disagreeing with us
-  // is not a blip, and retrying it would spin.
-  return readList<OAuthProvider>(res);
+  let text: string;
+  try {
+    text = await res.text();
+  } catch {
+    // The headers arrived and the body did not. A connection dropped
+    // mid-response is the same transport failure as never reaching the API,
+    // so it must not read as "this deployment has no providers".
+    throw new OAuthProvidersUnavailable("the response body could not be read");
+  }
+  let body: unknown;
+  try {
+    body = parseJsonText(text);
+  } catch {
+    // Read in full and not JSON: the API disagreeing with us rather than a
+    // blip, which retrying cannot fix. Same for a readable non-list below.
+    return [];
+  }
+  const data = unwrapData<unknown>(body, []);
+  return Array.isArray(data) ? (data as OAuthProvider[]) : [];
 }
 
 export function startOAuthLogin(provider: OAuthProvider, redirectTo?: string) {
