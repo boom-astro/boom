@@ -177,7 +177,8 @@ mod tests {
 
     async fn insert_track(database: &Database, members: &[i64]) -> String {
         let jds: Vec<f64> = (0..members.len()).map(|k| 2460000.0 + k as f64).collect();
-        let plan = plan_upsert(database, members, &jds, None, None, None, None)
+        let members: Vec<(Survey, i64)> = members.iter().map(|&id| (Survey::Ztf, id)).collect();
+        let plan = plan_upsert(database, &members, &jds, None, None, None, None)
             .await
             .expect("Failed to plan track");
         commit_upsert(database, plan)
@@ -262,6 +263,7 @@ mod tests {
         StoredTrack {
             id,
             members: Vec::new(),
+            member_surveys: Vec::new(),
             epochs: Vec::new(),
             bound_fit: None,
             bound_fit_residual_arcsec: None,

@@ -94,7 +94,7 @@ pub async fn get_track(path: web::Path<(Survey, String)>, db: web::Data<Database
         return response::not_found(&format!("no tracks for survey {}", survey));
     }
     match track_by_id(&db, &track_id).await {
-        Ok(Some(track)) => response::ok_ser(&format!("track {} found", track_id), track),
+        Ok(Some(track)) => response::ok_ser(&format!("track {} found", track_id), track.explicit()),
         Ok(None) => response::not_found(&format!("no track {}", track_id)),
         Err(error) => response::internal_error(&format!("error getting track: {}", error)),
     }
