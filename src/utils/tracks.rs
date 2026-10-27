@@ -552,6 +552,9 @@ pub struct UpsertPlan {
     pub superseded: Vec<String>,
     /// Detections dropped because another track already owns them.
     pub contested: Vec<Member>,
+    /// Detections dropped because the orbit does not reproduce them, left for
+    /// other tracks.
+    pub dropped: Vec<Member>,
     /// When the stored track was last written, if this plan would write it
     /// back exactly as it is. A nightly run re-finds every track still in its
     /// window, and rewriting those would make each look new to a client
@@ -594,8 +597,13 @@ impl UpsertPlan {
                 self.contested.len()
             )
         };
+        let dropped = if self.dropped.is_empty() {
+            String::new()
+        } else {
+            format!(", {} detection(s) off its orbit", self.dropped.len())
+        };
         format!(
-            "{what}: {} detections over {} nights, {:.2} d arc{contested}",
+            "{what}: {} detections over {} nights, {:.2} d arc{contested}{dropped}",
             self.n_detections, self.n_nights, self.arc_days
         )
     }
@@ -746,6 +754,7 @@ pub async fn plan_upsert(
         near_planet,
         superseded,
         contested,
+        dropped: Vec::new(),
         unchanged_since,
     })
 }
@@ -793,6 +802,18 @@ pub async fn commit_upsert(
         .replace_one(doc! { "_id": &id }, &stored)
         .upsert(true)
         .await?;
+    // Only a stamp this track or one it absorbed left, never another track's.
+    let owners: Vec<String> = std::iter::once(id.clone())
+        .chain(plan.superseded.iter().cloned())
+        .collect();
+    for (survey, ids) in alerts_by_survey(&plan.dropped) {
+        db.collection::<Document>(&format!("{survey}_alerts"))
+            .update_many(
+                doc! { "_id": { "$in": ids }, "track.id": { "$in": &owners } },
+                doc! { "$unset": { "track": "" } },
+            )
+            .await?;
+    }
     if !plan.superseded.is_empty() {
         collection
             .delete_many(doc! { "_id": { "$in": &plan.superseded } })
@@ -1173,6 +1194,7 @@ pub(crate) mod tests {
             near_planet: None,
             superseded: Vec::new(),
             contested: ztf(&[11, 12]),
+            dropped: Vec::new(),
             unchanged_since: None,
         };
         assert!(

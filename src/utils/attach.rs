@@ -229,6 +229,85 @@ impl Pool {
     }
 }
 
+/// Which of `observations` one orbit reproduces, from `seed`, which was fitted
+/// on only some of them and left `seed_rms_arcsec` there.
+///
+/// All of them when one orbit fits them all within `gate_arcsec`. Otherwise
+/// the ones `seed` reproduces, grown nearest in time first by every other one
+/// a joint fit still passes with, as attached detections are. `None` when
+/// fewer than three are reproduced, too few to judge the rest by.
+pub fn reproduced(
+    observations: &[Observation],
+    seed: &State,
+    epoch_jd: f64,
+    seed_rms_arcsec: f64,
+    gate_arcsec: f64,
+) -> Option<(Vec<bool>, OrbitFit)> {
+    let conics = if is_bound(seed) {
+        Conics::Bound
+    } else {
+        Conics::Unbound {
+            vinf_au_per_day: f64::INFINITY,
+            max_rms_arcsec: f64::INFINITY,
+        }
+    };
+    let fits = |obs: &[Observation], from: &State| {
+        fit_within(obs, from, epoch_jd, gate_arcsec, conics).filter(|f| f.rms_arcsec <= gate_arcsec)
+    };
+    if let Some(fit) = fits(observations, seed) {
+        return Some((vec![true; observations.len()], fit));
+    }
+    let off = |state: &State, obs: &Observation| {
+        predict_radec(state, epoch_jd, obs.jd, &obs.site).map_or(f64::INFINITY, |(ra, dec)| {
+            angular_separation_deg(ra, dec, obs.ra, obs.dec) * 3600.0
+        })
+    };
+    let tolerance = gate_arcsec.max(5.0 * seed_rms_arcsec);
+    let mut kept: Vec<bool> = observations
+        .iter()
+        .map(|obs| off(seed, obs) <= tolerance)
+        .collect();
+    let subset = |kept: &[bool]| -> Vec<Observation> {
+        observations
+            .iter()
+            .zip(kept)
+            .filter(|(_, k)| **k)
+            .map(|(obs, _)| *obs)
+            .collect()
+    };
+    let core = subset(&kept);
+    if core.len() < 3 {
+        return None;
+    }
+    let mut fit = fits(&core, seed)?;
+    let (mut first, mut last) = core.iter().fold((f64::MAX, f64::MIN), |(lo, hi), obs| {
+        (lo.min(obs.jd), hi.max(obs.jd))
+    });
+    let beyond = |jd: f64, first: f64, last: f64| (first - jd).max(jd - last).max(0.0);
+    let mut order: Vec<usize> = (0..observations.len()).filter(|&i| !kept[i]).collect();
+    order.sort_by(|&a, &b| {
+        beyond(observations[a].jd, first, last).total_cmp(&beyond(observations[b].jd, first, last))
+    });
+    for i in order {
+        let obs = &observations[i];
+        let radius = (BASE_RADIUS_ARCSEC + RADIUS_PER_DAY_ARCSEC * beyond(obs.jd, first, last))
+            .min(MAX_RADIUS_ARCSEC);
+        if off(&fit.state, obs) > radius {
+            continue;
+        }
+        kept[i] = true;
+        match fits(&subset(&kept), &fit.state) {
+            Some(grown) => {
+                fit = grown;
+                first = first.min(obs.jd);
+                last = last.max(obs.jd);
+            }
+            None => kept[i] = false,
+        }
+    }
+    Some((kept, fit))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -319,5 +398,68 @@ mod tests {
         let ids: HashSet<i64> = attached.iter().map(|d| d.id).collect();
         assert_eq!(ids, same.iter().map(|d| d.id).collect());
         assert!(fit.rms_arcsec <= 2.0);
+    }
+
+    /// An orbit fitted on three nights of a track keeps every other detection
+    /// of its object, across surveys and on a hyperbola too, and lets another
+    /// object's go.
+    #[test]
+    fn test_an_orbit_keeps_its_own_object_and_frees_another() {
+        use crate::utils::orbit_fit::fit_orbit_with;
+        use crate::utils::sso_geometry::{DECAM, TT_MINUS_UTC_DAYS};
+        let borisov = OrbitalElements {
+            epoch_jd: 2458826.0536,
+            a: 2.006_548 / (1.0 - 3.356_633),
+            e: 3.356_633,
+            incl: 44.0526,
+            node: 308.1489,
+            peri: 209.1243,
+            mean_anomaly: 0.0,
+            q: 2.006_548,
+            tp: 2458826.0536,
+        };
+        for (el, start, odd_site) in [
+            (object(291.0), 2460010.70, ZTF),
+            (object(291.0), 2460010.70, DECAM),
+            (borisov, 2458746.70, ZTF),
+        ] {
+            let at = |el: &OrbitalElements, jd: f64, site: Site| {
+                let (ra, dec) = predict_radec_from(el, jd, &site);
+                Observation { jd, ra, dec, site }
+            };
+            let mut observations: Vec<Observation> = (0..6)
+                .flat_map(|night| {
+                    let site = if night % 2 == 0 { ZTF } else { odd_site };
+                    [0.0, 0.05].map(|visit| (start + 3.0 * f64::from(night) + visit, site))
+                })
+                .map(|(jd, site)| at(&el, jd, site))
+                .collect();
+            observations.extend([6.02, 12.02].map(|dt| at(&object(291.3), start + dt, ZTF)));
+            let epoch = start + 7.5;
+            let helio = |jd: f64| heliocentric_position(&el, jd + TT_MINUS_UTC_DAYS);
+            let (before, after) = (helio(epoch - 0.05), helio(epoch + 0.05));
+            let truth = State {
+                pos: helio(epoch),
+                vel: std::array::from_fn(|k| (after[k] - before[k]) / 0.1),
+            };
+            let conics = if is_bound(&truth) {
+                Conics::Bound
+            } else {
+                Conics::Unbound {
+                    vinf_au_per_day: f64::INFINITY,
+                    max_rms_arcsec: f64::INFINITY,
+                }
+            };
+            let seed = fit_orbit_with(&observations[4..10], &truth, epoch, 60, None, conics)
+                .expect("three nights fit");
+            let (kept, _) = reproduced(&observations, &seed.state, epoch, seed.rms_arcsec, 2.0)
+                .expect("enough to judge by");
+            assert!(
+                kept[..12].iter().all(|&k| k),
+                "e = {} lost its own detections: {kept:?}",
+                el.e
+            );
+            assert!(!kept[12] && !kept[13], "kept another object's: {kept:?}");
+        }
     }
 }
