@@ -268,6 +268,8 @@ mod tests {
             bound_fit: None,
             bound_fit_residual_arcsec: None,
             bound_fit_detections: None,
+            expected_rms_arcsec: None,
+            rms_ratio: None,
             n_detections: 2,
             n_nights,
             arc_days: 1.0,

@@ -13,7 +13,7 @@
 use crate::utils::enums::Survey;
 use crate::utils::heliolinc::MU;
 use crate::utils::linking::{night_at, Detection};
-use crate::utils::sso_geometry::{dot, norm, Site, DECAM, RUBIN, WINTER};
+use crate::utils::sso_geometry::{dot, norm, Site, DECAM, RUBIN, WINTER, ZTF};
 use mongodb::bson::{doc, Document};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -131,6 +131,12 @@ pub struct StoredTrack {
     /// before it was recorded, where it is taken to be all of them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bound_fit_detections: Option<i32>,
+    /// Root mean square of the members' site astrometric errors, arcseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_rms_arcsec: Option<f64>,
+    /// `bound_fit_residual_arcsec` over `expected_rms_arcsec`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rms_ratio: Option<f64>,
     pub n_detections: i32,
     pub n_nights: i32,
     pub arc_days: f64,
@@ -341,6 +347,22 @@ pub fn survey_site(survey: &Survey) -> Option<Site> {
         Survey::Decam => Some(DECAM),
         Survey::Winter => Some(WINTER),
     }
+}
+
+pub fn expected_rms_arcsec(members: &[Member]) -> Option<f64> {
+    if members.is_empty() {
+        return None;
+    }
+    let sum: f64 = members
+        .iter()
+        .map(|(survey, _)| {
+            survey_site(survey)
+                .unwrap_or(ZTF)
+                .astrometric_sigma_arcsec
+                .powi(2)
+        })
+        .sum();
+    Some((sum / members.len() as f64).sqrt())
 }
 
 pub fn alerts_by_survey(members: &[Member]) -> HashMap<Survey, Vec<i64>> {
@@ -760,6 +782,11 @@ pub async fn commit_upsert(
         Some(id) => id,
         None => format_id(next_sequence(db).await?),
     };
+    let expected_rms_arcsec = expected_rms_arcsec(&plan.members);
+    let rms_ratio = plan
+        .bound_fit_residual_arcsec
+        .zip(expected_rms_arcsec)
+        .map(|(rms, expected)| rms / expected);
     let (member_surveys, members): (Vec<Survey>, Vec<i64>) = plan.members.into_iter().unzip();
     let stored = StoredTrack {
         id: id.clone(),
@@ -769,6 +796,8 @@ pub async fn commit_upsert(
         bound_fit: plan.bound_fit,
         bound_fit_residual_arcsec: plan.bound_fit_residual_arcsec,
         bound_fit_detections: plan.bound_fit_detections,
+        expected_rms_arcsec,
+        rms_ratio,
         n_detections: plan.n_detections,
         n_nights: plan.n_nights,
         arc_days: plan.arc_days,
@@ -953,6 +982,7 @@ pub struct TrackQuery {
     pub min_e: Option<f64>,
     pub max_q: Option<f64>,
     pub min_nights: Option<i32>,
+    pub max_rms_ratio: Option<f64>,
 }
 
 impl TrackQuery {
@@ -980,6 +1010,9 @@ impl TrackQuery {
         }
         if let Some(max_q) = self.max_q {
             filter.insert("orbit.q", doc! { "$lte": max_q });
+        }
+        if let Some(max_rms_ratio) = self.max_rms_ratio {
+            filter.insert("rms_ratio", doc! { "$lte": max_rms_ratio });
         }
         filter
     }
@@ -1060,6 +1093,8 @@ pub(crate) mod tests {
             bound_fit: None,
             bound_fit_residual_arcsec: None,
             bound_fit_detections: None,
+            expected_rms_arcsec: None,
+            rms_ratio: None,
             n_detections: members.len() as i32,
             n_nights: 2,
             arc_days: 1.0,
@@ -1291,6 +1326,7 @@ pub(crate) mod tests {
             min_e: Some(1.0),
             max_q: Some(1.3),
             min_nights: Some(3),
+            max_rms_ratio: Some(4.0),
         };
         let filter = query.filter();
         assert_eq!(filter.keys().next().map(String::as_str), Some("updated_at"));
@@ -1314,6 +1350,10 @@ pub(crate) mod tests {
         assert_eq!(
             filter.get_document("orbit.q").unwrap(),
             &doc! { "$lte": 1.3 }
+        );
+        assert_eq!(
+            filter.get_document("rms_ratio").unwrap(),
+            &doc! { "$lte": 4.0 }
         );
         assert_eq!(
             TrackQuery::default().filter(),

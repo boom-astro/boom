@@ -228,9 +228,10 @@ pub const TASKS: &[TaskSpec] = &[
     TaskSpec {
         id: backfill_track_elements::TASK_TYPE,
         title: "Backfill track orbital elements",
-        description: "Write the eccentricity and perihelion distance next to the orbit of \
-                      tracks stored before they were. Resumable: re-running picks up the \
-                      tracks still missing them.",
+        description: "Write the eccentricity and perihelion distance next to the orbit, and \
+                      the residual over the rms expected from the members' sites, of tracks \
+                      stored before they were. Resumable: re-running picks up the tracks \
+                      still missing them.",
         idempotent: true,
         destructive: false,
         params_schema: || schema_of::<backfill_track_elements::BackfillTrackElementsParams>(),
