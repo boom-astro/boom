@@ -612,6 +612,34 @@ const CIDER_MIN_PHOTOMETRY_POINTS: usize = 2;
 
 const ACAI_BTS_NAMES: [&str; 6] = ["acai_h", "acai_n", "acai_v", "acai_o", "acai_b", "btsbot"];
 
+/// Per-object program for Milvus, from this alert and every prior detection:
+/// public (1) if any detection is public, else partnership (2) if any is
+/// partnership, else private (3). Other values are ignored; `None` means none
+/// of these was found, and the object is not stored.
+fn milvus_programid(alert_programid: i32, prv_candidates: &[ZtfPhotometry]) -> Option<i32> {
+    const PUBLIC: i32 = ProgramId::Public as i32;
+    const PARTNERSHIP: i32 = ProgramId::Partnership as i32;
+    // `ProgramId` names 3 after Caltech, but it holds every private program.
+    const PRIVATE: i32 = ProgramId::Caltech as i32;
+
+    let programids = || {
+        prv_candidates
+            .iter()
+            .map(|p| p.programid)
+            .chain([alert_programid])
+            .filter(|pid| matches!(*pid, PUBLIC | PARTNERSHIP | PRIVATE))
+    };
+    if programids().next().is_none() {
+        None
+    } else if programids().any(|pid| pid == PUBLIC) {
+        Some(PUBLIC)
+    } else if programids().any(|pid| pid == PARTNERSHIP) {
+        Some(PARTNERSHIP)
+    } else {
+        Some(PRIVATE)
+    }
+}
+
 struct AlertWork {
     candid: i64,
     programid: i32,
@@ -903,13 +931,15 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             ));
             processed_alerts.push(format!("{},{}", item.programid, item.candid));
 
-            if self.milvus.is_enabled() && item.programid == ProgramId::Public as i32 {
-                if let Some(embedding) = fusion_embedding {
+            if self.milvus.is_enabled() {
+                let programid = milvus_programid(item.programid, &item.alert.prv_candidates);
+                if let (Some(embedding), Some(programid)) = (fusion_embedding, programid) {
                     embedding_rows.push(EmbeddingRow {
                         object_id: item.alert.object_id.clone(),
                         embedding,
                         candid: item.candid,
                         jd: item.alert.candidate.candidate.jd,
+                        programid,
                     });
                 }
             }
@@ -1711,6 +1741,60 @@ mod tests {
             applecider_outputs: None,
             fusion_embedding: Some(vec![1.0, 2.0, 3.0]),
         }
+    }
+
+    fn detection(programid: i32) -> ZtfPhotometry {
+        ZtfPhotometry {
+            jd: 2460000.5,
+            magpsf: Some(19.0),
+            sigmapsf: Some(0.1),
+            diffmaglim: 20.5,
+            flux: Some(1000.0),
+            flux_err: 50.0,
+            band: Band::G,
+            ra: None,
+            dec: None,
+            snr_psf: None,
+            programid,
+        }
+    }
+
+    #[test]
+    fn a_public_alert_makes_the_object_public() {
+        assert_eq!(milvus_programid(1, &[]), Some(1));
+        assert_eq!(milvus_programid(1, &[detection(2), detection(3)]), Some(1));
+    }
+
+    #[test]
+    fn any_public_detection_in_the_history_makes_the_object_public() {
+        assert_eq!(milvus_programid(2, &[detection(2), detection(1)]), Some(1));
+        assert_eq!(milvus_programid(3, &[detection(1)]), Some(1));
+    }
+
+    #[test]
+    fn any_partnership_detection_without_a_public_one_makes_the_object_partnership() {
+        assert_eq!(milvus_programid(2, &[]), Some(2));
+        assert_eq!(milvus_programid(2, &[detection(2), detection(2)]), Some(2));
+        assert_eq!(milvus_programid(2, &[detection(2), detection(3)]), Some(2));
+        assert_eq!(milvus_programid(3, &[detection(2)]), Some(2));
+    }
+
+    #[test]
+    fn an_object_with_only_private_detections_is_private() {
+        assert_eq!(milvus_programid(3, &[]), Some(3));
+        assert_eq!(milvus_programid(3, &[detection(3), detection(3)]), Some(3));
+    }
+
+    #[test]
+    fn unknown_programs_are_ignored() {
+        assert_eq!(milvus_programid(2, &[detection(0), detection(4)]), Some(2));
+        assert_eq!(milvus_programid(0, &[detection(1)]), Some(1));
+    }
+
+    #[test]
+    fn an_object_with_no_known_program_is_not_classified() {
+        assert_eq!(milvus_programid(0, &[]), None);
+        assert_eq!(milvus_programid(0, &[detection(0), detection(7)]), None);
     }
 
     /// The enrichment worker takes the embedding out of the classifications
