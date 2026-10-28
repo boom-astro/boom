@@ -137,10 +137,15 @@ pub struct StoredTrack {
     /// `bound_fit_residual_arcsec` over `expected_rms_arcsec`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rms_ratio: Option<f64>,
-    /// Reasons to look again before believing the track, such as `to_confirm`.
-    /// Nothing is dropped for them. Absent on tracks written before it.
+    /// Reasons to look again before believing the track: `to_confirm`,
+    /// `photometry` or `long_gap`. Nothing is dropped for them. Absent on
+    /// tracks written before it.
     #[serde(default)]
     pub flags: Vec<String>,
+    /// Spread of the nightly median magnitudes, reduced under the stored orbit
+    /// and taken to V.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mag_spread: Option<f64>,
     pub n_detections: i32,
     pub n_nights: i32,
     pub arc_days: f64,
@@ -371,6 +376,17 @@ pub fn expected_rms_arcsec(members: &[Member]) -> Option<f64> {
 
 /// Flag for a track whose detections cannot pin an orbit down.
 pub const TO_CONFIRM: &str = "to_confirm";
+/// Flag for a track whose nights disagree on the brightness of one object.
+pub const PHOTOMETRY: &str = "photometry";
+/// Flag for a track bridging a long gap without the residual to back it.
+pub const LONG_GAP: &str = "long_gap";
+
+/// Above a rotating elongated asteroid or the calibration offset between two
+/// surveys, under the 3 mag the linker rejects at. A comet in outburst can still
+/// get here, which is why it only flags.
+const FLAGGED_MAG_SPREAD: f64 = 2.0;
+const LONG_GAP_DAYS: f64 = 30.0;
+const LONG_GAP_MAX_RMS_RATIO: f64 = 5.0;
 
 /// Whether the detections pin an orbit down: a pair on each of two nights gives
 /// the motion twice, and four nights give enough positions on their own. Three
@@ -386,10 +402,27 @@ pub fn constrained(members: &[Member], jds: &[f64]) -> bool {
     per_night.len() >= 4 || per_night.values().filter(|&&n| n >= 2).count() >= 2
 }
 
-pub fn track_flags(members: &[Member], jds: &[f64]) -> Vec<String> {
+fn longest_gap(jds: &[f64]) -> f64 {
+    let mut sorted = jds.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    sorted.windows(2).map(|w| w[1] - w[0]).fold(0.0, f64::max)
+}
+
+pub fn track_flags(
+    members: &[Member],
+    jds: &[f64],
+    rms_ratio: Option<f64>,
+    mag_spread: Option<f64>,
+) -> Vec<String> {
     let mut flags = Vec::new();
     if !constrained(members, jds) {
         flags.push(TO_CONFIRM.to_string());
+    }
+    if mag_spread.is_some_and(|s| s > FLAGGED_MAG_SPREAD) {
+        flags.push(PHOTOMETRY.to_string());
+    }
+    if rms_ratio.is_some_and(|r| r > LONG_GAP_MAX_RMS_RATIO) && longest_gap(jds) > LONG_GAP_DAYS {
+        flags.push(LONG_GAP.to_string());
     }
     flags
 }
@@ -596,6 +629,7 @@ pub struct UpsertPlan {
     pub bound_fit_residual_arcsec: Option<f64>,
     pub bound_fit_detections: Option<i32>,
     pub orbit: Option<StoredOrbit>,
+    pub mag_spread: Option<f64>,
     pub designation: Option<String>,
     pub kind: Option<String>,
     pub near_planet: Option<String>,
@@ -800,6 +834,7 @@ pub async fn plan_upsert(
         bound_fit_residual_arcsec,
         bound_fit_detections,
         orbit,
+        mag_spread: None,
         designation,
         kind,
         near_planet,
@@ -825,7 +860,7 @@ pub async fn commit_upsert(
         .bound_fit_residual_arcsec
         .zip(expected_rms_arcsec)
         .map(|(rms, expected)| rms / expected);
-    let flags = track_flags(&plan.members, &plan.epochs);
+    let flags = track_flags(&plan.members, &plan.epochs, rms_ratio, plan.mag_spread);
     let (member_surveys, members): (Vec<Survey>, Vec<i64>) = plan.members.into_iter().unzip();
     let stored = StoredTrack {
         id: id.clone(),
@@ -838,6 +873,7 @@ pub async fn commit_upsert(
         expected_rms_arcsec,
         rms_ratio,
         flags,
+        mag_spread: plan.mag_spread,
         n_detections: plan.n_detections,
         n_nights: plan.n_nights,
         arc_days: plan.arc_days,
@@ -1002,7 +1038,7 @@ pub fn restrict_to(track: &StoredTrack, keep: &HashSet<Member>) -> Option<Stored
     }
     let (n_detections, n_nights, arc_days, first_jd, last_jd) = summarise(&kept, &epochs);
     let orbit = track.orbit.filter(|_| kept.len() == track.members.len());
-    let flags = track_flags(&kept, &epochs);
+    let flags = track_flags(&kept, &epochs, track.rms_ratio, track.mag_spread);
     let (member_surveys, members): (Vec<Survey>, Vec<i64>) = kept.into_iter().unzip();
     Some(StoredTrack {
         orbit,
@@ -1150,6 +1186,7 @@ pub(crate) mod tests {
             expected_rms_arcsec: None,
             rms_ratio: None,
             flags: Vec::new(),
+            mag_spread: None,
             n_detections: members.len() as i32,
             n_nights: 2,
             arc_days: 1.0,
@@ -1174,13 +1211,27 @@ pub(crate) mod tests {
             (ztf(&(1..=jds.len() as i64).collect::<Vec<_>>()), jds)
         };
         let (m, j) = nights(&[1, 1, 1]);
-        assert_eq!(track_flags(&m, &j), vec![TO_CONFIRM.to_string()]);
+        assert_eq!(
+            track_flags(&m, &j, None, None),
+            vec![TO_CONFIRM.to_string()]
+        );
         let (m, j) = nights(&[2, 1, 1]);
         assert!(!constrained(&m, &j));
         let (m, j) = nights(&[2, 2]);
         assert!(constrained(&m, &j));
         let (m, j) = nights(&[1, 1, 1, 1]);
-        assert!(track_flags(&m, &j).is_empty());
+        assert!(track_flags(&m, &j, None, None).is_empty());
+    }
+
+    #[test]
+    fn test_a_year_long_link_needs_a_tight_residual() {
+        let members = ztf(&[1, 2, 3, 4]);
+        let jds = [2460000.0, 2460000.02, 2460365.0, 2460365.02];
+        assert!(track_flags(&members, &jds, Some(1.0), Some(0.5)).is_empty());
+        assert_eq!(
+            track_flags(&members, &jds, Some(8.0), Some(4.0)),
+            vec![PHOTOMETRY.to_string(), LONG_GAP.to_string()]
+        );
     }
 
     /// The property the whole module exists for: a track that gains detections
@@ -1278,6 +1329,7 @@ pub(crate) mod tests {
             bound_fit_residual_arcsec: None,
             bound_fit_detections: None,
             orbit: None,
+            mag_spread: None,
             designation: None,
             kind: None,
             near_planet: None,

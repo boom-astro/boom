@@ -271,6 +271,7 @@ mod tests {
             expected_rms_arcsec: None,
             rms_ratio: None,
             flags: Vec::new(),
+            mag_spread: None,
             n_detections: 2,
             n_nights,
             arc_days: 1.0,
