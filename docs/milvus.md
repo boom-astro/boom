@@ -205,9 +205,10 @@ vector itself is Milvus-only.
 (`src/milvus/search.rs`):
 
 - `search_embedding(query, top_k)` — similarity search: returns the `top_k`
-  nearest `object_id`s to a query vector with their scores (and stored
-  `candid`/`jd`), best-first. The query vector is wrapped in a protobuf
-  `PlaceholderGroup` (little-endian `f32` bytes) as Milvus requires.
+  nearest `object_id`s to a query vector with their scores and stored
+  `candid`, best-first. The `candid` is never serialized. The query vector is
+  wrapped in a protobuf `PlaceholderGroup` (little-endian `f32` bytes) as
+  Milvus requires.
 - `get_embeddings(&[object_id])` — fetch stored rows by id, with the vector
   split back out of Milvus's flat column into per-row `Vec<f32>`.
 - `count()` — number of objects in the collection (`count(*)`).
@@ -239,6 +240,14 @@ than a raw 384-float vector: the seed object's stored embedding is resolved
 server-side, and the seed is stripped from its own results. `top_k` defaults to
 10 and is clamped to 100. A 404 means the object has no stored embedding, which
 is an ordinary outcome — only ZTF alerts that clear the AppleCiDEr gate get one.
+
+Each neighbor is `{"object_id", "score", "applecider_fusion"}`. The last is
+AppleCiDEr's classification (`decision_label`, `decision_probability`,
+`class_probabilities`, ...), read from `classifications.applecider_fusion` on
+the `ZTF_alerts` document whose candid Milvus stored. Classifications live in
+Mongo only, so changing their post-processing needs no Milvus schema change.
+It is `null` when that alert has none, or when the Mongo lookup fails; a failed
+lookup is logged but does not fail the search.
 
 On the Babamul side, search and count are **public** (listed in
 `BABAMUL_PUBLIC_ROUTES`), matching the stats endpoints behind `/dashboard`:
