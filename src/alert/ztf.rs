@@ -909,6 +909,94 @@ impl ZtfAlertWorker {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub async fn upsert_aux(
+        &mut self,
+        object_id: &str,
+        ra: f64,
+        dec: f64,
+        prv_candidates: Vec<ZtfPrvCandidate>,
+        prv_nondetections: Vec<ZtfPrvCandidate>,
+        fp_hists: Vec<ZtfForcedPhot>,
+        now: f64,
+    ) -> Result<(), AlertError> {
+        let survey_matches = Some(
+            self.get_survey_matches(ra, dec)
+                .await
+                .inspect_err(as_error!())?,
+        );
+
+        let existing_alert_aux = self.get_existing_aux(object_id).await?;
+
+        if let Some(existing) = existing_alert_aux {
+            self.update_aux(
+                object_id,
+                &prv_candidates,
+                &prv_nondetections,
+                &fp_hists,
+                &survey_matches,
+                now,
+                &existing,
+            )
+            .await
+            .inspect_err(as_error!())?;
+            return Ok(());
+        }
+
+        let xmatches = xmatch(
+            ra,
+            dec,
+            object_id,
+            &Survey::Ztf,
+            &self.xmatch_configs,
+            &self.db,
+        )
+        .await?;
+        let host_galaxy = host::associate_with_photometry(
+            ra,
+            dec,
+            &xmatches,
+            &self.host_galaxy_config,
+            &self.xmatch_configs,
+            &Survey::Ztf,
+            object_id,
+            &self.db,
+        )
+        .await;
+        let obj = ZtfObject {
+            object_id: object_id.to_string(),
+            prv_candidates,
+            prv_nondetections,
+            fp_hists,
+            cross_matches: Some(xmatches),
+            host_galaxy,
+            aliases: survey_matches,
+            coordinates: Coordinates::new(ra, dec),
+            created_at: now,
+            updated_at: now,
+        };
+        let result = self.insert_aux(&obj, &self.alert_aux_collection).await;
+        if let Err(AlertError::AlertAuxExists) = result {
+            debug!(
+                "Alert aux document for object_id {} already exists. Using fallback update.",
+                object_id
+            );
+            self.update_aux_fallback(
+                object_id,
+                &obj.prv_candidates,
+                &obj.prv_nondetections,
+                &obj.fp_hists,
+                &obj.aliases,
+                now,
+            )
+            .await
+            .inspect_err(as_error!())?;
+        } else {
+            result.inspect_err(as_error!())?;
+        }
+        Ok(())
+    }
+
     async fn update_aux(
         &mut self,
         object_id: &str,
@@ -1062,79 +1150,16 @@ impl AlertWorker for ZtfAlertWorker {
             return Ok(ProcessAlertStatus::Exists(candid));
         }
 
-        let survey_matches = Some(
-            self.get_survey_matches(ra, dec)
-                .await
-                .inspect_err(as_error!())?,
-        );
-
-        let existing_alert_aux = self.get_existing_aux(&object_id).await?;
-
-        if let Some(existing) = existing_alert_aux {
-            self.update_aux(
-                &object_id,
-                &prv_candidates,
-                &prv_nondetections,
-                &fp_hists,
-                &survey_matches,
-                now,
-                &existing,
-            )
-            .await
-            .inspect_err(as_error!())?;
-        } else {
-            let xmatches = xmatch(
-                ra,
-                dec,
-                &object_id,
-                &Survey::Ztf,
-                &self.xmatch_configs,
-                &self.db,
-            )
-            .await?;
-            let host_galaxy = host::associate_with_photometry(
-                ra,
-                dec,
-                &xmatches,
-                &self.host_galaxy_config,
-                &self.xmatch_configs,
-                &Survey::Ztf,
-                &object_id,
-                &self.db,
-            )
-            .await;
-            let obj = ZtfObject {
-                object_id: object_id.clone(),
-                prv_candidates,
-                prv_nondetections,
-                fp_hists,
-                cross_matches: Some(xmatches),
-                host_galaxy,
-                aliases: survey_matches,
-                coordinates: Coordinates::new(ra, dec),
-                created_at: now,
-                updated_at: now,
-            };
-            let result = self.insert_aux(&obj, &self.alert_aux_collection).await;
-            if let Err(AlertError::AlertAuxExists) = result {
-                debug!(
-                    "Alert aux document for object_id {} already exists. Using fallback update.",
-                    object_id
-                );
-                self.update_aux_fallback(
-                    &object_id,
-                    &obj.prv_candidates,
-                    &obj.prv_nondetections,
-                    &obj.fp_hists,
-                    &obj.aliases,
-                    now,
-                )
-                .await
-                .inspect_err(as_error!())?;
-            } else {
-                result.inspect_err(as_error!())?;
-            }
-        }
+        self.upsert_aux(
+            &object_id,
+            ra,
+            dec,
+            prv_candidates,
+            prv_nondetections,
+            fp_hists,
+            now,
+        )
+        .await?;
 
         self.format_and_insert_cutouts(
             candid,
