@@ -137,6 +137,10 @@ pub struct StoredTrack {
     /// `bound_fit_residual_arcsec` over `expected_rms_arcsec`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rms_ratio: Option<f64>,
+    /// Reasons to look again before believing the track, such as `to_confirm`.
+    /// Nothing is dropped for them. Absent on tracks written before it.
+    #[serde(default)]
+    pub flags: Vec<String>,
     pub n_detections: i32,
     pub n_nights: i32,
     pub arc_days: f64,
@@ -363,6 +367,31 @@ pub fn expected_rms_arcsec(members: &[Member]) -> Option<f64> {
         })
         .sum();
     Some((sum / members.len() as f64).sqrt())
+}
+
+/// Flag for a track whose detections cannot pin an orbit down.
+pub const TO_CONFIRM: &str = "to_confirm";
+
+/// Whether the detections pin an orbit down: a pair on each of two nights gives
+/// the motion twice, and four nights give enough positions on their own. Three
+/// single detections are six measurements for six parameters, which any orbit
+/// fits with no residual.
+pub fn constrained(members: &[Member], jds: &[f64]) -> bool {
+    let mut per_night: HashMap<i64, usize> = HashMap::new();
+    for ((survey, _), &jd) in members.iter().zip(jds) {
+        *per_night
+            .entry(night_at(jd, survey_site(survey).as_ref()))
+            .or_default() += 1;
+    }
+    per_night.len() >= 4 || per_night.values().filter(|&&n| n >= 2).count() >= 2
+}
+
+pub fn track_flags(members: &[Member], jds: &[f64]) -> Vec<String> {
+    let mut flags = Vec::new();
+    if !constrained(members, jds) {
+        flags.push(TO_CONFIRM.to_string());
+    }
+    flags
 }
 
 pub fn alerts_by_survey(members: &[Member]) -> HashMap<Survey, Vec<i64>> {
@@ -796,6 +825,7 @@ pub async fn commit_upsert(
         .bound_fit_residual_arcsec
         .zip(expected_rms_arcsec)
         .map(|(rms, expected)| rms / expected);
+    let flags = track_flags(&plan.members, &plan.epochs);
     let (member_surveys, members): (Vec<Survey>, Vec<i64>) = plan.members.into_iter().unzip();
     let stored = StoredTrack {
         id: id.clone(),
@@ -807,6 +837,7 @@ pub async fn commit_upsert(
         bound_fit_detections: plan.bound_fit_detections,
         expected_rms_arcsec,
         rms_ratio,
+        flags,
         n_detections: plan.n_detections,
         n_nights: plan.n_nights,
         arc_days: plan.arc_days,
@@ -971,9 +1002,11 @@ pub fn restrict_to(track: &StoredTrack, keep: &HashSet<Member>) -> Option<Stored
     }
     let (n_detections, n_nights, arc_days, first_jd, last_jd) = summarise(&kept, &epochs);
     let orbit = track.orbit.filter(|_| kept.len() == track.members.len());
+    let flags = track_flags(&kept, &epochs);
     let (member_surveys, members): (Vec<Survey>, Vec<i64>) = kept.into_iter().unzip();
     Some(StoredTrack {
         orbit,
+        flags,
         members,
         member_surveys,
         epochs,
@@ -1116,6 +1149,7 @@ pub(crate) mod tests {
             bound_fit_detections: None,
             expected_rms_arcsec: None,
             rms_ratio: None,
+            flags: Vec::new(),
             n_detections: members.len() as i32,
             n_nights: 2,
             arc_days: 1.0,
@@ -1127,6 +1161,26 @@ pub(crate) mod tests {
             updated_at: 0.0,
             orbit: None,
         }
+    }
+
+    #[test]
+    fn test_single_detections_on_three_nights_are_to_confirm() {
+        let nights = |per: &[usize]| -> (Vec<Member>, Vec<f64>) {
+            let jds: Vec<f64> = per
+                .iter()
+                .enumerate()
+                .flat_map(|(n, &k)| (0..k).map(move |i| 2460000.0 + n as f64 + i as f64 * 0.01))
+                .collect();
+            (ztf(&(1..=jds.len() as i64).collect::<Vec<_>>()), jds)
+        };
+        let (m, j) = nights(&[1, 1, 1]);
+        assert_eq!(track_flags(&m, &j), vec![TO_CONFIRM.to_string()]);
+        let (m, j) = nights(&[2, 1, 1]);
+        assert!(!constrained(&m, &j));
+        let (m, j) = nights(&[2, 2]);
+        assert!(constrained(&m, &j));
+        let (m, j) = nights(&[1, 1, 1, 1]);
+        assert!(track_flags(&m, &j).is_empty());
     }
 
     /// The property the whole module exists for: a track that gains detections
