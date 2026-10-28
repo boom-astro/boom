@@ -86,7 +86,12 @@ fn flags_update(namespace: &Namespace, track: &Document) -> Option<WriteModel> {
     if stored.epochs.len() != stored.members.len() {
         return None;
     }
-    let flags = track_flags(&stored.member_keys(), &stored.epochs);
+    let flags = track_flags(
+        &stored.member_keys(),
+        &stored.epochs,
+        stored.rms_ratio,
+        stored.mag_spread,
+    );
     Some(WriteModel::UpdateOne(
         UpdateOneModel::builder()
             .namespace(namespace.clone())
@@ -219,7 +224,7 @@ pub async fn run(
         (
             missing_flags(),
             doc! {
-                "members": 1, "member_surveys": 1, "epochs": 1,
+                "members": 1, "member_surveys": 1, "epochs": 1, "rms_ratio": 1, "mag_spread": 1,
                 "n_detections": 1, "n_nights": 1, "arc_days": 1, "first_jd": 1, "last_jd": 1,
             },
         ),

@@ -9,8 +9,8 @@ use crate::utils::attach::{match_track, reproduced, Pool, Target};
 use crate::utils::enums::Survey;
 use crate::utils::fast::{FastTrack, FAST_KIND};
 use crate::utils::heliolinc::{
-    sky_track, test_orbits, unbound_test_orbits, Conics, SkyResolution, State, Track,
-    KM_S_PER_AU_DAY,
+    night_magnitude_spread, sky_track, test_orbits, unbound_test_orbits, Conics, SkyResolution,
+    State, Track, KM_S_PER_AU_DAY,
 };
 use crate::utils::identify::{
     identify, known_tracklets, predict_radec, track_designation, IdentifyConfig, KnownRule, Match,
@@ -816,24 +816,7 @@ async fn keep_reproduced(
     {
         return Ok(plan);
     }
-    let ids: Vec<i64> = plan
-        .members
-        .iter()
-        .map(|(survey, id)| detection_id(survey, *id))
-        .collect();
-    let at_hand = |id: &i64| run.get(id).map(|d| **d).or_else(|| stored.get(id).copied());
-    let elsewhere: Vec<Member> = plan
-        .members
-        .iter()
-        .zip(&ids)
-        .filter(|&(_, id)| at_hand(id).is_none())
-        .map(|(m, _)| m.clone())
-        .collect();
-    let loaded = load_positions(db, &elsewhere).await?;
-    let found: Vec<Option<Detection>> = ids
-        .iter()
-        .map(|id| at_hand(id).or_else(|| loaded.get(id).copied()))
-        .collect();
+    let found = member_detections(db, &plan.members, run, stored).await?;
     let observations: Vec<Observation> = found
         .iter()
         .flatten()
@@ -883,6 +866,54 @@ async fn keep_reproduced(
         unchanged_since: None,
         ..plan
     })
+}
+
+/// The detection behind each of `members`, from the run or else its alert, and
+/// `None` for one with neither.
+async fn member_detections(
+    db: &mongodb::Database,
+    members: &[Member],
+    run: &HashMap<i64, &Detection>,
+    stored: &HashMap<i64, Detection>,
+) -> Result<Vec<Option<Detection>>, mongodb::error::Error> {
+    let ids: Vec<i64> = members
+        .iter()
+        .map(|(survey, id)| detection_id(survey, *id))
+        .collect();
+    let at_hand = |id: &i64| run.get(id).map(|d| **d).or_else(|| stored.get(id).copied());
+    let elsewhere: Vec<Member> = members
+        .iter()
+        .zip(&ids)
+        .filter(|&(_, id)| at_hand(id).is_none())
+        .map(|(m, _)| m.clone())
+        .collect();
+    let loaded = load_positions(db, &elsewhere).await?;
+    Ok(ids
+        .iter()
+        .map(|id| at_hand(id).or_else(|| loaded.get(id).copied()))
+        .collect())
+}
+
+/// `plan` with the spread of its nightly magnitudes under its orbit, over every
+/// member, including those of the tracks it extends. Skipped for a plan that
+/// writes nothing.
+async fn with_mag_spread(
+    db: &mongodb::Database,
+    mut plan: UpsertPlan,
+    run: &HashMap<i64, &Detection>,
+    stored: &HashMap<i64, Detection>,
+) -> Result<UpsertPlan, mongodb::error::Error> {
+    let Some(orbit) = plan.orbit.filter(|_| plan.unchanged_since.is_none()) else {
+        return Ok(plan);
+    };
+    let found = member_detections(db, &plan.members, run, stored).await?;
+    let detections: Vec<&Detection> = found.iter().flatten().collect();
+    let state = State {
+        pos: orbit.pos,
+        vel: orbit.vel,
+    };
+    plan.mag_spread = night_magnitude_spread(&state, orbit.epoch_jd, &detections);
+    Ok(plan)
 }
 
 /// Positions of `members` from their alerts, by detection id.
@@ -1177,6 +1208,17 @@ async fn persist(
             Err(e) => {
                 error!(
                     "could not check one of the {} against its orbit: {}",
+                    what, e
+                );
+                report.failed += 1;
+                continue;
+            }
+        };
+        let plan = match with_mag_spread(db, plan, &by_id, stored).await {
+            Ok(plan) => plan,
+            Err(e) => {
+                error!(
+                    "could not load the magnitudes of one of the {}: {}",
                     what, e
                 );
                 report.failed += 1;
