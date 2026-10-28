@@ -14,6 +14,7 @@ use crate::milvus::{BackupQueue, EmbeddingRow, MilvusSink};
 use crate::utils::cutouts::{AlertCutout, CutoutStorage};
 use crate::utils::db::mongify;
 use crate::utils::enums::{ProgramId, Survey};
+use crate::utils::gp_fit::{self, GpPoint};
 use crate::utils::host::HostGalaxyAssociation;
 use crate::utils::lightcurves::{
     analyze_photometry, is_stationary, prepare_photometry, signed_snr, summarise_detections,
@@ -230,6 +231,16 @@ impl ZtfPhotometry {
                 }),
             },
             _ => None,
+        }
+    }
+
+    pub fn to_gp_point(&self) -> GpPoint {
+        GpPoint {
+            jd: self.jd,
+            magpsf: self.magpsf,
+            sigmapsf: self.sigmapsf,
+            diffmaglim: self.diffmaglim,
+            band: self.band.clone(),
         }
     }
 }
@@ -669,6 +680,21 @@ fn position_index(indices: &[usize]) -> HashMap<usize, usize> {
         .collect()
 }
 
+/// The alert's ZTF photometry up to its own epoch, as the GP fit takes it.
+/// A matched LSST object's photometry is left out.
+fn gp_observations(alert: &ZtfAlertForEnrichment, config: &rust_gp::GpConfig) -> Vec<rust_gp::Obs> {
+    let jd = alert.candidate.candidate.jd;
+    // Alert photometry ahead of forced, so it is kept for an exposure both report.
+    let points = alert
+        .prv_candidates
+        .iter()
+        .chain(&alert.prv_nondetections)
+        .chain(&alert.fp_hists)
+        .filter(|p| p.jd <= jd)
+        .map(ZtfPhotometry::to_gp_point);
+    gp_fit::observations(points, config)
+}
+
 #[cfg(feature = "gpu")]
 fn to_villar_photometry(p: &PhotometryMag) -> Option<villar_pso::PhotometryMag> {
     let band = match p.band {
@@ -831,6 +857,9 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         let batch_size = alerts.len();
         let mut skipped_empty_lightcurve = 0usize;
         let mut work_items: Vec<AlertWork> = Vec::with_capacity(alerts.len());
+        let gp_config = gp_fit::gp_config();
+        // One per work item, in the same order.
+        let mut gp_inputs: Vec<(i64, Vec<rust_gp::Obs>)> = Vec::with_capacity(alerts.len());
         #[cfg(feature = "gpu")]
         let mut villar_inputs: Vec<(i64, Vec<PhotometryMag>)> = Vec::new();
         for alert in alerts {
@@ -858,6 +887,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                 villar_inputs.push((candid, lightcurve));
             }
 
+            gp_inputs.push((candid, gp_observations(&alert, &gp_config)));
             work_items.push(AlertWork {
                 candid,
                 programid,
@@ -878,7 +908,19 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             );
         }
 
+        // CPU-only, so the fits run on the Rayon pool while inference holds this thread.
+        let span = tracing::Span::current();
+        let gp_task = tokio::task::spawn_blocking(move || {
+            span.in_scope(|| gp_fit::fit_many(&gp_inputs, &gp_config))
+        });
+
         let classifications_list = self.classify(&self.models, &work_items)?;
+
+        let mut gp_fits = gp_task
+            .await
+            .inspect_err(|e| warn!("GP fitting failed for the whole batch: {}", e))
+            .ok()
+            .map(Vec::into_iter);
 
         for (item, mut classifications) in work_items.into_iter().zip(classifications_list) {
             // Extracting the fusion embedding from the classifications
@@ -892,6 +934,11 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             };
             if let Some(cls) = &classifications {
                 set_doc.insert("classifications", mongify(cls));
+            }
+            // Every key null when the light curve could not be fitted, absent
+            // when fitting never ran, so a backfill can select on the missing key.
+            if let Some(fit) = gp_fits.as_mut().and_then(Iterator::next) {
+                set_doc.insert("gp_fit", fit);
             }
 
             updates.push(WriteModel::UpdateOne(
