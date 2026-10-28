@@ -671,7 +671,8 @@ pub struct ZtfRawAvroAlert {
     pub candidate: ZtfCandidate,
     #[serde(deserialize_with = "deserialize_prv_candidates")]
     pub prv_candidates: Option<Vec<ZtfPrvCandidate>>,
-    #[serde(deserialize_with = "deserialize_fp_hists")]
+    // Absent from schemas before 4.0 (alerts up to mid-2023).
+    #[serde(default, deserialize_with = "deserialize_fp_hists")]
     pub fp_hists: Option<Vec<ZtfForcedPhot>>,
     #[serde(
         rename = "cutoutScience",
@@ -1666,6 +1667,46 @@ mod tests {
         // A survey pointing is not a ToO, so this packet reads false; the point
         // is that it parses at all, since the field was previously discarded.
         assert!(!alert.candidate.candidate.tooflag);
+    }
+
+    #[test]
+    fn test_pre_fp_hists_schema_deserializes() {
+        // Schema 3.3 packet (ZTF23aajjzfg, 2023-05-13): predates the fp_hists field.
+        let avro_bytes = std::fs::read("tests/data/alerts/ztf/2323428966215015003.avro").unwrap();
+        let mut cache = SchemaCache::default();
+        let alert: ZtfRawAvroAlert = cache.alert_from_avro_bytes(&avro_bytes).unwrap();
+        assert_eq!(alert.schemavsn, "3.3");
+        assert_eq!(alert.object_id, "ZTF23aajjzfg");
+        assert_eq!(alert.candid, 2323428966215015003);
+        assert!(alert.fp_hists.is_none());
+        assert_eq!(alert.prv_candidates.unwrap().len(), 16);
+    }
+
+    #[tokio::test]
+    async fn test_process_pre_fp_hists_alert() {
+        let mut worker = ztf_alert_worker().await;
+        let avro_bytes = std::fs::read("tests/data/alerts/ztf/2323428966215015003.avro").unwrap();
+        let candid = 2323428966215015003;
+        drop_alert_from_collections(candid, &Survey::Ztf)
+            .await
+            .unwrap();
+
+        let status = worker.process_alert(&avro_bytes).await.unwrap();
+        assert_eq!(status, ProcessAlertStatus::Added(candid));
+
+        let aux = worker
+            .alert_aux_collection
+            .find_one(doc! { "_id": "ZTF23aajjzfg" })
+            .await
+            .unwrap()
+            .expect("alert aux should exist after processing");
+        assert!(aux.fp_hists.is_empty());
+        assert_eq!(aux.prv_candidates.len(), 2);
+        assert_eq!(aux.prv_nondetections.len(), 15);
+
+        drop_alert_from_collections(candid, &Survey::Ztf)
+            .await
+            .unwrap();
     }
 
     #[test]

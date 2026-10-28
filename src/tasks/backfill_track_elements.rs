@@ -2,7 +2,7 @@ use super::context::TaskContext;
 use super::ledger::{MutationTarget, Operation};
 use super::TaskError;
 use crate::utils::tracks::{
-    conic, expected_rms_arcsec, StoredOrbit, StoredTrack, TRACKS_COLLECTION,
+    conic, expected_rms_arcsec, track_flags, StoredOrbit, StoredTrack, TRACKS_COLLECTION,
 };
 use futures::TryStreamExt;
 use mongodb::bson::{doc, Document};
@@ -72,6 +72,26 @@ fn quality_update(namespace: &Namespace, track: &Document) -> Option<WriteModel>
             .update(
                 doc! { "$set": { "expected_rms_arcsec": expected, "rms_ratio": rms / expected } },
             )
+            .build(),
+    ))
+}
+
+fn missing_flags() -> Document {
+    doc! { "flags": { "$exists": false } }
+}
+
+fn flags_update(namespace: &Namespace, track: &Document) -> Option<WriteModel> {
+    let id = track.get("_id")?;
+    let stored = mongodb::bson::from_document::<StoredTrack>(track.clone()).ok()?;
+    if stored.epochs.len() != stored.members.len() {
+        return None;
+    }
+    let flags = track_flags(&stored.member_keys(), &stored.epochs);
+    Some(WriteModel::UpdateOne(
+        UpdateOneModel::builder()
+            .namespace(namespace.clone())
+            .filter(doc! { "_id": id.clone(), "members": track.get("members")?.clone() })
+            .update(doc! { "$set": { "flags": flags } })
             .build(),
     ))
 }
@@ -193,7 +213,23 @@ pub async fn run(
     )
     .await?;
 
-    let written = elements.written + quality.written;
+    let flags = backfill(
+        ctx,
+        &tracks,
+        (
+            missing_flags(),
+            doc! {
+                "members": 1, "member_surveys": 1, "epochs": 1,
+                "n_detections": 1, "n_nights": 1, "arc_days": 1, "first_jd": 1, "last_jd": 1,
+            },
+        ),
+        flags_update,
+        "no flags",
+        params.batch_size,
+    )
+    .await?;
+
+    let written = elements.written + quality.written + flags.written;
     if written > 0 {
         ctx.record_mutation(
             MutationTarget {
@@ -204,7 +240,7 @@ pub async fn run(
             },
             Operation::Recompute,
             doc! {
-                "fields": ["orbit.e", "orbit.q", "expected_rms_arcsec", "rms_ratio"],
+                "fields": ["orbit.e", "orbit.q", "expected_rms_arcsec", "rms_ratio", "flags"],
                 "written": written as i64,
             },
         )
@@ -218,5 +254,8 @@ pub async fn run(
         "quality_tracks": quality.seen,
         "quality_written": quality.written,
         "quality_unreadable": quality.unreadable,
+        "flags_tracks": flags.seen,
+        "flags_written": flags.written,
+        "flags_unreadable": flags.unreadable,
     }))
 }
