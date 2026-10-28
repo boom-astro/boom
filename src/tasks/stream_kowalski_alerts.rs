@@ -56,9 +56,7 @@ pub const TASK_TYPE: &str = "stream_kowalski_alerts";
 pub struct StreamKowalskiParams {
     /// Kowalski MongoDB URI.
     pub kowalski_uri: String,
-    /// Enrich what was imported, by pushing the new candids onto this survey's
-    /// enrichment queue. Off by default, so an import does not start GPU work
-    /// nobody asked for.
+    /// Queue the new candids for `enrich_reprocess`, run with `input_queue` set to that queue.
     ///
     /// Only the choice is a parameter. Where the queue and the database are is
     /// this deployment's own configuration: the task backfills into the system
@@ -85,9 +83,8 @@ fn default_n_workers() -> usize {
     4
 }
 
-/// Where imported candids go when `enrich` is set. The pipeline's own queue
-/// for this survey, so a reprocess and a live alert land in the same place.
-const ENRICHMENT_QUEUE: &str = "ZTF_alerts_enrichment_queue";
+/// Not the live queue, which would send years-old alerts to filters and Babamul as new.
+const ENRICHMENT_QUEUE: &str = "ZTF_enrichment_queue_kowalski_import";
 
 const MAX_BATCH_SIZE: usize = 100_000;
 const MAX_WORKERS: usize = 64;
