@@ -69,6 +69,9 @@ pub struct StreamKowalskiParams {
     pub batch_size: usize,
     #[serde(default = "default_n_workers")]
     pub n_workers: usize,
+    /// Only stream alerts at or after this Julian date.
+    #[serde(default)]
+    pub min_jd: Option<f64>,
     /// Only stream alerts at or before this Julian date, for importing a fixed
     /// window rather than everything.
     #[serde(default)]
@@ -103,6 +106,11 @@ impl StreamKowalskiParams {
         }
         if self.n_workers == 0 || self.n_workers > MAX_WORKERS {
             return Err(format!("n_workers must be between 1 and {MAX_WORKERS}"));
+        }
+        if let (Some(min_jd), Some(max_jd)) = (self.min_jd, self.max_jd) {
+            if min_jd > max_jd {
+                return Err("min_jd must not exceed max_jd".to_string());
+            }
         }
         Ok(())
     }
@@ -176,9 +184,17 @@ pub async fn run(
         }
     });
 
-    let filter = match params.max_jd {
-        Some(max_jd) => doc! { "candidate.jd": { "$lte": Bson::Double(max_jd) } },
-        None => doc! {},
+    let mut jd_bounds = doc! {};
+    if let Some(min_jd) = params.min_jd {
+        jd_bounds.insert("$gte", Bson::Double(min_jd));
+    }
+    if let Some(max_jd) = params.max_jd {
+        jd_bounds.insert("$lte", Bson::Double(max_jd));
+    }
+    let filter = if jd_bounds.is_empty() {
+        doc! {}
+    } else {
+        doc! { "candidate.jd": jd_bounds }
     };
 
     // Exclude cutouts from the streaming cursor — they are large and we only
@@ -296,6 +312,7 @@ pub async fn run(
             "enriched": params.enrich,
             "alerts_read": n_read as i64,
             "alerts_imported": imported as i64,
+            "min_jd": params.min_jd,
             "max_jd": params.max_jd,
             "code_version": mongodb::bson::to_bson(&super::ledger::CodeVersion::current())
                 .unwrap_or(Bson::Null),
@@ -697,6 +714,7 @@ mod tests {
             enrich: false,
             batch_size: default_batch_size(),
             n_workers: default_n_workers(),
+            min_jd: None,
             max_jd: None,
         }
     }
