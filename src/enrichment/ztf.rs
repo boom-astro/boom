@@ -16,14 +16,14 @@ use crate::utils::db::mongify;
 use crate::utils::enums::{ProgramId, Survey};
 use crate::utils::host::HostGalaxyAssociation;
 use crate::utils::lightcurves::{
-    analyze_photometry, is_stationary, prepare_photometry, summarise_detections, ActivityMetrics,
-    AllBandsProperties, Band, DetectionHistory, EpisodeHistory, Outburst, PerBandProperties,
-    PhotometryMag, EPISODE_GAP_DAYS, STATIONARY_MIN_FORCED_SNR, ZTF_ZP,
+    analyze_photometry, is_stationary, prepare_photometry, signed_snr, summarise_detections,
+    ActivityMetrics, AllBandsProperties, Band, DetectionHistory, EpisodeHistory, Outburst,
+    PerBandProperties, PhotometryMag, EPISODE_GAP_DAYS, STATIONARY_MIN_FORCED_SNR, ZTF_ZP,
 };
 use crate::utils::mpcorb::{elements_from_document, normalize_ztf_ssnamenr, ORBITS_COLLECTION};
 use crate::utils::outburst::{Point, MAX_SEPARATION_ARCSEC};
 use crate::utils::phase_curve::{curves_from_document, PhaseCurve, BASELINES_COLLECTION};
-use crate::utils::sso_geometry::{geometry_at, OrbitalElements};
+use crate::utils::sso_geometry::{geometry_at, OrbitalElements, ZTF};
 use apache_avro_derive::AvroSchema;
 use apache_avro_macros::serdavro;
 use futures::TryStreamExt;
@@ -479,7 +479,7 @@ impl ZtfSsoAssociation {
 
     pub fn with_geometry(mut self, elements: Option<&OrbitalElements>, jd: f64) -> Self {
         if let Some(elements) = elements {
-            let geometry = geometry_at(elements, jd);
+            let geometry = geometry_at(elements, jd, &ZTF);
             self.helio_dist = Some(geometry.helio_dist as f32);
             self.topo_dist = Some(geometry.topo_dist as f32);
             self.phase_angle = Some(geometry.phase_angle as f32);
@@ -508,11 +508,6 @@ pub struct ZtfAlertProperties {
     pub stationary: bool,
     pub photstats: PerBandProperties,
     pub multisurvey_photstats: Option<PerBandProperties>,
-    /// Without the private DECam points, for Babamul. `None` when there are none.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[avro(skip)]
-    #[schema(ignore)]
-    pub public_multisurvey_photstats: Option<PerBandProperties>,
     /// `None` means never evaluated, not "not an asteroid".
     #[serde(default)]
     pub sso: Option<ZtfSsoAssociation>,
@@ -526,15 +521,6 @@ pub struct ZtfAlertProperties {
     /// Detection episodes, for finding sources that outburst more than once.
     /// `None` on alerts enriched before this field existed.
     pub episode_history: Option<EpisodeHistory>,
-}
-
-impl ZtfAlertProperties {
-    pub fn into_public(mut self) -> Self {
-        if let Some(public) = self.public_multisurvey_photstats.take() {
-            self.multisurvey_photstats = Some(public);
-        }
-        self
-    }
 }
 
 /// Field order matches the ONNX output index (0-7).
@@ -1411,22 +1397,19 @@ impl ZtfEnrichmentWorker {
             .as_ref()
             .map(|m| m.lightcurve(candidate.jd))
             .unwrap_or_default();
-        let (multisurvey_photstats, public_multisurvey_photstats) = if decam_lightcurve.is_empty() {
-            (multisurvey_photstats, None)
+        let multisurvey_photstats = if decam_lightcurve.is_empty() {
+            multisurvey_photstats
         } else {
             let mut with_decam = [lightcurve.clone(), decam_lightcurve].concat();
             prepare_photometry(&mut with_decam);
-            (
-                analyze_photometry(&with_decam).0,
-                Some(multisurvey_photstats),
-            )
+            analyze_photometry(&with_decam).0
         };
 
         let hosted = alert.host_galaxy.as_ref().map(|hg| hg.best_host.is_some());
 
         // Per-object detection history for history-aware filters, from the full
         // accumulated light curve (positive/negative by psfFlux sign).
-        let (detection_history, episode_history) = summarise_detections(
+        let (mut detection_history, episode_history) = summarise_detections(
             alert
                 .prv_candidates
                 .iter()
@@ -1436,9 +1419,16 @@ impl ZtfEnrichmentWorker {
                 .fp_hists
                 .iter()
                 .filter(|p| p.magpsf.is_some())
-                .map(|p| p.jd),
+                .map(|p| (p.jd, signed_snr(p.snr_psf, p.flux))),
             candidate.jd,
             EPISODE_GAP_DAYS,
+        );
+        detection_history.add_nondetections(
+            alert
+                .prv_nondetections
+                .iter()
+                .map(|p| (p.jd, p.diffmaglim as f32)),
+            candidate.jd,
         );
 
         Ok((
@@ -1450,7 +1440,6 @@ impl ZtfEnrichmentWorker {
                 stationary,
                 photstats,
                 multisurvey_photstats: Some(multisurvey_photstats),
-                public_multisurvey_photstats,
                 sso: Some(sso),
                 activity: Some(activity),
                 detection_history: Some(detection_history),

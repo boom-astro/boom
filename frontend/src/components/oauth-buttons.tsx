@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react"
 import { useLocation } from "react-router-dom"
-import api, { type OAuthProvider } from "@/lib/api"
+import api, { OAuthProvidersUnavailable, type OAuthProvider } from "@/lib/api"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 
@@ -59,16 +59,33 @@ export function OAuthButtons({ action = "Continue", className }: Props) {
 
   useEffect(() => {
     let mounted = true
-    api
-      .fetchOAuthProviders()
-      .then((list) => {
-        if (mounted) setProviders(list)
-      })
-      .catch(() => {
-        // Sign-in with a password still works; nothing to surface here.
-      })
+    let retry: ReturnType<typeof setTimeout> | undefined
+    let attempt = 0
+
+    const load = () => {
+      api
+        .fetchOAuthProviders()
+        .then((list) => {
+          if (mounted) setProviders(list)
+        })
+        .catch((error) => {
+          // Nothing is surfaced either way: password sign-in still works, and
+          // a deployment must never advertise a provider it has not
+          // configured. But not being able to *ask* is temporary, and giving
+          // up on it is what makes the API restarting -- every source edit, in
+          // development -- look like a deployment with no social sign-in until
+          // someone reloads the page by hand.
+          if (!mounted || !(error instanceof OAuthProvidersUnavailable)) return
+          attempt += 1
+          const backoff = Math.min(1000 * 2 ** (attempt - 1), 10_000)
+          retry = setTimeout(load, backoff)
+        })
+    }
+
+    load()
     return () => {
       mounted = false
+      if (retry) clearTimeout(retry)
     }
   }, [])
 
