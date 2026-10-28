@@ -510,12 +510,7 @@ function RunDetail({ runId, onClose }: { runId: string; onClose: () => void }) {
   );
 }
 
-/**
- * Which enrichment produced the alerts already in the database.
- *
- * The enrichment counterpart of the catalogs table: it reports drift and never
- * acts on it, because re-enriching an archive is days of work.
- */
+/** Reports enrichment drift and never acts on it: re-enriching takes days. */
 function EnrichmentDriftTable({
   drift,
   onReprocess,
@@ -544,15 +539,7 @@ function EnrichmentDriftTable({
       </p>
 
       {drift.map((survey) => {
-        // No published set means no enrichment worker has started since
-        // stamping was deployed. Nothing can be called stale against a set
-        // that does not exist, so the row says that instead of claiming the
-        // archive is clean.
         const unknown = survey.current_set === null;
-        // The drift query gave up inside its budget, which is what happens
-        // while the enrichment_set index is still building on an existing
-        // archive. Kept apart from "up to date", which is what the empty list
-        // it returns would otherwise read as.
         const timedOut = !unknown && survey.drift_unknown;
         const clean =
           !unknown &&
@@ -702,14 +689,6 @@ function EnrichmentDriftTable({
   );
 }
 
-/**
- * Every task this release can run, with a form built from its schema.
- *
- * Catalog ingests have their own row-level button above, because starting one
- * from the drift table needs no parameters. This is for everything else.
- */
-/** Human-readable file size. Exports run to hundreds of megabytes, so bytes
- *  are useless and megabytes are what tells you whether this will upload. */
 function bytes(n: number): string {
   if (n >= 1e9) return `${(n / 1e9).toFixed(1)} GB`;
   if (n >= 1e6) return `${(n / 1e6).toFixed(1)} MB`;
@@ -717,13 +696,7 @@ function bytes(n: number): string {
   return `${n} B`;
 }
 
-/**
- * Catalog exports waiting to be published.
- *
- * Deliberately not a browser download button: a chunk is hundreds of megabytes
- * and fetching it with an auth header means buffering the whole thing in the
- * tab. The command below streams it to disk instead.
- */
+/** A curl command, not a download button: chunks are too big to buffer in the tab. */
 function ExportsTable({ exports }: { exports: CatalogExport[] }) {
   if (exports.length === 0) return null;
   const origin = window.location.origin;
@@ -769,6 +742,12 @@ function ExportsTable({ exports }: { exports: CatalogExport[] }) {
   );
 }
 
+/**
+ * Every task this release can run, with a form built from its schema.
+ *
+ * Catalog ingests have their own row-level button above, because starting one
+ * from the drift table needs no parameters. This is for everything else.
+ */
 function TaskCatalog({
   types,
   onSubmit,

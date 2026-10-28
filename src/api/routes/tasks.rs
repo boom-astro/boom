@@ -22,9 +22,7 @@ const MAX_LIST_LIMIT: i64 = 500;
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct SubmitTaskBody {
-    /// Which task to run. The schema carries the values this release accepts,
-    /// so an unknown one is refused here rather than after a run has been
-    /// written.
+    /// Which task to run.
     pub task_type: TaskType,
     /// Parameters for that task type, validated here rather than on the worker.
     pub params: serde_json::Value,
@@ -57,9 +55,7 @@ pub struct LogsParams {
 /// for one to end up on a screen or in a screenshot.
 fn redacted(mut task: Task) -> Task {
     task.params = redact::redact_params(&task.params);
-    // The error too: a failure to connect usually quotes the whole URI back,
-    // so the password would be rendered on the admin page beside the parameter
-    // that was carefully masked. Masked by shape, since an error is free text.
+    // Connection errors often quote the whole URI back, password included.
     task.error = task.error.as_deref().map(redact::redact_text);
     task
 }
@@ -141,8 +137,7 @@ pub async fn submit_task(
 
     let task = Task {
         id: uuid::Uuid::new_v4().to_string(),
-        // Stored as a string: a run outlives the release that defined its
-        // type, and the record still has to say what it was.
+        // Stored as a string: a run outlives the release that defined its type.
         task_type: body.task_type.as_str().to_string(),
         params: body.params,
         status: TaskStatus::Queued,
@@ -331,16 +326,11 @@ pub async fn get_data_mutations(
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct AcceptSetBody {
-    /// Why this set is acceptable despite not being current. Required: "this is
-    /// fine" is only useful to the next person if it says on what grounds.
+    /// Why this set is acceptable despite not being current.
     pub reason: String,
 }
 
 /// Report which enrichment each survey's alerts were produced by
-///
-/// The enrichment analogue of `/catalogs/status`: it reports drift and never
-/// acts on it. Re-enriching an archive is days of work, so starting one stays an
-/// explicit, attributed decision.
 #[utoipa::path(
     get,
     path = "/enrichment/status",
@@ -355,8 +345,7 @@ pub async fn get_enrichment_status(
     db: web::Data<mongodb::Database>,
     _admin: AdminActor,
 ) -> HttpResponse {
-    // Only ZTF has enrichment models declared today; LSST joins the list when
-    // it does, rather than reporting an empty status that reads as "no drift".
+    // Only ZTF declares enrichment models so far.
     match crate::enrichment::version::drift_status(&db, "ztf").await {
         Ok(status) => response::ok_ser("success", vec![status]),
         Err(e) => response::internal_error(&format!("failed to read enrichment status: {e}")),
@@ -364,11 +353,6 @@ pub async fn get_enrichment_status(
 }
 
 /// Accept a non-current enrichment set, so it stops being reported as drift
-///
-/// For when the difference does not matter for the alerts already scored — a
-/// derivation version bumped for a change that cannot affect them, say. It
-/// records the decision **against the set**; no alert is rewritten, so every
-/// alert keeps saying exactly which enrichment produced it.
 #[utoipa::path(
     post,
     path = "/enrichment/sets/{set_id}/accept",
@@ -393,9 +377,7 @@ pub async fn accept_enrichment_set(
         return response::bad_request("a reason is required to accept a set");
     }
 
-    // The set the running workers published, read rather than resolved -- the
-    // same reasoning as `drift_status`: resolving here would hash model files
-    // the API does not carry, and intern a set as a side effect of a click.
+    // Read, not resolved: resolving would hash model files the API does not carry.
     let current_id = match crate::enrichment::version::current_set_id(&db, "ztf").await {
         Ok(Some(id)) => id,
         Ok(None) => {
@@ -418,16 +400,12 @@ pub async fn accept_enrichment_set(
     )
     .await
     {
-        // An unknown id, or the current set, is the caller's mistake: it must
-        // not reach the ledger below as though a decision had been recorded.
         if e.is_bad_request() {
             return response::bad_request(&e.to_string());
         }
         return response::internal_error(&format!("failed to accept the set: {e}"));
     }
 
-    // The ledger is where "what has been done to this data, and by whom" lives,
-    // and deciding not to reprocess is such a decision.
     let entry = tasks::ledger::MutationRecord {
         id: uuid::Uuid::new_v4().to_string(),
         source_kind: tasks::ledger::SourceKind::Task,
@@ -437,8 +415,6 @@ pub async fn accept_enrichment_set(
         trigger: Trigger::Api,
         target: tasks::ledger::MutationTarget {
             database: db.name().to_string(),
-            // The set is what was written, and no alert was touched. Naming
-            // ZTF_alerts here would read as a change to the archive.
             collection: crate::enrichment::version::SETS_COLLECTION.to_string(),
             catalog: None,
             survey: Some("ztf".to_string()),
@@ -490,9 +466,6 @@ pub async fn unaccept_enrichment_set(
         return response::internal_error(&format!("failed to withdraw: {e}"));
     }
 
-    // Withdrawing is as much a decision as accepting. Recording only one side
-    // leaves a ledger that says a set was signed off and never that it stopped
-    // being, so nothing explains why those alerts are drift again.
     let entry = tasks::ledger::MutationRecord {
         id: uuid::Uuid::new_v4().to_string(),
         source_kind: tasks::ledger::SourceKind::Task,

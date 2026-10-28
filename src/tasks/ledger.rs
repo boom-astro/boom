@@ -51,9 +51,7 @@ pub enum Operation {
     Delete,
     /// Indexes created or dropped.
     Index,
-    /// A decision recorded against data, with no document rewritten -- an
-    /// enrichment set signed off as good enough, say. In the ledger because
-    /// deciding not to reprocess is as much a decision as reprocessing.
+    /// A decision recorded against data, with no document rewritten.
     Annotate,
     /// A whole collection removed.
     Drop,

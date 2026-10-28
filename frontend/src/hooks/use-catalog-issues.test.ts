@@ -119,8 +119,6 @@ describe("countEnrichmentIssues", () => {
   });
 
   it("counts a survey once, however many stale sets it has", () => {
-    // An operator acts on "ZTF needs reprocessing", not on each set: one run
-    // covers all of them.
     const { count, parts } = countEnrichmentIssues([
       {
         ...clean,
@@ -135,13 +133,10 @@ describe("countEnrichmentIssues", () => {
   });
 
   it("counts alerts that predate stamping as drift", () => {
-    // They carry no set, so what produced them cannot be established.
     expect(countEnrichmentIssues([{ ...clean, has_unstamped: true }]).count).toBe(1);
   });
 
   it("does not count a survey with no published set", () => {
-    // No worker has published one, so nothing can be shown to be stale and
-    // there is no action the badge could point at. The table still says so.
     expect(
       countEnrichmentIssues([
         { ...clean, current_set: null, has_unstamped: true },
@@ -150,9 +145,6 @@ describe("countEnrichmentIssues", () => {
   });
 
   it("counts a survey whose drift could not be determined", () => {
-    // The query timed out, so stale_sets is empty for want of an answer. A
-    // zero here would read as "nothing is stale", which is the one thing that
-    // is not known.
     const { count, parts } = countEnrichmentIssues([
       { ...clean, drift_unknown: true },
     ]);
@@ -161,7 +153,6 @@ describe("countEnrichmentIssues", () => {
   });
 
   it("does not count a set an operator accepted", () => {
-    // Accepted sets are absent from stale_sets, so the survey reads clean.
     expect(
       countEnrichmentIssues([{ ...clean, accepted_sets: [6] }]).count,
     ).toBe(0);
@@ -194,8 +185,6 @@ describe("useCatalogIssues", () => {
     // is under our control.
     vi.useFakeTimers({ shouldAdvanceTime: true });
     status = vi.spyOn(adminApi, "fetchCatalogStatus");
-    // The hook reads enrichment drift in the same `Promise.all`, so leaving it
-    // unstubbed makes every poll reject and the count read a misleading zero.
     vi.spyOn(adminApi, "fetchEnrichmentStatus").mockResolvedValue([]);
   });
 

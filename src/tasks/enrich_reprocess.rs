@@ -68,20 +68,11 @@ pub enum Selection {
     /// A candid range, for reprocessing a known import.
     CandidRange { from: i64, to: i64 },
     /// Everything not enriched by what this release runs.
-    ///
-    /// The selection to reach for after changing a model or a derivation: it is
-    /// exact, where `MissingField` only finds alerts that never had the field
-    /// at all and silently misses every alert holding a stale value.
     Stale,
 }
 
 impl Selection {
     /// The query that picks the alerts out of `<survey>_alerts`.
-    ///
-    /// `acceptable` is the current set plus any an operator has accepted; only
-    /// `Stale` uses it. Alerts with no `enrichment_set` at all are included,
-    /// because they were enriched before stamping existed and cannot be shown
-    /// to be current.
     fn filter(&self, acceptable: &[i64]) -> Document {
         match self {
             Selection::All => doc! {},
@@ -143,9 +134,7 @@ impl EnrichReprocessParams {
                 &self.survey.to_string().to_lowercase(),
             )
         {
-            // Refused rather than run: this survey's worker writes no
-            // enrichment_set, so `stale` would select every alert, reprocess
-            // them all, leave them unstamped, and select the same alerts again.
+            // Unstamped, every alert would be reselected on every run.
             return Err(format!(
                 "selection 'stale' needs a survey whose worker stamps the enrichment set, \
                  and {} does not; only ztf does today",
@@ -240,10 +229,7 @@ pub async fn run(
         .unwrap_or(worker_config.enrichment.n_workers)
         .clamp(1, MAX_WORKERS);
 
-    // Loaded before the set is resolved, because resolving *publishes* the set
-    // as what the workers are running. A model that fails to load after that
-    // would leave `enrichment_current` naming a set no worker can produce, and
-    // every alert in the survey reported stale against it.
+    // Loaded before resolving the set, which publishes it as what the workers run.
     let shared_model_pool: Option<Arc<SharedModelPool>> =
         if matches!(params.survey, Survey::Ztf) && config.gpu.is_active() {
             Some(
@@ -255,27 +241,14 @@ pub async fn run(
         };
 
     let survey_key = params.survey.to_string().to_lowercase();
-    // Only for a survey that stamps. `ZTF_MODELS` is the only model list there
-    // is, so resolving for any other survey would hash the ZTF ONNX files --
-    // work, and a hard error when they are absent, for a set id that survey's
-    // worker never writes.
+    // Only ZTF stamps, and `ZTF_MODELS` is the only model list.
     let (current_set_id, acceptable) =
         if crate::enrichment::version::stamps_enrichment_set(&survey_key) {
-            // What this release would produce, so `Stale` can ask for everything
-            // else. Resolved before the workers start: they intern the same set,
-            // and running the query against a set that does not exist yet would
-            // select every alert.
-            // Before the first resolution: interning relies on the unique
-            // fingerprint index, and the task worker only creates the task and
-            // ledger ones. Without this, two resolvers racing in that window
-            // both insert the same fingerprint and the later index creation
-            // fails on the duplicates.
+            // Concurrent interning needs the unique fingerprint index first.
             crate::enrichment::version::initialize_indexes(ctx.db())
                 .await
                 .map_err(|e| failed(e.to_string()))?;
-            // The same answer the workers will reach: a pool is loaded only
-            // when the GPU is active, and a worker without one runs on the CPU
-            // and computes no `villar_fit`.
+            // Workers without a pool run on CPU and compute no `villar_fit`.
             let current_set = crate::enrichment::version::resolve_current_set(
                 ctx.db(),
                 &survey_key,
@@ -284,8 +257,6 @@ pub async fn run(
             )
             .await
             .map_err(|e| failed(e.to_string()))?;
-            // Includes sets an operator accepted, so a run does not redo work
-            // that was explicitly signed off as good enough.
             let acceptable = crate::enrichment::version::acceptable_set_ids(
                 ctx.db(),
                 &survey_key,
@@ -369,8 +340,6 @@ pub async fn run(
         let handle = thread::spawn(move || {
             let tid = std::thread::current().id();
             span!(Level::INFO, "enrich-only worker", ?tid, ?survey).in_scope(|| {
-                // Every survey has an enrichment worker since #704, so this
-                // is exhaustive rather than guarded at submit time.
                 let run_worker = match survey {
                     Survey::Ztf => run_enrich_only::<ZtfEnrichmentWorker>,
                     Survey::Lsst => run_enrich_only::<LsstEnrichmentWorker>,
@@ -586,9 +555,6 @@ mod tests {
 
     #[test]
     fn every_survey_has_an_enrichment_worker() {
-        // This used to reject DECAM and WINTER, which had no enrichment worker
-        // to reprocess with. #704 gave them one, so the dispatch is exhaustive
-        // and there is nothing left to reject here.
         for survey in [Survey::Ztf, Survey::Lsst, Survey::Decam, Survey::Winter] {
             assert!(
                 params(survey.clone(), Selection::All)
@@ -609,9 +575,6 @@ mod tests {
 
     #[test]
     fn stale_is_refused_for_a_survey_that_does_not_stamp() {
-        // Only ZTF's worker writes enrichment_set. Elsewhere a stale run would
-        // select every alert, reprocess them, leave them unstamped, and select
-        // exactly the same alerts the next time it ran.
         for survey in [Survey::Lsst, Survey::Decam, Survey::Winter] {
             let message = params(survey.clone(), Selection::Stale)
                 .validate_params()
@@ -662,9 +625,7 @@ mod tests {
 
     #[test]
     fn stale_selects_everything_not_enriched_by_the_current_set() {
-        // Including alerts with no stamp at all: they were enriched before
-        // stamping existed, so they cannot be shown to be current. `$nin`
-        // matches a missing field, which is what makes that work.
+        // `$nin` also matches alerts with no stamp at all.
         assert_eq!(
             Selection::Stale.filter(&[7]),
             doc! { "enrichment_set": { "$nin": [7i64] } }
@@ -673,9 +634,6 @@ mod tests {
 
     #[test]
     fn stale_is_the_selection_that_finds_a_changed_model() {
-        // MissingField only finds alerts that never had the field. After a
-        // model changes, every alert still has `classifications.btsbot` -- the
-        // value is just stale -- so MissingField would select none of them.
         let changed_model = Selection::MissingField {
             field: "classifications.btsbot".into(),
         };
@@ -689,8 +647,6 @@ mod tests {
 
     #[test]
     fn stale_skips_sets_an_operator_accepted() {
-        // Accepting a set is a decision that reprocessing it is unnecessary;
-        // a run that redid it anyway would waste days and ignore the decision.
         assert_eq!(
             Selection::Stale.filter(&[6, 7]),
             doc! { "enrichment_set": { "$nin": [6i64, 7i64] } }

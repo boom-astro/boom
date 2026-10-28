@@ -46,8 +46,7 @@ export type SchemaField = {
    *  optional field. */
   type?: string | string[];
   description?: string;
-  /** Present when the field is a closed set, e.g. a survey, so it can be
-   *  offered as one. */
+  /** A closed set of values, e.g. a survey. */
   enum?: string[];
   minimum?: number;
   maximum?: number;
@@ -59,9 +58,7 @@ export type SchemaField = {
    *  either, so it has to be recognized by this rather than rendered as the
    *  string the fallback would make it. */
   $ref?: string;
-  /** Present for tagged unions, e.g. enrich_reprocess's selection, and for
-   *  an optional field whose inner type utoipa could not express as a type
-   *  pair. */
+  /** Tagged unions, and optional fields utoipa cannot express as a type pair. */
   oneOf?: SchemaField[];
   properties?: Record<string, SchemaField>;
   required?: string[];
@@ -88,15 +85,13 @@ export type StaleSet = {
 
 export type EnrichmentDrift = {
   survey: string;
-  /** null when no enrichment worker has published a set yet, so there is
-   *  nothing to compare alerts against. */
+  /** null until an enrichment worker publishes a set. */
   current_set: number | null;
   stale_sets: StaleSet[];
   accepted_sets: number[];
   /** Alerts enriched before stamping existed. */
   has_unstamped: boolean;
-  /** The drift query timed out, so staleness is not known. An empty
-   *  `stale_sets` alongside this does not mean there is none. */
+  /** The drift query timed out: an empty `stale_sets` means nothing then. */
   drift_unknown: boolean;
 };
 
@@ -208,12 +203,7 @@ export function fetchEnrichmentStatus(): Promise<EnrichmentDrift[]> {
   return request<EnrichmentDrift[]>("/enrichment/status", undefined, []);
 }
 
-/**
- * Record that a non-current set need not be reprocessed.
- *
- * Writes the decision against the set, not onto any alert — every alert keeps
- * saying which enrichment actually produced it.
- */
+/** Marks a non-current set as not needing reprocessing, without touching alerts. */
 export function acceptEnrichmentSet(setId: number, reason: string): Promise<unknown> {
   return request<unknown>(
     `/enrichment/sets/${setId}/accept`,
@@ -230,8 +220,7 @@ export function unacceptEnrichmentSet(setId: number): Promise<unknown> {
   return request<unknown>(`/enrichment/sets/${setId}/unaccept`, { method: "POST" }, null);
 }
 
-/** One catalog export sitting on the task worker's disk, written by
- *  `export_catalog` and waiting to be published somewhere durable. */
+/** A catalog export on the task worker's disk, waiting to be published. */
 export type CatalogExport = {
   collection: string;
   files: { name: string; bytes: number }[];

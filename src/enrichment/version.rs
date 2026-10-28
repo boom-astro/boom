@@ -1,41 +1,16 @@
-//! What produced an alert's enrichment, and how to tell when it is stale.
+//! Enrichment provenance and staleness.
 //!
-//! Enrichment runs once, at ingestion, so after a model or a formula changes
-//! the alerts already in the database hold values the current code would not
-//! produce. Each alert carries one integer, `enrichment_set`, naming a row in
-//! [`SETS_COLLECTION`] that says what ran:
-//!
-//! ```jsonc
-//! { "_id": 7, "survey": "ztf",
-//!   "models": { "acai_h": { "name": "d1_dnn_20201130", "sha256": "ab12…" }, … },
-//!   "derivations": { "photstats": 1, "sso": 1, "crossmatch_flags": 1 },
-//!   "fingerprint": "…", "first_seen": 1765000000 }
-//! ```
-//!
-//! One integer rather than a version per field, because at ~10^9 alerts the
-//! difference is tens of gigabytes. Interning rather than counting means
-//! diffing two sets says which components moved, so a run can re-score one
-//! model instead of six.
-//!
-//! The stamp says which enrichment ran over an alert, not which fields came out
-//! of it. A component that declines an alert leaves its own key absent, and
-//! `MissingField` is the selection that fills those in.
-//!
-//! A model's identity is the SHA-256 of its file, since the weights behind
-//! `acai_h.d1_dnn_20201130.onnx` can be replaced without anyone renaming it.
-//! Derivation versions are declared by hand in [`DERIVATIONS`] instead:
-//! whether a change alters the output is a semantic question, so hashing the
-//! source would flag every comment edit. See `docs/alert-processing.md`.
+//! Each alert's `enrichment_set` names a row in [`SETS_COLLECTION`] recording the models
+//! (by file SHA-256) and the derivation versions in [`DERIVATIONS`] that produced it.
+//! See `docs/alert-processing.md`.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::Path;
 
-/// How long the drift query may run before it reports that it does not know.
 const DRIFT_QUERY_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// MongoDB's code for an operation that ran past `maxTimeMS`.
 const MAX_TIME_MS_EXPIRED: i32 = 50;
 
 fn is_max_time_expired(error: &mongodb::error::Error) -> bool {
@@ -46,49 +21,25 @@ fn is_max_time_expired(error: &mongodb::error::Error) -> bool {
 /// Interned enrichment sets, one row per distinct combination ever run.
 pub const SETS_COLLECTION: &str = "enrichment_sets";
 
-/// Allocates the integer ids for [`SETS_COLLECTION`].
 const COUNTERS_COLLECTION: &str = "enrichment_set_counters";
 
-/// The single sequence every set id comes from.
-///
-/// Deliberately not per-survey: `_id` is unique across the whole collection, so
-/// a per-survey counter would have ZTF's set 1 and LSST's set 1 collide the
-/// first time a second survey enriched anything. Ids are globally unique and a
-/// set carries its survey as a field.
+/// Global, not per survey, because set `_id`s are unique across surveys.
 const COUNTER_ID: &str = "enrichment_set";
 
-/// What the running enrichment workers say they are producing, one document per
-/// survey.
-///
-/// The API cannot work this out for itself. Resolving a set means hashing the
-/// model files, which the API has no reason to carry -- and if it did carry
-/// them, they could differ from the ones the worker actually loaded, so the
-/// admin page would report a "current" set no alert was ever stamped with.
-/// Worse, resolving *interns*: polling a status endpoint would create set rows
-/// as a side effect. So the worker publishes what it resolved, and readers read
-/// that.
+/// Set published by each survey's workers; the API reads it, since resolving would intern rows.
 pub const CURRENT_COLLECTION: &str = "enrichment_current";
 
 /// One ONNX model the enrichment pipeline loads.
-///
-/// Declared once here rather than at each load site: the CPU and GPU paths both
-/// need the path, and a stamp is worthless if the two can disagree about which
-/// file is in use.
 pub struct ModelFile {
     /// Key under `classifications`, e.g. `acai_h`.
     pub field: &'static str,
-    /// The published version, for humans reading a set back.
     pub version: &'static str,
     pub path: &'static str,
 }
 
-/// Every model the ZTF enrichment worker runs.
+/// Every model loaded in models/mod.rs must be listed here, or the fingerprint misses it.
 pub const ZTF_MODELS: &[ModelFile] = &[
     ModelFile {
-        // Declared here as well as loaded in models/mod.rs: a model the
-        // loader uses but this list omits is
-        // invisible to the fingerprint, so changing it would leave every old
-        // alert looking current.
         field: "cider",
         version: "plus_embedding",
         path: "data/models/cider_fusion_plus_embedding.onnx",
@@ -125,49 +76,21 @@ pub const ZTF_MODELS: &[ModelFile] = &[
     },
 ];
 
-/// Versions of the enrichment logic that is code rather than a model.
-///
-/// **Bump one when a change alters what enrichment writes.** A refactor that
-/// produces identical output should not; a corrected formula, a changed
-/// threshold, or a new field must. Getting this wrong in the cautious direction
-/// costs a reprocessing run; getting it wrong the other way leaves values that
-/// look current and are not.
-///
-/// Kept coarse deliberately -- a handful of components, not one per field -- so
-/// that the judgement call is made a few times a year rather than weekly.
+/// Bump a version whenever a change alters what enrichment writes.
 pub const DERIVATIONS: &[(&str, u32)] = &[
-    // photstats and multisurvey_photstats: per-band photometric statistics.
+    // photstats and multisurvey_photstats.
     ("photstats", 1),
-    // sso: solar system association, geometry, and the activity metrics derived
-    // from it.
     ("sso", 1),
-    // rock / star / near_brightstar / stationary, derived from crossmatches.
+    // rock, star, near_brightstar and stationary.
     ("crossmatch_flags", 1),
-    // detection_history: the per-object detection summary.
     ("detection_history", 1),
-    // hosted: whether a host galaxy was associated, read off the aux record's
-    // host_galaxy, which the DLR scoring writes. Bump it when those scoring
-    // parameters change: the association is rewritten in place, so a stale
-    // `hosted` looks exactly like a current one.
+    // hosted. Also bump when the DLR scoring parameters change: hosts are rewritten in place.
     ("host_association", 1),
-    // applecider_fusion / applecider_outputs / fusion_embedding: BOOM's own
-    // postprocessing of the fusion model's alpha output, which is a derivation
-    // on top of the model rather than the model itself.
+    // applecider_fusion, applecider_outputs and fusion_embedding.
     ("applecider_postprocess", 1),
 ];
 
-/// Derivations only a GPU build produces.
-///
-/// `villar_fit` is fitted by BOOM's own PSO rather than loaded from a file, so
-/// it is a derivation and not a hashed model: a change to the fit or to its
-/// `PsoConfig` has to be declared here or the fingerprint will not move and old
-/// fits will look current.
-///
-/// Declared separately because a CPU build writes no `villar_fit` at all, and
-/// so genuinely produces different enrichment -- the same reason a model behind
-/// a cargo feature is left out of `ZTF_MODELS` when the feature is off. Sharing
-/// one fingerprint across both builds would have a CPU-enriched alert claim a
-/// fit it does not carry.
+/// Only GPU builds compute `villar_fit`; bump it when the PSO fit or its `PsoConfig` changes.
 #[cfg(feature = "gpu")]
 pub const GPU_DERIVATIONS: &[(&str, u32)] = &[("villar_fit", 1)];
 #[cfg(not(feature = "gpu"))]
@@ -176,9 +99,7 @@ pub const GPU_DERIVATIONS: &[(&str, u32)] = &[];
 /// A model as recorded on a set.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelIdentity {
-    /// The declared version, as a label.
     pub name: String,
-    /// SHA-256 of the file, which is the actual identity.
     pub sha256: String,
 }
 
@@ -189,18 +110,11 @@ pub struct EnrichmentSet {
     #[serde(rename = "_id")]
     pub id: i64,
     pub survey: String,
-    /// Keyed by classification field, so a diff says which model moved.
     pub models: BTreeMap<String, ModelIdentity>,
     pub derivations: BTreeMap<String, u32>,
-    /// Digest of everything above; the key this set is interned on.
     pub fingerprint: String,
     pub first_seen: f64,
-    /// Set when an operator has decided alerts at this set need not be
-    /// reprocessed, even though it is not the current one.
-    ///
-    /// Recorded here, once, rather than by restamping the alerts: they would
-    /// then name a set that did not produce them, and it would cost a write
-    /// per alert across the archive.
+    /// Set when an operator decides alerts at this set need no reprocessing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accepted: Option<Acceptance>,
 }
@@ -210,13 +124,9 @@ pub struct EnrichmentSet {
 pub struct Acceptance {
     /// Who decided, realm-qualified as elsewhere.
     pub actor: String,
-    /// Why. Required, because "this is fine" is only useful to the next person
-    /// if it says on what grounds.
     pub reason: String,
     pub accepted_at: f64,
-    /// The set that was current when the decision was made. If the current set
-    /// moves on again, that is a new decision to make rather than one already
-    /// covered.
+    /// The current set at decision time; the acceptance lapses once that moves on.
     pub accepted_against: i64,
 }
 
@@ -240,10 +150,7 @@ pub enum VersionError {
 }
 
 impl VersionError {
-    /// Whether this is the caller's mistake rather than ours.
-    ///
-    /// The acceptance routes turn it into a 4xx; everything else here is a
-    /// failure of ours and stays a 500.
+    /// Caller errors, which the acceptance routes map to a 4xx.
     pub fn is_bad_request(&self) -> bool {
         matches!(
             self,
@@ -252,7 +159,6 @@ impl VersionError {
     }
 }
 
-/// Hash a model file.
 fn hash_file(path: &str) -> Result<String, VersionError> {
     let bytes = std::fs::read(Path::new(path)).map_err(|source| VersionError::ModelUnreadable {
         path: path.to_string(),
@@ -263,15 +169,10 @@ fn hash_file(path: &str) -> Result<String, VersionError> {
     Ok(hex(&hasher.finalize()))
 }
 
-/// Lowercase hex, since sha2's output type does not implement `LowerHex`.
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Read the declared models and hash each one.
-///
-/// Done once per process at worker startup, not per alert: it is a few
-/// megabytes of I/O and the answer cannot change while the process runs.
 pub fn current_models(
     models: &[ModelFile],
 ) -> Result<BTreeMap<String, ModelIdentity>, VersionError> {
@@ -289,12 +190,7 @@ pub fn current_models(
         .collect()
 }
 
-/// The derivation versions a worker will actually produce.
-///
-/// `gpu_active` is whether the GPU derivations will really run, which a GPU
-/// *build* does not settle: the same image runs with the GPU turned off in
-/// config, and then computes no `villar_fit`. Taking the build's word for it
-/// would stamp those alerts with a set claiming a fit they do not carry.
+/// `gpu_active` is the runtime config, not the build: a GPU image can run with the GPU off.
 pub fn current_derivations(gpu_active: bool) -> BTreeMap<String, u32> {
     let gpu: &[(&str, u32)] = if gpu_active { GPU_DERIVATIONS } else { &[] };
     DERIVATIONS
@@ -304,10 +200,6 @@ pub fn current_derivations(gpu_active: bool) -> BTreeMap<String, u32> {
         .collect()
 }
 
-/// Digest of a model and derivation combination.
-///
-/// Over a `BTreeMap`, so the ordering is the key ordering and the digest does
-/// not change when a declaration is reordered.
 pub fn fingerprint(
     survey: &str,
     models: &BTreeMap<String, ModelIdentity>,
@@ -326,21 +218,12 @@ pub fn fingerprint(
     hex(&hasher.finalize())
 }
 
-/// Whether this survey's enrichment worker stamps the set that produced an alert.
-///
-/// Only ZTF declares models today. The distinction matters because a survey
-/// that does not stamp cannot be asked for `stale` work: the selection would
-/// return every alert, reprocess them, leave them unstamped, and select exactly
-/// the same alerts next time.
+/// Only ZTF stamps today; selecting `stale` on another survey would reprocess it forever.
 pub fn stamps_enrichment_set(survey: &str) -> bool {
     survey.eq_ignore_ascii_case("ztf")
 }
 
 /// The set id for what this process is about to run, interning it if new.
-///
-/// Resolved once at startup and reused for every alert. A new row appears only
-/// when a model file or a declared derivation version changes, which is a
-/// deploy-time event.
 pub async fn resolve_current_set(
     db: &mongodb::Database,
     survey: &str,
@@ -351,14 +234,10 @@ pub async fn resolve_current_set(
     let derivations = current_derivations(gpu_active);
     let fingerprint = fingerprint(survey, &models, &derivations);
     let set = intern(db, survey, models, derivations, fingerprint).await?;
-    // Published here rather than at the call site so a worker cannot resolve a
-    // set and forget to say so, leaving the admin page reporting drift against
-    // a set nothing is running.
     publish_current_set(db, survey, set.id).await?;
     Ok(set)
 }
 
-/// Find the set with this fingerprint, or create it.
 async fn intern(
     db: &mongodb::Database,
     survey: &str,
@@ -373,11 +252,7 @@ async fn intern(
         return Ok(existing);
     }
 
-    // Retried because the counter and the collection can fall out of step --
-    // a restored backup, a removed row, or a change to how ids were allocated
-    // can leave the next id already taken. The counter advances on every
-    // attempt, so a retry moves past the collision rather than repeating it.
-    // Without this the worker refuses to start until someone intervenes.
+    // The counter can lag behind existing ids (e.g. a restored backup); each retry advances it.
     const ATTEMPTS: usize = 5;
     let mut last_error = None;
 
@@ -408,13 +283,10 @@ async fn intern(
         match sets.insert_one(&set).await {
             Ok(_) => return Ok(set),
             Err(e) => {
-                // Another worker interned the same set between the read and the
-                // write: its row is as good as ours, and the id it allocated is
-                // the one alerts must carry.
+                // A concurrent worker interned the same set.
                 if let Some(existing) = sets.find_one(doc! { "fingerprint": &fingerprint }).await? {
                     return Ok(existing);
                 }
-                // Otherwise the id itself collided; take the next one.
                 last_error = Some(e.to_string());
             }
         }
@@ -426,9 +298,6 @@ async fn intern(
 }
 
 /// Which components differ between two sets.
-///
-/// This is why sets record components rather than one opaque number: a
-/// reprocessing run can re-score only what moved.
 pub fn diff(from: &EnrichmentSet, to: &EnrichmentSet) -> Vec<String> {
     let mut changed = Vec::new();
     for (field, identity) in &to.models {
@@ -436,8 +305,6 @@ pub fn diff(from: &EnrichmentSet, to: &EnrichmentSet) -> Vec<String> {
             changed.push(field.clone());
         }
     }
-    // A model that is no longer run is a change too: its scores are now stale
-    // in the strongest sense.
     for field in from.models.keys() {
         if !to.models.contains_key(field) {
             changed.push(field.clone());
@@ -448,9 +315,6 @@ pub fn diff(from: &EnrichmentSet, to: &EnrichmentSet) -> Vec<String> {
             changed.push(name.clone());
         }
     }
-    // Same as for models: a derivation that is no longer declared changed the
-    // fingerprint, so the alerts are stale, and naming nothing as the cause
-    // would leave the admin page reporting drift it cannot explain.
     for name in from.derivations.keys() {
         if !to.derivations.contains_key(name) {
             changed.push(name.clone());
@@ -465,45 +329,25 @@ pub fn diff(from: &EnrichmentSet, to: &EnrichmentSet) -> Vec<String> {
 #[derive(Debug, Clone, Serialize)]
 pub struct DriftStatus {
     pub survey: String,
-    /// The set the running enrichment workers published. `None` when no worker
-    /// has started since stamping was deployed, in which case there is nothing
-    /// to compare against and the other fields are empty.
+    /// `None` until a worker has published; the other fields are then empty.
     pub current_set: Option<i64>,
-    /// Sets seen on alerts that are neither current nor accepted, with what
-    /// each one differs by. Empty means nothing needs reprocessing.
+    /// Sets seen on alerts that are neither current nor accepted.
     pub stale_sets: Vec<StaleSet>,
-    /// Sets an operator has explicitly accepted.
     pub accepted_sets: Vec<i64>,
-    /// Whether any alert carries no set at all -- enriched before stamping
-    /// existed, so it cannot be shown to be current.
+    /// Whether some alerts predate stamping and so cannot be shown to be current.
     pub has_unstamped: bool,
-    /// Set when the drift query ran out of its time budget, which is what
-    /// happens while the `enrichment_set` index is still being built. Reported
-    /// rather than swallowed: an empty `stale_sets` reads as "nothing is
-    /// stale", and a timeout does not mean that.
+    /// Drift query timed out (index still building): an empty `stale_sets` proves nothing.
     pub drift_unknown: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct StaleSet {
     pub id: i64,
-    /// Which models or derivations differ from the current set. This is what a
-    /// reprocessing run would have to redo.
+    /// Models or derivations that differ from the current set.
     pub changed: Vec<String>,
 }
 
-/// The set ids that do not need reprocessing: the current one, plus any an
-/// operator has accepted against it.
-///
-/// Acceptance is scoped to the set it was made against. If the current set has
-/// moved on since, the old decision no longer applies -- someone said "set 6 is
-/// as good as set 7", not "set 6 is good forever".
-/// Record which set this process is running, for readers that cannot resolve
-/// one themselves.
-///
-/// Upserted rather than appended: the answer to "what are the workers producing
-/// now" has one value per survey, and a worker rolling back to an older release
-/// must be able to move it backwards.
+/// Upserted so a worker rolled back to an older release moves the current set backwards.
 pub async fn publish_current_set(
     db: &mongodb::Database,
     survey: &str,
@@ -520,12 +364,7 @@ pub async fn publish_current_set(
     Ok(())
 }
 
-/// The set the running workers last published for this survey.
-///
-/// `None` means no enrichment worker has started since stamping was deployed,
-/// so there is nothing to compare against. Reported as such rather than guessed
-/// at: an inferred "current" set would be a claim about what produced the data,
-/// which is the one thing this module exists not to make up.
+/// `None` means no enrichment worker has started since stamping was deployed.
 pub async fn current_set_id(
     db: &mongodb::Database,
     survey: &str,
@@ -538,6 +377,7 @@ pub async fn current_set_id(
         .and_then(|d| d.get_i64("set_id").ok()))
 }
 
+/// The current set plus those accepted against it; acceptances lapse when it moves on.
 pub async fn acceptable_set_ids(
     db: &mongodb::Database,
     survey: &str,
@@ -562,28 +402,17 @@ pub async fn acceptable_set_ids(
 /// The query for alerts that need re-enriching.
 pub fn stale_filter(acceptable: &[i64]) -> mongodb::bson::Document {
     use mongodb::bson::doc;
-    // `$nin` also matches documents with no `enrichment_set` at all, which is
-    // what we want: those were enriched before stamping and cannot be shown to
-    // be current.
+    // `$nin` also matches alerts with no `enrichment_set`, i.e. enriched before stamping.
     doc! { "enrichment_set": { "$nin": acceptable } }
 }
 
-/// Which sets alerts are actually sitting at, and how they differ.
-///
-/// Reads the *distinct* set ids on the collection rather than counting alerts:
-/// a count per set is an index scan over the whole archive, and the admin page
-/// polls. Distinct over an indexed field with a handful of values is cheap; the
-/// magnitude of the drift is a question for the reprocessing run, not for a
-/// status poll.
+/// Uses distinct set ids, not per-set counts: counting scans the archive and the page polls.
 pub async fn drift_status(
     db: &mongodb::Database,
     survey: &str,
 ) -> Result<DriftStatus, VersionError> {
     use mongodb::bson::doc;
 
-    // Read, never resolve. See CURRENT_COLLECTION: resolving here would hash
-    // model files the reader may not have, and would intern a set as a side
-    // effect of someone opening the admin page.
     let Some(current_id) = current_set_id(db, survey).await? else {
         return Ok(DriftStatus {
             survey: survey.to_string(),
@@ -602,11 +431,6 @@ pub async fn drift_status(
 
     let alerts =
         db.collection::<mongodb::bson::Document>(&format!("{}_alerts", survey.to_uppercase()));
-    // Bounded because the admin page polls this. With the index in place it is
-    // a scan of distinct index keys and returns in milliseconds; without one --
-    // the window between deploying this and the index finishing on an existing
-    // archive -- it is a collection scan, and an unbounded one would have every
-    // poll walk the whole archive.
     let seen = match alerts
         .distinct("enrichment_set", doc! {})
         .max_time(DRIFT_QUERY_BUDGET)
@@ -634,24 +458,18 @@ pub async fn drift_status(
     for value in seen {
         match value.as_i64() {
             Some(id) if !acceptable.contains(&id) => {
-                // What a reprocessing run would have to redo. A set that is no
-                // longer in the registry cannot be diffed, and is reported with
-                // no detail rather than omitted.
                 let old = db
                     .collection::<EnrichmentSet>(SETS_COLLECTION)
                     .find_one(doc! { "_id": id })
                     .await?;
                 let changed = match (&old, &current) {
                     (Some(old), Some(current)) => diff(old, current),
-                    // Either end missing: the row was removed, or the current
-                    // set was published by a release whose row is gone. Report
-                    // the staleness with no detail rather than omitting it.
+                    // A missing row cannot be diffed, but its alerts are still stale.
                     _ => Vec::new(),
                 };
                 stale_sets.push(StaleSet { id, changed });
             }
             Some(_) => {}
-            // A null or absent value: enriched before stamping existed.
             None => has_unstamped = true,
         }
     }
@@ -670,11 +488,7 @@ pub async fn drift_status(
     })
 }
 
-/// Record that a non-current set is acceptable, so it stops being reported as
-/// drift.
-///
-/// Writes one document and touches no alert, for the reason given on
-/// [`EnrichmentSet::accepted`].
+/// Record that a non-current set is acceptable, so it stops being reported as drift.
 pub async fn accept_set(
     db: &mongodb::Database,
     survey: &str,
@@ -686,9 +500,6 @@ pub async fn accept_set(
     use mongodb::bson::doc;
 
     if set_id == current {
-        // Rejected rather than silently accepted: the caller gets told, and the
-        // route does not write a ledger entry implying the current set was in
-        // some way doubtful.
         return Err(VersionError::AcceptCurrent(set_id));
     }
     let acceptance = Acceptance {
@@ -697,10 +508,7 @@ pub async fn accept_set(
         accepted_at: chrono::Utc::now().timestamp() as f64,
         accepted_against: current,
     };
-    // Scoped to the survey, and the match is checked: `acceptable_set_ids`
-    // filters on survey, so accepting another survey's id would write an
-    // acceptance that can never take effect, and an id that exists nowhere
-    // would report success having changed nothing.
+    // Filtered on survey: `acceptable_set_ids` would never see another survey's acceptance.
     let outcome = db
         .collection::<EnrichmentSet>(SETS_COLLECTION)
         .update_one(
@@ -719,10 +527,6 @@ pub async fn accept_set(
 }
 
 /// Withdraw an acceptance, so the set is reported as drift again.
-///
-/// Withdrawing from a set that was never accepted succeeds: the caller asked
-/// for it not to be accepted, and it is not. A set that does not exist for this
-/// survey is a different thing, and says so.
 pub async fn unaccept_set(
     db: &mongodb::Database,
     survey: &str,
@@ -745,7 +549,6 @@ pub async fn unaccept_set(
     Ok(())
 }
 
-/// Index for the drift query.
 pub async fn initialize_indexes(db: &mongodb::Database) -> Result<(), mongodb::error::Error> {
     use mongodb::bson::doc;
     db.collection::<EnrichmentSet>(SETS_COLLECTION)
@@ -796,8 +599,6 @@ mod tests {
 
     #[test]
     fn every_declared_model_file_exists_and_is_readable() {
-        // A stamp naming a model nobody can hash is worse than none: the worker
-        // would fail at startup rather than at the point of confusion.
         for m in ZTF_MODELS {
             assert!(
                 std::path::Path::new(m.path).exists(),
@@ -810,9 +611,6 @@ mod tests {
 
     #[test]
     fn the_loader_and_the_stamp_read_the_same_declaration() {
-        // If the models loaded and the models hashed could differ, an alert
-        // could claim a model it was not scored by -- the exact failure the
-        // stamp exists to prevent.
         for m in ZTF_MODELS {
             let loaded = crate::enrichment::models::model_path_for_test(m.field);
             assert_eq!(loaded, m.path, "{} loads a different file", m.field);
@@ -824,7 +622,6 @@ mod tests {
         let models = current_models(ZTF_MODELS).expect("models are readable");
         assert_eq!(models.len(), ZTF_MODELS.len());
         for (field, identity) in &models {
-            // A sha256 rendered as hex.
             assert_eq!(identity.sha256.len(), 64, "{field}");
             assert!(identity.sha256.chars().all(|c| c.is_ascii_hexdigit()));
         }
@@ -832,8 +629,6 @@ mod tests {
 
     #[test]
     fn two_models_do_not_share_a_hash() {
-        // A copy-paste in the declaration would otherwise go unnoticed, and two
-        // fields claiming one file would make a diff meaningless.
         let models = current_models(ZTF_MODELS).expect("models are readable");
         let mut hashes: Vec<&String> = models.values().map(|m| &m.sha256).collect();
         let count = hashes.len();
@@ -844,7 +639,6 @@ mod tests {
 
     #[test]
     fn the_fingerprint_is_stable_and_order_independent() {
-        // Reordering a declaration must not invalidate the archive.
         let a = set(1, &[("acai_h", "aa"), ("btsbot", "bb")], &[("sso", 1)]);
         let b = set(2, &[("btsbot", "bb"), ("acai_h", "aa")], &[("sso", 1)]);
         assert_eq!(a.fingerprint, b.fingerprint);
@@ -859,8 +653,6 @@ mod tests {
 
     #[test]
     fn changing_a_derivation_version_changes_the_fingerprint() {
-        // The half a content hash cannot cover: code that produces different
-        // output from the same models.
         let before = set(1, &[], &[("photstats", 1)]);
         let after = set(2, &[], &[("photstats", 2)]);
         assert_ne!(before.fingerprint, after.fingerprint);
@@ -868,7 +660,6 @@ mod tests {
 
     #[test]
     fn a_diff_names_only_what_moved() {
-        // The reason sets record components: re-score one model, not six.
         let before = set(1, &[("acai_h", "aa"), ("btsbot", "bb")], &[("sso", 1)]);
         let after = set(2, &[("acai_h", "aa"), ("btsbot", "cc")], &[("sso", 1)]);
         assert_eq!(diff(&before, &after), vec!["btsbot"]);
@@ -883,8 +674,6 @@ mod tests {
 
     #[test]
     fn a_model_that_stopped_running_counts_as_changed() {
-        // Its scores are stale in the strongest sense: nothing produces them
-        // any more, so they can never be refreshed in place.
         let before = set(1, &[("acai_h", "aa"), ("retired", "bb")], &[]);
         let after = set(2, &[("acai_h", "aa")], &[]);
         assert_eq!(diff(&before, &after), vec!["retired"]);
@@ -892,9 +681,6 @@ mod tests {
 
     #[test]
     fn a_derivation_that_stopped_being_declared_counts_as_changed() {
-        // The mirror of the model case above. Dropping a derivation moves the
-        // fingerprint and makes the alerts stale either way; without this the
-        // admin page reports drift it cannot name a cause for.
         let before = set(1, &[], &[("sso", 1), ("retired", 1)]);
         let after = set(2, &[], &[("sso", 1)]);
         assert_eq!(diff(&before, &after), vec!["retired"]);
@@ -909,9 +695,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_set_is_interned_once_and_reused() {
-        // The property the whole scheme rests on: two workers starting against
-        // the same models must stamp the same id, or the drift query splits the
-        // archive along a line that means nothing.
         let db = crate::conf::get_test_db().await;
         let first = resolve_current_set(&db, "ztf_test", ZTF_MODELS, false)
             .await
@@ -921,15 +704,12 @@ mod tests {
             .expect("resolves");
         assert_eq!(first.id, second.id, "the same models produced two ids");
         assert_eq!(first.fingerprint, second.fingerprint);
-        // Hashes are of the real files on disk.
         assert_eq!(first.models.len(), ZTF_MODELS.len());
         assert_eq!(first.derivations.len(), DERIVATIONS.len());
     }
 
     #[tokio::test]
     async fn a_changed_model_interns_a_new_set() {
-        // What a deploy with new weights looks like: a new row, a new id, and a
-        // diff naming exactly the model that moved.
         let db = crate::conf::get_test_db().await;
         let survey = format!("ztf_change_{}", uuid::Uuid::new_v4().simple());
 
@@ -937,8 +717,6 @@ mod tests {
             .await
             .expect("resolves");
 
-        // Stand in for retrained weights by declaring a different file for one
-        // field; every other model is unchanged.
         let swapped: Vec<ModelFile> = ZTF_MODELS
             .iter()
             .map(|m| ModelFile {
@@ -970,9 +748,6 @@ mod tests {
 
     #[tokio::test]
     async fn two_surveys_do_not_collide_on_a_set_id() {
-        // Regression: the id sequence was once per-survey while `_id` is unique
-        // across the collection, so ZTF's set 1 and LSST's set 1 collided the
-        // first time a second survey enriched anything.
         let db = crate::conf::get_test_db().await;
         let run = uuid::Uuid::new_v4().simple().to_string();
         let a = format!("surveyA_{run}");
@@ -989,8 +764,6 @@ mod tests {
             first.id, second.id,
             "two surveys were given the same set id"
         );
-        // The same models under a different survey are a different set, because
-        // the survey is part of what a set identifies.
         assert_ne!(first.fingerprint, second.fingerprint);
 
         for survey in [&a, &b] {
@@ -1003,9 +776,6 @@ mod tests {
 
     #[test]
     fn the_stale_filter_catches_unstamped_alerts() {
-        // `$nin` matches a document with no such field, which is what makes
-        // pre-stamping alerts show up as stale. They cannot be shown to be
-        // current, so treating them as fine would be a guess.
         let filter = stale_filter(&[7]);
         assert_eq!(
             filter,
@@ -1015,9 +785,6 @@ mod tests {
 
     #[tokio::test]
     async fn resolving_publishes_what_the_worker_is_running() {
-        // The API reads this rather than resolving, so a worker that resolved
-        // without publishing would leave the admin page unable to say what is
-        // current.
         let db = crate::conf::get_test_db().await;
         let survey = format!("publish_{}", uuid::Uuid::new_v4().simple());
 
@@ -1035,9 +802,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_rollback_moves_the_current_set_backwards() {
-        // Upsert, not append: a worker rolled back to an older release has to
-        // be able to say so, or the admin page reports drift against a set
-        // nothing is running.
         let db = crate::conf::get_test_db().await;
         let survey = format!("rollback_{}", uuid::Uuid::new_v4().simple());
 
@@ -1059,8 +823,6 @@ mod tests {
 
     #[tokio::test]
     async fn drift_status_reads_rather_than_resolving() {
-        // Reading the status must not create a set row. Polling an admin page
-        // that interns would grow the registry for free.
         let db = crate::conf::get_test_db().await;
         let survey = format!("driftread_{}", uuid::Uuid::new_v4().simple());
 
@@ -1088,10 +850,6 @@ mod tests {
 
     #[tokio::test]
     async fn an_acceptance_must_name_a_set_of_this_survey() {
-        // `acceptable_set_ids` filters on survey, so accepting another
-        // survey's id -- or one that exists nowhere -- would report success
-        // having changed nothing that can ever take effect, and the route would
-        // write a ledger entry saying a decision had been recorded.
         let db = crate::conf::get_test_db().await;
         let mine = format!("mine_{}", uuid::Uuid::new_v4().simple());
         let theirs = format!("theirs_{}", uuid::Uuid::new_v4().simple());
@@ -1115,7 +873,6 @@ mod tests {
             );
         }
 
-        // And the current set is not a thing to accept.
         let outcome =
             accept_set(&db, &mine, current.id, current.id, "babamul:someone", "why").await;
         assert!(
@@ -1123,7 +880,6 @@ mod tests {
             "accepting the current set was allowed: {outcome:?}"
         );
 
-        // Withdrawing is scoped the same way.
         assert!(matches!(
             unaccept_set(&db, &mine, other.id).await,
             Err(VersionError::UnknownSet { .. })
@@ -1132,16 +888,12 @@ mod tests {
 
     #[tokio::test]
     async fn accepting_a_set_changes_no_alert() {
-        // The point of accepting rather than restamping: an alert stamped with
-        // a set that did not produce it would claim provenance it does not
-        // have, which is the one thing the stamp exists not to do.
         let db = crate::conf::get_test_db().await;
         let survey = format!("accept_{}", uuid::Uuid::new_v4().simple());
 
         let current = resolve_current_set(&db, &survey, ZTF_MODELS, false)
             .await
             .expect("resolves");
-        // A second, different set to stand in for an older enrichment.
         let older = intern(
             &db,
             &survey,
@@ -1178,7 +930,6 @@ mod tests {
             "the accepted set joins the current one"
         );
 
-        // The reason is recorded, so the next person can see the grounds.
         let stored = db
             .collection::<EnrichmentSet>(SETS_COLLECTION)
             .find_one(mongodb::bson::doc! { "_id": older.id })
@@ -1189,7 +940,6 @@ mod tests {
         assert_eq!(acceptance.reason, "no output change");
         assert_eq!(acceptance.accepted_against, current.id);
 
-        // Withdrawing puts it back into drift.
         unaccept_set(&db, &survey, older.id)
             .await
             .expect("withdrawn");
@@ -1206,8 +956,6 @@ mod tests {
 
     #[tokio::test]
     async fn an_acceptance_does_not_survive_the_current_set_moving_on() {
-        // Someone said "set 6 is as good as set 7", not "set 6 is good
-        // forever". When the current set becomes 8, that is a new decision.
         let db = crate::conf::get_test_db().await;
         let survey = format!("scoped_{}", uuid::Uuid::new_v4().simple());
 
@@ -1235,7 +983,6 @@ mod tests {
         .await
         .expect("accepted");
 
-        // A later current set: the old acceptance no longer applies.
         let moved_on = current.id + 1000;
         assert_eq!(
             acceptable_set_ids(&db, &survey, moved_on).await.unwrap(),
@@ -1265,22 +1012,16 @@ mod tests {
 
     #[test]
     fn the_gpu_derivations_are_recorded_only_when_the_gpu_will_run() {
-        // A GPU build running with the GPU off in config computes no
-        // `villar_fit`. Claiming it anyway would stamp those alerts as
-        // carrying a fit they do not have, and `stale` would pass over them.
         let off = current_derivations(false);
         let on = current_derivations(true);
         for (name, _) in GPU_DERIVATIONS {
             assert!(!off.contains_key(*name), "{name} claimed with the GPU off");
             assert!(on.contains_key(*name), "{name} absent with the GPU on");
         }
-        // Everything else is unconditional either way.
         for (name, version) in DERIVATIONS {
             assert_eq!(off.get(*name), Some(version));
             assert_eq!(on.get(*name), Some(version));
         }
-        // So the two intern as different sets, and alerts enriched with and
-        // without the GPU are never reported as the same provenance.
         #[cfg(feature = "gpu")]
         assert_ne!(
             fingerprint("ztf", &BTreeMap::new(), &off),

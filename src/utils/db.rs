@@ -164,14 +164,7 @@ pub async fn initialize_survey_indexes(
     };
     create_index(&alerts_collection, index, false).await?;
 
-    // Which enrichment produced each alert: without it the drift check and the
-    // `stale` selection are collection scans over the whole archive. Only for
-    // surveys whose worker stamps the field -- on the others it would index
-    // nothing but nulls.
-    //
-    // On an archive that predates the field, this build takes hours and holds
-    // up startup until it finishes, so create it by hand before deploying a
-    // release that adds it. See docs/alert-processing.md.
+    // Blocks startup for hours on an existing archive, see docs/alert-processing.md.
     if crate::enrichment::version::stamps_enrichment_set(&survey.to_string()) {
         let index = doc! { "enrichment_set": 1 };
         create_index(&alerts_collection, index, false).await?;

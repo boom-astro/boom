@@ -1823,12 +1823,7 @@ pub fn load_config(config_path: Option<&str>) -> Result<AppConfig, BoomConfigErr
     Ok(app_config)
 }
 
-/// Path to `tests/config.test.yaml`, found by walking up from the working
-/// directory.
-///
-/// Public because some components load config from a *path* rather than an
-/// `AppConfig` -- the enrichment workers build themselves that way -- so a test
-/// that constructs one needs the path, not just the parsed config.
+/// Path to `tests/config.test.yaml`, found by walking up from the working directory.
 pub fn test_config_path() -> String {
     let mut current_dir = std::env::current_dir().expect("Failed to get current directory");
     loop {

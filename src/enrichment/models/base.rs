@@ -71,10 +71,7 @@ fn load_model_on_device_inner(
 
     // Pin execution providers explicitly so CPU mode never initializes GPU EPs.
     if let Some(dev) = device_id {
-        // Only the CUDA provider reads the device id, and that is Linux only --
-        // the same reason `cuda_stream` and `allow_cpu_fallback` carry the
-        // attribute above. An `if let` binding cannot take one, so this stands
-        // in for it.
+        // Only the Linux-only CUDA provider reads `dev`.
         #[cfg(not(target_os = "linux"))]
         let _ = dev;
 

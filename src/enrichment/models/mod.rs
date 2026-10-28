@@ -25,11 +25,7 @@ use tracing::info;
 /// Workers round-robin over sets; more workers than GPUs share a set and its stream.
 const SESSIONS_PER_DEVICE: usize = 1;
 
-/// The declared path for a model field.
-///
-/// Reads from `enrichment::version::ZTF_MODELS`, which is also what gets
-/// hashed into the enrichment set. Loading from one list and stamping from
-/// another would let an alert claim a model it was not scored by.
+/// Same list that is hashed into the enrichment set, so stamps match what was loaded.
 fn model_path(field: &str) -> &'static str {
     crate::enrichment::version::ZTF_MODELS
         .iter()

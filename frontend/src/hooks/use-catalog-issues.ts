@@ -22,17 +22,12 @@ export type CatalogIssues = {
   label: string;
 };
 
-/** Enrichment drift, counted per survey rather than per stale set: an operator
- *  acts on "ZTF needs reprocessing", not on each set individually. */
+/** Counted per survey, not per stale set. */
 export function countEnrichmentIssues(drift: EnrichmentDrift[]): {
   count: number;
   parts: string[];
 } {
-  // A survey with no published set is not counted: nothing is known to be
-  // stale, and there is no action an operator could take from the badge.
   const published = drift.filter((d) => d.current_set !== null);
-  // Counted, and named differently: the query could not answer, which is not
-  // the same as answering "nothing is stale" and must not look like it.
   const unknown = published.filter((d) => d.drift_unknown);
   const stale = published.filter(
     (d) => !d.drift_unknown && (d.stale_sets.length > 0 || d.has_unstamped),
