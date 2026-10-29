@@ -20,12 +20,22 @@ pub const FIELD_EMBEDDING: &str = "embedding";
 pub const FIELD_CANDID: &str = "candid";
 /// Julian date of that alert.
 pub const FIELD_JD: &str = "jd";
+/// The object's program: 1 (public) if any detection is public, else 2
+/// (partnership) if any is partnership, else 3 (private). Other values are
+/// ignored; an object with none of these is not stored.
+pub const FIELD_PROGRAMID: &str = "programid";
 
 const INDEX_NAME: &str = "embedding_idx";
 
 /// Every field an upsert sends. A collection missing any of these cannot accept
 /// BOOM's writes.
-const REQUIRED_FIELDS: [&str; 4] = [FIELD_OBJECT_ID, FIELD_EMBEDDING, FIELD_CANDID, FIELD_JD];
+const REQUIRED_FIELDS: [&str; 5] = [
+    FIELD_OBJECT_ID,
+    FIELD_EMBEDDING,
+    FIELD_CANDID,
+    FIELD_JD,
+    FIELD_PROGRAMID,
+];
 
 impl MilvusClient {
     /// Create the embeddings collection, its vector index, and load it into
@@ -243,6 +253,13 @@ pub fn embedding_collection_schema(
                 name: FIELD_JD.to_string(),
                 description: "Julian date of that alert".to_string(),
                 data_type: DataType::Double as i32,
+                ..Default::default()
+            },
+            FieldSchema {
+                name: FIELD_PROGRAMID.to_string(),
+                description: "1 if any detection is public, else 2 if any is partnership, else 3"
+                    .to_string(),
+                data_type: DataType::Int32 as i32,
                 ..Default::default()
             },
         ],

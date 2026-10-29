@@ -1445,6 +1445,9 @@ pub struct LinkerConfig {
     /// Minimum drb for a detection to be searched.
     #[serde(default = "default_linker_drb")]
     pub drb: f64,
+    /// Minimum reliability for an LSST detection to be searched.
+    #[serde(default = "default_linker_lsst_min_reliability")]
+    pub lsst_min_reliability: f64,
     #[serde(default = "default_linker_surveys")]
     pub surveys: Vec<Survey>,
     /// Link tracklets across nights.
@@ -1495,6 +1498,8 @@ pub struct LinkerConfig {
     pub fast_max_rate_deg_per_day: f64,
     #[serde(default = "default_linker_fast_dense_detections")]
     pub fast_dense_detections: usize,
+    #[serde(default = "default_linker_fast_dense_max_rate")]
+    pub fast_dense_max_rate_deg_per_day: f64,
 }
 
 impl LinkerConfig {
@@ -1522,6 +1527,12 @@ impl LinkerConfig {
         if !(0.0..=1.0).contains(&self.drb) {
             return Err(format!("drb is {}, but scores run from 0 to 1", self.drb));
         }
+        if !(0.0..=1.0).contains(&self.lsst_min_reliability) {
+            return Err(format!(
+                "lsst_min_reliability is {}, but scores run from 0 to 1",
+                self.lsst_min_reliability
+            ));
+        }
         if !(0.0..f64::INFINITY).contains(&self.max_vinf_km_s) {
             return Err(format!(
                 "max_vinf_km_s is {}, but must be zero or a positive speed",
@@ -1548,6 +1559,12 @@ impl LinkerConfig {
                 self.fast_min_rate_deg_per_day, self.fast_max_rate_deg_per_day
             ));
         }
+        if self.fast_dense_max_rate_deg_per_day <= self.fast_min_rate_deg_per_day {
+            return Err(format!(
+                "fast_dense_max_rate_deg_per_day is {}, but must exceed fast_min_rate_deg_per_day ({})",
+                self.fast_dense_max_rate_deg_per_day, self.fast_min_rate_deg_per_day
+            ));
+        }
         Ok(())
     }
 }
@@ -1559,6 +1576,7 @@ impl Default for LinkerConfig {
             thor_window_nights: default_linker_thor_window_nights(),
             run_after_utc_hour: default_linker_run_after_utc_hour(),
             drb: default_linker_drb(),
+            lsst_min_reliability: default_linker_lsst_min_reliability(),
             surveys: default_linker_surveys(),
             link: default_linker_pass(),
             thor: default_linker_pass(),
@@ -1577,6 +1595,7 @@ impl Default for LinkerConfig {
             fast_min_rate_deg_per_day: default_linker_fast_min_rate(),
             fast_max_rate_deg_per_day: default_linker_fast_max_rate(),
             fast_dense_detections: default_linker_fast_dense_detections(),
+            fast_dense_max_rate_deg_per_day: default_linker_fast_dense_max_rate(),
         }
     }
 }
@@ -1605,6 +1624,10 @@ fn default_linker_fast_dense_detections() -> usize {
     10_000
 }
 
+fn default_linker_fast_dense_max_rate() -> f64 {
+    5.0
+}
+
 fn default_linker_recall_window_nights() -> u32 {
     5
 }
@@ -1623,6 +1646,10 @@ fn default_linker_run_after_utc_hour() -> u32 {
 
 fn default_linker_drb() -> f64 {
     0.8
+}
+
+fn default_linker_lsst_min_reliability() -> f64 {
+    0.5
 }
 
 fn default_linker_surveys() -> Vec<Survey> {

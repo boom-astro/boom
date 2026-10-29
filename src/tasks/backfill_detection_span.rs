@@ -6,66 +6,123 @@
 //! differently from the same search on the live stream: a missing field reads
 //! as null, which is exactly the failure the fields were added to close.
 //!
-//! Bounded by `--days` so the counterpart filters can adopt the fields before
-//! the whole history is done: run it at 31 days, which is what those searches
-//! reach back by default, then widen it.
+//! Bounded by `days` so the counterpart filters can adopt the fields before the
+//! whole history is done: run it at 31 days, which is what those searches reach
+//! back by default, then widen it.
 //!
 //! The arrays are read straight from `<survey>_alerts_aux`: `magpsf` is stored
 //! on a forced epoch only when it cleared the detection threshold, so its
 //! presence is the test, and no flux has to be reconverted here.
+//!
+//! **Idempotent.** The span is recomputed from the stored arrays rather than
+//! amended, so a second run over the same alerts writes the same values.
 //!
 //! ZTF and LSST only, which is what those field names belong to. WINTER stores
 //! no forced photometry at all, and DECam names the same quantities
 //! differently and computes `snr` on every epoch rather than only the
 //! significant ones, so presence would mark every point a detection. Reading
 //! either with these names yields a wrong answer rather than an empty one,
-//! which is why the survey is checked rather than left to the caller.
+//! which is why the survey is refused at submit rather than left to the caller.
 
-use boom::{
-    conf::{load_dotenv, AppConfig},
-    utils::{
-        data::{make_progress_bar, spawn_progress_logger},
-        db::{join_tasks, range_shards, shard_field, TaskError, CURSOR_BATCH_SIZE},
-        enums::Survey,
-        lightcurves::{summarise_detections, EPISODE_GAP_DAYS},
-        parser::parse_positive_usize,
-    },
+use super::context::TaskContext;
+use super::ledger::{MutationTarget, Operation};
+use crate::utils::{
+    db::{join_tasks, range_shards, shard_field, TaskError, CURSOR_BATCH_SIZE},
+    enums::Survey,
+    lightcurves::{summarise_detections, EPISODE_GAP_DAYS},
 };
-use clap::Parser;
 use futures::TryStreamExt;
-use indicatif::ProgressBar;
 use mongodb::{
     bson::{doc, Document},
     options::{UpdateOneModel, WriteModel},
     Collection, Namespace,
 };
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use tracing::{error, info, Level};
-use tracing_subscriber::FmtSubscriber;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use utoipa::ToSchema;
 
-#[derive(Parser)]
-#[command(about = "Backfill the activity-span fields on existing alerts")]
-struct Cli {
-    #[arg(long, value_enum)]
-    survey: Survey,
+/// Stable identifier for this task type.
+pub const TASK_TYPE: &str = "backfill_detection_span";
 
-    #[arg(long, value_name = "FILE", default_value = "config.yaml")]
-    config: String,
+const MAX_BATCH_SIZE: usize = 100_000;
+const MAX_PROCESSES: usize = 64;
+const MAX_DAYS: f64 = 10_000.0;
+/// How often the progress ticker publishes.
+const PROGRESS_TICK: std::time::Duration = std::time::Duration::from_secs(5);
 
+fn default_days() -> f64 {
+    31.0
+}
+fn default_batch_size() -> usize {
+    2_000
+}
+fn default_processes() -> usize {
+    8
+}
+
+/// What a client may ask for.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct BackfillDetectionSpanParams {
+    /// ZTF or LSST. The others store these quantities under other names, or
+    /// not at all.
+    pub survey: Survey,
     /// How far back to reach, days. The counterpart searches use 31.
-    #[arg(long, default_value_t = 31.0)]
-    days: f64,
-
-    /// Alerts held per worker before a bulk write is issued.
-    #[arg(long, default_value_t = 2000, value_parser = parse_positive_usize)]
-    batch_size: usize,
-
-    #[arg(long, default_value_t = 8, value_parser = parse_positive_usize)]
-    processes: usize,
-
+    #[serde(default = "default_days")]
+    pub days: f64,
+    /// Alerts held per worker before a bulk write.
+    #[serde(default = "default_batch_size")]
+    pub batch_size: usize,
+    /// Shards scanned at once.
+    #[serde(default = "default_processes")]
+    pub processes: usize,
     /// Count what would change without writing it.
-    #[arg(long, default_value_t = false)]
-    dry_run: bool,
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+impl BackfillDetectionSpanParams {
+    pub fn validate_params(&self) -> Result<(), String> {
+        if !matches!(self.survey, Survey::Ztf | Survey::Lsst) {
+            return Err(format!(
+                "{} is not supported: this reads psfFlux and magpsf, which WINTER and \
+                 DECam do not store under those names",
+                self.survey
+            ));
+        }
+        if !(self.days > 0.0 && self.days <= MAX_DAYS) {
+            return Err(format!("days must be between 0 and {MAX_DAYS}"));
+        }
+        if self.batch_size == 0 || self.batch_size > MAX_BATCH_SIZE {
+            return Err(format!("batch_size must be between 1 and {MAX_BATCH_SIZE}"));
+        }
+        if self.processes == 0 || self.processes > MAX_PROCESSES {
+            return Err(format!("processes must be between 1 and {MAX_PROCESSES}"));
+        }
+        Ok(())
+    }
+}
+
+/// Stands in for the binary's terminal progress bar: the same `inc` calls,
+/// counted for the run rather than drawn on a tty.
+#[derive(Clone)]
+pub struct Progress(Arc<AtomicU64>);
+
+impl Progress {
+    fn new() -> Self {
+        Self(Arc::new(AtomicU64::new(0)))
+    }
+    fn inc(&self, n: u64) {
+        self.0.fetch_add(n, Ordering::Relaxed);
+    }
+    fn count(&self) -> u64 {
+        self.0.load(Ordering::Relaxed)
+    }
+}
+
+fn failed(e: impl std::fmt::Display) -> super::TaskError {
+    super::TaskError::Failed(e.to_string())
 }
 
 /// One alert to recompute: its id, its object, and the epoch to summarise at.
@@ -137,7 +194,7 @@ async fn flush(
     client: &mongodb::Client,
     alert_ns: &Namespace,
     dry_run: bool,
-    pb: &ProgressBar,
+    pb: &Progress,
 ) -> Result<u64, mongodb::error::Error> {
     if batch.is_empty() {
         return Ok(0);
@@ -205,7 +262,7 @@ async fn run_shard(
     cutoff_jd: f64,
     batch_size: usize,
     dry_run: bool,
-    pb: ProgressBar,
+    pb: Progress,
 ) -> Result<u64, mongodb::error::Error> {
     let client = alerts.client().clone();
     let mut find_filter = filter;
@@ -233,64 +290,48 @@ async fn run_shard(
     Ok(written)
 }
 
-#[tokio::main]
-async fn main() {
-    load_dotenv();
-    let subscriber = FmtSubscriber::builder()
-        .with_max_level(Level::INFO)
-        .finish();
-    let _ = tracing::subscriber::set_global_default(subscriber);
-    let args = Cli::parse();
+pub async fn run(
+    ctx: &TaskContext,
+    params: BackfillDetectionSpanParams,
+) -> Result<serde_json::Value, super::TaskError> {
+    params
+        .validate_params()
+        .map_err(super::TaskError::InvalidParams)?;
 
-    if !matches!(args.survey, Survey::Ztf | Survey::Lsst) {
-        error!(
-            "{} is not supported: this reads psfFlux and magpsf, which WINTER and DECam \
-             do not store under those names",
-            args.survey
-        );
-        std::process::exit(1);
-    }
-
-    let config = match AppConfig::from_path(&args.config) {
-        Ok(c) => c,
-        Err(e) => {
-            error!("failed to load config from {}: {}", args.config, e);
-            std::process::exit(1);
-        }
-    };
-    let db = match config.build_db().await {
-        Ok(db) => db,
-        Err(e) => {
-            error!("failed to build mongo client: {}", e);
-            std::process::exit(1);
-        }
-    };
-
-    let alerts: Collection<AlertRow> = db.collection(&format!("{}_alerts", args.survey));
-    let counter: Collection<Document> = db.collection(&format!("{}_alerts", args.survey));
-    let aux: Collection<Document> = db.collection(&format!("{}_alerts_aux", args.survey));
+    let db = ctx.db().clone();
+    let alerts: Collection<AlertRow> = db.collection(&format!("{}_alerts", params.survey));
+    let counter: Collection<Document> = db.collection(&format!("{}_alerts", params.survey));
+    let aux: Collection<Document> = db.collection(&format!("{}_alerts_aux", params.survey));
     let alert_ns = alerts.namespace();
 
-    let now_jd = flare::Time::now().to_jd();
-    let cutoff_jd = now_jd - args.days;
+    let cutoff_jd = flare::Time::now().to_jd() - params.days;
     let base = doc! { "candidate.jd": { "$gte": cutoff_jd } };
     let total = counter.count_documents(base.clone()).await.unwrap_or(0);
 
     let field = shard_field(&counter).await;
-    let shards = range_shards(&counter, args.processes, field, &base).await;
-    info!(
-        "backfilling {} alert(s) at or after jd {:.3} across {} shard(s) cut on '{}' (dry run: {})",
+    let shards = range_shards(&counter, params.processes, field, &base).await;
+    ctx.info(format!(
+        "backfilling {} alert(s) at or after jd {:.3} across {} shard(s) cut on '{}'{}",
         total,
         cutoff_jd,
         shards.len(),
         field,
-        args.dry_run
-    );
+        if params.dry_run { " (dry run)" } else { "" }
+    ));
 
-    let label = format!("span→{}", args.survey);
-    let pb = make_progress_bar(total, label.clone());
-    pb.enable_steady_tick(std::time::Duration::from_millis(200));
-    let logger = spawn_progress_logger(pb.clone(), label);
+    let pb = Progress::new();
+    let ticker = {
+        let ctx = ctx.clone();
+        let pb = pb.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(PROGRESS_TICK).await;
+                let done = pb.count();
+                ctx.progress(done, total.max(done), format!("{done} alert(s) updated"))
+                    .await;
+            }
+        })
+    };
 
     let mut handles = Vec::with_capacity(shards.len());
     for filter in shards {
@@ -298,7 +339,7 @@ async fn main() {
         let aux = aux.clone();
         let alert_ns = alert_ns.clone();
         let pb = pb.clone();
-        let (batch_size, dry_run) = (args.batch_size, args.dry_run);
+        let (batch_size, dry_run) = (params.batch_size, params.dry_run);
         handles.push(tokio::spawn(async move {
             run_shard(
                 alerts, aux, alert_ns, filter, cutoff_jd, batch_size, dry_run, pb,
@@ -308,23 +349,48 @@ async fn main() {
     }
 
     let outcome: Result<Vec<u64>, TaskError> = join_tasks(handles, "shard").await;
-    logger.abort();
-    pb.finish();
+    ticker.abort();
+    let counts = outcome.map_err(failed)?;
+    let updated: u64 = counts.iter().sum();
 
-    match outcome {
-        Ok(counts) => {
-            let n: u64 = counts.iter().sum();
-            if args.dry_run {
-                info!("dry run: {} alert(s) would be updated", n);
-            } else {
-                info!("updated the activity span on {} alert(s)", n);
-            }
-        }
-        Err(e) => {
-            error!("backfill failed: {}", e);
-            std::process::exit(1);
-        }
+    if ctx.is_canceled() {
+        return Err(super::TaskError::Canceled);
     }
+
+    if !params.dry_run && updated > 0 {
+        ctx.record_mutation(
+            MutationTarget {
+                database: db.name().to_string(),
+                collection: format!("{}_alerts", params.survey),
+                catalog: None,
+                survey: Some(params.survey.to_string().to_lowercase()),
+            },
+            // Recompute: the span is derived from arrays already stored on the
+            // aux record, not fetched from anywhere.
+            Operation::Recompute,
+            doc! {
+                "fields": ["first_activity_jd", "last_detection_jd", "n_forced_detections"],
+                "updated": updated as i64,
+                "days": params.days,
+                "code_version": mongodb::bson::to_bson(&super::ledger::CodeVersion::current())
+                    .unwrap_or(mongodb::bson::Bson::Null),
+            },
+        )
+        .await;
+    }
+
+    ctx.info(if params.dry_run {
+        format!("dry run: {updated} alert(s) would be updated")
+    } else {
+        format!("updated the activity span on {updated} alert(s)")
+    });
+    Ok(serde_json::json!({
+        "survey": params.survey.to_string(),
+        "scanned": total,
+        "updated": updated,
+        "days": params.days,
+        "dry_run": params.dry_run,
+    }))
 }
 
 #[cfg(test)]

@@ -16,7 +16,9 @@ use prost::Message;
 use tracing::{debug, instrument};
 
 use super::client::{check_status, MilvusClient, MilvusError};
-use super::collection::{FIELD_CANDID, FIELD_EMBEDDING, FIELD_JD, FIELD_OBJECT_ID};
+use super::collection::{
+    FIELD_CANDID, FIELD_EMBEDDING, FIELD_JD, FIELD_OBJECT_ID, FIELD_PROGRAMID,
+};
 use super::insert::EmbeddingRow;
 use super::proto::common::{
     DslType, KeyValuePair, PlaceholderGroup, PlaceholderType, PlaceholderValue,
@@ -36,21 +38,24 @@ pub struct SearchHit {
     /// Similarity score under the collection's metric (higher is closer for
     /// `COSINE`/inner-product).
     pub score: f32,
-    /// Candid stored with the matched embedding, if requested/available.
-    pub candid: Option<i64>,
-    /// Julian date stored with the matched embedding, if requested/available.
-    pub jd: Option<f64>,
 }
 
 impl MilvusClient {
     /// Find the `top_k` objects whose stored embeddings are most similar.
     /// Results are ordered best-first.
+    ///
+    /// Only rows whose `programid` is in `programids` can match; an empty list
+    /// matches nothing.
     #[instrument(skip_all, err, fields(collection = %self.config().collection.name, top_k))]
     pub async fn search_embedding(
         &mut self,
         query: &[f32],
         top_k: i64,
+        programids: &[i32],
     ) -> Result<Vec<SearchHit>, MilvusError> {
+        if programids.is_empty() {
+            return Ok(vec![]);
+        }
         let config = self.config().clone();
 
         if query.len() as i64 != config.collection.dim {
@@ -72,12 +77,13 @@ impl MilvusClient {
         let request = SearchRequest {
             db_name: config.database.clone(),
             collection_name: config.collection.name.clone(),
-            dsl: String::new(),
+            // Applied during the ANN search, so top_k counts only allowed rows.
+            dsl: programid_in_expr(programids),
             dsl_type: DslType::BoolExprV1 as i32,
             search_input: Some(SearchInput::PlaceholderGroup(encode_float_placeholder(&[
                 query,
             ]))),
-            output_fields: vec![FIELD_CANDID.to_string(), FIELD_JD.to_string()],
+            output_fields: vec![],
             search_params,
             nq: 1,
             use_default_consistency: true,
@@ -94,25 +100,36 @@ impl MilvusClient {
 
     /// Fetch the stored rows for the given `object_ids`. Missing ids are simply
     /// absent from the result; order is not guaranteed to match the input.
+    ///
+    /// Rows outside `programids` are left out as if missing; an empty list
+    /// returns nothing.
     #[instrument(skip_all, err, fields(collection = %self.config().collection.name, ids = object_ids.len()))]
     pub async fn get_embeddings(
         &mut self,
         object_ids: &[&str],
+        programids: &[i32],
     ) -> Result<Vec<EmbeddingRow>, MilvusError> {
-        if object_ids.is_empty() {
+        if object_ids.is_empty() || programids.is_empty() {
             return Ok(vec![]);
         }
         let config = self.config().clone();
 
+        let expr = format!(
+            "{} and {}",
+            object_id_in_expr(object_ids),
+            programid_in_expr(programids)
+        );
+
         let request = QueryRequest {
             db_name: config.database.clone(),
             collection_name: config.collection.name.clone(),
-            expr: object_id_in_expr(object_ids),
+            expr,
             output_fields: vec![
                 FIELD_OBJECT_ID.to_string(),
                 FIELD_EMBEDDING.to_string(),
                 FIELD_CANDID.to_string(),
                 FIELD_JD.to_string(),
+                FIELD_PROGRAMID.to_string(),
             ],
             use_default_consistency: true,
             ..Default::default()
@@ -229,6 +246,15 @@ fn object_id_in_expr(object_ids: &[&str]) -> String {
     format!("{FIELD_OBJECT_ID} in [{list}]")
 }
 
+fn programid_in_expr(programids: &[i32]) -> String {
+    let list = programids
+        .iter()
+        .map(i32::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{FIELD_PROGRAMID} in [{list}]")
+}
+
 /// Serialize float query vectors into a Milvus `PlaceholderGroup` (each vector
 /// as little-endian `f32` bytes).
 fn encode_float_placeholder(vectors: &[&[f32]]) -> Vec<u8> {
@@ -267,17 +293,12 @@ fn parse_search_hits(data: Option<SearchResultData>) -> Vec<SearchHit> {
         _ => return vec![],
     };
 
-    let candids = long_column(&data.fields_data, FIELD_CANDID);
-    let jds = double_column(&data.fields_data, FIELD_JD);
-
     object_ids
         .into_iter()
         .enumerate()
         .map(|(i, object_id)| SearchHit {
             object_id,
             score: data.scores.get(i).copied().unwrap_or(f32::NAN),
-            candid: candids.as_ref().and_then(|c| c.get(i).copied()),
-            jd: jds.as_ref().and_then(|j| j.get(i).copied()),
         })
         .collect()
 }
@@ -300,6 +321,7 @@ fn parse_embedding_rows(fields: &[FieldData]) -> Vec<EmbeddingRow> {
     let (dim, flat) = float_vector_column(fields, FIELD_EMBEDDING).unwrap_or((0, vec![]));
     let candids = long_column(fields, FIELD_CANDID).unwrap_or_default();
     let jds = double_column(fields, FIELD_JD).unwrap_or_default();
+    let programids = int_column(fields, FIELD_PROGRAMID).unwrap_or_default();
 
     object_ids
         .into_iter()
@@ -318,6 +340,7 @@ fn parse_embedding_rows(fields: &[FieldData]) -> Vec<EmbeddingRow> {
                 embedding,
                 candid: candids.get(i).copied().unwrap_or_default(),
                 jd: jds.get(i).copied().unwrap_or_default(),
+                programid: programids.get(i).copied().unwrap_or_default(),
             }
         })
         .collect()
@@ -325,6 +348,16 @@ fn parse_embedding_rows(fields: &[FieldData]) -> Vec<EmbeddingRow> {
 
 fn find_field<'a>(fields: &'a [FieldData], name: &str) -> Option<&'a FieldData> {
     fields.iter().find(|f| f.field_name == name)
+}
+
+fn int_column(fields: &[FieldData], name: &str) -> Option<Vec<i32>> {
+    match &find_field(fields, name)?.field {
+        Some(field_data::Field::Scalars(s)) => match &s.data {
+            Some(scalar_field::Data::IntData(a)) => Some(a.data.clone()),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 fn long_column(fields: &[FieldData], name: &str) -> Option<Vec<i64>> {
@@ -379,8 +412,8 @@ fn kv(key: &str, value: &str) -> KeyValuePair {
 mod tests {
     use super::*;
     use crate::milvus::proto::schema::{
-        i_ds, scalar_field, DoubleArray, FloatArray, IDs, LongArray, ScalarField, StringArray,
-        VectorField,
+        i_ds, scalar_field, DoubleArray, FloatArray, IDs, IntArray, LongArray, ScalarField,
+        StringArray, VectorField,
     };
 
     fn scalar(name: &str, data: scalar_field::Data) -> FieldData {
@@ -454,6 +487,12 @@ mod tests {
     }
 
     #[test]
+    fn programid_in_expr_lists_the_programs() {
+        assert_eq!(programid_in_expr(&[1]), "programid in [1]");
+        assert_eq!(programid_in_expr(&[1, 3]), "programid in [1, 3]");
+    }
+
+    #[test]
     fn encode_float_placeholder_lays_out_little_endian_floats() {
         let bytes = encode_float_placeholder(&[&[1.0f32, 2.0]]);
         let group = PlaceholderGroup::decode(bytes.as_slice()).unwrap();
@@ -467,7 +506,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_search_hits_zips_ids_scores_and_metadata() {
+    fn parse_search_hits_zips_ids_and_scores() {
         let data = SearchResultData {
             scores: vec![0.9, 0.8],
             ids: Some(IDs {
@@ -475,18 +514,6 @@ mod tests {
                     data: vec!["ZTF_A".into(), "ZTF_B".into()],
                 })),
             }),
-            fields_data: vec![
-                scalar(
-                    FIELD_CANDID,
-                    scalar_field::Data::LongData(LongArray { data: vec![10, 20] }),
-                ),
-                scalar(
-                    FIELD_JD,
-                    scalar_field::Data::DoubleData(DoubleArray {
-                        data: vec![2400000.5, 2400001.5],
-                    }),
-                ),
-            ],
             ..Default::default()
         };
 
@@ -497,14 +524,10 @@ mod tests {
                 SearchHit {
                     object_id: "ZTF_A".into(),
                     score: 0.9,
-                    candid: Some(10),
-                    jd: Some(2400000.5),
                 },
                 SearchHit {
                     object_id: "ZTF_B".into(),
                     score: 0.8,
-                    candid: Some(20),
-                    jd: Some(2400001.5),
                 },
             ]
         );
@@ -539,6 +562,10 @@ mod tests {
                     data: vec![2400000.5, 2400001.5],
                 }),
             ),
+            scalar(
+                FIELD_PROGRAMID,
+                scalar_field::Data::IntData(IntArray { data: vec![1, 1] }),
+            ),
         ];
 
         let rows = parse_embedding_rows(&fields);
@@ -548,5 +575,6 @@ mod tests {
         assert_eq!(rows[1].embedding, vec![3.0, 4.0]);
         assert_eq!(rows[1].candid, 20);
         assert_eq!(rows[1].jd, 2400001.5);
+        assert_eq!(rows[1].programid, 1);
     }
 }

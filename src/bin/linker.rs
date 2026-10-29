@@ -210,7 +210,7 @@ async fn run_night(db: &mongodb::Database, cfg: &LinkerConfig, night: i64, stop:
     let first = night - cfg.window_nights as i64 + 1;
     let mut detections = Vec::new();
     for survey in &cfg.surveys {
-        match load_unknown(db, survey, first, night, cfg.drb).await {
+        match load_unknown(db, survey, first, night, cfg.drb, cfg.lsst_min_reliability).await {
             Ok(mut found) => {
                 let loaded = found.len();
                 if let Some(orbits) = catalog
@@ -352,6 +352,7 @@ async fn run_night(db: &mongodb::Database, cfg: &LinkerConfig, night: i64, stop:
                     min_rate_deg_per_day: cfg.fast_min_rate_deg_per_day,
                     max_rate_deg_per_day: cfg.fast_max_rate_deg_per_day,
                     dense_detections: cfg.fast_dense_detections,
+                    dense_max_rate_deg_per_day: cfg.fast_dense_max_rate_deg_per_day,
                     conics,
                     ..FastSearch::default()
                 };
@@ -438,7 +439,7 @@ async fn run_night(db: &mongodb::Database, cfg: &LinkerConfig, night: i64, stop:
         let (start, span) = window(night, cfg.recall_window_nights);
         match load_window(db, start, span, cfg.drb, true, None).await {
             Ok((identified, names)) => {
-                let (tracklets, tracks, _) = link(&identified, conics);
+                let (tracklets, tracks, _) = link(&identified, Conics::Bound);
                 let r = recall(&tracks, &tracklets, &names);
                 info!(
                     detections = identified.len(),
