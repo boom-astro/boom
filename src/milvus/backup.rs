@@ -192,6 +192,7 @@ mod tests {
             embedding: vec![jd as f32, 1.0],
             candid: jd as i64,
             jd,
+            programid: 1,
         }
     }
 
@@ -201,6 +202,7 @@ mod tests {
             embedding: (0..dim).map(|i| i as f32 * 0.5).collect(),
             candid: 1234567890123,
             jd: 2400123.75,
+            programid: 1,
         }
     }
 
@@ -212,7 +214,31 @@ mod tests {
         assert_eq!(decoded.object_id, original.object_id);
         assert_eq!(decoded.candid, original.candid);
         assert_eq!(decoded.jd, original.jd);
+        assert_eq!(decoded.programid, original.programid);
         assert_eq!(decoded.embedding, original.embedding);
+    }
+
+    /// Queued before `programid` existed, so it would come back as 0.
+    #[test]
+    fn a_row_queued_before_programid_is_rejected() {
+        #[derive(Clone, PartialEq, prost::Message)]
+        struct OldRow {
+            #[prost(string, tag = "3")]
+            object_id: String,
+            #[prost(float, repeated, tag = "4")]
+            embedding: Vec<f32>,
+            #[prost(int64, tag = "1")]
+            candid: i64,
+            #[prost(double, tag = "2")]
+            jd: f64,
+        }
+        let old = OldRow {
+            object_id: "ZTF_A".into(),
+            embedding: vec![0.5; 4],
+            candid: 1,
+            jd: 2400123.75,
+        };
+        assert!(decode(&old.encode_to_vec()).is_none());
     }
 
     #[test]
@@ -240,6 +266,7 @@ mod tests {
             embedding: vec![f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -0.0],
             candid: -1,
             jd: f64::NAN,
+            programid: 1,
         };
         let decoded = decode(&original.encode_to_vec()).expect("must decode");
 

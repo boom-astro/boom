@@ -12,8 +12,12 @@
 
 use crate::api::models::response;
 use crate::milvus::MilvusClient;
+use crate::utils::enums::ProgramId;
 
 use actix_web::{get, post, web, HttpResponse};
+
+/// What every caller may search until per-user access is derived from ACLs.
+const PUBLIC_ONLY: &[i32] = &[ProgramId::Public as i32];
 
 /// Request body for a similarity search seeded by a known object.
 #[derive(serde::Deserialize, utoipa::ToSchema)]
@@ -59,7 +63,9 @@ pub(crate) async fn similar_objects_response(
 
     // Fetch the seed object's embedding — the API caller supplies an id, not a
     // raw 384-float vector, so we resolve it here before searching.
-    let seed = match client.get_embeddings(&[object_id]).await {
+    // TODO: replace PUBLIC_ONLY, here and in the search below, with the
+    // caller's allowed programids from their ACLs.
+    let seed = match client.get_embeddings(&[object_id], PUBLIC_ONLY).await {
         Ok(rows) => rows,
         Err(e) => return response::internal_error(&format!("Error fetching embedding: {}", e)),
     };
@@ -69,7 +75,10 @@ pub(crate) async fn similar_objects_response(
 
     // Ask for one extra result: the seed object matches itself perfectly and is
     // stripped out below, so this keeps up to `top_k` genuine neighbors.
-    let hits = match client.search_embedding(&seed.embedding, top_k + 1).await {
+    let hits = match client
+        .search_embedding(&seed.embedding, top_k + 1, PUBLIC_ONLY)
+        .await
+    {
         Ok(hits) => hits,
         Err(e) => return response::internal_error(&format!("Error running search: {}", e)),
     };

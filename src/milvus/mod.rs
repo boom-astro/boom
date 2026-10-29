@@ -16,6 +16,7 @@ pub use backup::BackupQueue;
 pub use client::{MilvusClient, MilvusError};
 pub use collection::{
     embedding_collection_schema, FIELD_CANDID, FIELD_EMBEDDING, FIELD_JD, FIELD_OBJECT_ID,
+    FIELD_PROGRAMID,
 };
 pub use insert::EmbeddingRow;
 pub use search::SearchHit;

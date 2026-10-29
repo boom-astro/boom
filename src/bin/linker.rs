@@ -352,6 +352,7 @@ async fn run_night(db: &mongodb::Database, cfg: &LinkerConfig, night: i64, stop:
                     min_rate_deg_per_day: cfg.fast_min_rate_deg_per_day,
                     max_rate_deg_per_day: cfg.fast_max_rate_deg_per_day,
                     dense_detections: cfg.fast_dense_detections,
+                    dense_max_rate_deg_per_day: cfg.fast_dense_max_rate_deg_per_day,
                     conics,
                     ..FastSearch::default()
                 };

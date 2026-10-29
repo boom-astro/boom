@@ -1,12 +1,14 @@
 //! The `stream_kowalski_alerts` task: back-fill BOOM from a Kowalski deployment.
 //!
 //! Opens one cursor over Kowalski's `ZTF_alerts` and streams every document
-//! through a pool of workers. Each worker takes a batch, drops alerts whose
-//! objectId BOOM does not already know, bulk-inserts the rest, then fetches
-//! cutouts from Kowalski only for the candids that were actually new.
+//! through a pool of workers. Each worker takes a batch, keeps the alerts BOOM
+//! does not have, merges their detections into each object's aux (creating it,
+//! with crossmatches, for an object BOOM has never seen), fetches their cutouts
+//! from Kowalski, and inserts the alerts last, as live ingestion does.
 //!
 //! Cutouts are excluded from the streaming projection on purpose -- they are
-//! large, and only a subset of alerts turn out to be new.
+//! large, and only a subset of alerts turn out to be new. Kowalski's alerts
+//! carry no history, so an object's aux only gets the detections imported here.
 //!
 //! **Idempotent.** Inserts are unordered and duplicate-key errors are skipped,
 //! so re-running from the beginning is safe and is how an interrupted run
@@ -20,20 +22,23 @@ use super::context::TaskContext;
 use super::ledger::{MutationTarget, Operation};
 use crate::utils::cutouts::AlertCutout;
 use crate::{
-    alert::{deserialize_candidate, deserialize_cutout_as_bytes, ZtfAlert, ZtfCandidate},
+    alert::{
+        deserialize_candidate, deserialize_cutout_as_bytes, AlertWorker, TimeSeries, ZtfAlert,
+        ZtfAlertWorker, ZtfCandidate, ZtfPrvCandidate,
+    },
     utils::spatial::Coordinates,
 };
 use anyhow::{Context as _, Result};
 use futures::StreamExt;
 use mongodb::{
-    bson::{doc, Bson},
+    bson::{doc, Bson, Document},
     options::InsertManyOptions,
     Client, Collection,
 };
 use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc,
@@ -51,9 +56,7 @@ pub const TASK_TYPE: &str = "stream_kowalski_alerts";
 pub struct StreamKowalskiParams {
     /// Kowalski MongoDB URI.
     pub kowalski_uri: String,
-    /// Enrich what was imported, by pushing the new candids onto this survey's
-    /// enrichment queue. Off by default, so an import does not start GPU work
-    /// nobody asked for.
+    /// Queue the new candids for `enrich_reprocess`, run with `input_queue` set to that queue.
     ///
     /// Only the choice is a parameter. Where the queue and the database are is
     /// this deployment's own configuration: the task backfills into the system
@@ -66,6 +69,9 @@ pub struct StreamKowalskiParams {
     pub batch_size: usize,
     #[serde(default = "default_n_workers")]
     pub n_workers: usize,
+    /// Only stream alerts at or after this Julian date.
+    #[serde(default)]
+    pub min_jd: Option<f64>,
     /// Only stream alerts at or before this Julian date, for importing a fixed
     /// window rather than everything.
     #[serde(default)]
@@ -80,9 +86,8 @@ fn default_n_workers() -> usize {
     4
 }
 
-/// Where imported candids go when `enrich` is set. The pipeline's own queue
-/// for this survey, so a reprocess and a live alert land in the same place.
-const ENRICHMENT_QUEUE: &str = "ZTF_alerts_enrichment_queue";
+/// Not the live queue, which would send years-old alerts to filters and Babamul as new.
+const ENRICHMENT_QUEUE: &str = "ZTF_enrichment_queue_kowalski_import";
 
 const MAX_BATCH_SIZE: usize = 100_000;
 const MAX_WORKERS: usize = 64;
@@ -101,6 +106,11 @@ impl StreamKowalskiParams {
         }
         if self.n_workers == 0 || self.n_workers > MAX_WORKERS {
             return Err(format!("n_workers must be between 1 and {MAX_WORKERS}"));
+        }
+        if let (Some(min_jd), Some(max_jd)) = (self.min_jd, self.max_jd) {
+            if min_jd > max_jd {
+                return Err("min_jd must not exceed max_jd".to_string());
+            }
         }
         Ok(())
     }
@@ -174,9 +184,17 @@ pub async fn run(
         }
     });
 
-    let filter = match params.max_jd {
-        Some(max_jd) => doc! { "candidate.jd": { "$lte": Bson::Double(max_jd) } },
-        None => doc! {},
+    let mut jd_bounds = doc! {};
+    if let Some(min_jd) = params.min_jd {
+        jd_bounds.insert("$gte", Bson::Double(min_jd));
+    }
+    if let Some(max_jd) = params.max_jd {
+        jd_bounds.insert("$lte", Bson::Double(max_jd));
+    }
+    let filter = if jd_bounds.is_empty() {
+        doc! {}
+    } else {
+        doc! { "candidate.jd": jd_bounds }
     };
 
     // Exclude cutouts from the streaming cursor — they are large and we only
@@ -294,6 +312,7 @@ pub async fn run(
             "enriched": params.enrich,
             "alerts_read": n_read as i64,
             "alerts_imported": imported as i64,
+            "min_jd": params.min_jd,
             "max_jd": params.max_jd,
             "code_version": mongodb::bson::to_bson(&super::ledger::CodeVersion::current())
                 .unwrap_or(Bson::Null),
@@ -340,13 +359,6 @@ struct KowalskiZtfCutout {
     cutout_difference: Vec<u8>,
 }
 
-// For projecting _id-only from ZTF_alerts_aux (_id == objectId string).
-#[derive(Deserialize)]
-struct ObjectIdOnly {
-    #[serde(rename = "_id")]
-    object_id: String,
-}
-
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 // Blocks on the first item, then non-blocking drains up to batch_size total.
@@ -369,40 +381,69 @@ async fn collect_batch(
     batch
 }
 
-// Returns the set of objectIds present in ZTF_alerts_aux (_id field).
-async fn query_known_obj_ids(
-    coll: &Collection<ObjectIdOnly>,
-    obj_ids: &[&str],
-) -> Result<HashSet<String>> {
+async fn query_existing_candids(
+    coll: &Collection<Document>,
+    candids: &[i64],
+) -> Result<HashSet<i64>> {
     let t = Instant::now();
     let mut cursor = coll
-        .find(doc! { "_id": { "$in": obj_ids } })
+        .find(doc! { "_id": { "$in": candids } })
         .projection(doc! { "_id": 1 })
-        .no_cursor_timeout(true)
         .await
-        .context("ZTF_alerts_aux query failed")?;
-    debug!(
-        n = obj_ids.len(),
-        elapsed_ms = t.elapsed().as_millis(),
-        "aux cursor open"
-    );
-
-    let t = Instant::now();
-    let mut known = HashSet::with_capacity(obj_ids.len());
+        .context("ZTF_alerts query failed")?;
+    let mut existing = HashSet::with_capacity(candids.len());
     while let Some(result) = cursor.next().await {
-        known.insert(
-            result
-                .context("cursor error in ZTF_alerts_aux query")?
-                .object_id,
-        );
+        let doc = result.context("cursor error in ZTF_alerts query")?;
+        if let Ok(candid) = doc.get_i64("_id") {
+            existing.insert(candid);
+        }
     }
     debug!(
-        n = obj_ids.len(),
-        found = known.len(),
+        n = candids.len(),
+        found = existing.len(),
         elapsed_ms = t.elapsed().as_millis(),
-        "aux cursor drain"
+        "existing alerts"
     );
-    Ok(known)
+    Ok(existing)
+}
+
+async fn merge_into_aux(
+    alert_worker: &mut ZtfAlertWorker,
+    alerts: &[KowalskiZtfAlert],
+    now: f64,
+) -> Result<()> {
+    let t = Instant::now();
+    let mut by_object: HashMap<&str, Vec<&KowalskiZtfAlert>> = HashMap::new();
+    for a in alerts {
+        by_object.entry(a.object_id.as_str()).or_default().push(a);
+    }
+    let n_objects = by_object.len();
+    for (object_id, object_alerts) in by_object {
+        let mut detections = object_alerts
+            .iter()
+            .map(|a| ZtfPrvCandidate::try_from(&a.candidate))
+            .collect::<Result<Vec<_>, _>>()?;
+        ZtfPrvCandidate::sanitize_timeseries(&mut detections);
+        let first = &object_alerts[0].candidate.candidate;
+        alert_worker
+            .upsert_aux(
+                object_id,
+                first.ra,
+                first.dec,
+                detections,
+                vec![],
+                vec![],
+                now,
+            )
+            .await
+            .with_context(|| format!("failed to update the aux of {object_id}"))?;
+    }
+    debug!(
+        objects = n_objects,
+        elapsed_ms = t.elapsed().as_millis(),
+        "aux upsert"
+    );
+    Ok(())
 }
 
 fn into_boom(alerts: Vec<KowalskiZtfAlert>) -> Vec<ZtfAlert> {
@@ -523,9 +564,13 @@ async fn worker(
     // one connection pool instead of opening a second per worker.
     let db = ctx.db().clone();
 
-    let aux_coll: Collection<ObjectIdOnly> = db.collection("ZTF_alerts_aux");
+    let existing_coll: Collection<Document> = db.collection("ZTF_alerts");
     let alerts_coll: Collection<ZtfAlert> = db.collection("ZTF_alerts");
     let cutouts_coll: Collection<AlertCutout> = db.collection("ZTF_alerts_cutouts");
+
+    let mut alert_worker = ZtfAlertWorker::new(ctx.config_path())
+        .await
+        .context("failed to start a ZTF alert worker")?;
 
     let mut redis_conn = if enrich {
         Some(
@@ -556,42 +601,51 @@ async fn worker(
         );
         let t_batch = Instant::now();
 
-        // Deduplicate objectIds before querying aux.
-        let unique_obj_ids: Vec<&str> = {
-            let mut seen = HashSet::with_capacity(batch.len());
-            batch
-                .iter()
-                .filter_map(|a| {
-                    if seen.insert(a.object_id.as_str()) {
-                        Some(a.object_id.as_str())
-                    } else {
-                        None
-                    }
-                })
-                .collect()
-        };
-
-        let known = query_known_obj_ids(&aux_coll, &unique_obj_ids).await?;
+        let batch_candids: Vec<i64> = batch.iter().map(|a| a.candid).collect();
+        let existing = query_existing_candids(&existing_coll, &batch_candids).await?;
 
         let to_import: Vec<KowalskiZtfAlert> = batch
             .into_iter()
-            .filter(|a| known.contains(&a.object_id))
+            .filter(|a| !existing.contains(&a.candid))
             .collect();
 
         if to_import.is_empty() {
-            debug!(batch = batch_len, "batch: no matching objects in BOOM");
+            debug!(batch = batch_len, "batch: every alert is already in BOOM");
             processed += batch_len;
             continue;
         }
 
         let n = to_import.len();
-        let ztf_alerts = into_boom(to_import);
-        let candids: Vec<i64> = ztf_alerts.iter().map(|a| a.candid).collect();
+        let candids: Vec<i64> = to_import.iter().map(|a| a.candid).collect();
 
-        // Insert alerts first to learn which candids are actually new.
+        merge_into_aux(&mut alert_worker, &to_import, flare::Time::now().to_jd()).await?;
+
+        let cutouts = fetch_cutouts_from_kowalski(&kowalski_cutout_coll, &candids).await?;
+
+        // A candid without cutouts would fail enrichment.
+        let fetched_set: HashSet<i64> = cutouts.iter().map(|c| c.candid).collect();
+        if fetched_set.len() != candids.len() {
+            warn!(
+                new = candids.len(),
+                fetched = fetched_set.len(),
+                missing = candids.len() - fetched_set.len(),
+                "cutouts missing for some new alerts; those candids will not be enqueued"
+            );
+        }
+
+        let t = Instant::now();
+        insert_many_skip_dups(&cutouts_coll, cutouts, &insert_opts, "cutouts").await?;
+        info!(
+            count = fetched_set.len(),
+            elapsed_ms = t.elapsed().as_millis(),
+            "cutout insert"
+        );
+
+        // Inserted last: an alert in the database implies its aux and cutouts are there too.
         let t = Instant::now();
         let dup_indices =
-            insert_many_skip_dups(&alerts_coll, ztf_alerts, &insert_opts, "alerts").await?;
+            insert_many_skip_dups(&alerts_coll, into_boom(to_import), &insert_opts, "alerts")
+                .await?;
         let inserted = n - dup_indices.len();
         debug!(
             count = n,
@@ -601,7 +655,6 @@ async fn worker(
             "alert insert"
         );
 
-        // Determine exactly which candids were new so we only fetch those cutouts.
         let dup_set: HashSet<usize> = dup_indices.into_iter().collect();
         let inserted_candids: Vec<i64> = candids
             .iter()
@@ -611,37 +664,6 @@ async fn worker(
             .collect();
 
         if !inserted_candids.is_empty() {
-            debug!(
-                requested = candids.len(),
-                inserted = inserted_candids.len(),
-                elapsed_ms = t.elapsed().as_millis(),
-                "new alerts to fetch cutouts for"
-            );
-            // Fetch cutouts from Kowalski only for the newly inserted candids.
-            let cutouts =
-                fetch_cutouts_from_kowalski(&kowalski_cutout_coll, &inserted_candids).await?;
-
-            // Build set of candids that actually came back so we can filter the
-            // enrichment queue below. Enqueueing a candid with no cutout would
-            // produce a guaranteed MissingCutouts error in the enrichment worker.
-            let fetched_set: HashSet<i64> = cutouts.iter().map(|c| c.candid).collect();
-            if fetched_set.len() != inserted_candids.len() {
-                warn!(
-                    inserted = inserted_candids.len(),
-                    fetched = fetched_set.len(),
-                    missing = inserted_candids.len() - fetched_set.len(),
-                    "cutouts missing for some newly inserted alerts; those candids will not be enqueued"
-                );
-            }
-
-            let t = Instant::now();
-            insert_many_skip_dups(&cutouts_coll, cutouts, &insert_opts, "cutouts").await?;
-            info!(
-                count = inserted,
-                elapsed_ms = t.elapsed().as_millis(),
-                "cutout insert"
-            );
-
             if let Some(conn) = redis_conn.as_mut() {
                 let queue = ENRICHMENT_QUEUE;
                 let to_enqueue: Vec<i64> = inserted_candids
@@ -692,6 +714,7 @@ mod tests {
             enrich: false,
             batch_size: default_batch_size(),
             n_workers: default_n_workers(),
+            min_jd: None,
             max_jd: None,
         }
     }

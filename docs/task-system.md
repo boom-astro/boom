@@ -198,7 +198,7 @@ later.
 | `backfill_detection_span` | Write `first_activity_jd`, `last_detection_jd` and `n_forced_detections` onto alerts written before those fields existed. ZTF and LSST. |
 | `backfill_host_galaxy` | Score stored galaxy cross-matches and write `host_galaxy` on `alerts_aux`. |
 | `backfill_hpx` | Write `coordinates.hpx` onto alerts that predate the field, so MOC region queries can find them. |
-| `backfill_track_elements` | Write `orbit.e` and `orbit.q` onto tracks stored before they were. |
+| `backfill_track_elements` | Write `orbit.e`, `orbit.q`, `rms_ratio` and `flags` onto tracks stored before they were. |
 | `repair_photometry` | Rewrite `alerts_aux` timeseries arrays that are out of order, duplicated, or carry a non-numeric `jd`. Deletes the offending points — run with `dry_run` first. |
 | `enrich_reprocess` | Select alerts, queue them, and re-run enrichment over them. See [alert-processing.md](./alert-processing.md). |
 | `mpcorb_ingest` | Re-download MPC orbital elements and swap them into `MPC_orbits`. |

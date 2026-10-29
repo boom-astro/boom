@@ -671,7 +671,8 @@ pub struct ZtfRawAvroAlert {
     pub candidate: ZtfCandidate,
     #[serde(deserialize_with = "deserialize_prv_candidates")]
     pub prv_candidates: Option<Vec<ZtfPrvCandidate>>,
-    #[serde(deserialize_with = "deserialize_fp_hists")]
+    // Absent from schemas before 4.0 (alerts up to mid-2023).
+    #[serde(default, deserialize_with = "deserialize_fp_hists")]
     pub fp_hists: Option<Vec<ZtfForcedPhot>>,
     #[serde(
         rename = "cutoutScience",
@@ -908,6 +909,94 @@ impl ZtfAlertWorker {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub async fn upsert_aux(
+        &mut self,
+        object_id: &str,
+        ra: f64,
+        dec: f64,
+        prv_candidates: Vec<ZtfPrvCandidate>,
+        prv_nondetections: Vec<ZtfPrvCandidate>,
+        fp_hists: Vec<ZtfForcedPhot>,
+        now: f64,
+    ) -> Result<(), AlertError> {
+        let survey_matches = Some(
+            self.get_survey_matches(ra, dec)
+                .await
+                .inspect_err(as_error!())?,
+        );
+
+        let existing_alert_aux = self.get_existing_aux(object_id).await?;
+
+        if let Some(existing) = existing_alert_aux {
+            self.update_aux(
+                object_id,
+                &prv_candidates,
+                &prv_nondetections,
+                &fp_hists,
+                &survey_matches,
+                now,
+                &existing,
+            )
+            .await
+            .inspect_err(as_error!())?;
+            return Ok(());
+        }
+
+        let xmatches = xmatch(
+            ra,
+            dec,
+            object_id,
+            &Survey::Ztf,
+            &self.xmatch_configs,
+            &self.db,
+        )
+        .await?;
+        let host_galaxy = host::associate_with_photometry(
+            ra,
+            dec,
+            &xmatches,
+            &self.host_galaxy_config,
+            &self.xmatch_configs,
+            &Survey::Ztf,
+            object_id,
+            &self.db,
+        )
+        .await;
+        let obj = ZtfObject {
+            object_id: object_id.to_string(),
+            prv_candidates,
+            prv_nondetections,
+            fp_hists,
+            cross_matches: Some(xmatches),
+            host_galaxy,
+            aliases: survey_matches,
+            coordinates: Coordinates::new(ra, dec),
+            created_at: now,
+            updated_at: now,
+        };
+        let result = self.insert_aux(&obj, &self.alert_aux_collection).await;
+        if let Err(AlertError::AlertAuxExists) = result {
+            debug!(
+                "Alert aux document for object_id {} already exists. Using fallback update.",
+                object_id
+            );
+            self.update_aux_fallback(
+                object_id,
+                &obj.prv_candidates,
+                &obj.prv_nondetections,
+                &obj.fp_hists,
+                &obj.aliases,
+                now,
+            )
+            .await
+            .inspect_err(as_error!())?;
+        } else {
+            result.inspect_err(as_error!())?;
+        }
+        Ok(())
+    }
+
     async fn update_aux(
         &mut self,
         object_id: &str,
@@ -1061,79 +1150,16 @@ impl AlertWorker for ZtfAlertWorker {
             return Ok(ProcessAlertStatus::Exists(candid));
         }
 
-        let survey_matches = Some(
-            self.get_survey_matches(ra, dec)
-                .await
-                .inspect_err(as_error!())?,
-        );
-
-        let existing_alert_aux = self.get_existing_aux(&object_id).await?;
-
-        if let Some(existing) = existing_alert_aux {
-            self.update_aux(
-                &object_id,
-                &prv_candidates,
-                &prv_nondetections,
-                &fp_hists,
-                &survey_matches,
-                now,
-                &existing,
-            )
-            .await
-            .inspect_err(as_error!())?;
-        } else {
-            let xmatches = xmatch(
-                ra,
-                dec,
-                &object_id,
-                &Survey::Ztf,
-                &self.xmatch_configs,
-                &self.db,
-            )
-            .await?;
-            let host_galaxy = host::associate_with_photometry(
-                ra,
-                dec,
-                &xmatches,
-                &self.host_galaxy_config,
-                &self.xmatch_configs,
-                &Survey::Ztf,
-                &object_id,
-                &self.db,
-            )
-            .await;
-            let obj = ZtfObject {
-                object_id: object_id.clone(),
-                prv_candidates,
-                prv_nondetections,
-                fp_hists,
-                cross_matches: Some(xmatches),
-                host_galaxy,
-                aliases: survey_matches,
-                coordinates: Coordinates::new(ra, dec),
-                created_at: now,
-                updated_at: now,
-            };
-            let result = self.insert_aux(&obj, &self.alert_aux_collection).await;
-            if let Err(AlertError::AlertAuxExists) = result {
-                debug!(
-                    "Alert aux document for object_id {} already exists. Using fallback update.",
-                    object_id
-                );
-                self.update_aux_fallback(
-                    &object_id,
-                    &obj.prv_candidates,
-                    &obj.prv_nondetections,
-                    &obj.fp_hists,
-                    &obj.aliases,
-                    now,
-                )
-                .await
-                .inspect_err(as_error!())?;
-            } else {
-                result.inspect_err(as_error!())?;
-            }
-        }
+        self.upsert_aux(
+            &object_id,
+            ra,
+            dec,
+            prv_candidates,
+            prv_nondetections,
+            fp_hists,
+            now,
+        )
+        .await?;
 
         self.format_and_insert_cutouts(
             candid,
@@ -1641,6 +1667,46 @@ mod tests {
         // A survey pointing is not a ToO, so this packet reads false; the point
         // is that it parses at all, since the field was previously discarded.
         assert!(!alert.candidate.candidate.tooflag);
+    }
+
+    #[test]
+    fn test_pre_fp_hists_schema_deserializes() {
+        // Schema 3.3 packet (ZTF23aajjzfg, 2023-05-13): predates the fp_hists field.
+        let avro_bytes = std::fs::read("tests/data/alerts/ztf/2323428966215015003.avro").unwrap();
+        let mut cache = SchemaCache::default();
+        let alert: ZtfRawAvroAlert = cache.alert_from_avro_bytes(&avro_bytes).unwrap();
+        assert_eq!(alert.schemavsn, "3.3");
+        assert_eq!(alert.object_id, "ZTF23aajjzfg");
+        assert_eq!(alert.candid, 2323428966215015003);
+        assert!(alert.fp_hists.is_none());
+        assert_eq!(alert.prv_candidates.unwrap().len(), 16);
+    }
+
+    #[tokio::test]
+    async fn test_process_pre_fp_hists_alert() {
+        let mut worker = ztf_alert_worker().await;
+        let avro_bytes = std::fs::read("tests/data/alerts/ztf/2323428966215015003.avro").unwrap();
+        let candid = 2323428966215015003;
+        drop_alert_from_collections(candid, &Survey::Ztf)
+            .await
+            .unwrap();
+
+        let status = worker.process_alert(&avro_bytes).await.unwrap();
+        assert_eq!(status, ProcessAlertStatus::Added(candid));
+
+        let aux = worker
+            .alert_aux_collection
+            .find_one(doc! { "_id": "ZTF23aajjzfg" })
+            .await
+            .unwrap()
+            .expect("alert aux should exist after processing");
+        assert!(aux.fp_hists.is_empty());
+        assert_eq!(aux.prv_candidates.len(), 2);
+        assert_eq!(aux.prv_nondetections.len(), 15);
+
+        drop_alert_from_collections(candid, &Survey::Ztf)
+            .await
+            .unwrap();
     }
 
     #[test]
