@@ -64,6 +64,49 @@ pub fn forbidden(message: &str) -> HttpResponse {
     HttpResponse::Forbidden().json(ApiResponseBody::error(message))
 }
 
+pub fn unauthorized(message: &str) -> HttpResponse {
+    HttpResponse::Unauthorized().json(ApiResponseBody::error(message))
+}
+
+/// An error response in the API's JSON envelope, for extractors and middleware.
+#[derive(Debug)]
+pub struct ApiError {
+    status: actix_web::http::StatusCode,
+    message: String,
+}
+
+impl ApiError {
+    pub fn forbidden(message: impl Into<String>) -> Self {
+        Self {
+            status: actix_web::http::StatusCode::FORBIDDEN,
+            message: message.into(),
+        }
+    }
+
+    pub fn unauthorized(message: impl Into<String>) -> Self {
+        Self {
+            status: actix_web::http::StatusCode::UNAUTHORIZED,
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for ApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl actix_web::ResponseError for ApiError {
+    fn status_code(&self) -> actix_web::http::StatusCode {
+        self.status
+    }
+
+    fn error_response(&self) -> HttpResponse {
+        HttpResponse::build(self.status).json(ApiResponseBody::error(&self.message))
+    }
+}
+
 #[derive(serde::Serialize)]
 struct SerializedResponseBody<'a, T> {
     message: &'a str,
