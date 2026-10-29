@@ -58,7 +58,13 @@ export function unwrapData<T>(body: unknown, fallback: T): T {
 async function ensureOk(res: Response, action: string): Promise<void> {
   if (res.ok) return;
   const text = await res.text().catch(() => "");
-  throw new Error(`${action} failed: ${res.status} ${text}`);
+  let body: unknown = null;
+  try {
+    body = parseJsonText(text);
+  } catch {
+    // Not JSON.
+  }
+  throw new Error(messageOf(body) ?? `${action} failed: ${res.status} ${text}`);
 }
 
 async function readJson(res: Response): Promise<unknown> {
