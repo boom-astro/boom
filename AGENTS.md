@@ -130,10 +130,22 @@ These apply to comments, doc comments, log lines, and user-facing strings —
 anywhere the repo writes English rather than code.
 
 - **Terse but accurate.** Say what the code cannot — the constraint, the
-  failure being avoided, why the obvious alternative is wrong — and stop. A
-  sentence or two usually does it. A comment longer than the code it explains
-  means the reasoning belongs in the commit message or a doc, with a pointer
-  to it here if it needs one.
+  failure being avoided, why the obvious alternative is wrong — and stop. One
+  line is the default, two is common, and past three it is worth asking what
+  the extra lines are doing. A comment longer than the code it explains means
+  the reasoning belongs in the commit message or a doc, with a pointer to it
+  here if it needs one. Three habits account for most of the overrun:
+  - **Do not argue for the change.** A comment explaining what was broken
+    before, or why this diff is the right one, is commit-message content. The
+    comment is for someone reading the code much later, who cannot see the
+    diff and has no reason to know there was ever a bug. A comment phrased as
+    a contrast — "X, not Y" — is usually still arguing with the code it
+    replaced; say what holds, not what it is not.
+  - **Say it once.** A rule belongs at the single place it is decided, not
+    restated at each call site and again in the tests. If it needs repeating,
+    the repetitions should be a pointer to the one statement of it.
+  - **Do not restate the code.** If the line below says it, delete the line
+    above.
 - **US spelling.** `normalized`, not `normalised`; `honored`, `canceled`,
   `catalog`, `center`, `labeled`. The `-ize`/`-or` forms throughout.
 - **One space after a period.** Not two.
