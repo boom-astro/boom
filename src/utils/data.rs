@@ -112,8 +112,7 @@ enum DownloadFailure {
 }
 
 impl DownloadFailure {
-    /// `Send + Sync` so a failure can be held across the retry's sleep without
-    /// making every caller's future non-`Send`.
+    /// `Send + Sync`, or holding one across the sleep makes callers non-`Send`.
     fn into_inner(self) -> Box<dyn std::error::Error + Send + Sync> {
         match self {
             Self::Transient(e) | Self::Permanent(e) => e,
@@ -123,13 +122,8 @@ impl DownloadFailure {
 
 /// Downloads `url` into `file`, retrying a transient failure.
 ///
-/// Takes a `File` rather than a `Write` because a retry has to undo the partial
-/// body the last attempt wrote: rewinding alone would leave a stale tail if the
-/// second body were shorter, so the file is truncated as well.
-///
-/// A 4xx is not retried. The ZTF producer reads "404 Not Found" out of the
-/// error to mean "no alerts for this date", and asking four times would turn a
-/// quick answer into a slow one.
+/// Takes a `File` because a retry truncates: rewinding alone would leave the
+/// first body's tail behind if the second were shorter.
 pub async fn download_to_file(
     file: &mut std::fs::File,
     url: &str,
@@ -166,8 +160,8 @@ pub async fn download_to_file(
     }
 }
 
-/// 5xx and 429 are the server declining for now; every other failing status
-/// will say the same thing however many times it is asked.
+/// 5xx and 429 are the server declining for now. A 4xx is not retried: the ZTF
+/// producer reads "404 Not Found" as "no alerts for this date".
 fn status_is_transient(status: reqwest::StatusCode) -> bool {
     status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS
 }
@@ -187,8 +181,6 @@ async fn download_once(
     let response = request_builder
         .send()
         .await
-        // The request never reached a verdict -- connection refused, DNS, a
-        // reset partway through the handshake.
         .map_err(|e| DownloadFailure::Transient(e.into()))?;
     let status = response.status();
     if !status.is_success() {
@@ -290,9 +282,6 @@ mod download_retry_tests {
     use super::status_is_transient;
     use reqwest::StatusCode;
 
-    /// The ZTF producer reads "404 Not Found" out of the error to mean "no
-    /// alerts for this date", so retrying it would turn a quick answer into a
-    /// slow one -- and it would still be 404.
     #[test]
     fn a_client_error_is_not_retried() {
         assert!(!status_is_transient(StatusCode::NOT_FOUND));

@@ -19,8 +19,7 @@
 
 use super::batch::PROGRESS_EVERY;
 
-/// Cutout writes in flight at once: enough that S3 round trips overlap, few
-/// enough not to crowd the live workers' own writes.
+/// Cutout writes in flight, enough to overlap S3 round trips.
 const CUTOUT_WRITE_CONCURRENCY: usize = 16;
 use super::context::TaskContext;
 use super::ledger::{MutationTarget, Operation};
@@ -570,9 +569,7 @@ async fn worker(
 
     let existing_coll: Collection<Document> = db.collection("ZTF_alerts");
     let alerts_coll: Collection<ZtfAlert> = db.collection("ZTF_alerts");
-    // Through the configured storage, not a hardcoded collection: an S3
-    // deployment reads cutouts from the bucket, so writing them to Mongo here
-    // left the imported alerts with cutouts nothing would ever look for.
+    // An S3 deployment reads cutouts from the bucket, not from Mongo.
     let cutout_storage = ctx
         .config()
         .build_cutout_storage(&crate::utils::enums::Survey::Ztf)
@@ -645,9 +642,8 @@ async fn worker(
         }
 
         let t = Instant::now();
-        // One call per cutout, since an object store has no bulk insert, run a
-        // few at a time so S3 round trips overlap. A cutout already stored is
-        // the normal case on a resumed run, not a failure.
+        // One call per cutout: an object store has no bulk insert. Already
+        // stored is the normal case on a resumed run.
         let stored = futures::stream::iter(cutouts.into_iter().map(|cutout| {
             let storage = &cutout_storage;
             async move {
