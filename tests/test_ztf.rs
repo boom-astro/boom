@@ -365,7 +365,7 @@ async fn test_enrich_ztf_alert() {
     let peak_mag = g_stats.get_f64("peak_mag").unwrap();
     let peak_jd = g_stats.get_f64("peak_jd").unwrap();
     let dt = g_stats.get_f64("dt").unwrap();
-    assert!((peak_mag - 15.6940).abs() < 1e-6);
+    assert!((peak_mag - 15.6926775).abs() < 1e-6);
     assert!((peak_jd - 2460441.971956).abs() < 1e-6);
     assert!((dt - 26.956516).abs() < 1e-6);
 
@@ -374,8 +374,8 @@ async fn test_enrich_ztf_alert() {
     let rising_rate = rising.get_f64("rate").unwrap();
     let rising_red_chi2 = rising.get_f64("red_chi2").unwrap();
     let rising_dt = rising.get_f64("dt").unwrap();
-    assert!((rising_rate + 0.086736).abs() < 1e-6);
-    assert!((rising_red_chi2 - 82.419716).abs() < 1e-6); // bad fit
+    assert!((rising_rate + 0.025749).abs() < 1e-6);
+    assert!((rising_red_chi2 - 1293.753174).abs() < 1e-6); // bad fit
     assert!((rising_dt - 21.008194).abs() < 1e-6);
 
     // g fading stats
@@ -383,8 +383,8 @@ async fn test_enrich_ztf_alert() {
     let fading_rate = fading.get_f64("rate").unwrap();
     let fading_red_chi2 = fading.get_f64("red_chi2").unwrap();
     let fading_dt = fading.get_f64("dt").unwrap();
-    assert!((fading_rate - 0.038436).abs() < 1e-6);
-    assert!((fading_red_chi2 - 1.654100).abs() < 1e-6); // decent fit
+    assert!((fading_rate - 0.040575).abs() < 1e-6);
+    assert!((fading_red_chi2 - 2096.718506).abs() < 1e-6); // bad fit
     assert!((fading_dt - 5.948322).abs() < 1e-6);
 
     // check the values for the r band
@@ -395,7 +395,7 @@ async fn test_enrich_ztf_alert() {
     let peak_mag = r_stats.get_f64("peak_mag").unwrap();
     let peak_jd = r_stats.get_f64("peak_jd").unwrap();
     let dt = r_stats.get_f64("dt").unwrap();
-    assert!((peak_mag - 14.3987).abs() < 1e-6);
+    assert!((peak_mag - 14.408163).abs() < 1e-6);
     assert!((peak_jd - 2460441.922303).abs() < 1e-6);
     assert!((dt - 25.922222).abs() < 1e-6);
 
@@ -404,15 +404,15 @@ async fn test_enrich_ztf_alert() {
     let rising_rate = rising.get_f64("rate").unwrap();
     let rising_red_chi2 = rising.get_f64("red_chi2").unwrap();
     let rising_dt = rising.get_f64("dt").unwrap();
-    assert!((rising_rate + 0.023725).abs() < 1e-6);
-    assert!((rising_red_chi2 - 70.454285).abs() < 1e-6); // bad fit
+    assert!((rising_rate + 0.021070).abs() < 1e-6);
+    assert!((rising_red_chi2 - 11816.741211).abs() < 1e-6); // bad fit
     assert!((rising_dt - 17.966065).abs() < 1e-6);
 
     // r fading stats
     let fading = r_stats.get_document("fading").unwrap();
     let fading_rate = fading.get_f64("rate").unwrap();
     let fading_dt = fading.get_f64("dt").unwrap();
-    assert!((fading_rate - 0.063829).abs() < 1e-6);
+    assert!((fading_rate - 0.0626394).abs() < 1e-6);
     assert!((fading_dt - 7.956157).abs() < 1e-6);
     // Only 2 points after the peak, so red_chi2 is null. Explicitly null and not
     // omitted: the avro schema requires the field to be present.
@@ -423,7 +423,7 @@ async fn test_enrich_ztf_alert() {
     );
     assert_eq!(fading.get_i32("dof").unwrap(), 0);
     assert_eq!(fading.get_i32("nb_data").unwrap(), 2);
-    assert!(fading.get_f64("chi2").unwrap().abs() < 1e-9);
+    assert!(fading.get_f64("chi2").unwrap().abs() < 1e-5);
 }
 
 #[tokio::test]

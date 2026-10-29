@@ -20,10 +20,12 @@ pub struct VillarFitResponse {
     pub candid: i64,
     /// Reduced chi-squared of the fit. `null` if no fit could be produced for this alert.
     pub reduced_chi2: Option<f64>,
-    /// Flux normalization scale (µJy) used by the fit. `null` if no fit could be produced.
-    pub peak_flux: Option<f64>,
+    /// AB magnitude of the flux normalization scale used by the fit. `null` if
+    /// no fit could be produced.
+    pub peak_mag: Option<f64>,
     /// Villar model parameters, keyed as `{param}_{filter}` (e.g. `A_ZTF_g`).
-    /// Values are `null` where a fit could not be produced.
+    /// `A` is an AB magnitude and `extra_sigma` a magnitude scatter; the rest
+    /// are in days or day⁻¹. Values are `null` where a fit could not be produced.
     pub params: HashMap<String, f64>,
 }
 
@@ -149,7 +151,7 @@ pub async fn get_villar_fit(
     };
 
     let mut reduced_chi2 = None;
-    let mut peak_flux = None;
+    let mut peak_mag = None;
     let mut params = HashMap::new();
     for (key, value) in villar_fit_doc.iter() {
         let value = match value.as_f64() {
@@ -158,7 +160,7 @@ pub async fn get_villar_fit(
         };
         match key.as_str() {
             "reduced_chi2" => reduced_chi2 = Some(value),
-            "peak_flux" => peak_flux = Some(value),
+            "peak_mag" => peak_mag = Some(value),
             _ => {
                 params.insert(key.clone(), value);
             }
@@ -168,7 +170,7 @@ pub async fn get_villar_fit(
     let response = VillarFitResponse {
         candid,
         reduced_chi2,
-        peak_flux,
+        peak_mag,
         params,
     };
     response::ok_ser(&format!("found Villar fit for candid {}", candid), response)

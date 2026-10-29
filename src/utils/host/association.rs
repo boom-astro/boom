@@ -5,6 +5,7 @@ use apache_avro_macros::serdavro;
 use serde::{Deserialize, Serialize};
 
 use super::associate::AssociationResult;
+use super::photometry::HostPhotometry;
 
 const ARCSEC_PER_RADIAN: f64 = 206_264.806_247_096_36;
 
@@ -41,6 +42,8 @@ pub struct StoredHostCandidate {
     pub a_arcsec: f64,
     pub b_arcsec: f64,
     pub pa_deg: f64,
+    #[serde(default)]
+    pub photometry: Option<HostPhotometry>,
 }
 
 /// Host association for one object, as stored under `aux.host_galaxy`.
@@ -87,6 +90,7 @@ impl HostGalaxyAssociation {
                 a_arcsec: c.galaxy.a_arcsec,
                 b_arcsec: c.galaxy.b_arcsec,
                 pa_deg: c.galaxy.pa_deg,
+                photometry: None,
             })
             .collect();
 

@@ -33,6 +33,10 @@ services:
     volumes:
       - ${BOOM_CUTOUTS_MONGO_VOLUME:-mongodb_cutouts}:/data/db
     restart: always
+    ulimits:
+      nofile:
+        soft: 64000
+        hard: 64000
     deploy:
       resources:
         limits:

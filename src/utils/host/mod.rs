@@ -35,6 +35,7 @@ mod dlr;
 mod ellipse;
 mod error;
 mod likelihood;
+mod photometry;
 mod prior;
 mod sersic;
 mod types;
@@ -46,6 +47,7 @@ pub use config::HostGalaxyConfig;
 pub use dlr::{compute_dlr, DlrResult};
 pub use ellipse::Ellipse;
 pub use error::HostError;
+pub use photometry::{attach_photometry, HostPhotometry};
 pub use types::{GalaxyCandidate, HostCandidate, Transient};
 
 /// Run host association for one alert from its cross-match results.
@@ -74,6 +76,31 @@ pub fn associate_from_xmatches(
             // The only error is "no candidates", which the guard above rules out.
             .unwrap_or_else(|_| HostGalaxyAssociation::empty()),
     )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn associate_with_photometry(
+    ra: f64,
+    dec: f64,
+    xmatches: &HashMap<String, Vec<Document>>,
+    config: &HostGalaxyConfig,
+    xmatch_configs: &[crate::conf::CatalogXmatchConfig],
+    survey: &crate::utils::enums::Survey,
+    object_id: &str,
+    db: &mongodb::Database,
+) -> Option<HostGalaxyAssociation> {
+    let mut association = associate_from_xmatches(ra, dec, xmatches, config)?;
+    attach_photometry(
+        &mut association,
+        xmatches,
+        config,
+        xmatch_configs,
+        survey,
+        object_id,
+        db,
+    )
+    .await;
+    Some(association)
 }
 
 #[cfg(test)]

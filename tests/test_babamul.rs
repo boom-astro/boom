@@ -297,6 +297,7 @@ async fn create_mock_enriched_lsst_alert_with_matches(
         cross_matches: cross_matches.clone(),
         host_galaxy: None,
         survey_matches: survey_matches.clone(),
+        decam_match: None,
     };
 
     let properties = enrichment_worker

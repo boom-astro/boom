@@ -1,4 +1,4 @@
-use actix_web::HttpResponse;
+use actix_web::{http::header::ContentType, HttpResponse};
 use serde_with::{serde_as, skip_serializing_none};
 
 #[serde_as]
@@ -50,6 +50,16 @@ pub fn request_timeout(message: &str) -> HttpResponse {
     HttpResponse::RequestTimeout().json(ApiResponseBody::error(message))
 }
 
+pub fn service_unavailable(message: &str) -> HttpResponse {
+    HttpResponse::ServiceUnavailable().json(ApiResponseBody::error(message))
+}
+
+/// A request that is well-formed and permitted but conflicts with the state it
+/// found, so retrying it against fresh state is the right next move.
+pub fn conflict(message: &str) -> HttpResponse {
+    HttpResponse::Conflict().json(ApiResponseBody::error(message))
+}
+
 pub fn forbidden(message: &str) -> HttpResponse {
     HttpResponse::Forbidden().json(ApiResponseBody::error(message))
 }
@@ -58,16 +68,11 @@ pub fn unauthorized(message: &str) -> HttpResponse {
     HttpResponse::Unauthorized().json(ApiResponseBody::error(message))
 }
 
-/// A refusal in the API's own JSON envelope, for the places that have to hand
-/// back an `actix_web::Error` rather than an `HttpResponse` -- a `FromRequest`
-/// extractor or a middleware.
+/// A refusal in the API's JSON envelope, for an extractor or middleware that
+/// must return an `actix_web::Error` rather than an `HttpResponse`.
 ///
-/// `actix_web::error::ErrorForbidden` and its siblings send the message as
-/// `text/plain`. A client that reads `message` out of the body finds nothing
-/// there and falls back to the bare status code, so the same UI showed a
-/// sentence for a refusal from one route and "failed: 403" for the next one --
-/// and messages written to be read, like the one telling somebody their account
-/// is not activated yet, never reached anybody.
+/// `actix_web::error::ErrorForbidden` and its siblings send `text/plain`, which
+/// leaves the client no `message` to show.
 #[derive(Debug)]
 pub struct ApiError {
     status: actix_web::http::StatusCode,
@@ -106,12 +111,20 @@ impl actix_web::ResponseError for ApiError {
     }
 }
 
-// have an ok_ser() that takes a serializable object and converts it to serde_json::Value
+#[derive(serde::Serialize)]
+struct SerializedResponseBody<'a, T> {
+    message: &'a str,
+    data: T,
+}
+
+/// Same body as `ok`, written straight from `data` without building a `serde_json::Value` first.
 pub fn ok_ser<T: serde::Serialize>(message: &str, data: T) -> HttpResponse {
-    match serde_json::to_value(data) {
-        Ok(data_value) => HttpResponse::Ok().json(ApiResponseBody::ok(message, data_value)),
+    match serde_json::to_vec(&SerializedResponseBody { message, data }) {
+        Ok(body) => HttpResponse::Ok()
+            .content_type(ContentType::json())
+            .body(body),
         Err(e) => {
-            tracing::info!("Serialization error: {}", e); // TODO: replace with tracing once integrated
+            tracing::error!("Serialization error: {}", e);
             HttpResponse::InternalServerError()
                 .json(ApiResponseBody::error("Failed to serialize response data"))
         }

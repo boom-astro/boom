@@ -10,21 +10,23 @@ The model is the piecewise analytic supernova light-curve function introduced by
 [Villar et al. (2019)](https://ui.adsabs.harvard.edu/abs/2019ApJ...884...83V/abstract).
 BOOM fits it jointly in ZTF *g* and *r* with a GPU particle-swarm optimizer
 ([`villar-pso`](https://github.com/frenbox/villar-pso)), minimizing a
-band-balanced chi-squared with Gaussian priors.
+band-balanced Gaussian negative log-likelihood with Gaussian priors, then
+refining the swarm's best point with a short Nelder-Mead polish. The fit runs in
+flux; the two flux-valued parameters are reported on the AB magnitude scale.
 
 ## Quick reference
 
 | Field | Meaning | Unit |
 | --- | --- | --- |
-| `villar_fit.A_ZTF_r` / `A_ZTF_g` | Amplitude | µJy |
+| `villar_fit.A_ZTF_r` / `A_ZTF_g` | Amplitude | AB mag |
 | `villar_fit.beta_ZTF_r` / `beta_ZTF_g` | Plateau slope, as a fraction of `A` | day⁻¹ |
 | `villar_fit.gamma_ZTF_r` / `gamma_ZTF_g` | Plateau duration | days |
 | `villar_fit.t_0_ZTF_r` / `t_0_ZTF_g` | Reference (rise) time | days from peak |
 | `villar_fit.tau_rise_ZTF_r` / `tau_rise_ZTF_g` | Rise e-folding time | days |
 | `villar_fit.tau_fall_ZTF_r` / `tau_fall_ZTF_g` | Decline e-folding time | days |
-| `villar_fit.extra_sigma_ZTF_r` / `extra_sigma_ZTF_g` | Fitted excess scatter | µJy |
+| `villar_fit.extra_sigma_ZTF_r` / `extra_sigma_ZTF_g` | Fitted excess scatter, as a magnitude error at `A` | mag |
 | `villar_fit.reduced_chi2` | Goodness of fit | dimensionless |
-| `villar_fit.peak_flux` | Normalization scale used by the fit | µJy |
+| `villar_fit.peak_mag` | Normalization scale used by the fit | AB mag |
 
 Sixteen fields in total: seven parameters × two bands, plus a fit statistic and
 the normalization scale. Every field is a double, and **every field is `NaN`
@@ -62,6 +64,9 @@ plateau of duration `gamma`, then an exponential tail with e-folding time
 `tau_fall`. `t_0` sets where the rise sits relative to the *r*-band peak; at
 `p = 0` the flux is exactly `A/2`.
 
+The model is linear in flux, so `A` here is a flux. The stored `A` is an AB
+magnitude; convert it first (see [Flux and magnitude convention](#flux-and-magnitude-convention)).
+
 Two deliberate differences from the paper's Equation 1:
 
 - **No baseline term.** Villar et al. include a constant `c`. ZTF alert
@@ -76,15 +81,36 @@ The *g*-band is fitted as an offset from *r* in the optimizer's internal space,
 but **the stored values are absolute per band**. `gamma_ZTF_g` is the *g*-band
 plateau duration, not a difference.
 
-### Flux convention
+### Flux and magnitude convention
 
-Magnitudes are converted to flux with a zeropoint of 23.9, so all flux-valued
-parameters are in **microjanskys**:
+The fit works in flux. Magnitudes are converted with a zeropoint of 23.9, so
+the internal flux scale is in **microjanskys**:
 
 ```
 F_uJy = 10 ** ((23.9 - mag) / 2.5)
 mag   = 23.9 - 2.5 * log10(F_uJy)
 ```
+
+The two flux-valued parameters are converted back for storage. `A` and
+`peak_mag` are plain AB magnitudes. `extra_sigma` follows the photometric
+`mag_err` convention: the flux scatter expressed as a magnitude error at the
+amplitude `A`.
+
+```
+A           = 23.9 - 2.5 * log10(A_uJy)
+extra_sigma = 2.5 / ln(10) * extra_sigma_uJy / A_uJy    # ≈ 1.0857 * extra_sigma_uJy / A_uJy
+peak_mag    = 23.9 - 2.5 * log10(peak_flux_uJy)
+```
+
+and back:
+
+```
+A_uJy           = 10 ** ((23.9 - A) / 2.5)
+extra_sigma_uJy = extra_sigma * A_uJy / 1.0857
+```
+
+The other five parameters are in days or day⁻¹ and do not depend on the flux
+scale.
 
 ### Physical validity constraints
 
@@ -99,13 +125,14 @@ beta * tau_fall + beta * gamma                 <= 1
 
 ## Parameters in detail
 
-### `A` — amplitude (µJy)
+### `A` — amplitude (AB mag)
 
 Scale of the light curve. With the sigmoid saturated and `beta` small, the
-plateau flux tends to `A`. Convert to a magnitude with the formula above.
+plateau flux tends to `A`, so `A` is roughly the plateau magnitude and is
+directly comparable across objects. Lower is brighter.
 
-The *g*/*r* amplitude ratio `A_ZTF_g / A_ZTF_r` is a color proxy:
-`-2.5 * log10(A_ZTF_g / A_ZTF_r)` is roughly the *g − r* color at plateau.
+The amplitude difference is a color proxy: `A_ZTF_g - A_ZTF_r` is roughly the
+*g − r* color at plateau.
 
 ### `beta` — plateau slope
 
@@ -114,7 +141,7 @@ How fast the plateau declines, as a fraction of `A` per day, in day⁻¹. Positi
 
 Because it is a *fractional* rate, `beta` is already comparable across objects
 of any brightness. If you want the slope in flux units — the `β` of the paper's
-Equation 1 — it is `-A * beta`, in µJy/day.
+Equation 1 — it is `-A_uJy * beta`, in µJy/day, with `A` converted to µJy first.
 
 ### `gamma` — plateau duration (days)
 
@@ -144,19 +171,25 @@ E-folding time of the exponential tail after the plateau. This is the parameter
 that separates fast-evolving transients from slowly fading, radioactively
 powered supernovae.
 
-### `extra_sigma` — excess scatter (µJy)
+### `extra_sigma` — excess scatter (mag)
 
 A white-noise term fitted alongside the shape parameters and added in quadrature
-to the reported photometric errors:
+to the reported photometric errors, in flux:
 
 ```
-sigma_total^2 = flux_err^2 + extra_sigma^2
+sigma_total^2 = flux_err^2 + extra_sigma_uJy^2
 ```
 
 It absorbs both real intrinsic variability and underestimated uncertainties.
-A large `extra_sigma` relative to `A` means the model is not describing the data
-well even if `reduced_chi2` looks acceptable — the fit bought its chi-squared by
-inflating the errors. **Check `extra_sigma / A` alongside `reduced_chi2`.**
+The stored value is that scatter as a magnitude error at the amplitude, so it
+is already relative to `A`: `0.05` is a scatter of about 5% of the amplitude.
+
+The likelihood includes the Gaussian normalization term `ln sigma_total^2`, so
+widening the errors has a cost and `extra_sigma` grows only as far as the
+residuals call for. A large `extra_sigma` still means the model is not
+describing the data well even if `reduced_chi2` looks acceptable — the fit
+traded residuals for scatter. **Check `extra_sigma` alongside
+`reduced_chi2`.**
 
 ### `reduced_chi2`
 
@@ -164,22 +197,28 @@ Chi-squared per degree of freedom of the best fit, computed on peak-normalized
 flux with `extra_sigma` included in the denominator, with
 `dof = max(n_points - 14, 1)`.
 
-Because `extra_sigma` is free, this statistic is pulled towards ~1 by
-construction. Treat it as a relative ranking tool — "which of these fits is
-worse" — rather than an absolute, calibrated goodness-of-fit probability. Values
-well above a few indicate the model genuinely failed.
+When the model cannot follow the data, the fit grows `extra_sigma` until the
+residuals are about the size of the total error, so this statistic sits near 1
+even for a poor fit. Treat it as a relative ranking tool — "which of these fits
+is worse" — rather than an absolute, calibrated goodness-of-fit probability.
+Values well above a few indicate the model genuinely failed.
 
-### `peak_flux`
+The optimizer minimizes the full likelihood, not this statistic, and with three
+seeds keeps the one with the lowest likelihood cost. The stored fit is therefore
+not necessarily the one with the lowest `reduced_chi2`.
 
-The largest flux, in either band, among the points the fit actually saw — the
-scale everything was normalized by before fitting. It is stored because it is
-not otherwise recoverable from the alert document alone: reproducing it means
-replaying the preprocessing over that object's `ZTF_alerts_aux` photometry,
-filtered to `jd <= ` the alert's own `jd`.
+### `peak_mag`
 
-Divide `A` or `extra_sigma` by it to recover the normalized (dimensionless)
-values the optimizer worked in, which is what you want when comparing fit
-*shapes* across objects of very different brightness.
+The AB magnitude of the largest flux, in either band, among the points the fit
+actually saw — the scale everything was normalized by before fitting. It is
+stored because it is not otherwise recoverable from the alert document alone:
+reproducing it means replaying the preprocessing over that object's
+`ZTF_alerts_aux` photometry, filtered to `jd <= ` the alert's own `jd`.
+
+`A - peak_mag` is the amplitude relative to that scale — the normalized value
+the optimizer worked in, as a magnitude — which is what you want when comparing
+fit *shapes* across objects of very different brightness. `extra_sigma` needs
+no such step; it is already relative to `A`.
 
 ## Parameter bounds
 
@@ -189,19 +228,27 @@ wanted to go further and could not.
 
 | Parameter | `ZTF_r` range | `ZTF_g` envelope |
 | --- | --- | --- |
-| `A` (× peak flux) | 0.631 – 1.413 | 0.316 – 2.239 |
-| `beta` (× peak flux) | −0.01 – 0.03 | −0.03 – 0.05 |
+| `A - peak_mag` (mag) | −0.375 – +0.5 | −0.875 – +1.25 |
+| `beta` (day⁻¹) | −0.01 – 0.03 | −0.03 – 0.05 |
 | `gamma` (days) | 6.31 – 100 | 1.0 – 316 |
 | `t_0` (days) | −50 – 30 | −55 – 33 |
 | `tau_rise` (days) | 0.501 – 10.0 | 0.050 – 31.6 |
 | `tau_fall` (days) | 6.31 – 158 | 1.0 – 316 |
-| `extra_sigma` (× peak flux) | 0.00316 – 0.501 | 0.00079 – 1.995 |
+| `extra_sigma_uJy` (× peak flux) | 0.00316 – 0.501 | 0.00079 – 1.995 |
 
 The *r*-band ranges are exact. The *g*-band column is an **envelope**: *g* is
 searched as a bounded offset from *r*, so reaching a *g* extreme also requires
 *r* to be near its own extreme. The bounds were calibrated against reference
 fits and carry roughly 2σ of margin, which is why they are tighter than a naive
 "any physical supernova" range would be.
+
+The search bounds `A` as a fraction of peak flux (0.631 – 1.413 in *r*), which
+is the magnitude range shown: up to 0.375 mag brighter or 0.5 mag fainter than
+`peak_mag`. `extra_sigma` is bounded in flux, as a fraction of peak flux.
+Its stored magnitude value also depends on `A`, so it has no fixed range of its
+own; convert it back with the formula in
+[Flux and magnitude convention](#flux-and-magnitude-convention) to check it
+against a bound.
 
 ## Preprocessing
 
@@ -216,8 +263,8 @@ The fit does not see the raw alert history. Before fitting, `villar-pso`:
 5. Truncates to phase ∈ [−50, +100] days.
 6. Requires **more than two surviving points in each of *g* and *r***, or the
    fit is skipped.
-7. Normalizes all fluxes by the global peak flux; parameters are converted back
-   to physical units afterwards.
+7. Normalizes all fluxes by the global peak flux; `A` and `extra_sigma` are
+   converted to AB magnitudes afterwards.
 
 Step 5 is why `t_0` has a −50 day floor, and step 3 is why `t_0` is usually
 negative.
@@ -274,12 +321,21 @@ db.ZTF_alerts.find({
 })
 ```
 
-Blue transients, via the amplitude ratio (needs `$expr`, since it compares two
-fields):
+Bright enough for spectroscopic follow-up, brighter than 18.5 mag at plateau:
 
 ```js
 db.ZTF_alerts.find({
-  $expr: { $gt: ["$villar_fit.A_ZTF_g", { $multiply: ["$villar_fit.A_ZTF_r", 1.3] }] }
+  "villar_fit.reduced_chi2": { $lt: 3 },
+  "villar_fit.A_ZTF_r":      { $lt: 18.5 }
+})
+```
+
+Blue transients, *g − r* < −0.285 at plateau (a 30% *g*-band flux excess;
+needs `$expr`, since it compares two fields):
+
+```js
+db.ZTF_alerts.find({
+  $expr: { $lt: ["$villar_fit.A_ZTF_g", { $subtract: ["$villar_fit.A_ZTF_r", 0.285] }] }
 })
 ```
 
@@ -303,24 +359,27 @@ def villar_flux(phase, A, beta, gamma, t_0, tau_rise, tau_fall):
 
 
 def model_lightcurve(villar_fit, band="ZTF_r", phases=None):
-    """Evaluate one band of a stored villar_fit over a phase grid."""
+    """Evaluate one band of a stored villar_fit over a phase grid, in AB mag."""
     if phases is None:
         phases = np.linspace(-50.0, 100.0, 500)
 
-    return phases, villar_flux(
+    flux = villar_flux(
         phases,
-        A=villar_fit[f"A_{band}"],
+        A=10 ** ((ZP - villar_fit[f"A_{band}"]) / 2.5),  # stored A is AB mag
         beta=villar_fit[f"beta_{band}"],
         gamma=villar_fit[f"gamma_{band}"],
         t_0=villar_fit[f"t_0_{band}"],
         tau_rise=villar_fit[f"tau_rise_{band}"],
         tau_fall=villar_fit[f"tau_fall_{band}"],
     )
+    # Non-positive model flux has no magnitude.
+    with np.errstate(divide="ignore", invalid="ignore"):
+        mag = np.where(flux > 0, ZP - 2.5 * np.log10(flux), np.nan)
+    return phases, mag
 ```
 
 To overlay this on observed photometry, plot the data against
-`jd - jd_of_brightest_r_band_point` so both are on the same phase axis, and
-convert the model flux to magnitudes with `23.9 - 2.5 * log10(F)`.
+`jd - jd_of_brightest_r_band_point` so both are on the same phase axis.
 
 ### Derived quantities
 
@@ -328,32 +387,25 @@ A few combinations are more useful than the raw parameters:
 
 | Quantity | Expression | Why |
 | --- | --- | --- |
-| Plateau slope, flux units | `-A * beta` | The paper's `β`, in µJy/day |
-| Peak magnitude | `23.9 - 2.5*log10(A)` | Comparable across objects |
-| Color at plateau | `-2.5*log10(A_ZTF_g / A_ZTF_r)` | Approximate *g − r* |
+| Plateau slope, flux units | `-beta * 10**((23.9 - A)/2.5)` | The paper's `β`, in µJy/day |
+| Color at plateau | `A_ZTF_g - A_ZTF_r` | Approximate *g − r* |
+| Amplitude vs. normalization | `A - peak_mag` | Brightness-independent shape |
 | Rise/fall asymmetry | `tau_fall / tau_rise` | Separates fast transients |
-| Fractional scatter | `extra_sigma / A` | Sanity check on `reduced_chi2` |
+| Fractional scatter | `extra_sigma / 1.0857` | Sanity check on `reduced_chi2` |
 | Total duration proxy | `gamma + tau_fall` | Rough event timescale |
 
 ## Caveats
 
 Worth knowing before you build science on these numbers.
 
-**`reduced_chi2` uses a truncated point set.** Internally the fitter pads each
-band to a common length and then evaluates the cost over the first `n_points`
-entries of a band-sorted array. When the *r*-band needs padding, that window
-includes some zero-weight padded entries and correspondingly excludes the
-latest *g*-band points. The padded entries carry an error of 1000 in normalized
-flux and contribute essentially nothing, but a handful of late *g* points can
-be left out of both the fit and the reported chi-squared.
-
 **`dof` is clamped at 1.** With 14 free parameters, any light curve with fewer
 than 15 points gets `dof = 1`, so `reduced_chi2` is then just the total
 chi-squared. Compare fits with similar numbers of points.
 
-**`extra_sigma` can mask a bad fit.** Because it is free, the optimizer can
-drive `reduced_chi2` towards 1 by inflating the errors. Always read
-`extra_sigma / A` alongside it.
+**`extra_sigma` can mask a bad fit.** The likelihood charges for widening the
+errors, but a model that cannot follow the data still trades residuals for
+scatter, which keeps `reduced_chi2` near 1. Always read `extra_sigma` alongside
+it.
 
 **Priors are ZTF-calibrated and fairly tight.** The bounds above come from
 reference fits on ZTF supernovae. Genuinely exotic transients can be pushed
@@ -370,8 +422,8 @@ specifically want the historical view.
 | What | Where |
 | --- | --- |
 | Model, priors, PSO, preprocessing | [`villar-pso`](https://github.com/frenbox/villar-pso) |
-| Batch fitting and Mongo writes | [`src/enrichment/ztf.rs`](../src/enrichment/ztf.rs) |
-| GPU context setup | [`src/enrichment/models/mod.rs`](../src/enrichment/models/mod.rs) |
+| Batch fitting and Mongo writes | [`src/enrichment/ztf.rs`](https://github.com/boom-astro/boom/blob/main/src/enrichment/ztf.rs) |
+| GPU context setup | [`src/enrichment/models/mod.rs`](https://github.com/boom-astro/boom/blob/main/src/enrichment/models/mod.rs) |
 
 ## References
 

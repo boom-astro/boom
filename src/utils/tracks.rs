@@ -10,8 +10,13 @@
 //! because the contents are what changes. A run's track that shares detections
 //! with a stored one *is* that track, extended.
 
+use crate::utils::enums::Survey;
+use crate::utils::heliolinc::MU;
+use crate::utils::linking::{night_at, Detection};
+use crate::utils::sso_geometry::{dot, norm, Site, DECAM, RUBIN, WINTER, ZTF};
 use mongodb::bson::{doc, Document};
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 
 /// Detections two tracks must share to be judged the same object.
 ///
@@ -21,8 +26,8 @@ pub const SHARED_FOR_IDENTITY: usize = 2;
 
 /// How well a bound orbit reproduces a track.
 ///
-/// Propagation is Keplerian and bound-only, so a hyperbolic object cannot fit
-/// however clean its astrometry. `Poor` and `None` are where a distant or
+/// Fits stay bound unless `max_vinf_km_s` is set, so a hyperbolic object cannot
+/// fit however clean its astrometry. `Poor` and `None` are where a distant or
 /// unbound object shows up, so the distinction has to survive persistence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BoundFit {
@@ -72,10 +77,34 @@ impl BoundFit {
 const SAME_RESIDUAL_ARCSEC: f64 = 0.01;
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(into = "OrbitWithElements")]
 pub struct StoredOrbit {
+    /// UTC, like the detections.
     pub epoch_jd: f64,
     pub pos: [f64; 3],
     pub vel: [f64; 3],
+}
+
+#[derive(Serialize)]
+struct OrbitWithElements {
+    epoch_jd: f64,
+    pos: [f64; 3],
+    vel: [f64; 3],
+    e: f64,
+    q: f64,
+}
+
+impl From<StoredOrbit> for OrbitWithElements {
+    fn from(orbit: StoredOrbit) -> Self {
+        let (e, q) = conic(&orbit);
+        OrbitWithElements {
+            epoch_jd: orbit.epoch_jd,
+            pos: orbit.pos,
+            vel: orbit.vel,
+            e,
+            q,
+        }
+    }
 }
 
 /// A track as stored, keyed by an id that outlives any one linking run.
@@ -83,8 +112,11 @@ pub struct StoredOrbit {
 pub struct StoredTrack {
     #[serde(rename = "_id")]
     pub id: String,
-    /// Candids, ascending. The identity of the track.
+    /// Alert ids, ordered with `member_surveys`. The identity of the track.
     pub members: Vec<i64>,
+    /// Empty on tracks written before it, whose member ids encode their survey.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub member_surveys: Vec<Survey>,
     /// Epoch of each member, parallel to `members`. Held so a later run that
     /// sees only part of the track can still count its nights and span.
     #[serde(default)]
@@ -99,6 +131,21 @@ pub struct StoredTrack {
     /// before it was recorded, where it is taken to be all of them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bound_fit_detections: Option<i32>,
+    /// Root mean square of the members' site astrometric errors, arcseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_rms_arcsec: Option<f64>,
+    /// `bound_fit_residual_arcsec` over `expected_rms_arcsec`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rms_ratio: Option<f64>,
+    /// Reasons to look again before believing the track: `to_confirm`,
+    /// `photometry` or `long_gap`. Nothing is dropped for them. Absent on
+    /// tracks written before it.
+    #[serde(default)]
+    pub flags: Vec<String>,
+    /// Spread of the nightly median magnitudes, reduced under the stored orbit
+    /// and taken to V.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mag_spread: Option<f64>,
     pub n_detections: i32,
     pub n_nights: i32,
     pub arc_days: f64,
@@ -108,6 +155,11 @@ pub struct StoredTrack {
     /// distinguishes a recovery from a discovery candidate.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub designation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// The giant planet every detection sat next to: likely one of its satellites.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub near_planet: Option<String>,
     /// When the track was last written, Unix seconds. A client polling for new
     /// and extended tracks asks for the ones updated since its last look.
     /// Zero on tracks written before the field existed.
@@ -115,6 +167,30 @@ pub struct StoredTrack {
     pub updated_at: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub orbit: Option<StoredOrbit>,
+}
+
+impl StoredTrack {
+    pub fn member_keys(&self) -> Vec<Member> {
+        if self.member_surveys.is_empty() {
+            self.members.iter().map(|&m| legacy_member(m)).collect()
+        } else {
+            self.member_surveys
+                .iter()
+                .cloned()
+                .zip(self.members.iter().copied())
+                .collect()
+        }
+    }
+
+    pub fn explicit(self) -> Self {
+        let (member_surveys, members): (Vec<Survey>, Vec<i64>) =
+            self.member_keys().into_iter().unzip();
+        StoredTrack {
+            members,
+            member_surveys,
+            ..self
+        }
+    }
 }
 
 /// Stamped on every member alert. The candids are deliberately not here:
@@ -137,6 +213,9 @@ pub struct AlertTrack {
     /// recovery from a discovery candidate.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub designation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    pub near_planet: Option<String>,
 }
 
 impl From<&StoredTrack> for AlertTrack {
@@ -150,6 +229,8 @@ impl From<&StoredTrack> for AlertTrack {
             last_jd: t.last_jd,
             bound_fit: t.bound_fit.clone(),
             designation: t.designation.clone(),
+            kind: t.kind.clone(),
+            near_planet: t.near_planet.clone(),
         }
     }
 }
@@ -167,12 +248,16 @@ pub enum Identity {
 }
 
 /// Which stored track, if any, an incoming set of detections belongs to.
-pub fn identify(members: &[i64], stored: &[StoredTrack]) -> Identity {
-    let incoming: std::collections::HashSet<i64> = members.iter().copied().collect();
+pub fn identify(members: &[Member], stored: &[StoredTrack]) -> Identity {
+    let incoming: HashSet<&Member> = members.iter().collect();
     let mut matched: Vec<String> = stored
         .iter()
         .filter(|s| {
-            s.members.iter().filter(|m| incoming.contains(m)).count() >= SHARED_FOR_IDENTITY
+            s.member_keys()
+                .iter()
+                .filter(|m| incoming.contains(m))
+                .count()
+                >= SHARED_FOR_IDENTITY
         })
         .map(|s| s.id.clone())
         .collect();
@@ -199,17 +284,166 @@ pub fn resolve_merge(ids: &[String]) -> Option<(String, Vec<String>)> {
 /// Format a minted id. Sequential and short enough to quote as an MPC `trkSub`,
 /// which is limited to 8 characters.
 pub fn format_id(n: u64) -> String {
-    format!("BT{n:06}")
+    // MPC-style number packing: ids stay 8 characters and sort as strings in minting order.
+    const BASE62: &[u8; 62] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    if n < 6_200_000 {
+        let lead = BASE62[(n / 100_000) as usize] as char;
+        return format!("BT{lead}{:05}", n % 100_000);
+    }
+    let mut rest = n - 6_200_000;
+    let mut tail = [b'0'; 5];
+    for digit in tail.iter_mut().rev() {
+        *digit = BASE62[(rest % 62) as usize];
+        rest /= 62;
+    }
+    format!("BT~{}", String::from_utf8_lossy(&tail))
+}
+
+const WINTER_IDS: i64 = 51_000_000_000_000_000;
+const DECAM_IDS: i64 = 52_000_000_000_000_000;
+const LSST_IDS: i64 = 53_000_000_000_000_000;
+const ZTF_IDS: i64 = 400_000_000_000_000_000;
+
+/// A survey and the `_id` of an alert in its collection.
+pub type Member = (Survey, i64);
+
+/// Unique within a run: DECam ids span the positive i64, so they are negated.
+pub fn detection_id(survey: &Survey, alert_id: i64) -> i64 {
+    match survey {
+        Survey::Decam => alert_id.wrapping_neg(),
+        _ => alert_id,
+    }
+}
+
+pub fn site_survey(site: Option<&Site>) -> Option<Survey> {
+    match site.map(|s| s.mpc_code) {
+        None | Some("I41") => Some(Survey::Ztf),
+        Some("X05") => Some(Survey::Lsst),
+        Some("W84") => Some(Survey::Decam),
+        Some("675") => Some(Survey::Winter),
+        _ => None,
+    }
+}
+
+pub fn member_of(d: &Detection) -> Option<Member> {
+    let survey = site_survey(d.site.as_ref())?;
+    let id = detection_id(&survey, d.id);
+    Some((survey, id))
+}
+
+fn legacy_member_id(survey: &Survey, alert_id: i64) -> i64 {
+    match survey {
+        Survey::Ztf | Survey::Lsst => alert_id,
+        Survey::Decam => DECAM_IDS.wrapping_add(alert_id),
+        Survey::Winter => WINTER_IDS.wrapping_add(alert_id),
+    }
+}
+
+fn legacy_member(id: i64) -> Member {
+    match id {
+        WINTER_IDS..DECAM_IDS => (Survey::Winter, id - WINTER_IDS),
+        DECAM_IDS..LSST_IDS => (Survey::Decam, id - DECAM_IDS),
+        LSST_IDS..ZTF_IDS => (Survey::Lsst, id),
+        _ => (Survey::Ztf, id),
+    }
+}
+
+/// `None` for ZTF, the default site of every fit.
+pub fn survey_site(survey: &Survey) -> Option<Site> {
+    match survey {
+        Survey::Ztf => None,
+        Survey::Lsst => Some(RUBIN),
+        Survey::Decam => Some(DECAM),
+        Survey::Winter => Some(WINTER),
+    }
+}
+
+pub fn expected_rms_arcsec(members: &[Member]) -> Option<f64> {
+    if members.is_empty() {
+        return None;
+    }
+    let sum: f64 = members
+        .iter()
+        .map(|(survey, _)| {
+            survey_site(survey)
+                .unwrap_or(ZTF)
+                .astrometric_sigma_arcsec
+                .powi(2)
+        })
+        .sum();
+    Some((sum / members.len() as f64).sqrt())
+}
+
+/// Flag for a track whose detections cannot pin an orbit down.
+pub const TO_CONFIRM: &str = "to_confirm";
+/// Flag for a track whose nights disagree on the brightness of one object.
+pub const PHOTOMETRY: &str = "photometry";
+/// Flag for a track bridging a long gap without the residual to back it.
+pub const LONG_GAP: &str = "long_gap";
+
+/// Above a rotating elongated asteroid or the calibration offset between two
+/// surveys, under the 3 mag the linker rejects at. A comet in outburst can still
+/// get here, which is why it only flags.
+const FLAGGED_MAG_SPREAD: f64 = 2.0;
+const LONG_GAP_DAYS: f64 = 30.0;
+const LONG_GAP_MAX_RMS_RATIO: f64 = 5.0;
+
+/// Whether the detections pin an orbit down: a pair on each of two nights gives
+/// the motion twice, and four nights give enough positions on their own. Three
+/// single detections are six measurements for six parameters, which any orbit
+/// fits with no residual.
+pub fn constrained(members: &[Member], jds: &[f64]) -> bool {
+    let mut per_night: HashMap<i64, usize> = HashMap::new();
+    for ((survey, _), &jd) in members.iter().zip(jds) {
+        *per_night
+            .entry(night_at(jd, survey_site(survey).as_ref()))
+            .or_default() += 1;
+    }
+    per_night.len() >= 4 || per_night.values().filter(|&&n| n >= 2).count() >= 2
+}
+
+fn longest_gap(jds: &[f64]) -> f64 {
+    let mut sorted = jds.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    sorted.windows(2).map(|w| w[1] - w[0]).fold(0.0, f64::max)
+}
+
+pub fn track_flags(
+    members: &[Member],
+    jds: &[f64],
+    rms_ratio: Option<f64>,
+    mag_spread: Option<f64>,
+) -> Vec<String> {
+    let mut flags = Vec::new();
+    if !constrained(members, jds) {
+        flags.push(TO_CONFIRM.to_string());
+    }
+    if mag_spread.is_some_and(|s| s > FLAGGED_MAG_SPREAD) {
+        flags.push(PHOTOMETRY.to_string());
+    }
+    if rms_ratio.is_some_and(|r| r > LONG_GAP_MAX_RMS_RATIO) && longest_gap(jds) > LONG_GAP_DAYS {
+        flags.push(LONG_GAP.to_string());
+    }
+    flags
+}
+
+pub fn alerts_by_survey(members: &[Member]) -> HashMap<Survey, Vec<i64>> {
+    let mut out: HashMap<Survey, Vec<i64>> = HashMap::new();
+    for (survey, id) in members {
+        out.entry(survey.clone()).or_default().push(*id);
+    }
+    out
 }
 
 /// Summarise a track's detections, given their epochs.
 ///
 /// `nights` counts distinct local nights, so a pair split either side of
 /// midnight UTC is still one night.
-pub fn summarise(members: &[i64], jds: &[f64]) -> (i32, i32, f64, f64, f64) {
-    let nights: std::collections::HashSet<i64> = jds
+pub fn summarise(members: &[Member], jds: &[f64]) -> (i32, i32, f64, f64, f64) {
+    let nights: HashSet<i64> = members
         .iter()
-        .map(|&jd| crate::utils::linking::night_of(jd))
+        .zip(jds)
+        .map(|((survey, _), &jd)| night_at(jd, survey_site(survey).as_ref()))
         .collect();
     let first = jds.iter().cloned().fold(f64::MAX, f64::min);
     let last = jds.iter().cloned().fold(f64::MIN, f64::max);
@@ -357,11 +591,15 @@ pub async fn lock_is_held(db: &mongodb::Database) -> Result<bool, mongodb::error
 /// set `identify` then applies its threshold to.
 async fn overlapping(
     db: &mongodb::Database,
-    members: &[i64],
+    members: &[Member],
 ) -> Result<Vec<StoredTrack>, mongodb::error::Error> {
+    let ids: Vec<i64> = members
+        .iter()
+        .flat_map(|(survey, id)| [*id, legacy_member_id(survey, *id)])
+        .collect();
     let mut cursor = db
         .collection::<StoredTrack>(TRACKS_COLLECTION)
-        .find(doc! { "members": { "$in": members } })
+        .find(doc! { "members": { "$in": ids } })
         .await?;
     let mut out = Vec::new();
     while cursor.advance().await? {
@@ -380,7 +618,7 @@ async fn overlapping(
 pub struct UpsertPlan {
     /// `None` for a track nothing stored matches; commit mints it.
     pub id: Option<String>,
-    pub members: Vec<i64>,
+    pub members: Vec<Member>,
     pub epochs: Vec<f64>,
     pub n_detections: i32,
     pub n_nights: i32,
@@ -391,11 +629,17 @@ pub struct UpsertPlan {
     pub bound_fit_residual_arcsec: Option<f64>,
     pub bound_fit_detections: Option<i32>,
     pub orbit: Option<StoredOrbit>,
+    pub mag_spread: Option<f64>,
     pub designation: Option<String>,
+    pub kind: Option<String>,
+    pub near_planet: Option<String>,
     /// Ids a merge would absorb and then delete.
     pub superseded: Vec<String>,
     /// Detections dropped because another track already owns them.
-    pub contested: Vec<i64>,
+    pub contested: Vec<Member>,
+    /// Detections dropped because the orbit does not reproduce them, left for
+    /// other tracks.
+    pub dropped: Vec<Member>,
     /// When the stored track was last written, if this plan would write it
     /// back exactly as it is. A nightly run re-finds every track still in its
     /// window, and rewriting those would make each look new to a client
@@ -410,6 +654,14 @@ impl UpsertPlan {
     /// remnant stored as a track is worse than no track at all.
     pub fn meets(&self, min_detections: usize, min_nights: usize) -> bool {
         self.n_detections as usize >= min_detections && self.n_nights as usize >= min_nights
+    }
+
+    pub fn with_kind(mut self, kind: &str) -> Self {
+        if self.kind.as_deref() != Some(kind) {
+            self.kind = Some(kind.to_string());
+            self.unchanged_since = None;
+        }
+        self
     }
 
     /// One line naming what the write would do, for a dry run's log.
@@ -430,8 +682,13 @@ impl UpsertPlan {
                 self.contested.len()
             )
         };
+        let dropped = if self.dropped.is_empty() {
+            String::new()
+        } else {
+            format!(", {} detection(s) off its orbit", self.dropped.len())
+        };
         format!(
-            "{what}: {} detections over {} nights, {:.2} d arc{contested}",
+            "{what}: {} detections over {} nights, {:.2} d arc{contested}{dropped}",
             self.n_detections, self.n_nights, self.arc_days
         )
     }
@@ -459,9 +716,10 @@ fn fit_detections(t: &StoredTrack) -> i32 {
 /// partial tracks turn out to be one object.
 pub async fn plan_upsert(
     db: &mongodb::Database,
-    members: &[i64],
+    members: &[Member],
     jds: &[f64],
     designation: Option<String>,
+    near_planet: Option<String>,
     bound_fit: Option<(BoundFit, Option<f64>)>,
     orbit: Option<StoredOrbit>,
 ) -> Result<UpsertPlan, mongodb::error::Error> {
@@ -479,36 +737,36 @@ pub async fn plan_upsert(
     // belongs to one track, so it stays with the one that already holds it and
     // is dropped here rather than stamped over.
     let absorbed: Vec<&String> = id.iter().chain(superseded.iter()).collect();
-    let designation = designation.or_else(|| {
-        absorbed.iter().find_map(|a| {
-            existing
-                .iter()
-                .find(|t| &&t.id == a)
-                .and_then(|t| t.designation.clone())
-        })
-    });
-    let mut owned_elsewhere: std::collections::HashSet<i64> = std::collections::HashSet::new();
+    let carried = |field: fn(&StoredTrack) -> Option<String>| {
+        absorbed
+            .iter()
+            .find_map(|a| existing.iter().find(|t| &&t.id == a).and_then(field))
+    };
+    let designation = designation.or_else(|| carried(|t| t.designation.clone()));
+    let near_planet = near_planet.or_else(|| carried(|t| t.near_planet.clone()));
+    let kind = carried(|t| t.kind.clone());
+    let mut owned_elsewhere: HashSet<Member> = HashSet::new();
     for t in existing.iter().filter(|t| !absorbed.contains(&&t.id)) {
-        owned_elsewhere.extend(t.members.iter().copied());
+        owned_elsewhere.extend(t.member_keys());
     }
 
     // Epochs carried per member so an extension keeps the nights and the span
     // of detections this run did not see.
-    let mut by_candid: std::collections::BTreeMap<i64, f64> = members
+    let mut by_candid: std::collections::BTreeMap<Member, f64> = members
         .iter()
         .zip(jds.iter())
-        .filter(|(m, _)| !owned_elsewhere.contains(m))
-        .map(|(m, j)| (*m, *j))
+        .filter(|(m, _)| !owned_elsewhere.contains(*m))
+        .map(|(m, j)| (m.clone(), *j))
         .collect();
     for t in existing.iter().filter(|t| absorbed.contains(&&t.id)) {
-        for (m, j) in t.members.iter().zip(t.epochs.iter()) {
-            by_candid.entry(*m).or_insert(*j);
+        for (m, j) in t.member_keys().into_iter().zip(t.epochs.iter()) {
+            by_candid.entry(m).or_insert(*j);
         }
     }
-    let mut contested: Vec<i64> = members
+    let mut contested: Vec<Member> = members
         .iter()
-        .copied()
-        .filter(|m| owned_elsewhere.contains(m))
+        .filter(|m| owned_elsewhere.contains(*m))
+        .cloned()
         .collect();
     contested.sort_unstable();
 
@@ -536,7 +794,7 @@ pub async fn plan_upsert(
         (new, _) => new,
     };
 
-    let all: Vec<i64> = by_candid.keys().copied().collect();
+    let all: Vec<Member> = by_candid.keys().cloned().collect();
     let epochs: Vec<f64> = by_candid.values().copied().collect();
     let (n_detections, n_nights, arc_days, first_jd, last_jd) = summarise(&all, &epochs);
     let bound_fit_residual_arcsec = bound_fit.and_then(|(_, r, _, _)| r);
@@ -548,9 +806,10 @@ pub async fn plan_upsert(
             .iter()
             .find(|t| &t.id == id)
             .filter(|t| {
-                t.members == all
+                t.member_keys() == all
                     && t.epochs == epochs
                     && t.designation == designation
+                    && t.near_planet == near_planet
                     && t.bound_fit == bound_fit
                     && (orbit.is_none() || t.orbit.is_some())
                     && bound_fit_detections.is_none_or(|n| n == fit_detections(t))
@@ -575,9 +834,13 @@ pub async fn plan_upsert(
         bound_fit_residual_arcsec,
         bound_fit_detections,
         orbit,
+        mag_spread: None,
         designation,
+        kind,
+        near_planet,
         superseded,
         contested,
+        dropped: Vec::new(),
         unchanged_since,
     })
 }
@@ -592,19 +855,33 @@ pub async fn commit_upsert(
         Some(id) => id,
         None => format_id(next_sequence(db).await?),
     };
+    let expected_rms_arcsec = expected_rms_arcsec(&plan.members);
+    let rms_ratio = plan
+        .bound_fit_residual_arcsec
+        .zip(expected_rms_arcsec)
+        .map(|(rms, expected)| rms / expected);
+    let flags = track_flags(&plan.members, &plan.epochs, rms_ratio, plan.mag_spread);
+    let (member_surveys, members): (Vec<Survey>, Vec<i64>) = plan.members.into_iter().unzip();
     let stored = StoredTrack {
         id: id.clone(),
-        members: plan.members,
+        members,
+        member_surveys,
         epochs: plan.epochs,
         bound_fit: plan.bound_fit,
         bound_fit_residual_arcsec: plan.bound_fit_residual_arcsec,
         bound_fit_detections: plan.bound_fit_detections,
+        expected_rms_arcsec,
+        rms_ratio,
+        flags,
+        mag_spread: plan.mag_spread,
         n_detections: plan.n_detections,
         n_nights: plan.n_nights,
         arc_days: plan.arc_days,
         first_jd: plan.first_jd,
         last_jd: plan.last_jd,
         designation: plan.designation,
+        kind: plan.kind,
+        near_planet: plan.near_planet,
         orbit: plan.orbit,
         updated_at: plan
             .unchanged_since
@@ -621,6 +898,18 @@ pub async fn commit_upsert(
         .replace_one(doc! { "_id": &id }, &stored)
         .upsert(true)
         .await?;
+    // Only a stamp this track or one it absorbed left, never another track's.
+    let owners: Vec<String> = std::iter::once(id.clone())
+        .chain(plan.superseded.iter().cloned())
+        .collect();
+    for (survey, ids) in alerts_by_survey(&plan.dropped) {
+        db.collection::<Document>(&format!("{survey}_alerts"))
+            .update_many(
+                doc! { "_id": { "$in": ids }, "track.id": { "$in": &owners } },
+                doc! { "$unset": { "track": "" } },
+            )
+            .await?;
+    }
     if !plan.superseded.is_empty() {
         collection
             .delete_many(doc! { "_id": { "$in": &plan.superseded } })
@@ -654,12 +943,7 @@ pub async fn stamp_members(
     db: &mongodb::Database,
     stored: &StoredTrack,
 ) -> Result<u64, mongodb::error::Error> {
-    let update = alert_update(&AlertTrack::from(stored));
-    let result = db
-        .collection::<Document>("ZTF_alerts")
-        .update_many(doc! { "_id": { "$in": &stored.members } }, update)
-        .await?;
-    Ok(result.modified_count)
+    stamp(db, stored, false).await
 }
 
 /// Stamp the track onto the members that do not carry it yet.
@@ -671,15 +955,28 @@ pub async fn stamp_missing(
     db: &mongodb::Database,
     stored: &StoredTrack,
 ) -> Result<u64, mongodb::error::Error> {
+    stamp(db, stored, true).await
+}
+
+async fn stamp(
+    db: &mongodb::Database,
+    stored: &StoredTrack,
+    missing_only: bool,
+) -> Result<u64, mongodb::error::Error> {
     let update = alert_update(&AlertTrack::from(stored));
-    let result = db
-        .collection::<Document>("ZTF_alerts")
-        .update_many(
-            doc! { "_id": { "$in": &stored.members }, "track.id": { "$ne": &stored.id } },
-            update,
-        )
-        .await?;
-    Ok(result.modified_count)
+    let mut modified = 0;
+    for (survey, ids) in alerts_by_survey(&stored.member_keys()) {
+        let mut filter = doc! { "_id": { "$in": ids } };
+        if missing_only {
+            filter.insert("track.id", doc! { "$ne": &stored.id });
+        }
+        modified += db
+            .collection::<Document>(&format!("{survey}_alerts"))
+            .update_many(filter, update.clone())
+            .await?
+            .modified_count;
+    }
+    Ok(modified)
 }
 
 /// One track by id, which is how a consumer reaches the epochs the alert block
@@ -709,39 +1006,45 @@ pub async fn public_track_by_id(
     let Some(track) = track_by_id(db, id).await? else {
         return Ok(None);
     };
+    let ztf: Vec<i64> = track
+        .member_keys()
+        .into_iter()
+        .filter(|(survey, _)| *survey == Survey::Ztf)
+        .map(|(_, id)| id)
+        .collect();
     let mut cursor = db
         .collection::<Document>("ZTF_alerts")
-        .find(doc! { "_id": { "$in": &track.members }, "candidate.programid": 1 })
+        .find(doc! { "_id": { "$in": ztf }, "candidate.programid": 1 })
         .projection(doc! { "_id": 1 })
         .await?;
-    let mut public = std::collections::HashSet::new();
+    let mut public = HashSet::new();
     while cursor.advance().await? {
         if let Ok(id) = cursor.current().get_i64("_id") {
-            public.insert(id);
+            public.insert((Survey::Ztf, id));
         }
     }
     Ok(restrict_to(&track, &public))
 }
 
-pub fn restrict_to(
-    track: &StoredTrack,
-    keep: &std::collections::HashSet<i64>,
-) -> Option<StoredTrack> {
-    let (members, epochs): (Vec<i64>, Vec<f64>) = track
-        .members
-        .iter()
-        .zip(track.epochs.iter())
+pub fn restrict_to(track: &StoredTrack, keep: &HashSet<Member>) -> Option<StoredTrack> {
+    let (kept, epochs): (Vec<Member>, Vec<f64>) = track
+        .member_keys()
+        .into_iter()
+        .zip(track.epochs.iter().copied())
         .filter(|(m, _)| keep.contains(m))
-        .map(|(m, j)| (*m, *j))
         .unzip();
-    if members.is_empty() {
+    if kept.is_empty() {
         return None;
     }
-    let (n_detections, n_nights, arc_days, first_jd, last_jd) = summarise(&members, &epochs);
-    let orbit = track.orbit.filter(|_| members.len() == track.members.len());
+    let (n_detections, n_nights, arc_days, first_jd, last_jd) = summarise(&kept, &epochs);
+    let orbit = track.orbit.filter(|_| kept.len() == track.members.len());
+    let flags = track_flags(&kept, &epochs, track.rms_ratio, track.mag_spread);
+    let (member_surveys, members): (Vec<Survey>, Vec<i64>) = kept.into_iter().unzip();
     Some(StoredTrack {
         orbit,
+        flags,
         members,
+        member_surveys,
         epochs,
         n_detections,
         n_nights,
@@ -752,28 +1055,183 @@ pub fn restrict_to(
     })
 }
 
+pub fn conic(orbit: &StoredOrbit) -> (f64, f64) {
+    let r = norm(&orbit.pos);
+    let v2 = dot(&orbit.vel, &orbit.vel);
+    let rv = dot(&orbit.pos, &orbit.vel);
+    let h2 = r * r * v2 - rv * rv;
+    let e = (1.0 + (v2 - 2.0 * MU / r) * h2 / (MU * MU)).max(0.0).sqrt();
+    (e, h2 / (MU * (1.0 + e)))
+}
+
+#[derive(Debug, Default)]
+pub struct TrackQuery {
+    pub updated_since: f64,
+    pub after_id: Option<String>,
+    pub unknown_only: bool,
+    pub min_e: Option<f64>,
+    pub max_q: Option<f64>,
+    pub min_nights: Option<i32>,
+    pub max_rms_ratio: Option<f64>,
+}
+
+impl TrackQuery {
+    fn window(&self) -> Document {
+        let mut filter = doc! { "updated_at": { "$gte": self.updated_since } };
+        if let Some(after_id) = &self.after_id {
+            filter.insert(
+                "$nor",
+                vec![doc! { "updated_at": self.updated_since, "_id": { "$lte": after_id } }],
+            );
+        }
+        filter
+    }
+
+    pub fn filter(&self) -> Document {
+        let mut filter = self.window();
+        if self.unknown_only {
+            filter.insert("designation", mongodb::bson::Bson::Null);
+        }
+        if let Some(min_nights) = self.min_nights {
+            filter.insert("n_nights", doc! { "$gte": min_nights });
+        }
+        if let Some(min_e) = self.min_e {
+            filter.insert("orbit.e", doc! { "$gte": min_e });
+        }
+        if let Some(max_q) = self.max_q {
+            filter.insert("orbit.q", doc! { "$lte": max_q });
+        }
+        if let Some(max_rms_ratio) = self.max_rms_ratio {
+            filter.insert("rms_ratio", doc! { "$lte": max_rms_ratio });
+        }
+        filter
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct TrackCursor {
+    pub updated_since: f64,
+    pub after_id: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TrackPage {
+    pub tracks: Vec<StoredTrack>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next: Option<TrackCursor>,
+}
+
+pub async fn list_tracks(
+    db: &mongodb::Database,
+    query: &TrackQuery,
+    limit: usize,
+) -> Result<TrackPage, mongodb::error::Error> {
+    let tracks = db.collection::<StoredTrack>(TRACKS_COLLECTION);
+    // Read before the page, so a short page moves the cursor past what the cuts rejected.
+    let newest = tracks
+        .clone_with_type::<Document>()
+        .find_one(query.window())
+        .sort(doc! { "updated_at": -1, "_id": -1 })
+        .projection(doc! { "updated_at": 1 })
+        .await?
+        .and_then(|d| {
+            Some(TrackCursor {
+                updated_since: d.get_f64("updated_at").ok()?,
+                after_id: d.get_str("_id").ok()?.to_string(),
+            })
+        });
+    let mut cursor = tracks
+        .find(query.filter())
+        .sort(doc! { "updated_at": 1, "_id": 1 })
+        .limit(limit as i64)
+        .await?;
+    let mut page = TrackPage {
+        tracks: Vec::new(),
+        next: newest,
+    };
+    let mut scanned = 0;
+    while cursor.advance().await? {
+        scanned += 1;
+        if let Ok(track) = cursor.deserialize_current() {
+            page.tracks.push(track.explicit());
+        }
+    }
+    if scanned == limit {
+        page.next = page.tracks.last().map(|track| TrackCursor {
+            updated_since: track.updated_at,
+            after_id: track.id.clone(),
+        });
+    }
+    Ok(page)
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    fn ztf(ids: &[i64]) -> Vec<Member> {
+        ids.iter().map(|&id| (Survey::Ztf, id)).collect()
+    }
 
     fn stored(id: &str, members: &[i64]) -> StoredTrack {
         StoredTrack {
             id: id.to_string(),
             members: members.to_vec(),
+            member_surveys: Vec::new(),
             // One per night, so a helper track's nights match its detections.
             epochs: (0..members.len()).map(|k| 2460000.0 + k as f64).collect(),
             bound_fit: None,
             bound_fit_residual_arcsec: None,
             bound_fit_detections: None,
+            expected_rms_arcsec: None,
+            rms_ratio: None,
+            flags: Vec::new(),
+            mag_spread: None,
             n_detections: members.len() as i32,
             n_nights: 2,
             arc_days: 1.0,
             first_jd: 2460000.0,
             last_jd: 2460001.0,
             designation: None,
+            kind: None,
+            near_planet: None,
             updated_at: 0.0,
             orbit: None,
         }
+    }
+
+    #[test]
+    fn test_single_detections_on_three_nights_are_to_confirm() {
+        let nights = |per: &[usize]| -> (Vec<Member>, Vec<f64>) {
+            let jds: Vec<f64> = per
+                .iter()
+                .enumerate()
+                .flat_map(|(n, &k)| (0..k).map(move |i| 2460000.0 + n as f64 + i as f64 * 0.01))
+                .collect();
+            (ztf(&(1..=jds.len() as i64).collect::<Vec<_>>()), jds)
+        };
+        let (m, j) = nights(&[1, 1, 1]);
+        assert_eq!(
+            track_flags(&m, &j, None, None),
+            vec![TO_CONFIRM.to_string()]
+        );
+        let (m, j) = nights(&[2, 1, 1]);
+        assert!(!constrained(&m, &j));
+        let (m, j) = nights(&[2, 2]);
+        assert!(constrained(&m, &j));
+        let (m, j) = nights(&[1, 1, 1, 1]);
+        assert!(track_flags(&m, &j, None, None).is_empty());
+    }
+
+    #[test]
+    fn test_a_year_long_link_needs_a_tight_residual() {
+        let members = ztf(&[1, 2, 3, 4]);
+        let jds = [2460000.0, 2460000.02, 2460365.0, 2460365.02];
+        assert!(track_flags(&members, &jds, Some(1.0), Some(0.5)).is_empty());
+        assert_eq!(
+            track_flags(&members, &jds, Some(8.0), Some(4.0)),
+            vec![PHOTOMETRY.to_string(), LONG_GAP.to_string()]
+        );
     }
 
     /// The property the whole module exists for: a track that gains detections
@@ -782,7 +1240,7 @@ pub(crate) mod tests {
     fn test_a_growing_track_keeps_its_id() {
         let db = vec![stored("BT000001", &[10, 11, 12])];
         // The next night adds two detections and re-links the same object.
-        let grown = [10, 11, 12, 13, 14];
+        let grown = ztf(&[10, 11, 12, 13, 14]);
         assert_eq!(identify(&grown, &db), Identity::Extends("BT000001".into()));
     }
 
@@ -792,7 +1250,7 @@ pub(crate) mod tests {
     fn test_a_shrinking_track_keeps_its_id() {
         let db = vec![stored("BT000001", &[10, 11, 12, 13])];
         assert_eq!(
-            identify(&[11, 12], &db),
+            identify(&ztf(&[11, 12]), &db),
             Identity::Extends("BT000001".into())
         );
     }
@@ -802,13 +1260,13 @@ pub(crate) mod tests {
     #[test]
     fn test_one_shared_detection_is_not_the_same_track() {
         let db = vec![stored("BT000001", &[10, 11, 12])];
-        assert_eq!(identify(&[12, 90, 91], &db), Identity::New);
+        assert_eq!(identify(&ztf(&[12, 90, 91]), &db), Identity::New);
     }
 
     #[test]
     fn test_an_unrelated_track_is_new() {
         let db = vec![stored("BT000001", &[10, 11, 12])];
-        assert_eq!(identify(&[90, 91, 92], &db), Identity::New);
+        assert_eq!(identify(&ztf(&[90, 91, 92]), &db), Identity::New);
     }
 
     /// One object's detections can be stored as two tracks before enough nights
@@ -816,7 +1274,7 @@ pub(crate) mod tests {
     #[test]
     fn test_bridging_two_stored_tracks_merges_them() {
         let db = vec![stored("BT000002", &[10, 11]), stored("BT000005", &[20, 21])];
-        let joined = [10, 11, 20, 21];
+        let joined = ztf(&[10, 11, 20, 21]);
         match identify(&joined, &db) {
             Identity::Merges(ids) => assert_eq!(ids, vec!["BT000002", "BT000005"]),
             other => panic!("expected a merge, got {other:?}"),
@@ -832,7 +1290,8 @@ pub(crate) mod tests {
     /// Two epochs a few hours apart either side of midnight UTC are one night.
     #[test]
     fn test_nights_are_counted_locally() {
-        let (n_det, nights, arc, ..) = summarise(&[1, 2, 3], &[2460000.9, 2460001.05, 2460002.9]);
+        let (n_det, nights, arc, ..) =
+            summarise(&ztf(&[1, 2, 3]), &[2460000.9, 2460001.05, 2460002.9]);
         assert_eq!(n_det, 3);
         assert_eq!(nights, 2, "the first two epochs are one night");
         assert!((arc - 2.0).abs() < 1e-9, "arc {arc}");
@@ -842,7 +1301,15 @@ pub(crate) mod tests {
     #[test]
     fn test_minted_ids_fit_a_trksub() {
         assert_eq!(format_id(1), "BT000001");
-        assert!(format_id(999_999).len() <= 8);
+        assert_eq!(format_id(999_999), "BT999999");
+        assert_eq!(format_id(1_000_000), "BTA00000");
+        assert_eq!(format_id(6_200_000), "BT~00000");
+        let ids: Vec<String> = [1, 999_999, 1_000_000, 6_199_999, 6_200_000, 900_000_000]
+            .into_iter()
+            .map(format_id)
+            .collect();
+        assert!(ids.iter().all(|id| id.len() == 8), "{ids:?}");
+        assert!(ids.windows(2).all(|w| w[0] < w[1]), "{ids:?}");
     }
 
     /// A track whittled down by contested detections must not be stored as a
@@ -851,7 +1318,7 @@ pub(crate) mod tests {
     fn test_a_plan_below_the_run_thresholds_is_not_viable() {
         let plan = UpsertPlan {
             id: None,
-            members: vec![10],
+            members: ztf(&[10]),
             epochs: vec![2460000.0],
             n_detections: 1,
             n_nights: 1,
@@ -862,9 +1329,13 @@ pub(crate) mod tests {
             bound_fit_residual_arcsec: None,
             bound_fit_detections: None,
             orbit: None,
+            mag_spread: None,
             designation: None,
+            kind: None,
+            near_planet: None,
             superseded: Vec::new(),
-            contested: vec![11, 12],
+            contested: ztf(&[11, 12]),
+            dropped: Vec::new(),
             unchanged_since: None,
         };
         assert!(
@@ -900,7 +1371,7 @@ pub(crate) mod tests {
         }
         let all: Vec<i64> = merged.keys().copied().collect();
         let epochs: Vec<f64> = merged.values().copied().collect();
-        let (n_det, nights, ..) = summarise(&all, &epochs);
+        let (n_det, nights, ..) = summarise(&ztf(&all), &epochs);
         assert_eq!(n_det, 4, "the stored detection this run missed was dropped");
         assert_eq!(nights, 4, "a night the run did not see was dropped");
     }
@@ -921,14 +1392,14 @@ pub(crate) mod tests {
     #[test]
     fn test_restricting_a_track_recounts_what_is_left() {
         let t = stored("BT000001", &[10, 11, 12, 13]);
-        let kept = restrict_to(&t, &[11, 13].into_iter().collect()).expect("two remain");
+        let kept = restrict_to(&t, &ztf(&[11, 13]).into_iter().collect()).expect("two remain");
         assert_eq!(kept.members, vec![11, 13]);
         assert_eq!(kept.epochs, vec![2460001.0, 2460003.0]);
         assert_eq!(kept.n_detections, 2);
         assert_eq!(kept.n_nights, 2);
         assert_eq!(kept.first_jd, 2460001.0);
         assert_eq!(kept.last_jd, 2460003.0);
-        assert!(restrict_to(&t, &[99].into_iter().collect()).is_none());
+        assert!(restrict_to(&t, &ztf(&[99]).into_iter().collect()).is_none());
     }
 
     /// Epochs are quoted as MPC astrometry, where 1e-5 d is 0.86 s -- enough to
@@ -941,9 +1412,86 @@ pub(crate) mod tests {
         assert_eq!(carried.first_jd, 2461293.8666435);
     }
 
+    fn orbit_at(e: f64, q: f64, nu_deg: f64) -> StoredOrbit {
+        let p = q * (1.0 + e);
+        let nu = nu_deg.to_radians();
+        let r = p / (1.0 + e * nu.cos());
+        let speed = (MU / p).sqrt();
+        StoredOrbit {
+            epoch_jd: 2460000.0,
+            pos: [r * nu.cos(), r * nu.sin(), 0.0],
+            vel: [-speed * nu.sin(), speed * (e + nu.cos()), 0.0],
+        }
+    }
+
+    #[test]
+    fn test_an_orbit_is_written_with_its_eccentricity_and_perihelion() {
+        for (e, q, nu) in [
+            (0.0, 2.5, 0.0),
+            (0.1, 2.2, 130.0),
+            (0.6, 0.9, -40.0),
+            (1.0, 1.0, 50.0),
+            (3.36, 2.0, 70.0),
+        ] {
+            let orbit = orbit_at(e, q, nu);
+            let written = mongodb::bson::to_document(&orbit).unwrap();
+            let (got_e, got_q) = (written.get_f64("e").unwrap(), written.get_f64("q").unwrap());
+            assert!((got_e - e).abs() < 1e-6, "e {e}: {got_e}");
+            assert!((got_q - q).abs() < 1e-9, "q {q}: {got_q}");
+            assert_eq!(
+                mongodb::bson::from_document::<StoredOrbit>(written).unwrap(),
+                orbit
+            );
+        }
+    }
+
+    #[test]
+    fn test_a_track_query_filters_on_updated_at_first() {
+        let query = TrackQuery {
+            updated_since: 1.7e9,
+            after_id: Some("BT000009".to_string()),
+            unknown_only: true,
+            min_e: Some(1.0),
+            max_q: Some(1.3),
+            min_nights: Some(3),
+            max_rms_ratio: Some(4.0),
+        };
+        let filter = query.filter();
+        assert_eq!(filter.keys().next().map(String::as_str), Some("updated_at"));
+        assert_eq!(
+            filter.get_document("updated_at").unwrap(),
+            &doc! { "$gte": 1.7e9 }
+        );
+        assert_eq!(
+            filter.get_array("$nor").unwrap()[0],
+            doc! { "updated_at": 1.7e9, "_id": { "$lte": "BT000009" } }.into()
+        );
+        assert_eq!(filter.get("designation"), Some(&mongodb::bson::Bson::Null));
+        assert_eq!(
+            filter.get_document("n_nights").unwrap(),
+            &doc! { "$gte": 3 }
+        );
+        assert_eq!(
+            filter.get_document("orbit.e").unwrap(),
+            &doc! { "$gte": 1.0 }
+        );
+        assert_eq!(
+            filter.get_document("orbit.q").unwrap(),
+            &doc! { "$lte": 1.3 }
+        );
+        assert_eq!(
+            filter.get_document("rms_ratio").unwrap(),
+            &doc! { "$lte": 4.0 }
+        );
+        assert_eq!(
+            TrackQuery::default().filter(),
+            doc! { "updated_at": { "$gte": 0.0 } }
+        );
+    }
+
     /// Candids no other test uses, so tests can share the database.
     fn fresh_members(n: i64) -> Vec<i64> {
-        let base = (uuid::Uuid::new_v4().as_u128() as i64).abs() / 16;
+        let base = ZTF_IDS + (uuid::Uuid::new_v4().as_u128() as i64).abs() / 64;
         (base..base + n).collect()
     }
 
@@ -958,7 +1506,7 @@ pub(crate) mod tests {
             .iter()
             .map(|m| 2460000.0 + m.rem_euclid(1000) as f64)
             .collect();
-        let plan = plan_upsert(db, members, &jds, None, Some(fit), None)
+        let plan = plan_upsert(db, &ztf(members), &jds, None, None, Some(fit), None)
             .await
             .unwrap();
         commit_upsert(db, plan).await.unwrap()
@@ -1168,6 +1716,56 @@ pub(crate) mod tests {
         assert_eq!(stamp_missing(&db, &stored).await.unwrap(), 0);
         alerts
             .delete_many(doc! { "_id": { "$in": &members } })
+            .await
+            .unwrap();
+    }
+
+    #[test]
+    fn test_a_track_written_before_member_surveys_decodes_its_ids() {
+        let old = stored(
+            "BT000001",
+            &[51_000_000_017_600_000, 52_000_000_000_461_147, 10],
+        );
+        assert_eq!(
+            old.explicit().member_keys(),
+            vec![
+                (Survey::Winter, 17_600_000),
+                (Survey::Decam, 461_147),
+                (Survey::Ztf, 10)
+            ]
+        );
+    }
+
+    /// DECam ids are hashed over the whole positive i64, so no id range names the survey.
+    #[tokio::test]
+    async fn test_a_hashed_decam_member_is_stamped_in_its_own_collection() {
+        let db = crate::conf::get_test_db().await;
+        let decam_id =
+            8_979_027_391_976_047_686 - (uuid::Uuid::new_v4().as_u128() % 1_000_000) as i64;
+        let ztf_ids = fresh_members(2);
+        let members = vec![
+            (Survey::Ztf, ztf_ids[0]),
+            (Survey::Ztf, ztf_ids[1]),
+            (Survey::Decam, decam_id),
+        ];
+        let decam = db.collection::<Document>("DECAM_alerts");
+        decam.insert_one(doc! { "_id": decam_id }).await.unwrap();
+        let jds = [2460000.8, 2460001.8, 2460002.8];
+        let plan = plan_upsert(&db, &members, &jds, None, None, None, None)
+            .await
+            .unwrap();
+        let id = commit_upsert(&db, plan).await.unwrap().track.id;
+        let stored = track_by_id(&db, &id).await.unwrap().unwrap();
+        assert_eq!(stored.member_keys(), members);
+        assert_eq!(stamp_members(&db, &stored).await.unwrap(), 1);
+        let stamped = decam
+            .find_one(doc! { "_id": decam_id, "track.id": &id })
+            .await
+            .unwrap();
+        assert!(stamped.is_some());
+        decam.delete_one(doc! { "_id": decam_id }).await.unwrap();
+        db.collection::<Document>(TRACKS_COLLECTION)
+            .delete_one(doc! { "_id": &id })
             .await
             .unwrap();
     }

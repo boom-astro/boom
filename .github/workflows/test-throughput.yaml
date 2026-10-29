@@ -31,7 +31,9 @@ jobs:
     name: Run throughput test
     runs-on: ubuntu-latest
     permissions: write-all
-    timeout-minutes: 30
+    # Same reasoning as the unit test job: the cap catches a hang, and leaves
+    # room for a slow runner rather than cancelling one.
+    timeout-minutes: 60
     strategy:
       matrix:
         cutouts_storage_type: [mongo, s3]
@@ -52,14 +54,26 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Setup Docker buildx
         uses: docker/setup-buildx-action@v3
+      # In the registry rather than the Actions cache, whose 10 GB cap this
+      # build's export was filling at the cost of the cargo caches, and exported
+      # from main only, since one tag cannot hold two branches.
+      - name: Choose the layer cache
+        run: |
+          ref=ghcr.io/${{ github.repository }}-cache:throughput
+          {
+            echo 'BAKE_CACHE<<EOF'
+            echo "*.cache-from=type=registry,ref=$ref"
+            if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+              echo "*.cache-to=type=registry,ref=$ref,mode=max"
+            fi
+            echo EOF
+          } >> "$GITHUB_ENV"
       - name: Build & Cache Docker images
         uses: docker/bake-action@v2
         with:
           workdir: ./tests/throughput
           load: true
-          set: |
-            *.cache-to=type=gha,mode=max
-            *.cache-from=type=gha
+          set: ${{ env.BAKE_CACHE }}
         env:
           PWD: ${{ github.workspace }}
           BOOM_REPO_ROOT: ${{ github.workspace }}
@@ -70,8 +84,19 @@ jobs:
         run: |
           mkdir -p ./data/alerts
           wget -q https://github.com/boom-astro/boom/releases/download/test-data-v1/BOOM.NED.json.gz -O ./data/alerts/BOOM.NED.json.gz
-      - name: Download auxiliary ZTF alerts from Caltech Box
-        run: wget -q https://caltech.box.com/shared/static/qdois5qq2lmvp02ri50fum80vzr54505.gz -O ./data/alerts/boom_throughput.ZTF_alerts_aux.dump.gz
+      - name: Download auxiliary ZTF alerts
+        run: wget -q https://github.com/boom-astro/boom/releases/download/test-data-v1/boom_throughput.ZTF_alerts_aux.dump.gz -O ./data/alerts/boom_throughput.ZTF_alerts_aux.dump.gz
+      # Seeded from our own release so a run does not depend on ztf.uw.edu being
+      # up; the producer downloads from there only when this directory is empty.
+      - name: Seed the alerts the producer replays
+        run: |
+          dir=./data/alerts/ztf/public/20250311
+          mkdir -p "$dir"
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/ztf_public.tar.gz \
+            "https://github.com/boom-astro/boom/releases/download/test-data-v1/ztf_public_20250311.tar.gz"
+          tar -xzf /tmp/ztf_public.tar.gz -C "$dir"
+          rm -f /tmp/ztf_public.tar.gz
+          echo "Seeded $(find "$dir" -maxdepth 1 -name '*.avro' | wc -l | tr -d ' ') alerts"
       - name: Run test
         run: |
           uv run tests/throughput/run.py \

@@ -11,8 +11,10 @@ import {
   IconBook,
   IconShieldLock,
   IconTelescope,
+  IconVector,
 } from "@tabler/icons-react"
 
+import { useCatalogIssues } from "@/hooks/use-catalog-issues"
 import { NavDocuments } from "@/components/nav-documents"
 import { NavMain } from "@/components/nav-main"
 import { NavSecondary } from "@/components/nav-secondary"
@@ -45,6 +47,11 @@ const data = {
       title: "Telescopes",
       url: "/telescopes",
       icon: IconTelescope,
+    },
+    {
+      title: "Embeddings",
+      url: "/embeddings",
+      icon: IconVector,
     },
   ],
   navSecondary: [
@@ -89,9 +96,23 @@ const data = {
 
 export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
   const isAdmin = useAppStore((s) => s.profile?.is_admin === true)
+  // Only polled for admins; for anyone else the hook is inert.
+  const issues = useCatalogIssues(isAdmin)
+  // Shown only to admins, but the page and every route behind it are enforced
+  // server-side -- this just avoids offering a link that would 403.
   const navMain = isAdmin
-    ? [...data.navMain, { title: "Admin", url: "/admin", icon: IconShieldLock }]
+    ? [
+        ...data.navMain,
+        {
+          title: "Admin",
+          url: "/admin",
+          icon: IconShieldLock,
+          badge: issues.count,
+          badgeLabel: issues.label,
+        },
+      ]
     : data.navMain
+
   return (
     <Sidebar collapsible="icon" {...props}>
       <SidebarHeader>

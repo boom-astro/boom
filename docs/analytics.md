@@ -30,7 +30,7 @@ Package version, Python version, OS name. No hostname, username, machine id,
 architecture, OS version, locale, or timezone — see `get_user_agent` in
 [`babamul/api.py`](https://github.com/boom-astro/babamul) and the tests that
 pin it. The server never stores the raw string; `parse_user_agent` in
-[`src/api/observability.rs`](../src/api/observability.rs) reduces unrecognized
+[`src/api/observability.rs`](https://github.com/boom-astro/boom/blob/main/src/api/observability.rs) reduces unrecognized
 agents to a bucket (`browser`, `httpx`, `requests`, `curl`, `other`) so an
 unusual `User-Agent` can't become a fingerprint.
 
@@ -70,7 +70,7 @@ stays anonymous and the next successful `identify` merges it in. Activation
 and password-reset links do carry the address in their query string, and PostHog
 reports `$current_url` with every event, so the client masks `email`, `token`
 and `activation_code` out of it (`mask_personal_data_properties` in
-[`frontend/src/main.tsx`](../frontend/src/main.tsx)).
+[`frontend/src/main.tsx`](https://github.com/boom-astro/boom/blob/main/frontend/src/main.tsx)).
 
 Sessions that signed in before the `id` fix are already identified on the
 username, and `posthog.identify` emits its merge event only while the stored
@@ -137,7 +137,7 @@ without querying the event log.
 ## Grafana
 
 The **Babamul Usage** dashboard
-([`config/grafana/dashboards/babamul-usage.json`](../config/grafana/dashboards/babamul-usage.json))
+([`config/grafana/dashboards/babamul-usage.json`](https://github.com/boom-astro/boom/blob/main/config/grafana/dashboards/babamul-usage.json))
 covers stream consumption per user and per topic, Babamul API request rate
 split by client, and the health of the analytics pipeline itself.
 
@@ -162,7 +162,7 @@ credential id, and the credential id lives on the user document — which is wha
 turns an anonymous-looking consumer group back into "this user consumed this
 much".
 
-Every cycle, [`src/api/consumption.rs`](../src/api/consumption.rs):
+Every cycle, [`src/api/consumption.rs`](https://github.com/boom-astro/boom/blob/main/src/api/consumption.rs):
 
 1. loads every user's Kafka credentials into a username → user map;
 2. reads watermarks for all `babamul.*` partitions;

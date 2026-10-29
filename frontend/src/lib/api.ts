@@ -18,6 +18,8 @@ export type Profile = {
   /** Provider slugs the account can sign in with, e.g. ["google", "orcid"] */
   identity_providers?: string[];
   orcid_id?: string | null;
+  /** Whether this account may reach the admin page. Server-enforced on every
+   * admin route regardless; this only decides what the UI offers. */
   is_admin?: boolean;
   acls?: string[];
 } | null;
@@ -32,16 +34,20 @@ export type TokenResponse = { id: string; name: string; access_token: string; cr
 export const TOKEN_KEY = "api_token";
 export const USERNAME_KEY = "api_user";
 
-async function parseResponseJson(res: Response): Promise<unknown> {
-  const text = await res.text();
+/** Parse a body that has already been read, throwing if it is not JSON. */
+export function parseJsonText(text: string): unknown {
   // Quote 16+ digit integers: `JSON.parse` would round them and lose candid precision.
   const safeText = text.replace(/:\s*(-?\d{16,})(?![\d]*["])/g, (_, numStr) => `:"${numStr}"`);
   return JSON.parse(safeText);
 }
 
+export async function parseResponseJson(res: Response): Promise<unknown> {
+  return parseJsonText(await res.text());
+}
+
 type DataEnvelope<T> = { data?: T };
 
-function unwrapData<T>(body: unknown, fallback: T): T {
+export function unwrapData<T>(body: unknown, fallback: T): T {
   if (body && typeof body === "object" && "data" in body) {
     const dataVal = (body as DataEnvelope<unknown>).data;
     if (dataVal !== undefined) return dataVal as T;
@@ -126,10 +132,43 @@ export async function login(email: string, password: string): Promise<TokenRecor
   return getTokenRecord();
 }
 
+/**
+ * The providers could not be asked for, as distinct from there being none.
+ *
+ * Only this is worth retrying. A usable answer is final, including an empty
+ * one: that is a deployment that configured no provider.
+ */
+export class OAuthProvidersUnavailable extends Error {}
+
 export async function fetchOAuthProviders(): Promise<OAuthProvider[]> {
-  const res = await fetch(`${API_BASE}/oauth/providers`);
-  if (!res.ok) return [];
-  return readList<OAuthProvider>(res);
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE}/oauth/providers`);
+  } catch {
+    throw new OAuthProvidersUnavailable("the API could not be reached");
+  }
+  if (!res.ok) {
+    throw new OAuthProvidersUnavailable(`the API answered ${res.status}`);
+  }
+  let text: string;
+  try {
+    text = await res.text();
+  } catch {
+    // The headers arrived and the body did not. A connection dropped
+    // mid-response is the same transport failure as never reaching the API,
+    // so it must not read as "this deployment has no providers".
+    throw new OAuthProvidersUnavailable("the response body could not be read");
+  }
+  let body: unknown;
+  try {
+    body = parseJsonText(text);
+  } catch {
+    // Read in full and not JSON: the API disagreeing with us rather than a
+    // blip, which retrying cannot fix. Same for a readable non-list below.
+    return [];
+  }
+  const data = unwrapData<unknown>(body, []);
+  return Array.isArray(data) ? (data as OAuthProvider[]) : [];
 }
 
 export function startOAuthLogin(provider: OAuthProvider, redirectTo?: string) {
@@ -189,7 +228,9 @@ export async function resetPassword(email: string, token: string, new_password: 
 
 const authorization = (token: TokenRecord) => `${token.token_type} ${token.access_token}`;
 
-async function fetchWithAuth(input: RequestInfo, init: RequestInit = {}) {
+// Exported for the admin client, which shares this request path rather than
+// carrying a second copy of the auth handling.
+export async function fetchWithAuth(input: RequestInfo, init: RequestInit = {}) {
   const token = getTokenRecord();
   if (!token) throw new Error("Not authenticated");
   const headers = new Headers(init.headers || {});
@@ -256,7 +297,9 @@ export async function fetchAdminUsers(search: string, limit: number, offset: num
   return unwrapData<AdminUsersPage>(await readJson(res), { users: [], total: 0, available_acls: [] });
 }
 
-export async function updateAdminUser(id: string, patch: { is_admin?: boolean; acls?: string[] }): Promise<AdminUser> {
+export type AdminUserPatch = { is_admin?: boolean; grant_acls?: string[]; revoke_acls?: string[] };
+
+export async function updateAdminUser(id: string, patch: AdminUserPatch): Promise<AdminUser> {
   const res = await fetchWithAuth(`${API_BASE}/admin/users/${encodeURIComponent(id)}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
@@ -264,7 +307,16 @@ export async function updateAdminUser(id: string, patch: { is_admin?: boolean; a
   });
   const body = await readJson(res);
   if (!res.ok) throw new Error(messageOf(body) ?? `Update user failed: ${res.status}`);
-  return unwrapData<AdminUser>(body, {} as AdminUser);
+  const updated = unwrapData<AdminUser | null>(body, null);
+  // `readJson` swallows a parse failure to null, and the `{} as AdminUser`
+  // this used to fall back to left every field undefined: no row matched the
+  // id, so the table went on showing the old values while the toast said
+  // "Updated undefined". The change did land -- the status says so -- but the
+  // page can no longer say what it landed as.
+  if (!updated || typeof updated.id !== "string") {
+    throw new Error("The change was saved but the response could not be read. Reload to see it.");
+  }
+  return updated;
 }
 
 export async function fetchKafkaCredentials(): Promise<KafkaCredential[]> {
@@ -404,8 +456,9 @@ export async function fetchStats(startDate: string, endDate: string, survey?: st
   return readList<NightlyStat>(res);
 }
 
-export async function refreshStats(startDate: string, endDate: string): Promise<void> {
+export async function refreshStats(startDate: string, endDate: string, survey?: string): Promise<void> {
   const params = new URLSearchParams({ start_date: startDate, end_date: endDate });
+  if (survey) params.set("survey", survey);
   const res = await fetchWithAuth(`${API_BASE}/stats/refresh?${params}`, { method: "POST" });
   if (res.ok) return;
   throw new Error(messageOf(await readJson(res)) ?? `Refresh stats failed: ${res.status}`);
@@ -476,6 +529,56 @@ export async function searchObjects(value: string, limit: number = 10): Promise<
     results: Array.isArray(result) ? (result as SearchResult[]) : [],
     message: messageOf(body),
   };
+}
+
+export type SimilarObject = {
+  object_id: string;
+  /** COSINE similarity, so higher is closer. */
+  score: number;
+};
+
+/**
+ * Objects whose AppleCiDEr fusion embedding is closest to this one's, excluding
+ * itself. A 404 means no embedding is stored (only ZTF alerts that pass the
+ * AppleCiDEr gate get one), so it returns an empty list rather than throwing.
+ */
+export async function fetchSimilarObjects(
+  objectId: string,
+  topK: number = 10
+): Promise<{ results: SimilarObject[]; message?: string }> {
+  const url = `${API_BASE}/similarity/objects`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ object_id: objectId, top_k: topK }),
+  });
+  const body = await parseResponseJson(res).catch(() => null);
+  const message =
+    body && typeof body === "object" && "message" in body
+      ? String((body as { message?: unknown }).message)
+      : undefined;
+
+  if (res.status === 404) {
+    return { results: [], message: message ?? `No embedding stored for ${objectId}` };
+  }
+  if (!res.ok) {
+    throw new Error(message ?? `Similarity search failed: ${res.status}`);
+  }
+
+  const result = unwrapData<unknown>(body, []);
+  return { results: Array.isArray(result) ? (result as SimilarObject[]) : [], message };
+}
+
+export async function fetchEmbeddingsCount(): Promise<number> {
+  const url = `${API_BASE}/embeddings/count`;
+  const res = await fetch(url);
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`Fetch embedding count failed: ${res.status} ${txt}`);
+  }
+  const body = await parseResponseJson(res).catch(() => ({}));
+  const data = unwrapData<{ count?: number }>(body, {});
+  return typeof data.count === "number" ? data.count : 0;
 }
 
 export default {

@@ -46,6 +46,7 @@ impl Modify for BabamulSecurityAddon {
         title = "BOOM API",
         version = "0.1.0",
         description = "An HTTP REST interface to BOOM.\n\n\
+        **Python client**: [boom-client](https://github.com/boom-astro/boom-client) (`pip install boom-client`).\n\n\
         **Note**: For the public Babamul API, see the separate documentation at `/babamul/docs`."
     ),
     paths(
@@ -71,6 +72,9 @@ impl Modify for BabamulSecurityAddon {
         routes::tasks::get_task_logs,
         routes::tasks::cancel_task,
         routes::tasks::get_data_mutations,
+        routes::tasks::get_enrichment_status,
+        routes::tasks::accept_enrichment_set,
+        routes::tasks::unaccept_enrichment_set,
         routes::filters::post_filter,
         routes::filters::patch_filter,
         routes::filters::validate_filter,
@@ -87,11 +91,11 @@ impl Modify for BabamulSecurityAddon {
         routes::queries::cone_search::post_cone_search_query,
         routes::surveys::cutouts::get_cutouts,
         routes::surveys::cutouts::get_batch_cutouts,
+        routes::surveys::tracks::get_tracks,
         routes::surveys::tracks::get_track,
         routes::queries::pipeline::post_pipeline_query,
         routes::embeddings::post_similar_objects,
         routes::embeddings::get_embeddings_count,
-        routes::embeddings::delete_object_embedding
     ),
     security(
         ("api_jwt_token" = [])
@@ -141,6 +145,8 @@ pub struct ApiDoc;
         routes::babamul::stats::nightly::get_nightly_stats,
         routes::babamul::stats::refresh::post_stats_refresh,
         routes::babamul::surveys::alerts::skymap_search_alerts,
+        routes::babamul::embeddings::post_babamul_similar_objects,
+        routes::babamul::embeddings::get_babamul_embeddings_count,
     ),
     components(schemas(
         routes::babamul::surveys::alerts::LsstAlertSkymapSearchResult

@@ -7,11 +7,12 @@
 //! leaves measures each survey's astrometry against the same reference.
 
 use crate::utils::heliolinc::radec_from_ecliptic;
-use crate::utils::linking::{angular_separation_deg, night_of, Detection};
+use crate::utils::linking::{angular_separation_deg, tangent_plane, Detection, Tracklet};
 use crate::utils::orbit_fit::C_AU_PER_DAY;
 pub use crate::utils::outburst::median;
 use crate::utils::sso_geometry::{
-    earth_position, heliocentric_position, observer_position, OrbitalElements, Site, ZTF,
+    earth_position_utc, heliocentric_position, observer_position, OrbitalElements, Site,
+    TT_MINUS_UTC_DAYS, ZTF,
 };
 use rayon::prelude::*;
 use std::collections::HashMap;
@@ -30,13 +31,13 @@ pub struct Match {
     pub designation: String,
     pub separation_arcsec: f64,
     pub jd: f64,
+    pub night: i64,
 }
 
 /// How wide to search, at each of the two stages.
 #[derive(Debug, Clone)]
 pub struct IdentifyConfig {
-    /// Shortlisting radius, degrees. Must exceed a night's motion, since the
-    /// coarse pass places every object at one epoch per night.
+    /// Shortlisting radius around each object's path through the night, degrees.
     pub coarse_radius_deg: f64,
     /// Where the observations were made from, for the parallax correction.
     pub site: Site,
@@ -63,7 +64,7 @@ impl Default for IdentifyConfig {
     }
 }
 
-/// Apparent position of `elements` at `jd` as seen from `site`, degrees.
+/// Apparent position of `elements` at `jd` (UTC) as seen from `site`, degrees.
 ///
 /// Topocentric rather than geocentric: an Earth radius of offset is several
 /// arcseconds against a main-belt asteroid, which is a large share of the
@@ -79,7 +80,7 @@ fn light_time_corrected(elements: &OrbitalElements, jd: f64, observer: &[f64; 3]
     let mut tau = 0.0;
     let mut los = [0.0; 3];
     for _ in 0..2 {
-        let helio = heliocentric_position(elements, jd - tau);
+        let helio = heliocentric_position(elements, jd + TT_MINUS_UTC_DAYS - tau);
         los = [
             helio[0] - observer[0],
             helio[1] - observer[1],
@@ -92,10 +93,10 @@ fn light_time_corrected(elements: &OrbitalElements, jd: f64, observer: &[f64; 3]
 
 /// Apparent position from the Earth's centre, degrees.
 pub fn predict_radec(elements: &OrbitalElements, jd: f64) -> (f64, f64) {
-    radec_from_ecliptic(&light_time_corrected(elements, jd, &earth_position(jd)))
+    radec_from_ecliptic(&light_time_corrected(elements, jd, &earth_position_utc(jd)))
 }
 
-/// Catalogued objects placed on the sky at one epoch, bucketed so a position's
+/// Catalogued objects' paths on the sky, bucketed so a position's
 /// neighbours are found without scanning the catalogue.
 ///
 /// Cells are `size` degrees in dec. Each dec band is cut into RA bins at least
@@ -107,14 +108,24 @@ struct SkyGrid {
 }
 
 impl SkyGrid {
-    fn new(positions: &[(f64, f64)], size: f64) -> Self {
+    fn along(start: &[(f64, f64)], end: &[(f64, f64)], spacing: f64, size: f64) -> Self {
         let mut cells: HashMap<(i64, i64), Vec<usize>> = HashMap::new();
-        for (i, &(ra, dec)) in positions.iter().enumerate() {
-            let band = Self::band(dec, size);
-            cells
-                .entry((band, Self::bin(ra, band, size)))
-                .or_default()
-                .push(i);
+        for (i, (&a, &b)) in start.iter().zip(end).enumerate() {
+            let steps = (angular_separation_deg(a.0, a.1, b.0, b.1) / spacing)
+                .ceil()
+                .max(1.0) as usize;
+            let mut keys: Vec<(i64, i64)> = Vec::new();
+            for step in 0..=steps {
+                let (ra, dec) = interpolate(a, b, step as f64 / steps as f64);
+                let band = Self::band(dec, size);
+                let key = (band, Self::bin(ra, band, size));
+                if !keys.contains(&key) {
+                    keys.push(key);
+                }
+            }
+            for key in keys {
+                cells.entry(key).or_default().push(i);
+            }
         }
         SkyGrid { size, cells }
     }
@@ -150,21 +161,97 @@ impl SkyGrid {
                 }
             }
         }
-        keys.iter()
+        let mut out: Vec<usize> = keys
+            .iter()
             .filter_map(|k| self.cells.get(k))
             .flatten()
             .copied()
-            .collect()
+            .collect();
+        out.sort_unstable();
+        out.dedup();
+        out
     }
+}
+
+struct NightPaths {
+    first: f64,
+    span: f64,
+    start: Vec<(f64, f64)>,
+    end: Option<Vec<(f64, f64)>>,
+    grid: SkyGrid,
+    radius_deg: f64,
+}
+
+impl NightPaths {
+    fn new(orbits: &[OrbitEntry], first: f64, last: f64, radius_deg: f64) -> Self {
+        let place = |jd: f64| -> Vec<(f64, f64)> {
+            let earth = earth_position_utc(jd);
+            orbits
+                .par_iter()
+                .map(|o| radec_from_ecliptic(&light_time_corrected(&o.elements, jd, &earth)))
+                .collect()
+        };
+        let start = place(first);
+        let end = (last > first).then(|| place(last));
+        let spacing = radius_deg / 2.0;
+        // Widened by the spacing, so a path point between two samples is still found.
+        let grid = SkyGrid::along(
+            &start,
+            end.as_deref().unwrap_or(&start),
+            spacing,
+            radius_deg + spacing,
+        );
+        NightPaths {
+            first,
+            span: last - first,
+            start,
+            end,
+            grid,
+            radius_deg,
+        }
+    }
+
+    fn near(&self, ra: f64, dec: f64, jd: f64) -> impl Iterator<Item = usize> + '_ {
+        let f = if self.span > 0.0 {
+            (jd - self.first) / self.span
+        } else {
+            0.0
+        };
+        let end = self.end.as_deref().unwrap_or(&self.start);
+        // The grid overreaches, so gate on the separation before paying for a
+        // second propagation.
+        self.grid.near(ra, dec).into_iter().filter(move |&idx| {
+            let (night_ra, night_dec) = interpolate(self.start[idx], end[idx], f);
+            angular_separation_deg(ra, dec, night_ra, night_dec) <= self.radius_deg
+        })
+    }
+}
+
+fn interpolate(a: (f64, f64), b: (f64, f64), f: f64) -> (f64, f64) {
+    let unit = |(ra, dec): (f64, f64)| {
+        let (ra, dec) = (ra.to_radians(), dec.to_radians());
+        [dec.cos() * ra.cos(), dec.cos() * ra.sin(), dec.sin()]
+    };
+    let (u, v) = (unit(a), unit(b));
+    let p = [
+        u[0] + f * (v[0] - u[0]),
+        u[1] + f * (v[1] - u[1]),
+        u[2] + f * (v[2] - u[2]),
+    ];
+    let n = (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt();
+    (
+        p[1].atan2(p[0]).to_degrees().rem_euclid(360.0),
+        (p[2] / n).clamp(-1.0, 1.0).asin().to_degrees(),
+    )
 }
 
 /// Attribute each detection to the catalogued object it sits closest to.
 ///
 /// Two stages, because propagating the whole catalogue per detection is
-/// wasteful: every object is placed once per night to shortlist candidates,
-/// then only those are recomputed at the detection's own epoch. The shortlist
-/// comes from a sky grid rather than a dec band spanning every RA, and the
-/// detections of a night are matched in parallel.
+/// wasteful: every object is placed at the night's first and last epochs to
+/// shortlist candidates, then only those are recomputed at the detection's
+/// own epoch. The shortlist comes from a sky grid rather than a dec band
+/// spanning every RA, and the detections of a night are matched in parallel.
 pub fn identify(
     detections: &[Detection],
     orbits: &[OrbitEntry],
@@ -172,7 +259,7 @@ pub fn identify(
 ) -> Vec<Match> {
     let mut by_night: HashMap<i64, Vec<&Detection>> = HashMap::new();
     for d in detections {
-        by_night.entry(night_of(d.jd)).or_default().push(d);
+        by_night.entry(d.night()).or_default().push(d);
     }
 
     // Sorted, since a HashMap's order would carry into `matches`.
@@ -180,29 +267,22 @@ pub fn identify(
     nights.sort_by_key(|(night, _)| *night);
 
     let mut matches = Vec::new();
-    for (night, dets) in nights {
-        let epoch = night as f64 + 1.0;
-        // Every object placed once for the night.
-        let placed: Vec<(f64, f64)> = orbits
-            .par_iter()
-            .map(|o| predict_radec(&o.elements, epoch))
-            .collect();
-        let grid = SkyGrid::new(&placed, cfg.coarse_radius_deg);
+    for (_, dets) in nights {
+        let first = dets.iter().map(|d| d.jd).fold(f64::INFINITY, f64::min);
+        let last = dets.iter().map(|d| d.jd).fold(f64::NEG_INFINITY, f64::max);
+        let paths = NightPaths::new(orbits, first, last, cfg.coarse_radius_deg);
 
         let found: Vec<Match> = dets
             .par_iter()
             .filter_map(|d| {
                 let mut best: Option<(f64, usize)> = None;
-                for idx in grid.near(d.ra, d.dec) {
-                    let (night_ra, night_dec) = placed[idx];
-                    // The grid overreaches, so gate on the separation before
-                    // paying for a second propagation.
-                    if angular_separation_deg(d.ra, d.dec, night_ra, night_dec)
-                        > cfg.coarse_radius_deg
-                    {
-                        continue;
-                    }
-                    let (pra, pdec) = predict_radec_from(&orbits[idx].elements, d.jd, &cfg.site);
+                let observer = observer_position(d.jd, d.site.as_ref().unwrap_or(&cfg.site));
+                for idx in paths.near(d.ra, d.dec, d.jd) {
+                    let (pra, pdec) = radec_from_ecliptic(&light_time_corrected(
+                        &orbits[idx].elements,
+                        d.jd,
+                        &observer,
+                    ));
                     let sep = angular_separation_deg(d.ra, d.dec, pra, pdec) * 3600.0;
                     // Ties go to the lower index, so the result does not
                     // depend on the order the grid returns candidates in.
@@ -217,6 +297,7 @@ pub fn identify(
                     designation: orbits[idx].designation.clone(),
                     separation_arcsec: sep,
                     jd: d.jd,
+                    night: d.night(),
                 })
             })
             .collect();
@@ -278,7 +359,7 @@ pub fn track_designation(
         .into_iter()
         // Most detections first; the designation breaks a tie reproducibly.
         .max_by(|a, b| a.1.len().cmp(&b.1.len()).then(b.0.cmp(a.0)))?;
-    let nights: std::collections::BTreeSet<i64> = agreeing.iter().map(|m| night_of(m.jd)).collect();
+    let nights: std::collections::BTreeSet<i64> = agreeing.iter().map(|m| m.night).collect();
     let separations: Vec<f64> = agreeing.iter().map(|m| m.separation_arcsec).collect();
     let centre = median(&separations)?;
     let jds: Vec<f64> = agreeing.iter().map(|m| m.jd).collect();
@@ -291,6 +372,112 @@ pub fn track_designation(
         && nights.len() >= rule.min_nights
         && steady)
         .then(|| designation.to_string())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MotionRule {
+    pub radius_arcsec: f64,
+    /// In units of the rate error the site's astrometry leaves over the tracklet.
+    pub rate_sigma: f64,
+}
+
+impl Default for MotionRule {
+    fn default() -> Self {
+        Self {
+            radius_arcsec: 30.0,
+            rate_sigma: 4.0,
+        }
+    }
+}
+
+const RATE_STEP_DAYS: f64 = 0.01;
+
+pub fn known_tracklets(
+    tracklets: &[Tracklet],
+    detections: &[Detection],
+    orbits: &[OrbitEntry],
+    cfg: &IdentifyConfig,
+    rule: &MotionRule,
+) -> Vec<Option<String>> {
+    let by_id: HashMap<i64, &Detection> = detections.iter().map(|d| (d.id, d)).collect();
+    let mut by_night: HashMap<i64, Vec<usize>> = HashMap::new();
+    for (k, t) in tracklets.iter().enumerate() {
+        by_night.entry(t.night()).or_default().push(k);
+    }
+    let mut known = vec![None; tracklets.len()];
+    for members in by_night.into_values() {
+        let epochs = members.iter().map(|&k| tracklets[k].jd_ref);
+        let first = epochs.clone().fold(f64::INFINITY, f64::min);
+        let last = epochs.fold(f64::NEG_INFINITY, f64::max);
+        let paths = NightPaths::new(orbits, first, last, cfg.coarse_radius_deg);
+        let found: Vec<(usize, Option<usize>)> = members
+            .par_iter()
+            .map(|&k| {
+                (
+                    k,
+                    moving_with(&tracklets[k], &by_id, orbits, &paths, cfg, rule),
+                )
+            })
+            .collect();
+        for (k, idx) in found {
+            known[k] = idx.map(|i| orbits[i].designation.clone());
+        }
+    }
+    known
+}
+
+fn moving_with(
+    t: &Tracklet,
+    by_id: &HashMap<i64, &Detection>,
+    orbits: &[OrbitEntry],
+    paths: &NightPaths,
+    cfg: &IdentifyConfig,
+    rule: &MotionRule,
+) -> Option<usize> {
+    let members: Vec<&Detection> = t
+        .ids
+        .iter()
+        .filter_map(|id| by_id.get(id).copied())
+        .collect();
+    let site = members.first().and_then(|d| d.site).unwrap_or(cfg.site);
+    let spread: f64 = members.iter().map(|d| (d.jd - t.jd_ref).powi(2)).sum();
+    if spread <= 0.0 {
+        return None;
+    }
+    let tolerance = rule.rate_sigma * site.astrometric_sigma_arcsec / spread.sqrt();
+    let half = RATE_STEP_DAYS / 2.0;
+    let observed = (
+        crate::utils::linking::predict(t, t.jd_ref - half),
+        crate::utils::linking::predict(t, t.jd_ref + half),
+    );
+    let [now, before, after] =
+        [t.jd_ref, t.jd_ref - half, t.jd_ref + half].map(|jd| (jd, observer_position(jd, &site)));
+    let seen = |elements: &OrbitalElements, (jd, observer): &(f64, [f64; 3])| {
+        radec_from_ecliptic(&light_time_corrected(elements, *jd, observer))
+    };
+    paths
+        .near(t.ra_ref, t.dec_ref, t.jd_ref)
+        .filter_map(|idx| {
+            let elements = &orbits[idx].elements;
+            let center = seen(elements, &now);
+            let sep = angular_separation_deg(t.ra_ref, t.dec_ref, center.0, center.1) * 3600.0;
+            if sep > rule.radius_arcsec {
+                return None;
+            }
+            let predicted = (seen(elements, &before), seen(elements, &after));
+            let (ox, oy) = displacement(observed, center)?;
+            let (px, py) = displacement(predicted, center)?;
+            let gap = (ox - px).hypot(oy - py) * 3600.0 / RATE_STEP_DAYS;
+            (gap <= tolerance).then_some((sep, idx))
+        })
+        .min_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)))
+        .map(|(_, idx)| idx)
+}
+
+fn displacement((from, to): ((f64, f64), (f64, f64)), center: (f64, f64)) -> Option<(f64, f64)> {
+    let a = tangent_plane(from.0, from.1, center.0, center.1)?;
+    let b = tangent_plane(to.0, to.1, center.0, center.1)?;
+    Some((b.0 - a.0, b.1 - a.1))
 }
 
 #[cfg(test)]
@@ -331,6 +518,7 @@ mod tests {
             mag: None,
             mag_err: None,
             band: None,
+            site: None,
         }
     }
 
@@ -362,6 +550,7 @@ mod tests {
             mag: None,
             mag_err: None,
             band: None,
+            site: None,
         }];
         assert!(identify(&dets, &catalogue(), &IdentifyConfig::default()).is_empty());
     }
@@ -382,6 +571,38 @@ mod tests {
     }
 
     #[test]
+    fn test_matches_an_object_too_fast_for_one_placement_a_night() {
+        use crate::utils::heliolinc::{state_to_elements, State};
+
+        let jd = 2460010.6;
+        let earth = earth_position_utc(jd);
+        let (before, after) = (earth_position_utc(jd - 0.5), earth_position_utc(jd + 0.5));
+        let r = (earth[0] * earth[0] + earth[1] * earth[1] + earth[2] * earth[2]).sqrt();
+        let state = State {
+            pos: [0, 1, 2].map(|k| earth[k] * (1.0 + 0.03 / r)),
+            vel: [
+                after[0] - before[0],
+                after[1] - before[1],
+                after[2] - before[2] + 0.01,
+            ],
+        };
+        let fast = vec![OrbitEntry {
+            designation: "fast".to_string(),
+            elements: state_to_elements(&state, jd).expect("a bound orbit"),
+        }];
+        let dets = vec![
+            detection_of(&fast[0].elements, 2460010.62, 1),
+            detection_of(&fast[0].elements, 2460010.95, 2),
+        ];
+        assert!(
+            angular_separation_deg(dets[0].ra, dets[0].dec, dets[1].ra, dets[1].dec) > 5.0,
+            "the fixture should move several degrees within the night"
+        );
+        let found = identify(&dets, &fast, &IdentifyConfig::default());
+        assert_eq!(found.len(), 2);
+    }
+
+    #[test]
     fn test_matches_across_separate_nights() {
         let dets = vec![
             detection_of(&ceres_like(), 2460010.3, 1),
@@ -390,6 +611,47 @@ mod tests {
         let found = identify(&dets, &catalogue(), &IdentifyConfig::default());
         assert_eq!(found.len(), 2);
         assert!(found.iter().all(|m| m.designation == "1"));
+    }
+
+    #[test]
+    fn test_a_tracklet_is_known_only_when_it_moves_as_predicted() {
+        use crate::utils::linking::{fit_tracklet, TrackletConfig};
+        use crate::utils::sso_geometry::DECAM;
+
+        let detection = |id: i64, jd: f64, north_arcsec: f64| {
+            let (ra, dec) = predict_radec_from(&ceres_like(), jd, &DECAM);
+            Detection {
+                id,
+                jd,
+                ra,
+                dec: dec + north_arcsec / 3600.0,
+                mag: None,
+                mag_err: None,
+                band: None,
+                site: Some(DECAM),
+            }
+        };
+        let (a, b) = (2460010.6, 2460010.63);
+        let detections = vec![
+            detection(1, a, 0.0),
+            detection(2, b, 0.0),
+            detection(3, a, 0.0),
+            detection(4, b, 3.0),
+            detection(5, a, 40.0),
+            detection(6, b, 40.0),
+        ];
+        let tracklets: Vec<Tracklet> = detections
+            .chunks(2)
+            .map(|pair| fit_tracklet(pair, &TrackletConfig::default()).expect("a tracklet"))
+            .collect();
+        let known = known_tracklets(
+            &tracklets,
+            &detections,
+            &catalogue(),
+            &IdentifyConfig::default(),
+            &MotionRule::default(),
+        );
+        assert_eq!(known, vec![Some("1".to_string()), None, None]);
     }
 
     /// A spread of orbits, deterministic, reaching high inclinations so some
@@ -427,14 +689,10 @@ mod tests {
         detections
             .iter()
             .filter_map(|d| {
-                let epoch = night_of(d.jd) as f64 + 1.0;
                 let mut best: Option<(f64, usize)> = None;
                 for (idx, o) in orbits.iter().enumerate() {
-                    let (ra, dec) = predict_radec(&o.elements, epoch);
-                    if angular_separation_deg(d.ra, d.dec, ra, dec) > cfg.coarse_radius_deg {
-                        continue;
-                    }
-                    let (pra, pdec) = predict_radec_from(&o.elements, d.jd, &cfg.site);
+                    let (pra, pdec) =
+                        predict_radec_from(&o.elements, d.jd, d.site.as_ref().unwrap_or(&cfg.site));
                     let sep = angular_separation_deg(d.ra, d.dec, pra, pdec) * 3600.0;
                     if sep <= cfg.match_radius_arcsec
                         && best.is_none_or(|(b, i)| sep < b || (sep == b && idx < i))
@@ -478,6 +736,7 @@ mod tests {
                 mag: None,
                 mag_err: None,
                 band: None,
+                site: None,
             });
         }
         assert!(
@@ -506,6 +765,7 @@ mod tests {
             designation: designation.to_string(),
             separation_arcsec: 30.0,
             jd,
+            night: crate::utils::linking::night_of(jd),
         }
     }
 
