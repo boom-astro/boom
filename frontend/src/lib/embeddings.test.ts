@@ -52,6 +52,33 @@ describe("fetchSimilarObjects", () => {
     expect(results[0].score).toBeCloseTo(0.98)
   })
 
+  it("passes each neighbor's AppleCiDEr classification through, null when absent", async () => {
+    const fusion = {
+      decision_label: "Ia-like SN",
+      decision_level: "class",
+      decision_probability: 0.84,
+      abstain_completely: false,
+      class_probabilities: { "Ia-like SN": 0.84, TDE: 0.16 },
+    }
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse({
+          message: "success",
+          data: [
+            { object_id: "ZTF21aaa", score: 0.98, applecider_fusion: fusion },
+            { object_id: "ZTF21bbb", score: 0.91, applecider_fusion: null },
+          ],
+        })
+      )
+    )
+
+    const { results } = await fetchSimilarObjects("ZTF18abcdefg")
+
+    expect(results[0].applecider_fusion).toEqual(fusion)
+    expect(results[1].applecider_fusion).toBeNull()
+  })
+
   it("treats 404 as an empty result with the server's explanation, not an error", async () => {
     const fetchMock = vi.fn(async () =>
       jsonResponse({ message: "No embedding stored for object ZTF18abcdefg" }, 404)

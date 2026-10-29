@@ -531,10 +531,24 @@ export async function searchObjects(value: string, limit: number = 10): Promise<
   };
 }
 
+/** AppleCiDEr's classification, as stored in `classifications.applecider_fusion`. */
+export type AppleCiderFusion = {
+  /** Absent, like level and probability, when every level abstained. */
+  decision_label?: string;
+  /** "class", "family" or "domain": the deepest level that survived its gate. */
+  decision_level?: string;
+  decision_probability?: number;
+  abstain_completely: boolean;
+  /** Calibrated leaf probabilities, keyed by class name ("AGN-like", ...). */
+  class_probabilities: Record<string, number>;
+};
+
 export type SimilarObject = {
   object_id: string;
   /** COSINE similarity, so higher is closer. */
   score: number;
+  /** Null when the alert the embedding came from has no classification. */
+  applecider_fusion?: AppleCiderFusion | null;
 };
 
 /**
