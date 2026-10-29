@@ -243,9 +243,9 @@ async fn main() -> std::io::Result<()> {
                 .service(routes::tasks::get_enrichment_status)
                 .service(routes::tasks::accept_enrichment_set)
                 .service(routes::tasks::unaccept_enrichment_set)
-                // Registered after the more specific /tasks/... paths: actix
-                // matches in registration order, so a leading {task_id} route
-                // would swallow /tasks/types.
+                // Registered last among the /tasks paths: actix matches in
+                // registration order, so {task_id} would swallow any literal
+                // /tasks/<name> added above it.
                 .service(routes::tasks::get_task)
                 .service(routes::queries::post_find_query)
                 .service(routes::queries::post_cone_search_query)

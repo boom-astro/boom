@@ -13,6 +13,13 @@ const DRIFT_QUERY_BUDGET: std::time::Duration = std::time::Duration::from_secs(5
 
 const MAX_TIME_MS_EXPIRED: i32 = 50;
 
+const NAMESPACE_NOT_FOUND: i32 = 26;
+
+fn is_namespace_not_found(error: &mongodb::error::Error) -> bool {
+    matches!(error.kind.as_ref(),
+        mongodb::error::ErrorKind::Command(e) if e.code == NAMESPACE_NOT_FOUND)
+}
+
 fn is_max_time_expired(error: &mongodb::error::Error) -> bool {
     matches!(error.kind.as_ref(),
         mongodb::error::ErrorKind::Command(e) if e.code == MAX_TIME_MS_EXPIRED)
@@ -406,6 +413,28 @@ pub fn stale_filter(acceptable: &[i64]) -> mongodb::bson::Document {
     doc! { "enrichment_set": { "$nin": acceptable } }
 }
 
+/// Whether the distinct in [`drift_status`] can be trusted: it needs the
+/// `enrichment_set` index to see alerts missing the field. A survey that has
+/// never ingested has no collection to list, and no alert that could be stale,
+/// so it reads normally rather than reporting the absence as doubt.
+async fn can_read_drift(
+    alerts: &mongodb::Collection<mongodb::bson::Document>,
+) -> Result<bool, VersionError> {
+    use futures::TryStreamExt;
+    let indexes: Vec<_> = match alerts.list_indexes().await {
+        Ok(cursor) => cursor.try_collect().await?,
+        Err(e) if is_namespace_not_found(&e) => return Ok(true),
+        Err(e) => return Err(e.into()),
+    };
+    Ok(indexes.iter().any(|index| {
+        index
+            .keys
+            .keys()
+            .next()
+            .is_some_and(|k| k == "enrichment_set")
+    }))
+}
+
 /// Uses distinct set ids, not per-set counts: counting scans the archive and the page polls.
 pub async fn drift_status(
     db: &mongodb::Database,
@@ -431,6 +460,26 @@ pub async fn drift_status(
 
     let alerts =
         db.collection::<mongodb::bson::Document>(&format!("{}_alerts", survey.to_uppercase()));
+
+    // Without the index the distinct is both expensive and wrong: a collection
+    // scan emits nothing for an alert missing the field, so unstamped alerts
+    // are invisible and an archive with no stamps at all reads "up to date".
+    // The index's null is what makes them visible, so until it exists the only
+    // honest answer is that drift is not known.
+    if !can_read_drift(&alerts).await? {
+        return Ok(DriftStatus {
+            survey: survey.to_string(),
+            current_set: Some(current_id),
+            stale_sets: Vec::new(),
+            accepted_sets: acceptable
+                .into_iter()
+                .filter(|id| *id != current_id)
+                .collect(),
+            has_unstamped: false,
+            drift_unknown: true,
+        });
+    }
+
     let seen = match alerts
         .distinct("enrichment_set", doc! {})
         .max_time(DRIFT_QUERY_BUDGET)
@@ -691,6 +740,56 @@ mod tests {
         let a = set(1, &[("acai_h", "aa")], &[("sso", 1)]);
         let b = set(2, &[("acai_h", "aa")], &[("sso", 1)]);
         assert!(diff(&a, &b).is_empty());
+    }
+
+    /// A collection scan emits no value for an alert missing the field, so
+    /// inferring "are any unstamped" from the distinct reports an all-clear on
+    /// an archive where nothing is stamped at all. The index's null is what
+    /// makes them visible.
+    #[tokio::test]
+    async fn drift_is_unknown_until_the_set_index_exists() {
+        use mongodb::bson::doc;
+        let db = crate::conf::get_test_db().await;
+        let survey = "drift_idx_test";
+        let alerts = db.collection::<mongodb::bson::Document>("DRIFT_IDX_TEST_alerts");
+        alerts.drop().await.ok();
+
+        let set = resolve_current_set(&db, survey, ZTF_MODELS, false)
+            .await
+            .expect("resolves");
+        publish_current_set(&db, survey, set.id)
+            .await
+            .expect("publishes");
+        alerts
+            .insert_many(vec![
+                doc! { "_id": 1, "enrichment_set": set.id },
+                doc! { "_id": 2 },
+            ])
+            .await
+            .expect("inserts");
+
+        let status = drift_status(&db, survey).await.expect("reads");
+        assert!(
+            status.drift_unknown,
+            "without the index an unstamped alert is invisible, so drift cannot be known"
+        );
+
+        alerts
+            .create_index(
+                mongodb::IndexModel::builder()
+                    .keys(doc! { "enrichment_set": 1 })
+                    .build(),
+            )
+            .await
+            .expect("creates the index");
+
+        let status = drift_status(&db, survey).await.expect("reads");
+        assert!(
+            !status.drift_unknown,
+            "the index is there, so drift is known"
+        );
+        assert!(status.has_unstamped, "the unstamped alert must be reported");
+        alerts.drop().await.ok();
     }
 
     #[tokio::test]

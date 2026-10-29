@@ -98,7 +98,10 @@ export function useCatalogIssues(enabled: boolean): CatalogIssues {
       try {
         const [catalogs, drift] = await Promise.all([
           fetchCatalogStatus(),
-          fetchEnrichmentStatus(),
+          // Counted as no enrichment issues when it fails, so a newly missing
+          // catalog still lights the badge: before this the rejection left the
+          // whole previous count standing until the endpoint recovered.
+          fetchEnrichmentStatus().catch(() => []),
         ]);
         if (!cancelled) {
           const catalogIssues = countIssues(catalogs);

@@ -927,13 +927,19 @@ export default function Admin() {
         fetchCatalogStatus(),
         fetchTasks(undefined, RUNS_FETCHED),
         fetchTaskTypes(),
-        fetchEnrichmentStatus(),
+        // Caught here, not with the others: the drift query is the one call
+        // that scans, so it fails on its own schedule, and a 500 from it used
+        // to reject the whole batch -- costing the operator the catalogs table,
+        // the runs table and a running reprocess's log tail. `null` leaves the
+        // last reading standing rather than substituting an empty list, which
+        // would render as "nothing is stale".
+        fetchEnrichmentStatus().catch(() => null),
         fetchCatalogExports(),
       ]);
       setCatalogs(status);
       setTasks(recent);
       setTaskTypes(types);
-      setEnrichment(drift);
+      if (drift) setEnrichment(drift);
       setExports(exported);
       setLoadError(null);
       failures.current = 0;

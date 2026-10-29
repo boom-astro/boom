@@ -229,16 +229,10 @@ pub async fn run(
         .unwrap_or(worker_config.enrichment.n_workers)
         .clamp(1, MAX_WORKERS);
 
-    // Loaded before resolving the set, which publishes it as what the workers run.
-    let shared_model_pool: Option<Arc<SharedModelPool>> =
-        if matches!(params.survey, Survey::Ztf) && config.gpu.is_active() {
-            Some(
-                SharedModelPool::load(&config.gpu.device_ids)
-                    .map_err(|e| failed(format!("failed to load ONNX models on GPU: {e}")))?,
-            )
-        } else {
-            None
-        };
+    // The answer the workers will reach, without loading anything: the pool is
+    // only loaded once the queue is filled, since selection can scan the whole
+    // archive and the GPU is in use by the live workers meanwhile.
+    let gpu_active = matches!(params.survey, Survey::Ztf) && config.gpu.is_active();
 
     let survey_key = params.survey.to_string().to_lowercase();
     // Only ZTF stamps, and `ZTF_MODELS` is the only model list.
@@ -253,7 +247,7 @@ pub async fn run(
                 ctx.db(),
                 &survey_key,
                 crate::enrichment::version::ZTF_MODELS,
-                shared_model_pool.is_some(),
+                gpu_active,
             )
             .await
             .map_err(|e| failed(e.to_string()))?;
@@ -322,6 +316,15 @@ pub async fn run(
     } else {
         ctx.info(format!("draining externally populated queue {queue}"));
         0
+    };
+
+    let shared_model_pool: Option<Arc<SharedModelPool>> = if gpu_active {
+        Some(
+            SharedModelPool::load(&config.gpu.device_ids)
+                .map_err(|e| failed(format!("failed to load ONNX models on GPU: {e}")))?,
+        )
+    } else {
+        None
     };
 
     ctx.info(format!(
@@ -678,12 +681,16 @@ mod tests {
 
     #[test]
     fn single_flight_is_keyed_by_survey() {
+        // Matches either spelling, because params are stored as they were sent
+        // and the same survey arrives cased both ways. The key's job is that
+        // one survey has one key; see
+        // `tasks::tests::one_survey_is_one_key_however_it_is_spelled`.
         assert_eq!(
             crate::tasks::single_flight_key(
                 TASK_TYPE,
                 &serde_json::json!({ "survey": "ztf", "selection": { "kind": "all" } })
             ),
-            Some(mongodb::bson::doc! { "survey": "ztf" })
+            Some(mongodb::bson::doc! { "survey": { "$in": ["ZTF", "ztf"] } })
         );
     }
 }
