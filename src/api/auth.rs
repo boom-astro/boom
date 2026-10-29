@@ -12,12 +12,7 @@ use mongodb::Database;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-/// Refuse a request in the API's JSON envelope.
-///
-/// These messages are written to be read -- "check your email for activation
-/// instructions" is the whole point of the refusal -- and `ErrorForbidden`
-/// would send them as `text/plain`, where the client finds no `message` field
-/// and shows the status code instead.
+/// Like `ErrorForbidden`, but with the message in the API's JSON envelope.
 fn forbidden(message: &str) -> Error {
     ApiError::forbidden(message).into()
 }

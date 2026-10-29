@@ -68,11 +68,7 @@ pub fn unauthorized(message: &str) -> HttpResponse {
     HttpResponse::Unauthorized().json(ApiResponseBody::error(message))
 }
 
-/// A refusal in the API's JSON envelope, for an extractor or middleware that
-/// must return an `actix_web::Error` rather than an `HttpResponse`.
-///
-/// `actix_web::error::ErrorForbidden` and its siblings send `text/plain`, which
-/// leaves the client no `message` to show.
+/// An error response in the API's JSON envelope, for extractors and middleware.
 #[derive(Debug)]
 pub struct ApiError {
     status: actix_web::http::StatusCode,
