@@ -23,7 +23,7 @@ use super::batch::PROGRESS_EVERY;
 const CUTOUT_WRITE_CONCURRENCY: usize = 16;
 use super::context::TaskContext;
 use super::ledger::{MutationTarget, Operation};
-use crate::utils::cutouts::{AlertCutout, CutoutStorageError};
+use crate::utils::cutouts::{AlertCutout, CutoutStorage, CutoutStorageError};
 use crate::{
     alert::{
         deserialize_candidate, deserialize_cutout_as_bytes, AlertWorker, TimeSeries, ZtfAlert,
@@ -410,6 +410,29 @@ async fn query_existing_candids(
     Ok(existing)
 }
 
+/// Stores a batch of cutouts, a few at a time.
+///
+/// A function of its own rather than a block inside `run`: the per-cutout
+/// future's layout is computed where it is written, and nesting it in `run`'s
+/// already large future overflowed rustc's query depth.
+async fn store_cutouts(storage: &CutoutStorage, cutouts: Vec<AlertCutout>) -> Result<usize> {
+    let count = cutouts.len();
+    // One call per cutout: an object store has no bulk insert. Already stored
+    // is the normal case on a resumed run.
+    let results = futures::stream::iter(cutouts)
+        .map(|cutout| storage.insert_cutouts(cutout))
+        .buffer_unordered(CUTOUT_WRITE_CONCURRENCY)
+        .collect::<Vec<_>>()
+        .await;
+    for result in results {
+        match result {
+            Ok(()) | Err(CutoutStorageError::CutoutAlreadyExists(_)) => {}
+            Err(e) => return Err(e).context("could not store a cutout"),
+        }
+    }
+    Ok(count)
+}
+
 async fn merge_into_aux(
     alert_worker: &mut ZtfAlertWorker,
     alerts: &[KowalskiZtfAlert],
@@ -641,24 +664,7 @@ async fn worker(
         }
 
         let t = Instant::now();
-        // One call per cutout: an object store has no bulk insert. Already
-        // stored is the normal case on a resumed run.
-        let stored = futures::stream::iter(cutouts.into_iter().map(|cutout| {
-            let storage = &cutout_storage;
-            async move {
-                match storage.insert_cutouts(cutout).await {
-                    Ok(()) | Err(CutoutStorageError::CutoutAlreadyExists(_)) => Ok(()),
-                    Err(e) => Err(e),
-                }
-            }
-        }))
-        .buffer_unordered(CUTOUT_WRITE_CONCURRENCY)
-        .collect::<Vec<_>>()
-        .await;
-        let written = stored.len();
-        for result in stored {
-            result.context("could not store a cutout")?;
-        }
+        let written = store_cutouts(&cutout_storage, cutouts).await?;
         info!(
             count = written,
             elapsed_ms = t.elapsed().as_millis(),
