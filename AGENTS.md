@@ -138,7 +138,9 @@ anywhere the repo writes English rather than code.
   - **Do not argue for the change.** A comment explaining what was broken
     before, or why this diff is the right one, is commit-message content. The
     comment is for someone reading the code much later, who cannot see the
-    diff and has no reason to know there was ever a bug.
+    diff and has no reason to know there was ever a bug. A comment phrased as
+    a contrast — "X, not Y" — is usually still arguing with the code it
+    replaced; say what holds, not what it is not.
   - **Say it once.** A rule belongs at the single place it is decided, not
     restated at each call site and again in the tests. If it needs repeating,
     the repetitions should be a pointer to the one statement of it.
