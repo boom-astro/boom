@@ -232,17 +232,16 @@ the admin link, so drift is visible without going looking for it.
 
 Both that query and the `stale` selection need an index on `enrichment_set`.
 `initialize_survey_indexes` creates it for ZTF alone, since no other survey
-stamps the field and the index would hold nothing but nulls there. On an archive
-that predates the field the build takes hours and holds up worker startup, so
-create it by hand before deploying a release that adds it:
+stamps the field and the index would hold nothing but nulls there. It is started
+and not waited on: on an archive that predates the field the build takes hours,
+and the scheduler has no reason to hold up ingestion for it. Nothing to run by
+hand, on this or any other deployment.
 
-```js
-db.ZTF_alerts.createIndex({ enrichment_set: 1 })
-```
-
-Until it exists the status query is a collection scan. It is capped at five
+While it builds, the status query is a collection scan. It is capped at five
 seconds rather than left to run, and the survey then reads **not known** — an
-empty list of stale sets is not the same answer as "nothing is stale".
+empty list of stale sets is not the same answer as "nothing is stale". So the
+first hours after a deploy read **not known**, then turn into a real answer on
+their own once the index lands.
 
 **"Current" is what the workers say it is, not what the reader computes.** An
 enrichment worker publishes the set it resolved into `enrichment_current`, one

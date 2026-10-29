@@ -164,10 +164,17 @@ pub async fn initialize_survey_indexes(
     };
     create_index(&alerts_collection, index, false).await?;
 
-    // Blocks startup for hours on an existing archive, see docs/alert-processing.md.
+    // Started, not awaited: hours on an archive that predates the field, and a
+    // missing index only costs the drift query its answer, never correctness.
+    // See docs/alert-processing.md.
     if crate::enrichment::version::stamps_enrichment_set(&survey.to_string()) {
-        let index = doc! { "enrichment_set": 1 };
-        create_index(&alerts_collection, index, false).await?;
+        let collection = alerts_collection.clone();
+        tokio::spawn(async move {
+            match create_index(&collection, doc! { "enrichment_set": 1 }, false).await {
+                Ok(()) => info!("enrichment_set index ready"),
+                Err(error) => error!(%error, "enrichment_set index failed to build"),
+            }
+        });
     }
 
     // ZTF joins a moving object's detections by MPC designation, since objectId is
