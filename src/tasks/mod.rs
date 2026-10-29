@@ -599,7 +599,25 @@ pub fn single_flight_key(
             params
                 .get("survey")
                 .and_then(|s| s.as_str())
-                .map(|survey| doc! { "survey": survey })
+                .map(|survey| {
+                    // `Survey` accepts "ZTF", "ztf" and per-survey aliases, and
+                    // params are stored as sent, so the same survey reaches this
+                    // key spelled several ways -- the admin page's button sends
+                    // what `drift_status` returned, the task form sends the
+                    // schema's value. Canonicalize, and match either spelling,
+                    // or two archive-wide reprocesses run without seeing each
+                    // other.
+                    let canonical = serde_json::from_value::<crate::utils::enums::Survey>(
+                        serde_json::Value::String(survey.to_string()),
+                    )
+                    .ok()
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| survey.to_string());
+                    doc! { "survey": { "$in": [
+                        canonical.to_uppercase(),
+                        canonical.to_lowercase(),
+                    ] } }
+                })
                 .unwrap_or_default(),
         ),
         // One preparation of a collection at a time; two would rewrite the same
@@ -882,6 +900,25 @@ mod tests {
             "these task types would be failed rather than resumed when a worker \
              goes away: {not:?}. If that is intended, update this test and say why."
         );
+    }
+
+    /// The admin page's Reprocess stale button sends what `drift_status`
+    /// returned ("ztf"); the task form sends the schema's value ("ZTF"). Both
+    /// deserialize, so the only symptom of them keying differently is two
+    /// archive-wide reprocesses contending for one GPU.
+    #[test]
+    fn one_survey_is_one_key_however_it_is_spelled() {
+        let key = |survey: &str| {
+            single_flight_key(
+                enrich_reprocess::TASK_TYPE,
+                &serde_json::json!({ "survey": survey }),
+            )
+        };
+        assert_eq!(key("ztf"), key("ZTF"));
+        assert_eq!(key("ztf"), key("Ztf"));
+        assert_ne!(key("ztf"), key("lsst"));
+        // An alias reaches the same key as the canonical spelling.
+        assert_eq!(key("wntr"), key("WINTER"));
     }
 
     #[test]

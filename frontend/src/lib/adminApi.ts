@@ -46,7 +46,7 @@ export type SchemaField = {
    *  optional field. */
   type?: string | string[];
   description?: string;
-  /** Present when the field is a closed set, so it can be offered as one. */
+  /** A closed set of values, e.g. a survey. */
   enum?: string[];
   minimum?: number;
   maximum?: number;
@@ -58,8 +58,7 @@ export type SchemaField = {
    *  either, so it has to be recognized by this rather than rendered as the
    *  string the fallback would make it. */
   $ref?: string;
-  /** Present for tagged unions, and for an optional field whose inner type
-   *  utoipa could not express as a type pair. */
+  /** Tagged unions, and optional fields utoipa cannot express as a type pair. */
   oneOf?: SchemaField[];
   properties?: Record<string, SchemaField>;
   required?: string[];
@@ -75,6 +74,25 @@ export type TaskType = {
     properties?: Record<string, SchemaField>;
     required?: string[];
   };
+};
+
+/** One enrichment set alerts are sitting at that is neither current nor accepted. */
+export type StaleSet = {
+  id: number;
+  /** Which models or derivations differ from the current set. */
+  changed: string[];
+};
+
+export type EnrichmentDrift = {
+  survey: string;
+  /** null until an enrichment worker publishes a set. */
+  current_set: number | null;
+  stale_sets: StaleSet[];
+  accepted_sets: number[];
+  /** Alerts enriched before stamping existed. */
+  has_unstamped: boolean;
+  /** The drift query timed out: an empty `stale_sets` means nothing then. */
+  drift_unknown: boolean;
 };
 
 export type TaskStatus = "queued" | "running" | "succeeded" | "failed" | "canceled";
@@ -162,7 +180,7 @@ async function request<T>(path: string, init: RequestInit | undefined, fallback:
 }
 
 export function fetchTaskTypes(): Promise<TaskType[]> {
-  return request<TaskType[]>("/tasks/types", undefined, []);
+  return request<TaskType[]>("/task-types", undefined, []);
 }
 
 /** Submit any task type. */
@@ -179,6 +197,43 @@ export function submitTask(
     },
     {} as Task,
   );
+}
+
+export function fetchEnrichmentStatus(): Promise<EnrichmentDrift[]> {
+  return request<EnrichmentDrift[]>("/enrichment/status", undefined, []);
+}
+
+/** Marks a non-current set as not needing reprocessing, without touching alerts. */
+export function acceptEnrichmentSet(setId: number, reason: string): Promise<unknown> {
+  return request<unknown>(
+    `/enrichment/sets/${setId}/accept`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reason }),
+    },
+    null,
+  );
+}
+
+export function unacceptEnrichmentSet(setId: number): Promise<unknown> {
+  return request<unknown>(`/enrichment/sets/${setId}/unaccept`, { method: "POST" }, null);
+}
+
+/** A catalog export on the task worker's disk, waiting to be published. */
+export type CatalogExport = {
+  collection: string;
+  files: { name: string; bytes: number }[];
+  manifest: {
+    rows?: number;
+    fields?: string[];
+    source_database?: string;
+    code_version?: { package_version: string; git_sha?: string };
+  } | null;
+};
+
+export function fetchCatalogExports(): Promise<CatalogExport[]> {
+  return request<CatalogExport[]>("/catalogs/exports", undefined, []);
 }
 
 export function fetchCatalogStatus(): Promise<CatalogStatus[]> {

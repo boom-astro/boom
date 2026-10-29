@@ -29,7 +29,8 @@ use super::ledger::{MutationTarget, Operation};
 use crate::conf::AppConfig;
 use crate::enrichment::{
     models::{SharedModelPool, SharedModels},
-    EnrichmentWorker, EnrichmentWorkerError, LsstEnrichmentWorker, ZtfEnrichmentWorker,
+    DecamEnrichmentWorker, EnrichmentWorker, EnrichmentWorkerError, LsstEnrichmentWorker,
+    WinterEnrichmentWorker, ZtfEnrichmentWorker,
 };
 use crate::utils::{
     enums::Survey,
@@ -66,17 +67,20 @@ pub enum Selection {
     MissingField { field: String },
     /// A candid range, for reprocessing a known import.
     CandidRange { from: i64, to: i64 },
+    /// Everything not enriched by what this release runs.
+    Stale,
 }
 
 impl Selection {
     /// The query that picks the alerts out of `<survey>_alerts`.
-    fn filter(&self) -> Document {
+    fn filter(&self, acceptable: &[i64]) -> Document {
         match self {
             Selection::All => doc! {},
             Selection::MissingField { field } => doc! { field: { "$exists": false } },
             Selection::CandidRange { from, to } => {
                 doc! { "_id": { "$gte": from, "$lte": to } }
             }
+            Selection::Stale => crate::enrichment::version::stale_filter(acceptable),
         }
     }
 
@@ -85,6 +89,7 @@ impl Selection {
             Selection::All => "every alert".to_string(),
             Selection::MissingField { field } => format!("alerts missing {field}"),
             Selection::CandidRange { from, to } => format!("candids {from}..={to}"),
+            Selection::Stale => "alerts not enriched by the current set".to_string(),
         }
     }
 }
@@ -109,14 +114,6 @@ const MAX_WORKERS: usize = 32;
 
 impl EnrichReprocessParams {
     pub fn validate_params(&self) -> Result<(), String> {
-        // Only these two have enrichment workers; the others would fail after
-        // the queue had already been filled.
-        if !matches!(self.survey, Survey::Ztf | Survey::Lsst) {
-            return Err(format!(
-                "enrichment reprocessing is not supported for {}",
-                self.survey
-            ));
-        }
         if let Some(n) = self.n_workers {
             if n == 0 || n > MAX_WORKERS {
                 return Err(format!("n_workers must be between 1 and {MAX_WORKERS}"));
@@ -132,6 +129,18 @@ impl EnrichReprocessParams {
                 return Err("selection.from must not exceed selection.to".to_string());
             }
         }
+        if matches!(self.selection, Selection::Stale)
+            && !crate::enrichment::version::stamps_enrichment_set(
+                &self.survey.to_string().to_lowercase(),
+            )
+        {
+            // Unstamped, every alert would be reselected on every run.
+            return Err(format!(
+                "selection 'stale' needs a survey whose worker stamps the enrichment set, \
+                 and {} does not; only ztf does today",
+                self.survey
+            ));
+        }
         Ok(())
     }
 }
@@ -145,6 +154,7 @@ async fn populate(
     ctx: &TaskContext,
     survey: &Survey,
     selection: &Selection,
+    acceptable: &[i64],
     queue: &str,
 ) -> Result<u64, super::TaskError> {
     let failed = |e: String| super::TaskError::Failed(e);
@@ -157,7 +167,7 @@ async fn populate(
         .map_err(|e| failed(e.to_string()))?;
 
     let mut cursor = alerts
-        .find(selection.filter())
+        .find(selection.filter(acceptable))
         .projection(doc! { "_id": 1 })
         .no_cursor_timeout(true)
         .await
@@ -219,6 +229,48 @@ pub async fn run(
         .unwrap_or(worker_config.enrichment.n_workers)
         .clamp(1, MAX_WORKERS);
 
+    // The answer the workers will reach, without loading anything: the pool is
+    // only loaded once the queue is filled, since selection can scan the whole
+    // archive and the GPU is in use by the live workers meanwhile.
+    let gpu_active = matches!(params.survey, Survey::Ztf) && config.gpu.is_active();
+
+    let survey_key = params.survey.to_string().to_lowercase();
+    // Only ZTF stamps, and `ZTF_MODELS` is the only model list.
+    let (current_set_id, acceptable) =
+        if crate::enrichment::version::stamps_enrichment_set(&survey_key) {
+            // Concurrent interning needs the unique fingerprint index first.
+            crate::enrichment::version::initialize_indexes(ctx.db())
+                .await
+                .map_err(|e| failed(e.to_string()))?;
+            // Workers without a pool run on CPU and compute no `villar_fit`.
+            let current_set = crate::enrichment::version::resolve_current_set(
+                ctx.db(),
+                &survey_key,
+                crate::enrichment::version::ZTF_MODELS,
+                gpu_active,
+            )
+            .await
+            .map_err(|e| failed(e.to_string()))?;
+            let acceptable = crate::enrichment::version::acceptable_set_ids(
+                ctx.db(),
+                &survey_key,
+                current_set.id,
+            )
+            .await
+            .map_err(|e| failed(e.to_string()))?;
+            ctx.info(format!(
+                "current enrichment set is {}; acceptable: {acceptable:?}",
+                current_set.id
+            ));
+            (Some(current_set.id), acceptable)
+        } else {
+            ctx.info(format!(
+                "{} does not stamp an enrichment set; reprocessing without one",
+                params.survey
+            ));
+            (None, Vec::new())
+        };
+
     // Owning the queue is what makes "empty" mean "done". A caller-supplied one
     // may still be filling, so the task only drains it and never deletes it.
     let owned = params.input_queue.is_none();
@@ -236,7 +288,7 @@ pub async fn run(
             params.selection.describe(),
             params.survey
         ));
-        let n = match populate(ctx, &params.survey, &params.selection, &queue).await {
+        let n = match populate(ctx, &params.survey, &params.selection, &acceptable, &queue).await {
             Ok(n) => n,
             Err(e) => {
                 // Population pushes in batches, so a failure or cancellation
@@ -266,15 +318,14 @@ pub async fn run(
         0
     };
 
-    let shared_model_pool: Option<Arc<SharedModelPool>> =
-        if matches!(params.survey, Survey::Ztf) && config.gpu.is_active() {
-            Some(
-                SharedModelPool::load(&config.gpu.device_ids)
-                    .map_err(|e| failed(format!("failed to load ONNX models on GPU: {e}")))?,
-            )
-        } else {
-            None
-        };
+    let shared_model_pool: Option<Arc<SharedModelPool>> = if gpu_active {
+        Some(
+            SharedModelPool::load(&config.gpu.device_ids)
+                .map_err(|e| failed(format!("failed to load ONNX models on GPU: {e}")))?,
+        )
+    } else {
+        None
+    };
 
     ctx.info(format!(
         "starting {n_workers} enrichment worker(s) (Babamul disabled, no filter forwarding)"
@@ -292,21 +343,13 @@ pub async fn run(
         let handle = thread::spawn(move || {
             let tid = std::thread::current().id();
             span!(Level::INFO, "enrich-only worker", ?tid, ?survey).in_scope(|| {
-                let result = match survey {
-                    Survey::Ztf => run_enrich_only::<ZtfEnrichmentWorker>(
-                        receiver,
-                        &config_path,
-                        shared_models,
-                        queue,
-                    ),
-                    Survey::Lsst => run_enrich_only::<LsstEnrichmentWorker>(
-                        receiver,
-                        &config_path,
-                        shared_models,
-                        queue,
-                    ),
-                    _ => unreachable!("survey validated at submit time"),
+                let run_worker = match survey {
+                    Survey::Ztf => run_enrich_only::<ZtfEnrichmentWorker>,
+                    Survey::Lsst => run_enrich_only::<LsstEnrichmentWorker>,
+                    Survey::Decam => run_enrich_only::<DecamEnrichmentWorker>,
+                    Survey::Winter => run_enrich_only::<WinterEnrichmentWorker>,
                 };
+                let result = run_worker(receiver, &config_path, shared_models, queue);
                 result.unwrap_or_else(as_error!("enrichment worker failed"));
             })
         });
@@ -347,6 +390,7 @@ pub async fn run(
         Operation::Recompute,
         doc! {
             "selection": params.selection.describe(),
+            "enrichment_set": current_set_id,
             "queued": queued as i64,
             "workers": n_workers as i64,
             "code_version": mongodb::bson::to_bson(&super::ledger::CodeVersion::current())
@@ -513,17 +557,15 @@ mod tests {
     }
 
     #[test]
-    fn only_surveys_with_enrichment_workers_are_accepted() {
-        // Rejected at submit rather than after the queue is already full.
-        assert!(params(Survey::Ztf, Selection::All)
-            .validate_params()
-            .is_ok());
-        assert!(params(Survey::Lsst, Selection::All)
-            .validate_params()
-            .is_ok());
-        assert!(params(Survey::Decam, Selection::All)
-            .validate_params()
-            .is_err());
+    fn every_survey_has_an_enrichment_worker() {
+        for survey in [Survey::Ztf, Survey::Lsst, Survey::Decam, Survey::Winter] {
+            assert!(
+                params(survey.clone(), Selection::All)
+                    .validate_params()
+                    .is_ok(),
+                "{survey} should be accepted"
+            );
+        }
     }
 
     #[test]
@@ -532,6 +574,22 @@ mod tests {
             field: "  ".to_string(),
         };
         assert!(params(Survey::Ztf, blank).validate_params().is_err());
+    }
+
+    #[test]
+    fn stale_is_refused_for_a_survey_that_does_not_stamp() {
+        for survey in [Survey::Lsst, Survey::Decam, Survey::Winter] {
+            let message = params(survey.clone(), Selection::Stale)
+                .validate_params()
+                .expect_err("stale must be refused for a survey that does not stamp");
+            assert!(message.contains("stamp"), "unhelpful message: {message}");
+        }
+        assert!(
+            params(Survey::Ztf, Selection::Stale)
+                .validate_params()
+                .is_ok(),
+            "ztf does stamp, so stale is the whole point there"
+        );
     }
 
     #[test]
@@ -554,17 +612,47 @@ mod tests {
 
     #[test]
     fn each_selection_builds_the_query_it_describes() {
-        assert_eq!(Selection::All.filter(), doc! {});
+        assert_eq!(Selection::All.filter(&[7]), doc! {});
         assert_eq!(
             Selection::MissingField {
                 field: "classifications.acai_h".into()
             }
-            .filter(),
+            .filter(&[7]),
             doc! { "classifications.acai_h": { "$exists": false } }
         );
         assert_eq!(
-            Selection::CandidRange { from: 1, to: 9 }.filter(),
+            Selection::CandidRange { from: 1, to: 9 }.filter(&[7]),
             doc! { "_id": { "$gte": 1i64, "$lte": 9i64 } }
+        );
+    }
+
+    #[test]
+    fn stale_selects_everything_not_enriched_by_the_current_set() {
+        // `$nin` also matches alerts with no stamp at all.
+        assert_eq!(
+            Selection::Stale.filter(&[7]),
+            doc! { "enrichment_set": { "$nin": [7i64] } }
+        );
+    }
+
+    #[test]
+    fn stale_is_the_selection_that_finds_a_changed_model() {
+        let changed_model = Selection::MissingField {
+            field: "classifications.btsbot".into(),
+        };
+        assert_eq!(
+            changed_model.filter(&[7]),
+            doc! { "classifications.btsbot": { "$exists": false } },
+            "MissingField cannot express staleness, which is why Stale exists"
+        );
+        assert!(Selection::Stale.describe().contains("current set"));
+    }
+
+    #[test]
+    fn stale_skips_sets_an_operator_accepted() {
+        assert_eq!(
+            Selection::Stale.filter(&[6, 7]),
+            doc! { "enrichment_set": { "$nin": [6i64, 7i64] } }
         );
     }
 
@@ -593,12 +681,16 @@ mod tests {
 
     #[test]
     fn single_flight_is_keyed_by_survey() {
+        // Matches either spelling, because params are stored as they were sent
+        // and the same survey arrives cased both ways. The key's job is that
+        // one survey has one key; see
+        // `tasks::tests::one_survey_is_one_key_however_it_is_spelled`.
         assert_eq!(
             crate::tasks::single_flight_key(
                 TASK_TYPE,
                 &serde_json::json!({ "survey": "ztf", "selection": { "kind": "all" } })
             ),
-            Some(mongodb::bson::doc! { "survey": "ztf" })
+            Some(mongodb::bson::doc! { "survey": { "$in": ["ZTF", "ztf"] } })
         );
     }
 }

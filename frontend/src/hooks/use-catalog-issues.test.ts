@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, renderHook, waitFor } from "@testing-library/react";
-import { countIssues, useCatalogIssues } from "./use-catalog-issues";
+import {
+  countEnrichmentIssues,
+  countIssues,
+  useCatalogIssues,
+} from "./use-catalog-issues";
 import * as adminApi from "@/lib/adminApi";
 import type { CatalogStatus, CatalogHealth } from "@/lib/adminApi";
 
@@ -100,6 +104,61 @@ describe("countIssues", () => {
   });
 });
 
+describe("countEnrichmentIssues", () => {
+  const clean = {
+    survey: "ztf",
+    current_set: 7,
+    stale_sets: [],
+    accepted_sets: [],
+    has_unstamped: false,
+    drift_unknown: false,
+  };
+
+  it("reports nothing when every alert is at the current set", () => {
+    expect(countEnrichmentIssues([clean]).count).toBe(0);
+  });
+
+  it("counts a survey once, however many stale sets it has", () => {
+    const { count, parts } = countEnrichmentIssues([
+      {
+        ...clean,
+        stale_sets: [
+          { id: 5, changed: ["btsbot"] },
+          { id: 6, changed: ["sso"] },
+        ],
+      },
+    ]);
+    expect(count).toBe(1);
+    expect(parts).toEqual(["ZTF enrichment is stale"]);
+  });
+
+  it("counts alerts that predate stamping as drift", () => {
+    expect(countEnrichmentIssues([{ ...clean, has_unstamped: true }]).count).toBe(1);
+  });
+
+  it("does not count a survey with no published set", () => {
+    expect(
+      countEnrichmentIssues([
+        { ...clean, current_set: null, has_unstamped: true },
+      ]).count,
+    ).toBe(0);
+  });
+
+  it("counts a survey whose drift could not be determined", () => {
+    const { count, parts } = countEnrichmentIssues([
+      { ...clean, drift_unknown: true },
+    ]);
+    expect(count).toBe(1);
+    expect(parts).toEqual(["ZTF enrichment drift is unknown"]);
+  });
+
+  it("does not count a set an operator accepted", () => {
+    expect(
+      countEnrichmentIssues([{ ...clean, accepted_sets: [6] }]).count,
+    ).toBe(0);
+  });
+});
+
 describe("countIssues and an ingest in flight", () => {
   it("does not count a catalog a run is working on", () => {
     // Counting it would light the badge for the hours an ingest takes, every
@@ -126,6 +185,7 @@ describe("useCatalogIssues", () => {
     // is under our control.
     vi.useFakeTimers({ shouldAdvanceTime: true });
     status = vi.spyOn(adminApi, "fetchCatalogStatus");
+    vi.spyOn(adminApi, "fetchEnrichmentStatus").mockResolvedValue([]);
   });
 
   afterEach(() => {

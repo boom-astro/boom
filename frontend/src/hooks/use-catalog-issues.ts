@@ -7,7 +7,9 @@
 import { useEffect, useState } from "react";
 import {
   fetchCatalogStatus,
+  fetchEnrichmentStatus,
   type CatalogStatus,
+  type EnrichmentDrift,
 } from "@/lib/adminApi";
 
 /** How often to re-check. Drift changes on the order of hours, not seconds. */
@@ -19,6 +21,27 @@ export type CatalogIssues = {
   /** Human-readable breakdown, for the badge's title. */
   label: string;
 };
+
+/** Counted per survey, not per stale set. */
+export function countEnrichmentIssues(drift: EnrichmentDrift[]): {
+  count: number;
+  parts: string[];
+} {
+  const published = drift.filter((d) => d.current_set !== null);
+  const unknown = published.filter((d) => d.drift_unknown);
+  const stale = published.filter(
+    (d) => !d.drift_unknown && (d.stale_sets.length > 0 || d.has_unstamped),
+  );
+  return {
+    count: stale.length + unknown.length,
+    parts: [
+      ...stale.map((d) => `${d.survey.toUpperCase()} enrichment is stale`),
+      ...unknown.map(
+        (d) => `${d.survey.toUpperCase()} enrichment drift is unknown`,
+      ),
+    ],
+  };
+}
 
 /** Catalogs the pipeline is configured to query but cannot fully read.
  *
@@ -73,8 +96,25 @@ export function useCatalogIssues(enabled: boolean): CatalogIssues {
 
     async function poll() {
       try {
-        const catalogs = await fetchCatalogStatus();
-        if (!cancelled) setIssues(countIssues(catalogs));
+        const [catalogs, drift] = await Promise.all([
+          fetchCatalogStatus(),
+          // Counted as no enrichment issues when it fails, so a newly missing
+          // catalog still lights the badge: before this the rejection left the
+          // whole previous count standing until the endpoint recovered.
+          fetchEnrichmentStatus().catch(() => []),
+        ]);
+        if (!cancelled) {
+          const catalogIssues = countIssues(catalogs);
+          const enrichmentIssues = countEnrichmentIssues(drift);
+          const parts = [
+            ...(catalogIssues.count ? [catalogIssues.label] : []),
+            ...enrichmentIssues.parts,
+          ];
+          setIssues({
+            count: catalogIssues.count + enrichmentIssues.count,
+            label: parts.length ? parts.join("; ") : "Nothing needs attention",
+          });
+        }
       } catch {
         // A failed check must not render a misleading zero, so the previous
         // count stands until the next poll succeeds.
