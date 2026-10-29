@@ -2,10 +2,10 @@ use futures::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::{
     collections::VecDeque,
-    io::Write,
+    io::{Seek, SeekFrom, Write},
     time::{Duration, Instant},
 };
-use tracing::info;
+use tracing::{info, warn};
 
 const PROGRESS_LOG_SECS: u64 = 60;
 const RATE_WINDOW_SAMPLES: usize = 10;
@@ -100,22 +100,105 @@ pub fn spawn_elapsed_logger(label: String, activity: &'static str) -> tokio::tas
     })
 }
 
-// let's make this more generic so we can take any file type, not just a NamedTempFile
+/// How many times to ask for the body, counting the first.
+const DOWNLOAD_ATTEMPTS: u32 = 4;
+
+/// A failed download, and whether asking again could plausibly work.
+enum DownloadFailure {
+    /// The request never completed, or the server said "not now".
+    Transient(Box<dyn std::error::Error + Send + Sync>),
+    /// The server answered, and the answer will not change.
+    Permanent(Box<dyn std::error::Error + Send + Sync>),
+}
+
+impl DownloadFailure {
+    /// `Send + Sync` so a failure can be held across the retry's sleep without
+    /// making every caller's future non-`Send`.
+    fn into_inner(self) -> Box<dyn std::error::Error + Send + Sync> {
+        match self {
+            Self::Transient(e) | Self::Permanent(e) => e,
+        }
+    }
+}
+
+/// Downloads `url` into `file`, retrying a transient failure.
+///
+/// Takes a `File` rather than a `Write` because a retry has to undo the partial
+/// body the last attempt wrote: rewinding alone would leave a stale tail if the
+/// second body were shorter, so the file is truncated as well.
+///
+/// A 4xx is not retried. The ZTF producer reads "404 Not Found" out of the
+/// error to mean "no alerts for this date", and asking four times would turn a
+/// quick answer into a slow one.
 pub async fn download_to_file(
-    file: &mut impl Write,
+    file: &mut std::fs::File,
     url: &str,
     username: Option<&str>,
     password: Option<&str>,
     show_progress: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let client = reqwest::Client::builder().build()?;
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        match download_once(&client, file, url, username, password, show_progress).await {
+            Ok(()) => return Ok(()),
+            Err(failure) => {
+                let transient = matches!(failure, DownloadFailure::Transient(_));
+                let error = failure.into_inner();
+                if !transient || attempt >= DOWNLOAD_ATTEMPTS {
+                    let error: Box<dyn std::error::Error> = error;
+                    return Err(error);
+                }
+                let backoff = Duration::from_secs(2u64.pow(attempt));
+                warn!(
+                    attempt,
+                    url,
+                    backoff_s = backoff.as_secs(),
+                    error = %error,
+                    "download failed, retrying"
+                );
+                file.set_len(0)?;
+                file.seek(SeekFrom::Start(0))?;
+                tokio::time::sleep(backoff).await;
+            }
+        }
+    }
+}
+
+/// 5xx and 429 are the server declining for now; every other failing status
+/// will say the same thing however many times it is asked.
+fn status_is_transient(status: reqwest::StatusCode) -> bool {
+    status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+}
+
+async fn download_once(
+    client: &reqwest::Client,
+    file: &mut std::fs::File,
+    url: &str,
+    username: Option<&str>,
+    password: Option<&str>,
+    show_progress: bool,
+) -> Result<(), DownloadFailure> {
     let mut request_builder = client.get(url);
     if let (Some(user), Some(pass)) = (username, password) {
         request_builder = request_builder.basic_auth(user, Some(pass));
     }
-    let response = request_builder.send().await?;
-    if !response.status().is_success() {
-        return Err(format!("Failed to download file: {}", response.status()).into());
+    let response = request_builder
+        .send()
+        .await
+        // The request never reached a verdict -- connection refused, DNS, a
+        // reset partway through the handshake.
+        .map_err(|e| DownloadFailure::Transient(e.into()))?;
+    let status = response.status();
+    if !status.is_success() {
+        let error: Box<dyn std::error::Error + Send + Sync> =
+            format!("Failed to download file: {}", status).into();
+        return Err(if status_is_transient(status) {
+            DownloadFailure::Transient(error)
+        } else {
+            DownloadFailure::Permanent(error)
+        });
     }
 
     let total_size = response.content_length().unwrap_or(0);
@@ -125,17 +208,20 @@ pub async fn download_to_file(
         let progress_bar = ProgressBar::new(total_size)
             .with_message("Downloading file")
             .with_style(indicatif::ProgressStyle::default_bar()
-                .template("{spinner:.green} {msg} {wide_bar} [{elapsed_precise}] {bytes}/{total_bytes} ({eta})")?);
+                .template("{spinner:.green} {msg} {wide_bar} [{elapsed_precise}] {bytes}/{total_bytes} ({eta})")
+                .map_err(|e| DownloadFailure::Permanent(e.into()))?);
         while let Some(chunk_result) = stream.next().await {
-            let chunk = chunk_result?;
-            file.write_all(&chunk)?;
+            let chunk = chunk_result.map_err(|e| DownloadFailure::Transient(e.into()))?;
+            file.write_all(&chunk)
+                .map_err(|e| DownloadFailure::Permanent(e.into()))?;
             progress_bar.inc(chunk.len() as u64);
         }
         progress_bar.finish();
     } else {
         while let Some(chunk_result) = stream.next().await {
-            let chunk = chunk_result?;
-            file.write_all(&chunk)?;
+            let chunk = chunk_result.map_err(|e| DownloadFailure::Transient(e.into()))?;
+            file.write_all(&chunk)
+                .map_err(|e| DownloadFailure::Permanent(e.into()))?;
         }
     }
 
@@ -196,5 +282,30 @@ mod tests {
         assert_eq!(format_eta(5400, 1.0), "1h30m");
         assert_eq!(format_eta(0, 0.0), "0h00m");
         assert_eq!(format_eta(1000, 0.0), "unknown");
+    }
+}
+
+#[cfg(test)]
+mod download_retry_tests {
+    use super::status_is_transient;
+    use reqwest::StatusCode;
+
+    /// The ZTF producer reads "404 Not Found" out of the error to mean "no
+    /// alerts for this date", so retrying it would turn a quick answer into a
+    /// slow one -- and it would still be 404.
+    #[test]
+    fn a_client_error_is_not_retried() {
+        assert!(!status_is_transient(StatusCode::NOT_FOUND));
+        assert!(!status_is_transient(StatusCode::UNAUTHORIZED));
+        assert!(!status_is_transient(StatusCode::FORBIDDEN));
+    }
+
+    #[test]
+    fn a_server_saying_not_now_is_retried() {
+        assert!(status_is_transient(StatusCode::INTERNAL_SERVER_ERROR));
+        assert!(status_is_transient(StatusCode::BAD_GATEWAY));
+        assert!(status_is_transient(StatusCode::SERVICE_UNAVAILABLE));
+        assert!(status_is_transient(StatusCode::GATEWAY_TIMEOUT));
+        assert!(status_is_transient(StatusCode::TOO_MANY_REQUESTS));
     }
 }

@@ -18,9 +18,13 @@
 //! redacted everywhere they are read back. See `tasks::redact`.
 
 use super::batch::PROGRESS_EVERY;
+
+/// Cutout writes in flight at once: enough that S3 round trips overlap, few
+/// enough not to crowd the live workers' own writes.
+const CUTOUT_WRITE_CONCURRENCY: usize = 16;
 use super::context::TaskContext;
 use super::ledger::{MutationTarget, Operation};
-use crate::utils::cutouts::AlertCutout;
+use crate::utils::cutouts::{AlertCutout, CutoutStorageError};
 use crate::{
     alert::{
         deserialize_candidate, deserialize_cutout_as_bytes, AlertWorker, TimeSeries, ZtfAlert,
@@ -566,7 +570,14 @@ async fn worker(
 
     let existing_coll: Collection<Document> = db.collection("ZTF_alerts");
     let alerts_coll: Collection<ZtfAlert> = db.collection("ZTF_alerts");
-    let cutouts_coll: Collection<AlertCutout> = db.collection("ZTF_alerts_cutouts");
+    // Through the configured storage, not a hardcoded collection: an S3
+    // deployment reads cutouts from the bucket, so writing them to Mongo here
+    // left the imported alerts with cutouts nothing would ever look for.
+    let cutout_storage = ctx
+        .config()
+        .build_cutout_storage(&crate::utils::enums::Survey::Ztf)
+        .await
+        .context("could not build cutout storage")?;
 
     let mut alert_worker = ZtfAlertWorker::new(ctx.config_path())
         .await
@@ -634,9 +645,27 @@ async fn worker(
         }
 
         let t = Instant::now();
-        insert_many_skip_dups(&cutouts_coll, cutouts, &insert_opts, "cutouts").await?;
+        // One call per cutout, since an object store has no bulk insert, run a
+        // few at a time so S3 round trips overlap. A cutout already stored is
+        // the normal case on a resumed run, not a failure.
+        let stored = futures::stream::iter(cutouts.into_iter().map(|cutout| {
+            let storage = &cutout_storage;
+            async move {
+                match storage.insert_cutouts(cutout).await {
+                    Ok(()) | Err(CutoutStorageError::CutoutAlreadyExists(_)) => Ok(()),
+                    Err(e) => Err(e),
+                }
+            }
+        }))
+        .buffer_unordered(CUTOUT_WRITE_CONCURRENCY)
+        .collect::<Vec<_>>()
+        .await;
+        let written = stored.len();
+        for result in stored {
+            result.context("could not store a cutout")?;
+        }
         info!(
-            count = fetched_set.len(),
+            count = written,
             elapsed_ms = t.elapsed().as_millis(),
             "cutout insert"
         );
