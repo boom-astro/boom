@@ -569,8 +569,6 @@ async fn worker(
 
     let existing_coll: Collection<Document> = db.collection("ZTF_alerts");
     let alerts_coll: Collection<ZtfAlert> = db.collection("ZTF_alerts");
-    // Whether cutouts live in a bucket or a Mongo collection is this
-    // deployment's configuration to make.
     let cutout_storage = ctx
         .config()
         .build_cutout_storage(&crate::utils::enums::Survey::Ztf)
