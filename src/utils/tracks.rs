@@ -387,6 +387,7 @@ pub const LONG_GAP: &str = "long_gap";
 const FLAGGED_MAG_SPREAD: f64 = 2.0;
 const LONG_GAP_DAYS: f64 = 30.0;
 const LONG_GAP_MAX_RMS_RATIO: f64 = 5.0;
+const LONE_NIGHT_GAP_DAYS: f64 = 90.0;
 
 fn night_of_member((survey, _): &Member, jd: f64) -> i64 {
     night_at(jd, survey_site(survey).as_ref())
@@ -407,6 +408,20 @@ fn longest_gap(jds: &[f64]) -> f64 {
     sorted.windows(2).map(|w| w[1] - w[0]).fold(0.0, f64::max)
 }
 
+fn lone_night_across_gap(members: &[Member], jds: &[f64]) -> bool {
+    let mut nights: Vec<(f64, i64)> = members
+        .iter()
+        .zip(jds)
+        .map(|(member, &jd)| (jd, night_of_member(member, jd)))
+        .collect();
+    nights.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let distinct = |side: &[(f64, i64)]| side.iter().map(|n| n.1).collect::<HashSet<_>>().len();
+    (1..nights.len()).any(|k| {
+        nights[k].0 - nights[k - 1].0 > LONE_NIGHT_GAP_DAYS
+            && (distinct(&nights[..k]) < 2 || distinct(&nights[k..]) < 2)
+    })
+}
+
 pub fn track_flags(
     members: &[Member],
     jds: &[f64],
@@ -420,7 +435,9 @@ pub fn track_flags(
     if mag_spread.is_some_and(|s| s > FLAGGED_MAG_SPREAD) {
         flags.push(PHOTOMETRY.to_string());
     }
-    if rms_ratio.is_some_and(|r| r > LONG_GAP_MAX_RMS_RATIO) && longest_gap(jds) > LONG_GAP_DAYS {
+    let loose =
+        rms_ratio.is_some_and(|r| r > LONG_GAP_MAX_RMS_RATIO) && longest_gap(jds) > LONG_GAP_DAYS;
+    if loose || lone_night_across_gap(members, jds) {
         flags.push(LONG_GAP.to_string());
     }
     flags
@@ -1235,6 +1252,14 @@ pub(crate) mod tests {
         assert_eq!(
             track_flags(&members, &jds, Some(8.0), Some(4.0)),
             vec![PHOTOMETRY.to_string(), LONG_GAP.to_string()]
+        );
+        let jds = [
+            2460000.0, 2460000.02, 2460365.0, 2460365.02, 2460366.0, 2460366.02, 2460367.0,
+            2460367.02,
+        ];
+        assert_eq!(
+            track_flags(&members, &jds, Some(1.0), Some(0.5)),
+            vec![LONG_GAP.to_string()]
         );
     }
 
