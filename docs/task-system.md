@@ -591,10 +591,11 @@ the person up later.
 | --- | --- |
 | `GET /task-types` | What this release can run, with a JSON Schema per task type |
 | `POST /tasks` | Submit a run |
-| `GET /tasks` | Runs, most recent first |
+| `GET /tasks?status=` | Runs, most recent first; `status` takes a comma-separated list |
 | `GET /tasks/{id}` | One run |
 | `GET /tasks/{id}/logs?after_seq=` | Tail its logs |
 | `POST /tasks/{id}/cancel` | Request cancellation |
+| `POST /tasks/{id}/resubmit` | Queue a new run with a finished run's type and parameters |
 | `GET /data/mutations?collection=&limit=` | What has been done to the data |
 
 ## Scheduled tasks, when we build them

@@ -102,7 +102,8 @@ export type Task = {
   task_type: string;
   params: Record<string, unknown>;
   status: TaskStatus;
-  actor: { user_id: string; username: string };
+  /** `email` is absent only for system runs and accounts since deleted. */
+  actor: { user_id: string; username: string; email?: string | null };
   trigger: string;
   requested_at: number;
   started_at?: number | null;
@@ -114,6 +115,8 @@ export type Task = {
   cancel_requested?: boolean;
   error?: string | null;
   attempts: number;
+  /** The finished run this one repeats. */
+  resubmitted_from?: string | null;
 };
 
 export type TaskLogLine = { ts: number; level: string; message: string };
@@ -240,10 +243,30 @@ export function fetchCatalogStatus(): Promise<CatalogStatus[]> {
   return request<CatalogStatus[]>("/catalogs/status", undefined, []);
 }
 
-export function fetchTasks(taskType?: string, limit = 25): Promise<Task[]> {
+/** Runs, most recent first. No `statuses` means any status. */
+export function fetchTasks({
+  taskType,
+  statuses,
+  limit = 25,
+}: { taskType?: string; statuses?: TaskStatus[]; limit?: number } = {}): Promise<Task[]> {
   const params = new URLSearchParams({ limit: String(limit) });
   if (taskType) params.set("task_type", taskType);
+  if (statuses?.length) params.set("status", statuses.join(","));
   return request<Task[]>(`/tasks?${params}`, undefined, []);
+}
+
+/**
+ * Queue a new run with a finished run's type and parameters.
+ *
+ * Done by id rather than by resending `params`: those come back redacted, so
+ * the client does not hold what the original run was given.
+ */
+export function resubmitTaskRun(runId: string): Promise<Task> {
+  return request<Task>(
+    `/tasks/${encodeURIComponent(runId)}/resubmit`,
+    { method: "POST" },
+    {} as Task,
+  );
 }
 
 export function fetchTaskRun(runId: string): Promise<Task> {

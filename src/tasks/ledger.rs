@@ -208,6 +208,7 @@ mod tests {
         Actor {
             user_id: "babamul:abc".into(),
             username: "pete".into(),
+            email: None,
         }
     }
 
