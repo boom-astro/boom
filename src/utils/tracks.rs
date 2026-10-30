@@ -629,6 +629,7 @@ pub struct UpsertPlan {
     pub bound_fit_residual_arcsec: Option<f64>,
     pub bound_fit_detections: Option<i32>,
     pub orbit: Option<StoredOrbit>,
+    pub seeds: Vec<(StoredOrbit, Option<f64>)>,
     pub mag_spread: Option<f64>,
     pub designation: Option<String>,
     pub kind: Option<String>,
@@ -780,13 +781,22 @@ pub async fn plan_upsert(
     // Counted over this run's own detections, not ones another track keeps.
     let incoming_fit =
         bound_fit.map(|(fit, r)| (fit, r, (members.len() - contested.len()) as i32, orbit));
-    let stored_fit = existing
+    let stored_fits: Vec<_> = existing
         .iter()
         .filter(|t| absorbed.contains(&&t.id))
         .filter_map(|t| {
             let fit = BoundFit::parse(t.bound_fit.as_deref()?)?;
             Some((fit, t.bound_fit_residual_arcsec, fit_detections(t), t.orbit))
         })
+        .collect();
+    let seeds = incoming_fit
+        .iter()
+        .chain(&stored_fits)
+        .filter(|&&(fit, ..)| fit == BoundFit::Good)
+        .filter_map(|&(_, r, _, o)| Some((o?, r)))
+        .collect();
+    let stored_fit = stored_fits
+        .into_iter()
         .max_by_key(|&(fit, _, fit_on, _)| (fit_on, std::cmp::Reverse(fit.rank())));
     let bound_fit = match (incoming_fit, stored_fit) {
         (Some(new), Some(old)) if old.2 > new.2 => Some(old),
@@ -834,6 +844,7 @@ pub async fn plan_upsert(
         bound_fit_residual_arcsec,
         bound_fit_detections,
         orbit,
+        seeds,
         mag_spread: None,
         designation,
         kind,
@@ -1329,6 +1340,7 @@ pub(crate) mod tests {
             bound_fit_residual_arcsec: None,
             bound_fit_detections: None,
             orbit: None,
+            seeds: Vec::new(),
             mag_spread: None,
             designation: None,
             kind: None,
