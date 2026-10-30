@@ -32,7 +32,22 @@ pub struct SubmitTaskBody {
 pub struct ListTasksParams {
     /// Only runs of this task type.
     pub task_type: Option<TaskType>,
+    /// Only runs in these statuses, comma-separated, e.g. `queued,running`.
+    pub status: Option<String>,
     pub limit: Option<i64>,
+}
+
+/// Parse a comma-separated status list. Empty or absent means any status.
+fn parse_statuses(raw: Option<&str>) -> Result<Vec<TaskStatus>, String> {
+    raw.unwrap_or("")
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            serde_json::from_value(serde_json::Value::String(s.to_string()))
+                .map_err(|_| format!("unknown status '{s}'"))
+        })
+        .collect()
 }
 
 #[derive(Debug, Deserialize, IntoParams)]
@@ -58,6 +73,130 @@ fn redacted(mut task: Task) -> Task {
     // Connection errors often quote the whole URI back, password included.
     task.error = task.error.as_deref().map(redact::redact_text);
     task
+}
+
+/// Fill in the submitter's email on runs recorded before the actor carried one.
+///
+/// Best effort: a failed lookup or a deleted account leaves only the username.
+async fn fill_missing_emails(db: &mongodb::Database, runs: &mut [Task]) {
+    for (realm, collection) in [("boom", "users"), ("babamul", "babamul_users")] {
+        let prefix = format!("{realm}:");
+        let mut ids: Vec<String> = runs
+            .iter()
+            .filter(|t| t.actor.email.is_none())
+            .filter_map(|t| t.actor.user_id.strip_prefix(&prefix))
+            .map(str::to_string)
+            .collect();
+        ids.sort();
+        ids.dedup();
+        if ids.is_empty() {
+            continue;
+        }
+        let emails = match emails_by_id(db, collection, ids).await {
+            Ok(emails) => emails,
+            Err(e) => {
+                tracing::warn!("failed to look up task submitters in {collection}: {e}");
+                continue;
+            }
+        };
+        for run in runs.iter_mut().filter(|t| t.actor.email.is_none()) {
+            if let Some(id) = run.actor.user_id.strip_prefix(&prefix) {
+                run.actor.email = emails.get(id).cloned();
+            }
+        }
+    }
+}
+
+async fn emails_by_id(
+    db: &mongodb::Database,
+    collection: &str,
+    ids: Vec<String>,
+) -> Result<std::collections::HashMap<String, String>, mongodb::error::Error> {
+    use futures::TryStreamExt;
+    use mongodb::bson::{doc, Document};
+    let docs: Vec<Document> = db
+        .collection::<Document>(collection)
+        .find(doc! { "_id": { "$in": ids } })
+        .projection(doc! { "email": 1 })
+        .await?
+        .try_collect()
+        .await?;
+    Ok(docs
+        .iter()
+        .filter_map(|d| {
+            Some((
+                d.get_str("_id").ok()?.to_string(),
+                d.get_str("email").ok()?.to_string(),
+            ))
+        })
+        .collect())
+}
+
+/// Validate, apply single-flight, and queue a run.
+async fn enqueue(
+    db: &mongodb::Database,
+    task_type: &str,
+    params: serde_json::Value,
+    admin: &AdminActor,
+    resubmitted_from: Option<String>,
+) -> HttpResponse {
+    // Validated here so a typo comes back as a 400 the client can act on,
+    // rather than as a run that fails on a worker minutes later.
+    if let Err(e) = tasks::validate_params(task_type, &params) {
+        return response::bad_request(&e.to_string());
+    }
+
+    // Single-flight: two ingests of the same catalog would race on the same
+    // collection and the same chunk state. Returning the existing run rather
+    // than a bare error lets the client jump straight to watching it.
+    if let Some(key) = tasks::single_flight_key(task_type, &params) {
+        match queue::find_active(db, task_type, key).await {
+            Ok(Some(existing)) => {
+                return HttpResponse::Conflict().json(response::ApiResponseBody::ok(
+                    "an equivalent run is already queued or running",
+                    serde_json::to_value(redacted(existing)).unwrap_or_default(),
+                ));
+            }
+            Ok(None) => {}
+            Err(e) => {
+                return response::internal_error(&format!("failed to check for active runs: {e}"))
+            }
+        }
+    }
+
+    let task = Task {
+        id: uuid::Uuid::new_v4().to_string(),
+        // Stored as a string: a run outlives the release that defined its type.
+        task_type: task_type.to_string(),
+        params,
+        status: TaskStatus::Queued,
+        actor: admin.as_task_actor(),
+        trigger: Trigger::Api,
+        requested_at: now(),
+        started_at: None,
+        finished_at: None,
+        progress: Default::default(),
+        worker: None,
+        lease_expires_at: None,
+        cancel_requested: false,
+        error: None,
+        attempts: 0,
+        resubmitted_from,
+    };
+
+    match queue::submit(db, &task).await {
+        Ok(()) => {
+            tracing::info!(
+                task_id = %task.id,
+                task_type = %task.task_type,
+                resubmitted_from = ?task.resubmitted_from,
+                "queued a run for {}",
+                task.actor.username
+            );
+            response::ok_ser("success", redacted(task))
+        }
+        Err(e) => response::internal_error(&format!("failed to queue the task: {e}")),
+    }
 }
 
 /// List the task types this release can run
@@ -110,62 +249,50 @@ pub async fn submit_task(
     admin: AdminActor,
 ) -> HttpResponse {
     let body = body.into_inner();
+    enqueue(&db, body.task_type.as_str(), body.params, &admin, None).await
+}
 
-    // Validated here so a typo comes back as a 400 the client can act on,
-    // rather than as a run that fails on a worker minutes later.
-    if let Err(e) = tasks::validate_params(body.task_type.as_str(), &body.params) {
-        return response::bad_request(&e.to_string());
-    }
-
-    // Single-flight: two ingests of the same catalog would race on the same
-    // collection and the same chunk state. Returning the existing run rather
-    // than a bare error lets the client jump straight to watching it.
-    if let Some(key) = tasks::single_flight_key(body.task_type.as_str(), &body.params) {
-        match queue::find_active(&db, body.task_type.as_str(), key).await {
-            Ok(Some(existing)) => {
-                return HttpResponse::Conflict().json(response::ApiResponseBody::ok(
-                    "an equivalent run is already queued or running",
-                    serde_json::to_value(redacted(existing)).unwrap_or_default(),
-                ));
-            }
-            Ok(None) => {}
-            Err(e) => {
-                return response::internal_error(&format!("failed to check for active runs: {e}"))
-            }
-        }
-    }
-
-    let task = Task {
-        id: uuid::Uuid::new_v4().to_string(),
-        // Stored as a string: a run outlives the release that defined its type.
-        task_type: body.task_type.as_str().to_string(),
-        params: body.params,
-        status: TaskStatus::Queued,
-        actor: admin.as_task_actor(),
-        trigger: Trigger::Api,
-        requested_at: now(),
-        started_at: None,
-        finished_at: None,
-        progress: Default::default(),
-        worker: None,
-        lease_expires_at: None,
-        cancel_requested: false,
-        error: None,
-        attempts: 0,
+/// Submit a new run with the same type and parameters as a finished one
+///
+/// The copy is made server-side because the parameters the API returns are
+/// redacted, so a client cannot send back what the original run was given.
+#[utoipa::path(
+    post,
+    path = "/tasks/{task_id}/resubmit",
+    params(("task_id" = String, Path, description = "The finished run to repeat")),
+    responses(
+        (status = 200, description = "The queued task", body = Task),
+        (status = 400, description = "The run is not finished, or its type or parameters are no longer accepted"),
+        (status = 403, description = "Not an admin"),
+        (status = 404, description = "No such run"),
+        (status = 409, description = "An equivalent run is already queued or running")
+    ),
+    tags=["Tasks"]
+)]
+#[post("/tasks/{task_id}/resubmit")]
+pub async fn resubmit_task(
+    db: web::Data<mongodb::Database>,
+    task_id: web::Path<String>,
+    admin: AdminActor,
+) -> HttpResponse {
+    let original = match queue::get(&db, &task_id).await {
+        Ok(Some(task)) => task,
+        Ok(None) => return response::not_found("no such run"),
+        Err(e) => return response::internal_error(&format!("failed to read the task: {e}")),
     };
-
-    match queue::submit(&db, &task).await {
-        Ok(()) => {
-            tracing::info!(
-                task_id = %task.id,
-                task_type = %task.task_type,
-                "queued a run for {}",
-                task.actor.username
-            );
-            response::ok_ser("success", redacted(task))
-        }
-        Err(e) => response::internal_error(&format!("failed to queue the task: {e}")),
+    if !original.status.is_terminal() {
+        return response::bad_request("only a finished run can be resubmitted");
     }
+    // Validated again by `enqueue`: the release may have changed the task's
+    // parameters, or dropped the task, since the original was accepted.
+    enqueue(
+        &db,
+        &original.task_type,
+        original.params,
+        &admin,
+        Some(original.id),
+    )
+    .await
 }
 
 /// List task runs, most recent first
@@ -189,11 +316,18 @@ pub async fn get_tasks(
         .limit
         .unwrap_or(DEFAULT_LIST_LIMIT)
         .clamp(1, MAX_LIST_LIMIT);
-    match queue::list(&db, params.task_type.map(|t| t.as_str()), limit).await {
-        Ok(runs) => response::ok_ser(
-            "success",
-            runs.into_iter().map(redacted).collect::<Vec<_>>(),
-        ),
+    let statuses = match parse_statuses(params.status.as_deref()) {
+        Ok(statuses) => statuses,
+        Err(e) => return response::bad_request(&e),
+    };
+    match queue::list(&db, params.task_type.map(|t| t.as_str()), &statuses, limit).await {
+        Ok(mut runs) => {
+            fill_missing_emails(&db, &mut runs).await;
+            response::ok_ser(
+                "success",
+                runs.into_iter().map(redacted).collect::<Vec<_>>(),
+            )
+        }
         Err(e) => response::internal_error(&format!("failed to list runs: {e}")),
     }
 }
@@ -217,7 +351,12 @@ pub async fn get_task(
     _admin: AdminActor,
 ) -> HttpResponse {
     match queue::get(&db, &task_id).await {
-        Ok(Some(task)) => response::ok_ser("success", redacted(task)),
+        Ok(Some(task)) => {
+            let mut runs = [task];
+            fill_missing_emails(&db, &mut runs).await;
+            let [task] = runs;
+            response::ok_ser("success", redacted(task))
+        }
         Ok(None) => response::not_found("no such run"),
         Err(e) => response::internal_error(&format!("failed to read the task: {e}")),
     }
@@ -493,4 +632,82 @@ pub async fn unaccept_enrichment_set(
         admin.username
     );
     response::ok_no_data("acceptance withdrawn")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tasks::models::{Actor, Progress};
+
+    #[test]
+    fn statuses_parse_from_a_comma_separated_list() {
+        assert_eq!(
+            parse_statuses(Some("queued, running")).unwrap(),
+            vec![TaskStatus::Queued, TaskStatus::Running]
+        );
+        assert!(parse_statuses(None).unwrap().is_empty());
+        assert!(parse_statuses(Some("")).unwrap().is_empty());
+        assert_eq!(
+            parse_statuses(Some("queued,cancelled")).unwrap_err(),
+            "unknown status 'cancelled'"
+        );
+    }
+
+    fn run_by(user_id: &str, email: Option<&str>) -> Task {
+        Task {
+            id: uuid::Uuid::new_v4().to_string(),
+            task_type: "test".into(),
+            params: serde_json::json!({}),
+            status: TaskStatus::Succeeded,
+            actor: Actor {
+                user_id: user_id.into(),
+                username: "admin".into(),
+                email: email.map(str::to_string),
+            },
+            trigger: Trigger::Api,
+            requested_at: now(),
+            started_at: None,
+            finished_at: None,
+            progress: Progress::default(),
+            worker: None,
+            lease_expires_at: None,
+            cancel_requested: false,
+            error: None,
+            attempts: 0,
+            resubmitted_from: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn older_runs_get_the_submitters_email_from_their_realm() {
+        use mongodb::bson::doc;
+        let db = crate::conf::get_test_db().await;
+        let id = uuid::Uuid::new_v4().to_string();
+        let users = db.collection::<mongodb::bson::Document>("babamul_users");
+        users
+            .insert_one(doc! { "_id": &id, "email": "someone@example.org" })
+            .await
+            .unwrap();
+
+        let mut runs = [
+            run_by(&format!("babamul:{id}"), None),
+            // The same id in the other realm is somebody else.
+            run_by(&format!("boom:{id}"), None),
+            run_by(&format!("babamul:{id}"), Some("recorded@example.org")),
+            run_by("system", None),
+        ];
+        fill_missing_emails(&db, &mut runs).await;
+        users.delete_one(doc! { "_id": &id }).await.unwrap();
+
+        let emails: Vec<_> = runs.iter().map(|r| r.actor.email.as_deref()).collect();
+        assert_eq!(
+            emails,
+            vec![
+                Some("someone@example.org"),
+                None,
+                Some("recorded@example.org"),
+                None
+            ]
+        );
+    }
 }

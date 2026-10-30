@@ -105,7 +105,8 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
         ...data.navMain,
         {
           title: "Admin",
-          url: "/admin",
+          // The badge counts catalog and enrichment issues, so it leads to them.
+          url: issues.count > 0 ? "/admin?tab=data" : "/admin",
           icon: IconShieldLock,
           badge: issues.count,
           badgeLabel: issues.label,
