@@ -174,7 +174,7 @@ pub async fn load_unknown(
     let filter = match survey {
         Survey::Ztf => {
             let (detections, _) = load_window(db, start, end - start, drb, false, None).await?;
-            return Ok(detections);
+            return Ok(drop_repeats(detections));
         }
         Survey::Lsst => doc! {
             "candidate.jd": jd,
@@ -223,7 +223,38 @@ pub async fn load_unknown(
             })
         });
     }
-    Ok(detections)
+    Ok(drop_repeats(detections))
+}
+
+const REPEAT_ARCSEC: f64 = 2.0;
+
+/// DECam can send two alerts an arcsecond apart for one source in one exposure.
+fn drop_repeats(mut detections: Vec<Detection>) -> Vec<Detection> {
+    let second = |d: &Detection| (d.jd * 86_400.0).round() as i64;
+    let tol_deg = REPEAT_ARCSEC / 3600.0;
+    let mut order: Vec<usize> = (0..detections.len()).collect();
+    order.sort_by(|&a, &b| {
+        let (a, b) = (&detections[a], &detections[b]);
+        second(a).cmp(&second(b)).then(a.dec.total_cmp(&b.dec))
+    });
+    let mut kept: Vec<usize> = Vec::with_capacity(order.len());
+    let mut repeats = HashSet::new();
+    for k in order {
+        let d = &detections[k];
+        let repeat = kept
+            .iter()
+            .rev()
+            .map(|&j| &detections[j])
+            .take_while(|o| second(o) == second(d) && d.dec - o.dec <= tol_deg)
+            .any(|o| angular_separation_deg(d.ra, d.dec, o.ra, o.dec) <= tol_deg);
+        if repeat {
+            repeats.insert(d.id);
+        } else {
+            kept.push(k);
+        }
+    }
+    detections.retain(|d| !repeats.contains(&d.id));
+    detections
 }
 
 pub fn associates_known(survey: &Survey) -> bool {
