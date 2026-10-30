@@ -563,16 +563,20 @@ export type SimilarObject = {
  * Objects whose AppleCiDEr fusion embedding is closest to this one's, excluding
  * itself. A 404 means no embedding is stored (only ZTF alerts that pass the
  * AppleCiDEr gate get one), so it returns an empty list rather than throwing.
+ *
+ * `programids` are the ZTF programs the caller's ACLs allow; the server checks
+ * them against the token's user.
  */
 export async function fetchSimilarObjects(
   objectId: string,
-  topK: number = 10
+  topK: number,
+  programids: number[]
 ): Promise<{ results: SimilarObject[]; message?: string }> {
   const url = `${API_BASE}/similarity/objects`;
-  const res = await fetch(url, {
+  const res = await fetchWithAuth(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ object_id: objectId, top_k: topK }),
+    body: JSON.stringify({ object_id: objectId, top_k: topK, programids }),
   });
   const body = await parseResponseJson(res).catch(() => null);
   const message =
@@ -593,7 +597,7 @@ export async function fetchSimilarObjects(
 
 export async function fetchEmbeddingsCount(): Promise<number> {
   const url = `${API_BASE}/embeddings/count`;
-  const res = await fetch(url);
+  const res = await fetchWithAuth(url);
   if (!res.ok) {
     const txt = await res.text().catch(() => "");
     throw new Error(`Fetch embedding count failed: ${res.status} ${txt}`);

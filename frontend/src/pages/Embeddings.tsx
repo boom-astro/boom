@@ -10,6 +10,8 @@ import {
   fetchSimilarObjects,
   type SimilarObject,
 } from "@/lib/api";
+import { useAppStore } from "@/lib/store";
+import { ZTF_ACCESS_LABELS, ztfAccess, ztfProgramIds } from "@/lib/ztfAccess";
 
 /** Matches the server's clamp. */
 const MAX_TOP_K = 100;
@@ -22,6 +24,9 @@ function formatScore(score: number): string {
 }
 
 export default function Embeddings() {
+  const access = useAppStore((s) => ztfAccess(s.profile));
+  const programids = ztfProgramIds(access);
+
   const [objectId, setObjectId] = useState("");
   const [topK, setTopK] = useState(String(DEFAULT_TOP_K));
   const [results, setResults] = useState<SimilarObject[] | null>(null);
@@ -57,7 +62,7 @@ export default function Embeddings() {
     setError(null);
     setNotice(null);
     try {
-      const { results, message } = await fetchSimilarObjects(trimmed, k);
+      const { results, message } = await fetchSimilarObjects(trimmed, k, programids);
       setResults(results);
       setSearchedId(trimmed);
       // No embedding stored is a normal answer, shown as a notice, not an error.
@@ -76,7 +81,7 @@ export default function Embeddings() {
         <h1 className="text-2xl font-bold">Embeddings</h1>
       </div>
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
         <Card>
           <CardHeader className="pb-2">
             <CardDescription>Stored Embeddings</CardDescription>
@@ -92,6 +97,15 @@ export default function Embeddings() {
             <CardTitle className="text-2xl">AppleCiDEr fusion</CardTitle>
             <p className="text-sm text-muted-foreground">
               384-dimensional, L2-normalized. Ranked by cosine similarity.
+            </p>
+          </CardHeader>
+        </Card>
+        <Card>
+          <CardHeader className="pb-2">
+            <CardDescription>Your Access</CardDescription>
+            <CardTitle className="text-2xl">{ZTF_ACCESS_LABELS[access]}</CardTitle>
+            <p className="text-sm text-muted-foreground">
+              Searches ZTF program{programids.length === 1 ? "" : "s"} {programids.join(", ")}.
             </p>
           </CardHeader>
         </Card>
