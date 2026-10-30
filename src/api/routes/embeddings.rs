@@ -11,10 +11,15 @@
 //! [`crate::api::routes::babamul::embeddings`] can share it.
 
 use crate::api::models::response;
-use crate::milvus::MilvusClient;
+use crate::enrichment::models::applecider_postprocess::AppleCiderFusion;
+use crate::milvus::{MilvusClient, SearchHit};
 use crate::utils::enums::ProgramId;
 
+use std::collections::HashMap;
+
 use actix_web::{get, post, web, HttpResponse};
+use futures::TryStreamExt;
+use mongodb::{bson::doc, Database};
 
 /// What every caller may search until per-user access is derived from ACLs.
 const PUBLIC_ONLY: &[i32] = &[ProgramId::Public as i32];
@@ -32,6 +37,32 @@ pub struct SimilarObjectsQuery {
 const DEFAULT_TOP_K: i64 = 10;
 const MAX_TOP_K: i64 = 100;
 
+/// Only ZTF alerts are embedded, so every stored candid is a ZTF one.
+const ZTF_ALERTS: &str = "ZTF_alerts";
+
+/// One neighbor from a similarity search.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub struct SimilarObject {
+    pub object_id: String,
+    /// Similarity score under the collection's metric; higher is closer.
+    pub score: f32,
+    /// AppleCiDEr's classification of the alert the stored embedding came
+    /// from. Null when that alert has none.
+    pub applecider_fusion: Option<AppleCiderFusion>,
+}
+
+#[derive(serde::Deserialize)]
+struct ClassifiedAlert {
+    #[serde(rename = "_id")]
+    candid: i64,
+    classifications: Option<StoredClassifications>,
+}
+
+#[derive(serde::Deserialize)]
+struct StoredClassifications {
+    applecider_fusion: Option<AppleCiderFusion>,
+}
+
 /// Grab the shared client, cloned for `&mut` use, or the "not enabled" reply.
 pub(crate) fn client_or_unavailable(
     milvus: &web::Data<Option<MilvusClient>>,
@@ -44,9 +75,29 @@ pub(crate) fn client_or_unavailable(
     }
 }
 
+/// Map each hit's candid to the AppleCiDEr classification stored on its alert.
+async fn applecider_classifications(
+    db: &Database,
+    hits: &[SearchHit],
+) -> Result<HashMap<i64, AppleCiderFusion>, mongodb::error::Error> {
+    let candids: Vec<i64> = hits.iter().map(|hit| hit.candid).collect();
+    let alerts: Vec<ClassifiedAlert> = db
+        .collection::<ClassifiedAlert>(ZTF_ALERTS)
+        .find(doc! { "_id": { "$in": candids } })
+        .projection(doc! { "classifications.applecider_fusion": 1 })
+        .await?
+        .try_collect()
+        .await?;
+    Ok(alerts
+        .into_iter()
+        .filter_map(|alert| Some((alert.candid, alert.classifications?.applecider_fusion?)))
+        .collect())
+}
+
 /// Resolve the seed object's embedding and return its nearest neighbors.
 pub(crate) async fn similar_objects_response(
     milvus: &web::Data<Option<MilvusClient>>,
+    db: &Database,
     object_id: &str,
     top_k: Option<i64>,
 ) -> HttpResponse {
@@ -83,10 +134,28 @@ pub(crate) async fn similar_objects_response(
         Err(e) => return response::internal_error(&format!("Error running search: {}", e)),
     };
 
-    let neighbors: Vec<_> = hits
+    let hits: Vec<_> = hits
         .into_iter()
         .filter(|hit| hit.object_id != object_id)
         .take(top_k as usize)
+        .collect();
+
+    // The classification only annotates the neighbors, so a failed lookup
+    // drops it rather than the search results.
+    let mut classes = applecider_classifications(db, &hits)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::error!("Error fetching AppleCiDEr classifications: {}", e);
+            HashMap::new()
+        });
+
+    let neighbors: Vec<_> = hits
+        .into_iter()
+        .map(|hit| SimilarObject {
+            applecider_fusion: classes.remove(&hit.candid),
+            object_id: hit.object_id,
+            score: hit.score,
+        })
         .collect();
 
     response::ok_ser("success", neighbors)
@@ -111,7 +180,8 @@ pub(crate) async fn embeddings_count_response(
 ///
 /// Looks up the seed object's stored embedding, then runs a nearest-neighbor
 /// search with it. The seed object (which would otherwise be its own closest
-/// match) is filtered out of the results.
+/// match) is filtered out of the results. Each neighbor carries AppleCiDEr's
+/// classification of the alert its embedding came from.
 #[utoipa::path(
     post,
     path = "/similarity/objects",
@@ -126,9 +196,10 @@ pub(crate) async fn embeddings_count_response(
 #[post("/similarity/objects")]
 pub async fn post_similar_objects(
     milvus: web::Data<Option<MilvusClient>>,
+    db: web::Data<Database>,
     body: web::Json<SimilarObjectsQuery>,
 ) -> HttpResponse {
-    similar_objects_response(&milvus, &body.object_id, body.top_k).await
+    similar_objects_response(&milvus, &db, &body.object_id, body.top_k).await
 }
 
 /// Get the number of embeddings currently stored.
@@ -144,4 +215,52 @@ pub async fn post_similar_objects(
 #[get("/embeddings/count")]
 pub async fn get_embeddings_count(milvus: web::Data<Option<MilvusClient>>) -> HttpResponse {
     embeddings_count_response(&milvus).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::enrichment::models::applecider_postprocess::{derive, AppleCiderModalities};
+    use crate::utils::db::mongify;
+    use mongodb::bson::from_document;
+
+    const MODALITIES: AppleCiderModalities = AppleCiderModalities {
+        photometry: true,
+        science_stamp: true,
+        reference_stamp: true,
+        metadata: true,
+        redshift: false,
+    };
+
+    /// Enrichment writes the summary with `mongify`, so the lookup must read
+    /// that shape back.
+    #[test]
+    fn reads_the_classification_enrichment_stores() {
+        let alpha = [20.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0];
+        let (fusion, _) = derive(&alpha, 10, MODALITIES).expect("8 alphas derive");
+        let stored = doc! {
+            "_id": 1234567890123_i64,
+            "classifications": { "acai_h": 0.1, "applecider_fusion": mongify(&fusion) },
+        };
+
+        let alert: ClassifiedAlert = from_document(stored).expect("must deserialize");
+        let read = alert.classifications.unwrap().applecider_fusion.unwrap();
+        assert_eq!(alert.candid, 1234567890123);
+        assert_eq!(read.decision_label, fusion.decision_label);
+        assert_eq!(read.abstain_completely, fusion.abstain_completely);
+        assert_eq!(
+            read.class_probabilities.agn_like,
+            fusion.class_probabilities.agn_like
+        );
+    }
+
+    #[test]
+    fn an_alert_without_a_classification_reads_as_none() {
+        let alert: ClassifiedAlert = from_document(doc! { "_id": 1_i64 }).unwrap();
+        assert!(alert.classifications.is_none());
+
+        let alert: ClassifiedAlert =
+            from_document(doc! { "_id": 1_i64, "classifications": { "acai_h": 0.1 } }).unwrap();
+        assert!(alert.classifications.unwrap().applecider_fusion.is_none());
+    }
 }

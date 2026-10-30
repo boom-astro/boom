@@ -38,6 +38,10 @@ pub struct SearchHit {
     /// Similarity score under the collection's metric (higher is closer for
     /// `COSINE`/inner-product).
     pub score: f32,
+    /// Alert the stored embedding came from, for joining against Mongo.
+    /// Confidential, so never serialized to clients.
+    #[serde(skip)]
+    pub candid: i64,
 }
 
 impl MilvusClient {
@@ -83,7 +87,7 @@ impl MilvusClient {
             search_input: Some(SearchInput::PlaceholderGroup(encode_float_placeholder(&[
                 query,
             ]))),
-            output_fields: vec![],
+            output_fields: vec![FIELD_CANDID.to_string()],
             search_params,
             nq: 1,
             use_default_consistency: true,
@@ -292,6 +296,7 @@ fn parse_search_hits(data: Option<SearchResultData>) -> Vec<SearchHit> {
         Some(i_ds::IdField::StrId(arr)) => arr.data,
         _ => return vec![],
     };
+    let candids = long_column(&data.fields_data, FIELD_CANDID).unwrap_or_default();
 
     object_ids
         .into_iter()
@@ -299,6 +304,7 @@ fn parse_search_hits(data: Option<SearchResultData>) -> Vec<SearchHit> {
         .map(|(i, object_id)| SearchHit {
             object_id,
             score: data.scores.get(i).copied().unwrap_or(f32::NAN),
+            candid: candids.get(i).copied().unwrap_or_default(),
         })
         .collect()
 }
@@ -514,6 +520,10 @@ mod tests {
                     data: vec!["ZTF_A".into(), "ZTF_B".into()],
                 })),
             }),
+            fields_data: vec![scalar(
+                FIELD_CANDID,
+                scalar_field::Data::LongData(LongArray { data: vec![10, 20] }),
+            )],
             ..Default::default()
         };
 
@@ -524,13 +534,26 @@ mod tests {
                 SearchHit {
                     object_id: "ZTF_A".into(),
                     score: 0.9,
+                    candid: 10,
                 },
                 SearchHit {
                     object_id: "ZTF_B".into(),
                     score: 0.8,
+                    candid: 20,
                 },
             ]
         );
+    }
+
+    #[test]
+    fn a_search_hit_does_not_serialize_its_candid() {
+        let hit = SearchHit {
+            object_id: "ZTF_A".into(),
+            score: 0.9,
+            candid: 10,
+        };
+        let json = serde_json::to_value(&hit).unwrap();
+        assert!(json.get("candid").is_none());
     }
 
     #[test]

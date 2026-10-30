@@ -10,11 +10,14 @@ use crate::api::routes::embeddings::{
 use crate::milvus::MilvusClient;
 
 use actix_web::{get, post, web, HttpResponse};
+use mongodb::Database;
 
 /// Find the objects most similar to a given object.
 ///
 /// Looks up the seed object's stored embedding, then runs a nearest-neighbor
-/// search with it. The seed object itself is excluded from the results.
+/// search with it. The seed object itself is excluded from the results. Each
+/// neighbor carries AppleCiDEr's classification of the alert its embedding came
+/// from.
 #[utoipa::path(
     post,
     path = "/babamul/similarity/objects",
@@ -30,9 +33,10 @@ use actix_web::{get, post, web, HttpResponse};
 #[post("/similarity/objects")]
 pub async fn post_babamul_similar_objects(
     milvus: web::Data<Option<MilvusClient>>,
+    db: web::Data<Database>,
     body: web::Json<SimilarObjectsQuery>,
 ) -> HttpResponse {
-    similar_objects_response(&milvus, &body.object_id, body.top_k).await
+    similar_objects_response(&milvus, &db, &body.object_id, body.top_k).await
 }
 
 /// Get the number of embeddings currently stored.
