@@ -1016,6 +1016,8 @@ mod timeseries_tests {
 
 #[derive(thiserror::Error, Debug)]
 pub enum AlertWorkerError {
+    #[error("failed to initialize photometry shadow outbox")]
+    PhotometryShadow(#[source] anyhow::Error),
     #[error("failed to load config")]
     LoadConfigError(#[from] conf::BoomConfigError),
     #[error("error from redis")]
