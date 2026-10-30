@@ -1684,6 +1684,23 @@ pub struct AppConfig {
     #[serde(default)]
     pub linker: LinkerConfig,
     pub cutouts_storage: CutoutsStorage,
+    #[serde(default)]
+    pub photometry_points: PhotometryPointsConfig,
+}
+
+#[derive(Default, Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct PhotometryPointsConfig {
+    #[serde(default)]
+    pub mode: PhotometryPointsMode,
+}
+
+#[derive(Default, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PhotometryPointsMode {
+    #[default]
+    Disabled,
+    Compare,
 }
 
 impl AppConfig {
