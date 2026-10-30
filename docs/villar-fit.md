@@ -8,11 +8,17 @@ reconstructing the model curve yourself.
 
 The model is the piecewise analytic supernova light-curve function introduced by
 [Villar et al. (2019)](https://ui.adsabs.harvard.edu/abs/2019ApJ...884...83V/abstract).
-BOOM fits it jointly in ZTF *g* and *r* with a GPU particle-swarm optimizer
+BOOM fits it jointly in *g* and *r* with a GPU particle-swarm optimizer
 ([`villar-pso`](https://github.com/frenbox/villar-pso)), minimizing a
 band-balanced Gaussian negative log-likelihood with Gaussian priors, then
 refining the swarm's best point with a short Nelder-Mead polish. The fit runs in
 flux; the two flux-valued parameters are reported on the AB magnitude scale.
+
+The light curve it fits is the ZTF photometry (detections and forced
+photometry) up to the alert, plus the *g* and *r* photometry of the matched
+LSST object when there is one. Points from both surveys go into the same two
+bands, so the parameters keep their `ZTF_` names even when LSST points were
+used. DECam points are not used.
 
 ## Quick reference
 
@@ -416,7 +422,12 @@ against a bound rather than fitted; check for railed parameters.
 curves and will disagree with later ones. Use the latest `candid` unless you
 specifically want the historical view.
 
-**Only *g* and *r*.** ZTF *i*-band points are discarded before fitting.
+**Only *g* and *r*.** ZTF *i*-band points and the other LSST bands are
+discarded before fitting.
+
+**ZTF and LSST are fitted as one survey.** Their *g* and *r* filters are close
+but not identical, and the fit does not correct for the difference: a
+systematic offset between the two surveys ends up in `extra_sigma`.
 
 ## Source
 
