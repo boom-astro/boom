@@ -440,6 +440,22 @@ export function fetchObjCutouts(survey: string, objectId: string): Promise<Cutou
   return fetchCutouts(survey, `objectId=${encodeURIComponent(objectId)}`);
 }
 
+export type VillarFit = {
+  candid: string | number;
+  reduced_chi2: number | null;
+  peak_mag: number | null;
+  t_peak: number | null;
+  params: Record<string, number | null>;
+};
+
+export async function fetchVillarFit(survey: string, objectId: string): Promise<VillarFit | null> {
+  const url = `${API_BASE}/surveys/${encodeURIComponent(survey)}/villar-fit?objectId=${encodeURIComponent(objectId)}`;
+  const res = await fetchWithAuth(url);
+  if (res.status === 404) return null;
+  await ensureOk(res, "Fetch Villar fit");
+  return unwrapData<VillarFit | null>(await readJson(res), null);
+}
+
 export type NightlyStat = {
   date: string;
   ztf?: number;

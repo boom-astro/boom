@@ -2,6 +2,8 @@ import React, { useMemo, useRef, useState, useEffect } from 'react';
 import { Card, CardContent } from './ui/card';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Maximize2, Info } from 'lucide-react';
+import { fetchVillarFit, VillarFit } from '@/lib/api';
+import { villarCurves, VillarCurve } from '@/lib/villar';
 
 // Band colors matching other plots
 const BAND_COLORS: Record<string, string> = {
@@ -38,7 +40,7 @@ function jd2mjd(jd: number) {
     return jd - 2400000.5;
 }
 
-function LightcurveInternal({ data, setExpandedDialogOpen, setHelpDialogOpen, height }: { data: LightcurveData, setExpandedDialogOpen?: (open: boolean) => void | null, setHelpDialogOpen: (open: boolean) => void, height?: string }) {
+function LightcurveInternal({ data, fitCurves, setExpandedDialogOpen, setHelpDialogOpen, height }: { data: LightcurveData, fitCurves: VillarCurve[], setExpandedDialogOpen?: (open: boolean) => void | null, setHelpDialogOpen: (open: boolean) => void, height?: string }) {
     const candidates: Detection[] = data?.prv_candidates ?? [];
     const fpHists: Detection[] = data?.fp_hists ?? [];
     const nondets: Detection[] = data?.prv_nondetections ?? [];
@@ -46,6 +48,7 @@ function LightcurveInternal({ data, setExpandedDialogOpen, setHelpDialogOpen, he
     const [includeSurveyMatches, setIncludeSurveyMatches] = useState(true);
     const [includeForcedPhot, setIncludeForcedPhot] = useState(true);
     const [includeUpperLimits, setIncludeUpperLimits] = useState(true);
+    const [includeFit, setIncludeFit] = useState(true);
 
     const nondetsFromFpHists = useMemo(() => {
         if (!includeForcedPhot) return [];
@@ -261,6 +264,20 @@ function LightcurveInternal({ data, setExpandedDialogOpen, setHelpDialogOpen, he
     const yToPixel = (mag: number) => pad.top + ((mag - domain.y0) / (domain.y1 - domain.y0)) * plotH; // increasing mag -> downwards
     const pixelToX = (px: number) => domain.x0 + ((px - pad.left) / plotW) * (domain.x1 - domain.x0);
     const pixelToY = (py: number) => domain.y0 + ((py - pad.top) / plotH) * (domain.y1 - domain.y0);
+
+    const fitPath = (curve: VillarCurve) => {
+        let d = '';
+        let penDown = false;
+        for (const pt of curve.points) {
+            if (!Number.isFinite(pt.mag)) {
+                penDown = false;
+                continue;
+            }
+            d += `${penDown ? 'L' : 'M'}${xToPixel(jd2mjd(pt.jd)).toFixed(1)},${yToPixel(pt.mag).toFixed(1)}`;
+            penDown = true;
+        }
+        return d;
+    };
 
     // ticks
     const xTicks = useMemo(() => {
@@ -482,6 +499,17 @@ function LightcurveInternal({ data, setExpandedDialogOpen, setHelpDialogOpen, he
                         />
                         <span className="text-gray-600 dark:text-gray-300">Upperlimits</span>
                     </label>
+                    {fitCurves.length > 0 && (
+                        <label className="flex items-center gap-2 text-xs cursor-pointer select-none px-2 py-1 rounded hover:bg-gray-100 dark:hover:bg-slate-700">
+                            <input
+                                type="checkbox"
+                                checked={includeFit}
+                                onChange={(e) => setIncludeFit(e.target.checked)}
+                                className="w-4 h-4"
+                            />
+                            <span className="text-gray-600 dark:text-gray-300">Fit</span>
+                        </label>
+                    )}
                     {setExpandedDialogOpen && (
                         <button onClick={() => setExpandedDialogOpen(true)} title="Expand" className="p-1 rounded hover:bg-slate-100">
                             <Maximize2 className="w-4 h-4 text-gray-600" />
@@ -551,6 +579,16 @@ function LightcurveInternal({ data, setExpandedDialogOpen, setHelpDialogOpen, he
                         ) : null;
                     })}
                 </g>
+
+                {includeFit && (
+                    <g clipPath="url(#plot-area)" style={{ pointerEvents: 'none' }}>
+                        {fitCurves.map(curve => {
+                            const { bandKey, isHidden, color } = getBandState(curve.band);
+                            if (isHidden) return null;
+                            return <path key={`fit-${bandKey}`} d={fitPath(curve)} fill="none" stroke={color} strokeWidth={1.5} style={{ opacity: 0.7 }} />;
+                        })}
+                    </g>
+                )}
 
                 {/* transparent overlay to capture drag events - rendered early so interactive elements are on top */}
                 <rect
@@ -715,14 +753,28 @@ function LightcurveInternal({ data, setExpandedDialogOpen, setHelpDialogOpen, he
 export default function Lightcurve({ data }: { data: LightcurveData }) {
     const [dialogOpen, setDialogOpen] = useState(false);
     const [helpDialogOpen, setHelpDialogOpen] = useState(false);
+    const [villarFit, setVillarFit] = useState<VillarFit | null>(null);
+    const objectId = data?.objectId;
+
+    useEffect(() => {
+        setVillarFit(null);
+        if (!objectId?.startsWith('ZTF')) return;
+        let active = true;
+        fetchVillarFit('ztf', objectId)
+            .then(fit => { if (active) setVillarFit(fit); })
+            .catch(err => console.warn('Lightcurve: unable to fetch the Villar fit', err));
+        return () => { active = false; };
+    }, [objectId]);
+
+    const fitCurves = useMemo(() => (villarFit ? villarCurves(villarFit) : []), [villarFit]);
 
     return (
         <Card className="@container/card col-span-1 @xl/main:col-span-2">
             <CardContent>
-                <LightcurveInternal data={data} setExpandedDialogOpen={setDialogOpen} setHelpDialogOpen={setHelpDialogOpen} />
+                <LightcurveInternal data={data} fitCurves={fitCurves} setExpandedDialogOpen={setDialogOpen} setHelpDialogOpen={setHelpDialogOpen} />
                 <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
                     <DialogContent className="w-[min(1400px,95vw)] max-w-none sm:!max-w-none h-[90vh] flex flex-col">
-                        <LightcurveInternal data={data} setHelpDialogOpen={setHelpDialogOpen} height='100%'/>
+                        <LightcurveInternal data={data} fitCurves={fitCurves} setHelpDialogOpen={setHelpDialogOpen} height='100%'/>
                     </DialogContent>
                 </Dialog>
 
@@ -761,6 +813,10 @@ export default function Lightcurve({ data }: { data: LightcurveData }) {
                                     <div className="flex items-start gap-2">
                                         <span className="font-medium">Triangles (larger):</span>
                                         <span>Non-detections from other surveys.</span>
+                                    </div>
+                                    <div className="flex items-start gap-2">
+                                        <span className="font-medium">Lines:</span>
+                                        <span>Villar et al. (2019) model fitted to the ZTF g and r photometry (when "Fit" is enabled).</span>
                                     </div>
                                 </div>
                             </div>
