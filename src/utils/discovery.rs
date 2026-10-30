@@ -809,7 +809,7 @@ async fn keep_reproduced(
     run: &HashMap<i64, &Detection>,
     stored: &HashMap<i64, Detection>,
 ) -> Result<UpsertPlan, mongodb::error::Error> {
-    let (Some(orbit), Some(fitted_on)) = (plan.orbit, plan.bound_fit_detections) else {
+    let Some(fitted_on) = plan.bound_fit_detections else {
         return Ok(plan);
     };
     if plan.bound_fit.as_deref() != Some(BoundFit::Good.as_str()) || fitted_on >= plan.n_detections
@@ -827,30 +827,51 @@ async fn keep_reproduced(
             site: d.site.unwrap_or(ZTF),
         })
         .collect();
-    let seed = State {
-        pos: orbit.pos,
-        vel: orbit.vel,
-    };
-    let Some((verdicts, fit)) = reproduced(
-        &observations,
-        &seed,
-        orbit.epoch_jd,
-        plan.bound_fit_residual_arcsec.unwrap_or(0.0),
-        GOOD_RESIDUAL_ARCSEC,
-    ) else {
+    let best = plan
+        .seeds
+        .iter()
+        .filter_map(|(orbit, rms)| {
+            let seed = State {
+                pos: orbit.pos,
+                vel: orbit.vel,
+            };
+            let (verdicts, fit) = reproduced(
+                &observations,
+                &seed,
+                orbit.epoch_jd,
+                rms.unwrap_or(0.0),
+                GOOD_RESIDUAL_ARCSEC,
+            )?;
+            let mut verdicts = verdicts.into_iter();
+            let (mut members, mut epochs, mut dropped) = (Vec::new(), Vec::new(), Vec::new());
+            for ((member, epoch), position) in plan.members.iter().zip(&plan.epochs).zip(&found) {
+                if position.is_none() || verdicts.next().unwrap_or(true) {
+                    members.push(member.clone());
+                    epochs.push(*epoch);
+                } else {
+                    dropped.push(member.clone());
+                }
+            }
+            let summary = summarise(&members, &epochs);
+            Some((members, epochs, dropped, summary, fit))
+        })
+        .max_by(
+            |(.., (n_a, nights_a, ..), fit_a), (.., (n_b, nights_b, ..), fit_b)| {
+                (n_a, nights_a)
+                    .cmp(&(n_b, nights_b))
+                    .then(fit_b.rms_arcsec.total_cmp(&fit_a.rms_arcsec))
+            },
+        );
+    let Some((
+        members,
+        epochs,
+        dropped,
+        (n_detections, n_nights, arc_days, first_jd, last_jd),
+        fit,
+    )) = best
+    else {
         return Ok(plan);
     };
-    let mut verdicts = verdicts.into_iter();
-    let (mut members, mut epochs, mut dropped) = (Vec::new(), Vec::new(), Vec::new());
-    for ((member, epoch), position) in plan.members.iter().zip(&plan.epochs).zip(&found) {
-        if position.is_none() || verdicts.next().unwrap_or(true) {
-            members.push(member.clone());
-            epochs.push(*epoch);
-        } else {
-            dropped.push(member.clone());
-        }
-    }
-    let (n_detections, n_nights, arc_days, first_jd, last_jd) = summarise(&members, &epochs);
     Ok(UpsertPlan {
         members,
         epochs,
