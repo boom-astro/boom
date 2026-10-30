@@ -168,6 +168,7 @@ mod tests {
             size_is_isophotal: true,
             diam_survey: None,
             orientation_is_nominal: false,
+            rex_snr_band: None,
         }
     }
 
