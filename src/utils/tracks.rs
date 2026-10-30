@@ -388,18 +388,17 @@ const FLAGGED_MAG_SPREAD: f64 = 2.0;
 const LONG_GAP_DAYS: f64 = 30.0;
 const LONG_GAP_MAX_RMS_RATIO: f64 = 5.0;
 
-/// Whether the detections pin an orbit down: a pair on each of two nights gives
-/// the motion twice, and four nights give enough positions on their own. Three
-/// single detections are six measurements for six parameters, which any orbit
-/// fits with no residual.
+fn night_of_member((survey, _): &Member, jd: f64) -> i64 {
+    night_at(jd, survey_site(survey).as_ref())
+}
+
 pub fn constrained(members: &[Member], jds: &[f64]) -> bool {
     let mut per_night: HashMap<i64, usize> = HashMap::new();
-    for ((survey, _), &jd) in members.iter().zip(jds) {
-        *per_night
-            .entry(night_at(jd, survey_site(survey).as_ref()))
-            .or_default() += 1;
+    for (member, &jd) in members.iter().zip(jds) {
+        *per_night.entry(night_of_member(member, jd)).or_default() += 1;
     }
-    per_night.len() >= 4 || per_night.values().filter(|&&n| n >= 2).count() >= 2
+    let pairs = per_night.values().filter(|&&n| n >= 2).count();
+    per_night.len() >= 4 || (per_night.len() >= 3 && pairs >= 2)
 }
 
 fn longest_gap(jds: &[f64]) -> f64 {
@@ -1218,6 +1217,8 @@ pub(crate) mod tests {
         let (m, j) = nights(&[2, 1, 1]);
         assert!(!constrained(&m, &j));
         let (m, j) = nights(&[2, 2]);
+        assert!(!constrained(&m, &j));
+        let (m, j) = nights(&[2, 2, 1]);
         assert!(constrained(&m, &j));
         let (m, j) = nights(&[1, 1, 1, 1]);
         assert!(track_flags(&m, &j, None, None).is_empty());
@@ -1225,8 +1226,11 @@ pub(crate) mod tests {
 
     #[test]
     fn test_a_year_long_link_needs_a_tight_residual() {
-        let members = ztf(&[1, 2, 3, 4]);
-        let jds = [2460000.0, 2460000.02, 2460365.0, 2460365.02];
+        let members = ztf(&[1, 2, 3, 4, 5, 6, 7, 8]);
+        let jds = [
+            2460000.0, 2460000.02, 2460001.0, 2460001.02, 2460365.0, 2460365.02, 2460366.0,
+            2460366.02,
+        ];
         assert!(track_flags(&members, &jds, Some(1.0), Some(0.5)).is_empty());
         assert_eq!(
             track_flags(&members, &jds, Some(8.0), Some(4.0)),
