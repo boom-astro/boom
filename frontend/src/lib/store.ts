@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
-import api, { Profile } from './api'
+import api, { UnauthorizedError, type Profile } from './api'
 
 async function generateAvatarUrl(email: string) {
     const msgUint8 = new TextEncoder().encode(email.trim().toLowerCase());
@@ -49,6 +49,14 @@ export const useAppStore = create<AppState>()(
   )
 )
 
+// The profile is persisted, so it outlives the token that justified it. Dropping
+// the credential without dropping the profile leaves whatever was gated on that
+// profile -- the admin page most visibly -- rendered over a session that no
+// longer exists.
+api.setLogoutHandler(() => {
+  if (useAppStore.getState().profile) useAppStore.getState().clearProfile()
+})
+
 // helper to load profile if authenticated and no profile in store
 //
 // Pass `{ force: true }` whenever the token has just changed. The cache is keyed
@@ -85,11 +93,18 @@ export async function ensureProfileLoaded(options?: { force?: boolean }): Promis
     useAppStore.getState().setProfile(data)
     return data
   } catch (err: unknown) {
-    // if fetchProfile throws (e.g. unauthorized) clear token
     console.error('ensureProfileLoaded: failed to fetch profile', err)
-    api.logout()
-    useAppStore.getState().clearProfile()
-    return null
+    // Only an authentication failure signs the user out. Every failure used to:
+    // a transient 500 or a dropped connection on this one request logged
+    // somebody out of the whole app and discarded whatever they were part way
+    // through. The profile already in the store is the better answer -- it is
+    // what the page was rendering a moment ago -- and the next request that
+    // really is unauthorized clears it through the handler above.
+    if (err instanceof UnauthorizedError) {
+      api.logout()
+      return null
+    }
+    return useAppStore.getState().profile
   }
 }
 
