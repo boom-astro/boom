@@ -1835,15 +1835,9 @@ pub async fn get_filter_schema(
         .get(&survey_name)
         .map(Vec::as_slice)
         .unwrap_or_default();
-    match cross_matches_field(&db, catalogs).await {
-        Ok(Some(field)) => {
-            if let Some(fields) = schema["fields"].as_array_mut() {
-                fields.push(field);
-            }
-        }
-        Ok(None) => {}
-        Err(e) => {
-            return response::internal_error(&format!("error sampling crossmatch catalogs: {}", e))
+    if let Some(field) = cross_matches_field(&db, catalogs).await {
+        if let Some(fields) = schema["fields"].as_array_mut() {
+            fields.push(field);
         }
     }
     response::ok(&format!("avro schema for survey {}", survey_name), schema)
@@ -1872,20 +1866,30 @@ fn bson_avro_type(value: &Bson) -> Option<serde_json::Value> {
 async fn cross_matches_field(
     db: &Database,
     catalogs: &[CatalogXmatchConfig],
-) -> Result<Option<serde_json::Value>, mongodb::error::Error> {
+) -> Option<serde_json::Value> {
     let mut catalog_fields = Vec::new();
     for catalog in catalogs
         .iter()
         .filter(|c| !c.catalog.starts_with(WATCHLIST_PREFIX))
     {
-        let rows: Vec<Document> = db
-            .collection::<Document>(catalog.collection_name())
-            .find(doc! {})
-            .projection(catalog.projection.clone())
-            .limit(CATALOG_SAMPLE_SIZE)
-            .await?
-            .try_collect()
-            .await?;
+        let rows = async {
+            db.collection::<Document>(catalog.collection_name())
+                .find(doc! {})
+                .projection(catalog.projection.clone())
+                .limit(CATALOG_SAMPLE_SIZE)
+                .await?
+                .try_collect::<Vec<Document>>()
+                .await
+        }
+        .await
+        .unwrap_or_else(|error| {
+            tracing::warn!(
+                %error,
+                catalog = %catalog.catalog,
+                "could not sample a crossmatch catalog for the filter schema"
+            );
+            Vec::new()
+        });
         let mut row_fields: Vec<serde_json::Value> = catalog
             .projection
             .keys()
@@ -1920,13 +1924,13 @@ async fn cross_matches_field(
         }));
     }
     if catalog_fields.is_empty() {
-        return Ok(None);
+        return None;
     }
-    Ok(Some(serde_json::json!({
+    Some(serde_json::json!({
         "name": "cross_matches",
         "type": ["null", { "type": "record", "name": "CrossMatches", "fields": catalog_fields }],
         "default": null,
-    })))
+    }))
 }
 
 #[cfg(test)]
