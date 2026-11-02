@@ -3,15 +3,17 @@ use crate::conf::AppConfig;
 use crate::enrichment::{
     babamul::{Babamul, BabamulLsstAlert},
     decam::{add_decam_match, DecamMatch},
-    fetch_alerts, EnrichmentWorker, EnrichmentWorkerError, ZtfMatch,
+    fetch_alerts,
+    ztf::{ztf_detections, ztf_nondetections},
+    EnrichmentWorker, EnrichmentWorkerError, ZtfMatch,
 };
 use crate::utils::db::mongify;
 use crate::utils::enums::Survey;
 use crate::utils::host::HostGalaxyAssociation;
 use crate::utils::lightcurves::{
     analyze_photometry, is_stationary, prepare_photometry, signed_snr, summarise_detections,
-    ActivityMetrics, Band, DetectionHistory, EpisodeHistory, PerBandProperties, PhotometryMag,
-    EPISODE_GAP_DAYS, STATIONARY_MIN_FORCED_SNR,
+    ActivityMetrics, Band, DetectionHistory, EpisodeHistory, MultisurveyDetectionHistory,
+    PerBandProperties, PhotometryMag, EPISODE_GAP_DAYS, STATIONARY_MIN_FORCED_SNR,
 };
 use apache_avro_derive::AvroSchema;
 use apache_avro_macros::serdavro;
@@ -74,6 +76,24 @@ impl LsstPhotometry {
             _ => None,
         }
     }
+}
+
+pub fn lsst_detections(
+    prv_candidates: &[LsstPhotometry],
+) -> impl Iterator<Item = (f64, Survey, &Band)> {
+    prv_candidates
+        .iter()
+        .filter(|p| p.flux.is_some_and(|f| f >= 0.0))
+        .map(|p| (p.jd, Survey::Lsst, &p.band))
+}
+
+pub fn lsst_nondetections(
+    fp_hists: &[LsstPhotometry],
+) -> impl Iterator<Item = (f64, f32, Survey, &Band)> {
+    fp_hists
+        .iter()
+        .filter(|p| p.magpsf.is_none() && p.flux.is_some())
+        .map(|p| (p.jd, p.diffmaglim, Survey::Lsst, &p.band))
 }
 
 pub fn create_lsst_alert_pipeline() -> Vec<Document> {
@@ -264,6 +284,8 @@ pub struct LsstAlertProperties {
     /// `None` on alerts enriched before this field existed.
     #[serde(default)]
     pub detection_history: Option<DetectionHistory>,
+    #[serde(default)]
+    pub multisurvey_detection_history: Option<MultisurveyDetectionHistory>,
     /// Detection episodes, for finding sources that outburst more than once.
     /// `None` on alerts enriched before this field existed.
     pub episode_history: Option<EpisodeHistory>,
@@ -573,7 +595,7 @@ impl LsstEnrichmentWorker {
 
         // Per-object detection history for history-aware filters (positive/negative
         // by psfFlux sign; LSST difference psfFlux is signed natively).
-        let (detection_history, episode_history) = summarise_detections(
+        let (mut detection_history, episode_history) = summarise_detections(
             alert
                 .prv_candidates
                 .iter()
@@ -587,6 +609,29 @@ impl LsstEnrichmentWorker {
             alert.candidate.jd,
             EPISODE_GAP_DAYS,
         );
+        detection_history.add_nondetections(
+            lsst_nondetections(&alert.fp_hists).map(|(jd, maglim, ..)| (jd, maglim)),
+            alert.candidate.jd,
+        );
+
+        let ztf_match = alert.survey_matches.as_ref().and_then(|m| m.ztf.as_ref());
+        let multisurvey_detection_history = MultisurveyDetectionHistory::from_points(
+            lsst_detections(&alert.prv_candidates)
+                .chain(
+                    ztf_match
+                        .into_iter()
+                        .flat_map(|m| ztf_detections(&m.prv_candidates)),
+                )
+                .chain(alert.decam_match.iter().flat_map(|m| m.detections())),
+            lsst_nondetections(&alert.fp_hists)
+                .chain(
+                    ztf_match
+                        .into_iter()
+                        .flat_map(|m| ztf_nondetections(&m.prv_nondetections, &m.fp_hists)),
+                )
+                .chain(alert.decam_match.iter().flat_map(|m| m.nondetections())),
+            alert.candidate.jd,
+        );
 
         Ok(LsstAlertProperties {
             rock: is_rock,
@@ -599,6 +644,7 @@ impl LsstEnrichmentWorker {
             photstats,
             multisurvey_photstats,
             detection_history: Some(detection_history),
+            multisurvey_detection_history: Some(multisurvey_detection_history),
             episode_history: Some(episode_history),
         })
     }

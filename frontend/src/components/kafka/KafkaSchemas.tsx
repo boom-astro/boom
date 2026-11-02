@@ -59,6 +59,7 @@ const getFieldDescriptions = (survey: Survey): Record<string, ReactNode> => ({
   },
   photstats: "Light-curve statistics computed from the alert's (prv_candidates + fp_hists).",
   multisurvey_photstats: "Same statistics recomputed from the combined light curve when a cross-survey match exists.",
+  multisurvey_detection_history: "First detection in any linked survey and the latest non-detection before it.",
   peak_jd: "Julian Date of the brightest observation (minimum magnitude) in this band.",
   peak_mag: "Magnitude at the brightest point (lower magnitude = brighter).",
   peak_mag_err: "Photometric uncertainty on the peak magnitude.",
