@@ -4,14 +4,25 @@ use crate::enrichment::{fetch_alerts, EnrichmentWorker, EnrichmentWorkerError};
 use crate::utils::db::{fetch_timeseries_op, mongify};
 use crate::utils::enums::Survey;
 use crate::utils::host::HostGalaxyAssociation;
+use crate::utils::identify::{closest, IdentifyConfig, NightPaths, OrbitEntry};
 use crate::utils::lightcurves::{
     analyze_photometry, prepare_photometry, summarise_detections, Band, DetectionHistory,
     EpisodeHistory, PerBandProperties, PhotometryMag, EPISODE_GAP_DAYS, SNT,
 };
+use crate::utils::linking::{night_start, Detection};
+use crate::utils::mpcorb::load_catalogue;
+use crate::utils::o11y::logging::{log_error, WARN};
+use crate::utils::sso_geometry::{geometry_at, DECAM};
 use apache_avro_derive::AvroSchema;
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
+use rayon::prelude::*;
+use std::collections::{BTreeMap, HashMap};
+use std::time::{Duration, Instant};
 use tracing::{instrument, warn};
+
+const SSO_MATCH_RADIUS_ARCSEC: f64 = 30.0;
+const CATALOGUE_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 
 pub fn create_decam_alert_pipeline() -> Vec<Document> {
     vec![
@@ -181,10 +192,24 @@ pub struct DecamAlertForEnrichment {
     pub host_galaxy: Option<HostGalaxyAssociation>,
 }
 
+#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize, AvroSchema)]
+#[serde(default)]
+pub struct DecamSsoAssociation {
+    pub is_sso: bool,
+    pub designation: Option<String>,
+    pub separation_arcsec: Option<f32>,
+    pub source: Option<String>,
+    pub helio_dist: Option<f32>,
+    pub topo_dist: Option<f32>,
+    pub phase_angle: Option<f32>,
+}
+
 /// DECAM alert properties computed during enrichment
 /// and inserted back into the alert document
 #[derive(Debug, serde::Deserialize, serde::Serialize, AvroSchema)]
 pub struct DecamAlertProperties {
+    #[serde(default)]
+    pub rock: bool,
     pub stationary: bool,
     /// Absent means never evaluated for a host, not evaluated and hostless.
     #[serde(default)]
@@ -197,14 +222,92 @@ pub struct DecamAlertProperties {
     /// Detection episodes, for finding sources that outburst more than once.
     /// `None` on alerts enriched before this field existed.
     pub episode_history: Option<EpisodeHistory>,
+    #[serde(default)]
+    pub sso: Option<DecamSsoAssociation>,
+}
+
+struct KnownObjects {
+    orbits: Vec<OrbitEntry>,
+    loaded: Instant,
+    paths: Option<(i64, NightPaths)>,
+}
+
+fn known_associations(
+    known: &mut KnownObjects,
+    alerts: &[DecamAlertForEnrichment],
+) -> HashMap<i64, DecamSsoAssociation> {
+    let cfg = IdentifyConfig {
+        site: DECAM,
+        match_radius_arcsec: SSO_MATCH_RADIUS_ARCSEC,
+        ..IdentifyConfig::default()
+    };
+    let mut by_night: BTreeMap<i64, Vec<Detection>> = BTreeMap::new();
+    for alert in alerts {
+        let detection = Detection {
+            id: alert.candid,
+            jd: alert.candidate.jd,
+            ra: alert.candidate.candidate.ra,
+            dec: alert.candidate.candidate.dec,
+            mag: None,
+            mag_err: None,
+            band: None,
+            site: Some(DECAM),
+        };
+        by_night
+            .entry(detection.night())
+            .or_default()
+            .push(detection);
+    }
+
+    let mut associations = HashMap::new();
+    for (night, detections) in by_night {
+        if !matches!(&known.paths, Some((n, _)) if *n == night) {
+            let paths = NightPaths::new(
+                &known.orbits,
+                night_start(night, Some(&DECAM)),
+                night_start(night + 1, Some(&DECAM)),
+                cfg.coarse_radius_deg,
+            );
+            known.paths = Some((night, paths));
+        }
+        let Some((_, paths)) = &known.paths else {
+            continue;
+        };
+        let orbits = &known.orbits;
+        let found: Vec<(i64, DecamSsoAssociation)> = detections
+            .par_iter()
+            .map(|d| {
+                let sso = match closest(d, orbits, paths, &cfg) {
+                    Some((idx, separation)) => {
+                        let geometry = geometry_at(&orbits[idx].elements, d.jd, &DECAM);
+                        DecamSsoAssociation {
+                            is_sso: true,
+                            designation: Some(orbits[idx].designation.clone()),
+                            separation_arcsec: Some(separation as f32),
+                            source: Some("boom".to_string()),
+                            helio_dist: Some(geometry.helio_dist as f32),
+                            topo_dist: Some(geometry.topo_dist as f32),
+                            phase_angle: Some(geometry.phase_angle as f32),
+                        }
+                    }
+                    None => DecamSsoAssociation::default(),
+                };
+                (d.id, sso)
+            })
+            .collect();
+        associations.extend(found);
+    }
+    associations
 }
 
 pub struct DecamEnrichmentWorker {
     input_queue: String,
     output_queue: String,
     client: mongodb::Client,
+    db: mongodb::Database,
     alert_collection: mongodb::Collection<Document>,
     alert_pipeline: Vec<Document>,
+    known: Option<KnownObjects>,
 }
 
 #[async_trait::async_trait]
@@ -226,8 +329,10 @@ impl EnrichmentWorker for DecamEnrichmentWorker {
             input_queue,
             output_queue,
             client,
+            db,
             alert_collection,
             alert_pipeline: create_decam_alert_pipeline(),
+            known: None,
         })
     }
 
@@ -267,6 +372,11 @@ impl EnrichmentWorker for DecamEnrichmentWorker {
 
         let now = flare::Time::now().to_jd();
 
+        let mut associations = self
+            .known_objects()
+            .await
+            .map(|known| known_associations(known, &alerts));
+
         // we keep it very simple for now, let's run on 1 alert at a time
         // we will move to batch processing later
         let mut updates = Vec::new();
@@ -274,7 +384,8 @@ impl EnrichmentWorker for DecamEnrichmentWorker {
         for alert in alerts {
             let candid = alert.candid;
 
-            let properties = self.get_alert_properties(&alert).await?;
+            let sso = associations.as_mut().and_then(|a| a.remove(&candid));
+            let properties = self.get_alert_properties(&alert, sso).await?;
 
             let update_alert_document = doc! {
                 "$set": {
@@ -302,9 +413,33 @@ impl EnrichmentWorker for DecamEnrichmentWorker {
 }
 
 impl DecamEnrichmentWorker {
+    async fn known_objects(&mut self) -> Option<&mut KnownObjects> {
+        if self
+            .known
+            .as_ref()
+            .is_none_or(|k| k.loaded.elapsed() >= CATALOGUE_MAX_AGE)
+        {
+            match load_catalogue(&self.db).await {
+                Ok(orbits) if !orbits.is_empty() => {
+                    self.known = Some(KnownObjects {
+                        orbits,
+                        loaded: Instant::now(),
+                        paths: None,
+                    });
+                }
+                Ok(_) => {
+                    warn!("MPC_orbits is empty, DECam alerts are not matched to known objects")
+                }
+                Err(error) => log_error!(WARN, error, "could not load MPC_orbits"),
+            }
+        }
+        self.known.as_mut()
+    }
+
     async fn get_alert_properties(
         &self,
         alert: &DecamAlertForEnrichment,
+        sso: Option<DecamSsoAssociation>,
     ) -> Result<DecamAlertProperties, EnrichmentWorkerError> {
         let prv_candidates: Vec<PhotometryMag> = alert
             .prv_candidates
@@ -332,11 +467,13 @@ impl DecamEnrichmentWorker {
         );
 
         Ok(DecamAlertProperties {
+            rock: sso.as_ref().is_some_and(|s| s.is_sso),
             stationary,
             hosted: alert.host_galaxy.as_ref().map(|h| h.best_host.is_some()),
             photstats,
             detection_history: Some(detection_history),
             episode_history: Some(episode_history),
+            sso,
         })
     }
 }
