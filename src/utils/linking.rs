@@ -388,6 +388,11 @@ pub fn find_tracklets(detections: &[Detection], cfg: &TrackletConfig) -> Vec<Tra
 
     let max_sep = cfg.max_rate_deg_per_day * cfg.max_span_days;
     let match_radius = cfg.match_radius_arcsec / 3600.0;
+    let far = (max_sep.to_radians() / 2.0).sin() * (1.0 + 1e-6);
+    let root_cos: Vec<f64> = detections
+        .iter()
+        .map(|d| d.dec.to_radians().cos().max(0.0).sqrt())
+        .collect();
     let exposures = exposures(detections, &order);
     let slack = 1e-6;
     let mut candidates: Vec<Tracklet> = Vec::new();
@@ -400,6 +405,13 @@ pub fn find_tracklets(detections: &[Detection], cfg: &TrackletConfig) -> Vec<Tra
             }
             let dt = (b.jd - a.jd).abs();
             if dt < cfg.min_pair_dt_days || dt > cfg.max_span_days {
+                continue;
+            }
+            let dra = (a.ra - b.ra).abs().rem_euclid(360.0);
+            // Haversine with sin(x) >= 2x/pi: a lower bound on the separation.
+            if root_cos[i] * root_cos[j] * dra.min(360.0 - dra).to_radians() / std::f64::consts::PI
+                > far
+            {
                 continue;
             }
             // Before the trigonometry, since it rejects a good share of pairs.
