@@ -1160,7 +1160,7 @@ pub const WITHOUT_DEFINITIONS: &[(&str, &str)] = &[
     (
         "TNS",
         "the Transient Name Server is a live, credentialed feed rather than an archival \
-         download, and is populated outside the catalog ingest path",
+         download, kept current by the tns_sync task instead of the catalog ingest path",
     ),
 ];
 

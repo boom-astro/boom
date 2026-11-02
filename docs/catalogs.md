@@ -210,14 +210,115 @@ that is neither defined nor listed there:
   parameters, built outside BOOM with LSDB. A boompy module reading that HATS
   catalog the way `allwise` and `panstarrs` do would make this an ordinary
   definition; nobody has written one yet.
-- **`TNS`** — a live, credentialed feed rather than an archival download,
-  populated outside the catalog ingest path.
+- **`TNS`**: a live, credentialed feed rather than an archival download, kept
+  current by the `tns_sync` task. See [TNS](#tns).
 
 The admin page lists both, with the reason from `WITHOUT_DEFINITIONS` in place
 of a title and a state of **Built elsewhere** rather than **Unknown slug**, and
 the drift badge does not count them. The distinction is the point: a name with
 no definition is otherwise reported as a probable typo, and two rows of
 permanent false alarm are how a real typo stops being noticed.
+
+## TNS
+
+`TNS` holds the Transient Name Server's public objects, one document per object,
+keyed by its TNS `objid`:
+
+| Field | From the TNS objects CSV |
+| --- | --- |
+| `_id` | `objid` |
+| `name_prefix`, `name` | `name_prefix`, `name`, e.g. `AT` and `2026bna` |
+| `ra`, `dec` | `ra`, `declination`, in degrees |
+| `type`, `redshift` | `type`, `redshift`, null when TNS has none |
+| `discovery_date`, `discovery_jd` | `discoverydate` as TNS writes it, and as a Julian date |
+| `discovery_mag`, `discovery_mag_filter` | `discoverymag`, `filter` |
+| `reporters` | `reporters` |
+| `internal_names` | `internal_names`, split on commas |
+| `coordinates` | `radec_geojson` at `[ra - 180, dec]`, with `l`, `b` and `hpx` as for every catalog |
+
+It is indexed on `coordinates.radec_geojson` (2dsphere) and `discovery_jd`.
+
+### Keeping it current
+
+`tns_sync` downloads the
+[public objects files](https://www.wis-tns.org/content/tns-getting-started) by
+`POST`ing the bot's `api_key` to
+`https://www.wis-tns.org/system/files/tns_public_objects/<file>`, with the bot's
+`tns_marker` as User-Agent, and upserts every row by `objid`:
+
+- `tns_public_objects.csv.zip`, the full file TNS cuts after UT midnight, on the
+  first run, once `tns.full_sync_every_hours` have passed since the last one
+  applied, or when the hourly files no longer cover the gap.
+- Otherwise `tns_public_objects_HH.csv.zip`, one per hour since the last one
+  applied. TNS overwrites each on a 24-hour cycle, so a file whose first line
+  does not start at the expected hour is not cut yet, and the run stops there.
+
+Progress is kept in `catalog_state` under `_id: "TNS"` (`synced_through`,
+`full_at`), so each run continues where the last one stopped.
+
+The live pipeline crossmatches an object only when it first sees it, which is
+usually before it is reported to TNS. So for every object in an hourly file, and
+every object of a full file modified since the last sync, `tns_sync` recomputes
+`cross_matches.TNS` on the `alerts_aux` records within the TNS crossmatch radius,
+in each survey that crossmatches against TNS. The backlog is not covered: after
+the first sync on a deployment, run `reprocess_crossmatch` with
+`catalogs: [TNS]` for each survey.
+
+### Photometry
+
+`tns_photometry` fetches the photometry reported to TNS, non-detections
+included, from `https://www.wis-tns.org/api/get/object` with
+`"photometry": "1"`, for the TNS objects that:
+
+- were discovered in the last `tns.photometry.max_age_days` (60),
+- are in `cross_matches.TNS` of a BOOM object whose
+  `host_galaxy.best_host.dist_mpc` is at most `tns.photometry.max_distance_mpc`
+  (200),
+- were not fetched in the last `tns.photometry.refresh_hours` (24).
+
+Objects never fetched go first, and a run fetches at most
+`tns.photometry.max_objects` (250). Its `names` parameter fetches a list of TNS
+names instead.
+
+After every request it reads `x-rate-limit-remaining` and `x-rate-limit-reset`:
+with none remaining it waits out the reset before the next request, and on a 429
+it waits the reset, or 60 s without one, and retries, five attempts in all. A
+401 or 403 fails the run; any other error skips the object.
+
+Each object is one document in `TNS_photometry`, replaced on every fetch:
+
+```json
+{
+  "_id": 182301,
+  "name": "2026bna",
+  "fetched_at": 1769330000.0,
+  "photometry": [
+    {
+      "jd": 2461065.24862,
+      "mag": 19.41, "mag_err": 0.08, "lim_mag": null,
+      "flux": null, "flux_err": null, "lim_flux": null,
+      "unit": "ABMag", "filter": "r",
+      "instrument": "ZTF-Cam", "telescope": "P48",
+      "reporting_group": null, "survey": "ZTF"
+    }
+  ]
+}
+```
+
+`mag`, `mag_err` and `lim_mag` are AB magnitudes. A point reported in another
+unit keeps its values in `flux`, `flux_err` and `lim_flux`, with `unit` naming
+it. A point with a `lim_mag` and no `mag` is a non-detection. Points TNS marks
+as not public are dropped. The Babamul object route returns the document of the
+nearest `cross_matches.TNS` match as `tns_photometry`, and the object page plots
+it.
+
+### Turning it on
+
+Set `BOOM_TNS__BOT_ID`, `BOOM_TNS__BOT_NAME` and `BOOM_TNS__API_KEY` on the
+`task-worker` service. With all three, the worker schedules `tns_sync` every
+`tns.sync_every_minutes` (60) and `tns_photometry` every
+`tns.photometry.every_minutes` (360); 0 turns either off. Without them nothing
+is scheduled. See [Scheduled runs](./task-system.md#scheduled-runs).
 
 ## When BOOM is the provenance
 

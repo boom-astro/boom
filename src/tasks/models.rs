@@ -53,11 +53,7 @@ pub struct Actor {
 }
 
 impl Actor {
-    /// The actor for a run nothing human asked for.
-    ///
-    /// Exists so that when recurring tasks land, a scheduled run is
-    /// distinguishable from one a person submitted rather than being attributed
-    /// to whoever happened to configure the schedule.
+    /// The actor for a run nothing human asked for, such as a scheduled one.
     pub fn system() -> Self {
         Self {
             user_id: "system".to_string(),
@@ -77,7 +73,7 @@ pub enum Trigger {
     /// A person, through the API.
     #[default]
     Api,
-    /// A recurring schedule. Not yet implemented -- see docs/task-system.md.
+    /// A recurring schedule, see `tasks::schedule`.
     Schedule,
 }
 
