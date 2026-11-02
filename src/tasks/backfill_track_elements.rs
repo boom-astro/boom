@@ -23,6 +23,8 @@ fn default_batch_size() -> usize {
 pub struct BackfillTrackElementsParams {
     #[serde(default = "default_batch_size")]
     pub batch_size: usize,
+    #[serde(default)]
+    pub recompute_flags: bool,
 }
 
 impl BackfillTrackElementsParams {
@@ -222,14 +224,22 @@ pub async fn run(
         ctx,
         &tracks,
         (
-            missing_flags(),
+            if params.recompute_flags {
+                doc! {}
+            } else {
+                missing_flags()
+            },
             doc! {
                 "members": 1, "member_surveys": 1, "epochs": 1, "rms_ratio": 1, "mag_spread": 1,
                 "n_detections": 1, "n_nights": 1, "arc_days": 1, "first_jd": 1, "last_jd": 1,
             },
         ),
         flags_update,
-        "no flags",
+        if params.recompute_flags {
+            "flags to recompute"
+        } else {
+            "no flags"
+        },
         params.batch_size,
     )
     .await?;
