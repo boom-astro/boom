@@ -2,7 +2,7 @@
 //! sets consistent with a single source moving at a constant on-sky rate.
 
 use crate::utils::sso_geometry::Site;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// Mean of angles in degrees, taken on the circle.
 ///
@@ -453,11 +453,16 @@ pub fn find_tracklets(detections: &[Detection], cfg: &TrackletConfig) -> Vec<Tra
     let mut kept: Vec<Tracklet> = Vec::new();
     // Membership sets alongside `kept`: the subset test is the hot loop here.
     let mut kept_ids: Vec<HashSet<i64>> = Vec::new();
+    let mut holding: HashMap<i64, Vec<usize>> = HashMap::new();
     for c in candidates {
-        let covered = kept_ids
-            .iter()
-            .any(|k| c.ids.iter().all(|id| k.contains(id)));
+        let covered = holding.get(&c.ids[0]).is_some_and(|ks| {
+            ks.iter()
+                .any(|&k| c.ids.iter().all(|id| kept_ids[k].contains(id)))
+        });
         if !covered {
+            for &id in &c.ids {
+                holding.entry(id).or_default().push(kept.len());
+            }
             kept_ids.push(c.ids.iter().copied().collect());
             kept.push(c);
         }
