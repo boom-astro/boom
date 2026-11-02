@@ -91,8 +91,8 @@ pub const DERIVATIONS: &[(&str, u32)] = &[
     // rock, star, near_brightstar and stationary.
     ("crossmatch_flags", 1),
     ("detection_history", 1),
-    // hosted. Also bump when the DLR scoring parameters change: hosts are rewritten in place.
-    ("host_association", 1),
+    // hosted, best_host. Also bump when the DLR scoring parameters change: hosts are rewritten in place.
+    ("host_association", 2),
     // applecider_fusion, applecider_outputs and fusion_embedding.
     ("applecider_postprocess", 1),
 ];
