@@ -1500,6 +1500,8 @@ pub struct LinkerConfig {
     pub fast_dense_detections: usize,
     #[serde(default = "default_linker_fast_dense_max_rate")]
     pub fast_dense_max_rate_deg_per_day: f64,
+    #[serde(default)]
+    pub fast_live_every_minutes: u32,
 }
 
 impl LinkerConfig {
@@ -1596,6 +1598,7 @@ impl Default for LinkerConfig {
             fast_max_rate_deg_per_day: default_linker_fast_max_rate(),
             fast_dense_detections: default_linker_fast_dense_detections(),
             fast_dense_max_rate_deg_per_day: default_linker_fast_dense_max_rate(),
+            fast_live_every_minutes: 0,
         }
     }
 }
