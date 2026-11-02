@@ -17,7 +17,8 @@
 //! not search it again, and a night it could not finish is retried.
 //!
 //! With `linker.fast_live_every_minutes`, the fast pass alone also reruns on
-//! the night in progress while the linker waits for it to end.
+//! the night in progress, when it has new detections, while the linker waits
+//! for it to end.
 
 use boom::conf::{load_dotenv, AppConfig, LinkerConfig};
 use boom::utils::discovery::{
@@ -90,6 +91,24 @@ fn live(cfg: &LinkerConfig) -> LinkerConfig {
         recall: false,
         ..cfg.clone()
     }
+}
+
+async fn detections_so_far(
+    db: &mongodb::Database,
+    cfg: &LinkerConfig,
+    night: i64,
+) -> Option<usize> {
+    let mut count = 0;
+    for survey in &cfg.surveys {
+        match load_unknown(db, survey, night, night, cfg.drb, cfg.lsst_min_reliability).await {
+            Ok(found) => count += found.len(),
+            Err(error) => {
+                error!(%error, night, %survey, "could not count the night in progress");
+                return None;
+            }
+        }
+    }
+    Some(count)
 }
 
 /// The `nights` nights ending with `night`: the window's first JD and its
@@ -559,12 +578,20 @@ async fn main() {
     let live_cfg = live(&cfg);
     let live_every = (cfg.fast && cfg.fast_live_every_minutes > 0)
         .then(|| Duration::from_secs(cfg.fast_live_every_minutes as u64 * 60));
+    let mut live_seen = None;
     loop {
         let night = last_finished_night(now_jd(), cfg.run_after_utc_hour);
         let wait = if done.is_some_and(|d| d >= night) {
             if live_every.is_some() {
-                info!(night = night + 1, "fast pass over the night in progress");
-                run_night(&db, &live_cfg, night + 1, &stop).await;
+                let seen = detections_so_far(&db, &cfg, night + 1)
+                    .await
+                    .map(|count| (night + 1, count));
+                if seen.is_some_and(|(_, count)| count > 0) && seen != live_seen {
+                    info!(night = night + 1, "fast pass over the night in progress");
+                    if run_night(&db, &live_cfg, night + 1, &stop).await {
+                        live_seen = seen;
+                    }
+                }
             }
             let days = (finished_at(night + 1, cfg.run_after_utc_hour) - now_jd()).max(0.0);
             info!(
