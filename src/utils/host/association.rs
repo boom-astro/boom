@@ -35,6 +35,8 @@ pub struct StoredHostCandidate {
     /// Normalised over all candidates considered, not just the stored ones.
     pub posterior: f64,
     pub z: Option<f64>,
+    #[serde(default)]
+    pub z_err: Option<f64>,
     /// Adopted distance in Mpc, redshift-independent only when
     /// `dist_mpc_method` says so.
     pub dist_mpc: Option<f64>,
@@ -85,6 +87,7 @@ impl HostGalaxyAssociation {
                 dlr_rank: c.dlr_rank,
                 posterior: c.posterior,
                 z: c.galaxy.redshift,
+                z_err: c.galaxy.redshift_err,
                 dist_mpc: c.galaxy.dist_mpc,
                 dist_mpc_method: c.galaxy.dist_mpc_method.clone(),
                 a_arcsec: c.galaxy.a_arcsec,
