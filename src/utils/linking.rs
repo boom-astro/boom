@@ -344,6 +344,29 @@ pub fn fit_tracklet(dets: &[Detection], cfg: &TrackletConfig) -> Option<Tracklet
     })
 }
 
+struct Exposure {
+    jd: f64,
+    decs: Vec<f64>,
+    pos: Vec<usize>,
+}
+
+fn exposures(detections: &[Detection], order: &[usize]) -> Vec<Exposure> {
+    let mut by_jd: HashMap<u64, Vec<usize>> = HashMap::new();
+    for (p, &k) in order.iter().enumerate() {
+        by_jd.entry(detections[k].jd.to_bits()).or_default().push(p);
+    }
+    let mut out: Vec<Exposure> = by_jd
+        .into_iter()
+        .map(|(bits, pos)| Exposure {
+            jd: f64::from_bits(bits),
+            decs: pos.iter().map(|&p| detections[order[p]].dec).collect(),
+            pos,
+        })
+        .collect();
+    out.sort_by(|a, b| a.jd.total_cmp(&b.jd));
+    out
+}
+
 /// Find every tracklet supported by `detections`, longest first.
 ///
 /// Seeds on pairs that could be one mover, grows each seed by attaching
@@ -365,9 +388,8 @@ pub fn find_tracklets(detections: &[Detection], cfg: &TrackletConfig) -> Vec<Tra
 
     let max_sep = cfg.max_rate_deg_per_day * cfg.max_span_days;
     let match_radius = cfg.match_radius_arcsec / 3600.0;
-    // Declinations in `order`, so growth can binary-search the same band the
-    // pair search sweeps rather than rescanning every detection per seed.
-    let sorted_decs: Vec<f64> = order.iter().map(|&k| detections[k].dec).collect();
+    let exposures = exposures(detections, &order);
+    let slack = 1e-6;
     let mut candidates: Vec<Tracklet> = Vec::new();
 
     for (oi, &i) in order.iter().enumerate() {
@@ -396,25 +418,42 @@ pub fn find_tracklets(detections: &[Detection], cfg: &TrackletConfig) -> Vec<Tra
             let Some(seed) = fit_tracklet(&[*a, *b], cfg) else {
                 continue;
             };
-            let mut members = vec![*a, *b];
             // A member sits within `match_radius` of the seed line, which over
             // the window reaches at most `max_sep` from the pair in latitude.
             let margin = max_sep + match_radius;
-            let lo = sorted_decs.partition_point(|&x| x < a.dec.min(b.dec) - margin);
-            let hi = sorted_decs.partition_point(|&x| x <= a.dec.max(b.dec) + margin);
-            for &k in &order[lo..hi] {
-                let d = &detections[k];
-                if k == i || k == j || (d.jd - seed.jd_ref).abs() > cfg.max_span_days {
+            let (band_lo, band_hi) = (a.dec.min(b.dec) - margin, a.dec.max(b.dec) + margin);
+            let first =
+                exposures.partition_point(|e| e.jd < seed.jd_ref - cfg.max_span_days - slack);
+            let mut hits = Vec::new();
+            for e in &exposures[first..] {
+                if e.jd > seed.jd_ref + cfg.max_span_days + slack {
+                    break;
+                }
+                if (e.jd - seed.jd_ref).abs() > cfg.max_span_days {
                     continue;
                 }
-                if photometry_disagrees(a, d, cfg) {
-                    continue;
-                }
-                let (pra, pdec) = predict(&seed, d.jd);
-                if angular_separation_deg(d.ra, d.dec, pra, pdec) <= match_radius {
-                    members.push(*d);
+                let (pra, pdec) = predict(&seed, e.jd);
+                let lo = e.decs.partition_point(|&x| x < pdec - match_radius - slack);
+                let hi = e
+                    .decs
+                    .partition_point(|&x| x <= pdec + match_radius + slack);
+                for &p in &e.pos[lo..hi] {
+                    let k = order[p];
+                    let d = &detections[k];
+                    if k == i || k == j || d.dec < band_lo || d.dec > band_hi {
+                        continue;
+                    }
+                    if photometry_disagrees(a, d, cfg) {
+                        continue;
+                    }
+                    if angular_separation_deg(d.ra, d.dec, pra, pdec) <= match_radius {
+                        hits.push(p);
+                    }
                 }
             }
+            hits.sort_unstable();
+            let mut members = vec![*a, *b];
+            members.extend(hits.iter().map(|&p| detections[order[p]]));
             members.sort_by(|p, q| {
                 (p.jd - seed.jd_ref)
                     .abs()
