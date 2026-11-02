@@ -49,6 +49,7 @@ pub mod migrate_snr;
 pub mod mpcorb_ingest;
 pub mod prepare_catalog;
 pub mod repair_photometry;
+pub mod repair_track_members;
 pub mod reprocess_crossmatch;
 pub mod sso_baselines;
 pub mod stream_kowalski_alerts;
@@ -98,13 +99,14 @@ pub enum TaskType {
     BackfillHpx,
     BackfillTrackElements,
     RepairPhotometry,
+    RepairTrackMembers,
     ReprocessCrossmatch,
     MigrateSnr,
     MigrateFpFlux,
 }
 
 impl TaskType {
-    pub const ALL: [TaskType; 17] = [
+    pub const ALL: [TaskType; 18] = [
         Self::CatalogIngest,
         Self::StreamKowalskiAlerts,
         Self::CopyCutouts,
@@ -119,6 +121,7 @@ impl TaskType {
         Self::BackfillHpx,
         Self::BackfillTrackElements,
         Self::RepairPhotometry,
+        Self::RepairTrackMembers,
         Self::ReprocessCrossmatch,
         Self::MigrateSnr,
         Self::MigrateFpFlux,
@@ -140,6 +143,7 @@ impl TaskType {
             Self::BackfillHpx => backfill_hpx::TASK_TYPE,
             Self::BackfillTrackElements => backfill_track_elements::TASK_TYPE,
             Self::RepairPhotometry => repair_photometry::TASK_TYPE,
+            Self::RepairTrackMembers => repair_track_members::TASK_TYPE,
             Self::ReprocessCrossmatch => reprocess_crossmatch::TASK_TYPE,
             Self::MigrateSnr => migrate_snr::TASK_TYPE,
             Self::MigrateFpFlux => migrate_fp_flux::TASK_TYPE,
@@ -235,6 +239,18 @@ pub const TASKS: &[TaskSpec] = &[
         idempotent: true,
         destructive: false,
         params_schema: || schema_of::<backfill_track_elements::BackfillTrackElementsParams>(),
+    },
+    TaskSpec {
+        id: repair_track_members::TASK_TYPE,
+        title: "Repair track members",
+        description: "Read each track member from the alert collection that holds it, so \
+                      DECam members of tracks stored before member_surveys stop reading as \
+                      ZTF or LSST, then merge the tracks this left sharing detections. \
+                      Resumable: re-running finds only what is left.",
+        idempotent: true,
+        // A merge deletes the tracks it absorbs, leaving an alias to the survivor.
+        destructive: true,
+        params_schema: || schema_of::<repair_track_members::RepairTrackMembersParams>(),
     },
     TaskSpec {
         id: stream_kowalski_alerts::TASK_TYPE,
@@ -464,6 +480,12 @@ pub fn validate_params(task_type: &str, params: &serde_json::Value) -> Result<()
                     .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
             parsed.validate().map_err(TaskError::InvalidParams)
         }
+        repair_track_members::TASK_TYPE => {
+            let parsed: repair_track_members::RepairTrackMembersParams =
+                serde_json::from_value(params.clone())
+                    .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            parsed.validate().map_err(TaskError::InvalidParams)
+        }
         stream_kowalski_alerts::TASK_TYPE => {
             let parsed: stream_kowalski_alerts::StreamKowalskiParams =
                 serde_json::from_value(params.clone())
@@ -570,6 +592,7 @@ pub fn single_flight_key(
             .and_then(|c| c.as_str())
             .map(|catalog| doc! { "catalog": catalog }),
         backfill_track_elements::TASK_TYPE => Some(doc! {}),
+        repair_track_members::TASK_TYPE => Some(doc! {}),
         // One migration of a collection at a time: two concurrent runs would
         // rewrite the same documents with the same pipeline, wasting a large
         // amount of write throughput for no benefit.
@@ -708,6 +731,11 @@ pub async fn dispatch(
             let params = backfill_track_elements::BackfillTrackElementsParams::deserialize(params)
                 .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
             backfill_track_elements::run(ctx, params).await
+        }
+        repair_track_members::TASK_TYPE => {
+            let params = repair_track_members::RepairTrackMembersParams::deserialize(params)
+                .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            repair_track_members::run(ctx, params).await
         }
         stream_kowalski_alerts::TASK_TYPE => {
             let params = stream_kowalski_alerts::StreamKowalskiParams::deserialize(params)

@@ -348,6 +348,68 @@ fn legacy_member(id: i64) -> Member {
     }
 }
 
+fn member_guesses(stored: Member, id: i64) -> Vec<Member> {
+    let mut guesses = vec![stored];
+    for guess in [
+        (Survey::Ztf, id),
+        (Survey::Lsst, id),
+        (Survey::Decam, id.wrapping_sub(DECAM_IDS)),
+        (Survey::Winter, id.wrapping_sub(WINTER_IDS)),
+    ] {
+        if !guesses.contains(&guess) {
+            guesses.push(guess);
+        }
+    }
+    guesses
+}
+
+/// Legacy id ranges read most DECam ids as LSST or ZTF.
+pub async fn locate_members(
+    db: &mongodb::Database,
+    tracks: &[StoredTrack],
+) -> Result<Vec<Vec<Member>>, mongodb::error::Error> {
+    let guesses: Vec<Vec<Vec<Member>>> = tracks
+        .iter()
+        .map(|t| {
+            t.member_keys()
+                .into_iter()
+                .zip(&t.members)
+                .map(|(stored, &id)| member_guesses(stored, id))
+                .collect()
+        })
+        .collect();
+    let wanted: Vec<Member> = guesses.iter().flatten().flatten().cloned().collect();
+    let mut held = HashSet::new();
+    for (survey, ids) in alerts_by_survey(&wanted) {
+        for chunk in ids.chunks(10_000) {
+            let mut cursor = db
+                .collection::<Document>(&format!("{survey}_alerts"))
+                .find(doc! { "_id": { "$in": chunk } })
+                .projection(doc! { "_id": 1 })
+                .await?;
+            while cursor.advance().await? {
+                if let Ok(id) = cursor.current().get_i64("_id") {
+                    held.insert((survey.clone(), id));
+                }
+            }
+        }
+    }
+    Ok(guesses
+        .into_iter()
+        .map(|track| {
+            track
+                .into_iter()
+                .map(|g| {
+                    g.iter()
+                        .find(|m| held.contains(*m))
+                        .unwrap_or(&g[0])
+                        .clone()
+                })
+                .collect()
+        })
+        .collect())
+}
+
 /// `None` for ZTF, the default site of every fit.
 pub fn survey_site(survey: &Survey) -> Option<Site> {
     match survey {

@@ -26,7 +26,7 @@ use crate::utils::thor;
 use crate::utils::tracks::{
     acquire_lock, alerts_by_survey, commit_upsert, detection_id, member_of, plan_upsert,
     release_lock, renew_lock, stamp_members, stamp_missing, summarise, survey_site, BoundFit,
-    Member, StoredOrbit, StoredTrack, UpsertPlan, LOCK_LEASE, LOCK_RENEW_EVERY,
+    Member, StoredOrbit, StoredTrack, UpsertPlan, Upserted, LOCK_LEASE, LOCK_RENEW_EVERY,
     SHARED_FOR_IDENTITY, TRACKS_COLLECTION,
 };
 use futures::StreamExt;
@@ -918,6 +918,33 @@ async fn keep_reproduced(
         unchanged_since: None,
         ..plan
     })
+}
+
+pub async fn refind(
+    db: &mongodb::Database,
+    track: &StoredTrack,
+) -> Result<Upserted, mongodb::error::Error> {
+    let fit = track
+        .bound_fit
+        .as_deref()
+        .and_then(BoundFit::parse)
+        .map(|fit| (fit, track.bound_fit_residual_arcsec));
+    let plan = plan_upsert(
+        db,
+        &track.member_keys(),
+        &track.epochs,
+        track.designation.clone(),
+        track.near_planet.clone(),
+        fit,
+        track.orbit,
+    )
+    .await?;
+    let none = HashMap::new();
+    let plan = keep_reproduced(db, plan, &HashMap::new(), &none).await?;
+    let plan = with_mag_spread(db, plan, &HashMap::new(), &none).await?;
+    let up = commit_upsert(db, plan).await?;
+    stamp_members(db, &up.track).await?;
+    Ok(up)
 }
 
 /// The detection behind each of `members`, from the run or else its alert, and
