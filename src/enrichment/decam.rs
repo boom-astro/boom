@@ -21,7 +21,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
 use tracing::{instrument, warn};
 
-const SSO_MATCH_RADIUS_ARCSEC: f64 = 30.0;
+const SSO_MATCH_RADIUS_ARCSEC: f64 = 8.0;
 const CATALOGUE_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 
 pub fn create_decam_alert_pipeline() -> Vec<Document> {
