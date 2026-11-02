@@ -14,7 +14,7 @@ export const LSST = "lsst";
 export const SURVEYS = [LSST, ZTF] as const;
 export type Survey = (typeof SURVEYS)[number];
 
-// Every Babamul Kafka topic, named `babamul.{survey}.{cross-match}.{class}`.
+// Every Babamul category topic, named `babamul.{survey}.{cross-match}.{class}`.
 // Listed rather than generated from the parts: the combinations aren't a full
 // product — only LSST has an `unknown` class.
 export const KAFKA_TOPICS = [

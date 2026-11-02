@@ -88,6 +88,14 @@ const TOPIC_TREE: TopicNode[] = [
       },
     ],
   },
+  {
+    key: "babamul.nearby",
+    label: "Nearby",
+    children: [
+      { key: "babamul.ztf.nearby", desc: "ZTF, host within 200 Mpc" },
+      { key: "babamul.lsst.nearby", desc: "LSST, host within 200 Mpc" },
+    ],
+  },
 ];
 
 const KAFKA_BOOTSTRAP = import.meta.env.VITE_KAFKA_DOMAIN ?? "kafka.boom.example.com:9092";

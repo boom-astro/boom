@@ -5,6 +5,22 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 const AND = () => <span className="text-muted-foreground">AND</span>;
 const OR = () => <span className="text-muted-foreground">OR</span>;
 
+function NearbyRule({ survey }: { survey: string }) {
+  return (
+    <div>
+      <h3 className="font-semibold text-chart-3">nearby</h3>
+      <p className="text-sm text-muted-foreground mb-0.5">Also sent to <code>babamul.{survey}.nearby</code>:</p>
+      <ul className="text-sm list-disc pl-5">
+        <li>not <code>stellar</code></li>
+        <AND/>
+        <li><code>properties.best_host.dist_mpc &le; 200</code></li>
+        <AND/>
+        <li><code>properties.best_host.d_dlr &le; 4</code></li>
+      </ul>
+    </div>
+  );
+}
+
 function LsstRules() {
   return (
     <Card>
@@ -63,6 +79,10 @@ function LsstRules() {
             <li><code>(ra, dec)</code> falls outside the LSPSC MOC (HEALPix depth&nbsp;11)</li>
           </ul>
         </div>
+
+        <hr className="border-border" />
+
+        <NearbyRule survey={LSST} />
 
         <hr className="border-border" />
 
@@ -158,6 +178,10 @@ function ZtfRules() {
             <li>fallback: not <code>stellar</code> and no valid <code>sgscoreN*</code> in the hosted range</li>
           </ul>
         </div>
+
+        <hr className="border-border" />
+
+        <NearbyRule survey={ZTF} />
 
         <hr className="border-border" />
 

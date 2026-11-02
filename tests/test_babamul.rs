@@ -1028,6 +1028,33 @@ async fn test_babamul_filters_low_drb() {
 }
 
 #[tokio::test]
+async fn test_babamul_ztf_nearby_topic() {
+    use boom::enrichment::babamul::Babamul;
+    use boom::utils::host::HostSummary;
+
+    let config = AppConfig::from_path(TEST_CONFIG_FILE).unwrap();
+    let babamul = Babamul::new(&config);
+
+    let host = |dist_mpc: f64| HostSummary {
+        name: Some("NGC 4993".to_string()),
+        catalog: Some("NED".to_string()),
+        z: Some(0.0098),
+        dist_mpc: Some(dist_mpc),
+        dist_mpc_method: Some("zIndependent".to_string()),
+        sep_arcsec: 10.0,
+        sep_kpc: Some(2.0),
+        d_dlr: 1.0,
+    };
+    let mut near = create_mock_enriched_ztf_alert(1234567903, "ZTF21aaaaaan", false);
+    near.properties.best_host = Some(host(40.0));
+    let mut far = create_mock_enriched_ztf_alert(1234567904, "ZTF21aaaaaao", false);
+    far.properties.best_host = Some(host(400.0));
+
+    let sent = babamul.process_ztf_alerts(vec![near, far]).await.unwrap();
+    assert_eq!(sent, 3, "the nearby alert also goes to babamul.ztf.nearby");
+}
+
+#[tokio::test]
 async fn test_babamul_filters_pixel_flags() {
     use boom::enrichment::babamul::Babamul;
 

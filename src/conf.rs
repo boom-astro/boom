@@ -891,6 +891,8 @@ pub struct BabamulConfig {
     /// Social sign-in (Google / GitHub / ORCID) configuration
     #[serde(default)]
     pub oauth: OAuthConfig,
+    #[serde(default)]
+    pub nearby: NearbyConfig,
 }
 
 impl Default for BabamulConfig {
@@ -903,8 +905,34 @@ impl Default for BabamulConfig {
             password_reset_cooldown_minutes: default_password_reset_cooldown_minutes(),
             registration_enabled: default_babamul_registration_enabled(),
             oauth: OAuthConfig::default(),
+            nearby: NearbyConfig::default(),
         }
     }
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct NearbyConfig {
+    #[serde(default = "default_nearby_max_dist_mpc")]
+    pub max_dist_mpc: f64,
+    #[serde(default = "default_nearby_max_d_dlr")]
+    pub max_d_dlr: f64,
+}
+
+impl Default for NearbyConfig {
+    fn default() -> Self {
+        NearbyConfig {
+            max_dist_mpc: default_nearby_max_dist_mpc(),
+            max_d_dlr: default_nearby_max_d_dlr(),
+        }
+    }
+}
+
+fn default_nearby_max_dist_mpc() -> f64 {
+    200.0
+}
+
+fn default_nearby_max_d_dlr() -> f64 {
+    4.0
 }
 
 /// Credentials for a single OAuth 2.0 / OIDC identity provider.
