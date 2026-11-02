@@ -2,6 +2,7 @@ use crate::alert::{LsstCandidate, ZtfCandidate};
 use crate::api::limits::{large_query_slot, next_result};
 use crate::api::models::response;
 use crate::api::routes::babamul::BabamulUser;
+use crate::conf::AppConfig;
 use crate::enrichment::{LsstAlertProperties, ZtfAlertClassifications, ZtfAlertProperties};
 use crate::utils::cosmology::luminosity_distance_mpc;
 use crate::utils::enums::Survey;
@@ -61,6 +62,7 @@ struct AlertsQuery {
     is_star: Option<bool>,
     is_near_brightstar: Option<bool>,
     is_stationary: Option<bool>,
+    max_host_dist_mpc: Option<f64>,
     limit: Option<u32>,
     skip: Option<u64>,
 }
@@ -91,6 +93,7 @@ enum AlertsQueryResult {
         ("is_star" = Option<bool>, Query, description = "Whether to filter for likely star candidates"),
         ("is_near_brightstar" = Option<bool>, Query, description = "Whether to filter for candidates near bright stars"),
         ("is_stationary" = Option<bool>, Query, description = "Whether to filter for stationary candidates"),
+        ("max_host_dist_mpc" = Option<f64>, Query, description = "Maximum distance in Mpc of the best host galaxy, which must also pass the nearby d_DLR cut"),
         ("limit" = Option<u32>, Query, description = "Maximum number of alerts to return (1-100000, default 1000)"),
         ("skip" = Option<u64>, Query, description = "Number of alerts to skip (for pagination)"),
     ),
@@ -107,6 +110,7 @@ pub async fn get_alerts(
     query: web::Query<AlertsQuery>,
     current_user: Option<web::ReqData<BabamulUser>>,
     db: web::Data<Database>,
+    config: web::Data<AppConfig>,
 ) -> HttpResponse {
     let _current_user = match current_user {
         Some(user) => user,
@@ -243,6 +247,16 @@ pub async fn get_alerts(
     }
     if let Some(is_stationary) = query.is_stationary {
         filter_doc.insert("properties.stationary", is_stationary);
+    }
+    if let Some(max_host_dist_mpc) = query.max_host_dist_mpc {
+        filter_doc.insert(
+            "properties.best_host.dist_mpc",
+            doc! { "$lte": max_host_dist_mpc },
+        );
+        filter_doc.insert(
+            "properties.best_host.d_dlr",
+            doc! { "$lte": config.babamul.nearby.max_d_dlr },
+        );
     }
 
     match survey {

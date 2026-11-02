@@ -342,6 +342,28 @@ flowchart TD
     style Topic14 fill:#2d3f5f,color:#e0e0e0
 ```
 
+### Nearby galaxies
+
+Transients around galaxies within ~200 Mpc (Sand et al. 2026, arXiv:2609.38304)
+also go to `babamul.ztf.nearby` and `babamul.lsst.nearby`, on top of their
+category topic. An alert goes there when it is published, is not `stellar`,
+and its best host has:
+
+- `dist_mpc <= babamul.nearby.max_dist_mpc` (default 200)
+- `d_dlr <= babamul.nearby.max_d_dlr` (default 4.0)
+
+Subscribing to `nearby` and a category topic delivers those alerts twice.
+
+Every ZTF and LSST alert carries its best host in `properties.best_host` (null
+when there is none): `name`, `catalog`, `z`, `dist_mpc`, `dist_mpc_method`,
+`sep_arcsec`, `sep_kpc` and `d_dlr`, the separation in units of the galaxy's
+directional light radius. Only NED-LVS hosts have a `dist_mpc`, so a Legacy
+Survey host never makes an alert nearby.
+
+The alert search lists them too: the `Nearby` profile in the web app, or
+`max_host_dist_mpc` on `GET /babamul/surveys/{survey}/alerts`, which also
+applies the `max_d_dlr` cut.
+
 ## Usage analytics
 
 Babamul usage is measured server-side only: API requests we already serve, and
