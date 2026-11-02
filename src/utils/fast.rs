@@ -1,5 +1,6 @@
 //! Fast movers, 1 to 25 deg/day, chained night to night and kept when one orbit fits.
 
+use crate::utils::digest2::neo_score_of;
 use crate::utils::discovery::DiscoveryError;
 use crate::utils::enums::Survey;
 use crate::utils::heliolinc::{is_bound, unit_vector, Conics, State};
@@ -43,6 +44,8 @@ pub struct FastSearch {
     pub max_chain_tracklets: usize,
     pub max_residual_arcsec: f64,
     pub conics: Conics,
+    pub lone_night: Option<i64>,
+    pub min_neo_score: f64,
 }
 
 impl Default for FastSearch {
@@ -60,6 +63,8 @@ impl Default for FastSearch {
             max_chain_tracklets: 60,
             max_residual_arcsec: 3.0,
             conics: Conics::Bound,
+            lone_night: None,
+            min_neo_score: 90.0,
         }
     }
 }
@@ -692,11 +697,47 @@ fn fit_chain(
     })
 }
 
+fn lone_tracklets(
+    tracklets: &[Tracklet],
+    tracks: &[FastTrack],
+    trails: &HashMap<i64, f64>,
+    by_id: &HashMap<i64, &Detection>,
+    night: i64,
+    search: &FastSearch,
+) -> Vec<Tracklet> {
+    let linked: HashSet<i64> = tracks
+        .iter()
+        .flat_map(|t| t.members.iter().copied())
+        .collect();
+    tracklets
+        .par_iter()
+        .filter(|t| t.night() == night)
+        .filter(|t| t.ids.iter().all(|id| !linked.contains(id)))
+        .filter(|t| {
+            match by_id
+                .get(&t.ids[0])
+                .and_then(|d| site_survey(d.site.as_ref()))
+            {
+                Some(Survey::Lsst) => trailed_like(t, trails),
+                _ => t.ids.len() >= 3,
+            }
+        })
+        .filter(|t| {
+            let members: Option<Vec<&Detection>> =
+                t.ids.iter().map(|id| by_id.get(id).copied()).collect();
+            members
+                .and_then(|m| neo_score_of(&m))
+                .is_some_and(|score| score.noid >= search.min_neo_score)
+        })
+        .cloned()
+        .collect()
+}
+
 pub fn fast_tracks(
     detections: &[Detection],
     trails: &HashMap<i64, f64>,
     search: &FastSearch,
-) -> Vec<FastTrack> {
+) -> (Vec<FastTrack>, Vec<Tracklet>) {
     let started = std::time::Instant::now();
     let tracklets = longest_first(fast_tracklets(detections, trails, search));
     let motions: Vec<Motion> = tracklets.par_iter().map(Motion::of).collect();
@@ -711,15 +752,20 @@ pub fn fast_tracks(
         .par_iter()
         .filter_map(|chain| fit_chain(chain, &next, &motions, &tracklets, &by_id, search))
         .collect();
+    let lone = match search.lone_night {
+        Some(night) => lone_tracklets(&tracklets, &tracks, trails, &by_id, night, search),
+        None => Vec::new(),
+    };
     info!(
         tracklets = tracklets.len(),
         continuations = edges.len(),
         chains = chains.len(),
         tracks = tracks.len(),
+        lone = lone.len(),
         seconds = started.elapsed().as_secs_f64(),
         "fast movers linked"
     );
-    tracks
+    (tracks, lone)
 }
 
 #[cfg(test)]
@@ -798,7 +844,7 @@ mod tests {
             }
         }
 
-        let tracks = fast_tracks(&detections, &HashMap::new(), &FastSearch::default());
+        let (tracks, _) = fast_tracks(&detections, &HashMap::new(), &FastSearch::default());
         assert_eq!(tracks.len(), 1, "{tracks:?}");
         assert_eq!(tracks[0].members, neo);
         assert!(

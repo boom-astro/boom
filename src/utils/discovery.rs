@@ -1119,6 +1119,39 @@ pub async fn persist_fast(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
+pub async fn persist_fast_tracklets(
+    db: &mongodb::Database,
+    tracklets: &[Tracklet],
+    detections: &[Detection],
+    labels: &HashMap<i64, String>,
+    known: &[Option<String>],
+    planets: &[Option<&'static str>],
+    dry_run: bool,
+    stop: &Stop,
+) -> PersistReport {
+    let candidates = tracklets.iter().map(|t| Candidate {
+        members: t.ids.clone(),
+        fit: (BoundFit::Ungated, None),
+        orbit: None,
+    });
+    persist(
+        db,
+        "fast tracklets",
+        Some(FAST_KIND),
+        candidates,
+        detections,
+        labels,
+        known,
+        planets,
+        dry_run,
+        &HashMap::new(),
+        (2, 1),
+        stop,
+    )
+    .await
+}
+
 /// Store each candidate as a track, holding the tracks lock throughout.
 ///
 /// One at a time rather than in bulk: identity is decided against what is
