@@ -23,8 +23,9 @@
 use boom::conf::{load_dotenv, AppConfig, LinkerConfig};
 use boom::utils::discovery::{
     associates_known, attach_pass, designations, known_movers, load_unknown, load_window,
-    persist_clusters, persist_fast, persist_tracks, recall, reference_epoch, satellites,
-    thor_clusters, track_detections, tracklets_per_night, Stop, ThorSearch,
+    persist_clusters, persist_fast, persist_fast_tracklets, persist_tracks, recall,
+    reference_epoch, satellites, thor_clusters, track_detections, tracklets_per_night, Stop,
+    ThorSearch,
 };
 use boom::utils::fast::{fast_tracks, lsst_trails, FastSearch};
 use boom::utils::heliolinc::{link_tracklets, Conics, LinkConfig, Track, KM_S_PER_AU_DAY};
@@ -387,9 +388,11 @@ async fn run_night(db: &mongodb::Database, cfg: &LinkerConfig, night: i64, stop:
                     dense_detections: cfg.fast_dense_detections,
                     dense_max_rate_deg_per_day: cfg.fast_dense_max_rate_deg_per_day,
                     conics,
+                    lone_night: cfg.fast_single_night.then_some(night),
+                    min_neo_score: cfg.fast_min_neo_score,
                     ..FastSearch::default()
                 };
-                let tracks = fast_tracks(&recent, &trails, &search);
+                let (tracks, lone) = fast_tracks(&recent, &trails, &search);
                 let groups: Vec<Vec<i64>> = tracks.iter().map(|t| t.members.clone()).collect();
                 let known = known_objects(&groups, &recent, catalog.as_deref());
                 let near = planets(&groups, &recent, cfg);
@@ -408,6 +411,21 @@ async fn run_night(db: &mongodb::Database, cfg: &LinkerConfig, night: i64, stop:
                 .await;
                 done &= report.complete();
                 found.extend(groups);
+                let lone_groups: Vec<Vec<i64>> = lone.iter().map(|t| t.ids.clone()).collect();
+                let lone_known = known_objects(&lone_groups, &recent, catalog.as_deref());
+                let lone_near = planets(&lone_groups, &recent, cfg);
+                let lone_report = persist_fast_tracklets(
+                    db,
+                    &lone,
+                    &recent,
+                    &labels,
+                    &lone_known,
+                    &lone_near,
+                    dry_run,
+                    stop,
+                )
+                .await;
+                done &= lone_report.complete();
                 info!(
                     detections = recent.len(),
                     trailed = trails.len(),
@@ -415,6 +433,9 @@ async fn run_night(db: &mongodb::Database, cfg: &LinkerConfig, night: i64, stop:
                     known = known.iter().filter(|k| k.is_some()).count(),
                     stored = report.stored,
                     unchanged = report.unchanged,
+                    single_night = lone.len(),
+                    single_night_known = lone_known.iter().filter(|k| k.is_some()).count(),
+                    single_night_stored = lone_report.stored,
                     wrote = report.ran && !dry_run,
                     seconds = pass.elapsed().as_secs_f64(),
                     "fast pass done"

@@ -7,6 +7,7 @@ pub mod cutouts;
 pub mod data;
 pub mod db;
 pub mod derive_avro_schema;
+pub mod digest2;
 pub mod discovery;
 pub mod enums;
 pub mod fast;

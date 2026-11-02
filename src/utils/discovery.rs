@@ -6,6 +6,7 @@
 //! finds to the MPC catalog, and stores the result as tracks.
 
 use crate::utils::attach::{match_track, reproduced, Pool, Target};
+use crate::utils::digest2::neo_score_of;
 use crate::utils::enums::Survey;
 use crate::utils::fast::{FastTrack, FAST_KIND};
 use crate::utils::heliolinc::{
@@ -1118,6 +1119,39 @@ pub async fn persist_fast(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
+pub async fn persist_fast_tracklets(
+    db: &mongodb::Database,
+    tracklets: &[Tracklet],
+    detections: &[Detection],
+    labels: &HashMap<i64, String>,
+    known: &[Option<String>],
+    planets: &[Option<&'static str>],
+    dry_run: bool,
+    stop: &Stop,
+) -> PersistReport {
+    let candidates = tracklets.iter().map(|t| Candidate {
+        members: t.ids.clone(),
+        fit: (BoundFit::Ungated, None),
+        orbit: None,
+    });
+    persist(
+        db,
+        "fast tracklets",
+        Some(FAST_KIND),
+        candidates,
+        detections,
+        labels,
+        known,
+        planets,
+        dry_run,
+        &HashMap::new(),
+        (2, 1),
+        stop,
+    )
+    .await
+}
+
 /// Store each candidate as a track, holding the tracks lock throughout.
 ///
 /// One at a time rather than in bulk: identity is decided against what is
@@ -1278,6 +1312,13 @@ async fn persist(
             }
         };
         off_orbit += plan.dropped.len();
+        let plan = match kind
+            .filter(|k| *k == FAST_KIND)
+            .and_then(|_| neo_score_of(&found))
+        {
+            Some(score) => plan.with_neo_score(score.noid),
+            None => plan,
+        };
         if !plan.meets(min_detections, min_nights) {
             info!(
                 "dropping a track: {} detections over {} nights after {} contested detection(s) were left with another track and {} were off its orbit",

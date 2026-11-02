@@ -167,6 +167,8 @@ pub struct StoredTrack {
     pub updated_at: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub orbit: Option<StoredOrbit>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub neo_score: Option<f64>,
 }
 
 impl StoredTrack {
@@ -650,6 +652,7 @@ pub struct UpsertPlan {
     pub designation: Option<String>,
     pub kind: Option<String>,
     pub near_planet: Option<String>,
+    pub neo_score: Option<f64>,
     /// Ids a merge would absorb and then delete.
     pub superseded: Vec<String>,
     /// Detections dropped because another track already owns them.
@@ -676,6 +679,14 @@ impl UpsertPlan {
     pub fn with_kind(mut self, kind: &str) -> Self {
         if self.kind.as_deref() != Some(kind) {
             self.kind = Some(kind.to_string());
+            self.unchanged_since = None;
+        }
+        self
+    }
+
+    pub fn with_neo_score(mut self, score: f64) -> Self {
+        if self.neo_score != Some(score) {
+            self.neo_score = Some(score);
             self.unchanged_since = None;
         }
         self
@@ -762,6 +773,12 @@ pub async fn plan_upsert(
     let designation = designation.or_else(|| carried(|t| t.designation.clone()));
     let near_planet = near_planet.or_else(|| carried(|t| t.near_planet.clone()));
     let kind = carried(|t| t.kind.clone());
+    let neo_score = absorbed.iter().find_map(|a| {
+        existing
+            .iter()
+            .find(|t| &&t.id == a)
+            .and_then(|t| t.neo_score)
+    });
     let mut owned_elsewhere: HashSet<Member> = HashSet::new();
     for t in existing.iter().filter(|t| !absorbed.contains(&&t.id)) {
         owned_elsewhere.extend(t.member_keys());
@@ -865,6 +882,7 @@ pub async fn plan_upsert(
         designation,
         kind,
         near_planet,
+        neo_score,
         superseded,
         contested,
         dropped: Vec::new(),
@@ -910,6 +928,7 @@ pub async fn commit_upsert(
         kind: plan.kind,
         near_planet: plan.near_planet,
         orbit: plan.orbit,
+        neo_score: plan.neo_score,
         updated_at: plan
             .unchanged_since
             .unwrap_or_else(|| chrono::Utc::now().timestamp_millis() as f64 / 1000.0),
@@ -1100,6 +1119,7 @@ pub struct TrackQuery {
     pub max_q: Option<f64>,
     pub min_nights: Option<i32>,
     pub max_rms_ratio: Option<f64>,
+    pub min_neo_score: Option<f64>,
 }
 
 impl TrackQuery {
@@ -1130,6 +1150,9 @@ impl TrackQuery {
         }
         if let Some(max_rms_ratio) = self.max_rms_ratio {
             filter.insert("rms_ratio", doc! { "$lte": max_rms_ratio });
+        }
+        if let Some(min_neo_score) = self.min_neo_score {
+            filter.insert("neo_score", doc! { "$gte": min_neo_score });
         }
         filter
     }
@@ -1224,6 +1247,7 @@ pub(crate) mod tests {
             near_planet: None,
             updated_at: 0.0,
             orbit: None,
+            neo_score: None,
         }
     }
 
@@ -1374,6 +1398,7 @@ pub(crate) mod tests {
             designation: None,
             kind: None,
             near_planet: None,
+            neo_score: None,
             superseded: Vec::new(),
             contested: ztf(&[11, 12]),
             dropped: Vec::new(),
@@ -1496,6 +1521,7 @@ pub(crate) mod tests {
             max_q: Some(1.3),
             min_nights: Some(3),
             max_rms_ratio: Some(4.0),
+            min_neo_score: None,
         };
         let filter = query.filter();
         assert_eq!(filter.keys().next().map(String::as_str), Some("updated_at"));
