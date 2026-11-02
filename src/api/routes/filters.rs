@@ -11,14 +11,18 @@ use crate::{
         routes::users::User,
     },
     conf::{AppConfig, FilterWorkerConfig},
-    enrichment::{LsstAlertProperties, ZtfAlertClassifications, ZtfAlertProperties},
+    enrichment::{
+        DecamAlertProperties, LsstAlertProperties, WinterAlertProperties, ZtfAlertClassifications,
+        ZtfAlertProperties,
+    },
     filter::{
-        build_filter_pipeline, Filter, FilterError, FilterVersion, SURVEYS_REQUIRING_PERMISSIONS,
+        build_filter_pipeline, reject_unknown_candidate_fields, Filter, FilterError, FilterVersion,
+        SURVEYS_REQUIRING_PERMISSIONS,
     },
     utils::{
-        db::{count_alerts_for_night, mongify},
-        enrichment_schema::{enrichment_fields, EnabledEnrichers, EnrichmentField},
+        db::{count_alerts_in_jd_window, mongify},
         enums::Survey,
+        host::HostGalaxyAssociation,
     },
 };
 
@@ -39,7 +43,7 @@ async fn validate_watchlist(
             WATCHLIST_PREFIX
         ));
     }
-    if !catalog_accessible(db, watchlist, Some(user)).await {
+    if !catalog_accessible(db, watchlist, user, config).await {
         return Err(format!(
             "watchlist '{}' does not exist or is not accessible to the user",
             watchlist
@@ -59,12 +63,18 @@ async fn validate_watchlist(
     Ok(())
 }
 
-use crate::utils::moc::{moc_from_ascii, moc_hpx_stage};
+use crate::api::limits::{large_query_slot, next_result};
+use crate::utils::moc::{
+    credible_volume_to_2d_moc, moc_from_ascii, moc_hpx_stage, parse_3d_skymap_bytes,
+    CredibleVolumeIndex, LIGO3dskymap,
+};
+use crate::utils::skymap_search::credible_level_at;
 use actix_web::{delete, get, patch, post, web, HttpResponse};
 use apache_avro::AvroSchema;
 use apache_avro_macros::serdavro;
+use base64::prelude::{Engine, BASE64_STANDARD};
 use flare::Time;
-use futures::stream::StreamExt;
+use futures::stream::{StreamExt, TryStreamExt};
 use mongodb::{
     bson::{doc, Document},
     Collection, Database,
@@ -167,13 +177,14 @@ async fn build_and_test_filter_version(
     pipeline: &Vec<serde_json::Value>,
     permissions: &HashMap<Survey, Vec<i32>>,
 ) -> Result<(), FilterError> {
+    reject_unknown_candidate_fields(pipeline, survey)?;
     let test_pipeline = build_filter_pipeline(pipeline, permissions, survey).await?;
     run_test_pipeline(db, survey, test_pipeline).await
 }
 
-/// Validate that activating this filter is safe by running it against a
-/// reference observing night and ensuring the filter does not match more than
-/// `max_result_ratio_percent` of the alerts the filter has access to that night.
+/// Validate that activating this filter is safe by running it against the
+/// reference observing nights and ensuring the filter does not match more than
+/// `max_match_rate` percent of the alerts the filter has access to on those nights.
 async fn validate_filter_activation(
     db: &Database,
     config: &FilterWorkerConfig,
@@ -208,26 +219,33 @@ async fn validate_filter_activation(
     } else {
         None
     };
+    let first_night = night_date - chrono::Duration::days(config.reference_window_days as i64 - 1);
+    let period = if first_night == night_date {
+        format!("reference night {}", night_date)
+    } else {
+        format!("reference nights {} to {}", first_night, night_date)
+    };
+    let (start_jd, _) = survey.night_jd_window(&first_night);
+    let (_, end_jd) = survey.night_jd_window(&night_date);
+
     let pid_slice = permission_programids.as_deref();
-    let night_total = count_alerts_for_night(db, survey, &night_date, pid_slice)
+    let total = count_alerts_in_jd_window(db, survey, start_jd, end_jd, pid_slice)
         .await
-        .map_err(|e| format!("failed to count alerts for {}: {}", night_date, e))?;
-    if night_total == 0 {
+        .map_err(|e| format!("failed to count alerts for {}: {}", period, e))?;
+    if total == 0 {
         return Err(if pid_slice.is_some() {
             format!(
-                "no {} alerts accessible with the given permissions on reference night {}; cannot validate filter activation",
-                survey, night_date
+                "no {} alerts accessible with the given permissions on {}; cannot validate filter activation",
+                survey, period
             )
         } else {
             format!(
-                "no {} alerts on reference night {}; cannot validate filter activation",
-                survey, night_date
+                "no {} alerts on {}; cannot validate filter activation",
+                survey, period
             )
         });
     }
 
-    // Run the filter pipeline restricted to that night, count matches.
-    let (start_jd, end_jd) = survey.night_jd_window(&night_date);
     let mut test_pipeline = build_filter_pipeline(pipeline, permissions, survey)
         .await
         .map_err(|e| e.to_string())?;
@@ -249,7 +267,7 @@ async fn validate_filter_activation(
     let mut cursor = collection
         .aggregate(test_pipeline)
         .await
-        .map_err(|e| format!("failed to run filter on night {}: {}", night_date, e))?;
+        .map_err(|e| format!("failed to run filter on {}: {}", period, e))?;
     let matched = match cursor.next().await {
         Some(Ok(doc)) => match doc.get("count") {
             Some(mongodb::bson::Bson::Int32(c)) => *c as i64,
@@ -260,15 +278,15 @@ async fn validate_filter_activation(
         None => 0,
     };
 
-    let max_allowed = (night_total as f64 * max_match_rate as f64 / 100.0) as i64;
+    let max_allowed = (total as f64 * max_match_rate as f64 / 100.0) as i64;
     if matched > max_allowed {
         return Err(format!(
-            "filter matched {} of {} {} alerts ({:.1}%) on night {}, which exceeds the {}% limit",
+            "filter matched {} of {} {} alerts ({:.1}%) on {}, which exceeds the {}% limit",
             matched,
-            night_total,
+            total,
             survey,
-            (matched as f64 / night_total as f64) * 100.0,
-            night_date,
+            (matched as f64 / total as f64) * 100.0,
+            period,
             max_match_rate,
         ));
     }
@@ -901,6 +919,179 @@ pub async fn delete_filter(
     }
 }
 
+/// Documents the count endpoint will score before giving up, so a wide
+/// localization cannot pull an unbounded set into memory.
+const CREDIBLE_LEVEL_COUNT_CAP: usize = 50_000;
+
+/// Documents scored per round trip. Scoring costs two queries whatever the batch
+/// size, so this trades a few wasted rows against a round trip per alert.
+const CREDIBLE_LEVEL_BATCH: usize = 500;
+
+/// Why a localization cannot be used.
+///
+/// Separate from the response so the parse, which is slow CPU work, can run on
+/// a blocking thread: `HttpResponse` is not `Send`.
+#[derive(Debug)]
+enum SkymapRegionError {
+    BadRequest(String),
+    Internal(String),
+}
+
+impl From<SkymapRegionError> for HttpResponse {
+    fn from(e: SkymapRegionError) -> Self {
+        match e {
+            SkymapRegionError::BadRequest(m) => response::bad_request(&m),
+            SkymapRegionError::Internal(m) => response::internal_error(&m),
+        }
+    }
+}
+
+/// The localization to score against, and the region to search inside it.
+struct SkymapRegion {
+    skymap: Box<LIGO3dskymap>,
+    idx: CredibleVolumeIndex,
+    credible_level: f64,
+    conditions: mongodb::bson::Array,
+}
+
+/// Build the search region from a localization, or `Ok(None)` when none is given.
+///
+/// The MOC is an over-approximation of the credible volume, so it narrows the
+/// query and [`credible_level_at`] still decides each alert.
+fn skymap_region(
+    skymap_fits_base64: Option<String>,
+    credible_level: Option<f64>,
+) -> Result<Option<SkymapRegion>, SkymapRegionError> {
+    use SkymapRegionError::{BadRequest, Internal};
+    let Some(encoded) = skymap_fits_base64 else {
+        return Ok(None);
+    };
+    let credible_level = credible_level.unwrap_or(0.9);
+    if !(0.0..=1.0).contains(&credible_level) {
+        return Err(BadRequest("credible_level must be in [0, 1]".to_string()));
+    }
+    let bytes = BASE64_STANDARD
+        .decode(encoded)
+        .map_err(|e| BadRequest(format!("invalid base64 in skymap_fits_base64: {e}")))?;
+    let skymap = parse_3d_skymap_bytes(&bytes).map_err(|e| {
+        BadRequest(format!(
+            "a distance-aware (3D) skymap is required to score a credible level: {e}"
+        ))
+    })?;
+    let idx = CredibleVolumeIndex::build(&skymap, 200);
+    let moc = credible_volume_to_2d_moc(&skymap, &idx, credible_level);
+    let stage = moc_hpx_stage(&moc).map_err(BadRequest)?;
+    let conditions = stage
+        .get_document("$match")
+        .and_then(|m| m.get_array("$or"))
+        .cloned()
+        .map_err(|e| Internal(format!("malformed moc stage: {e}")))?;
+    Ok(Some(SkymapRegion {
+        skymap: Box::new(skymap),
+        idx,
+        credible_level,
+        conditions,
+    }))
+}
+
+/// Attach each alert's credible level, dropping those outside the region.
+///
+/// The pipeline's own projection decides what comes back, so the position and
+/// cross-matches are re-read here rather than assumed to have survived it. An
+/// alert with no host redshift keeps no level and is kept: the MOC has already
+/// applied the only test available to it.
+async fn score_credible_levels(
+    db: &Database,
+    survey: &Survey,
+    region: &SkymapRegion,
+    results: &mut Vec<Document>,
+) -> Result<(), String> {
+    if results.is_empty() {
+        return Ok(());
+    }
+    // Keyed on the candid rather than the objectId: one document per result
+    // instead of every alert the object has, and the position of this epoch
+    // rather than an arbitrary one.
+    let candids: Vec<i64> = results
+        .iter()
+        .filter_map(|d| d.get_i64("_id").ok())
+        .collect();
+    if candids.len() != results.len() {
+        return Err(format!(
+            "{} of {} results carry no _id, so their credible level cannot be scored; \
+             the filter must not project it away",
+            results.len() - candids.len(),
+            results.len()
+        ));
+    }
+
+    let alerts: Collection<Document> = db.collection(&format!("{}_alerts", survey));
+    let mut positions: HashMap<i64, (String, f64, f64)> = HashMap::new();
+    let mut cursor = alerts
+        .find(doc! { "_id": { "$in": &candids } })
+        .projection(doc! { "objectId": 1, "candidate.ra": 1, "candidate.dec": 1 })
+        .await
+        .map_err(|e| e.to_string())?;
+    while let Some(d) = cursor.try_next().await.map_err(|e| e.to_string())? {
+        let (Ok(candid), Ok(object_id), Ok(candidate)) = (
+            d.get_i64("_id"),
+            d.get_str("objectId"),
+            d.get_document("candidate"),
+        ) else {
+            continue;
+        };
+        if let (Ok(ra), Ok(dec)) = (candidate.get_f64("ra"), candidate.get_f64("dec")) {
+            positions.insert(candid, (object_id.to_string(), ra, dec));
+        }
+    }
+
+    // Both come off the same aux document, so the host association costs no
+    // extra round trip.
+    let object_ids: Vec<&String> = positions.values().map(|(id, _, _)| id).collect();
+    let aux: Collection<Document> = db.collection(&format!("{}_alerts_aux", survey));
+    let mut cross_matches: HashMap<String, Document> = HashMap::new();
+    let mut host_galaxies: HashMap<String, Document> = HashMap::new();
+    let mut cursor = aux
+        .find(doc! { "_id": { "$in": &object_ids } })
+        .projection(doc! { "cross_matches": 1, "host_galaxy": 1 })
+        .await
+        .map_err(|e| e.to_string())?;
+    while let Some(d) = cursor.try_next().await.map_err(|e| e.to_string())? {
+        let Ok(id) = d.get_str("_id") else { continue };
+        if let Ok(cm) = d.get_document("cross_matches") {
+            cross_matches.insert(id.to_string(), cm.clone());
+        }
+        if let Ok(hg) = d.get_document("host_galaxy") {
+            host_galaxies.insert(id.to_string(), hg.clone());
+        }
+    }
+
+    results.retain_mut(|alert| {
+        let Ok(candid) = alert.get_i64("_id") else {
+            return true;
+        };
+        let Some((object_id, ra, dec)) = positions.get(&candid) else {
+            return true;
+        };
+        match credible_level_at(
+            &region.skymap,
+            &region.idx,
+            *ra,
+            *dec,
+            host_galaxies.get(object_id),
+            cross_matches.get(object_id),
+        ) {
+            Some(level) if level <= region.credible_level => {
+                alert.insert("credible_level", level);
+                true
+            }
+            Some(_) => false,
+            None => true,
+        }
+    });
+    Ok(())
+}
+
 /// HEALPix range conditions for a MOC, or the response explaining why it cannot
 /// be used. Merged into the leading `$match` rather than prepended as its own
 /// stage: a `$match` after the `$project` cannot use the `coordinates.hpx` index.
@@ -1040,6 +1231,12 @@ pub struct FilterTestRequest {
     /// runs the filter's own cuts rather than a separate set. Matched exactly,
     /// by HEALPix range.
     pub moc_ascii: Option<String>,
+    /// A LIGO/Virgo/KAGRA localization, base64 FITS. Its credible region is used
+    /// as the search region in place of `moc_ascii`, and each returned alert
+    /// carries the credible level its position and host distance place it at.
+    pub skymap_fits_base64: Option<String>,
+    /// Credible level to restrict to, default 0.9.
+    pub credible_level: Option<f64>,
     pub permissions: HashMap<Survey, Vec<i32>>,
     pub survey: Survey,
     pub start_jd: Option<f64>,
@@ -1056,14 +1253,15 @@ pub struct FilterTestRequest {
 #[derive(serde::Serialize, ToSchema)]
 pub struct FilterTestResponse {
     pub pipeline: Vec<serde_json::Value>,
-    pub results: Vec<serde_json::Value>,
+    #[schema(value_type = Vec<Object>)]
+    pub results: Vec<Document>,
 }
 
 impl FilterTestResponse {
     pub fn new(pipeline: Vec<Document>, results: Vec<Document>) -> Self {
         Self {
             pipeline: doc2json(pipeline),
-            results: doc2json(results),
+            results,
         }
     }
 }
@@ -1092,14 +1290,32 @@ pub async fn post_filter_test(
             return HttpResponse::Unauthorized().body("Unauthorized");
         }
     };
-    let body = body.clone();
+    let _slot = match large_query_slot().await {
+        Ok(slot) => slot,
+        Err(response) => return response,
+    };
+    // Taken rather than cloned: a skymap can be most of the 200 MB this route
+    // accepts, and every copy of it is held for the life of the request.
+    let body = body.into_inner();
     let survey = body.survey;
     let permissions = body.permissions;
     let pipeline = body.pipeline;
 
-    let moc_conditions = match region_conditions(body.moc_ascii) {
-        Ok(conditions) => conditions,
-        Err(response) => return response,
+    // Off the async thread: parsing a full-resolution skymap would otherwise
+    // block every other request sharing it.
+    let (encoded, level) = (body.skymap_fits_base64, body.credible_level);
+    let region = match web::block(move || skymap_region(encoded, level)).await {
+        Ok(Ok(region)) => region,
+        Ok(Err(e)) => return e.into(),
+        Err(e) => return response::internal_error(&format!("skymap parsing failed to run: {e}")),
+    };
+    let moc_conditions = match &region {
+        // The localization supersedes a hand-supplied region.
+        Some(region) => Some(region.conditions.clone()),
+        None => match region_conditions(body.moc_ascii) {
+            Ok(conditions) => conditions,
+            Err(response) => return response,
+        },
     };
 
     let mut test_pipeline = match build_test_filter_pipeline(
@@ -1147,8 +1363,16 @@ pub async fn post_filter_test(
         if limit == 0 {
             return response::bad_request("limit must be greater than 0");
         }
-        let limit_stage = doc! { "$limit": limit as i64 };
-        test_pipeline.push(limit_stage);
+        // With a region the page is cut after scoring, so the stage is only the
+        // ceiling on what the server will produce; the cursor stops earlier.
+        let effective = if region.is_some() {
+            CREDIBLE_LEVEL_COUNT_CAP as i64
+        } else {
+            limit as i64
+        };
+        test_pipeline.push(doc! { "$limit": effective });
+    } else if region.is_some() {
+        test_pipeline.push(doc! { "$limit": CREDIBLE_LEVEL_COUNT_CAP as i64 });
     }
 
     let collection: Collection<Document> = db.collection(format!("{}_alerts", survey).as_str());
@@ -1163,17 +1387,44 @@ pub async fn post_filter_test(
     };
 
     let mut results = Vec::new();
-    while let Some(result) = cursor.next().await {
-        match result {
-            Ok(doc) => results.push(doc),
-            Err(e) => {
-                return response::internal_error(&format!(
-                    "error retrieving test filter results: {}",
-                    e
-                ));
+    let mut bytes_read = 0;
+    if let Some(region) = &region {
+        // Scoring is what decides which alerts count, so the page cannot be cut
+        // before it. Score a batch at a time and stop as soon as enough survive,
+        // rather than reading the cap into memory to return a handful.
+        let want = body.limit.map(|l| l as usize);
+        let mut batch: Vec<Document> = Vec::new();
+        let mut drained = false;
+        while !drained {
+            match next_result(&mut cursor, &mut bytes_read).await {
+                Ok(Some(doc)) => batch.push(doc),
+                Ok(None) => drained = true,
+                Err(e) => return e.into_response("error retrieving test filter results"),
+            }
+            if !drained && batch.len() < CREDIBLE_LEVEL_BATCH {
+                continue;
+            }
+            if let Err(e) = score_credible_levels(&db, &survey, region, &mut batch).await {
+                return response::bad_request(&format!("failed to score credible levels: {e}"));
+            }
+            results.append(&mut batch);
+            if want.is_some_and(|w| results.len() >= w) {
+                break;
+            }
+        }
+        if let Some(want) = want {
+            results.truncate(want);
+        }
+    } else {
+        loop {
+            match next_result(&mut cursor, &mut bytes_read).await {
+                Ok(Some(doc)) => results.push(doc),
+                Ok(None) => break,
+                Err(e) => return e.into_response("error retrieving test filter results"),
             }
         }
     }
+
     response::ok_ser(
         "filter test executed successfully",
         FilterTestResponse::new(test_pipeline, results),
@@ -1187,6 +1438,12 @@ pub struct FilterTestCountRequest {
     /// the region, so the result can be compared against a test's `limit` to
     /// tell a truncated result from a complete one.
     pub moc_ascii: Option<String>,
+    /// A LIGO/Virgo/KAGRA localization, base64 FITS. Its credible region is used
+    /// as the search region in place of `moc_ascii`, and each returned alert
+    /// carries the credible level its position and host distance place it at.
+    pub skymap_fits_base64: Option<String>,
+    /// Credible level to restrict to, default 0.9.
+    pub credible_level: Option<f64>,
     pub permissions: HashMap<Survey, Vec<i32>>,
     pub survey: Survey,
     pub start_jd: Option<f64>,
@@ -1201,6 +1458,9 @@ pub struct FilterTestCountRequest {
 pub struct FilterTestCountResponse {
     pub count: i64,
     pub pipeline: Vec<serde_json::Value>,
+    /// Whether scoring stopped at the cap, which makes `count` a lower bound.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub capped: bool,
 }
 
 impl FilterTestCountResponse {
@@ -1208,7 +1468,13 @@ impl FilterTestCountResponse {
         Self {
             pipeline: doc2json(pipeline),
             count,
+            capped: false,
         }
+    }
+
+    fn capped(mut self, capped: bool) -> Self {
+        self.capped = capped;
+        self
     }
 }
 
@@ -1236,14 +1502,28 @@ pub async fn post_filter_test_count(
             return HttpResponse::Unauthorized().body("Unauthorized");
         }
     };
-    let body = body.clone();
+    // Taken rather than cloned: a skymap can be most of the 200 MB this route
+    // accepts, and every copy of it is held for the life of the request.
+    let body = body.into_inner();
     let survey = body.survey;
     let permissions = body.permissions;
     let pipeline = body.pipeline;
 
-    let moc_conditions = match region_conditions(body.moc_ascii) {
-        Ok(conditions) => conditions,
-        Err(response) => return response,
+    // Off the async thread: parsing a full-resolution skymap would otherwise
+    // block every other request sharing it.
+    let (encoded, level) = (body.skymap_fits_base64, body.credible_level);
+    let region = match web::block(move || skymap_region(encoded, level)).await {
+        Ok(Ok(region)) => region,
+        Ok(Err(e)) => return e.into(),
+        Err(e) => return response::internal_error(&format!("skymap parsing failed to run: {e}")),
+    };
+    let moc_conditions = match &region {
+        // The localization supersedes a hand-supplied region.
+        Some(region) => Some(region.conditions.clone()),
+        None => match region_conditions(body.moc_ascii) {
+            Ok(conditions) => conditions,
+            Err(response) => return response,
+        },
     };
 
     let mut test_pipeline = match build_test_filter_pipeline(
@@ -1272,9 +1552,13 @@ pub async fn post_filter_test_count(
         },
     };
 
-    // Add count stage at the end of the pipeline
-    let count_stage = doc! { "$count": "count" };
-    test_pipeline.push(count_stage);
+    // With a localization the count has to be of what survives the credible-level
+    // cut, or it would exceed what a test returns and read as truncation. That
+    // needs the documents, so `$count` is replaced by the ids to score.
+    match &region {
+        Some(_) => test_pipeline.push(doc! { "$project": { "objectId": 1 } }),
+        None => test_pipeline.push(doc! { "$count": "count" }),
+    }
 
     let collection: Collection<mongodb::bson::Document> =
         db.collection(format!("{}_alerts", survey).as_str());
@@ -1287,6 +1571,38 @@ pub async fn post_filter_test_count(
             ))
         }
     };
+    if let Some(region) = &region {
+        let mut scored: Vec<Document> = Vec::new();
+        while let Some(result) = cursor.next().await {
+            match result {
+                Ok(doc) => scored.push(doc),
+                Err(e) => {
+                    return response::internal_error(&format!(
+                        "error retrieving test filter count result: {}",
+                        e
+                    ));
+                }
+            }
+            if scored.len() >= CREDIBLE_LEVEL_COUNT_CAP {
+                break;
+            }
+        }
+        let capped = scored.len() >= CREDIBLE_LEVEL_COUNT_CAP;
+        if let Err(e) = score_credible_levels(&db, &survey, region, &mut scored).await {
+            return response::bad_request(&format!("failed to score credible levels: {e}"));
+        }
+        let count = scored.len() as i64;
+        let message = if capped {
+            "filter test count executed successfully (capped before scoring)"
+        } else {
+            "filter test count executed successfully"
+        };
+        return response::ok_ser(
+            message,
+            FilterTestCountResponse::new(test_pipeline, count).capped(capped),
+        );
+    }
+
     // there is no Vec of results, just one document with the count
     let count =
         match cursor.next().await {
@@ -1340,9 +1656,19 @@ pub struct LsstFilterMatch {
 
 #[serdavro]
 #[derive(Debug, Deserialize, Serialize)]
+pub struct DecamFilterMatch {
+    pub prv_candidates: Vec<DecamCandidate>,
+    pub fp_hists: Vec<DecamForcedPhot>,
+}
+
+#[serdavro]
+#[derive(Debug, Deserialize, Serialize)]
 /// ZTF data available at filtering time
 pub struct ZtfAlertToFilter {
     pub candid: i64,
+    /// Signal-to-noise a forced epoch had to clear for `isdiffpos` and
+    /// `snr_psf` to be set on it; below it those read as null.
+    pub snt: f32,
     #[serde(rename = "objectId")]
     pub object_id: String,
     pub candidate: ZtfCandidate,
@@ -1355,6 +1681,9 @@ pub struct ZtfAlertToFilter {
     pub aliases: ZtfAliases,
     #[serde(rename = "LSST")]
     pub lsst: Option<LsstFilterMatch>,
+    #[serde(rename = "DECAM")]
+    pub decam: Option<DecamFilterMatch>,
+    pub host_galaxy: Option<HostGalaxyAssociation>,
 }
 
 #[serdavro]
@@ -1362,6 +1691,9 @@ pub struct ZtfAlertToFilter {
 /// LSST data available at filtering time
 pub struct LsstAlertToFilter {
     pub candid: i64,
+    /// Signal-to-noise a forced epoch had to clear for `isdiffpos` and
+    /// `snr_psf` to be set on it; below it those read as null.
+    pub snt: f32,
     #[serde(rename = "objectId")]
     pub object_id: String,
     pub candidate: LsstCandidate,
@@ -1372,6 +1704,9 @@ pub struct LsstAlertToFilter {
     pub aliases: LsstAliases,
     #[serde(rename = "ZTF")]
     pub ztf: Option<ZtfFilterMatch>,
+    #[serde(rename = "DECAM")]
+    pub decam: Option<DecamFilterMatch>,
+    pub host_galaxy: Option<HostGalaxyAssociation>,
 }
 
 #[serdavro]
@@ -1382,9 +1717,11 @@ pub struct WinterAlertToFilter {
     #[serde(rename = "objectId")]
     pub object_id: String,
     pub candidate: WinterCandidate,
+    pub properties: WinterAlertProperties,
     pub coordinates: GalacticCoordinates,
     pub prv_candidates: Vec<WinterPrvCandidate>,
     pub aliases: WinterAliases,
+    pub host_galaxy: Option<HostGalaxyAssociation>,
 }
 
 #[serdavro]
@@ -1395,77 +1732,19 @@ pub struct DecamAlertToFilter {
     #[serde(rename = "objectId")]
     pub object_id: String,
     pub candidate: DecamCandidate,
+    pub properties: DecamAlertProperties,
     pub coordinates: GalacticCoordinates,
     pub prv_candidates: Vec<DecamCandidate>,
     pub fp_hists: Vec<DecamForcedPhot>,
     pub aliases: DecamAliases,
+    #[serde(rename = "ZTF")]
+    pub ztf: Option<ZtfFilterMatch>,
+    #[serde(rename = "LSST")]
+    pub lsst: Option<LsstFilterMatch>,
+    pub host_galaxy: Option<HostGalaxyAssociation>,
 }
 
-#[derive(Debug, Serialize, ToSchema)]
-pub struct FilterSchemaResponse {
-    #[schema(value_type = Object)]
-    pub schema: serde_json::Value,
-    pub enrichment: Vec<EnrichmentField>,
-}
-
-/// The fields a survey's alerts carry at filtering time, for both paths.
-fn filter_alert_schema(survey_name: Survey, config: &AppConfig) -> HttpResponse {
-    let schema = match survey_name {
-        Survey::Ztf => ZtfAlertToFilter::get_schema(),
-        Survey::Lsst => LsstAlertToFilter::get_schema(),
-        Survey::Winter => WinterAlertToFilter::get_schema(),
-        Survey::Decam => DecamAlertToFilter::get_schema(),
-    };
-    let crossmatch = config
-        .crossmatch
-        .get(&survey_name)
-        .map(Vec::as_slice)
-        .unwrap_or_default();
-    let enrichment = enrichment_fields(
-        &survey_name,
-        crossmatch,
-        EnabledEnrichers {
-            host_galaxy: config.host_galaxy.enabled,
-            villar: config.gpu.is_active(),
-        },
-    );
-    response::ok_ser(
-        &format!("filter fields for survey {}", survey_name),
-        FilterSchemaResponse {
-            schema: serde_json::json!(schema),
-            enrichment,
-        },
-    )
-}
-
-/// Get the fields a survey's alerts carry at filtering time
-///
-/// `schema` is the alert struct, fixed at compile time. `enrichment` is the rest:
-/// paths written as sub-documents, whose membership follows this deployment's
-/// configured catalogs and enabled enrichers, so no static schema can carry them.
-#[utoipa::path(
-    get,
-    path = "/filters/alert-schemas/{survey_name}",
-    params(
-        ("survey_name" = Survey, Path, description = "Name of the survey (e.g., 'ZTF')"),
-    ),
-    responses(
-        (status = 200, description = "Avro schema and enrichment paths", body = FilterSchemaResponse),
-        (status = 404, description = "Schema not found"),
-    ),
-    tags=["Filters"]
-)]
-#[get("/filters/alert-schemas/{survey_name}")]
-pub async fn get_filter_alert_schema(
-    path: web::Path<(Survey,)>,
-    config: web::Data<AppConfig>,
-) -> HttpResponse {
-    filter_alert_schema(path.into_inner().0, &config)
-}
-
-/// Get the fields a survey's alerts carry at filtering time
-///
-/// The former path for the same response, kept so existing callers keep working.
+/// Get a schema of a survey's data available at filtering time
 #[utoipa::path(
     get,
     path = "/filters/schemas/{survey_name}",
@@ -1473,17 +1752,25 @@ pub async fn get_filter_alert_schema(
         ("survey_name" = Survey, Path, description = "Name of the survey (e.g., 'ZTF')"),
     ),
     responses(
-        (status = 200, description = "Avro schema and enrichment paths", body = FilterSchemaResponse),
+        (status = 200, description = "Schema found", body = serde_json::Value),
         (status = 404, description = "Schema not found"),
     ),
     tags=["Filters"]
 )]
 #[get("/filters/schemas/{survey_name}")]
-pub async fn get_filter_schema(
-    path: web::Path<(Survey,)>,
-    config: web::Data<AppConfig>,
-) -> HttpResponse {
-    filter_alert_schema(path.into_inner().0, &config)
+pub async fn get_filter_schema(path: web::Path<(Survey,)>) -> HttpResponse {
+    // return the avro schema
+    let survey_name = path.into_inner().0;
+    let schema = match survey_name {
+        Survey::Ztf => ZtfAlertToFilter::get_schema(),
+        Survey::Lsst => LsstAlertToFilter::get_schema(),
+        Survey::Winter => WinterAlertToFilter::get_schema(),
+        Survey::Decam => DecamAlertToFilter::get_schema(),
+    };
+    response::ok(
+        &format!("avro schema for survey {}", survey_name),
+        serde_json::json!(schema),
+    )
 }
 
 #[cfg(test)]
@@ -1577,47 +1864,37 @@ mod tests {
 #[cfg(test)]
 mod schema_tests {
     use super::*;
-    use crate::conf::{arcsec_to_radians, CatalogXmatchConfig};
 
     fn schema_str<T: AvroSchema>() -> String {
         serde_json::to_string(&T::get_schema()).unwrap()
     }
 
-    /// The enrichment endpoint covers what the Avro schema cannot name. A path in
-    /// both is declared twice, and the two declarations drift independently.
-    #[test]
-    fn enrichment_declares_nothing_the_filter_schema_already_has() {
-        let enabled = EnabledEnrichers {
-            host_galaxy: true,
-            villar: true,
-        };
-        let crossmatch = [CatalogXmatchConfig {
-            catalog: "NED".to_string(),
-            radius: arcsec_to_radians(300.0),
-            projection: doc! { "_id": 1, "z": 1 },
-            ..Default::default()
-        }];
-        for (survey, schema) in [
-            (Survey::Ztf, ZtfAlertToFilter::get_schema()),
-            (Survey::Lsst, LsstAlertToFilter::get_schema()),
-            (Survey::Winter, WinterAlertToFilter::get_schema()),
-            (Survey::Decam, DecamAlertToFilter::get_schema()),
-        ] {
-            let value = serde_json::to_value(schema).unwrap();
-            let declared: Vec<String> = value["fields"]
-                .as_array()
-                .unwrap()
+    fn field_type<'a>(record: &'a serde_json::Value, name: &str) -> &'a serde_json::Value {
+        let field = record["fields"]
+            .as_array()
+            .and_then(|fields| fields.iter().find(|f| f["name"] == name))
+            .unwrap_or_else(|| panic!("no `{name}` field in {record}"));
+        match &field["type"] {
+            serde_json::Value::Array(union) => union
                 .iter()
-                .map(|f| f["name"].as_str().unwrap().to_string())
-                .collect();
-            for field in enrichment_fields(&survey, &crossmatch, enabled) {
-                let root = field.path.split('.').next().unwrap();
-                assert!(
-                    !declared.iter().any(|d| d == root),
-                    "{survey:?} already declares {root} in its filter Avro schema"
-                );
-            }
+                .find(|t| *t != "null")
+                .unwrap_or_else(|| panic!("`{name}` is only null: {field}")),
+            other => other,
         }
+    }
+
+    fn assert_exposes_best_host_d_dlr<T: AvroSchema>() {
+        let schema = serde_json::to_value(T::get_schema()).unwrap();
+        let best_host = field_type(field_type(&schema, "host_galaxy"), "best_host");
+        field_type(best_host, "d_dlr");
+    }
+
+    #[test]
+    fn every_filter_schema_exposes_the_host_galaxy_d_dlr() {
+        assert_exposes_best_host_d_dlr::<ZtfAlertToFilter>();
+        assert_exposes_best_host_d_dlr::<LsstAlertToFilter>();
+        assert_exposes_best_host_d_dlr::<WinterAlertToFilter>();
+        assert_exposes_best_host_d_dlr::<DecamAlertToFilter>();
     }
 
     #[test]
@@ -1632,6 +1909,10 @@ mod schema_tests {
             "\"magap\"",
             "\"sigmagap\"",
             "\"snr\"",
+            "\"properties\"",
+            "\"photstats\"",
+            "\"ZTF\"",
+            "\"LSST\"",
         ] {
             assert!(
                 s.contains(field),
@@ -1641,11 +1922,43 @@ mod schema_tests {
     }
 
     #[test]
+    fn ztf_filter_schema_uses_stored_applecider_names() {
+        // AppleCiDER fields are stored under their `#[serde(rename)]` names, so
+        // a filter written against the schema must see those, not the Rust ones.
+        let s = schema_str::<ZtfAlertToFilter>();
+        for field in [
+            "\"AGN-like\"",
+            "\"Superluminous SN\"",
+            "\"Variable\"",
+            "\"NuclearVariable\"",
+        ] {
+            assert!(s.contains(field), "ZTF filter schema missing {field}: {s}");
+        }
+        // The embedding goes to Milvus and is never stored in Mongo.
+        for field in [
+            "\"agn_like\"",
+            "\"variable\"",
+            "\"nuclear_variable\"",
+            "\"fusion_embedding\"",
+        ] {
+            assert!(
+                !s.contains(field),
+                "ZTF filter schema has {field}, which is not stored: {s}"
+            );
+        }
+    }
+
+    #[test]
     fn winter_filter_schema_generates_without_forced_phot() {
         // WINTER does PSF photometry (magpsf) and has no forced-photometry history,
         // so its schema exposes candidate/prv_candidates but no fp_hists.
         let s = schema_str::<WinterAlertToFilter>();
-        for field in ["\"candidate\"", "\"prv_candidates\"", "\"magpsf\""] {
+        for field in [
+            "\"candidate\"",
+            "\"properties\"",
+            "\"prv_candidates\"",
+            "\"magpsf\"",
+        ] {
             assert!(
                 s.contains(field),
                 "WINTER filter schema missing {field}: {s}"
@@ -1655,5 +1968,114 @@ mod schema_tests {
             !s.contains("\"fp_hists\""),
             "WINTER has no forced photometry; schema should omit fp_hists: {s}"
         );
+    }
+}
+
+#[cfg(test)]
+mod credible_level_tests {
+    use super::*;
+
+    /// Both endpoints accept a localization, or a count could not be compared
+    /// against a test run over the same region.
+    #[test]
+    fn both_requests_accept_a_skymap() {
+        let body = serde_json::json!({
+            "pipeline": [{"$match": {}}],
+            "permissions": {"ztf": [1]},
+            "survey": "ztf",
+            "skymap_fits_base64": "AAAA",
+            "credible_level": 0.9,
+        });
+        let test: FilterTestRequest = serde_json::from_value(body.clone()).expect("test request");
+        assert_eq!(test.skymap_fits_base64.as_deref(), Some("AAAA"));
+        assert_eq!(test.credible_level, Some(0.9));
+
+        let count: FilterTestCountRequest = serde_json::from_value(body).expect("count request");
+        assert_eq!(count.skymap_fits_base64.as_deref(), Some("AAAA"));
+        assert_eq!(count.credible_level, Some(0.9));
+    }
+
+    /// No localization means no region and no scoring, as before.
+    #[test]
+    fn test_absent_skymap_is_not_a_region() {
+        assert!(skymap_region(None, None)
+            .map(|r| r.is_none())
+            .unwrap_or(false));
+    }
+
+    /// A credible level outside [0, 1] is a bad request, not a silent clamp.
+    #[test]
+    fn test_credible_level_is_bounded() {
+        for bad in [-0.1, 1.5] {
+            assert!(
+                skymap_region(Some("AAAA".to_string()), Some(bad)).is_err(),
+                "credible_level {bad} was accepted"
+            );
+        }
+    }
+
+    /// Undecodable input is rejected before anything is parsed as FITS.
+    #[test]
+    fn test_bad_base64_is_rejected() {
+        assert!(skymap_region(Some("not base64!!".to_string()), None).is_err());
+    }
+}
+
+#[cfg(test)]
+mod backward_compatibility_tests {
+    use super::*;
+
+    /// A request predating the localization fields still deserializes: the two
+    /// new fields are absent, not null, in everything already sending to these
+    /// endpoints.
+    #[test]
+    fn test_a_request_without_the_new_fields_is_accepted() {
+        let body = serde_json::json!({
+            "pipeline": [{"$match": {"candidate.drb": {"$gt": 0.5}}}],
+            "permissions": {"ztf": [1]},
+            "survey": "ztf",
+            "moc_ascii": "5/1-3 8 11/1234",
+            "start_jd": 2461000.0,
+            "end_jd": 2461031.0,
+        });
+        let test: FilterTestRequest = serde_json::from_value(body.clone()).expect("test request");
+        assert!(test.skymap_fits_base64.is_none());
+        assert!(test.credible_level.is_none());
+        assert_eq!(test.moc_ascii.as_deref(), Some("5/1-3 8 11/1234"));
+
+        let count: FilterTestCountRequest = serde_json::from_value(body).expect("count request");
+        assert!(count.skymap_fits_base64.is_none());
+        assert_eq!(count.moc_ascii.as_deref(), Some("5/1-3 8 11/1234"));
+    }
+
+    /// Without a localization there is no region to score against, so the
+    /// endpoints take the `moc_ascii` path they always did.
+    #[test]
+    fn test_no_skymap_means_no_scoring() {
+        let region = skymap_region(None, Some(0.9)).expect("no skymap is not an error");
+        assert!(region.is_none(), "a region was built without a skymap");
+
+        // And the MOC path still yields the same conditions it did before.
+        let conditions = region_conditions(Some("5/1-3 8 11/1234".to_string()))
+            .expect("the moc parses")
+            .expect("conditions are produced");
+        assert!(!conditions.is_empty());
+    }
+
+    /// A capped count is a lower bound, and a caller can only act on that if the
+    /// response says so. An uncapped one stays absent rather than noisy.
+    #[test]
+    fn test_only_a_capped_count_says_so() {
+        let plain = serde_json::to_value(FilterTestCountResponse::new(vec![], 7)).unwrap();
+        assert_eq!(plain["count"], 7);
+        assert!(
+            plain.get("capped").is_none(),
+            "an uncapped count should not carry the flag: {plain}"
+        );
+
+        let capped =
+            serde_json::to_value(FilterTestCountResponse::new(vec![], 50_000).capped(true))
+                .unwrap();
+        assert_eq!(capped["capped"], true);
     }
 }

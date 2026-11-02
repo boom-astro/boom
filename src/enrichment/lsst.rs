@@ -2,14 +2,16 @@ use crate::alert::{LsstCandidate, SsSource};
 use crate::conf::AppConfig;
 use crate::enrichment::{
     babamul::{Babamul, BabamulLsstAlert},
+    decam::{add_decam_match, DecamMatch},
     fetch_alerts, EnrichmentWorker, EnrichmentWorkerError, ZtfMatch,
 };
 use crate::utils::db::mongify;
 use crate::utils::enums::Survey;
 use crate::utils::host::HostGalaxyAssociation;
 use crate::utils::lightcurves::{
-    analyze_photometry, prepare_photometry, summarise_detections, ActivityMetrics, Band,
-    DetectionHistory, EpisodeHistory, PerBandProperties, PhotometryMag, EPISODE_GAP_DAYS,
+    analyze_photometry, is_stationary, prepare_photometry, signed_snr, summarise_detections,
+    ActivityMetrics, Band, DetectionHistory, EpisodeHistory, PerBandProperties, PhotometryMag,
+    EPISODE_GAP_DAYS, STATIONARY_MIN_FORCED_SNR,
 };
 use apache_avro_derive::AvroSchema;
 use apache_avro_macros::serdavro;
@@ -172,6 +174,8 @@ pub struct LsstAlertForEnrichment {
     #[serde(default)]
     pub host_galaxy: Option<HostGalaxyAssociation>,
     pub survey_matches: Option<LsstSurveyMatches>,
+    #[serde(default)]
+    pub decam_match: Option<DecamMatch>,
 }
 
 /// Solar system association for a single LSST detection, mirroring the ZTF block so
@@ -330,7 +334,7 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
             output_queue,
             client,
             alert_collection,
-            alert_pipeline: create_lsst_alert_pipeline(),
+            alert_pipeline: add_decam_match(create_lsst_alert_pipeline()),
             babamul,
         })
     }
@@ -504,14 +508,29 @@ impl LsstEnrichmentWorker {
             .fp_hists
             .iter()
             .filter(|p| p.jd <= alert.candidate.jd)
-            .filter_map(|p| p.to_photometry_mag(Some(3.0)))
+            .filter_map(|p| p.to_photometry_mag(None))
             .collect();
 
         // lightcurve is prv_candidates + fp_hists, no need for parse_photometry here
         let mut lightcurve = [prv_candidates, fp_hists].concat();
 
         prepare_photometry(&mut lightcurve);
-        let (photstats, _, stationary) = analyze_photometry(&lightcurve);
+        let (photstats, _, _) = analyze_photometry(&lightcurve);
+        let stationary = is_stationary(
+            alert
+                .prv_candidates
+                .iter()
+                .filter(|p| p.jd <= alert.candidate.jd)
+                .filter_map(|p| p.to_photometry_mag(None))
+                .chain(
+                    alert
+                        .fp_hists
+                        .iter()
+                        .filter(|p| p.jd <= alert.candidate.jd)
+                        .filter_map(|p| p.to_photometry_mag(Some(STATIONARY_MIN_FORCED_SNR))),
+                )
+                .map(|p| p.time),
+        );
 
         // Compute multisurvey photstats (including ZTF if available, other surveys can be added later)
         let mut has_matches = false;
@@ -527,11 +546,10 @@ impl LsstEnrichmentWorker {
                     .fp_hists
                     .iter()
                     .filter(|p| p.jd <= alert.candidate.jd)
-                    .filter_map(|p| p.to_photometry_mag(Some(3.0)))
+                    .filter_map(|p| p.to_photometry_mag(None))
                     .collect();
-                let mut ztf_lightcurve = [ztf_prv_candidates, ztf_fp_hists].concat();
-                prepare_photometry(&mut ztf_lightcurve);
-                lightcurve.extend(ztf_lightcurve);
+                lightcurve.extend([ztf_prv_candidates, ztf_fp_hists].concat());
+                prepare_photometry(&mut lightcurve);
                 has_matches = true;
             }
         }
@@ -539,6 +557,18 @@ impl LsstEnrichmentWorker {
             analyze_photometry(&lightcurve).0
         } else {
             photstats.clone()
+        };
+        let decam_lightcurve = alert
+            .decam_match
+            .as_ref()
+            .map(|m| m.lightcurve(alert.candidate.jd))
+            .unwrap_or_default();
+        let multisurvey_photstats = if decam_lightcurve.is_empty() {
+            multisurvey_photstats
+        } else {
+            let mut with_decam = [lightcurve, decam_lightcurve].concat();
+            prepare_photometry(&mut with_decam);
+            analyze_photometry(&with_decam).0
         };
 
         // Per-object detection history for history-aware filters (positive/negative
@@ -548,6 +578,12 @@ impl LsstEnrichmentWorker {
                 .prv_candidates
                 .iter()
                 .map(|p| (p.jd, p.flux.filter(|f| !f.is_nan()).map(|f| f < 0.0))),
+            // magpsf is set only above SNT, so it marks a forced detection.
+            alert
+                .fp_hists
+                .iter()
+                .filter(|p| p.magpsf.is_some())
+                .map(|p| (p.jd, signed_snr(p.snr_psf, p.flux))),
             alert.candidate.jd,
             EPISODE_GAP_DAYS,
         );

@@ -21,12 +21,13 @@ use flare::Time;
 use mongodb::bson::{doc, Document};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_with::{serde_as, skip_serializing_none};
-use std::collections::HashMap;
+use std::{collections::HashMap, ops::RangeInclusive};
 use tracing::{debug, error, instrument, warn};
 use utoipa::ToSchema;
 
 pub const STREAM_NAME: &str = "ZTF";
 pub const ZTF_DEC_RANGE: (f64, f64) = (-30.0, 90.0);
+const ZTF_DIFFMAGLIM_RANGE: RangeInclusive<f32> = 10.0..=30.0;
 // Position uncertainty in arcsec (median FHWM from https://www.ztf.caltech.edu/ztf-camera.html)
 pub const ZTF_POSITION_UNCERTAINTY: f64 = 2.;
 pub const ALERT_COLLECTION: &str = concat!(STREAM_NAME, "_alerts");
@@ -159,6 +160,9 @@ impl TryFrom<PrvCandidate> for ZtfPrvCandidate {
             }
             (None, None, None, Some(diffmaglim)) => {
                 let flux_err = diffmaglim2fluxerr(diffmaglim, ZTF_ZP) * 1e9_f32; // convert to nJy
+                if !ZTF_DIFFMAGLIM_RANGE.contains(&diffmaglim) || !flux_err.is_finite() {
+                    return Err(AlertError::InvalidDiffmaglim(diffmaglim));
+                }
                 (None, Some(flux_err), None)
             }
             _ => {
@@ -324,12 +328,17 @@ impl TryFrom<FpHist> for ZtfForcedPhot {
             _ => (None, None, None, None, None),
         };
 
+        let psf_flux_err = (psf_flux_err as f64 * 1e9 * zp_scaling_factor) as f32; // convert to nJy and a fixed ZTF_ZP
+        if !psf_flux_err.is_finite() || !psf_flux.is_none_or(f32::is_finite) {
+            return Err(AlertError::NonFiniteFluxPSF);
+        }
+
         Ok(ZtfForcedPhot {
             fp_hist,
             magpsf,
             sigmapsf,
             psf_flux,
-            psf_flux_err: Some((psf_flux_err as f64 * 1e9 * zp_scaling_factor) as f32), // convert to nJy and a fixed ZTF_ZP
+            psf_flux_err: Some(psf_flux_err),
             isdiffpos,
             snr_psf,
             band,
@@ -416,6 +425,14 @@ pub struct Candidate {
     pub sgscore3: Option<f32>,
     pub distpsnr3: Option<f32>,
     pub nmtchps: i32,
+    #[serde(deserialize_with = "deserialize_some")]
+    pub rfid: Option<i64>,
+    #[serde(deserialize_with = "deserialize_some")]
+    pub jdstartref: Option<f64>,
+    #[serde(deserialize_with = "deserialize_some")]
+    pub jdendref: Option<f64>,
+    #[serde(deserialize_with = "deserialize_some")]
+    pub nframesref: Option<i32>,
     pub dsnrms: Option<f32>,
     pub ssnrms: Option<f32>,
     pub dsdiff: Option<f32>,
@@ -496,6 +513,15 @@ where
         .collect();
 
     Ok(Some(fp_hists))
+}
+
+/// Plain in the IPAC schema, but missing from alerts stored before BOOM kept them.
+fn deserialize_some<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
 }
 
 fn deserialize_ssnamenr<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
@@ -645,7 +671,8 @@ pub struct ZtfRawAvroAlert {
     pub candidate: ZtfCandidate,
     #[serde(deserialize_with = "deserialize_prv_candidates")]
     pub prv_candidates: Option<Vec<ZtfPrvCandidate>>,
-    #[serde(deserialize_with = "deserialize_fp_hists")]
+    // Absent from schemas before 4.0 (alerts up to mid-2023).
+    #[serde(default, deserialize_with = "deserialize_fp_hists")]
     pub fp_hists: Option<Vec<ZtfForcedPhot>>,
     #[serde(
         rename = "cutoutScience",
@@ -882,6 +909,94 @@ impl ZtfAlertWorker {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub async fn upsert_aux(
+        &mut self,
+        object_id: &str,
+        ra: f64,
+        dec: f64,
+        prv_candidates: Vec<ZtfPrvCandidate>,
+        prv_nondetections: Vec<ZtfPrvCandidate>,
+        fp_hists: Vec<ZtfForcedPhot>,
+        now: f64,
+    ) -> Result<(), AlertError> {
+        let survey_matches = Some(
+            self.get_survey_matches(ra, dec)
+                .await
+                .inspect_err(as_error!())?,
+        );
+
+        let existing_alert_aux = self.get_existing_aux(object_id).await?;
+
+        if let Some(existing) = existing_alert_aux {
+            self.update_aux(
+                object_id,
+                &prv_candidates,
+                &prv_nondetections,
+                &fp_hists,
+                &survey_matches,
+                now,
+                &existing,
+            )
+            .await
+            .inspect_err(as_error!())?;
+            return Ok(());
+        }
+
+        let xmatches = xmatch(
+            ra,
+            dec,
+            object_id,
+            &Survey::Ztf,
+            &self.xmatch_configs,
+            &self.db,
+        )
+        .await?;
+        let host_galaxy = host::associate_with_photometry(
+            ra,
+            dec,
+            &xmatches,
+            &self.host_galaxy_config,
+            &self.xmatch_configs,
+            &Survey::Ztf,
+            object_id,
+            &self.db,
+        )
+        .await;
+        let obj = ZtfObject {
+            object_id: object_id.to_string(),
+            prv_candidates,
+            prv_nondetections,
+            fp_hists,
+            cross_matches: Some(xmatches),
+            host_galaxy,
+            aliases: survey_matches,
+            coordinates: Coordinates::new(ra, dec),
+            created_at: now,
+            updated_at: now,
+        };
+        let result = self.insert_aux(&obj, &self.alert_aux_collection).await;
+        if let Err(AlertError::AlertAuxExists) = result {
+            debug!(
+                "Alert aux document for object_id {} already exists. Using fallback update.",
+                object_id
+            );
+            self.update_aux_fallback(
+                object_id,
+                &obj.prv_candidates,
+                &obj.prv_nondetections,
+                &obj.fp_hists,
+                &obj.aliases,
+                now,
+            )
+            .await
+            .inspect_err(as_error!())?;
+        } else {
+            result.inspect_err(as_error!())?;
+        }
+        Ok(())
+    }
+
     async fn update_aux(
         &mut self,
         object_id: &str,
@@ -943,6 +1058,11 @@ impl AlertWorker for ZtfAlertWorker {
             .build_db()
             .await
             .inspect_err(as_error!("failed to create mongo client"))?;
+
+        // Warns rather than fails: a crossmatch catalog that is configured but
+        // empty produces zero matches on every alert, which is
+        // indistinguishable from a genuine non-match.
+        crate::catalogs::warn_on_empty_crossmatch_catalogs(&db, &xmatch_configs).await;
 
         let alert_collection = db.collection(&ALERT_COLLECTION);
         let alert_aux_collection = db.collection(&ALERT_AUX_COLLECTION);
@@ -1022,89 +1142,39 @@ impl AlertWorker for ZtfAlertWorker {
             updated_at: now,
         };
 
+        if self
+            .check_alert_exists(candid, &self.alert_collection)
+            .await
+            .inspect_err(as_error!())?
+        {
+            return Ok(ProcessAlertStatus::Exists(candid));
+        }
+
+        self.upsert_aux(
+            &object_id,
+            ra,
+            dec,
+            prv_candidates,
+            prv_nondetections,
+            fp_hists,
+            now,
+        )
+        .await?;
+
+        self.format_and_insert_cutouts(
+            candid,
+            &object_id,
+            avro_alert.cutout_science,
+            avro_alert.cutout_template,
+            avro_alert.cutout_difference,
+            &self.alert_cutout_storage,
+        )
+        .await
+        .inspect_err(as_error!())?;
+
+        // Inserted last: an alert in the database implies its aux and cutouts are there too.
         let status = self
             .format_and_insert_alert(candid, &alert, &self.alert_collection)
-            .await
-            .inspect_err(as_error!())?;
-
-        if let ProcessAlertStatus::Exists(_) = status {
-            return Ok(status);
-        }
-
-        let survey_matches = Some(
-            self.get_survey_matches(ra, dec)
-                .await
-                .inspect_err(as_error!())?,
-        );
-
-        let existing_alert_aux = self.get_existing_aux(&object_id).await?;
-
-        if let Some(existing) = existing_alert_aux {
-            self.update_aux(
-                &object_id,
-                &prv_candidates,
-                &prv_nondetections,
-                &fp_hists,
-                &survey_matches,
-                now,
-                &existing,
-            )
-            .await
-            .inspect_err(as_error!())?;
-        } else {
-            let xmatches = xmatch(
-                ra,
-                dec,
-                &object_id,
-                &Survey::Ztf,
-                &self.xmatch_configs,
-                &self.db,
-            )
-            .await?;
-            let host_galaxy =
-                host::associate_from_xmatches(ra, dec, &xmatches, &self.host_galaxy_config);
-            let obj = ZtfObject {
-                object_id: object_id.clone(),
-                prv_candidates,
-                prv_nondetections,
-                fp_hists,
-                cross_matches: Some(xmatches),
-                host_galaxy,
-                aliases: survey_matches,
-                coordinates: Coordinates::new(ra, dec),
-                created_at: now,
-                updated_at: now,
-            };
-            let result = self.insert_aux(&obj, &self.alert_aux_collection).await;
-            if let Err(AlertError::AlertAuxExists) = result {
-                debug!(
-                    "Alert aux document for object_id {} already exists. Using fallback update.",
-                    object_id
-                );
-                self.update_aux_fallback(
-                    &object_id,
-                    &obj.prv_candidates,
-                    &obj.prv_nondetections,
-                    &obj.fp_hists,
-                    &obj.aliases,
-                    now,
-                )
-                .await
-                .inspect_err(as_error!())?;
-            } else {
-                result.inspect_err(as_error!())?;
-            }
-        }
-
-        let status = self
-            .format_and_insert_cutouts(
-                candid,
-                &object_id,
-                avro_alert.cutout_science,
-                avro_alert.cutout_template,
-                avro_alert.cutout_difference,
-                &self.alert_cutout_storage,
-            )
             .await
             .inspect_err(as_error!())?;
 
@@ -1123,6 +1193,35 @@ mod tests {
             AlertRandomizer, AuxBranchSnapshot, AuxUpdateBranchTestAdapter,
         },
     };
+    use apache_avro::{from_value, types::Value, Reader};
+
+    fn read_test_alert_value() -> Value {
+        let avro_bytes = std::fs::read("tests/data/alerts/ztf/2695378462115010012.avro").unwrap();
+        Reader::new(&avro_bytes[..])
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+    }
+
+    fn corrupt_first_point(alert: &mut Value, series: &str, field: &str, corrupt: f32) {
+        let Value::Record(fields) = alert else {
+            panic!()
+        };
+        let (_, Value::Union(_, points)) =
+            fields.iter_mut().find(|(name, _)| name == series).unwrap()
+        else {
+            panic!()
+        };
+        let Value::Array(points) = points.as_mut() else {
+            panic!()
+        };
+        let Value::Record(point) = &mut points[0] else {
+            panic!()
+        };
+        let (_, value) = point.iter_mut().find(|(name, _)| name == field).unwrap();
+        *value = Value::Union(1, Box::new(Value::Float(corrupt)));
+    }
 
     struct ZtfPrvLightcurveGen {
         template: ZtfPrvCandidate,
@@ -1571,6 +1670,46 @@ mod tests {
     }
 
     #[test]
+    fn test_pre_fp_hists_schema_deserializes() {
+        // Schema 3.3 packet (ZTF23aajjzfg, 2023-05-13): predates the fp_hists field.
+        let avro_bytes = std::fs::read("tests/data/alerts/ztf/2323428966215015003.avro").unwrap();
+        let mut cache = SchemaCache::default();
+        let alert: ZtfRawAvroAlert = cache.alert_from_avro_bytes(&avro_bytes).unwrap();
+        assert_eq!(alert.schemavsn, "3.3");
+        assert_eq!(alert.object_id, "ZTF23aajjzfg");
+        assert_eq!(alert.candid, 2323428966215015003);
+        assert!(alert.fp_hists.is_none());
+        assert_eq!(alert.prv_candidates.unwrap().len(), 16);
+    }
+
+    #[tokio::test]
+    async fn test_process_pre_fp_hists_alert() {
+        let mut worker = ztf_alert_worker().await;
+        let avro_bytes = std::fs::read("tests/data/alerts/ztf/2323428966215015003.avro").unwrap();
+        let candid = 2323428966215015003;
+        drop_alert_from_collections(candid, &Survey::Ztf)
+            .await
+            .unwrap();
+
+        let status = worker.process_alert(&avro_bytes).await.unwrap();
+        assert_eq!(status, ProcessAlertStatus::Added(candid));
+
+        let aux = worker
+            .alert_aux_collection
+            .find_one(doc! { "_id": "ZTF23aajjzfg" })
+            .await
+            .unwrap()
+            .expect("alert aux should exist after processing");
+        assert!(aux.fp_hists.is_empty());
+        assert_eq!(aux.prv_candidates.len(), 2);
+        assert_eq!(aux.prv_nondetections.len(), 15);
+
+        drop_alert_from_collections(candid, &Survey::Ztf)
+            .await
+            .unwrap();
+    }
+
+    #[test]
     fn test_tooflag_coerces_every_form_ipac_sends() {
         #[derive(serde::Deserialize)]
         struct Wrapper {
@@ -1584,6 +1723,30 @@ mod tests {
         assert!(parse(r#"{"tooflag": true}"#));
         assert!(parse(r#"{"tooflag": "t"}"#));
         assert!(!parse(r#"{"tooflag": "f"}"#));
+    }
+
+    #[test]
+    fn test_implausible_diffmaglim_drops_only_that_nondetection() {
+        let mut value = read_test_alert_value();
+        let original: ZtfRawAvroAlert = from_value(&value).unwrap();
+        corrupt_first_point(&mut value, "prv_candidates", "diffmaglim", -253.757);
+        let alert: ZtfRawAvroAlert = from_value(&value).unwrap();
+
+        let original_prv_candidates = original.prv_candidates.unwrap();
+        assert!(original_prv_candidates[0].prv_candidate.magpsf.is_none());
+        assert_eq!(alert.prv_candidates.unwrap(), original_prv_candidates[1..]);
+        assert_eq!(alert.fp_hists, original.fp_hists);
+    }
+
+    #[test]
+    fn test_overflowing_forced_flux_drops_only_that_point() {
+        let mut value = read_test_alert_value();
+        let original: ZtfRawAvroAlert = from_value(&value).unwrap();
+        corrupt_first_point(&mut value, "fp_hists", "magzpsci", -247.979);
+        let alert: ZtfRawAvroAlert = from_value(&value).unwrap();
+
+        assert_eq!(alert.fp_hists.unwrap(), original.fp_hists.unwrap()[1..]);
+        assert_eq!(alert.prv_candidates, original.prv_candidates);
     }
 
     #[test]

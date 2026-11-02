@@ -271,6 +271,8 @@ async fn create_mock_enriched_lsst_alert_with_matches(
         jdstarthist: Some(2459990.5),
         ndethist: Some(5),
         chipsf: Some(2.0),
+        observation_reason: None,
+        target_name: None,
     };
     let prv_candidate = LsstPhotometry {
         jd: 2460000.0,
@@ -295,6 +297,7 @@ async fn create_mock_enriched_lsst_alert_with_matches(
         cross_matches: cross_matches.clone(),
         host_galaxy: None,
         survey_matches: survey_matches.clone(),
+        decam_match: None,
     };
 
     let properties = enrichment_worker
@@ -1208,6 +1211,8 @@ async fn test_babamul_lsst_with_ztf_match() {
         snr_ap: Some(90.0),
         jdstarthist: Some(2459990.5),
         ndethist: Some(5),
+        observation_reason: None,
+        target_name: None,
     };
 
     let lsst_alert = LsstAlert {

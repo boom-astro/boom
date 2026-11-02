@@ -1,4 +1,5 @@
 use crate::alert::{LsstCandidate, ZtfCandidate};
+use crate::api::limits::{large_query_slot, next_result};
 use crate::api::models::response;
 use crate::api::routes::babamul::BabamulUser;
 use crate::enrichment::{LsstAlertProperties, ZtfAlertClassifications, ZtfAlertProperties};
@@ -9,7 +10,7 @@ use crate::utils::moc::{
     parse_3d_skymap_bytes, select_covering_depth_bounded, Cone, CredibleVolumeIndex, HpxMoc,
     LIGO3dskymap, Skymap3dError,
 };
-use crate::utils::spatial::get_f64_from_doc;
+use crate::utils::skymap_search::host_redshifts;
 use actix_web::{get, post, web, HttpResponse};
 use base64::prelude::*;
 use futures::TryStreamExt;
@@ -90,7 +91,7 @@ enum AlertsQueryResult {
         ("is_star" = Option<bool>, Query, description = "Whether to filter for likely star candidates"),
         ("is_near_brightstar" = Option<bool>, Query, description = "Whether to filter for candidates near bright stars"),
         ("is_stationary" = Option<bool>, Query, description = "Whether to filter for stationary candidates"),
-        ("limit" = Option<u32>, Query, description = "Maximum number of alerts to return"),
+        ("limit" = Option<u32>, Query, description = "Maximum number of alerts to return (1-100000, default 1000)"),
         ("skip" = Option<u64>, Query, description = "Number of alerts to skip (for pagination)"),
     ),
     responses(
@@ -114,8 +115,12 @@ pub async fn get_alerts(
         }
     };
     let survey = path.into_inner();
+    let _slot = match large_query_slot().await {
+        Ok(slot) => slot,
+        Err(response) => return response,
+    };
 
-    let limit = query.limit.unwrap_or(100000);
+    let limit = query.limit.unwrap_or(1000);
     if limit == 0 || limit > 100000 {
         return response::bad_request("Invalid limit, must be between 1 and 100000");
     }
@@ -261,21 +266,17 @@ pub async fn get_alerts(
             };
 
             let mut results: Vec<EnrichedZtfAlert> = Vec::new();
-            while let Some(alert_doc) = match alert_cursor.try_next().await {
-                Ok(Some(doc)) => Some(doc),
-                Ok(None) => None,
-                Err(error) => {
-                    return response::internal_error(&format!(
-                        "error getting documents: {}",
-                        error
-                    ));
-                }
+            let mut bytes_read = 0;
+            while let Some(alert_doc) = match next_result(&mut alert_cursor, &mut bytes_read).await
+            {
+                Ok(doc) => doc,
+                Err(e) => return e.into_response("error getting documents"),
             } {
                 results.push(alert_doc);
             }
-            return response::ok(
+            return response::ok_ser(
                 &format!("found {} alerts matching query", results.len()),
-                serde_json::json!(results),
+                &results,
             );
         }
         Survey::Lsst => {
@@ -298,21 +299,17 @@ pub async fn get_alerts(
             };
 
             let mut results: Vec<EnrichedLsstAlert> = Vec::new();
-            while let Some(alert_doc) = match alert_cursor.try_next().await {
-                Ok(Some(doc)) => Some(doc),
-                Ok(None) => None,
-                Err(error) => {
-                    return response::internal_error(&format!(
-                        "error getting documents: {}",
-                        error
-                    ));
-                }
+            let mut bytes_read = 0;
+            while let Some(alert_doc) = match next_result(&mut alert_cursor, &mut bytes_read).await
+            {
+                Ok(doc) => doc,
+                Err(e) => return e.into_response("error getting documents"),
             } {
                 results.push(alert_doc);
             }
-            return response::ok(
+            return response::ok_ser(
                 &format!("found {} alerts matching query", results.len()),
-                serde_json::json!(results),
+                &results,
             );
         }
         _ => {
@@ -361,6 +358,7 @@ where
     let mut results: HashMap<String, Vec<T>> = HashMap::new();
     let mut alert_count = 0;
     let mut coordinates_with_matches_count = 0;
+    let mut bytes_read = 0;
     for (object_name, radec) in coordinates {
         let ra = radec[0];
         let dec = radec[1];
@@ -403,12 +401,9 @@ where
         };
 
         let mut alert_results: Vec<T> = Vec::new();
-        while let Some(alert_doc) = match alert_cursor.try_next().await {
-            Ok(Some(doc)) => Some(doc),
-            Ok(None) => None,
-            Err(error) => {
-                return response::internal_error(&format!("error getting documents: {}", error));
-            }
+        while let Some(alert_doc) = match next_result(&mut alert_cursor, &mut bytes_read).await {
+            Ok(doc) => doc,
+            Err(e) => return e.into_response("error getting documents"),
         } {
             alert_results.push(alert_doc);
             alert_count += 1;
@@ -418,14 +413,14 @@ where
         }
         results.insert(object_name.clone(), alert_results);
     }
-    response::ok(
+    response::ok_ser(
         &format!(
             "found cross-matches for {}/{} coordinates, with a total {} alerts",
             coordinates_with_matches_count,
             coordinates.len(),
             alert_count
         ),
-        serde_json::json!(results),
+        &results,
     )
 }
 
@@ -457,6 +452,10 @@ pub async fn cone_search_alerts(
         }
     };
     let survey = path.into_inner();
+    let _slot = match large_query_slot().await {
+        Ok(slot) => slot,
+        Err(response) => return response,
+    };
     let coordinates = &query.coordinates;
     // we must have more than 0 and less than 1000 coordinate pairs
     // to prevent expensive queries that could potentially timeout the server
@@ -583,99 +582,6 @@ impl SkymapSearchMode {
     }
 }
 
-/// Host-galaxy redshifts from an alert's `cross_matches`, best-first and
-/// deduplicated by 3-arcsec proximity so one galaxy isn't counted per catalog.
-///
-/// Priority: 0 = DESI spec (zwarn=0), 1 = NED SPEC, 2 = DESI spec (zwarn!=0)
-/// and LSDR10 spec, 3 = NED PHOT, 4 = LSDR10 photo-z.
-fn extract_host_redshifts(cross_matches: Option<&Document>) -> Vec<f64> {
-    /// `priority` ranks a row (lower = better) or returns None to skip it.
-    fn extract_catalog_zs(
-        cross_matches: Option<&Document>,
-        catalog: &str,
-        z_field: &str,
-        priority: impl Fn(&Document) -> Option<u8>,
-        ranked: &mut Vec<(u8, f64, f64, f64)>,
-    ) {
-        let Some(arr) = cross_matches.and_then(|cm| cm.get_array(catalog).ok()) else {
-            return;
-        };
-        for v in arr {
-            let Some(m) = v.as_document() else { continue };
-            let Some(p) = priority(m) else { continue };
-            // Document::get_f64 rejects the Int32 these catalogs sometimes store.
-            let Some(z) = get_f64_from_doc(m, z_field).filter(|&z| z > 0.0) else {
-                continue;
-            };
-            let Some(ra) = get_f64_from_doc(m, "ra") else {
-                continue;
-            };
-            let Some(dec) = get_f64_from_doc(m, "dec") else {
-                continue;
-            };
-            ranked.push((p, ra, dec, z));
-        }
-    }
-
-    let mut ranked: Vec<(u8, f64, f64, f64)> = Vec::new(); // (priority, ra, dec, z)
-
-    extract_catalog_zs(
-        cross_matches,
-        "DESI_DR1",
-        "z",
-        |m| {
-            if m.get_str("spectype").map(|s| s == "STAR").unwrap_or(false) {
-                return None;
-            }
-            Some(if get_f64_from_doc(m, "zwarn").unwrap_or(1.0) == 0.0 {
-                0
-            } else {
-                2
-            })
-        },
-        &mut ranked,
-    );
-    extract_catalog_zs(
-        cross_matches,
-        "NED",
-        "z",
-        |m| {
-            Some(
-                if m.get_str("z_tech").map(|s| s == "SPEC").unwrap_or(false) {
-                    1
-                } else {
-                    3
-                },
-            )
-        },
-        &mut ranked,
-    );
-    // A Legacy row carrying both is deduplicated below, keeping the spectroscopic one.
-    extract_catalog_zs(cross_matches, "LSDR10", "z_spec", |_| Some(2), &mut ranked);
-    extract_catalog_zs(
-        cross_matches,
-        "LSDR10",
-        "z_phot_median",
-        |_| Some(4),
-        &mut ranked,
-    );
-
-    ranked.sort_by_key(|&(p, _, _, _)| p);
-    const DEDUP_ARCSEC: f64 = 3.0;
-    let mut kept: Vec<(f64, f64, f64)> = Vec::new(); // (ra, dec, z)
-    for (_, ra, dec, z) in ranked {
-        let is_dup = kept.iter().any(|&(kra, kdec, _)| {
-            let dra = (ra - kra) * dec.to_radians().cos();
-            let ddec = dec - kdec;
-            (dra * dra + ddec * ddec).sqrt() * 3600.0 < DEDUP_ARCSEC
-        });
-        if !is_dup {
-            kept.push((ra, dec, z));
-        }
-    }
-    kept.into_iter().map(|(_, _, z)| z).collect()
-}
-
 /// The spatial `$or` is only a covering-cone pre-filter, so each alert is re-tested
 /// against the real region here. `truncated` means `SKYMAP_3D_SPATIAL_CAP` was hit,
 /// not the caller's `limit`.
@@ -747,7 +653,7 @@ where
             let aux_col: Collection<Document> = db.collection(&format!("{}_alerts_aux", survey));
             let mut aux_cursor = aux_col
                 .find(doc! { "_id": { "$in": object_ids } })
-                .projection(doc! { "_id": 1, "cross_matches": 1 })
+                .projection(doc! { "_id": 1, "cross_matches": 1, "host_galaxy": 1 })
                 .await
                 .map_err(|e| response::internal_error(&format!("error querying aux: {}", e)))?;
 
@@ -758,7 +664,12 @@ where
                 let Ok(oid) = aux_doc.get_str("_id") else {
                     continue;
                 };
-                let z_values = extract_host_redshifts(aux_doc.get_document("cross_matches").ok());
+                // Same precedence as the filter test endpoints: an associated host
+                // names the galaxy, so the two cannot disagree about one alert.
+                let z_values = host_redshifts(
+                    aux_doc.get_document("host_galaxy").ok(),
+                    aux_doc.get_document("cross_matches").ok(),
+                );
                 host_z_map.insert(oid.to_string(), z_values);
             }
 
@@ -1166,6 +1077,8 @@ mod tests {
     use super::*;
     use mongodb::bson::{doc, Document};
 
+    use crate::utils::skymap_search::extract_host_redshifts;
+
     /// A cross-match block holding one row per catalog at the same position.
     fn cross_matches(rows: Vec<(&str, Document)>) -> Document {
         let mut d = Document::new();
@@ -1173,6 +1086,19 @@ mod tests {
             d.insert(catalog, vec![row]);
         }
         d
+    }
+
+    /// This endpoint and the filter test endpoints score the same alert, so they
+    /// take the host the same way: an association wins, the sweep is the fallback.
+    #[test]
+    fn test_the_skymap_search_prefers_the_associated_host() {
+        let cm = cross_matches(vec![(
+            "NED",
+            doc! { "ra": 10.0, "dec": 20.0, "z": 0.05, "z_tech": "SPEC" },
+        )]);
+        let host = doc! { "best_host": doc! { "ra": 10.0, "dec": 20.0, "z": 0.2 } };
+        assert_eq!(host_redshifts(Some(&host), Some(&cm)), vec![0.2]);
+        assert_eq!(host_redshifts(None, Some(&cm)), vec![0.05]);
     }
 
     #[test]

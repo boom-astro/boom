@@ -6,9 +6,13 @@ use crate::{
             logging::{as_error, log_error, WARN},
             metrics::CONSUMER_METER,
         },
+        retry::{
+            is_transient_redis_error, retry_transient, DEFAULT_BASE_BACKOFF, DEFAULT_MAX_RETRIES,
+        },
     },
 };
 
+use std::future::Future;
 use std::sync::{Arc, LazyLock};
 
 use indicatif::ProgressBar;
@@ -173,6 +177,17 @@ pub async fn delete_topic(bootstrap_servers: &str, topic_name: &str) -> Result<(
 
     let opts = AdminOptions::new().operation_timeout(Some(KAFKA_TIMEOUT_SECS));
     admin_client.delete_topics(&[topic_name], &opts).await?;
+
+    // Poll until the deletion reaches broker metadata, else count_messages() sees the old topic.
+    let consumer: BaseConsumer = ClientConfig::new()
+        .set("bootstrap.servers", bootstrap_servers)
+        .create()?;
+    for attempt in 0..20u64 {
+        if get_partition_ids(&consumer, topic_name)?.is_none() {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250 * (attempt + 1))).await;
+    }
     Ok(())
 }
 
@@ -908,6 +923,39 @@ fn is_expired_partition(error: &KafkaError) -> bool {
     )
 }
 
+async fn retry_valkey<T, Fut>(
+    operation: &'static str,
+    op: impl FnMut() -> Fut,
+) -> Result<T, redis::RedisError>
+where
+    Fut: Future<Output = Result<T, redis::RedisError>>,
+{
+    retry_transient(
+        operation,
+        DEFAULT_MAX_RETRIES,
+        DEFAULT_BASE_BACKOFF,
+        is_transient_redis_error,
+        || {},
+        op,
+    )
+    .await
+}
+
+async fn push_to_queue(
+    con: &redis::aio::MultiplexedConnection,
+    queue: &str,
+    payload: &[u8],
+) -> Result<usize, redis::RedisError> {
+    retry_valkey("valkey_rpush", || {
+        let mut con = con.clone();
+        async move {
+            con.rpush::<&str, Vec<u8>, usize>(queue, payload.to_vec())
+                .await
+        }
+    })
+    .await
+}
+
 // No `#[instrument]` here: this function is the long-lived Kafka poll loop;
 // instrumenting it would funnel every per-message span into one giant trace.
 pub async fn consumer(
@@ -1066,12 +1114,22 @@ pub async fn consumer(
             );
         }
         match consumer.poll(KAFKA_TIMEOUT_SECS) {
-            Some(Ok(_msg)) => {
+            Some(Ok(msg)) => {
                 debug!("Got initial assignment, positioning partitions...");
                 if replay {
                     // Replay: (re)read from the timestamp; `position_partitions` commits.
                     seek_to_timestamp(&consumer, plan.position_timestamp * 1000)?;
-                } else if !position_or_warn(&consumer, position_timestamp * 1000, &mut positioned) {
+                } else if positioned.contains(&(msg.topic().to_string(), msg.partition())) {
+                    consumer.seek(
+                        msg.topic(),
+                        msg.partition(),
+                        rdkafka::Offset::Offset(msg.offset()),
+                        KAFKA_TIMEOUT_SECS,
+                    )?;
+                }
+                if !replay
+                    && !position_or_warn(&consumer, position_timestamp * 1000, &mut positioned)
+                {
                     // Consuming unpositioned would replay an old night from
                     // `earliest`; poll again and retry.
                     continue;
@@ -1144,7 +1202,7 @@ pub async fn consumer(
         ])
         .collect();
 
-    let mut con = config
+    let con = config
         .build_redis()
         .await
         .inspect_err(as_error!("failed to connect to redis"))?;
@@ -1195,10 +1253,12 @@ pub async fn consumer(
             // `max.poll.interval.ms` (5 min) is fenced out of the group.
             let mut paused = false;
             loop {
-                let nb_in_queue = con
-                    .llen::<&str, usize>(&output_queue)
-                    .await
-                    .inspect_err(as_error!("failed to get queue length"))?;
+                let nb_in_queue = retry_valkey("valkey_llen", || {
+                    let mut con = con.clone();
+                    async move { con.llen::<&str, usize>(output_queue).await }
+                })
+                .await
+                .inspect_err(as_error!("failed to get queue length"))?;
                 if nb_in_queue < max_in_queue {
                     break;
                 }
@@ -1213,7 +1273,7 @@ pub async fn consumer(
                 // Yields nothing while paused, but forwards anything still in flight.
                 if let Some(Ok(message)) = consumer.poll(core::time::Duration::from_millis(500)) {
                     let payload = message.payload().unwrap_or_default();
-                    con.rpush::<&str, Vec<u8>, usize>(&output_queue, payload.to_vec())
+                    push_to_queue(&con, output_queue, payload)
                         .await
                         .inspect_err(|error| {
                             log_error!(error, "failed to push message to queue");
@@ -1236,7 +1296,7 @@ pub async fn consumer(
         match consumer.poll(KAFKA_TIMEOUT_SECS) {
             Some(Ok(message)) => {
                 let payload = message.payload().unwrap_or_default();
-                con.rpush::<&str, Vec<u8>, usize>(&output_queue, payload.to_vec())
+                push_to_queue(&con, output_queue, payload)
                     .await
                     .inspect_err(|error| {
                         log_error!(error, "failed to push message to queue");

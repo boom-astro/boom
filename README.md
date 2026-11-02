@@ -23,7 +23,7 @@ BOOM is an alert broker. What sets it apart from other alert brokers is that it 
 Workers are managed by a Scheduler that can spawn or kill workers of each type.
 Currently, the number of workers is static, but we are working on dynamically scaling the number of workers based on the load of the system.
 
-BOOM also comes with an HTTP API, under development, which will allow users to query the `MongoDB` database, to define their own filters, and to have those filters run on alerts in real-time.
+BOOM also comes with an HTTP API, under development, which will allow users to query the `MongoDB` database, to define their own filters, and to have those filters run on alerts in real-time. Its Python client is [boom-client](https://github.com/boom-astro/boom-client).
 
 ## System Requirements
 
@@ -284,6 +284,27 @@ gpu:
 
 See [docs/gpu.md](docs/gpu.md) for container-vs-native details, troubleshooting, and version notes.
 
+### Milvus vector database (optional)
+
+BOOM can store the CIDER fusion model's embeddings in a
+[Milvus](https://milvus.io) vector database, so that objects can be retrieved by
+similarity. This is disabled by default; deployments that don't use it need no
+configuration.
+
+Enable it with `BOOM_MILVUS__ENABLED=true`. One vector database serves the whole
+project, so `config.yaml` already names it. BOOM connects with an administrative
+account, so only the username and password come from the environment — they go
+in `.env` (gitignored) or the deployment's secret store, never in `config.yaml`
+or `.env.example`, both of which are committed. Once set, verify the connection
+without writing any data:
+
+```bash
+cargo run --bin milvus_check
+```
+
+See [docs/milvus.md](docs/milvus.md) for the collection schema and how each
+deployment supplies those settings.
+
 ### Start services for local development
 
 1. Install lfs and pull the large files:
@@ -403,7 +424,7 @@ cargo run --release --bin scheduler ztf
 
 ### Using Docker
 
-In production, BOOM runs the default services alongside a set of dedicated services defined in `docker-compose.yaml` under the `prod` profile: `api`, `consumer-ztf`, `consumer-lsst`, `scheduler-ztf`, `scheduler-lsst`, and `frontend`. The Rust services each start their binary automatically at container startup; `frontend` builds the web app and serves it with nginx.
+In production, BOOM runs the default services alongside a set of dedicated services defined in `docker-compose.yaml` under the `prod` profile: `api`, `consumer-ztf-public`, `consumer-ztf-partnership`, `consumer-ztf-caltech`, `consumer-lsst`, `consumer-winter`, `scheduler-ztf`, `scheduler-lsst`, `scheduler-winter`, and `frontend`. `consumer-decam` and `scheduler-decam` sit in a separate `decam` profile, which the deploy workflow adds only when `BOOM_KAFKA__CONSUMER__DECAM__SERVER` is set. The Rust services each start their binary automatically at container startup; `frontend` builds the web app and serves it with nginx.
 
 Bring up the full prod stack with:
 
@@ -414,15 +435,18 @@ docker compose --profile prod up -d
 Or start individual services:
 
 ```bash
-docker compose --profile prod up -d consumer-ztf scheduler-ztf
+docker compose --profile prod up -d consumer-ztf-public scheduler-ztf
 ```
 
-To run a one-shot operational task, override the service's command with `docker compose run`. This is typically used for database migrations such as `migrate_fp_flux` and `migrate_snr`:
+One-shot operational work — catalog ingests, migrations, reprocessing — runs through the [task system](docs/task-system.md) rather than as a binary. Start one from the admin page, or submit it to the API:
 
 ```bash
-docker compose --profile prod run --rm scheduler-ztf /app/migrate_fp_flux
-docker compose --profile prod run --rm scheduler-ztf /app/migrate_snr
+curl -X POST http://localhost:4000/tasks \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"task_type": "migrate_snr", "params": {"survey": "ztf"}}'
 ```
+
+There is deliberately no binary to run over SSH. These jobs take hours, so they have to survive a deploy, stream their logs while running, and be cancellable — and each one records who ran it, with which parameters, under which release, in the append-only `data_mutations` ledger. None of that is available to a process started from a shell.
 
 To tail logs or open a shell in a running container:
 
@@ -498,11 +522,11 @@ mkdir -p ./data/alerts
 
 **For Linux:**
 ```
-wget -q https://caltech.box.com/shared/static/qdois5qq2lmvp02ri50fum80vzr54505.gz -O ./data/alerts/boom_throughput.ZTF_alerts_aux.dump.gz
+wget -q https://github.com/boom-astro/boom/releases/download/test-data-v1/boom_throughput.ZTF_alerts_aux.dump.gz -O ./data/alerts/boom_throughput.ZTF_alerts_aux.dump.gz
 ```
 **For macOS:**
 ```
-curl -sL https://caltech.box.com/shared/static/qdois5qq2lmvp02ri50fum80vzr54505.gz -o ./data/alerts/boom_throughput.ZTF_alerts_aux.dump.gz
+curl -sL https://github.com/boom-astro/boom/releases/download/test-data-v1/boom_throughput.ZTF_alerts_aux.dump.gz -o ./data/alerts/boom_throughput.ZTF_alerts_aux.dump.gz
 ```
 
 Download the NED catalog for crossmatching.

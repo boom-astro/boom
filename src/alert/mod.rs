@@ -10,7 +10,7 @@ pub use base::{
 };
 pub use decam::{
     DecamAlert, DecamAlertWorker, DecamAliases, DecamCandidate, DecamForcedPhot, DecamObject,
-    DecamRawAvroAlert, DECAM_DEC_RANGE,
+    DecamRawAvroAlert, DECAM_DEC_RANGE, DECAM_LSST_XMATCH_RADIUS, DECAM_ZTF_XMATCH_RADIUS,
 };
 pub use lsst::{
     DiaForcedSource, DiaSource, LsstAlert, LsstAlertWorker, LsstAliases, LsstCandidate,

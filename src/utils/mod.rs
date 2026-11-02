@@ -1,12 +1,15 @@
 pub mod ades;
+pub mod attach;
 pub mod comets;
 pub mod cosmology;
+pub mod css;
 pub mod cutouts;
 pub mod data;
 pub mod db;
 pub mod derive_avro_schema;
-pub mod enrichment_schema;
+pub mod discovery;
 pub mod enums;
+pub mod fast;
 pub mod fits;
 pub mod gpu;
 pub mod heliolinc;
@@ -22,10 +25,13 @@ pub mod outburst;
 pub mod parser;
 pub mod phase_curve;
 pub mod retry;
+pub mod skymap_search;
 pub mod spatial;
 pub mod sso_geometry;
 pub mod testing;
 pub mod thor;
+pub mod tracks;
+pub mod vsop87;
 pub mod worker;
 
 /// A BSON number as `f64`, whatever width it was written at.

@@ -25,16 +25,16 @@ impl DecamAlertConsumer {
 impl AlertConsumer for DecamAlertConsumer {
     fn topic_names(&self, timestamp: i64) -> Vec<String> {
         let date = chrono::DateTime::from_timestamp(timestamp, 0).unwrap();
-        vec![format!("decam_{}_programid{}", date.format("%Y%m%d"), 1)]
+        vec![format!("farts_v2_{}", date.format("%Y%m%d"))]
     }
     fn subscription_topics(&self, timestamp: i64, window_days: u64) -> Vec<String> {
         // Concrete names over the rollover window rather than a
-        // `^decam_[0-9]+_programid[0-9]+$` regex: a pattern also matches every
+        // `^farts_v2_[0-9]+$` regex: a pattern also matches every
         // past night the cluster still advertises, whose partitions have
         // already been expired upstream.
         subscription_window(timestamp, window_days)
             .iter()
-            .map(|date| format!("decam_{}_programid{}", date.format("%Y%m%d"), 1))
+            .map(|date| format!("farts_v2_{}", date.format("%Y%m%d")))
             .collect()
     }
     fn output_queue(&self) -> String {
@@ -66,7 +66,7 @@ impl DecamAlertProducer {
 #[async_trait::async_trait]
 impl AlertProducer for DecamAlertProducer {
     fn topic_name(&self) -> String {
-        format!("decam_{}_programid1", self.date.format("%Y%m%d"))
+        format!("farts_v2_{}", self.date.format("%Y%m%d"))
     }
     fn data_directory(&self) -> String {
         format!("data/alerts/decam/{}", self.date.format("%Y%m%d"))

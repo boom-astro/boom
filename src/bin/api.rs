@@ -9,6 +9,7 @@ use boom::api::email::EmailService;
 use boom::api::observability::request_metrics_middleware;
 use boom::api::routes;
 use boom::conf::{load_dotenv, AppConfig};
+use boom::milvus::MilvusClient;
 use boom::utils::cutouts::CutoutStorage;
 use boom::utils::enums::Survey;
 use boom::utils::o11y::{
@@ -20,6 +21,10 @@ use std::collections::HashMap;
 use utoipa::OpenApi;
 use utoipa_scalar::{Scalar, Servable};
 use uuid::Uuid;
+
+// glibc keeps freed memory in per-thread arenas; jemalloc reuses it across workers and returns it to the OS.
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
@@ -61,11 +66,42 @@ async fn main() -> std::io::Result<()> {
     }
     let cutout_storages = web::Data::new(cutout_storage_map);
 
+    // Connect to Milvus once at startup when enabled. A failure here is
+    // non-fatal: the embedding endpoints reply with a clear error, but the rest
+    // of the API still boots. `None` means disabled or unreachable.
+    let milvus_client: Option<MilvusClient> = if config.milvus.enabled {
+        match MilvusClient::connect(&config.milvus).await {
+            Ok(client) => {
+                tracing::info!("Milvus embedding endpoints are ENABLED");
+                Some(client)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Milvus configuration is enabled but connection failed, \
+                so embedding endpoints will be unavailable: {}",
+                    e
+                );
+                None
+            }
+        }
+    } else {
+        tracing::info!(
+            "Milvus configuration is currently disabled, so embedding endpoints are DISABLED"
+        );
+        None
+    };
+
     let babamul_is_enabled = config.babamul.enabled;
     if babamul_is_enabled {
         tracing::info!("Babamul API endpoints are ENABLED");
         // Abandoned sign-in attempts are only cleaned up by this TTL index —
         // completed flows delete their own state, incomplete ones never do.
+        if let Err(error) =
+            boom::api::admin::reconcile_babamul_admins(&database, &config.babamul.admin_emails)
+                .await
+        {
+            panic!("failed to reconcile babamul admins: {error}");
+        }
         if let Err(error) = routes::babamul::oauth::ensure_oauth_state_index(&database).await {
             log_error!(WARN, error, "failed to create the OAuth TTL indexes");
         }
@@ -106,6 +142,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(database.clone()))
             .app_data(web::Data::new(auth.clone()))
             .app_data(web::Data::new(email_service.clone()))
+            .app_data(web::Data::new(milvus_client.clone()))
             .app_data(cutout_storages.clone())
             .app_data(analytics.clone())
             .wrap(from_fn(request_metrics_middleware));
@@ -142,8 +179,11 @@ async fn main() -> std::io::Result<()> {
                     .service(routes::babamul::surveys::get_objects)
                     .service(routes::babamul::surveys::cone_search_objects)
                     .service(routes::babamul::surveys::get_cutouts)
+                    .service(routes::babamul::surveys::get_batch_cutouts)
+                    .service(routes::babamul::surveys::get_track)
                     .service(routes::babamul::surveys::get_alerts)
                     .service(routes::babamul::surveys::cone_search_alerts)
+                    .service(routes::babamul::surveys::get_villar_fit)
                     .service(routes::babamul::stats::get_nightly_stats)
                     .service(routes::babamul::stats::get_collection_stats)
                     .service(routes::babamul::stats::get_kafka_stats)
@@ -151,6 +191,10 @@ async fn main() -> std::io::Result<()> {
                     .service(routes::babamul::tokens::get_tokens)
                     .service(routes::babamul::tokens::post_token)
                     .service(routes::babamul::tokens::delete_token)
+                    .service(routes::babamul::admin::get_admin_users)
+                    .service(routes::babamul::admin::patch_admin_user)
+                    .service(routes::babamul::embeddings::post_babamul_similar_objects)
+                    .service(routes::babamul::embeddings::get_babamul_embeddings_count)
                     // Larger JSON limit for skymap uploads (~130 MB base64). This
                     // prefix-less scope swallows any sibling after it, so keep it last.
                     .service(
@@ -179,10 +223,7 @@ async fn main() -> std::io::Result<()> {
                 .service(routes::filters::get_filter)
                 .service(routes::filters::delete_filter)
                 .service(routes::filters::post_filter_version)
-                .service(routes::filters::post_filter_test)
-                .service(routes::filters::post_filter_test_count)
                 .service(routes::filters::get_filter_schema)
-                .service(routes::filters::get_filter_alert_schema)
                 .service(routes::users::post_user)
                 .service(routes::users::get_users)
                 .service(routes::users::delete_user)
@@ -190,12 +231,41 @@ async fn main() -> std::io::Result<()> {
                 .service(routes::catalogs::get_catalogs)
                 .service(routes::catalogs::get_catalog_indexes)
                 .service(routes::catalogs::get_catalog_sample)
+                .service(routes::catalogs::get_catalog_status)
+                .service(routes::catalogs::get_catalog_exports)
+                .service(routes::catalogs::download_catalog_export)
+                .service(routes::tasks::get_task_types)
+                .service(routes::tasks::submit_task)
+                .service(routes::tasks::get_tasks)
+                .service(routes::tasks::get_task_logs)
+                .service(routes::tasks::cancel_task)
+                .service(routes::tasks::get_data_mutations)
+                .service(routes::tasks::get_enrichment_status)
+                .service(routes::tasks::accept_enrichment_set)
+                .service(routes::tasks::unaccept_enrichment_set)
+                // Registered last among the /tasks paths: actix matches in
+                // registration order, so {task_id} would swallow any literal
+                // /tasks/<name> added above it.
+                .service(routes::tasks::get_task)
                 .service(routes::queries::post_find_query)
                 .service(routes::queries::post_cone_search_query)
                 .service(routes::surveys::get_cutouts)
+                .service(routes::surveys::get_batch_cutouts)
+                .service(routes::surveys::get_tracks)
+                .service(routes::surveys::get_track)
                 .service(routes::queries::post_count_query)
                 .service(routes::queries::post_estimated_count_query)
                 .service(routes::queries::post_pipeline_query)
+                .service(routes::embeddings::post_similar_objects)
+                .service(routes::embeddings::get_embeddings_count)
+                // Larger JSON limit for the skymap these accept (~130 MB base64).
+                // This prefix-less scope swallows any sibling after it, so keep it last.
+                .service(
+                    actix_web::web::scope("")
+                        .app_data(web::JsonConfig::default().limit(209_715_200))
+                        .service(routes::filters::post_filter_test)
+                        .service(routes::filters::post_filter_test_count),
+                )
                 .wrap(Logger::default()),
         )
     })

@@ -1,0 +1,661 @@
+# Task system
+
+Operating a BOOM system typically involves adding new catalogs,
+changing the schema of alerts and object already in the database,
+and reprocessing alerts already saved in the database, e.g., when a new
+catalog or enrichment step like an ML model classifier is added.
+It is important for us to be able to track what mutations were done to the
+data, at what time, and with what version of the code.
+A schema change also has to be carried into whatever references the old shape,
+such as the filters users have saved, and running more than one BOOM instance
+means moving data between them.
+
+BOOM's task system allows kicking off, monitoring, and querying the history
+of these tasks from the admin section of the front end.
+All tasks report what they've done to mutate the data system, and this
+changelog can be viewed from the admin page.
+
+BOOM owns its own data. Another system can ask BOOM for a desired state, but
+does not write to the database itself, which is what keeps the changelog
+complete.
+
+A **task type** is a kind of work this release can do -- `backfill_hpx`,
+`catalog_ingest` -- declared in code and listed by `GET /task-types`. A
+**task** is one run of one: a document in `tasks` with parameters, a status, a
+lease and a log. Adding a type is a code change; creating a task is submitting
+the form. `TaskType` and `TaskSpec` are the kind, `Task` is the run.
+
+**Who this is for:** BOOM developers, and the admins who operate a deployment.
+None of it is visible to Babamul users, and a SkyPortal integrator only meets it
+if that account is also an admin.
+
+## Why not just run a binary
+
+A process started over SSH cannot give us four things we need:
+
+- **It has to survive a deploy.** A catalog ingest is hours to days. A run whose
+  worker is replaced mid-flight goes back on the queue and is picked up again.
+- **Its logs have to be watchable while it runs**, by whoever started it, without
+  shell access to the production host.
+- **It has to be cancellable** — cleanly, at a point the task chooses, not by
+  killing a process partway through a batch.
+- **It has to leave a record.** Who ran what, with which parameters, against
+  which release. The database is the raw stream plus every mutation since, so
+  mutations that live only in someone's shell history make the results derived
+  from them impossible to reproduce.
+- **It has to go through BOOM.** The application owns its database. Humans,
+  scripts and other apps should not be reaching into MongoDB to change it: what
+  kinds of access and actions are acceptable, and from whom, is exactly what an
+  API is for. MongoDB credentials are not an authorization system, and mutating
+  production data should not require handing out root-adjacent shell access.
+
+## Why not Temporal
+
+Building a task queue is the kind of thing a workflow engine already does, so
+the question deserves an answer rather than a shrug. [Temporal](https://temporal.io)
+is the closest fit, and adopting it would genuinely replace parts of this: its
+durable execution makes resumability a property of the runtime rather than a
+flag the task author sets, which is strictly stronger than `idempotent` — every
+task declares it and nothing verifies it. Activity heartbeats, retry policies
+and timeouts cover by configuration what `queue.rs` does by hand. Schedules
+would cover the periodic jobs below for free.
+
+Three reasons it is not used here.
+
+**It does not provide the ledger.** `data_mutations` answers "why does
+this collection look like this": the collection, the operation, the actor, and
+the commit that ran. Temporal's event history records what a workflow did, keyed
+by run, with retention limits and archival. That record would still have to be
+built on top of it, and it is the part that matters for explaining a result.
+
+**The programming model fits badly.** Workflow code has to be replay-deterministic — no I/O,
+no clocks, and explicit versioning when a workflow changes while runs are in
+flight. A task here is one long loop over a MongoDB collection, so nearly all of
+it would have to be an activity with the workflow as a thin driver, at which
+point what durable execution buys is checkpointing between activities, which
+`record_chunk` and the resume filters already do. Histories also have event and
+size limits, so a task walking hundreds of millions of documents needs
+continue-as-new chunking designed around them.
+
+**It is another server to operate.** A Temporal server plus its persistence
+store, on deployments that today are MongoDB, Valkey, Kafka and a handful of
+Rust services on hardware the institutions run themselves — or a hosted
+dependency for metadata about data movements. The Rust SDK reached public
+preview in May 2026, so the language is no longer the obstacle it would have
+been; the operational weight is.
+
+Revisit it if tasks start spanning services and needing compensation when a
+later step fails, or if runs need to pause for human approval. Both are things a
+workflow engine is for and this is not.
+
+Worth taking from its design regardless, none of which needs Temporal:
+
+- **A checkpoint token on the run.** A Temporal activity heartbeats with a
+  payload that comes back to it on retry. Resume points here are re-derived from
+  the data every time; recording the last `_id` processed on the run would
+  generalize the per-task tricks and make resumability inspectable rather than
+  asserted.
+- **A test that kills a run and resumes it.** `idempotent: true` is a claim
+  about every task in `TASKS`, and nothing checks it.
+- **A retry policy per task** rather than one boolean: attempts, backoff, and
+  which errors are not worth retrying.
+- **Separate timeouts.** One lease TTL currently does the work that Temporal
+  splits into start-to-close, schedule-to-close and heartbeat timeouts, so a
+  task that hangs without dying is indistinguishable from one making progress.
+- **An overlap policy on schedules** — skip, buffer or allow — which is what a
+  periodic trim needs, and what `single_flight_key` only approximates.
+
+## How a run flows
+
+```text
+   admin page ──POST /tasks──▶ boom-api ──▶ tasks (status: queued)
+                                                 │
+                                    findOneAndUpdate(queued → running, +lease)
+                                                 ▼
+                                          boom task-worker
+                                                 │
+                    ┌────────────────────────────┼───────────────────────┐
+                    ▼                            ▼                       ▼
+             the data itself              tasks.progress         task_logs
+                                          (+ lease heartbeat)     (tailed by the UI)
+```
+
+MongoDB is both the queue and the record. An atomic `find_one_and_update` moves
+a run from `queued` to `running` and stamps a lease in one operation: two
+workers racing both match the filter, but only one update sees `queued`.
+
+**Why not Valkey**, which is already in the stack and is what the alert
+scheduler uses: the task record has to live in Mongo regardless — status, params,
+actor, progress and history are what the admin page and the provenance story
+read. Putting the queue elsewhere makes every state transition a dual write to
+two stores, and reconciling those when one fails mid-transition is a real source
+of lost or duplicated runs. Valkey's advantage is throughput, which the alert
+pipeline needs and this does not: the task system sees a few runs a week, and
+the claim is one indexed lookup every couple of seconds.
+
+It also does not contend with alert writes. WiredTiger takes only *intent* locks
+at the database and collection level, and those are mutually compatible, so
+writes to `tasks` never block writes to an alert collection. The thing that
+*does* contend is a large ingest itself — which is why `catalog_ingest` exposes
+`num_workers` and `batch_size`, so a run can be turned down when it is hurting
+the pipeline.
+
+## Leases, and surviving a deploy
+
+A claimed run carries `lease_expires_at`, renewed by the worker's heartbeat
+every 20 seconds against a 60-second lease. Two things use it:
+
+- **A worker shutting down cleanly** (SIGTERM, i.e. a deploy) sets the running
+  task's cancellation flag, waits for it to stop at its next safe point, and
+  puts the run back on the queue as `queued`. The replacement worker picks it up
+  immediately rather than waiting out the lease.
+- **A worker that dies** renews nothing. The next worker to poll requeues any
+  run whose lease has lapsed.
+
+Both rely on task bodies being **resumable**: re-running one continues rather
+than repeating. `catalog_ingest` records each completed chunk, so a resumed run
+skips what is already in and costs one chunk, not the whole catalog.
+
+**Only tasks that declare `idempotent` are retried.** Resuming is safe exactly
+when re-running produces the same state — a chunked ingest skips what it
+recorded, a recompute derives from untouched inputs. Anything else is **failed**
+instead, with an error saying why, and left for a person to look at. Quietly
+doing half the work twice is the one outcome nobody could detect afterwards.
+
+The same rule applies on clean shutdown, not just to a lapsed lease: a deploy
+must not silently re-run something that cannot be re-run safely.
+
+A task type this build does not recognize is treated as **not** retryable. A run
+can outlive the release that created it, and re-running something the code
+cannot even describe is precisely the case to be conservative about.
+
+Every task registered today is idempotent, and a test asserts it — not because
+the system requires it, but because it is the property that makes a task survive
+a deploy, which is most of the point. Registering one without it should be a
+deliberate edit to that test.
+
+The heartbeat also carries cancellation in the other direction. `POST
+/tasks/{id}/cancel` sets `cancel_requested`; the heartbeat mirrors it into a
+flag the task polls. A queued run is canceled outright, since nothing started.
+
+## Task types
+
+Declared in code, in `TASKS` in [`src/tasks/mod.rs`](https://github.com/boom-astro/boom/blob/main/src/tasks/mod.rs) —
+a task type is part of the release, so pinning the code version pins what it
+does. Parameters are validated by the API at submit time, so a bad request is a
+400 the client can act on rather than a run that fails on a worker minutes
+later.
+
+| Task | What it does |
+| --- | --- |
+| `catalog_ingest` | Download an archival catalog and insert it. See [catalogs.md](./catalogs.md). |
+| `migrate_fp_flux` | Recompute ZTF forced-photometry flux in `ZTF_alerts_aux` at a fixed zeropoint. |
+| `migrate_snr` | Recompute `snr_psf`, `snr_ap` and ZTF `apFlux` across alerts and lightcurves. |
+| `reprocess_crossmatch` | Fill in or refresh crossmatches on a survey's `alerts_aux` records, or with `remove` unset a dropped catalog's matches. |
+| `prepare_catalog` | Add spatial fields and a 2dsphere index to a hand-imported collection. |
+| `export_catalog` | Write a catalog collection to gzipped JSONL chunks plus a manifest, for a catalog BOOM cannot fetch again. Read-only. |
+| `link_tracks` | Find intra-night tracklets in a window of alerts and link them into moving-object tracks. Writes nothing unless `persist` is set; `dry_run` reports what it would have written. |
+| `backfill_detection_span` | Write `first_activity_jd`, `last_detection_jd` and `n_forced_detections` onto alerts written before those fields existed. ZTF and LSST. |
+| `backfill_host_galaxy` | Score stored galaxy cross-matches and write `host_galaxy` on `alerts_aux`. |
+| `backfill_hpx` | Write `coordinates.hpx` onto alerts that predate the field, so MOC region queries can find them. |
+| `backfill_track_elements` | Write `orbit.e`, `orbit.q`, `rms_ratio` and `flags` onto tracks stored before they were. |
+| `repair_photometry` | Rewrite `alerts_aux` timeseries arrays that are out of order, duplicated, or carry a non-numeric `jd`. Deletes the offending points — run with `dry_run` first. |
+| `enrich_reprocess` | Select alerts, queue them, and re-run enrichment over them. See [alert-processing.md](./alert-processing.md). |
+| `mpcorb_ingest` | Re-download MPC orbital elements and swap them into `MPC_orbits`. |
+| `sso_baselines` | Fit solar system phase-curve baselines from ZTF detections. |
+| `copy_cutouts` | Copy a survey's cutout collection between MongoDB deployments. |
+| `stream_kowalski_alerts` | Back-fill BOOM by streaming a Kowalski deployment's alerts. |
+
+Submission is single-flight per target, not per type: two ingests of the same
+catalog would race on the same collection and chunk state, but ingesting 2MASS
+should not block ingesting NED.
+
+**Every data-mutating binary is a task.** `src/bin/` holds the services
+(`api`, `scheduler`, `kafka_consumer`, `kafka_producer`, `task_worker`) and two
+tools that change nothing (`check_config`, `add_filter`).
+
+That includes the ones whose main use is iterative: `link_tracks` carries every
+threshold the tracklet and THOR searches take, because tuning them on a
+terminal is how a stored track ends up with parameters that live only in
+somebody's shell history. A tuning run sets `dry_run`, reads its numbers off
+the run's result, and writes nothing.
+
+That is the point the system was built for: there is no longer a binary an
+operator can run over SSH that mutates data without a record of who ran it, with
+what, under which release.
+
+### Adding a task type
+
+The whole point is that this should be *less* work than writing a binary and
+running it over SSH, not more. A new task is one file plus four lines of
+registration, and running it needs no shell on the production host.
+
+**1. Write the body.** Copy this skeleton into `src/tasks/<your_task>.rs`:
+
+```rust
+use super::context::TaskContext;
+use super::ledger::{MutationTarget, Operation};
+use crate::utils::enums::Survey;
+use mongodb::bson::doc;
+use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
+
+/// Stable identifier. Historical runs are read back by it, so it never changes.
+pub const TASK_TYPE: &str = "your_task";
+
+/// What a client may ask for. Every doc comment here becomes help text on the
+/// admin page's form, and the JSON Schema comes from `ToSchema`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct YourTaskParams {
+    pub survey: Survey,
+    #[serde(default = "default_batch_size")]
+    pub batch_size: usize,
+}
+
+fn default_batch_size() -> usize {
+    5_000
+}
+
+impl YourTaskParams {
+    pub fn validate_params(&self) -> Result<(), String> {
+        if self.batch_size == 0 {
+            return Err("batch_size must be greater than zero".to_string());
+        }
+        Ok(())
+    }
+}
+
+pub async fn run(
+    ctx: &TaskContext,
+    params: YourTaskParams,
+) -> Result<serde_json::Value, super::TaskError> {
+    params
+        .validate_params()
+        .map_err(super::TaskError::InvalidParams)?;
+    let db = ctx.db().clone();
+    let mut done: u64 = 0;
+
+    // ... your batch loop ...
+    //   ctx.is_canceled()  -> stop at a batch boundary and return TaskError::Canceled
+    //   ctx.progress(done, total, "…").await
+    //   ctx.info("…") / ctx.warn("…")  -> streamed to the admin page
+
+    ctx.record_mutation(
+        MutationTarget {
+            database: db.name().to_string(),
+            collection: format!("{}_alerts_aux", params.survey),
+            catalog: None,
+            survey: Some(params.survey.to_string().to_lowercase()),
+        },
+        Operation::Recompute,
+        doc! { "updated": done as i64 },
+    )
+    .await;
+
+    Ok(serde_json::json!({ "updated": done }))
+}
+```
+
+**2. Register it,** all in [`src/tasks/mod.rs`](https://github.com/boom-astro/boom/blob/main/src/tasks/mod.rs): a `pub mod`
+line, an entry in `TASKS`, an arm in `validate_params`, an arm in `dispatch`,
+and optionally one in `single_flight_key` if two concurrent runs would collide.
+Copy the `backfill_hpx` arms; they are the shortest. Forgetting an arm is caught
+by `every_registered_task_validates_and_dispatches`, so the test suite tells you
+rather than the admin page at 2am.
+
+**3. Run it locally.** `make dev` brings up a task worker under cargo-watch
+beside the API, so editing the body rebuilds it. The admin page at `/admin`
+lists every task with a form built from your params struct — no frontend work.
+By curl:
+
+```sh
+TOKEN=$(curl -s -X POST localhost:4000/auth \
+  -d "username=$ADMIN_USER&password=$ADMIN_PASSWORD" | jq -r .access_token)
+curl -s -X POST localhost:4000/tasks -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"task_type": "your_task", "params": {"survey": "ztf"}}'
+```
+
+**4. Run it against real data, from your branch.** This is the part that used to
+mean `scp` and a shell. On the deployment host, from your branch's checkout,
+rebuild the API and the task worker and restart just those two:
+
+```sh
+export BOOM_GIT_SHA=$(git rev-parse HEAD)
+docker compose --profile prod build api task-worker
+docker compose --profile prod up -d api task-worker
+```
+
+Both of them, because the API validates `task_type` against its own registry
+when you submit: a worker that knows your task and an API that does not gets you
+a 400, not a run. Everything else — consumers, schedulers, enrichment workers —
+keeps running the deployed release, so the pipeline is untouched. The API
+restart costs a few seconds of downtime for every client, which is the price of
+not needing a shell on the box.
+
+Then submit it from the admin page or the API as above. `BOOM_GIT_SHA` is
+compiled into the binaries, so the ledger entry names the commit your code came
+from without anyone writing it down. To run an image someone already built, set
+`BOOM_IMAGE` and `BOOM_PULL_POLICY=always` instead of building.
+
+Put both back on the release with `docker compose --profile prod up -d
+--force-recreate api task-worker` from a clean checkout.
+
+**What you get without asking**, and what the SSH habit could not give:
+
+- The task record: who submitted it, with which parameters, when it started and
+  finished, and which commit ran it.
+- Logs streamed while it runs, readable by whoever is watching rather than only
+  by whoever owns the terminal.
+- Cancellation at a safe point, and resumption if the worker is deployed over
+  mid-run.
+- A `data_mutations` entry saying what changed, so the next person asking "why
+  does this collection look like this" has an answer.
+
+### Porting a binary to a task type
+
+A task body needs a params struct, an arm in `dispatch` and `validate_params`,
+an entry in `TASKS`, and a cancellation check in its batch loop. The ones that
+drive their work through Valkey already have the resumability a task needs.
+
+`migrate_fp_flux` shows the shape. Three things change when a one-shot binary
+becomes a task, and all three are about no longer owning the process:
+
+- **`process::exit` becomes an error.** Exiting would kill the worker and every
+  other run on it, and leave this run holding a lease until it expired.
+- **The batch loop checks for cancellation**, at batch boundaries — an
+  `update_many` is atomic per document, so a boundary is the only point where
+  stopping leaves a state that is easy to describe.
+- **Progress goes to the run**, not to a terminal progress bar nobody is
+  watching.
+
+A panicking task fails its own run rather than taking the worker down: the
+worker catches unwinds at the dispatch boundary. That matters precisely because
+these bodies come from binaries where an `unwrap` on unexpected data was a
+reasonable way to stop.
+
+**A ported task leaves no binary behind.** `migrate_fp_flux` and `migrate_snr`
+were briefly kept as thin wrappers and are now gone, the same way `add_catalog`
+was: a binary is precisely the thing this system exists to replace, and leaving
+one available means the untracked path stays the easy one.
+
+That does mean these can only be run against a database the API and a worker can
+both reach. The escape hatch, if a migration ever has to run somewhere the task
+system cannot, is a task body called from a one-off binary — but that should be
+a deliberate, temporary addition rather than a standing wrapper.
+
+### `enrich_reprocess`
+
+`enrich_reprocess` **populates the queue and then drains it**, rather than only
+draining one something else filled. That is what closes the loop the binary left
+open, and it is also what makes completion well-defined: because the task owns
+the queue, `LLEN == 0` means done rather than "nobody has pushed anything yet".
+
+The queue is scoped to the run — `<survey>_enrichment_queue_reprocess_<task_id>`
+— precisely so that holds. An `input_queue` parameter overrides it for a queue
+filled out of band; the task then only drains, and never deletes it.
+
+Completion needs `LLEN == 0` twice in a row. A worker pops a batch of up to
+1000 before processing it, so a single zero can be observed while a batch is
+still in flight, and stopping there would count those alerts as reprocessed
+before they were.
+
+Selection is explicit rather than inferred: everything not enriched by the
+current set (`stale`, the one to use after changing a model or a formula),
+alerts missing a field, a candid range, or everything. See
+[alert-processing.md](./alert-processing.md)
+for how staleness is recorded and why `missing_field` cannot express it.
+
+### Credentials in parameters
+
+A task may take a connection URI — a copy between two clusters has to name both
+ends somehow. But parameters are stored on the run, rendered on the admin page,
+and copied into the ledger, so a URI carries a password into all three.
+
+The worker reads the real parameters from `tasks`. Everywhere they are read
+*back* they are redacted first: every API response, and the ledger, which is
+append-only and would otherwise archive a password permanently.
+
+Redaction masks the password and leaves the rest — `mongodb://alice:***@host/db`
+— because which host and database a run touched is most of why anyone reads the
+parameters back. It keys on the field *name* (`*_uri`, `uri`), not on whether a
+value looks like a URI, so a catalog source URL stays readable in full.
+
+A run's log lines and progress messages have no field names to key on, so they
+are masked by shape instead: anything of the form `scheme://user:password@host`
+is masked wherever it appears in the text, and a URI without credentials passes
+through whole. That happens as the message leaves the task, so it covers both
+the stored copy the admin page tails and the line that reaches Loki. It is
+there so that a task which writes a URI into a message does not put a password
+somewhere it is read back; the field-name rule above cannot see inside a
+sentence.
+
+## Running it in dev
+
+`make dev` brings up a `task-worker` alongside the API, under cargo-watch like
+the other services. It shares the dev MongoDB, so a run kicked off from the
+admin page is picked up within a couple of seconds.
+
+Two things about the dev container specifically:
+
+- It runs `uv sync --project /app/boompy --frozen` before starting, so boompy's
+  environment exists before the first ingest asks for it. The venv lives in its
+  own volume rather than being bind-mounted from the host — a host venv would
+  carry macOS wheels into a Debian image.
+- It shares the `target` volume with the api and scheduler containers, so all of
+  them serialize on one cargo build lock. A source edit therefore costs several
+  sequential rebuilds, and the API can be briefly unavailable while they drain.
+
+Catalog chunks are staged in the `catalog_data` volume, mounted at
+`/app/data/catalogs`.
+
+## Where the worker runs
+
+One `task-worker` service, running one task at a time. It needs more than a
+database connection:
+
+- **The ONNX models**, bind-mounted read-only at `/app/data/models`.
+  `enrich_reprocess` builds a real enrichment worker, which loads every model in
+  `ZTF_MODELS` and hashes it for the enrichment set stamp, so a worker without
+  them fails at startup rather than part way through a run.
+- **boompy**, baked into the image, for the catalog downloaders.
+- **Valkey**, which the migration and reprocessing tasks use to drive and resume
+  their work.
+
+On a GPU deployment, `docker-compose.cuda.yaml` moves the task worker onto the
+GPU image alongside the schedulers. That is not an optimisation: `enrich_reprocess`
+loads the models in-process rather than handing work to the enrichment workers,
+so on the CPU image it would re-enrich the archive without a GPU at all.
+
+The consequence is that a long catalog ingest occupies the GPU box for its
+duration, since a worker runs one task at a time and claims whatever is at the
+head of the queue. Acceptable while there is one worker; splitting CPU work from
+GPU work needs claim-time routing, which is listed below.
+
+## Collections
+
+| Collection | Holds |
+| --- | --- |
+| `tasks` | One document per run: params, status, actor, progress, lease, error. Also the queue. |
+| `task_logs` | Log lines, batched — one document per flush, not per line. The UI tails by asking for `seq` greater than the last it saw. |
+| `data_mutations` | The append-only ledger: what changed, who changed it, and under which release. |
+
+`task_logs` is a convenience copy for the UI; the full firehose still reaches
+Loki through the normal container-log path. It is capped per run so a task
+logging in a loop cannot fill the disk.
+
+**Logs expire; the ledger does not.** Each chunk carries an `expires_at` date
+and `task_logs` has a TTL index on it, so MongoDB's own background monitor
+deletes them — there is no cron job and no loop in the worker to go wrong. The
+window is 90 days normally and a year for a run that failed or was canceled,
+set when the outcome is recorded, since those are the logs somebody comes back
+to. Loki holds the same lines for seven days, so the two together mean: recent
+firehose in Loki, per-task record here, permanent record of *what changed* in
+`data_mutations`.
+
+The index uses `expireAfterSeconds: 0` against a per-document date rather than
+a fixed window against a creation date, which is what makes the two retention
+periods expressible at all. One consequence worth knowing: the field has to be
+a BSON date. The TTL monitor ignores a document whose indexed field is a
+number, and does so silently, so hanging the index off the numeric `ts` would
+look installed and delete nothing.
+
+## The ledger
+
+BOOM's scientific artifacts are a function of the *current state* of the
+database, and that state is the raw alert stream plus a sequence of out-of-band
+mutations. If those mutations live only in shell history, the artifacts derived
+from them cannot be reasoned about or reproduced. So every task that changes
+data appends to `data_mutations`, and `GET /data/mutations?collection=NED` reads
+it back, newest first.
+
+It is **append-only**. Entries are written when a mutation finishes, and there
+is no code path that updates or deletes one — a record that can be edited
+answers a much weaker question than "what happened".
+
+Each entry names the source (task run, migration, or pipeline), the actor
+qualified by realm, the trigger, the target collection, a coarse operation
+(`ingest`, `backfill`, `recompute`, `delete`, `index`, `drop`), and a free-form
+`details` document for row counts.
+
+`code_version` carries the package version and the commit, the latter compiled
+in from `BOOM_GIT_SHA`. When the build does not set it the field is **absent**
+rather than a placeholder: "we do not know which commit did this" is a real
+answer, and a fabricated one would make the ledger confidently wrong. Set it
+with `BOOM_GIT_SHA=$(git rev-parse HEAD)`; the Dockerfile takes it as a build
+arg.
+
+Writing a ledger entry is best-effort. A task that mutated data has already
+done so, and failing the run because the bookkeeping write failed would leave
+the data changed *and* the run marked failed — the worst of both. The failure is
+logged loudly instead.
+
+## The submission form
+
+The admin page renders a form for each task from the `params_schema` on
+`/task-types`. That schema is derived from the params struct's `ToSchema`
+derive, so it cannot drift from what the API will accept, and the help text
+under each field is the doc comment written on it — which is a reason to write
+them well.
+
+Adding a parameter to a task therefore puts it on the form with no frontend
+change. What the schema says about a field is what the form does with it:
+
+- **A blank field is omitted, not sent as zero or null.** The server then
+  applies the struct's `#[serde(default)]`. An empty number box becoming `0` is
+  a value nearly every `validate_params` here rejects — `num_workers` and
+  `batch_size` among them — and it would be rejected for a reason nobody asked
+  about.
+- **Numeric text is either the number it looks like or an error.** Not a prefix
+  of it: `1e9` and `2.5` in an integer box are reported next to the field, where
+  taking the leading digits would have run the task with `1` and `2`.
+- **`minimum` and `maximum` are applied.** They come from the same struct the
+  server validates against, so a value outside them is a 400 waiting to happen
+  and the form says so first. Declare them with `#[schema(minimum = …)]` where
+  `validate_params` has a bound, and the form enforces it for free.
+- **A closed set renders as a dropdown.** `survey`, and anything else that is
+  a Rust enum, arrives in the schema as `enum` and so cannot be mistyped. A `String` field over a closed set — a
+  catalog slug, say — does not, and comes back as a 400 listing what was
+  allowed; making it an enum is the better fix.
+
+A parameter the form cannot offer as a single input falls back to a JSON field
+for the whole task, rather than a half-working widget guessing at a shape. Two
+kinds reach that path: a tagged union — `enrich_reprocess`'s `selection` —
+which arrives as a multi-arm `oneOf`,
+and a struct or enum field, which arrives as a `$ref`. The `$ref` cannot be
+followed — [`schema_of`](https://github.com/boom-astro/boom/blob/main/src/tasks/mod.rs) serializes one type and keeps no
+definitions registry, so the reference dangles — which is why the fallback is
+keyed on recognizing it rather than on resolving it. A task with such a
+parameter is worth a look at `/docs` before it is submitted from the page.
+
+Note that `Option<T>` is *not* one of those: utoipa writes it either as a type
+pair like `["integer", "null"]` or as a two-arm `oneOf`, depending on `T`, and
+both stay on the form.
+
+## Access
+
+Admin-only, and both login realms are accepted: the BOOM API's `users` and
+Babamul's `babamul_users` both carry `is_admin`, and
+[`src/api/admin.rs`](https://github.com/boom-astro/boom/blob/main/src/api/admin.rs) is the one check. Babamul admins are
+declared in config as `babamul.admin_emails` and reconciled onto accounts at API
+startup — in both directions, so removing someone from the list revokes their
+access on the next restart rather than leaving a grant nobody remembers making.
+
+The actor recorded on a run is qualified by realm (`babamul:<id>`), because the
+two id spaces are unrelated and the point of recording it is being able to look
+the person up later.
+
+## API
+
+| Route | |
+| --- | --- |
+| `GET /task-types` | What this release can run, with a JSON Schema per task type |
+| `POST /tasks` | Submit a run |
+| `GET /tasks` | Runs, most recent first |
+| `GET /tasks/{id}` | One run |
+| `GET /tasks/{id}/logs?after_seq=` | Tail its logs |
+| `POST /tasks/{id}/cancel` | Request cancellation |
+| `GET /data/mutations?collection=&limit=` | What has been done to the data |
+
+## Scheduled tasks, when we build them
+
+The first candidate is the LSST cutout retention policy
+([#518](https://github.com/boom-astro/boom/issues/518)). Nothing here is built
+yet; this records what the current design already supports so that whoever
+picks it up does not have to re-derive it.
+
+**What is already in place.** A run carries `trigger` (`api` or `schedule`) and
+`Actor::system()`, both on the document from the start, so a scheduled run is
+distinguishable from one a person submitted rather than being attributed to
+whoever configured the schedule. Everything else a run gets — the lease and
+heartbeat, requeue after a lost worker, cancellation, streamed logs, progress,
+the `data_mutations` ledger entry — is keyed off the run rather than off what
+triggered it, so a scheduled run inherits all of it unchanged.
+
+**What is missing** is where a schedule is declared and the loop that fires it,
+plus two things worth getting right the first time.
+
+*Firing exactly once per tick.* Every task-worker in the fleet wakes at the same
+cron instant. `single_flight_key` does not solve this: it is a check-then-insert
+in the API handler, not an invariant of `queue::submit`, so a scheduler that
+enqueues directly bypasses it, and two schedulers racing would both pass the
+check anyway. The fix needs no leader election and no new index — give a
+scheduled run a deterministic id, `sched:{schedule}:{unix_fire_time}`, and let
+the `_id` uniqueness Mongo already enforces settle it. One worker inserts, the
+rest take a duplicate-key error and move on.
+
+*Missed ticks.* If the fleet was down across a fire time, maintenance work wants
+skip-to-next rather than one backfilled run per missed tick. The work is
+cumulative — a single run catches up on everything that accrued.
+
+**Where the schedule lives** is the open design question. Declaring it on
+`TaskSpec` keeps "may this run unattended" in code review; storing it in a
+collection lets an operator change it from the admin page, which is more in
+keeping with the rest of this system. The likely answer is both: the spec says a
+task is schedulable and gives a default cron, and the collection holds whether
+it is enabled and any override.
+
+**On #518 specifically:** it asks to *offload* cutouts to S3 after ~30 days, not
+to delete them — Babamul is meant to read the archived ones back. A TTL index
+would quietly destroy exactly the data the issue wants kept, so this is a task
+body rather than an index: a chunked, resumable copy-then-delete of the same
+shape as `catalog_ingest`, where each chunk is durable before the source rows go.
+`CutoutStorage` and the existing `copy_cutouts` task already cover most of the
+moving part. The scheduling is the small half; the offload is the work.
+
+## Not yet built
+
+- **Recurring runs.** See [Scheduled tasks](#scheduled-tasks-when-we-build-them)
+  above — the task record is ready for them, the loop that fires them is not.
+- **Ledger coverage beyond tasks.** `data_mutations` records task runs today.
+  Startup migrations and the live pipeline have `SourceKind` variants reserved
+  but do not write to it yet.
+- **Partitioned execution**, for tasks whose unit of work is a key range rather
+  than a chunk.
+- **Claim-time routing.** `claim_next` takes the oldest queued run regardless of
+  type, so every worker is interchangeable. Once there is more than one — a GPU
+  worker for `enrich_reprocess` and a CPU worker for everything else — a worker
+  needs to declare what it will accept and the claim filter needs to honour it.
+  The guard rail that comes with it is starvation: an allowlist that no worker
+  covers leaves a run queued forever, so the admin page would need to say a
+  queued run has no worker willing to take it.

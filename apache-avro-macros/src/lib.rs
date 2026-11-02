@@ -1,6 +1,6 @@
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
-use syn::{Fields, Item, ItemEnum, ItemStruct, parse_macro_input, spanned::Spanned};
+use syn::{Fields, Item, ItemEnum, ItemStruct, parse_macro_input, parse_quote, spanned::Spanned};
 
 #[proc_macro_attribute]
 pub fn serdavro(
@@ -159,7 +159,6 @@ fn serdavro_impl(item: &ItemStruct) -> syn::Result<TokenStream> {
     })
 }
 
-// the above didn't actually rename the enum variants, so we need to do it manually
 fn serdavro_enum_impl(item: &syn::ItemEnum) -> syn::Result<TokenStream> {
     let ident = &item.ident;
 
@@ -167,18 +166,20 @@ fn serdavro_enum_impl(item: &syn::ItemEnum) -> syn::Result<TokenStream> {
     let mut fake = item.clone();
     fake.ident = fake_ident.clone();
 
-    let (impl_generics, ty_generics, where_clause) = item.generics.split_for_impl();
-
-    // Collect rename pairs for enum variants (#[serde(rename = "...")])
+    if let Some(rule) = collect_rename_all(item) {
+        fake.attrs.push(parse_quote!(#[avro(rename_all = #rule)]));
+    }
     let variant_renames = collect_variant_renames(item)?;
-    let variant_renames_tokens: Vec<TokenStream> = variant_renames
-        .iter()
-        .map(|(from, to)| {
-            let f = proc_macro2::Literal::string(from);
-            let t = proc_macro2::Literal::string(to);
-            quote!((#f, #t))
-        })
-        .collect();
+    for variant in &mut fake.variants {
+        if let Some((_, to)) = variant_renames
+            .iter()
+            .find(|(from, _)| variant.ident == from)
+        {
+            variant.attrs.push(parse_quote!(#[avro(rename = #to)]));
+        }
+    }
+
+    let (impl_generics, ty_generics, where_clause) = item.generics.split_for_impl();
 
     Ok(quote! {
         const _: () = {
@@ -199,19 +200,6 @@ fn serdavro_enum_impl(item: &syn::ItemEnum) -> syn::Result<TokenStream> {
                     match fake_schema {
                         Schema::Enum(mut enum_schema) => {
                             enum_schema.name = Name::new(stringify!(#ident)).expect("Unable to parse schema name");
-
-                            // Apply renames to enum symbols
-                            let renames: &[(&str, &str)] = &[#(#variant_renames_tokens),*];
-
-                            for symbol in enum_schema.symbols.iter_mut() {
-                                for (from, to) in renames {
-                                    if symbol == from {
-                                        *symbol = to.to_string();
-                                        break;
-                                    }
-                                }
-                            }
-
                             Schema::Enum(enum_schema)
                         }
                         Schema::Ref { name } => {
@@ -368,6 +356,27 @@ fn collect_serde_avro_bytes_fields(item: &ItemStruct) -> syn::Result<Vec<String>
             "Only named fields are supported",
         )),
     }
+}
+
+fn collect_rename_all(item: &ItemEnum) -> Option<String> {
+    let mut rename_all: Option<String> = None;
+    for attr in &item.attrs {
+        if attr.path().is_ident("serde") {
+            let _ = attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("rename_all") {
+                    if let Ok(pbuf) = meta.value() {
+                        if let Ok(syn::Lit::Str(s)) = pbuf.parse::<syn::Lit>() {
+                            rename_all = Some(s.value());
+                        }
+                    }
+                } else if meta.input.peek(syn::Token![=]) {
+                    let _ = meta.value().and_then(|v| v.parse::<syn::Expr>());
+                }
+                Ok(())
+            });
+        }
+    }
+    rename_all
 }
 
 // Collect (orig, rename) pairs for enum variants that have `#[serde(rename = "...")]`.

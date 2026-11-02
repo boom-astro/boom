@@ -18,7 +18,12 @@ jobs:
     name: Build & Test
     runs-on: ubuntu-latest
     permissions: write-all
-    timeout-minutes: 30
+    # `cargo test --release` is around twenty minutes of this job and the rest
+    # is under two, so a thirty minute cap sat close enough to the typical run
+    # that an ordinarily slow runner was cancelled rather than reported. The
+    # ceiling is here to stop a hung test burning an hour, not to bound a
+    # healthy run.
+    timeout-minutes: 60
     strategy:
       matrix:
         cutouts_storage_type: [mongo, s3]
@@ -121,5 +126,19 @@ jobs:
         docker compose logs kafka-acl-init || true
         docker compose logs broker || true
         exit 1
+    # Seeded from our own release so the Kafka tests do not depend on
+    # ztf.uw.edu being up; download_alerts_from_archive returns early once the
+    # date's directory already holds avro files.
+    - name: Seed the archival alerts the Kafka tests replay
+      run: |
+        for date in 20231118 20240617; do
+          dir="data/alerts/ztf/public/$date"
+          mkdir -p "$dir"
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/ztf.tar.gz \
+            "https://github.com/boom-astro/boom/releases/download/test-data-v1/ztf_public_$date.tar.gz"
+          tar -xzf /tmp/ztf.tar.gz -C "$dir"
+          rm -f /tmp/ztf.tar.gz
+          echo "$date: $(find "$dir" -maxdepth 1 -name '*.avro' | wc -l | tr -d ' ') alerts"
+        done
     - name: Test BOOM
       run: PATH=/opt/kafka/bin:$PATH cargo test --release

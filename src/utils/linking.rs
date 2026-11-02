@@ -1,6 +1,7 @@
 //! Intra-night tracklet finding: group a night's unassociated detections into
 //! sets consistent with a single source moving at a constant on-sky rate.
 
+use crate::utils::sso_geometry::Site;
 use std::collections::HashSet;
 
 /// Mean of angles in degrees, taken on the circle.
@@ -32,10 +33,24 @@ pub fn night_of(jd: f64) -> i64 {
     (jd - 0.5).floor() as i64
 }
 
+fn night_offset(site: Option<&Site>) -> f64 {
+    site.map_or(0.5, |s| (-s.longitude_deg / 360.0).rem_euclid(1.0))
+}
+
+/// Split at local mean noon, numbered as Palomar's nights; `None` is `night_of`.
+pub fn night_at(jd: f64, site: Option<&Site>) -> i64 {
+    (jd - night_offset(site)).floor() as i64
+}
+
+pub fn night_start(night: i64, site: Option<&Site>) -> f64 {
+    night as f64 + night_offset(site)
+}
+
 /// One detection offered to the linker.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Detection {
     pub id: i64,
+    /// Mid-exposure, UTC.
     pub jd: f64,
     /// Degrees.
     pub ra: f64,
@@ -47,6 +62,18 @@ pub struct Detection {
     pub mag_err: Option<f64>,
     /// Filter as a single letter, for reporting.
     pub band: Option<char>,
+    /// Where it was observed from, when that is not the run's default site.
+    ///
+    /// A fit drawing on two observatories has to know which is which: the
+    /// parallax between them is arcseconds against a main-belt object, and
+    /// whole arcminutes against a near-Earth one.
+    pub site: Option<Site>,
+}
+
+impl Detection {
+    pub fn night(&self) -> i64 {
+        night_at(self.jd, self.site.as_ref())
+    }
 }
 
 /// Bounds a tracklet must satisfy to be believable.
@@ -131,6 +158,7 @@ pub struct Tracklet {
     /// Plane position at `jd_ref`, degrees.
     xi0: f64,
     eta0: f64,
+    site: Option<Site>,
 }
 
 impl Tracklet {
@@ -158,12 +186,17 @@ impl Tracklet {
             dec_center: dec,
             xi0: 0.0,
             eta0: 0.0,
+            site: None,
         }
     }
 
     /// Total on-sky rate, degrees/day.
     pub fn rate_deg_per_day(&self) -> f64 {
         self.ra_rate_deg_per_day.hypot(self.dec_rate_deg_per_day)
+    }
+
+    pub fn night(&self) -> i64 {
+        night_at(self.jd_ref, self.site.as_ref())
     }
 }
 
@@ -246,7 +279,11 @@ fn photometry_disagrees(a: &Detection, b: &Detection, cfg: &TrackletConfig) -> b
 }
 
 /// Fit constant motion to a set of detections, or `None` if it does not hold.
-fn fit_tracklet(dets: &[Detection], cfg: &TrackletConfig) -> Option<Tracklet> {
+///
+/// Public so a survey that publishes its own groupings -- CSS archives the
+/// tracklets its pipeline built -- can be fitted into the same representation
+/// the linker consumes, rather than having its grouping rediscovered here.
+pub fn fit_tracklet(dets: &[Detection], cfg: &TrackletConfig) -> Option<Tracklet> {
     if dets.len() < 2 {
         return None;
     }
@@ -303,6 +340,7 @@ fn fit_tracklet(dets: &[Detection], cfg: &TrackletConfig) -> Option<Tracklet> {
         dec_center: dec0,
         xi0: x0,
         eta0: y0,
+        site: dets[0].site,
     })
 }
 
@@ -377,7 +415,21 @@ pub fn find_tracklets(detections: &[Detection], cfg: &TrackletConfig) -> Vec<Tra
                     members.push(*d);
                 }
             }
-            members.sort_by(|p, q| p.jd.partial_cmp(&q.jd).unwrap_or(std::cmp::Ordering::Equal));
+            members.sort_by(|p, q| {
+                (p.jd - seed.jd_ref)
+                    .abs()
+                    .total_cmp(&(q.jd - seed.jd_ref).abs())
+            });
+            let (mut lo_jd, mut hi_jd) = (a.jd.min(b.jd), a.jd.max(b.jd));
+            members.retain(|d| {
+                let (lo, hi) = (lo_jd.min(d.jd), hi_jd.max(d.jd));
+                let fits = hi - lo <= cfg.max_span_days;
+                if fits {
+                    (lo_jd, hi_jd) = (lo, hi);
+                }
+                fits
+            });
+            members.sort_by(|p, q| p.jd.total_cmp(&q.jd));
             members.dedup_by_key(|d| d.id);
 
             if members.len() < cfg.min_detections {
@@ -450,6 +502,7 @@ mod tests {
                     mag: None,
                     mag_err: None,
                     band: None,
+                    site: None,
                 }
             })
             .collect()
@@ -548,6 +601,7 @@ mod tests {
             mag: None,
             mag_err: None,
             band: None,
+            site: None,
         });
         let found = find_tracklets(&dets, &TrackletConfig::default());
         assert_eq!(found.len(), 1);
@@ -613,6 +667,17 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_a_night_longer_than_the_window_still_yields_a_tracklet() {
+        let cfg = TrackletConfig::default();
+        let span = cfg.max_span_days;
+        let jds = [0.0, 0.367, 0.747, 0.787, 1.153].map(|f| 2_461_200.8 + f * span);
+        let dets = mover(291.7, 15.4, -0.12, 0.8, &jds, 1);
+
+        let found = find_tracklets(&dets, &cfg);
+        assert!(found.iter().any(|t| t.ids.len() >= 4), "{found:?}");
+    }
+
     fn at_mag(mag: f64, err: f64, band: char) -> Detection {
         Detection {
             id: 1,
@@ -622,6 +687,7 @@ mod tests {
             mag: Some(mag),
             mag_err: Some(err),
             band: Some(band),
+            site: None,
         }
     }
 

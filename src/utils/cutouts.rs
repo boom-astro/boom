@@ -601,10 +601,16 @@ pub struct MongoCutoutStorage {
     collection: mongodb::Collection<AlertCutout>,
 }
 
+/// The collection cutouts occupy when a deployment stores them in Mongo. Read
+/// and written through [`CutoutStorage`], which an S3 deployment points
+/// elsewhere; a caller naming the collection itself answers for one backend.
+pub fn mongo_collection_name(survey: &Survey) -> String {
+    format!("{}_alerts_cutouts", survey)
+}
+
 impl MongoCutoutStorage {
     pub fn new(db: mongodb::Database, survey: &Survey) -> Self {
-        let collection_name = format!("{}_alerts_cutouts", survey);
-        let collection = db.collection::<AlertCutout>(&collection_name);
+        let collection = db.collection::<AlertCutout>(&mongo_collection_name(survey));
         Self { collection }
     }
 

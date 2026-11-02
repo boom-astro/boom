@@ -6,8 +6,9 @@ use crate::utils::enums::Survey;
 use crate::utils::host::HostGalaxyAssociation;
 use crate::utils::lightcurves::{
     analyze_photometry, prepare_photometry, summarise_detections, Band, DetectionHistory,
-    EpisodeHistory, PerBandProperties, PhotometryMag, EPISODE_GAP_DAYS,
+    EpisodeHistory, PerBandProperties, PhotometryMag, EPISODE_GAP_DAYS, SNT,
 };
+use apache_avro_derive::AvroSchema;
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use tracing::{instrument, warn};
@@ -50,7 +51,7 @@ pub fn create_decam_alert_pipeline() -> Vec<Document> {
                     Some(vec![doc! {
                         "$gte": [
                             "$$x.snr",
-                            3.0
+                            SNT
                         ]
                     }]),
                 ),
@@ -104,6 +105,65 @@ impl DecamPhotometry {
     }
 }
 
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct DecamMatch {
+    pub prv_candidates: Vec<DecamPhotometry>,
+    pub fp_hists: Vec<DecamPhotometry>,
+}
+
+impl DecamMatch {
+    pub fn lightcurve(&self, jd: f64) -> Vec<PhotometryMag> {
+        self.prv_candidates
+            .iter()
+            .chain(&self.fp_hists)
+            .filter(|p| p.time <= jd)
+            .map(DecamPhotometry::to_photometry_mag)
+            .collect()
+    }
+}
+
+/// The pipeline must end with its `$project` stage.
+pub fn add_decam_match(mut pipeline: Vec<Document>) -> Vec<Document> {
+    let project_index = pipeline.len() - 1;
+    if let Ok(project) = pipeline[project_index].get_document_mut("$project") {
+        project.insert(
+            "decam_match",
+            doc! {
+                "$cond": {
+                    "if": { "$gt": [ { "$size": "$decam_aux" }, 0 ] },
+                    "then": {
+                        "prv_candidates": {
+                            "$ifNull": [{ "$arrayElemAt": [ "$decam_aux.prv_candidates", 0 ] }, []]
+                        },
+                        "fp_hists": {
+                            "$filter": {
+                                "input": {
+                                    "$ifNull": [{ "$arrayElemAt": [ "$decam_aux.fp_hists", 0 ] }, []]
+                                },
+                                "as": "x",
+                                "cond": { "$gte": [ "$$x.snr", SNT ] }
+                            }
+                        },
+                    },
+                    "else": null
+                }
+            },
+        );
+    }
+    pipeline.insert(
+        project_index,
+        doc! {
+            "$lookup": {
+                "from": "DECAM_alerts_aux",
+                "localField": "aux.aliases.DECAM.0",
+                "foreignField": "_id",
+                "as": "decam_aux"
+            }
+        },
+    );
+    pipeline
+}
+
 /// DECAM alert structure used to deserialize alerts
 /// from the database, used by the enrichment worker
 /// to compute features and ML scores
@@ -123,7 +183,7 @@ pub struct DecamAlertForEnrichment {
 
 /// DECAM alert properties computed during enrichment
 /// and inserted back into the alert document
-#[derive(Debug, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, serde::Deserialize, serde::Serialize, AvroSchema)]
 pub struct DecamAlertProperties {
     pub stationary: bool,
     /// Absent means never evaluated for a host, not evaluated and hostless.
@@ -265,6 +325,8 @@ impl DecamEnrichmentWorker {
                 .prv_candidates
                 .iter()
                 .map(|p| (p.time, p.snr.filter(|s| !s.is_nan()).map(|s| s < 0.0))),
+            // Every stored forced epoch carries a magnitude, so it is a detection.
+            alert.fp_hists.iter().map(|p| (p.time, None)),
             alert.candidate.jd,
             EPISODE_GAP_DAYS,
         );

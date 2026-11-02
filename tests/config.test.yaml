@@ -53,6 +53,10 @@ cutouts_storage:
   username: mongoadmin
   password: mongoadminsecret
   srv: false
+milvus:
+  # A test-only collection, so no test run can touch the one production searches.
+  collection:
+    name: boom_ztf_fusion_embeddings_test
 workers:
   ztf:
     command_interval: 500
@@ -98,6 +102,7 @@ workers:
       refresh_interval_minutes: 15
       max_match_rate: 5
       reference_night:
+      reference_window_days: 30
 crossmatch:
   ztf:
     PS1_DR1:

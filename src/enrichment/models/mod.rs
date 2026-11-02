@@ -1,10 +1,17 @@
 mod acai;
+pub mod applecider_postprocess;
 mod base;
 mod btsbot;
+mod cider;
 
 pub use acai::AcaiModel;
-pub use base::{load_model, load_model_on_device, Model, ModelError};
+pub use applecider_postprocess::AppleCiderOutputs;
+pub use base::{
+    load_model, load_model_on_device, load_model_on_device_with_cpu_fallback, FusionModel,
+    FusionOutputs, Model, ModelError,
+};
 pub use btsbot::BtsBotModel;
+pub use cider::CiderFusionModel;
 
 #[cfg(all(feature = "gpu", target_os = "linux"))]
 use villar_pso::gpu::{GpuContext, Stream};
@@ -17,6 +24,20 @@ use tracing::info;
 
 /// Workers round-robin over sets; more workers than GPUs share a set and its stream.
 const SESSIONS_PER_DEVICE: usize = 1;
+
+/// Same list that is hashed into the enrichment set, so stamps match what was loaded.
+fn model_path(field: &str) -> &'static str {
+    crate::enrichment::version::ZTF_MODELS
+        .iter()
+        .find(|m| m.field == field)
+        .map(|m| m.path)
+        .unwrap_or_else(|| panic!("{field} is not declared in ZTF_MODELS"))
+}
+
+#[cfg(test)]
+pub fn model_path_for_test(field: &str) -> &'static str {
+    model_path(field)
+}
 
 /// ONNX models shared across all enrichment worker threads via `Arc`.
 ///
@@ -36,6 +57,7 @@ pub struct SharedModels {
     pub acai_o: Mutex<AcaiModel>,
     pub acai_b: Mutex<AcaiModel>,
     pub btsbot: Mutex<BtsBotModel>,
+    pub cider: Mutex<cider::CiderFusionModel>,
     /// Villar-PSO context for this device; `None` for the CPU set. No mutex:
     /// `&self` methods with per-call buffers, and stream enqueue is thread-safe.
     #[cfg(feature = "gpu")]
@@ -76,42 +98,24 @@ impl SharedModels {
         #[cfg(not(all(feature = "gpu", target_os = "linux")))]
         let stream_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
 
-        let (acai_h, acai_n, acai_v, acai_o, acai_b, btsbot) = match device_id {
+        let (acai_h, acai_n, acai_v, acai_o, acai_b, btsbot, cider) = match device_id {
             Some(id) => (
-                AcaiModel::new_on_device(
-                    "data/models/acai_h.d1_dnn_20201130.onnx",
-                    id,
-                    stream_ptr,
-                )?,
-                AcaiModel::new_on_device(
-                    "data/models/acai_n.d1_dnn_20201130.onnx",
-                    id,
-                    stream_ptr,
-                )?,
-                AcaiModel::new_on_device(
-                    "data/models/acai_v.d1_dnn_20201130.onnx",
-                    id,
-                    stream_ptr,
-                )?,
-                AcaiModel::new_on_device(
-                    "data/models/acai_o.d1_dnn_20201130.onnx",
-                    id,
-                    stream_ptr,
-                )?,
-                AcaiModel::new_on_device(
-                    "data/models/acai_b.d1_dnn_20201130.onnx",
-                    id,
-                    stream_ptr,
-                )?,
-                BtsBotModel::new_on_device("data/models/btsbot-v2.0.0.onnx", id, stream_ptr)?,
+                AcaiModel::new_on_device(model_path("acai_h"), id, stream_ptr)?,
+                AcaiModel::new_on_device(model_path("acai_n"), id, stream_ptr)?,
+                AcaiModel::new_on_device(model_path("acai_v"), id, stream_ptr)?,
+                AcaiModel::new_on_device(model_path("acai_o"), id, stream_ptr)?,
+                AcaiModel::new_on_device(model_path("acai_b"), id, stream_ptr)?,
+                BtsBotModel::new_on_device(model_path("btsbot"), id, stream_ptr)?,
+                cider::CiderFusionModel::new_on_device(model_path("cider"), id)?,
             ),
             None => (
-                AcaiModel::new("data/models/acai_h.d1_dnn_20201130.onnx")?,
-                AcaiModel::new("data/models/acai_n.d1_dnn_20201130.onnx")?,
-                AcaiModel::new("data/models/acai_v.d1_dnn_20201130.onnx")?,
-                AcaiModel::new("data/models/acai_o.d1_dnn_20201130.onnx")?,
-                AcaiModel::new("data/models/acai_b.d1_dnn_20201130.onnx")?,
-                BtsBotModel::new("data/models/btsbot-v2.0.0.onnx")?,
+                AcaiModel::new(model_path("acai_h"))?,
+                AcaiModel::new(model_path("acai_n"))?,
+                AcaiModel::new(model_path("acai_v"))?,
+                AcaiModel::new(model_path("acai_o"))?,
+                AcaiModel::new(model_path("acai_b"))?,
+                BtsBotModel::new(model_path("btsbot"))?,
+                cider::CiderFusionModel::new(model_path("cider"))?,
             ),
         };
 
@@ -142,6 +146,7 @@ impl SharedModels {
             acai_o: Mutex::new(acai_o),
             acai_b: Mutex::new(acai_b),
             btsbot: Mutex::new(btsbot),
+            cider: Mutex::new(cider),
             #[cfg(feature = "gpu")]
             gpu_ctx,
             #[cfg(all(feature = "gpu", target_os = "linux"))]

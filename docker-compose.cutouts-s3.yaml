@@ -73,9 +73,13 @@ services:
     <<: *s3_cutouts_env
   consumer-lsst:
     <<: *s3_cutouts_env
+  consumer-winter:
+    <<: *s3_cutouts_env
   scheduler-ztf:
     <<: *s3_cutouts_env
   scheduler-lsst:
+    <<: *s3_cutouts_env
+  scheduler-winter:
     <<: *s3_cutouts_env
 
   # Dedicated Valkey instance for the cutout cache. Kept separate from the main

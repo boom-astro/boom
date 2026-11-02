@@ -1,6 +1,7 @@
 use super::STATS_COLLECTION;
 use crate::api::catalogs::is_catalog_name_visible;
 use crate::api::models::response;
+use crate::api::routes::babamul::{BabamulAcl, BabamulUser};
 use crate::conf::AppConfig;
 use actix_web::{get, web, HttpResponse};
 use chrono::Utc;
@@ -11,7 +12,7 @@ use std::collections::HashSet;
 use utoipa::ToSchema;
 
 /// Surveys whose alert collections are reported, and the collections each one owns.
-const ALERT_SURVEYS: [&str; 2] = ["ZTF", "LSST"];
+const ALERT_SURVEYS: [&str; 4] = ["ZTF", "LSST", "DECAM", "WINTER"];
 const ALERT_COLLECTION_SUFFIXES: [&str; 3] = ["alerts", "alerts_aux", "alerts_cutouts"];
 
 pub(super) const COLLECTION_STATS_CACHE_KEY: &str = "collection_stats";
@@ -84,6 +85,7 @@ pub struct CollectionStats {
 )]
 #[get("/stats/collections")]
 pub async fn get_collection_stats(
+    current_user: Option<web::ReqData<BabamulUser>>,
     query: web::Query<CollectionStatsQuery>,
     db: web::Data<Database>,
     config: web::Data<AppConfig>,
@@ -91,6 +93,8 @@ pub async fn get_collection_stats(
     let include_count = query.count.unwrap_or(false);
     let include_size = query.size.unwrap_or(false);
     let now_ts = Utc::now().timestamp() as f64;
+    let sees_winter = current_user.is_some_and(|user| user.has_acl(BabamulAcl::Winter));
+    let visible = |entry: &CollectionEntry| sees_winter || !entry.name.starts_with("WINTER_");
 
     let collection_names = match db.list_collection_names().await {
         Ok(c) => c,
@@ -141,6 +145,7 @@ pub async fn get_collection_stats(
                 let collections = cached
                     .collections
                     .into_iter()
+                    .filter(visible)
                     .map(|c| CollectionEntry {
                         name: c.name,
                         count: if include_count { c.count } else { None },
@@ -243,6 +248,7 @@ pub async fn get_collection_stats(
 
     let collections: Vec<CollectionEntry> = collections
         .into_iter()
+        .filter(visible)
         .map(|c| CollectionEntry {
             name: c.name,
             count: if include_count { c.count } else { None },
