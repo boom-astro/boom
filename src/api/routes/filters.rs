@@ -1875,6 +1875,7 @@ async fn cross_matches_field(
         let rows = async {
             db.collection::<Document>(catalog.collection_name())
                 .find(doc! {})
+                .sort(doc! { "_id": 1 })
                 .projection(catalog.projection.clone())
                 .limit(CATALOG_SAMPLE_SIZE)
                 .await?
@@ -1901,7 +1902,7 @@ async fn cross_matches_field(
                 let avro_type = match types.iter().flatten().next() {
                     Some(t) if types.iter().all(Option::is_some) => t.clone(),
                     Some(t) => serde_json::json!(["null", t]),
-                    None => serde_json::json!("null"),
+                    None => serde_json::json!(["null", "double", "string", "boolean"]),
                 };
                 serde_json::json!({ "name": key, "type": avro_type })
             })
