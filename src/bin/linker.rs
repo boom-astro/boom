@@ -15,6 +15,9 @@
 //!
 //! The last night it finished is recorded in the database, so a restart does
 //! not search it again, and a night it could not finish is retried.
+//!
+//! With `linker.fast_live_every_minutes`, the fast pass alone also reruns on
+//! the night in progress while the linker waits for it to end.
 
 use boom::conf::{load_dotenv, AppConfig, LinkerConfig};
 use boom::utils::discovery::{
@@ -76,6 +79,17 @@ fn last_finished_night(jd: f64, run_after_utc_hour: u32) -> i64 {
 /// When `night` counts as over, JD.
 fn finished_at(night: i64, run_after_utc_hour: u32) -> f64 {
     night as f64 + 0.5 + run_after_utc_hour as f64 / 24.0
+}
+
+fn live(cfg: &LinkerConfig) -> LinkerConfig {
+    LinkerConfig {
+        window_nights: cfg.fast_window_nights,
+        link: false,
+        thor: false,
+        attach: false,
+        recall: false,
+        ..cfg.clone()
+    }
 }
 
 /// The `nights` nights ending with `night`: the window's first JD and its
@@ -542,9 +556,16 @@ async fn main() {
     if let Some(night) = done {
         info!(night, "resuming after the last finished night");
     }
+    let live_cfg = live(&cfg);
+    let live_every = (cfg.fast && cfg.fast_live_every_minutes > 0)
+        .then(|| Duration::from_secs(cfg.fast_live_every_minutes as u64 * 60));
     loop {
         let night = last_finished_night(now_jd(), cfg.run_after_utc_hour);
         let wait = if done.is_some_and(|d| d >= night) {
+            if live_every.is_some() {
+                info!(night = night + 1, "fast pass over the night in progress");
+                run_night(&db, &live_cfg, night + 1, &stop).await;
+            }
             let days = (finished_at(night + 1, cfg.run_after_utc_hour) - now_jd()).max(0.0);
             info!(
                 next_night = night + 1,
@@ -552,7 +573,8 @@ async fn main() {
                 "waiting for the next night to end"
             );
             // A minute late, so the night is over by any clock's reckoning.
-            Duration::from_secs_f64(days * 86_400.0 + 60.0)
+            let left = Duration::from_secs_f64(days * 86_400.0 + 60.0);
+            live_every.map_or(left, |every| every.min(left))
         } else if run_night(&db, &cfg, night, &stop).await {
             record_night(&db, night).await;
             done = Some(night);
