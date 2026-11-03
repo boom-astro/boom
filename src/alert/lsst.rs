@@ -1091,19 +1091,23 @@ struct AlertAuxForUpdate {
     pub version: Option<i32>,
 }
 
-fn first_detection_jd(
+fn detection_history(
     prv_candidates: &[LsstPrvCandidate],
     existing_aux: Option<&AlertAuxForUpdate>,
-) -> Option<f64> {
+    jd: f64,
+) -> (Option<f64>, i32) {
     let stored = existing_aux
         .into_iter()
         .flat_map(|aux| aux.prv_candidates.iter().map(|pc| pc.jd));
-    prv_candidates
+    let mut jds: Vec<f64> = prv_candidates
         .iter()
         .map(|pc| pc.jd)
         .chain(stored)
-        .filter(|jd| jd.is_finite())
-        .reduce(f64::min)
+        .filter(|pc_jd| pc_jd.is_finite() && *pc_jd <= jd)
+        .collect();
+    jds.sort_by(f64::total_cmp);
+    jds.dedup();
+    (jds.first().copied(), jds.len() as i32)
 }
 
 pub struct LsstAlertWorker {
@@ -1410,10 +1414,15 @@ impl AlertWorker for LsstAlertWorker {
 
         let existing_alert_aux = self.get_existing_aux(&object_id).await?;
 
-        if candidate.jdstarthist.is_none() {
-            candidate.jdstarthist =
-                first_detection_jd(&prv_candidates, existing_alert_aux.as_ref());
-        }
+        // Rubin's nDiaSources and firstDiaSourceMjdTai only cover the last 12 months
+        let (first_jd, ndethist) =
+            detection_history(&prv_candidates, existing_alert_aux.as_ref(), candidate.jd);
+        candidate.jdstarthist = candidate
+            .jdstarthist
+            .into_iter()
+            .chain(first_jd)
+            .reduce(f64::min);
+        candidate.ndethist = Some(ndethist);
 
         let alert = LsstAlert {
             candid,
