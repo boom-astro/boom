@@ -48,6 +48,34 @@ pub struct StoredHostCandidate {
     pub photometry: Option<HostPhotometry>,
 }
 
+#[serdavro]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
+pub struct HostSummary {
+    pub name: Option<String>,
+    pub catalog: Option<String>,
+    pub z: Option<f64>,
+    pub dist_mpc: Option<f64>,
+    pub dist_mpc_method: Option<String>,
+    pub sep_arcsec: f64,
+    pub sep_kpc: Option<f64>,
+    pub d_dlr: f64,
+}
+
+impl From<&StoredHostCandidate> for HostSummary {
+    fn from(host: &StoredHostCandidate) -> Self {
+        Self {
+            name: host.objname.clone(),
+            catalog: host.catalog.clone(),
+            z: host.z,
+            dist_mpc: host.dist_mpc,
+            dist_mpc_method: host.dist_mpc_method.clone(),
+            sep_arcsec: host.sep_arcsec,
+            sep_kpc: host.sep_kpc,
+            d_dlr: host.d_dlr,
+        }
+    }
+}
+
 /// Host association for one object, as stored under `aux.host_galaxy`.
 #[serdavro]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
