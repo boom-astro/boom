@@ -46,6 +46,10 @@ pub struct HostGalaxyConfig {
     /// Cross-match catalog searched at the host's position when no Legacy row is on it.
     pub ps1_catalog: String,
     pub photometry_match_arcsec: f64,
+    /// Cross-match catalog of spectra whose redshift replaces a photometric one.
+    pub desi_catalog: String,
+    /// Largest offset between a spectrum and the galaxy centre, arcsec.
+    pub spectrum_match_arcsec: f64,
 }
 
 impl Default for HostGalaxyConfig {
@@ -71,6 +75,8 @@ impl Default for HostGalaxyConfig {
             isophote_mag: super::sersic::MU_25,
             ps1_catalog: "PS1_DR2".to_string(),
             photometry_match_arcsec: 2.0,
+            desi_catalog: "DESI_DR1".to_string(),
+            spectrum_match_arcsec: 1.0,
         }
     }
 }
