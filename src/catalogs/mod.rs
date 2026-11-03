@@ -75,6 +75,10 @@ pub enum Reader {
     /// Legacy Survey point-source scores, staged gzipped JSONL exported from
     /// BOOM's own copy.
     Lspsc,
+    Erass1,
+    FiveXmm,
+    TwoSxps,
+    FourFgl,
 }
 
 /// Where a catalog's files come from, which decides whether BOOM may delete
@@ -258,6 +262,50 @@ pub const CATALOGS: &[CatalogDef] = &[
                       it. See docs/catalogs.md.",
         reader: Reader::Lspsc,
         source: Source::Staged,
+        aliases: &[],
+    },
+    CatalogDef {
+        id: "erass1-main",
+        collection: "eRASS1_Main",
+        title: "eRASS1 Main",
+        description: "eROSITA-DE DR1 X-ray sources detected in 0.2-2.3 keV, with fluxes, \
+                      band rates, extent and detection likelihood. German half of the sky \
+                      only (Galactic longitude 180 to 360 degrees). One table, converted from \
+                      FITS.",
+        reader: Reader::Erass1,
+        source: Source::Fetched,
+        aliases: &[],
+    },
+    CatalogDef {
+        id: "5xmm-dr15",
+        collection: "5XMM_DR15",
+        title: "5XMM-DR15",
+        description: "XMM-Newton serendipitous X-ray sources, one row per unique source, with \
+                      fluxes, hardness ratios, variability and CLASSX classifications. One \
+                      table, converted from FITS.",
+        reader: Reader::FiveXmm,
+        source: Source::Fetched,
+        aliases: &[],
+    },
+    CatalogDef {
+        id: "2sxps",
+        collection: "2SXPS",
+        title: "2SXPS",
+        description: "Swift-XRT point sources, clean subset, with count rates, hardness \
+                      ratios, fluxes and variability probabilities. One table, converted from \
+                      FITS.",
+        reader: Reader::TwoSxps,
+        source: Source::Fetched,
+        aliases: &[],
+    },
+    CatalogDef {
+        id: "4fgl-dr4",
+        collection: "4FGL_DR4",
+        title: "Fermi-LAT 4FGL-DR4",
+        description: "Gamma-ray sources from 14 years of Fermi-LAT, with 95% error ellipses, \
+                      fluxes, variability and associations. One table, converted from FITS.",
+        reader: Reader::FourFgl,
+        source: Source::Fetched,
         aliases: &[],
     },
 ];
@@ -818,6 +866,10 @@ async fn ingest_file(
         Reader::PanStarrs => Ok(arrow::ingest_parquet::<types::PanStarrs>(inserter, path).await?),
         Reader::LsDr9 => Ok(arrow::ingest_parquet::<types::LsDr9>(inserter, path).await?),
         Reader::Lspsc => Ok(jsonl::ingest_jsonl::<types::Lspsc>(inserter, path).await?),
+        Reader::Erass1 => Ok(arrow::ingest_parquet::<types::Erass1>(inserter, path).await?),
+        Reader::FiveXmm => Ok(arrow::ingest_parquet::<types::FiveXmm>(inserter, path).await?),
+        Reader::TwoSxps => Ok(arrow::ingest_parquet::<types::TwoSxps>(inserter, path).await?),
+        Reader::FourFgl => Ok(arrow::ingest_parquet::<types::FourFgl>(inserter, path).await?),
     }
 }
 
@@ -1160,7 +1212,7 @@ pub const WITHOUT_DEFINITIONS: &[(&str, &str)] = &[
     (
         "TNS",
         "the Transient Name Server is a live, credentialed feed rather than an archival \
-         download, and is populated outside the catalog ingest path",
+         download, kept current by the tns_sync task instead of the catalog ingest path",
     ),
 ];
 

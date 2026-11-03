@@ -14,6 +14,16 @@ use crate::utils::enums::Survey;
 #[error("failed to create index")]
 pub struct CreateIndexError(#[from] mongodb::error::Error);
 
+pub fn is_duplicate_key(error: &mongodb::error::Error) -> bool {
+    match &*error.kind {
+        mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(e)) => {
+            e.code == 11000
+        }
+        mongodb::error::ErrorKind::Command(e) => e.code == 11000,
+        _ => false,
+    }
+}
+
 pub async fn create_index(
     collection: &Collection<Document>,
     index: Document,

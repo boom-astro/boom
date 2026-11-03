@@ -1,10 +1,13 @@
 import {
   DESI_DR1_FOOTPRINT,
+  ERASS1_FOOTPRINT,
   GALEX_FOOTPRINT,
   LEGACY_SURVEYS_FOOTPRINT,
   LSDR10_FOOTPRINT,
   MILLIQUAS_FOOTPRINT,
   NED_FOOTPRINT,
+  SXPS_FOOTPRINT,
+  XMM_DR15_FOOTPRINT,
 } from "@/lib/footprints";
 
 const EDGE_SOFTNESS = 1.5;
@@ -93,6 +96,28 @@ export const CATALOGS: Catalog[] = [
     footprint: { raster: MILLIQUAS_FOOTPRINT },
   },
   { id: "VSX", name: "VSX", description: "Known variable stars (AAVSO)", extent: "All sky", footprint: {} },
+  {
+    id: "eRASS1_Main",
+    name: "eRASS1",
+    description: "eROSITA X-ray sources",
+    extent: "Galactic longitude 180° to 360°",
+    footprint: { raster: ERASS1_FOOTPRINT },
+  },
+  {
+    id: "5XMM_DR15",
+    name: "5XMM-DR15",
+    description: "XMM-Newton X-ray sources",
+    extent: "Pointed fields",
+    footprint: { raster: XMM_DR15_FOOTPRINT },
+  },
+  {
+    id: "2SXPS",
+    name: "2SXPS",
+    description: "Swift-XRT X-ray sources",
+    extent: "Pointed fields",
+    footprint: { raster: SXPS_FOOTPRINT },
+  },
+  { id: "4FGL_DR4", name: "4FGL-DR4", description: "Fermi-LAT gamma-ray sources", extent: "All sky", footprint: {} },
   { id: "TNS", name: "TNS", description: "Reported transients", extent: "All sky", footprint: {} },
 ];
 

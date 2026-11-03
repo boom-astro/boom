@@ -317,6 +317,20 @@ linker:
   fast_live_every_minutes: 60 # also rerun the fast pass on the night in progress, 0 is off
   fast_single_night: true # also store a night's lone fast tracklets scoring fast_min_neo_score or more
   fast_min_neo_score: 90.0 # digest2 NEO score, 0 to 100
+tns:
+  base_url: "https://www.wis-tns.org"
+  bot_id: "" # BOOM_TNS__BOT_ID, BOOM_TNS__BOT_NAME, BOOM_TNS__API_KEY; nothing is scheduled without all three
+  bot_name: ""
+  api_key: ""
+  sync_every_minutes: 60 # 0 is off
+  full_sync_every_hours: 24
+  photometry:
+    every_minutes: 360 # 0 is off
+    max_distance_mpc: 200.0
+    max_age_days: 60.0
+    refresh_hours: 24.0
+    max_objects: 250
+# Off until each is ingested on this deployment, see docs/catalogs.md.
 crossmatch:
   ztf:
     Gaia_DR3:
@@ -590,6 +604,10 @@ crossmatch:
         w2mpro: 1
         w3mpro: 1
         w4mpro: 1
+    eRASS1_Main: null
+    5XMM_DR15: null
+    2SXPS: null
+    4FGL_DR4: null
   lsst:
     LSPSC:
       radius: 30.0 # 30 arcseconds
@@ -872,6 +890,10 @@ crossmatch:
         w2mpro: 1
         w3mpro: 1
         w4mpro: 1
+    eRASS1_Main: null
+    5XMM_DR15: null
+    2SXPS: null
+    4FGL_DR4: null
   decam:
     LSPSC:
       radius: 30.0 # 30 arcseconds
@@ -1154,6 +1176,10 @@ crossmatch:
         w2mpro: 1
         w3mpro: 1
         w4mpro: 1
+    eRASS1_Main: null
+    5XMM_DR15: null
+    2SXPS: null
+    4FGL_DR4: null
   winter:
     Gaia_DR3:
       radius: 2.0 # 2 arcseconds
@@ -1426,6 +1452,10 @@ crossmatch:
         w2mpro: 1
         w3mpro: 1
         w4mpro: 1
+    eRASS1_Main: null
+    5XMM_DR15: null
+    2SXPS: null
+    4FGL_DR4: null
     watchlist_wtp:
       radius: 2.75 # 2.75 arcseconds, one WISE pixel
       use_distance: false
