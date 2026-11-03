@@ -1,7 +1,8 @@
-// Client for BOOM's admin surface: catalog drift and the task system.
+// Client for BOOM's admin surface: users, catalog and enrichment drift, and
+// the task system.
 //
-// These routes live on the main API scope (`/api/...`) rather than under
-// `/api/babamul`, but they accept the same token the Client already holds --
+// User management is under `/api/babamul`; everything else is on the main API
+// scope (`/api/...`) but accepts the same token the client already holds --
 // the API middleware resolves either realm, so the admin page needs no second
 // login. See docs/task-system.md.
 import { fetchWithAuth, parseResponseJson, unwrapData } from "./api";
@@ -123,8 +124,11 @@ export type TaskLogLine = { ts: number; level: string; message: string };
 export type TaskLogChunk = { task_id: string; seq: number; ts: number; lines: TaskLogLine[] };
 
 /** A run that is not finished, and so is worth polling. */
+/** The statuses a run can still change from. */
+export const ACTIVE_STATUSES: TaskStatus[] = ["queued", "running"];
+
 export function isActive(run: Task): boolean {
-  return run.status === "queued" || run.status === "running";
+  return ACTIVE_STATUSES.includes(run.status);
 }
 
 /**
@@ -146,6 +150,13 @@ export class ApiRequestError extends Error {
     this.status = status;
     this.data = data;
   }
+}
+
+/** The run a single-flight conflict carries, if that is what this failure is. */
+export function conflictingRun(e: unknown): Task | null {
+  if (!(e instanceof ApiRequestError) || e.status !== 409) return null;
+  const run = e.data;
+  return run && typeof run === "object" && "_id" in run ? (run as Task) : null;
 }
 
 /** The API's envelope: a message written to be shown, and the payload. */
@@ -320,4 +331,50 @@ export function cancelTaskRun(runId: string): Promise<string> {
     { method: "POST" },
     null,
   ).then((envelope) => envelope.message || "Cancellation requested.");
+}
+
+export type AdminUser = {
+  id: string;
+  username: string;
+  email: string;
+  name: string | null;
+  created_at: number;
+  is_activated: boolean;
+  is_admin: boolean;
+  acls: string[];
+};
+
+export type AdminUsersPage = { users: AdminUser[]; total: number; available_acls: string[] };
+
+export function fetchAdminUsers(
+  search: string,
+  limit: number,
+  offset: number,
+): Promise<AdminUsersPage> {
+  const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+  if (search.trim()) params.set("search", search.trim());
+  return request<AdminUsersPage>(`/babamul/admin/users?${params}`, undefined, {
+    users: [],
+    total: 0,
+    available_acls: [],
+  });
+}
+
+export type AdminUserPatch = { is_admin?: boolean; grant_acls?: string[]; revoke_acls?: string[] };
+
+export async function updateAdminUser(id: string, patch: AdminUserPatch): Promise<AdminUser> {
+  const updated = await request<AdminUser | null>(
+    `/babamul/admin/users/${encodeURIComponent(id)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    },
+    null,
+  );
+  // An unreadable body means the table cannot show what the change landed as.
+  if (!updated || typeof updated.id !== "string") {
+    throw new Error("The change was saved but the response could not be read. Reload to see it.");
+  }
+  return updated;
 }
