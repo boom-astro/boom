@@ -101,7 +101,7 @@ pub async fn run(
     let src_db = connect(&params.src_uri).await?;
     let dst_db = connect(&params.dst_uri).await?;
 
-    let collection_name = format!("{}_alerts_cutouts", params.survey);
+    let collection_name = crate::utils::cutouts::mongo_collection_name(&params.survey);
     let src = src_db.collection::<mongodb::bson::Document>(&collection_name);
     let dst = dst_db.collection::<mongodb::bson::Document>(&collection_name);
 

@@ -2,7 +2,8 @@
 //! sets consistent with a single source moving at a constant on-sky rate.
 
 use crate::utils::sso_geometry::Site;
-use std::collections::HashSet;
+use rayon::prelude::*;
+use std::collections::{HashMap, HashSet};
 
 /// Mean of angles in degrees, taken on the circle.
 ///
@@ -344,6 +345,29 @@ pub fn fit_tracklet(dets: &[Detection], cfg: &TrackletConfig) -> Option<Tracklet
     })
 }
 
+struct Exposure {
+    jd: f64,
+    decs: Vec<f64>,
+    pos: Vec<usize>,
+}
+
+fn exposures(detections: &[Detection], order: &[usize]) -> Vec<Exposure> {
+    let mut by_jd: HashMap<u64, Vec<usize>> = HashMap::new();
+    for (p, &k) in order.iter().enumerate() {
+        by_jd.entry(detections[k].jd.to_bits()).or_default().push(p);
+    }
+    let mut out: Vec<Exposure> = by_jd
+        .into_iter()
+        .map(|(bits, pos)| Exposure {
+            jd: f64::from_bits(bits),
+            decs: pos.iter().map(|&p| detections[order[p]].dec).collect(),
+            pos,
+        })
+        .collect();
+    out.sort_by(|a, b| a.jd.total_cmp(&b.jd));
+    out
+}
+
 /// Find every tracklet supported by `detections`, longest first.
 ///
 /// Seeds on pairs that could be one mover, grows each seed by attaching
@@ -365,81 +389,115 @@ pub fn find_tracklets(detections: &[Detection], cfg: &TrackletConfig) -> Vec<Tra
 
     let max_sep = cfg.max_rate_deg_per_day * cfg.max_span_days;
     let match_radius = cfg.match_radius_arcsec / 3600.0;
-    // Declinations in `order`, so growth can binary-search the same band the
-    // pair search sweeps rather than rescanning every detection per seed.
-    let sorted_decs: Vec<f64> = order.iter().map(|&k| detections[k].dec).collect();
-    let mut candidates: Vec<Tracklet> = Vec::new();
+    let far = (max_sep.to_radians() / 2.0).sin() * (1.0 + 1e-6);
+    let root_cos: Vec<f64> = detections
+        .iter()
+        .map(|d| d.dec.to_radians().cos().max(0.0).sqrt())
+        .collect();
+    let exposures = exposures(detections, &order);
+    let slack = 1e-6;
 
-    for (oi, &i) in order.iter().enumerate() {
-        for &j in order[oi + 1..].iter() {
-            let (a, b) = (&detections[i], &detections[j]);
-            if b.dec - a.dec > max_sep {
-                break;
-            }
-            let dt = (b.jd - a.jd).abs();
-            if dt < cfg.min_pair_dt_days || dt > cfg.max_span_days {
-                continue;
-            }
-            // Before the trigonometry, since it rejects a good share of pairs.
-            if photometry_disagrees(a, b, cfg) {
-                continue;
-            }
-            let sep = angular_separation_deg(a.ra, a.dec, b.ra, b.dec);
-            if sep * 3600.0 < cfg.min_arc_arcsec {
-                continue;
-            }
-            let rate = sep / dt;
-            if rate < cfg.min_rate_deg_per_day || rate > cfg.max_rate_deg_per_day {
-                continue;
-            }
-
-            let Some(seed) = fit_tracklet(&[*a, *b], cfg) else {
-                continue;
-            };
-            let mut members = vec![*a, *b];
-            // A member sits within `match_radius` of the seed line, which over
-            // the window reaches at most `max_sep` from the pair in latitude.
-            let margin = max_sep + match_radius;
-            let lo = sorted_decs.partition_point(|&x| x < a.dec.min(b.dec) - margin);
-            let hi = sorted_decs.partition_point(|&x| x <= a.dec.max(b.dec) + margin);
-            for &k in &order[lo..hi] {
-                let d = &detections[k];
-                if k == i || k == j || (d.jd - seed.jd_ref).abs() > cfg.max_span_days {
+    let mut candidates: Vec<Tracklet> = order
+        .par_iter()
+        .enumerate()
+        .flat_map_iter(|(oi, &i)| {
+            let mut found = Vec::new();
+            for &j in order[oi + 1..].iter() {
+                let (a, b) = (&detections[i], &detections[j]);
+                if b.dec - a.dec > max_sep {
+                    break;
+                }
+                let dt = (b.jd - a.jd).abs();
+                if dt < cfg.min_pair_dt_days || dt > cfg.max_span_days {
                     continue;
                 }
-                if photometry_disagrees(a, d, cfg) {
+                let dra = (a.ra - b.ra).abs().rem_euclid(360.0);
+                // Haversine with sin(x) >= 2x/pi: a lower bound on the separation.
+                if root_cos[i] * root_cos[j] * dra.min(360.0 - dra).to_radians()
+                    / std::f64::consts::PI
+                    > far
+                {
                     continue;
                 }
-                let (pra, pdec) = predict(&seed, d.jd);
-                if angular_separation_deg(d.ra, d.dec, pra, pdec) <= match_radius {
-                    members.push(*d);
+                // Before the trigonometry, since it rejects a good share of pairs.
+                if photometry_disagrees(a, b, cfg) {
+                    continue;
                 }
-            }
-            members.sort_by(|p, q| {
-                (p.jd - seed.jd_ref)
-                    .abs()
-                    .total_cmp(&(q.jd - seed.jd_ref).abs())
-            });
-            let (mut lo_jd, mut hi_jd) = (a.jd.min(b.jd), a.jd.max(b.jd));
-            members.retain(|d| {
-                let (lo, hi) = (lo_jd.min(d.jd), hi_jd.max(d.jd));
-                let fits = hi - lo <= cfg.max_span_days;
-                if fits {
-                    (lo_jd, hi_jd) = (lo, hi);
+                let sep = angular_separation_deg(a.ra, a.dec, b.ra, b.dec);
+                if sep * 3600.0 < cfg.min_arc_arcsec {
+                    continue;
                 }
-                fits
-            });
-            members.sort_by(|p, q| p.jd.total_cmp(&q.jd));
-            members.dedup_by_key(|d| d.id);
+                let rate = sep / dt;
+                if rate < cfg.min_rate_deg_per_day || rate > cfg.max_rate_deg_per_day {
+                    continue;
+                }
 
-            if members.len() < cfg.min_detections {
-                continue;
+                let Some(seed) = fit_tracklet(&[*a, *b], cfg) else {
+                    continue;
+                };
+                // A member sits within `match_radius` of the seed line, which over
+                // the window reaches at most `max_sep` from the pair in latitude.
+                let margin = max_sep + match_radius;
+                let (band_lo, band_hi) = (a.dec.min(b.dec) - margin, a.dec.max(b.dec) + margin);
+                let first =
+                    exposures.partition_point(|e| e.jd < seed.jd_ref - cfg.max_span_days - slack);
+                let mut hits = Vec::new();
+                for e in &exposures[first..] {
+                    if e.jd > seed.jd_ref + cfg.max_span_days + slack {
+                        break;
+                    }
+                    if (e.jd - seed.jd_ref).abs() > cfg.max_span_days {
+                        continue;
+                    }
+                    let (pra, pdec) = predict(&seed, e.jd);
+                    let lo = e.decs.partition_point(|&x| x < pdec - match_radius - slack);
+                    let hi = e
+                        .decs
+                        .partition_point(|&x| x <= pdec + match_radius + slack);
+                    for &p in &e.pos[lo..hi] {
+                        let k = order[p];
+                        let d = &detections[k];
+                        if k == i || k == j || d.dec < band_lo || d.dec > band_hi {
+                            continue;
+                        }
+                        if photometry_disagrees(a, d, cfg) {
+                            continue;
+                        }
+                        if angular_separation_deg(d.ra, d.dec, pra, pdec) <= match_radius {
+                            hits.push(p);
+                        }
+                    }
+                }
+                hits.sort_unstable();
+                let mut members = vec![*a, *b];
+                members.extend(hits.iter().map(|&p| detections[order[p]]));
+                members.sort_by(|p, q| {
+                    (p.jd - seed.jd_ref)
+                        .abs()
+                        .total_cmp(&(q.jd - seed.jd_ref).abs())
+                });
+                let (mut lo_jd, mut hi_jd) = (a.jd.min(b.jd), a.jd.max(b.jd));
+                members.retain(|d| {
+                    let (lo, hi) = (lo_jd.min(d.jd), hi_jd.max(d.jd));
+                    let fits = hi - lo <= cfg.max_span_days;
+                    if fits {
+                        (lo_jd, hi_jd) = (lo, hi);
+                    }
+                    fits
+                });
+                members.sort_by(|p, q| p.jd.total_cmp(&q.jd));
+                members.dedup_by_key(|d| d.id);
+
+                if members.len() < cfg.min_detections {
+                    continue;
+                }
+                if let Some(t) = fit_tracklet(&members, cfg) {
+                    found.push(t);
+                }
             }
-            if let Some(t) = fit_tracklet(&members, cfg) {
-                candidates.push(t);
-            }
-        }
-    }
+            found
+        })
+        .collect();
 
     // Longest first, then tightest, so subset removal keeps the best version.
     candidates.sort_by(|a, b| {
@@ -453,11 +511,16 @@ pub fn find_tracklets(detections: &[Detection], cfg: &TrackletConfig) -> Vec<Tra
     let mut kept: Vec<Tracklet> = Vec::new();
     // Membership sets alongside `kept`: the subset test is the hot loop here.
     let mut kept_ids: Vec<HashSet<i64>> = Vec::new();
+    let mut holding: HashMap<i64, Vec<usize>> = HashMap::new();
     for c in candidates {
-        let covered = kept_ids
-            .iter()
-            .any(|k| c.ids.iter().all(|id| k.contains(id)));
+        let covered = holding.get(&c.ids[0]).is_some_and(|ks| {
+            ks.iter()
+                .any(|&k| c.ids.iter().all(|id| kept_ids[k].contains(id)))
+        });
         if !covered {
+            for &id in &c.ids {
+                holding.entry(id).or_default().push(kept.len());
+            }
             kept_ids.push(c.ids.iter().copied().collect());
             kept.push(c);
         }

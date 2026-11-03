@@ -313,6 +313,9 @@ linker:
   fast_max_rate_deg_per_day: 25.0
   fast_dense_detections: 10000 # above this a night keeps no untrailed pairs
   fast_dense_max_rate_deg_per_day: 5.0 # untrailed rate limit on those nights
+  fast_live_every_minutes: 60 # also rerun the fast pass on the night in progress, 0 is off
+  fast_single_night: true # also store a night's lone fast tracklets scoring fast_min_neo_score or more
+  fast_min_neo_score: 90.0 # digest2 NEO score, 0 to 100
 crossmatch:
   ztf:
     Gaia_DR3:

@@ -1,3 +1,7 @@
+// User management for the admin page's Users tab: search users and change
+// their admin status and ACLs. The route guard checks `is_admin` and
+// re-reads the profile to do it; every route called from here is enforced
+// server-side as well.
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -8,7 +12,12 @@ import { Switch } from "@/components/ui/switch";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Spinner } from "@/components/ui/spinner";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { fetchAdminUsers, updateAdminUser, type AdminUser, type AdminUserPatch } from "@/lib/api";
+import {
+  fetchAdminUsers,
+  updateAdminUser,
+  type AdminUser,
+  type AdminUserPatch,
+} from "@/lib/adminApi";
 import { useAppStore } from "@/lib/store";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 
@@ -30,9 +39,6 @@ type PendingChange = {
   grants: boolean;
 };
 
-// User management: one card on the admin page, beside the catalog and task
-// surfaces. The route guard checks `is_admin` and re-reads the profile to do
-// it; every route called from here is enforced server-side as well.
 export function AdminUsers() {
   const profile = useAppStore((s) => s.profile);
   const [search, setSearch] = useState("");

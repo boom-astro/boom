@@ -201,7 +201,7 @@ impl AlertProducer for ZtfAlertProducer {
 
         // use download_to_file function to download the file
         match download_to_file(
-            &mut output_temp_file,
+            output_temp_file.as_file_mut(),
             &format!("{}{}", base_url, file_name),
             self.partnership_archive_username.as_deref(),
             self.partnership_archive_password.as_deref(),

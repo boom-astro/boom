@@ -1,7 +1,8 @@
-// Client for BOOM's admin surface: catalog drift and the task system.
+// Client for BOOM's admin surface: users, catalog and enrichment drift, and
+// the task system.
 //
-// These routes live on the main API scope (`/api/...`) rather than under
-// `/api/babamul`, but they accept the same token the Client already holds --
+// User management is under `/api/babamul`; everything else is on the main API
+// scope (`/api/...`) but accepts the same token the client already holds --
 // the API middleware resolves either realm, so the admin page needs no second
 // login. See docs/task-system.md.
 import { fetchWithAuth, parseResponseJson, unwrapData } from "./api";
@@ -52,11 +53,7 @@ export type SchemaField = {
   maximum?: number;
   /** The element schema of an array field. */
   items?: SchemaField;
-  /** A reference to a definition the task's schema does not carry: `schema_of`
-   *  serializes one type and keeps no registry, so a struct or enum parameter
-   *  arrives as a `$ref` that cannot be followed. Such a field has no `type`
-   *  either, so it has to be recognized by this rather than rendered as the
-   *  string the fallback would make it. */
+  /** A definition `schema_of` left unresolved, past its inlining depth. */
   $ref?: string;
   /** Tagged unions, and optional fields utoipa cannot express as a type pair. */
   oneOf?: SchemaField[];
@@ -83,10 +80,23 @@ export type StaleSet = {
   changed: string[];
 };
 
+/** What produced an alert's enrichment: each model by file hash, and each
+ *  derivation's version. */
+export type EnrichmentSet = {
+  _id: number;
+  survey: string;
+  models: Record<string, { name: string; sha256: string }>;
+  derivations: Record<string, number>;
+  fingerprint: string;
+  first_seen: number;
+};
+
 export type EnrichmentDrift = {
   survey: string;
   /** null until an enrichment worker publishes a set. */
   current_set: number | null;
+  /** The current set itself; null too if its row is missing. */
+  current: EnrichmentSet | null;
   stale_sets: StaleSet[];
   accepted_sets: number[];
   /** Alerts enriched before stamping existed. */
@@ -102,7 +112,8 @@ export type Task = {
   task_type: string;
   params: Record<string, unknown>;
   status: TaskStatus;
-  actor: { user_id: string; username: string };
+  /** `email` is absent only for system runs and accounts since deleted. */
+  actor: { user_id: string; username: string; email?: string | null };
   trigger: string;
   requested_at: number;
   started_at?: number | null;
@@ -114,14 +125,19 @@ export type Task = {
   cancel_requested?: boolean;
   error?: string | null;
   attempts: number;
+  /** The finished run this one repeats. */
+  resubmitted_from?: string | null;
 };
 
 export type TaskLogLine = { ts: number; level: string; message: string };
 export type TaskLogChunk = { task_id: string; seq: number; ts: number; lines: TaskLogLine[] };
 
 /** A run that is not finished, and so is worth polling. */
+/** The statuses a run can still change from. */
+export const ACTIVE_STATUSES: TaskStatus[] = ["queued", "running"];
+
 export function isActive(run: Task): boolean {
-  return run.status === "queued" || run.status === "running";
+  return ACTIVE_STATUSES.includes(run.status);
 }
 
 /**
@@ -143,6 +159,13 @@ export class ApiRequestError extends Error {
     this.status = status;
     this.data = data;
   }
+}
+
+/** The run a single-flight conflict carries, if that is what this failure is. */
+export function conflictingRun(e: unknown): Task | null {
+  if (!(e instanceof ApiRequestError) || e.status !== 409) return null;
+  const run = e.data;
+  return run && typeof run === "object" && "_id" in run ? (run as Task) : null;
 }
 
 /** The API's envelope: a message written to be shown, and the payload. */
@@ -240,10 +263,30 @@ export function fetchCatalogStatus(): Promise<CatalogStatus[]> {
   return request<CatalogStatus[]>("/catalogs/status", undefined, []);
 }
 
-export function fetchTasks(taskType?: string, limit = 25): Promise<Task[]> {
+/** Runs, most recent first. No `statuses` means any status. */
+export function fetchTasks({
+  taskType,
+  statuses,
+  limit = 25,
+}: { taskType?: string; statuses?: TaskStatus[]; limit?: number } = {}): Promise<Task[]> {
   const params = new URLSearchParams({ limit: String(limit) });
   if (taskType) params.set("task_type", taskType);
+  if (statuses?.length) params.set("status", statuses.join(","));
   return request<Task[]>(`/tasks?${params}`, undefined, []);
+}
+
+/**
+ * Queue a new run with a finished run's type and parameters.
+ *
+ * Done by id rather than by resending `params`: those come back redacted, so
+ * the client does not hold what the original run was given.
+ */
+export function resubmitTaskRun(runId: string): Promise<Task> {
+  return request<Task>(
+    `/tasks/${encodeURIComponent(runId)}/resubmit`,
+    { method: "POST" },
+    {} as Task,
+  );
 }
 
 export function fetchTaskRun(runId: string): Promise<Task> {
@@ -291,10 +334,58 @@ export function submitCatalogIngest(catalog: string, dropExisting = false): Prom
  * "cancellation requested" and "run canceled" are different outcomes and the
  * operator needs to know which one they got.
  */
-export function cancelTaskRun(runId: string): Promise<string> {
-  return send<unknown>(
+/** The run's status when the cancel landed: `running` means it was asked to
+ *  stop, `canceled` that it never started, anything else that it had ended. */
+export function cancelTaskRun(runId: string): Promise<TaskStatus | null> {
+  return request<{ status?: TaskStatus } | null>(
     `/tasks/${encodeURIComponent(runId)}/cancel`,
     { method: "POST" },
     null,
-  ).then((envelope) => envelope.message || "Cancellation requested.");
+  ).then((data) => data?.status ?? null);
+}
+
+export type AdminUser = {
+  id: string;
+  username: string;
+  email: string;
+  name: string | null;
+  created_at: number;
+  is_activated: boolean;
+  is_admin: boolean;
+  acls: string[];
+};
+
+export type AdminUsersPage = { users: AdminUser[]; total: number; available_acls: string[] };
+
+export function fetchAdminUsers(
+  search: string,
+  limit: number,
+  offset: number,
+): Promise<AdminUsersPage> {
+  const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+  if (search.trim()) params.set("search", search.trim());
+  return request<AdminUsersPage>(`/babamul/admin/users?${params}`, undefined, {
+    users: [],
+    total: 0,
+    available_acls: [],
+  });
+}
+
+export type AdminUserPatch = { is_admin?: boolean; grant_acls?: string[]; revoke_acls?: string[] };
+
+export async function updateAdminUser(id: string, patch: AdminUserPatch): Promise<AdminUser> {
+  const updated = await request<AdminUser | null>(
+    `/babamul/admin/users/${encodeURIComponent(id)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    },
+    null,
+  );
+  // An unreadable body means the table cannot show what the change landed as.
+  if (!updated || typeof updated.id !== "string") {
+    throw new Error("The change was saved but the response could not be read. Reload to see it.");
+  }
+  return updated;
 }

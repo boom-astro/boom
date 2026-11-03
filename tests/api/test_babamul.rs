@@ -5746,6 +5746,7 @@ mod tests {
                 doc! { "$set": {
                     "villar_fit.reduced_chi2": 1.23,
                     "villar_fit.peak_mag": 16.58,
+                    "villar_fit.t_peak": 2460512.75,
                     "villar_fit.A_ZTF_g": 4.56,
                     "villar_fit.A_ZTF_r": f64::NAN,
                 }},
@@ -5786,6 +5787,11 @@ mod tests {
         assert!(
             body["data"]["params"].get("peak_mag").is_none(),
             "peak_mag is not a model parameter"
+        );
+        assert_eq!(body["data"]["t_peak"].as_f64().unwrap(), 2460512.75);
+        assert!(
+            body["data"]["params"].get("t_peak").is_none(),
+            "t_peak is not a model parameter"
         );
         assert_eq!(body["data"]["params"]["A_ZTF_g"].as_f64().unwrap(), 4.56);
         assert!(

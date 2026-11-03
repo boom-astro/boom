@@ -1,3 +1,4 @@
+#![recursion_limit = "512"] // for large bson docs and CutoutStorage's s3 client
 //! Runs queued tasks.
 //!
 //! Claims one run at a time from `tasks`, holds a lease on it, renews that

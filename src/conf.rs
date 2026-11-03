@@ -1500,6 +1500,12 @@ pub struct LinkerConfig {
     pub fast_dense_detections: usize,
     #[serde(default = "default_linker_fast_dense_max_rate")]
     pub fast_dense_max_rate_deg_per_day: f64,
+    #[serde(default)]
+    pub fast_live_every_minutes: u32,
+    #[serde(default)]
+    pub fast_single_night: bool,
+    #[serde(default = "default_linker_fast_min_neo_score")]
+    pub fast_min_neo_score: f64,
 }
 
 impl LinkerConfig {
@@ -1565,6 +1571,12 @@ impl LinkerConfig {
                 self.fast_dense_max_rate_deg_per_day, self.fast_min_rate_deg_per_day
             ));
         }
+        if !(0.0..=100.0).contains(&self.fast_min_neo_score) {
+            return Err(format!(
+                "fast_min_neo_score is {}, not a digest2 score from 0 to 100",
+                self.fast_min_neo_score
+            ));
+        }
         Ok(())
     }
 }
@@ -1596,6 +1608,9 @@ impl Default for LinkerConfig {
             fast_max_rate_deg_per_day: default_linker_fast_max_rate(),
             fast_dense_detections: default_linker_fast_dense_detections(),
             fast_dense_max_rate_deg_per_day: default_linker_fast_dense_max_rate(),
+            fast_live_every_minutes: 0,
+            fast_single_night: false,
+            fast_min_neo_score: default_linker_fast_min_neo_score(),
         }
     }
 }
@@ -1622,6 +1637,10 @@ fn default_linker_fast_max_rate() -> f64 {
 
 fn default_linker_fast_dense_detections() -> usize {
     10_000
+}
+
+fn default_linker_fast_min_neo_score() -> f64 {
+    90.0
 }
 
 fn default_linker_fast_dense_max_rate() -> f64 {

@@ -167,6 +167,8 @@ pub struct StoredTrack {
     pub updated_at: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub orbit: Option<StoredOrbit>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub neo_score: Option<f64>,
 }
 
 impl StoredTrack {
@@ -387,25 +389,39 @@ pub const LONG_GAP: &str = "long_gap";
 const FLAGGED_MAG_SPREAD: f64 = 2.0;
 const LONG_GAP_DAYS: f64 = 30.0;
 const LONG_GAP_MAX_RMS_RATIO: f64 = 5.0;
+const LONE_NIGHT_GAP_DAYS: f64 = 90.0;
 
-/// Whether the detections pin an orbit down: a pair on each of two nights gives
-/// the motion twice, and four nights give enough positions on their own. Three
-/// single detections are six measurements for six parameters, which any orbit
-/// fits with no residual.
+fn night_of_member((survey, _): &Member, jd: f64) -> i64 {
+    night_at(jd, survey_site(survey).as_ref())
+}
+
 pub fn constrained(members: &[Member], jds: &[f64]) -> bool {
     let mut per_night: HashMap<i64, usize> = HashMap::new();
-    for ((survey, _), &jd) in members.iter().zip(jds) {
-        *per_night
-            .entry(night_at(jd, survey_site(survey).as_ref()))
-            .or_default() += 1;
+    for (member, &jd) in members.iter().zip(jds) {
+        *per_night.entry(night_of_member(member, jd)).or_default() += 1;
     }
-    per_night.len() >= 4 || per_night.values().filter(|&&n| n >= 2).count() >= 2
+    let pairs = per_night.values().filter(|&&n| n >= 2).count();
+    per_night.len() >= 4 || (per_night.len() >= 3 && pairs >= 2)
 }
 
 fn longest_gap(jds: &[f64]) -> f64 {
     let mut sorted = jds.to_vec();
     sorted.sort_by(f64::total_cmp);
     sorted.windows(2).map(|w| w[1] - w[0]).fold(0.0, f64::max)
+}
+
+fn lone_night_across_gap(members: &[Member], jds: &[f64]) -> bool {
+    let mut nights: Vec<(f64, i64)> = members
+        .iter()
+        .zip(jds)
+        .map(|(member, &jd)| (jd, night_of_member(member, jd)))
+        .collect();
+    nights.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let distinct = |side: &[(f64, i64)]| side.iter().map(|n| n.1).collect::<HashSet<_>>().len();
+    (1..nights.len()).any(|k| {
+        nights[k].0 - nights[k - 1].0 > LONE_NIGHT_GAP_DAYS
+            && (distinct(&nights[..k]) < 2 || distinct(&nights[k..]) < 2)
+    })
 }
 
 pub fn track_flags(
@@ -421,7 +437,9 @@ pub fn track_flags(
     if mag_spread.is_some_and(|s| s > FLAGGED_MAG_SPREAD) {
         flags.push(PHOTOMETRY.to_string());
     }
-    if rms_ratio.is_some_and(|r| r > LONG_GAP_MAX_RMS_RATIO) && longest_gap(jds) > LONG_GAP_DAYS {
+    let loose =
+        rms_ratio.is_some_and(|r| r > LONG_GAP_MAX_RMS_RATIO) && longest_gap(jds) > LONG_GAP_DAYS;
+    if loose || lone_night_across_gap(members, jds) {
         flags.push(LONG_GAP.to_string());
     }
     flags
@@ -629,10 +647,12 @@ pub struct UpsertPlan {
     pub bound_fit_residual_arcsec: Option<f64>,
     pub bound_fit_detections: Option<i32>,
     pub orbit: Option<StoredOrbit>,
+    pub seeds: Vec<(StoredOrbit, Option<f64>)>,
     pub mag_spread: Option<f64>,
     pub designation: Option<String>,
     pub kind: Option<String>,
     pub near_planet: Option<String>,
+    pub neo_score: Option<f64>,
     /// Ids a merge would absorb and then delete.
     pub superseded: Vec<String>,
     /// Detections dropped because another track already owns them.
@@ -659,6 +679,14 @@ impl UpsertPlan {
     pub fn with_kind(mut self, kind: &str) -> Self {
         if self.kind.as_deref() != Some(kind) {
             self.kind = Some(kind.to_string());
+            self.unchanged_since = None;
+        }
+        self
+    }
+
+    pub fn with_neo_score(mut self, score: f64) -> Self {
+        if self.neo_score != Some(score) {
+            self.neo_score = Some(score);
             self.unchanged_since = None;
         }
         self
@@ -745,6 +773,12 @@ pub async fn plan_upsert(
     let designation = designation.or_else(|| carried(|t| t.designation.clone()));
     let near_planet = near_planet.or_else(|| carried(|t| t.near_planet.clone()));
     let kind = carried(|t| t.kind.clone());
+    let neo_score = absorbed.iter().find_map(|a| {
+        existing
+            .iter()
+            .find(|t| &&t.id == a)
+            .and_then(|t| t.neo_score)
+    });
     let mut owned_elsewhere: HashSet<Member> = HashSet::new();
     for t in existing.iter().filter(|t| !absorbed.contains(&&t.id)) {
         owned_elsewhere.extend(t.member_keys());
@@ -780,13 +814,22 @@ pub async fn plan_upsert(
     // Counted over this run's own detections, not ones another track keeps.
     let incoming_fit =
         bound_fit.map(|(fit, r)| (fit, r, (members.len() - contested.len()) as i32, orbit));
-    let stored_fit = existing
+    let stored_fits: Vec<_> = existing
         .iter()
         .filter(|t| absorbed.contains(&&t.id))
         .filter_map(|t| {
             let fit = BoundFit::parse(t.bound_fit.as_deref()?)?;
             Some((fit, t.bound_fit_residual_arcsec, fit_detections(t), t.orbit))
         })
+        .collect();
+    let seeds = incoming_fit
+        .iter()
+        .chain(&stored_fits)
+        .filter(|&&(fit, ..)| fit == BoundFit::Good)
+        .filter_map(|&(_, r, _, o)| Some((o?, r)))
+        .collect();
+    let stored_fit = stored_fits
+        .into_iter()
         .max_by_key(|&(fit, _, fit_on, _)| (fit_on, std::cmp::Reverse(fit.rank())));
     let bound_fit = match (incoming_fit, stored_fit) {
         (Some(new), Some(old)) if old.2 > new.2 => Some(old),
@@ -834,10 +877,12 @@ pub async fn plan_upsert(
         bound_fit_residual_arcsec,
         bound_fit_detections,
         orbit,
+        seeds,
         mag_spread: None,
         designation,
         kind,
         near_planet,
+        neo_score,
         superseded,
         contested,
         dropped: Vec::new(),
@@ -883,6 +928,7 @@ pub async fn commit_upsert(
         kind: plan.kind,
         near_planet: plan.near_planet,
         orbit: plan.orbit,
+        neo_score: plan.neo_score,
         updated_at: plan
             .unchanged_since
             .unwrap_or_else(|| chrono::Utc::now().timestamp_millis() as f64 / 1000.0),
@@ -1073,6 +1119,7 @@ pub struct TrackQuery {
     pub max_q: Option<f64>,
     pub min_nights: Option<i32>,
     pub max_rms_ratio: Option<f64>,
+    pub min_neo_score: Option<f64>,
 }
 
 impl TrackQuery {
@@ -1103,6 +1150,9 @@ impl TrackQuery {
         }
         if let Some(max_rms_ratio) = self.max_rms_ratio {
             filter.insert("rms_ratio", doc! { "$lte": max_rms_ratio });
+        }
+        if let Some(min_neo_score) = self.min_neo_score {
+            filter.insert("neo_score", doc! { "$gte": min_neo_score });
         }
         filter
     }
@@ -1197,6 +1247,7 @@ pub(crate) mod tests {
             near_planet: None,
             updated_at: 0.0,
             orbit: None,
+            neo_score: None,
         }
     }
 
@@ -1218,6 +1269,8 @@ pub(crate) mod tests {
         let (m, j) = nights(&[2, 1, 1]);
         assert!(!constrained(&m, &j));
         let (m, j) = nights(&[2, 2]);
+        assert!(!constrained(&m, &j));
+        let (m, j) = nights(&[2, 2, 1]);
         assert!(constrained(&m, &j));
         let (m, j) = nights(&[1, 1, 1, 1]);
         assert!(track_flags(&m, &j, None, None).is_empty());
@@ -1225,12 +1278,23 @@ pub(crate) mod tests {
 
     #[test]
     fn test_a_year_long_link_needs_a_tight_residual() {
-        let members = ztf(&[1, 2, 3, 4]);
-        let jds = [2460000.0, 2460000.02, 2460365.0, 2460365.02];
+        let members = ztf(&[1, 2, 3, 4, 5, 6, 7, 8]);
+        let jds = [
+            2460000.0, 2460000.02, 2460001.0, 2460001.02, 2460365.0, 2460365.02, 2460366.0,
+            2460366.02,
+        ];
         assert!(track_flags(&members, &jds, Some(1.0), Some(0.5)).is_empty());
         assert_eq!(
             track_flags(&members, &jds, Some(8.0), Some(4.0)),
             vec![PHOTOMETRY.to_string(), LONG_GAP.to_string()]
+        );
+        let jds = [
+            2460000.0, 2460000.02, 2460365.0, 2460365.02, 2460366.0, 2460366.02, 2460367.0,
+            2460367.02,
+        ];
+        assert_eq!(
+            track_flags(&members, &jds, Some(1.0), Some(0.5)),
+            vec![LONG_GAP.to_string()]
         );
     }
 
@@ -1329,10 +1393,12 @@ pub(crate) mod tests {
             bound_fit_residual_arcsec: None,
             bound_fit_detections: None,
             orbit: None,
+            seeds: Vec::new(),
             mag_spread: None,
             designation: None,
             kind: None,
             near_planet: None,
+            neo_score: None,
             superseded: Vec::new(),
             contested: ztf(&[11, 12]),
             dropped: Vec::new(),
@@ -1455,6 +1521,7 @@ pub(crate) mod tests {
             max_q: Some(1.3),
             min_nights: Some(3),
             max_rms_ratio: Some(4.0),
+            min_neo_score: None,
         };
         let filter = query.filter();
         assert_eq!(filter.keys().next().map(String::as_str), Some("updated_at"));

@@ -10,6 +10,9 @@ kafka:
   producer:
     server: "broker:29092"
 
+linker:
+  fast_live_every_minutes: 60
+
 workers:
   ztf:
     alert:

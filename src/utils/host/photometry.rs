@@ -218,6 +218,7 @@ mod tests {
             dlr_rank: 1,
             posterior: 0.7,
             z: None,
+            z_err: None,
             dist_mpc: None,
             dist_mpc_method: None,
             a_arcsec: 20.0,

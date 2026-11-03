@@ -6,6 +6,7 @@
 //! finds to the MPC catalog, and stores the result as tracks.
 
 use crate::utils::attach::{match_track, reproduced, Pool, Target};
+use crate::utils::digest2::neo_score_of;
 use crate::utils::enums::Survey;
 use crate::utils::fast::{FastTrack, FAST_KIND};
 use crate::utils::heliolinc::{
@@ -174,7 +175,7 @@ pub async fn load_unknown(
     let filter = match survey {
         Survey::Ztf => {
             let (detections, _) = load_window(db, start, end - start, drb, false, None).await?;
-            return Ok(detections);
+            return Ok(drop_repeats(detections));
         }
         Survey::Lsst => doc! {
             "candidate.jd": jd,
@@ -223,7 +224,38 @@ pub async fn load_unknown(
             })
         });
     }
-    Ok(detections)
+    Ok(drop_repeats(detections))
+}
+
+const REPEAT_ARCSEC: f64 = 2.0;
+
+/// DECam can send two alerts an arcsecond apart for one source in one exposure.
+fn drop_repeats(mut detections: Vec<Detection>) -> Vec<Detection> {
+    let second = |d: &Detection| (d.jd * 86_400.0).round() as i64;
+    let tol_deg = REPEAT_ARCSEC / 3600.0;
+    let mut order: Vec<usize> = (0..detections.len()).collect();
+    order.sort_by(|&a, &b| {
+        let (a, b) = (&detections[a], &detections[b]);
+        second(a).cmp(&second(b)).then(a.dec.total_cmp(&b.dec))
+    });
+    let mut kept: Vec<usize> = Vec::with_capacity(order.len());
+    let mut repeats = HashSet::new();
+    for k in order {
+        let d = &detections[k];
+        let repeat = kept
+            .iter()
+            .rev()
+            .map(|&j| &detections[j])
+            .take_while(|o| second(o) == second(d) && d.dec - o.dec <= tol_deg)
+            .any(|o| angular_separation_deg(d.ra, d.dec, o.ra, o.dec) <= tol_deg);
+        if repeat {
+            repeats.insert(d.id);
+        } else {
+            kept.push(k);
+        }
+    }
+    detections.retain(|d| !repeats.contains(&d.id));
+    detections
 }
 
 pub fn associates_known(survey: &Survey) -> bool {
@@ -809,7 +841,7 @@ async fn keep_reproduced(
     run: &HashMap<i64, &Detection>,
     stored: &HashMap<i64, Detection>,
 ) -> Result<UpsertPlan, mongodb::error::Error> {
-    let (Some(orbit), Some(fitted_on)) = (plan.orbit, plan.bound_fit_detections) else {
+    let Some(fitted_on) = plan.bound_fit_detections else {
         return Ok(plan);
     };
     if plan.bound_fit.as_deref() != Some(BoundFit::Good.as_str()) || fitted_on >= plan.n_detections
@@ -827,30 +859,51 @@ async fn keep_reproduced(
             site: d.site.unwrap_or(ZTF),
         })
         .collect();
-    let seed = State {
-        pos: orbit.pos,
-        vel: orbit.vel,
-    };
-    let Some((verdicts, fit)) = reproduced(
-        &observations,
-        &seed,
-        orbit.epoch_jd,
-        plan.bound_fit_residual_arcsec.unwrap_or(0.0),
-        GOOD_RESIDUAL_ARCSEC,
-    ) else {
+    let best = plan
+        .seeds
+        .iter()
+        .filter_map(|(orbit, rms)| {
+            let seed = State {
+                pos: orbit.pos,
+                vel: orbit.vel,
+            };
+            let (verdicts, fit) = reproduced(
+                &observations,
+                &seed,
+                orbit.epoch_jd,
+                rms.unwrap_or(0.0),
+                GOOD_RESIDUAL_ARCSEC,
+            )?;
+            let mut verdicts = verdicts.into_iter();
+            let (mut members, mut epochs, mut dropped) = (Vec::new(), Vec::new(), Vec::new());
+            for ((member, epoch), position) in plan.members.iter().zip(&plan.epochs).zip(&found) {
+                if position.is_none() || verdicts.next().unwrap_or(true) {
+                    members.push(member.clone());
+                    epochs.push(*epoch);
+                } else {
+                    dropped.push(member.clone());
+                }
+            }
+            let summary = summarise(&members, &epochs);
+            Some((members, epochs, dropped, summary, fit))
+        })
+        .max_by(
+            |(.., (n_a, nights_a, ..), fit_a), (.., (n_b, nights_b, ..), fit_b)| {
+                (n_a, nights_a)
+                    .cmp(&(n_b, nights_b))
+                    .then(fit_b.rms_arcsec.total_cmp(&fit_a.rms_arcsec))
+            },
+        );
+    let Some((
+        members,
+        epochs,
+        dropped,
+        (n_detections, n_nights, arc_days, first_jd, last_jd),
+        fit,
+    )) = best
+    else {
         return Ok(plan);
     };
-    let mut verdicts = verdicts.into_iter();
-    let (mut members, mut epochs, mut dropped) = (Vec::new(), Vec::new(), Vec::new());
-    for ((member, epoch), position) in plan.members.iter().zip(&plan.epochs).zip(&found) {
-        if position.is_none() || verdicts.next().unwrap_or(true) {
-            members.push(member.clone());
-            epochs.push(*epoch);
-        } else {
-            dropped.push(member.clone());
-        }
-    }
-    let (n_detections, n_nights, arc_days, first_jd, last_jd) = summarise(&members, &epochs);
     Ok(UpsertPlan {
         members,
         epochs,
@@ -1066,6 +1119,39 @@ pub async fn persist_fast(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
+pub async fn persist_fast_tracklets(
+    db: &mongodb::Database,
+    tracklets: &[Tracklet],
+    detections: &[Detection],
+    labels: &HashMap<i64, String>,
+    known: &[Option<String>],
+    planets: &[Option<&'static str>],
+    dry_run: bool,
+    stop: &Stop,
+) -> PersistReport {
+    let candidates = tracklets.iter().map(|t| Candidate {
+        members: t.ids.clone(),
+        fit: (BoundFit::Ungated, None),
+        orbit: None,
+    });
+    persist(
+        db,
+        "fast tracklets",
+        Some(FAST_KIND),
+        candidates,
+        detections,
+        labels,
+        known,
+        planets,
+        dry_run,
+        &HashMap::new(),
+        (2, 1),
+        stop,
+    )
+    .await
+}
+
 /// Store each candidate as a track, holding the tracks lock throughout.
 ///
 /// One at a time rather than in bulk: identity is decided against what is
@@ -1226,6 +1312,13 @@ async fn persist(
             }
         };
         off_orbit += plan.dropped.len();
+        let plan = match kind
+            .filter(|k| *k == FAST_KIND)
+            .and_then(|_| neo_score_of(&found))
+        {
+            Some(score) => plan.with_neo_score(score.noid),
+            None => plan,
+        };
         if !plan.meets(min_detections, min_nights) {
             info!(
                 "dropping a track: {} detections over {} nights after {} contested detection(s) were left with another track and {} were off its orbit",
