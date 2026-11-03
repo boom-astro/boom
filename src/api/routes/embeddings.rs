@@ -39,7 +39,7 @@ pub(crate) fn client_or_unavailable(
     match milvus.get_ref() {
         Some(client) => Ok(client.clone()),
         None => Err(response::internal_error(
-            "Milvus is not enabled or is misconfigured",
+            "Milvus is not enabled or was unavailable at startup",
         )),
     }
 }
