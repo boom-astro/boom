@@ -713,7 +713,6 @@ mod tests {
         let app = test::init_service(
             App::new().service(
                 actix_web::web::scope("/babamul")
-                    .app_data(web::Data::new(AppConfig::from_test_config().unwrap()))
                     .app_data(web::Data::new(database.clone()))
                     .app_data(web::Data::new(auth_app_data.clone()))
                     .wrap(from_fn(babamul_auth_middleware))
@@ -778,7 +777,6 @@ mod tests {
         let app = test::init_service(
             App::new().service(
                 actix_web::web::scope("/babamul")
-                    .app_data(web::Data::new(AppConfig::from_test_config().unwrap()))
                     .app_data(web::Data::new(database.clone()))
                     .app_data(web::Data::new(auth_app_data.clone()))
                     .wrap(from_fn(babamul_auth_middleware))

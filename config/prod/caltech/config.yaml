@@ -73,9 +73,6 @@ babamul:
   # works. Pair it with VITE_PRERELEASE_MODE in the web app, which decides what
   # the UI offers, while this decides what the API allows.
   registration_enabled: true # Set via BOOM_BABAMUL__REGISTRATION_ENABLED
-  nearby: # babamul.{ztf,lsst}.nearby: non-stellar alerts whose best host passes both cuts
-    max_dist_mpc: 200.0
-    max_d_dlr: 4.0
   oauth:
     # Social sign-in with Google / GitHub / ORCID.
     #

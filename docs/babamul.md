@@ -264,6 +264,10 @@ sequenceDiagram
 LSST alerts are first classified based on LSPSC catalog matches, then assigned to topics
 based on their classification and whether they have a ZTF match.
 
+When BOOM's host-galaxy association has run on the object (`properties.hosted`
+is set), it decides instead of LSPSC: `true` is hosted, `false` is hostless, or
+unknown outside the LSPSC footprint. Stellar alerts stay stellar.
+
 ```mermaid
 flowchart TD
     LSST[New LSST Alert] --> CheckLSPSC{Has matches<br/>in LSPSC?}
@@ -311,6 +315,10 @@ flowchart TD
 ZTF alerts are first classified based on stellar properties and star-galaxy scores, then assigned
 to topics based on their classification and whether they have an LSST match.
 
+When BOOM's host-galaxy association has run on the object (`properties.hosted`
+is set), it decides between hosted and hostless instead of the star-galaxy
+scores. Stellar alerts stay stellar.
+
 ```mermaid
 flowchart TD
     ZTF[New ZTF Alert] --> CheckStellar{Any stellar sgscore?}
@@ -342,27 +350,18 @@ flowchart TD
     style Topic14 fill:#2d3f5f,color:#e0e0e0
 ```
 
-### Nearby galaxies
-
-Transients around galaxies within ~200 Mpc (Sand et al. 2026, arXiv:2609.38304)
-also go to `babamul.ztf.nearby` and `babamul.lsst.nearby`, on top of their
-category topic. An alert goes there when it is published, is not `stellar`,
-and its best host has:
-
-- `dist_mpc <= babamul.nearby.max_dist_mpc` (default 200)
-- `d_dlr <= babamul.nearby.max_d_dlr` (default 4.0)
-
-Subscribing to `nearby` and a category topic delivers those alerts twice.
+### Host galaxy
 
 Every ZTF and LSST alert carries its best host in `properties.best_host` (null
 when there is none): `name`, `catalog`, `z`, `dist_mpc`, `dist_mpc_method`,
 `sep_arcsec`, `sep_kpc` and `d_dlr`, the separation in units of the galaxy's
-directional light radius. Only NED-LVS hosts have a `dist_mpc`, so a Legacy
-Survey host never makes an alert nearby.
+directional light radius. Only NED-LVS hosts have a `dist_mpc`.
 
-The alert search lists them too: the `Nearby` profile in the web app, or
-`max_host_dist_mpc` on `GET /babamul/surveys/{survey}/alerts`, which also
-applies the `max_d_dlr` cut.
+To follow transients in nearby galaxies (Sand et al. 2026, arXiv:2609.38304),
+subscribe to the `hosted` topics and keep the alerts whose
+`best_host.dist_mpc` is below your limit. The alert search does the same with
+the `Nearby` profile in the web app, or `max_host_dist_mpc` on
+`GET /babamul/surveys/{survey}/alerts`.
 
 ## Usage analytics
 

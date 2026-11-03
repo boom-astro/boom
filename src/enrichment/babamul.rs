@@ -1,14 +1,14 @@
 //! Babamul is an optional component of ZTF and LSST enrichment pipelines,
 //! which sends enriched alerts to various Kafka topics for public consumption.
 use crate::alert::{LsstCandidate, ZtfCandidate};
-use crate::conf::{AppConfig, NearbyConfig};
+use crate::conf::AppConfig;
 use crate::enrichment::lsst::{
     is_in_footprint, LsstAlertForEnrichment, LsstAlertProperties, IS_HOSTED_SCORE_THRESH,
 };
 use crate::enrichment::ztf::{ZtfAlertForEnrichment, ZtfAlertProperties};
 use crate::enrichment::EnrichmentWorkerError;
 use crate::scheduler::record_kafka_alert_published;
-use crate::utils::{derive_avro_schema::SerdavroWriter, host::HostSummary, lightcurves::Band};
+use crate::utils::{derive_avro_schema::SerdavroWriter, lightcurves::Band};
 use apache_avro::{AvroSchema, Schema, Writer};
 use apache_avro_macros::serdavro;
 use rdkafka::admin::{
@@ -201,7 +201,7 @@ impl From<Option<crate::enrichment::ztf::ZtfSurveyMatches>> for BabamulSurveyMat
 
 /// Enriched LSST alert
 #[serdavro]
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
 pub struct BabamulLsstAlert {
     pub candid: i64,
     #[serde(rename = "objectId")]
@@ -271,8 +271,24 @@ impl BabamulLsstAlert {
 
         // The enrichment worker already uses the LSPSC matches to classify stars
         // by creating 2 properties: star (bool) and near_brightstar (bool)
-        if self.is_stellar() {
+        if self.properties.star.unwrap_or(false) || self.properties.near_brightstar.unwrap_or(false)
+        {
             return category + "stellar";
+        }
+
+        match self.properties.hosted {
+            Some(true) => return category + "hosted",
+            Some(false) => {
+                return if is_in_footprint(
+                    self.candidate.dia_source.ra,
+                    self.candidate.dia_source.dec,
+                ) {
+                    category + "hostless"
+                } else {
+                    category + "unknown"
+                };
+            }
+            None => {}
         }
 
         // Check if we have LSPSC cross-matches
@@ -304,19 +320,11 @@ impl BabamulLsstAlert {
         }
         category + label
     }
-
-    fn is_stellar(&self) -> bool {
-        self.properties.star.unwrap_or(false) || self.properties.near_brightstar.unwrap_or(false)
-    }
-
-    fn is_nearby(&self, nearby: &NearbyConfig) -> bool {
-        !self.is_stellar() && has_nearby_host(self.properties.best_host.as_ref(), nearby)
-    }
 }
 
 /// Enriched ZTF alert
 #[serdavro]
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
 pub struct BabamulZtfAlert {
     pub candid: i64,
     #[serde(rename = "objectId")]
@@ -391,8 +399,14 @@ impl BabamulZtfAlert {
         };
 
         // Already classified as stellar (by the enrichment worker), return that
-        if self.is_stellar() {
+        if self.properties.star || self.properties.near_brightstar {
             return category + "stellar";
+        }
+
+        match self.properties.hosted {
+            Some(true) => return category + "hosted",
+            Some(false) => return category + "hostless",
+            None => {}
         }
 
         // Check star-galaxy scores (sgscore1, sgscore2, sgscore3) to determine if hosted
@@ -415,20 +429,6 @@ impl BabamulZtfAlert {
         // Not a star and no valid sgscores, so classify as hostless
         category + "hostless"
     }
-
-    fn is_stellar(&self) -> bool {
-        self.properties.star || self.properties.near_brightstar
-    }
-
-    fn is_nearby(&self, nearby: &NearbyConfig) -> bool {
-        !self.is_stellar() && has_nearby_host(self.properties.best_host.as_ref(), nearby)
-    }
-}
-
-fn has_nearby_host(host: Option<&HostSummary>, nearby: &NearbyConfig) -> bool {
-    host.is_some_and(|h| {
-        h.d_dlr <= nearby.max_d_dlr && h.dist_mpc.is_some_and(|d| d <= nearby.max_dist_mpc)
-    })
 }
 
 enum EnrichedAlert<'a> {
@@ -442,7 +442,6 @@ pub struct Babamul {
     ztf_avro_schema: Schema,
     kafka_admin_client: AdminClient<DefaultClientContext>,
     topic_retention_ms: i64,
-    nearby: NearbyConfig,
     // A cache for Kafka topics we've checked exist and match retention policy
     checked_topics: Mutex<HashSet<String>>,
 }
@@ -491,7 +490,6 @@ impl Babamul {
             ztf_avro_schema,
             kafka_admin_client: admin_client,
             topic_retention_ms: babamul_retention_ms,
-            nearby: config.babamul.nearby.clone(),
             checked_topics: Mutex::new(HashSet::new()),
         }
     }
@@ -701,12 +699,6 @@ impl Babamul {
 
             // Compute the category for this alert to determine the topic
             let category = alert.compute_babamul_category(&cross_matches);
-            if alert.is_nearby(&self.nearby) {
-                alerts_by_topic
-                    .entry("babamul.lsst.nearby".to_string())
-                    .or_insert_with(Vec::new)
-                    .push(alert.clone());
-            }
             let topic_name = format!("babamul.lsst.{}", category);
             alerts_by_topic
                 .entry(topic_name)
@@ -752,12 +744,6 @@ impl Babamul {
 
             // Determine which topic this alert should go to
             let category: String = alert.compute_babamul_category();
-            if alert.is_nearby(&self.nearby) {
-                alerts_by_topic
-                    .entry("babamul.ztf.nearby".to_string())
-                    .or_insert_with(Vec::new)
-                    .push(alert.clone());
-            }
             let topic_name = format!("babamul.ztf.{}", category);
             alerts_by_topic
                 .entry(topic_name)
