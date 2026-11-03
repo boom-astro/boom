@@ -192,7 +192,11 @@ async fn worker(
     batch_size: usize,
     dry_run: bool,
 ) -> Result<(u64, u64), super::TaskError> {
-    let catalogs = [config.ned_catalog.as_str(), config.ls_dr10_catalog.as_str()];
+    let catalogs = [
+        config.ned_catalog.as_str(),
+        config.ls_dr10_catalog.as_str(),
+        config.desi_catalog.as_str(),
+    ];
     // Photometry is read from the same database the records come from.
     let db = client.database(&aux_ns.db);
     let mut batch: Vec<WriteModel> = Vec::with_capacity(batch_size);
@@ -371,7 +375,11 @@ pub async fn run(
     drop(rx);
 
     let mut projection = doc! { "_id": 1, "coordinates.radec_geojson.coordinates": 1 };
-    for catalog in [&config.ned_catalog, &config.ls_dr10_catalog] {
+    for catalog in [
+        &config.ned_catalog,
+        &config.ls_dr10_catalog,
+        &config.desi_catalog,
+    ] {
         projection.insert(format!("cross_matches.{catalog}"), 1);
     }
 
