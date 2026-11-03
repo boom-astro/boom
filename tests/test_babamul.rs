@@ -179,7 +179,8 @@ fn create_mock_enriched_ztf_alert(candid: i64, object_id: &str, is_rock: bool) -
             rock: is_rock,
             star: false,
             near_brightstar: false,
-            hosted: Some(false),
+            hosted: None,
+            best_host: None,
             stationary: false,
             photstats: PerBandProperties::default(),
             multisurvey_photstats: Some(PerBandProperties::default()),
@@ -611,6 +612,42 @@ async fn test_compute_babamul_category_lsst() {
         "Alert with empty LSPSC matches and no ZTF match should be unknown"
     );
 
+    let (mut alert_dlr_hosted, cross_matches) = create_mock_enriched_lsst_alert_with_matches(
+        9876543221,
+        "LSST24aaaaaal",
+        0.8,
+        false,
+        false,
+        Some(create_lspsc_cross_matches(Some(2.5), Some(0.8), true)),
+        None,
+        None,
+        None,
+    )
+    .await;
+    alert_dlr_hosted.properties.hosted = Some(true);
+    assert_eq!(
+        alert_dlr_hosted.compute_babamul_category(&cross_matches),
+        "no-ztf-match.hosted"
+    );
+
+    let (mut alert_dlr_unknown, cross_matches) = create_mock_enriched_lsst_alert_with_matches(
+        9876543222,
+        "LSST24aaaaaam",
+        0.8,
+        false,
+        false,
+        None,
+        None,
+        Some(265.05),
+        Some(-32.25),
+    )
+    .await;
+    alert_dlr_unknown.properties.hosted = Some(false);
+    assert_eq!(
+        alert_dlr_unknown.compute_babamul_category(&cross_matches),
+        "no-ztf-match.unknown"
+    );
+
     // Test case 11: ZTF match whose prv_candidates are all non-public (programid != 1) →
     // should be treated as if there is no ZTF match at all → "no-ztf-match.*"
     let cross_matches = create_lspsc_cross_matches(Some(2.5), Some(0.8), true);
@@ -817,6 +854,24 @@ fn test_compute_babamul_category_ztf() {
     assert_eq!(
         category, "lsst-match.stellar",
         "ZTF alert with LSST match, near_brightstar=true and star=false should be lsst-match.stellar"
+    );
+
+    let mut alert_dlr_hosted = create_mock_enriched_ztf_alert(1234567900, "ZTF21aaaaaak", false);
+    alert_dlr_hosted.survey_matches = BabamulSurveyMatches::default();
+    alert_dlr_hosted.properties.hosted = Some(true);
+    alert_dlr_hosted.candidate.candidate.sgscore1 = Some(0.8);
+    assert_eq!(
+        alert_dlr_hosted.compute_babamul_category(),
+        "no-lsst-match.hosted"
+    );
+
+    let mut alert_dlr_hostless = create_mock_enriched_ztf_alert(1234567901, "ZTF21aaaaaal", false);
+    alert_dlr_hostless.survey_matches = BabamulSurveyMatches::default();
+    alert_dlr_hostless.properties.hosted = Some(false);
+    alert_dlr_hostless.candidate.candidate.sgscore1 = Some(0.3);
+    assert_eq!(
+        alert_dlr_hostless.compute_babamul_category(),
+        "no-lsst-match.hostless"
     );
 }
 
@@ -1025,6 +1080,31 @@ async fn test_babamul_filters_low_drb() {
         0,
         "Expected 0 messages for ZTF alerts with DRB below threshold"
     );
+}
+
+#[tokio::test]
+async fn test_babamul_sends_ztf_alert_with_best_host() {
+    use boom::enrichment::babamul::Babamul;
+    use boom::utils::host::HostSummary;
+
+    let config = AppConfig::from_path(TEST_CONFIG_FILE).unwrap();
+    let babamul = Babamul::new(&config);
+
+    let mut alert = create_mock_enriched_ztf_alert(1234567903, "ZTF21aaaaaan", false);
+    alert.properties.hosted = Some(true);
+    alert.properties.best_host = Some(HostSummary {
+        name: Some("NGC 4993".to_string()),
+        catalog: Some("NED".to_string()),
+        z: Some(0.0098),
+        dist_mpc: Some(40.0),
+        dist_mpc_method: Some("zIndependent".to_string()),
+        sep_arcsec: 10.0,
+        sep_kpc: Some(2.0),
+        d_dlr: 1.0,
+    });
+
+    let sent = babamul.process_ztf_alerts(vec![alert]).await.unwrap();
+    assert_eq!(sent, 1);
 }
 
 #[tokio::test]

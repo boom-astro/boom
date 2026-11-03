@@ -9,7 +9,7 @@ use crate::enrichment::{
 };
 use crate::utils::db::mongify;
 use crate::utils::enums::Survey;
-use crate::utils::host::HostGalaxyAssociation;
+use crate::utils::host::{HostGalaxyAssociation, HostSummary};
 use crate::utils::lightcurves::{
     analyze_photometry, is_stationary, prepare_photometry, signed_snr, summarise_detections,
     ActivityMetrics, Band, DetectionHistory, EpisodeHistory, MultisurveyDetectionHistory,
@@ -271,6 +271,10 @@ pub struct LsstAlertProperties {
     /// Absent means never evaluated for a host, not evaluated and hostless.
     #[serde(default)]
     pub hosted: Option<bool>,
+    /// Copy of `host_galaxy.best_host`, so alert searches can cut on it without reading aux.
+    #[serde(default)]
+    #[avro(default = "null")]
+    pub best_host: Option<HostSummary>,
     pub photstats: PerBandProperties,
     pub multisurvey_photstats: PerBandProperties,
     /// `None` on alerts enriched before this existed: never evaluated, which is not
@@ -636,6 +640,11 @@ impl LsstEnrichmentWorker {
         Ok(LsstAlertProperties {
             rock: is_rock,
             hosted: alert.host_galaxy.as_ref().map(|h| h.best_host.is_some()),
+            best_host: alert
+                .host_galaxy
+                .as_ref()
+                .and_then(|h| h.best_host.as_ref())
+                .map(HostSummary::from),
             sso: Some(sso),
             activity: Some(activity),
             star: is_star,

@@ -91,8 +91,8 @@ pub const DERIVATIONS: &[(&str, u32)] = &[
     // rock, star, near_brightstar and stationary.
     ("crossmatch_flags", 1),
     ("detection_history", 2),
-    // hosted. Also bump when the DLR scoring parameters change: hosts are rewritten in place.
-    ("host_association", 1),
+    // hosted, best_host. Also bump when the DLR scoring parameters change: hosts are rewritten in place.
+    ("host_association", 2),
     // applecider_fusion, applecider_outputs and fusion_embedding.
     ("applecider_postprocess", 1),
 ];
@@ -338,6 +338,8 @@ pub struct DriftStatus {
     pub survey: String,
     /// `None` until a worker has published; the other fields are then empty.
     pub current_set: Option<i64>,
+    /// The current set's models and derivations; `None` too if its row is missing.
+    pub current: Option<EnrichmentSet>,
     /// Sets seen on alerts that are neither current nor accepted.
     pub stale_sets: Vec<StaleSet>,
     pub accepted_sets: Vec<i64>,
@@ -446,6 +448,7 @@ pub async fn drift_status(
         return Ok(DriftStatus {
             survey: survey.to_string(),
             current_set: None,
+            current: None,
             stale_sets: Vec::new(),
             accepted_sets: Vec::new(),
             has_unstamped: false,
@@ -470,6 +473,7 @@ pub async fn drift_status(
         return Ok(DriftStatus {
             survey: survey.to_string(),
             current_set: Some(current_id),
+            current,
             stale_sets: Vec::new(),
             accepted_sets: acceptable
                 .into_iter()
@@ -490,6 +494,7 @@ pub async fn drift_status(
             return Ok(DriftStatus {
                 survey: survey.to_string(),
                 current_set: Some(current_id),
+                current,
                 stale_sets: Vec::new(),
                 accepted_sets: acceptable
                     .into_iter()
@@ -527,6 +532,7 @@ pub async fn drift_status(
     Ok(DriftStatus {
         survey: survey.to_string(),
         current_set: Some(current_id),
+        current,
         stale_sets,
         accepted_sets: acceptable
             .into_iter()
@@ -789,6 +795,11 @@ mod tests {
             "the index is there, so drift is known"
         );
         assert!(status.has_unstamped, "the unstamped alert must be reported");
+        assert_eq!(
+            status.current.map(|c| c.id),
+            Some(set.id),
+            "the current set's row comes with the status"
+        );
         alerts.drop().await.ok();
     }
 

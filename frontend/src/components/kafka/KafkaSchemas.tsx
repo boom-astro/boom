@@ -57,6 +57,9 @@ const getFieldDescriptions = (survey: Survey): Record<string, ReactNode> => ({
       </>
     ),
   },
+  best_host: "Most probable host galaxy.",
+  dist_mpc: "Host distance in Mpc.",
+  d_dlr: "Separation in units of the host's directional light radius.",
   photstats: "Light-curve statistics computed from the alert's (prv_candidates + fp_hists).",
   multisurvey_photstats: "Same statistics recomputed from the combined light curve when a cross-survey match exists.",
   multisurvey_detection_history: "First detection in any linked survey and the latest non-detection before it.",

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { baseType, isStructured, parseField, unwrapOptional } from "./task-form";
+import type { SchemaField } from "@/lib/adminApi";
+import { baseType, examples, isStructured, parseField, unwrapOptional } from "./task-form";
 
 const value = (...args: Parameters<typeof parseField>) => parseField(...args).value;
 const error = (...args: Parameters<typeof parseField>) => parseField(...args).error;
@@ -121,3 +122,37 @@ describe("parseField", () => {
     expect(value({ type: "string" }, "  2mass  ")).toBe("2mass");
   });
 });
+
+describe("structured fields", () => {
+  const selection: SchemaField = {
+    description: "Which alerts to reprocess.",
+    oneOf: [
+      {
+        type: "object",
+        properties: { kind: { type: "string", enum: ["stale"] } },
+        required: ["kind"],
+      },
+      {
+        type: "object",
+        properties: {
+          kind: { type: "string", enum: ["since"] },
+          jd: { type: "number" },
+          note: { type: "string" },
+        },
+        required: ["kind", "jd"],
+      },
+    ],
+  };
+
+  it("parses the field's own JSON, and says so when it is not JSON", () => {
+    expect(value(selection, '{"kind": "stale"}')).toEqual({ kind: "stale" });
+    expect(error(selection, "{kind: stale}")).toBe("not valid JSON");
+    expect(parseField(selection, "  ")).toEqual({});
+  });
+
+  it("offers one example per shape, with only the required properties", () => {
+    expect(examples(selection)).toEqual([{ kind: "stale" }, { kind: "since", jd: 0 }]);
+    expect(Object.keys(examples(selection)[1] as object)[0]).toBe("kind");
+  });
+});
+

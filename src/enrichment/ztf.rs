@@ -15,7 +15,7 @@ use crate::milvus::{BackupQueue, EmbeddingRow, MilvusSink};
 use crate::utils::cutouts::{AlertCutout, CutoutStorage};
 use crate::utils::db::mongify;
 use crate::utils::enums::{ProgramId, Survey};
-use crate::utils::host::HostGalaxyAssociation;
+use crate::utils::host::{HostGalaxyAssociation, HostSummary};
 use crate::utils::lightcurves::{
     analyze_photometry, is_stationary, prepare_photometry, signed_snr, summarise_detections,
     ActivityMetrics, AllBandsProperties, Band, DetectionHistory, EpisodeHistory,
@@ -530,6 +530,10 @@ pub struct ZtfAlertProperties {
     /// filter must not read absence as "no host".
     #[serde(default)]
     pub hosted: Option<bool>,
+    /// Copy of `host_galaxy.best_host`, so alert searches can cut on it without reading aux.
+    #[serde(default)]
+    #[avro(default = "null")]
+    pub best_host: Option<HostSummary>,
     pub stationary: bool,
     pub photstats: PerBandProperties,
     pub multisurvey_photstats: Option<PerBandProperties>,
@@ -1468,6 +1472,11 @@ impl ZtfEnrichmentWorker {
         };
 
         let hosted = alert.host_galaxy.as_ref().map(|hg| hg.best_host.is_some());
+        let best_host = alert
+            .host_galaxy
+            .as_ref()
+            .and_then(|hg| hg.best_host.as_ref())
+            .map(HostSummary::from);
 
         // Per-object detection history for history-aware filters, from the full
         // accumulated light curve (positive/negative by psfFlux sign).
@@ -1516,6 +1525,7 @@ impl ZtfEnrichmentWorker {
                 star: is_star,
                 near_brightstar: is_near_brightstar,
                 hosted,
+                best_host,
                 stationary,
                 photstats,
                 multisurvey_photstats: Some(multisurvey_photstats),

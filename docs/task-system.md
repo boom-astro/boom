@@ -558,15 +558,17 @@ change. What the schema says about a field is what the form does with it:
   catalog slug, say — does not, and comes back as a 400 listing what was
   allowed; making it an enum is the better fix.
 
-A parameter the form cannot offer as a single input falls back to a JSON field
-for the whole task, rather than a half-working widget guessing at a shape. Two
-kinds reach that path: a tagged union — `enrich_reprocess`'s `selection` —
-which arrives as a multi-arm `oneOf`,
-and a struct or enum field, which arrives as a `$ref`. The `$ref` cannot be
-followed — [`schema_of`](https://github.com/boom-astro/boom/blob/main/src/tasks/mod.rs) serializes one type and keeps no
-definitions registry, so the reference dangles — which is why the fallback is
-keyed on recognizing it rather than on resolving it. A task with such a
-parameter is worth a look at `/docs` before it is submitted from the page.
+[`schema_of`](https://github.com/boom-astro/boom/blob/main/src/tasks/mod.rs)
+inlines every `$ref` into the definition it names, since the client has no
+registry to resolve one against. An enum parameter therefore arrives as its
+values and renders as a dropdown, and a struct arrives as its properties.
+
+A parameter the form cannot offer as a single input gets its own JSON box, and
+the rest of the task stays on the form. That is a tagged union, such as
+`enrich_reprocess`'s `selection`, which arrives as a multi-arm `oneOf`, or a
+nested struct. The box offers one example per shape the schema allows, with only
+the required properties filled in, so it starts from something the server will
+take.
 
 Note that `Option<T>` is *not* one of those: utoipa writes it either as a type
 pair like `["integer", "null"]` or as a two-arm `oneOf`, depending on `T`, and
@@ -591,10 +593,11 @@ the person up later.
 | --- | --- |
 | `GET /task-types` | What this release can run, with a JSON Schema per task type |
 | `POST /tasks` | Submit a run |
-| `GET /tasks` | Runs, most recent first |
+| `GET /tasks?status=` | Runs, most recent first; `status` takes a comma-separated list |
 | `GET /tasks/{id}` | One run |
 | `GET /tasks/{id}/logs?after_seq=` | Tail its logs |
 | `POST /tasks/{id}/cancel` | Request cancellation |
+| `POST /tasks/{id}/resubmit` | Queue a new run with a finished run's type and parameters |
 | `GET /data/mutations?collection=&limit=` | What has been done to the data |
 
 ## Scheduled tasks, when we build them

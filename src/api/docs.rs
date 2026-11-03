@@ -71,6 +71,7 @@ impl Modify for BabamulSecurityAddon {
         routes::tasks::get_task,
         routes::tasks::get_task_logs,
         routes::tasks::cancel_task,
+        routes::tasks::resubmit_task,
         routes::tasks::get_data_mutations,
         routes::tasks::get_enrichment_status,
         routes::tasks::accept_enrichment_set,

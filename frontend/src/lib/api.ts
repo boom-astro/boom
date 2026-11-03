@@ -282,49 +282,6 @@ export async function updateProfileName(name: string): Promise<Profile> {
   return normalizeProfile(unwrapData<ProfileWire>(body, null));
 }
 
-export type AdminUser = {
-  id: string;
-  username: string;
-  email: string;
-  name: string | null;
-  created_at: number;
-  is_activated: boolean;
-  is_admin: boolean;
-  acls: string[];
-};
-
-export type AdminUsersPage = { users: AdminUser[]; total: number; available_acls: string[] };
-
-export async function fetchAdminUsers(search: string, limit: number, offset: number): Promise<AdminUsersPage> {
-  const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
-  if (search.trim()) params.set("search", search.trim());
-  const res = await fetchWithAuth(`${API_BASE}/admin/users?${params}`);
-  await ensureOk(res, "Fetch users");
-  return unwrapData<AdminUsersPage>(await readJson(res), { users: [], total: 0, available_acls: [] });
-}
-
-export type AdminUserPatch = { is_admin?: boolean; grant_acls?: string[]; revoke_acls?: string[] };
-
-export async function updateAdminUser(id: string, patch: AdminUserPatch): Promise<AdminUser> {
-  const res = await fetchWithAuth(`${API_BASE}/admin/users/${encodeURIComponent(id)}`, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(patch),
-  });
-  const body = await readJson(res);
-  if (!res.ok) throw new Error(messageOf(body) ?? `Update user failed: ${res.status}`);
-  const updated = unwrapData<AdminUser | null>(body, null);
-  // `readJson` swallows a parse failure to null, and the `{} as AdminUser`
-  // this used to fall back to left every field undefined: no row matched the
-  // id, so the table went on showing the old values while the toast said
-  // "Updated undefined". The change did land -- the status says so -- but the
-  // page can no longer say what it landed as.
-  if (!updated || typeof updated.id !== "string") {
-    throw new Error("The change was saved but the response could not be read. Reload to see it.");
-  }
-  return updated;
-}
-
 export async function fetchKafkaCredentials(): Promise<KafkaCredential[]> {
   const res = await fetchWithAuth(`${API_BASE}/kafka-credentials`);
   await ensureOk(res, "Fetch kafka credentials");
@@ -387,6 +344,7 @@ export type AlertSearchParams = {
   is_near_brightstar?: boolean;
   is_stationary?: boolean;
   is_positive?: boolean;
+  max_host_dist_mpc?: number;
   limit?: number;
   skip?: number;
 };
@@ -395,6 +353,17 @@ export type Cutouts = {
   cutoutScience?: string;
   cutoutDifference?: string;
   cutoutTemplate?: string;
+};
+
+export type HostSummary = {
+  name?: string | null;
+  catalog?: string | null;
+  z?: number | null;
+  dist_mpc?: number | null;
+  dist_mpc_method?: string | null;
+  sep_arcsec: number;
+  sep_kpc?: number | null;
+  d_dlr: number;
 };
 
 export type Alert = {
@@ -409,6 +378,10 @@ export type Alert = {
     reliability?: number;
     [key: string]: unknown;
   };
+  properties?: {
+    best_host?: HostSummary | null;
+    [key: string]: unknown;
+  } | null;
   [key: string]: unknown;
 };
 

@@ -158,6 +158,23 @@ still resolves to the same catalog definition.
 | `panstarrs` | `PS1_DR2` | parquet | HEALPix partitions | Mean PSF magnitudes in grizy, from the HATS mirror of the DR2 otmo table. Requester-pays S3. Does not include the PS1-STRM `strm_*` columns crossmatch config projects. |
 | `lsdr9` | `LSDR9` | parquet, from FITS pairs | one per `dr9/north` sweep file | Fluxes, Tractor shapes and photo-z posteriors for the BASS+MzLS reduction, which covers the sky DR10's DECam footprint does not reach. Each chunk is one published sweep file merged with its photo-z counterpart. No i-band: DR9 predates it. |
 | `lspsc` | `LSPSC` | gzipped JSONL, **staged** | one per exported chunk | Morphological resolved/unresolved scores for 3.1×10⁹ LS DR10 sources ([Liu et al. 2025](https://arxiv.org/abs/2505.17174)). Upstream is a cone-search API, so BOOM ingests an export of its own copy — see below. |
+| `erass1-main` | `eRASS1_Main` | parquet, from FITS in a tarball | 1 | eROSITA-DE DR1 Main, 930,203 X-ray sources detected in 0.2-2.3 keV, with fluxes, band rates, extent and detection likelihood. German half of the sky only (Galactic longitude 180° to 360°). |
+| `5xmm-dr15` | `5XMM_DR15` | parquet, from FITS | 1 | XMM-Newton serendipitous source table, 818,656 unique sources, with fluxes, hardness ratios, variability and CLASSX classifications. 2 GB decompressed, so it is read memory-mapped. |
+| `2sxps` | `2SXPS` | parquet, from FITS | 1 | Swift-XRT point sources, the 146,768 of the clean subset, with count rates, hardness ratios, fluxes and variability probabilities. |
+| `4fgl-dr4` | `4FGL_DR4` | parquet, from FITS | 1 | Fermi-LAT 14-year catalog, 7,195 gamma-ray sources with 95% error ellipses, fluxes, variability and associations. |
+
+### Matching within a positional error
+
+X-ray and gamma-ray positions are much less precise than optical ones, and
+their uncertainty varies from row to row, so the four high-energy catalogs
+accept each row within its own error rather than within one fixed radius. They
+reuse the per-row radius built for galaxy sizes: `angular_size_key` names the
+error column, and `angular_size_scale` turns it into a radius (3 sigma for
+eRASS1 and 5XMM, 1.5 times the 90% radius for 2SXPS). For 4FGL the radius is
+the semi-major axis of the 95% ellipse, a circle that contains the ellipse; the
+ellipse itself (`Conf_95_SemiMajor`, `Conf_95_SemiMinor`, `Conf_95_PosAng`, in
+degrees) is projected so a filter can test containment. The 90 4FGL sources
+without an ellipse, 81 of them extended, are never matched.
 
 ### The two Legacy Survey releases
 
@@ -296,6 +313,11 @@ Adding a catalog to a deployment goes in this order, and the order matters:
    there as soon as the release ships it, whether or not anything crossmatches
    against it. No config change is needed to make it appear or to ingest it.
 3. **Add it to `crossmatch` config** once the ingest reports complete.
+
+When the base `config.yaml` crossmatches a catalog that a deployment has not
+ingested yet, that deployment's `overrides.yaml` keeps it off with
+`<collection>: null` under each survey. Step 3 is then deleting those lines and
+running `make configs`.
 
 Step 2 does not depend on step 3 on purpose. The catalogs table is built from
 `CATALOGS` in the code, not from crossmatch config, so you never have to
