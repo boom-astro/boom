@@ -195,6 +195,7 @@ fn create_mock_enriched_ztf_alert(candid: i64, object_id: &str, is_rock: bool) -
             detection_history: None,
             multisurvey_detection_history: None,
             episode_history: None,
+            variability: None,
         },
         survey_matches: BabamulSurveyMatches::default(),
     }

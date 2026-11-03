@@ -160,6 +160,7 @@ the matching version in `DERIVATIONS`.** The components are deliberately coarse:
 | `sso` | `properties.sso`, and the activity metrics derived from it |
 | `crossmatch_flags` | `rock`, `star`, `near_brightstar`, `stationary` |
 | `detection_history` | `properties.detection_history`, `multisurvey_detection_history` |
+| `variability` | `properties.variability` |
 | `host_association` | `properties.hosted` and `properties.best_host`, from the `host_galaxy` the DLR scoring writes |
 | `applecider_postprocess` | `applecider_fusion`, `applecider_outputs` and the fusion embedding, which BOOM derives from the model's `alpha` |
 | `villar_fit` | `villar_fit`, on a GPU build. Fitted by BOOM's own PSO, so a change to the fit or its `PsoConfig` belongs here rather than in a model hash |
