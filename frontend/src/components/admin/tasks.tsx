@@ -1,5 +1,5 @@
-// Task runs for the admin page's Tasks tab: what is queued or running, the
-// history of finished runs, one run's logs, and starting a task from its
+// Task runs for the admin page's Tasks tab: one table of runs with what is
+// queued or running at the top, one run's logs, and starting a task from its
 // schema. Each run records who started it and with which parameters; see
 // docs/task-system.md.
 import { useEffect, useRef, useState } from "react";
@@ -11,6 +11,7 @@ import {
   fetchTaskRun,
   isActive,
   resubmitTaskRun,
+  submitTask,
   type TaskLogLine,
   type Task,
   type TaskType,
@@ -18,6 +19,14 @@ import {
 import { TaskForm } from "@/components/task-form";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  Card,
+  CardAction,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
 import {
   Dialog,
   DialogContent,
@@ -27,6 +36,14 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
 
 /** How often to re-poll while anything is still running. */
 export const POLL_MS = 3000;
@@ -37,9 +54,10 @@ export const ACTIVE_FETCHED = 200;
 export const HISTORY_PAGE = 25;
 export const HISTORY_MAX = 500;
 
-export type HistoryFilter = "all" | "succeeded" | "failed" | "canceled";
+export type HistoryFilter = "all" | "active" | "succeeded" | "failed" | "canceled";
 const HISTORY_FILTERS: { value: HistoryFilter; label: string }[] = [
   { value: "all", label: "All" },
+  { value: "active", label: "In progress" },
   { value: "succeeded", label: "Succeeded" },
   { value: "failed", label: "Failed" },
   { value: "canceled", label: "Canceled" },
@@ -228,7 +246,7 @@ function ProgressBar({ progress }: { progress: Task["progress"] }) {
   const pct = progress.total > 0 ? Math.round((progress.done / progress.total) * 100) : 0;
   return (
     <>
-      <div className="flex justify-between text-xs text-muted-foreground mb-1">
+      <div className="flex justify-between gap-2 text-xs text-muted-foreground mb-1">
         <span>{progress.message || "working"}</span>
         <span className="tabular-nums">
           {progress.done}/{progress.total} ({pct}%)
@@ -241,84 +259,6 @@ function ProgressBar({ progress }: { progress: Task["progress"] }) {
   );
 }
 
-/**
- * Runs that are queued or running, at the top of the Tasks tab.
- *
- * These are the rows an admin is actually here to watch: a catalog ingest runs
- * for hours, and having to hunt for it in the history is exactly the friction
- * the admin page exists to remove.
- */
-export function ActiveRuns({ runs, onSelect, onCancel }: {
-  runs: Task[];
-  onSelect: (id: string) => void;
-  onCancel: (run: Task) => void;
-}) {
-  return (
-    <section className="mb-8">
-      <h2 className="text-lg font-semibold mb-1">In progress</h2>
-      {runs.length === 0 ? (
-        <p className="text-sm text-muted-foreground">Nothing is queued or running.</p>
-      ) : (
-        <>
-          <p className="text-sm text-muted-foreground mb-3">
-            {runs.length} {runs.length === 1 ? "run is" : "runs are"} active. These survive a
-            deploy — a run whose worker goes away is picked up again and resumes.
-          </p>
-          <div className="space-y-3">
-            {runs.map((run) => (
-              <div key={run._id} className="border rounded-lg p-3">
-                <div className="flex items-start justify-between gap-4 mb-2">
-                  <div className="min-w-0">
-                    <div className="font-medium">
-                      {run.task_type}{" "}
-                      <Badge variant={statusVariant(run.status)}>{run.status}</Badge>{" "}
-                      {run.cancel_requested && <Badge variant="outline">stopping</Badge>}
-                    </div>
-                    <div
-                      className="text-xs text-muted-foreground font-mono truncate"
-                      title={paramSummary(run.params)}
-                    >
-                      {paramSummary(run.params)}
-                    </div>
-                    <div className="text-xs text-muted-foreground">
-                      started by {actorLabel(run.actor)}
-                      {run.started_at && ` · running for ${runDuration(run)}`}
-                      {run.attempts > 1 && ` · attempt ${run.attempts} (resumed)`}
-                    </div>
-                  </div>
-                  <div className="flex gap-2 shrink-0">
-                    <Button variant="outline" size="sm" onClick={() => onSelect(run._id)}>
-                      Logs
-                    </Button>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      disabled={run.cancel_requested}
-                      onClick={() => onCancel(run)}
-                    >
-                      {run.cancel_requested ? "Stopping…" : "Cancel…"}
-                    </Button>
-                  </div>
-                </div>
-                {run.progress.total > 0 ? (
-                  <ProgressBar progress={run.progress} />
-                ) : (
-                  // Before the first chunk lands there is nothing to divide by --
-                  // the run is downloading, which can take a while on its own.
-                  <p className="text-xs text-muted-foreground">
-                    {run.status === "queued"
-                      ? "Waiting for a worker."
-                      : "Starting — fetching the first chunk."}
-                  </p>
-                )}
-              </div>
-            ))}
-          </div>
-        </>
-      )}
-    </section>
-  );
-}
 
 /** One run's status and log tail, shown in a side panel over any tab. */
 export function RunDetail({
@@ -530,109 +470,148 @@ export function RunDetail({
   );
 }
 
-/**
- * Every task this release can run, with a form built from its schema.
- *
- * Catalog ingests have their own row-level button above, because starting one
- * from the drift table needs no parameters. This is for everything else.
- */
-export function TaskCatalog({
+/** Picks a task type, then configures and submits it. Owns its error, since it
+ *  covers the page's messages. */
+export function NewRunDialog({
+  open,
   types,
-  onSubmit,
-  busy,
+  onClose,
+  onQueued,
 }: {
+  open: boolean;
   types: TaskType[];
-  onSubmit: (taskType: string, params: Record<string, unknown>) => void;
-  busy: string | null;
+  onClose: () => void;
+  onQueued: (run: Task, notice?: string) => void;
 }) {
   const [selected, setSelected] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const task = types.find((t) => t.id === selected) ?? null;
 
+  useEffect(() => {
+    if (!open) return;
+    setSelected(null);
+    setBusy(false);
+    setError(null);
+  }, [open]);
+
+  async function submit(taskType: string, params: Record<string, unknown>) {
+    setBusy(true);
+    setError(null);
+    try {
+      onQueued(await submitTask(taskType, params));
+    } catch (e) {
+      const existing = conflictingRun(e);
+      if (existing) {
+        onQueued(existing, `An equivalent ${taskType} run is already in flight. Showing that one.`);
+      } else {
+        setError(e instanceof Error ? e.message : String(e));
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
-    <section className="mb-8">
-      <h2 className="text-lg font-semibold mb-1">Run a task</h2>
-      <p className="text-sm text-muted-foreground mb-3">
-        Data-mutating work runs here rather than over SSH: every task records who
-        started it, with which parameters, under which release.
-      </p>
-
-      {task && (
-        // Keyed by task, so switching between two tasks starts a fresh form
-        // rather than carrying the previous one's state across -- including the
-        // "I understand this can destroy data" box, which would otherwise
-        // arrive already checked on the next task.
-        <TaskForm
-          key={task.id}
-          task={task}
-          busy={busy === task.id}
-          onCancel={() => setSelected(null)}
-          onSubmit={(params) => onSubmit(task.id, params)}
-        />
-      )}
-
-      <div className="overflow-x-auto">
-        <table className="w-full text-sm">
-          <tbody>
+    <Dialog open={open} onOpenChange={(next) => !next && onClose()}>
+      <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>{task ? task.title : "Run a task"}</DialogTitle>
+          <DialogDescription>
+            {task
+              ? task.description
+              : "Every run records who started it, with which parameters, under which release."}
+          </DialogDescription>
+        </DialogHeader>
+        {task ? (
+          // Keyed by task, so the "I understand this can destroy data" box
+          // does not arrive already checked on the next task.
+          <TaskForm
+            key={task.id}
+            task={task}
+            busy={busy}
+            onCancel={() => {
+              setSelected(null);
+              setError(null);
+            }}
+            onSubmit={(params) => void submit(task.id, params)}
+          />
+        ) : (
+          <div className="rounded-md border">
             {types.map((type) => (
-              <tr key={type.id} className="border-b last:border-0">
-                <td className="py-2 pr-4">
-                  <div className="font-medium">
-                    {type.title}{" "}
-                    {type.destructive && (
-                      <Badge variant="destructive">can destroy data</Badge>
-                    )}
-                  </div>
-                  <div className="text-xs text-muted-foreground">
-                    {type.description}
-                  </div>
-                  <div className="text-xs text-muted-foreground font-mono mt-0.5">
-                    {type.id}
-                  </div>
-                </td>
-                <td className="py-2 w-24 text-right">
-                  <Button
-                    variant={selected === type.id ? "secondary" : "outline"}
-                    size="sm"
-                    onClick={() =>
-                      setSelected(selected === type.id ? null : type.id)
-                    }
-                  >
-                    {selected === type.id ? "Close" : "Configure"}
-                  </Button>
-                </td>
-              </tr>
+              <button
+                key={type.id}
+                type="button"
+                className="block w-full border-b px-3 py-2 text-left last:border-0 hover:bg-muted/50"
+                onClick={() => setSelected(type.id)}
+              >
+                <div className="text-sm font-medium">
+                  {type.title}{" "}
+                  {type.destructive && <Badge variant="destructive">can destroy data</Badge>}
+                </div>
+                <div className="text-xs text-muted-foreground">{type.description}</div>
+                <div className="text-xs text-muted-foreground font-mono">{type.id}</div>
+              </button>
             ))}
-          </tbody>
-        </table>
-      </div>
-    </section>
+          </div>
+        )}
+        {error && <p className="text-sm text-destructive">{error}</p>}
+      </DialogContent>
+    </Dialog>
   );
 }
 
+/** In-progress runs pinned above finished ones, each group newest first. */
 export function RunsTable({
-  runs,
+  active,
+  finished,
   filter,
   onFilter,
   limit,
   onShowMore,
   onSelect,
+  onCancel,
   onResubmit,
+  onNewRun,
   error,
 }: {
-  runs: Task[];
+  active: Task[];
+  finished: Task[];
   filter: HistoryFilter;
   onFilter: (filter: HistoryFilter) => void;
   limit: number;
   onShowMore: () => void;
   onSelect: (id: string) => void;
+  onCancel: (run: Task) => void;
   onResubmit: (run: Task) => void;
+  onNewRun: () => void;
   error: string | null;
 }) {
+  const showActive = filter === "all" || filter === "active";
+  const rows = [...(showActive ? active : []), ...(filter === "active" ? [] : finished)];
+  const emptyText = error
+    ? "Task runs could not be read"
+    : filter === "all"
+      ? "Nothing has been run yet"
+      : filter === "active"
+        ? "Nothing is queued or running"
+        : `No ${filter} runs`;
+
   return (
-    <section className="mb-8">
-      <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
-        <h2 className="text-lg font-semibold">Task runs</h2>
-        <div className="flex gap-1" role="group" aria-label="Filter runs by status">
+    <Card className="mb-6">
+      <CardHeader>
+        <CardTitle>Task runs</CardTitle>
+        <CardDescription>
+          Runs survive a deploy: one whose worker goes away is picked up again and resumes.
+        </CardDescription>
+        <CardAction>
+          <Button size="sm" onClick={onNewRun}>
+            Run task…
+          </Button>
+        </CardAction>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-4">
+        <div className="flex flex-wrap gap-1" role="group" aria-label="Filter runs by status">
           {HISTORY_FILTERS.map((f) => (
             <Button
               key={f.value}
@@ -642,77 +621,119 @@ export function RunsTable({
               onClick={() => onFilter(f.value)}
             >
               {f.label}
+              {f.value === "active" && active.length > 0 && (
+                <Badge variant="secondary" className="ml-1 px-1.5">
+                  {active.length}
+                </Badge>
+              )}
             </Button>
           ))}
         </div>
-      </div>
-      {runs.length === 0 ? (
-        <p className="text-sm text-muted-foreground">
-          {error
-            ? "Task runs could not be read."
-            : filter === "all"
-              ? "Nothing has been run yet."
-              : `No ${filter} runs.`}
-        </p>
-      ) : (
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b text-left text-muted-foreground">
-                <th className="py-2 pr-4 font-medium">Task</th>
-                <th className="py-2 pr-4 font-medium">Status</th>
-                <th className="py-2 pr-4 font-medium">Started by</th>
-                <th className="py-2 pr-4 font-medium">Requested</th>
-                <th className="py-2 pr-4 font-medium">Duration</th>
-                <th className="py-2 font-medium" />
-              </tr>
-            </thead>
-            <tbody>
-              {runs.map((run) => {
-                const params = paramSummary(run.params);
-                return (
-                  <tr key={run._id} className="border-b last:border-0">
-                    <td className="py-2 pr-4 max-w-xs">
-                      <div className="font-medium">{run.task_type}</div>
-                      {params && (
-                        <div
-                          className="text-xs text-muted-foreground font-mono truncate"
-                          title={params}
-                        >
-                          {params}
+
+        <div className="rounded-md border">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Task</TableHead>
+                <TableHead>Status</TableHead>
+                <TableHead>Started by</TableHead>
+                <TableHead>Requested</TableHead>
+                <TableHead />
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {rows.length === 0 ? (
+                <TableRow>
+                  <TableCell colSpan={5} className="h-24 text-center text-muted-foreground">
+                    {emptyText}
+                  </TableCell>
+                </TableRow>
+              ) : (
+                rows.map((run) => {
+                  const params = paramSummary(run.params);
+                  const running = isActive(run);
+                  return (
+                    <TableRow key={run._id}>
+                      <TableCell className="max-w-56">
+                        <div className="font-medium">{run.task_type}</div>
+                        {params && (
+                          <div
+                            className="text-xs text-muted-foreground font-mono truncate"
+                            title={params}
+                          >
+                            {params}
+                          </div>
+                        )}
+                      </TableCell>
+                      <TableCell className="min-w-32">
+                        <div className="flex flex-wrap gap-1">
+                          <Badge variant={statusVariant(run.status)}>{run.status}</Badge>
+                          {running && run.cancel_requested && (
+                            <Badge variant="outline">stopping</Badge>
+                          )}
                         </div>
-                      )}
-                    </td>
-                    <td className="py-2 pr-4">
-                      <Badge variant={statusVariant(run.status)}>{run.status}</Badge>
-                    </td>
-                    <td className="py-2 pr-4 text-xs">{actorLabel(run.actor)}</td>
-                    <td className="py-2 pr-4 text-xs">{formatTime(run.requested_at)}</td>
-                    <td className="py-2 pr-4 text-xs tabular-nums">{runDuration(run)}</td>
-                    <td className="py-2 whitespace-nowrap text-right">
-                      {(run.status === "canceled" || run.status === "failed") && (
-                        <Button variant="ghost" size="sm" onClick={() => onResubmit(run)}>
-                          Run again…
+                        {running && run.progress.total > 0 && (
+                          <div className="mt-1">
+                            <ProgressBar progress={run.progress} />
+                          </div>
+                        )}
+                        {run.attempts > 1 && (
+                          <div className="text-xs text-muted-foreground">
+                            attempt {run.attempts}
+                          </div>
+                        )}
+                      </TableCell>
+                      <TableCell className="text-sm text-muted-foreground">
+                        {actorLabel(run.actor)}
+                      </TableCell>
+                      <TableCell className="text-sm text-muted-foreground">
+                        <div>{formatTime(run.requested_at)}</div>
+                        {run.started_at && (
+                          <div className="text-xs tabular-nums">
+                            {running ? "running for" : "took"} {runDuration(run)}
+                          </div>
+                        )}
+                      </TableCell>
+                      <TableCell className="text-right whitespace-nowrap">
+                        {running ? (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            disabled={run.cancel_requested}
+                            onClick={() => onCancel(run)}
+                          >
+                            {run.cancel_requested ? "Stopping…" : "Cancel…"}
+                          </Button>
+                        ) : (
+                          (run.status === "canceled" || run.status === "failed") && (
+                            <Button variant="ghost" size="sm" onClick={() => onResubmit(run)}>
+                              Run again…
+                            </Button>
+                          )
+                        )}
+                        <Button variant="ghost" size="sm" onClick={() => onSelect(run._id)}>
+                          {running ? "Logs" : "View"}
                         </Button>
-                      )}
-                      <Button variant="ghost" size="sm" onClick={() => onSelect(run._id)}>
-                        View
-                      </Button>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-          {runs.length >= limit && limit < HISTORY_MAX && (
-            <div className="mt-2">
-              <Button variant="outline" size="sm" onClick={onShowMore}>
-                Show more
-              </Button>
-            </div>
+                      </TableCell>
+                    </TableRow>
+                  );
+                })
+              )}
+            </TableBody>
+          </Table>
+        </div>
+
+        <div className="flex items-center justify-between text-sm text-muted-foreground">
+          <span>
+            {rows.length} {rows.length === 1 ? "run" : "runs"}
+          </span>
+          {filter !== "active" && finished.length >= limit && limit < HISTORY_MAX && (
+            <Button variant="outline" size="sm" onClick={onShowMore}>
+              Show more
+            </Button>
           )}
         </div>
-      )}
-    </section>
+      </CardContent>
+    </Card>
   );
 }

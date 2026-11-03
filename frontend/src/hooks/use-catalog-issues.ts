@@ -20,6 +20,8 @@ export type CatalogIssues = {
   count: number;
   /** Human-readable breakdown, for the badge's title. */
   label: string;
+  /** The admin tab the issues are on, catalogs first when both have some. */
+  tab?: "catalogs" | "enrichment";
 };
 
 /** Counted per survey, not per stale set. */
@@ -113,6 +115,7 @@ export function useCatalogIssues(enabled: boolean): CatalogIssues {
           setIssues({
             count: catalogIssues.count + enrichmentIssues.count,
             label: parts.length ? parts.join("; ") : "Nothing needs attention",
+            tab: catalogIssues.count > 0 ? "catalogs" : "enrichment",
           });
         }
       } catch {

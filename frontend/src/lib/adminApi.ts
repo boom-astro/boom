@@ -84,10 +84,23 @@ export type StaleSet = {
   changed: string[];
 };
 
+/** What produced an alert's enrichment: each model by file hash, and each
+ *  derivation's version. */
+export type EnrichmentSet = {
+  _id: number;
+  survey: string;
+  models: Record<string, { name: string; sha256: string }>;
+  derivations: Record<string, number>;
+  fingerprint: string;
+  first_seen: number;
+};
+
 export type EnrichmentDrift = {
   survey: string;
   /** null until an enrichment worker publishes a set. */
   current_set: number | null;
+  /** The current set itself; null too if its row is missing. */
+  current: EnrichmentSet | null;
   stale_sets: StaleSet[];
   accepted_sets: number[];
   /** Alerts enriched before stamping existed. */

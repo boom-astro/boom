@@ -206,9 +206,7 @@ export function TaskForm({
   }
 
   return (
-    <div className="border rounded-lg p-4 mb-6">
-      <h3 className="font-semibold">{task.title}</h3>
-      <p className="text-sm text-muted-foreground mb-1">{task.description}</p>
+    <div>
       {task.destructive && (
         <p className="text-sm text-destructive mb-3">
           This task can destroy data. Check what it will do before running it.
@@ -348,7 +346,7 @@ export function TaskForm({
           {busy ? "Starting…" : "Run task"}
         </Button>
         <Button variant="outline" size="sm" onClick={onCancel}>
-          Cancel
+          Back
         </Button>
         {missing.length > 0 && (
           <span className="text-xs text-muted-foreground">
