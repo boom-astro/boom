@@ -38,14 +38,10 @@ export function unwrapOptional(field: SchemaField): SchemaField {
 }
 
 /**
- * Whether a field has to be entered as JSON rather than as one input.
- *
- * A struct or enum parameter arrives as a `$ref` into a definitions section
- * that `schema_of` does not emit, so there is nothing to render and nothing to
- * follow. Such a field used to render as a text box, because `$ref` carries no
- * `type` and the fallback is "string" — which quietly accepted a string for a
- * parameter that is not one, and meant the escape hatch this check exists for
- * never opened.
+ * Whether a field has to be entered as JSON rather than as one input: a tagged
+ * union, a nested struct, or a `$ref` the server left unresolved. A `$ref`
+ * carries no `type`, so without this it would fall back to a text box that
+ * accepts a string for a parameter that is not one.
  */
 export function isStructured(field: SchemaField): boolean {
   const resolved = unwrapOptional(field);
@@ -82,6 +78,13 @@ export function parseField(field: SchemaField, raw: string | boolean): Parsed {
   if (typeof raw === "boolean") return { value: raw };
   const text = raw.trim();
   if (text === "") return {};
+  if (isStructured(field)) {
+    try {
+      return { value: JSON.parse(text) };
+    } catch {
+      return { error: "not valid JSON" };
+    }
+  }
   const resolved = unwrapOptional(field);
   const type = baseType(resolved);
 
@@ -128,6 +131,52 @@ export function parseField(field: SchemaField, raw: string | boolean): Parsed {
   }
 }
 
+/**
+ * One example per shape a structured field accepts, built from its schema, so
+ * its JSON box can start from something the server will take.
+ */
+export function examples(field: SchemaField): unknown[] {
+  const resolved = unwrapOptional(field);
+  const arms = resolved.oneOf
+    ? resolved.oneOf.filter((arm) => baseType(arm) !== "null" || arm.$ref)
+    : [resolved];
+  return arms.map(skeleton);
+}
+
+/** The smallest value of a schema's shape: required properties only. */
+function skeleton(field: SchemaField): unknown {
+  const resolved = unwrapOptional(field);
+  if (resolved.enum?.length) return resolved.enum[0];
+  if (resolved.oneOf) return examples(resolved)[0] ?? null;
+  if (resolved.properties) {
+    const value: Record<string, unknown> = {};
+    // A property with one allowed value is a union's tag, so it leads.
+    const tagFirst = [...(resolved.required ?? [])].sort(
+      (a, b) =>
+        Number(resolved.properties?.[b]?.enum?.length === 1) -
+        Number(resolved.properties?.[a]?.enum?.length === 1),
+    );
+    for (const name of tagFirst) {
+      const property = resolved.properties[name];
+      if (property) value[name] = skeleton(property);
+    }
+    return value;
+  }
+  switch (baseType(resolved)) {
+    case "integer":
+    case "number":
+      return resolved.minimum ?? 0;
+    case "boolean":
+      return false;
+    case "array":
+      return [];
+    case "object":
+      return {};
+    default:
+      return "";
+  }
+}
+
 export function TaskForm({
   task,
   onSubmit,
@@ -139,19 +188,16 @@ export function TaskForm({
   onCancel: () => void;
   busy: boolean;
 }) {
-  const fields = useMemo(
-    () => Object.entries(task.params_schema.properties ?? {}),
-    [task],
-  );
+  // Required first. The schema's own order is alphabetical, since the server's
+  // JSON maps do not keep the struct's field order.
+  const fields = useMemo(() => {
+    const required = task.params_schema.required ?? [];
+    return Object.entries(task.params_schema.properties ?? {}).sort(
+      ([a], [b]) => Number(required.includes(b)) - Number(required.includes(a)),
+    );
+  }, [task]);
   const [values, setValues] = useState<Record<string, string | boolean>>({});
   const [confirmed, setConfirmed] = useState(false);
-
-  // A task whose parameters cannot be expressed as flat fields — a tagged union
-  // like a selection, or a struct the schema only references — is submitted as
-  // JSON rather than guessed at with a half-working widget.
-  const [rawJson, setRawJson] = useState("{}");
-  const [jsonError, setJsonError] = useState<string | null>(null);
-  const useRawJson = fields.some(([, field]) => isStructured(field));
 
   // Parsed once per render and read everywhere below, so what the button
   // decides from and what the request carries cannot disagree. Reading the raw
@@ -167,36 +213,12 @@ export function TaskForm({
   );
   const invalid = parsed.filter(([, , result]) => result.error);
 
-  // Structured tasks are entered as one JSON value, so their required fields
-  // do not live in the flat form state. Validation for those happens when the
-  // JSON is parsed and again on the API; keeping this flat-field check would
-  // make every such form permanently disabled.
-  const missing = useRawJson
-    ? []
-    : (task.params_schema.required ?? []).filter((name) => {
-        const entry = parsed.find(([field]) => field === name);
-        return !entry || entry[2].value === undefined;
-      });
+  const missing = (task.params_schema.required ?? []).filter((name) => {
+    const entry = parsed.find(([field]) => field === name);
+    return !entry || entry[2].value === undefined;
+  });
 
   function submit() {
-    if (useRawJson) {
-      let value: unknown;
-      try {
-        value = JSON.parse(rawJson);
-      } catch (e) {
-        setJsonError(e instanceof Error ? e.message : String(e));
-        return;
-      }
-      // `JSON.parse` is happy with `7` or `null`, which reach the API as a
-      // body it cannot deserialize into a params struct at all.
-      if (value === null || typeof value !== "object" || Array.isArray(value)) {
-        setJsonError("parameters have to be a JSON object");
-        return;
-      }
-      setJsonError(null);
-      onSubmit(value as Record<string, unknown>);
-      return;
-    }
     const params: Record<string, unknown> = {};
     for (const [name, , result] of parsed) {
       // Omitted rather than sent as null: the server fills in the default.
@@ -213,38 +235,16 @@ export function TaskForm({
         </p>
       )}
 
-      {useRawJson ? (
-        <div className="mb-3">
-          <Label htmlFor="raw-params" className="text-xs">
-            Parameters (JSON)
-          </Label>
-          <p className="text-xs text-muted-foreground mb-1">
-            This task takes structured parameters, so they are entered directly.
-            See the field list in <code>/docs</code>.
-          </p>
-          <textarea
-            id="raw-params"
-            className="w-full rounded border bg-background p-2 font-mono text-xs"
-            rows={6}
-            value={rawJson}
-            onChange={(e) => {
-              setRawJson(e.target.value);
-              // Cleared on edit: the old message described text that is no
-              // longer there, and pointed at a column that had moved.
-              setJsonError(null);
-            }}
-            spellCheck={false}
-          />
-          {jsonError && <p className="text-xs text-destructive mt-1">{jsonError}</p>}
-        </div>
-      ) : (
         <div className="grid gap-3 mb-3 sm:grid-cols-2">
           {parsed.map(([name, field, result]) => {
             const required = isRequired(task.params_schema, name);
             const resolved = unwrapOptional(field);
             const type = baseType(resolved);
             return (
-              <div key={name} className={type === "boolean" ? "sm:col-span-2" : ""}>
+              <div
+                key={name}
+                className={type === "boolean" || isStructured(field) ? "sm:col-span-2" : ""}
+              >
                 <Label htmlFor={name} className="text-xs">
                   {name}
                   {required && <span className="text-destructive"> *</span>}
@@ -264,7 +264,45 @@ export function TaskForm({
                   </div>
                 ) : (
                   <>
-                    {resolved.enum ? (
+                    {isStructured(field) ? (
+                      <>
+                        <textarea
+                          id={name}
+                          className="mt-1 w-full rounded-md border bg-background p-2 font-mono text-xs"
+                          rows={4}
+                          value={String(values[name] ?? "")}
+                          placeholder={required ? "JSON" : "JSON, or blank for the default"}
+                          aria-invalid={result.error ? true : undefined}
+                          onChange={(e) =>
+                            setValues((v) => ({ ...v, [name]: e.target.value }))
+                          }
+                          spellCheck={false}
+                        />
+                        <div className="flex flex-wrap items-center gap-1 text-xs text-muted-foreground">
+                          Start from:
+                          {examples(field).map((example) => {
+                            const text = JSON.stringify(example);
+                            return (
+                              <Button
+                                key={text}
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                className="h-6 px-2 font-mono text-xs"
+                                onClick={() =>
+                                  setValues((v) => ({
+                                    ...v,
+                                    [name]: JSON.stringify(example, null, 2),
+                                  }))
+                                }
+                              >
+                                {text}
+                              </Button>
+                            );
+                          })}
+                        </div>
+                      </>
+                    ) : resolved.enum ? (
                       <select
                         id={name}
                         className="w-full rounded border bg-background p-2 text-sm"
@@ -317,7 +355,6 @@ export function TaskForm({
             );
           })}
         </div>
-      )}
 
       {task.destructive && (
         <div className="flex items-center gap-2 mb-3">

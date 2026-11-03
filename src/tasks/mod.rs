@@ -178,9 +178,60 @@ pub struct TaskSpec {
     pub params_schema: fn() -> serde_json::Value,
 }
 
-/// The schema of a params type, as JSON.
-fn schema_of<T: utoipa::PartialSchema>() -> serde_json::Value {
-    serde_json::to_value(T::schema()).unwrap_or_else(|_| serde_json::json!({}))
+/// The schema of a params type, as JSON, with each `$ref` replaced by the
+/// definition it names, so a client can build a form from it alone.
+fn schema_of<T: utoipa::ToSchema>() -> serde_json::Value {
+    let mut named = Vec::new();
+    T::schemas(&mut named);
+    let definitions: std::collections::HashMap<String, serde_json::Value> = named
+        .into_iter()
+        .filter_map(|(name, schema)| Some((name, serde_json::to_value(schema).ok()?)))
+        .collect();
+    let mut schema = serde_json::to_value(T::schema()).unwrap_or_else(|_| serde_json::json!({}));
+    inline_refs(&mut schema, &definitions, 0);
+    schema
+}
+
+/// Bounded, because a recursive type would otherwise inline forever; past the
+/// limit the `$ref` is left for the client to treat as opaque.
+const MAX_INLINE_DEPTH: usize = 8;
+
+fn inline_refs(
+    value: &mut serde_json::Value,
+    definitions: &std::collections::HashMap<String, serde_json::Value>,
+    depth: usize,
+) {
+    match value {
+        serde_json::Value::Object(map) => {
+            let target = map
+                .get("$ref")
+                .and_then(|r| r.as_str())
+                .and_then(|r| r.strip_prefix("#/components/schemas/"))
+                .and_then(|name| definitions.get(name));
+            if let (Some(definition), true) = (target, depth < MAX_INLINE_DEPTH) {
+                let mut definition = definition.clone();
+                inline_refs(&mut definition, definitions, depth + 1);
+                map.remove("$ref");
+                // Keys already on the field win: its doc comment describes this
+                // use of the type better than the type's own does.
+                if let serde_json::Value::Object(fields) = definition {
+                    for (key, field) in fields {
+                        map.entry(key).or_insert(field);
+                    }
+                }
+                return;
+            }
+            for field in map.values_mut() {
+                inline_refs(field, definitions, depth);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                inline_refs(item, definitions, depth);
+            }
+        }
+        _ => {}
+    }
 }
 
 // TODO: recurring runs, for periodic maintenance such as the LSST cutout
@@ -858,6 +909,21 @@ mod tests {
                 .unwrap_or_else(|| panic!("{} has no properties", spec.id));
             assert!(!properties.is_empty(), "{} has an empty schema", spec.id);
         }
+    }
+
+    #[test]
+    fn no_schema_refers_to_a_definition_it_does_not_carry() {
+        // The client has no registry to resolve a `$ref` against, so one left
+        // in place turns that field into raw JSON.
+        for spec in TASKS {
+            let schema = (spec.params_schema)().to_string();
+            assert!(!schema.contains("$ref"), "{}: {schema}", spec.id);
+        }
+        let schema = (find(repair_photometry::TASK_TYPE).unwrap().params_schema)();
+        assert!(
+            schema["properties"]["survey"]["enum"].is_array(),
+            "an enum parameter arrives as its values: {schema}"
+        );
     }
 
     #[test]

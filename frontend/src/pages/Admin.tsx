@@ -285,10 +285,6 @@ export default function Admin() {
     <div className="px-4 lg:px-6">
       <div className="max-w-5xl mx-auto">
         <h1 className="text-2xl font-bold mb-2">Admin</h1>
-        <p className="text-sm text-muted-foreground mb-6">
-          Run and watch tasks, check catalog and enrichment state, and manage users.
-        </p>
-
         {/* Above the tabs, and not cleared by the next poll: this is the answer
             to something the operator just asked for. */}
         {actionError && (

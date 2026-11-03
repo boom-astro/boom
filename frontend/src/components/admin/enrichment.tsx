@@ -14,7 +14,6 @@ import { Button } from "@/components/ui/button";
 import {
   Card,
   CardContent,
-  CardDescription,
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
@@ -106,11 +105,6 @@ export function EnrichmentDriftTable({
     <Card className="mb-6">
       <CardHeader>
         <CardTitle>Enrichment</CardTitle>
-        <CardDescription>
-          Enrichment runs once, when an alert is ingested. After a model or a derivation
-          changes, alerts already in the database hold values the current code would not
-          produce.
-        </CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-6">
         {drift.length === 0 && (

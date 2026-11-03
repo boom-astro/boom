@@ -53,11 +53,7 @@ export type SchemaField = {
   maximum?: number;
   /** The element schema of an array field. */
   items?: SchemaField;
-  /** A reference to a definition the task's schema does not carry: `schema_of`
-   *  serializes one type and keeps no registry, so a struct or enum parameter
-   *  arrives as a `$ref` that cannot be followed. Such a field has no `type`
-   *  either, so it has to be recognized by this rather than rendered as the
-   *  string the fallback would make it. */
+  /** A definition `schema_of` left unresolved, past its inlining depth. */
   $ref?: string;
   /** Tagged unions, and optional fields utoipa cannot express as a type pair. */
   oneOf?: SchemaField[];

@@ -24,7 +24,6 @@ import {
   Card,
   CardAction,
   CardContent,
-  CardDescription,
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
@@ -54,6 +53,9 @@ export const ACTIVE_FETCHED = 200;
 /** History page size, and the most "Show more" will ask the API for. */
 export const HISTORY_PAGE = 25;
 export const HISTORY_MAX = 500;
+
+const ADD_TASK_TYPE_DOCS =
+  "https://github.com/boom-astro/boom/blob/main/docs/task-system.md#adding-a-task-type";
 
 export type HistoryFilter = "all" | "active" | "succeeded" | "failed" | "canceled";
 const HISTORY_FILTERS: { value: HistoryFilter; label: string }[] = [
@@ -533,9 +535,22 @@ export function NewRunDialog({
           )}
           <DialogTitle>{task ? task.title : "Run a task"}</DialogTitle>
           <DialogDescription>
-            {task
-              ? task.description
-              : "Every run records who started it, with which parameters, under which release."}
+            {task ? (
+              task.description
+            ) : (
+              <>
+                Missing one? See{" "}
+                <a
+                  className="underline hover:no-underline"
+                  href={ADD_TASK_TYPE_DOCS}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  adding a task type
+                </a>
+                .
+              </>
+            )}
           </DialogDescription>
         </DialogHeader>
         {task ? (
@@ -612,10 +627,7 @@ export function RunsTable({
   return (
     <Card className="mb-6">
       <CardHeader>
-        <CardTitle>Task runs</CardTitle>
-        <CardDescription>
-          Runs survive a deploy: one whose worker goes away is picked up again and resumes.
-        </CardDescription>
+        <CardTitle>Tasks</CardTitle>
         <CardAction>
           <Button size="sm" onClick={onNewRun}>
             Run task…

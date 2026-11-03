@@ -78,10 +78,6 @@ export function CatalogsTable({
     <Card className="mb-6">
       <CardHeader>
         <CardTitle>Catalogs</CardTitle>
-        <CardDescription>
-          Every catalog this release can ingest, and whether the alert pipeline crossmatches
-          against it.
-        </CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-4">
         {error && <p className="text-sm text-destructive">{error}</p>}
