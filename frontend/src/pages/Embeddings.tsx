@@ -17,8 +17,9 @@ const DEFAULT_TOP_K = 10;
 
 const EMBEDDING_SURVEY = "ztf";
 
-/** Wait before each automatic count retry; the last repeats until one succeeds. */
-const COUNT_RETRY_DELAYS_MS = [5_000, 10_000, 20_000, 30_000];
+/** Automatic count retries wait 5s, doubling after each failure up to an hour. */
+const COUNT_RETRY_BASE_MS = 5_000;
+const COUNT_RETRY_MAX_MS = 60 * 60 * 1000;
 
 function formatScore(score: number): string {
   return score.toFixed(4);
@@ -53,8 +54,7 @@ export default function Embeddings() {
       .catch((e) => {
         if (canceled) return;
         setCountError(e instanceof Error ? e.message : "Failed to fetch count");
-        const delay =
-          COUNT_RETRY_DELAYS_MS[Math.min(countFailures.current, COUNT_RETRY_DELAYS_MS.length - 1)];
+        const delay = Math.min(COUNT_RETRY_BASE_MS * 2 ** countFailures.current, COUNT_RETRY_MAX_MS);
         countFailures.current += 1;
         timer = setTimeout(() => setCountLoad((n) => n + 1), delay);
       });
