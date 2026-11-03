@@ -23,6 +23,7 @@ pub struct AdminActor {
     pub realm: &'static str,
     pub user_id: String,
     pub username: String,
+    pub email: String,
 }
 
 impl AdminActor {
@@ -34,6 +35,7 @@ impl AdminActor {
             // look the person up later.
             user_id: format!("{}:{}", self.realm, self.user_id),
             username: self.username.clone(),
+            email: Some(self.email.clone()),
         }
     }
 }
@@ -80,6 +82,7 @@ pub fn resolve_admin(
                 realm: "boom",
                 user_id: user.id.clone(),
                 username: user.username.clone(),
+                email: user.email.clone(),
             })
         } else {
             Err(AdminDenied::NotAnAdmin)
@@ -91,6 +94,7 @@ pub fn resolve_admin(
                 realm: "babamul",
                 user_id: user.id.clone(),
                 username: user.username.clone(),
+                email: user.email.clone(),
             })
         } else {
             Err(AdminDenied::NotAnAdmin)
@@ -486,5 +490,13 @@ mod tests {
         // Same username in both realms, so the id is what disambiguates.
         assert_eq!(boom.username, babamul.username);
         assert_ne!(boom.user_id, babamul.user_id);
+    }
+
+    #[test]
+    fn the_recorded_actor_carries_the_email() {
+        let actor = resolve_admin(None, Some(&babamul_user(true)))
+            .unwrap()
+            .as_task_actor();
+        assert_eq!(actor.email.as_deref(), Some("pete@example.org"));
     }
 }
