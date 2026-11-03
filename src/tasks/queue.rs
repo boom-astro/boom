@@ -372,17 +372,22 @@ pub async fn get(db: &Database, task_id: &str) -> Result<Option<Task>, QueueErro
     Ok(collection(db).find_one(doc! { "_id": task_id }).await?)
 }
 
-/// Most recent runs first, optionally filtered by task type.
+/// Runs, most recent first. An empty `statuses` means any status.
 pub async fn list(
     db: &Database,
     task_type: Option<&str>,
+    statuses: &[TaskStatus],
     limit: i64,
 ) -> Result<Vec<Task>, QueueError> {
     use futures::TryStreamExt;
-    let filter: Document = match task_type {
-        Some(t) => doc! { "task_type": t },
-        None => doc! {},
-    };
+    let mut filter = Document::new();
+    if let Some(t) = task_type {
+        filter.insert("task_type", t);
+    }
+    if !statuses.is_empty() {
+        let statuses: Vec<&str> = statuses.iter().map(TaskStatus::as_str).collect();
+        filter.insert("status", doc! { "$in": statuses });
+    }
     let cursor = collection(db)
         .find(filter)
         .sort(doc! { "requested_at": -1 })
@@ -425,6 +430,7 @@ mod tests {
             actor: Actor {
                 user_id: "test".into(),
                 username: "test".into(),
+                email: None,
             },
             trigger: Trigger::Api,
             requested_at: now(),
@@ -436,6 +442,7 @@ mod tests {
             cancel_requested: false,
             error: None,
             attempts: 0,
+            resubmitted_from: None,
         }
     }
 
@@ -855,6 +862,36 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+        cleanup(&db, &task_type).await;
+    }
+
+    #[tokio::test]
+    async fn listing_filters_by_status() {
+        let db = crate::conf::get_test_db().await;
+        let task_type = unique_type();
+        let waiting = queued(&task_type, serde_json::json!({}));
+        let failed = queued(&task_type, serde_json::json!({}));
+        submit(&db, &waiting).await.unwrap();
+        submit(&db, &failed).await.unwrap();
+        finish(&db, &failed.id, TaskStatus::Failed, Some("boom".into()))
+            .await
+            .unwrap();
+
+        let ids = |runs: Vec<Task>| runs.into_iter().map(|t| t.id).collect::<Vec<_>>();
+        let only_failed = list(&db, Some(&task_type), &[TaskStatus::Failed], 10)
+            .await
+            .unwrap();
+        assert_eq!(ids(only_failed), vec![failed.id.clone()]);
+        let active = list(
+            &db,
+            Some(&task_type),
+            &[TaskStatus::Queued, TaskStatus::Running],
+            10,
+        )
+        .await
+        .unwrap();
+        assert_eq!(ids(active), vec![waiting.id.clone()]);
+        assert_eq!(list(&db, Some(&task_type), &[], 10).await.unwrap().len(), 2);
         cleanup(&db, &task_type).await;
     }
 }

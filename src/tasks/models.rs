@@ -50,6 +50,11 @@ impl TaskStatus {
 pub struct Actor {
     pub user_id: String,
     pub username: String,
+    /// Absent on runs recorded before it was captured, and on system runs.
+    /// Usernames are derived from an email's local part, so "admin" is not
+    /// enough to say who.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
 }
 
 impl Actor {
@@ -62,6 +67,7 @@ impl Actor {
         Self {
             user_id: "system".to_string(),
             username: "system".to_string(),
+            email: None,
         }
     }
 }
@@ -125,6 +131,9 @@ pub struct Task {
     /// deploy is on its second attempt, which is normal and worth seeing.
     #[serde(default)]
     pub attempts: u32,
+    /// The finished run this one repeats, when it was submitted by resubmitting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resubmitted_from: Option<String>,
 }
 
 /// One flush of log lines from a run.
