@@ -125,6 +125,7 @@ milvus:
   password: "" # Set via BOOM_MILVUS__PASSWORD environment variable
   database: umn_babamul_vectordb # Override via BOOM_MILVUS__DATABASE environment variable
   timeout_seconds: 30
+  connect_timeout_seconds: 5
   collection:
     name: boom_ztf_fusion_embeddings
     dim: 384
