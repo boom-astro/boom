@@ -84,6 +84,22 @@ async fn main() {
     let shutting_down = Arc::new(AtomicBool::new(false));
     spawn_signal_handler(shutting_down.clone());
 
+    let schedules = tasks::schedule::configured(&config);
+    for schedule in &schedules {
+        info!(
+            "scheduling {} every {} minutes",
+            schedule.task_type,
+            schedule.every.as_secs() / 60
+        );
+    }
+    if !schedules.is_empty() {
+        tokio::spawn(tasks::schedule::run(
+            db.clone(),
+            schedules,
+            shutting_down.clone(),
+        ));
+    }
+
     while !shutting_down.load(Ordering::Relaxed) {
         // Before claiming: anything whose worker stopped renewing its lease is
         // ours to pick up. Cheap, and it is what recovers a run orphaned by a
