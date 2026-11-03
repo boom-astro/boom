@@ -332,6 +332,7 @@ tns:
     max_age_days: 60.0
     refresh_hours: 24.0
     max_objects: 250
+# Off until each is ingested on this deployment, see docs/catalogs.md.
 crossmatch:
   ztf:
     Gaia_DR3:
@@ -605,6 +606,10 @@ crossmatch:
         w2mpro: 1
         w3mpro: 1
         w4mpro: 1
+    eRASS1_Main: null
+    5XMM_DR15: null
+    2SXPS: null
+    4FGL_DR4: null
     watchlist_supernovas:
       radius: 2.0
       use_distance: false
@@ -896,6 +901,10 @@ crossmatch:
         w2mpro: 1
         w3mpro: 1
         w4mpro: 1
+    eRASS1_Main: null
+    5XMM_DR15: null
+    2SXPS: null
+    4FGL_DR4: null
     watchlist_supernovas:
       radius: 2.0
       use_distance: false
@@ -1187,6 +1196,10 @@ crossmatch:
         w2mpro: 1
         w3mpro: 1
         w4mpro: 1
+    eRASS1_Main: null
+    5XMM_DR15: null
+    2SXPS: null
+    4FGL_DR4: null
   winter:
     Gaia_DR3:
       radius: 2.0 # 2 arcseconds
@@ -1459,6 +1472,10 @@ crossmatch:
         w2mpro: 1
         w3mpro: 1
         w4mpro: 1
+    eRASS1_Main: null
+    5XMM_DR15: null
+    2SXPS: null
+    4FGL_DR4: null
     watchlist_wtp:
       radius: 2.75 # 2.75 arcseconds, one WISE pixel
       use_distance: false

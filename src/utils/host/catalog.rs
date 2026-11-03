@@ -4,6 +4,7 @@
 //! Legacy Survey gives a Tractor half-light radius plus ellipticity components.
 //! Both end up as the same semi-axes and PA.
 
+use flare::spatial::great_circle_distance;
 use mongodb::bson::{Bson, Document};
 
 use crate::utils::spatial::get_opt_f64_from_doc as opt_f64;
@@ -226,8 +227,62 @@ pub const LS_DR10: &str = "LSDR10";
 /// NED-LVS comes first, for its curated diameters and redshift-independent
 /// distances. Legacy Survey shreds large galaxies into many rows, each of which
 /// would split the posterior among fragments of one galaxy, so a Legacy row
-/// inside an accepted NED-LVS galaxy (d_DLR <= 1) is dropped.
+/// inside an accepted NED-LVS galaxy (d_DLR <= 1) is dropped. A DESI spectrum on
+/// a galaxy's centre then replaces its missing or photometric redshift.
 pub fn collect_galaxies(
+    xmatches: &std::collections::HashMap<String, Vec<Document>>,
+    config: &HostGalaxyConfig,
+) -> Vec<GalaxyCandidate> {
+    let mut galaxies = shaped_galaxies(xmatches, config);
+    if let Some(spectra) = xmatches.get(&config.desi_catalog) {
+        for galaxy in galaxies.iter_mut() {
+            add_spectroscopic_redshift(galaxy, spectra, config);
+        }
+    }
+    galaxies
+}
+
+fn is_good_galaxy_spectrum(doc: &Document) -> bool {
+    let zwarn = match doc.get("zwarn") {
+        Some(Bson::Int64(v)) => *v,
+        Some(Bson::Int32(v)) => *v as i64,
+        _ => return false,
+    };
+    zwarn == 0
+        && opt_string(doc, "spectype").as_deref() == Some("GALAXY")
+        && opt_f64(doc, "z").is_some_and(|z| z > 0.0)
+}
+
+fn add_spectroscopic_redshift(
+    galaxy: &mut GalaxyCandidate,
+    spectra: &[Document],
+    config: &HostGalaxyConfig,
+) {
+    let photometric = galaxy.redshift.is_none()
+        || (galaxy.catalog.as_deref() == Some(LS_DR10) && galaxy.redshift_err.is_some());
+    if !photometric {
+        return;
+    }
+    let spectrum = spectra
+        .iter()
+        .filter(|doc| is_good_galaxy_spectrum(doc))
+        .filter_map(|doc| {
+            let sep = great_circle_distance(
+                galaxy.ra,
+                galaxy.dec,
+                opt_f64(doc, "ra")?,
+                opt_f64(doc, "dec")?,
+            ) * 3600.0;
+            (sep <= config.spectrum_match_arcsec).then_some((doc, sep))
+        })
+        .min_by(|a, b| a.1.total_cmp(&b.1));
+    if let Some((doc, _)) = spectrum {
+        galaxy.redshift = opt_f64(doc, "z");
+        galaxy.redshift_err = opt_f64(doc, "zerr");
+    }
+}
+
+fn shaped_galaxies(
     xmatches: &std::collections::HashMap<String, Vec<Document>>,
     config: &HostGalaxyConfig,
 ) -> Vec<GalaxyCandidate> {

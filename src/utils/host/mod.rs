@@ -41,7 +41,7 @@ mod sersic;
 mod types;
 
 pub use associate::{associate_host, AssociationConfig, AssociationResult};
-pub use association::{HostGalaxyAssociation, StoredHostCandidate};
+pub use association::{HostGalaxyAssociation, HostSummary, StoredHostCandidate};
 pub use catalog::{collect_galaxies, galaxy_from_ls_dr10, galaxy_from_ned, LS_DR10, NED};
 pub use config::HostGalaxyConfig;
 pub use dlr::{compute_dlr, DlrResult};

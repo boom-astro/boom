@@ -239,6 +239,7 @@ async fn main() -> std::io::Result<()> {
                 .service(routes::tasks::get_tasks)
                 .service(routes::tasks::get_task_logs)
                 .service(routes::tasks::cancel_task)
+                .service(routes::tasks::resubmit_task)
                 .service(routes::tasks::get_data_mutations)
                 .service(routes::tasks::get_enrichment_status)
                 .service(routes::tasks::accept_enrichment_set)

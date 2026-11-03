@@ -542,6 +542,7 @@ mod tests {
             "/tasks/abc123",
             "/tasks/abc123/logs",
             "/tasks/abc123/cancel",
+            "/tasks/abc123/resubmit",
             "/data/mutations",
             "/enrichment/status",
             "/enrichment/sets/4/accept",
