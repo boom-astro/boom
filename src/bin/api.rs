@@ -66,18 +66,18 @@ async fn main() -> std::io::Result<()> {
     }
     let cutout_storages = web::Data::new(cutout_storage_map);
 
-    // Connect to Milvus once at startup when enabled. A failure here is
-    // non-fatal: the embedding endpoints reply with a clear error, but the rest
-    // of the API still boots. `None` means disabled or unreachable.
+    // Lazy, so Milvus being down at startup only fails requests until it is
+    // back rather than until the next restart. `None` means disabled or
+    // misconfigured.
     let milvus_client: Option<MilvusClient> = if config.milvus.enabled {
-        match MilvusClient::connect(&config.milvus).await {
+        match MilvusClient::connect_lazy(&config.milvus) {
             Ok(client) => {
                 tracing::info!("Milvus embedding endpoints are ENABLED");
                 Some(client)
             }
             Err(e) => {
                 tracing::warn!(
-                    "Milvus configuration is enabled but connection failed, \
+                    "Milvus configuration is enabled but invalid, \
                 so embedding endpoints will be unavailable: {}",
                     e
                 );
