@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -17,6 +17,9 @@ const DEFAULT_TOP_K = 10;
 
 const EMBEDDING_SURVEY = "ztf";
 
+/** Wait before each automatic count retry; the last repeats until one succeeds. */
+const COUNT_RETRY_DELAYS_MS = [5_000, 10_000, 20_000, 30_000];
+
 function formatScore(score: number): string {
   return score.toFixed(4);
 }
@@ -33,18 +36,33 @@ export default function Embeddings() {
   const [count, setCount] = useState<number | null>(null);
   const [countError, setCountError] = useState<string | null>(null);
 
-  const loadCount = useCallback(() => {
+  // Bumping this reloads the count; a failed load schedules the next bump.
+  const [countLoad, setCountLoad] = useState(0);
+  const countFailures = useRef(0);
+
+  useEffect(() => {
+    let canceled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     fetchEmbeddingsCount()
       .then((n) => {
+        if (canceled) return;
+        countFailures.current = 0;
         setCount(n);
         setCountError(null);
       })
-      .catch((e) => setCountError(e instanceof Error ? e.message : "Failed to fetch count"));
-  }, []);
-
-  useEffect(() => {
-    loadCount();
-  }, [loadCount]);
+      .catch((e) => {
+        if (canceled) return;
+        setCountError(e instanceof Error ? e.message : "Failed to fetch count");
+        const delay =
+          COUNT_RETRY_DELAYS_MS[Math.min(countFailures.current, COUNT_RETRY_DELAYS_MS.length - 1)];
+        countFailures.current += 1;
+        timer = setTimeout(() => setCountLoad((n) => n + 1), delay);
+      });
+    return () => {
+      canceled = true;
+      clearTimeout(timer);
+    };
+  }, [countLoad]);
 
   async function runSearch(e: React.FormEvent) {
     e.preventDefault();
@@ -83,7 +101,12 @@ export default function Embeddings() {
             <CardTitle className="text-2xl tabular-nums">
               {countError ? "-" : count === null ? "…" : count.toLocaleString()}
             </CardTitle>
-            {countError && <p className="text-sm text-destructive">{countError}</p>}
+            {countError && (
+              <>
+                <p className="text-sm text-destructive">{countError}</p>
+                <p className="text-sm text-muted-foreground">Retrying automatically.</p>
+              </>
+            )}
           </CardHeader>
         </Card>
         <Card>
