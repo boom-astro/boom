@@ -66,9 +66,10 @@ async fn main() -> std::io::Result<()> {
     }
     let cutout_storages = web::Data::new(cutout_storage_map);
 
-    // Lazy, so Milvus being down at startup only fails requests until it is
-    // back rather than until the next restart. `None` means disabled or
-    // misconfigured.
+    // The client is built now but opens its connection on first use, so if
+    // Milvus is down when the API starts, the embedding endpoints recover once
+    // it is back, without a restart. `None` means Milvus is disabled or its
+    // config is invalid.
     let milvus_client: Option<MilvusClient> = if config.milvus.enabled {
         match MilvusClient::connect_lazy(&config.milvus) {
             Ok(client) => {

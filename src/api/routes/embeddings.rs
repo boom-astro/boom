@@ -2,7 +2,7 @@
 //!
 //! Milvus is optional (see `milvus.enabled`), so these handlers receive the
 //! client as `web::Data<Option<MilvusClient>>` and reply with a clear error
-//! when it is switched off or was unreachable at startup. Every method on
+//! when it is switched off or misconfigured. Every method on
 //! [`MilvusClient`] takes `&mut self`, so each handler clones the shared client
 //! (cheap — the tonic `Channel` shares one connection pool) to get a local
 //! owned copy rather than serializing all requests through a lock.

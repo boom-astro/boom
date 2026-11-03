@@ -97,7 +97,7 @@ impl MilvusClient {
         let mut endpoint = Endpoint::from_shared(endpoint_url.clone())
             .map_err(|_| MilvusError::InvalidEndpoint(endpoint_url))?
             .timeout(Duration::from_secs(config.timeout_seconds))
-            .connect_timeout(Duration::from_secs(config.timeout_seconds));
+            .connect_timeout(Duration::from_secs(config.connect_timeout_seconds));
 
         if config.tls {
             // NRP serves a standard Let's Encrypt certificate, so the platform
