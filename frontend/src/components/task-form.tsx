@@ -346,7 +346,7 @@ export function TaskForm({
           {busy ? "Starting…" : "Run task"}
         </Button>
         <Button variant="outline" size="sm" onClick={onCancel}>
-          Back
+          Cancel
         </Button>
         {missing.length > 0 && (
           <span className="text-xs text-muted-foreground">

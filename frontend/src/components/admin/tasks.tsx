@@ -3,6 +3,7 @@
 // schema. Each run records who started it and with which parameters; see
 // docs/task-system.md.
 import { useEffect, useRef, useState } from "react";
+import { IconArrowLeft } from "@tabler/icons-react";
 import {
   ApiRequestError,
   cancelTaskRun,
@@ -516,6 +517,20 @@ export function NewRunDialog({
     <Dialog open={open} onOpenChange={(next) => !next && onClose()}>
       <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-2xl">
         <DialogHeader>
+          {task && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="-ml-2 w-fit text-muted-foreground"
+              onClick={() => {
+                setSelected(null);
+                setError(null);
+              }}
+            >
+              <IconArrowLeft />
+              All tasks
+            </Button>
+          )}
           <DialogTitle>{task ? task.title : "Run a task"}</DialogTitle>
           <DialogDescription>
             {task
@@ -530,10 +545,7 @@ export function NewRunDialog({
             key={task.id}
             task={task}
             busy={busy}
-            onCancel={() => {
-              setSelected(null);
-              setError(null);
-            }}
+            onCancel={onClose}
             onSubmit={(params) => void submit(task.id, params)}
           />
         ) : (
