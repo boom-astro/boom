@@ -1680,6 +1680,111 @@ fn default_linker_pass() -> bool {
 }
 
 #[derive(Deserialize, Debug, Clone)]
+pub struct TnsConfig {
+    #[serde(default = "default_tns_base_url")]
+    pub base_url: String,
+    #[serde(default)]
+    pub bot_id: String,
+    #[serde(default)]
+    pub bot_name: String,
+    #[serde(default)]
+    pub api_key: String,
+    #[serde(default = "default_tns_sync_every_minutes")]
+    pub sync_every_minutes: u64,
+    #[serde(default = "default_tns_full_sync_every_hours")]
+    pub full_sync_every_hours: u64,
+    #[serde(default)]
+    pub photometry: TnsPhotometryConfig,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct TnsPhotometryConfig {
+    #[serde(default = "default_tns_photometry_every_minutes")]
+    pub every_minutes: u64,
+    #[serde(default = "default_tns_photometry_max_distance_mpc")]
+    pub max_distance_mpc: f64,
+    #[serde(default = "default_tns_photometry_max_age_days")]
+    pub max_age_days: f64,
+    #[serde(default = "default_tns_photometry_refresh_hours")]
+    pub refresh_hours: f64,
+    #[serde(default = "default_tns_photometry_max_objects")]
+    pub max_objects: usize,
+}
+
+impl Default for TnsConfig {
+    fn default() -> Self {
+        TnsConfig {
+            base_url: default_tns_base_url(),
+            bot_id: String::new(),
+            bot_name: String::new(),
+            api_key: String::new(),
+            sync_every_minutes: default_tns_sync_every_minutes(),
+            full_sync_every_hours: default_tns_full_sync_every_hours(),
+            photometry: TnsPhotometryConfig::default(),
+        }
+    }
+}
+
+impl Default for TnsPhotometryConfig {
+    fn default() -> Self {
+        TnsPhotometryConfig {
+            every_minutes: default_tns_photometry_every_minutes(),
+            max_distance_mpc: default_tns_photometry_max_distance_mpc(),
+            max_age_days: default_tns_photometry_max_age_days(),
+            refresh_hours: default_tns_photometry_refresh_hours(),
+            max_objects: default_tns_photometry_max_objects(),
+        }
+    }
+}
+
+impl TnsConfig {
+    pub fn has_credentials(&self) -> bool {
+        [&self.bot_id, &self.bot_name, &self.api_key]
+            .iter()
+            .all(|value| !value.trim().is_empty())
+    }
+
+    pub fn has_partial_credentials(&self) -> bool {
+        !self.has_credentials()
+            && [&self.bot_id, &self.bot_name, &self.api_key]
+                .iter()
+                .any(|value| !value.trim().is_empty())
+    }
+}
+
+fn default_tns_base_url() -> String {
+    "https://www.wis-tns.org".to_string()
+}
+
+fn default_tns_sync_every_minutes() -> u64 {
+    60
+}
+
+fn default_tns_full_sync_every_hours() -> u64 {
+    24
+}
+
+fn default_tns_photometry_every_minutes() -> u64 {
+    360
+}
+
+fn default_tns_photometry_max_distance_mpc() -> f64 {
+    200.0
+}
+
+fn default_tns_photometry_max_age_days() -> f64 {
+    60.0
+}
+
+fn default_tns_photometry_refresh_hours() -> f64 {
+    24.0
+}
+
+fn default_tns_photometry_max_objects() -> usize {
+    250
+}
+
+#[derive(Deserialize, Debug, Clone)]
 pub struct AppConfig {
     pub api: ApiConfig,
     pub database: DatabaseConfig,
@@ -1702,6 +1807,8 @@ pub struct AppConfig {
     pub host_galaxy: HostGalaxyConfig,
     #[serde(default)]
     pub linker: LinkerConfig,
+    #[serde(default)]
+    pub tns: TnsConfig,
     pub cutouts_storage: CutoutsStorage,
 }
 
