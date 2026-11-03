@@ -164,7 +164,7 @@ function LayoutRoutes() {
                   <Route path="/admin" element={<AdminRoute><Admin /></AdminRoute>} />
                   <Route path="/dashboard" element={<Dashboard />} />
                   <Route path="/telescopes" element={<Telescopes />} />
-                  <Route path="/embeddings" element={<Embeddings />} />
+                  <Route path="/embeddings" element={<ProtectedRoute><Embeddings /></ProtectedRoute>} />
                   <Route path="/docs/kafka" element={<KafkaDocs />} />
                   <Route path="/docs/kafka/access-guide" element={<KafkaAccessGuide />} />
                   <Route path="/docs/api" element={<ApiDocs />} />
