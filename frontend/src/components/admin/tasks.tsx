@@ -120,7 +120,7 @@ function RunSummary({ run }: { run: Task }) {
       <div className="text-muted-foreground mb-1">
         started by {actorLabel(run.actor)} · requested {formatTime(run.requested_at)}
       </div>
-      <pre className="font-mono whitespace-pre-wrap break-all">
+      <pre className="max-h-64 overflow-y-auto font-mono whitespace-pre-wrap break-all">
         {JSON.stringify(run.params, null, 2)}
       </pre>
     </div>
@@ -606,7 +606,8 @@ export function RunsTable({
   error,
 }: {
   active: Task[];
-  finished: Task[];
+  /** Null while the current filter's runs are being fetched. */
+  finished: Task[] | null;
   filter: HistoryFilter;
   onFilter: (filter: HistoryFilter) => void;
   limit: number;
@@ -618,10 +619,19 @@ export function RunsTable({
   error: string | null;
 }) {
   const showActive = filter === "all" || filter === "active";
-  const rows = [...(showActive ? active : []), ...(filter === "active" ? [] : finished)];
+  const shownFinished = filter === "active" ? [] : (finished ?? []);
+  // The two lists are read separately, so a run that finished between the reads
+  // is in both; its finished copy is the newer one.
+  const finishedIds = new Set(shownFinished.map((run) => run._id));
+  const rows = [
+    ...(showActive ? active.filter((run) => !finishedIds.has(run._id)) : []),
+    ...shownFinished,
+  ];
   const emptyText = error
     ? "Task runs could not be read"
-    : filter === "all"
+    : finished === null && filter !== "active"
+      ? "Loading…"
+      : filter === "all"
       ? "Nothing has been run yet"
       : filter === "active"
         ? "Nothing is queued or running"
@@ -754,7 +764,7 @@ export function RunsTable({
           <span>
             {rows.length} {rows.length === 1 ? "run" : "runs"}
           </span>
-          {filter !== "active" && finished.length >= limit && limit < HISTORY_MAX && (
+          {filter !== "active" && shownFinished.length >= limit && limit < HISTORY_MAX && (
             <Button variant="outline" size="sm" onClick={onShowMore}>
               Show more
             </Button>

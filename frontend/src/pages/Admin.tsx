@@ -71,7 +71,11 @@ export default function Admin() {
 
   const [catalogs, setCatalogs] = useState<CatalogStatus[]>([]);
   const [active, setActive] = useState<Task[]>([]);
-  const [history, setHistory] = useState<Task[]>([]);
+  // Kept with the filter it was fetched for, so switching filters never shows
+  // the previous filter's runs under the new one.
+  const [history, setHistory] = useState<{ filter: HistoryFilter; runs: Task[] } | null>(
+    null,
+  );
   const [historyFilter, setHistoryFilter] = useState<HistoryFilter>("all");
   const [historyLimit, setHistoryLimit] = useState(HISTORY_PAGE);
   const [taskTypes, setTaskTypes] = useState<TaskType[]>([]);
@@ -131,7 +135,7 @@ export default function Admin() {
       ]);
       setCatalogs(status);
       setActive(inFlight);
-      if (latestHistoryKey.current === key) setHistory(recent);
+      if (latestHistoryKey.current === key) setHistory({ filter: historyFilter, runs: recent });
       setTaskTypes(types);
       if (drift) setEnrichment(drift);
       setExports(exported);
@@ -323,7 +327,7 @@ export default function Admin() {
             ) : (
               <RunsTable
                 active={active}
-                finished={history}
+                finished={history?.filter === historyFilter ? history.runs : null}
                 filter={historyFilter}
                 onFilter={(f) => {
                   setHistoryFilter(f);
