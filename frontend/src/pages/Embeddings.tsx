@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import {
+  EmbeddingsDisabled,
   fetchEmbeddingsCount,
   fetchSimilarObjects,
   type SimilarObject,
@@ -36,6 +37,7 @@ export default function Embeddings() {
 
   const [count, setCount] = useState<number | null>(null);
   const [countError, setCountError] = useState<string | null>(null);
+  const [countDisabled, setCountDisabled] = useState(false);
 
   // Bumping this reloads the count; a failed load schedules the next bump.
   const [countLoad, setCountLoad] = useState(0);
@@ -54,6 +56,10 @@ export default function Embeddings() {
       .catch((e) => {
         if (canceled) return;
         setCountError(e instanceof Error ? e.message : "Failed to fetch count");
+        if (e instanceof EmbeddingsDisabled) {
+          setCountDisabled(true);
+          return;
+        }
         const delay = Math.min(COUNT_RETRY_BASE_MS * 2 ** countFailures.current, COUNT_RETRY_MAX_MS);
         countFailures.current += 1;
         timer = setTimeout(() => setCountLoad((n) => n + 1), delay);
@@ -104,7 +110,9 @@ export default function Embeddings() {
             {countError && (
               <>
                 <p className="text-sm text-destructive">{countError}</p>
-                <p className="text-sm text-muted-foreground">Retrying automatically.</p>
+                {!countDisabled && (
+                  <p className="text-sm text-muted-foreground">Retrying automatically.</p>
+                )}
               </>
             )}
           </CardHeader>

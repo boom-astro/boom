@@ -38,8 +38,8 @@ pub(crate) fn client_or_unavailable(
 ) -> Result<MilvusClient, HttpResponse> {
     match milvus.get_ref() {
         Some(client) => Ok(client.clone()),
-        None => Err(response::internal_error(
-            "Milvus is not enabled or was unavailable at startup",
+        None => Err(response::not_implemented(
+            "Milvus is not enabled or misconfigured",
         )),
     }
 }
@@ -119,7 +119,8 @@ pub(crate) async fn embeddings_count_response(
     responses(
         (status = 200, description = "Nearest neighbors, best-first", body = serde_json::Value),
         (status = 404, description = "No embedding stored for the object"),
-        (status = 500, description = "Milvus unavailable or search failed")
+        (status = 500, description = "Milvus unavailable or search failed"),
+        (status = 501, description = "Milvus not enabled or misconfigured")
     ),
     tags=["Similarity"]
 )]
@@ -137,7 +138,8 @@ pub async fn post_similar_objects(
     path = "/embeddings/count",
     responses(
         (status = 200, description = "Embedding count retrieved"),
-        (status = 500, description = "Milvus unavailable or count failed")
+        (status = 500, description = "Milvus unavailable or count failed"),
+        (status = 501, description = "Milvus not enabled or misconfigured")
     ),
     tags=["Similarity"]
 )]
