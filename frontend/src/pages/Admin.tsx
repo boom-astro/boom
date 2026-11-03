@@ -10,7 +10,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import {
   ACTIVE_STATUSES,
-  cancelTaskRun,
   acceptEnrichmentSet,
   conflictingRun,
   fetchCatalogExports,
@@ -87,7 +86,6 @@ export default function Admin() {
   // stay until they have read it.
   const [loadError, setLoadError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
   // Consecutive failed polls. The page gives up rather than backing off
   // forever: one that has quietly stopped updating looks exactly like an idle
@@ -191,19 +189,6 @@ export default function Admin() {
   const catalogIssues = countIssues(catalogs).count;
   const enrichmentIssues = countEnrichmentIssues(enrichment).count;
 
-  async function onCancelRun(run: Task) {
-    setActionError(null);
-    try {
-      // A running task stops at its next safe point, so this reports what the
-      // server says it did rather than implying the run has stopped.
-      setNotice(await cancelTaskRun(run._id));
-      await refresh();
-    } catch (e) {
-      setNotice(null);
-      setActionError(e instanceof Error ? e.message : String(e));
-    }
-  }
-
   function onQueued(run: Task, why?: string) {
     setResubmitting(null);
     setNewRun(false);
@@ -244,7 +229,6 @@ export default function Admin() {
   async function start(key: string, submit: () => Promise<Task>, already: string) {
     setBusy(key);
     setActionError(null);
-    setNotice(null);
     try {
       const run = await submit();
       openRun(run._id);
@@ -291,9 +275,6 @@ export default function Admin() {
           <div className="mb-4 rounded-lg border border-destructive/50 p-3">
             <p className="text-sm text-destructive">{actionError}</p>
           </div>
-        )}
-        {notice && !actionError && (
-          <p className="mb-4 text-sm text-muted-foreground">{notice}</p>
         )}
         {stalled && (
           <div className="mb-4 flex items-center justify-between gap-4 rounded-lg border p-3">
@@ -414,7 +395,7 @@ export default function Admin() {
 
       <CancelRunDialog
         run={confirmCancel}
-        onConfirm={(run) => void onCancelRun(run)}
+        onCanceled={() => void refresh()}
         onClose={() => setConfirmCancel(null)}
       />
 

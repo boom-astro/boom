@@ -334,12 +334,14 @@ export function submitCatalogIngest(catalog: string, dropExisting = false): Prom
  * "cancellation requested" and "run canceled" are different outcomes and the
  * operator needs to know which one they got.
  */
-export function cancelTaskRun(runId: string): Promise<string> {
-  return send<unknown>(
+/** The run's status when the cancel landed: `running` means it was asked to
+ *  stop, `canceled` that it never started, anything else that it had ended. */
+export function cancelTaskRun(runId: string): Promise<TaskStatus | null> {
+  return request<{ status?: TaskStatus } | null>(
     `/tasks/${encodeURIComponent(runId)}/cancel`,
     { method: "POST" },
     null,
-  ).then((envelope) => envelope.message || "Cancellation requested.");
+  ).then((data) => data?.status ?? null);
 }
 
 export type AdminUser = {

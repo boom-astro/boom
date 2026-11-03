@@ -4,6 +4,7 @@
 // docs/task-system.md.
 import { useEffect, useRef, useState } from "react";
 import { IconArrowLeft } from "@tabler/icons-react";
+import { toast } from "sonner";
 import {
   ApiRequestError,
   cancelTaskRun,
@@ -14,6 +15,7 @@ import {
   resubmitTaskRun,
   submitTask,
   type TaskLogLine,
+  type TaskStatus,
   type Task,
   type TaskType,
 } from "@/lib/adminApi";
@@ -125,16 +127,39 @@ function RunSummary({ run }: { run: Task }) {
   );
 }
 
+function cancelOutcome(status: TaskStatus | null): string {
+  switch (status) {
+    case "running":
+    case null:
+      return "Cancel requested. The run stops at its next safe point.";
+    case "canceled":
+    case "queued":
+      return "Run canceled.";
+    default:
+      return `That run had already ${status}, so there was nothing to cancel.`;
+  }
+}
+
 /** Canceling sits one click from a list of runs, so it asks first. */
 export function CancelRunDialog({
   run,
-  onConfirm,
+  onCanceled,
   onClose,
 }: {
   run: Task | null;
-  onConfirm: (run: Task) => void;
+  onCanceled?: () => void;
   onClose: () => void;
 }) {
+  async function confirm(target: Task) {
+    onClose();
+    try {
+      toast(cancelOutcome(await cancelTaskRun(target._id)));
+      onCanceled?.();
+    } catch (e) {
+      toast.error(`Could not cancel the run: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
   return (
     <Dialog open={run !== null} onOpenChange={(open) => !open && onClose()}>
       <DialogContent>
@@ -154,10 +179,7 @@ export function CancelRunDialog({
           </Button>
           <Button
             variant="destructive"
-            onClick={() => {
-              if (run) onConfirm(run);
-              onClose();
-            }}
+            onClick={() => run && void confirm(run)}
           >
             Cancel run
           </Button>
@@ -277,8 +299,6 @@ export function RunDetail({
   const [run, setRun] = useState<Task | null>(null);
   const [lines, setLines] = useState<TaskLogLine[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
-  const [canceling, setCanceling] = useState(false);
   const [confirmCancel, setConfirmCancel] = useState<Task | null>(null);
   // Tail cursor: the server returns only chunks after this, so a long-running
   // ingest is not re-fetched in full on every poll.
@@ -297,8 +317,6 @@ export function RunDetail({
     setLines([]);
     setRun(null);
     setError(null);
-    setNotice(null);
-    setCanceling(false);
 
     async function poll() {
       try {
@@ -339,21 +357,6 @@ export function RunDetail({
     if (box && following.current) box.scrollTop = box.scrollHeight;
   }, [lines.length]);
 
-  async function cancel() {
-    setCanceling(true);
-    try {
-      // A running task stops at its next safe point rather than being killed,
-      // so the button cannot report a completed cancellation. The server says
-      // which of the two happened and that is what gets shown.
-      setNotice(await cancelTaskRun(runId));
-      setError(null);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setCanceling(false);
-    }
-  }
-
   const stopping = run?.cancel_requested && isActive(run);
 
   return (
@@ -393,10 +396,10 @@ export function RunDetail({
               <Button
                 variant="outline"
                 size="sm"
-                disabled={canceling || run.cancel_requested}
+                disabled={run.cancel_requested}
                 onClick={() => setConfirmCancel(run)}
               >
-                {canceling ? "Canceling…" : run.cancel_requested ? "Cancel requested" : "Cancel…"}
+                {run.cancel_requested ? "Cancel requested" : "Cancel…"}
               </Button>
             ) : (
               <Button variant="outline" size="sm" onClick={() => onResubmit(run)}>
@@ -426,7 +429,6 @@ export function RunDetail({
         )}
 
         {openedWith && <p className="text-sm text-muted-foreground">{openedWith}</p>}
-        {notice && <p className="text-sm text-muted-foreground">{notice}</p>}
         {run?.error && <p className="text-sm text-destructive">{run.error}</p>}
         {error && <p className="text-sm text-destructive">{error}</p>}
 
@@ -466,7 +468,8 @@ export function RunDetail({
 
       <CancelRunDialog
         run={confirmCancel}
-        onConfirm={() => void cancel()}
+        // Re-read now rather than at the next poll, so the button reflects it.
+        onCanceled={() => void fetchTaskRun(runId).then(setRun, () => {})}
         onClose={() => setConfirmCancel(null)}
       />
     </>
