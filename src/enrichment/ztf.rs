@@ -4,6 +4,7 @@ use crate::enrichment::{
     babamul::{Babamul, BabamulZtfAlert},
     decam::{add_decam_match, DecamMatch},
     fetch_alerts,
+    lsst::{lsst_detections, lsst_nondetections},
     models::{
         applecider_postprocess::{self, AppleCiderFusion, AppleCiderModalities},
         AcaiModel, AppleCiderOutputs, BtsBotModel, FusionModel, Model, ModelError, SharedModels,
@@ -17,8 +18,9 @@ use crate::utils::enums::{ProgramId, Survey};
 use crate::utils::host::{HostGalaxyAssociation, HostSummary};
 use crate::utils::lightcurves::{
     analyze_photometry, is_stationary, prepare_photometry, signed_snr, summarise_detections,
-    ActivityMetrics, AllBandsProperties, Band, DetectionHistory, EpisodeHistory, Outburst,
-    PerBandProperties, PhotometryMag, EPISODE_GAP_DAYS, STATIONARY_MIN_FORCED_SNR, ZTF_ZP,
+    ActivityMetrics, AllBandsProperties, Band, DetectionHistory, EpisodeHistory,
+    MultisurveyDetectionHistory, Outburst, PerBandProperties, PhotometryMag, EPISODE_GAP_DAYS,
+    STATIONARY_MIN_FORCED_SNR, ZTF_ZP,
 };
 use crate::utils::mpcorb::{elements_from_document, normalize_ztf_ssnamenr, ORBITS_COLLECTION};
 use crate::utils::outburst::{Point, MAX_SEPARATION_ARCSEC};
@@ -232,6 +234,29 @@ impl ZtfPhotometry {
             _ => None,
         }
     }
+}
+
+pub fn ztf_detections(
+    prv_candidates: &[ZtfPhotometry],
+) -> impl Iterator<Item = (f64, Survey, &Band)> {
+    prv_candidates
+        .iter()
+        .filter(|p| p.flux.is_some_and(|f| f >= 0.0))
+        .map(|p| (p.jd, Survey::Ztf, &p.band))
+}
+
+pub fn ztf_nondetections<'a>(
+    prv_nondetections: &'a [ZtfPhotometry],
+    fp_hists: &'a [ZtfPhotometry],
+) -> impl Iterator<Item = (f64, f32, Survey, &'a Band)> {
+    prv_nondetections
+        .iter()
+        .chain(
+            fp_hists
+                .iter()
+                .filter(|p| p.magpsf.is_none() && p.flux.is_some()),
+        )
+        .map(|p| (p.jd, p.diffmaglim as f32, Survey::Ztf, &p.band))
 }
 
 pub fn create_ztf_alert_pipeline(include_classifications: bool) -> Vec<Document> {
@@ -522,6 +547,8 @@ pub struct ZtfAlertProperties {
     /// `None` on alerts enriched before this field existed.
     #[serde(default)]
     pub detection_history: Option<DetectionHistory>,
+    #[serde(default)]
+    pub multisurvey_detection_history: Option<MultisurveyDetectionHistory>,
     /// Detection episodes, for finding sources that outburst more than once.
     /// `None` on alerts enriched before this field existed.
     pub episode_history: Option<EpisodeHistory>,
@@ -1468,10 +1495,27 @@ impl ZtfEnrichmentWorker {
             EPISODE_GAP_DAYS,
         );
         detection_history.add_nondetections(
-            alert
-                .prv_nondetections
-                .iter()
-                .map(|p| (p.jd, p.diffmaglim as f32)),
+            ztf_nondetections(&alert.prv_nondetections, &alert.fp_hists)
+                .map(|(jd, maglim, ..)| (jd, maglim)),
+            candidate.jd,
+        );
+
+        let lsst_match = alert.survey_matches.as_ref().and_then(|m| m.lsst.as_ref());
+        let multisurvey_detection_history = MultisurveyDetectionHistory::from_points(
+            ztf_detections(&alert.prv_candidates)
+                .chain(
+                    lsst_match
+                        .into_iter()
+                        .flat_map(|m| lsst_detections(&m.prv_candidates)),
+                )
+                .chain(alert.decam_match.iter().flat_map(|m| m.detections())),
+            ztf_nondetections(&alert.prv_nondetections, &alert.fp_hists)
+                .chain(
+                    lsst_match
+                        .into_iter()
+                        .flat_map(|m| lsst_nondetections(&m.fp_hists)),
+                )
+                .chain(alert.decam_match.iter().flat_map(|m| m.nondetections())),
             candidate.jd,
         );
 
@@ -1488,6 +1532,7 @@ impl ZtfEnrichmentWorker {
                 sso: Some(sso),
                 activity: Some(activity),
                 detection_history: Some(detection_history),
+                multisurvey_detection_history: Some(multisurvey_detection_history),
                 episode_history: Some(episode_history),
             },
             all_bands_properties,
