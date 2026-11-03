@@ -10,7 +10,7 @@ use crate::{
         models::response,
         routes::users::User,
     },
-    conf::{AppConfig, FilterWorkerConfig},
+    conf::{AppConfig, CatalogXmatchConfig, FilterWorkerConfig},
     enrichment::{
         DecamAlertProperties, LsstAlertProperties, WinterAlertProperties, ZtfAlertClassifications,
         ZtfAlertProperties,
@@ -76,7 +76,7 @@ use base64::prelude::{Engine, BASE64_STANDARD};
 use flare::Time;
 use futures::stream::{StreamExt, TryStreamExt};
 use mongodb::{
-    bson::{doc, Document},
+    bson::{doc, Bson, Document},
     Collection, Database,
 };
 use serde::{Deserialize, Serialize};
@@ -1684,6 +1684,65 @@ pub struct ZtfAlertToFilter {
     #[serde(rename = "DECAM")]
     pub decam: Option<DecamFilterMatch>,
     pub host_galaxy: Option<HostGalaxyAssociation>,
+    /// Absent without a GPU, NaN everywhere when the fit was skipped.
+    pub villar_fit: Option<VillarFit>,
+    /// Joined only for alerts with `properties.sso.designation`, others are dropped.
+    pub sso_history: Option<Vec<SsoHistoryEntry>>,
+}
+
+#[serdavro]
+#[derive(Debug, Deserialize, Serialize)]
+pub struct VillarFit {
+    pub reduced_chi2: f64,
+    pub peak_mag: f64,
+    pub t_peak: f64,
+    #[serde(rename = "A_ZTF_r")]
+    pub a_ztf_r: f64,
+    #[serde(rename = "beta_ZTF_r")]
+    pub beta_ztf_r: f64,
+    #[serde(rename = "gamma_ZTF_r")]
+    pub gamma_ztf_r: f64,
+    #[serde(rename = "t_0_ZTF_r")]
+    pub t_0_ztf_r: f64,
+    #[serde(rename = "tau_rise_ZTF_r")]
+    pub tau_rise_ztf_r: f64,
+    #[serde(rename = "tau_fall_ZTF_r")]
+    pub tau_fall_ztf_r: f64,
+    #[serde(rename = "extra_sigma_ZTF_r")]
+    pub extra_sigma_ztf_r: f64,
+    #[serde(rename = "A_ZTF_g")]
+    pub a_ztf_g: f64,
+    #[serde(rename = "beta_ZTF_g")]
+    pub beta_ztf_g: f64,
+    #[serde(rename = "gamma_ZTF_g")]
+    pub gamma_ztf_g: f64,
+    #[serde(rename = "t_0_ZTF_g")]
+    pub t_0_ztf_g: f64,
+    #[serde(rename = "tau_rise_ZTF_g")]
+    pub tau_rise_ztf_g: f64,
+    #[serde(rename = "tau_fall_ZTF_g")]
+    pub tau_fall_ztf_g: f64,
+    #[serde(rename = "extra_sigma_ZTF_g")]
+    pub extra_sigma_ztf_g: f64,
+}
+
+#[serdavro]
+#[derive(Debug, Deserialize, Serialize)]
+pub struct SsoHistoryEntry {
+    pub designation: String,
+    pub jd: f64,
+    pub fid: i32,
+    pub magpsf: f32,
+    pub sigmapsf: f32,
+    pub ra: f64,
+    pub dec: f64,
+    pub predicted_mag: Option<f32>,
+    pub separation_arcsec: Option<f32>,
+    pub helio_dist: Option<f32>,
+    pub topo_dist: Option<f32>,
+    pub phase_angle: Option<f32>,
+    pub true_anomaly: Option<f32>,
+    pub perihelion_time: Option<f64>,
 }
 
 #[serdavro]
@@ -1758,8 +1817,11 @@ pub struct DecamAlertToFilter {
     tags=["Filters"]
 )]
 #[get("/filters/schemas/{survey_name}")]
-pub async fn get_filter_schema(path: web::Path<(Survey,)>) -> HttpResponse {
-    // return the avro schema
+pub async fn get_filter_schema(
+    path: web::Path<(Survey,)>,
+    db: web::Data<Database>,
+    config: web::Data<AppConfig>,
+) -> HttpResponse {
     let survey_name = path.into_inner().0;
     let schema = match survey_name {
         Survey::Ztf => ZtfAlertToFilter::get_schema(),
@@ -1767,10 +1829,109 @@ pub async fn get_filter_schema(path: web::Path<(Survey,)>) -> HttpResponse {
         Survey::Winter => WinterAlertToFilter::get_schema(),
         Survey::Decam => DecamAlertToFilter::get_schema(),
     };
-    response::ok(
-        &format!("avro schema for survey {}", survey_name),
-        serde_json::json!(schema),
-    )
+    let mut schema = serde_json::json!(schema);
+    let catalogs = config
+        .crossmatch
+        .get(&survey_name)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    if let Some(field) = cross_matches_field(&db, catalogs).await {
+        if let Some(fields) = schema["fields"].as_array_mut() {
+            fields.push(field);
+        }
+    }
+    response::ok(&format!("avro schema for survey {}", survey_name), schema)
+}
+
+const CATALOG_SAMPLE_SIZE: i64 = 20;
+
+fn bson_avro_type(value: &Bson) -> Option<serde_json::Value> {
+    Some(match value {
+        Bson::Null | Bson::Undefined => return None,
+        Bson::Double(_) => serde_json::json!("double"),
+        Bson::Int32(_) => serde_json::json!("int"),
+        Bson::Int64(_) => serde_json::json!("long"),
+        Bson::Boolean(_) => serde_json::json!("boolean"),
+        Bson::Array(items) => serde_json::json!({
+            "type": "array",
+            "items": items
+                .iter()
+                .find_map(bson_avro_type)
+                .unwrap_or(serde_json::json!("null")),
+        }),
+        _ => serde_json::json!("string"),
+    })
+}
+
+async fn cross_matches_field(
+    db: &Database,
+    catalogs: &[CatalogXmatchConfig],
+) -> Option<serde_json::Value> {
+    let mut catalog_fields = Vec::new();
+    for catalog in catalogs
+        .iter()
+        .filter(|c| !c.catalog.starts_with(WATCHLIST_PREFIX))
+    {
+        let rows = async {
+            db.collection::<Document>(catalog.collection_name())
+                .find(doc! {})
+                .sort(doc! { "_id": 1 })
+                .projection(catalog.projection.clone())
+                .limit(CATALOG_SAMPLE_SIZE)
+                .await?
+                .try_collect::<Vec<Document>>()
+                .await
+        }
+        .await
+        .unwrap_or_else(|error| {
+            tracing::warn!(
+                %error,
+                catalog = %catalog.catalog,
+                "could not sample a crossmatch catalog for the filter schema"
+            );
+            Vec::new()
+        });
+        let mut row_fields: Vec<serde_json::Value> = catalog
+            .projection
+            .keys()
+            .map(|key| {
+                let types: Vec<Option<serde_json::Value>> = rows
+                    .iter()
+                    .map(|row| row.get(key).and_then(bson_avro_type))
+                    .collect();
+                let avro_type = match types.iter().flatten().next() {
+                    Some(t) if types.iter().all(Option::is_some) => t.clone(),
+                    Some(t) => serde_json::json!(["null", t]),
+                    None => serde_json::json!(["null", "double", "string", "boolean"]),
+                };
+                serde_json::json!({ "name": key, "type": avro_type })
+            })
+            .collect();
+        row_fields.push(serde_json::json!({ "name": "distance_arcsec", "type": "double" }));
+        if catalog.distance_key.is_some() {
+            row_fields
+                .push(serde_json::json!({ "name": "distance_kpc", "type": ["null", "double"] }));
+        }
+        catalog_fields.push(serde_json::json!({
+            "name": catalog.catalog,
+            "type": {
+                "type": "array",
+                "items": {
+                    "type": "record",
+                    "name": format!("CrossMatch_{}", catalog.catalog),
+                    "fields": row_fields,
+                },
+            },
+        }));
+    }
+    if catalog_fields.is_empty() {
+        return None;
+    }
+    Some(serde_json::json!({
+        "name": "cross_matches",
+        "type": ["null", { "type": "record", "name": "CrossMatches", "fields": catalog_fields }],
+        "default": null,
+    }))
 }
 
 #[cfg(test)]

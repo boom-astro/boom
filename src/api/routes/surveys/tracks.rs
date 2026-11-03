@@ -18,6 +18,7 @@ pub struct ListTracksQuery {
     max_q: Option<f64>,
     min_nights: Option<i32>,
     max_rms_ratio: Option<f64>,
+    min_neo_score: Option<f64>,
     limit: Option<i64>,
 }
 
@@ -34,6 +35,7 @@ pub struct ListTracksQuery {
         ("max_q" = Option<f64>, Query, description = "Maximum perihelion distance of the stored orbit, au"),
         ("min_nights" = Option<i32>, Query, description = "Minimum number of nights"),
         ("max_rms_ratio" = Option<f64>, Query, description = "Maximum fit residual over the rms expected from the members' sites"),
+        ("min_neo_score" = Option<f64>, Query, description = "Minimum digest2 NEO score (0-100), set on fast tracks"),
         ("limit" = Option<i64>, Query, description = "Maximum number of tracks (1-500, default 50)"),
     ),
     responses(
@@ -64,6 +66,7 @@ pub async fn get_tracks(
         max_q: params.max_q,
         min_nights: params.min_nights,
         max_rms_ratio: params.max_rms_ratio,
+        min_neo_score: params.min_neo_score,
     };
     let limit = params
         .limit

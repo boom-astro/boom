@@ -15,12 +15,17 @@
 //!
 //! The last night it finished is recorded in the database, so a restart does
 //! not search it again, and a night it could not finish is retried.
+//!
+//! With `linker.fast_live_every_minutes`, the fast pass alone also reruns on
+//! the night in progress, when it has new detections, while the linker waits
+//! for it to end.
 
 use boom::conf::{load_dotenv, AppConfig, LinkerConfig};
 use boom::utils::discovery::{
     associates_known, attach_pass, designations, known_movers, load_unknown, load_window,
-    persist_clusters, persist_fast, persist_tracks, recall, reference_epoch, satellites,
-    thor_clusters, track_detections, tracklets_per_night, Stop, ThorSearch,
+    persist_clusters, persist_fast, persist_fast_tracklets, persist_tracks, recall,
+    reference_epoch, satellites, thor_clusters, track_detections, tracklets_per_night, Stop,
+    ThorSearch,
 };
 use boom::utils::fast::{fast_tracks, lsst_trails, FastSearch};
 use boom::utils::heliolinc::{link_tracklets, Conics, LinkConfig, Track, KM_S_PER_AU_DAY};
@@ -76,6 +81,35 @@ fn last_finished_night(jd: f64, run_after_utc_hour: u32) -> i64 {
 /// When `night` counts as over, JD.
 fn finished_at(night: i64, run_after_utc_hour: u32) -> f64 {
     night as f64 + 0.5 + run_after_utc_hour as f64 / 24.0
+}
+
+fn live(cfg: &LinkerConfig) -> LinkerConfig {
+    LinkerConfig {
+        window_nights: cfg.fast_window_nights,
+        link: false,
+        thor: false,
+        attach: false,
+        recall: false,
+        ..cfg.clone()
+    }
+}
+
+async fn detections_so_far(
+    db: &mongodb::Database,
+    cfg: &LinkerConfig,
+    night: i64,
+) -> Option<usize> {
+    let mut count = 0;
+    for survey in &cfg.surveys {
+        match load_unknown(db, survey, night, night, cfg.drb, cfg.lsst_min_reliability).await {
+            Ok(found) => count += found.len(),
+            Err(error) => {
+                error!(%error, night, %survey, "could not count the night in progress");
+                return None;
+            }
+        }
+    }
+    Some(count)
 }
 
 /// The `nights` nights ending with `night`: the window's first JD and its
@@ -354,9 +388,11 @@ async fn run_night(db: &mongodb::Database, cfg: &LinkerConfig, night: i64, stop:
                     dense_detections: cfg.fast_dense_detections,
                     dense_max_rate_deg_per_day: cfg.fast_dense_max_rate_deg_per_day,
                     conics,
+                    lone_night: cfg.fast_single_night.then_some(night),
+                    min_neo_score: cfg.fast_min_neo_score,
                     ..FastSearch::default()
                 };
-                let tracks = fast_tracks(&recent, &trails, &search);
+                let (tracks, lone) = fast_tracks(&recent, &trails, &search);
                 let groups: Vec<Vec<i64>> = tracks.iter().map(|t| t.members.clone()).collect();
                 let known = known_objects(&groups, &recent, catalog.as_deref());
                 let near = planets(&groups, &recent, cfg);
@@ -375,6 +411,21 @@ async fn run_night(db: &mongodb::Database, cfg: &LinkerConfig, night: i64, stop:
                 .await;
                 done &= report.complete();
                 found.extend(groups);
+                let lone_groups: Vec<Vec<i64>> = lone.iter().map(|t| t.ids.clone()).collect();
+                let lone_known = known_objects(&lone_groups, &recent, catalog.as_deref());
+                let lone_near = planets(&lone_groups, &recent, cfg);
+                let lone_report = persist_fast_tracklets(
+                    db,
+                    &lone,
+                    &recent,
+                    &labels,
+                    &lone_known,
+                    &lone_near,
+                    dry_run,
+                    stop,
+                )
+                .await;
+                done &= lone_report.complete();
                 info!(
                     detections = recent.len(),
                     trailed = trails.len(),
@@ -382,6 +433,9 @@ async fn run_night(db: &mongodb::Database, cfg: &LinkerConfig, night: i64, stop:
                     known = known.iter().filter(|k| k.is_some()).count(),
                     stored = report.stored,
                     unchanged = report.unchanged,
+                    single_night = lone.len(),
+                    single_night_known = lone_known.iter().filter(|k| k.is_some()).count(),
+                    single_night_stored = lone_report.stored,
                     wrote = report.ran && !dry_run,
                     seconds = pass.elapsed().as_secs_f64(),
                     "fast pass done"
@@ -542,9 +596,24 @@ async fn main() {
     if let Some(night) = done {
         info!(night, "resuming after the last finished night");
     }
+    let live_cfg = live(&cfg);
+    let live_every = (cfg.fast && cfg.fast_live_every_minutes > 0)
+        .then(|| Duration::from_secs(cfg.fast_live_every_minutes as u64 * 60));
+    let mut live_seen = None;
     loop {
         let night = last_finished_night(now_jd(), cfg.run_after_utc_hour);
         let wait = if done.is_some_and(|d| d >= night) {
+            if live_every.is_some() {
+                let seen = detections_so_far(&db, &cfg, night + 1)
+                    .await
+                    .map(|count| (night + 1, count));
+                if seen.is_some_and(|(_, count)| count > 0) && seen != live_seen {
+                    info!(night = night + 1, "fast pass over the night in progress");
+                    if run_night(&db, &live_cfg, night + 1, &stop).await {
+                        live_seen = seen;
+                    }
+                }
+            }
             let days = (finished_at(night + 1, cfg.run_after_utc_hour) - now_jd()).max(0.0);
             info!(
                 next_night = night + 1,
@@ -552,7 +621,8 @@ async fn main() {
                 "waiting for the next night to end"
             );
             // A minute late, so the night is over by any clock's reckoning.
-            Duration::from_secs_f64(days * 86_400.0 + 60.0)
+            let left = Duration::from_secs_f64(days * 86_400.0 + 60.0);
+            live_every.map_or(left, |every| every.min(left))
         } else if run_night(&db, &cfg, night, &stop).await {
             record_night(&db, night).await;
             done = Some(night);
