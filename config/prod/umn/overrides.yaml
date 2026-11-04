@@ -6,11 +6,11 @@ babamul:
 gpu:
   device_ids: [0, 1]
 
-# The NRP Milvus instance is UMN's, so this stays out of the base config.yaml:
-# Caltech has no credentials for it and would warn on every enrichment batch.
+# The NRP Milvus collection is UMN's, so UMN is the only deployment that writes it.
 # Credentials come from BOOM_MILVUS__USERNAME / __PASSWORD.
 milvus:
-  enabled: true
+  read_embeddings: true
+  write_embeddings: true
 
 kafka:
   consumer:

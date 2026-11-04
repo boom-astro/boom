@@ -4,10 +4,10 @@
 //! resulting embedding to Milvus) — and is then read back out of Milvus with the
 //! similarity-search / query / count APIs.
 //!
-//! The ZTF enrichment worker only writes embeddings when `milvus.enabled`, so
+//! The ZTF enrichment worker only writes embeddings when `milvus.write_embeddings`, so
 //! this test is **gated on the config**: with Milvus disabled it logs a skip and
 //! returns. That is the case in CI, where `.env` is copied from `.env.example`
-//! (`BOOM_MILVUS__ENABLED=false`). To run it for real, set `BOOM_MILVUS__*` in
+//! (both Milvus flags false). To run it for real, set `BOOM_MILVUS__*` in
 //! `.env` (see `docs/milvus.md`); it then runs against whatever Milvus those
 //! credentials point at, provisioning the collection if it does not yet exist.
 use boom::{
@@ -31,10 +31,11 @@ async fn test_ztf_alert_to_milvus_e2e() {
     // are inside the enrichment worker.
     let config = conf::load_config(Some(TEST_CONFIG_FILE)).expect("failed to load test config");
 
-    if !config.milvus.enabled {
+    if !(config.milvus.read_embeddings && config.milvus.write_embeddings) {
         eprintln!(
             "skipping test because milvus is disabled. Set \
-             BOOM_MILVUS__ENABLED=true and add credentials in .env to run the \
+             BOOM_MILVUS__READ_EMBEDDINGS=true and BOOM_MILVUS__WRITE_EMBEDDINGS=true \
+             and add credentials in .env to run the \
              full end-to-end flow."
         );
         return;

@@ -67,7 +67,7 @@ pub struct MilvusClient {
 impl MilvusClient {
     /// Connect to Milvus using the supplied configuration.
     ///
-    /// Returns [`MilvusError::NotEnabled`] if `milvus.enabled` is false, so that
+    /// Returns [`MilvusError::NotEnabled`] if both Milvus flags are false, so that
     /// callers cannot accidentally dial a server the operator has switched off.
     #[instrument(skip_all, err, fields(endpoint = %config.endpoint(), database = %config.database))]
     pub async fn connect(config: &MilvusConfig) -> Result<Self, MilvusError> {
@@ -89,7 +89,7 @@ impl MilvusClient {
     }
 
     fn build_endpoint(config: &MilvusConfig) -> Result<Endpoint, MilvusError> {
-        if !config.enabled {
+        if !config.is_enabled() {
             return Err(MilvusError::NotEnabled);
         }
 

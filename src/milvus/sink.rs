@@ -55,7 +55,7 @@ pub struct MilvusSink {
 }
 
 impl MilvusSink {
-    /// Connect if `milvus.writes_embeddings()`, degrading to a paused sink if
+    /// Connect if `milvus.write_embeddings`, degrading to a paused sink if
     /// Milvus is unreachable rather than failing the caller.
     ///
     /// This is deliberately infallible: an operator enabling Milvus must not be
@@ -70,7 +70,7 @@ impl MilvusSink {
             idle_drain_at: None,
         };
 
-        if !config.writes_embeddings() {
+        if !config.write_embeddings {
             return sink;
         }
 
@@ -91,7 +91,7 @@ impl MilvusSink {
     /// state, which is deliberate — an outage should not silently change what
     /// the worker computes, only where it ends up.
     pub fn is_writing(&self) -> bool {
-        self.config.writes_embeddings()
+        self.config.write_embeddings
     }
 
     /// Whether an upload would be attempted right now.
@@ -301,18 +301,17 @@ mod tests {
     use super::*;
 
     /// Built through serde so the test sees the same defaults a deployment gets.
-    fn config(enabled: bool) -> MilvusConfig {
-        serde_json::from_value(serde_json::json!({ "enabled": enabled }))
-            .expect("milvus config defaults must deserialize")
+    fn config(read: bool, write: bool) -> MilvusConfig {
+        serde_json::from_value(serde_json::json!({
+            "read_embeddings": read,
+            "write_embeddings": write,
+        }))
+        .expect("milvus config defaults must deserialize")
     }
 
-    fn sink(enabled: bool) -> MilvusSink {
-        sink_with(config(enabled))
-    }
-
-    fn sink_with(config: MilvusConfig) -> MilvusSink {
+    fn sink(writing: bool) -> MilvusSink {
         MilvusSink {
-            config,
+            config: config(true, writing),
             client: None,
             consecutive_failures: 0,
             retry_at: None,
@@ -348,16 +347,12 @@ mod tests {
         assert!(!sink.is_ready());
     }
 
-    /// A read-only deployment keeps Milvus enabled for the API but must not
-    /// write, so its enrichment workers get the same inert sink.
+    /// A read-only deployment keeps Milvus on for the API but must not write,
+    /// so its enrichment workers get the same inert sink.
     #[tokio::test]
     async fn a_read_only_deployment_never_writes() {
-        let config: MilvusConfig = serde_json::from_value(serde_json::json!({
-            "enabled": true,
-            "write_embeddings": false,
-        }))
-        .unwrap();
-        assert!(!config.writes_embeddings());
+        let config = config(true, false);
+        assert!(config.is_enabled());
 
         let sink = MilvusSink::connect_or_degrade(&config, None).await;
         assert!(sink.client.is_none(), "a read-only sink should not connect");
@@ -366,9 +361,14 @@ mod tests {
     }
 
     #[test]
-    fn writes_default_on_when_milvus_is_enabled() {
-        assert!(config(true).writes_embeddings());
-        assert!(!config(false).writes_embeddings());
+    fn milvus_is_off_unless_a_flag_is_set() {
+        let from_serde: MilvusConfig = serde_json::from_value(serde_json::json!({})).unwrap();
+        for config in [from_serde, MilvusConfig::default()] {
+            assert!(!config.read_embeddings);
+            assert!(!config.write_embeddings);
+            assert!(!config.is_enabled());
+        }
+        assert!(config(false, true).is_enabled());
     }
 
     /// The point of the breaker: after a failure the next batch is skipped

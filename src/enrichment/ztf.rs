@@ -715,7 +715,7 @@ pub struct ZtfEnrichmentWorker {
     models: Arc<SharedModels>,
     babamul: Option<Babamul>,
     /// Sink for fusion embeddings, upserted after classification. Inert when
-    /// `milvus.writes_embeddings()` is false, and self-pausing while Milvus is
+    /// `milvus.write_embeddings` is false, and self-pausing while Milvus is
     /// unreachable so an outage there never stalls enrichment.
     milvus: MilvusSink,
     gpu_enabled: bool,
@@ -802,26 +802,25 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             .enrichment
             .batch_size;
 
-        let milvus_queue =
-            if config.milvus.writes_embeddings() && config.milvus.backup_queue.enabled {
-                match config.build_redis().await {
-                    Ok(con) => Some(BackupQueue::new(
-                        con,
-                        "ZTF_milvus_embedding_backup_queue".to_string(),
-                        config.milvus.backup_queue.max_rows,
-                    )),
-                    Err(error) => {
-                        warn!(
-                            %error,
-                            "could not open the milvus backup queue; embeddings \
-                             rejected during an outage will be dropped"
-                        );
-                        None
-                    }
+        let milvus_queue = if config.milvus.write_embeddings && config.milvus.backup_queue.enabled {
+            match config.build_redis().await {
+                Ok(con) => Some(BackupQueue::new(
+                    con,
+                    "ZTF_milvus_embedding_backup_queue".to_string(),
+                    config.milvus.backup_queue.max_rows,
+                )),
+                Err(error) => {
+                    warn!(
+                        %error,
+                        "could not open the milvus backup queue; embeddings \
+                         rejected during an outage will be dropped"
+                    );
+                    None
                 }
-            } else {
-                None
-            };
+            }
+        } else {
+            None
+        };
 
         let milvus = MilvusSink::connect_or_degrade(&config.milvus, milvus_queue).await;
 

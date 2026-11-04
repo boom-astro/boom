@@ -1271,10 +1271,9 @@ fn default_gpu_device_ids() -> Vec<i32> {
 /// with an administrative/user account supplied entirely through the environment.
 #[derive(Deserialize, Debug, Clone)]
 pub struct MilvusConfig {
-    /// When false, BOOM never opens a Milvus connection. Defaults to false so
-    /// that existing deployments are unaffected.
+    /// Whether the API serves the embedding count and similarity search.
     #[serde(default)]
-    pub enabled: bool,
+    pub read_embeddings: bool,
     #[serde(default = "default_milvus_host")]
     pub host: String,
     #[serde(default = "default_milvus_port")]
@@ -1299,9 +1298,10 @@ pub struct MilvusConfig {
     /// fails a request quickly while a slow search still has `timeout_seconds`.
     #[serde(default = "default_milvus_connect_timeout_seconds")]
     pub connect_timeout_seconds: u64,
-    /// Whether this deployment's ZTF enrichment upserts embeddings. When false,
-    /// the API still reads Milvus for the count and similarity search.
-    #[serde(default = "default_milvus_write_embeddings")]
+    /// Whether ZTF enrichment upserts embeddings and the scheduler provisions
+    /// the collection. Off by default: the collection is shared across
+    /// deployments, so only the one that owns it should write.
+    #[serde(default)]
     pub write_embeddings: bool,
     #[serde(default)]
     pub collection: MilvusCollectionConfig,
@@ -1310,8 +1310,10 @@ pub struct MilvusConfig {
 }
 
 impl MilvusConfig {
-    pub fn writes_embeddings(&self) -> bool {
-        self.enabled && self.write_embeddings
+    /// Whether anything in this deployment connects to Milvus. With both flags
+    /// false BOOM never opens a connection.
+    pub fn is_enabled(&self) -> bool {
+        self.read_embeddings || self.write_embeddings
     }
 }
 
@@ -1366,10 +1368,6 @@ fn default_milvus_connect_timeout_seconds() -> u64 {
     5
 }
 
-fn default_milvus_write_embeddings() -> bool {
-    true
-}
-
 fn default_milvus_backup_queue_enabled() -> bool {
     true
 }
@@ -1405,7 +1403,7 @@ fn default_milvus_object_id_max_length() -> i64 {
 impl Default for MilvusConfig {
     fn default() -> Self {
         MilvusConfig {
-            enabled: false,
+            read_embeddings: false,
             host: default_milvus_host(),
             port: default_milvus_port(),
             tls: default_milvus_tls(),
@@ -1414,7 +1412,7 @@ impl Default for MilvusConfig {
             database: String::new(),
             timeout_seconds: default_milvus_timeout_seconds(),
             connect_timeout_seconds: default_milvus_connect_timeout_seconds(),
-            write_embeddings: default_milvus_write_embeddings(),
+            write_embeddings: false,
             collection: MilvusCollectionConfig::default(),
             backup_queue: MilvusBackupQueueConfig::default(),
         }
@@ -1893,24 +1891,24 @@ impl AppConfig {
 
         // Milvus settings are only required when the integration is switched on,
         // so that deployments not using it need no extra configuration.
-        if self.milvus.enabled {
+        if self.milvus.is_enabled() {
             if self.milvus.username.is_empty() {
                 return Err(
-                    "Milvus username must be set via BOOM_MILVUS__USERNAME environment variable when milvus.enabled is true"
+                    "Milvus username must be set via BOOM_MILVUS__USERNAME environment variable when milvus.read_embeddings or milvus.write_embeddings is true"
                         .to_string(),
                 );
             }
 
             if self.milvus.password.is_empty() {
                 return Err(
-                    "Milvus password must be set via BOOM_MILVUS__PASSWORD environment variable when milvus.enabled is true"
+                    "Milvus password must be set via BOOM_MILVUS__PASSWORD environment variable when milvus.read_embeddings or milvus.write_embeddings is true"
                         .to_string(),
                 );
             }
 
             if self.milvus.database.is_empty() {
                 return Err(
-                    "Milvus database must not be empty when milvus.enabled is true; config.yaml supplies a default, override it with BOOM_MILVUS__DATABASE"
+                    "Milvus database must not be empty when milvus.read_embeddings or milvus.write_embeddings is true; config.yaml supplies a default, override it with BOOM_MILVUS__DATABASE"
                         .to_string(),
                 );
             }

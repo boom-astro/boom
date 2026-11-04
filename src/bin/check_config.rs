@@ -14,7 +14,7 @@ fn ensure_required_env() {
     if std::env::var_os("BOOM_API__AUTH__ADMIN_PASSWORD").is_none() {
         std::env::set_var("BOOM_API__AUTH__ADMIN_PASSWORD", "ci-dummy-admin-password");
     }
-    // Required whenever a config has milvus.enabled (config/prod/umn does), and
+    // Required whenever a config reads or writes Milvus (config/prod/umn does), and
     // supplied by the deployment environment rather than the checked-in file.
     if std::env::var_os("BOOM_MILVUS__USERNAME").is_none() {
         std::env::set_var("BOOM_MILVUS__USERNAME", "ci-dummy-milvus-username");
