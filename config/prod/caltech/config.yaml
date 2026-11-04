@@ -111,7 +111,7 @@ gpu:
 redis:
   host: localhost
   port: 6379
-# Reads UMN's NRP collection. Credentials come from BOOM_MILVUS__USERNAME / __PASSWORD.
+# Read-only: searches the shared NRP collection, which only UMN writes.
 milvus:
   # Vector database holding the AppleCiDEr fusion model's embeddings.
   # See docs/milvus.md.

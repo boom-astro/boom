@@ -6,7 +6,7 @@ babamul:
 gpu:
   device_ids: [0]
 
-# Reads UMN's NRP collection. Credentials come from BOOM_MILVUS__USERNAME / __PASSWORD.
+# Read-only: searches the shared NRP collection, which only UMN writes.
 milvus:
   read_embeddings: true
 
