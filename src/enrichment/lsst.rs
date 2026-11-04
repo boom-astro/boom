@@ -15,6 +15,7 @@ use crate::utils::lightcurves::{
     ActivityMetrics, Band, DetectionHistory, EpisodeHistory, MultisurveyDetectionHistory,
     PerBandProperties, PhotometryMag, EPISODE_GAP_DAYS, STATIONARY_MIN_FORCED_SNR,
 };
+use crate::utils::variability::PerBandVariability;
 use apache_avro_derive::AvroSchema;
 use apache_avro_macros::serdavro;
 use mongodb::bson::{doc, Document};
@@ -293,6 +294,8 @@ pub struct LsstAlertProperties {
     /// Detection episodes, for finding sources that outburst more than once.
     /// `None` on alerts enriched before this field existed.
     pub episode_history: Option<EpisodeHistory>,
+    #[serde(default)]
+    pub variability: Option<PerBandVariability>,
 }
 
 pub struct LsstEnrichmentWorker {
@@ -637,6 +640,14 @@ impl LsstEnrichmentWorker {
             alert.candidate.jd,
         );
 
+        let variability = PerBandVariability::from_points(
+            alert
+                .fp_hists
+                .iter()
+                .filter(|p| p.jd <= alert.candidate.jd)
+                .filter_map(|p| Some((p.jd, p.flux?, p.flux_err, p.band.clone()))),
+        );
+
         Ok(LsstAlertProperties {
             rock: is_rock,
             hosted: alert.host_galaxy.as_ref().map(|h| h.best_host.is_some()),
@@ -655,6 +666,7 @@ impl LsstEnrichmentWorker {
             detection_history: Some(detection_history),
             multisurvey_detection_history: Some(multisurvey_detection_history),
             episode_history: Some(episode_history),
+            variability: Some(variability),
         })
     }
 }

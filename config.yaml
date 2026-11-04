@@ -255,6 +255,7 @@ host_galaxy:
   enabled: true
   ned_catalog: NED
   ls_dr10_catalog: LSDR10 # collection name as ingested; UMN uses LSDR10
+  ls_dr9_catalog: LSDR9 # fallback where LSDR10 has no rows
   max_dlr: 5.0            # admission cutoff; filters should cut tighter (~4)
   min_axis_arcsec: 0.05
   max_candidates: 10

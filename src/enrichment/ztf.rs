@@ -26,6 +26,7 @@ use crate::utils::mpcorb::{elements_from_document, normalize_ztf_ssnamenr, ORBIT
 use crate::utils::outburst::{Point, MAX_SEPARATION_ARCSEC};
 use crate::utils::phase_curve::{curves_from_document, PhaseCurve, BASELINES_COLLECTION};
 use crate::utils::sso_geometry::{geometry_at, OrbitalElements, ZTF};
+use crate::utils::variability::PerBandVariability;
 use apache_avro_derive::AvroSchema;
 use apache_avro_macros::serdavro;
 use futures::TryStreamExt;
@@ -552,6 +553,8 @@ pub struct ZtfAlertProperties {
     /// Detection episodes, for finding sources that outburst more than once.
     /// `None` on alerts enriched before this field existed.
     pub episode_history: Option<EpisodeHistory>,
+    #[serde(default)]
+    pub variability: Option<PerBandVariability>,
 }
 
 /// Field order matches the ONNX output index (0-7).
@@ -1520,6 +1523,14 @@ impl ZtfEnrichmentWorker {
             candidate.jd,
         );
 
+        let variability = PerBandVariability::from_points(
+            alert
+                .fp_hists
+                .iter()
+                .filter(|p| p.jd <= candidate.jd)
+                .filter_map(|p| Some((p.jd, p.flux?, p.flux_err, p.band.clone()))),
+        );
+
         Ok((
             ZtfAlertProperties {
                 rock: is_rock,
@@ -1535,6 +1546,7 @@ impl ZtfEnrichmentWorker {
                 detection_history: Some(detection_history),
                 multisurvey_detection_history: Some(multisurvey_detection_history),
                 episode_history: Some(episode_history),
+                variability: Some(variability),
             },
             all_bands_properties,
             programid,
