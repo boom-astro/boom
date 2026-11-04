@@ -157,6 +157,7 @@ async fn probe_catalogs(
     let present = vec![
         doc! { format!("cross_matches.{}.Diam", config.ned_catalog): { "$exists": true } },
         doc! { format!("cross_matches.{}", config.ls_dr10_catalog): { "$exists": true } },
+        doc! { format!("cross_matches.{}", config.ls_dr9_catalog): { "$exists": true } },
     ];
     let found = collection
         .aggregate(vec![
@@ -168,9 +169,9 @@ async fn probe_catalogs(
     match found {
         Ok(mut cursor) => match cursor.try_next().await {
             Ok(None) => ctx.warn(format!(
-                "none of {} sampled records carry {}.Diam or {}; run reprocess_crossmatch over \
+                "none of {} sampled records carry {}.Diam, {} or {}; run reprocess_crossmatch over \
                  the galaxy catalogs first, or every association will be empty",
-                CATALOG_PROBE_SAMPLE, config.ned_catalog, config.ls_dr10_catalog
+                CATALOG_PROBE_SAMPLE, config.ned_catalog, config.ls_dr10_catalog, config.ls_dr9_catalog
             )),
             Ok(Some(_)) => {}
             Err(e) => ctx.warn(format!("catalog probe failed, continuing: {e}")),
@@ -195,6 +196,7 @@ async fn worker(
     let catalogs = [
         config.ned_catalog.as_str(),
         config.ls_dr10_catalog.as_str(),
+        config.ls_dr9_catalog.as_str(),
         config.desi_catalog.as_str(),
     ];
     // Photometry is read from the same database the records come from.
@@ -378,6 +380,7 @@ pub async fn run(
     for catalog in [
         &config.ned_catalog,
         &config.ls_dr10_catalog,
+        &config.ls_dr9_catalog,
         &config.desi_catalog,
     ] {
         projection.insert(format!("cross_matches.{catalog}"), 1);
