@@ -126,6 +126,9 @@ milvus:
   database: umn_babamul_vectordb # Override via BOOM_MILVUS__DATABASE environment variable
   timeout_seconds: 30
   connect_timeout_seconds: 5
+  # False on a deployment that only reads Milvus: its API serves the count and
+  # similarity search, but its ZTF enrichment does not upsert embeddings.
+  write_embeddings: true
   collection:
     name: boom_ztf_fusion_embeddings
     dim: 384

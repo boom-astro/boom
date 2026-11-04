@@ -239,7 +239,7 @@ async fn run(
     // failure must not stop the scheduler from ingesting alerts. The enrichment
     // workers pause their uploads and retry, so this recovers on its own once
     // Milvus is reachable and the collection exists.
-    if config.milvus.enabled && args.survey == Survey::Ztf {
+    if config.milvus.writes_embeddings() && args.survey == Survey::Ztf {
         match MilvusClient::connect(&config.milvus).await {
             Ok(mut milvus) => {
                 if let Err(error) = milvus.ensure_embedding_collection().await {

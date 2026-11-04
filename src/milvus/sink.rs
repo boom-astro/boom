@@ -55,7 +55,7 @@ pub struct MilvusSink {
 }
 
 impl MilvusSink {
-    /// Connect if `milvus.enabled`, degrading to a paused sink if Milvus is
+    /// Connect if `milvus.writes_embeddings()`, degrading to a paused sink if Milvus is
     /// unreachable rather than failing the caller.
     ///
     /// This is deliberately infallible: an operator enabling Milvus must not be
@@ -70,7 +70,7 @@ impl MilvusSink {
             idle_drain_at: None,
         };
 
-        if !config.enabled {
+        if !config.writes_embeddings() {
             return sink;
         }
 
@@ -91,12 +91,12 @@ impl MilvusSink {
     /// which is deliberate — an outage should not silently change what the
     /// worker computes, only where it ends up.
     pub fn is_enabled(&self) -> bool {
-        self.config.enabled
+        self.config.writes_embeddings()
     }
 
     /// Whether an upload would be attempted right now.
     fn is_ready(&self) -> bool {
-        self.config.enabled && self.retry_at.is_none_or(|at| Instant::now() >= at)
+        self.is_enabled() && self.retry_at.is_none_or(|at| Instant::now() >= at)
     }
 
     /// Time left before the breaker allows another attempt; zero once closed.
@@ -177,7 +177,7 @@ impl MilvusSink {
     /// Never returns an error: failures are recorded and logged, because the
     /// alerts these embeddings came from are already persisted in Mongo.
     pub async fn upsert(&mut self, rows: &[EmbeddingRow]) {
-        if rows.is_empty() || !self.config.enabled {
+        if rows.is_empty() || !self.is_enabled() {
             return;
         }
 
@@ -307,8 +307,12 @@ mod tests {
     }
 
     fn sink(enabled: bool) -> MilvusSink {
+        sink_with(config(enabled))
+    }
+
+    fn sink_with(config: MilvusConfig) -> MilvusSink {
         MilvusSink {
-            config: config(enabled),
+            config,
             client: None,
             consecutive_failures: 0,
             retry_at: None,
@@ -342,6 +346,29 @@ mod tests {
         let sink = sink(false);
         assert!(!sink.is_enabled());
         assert!(!sink.is_ready());
+    }
+
+    /// A read-only deployment keeps Milvus enabled for the API but must not
+    /// write, so its enrichment workers get the same inert sink.
+    #[tokio::test]
+    async fn a_read_only_deployment_never_writes() {
+        let config: MilvusConfig = serde_json::from_value(serde_json::json!({
+            "enabled": true,
+            "write_embeddings": false,
+        }))
+        .unwrap();
+        assert!(!config.writes_embeddings());
+
+        let sink = MilvusSink::connect_or_degrade(&config, None).await;
+        assert!(sink.client.is_none(), "a read-only sink should not connect");
+        assert!(!sink.is_enabled());
+        assert!(!sink.is_ready());
+    }
+
+    #[test]
+    fn writes_default_on_when_milvus_is_enabled() {
+        assert!(config(true).writes_embeddings());
+        assert!(!config(false).writes_embeddings());
     }
 
     /// The point of the breaker: after a failure the next batch is skipped

@@ -111,6 +111,7 @@ gpu:
 redis:
   host: localhost
   port: 6379
+# UMN writes the shared NRP collection; Caltech only reads it.
 milvus:
   # Vector database holding the AppleCiDEr fusion model's embeddings.
   # See docs/milvus.md.
@@ -123,6 +124,9 @@ milvus:
   database: umn_babamul_vectordb # Override via BOOM_MILVUS__DATABASE environment variable
   timeout_seconds: 30
   connect_timeout_seconds: 5
+  # False on a deployment that only reads Milvus: its API serves the count and
+  # similarity search, but its ZTF enrichment does not upsert embeddings.
+  write_embeddings: false
   collection:
     name: boom_ztf_fusion_embeddings
     dim: 384

@@ -1299,10 +1299,20 @@ pub struct MilvusConfig {
     /// fails a request quickly while a slow search still has `timeout_seconds`.
     #[serde(default = "default_milvus_connect_timeout_seconds")]
     pub connect_timeout_seconds: u64,
+    /// Whether this deployment's ZTF enrichment upserts embeddings. When false,
+    /// the API still reads Milvus for the count and similarity search.
+    #[serde(default = "default_milvus_write_embeddings")]
+    pub write_embeddings: bool,
     #[serde(default)]
     pub collection: MilvusCollectionConfig,
     #[serde(default)]
     pub backup_queue: MilvusBackupQueueConfig,
+}
+
+impl MilvusConfig {
+    pub fn writes_embeddings(&self) -> bool {
+        self.enabled && self.write_embeddings
+    }
 }
 
 /// Where embeddings wait while Milvus is unreachable, so an outage costs
@@ -1356,6 +1366,10 @@ fn default_milvus_connect_timeout_seconds() -> u64 {
     5
 }
 
+fn default_milvus_write_embeddings() -> bool {
+    true
+}
+
 fn default_milvus_backup_queue_enabled() -> bool {
     true
 }
@@ -1400,6 +1414,7 @@ impl Default for MilvusConfig {
             database: String::new(),
             timeout_seconds: default_milvus_timeout_seconds(),
             connect_timeout_seconds: default_milvus_connect_timeout_seconds(),
+            write_embeddings: default_milvus_write_embeddings(),
             collection: MilvusCollectionConfig::default(),
             backup_queue: MilvusBackupQueueConfig::default(),
         }

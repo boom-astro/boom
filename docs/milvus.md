@@ -160,6 +160,12 @@ Once `milvus.enabled` is true, the ZTF enrichment worker upserts each alert's
 `object_id` so a re-observed object overwrites its previous vector. The write is
 an `Upsert` RPC batched per enrichment batch.
 
+A deployment that should only read the collection sets
+`milvus.write_embeddings: false` in its `overrides.yaml` (`config/prod/caltech`
+does). Its API still serves the embedding count and similarity search, but its
+scheduler neither provisions the collection nor upserts, and opens no backup
+queue.
+
 The worker **connects only** — it does not create the collection. Provision it
 once with `milvus_check --create-collection` before starting the workers, since
 several enrichment workers run in parallel and must not race to create it.
@@ -188,11 +194,12 @@ cannot reach Milvus at startup.
 
 ### The embedding is never written to Mongo
 
-`milvus.enabled` is the only switch. The 384-float vector is stripped from the
-alert's Mongo `classifications` document in every case and there is no dual write:
+Whether the vector goes to Milvus depends only on `milvus.enabled` and
+`milvus.write_embeddings`. It is stripped from the alert's Mongo
+`classifications` document in every case and there is no dual write:
 
-- **Milvus on** — the embedding is written to Milvus only.
-- **Milvus off** — the embedding is not stored anywhere; it is computed as part
+- **Both true** — the embedding is written to Milvus only.
+- **Either false** — the embedding is not stored anywhere; it is computed as part
   of AppleCiDEr inference and dropped.
 
 Either way the AppleCiDEr class probabilities (`applecider_fusion` and

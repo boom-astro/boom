@@ -6,6 +6,10 @@ babamul:
 gpu:
   device_ids: [0]
 
+# UMN writes the shared NRP collection; Caltech only reads it.
+milvus:
+  write_embeddings: false
+
 kafka:
   producer:
     server: "broker:29092"
