@@ -113,7 +113,6 @@ redis:
 milvus:
   # Vector database holding the AppleCiDEr fusion model's embeddings.
   # See docs/milvus.md.
-  read_embeddings: false # Set per deployment in overrides.yaml
   host: milvus.nrp-nautilus.io
   port: 50051
   tls: true
@@ -122,6 +121,7 @@ milvus:
   database: umn_babamul_vectordb # Override via BOOM_MILVUS__DATABASE environment variable
   timeout_seconds: 30
   connect_timeout_seconds: 5
+  read_embeddings: false # Set per deployment in overrides.yaml
   write_embeddings: false # Set per deployment in overrides.yaml
   collection:
     name: boom_ztf_fusion_embeddings
