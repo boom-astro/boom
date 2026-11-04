@@ -344,6 +344,7 @@ export type AlertSearchParams = {
   is_near_brightstar?: boolean;
   is_stationary?: boolean;
   is_positive?: boolean;
+  max_host_dist_mpc?: number;
   limit?: number;
   skip?: number;
 };
@@ -352,6 +353,17 @@ export type Cutouts = {
   cutoutScience?: string;
   cutoutDifference?: string;
   cutoutTemplate?: string;
+};
+
+export type HostSummary = {
+  name?: string | null;
+  catalog?: string | null;
+  z?: number | null;
+  dist_mpc?: number | null;
+  dist_mpc_method?: string | null;
+  sep_arcsec: number;
+  sep_kpc?: number | null;
+  d_dlr: number;
 };
 
 export type Alert = {
@@ -366,6 +378,10 @@ export type Alert = {
     reliability?: number;
     [key: string]: unknown;
   };
+  properties?: {
+    best_host?: HostSummary | null;
+    [key: string]: unknown;
+  } | null;
   [key: string]: unknown;
 };
 
@@ -548,12 +564,15 @@ export async function fetchSimilarObjects(
   return { results: Array.isArray(result) ? (result as SimilarObject[]) : [], message };
 }
 
+export class EmbeddingsDisabled extends Error {}
+
 export async function fetchEmbeddingsCount(): Promise<number> {
   const url = `${API_BASE}/embeddings/count`;
   const res = await fetch(url);
   if (!res.ok) {
     const txt = await res.text().catch(() => "");
-    throw new Error(`Fetch embedding count failed: ${res.status} ${txt}`);
+    const message = `Fetch embedding count failed: ${res.status} ${txt}`;
+    throw res.status === 501 ? new EmbeddingsDisabled(message) : new Error(message);
   }
   const body = await parseResponseJson(res).catch(() => ({}));
   const data = unwrapData<{ count?: number }>(body, {});

@@ -121,6 +121,7 @@ milvus:
   password: "" # Set via BOOM_MILVUS__PASSWORD environment variable
   database: umn_babamul_vectordb # Override via BOOM_MILVUS__DATABASE environment variable
   timeout_seconds: 30
+  connect_timeout_seconds: 5
   collection:
     name: boom_ztf_fusion_embeddings
     dim: 384
@@ -251,6 +252,7 @@ host_galaxy:
   enabled: true
   ned_catalog: NED
   ls_dr10_catalog: LSDR10 # collection name as ingested; UMN uses LSDR10
+  ls_dr9_catalog: LSDR9 # fallback where LSDR10 has no rows
   max_dlr: 5.0            # admission cutoff; filters should cut tighter (~4)
   min_axis_arcsec: 0.05
   max_candidates: 10
@@ -315,6 +317,19 @@ linker:
   fast_live_every_minutes: 0 # also rerun the fast pass on the night in progress, 0 is off
   fast_single_night: true # also store a night's lone fast tracklets scoring fast_min_neo_score or more
   fast_min_neo_score: 90.0 # digest2 NEO score, 0 to 100
+tns:
+  base_url: "https://www.wis-tns.org"
+  bot_id: "" # BOOM_TNS__BOT_ID, BOOM_TNS__BOT_NAME, BOOM_TNS__API_KEY; nothing is scheduled without all three
+  bot_name: ""
+  api_key: ""
+  sync_every_minutes: 60 # 0 is off
+  full_sync_every_hours: 24
+  photometry:
+    every_minutes: 360 # 0 is off
+    max_distance_mpc: 200.0
+    max_age_days: 60.0
+    refresh_hours: 24.0
+    max_objects: 250
 crossmatch:
   ztf:
     Gaia_DR3:
@@ -588,6 +603,142 @@ crossmatch:
         w2mpro: 1
         w3mpro: 1
         w4mpro: 1
+    eRASS1_Main:
+      radius: 45.0
+      use_distance: false
+      angular_size_key: pos_err
+      # pos_err is a 1-sigma radius, not a diameter: 6.0 matches within 3 sigma.
+      angular_size_scale: 6.0
+      angular_size_radius_max: 45.0
+      angular_size_radius_min: 5.0
+      projection:
+        _id: 1
+        iauname: 1
+        ra: 1
+        dec: 1
+        pos_err: 1
+        mjd_min: 1
+        mjd_max: 1
+        ext: 1
+        ext_like: 1
+        det_like_0: 1
+        ml_rate_1: 1
+        ml_rate_err_1: 1
+        ml_flux_1: 1
+        ml_flux_err_1: 1
+        ml_rate_p1: 1
+        ml_rate_err_p1: 1
+        ml_rate_p2: 1
+        ml_rate_err_p2: 1
+        ml_rate_p3: 1
+        ml_rate_err_p3: 1
+        flag_sp_snr: 1
+        flag_sp_bps: 1
+        flag_sp_scl: 1
+        flag_sp_lga: 1
+        flag_sp_gc_cons: 1
+        flag_opt: 1
+    5XMM_DR15:
+      radius: 20.0
+      use_distance: false
+      angular_size_key: radec_err
+      # 3 x radec_err, floored for the uncorrected 0.88" systematic error.
+      angular_size_scale: 6.0
+      angular_size_radius_max: 20.0
+      angular_size_radius_min: 4.0
+      projection:
+        _id: 1
+        iauname: 1
+        ra: 1
+        dec: 1
+        radec_err: 1
+        n_obs: 1
+        mjd_first: 1
+        mjd_last: 1
+        ep_flux: 1
+        ep_flux_err: 1
+        ep_det_ml: 1
+        ep_hr1: 1
+        ep_hr2: 1
+        ep_hr3: 1
+        ep_hr4: 1
+        extent: 1
+        extent_ml: 1
+        sum_flag: 1
+        var_flag: 1
+        fvar: 1
+        var_prob: 1
+        fratio: 1
+        classx_class: 1
+        classx_prob_agn: 1
+        classx_prob_star: 1
+        classx_prob_gal_xrb: 1
+        classx_prob_gal_cv: 1
+    2SXPS:
+      radius: 30.0
+      use_distance: false
+      angular_size_key: Err90
+      # Err90 is a 90% radius, not a diameter: 3.0 matches within 1.5 x Err90.
+      angular_size_scale: 3.0
+      angular_size_radius_max: 30.0
+      angular_size_radius_min: 2.0
+      projection:
+        _id: 1
+        IAUName: 1
+        ra: 1
+        dec: 1
+        Err90: 1
+        AstromType: 1
+        DetFlag: 1
+        FieldFlag: 1
+        NumObs: 1
+        NumDetObs: 1
+        FirstDetDate: 1
+        LastDetDate: 1
+        Rate_band0: 1
+        Rate_band0_pos: 1
+        Rate_band0_neg: 1
+        PeakRate_band0: 1
+        HR1: 1
+        HR2: 1
+        PvarPchiSnapshot_band0: 1
+        PvarPchiObsID_band0: 1
+        PowFlux: 1
+        PowFlux_pos: 1
+        PowFlux_neg: 1
+    4FGL_DR4:
+      radius: 3600.0
+      use_distance: false
+      angular_size_key: Conf_95_SemiMajor
+      # Conf_95_SemiMajor is in degrees: 7200.0 matches within the semi-major axis.
+      angular_size_scale: 7200.0
+      angular_size_radius_max: 3600.0
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        DataRelease: 1
+        Conf_95_SemiMajor: 1
+        Conf_95_SemiMinor: 1
+        Conf_95_PosAng: 1
+        Signif_Avg: 1
+        Flux1000: 1
+        Unc_Flux1000: 1
+        Energy_Flux100: 1
+        Unc_Energy_Flux100: 1
+        SpectrumType: 1
+        PL_Index: 1
+        Variability_Index: 1
+        Frac_Variability: 1
+        Flags: 1
+        CLASS1: 1
+        CLASS2: 1
+        ASSOC1: 1
+        ASSOC2: 1
+        ASSOC_PROB_BAY: 1
+        ASSOC_PROB_LR: 1
+        RA_Counterpart: 1
+        DEC_Counterpart: 1
   lsst:
     LSPSC:
       radius: 30.0 # 30 arcseconds
@@ -870,6 +1021,142 @@ crossmatch:
         w2mpro: 1
         w3mpro: 1
         w4mpro: 1
+    eRASS1_Main:
+      radius: 45.0
+      use_distance: false
+      angular_size_key: pos_err
+      # pos_err is a 1-sigma radius, not a diameter: 6.0 matches within 3 sigma.
+      angular_size_scale: 6.0
+      angular_size_radius_max: 45.0
+      angular_size_radius_min: 5.0
+      projection:
+        _id: 1
+        iauname: 1
+        ra: 1
+        dec: 1
+        pos_err: 1
+        mjd_min: 1
+        mjd_max: 1
+        ext: 1
+        ext_like: 1
+        det_like_0: 1
+        ml_rate_1: 1
+        ml_rate_err_1: 1
+        ml_flux_1: 1
+        ml_flux_err_1: 1
+        ml_rate_p1: 1
+        ml_rate_err_p1: 1
+        ml_rate_p2: 1
+        ml_rate_err_p2: 1
+        ml_rate_p3: 1
+        ml_rate_err_p3: 1
+        flag_sp_snr: 1
+        flag_sp_bps: 1
+        flag_sp_scl: 1
+        flag_sp_lga: 1
+        flag_sp_gc_cons: 1
+        flag_opt: 1
+    5XMM_DR15:
+      radius: 20.0
+      use_distance: false
+      angular_size_key: radec_err
+      # 3 x radec_err, floored for the uncorrected 0.88" systematic error.
+      angular_size_scale: 6.0
+      angular_size_radius_max: 20.0
+      angular_size_radius_min: 4.0
+      projection:
+        _id: 1
+        iauname: 1
+        ra: 1
+        dec: 1
+        radec_err: 1
+        n_obs: 1
+        mjd_first: 1
+        mjd_last: 1
+        ep_flux: 1
+        ep_flux_err: 1
+        ep_det_ml: 1
+        ep_hr1: 1
+        ep_hr2: 1
+        ep_hr3: 1
+        ep_hr4: 1
+        extent: 1
+        extent_ml: 1
+        sum_flag: 1
+        var_flag: 1
+        fvar: 1
+        var_prob: 1
+        fratio: 1
+        classx_class: 1
+        classx_prob_agn: 1
+        classx_prob_star: 1
+        classx_prob_gal_xrb: 1
+        classx_prob_gal_cv: 1
+    2SXPS:
+      radius: 30.0
+      use_distance: false
+      angular_size_key: Err90
+      # Err90 is a 90% radius, not a diameter: 3.0 matches within 1.5 x Err90.
+      angular_size_scale: 3.0
+      angular_size_radius_max: 30.0
+      angular_size_radius_min: 2.0
+      projection:
+        _id: 1
+        IAUName: 1
+        ra: 1
+        dec: 1
+        Err90: 1
+        AstromType: 1
+        DetFlag: 1
+        FieldFlag: 1
+        NumObs: 1
+        NumDetObs: 1
+        FirstDetDate: 1
+        LastDetDate: 1
+        Rate_band0: 1
+        Rate_band0_pos: 1
+        Rate_band0_neg: 1
+        PeakRate_band0: 1
+        HR1: 1
+        HR2: 1
+        PvarPchiSnapshot_band0: 1
+        PvarPchiObsID_band0: 1
+        PowFlux: 1
+        PowFlux_pos: 1
+        PowFlux_neg: 1
+    4FGL_DR4:
+      radius: 3600.0
+      use_distance: false
+      angular_size_key: Conf_95_SemiMajor
+      # Conf_95_SemiMajor is in degrees: 7200.0 matches within the semi-major axis.
+      angular_size_scale: 7200.0
+      angular_size_radius_max: 3600.0
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        DataRelease: 1
+        Conf_95_SemiMajor: 1
+        Conf_95_SemiMinor: 1
+        Conf_95_PosAng: 1
+        Signif_Avg: 1
+        Flux1000: 1
+        Unc_Flux1000: 1
+        Energy_Flux100: 1
+        Unc_Energy_Flux100: 1
+        SpectrumType: 1
+        PL_Index: 1
+        Variability_Index: 1
+        Frac_Variability: 1
+        Flags: 1
+        CLASS1: 1
+        CLASS2: 1
+        ASSOC1: 1
+        ASSOC2: 1
+        ASSOC_PROB_BAY: 1
+        ASSOC_PROB_LR: 1
+        RA_Counterpart: 1
+        DEC_Counterpart: 1
   decam:
     LSPSC:
       radius: 30.0 # 30 arcseconds
@@ -1152,6 +1439,142 @@ crossmatch:
         w2mpro: 1
         w3mpro: 1
         w4mpro: 1
+    eRASS1_Main:
+      radius: 45.0
+      use_distance: false
+      angular_size_key: pos_err
+      # pos_err is a 1-sigma radius, not a diameter: 6.0 matches within 3 sigma.
+      angular_size_scale: 6.0
+      angular_size_radius_max: 45.0
+      angular_size_radius_min: 5.0
+      projection:
+        _id: 1
+        iauname: 1
+        ra: 1
+        dec: 1
+        pos_err: 1
+        mjd_min: 1
+        mjd_max: 1
+        ext: 1
+        ext_like: 1
+        det_like_0: 1
+        ml_rate_1: 1
+        ml_rate_err_1: 1
+        ml_flux_1: 1
+        ml_flux_err_1: 1
+        ml_rate_p1: 1
+        ml_rate_err_p1: 1
+        ml_rate_p2: 1
+        ml_rate_err_p2: 1
+        ml_rate_p3: 1
+        ml_rate_err_p3: 1
+        flag_sp_snr: 1
+        flag_sp_bps: 1
+        flag_sp_scl: 1
+        flag_sp_lga: 1
+        flag_sp_gc_cons: 1
+        flag_opt: 1
+    5XMM_DR15:
+      radius: 20.0
+      use_distance: false
+      angular_size_key: radec_err
+      # 3 x radec_err, floored for the uncorrected 0.88" systematic error.
+      angular_size_scale: 6.0
+      angular_size_radius_max: 20.0
+      angular_size_radius_min: 4.0
+      projection:
+        _id: 1
+        iauname: 1
+        ra: 1
+        dec: 1
+        radec_err: 1
+        n_obs: 1
+        mjd_first: 1
+        mjd_last: 1
+        ep_flux: 1
+        ep_flux_err: 1
+        ep_det_ml: 1
+        ep_hr1: 1
+        ep_hr2: 1
+        ep_hr3: 1
+        ep_hr4: 1
+        extent: 1
+        extent_ml: 1
+        sum_flag: 1
+        var_flag: 1
+        fvar: 1
+        var_prob: 1
+        fratio: 1
+        classx_class: 1
+        classx_prob_agn: 1
+        classx_prob_star: 1
+        classx_prob_gal_xrb: 1
+        classx_prob_gal_cv: 1
+    2SXPS:
+      radius: 30.0
+      use_distance: false
+      angular_size_key: Err90
+      # Err90 is a 90% radius, not a diameter: 3.0 matches within 1.5 x Err90.
+      angular_size_scale: 3.0
+      angular_size_radius_max: 30.0
+      angular_size_radius_min: 2.0
+      projection:
+        _id: 1
+        IAUName: 1
+        ra: 1
+        dec: 1
+        Err90: 1
+        AstromType: 1
+        DetFlag: 1
+        FieldFlag: 1
+        NumObs: 1
+        NumDetObs: 1
+        FirstDetDate: 1
+        LastDetDate: 1
+        Rate_band0: 1
+        Rate_band0_pos: 1
+        Rate_band0_neg: 1
+        PeakRate_band0: 1
+        HR1: 1
+        HR2: 1
+        PvarPchiSnapshot_band0: 1
+        PvarPchiObsID_band0: 1
+        PowFlux: 1
+        PowFlux_pos: 1
+        PowFlux_neg: 1
+    4FGL_DR4:
+      radius: 3600.0
+      use_distance: false
+      angular_size_key: Conf_95_SemiMajor
+      # Conf_95_SemiMajor is in degrees: 7200.0 matches within the semi-major axis.
+      angular_size_scale: 7200.0
+      angular_size_radius_max: 3600.0
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        DataRelease: 1
+        Conf_95_SemiMajor: 1
+        Conf_95_SemiMinor: 1
+        Conf_95_PosAng: 1
+        Signif_Avg: 1
+        Flux1000: 1
+        Unc_Flux1000: 1
+        Energy_Flux100: 1
+        Unc_Energy_Flux100: 1
+        SpectrumType: 1
+        PL_Index: 1
+        Variability_Index: 1
+        Frac_Variability: 1
+        Flags: 1
+        CLASS1: 1
+        CLASS2: 1
+        ASSOC1: 1
+        ASSOC2: 1
+        ASSOC_PROB_BAY: 1
+        ASSOC_PROB_LR: 1
+        RA_Counterpart: 1
+        DEC_Counterpart: 1
   winter:
     Gaia_DR3:
       radius: 2.0 # 2 arcseconds
@@ -1424,6 +1847,142 @@ crossmatch:
         w2mpro: 1
         w3mpro: 1
         w4mpro: 1
+    eRASS1_Main:
+      radius: 45.0
+      use_distance: false
+      angular_size_key: pos_err
+      # pos_err is a 1-sigma radius, not a diameter: 6.0 matches within 3 sigma.
+      angular_size_scale: 6.0
+      angular_size_radius_max: 45.0
+      angular_size_radius_min: 5.0
+      projection:
+        _id: 1
+        iauname: 1
+        ra: 1
+        dec: 1
+        pos_err: 1
+        mjd_min: 1
+        mjd_max: 1
+        ext: 1
+        ext_like: 1
+        det_like_0: 1
+        ml_rate_1: 1
+        ml_rate_err_1: 1
+        ml_flux_1: 1
+        ml_flux_err_1: 1
+        ml_rate_p1: 1
+        ml_rate_err_p1: 1
+        ml_rate_p2: 1
+        ml_rate_err_p2: 1
+        ml_rate_p3: 1
+        ml_rate_err_p3: 1
+        flag_sp_snr: 1
+        flag_sp_bps: 1
+        flag_sp_scl: 1
+        flag_sp_lga: 1
+        flag_sp_gc_cons: 1
+        flag_opt: 1
+    5XMM_DR15:
+      radius: 20.0
+      use_distance: false
+      angular_size_key: radec_err
+      # 3 x radec_err, floored for the uncorrected 0.88" systematic error.
+      angular_size_scale: 6.0
+      angular_size_radius_max: 20.0
+      angular_size_radius_min: 4.0
+      projection:
+        _id: 1
+        iauname: 1
+        ra: 1
+        dec: 1
+        radec_err: 1
+        n_obs: 1
+        mjd_first: 1
+        mjd_last: 1
+        ep_flux: 1
+        ep_flux_err: 1
+        ep_det_ml: 1
+        ep_hr1: 1
+        ep_hr2: 1
+        ep_hr3: 1
+        ep_hr4: 1
+        extent: 1
+        extent_ml: 1
+        sum_flag: 1
+        var_flag: 1
+        fvar: 1
+        var_prob: 1
+        fratio: 1
+        classx_class: 1
+        classx_prob_agn: 1
+        classx_prob_star: 1
+        classx_prob_gal_xrb: 1
+        classx_prob_gal_cv: 1
+    2SXPS:
+      radius: 30.0
+      use_distance: false
+      angular_size_key: Err90
+      # Err90 is a 90% radius, not a diameter: 3.0 matches within 1.5 x Err90.
+      angular_size_scale: 3.0
+      angular_size_radius_max: 30.0
+      angular_size_radius_min: 2.0
+      projection:
+        _id: 1
+        IAUName: 1
+        ra: 1
+        dec: 1
+        Err90: 1
+        AstromType: 1
+        DetFlag: 1
+        FieldFlag: 1
+        NumObs: 1
+        NumDetObs: 1
+        FirstDetDate: 1
+        LastDetDate: 1
+        Rate_band0: 1
+        Rate_band0_pos: 1
+        Rate_band0_neg: 1
+        PeakRate_band0: 1
+        HR1: 1
+        HR2: 1
+        PvarPchiSnapshot_band0: 1
+        PvarPchiObsID_band0: 1
+        PowFlux: 1
+        PowFlux_pos: 1
+        PowFlux_neg: 1
+    4FGL_DR4:
+      radius: 3600.0
+      use_distance: false
+      angular_size_key: Conf_95_SemiMajor
+      # Conf_95_SemiMajor is in degrees: 7200.0 matches within the semi-major axis.
+      angular_size_scale: 7200.0
+      angular_size_radius_max: 3600.0
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        DataRelease: 1
+        Conf_95_SemiMajor: 1
+        Conf_95_SemiMinor: 1
+        Conf_95_PosAng: 1
+        Signif_Avg: 1
+        Flux1000: 1
+        Unc_Flux1000: 1
+        Energy_Flux100: 1
+        Unc_Energy_Flux100: 1
+        SpectrumType: 1
+        PL_Index: 1
+        Variability_Index: 1
+        Frac_Variability: 1
+        Flags: 1
+        CLASS1: 1
+        CLASS2: 1
+        ASSOC1: 1
+        ASSOC2: 1
+        ASSOC_PROB_BAY: 1
+        ASSOC_PROB_LR: 1
+        RA_Counterpart: 1
+        DEC_Counterpart: 1
     watchlist_wtp:
       radius: 2.75 # 2.75 arcseconds, one WISE pixel
       use_distance: false

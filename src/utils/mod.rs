@@ -31,7 +31,9 @@ pub mod spatial;
 pub mod sso_geometry;
 pub mod testing;
 pub mod thor;
+pub mod tns;
 pub mod tracks;
+pub mod variability;
 pub mod vsop87;
 pub mod worker;
 

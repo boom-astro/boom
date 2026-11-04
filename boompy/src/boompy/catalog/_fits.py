@@ -21,6 +21,7 @@ def fits_to_parquet(
     hdu: int | str = 1,
     row_filter=None,
     label: str = "",
+    memmap: bool = False,
 ) -> Path:
     """Convert `hdu` of a FITS table to parquet, keeping `columns`.
 
@@ -28,8 +29,10 @@ def fits_to_parquet(
     catalogs where most rows should never reach the database at all -- filtering
     before conversion rather than after keeps the parquet, the transfer and the
     ingest all proportional to what is actually stored.
+
+    `memmap` needs an uncompressed file and leaves NaN and blanks unmasked.
     """
-    table = Table.read(fits_path, hdu=hdu)
+    table = Table.read(fits_path, hdu=hdu, memmap=memmap)
     missing = [c for c in columns if c not in table.colnames]
     if missing:
         raise RuntimeError(
