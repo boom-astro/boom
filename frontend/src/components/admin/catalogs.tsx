@@ -34,18 +34,19 @@ import {
   TableRow,
 } from "@/components/ui/table";
 
-const STATE_TINT: Record<CatalogHealth, string> = {
-  present: "border-transparent bg-emerald-500/15 text-emerald-700 dark:text-emerald-400",
-  missing: "border-transparent bg-red-500/15 text-red-700 dark:text-red-400",
-  partial: "border-transparent bg-amber-500/15 text-amber-700 dark:text-amber-400",
-  ingesting: "border-transparent bg-sky-500/15 text-sky-700 dark:text-sky-400",
-  undeclared: "text-muted-foreground",
-  external: "border-transparent bg-muted text-muted-foreground",
+const STATE_VARIANT: Record<CatalogHealth, "secondary" | "destructive" | "outline"> = {
+  present: "outline",
+  missing: "destructive",
+  partial: "destructive",
+  ingesting: "secondary",
+  undeclared: "outline",
+  external: "outline",
 };
 
-const BAR_TINT: Partial<Record<CatalogHealth, string>> = {
-  partial: "bg-amber-500",
-  ingesting: "bg-sky-500",
+const STATE_TINT: Partial<Record<CatalogHealth, string>> = {
+  present: "border-transparent bg-emerald-600 text-white dark:bg-emerald-600/60",
+  partial: "border-transparent bg-amber-600 text-white dark:bg-amber-600/60",
+  external: "text-muted-foreground",
 };
 
 function healthText(health: CatalogHealth): string {
@@ -72,8 +73,7 @@ function healthText(health: CatalogHealth): string {
 function Chunks({ catalog, health }: { catalog: CatalogStatus; health: CatalogHealth }) {
   const { chunks_done: done, chunks_total: total } = catalog;
   if (total === 0) return <span className="text-muted-foreground">—</span>;
-  const bar = BAR_TINT[health];
-  if (!bar || done >= total) {
+  if ((health !== "partial" && health !== "ingesting") || done >= total) {
     return (
       <span className="text-muted-foreground">
         {done}/{total}
@@ -83,7 +83,7 @@ function Chunks({ catalog, health }: { catalog: CatalogStatus; health: CatalogHe
   return (
     <div className="flex w-28 flex-col gap-1">
       <div className="h-1.5 overflow-hidden rounded-full bg-muted">
-        <div className={`h-full ${bar}`} style={{ width: `${(done / total) * 100}%` }} />
+        <div className="h-full bg-primary" style={{ width: `${(done / total) * 100}%` }} />
       </div>
       <span className="text-xs text-muted-foreground">
         {done}/{total}
@@ -158,7 +158,7 @@ export function CatalogsTable({
                         {catalog.collection ?? "—"}
                       </TableCell>
                       <TableCell>
-                        <Badge variant="outline" className={STATE_TINT[health]}>
+                        <Badge variant={STATE_VARIANT[health]} className={STATE_TINT[health]}>
                           {running && run.status === "queued" ? "Queued" : healthText(health)}
                         </Badge>
                       </TableCell>
@@ -198,9 +198,8 @@ export function CatalogsTable({
                           // drops the collection and rebuilds it. That is
                           // destructive, so it goes through a confirmation.
                           <Button
-                            variant="ghost"
+                            variant="outline"
                             size="sm"
-                            className="text-muted-foreground hover:bg-destructive/10 hover:text-destructive dark:hover:bg-destructive/20"
                             disabled={starting}
                             onClick={() => onReingest(catalog)}
                           >
