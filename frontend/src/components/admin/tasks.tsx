@@ -68,11 +68,18 @@ const HISTORY_FILTERS: { value: HistoryFilter; label: string }[] = [
   { value: "canceled", label: "Canceled" },
 ];
 
-function statusVariant(status: Task["status"]): "default" | "secondary" | "destructive" | "outline" {
-  if (status === "succeeded") return "default";
-  if (status === "failed") return "destructive";
-  if (status === "running") return "secondary";
-  return "outline";
+const STATUS_TINT: Partial<Record<Task["status"], string>> = {
+  succeeded: "border-emerald-600/20 bg-emerald-500/15 text-emerald-700 dark:text-emerald-400",
+  canceled: "border-amber-600/20 bg-amber-500/15 text-amber-700 dark:text-amber-400",
+};
+
+function StatusBadge({ status }: { status: Task["status"] }) {
+  const variant = status === "failed" ? "destructive" : status === "running" ? "secondary" : "outline";
+  return (
+    <Badge variant={variant} className={STATUS_TINT[status]}>
+      {status}
+    </Badge>
+  );
 }
 
 function formatTime(seconds?: number | null): string {
@@ -364,7 +371,7 @@ export function RunDetail({
       <SheetHeader className="pr-10">
         <SheetTitle className="flex flex-wrap items-center gap-2">
           {run?.task_type ?? "Run"}
-          {run && <Badge variant={statusVariant(run.status)}>{run.status}</Badge>}
+          {run && <StatusBadge status={run.status} />}
           {stopping && <Badge variant="outline">stopping</Badge>}
         </SheetTitle>
         <SheetDescription className="font-mono text-xs">{runId}</SheetDescription>
@@ -704,7 +711,7 @@ export function RunsTable({
                       </TableCell>
                       <TableCell className="min-w-32">
                         <div className="flex flex-wrap gap-1">
-                          <Badge variant={statusVariant(run.status)}>{run.status}</Badge>
+                          <StatusBadge status={run.status} />
                           {running && run.cancel_requested && (
                             <Badge variant="outline">stopping</Badge>
                           )}
