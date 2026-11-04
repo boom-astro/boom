@@ -69,8 +69,8 @@ const HISTORY_FILTERS: { value: HistoryFilter; label: string }[] = [
 ];
 
 const STATUS_TINT: Partial<Record<Task["status"], string>> = {
-  succeeded: "border-emerald-600/20 bg-emerald-500/15 text-emerald-700 dark:text-emerald-400",
-  canceled: "border-zinc-500/20 bg-zinc-500/15 text-zinc-600 dark:text-zinc-400",
+  succeeded: "border-transparent bg-emerald-600 text-white dark:bg-emerald-600/60",
+  canceled: "border-transparent bg-zinc-500 text-white dark:bg-zinc-500/60",
 };
 
 function StatusBadge({ status }: { status: Task["status"] }) {
