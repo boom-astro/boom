@@ -197,6 +197,7 @@ async fn worker(
         config.ned_catalog.as_str(),
         config.ls_dr10_catalog.as_str(),
         config.ls_dr9_catalog.as_str(),
+        config.desi_catalog.as_str(),
     ];
     // Photometry is read from the same database the records come from.
     let db = client.database(&aux_ns.db);
@@ -380,6 +381,7 @@ pub async fn run(
         &config.ned_catalog,
         &config.ls_dr10_catalog,
         &config.ls_dr9_catalog,
+        &config.desi_catalog,
     ] {
         projection.insert(format!("cross_matches.{catalog}"), 1);
     }
