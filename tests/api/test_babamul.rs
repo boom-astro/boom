@@ -128,7 +128,8 @@ mod tests {
         let req = test::TestRequest::post()
             .uri("/babamul/signup")
             .set_json(serde_json::json!({
-                "email": test_email
+                "email": test_email,
+                "name": "Test User"
             }))
             .to_request();
 
@@ -174,7 +175,8 @@ mod tests {
         let req = test::TestRequest::post()
             .uri("/babamul/signup")
             .set_json(serde_json::json!({
-                "email": test_email
+                "email": test_email,
+                "name": "Test User"
             }))
             .to_request();
 
@@ -239,7 +241,8 @@ mod tests {
         let req = test::TestRequest::post()
             .uri("/babamul/signup")
             .set_json(serde_json::json!({
-                "email": test_email
+                "email": test_email,
+                "name": "Test User"
             }))
             .to_request();
 
@@ -383,7 +386,7 @@ mod tests {
             &app,
             test::TestRequest::post()
                 .uri("/babamul/signup")
-                .set_json(serde_json::json!({ "email": &email }))
+                .set_json(serde_json::json!({ "email": &email, "name": "Test User" }))
                 .to_request(),
         )
         .await;
@@ -422,7 +425,8 @@ mod tests {
             let req = test::TestRequest::post()
                 .uri("/babamul/signup")
                 .set_json(serde_json::json!({
-                    "email": invalid_email
+                    "email": invalid_email,
+                    "name": "Test User"
                 }))
                 .to_request();
 

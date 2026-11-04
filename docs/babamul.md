@@ -19,7 +19,7 @@ Babamul accounts are isolated from main BOOM API accounts:
 
 ## Authentication flow
 
-1. **Signup** (`POST /babamul/signup`): User provides email, system creates account with activation code
+1. **Signup** (`POST /babamul/signup`): User provides email and full name, system creates account with activation code
 2. **Activation** (`POST /babamul/activate`): User submits activation code, receives 32-character password (shown once)
 3. **Kafka access**: Use email + password with SCRAM-SHA-512 authentication
 4. **API access** (`POST /babamul/auth`): Exchange email + password for JWT token
