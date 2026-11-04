@@ -739,25 +739,27 @@ export function RunsTable({
                         )}
                       </TableCell>
                       <TableCell className="text-right whitespace-nowrap">
-                        {running ? (
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            disabled={run.cancel_requested}
-                            onClick={() => onCancel(run)}
-                          >
-                            {run.cancel_requested ? "Stopping…" : "Cancel…"}
-                          </Button>
-                        ) : (
-                          (run.status === "canceled" || run.status === "failed") && (
-                            <Button variant="outline" size="sm" onClick={() => onResubmit(run)}>
-                              Run again…
+                        <div className="flex justify-end gap-2">
+                          {running ? (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              disabled={run.cancel_requested}
+                              onClick={() => onCancel(run)}
+                            >
+                              {run.cancel_requested ? "Stopping…" : "Cancel…"}
                             </Button>
-                          )
-                        )}
-                        <Button variant="outline" size="sm" onClick={() => onSelect(run._id)}>
-                          {running ? "Logs" : "View"}
-                        </Button>
+                          ) : (
+                            (run.status === "canceled" || run.status === "failed") && (
+                              <Button variant="outline" size="sm" onClick={() => onResubmit(run)}>
+                                Run again…
+                              </Button>
+                            )
+                          )}
+                          <Button variant="outline" size="sm" onClick={() => onSelect(run._id)}>
+                            {running ? "Logs" : "View"}
+                          </Button>
+                        </div>
                       </TableCell>
                     </TableRow>
                   );
