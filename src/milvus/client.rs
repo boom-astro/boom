@@ -71,15 +71,33 @@ impl MilvusClient {
     /// callers cannot accidentally dial a server the operator has switched off.
     #[instrument(skip_all, err, fields(endpoint = %config.endpoint(), database = %config.database))]
     pub async fn connect(config: &MilvusConfig) -> Result<Self, MilvusError> {
+        let channel = Self::build_endpoint(config)?
+            .connect()
+            .await
+            .map_err(MilvusError::ConnectError)?;
+        info!(endpoint = %config.endpoint(), "connected to milvus");
+        Self::with_channel(config, channel)
+    }
+
+    /// Build a client without dialing. The connection is opened by the first
+    /// RPC, and tonic redials on a later RPC if it fails, so a long-lived
+    /// caller recovers from an outage without being restarted. Errors only for
+    /// configuration that will never connect.
+    pub fn connect_lazy(config: &MilvusConfig) -> Result<Self, MilvusError> {
+        let channel = Self::build_endpoint(config)?.connect_lazy();
+        Self::with_channel(config, channel)
+    }
+
+    fn build_endpoint(config: &MilvusConfig) -> Result<Endpoint, MilvusError> {
         if !config.enabled {
             return Err(MilvusError::NotEnabled);
         }
 
         let endpoint_url = config.endpoint();
         let mut endpoint = Endpoint::from_shared(endpoint_url.clone())
-            .map_err(|_| MilvusError::InvalidEndpoint(endpoint_url.clone()))?
+            .map_err(|_| MilvusError::InvalidEndpoint(endpoint_url))?
             .timeout(Duration::from_secs(config.timeout_seconds))
-            .connect_timeout(Duration::from_secs(config.timeout_seconds));
+            .connect_timeout(Duration::from_secs(config.connect_timeout_seconds));
 
         if config.tls {
             // NRP serves a standard Let's Encrypt certificate, so the platform
@@ -91,19 +109,13 @@ impl MilvusClient {
                 .tls_config(tls)
                 .map_err(MilvusError::ConnectError)?;
         }
+        Ok(endpoint)
+    }
 
-        let channel = endpoint
-            .connect()
-            .await
-            .map_err(MilvusError::ConnectError)?;
-
+    fn with_channel(config: &MilvusConfig, channel: Channel) -> Result<Self, MilvusError> {
         let interceptor = Self::build_interceptor(config)?;
-        let inner = MilvusServiceClient::with_interceptor(channel, interceptor);
-
-        info!(endpoint = %endpoint_url, "connected to milvus");
-
         Ok(Self {
-            inner,
+            inner: MilvusServiceClient::with_interceptor(channel, interceptor),
             config: config.clone(),
         })
     }
