@@ -6,9 +6,10 @@
 //!
 //! The test needs both `milvus.read_embeddings` and `milvus.write_embeddings`,
 //! so it is **gated on the config**: without them it logs a skip and returns.
-//! That is the case in CI, where `.env` is copied from `.env.example`. To run it for real, set `BOOM_MILVUS__*` in
-//! `.env` (see `docs/milvus.md`); it then runs against whatever Milvus those
-//! credentials point at, provisioning the collection if it does not yet exist.
+//! That is the case in CI, where `.env` is copied from `.env.example`. To run
+//! it for real, set `BOOM_MILVUS__*` in `.env` (see `docs/milvus.md`); it then
+//! runs against whatever Milvus those credentials point at, provisioning the
+//! collection if it does not yet exist.
 use boom::{
     alert::{AlertWorker, ProcessAlertStatus},
     conf::{self},
