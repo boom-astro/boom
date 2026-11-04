@@ -741,7 +741,7 @@ export function RunsTable({
                       <TableCell className="text-right whitespace-nowrap">
                         {running ? (
                           <Button
-                            variant="ghost"
+                            variant="outline"
                             size="sm"
                             disabled={run.cancel_requested}
                             onClick={() => onCancel(run)}
@@ -750,7 +750,7 @@ export function RunsTable({
                           </Button>
                         ) : (
                           (run.status === "canceled" || run.status === "failed") && (
-                            <Button variant="ghost" size="sm" onClick={() => onResubmit(run)}>
+                            <Button variant="outline" size="sm" onClick={() => onResubmit(run)}>
                               Run again…
                             </Button>
                           )
