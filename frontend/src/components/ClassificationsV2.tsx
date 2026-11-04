@@ -41,6 +41,23 @@ type AlertLike = {
   candidate?: { drb?: number; sgscore1?: number; distpsnr1?: number, reliability?: number };
   classifications_history?: Record<string, number>[];
   cross_matches?: Record<string, Array<{ ra?: number; dec?: number; score?: number, distance_arcsec?: number }>>;
+  flare?: {
+    p_sn_ia?: number;
+    p_sn_cc?: number;
+    p_slsn?: number;
+    p_agn?: number;
+    p_tde?: number;
+    p_cv?: number;
+    label?: string;
+    set?: string[];
+    alpha?: number;
+    credibility?: number;
+    confidence?: number;
+    energy?: number;
+    p_anomaly?: number;
+    novelty_p?: number;
+    argmax_excluded?: boolean;
+  };
 };
 
 function mapAlertClassifications(alert: unknown): MapAlertResult {
@@ -142,6 +159,34 @@ function mapAlertClassifications(alert: unknown): MapAlertResult {
         },
       ];
     }
+  }
+
+  if (a.flare) {
+    const fl = a.flare;
+
+    const probabilities: Record<string, number | undefined> = {
+      SN_Ia: fl.p_sn_ia,
+      SN_CC: fl.p_sn_cc,
+      SLSN: fl.p_slsn,
+      AGN: fl.p_agn,
+      TDE: fl.p_tde,
+      CV: fl.p_cv,
+    };
+
+    const score = fl.label ? probabilities[fl.label] ?? 0 : 0;
+    const conformalSet = fl.set ?? [];
+
+    mapped.binary['FLARE'] = [{
+      name: `FLARE: ${(fl.label ?? '?').replace('_', ' ')}`,
+      score,
+      history: [],
+      isStatic: true,
+      description: conformalSet.length
+        ? `${Math.round((1 - (fl.alpha ?? 0.1)) * 100)}% conformal set {${conformalSet
+            .map(s => s.replace('_', ' '))
+            .join(', ')}}${fl.argmax_excluded ? ' \u00b7 argmax excluded: review queue' : ''}`
+        : 'empty conformal set: no class is consistent at this level',
+    }];
   }
 
   return mapped;
@@ -657,7 +702,7 @@ const ClassifierDisplay = ({ alert }: { alert?: unknown }) => {
         };
       }, [alert]);
 
-  const FAMILY_ORDER = ['drb', 'reliability', 'sgscore', 'LSPSC', 'BTSBot', 'ACAI'];
+  const FAMILY_ORDER = ['drb', 'reliability', 'sgscore', 'LSPSC', 'BTSBot', 'ACAI', 'FLARE'];
   const binaryFamilies = Object.keys(classifierData.binary).sort((a, b) => {
     const ai = FAMILY_ORDER.indexOf(a);
     const bi = FAMILY_ORDER.indexOf(b);
