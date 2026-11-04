@@ -55,8 +55,8 @@ pub struct MilvusSink {
 }
 
 impl MilvusSink {
-    /// Connect if `milvus.writes_embeddings()`, degrading to a paused sink if Milvus is
-    /// unreachable rather than failing the caller.
+    /// Connect if `milvus.writes_embeddings()`, degrading to a paused sink if
+    /// Milvus is unreachable rather than failing the caller.
     ///
     /// This is deliberately infallible: an operator enabling Milvus must not be
     /// able to take enrichment down by pointing it at a server that is off.
@@ -86,17 +86,17 @@ impl MilvusSink {
         sink
     }
 
-    /// Whether the integration is switched on at all. False means callers can
-    /// skip collecting embeddings entirely; it does not track breaker state,
-    /// which is deliberate — an outage should not silently change what the
-    /// worker computes, only where it ends up.
-    pub fn is_enabled(&self) -> bool {
+    /// Whether this deployment writes embeddings at all. False means callers
+    /// can skip collecting embeddings entirely; it does not track breaker
+    /// state, which is deliberate — an outage should not silently change what
+    /// the worker computes, only where it ends up.
+    pub fn is_writing(&self) -> bool {
         self.config.writes_embeddings()
     }
 
     /// Whether an upload would be attempted right now.
     fn is_ready(&self) -> bool {
-        self.is_enabled() && self.retry_at.is_none_or(|at| Instant::now() >= at)
+        self.is_writing() && self.retry_at.is_none_or(|at| Instant::now() >= at)
     }
 
     /// Time left before the breaker allows another attempt; zero once closed.
@@ -177,7 +177,7 @@ impl MilvusSink {
     /// Never returns an error: failures are recorded and logged, because the
     /// alerts these embeddings came from are already persisted in Mongo.
     pub async fn upsert(&mut self, rows: &[EmbeddingRow]) {
-        if rows.is_empty() || !self.is_enabled() {
+        if rows.is_empty() || !self.is_writing() {
             return;
         }
 
@@ -344,7 +344,7 @@ mod tests {
     #[test]
     fn disabled_sink_is_inert() {
         let sink = sink(false);
-        assert!(!sink.is_enabled());
+        assert!(!sink.is_writing());
         assert!(!sink.is_ready());
     }
 
@@ -361,7 +361,7 @@ mod tests {
 
         let sink = MilvusSink::connect_or_degrade(&config, None).await;
         assert!(sink.client.is_none(), "a read-only sink should not connect");
-        assert!(!sink.is_enabled());
+        assert!(!sink.is_writing());
         assert!(!sink.is_ready());
     }
 
@@ -385,9 +385,9 @@ mod tests {
         assert!(!sink.is_ready());
         assert_eq!(sink.consecutive_failures, 1);
 
-        // Still enabled — the outage changes where embeddings go, not whether
+        // Still writing — the outage changes where embeddings go, not whether
         // the worker computes them.
-        assert!(sink.is_enabled());
+        assert!(sink.is_writing());
     }
 
     #[test]

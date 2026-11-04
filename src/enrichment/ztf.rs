@@ -715,8 +715,8 @@ pub struct ZtfEnrichmentWorker {
     models: Arc<SharedModels>,
     babamul: Option<Babamul>,
     /// Sink for fusion embeddings, upserted after classification. Inert when
-    /// `milvus.writes_embeddings()` is false, and self-pausing while Milvus is unreachable
-    /// so an outage there never stalls enrichment.
+    /// `milvus.writes_embeddings()` is false, and self-pausing while Milvus is
+    /// unreachable so an outage there never stalls enrichment.
     milvus: MilvusSink,
     gpu_enabled: bool,
     /// Enrichment set stamped onto every alert this worker enriches.
@@ -998,7 +998,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             ));
             processed_alerts.push(format!("{},{}", item.programid, item.candid));
 
-            if self.milvus.is_enabled() {
+            if self.milvus.is_writing() {
                 let programid = milvus_programid(item.programid, &item.alert.prv_candidates);
                 if let (Some(embedding), Some(programid)) = (fusion_embedding, programid) {
                     embedding_rows.push(EmbeddingRow {
