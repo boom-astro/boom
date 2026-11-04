@@ -73,6 +73,13 @@ const STATUS_TINT: Partial<Record<Task["status"], string>> = {
   canceled: "border-transparent bg-zinc-500 text-white dark:bg-zinc-500/60",
 };
 
+const CANCEL_BUTTON =
+  "text-destructive hover:bg-destructive/10 hover:text-destructive dark:hover:bg-destructive/20 dark:hover:text-destructive";
+
+function rerunLabel(status: Task["status"]): string {
+  return status === "succeeded" ? "Run again" : "Retry";
+}
+
 function StatusBadge({ status }: { status: Task["status"] }) {
   const variant = status === "failed" ? "destructive" : status === "running" ? "secondary" : "outline";
   return (
@@ -244,7 +251,9 @@ export function ResubmitDialog({
     <Dialog open={run !== null} onOpenChange={(open) => !open && onClose()}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Run {run?.task_type} again?</DialogTitle>
+          <DialogTitle>
+            {run?.status === "succeeded" ? `Run ${run.task_type} again?` : `Retry ${run?.task_type}?`}
+          </DialogTitle>
           <DialogDescription>
             A new run is queued with the same parameters as this {run?.status} one, recorded as
             started by you.
@@ -266,7 +275,7 @@ export function ResubmitDialog({
             disabled={busy}
             onClick={confirm}
           >
-            {busy ? "Submitting…" : "Run again"}
+            {busy ? "Submitting…" : run && rerunLabel(run.status)}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -403,14 +412,15 @@ export function RunDetail({
               <Button
                 variant="outline"
                 size="sm"
+                className={CANCEL_BUTTON}
                 disabled={run.cancel_requested}
                 onClick={() => setConfirmCancel(run)}
               >
-                {run.cancel_requested ? "Cancel requested" : "Cancel…"}
+                {run.cancel_requested ? "Cancel requested" : "Cancel run"}
               </Button>
             ) : (
               <Button variant="outline" size="sm" onClick={() => onResubmit(run)}>
-                Run again…
+                {rerunLabel(run.status)}
               </Button>
             )}
           </div>
@@ -697,9 +707,18 @@ export function RunsTable({
                   const params = paramSummary(run.params);
                   const running = isActive(run);
                   return (
-                    <TableRow key={run._id}>
+                    <TableRow
+                      key={run._id}
+                      className="cursor-pointer"
+                      onClick={() => onSelect(run._id)}
+                    >
                       <TableCell className="max-w-56">
-                        <div className="font-medium">{run.task_type}</div>
+                        <button
+                          type="button"
+                          className="font-medium text-left rounded-sm outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
+                        >
+                          {run.task_type}
+                        </button>
                         {params && (
                           <div
                             className="text-xs text-muted-foreground font-mono truncate"
@@ -739,27 +758,32 @@ export function RunsTable({
                         )}
                       </TableCell>
                       <TableCell className="text-right whitespace-nowrap">
-                        <div className="flex justify-end gap-2">
-                          {running ? (
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              disabled={run.cancel_requested}
-                              onClick={() => onCancel(run)}
-                            >
-                              {run.cancel_requested ? "Stopping…" : "Cancel…"}
-                            </Button>
-                          ) : (
-                            (run.status === "canceled" || run.status === "failed") && (
-                              <Button variant="outline" size="sm" onClick={() => onResubmit(run)}>
-                                Run again…
+                        {running
+                          ? !run.cancel_requested && (
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                className={CANCEL_BUTTON}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  onCancel(run);
+                                }}
+                              >
+                                Cancel
                               </Button>
                             )
-                          )}
-                          <Button variant="outline" size="sm" onClick={() => onSelect(run._id)}>
-                            {running ? "Logs" : "View"}
-                          </Button>
-                        </div>
+                          : (run.status === "canceled" || run.status === "failed") && (
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  onResubmit(run);
+                                }}
+                              >
+                                Retry
+                              </Button>
+                            )}
                       </TableCell>
                     </TableRow>
                   );
