@@ -46,6 +46,7 @@ pub struct GalaxyCandidate {
     pub diam_survey: Option<String>,
     /// Whether the position angle is a catalogue default rather than measured.
     pub orientation_is_nominal: bool,
+    pub rex_snr_band: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
