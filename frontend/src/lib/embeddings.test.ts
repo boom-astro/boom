@@ -66,12 +66,12 @@ describe("fetchSimilarObjects", () => {
 
   it("throws when Milvus is unavailable, so the page can say so", async () => {
     const fetchMock = vi.fn(async () =>
-      jsonResponse({ message: "Milvus is not enabled or was unavailable at startup" }, 500)
+      jsonResponse({ message: "Milvus is not enabled or misconfigured" }, 501)
     )
     vi.stubGlobal("fetch", fetchMock)
 
     await expect(fetchSimilarObjects("ZTF18abcdefg")).rejects.toThrow(
-      "Milvus is not enabled or was unavailable at startup"
+      "Milvus is not enabled or misconfigured"
     )
   })
 
