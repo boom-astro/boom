@@ -755,7 +755,7 @@ export function RunsTable({
                             </Button>
                           )
                         )}
-                        <Button variant="ghost" size="sm" onClick={() => onSelect(run._id)}>
+                        <Button variant="outline" size="sm" onClick={() => onSelect(run._id)}>
                           {running ? "Logs" : "View"}
                         </Button>
                       </TableCell>
