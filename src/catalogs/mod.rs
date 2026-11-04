@@ -1277,7 +1277,7 @@ pub fn validate_crossmatch(
 ///
 /// Deserializing an `AppConfig` requires the secrets a deployment supplies
 /// -- the database password, the API keys, and, for any config with
-/// Milvus enabled (`config/prod/umn` has it), the milvus credentials. A
+/// Milvus enabled (both prod configs), the Milvus credentials. A
 /// substituted environment rather than `set_var` keeps that off the other
 /// tests in this binary and makes the result the same whether or not the
 /// developer has a `.env` loaded. Secret *validation* is `check_config`'s

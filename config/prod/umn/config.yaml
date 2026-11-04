@@ -111,7 +111,7 @@ gpu:
 redis:
   host: localhost
   port: 6379
-# The NRP Milvus collection is UMN's, so UMN is the only deployment that writes it.
+# UMN owns the NRP collection and is the only deployment that writes it.
 # Credentials come from BOOM_MILVUS__USERNAME / __PASSWORD.
 milvus:
   # Vector database holding the AppleCiDEr fusion model's embeddings.
@@ -125,7 +125,7 @@ milvus:
   database: umn_babamul_vectordb # Override via BOOM_MILVUS__DATABASE environment variable
   timeout_seconds: 30
   connect_timeout_seconds: 5
-  write_embeddings: true # Only the deployment that owns the collection writes it
+  write_embeddings: true # Set per deployment in overrides.yaml
   collection:
     name: boom_ztf_fusion_embeddings
     dim: 384

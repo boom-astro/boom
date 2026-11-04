@@ -1299,8 +1299,7 @@ pub struct MilvusConfig {
     #[serde(default = "default_milvus_connect_timeout_seconds")]
     pub connect_timeout_seconds: u64,
     /// Whether ZTF enrichment upserts embeddings and the scheduler provisions
-    /// the collection. Off by default: the collection is shared across
-    /// deployments, so only the one that owns it should write.
+    /// the collection. The collection is shared, so only its owner sets this.
     #[serde(default)]
     pub write_embeddings: bool,
     #[serde(default)]
@@ -1310,8 +1309,7 @@ pub struct MilvusConfig {
 }
 
 impl MilvusConfig {
-    /// Whether anything in this deployment connects to Milvus. With both flags
-    /// false BOOM never opens a connection.
+    /// Whether this deployment connects to Milvus at all.
     pub fn is_enabled(&self) -> bool {
         self.read_embeddings || self.write_embeddings
     }

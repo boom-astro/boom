@@ -101,10 +101,9 @@ and are never committed. To give a deployment Milvus credentials, set these unde
 `BOOM_MILVUS__DATABASE` is not in the table because `config.yaml` already
 carries the name.
 
-Only the password is secret. Whether a deployment reads or writes is not set
-here: `milvus.read_embeddings` and `milvus.write_embeddings` live in its
-`overrides.yaml`. Turning either on there without the credentials above fails
-config validation, which stops every service at startup.
+Only the password is secret. Reading and writing are set per deployment in
+`overrides.yaml`, not here. If either is on and the credentials are missing,
+config validation fails and no service starts.
 
 Some wiring details worth knowing, because all of them fail *silently* rather
 than loudly:
@@ -161,11 +160,9 @@ Once `milvus.write_embeddings` is true, the ZTF enrichment worker upserts each a
 `object_id` so a re-observed object overwrites its previous vector. The write is
 an `Upsert` RPC batched per enrichment batch.
 
-`milvus.read_embeddings` and `milvus.write_embeddings` are independent, and
-writing defaults to off because the collection is shared: a deployment with
-only `read_embeddings` serves the count and similarity search but never
-provisions, upserts or opens a backup queue, and `milvus_check
---create-collection` refuses to run there.
+Writing is off by default because the collection is shared. A deployment with
+only `read_embeddings` serves the count and similarity search, but never
+provisions the collection, upserts or opens a backup queue.
 
 The worker **connects only** — it does not create the collection. Provision it
 once with `milvus_check --create-collection` before starting the workers, since

@@ -4,10 +4,9 @@
 //! resulting embedding to Milvus) — and is then read back out of Milvus with the
 //! similarity-search / query / count APIs.
 //!
-//! The ZTF enrichment worker only writes embeddings when `milvus.write_embeddings`, so
-//! this test is **gated on the config**: with Milvus disabled it logs a skip and
-//! returns. That is the case in CI, where `.env` is copied from `.env.example`
-//! (both Milvus flags false). To run it for real, set `BOOM_MILVUS__*` in
+//! The test needs both `milvus.read_embeddings` and `milvus.write_embeddings`,
+//! so it is **gated on the config**: without them it logs a skip and returns.
+//! That is the case in CI, where `.env` is copied from `.env.example`. To run it for real, set `BOOM_MILVUS__*` in
 //! `.env` (see `docs/milvus.md`); it then runs against whatever Milvus those
 //! credentials point at, provisioning the collection if it does not yet exist.
 use boom::{

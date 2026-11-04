@@ -6,7 +6,7 @@ babamul:
 gpu:
   device_ids: [0, 1]
 
-# The NRP Milvus collection is UMN's, so UMN is the only deployment that writes it.
+# UMN owns the NRP collection and is the only deployment that writes it.
 # Credentials come from BOOM_MILVUS__USERNAME / __PASSWORD.
 milvus:
   read_embeddings: true

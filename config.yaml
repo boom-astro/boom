@@ -122,7 +122,7 @@ milvus:
   database: umn_babamul_vectordb # Override via BOOM_MILVUS__DATABASE environment variable
   timeout_seconds: 30
   connect_timeout_seconds: 5
-  write_embeddings: false # Only the deployment that owns the collection writes it
+  write_embeddings: false # Set per deployment in overrides.yaml
   collection:
     name: boom_ztf_fusion_embeddings
     dim: 384

@@ -47,8 +47,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     if !milvus_config.is_enabled() {
         return Err(
-            "milvus is disabled; set BOOM_MILVUS__READ_EMBEDDINGS=true (and the credentials) to use it"
-                .into(),
+            "milvus is disabled; set milvus.read_embeddings (and the credentials) to use it".into(),
         );
     }
     if cli.create_collection && !milvus_config.write_embeddings {

@@ -6,8 +6,7 @@ babamul:
 gpu:
   device_ids: [0]
 
-# Reads UMN's shared NRP collection; needs BOOM_MILVUS__USERNAME / __PASSWORD
-# in Caltech's environment, or every service fails config validation at startup.
+# Reads UMN's NRP collection. Credentials come from BOOM_MILVUS__USERNAME / __PASSWORD.
 milvus:
   read_embeddings: true
 
