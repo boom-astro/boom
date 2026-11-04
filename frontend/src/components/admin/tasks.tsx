@@ -68,11 +68,25 @@ const HISTORY_FILTERS: { value: HistoryFilter; label: string }[] = [
   { value: "canceled", label: "Canceled" },
 ];
 
-function statusVariant(status: Task["status"]): "default" | "secondary" | "destructive" | "outline" {
-  if (status === "succeeded") return "default";
-  if (status === "failed") return "destructive";
-  if (status === "running") return "secondary";
-  return "outline";
+const STATUS_TINT: Partial<Record<Task["status"], string>> = {
+  succeeded: "border-transparent bg-emerald-600 text-white dark:bg-emerald-600/60",
+  canceled: "border-transparent bg-zinc-500 text-white dark:bg-zinc-500/60",
+};
+
+const CANCEL_BUTTON =
+  "text-destructive hover:bg-destructive/10 hover:text-destructive dark:hover:bg-destructive/20 dark:hover:text-destructive";
+
+function rerunLabel(status: Task["status"]): string {
+  return status === "succeeded" ? "Run again" : "Retry";
+}
+
+function StatusBadge({ status }: { status: Task["status"] }) {
+  const variant = status === "failed" ? "destructive" : status === "running" ? "secondary" : "outline";
+  return (
+    <Badge variant={variant} className={STATUS_TINT[status]}>
+      {status}
+    </Badge>
+  );
 }
 
 function formatTime(seconds?: number | null): string {
@@ -237,7 +251,9 @@ export function ResubmitDialog({
     <Dialog open={run !== null} onOpenChange={(open) => !open && onClose()}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Run {run?.task_type} again?</DialogTitle>
+          <DialogTitle>
+            {run?.status === "succeeded" ? `Run ${run.task_type} again?` : `Retry ${run?.task_type}?`}
+          </DialogTitle>
           <DialogDescription>
             A new run is queued with the same parameters as this {run?.status} one, recorded as
             started by you.
@@ -259,7 +275,7 @@ export function ResubmitDialog({
             disabled={busy}
             onClick={confirm}
           >
-            {busy ? "Submitting…" : "Run again"}
+            {busy ? "Submitting…" : run && rerunLabel(run.status)}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -364,7 +380,7 @@ export function RunDetail({
       <SheetHeader className="pr-10">
         <SheetTitle className="flex flex-wrap items-center gap-2">
           {run?.task_type ?? "Run"}
-          {run && <Badge variant={statusVariant(run.status)}>{run.status}</Badge>}
+          {run && <StatusBadge status={run.status} />}
           {stopping && <Badge variant="outline">stopping</Badge>}
         </SheetTitle>
         <SheetDescription className="font-mono text-xs">{runId}</SheetDescription>
@@ -396,14 +412,15 @@ export function RunDetail({
               <Button
                 variant="outline"
                 size="sm"
+                className={CANCEL_BUTTON}
                 disabled={run.cancel_requested}
                 onClick={() => setConfirmCancel(run)}
               >
-                {run.cancel_requested ? "Cancel requested" : "Cancel…"}
+                {run.cancel_requested ? "Cancel requested" : "Cancel run"}
               </Button>
             ) : (
               <Button variant="outline" size="sm" onClick={() => onResubmit(run)}>
-                Run again…
+                {rerunLabel(run.status)}
               </Button>
             )}
           </div>
@@ -690,9 +707,18 @@ export function RunsTable({
                   const params = paramSummary(run.params);
                   const running = isActive(run);
                   return (
-                    <TableRow key={run._id}>
+                    <TableRow
+                      key={run._id}
+                      className="cursor-pointer"
+                      onClick={() => onSelect(run._id)}
+                    >
                       <TableCell className="max-w-56">
-                        <div className="font-medium">{run.task_type}</div>
+                        <button
+                          type="button"
+                          className="font-medium text-left rounded-sm outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
+                        >
+                          {run.task_type}
+                        </button>
                         {params && (
                           <div
                             className="text-xs text-muted-foreground font-mono truncate"
@@ -704,7 +730,7 @@ export function RunsTable({
                       </TableCell>
                       <TableCell className="min-w-32">
                         <div className="flex flex-wrap gap-1">
-                          <Badge variant={statusVariant(run.status)}>{run.status}</Badge>
+                          <StatusBadge status={run.status} />
                           {running && run.cancel_requested && (
                             <Badge variant="outline">stopping</Badge>
                           )}
@@ -732,25 +758,32 @@ export function RunsTable({
                         )}
                       </TableCell>
                       <TableCell className="text-right whitespace-nowrap">
-                        {running ? (
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            disabled={run.cancel_requested}
-                            onClick={() => onCancel(run)}
-                          >
-                            {run.cancel_requested ? "Stopping…" : "Cancel…"}
-                          </Button>
-                        ) : (
-                          (run.status === "canceled" || run.status === "failed") && (
-                            <Button variant="ghost" size="sm" onClick={() => onResubmit(run)}>
-                              Run again…
-                            </Button>
-                          )
-                        )}
-                        <Button variant="ghost" size="sm" onClick={() => onSelect(run._id)}>
-                          {running ? "Logs" : "View"}
-                        </Button>
+                        {running
+                          ? !run.cancel_requested && (
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                className={CANCEL_BUTTON}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  onCancel(run);
+                                }}
+                              >
+                                Cancel
+                              </Button>
+                            )
+                          : (run.status === "canceled" || run.status === "failed") && (
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  onResubmit(run);
+                                }}
+                              >
+                                Retry
+                              </Button>
+                            )}
                       </TableCell>
                     </TableRow>
                   );

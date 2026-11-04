@@ -1136,20 +1136,16 @@ pub async fn status(
                 }
             }
         }
-        // An alias populated before this release tracked ingest state has no
-        // state document at all, so the collection itself is the only evidence.
-        // Counted rather than assumed missing, because a populated alias is
-        // what the crossmatch is reading right now.
         let mut untracked = 0i64;
         if doc.is_none() {
-            for alias in def.aliases {
+            for name in std::iter::once(&def.collection).chain(def.aliases) {
                 let count = db
-                    .collection::<Document>(alias)
+                    .collection::<Document>(name)
                     .estimated_document_count()
                     .await
                     .unwrap_or(0) as i64;
                 if count > 0 {
-                    serving = (*alias).to_string();
+                    serving = (*name).to_string();
                     untracked = count;
                     break;
                 }
