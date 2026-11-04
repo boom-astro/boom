@@ -1295,6 +1295,10 @@ pub struct MilvusConfig {
     /// Per-RPC timeout in seconds.
     #[serde(default = "default_milvus_timeout_seconds")]
     pub timeout_seconds: u64,
+    /// Timeout for opening a connection, kept short so an unreachable server
+    /// fails a request quickly while a slow search still has `timeout_seconds`.
+    #[serde(default = "default_milvus_connect_timeout_seconds")]
+    pub connect_timeout_seconds: u64,
     #[serde(default)]
     pub collection: MilvusCollectionConfig,
     #[serde(default)]
@@ -1348,6 +1352,10 @@ fn default_milvus_timeout_seconds() -> u64 {
     30
 }
 
+fn default_milvus_connect_timeout_seconds() -> u64 {
+    5
+}
+
 fn default_milvus_backup_queue_enabled() -> bool {
     true
 }
@@ -1391,6 +1399,7 @@ impl Default for MilvusConfig {
             password: String::new(),
             database: String::new(),
             timeout_seconds: default_milvus_timeout_seconds(),
+            connect_timeout_seconds: default_milvus_connect_timeout_seconds(),
             collection: MilvusCollectionConfig::default(),
             backup_queue: MilvusBackupQueueConfig::default(),
         }

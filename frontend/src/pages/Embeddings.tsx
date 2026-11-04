@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import {
+  EmbeddingsDisabled,
   fetchEmbeddingsCount,
   fetchSimilarObjects,
   type SimilarObject,
@@ -16,6 +17,10 @@ const MAX_TOP_K = 100;
 const DEFAULT_TOP_K = 10;
 
 const EMBEDDING_SURVEY = "ztf";
+
+/** Automatic count retries wait 5s, doubling after each failure up to an hour. */
+const COUNT_RETRY_BASE_MS = 5_000;
+const COUNT_RETRY_MAX_MS = 60 * 60 * 1000;
 
 function formatScore(score: number): string {
   return score.toFixed(4);
@@ -32,19 +37,38 @@ export default function Embeddings() {
 
   const [count, setCount] = useState<number | null>(null);
   const [countError, setCountError] = useState<string | null>(null);
+  const [countDisabled, setCountDisabled] = useState(false);
 
-  const loadCount = useCallback(() => {
+  // Bumping this reloads the count; a failed load schedules the next bump.
+  const [countLoad, setCountLoad] = useState(0);
+  const countFailures = useRef(0);
+
+  useEffect(() => {
+    let canceled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     fetchEmbeddingsCount()
       .then((n) => {
+        if (canceled) return;
+        countFailures.current = 0;
         setCount(n);
         setCountError(null);
       })
-      .catch((e) => setCountError(e instanceof Error ? e.message : "Failed to fetch count"));
-  }, []);
-
-  useEffect(() => {
-    loadCount();
-  }, [loadCount]);
+      .catch((e) => {
+        if (canceled) return;
+        setCountError(e instanceof Error ? e.message : "Failed to fetch count");
+        if (e instanceof EmbeddingsDisabled) {
+          setCountDisabled(true);
+          return;
+        }
+        const delay = Math.min(COUNT_RETRY_BASE_MS * 2 ** countFailures.current, COUNT_RETRY_MAX_MS);
+        countFailures.current += 1;
+        timer = setTimeout(() => setCountLoad((n) => n + 1), delay);
+      });
+    return () => {
+      canceled = true;
+      clearTimeout(timer);
+    };
+  }, [countLoad]);
 
   async function runSearch(e: React.FormEvent) {
     e.preventDefault();
@@ -83,7 +107,14 @@ export default function Embeddings() {
             <CardTitle className="text-2xl tabular-nums">
               {countError ? "-" : count === null ? "…" : count.toLocaleString()}
             </CardTitle>
-            {countError && <p className="text-sm text-destructive">{countError}</p>}
+            {countError && (
+              <>
+                <p className="text-sm text-destructive">{countError}</p>
+                {!countDisabled && (
+                  <p className="text-sm text-muted-foreground">Retrying automatically.</p>
+                )}
+              </>
+            )}
           </CardHeader>
         </Card>
         <Card>
