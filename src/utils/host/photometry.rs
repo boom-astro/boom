@@ -11,7 +11,7 @@ use crate::utils::enums::Survey;
 use crate::utils::spatial::{get_opt_f64_from_doc as opt_f64, xmatch};
 
 use super::association::{HostGalaxyAssociation, StoredHostCandidate};
-use super::catalog::{opt_objname, LS_DR10};
+use super::catalog::{legacy_rows, opt_objname};
 use super::config::HostGalaxyConfig;
 
 const LS_NANOMAGGY_ZERO_POINT: f64 = 22.5;
@@ -117,8 +117,8 @@ pub fn photometry_from_xmatches(
     xmatches: &HashMap<String, Vec<Document>>,
     config: &HostGalaxyConfig,
 ) -> Option<HostPhotometry> {
-    let rows = xmatches.get(&config.ls_dr10_catalog)?;
-    let own_row = (best.catalog.as_deref() == Some(LS_DR10))
+    let (catalog, rows) = legacy_rows(xmatches, config)?;
+    let own_row = (best.catalog.as_deref() == Some(catalog))
         .then_some(best.objname.as_deref())
         .flatten()
         .and_then(|id| {
@@ -129,7 +129,7 @@ pub fn photometry_from_xmatches(
         Some(row) => (row, 0.0),
         None => nearest(rows, best.ra, best.dec, config.photometry_match_arcsec)?,
     };
-    from_legacy(row, &config.ls_dr10_catalog, sep)
+    from_legacy(row, catalog, sep)
 }
 
 async fn photometry_from_ps1(
@@ -199,6 +199,7 @@ pub async fn attach_photometry(
 
 #[cfg(test)]
 mod tests {
+    use super::super::catalog::LS_DR10;
     use super::*;
     use mongodb::bson::doc;
 
