@@ -23,7 +23,8 @@ use actix_web::{get, post, web, HttpResponse};
         (status = 200, description = "Nearest neighbors, best-first", body = serde_json::Value),
         (status = 401, description = "Unauthorized"),
         (status = 404, description = "No embedding stored for the object"),
-        (status = 500, description = "Milvus unavailable or search failed")
+        (status = 500, description = "Milvus unavailable or search failed"),
+        (status = 501, description = "Milvus not enabled or misconfigured")
     ),
     tags=["Babamul"]
 )]
@@ -45,7 +46,8 @@ pub async fn post_babamul_similar_objects(
     responses(
         (status = 200, description = "Embedding count retrieved"),
         (status = 401, description = "Unauthorized"),
-        (status = 500, description = "Milvus unavailable or count failed")
+        (status = 500, description = "Milvus unavailable or count failed"),
+        (status = 501, description = "Milvus not enabled or misconfigured")
     ),
     tags=["Babamul"]
 )]

@@ -564,12 +564,15 @@ export async function fetchSimilarObjects(
   return { results: Array.isArray(result) ? (result as SimilarObject[]) : [], message };
 }
 
+export class EmbeddingsDisabled extends Error {}
+
 export async function fetchEmbeddingsCount(): Promise<number> {
   const url = `${API_BASE}/embeddings/count`;
   const res = await fetch(url);
   if (!res.ok) {
     const txt = await res.text().catch(() => "");
-    throw new Error(`Fetch embedding count failed: ${res.status} ${txt}`);
+    const message = `Fetch embedding count failed: ${res.status} ${txt}`;
+    throw res.status === 501 ? new EmbeddingsDisabled(message) : new Error(message);
   }
   const body = await parseResponseJson(res).catch(() => ({}));
   const data = unwrapData<{ count?: number }>(body, {});
