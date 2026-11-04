@@ -51,6 +51,8 @@ RUN ORT_CAPI_DIR="$('/opt/ort-py/bin/python' -c 'import pathlib, onnxruntime as 
 
 COPY apache-avro-macros /app/apache-avro-macros
 COPY Cargo.toml Cargo.lock build.rs /app/
+# Cargo validates explicitly declared example paths even for binary-only builds.
+COPY examples/clickhouse_shadow.rs /app/examples/clickhouse_shadow.rs
 # build.rs generates the Milvus gRPC bindings from these vendored protos into
 # OUT_DIR; without them src/milvus/proto.rs has nothing to include!().
 COPY ./proto /app/proto

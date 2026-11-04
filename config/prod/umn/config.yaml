@@ -111,6 +111,15 @@ gpu:
 redis:
   host: localhost
   port: 6379
+photometry_shadow:
+  # Empty URL disables the experimental ZTF shadow path. Mongo remains authoritative.
+  url: "" # BOOM_PHOTOMETRY_SHADOW__URL
+  database: boom_photometry_shadow
+  username: default
+  password: "" # Environment only: BOOM_PHOTOMETRY_SHADOW__PASSWORD
+  poll_seconds: 5
+  drain_rows: 4
+  concurrent_deliveries: 1 # Bounded 1..32; opt-in tuning, total work remains limited by drain_rows.
 # The NRP Milvus instance is UMN's, so this stays out of the base config.yaml:
 # Caltech has no credentials for it and would warn on every enrichment batch.
 # Credentials come from BOOM_MILVUS__USERNAME / __PASSWORD.
