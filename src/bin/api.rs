@@ -70,7 +70,7 @@ async fn main() -> std::io::Result<()> {
     // Milvus is down when the API starts, the embedding endpoints recover once
     // it is back, without a restart. `None` means Milvus is disabled or its
     // config is invalid.
-    let milvus_client: Option<MilvusClient> = if config.milvus.enabled {
+    let milvus_client: Option<MilvusClient> = if config.milvus.read_embeddings {
         match MilvusClient::connect_lazy(&config.milvus) {
             Ok(client) => {
                 tracing::info!("Milvus embedding endpoints are ENABLED");

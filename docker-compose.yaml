@@ -229,7 +229,7 @@ services:
       # Milvus vector database (optional; see docs/milvus.md).
       # Reached over the public internet, so this works regardless of where
       # BOOM itself is deployed.
-      BOOM_MILVUS__ENABLED: ${BOOM_MILVUS__ENABLED:-false}
+      BOOM_MILVUS__READ_EMBEDDINGS: ${BOOM_MILVUS__READ_EMBEDDINGS:-}
       BOOM_MILVUS__HOST: ${BOOM_MILVUS__HOST:-milvus.nrp-nautilus.io}
       BOOM_MILVUS__PORT: ${BOOM_MILVUS__PORT:-50051}
       BOOM_MILVUS__USERNAME: ${BOOM_MILVUS__USERNAME:-}
@@ -697,7 +697,7 @@ services:
       # This scheduler runs the AppleCiDEr fusion model, so it is what produces the
       # embeddings. Reached over the public internet, so this works regardless
       # of where BOOM itself is deployed.
-      BOOM_MILVUS__ENABLED: ${BOOM_MILVUS__ENABLED:-false}
+      BOOM_MILVUS__WRITE_EMBEDDINGS: ${BOOM_MILVUS__WRITE_EMBEDDINGS:-}
       BOOM_MILVUS__HOST: ${BOOM_MILVUS__HOST:-milvus.nrp-nautilus.io}
       BOOM_MILVUS__PORT: ${BOOM_MILVUS__PORT:-50051}
       BOOM_MILVUS__USERNAME: ${BOOM_MILVUS__USERNAME:-}
