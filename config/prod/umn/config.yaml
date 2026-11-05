@@ -597,6 +597,38 @@ crossmatch:
         sersic: 1
         flux_ivar_r: 1
         fracflux_r: 1
+    LSDR9:
+      radius: 30.0
+      use_distance: true
+      distance_key: "z_phot_mean"
+      distance_max: 60.0
+      distance_max_near: 300.0
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        objtype: 1
+        ebv: 1
+        z_spec: 1
+        survey: 1
+        z_phot_mean: 1
+        z_phot_median: 1
+        z_phot_std: 1
+        z_phot_l95: 1
+        z_phot_u95: 1
+        flux_g: 1
+        flux_r: 1
+        flux_z: 1
+        flux_w1: 1
+        flux_w2: 1
+        flux_w3: 1
+        flux_w4: 1
+        shape_r: 1
+        shape_e1: 1
+        shape_e2: 1
+        sersic: 1
+        flux_ivar_r: 1
+        fracflux_r: 1
     AllWISE:
       radius: 2.0
       use_distance: false
@@ -881,6 +913,38 @@ crossmatch:
         flux_g: 1
         flux_r: 1
         flux_i: 1
+        flux_z: 1
+        flux_w1: 1
+        flux_w2: 1
+        flux_w3: 1
+        flux_w4: 1
+        shape_r: 1
+        shape_e1: 1
+        shape_e2: 1
+        sersic: 1
+        flux_ivar_r: 1
+        fracflux_r: 1
+    LSDR9:
+      radius: 30.0
+      use_distance: true
+      distance_key: "z_phot_mean"
+      distance_max: 60.0
+      distance_max_near: 300.0
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        objtype: 1
+        ebv: 1
+        z_spec: 1
+        survey: 1
+        z_phot_mean: 1
+        z_phot_median: 1
+        z_phot_std: 1
+        z_phot_l95: 1
+        z_phot_u95: 1
+        flux_g: 1
+        flux_r: 1
         flux_z: 1
         flux_w1: 1
         flux_w2: 1
@@ -1187,6 +1251,38 @@ crossmatch:
         sersic: 1
         flux_ivar_r: 1
         fracflux_r: 1
+    LSDR9:
+      radius: 30.0
+      use_distance: true
+      distance_key: "z_phot_mean"
+      distance_max: 60.0
+      distance_max_near: 300.0
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        objtype: 1
+        ebv: 1
+        z_spec: 1
+        survey: 1
+        z_phot_mean: 1
+        z_phot_median: 1
+        z_phot_std: 1
+        z_phot_l95: 1
+        z_phot_u95: 1
+        flux_g: 1
+        flux_r: 1
+        flux_z: 1
+        flux_w1: 1
+        flux_w2: 1
+        flux_w3: 1
+        flux_w4: 1
+        shape_r: 1
+        shape_e1: 1
+        shape_e2: 1
+        sersic: 1
+        flux_ivar_r: 1
+        fracflux_r: 1
     AllWISE:
       radius: 2.0
       use_distance: false
@@ -1452,6 +1548,38 @@ crossmatch:
         flux_g: 1
         flux_r: 1
         flux_i: 1
+        flux_z: 1
+        flux_w1: 1
+        flux_w2: 1
+        flux_w3: 1
+        flux_w4: 1
+        shape_r: 1
+        shape_e1: 1
+        shape_e2: 1
+        sersic: 1
+        flux_ivar_r: 1
+        fracflux_r: 1
+    LSDR9:
+      radius: 30.0
+      use_distance: true
+      distance_key: "z_phot_mean"
+      distance_max: 60.0
+      distance_max_near: 300.0
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        objtype: 1
+        ebv: 1
+        z_spec: 1
+        survey: 1
+        z_phot_mean: 1
+        z_phot_median: 1
+        z_phot_std: 1
+        z_phot_l95: 1
+        z_phot_u95: 1
+        flux_g: 1
+        flux_r: 1
         flux_z: 1
         flux_w1: 1
         flux_w2: 1
