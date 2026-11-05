@@ -34,27 +34,66 @@ import {
   TableRow,
 } from "@/components/ui/table";
 
-function healthLabel(health: CatalogHealth): { text: string; variant: "default" | "secondary" | "destructive" | "outline" } {
+const STATE_VARIANT: Record<CatalogHealth, "destructive" | "outline"> = {
+  present: "outline",
+  missing: "destructive",
+  partial: "destructive",
+  ingesting: "outline",
+  undeclared: "outline",
+  external: "outline",
+};
+
+const STATE_TINT: Partial<Record<CatalogHealth, string>> = {
+  present: "border-transparent bg-emerald-600 text-white dark:bg-emerald-600/60",
+  partial: "border-transparent bg-amber-600 text-white dark:bg-amber-600/60",
+  ingesting: "border-transparent bg-sky-600 text-white dark:bg-sky-600/60",
+  external: "text-muted-foreground",
+};
+
+function healthText(health: CatalogHealth): string {
   switch (health) {
     case "present":
-      return { text: "Present", variant: "default" };
+      return "Complete";
     case "missing":
-      return { text: "Missing", variant: "destructive" };
+      return "Missing";
     // Partly ingested is worse than absent: a crossmatch against it returns
     // fewer matches rather than failing, so it is called out separately.
     case "partial":
-      return { text: "Partial", variant: "destructive" };
-    // Also partly ingested, but because a run is part way through it. Not a
-    // problem to fix, and not counted on the badge.
+      return "Partial";
     case "ingesting":
-      return { text: "Ingesting", variant: "secondary" };
+      return "Ingesting";
     case "undeclared":
-      return { text: "Unknown slug", variant: "outline" };
+      return "Unknown slug";
     // Not a problem to fix: the collection is real and populated by something
     // other than the ingest. The row's title says what.
     case "external":
-      return { text: "Built elsewhere", variant: "secondary" };
+      return "Built elsewhere";
   }
+}
+
+function Chunks({ catalog, health }: { catalog: CatalogStatus; health: CatalogHealth }) {
+  const { chunks_done: done, chunks_total: total } = catalog;
+  if (total === 0) return <span className="text-muted-foreground">—</span>;
+  if ((health !== "partial" && health !== "ingesting") || done >= total) {
+    return (
+      <span className="text-muted-foreground">
+        {done}/{total}
+      </span>
+    );
+  }
+  return (
+    <div className="flex w-28 flex-col gap-1">
+      <div className="h-1.5 overflow-hidden rounded-full bg-muted">
+        <div
+          className={`h-full ${health === "ingesting" ? "bg-sky-600" : "bg-primary"}`}
+          style={{ width: `${(done / total) * 100}%` }}
+        />
+      </div>
+      <span className="text-xs text-muted-foreground">
+        {done}/{total}
+      </span>
+    </div>
+  );
 }
 
 export function CatalogsTable({
@@ -62,7 +101,6 @@ export function CatalogsTable({
   runsByCatalog,
   onIngest,
   onReingest,
-  onSelect,
   busy,
   error,
 }: {
@@ -70,7 +108,6 @@ export function CatalogsTable({
   runsByCatalog: Map<string, Task>;
   onIngest: (id: string) => void;
   onReingest: (catalog: CatalogStatus) => void;
-  onSelect: (runId: string) => void;
   busy: string | null;
   error: string | null;
 }) {
@@ -90,7 +127,7 @@ export function CatalogsTable({
                 <TableHead>State</TableHead>
                 <TableHead>Crossmatch</TableHead>
                 <TableHead>Chunks</TableHead>
-                <TableHead>Records</TableHead>
+                <TableHead className="text-right">Records</TableHead>
                 <TableHead />
               </TableRow>
             </TableHeader>
@@ -109,9 +146,10 @@ export function CatalogsTable({
                 </TableRow>
               ) : (
                 catalogs.map((catalog) => {
-                  const label = healthLabel(catalog.health);
                   const run = runsByCatalog.get(catalog.id);
-                  const running = run && isActive(run);
+                  const running = run !== undefined && isActive(run);
+                  const health: CatalogHealth = running ? "ingesting" : catalog.health;
+                  const starting = busy === catalog.id;
                   return (
                     <TableRow key={catalog.id}>
                       <TableCell className="max-w-64 whitespace-normal">
@@ -124,71 +162,54 @@ export function CatalogsTable({
                         {catalog.collection ?? "—"}
                       </TableCell>
                       <TableCell>
-                        <Badge variant={label.variant}>{label.text}</Badge>
+                        <Badge variant={STATE_VARIANT[health]} className={STATE_TINT[health]}>
+                          {running && run.status === "queued" ? "Queued" : healthText(health)}
+                        </Badge>
                       </TableCell>
-                      <TableCell>
+                      <TableCell className="text-sm">
                         {/* Whether the alert pipeline queries this catalog. An
                             un-ingested catalog nobody crossmatches against is
                             simply available; a configured one that is missing
                             returns zero matches on every alert, silently. */}
                         {catalog.crossmatched ? (
-                          <Badge variant="outline">in use</Badge>
+                          "in use"
                         ) : (
-                          <span className="text-sm text-muted-foreground">not configured</span>
+                          <span className="text-muted-foreground">not configured</span>
                         )}
                       </TableCell>
-                      <TableCell className="text-sm text-muted-foreground tabular-nums">
-                        {catalog.chunks_total > 0
-                          ? `${catalog.chunks_done}/${catalog.chunks_total}`
-                          : "—"}
+                      <TableCell className="text-sm tabular-nums">
+                        <Chunks catalog={catalog} health={health} />
                       </TableCell>
-                      <TableCell className="text-sm text-muted-foreground tabular-nums">
-                        {catalog.n_records > 0 ? catalog.n_records.toLocaleString() : "—"}
+                      <TableCell className="text-right text-sm tabular-nums">
+                        {catalog.n_records > 0 ? (
+                          catalog.n_records.toLocaleString()
+                        ) : (
+                          <span className="text-muted-foreground">—</span>
+                        )}
                       </TableCell>
                       <TableCell className="text-right">
-                        {running ? (
-                          <Button variant="outline" size="sm" onClick={() => onSelect(run!._id)}>
-                            {run!.status === "queued" ? "Queued…" : "Running…"}
-                          </Button>
-                        ) : // Neither an unknown slug nor a collection built
-                        // elsewhere has anything to ingest, and offering a
-                        // button would be misleading. Neither has one that is
-                        // being ingested right now by a run too old to be in the
-                        // page of runs this view fetched -- the server would
-                        // refuse the submit anyway, but the button should not
-                        // invite it.
-                        catalog.health === "undeclared" ||
-                          catalog.health === "external" ? null : catalog.health ===
-                          "ingesting" ? (
-                          <span className="text-xs text-muted-foreground">in progress</span>
-                        ) : catalog.health === "present" ? (
-                          // A present catalog has every chunk, so resuming would
-                          // do nothing: the only re-ingest that means anything
-                          // drops the collection and rebuilds it. That is
-                          // destructive, so it goes through a confirmation --
-                          // which is also what the task form demands of a
-                          // destructive task, and this row used to skip.
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            disabled={busy === catalog.id}
-                            onClick={() => onReingest(catalog)}
-                          >
-                            {busy === catalog.id ? "Starting…" : "Re-ingest"}
-                          </Button>
-                        ) : (
-                          <Button
-                            size="sm"
-                            disabled={busy === catalog.id}
-                            onClick={() => onIngest(catalog.id)}
-                          >
-                            {busy === catalog.id
+                        {health === "missing" || health === "partial" ? (
+                          <Button size="sm" disabled={starting} onClick={() => onIngest(catalog.id)}>
+                            {starting
                               ? "Starting…"
-                              : catalog.health === "partial"
+                              : health === "partial"
                                 ? "Resume ingest"
                                 : "Ingest"}
                           </Button>
-                        )}
+                        ) : health === "present" ? (
+                          // A present catalog has every chunk, so resuming would
+                          // do nothing: the only re-ingest that means anything
+                          // drops the collection and rebuilds it. That is
+                          // destructive, so it goes through a confirmation.
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            disabled={starting}
+                            onClick={() => onReingest(catalog)}
+                          >
+                            {starting ? "Starting…" : "Re-ingest"}
+                          </Button>
+                        ) : null}
                       </TableCell>
                     </TableRow>
                   );
