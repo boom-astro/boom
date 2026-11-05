@@ -30,6 +30,10 @@ pub enum MilvusError {
     MissingStatus(&'static str),
     #[error("milvus is not enabled in the configuration")]
     NotEnabled,
+    #[error(
+        "milvus is enabled but BOOM_MILVUS__USERNAME and BOOM_MILVUS__PASSWORD are not both set"
+    )]
+    MissingCredentials,
     #[error("embedding has {got} dimensions but the collection expects {expected}")]
     DimensionMismatch { expected: i64, got: usize },
 }
@@ -91,6 +95,9 @@ impl MilvusClient {
     fn build_endpoint(config: &MilvusConfig) -> Result<Endpoint, MilvusError> {
         if !config.is_enabled() {
             return Err(MilvusError::NotEnabled);
+        }
+        if config.username.is_empty() || config.password.is_empty() {
+            return Err(MilvusError::MissingCredentials);
         }
 
         let endpoint_url = config.endpoint();
@@ -237,4 +244,29 @@ pub(super) fn check_status(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config(username: &str, password: &str) -> MilvusConfig {
+        MilvusConfig {
+            read_embeddings: true,
+            username: username.to_string(),
+            password: password.to_string(),
+            ..MilvusConfig::default()
+        }
+    }
+
+    #[test]
+    fn build_endpoint_requires_both_credentials() {
+        for (username, password) in [("", ""), ("user", ""), ("", "pass")] {
+            assert!(matches!(
+                MilvusClient::build_endpoint(&config(username, password)),
+                Err(MilvusError::MissingCredentials)
+            ));
+        }
+        assert!(MilvusClient::build_endpoint(&config("user", "pass")).is_ok());
+    }
 }

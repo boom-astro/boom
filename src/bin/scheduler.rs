@@ -5,7 +5,7 @@ use boom::{
     api::catalogs::WATCHLIST_PREFIX,
     conf::{load_dotenv, AppConfig, CatalogXmatchConfig},
     enrichment::models::SharedModelPool,
-    milvus::MilvusClient,
+    milvus::{MilvusClient, MilvusError},
     scheduler::{
         record_mpc_orbits_state, record_worker_pool_state, take_heartbeat_counts, ThreadPool,
     },
@@ -238,7 +238,8 @@ async fn run(
     // Logged rather than fatal: Milvus is an optional add-on, so a provisioning
     // failure must not stop the scheduler from ingesting alerts. The enrichment
     // workers pause their uploads and retry, so this recovers on its own once
-    // Milvus is reachable and the collection exists.
+    // Milvus is reachable and the collection exists. Missing credentials never
+    // recover, so they are fatal.
     if config.milvus.write_embeddings && args.survey == Survey::Ztf {
         match MilvusClient::connect(&config.milvus).await {
             Ok(mut milvus) => {
@@ -250,6 +251,9 @@ async fn run(
                          embedding uploads will be paused until it exists"
                     );
                 }
+            }
+            Err(MilvusError::MissingCredentials) => {
+                panic!("milvus.write_embeddings is on but BOOM_MILVUS__USERNAME and BOOM_MILVUS__PASSWORD are not both set")
             }
             Err(error) => log_error!(
                 WARN,

@@ -1272,8 +1272,7 @@ pub fn validate_crossmatch(
 /// An `AppConfig` from `path`, with a stand-in environment.
 ///
 /// Deserializing an `AppConfig` requires the secrets a deployment supplies
-/// -- the database password, the API keys, and, for any config with
-/// Milvus enabled (both prod configs), the Milvus credentials. A
+/// -- the database password and the API keys. A
 /// substituted environment rather than `set_var` keeps that off the other
 /// tests in this binary and makes the result the same whether or not the
 /// developer has a `.env` loaded. Secret *validation* is `check_config`'s
@@ -1284,8 +1283,6 @@ fn config_from(path: &str) -> crate::conf::AppConfig {
         ("BOOM_DATABASE__PASSWORD", "test-db-password"),
         ("BOOM_API__AUTH__SECRET_KEY", "test-secret-key"),
         ("BOOM_API__AUTH__ADMIN_PASSWORD", "test-admin-password"),
-        ("BOOM_MILVUS__USERNAME", "test-milvus-username"),
-        ("BOOM_MILVUS__PASSWORD", "test-milvus-password"),
     ]
     .iter()
     .map(|(key, value)| (key.to_string(), value.to_string()))

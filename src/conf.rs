@@ -1887,23 +1887,9 @@ impl AppConfig {
             }
         }
 
-        // Milvus settings are only required when the integration is switched on,
-        // so that deployments not using it need no extra configuration.
+        // Credentials are checked when a client is built instead, so services
+        // that load this config but never dial Milvus start without them.
         if self.milvus.is_enabled() {
-            if self.milvus.username.is_empty() {
-                return Err(
-                    "Milvus username must be set via BOOM_MILVUS__USERNAME environment variable when milvus.read_embeddings or milvus.write_embeddings is true"
-                        .to_string(),
-                );
-            }
-
-            if self.milvus.password.is_empty() {
-                return Err(
-                    "Milvus password must be set via BOOM_MILVUS__PASSWORD environment variable when milvus.read_embeddings or milvus.write_embeddings is true"
-                        .to_string(),
-                );
-            }
-
             if self.milvus.database.is_empty() {
                 return Err(
                     "Milvus database must not be empty when milvus.read_embeddings or milvus.write_embeddings is true; config.yaml supplies a default, override it with BOOM_MILVUS__DATABASE"

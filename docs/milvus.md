@@ -102,8 +102,9 @@ and are never committed. To give a deployment Milvus credentials, set these unde
 carries the name.
 
 Only the password is secret. Reading and writing are set per deployment in
-`overrides.yaml`, not here. If either is on and the credentials are missing,
-config validation fails and no service starts.
+`overrides.yaml`, not here. The credentials are checked only by services that
+dial Milvus: if they are missing, the API starts with the embedding endpoints
+off, and a ZTF scheduler with `write_embeddings` on exits at startup.
 
 Some wiring details worth knowing, because all of them fail *silently* rather
 than loudly:
