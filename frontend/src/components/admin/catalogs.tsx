@@ -34,11 +34,11 @@ import {
   TableRow,
 } from "@/components/ui/table";
 
-const STATE_VARIANT: Record<CatalogHealth, "secondary" | "destructive" | "outline"> = {
+const STATE_VARIANT: Record<CatalogHealth, "destructive" | "outline"> = {
   present: "outline",
   missing: "destructive",
   partial: "destructive",
-  ingesting: "secondary",
+  ingesting: "outline",
   undeclared: "outline",
   external: "outline",
 };
@@ -46,13 +46,14 @@ const STATE_VARIANT: Record<CatalogHealth, "secondary" | "destructive" | "outlin
 const STATE_TINT: Partial<Record<CatalogHealth, string>> = {
   present: "border-transparent bg-emerald-600 text-white dark:bg-emerald-600/60",
   partial: "border-transparent bg-amber-600 text-white dark:bg-amber-600/60",
+  ingesting: "border-transparent bg-sky-600 text-white dark:bg-sky-600/60",
   external: "text-muted-foreground",
 };
 
 function healthText(health: CatalogHealth): string {
   switch (health) {
     case "present":
-      return "Present";
+      return "Complete";
     case "missing":
       return "Missing";
     // Partly ingested is worse than absent: a crossmatch against it returns
@@ -83,7 +84,10 @@ function Chunks({ catalog, health }: { catalog: CatalogStatus; health: CatalogHe
   return (
     <div className="flex w-28 flex-col gap-1">
       <div className="h-1.5 overflow-hidden rounded-full bg-muted">
-        <div className="h-full bg-primary" style={{ width: `${(done / total) * 100}%` }} />
+        <div
+          className={`h-full ${health === "ingesting" ? "bg-sky-600" : "bg-primary"}`}
+          style={{ width: `${(done / total) * 100}%` }}
+        />
       </div>
       <span className="text-xs text-muted-foreground">
         {done}/{total}
