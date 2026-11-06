@@ -20,6 +20,7 @@ pub mod lightcurves;
 pub mod linking;
 pub mod moc;
 pub mod mpcorb;
+pub mod nbody;
 pub mod o11y;
 pub mod orbit_fit;
 pub mod outburst;
