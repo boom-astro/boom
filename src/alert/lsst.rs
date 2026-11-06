@@ -17,7 +17,6 @@ use crate::{
         spatial::{xmatch, Coordinates},
     },
 };
-use apache_avro_derive::AvroSchema;
 use apache_avro_macros::serdavro;
 use constcat::concat;
 use flare::Time;
@@ -742,7 +741,8 @@ pub struct DiaObject {
 
 #[serde_as]
 #[skip_serializing_none]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, Default, AvroSchema, ToSchema)]
+#[serdavro]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, Default, ToSchema)]
 #[serde(default)]
 pub struct DiaForcedSource {
     /// Unique id.
