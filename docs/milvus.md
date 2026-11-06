@@ -61,7 +61,8 @@ The database name is already in `config.yaml`, so only the credentials need to
 go in **`.env`**, which is gitignored and loaded automatically:
 
 ```bash
-BOOM_MILVUS__ENABLED=true
+BOOM_MILVUS__READ_EMBEDDINGS=true
+BOOM_MILVUS__WRITE_EMBEDDINGS=true
 BOOM_MILVUS__USERNAME=
 BOOM_MILVUS__PASSWORD=
 ```
@@ -89,21 +90,21 @@ GitHub secrets/variables  ->  deploy.yaml env:  ->  compose substitution  ->  co
 ```
 
 So git carries the variable *names*; the values live in GitHub's secret store
-and are never committed. To enable Milvus in production, set these under
+and are never committed. To give a deployment Milvus credentials, set these under
 **Settings -> Secrets and variables -> Actions**:
 
 | Name | Kind | Value |
 |---|---|---|
 | `BOOM_MILVUS__PASSWORD` | **Secret** | the administrative/user account's password |
-| `BOOM_MILVUS__ENABLED` | Variable | `true` |
 | `BOOM_MILVUS__USERNAME` | Variable | the administrative/user account |
 
 `BOOM_MILVUS__DATABASE` is not in the table because `config.yaml` already
 carries the name.
 
-Only the password is secret; the rest are plain variables. If
-`BOOM_MILVUS__ENABLED` is unset, Compose defaults it to `false` and the
-integration simply stays off.
+Only the password is secret. Reading and writing are set per deployment in
+`overrides.yaml`, not here. The credentials are checked only by services that
+dial Milvus: if they are missing, the API starts with the embedding endpoints
+off, and a ZTF scheduler with `write_embeddings` on exits at startup.
 
 Some wiring details worth knowing, because all of them fail *silently* rather
 than loudly:
@@ -155,10 +156,14 @@ cargo run --bin milvus_check -- --create-collection
 
 ## Writing embeddings
 
-Once `milvus.enabled` is true, the ZTF enrichment worker upserts each alert's
+Once `milvus.write_embeddings` is true, the ZTF enrichment worker upserts each alert's
 `fusion_embedding` into the collection right after ML classification, keyed by
 `object_id` so a re-observed object overwrites its previous vector. The write is
 an `Upsert` RPC batched per enrichment batch.
+
+Writing is off by default because the collection is shared. A deployment with
+only `read_embeddings` serves the count and similarity search, but never
+provisions the collection, upserts or opens a backup queue.
 
 The worker **connects only** — it does not create the collection. Provision it
 once with `milvus_check --create-collection` before starting the workers, since
@@ -188,11 +193,12 @@ cannot reach Milvus at startup.
 
 ### The embedding is never written to Mongo
 
-`milvus.enabled` is the only switch. The 384-float vector is stripped from the
-alert's Mongo `classifications` document in every case and there is no dual write:
+Whether the vector goes to Milvus depends only on `milvus.write_embeddings`.
+It is stripped from the alert's Mongo `classifications` document in every case
+and there is no dual write:
 
-- **Milvus on** — the embedding is written to Milvus only.
-- **Milvus off** — the embedding is not stored anywhere; it is computed as part
+- **Writing on** — the embedding is written to Milvus only.
+- **Writing off** — the embedding is not stored anywhere; it is computed as part
   of AppleCiDEr inference and dropped.
 
 Either way the AppleCiDEr class probabilities (`applecider_fusion` and

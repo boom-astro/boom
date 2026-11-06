@@ -356,7 +356,6 @@ export default function Admin() {
                   runsByCatalog={runsByCatalog}
                   onIngest={onIngest}
                   onReingest={setReingesting}
-                  onSelect={(id) => openRun(id)}
                   busy={busy}
                   error={loadError}
                 />

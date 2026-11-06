@@ -161,7 +161,7 @@ export function EnrichmentDriftTable({
                 </p>
               ) : clean ? (
                 <p className="text-xs text-muted-foreground">
-                  Every alert was enriched by the current set.
+                  No alert is stale.
                 </p>
               ) : (
                 <div className="rounded-md border">
@@ -178,9 +178,7 @@ export function EnrichmentDriftTable({
                           <TableCell className="whitespace-normal">
                             <div className="font-medium">Enriched before stamping</div>
                             <div className="text-xs text-muted-foreground">
-                              These carry no set at all, so what produced them cannot
-                              be established. Reprocessing is the only way to make
-                              them attributable.
+                              Below a derivation version declared wrong.
                             </div>
                           </TableCell>
                           <TableCell className="w-32 text-right text-sm text-muted-foreground">

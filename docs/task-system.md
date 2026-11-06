@@ -202,9 +202,12 @@ later.
 | `repair_photometry` | Rewrite `alerts_aux` timeseries arrays that are out of order, duplicated, or carry a non-numeric `jd`. Deletes the offending points — run with `dry_run` first. |
 | `enrich_reprocess` | Select alerts, queue them, and re-run enrichment over them. See [alert-processing.md](./alert-processing.md). |
 | `mpcorb_ingest` | Re-download MPC orbital elements and swap them into `MPC_orbits`. |
+| `propagate_orbits` | N-body propagate `MPC_orbits` to a grid of past epochs, so known objects are matched on older data. `drop` removes them. |
 | `sso_baselines` | Fit solar system phase-curve baselines from ZTF detections. |
 | `copy_cutouts` | Copy a survey's cutout collection between MongoDB deployments. |
 | `stream_kowalski_alerts` | Back-fill BOOM by streaming a Kowalski deployment's alerts. |
+| `tns_sync` | Upsert `TNS` from the TNS public objects files and refresh `cross_matches.TNS` near what changed. Scheduled. See [catalogs.md](./catalogs.md#tns). |
+| `tns_photometry` | Fetch TNS photometry and non-detections into `TNS_photometry` for young TNS objects matched near a nearby host. Scheduled. |
 
 Submission is single-flight per target, not per type: two ingests of the same
 catalog would race on the same collection and chunk state, but ingesting 2MASS
@@ -600,43 +603,35 @@ the person up later.
 | `POST /tasks/{id}/resubmit` | Queue a new run with a finished run's type and parameters |
 | `GET /data/mutations?collection=&limit=` | What has been done to the data |
 
-## Scheduled tasks, when we build them
+## Scheduled runs
 
-The first candidate is the LSST cutout retention policy
-([#518](https://github.com/boom-astro/boom/issues/518)). Nothing here is built
-yet; this records what the current design already supports so that whoever
-picks it up does not have to re-derive it.
+A schedule is declared in code from the deployment config, in
+[`src/tasks/schedule.rs`](https://github.com/boom-astro/boom/blob/main/src/tasks/schedule.rs):
+a task type, an interval, an offset into the interval, and the parameters. There
+are two today, `tns_sync` and `tns_photometry`, present only when TNS bot
+credentials are set (see [catalogs.md](./catalogs.md#tns)).
 
-**What is already in place.** A run carries `trigger` (`api` or `schedule`) and
-`Actor::system()`, both on the document from the start, so a scheduled run is
-distinguishable from one a person submitted rather than being attributed to
-whoever configured the schedule. Everything else a run gets — the lease and
-heartbeat, requeue after a lost worker, cancellation, streamed logs, progress,
-the `data_mutations` ledger entry — is keyed off the run rather than off what
-triggered it, so a scheduled run inherits all of it unchanged.
+Every task worker runs the loop that fires them, every 30 seconds. A scheduled
+run is an ordinary run with `trigger: schedule` and the `system` actor, so the
+lease, requeue, cancellation, logs and ledger entry all apply to it unchanged.
 
-**What is missing** is where a schedule is declared and the loop that fires it,
-plus two things worth getting right the first time.
+- **Once per tick across a fleet.** A scheduled run's `_id` is
+  `sched:{task_type}:{unix_fire_time}`, so the first worker to insert it wins and
+  the others get a duplicate key. `single_flight_key` cannot do this: it is a
+  check-then-insert in the API handler.
+- **Skip to the latest tick.** Only the tick in progress is fired, so a fleet
+  that was down over several fires once when it is back. The work is cumulative,
+  and that one run catches up on all of it.
+- **No overlap.** While a run of the same type is queued or running, whoever
+  submitted it, the tick waits, and fires when that run ends if the tick has not
+  passed by then.
 
-*Firing exactly once per tick.* Every task-worker in the fleet wakes at the same
-cron instant. `single_flight_key` does not solve this: it is a check-then-insert
-in the API handler, not an invariant of `queue::submit`, so a scheduler that
-enqueues directly bypasses it, and two schedulers racing would both pass the
-check anyway. The fix needs no leader election and no new index — give a
-scheduled run a deterministic id, `sched:{schedule}:{unix_fire_time}`, and let
-the `_id` uniqueness Mongo already enforces settle it. One worker inserts, the
-rest take a duplicate-key error and move on.
+Schedules change through `overrides.yaml` and a worker restart. Storing them in
+a collection would let an operator change one from the admin page; nothing needs
+that yet.
 
-*Missed ticks.* If the fleet was down across a fire time, maintenance work wants
-skip-to-next rather than one backfilled run per missed tick. The work is
-cumulative — a single run catches up on everything that accrued.
-
-**Where the schedule lives** is the open design question. Declaring it on
-`TaskSpec` keeps "may this run unattended" in code review; storing it in a
-collection lets an operator change it from the admin page, which is more in
-keeping with the rest of this system. The likely answer is both: the spec says a
-task is schedulable and gives a default cron, and the collection holds whether
-it is enabled and any override.
+The next candidate is the LSST cutout retention policy
+([#518](https://github.com/boom-astro/boom/issues/518)).
 
 **On #518 specifically:** it asks to *offload* cutouts to S3 after ~30 days, not
 to delete them — Babamul is meant to read the archived ones back. A TTL index
@@ -648,8 +643,6 @@ moving part. The scheduling is the small half; the offload is the work.
 
 ## Not yet built
 
-- **Recurring runs.** See [Scheduled tasks](#scheduled-tasks-when-we-build-them)
-  above — the task record is ready for them, the loop that fires them is not.
 - **Ledger coverage beyond tasks.** `data_mutations` records task runs today.
   Startup migrations and the live pipeline have `SourceKind` variants reserved
   but do not write to it yet.

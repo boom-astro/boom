@@ -10,7 +10,7 @@ use crate::utils::lightcurves::{
     EpisodeHistory, PerBandProperties, PhotometryMag, EPISODE_GAP_DAYS, SNT,
 };
 use crate::utils::linking::{night_start, Detection};
-use crate::utils::mpcorb::load_catalogue;
+use crate::utils::mpcorb::{load_catalogue, MAX_EPOCH_GAP_DAYS};
 use crate::utils::o11y::logging::{log_error, WARN};
 use crate::utils::sso_geometry::{geometry_at, DECAM};
 use apache_avro_derive::AvroSchema;
@@ -23,6 +23,7 @@ use tracing::{instrument, warn};
 
 const SSO_MATCH_RADIUS_ARCSEC: f64 = 8.0;
 const CATALOGUE_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+const CATALOGUE_MIN_RELOAD: Duration = Duration::from_secs(10 * 60);
 
 pub fn create_decam_alert_pipeline() -> Vec<Document> {
     vec![
@@ -66,6 +67,12 @@ pub fn create_decam_alert_pipeline() -> Vec<Document> {
                         ]
                     }]),
                 ),
+                "fp_nondetections": fetch_timeseries_op(
+                    "aux.fp_hists",
+                    "candidate.jd",
+                    365,
+                    Some(below_threshold()),
+                ),
                 "host_galaxy": {"$arrayElemAt": ["$aux.host_galaxy", 0]},
             }
         },
@@ -83,9 +90,20 @@ pub fn create_decam_alert_pipeline() -> Vec<Document> {
                 "fp_hists.sigmagap": 1,
                 "fp_hists.band": 1,
                 "fp_hists.snr": 1,
+                "fp_nondetections.jd": 1,
+                "fp_nondetections.band": 1,
+                "fp_nondetections.diffmaglim": 1,
                 "host_galaxy": 1,
             }
         },
+    ]
+}
+
+// Null and NaN sort below every number, so the lower bound also drops unmeasured epochs.
+fn below_threshold() -> Vec<Document> {
+    vec![
+        doc! { "$gt": [ "$$x.snr", -SNT ] },
+        doc! { "$lt": [ "$$x.snr", SNT ] },
     ]
 }
 
@@ -117,9 +135,18 @@ impl DecamPhotometry {
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct DecamNonDetection {
+    pub jd: f64,
+    pub diffmaglim: f64,
+    pub band: Band,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct DecamMatch {
     pub prv_candidates: Vec<DecamPhotometry>,
     pub fp_hists: Vec<DecamPhotometry>,
+    #[serde(default)]
+    pub fp_nondetections: Vec<DecamNonDetection>,
 }
 
 impl DecamMatch {
@@ -130,6 +157,19 @@ impl DecamMatch {
             .filter(|p| p.time <= jd)
             .map(DecamPhotometry::to_photometry_mag)
             .collect()
+    }
+
+    pub fn detections(&self) -> impl Iterator<Item = (f64, Survey, &Band)> {
+        self.prv_candidates
+            .iter()
+            .filter(|p| p.snr.is_some_and(|s| s >= 0.0))
+            .map(|p| (p.time, Survey::Decam, &p.band))
+    }
+
+    pub fn nondetections(&self) -> impl Iterator<Item = (f64, f32, Survey, &Band)> {
+        self.fp_nondetections
+            .iter()
+            .map(|p| (p.jd, p.diffmaglim as f32, Survey::Decam, &p.band))
     }
 }
 
@@ -153,6 +193,15 @@ pub fn add_decam_match(mut pipeline: Vec<Document>) -> Vec<Document> {
                                 },
                                 "as": "x",
                                 "cond": { "$gte": [ "$$x.snr", SNT ] }
+                            }
+                        },
+                        "fp_nondetections": {
+                            "$filter": {
+                                "input": {
+                                    "$ifNull": [{ "$arrayElemAt": [ "$decam_aux.fp_hists", 0 ] }, []]
+                                },
+                                "as": "x",
+                                "cond": { "$and": below_threshold() }
                             }
                         },
                     },
@@ -188,6 +237,8 @@ pub struct DecamAlertForEnrichment {
     // Signed SNR is only needed here: detection history counts detections.
     pub prv_candidates: Vec<DecamPhotometry>,
     pub fp_hists: Vec<PhotometryMag>,
+    #[serde(default)]
+    pub fp_nondetections: Vec<DecamNonDetection>,
     #[serde(default)]
     pub host_galaxy: Option<HostGalaxyAssociation>,
 }
@@ -229,6 +280,7 @@ pub struct DecamAlertProperties {
 struct KnownObjects {
     orbits: Vec<OrbitEntry>,
     loaded: Instant,
+    jd: f64,
     paths: Option<(i64, NightPaths)>,
 }
 
@@ -372,8 +424,13 @@ impl EnrichmentWorker for DecamEnrichmentWorker {
 
         let now = flare::Time::now().to_jd();
 
+        let (first, last) = alerts
+            .iter()
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), a| {
+                (lo.min(a.candidate.jd), hi.max(a.candidate.jd))
+            });
         let mut associations = self
-            .known_objects()
+            .known_objects((first + last) / 2.0)
             .await
             .map(|known| known_associations(known, &alerts));
 
@@ -413,17 +470,18 @@ impl EnrichmentWorker for DecamEnrichmentWorker {
 }
 
 impl DecamEnrichmentWorker {
-    async fn known_objects(&mut self) -> Option<&mut KnownObjects> {
-        if self
-            .known
-            .as_ref()
-            .is_none_or(|k| k.loaded.elapsed() >= CATALOGUE_MAX_AGE)
-        {
-            match load_catalogue(&self.db).await {
+    async fn known_objects(&mut self, jd: f64) -> Option<&mut KnownObjects> {
+        if self.known.as_ref().is_none_or(|k| {
+            k.loaded.elapsed() >= CATALOGUE_MAX_AGE
+                || ((k.jd - jd).abs() > MAX_EPOCH_GAP_DAYS
+                    && k.loaded.elapsed() >= CATALOGUE_MIN_RELOAD)
+        }) {
+            match load_catalogue(&self.db, jd).await {
                 Ok(orbits) if !orbits.is_empty() => {
                     self.known = Some(KnownObjects {
                         orbits,
                         loaded: Instant::now(),
+                        jd,
                         paths: None,
                     });
                 }
@@ -455,7 +513,7 @@ impl DecamEnrichmentWorker {
         let (photstats, _, stationary) = analyze_photometry(&lightcurve);
 
         // Per-object detection history for history-aware filters (sign from signed snr).
-        let (detection_history, episode_history) = summarise_detections(
+        let (mut detection_history, episode_history) = summarise_detections(
             alert
                 .prv_candidates
                 .iter()
@@ -464,6 +522,13 @@ impl DecamEnrichmentWorker {
             alert.fp_hists.iter().map(|p| (p.time, None)),
             alert.candidate.jd,
             EPISODE_GAP_DAYS,
+        );
+        detection_history.add_nondetections(
+            alert
+                .fp_nondetections
+                .iter()
+                .map(|p| (p.jd, p.diffmaglim as f32)),
+            alert.candidate.jd,
         );
 
         Ok(DecamAlertProperties {

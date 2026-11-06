@@ -4,6 +4,7 @@ use crate::enrichment::{
     babamul::{Babamul, BabamulZtfAlert},
     decam::{add_decam_match, DecamMatch},
     fetch_alerts,
+    lsst::{lsst_detections, lsst_nondetections},
     models::{
         applecider_postprocess::{self, AppleCiderFusion, AppleCiderModalities},
         AcaiModel, AppleCiderOutputs, BtsBotModel, FusionModel, Model, ModelError, SharedModels,
@@ -14,16 +15,18 @@ use crate::milvus::{BackupQueue, EmbeddingRow, MilvusSink};
 use crate::utils::cutouts::{AlertCutout, CutoutStorage};
 use crate::utils::db::mongify;
 use crate::utils::enums::{ProgramId, Survey};
-use crate::utils::host::HostGalaxyAssociation;
+use crate::utils::host::{HostGalaxyAssociation, HostSummary};
 use crate::utils::lightcurves::{
     analyze_photometry, is_stationary, prepare_photometry, signed_snr, summarise_detections,
-    ActivityMetrics, AllBandsProperties, Band, DetectionHistory, EpisodeHistory, Outburst,
-    PerBandProperties, PhotometryMag, EPISODE_GAP_DAYS, STATIONARY_MIN_FORCED_SNR, ZTF_ZP,
+    ActivityMetrics, AllBandsProperties, Band, DetectionHistory, EpisodeHistory,
+    MultisurveyDetectionHistory, Outburst, PerBandProperties, PhotometryMag, EPISODE_GAP_DAYS,
+    STATIONARY_MIN_FORCED_SNR, ZTF_ZP,
 };
 use crate::utils::mpcorb::{elements_from_document, normalize_ztf_ssnamenr, ORBITS_COLLECTION};
 use crate::utils::outburst::{Point, MAX_SEPARATION_ARCSEC};
 use crate::utils::phase_curve::{curves_from_document, PhaseCurve, BASELINES_COLLECTION};
 use crate::utils::sso_geometry::{geometry_at, OrbitalElements, ZTF};
+use crate::utils::variability::PerBandVariability;
 use apache_avro_derive::AvroSchema;
 use apache_avro_macros::serdavro;
 use futures::TryStreamExt;
@@ -232,6 +235,29 @@ impl ZtfPhotometry {
             _ => None,
         }
     }
+}
+
+pub fn ztf_detections(
+    prv_candidates: &[ZtfPhotometry],
+) -> impl Iterator<Item = (f64, Survey, &Band)> {
+    prv_candidates
+        .iter()
+        .filter(|p| p.flux.is_some_and(|f| f >= 0.0))
+        .map(|p| (p.jd, Survey::Ztf, &p.band))
+}
+
+pub fn ztf_nondetections<'a>(
+    prv_nondetections: &'a [ZtfPhotometry],
+    fp_hists: &'a [ZtfPhotometry],
+) -> impl Iterator<Item = (f64, f32, Survey, &'a Band)> {
+    prv_nondetections
+        .iter()
+        .chain(
+            fp_hists
+                .iter()
+                .filter(|p| p.magpsf.is_none() && p.flux.is_some()),
+        )
+        .map(|p| (p.jd, p.diffmaglim as f32, Survey::Ztf, &p.band))
 }
 
 pub fn create_ztf_alert_pipeline(include_classifications: bool) -> Vec<Document> {
@@ -505,6 +531,10 @@ pub struct ZtfAlertProperties {
     /// filter must not read absence as "no host".
     #[serde(default)]
     pub hosted: Option<bool>,
+    /// Copy of `host_galaxy.best_host`, so alert searches can cut on it without reading aux.
+    #[serde(default)]
+    #[avro(default = "null")]
+    pub best_host: Option<HostSummary>,
     pub stationary: bool,
     pub photstats: PerBandProperties,
     pub multisurvey_photstats: Option<PerBandProperties>,
@@ -518,9 +548,13 @@ pub struct ZtfAlertProperties {
     /// `None` on alerts enriched before this field existed.
     #[serde(default)]
     pub detection_history: Option<DetectionHistory>,
+    #[serde(default)]
+    pub multisurvey_detection_history: Option<MultisurveyDetectionHistory>,
     /// Detection episodes, for finding sources that outburst more than once.
     /// `None` on alerts enriched before this field existed.
     pub episode_history: Option<EpisodeHistory>,
+    #[serde(default)]
+    pub variability: Option<PerBandVariability>,
 }
 
 /// Field order matches the ONNX output index (0-7).
@@ -681,8 +715,8 @@ pub struct ZtfEnrichmentWorker {
     models: Arc<SharedModels>,
     babamul: Option<Babamul>,
     /// Sink for fusion embeddings, upserted after classification. Inert when
-    /// `milvus.enabled` is false, and self-pausing while Milvus is unreachable
-    /// so an outage there never stalls enrichment.
+    /// `milvus.write_embeddings` is false, and self-pausing while Milvus is
+    /// unreachable so an outage there never stalls enrichment.
     milvus: MilvusSink,
     gpu_enabled: bool,
     /// Enrichment set stamped onto every alert this worker enriches.
@@ -768,7 +802,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             .enrichment
             .batch_size;
 
-        let milvus_queue = if config.milvus.enabled && config.milvus.backup_queue.enabled {
+        let milvus_queue = if config.milvus.write_embeddings && config.milvus.backup_queue.enabled {
             match config.build_redis().await {
                 Ok(con) => Some(BackupQueue::new(
                     con,
@@ -963,7 +997,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             ));
             processed_alerts.push(format!("{},{}", item.programid, item.candid));
 
-            if self.milvus.is_enabled() {
+            if self.milvus.is_writing() {
                 let programid = milvus_programid(item.programid, &item.alert.prv_candidates);
                 if let (Some(embedding), Some(programid)) = (fusion_embedding, programid) {
                     embedding_rows.push(EmbeddingRow {
@@ -1441,6 +1475,11 @@ impl ZtfEnrichmentWorker {
         };
 
         let hosted = alert.host_galaxy.as_ref().map(|hg| hg.best_host.is_some());
+        let best_host = alert
+            .host_galaxy
+            .as_ref()
+            .and_then(|hg| hg.best_host.as_ref())
+            .map(HostSummary::from);
 
         // Per-object detection history for history-aware filters, from the full
         // accumulated light curve (positive/negative by psfFlux sign).
@@ -1459,11 +1498,36 @@ impl ZtfEnrichmentWorker {
             EPISODE_GAP_DAYS,
         );
         detection_history.add_nondetections(
-            alert
-                .prv_nondetections
-                .iter()
-                .map(|p| (p.jd, p.diffmaglim as f32)),
+            ztf_nondetections(&alert.prv_nondetections, &alert.fp_hists)
+                .map(|(jd, maglim, ..)| (jd, maglim)),
             candidate.jd,
+        );
+
+        let lsst_match = alert.survey_matches.as_ref().and_then(|m| m.lsst.as_ref());
+        let multisurvey_detection_history = MultisurveyDetectionHistory::from_points(
+            ztf_detections(&alert.prv_candidates)
+                .chain(
+                    lsst_match
+                        .into_iter()
+                        .flat_map(|m| lsst_detections(&m.prv_candidates)),
+                )
+                .chain(alert.decam_match.iter().flat_map(|m| m.detections())),
+            ztf_nondetections(&alert.prv_nondetections, &alert.fp_hists)
+                .chain(
+                    lsst_match
+                        .into_iter()
+                        .flat_map(|m| lsst_nondetections(&m.fp_hists)),
+                )
+                .chain(alert.decam_match.iter().flat_map(|m| m.nondetections())),
+            candidate.jd,
+        );
+
+        let variability = PerBandVariability::from_points(
+            alert
+                .fp_hists
+                .iter()
+                .filter(|p| p.jd <= candidate.jd)
+                .filter_map(|p| Some((p.jd, p.flux?, p.flux_err, p.band.clone()))),
         );
 
         Ok((
@@ -1472,13 +1536,16 @@ impl ZtfEnrichmentWorker {
                 star: is_star,
                 near_brightstar: is_near_brightstar,
                 hosted,
+                best_host,
                 stationary,
                 photstats,
                 multisurvey_photstats: Some(multisurvey_photstats),
                 sso: Some(sso),
                 activity: Some(activity),
                 detection_history: Some(detection_history),
+                multisurvey_detection_history: Some(multisurvey_detection_history),
                 episode_history: Some(episode_history),
+                variability: Some(variability),
             },
             all_bands_properties,
             programid,

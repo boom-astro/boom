@@ -1,4 +1,5 @@
-//! Fill in `host_galaxy` on a survey's `alerts_aux` records.
+//! Fill in `host_galaxy` on a survey's `alerts_aux` records, and its copy
+//! (`properties.hosted`, `properties.best_host`) on their alerts.
 //!
 //! Association is a pure function of the galaxy cross-matches already stored on
 //! each record, so this reads `cross_matches` rather than re-querying the
@@ -22,12 +23,12 @@ use crate::conf::CatalogXmatchConfig;
 use crate::utils::{
     db::CURSOR_BATCH_SIZE,
     enums::Survey,
-    host::{self, HostGalaxyConfig},
+    host::{self, HostGalaxyAssociation, HostGalaxyConfig, HostSummary},
 };
 use futures::TryStreamExt;
 use mongodb::{
     bson::{doc, to_bson, Bson, Document},
-    options::{UpdateOneModel, WriteModel},
+    options::{UpdateManyModel, UpdateOneModel, WriteModel},
     Namespace,
 };
 use serde::{Deserialize, Serialize};
@@ -140,6 +141,19 @@ fn galaxy_matches(
     Some(matches)
 }
 
+/// What the enrichment workers copy from `host_galaxy` onto each alert.
+fn alert_host_fields(
+    survey: &Survey,
+    association: &HostGalaxyAssociation,
+) -> Result<Document, mongodb::bson::ser::Error> {
+    let mut fields = doc! { "properties.hosted": association.best_host.is_some() };
+    if matches!(survey, Survey::Ztf | Survey::Lsst) {
+        let best_host = association.best_host.as_ref().map(HostSummary::from);
+        fields.insert("properties.best_host", to_bson(&best_host)?);
+    }
+    Ok(fields)
+}
+
 fn failed(e: impl std::fmt::Display) -> super::TaskError {
     super::TaskError::Failed(e.to_string())
 }
@@ -157,6 +171,7 @@ async fn probe_catalogs(
     let present = vec![
         doc! { format!("cross_matches.{}.Diam", config.ned_catalog): { "$exists": true } },
         doc! { format!("cross_matches.{}", config.ls_dr10_catalog): { "$exists": true } },
+        doc! { format!("cross_matches.{}", config.ls_dr9_catalog): { "$exists": true } },
     ];
     let found = collection
         .aggregate(vec![
@@ -168,9 +183,9 @@ async fn probe_catalogs(
     match found {
         Ok(mut cursor) => match cursor.try_next().await {
             Ok(None) => ctx.warn(format!(
-                "none of {} sampled records carry {}.Diam or {}; run reprocess_crossmatch over \
+                "none of {} sampled records carry {}.Diam, {} or {}; run reprocess_crossmatch over \
                  the galaxy catalogs first, or every association will be empty",
-                CATALOG_PROBE_SAMPLE, config.ned_catalog, config.ls_dr10_catalog
+                CATALOG_PROBE_SAMPLE, config.ned_catalog, config.ls_dr10_catalog, config.ls_dr9_catalog
             )),
             Ok(Some(_)) => {}
             Err(e) => ctx.warn(format!("catalog probe failed, continuing: {e}")),
@@ -186,16 +201,23 @@ async fn worker(
     rx: async_channel::Receiver<Document>,
     client: mongodb::Client,
     aux_ns: Namespace,
+    alerts_ns: Namespace,
     config: HostGalaxyConfig,
     xmatch_configs: Vec<CatalogXmatchConfig>,
     survey: Survey,
     batch_size: usize,
     dry_run: bool,
 ) -> Result<(u64, u64), super::TaskError> {
-    let catalogs = [config.ned_catalog.as_str(), config.ls_dr10_catalog.as_str()];
+    let catalogs = [
+        config.ned_catalog.as_str(),
+        config.ls_dr10_catalog.as_str(),
+        config.ls_dr9_catalog.as_str(),
+        config.desi_catalog.as_str(),
+    ];
     // Photometry is read from the same database the records come from.
     let db = client.database(&aux_ns.db);
-    let mut batch: Vec<WriteModel> = Vec::with_capacity(batch_size);
+    let mut batch: Vec<WriteModel> = Vec::with_capacity(2 * batch_size);
+    let mut pending = 0u64;
     let mut written = 0u64;
     let mut unreadable = 0u64;
     // Named in the log, but only the first few: a systematic problem would
@@ -247,7 +269,13 @@ async fn worker(
         else {
             continue;
         };
-        let value = match to_bson(&association) {
+        let encode = || -> Result<_, mongodb::bson::ser::Error> {
+            Ok((
+                to_bson(&association)?,
+                alert_host_fields(&survey, &association)?,
+            ))
+        };
+        let (value, alert_fields) = match encode() {
             Ok(v) => v,
             Err(e) => {
                 unreadable += 1;
@@ -262,12 +290,21 @@ async fn worker(
         batch.push(WriteModel::UpdateOne(
             UpdateOneModel::builder()
                 .namespace(aux_ns.clone())
-                .filter(doc! { "_id": object_id })
+                .filter(doc! { "_id": object_id.clone() })
                 .update(doc! { "$set": { "host_galaxy": value } })
                 .build(),
         ));
+        // Alerts not enriched yet have no `properties` to complete.
+        batch.push(WriteModel::UpdateMany(
+            UpdateManyModel::builder()
+                .namespace(alerts_ns.clone())
+                .filter(doc! { "objectId": object_id, "properties": { "$type": "object" } })
+                .update(doc! { "$set": alert_fields })
+                .build(),
+        ));
+        pending += 1;
 
-        if batch.len() >= batch_size {
+        if pending >= batch_size as u64 {
             // Checked at the batch boundary: each association is independently
             // correct, so stopping here leaves a state that is easy to describe
             // -- some records scored, the rest untouched.
@@ -278,7 +315,6 @@ async fn worker(
                 ));
                 return Err(super::TaskError::Canceled);
             }
-            let n = batch.len() as u64;
             if dry_run {
                 batch.clear();
             } else {
@@ -288,12 +324,12 @@ async fn worker(
                     .await
                     .map_err(failed)?;
             }
-            written += n;
+            written += std::mem::take(&mut pending);
         }
     }
 
     if !batch.is_empty() {
-        let n = batch.len() as u64;
+        let n = pending;
         if !dry_run {
             client
                 .bulk_write(batch)
@@ -344,6 +380,11 @@ pub async fn run(
         db: db.name().to_string(),
         coll: aux_name.clone(),
     };
+    let alerts_name = format!("{}_alerts", params.survey);
+    let alerts_ns = Namespace {
+        db: db.name().to_string(),
+        coll: alerts_name.clone(),
+    };
     let xmatch_configs = ctx
         .config()
         .crossmatch
@@ -361,6 +402,7 @@ pub async fn run(
             rx.clone(),
             db.client().clone(),
             aux_ns.clone(),
+            alerts_ns.clone(),
             config.clone(),
             xmatch_configs.clone(),
             params.survey.clone(),
@@ -371,7 +413,12 @@ pub async fn run(
     drop(rx);
 
     let mut projection = doc! { "_id": 1, "coordinates.radec_geojson.coordinates": 1 };
-    for catalog in [&config.ned_catalog, &config.ls_dr10_catalog] {
+    for catalog in [
+        &config.ned_catalog,
+        &config.ls_dr10_catalog,
+        &config.ls_dr9_catalog,
+        &config.desi_catalog,
+    ] {
         projection.insert(format!("cross_matches.{catalog}"), 1);
     }
 
@@ -440,6 +487,20 @@ pub async fn run(
                 "written": total as i64,
                 "unreadable": unreadable as i64,
                 "skip_existing": params.skip_existing,
+            },
+        )
+        .await;
+        ctx.record_mutation(
+            MutationTarget {
+                database: db.name().to_string(),
+                collection: alerts_name,
+                catalog: None,
+                survey: Some(params.survey.to_string().to_lowercase()),
+            },
+            Operation::Recompute,
+            doc! {
+                "field": "properties.hosted, properties.best_host",
+                "objects": total as i64,
             },
         )
         .await;

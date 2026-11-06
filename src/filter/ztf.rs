@@ -220,6 +220,12 @@ pub struct ZtfAlertEnriched {
     pub host_galaxy: Option<HostGalaxyAssociation>,
 }
 
+pub fn ztf_results_pipeline() -> Vec<Document> {
+    let mut pipeline = create_ztf_alert_pipeline(true);
+    add_decam_survey_match(&mut pipeline);
+    pipeline
+}
+
 /// Builds ZTF Alert objects from the provided filter results and alert collection.
 ///
 /// # Arguments
@@ -912,11 +918,8 @@ impl FilterWorker for ZtfFilterWorker {
             }
         }
 
-        let mut alert_pipeline = create_ztf_alert_pipeline(true);
-        add_decam_survey_match(&mut alert_pipeline);
-
         Ok(ZtfFilterWorker {
-            alert_pipeline,
+            alert_pipeline: ztf_results_pipeline(),
             alert_collection,
             mpc_orbits,
             alert_cutout_storage,

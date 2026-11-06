@@ -38,6 +38,7 @@ export default function SignupPage() {
     }
   }, [location.search]);
   const [email, setEmail] = useState('');
+  const [name, setName] = useState('');
   const [loading, setLoading] = useState(false);
   const [step, setStep] = useState<'email'|'code'|'done'>('email');
   const [message, setMessage] = useState<string | null>(null);
@@ -58,7 +59,7 @@ export default function SignupPage() {
       const res = await fetch(`${API_BASE}/signup`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email }),
+        body: JSON.stringify({ email, name }),
       });
       if (!res.ok) {
         const txt = await res.text().catch(() => '');
@@ -192,11 +193,15 @@ export default function SignupPage() {
           {step === 'email' && (
             <form onSubmit={submitEmail} className="grid gap-4">
               <div>
+                <label className="text-sm font-medium">Full name</label>
+                <Input value={name} onChange={(e) => setName(e.target.value)} type="text" autoComplete="name" maxLength={100} placeholder="Your full name" required className="mt-1" />
+              </div>
+              <div>
                 <label className="text-sm font-medium">Email</label>
                 <Input value={email} onChange={(e) => setEmail(e.target.value)} type="email" placeholder="you@example.com" required className="mt-1" />
               </div>
               <div className="flex gap-2">
-                <Button type="submit" disabled={loading || !email}>{loading ? 'Sending…' : 'Send activation'}</Button>
+                <Button type="submit" disabled={loading || !email || !name.trim()}>{loading ? 'Sending…' : 'Send activation'}</Button>
               </div>
               {message && <div className="text-sm text-muted-foreground mt-2">{message}</div>}
               {error && <div className="text-sm text-red-600 mt-2">{error}</div>}

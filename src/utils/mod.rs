@@ -20,6 +20,7 @@ pub mod lightcurves;
 pub mod linking;
 pub mod moc;
 pub mod mpcorb;
+pub mod nbody;
 pub mod o11y;
 pub mod orbit_fit;
 pub mod outburst;
@@ -31,7 +32,10 @@ pub mod spatial;
 pub mod sso_geometry;
 pub mod testing;
 pub mod thor;
+pub mod tns;
+pub mod track_results;
 pub mod tracks;
+pub mod variability;
 pub mod vsop87;
 pub mod worker;
 

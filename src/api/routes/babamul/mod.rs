@@ -272,6 +272,7 @@ impl From<BabamulUser> for BabamulUserPublic {
 #[derive(Deserialize, Clone, ToSchema)]
 pub struct BabamulSignupPost {
     pub email: String,
+    pub name: String,
 }
 
 #[serde_as]
@@ -289,6 +290,7 @@ pub struct BabamulSignupResponse {
     request_body = BabamulSignupPost,
     responses(
         (status = 200, description = "Signup successful", body = BabamulSignupResponse),
+        (status = 400, description = "Invalid email address or name"),
         (status = 403, description = "This deployment is not creating new accounts"),
         (status = 409, description = "Email already exists"),
         (status = 500, description = "Internal server error")
@@ -312,6 +314,14 @@ pub async fn post_babamul_signup(
         return response::bad_request("Invalid email address");
     }
 
+    let name = body.name.trim();
+    if name.is_empty() {
+        return response::bad_request("Full name is required");
+    }
+    if let Err(message) = validate_name(name) {
+        return response::bad_request(&message);
+    }
+
     let babamul_users_collection: mongodb::Collection<BabamulUser> = db.collection("babamul_users");
 
     let user = match babamul_users_collection
@@ -323,10 +333,14 @@ pub async fn post_babamul_signup(
                 return duplicate_email("Email already registered (and activated)");
             }
             existing_user.activation_code = Some(uuid::Uuid::new_v4().to_string());
+            existing_user.name = Some(name.to_string());
             if let Err(e) = babamul_users_collection
                 .update_one(
                     doc! { "_id": &existing_user.id },
-                    doc! { "$set": { "activation_code": &existing_user.activation_code } },
+                    doc! { "$set": {
+                        "activation_code": &existing_user.activation_code,
+                        "name": name,
+                    } },
                 )
                 .await
             {
@@ -371,7 +385,7 @@ pub async fn post_babamul_signup(
                 password_last_changed_at: None,
                 identities: Vec::new(),
                 orcid_id: None,
-                name: None,
+                name: Some(name.to_string()),
                 is_admin: false,
                 acls: vec![],
             };
@@ -1029,6 +1043,21 @@ pub async fn get_babamul_profile(current_user: Option<web::ReqData<BabamulUser>>
 /// Long enough for any real name; short enough that the field is not free storage.
 const MAX_NAME_LENGTH: usize = 100;
 
+fn validate_name(name: &str) -> Result<(), String> {
+    // Characters, not bytes: `.len()` would cut a non-Latin name to a fraction.
+    if name.chars().count() > MAX_NAME_LENGTH {
+        return Err(format!(
+            "Name must be at most {} characters",
+            MAX_NAME_LENGTH
+        ));
+    }
+    // Rendered on one line: control characters only buy a caller newline smuggling.
+    if name.chars().any(char::is_control) {
+        return Err("Name cannot contain control characters".to_string());
+    }
+    Ok(())
+}
+
 #[derive(Deserialize, Clone, ToSchema)]
 pub struct UpdateProfilePatch {
     /// Full name to show on the profile. A blank or whitespace-only value
@@ -1070,16 +1099,8 @@ pub async fn patch_babamul_profile(
         Some(name) => name.trim(),
     };
 
-    // Characters, not bytes: `.len()` would cut a non-Latin name to a fraction.
-    if name.chars().count() > MAX_NAME_LENGTH {
-        return response::bad_request(&format!(
-            "Name must be at most {} characters",
-            MAX_NAME_LENGTH
-        ));
-    }
-    // Rendered on one line: control characters only buy a caller newline smuggling.
-    if name.chars().any(char::is_control) {
-        return response::bad_request("Name cannot contain control characters");
+    if let Err(message) = validate_name(name) {
+        return response::bad_request(&message);
     }
 
     // Unset, not `""`: a stored empty string is a name that renders blank.

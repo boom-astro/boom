@@ -16,8 +16,8 @@ use crate::{
         ZtfAlertProperties,
     },
     filter::{
-        build_filter_pipeline, reject_unknown_candidate_fields, Filter, FilterError, FilterVersion,
-        SURVEYS_REQUIRING_PERMISSIONS,
+        build_filter_pipeline, find_unknown_field, DocumentShape, Filter, FilterError,
+        FilterVersion, SURVEYS_REQUIRING_PERMISSIONS,
     },
     utils::{
         db::{count_alerts_in_jd_window, mongify},
@@ -171,13 +171,30 @@ async fn run_test_pipeline(
     }
 }
 
+fn reject_unknown_fields(
+    pipeline: &[serde_json::Value],
+    survey: &Survey,
+    catalogs: &[CatalogXmatchConfig],
+) -> Result<(), FilterError> {
+    let document =
+        DocumentShape::filter_document(&serde_json::json!(filter_schema(survey)), catalogs);
+    match find_unknown_field(pipeline, &document) {
+        Some(path) => Err(FilterError::InvalidFilterPipeline(format!(
+            "`{path}` is not in the {survey} filter schema or its crossmatch catalogs: \
+             it always reads as null, so a cut on it lets every alert through or none."
+        ))),
+        None => Ok(()),
+    }
+}
+
 async fn build_and_test_filter_version(
     db: web::Data<Database>,
     survey: &Survey,
     pipeline: &Vec<serde_json::Value>,
     permissions: &HashMap<Survey, Vec<i32>>,
+    catalogs: &[CatalogXmatchConfig],
 ) -> Result<(), FilterError> {
-    reject_unknown_candidate_fields(pipeline, survey)?;
+    reject_unknown_fields(pipeline, survey, catalogs)?;
     let test_pipeline = build_filter_pipeline(pipeline, permissions, survey).await?;
     run_test_pipeline(db, survey, test_pipeline).await
 }
@@ -350,7 +367,14 @@ pub async fn post_filter_version(
     let new_pipeline = body.pipeline.clone();
 
     // Test the filter to ensure it works
-    match build_and_test_filter_version(db.clone(), &survey, &new_pipeline, &permissions).await {
+    let catalogs = config
+        .crossmatch
+        .get(&survey)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    match build_and_test_filter_version(db.clone(), &survey, &new_pipeline, &permissions, catalogs)
+        .await
+    {
         Ok(()) => {}
         Err(e) => {
             return response::bad_request(&format!(
@@ -473,7 +497,14 @@ pub async fn post_filter(
     let pipeline = body.pipeline;
 
     // Test the filter to ensure it works
-    match build_and_test_filter_version(db.clone(), &survey, &pipeline, &permissions).await {
+    let catalogs = config
+        .crossmatch
+        .get(&survey)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    match build_and_test_filter_version(db.clone(), &survey, &pipeline, &permissions, catalogs)
+        .await
+    {
         Ok(()) => {}
         Err(e) => {
             return response::bad_request(&format!(
@@ -1803,6 +1834,15 @@ pub struct DecamAlertToFilter {
     pub host_galaxy: Option<HostGalaxyAssociation>,
 }
 
+fn filter_schema(survey: &Survey) -> apache_avro::Schema {
+    match survey {
+        Survey::Ztf => ZtfAlertToFilter::get_schema(),
+        Survey::Lsst => LsstAlertToFilter::get_schema(),
+        Survey::Winter => WinterAlertToFilter::get_schema(),
+        Survey::Decam => DecamAlertToFilter::get_schema(),
+    }
+}
+
 /// Get a schema of a survey's data available at filtering time
 #[utoipa::path(
     get,
@@ -1823,13 +1863,7 @@ pub async fn get_filter_schema(
     config: web::Data<AppConfig>,
 ) -> HttpResponse {
     let survey_name = path.into_inner().0;
-    let schema = match survey_name {
-        Survey::Ztf => ZtfAlertToFilter::get_schema(),
-        Survey::Lsst => LsstAlertToFilter::get_schema(),
-        Survey::Winter => WinterAlertToFilter::get_schema(),
-        Survey::Decam => DecamAlertToFilter::get_schema(),
-    };
-    let mut schema = serde_json::json!(schema);
+    let mut schema = serde_json::json!(filter_schema(&survey_name));
     let catalogs = config
         .crossmatch
         .get(&survey_name)

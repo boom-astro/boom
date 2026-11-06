@@ -32,6 +32,7 @@ pub mod logs;
 pub mod models;
 pub mod queue;
 pub mod redact;
+pub mod schedule;
 
 // The tasks: one module per entry in `TASKS` below, each with its own
 // `TASK_TYPE`, params type and `run`. These are what moves to `task/tasks/`.
@@ -48,10 +49,13 @@ pub mod migrate_fp_flux;
 pub mod migrate_snr;
 pub mod mpcorb_ingest;
 pub mod prepare_catalog;
+pub mod propagate_orbits;
 pub mod repair_photometry;
 pub mod reprocess_crossmatch;
 pub mod sso_baselines;
 pub mod stream_kowalski_alerts;
+pub mod tns_photometry;
+pub mod tns_sync;
 
 pub use context::TaskContext;
 pub use models::{Actor, Task, TaskStatus, Trigger};
@@ -89,6 +93,7 @@ pub enum TaskType {
     CopyCutouts,
     SsoBaselines,
     MpcorbIngest,
+    PropagateOrbits,
     EnrichReprocess,
     PrepareCatalog,
     ExportCatalog,
@@ -101,15 +106,18 @@ pub enum TaskType {
     ReprocessCrossmatch,
     MigrateSnr,
     MigrateFpFlux,
+    TnsSync,
+    TnsPhotometry,
 }
 
 impl TaskType {
-    pub const ALL: [TaskType; 17] = [
+    pub const ALL: [TaskType; 20] = [
         Self::CatalogIngest,
         Self::StreamKowalskiAlerts,
         Self::CopyCutouts,
         Self::SsoBaselines,
         Self::MpcorbIngest,
+        Self::PropagateOrbits,
         Self::EnrichReprocess,
         Self::PrepareCatalog,
         Self::ExportCatalog,
@@ -122,6 +130,8 @@ impl TaskType {
         Self::ReprocessCrossmatch,
         Self::MigrateSnr,
         Self::MigrateFpFlux,
+        Self::TnsSync,
+        Self::TnsPhotometry,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -131,6 +141,7 @@ impl TaskType {
             Self::CopyCutouts => copy_cutouts::TASK_TYPE,
             Self::SsoBaselines => sso_baselines::TASK_TYPE,
             Self::MpcorbIngest => mpcorb_ingest::TASK_TYPE,
+            Self::PropagateOrbits => propagate_orbits::TASK_TYPE,
             Self::EnrichReprocess => enrich_reprocess::TASK_TYPE,
             Self::PrepareCatalog => prepare_catalog::TASK_TYPE,
             Self::ExportCatalog => export_catalog::TASK_TYPE,
@@ -143,6 +154,8 @@ impl TaskType {
             Self::ReprocessCrossmatch => reprocess_crossmatch::TASK_TYPE,
             Self::MigrateSnr => migrate_snr::TASK_TYPE,
             Self::MigrateFpFlux => migrate_fp_flux::TASK_TYPE,
+            Self::TnsSync => tns_sync::TASK_TYPE,
+            Self::TnsPhotometry => tns_photometry::TASK_TYPE,
         }
     }
 }
@@ -234,35 +247,7 @@ fn inline_refs(
     }
 }
 
-// TODO: recurring runs, for periodic maintenance such as the LSST cutout
-// retention policy (#518). The task document is already ready for them --
-// `Trigger::Schedule` and `Actor::system()` exist so a scheduled run is
-// distinguishable from one a person asked for, and lease, heartbeat, cancel,
-// logs and the ledger are all keyed off the run rather than off what triggered
-// it. What is missing is where a schedule is declared and the loop that fires
-// it.
-//
-// Two things to get right, neither of which the current code handles:
-//
-// 1. **Firing exactly once per tick across a fleet.** Every task-worker wakes
-//    at the same cron instant, and `single_flight_key` will not save us: it is
-//    a check-then-insert in the API handler (`api::routes::tasks::submit`), not
-//    an invariant of `queue::submit`, so a scheduler enqueuing directly bypasses
-//    it and two schedulers racing would both pass the check anyway. The fix
-//    needs no leader election -- give a scheduled run a deterministic id such
-//    as `sched:{schedule}:{unix_fire_time}` and let the `_id` uniqueness Mongo
-//    already enforces settle it. One worker inserts, the rest get a duplicate
-//    key and move on.
-//
-// 2. **Missed ticks.** If the fleet was down over a fire time, maintenance work
-//    wants skip-to-next rather than a backfilled run per missed tick: the work
-//    is cumulative, so one run catches up on all of it.
-//
-// Note that #518 is an *offload* to S3, not a delete -- Babamul is meant to
-// read the archived cutouts back. A TTL index would destroy exactly the data
-// the issue wants kept, so this does need a task body: a chunked, resumable
-// copy-then-delete of the same shape as `catalog_ingest`, with `CutoutStorage`
-// and `copy_cutouts` already covering most of the moving part.
+// TODO: the LSST cutout retention policy (#518) as a scheduled S3 offload.
 
 /// Every task type this release knows how to run.
 pub const TASKS: &[TaskSpec] = &[
@@ -327,6 +312,16 @@ pub const TASKS: &[TaskSpec] = &[
         idempotent: true,
         destructive: false,
         params_schema: || schema_of::<mpcorb_ingest::MpcorbIngestParams>(),
+    },
+    TaskSpec {
+        id: propagate_orbits::TASK_TYPE,
+        title: "Propagate MPC orbits to past epochs",
+        description: "N-body propagation of MPC_orbits to a grid of epochs, so known \
+                      objects are matched on older data. Run it before reprocessing a \
+                      period; drop removes the epochs once done.",
+        idempotent: true,
+        destructive: false,
+        params_schema: || schema_of::<propagate_orbits::PropagateOrbitsParams>(),
     },
     TaskSpec {
         id: enrich_reprocess::TASK_TYPE,
@@ -465,6 +460,27 @@ pub const TASKS: &[TaskSpec] = &[
         destructive: false,
         params_schema: || schema_of::<migrate_fp_flux::MigrateFpFluxParams>(),
     },
+    TaskSpec {
+        id: tns_sync::TASK_TYPE,
+        title: "Sync the TNS collection",
+        description: "Upsert TNS from the public objects files: the full file once it is \
+                      due, then each hourly delta since the last one applied, refreshing \
+                      cross_matches.TNS on alerts_aux records near objects that changed. \
+                      Scheduled when TNS bot credentials are set.",
+        idempotent: true,
+        destructive: false,
+        params_schema: || schema_of::<tns_sync::TnsSyncParams>(),
+    },
+    TaskSpec {
+        id: tns_photometry::TASK_TYPE,
+        title: "Fetch TNS photometry",
+        description: "Fetch photometry and non-detections reported to TNS for young TNS \
+                      objects matched by BOOM objects with a nearby host, into \
+                      TNS_photometry. Scheduled when TNS bot credentials are set.",
+        idempotent: true,
+        destructive: false,
+        params_schema: || schema_of::<tns_photometry::TnsPhotometryParams>(),
+    },
 ];
 
 pub fn find(id: &str) -> Option<&'static TaskSpec> {
@@ -536,6 +552,12 @@ pub fn validate_params(task_type: &str, params: &serde_json::Value) -> Result<()
                 .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
             parsed.validate_params().map_err(TaskError::InvalidParams)
         }
+        propagate_orbits::TASK_TYPE => {
+            let parsed: propagate_orbits::PropagateOrbitsParams =
+                serde_json::from_value(params.clone())
+                    .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            parsed.validate_params().map_err(TaskError::InvalidParams)
+        }
         enrich_reprocess::TASK_TYPE => {
             let parsed: enrich_reprocess::EnrichReprocessParams =
                 serde_json::from_value(params.clone())
@@ -599,6 +621,17 @@ pub fn validate_params(task_type: &str, params: &serde_json::Value) -> Result<()
                     .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
             parsed.validate_params().map_err(TaskError::InvalidParams)
         }
+        tns_sync::TASK_TYPE => {
+            let parsed: tns_sync::TnsSyncParams = serde_json::from_value(params.clone())
+                .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            parsed.validate_params().map_err(TaskError::InvalidParams)
+        }
+        tns_photometry::TASK_TYPE => {
+            let parsed: tns_photometry::TnsPhotometryParams =
+                serde_json::from_value(params.clone())
+                    .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            parsed.validate_params().map_err(TaskError::InvalidParams)
+        }
         other => Err(TaskError::UnknownType {
             id: other.to_string(),
             known: known_types(),
@@ -644,6 +677,7 @@ pub fn single_flight_key(
         // One refresh at a time: two would download the same file and race on
         // the staging collection.
         mpcorb_ingest::TASK_TYPE => Some(doc! {}),
+        propagate_orbits::TASK_TYPE => Some(doc! {}),
         // Keyed by survey: two reprocesses of one survey would contend for the
         // same enrichment workers and GPU, but ZTF and LSST are independent.
         enrich_reprocess::TASK_TYPE => Some(
@@ -736,6 +770,8 @@ pub fn single_flight_key(
                 .map(|survey| doc! { "survey": survey })
                 .unwrap_or_default(),
         ),
+        tns_sync::TASK_TYPE => Some(doc! {}),
+        tns_photometry::TASK_TYPE => Some(doc! {}),
         _ => None,
     }
 }
@@ -810,6 +846,11 @@ pub async fn dispatch(
                 .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
             mpcorb_ingest::run(ctx, params).await
         }
+        propagate_orbits::TASK_TYPE => {
+            let params = propagate_orbits::PropagateOrbitsParams::deserialize(params)
+                .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            propagate_orbits::run(ctx, params).await
+        }
         enrich_reprocess::TASK_TYPE => {
             let params = enrich_reprocess::EnrichReprocessParams::deserialize(params)
                 .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
@@ -834,6 +875,16 @@ pub async fn dispatch(
             let params = migrate_fp_flux::MigrateFpFluxParams::deserialize(params)
                 .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
             migrate_fp_flux::run(ctx, params).await
+        }
+        tns_sync::TASK_TYPE => {
+            let params = tns_sync::TnsSyncParams::deserialize(params)
+                .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            tns_sync::run(ctx, params).await
+        }
+        tns_photometry::TASK_TYPE => {
+            let params = tns_photometry::TnsPhotometryParams::deserialize(params)
+                .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            tns_photometry::run(ctx, params).await
         }
         other => Err(TaskError::UnknownType {
             id: other.to_string(),

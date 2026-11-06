@@ -1224,6 +1224,463 @@ impl super::arrow::FromRecordBatch for LsDr9 {
 
 impl HasCoordinates for LsDr9 {}
 
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Erass1 {
+    #[serde(rename(serialize = "_id"))]
+    pub uid: i64,
+    pub iauname: String,
+    pub ra: f64,
+    pub dec: f64,
+    pub pos_err: Option<f64>,
+    pub mjd_min: Option<f64>,
+    pub mjd_max: Option<f64>,
+    pub ext: Option<f64>,
+    pub ext_like: Option<f64>,
+    pub det_like_0: Option<f64>,
+    pub ml_rate_1: Option<f64>,
+    pub ml_rate_err_1: Option<f64>,
+    pub ml_flux_1: Option<f64>,
+    pub ml_flux_err_1: Option<f64>,
+    pub ml_rate_p1: Option<f64>,
+    pub ml_rate_err_p1: Option<f64>,
+    pub ml_rate_p2: Option<f64>,
+    pub ml_rate_err_p2: Option<f64>,
+    pub ml_rate_p3: Option<f64>,
+    pub ml_rate_err_p3: Option<f64>,
+    pub flag_sp_snr: Option<i64>,
+    pub flag_sp_bps: Option<i64>,
+    pub flag_sp_scl: Option<i64>,
+    pub flag_sp_lga: Option<i64>,
+    pub flag_sp_gc_cons: Option<i64>,
+    pub flag_opt: Option<i64>,
+}
+
+impl super::arrow::FromRecordBatch for Erass1 {
+    fn from_batch(
+        batch: &::arrow::array::RecordBatch,
+    ) -> Result<Vec<Self>, super::arrow::ColumnError> {
+        use super::arrow::{f64_column, i64_column, string_column};
+
+        let uid = i64_column(batch, "UID")?;
+        let iauname = string_column(batch, "IAUNAME")?;
+        let ra = f64_column(batch, "RA")?;
+        let dec = f64_column(batch, "DEC")?;
+        let pos_err = f64_column(batch, "POS_ERR")?;
+        let mjd_min = f64_column(batch, "MJD_MIN")?;
+        let mjd_max = f64_column(batch, "MJD_MAX")?;
+        let ext = f64_column(batch, "EXT")?;
+        let ext_like = f64_column(batch, "EXT_LIKE")?;
+        let det_like_0 = f64_column(batch, "DET_LIKE_0")?;
+        let ml_rate_1 = f64_column(batch, "ML_RATE_1")?;
+        let ml_rate_err_1 = f64_column(batch, "ML_RATE_ERR_1")?;
+        let ml_flux_1 = f64_column(batch, "ML_FLUX_1")?;
+        let ml_flux_err_1 = f64_column(batch, "ML_FLUX_ERR_1")?;
+        let ml_rate_p1 = f64_column(batch, "ML_RATE_P1")?;
+        let ml_rate_err_p1 = f64_column(batch, "ML_RATE_ERR_P1")?;
+        let ml_rate_p2 = f64_column(batch, "ML_RATE_P2")?;
+        let ml_rate_err_p2 = f64_column(batch, "ML_RATE_ERR_P2")?;
+        let ml_rate_p3 = f64_column(batch, "ML_RATE_P3")?;
+        let ml_rate_err_p3 = f64_column(batch, "ML_RATE_ERR_P3")?;
+        let flag_sp_snr = i64_column(batch, "FLAG_SP_SNR")?;
+        let flag_sp_bps = i64_column(batch, "FLAG_SP_BPS")?;
+        let flag_sp_scl = i64_column(batch, "FLAG_SP_SCL")?;
+        let flag_sp_lga = i64_column(batch, "FLAG_SP_LGA")?;
+        let flag_sp_gc_cons = i64_column(batch, "FLAG_SP_GC_CONS")?;
+        let flag_opt = i64_column(batch, "FLAG_OPT")?;
+
+        let mut rows = Vec::with_capacity(batch.num_rows());
+        for row in 0..batch.num_rows() {
+            let (Some(uid), Some(ra), Some(dec)) = (uid[row], ra[row], dec[row]) else {
+                continue;
+            };
+            rows.push(Erass1 {
+                uid,
+                iauname: iauname[row].clone().unwrap_or_default(),
+                ra,
+                dec,
+                pos_err: pos_err[row],
+                mjd_min: mjd_min[row],
+                mjd_max: mjd_max[row],
+                ext: ext[row],
+                ext_like: ext_like[row],
+                det_like_0: det_like_0[row],
+                ml_rate_1: ml_rate_1[row],
+                ml_rate_err_1: ml_rate_err_1[row],
+                ml_flux_1: ml_flux_1[row],
+                ml_flux_err_1: ml_flux_err_1[row],
+                ml_rate_p1: ml_rate_p1[row],
+                ml_rate_err_p1: ml_rate_err_p1[row],
+                ml_rate_p2: ml_rate_p2[row],
+                ml_rate_err_p2: ml_rate_err_p2[row],
+                ml_rate_p3: ml_rate_p3[row],
+                ml_rate_err_p3: ml_rate_err_p3[row],
+                flag_sp_snr: flag_sp_snr[row],
+                flag_sp_bps: flag_sp_bps[row],
+                flag_sp_scl: flag_sp_scl[row],
+                flag_sp_lga: flag_sp_lga[row],
+                flag_sp_gc_cons: flag_sp_gc_cons[row],
+                flag_opt: flag_opt[row],
+            });
+        }
+        Ok(rows)
+    }
+}
+
+impl HasCoordinates for Erass1 {}
+
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FiveXmm {
+    #[serde(rename(serialize = "_id"))]
+    pub srcid: i64,
+    pub iauname: String,
+    pub ra: f64,
+    pub dec: f64,
+    pub radec_err: Option<f64>,
+    pub n_obs: Option<i64>,
+    pub mjd_first: Option<f64>,
+    pub mjd_last: Option<f64>,
+    pub ep_flux: Option<f64>,
+    pub ep_flux_err: Option<f64>,
+    pub ep_det_ml: Option<f64>,
+    pub ep_hr1: Option<f64>,
+    pub ep_hr2: Option<f64>,
+    pub ep_hr3: Option<f64>,
+    pub ep_hr4: Option<f64>,
+    pub extent: Option<f64>,
+    pub extent_ml: Option<f64>,
+    pub sum_flag: Option<i64>,
+    pub var_flag: Option<bool>,
+    pub fvar: Option<f64>,
+    pub var_prob: Option<f64>,
+    pub fratio: Option<f64>,
+    pub classx_class: Option<String>,
+    pub classx_prob_agn: Option<f64>,
+    pub classx_prob_star: Option<f64>,
+    pub classx_prob_gal_xrb: Option<f64>,
+    pub classx_prob_gal_cv: Option<f64>,
+}
+
+impl super::arrow::FromRecordBatch for FiveXmm {
+    fn from_batch(
+        batch: &::arrow::array::RecordBatch,
+    ) -> Result<Vec<Self>, super::arrow::ColumnError> {
+        use super::arrow::{bool_column, f64_column, i64_column, string_column};
+
+        let srcid = i64_column(batch, "SRCID")?;
+        let iauname = string_column(batch, "IAUNAME")?;
+        let ra = f64_column(batch, "RA")?;
+        let dec = f64_column(batch, "DEC")?;
+        let radec_err = f64_column(batch, "RADEC_ERR")?;
+        let n_obs = i64_column(batch, "N_OBS")?;
+        let mjd_first = f64_column(batch, "MJD_FIRST")?;
+        let mjd_last = f64_column(batch, "MJD_LAST")?;
+        let ep_flux = f64_column(batch, "EP_FLUX")?;
+        let ep_flux_err = f64_column(batch, "EP_FLUX_ERR")?;
+        let ep_det_ml = f64_column(batch, "EP_DET_ML")?;
+        let ep_hr1 = f64_column(batch, "EP_HR1")?;
+        let ep_hr2 = f64_column(batch, "EP_HR2")?;
+        let ep_hr3 = f64_column(batch, "EP_HR3")?;
+        let ep_hr4 = f64_column(batch, "EP_HR4")?;
+        let extent = f64_column(batch, "EXTENT")?;
+        let extent_ml = f64_column(batch, "EXTENT_ML")?;
+        let sum_flag = i64_column(batch, "SUM_FLAG")?;
+        let var_flag = bool_column(batch, "VAR_FLAG")?;
+        let fvar = f64_column(batch, "FVAR")?;
+        let var_prob = f64_column(batch, "VAR_PROB")?;
+        let fratio = f64_column(batch, "FRATIO")?;
+        let classx_class = string_column(batch, "CLASSX_CLASS")?;
+        let classx_prob_agn = f64_column(batch, "CLASSX_PROB_AGN")?;
+        let classx_prob_star = f64_column(batch, "CLASSX_PROB_STAR")?;
+        let classx_prob_gal_xrb = f64_column(batch, "CLASSX_PROB_GAL_XRB")?;
+        let classx_prob_gal_cv = f64_column(batch, "CLASSX_PROB_GAL_CV")?;
+
+        let mut rows = Vec::with_capacity(batch.num_rows());
+        for row in 0..batch.num_rows() {
+            let (Some(srcid), Some(ra), Some(dec)) = (srcid[row], ra[row], dec[row]) else {
+                continue;
+            };
+            rows.push(FiveXmm {
+                srcid,
+                iauname: iauname[row].clone().unwrap_or_default(),
+                ra,
+                dec,
+                radec_err: radec_err[row],
+                n_obs: n_obs[row],
+                mjd_first: mjd_first[row],
+                mjd_last: mjd_last[row],
+                ep_flux: ep_flux[row],
+                ep_flux_err: ep_flux_err[row],
+                ep_det_ml: ep_det_ml[row],
+                ep_hr1: ep_hr1[row],
+                ep_hr2: ep_hr2[row],
+                ep_hr3: ep_hr3[row],
+                ep_hr4: ep_hr4[row],
+                extent: extent[row],
+                extent_ml: extent_ml[row],
+                sum_flag: sum_flag[row],
+                var_flag: var_flag[row],
+                fvar: fvar[row],
+                var_prob: var_prob[row],
+                fratio: fratio[row],
+                classx_class: classx_class[row].clone().filter(|s| !s.is_empty()),
+                classx_prob_agn: classx_prob_agn[row],
+                classx_prob_star: classx_prob_star[row],
+                classx_prob_gal_xrb: classx_prob_gal_xrb[row],
+                classx_prob_gal_cv: classx_prob_gal_cv[row],
+            });
+        }
+        Ok(rows)
+    }
+}
+
+impl HasCoordinates for FiveXmm {}
+
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TwoSxps {
+    #[serde(rename(serialize = "_id"))]
+    pub id: i64,
+    #[serde(rename(serialize = "IAUName"))]
+    pub iau_name: String,
+    pub ra: f64,
+    pub dec: f64,
+    #[serde(rename(serialize = "Err90"))]
+    pub err90: Option<f64>,
+    #[serde(rename(serialize = "AstromType"))]
+    pub astrom_type: Option<i64>,
+    #[serde(rename(serialize = "DetFlag"))]
+    pub det_flag: Option<i64>,
+    #[serde(rename(serialize = "FieldFlag"))]
+    pub field_flag: Option<i64>,
+    #[serde(rename(serialize = "NumObs"))]
+    pub num_obs: Option<i64>,
+    #[serde(rename(serialize = "NumDetObs"))]
+    pub num_det_obs: Option<i64>,
+    #[serde(rename(serialize = "FirstDetDate"))]
+    pub first_det_date: Option<String>,
+    #[serde(rename(serialize = "LastDetDate"))]
+    pub last_det_date: Option<String>,
+    #[serde(rename(serialize = "Rate_band0"))]
+    pub rate_band0: Option<f64>,
+    #[serde(rename(serialize = "Rate_band0_pos"))]
+    pub rate_band0_pos: Option<f64>,
+    #[serde(rename(serialize = "Rate_band0_neg"))]
+    pub rate_band0_neg: Option<f64>,
+    #[serde(rename(serialize = "PeakRate_band0"))]
+    pub peak_rate_band0: Option<f64>,
+    #[serde(rename(serialize = "HR1"))]
+    pub hr1: Option<f64>,
+    #[serde(rename(serialize = "HR2"))]
+    pub hr2: Option<f64>,
+    #[serde(rename(serialize = "PvarPchiSnapshot_band0"))]
+    pub pvar_pchi_snapshot_band0: Option<f64>,
+    #[serde(rename(serialize = "PvarPchiObsID_band0"))]
+    pub pvar_pchi_obsid_band0: Option<f64>,
+    #[serde(rename(serialize = "PowFlux"))]
+    pub pow_flux: Option<f64>,
+    #[serde(rename(serialize = "PowFlux_pos"))]
+    pub pow_flux_pos: Option<f64>,
+    #[serde(rename(serialize = "PowFlux_neg"))]
+    pub pow_flux_neg: Option<f64>,
+}
+
+impl super::arrow::FromRecordBatch for TwoSxps {
+    fn from_batch(
+        batch: &::arrow::array::RecordBatch,
+    ) -> Result<Vec<Self>, super::arrow::ColumnError> {
+        use super::arrow::{f64_column, i64_column, string_column};
+
+        let id = i64_column(batch, "2SXPS_ID")?;
+        let iau_name = string_column(batch, "IAUName")?;
+        let ra = f64_column(batch, "RA")?;
+        let dec = f64_column(batch, "Decl")?;
+        let err90 = f64_column(batch, "Err90")?;
+        let astrom_type = i64_column(batch, "AstromType")?;
+        let det_flag = i64_column(batch, "DetFlag")?;
+        let field_flag = i64_column(batch, "FieldFlag")?;
+        let num_obs = i64_column(batch, "NumObs")?;
+        let num_det_obs = i64_column(batch, "NumDetObs")?;
+        let first_det_date = string_column(batch, "FirstDetDate")?;
+        let last_det_date = string_column(batch, "LastDetDate")?;
+        let rate_band0 = f64_column(batch, "Rate_band0")?;
+        let rate_band0_pos = f64_column(batch, "Rate_band0_pos")?;
+        let rate_band0_neg = f64_column(batch, "Rate_band0_neg")?;
+        let peak_rate_band0 = f64_column(batch, "PeakRate_band0")?;
+        let hr1 = f64_column(batch, "HR1")?;
+        let hr2 = f64_column(batch, "HR2")?;
+        let pvar_pchi_snapshot_band0 = f64_column(batch, "PvarPchiSnapshot_band0")?;
+        let pvar_pchi_obsid_band0 = f64_column(batch, "PvarPchiObsID_band0")?;
+        let pow_flux = f64_column(batch, "PowFlux")?;
+        let pow_flux_pos = f64_column(batch, "PowFlux_pos")?;
+        let pow_flux_neg = f64_column(batch, "PowFlux_neg")?;
+
+        let mut rows = Vec::with_capacity(batch.num_rows());
+        for row in 0..batch.num_rows() {
+            let (Some(id), Some(ra), Some(dec)) = (id[row], ra[row], dec[row]) else {
+                continue;
+            };
+            rows.push(TwoSxps {
+                id,
+                iau_name: iau_name[row].clone().unwrap_or_default(),
+                ra,
+                dec,
+                err90: err90[row],
+                astrom_type: astrom_type[row],
+                det_flag: det_flag[row],
+                field_flag: field_flag[row],
+                num_obs: num_obs[row],
+                num_det_obs: num_det_obs[row],
+                first_det_date: first_det_date[row].clone().filter(|s| !s.is_empty()),
+                last_det_date: last_det_date[row].clone().filter(|s| !s.is_empty()),
+                rate_band0: rate_band0[row],
+                rate_band0_pos: rate_band0_pos[row],
+                rate_band0_neg: rate_band0_neg[row],
+                peak_rate_band0: peak_rate_band0[row],
+                hr1: hr1[row],
+                hr2: hr2[row],
+                pvar_pchi_snapshot_band0: pvar_pchi_snapshot_band0[row],
+                pvar_pchi_obsid_band0: pvar_pchi_obsid_band0[row],
+                pow_flux: pow_flux[row],
+                pow_flux_pos: pow_flux_pos[row],
+                pow_flux_neg: pow_flux_neg[row],
+            });
+        }
+        Ok(rows)
+    }
+}
+
+impl HasCoordinates for TwoSxps {}
+
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FourFgl {
+    #[serde(rename(serialize = "_id"))]
+    pub source_name: String,
+    pub ra: f64,
+    pub dec: f64,
+    #[serde(rename(serialize = "DataRelease"))]
+    pub data_release: Option<i64>,
+    #[serde(rename(serialize = "Conf_95_SemiMajor"))]
+    pub conf_95_semi_major: Option<f64>,
+    #[serde(rename(serialize = "Conf_95_SemiMinor"))]
+    pub conf_95_semi_minor: Option<f64>,
+    #[serde(rename(serialize = "Conf_95_PosAng"))]
+    pub conf_95_pos_ang: Option<f64>,
+    #[serde(rename(serialize = "Signif_Avg"))]
+    pub signif_avg: Option<f64>,
+    #[serde(rename(serialize = "Flux1000"))]
+    pub flux1000: Option<f64>,
+    #[serde(rename(serialize = "Unc_Flux1000"))]
+    pub unc_flux1000: Option<f64>,
+    #[serde(rename(serialize = "Energy_Flux100"))]
+    pub energy_flux100: Option<f64>,
+    #[serde(rename(serialize = "Unc_Energy_Flux100"))]
+    pub unc_energy_flux100: Option<f64>,
+    #[serde(rename(serialize = "SpectrumType"))]
+    pub spectrum_type: Option<String>,
+    #[serde(rename(serialize = "PL_Index"))]
+    pub pl_index: Option<f64>,
+    #[serde(rename(serialize = "Variability_Index"))]
+    pub variability_index: Option<f64>,
+    #[serde(rename(serialize = "Frac_Variability"))]
+    pub frac_variability: Option<f64>,
+    #[serde(rename(serialize = "Flags"))]
+    pub flags: Option<i64>,
+    #[serde(rename(serialize = "CLASS1"))]
+    pub class1: Option<String>,
+    #[serde(rename(serialize = "CLASS2"))]
+    pub class2: Option<String>,
+    #[serde(rename(serialize = "ASSOC1"))]
+    pub assoc1: Option<String>,
+    #[serde(rename(serialize = "ASSOC2"))]
+    pub assoc2: Option<String>,
+    #[serde(rename(serialize = "ASSOC_PROB_BAY"))]
+    pub assoc_prob_bay: Option<f64>,
+    #[serde(rename(serialize = "ASSOC_PROB_LR"))]
+    pub assoc_prob_lr: Option<f64>,
+    #[serde(rename(serialize = "RA_Counterpart"))]
+    pub ra_counterpart: Option<f64>,
+    #[serde(rename(serialize = "DEC_Counterpart"))]
+    pub dec_counterpart: Option<f64>,
+}
+
+impl super::arrow::FromRecordBatch for FourFgl {
+    fn from_batch(
+        batch: &::arrow::array::RecordBatch,
+    ) -> Result<Vec<Self>, super::arrow::ColumnError> {
+        use super::arrow::{f64_column, i64_column, string_column};
+
+        let source_name = string_column(batch, "Source_Name")?;
+        let ra = f64_column(batch, "RAJ2000")?;
+        let dec = f64_column(batch, "DEJ2000")?;
+        let data_release = i64_column(batch, "DataRelease")?;
+        let conf_95_semi_major = f64_column(batch, "Conf_95_SemiMajor")?;
+        let conf_95_semi_minor = f64_column(batch, "Conf_95_SemiMinor")?;
+        let conf_95_pos_ang = f64_column(batch, "Conf_95_PosAng")?;
+        let signif_avg = f64_column(batch, "Signif_Avg")?;
+        let flux1000 = f64_column(batch, "Flux1000")?;
+        let unc_flux1000 = f64_column(batch, "Unc_Flux1000")?;
+        let energy_flux100 = f64_column(batch, "Energy_Flux100")?;
+        let unc_energy_flux100 = f64_column(batch, "Unc_Energy_Flux100")?;
+        let spectrum_type = string_column(batch, "SpectrumType")?;
+        let pl_index = f64_column(batch, "PL_Index")?;
+        let variability_index = f64_column(batch, "Variability_Index")?;
+        let frac_variability = f64_column(batch, "Frac_Variability")?;
+        let flags = i64_column(batch, "Flags")?;
+        let class1 = string_column(batch, "CLASS1")?;
+        let class2 = string_column(batch, "CLASS2")?;
+        let assoc1 = string_column(batch, "ASSOC1")?;
+        let assoc2 = string_column(batch, "ASSOC2")?;
+        let assoc_prob_bay = f64_column(batch, "ASSOC_PROB_BAY")?;
+        let assoc_prob_lr = f64_column(batch, "ASSOC_PROB_LR")?;
+        let ra_counterpart = f64_column(batch, "RA_Counterpart")?;
+        let dec_counterpart = f64_column(batch, "DEC_Counterpart")?;
+
+        let text = |v: &Option<String>| v.clone().filter(|s| !s.is_empty());
+
+        let mut rows = Vec::with_capacity(batch.num_rows());
+        for row in 0..batch.num_rows() {
+            let (Some(source_name), Some(ra), Some(dec)) =
+                (source_name[row].clone(), ra[row], dec[row])
+            else {
+                continue;
+            };
+            rows.push(FourFgl {
+                source_name,
+                ra,
+                dec,
+                data_release: data_release[row],
+                conf_95_semi_major: conf_95_semi_major[row],
+                conf_95_semi_minor: conf_95_semi_minor[row],
+                conf_95_pos_ang: conf_95_pos_ang[row],
+                signif_avg: signif_avg[row],
+                flux1000: flux1000[row],
+                unc_flux1000: unc_flux1000[row],
+                energy_flux100: energy_flux100[row],
+                unc_energy_flux100: unc_energy_flux100[row],
+                spectrum_type: text(&spectrum_type[row]),
+                pl_index: pl_index[row],
+                variability_index: variability_index[row],
+                frac_variability: frac_variability[row],
+                flags: flags[row],
+                class1: text(&class1[row]),
+                class2: text(&class2[row]),
+                assoc1: text(&assoc1[row]),
+                assoc2: text(&assoc2[row]),
+                assoc_prob_bay: assoc_prob_bay[row],
+                assoc_prob_lr: assoc_prob_lr[row],
+                ra_counterpart: ra_counterpart[row],
+                dec_counterpart: dec_counterpart[row],
+            });
+        }
+        Ok(rows)
+    }
+}
+
+impl HasCoordinates for FourFgl {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1619,6 +2076,195 @@ mod tests {
                 one_lsdr9_row(&absent).is_empty(),
                 "a row with no {absent:?} was kept"
             );
+        }
+    }
+
+    fn one_row(ints: &[&str], floats: &[&str], strings: &[&str]) -> ::arrow::array::RecordBatch {
+        use ::arrow::array::{ArrayRef, Float64Array, Int64Array, RecordBatch, StringArray};
+        use ::arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+
+        let mut fields = Vec::new();
+        let mut columns: Vec<ArrayRef> = Vec::new();
+        for name in ints {
+            fields.push(Field::new(*name, DataType::Int64, true));
+            columns.push(Arc::new(Int64Array::from(vec![1])));
+        }
+        for name in floats {
+            fields.push(Field::new(*name, DataType::Float64, true));
+            columns.push(Arc::new(Float64Array::from(vec![1.0])));
+        }
+        for name in strings {
+            fields.push(Field::new(*name, DataType::Utf8, true));
+            columns.push(Arc::new(StringArray::from(vec!["x"])));
+        }
+        RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).expect("valid batch")
+    }
+
+    #[test]
+    fn high_energy_documents_have_every_key_their_crossmatch_projects() {
+        use crate::catalogs::arrow::FromRecordBatch;
+        use mongodb::bson::Document;
+
+        fn first<T: FromRecordBatch + serde::Serialize>(
+            batch: ::arrow::array::RecordBatch,
+        ) -> Document {
+            let rows = T::from_batch(&batch).expect("every column is present");
+            mongodb::bson::to_document(&rows[0]).expect("serializes")
+        }
+
+        let documents = [
+            (
+                "eRASS1_Main",
+                first::<Erass1>(one_row(
+                    &[
+                        "UID",
+                        "FLAG_SP_SNR",
+                        "FLAG_SP_BPS",
+                        "FLAG_SP_SCL",
+                        "FLAG_SP_LGA",
+                        "FLAG_SP_GC_CONS",
+                        "FLAG_OPT",
+                    ],
+                    &[
+                        "RA",
+                        "DEC",
+                        "POS_ERR",
+                        "MJD_MIN",
+                        "MJD_MAX",
+                        "EXT",
+                        "EXT_LIKE",
+                        "DET_LIKE_0",
+                        "ML_RATE_1",
+                        "ML_RATE_ERR_1",
+                        "ML_FLUX_1",
+                        "ML_FLUX_ERR_1",
+                        "ML_RATE_P1",
+                        "ML_RATE_ERR_P1",
+                        "ML_RATE_P2",
+                        "ML_RATE_ERR_P2",
+                        "ML_RATE_P3",
+                        "ML_RATE_ERR_P3",
+                    ],
+                    &["IAUNAME"],
+                )),
+            ),
+            (
+                "5XMM_DR15",
+                first::<FiveXmm>(one_row(
+                    &["SRCID", "N_OBS", "SUM_FLAG", "VAR_FLAG"],
+                    &[
+                        "RA",
+                        "DEC",
+                        "RADEC_ERR",
+                        "MJD_FIRST",
+                        "MJD_LAST",
+                        "EP_FLUX",
+                        "EP_FLUX_ERR",
+                        "EP_DET_ML",
+                        "EP_HR1",
+                        "EP_HR2",
+                        "EP_HR3",
+                        "EP_HR4",
+                        "EXTENT",
+                        "EXTENT_ML",
+                        "FVAR",
+                        "VAR_PROB",
+                        "FRATIO",
+                        "CLASSX_PROB_AGN",
+                        "CLASSX_PROB_STAR",
+                        "CLASSX_PROB_GAL_XRB",
+                        "CLASSX_PROB_GAL_CV",
+                    ],
+                    &["IAUNAME", "CLASSX_CLASS"],
+                )),
+            ),
+            (
+                "2SXPS",
+                first::<TwoSxps>(one_row(
+                    &[
+                        "2SXPS_ID",
+                        "AstromType",
+                        "DetFlag",
+                        "FieldFlag",
+                        "NumObs",
+                        "NumDetObs",
+                    ],
+                    &[
+                        "RA",
+                        "Decl",
+                        "Err90",
+                        "Rate_band0",
+                        "Rate_band0_pos",
+                        "Rate_band0_neg",
+                        "PeakRate_band0",
+                        "HR1",
+                        "HR2",
+                        "PvarPchiSnapshot_band0",
+                        "PvarPchiObsID_band0",
+                        "PowFlux",
+                        "PowFlux_pos",
+                        "PowFlux_neg",
+                    ],
+                    &["IAUName", "FirstDetDate", "LastDetDate"],
+                )),
+            ),
+            (
+                "4FGL_DR4",
+                first::<FourFgl>(one_row(
+                    &["DataRelease", "Flags"],
+                    &[
+                        "RAJ2000",
+                        "DEJ2000",
+                        "Conf_95_SemiMajor",
+                        "Conf_95_SemiMinor",
+                        "Conf_95_PosAng",
+                        "Signif_Avg",
+                        "Flux1000",
+                        "Unc_Flux1000",
+                        "Energy_Flux100",
+                        "Unc_Energy_Flux100",
+                        "PL_Index",
+                        "Variability_Index",
+                        "Frac_Variability",
+                        "ASSOC_PROB_BAY",
+                        "ASSOC_PROB_LR",
+                        "RA_Counterpart",
+                        "DEC_Counterpart",
+                    ],
+                    &[
+                        "Source_Name",
+                        "SpectrumType",
+                        "CLASS1",
+                        "CLASS2",
+                        "ASSOC1",
+                        "ASSOC2",
+                    ],
+                )),
+            ),
+        ];
+
+        let config =
+            crate::catalogs::config_from(concat!(env!("CARGO_MANIFEST_DIR"), "/config.yaml"));
+        for (collection, doc) in &documents {
+            let entries: Vec<_> = config
+                .crossmatch
+                .values()
+                .flatten()
+                .filter(|entry| entry.catalog == *collection)
+                .collect();
+            assert!(
+                !entries.is_empty(),
+                "config.yaml does not crossmatch {collection}"
+            );
+            for entry in entries {
+                for key in entry.projection.keys() {
+                    assert!(
+                        doc.contains_key(key),
+                        "{collection} projects {key}, which its documents do not have"
+                    );
+                }
+            }
         }
     }
 

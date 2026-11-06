@@ -10,6 +10,7 @@
 //! because the contents are what changes. A run's track that shares detections
 //! with a stored one *is* that track, extended.
 
+use crate::utils::db::is_duplicate_key;
 use crate::utils::enums::Survey;
 use crate::utils::heliolinc::MU;
 use crate::utils::linking::{night_at, Detection};
@@ -556,16 +557,6 @@ pub async fn acquire_lock(
     };
     let owner = after.as_ref().and_then(|d| d.get_str("owner").ok());
     Ok((owner == Some(lock.owner.as_str())).then_some(lock))
-}
-
-fn is_duplicate_key(error: &mongodb::error::Error) -> bool {
-    match &*error.kind {
-        mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(e)) => {
-            e.code == 11000
-        }
-        mongodb::error::ErrorKind::Command(e) => e.code == 11000,
-        _ => false,
-    }
 }
 
 /// Extend the lease. False when the lock is no longer this holder's: it

@@ -743,6 +743,15 @@ async fn run_thor(
     result
 }
 
+fn mid_jd(detections: &[Detection]) -> f64 {
+    let (lo, hi) = detections
+        .iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), d| {
+            (lo.min(d.jd), hi.max(d.jd))
+        });
+    (lo + hi) / 2.0
+}
+
 /// The cataloged object each group of detections is, if any, in the order of
 /// `groups`.
 ///
@@ -756,7 +765,7 @@ async fn match_known(
     detections: &[Detection],
     params: &LinkTracksParams,
 ) -> Vec<Option<String>> {
-    let orbits = match crate::utils::mpcorb::load_catalogue(db).await {
+    let orbits = match crate::utils::mpcorb::load_catalogue(db, mid_jd(detections)).await {
         Ok(orbits) => orbits,
         Err(error) => {
             ctx.warn(format!(
@@ -804,9 +813,10 @@ async fn run_identify(
     use crate::utils::mpcorb::{load_catalogue, normalize_ztf_ssnamenr};
 
     let started = std::time::Instant::now();
+    let mid_jd = mid_jd(detections);
     // A read failure part-way through would leave a truncated catalogue, which
     // would silently score as a lower recall rather than as a failure.
-    let orbits = match load_catalogue(db).await {
+    let orbits = match load_catalogue(db, mid_jd).await {
         Ok(orbits) => orbits,
         Err(error) => {
             error!(%error, "reading MPC_orbits failed");
@@ -814,7 +824,6 @@ async fn run_identify(
         }
     };
     let mut epochs: Vec<f64> = orbits.iter().map(|o| o.elements.epoch_jd).collect();
-    let mid_jd = detections.iter().map(|d| d.jd).sum::<f64>() / detections.len() as f64;
     epochs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let median_epoch = epochs.get(epochs.len() / 2).copied().unwrap_or(0.0);
     info!(
