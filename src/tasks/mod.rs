@@ -49,6 +49,7 @@ pub mod migrate_fp_flux;
 pub mod migrate_snr;
 pub mod mpcorb_ingest;
 pub mod prepare_catalog;
+pub mod propagate_orbits;
 pub mod repair_photometry;
 pub mod reprocess_crossmatch;
 pub mod sso_baselines;
@@ -92,6 +93,7 @@ pub enum TaskType {
     CopyCutouts,
     SsoBaselines,
     MpcorbIngest,
+    PropagateOrbits,
     EnrichReprocess,
     PrepareCatalog,
     ExportCatalog,
@@ -109,12 +111,13 @@ pub enum TaskType {
 }
 
 impl TaskType {
-    pub const ALL: [TaskType; 19] = [
+    pub const ALL: [TaskType; 20] = [
         Self::CatalogIngest,
         Self::StreamKowalskiAlerts,
         Self::CopyCutouts,
         Self::SsoBaselines,
         Self::MpcorbIngest,
+        Self::PropagateOrbits,
         Self::EnrichReprocess,
         Self::PrepareCatalog,
         Self::ExportCatalog,
@@ -138,6 +141,7 @@ impl TaskType {
             Self::CopyCutouts => copy_cutouts::TASK_TYPE,
             Self::SsoBaselines => sso_baselines::TASK_TYPE,
             Self::MpcorbIngest => mpcorb_ingest::TASK_TYPE,
+            Self::PropagateOrbits => propagate_orbits::TASK_TYPE,
             Self::EnrichReprocess => enrich_reprocess::TASK_TYPE,
             Self::PrepareCatalog => prepare_catalog::TASK_TYPE,
             Self::ExportCatalog => export_catalog::TASK_TYPE,
@@ -308,6 +312,16 @@ pub const TASKS: &[TaskSpec] = &[
         idempotent: true,
         destructive: false,
         params_schema: || schema_of::<mpcorb_ingest::MpcorbIngestParams>(),
+    },
+    TaskSpec {
+        id: propagate_orbits::TASK_TYPE,
+        title: "Propagate MPC orbits to past epochs",
+        description: "N-body propagation of MPC_orbits to a grid of epochs, so known \
+                      objects are matched on older data. Run it before reprocessing a \
+                      period; drop removes the epochs once done.",
+        idempotent: true,
+        destructive: false,
+        params_schema: || schema_of::<propagate_orbits::PropagateOrbitsParams>(),
     },
     TaskSpec {
         id: enrich_reprocess::TASK_TYPE,
@@ -538,6 +552,12 @@ pub fn validate_params(task_type: &str, params: &serde_json::Value) -> Result<()
                 .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
             parsed.validate_params().map_err(TaskError::InvalidParams)
         }
+        propagate_orbits::TASK_TYPE => {
+            let parsed: propagate_orbits::PropagateOrbitsParams =
+                serde_json::from_value(params.clone())
+                    .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            parsed.validate_params().map_err(TaskError::InvalidParams)
+        }
         enrich_reprocess::TASK_TYPE => {
             let parsed: enrich_reprocess::EnrichReprocessParams =
                 serde_json::from_value(params.clone())
@@ -657,6 +677,7 @@ pub fn single_flight_key(
         // One refresh at a time: two would download the same file and race on
         // the staging collection.
         mpcorb_ingest::TASK_TYPE => Some(doc! {}),
+        propagate_orbits::TASK_TYPE => Some(doc! {}),
         // Keyed by survey: two reprocesses of one survey would contend for the
         // same enrichment workers and GPU, but ZTF and LSST are independent.
         enrich_reprocess::TASK_TYPE => Some(
@@ -824,6 +845,11 @@ pub async fn dispatch(
             let params = mpcorb_ingest::MpcorbIngestParams::deserialize(params)
                 .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
             mpcorb_ingest::run(ctx, params).await
+        }
+        propagate_orbits::TASK_TYPE => {
+            let params = propagate_orbits::PropagateOrbitsParams::deserialize(params)
+                .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            propagate_orbits::run(ctx, params).await
         }
         enrich_reprocess::TASK_TYPE => {
             let params = enrich_reprocess::EnrichReprocessParams::deserialize(params)
