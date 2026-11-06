@@ -219,8 +219,9 @@ async fn run_night(db: &mongodb::Database, cfg: &LinkerConfig, night: i64, stop:
     // object IPAC missed would be stored as a discovery candidate, so a run
     // that should match and cannot does not store anything. Read before the
     // window, so a night waiting on a missing catalog costs one quick read.
+    let (jd_start, span) = window(night, cfg.window_nights);
     let catalog = if cfg.match_known && (cfg.link || cfg.thor || cfg.fast) {
-        match load_catalogue(db).await {
+        match load_catalogue(db, jd_start + span / 2.0).await {
             Ok(orbits) if orbits.is_empty() => {
                 error!("MPC_orbits is empty, so tracks cannot be matched; run mpcorb_ingest");
                 return false;
@@ -235,7 +236,6 @@ async fn run_night(db: &mongodb::Database, cfg: &LinkerConfig, night: i64, stop:
         None
     };
 
-    let (jd_start, span) = window(night, cfg.window_nights);
     info!(
         night,
         jd_start, span, "searching the window ending with this night"

@@ -10,7 +10,7 @@ use crate::utils::lightcurves::{
     EpisodeHistory, PerBandProperties, PhotometryMag, EPISODE_GAP_DAYS, SNT,
 };
 use crate::utils::linking::{night_start, Detection};
-use crate::utils::mpcorb::load_catalogue;
+use crate::utils::mpcorb::{load_catalogue, MAX_EPOCH_GAP_DAYS};
 use crate::utils::o11y::logging::{log_error, WARN};
 use crate::utils::sso_geometry::{geometry_at, DECAM};
 use apache_avro_derive::AvroSchema;
@@ -23,6 +23,7 @@ use tracing::{instrument, warn};
 
 const SSO_MATCH_RADIUS_ARCSEC: f64 = 8.0;
 const CATALOGUE_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+const CATALOGUE_MIN_RELOAD: Duration = Duration::from_secs(10 * 60);
 
 pub fn create_decam_alert_pipeline() -> Vec<Document> {
     vec![
@@ -279,6 +280,7 @@ pub struct DecamAlertProperties {
 struct KnownObjects {
     orbits: Vec<OrbitEntry>,
     loaded: Instant,
+    jd: f64,
     paths: Option<(i64, NightPaths)>,
 }
 
@@ -422,8 +424,13 @@ impl EnrichmentWorker for DecamEnrichmentWorker {
 
         let now = flare::Time::now().to_jd();
 
+        let (first, last) = alerts
+            .iter()
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), a| {
+                (lo.min(a.candidate.jd), hi.max(a.candidate.jd))
+            });
         let mut associations = self
-            .known_objects()
+            .known_objects((first + last) / 2.0)
             .await
             .map(|known| known_associations(known, &alerts));
 
@@ -463,17 +470,18 @@ impl EnrichmentWorker for DecamEnrichmentWorker {
 }
 
 impl DecamEnrichmentWorker {
-    async fn known_objects(&mut self) -> Option<&mut KnownObjects> {
-        if self
-            .known
-            .as_ref()
-            .is_none_or(|k| k.loaded.elapsed() >= CATALOGUE_MAX_AGE)
-        {
-            match load_catalogue(&self.db).await {
+    async fn known_objects(&mut self, jd: f64) -> Option<&mut KnownObjects> {
+        if self.known.as_ref().is_none_or(|k| {
+            k.loaded.elapsed() >= CATALOGUE_MAX_AGE
+                || ((k.jd - jd).abs() > MAX_EPOCH_GAP_DAYS
+                    && k.loaded.elapsed() >= CATALOGUE_MIN_RELOAD)
+        }) {
+            match load_catalogue(&self.db, jd).await {
                 Ok(orbits) if !orbits.is_empty() => {
                     self.known = Some(KnownObjects {
                         orbits,
                         loaded: Instant::now(),
+                        jd,
                         paths: None,
                     });
                 }
