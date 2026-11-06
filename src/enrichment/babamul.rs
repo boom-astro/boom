@@ -23,7 +23,7 @@ use tokio::sync::Mutex;
 use tracing::instrument;
 
 const ZTF_HOSTED_SG_SCORE_THRESH: f32 = 0.5;
-const LSST_MIN_RELIABILITY: f32 = 0.0; // TODO: Temporary value; update once an appropriate LSST reliability threshold is determined with the new reliability model
+const LSST_MIN_RELIABILITY: f32 = 0.5;
 const ZTF_MIN_DRB: f32 = 0.2;
 
 #[serdavro]
