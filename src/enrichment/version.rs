@@ -104,6 +104,15 @@ pub const GPU_DERIVATIONS: &[(&str, u32)] = &[("villar_fit", 1)];
 #[cfg(not(feature = "gpu"))]
 pub const GPU_DERIVATIONS: &[(&str, u32)] = &[];
 
+/// Raise an entry only when old values are wrong; an unstamped alert counts as version 0.
+pub const STALE_BELOW: &[(&str, u32)] = &[];
+
+fn is_stale(derivations: &BTreeMap<String, u32>, floors: &[(&str, u32)]) -> bool {
+    floors
+        .iter()
+        .any(|(name, floor)| derivations.get(*name).copied().unwrap_or(0) < *floor)
+}
+
 /// A model as recorded on a set.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelIdentity {
@@ -344,7 +353,7 @@ pub struct DriftStatus {
     /// Sets seen on alerts that are neither current nor accepted.
     pub stale_sets: Vec<StaleSet>,
     pub accepted_sets: Vec<i64>,
-    /// Whether some alerts predate stamping and so cannot be shown to be current.
+    /// Whether some alerts predate stamping while [`STALE_BELOW`] makes them stale.
     pub has_unstamped: bool,
     /// Drift query timed out (index still building): an empty `stale_sets` proves nothing.
     pub drift_unknown: bool,
@@ -387,33 +396,64 @@ pub async fn current_set_id(
         .and_then(|d| d.get_i64("set_id").ok()))
 }
 
-/// The current set plus those accepted against it; acceptances lapse when it moves on.
+/// The current set, those accepted against it, and those not below [`STALE_BELOW`].
 pub async fn acceptable_set_ids(
     db: &mongodb::Database,
     survey: &str,
     current: i64,
 ) -> Result<Vec<i64>, VersionError> {
+    acceptable_set_ids_with(db, survey, current, STALE_BELOW).await
+}
+
+async fn acceptable_set_ids_with(
+    db: &mongodb::Database,
+    survey: &str,
+    current: i64,
+    floors: &[(&str, u32)],
+) -> Result<Vec<i64>, VersionError> {
     use futures::TryStreamExt;
     use mongodb::bson::doc;
 
-    let accepted: Vec<EnrichmentSet> = db
+    let sets: Vec<EnrichmentSet> = db
         .collection::<EnrichmentSet>(SETS_COLLECTION)
-        .find(doc! { "survey": survey, "accepted.accepted_against": current })
+        .find(doc! { "survey": survey })
         .await?
         .try_collect()
         .await?;
 
-    let mut ids: Vec<i64> = accepted.into_iter().map(|s| s.id).collect();
+    let mut ids: Vec<i64> = sets
+        .into_iter()
+        .filter(|s| {
+            s.accepted
+                .as_ref()
+                .is_some_and(|a| a.accepted_against == current)
+                || !is_stale(&s.derivations, floors)
+        })
+        .map(|s| s.id)
+        .collect();
     ids.push(current);
     ids.sort_unstable();
+    ids.dedup();
     Ok(ids)
+}
+
+fn unstamped_are_stale() -> bool {
+    is_stale(&BTreeMap::new(), STALE_BELOW)
 }
 
 /// The query for alerts that need re-enriching.
 pub fn stale_filter(acceptable: &[i64]) -> mongodb::bson::Document {
+    stale_filter_with(acceptable, unstamped_are_stale())
+}
+
+fn stale_filter_with(acceptable: &[i64], unstamped_stale: bool) -> mongodb::bson::Document {
     use mongodb::bson::doc;
-    // `$nin` also matches alerts with no `enrichment_set`, i.e. enriched before stamping.
-    doc! { "enrichment_set": { "$nin": acceptable } }
+    if unstamped_stale {
+        // `$nin` also matches alerts with no `enrichment_set`, i.e. enriched before stamping.
+        doc! { "enrichment_set": { "$nin": acceptable } }
+    } else {
+        doc! { "enrichment_set": { "$exists": true, "$nin": acceptable } }
+    }
 }
 
 /// Whether the distinct in [`drift_status`] can be trusted: it needs the
@@ -525,7 +565,7 @@ pub async fn drift_status(
                 stale_sets.push(StaleSet { id, changed });
             }
             Some(_) => {}
-            None => has_unstamped = true,
+            None => has_unstamped = unstamped_are_stale(),
         }
     }
     stale_sets.sort_by_key(|s| s.id);
@@ -886,11 +926,26 @@ mod tests {
     }
 
     #[test]
-    fn the_stale_filter_catches_unstamped_alerts() {
-        let filter = stale_filter(&[7]);
+    fn the_stale_filter_catches_unstamped_alerts_only_when_they_are_stale() {
         assert_eq!(
-            filter,
+            stale_filter_with(&[7], true),
             mongodb::bson::doc! { "enrichment_set": { "$nin": [7i64] } }
+        );
+        assert_eq!(
+            stale_filter_with(&[7], false),
+            mongodb::bson::doc! { "enrichment_set": { "$exists": true, "$nin": [7i64] } }
+        );
+    }
+
+    #[test]
+    fn only_a_derivation_below_its_floor_is_stale() {
+        let set: BTreeMap<String, u32> = [("photstats".to_string(), 2)].into_iter().collect();
+        assert!(!is_stale(&set, &[]));
+        assert!(!is_stale(&set, &[("photstats", 2)]));
+        assert!(is_stale(&set, &[("photstats", 3)]));
+        assert!(
+            is_stale(&set, &[("variability", 1)]),
+            "a missing derivation is version 0"
         );
     }
 
@@ -1014,11 +1069,14 @@ mod tests {
         )
         .await
         .expect("interned");
+        const FLOORS: &[(&str, u32)] = &[("photstats", 100)];
 
         assert_eq!(
-            acceptable_set_ids(&db, &survey, current.id).await.unwrap(),
+            acceptable_set_ids_with(&db, &survey, current.id, FLOORS)
+                .await
+                .unwrap(),
             vec![current.id],
-            "nothing is acceptable but the current set until someone says so"
+            "nothing below a floor is acceptable but the current set until someone says so"
         );
 
         accept_set(
@@ -1032,7 +1090,9 @@ mod tests {
         .await
         .expect("accepted");
 
-        let mut acceptable = acceptable_set_ids(&db, &survey, current.id).await.unwrap();
+        let mut acceptable = acceptable_set_ids_with(&db, &survey, current.id, FLOORS)
+            .await
+            .unwrap();
         acceptable.sort_unstable();
         let mut expected = vec![current.id, older.id];
         expected.sort_unstable();
@@ -1055,7 +1115,9 @@ mod tests {
             .await
             .expect("withdrawn");
         assert_eq!(
-            acceptable_set_ids(&db, &survey, current.id).await.unwrap(),
+            acceptable_set_ids_with(&db, &survey, current.id, FLOORS)
+                .await
+                .unwrap(),
             vec![current.id]
         );
 
@@ -1095,9 +1157,11 @@ mod tests {
         .expect("accepted");
 
         let moved_on = current.id + 1000;
-        assert_eq!(
-            acceptable_set_ids(&db, &survey, moved_on).await.unwrap(),
-            vec![moved_on],
+        let acceptable = acceptable_set_ids_with(&db, &survey, moved_on, &[("photstats", 100)])
+            .await
+            .unwrap();
+        assert!(
+            !acceptable.contains(&older.id),
             "the acceptance was scoped to the set it was made against"
         );
 
