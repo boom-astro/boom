@@ -1016,6 +1016,7 @@ where
     let dia_sources = <Vec<DiaSource> as Deserialize>::deserialize(deserializer)?;
     let candidates = dia_sources
         .into_iter()
+        .filter(|dia_source| dia_source.psf_flux.is_none_or(f32::is_finite))
         .map(LsstPrvCandidate::try_from)
         .collect::<Result<Vec<LsstPrvCandidate>, AlertError>>()
         .map_err(serde::de::Error::custom)?;
