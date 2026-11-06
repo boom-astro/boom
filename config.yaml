@@ -318,6 +318,7 @@ linker:
   fast_live_every_minutes: 0 # also rerun the fast pass on the night in progress, 0 is off
   fast_single_night: true # also store a night's lone fast tracklets scoring fast_min_neo_score or more
   fast_min_neo_score: 90.0 # digest2 NEO score, 0 to 100
+  results_filter_id: "" # filter publishing new unknown ZTF tracks, empty is off
 tns:
   base_url: "https://www.wis-tns.org"
   bot_id: "" # BOOM_TNS__BOT_ID, BOOM_TNS__BOT_NAME, BOOM_TNS__API_KEY; nothing is scheduled without all three
