@@ -28,11 +28,6 @@ fn is_max_time_expired(error: &mongodb::error::Error) -> bool {
 /// Interned enrichment sets, one row per distinct combination ever run.
 pub const SETS_COLLECTION: &str = "enrichment_sets";
 
-const COUNTERS_COLLECTION: &str = "enrichment_set_counters";
-
-/// Global, not per survey, because set `_id`s are unique across surveys.
-const COUNTER_ID: &str = "enrichment_set";
-
 /// Set published by each survey's workers; the API reads it, since resolving would intern rows.
 pub const CURRENT_COLLECTION: &str = "enrichment_current";
 
@@ -147,8 +142,6 @@ pub enum VersionError {
     },
     #[error(transparent)]
     Mongo(#[from] mongodb::error::Error),
-    #[error("failed to allocate an enrichment set id")]
-    IdAllocationFailed,
     #[error("failed to intern the enrichment set: {0}")]
     InternFailed(String),
     #[error("no enrichment set {set_id} for survey {survey}")]
@@ -260,23 +253,15 @@ async fn intern(
         return Ok(existing);
     }
 
-    // The counter can lag behind existing ids (e.g. a restored backup); each retry advances it.
-    const ATTEMPTS: usize = 5;
+    const ATTEMPTS: usize = 20;
     let mut last_error = None;
 
     for _ in 0..ATTEMPTS {
-        let counter = db
-            .collection::<mongodb::bson::Document>(COUNTERS_COLLECTION)
-            .find_one_and_update(
-                doc! { "_id": COUNTER_ID },
-                doc! { "$inc": { "next_id": 1i64 } },
-            )
-            .upsert(true)
-            .return_document(mongodb::options::ReturnDocument::After)
-            .await?;
-        let id = counter
-            .and_then(|d| d.get_i64("next_id").ok())
-            .ok_or(VersionError::IdAllocationFailed)?;
+        let id = sets
+            .find_one(doc! {})
+            .sort(doc! { "_id": -1 })
+            .await?
+            .map_or(1, |last| last.id + 1);
 
         let set = EnrichmentSet {
             id,
