@@ -1,3 +1,4 @@
+#![recursion_limit = "512"] // for large bson docs and CutoutStorage's s3 client
 //! Run moving-object discovery once each ZTF night is over.
 //!
 //! For the night just finished, the linker reads the last
