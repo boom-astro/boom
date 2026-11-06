@@ -1,3 +1,4 @@
+#![recursion_limit = "512"] // for large bson docs and CutoutStorage's s3 client
 //! Run moving-object discovery once each ZTF night is over.
 //!
 //! For the night just finished, the linker reads the last
@@ -5,8 +6,8 @@
 //! across nights, recovers objects seen once a night with THOR over the most
 //! recent `linker.thor_window_nights`, matches what it finds to the MPC
 //! catalog so a known object is stored as a recovery, and stores the tracks.
-//! Nothing is sent anywhere else: this is the loop that shows how fast and how
-//! complete the search is before anything depends on it.
+//! With `linker.results_filter_id`, each run then publishes the new and
+//! extended unknown tracks on `ZTF_alerts_results`.
 //!
 //! It then links the detections IPAC already identified over the most recent
 //! `linker.recall_window_nights`, stores nothing, and logs how many of those
@@ -34,6 +35,7 @@ use boom::utils::linking::{night_of, Detection, Tracklet, TrackletConfig};
 use boom::utils::mpcorb::load_catalogue;
 use boom::utils::o11y::logging::build_subscriber;
 use boom::utils::sso_geometry::ZTF;
+use boom::utils::track_results::TrackPublisher;
 use boom::utils::tracks::{lock_is_held, COUNTERS_COLLECTION};
 use clap::Parser;
 use mongodb::bson::{doc, Document};
@@ -521,6 +523,16 @@ async fn run_night(db: &mongodb::Database, cfg: &LinkerConfig, night: i64, stop:
     done
 }
 
+async fn publish(db: &mongodb::Database, publisher: Option<&TrackPublisher>) {
+    let Some(publisher) = publisher else {
+        return;
+    };
+    match publisher.publish(db).await {
+        Ok(published) => info!(published, "published new and extended unknown tracks"),
+        Err(error) => error!(%error, "could not publish tracks"),
+    }
+}
+
 /// Request `stop` and wake `wake` on SIGTERM or Ctrl-C.
 ///
 /// Listening from the start, not only while waiting, so a shutdown mid-run is
@@ -573,6 +585,15 @@ async fn main() {
     let config_path = cli.config.unwrap_or_else(|| "config.yaml".to_string());
     let config = AppConfig::from_path(&config_path).expect("failed to load config");
     let db = config.build_db().await.expect("failed to connect to mongo");
+    let publisher = match TrackPublisher::new(&config).await {
+        Ok(publisher) if config.linker.persist => publisher,
+        Ok(_) => None,
+        Err(error) => {
+            error!(%error, "could not set up publishing tracks");
+            None
+        }
+    };
+    let publisher = publisher.as_ref();
     let cfg = config.linker;
     if let Err(problem) = cfg.validate() {
         error!(problem, "the linker section of the config is invalid");
@@ -582,11 +603,14 @@ async fn main() {
 
     if let Some(night) = cli.night {
         run_night(&db, &cfg, night, &stop).await;
+        publish(&db, publisher).await;
         return;
     }
     if cli.once {
         let night = last_finished_night(now_jd(), cfg.run_after_utc_hour);
-        if run_night(&db, &cfg, night, &stop).await {
+        let finished = run_night(&db, &cfg, night, &stop).await;
+        publish(&db, publisher).await;
+        if finished {
             record_night(&db, night).await;
         }
         return;
@@ -609,7 +633,9 @@ async fn main() {
                     .map(|count| (night + 1, count));
                 if seen.is_some_and(|(_, count)| count > 0) && seen != live_seen {
                     info!(night = night + 1, "fast pass over the night in progress");
-                    if run_night(&db, &live_cfg, night + 1, &stop).await {
+                    let finished = run_night(&db, &live_cfg, night + 1, &stop).await;
+                    publish(&db, publisher).await;
+                    if finished {
                         live_seen = seen;
                     }
                 }
@@ -623,11 +649,14 @@ async fn main() {
             // A minute late, so the night is over by any clock's reckoning.
             let left = Duration::from_secs_f64(days * 86_400.0 + 60.0);
             live_every.map_or(left, |every| every.min(left))
-        } else if run_night(&db, &cfg, night, &stop).await {
-            record_night(&db, night).await;
-            done = Some(night);
-            continue;
         } else {
+            let finished = run_night(&db, &cfg, night, &stop).await;
+            publish(&db, publisher).await;
+            if finished {
+                record_night(&db, night).await;
+                done = Some(night);
+                continue;
+            }
             info!(
                 night,
                 retry_minutes = RETRY_AFTER.as_secs() / 60,
