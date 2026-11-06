@@ -835,7 +835,7 @@ mod tests {
             !status.drift_unknown,
             "the index is there, so drift is known"
         );
-        assert!(status.has_unstamped, "the unstamped alert must be reported");
+        assert_eq!(status.has_unstamped, unstamped_are_stale());
         assert_eq!(
             status.current.map(|c| c.id),
             Some(set.id),
