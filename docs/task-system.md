@@ -202,6 +202,7 @@ later.
 | `repair_photometry` | Rewrite `alerts_aux` timeseries arrays that are out of order, duplicated, or carry a non-numeric `jd`. Deletes the offending points — run with `dry_run` first. |
 | `enrich_reprocess` | Select alerts, queue them, and re-run enrichment over them. See [alert-processing.md](./alert-processing.md). |
 | `mpcorb_ingest` | Re-download MPC orbital elements and swap them into `MPC_orbits`. |
+| `propagate_orbits` | N-body propagate `MPC_orbits` to a grid of past epochs, so known objects are matched on older data. `drop` removes them. |
 | `sso_baselines` | Fit solar system phase-curve baselines from ZTF detections. |
 | `copy_cutouts` | Copy a survey's cutout collection between MongoDB deployments. |
 | `stream_kowalski_alerts` | Back-fill BOOM by streaming a Kowalski deployment's alerts. |
