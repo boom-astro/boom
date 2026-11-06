@@ -87,6 +87,7 @@ async fn refresh_mpc_orbits_if_due(db: &Database) {
             orbits = count.unwrap_or(0),
             "MPC_orbits is current"
         );
+        keep_live_epoch(db, false).await;
         return;
     }
     match age {
@@ -106,9 +107,82 @@ async fn refresh_mpc_orbits_if_due(db: &Database) {
                 "MPC_orbits refreshed"
             );
             record_mpc_orbits_state(Some(0.0), Some(report.parsed));
+            keep_live_epoch(db, true).await;
         }
         // The previous catalogue survives a failure, so geometry keeps working.
         Err(error) => log_error!(WARN, error, "failed to refresh MPC_orbits"),
+    }
+}
+
+const LIVE_EPOCH_LEAD_DAYS: f64 = 7.0;
+const LIVE_EPOCH_KEEP_DAYS: f64 = 30.0;
+const LIVE_EPOCH_THREADS: usize = 4;
+
+async fn keep_live_epoch(db: &Database, refreshed: bool) {
+    let now_jd = flare::Time::now().to_jd();
+    let current = match mpcorb::stored_epochs(
+        db,
+        now_jd - LIVE_EPOCH_LEAD_DAYS,
+        now_jd + LIVE_EPOCH_LEAD_DAYS,
+        true,
+    )
+    .await
+    {
+        Ok(epochs) => epochs.into_iter().max_by(f64::total_cmp),
+        Err(error) => {
+            log_error!(WARN, error, "could not read the live propagation epochs");
+            return;
+        }
+    };
+    if current.is_some() && !refreshed {
+        return;
+    }
+    let orbits = match mpcorb::load_mpcorb(db).await {
+        Ok(orbits) => orbits,
+        Err(error) => {
+            log_error!(WARN, error, "could not read MPC_orbits to propagate");
+            return;
+        }
+    };
+    let (epoch, orbits) = match current {
+        Some(epoch) => match mpcorb::stale_orbits(db, orbits, epoch).await {
+            Ok(stale) => (epoch, stale),
+            Err(error) => {
+                log_error!(WARN, error, "could not read the live propagation epoch");
+                return;
+            }
+        },
+        None => ((now_jd + LIVE_EPOCH_LEAD_DAYS).floor() + 0.5, orbits),
+    };
+    info!(
+        epoch,
+        orbits = orbits.len(),
+        "propagating MPC_orbits to the live epoch"
+    );
+    match mpcorb::propagate_to_epochs(
+        db,
+        &orbits,
+        &[epoch],
+        true,
+        LIVE_EPOCH_THREADS,
+        |_, _| async { true },
+    )
+    .await
+    {
+        Ok(written) => info!(epoch, written, "live epoch propagated"),
+        Err(error) => {
+            log_error!(WARN, error, "N-body propagation to the live epoch failed");
+            return;
+        }
+    }
+    match mpcorb::stored_epochs(db, 0.0, now_jd - LIVE_EPOCH_KEEP_DAYS, true).await {
+        Ok(old) if !old.is_empty() => {
+            if let Err(error) = mpcorb::drop_epochs(db, &old).await {
+                log_error!(WARN, error, "could not drop old live epochs");
+            }
+        }
+        Ok(_) => {}
+        Err(error) => log_error!(WARN, error, "could not list old live epochs"),
     }
 }
 
