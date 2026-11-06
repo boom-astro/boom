@@ -1448,6 +1448,21 @@ impl AlertWorker for LsstAlertWorker {
                 .await
                 .inspect_err(as_error!())?,
         );
+        if let Some(id) = survey_matches
+            .as_ref()
+            .and_then(|a| a.ztf.first())
+            .filter(|_| ss_object_id.is_none())
+        {
+            self.link_counterpart(
+                &self.ztf_alert_aux_collection,
+                id,
+                &object_id,
+                "LSST",
+                "DECAM",
+            )
+            .await
+            .inspect_err(as_error!())?;
+        }
 
         // The designation is only known once a diaSource is linked to an ssObject; keep it
         // current independent of whichever branch below runs, and regardless of any ZTF
