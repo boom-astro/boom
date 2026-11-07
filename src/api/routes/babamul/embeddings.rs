@@ -5,7 +5,7 @@
 //! are public (`BABAMUL_PUBLIC_ROUTES`), like the `/dashboard` stats.
 
 use crate::api::routes::embeddings::{
-    embeddings_count_response, similar_objects_response, SimilarObjectsQuery,
+    embeddings_count_response, similar_objects_response, SimilarObject, SimilarObjectsQuery,
 };
 use crate::milvus::MilvusClient;
 
@@ -23,7 +23,7 @@ use mongodb::Database;
     path = "/babamul/similarity/objects",
     request_body = SimilarObjectsQuery,
     responses(
-        (status = 200, description = "Nearest neighbors, best-first", body = serde_json::Value),
+        (status = 200, description = "Nearest neighbors, best-first", body = Vec<SimilarObject>),
         (status = 401, description = "Unauthorized"),
         (status = 404, description = "No embedding stored for the object"),
         (status = 500, description = "Milvus unavailable or search failed"),
