@@ -321,16 +321,7 @@ impl DecamAlertWorker {
             (&aliases.lsst, &self.lsst_alert_aux_collection, "ZTF"),
         ] {
             if let Some(id) = ids.first() {
-                let decam = doc! { "$literal": [object_id] };
-                collection
-                    .update_one(
-                        doc! { "_id": id, "aliases.DECAM.0": { "$exists": false } },
-                        vec![doc! { "$set": { "aliases": { "$cond": [
-                            { "$eq": [{ "$type": "$aliases" }, "object"] },
-                            { "$mergeObjects": ["$aliases", { "DECAM": &decam }] },
-                            { other_survey: [], "DECAM": &decam },
-                        ] } } }],
-                    )
+                self.link_counterpart(collection, id, object_id, "DECAM", other_survey)
                     .await?;
             }
         }

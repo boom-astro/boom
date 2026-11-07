@@ -925,6 +925,24 @@ impl ZtfAlertWorker {
                 .await
                 .inspect_err(as_error!())?,
         );
+        let is_sso = prv_candidates
+            .last()
+            .is_some_and(|p| p.prv_candidate.ssnamenr.is_some());
+        if let Some(id) = survey_matches
+            .as_ref()
+            .and_then(|a| a.lsst.first())
+            .filter(|_| !is_sso)
+        {
+            self.link_counterpart(
+                &self.lsst_alert_aux_collection,
+                id,
+                object_id,
+                "ZTF",
+                "DECAM",
+            )
+            .await
+            .inspect_err(as_error!())?;
+        }
 
         let existing_alert_aux = self.get_existing_aux(object_id).await?;
 

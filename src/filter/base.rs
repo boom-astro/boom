@@ -791,6 +791,7 @@ pub struct LoadedFilter {
     pub name: String,
     pub permissions: HashMap<Survey, Vec<i32>>,
     pub pipeline: Vec<Document>,
+    pub reads_track: bool,
 }
 
 /// Retrieves an active filter from the database.
@@ -911,6 +912,7 @@ pub async fn build_loaded_filter(
     if let Err(error) = reject_unknown_candidate_fields(&pipeline, survey) {
         warn!(filter_id, %error, "filter references a field the survey does not define");
     }
+    let reads_track = uses_field_in_filter(&pipeline, "track").is_some();
     let mut pipeline =
         build_filter_pipeline(&pipeline, &filter.permissions, &filter.survey).await?;
 
@@ -957,6 +959,7 @@ pub async fn build_loaded_filter(
         name: filter.name.clone(),
         pipeline,
         permissions: filter.permissions,
+        reads_track,
     };
     Ok(loaded)
 }
