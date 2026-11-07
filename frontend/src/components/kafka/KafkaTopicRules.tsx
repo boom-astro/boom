@@ -1,9 +1,25 @@
-import { LSST, ZTF } from "@/lib/utils";
+import { LSST, ZTF } from "@/lib/constants";
 import { Card, CardContent } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
 const AND = () => <span className="text-muted-foreground">AND</span>;
 const OR = () => <span className="text-muted-foreground">OR</span>;
+
+function HostAssociationRule({ survey }: { survey: string }) {
+  return (
+    <div>
+      <h3 className="mb-1 font-semibold text-chart-2">host association</h3>
+      <ul className="text-sm list-disc pl-5">
+        <li><code>properties.hosted == true</code>: <code>hosted</code></li>
+        <li>
+          <code>properties.hosted == false</code>: <code>hostless</code>
+          {survey === LSST && <>, or <code>unknown</code> outside the LSPSC MOC</>}
+        </li>
+      </ul>
+      <p className="text-sm text-muted-foreground mt-1">The rules below apply when <code>properties.hosted</code> is null.</p>
+    </div>
+  );
+}
 
 function LsstRules() {
   return (
@@ -30,6 +46,10 @@ function LsstRules() {
             </li>
           </ul>
         </div>
+
+        <hr className="border-border" />
+
+        <HostAssociationRule survey={LSST} />
 
         <hr className="border-border" />
 
@@ -63,6 +83,7 @@ function LsstRules() {
             <li><code>(ra, dec)</code> falls outside the LSPSC MOC (HEALPix depth&nbsp;11)</li>
           </ul>
         </div>
+
 
         <hr className="border-border" />
 
@@ -141,6 +162,10 @@ function ZtfRules() {
 
         <hr className="border-border" />
 
+        <HostAssociationRule survey={ZTF} />
+
+        <hr className="border-border" />
+
         <div>
           <h3 className="mb-1 font-semibold text-chart-2">hosted</h3>
           <ul className="text-sm list-disc pl-5">
@@ -158,6 +183,7 @@ function ZtfRules() {
             <li>fallback: not <code>stellar</code> and no valid <code>sgscoreN*</code> in the hosted range</li>
           </ul>
         </div>
+
 
         <hr className="border-border" />
 

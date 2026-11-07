@@ -1,5 +1,5 @@
 use crate::{
-    kafka::base::{AlertConsumer, AlertProducer},
+    kafka::base::{subscription_window, AlertConsumer, AlertProducer},
     utils::{
         data::{count_files_in_dir, download_to_file},
         enums::{ProgramId, Survey},
@@ -10,6 +10,7 @@ use tracing::{info, instrument};
 
 const ZTF_DEFAULT_NB_PARTITIONS: usize = 15;
 
+#[derive(Clone)]
 pub struct ZtfAlertConsumer {
     output_queue: String,
     program_ids: Vec<ProgramId>,
@@ -18,7 +19,11 @@ pub struct ZtfAlertConsumer {
 impl ZtfAlertConsumer {
     #[instrument]
     pub fn new(output_queue: Option<&str>, program_ids: Option<Vec<ProgramId>>) -> Self {
-        let program_ids = program_ids.unwrap_or_else(|| vec![ProgramId::Public]);
+        // An empty selection would yield no topics at all, so it falls back to
+        // the public program the same way an unset one does.
+        let program_ids = program_ids
+            .filter(|ids| !ids.is_empty())
+            .unwrap_or_else(|| vec![ProgramId::Public]);
         let output_queue = output_queue
             .unwrap_or("ZTF_alerts_packets_queue")
             .to_string();
@@ -39,23 +44,20 @@ impl AlertConsumer for ZtfAlertConsumer {
             .map(|program_id| format!("ztf_{}_programid{}", date.format("%Y%m%d"), program_id))
             .collect()
     }
-    fn topic_patterns(&self) -> Vec<String> {
-        // Regex matching any date for the selected program id(s), e.g.
-        // ^ztf_[0-9]+_programid(1|2)$ — librdkafka auto-joins new daily topics.
-        // NB: librdkafka's matcher is POSIX/Thompson-NFA, so only basic
-        // constructs are used (no `\d`, no `{n}` bounded repetition).
-        let ids = if self.program_ids.is_empty() {
-            // Empty selection would otherwise yield `programid()`, matching
-            // nothing; fall back to any program id.
-            "[0-9]+".to_string()
-        } else {
-            self.program_ids
-                .iter()
-                .map(|program_id| program_id.to_string())
-                .collect::<Vec<_>>()
-                .join("|")
-        };
-        vec![format!(r"^ztf_[0-9]+_programid({})$", ids)]
+    fn subscription_topics(&self, timestamp: i64, window_days: u64) -> Vec<String> {
+        // One concrete topic per (date, program id) over the rollover window.
+        // Not a `^ztf_[0-9]+_programid(…)$` regex: librdkafka expands a pattern
+        // against every topic the cluster advertises, and IPAC keeps advertising
+        // topic names for nights whose partitions it has long since expired, so
+        // the pattern grows an assignment of dead partitions without bound.
+        subscription_window(timestamp, window_days)
+            .iter()
+            .flat_map(|date| {
+                self.program_ids.iter().map(move |program_id| {
+                    format!("ztf_{}_programid{}", date.format("%Y%m%d"), program_id)
+                })
+            })
+            .collect()
     }
     fn output_queue(&self) -> String {
         self.output_queue.clone()
@@ -74,6 +76,7 @@ pub struct ZtfAlertProducer {
     server_url: String,
     verbose: bool,
     working_dir: String,
+    archive_base_url: Option<String>,
 }
 
 impl ZtfAlertProducer {
@@ -109,12 +112,22 @@ impl ZtfAlertProducer {
             server_url: server_url.to_string(),
             verbose,
             working_dir: ".".to_string(),
+            archive_base_url: None,
         }
     }
 
     pub fn with_working_dir(self, working_dir: &str) -> Self {
         Self {
             working_dir: working_dir.to_string(),
+            ..self
+        }
+    }
+
+    /// Fetch from somewhere other than ztf.uw.edu. The file name is unchanged,
+    /// so a mirror need only serve `ztf_<program>_<date>.tar.gz` at this prefix.
+    pub fn with_archive_base_url(self, archive_base_url: &str) -> Self {
+        Self {
+            archive_base_url: Some(archive_base_url.to_string()),
             ..self
         }
     }
@@ -161,7 +174,7 @@ impl AlertProducer for ZtfAlertProducer {
             date_str, self.program_id
         );
 
-        let (file_name, base_url) = match self.program_id {
+        let (file_name, default_base_url) = match self.program_id {
             ProgramId::Public => (
                 format!("ztf_public_{}.tar.gz", date_str),
                 "https://ztf.uw.edu/alerts/public/".to_string(),
@@ -172,6 +185,7 @@ impl AlertProducer for ZtfAlertProducer {
             ),
             _ => return Err("Unsupported program ID for ZTF alerts".into()),
         };
+        let base_url = self.archive_base_url.clone().unwrap_or(default_base_url);
 
         let data_folder = self.data_directory();
         std::fs::create_dir_all(&data_folder)?;
@@ -187,7 +201,7 @@ impl AlertProducer for ZtfAlertProducer {
 
         // use download_to_file function to download the file
         match download_to_file(
-            &mut output_temp_file,
+            output_temp_file.as_file_mut(),
             &format!("{}{}", base_url, file_name),
             self.partnership_archive_username.as_deref(),
             self.partnership_archive_password.as_deref(),

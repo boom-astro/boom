@@ -1,12 +1,13 @@
 use crate::utils::{
     cutouts::{CutoutCache, CutoutStorage},
     enums::Survey,
+    host::HostGalaxyConfig,
     o11y::logging::as_error,
 };
 use chrono::NaiveDate;
-use config::{Config, File, Value};
+use config::{Config, File, Value, ValueKind};
 use dotenvy;
-use mongodb::bson::doc;
+use mongodb::bson::{doc, Document};
 use mongodb::Database;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -14,7 +15,8 @@ use std::sync::OnceLock;
 use std::{collections::HashMap, path::Path};
 use tracing::{debug, error, info, instrument, warn};
 
-const DEFAULT_CONFIG_PATH: &str = "config.yaml";
+/// Where config is loaded from when nothing names a path.
+pub const DEFAULT_CONFIG_PATH: &str = "config.yaml";
 
 static HASHED_SECRET_KEY: OnceLock<[u8; 32]> = OnceLock::new();
 
@@ -34,6 +36,8 @@ pub enum BoomConfigError {
     InvalidSecretError(String),
     #[error("cutout storage error: {0}")]
     CutoutStorageError(#[from] crate::utils::cutouts::CutoutStorageError),
+    #[error("invalid crossmatch config: {0}")]
+    UnknownCrossmatchCatalog(String),
 }
 
 /// Load environment variables from a .env file if it exists.
@@ -45,8 +49,7 @@ pub enum BoomConfigError {
 /// 2. .env in the parent directory (useful when running from subdirs)
 /// 3. If none found, continues without error (env vars may be set by system)
 pub fn load_dotenv() {
-    // Try current directory first
-    if std::path::Path::new(".env").exists() {
+    if Path::new(".env").exists() {
         match dotenvy::dotenv() {
             Ok(_) => debug!("Loaded environment variables from .env file"),
             Err(e) => warn!("Found .env file but failed to load it: {}", e),
@@ -54,8 +57,7 @@ pub fn load_dotenv() {
         return;
     }
 
-    // Try parent directory (useful when running from subdirectories like api/)
-    if std::path::Path::new("../.env").exists() {
+    if Path::new("../.env").exists() {
         match dotenvy::from_path("../.env") {
             Ok(_) => debug!("Loaded environment variables from ../.env file"),
             Err(e) => warn!("Found ../.env file but failed to load it: {}", e),
@@ -63,7 +65,6 @@ pub fn load_dotenv() {
         return;
     }
 
-    // No .env file found - this is fine, environment variables may be set by the system
     info!("No .env file found, using system environment variables only");
 }
 
@@ -82,42 +83,94 @@ pub fn load_raw_config(filepath: &str) -> Result<Config, BoomConfigError> {
         .add_source(
             config::Environment::with_prefix("boom")
                 .prefix_separator("_")
-                .separator("__"),
+                .separator("__")
+                // Compose and .env.example pass unset variables through as
+                // empty strings; without this they would wipe out the
+                // config.yaml defaults rather than leave them alone.
+                .ignore_empty(true),
         )
+        .add_source(env_source())
         .build()?;
 
     Ok(conf)
 }
 
-#[instrument(skip_all, err)]
-async fn _build_db(db_conf: &DatabaseConfig) -> Result<mongodb::Database, BoomConfigError> {
-    let prefix = match db_conf.srv {
-        true => "mongodb+srv://",
-        false => "mongodb://",
-    };
+/// Accept a list as either a YAML sequence or a comma-separated string.
+///
+/// A list has no natural single-variable form, and these lists have to be
+/// settable from the environment -- `babamul.admin_emails` seeds who may
+/// mutate the data, so it belongs with the other deployment settings rather
+/// than only in a file.
+///
+/// Done as a field deserializer rather than by turning on the config crate's
+/// `list_separator`, which only takes effect with `try_parsing` and would then
+/// coerce *every* env value that looks numeric into an integer -- including a
+/// password that happens to be all digits.
+///
+/// Blank entries are dropped, so a trailing comma or a stray space is not a
+/// silent extra "" entry that matches nothing.
+fn comma_separated<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum SequenceOrString {
+        Sequence(Vec<String>),
+        String(String),
+    }
 
-    let mut uri = prefix.to_string();
+    Ok(match SequenceOrString::deserialize(deserializer)? {
+        SequenceOrString::Sequence(items) => items,
+        SequenceOrString::String(value) => value
+            .split(',')
+            .map(|item| item.trim().to_string())
+            .filter(|item| !item.is_empty())
+            .collect(),
+    })
+}
+
+/// The `BOOM_*` environment overlay applied on top of `config.yaml`.
+///
+/// Split out from [`load_raw_config`] so tests can exercise the exact source
+/// production uses while feeding it a fake environment via
+/// [`config::Environment::source`], rather than mutating the process's own.
+fn env_source() -> config::Environment {
+    config::Environment::with_prefix("boom")
+        .prefix_separator("_")
+        .separator("__")
+        // Compose renders every `${VAR:-}` as `VAR=`, blanking the YAML. See AGENTS.md.
+        .ignore_empty(true)
+}
+
+#[instrument(skip_all, err)]
+async fn _build_db(db_conf: &DatabaseConfig) -> Result<Database, BoomConfigError> {
+    let mut uri = if db_conf.srv {
+        "mongodb+srv://".to_string()
+    } else {
+        "mongodb://".to_string()
+    };
 
     let using_auth = !db_conf.username.is_empty() && !db_conf.password.is_empty();
 
     if using_auth {
         uri.push_str(&db_conf.username);
-        uri.push_str(":");
+        uri.push(':');
         uri.push_str(&db_conf.password);
-        uri.push_str("@");
+        uri.push('@');
     }
 
     uri.push_str(&db_conf.host);
-    uri.push_str(":");
+    uri.push(':');
     uri.push_str(&db_conf.port.to_string());
 
-    uri.push_str("/");
+    uri.push('/');
     uri.push_str(&db_conf.name);
 
     uri.push_str("?directConnection=true");
 
     if using_auth {
-        uri.push_str(&format!("&authSource=admin"));
+        uri.push_str("&authSource=admin");
     }
 
     if let Some(replica_set) = &db_conf.replica_set {
@@ -133,7 +186,7 @@ async fn _build_db(db_conf: &DatabaseConfig) -> Result<mongodb::Database, BoomCo
 }
 
 #[instrument(skip_all, err)]
-async fn build_db(conf: &AppConfig) -> Result<mongodb::Database, BoomConfigError> {
+async fn build_db(conf: &AppConfig) -> Result<Database, BoomConfigError> {
     let db_conf = &conf.database;
 
     _build_db(db_conf).await
@@ -251,7 +304,7 @@ async fn build_cutout_storage(
             .inspect_err(as_error!("failed to create cutout storage"))?
         }
         CutoutsStorage::Mongo(mongo_conf) => {
-            let db = _build_db(&mongo_conf).await?;
+            let db = _build_db(mongo_conf).await?;
             CutoutStorage::from_mongo(db, survey).await
         }
     };
@@ -259,90 +312,158 @@ async fn build_cutout_storage(
     Ok(storage)
 }
 
+/// An explicit null unsets a field inherited from the base config, at any depth
+/// so a single projection entry can be dropped too.
+fn strip_nulls(table: &mut config::Map<String, Value>) {
+    table.retain(|_, value| !matches!(value.kind, ValueKind::Nil));
+    for value in table.values_mut() {
+        if let ValueKind::Table(inner) = &mut value.kind {
+            strip_nulls(inner);
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct CatalogXmatchConfig {
-    pub catalog: String,                     // name of the collection in the database
-    pub radius: f64,                         // radius in radians
-    pub projection: mongodb::bson::Document, // projection to apply to the catalog
-    pub use_distance: bool,                  // whether to use the distance field in the crossmatch
-    pub distance_key: Option<String>,        // name of the field to use for distance
-    pub distance_max: Option<f64>,           // maximum distance in kpc
-    pub distance_max_near: Option<f64>,      // maximum distance in arcsec for nearby objects
-    pub max_results: Option<usize>,          // maximum number of results to return
+    /// Key this catalog's matches appear under in `cross_matches`.
+    pub catalog: String,
+    /// Collection actually queried, defaulting to `catalog`. Set it when two
+    /// entries read the same collection with different matching rules, since
+    /// the results are keyed by `catalog` and that key must stay unique.
+    pub collection: Option<String>,
+    pub radius: f64, // in radians
+    pub projection: Document,
+    pub use_distance: bool,
+    pub distance_key: Option<String>,
+    pub distance_max: Option<f64>,      // in kpc
+    pub distance_max_near: Option<f64>, // in arcsec
+    pub max_results: Option<usize>,
+    /// Field holding the angular DIAMETER in arcsec. Setting it gives each row
+    /// its own match radius, scaled from that size.
+    pub angular_size_key: Option<String>,
+    /// Multiple of the semi-major axis to match within.
+    pub angular_size_scale: f64,
+    /// Cap on the per-row radius, in radians.
+    pub angular_size_radius_max: Option<f64>,
+    /// Floor on the per-row radius, in radians. A row with no usable size is
+    /// matched within it, and nothing else reaches past its own scaled size.
+    pub angular_size_radius_min: f64,
+    /// Field naming a row's object type, e.g. DESI's `spectype`.
+    pub type_key: Option<String>,
+    /// Values of `type_key` that mean the row is a star rather than a galaxy.
+    pub stellar_types: Vec<String>,
+}
+
+impl Default for CatalogXmatchConfig {
+    fn default() -> Self {
+        Self {
+            catalog: String::new(),
+            collection: None,
+            radius: 0.0,
+            projection: Document::new(),
+            use_distance: false,
+            distance_key: None,
+            distance_max: None,
+            distance_max_near: None,
+            max_results: None,
+            angular_size_key: None,
+            // 1.0, not 0.0: `angular_size_threshold_arcsec` divides by it.
+            angular_size_scale: 1.0,
+            angular_size_radius_max: None,
+            angular_size_radius_min: 0.0,
+            type_key: None,
+            stellar_types: Vec::new(),
+        }
+    }
+}
+
+pub fn arcsec_to_radians(arcsec: f64) -> f64 {
+    arcsec * std::f64::consts::PI / 180.0 / 3600.0
+}
+
+pub fn radians_to_arcsec(radians: f64) -> f64 {
+    radians * 180.0 / std::f64::consts::PI * 3600.0
 }
 
 impl CatalogXmatchConfig {
-    pub fn new(
-        catalog: &str,
-        radius: f64,
-        projection: mongodb::bson::Document,
-        use_distance: bool,
-        distance_key: Option<String>,
-        distance_max: Option<f64>,
-        distance_max_near: Option<f64>,
-        max_results: Option<usize>,
-    ) -> CatalogXmatchConfig {
-        CatalogXmatchConfig {
-            catalog: catalog.to_string(),
-            radius: radius * std::f64::consts::PI / 180.0 / 3600.0, // convert arcsec to radians
-            projection,
-            use_distance,
-            distance_key,
-            distance_max,
-            distance_max_near,
-            max_results,
-        }
+    /// Collection to query, which is the catalog name unless overridden.
+    pub fn collection_name(&self) -> &str {
+        self.collection.as_deref().unwrap_or(&self.catalog)
     }
 
-    // based on the code in the main function, create a from_config function
+    /// Match radius in arcsec for one candidate row, from its extent alone.
+    ///
+    /// `radius` is the cone the database is asked for, not the radius a row is
+    /// accepted within: a sized catalog accepts each row within its own extent,
+    /// so a small galaxy far out in the cone is rejected here. See
+    /// [`crate::utils::spatial::row_match_radius_arcsec`] for the rule that
+    /// combines this with distance matching.
+    pub fn match_radius_arcsec(&self, angular_size_arcsec: Option<f64>) -> f64 {
+        let Some(max) = self.angular_size_radius_max else {
+            return radians_to_arcsec(self.radius);
+        };
+        let scaled = angular_size_arcsec
+            .filter(|s| s.is_finite() && *s > 0.0)
+            .map(|s| self.angular_size_scale * s / 2.0)
+            .unwrap_or(0.0);
+        scaled.clamp(
+            radians_to_arcsec(self.angular_size_radius_min),
+            radians_to_arcsec(max),
+        )
+    }
+
+    /// Smallest angular size that reaches beyond the base cone, and so needs
+    /// the extended search.
+    pub fn angular_size_threshold_arcsec(&self) -> f64 {
+        2.0 * radians_to_arcsec(self.radius) / self.angular_size_scale
+    }
+
     #[instrument(skip_all, err)]
-    fn from_config(config_value: Value) -> Result<CatalogXmatchConfig, BoomConfigError> {
-        let hashmap_xmatch = config_value.into_table()?;
-
-        let catalog = hashmap_xmatch
-            .get("catalog")
-            .ok_or(BoomConfigError::MissingKeyError("catalog".to_string()))?
-            .clone()
-            .into_string()?;
-
-        let radius = hashmap_xmatch
-            .get("radius")
-            .ok_or(BoomConfigError::MissingKeyError("radius".to_string()))?
-            .clone()
-            .into_float()?;
-
-        let projection = hashmap_xmatch
-            .get("projection")
-            .ok_or(BoomConfigError::MissingKeyError("projection".to_string()))?
-            .clone()
-            .into_table()?;
-
-        let use_distance = match hashmap_xmatch.get("use_distance") {
-            Some(use_distance) => use_distance.clone().into_bool()?,
-            None => false,
+    fn from_config(
+        catalog: &str,
+        config_value: Value,
+    ) -> Result<CatalogXmatchConfig, BoomConfigError> {
+        let mut hashmap_xmatch = config_value.into_table()?;
+        strip_nulls(&mut hashmap_xmatch);
+        let required = |key: &str| {
+            hashmap_xmatch
+                .get(key)
+                .cloned()
+                .ok_or_else(|| BoomConfigError::MissingKeyError(key.to_string()))
         };
 
-        let distance_key = match hashmap_xmatch.get("distance_key") {
-            Some(distance_key) => Some(distance_key.clone().into_string()?),
-            None => None,
+        let opt_string = |key: &str| -> Result<Option<String>, BoomConfigError> {
+            Ok(hashmap_xmatch
+                .get(key)
+                .cloned()
+                .map(Value::into_string)
+                .transpose()?)
+        };
+        let opt_float = |key: &str| -> Result<Option<f64>, BoomConfigError> {
+            Ok(hashmap_xmatch
+                .get(key)
+                .cloned()
+                .map(Value::into_float)
+                .transpose()?)
         };
 
-        let distance_max = match hashmap_xmatch.get("distance_max") {
-            Some(distance_max) => Some(distance_max.clone().into_float()?),
-            None => None,
-        };
+        let radius = required("radius")?.into_float()?;
+        let projection = required("projection")?.into_table()?;
 
-        let distance_max_near = match hashmap_xmatch.get("distance_max_near") {
-            Some(distance_max_near) => Some(distance_max_near.clone().into_float()?),
-            None => None,
-        };
+        let use_distance = hashmap_xmatch
+            .get("use_distance")
+            .cloned()
+            .map(Value::into_bool)
+            .transpose()?
+            .unwrap_or_default();
 
-        // projection is a hashmap, we need to convert it to a Document
-        let mut projection_doc = mongodb::bson::Document::new();
-        for (key, value) in projection.iter() {
-            let key = key.as_str();
-            let value = value.clone().into_int()?;
-            projection_doc.insert(key, value);
+        let distance_key = opt_string("distance_key")?;
+        let distance_max = opt_float("distance_max")?;
+        let distance_max_near = opt_float("distance_max_near")?;
+
+        let mut projection_doc = Document::new();
+        for (key, value) in projection {
+            projection_doc.insert(key, value.into_int()?);
         }
 
         if use_distance {
@@ -370,33 +491,107 @@ impl CatalogXmatchConfig {
             None => None,
         };
 
-        // for now, we don't want to support max_results + distance filtering together
-        if max_results.is_some() && use_distance {
-            panic!("cannot use max_results with distance filtering");
+        let angular_size_key = opt_string("angular_size_key")?;
+        let angular_size_scale = opt_float("angular_size_scale")?.unwrap_or(1.0);
+        let angular_size_radius_max = opt_float("angular_size_radius_max")?;
+        let angular_size_radius_min = opt_float("angular_size_radius_min")?.unwrap_or(0.0);
+
+        if angular_size_key.is_some() {
+            let Some(radius_max) = angular_size_radius_max else {
+                panic!("must provide an angular_size_radius_max if angular_size_key is set");
+            };
+            if angular_size_scale <= 0.0 {
+                panic!("angular_size_scale must be greater than 0");
+            }
+            if radius_max < radius {
+                panic!("angular_size_radius_max must be at least as large as radius");
+            }
+            if angular_size_radius_min > radius_max {
+                panic!("angular_size_radius_min must not exceed angular_size_radius_max");
+            }
         }
 
-        Ok(CatalogXmatchConfig::new(
-            &catalog,
-            radius,
-            projection_doc,
+        let stellar_types = match hashmap_xmatch.get("stellar_types") {
+            Some(values) => values
+                .clone()
+                .into_array()?
+                .into_iter()
+                .map(Value::into_string)
+                .collect::<Result<Vec<String>, _>>()?,
+            None => Vec::new(),
+        };
+
+        Ok(CatalogXmatchConfig {
+            catalog: catalog.to_string(),
+            collection: opt_string("collection")?,
+            radius: arcsec_to_radians(radius),
+            projection: projection_doc,
             use_distance,
             distance_key,
             distance_max,
             distance_max_near,
             max_results,
-        ))
+            angular_size_key,
+            angular_size_scale,
+            angular_size_radius_max: angular_size_radius_max.map(arcsec_to_radians),
+            angular_size_radius_min: arcsec_to_radians(angular_size_radius_min),
+            type_key: opt_string("type_key")?,
+            stellar_types,
+        })
     }
 }
 
-// implement Deserialize for CatalogXmatchConfig
-impl<'de> Deserialize<'de> for CatalogXmatchConfig {
+/// Catalogs are keyed by name rather than listed, so a deployment override can
+/// add, retune or drop one without restating the whole set. A null value drops
+/// the catalog inherited from the base config.
+struct SurveyXmatchConfigs(Vec<CatalogXmatchConfig>);
+
+impl<'de> Deserialize<'de> for SurveyXmatchConfigs {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
-        D: serde::Deserializer<'de>,
+        D: Deserializer<'de>,
     {
-        let v = Value::deserialize(deserializer).map_err(serde::de::Error::custom)?;
-        CatalogXmatchConfig::from_config(v).map_err(serde::de::Error::custom)
+        struct CatalogMapVisitor;
+
+        impl<'de> de::Visitor<'de> for CatalogMapVisitor {
+            type Value = SurveyXmatchConfigs;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a map of catalog name to crossmatch settings")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: de::MapAccess<'de>,
+            {
+                let mut configs = Vec::new();
+                while let Some((catalog, value)) = map.next_entry::<String, Option<Value>>()? {
+                    let Some(value) = value else { continue };
+                    configs.push(
+                        CatalogXmatchConfig::from_config(&catalog, value)
+                            .map_err(de::Error::custom)?,
+                    );
+                }
+                Ok(SurveyXmatchConfigs(configs))
+            }
+        }
+
+        deserializer.deserialize_map(CatalogMapVisitor)
     }
+}
+
+fn deserialize_crossmatch<'de, D>(
+    deserializer: D,
+) -> Result<HashMap<Survey, Vec<CatalogXmatchConfig>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(
+        HashMap::<Survey, SurveyXmatchConfigs>::deserialize(deserializer)?
+            .into_iter()
+            .map(|(survey, configs)| (survey, configs.0))
+            .collect(),
+    )
 }
 
 fn default_bucket_name() -> String {
@@ -425,14 +620,11 @@ pub enum CutoutsStorage {
 }
 
 impl<'de> Deserialize<'de> for CutoutsStorage {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         use serde::de::Error;
 
-        // Materialise the entire map via serde_json::Value so we can (a) read
-        // the "type" discriminant and (b) re-deserialize into the chosen variant
-        // without fighting the config crate's single-pass deserializer constraint
-        // that prevents #[serde(tag = "type")] from working here.
-        let map = serde_json::Value::deserialize(deserializer).map_err(|e| D::Error::custom(e))?;
+        // The config crate's single-pass deserializer rules out #[serde(tag = "type")].
+        let map = serde_json::Value::deserialize(deserializer).map_err(D::Error::custom)?;
 
         let storage_type = map
             .get("type")
@@ -442,10 +634,10 @@ impl<'de> Deserialize<'de> for CutoutsStorage {
         match storage_type {
             "mongo" => serde_json::from_value::<DatabaseConfig>(map)
                 .map(CutoutsStorage::Mongo)
-                .map_err(|e| D::Error::custom(e)),
+                .map_err(D::Error::custom),
             "s3" => serde_json::from_value::<S3CutoutsStorageConfig>(map)
                 .map(CutoutsStorage::S3)
-                .map_err(|e| D::Error::custom(e)),
+                .map_err(D::Error::custom),
             other => Err(D::Error::custom(format!(
                 "unknown cutouts_storage type {:?}; expected \"mongo\" or \"s3\"",
                 other
@@ -458,6 +650,85 @@ fn default_kafka_server() -> String {
     "localhost:9092".to_string()
 }
 
+fn default_subscription_window_days() -> u64 {
+    1
+}
+
+/// `Unset` is spelled `""` rather than a missing key, so that an empty env
+/// override deserializes instead of erroring.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum SecurityProtocol {
+    #[default]
+    #[serde(rename = "")]
+    Unset,
+    Plaintext,
+    Ssl,
+    SaslPlaintext,
+    SaslSsl,
+}
+
+impl SecurityProtocol {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SecurityProtocol::Unset | SecurityProtocol::Plaintext => "PLAINTEXT",
+            SecurityProtocol::Ssl => "SSL",
+            SecurityProtocol::SaslPlaintext => "SASL_PLAINTEXT",
+            SecurityProtocol::SaslSsl => "SASL_SSL",
+        }
+    }
+
+    pub fn uses_sasl(self) -> bool {
+        matches!(self, Self::SaslPlaintext | Self::SaslSsl)
+    }
+
+    pub fn uses_tls(self) -> bool {
+        matches!(self, Self::Ssl | Self::SaslSsl)
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct KafkaSecurity {
+    protocol: SecurityProtocol,
+    username: Option<String>,
+    password: Option<String>,
+    ssl_ca_location: Option<String>,
+}
+
+impl KafkaSecurity {
+    pub fn protocol(&self) -> SecurityProtocol {
+        match self.protocol {
+            SecurityProtocol::Unset if self.has_credentials() => SecurityProtocol::SaslPlaintext,
+            SecurityProtocol::Unset => SecurityProtocol::Plaintext,
+            explicit => explicit,
+        }
+    }
+
+    pub fn has_credentials(&self) -> bool {
+        self.username.is_some() && self.password.is_some()
+    }
+
+    pub fn username(&self) -> Option<&str> {
+        self.username.as_deref()
+    }
+
+    pub fn password(&self) -> Option<&str> {
+        self.password.as_deref()
+    }
+
+    pub fn ssl_ca_location(&self) -> Option<&str> {
+        self.ssl_ca_location.as_deref()
+    }
+}
+
+/// An empty string is an unset key, not a credential.
+fn configured(value: &Option<String>) -> Option<String> {
+    value
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct KafkaConsumerConfig {
     #[serde(default = "default_kafka_server")]
@@ -467,6 +738,27 @@ pub struct KafkaConsumerConfig {
     pub schema_github_fallback_url: Option<String>, // URL of the GitHub fallback for schemas (if any)
     pub username: Option<String>,                   // Username for authentication (if any)
     pub password: Option<String>,                   // Password for authentication (if any)
+    #[serde(default)]
+    pub security_protocol: SecurityProtocol, // Empty infers it from the credentials
+    pub ssl_ca_location: Option<String>,            // CA bundle path (only for a private CA)
+    /// Days before the current one to stay subscribed to, for surveys whose
+    /// topics are per-night. 1 (the default) keeps yesterday alongside today so
+    /// a night spanning UTC midnight isn't cut off. Raise it temporarily to
+    /// catch up after an upstream outage — bounded by upstream retention, which
+    /// is about 7 days for ZTF. Ignored by surveys with a single static topic.
+    #[serde(default = "default_subscription_window_days")]
+    pub subscription_window_days: u64,
+}
+
+impl KafkaConsumerConfig {
+    pub fn security(&self) -> KafkaSecurity {
+        KafkaSecurity {
+            protocol: self.security_protocol,
+            username: configured(&self.username),
+            password: configured(&self.password),
+            ssl_ca_location: configured(&self.ssl_ca_location),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -563,23 +855,120 @@ impl Default for CutoutCacheConfig {
 pub struct BabamulConfig {
     pub enabled: bool,
     pub webapp_url: Option<String>,
+    /// Emails that are admins. Granted at every API startup.
+    ///
+    /// The floor rather than the whole answer: admin is also granted through
+    /// `PATCH /babamul/admin/users/{id}`, and startup never revokes. So
+    /// removing an admin is two steps, in this order -- take them off this
+    /// list, then revoke them in the admin page. Revoking first leaves them
+    /// named here and the next restart grants it back.
+    ///
+    /// Emails rather than usernames because an email is what the account signs
+    /// in with. See [`crate::api::admin::reconcile_babamul_admins`].
+    ///
+    /// Settable as `BOOM_BABAMUL__ADMIN_EMAILS`, comma-separated.
+    #[serde(default, deserialize_with = "comma_separated")]
+    pub admin_emails: Vec<String>,
     /// Number of days to retain Kafka messages for Babamul topics
     #[serde(default = "default_babamul_retention_days")]
     pub retention_days: u32,
     /// Minimum number of minutes that must elapse between successive password resets (default: 15)
     #[serde(default = "default_password_reset_cooldown_minutes")]
     pub password_reset_cooldown_minutes: u32,
+    /// Whether this deployment will create new accounts (default: true).
+    ///
+    /// Set to `false` for a pre-release deployment that is open only to
+    /// accounts that already exist. Every path that would mint one honors it —
+    /// password sign-up and social sign-in alike — so it cannot be sidestepped
+    /// by calling the API directly or by pressing a sign-in button the web app
+    /// still shows. Signing in with an account that already exists, including
+    /// linking a new provider to it, is unaffected.
+    ///
+    /// The web app has its own build-time `VITE_PRERELEASE_MODE`, which decides
+    /// what the UI *offers*; this decides what the API *allows*. Set both.
+    #[serde(default = "default_babamul_registration_enabled")]
+    pub registration_enabled: bool,
+    /// Social sign-in (Google / GitHub / ORCID) configuration
+    #[serde(default)]
+    pub oauth: OAuthConfig,
 }
 
 impl Default for BabamulConfig {
     fn default() -> Self {
         BabamulConfig {
             enabled: false,
+            admin_emails: Vec::new(),
             webapp_url: None,
             retention_days: default_babamul_retention_days(),
             password_reset_cooldown_minutes: default_password_reset_cooldown_minutes(),
+            registration_enabled: default_babamul_registration_enabled(),
+            oauth: OAuthConfig::default(),
         }
     }
+}
+
+/// Credentials for a single OAuth 2.0 / OIDC identity provider.
+///
+/// **Set these from the environment, not `config.yaml`** — the YAML files are
+/// committed, and a `client_secret:` key sitting in one is an invitation to
+/// paste a live secret into the repo. The env vars are
+/// `BOOM_BABAMUL__OAUTH__{GOOGLE,GITHUB,ORCID}__CLIENT_{ID,SECRET}`.
+///
+/// There is deliberately no `enabled` flag: a provider is on exactly when both
+/// halves of its credential are present. That keeps the on/off switch in the
+/// same place as the secret, so a provider can never be switched on without
+/// one — it fails closed instead of sending users to a consent screen that
+/// will reject them. Same shape as [`PostHogConfig`], where an empty
+/// `project_api_key` disables analytics.
+#[derive(Deserialize, Debug, Clone, Default)]
+pub struct OAuthProviderConfig {
+    #[serde(default)]
+    pub client_id: String,
+    #[serde(default)]
+    pub client_secret: String,
+}
+
+impl OAuthProviderConfig {
+    pub fn is_configured(&self) -> bool {
+        !self.client_id.is_empty() && !self.client_secret.is_empty()
+    }
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct OAuthConfig {
+    #[serde(default)]
+    pub google: OAuthProviderConfig,
+    #[serde(default)]
+    pub github: OAuthProviderConfig,
+    #[serde(default)]
+    pub orcid: OAuthProviderConfig,
+    /// Public base URL the API is reachable at, e.g. `https://api.babamul.org`.
+    /// The redirect URI registered with each provider must be
+    /// `{redirect_base_url}/babamul/oauth/{provider}/callback`.
+    pub redirect_base_url: Option<String>,
+    /// Point ORCID at its sandbox (`sandbox.orcid.org`) instead of production.
+    #[serde(default)]
+    pub orcid_sandbox: bool,
+    /// Seconds an in-flight authorization request stays valid (default: 600)
+    #[serde(default = "default_oauth_state_ttl_seconds")]
+    pub state_ttl_seconds: i64,
+}
+
+impl Default for OAuthConfig {
+    fn default() -> Self {
+        OAuthConfig {
+            google: OAuthProviderConfig::default(),
+            github: OAuthProviderConfig::default(),
+            orcid: OAuthProviderConfig::default(),
+            redirect_base_url: None,
+            orcid_sandbox: false,
+            state_ttl_seconds: default_oauth_state_ttl_seconds(),
+        }
+    }
+}
+
+fn default_oauth_state_ttl_seconds() -> i64 {
+    600
 }
 
 fn default_babamul_retention_days() -> u32 {
@@ -590,9 +979,91 @@ fn default_password_reset_cooldown_minutes() -> u32 {
     15
 }
 
+fn default_babamul_registration_enabled() -> bool {
+    true
+}
+
+/// Server-side PostHog product analytics.
+///
+/// Analytics are only sent when `project_api_key` is non-empty, so leaving it
+/// unset (the default) disables capture entirely without any other change.
+/// The key is a PostHog *project* (write-only, publicly shippable) key — the
+/// same class of key the web app already ships in `VITE_PUBLIC_POSTHOG_KEY`.
+#[derive(Deserialize, Debug, Clone)]
+pub struct PostHogConfig {
+    /// PostHog project API key. Empty disables analytics.
+    #[serde(default)]
+    pub project_api_key: String,
+    /// PostHog ingestion host, e.g. `https://us.i.posthog.com`.
+    #[serde(default = "default_posthog_host")]
+    pub host: String,
+    /// How often the buffered event queue is flushed to PostHog, in seconds.
+    #[serde(default = "default_posthog_flush_interval_seconds")]
+    pub flush_interval_seconds: u64,
+    /// Maximum number of events buffered before excess events are dropped.
+    ///
+    /// Analytics must never apply backpressure to API requests, so the queue is
+    /// bounded and overflow is dropped (and counted) rather than awaited.
+    #[serde(default = "default_posthog_queue_capacity")]
+    pub queue_capacity: usize,
+    /// How often Kafka consumer-group consumption is sampled, in seconds.
+    #[serde(default = "default_posthog_consumption_interval_seconds")]
+    pub consumption_interval_seconds: u64,
+}
+
+impl Default for PostHogConfig {
+    fn default() -> Self {
+        PostHogConfig {
+            project_api_key: String::new(),
+            host: default_posthog_host(),
+            flush_interval_seconds: default_posthog_flush_interval_seconds(),
+            queue_capacity: default_posthog_queue_capacity(),
+            consumption_interval_seconds: default_posthog_consumption_interval_seconds(),
+        }
+    }
+}
+
+impl PostHogConfig {
+    /// Whether analytics capture is enabled (i.e. a project key is configured).
+    pub fn is_enabled(&self) -> bool {
+        !self.project_api_key.trim().is_empty()
+    }
+}
+
+fn default_posthog_host() -> String {
+    "https://us.i.posthog.com".to_string()
+}
+
+fn default_posthog_flush_interval_seconds() -> u64 {
+    10
+}
+
+fn default_posthog_queue_capacity() -> usize {
+    10_000
+}
+
+fn default_posthog_consumption_interval_seconds() -> u64 {
+    5 * 60
+}
+
 #[derive(Deserialize, Debug, Clone)]
 pub struct WorkerConfig {
     pub n_workers: usize,
+}
+
+fn default_enrichment_batch_size() -> usize {
+    // The RPOP cap that was hardcoded before this field existed.
+    1000
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct EnrichmentWorkerConfig {
+    pub n_workers: usize,
+    /// Alerts per enrichment batch: both the queue RPOP cap and the fixed ONNX
+    /// input shape (partial batches are zero-padded). CUDA sessions pin
+    /// `SameAsRequested`, so this shape must not vary; see `config.yaml` for sizing.
+    #[serde(default = "default_enrichment_batch_size")]
+    pub batch_size: usize,
 }
 
 fn default_filter_refresh_interval_minutes() -> u64 {
@@ -601,7 +1072,7 @@ fn default_filter_refresh_interval_minutes() -> u64 {
 
 fn deserialize_filter_refresh_interval<'de, D>(deserializer: D) -> Result<u64, D::Error>
 where
-    D: serde::Deserializer<'de>,
+    D: Deserializer<'de>,
 {
     let value = u64::deserialize(deserializer)?;
     const MIN_INTERVAL: u64 = 1;
@@ -623,7 +1094,7 @@ where
 
 fn deserialize_command_interval<'de, D>(deserializer: D) -> Result<usize, D::Error>
 where
-    D: serde::Deserializer<'de>,
+    D: Deserializer<'de>,
 {
     let value = usize::deserialize(deserializer)?;
     const MIN_INTERVAL: usize = 100;
@@ -646,7 +1117,7 @@ where
 
 fn deserialize_max_match_rate<'de, D>(deserializer: D) -> Result<Option<u8>, D::Error>
 where
-    D: serde::Deserializer<'de>,
+    D: Deserializer<'de>,
 {
     let value = Option::<u8>::deserialize(deserializer)?;
     if let Some(v) = value {
@@ -656,6 +1127,23 @@ where
                 v
             )));
         }
+    }
+    Ok(value)
+}
+
+fn default_reference_window_days() -> u32 {
+    1
+}
+
+fn deserialize_reference_window_days<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = u32::deserialize(deserializer)?;
+    if value == 0 {
+        return Err(serde::de::Error::custom(
+            "reference_window_days must be at least 1",
+        ));
     }
     Ok(value)
 }
@@ -680,6 +1168,13 @@ pub struct FilterWorkerConfig {
     /// if either is missing, filters cannot be activated.
     #[serde(default)]
     pub reference_night: Option<NaiveDate>,
+    /// Number of consecutive nights, ending on `reference_night`, used to
+    /// gauge the filter. Raise it for surveys with few alerts per night.
+    #[serde(
+        default = "default_reference_window_days",
+        deserialize_with = "deserialize_reference_window_days"
+    )]
+    pub reference_window_days: u32,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -687,7 +1182,7 @@ pub struct SurveyWorkerConfig {
     #[serde(deserialize_with = "deserialize_command_interval")]
     pub command_interval: usize, // in milliseconds
     pub alert: WorkerConfig,
-    pub enrichment: WorkerConfig,
+    pub enrichment: EnrichmentWorkerConfig,
     pub filter: FilterWorkerConfig,
 }
 
@@ -697,8 +1192,7 @@ use serde::{de, Deserializer};
 pub struct GpuConfig {
     /// Whether to load ONNX models on GPU (CUDA) instead of CPU.
     /// Models are loaded once at startup and shared across all enrichment workers
-    /// via `Arc<Mutex<...>>`. When false, models are loaded on CPU (the BOOM_GPU__ENABLED
-    /// env var is still respected by the ORT session builder).
+    /// via `Arc<Mutex<...>>`.
     #[serde(default)]
     pub enabled: bool,
     /// CUDA device IDs available for GPU work. Default: [0].
@@ -750,6 +1244,13 @@ where
     deserializer.deserialize_any(DeviceIdsVisitor)
 }
 
+impl GpuConfig {
+    /// Whether models load on CUDA: enabled, with at least one device.
+    pub fn is_active(&self) -> bool {
+        self.enabled && !self.device_ids.is_empty()
+    }
+}
+
 impl Default for GpuConfig {
     fn default() -> Self {
         GpuConfig {
@@ -763,6 +1264,549 @@ fn default_gpu_device_ids() -> Vec<i32> {
     vec![0]
 }
 
+/// Connection settings for a Milvus vector database.
+///
+/// On the NRP platform Milvus is reachable only over gRPC (there is no REST
+/// port exposed), on `milvus.nrp-nautilus.io:50051`, behind TLS. BOOM connects
+/// with an administrative/user account supplied entirely through the environment.
+#[derive(Deserialize, Debug, Clone)]
+pub struct MilvusConfig {
+    /// Whether the API serves the embedding count and similarity search.
+    #[serde(default)]
+    pub read_embeddings: bool,
+    #[serde(default = "default_milvus_host")]
+    pub host: String,
+    #[serde(default = "default_milvus_port")]
+    pub port: u16,
+    /// Whether to use TLS. NRP terminates TLS with a standard Let's Encrypt
+    /// certificate, so the system root store is sufficient.
+    #[serde(default = "default_milvus_tls")]
+    pub tls: bool,
+    #[serde(default)]
+    pub username: String,
+    /// Set via `BOOM_MILVUS__PASSWORD`; never commit a real value.
+    #[serde(default)]
+    pub password: String,
+    /// Milvus database to operate in. One database serves the whole project, so
+    /// `config.yaml` carries the name; `BOOM_MILVUS__DATABASE` overrides it.
+    #[serde(default)]
+    pub database: String,
+    /// Per-RPC timeout in seconds.
+    #[serde(default = "default_milvus_timeout_seconds")]
+    pub timeout_seconds: u64,
+    /// Timeout for opening a connection, kept short so an unreachable server
+    /// fails a request quickly while a slow search still has `timeout_seconds`.
+    #[serde(default = "default_milvus_connect_timeout_seconds")]
+    pub connect_timeout_seconds: u64,
+    /// Whether ZTF enrichment upserts embeddings and the scheduler provisions
+    /// the collection. The collection is shared, so only its owner sets this.
+    #[serde(default)]
+    pub write_embeddings: bool,
+    #[serde(default)]
+    pub collection: MilvusCollectionConfig,
+    #[serde(default)]
+    pub backup_queue: MilvusBackupQueueConfig,
+}
+
+impl MilvusConfig {
+    /// Whether this deployment connects to Milvus at all.
+    pub fn is_enabled(&self) -> bool {
+        self.read_embeddings || self.write_embeddings
+    }
+}
+
+/// Where embeddings wait while Milvus is unreachable, so an outage costs
+/// Valkey space instead of the GPU time to recompute them.
+#[derive(Deserialize, Debug, Clone)]
+pub struct MilvusBackupQueueConfig {
+    #[serde(default = "default_milvus_backup_queue_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_milvus_backup_queue_max_rows")]
+    pub max_rows: usize,
+    #[serde(default = "default_milvus_backup_queue_drain_rows")]
+    pub drain_rows: usize,
+}
+
+/// Schema and index settings for the collection holding CIDER fusion embeddings.
+#[derive(Deserialize, Debug, Clone)]
+pub struct MilvusCollectionConfig {
+    #[serde(default = "default_milvus_collection_name")]
+    pub name: String,
+    /// Embedding width. The CIDER fusion model
+    /// (`data/models/cider_fusion_plus_embedding.onnx`) emits 384 floats.
+    #[serde(default = "default_milvus_dim")]
+    pub dim: i64,
+    /// The model L2-normalizes its output, so COSINE and IP are equivalent here.
+    #[serde(default = "default_milvus_metric_type")]
+    pub metric_type: String,
+    #[serde(default = "default_milvus_index_type")]
+    pub index_type: String,
+    /// Upper bound on the stored `objectId` primary key.
+    #[serde(default = "default_milvus_object_id_max_length")]
+    pub object_id_max_length: i64,
+}
+
+fn default_milvus_host() -> String {
+    "milvus.nrp-nautilus.io".to_string()
+}
+
+fn default_milvus_port() -> u16 {
+    50051
+}
+
+fn default_milvus_tls() -> bool {
+    true
+}
+
+fn default_milvus_timeout_seconds() -> u64 {
+    30
+}
+
+fn default_milvus_connect_timeout_seconds() -> u64 {
+    5
+}
+
+fn default_milvus_backup_queue_enabled() -> bool {
+    true
+}
+
+fn default_milvus_backup_queue_max_rows() -> usize {
+    1_000_000
+}
+
+fn default_milvus_backup_queue_drain_rows() -> usize {
+    500
+}
+
+fn default_milvus_collection_name() -> String {
+    "boom_ztf_fusion_embeddings".to_string()
+}
+
+fn default_milvus_dim() -> i64 {
+    384
+}
+
+fn default_milvus_metric_type() -> String {
+    "COSINE".to_string()
+}
+
+fn default_milvus_index_type() -> String {
+    "HNSW".to_string()
+}
+
+fn default_milvus_object_id_max_length() -> i64 {
+    64
+}
+
+impl Default for MilvusConfig {
+    fn default() -> Self {
+        MilvusConfig {
+            read_embeddings: false,
+            host: default_milvus_host(),
+            port: default_milvus_port(),
+            tls: default_milvus_tls(),
+            username: String::new(),
+            password: String::new(),
+            database: String::new(),
+            timeout_seconds: default_milvus_timeout_seconds(),
+            connect_timeout_seconds: default_milvus_connect_timeout_seconds(),
+            write_embeddings: false,
+            collection: MilvusCollectionConfig::default(),
+            backup_queue: MilvusBackupQueueConfig::default(),
+        }
+    }
+}
+
+impl Default for MilvusBackupQueueConfig {
+    fn default() -> Self {
+        MilvusBackupQueueConfig {
+            enabled: default_milvus_backup_queue_enabled(),
+            max_rows: default_milvus_backup_queue_max_rows(),
+            drain_rows: default_milvus_backup_queue_drain_rows(),
+        }
+    }
+}
+
+impl Default for MilvusCollectionConfig {
+    fn default() -> Self {
+        MilvusCollectionConfig {
+            name: default_milvus_collection_name(),
+            dim: default_milvus_dim(),
+            metric_type: default_milvus_metric_type(),
+            index_type: default_milvus_index_type(),
+            object_id_max_length: default_milvus_object_id_max_length(),
+        }
+    }
+}
+
+impl MilvusConfig {
+    /// The gRPC endpoint to dial, e.g. `https://milvus.nrp-nautilus.io:50051`.
+    pub fn endpoint(&self) -> String {
+        let scheme = if self.tls { "https" } else { "http" };
+        format!("{}://{}:{}", scheme, self.host, self.port)
+    }
+}
+
+/// The `linker` service, which runs moving-object discovery over the last few
+/// nights of ZTF data once each night is over, and stores what it finds as
+/// tracks. The `linker-ztf` compose service runs it with the prod profile.
+#[derive(Debug, Clone, Deserialize)]
+pub struct LinkerConfig {
+    /// Nights of detections a linking pass reads, ending with the night just
+    /// over.
+    #[serde(default = "default_linker_window_nights")]
+    pub window_nights: u32,
+    /// Nights a THOR pass reads, the most recent of the linking window.
+    #[serde(default = "default_linker_thor_window_nights")]
+    pub thor_window_nights: u32,
+    /// UTC hour after which the night observed that morning counts as over.
+    #[serde(default = "default_linker_run_after_utc_hour")]
+    pub run_after_utc_hour: u32,
+    /// Minimum drb for a detection to be searched.
+    #[serde(default = "default_linker_drb")]
+    pub drb: f64,
+    /// Minimum reliability for an LSST detection to be searched.
+    #[serde(default = "default_linker_lsst_min_reliability")]
+    pub lsst_min_reliability: f64,
+    #[serde(default = "default_linker_surveys")]
+    pub surveys: Vec<Survey>,
+    /// Link tracklets across nights.
+    #[serde(default = "default_linker_pass")]
+    pub link: bool,
+    /// Recover objects seen once a night with THOR.
+    #[serde(default = "default_linker_pass")]
+    pub thor: bool,
+    /// Match tracks to MPC_orbits, so a known object is stored under its
+    /// designation as a recovery rather than as a discovery candidate.
+    #[serde(default = "default_linker_pass")]
+    pub match_known: bool,
+    #[serde(default = "default_linker_pass")]
+    pub reject_known: bool,
+    #[serde(default)]
+    pub flag_satellites: bool,
+    /// Store tracks and stamp their alerts. Off, a run reports what it would
+    /// store and writes nothing.
+    #[serde(default = "default_linker_pass")]
+    pub persist: bool,
+    /// Also link the detections IPAC already identified, store nothing, and
+    /// report how many of those objects the search recovered.
+    #[serde(default = "default_linker_pass")]
+    pub recall: bool,
+    /// Nights the recall pass reads, the most recent of the window. Most ZTF
+    /// alerts are known asteroids, so this pass can far outweigh the search.
+    #[serde(default = "default_linker_recall_window_nights")]
+    pub recall_window_nights: u32,
+    #[serde(default = "default_linker_pass")]
+    pub attach: bool,
+    #[serde(default = "default_linker_attach_lookback_nights")]
+    pub attach_lookback_nights: u32,
+    /// Also link and recover unbound orbits, up to this hyperbolic excess
+    /// speed, km/s.
+    #[serde(default)]
+    pub max_vinf_km_s: f64,
+    /// Largest residual an unbound orbit may leave and stand, arcseconds. A
+    /// track fitting worse keeps its bound fit if that passes, or is dropped.
+    #[serde(default = "default_linker_max_unbound_rms_arcsec")]
+    pub max_unbound_rms_arcsec: f64,
+    #[serde(default)]
+    pub fast: bool,
+    #[serde(default = "default_linker_fast_window_nights")]
+    pub fast_window_nights: u32,
+    #[serde(default = "default_linker_fast_min_rate")]
+    pub fast_min_rate_deg_per_day: f64,
+    #[serde(default = "default_linker_fast_max_rate")]
+    pub fast_max_rate_deg_per_day: f64,
+    #[serde(default = "default_linker_fast_dense_detections")]
+    pub fast_dense_detections: usize,
+    #[serde(default = "default_linker_fast_dense_max_rate")]
+    pub fast_dense_max_rate_deg_per_day: f64,
+    #[serde(default)]
+    pub fast_live_every_minutes: u32,
+    #[serde(default)]
+    pub fast_single_night: bool,
+    #[serde(default = "default_linker_fast_min_neo_score")]
+    pub fast_min_neo_score: f64,
+    #[serde(default)]
+    pub results_filter_id: String,
+}
+
+impl LinkerConfig {
+    /// Settings no night could be searched with, which would otherwise shift
+    /// or empty every window without saying so.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.surveys.is_empty() {
+            return Err("surveys must name at least one survey".to_string());
+        }
+        if self.run_after_utc_hour > 23 {
+            return Err(format!(
+                "run_after_utc_hour is {}, not an hour of the day",
+                self.run_after_utc_hour
+            ));
+        }
+        if self.window_nights == 0 || self.recall_window_nights == 0 {
+            return Err("window_nights and recall_window_nights must be at least 1".to_string());
+        }
+        if self.thor_window_nights == 0 || self.thor_window_nights > self.window_nights {
+            return Err(format!(
+                "thor_window_nights is {}, but must be between 1 and window_nights ({})",
+                self.thor_window_nights, self.window_nights
+            ));
+        }
+        if !(0.0..=1.0).contains(&self.drb) {
+            return Err(format!("drb is {}, but scores run from 0 to 1", self.drb));
+        }
+        if !(0.0..=1.0).contains(&self.lsst_min_reliability) {
+            return Err(format!(
+                "lsst_min_reliability is {}, but scores run from 0 to 1",
+                self.lsst_min_reliability
+            ));
+        }
+        if !(0.0..f64::INFINITY).contains(&self.max_vinf_km_s) {
+            return Err(format!(
+                "max_vinf_km_s is {}, but must be zero or a positive speed",
+                self.max_vinf_km_s
+            ));
+        }
+        if !self.max_unbound_rms_arcsec.is_finite() || self.max_unbound_rms_arcsec <= 0.0 {
+            return Err(format!(
+                "max_unbound_rms_arcsec is {}, but must be a positive residual",
+                self.max_unbound_rms_arcsec
+            ));
+        }
+        if self.fast_window_nights == 0 || self.fast_window_nights > self.window_nights {
+            return Err(format!(
+                "fast_window_nights is {}, but must be between 1 and window_nights ({})",
+                self.fast_window_nights, self.window_nights
+            ));
+        }
+        if !(self.fast_min_rate_deg_per_day > 0.0
+            && self.fast_min_rate_deg_per_day < self.fast_max_rate_deg_per_day)
+        {
+            return Err(format!(
+                "fast rates run from {} to {} deg/day, which is no range",
+                self.fast_min_rate_deg_per_day, self.fast_max_rate_deg_per_day
+            ));
+        }
+        if self.fast_dense_max_rate_deg_per_day <= self.fast_min_rate_deg_per_day {
+            return Err(format!(
+                "fast_dense_max_rate_deg_per_day is {}, but must exceed fast_min_rate_deg_per_day ({})",
+                self.fast_dense_max_rate_deg_per_day, self.fast_min_rate_deg_per_day
+            ));
+        }
+        if !(0.0..=100.0).contains(&self.fast_min_neo_score) {
+            return Err(format!(
+                "fast_min_neo_score is {}, not a digest2 score from 0 to 100",
+                self.fast_min_neo_score
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl Default for LinkerConfig {
+    fn default() -> Self {
+        LinkerConfig {
+            window_nights: default_linker_window_nights(),
+            thor_window_nights: default_linker_thor_window_nights(),
+            run_after_utc_hour: default_linker_run_after_utc_hour(),
+            drb: default_linker_drb(),
+            lsst_min_reliability: default_linker_lsst_min_reliability(),
+            surveys: default_linker_surveys(),
+            link: default_linker_pass(),
+            thor: default_linker_pass(),
+            match_known: default_linker_pass(),
+            reject_known: default_linker_pass(),
+            flag_satellites: false,
+            persist: default_linker_pass(),
+            recall: default_linker_pass(),
+            recall_window_nights: default_linker_recall_window_nights(),
+            attach: default_linker_pass(),
+            attach_lookback_nights: default_linker_attach_lookback_nights(),
+            max_vinf_km_s: 0.0,
+            max_unbound_rms_arcsec: default_linker_max_unbound_rms_arcsec(),
+            fast: false,
+            fast_window_nights: default_linker_fast_window_nights(),
+            fast_min_rate_deg_per_day: default_linker_fast_min_rate(),
+            fast_max_rate_deg_per_day: default_linker_fast_max_rate(),
+            fast_dense_detections: default_linker_fast_dense_detections(),
+            fast_dense_max_rate_deg_per_day: default_linker_fast_dense_max_rate(),
+            fast_live_every_minutes: 0,
+            fast_single_night: false,
+            fast_min_neo_score: default_linker_fast_min_neo_score(),
+            results_filter_id: String::new(),
+        }
+    }
+}
+
+fn default_linker_max_unbound_rms_arcsec() -> f64 {
+    0.5
+}
+
+fn default_linker_attach_lookback_nights() -> u32 {
+    60
+}
+
+fn default_linker_fast_window_nights() -> u32 {
+    7
+}
+
+fn default_linker_fast_min_rate() -> f64 {
+    1.0
+}
+
+fn default_linker_fast_max_rate() -> f64 {
+    25.0
+}
+
+fn default_linker_fast_dense_detections() -> usize {
+    10_000
+}
+
+fn default_linker_fast_min_neo_score() -> f64 {
+    90.0
+}
+
+fn default_linker_fast_dense_max_rate() -> f64 {
+    5.0
+}
+
+fn default_linker_recall_window_nights() -> u32 {
+    5
+}
+
+fn default_linker_window_nights() -> u32 {
+    14
+}
+
+fn default_linker_thor_window_nights() -> u32 {
+    5
+}
+
+fn default_linker_run_after_utc_hour() -> u32 {
+    14
+}
+
+fn default_linker_drb() -> f64 {
+    0.8
+}
+
+fn default_linker_lsst_min_reliability() -> f64 {
+    0.5
+}
+
+fn default_linker_surveys() -> Vec<Survey> {
+    vec![Survey::Ztf]
+}
+
+fn default_linker_pass() -> bool {
+    true
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct TnsConfig {
+    #[serde(default = "default_tns_base_url")]
+    pub base_url: String,
+    #[serde(default)]
+    pub bot_id: String,
+    #[serde(default)]
+    pub bot_name: String,
+    #[serde(default)]
+    pub api_key: String,
+    #[serde(default = "default_tns_sync_every_minutes")]
+    pub sync_every_minutes: u64,
+    #[serde(default = "default_tns_full_sync_every_hours")]
+    pub full_sync_every_hours: u64,
+    #[serde(default)]
+    pub photometry: TnsPhotometryConfig,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct TnsPhotometryConfig {
+    #[serde(default = "default_tns_photometry_every_minutes")]
+    pub every_minutes: u64,
+    #[serde(default = "default_tns_photometry_max_distance_mpc")]
+    pub max_distance_mpc: f64,
+    #[serde(default = "default_tns_photometry_max_age_days")]
+    pub max_age_days: f64,
+    #[serde(default = "default_tns_photometry_refresh_hours")]
+    pub refresh_hours: f64,
+    #[serde(default = "default_tns_photometry_max_objects")]
+    pub max_objects: usize,
+}
+
+impl Default for TnsConfig {
+    fn default() -> Self {
+        TnsConfig {
+            base_url: default_tns_base_url(),
+            bot_id: String::new(),
+            bot_name: String::new(),
+            api_key: String::new(),
+            sync_every_minutes: default_tns_sync_every_minutes(),
+            full_sync_every_hours: default_tns_full_sync_every_hours(),
+            photometry: TnsPhotometryConfig::default(),
+        }
+    }
+}
+
+impl Default for TnsPhotometryConfig {
+    fn default() -> Self {
+        TnsPhotometryConfig {
+            every_minutes: default_tns_photometry_every_minutes(),
+            max_distance_mpc: default_tns_photometry_max_distance_mpc(),
+            max_age_days: default_tns_photometry_max_age_days(),
+            refresh_hours: default_tns_photometry_refresh_hours(),
+            max_objects: default_tns_photometry_max_objects(),
+        }
+    }
+}
+
+impl TnsConfig {
+    pub fn has_credentials(&self) -> bool {
+        [&self.bot_id, &self.bot_name, &self.api_key]
+            .iter()
+            .all(|value| !value.trim().is_empty())
+    }
+
+    pub fn has_partial_credentials(&self) -> bool {
+        !self.has_credentials()
+            && [&self.bot_id, &self.bot_name, &self.api_key]
+                .iter()
+                .any(|value| !value.trim().is_empty())
+    }
+}
+
+fn default_tns_base_url() -> String {
+    "https://www.wis-tns.org".to_string()
+}
+
+fn default_tns_sync_every_minutes() -> u64 {
+    60
+}
+
+fn default_tns_full_sync_every_hours() -> u64 {
+    24
+}
+
+fn default_tns_photometry_every_minutes() -> u64 {
+    360
+}
+
+fn default_tns_photometry_max_distance_mpc() -> f64 {
+    200.0
+}
+
+fn default_tns_photometry_max_age_days() -> f64 {
+    60.0
+}
+
+fn default_tns_photometry_refresh_hours() -> f64 {
+    24.0
+}
+
+fn default_tns_photometry_max_objects() -> usize {
+    250
+}
+
 #[derive(Deserialize, Debug, Clone)]
 pub struct AppConfig {
     pub api: ApiConfig,
@@ -771,13 +1815,23 @@ pub struct AppConfig {
     pub redis: RedisConfig,
     #[serde(default)]
     pub babamul: BabamulConfig,
-    pub kafka: KafkaConfig,
     #[serde(default)]
+    pub posthog: PostHogConfig,
+    pub kafka: KafkaConfig,
+    #[serde(default, deserialize_with = "deserialize_crossmatch")]
     pub crossmatch: HashMap<Survey, Vec<CatalogXmatchConfig>>,
     #[serde(default)]
     pub workers: HashMap<Survey, SurveyWorkerConfig>,
     #[serde(default)]
     pub gpu: GpuConfig,
+    #[serde(default)]
+    pub milvus: MilvusConfig,
+    #[serde(default)]
+    pub host_galaxy: HostGalaxyConfig,
+    #[serde(default)]
+    pub linker: LinkerConfig,
+    #[serde(default)]
+    pub tns: TnsConfig,
     pub cutouts_storage: CutoutsStorage,
 }
 
@@ -794,26 +1848,7 @@ impl AppConfig {
 
     #[instrument(err)]
     pub fn from_test_config() -> Result<Self, BoomConfigError> {
-        // Find the workspace root by looking for Cargo.toml with tests/ directory
-        let mut current_dir = std::env::current_dir().expect("Failed to get current directory");
-        let test_config_path = loop {
-            let tests_dir = current_dir.join("tests");
-            let test_config = tests_dir.join("config.test.yaml");
-
-            // Check if we found the workspace root (has tests dir with config file)
-            if test_config.exists() {
-                break test_config;
-            }
-
-            // Move up to parent directory
-            if let Some(parent) = current_dir.parent() {
-                current_dir = parent.to_path_buf();
-            } else {
-                panic!("Could not find workspace root with tests/config.test.yaml");
-            }
-        };
-
-        load_config(Some(test_config_path.to_str().expect("Invalid path")))
+        load_config(Some(&test_config_path()))
     }
 
     /// Validate that all required secrets are present
@@ -836,16 +1871,45 @@ impl AppConfig {
             return Err("Admin password must be set via BOOM_API__AUTH__ADMIN_PASSWORD environment variable".to_string());
         }
 
-        // Validate token expiration
-        if self.api.auth.token_expiration <= 0 {
+        if self.api.auth.token_expiration == 0 {
             return Err("Token expiration must be greater than 0 for security reasons".to_string());
+        }
+
+        for (survey, consumer) in &self.kafka.consumer {
+            let security = consumer.security();
+            let protocol = security.protocol();
+            if protocol.uses_sasl() && !security.has_credentials() {
+                return Err(format!(
+                    "kafka.consumer.{} is set to {} but has no credentials; set \
+                     BOOM_KAFKA__CONSUMER__{}__USERNAME and BOOM_KAFKA__CONSUMER__{}__PASSWORD",
+                    survey.as_str().to_lowercase(),
+                    protocol.as_str(),
+                    survey.as_str(),
+                    survey.as_str(),
+                ));
+            }
+        }
+
+        // Credentials are checked when a client is built instead, so services
+        // that load this config but never dial Milvus start without them.
+        if self.milvus.is_enabled() {
+            if self.milvus.database.is_empty() {
+                return Err(
+                    "Milvus database must not be empty when milvus.read_embeddings or milvus.write_embeddings is true; config.yaml supplies a default, override it with BOOM_MILVUS__DATABASE"
+                        .to_string(),
+                );
+            }
+
+            if self.milvus.collection.dim <= 0 {
+                return Err("Milvus collection dimension must be greater than 0".to_string());
+            }
         }
 
         Ok(())
     }
 
     #[instrument(skip_all, err)]
-    pub async fn build_db(&self) -> Result<mongodb::Database, BoomConfigError> {
+    pub async fn build_db(&self) -> Result<Database, BoomConfigError> {
         build_db(self).await
     }
 
@@ -882,9 +1946,15 @@ pub fn load_config(config_path: Option<&str>) -> Result<AppConfig, BoomConfigErr
 
     let app_config: AppConfig = config.try_deserialize()?;
 
-    // Validate that required secrets are present
     if let Err(e) = app_config.validate_secrets() {
         return Err(BoomConfigError::InvalidSecretError(e));
+    }
+
+    // A misspelled crossmatch catalog does not fail at query time -- it matches
+    // nothing, and the alerts come out looking confidently unmatched. Fail
+    // startup instead, where someone will see it.
+    if let Err(e) = crate::catalogs::validate_crossmatch(&app_config.crossmatch) {
+        return Err(BoomConfigError::UnknownCrossmatchCatalog(e));
     }
 
     debug!("Configuration loaded successfully");
@@ -899,6 +1969,21 @@ pub fn load_config(config_path: Option<&str>) -> Result<AppConfig, BoomConfigErr
     );
 
     Ok(app_config)
+}
+
+/// Path to `tests/config.test.yaml`, found by walking up from the working directory.
+pub fn test_config_path() -> String {
+    let mut current_dir = std::env::current_dir().expect("Failed to get current directory");
+    loop {
+        let test_config = current_dir.join("tests").join("config.test.yaml");
+        if test_config.exists() {
+            return test_config.to_str().expect("Invalid path").to_string();
+        }
+        match current_dir.parent() {
+            Some(parent) => current_dir = parent.to_path_buf(),
+            None => panic!("Could not find workspace root with tests/config.test.yaml"),
+        }
+    }
 }
 
 pub async fn get_test_db() -> Database {
@@ -917,6 +2002,218 @@ pub async fn get_test_cutout_storage(survey: &Survey) -> CutoutStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn consumer_config(yaml: &str) -> KafkaConsumerConfig {
+        Config::builder()
+            .add_source(File::from_str(yaml, config::FileFormat::Yaml))
+            .build()
+            .unwrap()
+            .try_deserialize()
+            .unwrap()
+    }
+
+    #[test]
+    fn a_consumer_without_credentials_stays_on_plaintext() {
+        let config = consumer_config("group_id: boom-ztf\n");
+        assert_eq!(config.security().protocol(), SecurityProtocol::Plaintext);
+    }
+
+    #[test]
+    fn credentials_alone_mean_sasl_plaintext() {
+        let config = consumer_config("group_id: boom-lsst\nusername: user\npassword: pass\n");
+        assert_eq!(
+            config.security().protocol(),
+            SecurityProtocol::SaslPlaintext
+        );
+    }
+
+    #[test]
+    fn an_empty_credential_is_not_a_credential() {
+        let config = consumer_config("group_id: boom-ztf\nusername: \"\"\npassword: \"\"\n");
+        assert_eq!(config.security().protocol(), SecurityProtocol::Plaintext);
+        assert!(!config.security().has_credentials());
+    }
+
+    #[test]
+    fn an_explicit_protocol_wins_over_the_inferred_one() {
+        let config = consumer_config(
+            "group_id: boom-ztf\nsecurity_protocol: SASL_SSL\nusername: user\npassword: pass\n",
+        );
+        assert_eq!(config.security().protocol(), SecurityProtocol::SaslSsl);
+        assert!(config.security().protocol().uses_tls());
+    }
+
+    #[test]
+    fn an_empty_protocol_means_unset_rather_than_a_parse_error() {
+        let config = consumer_config("group_id: boom-ztf\nsecurity_protocol: \"\"\n");
+        assert_eq!(config.security_protocol, SecurityProtocol::Unset);
+    }
+
+    /// `config.yaml` as a deployment with both OAuth URLs set would have it.
+    const URLS_CONFIGURED_YAML: &str = "babamul:\n  webapp_url: https://example.org\n  oauth:\n    redirect_base_url: https://example.org/api\n";
+
+    /// Build a config from [`URLS_CONFIGURED_YAML`] plus a *fake* environment.
+    ///
+    /// `Environment::source` substitutes the map for the real environment, so
+    /// this exercises the production overlay without `set_var` — which would
+    /// race the other tests in this binary reading the environment through
+    /// `from_test_config`, and would clobber any `BOOM_*` values a developer's
+    /// `.env` had already loaded into the process.
+    fn config_with_env(vars: &[(&str, &str)]) -> Config {
+        let env: config::Map<String, String> = vars
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect();
+        Config::builder()
+            .add_source(File::from_str(
+                URLS_CONFIGURED_YAML,
+                config::FileFormat::Yaml,
+            ))
+            .add_source(env_source().source(Some(env)))
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn admin_emails_can_be_set_as_a_comma_separated_env_var() {
+        // A list has no natural single-variable form, and this one has to be
+        // settable from the environment because it decides who may mutate the
+        // data -- see AGENTS.md on secrets and deployment settings.
+        let conf = config_with_env(&[(
+            "BOOM_BABAMUL__ADMIN_EMAILS",
+            "one@example.org,two@example.org",
+        )]);
+        assert_eq!(
+            conf.get::<AdminEmails>("babamul").unwrap().admin_emails,
+            vec!["one@example.org", "two@example.org"]
+        );
+    }
+
+    #[test]
+    fn a_single_admin_email_still_parses_as_a_list() {
+        let conf = config_with_env(&[("BOOM_BABAMUL__ADMIN_EMAILS", "solo@example.org")]);
+        assert_eq!(
+            conf.get::<AdminEmails>("babamul").unwrap().admin_emails,
+            vec!["solo@example.org"]
+        );
+    }
+
+    #[test]
+    fn admin_emails_tolerate_spacing_and_a_trailing_comma() {
+        // A blank entry would match no account, but it would also make the
+        // configured list look longer than it is.
+        let conf = config_with_env(&[(
+            "BOOM_BABAMUL__ADMIN_EMAILS",
+            " one@example.org , two@example.org ,",
+        )]);
+        assert_eq!(
+            conf.get::<AdminEmails>("babamul").unwrap().admin_emails,
+            vec!["one@example.org", "two@example.org"]
+        );
+    }
+
+    #[test]
+    fn admin_emails_still_accept_a_yaml_sequence() {
+        // The env form must not cost us the readable form in config.yaml.
+        let conf = Config::builder()
+            .add_source(File::from_str(
+                "babamul:\n  admin_emails:\n    - one@example.org\n    - two@example.org\n",
+                config::FileFormat::Yaml,
+            ))
+            .build()
+            .unwrap();
+        assert_eq!(
+            conf.get::<AdminEmails>("babamul").unwrap().admin_emails,
+            vec!["one@example.org", "two@example.org"]
+        );
+    }
+
+    #[test]
+    fn an_unset_admin_email_list_leaves_nobody_an_admin() {
+        // Failing closed matters here: the alternative to "no admins" must not
+        // be "everyone".
+        let conf = config_with_env(&[]);
+        assert_eq!(
+            conf.get::<AdminEmails>("babamul").unwrap().admin_emails,
+            Vec::<String>::new()
+        );
+    }
+
+    /// Just the field under test, so these do not need a whole valid AppConfig.
+    #[derive(Deserialize)]
+    struct AdminEmails {
+        #[serde(default, deserialize_with = "comma_separated")]
+        admin_emails: Vec<String>,
+    }
+
+    #[test]
+    fn an_empty_env_var_does_not_blank_out_a_configured_value() {
+        // Regression: an empty compose default hid social sign-in in production.
+        let conf = config_with_env(&[
+            ("BOOM_BABAMUL__WEBAPP_URL", ""),
+            ("BOOM_BABAMUL__OAUTH__REDIRECT_BASE_URL", ""),
+        ]);
+
+        assert_eq!(
+            conf.get::<String>("babamul.webapp_url").unwrap(),
+            "https://example.org"
+        );
+        assert_eq!(
+            conf.get::<String>("babamul.oauth.redirect_base_url")
+                .unwrap(),
+            "https://example.org/api"
+        );
+    }
+
+    #[test]
+    fn a_non_empty_env_var_still_overrides_the_file() {
+        // The other half: ignoring empty vars must not ignore the environment.
+        let conf = config_with_env(&[("BOOM_BABAMUL__WEBAPP_URL", "https://override.example")]);
+
+        assert_eq!(
+            conf.get::<String>("babamul.webapp_url").unwrap(),
+            "https://override.example"
+        );
+    }
+
+    #[test]
+    fn oauth_provider_needs_a_client_id_and_secret_to_count_as_configured() {
+        let mut provider = OAuthProviderConfig {
+            client_id: "id".to_string(),
+            client_secret: "secret".to_string(),
+        };
+        assert!(provider.is_configured());
+
+        // A half-filled provider must fail closed, not hit a rejecting consent screen.
+        provider.client_secret = String::new();
+        assert!(!provider.is_configured());
+        provider.client_secret = "secret".to_string();
+        provider.client_id = String::new();
+        assert!(!provider.is_configured());
+    }
+
+    #[test]
+    fn oauth_config_defaults_are_off_with_a_usable_state_ttl() {
+        // The serde defaults are separate from the Default impl.
+        let config: OAuthConfig = serde_json::from_str("{}").unwrap();
+        assert!(!config.google.is_configured());
+        assert!(!config.github.is_configured());
+        assert!(!config.orcid.is_configured());
+        assert!(config.redirect_base_url.is_none());
+        assert_eq!(config.state_ttl_seconds, 600);
+        assert_eq!(
+            config.state_ttl_seconds,
+            OAuthConfig::default().state_ttl_seconds
+        );
+    }
+
+    #[test]
+    fn babamul_config_without_an_oauth_block_still_deserializes() {
+        // Existing deployments' config.yaml files predate the oauth section.
+        let config: BabamulConfig =
+            serde_json::from_str(r#"{"enabled": true, "webapp_url": null}"#).unwrap();
+        assert!(!config.oauth.google.is_configured());
+    }
 
     #[test]
     fn test_gpu_config_defaults() {
@@ -962,5 +2259,77 @@ mod tests {
         let json = r#"{"enabled": true, "device_ids": [2, 5]}"#;
         let config: GpuConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.device_ids, vec![2, 5]);
+    }
+
+    #[test]
+    fn test_gpu_config_is_active() {
+        let active: GpuConfig = serde_json::from_str(r#"{"enabled": true}"#).unwrap();
+        assert!(active.is_active());
+        let disabled: GpuConfig = serde_json::from_str(r#"{"enabled": false}"#).unwrap();
+        assert!(!disabled.is_active());
+        let no_device: GpuConfig =
+            serde_json::from_str(r#"{"enabled": true, "device_ids": []}"#).unwrap();
+        assert!(!no_device.is_active());
+    }
+
+    fn crossmatch_config(yaml: &str) -> HashMap<Survey, Vec<CatalogXmatchConfig>> {
+        #[derive(Deserialize)]
+        struct Wrapper {
+            #[serde(deserialize_with = "deserialize_crossmatch")]
+            crossmatch: HashMap<Survey, Vec<CatalogXmatchConfig>>,
+        }
+
+        let wrapper: Wrapper = Config::builder()
+            .add_source(File::from_str(yaml, config::FileFormat::Yaml))
+            .build()
+            .unwrap()
+            .try_deserialize()
+            .unwrap();
+        wrapper.crossmatch
+    }
+
+    fn catalog_names(configs: &[CatalogXmatchConfig]) -> Vec<&str> {
+        configs.iter().map(|c| c.catalog.as_str()).collect()
+    }
+
+    /// The first catalog drives the aggregation the others are unioned onto, so
+    /// the declared order has to survive deserialization.
+    #[test]
+    fn catalogs_keep_the_order_they_are_declared_in() {
+        let crossmatch = crossmatch_config(
+            "crossmatch:\n  ztf:\n    Gaia_DR3:\n      radius: 2.0\n      projection: {_id: 1}\n    NED:\n      radius: 300.0\n      projection: {_id: 1}\n    TNS:\n      radius: 2.0\n      projection: {_id: 1}\n",
+        );
+        assert_eq!(
+            catalog_names(&crossmatch[&Survey::Ztf]),
+            ["Gaia_DR3", "NED", "TNS"]
+        );
+    }
+
+    #[test]
+    fn a_null_catalog_drops_the_one_inherited_from_the_base_config() {
+        let crossmatch = crossmatch_config(
+            "crossmatch:\n  ztf:\n    Gaia_DR3:\n      radius: 2.0\n      projection: {_id: 1}\n    PS1_DR2: null\n",
+        );
+        assert_eq!(catalog_names(&crossmatch[&Survey::Ztf]), ["Gaia_DR3"]);
+    }
+
+    #[test]
+    fn a_null_projection_field_unsets_the_one_inherited_from_the_base_config() {
+        let crossmatch = crossmatch_config(
+            "crossmatch:\n  ztf:\n    Gaia_DR3:\n      radius: 2.0\n      projection: {_id: 1, ruwe: null}\n",
+        );
+        let gaia = &crossmatch[&Survey::Ztf][0];
+        assert!(!gaia.projection.contains_key("ruwe"));
+        assert_eq!(gaia.projection.len(), 1);
+    }
+
+    #[test]
+    fn a_null_field_unsets_the_one_inherited_from_the_base_config() {
+        let crossmatch = crossmatch_config(
+            "crossmatch:\n  ztf:\n    DESI_DR1:\n      radius: 30.0\n      projection: {_id: 1}\n      type_key: null\n      stellar_types: null\n",
+        );
+        let desi = &crossmatch[&Survey::Ztf][0];
+        assert_eq!(desi.type_key, None);
+        assert!(desi.stellar_types.is_empty());
     }
 }

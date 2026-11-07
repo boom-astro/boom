@@ -14,6 +14,7 @@ use crate::enrichment::{LsstAlertProperties, ZtfAlertClassifications, ZtfAlertPr
 use crate::utils::cutouts::{CutoutStorage, CutoutStorageError};
 use crate::utils::enums::Survey;
 use crate::utils::spatial::Coordinates;
+use crate::utils::tns::{photometry_for_matches, TnsPhotometry};
 use actix_web::{get, post, web, HttpResponse};
 use futures::TryStreamExt;
 use mongodb::{bson::doc, Collection, Database};
@@ -69,6 +70,7 @@ struct ZtfObj {
     classifications_history: Vec<ZtfAlertClassifications>,
     cross_matches: serde_json::Value,
     survey_matches: ZtfSurveyMatches,
+    tns_photometry: Option<TnsPhotometry>,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
@@ -99,6 +101,7 @@ struct LsstObj {
     fp_hists: Vec<LsstForcedPhot>,
     cross_matches: serde_json::Value,
     survey_matches: LsstSurveyMatches,
+    tns_photometry: Option<TnsPhotometry>,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
@@ -249,6 +252,7 @@ pub async fn get_object(
                 }
             };
 
+            let tns_photometry = tns_photometry_of(&db, aux_entry.cross_matches.as_ref()).await;
             let survey_matches = ZtfSurveyMatches {
                 lsst: match nearest_lsst {
                     Some(lsst_obj) => {
@@ -296,6 +300,7 @@ pub async fn get_object(
                 classifications_history,
                 cross_matches: serde_json::json!(aux_entry.cross_matches),
                 survey_matches,
+                tns_photometry,
             };
             return response::ok_ser(&format!("object found with object_id: {}", object_id), obj);
         }
@@ -380,6 +385,7 @@ pub async fn get_object(
                 }
             };
 
+            let tns_photometry = tns_photometry_of(&db, aux_entry.cross_matches.as_ref()).await;
             let survey_matches = LsstSurveyMatches {
                 ztf: match nearest_ztf {
                     Some(ztf_obj) => {
@@ -425,6 +431,7 @@ pub async fn get_object(
                 fp_hists: aux_entry.fp_hists,
                 cross_matches: serde_json::json!(aux_entry.cross_matches),
                 survey_matches,
+                tns_photometry,
             };
             return response::ok_ser(&format!("object found with object_id: {}", object_id), obj);
         }
@@ -434,6 +441,17 @@ pub async fn get_object(
             );
         }
     }
+}
+
+async fn tns_photometry_of(
+    db: &Database,
+    cross_matches: Option<&HashMap<String, Vec<mongodb::bson::Document>>>,
+) -> Option<TnsPhotometry> {
+    photometry_for_matches(db, cross_matches)
+        .await
+        .inspect_err(|error| tracing::warn!("could not read TNS photometry: {error}"))
+        .ok()
+        .flatten()
 }
 
 fn ztf_bad_formatting_message(value: &str) -> String {
@@ -776,6 +794,12 @@ pub async fn cone_search_objects(
     let mut results: HashMap<String, Vec<SearchObjectResult>> = HashMap::new();
 
     let survey = path.into_inner();
+    if survey != Survey::Ztf && survey != Survey::Lsst {
+        return response::bad_request(&format!(
+            "Unsupported survey: {}. Supported surveys are: ztf, lsst",
+            survey
+        ));
+    }
     let collection = db.collection::<ObjectMini>(&format!("{}_alerts_aux", survey));
     for (object_name, radec) in coordinates {
         if radec.len() != 2 {

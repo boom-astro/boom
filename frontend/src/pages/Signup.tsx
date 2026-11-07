@@ -4,10 +4,15 @@ import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Alert, AlertTitle, AlertDescription } from '@/components/ui/alert';
+import { OAuthButtons } from '@/components/oauth-buttons';
 import * as analytics from '@/lib/analytics';
 
 // Use same-origin proxy; prod nginx should route /api to backend
 const API_BASE = '/api/babamul';
+
+function errorMessage(err: unknown) {
+  return err && typeof err === 'object' && 'message' in err ? String((err as { message?: unknown }).message) : String(err);
+}
 
 export default function SignupPage() {
   const navigate = useNavigate();
@@ -33,6 +38,7 @@ export default function SignupPage() {
     }
   }, [location.search]);
   const [email, setEmail] = useState('');
+  const [name, setName] = useState('');
   const [loading, setLoading] = useState(false);
   const [step, setStep] = useState<'email'|'code'|'done'>('email');
   const [message, setMessage] = useState<string | null>(null);
@@ -48,12 +54,12 @@ export default function SignupPage() {
     setError(null);
     setMessage(null);
     setLoading(true);
-    analytics.trackSignupInitiated({ email });
+    analytics.trackSignupInitiated();
     try {
       const res = await fetch(`${API_BASE}/signup`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email }),
+        body: JSON.stringify({ email, name }),
       });
       if (!res.ok) {
         const txt = await res.text().catch(() => '');
@@ -70,11 +76,10 @@ export default function SignupPage() {
         setMessage('An email has been sent with an activation code. Check your inbox.');
         setStep('code');
       }
-      analytics.trackSignupEmailSubmitted({ email });
+      analytics.trackSignupEmailSubmitted();
     } catch (err: unknown) {
-      const msg = err && typeof err === 'object' && 'message' in err ? String((err as { message?: unknown }).message) : String(err);
-      setError(msg);
-      analytics.trackError('signup_email_submission', err, { email });
+      setError(errorMessage(err));
+      analytics.trackError('signup_email_submission', err);
     } finally {
       setLoading(false);
     }
@@ -84,7 +89,7 @@ export default function SignupPage() {
     e?.preventDefault();
     setError(null);
     setLoading(true);
-    analytics.trackActivationCodeSubmitted({ email });
+    analytics.trackActivationCodeSubmitted();
     try {
       const res = await fetch(`${API_BASE}/activate`, {
         method: 'POST',
@@ -107,11 +112,10 @@ export default function SignupPage() {
         setMessage('An account with this email is already activated.');
         setStep('done');
       }
-      analytics.trackAccountActivated({ email });
+      analytics.trackAccountActivated();
     } catch (err: unknown) {
-      const msg = err && typeof err === 'object' && 'message' in err ? String((err as { message?: unknown }).message) : String(err);
-      setError(msg);
-      analytics.trackError('account_activation', err, { email });
+      setError(errorMessage(err));
+      analytics.trackError('account_activation', err);
     } finally {
       setLoading(false);
     }
@@ -142,11 +146,10 @@ export default function SignupPage() {
         setMessage('An account with this email is already activated.');
         setStep('done');
       }
-      analytics.trackAccountActivated({ email: emailToUse, via_link: true });
+      analytics.trackAccountActivated({ via_link: true });
     } catch (err: unknown) {
-      const msg = err && typeof err === 'object' && 'message' in err ? String((err as { message?: unknown }).message) : String(err);
-      setError(msg);
-      analytics.trackError('auto_account_activation', err, { email: emailToUse });
+      setError(errorMessage(err));
+      analytics.trackError('auto_account_activation', err);
     } finally {
       setLoading(false);
     }
@@ -190,14 +193,21 @@ export default function SignupPage() {
           {step === 'email' && (
             <form onSubmit={submitEmail} className="grid gap-4">
               <div>
+                <label className="text-sm font-medium">Full name</label>
+                <Input value={name} onChange={(e) => setName(e.target.value)} type="text" autoComplete="name" maxLength={100} placeholder="Your full name" required className="mt-1" />
+              </div>
+              <div>
                 <label className="text-sm font-medium">Email</label>
                 <Input value={email} onChange={(e) => setEmail(e.target.value)} type="email" placeholder="you@example.com" required className="mt-1" />
               </div>
               <div className="flex gap-2">
-                <Button type="submit" disabled={loading || !email}>{loading ? 'Sending…' : 'Send activation'}</Button>
+                <Button type="submit" disabled={loading || !email || !name.trim()}>{loading ? 'Sending…' : 'Send activation'}</Button>
               </div>
               {message && <div className="text-sm text-muted-foreground mt-2">{message}</div>}
               {error && <div className="text-sm text-red-600 mt-2">{error}</div>}
+              {/* Social sign-up skips the activation code entirely — the
+                  provider has already verified who the user is. */}
+              <OAuthButtons action="Sign up" />
             </form>
           )}
 

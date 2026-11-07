@@ -23,7 +23,7 @@ volumes:
 
 services:
   mongo-cutouts:
-    image: mongo:8.0
+    image: mongo:8.2
     hostname: mongo-cutouts
     expose:
       - "27017"
@@ -33,6 +33,17 @@ services:
     volumes:
       - ${BOOM_CUTOUTS_MONGO_VOLUME:-mongodb_cutouts}:/data/db
     restart: always
+    ulimits:
+      nofile:
+        soft: 64000
+        hard: 64000
+    deploy:
+      resources:
+        limits:
+          # Same as mongo: without a limit the cache sizes off host RAM. ML
+          # scoring reads a cutout per alert, so a backfill fills it to that
+          # ceiling. 0 = unlimited. See .env.example.
+          memory: ${BOOM_CUTOUTS_MONGO_MEM_LIMIT:-0}
     networks:
       - boom
     healthcheck:
@@ -57,9 +68,19 @@ services:
     <<: *mongo_cutouts_env
   consumer-lsst:
     <<: *mongo_cutouts_env
+  consumer-winter:
+    <<: *mongo_cutouts_env
+  consumer-decam:
+    <<: *mongo_cutouts_env
   scheduler-ztf:
     <<: *mongo_cutouts_env
   scheduler-lsst:
+    <<: *mongo_cutouts_env
+  scheduler-winter:
+    <<: *mongo_cutouts_env
+  scheduler-decam:
+    <<: *mongo_cutouts_env
+  task-worker:
     <<: *mongo_cutouts_env
   # Dev-only single ZTF consumer, defined in docker-compose.override.yaml.
   # Gated to the dev profile so it isn't an orphan (no image/build) in prod,

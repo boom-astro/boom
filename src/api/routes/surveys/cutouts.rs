@@ -1,10 +1,12 @@
-use crate::api::cutouts::{AlertCandidOnly, CutoutQuery, WhichCutouts};
+use crate::api::cutouts::{
+    cutouts_to_json, fetch_alert_jds, retrieve_batch_cutouts, validate_batch_candids, AlertJdOnly,
+    BatchCutoutQuery, CutoutQuery, WhichCutouts,
+};
 use crate::api::models::response;
 use crate::utils::cutouts::{CutoutStorage, CutoutStorageError};
 use crate::utils::enums::Survey;
 use crate::utils::lightcurves::Band;
-use actix_web::{get, web, HttpResponse};
-use base64::prelude::*;
+use actix_web::{get, post, web, HttpResponse};
 use mongodb::{bson::doc, Database};
 use std::collections::HashMap;
 
@@ -40,6 +42,7 @@ pub async fn get_cutouts(
             return response::internal_error("cutout storage not available for this survey");
         }
     };
+    let alert_collection = db.collection::<AlertJdOnly>(&format!("{}_alerts", survey));
 
     if let Some(candid) = query.candid {
         let cutouts = match cutout_storage.retrieve_cutouts(candid, false).await {
@@ -52,17 +55,22 @@ pub async fn get_cutouts(
                 return response::internal_error("error retrieving cutouts from storage");
             }
         };
-        let resp = serde_json::json!({
-            "candid": candid,
-            "cutoutScience": BASE64_STANDARD.encode(&cutouts.cutout_science),
-            "cutoutTemplate": BASE64_STANDARD.encode(&cutouts.cutout_template),
-            "cutoutDifference": BASE64_STANDARD.encode(&cutouts.cutout_difference),
-        });
+        let jd = match alert_collection
+            .find_one(doc! { "_id": candid })
+            .projection(doc! { "_id": 1, "candidate.jd": 1 })
+            .await
+        {
+            Ok(alert) => alert.map(|alert| alert.candidate.jd),
+            Err(error) => {
+                return response::internal_error(&format!("error getting documents: {}", error));
+            }
+        };
+        let mut resp = cutouts_to_json(&cutouts);
+        resp["jd"] = jd.into();
         return response::ok(&format!("cutouts found for candid: {}", candid), resp);
     }
 
     if let Some(object_id) = &query.object_id {
-        let alert_collection = db.collection::<AlertCandidOnly>(&format!("{}_alerts", survey));
         // here we first find the alerts matching the object id,
         // sorted according to the "which" parameter (default to brightest),
         // and finally we get the cutouts for the selected alert
@@ -71,6 +79,10 @@ pub async fn get_cutouts(
             .as_ref()
             .unwrap_or(&WhichCutouts::Brightest)
             .clone();
+        let mag_field = match survey {
+            Survey::Decam => "candidate.magap",
+            _ => "candidate.magpsf",
+        };
         let find_options = match which {
             WhichCutouts::First => mongodb::options::FindOneOptions::builder()
                 .sort(doc! { "candidate.jd": 1 })
@@ -79,10 +91,10 @@ pub async fn get_cutouts(
                 .sort(doc! { "candidate.jd": -1 })
                 .build(),
             WhichCutouts::Brightest => mongodb::options::FindOneOptions::builder()
-                .sort(doc! { "candidate.magpsf": 1 }) // Lowest mag is brightest, so sort in ascending order
+                .sort(doc! { mag_field: 1 }) // Lowest mag is brightest, so sort in ascending order
                 .build(),
             WhichCutouts::Faintest => mongodb::options::FindOneOptions::builder()
-                .sort(doc! { "candidate.magpsf": -1 }) // Highest mag is faintest, so sort in descending order
+                .sort(doc! { mag_field: -1 }) // Highest mag is faintest, so sort in descending order
                 .build(),
         };
 
@@ -90,13 +102,13 @@ pub async fn get_cutouts(
         if let Some(band) = &query.band {
             filter.insert("candidate.band", band.to_string());
         }
-        let candid = match alert_collection
+        let (candid, jd) = match alert_collection
             .find_one(filter)
-            .projection(doc! { "_id": 1 })
+            .projection(doc! { "_id": 1, "candidate.jd": 1 })
             .with_options(find_options)
             .await
         {
-            Ok(Some(alert)) => alert.candid,
+            Ok(Some(alert)) => (alert.candid, alert.candidate.jd),
             Ok(None) => {
                 return response::not_found(&format!("no alerts found for objectId {}", object_id));
             }
@@ -119,14 +131,67 @@ pub async fn get_cutouts(
             }
         };
 
-        let resp = serde_json::json!({
-            "candid": candid,
-            "cutoutScience": BASE64_STANDARD.encode(&cutouts.cutout_science),
-            "cutoutTemplate": BASE64_STANDARD.encode(&cutouts.cutout_template),
-            "cutoutDifference": BASE64_STANDARD.encode(&cutouts.cutout_difference),
-        });
+        let mut resp = cutouts_to_json(&cutouts);
+        resp["jd"] = jd.into();
         return response::ok(&format!("cutouts found for objectId: {}", object_id), resp);
     }
 
     response::bad_request("candid or objectId query parameter must be provided")
+}
+
+/// Get image cutouts for a batch of alerts
+///
+/// Returns the cutouts found, in request order, and lists the candids that
+/// have none under `missing` rather than failing the whole request.
+#[utoipa::path(
+    post,
+    path = "/surveys/{survey}/cutouts",
+    params(
+        ("survey" = Survey, Path, description = "Name of the survey (e.g., ztf, lsst)"),
+    ),
+    request_body = BatchCutoutQuery,
+    responses(
+        (status = 200, description = "Cutouts retrieved successfully", body = serde_json::Value),
+        (status = 400, description = "Invalid request"),
+        (status = 500, description = "Internal server error")
+    ),
+    tags=["Surveys"]
+)]
+#[post("/surveys/{survey}/cutouts")]
+pub async fn get_batch_cutouts(
+    path: web::Path<Survey>,
+    body: web::Json<BatchCutoutQuery>,
+    db: web::Data<Database>,
+    cutout_storages: web::Data<HashMap<Survey, CutoutStorage>>,
+) -> HttpResponse {
+    let survey = path.into_inner();
+    let cutout_storage = match cutout_storages.get(&survey) {
+        Some(storage) => storage,
+        None => {
+            return response::internal_error("cutout storage not available for this survey");
+        }
+    };
+    let candids = match validate_batch_candids(&body.candids) {
+        Ok(candids) => candids,
+        Err(message) => return response::bad_request(&message),
+    };
+
+    let alert_collection = db.collection::<AlertJdOnly>(&format!("{}_alerts", survey));
+    let jds = match fetch_alert_jds(&alert_collection, &candids, doc! {}).await {
+        Ok(jds) => jds,
+        Err(error) => {
+            return response::internal_error(&format!("error getting documents: {}", error));
+        }
+    };
+
+    match retrieve_batch_cutouts(cutout_storage, &candids, &jds).await {
+        Ok(data) => response::ok(
+            &format!("cutouts retrieved for {} candids", candids.len()),
+            data,
+        ),
+        Err(error) => {
+            tracing::error!("Error retrieving cutouts from storage: {}", error);
+            response::internal_error("error retrieving cutouts from storage")
+        }
+    }
 }
