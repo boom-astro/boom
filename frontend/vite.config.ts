@@ -16,6 +16,10 @@ const mermaidChunk = [
   "mermaid",
   "cytoscape",
   "katex",
+]
+// Apart from mermaid, so the assistant panel can render markdown without
+// downloading the diagram library.
+const markdownChunk = [
   "react-markdown",
   "remark-gfm",
 ]
@@ -56,6 +60,9 @@ export default defineConfig(({mode}) => {
               // to avoid bloating other chunks
               for (const dep of mermaidChunk) {
                 if (id.includes(dep)) return "mermaid"
+              }
+              for (const dep of markdownChunk) {
+                if (id.includes(dep)) return "markdown"
               }
 
               // Large dependencies in their own chunks to avoid bloating vendor
@@ -105,6 +112,13 @@ export default defineConfig(({mode}) => {
       },
       // Dev proxy to avoid CORS when backend runs on localhost:4000
       proxy: {
+        // The assistant service (boom-mcp) serves its routes under /assistant.
+        // Listed first because Vite uses the first matching entry.
+        '/api/assistant': {
+          target: env.VITE_ASSISTANT_PROXY || 'http://localhost:8000/assistant',
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/api\/assistant/, ''),
+        },
         '/api': {
           // let's have the target be configurable via env var
           target: env.VITE_API_PROXY_TARGET || 'http://localhost:4000',

@@ -333,6 +333,8 @@ services:
         VITE_PUBLIC_POSTHOG_HOST: ${VITE_PUBLIC_POSTHOG_HOST:-}
     environment:
       BOOM_API__DOMAIN: ${BOOM_API__DOMAIN:-api.${DOMAIN?Variable not set}}
+      # Where nginx sends /api/assistant; blank means the `assistant` service below.
+      ASSISTANT_ORIGIN: ${ASSISTANT_ORIGIN:-}
     restart: always
     networks:
       - boom
@@ -355,6 +357,35 @@ services:
       - traefik.http.middlewares.${STACK_NAME?Variable not set}-frontend-compress.compress=true
       - traefik.http.routers.${STACK_NAME?Variable not set}-frontend-http.middlewares=https-redirect,${STACK_NAME?Variable not set}-frontend-compress
       - traefik.http.routers.${STACK_NAME?Variable not set}-frontend-https.middlewares=${STACK_NAME?Variable not set}-frontend-compress
+  # The web app's chat assistant (boom-mcp). The frontend's nginx reaches it at
+  # /api/assistant over the boom network; it is not exposed through Traefik.
+  # Off unless the `assistant` profile is enabled, and it will not start without
+  # ASSISTANT_LLM_URL. While it is down the web app hides the Ask button.
+  assistant:
+    image: ${BOOM_ASSISTANT_IMAGE:-boom-astro/boom-assistant:local}
+    pull_policy: ${BOOM_ASSISTANT_PULL_POLICY:-build}
+    hostname: assistant
+    build:
+      context: https://github.com/leonitousconforti/boom-mcp.git#main
+    environment:
+      # The image serves only /mcp unless this is set.
+      ASSISTANT_ENABLED: "true"
+      # An OpenAI-compatible endpoint (base URL ending in /v1). The key stays
+      # on the server; the browser never sees it.
+      ASSISTANT_LLM_URL: ${ASSISTANT_LLM_URL:-}
+      ASSISTANT_LLM_MODEL: ${ASSISTANT_LLM_MODEL:-}
+      ASSISTANT_LLM_API_KEY: ${ASSISTANT_LLM_API_KEY:-}
+      # Model calls in flight at once; blank means 4.
+      ASSISTANT_CONCURRENCY: ${ASSISTANT_CONCURRENCY:-}
+      # Tool calls run against the API with each user's own token.
+      BABAMUL_API_URL: http://api:${BOOM_API__PORT:-4000}/babamul
+    expose:
+      - "8000"
+    networks:
+      - boom
+    restart: always
+    profiles:
+      - assistant
   consumer-ztf-public:
     # Note: separate consumers for each ZTF program ID to allow independent scaling and isolation of processing
     # (there appears to be an issue when one consumer reads from multiple topics, i.e. one group id with multiple topics)

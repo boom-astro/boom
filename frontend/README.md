@@ -25,6 +25,16 @@ bun run lint
 bun run tsc --noEmit
 ```
 
+## Assistant
+
+The "Ask" button in the header opens a chat panel backed by
+[boom-mcp](https://github.com/leonitousconforti/boom-mcp), which runs the model and its tool
+calls server side with the user's own token. The button only shows when `/api/assistant/health`
+answers. In dev, the Vite server proxies `/api/assistant` to `VITE_ASSISTANT_PROXY`
+(default `http://localhost:8000/assistant`). With the Docker dev stack, add `--profile assistant`
+to the compose command and set `ASSISTANT_LLM_URL` in `.env`. In production, nginx proxies it to
+the `assistant` service.
+
 ## ESLint configuration
 
 This project uses [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react)
