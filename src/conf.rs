@@ -1526,8 +1526,6 @@ pub struct LinkerConfig {
     pub fast_single_night: bool,
     #[serde(default = "default_linker_fast_min_neo_score")]
     pub fast_min_neo_score: f64,
-    #[serde(default)]
-    pub results_filter_id: String,
 }
 
 impl LinkerConfig {
@@ -1633,7 +1631,6 @@ impl Default for LinkerConfig {
             fast_live_every_minutes: 0,
             fast_single_night: false,
             fast_min_neo_score: default_linker_fast_min_neo_score(),
-            results_filter_id: String::new(),
         }
     }
 }

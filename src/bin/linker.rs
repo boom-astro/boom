@@ -6,8 +6,8 @@
 //! across nights, recovers objects seen once a night with THOR over the most
 //! recent `linker.thor_window_nights`, matches what it finds to the MPC
 //! catalog so a known object is stored as a recovery, and stores the tracks.
-//! With `linker.results_filter_id`, each run then publishes the new and
-//! extended unknown tracks on `ZTF_alerts_results`.
+//! Each run then runs the filters that read `track` over the alerts of the
+//! tracks it changed, and publishes what passes on `ZTF_alerts_results`.
 //!
 //! It then links the detections IPAC already identified over the most recent
 //! `linker.recall_window_nights`, stores nothing, and logs how many of those
@@ -528,8 +528,8 @@ async fn publish(db: &mongodb::Database, publisher: Option<&TrackPublisher>) {
         return;
     };
     match publisher.publish(db).await {
-        Ok(published) => info!(published, "published new and extended unknown tracks"),
-        Err(error) => error!(%error, "could not publish tracks"),
+        Ok(published) => info!(published, "ran the track filters"),
+        Err(error) => error!(%error, "could not run the track filters"),
     }
 }
 
@@ -586,10 +586,10 @@ async fn main() {
     let config = AppConfig::from_path(&config_path).expect("failed to load config");
     let db = config.build_db().await.expect("failed to connect to mongo");
     let publisher = match TrackPublisher::new(&config).await {
-        Ok(publisher) if config.linker.persist => publisher,
+        Ok(publisher) if config.linker.persist => Some(publisher),
         Ok(_) => None,
         Err(error) => {
-            error!(%error, "could not set up publishing tracks");
+            error!(%error, "could not set up the track filters");
             None
         }
     };
