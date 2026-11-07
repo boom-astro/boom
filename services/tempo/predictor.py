@@ -82,11 +82,12 @@ class TempoBundle:
         self.horizon_days = float(cfg["horizon_days"])
         self.max_len = int(cfg["max_len"])
 
-        # `stats_file` in a bundle config is usually a bare filename relative to
-        # the bundle, but absolute paths from the training machine also appear.
-        stats_file = Path(str(cfg["stats_file"]))
-        if not stats_file.is_file():
-            stats_file = self.bundle_dir / stats_file.name
+        # Always read from the bundle: configs can carry an absolute path from the
+        # training machine, and stats from any other run normalize without error but
+        # yield wrong scores.
+        if not cfg.get("stats_file"):
+            raise ValueError(f"bundle config does not name a stats_file: {config_path}")
+        stats_file = self.bundle_dir / Path(str(cfg["stats_file"])).name
         if not stats_file.is_file():
             raise FileNotFoundError(f"bundle is missing its feature stats file: {stats_file}")
         self.stats = FeatureStats.load(stats_file)

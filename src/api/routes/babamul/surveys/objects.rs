@@ -2,23 +2,19 @@ use crate::alert::{
     LsstCandidate, LsstForcedPhot, LsstObject, LsstPrvCandidate, ZtfCandidate, ZtfForcedPhot,
     ZtfObject, ZtfPrvCandidate, LSST_ZTF_XMATCH_RADIUS, ZTF_LSST_XMATCH_RADIUS,
 };
-use crate::api::cutouts::AlertCandidOnly;
 use crate::api::models::response;
 use crate::api::routes::babamul::surveys::alerts::{EnrichedLsstAlert, EnrichedZtfAlert};
 use crate::api::routes::babamul::BabamulUser;
 use crate::enrichment::models::{
-    build_triplet, classify_with_service, find_model_spec, HyraxInput, HyraxPredictError,
-    HYRAX_MODELS,
+    classify_with_service, find_model_spec, HyraxInput, HyraxPredictError, HYRAX_MODELS,
 };
 use crate::enrichment::{LsstAlertProperties, ZtfAlertClassifications, ZtfAlertProperties};
-use crate::utils::cutouts::{CutoutStorage, CutoutStorageError};
 use crate::utils::enums::Survey;
 use crate::utils::spatial::Coordinates;
 use crate::utils::tns::{photometry_for_matches, TnsPhotometry};
 use actix_web::{get, post, web, HttpResponse};
 use futures::TryStreamExt;
 use mongodb::{bson::doc, Collection, Database};
-use ndarray::{Array, Dim};
 use regex::Regex;
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -1116,12 +1112,11 @@ pub struct ClassifyObjectQuery {
     model: String,
 }
 
-/// The scored alert, as far as a model is concerned: the candidate block and
-/// whatever enrichment the ingest workers already attached to it.
+/// An alert as a model sees it: the candidate block and whatever enrichment the
+/// ingest workers already attached to it.
 ///
-/// Deliberately its own type rather than a reuse of the object endpoint's response:
-/// the classify path wants the alert whose image is being scored, not the newest
-/// one, and it has no use for cross-survey matches.
+/// Its own type rather than the object endpoint's response: classify sends the
+/// brightest alert, not the newest, and has no use for cross-survey matches.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct ScoredZtfAlert {
     candidate: ZtfCandidate,
@@ -1137,78 +1132,58 @@ struct ScoredLsstAlert {
 }
 
 /// The object's light curve and cross-matches, from its aux document.
-///
-/// A missing aux entry is not fatal — refusing to score an object just because its
-/// light curve has not been backfilled would be worse than reporting empty
-/// photometry and letting the model say it has nothing to work with.
 async fn fetch_object_photometry(
     db: &Database,
     survey: &Survey,
     object_id: &str,
 ) -> Result<(serde_json::Value, serde_json::Value), HttpResponse> {
     let aux_filter = doc! { "_id": object_id };
+    let not_found = || response::not_found(&format!("no object found with id {}", object_id));
 
     match survey {
         Survey::Ztf => {
-            let aux: Option<ZtfObject> = db
+            let aux: ZtfObject = db
                 .collection("ZTF_alerts_aux")
                 .find_one(aux_filter)
                 .await
-                .map_err(aux_lookup_error(object_id))?;
+                .map_err(aux_lookup_error(object_id))?
+                .ok_or_else(not_found)?;
 
-            Ok(match aux {
-                // Limit photometry to programid 1 (public ZTF alerts), as the object
-                // endpoint does.
-                Some(aux) => (
-                    serde_json::json!({
-                        "prv_candidates": aux.prv_candidates
-                            .into_iter()
-                            .filter(|c| c.prv_candidate.programid == 1)
-                            .collect::<Vec<_>>(),
-                        "prv_nondetections": aux.prv_nondetections
-                            .into_iter()
-                            .filter(|c| c.prv_candidate.programid == 1)
-                            .collect::<Vec<_>>(),
-                        "fp_hists": aux.fp_hists
-                            .into_iter()
-                            .filter(|c| c.fp_hist.programid == 1)
-                            .collect::<Vec<_>>(),
-                    }),
-                    serde_json::json!(aux.cross_matches),
-                ),
-                None => (
-                    serde_json::json!({
-                        "prv_candidates": [],
-                        "prv_nondetections": [],
-                        "fp_hists": [],
-                    }),
-                    serde_json::Value::Null,
-                ),
-            })
+            // Limit photometry to programid 1 (public ZTF alerts), as the object
+            // endpoint does.
+            Ok((
+                serde_json::json!({
+                    "prv_candidates": aux.prv_candidates
+                        .into_iter()
+                        .filter(|c| c.prv_candidate.programid == 1)
+                        .collect::<Vec<_>>(),
+                    "prv_nondetections": aux.prv_nondetections
+                        .into_iter()
+                        .filter(|c| c.prv_candidate.programid == 1)
+                        .collect::<Vec<_>>(),
+                    "fp_hists": aux.fp_hists
+                        .into_iter()
+                        .filter(|c| c.fp_hist.programid == 1)
+                        .collect::<Vec<_>>(),
+                }),
+                serde_json::json!(aux.cross_matches),
+            ))
         }
         Survey::Lsst => {
-            let aux: Option<LsstObject> = db
+            let aux: LsstObject = db
                 .collection("LSST_alerts_aux")
                 .find_one(aux_filter)
                 .await
-                .map_err(aux_lookup_error(object_id))?;
+                .map_err(aux_lookup_error(object_id))?
+                .ok_or_else(not_found)?;
 
-            Ok(match aux {
-                Some(aux) => (
-                    serde_json::json!({
-                        "prv_candidates": aux.prv_candidates,
-                        "fp_hists": aux.fp_hists,
-                    }),
-                    serde_json::json!(aux.cross_matches),
-                ),
-                None => (
-                    serde_json::json!({
-                        "prv_candidates": [],
-                        "fp_hists": [],
-                    }),
-                    serde_json::Value::Null,
-                ),
-            })
+            Ok((
+                serde_json::json!({
+                    "prv_candidates": aux.prv_candidates,
+                    "fp_hists": aux.fp_hists,
+                }),
+                serde_json::json!(aux.cross_matches),
+            ))
         }
         _ => Err(response::bad_request(
             "Invalid survey specified, only ZTF and LSST are supported",
@@ -1227,142 +1202,66 @@ fn aux_lookup_error(object_id: &str) -> impl Fn(mongodb::error::Error) -> HttpRe
     }
 }
 
-/// Candid of the alert a classify request should score: the object's brightest
-/// public alert, matching the default the cutouts endpoint uses so the scored image
-/// is the one the UI is showing.
-///
-/// `None` when the object has no alert to point at, or the lookup failed. Neither is
-/// fatal: it costs the run its cutouts and its alert metadata, not the run itself.
-async fn find_brightest_candid(db: &Database, survey: &Survey, object_id: &str) -> Option<i64> {
-    let mut filter = doc! { "objectId": object_id };
-    if *survey == Survey::Ztf {
-        filter.insert("candidate.programid", 1);
-    }
-    let alert_collection = db.collection::<AlertCandidOnly>(&format!("{}_alerts", survey));
-    match alert_collection
-        .find_one(filter)
-        .projection(doc! { "_id": 1 })
-        .with_options(
-            mongodb::options::FindOneOptions::builder()
-                // Lowest mag is brightest, so sort in ascending order
-                .sort(doc! { "candidate.magpsf": 1 })
-                .build(),
-        )
-        .await
-    {
-        Ok(Some(alert)) => Some(alert.candid),
-        Ok(None) => {
-            tracing::debug!(object = object_id, "object has no alert to score");
-            None
-        }
-        Err(error) => {
-            tracing::warn!(object = object_id, %error, "could not find the brightest alert");
-            None
-        }
-    }
-}
-
-/// The cutout triplet of `candid`, or `None` if it cannot be built.
-///
-/// Every failure here is logged and swallowed: cutouts that were never stored, or a
-/// storage backend that is down, should not stop a model that scores the light curve
-/// from running.
-async fn fetch_triplet(
-    cutout_storages: &HashMap<Survey, CutoutStorage>,
+/// The object's brightest public alert as JSON, the same default the cutouts
+/// endpoint shows. `Null` when it cannot be read: it is context for the model, so
+/// losing it does not fail the run.
+async fn fetch_brightest_alert(
+    db: &Database,
     survey: &Survey,
-    candid: i64,
-) -> Option<Array<f32, Dim<[usize; 4]>>> {
-    let storage = match cutout_storages.get(survey) {
-        Some(storage) => storage,
-        None => {
-            tracing::warn!(%survey, "no cutout storage configured for this survey");
-            return None;
-        }
-    };
-
-    let cutouts = match storage.retrieve_cutouts(candid, false).await {
-        Ok(cutouts) => cutouts,
-        Err(CutoutStorageError::CutoutsNotFound) => {
-            tracing::debug!(candid, "no cutouts stored for this alert");
-            return None;
-        }
-        Err(error) => {
-            tracing::warn!(candid, %error, "error retrieving cutouts from storage");
-            return None;
-        }
-    };
-
-    match build_triplet(&[&cutouts]) {
-        Ok(triplet) => Some(triplet),
-        Err(error) => {
-            tracing::warn!(candid, %error, "could not build a cutout triplet");
-            None
-        }
-    }
-}
-
-/// The scored alert's own document, as JSON. `Null` when it cannot be read.
-async fn fetch_scored_alert(db: &Database, survey: &Survey, candid: i64) -> serde_json::Value {
-    let filter = doc! { "_id": candid };
+    object_id: &str,
+) -> serde_json::Value {
+    let mut filter = doc! { "objectId": object_id };
+    // Lowest mag is brightest.
+    let sort = doc! { "candidate.magpsf": 1 };
     let alert = match survey {
-        Survey::Ztf => db
-            .collection::<ScoredZtfAlert>("ZTF_alerts")
-            .find_one(filter)
-            .await
-            .map(|alert| serde_json::to_value(alert).ok()),
+        Survey::Ztf => {
+            filter.insert("candidate.programid", 1);
+            db.collection::<ScoredZtfAlert>("ZTF_alerts")
+                .find_one(filter)
+                .sort(sort)
+                .await
+                .map(|alert| alert.map(serde_json::to_value))
+        }
         Survey::Lsst => db
             .collection::<ScoredLsstAlert>("LSST_alerts")
             .find_one(filter)
+            .sort(sort)
             .await
-            .map(|alert| serde_json::to_value(alert).ok()),
+            .map(|alert| alert.map(serde_json::to_value)),
         _ => return serde_json::Value::Null,
     };
 
     match alert {
-        Ok(Some(alert)) => alert,
+        Ok(Some(Ok(alert))) => alert,
         Ok(None) => serde_json::Value::Null,
+        Ok(Some(Err(error))) => {
+            tracing::warn!(object = object_id, %error, "could not serialize the brightest alert");
+            serde_json::Value::Null
+        }
         Err(error) => {
-            tracing::warn!(candid, %error, "could not read the scored alert");
+            tracing::warn!(object = object_id, %error, "could not read the brightest alert");
             serde_json::Value::Null
         }
     }
 }
 
-/// Gather everything the API knows about an object, for any model run: its light
-/// curve, the cutout triplet of its brightest alert, and the metadata describing
-/// that alert.
-///
-/// Assembled in full regardless of what the chosen model reads, so that adding a
-/// model which wants images or candidate features is a change to what gets forwarded
-/// rather than a change to what gets collected.
-///
-/// Only the photometry lookup can fail the request. The candid, cutouts and scored
-/// alert are best-effort: a model that needs an image reports that itself, which
-/// beats refusing to run a light-curve model on an object whose cutouts were never
-/// stored.
+/// Gather what a model run sends: the object's light curve, plus its brightest
+/// alert and cross-matches as metadata.
 async fn fetch_hyrax_object_inputs(
     db: &Database,
-    cutout_storages: &HashMap<Survey, CutoutStorage>,
     survey: &Survey,
     object_id: &str,
 ) -> Result<HyraxInput, HttpResponse> {
-    let (photometry, cross_matches) = fetch_object_photometry(db, survey, object_id).await?;
-
-    let candid = find_brightest_candid(db, survey, object_id).await;
-    let (triplet, alert) = match candid {
-        Some(candid) => (
-            fetch_triplet(cutout_storages, survey, candid).await,
-            fetch_scored_alert(db, survey, candid).await,
-        ),
-        None => (None, serde_json::Value::Null),
-    };
+    let (photometry, alert) = futures::join!(
+        fetch_object_photometry(db, survey, object_id),
+        fetch_brightest_alert(db, survey, object_id),
+    );
+    let (photometry, cross_matches) = photometry?;
 
     Ok(HyraxInput {
-        triplet,
         photometry,
         metadata: serde_json::json!({
             "objectId": object_id,
-            "candid": candid,
             "survey": survey.to_string(),
             "alert": alert,
             "cross_matches": cross_matches,
@@ -1404,8 +1303,9 @@ pub struct ClassifyObjectResult {
     request_body = ClassifyObjectQuery,
     responses(
         (status = 200, description = "Classification result", body = ClassifyObjectResult),
-        (status = 400, description = "Unknown model, model not supported for this survey, or the object could not be classified"),
-        (status = 503, description = "The model's inference service is unreachable"),
+        (status = 400, description = "Unknown model, model not supported for this survey, or the object's data gave the model nothing to score"),
+        (status = 404, description = "Object not found"),
+        (status = 503, description = "The model's inference service is unreachable or not ready"),
         (status = 500, description = "Internal server error")
     ),
     tags=["Surveys"]
@@ -1415,7 +1315,6 @@ pub async fn classify_object(
     path: web::Path<(Survey, String)>,
     query: web::Json<ClassifyObjectQuery>,
     db: web::Data<Database>,
-    cutout_storages: web::Data<HashMap<Survey, CutoutStorage>>,
 ) -> HttpResponse {
     let (survey, object_id) = path.into_inner();
     let model_id = query.into_inner().model;
@@ -1435,8 +1334,7 @@ pub async fn classify_object(
     // Nothing else is checked before the run: a model whose service is not running
     // fails below, with the reason the service gives, rather than being refused here.
 
-    // Gathered in full for every model, whether or not this one reads all of it.
-    let input = match fetch_hyrax_object_inputs(&db, &cutout_storages, &survey, &object_id).await {
+    let input = match fetch_hyrax_object_inputs(&db, &survey, &object_id).await {
         Ok(input) => input,
         Err(response) => return response,
     };
@@ -1453,36 +1351,16 @@ pub async fn classify_object(
                 n_events_used: result.n_events_used,
             },
         ),
-        Err(HyraxPredictError::ServiceUnreachable { url, reason }) => {
-            tracing::error!(
-                model = spec.id,
-                url,
-                reason,
-                "Hyrax inference service is unreachable"
-            );
-            response::service_unavailable(&format!(
-                "Model {} is not available: its inference service could not be reached",
-                spec.id
-            ))
-        }
-        Err(HyraxPredictError::ServiceStatus { status, detail }) => {
-            tracing::error!(
-                model = spec.id,
-                status,
-                detail,
-                "Hyrax inference service refused the request"
-            );
-            // A 4xx means the object is the problem — no usable photometry, most
-            // often — so report it as such and pass the service's own message
-            // through rather than flattening it into a server fault.
-            if (400..500).contains(&status) {
-                response::bad_request(&format!(
-                    "Model {} could not classify {}: {}",
-                    spec.id, object_id, detail
-                ))
-            } else {
-                response::internal_error(&format!("error running model {}: {}", spec.id, detail))
-            }
+        Err(HyraxPredictError::Unclassifiable { detail }) => response::bad_request(&format!(
+            "Model {} could not classify {}: {}",
+            spec.id, object_id, detail
+        )),
+        Err(
+            error @ (HyraxPredictError::ServiceUnreachable { .. }
+            | HyraxPredictError::ServiceNotReady { .. }),
+        ) => {
+            tracing::error!(model = spec.id, %error, "Hyrax inference service is unavailable");
+            response::service_unavailable(&format!("Model {} is not available", spec.id))
         }
         Err(error) => {
             tracing::error!(model = spec.id, %error, "Hyrax inference failed");

@@ -14,8 +14,8 @@ pub use base::{
 pub use btsbot::BtsBotModel;
 pub use cider::CiderFusionModel;
 pub use hyrax::{
-    build_triplet, classify_with_service, find_model_spec, HyraxInput, HyraxModelSpec,
-    HyraxPredictError, HYRAX_MODELS,
+    classify_with_service, find_model_spec, HyraxInput, HyraxModelSpec, HyraxPredictError,
+    HYRAX_MODELS,
 };
 
 #[cfg(all(feature = "gpu", target_os = "linux"))]

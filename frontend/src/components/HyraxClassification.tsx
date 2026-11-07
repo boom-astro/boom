@@ -252,7 +252,7 @@ export default function HyraxClassification() {
                 <div className="flex items-start gap-2">
                   <span className="font-medium">3. Read the scores:</span>
                   <span>
-                    Every class is listed, sorted by probability. Bars are colour-coded green
+                    Every class is listed, sorted by probability. Bars are color-coded green
                     (&gt;70%), yellow (40–70%), red (&lt;40%). Evidential models also report{' '}
                     <span className="font-medium">vacuity</span> — how little evidence they had,
                     where a high value means the probabilities rest on very little light curve.

@@ -13,10 +13,7 @@
 //! listed and can be selected, and a service that turns out not to be running fails
 //! the run it was asked for rather than being filtered out of the list.
 
-use crate::enrichment::models::{AcaiModel, Model, ModelError};
-use crate::utils::cutouts::AlertCutout;
 use crate::utils::enums::Survey;
-use ndarray::{Array, Dim};
 use std::collections::HashMap;
 use std::sync::LazyLock;
 use tracing::instrument;
@@ -33,7 +30,7 @@ pub struct HyraxModelSpec {
     /// Environment variable holding the service's base URL, so a deployment can move
     /// the sidecar without a rebuild.
     pub url_env: &'static str,
-    /// Base URL used when `url_env` is unset.
+    /// Base URL used when `url_env` is unset or empty.
     pub default_url: &'static str,
     /// Whether to send forced photometry alongside the alert magnitudes. Forced
     /// photometry re-measures the same epochs, so it changes what the model sees.
@@ -46,7 +43,12 @@ impl HyraxModelSpec {
     /// Base URL of the model's service, with any trailing slash removed so callers
     /// can append `/classify` without doubling the separator.
     pub fn base_url(&self) -> String {
-        let url = std::env::var(self.url_env).unwrap_or_else(|_| self.default_url.to_string());
+        // Empty counts as unset: compose renders `${VAR:-}` as `VAR=` everywhere it
+        // is not configured.
+        let url = std::env::var(self.url_env)
+            .ok()
+            .filter(|url| !url.is_empty())
+            .unwrap_or_else(|| self.default_url.to_string());
         url.trim_end_matches('/').to_string()
     }
 }
@@ -68,47 +70,36 @@ pub fn find_model_spec(id: &str) -> Option<&'static HyraxModelSpec> {
     HYRAX_MODELS.iter().find(|spec| spec.id == id)
 }
 
-/// Everything the API can gather about an object, assembled for every model run
-/// whether or not the model asked for all of it.
-///
-/// Kept whole so that adding a model which wants images or candidate features is a
-/// change to what gets forwarded, not a change to what gets collected.
+/// What the API sends a model's service about one object.
 ///
 /// The photometry and metadata are `serde_json::Value` rather than typed structs
 /// because ZTF and LSST objects carry differently shaped candidates and light
 /// curves; a model that wants a specific field reads it by name.
 #[derive(Debug)]
 pub struct HyraxInput {
-    /// (1, 63, 63, 3) cutout triplet of the object's brightest alert.
-    ///
-    /// `None` when the object has no alert to point at or its cutouts were never
-    /// stored. Absent rather than fatal: a model that needs an image should say so
-    /// itself, which beats refusing to run a light-curve model on an object whose
-    /// cutouts happen to be missing.
-    pub triplet: Option<Array<f32, Dim<[usize; 4]>>>,
     /// Light curve: previous candidates, non-detections and forced photometry.
     pub photometry: serde_json::Value,
-    /// The scored alert's candidate block and enrichment, plus cross-matches.
+    /// The object's brightest alert (candidate block and enrichment), plus
+    /// cross-matches.
     pub metadata: serde_json::Value,
-}
-
-/// Build the (N, 63, 63, 3) triplet for a set of cutouts.
-///
-/// [`Model::get_triplet`] is a provided trait method that takes no receiver and
-/// never touches `Self`, but Rust still needs an implementor to name it through.
-/// Any would do; naming one here keeps that quirk out of the call site.
-pub fn build_triplet(cutouts: &[&AlertCutout]) -> Result<Array<f32, Dim<[usize; 4]>>, ModelError> {
-    AcaiModel::get_triplet(cutouts)
 }
 
 /// Why a model run failed. Each variant maps to a different HTTP status.
 #[derive(Debug, thiserror::Error)]
 pub enum HyraxPredictError {
-    /// The sidecar could not be reached at all — not running, or the URL is wrong.
+    /// The sidecar could not be reached at all — not running, the URL is wrong, or
+    /// it did not answer in time.
     #[error("inference service at {url} is unreachable: {reason}")]
     ServiceUnreachable { url: String, reason: String },
-    /// The sidecar answered, but refused the request. `detail` is its own message,
-    /// forwarded verbatim so the caller sees why rather than a generic failure.
+    /// The sidecar is up but its model is not loaded.
+    #[error("inference service is not ready: {detail}")]
+    ServiceNotReady { detail: String },
+    /// The sidecar ran, but the object's data gave the model nothing to score.
+    /// `detail` is the sidecar's own message, meant for the caller.
+    #[error("object could not be classified: {detail}")]
+    Unclassifiable { detail: String },
+    /// Any other refusal, which points at the deployment rather than the object: a
+    /// model-id mismatch, a wrong URL, or a request the sidecar no longer accepts.
     #[error("inference service returned {status}: {detail}")]
     ServiceStatus { status: u16, detail: String },
     /// The sidecar answered with something that is not a classification.
@@ -118,12 +109,13 @@ pub enum HyraxPredictError {
 
 /// Shared client for the inference sidecars.
 ///
-/// One client process-wide so connections are pooled across requests. The timeout is
-/// generous because a cold sidecar may still be loading its checkpoint, but bounded
-/// so a wedged service cannot pin an actix worker indefinitely.
+/// One client process-wide so connections are pooled across requests. The total
+/// timeout stays under nginx's default 60s `proxy_read_timeout`, so the client gets
+/// this API's 503 rather than a gateway error.
 static SERVICE_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
     reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .timeout(std::time::Duration::from_secs(50))
         .build()
         .expect("failed to build the Hyrax inference HTTP client")
 });
@@ -155,12 +147,7 @@ struct ServiceError {
 /// reshaping, next to the model that defines what shape it wants. The metadata rides
 /// along for models that want candidate features; a service that has no use for it
 /// ignores it.
-///
-/// [`HyraxInput::triplet`] is deliberately not sent. Serializing a 63x63x3 float
-/// array into JSON on every call would cost far more than the models that ignore it
-/// can justify — an image model wants a binary encoding negotiated with its service,
-/// not this.
-#[instrument(skip_all, fields(model = spec.id, object = object_id), err)]
+#[instrument(skip_all, fields(model = spec.id, object = object_id))]
 pub async fn classify_with_service(
     spec: &'static HyraxModelSpec,
     object_id: &str,
@@ -188,12 +175,18 @@ pub async fn classify_with_service(
         // Read the body as text first: an unreachable-but-listening proxy answers
         // with HTML, which would fail to parse as FastAPI's error shape.
         let body = response.text().await.unwrap_or_default();
-        let detail = serde_json::from_str::<ServiceError>(&body)
-            .map(|error| error.detail)
-            .unwrap_or(body);
-        return Err(HyraxPredictError::ServiceStatus {
-            status: status.as_u16(),
-            detail,
+        // FastAPI's own request-validation 422 carries a list, not a string, so only
+        // a string `detail` is the sidecar speaking about the object.
+        let detail = serde_json::from_str::<ServiceError>(&body).map(|error| error.detail);
+        return Err(match (status.as_u16(), detail) {
+            (422, Ok(detail)) => HyraxPredictError::Unclassifiable { detail },
+            (503, detail) => HyraxPredictError::ServiceNotReady {
+                detail: detail.unwrap_or(body),
+            },
+            (status, detail) => HyraxPredictError::ServiceStatus {
+                status,
+                detail: detail.unwrap_or(body),
+            },
         });
     }
 

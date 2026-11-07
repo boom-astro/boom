@@ -451,27 +451,11 @@ export type HyraxClassification = {
   n_events_used?: number;
 };
 
-/** Pull the server's error message out of an API error body, falling back to the status. */
-async function classifyErrorMessage(res: Response): Promise<string> {
-  const txt = await res.text().catch(() => "");
-  try {
-    const parsed = JSON.parse(txt);
-    if (parsed && typeof parsed.message === "string") return parsed.message;
-  } catch {
-    // Not JSON — fall through to the raw body.
-  }
-  return txt || `Request failed with status ${res.status}`;
-}
-
 export async function fetchClassificationModels(survey: string): Promise<ClassificationModel[]> {
   const url = `${API_BASE}/surveys/${encodeURIComponent(survey)}/classification-models`;
   const res = await fetchWithAuth(url);
-  if (!res.ok) {
-    throw new Error(await classifyErrorMessage(res));
-  }
-  const body = await parseResponseJson(res).catch(() => ({}));
-  const models = unwrapData<ClassificationModel[]>(body, []);
-  return Array.isArray(models) ? models : [];
+  await ensureOk(res, "Fetching classification models");
+  return readList<ClassificationModel>(res);
 }
 
 export async function classifyObject(
@@ -485,11 +469,8 @@ export async function classifyObject(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ model }),
   });
-  if (!res.ok) {
-    throw new Error(await classifyErrorMessage(res));
-  }
-  const body = await parseResponseJson(res).catch(() => ({}));
-  return unwrapData<HyraxClassification>(body, {} as HyraxClassification);
+  await ensureOk(res, `Running ${model}`);
+  return unwrapData<HyraxClassification>(await parseResponseJson(res), {});
 }
 
 export type NightlyStat = {
