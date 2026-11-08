@@ -364,11 +364,11 @@ services:
     pull_policy: ${TEMPO_INFERENCE_PULL_POLICY:-build}
     hostname: tempo-inference
     build:
-      context: services/tempo
+      # Repo root, so the image can copy the bundle from data/models/tempo.
+      context: .
+      dockerfile: services/tempo/Dockerfile
     environment:
       TEMPO_BUNDLE_DIR: /models/tempo
-    volumes:
-      - ${TEMPO_BUNDLE_HOST_DIR:-./data/tempo}:/models/tempo:ro
     networks:
       - boom
     restart: always

@@ -6,7 +6,7 @@ WORKDIR /app
 # PyPI wheel bundles CUDA libraries several GB in size.
 RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu "torch>=2.9,<3"
 
-COPY requirements.txt .
+COPY services/tempo/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Pinned to a commit so a push upstream cannot change the preprocessing under a
@@ -15,7 +15,9 @@ ARG TEMPO_HYRAX_REF=509931b05b3678fac7d712a9f78ed3440f08cfc5
 RUN pip install --no-cache-dir --no-deps \
     "https://github.com/frenbox/hyrax_tempo/archive/${TEMPO_HYRAX_REF}.tar.gz"
 
-COPY app.py predictor.py ./
+# Baked in so each image carries the bundle its commit was reviewed with.
+COPY data/models/tempo /models/tempo
+COPY services/tempo/app.py services/tempo/predictor.py ./
 
 USER nobody
 EXPOSE 8500

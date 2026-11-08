@@ -74,6 +74,7 @@ class TempoBundle:
         config_path = self.bundle_dir / "config.json"
         if not config_path.is_file():
             raise FileNotFoundError(f"bundle is missing config.json: {config_path}")
+        _require_lfs_content(config_path)
         raw_config = json.loads(config_path.read_text())
         cfg = {**_MODEL_DEFAULTS, **raw_config}
 
@@ -90,6 +91,7 @@ class TempoBundle:
         stats_file = self.bundle_dir / Path(str(cfg["stats_file"])).name
         if not stats_file.is_file():
             raise FileNotFoundError(f"bundle is missing its feature stats file: {stats_file}")
+        _require_lfs_content(stats_file)
         self.stats = FeatureStats.load(stats_file)
         self._mean = self.stats.mean.view(1, 1, 4)
         self._std = self.stats.std.view(1, 1, 4)
@@ -106,6 +108,7 @@ class TempoBundle:
         checkpoint_path = self.bundle_dir / "best_evidential.pt"
         if not checkpoint_path.is_file():
             raise FileNotFoundError(f"bundle is missing best_evidential.pt: {checkpoint_path}")
+        _require_lfs_content(checkpoint_path)
         state = _load_state_dict(checkpoint_path)
         # Strict: a silently partial load produces confident nonsense rather than
         # an error, which is far worse than refusing to start.
@@ -187,15 +190,19 @@ class TempoBundle:
         }
 
 
+_LFS_POINTER_PREFIX = b"version https://git-lfs.github.com/spec/"
+
+
+def _require_lfs_content(path: Path) -> None:
+    """Fail clearly on a checkout made without `git lfs pull`, which leaves pointer stubs."""
+    with path.open("rb") as handle:
+        if handle.read(len(_LFS_POINTER_PREFIX)) == _LFS_POINTER_PREFIX:
+            raise RuntimeError(f"{path} is a Git LFS pointer, not the file; run `git lfs pull`")
+
+
 def _load_state_dict(path: Path):
     """Read a checkpoint, tolerating both bare state_dicts and {"model": ...} wrappers."""
-    try:
-        checkpoint = torch.load(path, map_location="cpu", weights_only=True)
-    except Exception:
-        # Older bundles pickle more than tensors; they are operator-supplied files,
-        # not user input, so falling back to a full unpickle is acceptable here.
-        log.warning("%s could not be loaded with weights_only=True; retrying", path)
-        checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+    checkpoint = torch.load(path, map_location="cpu", weights_only=True)
     if isinstance(checkpoint, dict) and "model" in checkpoint:
         return checkpoint["model"]
     return checkpoint
