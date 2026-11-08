@@ -198,3 +198,145 @@ pub async fn classify_with_service(
             reason: error.to_string(),
         })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{BufRead, BufReader, Read, Write};
+
+    /// Answer one request on a fresh port with `status` and `body`, and return the
+    /// base URL. The request is read in full first, so closing cannot reset it.
+    fn serve_once(status: &'static str, body: &'static str) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(&stream);
+            let mut content_length = 0;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    content_length = value.trim().parse().unwrap();
+                }
+            }
+            reader.read_exact(&mut vec![0; content_length]).unwrap();
+            write!(
+                &stream,
+                "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+        });
+        url
+    }
+
+    fn spec_at(url: String) -> &'static HyraxModelSpec {
+        Box::leak(Box::new(HyraxModelSpec {
+            id: "test_model",
+            name: "Test",
+            description: "",
+            url_env: "BOOM_TEST_HYRAX_URL_NEVER_SET",
+            default_url: Box::leak(url.into_boxed_str()),
+            include_forced_photometry: false,
+            surveys: &[],
+        }))
+    }
+
+    async fn classify(url: String) -> Result<ServiceClassification, HyraxPredictError> {
+        let input = HyraxInput {
+            photometry: serde_json::json!({ "prv_candidates": [] }),
+            metadata: serde_json::Value::Null,
+        };
+        classify_with_service(spec_at(url), "ZTF24aaaaaaa", &input).await
+    }
+
+    #[tokio::test]
+    async fn success_is_parsed() {
+        let url = serve_once(
+            "200 OK",
+            r#"{"classes":{"SN Ia":0.9,"AGN":0.1},"pred_class":"SN Ia","vacuity":0.2,"predictive_entropy":0.3,"n_events_used":12}"#,
+        );
+        let result = classify(url).await.unwrap();
+        assert_eq!(result.pred_class, "SN Ia");
+        assert_eq!(result.n_events_used, 12);
+    }
+
+    #[tokio::test]
+    async fn sidecar_422_with_message_is_the_object() {
+        let url = serve_once(
+            "422 Unprocessable Entity",
+            r#"{"detail":"no usable photometry"}"#,
+        );
+        match classify(url).await {
+            Err(HyraxPredictError::Unclassifiable { detail }) => {
+                assert_eq!(detail, "no usable photometry")
+            }
+            other => panic!("expected Unclassifiable, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn validation_422_is_the_deployment() {
+        let url = serve_once(
+            "422 Unprocessable Entity",
+            r#"{"detail":[{"loc":["body","object_id"],"msg":"field required"}]}"#,
+        );
+        assert!(matches!(
+            classify(url).await,
+            Err(HyraxPredictError::ServiceStatus { status: 422, .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn sidecar_503_is_not_ready_even_without_json() {
+        let url = serve_once("503 Service Unavailable", "<html>bad gateway</html>");
+        assert!(matches!(
+            classify(url).await,
+            Err(HyraxPredictError::ServiceNotReady { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn other_4xx_is_the_deployment() {
+        let url = serve_once(
+            "400 Bad Request",
+            r#"{"detail":"unknown model: test_model"}"#,
+        );
+        match classify(url).await {
+            Err(HyraxPredictError::ServiceStatus {
+                status: 400,
+                detail,
+            }) => {
+                assert_eq!(detail, "unknown model: test_model")
+            }
+            other => panic!("expected ServiceStatus 400, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn closed_port_is_unreachable() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        assert!(matches!(
+            classify(url).await,
+            Err(HyraxPredictError::ServiceUnreachable { .. })
+        ));
+    }
+
+    #[test]
+    fn empty_url_env_falls_back_to_default() {
+        let spec = HyraxModelSpec {
+            url_env: "BOOM_TEST_HYRAX_URL_EMPTY",
+            ..*spec_at("http://default:8500/".to_string())
+        };
+        std::env::set_var(spec.url_env, "");
+        assert_eq!(spec.base_url(), "http://default:8500");
+        std::env::set_var(spec.url_env, "http://elsewhere:9000");
+        assert_eq!(spec.base_url(), "http://elsewhere:9000");
+    }
+}

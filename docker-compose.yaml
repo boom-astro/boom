@@ -236,6 +236,8 @@ services:
       BOOM_MILVUS__PASSWORD: ${BOOM_MILVUS__PASSWORD:-}
       BOOM_MILVUS__DATABASE: ${BOOM_MILVUS__DATABASE:-}
       BOOM_BABAMUL__WEBAPP_URL: ${BOOM_BABAMUL__WEBAPP_URL:-}
+      # Base URL of the TEMPO inference service; blank means tempo-inference below.
+      TEMPO_SERVICE_URL: ${TEMPO_SERVICE_URL:-}
       # Whether the API will create accounts. Pair it with VITE_PRERELEASE_MODE
       # below, which only decides what the web app offers.
       BOOM_BABAMUL__REGISTRATION_ENABLED: ${BOOM_BABAMUL__REGISTRATION_ENABLED:-true}
@@ -355,6 +357,32 @@ services:
       - traefik.http.middlewares.${STACK_NAME?Variable not set}-frontend-compress.compress=true
       - traefik.http.routers.${STACK_NAME?Variable not set}-frontend-http.middlewares=https-redirect,${STACK_NAME?Variable not set}-frontend-compress
       - traefik.http.routers.${STACK_NAME?Variable not set}-frontend-https.middlewares=${STACK_NAME?Variable not set}-frontend-compress
+  # On-demand TEMPO classification for the API's classify route. Distinct from
+  # `tempo` below, which is Grafana Tempo (tracing). See services/tempo/README.md.
+  tempo-inference:
+    image: ${TEMPO_INFERENCE_IMAGE:-boom-astro/tempo-inference:local}
+    pull_policy: ${TEMPO_INFERENCE_PULL_POLICY:-build}
+    hostname: tempo-inference
+    build:
+      context: services/tempo
+    environment:
+      TEMPO_BUNDLE_DIR: /models/tempo
+    volumes:
+      - ${TEMPO_BUNDLE_HOST_DIR:-./data/tempo}:/models/tempo:ro
+    networks:
+      - boom
+    restart: always
+    healthcheck:
+      # Unhealthy until a bundle is loaded; the API reports 503 meanwhile.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8500/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    profiles:
+      - prod
+      - api
+      - dev
   consumer-ztf-public:
     # Note: separate consumers for each ZTF program ID to allow independent scaling and isolation of processing
     # (there appears to be an issue when one consumer reads from multiple topics, i.e. one group id with multiple topics)

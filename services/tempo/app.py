@@ -9,6 +9,8 @@ never has to reshape a light curve; the ZTF-table -> event-array conversion
 happens here, in `tempo_hyrax.raw_photometry`, next to the model that defines it.
 
     TEMPO_BUNDLE_DIR=/models/tempo uvicorn app:app --host 0.0.0.0 --port 8500
+
+In compose this is the `tempo-inference` service; see services/tempo/README.md.
 """
 from __future__ import annotations
 
@@ -98,6 +100,12 @@ def _ready() -> TempoBundle:
         )
         raise HTTPException(status_code=503, detail=detail)
     return _bundle
+
+
+@app.get("/health")
+def health() -> dict[str, str]:
+    _ready()
+    return {"status": "ok", "model": MODEL_ID}
 
 
 @app.post("/classify")
