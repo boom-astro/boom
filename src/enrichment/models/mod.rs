@@ -3,6 +3,7 @@ pub mod applecider_postprocess;
 mod base;
 mod btsbot;
 mod cider;
+mod hyrax;
 
 pub use acai::AcaiModel;
 pub use applecider_postprocess::AppleCiderOutputs;
@@ -12,6 +13,10 @@ pub use base::{
 };
 pub use btsbot::BtsBotModel;
 pub use cider::CiderFusionModel;
+pub use hyrax::{
+    classify_with_service, find_model_spec, HyraxInput, HyraxModelSpec, HyraxPredictError,
+    HYRAX_MODELS,
+};
 
 #[cfg(all(feature = "gpu", target_os = "linux"))]
 use villar_pso::gpu::{GpuContext, Stream};

@@ -5914,4 +5914,171 @@ mod tests {
             .await
             .unwrap();
     }
+
+    /// Test GET /babamul/surveys/{survey}/classification-models
+    #[actix_rt::test]
+    async fn test_get_classification_models() {
+        load_dotenv();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+        let test_user = TestUser::create(&database, &auth_app_data).await;
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(database.clone()))
+                .app_data(web::Data::new(auth_app_data))
+                .service(
+                    web::scope("/babamul")
+                        .wrap(from_fn(babamul_auth_middleware))
+                        .service(routes::babamul::surveys::get_classification_models),
+                ),
+        )
+        .await;
+
+        let list = |survey: &str| {
+            test::TestRequest::get()
+                .uri(&format!(
+                    "/babamul/surveys/{}/classification-models",
+                    survey
+                ))
+                .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+                .to_request()
+        };
+
+        let resp = test::call_service(&app, list("ztf")).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = read_json_response(resp).await;
+        let ids: Vec<&str> = body["data"]
+            .as_array()
+            .expect("data should be an array")
+            .iter()
+            .map(|model| model["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, vec!["tempo_evidential"]);
+
+        let resp = test::call_service(&app, list("lsst")).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = read_json_response(resp).await;
+        assert_eq!(body["data"], serde_json::json!([]));
+
+        let req = test::TestRequest::get()
+            .uri("/babamul/surveys/ztf/classification-models")
+            .to_request();
+        let resp = test::try_call_service(&app, req).await;
+        assert_eq!(
+            resp.err().unwrap().as_response_error().status_code(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    /// Test POST /babamul/surveys/{survey}/objects/{object_id}/classify, up to the
+    /// call to the inference service, which is pointed at a closed port.
+    #[actix_rt::test]
+    async fn test_classify_object() {
+        load_dotenv();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+        let test_user = TestUser::create(&database, &auth_app_data).await;
+
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        std::env::set_var(
+            "TEMPO_SERVICE_URL",
+            format!("http://{}", closed.local_addr().unwrap()),
+        );
+        drop(closed);
+
+        let object_id = "ZTF26hyraxcls";
+        let aux_collection = database.collection::<boom::alert::ZtfObject>("ZTF_alerts_aux");
+        aux_collection
+            .delete_one(doc! { "_id": object_id })
+            .await
+            .unwrap();
+        aux_collection
+            .insert_one(boom::alert::ZtfObject {
+                object_id: object_id.to_string(),
+                coordinates: boom::utils::spatial::Coordinates::new(124.5, -12.3),
+                prv_candidates: vec![],
+                prv_nondetections: vec![],
+                fp_hists: vec![],
+                aliases: None,
+                host_galaxy: None,
+                created_at: 0.0,
+                updated_at: 0.0,
+                cross_matches: None,
+            })
+            .await
+            .unwrap();
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(database.clone()))
+                .app_data(web::Data::new(auth_app_data))
+                .service(
+                    web::scope("/babamul")
+                        .wrap(from_fn(babamul_auth_middleware))
+                        .service(routes::babamul::surveys::classify_object),
+                ),
+        )
+        .await;
+
+        let classify = |survey: &str, object_id: &str, model: &str| {
+            test::TestRequest::post()
+                .uri(&format!(
+                    "/babamul/surveys/{}/objects/{}/classify",
+                    survey, object_id
+                ))
+                .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+                .set_json(serde_json::json!({ "model": model }))
+                .to_request()
+        };
+
+        let cases = [
+            (
+                "ztf",
+                object_id,
+                "not_a_real_model",
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                "lsst",
+                object_id,
+                "tempo_evidential",
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                "ztf",
+                "ZTF26nosuchobj",
+                "tempo_evidential",
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                "ztf",
+                object_id,
+                "tempo_evidential",
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+        ];
+        for (survey, object, model, expected) in cases {
+            let resp = test::call_service(&app, classify(survey, object, model)).await;
+            assert_eq!(resp.status(), expected, "{} {} {}", survey, object, model);
+        }
+
+        let req = test::TestRequest::post()
+            .uri(&format!(
+                "/babamul/surveys/ztf/objects/{}/classify",
+                object_id
+            ))
+            .set_json(serde_json::json!({ "model": "tempo_evidential" }))
+            .to_request();
+        let resp = test::try_call_service(&app, req).await;
+        assert_eq!(
+            resp.err().unwrap().as_response_error().status_code(),
+            StatusCode::UNAUTHORIZED
+        );
+
+        aux_collection
+            .delete_one(doc! { "_id": object_id })
+            .await
+            .unwrap();
+    }
 }

@@ -429,6 +429,50 @@ export async function fetchVillarFit(survey: string, objectId: string): Promise<
   return unwrapData<VillarFit | null>(await readJson(res), null);
 }
 
+/** A Hyrax model that can be run on demand against objects of a survey. */
+export type ClassificationModel = {
+  id: string;
+  name: string;
+  description: string;
+};
+
+/** Result of running a Hyrax model on a single object, on demand. */
+export type HyraxClassification = {
+  model?: string;
+  /** Class name -> probability. The model names its own classes. */
+  classes?: Record<string, number>;
+  /** Highest-probability class. */
+  pred_class?: string;
+  /** Evidential uncertainty, 0 (well-evidenced) to 1. */
+  vacuity?: number;
+  /** Entropy of the predicted class distribution. */
+  predictive_entropy?: number;
+  /** How many photometry points the model actually used. */
+  n_events_used?: number;
+};
+
+export async function fetchClassificationModels(survey: string): Promise<ClassificationModel[]> {
+  const url = `${API_BASE}/surveys/${encodeURIComponent(survey)}/classification-models`;
+  const res = await fetchWithAuth(url);
+  await ensureOk(res, "Fetching classification models");
+  return readList<ClassificationModel>(res);
+}
+
+export async function classifyObject(
+  survey: string,
+  objectId: string,
+  model: string,
+): Promise<HyraxClassification> {
+  const url = `${API_BASE}/surveys/${encodeURIComponent(survey)}/objects/${encodeURIComponent(objectId)}/classify`;
+  const res = await fetchWithAuth(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model }),
+  });
+  await ensureOk(res, `Running ${model}`);
+  return unwrapData<HyraxClassification>(await parseResponseJson(res), {});
+}
+
 export type NightlyStat = {
   date: string;
   ztf?: number;
@@ -607,6 +651,8 @@ export default {
   fetchObject,
   fetchProfile,
   updateProfileName,
+  classifyObject,
+  fetchClassificationModels,
   fetchAlerts,
   fetchAlertCutouts,
   fetchObjCutouts,
