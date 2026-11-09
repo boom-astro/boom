@@ -121,7 +121,7 @@ Each alert therefore carries an integer, `enrichment_set`, naming a row in the
 
 One integer per alert rather than a version per field: at BOOM's scale the
 difference is tens of gigabytes of bookkeeping. Finding stale alerts is then
-`{ enrichment_set: { $nin: <current and accepted> } }` — indexable and exact.
+`{ enrichment_set: { $nin: <acceptable sets> } }`, indexable and exact.
 
 Sets record **components**, not one opaque number, so a diff says *which* part
 moved. If two sets differ only in `btsbot`, the alerts at the older set need
@@ -159,8 +159,9 @@ the matching version in `DERIVATIONS`.** The components are deliberately coarse:
 | `photstats` | `properties.photstats`, `multisurvey_photstats` |
 | `sso` | `properties.sso`, and the activity metrics derived from it |
 | `crossmatch_flags` | `rock`, `star`, `near_brightstar`, `stationary` |
-| `detection_history` | `properties.detection_history` |
-| `host_association` | `properties.hosted`, from the `host_galaxy` the DLR scoring writes |
+| `detection_history` | `properties.detection_history`, `multisurvey_detection_history` |
+| `variability` | `properties.variability` |
+| `host_association` | `properties.hosted` and `properties.best_host`, from the `host_galaxy` the DLR scoring writes |
 | `applecider_postprocess` | `applecider_fusion`, `applecider_outputs` and the fusion embedding, which BOOM derives from the model's `alpha` |
 | `villar_fit` | `villar_fit`, on a GPU build. Fitted by BOOM's own PSO, so a change to the fit or its `PsoConfig` belongs here rather than in a model hash |
 
@@ -173,17 +174,24 @@ enrichment — the same reasoning that keeps a feature-gated model out of
 `ZTF_MODELS` when the feature is off. The two builds therefore get different
 set ids instead of a CPU-enriched alert claiming a fit it does not carry.
 
-Erring toward bumping costs a reprocessing run. Erring the other way leaves
-values that look current and are not — which is the failure this exists to
-prevent, and the one nobody notices.
+A bump records which code wrote an alert; on its own it does not make older
+alerts stale. When the values already written are wrong and must be recomputed,
+also raise the derivation's entry in `STALE_BELOW` to the new version: alerts
+below it are stale. A bump that only adds a field, or that improves values
+without making the old ones wrong, leaves `STALE_BELOW` alone, and older alerts
+simply lack the new field. An unstamped alert counts as version 0 of every
+derivation, so any entry in `STALE_BELOW` makes the alerts predating stamping
+stale too.
 
 ### Adding or swapping a model
 
 **Pointing an existing model at retrained weights** is one edit: its entry in
 `ZTF_MODELS`. The worker loads the file through `model_path`, which reads this
 list, and the same list is hashed into the fingerprint, so a changed entry moves
-the fingerprint, interns a new set, and makes every previously enriched alert
-show up as stale on the admin page.
+the fingerprint and interns a new set. Alerts enriched before keep their scores
+and their set, which names the model that produced them: a model change never
+makes an alert stale, and rescoring the archive is an explicit `all` or
+`candid_range` reprocess.
 
 **Adding a new classifier is not**, and the entry is the last step rather than
 the whole job. `SharedModels` holds one named field per model and `classify`
@@ -194,10 +202,8 @@ set naming a model that never scored them. The wiring it also needs: a field on
 `classify`, and a field on `ZtfAlertClassifications` for the score to land in.
 
 **Skipping it is silent.** The model runs, scores get written, and the
-fingerprint does not move — so no alert is marked stale, the admin page shows
-no drift, and `enrich_reprocess --selection stale` selects nothing. The archive
-keeps its unscored state while the page reports it current, which is worse than
-having no stamp at all: there is now a green light on it.
+fingerprint does not move, so alerts carry a set that does not name the model
+that scored them, which is worse than having no stamp at all.
 
 Nothing catches this for you if the model lives in its own module and calls
 `load_model` directly. Models routed through `src/enrichment/models/` get a
@@ -222,7 +228,7 @@ Do not bump `DERIVATIONS` for a model change. The file hash already covers it;
 The admin page shows an **Enrichment** section per survey: the current set, and
 any set alerts are still sitting at, with what each differs by (`differs by:
 btsbot`, `differs by: sso`). Alerts enriched before stamping existed are listed
-separately, since what produced them cannot be established at all.
+separately when `STALE_BELOW` makes them stale.
 
 Like the catalogs table, it reports and never acts: re-enriching an archive is
 days of work and stays an explicit decision. The count also feeds the badge on
@@ -293,14 +299,15 @@ curl -X POST http://localhost:4000/tasks \
 
 | Selection | Use it when |
 | --- | --- |
-| `{"kind": "stale"}` | **After changing a model or a derivation.** Selects everything not enriched by the current set, including alerts predating stamping. |
+| `{"kind": "stale"}` | **After raising `STALE_BELOW`.** Selects the alerts whose derivations are below it and not accepted, including alerts predating stamping. |
 | `{"kind": "missing_field", "field": "classifications.acai_h"}` | Adding a classifier, where the field genuinely does not exist yet. |
 | `{"kind": "candid_range", "from": …, "to": …}` | Reprocessing a known import. |
 | `{"kind": "all"}` | Everything. Hundreds of millions of alerts. |
 
-Prefer `stale` after a change. `missing_field` only finds alerts that never had
-the field, so after a model changes it selects **none of them** — every alert
-still has the field, just with an old value.
+Prefer `stale` after raising `STALE_BELOW`. To rescore after a model change, use
+`all` or `candid_range`: `missing_field` only finds alerts that never had the
+field, so it selects **none of them**: every alert still has the field, just
+with an old value.
 
 `missing_field` also selects alerts a component skipped deliberately: an output
 that can be absent is skipped rather than written as null, so `classifications`
@@ -345,7 +352,6 @@ the enrichment set each one wrote. See [the task system](./task-system.md).
   golden-output test (fixed input alerts, checked-in expected output, failing
   when output changes without a version change) is the natural guard and does
   not exist yet.
-- **Alerts enriched before stamping.** They have no `enrichment_set` and so
-  match `stale` forever until reprocessed. That is the honest answer — they
-  cannot be shown to be current — but it means the first `stale` run after
-  deploying this selects the entire archive.
+- **Alerts enriched before stamping.** They have no `enrichment_set` and count
+  as version 0 of every derivation, so the first entry in `STALE_BELOW` makes
+  the whole archive before stamping stale.

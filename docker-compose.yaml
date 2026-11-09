@@ -229,7 +229,7 @@ services:
       # Milvus vector database (optional; see docs/milvus.md).
       # Reached over the public internet, so this works regardless of where
       # BOOM itself is deployed.
-      BOOM_MILVUS__ENABLED: ${BOOM_MILVUS__ENABLED:-false}
+      BOOM_MILVUS__READ_EMBEDDINGS: ${BOOM_MILVUS__READ_EMBEDDINGS:-}
       BOOM_MILVUS__HOST: ${BOOM_MILVUS__HOST:-milvus.nrp-nautilus.io}
       BOOM_MILVUS__PORT: ${BOOM_MILVUS__PORT:-50051}
       BOOM_MILVUS__USERNAME: ${BOOM_MILVUS__USERNAME:-}
@@ -646,6 +646,9 @@ services:
       BOOM_PANSTARRS_AWS_SECRET_ACCESS_KEY: ${BOOM_PANSTARRS_AWS_SECRET_ACCESS_KEY:-}
       BOOM_PANSTARRS_AWS_SESSION_TOKEN: ${BOOM_PANSTARRS_AWS_SESSION_TOKEN:-}
       BOOM_PANSTARRS_AWS_DEFAULT_REGION: ${BOOM_PANSTARRS_AWS_DEFAULT_REGION:-us-east-1}
+      BOOM_TNS__BOT_ID: ${BOOM_TNS__BOT_ID:-}
+      BOOM_TNS__BOT_NAME: ${BOOM_TNS__BOT_NAME:-}
+      BOOM_TNS__API_KEY: ${BOOM_TNS__API_KEY:-}
     networks:
       - boom
     profiles:
@@ -694,7 +697,7 @@ services:
       # This scheduler runs the AppleCiDEr fusion model, so it is what produces the
       # embeddings. Reached over the public internet, so this works regardless
       # of where BOOM itself is deployed.
-      BOOM_MILVUS__ENABLED: ${BOOM_MILVUS__ENABLED:-false}
+      BOOM_MILVUS__WRITE_EMBEDDINGS: ${BOOM_MILVUS__WRITE_EMBEDDINGS:-}
       BOOM_MILVUS__HOST: ${BOOM_MILVUS__HOST:-milvus.nrp-nautilus.io}
       BOOM_MILVUS__PORT: ${BOOM_MILVUS__PORT:-50051}
       BOOM_MILVUS__USERNAME: ${BOOM_MILVUS__USERNAME:-}

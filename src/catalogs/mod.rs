@@ -75,6 +75,10 @@ pub enum Reader {
     /// Legacy Survey point-source scores, staged gzipped JSONL exported from
     /// BOOM's own copy.
     Lspsc,
+    Erass1,
+    FiveXmm,
+    TwoSxps,
+    FourFgl,
 }
 
 /// Where a catalog's files come from, which decides whether BOOM may delete
@@ -258,6 +262,50 @@ pub const CATALOGS: &[CatalogDef] = &[
                       it. See docs/catalogs.md.",
         reader: Reader::Lspsc,
         source: Source::Staged,
+        aliases: &[],
+    },
+    CatalogDef {
+        id: "erass1-main",
+        collection: "eRASS1_Main",
+        title: "eRASS1 Main",
+        description: "eROSITA-DE DR1 X-ray sources detected in 0.2-2.3 keV, with fluxes, \
+                      band rates, extent and detection likelihood. German half of the sky \
+                      only (Galactic longitude 180 to 360 degrees). One table, converted from \
+                      FITS.",
+        reader: Reader::Erass1,
+        source: Source::Fetched,
+        aliases: &[],
+    },
+    CatalogDef {
+        id: "5xmm-dr15",
+        collection: "5XMM_DR15",
+        title: "5XMM-DR15",
+        description: "XMM-Newton serendipitous X-ray sources, one row per unique source, with \
+                      fluxes, hardness ratios, variability and CLASSX classifications. One \
+                      table, converted from FITS.",
+        reader: Reader::FiveXmm,
+        source: Source::Fetched,
+        aliases: &[],
+    },
+    CatalogDef {
+        id: "2sxps",
+        collection: "2SXPS",
+        title: "2SXPS",
+        description: "Swift-XRT point sources, clean subset, with count rates, hardness \
+                      ratios, fluxes and variability probabilities. One table, converted from \
+                      FITS.",
+        reader: Reader::TwoSxps,
+        source: Source::Fetched,
+        aliases: &[],
+    },
+    CatalogDef {
+        id: "4fgl-dr4",
+        collection: "4FGL_DR4",
+        title: "Fermi-LAT 4FGL-DR4",
+        description: "Gamma-ray sources from 14 years of Fermi-LAT, with 95% error ellipses, \
+                      fluxes, variability and associations. One table, converted from FITS.",
+        reader: Reader::FourFgl,
+        source: Source::Fetched,
         aliases: &[],
     },
 ];
@@ -818,6 +866,10 @@ async fn ingest_file(
         Reader::PanStarrs => Ok(arrow::ingest_parquet::<types::PanStarrs>(inserter, path).await?),
         Reader::LsDr9 => Ok(arrow::ingest_parquet::<types::LsDr9>(inserter, path).await?),
         Reader::Lspsc => Ok(jsonl::ingest_jsonl::<types::Lspsc>(inserter, path).await?),
+        Reader::Erass1 => Ok(arrow::ingest_parquet::<types::Erass1>(inserter, path).await?),
+        Reader::FiveXmm => Ok(arrow::ingest_parquet::<types::FiveXmm>(inserter, path).await?),
+        Reader::TwoSxps => Ok(arrow::ingest_parquet::<types::TwoSxps>(inserter, path).await?),
+        Reader::FourFgl => Ok(arrow::ingest_parquet::<types::FourFgl>(inserter, path).await?),
     }
 }
 
@@ -1084,20 +1136,16 @@ pub async fn status(
                 }
             }
         }
-        // An alias populated before this release tracked ingest state has no
-        // state document at all, so the collection itself is the only evidence.
-        // Counted rather than assumed missing, because a populated alias is
-        // what the crossmatch is reading right now.
         let mut untracked = 0i64;
         if doc.is_none() {
-            for alias in def.aliases {
+            for name in std::iter::once(&def.collection).chain(def.aliases) {
                 let count = db
-                    .collection::<Document>(alias)
+                    .collection::<Document>(name)
                     .estimated_document_count()
                     .await
                     .unwrap_or(0) as i64;
                 if count > 0 {
-                    serving = (*alias).to_string();
+                    serving = (*name).to_string();
                     untracked = count;
                     break;
                 }
@@ -1160,7 +1208,7 @@ pub const WITHOUT_DEFINITIONS: &[(&str, &str)] = &[
     (
         "TNS",
         "the Transient Name Server is a live, credentialed feed rather than an archival \
-         download, and is populated outside the catalog ingest path",
+         download, kept current by the tns_sync task instead of the catalog ingest path",
     ),
 ];
 
@@ -1224,8 +1272,7 @@ pub fn validate_crossmatch(
 /// An `AppConfig` from `path`, with a stand-in environment.
 ///
 /// Deserializing an `AppConfig` requires the secrets a deployment supplies
-/// -- the database password, the API keys, and, for any config with
-/// `milvus.enabled` (`config/prod/umn` has it), the milvus credentials. A
+/// -- the database password and the API keys. A
 /// substituted environment rather than `set_var` keeps that off the other
 /// tests in this binary and makes the result the same whether or not the
 /// developer has a `.env` loaded. Secret *validation* is `check_config`'s
@@ -1236,8 +1283,6 @@ fn config_from(path: &str) -> crate::conf::AppConfig {
         ("BOOM_DATABASE__PASSWORD", "test-db-password"),
         ("BOOM_API__AUTH__SECRET_KEY", "test-secret-key"),
         ("BOOM_API__AUTH__ADMIN_PASSWORD", "test-admin-password"),
-        ("BOOM_MILVUS__USERNAME", "test-milvus-username"),
-        ("BOOM_MILVUS__PASSWORD", "test-milvus-password"),
     ]
     .iter()
     .map(|(key, value)| (key.to_string(), value.to_string()))

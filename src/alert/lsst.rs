@@ -17,7 +17,6 @@ use crate::{
         spatial::{xmatch, Coordinates},
     },
 };
-use apache_avro_derive::AvroSchema;
 use apache_avro_macros::serdavro;
 use constcat::concat;
 use flare::Time;
@@ -742,7 +741,8 @@ pub struct DiaObject {
 
 #[serde_as]
 #[skip_serializing_none]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, Default, AvroSchema, ToSchema)]
+#[serdavro]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, Default, ToSchema)]
 #[serde(default)]
 pub struct DiaForcedSource {
     /// Unique id.
@@ -1016,6 +1016,7 @@ where
     let dia_sources = <Vec<DiaSource> as Deserialize>::deserialize(deserializer)?;
     let candidates = dia_sources
         .into_iter()
+        .filter(|dia_source| dia_source.psf_flux.is_none_or(f32::is_finite))
         .map(LsstPrvCandidate::try_from)
         .collect::<Result<Vec<LsstPrvCandidate>, AlertError>>()
         .map_err(serde::de::Error::custom)?;
@@ -1091,19 +1092,23 @@ struct AlertAuxForUpdate {
     pub version: Option<i32>,
 }
 
-fn first_detection_jd(
+fn detection_history(
     prv_candidates: &[LsstPrvCandidate],
     existing_aux: Option<&AlertAuxForUpdate>,
-) -> Option<f64> {
+    jd: f64,
+) -> (Option<f64>, i32) {
     let stored = existing_aux
         .into_iter()
         .flat_map(|aux| aux.prv_candidates.iter().map(|pc| pc.jd));
-    prv_candidates
+    let mut jds: Vec<f64> = prv_candidates
         .iter()
         .map(|pc| pc.jd)
         .chain(stored)
-        .filter(|jd| jd.is_finite())
-        .reduce(f64::min)
+        .filter(|pc_jd| pc_jd.is_finite() && *pc_jd <= jd)
+        .collect();
+    jds.sort_by(f64::total_cmp);
+    jds.dedup();
+    (jds.first().copied(), jds.len() as i32)
 }
 
 pub struct LsstAlertWorker {
@@ -1410,10 +1415,15 @@ impl AlertWorker for LsstAlertWorker {
 
         let existing_alert_aux = self.get_existing_aux(&object_id).await?;
 
-        if candidate.jdstarthist.is_none() {
-            candidate.jdstarthist =
-                first_detection_jd(&prv_candidates, existing_alert_aux.as_ref());
-        }
+        // Rubin's nDiaSources and firstDiaSourceMjdTai only cover the last 12 months
+        let (first_jd, ndethist) =
+            detection_history(&prv_candidates, existing_alert_aux.as_ref(), candidate.jd);
+        candidate.jdstarthist = candidate
+            .jdstarthist
+            .into_iter()
+            .chain(first_jd)
+            .reduce(f64::min);
+        candidate.ndethist = Some(ndethist);
 
         let alert = LsstAlert {
             candid,
@@ -1439,6 +1449,21 @@ impl AlertWorker for LsstAlertWorker {
                 .await
                 .inspect_err(as_error!())?,
         );
+        if let Some(id) = survey_matches
+            .as_ref()
+            .and_then(|a| a.ztf.first())
+            .filter(|_| ss_object_id.is_none())
+        {
+            self.link_counterpart(
+                &self.ztf_alert_aux_collection,
+                id,
+                &object_id,
+                "LSST",
+                "DECAM",
+            )
+            .await
+            .inspect_err(as_error!())?;
+        }
 
         // The designation is only known once a diaSource is linked to an ssObject; keep it
         // current independent of whichever branch below runs, and regardless of any ZTF

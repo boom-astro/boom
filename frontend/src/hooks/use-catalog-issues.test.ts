@@ -108,6 +108,7 @@ describe("countEnrichmentIssues", () => {
   const clean = {
     survey: "ztf",
     current_set: 7,
+    current: null,
     stale_sets: [],
     accepted_sets: [],
     has_unstamped: false,

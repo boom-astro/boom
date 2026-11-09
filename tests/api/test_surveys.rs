@@ -282,6 +282,7 @@ mod tests {
             near_planet: None,
             updated_at,
             orbit,
+            neo_score: None,
         }
     }
 

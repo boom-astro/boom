@@ -1,3 +1,4 @@
+use crate::utils::enums::Survey;
 use crate::utils::outburst::{
     outburst_statistic, same_band_statistic, window_scatter, Point, DEFAULT_G12,
 };
@@ -747,6 +748,50 @@ impl DetectionHistory {
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize, AvroSchema, ToSchema)]
+#[serde(default)]
+pub struct MultisurveyDetectionHistory {
+    pub first_pos_jd: Option<f64>,
+    pub first_pos_survey: Option<Survey>,
+    pub first_pos_band: Option<Band>,
+    pub prediscovery_nondet_jd: Option<f64>,
+    pub prediscovery_nondet_maglim: Option<f32>,
+    pub prediscovery_nondet_survey: Option<Survey>,
+    pub prediscovery_nondet_band: Option<Band>,
+}
+
+impl MultisurveyDetectionHistory {
+    pub fn from_points<'a, D, N>(detections: D, nondetections: N, ref_jd: f64) -> Self
+    where
+        D: IntoIterator<Item = (f64, Survey, &'a Band)>,
+        N: IntoIterator<Item = (f64, f32, Survey, &'a Band)>,
+    {
+        let mut history = MultisurveyDetectionHistory::default();
+        for (jd, survey, band) in detections {
+            if jd <= ref_jd && history.first_pos_jd.is_none_or(|first| jd < first) {
+                history.first_pos_jd = Some(jd);
+                history.first_pos_survey = Some(survey);
+                history.first_pos_band = Some(band.clone());
+            }
+        }
+        let Some(first) = history.first_pos_jd else {
+            return history;
+        };
+        for (jd, maglim, survey, band) in nondetections {
+            if jd < first
+                && maglim.is_finite()
+                && history.prediscovery_nondet_jd.is_none_or(|j| jd > j)
+            {
+                history.prediscovery_nondet_jd = Some(jd);
+                history.prediscovery_nondet_maglim = Some(maglim);
+                history.prediscovery_nondet_survey = Some(survey);
+                history.prediscovery_nondet_band = Some(band.clone());
+            }
+        }
+        history
+    }
+}
+
 // TODO: avro serialization fail when we use skip_serializing_none,
 // since the optional fields are not just None but simply missing
 // (this needs to be fixed in the apache_avro-related crates)
@@ -1156,6 +1201,33 @@ mod tests {
 
         assert_eq!(d.n_forced_detections, 0);
         assert_eq!(d.last_detection_jd, Some(2900.0));
+    }
+
+    #[test]
+    fn test_prediscovery_limit_precedes_the_first_detection_in_any_survey() {
+        use super::{Band, MultisurveyDetectionHistory};
+        use crate::utils::enums::Survey;
+        let (g, r, i) = (Band::G, Band::R, Band::I);
+        let detections = vec![
+            (2500.0, Survey::Ztf, &r),
+            (2498.0, Survey::Lsst, &g),
+            (REF + 1.0, Survey::Decam, &i),
+        ];
+        let nondetections = vec![
+            (2495.0, 20.5, Survey::Ztf, &r),
+            (2497.0, 24.0, Survey::Decam, &i),
+            (2497.5, f32::NAN, Survey::Lsst, &g),
+            (2499.0, 20.8, Survey::Ztf, &r),
+        ];
+        let h = MultisurveyDetectionHistory::from_points(detections, nondetections, REF);
+
+        assert_eq!(h.first_pos_jd, Some(2498.0));
+        assert_eq!(h.first_pos_survey, Some(Survey::Lsst));
+        assert_eq!(h.first_pos_band, Some(Band::G));
+        assert_eq!(h.prediscovery_nondet_jd, Some(2497.0));
+        assert_eq!(h.prediscovery_nondet_maglim, Some(24.0));
+        assert_eq!(h.prediscovery_nondet_survey, Some(Survey::Decam));
+        assert_eq!(h.prediscovery_nondet_band, Some(Band::I));
     }
 
     /// The sign says which way the object is going, which is what a filter

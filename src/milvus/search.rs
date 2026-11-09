@@ -31,7 +31,8 @@ use super::proto::schema::{
 };
 
 /// One nearest-neighbor result from a similarity search.
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+/// Not `Serialize`: `candid` is confidential and must not reach clients.
+#[derive(Debug, Clone, PartialEq)]
 pub struct SearchHit {
     /// The matched object's identifier.
     pub object_id: String,
@@ -39,8 +40,6 @@ pub struct SearchHit {
     /// `COSINE`/inner-product).
     pub score: f32,
     /// Alert the stored embedding came from, for joining against Mongo.
-    /// Confidential, so never serialized to clients.
-    #[serde(skip)]
     pub candid: i64,
 }
 
@@ -543,17 +542,6 @@ mod tests {
                 },
             ]
         );
-    }
-
-    #[test]
-    fn a_search_hit_does_not_serialize_its_candid() {
-        let hit = SearchHit {
-            object_id: "ZTF_A".into(),
-            score: 0.9,
-            candid: 10,
-        };
-        let json = serde_json::to_value(&hit).unwrap();
-        assert!(json.get("candid").is_none());
     }
 
     #[test]

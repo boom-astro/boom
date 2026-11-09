@@ -67,7 +67,7 @@ pub enum Selection {
     MissingField { field: String },
     /// A candid range, for reprocessing a known import.
     CandidRange { from: i64, to: i64 },
-    /// Everything not enriched by what this release runs.
+    /// Alerts below `STALE_BELOW` in a set nobody accepted.
     Stale,
 }
 
@@ -89,7 +89,7 @@ impl Selection {
             Selection::All => "every alert".to_string(),
             Selection::MissingField { field } => format!("alerts missing {field}"),
             Selection::CandidRange { from, to } => format!("candids {from}..={to}"),
-            Selection::Stale => "alerts not enriched by the current set".to_string(),
+            Selection::Stale => "stale alerts".to_string(),
         }
     }
 }
@@ -627,32 +627,10 @@ mod tests {
     }
 
     #[test]
-    fn stale_selects_everything_not_enriched_by_the_current_set() {
-        // `$nin` also matches alerts with no stamp at all.
-        assert_eq!(
-            Selection::Stale.filter(&[7]),
-            doc! { "enrichment_set": { "$nin": [7i64] } }
-        );
-    }
-
-    #[test]
-    fn stale_is_the_selection_that_finds_a_changed_model() {
-        let changed_model = Selection::MissingField {
-            field: "classifications.btsbot".into(),
-        };
-        assert_eq!(
-            changed_model.filter(&[7]),
-            doc! { "classifications.btsbot": { "$exists": false } },
-            "MissingField cannot express staleness, which is why Stale exists"
-        );
-        assert!(Selection::Stale.describe().contains("current set"));
-    }
-
-    #[test]
-    fn stale_skips_sets_an_operator_accepted() {
+    fn stale_skips_the_acceptable_sets() {
         assert_eq!(
             Selection::Stale.filter(&[6, 7]),
-            doc! { "enrichment_set": { "$nin": [6i64, 7i64] } }
+            crate::enrichment::version::stale_filter(&[6, 7])
         );
     }
 

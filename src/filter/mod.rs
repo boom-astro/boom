@@ -1,5 +1,6 @@
 mod base;
 mod decam;
+mod fields;
 mod lsst;
 mod winter;
 mod ztf;
@@ -21,8 +22,9 @@ use decam::{
     insert_decam_aux_pipeline_if_needed, DecamMatch,
 };
 pub use decam::{build_decam_filter_pipeline, DecamFilterWorker};
+pub use fields::{find_unknown_field, DocumentShape};
 use lsst::{build_lsst_aux_data, insert_lsst_aux_pipeline_if_needed, lsst_survey_match};
 pub use lsst::{build_lsst_filter_pipeline, LsstFilterWorker};
 pub use winter::{build_winter_filter_pipeline, WinterFilterWorker};
+pub use ztf::{build_ztf_alerts, build_ztf_filter_pipeline, ztf_results_pipeline, ZtfFilterWorker};
 use ztf::{build_ztf_aux_data, insert_ztf_aux_pipeline_if_needed, ztf_survey_match};
-pub use ztf::{build_ztf_filter_pipeline, ZtfFilterWorker};

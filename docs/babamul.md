@@ -19,7 +19,7 @@ Babamul accounts are isolated from main BOOM API accounts:
 
 ## Authentication flow
 
-1. **Signup** (`POST /babamul/signup`): User provides email, system creates account with activation code
+1. **Signup** (`POST /babamul/signup`): User provides email and full name, system creates account with activation code
 2. **Activation** (`POST /babamul/activate`): User submits activation code, receives 32-character password (shown once)
 3. **Kafka access**: Use email + password with SCRAM-SHA-512 authentication
 4. **API access** (`POST /babamul/auth`): Exchange email + password for JWT token
@@ -264,6 +264,10 @@ sequenceDiagram
 LSST alerts are first classified based on LSPSC catalog matches, then assigned to topics
 based on their classification and whether they have a ZTF match.
 
+When BOOM's host-galaxy association has run on the object (`properties.hosted`
+is set), it decides instead of LSPSC: `true` is hosted, `false` is hostless, or
+unknown outside the LSPSC footprint. Stellar alerts stay stellar.
+
 ```mermaid
 flowchart TD
     LSST[New LSST Alert] --> CheckLSPSC{Has matches<br/>in LSPSC?}
@@ -311,6 +315,10 @@ flowchart TD
 ZTF alerts are first classified based on stellar properties and star-galaxy scores, then assigned
 to topics based on their classification and whether they have an LSST match.
 
+When BOOM's host-galaxy association has run on the object (`properties.hosted`
+is set), it decides between hosted and hostless instead of the star-galaxy
+scores. Stellar alerts stay stellar.
+
 ```mermaid
 flowchart TD
     ZTF[New ZTF Alert] --> CheckStellar{Any stellar sgscore?}
@@ -341,6 +349,19 @@ flowchart TD
     style Topic13 fill:#5f2d2d,color:#e0e0e0
     style Topic14 fill:#2d3f5f,color:#e0e0e0
 ```
+
+### Host galaxy
+
+Every ZTF and LSST alert carries its best host in `properties.best_host` (null
+when there is none): `name`, `catalog`, `z`, `dist_mpc`, `dist_mpc_method`,
+`sep_arcsec`, `sep_kpc` and `d_dlr`, the separation in units of the galaxy's
+directional light radius. Only NED-LVS hosts have a `dist_mpc`.
+
+To follow transients in nearby galaxies (Sand et al. 2026, arXiv:2609.38304),
+subscribe to the `hosted` topics and keep the alerts whose
+`best_host.dist_mpc` is below your limit. The alert search does the same with
+the `Nearby` profile in the web app, or `max_host_dist_mpc` on
+`GET /babamul/surveys/{survey}/alerts`.
 
 ## Usage analytics
 

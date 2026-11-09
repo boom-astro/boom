@@ -1,8 +1,8 @@
 //! Endpoints backed by the Milvus vector store of CIDER fusion embeddings.
 //!
-//! Milvus is optional (see `milvus.enabled`), so these handlers receive the
+//! Milvus is optional (see `milvus.read_embeddings`), so these handlers receive the
 //! client as `web::Data<Option<MilvusClient>>` and reply with a clear error
-//! when it is switched off or was unreachable at startup. Every method on
+//! when it is switched off or misconfigured. Every method on
 //! [`MilvusClient`] takes `&mut self`, so each handler clones the shared client
 //! (cheap — the tonic `Channel` shares one connection pool) to get a local
 //! owned copy rather than serializing all requests through a lock.
@@ -47,7 +47,7 @@ pub struct SimilarObject {
     /// Similarity score under the collection's metric; higher is closer.
     pub score: f32,
     /// AppleCiDEr's classification of the alert the stored embedding came
-    /// from. Null when that alert has none.
+    /// from. Null when that alert has none or could not be looked up.
     pub applecider_fusion: Option<AppleCiderFusion>,
 }
 
@@ -69,8 +69,8 @@ pub(crate) fn client_or_unavailable(
 ) -> Result<MilvusClient, HttpResponse> {
     match milvus.get_ref() {
         Some(client) => Ok(client.clone()),
-        None => Err(response::internal_error(
-            "Milvus is not enabled or was unavailable at startup",
+        None => Err(response::not_implemented(
+            "Milvus is not enabled or misconfigured",
         )),
     }
 }
@@ -80,6 +80,9 @@ async fn applecider_classifications(
     db: &Database,
     hits: &[SearchHit],
 ) -> Result<HashMap<i64, AppleCiderFusion>, mongodb::error::Error> {
+    if hits.is_empty() {
+        return Ok(HashMap::new());
+    }
     let candids: Vec<i64> = hits.iter().map(|hit| hit.candid).collect();
     let alerts: Vec<ClassifiedAlert> = db
         .collection::<ClassifiedAlert>(ZTF_ALERTS)
@@ -187,9 +190,10 @@ pub(crate) async fn embeddings_count_response(
     path = "/similarity/objects",
     request_body = SimilarObjectsQuery,
     responses(
-        (status = 200, description = "Nearest neighbors, best-first", body = serde_json::Value),
+        (status = 200, description = "Nearest neighbors, best-first", body = Vec<SimilarObject>),
         (status = 404, description = "No embedding stored for the object"),
-        (status = 500, description = "Milvus unavailable or search failed")
+        (status = 500, description = "Milvus unavailable or search failed"),
+        (status = 501, description = "Milvus not enabled or misconfigured")
     ),
     tags=["Similarity"]
 )]
@@ -208,7 +212,8 @@ pub async fn post_similar_objects(
     path = "/embeddings/count",
     responses(
         (status = 200, description = "Embedding count retrieved"),
-        (status = 500, description = "Milvus unavailable or count failed")
+        (status = 500, description = "Milvus unavailable or count failed"),
+        (status = 501, description = "Milvus not enabled or misconfigured")
     ),
     tags=["Similarity"]
 )]

@@ -1271,10 +1271,9 @@ fn default_gpu_device_ids() -> Vec<i32> {
 /// with an administrative/user account supplied entirely through the environment.
 #[derive(Deserialize, Debug, Clone)]
 pub struct MilvusConfig {
-    /// When false, BOOM never opens a Milvus connection. Defaults to false so
-    /// that existing deployments are unaffected.
+    /// Whether the API serves the embedding count and similarity search.
     #[serde(default)]
-    pub enabled: bool,
+    pub read_embeddings: bool,
     #[serde(default = "default_milvus_host")]
     pub host: String,
     #[serde(default = "default_milvus_port")]
@@ -1295,10 +1294,25 @@ pub struct MilvusConfig {
     /// Per-RPC timeout in seconds.
     #[serde(default = "default_milvus_timeout_seconds")]
     pub timeout_seconds: u64,
+    /// Timeout for opening a connection, kept short so an unreachable server
+    /// fails a request quickly while a slow search still has `timeout_seconds`.
+    #[serde(default = "default_milvus_connect_timeout_seconds")]
+    pub connect_timeout_seconds: u64,
+    /// Whether ZTF enrichment upserts embeddings and the scheduler provisions
+    /// the collection. The collection is shared, so only its owner sets this.
+    #[serde(default)]
+    pub write_embeddings: bool,
     #[serde(default)]
     pub collection: MilvusCollectionConfig,
     #[serde(default)]
     pub backup_queue: MilvusBackupQueueConfig,
+}
+
+impl MilvusConfig {
+    /// Whether this deployment connects to Milvus at all.
+    pub fn is_enabled(&self) -> bool {
+        self.read_embeddings || self.write_embeddings
+    }
 }
 
 /// Where embeddings wait while Milvus is unreachable, so an outage costs
@@ -1348,6 +1362,10 @@ fn default_milvus_timeout_seconds() -> u64 {
     30
 }
 
+fn default_milvus_connect_timeout_seconds() -> u64 {
+    5
+}
+
 fn default_milvus_backup_queue_enabled() -> bool {
     true
 }
@@ -1383,7 +1401,7 @@ fn default_milvus_object_id_max_length() -> i64 {
 impl Default for MilvusConfig {
     fn default() -> Self {
         MilvusConfig {
-            enabled: false,
+            read_embeddings: false,
             host: default_milvus_host(),
             port: default_milvus_port(),
             tls: default_milvus_tls(),
@@ -1391,6 +1409,8 @@ impl Default for MilvusConfig {
             password: String::new(),
             database: String::new(),
             timeout_seconds: default_milvus_timeout_seconds(),
+            connect_timeout_seconds: default_milvus_connect_timeout_seconds(),
+            write_embeddings: false,
             collection: MilvusCollectionConfig::default(),
             backup_queue: MilvusBackupQueueConfig::default(),
         }
@@ -1500,6 +1520,12 @@ pub struct LinkerConfig {
     pub fast_dense_detections: usize,
     #[serde(default = "default_linker_fast_dense_max_rate")]
     pub fast_dense_max_rate_deg_per_day: f64,
+    #[serde(default)]
+    pub fast_live_every_minutes: u32,
+    #[serde(default)]
+    pub fast_single_night: bool,
+    #[serde(default = "default_linker_fast_min_neo_score")]
+    pub fast_min_neo_score: f64,
 }
 
 impl LinkerConfig {
@@ -1565,6 +1591,12 @@ impl LinkerConfig {
                 self.fast_dense_max_rate_deg_per_day, self.fast_min_rate_deg_per_day
             ));
         }
+        if !(0.0..=100.0).contains(&self.fast_min_neo_score) {
+            return Err(format!(
+                "fast_min_neo_score is {}, not a digest2 score from 0 to 100",
+                self.fast_min_neo_score
+            ));
+        }
         Ok(())
     }
 }
@@ -1596,6 +1628,9 @@ impl Default for LinkerConfig {
             fast_max_rate_deg_per_day: default_linker_fast_max_rate(),
             fast_dense_detections: default_linker_fast_dense_detections(),
             fast_dense_max_rate_deg_per_day: default_linker_fast_dense_max_rate(),
+            fast_live_every_minutes: 0,
+            fast_single_night: false,
+            fast_min_neo_score: default_linker_fast_min_neo_score(),
         }
     }
 }
@@ -1622,6 +1657,10 @@ fn default_linker_fast_max_rate() -> f64 {
 
 fn default_linker_fast_dense_detections() -> usize {
     10_000
+}
+
+fn default_linker_fast_min_neo_score() -> f64 {
+    90.0
 }
 
 fn default_linker_fast_dense_max_rate() -> f64 {
@@ -1661,6 +1700,111 @@ fn default_linker_pass() -> bool {
 }
 
 #[derive(Deserialize, Debug, Clone)]
+pub struct TnsConfig {
+    #[serde(default = "default_tns_base_url")]
+    pub base_url: String,
+    #[serde(default)]
+    pub bot_id: String,
+    #[serde(default)]
+    pub bot_name: String,
+    #[serde(default)]
+    pub api_key: String,
+    #[serde(default = "default_tns_sync_every_minutes")]
+    pub sync_every_minutes: u64,
+    #[serde(default = "default_tns_full_sync_every_hours")]
+    pub full_sync_every_hours: u64,
+    #[serde(default)]
+    pub photometry: TnsPhotometryConfig,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct TnsPhotometryConfig {
+    #[serde(default = "default_tns_photometry_every_minutes")]
+    pub every_minutes: u64,
+    #[serde(default = "default_tns_photometry_max_distance_mpc")]
+    pub max_distance_mpc: f64,
+    #[serde(default = "default_tns_photometry_max_age_days")]
+    pub max_age_days: f64,
+    #[serde(default = "default_tns_photometry_refresh_hours")]
+    pub refresh_hours: f64,
+    #[serde(default = "default_tns_photometry_max_objects")]
+    pub max_objects: usize,
+}
+
+impl Default for TnsConfig {
+    fn default() -> Self {
+        TnsConfig {
+            base_url: default_tns_base_url(),
+            bot_id: String::new(),
+            bot_name: String::new(),
+            api_key: String::new(),
+            sync_every_minutes: default_tns_sync_every_minutes(),
+            full_sync_every_hours: default_tns_full_sync_every_hours(),
+            photometry: TnsPhotometryConfig::default(),
+        }
+    }
+}
+
+impl Default for TnsPhotometryConfig {
+    fn default() -> Self {
+        TnsPhotometryConfig {
+            every_minutes: default_tns_photometry_every_minutes(),
+            max_distance_mpc: default_tns_photometry_max_distance_mpc(),
+            max_age_days: default_tns_photometry_max_age_days(),
+            refresh_hours: default_tns_photometry_refresh_hours(),
+            max_objects: default_tns_photometry_max_objects(),
+        }
+    }
+}
+
+impl TnsConfig {
+    pub fn has_credentials(&self) -> bool {
+        [&self.bot_id, &self.bot_name, &self.api_key]
+            .iter()
+            .all(|value| !value.trim().is_empty())
+    }
+
+    pub fn has_partial_credentials(&self) -> bool {
+        !self.has_credentials()
+            && [&self.bot_id, &self.bot_name, &self.api_key]
+                .iter()
+                .any(|value| !value.trim().is_empty())
+    }
+}
+
+fn default_tns_base_url() -> String {
+    "https://www.wis-tns.org".to_string()
+}
+
+fn default_tns_sync_every_minutes() -> u64 {
+    60
+}
+
+fn default_tns_full_sync_every_hours() -> u64 {
+    24
+}
+
+fn default_tns_photometry_every_minutes() -> u64 {
+    360
+}
+
+fn default_tns_photometry_max_distance_mpc() -> f64 {
+    200.0
+}
+
+fn default_tns_photometry_max_age_days() -> f64 {
+    60.0
+}
+
+fn default_tns_photometry_refresh_hours() -> f64 {
+    24.0
+}
+
+fn default_tns_photometry_max_objects() -> usize {
+    250
+}
+
+#[derive(Deserialize, Debug, Clone)]
 pub struct AppConfig {
     pub api: ApiConfig,
     pub database: DatabaseConfig,
@@ -1683,6 +1827,8 @@ pub struct AppConfig {
     pub host_galaxy: HostGalaxyConfig,
     #[serde(default)]
     pub linker: LinkerConfig,
+    #[serde(default)]
+    pub tns: TnsConfig,
     pub cutouts_storage: CutoutsStorage,
 }
 
@@ -1741,26 +1887,12 @@ impl AppConfig {
             }
         }
 
-        // Milvus settings are only required when the integration is switched on,
-        // so that deployments not using it need no extra configuration.
-        if self.milvus.enabled {
-            if self.milvus.username.is_empty() {
-                return Err(
-                    "Milvus username must be set via BOOM_MILVUS__USERNAME environment variable when milvus.enabled is true"
-                        .to_string(),
-                );
-            }
-
-            if self.milvus.password.is_empty() {
-                return Err(
-                    "Milvus password must be set via BOOM_MILVUS__PASSWORD environment variable when milvus.enabled is true"
-                        .to_string(),
-                );
-            }
-
+        // Credentials are checked when a client is built instead, so services
+        // that load this config but never dial Milvus start without them.
+        if self.milvus.is_enabled() {
             if self.milvus.database.is_empty() {
                 return Err(
-                    "Milvus database must not be empty when milvus.enabled is true; config.yaml supplies a default, override it with BOOM_MILVUS__DATABASE"
+                    "Milvus database must not be empty when milvus.read_embeddings or milvus.write_embeddings is true; config.yaml supplies a default, override it with BOOM_MILVUS__DATABASE"
                         .to_string(),
                 );
             }

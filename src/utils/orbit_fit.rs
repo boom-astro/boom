@@ -9,7 +9,7 @@
 use crate::utils::heliolinc::{
     bound_seed, is_bound, propagate_position, radec_from_ecliptic, state_to_elements, Conics, State,
 };
-use crate::utils::sso_geometry::{observer_position, OrbitalElements, Site};
+use crate::utils::sso_geometry::{dot, norm, observer_position, OrbitalElements, Site};
 
 /// One astrometric position.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -331,9 +331,22 @@ pub fn fit_within(
     if is_bound(&fit.state) {
         return Some(fit);
     }
-    let bound = [*seed, bound_seed(&fit.state)]
+    let mut along: Vec<(f64, State)> = observations
         .iter()
-        .filter_map(|s| screen_then_converge(observations, s, epoch_jd, gate_arcsec, Conics::Bound))
+        .min_by(|a, b| (a.jd - epoch_jd).abs().total_cmp(&(b.jd - epoch_jd).abs()))
+        .map(|o| line_of_sight_seeds(&fit.state, epoch_jd, &o.site))
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|s| Some((rms_arcsec(&s, epoch_jd, observations)?, s)))
+        .filter(|(rms, _)| rms.is_finite())
+        .collect();
+    along.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let bound = [*seed, bound_seed(&fit.state)]
+        .into_iter()
+        .chain(along.into_iter().take(LINE_OF_SIGHT_FITS).map(|(_, s)| s))
+        .filter_map(|s| {
+            screen_then_converge(observations, &s, epoch_jd, gate_arcsec, Conics::Bound)
+        })
         .min_by(|a, b| a.rms_arcsec.total_cmp(&b.rms_arcsec));
     let against = bound.as_ref().map(|b| (b.rms_arcsec, &b.state));
     if keeps_unbound(conics, fit.rms_arcsec, against) {
@@ -357,6 +370,40 @@ pub fn keeps_unbound(conics: Conics, rms: f64, bound: Option<(f64, &State)>) -> 
 /// Eccentricity past which a bound fit is pressed against e = 1, where one kept
 /// off hyperbolae stops when it wants one.
 const PINNED_ECCENTRICITY: f64 = 0.99;
+
+const LINE_OF_SIGHT_RANGES: usize = 16;
+const LINE_OF_SIGHT_RANGES_AU: (f64, f64) = (0.02, 20.0);
+const LINE_OF_SIGHT_RANGE_RATES: [f64; 5] = [-0.015, -0.006, 0.0, 0.006, 0.015];
+const LINE_OF_SIGHT_FITS: usize = 3;
+
+fn line_of_sight_seeds(state: &State, epoch_jd: f64, site: &Site) -> Vec<State> {
+    let step = 0.01;
+    let observer = observer_position(epoch_jd, site);
+    let ahead = observer_position(epoch_jd + step, site);
+    let behind = observer_position(epoch_jd - step, site);
+    let observer_vel: [f64; 3] = std::array::from_fn(|k| (ahead[k] - behind[k]) / (2.0 * step));
+    let offset: [f64; 3] = std::array::from_fn(|k| state.pos[k] - observer[k]);
+    let range = norm(&offset);
+    if range <= 0.0 {
+        return Vec::new();
+    }
+    let at: [f64; 3] = std::array::from_fn(|k| offset[k] / range);
+    let rel: [f64; 3] = std::array::from_fn(|k| state.vel[k] - observer_vel[k]);
+    let radial = dot(&rel, &at);
+    let turning: [f64; 3] = std::array::from_fn(|k| (rel[k] - radial * at[k]) / range);
+    let (first, last) = LINE_OF_SIGHT_RANGES_AU;
+    let ratio = (last / first).powf(1.0 / (LINE_OF_SIGHT_RANGES - 1) as f64);
+    (0..LINE_OF_SIGHT_RANGES)
+        .flat_map(|i| {
+            let r = first * ratio.powi(i as i32);
+            LINE_OF_SIGHT_RANGE_RATES.map(|rate| State {
+                pos: std::array::from_fn(|k| observer[k] + r * at[k]),
+                vel: std::array::from_fn(|k| observer_vel[k] + rate * at[k] + r * turning[k]),
+            })
+        })
+        .filter(is_bound)
+        .collect()
+}
 
 /// Whether a bound fit at `bound_rms` arcseconds should replace an unbound one
 /// at `rms`: it fits as well, or within twice and not pressed against e = 1.
