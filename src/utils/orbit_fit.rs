@@ -158,6 +158,21 @@ fn residual(
     Some(((dra, (obs.dec - dec) * 3600.0), tau))
 }
 
+pub fn observed_minus_computed(
+    state: &State,
+    epoch_jd: f64,
+    obs: &Observation,
+) -> Option<(f64, f64)> {
+    residual(
+        state,
+        epoch_jd,
+        obs,
+        &observer_position(obs.jd, &obs.site),
+        None,
+    )
+    .map(|(radec, _)| radec)
+}
+
 /// Nudge one component of a state.
 fn perturb(state: &State, k: usize, delta: f64) -> State {
     let mut out = *state;

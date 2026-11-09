@@ -1,4 +1,5 @@
 use crate::api::models::response;
+use crate::utils::discovery::member_residuals;
 use crate::utils::enums::Survey;
 use crate::utils::heliolinc::{state_to_elements, State};
 use crate::utils::sso_geometry::OrbitalElements;
@@ -85,6 +86,7 @@ struct TrackDetail {
     #[serde(flatten)]
     track: StoredTrack,
     elements: Option<OrbitalElements>,
+    residuals: Vec<Option<[f64; 2]>>,
 }
 
 /// Get a linked moving-object track with all of its members
@@ -96,7 +98,7 @@ struct TrackDetail {
         ("track_id" = String, Path, description = "Track id, e.g. BT000001"),
     ),
     responses(
-        (status = 200, description = "Track found, with the osculating elements of its orbit", body = serde_json::Value),
+        (status = 200, description = "Track found, with the osculating elements of its orbit and each member's observed minus computed position in arcseconds (RA on a great circle, Dec), parallel to members", body = serde_json::Value),
         (status = 404, description = "Track not found"),
         (status = 500, description = "Internal server error")
     ),
@@ -113,6 +115,12 @@ pub async fn get_track(path: web::Path<(Survey, String)>, db: web::Data<Database
         Ok(None) => return response::not_found(&format!("no track {}", track_id)),
         Err(error) => return response::internal_error(&format!("error getting track: {}", error)),
     };
+    let residuals = match member_residuals(&db, &track).await {
+        Ok(residuals) => residuals,
+        Err(error) => {
+            return response::internal_error(&format!("error getting residuals: {}", error))
+        }
+    };
     let elements = track.orbit.and_then(|orbit| {
         state_to_elements(
             &State {
@@ -124,6 +132,10 @@ pub async fn get_track(path: web::Path<(Survey, String)>, db: web::Data<Database
     });
     response::ok_ser(
         &format!("track {} found", track_id),
-        TrackDetail { track, elements },
+        TrackDetail {
+            track,
+            elements,
+            residuals,
+        },
     )
 }

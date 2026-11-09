@@ -21,7 +21,7 @@ use crate::utils::linking::{
     angular_separation_deg, circular_mean_deg, find_tracklets, night_of, night_start, Detection,
     Tracklet, TrackletConfig,
 };
-use crate::utils::orbit_fit::{fit_within, Observation, OrbitFit};
+use crate::utils::orbit_fit::{fit_within, observed_minus_computed, Observation, OrbitFit};
 use crate::utils::sso_geometry::{Planet, Site, JUPITER, NEPTUNE, SATURN, URANUS, ZTF};
 use crate::utils::thor;
 use crate::utils::tracks::{
@@ -944,6 +944,34 @@ async fn member_detections(
     Ok(ids
         .iter()
         .map(|id| at_hand(id).or_else(|| loaded.get(id).copied()))
+        .collect())
+}
+
+pub async fn member_residuals(
+    db: &mongodb::Database,
+    track: &StoredTrack,
+) -> Result<Vec<Option<[f64; 2]>>, mongodb::error::Error> {
+    let Some(orbit) = track.orbit else {
+        return Ok(Vec::new());
+    };
+    let state = State {
+        pos: orbit.pos,
+        vel: orbit.vel,
+    };
+    let found =
+        member_detections(db, &track.member_keys(), &HashMap::new(), &HashMap::new()).await?;
+    Ok(found
+        .iter()
+        .map(|d| {
+            let d = d.as_ref()?;
+            let obs = Observation {
+                jd: d.jd,
+                ra: d.ra,
+                dec: d.dec,
+                site: d.site.unwrap_or(ZTF),
+            };
+            observed_minus_computed(&state, orbit.epoch_jd, &obs).map(|(ra, dec)| [ra, dec])
+        })
         .collect())
 }
 
