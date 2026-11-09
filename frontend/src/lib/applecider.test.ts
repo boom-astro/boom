@@ -35,4 +35,9 @@ describe("formatPercent", () => {
   it("does not show a small nonzero probability as 0%", () => {
     expect(formatPercent(0.001)).toBe("<1%")
   })
+
+  it("does not show a probability short of 1 as 100%", () => {
+    expect(formatPercent(0.996)).toBe(">99%")
+    expect(formatPercent(1)).toBe("100%")
+  })
 })

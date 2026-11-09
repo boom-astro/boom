@@ -542,7 +542,7 @@ export type SimilarObject = {
   object_id: string;
   /** COSINE similarity, so higher is closer. */
   score: number;
-  /** Null when the alert the embedding came from has no classification. */
+  /** Null when that alert has no classification or it could not be looked up. */
   applecider_fusion?: AppleCiderFusion | null;
 };
 
