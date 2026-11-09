@@ -1,7 +1,7 @@
 use crate::alert::DecamCandidate;
 use crate::conf::AppConfig;
-use crate::enrichment::lsst::LsstMatch;
-use crate::enrichment::ztf::ZtfMatch;
+use crate::enrichment::lsst::{lsst_detections, lsst_nondetections, LsstMatch};
+use crate::enrichment::ztf::{ztf_detections, ztf_nondetections, ZtfMatch};
 use crate::enrichment::{fetch_alerts, EnrichmentWorker, EnrichmentWorkerError};
 use crate::utils::db::{fetch_timeseries_op, mongify};
 use crate::utils::enums::Survey;
@@ -9,7 +9,8 @@ use crate::utils::host::HostGalaxyAssociation;
 use crate::utils::identify::{closest, IdentifyConfig, NightPaths, OrbitEntry};
 use crate::utils::lightcurves::{
     analyze_photometry, prepare_photometry, summarise_detections, Band, DetectionHistory,
-    EpisodeHistory, PerBandProperties, PhotometryMag, EPISODE_GAP_DAYS, SNT,
+    EpisodeHistory, MultisurveyDetectionHistory, PerBandProperties, PhotometryMag,
+    EPISODE_GAP_DAYS, SNT,
 };
 use crate::utils::linking::{night_start, Detection};
 use crate::utils::mpcorb::{load_catalogue, MAX_EPOCH_GAP_DAYS};
@@ -214,17 +215,29 @@ impl DecamMatch {
     }
 
     pub fn detections(&self) -> impl Iterator<Item = (f64, Survey, &Band)> {
-        self.prv_candidates
-            .iter()
-            .filter(|p| p.snr.is_some_and(|s| s >= 0.0))
-            .map(|p| (p.time, Survey::Decam, &p.band))
+        decam_detections(&self.prv_candidates)
     }
 
     pub fn nondetections(&self) -> impl Iterator<Item = (f64, f32, Survey, &Band)> {
-        self.fp_nondetections
-            .iter()
-            .map(|p| (p.jd, p.diffmaglim as f32, Survey::Decam, &p.band))
+        decam_nondetections(&self.fp_nondetections)
     }
+}
+
+fn decam_detections(
+    prv_candidates: &[DecamPhotometry],
+) -> impl Iterator<Item = (f64, Survey, &Band)> {
+    prv_candidates
+        .iter()
+        .filter(|p| p.snr.is_some_and(|s| s >= 0.0))
+        .map(|p| (p.time, Survey::Decam, &p.band))
+}
+
+fn decam_nondetections(
+    fp_nondetections: &[DecamNonDetection],
+) -> impl Iterator<Item = (f64, f32, Survey, &Band)> {
+    fp_nondetections
+        .iter()
+        .map(|p| (p.jd, p.diffmaglim as f32, Survey::Decam, &p.band))
 }
 
 /// The pipeline must end with its `$project` stage.
@@ -334,6 +347,8 @@ pub struct DecamAlertProperties {
     /// `None` on alerts enriched before this field existed.
     #[serde(default)]
     pub detection_history: Option<DetectionHistory>,
+    #[serde(default)]
+    pub multisurvey_detection_history: Option<MultisurveyDetectionHistory>,
     /// Detection episodes, for finding sources that outburst more than once.
     /// `None` on alerts enriched before this field existed.
     pub episode_history: Option<EpisodeHistory>,
@@ -624,6 +639,34 @@ impl DecamEnrichmentWorker {
             alert.candidate.jd,
         );
 
+        let ztf_match = alert.survey_matches.as_ref().and_then(|m| m.ztf.as_ref());
+        let lsst_match = alert.survey_matches.as_ref().and_then(|m| m.lsst.as_ref());
+        let multisurvey_detection_history = MultisurveyDetectionHistory::from_points(
+            decam_detections(&alert.prv_candidates)
+                .chain(
+                    ztf_match
+                        .into_iter()
+                        .flat_map(|m| ztf_detections(&m.prv_candidates)),
+                )
+                .chain(
+                    lsst_match
+                        .into_iter()
+                        .flat_map(|m| lsst_detections(&m.prv_candidates)),
+                ),
+            decam_nondetections(&alert.fp_nondetections)
+                .chain(
+                    ztf_match
+                        .into_iter()
+                        .flat_map(|m| ztf_nondetections(&m.prv_nondetections, &m.fp_hists)),
+                )
+                .chain(
+                    lsst_match
+                        .into_iter()
+                        .flat_map(|m| lsst_nondetections(&m.fp_hists)),
+                ),
+            alert.candidate.jd,
+        );
+
         Ok(DecamAlertProperties {
             rock: sso.as_ref().is_some_and(|s| s.is_sso),
             stationary,
@@ -631,6 +674,7 @@ impl DecamEnrichmentWorker {
             photstats,
             multisurvey_photstats: Some(multisurvey_photstats),
             detection_history: Some(detection_history),
+            multisurvey_detection_history: Some(multisurvey_detection_history),
             episode_history: Some(episode_history),
             sso,
         })
