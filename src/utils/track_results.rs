@@ -46,7 +46,11 @@ impl TrackPublisher {
     }
 
     #[instrument(skip_all, err)]
-    pub async fn publish(&self, db: &mongodb::Database) -> Result<usize, FilterWorkerError> {
+    pub async fn publish(
+        &self,
+        db: &mongodb::Database,
+        min_last_jd: f64,
+    ) -> Result<usize, FilterWorkerError> {
         let counters = db.collection::<Document>(COUNTERS_COLLECTION);
         let now = chrono::Utc::now().timestamp_millis() as f64 / 1000.0;
         let filters: Vec<LoadedFilter> = build_loaded_filters(
@@ -68,6 +72,7 @@ impl TrackPublisher {
             );
             return Ok(0);
         };
+        query.min_last_jd = Some(min_last_jd);
         let alerts = db.collection::<Document>("ZTF_alerts");
         let mut published = 0;
         loop {

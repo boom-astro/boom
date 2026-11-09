@@ -1111,6 +1111,7 @@ pub struct TrackQuery {
     pub min_nights: Option<i32>,
     pub max_rms_ratio: Option<f64>,
     pub min_neo_score: Option<f64>,
+    pub min_last_jd: Option<f64>,
 }
 
 impl TrackQuery {
@@ -1144,6 +1145,9 @@ impl TrackQuery {
         }
         if let Some(min_neo_score) = self.min_neo_score {
             filter.insert("neo_score", doc! { "$gte": min_neo_score });
+        }
+        if let Some(min_last_jd) = self.min_last_jd {
+            filter.insert("last_jd", doc! { "$gte": min_last_jd });
         }
         filter
     }
@@ -1513,6 +1517,7 @@ pub(crate) mod tests {
             min_nights: Some(3),
             max_rms_ratio: Some(4.0),
             min_neo_score: None,
+            min_last_jd: None,
         };
         let filter = query.filter();
         assert_eq!(filter.keys().next().map(String::as_str), Some("updated_at"));

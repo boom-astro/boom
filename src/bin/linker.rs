@@ -523,11 +523,17 @@ async fn run_night(db: &mongodb::Database, cfg: &LinkerConfig, night: i64, stop:
     done
 }
 
-async fn publish(db: &mongodb::Database, publisher: Option<&TrackPublisher>) {
+/// Only tracks seen in the live window, so relinking past nights sends nothing.
+async fn publish(db: &mongodb::Database, publisher: Option<&TrackPublisher>, cfg: &LinkerConfig) {
     let Some(publisher) = publisher else {
         return;
     };
-    match publisher.publish(db).await {
+    let night = match last_recorded_night(db).await {
+        Some(night) => night,
+        None => last_finished_night(now_jd(), cfg.run_after_utc_hour),
+    };
+    let (min_last_jd, _) = window(night, cfg.window_nights);
+    match publisher.publish(db, min_last_jd).await {
         Ok(published) => info!(published, "ran the track filters"),
         Err(error) => error!(%error, "could not run the track filters"),
     }
@@ -603,13 +609,13 @@ async fn main() {
 
     if let Some(night) = cli.night {
         run_night(&db, &cfg, night, &stop).await;
-        publish(&db, publisher).await;
+        publish(&db, publisher, &cfg).await;
         return;
     }
     if cli.once {
         let night = last_finished_night(now_jd(), cfg.run_after_utc_hour);
         let finished = run_night(&db, &cfg, night, &stop).await;
-        publish(&db, publisher).await;
+        publish(&db, publisher, &cfg).await;
         if finished {
             record_night(&db, night).await;
         }
@@ -634,7 +640,7 @@ async fn main() {
                 if seen.is_some_and(|(_, count)| count > 0) && seen != live_seen {
                     info!(night = night + 1, "fast pass over the night in progress");
                     let finished = run_night(&db, &live_cfg, night + 1, &stop).await;
-                    publish(&db, publisher).await;
+                    publish(&db, publisher, &cfg).await;
                     if finished {
                         live_seen = seen;
                     }
@@ -651,7 +657,7 @@ async fn main() {
             live_every.map_or(left, |every| every.min(left))
         } else {
             let finished = run_night(&db, &cfg, night, &stop).await;
-            publish(&db, publisher).await;
+            publish(&db, publisher, &cfg).await;
             if finished {
                 record_night(&db, night).await;
                 done = Some(night);

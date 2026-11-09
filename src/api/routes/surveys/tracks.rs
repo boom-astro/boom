@@ -67,6 +67,7 @@ pub async fn get_tracks(
         min_nights: params.min_nights,
         max_rms_ratio: params.max_rms_ratio,
         min_neo_score: params.min_neo_score,
+        min_last_jd: None,
     };
     let limit = params
         .limit
