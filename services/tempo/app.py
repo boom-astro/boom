@@ -76,7 +76,7 @@ def _photometry_frame(photometry: dict[str, Any], include_forced: bool) -> pd.Da
     rows = []
     for source in sources:
         for point in photometry.get(source) or []:
-            if not isinstance(point, dict):
+            if not isinstance(point, dict) or point.get("isdiffpos") is False:
                 continue
             jd, mag, magerr, fid = (
                 point.get("jd"),

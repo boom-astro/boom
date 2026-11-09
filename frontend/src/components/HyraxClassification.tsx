@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { Info, Play } from 'lucide-react';
 import { toast } from 'sonner';
@@ -84,28 +84,34 @@ export default function HyraxClassification() {
 
   // A result belongs to the object it was computed for. Without this, navigating
   // to another object leaves the previous object's scores on screen.
+  const target = useRef('');
   useEffect(() => {
+    target.current = `${survey}/${objectId}`;
     setResult(null);
     setError(null);
+    setRunning(false);
   }, [survey, objectId]);
 
   const selected = models.find(m => m.id === model);
 
   async function handleSubmit() {
     if (!survey || !objectId || !model) return;
+    const key = `${survey}/${objectId}`;
     setRunning(true);
     setError(null);
     setResult(null);
     try {
       const res = await api.classifyObject(survey, objectId, model);
+      if (target.current !== key) return;
       setResult(res);
       toast.success(`${selected?.name ?? model} finished running on ${objectId}`);
     } catch (err: unknown) {
+      if (target.current !== key) return;
       const msg = errorMessage(err);
       setError(msg);
       toast.error('Classification failed', { description: msg });
     } finally {
-      setRunning(false);
+      if (target.current === key) setRunning(false);
     }
   }
 
