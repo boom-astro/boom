@@ -35,14 +35,10 @@ describe("Decision", () => {
 })
 
 describe("ClassProbabilities", () => {
-  it("shows the three most likely classes and folds the rest away", () => {
+  it("shows only the three most likely classes, best first", () => {
     const probs = { TDE: 0.02, "AGN-like": 0.5, "Ia-like SN": 0.3, "H-rich CCSN": 0.1, SLSN: 0.08 }
     const { container } = render(<ClassProbabilities fusion={fusion({ class_probabilities: probs })} />)
-    const names = (root: Element) =>
-      Array.from(root.querySelectorAll(":scope > div span.truncate")).map((el) => el.textContent)
-
-    expect(names(container.firstElementChild!)).toEqual(["AGN-like", "Ia-like SN", "H-rich CCSN"])
-    expect(screen.getByText("2 more").tagName).toBe("SUMMARY")
-    expect(names(container.querySelector("details > div")!)).toEqual(["SLSN", "TDE"])
+    const names = Array.from(container.querySelectorAll("span.truncate")).map((el) => el.textContent)
+    expect(names).toEqual(["AGN-like", "Ia-like SN", "H-rich CCSN"])
   })
 })
