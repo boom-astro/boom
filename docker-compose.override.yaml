@@ -246,6 +246,8 @@ services:
       - "5173"
     environment:
       VITE_API_PROXY_TARGET: http://api:4000
+      # Answers only with `--profile assistant`; otherwise the Ask button stays hidden.
+      VITE_ASSISTANT_PROXY: http://assistant:8000/assistant
     volumes: !override
       # One directory, for the reason the Rust services give above: a branch
       # switch that rewrites vite.config.ts or a tsconfig would orphan a

@@ -80,6 +80,12 @@ jobs:
       VITE_PRERELEASE_MODE: ${{ vars.VITE_PRERELEASE_MODE }}
       VITE_PUBLIC_POSTHOG_KEY: ${{ vars.VITE_PUBLIC_POSTHOG_KEY }}
       VITE_PUBLIC_POSTHOG_HOST: ${{ vars.VITE_PUBLIC_POSTHOG_HOST }}
+      # The web app's chat assistant. Setting ASSISTANT_LLM_URL adds the
+      # `assistant` compose profile below; unset, the deploy is unchanged.
+      ASSISTANT_LLM_URL: ${{ vars.ASSISTANT_LLM_URL }}
+      ASSISTANT_LLM_MODEL: ${{ vars.ASSISTANT_LLM_MODEL }}
+      ASSISTANT_LLM_API_KEY: ${{ secrets.ASSISTANT_LLM_API_KEY }}
+      ASSISTANT_CONCURRENCY: ${{ vars.ASSISTANT_CONCURRENCY }}
       # Server-side PostHog analytics for the Babamul API and Kafka stream.
       # Deliberately reuses the VITE_* values rather than taking its own
       # variables: web and API activity must land on the same PostHog project
@@ -222,15 +228,26 @@ jobs:
           else
             echo "args=" >> "$GITHUB_OUTPUT"
           fi
+      - name: Select assistant compose profile
+        id: assistant_profile
+        run: |
+          if [ -n "${ASSISTANT_LLM_URL}" ]; then
+            echo "Adding the assistant profile (ASSISTANT_LLM_URL is set)"
+            echo "args=--profile assistant" >> "$GITHUB_OUTPUT"
+          else
+            echo "args=" >> "$GITHUB_OUTPUT"
+          fi
       - run: >
           docker compose --profile prod
           ${{ steps.decam_profile.outputs.args }}
+          ${{ steps.assistant_profile.outputs.args }}
           -f docker-compose.yaml
           ${{ steps.gpu_compose.outputs.args }}
           build
       - run: >
           docker compose --profile prod
           ${{ steps.decam_profile.outputs.args }}
+          ${{ steps.assistant_profile.outputs.args }}
           -f docker-compose.yaml
           -f docker-compose.cutouts-mongo.yaml
           ${{ steps.gpu_compose.outputs.args }} up -d

@@ -6,6 +6,7 @@ import { SearchDialog, useSearchDialog } from "./search-dialog"
 import { Search } from "lucide-react"
 import { Button } from "./ui/button"
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip"
+import { AssistantButton } from "./assistant/assistant-button"
 
 export function SiteHeader() {
   const { open, setOpen } = useSearchDialog()
@@ -22,6 +23,7 @@ export function SiteHeader() {
           <Link to="/" className="text-base font-medium">Babamul</Link>
         </h1>
         <div className="ml-auto flex items-center gap-2">
+          <AssistantButton />
           <Tooltip>
             <TooltipTrigger asChild>
               <Button
