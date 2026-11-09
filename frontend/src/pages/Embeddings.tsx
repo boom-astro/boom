@@ -5,6 +5,7 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { ClassProbabilities, Decision } from "@/components/applecider-classification";
 import {
   EmbeddingsDisabled,
   fetchEmbeddingsCount,
@@ -174,6 +175,8 @@ export default function Embeddings() {
               <TableHeader>
                 <TableRow>
                   <TableHead>Object</TableHead>
+                  <TableHead>Classification</TableHead>
+                  <TableHead>Class probabilities</TableHead>
                   <TableHead className="text-right">Similarity</TableHead>
                 </TableRow>
               </TableHeader>
@@ -187,6 +190,12 @@ export default function Embeddings() {
                       >
                         {hit.object_id}
                       </Link>
+                    </TableCell>
+                    <TableCell>
+                      <Decision fusion={hit.applecider_fusion} />
+                    </TableCell>
+                    <TableCell>
+                      <ClassProbabilities fusion={hit.applecider_fusion} />
                     </TableCell>
                     <TableCell className="text-right tabular-nums">{formatScore(hit.score)}</TableCell>
                   </TableRow>
