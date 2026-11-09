@@ -7,6 +7,7 @@ import {
   finishTools,
   parseSavedTurns,
   streamChat,
+  trimImages,
   type AssistantTurn,
   type ChatContext,
   type Turn,
@@ -16,6 +17,9 @@ import {
 const STORAGE_PREFIX = "babamul-assistant:"
 // Text arrives a few tokens at a time; re-rendering markdown for each is wasted work.
 const TEXT_FLUSH_MS = 50
+// A plot is about 60 KB of base64 and a site gets about 5 MB of sessionStorage.
+// Keep the newest plots within this budget, and less if even that does not fit.
+const IMAGE_BUDGETS = [2_000_000, 500_000, 0]
 
 type AssistantState = {
   /** Whose conversation this is; each account keeps its own. */
@@ -52,32 +56,31 @@ function load(user: string | null): Turn[] {
 
 function save(user: string | null, turns: Turn[]) {
   if (!user) return
-  try {
-    if (turns.length === 0) {
-      sessionStorage.removeItem(storageKey(user))
-      return
-    }
-    sessionStorage.setItem(storageKey(user), JSON.stringify(turns))
-  } catch {
-    // Images are most of the size; keep the text if they do not fit.
+  if (turns.length === 0) {
     try {
-      sessionStorage.setItem(storageKey(user), JSON.stringify(withoutImages(turns)))
+      sessionStorage.removeItem(storageKey(user))
     } catch {
-      // Storage is full or blocked; the conversation still lives in memory.
+      // Blocked; there is nothing to keep anyway.
+    }
+    return
+  }
+  // Images are most of the size, so older ones go first when storage is full.
+  for (const budget of IMAGE_BUDGETS) {
+    try {
+      sessionStorage.setItem(storageKey(user), JSON.stringify(trimImages(turns, budget)))
+      return
+    } catch {
+      // Full or blocked; try with fewer images. The conversation still lives in memory.
     }
   }
 }
 
-function withoutImages(turns: Turn[]): Turn[] {
-  return turns.map((turn) =>
-    turn.role === "user"
-      ? turn
-      : {
-          ...turn,
-          parts: turn.parts.map((part) =>
-            part.kind === "tool" ? { ...part, step: { ...part.step, images: [] } } : part,
-          ),
-        },
+/** Ends a running answer and says why, so the account that asked sees it next time. */
+function endRunning(turns: Turn[], message: string): Turn[] {
+  return turns.map((t): Turn =>
+    t.role === "assistant" && t.state === "running"
+      ? { ...finishTools(t), state: "error", error: { kind: "aborted", message } }
+      : t,
   )
 }
 
@@ -93,7 +96,13 @@ export const useAssistantStore = create<AssistantState>()((set, get) => ({
   status: null,
 
   setUser: (user) => {
-    if (get().user === user) return
+    const { user: previous, turns, running } = get()
+    if (previous === user) return
+    // The answer cannot carry on for someone else, but it should not vanish without a word.
+    if (running) {
+      const why = user ? "Stopped because you switched accounts." : "Stopped because you logged out."
+      save(previous, endRunning(turns, why))
+    }
     cancelCurrent()
     set({ user, turns: load(user), running: false, status: null })
   },

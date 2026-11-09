@@ -1,8 +1,9 @@
-import { useMemo, type MouseEvent } from "react"
+import { useId, useMemo, type MouseEvent } from "react"
 import ReactMarkdown, { type Components } from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { Link } from "react-router-dom"
 import { inAppObjectPath, remarkObjectLinks } from "@/lib/assistant"
+import { cn } from "@/lib/utils"
 
 const remarkPlugins = [remarkGfm, remarkObjectLinks]
 
@@ -13,20 +14,66 @@ const proseClass = [
   "min-w-0 break-words text-sm leading-relaxed",
   "[&>:first-child]:mt-0 [&>:last-child]:mb-0",
   "[&_p]:my-2 [&_ul]:my-2 [&_ul]:list-disc [&_ul]:pl-5 [&_ol]:my-2 [&_ol]:list-decimal [&_ol]:pl-5 [&_li]:my-0.5",
-  "[&_h1]:mt-3 [&_h1]:mb-2 [&_h1]:text-base [&_h1]:font-semibold",
-  "[&_h2]:mt-3 [&_h2]:mb-2 [&_h2]:text-sm [&_h2]:font-semibold",
-  "[&_h3]:mt-3 [&_h3]:mb-1 [&_h3]:text-sm [&_h3]:font-semibold",
   "[&_blockquote]:my-2 [&_blockquote]:border-l-2 [&_blockquote]:pl-3 [&_blockquote]:text-muted-foreground",
   "[&_code]:rounded [&_code]:bg-muted [&_code]:px-1 [&_code]:py-0.5 [&_code]:font-mono [&_code]:text-[0.85em]",
   "[&_pre_code]:bg-transparent [&_pre_code]:p-0",
   "[&_hr]:my-3",
 ].join(" ")
 
+type HeadingTag = "h3" | "h4" | "h5" | "h6"
+
+// The panel's title is an h2, so the model's headings start one level below it.
+function heading(Tag: HeadingTag, style: string): Components["h1"] {
+  // `id` and `className` carry the footnotes' screen reader label.
+  return function Heading({ id, className, children }) {
+    return (
+      <Tag id={id} className={cn(style, className)}>
+        {children}
+      </Tag>
+    )
+  }
+}
+
+const headings: Components = {
+  h1: heading("h3", "mt-3 mb-2 text-base font-semibold"),
+  h2: heading("h4", "mt-3 mb-2 text-sm font-semibold"),
+  h3: heading("h5", "mt-3 mb-1 text-sm font-semibold"),
+  h4: heading("h6", "mt-3 mb-1 text-sm font-semibold"),
+  h5: heading("h6", "mt-3 mb-1 text-sm font-semibold"),
+  h6: heading("h6", "mt-3 mb-1 text-sm font-semibold"),
+}
+
+// Footnotes jump within the panel without touching the page's URL.
+function scrollToTarget(e: MouseEvent<HTMLAnchorElement>, id: string) {
+  e.preventDefault()
+  document.getElementById(id)?.scrollIntoView?.({ block: "nearest" })
+}
+
 /** An answer rendered as markdown, with object pages opened in the app. */
 export default function AssistantMarkdown({ text, onNavigate }: { text: string; onNavigate?: () => void }) {
+  // Footnote ids are unique per answer, so one answer's links do not land in another's notes.
+  const idPrefix = `${useId()}-`
   const components = useMemo<Components>(
     () => ({
-      a: ({ href, children }) => {
+      ...headings,
+      a: ({ href, children, id, "aria-describedby": describedBy, "aria-label": label }) => {
+        // react-markdown empties javascript: and data: links; a dead link reads as text.
+        if (!href) return <span>{children}</span>
+        if (href.startsWith("#")) {
+          // `id` and the labels let footnote references and back links find each other.
+          return (
+            <a
+              href={href}
+              id={id}
+              aria-describedby={describedBy}
+              aria-label={label}
+              onClick={(e) => scrollToTarget(e, href.slice(1))}
+              className={linkClass}
+            >
+              {children}
+            </a>
+          )
+        }
         const path = inAppObjectPath(href)
         if (path) {
           const onClick = (e: MouseEvent) => {
@@ -73,6 +120,7 @@ export default function AssistantMarkdown({ text, onNavigate }: { text: string; 
       {/* Tool images are shown with their tool call; images the model links to are not loaded. */}
       <ReactMarkdown
         remarkPlugins={remarkPlugins}
+        remarkRehypeOptions={{ clobberPrefix: idPrefix }}
         components={components}
         disallowedElements={["img"]}
         unwrapDisallowed

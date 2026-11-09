@@ -103,7 +103,9 @@ export function errorForStatus(status: number, serverMessage?: string): Assistan
   if (status === 400 || status === 413 || status === 422) {
     return new AssistantError("bad_request", serverMessage, status);
   }
-  return new AssistantError("unavailable", undefined, status);
+  // The service says why it failed ("Start a new chat", "Tell the Babamul team").
+  // A proxy's error page is not JSON, so it gets the default.
+  return new AssistantError("unavailable", serverMessage, status);
 }
 
 /**
@@ -448,6 +450,36 @@ export function buildHistory(turns: Turn[], question: string): ChatMessage[] {
   const recent = messages.slice(-MAX_HISTORY);
   while (recent.length > 1 && recent[0].role !== "user") recent.shift();
   return recent;
+}
+
+/**
+ * Keeps the newest tool images that fit in `budget` characters of base64 and
+ * drops the rest, so a long conversation loses its oldest plots first.
+ */
+export function trimImages(turns: Turn[], budget: number): Turn[] {
+  let left = budget;
+  const trimmed = [...turns];
+  for (let i = trimmed.length - 1; i >= 0; i--) {
+    const turn = trimmed[i];
+    if (turn.role !== "assistant") continue;
+    const parts = [...turn.parts];
+    let changed = false;
+    for (let j = parts.length - 1; j >= 0; j--) {
+      const part = parts[j];
+      if (part.kind !== "tool" || part.step.images.length === 0) continue;
+      const size = part.step.images.reduce((n, image) => n + image.data.length, 0);
+      if (size <= left) {
+        left -= size;
+        continue;
+      }
+      // Once one does not fit, older ones go too, so what is kept is the latest.
+      left = 0;
+      parts[j] = { kind: "tool", step: { ...part.step, images: [] } };
+      changed = true;
+    }
+    if (changed) trimmed[i] = { ...turn, parts };
+  }
+  return trimmed;
 }
 
 /** Restores saved turns; an answer cut off by a reload reads as stopped. */

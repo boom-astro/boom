@@ -1,6 +1,4 @@
 import {
-  Suspense,
-  lazy,
   useCallback,
   useId,
   useLayoutEffect,
@@ -17,11 +15,9 @@ import { SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/compo
 import { Textarea } from "@/components/ui/textarea"
 import type { AssistantTurn, ChatContext } from "@/lib/assistant"
 import { cn } from "@/lib/utils"
-import { loadMarkdown } from "./load-markdown"
+import { AnswerText, MarkdownRetry } from "./markdown-text"
 import { useAssistantStore } from "./store"
 import { ToolCall } from "./tool-call"
-
-const AssistantMarkdown = lazy(loadMarkdown)
 
 const GENERAL_EXAMPLES = [
   "Find likely supernovae in last night's ZTF alerts",
@@ -38,7 +34,8 @@ const OBJECT_EXAMPLES = [
 // Within this many pixels of the end, new text keeps the view scrolled down.
 const STICK_PX = 48
 
-// On phones, focusing the box opens the keyboard over half the panel.
+// On phones, focusing the box opens the keyboard over half the panel, and the
+// keyboard has no Shift, so Enter starts a new line and the button sends.
 const isTouch = () => window.matchMedia?.("(pointer: coarse)").matches ?? false
 
 /** The assistant's side panel: the conversation and the question box. */
@@ -124,7 +121,7 @@ export function AssistantPanel({ onNavigate }: { onNavigate: () => void }) {
   }
 
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+    if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && !isTouch()) {
       e.preventDefault()
       send(draft)
     }
@@ -175,6 +172,7 @@ export function AssistantPanel({ onNavigate }: { onNavigate: () => void }) {
             New chat
           </Button>
         </div>
+        <MarkdownRetry />
       </SheetHeader>
 
       <div
@@ -271,7 +269,7 @@ export function AssistantPanel({ onNavigate }: { onNavigate: () => void }) {
           </Button>
         </div>
         <p id={hintId} className="sr-only">
-          Enter sends. Shift and Enter starts a new line.
+          {isTouch() ? "Enter starts a new line. The Send button sends." : "Enter sends. Shift and Enter starts a new line."}
         </p>
       </form>
     </SheetContent>
@@ -306,23 +304,26 @@ function Answer({
   const running = turn.state === "running"
   const stopped = turn.state === "stopped"
   return (
-    <div className="flex min-w-0 flex-col gap-3" aria-live="polite" aria-busy={running}>
-      <span className="sr-only">Babamul answered:</span>
-      {turn.parts.map((part, i) =>
-        part.kind === "text" ? (
-          <Suspense key={i} fallback={<p className="text-sm break-words whitespace-pre-wrap">{part.text}</p>}>
-            <AssistantMarkdown text={part.text} onNavigate={onNavigate} />
-          </Suspense>
-        ) : (
-          <ToolCall key={i} step={part.step} />
-        ),
-      )}
-      {/* Kept under the latest answer once it is done, so the end of the list does not jump. */}
+    <div className="flex min-w-0 flex-col gap-3">
+      {/* Only the latest answer is live, so older ones re-rendering are not read out again. */}
+      <div className="flex min-w-0 flex-col gap-3" aria-live={isLast ? "polite" : undefined} aria-busy={running}>
+        <span className="sr-only">Babamul answered:</span>
+        {turn.parts.map((part, i) =>
+          part.kind === "text" ? (
+            <AnswerText key={i} text={part.text} onNavigate={onNavigate} />
+          ) : (
+            <ToolCall key={i} step={part.step} />
+          ),
+        )}
+      </div>
+      {/* Kept under the latest answer once it is done, so the end of the list does not jump.
+          Outside the busy region so a queue position is read out while the answer waits. */}
       {(running || stopped || isLast) && (
         <p
+          role="status"
           aria-hidden={!running && !stopped}
           className={cn(
-            "flex h-5 items-center gap-2 text-xs text-muted-foreground",
+            "flex min-h-5 items-center gap-2 text-xs text-muted-foreground",
             !running && !stopped && "invisible",
           )}
         >

@@ -10,6 +10,7 @@ import {
   remarkObjectLinks,
   splitObjectIds,
   streamChat,
+  trimImages,
   type AssistantEvent,
   type AssistantTurn,
   type Turn,
@@ -184,8 +185,15 @@ describe("streamChat", () => {
     [401, { error: "Invalid token" }, "auth", "Your session has expired. Log in again."],
     [429, { error: "You already have a question running." }, "busy", "You already have a question running."],
     [429, null, "busy", "One question at a time. Try again in a moment."],
-    [503, { error: "model down" }, "unavailable", "The assistant is unavailable right now. Try again later."],
+    [503, { error: "model down" }, "unavailable", "model down"],
+    [
+      503,
+      { error: "The model could not take this conversation, maybe because it is too long. Start a new chat and try again." },
+      "unavailable",
+      "The model could not take this conversation, maybe because it is too long. Start a new chat and try again.",
+    ],
     [502, null, "unavailable", "The assistant is unavailable right now. Try again later."],
+    [500, { error: "  " }, "unavailable", "The assistant is unavailable right now. Try again later."],
     [400, { error: "messages must end with a user message" }, "bad_request", "messages must end with a user message"],
   ])("maps HTTP %i to %s", async (status, body, kind, message) => {
     stubFetch(
@@ -204,6 +212,25 @@ describe("streamChat", () => {
   it("maps a network failure to unavailable", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => Promise.reject(new TypeError("Failed to fetch"))))
     await expect(streamChat({ messages: [] }, "tok", () => {})).rejects.toMatchObject({ kind: "unavailable" })
+  })
+
+  it("rejects as interrupted when the network drops mid-stream, after the events so far", async () => {
+    const body = new ReadableStream<Uint8Array>({
+      start(stream) {
+        stream.enqueue(encoder.encode(sse({ type: "text", delta: "Hal" })))
+      },
+      pull(stream) {
+        // What fetch does when the connection is lost while reading.
+        stream.error(new TypeError("network error"))
+      },
+    })
+    stubFetch(new Response(body, { status: 200, headers: { "Content-Type": "text/event-stream" } }))
+    const events: AssistantEvent[] = []
+    await expect(streamChat({ messages: [] }, "tok", (e) => events.push(e))).rejects.toMatchObject({
+      kind: "interrupted",
+      message: "The answer was cut off. Try again.",
+    })
+    expect(events).toEqual([{ type: "text", delta: "Hal" }])
   })
 
   it("rejects as aborted when stopped before the response arrives", async () => {
@@ -353,6 +380,49 @@ describe("parseSavedTurns", () => {
     expect(parseSavedTurns(null)).toEqual([])
     expect(parseSavedTurns("{")).toEqual([])
     expect(parseSavedTurns(JSON.stringify([{ role: "system" }]))).toEqual([])
+  })
+})
+
+describe("trimImages", () => {
+  const image = (data: string) => ({ mime_type: "image/png", data })
+  const withImages = (id: string, ...images: string[]): AssistantTurn => ({
+    id,
+    role: "assistant",
+    content: id,
+    state: "done",
+    parts: [
+      { kind: "text", text: id },
+      ...images.map((data, i) => ({
+        kind: "tool" as const,
+        step: { id: `${id}-${i}`, name: "plot", arguments: {}, state: "ok" as const, images: [image(data)] },
+      })),
+    ],
+  })
+  const kept = (turns: Turn[]) =>
+    turns.flatMap((t) =>
+      t.role === "assistant" ? t.parts.flatMap((p) => (p.kind === "tool" ? p.step.images.map((i) => i.data) : [])) : [],
+    )
+
+  it("keeps the newest images that fit and drops older ones first", () => {
+    const turns: Turn[] = [
+      { id: "q1", role: "user", content: "q1" },
+      withImages("a1", "1111", "2222"),
+      { id: "q2", role: "user", content: "q2" },
+      withImages("a2", "3333", "4444"),
+    ]
+    expect(kept(trimImages(turns, 100))).toEqual(["1111", "2222", "3333", "4444"])
+    expect(kept(trimImages(turns, 12))).toEqual(["2222", "3333", "4444"])
+    expect(kept(trimImages(turns, 9))).toEqual(["3333", "4444"])
+    expect(kept(trimImages(turns, 3))).toEqual([])
+    // The text and the tool calls stay; only the pictures go.
+    const none = trimImages(turns, 0)
+    expect(none.map((t) => t.role === "assistant" && t.parts.length)).toEqual([false, 3, false, 3])
+    expect(kept(turns)).toHaveLength(4)
+  })
+
+  it("does not keep an older image that fits after a newer one did not", () => {
+    const turns: Turn[] = [withImages("a1", "11"), withImages("a2", "22222222")]
+    expect(kept(trimImages(turns, 4))).toEqual([])
   })
 })
 
