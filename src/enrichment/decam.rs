@@ -1,5 +1,7 @@
 use crate::alert::DecamCandidate;
 use crate::conf::AppConfig;
+use crate::enrichment::lsst::{lsst_detections, lsst_nondetections, LsstMatch};
+use crate::enrichment::ztf::{ztf_detections, ztf_nondetections, ZtfMatch};
 use crate::enrichment::{fetch_alerts, EnrichmentWorker, EnrichmentWorkerError};
 use crate::utils::db::{fetch_timeseries_op, mongify};
 use crate::utils::enums::Survey;
@@ -7,7 +9,8 @@ use crate::utils::host::HostGalaxyAssociation;
 use crate::utils::identify::{closest, IdentifyConfig, NightPaths, OrbitEntry};
 use crate::utils::lightcurves::{
     analyze_photometry, prepare_photometry, summarise_detections, Band, DetectionHistory,
-    EpisodeHistory, PerBandProperties, PhotometryMag, EPISODE_GAP_DAYS, SNT,
+    EpisodeHistory, MultisurveyDetectionHistory, PerBandProperties, PhotometryMag,
+    EPISODE_GAP_DAYS, SNT,
 };
 use crate::utils::linking::{night_start, Detection};
 use crate::utils::mpcorb::{load_catalogue, MAX_EPOCH_GAP_DAYS};
@@ -47,9 +50,60 @@ pub fn create_decam_alert_pipeline() -> Vec<Document> {
             }
         },
         doc! {
+            "$lookup": {
+                "from": "ZTF_alerts_aux",
+                "localField": "aux.aliases.ZTF.0",
+                "foreignField": "_id",
+                "as": "ztf_aux"
+            }
+        },
+        doc! {
+            "$lookup": {
+                "from": "LSST_alerts_aux",
+                "localField": "aux.aliases.LSST.0",
+                "foreignField": "_id",
+                "as": "lsst_aux"
+            }
+        },
+        doc! {
             "$project": doc! {
                 "objectId": 1,
                 "candidate": 1,
+                "survey_matches": {
+                    "ztf": {
+                        "$cond": {
+                            "if": { "$gt": [ { "$size": "$ztf_aux" }, 0 ] },
+                            "then": {
+                                "objectId": { "$arrayElemAt": [ "$ztf_aux._id", 0 ] },
+                                "prv_candidates": { "$arrayElemAt": [ "$ztf_aux.prv_candidates", 0 ] },
+                                "prv_nondetections": { "$arrayElemAt": [ "$ztf_aux.prv_nondetections", 0 ] },
+                                "fp_hists": { "$arrayElemAt": [ "$ztf_aux.fp_hists", 0 ] },
+                                "ra": { "$add": [
+                                    { "$arrayElemAt": [{ "$arrayElemAt": [ "$ztf_aux.coordinates.radec_geojson.coordinates", 0 ] }, 0]},
+                                    180
+                                ]},
+                                "dec": { "$arrayElemAt": [{ "$arrayElemAt": [ "$ztf_aux.coordinates.radec_geojson.coordinates", 0 ] }, 1]},
+                            },
+                            "else": null
+                        }
+                    },
+                    "lsst": {
+                        "$cond": {
+                            "if": { "$gt": [ { "$size": "$lsst_aux" }, 0 ] },
+                            "then": {
+                                "objectId": { "$arrayElemAt": [ "$lsst_aux._id", 0 ] },
+                                "prv_candidates": { "$arrayElemAt": [ "$lsst_aux.prv_candidates", 0 ] },
+                                "fp_hists": { "$arrayElemAt": [ "$lsst_aux.fp_hists", 0 ] },
+                                "ra": { "$add": [
+                                    { "$arrayElemAt": [{ "$arrayElemAt": [ "$lsst_aux.coordinates.radec_geojson.coordinates", 0 ] }, 0]},
+                                    180
+                                ]},
+                                "dec": { "$arrayElemAt": [{ "$arrayElemAt": [ "$lsst_aux.coordinates.radec_geojson.coordinates", 0 ] }, 1]},
+                            },
+                            "else": null
+                        }
+                    }
+                },
                 "prv_candidates": fetch_timeseries_op(
                     "aux.prv_candidates",
                     "candidate.jd",
@@ -94,6 +148,7 @@ pub fn create_decam_alert_pipeline() -> Vec<Document> {
                 "fp_nondetections.band": 1,
                 "fp_nondetections.diffmaglim": 1,
                 "host_galaxy": 1,
+                "survey_matches": 1,
             }
         },
     ]
@@ -160,17 +215,29 @@ impl DecamMatch {
     }
 
     pub fn detections(&self) -> impl Iterator<Item = (f64, Survey, &Band)> {
-        self.prv_candidates
-            .iter()
-            .filter(|p| p.snr.is_some_and(|s| s >= 0.0))
-            .map(|p| (p.time, Survey::Decam, &p.band))
+        decam_detections(&self.prv_candidates)
     }
 
     pub fn nondetections(&self) -> impl Iterator<Item = (f64, f32, Survey, &Band)> {
-        self.fp_nondetections
-            .iter()
-            .map(|p| (p.jd, p.diffmaglim as f32, Survey::Decam, &p.band))
+        decam_nondetections(&self.fp_nondetections)
     }
+}
+
+fn decam_detections(
+    prv_candidates: &[DecamPhotometry],
+) -> impl Iterator<Item = (f64, Survey, &Band)> {
+    prv_candidates
+        .iter()
+        .filter(|p| p.snr.is_some_and(|s| s >= 0.0))
+        .map(|p| (p.time, Survey::Decam, &p.band))
+}
+
+fn decam_nondetections(
+    fp_nondetections: &[DecamNonDetection],
+) -> impl Iterator<Item = (f64, f32, Survey, &Band)> {
+    fp_nondetections
+        .iter()
+        .map(|p| (p.jd, p.diffmaglim as f32, Survey::Decam, &p.band))
 }
 
 /// The pipeline must end with its `$project` stage.
@@ -241,6 +308,14 @@ pub struct DecamAlertForEnrichment {
     pub fp_nondetections: Vec<DecamNonDetection>,
     #[serde(default)]
     pub host_galaxy: Option<HostGalaxyAssociation>,
+    #[serde(default)]
+    pub survey_matches: Option<DecamSurveyMatches>,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+pub struct DecamSurveyMatches {
+    pub ztf: Option<ZtfMatch>,
+    pub lsst: Option<LsstMatch>,
 }
 
 #[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize, AvroSchema)]
@@ -266,10 +341,14 @@ pub struct DecamAlertProperties {
     #[serde(default)]
     pub hosted: Option<bool>,
     pub photstats: PerBandProperties,
+    #[serde(default)]
+    pub multisurvey_photstats: Option<PerBandProperties>,
     /// Per-object detection-history summary for history-aware filters.
     /// `None` on alerts enriched before this field existed.
     #[serde(default)]
     pub detection_history: Option<DetectionHistory>,
+    #[serde(default)]
+    pub multisurvey_detection_history: Option<MultisurveyDetectionHistory>,
     /// Detection episodes, for finding sources that outburst more than once.
     /// `None` on alerts enriched before this field existed.
     pub episode_history: Option<EpisodeHistory>,
@@ -512,6 +591,35 @@ impl DecamEnrichmentWorker {
         prepare_photometry(&mut lightcurve);
         let (photstats, _, stationary) = analyze_photometry(&lightcurve);
 
+        let jd = alert.candidate.jd;
+        let decam_points = lightcurve.len();
+        if let Some(matches) = &alert.survey_matches {
+            if let Some(ztf) = &matches.ztf {
+                lightcurve.extend(
+                    ztf.prv_candidates
+                        .iter()
+                        .chain(&ztf.fp_hists)
+                        .filter(|p| p.jd <= jd)
+                        .filter_map(|p| p.to_photometry_mag(None)),
+                );
+            }
+            if let Some(lsst) = &matches.lsst {
+                lightcurve.extend(
+                    lsst.prv_candidates
+                        .iter()
+                        .chain(&lsst.fp_hists)
+                        .filter(|p| p.jd <= jd)
+                        .filter_map(|p| p.to_photometry_mag(None)),
+                );
+            }
+        }
+        let multisurvey_photstats = if lightcurve.len() == decam_points {
+            photstats.clone()
+        } else {
+            prepare_photometry(&mut lightcurve);
+            analyze_photometry(&lightcurve).0
+        };
+
         // Per-object detection history for history-aware filters (sign from signed snr).
         let (mut detection_history, episode_history) = summarise_detections(
             alert
@@ -531,12 +639,42 @@ impl DecamEnrichmentWorker {
             alert.candidate.jd,
         );
 
+        let ztf_match = alert.survey_matches.as_ref().and_then(|m| m.ztf.as_ref());
+        let lsst_match = alert.survey_matches.as_ref().and_then(|m| m.lsst.as_ref());
+        let multisurvey_detection_history = MultisurveyDetectionHistory::from_points(
+            decam_detections(&alert.prv_candidates)
+                .chain(
+                    ztf_match
+                        .into_iter()
+                        .flat_map(|m| ztf_detections(&m.prv_candidates)),
+                )
+                .chain(
+                    lsst_match
+                        .into_iter()
+                        .flat_map(|m| lsst_detections(&m.prv_candidates)),
+                ),
+            decam_nondetections(&alert.fp_nondetections)
+                .chain(
+                    ztf_match
+                        .into_iter()
+                        .flat_map(|m| ztf_nondetections(&m.prv_nondetections, &m.fp_hists)),
+                )
+                .chain(
+                    lsst_match
+                        .into_iter()
+                        .flat_map(|m| lsst_nondetections(&m.fp_hists)),
+                ),
+            alert.candidate.jd,
+        );
+
         Ok(DecamAlertProperties {
             rock: sso.as_ref().is_some_and(|s| s.is_sso),
             stationary,
             hosted: alert.host_galaxy.as_ref().map(|h| h.best_host.is_some()),
             photstats,
+            multisurvey_photstats: Some(multisurvey_photstats),
             detection_history: Some(detection_history),
+            multisurvey_detection_history: Some(multisurvey_detection_history),
             episode_history: Some(episode_history),
             sso,
         })
