@@ -48,29 +48,11 @@ crossmatch:
     5XMM_DR15: null
     2SXPS: null
     4FGL_DR4: null
-    watchlist_supernovas:
-      radius: 2.0
-      use_distance: false
-      projection:
-        _id: 1
-        classification: 1
-        redshift: 1
-        distance_mpc: 1
-        discovery_date: 1
   lsst:
     eRASS1_Main: null
     5XMM_DR15: null
     2SXPS: null
     4FGL_DR4: null
-    watchlist_supernovas:
-      radius: 2.0
-      use_distance: false
-      projection:
-        _id: 1
-        classification: 1
-        redshift: 1
-        distance_mpc: 1
-        discovery_date: 1
   decam:
     eRASS1_Main: null
     5XMM_DR15: null
