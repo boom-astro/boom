@@ -454,8 +454,10 @@ Catalog chunks are staged in the `catalog_data` volume, mounted at
 
 ## Where the worker runs
 
-One `task-worker` service, running one task at a time. It needs more than a
-database connection:
+One `task-worker` service. It runs one heavy task at a time and, beside it, one
+light task: a type flagged `light` in `TASKS` uses no GPU and scans no alert
+collection (the TNS syncs, the MPC orbit refresh and propagation). It needs more
+than a database connection:
 
 - **The ONNX models**, bind-mounted read-only at `/app/data/models`.
   `enrich_reprocess` builds a real enrichment worker, which loads every model in
@@ -470,10 +472,10 @@ GPU image alongside the schedulers. That is not an optimisation: `enrich_reproce
 loads the models in-process rather than handing work to the enrichment workers,
 so on the CPU image it would re-enrich the archive without a GPU at all.
 
-The consequence is that a long catalog ingest occupies the GPU box for its
-duration, since a worker runs one task at a time and claims whatever is at the
-head of the queue. Acceptable while there is one worker; splitting CPU work from
-GPU work needs claim-time routing, which is listed below.
+The consequence is that a long catalog ingest occupies the heavy slot for its
+duration, though light runs, the scheduled TNS syncs among them, go on beside
+it. Splitting CPU work from GPU work across workers needs claim-time routing,
+which is listed below.
 
 ## Collections
 
@@ -648,8 +650,8 @@ moving part. The scheduling is the small half; the offload is the work.
   but do not write to it yet.
 - **Partitioned execution**, for tasks whose unit of work is a key range rather
   than a chunk.
-- **Claim-time routing.** `claim_next` takes the oldest queued run regardless of
-  type, so every worker is interchangeable. Once there is more than one — a GPU
+- **Claim-time routing.** `claim_next` takes the oldest queued run of the weight
+  a worker has room for, so every worker is interchangeable. Once there is more than one — a GPU
   worker for `enrich_reprocess` and a CPU worker for everything else — a worker
   needs to declare what it will accept and the claim filter needs to honour it.
   The guard rail that comes with it is starvation: an allowlist that no worker

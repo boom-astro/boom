@@ -50,7 +50,9 @@ Like API routes, missing one fails quietly rather than loudly:
 
 1. `pub mod <your_task>;`
 2. An entry in `TASKS` — `idempotent` decides whether a lost lease is retried or
-   failed; `destructive` makes the admin page demand confirmation.
+   failed; `destructive` makes the admin page demand confirmation; `light` lets
+   it run beside a heavy task, only for work with no GPU and no scan of an
+   alert collection.
 3. An arm in `validate_params` (the API rejects bad parameters at submit).
 4. An arm in `dispatch`.
 5. An arm in `single_flight_key`, if two concurrent runs would collide. Key it
