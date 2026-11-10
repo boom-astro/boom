@@ -32,7 +32,8 @@ use mongodb::{
     Namespace,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{Mutex, MutexGuard};
 use utoipa::ToSchema;
 
 /// Stable identifier for this task type.
@@ -154,6 +155,65 @@ fn alert_host_fields(
     Ok(fields)
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct Checkpoint {
+    after_id: Bson,
+    scanned: u64,
+}
+
+/// Records are written out of order: resume just before the oldest one in flight.
+#[derive(Debug)]
+struct Watermark {
+    next: u64,
+    last_id: Option<Bson>,
+    in_flight: BTreeMap<u64, Option<Bson>>,
+}
+
+impl Watermark {
+    fn resume(checkpoint: Option<&Checkpoint>) -> Self {
+        Self {
+            next: checkpoint.map_or(0, |c| c.scanned),
+            last_id: checkpoint.map(|c| c.after_id.clone()),
+            in_flight: BTreeMap::new(),
+        }
+    }
+
+    fn feed(&mut self, id: Bson) -> u64 {
+        let seq = self.next;
+        self.next += 1;
+        self.in_flight.insert(seq, self.last_id.replace(id));
+        seq
+    }
+
+    fn done(&mut self, seqs: impl IntoIterator<Item = u64>) {
+        for seq in seqs {
+            self.in_flight.remove(&seq);
+        }
+    }
+
+    fn checkpoint(&self) -> Option<Checkpoint> {
+        let (scanned, after_id) = match self.in_flight.first_key_value() {
+            Some((&seq, before)) => (seq, before.clone()),
+            None => (self.next, self.last_id.clone()),
+        };
+        Some(Checkpoint {
+            after_id: after_id?,
+            scanned,
+        })
+    }
+}
+
+fn lock(watermark: &Mutex<Watermark>) -> MutexGuard<'_, Watermark> {
+    watermark.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+async fn save_checkpoint(ctx: &TaskContext, watermark: &Mutex<Watermark>) {
+    let checkpoint = lock(watermark).checkpoint();
+    if let Some(checkpoint) = checkpoint {
+        ctx.save_checkpoint(&checkpoint).await;
+    }
+}
+
 fn failed(e: impl std::fmt::Display) -> super::TaskError {
     super::TaskError::Failed(e.to_string())
 }
@@ -198,7 +258,8 @@ async fn probe_catalogs(
 #[allow(clippy::too_many_arguments)]
 async fn worker(
     ctx: &TaskContext,
-    rx: async_channel::Receiver<Document>,
+    rx: async_channel::Receiver<(u64, Document)>,
+    watermark: &Mutex<Watermark>,
     client: mongodb::Client,
     aux_ns: Namespace,
     alerts_ns: Namespace,
@@ -217,6 +278,7 @@ async fn worker(
     // Photometry is read from the same database the records come from.
     let db = client.database(&aux_ns.db);
     let mut batch: Vec<WriteModel> = Vec::with_capacity(2 * batch_size);
+    let mut seqs: Vec<u64> = Vec::with_capacity(batch_size);
     let mut pending = 0u64;
     let mut written = 0u64;
     let mut unreadable = 0u64;
@@ -228,7 +290,8 @@ async fn worker(
         }
     };
 
-    while let Ok(mut record) = rx.recv().await {
+    while let Ok((seq, mut record)) = rx.recv().await {
+        seqs.push(seq);
         let Some(object_id) = record.remove("_id") else {
             continue;
         };
@@ -325,6 +388,7 @@ async fn worker(
                     .map_err(failed)?;
             }
             written += std::mem::take(&mut pending);
+            lock(watermark).done(seqs.drain(..));
         }
     }
 
@@ -339,6 +403,7 @@ async fn worker(
         }
         written += n;
     }
+    lock(watermark).done(seqs);
     Ok((written, unreadable))
 }
 
@@ -365,6 +430,15 @@ pub async fn run(
     probe_catalogs(ctx, &probe, &config).await;
 
     let aux_collection: mongodb::Collection<Document> = db.collection(&aux_name);
+    let resumed: Option<Checkpoint> = ctx.checkpoint();
+    let start = resumed.as_ref().map_or(0, |c| c.scanned);
+    if let Some(checkpoint) = &resumed {
+        ctx.info(format!(
+            "resuming after {} ({start} record(s) already scanned)",
+            checkpoint.after_id
+        ));
+    }
+    let watermark = Mutex::new(Watermark::resume(resumed.as_ref()));
     let estimated = aux_collection.estimated_document_count().await.unwrap_or(0);
     ctx.info(format!(
         "associating hosts on {aux_name}: ~{estimated} record(s), {} worker(s){}",
@@ -392,7 +466,7 @@ pub async fn run(
         .cloned()
         .unwrap_or_default();
     let queue_capacity = params.processes * params.batch_size * QUEUE_MULTIPLIER;
-    let (tx, rx) = async_channel::bounded::<Document>(queue_capacity);
+    let (tx, rx) = async_channel::bounded::<(u64, Document)>(queue_capacity);
 
     // buffer_unordered over borrowed futures rather than tokio::spawn: the
     // workers borrow `ctx` to log and to check cancellation.
@@ -400,6 +474,7 @@ pub async fn run(
         worker(
             ctx,
             rx.clone(),
+            &watermark,
             db.client().clone(),
             aux_ns.clone(),
             alerts_ns.clone(),
@@ -422,15 +497,19 @@ pub async fn run(
         projection.insert(format!("cross_matches.{catalog}"), 1);
     }
 
-    let find_filter = if params.skip_existing {
+    let mut find_filter = if params.skip_existing {
         doc! { "host_galaxy": { "$exists": false } }
     } else {
         doc! {}
     };
+    if let Some(checkpoint) = &resumed {
+        find_filter.insert("_id", doc! { "$gt": checkpoint.after_id.clone() });
+    }
 
     let feed = async {
         let mut cursor = aux_collection
             .find(find_filter)
+            .sort(doc! { "_id": 1 })
             // Only the galaxy catalogs' rows: `cross_matches` as a whole is
             // every catalog the pipeline queries, which is far more BSON than
             // association reads.
@@ -439,14 +518,18 @@ pub async fn run(
             .no_cursor_timeout(true)
             .await
             .map_err(failed)?;
-        let mut fed = 0u64;
-        let mut last_reported = 0u64;
+        let mut fed = start;
+        let mut last_reported = start;
         while let Some(record) = cursor.try_next().await.map_err(failed)? {
             if ctx.is_canceled() {
                 ctx.warn(format!("canceled while streaming after {fed} record(s)"));
                 break;
             }
-            if tx.send(record).await.is_err() {
+            let Some(id) = record.get("_id").cloned() else {
+                continue;
+            };
+            let seq = lock(&watermark).feed(id);
+            if tx.send((seq, record)).await.is_err() {
                 break;
             }
             fed += 1;
@@ -454,13 +537,17 @@ pub async fn run(
                 last_reported = fed;
                 ctx.progress(fed, estimated.max(fed), format!("{fed} record(s) scanned"))
                     .await;
+                save_checkpoint(ctx, &watermark).await;
             }
         }
         drop(tx);
         Ok::<u64, super::TaskError>(fed)
     };
 
-    let (fed, per_worker) = futures::try_join!(feed, workers)?;
+    let outcome = futures::try_join!(feed, workers);
+    save_checkpoint(ctx, &watermark).await;
+    let (fed, per_worker) = outcome?;
+    let scanned = fed - start;
     let total: u64 = per_worker.iter().map(|(written, _)| written).sum();
     let unreadable: u64 = per_worker.iter().map(|(_, unreadable)| unreadable).sum();
     if unreadable > 0 {
@@ -483,7 +570,8 @@ pub async fn run(
             Operation::Recompute,
             doc! {
                 "field": "host_galaxy",
-                "scanned": fed as i64,
+                "scanned": scanned as i64,
+                "previously_scanned": start as i64,
                 "written": total as i64,
                 "unreadable": unreadable as i64,
                 "skip_existing": params.skip_existing,
@@ -520,7 +608,7 @@ pub async fn run(
     // run can return Ok on a scan that stopped early.
     if ctx.is_canceled() {
         ctx.warn(format!(
-            "canceled after associating {total} record(s) of {fed} scanned; what is \
+            "canceled after associating {total} record(s) of {scanned} scanned; what is \
              written stays, and re-running with skip_existing resumes"
         ));
         return Err(super::TaskError::Canceled);
@@ -528,7 +616,8 @@ pub async fn run(
 
     Ok(serde_json::json!({
         "survey": params.survey.to_string(),
-        "scanned": fed,
+        "scanned": scanned,
+        "previously_scanned": start,
         "written": total,
         "unreadable": unreadable,
         "skip_existing": params.skip_existing,
@@ -569,6 +658,27 @@ mod tests {
         assert!(p.validate_params().is_err());
         p.processes = MAX_PROCESSES + 1;
         assert!(p.validate_params().is_err());
+    }
+
+    #[test]
+    fn the_checkpoint_stops_before_the_oldest_record_in_flight() {
+        let at = |id: &str, scanned| Checkpoint {
+            after_id: Bson::from(id),
+            scanned,
+        };
+        let mut w = Watermark::resume(None);
+        assert_eq!(w.checkpoint(), None);
+        let [a, b, c] = ["a", "b", "c"].map(|id| w.feed(Bson::from(id)));
+        w.done([a, c]);
+        assert_eq!(w.checkpoint(), Some(at("a", 1)));
+        w.done([b]);
+        assert_eq!(w.checkpoint(), Some(at("c", 3)));
+
+        let mut w = Watermark::resume(Some(&at("c", 3)));
+        let d = w.feed(Bson::from("d"));
+        assert_eq!(w.checkpoint(), Some(at("c", 3)));
+        w.done([d]);
+        assert_eq!(w.checkpoint(), Some(at("d", 4)));
     }
 
     #[test]
