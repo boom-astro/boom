@@ -114,6 +114,9 @@ cargo build --tests                       # integration targets compile too
 - **A task that is not resumable must not say `idempotent: true`.** That flag is
   what decides whether a lost lease is retried, and a half-applied migration run
   twice is the one failure nobody notices.
+- **A long scan should save a checkpoint.** A deploy hands the run back to the
+  queue, and without `ctx.save_checkpoint` the next attempt starts over.
+  `backfill_host_galaxy` shows the pattern.
 - **Parameters that carry a URI carry a password.** Redaction keys on the field
   name (`*_uri`, `uri`); name the field that way and it is masked in API
   responses and the ledger.

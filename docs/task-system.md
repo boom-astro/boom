@@ -90,11 +90,6 @@ workflow engine is for and this is not.
 
 Worth taking from its design regardless, none of which needs Temporal:
 
-- **A checkpoint token on the run.** A Temporal activity heartbeats with a
-  payload that comes back to it on retry. Resume points here are re-derived from
-  the data every time; recording the last `_id` processed on the run would
-  generalize the per-task tricks and make resumability inspectable rather than
-  asserted.
 - **A test that kills a run and resumes it.** `idempotent: true` is a claim
   about every task in `TASKS`, and nothing checks it.
 - **A retry policy per task** rather than one boolean: attempts, backoff, and
@@ -155,6 +150,12 @@ every 20 seconds against a 60-second lease. Two things use it:
 Both rely on task bodies being **resumable**: re-running one continues rather
 than repeating. `catalog_ingest` records each completed chunk, so a resumed run
 skips what is already in and costs one chunk, not the whole catalog.
+
+A task whose resume point cannot be read back from the data saves one on the run
+instead, with `ctx.save_checkpoint`, and the next attempt reads it with
+`ctx.checkpoint`. `backfill_host_galaxy` walks its records in `_id` order and
+saves the `_id` just before the oldest record not yet written, so a deploy costs
+the records in flight rather than the whole scan.
 
 **Only tasks that declare `idempotent` are retried.** Resuming is safe exactly
 when re-running produces the same state — a chunked ingest skips what it
