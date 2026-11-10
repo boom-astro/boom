@@ -8,9 +8,9 @@ use std::io::{BufReader, Read};
 use std::path::Path;
 use tracing::instrument;
 
-fn open_csv(path: &Path) -> Result<csv::Reader<Box<dyn Read + Send>>, std::io::Error> {
+fn open_csv(path: &Path) -> Result<csv::Reader<Box<dyn Read>>, std::io::Error> {
     let file = File::open(path)?;
-    let reader: Box<dyn Read + Send> = if path.extension().is_some_and(|e| e == "gz") {
+    let reader: Box<dyn Read> = if path.extension().is_some_and(|e| e == "gz") {
         Box::new(BufReader::new(flate2::read::GzDecoder::new(file)))
     } else {
         Box::new(BufReader::new(file))
