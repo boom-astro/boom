@@ -66,6 +66,9 @@ jobs:
       BOOM_API__DOMAIN: ${{ vars.BOOM_API__DOMAIN }}
       BOOM_API__AUTH__SECRET_KEY: ${{ secrets.BOOM_API__AUTH__SECRET_KEY }}
       BOOM_API__AUTH__ADMIN_PASSWORD: ${{ secrets.BOOM_API__AUTH__ADMIN_PASSWORD }}
+      BOOM_TNS__BOT_ID: ${{ secrets.BOOM_TNS__BOT_ID }}
+      BOOM_TNS__BOT_NAME: ${{ secrets.BOOM_TNS__BOT_NAME }}
+      BOOM_TNS__API_KEY: ${{ secrets.BOOM_TNS__API_KEY }}
       # Unset, compose builds every image from this checkout. See docs/deployment.md.
       BOOM_IMAGE: ${{ vars.BOOM_IMAGE }}
       BOOM_PULL_POLICY: ${{ vars.BOOM_PULL_POLICY }}
