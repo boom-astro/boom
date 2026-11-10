@@ -82,6 +82,8 @@ services:
     <<: *mongo_cutouts_env
   task-worker:
     <<: *mongo_cutouts_env
+  linker-ztf:
+    <<: *mongo_cutouts_env
   # Dev-only single ZTF consumer, defined in docker-compose.override.yaml.
   # Gated to the dev profile so it isn't an orphan (no image/build) in prod,
   # where the *-public/-partnership/-caltech services above apply instead.
