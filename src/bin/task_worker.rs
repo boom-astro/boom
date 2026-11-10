@@ -140,14 +140,25 @@ async fn main() {
         };
 
         let light = tasks::is_light(&task.task_type);
-        let run = tokio::spawn(run_one(
+        let (db, config, config_path, worker_name, shutting_down) = (
             db.clone(),
             config.clone(),
             config_path.clone(),
             worker_name.clone(),
-            task,
             shutting_down.clone(),
-        ));
+        );
+        let runtime = tokio::runtime::Handle::current();
+        // Task futures are not all Send, so each run is driven on its own thread.
+        let run = tokio::task::spawn_blocking(move || {
+            runtime.block_on(run_one(
+                db,
+                config,
+                config_path,
+                worker_name,
+                task,
+                shutting_down,
+            ))
+        });
         running.push((light, run));
     }
 
