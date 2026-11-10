@@ -468,6 +468,7 @@ pub struct ActivityMetrics {
     /// Photometric outburst statistic for a moving object, `None` for anything
     /// else and for a mover with no usable earlier detection of its own.
     pub outburst: Option<Outburst>,
+    pub morphology: Option<Morphology>,
 }
 
 /// How much brighter a moving object is than its own recent history, in sigma.
@@ -613,6 +614,25 @@ pub struct OutburstPoint {
     pub sigma: f32,
 }
 
+/// Nights judged on untrailed detection medians; `seeratio`/`classtar` are the alert's night.
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    serde::Deserialize,
+    serde::Serialize,
+    AvroSchema,
+    utoipa::ToSchema,
+)]
+#[serde(default)]
+pub struct Morphology {
+    pub nights: i32,
+    pub extended_nights: i32,
+    pub seeratio: Option<f32>,
+    pub classtar: Option<f32>,
+}
+
 impl ActivityMetrics {
     /// ZTF: aperture and PSF magnitudes directly. Brighter aperture => positive.
     pub fn from_magnitudes(magpsf: Option<f32>, magap: Option<f32>) -> Self {
@@ -650,6 +670,7 @@ impl ActivityMetrics {
         ActivityMetrics {
             aperture_excess: aperture_excess.filter(|e| e.is_finite()),
             outburst: None,
+            morphology: None,
         }
     }
 }
@@ -2670,9 +2691,16 @@ mod outburst_tests {
                 }),
             ),
         ] {
+            let morphology = outburst.as_ref().map(|_| Morphology {
+                nights: 2,
+                extended_nights: 1,
+                seeratio: Some(0.7),
+                classtar: None,
+            });
             let metrics = ActivityMetrics {
                 aperture_excess: Some(0.1),
                 outburst,
+                morphology,
             };
             let mut writer = Writer::new(&schema, Vec::new());
             writer

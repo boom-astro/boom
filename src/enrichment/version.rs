@@ -82,7 +82,7 @@ pub const ZTF_MODELS: &[ModelFile] = &[
 pub const DERIVATIONS: &[(&str, u32)] = &[
     // photstats and multisurvey_photstats.
     ("photstats", 1),
-    ("sso", 1),
+    ("sso", 2),
     // rock, star, near_brightstar and stationary.
     ("crossmatch_flags", 1),
     ("detection_history", 2),
