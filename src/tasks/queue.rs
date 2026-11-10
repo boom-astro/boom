@@ -38,16 +38,37 @@ pub async fn submit(db: &Database, task: &Task) -> Result<(), QueueError> {
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lane {
+    Any,
+    Light,
+    Heavy,
+}
+
 /// Claim the oldest queued run, if there is one.
 ///
 /// The status guard in the filter is what makes this safe with more than one
 /// worker: two workers racing on the same document both match, but only the
 /// first update sees `status: "queued"`.
 #[instrument(skip(db), err)]
-pub async fn claim_next(db: &Database, worker: &str) -> Result<Option<Task>, QueueError> {
+pub async fn claim_next(
+    db: &Database,
+    worker: &str,
+    lane: Lane,
+) -> Result<Option<Task>, QueueError> {
+    let mut filter = doc! { "status": TaskStatus::Queued.as_str() };
+    match lane {
+        Lane::Any => {}
+        Lane::Light => {
+            filter.insert("task_type", doc! { "$in": super::light_task_types() });
+        }
+        Lane::Heavy => {
+            filter.insert("task_type", doc! { "$nin": super::light_task_types() });
+        }
+    }
     let claimed = collection(db)
         .find_one_and_update(
-            doc! { "status": TaskStatus::Queued.as_str() },
+            filter,
             doc! {
                 "$set": {
                     "status": TaskStatus::Running.as_str(),
@@ -472,7 +493,7 @@ mod tests {
     async fn claim_ours(db: &Database, worker: &str, task_type: &str) -> Option<Task> {
         let mut parked: Vec<String> = Vec::new();
         let mut ours = None;
-        while let Some(task) = claim_next(db, worker).await.unwrap() {
+        while let Some(task) = claim_next(db, worker, Lane::Any).await.unwrap() {
             if task.task_type == task_type {
                 ours = Some(task);
                 break;

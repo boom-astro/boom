@@ -1,9 +1,10 @@
 #![recursion_limit = "512"] // for large bson docs and CutoutStorage's s3 client
 //! Runs queued tasks.
 //!
-//! Claims one run at a time from `tasks`, holds a lease on it, renews that
-//! lease with a heartbeat, and streams progress and logs back to Mongo while
-//! the task runs. See [`docs/task-system.md`](../../docs/task-system.md).
+//! Claims runs from `tasks` (one heavy run, plus light ones beside it), holds a
+//! lease on each, renews it with a heartbeat, and streams progress and logs
+//! back to Mongo while the task runs. See
+//! [`docs/task-system.md`](../../docs/task-system.md).
 //!
 //! Deliberately a separate service from the API: these jobs run for hours and
 //! are memory-hungry, and an API restart or deploy must not kill one. When this
@@ -16,7 +17,8 @@ use boom::conf::{load_dotenv, AppConfig};
 use boom::tasks::{
     self,
     models::{self, TaskStatus},
-    queue, TaskContext, TaskError,
+    queue::{self, Lane},
+    TaskContext, TaskError,
 };
 use boom::utils::o11y::logging::build_subscriber;
 use clap::Parser;
@@ -35,6 +37,8 @@ const POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Renew well inside the lease so a slow round trip does not cost us the run.
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs((queue::LEASE_SECONDS / 3.0) as u64);
+
+const MAX_LIGHT_RUNS: usize = 1;
 
 #[derive(Parser)]
 #[command(about = "Claim and run queued BOOM tasks")]
@@ -100,7 +104,21 @@ async fn main() {
         ));
     }
 
+    let mut running: Vec<(bool, tokio::task::JoinHandle<()>)> = Vec::new();
     while !shutting_down.load(Ordering::Relaxed) {
+        running.retain(|(_, run)| !run.is_finished());
+        let heavy_busy = running.iter().any(|(light, _)| !light);
+        let light_room = running.iter().filter(|(light, _)| *light).count() < MAX_LIGHT_RUNS;
+        let lane = match (heavy_busy, light_room) {
+            (false, true) => Lane::Any,
+            (false, false) => Lane::Heavy,
+            (true, true) => Lane::Light,
+            (true, false) => {
+                tokio::time::sleep(POLL_INTERVAL).await;
+                continue;
+            }
+        };
+
         // Before claiming: anything whose worker stopped renewing its lease is
         // ours to pick up. Cheap, and it is what recovers a run orphaned by a
         // crash rather than by a clean shutdown.
@@ -108,7 +126,7 @@ async fn main() {
             warn!("failed to sweep expired leases: {}", e);
         }
 
-        let claimed = match queue::claim_next(&db, &worker_name).await {
+        let claimed = match queue::claim_next(&db, &worker_name, lane).await {
             Ok(claimed) => claimed,
             Err(e) => {
                 error!("failed to claim a task: {}", e);
@@ -121,15 +139,22 @@ async fn main() {
             continue;
         };
 
-        run_one(
-            &db,
-            &config,
-            &config_path,
-            &worker_name,
+        let light = tasks::is_light(&task.task_type);
+        let run = tokio::spawn(run_one(
+            db.clone(),
+            config.clone(),
+            config_path.clone(),
+            worker_name.clone(),
             task,
             shutting_down.clone(),
-        )
-        .await;
+        ));
+        running.push((light, run));
+    }
+
+    for (_, run) in running {
+        if let Err(e) = run.await {
+            error!("a run ended abnormally: {}", e);
+        }
     }
 
     info!("task worker {} stopped", worker_name);
@@ -137,13 +162,14 @@ async fn main() {
 
 /// Execute one claimed run, heartbeating for the duration.
 async fn run_one(
-    db: &Database,
-    config: &Arc<AppConfig>,
-    config_path: &str,
-    worker_name: &str,
+    db: Database,
+    config: Arc<AppConfig>,
+    config_path: Arc<String>,
+    worker_name: String,
     task: tasks::Task,
     shutting_down: Arc<AtomicBool>,
 ) {
+    let (db, config_path, worker_name) = (&db, config_path.as_str(), worker_name.as_str());
     info!(
         task_id = %task.id,
         task_type = %task.task_type,
@@ -303,7 +329,7 @@ fn spawn_signal_handler(shutting_down: Arc<AtomicBool>) {
             _ = tokio::signal::ctrl_c() => info!("received ctrl-c"),
             _ = term.recv() => info!("received SIGTERM"),
         }
-        info!("shutting down; the running task will stop at its next safe point");
+        info!("shutting down; running tasks will stop at their next safe point");
         shutting_down.store(true, Ordering::Relaxed);
     });
 }
