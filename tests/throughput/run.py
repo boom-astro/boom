@@ -1,6 +1,6 @@
 """Script to benchmark BOOM."""
 # /// script
-# requires-python = ">=3.13"
+# requires-python = ">=3.13,<3.15"
 # dependencies = [
 #     "pyyaml",
 #     "pandas>2",

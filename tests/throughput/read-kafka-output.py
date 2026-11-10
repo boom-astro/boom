@@ -1,6 +1,6 @@
 """Script to read the Kafka output from the BOOM throughput test."""
 # /// script
-# requires-python = ">=3.13"
+# requires-python = ">=3.13,<3.15"
 # dependencies = [
 #     "confluent-kafka",
 # ]

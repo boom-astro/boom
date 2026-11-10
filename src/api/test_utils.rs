@@ -1,4 +1,67 @@
+use crate::{
+    api::{
+        auth::{get_test_auth, AuthProvider},
+        routes::users::User,
+    },
+    conf::{AppConfig, CatalogXmatchConfig},
+    utils::enums::Survey,
+};
 use mongodb::{bson, Database};
+
+/// Auth provider plus a bearer token for the config's admin user, for tests
+/// that need to exercise endpoints behind `auth_middleware`.
+pub async fn get_admin_auth(db: &Database) -> (AuthProvider, String) {
+    let auth = get_test_auth(db).await.unwrap();
+    let auth_config = AppConfig::from_test_config().unwrap().api.auth;
+    let (token, _) = auth
+        .create_token_for_user(&auth_config.admin_username, &auth_config.admin_password)
+        .await
+        .unwrap();
+    (auth, token)
+}
+
+/// A non-admin user granted `watchlists`, stored in the users collection, and its bearer token.
+pub async fn create_test_user(
+    db: &Database,
+    auth: &AuthProvider,
+    watchlists: &[&str],
+) -> (User, String) {
+    let id = uuid::Uuid::new_v4().to_string();
+    let user = User {
+        id: id.clone(),
+        username: id.clone(),
+        email: format!("{}@example.com", id),
+        password: String::new(),
+        is_admin: false,
+        watchlist_access: watchlists.iter().map(|w| w.to_string()).collect(),
+    };
+    db.collection::<User>("users")
+        .insert_one(&user)
+        .await
+        .unwrap();
+    let (token, _) = auth.create_token(&user).await.unwrap();
+    (user, token)
+}
+
+pub async fn delete_test_user(db: &Database, user: &User) {
+    db.collection::<User>("users")
+        .delete_one(bson::doc! { "_id": &user.id })
+        .await
+        .unwrap();
+}
+
+/// The test config with `catalogs` added to the ZTF crossmatch catalogs.
+pub fn test_config_with_crossmatch(catalogs: &[&str]) -> AppConfig {
+    let mut config = AppConfig::from_test_config().unwrap();
+    let ztf_catalogs = config.crossmatch.entry(Survey::Ztf).or_default();
+    for catalog in catalogs {
+        ztf_catalogs.push(CatalogXmatchConfig {
+            catalog: catalog.to_string(),
+            ..Default::default()
+        });
+    }
+    config
+}
 
 pub async fn create_test_catalog(db: &Database) -> String {
     let name = format!("test_catalog_{}", uuid::Uuid::new_v4());

@@ -1,6 +1,6 @@
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
-use syn::{Fields, Item, ItemEnum, ItemStruct, parse_macro_input, spanned::Spanned};
+use syn::{Fields, Item, ItemEnum, ItemStruct, parse_macro_input, parse_quote, spanned::Spanned};
 
 #[proc_macro_attribute]
 pub fn serdavro(
@@ -46,15 +46,10 @@ fn serdavro_impl(item: &ItemStruct) -> syn::Result<TokenStream> {
         })
         .collect();
 
-    let (avro_bytes_fields, avro_bytes_opt_fields) = collect_serde_avro_bytes_fields(item)?;
+    // Collect field names whose schema must be overridden to Schema::Bytes because
+    // they carry `#[serde(with = "serde_avro_bytes")]`.
+    let avro_bytes_fields = collect_serde_avro_bytes_fields(item)?;
     let avro_bytes_fields_tokens: Vec<TokenStream> = avro_bytes_fields
-        .iter()
-        .map(|s| {
-            let lit = proc_macro2::Literal::string(s);
-            quote!(#lit)
-        })
-        .collect();
-    let avro_bytes_opt_fields_tokens: Vec<TokenStream> = avro_bytes_opt_fields
         .iter()
         .map(|s| {
             let lit = proc_macro2::Literal::string(s);
@@ -111,19 +106,11 @@ fn serdavro_impl(item: &ItemStruct) -> syn::Result<TokenStream> {
                             // Fields that use serde_avro_bytes; their AvroSchema-derived type
                             // is Array(Int) but the correct Avro schema is Bytes.
                             let avro_bytes_fields: &[&str] = &[#(#avro_bytes_fields_tokens),*];
-                            // serde_avro_bytes_opt fields (Option<Vec<u8>>): Union[Null, Bytes].
-                            let avro_bytes_opt_fields: &[&str] = &[#(#avro_bytes_opt_fields_tokens),*];
 
                             for mut field in fake.fields {
                                 // Fix up schema for `#[serde(with = "serde_avro_bytes")]` fields.
                                 if avro_bytes_fields.iter().any(|n| field.name == *n) {
                                     field.schema = Schema::Bytes;
-                                }
-                                if avro_bytes_opt_fields.iter().any(|n| field.name == *n) {
-                                    field.schema = Schema::Union(
-                                        ::apache_avro::schema::UnionSchema::new(vec![Schema::Null, Schema::Bytes])
-                                            .expect("null|bytes union"),
-                                    );
                                 }
                                 // Apply rename if the field currently matches the original name.
                                 for (from, to) in renames {
@@ -172,7 +159,6 @@ fn serdavro_impl(item: &ItemStruct) -> syn::Result<TokenStream> {
     })
 }
 
-// the above didn't actually rename the enum variants, so we need to do it manually
 fn serdavro_enum_impl(item: &syn::ItemEnum) -> syn::Result<TokenStream> {
     let ident = &item.ident;
 
@@ -180,18 +166,20 @@ fn serdavro_enum_impl(item: &syn::ItemEnum) -> syn::Result<TokenStream> {
     let mut fake = item.clone();
     fake.ident = fake_ident.clone();
 
-    let (impl_generics, ty_generics, where_clause) = item.generics.split_for_impl();
-
-    // Collect rename pairs for enum variants (#[serde(rename = "...")])
+    if let Some(rule) = collect_rename_all(item) {
+        fake.attrs.push(parse_quote!(#[avro(rename_all = #rule)]));
+    }
     let variant_renames = collect_variant_renames(item)?;
-    let variant_renames_tokens: Vec<TokenStream> = variant_renames
-        .iter()
-        .map(|(from, to)| {
-            let f = proc_macro2::Literal::string(from);
-            let t = proc_macro2::Literal::string(to);
-            quote!((#f, #t))
-        })
-        .collect();
+    for variant in &mut fake.variants {
+        if let Some((_, to)) = variant_renames
+            .iter()
+            .find(|(from, _)| variant.ident == from)
+        {
+            variant.attrs.push(parse_quote!(#[avro(rename = #to)]));
+        }
+    }
+
+    let (impl_generics, ty_generics, where_clause) = item.generics.split_for_impl();
 
     Ok(quote! {
         const _: () = {
@@ -212,19 +200,6 @@ fn serdavro_enum_impl(item: &syn::ItemEnum) -> syn::Result<TokenStream> {
                     match fake_schema {
                         Schema::Enum(mut enum_schema) => {
                             enum_schema.name = Name::new(stringify!(#ident)).expect("Unable to parse schema name");
-
-                            // Apply renames to enum symbols
-                            let renames: &[(&str, &str)] = &[#(#variant_renames_tokens),*];
-
-                            for symbol in enum_schema.symbols.iter_mut() {
-                                for (from, to) in renames {
-                                    if symbol == from {
-                                        *symbol = to.to_string();
-                                        break;
-                                    }
-                                }
-                            }
-
                             Schema::Enum(enum_schema)
                         }
                         Schema::Ref { name } => {
@@ -340,27 +315,24 @@ fn collect_field_renames(item: &ItemStruct) -> syn::Result<Vec<(String, String)>
     }
 }
 
-// Collect field names using `serde_avro_bytes` (need Schema::Bytes) or
-// `serde_avro_bytes_opt` (need Union[Null, Bytes]).
-fn collect_serde_avro_bytes_fields(item: &ItemStruct) -> syn::Result<(Vec<String>, Vec<String>)> {
+// Collect original field names that carry `#[serde(with = "…serde_avro_bytes")]`.
+// Those fields require Schema::Bytes instead of the Schema::Array that AvroSchema
+// would normally derive for Vec<u8>.
+fn collect_serde_avro_bytes_fields(item: &ItemStruct) -> syn::Result<Vec<String>> {
     match &item.fields {
         Fields::Named(fields) => {
             let mut names = Vec::new();
-            let mut opt_names = Vec::new();
             for field in fields.named.iter() {
                 let orig = field.ident.clone().unwrap().to_string();
                 for attr in &field.attrs {
                     if attr.path().is_ident("serde") {
                         let mut is_avro_bytes = false;
-                        let mut is_avro_bytes_opt = false;
                         let _ = attr.parse_nested_meta(|meta| {
                             if meta.path.is_ident("with") {
                                 if let Ok(pbuf) = meta.value() {
                                     if let Ok(lit) = pbuf.parse::<syn::Lit>() {
                                         if let syn::Lit::Str(s) = lit {
-                                            if s.value().ends_with("serde_avro_bytes_opt") {
-                                                is_avro_bytes_opt = true;
-                                            } else if s.value().ends_with("serde_avro_bytes") {
+                                            if s.value().ends_with("serde_avro_bytes") {
                                                 is_avro_bytes = true;
                                             }
                                         }
@@ -374,19 +346,37 @@ fn collect_serde_avro_bytes_fields(item: &ItemStruct) -> syn::Result<(Vec<String
                         if is_avro_bytes {
                             names.push(orig.clone());
                         }
-                        if is_avro_bytes_opt {
-                            opt_names.push(orig.clone());
-                        }
                     }
                 }
             }
-            Ok((names, opt_names))
+            Ok(names)
         }
         _ => Err(syn::Error::new(
             item.fields.span(),
             "Only named fields are supported",
         )),
     }
+}
+
+fn collect_rename_all(item: &ItemEnum) -> Option<String> {
+    let mut rename_all: Option<String> = None;
+    for attr in &item.attrs {
+        if attr.path().is_ident("serde") {
+            let _ = attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("rename_all") {
+                    if let Ok(pbuf) = meta.value() {
+                        if let Ok(syn::Lit::Str(s)) = pbuf.parse::<syn::Lit>() {
+                            rename_all = Some(s.value());
+                        }
+                    }
+                } else if meta.input.peek(syn::Token![=]) {
+                    let _ = meta.value().and_then(|v| v.parse::<syn::Expr>());
+                }
+                Ok(())
+            });
+        }
+    }
+    rename_all
 }
 
 // Collect (orig, rename) pairs for enum variants that have `#[serde(rename = "...")]`.
@@ -475,7 +465,7 @@ mod tests {
         )
         .unwrap();
 
-        let (names, _) = collect_serde_avro_bytes_fields(&s).unwrap();
+        let names = collect_serde_avro_bytes_fields(&s).unwrap();
         // Original field name (pre-rename) must be collected.
         assert!(names.contains(&"cutout_science".to_string()));
         assert!(!names.contains(&"other".to_string()));
@@ -497,29 +487,8 @@ mod tests {
         )
         .unwrap();
 
-        let (names, _) = collect_serde_avro_bytes_fields(&s).unwrap();
+        let names = collect_serde_avro_bytes_fields(&s).unwrap();
         assert!(names.contains(&"data".to_string()));
-    }
-
-    #[test]
-    fn serde_avro_bytes_opt_field_collected() {
-        let s: ItemStruct = syn::parse_str(
-            r#"
-            struct S {
-                #[serde(with = "apache_avro::serde_avro_bytes_opt")]
-                maybe: Option<Vec<u8>>,
-                #[serde(with = "serde_avro_bytes")]
-                plain: Vec<u8>,
-            }
-        "#,
-        )
-        .unwrap();
-
-        let (names, opt_names) = collect_serde_avro_bytes_fields(&s).unwrap();
-        assert!(names.contains(&"plain".to_string()));
-        assert!(!names.contains(&"maybe".to_string()));
-        assert!(opt_names.contains(&"maybe".to_string()));
-        assert!(!opt_names.contains(&"plain".to_string()));
     }
 
     #[test]

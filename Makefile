@@ -4,21 +4,41 @@
 #   make dev-s3             - S3-compatible storage via local rustfs
 #   make dev-s3-external    - external S3 bucket (AWS S3, Wasabi, …); requires BOOM_CUTOUTS_STORAGE__REGION/ACCESS_KEY/SECRET_KEY
 
+# Each dev target checks .env against exactly the compose files it loads.
+# Compose interpolates every file before it filters by profile, so a dev target
+# still needs the required variables of prod-only services; without the check,
+# a stale .env fails one variable at a time with an error naming a service dev
+# never runs.
+DEV_FILES := docker-compose.yaml docker-compose.override.yaml
+DEV_MONGO_FILES := docker-compose.yaml docker-compose.cutouts-mongo.yaml docker-compose.override.yaml
+DEV_S3_FILES := docker-compose.yaml docker-compose.cutouts-s3.yaml docker-compose.override.yaml
+DEV_S3_EXTERNAL_FILES := docker-compose.yaml docker-compose.cutouts-s3-external.yaml docker-compose.override.yaml
+
 .PHONY: dev
 dev:
-	docker compose -f docker-compose.yaml -f docker-compose.override.yaml --profile dev up
+	@bash scripts/check_env.sh $(DEV_FILES)
+	docker compose $(addprefix -f ,$(DEV_FILES)) --profile dev up
 
 .PHONY: dev-mongo
 dev-mongo:
-	docker compose -f docker-compose.yaml -f docker-compose.cutouts-mongo.yaml -f docker-compose.override.yaml --profile dev up
+	@bash scripts/check_env.sh $(DEV_MONGO_FILES)
+	docker compose $(addprefix -f ,$(DEV_MONGO_FILES)) --profile dev up
 
 .PHONY: dev-s3
 dev-s3:
-	docker compose -f docker-compose.yaml -f docker-compose.cutouts-s3.yaml -f docker-compose.override.yaml --profile dev up
+	@bash scripts/check_env.sh $(DEV_S3_FILES)
+	docker compose $(addprefix -f ,$(DEV_S3_FILES)) --profile dev up
 
 .PHONY: dev-s3-external
 dev-s3-external:
-	docker compose -f docker-compose.yaml -f docker-compose.cutouts-s3-external.yaml -f docker-compose.override.yaml --profile dev up
+	@bash scripts/check_env.sh $(DEV_S3_EXTERNAL_FILES)
+	docker compose $(addprefix -f ,$(DEV_S3_EXTERNAL_FILES)) --profile dev up
+
+# dev-s3-external is left out on purpose: its bucket region and credentials
+# have no sensible default, so it is checked only by the target that uses it.
+.PHONY: check-env
+check-env: # Report .env values missing for the local cutout storage modes
+	@bash scripts/check_env.sh $(DEV_FILES) $(DEV_MONGO_FILES) $(DEV_S3_FILES)
 
 .PHONY: delete-produce-ztf
 delete-produce-ztf: # Delete Kafka topic, data, and re-produce ZTF traffic for testing
@@ -71,3 +91,48 @@ check-configs: configs
 		echo "No generated configs found at config/prod/*/config.yaml"; \
 		exit 1; \
 	fi
+
+# --- Milvus e2e testing ---------------------------------------------------
+# Local, standalone Milvus (docker-compose.milvus.yaml) for running the
+# end-to-end test without touching the shared NRP instance. The .env file keeps
+# the NRP credentials as the default; the local overrides below are passed as
+# shell env vars, which win over .env (dotenvy does not override already-set
+# vars). So:
+#   make test-milvus-local  -> runs the e2e test against local Milvus
+#   make test-milvus-nrp    -> runs it against NRP (whatever .env points at)
+
+# Local overrides: plaintext gRPC on :19530, auth disabled, `default` database.
+# The standalone Milvus has authentication disabled, so it ignores the
+# username/password entirely -- but config validation requires them to be
+# non-empty when Milvus is on, so we pass Milvus's own default placeholders.
+MILVUS_LOCAL_ENV := \
+	BOOM_MILVUS__READ_EMBEDDINGS=true \
+	BOOM_MILVUS__WRITE_EMBEDDINGS=true \
+	BOOM_MILVUS__HOST=localhost \
+	BOOM_MILVUS__PORT=19530 \
+	BOOM_MILVUS__TLS=false \
+	BOOM_MILVUS__USERNAME=root \
+	BOOM_MILVUS__PASSWORD=Milvus \
+	BOOM_MILVUS__DATABASE=default
+
+.PHONY: milvus-up
+milvus-up: # Start the local standalone Milvus stack (etcd + minio + standalone + attu)
+	docker compose -p boom-milvus -f docker-compose.milvus.yaml up -d
+
+.PHONY: milvus-down
+milvus-down: # Stop the local Milvus stack, keeping its data volumes
+	docker compose -p boom-milvus -f docker-compose.milvus.yaml down
+
+.PHONY: milvus-clean
+milvus-clean: # Stop the local Milvus stack AND wipe its data volumes
+	docker compose -p boom-milvus -f docker-compose.milvus.yaml down -v
+
+.PHONY: test-milvus-local
+test-milvus-local: # Run the Milvus e2e test against the LOCAL standalone instance
+	@echo "Running Milvus e2e test against local Milvus (localhost:19530)"
+	$(MILVUS_LOCAL_ENV) cargo test --test test_milvus_e2e -- --nocapture
+
+.PHONY: test-milvus-nrp
+test-milvus-nrp: # Run the Milvus e2e test against NRP (uses .env as-is)
+	@echo "Running Milvus e2e test against NRP (per .env)"
+	cargo test --test test_milvus_e2e -- --nocapture

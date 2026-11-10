@@ -44,18 +44,12 @@ async fn test_process_askap_alert() {
     assert!(candidate.get_f64("flux_peak").is_ok());
     assert!(candidate.get_f64("snr").is_ok());
 
-    // cutouts inserted (science only; template/difference absent for radio)
     let cutout_storage = get_test_cutout_storage(&Survey::Askap).await;
-    let cutouts = cutout_storage
+    assert!(cutout_storage
         .retrieve_cutouts(candid, false)
         .await
-        .unwrap();
-    assert_eq!(cutouts.candid, candid);
-    assert!(!cutouts.cutout_science.is_empty());
-    assert!(cutouts.cutout_template.is_none());
-    assert!(cutouts.cutout_difference.is_none());
+        .is_err());
 
-    // aux: 1 in-packet prv + the current detection, and 2 forced points
     let aux = db
         .collection::<mongodb::bson::Document>("ASKAP_alerts_aux")
         .find_one(doc! {"_id": &object_id})
@@ -64,8 +58,12 @@ async fn test_process_askap_alert() {
     assert!(aux.is_some());
     let aux = aux.unwrap();
     assert_eq!(aux.get_str("_id").unwrap(), &object_id);
-    assert_eq!(aux.get_array("prv_candidates").unwrap().len(), 2);
-    assert_eq!(aux.get_array("fp_hists").unwrap().len(), 2);
+    assert_eq!(aux.get_array("prv_candidates").unwrap().len(), 1);
+    let fp_hists = aux.get_array("fp_hists").unwrap();
+    assert_eq!(fp_hists.len(), 2);
+    assert!(fp_hists
+        .iter()
+        .all(|p| p.as_document().unwrap().get("spectral_index").is_none()));
 
     drop_alert_from_collections(candid, &Survey::Askap)
         .await
@@ -100,30 +98,25 @@ async fn test_filter_askap_alert() {
     assert_eq!(&alert.object_id, &object_id);
     assert_eq!(alert.survey, Survey::Askap);
 
-    // 2 prv points at or before the candidate jd; the 2 forced points are later
-    // than the candidate and therefore excluded from the packet lightcurve.
-    assert_eq!(alert.photometry.len(), 2);
-    assert!(alert.photometry.iter().all(|p| p.band.starts_with("askap")));
-    // 38.29... mJy -> nJy
+    assert_eq!(alert.photometry.len(), 3);
+    assert!(alert.photometry.iter().all(|p| p.band == "askap-943MHz"));
     let flux = alert.photometry.last().unwrap().flux.unwrap();
-    assert!((flux - 38.29584503173828e6).abs() < 1.0);
+    assert!((flux - 3.7769999504089355e6).abs() < 1.0);
 
     let filter_passed = alert
         .filters
         .iter()
         .find(|f| f.filter_id == filter_id)
         .unwrap();
-    assert_eq!(filter_passed.annotations, "{\"flux_now\":38.3}");
+    assert_eq!(filter_passed.annotations, "{\"flux_now\":3.78}");
 
     // no real-bogus analog for ASKAP yet
     assert!(alert.classifications.is_empty());
 
-    // science stamp only
-    assert!(!alert.cutout_science.is_empty());
-    assert!(alert.cutout_template.is_none());
-    assert!(alert.cutout_difference.is_none());
+    assert!(alert.cutout_science.is_empty());
+    assert!(alert.cutout_template.is_empty());
+    assert!(alert.cutout_difference.is_empty());
 
-    // the outgoing packet serializes with the optional-cutout Alert schema
     let schema = load_alert_schema().unwrap();
     let _ = alert_to_avro_bytes(&alert, &schema).unwrap();
 

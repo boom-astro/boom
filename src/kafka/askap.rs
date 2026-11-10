@@ -1,11 +1,12 @@
 use crate::{
-    kafka::base::{AlertConsumer, AlertProducer},
+    kafka::base::{subscription_window, AlertConsumer, AlertProducer},
     utils::{data::count_files_in_dir, enums::Survey},
 };
 use tracing::info;
 
 const ASKAP_DEFAULT_NB_PARTITIONS: usize = 15;
 
+#[derive(Clone)]
 pub struct AskapAlertConsumer {
     output_queue: String,
 }
@@ -26,9 +27,11 @@ impl AlertConsumer for AskapAlertConsumer {
         let date = chrono::DateTime::from_timestamp(timestamp, 0).unwrap();
         vec![format!("askap_{}_programid{}", date.format("%Y%m%d"), 1)]
     }
-    fn topic_patterns(&self) -> Vec<String> {
-        // POSIX regex (librdkafka): use [0-9]+, not \d.
-        vec![r"^askap_[0-9]+_programid[0-9]+$".to_string()]
+    fn subscription_topics(&self, timestamp: i64, window_days: u64) -> Vec<String> {
+        subscription_window(timestamp, window_days)
+            .iter()
+            .map(|date| format!("askap_{}_programid1", date.format("%Y%m%d")))
+            .collect()
     }
     fn output_queue(&self) -> String {
         self.output_queue.clone()

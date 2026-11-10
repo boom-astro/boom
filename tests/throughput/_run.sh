@@ -123,7 +123,10 @@ docker compose "${COMPOSE_CONFIG[@]}" down
 # Spin up BOOM services with Docker Compose
 if ! docker compose "${COMPOSE_CONFIG[@]}" up --build -d; then
     echo "$(current_datetime) - ERROR: Failed to start Docker Compose services"
-    docker compose "${COMPOSE_CONFIG[@]}" logs mongo-init || true
+    # Every service, not just mongo-init: whichever one exited is the one whose
+    # log says why, and naming a single service hides exactly that.
+    docker compose "${COMPOSE_CONFIG[@]}" ps --all || true
+    docker compose "${COMPOSE_CONFIG[@]}" logs --no-color || true
     exit 1
 fi
 
@@ -184,7 +187,7 @@ echo "$(current_datetime) - Kafka consumer started in $STARTUP_TIME seconds"
 # If we are in LOW_STORAGE mode, clean up the downloaded files (producer files are not mounted)
 if [ "${LOW_STORAGE:-}" = "true" ]; then
     echo "$(current_datetime) - LOW_STORAGE mode enabled; cleaning up downloaded files to save space"
-    rm -rf ./data/alerts/kowalski.NED.json.gz || true
+    rm -rf ./data/alerts/BOOM.NED.json.gz || true
     rm -rf ./data/alerts/boom_throughput.ZTF_alerts_aux.dump.gz || true
 fi
 

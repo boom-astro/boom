@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-NED_EXPECTED_COUNT=1872544
+NED_EXPECTED_COUNT=2103732
 
 # Only import NED alerts if the collection does not exist or has the wrong count
 NED_COLLECTION_NAME="NED"
@@ -28,7 +28,7 @@ if [ "$NED_COLLECTION_EXISTS" = "false" ] || [ "${NED_COLLECTION_COUNT:-0}" -ne 
         --eval "db.$NED_COLLECTION_NAME.createIndex({ 'coordinates.radec_geojson': '2dsphere' })"
 
     echo "Importing NED alerts into $DB_NAME MongoDB database"
-    gunzip -kc /kowalski.NED.json.gz | \
+    gunzip -kc /BOOM.NED.json.gz | \
         mongoimport \
         "mongodb://mongoadmin:mongoadminsecret@mongo:27017/$DB_NAME?authSource=admin$DB_ADD_URI" \
         --collection $NED_COLLECTION_NAME \
@@ -49,6 +49,11 @@ mongosh "mongodb://mongoadmin:mongoadminsecret@mongo:27017/$DB_NAME?authSource=a
     db.ZTF_alerts_aux.drop();
     db.ZTF_alerts_cutouts.drop();
     db.filters.drop();"
+
+# A current MPC_orbits keeps the scheduler from holding the workers for an MPCORB download
+mongosh "mongodb://mongoadmin:mongoadminsecret@mongo:27017/$DB_NAME?authSource=admin" --quiet --eval "
+    db.MPC_orbits.drop();
+    db.MPC_orbits.insertOne({ _id: 'throughput-benchmark', updated_at: Double(Date.now() / 1000) });"
 
 # add the filters table with an index on filter_id
 mongosh "mongodb://mongoadmin:mongoadminsecret@mongo:27017/$DB_NAME?authSource=admin" \

@@ -1,6 +1,7 @@
 use super::STATS_COLLECTION;
-use crate::api::db::PROTECTED_COLLECTION_NAMES;
+use crate::api::catalogs::is_catalog_name_visible;
 use crate::api::models::response;
+use crate::api::routes::babamul::{BabamulAcl, BabamulUser};
 use crate::conf::AppConfig;
 use actix_web::{get, web, HttpResponse};
 use chrono::Utc;
@@ -10,7 +11,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use utoipa::ToSchema;
 
-const COLLECTION_STATS_CACHE_KEY: &str = "collection_stats";
+/// Surveys whose alert collections are reported, and the collections each one owns.
+const ALERT_SURVEYS: [&str; 4] = ["ZTF", "LSST", "DECAM", "WINTER"];
+const ALERT_COLLECTION_SUFFIXES: [&str; 3] = ["alerts", "alerts_aux", "alerts_cutouts"];
+
+pub(super) const COLLECTION_STATS_CACHE_KEY: &str = "collection_stats";
 /// Cache collection stats for 5 days
 const COLLECTION_STATS_CACHE_SECS: f64 = 5.0 * 24.0 * 3600.0;
 
@@ -57,9 +62,10 @@ pub struct CollectionStats {
 }
 
 /// Get statistics for catalogs declared under `crossmatch` in the application config,
-/// and survey alert collections matching `ZTF_*` / `LSST_*`.
-/// Names matching `system.*` or any `PROTECTED_COLLECTION_NAMES` entry are
-/// always excluded.
+/// and for the ZTF and LSST alert collections named in `ALERT_COLLECTION_SUFFIXES`.
+/// Names matching `system.*`, any `PROTECTED_COLLECTION_NAMES` entry, or the
+/// `watchlist_` prefix are always excluded: the endpoint is public and
+/// watchlists are gated by a per-user ACL.
 /// By default, returns just the list of collection names. Use `count=true`
 /// and/or `size=true` query parameters to include document counts and storage
 /// sizes. Results with counts/sizes are cached for 5 days; the cache is
@@ -79,6 +85,7 @@ pub struct CollectionStats {
 )]
 #[get("/stats/collections")]
 pub async fn get_collection_stats(
+    current_user: Option<web::ReqData<BabamulUser>>,
     query: web::Query<CollectionStatsQuery>,
     db: web::Data<Database>,
     config: web::Data<AppConfig>,
@@ -86,28 +93,34 @@ pub async fn get_collection_stats(
     let include_count = query.count.unwrap_or(false);
     let include_size = query.size.unwrap_or(false);
     let now_ts = Utc::now().timestamp() as f64;
+    let sees_winter = current_user.is_some_and(|user| user.has_acl(BabamulAcl::Winter));
+    let visible = |entry: &CollectionEntry| sees_winter || !entry.name.starts_with("WINTER_");
 
-    // Build the set of collections to expose:
-    // configured crossmatch catalogs + survey alert collections (`ZTF_*` / `LSST_*`)
     let collection_names = match db.list_collection_names().await {
         Ok(c) => c,
         Err(e) => {
             return response::internal_error(&format!("Error listing collections: {}", e));
         }
     };
-    let is_safe = |name: &str| {
-        !name.is_empty()
-            && !name.starts_with("system.")
-            && !PROTECTED_COLLECTION_NAMES.contains(&name)
-    };
+    // Public endpoint: watchlists are ACL-gated, so only anonymous-visible names.
+    let is_public = |name: &str| is_catalog_name_visible(name, None);
     let mut expected: HashSet<String> = config
         .crossmatch
         .values()
         .flat_map(|cats| cats.iter().map(|c| c.catalog.clone()))
-        .filter(|name| is_safe(name))
+        .filter(|name| is_public(name))
+        .collect();
+    // Named, not prefix-matched, so a leftover dump cannot list itself here.
+    let alert_collections: HashSet<String> = ALERT_SURVEYS
+        .iter()
+        .flat_map(|survey| {
+            ALERT_COLLECTION_SUFFIXES
+                .iter()
+                .map(move |suffix| format!("{}_{}", survey, suffix))
+        })
         .collect();
     for name in &collection_names {
-        if (name.starts_with("ZTF_") || name.starts_with("LSST_")) && is_safe(name) {
+        if alert_collections.contains(name) && is_public(name) {
             expected.insert(name.clone());
         }
     }
@@ -132,6 +145,7 @@ pub async fn get_collection_stats(
                 let collections = cached
                     .collections
                     .into_iter()
+                    .filter(visible)
                     .map(|c| CollectionEntry {
                         name: c.name,
                         count: if include_count { c.count } else { None },
@@ -234,6 +248,7 @@ pub async fn get_collection_stats(
 
     let collections: Vec<CollectionEntry> = collections
         .into_iter()
+        .filter(visible)
         .map(|c| CollectionEntry {
             name: c.name,
             count: if include_count { c.count } else { None },

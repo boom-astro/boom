@@ -1,6 +1,10 @@
+name: boom
+
 volumes:
   mongodb:
   valkey:
+  # Staging area for catalog chunks
+  catalog_data:
   kafka_data:
   prometheus_data:
   grafana_data:
@@ -28,7 +32,13 @@ services:
     networks:
       - boom
   mongo:
-    image: mongo:8.0
+    # 8.2 rather than 8.0: MongoDB 8.0 refuses to start on Linux kernel 6.19 and
+    # newer (https://jira.mongodb.org/browse/SERVER-121912), which current
+    # Docker Desktop VMs already ship, so 8.0 cannot run locally at all. 8.0 to
+    # 8.2 is a supported direct upgrade and 8.2 to 8.0 a supported downgrade,
+    # provided featureCompatibilityVersion is left at "8.0" until you are ready
+    # to give up that path.
+    image: mongo:8.2
     hostname: mongo
     expose:
       - "27017"
@@ -38,6 +48,17 @@ services:
     volumes:
       - ${BOOM_DATA_MONGODB_PATH:-mongodb}:/data/db
     restart: always
+    ulimits:
+      nofile:
+        soft: 64000
+        hard: 64000
+    deploy:
+      resources:
+        limits:
+          # Caps the WiredTiger cache at 50% of (limit - 1GiB); without a limit
+          # it's 50% of host RAM, so this and mongo-cutouts each claim half the
+          # machine. 0 = unlimited. See .env.example.
+          memory: ${BOOM_MONGO_MEM_LIMIT:-0}
     networks:
       - boom
     healthcheck:
@@ -53,6 +74,9 @@ services:
     command:
       - --mongodb.uri=mongodb://${BOOM_DATABASE__USERNAME:-mongoadmin}:${BOOM_DATABASE__PASSWORD}@mongo:27017/admin?authSource=admin
       - --collector.dbstats
+      - --collector.collstats
+      # Required for --collector.collstats to auto-discover collections
+      - --discovering-mode
       - --web.listen-address=:9216
     networks:
       - boom
@@ -86,7 +110,7 @@ services:
       - boom
     restart: always
   broker:
-    image: apache/kafka:4.1.1
+    image: apache/kafka:4.3.1
     hostname: broker
     networks:
       - boom
@@ -143,7 +167,7 @@ services:
       # Uncomment to enable TLS passthrough (requires EXTERNAL listener to use SSL)
       # - traefik.tcp.routers.${STACK_NAME?Variable not set}-kafka.tls.passthrough=true
   kafka-acl-init:
-    image: apache/kafka:4.1.1
+    image: apache/kafka:4.3.1
     hostname: kafka-acl-init
     depends_on:
       broker:
@@ -174,11 +198,16 @@ services:
       - --kafka.server=broker:29092
     restart: always
   api:
-    image: boom-astro/boom:latest
+    image: ${BOOM_IMAGE:-ghcr.io/boom-astro/boom:latest}
+    pull_policy: ${BOOM_PULL_POLICY:-build}
     hostname: api
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # Compiled in, and recorded on every data mutation, so the ledger names
+        # the commit a change came from instead of "unknown".
+        BOOM_GIT_SHA: ${BOOM_GIT_SHA:-}
     command:
       - /app/boom-api
     environment:
@@ -190,12 +219,43 @@ services:
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       # Optional overrides (these have defaults in config.yaml)
       BOOM_API__PORT: ${BOOM_API__PORT:-4000}
+      BOOM_API__AUTH__ADMIN_EMAIL: ${BOOM_API__AUTH__ADMIN_EMAIL:-}
       BOOM_DATABASE__HOST: mongo
       BOOM_DATABASE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
       BOOM_CUTOUTS_STORAGE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
       BOOM_CUTOUTS_STORAGE__TYPE: mongo
       BOOM_CUTOUTS_STORAGE__HOST: mongo
       BOOM_BABAMUL__ENABLED: ${BOOM_BABAMUL__ENABLED:-false}
+      # Milvus vector database (optional; see docs/milvus.md).
+      # Reached over the public internet, so this works regardless of where
+      # BOOM itself is deployed.
+      BOOM_MILVUS__READ_EMBEDDINGS: ${BOOM_MILVUS__READ_EMBEDDINGS:-}
+      BOOM_MILVUS__HOST: ${BOOM_MILVUS__HOST:-milvus.nrp-nautilus.io}
+      BOOM_MILVUS__PORT: ${BOOM_MILVUS__PORT:-50051}
+      BOOM_MILVUS__USERNAME: ${BOOM_MILVUS__USERNAME:-}
+      BOOM_MILVUS__PASSWORD: ${BOOM_MILVUS__PASSWORD:-}
+      BOOM_MILVUS__DATABASE: ${BOOM_MILVUS__DATABASE:-}
+      BOOM_BABAMUL__WEBAPP_URL: ${BOOM_BABAMUL__WEBAPP_URL:-}
+      # Base URL of the TEMPO inference service; blank means tempo-inference below.
+      TEMPO_SERVICE_URL: ${TEMPO_SERVICE_URL:-}
+      # Whether the API will create accounts. Pair it with VITE_PRERELEASE_MODE
+      # below, which only decides what the web app offers.
+      BOOM_BABAMUL__REGISTRATION_ENABLED: ${BOOM_BABAMUL__REGISTRATION_ENABLED:-true}
+      # Social sign-in. Secrets come from the environment only; a provider with
+      # no client ID/secret pair stays off.
+      BOOM_BABAMUL__OAUTH__REDIRECT_BASE_URL: ${BOOM_BABAMUL__OAUTH__REDIRECT_BASE_URL:-}
+      BOOM_BABAMUL__OAUTH__GOOGLE__CLIENT_ID: ${BOOM_BABAMUL__OAUTH__GOOGLE__CLIENT_ID:-}
+      BOOM_BABAMUL__OAUTH__GOOGLE__CLIENT_SECRET: ${BOOM_BABAMUL__OAUTH__GOOGLE__CLIENT_SECRET:-}
+      BOOM_BABAMUL__OAUTH__GITHUB__CLIENT_ID: ${BOOM_BABAMUL__OAUTH__GITHUB__CLIENT_ID:-}
+      BOOM_BABAMUL__OAUTH__GITHUB__CLIENT_SECRET: ${BOOM_BABAMUL__OAUTH__GITHUB__CLIENT_SECRET:-}
+      BOOM_BABAMUL__OAUTH__ORCID__CLIENT_ID: ${BOOM_BABAMUL__OAUTH__ORCID__CLIENT_ID:-}
+      BOOM_BABAMUL__OAUTH__ORCID__CLIENT_SECRET: ${BOOM_BABAMUL__OAUTH__ORCID__CLIENT_SECRET:-}
+      BOOM_BABAMUL__OAUTH__ORCID_SANDBOX: ${BOOM_BABAMUL__OAUTH__ORCID_SANDBOX:-false}
+      # Comma-separated emails of the admins: user management, data-mutating tasks.
+      BOOM_BABAMUL__ADMIN_EMAILS: ${BOOM_BABAMUL__ADMIN_EMAILS:-}
+      # Server-side PostHog analytics; blank disables analytics.
+      BOOM_POSTHOG__PROJECT_API_KEY: ${BOOM_POSTHOG__PROJECT_API_KEY:-}
+      BOOM_POSTHOG__HOST: ${BOOM_POSTHOG__HOST:-https://us.i.posthog.com}
       # SMTP config for email notifications
       SMTP_SERVER: ${SMTP_SERVER:-}
       SMTP_PORT: ${SMTP_PORT:-}
@@ -217,7 +277,14 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 20s
+      # boom-api does all of its init before it binds the port -- mongo connect,
+      # auth setup, and a cutout storage client per survey (see src/bin/api.rs)
+      # -- so nothing answers `/` until that finishes. With a 20s start_period
+      # the container was declared unhealthy ~70s in (20s + 5 x 10s), which is
+      # a routine cold start when mongo is restarting alongside it, and the
+      # api-down alert then paged 3m later. Docker ends the start period at the
+      # first successful check, so a generous value costs nothing on fast boots.
+      start_period: 180s
     profiles:
       - prod
       - api
@@ -247,7 +314,10 @@ services:
       - traefik.http.routers.${STACK_NAME?Variable not set}-api-http.middlewares=https-redirect,${STACK_NAME?Variable not set}-www-redirect,${STACK_NAME?Variable not set}-api-ratelimit,${STACK_NAME?Variable not set}-api-compress
       - traefik.http.routers.${STACK_NAME?Variable not set}-api-https.middlewares=${STACK_NAME?Variable not set}-www-redirect,${STACK_NAME?Variable not set}-api-ratelimit,${STACK_NAME?Variable not set}-api-compress
   frontend:
-    image: boom-astro/boom-frontend:latest
+    # Built per deployment: the VITE_* values and the nginx API origin are baked
+    # in at build time, so there is no generic image to pull.
+    image: ${BOOM_FRONTEND_IMAGE:-boom-astro/boom-frontend:local}
+    pull_policy: ${BOOM_FRONTEND_PULL_POLICY:-build}
     hostname: frontend
     build:
       # Root context so the build can bundle docs/babamul.md (see frontend/Dockerfile).
@@ -287,16 +357,47 @@ services:
       - traefik.http.middlewares.${STACK_NAME?Variable not set}-frontend-compress.compress=true
       - traefik.http.routers.${STACK_NAME?Variable not set}-frontend-http.middlewares=https-redirect,${STACK_NAME?Variable not set}-frontend-compress
       - traefik.http.routers.${STACK_NAME?Variable not set}-frontend-https.middlewares=${STACK_NAME?Variable not set}-frontend-compress
+  # On-demand TEMPO classification for the API's classify route. Distinct from
+  # `tempo` below, which is Grafana Tempo (tracing). See services/tempo/README.md.
+  tempo-inference:
+    image: ${TEMPO_INFERENCE_IMAGE:-boom-astro/tempo-inference:local}
+    pull_policy: ${TEMPO_INFERENCE_PULL_POLICY:-build}
+    hostname: tempo-inference
+    build:
+      # Repo root, so the image can copy the bundle from data/models/tempo.
+      context: .
+      dockerfile: services/tempo/Dockerfile
+    environment:
+      TEMPO_BUNDLE_DIR: /models/tempo
+    networks:
+      - boom
+    restart: always
+    healthcheck:
+      # Unhealthy until a bundle is loaded; the API reports 503 meanwhile.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8500/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    profiles:
+      - prod
+      - api
+      - dev
   consumer-ztf-public:
     # Note: separate consumers for each ZTF program ID to allow independent scaling and isolation of processing
     # (there appears to be an issue when one consumer reads from multiple topics, i.e. one group id with multiple topics)
     # TODO: investigate further and consider merging into single consumer with multiple topics if the issue is resolved
-    image: boom-astro/boom:latest
+    image: ${BOOM_IMAGE:-ghcr.io/boom-astro/boom:latest}
+    pull_policy: ${BOOM_PULL_POLICY:-build}
     hostname: consumer-ztf-public
     restart: always
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # Compiled in, and recorded on every data mutation, so the ledger names
+        # the commit a change came from instead of "unknown".
+        BOOM_GIT_SHA: ${BOOM_GIT_SHA:-}
     environment:
       # Required secrets - must be set in environment
       BOOM_DATABASE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
@@ -307,6 +408,10 @@ services:
       BOOM_KAFKA__CONSUMER__ZTF__GROUP_ID: ${BOOM_KAFKA__CONSUMER__ZTF__GROUP_ID:?BOOM_KAFKA__CONSUMER__ZTF__GROUP_ID must be set}-public
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       # Optional overrides
+      BOOM_KAFKA__CONSUMER__ZTF__SECURITY_PROTOCOL: ${BOOM_KAFKA__CONSUMER__ZTF__SECURITY_PROTOCOL:-}
+      BOOM_KAFKA__CONSUMER__ZTF__USERNAME: ${BOOM_KAFKA__CONSUMER__ZTF__USERNAME:-}
+      BOOM_KAFKA__CONSUMER__ZTF__PASSWORD: ${BOOM_KAFKA__CONSUMER__ZTF__PASSWORD:-}
+      BOOM_KAFKA__CONSUMER__ZTF__SSL_CA_LOCATION: ${BOOM_KAFKA__CONSUMER__ZTF__SSL_CA_LOCATION:-}
       BOOM_DATABASE__HOST: mongo
       BOOM_DATABASE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
       BOOM_CUTOUTS_STORAGE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
@@ -325,12 +430,17 @@ services:
       - --programids
       - public
   consumer-ztf-partnership:
-    image: boom-astro/boom:latest
+    image: ${BOOM_IMAGE:-ghcr.io/boom-astro/boom:latest}
+    pull_policy: ${BOOM_PULL_POLICY:-build}
     hostname: consumer-ztf-partnership
     restart: always
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # Compiled in, and recorded on every data mutation, so the ledger names
+        # the commit a change came from instead of "unknown".
+        BOOM_GIT_SHA: ${BOOM_GIT_SHA:-}
     environment:
       # Required secrets - must be set in environment
       BOOM_DATABASE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
@@ -341,6 +451,10 @@ services:
       BOOM_KAFKA__CONSUMER__ZTF__GROUP_ID: ${BOOM_KAFKA__CONSUMER__ZTF__GROUP_ID:?BOOM_KAFKA__CONSUMER__ZTF__GROUP_ID must be set}-partnership
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       # Optional overrides
+      BOOM_KAFKA__CONSUMER__ZTF__SECURITY_PROTOCOL: ${BOOM_KAFKA__CONSUMER__ZTF__SECURITY_PROTOCOL:-}
+      BOOM_KAFKA__CONSUMER__ZTF__USERNAME: ${BOOM_KAFKA__CONSUMER__ZTF__USERNAME:-}
+      BOOM_KAFKA__CONSUMER__ZTF__PASSWORD: ${BOOM_KAFKA__CONSUMER__ZTF__PASSWORD:-}
+      BOOM_KAFKA__CONSUMER__ZTF__SSL_CA_LOCATION: ${BOOM_KAFKA__CONSUMER__ZTF__SSL_CA_LOCATION:-}
       BOOM_DATABASE__HOST: mongo
       BOOM_DATABASE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
       BOOM_CUTOUTS_STORAGE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
@@ -359,12 +473,17 @@ services:
       - --programids
       - partnership
   consumer-ztf-caltech:
-    image: boom-astro/boom:latest
+    image: ${BOOM_IMAGE:-ghcr.io/boom-astro/boom:latest}
+    pull_policy: ${BOOM_PULL_POLICY:-build}
     hostname: consumer-ztf-caltech
     restart: always
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # Compiled in, and recorded on every data mutation, so the ledger names
+        # the commit a change came from instead of "unknown".
+        BOOM_GIT_SHA: ${BOOM_GIT_SHA:-}
     environment:
       # Required secrets - must be set in environment
       BOOM_DATABASE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
@@ -375,6 +494,10 @@ services:
       BOOM_KAFKA__CONSUMER__ZTF__GROUP_ID: ${BOOM_KAFKA__CONSUMER__ZTF__GROUP_ID:?BOOM_KAFKA__CONSUMER__ZTF__GROUP_ID must be set}-caltech
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       # Optional overrides
+      BOOM_KAFKA__CONSUMER__ZTF__SECURITY_PROTOCOL: ${BOOM_KAFKA__CONSUMER__ZTF__SECURITY_PROTOCOL:-}
+      BOOM_KAFKA__CONSUMER__ZTF__USERNAME: ${BOOM_KAFKA__CONSUMER__ZTF__USERNAME:-}
+      BOOM_KAFKA__CONSUMER__ZTF__PASSWORD: ${BOOM_KAFKA__CONSUMER__ZTF__PASSWORD:-}
+      BOOM_KAFKA__CONSUMER__ZTF__SSL_CA_LOCATION: ${BOOM_KAFKA__CONSUMER__ZTF__SSL_CA_LOCATION:-}
       BOOM_DATABASE__HOST: mongo
       BOOM_DATABASE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
       BOOM_CUTOUTS_STORAGE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
@@ -393,12 +516,17 @@ services:
       - --programids
       - caltech
   consumer-lsst:
-    image: boom-astro/boom:latest
+    image: ${BOOM_IMAGE:-ghcr.io/boom-astro/boom:latest}
+    pull_policy: ${BOOM_PULL_POLICY:-build}
     hostname: consumer-lsst
     restart: always
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # Compiled in, and recorded on every data mutation, so the ledger names
+        # the commit a change came from instead of "unknown".
+        BOOM_GIT_SHA: ${BOOM_GIT_SHA:-}
     environment:
       # Required secrets - must be set in environment
       BOOM_DATABASE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
@@ -426,12 +554,17 @@ services:
       - /app/kafka_consumer
       - lsst
   consumer-winter:
-    image: boom-astro/boom:latest
+    image: ${BOOM_IMAGE:-ghcr.io/boom-astro/boom:latest}
+    pull_policy: ${BOOM_PULL_POLICY:-build}
     hostname: consumer-winter
     restart: always
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # Compiled in, and recorded on every data mutation, so the ledger names
+        # the commit a change came from instead of "unknown".
+        BOOM_GIT_SHA: ${BOOM_GIT_SHA:-}
     environment:
       # Required secrets - must be set in environment
       BOOM_DATABASE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
@@ -459,13 +592,118 @@ services:
     command:
       - /app/kafka_consumer
       - winter
+  consumer-decam:
+    image: ${BOOM_IMAGE:-ghcr.io/boom-astro/boom:latest}
+    pull_policy: ${BOOM_PULL_POLICY:-build}
+    hostname: consumer-decam
+    restart: always
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      BOOM_DATABASE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
+      BOOM_CUTOUTS_STORAGE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
+      BOOM_API__AUTH__SECRET_KEY: ${BOOM_API__AUTH__SECRET_KEY:?BOOM_API__AUTH__SECRET_KEY must be set}
+      BOOM_API__AUTH__ADMIN_PASSWORD: ${BOOM_API__AUTH__ADMIN_PASSWORD:?BOOM_API__AUTH__ADMIN_PASSWORD must be set}
+      BOOM_KAFKA__CONSUMER__DECAM__SERVER: ${BOOM_KAFKA__CONSUMER__DECAM__SERVER:-}
+      BOOM_KAFKA__CONSUMER__DECAM__GROUP_ID: ${BOOM_KAFKA__CONSUMER__DECAM__GROUP_ID:-}
+      BOOM_KAFKA__CONSUMER__DECAM__SECURITY_PROTOCOL: ${BOOM_KAFKA__CONSUMER__DECAM__SECURITY_PROTOCOL:-}
+      BOOM_KAFKA__CONSUMER__DECAM__USERNAME: ${BOOM_KAFKA__CONSUMER__DECAM__USERNAME:-}
+      BOOM_KAFKA__CONSUMER__DECAM__PASSWORD: ${BOOM_KAFKA__CONSUMER__DECAM__PASSWORD:-}
+      BOOM_KAFKA__CONSUMER__DECAM__SSL_CA_LOCATION: ${BOOM_KAFKA__CONSUMER__DECAM__SSL_CA_FILE:+/app/decam-ca.crt}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      BOOM_DATABASE__HOST: mongo
+      BOOM_DATABASE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
+      BOOM_CUTOUTS_STORAGE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
+      BOOM_CUTOUTS_STORAGE__TYPE: mongo
+      BOOM_CUTOUTS_STORAGE__HOST: mongo
+      BOOM_REDIS__HOST: valkey
+    networks:
+      - boom
+    profiles:
+      - decam
+    volumes:
+      - ${BOOM_CONFIG_PATH:-./config.yaml}:/app/config.yaml
+      - ${BOOM_KAFKA__CONSUMER__DECAM__SSL_CA_FILE:-/dev/null}:/app/decam-ca.crt:ro
+    command:
+      - /app/kafka_consumer
+      - decam
+  # Runs queued tasks: catalog ingests, data migrations and reprocessing jobs.
+  # Separate from the api service on purpose: these run for hours and are
+  # memory-hungry, and an API restart or deploy must not kill one. A run
+  # interrupted by a deploy goes back on the queue and the replacement worker
+  # resumes it.
+  task-worker:
+    image: ${BOOM_IMAGE:-ghcr.io/boom-astro/boom:latest}
+    pull_policy: ${BOOM_PULL_POLICY:-build}
+    hostname: task-worker
+    restart: always
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # Compiled in, and recorded on every data mutation, so the ledger names
+        # the commit a change came from instead of "unknown".
+        BOOM_GIT_SHA: ${BOOM_GIT_SHA:-}
+    environment:
+      # Required secrets - must be set in environment
+      BOOM_DATABASE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
+      BOOM_CUTOUTS_STORAGE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
+      BOOM_API__AUTH__SECRET_KEY: ${BOOM_API__AUTH__SECRET_KEY:?BOOM_API__AUTH__SECRET_KEY must be set}
+      BOOM_API__AUTH__ADMIN_PASSWORD: ${BOOM_API__AUTH__ADMIN_PASSWORD:?BOOM_API__AUTH__ADMIN_PASSWORD must be set}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      # Optional overrides
+      BOOM_DATABASE__HOST: mongo
+      BOOM_DATABASE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
+      BOOM_CUTOUTS_STORAGE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
+      BOOM_CUTOUTS_STORAGE__TYPE: mongo
+      BOOM_CUTOUTS_STORAGE__HOST: mongo
+      # The migration and reprocessing tasks drive their work through Valkey.
+      BOOM_REDIS__HOST: valkey
+      BOOM_CATALOG_DATA_PATH: /app/data/catalogs
+      # Pan-STARRS is in a requester-pays bucket, so fetching it is billed to
+      # whoever asks and needs credentials that can pay. Prefixed, and renamed
+      # to the plain AWS_* names on boompy's environment alone: those are the
+      # default credential chain, so setting them here would make a key meant
+      # for one catalog the default for this process and everything it spawns.
+      # Left empty for deployments that do not ingest it: an empty value is
+      # unset, and only that one catalog refuses to start without them. On AWS,
+      # leave these unset and give the instance a role instead -- boto finds
+      # that on its own.
+      BOOM_PANSTARRS_AWS_ACCESS_KEY_ID: ${BOOM_PANSTARRS_AWS_ACCESS_KEY_ID:-}
+      BOOM_PANSTARRS_AWS_SECRET_ACCESS_KEY: ${BOOM_PANSTARRS_AWS_SECRET_ACCESS_KEY:-}
+      BOOM_PANSTARRS_AWS_SESSION_TOKEN: ${BOOM_PANSTARRS_AWS_SESSION_TOKEN:-}
+      BOOM_PANSTARRS_AWS_DEFAULT_REGION: ${BOOM_PANSTARRS_AWS_DEFAULT_REGION:-us-east-1}
+      BOOM_TNS__BOT_ID: ${BOOM_TNS__BOT_ID:-}
+      BOOM_TNS__BOT_NAME: ${BOOM_TNS__BOT_NAME:-}
+      BOOM_TNS__API_KEY: ${BOOM_TNS__API_KEY:-}
+    networks:
+      - boom
+    profiles:
+      - prod
+    volumes:
+      - ${BOOM_CONFIG_PATH:-./config.yaml}:/app/config.yaml
+      - catalog_data:/app/data/catalogs
+      # enrich_reprocess builds a real enrichment worker, which loads every
+      # model in ZTF_MODELS and hashes it for the enrichment set stamp. Without
+      # these the task fails at startup rather than part way through.
+      - ${PWD}/data/models:/app/data/models:ro
+      - ${PWD}/data/ls_footprint_moc.fits:/app/data/ls_footprint_moc.fits:ro
+    command:
+      - /app/task_worker
+
   scheduler-ztf:
-    image: boom-astro/boom:latest
+    image: ${BOOM_IMAGE:-ghcr.io/boom-astro/boom:latest}
+    pull_policy: ${BOOM_PULL_POLICY:-build}
     hostname: scheduler-ztf
     restart: always
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # Compiled in, and recorded on every data mutation, so the ledger names
+        # the commit a change came from instead of "unknown".
+        BOOM_GIT_SHA: ${BOOM_GIT_SHA:-}
     environment:
       # Required secrets - must be set in environment
       BOOM_DATABASE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
@@ -482,7 +720,17 @@ services:
       BOOM_BABAMUL__ENABLED: ${BOOM_BABAMUL__ENABLED:-false}
       BOOM_REDIS__HOST: valkey
       BOOM_GPU__ENABLED: ${BOOM_GPU__ENABLED:-false}
-      BOOM_GPU__DEVICE_IDS: ${BOOM_GPU__DEVICE_IDS:-0}
+      BOOM_GPU__DEVICE_IDS: ${BOOM_GPU__DEVICE_IDS:-}
+      # Milvus vector database (optional; see docs/milvus.md).
+      # This scheduler runs the AppleCiDEr fusion model, so it is what produces the
+      # embeddings. Reached over the public internet, so this works regardless
+      # of where BOOM itself is deployed.
+      BOOM_MILVUS__WRITE_EMBEDDINGS: ${BOOM_MILVUS__WRITE_EMBEDDINGS:-}
+      BOOM_MILVUS__HOST: ${BOOM_MILVUS__HOST:-milvus.nrp-nautilus.io}
+      BOOM_MILVUS__PORT: ${BOOM_MILVUS__PORT:-50051}
+      BOOM_MILVUS__USERNAME: ${BOOM_MILVUS__USERNAME:-}
+      BOOM_MILVUS__PASSWORD: ${BOOM_MILVUS__PASSWORD:-}
+      BOOM_MILVUS__DATABASE: ${BOOM_MILVUS__DATABASE:-}
     networks:
       - boom
     profiles:
@@ -495,12 +743,17 @@ services:
       - /app/scheduler
       - ztf
   scheduler-lsst:
-    image: boom-astro/boom:latest
+    image: ${BOOM_IMAGE:-ghcr.io/boom-astro/boom:latest}
+    pull_policy: ${BOOM_PULL_POLICY:-build}
     hostname: scheduler-lsst
     restart: always
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # Compiled in, and recorded on every data mutation, so the ledger names
+        # the commit a change came from instead of "unknown".
+        BOOM_GIT_SHA: ${BOOM_GIT_SHA:-}
     environment:
       # Required secrets - must be set in environment
       BOOM_DATABASE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
@@ -517,7 +770,7 @@ services:
       BOOM_BABAMUL__ENABLED: ${BOOM_BABAMUL__ENABLED:-false}
       BOOM_REDIS__HOST: valkey
       BOOM_GPU__ENABLED: ${BOOM_GPU__ENABLED:-false}
-      BOOM_GPU__DEVICE_IDS: ${BOOM_GPU__DEVICE_IDS:-0}
+      BOOM_GPU__DEVICE_IDS: ${BOOM_GPU__DEVICE_IDS:-}
     networks:
       - boom
     profiles:
@@ -530,12 +783,17 @@ services:
       - /app/scheduler
       - lsst
   scheduler-winter:
-    image: boom-astro/boom:latest
+    image: ${BOOM_IMAGE:-ghcr.io/boom-astro/boom:latest}
+    pull_policy: ${BOOM_PULL_POLICY:-build}
     hostname: scheduler-winter
     restart: always
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # Compiled in, and recorded on every data mutation, so the ledger names
+        # the commit a change came from instead of "unknown".
+        BOOM_GIT_SHA: ${BOOM_GIT_SHA:-}
     environment:
       # Required secrets - must be set in environment
       BOOM_DATABASE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
@@ -561,8 +819,77 @@ services:
     command:
       - /app/scheduler
       - winter
+  # MPC_orbits is refreshed by the ZTF scheduler on its own, and on demand by
+  # the `mpcorb_ingest` task -- see docs/task-system.md. The one-shot service
+  # that used to live here ran a binary that no longer exists.
+  scheduler-decam:
+    image: ${BOOM_IMAGE:-ghcr.io/boom-astro/boom:latest}
+    pull_policy: ${BOOM_PULL_POLICY:-build}
+    hostname: scheduler-decam
+    restart: always
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      BOOM_DATABASE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
+      BOOM_CUTOUTS_STORAGE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
+      BOOM_API__AUTH__SECRET_KEY: ${BOOM_API__AUTH__SECRET_KEY:?BOOM_API__AUTH__SECRET_KEY must be set}
+      BOOM_API__AUTH__ADMIN_PASSWORD: ${BOOM_API__AUTH__ADMIN_PASSWORD:?BOOM_API__AUTH__ADMIN_PASSWORD must be set}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      BOOM_DATABASE__HOST: mongo
+      BOOM_DATABASE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
+      BOOM_CUTOUTS_STORAGE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
+      BOOM_CUTOUTS_STORAGE__TYPE: mongo
+      BOOM_CUTOUTS_STORAGE__HOST: mongo
+      BOOM_REDIS__HOST: valkey
+    networks:
+      - boom
+    profiles:
+      - decam
+    volumes:
+      - ${BOOM_CONFIG_PATH:-./config.yaml}:/app/config.yaml
+    command:
+      - /app/scheduler
+      - decam
+  # Moving-object discovery: once each ZTF night is over, links the last
+  # `linker.window_nights` nights of unassociated detections, stores the tracks
+  # in ZTF_tracks, and logs the recall on objects IPAC identified. Settings are
+  # in the `linker` section of the config.
+  linker-ztf:
+    image: ${BOOM_IMAGE:-ghcr.io/boom-astro/boom:latest}
+    pull_policy: ${BOOM_PULL_POLICY:-build}
+    hostname: linker-ztf
+    restart: always
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      # Required secrets - must be set in environment
+      BOOM_DATABASE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
+      BOOM_CUTOUTS_STORAGE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
+      BOOM_API__AUTH__SECRET_KEY: ${BOOM_API__AUTH__SECRET_KEY:?BOOM_API__AUTH__SECRET_KEY must be set}
+      BOOM_API__AUTH__ADMIN_PASSWORD: ${BOOM_API__AUTH__ADMIN_PASSWORD:?BOOM_API__AUTH__ADMIN_PASSWORD must be set}
+      # Optional overrides
+      BOOM_DATABASE__HOST: mongo
+      BOOM_DATABASE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
+      BOOM_CUTOUTS_STORAGE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
+      BOOM_CUTOUTS_STORAGE__TYPE: mongo
+      BOOM_CUTOUTS_STORAGE__HOST: mongo
+    deploy:
+      resources:
+        limits:
+          memory: ${BOOM_LINKER_MEM_LIMIT:-48g}
+    networks:
+      - boom
+    profiles:
+      - prod
+    volumes:
+      - ${BOOM_CONFIG_PATH:-./config.yaml}:/app/config.yaml
+    command:
+      - /app/linker
   otel-collector: # [^1]
     image: otel/opentelemetry-collector:0.131.1
+    restart: always
     volumes:
       - ./config/otel-collector-config.yaml:/etc/otelcol/config.yaml
     networks:
@@ -709,7 +1036,7 @@ services:
     networks:
       - boom
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3200/ready | grep -q 'ready' || exit 1"]
+      test: ["CMD", "/busybox/sh", "-c", "/busybox/wget -qO- http://127.0.0.1:3200/ready | /busybox/grep -q 'ready' || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 10

@@ -13,6 +13,7 @@ use crate::{
         cutouts::CutoutStorage,
         db::{mongify_vec, update_timeseries_op},
         enums::Survey,
+        host::{self, HostGalaxyAssociation, HostGalaxyConfig},
         o11y::logging::as_error,
         spatial::{xmatch, Coordinates},
     },
@@ -136,6 +137,8 @@ pub struct AskapObject {
     pub prv_candidates: Vec<AskapCandidate>,
     pub fp_hists: Vec<AskapCandidate>,
     pub cross_matches: Option<HashMap<String, Vec<Document>>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_galaxy: Option<HostGalaxyAssociation>,
     pub aliases: Option<AskapAliases>,
     pub coordinates: Coordinates,
     pub created_at: f64,
@@ -165,6 +168,7 @@ struct AlertAuxForUpdate {
 
 pub struct AskapAlertWorker {
     xmatch_configs: Vec<conf::CatalogXmatchConfig>,
+    host_galaxy_config: HostGalaxyConfig,
     db: mongodb::Database,
     alert_collection: mongodb::Collection<AskapAlert>,
     alert_aux_collection: mongodb::Collection<AskapObject>,
@@ -273,6 +277,7 @@ impl AskapAlertWorker {
             current_version,
             now,
             &self.alert_aux_collection,
+            Document::new(),
         )
         .await
     }
@@ -299,9 +304,9 @@ impl AskapAlertWorker {
         {
             Ok(_) => Ok(()),
             Err(e) => {
-                // fall back to the concurrency-safe, self-healing in-DB update
                 match &e {
                     AlertError::ConcurrentAuxUpdate(_) => debug!(error = %e),
+                    AlertError::InvalidTimeseriesInput(_) => warn!(error = %e),
                     _ => error!(error = %e),
                 }
                 self.update_aux_fallback(object_id, prv_candidates, fp_hists, survey_matches, now)
@@ -327,6 +332,8 @@ impl AlertWorker for AskapAlertWorker {
             .await
             .inspect_err(as_error!("failed to create mongo client"))?;
 
+        crate::catalogs::warn_on_empty_crossmatch_catalogs(&db, &xmatch_configs).await;
+
         let alert_collection = db.collection(&ALERT_COLLECTION);
         let alert_aux_collection = db.collection(&ALERT_AUX_COLLECTION);
         let alert_cutout_storage = config
@@ -343,6 +350,7 @@ impl AlertWorker for AskapAlertWorker {
 
         let worker = AskapAlertWorker {
             xmatch_configs,
+            host_galaxy_config: config.host_galaxy.clone(),
             db,
             alert_collection,
             alert_aux_collection,
@@ -357,10 +365,6 @@ impl AlertWorker for AskapAlertWorker {
 
     fn survey() -> Survey {
         Survey::Askap
-    }
-
-    fn input_queue_name(&self) -> String {
-        format!("{}_alerts_packets_queue", AskapAlertWorker::survey())
     }
 
     fn output_queue_name(&self) -> String {
@@ -382,6 +386,9 @@ impl AlertWorker for AskapAlertWorker {
         let mut prv_candidates = avro_alert.prv_candidates.unwrap_or_default();
         prv_candidates.push(avro_alert.candidate.clone());
         let mut fp_hists = avro_alert.fp_hists.unwrap_or_default();
+        for point in fp_hists.iter_mut() {
+            point.spectral_index = None;
+        }
 
         AskapCandidate::sanitize_timeseries(&mut prv_candidates);
         AskapCandidate::sanitize_timeseries(&mut fp_hists);
@@ -395,13 +402,12 @@ impl AlertWorker for AskapAlertWorker {
             updated_at: now,
         };
 
-        let status = self
-            .format_and_insert_alert(candid, &alert, &self.alert_collection)
+        if self
+            .check_alert_exists(candid, &self.alert_collection)
             .await
-            .inspect_err(as_error!())?;
-
-        if let ProcessAlertStatus::Exists(_) = status {
-            return Ok(status);
+            .inspect_err(as_error!())?
+        {
+            return Ok(ProcessAlertStatus::Exists(candid));
         }
 
         let survey_matches = Some(
@@ -424,12 +430,32 @@ impl AlertWorker for AskapAlertWorker {
             .await
             .inspect_err(as_error!())?;
         } else {
-            let xmatches = xmatch(ra, dec, &self.xmatch_configs, &self.db).await?;
+            let xmatches = xmatch(
+                ra,
+                dec,
+                &object_id,
+                &Survey::Askap,
+                &self.xmatch_configs,
+                &self.db,
+            )
+            .await?;
+            let host_galaxy = host::associate_with_photometry(
+                ra,
+                dec,
+                &xmatches,
+                &self.host_galaxy_config,
+                &self.xmatch_configs,
+                &Survey::Askap,
+                &object_id,
+                &self.db,
+            )
+            .await;
             let obj = AskapObject {
                 object_id: object_id.clone(),
                 prv_candidates,
                 fp_hists,
                 cross_matches: Some(xmatches),
+                host_galaxy,
                 aliases: survey_matches,
                 coordinates: Coordinates::new(ra, dec),
                 created_at: now,
@@ -437,7 +463,7 @@ impl AlertWorker for AskapAlertWorker {
             };
             let result = self.insert_aux(&obj, &self.alert_aux_collection).await;
             if let Err(AlertError::AlertAuxExists) = result {
-                warn!(
+                debug!(
                     "Alert aux document for object_id {} already exists. Using fallback update.",
                     object_id
                 );
@@ -455,20 +481,21 @@ impl AlertWorker for AskapAlertWorker {
             }
         }
 
-        // Radio alerts carry at most a science stamp; template/difference are absent.
-        let cutout_science = avro_alert
-            .cutout_science
-            .map(|c| c.stamp_data)
-            .unwrap_or_default();
-        let status = self
-            .format_and_insert_cutouts(
+        if let Some(cutout) = avro_alert.cutout_science {
+            self.format_and_insert_cutouts(
                 candid,
                 &object_id,
-                cutout_science,
-                None,
-                None,
+                cutout.stamp_data,
+                Vec::new(),
+                Vec::new(),
                 &self.alert_cutout_storage,
             )
+            .await
+            .inspect_err(as_error!())?;
+        }
+
+        let status = self
+            .format_and_insert_alert(candid, &alert, &self.alert_collection)
             .await
             .inspect_err(as_error!())?;
 

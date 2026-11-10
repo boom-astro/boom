@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import os
 import socket
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import urlparse
 from urllib.parse import urlencode
@@ -28,9 +28,28 @@ DOCKER_API_VERSION = "v1.41"
 # Prometheus community port allocation for this exporter (must match the
 # targets entry in prometheus.yaml).
 EXPORTER_PORT = 9158
+# Docker API timeout. A failed scrape is not a neutral event here: Prometheus
+# writes stale markers for every series a target exported the moment a scrape
+# fails, so the series backing the api-down alert vanishes immediately rather
+# than after the usual 5m staleness window. The daemon shares this host with
+# the self-hosted Actions runner, so `/containers/json` can be slow during an
+# image build; give it room rather than turning that into a gap. Capped at
+# Prometheus' scrape_timeout (10s by default) -- waiting past that just holds a
+# connection open for a scrape that has already been abandoned.
+DOCKER_API_TIMEOUT_SECONDS = 10
 # Prometheus metric name. The _info suffix follows the convention for
 # label-only identity metrics (value is always 1).
 METRIC_NAME = "docker_container_identity_info"
+# Health/liveness metrics. cAdvisor reports resource usage but knows nothing
+# about Docker healthchecks, so a container that is running yet failing its
+# healthcheck (see PR #562: every request panicked its actix worker, so the
+# `/` healthcheck failed forever while the process stayed alive) is invisible
+# to every other exporter in the stack.
+HEALTH_METRIC_NAME = "docker_container_health_status"
+UP_METRIC_NAME = "docker_container_up"
+# Emitted for every container so queries never have to guess which label
+# values exist; exactly one is 1 per container.
+HEALTH_STATES = ("healthy", "unhealthy", "starting", "none")
 
 
 def _http_get_unix_socket(path: str, query: dict[str, Any] | None = None) -> Any:
@@ -46,6 +65,7 @@ def _http_get_unix_socket(path: str, query: dict[str, Any] | None = None) -> Any
     ).encode("utf-8")
 
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+        client.settimeout(DOCKER_API_TIMEOUT_SECONDS)
         client.connect(DOCKER_SOCKET)
         client.sendall(request)
 
@@ -84,11 +104,15 @@ def _http_get_tcp(path: str, query: dict[str, Any] | None = None) -> Any:
     if parsed.scheme == "https":
         import http.client
 
-        conn = http.client.HTTPSConnection(host, port, timeout=5)
+        conn = http.client.HTTPSConnection(
+            host, port, timeout=DOCKER_API_TIMEOUT_SECONDS
+        )
     else:
         import http.client
 
-        conn = http.client.HTTPConnection(host, port, timeout=5)
+        conn = http.client.HTTPConnection(
+            host, port, timeout=DOCKER_API_TIMEOUT_SECONDS
+        )
 
     conn.request("GET", path, headers={"Accept": "application/json"})
     response = conn.getresponse()
@@ -127,6 +151,26 @@ def _container_name(container: dict[str, Any]) -> str:
     return container.get("Id", "")[:12]
 
 
+def _health_state(container: dict[str, Any]) -> str:
+    """Health of a container, as one of HEALTH_STATES.
+
+    The container list endpoint has no dedicated health field; the daemon
+    appends the healthcheck result to the human-readable Status string as
+    "Up 3 hours (healthy)" / "(unhealthy)" / "(health: starting)", and omits
+    the suffix entirely for containers that declare no healthcheck. Reading
+    it here keeps the exporter to a single Docker API call per scrape, rather
+    than an inspect request per container.
+    """
+    status = container.get("Status") or ""
+    if "(healthy)" in status:
+        return "healthy"
+    if "(unhealthy)" in status:
+        return "unhealthy"
+    if "(health: starting)" in status:
+        return "starting"
+    return "none"
+
+
 def render_metrics() -> str:
     if DOCKER_API_BASE.startswith("unix://"):
         containers = _http_get_unix_socket(
@@ -135,9 +179,20 @@ def render_metrics() -> str:
     else:
         containers = _http_get_tcp(f"/{DOCKER_API_VERSION}/containers/json", {"all": 1})
 
-    lines = [
+    identity_lines = [
         f"# HELP {METRIC_NAME} Docker container identity metadata.",
         f"# TYPE {METRIC_NAME} gauge",
+    ]
+    health_lines = [
+        f"# HELP {HEALTH_METRIC_NAME} Docker healthcheck state of a container "
+        "(1 for the current state, 0 otherwise; 'none' means no healthcheck "
+        "is defined).",
+        f"# TYPE {HEALTH_METRIC_NAME} gauge",
+    ]
+    up_lines = [
+        f"# HELP {UP_METRIC_NAME} 1 if the container is running and not "
+        "failing its healthcheck, 0 otherwise.",
+        f"# TYPE {UP_METRIC_NAME} gauge",
     ]
 
     for c in containers:
@@ -161,9 +216,36 @@ def render_metrics() -> str:
         label_text = ",".join(
             f'{k}="{_escape_label(v)}"' for k, v in prom_labels.items()
         )
-        lines.append(f"{METRIC_NAME}{{{label_text}}} 1")
+        identity_lines.append(f"{METRIC_NAME}{{{label_text}}} 1")
 
-    return "\n".join(lines) + "\n"
+        # The full id is 64 hex characters of pure churn on any dashboard or
+        # alert that groups by it, and identity_info already maps it to the
+        # names below, so the state metrics carry only the human-readable set.
+        state_labels = {
+            "container_name": container_name,
+            "compose_project": compose_project,
+            "compose_service": compose_service,
+        }
+        state_label_text = ",".join(
+            f'{k}="{_escape_label(v)}"' for k, v in state_labels.items()
+        )
+
+        health = _health_state(c)
+        for candidate in HEALTH_STATES:
+            value = 1 if candidate == health else 0
+            health_lines.append(
+                f'{HEALTH_METRIC_NAME}{{{state_label_text},status="{candidate}"}} {value}'
+            )
+
+        # "starting" counts as up: it is what every container reports during
+        # its healthcheck start_period, and Docker moves it to "unhealthy"
+        # once the retries are exhausted, so treating it as down would fire
+        # this alert on every deploy without catching anything extra.
+        running = c.get("State") == "running"
+        up = 1 if running and health != "unhealthy" else 0
+        up_lines.append(f"{UP_METRIC_NAME}{{{state_label_text}}} {up}")
+
+    return "\n".join(identity_lines + health_lines + up_lines) + "\n"
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -193,5 +275,9 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    server = HTTPServer(("0.0.0.0", EXPORTER_PORT), Handler)
+    # Threaded so one slow Docker API call can only delay its own scrape. The
+    # single-threaded HTTPServer serialized them, so a stalled call blocked
+    # every subsequent scrape until it returned, turning one slow response into
+    # a run of failed scrapes.
+    server = ThreadingHTTPServer(("0.0.0.0", EXPORTER_PORT), Handler)
     server.serve_forever()

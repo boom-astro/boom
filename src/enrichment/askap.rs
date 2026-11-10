@@ -3,6 +3,7 @@ use crate::conf::AppConfig;
 use crate::enrichment::{fetch_alerts, EnrichmentWorker, EnrichmentWorkerError};
 use crate::utils::db::{fetch_timeseries_op, mongify};
 use crate::utils::enums::Survey;
+use apache_avro_derive::AvroSchema;
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
 use tracing::{instrument, warn};
@@ -82,9 +83,9 @@ pub struct AskapAlertForEnrichment {
 }
 
 /// VAST-style variability metrics over the peak-flux lightcurve.
-#[derive(Debug, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, serde::Deserialize, serde::Serialize, AvroSchema)]
 pub struct AskapAlertProperties {
-    pub n_measurements: usize,
+    pub n_measurements: i32,
     pub flux_peak_max: Option<f64>,
     pub flux_peak_min: Option<f64>,
     /// Weighted reduced chi-square about the weighted mean (VAST eta).
@@ -94,7 +95,7 @@ pub struct AskapAlertProperties {
 }
 
 fn variability_metrics(points: &[AskapFluxPoint]) -> AskapAlertProperties {
-    let n = points.len();
+    let n = points.len() as i32;
     let fluxes: Vec<f64> = points.iter().map(|p| p.flux_peak as f64).collect();
     let flux_peak_max = fluxes
         .iter()

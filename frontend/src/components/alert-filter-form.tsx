@@ -26,6 +26,7 @@ export type AlertFilterFormProps = {
   isNearBrightstar: BoolFilter; setIsNearBrightstar: (v: BoolFilter) => void;
   isStationary: BoolFilter;     setIsStationary: (v: BoolFilter) => void;
   isPositive: BoolFilter;       setIsPositive: (v: BoolFilter) => void;
+  maxHostDist: string;          setMaxHostDist: (v: string) => void;
 };
 
 export function toDatetimeLocalString(date: Date): string {
@@ -163,7 +164,7 @@ function propertyTooltips(survey: 'ZTF' | 'LSST') {
   const stationary = (
     <>
       <span className={T.green}>True</span> if the temporal baseline (last &minus; first observation) &gt;&nbsp;0.01&nbsp;days (~14&nbsp;min).
-      Combines <code>prv_candidates</code> and <code>fp_hists</code> (forced photometry, SNR&nbsp;&ge;&nbsp;3).
+      Combines <code>prv_candidates</code> and <code>fp_hists</code> (forced photometry, SNR&nbsp;&ge;&nbsp;5).
     </>
   );
 
@@ -313,12 +314,13 @@ function TimeCard({ timeFormat, onTimeFormatChange, startTime, setStartTime, end
   );
 }
 
-type ProfileValues = { isRock: BoolFilter; isStar: BoolFilter; isNearBrightstar: BoolFilter; isStationary: BoolFilter; isPositive: BoolFilter };
+type ProfileValues = { isRock: BoolFilter; isStar: BoolFilter; isNearBrightstar: BoolFilter; isStationary: BoolFilter; isPositive: BoolFilter; maxHostDist?: string };
 
 const PROFILES: Array<{ label: string; values: ProfileValues }> = [
   { label: 'Transient', values: { isRock: 'false', isStar: 'false', isNearBrightstar: 'false', isStationary: 'true', isPositive: 'true' } },
   { label: 'Stellar',   values: { isRock: 'false', isStar: 'true',  isNearBrightstar: 'true',  isStationary: 'true', isPositive: 'any'  } },
   { label: 'SSO',       values: { isRock: 'true',  isStar: 'false', isNearBrightstar: 'false', isStationary: 'any',  isPositive: 'any'  } },
+  { label: 'Nearby',    values: { isRock: 'false', isStar: 'false', isNearBrightstar: 'false', isStationary: 'any',  isPositive: 'any', maxHostDist: '200' } },
 ];
 
 type PropertiesCardProps = {
@@ -328,9 +330,10 @@ type PropertiesCardProps = {
   isNearBrightstar: BoolFilter; setIsNearBrightstar: (v: BoolFilter) => void;
   isStationary: BoolFilter; setIsStationary: (v: BoolFilter) => void;
   isPositive: BoolFilter; setIsPositive: (v: BoolFilter) => void;
+  maxHostDist: string; setMaxHostDist: (v: string) => void;
 };
 
-function PropertiesCard({ survey, isRock, setIsRock, isStar, setIsStar, isNearBrightstar, setIsNearBrightstar, isStationary, setIsStationary, isPositive, setIsPositive }: PropertiesCardProps) {
+function PropertiesCard({ survey, isRock, setIsRock, isStar, setIsStar, isNearBrightstar, setIsNearBrightstar, isStationary, setIsStationary, isPositive, setIsPositive, maxHostDist, setMaxHostDist }: PropertiesCardProps) {
   const tips = propertyTooltips(survey);
   const fields: Array<{ label: string; value: BoolFilter; set: (v: BoolFilter) => void; tooltip: ReactNode }> = [
     { label: 'Rock',             value: isRock,           set: setIsRock,           tooltip: tips.rock },
@@ -340,16 +343,24 @@ function PropertiesCard({ survey, isRock, setIsRock, isStar, setIsStar, isNearBr
     { label: 'Positive sub.',    value: isPositive,       set: setIsPositive,       tooltip: tips.positive },
   ];
 
-  const current: ProfileValues = { isRock, isStar, isNearBrightstar, isStationary, isPositive };
+  const current: ProfileValues = { isRock, isStar, isNearBrightstar, isStationary, isPositive, maxHostDist };
   const resetAll = () => { setIsRock('any'); setIsStar('any'); setIsNearBrightstar('any'); setIsStationary('any'); setIsPositive('any'); };
   const isActive = (v: ProfileValues) => (Object.keys(v) as (keyof ProfileValues)[]).every(k => v[k] === current[k]);
-  const toggleProfile = (v: ProfileValues) => isActive(v) ? resetAll() : (setIsRock(v.isRock), setIsStar(v.isStar), setIsNearBrightstar(v.isNearBrightstar), setIsStationary(v.isStationary), setIsPositive(v.isPositive));
+  const toggleProfile = (v: ProfileValues) => {
+    if (isActive(v)) {
+      resetAll();
+      if (v.maxHostDist !== undefined) setMaxHostDist('');
+      return;
+    }
+    setIsRock(v.isRock); setIsStar(v.isStar); setIsNearBrightstar(v.isNearBrightstar); setIsStationary(v.isStationary); setIsPositive(v.isPositive);
+    if (v.maxHostDist !== undefined) setMaxHostDist(v.maxHostDist);
+  };
 
   return (
     <div className="rounded-lg border bg-muted/40 p-4">
-      <div className="flex items-center justify-between mb-3">
+      <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
         <span className="text-base font-semibold">Properties</span>
-        <div className="flex items-center gap-1.5">
+        <div className="flex flex-wrap items-center justify-end gap-1.5">
           <span className="text-xs text-muted-foreground/60 mr-1">Click to cycle</span>
           {PROFILES.map(({ label, values }) => (
             <button
@@ -385,12 +396,12 @@ export function AlertFilterForm(props: AlertFilterFormProps) {
 
 function RangeRow({ label, minValue, onMinChange, maxValue, onMaxChange, minPlaceholder = "no min", maxPlaceholder = "no max", hardMin, hardMax }: {
   label: string;
-  minValue: string; onMinChange: (v: string) => void;
+  minValue?: string; onMinChange?: (v: string) => void;
   maxValue: string; onMaxChange: (v: string) => void;
   minPlaceholder?: string; maxPlaceholder?: string;
   hardMin?: number; hardMax?: number;
 }) {
-  const minNum = minValue !== '' ? parseFloat(minValue) : null;
+  const minNum = minValue ? parseFloat(minValue) : null;
   const maxNum = maxValue !== '' ? parseFloat(maxValue) : null;
 
   const minOutOfRange = minNum !== null && ((hardMin !== undefined && minNum < hardMin) || (hardMax !== undefined && minNum > hardMax));
@@ -410,9 +421,18 @@ function RangeRow({ label, minValue, onMinChange, maxValue, onMaxChange, minPlac
   return (
     <div className="space-y-1.5">
       <div className="flex items-center gap-2">
-        <Input type="number" step="any" min={hardMin} max={hardMax} value={minValue} onChange={e => onMinChange(e.target.value)} placeholder={minPlaceholder}
-          className={cn("w-0 flex-1 text-center font-mono text-sm", (minOutOfRange || crossInvalid) && "border-destructive focus-visible:ring-destructive")} />
-        {leq}
+        {onMinChange ? (
+          <>
+            <Input type="number" step="any" min={hardMin} max={hardMax} value={minValue} onChange={e => onMinChange(e.target.value)} placeholder={minPlaceholder}
+              className={cn("w-0 flex-1 text-center font-mono text-sm", (minOutOfRange || crossInvalid) && "border-destructive focus-visible:ring-destructive")} />
+            {leq}
+          </>
+        ) : (
+          <>
+            <div className="w-0 flex-1" />
+            <span className="invisible">{leq}</span>
+          </>
+        )}
         <span className="text-sm font-semibold px-3 py-1.5 rounded-md bg-secondary shrink-0 whitespace-nowrap">{label}</span>
         {leq}
         <Input type="number" step="any" min={hardMin} max={hardMax} value={maxValue} onChange={e => onMaxChange(e.target.value)} placeholder={maxPlaceholder}
@@ -430,6 +450,7 @@ function FiltersVisual({
   minDrb, setMinDrb, maxDrb, setMaxDrb,
   isRock, setIsRock, isStar, setIsStar, isNearBrightstar, setIsNearBrightstar, isStationary, setIsStationary,
   isPositive, setIsPositive,
+  maxHostDist, setMaxHostDist,
 }: AlertFilterFormProps) {
   const [activePreset, setActivePreset] = useState<number | null>(24 * 3_600_000);
 
@@ -448,6 +469,7 @@ function FiltersVisual({
         isNearBrightstar={isNearBrightstar} setIsNearBrightstar={setIsNearBrightstar}
         isStationary={isStationary} setIsStationary={setIsStationary}
         isPositive={isPositive} setIsPositive={setIsPositive}
+        maxHostDist={maxHostDist} setMaxHostDist={setMaxHostDist}
       />
       <div className="rounded-lg border bg-muted/40 p-4 space-y-4">
         <span className="text-base font-semibold block">Cuts</span>
@@ -461,6 +483,11 @@ function FiltersVisual({
           minValue={minDrb} onMinChange={setMinDrb}
           maxValue={maxDrb} onMaxChange={setMaxDrb}
           hardMin={0} hardMax={1}
+        />
+        <RangeRow
+          label="Host distance (Mpc)"
+          maxValue={maxHostDist} onMaxChange={setMaxHostDist}
+          hardMin={0}
         />
       </div>
     </div>

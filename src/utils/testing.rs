@@ -1,8 +1,9 @@
 use crate::{
     alert::{
-        sanitize_winter_avro, AlertWorker, AskapAlertWorker, DecamAlertWorker, LightcurveJdOnly,
-        LsstAlertWorker, SchemaRegistry, WinterAlertWorker, ZtfAlertWorker,
-        LSST_SCHEMA_REGISTRY_GITHUB_FALLBACK_URL, LSST_SCHEMA_REGISTRY_URL,
+        alert_temp_queue_name, sanitize_winter_avro, AlertWorker, AskapAlertWorker,
+        DecamAlertWorker, LightcurveJdOnly, LsstAlertWorker, SchemaRegistry, WinterAlertWorker,
+        WinterRawAvroAlert, ZtfAlertWorker, LSST_SCHEMA_REGISTRY_GITHUB_FALLBACK_URL,
+        LSST_SCHEMA_REGISTRY_URL,
     },
     conf,
     filter::{Filter, FilterVersion},
@@ -52,6 +53,14 @@ pub async fn askap_alert_worker() -> AskapAlertWorker {
         .await
         .unwrap();
     AskapAlertWorker::new(TEST_CONFIG_FILE).await.unwrap()
+}
+
+pub fn read_winter_test_alert(path: &str) -> WinterRawAvroAlert {
+    let raw = fs::read(path).unwrap();
+    let fixed = sanitize_winter_avro(&raw).unwrap();
+    let reader = Reader::new(&fixed[..]).unwrap();
+    let value = reader.into_iter().next().unwrap().unwrap();
+    apache_avro::from_value(&value).unwrap()
 }
 
 pub async fn winter_alert_worker() -> WinterAlertWorker {
@@ -118,11 +127,10 @@ pub async fn drop_alert_from_collections(
 const ZTF_TEST_PIPELINE: &str = "[{\"$match\": {\"candidate.drb\": {\"$gt\": 0.5}, \"candidate.ndethist\": {\"$gt\": 1.0}, \"candidate.magpsf\": {\"$lte\": 18.5}}}, {\"$project\": {\"annotations.mag_now\": {\"$round\": [\"$candidate.magpsf\", 2]}}}]";
 const ZTF_TEST_PIPELINE_PRV_CANDIDATES: &str = "[{\"$match\": {\"prv_candidates.0\": {\"$exists\": true}, \"candidate.drb\": {\"$gt\": 0.5}, \"candidate.ndethist\": {\"$gt\": 1.0}, \"candidate.magpsf\": {\"$lte\": 18.5}}}, {\"$project\": {\"objectId\": 1, \"annotations.mag_now\": {\"$round\": [\"$candidate.magpsf\", 2]}}}]";
 const LSST_TEST_PIPELINE: &str = "[{\"$match\": {\"candidate.reliability\": {\"$gt\": 0.1}, \"candidate.snr\": {\"$gt\": 5.0}, \"candidate.magpsf\": {\"$lte\": 25.0}}}, {\"$project\": {\"objectId\": 1, \"annotations.mag_now\": {\"$round\": [\"$candidate.magpsf\", 2]}}}]";
+const ASKAP_TEST_PIPELINE: &str = "[{\"$match\": {\"candidate.snr\": {\"$gte\": 5.0}, \"candidate.flux_peak\": {\"$gt\": 0.0}}}, {\"$project\": {\"objectId\": 1, \"annotations.flux_now\": {\"$round\": [\"$candidate.flux_peak\", 2]}}}]";
 const WINTER_TEST_PIPELINE: &str = "[{\"$match\": {\"candidate.magpsf\": {\"$lte\": 20.0}}}, {\"$project\": {\"objectId\": 1, \"annotations.mag_now\": {\"$round\": [\"$candidate.magpsf\", 2]}}}]";
 // DECam stores the difference-image magnitude as `magap` (not `magpsf`) and the
 // CNN real-bogus score as `reliability`.
-// ASKAP is radio: filter on snr and peak flux (mJy), not magnitudes.
-const ASKAP_TEST_PIPELINE: &str = "[{\"$match\": {\"candidate.snr\": {\"$gte\": 5.0}, \"candidate.flux_peak\": {\"$gt\": 0.0}}}, {\"$project\": {\"objectId\": 1, \"annotations.flux_now\": {\"$round\": [\"$candidate.flux_peak\", 2]}}}]";
 const DECAM_TEST_PIPELINE: &str = "[{\"$match\": {\"candidate.reliability\": {\"$gt\": 0.1}, \"candidate.magap\": {\"$lte\": 25.0}}}, {\"$project\": {\"objectId\": 1, \"annotations.mag_now\": {\"$round\": [\"$candidate.magap\", 2]}}}]";
 
 pub async fn remove_test_filter(
@@ -157,6 +165,7 @@ pub async fn insert_custom_test_filter(
         description: Some("Test filter".to_string()),
         survey: survey.clone(),
         user_id: "test_user".to_string(),
+        watchlist: None,
         permissions,
         active: true,
         active_fid: "v2e0fs".to_string(),
@@ -205,7 +214,9 @@ pub async fn empty_processed_alerts_queue(
     let config = conf::load_config(Some(TEST_CONFIG_FILE)).unwrap();
     let mut con = config.build_redis().await?;
     con.del::<&str, usize>(input_queue_name).await.unwrap();
-    con.del::<&str, usize>("{}_temp").await.unwrap();
+    con.del::<&str, usize>(&alert_temp_queue_name(input_queue_name))
+        .await
+        .unwrap();
     con.del::<&str, usize>(output_queue_name).await.unwrap();
 
     Ok(())

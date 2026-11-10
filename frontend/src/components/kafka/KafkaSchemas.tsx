@@ -2,7 +2,7 @@ import { type ReactNode } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import type { AvroSchema } from "@/lib/api";
-import { SURVEYS, ZTF, type Survey } from "@/lib/utils";
+import { SURVEYS, ZTF, type Survey } from "@/lib/constants";
 import { SchemaViewer } from "@/components/SchemaViewer";
 
 const getFieldDescriptions = (survey: Survey): Record<string, ReactNode> => ({
@@ -10,7 +10,7 @@ const getFieldDescriptions = (survey: Survey): Record<string, ReactNode> => ({
     <>
       <code className="text-chart-2">True</code> if the temporal baseline (last &minus; first
       observation) &gt; 0.01&nbsp;days (~14&nbsp;min).
-      Combines <code>prv_candidates</code> and <code>fp_hists</code> (forced photometry, SNR &ge; 3).
+      Combines <code>prv_candidates</code> and <code>fp_hists</code> (forced photometry, SNR &ge; 5).
     </>
   ),
   ...survey === ZTF ? {
@@ -57,8 +57,20 @@ const getFieldDescriptions = (survey: Survey): Record<string, ReactNode> => ({
       </>
     ),
   },
+  best_host: "Most probable host galaxy.",
+  dist_mpc: "Host distance in Mpc.",
+  d_dlr: "Separation in units of the host's directional light radius.",
   photstats: "Light-curve statistics computed from the alert's (prv_candidates + fp_hists).",
   multisurvey_photstats: "Same statistics recomputed from the combined light curve when a cross-survey match exists.",
+  multisurvey_detection_history: "First detection in any linked survey and the latest non-detection before it.",
+  variability: "Per-band variability statistics on the forced photometry flux, as defined in SCOPE. Null below 3 points.",
+  n: "Forced photometry points used.",
+  chi2red: "Reduced chi-squared against a constant flux, about 1 when constant.",
+  inv_vonneumannratio: "Inverse time-weighted von Neumann ratio: high for a smooth trend, about 0.5 for random scatter.",
+  stetson_j: "Stetson J index, positive when consecutive points deviate together.",
+  stetson_k: "Stetson K index, about 0.8 for Gaussian noise.",
+  skew: "Error-normalized flux skewness, positive for brightening outliers.",
+  median_abs_dev: "Median absolute deviation of the flux, in nJy.",
   peak_jd: "Julian Date of the brightest observation (minimum magnitude) in this band.",
   peak_mag: "Magnitude at the brightest point (lower magnitude = brighter).",
   peak_mag_err: "Photometric uncertainty on the peak magnitude.",

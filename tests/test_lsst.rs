@@ -202,7 +202,7 @@ async fn test_filter_lsst_alert() {
     remove_test_filter(&filter_id, &Survey::Lsst).await.unwrap();
     assert!(result.is_ok());
 
-    let alerts_output = result.unwrap();
+    let alerts_output: Vec<_> = result.unwrap();
     assert_eq!(alerts_output.len(), 1);
     let alert = &alerts_output[0];
     assert_eq!(alert.candid, candid);
@@ -229,19 +229,11 @@ async fn test_filter_lsst_alert() {
         "cutout_science should not be empty"
     );
     assert!(
-        !alert
-            .cutout_template
-            .as_deref()
-            .unwrap_or_default()
-            .is_empty(),
+        !alert.cutout_template.is_empty(),
         "cutout_template should not be empty"
     );
     assert!(
-        !alert
-            .cutout_difference
-            .as_deref()
-            .unwrap_or_default()
-            .is_empty(),
+        !alert.cutout_difference.is_empty(),
         "cutout_difference should not be empty"
     );
 
@@ -281,7 +273,7 @@ async fn test_filter_lsst_alert_with_ztf_match() {
     remove_test_filter(&filter_id, &Survey::Lsst).await.unwrap();
     assert!(result.is_ok(), "Filter failed: {:?}", result.err());
 
-    let alerts_output = result.unwrap();
+    let alerts_output: Vec<_> = result.unwrap();
     assert_eq!(alerts_output.len(), 1);
     let alert = &alerts_output[0];
     assert_eq!(alert.candid, candid);
@@ -306,19 +298,11 @@ async fn test_filter_lsst_alert_with_ztf_match() {
         "cutout_science should not be empty"
     );
     assert!(
-        !alert
-            .cutout_template
-            .as_deref()
-            .unwrap_or_default()
-            .is_empty(),
+        !alert.cutout_template.is_empty(),
         "cutout_template should not be empty"
     );
     assert!(
-        !alert
-            .cutout_difference
-            .as_deref()
-            .unwrap_or_default()
-            .is_empty(),
+        !alert.cutout_difference.is_empty(),
         "cutout_difference should not be empty"
     );
 

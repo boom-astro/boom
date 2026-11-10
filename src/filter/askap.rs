@@ -1,14 +1,14 @@
 use mongodb::bson::{doc, Document};
 use std::collections::HashMap;
-use tracing::{info, instrument, warn};
+use tracing::{debug, info, instrument, warn};
 
 use crate::alert::AskapCandidate;
 use crate::conf::AppConfig;
 use crate::enrichment::fetch_alerts;
 use crate::filter::{
-    build_loaded_filters, run_filter, uses_field_in_filter, validate_filter_pipeline, Alert,
-    Filter, FilterError, FilterResults, FilterWorker, FilterWorkerError, LoadedFilter, Origin,
-    Photometry, SurveyMatches,
+    build_loaded_filters, record_filter_result, run_filter, uses_field_in_filter,
+    validate_filter_pipeline, watchlist_projections, Alert, Filter, FilterError, FilterResults,
+    FilterWorker, FilterWorkerError, LoadedFilter, Origin, Photometry, SurveyMatches,
 };
 use crate::utils::cutouts::CutoutStorage;
 use crate::utils::db::{fetch_timeseries_op, get_array_dict_element};
@@ -157,24 +157,6 @@ pub async fn build_askap_alerts(
         .retrieve_multiple_cutouts(&candids, false)
         .await?;
 
-    if candid_to_cutouts.len() != alerts.len() {
-        let mut missing_cutouts_candids: Vec<&i64> = alerts
-            .iter()
-            .filter(|a| !candid_to_cutouts.contains_key(&a.candid))
-            .map(|a| &a.candid)
-            .collect();
-        missing_cutouts_candids.sort();
-        warn!(
-            "Only fetched cutouts for {} alerts from {} candids. Missing cutouts for candids: {:?}",
-            candid_to_cutouts.len(),
-            alerts.len(),
-            missing_cutouts_candids
-        );
-        return Err(FilterWorkerError::MissingCutoutsBatch(
-            missing_cutouts_candids.len(),
-        ));
-    }
-
     let mut alerts_output = Vec::new();
     for alert in alerts {
         let candid = alert.candid;
@@ -213,9 +195,11 @@ pub async fn build_askap_alerts(
         }
         photometry.sort_by(|a, b| a.jd.partial_cmp(&b.jd).unwrap());
 
-        let cutouts = candid_to_cutouts
-            .remove(&candid)
-            .ok_or_else(|| FilterWorkerError::MissingCutouts(candid))?;
+        let (cutout_science, cutout_template, cutout_difference) =
+            match candid_to_cutouts.remove(&candid) {
+                Some(c) => (c.cutout_science, c.cutout_template, c.cutout_difference),
+                None => (Vec::new(), Vec::new(), Vec::new()),
+            };
 
         let alert = Alert {
             candid: alert.candid,
@@ -229,14 +213,16 @@ pub async fn build_askap_alerts(
                 .unwrap_or_else(Vec::new),
             classifications,
             photometry,
-            cutout_science: cutouts.cutout_science,
-            cutout_template: cutouts.cutout_template,
-            cutout_difference: cutouts.cutout_difference,
+            cutout_science,
+            cutout_template,
+            cutout_difference,
             survey: Survey::Askap,
             survey_matches: SurveyMatches {
                 ztf: None,
                 lsst: None,
+                decam: None,
             },
+            host_galaxy: None,
         };
 
         alerts_output.push(alert);
@@ -255,6 +241,7 @@ pub async fn build_askap_filter_pipeline(
     let use_prv_candidates_index = uses_field_in_filter(filter_pipeline, "prv_candidates");
     let use_fp_hists_index = uses_field_in_filter(filter_pipeline, "fp_hists");
     let use_cross_matches_index = uses_field_in_filter(filter_pipeline, "cross_matches");
+    let use_host_galaxy_index = uses_field_in_filter(filter_pipeline, "host_galaxy");
     let use_aliases_index = uses_field_in_filter(filter_pipeline, "aliases");
 
     let mut aux_add_fields = doc! {
@@ -279,6 +266,12 @@ pub async fn build_askap_filter_pipeline(
             get_array_dict_element("aux.cross_matches"),
         );
     }
+    if use_host_galaxy_index.is_some() {
+        aux_add_fields.insert(
+            "host_galaxy".to_string(),
+            get_array_dict_element("aux.host_galaxy"),
+        );
+    }
     if use_aliases_index.is_some() {
         aux_add_fields.insert("aliases".to_string(), get_array_dict_element("aux.aliases"));
     }
@@ -286,6 +279,7 @@ pub async fn build_askap_filter_pipeline(
     let insert_aux_pipeline = use_prv_candidates_index.is_some()
         || use_fp_hists_index.is_some()
         || use_cross_matches_index.is_some()
+        || use_host_galaxy_index.is_some()
         || use_aliases_index.is_some();
 
     let mut insert_aux_index = usize::MAX;
@@ -296,6 +290,9 @@ pub async fn build_askap_filter_pipeline(
         insert_aux_index = insert_aux_index.min(index);
     }
     if let Some(index) = use_cross_matches_index {
+        insert_aux_index = insert_aux_index.min(index);
+    }
+    if let Some(index) = use_host_galaxy_index {
         insert_aux_index = insert_aux_index.min(index);
     }
     if let Some(index) = use_aliases_index {
@@ -359,6 +356,7 @@ pub struct AskapFilterWorker {
     output_topic: String,
     filter_ids: Option<Vec<String>>,
     filters: Vec<LoadedFilter>,
+    watchlist_projections: HashMap<String, Document>,
 }
 
 #[async_trait::async_trait]
@@ -377,7 +375,14 @@ impl FilterWorker for AskapFilterWorker {
         let input_queue = "ASKAP_alerts_filter_queue".to_string();
         let output_topic = "ASKAP_alerts_results".to_string();
 
-        let filters = build_loaded_filters(&filter_ids, &Survey::Askap, &filter_collection).await?;
+        let watchlist_projections = watchlist_projections(&config, &Survey::Askap);
+        let filters = build_loaded_filters(
+            &filter_ids,
+            &Survey::Askap,
+            &filter_collection,
+            &watchlist_projections,
+        )
+        .await?;
 
         Ok(AskapFilterWorker {
             alert_pipeline: create_askap_filter_alert_pipeline(),
@@ -388,13 +393,19 @@ impl FilterWorker for AskapFilterWorker {
             output_topic,
             filter_ids,
             filters,
+            watchlist_projections,
         })
     }
 
     async fn refresh_filters(&mut self) -> Result<(), FilterWorkerError> {
         info!("refreshing ASKAP filters from database");
-        self.filters =
-            build_loaded_filters(&self.filter_ids, &Survey::Askap, &self.filter_collection).await?;
+        self.filters = build_loaded_filters(
+            &self.filter_ids,
+            &Survey::Askap,
+            &self.filter_collection,
+            &self.watchlist_projections,
+        )
+        .await?;
         info!(
             "refreshed ASKAP filters from database; now tracking {} filters",
             self.filters.len()
@@ -435,14 +446,16 @@ impl FilterWorker for AskapFilterWorker {
             )
             .await?;
 
+            record_filter_result(&Survey::Askap, filter, out_documents.len(), candids.len());
+            debug!(
+                "{}/{} ASKAP alerts passed filter {}",
+                out_documents.len(),
+                candids.len(),
+                filter.id,
+            );
+
             if out_documents.is_empty() {
                 continue;
-            } else {
-                info!(
-                    "{} alerts passed askap filter {}",
-                    out_documents.len(),
-                    filter.id,
-                );
             }
 
             let now_ts = chrono::Utc::now().timestamp_millis() as f64;

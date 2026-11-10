@@ -19,8 +19,6 @@ pub enum CutoutError {
     DecodeGzip(#[from] zune_inflate::errors::InflateDecodeErrors),
     #[error("integer parsing error")]
     ParseInt(#[from] std::num::ParseIntError),
-    #[error("missing {0} cutout")]
-    MissingCutout(&'static str),
 }
 
 fn u8_to_f32_vec(v: &[u8]) -> Vec<f32> {
@@ -153,18 +151,8 @@ pub fn prepare_triplet(
     alert_cutouts: &AlertCutout,
 ) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>), CutoutError> {
     let cutout_science = prepare_cutout(&alert_cutouts.cutout_science)?;
-    let cutout_template = prepare_cutout(
-        alert_cutouts
-            .cutout_template
-            .as_deref()
-            .ok_or(CutoutError::MissingCutout("template"))?,
-    )?;
-    let cutout_difference = prepare_cutout(
-        alert_cutouts
-            .cutout_difference
-            .as_deref()
-            .ok_or(CutoutError::MissingCutout("difference"))?,
-    )?;
+    let cutout_template = prepare_cutout(&alert_cutouts.cutout_template)?;
+    let cutout_difference = prepare_cutout(&alert_cutouts.cutout_difference)?;
 
     Ok((cutout_science, cutout_template, cutout_difference))
 }
