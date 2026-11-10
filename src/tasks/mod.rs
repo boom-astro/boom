@@ -182,6 +182,8 @@ pub struct TaskSpec {
     pub idempotent: bool,
     /// Whether it can destroy data, and so needs the client to confirm.
     pub destructive: bool,
+    /// Small enough to run beside a heavy task: no GPU, no scan of an alert collection.
+    pub light: bool,
     /// JSON Schema for this task's parameters, for a client to render a form
     /// from.
     ///
@@ -259,6 +261,7 @@ pub const TASKS: &[TaskSpec] = &[
         idempotent: true,
         // Only with drop_existing, which the client has to ask for explicitly.
         destructive: true,
+        light: false,
         params_schema: || schema_of::<catalog_ingest::CatalogIngestParams>(),
     },
     TaskSpec {
@@ -270,6 +273,7 @@ pub const TASKS: &[TaskSpec] = &[
                       up the tracks still missing them.",
         idempotent: true,
         destructive: false,
+        light: false,
         params_schema: || schema_of::<backfill_track_elements::BackfillTrackElementsParams>(),
     },
     TaskSpec {
@@ -280,6 +284,7 @@ pub const TASKS: &[TaskSpec] = &[
         // Unordered inserts skipping duplicates, so re-running resumes.
         idempotent: true,
         destructive: false,
+        light: false,
         params_schema: || schema_of::<stream_kowalski_alerts::StreamKowalskiParams>(),
     },
     TaskSpec {
@@ -291,6 +296,7 @@ pub const TASKS: &[TaskSpec] = &[
         // Keyed on candid; duplicates are counted rather than fatal.
         idempotent: true,
         destructive: false,
+        light: false,
         params_schema: || schema_of::<copy_cutouts::CopyCutoutsParams>(),
     },
     TaskSpec {
@@ -301,6 +307,7 @@ pub const TASKS: &[TaskSpec] = &[
         // Upserts keyed on designation, refit from the same detections.
         idempotent: true,
         destructive: false,
+        light: false,
         params_schema: || schema_of::<sso_baselines::SsoBaselinesParams>(),
     },
     TaskSpec {
@@ -311,6 +318,7 @@ pub const TASKS: &[TaskSpec] = &[
         // Staged and swapped atomically, so a rerun replaces wholesale.
         idempotent: true,
         destructive: false,
+        light: true,
         params_schema: || schema_of::<mpcorb_ingest::MpcorbIngestParams>(),
     },
     TaskSpec {
@@ -321,6 +329,7 @@ pub const TASKS: &[TaskSpec] = &[
                       period; drop removes the epochs once done.",
         idempotent: true,
         destructive: false,
+        light: true,
         params_schema: || schema_of::<propagate_orbits::PropagateOrbitsParams>(),
     },
     TaskSpec {
@@ -332,6 +341,7 @@ pub const TASKS: &[TaskSpec] = &[
         // Scores are recomputed from the stored alert, so re-running converges.
         idempotent: true,
         destructive: false,
+        light: false,
         params_schema: || schema_of::<enrich_reprocess::EnrichReprocessParams>(),
     },
     TaskSpec {
@@ -344,6 +354,7 @@ pub const TASKS: &[TaskSpec] = &[
         // and index creation is a no-op when it already exists.
         idempotent: true,
         destructive: false,
+        light: false,
         params_schema: || schema_of::<prepare_catalog::PrepareCatalogParams>(),
     },
     TaskSpec {
@@ -355,6 +366,7 @@ pub const TASKS: &[TaskSpec] = &[
         // Re-running overwrites the same files from the same collection.
         idempotent: true,
         destructive: false,
+        light: false,
         params_schema: || schema_of::<export_catalog::ExportCatalogParams>(),
     },
     TaskSpec {
@@ -370,6 +382,7 @@ pub const TASKS: &[TaskSpec] = &[
         // It can merge two stored tracks into one, which cannot be undone by
         // running it again.
         destructive: true,
+        light: false,
         params_schema: || schema_of::<link_tracks::LinkTracksParams>(),
     },
     TaskSpec {
@@ -385,6 +398,7 @@ pub const TASKS: &[TaskSpec] = &[
         // second pass writes the same values.
         idempotent: true,
         destructive: false,
+        light: false,
         params_schema: || schema_of::<backfill_detection_span::BackfillDetectionSpanParams>(),
     },
     TaskSpec {
@@ -398,6 +412,7 @@ pub const TASKS: &[TaskSpec] = &[
         // resumed run rewrites the same values.
         idempotent: true,
         destructive: false,
+        light: false,
         params_schema: || schema_of::<backfill_host_galaxy::BackfillHostGalaxyParams>(),
     },
     TaskSpec {
@@ -410,6 +425,7 @@ pub const TASKS: &[TaskSpec] = &[
         // a pure function of the stored position.
         idempotent: true,
         destructive: false,
+        light: false,
         params_schema: || schema_of::<backfill_hpx::BackfillHpxParams>(),
     },
     TaskSpec {
@@ -423,6 +439,7 @@ pub const TASKS: &[TaskSpec] = &[
         idempotent: true,
         // It deletes photometry points, and does not keep a copy.
         destructive: true,
+        light: false,
         params_schema: || schema_of::<repair_photometry::RepairPhotometryParams>(),
     },
     TaskSpec {
@@ -435,6 +452,7 @@ pub const TASKS: &[TaskSpec] = &[
         // stands; watchlists use $addToSet, which is idempotent by construction.
         idempotent: true,
         destructive: false,
+        light: false,
         params_schema: || schema_of::<reprocess_crossmatch::ReprocessCrossmatchParams>(),
     },
     TaskSpec {
@@ -445,6 +463,7 @@ pub const TASKS: &[TaskSpec] = &[
         // Derived from stored photometry, never from a previous run's output.
         idempotent: true,
         destructive: false,
+        light: false,
         params_schema: || schema_of::<migrate_snr::MigrateSnrParams>(),
     },
     TaskSpec {
@@ -458,6 +477,7 @@ pub const TASKS: &[TaskSpec] = &[
         // It overwrites derived values, but the inputs it derives from are
         // untouched, so nothing is lost that cannot be recomputed.
         destructive: false,
+        light: false,
         params_schema: || schema_of::<migrate_fp_flux::MigrateFpFluxParams>(),
     },
     TaskSpec {
@@ -469,6 +489,7 @@ pub const TASKS: &[TaskSpec] = &[
                       Scheduled when TNS bot credentials are set.",
         idempotent: true,
         destructive: false,
+        light: true,
         params_schema: || schema_of::<tns_sync::TnsSyncParams>(),
     },
     TaskSpec {
@@ -479,6 +500,7 @@ pub const TASKS: &[TaskSpec] = &[
                       TNS_photometry. Scheduled when TNS bot credentials are set.",
         idempotent: true,
         destructive: false,
+        light: true,
         params_schema: || schema_of::<tns_photometry::TnsPhotometryParams>(),
     },
 ];
@@ -495,6 +517,15 @@ pub fn find(id: &str) -> Option<&'static TaskSpec> {
 /// even describe is exactly the case to be conservative about.
 pub fn is_retryable(task_type: &str) -> bool {
     find(task_type).is_some_and(|spec| spec.idempotent)
+}
+
+/// An unknown type is heavy, so it never runs beside one.
+pub fn is_light(task_type: &str) -> bool {
+    find(task_type).is_some_and(|spec| spec.light)
+}
+
+pub fn light_task_types() -> Vec<&'static str> {
+    TASKS.iter().filter(|t| t.light).map(|t| t.id).collect()
 }
 
 /// Task types safe to requeue after a lost lease.
