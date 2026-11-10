@@ -16,7 +16,7 @@ pub trait FromAsciiRow: Sized {
 }
 
 /// Open a text file, transparently decompressing `.gz`.
-fn open_lines(path: &Path) -> Result<Box<dyn BufRead>, std::io::Error> {
+fn open_lines(path: &Path) -> Result<Box<dyn BufRead + Send>, std::io::Error> {
     let file = File::open(path)?;
     if path.extension().is_some_and(|e| e == "gz") {
         Ok(Box::new(BufReader::new(flate2::read::GzDecoder::new(file))))

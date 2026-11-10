@@ -15,9 +15,9 @@ use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 use tracing::instrument;
 
-fn open_lines(path: &Path) -> Result<Box<dyn BufRead>, std::io::Error> {
+fn open_lines(path: &Path) -> Result<Box<dyn BufRead + Send>, std::io::Error> {
     let file = File::open(path)?;
-    let reader: Box<dyn Read> = if path.extension().is_some_and(|e| e == "gz") {
+    let reader: Box<dyn Read + Send> = if path.extension().is_some_and(|e| e == "gz") {
         Box::new(flate2::read::GzDecoder::new(file))
     } else {
         Box::new(file)
