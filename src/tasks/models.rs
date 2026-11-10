@@ -127,6 +127,8 @@ pub struct Task {
     /// deploy is on its second attempt, which is normal and worth seeing.
     #[serde(default)]
     pub attempts: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint: Option<serde_json::Value>,
     /// The finished run this one repeats, when it was submitted by resubmitting.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resubmitted_from: Option<String>,

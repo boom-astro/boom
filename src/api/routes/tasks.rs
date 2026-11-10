@@ -181,6 +181,7 @@ async fn enqueue(
         cancel_requested: false,
         error: None,
         attempts: 0,
+        checkpoint: None,
         resubmitted_from,
     };
 
@@ -674,6 +675,7 @@ mod tests {
             cancel_requested: false,
             error: None,
             attempts: 0,
+            checkpoint: None,
             resubmitted_from: None,
         }
     }

@@ -96,6 +96,7 @@ pub async fn fire(db: &Database, schedule: &Schedule, fire_time: i64) -> Result<
         cancel_requested: false,
         error: None,
         attempts: 0,
+        checkpoint: None,
         resubmitted_from: None,
     };
     match queue::submit(db, &task).await {

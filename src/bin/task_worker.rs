@@ -165,9 +165,8 @@ async fn run_one(
         db.clone(),
         config.clone(),
         config_path,
-        &task.id,
-        task.actor.clone(),
-        task.trigger,
+        &task,
+        worker_name,
         canceled.clone(),
     );
     ctx.info(format!(

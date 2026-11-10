@@ -107,6 +107,21 @@ pub async fn report_progress(
     Ok(())
 }
 
+pub async fn save_checkpoint(
+    db: &Database,
+    task_id: &str,
+    worker: &str,
+    checkpoint: &serde_json::Value,
+) -> Result<(), QueueError> {
+    collection(db)
+        .update_one(
+            doc! { "_id": task_id, "worker": worker, "status": TaskStatus::Running.as_str() },
+            doc! { "$set": { "checkpoint": to_bson(checkpoint)? } },
+        )
+        .await?;
+    Ok(())
+}
+
 /// Mark a run finished without an ownership guard.
 ///
 /// Only test setup may manufacture terminal runs this way. Production workers
@@ -442,6 +457,7 @@ mod tests {
             cancel_requested: false,
             error: None,
             attempts: 0,
+            checkpoint: None,
             resubmitted_from: None,
         }
     }

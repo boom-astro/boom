@@ -6,7 +6,7 @@
 
 use super::ledger::{self, MutationRecord};
 use super::logs::LogSink;
-use super::models::{Actor, Trigger};
+use super::models::{Actor, Task, Trigger};
 use super::queue;
 use crate::conf::AppConfig;
 use mongodb::Database;
@@ -37,6 +37,8 @@ pub struct TaskContext {
     /// the worker is shutting down. Checked by tasks at their own safe points.
     canceled: Arc<AtomicBool>,
     logs: LogSink,
+    worker: String,
+    checkpoint: Option<serde_json::Value>,
 }
 
 impl TaskContext {
@@ -44,21 +46,21 @@ impl TaskContext {
         db: Database,
         config: Arc<AppConfig>,
         config_path: impl Into<String>,
-        task_id: impl Into<String>,
-        actor: Actor,
-        trigger: Trigger,
+        task: &Task,
+        worker: impl Into<String>,
         canceled: Arc<AtomicBool>,
     ) -> Self {
-        let task_id = task_id.into();
         Self {
-            logs: LogSink::new(db.clone(), &task_id),
+            logs: LogSink::new(db.clone(), &task.id),
             db,
             config,
             config_path: config_path.into(),
-            task_id,
-            actor,
-            trigger,
+            task_id: task.id.clone(),
+            actor: task.actor.clone(),
+            trigger: task.trigger,
             canceled,
+            worker: worker.into(),
+            checkpoint: task.checkpoint.clone(),
         }
     }
 
@@ -78,6 +80,8 @@ impl TaskContext {
             trigger: Trigger::Api,
             canceled: Arc::new(AtomicBool::new(false)),
             logs: LogSink::detached(),
+            worker: String::new(),
+            checkpoint: None,
         }
     }
 
@@ -152,6 +156,32 @@ impl TaskContext {
         if let Err(e) = queue::report_progress(&self.db, &self.task_id, done, total, &message).await
         {
             tracing::warn!("failed to record progress: {}", e);
+        }
+    }
+
+    pub fn checkpoint<T: serde::de::DeserializeOwned>(&self) -> Option<T> {
+        match serde_json::from_value(self.checkpoint.clone()?) {
+            Ok(checkpoint) => Some(checkpoint),
+            Err(e) => {
+                self.warn(format!("unreadable checkpoint, starting over: {e}"));
+                None
+            }
+        }
+    }
+
+    /// Best-effort: a lost checkpoint only makes a resumed attempt redo more.
+    pub async fn save_checkpoint<T: serde::Serialize>(&self, checkpoint: &T) {
+        if self.task_id.is_empty() {
+            return;
+        }
+        let saved = match serde_json::to_value(checkpoint) {
+            Ok(value) => queue::save_checkpoint(&self.db, &self.task_id, &self.worker, &value)
+                .await
+                .map_err(|e| e.to_string()),
+            Err(e) => Err(e.to_string()),
+        };
+        if let Err(e) = saved {
+            tracing::warn!("failed to record the checkpoint: {}", e);
         }
     }
 
