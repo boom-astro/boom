@@ -18,12 +18,13 @@ use crate::utils::enums::{ProgramId, Survey};
 use crate::utils::host::{HostGalaxyAssociation, HostSummary};
 use crate::utils::lightcurves::{
     analyze_photometry, is_stationary, prepare_photometry, signed_snr, summarise_detections,
-    ActivityMetrics, AllBandsProperties, Band, DetectionHistory, EpisodeHistory,
+    ActivityMetrics, AllBandsProperties, Band, DetectionHistory, EpisodeHistory, Morphology,
     MultisurveyDetectionHistory, Outburst, PerBandProperties, PhotometryMag, EPISODE_GAP_DAYS,
     STATIONARY_MIN_FORCED_SNR, ZTF_ZP,
 };
+use crate::utils::linking::{angular_separation_deg, night_at};
 use crate::utils::mpcorb::{elements_from_document, normalize_ztf_ssnamenr, ORBITS_COLLECTION};
-use crate::utils::outburst::{Point, MAX_SEPARATION_ARCSEC};
+use crate::utils::outburst::{median, Point, MAX_SEPARATION_ARCSEC};
 use crate::utils::phase_curve::{curves_from_document, PhaseCurve, BASELINES_COLLECTION};
 use crate::utils::sso_geometry::{geometry_at, OrbitalElements, ZTF};
 use crate::utils::variability::PerBandVariability;
@@ -438,6 +439,112 @@ fn outburst_for(
         .unwrap_or_default();
     let curve = baselines.get(designation).and_then(|b| b.get(&test.band));
     Outburst::from_history(&history, test, candidate.jd, curve)
+}
+
+const MAX_SHAPE_SEPARATION_ARCSEC: f64 = 5.0;
+const EXTENDED_SEERATIO: f64 = 0.75;
+const MAX_TRAIL_ARCSEC: f64 = 1.0;
+const MIN_MOTION_SPAN_DAYS: f64 = 1.0 / 1440.0;
+const DEFAULT_EXPTIME_SECONDS: f64 = 30.0;
+const ARCSEC_PER_SECOND_AT_ONE_DEG_PER_DAY: f64 = 3600.0 / 86400.0;
+
+#[derive(Debug, Clone, Copy)]
+struct Shape {
+    jd: f64,
+    ra: f64,
+    dec: f64,
+    seeratio: f64,
+    classtar: Option<f64>,
+    exptime: f64,
+}
+
+#[derive(Default)]
+struct SsoHistory {
+    points: HashMap<String, Vec<(f64, Point)>>,
+    shapes: HashMap<String, Vec<Shape>>,
+}
+
+fn history_shape(doc: &Document) -> Option<(String, Shape)> {
+    let candidate = doc.get_document("candidate").ok()?;
+    let number = |key: &str| candidate.get(key).and_then(crate::utils::bson_number);
+    if number("ssdistnr")? > MAX_SHAPE_SEPARATION_ARCSEC {
+        return None;
+    }
+    Some((
+        candidate.get_str("ssnamenr").ok()?.to_string(),
+        Shape {
+            jd: number("jd")?,
+            ra: number("ra")?,
+            dec: number("dec")?,
+            seeratio: number("seeratio")?,
+            classtar: number("classtar"),
+            exptime: number("exptime").unwrap_or(DEFAULT_EXPTIME_SECONDS),
+        },
+    ))
+}
+
+fn judge_night(shapes: &[Shape]) -> Option<(f64, Option<f64>)> {
+    let first = shapes.iter().min_by(|a, b| a.jd.total_cmp(&b.jd))?;
+    let last = shapes.iter().max_by(|a, b| a.jd.total_cmp(&b.jd))?;
+    let span = last.jd - first.jd;
+    if shapes.len() < 2 || span < MIN_MOTION_SPAN_DAYS {
+        return None;
+    }
+    let rate = angular_separation_deg(first.ra, first.dec, last.ra, last.dec) / span;
+    let exptime = shapes.iter().map(|s| s.exptime).fold(0.0, f64::max);
+    if rate * exptime * ARCSEC_PER_SECOND_AT_ONE_DEG_PER_DAY > MAX_TRAIL_ARCSEC {
+        return None;
+    }
+    let seeratios: Vec<f64> = shapes.iter().map(|s| s.seeratio).collect();
+    let classtars: Vec<f64> = shapes.iter().filter_map(|s| s.classtar).collect();
+    Some((median(&seeratios)?, median(&classtars)))
+}
+
+fn morphology_for(
+    sso: &ZtfSsoAssociation,
+    candidate: &Candidate,
+    shapes: &HashMap<String, Vec<Shape>>,
+) -> Option<Morphology> {
+    let separation = sso.separation_arcsec? as f64;
+    if separation > MAX_SHAPE_SEPARATION_ARCSEC {
+        return None;
+    }
+    let own = Shape {
+        jd: candidate.jd,
+        ra: candidate.ra,
+        dec: candidate.dec,
+        seeratio: candidate.seeratio? as f64,
+        classtar: candidate.classtar.map(f64::from),
+        exptime: candidate.exptime.map_or(DEFAULT_EXPTIME_SECONDS, f64::from),
+    };
+    let earlier = shapes
+        .get(sso.designation.as_deref()?)
+        .into_iter()
+        .flatten()
+        .filter(|s| s.jd < own.jd && s.jd >= own.jd - HISTORY_WINDOW_DAYS);
+    let mut nights: HashMap<i64, Vec<Shape>> = HashMap::new();
+    for shape in earlier.copied().chain(std::iter::once(own)) {
+        nights
+            .entry(night_at(shape.jd, Some(&ZTF)))
+            .or_default()
+            .push(shape);
+    }
+    let own_night = night_at(own.jd, Some(&ZTF));
+    let mut morphology = Morphology::default();
+    for (night, shapes) in &nights {
+        let Some((seeratio, classtar)) = judge_night(shapes) else {
+            continue;
+        };
+        morphology.nights += 1;
+        if seeratio < EXTENDED_SEERATIO {
+            morphology.extended_nights += 1;
+        }
+        if *night == own_night {
+            morphology.seeratio = Some(seeratio as f32);
+            morphology.classtar = classtar.map(|c| c as f32);
+        }
+    }
+    (morphology.nights > 0).then_some(morphology)
 }
 
 /// Solar system object association for a single ZTF detection.
@@ -1253,10 +1360,7 @@ impl ZtfEnrichmentWorker {
     /// cannot place one whose distances are unknown.
     ///
     /// A failure is not fatal, matching `fetch_orbits`.
-    async fn fetch_sso_history(
-        &self,
-        alerts: &[ZtfAlertForEnrichment],
-    ) -> HashMap<String, Vec<(f64, Point)>> {
+    async fn fetch_sso_history(&self, alerts: &[ZtfAlertForEnrichment]) -> SsoHistory {
         let names: Vec<&str> = alerts
             .iter()
             .filter_map(|a| a.candidate.candidate.ssnamenr.as_deref())
@@ -1265,7 +1369,7 @@ impl ZtfEnrichmentWorker {
             .collect();
 
         if names.is_empty() {
-            return HashMap::new();
+            return SsoHistory::default();
         }
 
         let earliest = alerts
@@ -1287,6 +1391,11 @@ impl ZtfEnrichmentWorker {
             "candidate.magpsf": 1,
             "candidate.sigmapsf": 1,
             "candidate.ssdistnr": 1,
+            "candidate.ra": 1,
+            "candidate.dec": 1,
+            "candidate.seeratio": 1,
+            "candidate.classtar": 1,
+            "candidate.exptime": 1,
             "properties.sso.helio_dist": 1,
             "properties.sso.topo_dist": 1,
             "properties.sso.phase_angle": 1,
@@ -1301,25 +1410,27 @@ impl ZtfEnrichmentWorker {
             Ok(cursor) => cursor,
             Err(e) => {
                 warn!("failed to query solar system history: {}", e);
-                return HashMap::new();
+                return SsoHistory::default();
             }
         };
         let docs: Vec<Document> = match cursor.try_collect().await {
             Ok(docs) => docs,
             Err(e) => {
                 warn!("failed to read solar system history: {}", e);
-                return HashMap::new();
+                return SsoHistory::default();
             }
         };
 
-        let mut history: HashMap<String, Vec<(f64, Point)>> = HashMap::new();
+        let mut history = SsoHistory::default();
         for doc in &docs {
-            let Some((name, jd, point)) = history_point(doc) else {
-                continue;
-            };
-            history.entry(name).or_default().push((jd, point));
+            if let Some((name, jd, point)) = history_point(doc) {
+                history.points.entry(name).or_default().push((jd, point));
+            }
+            if let Some((name, shape)) = history_shape(doc) {
+                history.shapes.entry(name).or_default().push(shape);
+            }
         }
-        for points in history.values_mut() {
+        for points in history.points.values_mut() {
             points.sort_by(|a, b| a.0.total_cmp(&b.0));
         }
         history
@@ -1329,7 +1440,7 @@ impl ZtfEnrichmentWorker {
         &self,
         alert: &ZtfAlertForEnrichment,
         orbits: &HashMap<String, OrbitalElements>,
-        sso_history: &HashMap<String, Vec<(f64, Point)>>,
+        sso_history: &SsoHistory,
         baselines: &HashMap<String, HashMap<u8, PhaseCurve>>,
     ) -> Result<
         (
@@ -1363,7 +1474,8 @@ impl ZtfEnrichmentWorker {
         .with_geometry(elements, candidate.jd);
 
         let activity = ActivityMetrics {
-            outburst: outburst_for(&sso, candidate, sso_history, baselines),
+            outburst: outburst_for(&sso, candidate, &sso_history.points, baselines),
+            morphology: morphology_for(&sso, candidate, &sso_history.shapes),
             ..activity
         };
 
