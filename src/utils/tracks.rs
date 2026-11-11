@@ -895,12 +895,12 @@ pub async fn commit_upsert(
     db: &mongodb::Database,
     plan: UpsertPlan,
 ) -> Result<Upserted, mongodb::error::Error> {
+    let rms_ratio = plan.rms_ratio();
     let id = match plan.id {
         Some(id) => id,
         None => format_id(next_sequence(db).await?),
     };
     let expected_rms_arcsec = expected_rms_arcsec(&plan.members);
-    let rms_ratio = plan.rms_ratio();
     let flags = track_flags(&plan.members, &plan.epochs, rms_ratio, plan.mag_spread);
     let (member_surveys, members): (Vec<Survey>, Vec<i64>) = plan.members.into_iter().unzip();
     let stored = StoredTrack {
