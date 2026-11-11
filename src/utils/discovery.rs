@@ -28,7 +28,7 @@ use crate::utils::tracks::{
     acquire_lock, alerts_by_survey, commit_upsert, detection_id, member_of, plan_upsert,
     release_lock, renew_lock, stamp_members, stamp_missing, summarise, survey_site, BoundFit,
     Member, StoredOrbit, StoredTrack, UpsertPlan, LOCK_LEASE, LOCK_RENEW_EVERY,
-    SHARED_FOR_IDENTITY, TRACKS_COLLECTION,
+    MAX_TWO_NIGHT_RMS_RATIO, SHARED_FOR_IDENTITY, TRACKS_COLLECTION,
 };
 use futures::StreamExt;
 use mongodb::bson::{doc, Document};
@@ -1354,6 +1354,14 @@ async fn persist(
                 plan.n_nights,
                 plan.contested.len(),
                 plan.dropped.len()
+            );
+            continue;
+        }
+        let rms_ratio = plan.rms_ratio().unwrap_or(0.0);
+        if plan.n_nights == 2 && kind != Some(FAST_KIND) && rms_ratio > MAX_TWO_NIGHT_RMS_RATIO {
+            info!(
+                "dropping a track over two nights: its orbit misses its detections by {:.1} times their astrometric precision",
+                rms_ratio
             );
             continue;
         }

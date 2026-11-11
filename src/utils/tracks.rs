@@ -384,6 +384,8 @@ pub const PHOTOMETRY: &str = "photometry";
 /// Flag for a track bridging a long gap without the residual to back it.
 pub const LONG_GAP: &str = "long_gap";
 
+pub const MAX_TWO_NIGHT_RMS_RATIO: f64 = 3.0;
+
 /// Above a rotating elongated asteroid or the calibration offset between two
 /// surveys, under the 3 mag the linker rejects at. A comet in outburst can still
 /// get here, which is why it only flags.
@@ -667,6 +669,12 @@ impl UpsertPlan {
         self.n_detections as usize >= min_detections && self.n_nights as usize >= min_nights
     }
 
+    pub fn rms_ratio(&self) -> Option<f64> {
+        self.bound_fit_residual_arcsec
+            .zip(expected_rms_arcsec(&self.members))
+            .map(|(rms, expected)| rms / expected)
+    }
+
     pub fn with_kind(mut self, kind: &str) -> Self {
         if self.kind.as_deref() != Some(kind) {
             self.kind = Some(kind.to_string());
@@ -892,10 +900,7 @@ pub async fn commit_upsert(
         None => format_id(next_sequence(db).await?),
     };
     let expected_rms_arcsec = expected_rms_arcsec(&plan.members);
-    let rms_ratio = plan
-        .bound_fit_residual_arcsec
-        .zip(expected_rms_arcsec)
-        .map(|(rms, expected)| rms / expected);
+    let rms_ratio = plan.rms_ratio();
     let flags = track_flags(&plan.members, &plan.epochs, rms_ratio, plan.mag_spread);
     let (member_surveys, members): (Vec<Survey>, Vec<i64>) = plan.members.into_iter().unzip();
     let stored = StoredTrack {
