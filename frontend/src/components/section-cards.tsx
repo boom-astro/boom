@@ -2,6 +2,7 @@
 import Header from "@/components/Header";
 import Aladin from "@/components/Aladin";
 import CrossmatchCard from "@/components/CrossmatchCard";
+import HostCard from "@/components/HostCard";
 import CentroidPlot from "@/components/CentroidPlot";
 import Lightcurve from "./Lightcurve";
 import ClassifierDisplay from "./ClassificationsV2";
@@ -31,6 +32,7 @@ export function SectionCards({data}: {data: ApiObject | null}) {
       <HyraxClassification />
       <Aladin alert={data} />
       <CrossmatchCard />
+      <HostCard data={data} />
       <CentroidPlot />
       {/* <ClassificationsHistory alert={data} /> */}
     </div>
