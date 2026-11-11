@@ -10,6 +10,7 @@ use crate::enrichment::models::{
 };
 use crate::enrichment::{LsstAlertProperties, ZtfAlertClassifications, ZtfAlertProperties};
 use crate::utils::enums::Survey;
+use crate::utils::host::{HostGalaxyAssociation, StoredHostCandidate};
 use crate::utils::spatial::Coordinates;
 use crate::utils::tns::{photometry_for_matches, TnsPhotometry};
 use actix_web::{get, post, web, HttpResponse};
@@ -53,6 +54,39 @@ struct ZtfSurveyMatches {
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
+struct ObjHost {
+    name: Option<String>,
+    catalog: Option<String>,
+    z: Option<f64>,
+    z_err: Option<f64>,
+    dist_mpc: Option<f64>,
+    dist_mpc_method: Option<String>,
+    sep_arcsec: f64,
+    sep_kpc: Option<f64>,
+    d_dlr: f64,
+}
+
+impl From<&StoredHostCandidate> for ObjHost {
+    fn from(host: &StoredHostCandidate) -> Self {
+        Self {
+            name: host.objname.clone(),
+            catalog: host.catalog.clone(),
+            z: host.z,
+            z_err: host.z_err,
+            dist_mpc: host.dist_mpc,
+            dist_mpc_method: host.dist_mpc_method.clone(),
+            sep_arcsec: host.sep_arcsec,
+            sep_kpc: host.sep_kpc,
+            d_dlr: host.d_dlr,
+        }
+    }
+}
+
+fn best_host_of(host_galaxy: Option<&HostGalaxyAssociation>) -> Option<ObjHost> {
+    host_galaxy?.best_host.as_ref().map(ObjHost::from)
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
 struct ZtfObj {
     candid: i64,
     #[serde(rename = "objectId")]
@@ -65,6 +99,7 @@ struct ZtfObj {
     classifications: Option<ZtfAlertClassifications>,
     classifications_history: Vec<ZtfAlertClassifications>,
     cross_matches: serde_json::Value,
+    best_host: Option<ObjHost>,
     survey_matches: ZtfSurveyMatches,
     tns_photometry: Option<TnsPhotometry>,
 }
@@ -96,6 +131,7 @@ struct LsstObj {
     prv_candidates: Vec<LsstPrvCandidate>,
     fp_hists: Vec<LsstForcedPhot>,
     cross_matches: serde_json::Value,
+    best_host: Option<ObjHost>,
     survey_matches: LsstSurveyMatches,
     tns_photometry: Option<TnsPhotometry>,
 }
@@ -295,6 +331,7 @@ pub async fn get_object(
                 classifications: newest_alert.classifications,
                 classifications_history,
                 cross_matches: serde_json::json!(aux_entry.cross_matches),
+                best_host: best_host_of(aux_entry.host_galaxy.as_ref()),
                 survey_matches,
                 tns_photometry,
             };
@@ -426,6 +463,7 @@ pub async fn get_object(
                 prv_candidates: aux_entry.prv_candidates,
                 fp_hists: aux_entry.fp_hists,
                 cross_matches: serde_json::json!(aux_entry.cross_matches),
+                best_host: best_host_of(aux_entry.host_galaxy.as_ref()),
                 survey_matches,
                 tns_photometry,
             };
