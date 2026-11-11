@@ -385,6 +385,7 @@ pub const PHOTOMETRY: &str = "photometry";
 pub const LONG_GAP: &str = "long_gap";
 
 pub const MAX_TWO_NIGHT_RMS_RATIO: f64 = 3.0;
+pub const MAX_TWO_NIGHT_MAG_SPREAD: f64 = 1.0;
 
 /// Above a rotating elongated asteroid or the calibration offset between two
 /// surveys, under the 3 mag the linker rejects at. A comet in outburst can still
