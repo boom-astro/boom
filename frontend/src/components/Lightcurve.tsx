@@ -2,6 +2,8 @@ import React, { useMemo, useRef, useState, useEffect } from 'react';
 import { Card, CardContent } from './ui/card';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Maximize2, Info } from 'lucide-react';
+import { fetchVillarFit, VillarFit } from '@/lib/api';
+import { villarCurves, VillarCurve } from '@/lib/villar';
 
 // Band colors matching other plots
 const BAND_COLORS: Record<string, string> = {
@@ -21,8 +23,22 @@ function toColor(band?: string) {
 
 type Detection = { jd?: number; magpsf?: number | undefined; sigmapsf?: number | undefined; diffmaglim?: number; band?: string; source?: 'candidate' | 'fphist' | 'survey_match' | 'main', snr_psf?: number | undefined, snr?: number | undefined, objectId?: string | null };
 
+type TnsPoint = {
+    jd?: number;
+    mag?: number | null;
+    mag_err?: number | null;
+    lim_mag?: number | null;
+    filter?: string | null;
+    instrument?: string | null;
+    survey?: string | null;
+    reporting_group?: string | null;
+};
+
+type TnsSeriesPoint = { t: number; mag: number; sigma: number; band: string; origin: string };
+
 type LightcurveData = {
     objectId?: string | null;
+    tns_photometry?: { name?: string; photometry?: TnsPoint[] } | null;
     prv_candidates?: Detection[];
     fp_hists?: Detection[];
     prv_nondetections?: Detection[];
@@ -38,7 +54,16 @@ function jd2mjd(jd: number) {
     return jd - 2400000.5;
 }
 
-function LightcurveInternal({ data, setExpandedDialogOpen, setHelpDialogOpen, height }: { data: LightcurveData, setExpandedDialogOpen?: (open: boolean) => void | null, setHelpDialogOpen: (open: boolean) => void, height?: string }) {
+function tnsBand(filter?: string | null) {
+    return (filter ?? '').split('-')[0].trim().toLowerCase() || 'unknown';
+}
+
+function tnsOrigin(name: string | undefined, p: TnsPoint) {
+    const by = [p.survey ?? p.reporting_group, p.instrument].filter(Boolean).join(' ');
+    return `TNS ${name ?? ''}${by ? ` (${by})` : ''}`;
+}
+
+function LightcurveInternal({ data, fitCurves, setExpandedDialogOpen, setHelpDialogOpen, height }: { data: LightcurveData, fitCurves: VillarCurve[], setExpandedDialogOpen?: (open: boolean) => void | null, setHelpDialogOpen: (open: boolean) => void, height?: string }) {
     const candidates: Detection[] = data?.prv_candidates ?? [];
     const fpHists: Detection[] = data?.fp_hists ?? [];
     const nondets: Detection[] = data?.prv_nondetections ?? [];
@@ -46,6 +71,27 @@ function LightcurveInternal({ data, setExpandedDialogOpen, setHelpDialogOpen, he
     const [includeSurveyMatches, setIncludeSurveyMatches] = useState(true);
     const [includeForcedPhot, setIncludeForcedPhot] = useState(true);
     const [includeUpperLimits, setIncludeUpperLimits] = useState(true);
+    const [includeFit, setIncludeFit] = useState(true);
+    const [includeTns, setIncludeTns] = useState(true);
+
+    const tnsPoints = useMemo(() => data?.tns_photometry?.photometry ?? [], [data?.tns_photometry]);
+    const { tnsDetections, tnsLimits } = useMemo(() => {
+        const name = data?.tns_photometry?.name;
+        const detected: TnsSeriesPoint[] = [];
+        const limits: TnsSeriesPoint[] = [];
+        if (!includeTns) return { tnsDetections: detected, tnsLimits: limits };
+        for (const p of tnsPoints) {
+            const t = p.jd != null ? jd2mjd(Number(p.jd)) : NaN;
+            if (!Number.isFinite(t)) continue;
+            const point = { t, band: tnsBand(p.filter), origin: tnsOrigin(name, p), sigma: Number(p.mag_err ?? NaN) };
+            if (p.mag != null && Number.isFinite(p.mag)) {
+                detected.push({ ...point, mag: Number(p.mag) });
+            } else if (p.lim_mag != null && Number.isFinite(p.lim_mag)) {
+                limits.push({ ...point, mag: Number(p.lim_mag) });
+            }
+        }
+        return { tnsDetections: detected, tnsLimits: limits };
+    }, [tnsPoints, includeTns, data?.tns_photometry?.name]);
 
     const nondetsFromFpHists = useMemo(() => {
         if (!includeForcedPhot) return [];
@@ -174,15 +220,20 @@ function LightcurveInternal({ data, setExpandedDialogOpen, setHelpDialogOpen, he
         const set = new Set<string>();
         detections.forEach(d => set.add(String(d.band).toLowerCase()));
         nondetectionsSeries.forEach(d => set.add(String(d.band).toLowerCase()));
+        tnsDetections.forEach(d => set.add(d.band));
+        tnsLimits.forEach(d => set.add(d.band));
         return Array.from(set).filter(Boolean);
-    }, [detections, nondetectionsSeries]);
+    }, [detections, nondetectionsSeries, tnsDetections, tnsLimits]);
 
     // Domains
-    const visibleNondets = includeUpperLimits ? nondetectionsSeries : [];
-    const allTimes = [...detections.map(d => d.t), ...visibleNondets.map(d => d.t)];
+    const visibleNondets = includeUpperLimits ? [...nondetectionsSeries, ...tnsLimits] : [];
+    const finiteSigma = (sigma: number) => (Number.isFinite(sigma) ? sigma : 0);
+    const allTimes = [...detections.map(d => d.t), ...tnsDetections.map(d => d.t), ...visibleNondets.map(d => d.t)];
     const allMags = [
         ...detections.map(d => d.mag - d.sigma),
         ...detections.map(d => d.mag + d.sigma),
+        ...tnsDetections.map(d => d.mag - finiteSigma(d.sigma)),
+        ...tnsDetections.map(d => d.mag + finiteSigma(d.sigma)),
         ...visibleNondets.map(d => d.mag)
     ];
     const tMin = Math.min(...(allTimes.length ? allTimes : [0]));
@@ -262,6 +313,20 @@ function LightcurveInternal({ data, setExpandedDialogOpen, setHelpDialogOpen, he
     const pixelToX = (px: number) => domain.x0 + ((px - pad.left) / plotW) * (domain.x1 - domain.x0);
     const pixelToY = (py: number) => domain.y0 + ((py - pad.top) / plotH) * (domain.y1 - domain.y0);
 
+    const fitPath = (curve: VillarCurve) => {
+        let d = '';
+        let penDown = false;
+        for (const pt of curve.points) {
+            if (!Number.isFinite(pt.mag)) {
+                penDown = false;
+                continue;
+            }
+            d += `${penDown ? 'L' : 'M'}${xToPixel(jd2mjd(pt.jd)).toFixed(1)},${yToPixel(pt.mag).toFixed(1)}`;
+            penDown = true;
+        }
+        return d;
+    };
+
     // ticks
     const xTicks = useMemo(() => {
         const n = Math.min(8, Math.max(3, Math.ceil(plotW / 120)));
@@ -295,7 +360,12 @@ function LightcurveInternal({ data, setExpandedDialogOpen, setHelpDialogOpen, he
     }, [domain]);
 
     // interaction: tooltip, drag-zoom
-    const [tooltip, setTooltip] = useState<{ visible: boolean; x: number; y: number; mag?: number; t?: number; band?: string; sigma?: number; nondet?: boolean, snr?: number, objectId?: string | null }>(() => ({ visible: false, x: 0, y: 0}));
+    const [tooltip, setTooltip] = useState<{ visible: boolean; x: number; y: number; mag?: number; t?: number; band?: string; sigma?: number; nondet?: boolean, snr?: number, objectId?: string | null, origin?: string }>(() => ({ visible: false, x: 0, y: 0}));
+
+    const showTooltip = (e: React.MouseEvent<SVGElement>, content: Omit<typeof tooltip, 'visible' | 'x' | 'y'>) => {
+        const rect = containerRef.current?.getBoundingClientRect();
+        setTooltip({ visible: true, x: rect ? e.clientX - rect.left : e.clientX, y: rect ? e.clientY - rect.top : e.clientY, ...content });
+    };
 
     const dragging = useRef(false);
     const dragStart = useRef<{ x: number; y: number } | null>(null);
@@ -482,6 +552,28 @@ function LightcurveInternal({ data, setExpandedDialogOpen, setHelpDialogOpen, he
                         />
                         <span className="text-gray-600 dark:text-gray-300">Upperlimits</span>
                     </label>
+                    {tnsPoints.length > 0 && (
+                        <label className="flex items-center gap-2 text-xs cursor-pointer select-none px-2 py-1 rounded hover:bg-gray-100 dark:hover:bg-slate-700">
+                            <input
+                                type="checkbox"
+                                checked={includeTns}
+                                onChange={(e) => setIncludeTns(e.target.checked)}
+                                className="w-4 h-4"
+                            />
+                            <span className="text-gray-600 dark:text-gray-300">TNS</span>
+                        </label>
+                    )}
+                    {fitCurves.length > 0 && (
+                        <label className="flex items-center gap-2 text-xs cursor-pointer select-none px-2 py-1 rounded hover:bg-gray-100 dark:hover:bg-slate-700">
+                            <input
+                                type="checkbox"
+                                checked={includeFit}
+                                onChange={(e) => setIncludeFit(e.target.checked)}
+                                className="w-4 h-4"
+                            />
+                            <span className="text-gray-600 dark:text-gray-300">Fit</span>
+                        </label>
+                    )}
                     {setExpandedDialogOpen && (
                         <button onClick={() => setExpandedDialogOpen(true)} title="Expand" className="p-1 rounded hover:bg-slate-100">
                             <Maximize2 className="w-4 h-4 text-gray-600" />
@@ -551,6 +643,16 @@ function LightcurveInternal({ data, setExpandedDialogOpen, setHelpDialogOpen, he
                         ) : null;
                     })}
                 </g>
+
+                {includeFit && (
+                    <g clipPath="url(#plot-area)" style={{ pointerEvents: 'none' }}>
+                        {fitCurves.map(curve => {
+                            const { bandKey, isHidden, color } = getBandState(curve.band);
+                            if (isHidden) return null;
+                            return <path key={`fit-${bandKey}`} d={fitPath(curve)} fill="none" stroke={color} strokeWidth={1.5} style={{ opacity: 0.7 }} />;
+                        })}
+                    </g>
+                )}
 
                 {/* transparent overlay to capture drag events - rendered early so interactive elements are on top */}
                 <rect
@@ -678,6 +780,67 @@ function LightcurveInternal({ data, setExpandedDialogOpen, setHelpDialogOpen, he
                 })}
                 </g>
 
+                <g clipPath="url(#plot-area)">
+                {tnsDetections.map((pt, i) => {
+                    const { bandKey, isHidden, color } = getBandState(pt.band);
+                    if (isHidden) return null;
+                    const px = xToPixel(pt.t);
+                    const py = yToPixel(pt.mag);
+                    const size = 6;
+                    const hasSigma = Number.isFinite(pt.sigma) && pt.sigma > 0;
+                    return (
+                        <g key={`tns-d-${i}-${bandKey}`}>
+                            {hasSigma && (
+                                <line x1={px} x2={px} y1={yToPixel(pt.mag - pt.sigma)} y2={yToPixel(pt.mag + pt.sigma)} stroke={color} strokeWidth={1} style={{ opacity: 0.7, pointerEvents: 'none' }} />
+                            )}
+                            <polygon
+                                points={`${px},${py - size} ${px + size},${py} ${px},${py + size} ${px - size},${py}`}
+                                fill="none"
+                                stroke={color}
+                                strokeWidth={1.5}
+                                style={{ pointerEvents: 'none' }}
+                            />
+                            <circle
+                                cx={px}
+                                cy={py}
+                                r={8}
+                                fill="transparent"
+                                style={{ pointerEvents: 'auto', cursor: 'pointer' }}
+                                onMouseEnter={(e) => showTooltip(e, { mag: pt.mag, t: pt.t, band: pt.band, sigma: pt.sigma, nondet: false, origin: pt.origin })}
+                                onMouseLeave={() => setTooltip({ visible: false, x: 0, y: 0 })}
+                            />
+                        </g>
+                    );
+                })}
+                {includeUpperLimits && tnsLimits.map((pt, i) => {
+                    const { bandKey, isHidden, color } = getBandState(pt.band);
+                    if (isHidden) return null;
+                    const px = xToPixel(pt.t);
+                    const py = yToPixel(pt.mag);
+                    const size = 5;
+                    return (
+                        <g key={`tns-nd-${i}-${bandKey}`}>
+                            <polygon
+                                points={`${px - size},${py - size} ${px + size},${py - size} ${px},${py + size * 0.5}`}
+                                fill="none"
+                                stroke={color}
+                                strokeWidth={1.5}
+                                style={{ pointerEvents: 'none' }}
+                            />
+                            <circle
+                                cx={px}
+                                cy={py}
+                                r={8}
+                                fill="transparent"
+                                style={{ pointerEvents: 'auto', cursor: 'pointer' }}
+                                onMouseEnter={(e) => showTooltip(e, { mag: pt.mag, t: pt.t, band: pt.band, nondet: true, origin: pt.origin })}
+                                onMouseLeave={() => setTooltip({ visible: false, x: 0, y: 0 })}
+                            />
+                        </g>
+                    );
+                })}
+                </g>
+
                 {/* selection rect */}
                 {selection && (
                     <rect x={pad.left + selection.x} y={pad.top + selection.y} width={selection.w} height={selection.h} fill="#3b82f6" opacity={0.12} stroke="#3b82f6" strokeDasharray="4 2" />
@@ -695,7 +858,7 @@ function LightcurveInternal({ data, setExpandedDialogOpen, setHelpDialogOpen, he
                         {!tooltip.nondet && (
                             <>
                                 <div>Mag: {tooltip.mag?.toFixed(3)} {tooltip.sigma !== undefined && Number.isFinite(tooltip.sigma) && tooltip.sigma > 0 ? `± ${tooltip.sigma?.toFixed(3)}` : ''}</div>
-                                <div>SNR: {tooltip.snr !== undefined && !isNaN(tooltip.snr) ? tooltip.snr.toFixed(2) : 'N/A'}</div>
+                                {!tooltip.origin && <div>SNR: {tooltip.snr !== undefined && !isNaN(tooltip.snr) ? tooltip.snr.toFixed(2) : 'N/A'}</div>}
                             </>
                         )}
                         <div>Lim mag: {tooltip.mag?.toFixed(3)}</div>
@@ -703,6 +866,9 @@ function LightcurveInternal({ data, setExpandedDialogOpen, setHelpDialogOpen, he
                             <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
                                 Object ID: {tooltip.objectId}
                             </div>
+                        )}
+                        {tooltip.origin && (
+                            <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">{tooltip.origin}</div>
                         )}
                     </div>
                 </div>
@@ -715,14 +881,28 @@ function LightcurveInternal({ data, setExpandedDialogOpen, setHelpDialogOpen, he
 export default function Lightcurve({ data }: { data: LightcurveData }) {
     const [dialogOpen, setDialogOpen] = useState(false);
     const [helpDialogOpen, setHelpDialogOpen] = useState(false);
+    const [villarFit, setVillarFit] = useState<VillarFit | null>(null);
+    const objectId = data?.objectId;
+
+    useEffect(() => {
+        setVillarFit(null);
+        if (!objectId?.startsWith('ZTF')) return;
+        let active = true;
+        fetchVillarFit('ztf', objectId)
+            .then(fit => { if (active) setVillarFit(fit); })
+            .catch(err => console.warn('Lightcurve: unable to fetch the Villar fit', err));
+        return () => { active = false; };
+    }, [objectId]);
+
+    const fitCurves = useMemo(() => (villarFit ? villarCurves(villarFit) : []), [villarFit]);
 
     return (
         <Card className="@container/card col-span-1 @xl/main:col-span-2">
             <CardContent>
-                <LightcurveInternal data={data} setExpandedDialogOpen={setDialogOpen} setHelpDialogOpen={setHelpDialogOpen} />
+                <LightcurveInternal data={data} fitCurves={fitCurves} setExpandedDialogOpen={setDialogOpen} setHelpDialogOpen={setHelpDialogOpen} />
                 <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
                     <DialogContent className="w-[min(1400px,95vw)] max-w-none sm:!max-w-none h-[90vh] flex flex-col">
-                        <LightcurveInternal data={data} setHelpDialogOpen={setHelpDialogOpen} height='100%'/>
+                        <LightcurveInternal data={data} fitCurves={fitCurves} setHelpDialogOpen={setHelpDialogOpen} height='100%'/>
                     </DialogContent>
                 </Dialog>
 
@@ -761,6 +941,14 @@ export default function Lightcurve({ data }: { data: LightcurveData }) {
                                     <div className="flex items-start gap-2">
                                         <span className="font-medium">Triangles (larger):</span>
                                         <span>Non-detections from other surveys.</span>
+                                    </div>
+                                    <div className="flex items-start gap-2">
+                                        <span className="font-medium">Hollow diamonds and triangles:</span>
+                                        <span>Detections and non-detections reported to TNS (when "TNS" is enabled).</span>
+                                    </div>
+                                    <div className="flex items-start gap-2">
+                                        <span className="font-medium">Lines:</span>
+                                        <span>Villar et al. (2019) model fitted to the ZTF g and r photometry (when "Fit" is enabled).</span>
                                     </div>
                                 </div>
                             </div>

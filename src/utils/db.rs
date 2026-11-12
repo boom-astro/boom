@@ -14,6 +14,16 @@ use crate::utils::enums::Survey;
 #[error("failed to create index")]
 pub struct CreateIndexError(#[from] mongodb::error::Error);
 
+pub fn is_duplicate_key(error: &mongodb::error::Error) -> bool {
+    match &*error.kind {
+        mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(e)) => {
+            e.code == 11000
+        }
+        mongodb::error::ErrorKind::Command(e) => e.code == 11000,
+        _ => false,
+    }
+}
+
 pub async fn create_index(
     collection: &Collection<Document>,
     index: Document,
@@ -164,6 +174,19 @@ pub async fn initialize_survey_indexes(
     };
     create_index(&alerts_collection, index, false).await?;
 
+    // Started, not awaited: hours on an archive that predates the field, and a
+    // missing index only costs the drift query its answer, never correctness.
+    // See docs/alert-processing.md.
+    if crate::enrichment::version::stamps_enrichment_set(&survey.to_string()) {
+        let collection = alerts_collection.clone();
+        tokio::spawn(async move {
+            match create_index(&collection, doc! { "enrichment_set": 1 }, false).await {
+                Ok(()) => info!("enrichment_set index ready"),
+                Err(error) => error!(%error, "enrichment_set index failed to build"),
+            }
+        });
+    }
+
     // ZTF joins a moving object's detections by MPC designation, since objectId is
     // positional. Indexes the raw field, which is present on the whole archive.
     if survey == &Survey::Ztf {
@@ -183,7 +206,12 @@ pub async fn initialize_survey_indexes(
             db.collection(crate::utils::tracks::TRACKS_COLLECTION);
         create_index(&tracks_collection, doc! { "members": 1 }, false).await?;
         // A client polling for new and extended tracks asks by write time.
-        create_index(&tracks_collection, doc! { "updated_at": 1 }, false).await?;
+        create_index(
+            &tracks_collection,
+            doc! { "updated_at": 1, "_id": 1 },
+            false,
+        )
+        .await?;
         create_index(&tracks_collection, doc! { "last_jd": 1 }, false).await?;
         let aliases_collection: Collection<Document> =
             db.collection(crate::utils::tracks::ALIASES_COLLECTION);

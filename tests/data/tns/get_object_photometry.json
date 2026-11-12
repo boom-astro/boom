@@ -1,0 +1,126 @@
+{
+  "id_code": 200,
+  "id_message": "OK",
+  "data": {
+    "objname": "2026bna",
+    "name_prefix": "AT",
+    "objid": 182301,
+    "photometry": [
+      {
+        "obsdate": "2026-01-24 17:58:00.768",
+        "jd": 2461065.24862,
+        "flux": 19.41,
+        "fluxerr": 0.08,
+        "limflux": "",
+        "exptime": "30",
+        "observer": "Robot",
+        "remarks": "",
+        "instrument": {
+          "id": 196,
+          "name": "ZTF-Cam"
+        },
+        "telescope": {
+          "id": 132,
+          "name": "P48"
+        },
+        "source_group": {
+          "id": 48,
+          "name": "ZTF"
+        },
+        "filters": {
+          "id": 111,
+          "name": "r"
+        },
+        "flux_unit": {
+          "id": 1,
+          "name": "ABMag"
+        }
+      },
+      {
+        "obsdate": "2026-01-22 06:59:50",
+        "jd": 2461062.7915509,
+        "flux": "",
+        "fluxerr": "",
+        "limflux": 20.12,
+        "exptime": "30",
+        "observer": "Robot",
+        "remarks": "Last non detection",
+        "instrument": {
+          "id": 196,
+          "name": "ZTF-Cam"
+        },
+        "telescope": {
+          "id": 132,
+          "name": "P48"
+        },
+        "source_group": {
+          "id": 48,
+          "name": "ZTF"
+        },
+        "filters": {
+          "id": 111,
+          "name": "r"
+        },
+        "flux_unit": {
+          "id": 1,
+          "name": "ABMag"
+        }
+      },
+      {
+        "obsdate": "2026-01-25 05:12:00",
+        "jd": "2461065.7166667",
+        "flux": "12.5",
+        "fluxerr": "0.4",
+        "limflux": "",
+        "flux_unit": {
+          "id": 8,
+          "name": "mJy"
+        },
+        "filters": {
+          "id": 1,
+          "name": "Clear"
+        },
+        "instrument": {
+          "id": 2,
+          "name": "Other"
+        },
+        "telescope": {
+          "id": 3,
+          "name": "Other"
+        },
+        "reporting_group": {
+          "group_id": 5,
+          "group_name": "Amateur"
+        }
+      },
+      {
+        "obsdate": "2026-01-25 07:00:00",
+        "jd": 2461065.7916667,
+        "flux": 18.9,
+        "fluxerr": 0.1,
+        "limflux": "",
+        "public": "0",
+        "instrument": {
+          "id": 196,
+          "name": "ZTF-Cam"
+        },
+        "telescope": {
+          "id": 132,
+          "name": "P48"
+        },
+        "source_group": {
+          "id": 48,
+          "name": "ZTF"
+        },
+        "filters": {
+          "id": 111,
+          "name": "r"
+        },
+        "flux_unit": {
+          "id": 1,
+          "name": "ABMag"
+        }
+      }
+    ]
+  }
+}

@@ -1,3 +1,4 @@
+use crate::utils::enums::Survey;
 use crate::utils::outburst::{
     outburst_statistic, same_band_statistic, window_scatter, Point, DEFAULT_G12,
 };
@@ -38,7 +39,7 @@ pub fn diffmaglim2fluxerr(diffmaglim: f32, zp: f32) -> f32 {
 }
 
 #[apache_avro_macros::serdavro]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, Eq, Hash, ToSchema)]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, Eq, Hash, PartialOrd, Ord, ToSchema)]
 pub enum Band {
     #[serde(rename = "g")]
     G,
@@ -98,9 +99,9 @@ pub const EPISODE_GAP_DAYS: f64 = 30.0;
 
 /// Both light-curve summaries from a single pass over the detections.
 ///
-/// `forced` carries the JD of each forced epoch that reached the detection
-/// threshold; the caller applies that test, since only it knows how its survey
-/// records one.
+/// `forced` carries the JD and signed SNR of each forced epoch that reached the
+/// detection threshold; the caller applies that test, since only it knows how its
+/// survey records one.
 ///
 /// The two are derived from the same points and are always wanted together, so
 /// iterating once keeps the enrichment worker from walking a long light curve
@@ -113,7 +114,7 @@ pub fn summarise_detections<I, F>(
 ) -> (DetectionHistory, EpisodeHistory)
 where
     I: IntoIterator<Item = (f64, Option<bool>)>,
-    F: IntoIterator<Item = f64>,
+    F: IntoIterator<Item = (f64, Option<f64>)>,
 {
     let cutoff = ref_jd - 30.0;
     let mut detections = DetectionHistory::default();
@@ -121,12 +122,15 @@ where
 
     // Forced epochs widen the activity span and are counted, but are kept out
     // of the counts and episodes below, which filters already read.
-    for jd in forced {
+    for (jd, snr) in forced {
         if jd > ref_jd {
             continue;
         }
         detections.n_forced_detections += 1;
         detections.span(jd);
+        if snr.is_some_and(|s| s >= STATIONARY_MIN_FORCED_SNR) {
+            detections.first_forced_jd = Some(detections.first_forced_jd.map_or(jd, |j| j.min(jd)));
+        }
     }
 
     for (jd, is_negative) in points {
@@ -155,10 +159,21 @@ where
         }
     }
 
+    detections.first_pos_jd = positives.iter().copied().reduce(f64::min);
+    let mut nights: Vec<i64> = positives.iter().map(|jd| night_of(*jd)).collect();
+    nights.sort_unstable();
+    nights.dedup();
+    detections.n_nights = nights.len() as i32;
+
     (
         detections,
         EpisodeHistory::from_positive_epochs(positives, gap_days),
     )
+}
+
+/// Nights split at 18:00 UTC, daytime at Palomar and in Chile.
+fn night_of(jd: f64) -> i64 {
+    (jd - 0.25).floor() as i64
 }
 
 /// Detection episodes in an object's light curve, for finding sources that
@@ -298,6 +313,29 @@ pub struct BandRateProperties {
 /// value matters far less than having a bound at all.
 pub const RECENT_WINDOW_DAYS: f64 = 30.0;
 
+pub const LAST_DAY_WINDOW_DAYS: f64 = 1.0;
+
+/// The stored SNR is unsigned; the flux carries the sign.
+pub fn signed_snr(snr: Option<f64>, flux: Option<f64>) -> Option<f64> {
+    snr.map(|s| if flux.is_some_and(|f| f < 0.0) { -s } else { s })
+}
+
+fn window_properties(mags: &[&PhotometryMag], last_jd: f64, days: f64) -> Option<RecentProperties> {
+    let cutoff = last_jd - days;
+    let window: Vec<&PhotometryMag> = mags.iter().copied().filter(|m| m.time >= cutoff).collect();
+    brightest_index(&window).map(|peak| {
+        let (rising, fading) = fit_rising_and_fading(&window);
+        RecentProperties {
+            window_days: days as f32,
+            nb_data: window.len() as i32,
+            peak_jd: window[peak].time,
+            peak_mag: window[peak].mag,
+            rising,
+            fading,
+        }
+    })
+}
+
 /// Fit one monotonic segment, returning `None` when it cannot support a line.
 ///
 /// Rejects a segment whose spread sits inside its own error bars: a fit through
@@ -394,6 +432,11 @@ pub struct BandProperties {
     /// The same fits restricted to the last [`RECENT_WINDOW_DAYS`], or null when
     /// the window holds no detection in this band.
     pub recent: Option<RecentProperties>,
+    /// Like `recent`, over the last [`LAST_DAY_WINDOW_DAYS`].
+    #[serde(default)]
+    pub last_day: Option<RecentProperties>,
+    #[serde(default)]
+    pub nb_data: i32,
 }
 
 /// Morphological indicators of cometary activity, computed per survey but expressed
@@ -425,6 +468,7 @@ pub struct ActivityMetrics {
     /// Photometric outburst statistic for a moving object, `None` for anything
     /// else and for a mover with no usable earlier detection of its own.
     pub outburst: Option<Outburst>,
+    pub morphology: Option<Morphology>,
 }
 
 /// How much brighter a moving object is than its own recent history, in sigma.
@@ -570,6 +614,25 @@ pub struct OutburstPoint {
     pub sigma: f32,
 }
 
+/// Nights judged on untrailed detection medians; `seeratio`/`classtar` are the alert's night.
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    serde::Deserialize,
+    serde::Serialize,
+    AvroSchema,
+    utoipa::ToSchema,
+)]
+#[serde(default)]
+pub struct Morphology {
+    pub nights: i32,
+    pub extended_nights: i32,
+    pub seeratio: Option<f32>,
+    pub classtar: Option<f32>,
+}
+
 impl ActivityMetrics {
     /// ZTF: aperture and PSF magnitudes directly. Brighter aperture => positive.
     pub fn from_magnitudes(magpsf: Option<f32>, magap: Option<f32>) -> Self {
@@ -607,6 +670,7 @@ impl ActivityMetrics {
         ActivityMetrics {
             aperture_excess: aperture_excess.filter(|e| e.is_finite()),
             outburst: None,
+            morphology: None,
         }
     }
 }
@@ -646,6 +710,18 @@ pub struct DetectionHistory {
     pub last_detection_jd: Option<f64>,
     /// Forced epochs that reached the threshold, alongside `ndethist`.
     pub n_forced_detections: i32,
+    /// JD of the first positive alert-level detection.
+    pub first_pos_jd: Option<f64>,
+    /// JD of the first positive forced epoch at or above [`STATIONARY_MIN_FORCED_SNR`].
+    pub first_forced_jd: Option<f64>,
+    /// Distinct nights with a positive alert-level detection.
+    pub n_nights: i32,
+    /// Latest non-detection up to the alert epoch.
+    pub last_nondet_jd: Option<f64>,
+    pub last_nondet_maglim: Option<f32>,
+    /// Latest non-detection before `first_pos_jd`.
+    pub prediscovery_nondet_jd: Option<f64>,
+    pub prediscovery_nondet_maglim: Option<f32>,
 }
 
 impl DetectionHistory {
@@ -653,6 +729,26 @@ impl DetectionHistory {
     fn span(&mut self, jd: f64) {
         self.first_activity_jd = Some(self.first_activity_jd.map_or(jd, |j| j.min(jd)));
         self.last_detection_jd = Some(self.last_detection_jd.map_or(jd, |j| j.max(jd)));
+    }
+
+    pub fn add_nondetections<I>(&mut self, nondetections: I, ref_jd: f64)
+    where
+        I: IntoIterator<Item = (f64, f32)>,
+    {
+        for (jd, maglim) in nondetections {
+            if jd > ref_jd || !maglim.is_finite() {
+                continue;
+            }
+            if self.last_nondet_jd.is_none_or(|j| jd > j) {
+                self.last_nondet_jd = Some(jd);
+                self.last_nondet_maglim = Some(maglim);
+            }
+            let before_first = self.first_pos_jd.is_some_and(|first| jd < first);
+            if before_first && self.prediscovery_nondet_jd.is_none_or(|j| jd > j) {
+                self.prediscovery_nondet_jd = Some(jd);
+                self.prediscovery_nondet_maglim = Some(maglim);
+            }
+        }
     }
 
     /// Summarise detection history from `(jd, is_negative)` points, with windows
@@ -663,34 +759,57 @@ impl DetectionHistory {
     where
         I: IntoIterator<Item = (f64, Option<bool>)>,
     {
-        let cutoff = ref_jd - 30.0;
-        let mut h = DetectionHistory::default();
-        for (jd, is_negative) in points {
-            if jd > ref_jd {
-                continue;
-            }
-            let is_negative = match is_negative {
-                Some(v) => v,
-                None => continue,
-            };
-            h.span(jd);
-            h.n_det += 1;
-            let recent = jd >= cutoff;
-            if is_negative {
-                h.n_neg += 1;
-                if recent {
-                    h.n_neg_30d += 1;
-                }
-                h.first_neg_jd = Some(h.first_neg_jd.map_or(jd, |j| j.min(jd)));
-                h.last_neg_jd = Some(h.last_neg_jd.map_or(jd, |j| j.max(jd)));
-            } else {
-                h.n_pos += 1;
-                if recent {
-                    h.n_pos_30d += 1;
-                }
+        summarise_detections(
+            points,
+            std::iter::empty::<(f64, Option<f64>)>(),
+            ref_jd,
+            EPISODE_GAP_DAYS,
+        )
+        .0
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize, AvroSchema, ToSchema)]
+#[serde(default)]
+pub struct MultisurveyDetectionHistory {
+    pub first_pos_jd: Option<f64>,
+    pub first_pos_survey: Option<Survey>,
+    pub first_pos_band: Option<Band>,
+    pub prediscovery_nondet_jd: Option<f64>,
+    pub prediscovery_nondet_maglim: Option<f32>,
+    pub prediscovery_nondet_survey: Option<Survey>,
+    pub prediscovery_nondet_band: Option<Band>,
+}
+
+impl MultisurveyDetectionHistory {
+    pub fn from_points<'a, D, N>(detections: D, nondetections: N, ref_jd: f64) -> Self
+    where
+        D: IntoIterator<Item = (f64, Survey, &'a Band)>,
+        N: IntoIterator<Item = (f64, f32, Survey, &'a Band)>,
+    {
+        let mut history = MultisurveyDetectionHistory::default();
+        for (jd, survey, band) in detections {
+            if jd <= ref_jd && history.first_pos_jd.is_none_or(|first| jd < first) {
+                history.first_pos_jd = Some(jd);
+                history.first_pos_survey = Some(survey);
+                history.first_pos_band = Some(band.clone());
             }
         }
-        h
+        let Some(first) = history.first_pos_jd else {
+            return history;
+        };
+        for (jd, maglim, survey, band) in nondetections {
+            if jd < first
+                && maglim.is_finite()
+                && history.prediscovery_nondet_jd.is_none_or(|j| jd > j)
+            {
+                history.prediscovery_nondet_jd = Some(jd);
+                history.prediscovery_nondet_maglim = Some(maglim);
+                history.prediscovery_nondet_survey = Some(survey);
+                history.prediscovery_nondet_band = Some(band.clone());
+            }
+        }
+        history
     }
 }
 
@@ -818,10 +937,13 @@ fn weighted_least_squares_centered(
 
 /// Prepares photometry data by sorting and removing duplicates
 pub fn prepare_photometry(photometry: &mut Vec<PhotometryMag>) {
-    // sort by time
-    photometry.sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap());
-
-    // remove duplicates (same time and band)
+    photometry.sort_by(|a, b| {
+        a.time
+            .partial_cmp(&b.time)
+            .unwrap()
+            .then_with(|| a.band.cmp(&b.band))
+            .then_with(|| a.mag_err.total_cmp(&b.mag_err))
+    });
     photometry.dedup_by(|a, b| a.time == b.time && a.band == b.band);
 }
 
@@ -969,20 +1091,8 @@ pub fn analyze_photometry(
 
         // Anchored to the object's newest detection in any band, so every band
         // covers the same interval and a colour comparison stays meaningful.
-        let cutoff = last_jd - RECENT_WINDOW_DAYS;
-        let window: Vec<&PhotometryMag> =
-            mags.iter().copied().filter(|m| m.time >= cutoff).collect();
-        let recent = brightest_index(&window).map(|peak| {
-            let (rising, fading) = fit_rising_and_fading(&window);
-            RecentProperties {
-                window_days: RECENT_WINDOW_DAYS as f32,
-                nb_data: window.len() as i32,
-                peak_jd: window[peak].time,
-                peak_mag: window[peak].mag,
-                rising,
-                fading,
-            }
-        });
+        let recent = window_properties(mags, last_jd, RECENT_WINDOW_DAYS);
+        let last_day = window_properties(mags, last_jd, LAST_DAY_WINDOW_DAYS);
 
         let band_properties = BandProperties {
             peak_jd,
@@ -992,6 +1102,8 @@ pub fn analyze_photometry(
             rising: rising_properties,
             fading: fading_properties,
             recent,
+            last_day,
+            nb_data: mags.len() as i32,
         };
         match band {
             Band::G => {
@@ -1071,7 +1183,7 @@ mod tests {
     fn test_forced_epochs_predate_the_first_alert_detection() {
         use super::summarise_detections;
         let alerts = vec![(2500.0, Some(false))];
-        let forced = vec![2486.45, 2494.37];
+        let forced = vec![(2486.45, Some(6.0)), (2494.37, Some(-6.0))];
         let (d, _) = summarise_detections(alerts, forced, REF, EPISODE_GAP_DAYS);
 
         assert_eq!(d.first_activity_jd, Some(2486.45));
@@ -1087,7 +1199,12 @@ mod tests {
     fn test_span_falls_back_to_the_alert_detections() {
         use super::summarise_detections;
         let alerts = vec![(2500.0, Some(false)), (2400.0, Some(true))];
-        let (d, _) = summarise_detections(alerts, std::iter::empty(), REF, EPISODE_GAP_DAYS);
+        let (d, _) = summarise_detections(
+            alerts,
+            std::iter::empty::<(f64, Option<f64>)>(),
+            REF,
+            EPISODE_GAP_DAYS,
+        );
 
         assert_eq!(d.first_activity_jd, Some(2400.0));
         assert_eq!(d.last_detection_jd, Some(2500.0));
@@ -1100,11 +1217,38 @@ mod tests {
     fn test_forced_epochs_after_the_alert_epoch_are_ignored() {
         use super::summarise_detections;
         let alerts = vec![(2900.0, Some(false))];
-        let forced = vec![REF + 50.0];
+        let forced = vec![(REF + 50.0, Some(6.0))];
         let (d, _) = summarise_detections(alerts, forced, REF, EPISODE_GAP_DAYS);
 
         assert_eq!(d.n_forced_detections, 0);
         assert_eq!(d.last_detection_jd, Some(2900.0));
+    }
+
+    #[test]
+    fn test_prediscovery_limit_precedes_the_first_detection_in_any_survey() {
+        use super::{Band, MultisurveyDetectionHistory};
+        use crate::utils::enums::Survey;
+        let (g, r, i) = (Band::G, Band::R, Band::I);
+        let detections = vec![
+            (2500.0, Survey::Ztf, &r),
+            (2498.0, Survey::Lsst, &g),
+            (REF + 1.0, Survey::Decam, &i),
+        ];
+        let nondetections = vec![
+            (2495.0, 20.5, Survey::Ztf, &r),
+            (2497.0, 24.0, Survey::Decam, &i),
+            (2497.5, f32::NAN, Survey::Lsst, &g),
+            (2499.0, 20.8, Survey::Ztf, &r),
+        ];
+        let h = MultisurveyDetectionHistory::from_points(detections, nondetections, REF);
+
+        assert_eq!(h.first_pos_jd, Some(2498.0));
+        assert_eq!(h.first_pos_survey, Some(Survey::Lsst));
+        assert_eq!(h.first_pos_band, Some(Band::G));
+        assert_eq!(h.prediscovery_nondet_jd, Some(2497.0));
+        assert_eq!(h.prediscovery_nondet_maglim, Some(24.0));
+        assert_eq!(h.prediscovery_nondet_survey, Some(Survey::Decam));
+        assert_eq!(h.prediscovery_nondet_band, Some(Band::I));
     }
 
     /// The sign says which way the object is going, which is what a filter
@@ -1159,8 +1303,12 @@ mod tests {
             (REF + 10.0, Some(false)),
             (300.0, None),
         ];
-        let (detections, episodes) =
-            summarise_detections(points.clone(), std::iter::empty(), REF, EPISODE_GAP_DAYS);
+        let (detections, episodes) = summarise_detections(
+            points.clone(),
+            std::iter::empty::<(f64, Option<f64>)>(),
+            REF,
+            EPISODE_GAP_DAYS,
+        );
         assert_eq!(
             detections,
             DetectionHistory::from_points(points.clone(), REF)
@@ -1412,17 +1560,18 @@ mod tests {
                 mag: 20.0,
                 mag_err: 0.1,
                 band: Band::R,
-            }, // earlier point that should be sorted up
+            }, // less precise duplicate that should be removed
             PhotometryMag {
                 time: 2459000.5,
-                mag: 20.0,
-                mag_err: 0.1,
+                mag: 19.9,
+                mag_err: 0.02,
                 band: Band::R,
-            }, // duplicate that should be removed
+            }, // earlier point that should be sorted up
         ];
         prepare_photometry(&mut photometry);
         assert_eq!(photometry.len(), 2);
         assert_eq!(photometry[0].time, 2459000.5);
+        assert_eq!(photometry[0].mag_err, 0.02);
         assert_eq!(photometry[1].time, 2459001.5);
     }
 
@@ -2328,6 +2477,8 @@ mod recent_avro_tests {
                     rising: band.clone(),
                     fading: None,
                     recent,
+                    last_day: None,
+                    nb_data: 3,
                 }),
                 ..Default::default()
             };
@@ -2373,6 +2524,8 @@ mod rate_avro_tests {
                     rising: Some(band.clone()),
                     fading: Some(band),
                     recent: None,
+                    last_day: None,
+                    nb_data: 3,
                 }),
                 ..Default::default()
             };
@@ -2538,9 +2691,16 @@ mod outburst_tests {
                 }),
             ),
         ] {
+            let morphology = outburst.as_ref().map(|_| Morphology {
+                nights: 2,
+                extended_nights: 1,
+                seeratio: Some(0.7),
+                classtar: None,
+            });
             let metrics = ActivityMetrics {
                 aperture_excess: Some(0.1),
                 outburst,
+                morphology,
             };
             let mut writer = Writer::new(&schema, Vec::new());
             writer

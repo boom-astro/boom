@@ -13,6 +13,7 @@ import { Switch } from "@/components/ui/switch.tsx";
 import { Label } from "@/components/ui/label.tsx";
 import KafkaAlertCounts from "@/components/kafka/KafkaAlertCounts.tsx";
 import { toast } from "sonner";
+import { useAppStore } from "@/lib/store";
 
 const SURVEY_ORDER = ["ztf", "lsst", "decam", "winter"] as const;
 
@@ -34,7 +35,7 @@ const chartConfig = {
 
 const FIRST_NIGHT = "2018-01-01";
 
-// The API refuses to recount a longer range in one refresh.
+// The API refuses to recount a longer range in one refresh, except for admins.
 const MAX_REFRESH_MONTHS = 6;
 
 const OBSERVATORIES: Record<Survey, string> = {
@@ -217,6 +218,7 @@ export default function Dashboard() {
   const chartRef = useRef<HTMLDivElement>(null);
   const [chartWidth, setChartWidth] = useState(0);
   const [now, setNow] = useState(Date.now);
+  const isAdmin = useAppStore((s) => s.profile?.is_admin === true);
 
   useEffect(() => {
     setLoading(true);
@@ -330,9 +332,10 @@ export default function Dashboard() {
 
   async function refreshCaches() {
     setRefreshing(true);
-    const from = monthsBefore(endDate, MAX_REFRESH_MONTHS);
+    const from = isAdmin ? startDate : monthsBefore(endDate, MAX_REFRESH_MONTHS);
     try {
-      await api.refreshStats(startDate > from ? startDate : from, endDate);
+      const only = surveys.size === 1 ? [...surveys][0] : undefined;
+      await api.refreshStats(startDate > from ? startDate : from, endDate, only);
       setReloadKey((k) => k + 1);
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Failed to refresh the dashboard");
@@ -395,7 +398,7 @@ export default function Dashboard() {
             </TooltipTrigger>
             <TooltipContent side="left" className="max-w-xs">
               Drop the cached stats and recount the collections, the Kafka topics, and the displayed
-              nights, up to the last {MAX_REFRESH_MONTHS} months.
+              nights{isAdmin ? "" : `, up to the last ${MAX_REFRESH_MONTHS} months`}.
             </TooltipContent>
           </Tooltip>
         )}

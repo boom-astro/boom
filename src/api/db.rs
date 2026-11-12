@@ -1,4 +1,5 @@
 // Database related functionality
+use crate::api::routes::babamul::admin::LOCK_COLLECTION;
 use crate::api::routes::babamul::oauth::{OAUTH_STATES_COLLECTION, PENDING_IDENTITIES_COLLECTION};
 use crate::api::routes::babamul::stats::STATS_COLLECTION;
 use crate::api::routes::users::User;
@@ -14,13 +15,14 @@ use mongodb::Database;
 /// `state` and the PKCE verifier of a sign-in still in flight, which is enough
 /// to finish somebody else's login, and a pending identity holds the email and
 /// provider subject of an account being created.
-pub const PROTECTED_COLLECTION_NAMES: [&str; 7] = [
+pub const PROTECTED_COLLECTION_NAMES: [&str; 8] = [
     "filters",
     "babamul_users",
     "users",
     STATS_COLLECTION,
     OAUTH_STATES_COLLECTION,
     PENDING_IDENTITIES_COLLECTION,
+    LOCK_COLLECTION,
     // Per-catalog ingest state; operational bookkeeping, not a catalog itself.
     crate::catalogs::STATE_COLLECTION,
 ];

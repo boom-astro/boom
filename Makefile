@@ -104,9 +104,10 @@ check-configs: configs
 # Local overrides: plaintext gRPC on :19530, auth disabled, `default` database.
 # The standalone Milvus has authentication disabled, so it ignores the
 # username/password entirely -- but config validation requires them to be
-# non-empty when milvus.enabled, so we pass Milvus's own default placeholders.
+# non-empty when Milvus is on, so we pass Milvus's own default placeholders.
 MILVUS_LOCAL_ENV := \
-	BOOM_MILVUS__ENABLED=true \
+	BOOM_MILVUS__READ_EMBEDDINGS=true \
+	BOOM_MILVUS__WRITE_EMBEDDINGS=true \
 	BOOM_MILVUS__HOST=localhost \
 	BOOM_MILVUS__PORT=19530 \
 	BOOM_MILVUS__TLS=false \

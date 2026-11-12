@@ -33,6 +33,10 @@ services:
     volumes:
       - ${BOOM_CUTOUTS_MONGO_VOLUME:-mongodb_cutouts}:/data/db
     restart: always
+    ulimits:
+      nofile:
+        soft: 64000
+        hard: 64000
     deploy:
       resources:
         limits:
@@ -75,6 +79,10 @@ services:
   scheduler-winter:
     <<: *mongo_cutouts_env
   scheduler-decam:
+    <<: *mongo_cutouts_env
+  task-worker:
+    <<: *mongo_cutouts_env
+  linker-ztf:
     <<: *mongo_cutouts_env
   # Dev-only single ZTF consumer, defined in docker-compose.override.yaml.
   # Gated to the dev profile so it isn't an orphan (no image/build) in prod,

@@ -150,6 +150,7 @@ still resolves to the same catalog definition.
 | `allwise` | `AllWISE` | parquet | ~1000 HEALPix partitions | Mid-infrared W1–W4 photometry and proper motions for 748 million sources, from the LSDB HATS mirror. |
 | `milliquas` | `milliquas_v8` | parquet, from FITS | 1 | Quasars and candidates with redshifts and radio/X-ray associations. |
 | `desi-dr1` | `DESI_DR1` | parquet, from FITS | 1 | Spectroscopic redshifts from the iron zcatalog, filtered to the primary spectrum per science target. |
+| `desi-dr1-dwarfs` | `DESI_DR1_dwarfs` | parquet, from FITS, **staged** | 1 | Dwarf galaxies from DESI DR1 with stellar masses, distances and half-light radii, one row per galaxy. The DESIRT compilation, which is not published: stage `desi_dr1_dwarf_catalog.fits` at `<catalog data path>/staged/desi-dr1-dwarfs/`. Not the public DR1 dwarf value-added catalog. |
 | `catwise2020` | `CatWISE2020` | parquet, from IPAC tables | ~700 files | Mid-infrared W1/W2 photometry and proper motions. |
 | `gaia-dr3` | `Gaia_DR3` | gzipped CSV | ~3400 files | Astrometry, parallaxes, proper motions and G/BP/RP photometry for 1.8 billion sources. |
 | `galex` | `GALEX` | gzipped CSV | per release | Ultraviolet FUV/NUV photometry from the All-Sky Imaging Survey. |
@@ -157,6 +158,23 @@ still resolves to the same catalog definition.
 | `panstarrs` | `PS1_DR2` | parquet | HEALPix partitions | Mean PSF magnitudes in grizy, from the HATS mirror of the DR2 otmo table. Requester-pays S3. Does not include the PS1-STRM `strm_*` columns crossmatch config projects. |
 | `lsdr9` | `LSDR9` | parquet, from FITS pairs | one per `dr9/north` sweep file | Fluxes, Tractor shapes and photo-z posteriors for the BASS+MzLS reduction, which covers the sky DR10's DECam footprint does not reach. Each chunk is one published sweep file merged with its photo-z counterpart. No i-band: DR9 predates it. |
 | `lspsc` | `LSPSC` | gzipped JSONL, **staged** | one per exported chunk | Morphological resolved/unresolved scores for 3.1×10⁹ LS DR10 sources ([Liu et al. 2025](https://arxiv.org/abs/2505.17174)). Upstream is a cone-search API, so BOOM ingests an export of its own copy — see below. |
+| `erass1-main` | `eRASS1_Main` | parquet, from FITS in a tarball | 1 | eROSITA-DE DR1 Main, 930,203 X-ray sources detected in 0.2-2.3 keV, with fluxes, band rates, extent and detection likelihood. German half of the sky only (Galactic longitude 180° to 360°). |
+| `5xmm-dr15` | `5XMM_DR15` | parquet, from FITS | 1 | XMM-Newton serendipitous source table, 818,656 unique sources, with fluxes, hardness ratios, variability and CLASSX classifications. 2 GB decompressed, so it is read memory-mapped. |
+| `2sxps` | `2SXPS` | parquet, from FITS | 1 | Swift-XRT point sources, the 146,768 of the clean subset, with count rates, hardness ratios, fluxes and variability probabilities. |
+| `4fgl-dr4` | `4FGL_DR4` | parquet, from FITS | 1 | Fermi-LAT 14-year catalog, 7,195 gamma-ray sources with 95% error ellipses, fluxes, variability and associations. |
+
+### Matching within a positional error
+
+X-ray and gamma-ray positions are much less precise than optical ones, and
+their uncertainty varies from row to row, so the four high-energy catalogs
+accept each row within its own error rather than within one fixed radius. They
+reuse the per-row radius built for galaxy sizes: `angular_size_key` names the
+error column, and `angular_size_scale` turns it into a radius (3 sigma for
+eRASS1 and 5XMM, 1.5 times the 90% radius for 2SXPS). For 4FGL the radius is
+the semi-major axis of the 95% ellipse, a circle that contains the ellipse; the
+ellipse itself (`Conf_95_SemiMajor`, `Conf_95_SemiMinor`, `Conf_95_PosAng`, in
+degrees) is projected so a filter can test containment. The 90 4FGL sources
+without an ellipse, 81 of them extended, are never matched.
 
 ### The two Legacy Survey releases
 
@@ -192,8 +210,9 @@ nothing downstream could tell.
 
 A staged catalog is one BOOM ingests but does not fetch: the files are put in
 place beforehand — by hand, or by BOOM itself — and the ingest reads them where
-they are. `lspsc` is the one in the tree; see
-[When BOOM is the provenance](#when-boom-is-the-provenance).
+they are. `lspsc` is one, see
+[When BOOM is the provenance](#when-boom-is-the-provenance); `desi-dr1-dwarfs`,
+which has no public copy, is the other.
 
 A definition declares `source: Source::Staged`, and **BOOM never deletes a
 staged file** — for a fetched catalog the chunk is a cache and deleting it is
@@ -208,14 +227,115 @@ that is neither defined nor listed there:
   parameters, built outside BOOM with LSDB. A boompy module reading that HATS
   catalog the way `allwise` and `panstarrs` do would make this an ordinary
   definition; nobody has written one yet.
-- **`TNS`** — a live, credentialed feed rather than an archival download,
-  populated outside the catalog ingest path.
+- **`TNS`**: a live, credentialed feed rather than an archival download, kept
+  current by the `tns_sync` task. See [TNS](#tns).
 
 The admin page lists both, with the reason from `WITHOUT_DEFINITIONS` in place
 of a title and a state of **Built elsewhere** rather than **Unknown slug**, and
 the drift badge does not count them. The distinction is the point: a name with
 no definition is otherwise reported as a probable typo, and two rows of
 permanent false alarm are how a real typo stops being noticed.
+
+## TNS
+
+`TNS` holds the Transient Name Server's public objects, one document per object,
+keyed by its TNS `objid`:
+
+| Field | From the TNS objects CSV |
+| --- | --- |
+| `_id` | `objid` |
+| `name_prefix`, `name` | `name_prefix`, `name`, e.g. `AT` and `2026bna` |
+| `ra`, `dec` | `ra`, `declination`, in degrees |
+| `type`, `redshift` | `type`, `redshift`, null when TNS has none |
+| `discovery_date`, `discovery_jd` | `discoverydate` as TNS writes it, and as a Julian date |
+| `discovery_mag`, `discovery_mag_filter` | `discoverymag`, `filter` |
+| `reporters` | `reporters` |
+| `internal_names` | `internal_names`, split on commas |
+| `coordinates` | `radec_geojson` at `[ra - 180, dec]`, with `l`, `b` and `hpx` as for every catalog |
+
+It is indexed on `coordinates.radec_geojson` (2dsphere) and `discovery_jd`.
+
+### Keeping it current
+
+`tns_sync` downloads the
+[public objects files](https://www.wis-tns.org/content/tns-getting-started) by
+`POST`ing the bot's `api_key` to
+`https://www.wis-tns.org/system/files/tns_public_objects/<file>`, with the bot's
+`tns_marker` as User-Agent, and upserts every row by `objid`:
+
+- `tns_public_objects.csv.zip`, the full file TNS cuts after UT midnight, on the
+  first run, once `tns.full_sync_every_hours` have passed since the last one
+  applied, or when the hourly files no longer cover the gap.
+- Otherwise `tns_public_objects_HH.csv.zip`, one per hour since the last one
+  applied. TNS overwrites each on a 24-hour cycle, so a file whose first line
+  does not start at the expected hour is not cut yet, and the run stops there.
+
+Progress is kept in `catalog_state` under `_id: "TNS"` (`synced_through`,
+`full_at`), so each run continues where the last one stopped.
+
+The live pipeline crossmatches an object only when it first sees it, which is
+usually before it is reported to TNS. So for every object in an hourly file, and
+every object of a full file modified since the last sync, `tns_sync` recomputes
+`cross_matches.TNS` on the `alerts_aux` records within the TNS crossmatch radius,
+in each survey that crossmatches against TNS. The backlog is not covered: after
+the first sync on a deployment, run `reprocess_crossmatch` with
+`catalogs: [TNS]` for each survey.
+
+### Photometry
+
+`tns_photometry` fetches the photometry reported to TNS, non-detections
+included, from `https://www.wis-tns.org/api/get/object` with
+`"photometry": "1"`, for the TNS objects that:
+
+- were discovered in the last `tns.photometry.max_age_days` (60),
+- are in `cross_matches.TNS` of a BOOM object whose
+  `host_galaxy.best_host.dist_mpc` is at most `tns.photometry.max_distance_mpc`
+  (200),
+- were not fetched in the last `tns.photometry.refresh_hours` (24).
+
+Objects never fetched go first, and a run fetches at most
+`tns.photometry.max_objects` (250). Its `names` parameter fetches a list of TNS
+names instead.
+
+After every request it reads `x-rate-limit-remaining` and `x-rate-limit-reset`:
+with none remaining it waits out the reset before the next request, and on a 429
+it waits the reset, or 60 s without one, and retries, five attempts in all. A
+401 or 403 fails the run; any other error skips the object.
+
+Each object is one document in `TNS_photometry`, replaced on every fetch:
+
+```json
+{
+  "_id": 182301,
+  "name": "2026bna",
+  "fetched_at": 1769330000.0,
+  "photometry": [
+    {
+      "jd": 2461065.24862,
+      "mag": 19.41, "mag_err": 0.08, "lim_mag": null,
+      "flux": null, "flux_err": null, "lim_flux": null,
+      "unit": "ABMag", "filter": "r",
+      "instrument": "ZTF-Cam", "telescope": "P48",
+      "reporting_group": null, "survey": "ZTF"
+    }
+  ]
+}
+```
+
+`mag`, `mag_err` and `lim_mag` are AB magnitudes. A point reported in another
+unit keeps its values in `flux`, `flux_err` and `lim_flux`, with `unit` naming
+it. A point with a `lim_mag` and no `mag` is a non-detection. Points TNS marks
+as not public are dropped. The Babamul object route returns the document of the
+nearest `cross_matches.TNS` match as `tns_photometry`, and the object page plots
+it.
+
+### Turning it on
+
+Set `BOOM_TNS__BOT_ID`, `BOOM_TNS__BOT_NAME` and `BOOM_TNS__API_KEY` on the
+`task-worker` service. With all three, the worker schedules `tns_sync` every
+`tns.sync_every_minutes` (60) and `tns_photometry` every
+`tns.photometry.every_minutes` (360); 0 turns either off. Without them nothing
+is scheduled. See [Scheduled runs](./task-system.md#scheduled-runs).
 
 ## When BOOM is the provenance
 
@@ -295,6 +415,11 @@ Adding a catalog to a deployment goes in this order, and the order matters:
    against it. No config change is needed to make it appear or to ingest it.
 3. **Add it to `crossmatch` config** once the ingest reports complete.
 
+When the base `config.yaml` crossmatches a catalog that a deployment has not
+ingested yet, that deployment's `overrides.yaml` keeps it off with
+`<collection>: null` under each survey. Step 3 is then deleting those lines and
+running `make configs`.
+
 Step 2 does not depend on step 3 on purpose. The catalogs table is built from
 `CATALOGS` in the code, not from crossmatch config, so you never have to
 configure the pipeline to use a catalog in order to be allowed to ingest it.
@@ -337,9 +462,9 @@ position on the sky.
 
 Crossmatches are computed **once**, when an alert is first ingested. Nothing
 revisits them. So a change on the catalog side leaves existing alerts holding
-matches computed against something that no longer exists — the same problem the
-[enrichment set](./alert-processing.md#re-enriching-alerts-after-a-change)
-solves for models and derivations, and it is *not* solved here.
+matches computed against something that no longer exists — with no equivalent of
+the [enrichment set](./alert-processing.md#the-enrichment-set), which records what
+produced an alert's models and derivations and so makes that drift detectable.
 
 **What is handled: adding a new catalog.** `xmatch` writes a key for every
 configured catalog, including an empty array when nothing matched, so an alert
@@ -367,8 +492,8 @@ single hash over the whole `crossmatch` block is too coarse: adding NED would
 invalidate every Gaia match too, and the reprocessing run is exactly the thing
 worth keeping small.
 
-The shape that fits is the one the enrichment set already uses — intern per
-component, diff to see what moved — applied per catalog rather than per survey:
+The shape that fits is per-component interning with a diff to see what moved,
+applied per catalog rather than per survey:
 
 - Version each catalog's crossmatch settings (`radius`, `use_distance`,
   `max_results`, `projection`) *together with* an identity for the catalog
@@ -396,7 +521,7 @@ A catalog is declared in two halves, and both are in this repo:
 | `src/catalogs/` — a record type plus a `CatalogDef` | what the columns mean and how they are stored |
 
 The Python side is a module defining `ID`, `list_chunks()` and `fetch_chunk()`
-(see [`boompy/README.md`](../boompy/README.md)). Nothing registers it: that
+(see [`boompy/README.md`](https://github.com/boom-astro/boom/blob/main/boompy/README.md)). Nothing registers it: that
 directory holds one module per catalog and nothing else, and boompy builds its
 index by listing it, so a new file is a new catalog. It is Python because the
 archives are: LSDB reads HATS partitioning, `astroquery` speaks to the archives

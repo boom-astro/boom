@@ -4,6 +4,7 @@
 //! Legacy Survey gives a Tractor half-light radius plus ellipticity components.
 //! Both end up as the same semi-axes and PA.
 
+use flare::spatial::great_circle_distance;
 use mongodb::bson::{Bson, Document};
 
 use crate::utils::spatial::get_opt_f64_from_doc as opt_f64;
@@ -23,7 +24,7 @@ fn opt_string(doc: &Document, key: &str) -> Option<String> {
 
 /// An object's catalogue name. NED names its rows with a string, Legacy with a
 /// numeric id, so both spellings have to be accepted.
-fn opt_objname(doc: &Document, key: &str) -> Option<String> {
+pub(super) fn opt_objname(doc: &Document, key: &str) -> Option<String> {
     match doc.get(key) {
         Some(Bson::String(s)) if !s.is_empty() => Some(s.clone()),
         Some(Bson::Int64(v)) => Some(v.to_string()),
@@ -149,7 +150,11 @@ fn legacy_redshift(doc: &Document, key: &str) -> Option<f64> {
     opt_f64(doc, key).filter(|z| *z > -0.5)
 }
 
-pub fn galaxy_from_ls_dr10(doc: &Document, config: &HostGalaxyConfig) -> Option<GalaxyCandidate> {
+pub fn galaxy_from_legacy(
+    doc: &Document,
+    catalog: &str,
+    config: &HostGalaxyConfig,
+) -> Option<GalaxyCandidate> {
     let ra = opt_f64(doc, "ra")?;
     let dec = opt_f64(doc, "dec")?;
 
@@ -213,7 +218,7 @@ pub fn galaxy_from_ls_dr10(doc: &Document, config: &HostGalaxyConfig) -> Option<
         mag_err: None,
         objtype,
         objname: opt_objname(doc, "_id"),
-        catalog: Some(LS_DR10.to_string()),
+        catalog: Some(catalog.to_string()),
         size_is_isophotal,
         diam_survey: None,
         orientation_is_nominal: false,
@@ -222,12 +227,85 @@ pub fn galaxy_from_ls_dr10(doc: &Document, config: &HostGalaxyConfig) -> Option<
 
 pub const NED: &str = "NED";
 pub const LS_DR10: &str = "LSDR10";
+pub const LS_DR9: &str = "LSDR9";
+
+/// DR9 north only covers sky DR10 does not reach.
+pub(super) fn legacy_rows<'a>(
+    xmatches: &'a std::collections::HashMap<String, Vec<Document>>,
+    config: &'a HostGalaxyConfig,
+) -> Option<(&'a str, &'a [Document])> {
+    [&config.ls_dr10_catalog, &config.ls_dr9_catalog]
+        .into_iter()
+        .find_map(|catalog| {
+            xmatches
+                .get(catalog)
+                .filter(|rows| !rows.is_empty())
+                .map(|rows| (catalog.as_str(), rows.as_slice()))
+        })
+}
 
 /// NED-LVS comes first, for its curated diameters and redshift-independent
 /// distances. Legacy Survey shreds large galaxies into many rows, each of which
 /// would split the posterior among fragments of one galaxy, so a Legacy row
-/// inside an accepted NED-LVS galaxy (d_DLR <= 1) is dropped.
+/// inside an accepted NED-LVS galaxy (d_DLR <= 1) is dropped. A DESI spectrum on
+/// a galaxy's centre then replaces its missing or photometric redshift.
 pub fn collect_galaxies(
+    xmatches: &std::collections::HashMap<String, Vec<Document>>,
+    config: &HostGalaxyConfig,
+) -> Vec<GalaxyCandidate> {
+    let mut galaxies = shaped_galaxies(xmatches, config);
+    if let Some(spectra) = xmatches.get(&config.desi_catalog) {
+        for galaxy in galaxies.iter_mut() {
+            add_spectroscopic_redshift(galaxy, spectra, config);
+        }
+    }
+    galaxies
+}
+
+fn is_good_galaxy_spectrum(doc: &Document) -> bool {
+    let zwarn = match doc.get("zwarn") {
+        Some(Bson::Int64(v)) => *v,
+        Some(Bson::Int32(v)) => *v as i64,
+        _ => return false,
+    };
+    zwarn == 0
+        && opt_string(doc, "spectype").as_deref() == Some("GALAXY")
+        && opt_f64(doc, "z").is_some_and(|z| z > 0.0)
+}
+
+fn add_spectroscopic_redshift(
+    galaxy: &mut GalaxyCandidate,
+    spectra: &[Document],
+    config: &HostGalaxyConfig,
+) {
+    let from_legacy = galaxy
+        .catalog
+        .as_deref()
+        .is_some_and(|c| c == config.ls_dr10_catalog || c == config.ls_dr9_catalog);
+    let photometric = galaxy.redshift.is_none() || (from_legacy && galaxy.redshift_err.is_some());
+    if !photometric {
+        return;
+    }
+    let spectrum = spectra
+        .iter()
+        .filter(|doc| is_good_galaxy_spectrum(doc))
+        .filter_map(|doc| {
+            let sep = great_circle_distance(
+                galaxy.ra,
+                galaxy.dec,
+                opt_f64(doc, "ra")?,
+                opt_f64(doc, "dec")?,
+            ) * 3600.0;
+            (sep <= config.spectrum_match_arcsec).then_some((doc, sep))
+        })
+        .min_by(|a, b| a.1.total_cmp(&b.1));
+    if let Some((doc, _)) = spectrum {
+        galaxy.redshift = opt_f64(doc, "z");
+        galaxy.redshift_err = opt_f64(doc, "zerr");
+    }
+}
+
+fn shaped_galaxies(
     xmatches: &std::collections::HashMap<String, Vec<Document>>,
     config: &HostGalaxyConfig,
 ) -> Vec<GalaxyCandidate> {
@@ -240,7 +318,7 @@ pub fn collect_galaxies(
         })
         .unwrap_or_default();
 
-    let Some(ls_docs) = xmatches.get(&config.ls_dr10_catalog) else {
+    let Some((ls_catalog, ls_docs)) = legacy_rows(xmatches, config) else {
         return galaxies;
     };
 
@@ -254,7 +332,7 @@ pub fn collect_galaxies(
         .collect();
 
     for doc in ls_docs {
-        let Some(candidate) = galaxy_from_ls_dr10(doc, config) else {
+        let Some(candidate) = galaxy_from_legacy(doc, ls_catalog, config) else {
             continue;
         };
         let is_fragment = ned_ellipses.iter().any(|(ra, dec, ellipse)| {
@@ -418,8 +496,12 @@ mod tests {
 
     #[test]
     fn test_from_ls_dr10_uses_tractor_shape() {
-        let g =
-            galaxy_from_ls_dr10(&ls_doc("ls-1", 10.0, 20.0), &HostGalaxyConfig::default()).unwrap();
+        let g = galaxy_from_legacy(
+            &ls_doc("ls-1", 10.0, 20.0),
+            LS_DR10,
+            &HostGalaxyConfig::default(),
+        )
+        .unwrap();
         assert_close!(g.a_arcsec, 1.5);
         assert_close!(g.b_arcsec, 1.5 * (0.8 / 1.2), epsilon = 1e-9);
         assert_eq!(g.catalog.as_deref(), Some(LS_DR10));
@@ -430,13 +512,13 @@ mod tests {
         let config = HostGalaxyConfig::default();
         let mut d = ls_doc("ls-1", 10.0, 20.0);
         d.insert("objtype", "PSF");
-        assert!(galaxy_from_ls_dr10(&d, &config).is_none());
+        assert!(galaxy_from_legacy(&d, LS_DR10, &config).is_none());
 
         let config = HostGalaxyConfig {
             exclude_star_like: false,
             ..Default::default()
         };
-        assert!(galaxy_from_ls_dr10(&d, &config).is_some());
+        assert!(galaxy_from_legacy(&d, LS_DR10, &config).is_some());
     }
 
     #[test]
@@ -444,7 +526,7 @@ mod tests {
         let config = HostGalaxyConfig::default();
         let mut d = ls_doc("ls-1", 10.0, 20.0);
         d.insert("shape_r", Bson::Null);
-        assert!(galaxy_from_ls_dr10(&d, &config).is_none());
+        assert!(galaxy_from_legacy(&d, LS_DR10, &config).is_none());
     }
 
     #[test]
@@ -603,6 +685,7 @@ mod projection_tests {
             "enabled",
             "ned_catalog",
             "ls_dr10_catalog",
+            "ls_dr9_catalog",
             "max_dlr",
             "min_axis_arcsec",
             "max_candidates",
@@ -612,6 +695,8 @@ mod projection_tests {
             "rex_min_snr",
             "rex_max_fracflux",
             "isophote_mag",
+            "ps1_catalog",
+            "photometry_match_arcsec",
         ];
         for (name, config) in deployment_configs() {
             let Some(block) = config.split("\nhost_galaxy:").nth(1) else {
@@ -658,7 +743,7 @@ mod legacy_shape_tests {
     }
 
     fn accepted(doc: &Document) -> bool {
-        galaxy_from_ls_dr10(doc, &HostGalaxyConfig::default()).is_some()
+        galaxy_from_legacy(doc, LS_DR10, &HostGalaxyConfig::default()).is_some()
     }
 
     #[test]
@@ -722,7 +807,7 @@ mod legacy_shape_tests {
         let mut d = good_rex();
         d.insert("shape_r", 2.0_f64);
         d.insert("flux_r", 1000.0_f64); // ~15 mag, comfortably above the isophote
-        let g = galaxy_from_ls_dr10(&d, &HostGalaxyConfig::default()).expect("kept");
+        let g = galaxy_from_legacy(&d, LS_DR10, &HostGalaxyConfig::default()).expect("kept");
         assert!(
             g.a_arcsec > 2.0,
             "semi-major {} should exceed R_e = 2 after conversion",
@@ -735,7 +820,7 @@ mod legacy_shape_tests {
         let mut d = good_rex();
         d.insert("objtype", "EXP");
         d.remove("flux_r");
-        let g = galaxy_from_ls_dr10(&d, &HostGalaxyConfig::default()).expect("kept");
+        let g = galaxy_from_legacy(&d, LS_DR10, &HostGalaxyConfig::default()).expect("kept");
         assert!((g.a_arcsec - 1.2).abs() < 1e-9, "got {}", g.a_arcsec);
     }
 
@@ -748,8 +833,9 @@ mod legacy_shape_tests {
         let mut unconverted = d.clone();
         unconverted.remove("flux_r");
 
-        let converted = galaxy_from_ls_dr10(&d, &HostGalaxyConfig::default()).unwrap();
-        let plain = galaxy_from_ls_dr10(&unconverted, &HostGalaxyConfig::default()).unwrap();
+        let converted = galaxy_from_legacy(&d, LS_DR10, &HostGalaxyConfig::default()).unwrap();
+        let plain =
+            galaxy_from_legacy(&unconverted, LS_DR10, &HostGalaxyConfig::default()).unwrap();
         let q_converted = converted.b_arcsec / converted.a_arcsec;
         let q_plain = plain.b_arcsec / plain.a_arcsec;
         assert!(
@@ -824,7 +910,7 @@ mod review_tests {
                 "shape_r": 2.0, "shape_e1": 0.1, "shape_e2": 0.0, "flux_r": 100.0,
             };
             assert!(
-                galaxy_from_ls_dr10(&d, &config).is_none(),
+                galaxy_from_legacy(&d, LS_DR10, &config).is_none(),
                 "{objtype} has no galaxy extent"
             );
         }
@@ -837,19 +923,19 @@ mod review_tests {
             "_id": "x", "ra": 10.0, "dec": 20.0, "objtype": "EXP",
             "shape_r": 2.0, "shape_e1": 0.1, "shape_e2": 0.0, "flux_r": 100.0,
         };
-        let converted = galaxy_from_ls_dr10(&base, &config).expect("converted");
+        let converted = galaxy_from_legacy(&base, LS_DR10, &config).expect("converted");
         assert!(converted.size_is_isophotal);
 
         // No flux, so no total magnitude, so no isophote.
         let mut no_flux = base.clone();
         no_flux.remove("flux_r");
-        let fallback = galaxy_from_ls_dr10(&no_flux, &config).expect("still a candidate");
+        let fallback = galaxy_from_legacy(&no_flux, LS_DR10, &config).expect("still a candidate");
         assert!(!fallback.size_is_isophotal);
 
         // A SER row without a Sersic index falls back to its half-light radius.
         let mut ser = base.clone();
         ser.insert("objtype", "SER");
-        let ser = galaxy_from_ls_dr10(&ser, &config).expect("ser");
+        let ser = galaxy_from_legacy(&ser, LS_DR10, &config).expect("ser");
         assert!(!ser.size_is_isophotal);
     }
 }

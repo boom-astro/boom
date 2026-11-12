@@ -2,9 +2,11 @@
 import Header from "@/components/Header";
 import Aladin from "@/components/Aladin";
 import CrossmatchCard from "@/components/CrossmatchCard";
+import HostCard from "@/components/HostCard";
 import CentroidPlot from "@/components/CentroidPlot";
 import Lightcurve from "./Lightcurve";
 import ClassifierDisplay from "./ClassificationsV2";
+import HyraxClassification from "./HyraxClassification";
 // import PeriodFinding from "./PeriodFinding";
 import { ApiObject } from '@/lib/api';
 // import LightcurveCanvas from "./LightcurveCanvas";
@@ -27,8 +29,10 @@ export function SectionCards({data}: {data: ApiObject | null}) {
       {/* <Classifications alert={data} /> */}
       {/* <PeriodFinding data={data} /> */}
       <ClassifierDisplay alert={data} />
+      <HyraxClassification />
       <Aladin alert={data} />
       <CrossmatchCard />
+      <HostCard data={data} />
       <CentroidPlot />
       {/* <ClassificationsHistory alert={data} /> */}
     </div>

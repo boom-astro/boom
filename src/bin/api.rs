@@ -22,6 +22,10 @@ use utoipa::OpenApi;
 use utoipa_scalar::{Scalar, Servable};
 use uuid::Uuid;
 
+// glibc keeps freed memory in per-thread arenas; jemalloc reuses it across workers and returns it to the OS.
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     // Load environment variables from .env file before anything else
@@ -62,18 +66,19 @@ async fn main() -> std::io::Result<()> {
     }
     let cutout_storages = web::Data::new(cutout_storage_map);
 
-    // Connect to Milvus once at startup when enabled. A failure here is
-    // non-fatal: the embedding endpoints reply with a clear error, but the rest
-    // of the API still boots. `None` means disabled or unreachable.
-    let milvus_client: Option<MilvusClient> = if config.milvus.enabled {
-        match MilvusClient::connect(&config.milvus).await {
+    // The client is built now but opens its connection on first use, so if
+    // Milvus is down when the API starts, the embedding endpoints recover once
+    // it is back, without a restart. `None` means Milvus is disabled or its
+    // config is invalid.
+    let milvus_client: Option<MilvusClient> = if config.milvus.read_embeddings {
+        match MilvusClient::connect_lazy(&config.milvus) {
             Ok(client) => {
                 tracing::info!("Milvus embedding endpoints are ENABLED");
                 Some(client)
             }
             Err(e) => {
                 tracing::warn!(
-                    "Milvus configuration is enabled but connection failed, \
+                    "Milvus configuration is enabled but invalid, \
                 so embedding endpoints will be unavailable: {}",
                     e
                 );
@@ -170,6 +175,8 @@ async fn main() -> std::io::Result<()> {
                     .service(routes::babamul::get_kafka_credentials)
                     .service(routes::babamul::delete_kafka_credential)
                     .service(routes::babamul::surveys::get_object)
+                    .service(routes::babamul::surveys::get_classification_models)
+                    .service(routes::babamul::surveys::classify_object)
                     .service(routes::babamul::surveys::get_object_xmatches)
                     .service(routes::babamul::surveys::get_objects_xmatches)
                     .service(routes::babamul::surveys::get_objects)
@@ -189,6 +196,8 @@ async fn main() -> std::io::Result<()> {
                     .service(routes::babamul::tokens::delete_token)
                     .service(routes::babamul::admin::get_admin_users)
                     .service(routes::babamul::admin::patch_admin_user)
+                    .service(routes::babamul::embeddings::post_babamul_similar_objects)
+                    .service(routes::babamul::embeddings::get_babamul_embeddings_count)
                     // Larger JSON limit for skymap uploads (~130 MB base64). This
                     // prefix-less scope swallows any sibling after it, so keep it last.
                     .service(
@@ -233,22 +242,26 @@ async fn main() -> std::io::Result<()> {
                 .service(routes::tasks::get_tasks)
                 .service(routes::tasks::get_task_logs)
                 .service(routes::tasks::cancel_task)
+                .service(routes::tasks::resubmit_task)
                 .service(routes::tasks::get_data_mutations)
-                // Registered after the more specific /tasks/... paths: actix
-                // matches in registration order, so a leading {task_id} route
-                // would swallow /tasks/types.
+                .service(routes::tasks::get_enrichment_status)
+                .service(routes::tasks::accept_enrichment_set)
+                .service(routes::tasks::unaccept_enrichment_set)
+                // Registered last among the /tasks paths: actix matches in
+                // registration order, so {task_id} would swallow any literal
+                // /tasks/<name> added above it.
                 .service(routes::tasks::get_task)
                 .service(routes::queries::post_find_query)
                 .service(routes::queries::post_cone_search_query)
                 .service(routes::surveys::get_cutouts)
                 .service(routes::surveys::get_batch_cutouts)
+                .service(routes::surveys::get_tracks)
                 .service(routes::surveys::get_track)
                 .service(routes::queries::post_count_query)
                 .service(routes::queries::post_estimated_count_query)
                 .service(routes::queries::post_pipeline_query)
                 .service(routes::embeddings::post_similar_objects)
                 .service(routes::embeddings::get_embeddings_count)
-                .service(routes::embeddings::delete_object_embedding)
                 // Larger JSON limit for the skymap these accept (~130 MB base64).
                 // This prefix-less scope swallows any sibling after it, so keep it last.
                 .service(

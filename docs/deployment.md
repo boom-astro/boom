@@ -165,7 +165,7 @@ su - github
 As the `github` user,
 [install a GitHub Actions self-hosted runner following the official guide](https://docs.github.com/en/actions/hosting-your-own-runners/managing-self-hosted-runners/adding-self-hosted-runners#adding-a-self-hosted-runner-to-a-repository).
 When asked about labels, add `production`: the
-[deploy workflow](/.github/workflows/deploy.yaml) targets
+[deploy workflow](https://github.com/boom-astro/boom/blob/main/.github/workflows/deploy.yaml) targets
 `runs-on: [self-hosted, production]`. Labels can also be added later.
 
 The guide ends by telling you to start the runner in the foreground. Don't;
@@ -202,13 +202,13 @@ keys). Nothing is read from a `.env` file on the host. Add them under
 **Settings → Secrets and variables → Actions**, following the
 [official GitHub guide for setting repository secrets](https://docs.github.com/en/actions/security-guides/using-secrets-in-github-actions#creating-secrets-for-a-repository).
 
-[.github/workflows/deploy.yaml](/.github/workflows/deploy.yaml) is the
+[.github/workflows/deploy.yaml](https://github.com/boom-astro/boom/blob/main/.github/workflows/deploy.yaml) is the
 authoritative list: anything it references must exist. When a change introduces
 a new configuration key that the workflow needs to inject, it has to be added
 both to the environment settings and to the workflow's `env:` block, or Compose
 will fail at interpolation time.
 
-For generated production configs, [sync-configs workflow](/.github/workflows/sync-configs.yaml)
+For generated production configs, [sync-configs workflow](https://github.com/boom-astro/boom/blob/main/.github/workflows/sync-configs.yaml)
 runs `make configs` on every pull request.
 For pull requests opened from branches in this repository, it commits any
 generated config changes back to the PR branch automatically.
@@ -222,7 +222,7 @@ fails if any config is invalid.
 #### Checklist of GitHub environment variables and secrets
 
 The `production` environment must define everything the
-[deploy workflow](/.github/workflows/deploy.yaml) references. The runner checks
+[deploy workflow](https://github.com/boom-astro/boom/blob/main/.github/workflows/deploy.yaml) references. The runner checks
 out a clean tree on every deploy (no `.env` file), so every value below comes
 from a GitHub Actions **variable** (non-sensitive) or **secret** (sensitive);
 nothing is read from a file on the host. A required value that is missing makes
@@ -254,7 +254,7 @@ volume paths, and the specific env keys injected into containers) belong here.
 | `BOOM_DATA_VALKEY_PATH` | No | Host bind mount for Valkey; falls back to a named volume. |
 | `BOOM_DATA_KAFKA_PATH` | No | Host bind mount for Kafka; falls back to a named volume. |
 | `BOOM_DATA_CUTOUTS_MONGODB_PATH` | No | Host bind mount for the dedicated cutouts MongoDB (the workflow maps it to compose's `BOOM_CUTOUTS_MONGO_VOLUME`); falls back to a named volume. |
-| `BOOM_MONGO_MEM_LIMIT` | No | Memory limit for the alerts MongoDB container, which is what caps its WiredTiger cache. Unset means unlimited, and both mongos then size their cache off total host RAM. See [.env.example](/.env.example) for sizing. |
+| `BOOM_MONGO_MEM_LIMIT` | No | Memory limit for the alerts MongoDB container, which is what caps its WiredTiger cache. Unset means unlimited, and both mongos then size their cache off total host RAM. See [.env.example](https://github.com/boom-astro/boom/blob/main/.env.example) for sizing. |
 | `BOOM_CUTOUTS_MONGO_MEM_LIMIT` | No | Same, for the cutouts MongoDB container. |
 | `BOOM_KAFKA__CONSUMER__ZTF__SERVER` | Yes | ZTF Kafka bootstrap server. Reused for the WINTER consumer, which shares the same (unauthenticated) broker. |
 | `BOOM_KAFKA__CONSUMER__ZTF__GROUP_ID` | Yes | ZTF consumer group ID (per-program suffix added by compose). |
@@ -299,7 +299,7 @@ volume paths, and the specific env keys injected into containers) belong here.
 
 ### Production config layout
 
-The repository keeps the development baseline in [config.yaml](../config.yaml).
+The repository keeps the development baseline in [config.yaml](https://github.com/boom-astro/boom/blob/main/config.yaml).
 Production-specific changes live under deployment-specific directories in
 `config/prod`, for example:
 
@@ -407,7 +407,7 @@ corrupt Kafka data.
 ## GitHub deploy safety controls
 
 Production deploys are intentionally constrained by both repository settings and
-the workflow in [`.github/workflows/deploy.yaml`](/.github/workflows/deploy.yaml):
+the workflow in [`.github/workflows/deploy.yaml`](https://github.com/boom-astro/boom/blob/main/.github/workflows/deploy.yaml):
 
 1. A repository ruleset named `Tag creation` is active for tag refs (`~ALL`).
    It enforces tag creation/update/deletion protections, with bypass actors set
@@ -426,8 +426,8 @@ production, reducing the risk of accidental or unauthorized production changes.
 ### Triggering a deployment
 
 Deployments run through
-[`deploy-trigger.yaml`](/.github/workflows/deploy-trigger.yaml), which calls the
-reusable [`deploy.yaml`](/.github/workflows/deploy.yaml). There are two ways in:
+[`deploy-trigger.yaml`](https://github.com/boom-astro/boom/blob/main/.github/workflows/deploy-trigger.yaml), which calls the
+reusable [`deploy.yaml`](https://github.com/boom-astro/boom/blob/main/.github/workflows/deploy.yaml). There are two ways in:
 
 - **Publish a release** on GitHub with a `v*` tag. This is the normal path.
 - **Run `Trigger deployment to production` manually** (Actions tab → Run

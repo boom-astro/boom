@@ -33,6 +33,8 @@ futures = "0.3.32"
 hifitime = "4.3.0"
 indicatif = "0.18.4"
 itertools = "0.14.0"
+kete_core = { git = "https://github.com/dahlend/kete", rev = "418a5bf19fc71a881dfc661b456a22fa1c38bfa7" }
+kete_spice = { git = "https://github.com/dahlend/kete", rev = "418a5bf19fc71a881dfc661b456a22fa1c38bfa7" }
 jsonwebtoken = { version = "10.4.0", features = ["aws_lc_rs"] }
 lettre = "0.11"
 moc = "0.19.2"
@@ -55,6 +57,7 @@ serde_with = { version = "3.20.0", features = ["base64"] }
 sha2 = "0.11.0"
 tempfile = "3.27.0"
 thiserror = "2.0.18"
+tikv-jemallocator = { version = "0.7", features = ["background_threads"] }
 tokio = { version = "1.52.3", features = ["rt", "rt-multi-thread", "time", "macros", "sync", "signal", "process"] }
 # Milvus is reached over gRPC only (NRP exposes no REST port), so we talk to it
 # with the same tonic stack that opentelemetry-otlp already pulls in. `tls-aws-lc`
@@ -97,12 +100,12 @@ gpu = ["dep:villar-pso"]
 # villar-pso with the metal feature for Apple Silicon GPU light curve fitting
 [target.'cfg(target_os = "macos")'.dependencies]
 ort = { version = "=2.0.0-rc.12", features = ["coreml"] }
-villar-pso = { git = "https://github.com/frenbox/villar-pso", features = ["metal"], optional = true }
+villar-pso = { git = "https://github.com/frenbox/villar-pso", rev = "94569a874fccb351b3b8d1fc2ab8fff7d6a8b09a", features = ["metal"], optional = true }
 
 # Linux: ort with cuda + load-dynamic, villar-pso with the CUDA backend.
 [target.'cfg(target_os = "linux")'.dependencies]
 ort = { version = "=2.0.0-rc.12", features = ["cuda", "load-dynamic"] }
-villar-pso = { git = "https://github.com/frenbox/villar-pso", features = ["cuda"], optional = true }
+villar-pso = { git = "https://github.com/frenbox/villar-pso", rev = "94569a874fccb351b3b8d1fc2ab8fff7d6a8b09a", features = ["cuda"], optional = true }
 
 [workspace]
 members = ["apache-avro-macros"]

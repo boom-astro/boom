@@ -220,6 +220,12 @@ pub struct ZtfAlertEnriched {
     pub host_galaxy: Option<HostGalaxyAssociation>,
 }
 
+pub fn ztf_results_pipeline() -> Vec<Document> {
+    let mut pipeline = create_ztf_alert_pipeline(true);
+    add_decam_survey_match(&mut pipeline);
+    pipeline
+}
+
 /// Builds ZTF Alert objects from the provided filter results and alert collection.
 ///
 /// # Arguments
@@ -524,6 +530,8 @@ fn sso_history_lookup(ztf_permissions: &Vec<i32>, window_days: f64) -> Document 
                     "helio_dist": "$properties.sso.helio_dist",
                     "topo_dist": "$properties.sso.topo_dist",
                     "phase_angle": "$properties.sso.phase_angle",
+                    "true_anomaly": "$properties.sso.true_anomaly",
+                    "perihelion_time": "$properties.sso.perihelion_time",
                 } },
                 doc! { "$sort": { "jd": 1 } },
             ],
@@ -684,6 +692,8 @@ pub async fn build_ztf_filter_pipeline(
                 "classifications": 1,
                 "properties": 1,
                 "coordinates": 1,
+                "villar_fit": 1,
+                "track": 1,
                 // The threshold a forced epoch had to clear for `isdiffpos` and
                 // `snr_psf` to be set, so a filter can say so rather than
                 // hard-coding the number.
@@ -741,6 +751,11 @@ pub async fn build_ztf_filter_pipeline(
     }
 
     Ok(pipeline)
+}
+
+/// The linker runs these: a track is stamped after its alerts were filtered.
+fn without_track_filters(filters: Vec<LoadedFilter>) -> Vec<LoadedFilter> {
+    filters.into_iter().filter(|f| !f.reads_track).collect()
 }
 
 /// Where a filter must project `sso_history` for its geometry to be filled in.
@@ -897,6 +912,7 @@ impl FilterWorker for ZtfFilterWorker {
             &watchlist_projections,
         )
         .await?;
+        let filters = without_track_filters(filters);
 
         // Create a hashmap of filters per programid (permissions)
         let mut filters_by_permission: HashMap<i32, Vec<String>> = HashMap::new();
@@ -909,11 +925,8 @@ impl FilterWorker for ZtfFilterWorker {
             }
         }
 
-        let mut alert_pipeline = create_ztf_alert_pipeline(true);
-        add_decam_survey_match(&mut alert_pipeline);
-
         Ok(ZtfFilterWorker {
-            alert_pipeline,
+            alert_pipeline: ztf_results_pipeline(),
             alert_collection,
             mpc_orbits,
             alert_cutout_storage,
@@ -936,6 +949,7 @@ impl FilterWorker for ZtfFilterWorker {
             &self.watchlist_projections,
         )
         .await?;
+        let filters = without_track_filters(filters);
 
         let mut filters_by_permission: HashMap<i32, Vec<String>> = HashMap::new();
         for filter in &filters {
@@ -1089,6 +1103,7 @@ impl FilterWorker for ZtfFilterWorker {
 #[cfg(test)]
 mod sso_history_tests {
     use super::*;
+    use crate::utils::mpcorb::GEOMETRY_FIELDS;
 
     fn pipeline_from(json: &str) -> Vec<serde_json::Value> {
         serde_json::from_str(json).unwrap()
@@ -1313,7 +1328,7 @@ mod sso_history_tests {
             .find_map(|s| s.as_document()?.get_document("$project").ok())
             .expect("projection present");
 
-        for field in ["helio_dist", "topo_dist", "phase_angle"] {
+        for field in GEOMETRY_FIELDS {
             assert_eq!(
                 projection.get_str(field).ok(),
                 Some(format!("$properties.sso.{}", field).as_str()),

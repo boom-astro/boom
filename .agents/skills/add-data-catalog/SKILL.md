@@ -132,7 +132,7 @@ provenance** in [`docs/catalogs.md`](../../../docs/catalogs.md).
 
 ## Catalogs BOOM does not build
 
-Some collections are produced outside BOOM (`TNS`, `LSDR10`). List them
+Some collections are produced outside the ingest path (`TNS`, `LSDR10`). List them
 in `WITHOUT_DEFINITIONS` in `src/catalogs/mod.rs` **with the reason and, if you
 know it, the source**, so the next person is not left guessing. Config
 validation accepts those names; the admin page reports them as having no

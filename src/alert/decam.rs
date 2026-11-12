@@ -316,20 +316,12 @@ impl DecamAlertWorker {
         object_id: &str,
         aliases: &DecamAliases,
     ) -> Result<(), AlertError> {
-        for (ids, collection) in [
-            (&aliases.ztf, &self.ztf_alert_aux_collection),
-            (&aliases.lsst, &self.lsst_alert_aux_collection),
+        for (ids, collection, other_survey) in [
+            (&aliases.ztf, &self.ztf_alert_aux_collection, "LSST"),
+            (&aliases.lsst, &self.lsst_alert_aux_collection, "ZTF"),
         ] {
             if let Some(id) = ids.first() {
-                collection
-                    .update_one(
-                        doc! {
-                            "_id": id,
-                            "aliases": { "$type": "object" },
-                            "aliases.DECAM.0": { "$exists": false },
-                        },
-                        doc! { "$set": { "aliases.DECAM": [object_id] } },
-                    )
+                self.link_counterpart(collection, id, object_id, "DECAM", other_survey)
                     .await?;
             }
         }
@@ -576,8 +568,17 @@ impl AlertWorker for DecamAlertWorker {
                 &self.db,
             )
             .await?;
-            let host_galaxy =
-                host::associate_from_xmatches(ra, dec, &xmatches, &self.host_galaxy_config);
+            let host_galaxy = host::associate_with_photometry(
+                ra,
+                dec,
+                &xmatches,
+                &self.host_galaxy_config,
+                &self.xmatch_configs,
+                &Survey::Decam,
+                &object_id,
+                &self.db,
+            )
+            .await;
             let obj = DecamObject {
                 object_id: object_id.clone(),
                 prv_candidates,

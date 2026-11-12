@@ -10,14 +10,14 @@ use crate::{
         models::response,
         routes::users::User,
     },
-    conf::{AppConfig, FilterWorkerConfig},
+    conf::{AppConfig, CatalogXmatchConfig, FilterWorkerConfig},
     enrichment::{
         DecamAlertProperties, LsstAlertProperties, WinterAlertProperties, ZtfAlertClassifications,
         ZtfAlertProperties,
     },
     filter::{
-        build_filter_pipeline, reject_unknown_candidate_fields, Filter, FilterError, FilterVersion,
-        SURVEYS_REQUIRING_PERMISSIONS,
+        build_filter_pipeline, find_unknown_field, DocumentShape, Filter, FilterError,
+        FilterVersion, SURVEYS_REQUIRING_PERMISSIONS,
     },
     utils::{
         db::{count_alerts_in_jd_window, mongify},
@@ -63,6 +63,7 @@ async fn validate_watchlist(
     Ok(())
 }
 
+use crate::api::limits::{large_query_slot, next_result};
 use crate::utils::moc::{
     credible_volume_to_2d_moc, moc_from_ascii, moc_hpx_stage, parse_3d_skymap_bytes,
     CredibleVolumeIndex, LIGO3dskymap,
@@ -75,7 +76,7 @@ use base64::prelude::{Engine, BASE64_STANDARD};
 use flare::Time;
 use futures::stream::{StreamExt, TryStreamExt};
 use mongodb::{
-    bson::{doc, Document},
+    bson::{doc, Bson, Document},
     Collection, Database,
 };
 use serde::{Deserialize, Serialize};
@@ -170,13 +171,30 @@ async fn run_test_pipeline(
     }
 }
 
+fn reject_unknown_fields(
+    pipeline: &[serde_json::Value],
+    survey: &Survey,
+    catalogs: &[CatalogXmatchConfig],
+) -> Result<(), FilterError> {
+    let document =
+        DocumentShape::filter_document(&serde_json::json!(filter_schema(survey)), catalogs);
+    match find_unknown_field(pipeline, &document) {
+        Some(path) => Err(FilterError::InvalidFilterPipeline(format!(
+            "`{path}` is not in the {survey} filter schema or its crossmatch catalogs: \
+             it always reads as null, so a cut on it lets every alert through or none."
+        ))),
+        None => Ok(()),
+    }
+}
+
 async fn build_and_test_filter_version(
     db: web::Data<Database>,
     survey: &Survey,
     pipeline: &Vec<serde_json::Value>,
     permissions: &HashMap<Survey, Vec<i32>>,
+    catalogs: &[CatalogXmatchConfig],
 ) -> Result<(), FilterError> {
-    reject_unknown_candidate_fields(pipeline, survey)?;
+    reject_unknown_fields(pipeline, survey, catalogs)?;
     let test_pipeline = build_filter_pipeline(pipeline, permissions, survey).await?;
     run_test_pipeline(db, survey, test_pipeline).await
 }
@@ -349,7 +367,14 @@ pub async fn post_filter_version(
     let new_pipeline = body.pipeline.clone();
 
     // Test the filter to ensure it works
-    match build_and_test_filter_version(db.clone(), &survey, &new_pipeline, &permissions).await {
+    let catalogs = config
+        .crossmatch
+        .get(&survey)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    match build_and_test_filter_version(db.clone(), &survey, &new_pipeline, &permissions, catalogs)
+        .await
+    {
         Ok(()) => {}
         Err(e) => {
             return response::bad_request(&format!(
@@ -472,7 +497,14 @@ pub async fn post_filter(
     let pipeline = body.pipeline;
 
     // Test the filter to ensure it works
-    match build_and_test_filter_version(db.clone(), &survey, &pipeline, &permissions).await {
+    let catalogs = config
+        .crossmatch
+        .get(&survey)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    match build_and_test_filter_version(db.clone(), &survey, &pipeline, &permissions, catalogs)
+        .await
+    {
         Ok(()) => {}
         Err(e) => {
             return response::bad_request(&format!(
@@ -1252,14 +1284,15 @@ pub struct FilterTestRequest {
 #[derive(serde::Serialize, ToSchema)]
 pub struct FilterTestResponse {
     pub pipeline: Vec<serde_json::Value>,
-    pub results: Vec<serde_json::Value>,
+    #[schema(value_type = Vec<Object>)]
+    pub results: Vec<Document>,
 }
 
 impl FilterTestResponse {
     pub fn new(pipeline: Vec<Document>, results: Vec<Document>) -> Self {
         Self {
             pipeline: doc2json(pipeline),
-            results: doc2json(results),
+            results,
         }
     }
 }
@@ -1287,6 +1320,10 @@ pub async fn post_filter_test(
         None => {
             return HttpResponse::Unauthorized().body("Unauthorized");
         }
+    };
+    let _slot = match large_query_slot().await {
+        Ok(slot) => slot,
+        Err(response) => return response,
     };
     // Taken rather than cloned: a skymap can be most of the 200 MB this route
     // accepts, and every copy of it is held for the life of the request.
@@ -1381,6 +1418,7 @@ pub async fn post_filter_test(
     };
 
     let mut results = Vec::new();
+    let mut bytes_read = 0;
     if let Some(region) = &region {
         // Scoring is what decides which alerts count, so the page cannot be cut
         // before it. Score a batch at a time and stop as soon as enough survive,
@@ -1389,15 +1427,10 @@ pub async fn post_filter_test(
         let mut batch: Vec<Document> = Vec::new();
         let mut drained = false;
         while !drained {
-            match cursor.next().await {
-                Some(Ok(doc)) => batch.push(doc),
-                Some(Err(e)) => {
-                    return response::internal_error(&format!(
-                        "error retrieving test filter results: {}",
-                        e
-                    ));
-                }
-                None => drained = true,
+            match next_result(&mut cursor, &mut bytes_read).await {
+                Ok(Some(doc)) => batch.push(doc),
+                Ok(None) => drained = true,
+                Err(e) => return e.into_response("error retrieving test filter results"),
             }
             if !drained && batch.len() < CREDIBLE_LEVEL_BATCH {
                 continue;
@@ -1414,15 +1447,11 @@ pub async fn post_filter_test(
             results.truncate(want);
         }
     } else {
-        while let Some(result) = cursor.next().await {
-            match result {
-                Ok(doc) => results.push(doc),
-                Err(e) => {
-                    return response::internal_error(&format!(
-                        "error retrieving test filter results: {}",
-                        e
-                    ));
-                }
+        loop {
+            match next_result(&mut cursor, &mut bytes_read).await {
+                Ok(Some(doc)) => results.push(doc),
+                Ok(None) => break,
+                Err(e) => return e.into_response("error retrieving test filter results"),
             }
         }
     }
@@ -1686,6 +1715,65 @@ pub struct ZtfAlertToFilter {
     #[serde(rename = "DECAM")]
     pub decam: Option<DecamFilterMatch>,
     pub host_galaxy: Option<HostGalaxyAssociation>,
+    /// Absent without a GPU, NaN everywhere when the fit was skipped.
+    pub villar_fit: Option<VillarFit>,
+    /// Joined only for alerts with `properties.sso.designation`, others are dropped.
+    pub sso_history: Option<Vec<SsoHistoryEntry>>,
+}
+
+#[serdavro]
+#[derive(Debug, Deserialize, Serialize)]
+pub struct VillarFit {
+    pub reduced_chi2: f64,
+    pub peak_mag: f64,
+    pub t_peak: f64,
+    #[serde(rename = "A_ZTF_r")]
+    pub a_ztf_r: f64,
+    #[serde(rename = "beta_ZTF_r")]
+    pub beta_ztf_r: f64,
+    #[serde(rename = "gamma_ZTF_r")]
+    pub gamma_ztf_r: f64,
+    #[serde(rename = "t_0_ZTF_r")]
+    pub t_0_ztf_r: f64,
+    #[serde(rename = "tau_rise_ZTF_r")]
+    pub tau_rise_ztf_r: f64,
+    #[serde(rename = "tau_fall_ZTF_r")]
+    pub tau_fall_ztf_r: f64,
+    #[serde(rename = "extra_sigma_ZTF_r")]
+    pub extra_sigma_ztf_r: f64,
+    #[serde(rename = "A_ZTF_g")]
+    pub a_ztf_g: f64,
+    #[serde(rename = "beta_ZTF_g")]
+    pub beta_ztf_g: f64,
+    #[serde(rename = "gamma_ZTF_g")]
+    pub gamma_ztf_g: f64,
+    #[serde(rename = "t_0_ZTF_g")]
+    pub t_0_ztf_g: f64,
+    #[serde(rename = "tau_rise_ZTF_g")]
+    pub tau_rise_ztf_g: f64,
+    #[serde(rename = "tau_fall_ZTF_g")]
+    pub tau_fall_ztf_g: f64,
+    #[serde(rename = "extra_sigma_ZTF_g")]
+    pub extra_sigma_ztf_g: f64,
+}
+
+#[serdavro]
+#[derive(Debug, Deserialize, Serialize)]
+pub struct SsoHistoryEntry {
+    pub designation: String,
+    pub jd: f64,
+    pub fid: i32,
+    pub magpsf: f32,
+    pub sigmapsf: f32,
+    pub ra: f64,
+    pub dec: f64,
+    pub predicted_mag: Option<f32>,
+    pub separation_arcsec: Option<f32>,
+    pub helio_dist: Option<f32>,
+    pub topo_dist: Option<f32>,
+    pub phase_angle: Option<f32>,
+    pub true_anomaly: Option<f32>,
+    pub perihelion_time: Option<f64>,
 }
 
 #[serdavro]
@@ -1746,6 +1834,15 @@ pub struct DecamAlertToFilter {
     pub host_galaxy: Option<HostGalaxyAssociation>,
 }
 
+fn filter_schema(survey: &Survey) -> apache_avro::Schema {
+    match survey {
+        Survey::Ztf => ZtfAlertToFilter::get_schema(),
+        Survey::Lsst => LsstAlertToFilter::get_schema(),
+        Survey::Winter => WinterAlertToFilter::get_schema(),
+        Survey::Decam => DecamAlertToFilter::get_schema(),
+    }
+}
+
 /// Get a schema of a survey's data available at filtering time
 #[utoipa::path(
     get,
@@ -1760,19 +1857,115 @@ pub struct DecamAlertToFilter {
     tags=["Filters"]
 )]
 #[get("/filters/schemas/{survey_name}")]
-pub async fn get_filter_schema(path: web::Path<(Survey,)>) -> HttpResponse {
-    // return the avro schema
+pub async fn get_filter_schema(
+    path: web::Path<(Survey,)>,
+    db: web::Data<Database>,
+    config: web::Data<AppConfig>,
+) -> HttpResponse {
     let survey_name = path.into_inner().0;
-    let schema = match survey_name {
-        Survey::Ztf => ZtfAlertToFilter::get_schema(),
-        Survey::Lsst => LsstAlertToFilter::get_schema(),
-        Survey::Winter => WinterAlertToFilter::get_schema(),
-        Survey::Decam => DecamAlertToFilter::get_schema(),
-    };
-    response::ok(
-        &format!("avro schema for survey {}", survey_name),
-        serde_json::json!(schema),
-    )
+    let mut schema = serde_json::json!(filter_schema(&survey_name));
+    let catalogs = config
+        .crossmatch
+        .get(&survey_name)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    if let Some(field) = cross_matches_field(&db, catalogs).await {
+        if let Some(fields) = schema["fields"].as_array_mut() {
+            fields.push(field);
+        }
+    }
+    response::ok(&format!("avro schema for survey {}", survey_name), schema)
+}
+
+const CATALOG_SAMPLE_SIZE: i64 = 20;
+
+fn bson_avro_type(value: &Bson) -> Option<serde_json::Value> {
+    Some(match value {
+        Bson::Null | Bson::Undefined => return None,
+        Bson::Double(_) => serde_json::json!("double"),
+        Bson::Int32(_) => serde_json::json!("int"),
+        Bson::Int64(_) => serde_json::json!("long"),
+        Bson::Boolean(_) => serde_json::json!("boolean"),
+        Bson::Array(items) => serde_json::json!({
+            "type": "array",
+            "items": items
+                .iter()
+                .find_map(bson_avro_type)
+                .unwrap_or(serde_json::json!("null")),
+        }),
+        _ => serde_json::json!("string"),
+    })
+}
+
+async fn cross_matches_field(
+    db: &Database,
+    catalogs: &[CatalogXmatchConfig],
+) -> Option<serde_json::Value> {
+    let mut catalog_fields = Vec::new();
+    for catalog in catalogs
+        .iter()
+        .filter(|c| !c.catalog.starts_with(WATCHLIST_PREFIX))
+    {
+        let rows = async {
+            db.collection::<Document>(catalog.collection_name())
+                .find(doc! {})
+                .sort(doc! { "_id": 1 })
+                .projection(catalog.projection.clone())
+                .limit(CATALOG_SAMPLE_SIZE)
+                .await?
+                .try_collect::<Vec<Document>>()
+                .await
+        }
+        .await
+        .unwrap_or_else(|error| {
+            tracing::warn!(
+                %error,
+                catalog = %catalog.catalog,
+                "could not sample a crossmatch catalog for the filter schema"
+            );
+            Vec::new()
+        });
+        let mut row_fields: Vec<serde_json::Value> = catalog
+            .projection
+            .keys()
+            .map(|key| {
+                let types: Vec<Option<serde_json::Value>> = rows
+                    .iter()
+                    .map(|row| row.get(key).and_then(bson_avro_type))
+                    .collect();
+                let avro_type = match types.iter().flatten().next() {
+                    Some(t) if types.iter().all(Option::is_some) => t.clone(),
+                    Some(t) => serde_json::json!(["null", t]),
+                    None => serde_json::json!(["null", "double", "string", "boolean"]),
+                };
+                serde_json::json!({ "name": key, "type": avro_type })
+            })
+            .collect();
+        row_fields.push(serde_json::json!({ "name": "distance_arcsec", "type": "double" }));
+        if catalog.distance_key.is_some() {
+            row_fields
+                .push(serde_json::json!({ "name": "distance_kpc", "type": ["null", "double"] }));
+        }
+        catalog_fields.push(serde_json::json!({
+            "name": catalog.catalog,
+            "type": {
+                "type": "array",
+                "items": {
+                    "type": "record",
+                    "name": format!("CrossMatch_{}", catalog.catalog),
+                    "fields": row_fields,
+                },
+            },
+        }));
+    }
+    if catalog_fields.is_empty() {
+        return None;
+    }
+    Some(serde_json::json!({
+        "name": "cross_matches",
+        "type": ["null", { "type": "record", "name": "CrossMatches", "fields": catalog_fields }],
+        "default": null,
+    }))
 }
 
 #[cfg(test)]

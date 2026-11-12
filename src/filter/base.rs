@@ -236,6 +236,7 @@ pub struct AlertHostGalaxy {
     pub objname: Option<String>,
     pub catalog: Option<String>,
     pub z: Option<f64>,
+    pub z_err: Option<f64>,
     pub dist_mpc: Option<f64>,
     pub dist_mpc_method: Option<String>,
     pub sep_arcsec: f64,
@@ -252,6 +253,7 @@ impl AlertHostGalaxy {
             objname: best_host.objname.clone(),
             catalog: best_host.catalog.clone(),
             z: best_host.z,
+            z_err: best_host.z_err,
             dist_mpc: best_host.dist_mpc,
             dist_mpc_method: best_host.dist_mpc_method.clone(),
             sep_arcsec: best_host.sep_arcsec,
@@ -789,6 +791,7 @@ pub struct LoadedFilter {
     pub name: String,
     pub permissions: HashMap<Survey, Vec<i32>>,
     pub pipeline: Vec<Document>,
+    pub reads_track: bool,
 }
 
 /// Retrieves an active filter from the database.
@@ -909,6 +912,7 @@ pub async fn build_loaded_filter(
     if let Err(error) = reject_unknown_candidate_fields(&pipeline, survey) {
         warn!(filter_id, %error, "filter references a field the survey does not define");
     }
+    let reads_track = uses_field_in_filter(&pipeline, "track").is_some();
     let mut pipeline =
         build_filter_pipeline(&pipeline, &filter.permissions, &filter.survey).await?;
 
@@ -955,6 +959,7 @@ pub async fn build_loaded_filter(
         name: filter.name.clone(),
         pipeline,
         permissions: filter.permissions,
+        reads_track,
     };
     Ok(loaded)
 }
@@ -1384,11 +1389,13 @@ mod tests {
             dlr_rank: 1,
             posterior: 0.95,
             z: Some(0.009727),
+            z_err: Some(0.000_01),
             dist_mpc: Some(40.0),
             dist_mpc_method: Some("zIndependent".to_string()),
             a_arcsec: 60.0,
             b_arcsec: 50.0,
             pa_deg: 10.0,
+            photometry: None,
         };
         let association = HostGalaxyAssociation {
             best_host: Some(best_host.clone()),
@@ -1437,6 +1444,7 @@ mod tests {
                 objname: Some("NGC 4993".to_string()),
                 catalog: Some("NED".to_string()),
                 z: Some(0.009727),
+                z_err: Some(0.000_01),
                 dist_mpc: Some(40.0),
                 dist_mpc_method: Some("zIndependent".to_string()),
                 sep_arcsec: 10.6,

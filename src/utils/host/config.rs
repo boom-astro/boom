@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::associate::AssociationConfig;
-use super::catalog::{LS_DR10, NED};
+use super::catalog::{LS_DR10, LS_DR9, NED};
 
 /// Host-galaxy association, read from `config.yaml` under `host_galaxy`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -14,6 +14,7 @@ pub struct HostGalaxyConfig {
     pub ned_catalog: String,
     /// Cross-match key supplying Legacy Survey Tractor shapes.
     pub ls_dr10_catalog: String,
+    pub ls_dr9_catalog: String,
     /// Largest d_DLR still admitted as a candidate, deliberately looser than the
     /// cut a filter would apply so the posterior normalises over the full set.
     pub max_dlr: f64,
@@ -43,6 +44,13 @@ pub struct HostGalaxyConfig {
     pub rex_max_fracflux: f64,
     /// Isophote the Legacy half-light radius is converted to, mag/arcsec^2.
     pub isophote_mag: f64,
+    /// Cross-match catalog searched at the host's position when no Legacy row is on it.
+    pub ps1_catalog: String,
+    pub photometry_match_arcsec: f64,
+    /// Cross-match catalog of spectra whose redshift replaces a photometric one.
+    pub desi_catalog: String,
+    /// Largest offset between a spectrum and the galaxy centre, arcsec.
+    pub spectrum_match_arcsec: f64,
 }
 
 impl Default for HostGalaxyConfig {
@@ -51,6 +59,7 @@ impl Default for HostGalaxyConfig {
             enabled: false,
             ned_catalog: NED.to_string(),
             ls_dr10_catalog: LS_DR10.to_string(),
+            ls_dr9_catalog: LS_DR9.to_string(),
             max_dlr: 5.0,
             min_axis_arcsec: 0.05,
             min_axis_ratio: 0.05,
@@ -66,6 +75,10 @@ impl Default for HostGalaxyConfig {
             rex_min_snr: 5.0,
             rex_max_fracflux: 0.5,
             isophote_mag: super::sersic::MU_25,
+            ps1_catalog: "PS1_DR2".to_string(),
+            photometry_match_arcsec: 2.0,
+            desi_catalog: "DESI_DR1".to_string(),
+            spectrum_match_arcsec: 1.0,
         }
     }
 }
