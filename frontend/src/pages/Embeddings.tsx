@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -28,12 +29,19 @@ function formatScore(score: number): string {
   return score.toFixed(4);
 }
 
+function ObjectLink({ objectId }: { objectId: string }) {
+  return (
+    <Link to={`/objects/${EMBEDDING_SURVEY}/${encodeURIComponent(objectId)}`} className="underline">
+      {objectId}
+    </Link>
+  );
+}
+
 export default function Embeddings() {
   const [objectId, setObjectId] = useState("");
   const [topK, setTopK] = useState(String(DEFAULT_TOP_K));
   const [results, setResults] = useState<SimilarObject[] | null>(null);
   const [query, setQuery] = useState<QueryObject | null>(null);
-  const [searchedId, setSearchedId] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -87,7 +95,6 @@ export default function Embeddings() {
       const { query, results, message } = await fetchSimilarObjects(trimmed, k);
       setQuery(query ?? null);
       setResults(results);
-      setSearchedId(trimmed);
       // No embedding stored is a normal answer, shown as a notice, not an error.
       if (results.length === 0) setNotice(message ?? `No neighbors found for ${trimmed}`);
     } catch (err) {
@@ -136,9 +143,11 @@ export default function Embeddings() {
       <Card>
         <CardHeader>
           <CardTitle>Similarity Search</CardTitle>
-          <CardDescription>
-            Find the objects whose fusion embedding is closest to a given ZTF object's.
-            The seed object is excluded from its own results.
+          <CardDescription className="text-base">
+            Enter a ZTF object ID to find the objects whose AppleCiDEr fusion embeddings are most
+            similar to it. The highlighted first row is the object you searched for, with its own
+            classification for comparison. Its nearest neighbors follow, ranked by cosine
+            similarity, where 1 means identical.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
@@ -174,23 +183,7 @@ export default function Embeddings() {
           {error && <p className="text-sm text-destructive">{error}</p>}
           {notice && !error && <p className="text-sm text-muted-foreground">{notice}</p>}
 
-          {query && (
-            <div className="rounded-md border p-4 space-y-3">
-              <div className="flex flex-wrap items-center gap-3">
-                <span className="text-sm text-muted-foreground">Query object</span>
-                <Link
-                  to={`/objects/${EMBEDDING_SURVEY}/${encodeURIComponent(query.object_id)}`}
-                  className="font-mono text-sm underline"
-                >
-                  {query.object_id}
-                </Link>
-                <Decision fusion={query.applecider_fusion} />
-              </div>
-              <ClassProbabilities fusion={query.applecider_fusion} />
-            </div>
-          )}
-
-          {results && results.length > 0 && (
+          {(query || (results && results.length > 0)) && (
             <Table>
               <TableHeader>
                 <TableRow>
@@ -201,15 +194,39 @@ export default function Embeddings() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {results.map((hit) => (
+                {query && (
+                  <TableRow className="border-l-4 border-l-primary bg-primary/10 hover:bg-primary/15">
+                    <TableCell className="font-mono text-sm">
+                      <div className="flex items-center gap-2">
+                        <ObjectLink objectId={query.object_id} />
+                        <Badge className="px-2.5 py-0.5 font-sans text-sm font-semibold uppercase tracking-wide">
+                          Query
+                        </Badge>
+                      </div>
+                    </TableCell>
+                    <TableCell>
+                      <Decision fusion={query.applecider_fusion} />
+                    </TableCell>
+                    <TableCell>
+                      <ClassProbabilities fusion={query.applecider_fusion} />
+                    </TableCell>
+                    <TableCell className="text-right text-muted-foreground">-</TableCell>
+                  </TableRow>
+                )}
+                {results && results.length > 0 && (
+                  <TableRow className="bg-muted/50 hover:bg-muted/50">
+                    <TableCell
+                      colSpan={4}
+                      className="py-2 text-base font-semibold text-foreground"
+                    >
+                      {results.length} nearest neighbor{results.length === 1 ? "" : "s"}
+                    </TableCell>
+                  </TableRow>
+                )}
+                {results?.map((hit) => (
                   <TableRow key={hit.object_id}>
                     <TableCell className="font-mono text-sm">
-                      <Link
-                        to={`/objects/${EMBEDDING_SURVEY}/${encodeURIComponent(hit.object_id)}`}
-                        className="underline"
-                      >
-                        {hit.object_id}
-                      </Link>
+                      <ObjectLink objectId={hit.object_id} />
                     </TableCell>
                     <TableCell>
                       <Decision fusion={hit.applecider_fusion} />
@@ -222,13 +239,6 @@ export default function Embeddings() {
                 ))}
               </TableBody>
             </Table>
-          )}
-
-          {results && results.length > 0 && (
-            <p className="text-sm text-muted-foreground">
-              {results.length} neighbor{results.length === 1 ? "" : "s"} of{" "}
-              <span className="font-mono">{searchedId}</span>
-            </p>
           )}
         </CardContent>
       </Card>
