@@ -358,6 +358,8 @@ export type Cutouts = {
 export type HostSummary = {
   name?: string | null;
   catalog?: string | null;
+  ra?: number;
+  dec?: number;
   z?: number | null;
   z_err?: number | null;
   dist_mpc?: number | null;

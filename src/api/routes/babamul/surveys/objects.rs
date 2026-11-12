@@ -57,6 +57,8 @@ struct ZtfSurveyMatches {
 struct ObjHost {
     name: Option<String>,
     catalog: Option<String>,
+    ra: f64,
+    dec: f64,
     z: Option<f64>,
     z_err: Option<f64>,
     dist_mpc: Option<f64>,
@@ -71,6 +73,8 @@ impl From<&StoredHostCandidate> for ObjHost {
         Self {
             name: host.objname.clone(),
             catalog: host.catalog.clone(),
+            ra: host.ra,
+            dec: host.dec,
             z: host.z,
             z_err: host.z_err,
             dist_mpc: host.dist_mpc,
