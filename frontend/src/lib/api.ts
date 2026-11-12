@@ -359,6 +359,7 @@ export type HostSummary = {
   name?: string | null;
   catalog?: string | null;
   z?: number | null;
+  z_err?: number | null;
   dist_mpc?: number | null;
   dist_mpc_method?: string | null;
   sep_arcsec: number;
