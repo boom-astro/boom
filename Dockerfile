@@ -121,6 +121,9 @@ COPY --from=builder /app/bin/api /app/boom-api
 COPY --from=builder /app/bin/task_worker /app/task_worker
 COPY --from=builder /app/bin/linker /app/linker
 COPY --from=builder /opt/ort /opt/ort
+RUN mkdir -p /app/data/kernels && \
+    curl -fsSL -o /app/data/kernels/de440s.bsp https://naif.jpl.nasa.gov/pub/naif/generic_kernels/spk/planets/de440s.bsp && \
+    chmod 644 /app/data/kernels/de440s.bsp
 
 # Resolved at build time from the committed lockfile, so a catalog ingest does
 # not depend on PyPI being reachable -- or on resolving to different versions

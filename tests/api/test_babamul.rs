@@ -128,7 +128,8 @@ mod tests {
         let req = test::TestRequest::post()
             .uri("/babamul/signup")
             .set_json(serde_json::json!({
-                "email": test_email
+                "email": test_email,
+                "name": "Test User"
             }))
             .to_request();
 
@@ -174,7 +175,8 @@ mod tests {
         let req = test::TestRequest::post()
             .uri("/babamul/signup")
             .set_json(serde_json::json!({
-                "email": test_email
+                "email": test_email,
+                "name": "Test User"
             }))
             .to_request();
 
@@ -239,7 +241,8 @@ mod tests {
         let req = test::TestRequest::post()
             .uri("/babamul/signup")
             .set_json(serde_json::json!({
-                "email": test_email
+                "email": test_email,
+                "name": "Test User"
             }))
             .to_request();
 
@@ -383,7 +386,7 @@ mod tests {
             &app,
             test::TestRequest::post()
                 .uri("/babamul/signup")
-                .set_json(serde_json::json!({ "email": &email }))
+                .set_json(serde_json::json!({ "email": &email, "name": "Test User" }))
                 .to_request(),
         )
         .await;
@@ -422,7 +425,8 @@ mod tests {
             let req = test::TestRequest::post()
                 .uri("/babamul/signup")
                 .set_json(serde_json::json!({
-                    "email": invalid_email
+                    "email": invalid_email,
+                    "name": "Test User"
                 }))
                 .to_request();
 
@@ -1953,6 +1957,67 @@ mod tests {
             expires_at - created_at >= 1095 * 86400 - 10
                 && expires_at - created_at <= 1095 * 86400 + 10,
             "Token should expire in ~1095 days"
+        );
+    }
+
+    #[actix_rt::test]
+    async fn test_expired_token_is_rejected() {
+        load_dotenv();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+        let test_user = TestUser::create(&database, &auth_app_data).await;
+
+        let now = flare::Time::now().to_utc().timestamp();
+        // A UUID string is exactly the 36 characters a token secret has.
+        let expired = uuid::Uuid::new_v4().to_string();
+        let valid = uuid::Uuid::new_v4().to_string();
+        let token = |name: &str, secret: &str, expires_at: i64| {
+            doc! {
+                "id": uuid::Uuid::new_v4().to_string(),
+                "name": name,
+                "token_hash": hash_token(secret),
+                "created_at": now - 86400,
+                "expires_at": expires_at,
+            }
+        };
+        let tokens = vec![
+            token("expired", &expired, now - 1),
+            token("valid", &valid, now + 86400),
+        ];
+        database
+            .collection::<BabamulUser>("babamul_users")
+            .update_one(
+                doc! { "_id": &test_user.user.id },
+                doc! { "$set": { "tokens": tokens } },
+            )
+            .await
+            .unwrap();
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(database.clone()))
+                .app_data(web::Data::new(auth_app_data))
+                .service(
+                    web::scope("/babamul")
+                        .wrap(from_fn(babamul_auth_middleware))
+                        .service(routes::babamul::get_babamul_profile),
+                ),
+        )
+        .await;
+        let profile = |secret: &str| {
+            test::TestRequest::get()
+                .uri("/babamul/profile")
+                .insert_header(("Authorization", format!("Bearer bbml_{}", secret)))
+                .to_request()
+        };
+
+        let resp = test::call_service(&app, profile(&valid)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let resp = test::try_call_service(&app, profile(&expired)).await;
+        assert_eq!(
+            resp.err().unwrap().as_response_error().status_code(),
+            StatusCode::UNAUTHORIZED
         );
     }
 
@@ -5188,7 +5253,8 @@ mod tests {
         let mut ids = Vec::new();
         for members in [&mixed[..], &private[..]] {
             let jds: Vec<f64> = (0..members.len()).map(|k| 2460000.0 + k as f64).collect();
-            let plan = plan_upsert(&database, members, &jds, None, None, None, None)
+            let members: Vec<(Survey, i64)> = members.iter().map(|&id| (Survey::Ztf, id)).collect();
+            let plan = plan_upsert(&database, &members, &jds, None, None, None, None)
                 .await
                 .unwrap();
             ids.push(commit_upsert(&database, plan).await.unwrap().track.id);
@@ -5745,6 +5811,7 @@ mod tests {
                 doc! { "$set": {
                     "villar_fit.reduced_chi2": 1.23,
                     "villar_fit.peak_mag": 16.58,
+                    "villar_fit.t_peak": 2460512.75,
                     "villar_fit.A_ZTF_g": 4.56,
                     "villar_fit.A_ZTF_r": f64::NAN,
                 }},
@@ -5785,6 +5852,11 @@ mod tests {
         assert!(
             body["data"]["params"].get("peak_mag").is_none(),
             "peak_mag is not a model parameter"
+        );
+        assert_eq!(body["data"]["t_peak"].as_f64().unwrap(), 2460512.75);
+        assert!(
+            body["data"]["params"].get("t_peak").is_none(),
+            "t_peak is not a model parameter"
         );
         assert_eq!(body["data"]["params"]["A_ZTF_g"].as_f64().unwrap(), 4.56);
         assert!(
@@ -5900,6 +5972,173 @@ mod tests {
 
         // Clean up
         drop_alert_from_collections(candid, &Survey::Ztf)
+            .await
+            .unwrap();
+    }
+
+    /// Test GET /babamul/surveys/{survey}/classification-models
+    #[actix_rt::test]
+    async fn test_get_classification_models() {
+        load_dotenv();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+        let test_user = TestUser::create(&database, &auth_app_data).await;
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(database.clone()))
+                .app_data(web::Data::new(auth_app_data))
+                .service(
+                    web::scope("/babamul")
+                        .wrap(from_fn(babamul_auth_middleware))
+                        .service(routes::babamul::surveys::get_classification_models),
+                ),
+        )
+        .await;
+
+        let list = |survey: &str| {
+            test::TestRequest::get()
+                .uri(&format!(
+                    "/babamul/surveys/{}/classification-models",
+                    survey
+                ))
+                .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+                .to_request()
+        };
+
+        let resp = test::call_service(&app, list("ztf")).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = read_json_response(resp).await;
+        let ids: Vec<&str> = body["data"]
+            .as_array()
+            .expect("data should be an array")
+            .iter()
+            .map(|model| model["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, vec!["tempo_evidential"]);
+
+        let resp = test::call_service(&app, list("lsst")).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = read_json_response(resp).await;
+        assert_eq!(body["data"], serde_json::json!([]));
+
+        let req = test::TestRequest::get()
+            .uri("/babamul/surveys/ztf/classification-models")
+            .to_request();
+        let resp = test::try_call_service(&app, req).await;
+        assert_eq!(
+            resp.err().unwrap().as_response_error().status_code(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    /// Test POST /babamul/surveys/{survey}/objects/{object_id}/classify, up to the
+    /// call to the inference service, which is pointed at a closed port.
+    #[actix_rt::test]
+    async fn test_classify_object() {
+        load_dotenv();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+        let test_user = TestUser::create(&database, &auth_app_data).await;
+
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        std::env::set_var(
+            "TEMPO_SERVICE_URL",
+            format!("http://{}", closed.local_addr().unwrap()),
+        );
+        drop(closed);
+
+        let object_id = "ZTF26hyraxcls";
+        let aux_collection = database.collection::<boom::alert::ZtfObject>("ZTF_alerts_aux");
+        aux_collection
+            .delete_one(doc! { "_id": object_id })
+            .await
+            .unwrap();
+        aux_collection
+            .insert_one(boom::alert::ZtfObject {
+                object_id: object_id.to_string(),
+                coordinates: boom::utils::spatial::Coordinates::new(124.5, -12.3),
+                prv_candidates: vec![],
+                prv_nondetections: vec![],
+                fp_hists: vec![],
+                aliases: None,
+                host_galaxy: None,
+                created_at: 0.0,
+                updated_at: 0.0,
+                cross_matches: None,
+            })
+            .await
+            .unwrap();
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(database.clone()))
+                .app_data(web::Data::new(auth_app_data))
+                .service(
+                    web::scope("/babamul")
+                        .wrap(from_fn(babamul_auth_middleware))
+                        .service(routes::babamul::surveys::classify_object),
+                ),
+        )
+        .await;
+
+        let classify = |survey: &str, object_id: &str, model: &str| {
+            test::TestRequest::post()
+                .uri(&format!(
+                    "/babamul/surveys/{}/objects/{}/classify",
+                    survey, object_id
+                ))
+                .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+                .set_json(serde_json::json!({ "model": model }))
+                .to_request()
+        };
+
+        let cases = [
+            (
+                "ztf",
+                object_id,
+                "not_a_real_model",
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                "lsst",
+                object_id,
+                "tempo_evidential",
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                "ztf",
+                "ZTF26nosuchobj",
+                "tempo_evidential",
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                "ztf",
+                object_id,
+                "tempo_evidential",
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+        ];
+        for (survey, object, model, expected) in cases {
+            let resp = test::call_service(&app, classify(survey, object, model)).await;
+            assert_eq!(resp.status(), expected, "{} {} {}", survey, object, model);
+        }
+
+        let req = test::TestRequest::post()
+            .uri(&format!(
+                "/babamul/surveys/ztf/objects/{}/classify",
+                object_id
+            ))
+            .set_json(serde_json::json!({ "model": "tempo_evidential" }))
+            .to_request();
+        let resp = test::try_call_service(&app, req).await;
+        assert_eq!(
+            resp.err().unwrap().as_response_error().status_code(),
+            StatusCode::UNAUTHORIZED
+        );
+
+        aux_collection
+            .delete_one(doc! { "_id": object_id })
             .await
             .unwrap();
     }

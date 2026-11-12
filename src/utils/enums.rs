@@ -5,7 +5,19 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 #[serdavro]
-#[derive(clap::ValueEnum, Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq, Hash)]
+#[derive(
+    clap::ValueEnum,
+    Clone,
+    Debug,
+    Serialize,
+    Deserialize,
+    ToSchema,
+    PartialEq,
+    Eq,
+    Hash,
+    PartialOrd,
+    Ord,
+)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum Survey {
     #[serde(alias = "ztf")]

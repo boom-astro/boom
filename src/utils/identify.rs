@@ -173,7 +173,7 @@ impl SkyGrid {
     }
 }
 
-struct NightPaths {
+pub struct NightPaths {
     first: f64,
     span: f64,
     start: Vec<(f64, f64)>,
@@ -183,7 +183,7 @@ struct NightPaths {
 }
 
 impl NightPaths {
-    fn new(orbits: &[OrbitEntry], first: f64, last: f64, radius_deg: f64) -> Self {
+    pub fn new(orbits: &[OrbitEntry], first: f64, last: f64, radius_deg: f64) -> Self {
         let place = |jd: f64| -> Vec<(f64, f64)> {
             let earth = earth_position_utc(jd);
             orbits
@@ -275,24 +275,7 @@ pub fn identify(
         let found: Vec<Match> = dets
             .par_iter()
             .filter_map(|d| {
-                let mut best: Option<(f64, usize)> = None;
-                let observer = observer_position(d.jd, d.site.as_ref().unwrap_or(&cfg.site));
-                for idx in paths.near(d.ra, d.dec, d.jd) {
-                    let (pra, pdec) = radec_from_ecliptic(&light_time_corrected(
-                        &orbits[idx].elements,
-                        d.jd,
-                        &observer,
-                    ));
-                    let sep = angular_separation_deg(d.ra, d.dec, pra, pdec) * 3600.0;
-                    // Ties go to the lower index, so the result does not
-                    // depend on the order the grid returns candidates in.
-                    if sep <= cfg.match_radius_arcsec
-                        && best.is_none_or(|(b, i)| sep < b || (sep == b && idx < i))
-                    {
-                        best = Some((sep, idx));
-                    }
-                }
-                best.map(|(sep, idx)| Match {
+                closest(d, orbits, &paths, cfg).map(|(idx, sep)| Match {
                     detection_id: d.id,
                     designation: orbits[idx].designation.clone(),
                     separation_arcsec: sep,
@@ -304,6 +287,32 @@ pub fn identify(
         matches.extend(found);
     }
     matches
+}
+
+pub fn closest(
+    d: &Detection,
+    orbits: &[OrbitEntry],
+    paths: &NightPaths,
+    cfg: &IdentifyConfig,
+) -> Option<(usize, f64)> {
+    let mut best: Option<(f64, usize)> = None;
+    let observer = observer_position(d.jd, d.site.as_ref().unwrap_or(&cfg.site));
+    for idx in paths.near(d.ra, d.dec, d.jd) {
+        let (pra, pdec) = radec_from_ecliptic(&light_time_corrected(
+            &orbits[idx].elements,
+            d.jd,
+            &observer,
+        ));
+        let sep = angular_separation_deg(d.ra, d.dec, pra, pdec) * 3600.0;
+        // Ties go to the lower index, so the result does not
+        // depend on the order the grid returns candidates in.
+        if sep <= cfg.match_radius_arcsec
+            && best.is_none_or(|(b, i)| sep < b || (sep == b && idx < i))
+        {
+            best = Some((sep, idx));
+        }
+    }
+    best.map(|(sep, idx)| (idx, sep))
 }
 
 /// How much agreement makes a linked track a catalogued object.

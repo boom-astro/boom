@@ -20,11 +20,13 @@ use std::collections::HashMap;
 use tracing::{debug, instrument};
 
 use super::client::{check_status, MilvusClient, MilvusError};
-use super::collection::{FIELD_CANDID, FIELD_EMBEDDING, FIELD_JD, FIELD_OBJECT_ID};
+use super::collection::{
+    FIELD_CANDID, FIELD_EMBEDDING, FIELD_JD, FIELD_OBJECT_ID, FIELD_PROGRAMID,
+};
 use super::proto::milvus::UpsertRequest;
 use super::proto::schema::{
     field_data::Field, scalar_field, vector_field, DataType, DoubleArray, FieldData, FloatArray,
-    LongArray, ScalarField, StringArray, VectorField,
+    IntArray, LongArray, ScalarField, StringArray, VectorField,
 };
 
 /// One embedding to be written — becomes one row in the collection.
@@ -34,15 +36,16 @@ use super::proto::schema::{
 ///
 /// Fields are encoded in tag order, so `object_id` and `embedding` take the
 /// last tags: a stored entry cut short anywhere is then missing one of them,
-/// which `backup::decode` rejects.
+/// which `backup::decode` rejects. Entries queued before `programid` no longer
+/// decode.
 #[derive(Clone, PartialEq, prost::Message)]
 pub struct EmbeddingRow {
     /// Survey object identifier, the collection's primary key.
-    #[prost(string, tag = "3")]
+    #[prost(string, tag = "4")]
     pub object_id: String,
     /// The L2-normalized fusion embedding; its length must equal the
     /// collection's configured `dim`.
-    #[prost(float, repeated, tag = "4")]
+    #[prost(float, repeated, tag = "5")]
     pub embedding: Vec<f32>,
     /// Candid of the alert this embedding was computed from.
     #[prost(int64, tag = "1")]
@@ -50,6 +53,9 @@ pub struct EmbeddingRow {
     /// Julian date of that alert.
     #[prost(double, tag = "2")]
     pub jd: f64,
+    /// The object's program; see [`super::collection::FIELD_PROGRAMID`].
+    #[prost(int32, tag = "3")]
+    pub programid: i32,
 }
 
 impl MilvusClient {
@@ -194,12 +200,14 @@ fn build_upsert_request(
         .collect();
     let candids: Vec<i64> = rows.iter().map(|r| r.candid).collect();
     let jds: Vec<f64> = rows.iter().map(|r| r.jd).collect();
+    let programids: Vec<i32> = rows.iter().map(|r| r.programid).collect();
 
     let fields_data = vec![
         string_field(FIELD_OBJECT_ID, object_ids),
         float_vector_field(FIELD_EMBEDDING, dim, embeddings),
         long_field(FIELD_CANDID, candids),
         double_field(FIELD_JD, jds),
+        int_field(FIELD_PROGRAMID, programids),
     ];
 
     Ok(UpsertRequest {
@@ -217,6 +225,17 @@ fn string_field(name: &str, data: Vec<String>) -> FieldData {
         field_name: name.to_string(),
         field: Some(Field::Scalars(ScalarField {
             data: Some(scalar_field::Data::StringData(StringArray { data })),
+        })),
+        ..Default::default()
+    }
+}
+
+fn int_field(name: &str, data: Vec<i32>) -> FieldData {
+    FieldData {
+        r#type: DataType::Int32 as i32,
+        field_name: name.to_string(),
+        field: Some(Field::Scalars(ScalarField {
+            data: Some(scalar_field::Data::IntData(IntArray { data })),
         })),
         ..Default::default()
     }
@@ -302,6 +321,7 @@ mod tests {
             embedding,
             candid,
             jd,
+            programid: 1,
         }
     }
 
@@ -355,7 +375,13 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            vec![FIELD_OBJECT_ID, FIELD_EMBEDDING, FIELD_CANDID, FIELD_JD]
+            vec![
+                FIELD_OBJECT_ID,
+                FIELD_EMBEDDING,
+                FIELD_CANDID,
+                FIELD_JD,
+                FIELD_PROGRAMID
+            ]
         );
 
         // object_id column: both ids, in row order.
@@ -392,6 +418,14 @@ mod tests {
                 data: Some(scalar_field::Data::DoubleData(arr)),
             })) => assert_eq!(arr.data, vec![2400000.5, 2400001.5]),
             other => panic!("jd column malformed: {other:?}"),
+        }
+
+        // programid column.
+        match &request.fields_data[4].field {
+            Some(Field::Scalars(ScalarField {
+                data: Some(scalar_field::Data::IntData(arr)),
+            })) => assert_eq!(arr.data, vec![1, 1]),
+            other => panic!("programid column malformed: {other:?}"),
         }
     }
 

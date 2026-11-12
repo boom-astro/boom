@@ -1173,6 +1173,30 @@ pub trait AlertWorker {
         Ok(matches)
     }
 
+    #[instrument(skip(self, collection), fields(xmatch_survey = collection.name()), err)]
+    async fn link_counterpart(
+        &self,
+        collection: &Collection<Document>,
+        id: &str,
+        object_id: &str,
+        survey: &str,
+        other_survey: &str,
+    ) -> Result<(), AlertError> {
+        let alias = doc! { "$literal": [object_id] };
+        let unlinked = format!("aliases.{}.0", survey);
+        collection
+            .update_one(
+                doc! { "_id": id, unlinked: { "$exists": false } },
+                vec![doc! { "$set": { "aliases": { "$cond": [
+                    { "$eq": [{ "$type": "$aliases" }, "object"] },
+                    { "$mergeObjects": ["$aliases", { survey: &alias }] },
+                    { other_survey: [], survey: &alias },
+                ] } } }],
+            )
+            .await?;
+        Ok(())
+    }
+
     /// Update the alert auxiliary collection (object-level table) with new survey matches,
     /// and adding new lightcurve points to the existing ones, while ensuring that the lightcurves
     /// remains strictly increasing by time and contains no duplicate time values.

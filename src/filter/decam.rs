@@ -9,13 +9,14 @@ use crate::filter::{
     build_loaded_filters, build_lsst_aux_data, build_ztf_aux_data,
     insert_lsst_aux_pipeline_if_needed, insert_ztf_aux_pipeline_if_needed, lsst_survey_match,
     record_filter_result, run_filter, update_aliases_index_multiple, uses_field_in_filter,
-    validate_filter_pipeline, watchlist_projections, ztf_survey_match, Alert, Classification,
-    Filter, FilterError, FilterResults, FilterWorker, FilterWorkerError, LoadedFilter, Origin,
-    Photometry, SurveyMatch, SurveyMatches,
+    validate_filter_pipeline, watchlist_projections, ztf_survey_match, Alert, AlertHostGalaxy,
+    Classification, Filter, FilterError, FilterResults, FilterWorker, FilterWorkerError,
+    LoadedFilter, Origin, Photometry, SurveyMatch, SurveyMatches,
 };
 use crate::utils::cutouts::CutoutStorage;
 use crate::utils::db::{fetch_timeseries_op, get_array_dict_element};
 use crate::utils::enums::Survey;
+use crate::utils::host::HostGalaxyAssociation;
 use crate::utils::lightcurves::Band;
 
 /// A single DECam difference-image forced-photometry point, as fetched from the
@@ -224,6 +225,8 @@ pub struct DecamAlertForFilter {
     pub fp_hists: Vec<DecamPhotometry>,
     #[serde(default)]
     pub survey_matches: Option<DecamSurveyMatches>,
+    #[serde(default)]
+    pub host_galaxy: Option<HostGalaxyAssociation>,
 }
 
 /// The object matched in another survey, from its aux lookup, or null.
@@ -307,6 +310,7 @@ fn create_decam_filter_alert_pipeline() -> Vec<Document> {
                     "ztf": survey_match_projection("ztf_aux", true),
                     "lsst": survey_match_projection("lsst_aux", false),
                 },
+                "host_galaxy": { "$arrayElemAt": ["$aux.host_galaxy", 0] },
                 "prv_candidates": fetch_timeseries_op(
                     "aux.prv_candidates",
                     "candidate.jd",
@@ -336,6 +340,7 @@ fn create_decam_filter_alert_pipeline() -> Vec<Document> {
                 "fp_hists.forcediffimfluxunc": 1,
                 "fp_hists.band": 1,
                 "survey_matches": 1,
+                "host_galaxy": 1,
             }
         },
     ]
@@ -437,7 +442,10 @@ pub async fn build_decam_alerts(
                 lsst: survey_matches.lsst.as_ref().map(lsst_survey_match),
                 decam: None,
             },
-            host_galaxy: None,
+            host_galaxy: alert
+                .host_galaxy
+                .as_ref()
+                .and_then(AlertHostGalaxy::from_association),
         };
 
         alerts_output.push(alert);

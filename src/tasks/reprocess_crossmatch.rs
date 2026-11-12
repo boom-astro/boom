@@ -1456,6 +1456,9 @@ fn catalog_references(
     if host.enabled && host.ls_dr10_catalog == catalog {
         references.push("host_galaxy.ls_dr10_catalog".to_string());
     }
+    if host.enabled && host.ls_dr9_catalog == catalog {
+        references.push("host_galaxy.ls_dr9_catalog".to_string());
+    }
     references
 }
 

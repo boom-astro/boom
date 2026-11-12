@@ -7,6 +7,7 @@ const NAXIS2_BYTES_LEN = NAXIS2_BYTES.length;
 const FITS_HEADER_LEN = 2880;
 const SPACE_BYTES = new TextEncoder().encode(" ");
 const SPACE_BYTE = SPACE_BYTES[0];
+const BRIGHT_STAR_RATIO = 5;
 
 function bone(n: number) {
   const points = [
@@ -226,11 +227,28 @@ function ensureFinite(image: number[]): number[] {
   });
 }
 
+function centralPixels(image: number[], size: number): number[] {
+  const r = Math.max(Math.floor(size / 8), 1);
+  const c = Math.floor(size / 2);
+  const pixels: number[] = [];
+  for (let i = c - r; i <= c + r; i++) {
+    pixels.push(...image.slice(i * size + c - r, i * size + c + r + 1));
+  }
+  return pixels;
+}
+
+function hasBrightStar(image: number[], size: number): boolean {
+  const median = [...image].sort((a, b) => a - b)[Math.floor(image.length / 2)];
+  const centralPeak = Math.max(...centralPixels(image, size).map((value) => Math.abs(value - median)));
+  return Math.max(...image) - median > BRIGHT_STAR_RATIO * centralPeak;
+}
+
 function normalizeImage(
   image: number[],
   method: "minmax" | "asymmetric_percentile" = "minmax",
   lower_percentile = 0.01,
-  upper_percentile = 1
+  upper_percentile = 1,
+  min_upper = 0
 ): number[] {
   if (method == "minmax") {
     const max = Math.max(...image);
@@ -244,7 +262,10 @@ function normalizeImage(
   } else if (method == "asymmetric_percentile") {
     const sorted = [...image].sort((a, b) => a - b);
     const lower = lower_percentile > 0 ? sorted[Math.floor(lower_percentile * sorted.length)] : 0;
-    const upper = upper_percentile < 1 ? sorted[Math.floor(upper_percentile * sorted.length)] : 1;
+    const upper = Math.max(
+      min_upper,
+      upper_percentile < 1 ? sorted[Math.floor(upper_percentile * sorted.length)] : 1
+    );
     const range = upper - lower;
     if (range === 0) {
       return image.map(() => 0.5);
@@ -337,11 +358,18 @@ export function bytes2image(bytes: Uint8Array | string | ArrayBuffer | undefined
   data = cleanupImage(data);
   
   data = normalizeImage(data, "minmax");
+  const brightStar = hasBrightStar(data, NAXIS_STANDARD);
   if (type !== "difference") {
     const alpha = survey.toLowerCase() === "lsst" ? 10.0 : 1000.0;
     data = stretchImage(data, type, "log", alpha);
   }
-  data = normalizeImage(data, "asymmetric_percentile");
+  data = normalizeImage(
+    data,
+    "asymmetric_percentile",
+    0.01,
+    brightStar ? 0.995 : 1,
+    Math.max(...centralPixels(data, NAXIS_STANDARD))
+  );
   data = ensureFinite(data);
 
   data = data.map(value => Math.round(Math.max(0, Math.min(255, value * 255))));

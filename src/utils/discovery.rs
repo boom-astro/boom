@@ -5,12 +5,13 @@
 //! across nights or recovers objects tracklet-lessly with THOR, matches what it
 //! finds to the MPC catalog, and stores the result as tracks.
 
-use crate::utils::attach::{match_track, Pool, Target};
+use crate::utils::attach::{match_track, reproduced, Pool, Target};
+use crate::utils::digest2::neo_score_of;
 use crate::utils::enums::Survey;
 use crate::utils::fast::{FastTrack, FAST_KIND};
 use crate::utils::heliolinc::{
-    sky_track, test_orbits, unbound_test_orbits, Conics, SkyResolution, State, Track,
-    KM_S_PER_AU_DAY,
+    night_magnitude_spread, sky_track, test_orbits, unbound_test_orbits, Conics, SkyResolution,
+    State, Track, KM_S_PER_AU_DAY,
 };
 use crate::utils::identify::{
     identify, known_tracklets, predict_radec, track_designation, IdentifyConfig, KnownRule, Match,
@@ -20,13 +21,14 @@ use crate::utils::linking::{
     angular_separation_deg, circular_mean_deg, find_tracklets, night_of, night_start, Detection,
     Tracklet, TrackletConfig,
 };
-use crate::utils::orbit_fit::{fit_within, Observation, OrbitFit};
-use crate::utils::sso_geometry::{Planet, Site, JUPITER, NEPTUNE, SATURN, URANUS};
+use crate::utils::orbit_fit::{fit_within, observed_minus_computed, Observation, OrbitFit};
+use crate::utils::sso_geometry::{Planet, Site, JUPITER, NEPTUNE, SATURN, URANUS, ZTF};
 use crate::utils::thor;
 use crate::utils::tracks::{
-    acquire_lock, alerts_by_survey, commit_upsert, member_id, plan_upsert, release_lock,
-    renew_lock, stamp_members, stamp_missing, survey_site, BoundFit, StoredOrbit, StoredTrack,
-    LOCK_LEASE, LOCK_RENEW_EVERY, SHARED_FOR_IDENTITY, TRACKS_COLLECTION,
+    acquire_lock, alerts_by_survey, commit_upsert, detection_id, member_of, plan_upsert,
+    release_lock, renew_lock, stamp_members, stamp_missing, summarise, survey_site, BoundFit,
+    Member, StoredOrbit, StoredTrack, UpsertPlan, LOCK_LEASE, LOCK_RENEW_EVERY,
+    MAX_TWO_NIGHT_MAG_SPREAD, MAX_TWO_NIGHT_RMS_RATIO, SHARED_FOR_IDENTITY, TRACKS_COLLECTION,
 };
 use futures::StreamExt;
 use mongodb::bson::{doc, Document};
@@ -173,7 +175,7 @@ pub async fn load_unknown(
     let filter = match survey {
         Survey::Ztf => {
             let (detections, _) = load_window(db, start, end - start, drb, false, None).await?;
-            return Ok(detections);
+            return Ok(drop_repeats(detections));
         }
         Survey::Lsst => doc! {
             "candidate.jd": jd,
@@ -222,7 +224,38 @@ pub async fn load_unknown(
             })
         });
     }
-    Ok(detections)
+    Ok(drop_repeats(detections))
+}
+
+const REPEAT_ARCSEC: f64 = 2.0;
+
+/// DECam can send two alerts an arcsecond apart for one source in one exposure.
+fn drop_repeats(mut detections: Vec<Detection>) -> Vec<Detection> {
+    let second = |d: &Detection| (d.jd * 86_400.0).round() as i64;
+    let tol_deg = REPEAT_ARCSEC / 3600.0;
+    let mut order: Vec<usize> = (0..detections.len()).collect();
+    order.sort_by(|&a, &b| {
+        let (a, b) = (&detections[a], &detections[b]);
+        second(a).cmp(&second(b)).then(a.dec.total_cmp(&b.dec))
+    });
+    let mut kept: Vec<usize> = Vec::with_capacity(order.len());
+    let mut repeats = HashSet::new();
+    for k in order {
+        let d = &detections[k];
+        let repeat = kept
+            .iter()
+            .rev()
+            .map(|&j| &detections[j])
+            .take_while(|o| second(o) == second(d) && d.dec - o.dec <= tol_deg)
+            .any(|o| angular_separation_deg(d.ra, d.dec, o.ra, o.dec) <= tol_deg);
+        if repeat {
+            repeats.insert(d.id);
+        } else {
+            kept.push(k);
+        }
+    }
+    detections.retain(|d| !repeats.contains(&d.id));
+    detections
 }
 
 pub fn associates_known(survey: &Survey) -> bool {
@@ -284,7 +317,7 @@ fn detection_from(survey: &Survey, doc: &Document) -> Option<Detection> {
         ),
     };
     Some(Detection {
-        id: member_id(survey, doc.get_i64("_id").ok()?),
+        id: detection_id(survey, doc.get_i64("_id").ok()?),
         jd,
         ra: candidate.get_f64("ra").ok()?,
         dec: candidate.get_f64("dec").ok()?,
@@ -796,6 +829,197 @@ fn orbit_of(fit: &OrbitFit) -> StoredOrbit {
     }
 }
 
+/// The residual a good fit is held to on every pass.
+const GOOD_RESIDUAL_ARCSEC: f64 = 2.0;
+
+/// `plan` without the members its orbit does not reproduce, when that orbit
+/// was fitted on only some of them, and with the verdict refitted on the rest.
+/// A member with no position to check is kept.
+async fn keep_reproduced(
+    db: &mongodb::Database,
+    plan: UpsertPlan,
+    run: &HashMap<i64, &Detection>,
+    stored: &HashMap<i64, Detection>,
+) -> Result<UpsertPlan, mongodb::error::Error> {
+    let Some(fitted_on) = plan.bound_fit_detections else {
+        return Ok(plan);
+    };
+    if plan.bound_fit.as_deref() != Some(BoundFit::Good.as_str()) || fitted_on >= plan.n_detections
+    {
+        return Ok(plan);
+    }
+    let found = member_detections(db, &plan.members, run, stored).await?;
+    let observations: Vec<Observation> = found
+        .iter()
+        .flatten()
+        .map(|d| Observation {
+            jd: d.jd,
+            ra: d.ra,
+            dec: d.dec,
+            site: d.site.unwrap_or(ZTF),
+        })
+        .collect();
+    let best = plan
+        .seeds
+        .iter()
+        .filter_map(|(orbit, rms)| {
+            let seed = State {
+                pos: orbit.pos,
+                vel: orbit.vel,
+            };
+            let (verdicts, fit) = reproduced(
+                &observations,
+                &seed,
+                orbit.epoch_jd,
+                rms.unwrap_or(0.0),
+                GOOD_RESIDUAL_ARCSEC,
+            )?;
+            let mut verdicts = verdicts.into_iter();
+            let (mut members, mut epochs, mut dropped) = (Vec::new(), Vec::new(), Vec::new());
+            for ((member, epoch), position) in plan.members.iter().zip(&plan.epochs).zip(&found) {
+                if position.is_none() || verdicts.next().unwrap_or(true) {
+                    members.push(member.clone());
+                    epochs.push(*epoch);
+                } else {
+                    dropped.push(member.clone());
+                }
+            }
+            let summary = summarise(&members, &epochs);
+            Some((members, epochs, dropped, summary, fit))
+        })
+        .max_by(
+            |(.., (n_a, nights_a, ..), fit_a), (.., (n_b, nights_b, ..), fit_b)| {
+                (n_a, nights_a)
+                    .cmp(&(n_b, nights_b))
+                    .then(fit_b.rms_arcsec.total_cmp(&fit_a.rms_arcsec))
+            },
+        );
+    let Some((
+        members,
+        epochs,
+        dropped,
+        (n_detections, n_nights, arc_days, first_jd, last_jd),
+        fit,
+    )) = best
+    else {
+        return Ok(plan);
+    };
+    Ok(UpsertPlan {
+        members,
+        epochs,
+        n_detections,
+        n_nights,
+        arc_days,
+        first_jd,
+        last_jd,
+        bound_fit_residual_arcsec: Some(fit.rms_arcsec),
+        bound_fit_detections: Some(fit.n_obs as i32),
+        orbit: Some(orbit_of(&fit)),
+        dropped,
+        unchanged_since: None,
+        ..plan
+    })
+}
+
+/// The detection behind each of `members`, from the run or else its alert, and
+/// `None` for one with neither.
+async fn member_detections(
+    db: &mongodb::Database,
+    members: &[Member],
+    run: &HashMap<i64, &Detection>,
+    stored: &HashMap<i64, Detection>,
+) -> Result<Vec<Option<Detection>>, mongodb::error::Error> {
+    let ids: Vec<i64> = members
+        .iter()
+        .map(|(survey, id)| detection_id(survey, *id))
+        .collect();
+    let at_hand = |id: &i64| run.get(id).map(|d| **d).or_else(|| stored.get(id).copied());
+    let elsewhere: Vec<Member> = members
+        .iter()
+        .zip(&ids)
+        .filter(|&(_, id)| at_hand(id).is_none())
+        .map(|(m, _)| m.clone())
+        .collect();
+    let loaded = load_positions(db, &elsewhere).await?;
+    Ok(ids
+        .iter()
+        .map(|id| at_hand(id).or_else(|| loaded.get(id).copied()))
+        .collect())
+}
+
+pub async fn member_residuals(
+    db: &mongodb::Database,
+    track: &StoredTrack,
+) -> Result<Vec<Option<[f64; 2]>>, mongodb::error::Error> {
+    let Some(orbit) = track.orbit else {
+        return Ok(Vec::new());
+    };
+    let state = State {
+        pos: orbit.pos,
+        vel: orbit.vel,
+    };
+    let found =
+        member_detections(db, &track.member_keys(), &HashMap::new(), &HashMap::new()).await?;
+    Ok(found
+        .iter()
+        .map(|d| {
+            let d = d.as_ref()?;
+            let obs = Observation {
+                jd: d.jd,
+                ra: d.ra,
+                dec: d.dec,
+                site: d.site.unwrap_or(ZTF),
+            };
+            observed_minus_computed(&state, orbit.epoch_jd, &obs).map(|(ra, dec)| [ra, dec])
+        })
+        .collect())
+}
+
+/// `plan` with the spread of its nightly magnitudes under its orbit, over every
+/// member, including those of the tracks it extends. Skipped for a plan that
+/// writes nothing.
+async fn with_mag_spread(
+    db: &mongodb::Database,
+    mut plan: UpsertPlan,
+    run: &HashMap<i64, &Detection>,
+    stored: &HashMap<i64, Detection>,
+) -> Result<UpsertPlan, mongodb::error::Error> {
+    let Some(orbit) = plan.orbit.filter(|_| plan.unchanged_since.is_none()) else {
+        return Ok(plan);
+    };
+    let found = member_detections(db, &plan.members, run, stored).await?;
+    let detections: Vec<&Detection> = found.iter().flatten().collect();
+    let state = State {
+        pos: orbit.pos,
+        vel: orbit.vel,
+    };
+    plan.mag_spread = night_magnitude_spread(&state, orbit.epoch_jd, &detections);
+    Ok(plan)
+}
+
+/// Positions of `members` from their alerts, by detection id.
+async fn load_positions(
+    db: &mongodb::Database,
+    members: &[Member],
+) -> Result<HashMap<i64, Detection>, mongodb::error::Error> {
+    let mut positions = HashMap::new();
+    for (survey, ids) in alerts_by_survey(members) {
+        for chunk in ids.chunks(10_000) {
+            let mut cursor = db
+                .collection::<Document>(&format!("{survey}_alerts"))
+                .find(doc! { "_id": { "$in": chunk } })
+                .projection(projection(&survey))
+                .await?;
+            while let Some(doc) = cursor.next().await {
+                if let Some(d) = detection_from(&survey, &doc?) {
+                    positions.insert(d.id, d);
+                }
+            }
+        }
+    }
+    Ok(positions)
+}
+
 /// Store each track under a durable id and stamp it onto its member alerts.
 ///
 /// `known` is parallel to `tracks`, or empty when tracks were not matched to
@@ -923,6 +1147,39 @@ pub async fn persist_fast(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
+pub async fn persist_fast_tracklets(
+    db: &mongodb::Database,
+    tracklets: &[Tracklet],
+    detections: &[Detection],
+    labels: &HashMap<i64, String>,
+    known: &[Option<String>],
+    planets: &[Option<&'static str>],
+    dry_run: bool,
+    stop: &Stop,
+) -> PersistReport {
+    let candidates = tracklets.iter().map(|t| Candidate {
+        members: t.ids.clone(),
+        fit: (BoundFit::Ungated, None),
+        orbit: None,
+    });
+    persist(
+        db,
+        "fast tracklets",
+        Some(FAST_KIND),
+        candidates,
+        detections,
+        labels,
+        known,
+        planets,
+        dry_run,
+        &HashMap::new(),
+        (2, 1),
+        stop,
+    )
+    .await
+}
+
 /// Store each candidate as a track, holding the tracks lock throughout.
 ///
 /// One at a time rather than in bulk: identity is decided against what is
@@ -941,7 +1198,7 @@ async fn persist(
     known: &[Option<String>],
     planets: &[Option<&'static str>],
     dry_run: bool,
-    stored_jds: &HashMap<i64, f64>,
+    stored: &HashMap<i64, Detection>,
     (min_detections, min_nights): (usize, usize),
     stop: &Stop,
 ) -> PersistReport {
@@ -973,6 +1230,7 @@ async fn persist(
     report.ran = true;
     let mut renewed = std::time::Instant::now();
     let by_id: HashMap<i64, &Detection> = detections.iter().map(|d| (d.id, d)).collect();
+    let mut off_orbit = 0;
     for (
         i,
         Candidate {
@@ -1015,22 +1273,29 @@ async fn persist(
                 }
             }
         }
-        let jds: Vec<f64> = members
+        let found: Vec<&Detection> = members
             .iter()
-            .filter_map(|id| {
-                by_id
-                    .get(id)
-                    .map(|d| d.jd)
-                    .or_else(|| stored_jds.get(id).copied())
-            })
+            .filter_map(|id| by_id.get(id).copied().or_else(|| stored.get(id)))
             .collect();
-        if jds.len() != members.len() {
+        if found.len() != members.len() {
             error!(
                 "one of the {} references detections not in this run, skipping",
                 what
             );
             continue;
         }
+        let Some(keys) = found
+            .iter()
+            .map(|d| member_of(d))
+            .collect::<Option<Vec<Member>>>()
+        else {
+            error!(
+                "one of the {} has a detection from a site with no alerts, skipping",
+                what
+            );
+            continue;
+        };
+        let jds: Vec<f64> = found.iter().map(|d| d.jd).collect();
         // A track of a known object records the designation, which is what tells
         // a consumer this is a recovery rather than a discovery candidate. The
         // survey's own label comes first, then the catalog match.
@@ -1040,33 +1305,68 @@ async fn persist(
             .map(|l| crate::utils::mpcorb::normalize_ztf_ssnamenr(l).unwrap_or_else(|| l.clone()))
             .or_else(|| known.get(i).cloned().flatten());
         let near_planet = planets.get(i).copied().flatten().map(str::to_string);
-        let plan = match plan_upsert(
-            db,
-            &members,
-            &jds,
-            designation,
-            near_planet,
-            Some(fit),
-            orbit,
-        )
-        .await
-        {
-            Ok(plan) => match kind {
-                Some(kind) => plan.with_kind(kind),
-                None => plan,
-            },
+        let plan =
+            match plan_upsert(db, &keys, &jds, designation, near_planet, Some(fit), orbit).await {
+                Ok(plan) => match kind {
+                    Some(kind) => plan.with_kind(kind),
+                    None => plan,
+                },
+                Err(e) => {
+                    error!("could not resolve one of the {}: {}", what, e);
+                    report.failed += 1;
+                    continue;
+                }
+            };
+        let plan = match keep_reproduced(db, plan, &by_id, stored).await {
+            Ok(plan) => plan,
             Err(e) => {
-                error!("could not resolve one of the {}: {}", what, e);
+                error!(
+                    "could not check one of the {} against its orbit: {}",
+                    what, e
+                );
                 report.failed += 1;
                 continue;
             }
         };
+        let plan = match with_mag_spread(db, plan, &by_id, stored).await {
+            Ok(plan) => plan,
+            Err(e) => {
+                error!(
+                    "could not load the magnitudes of one of the {}: {}",
+                    what, e
+                );
+                report.failed += 1;
+                continue;
+            }
+        };
+        off_orbit += plan.dropped.len();
+        let plan = match kind
+            .filter(|k| *k == FAST_KIND)
+            .and_then(|_| neo_score_of(&found))
+        {
+            Some(score) => plan.with_neo_score(score.noid),
+            None => plan,
+        };
         if !plan.meets(min_detections, min_nights) {
             info!(
-                "dropping a track: {} detections over {} nights after {} contested detection(s) were left with another track",
+                "dropping a track: {} detections over {} nights after {} contested detection(s) were left with another track and {} were off its orbit",
                 plan.n_detections,
                 plan.n_nights,
-                plan.contested.len()
+                plan.contested.len(),
+                plan.dropped.len()
+            );
+            continue;
+        }
+        let rms_ratio = plan.rms_ratio().unwrap_or(0.0);
+        let mag_spread = plan.mag_spread.unwrap_or(0.0);
+        if plan.n_nights == 2
+            && plan.designation.is_none()
+            && kind != Some(FAST_KIND)
+            && (rms_ratio > MAX_TWO_NIGHT_RMS_RATIO || mag_spread > MAX_TWO_NIGHT_MAG_SPREAD)
+        {
+            info!(
+                "dropping an unidentified track over two nights: residual {:.1} times the astrometric precision, nightly magnitudes {:.1} apart",
+                rms_ratio, mag_spread
             );
             continue;
         }
@@ -1120,7 +1420,7 @@ async fn persist(
     }
     stop.writing.store(false, Ordering::Relaxed);
     info!(
-        "{} {} {} ({} unchanged, {} failed), stamped {} alerts, absorbed {} superseded ids",
+        "{} {} {} ({} unchanged, {} failed), stamped {} alerts, absorbed {} superseded ids, left {} detections off their orbits",
         if dry_run {
             "dry run: would store"
         } else {
@@ -1131,7 +1431,8 @@ async fn persist(
         report.unchanged,
         report.failed,
         report.stamped,
-        report.absorbed
+        report.absorbed,
+        off_orbit
     );
     report
 }
@@ -1152,39 +1453,23 @@ pub async fn load_targets(
     }
     let claimed: HashSet<i64> = stored
         .iter()
-        .flat_map(|t| t.members.iter().copied())
+        .flat_map(|t| t.member_keys())
+        .map(|(survey, id)| detection_id(&survey, id))
         .collect();
     let fitted: Vec<&StoredTrack> = stored
         .iter()
         .filter(|t| t.orbit.is_some() && t.bound_fit.as_deref() == Some(BoundFit::Good.as_str()))
         .collect();
-    let wanted: Vec<i64> = fitted
-        .iter()
-        .flat_map(|t| t.members.iter().copied())
-        .collect();
-    let mut positions: HashMap<i64, Detection> = HashMap::new();
-    for (survey, ids) in alerts_by_survey(&wanted) {
-        for chunk in ids.chunks(10_000) {
-            let mut cursor = db
-                .collection::<Document>(&format!("{survey}_alerts"))
-                .find(doc! { "_id": { "$in": chunk } })
-                .projection(projection(&survey))
-                .await?;
-            while let Some(doc) = cursor.next().await {
-                if let Some(d) = detection_from(&survey, &doc?) {
-                    positions.insert(d.id, d);
-                }
-            }
-        }
-    }
+    let wanted: Vec<Member> = fitted.iter().flat_map(|t| t.member_keys()).collect();
+    let positions = load_positions(db, &wanted).await?;
     let targets = fitted
         .into_iter()
         .filter_map(|t| {
             let orbit = t.orbit?;
             let members: Vec<Detection> = t
-                .members
+                .member_keys()
                 .iter()
-                .filter_map(|m| positions.get(m).copied())
+                .filter_map(|(survey, id)| positions.get(&detection_id(survey, *id)).copied())
                 .collect();
             (members.len() == t.members.len()).then(|| Target {
                 id: t.id.clone(),
@@ -1221,9 +1506,9 @@ pub async fn attach_pass(
 ) -> Result<AttachReport, DiscoveryError> {
     let (targets, claimed) = load_targets(db, since_jd).await?;
     let by_id: HashMap<i64, Detection> = detections.iter().map(|d| (d.id, *d)).collect();
-    let stored_jds: HashMap<i64, f64> = targets
+    let stored: HashMap<i64, Detection> = targets
         .iter()
-        .flat_map(|t| t.members.iter().map(|d| (d.id, d.jd)))
+        .flat_map(|t| t.members.iter().map(|d| (d.id, *d)))
         .collect();
     let in_found: HashSet<i64> = found.iter().flatten().copied().collect();
     let mut report = AttachReport::default();
@@ -1278,7 +1563,7 @@ pub async fn attach_pass(
         &[],
         &[],
         dry_run,
-        &stored_jds,
+        &stored,
         (1, 1),
         stop,
     )

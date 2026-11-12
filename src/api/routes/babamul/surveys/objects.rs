@@ -5,9 +5,14 @@ use crate::alert::{
 use crate::api::models::response;
 use crate::api::routes::babamul::surveys::alerts::{EnrichedLsstAlert, EnrichedZtfAlert};
 use crate::api::routes::babamul::BabamulUser;
+use crate::enrichment::models::{
+    classify_with_service, find_model_spec, HyraxInput, HyraxPredictError, HYRAX_MODELS,
+};
 use crate::enrichment::{LsstAlertProperties, ZtfAlertClassifications, ZtfAlertProperties};
 use crate::utils::enums::Survey;
+use crate::utils::host::{HostGalaxyAssociation, StoredHostCandidate};
 use crate::utils::spatial::Coordinates;
+use crate::utils::tns::{photometry_for_matches, TnsPhotometry};
 use actix_web::{get, post, web, HttpResponse};
 use futures::TryStreamExt;
 use mongodb::{bson::doc, Collection, Database};
@@ -49,6 +54,39 @@ struct ZtfSurveyMatches {
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
+struct ObjHost {
+    name: Option<String>,
+    catalog: Option<String>,
+    z: Option<f64>,
+    z_err: Option<f64>,
+    dist_mpc: Option<f64>,
+    dist_mpc_method: Option<String>,
+    sep_arcsec: f64,
+    sep_kpc: Option<f64>,
+    d_dlr: f64,
+}
+
+impl From<&StoredHostCandidate> for ObjHost {
+    fn from(host: &StoredHostCandidate) -> Self {
+        Self {
+            name: host.objname.clone(),
+            catalog: host.catalog.clone(),
+            z: host.z,
+            z_err: host.z_err,
+            dist_mpc: host.dist_mpc,
+            dist_mpc_method: host.dist_mpc_method.clone(),
+            sep_arcsec: host.sep_arcsec,
+            sep_kpc: host.sep_kpc,
+            d_dlr: host.d_dlr,
+        }
+    }
+}
+
+fn best_host_of(host_galaxy: Option<&HostGalaxyAssociation>) -> Option<ObjHost> {
+    host_galaxy?.best_host.as_ref().map(ObjHost::from)
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
 struct ZtfObj {
     candid: i64,
     #[serde(rename = "objectId")]
@@ -61,7 +99,9 @@ struct ZtfObj {
     classifications: Option<ZtfAlertClassifications>,
     classifications_history: Vec<ZtfAlertClassifications>,
     cross_matches: serde_json::Value,
+    best_host: Option<ObjHost>,
     survey_matches: ZtfSurveyMatches,
+    tns_photometry: Option<TnsPhotometry>,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
@@ -91,7 +131,9 @@ struct LsstObj {
     prv_candidates: Vec<LsstPrvCandidate>,
     fp_hists: Vec<LsstForcedPhot>,
     cross_matches: serde_json::Value,
+    best_host: Option<ObjHost>,
     survey_matches: LsstSurveyMatches,
+    tns_photometry: Option<TnsPhotometry>,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
@@ -242,6 +284,7 @@ pub async fn get_object(
                 }
             };
 
+            let tns_photometry = tns_photometry_of(&db, aux_entry.cross_matches.as_ref()).await;
             let survey_matches = ZtfSurveyMatches {
                 lsst: match nearest_lsst {
                     Some(lsst_obj) => {
@@ -288,7 +331,9 @@ pub async fn get_object(
                 classifications: newest_alert.classifications,
                 classifications_history,
                 cross_matches: serde_json::json!(aux_entry.cross_matches),
+                best_host: best_host_of(aux_entry.host_galaxy.as_ref()),
                 survey_matches,
+                tns_photometry,
             };
             return response::ok_ser(&format!("object found with object_id: {}", object_id), obj);
         }
@@ -373,6 +418,7 @@ pub async fn get_object(
                 }
             };
 
+            let tns_photometry = tns_photometry_of(&db, aux_entry.cross_matches.as_ref()).await;
             let survey_matches = LsstSurveyMatches {
                 ztf: match nearest_ztf {
                     Some(ztf_obj) => {
@@ -417,7 +463,9 @@ pub async fn get_object(
                 prv_candidates: aux_entry.prv_candidates,
                 fp_hists: aux_entry.fp_hists,
                 cross_matches: serde_json::json!(aux_entry.cross_matches),
+                best_host: best_host_of(aux_entry.host_galaxy.as_ref()),
                 survey_matches,
+                tns_photometry,
             };
             return response::ok_ser(&format!("object found with object_id: {}", object_id), obj);
         }
@@ -427,6 +475,17 @@ pub async fn get_object(
             );
         }
     }
+}
+
+async fn tns_photometry_of(
+    db: &Database,
+    cross_matches: Option<&HashMap<String, Vec<mongodb::bson::Document>>>,
+) -> Option<TnsPhotometry> {
+    photometry_for_matches(db, cross_matches)
+        .await
+        .inspect_err(|error| tracing::warn!("could not read TNS photometry: {error}"))
+        .ok()
+        .flatten()
 }
 
 fn ztf_bad_formatting_message(value: &str) -> String {
@@ -1042,4 +1101,308 @@ pub async fn get_objects_xmatches(
         data: cross_matches_map,
     };
     HttpResponse::Ok().json(response)
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
+pub struct ClassificationModelInfo {
+    /// Identifier to send back in the `model` field of a classify request.
+    id: String,
+    name: String,
+    description: String,
+}
+
+/// List the Hyrax models that can be run on demand against objects of a survey.
+///
+/// Every model registered for the survey is reported and every one of them can be
+/// selected: whether a model can answer is decided when it is run, not here. The
+/// class labels are left out because the model names its own in the classify result.
+#[utoipa::path(
+    get,
+    path = "/babamul/surveys/{survey}/classification-models",
+    params(
+        ("survey" = Survey, Path, description = "Name of the survey (e.g., ztf, lsst)"),
+    ),
+    responses(
+        (status = 200, description = "Available models", body = Vec<ClassificationModelInfo>),
+        (status = 500, description = "Internal server error")
+    ),
+    tags=["Surveys"]
+)]
+#[get("/surveys/{survey}/classification-models")]
+pub async fn get_classification_models(path: web::Path<Survey>) -> HttpResponse {
+    let survey = path.into_inner();
+    let models: Vec<ClassificationModelInfo> = HYRAX_MODELS
+        .iter()
+        .filter(|spec| spec.surveys.contains(&survey))
+        .map(|spec| ClassificationModelInfo {
+            id: spec.id.to_string(),
+            name: spec.name.to_string(),
+            description: spec.description.to_string(),
+        })
+        .collect();
+
+    response::ok_ser(&format!("Found {} models", models.len()), models)
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ToSchema)]
+pub struct ClassifyObjectQuery {
+    /// Id of the model to run, as returned by the classification-models endpoint.
+    model: String,
+}
+
+/// An alert as a model sees it: the candidate block and whatever enrichment the
+/// ingest workers already attached to it.
+///
+/// Its own type rather than the object endpoint's response: classify sends the
+/// brightest alert, not the newest, and has no use for cross-survey matches.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct ScoredZtfAlert {
+    candidate: ZtfCandidate,
+    properties: Option<ZtfAlertProperties>,
+    classifications: Option<ZtfAlertClassifications>,
+}
+
+/// LSST counterpart of [`ScoredZtfAlert`]. LSST alerts carry no `classifications`.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct ScoredLsstAlert {
+    candidate: LsstCandidate,
+    properties: Option<LsstAlertProperties>,
+}
+
+/// The object's light curve and cross-matches, from its aux document.
+async fn fetch_object_photometry(
+    db: &Database,
+    survey: &Survey,
+    object_id: &str,
+) -> Result<(serde_json::Value, serde_json::Value), HttpResponse> {
+    let aux_filter = doc! { "_id": object_id };
+    let not_found = || response::not_found(&format!("no object found with id {}", object_id));
+
+    match survey {
+        Survey::Ztf => {
+            let aux: ZtfObject = db
+                .collection("ZTF_alerts_aux")
+                .find_one(aux_filter)
+                .await
+                .map_err(aux_lookup_error(object_id))?
+                .ok_or_else(not_found)?;
+
+            // Limit photometry to programid 1 (public ZTF alerts), as the object
+            // endpoint does.
+            Ok((
+                serde_json::json!({
+                    "prv_candidates": aux.prv_candidates
+                        .into_iter()
+                        .filter(|c| c.prv_candidate.programid == 1)
+                        .collect::<Vec<_>>(),
+                    "prv_nondetections": aux.prv_nondetections
+                        .into_iter()
+                        .filter(|c| c.prv_candidate.programid == 1)
+                        .collect::<Vec<_>>(),
+                    "fp_hists": aux.fp_hists
+                        .into_iter()
+                        .filter(|c| c.fp_hist.programid == 1)
+                        .collect::<Vec<_>>(),
+                }),
+                serde_json::json!(aux.cross_matches),
+            ))
+        }
+        Survey::Lsst => {
+            let aux: LsstObject = db
+                .collection("LSST_alerts_aux")
+                .find_one(aux_filter)
+                .await
+                .map_err(aux_lookup_error(object_id))?
+                .ok_or_else(not_found)?;
+
+            Ok((
+                serde_json::json!({
+                    "prv_candidates": aux.prv_candidates,
+                    "fp_hists": aux.fp_hists,
+                }),
+                serde_json::json!(aux.cross_matches),
+            ))
+        }
+        _ => Err(response::bad_request(
+            "Invalid survey specified, only ZTF and LSST are supported",
+        )),
+    }
+}
+
+/// Error mapper for the aux-document lookup, kept out of the branches above so both
+/// surveys report the failure the same way.
+fn aux_lookup_error(object_id: &str) -> impl Fn(mongodb::error::Error) -> HttpResponse + '_ {
+    move |error| {
+        response::internal_error(&format!(
+            "error getting aux entry for object {}: {}",
+            object_id, error
+        ))
+    }
+}
+
+/// The object's brightest public alert as JSON, the same default the cutouts
+/// endpoint shows. `Null` when it cannot be read: it is context for the model, so
+/// losing it does not fail the run.
+async fn fetch_brightest_alert(
+    db: &Database,
+    survey: &Survey,
+    object_id: &str,
+) -> serde_json::Value {
+    let mut filter = doc! { "objectId": object_id };
+    // Lowest mag is brightest.
+    let sort = doc! { "candidate.magpsf": 1 };
+    let alert = match survey {
+        Survey::Ztf => {
+            filter.insert("candidate.programid", 1);
+            db.collection::<ScoredZtfAlert>("ZTF_alerts")
+                .find_one(filter)
+                .sort(sort)
+                .await
+                .map(|alert| alert.map(serde_json::to_value))
+        }
+        Survey::Lsst => db
+            .collection::<ScoredLsstAlert>("LSST_alerts")
+            .find_one(filter)
+            .sort(sort)
+            .await
+            .map(|alert| alert.map(serde_json::to_value)),
+        _ => return serde_json::Value::Null,
+    };
+
+    match alert {
+        Ok(Some(Ok(alert))) => alert,
+        Ok(None) => serde_json::Value::Null,
+        Ok(Some(Err(error))) => {
+            tracing::warn!(object = object_id, %error, "could not serialize the brightest alert");
+            serde_json::Value::Null
+        }
+        Err(error) => {
+            tracing::warn!(object = object_id, %error, "could not read the brightest alert");
+            serde_json::Value::Null
+        }
+    }
+}
+
+/// Gather what a model run sends: the object's light curve, plus its brightest
+/// alert and cross-matches as metadata.
+async fn fetch_hyrax_object_inputs(
+    db: &Database,
+    survey: &Survey,
+    object_id: &str,
+) -> Result<HyraxInput, HttpResponse> {
+    let (photometry, alert) = futures::join!(
+        fetch_object_photometry(db, survey, object_id),
+        fetch_brightest_alert(db, survey, object_id),
+    );
+    let (photometry, cross_matches) = photometry?;
+
+    Ok(HyraxInput {
+        photometry,
+        metadata: serde_json::json!({
+            "objectId": object_id,
+            "survey": survey.to_string(),
+            "alert": alert,
+            "cross_matches": cross_matches,
+        }),
+    })
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
+pub struct ClassifyObjectResult {
+    /// Id of the model that produced this result.
+    model: String,
+    /// Class name -> probability. The model names its own classes.
+    classes: HashMap<String, f32>,
+    /// Highest-probability class.
+    pred_class: String,
+    /// Evidential uncertainty: how little evidence the model had to go on, from 0
+    /// (well-evidenced) to 1.
+    vacuity: f32,
+    /// Entropy of the predicted class distribution.
+    predictive_entropy: f32,
+    /// How many photometry points the model actually used.
+    n_events_used: usize,
+}
+
+/// Run a Hyrax model against a single object, on demand.
+///
+/// The model scores the object's whole light curve, out of process: the API gathers
+/// the photometry and hands it to the model's inference service.
+///
+/// Results are returned to the caller only — unlike the classifications produced by
+/// the enrichment worker at ingest time, they are not persisted onto the object.
+#[utoipa::path(
+    post,
+    path = "/babamul/surveys/{survey}/objects/{object_id}/classify",
+    params(
+        ("survey" = Survey, Path, description = "Name of the survey (e.g., ztf, lsst)"),
+        ("object_id" = String, Path, description = "ID of the object to classify"),
+    ),
+    request_body = ClassifyObjectQuery,
+    responses(
+        (status = 200, description = "Classification result", body = ClassifyObjectResult),
+        (status = 400, description = "Unknown model, model not supported for this survey, or the object's data gave the model nothing to score"),
+        (status = 404, description = "Object not found"),
+        (status = 503, description = "The model's inference service is unreachable or not ready"),
+        (status = 500, description = "Internal server error")
+    ),
+    tags=["Surveys"]
+)]
+#[post("/surveys/{survey}/objects/{object_id}/classify")]
+pub async fn classify_object(
+    path: web::Path<(Survey, String)>,
+    query: web::Json<ClassifyObjectQuery>,
+    db: web::Data<Database>,
+) -> HttpResponse {
+    let (survey, object_id) = path.into_inner();
+    let model_id = query.into_inner().model;
+
+    let spec = match find_model_spec(&model_id) {
+        Some(spec) => spec,
+        None => {
+            return response::bad_request(&format!("Unknown model: {}", model_id));
+        }
+    };
+    if !spec.surveys.contains(&survey) {
+        return response::bad_request(&format!(
+            "Model {} does not support survey {}",
+            spec.id, survey
+        ));
+    }
+    // Nothing else is checked before the run: a model whose service is not running
+    // fails below, with the reason the service gives, rather than being refused here.
+
+    let input = match fetch_hyrax_object_inputs(&db, &survey, &object_id).await {
+        Ok(input) => input,
+        Err(response) => return response,
+    };
+
+    match classify_with_service(spec, &object_id, &input).await {
+        Ok(result) => response::ok_ser(
+            &format!("Ran {} on object {}", spec.id, object_id),
+            ClassifyObjectResult {
+                model: spec.id.to_string(),
+                classes: result.classes,
+                pred_class: result.pred_class,
+                vacuity: result.vacuity,
+                predictive_entropy: result.predictive_entropy,
+                n_events_used: result.n_events_used,
+            },
+        ),
+        Err(HyraxPredictError::Unclassifiable { detail }) => response::bad_request(&format!(
+            "Model {} could not classify {}: {}",
+            spec.id, object_id, detail
+        )),
+        Err(
+            error @ (HyraxPredictError::ServiceUnreachable { .. }
+            | HyraxPredictError::ServiceNotReady { .. }),
+        ) => {
+            tracing::error!(model = spec.id, %error, "Hyrax inference service is unavailable");
+            response::service_unavailable(&format!("Model {} is not available", spec.id))
+        }
+        Err(error) => {
+            tracing::error!(model = spec.id, %error, "Hyrax inference failed");
+            response::internal_error(&format!("error running model {}: {}", spec.id, error))
+        }
+    }
 }

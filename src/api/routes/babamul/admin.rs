@@ -273,7 +273,7 @@ fn require_admin(
     current_user: Option<web::ReqData<BabamulUser>>,
 ) -> Result<BabamulUser, HttpResponse> {
     let Some(user) = current_user else {
-        return Err(HttpResponse::Unauthorized().body("Unauthorized"));
+        return Err(response::unauthorized("Unauthorized"));
     };
     let user = user.into_inner();
     if !user.is_admin {

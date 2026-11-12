@@ -19,7 +19,7 @@ pub(crate) const PARABOLIC_TOLERANCE: f64 = 1e-8;
 const KEPLER_MAX_ITER: usize = 64;
 
 /// Heliocentric osculating elements at `epoch_jd`, as MPCORB distributes them.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
 pub struct OrbitalElements {
     pub epoch_jd: f64,
     /// Semimajor axis, au.

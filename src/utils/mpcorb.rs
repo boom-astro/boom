@@ -536,6 +536,241 @@ pub fn elements_from_document(doc: &Document) -> Option<OrbitalElements> {
 /// a truncated catalogue would quietly pass for fewer known objects.
 pub async fn load_catalogue(
     db: &mongodb::Database,
+    jd: f64,
+) -> Result<Vec<crate::utils::identify::OrbitEntry>, mongodb::error::Error> {
+    let mut orbits = load_mpcorb(db).await?;
+    let Some(epoch) = nearest_epoch(db, jd).await? else {
+        return Ok(orbits);
+    };
+    let propagated = load_epoch(db, epoch).await?;
+    let mut replaced = 0usize;
+    for orbit in &mut orbits {
+        if let Some((source, elements)) = propagated.get(&orbit.designation) {
+            if *source == orbit.elements {
+                orbit.elements = *elements;
+                replaced += 1;
+            }
+        }
+    }
+    tracing::info!(
+        epoch,
+        replaced,
+        total = orbits.len(),
+        "catalog orbits taken from N-body propagation"
+    );
+    Ok(orbits)
+}
+
+pub const PROPAGATED_COLLECTION: &str = "MPC_orbits_nbody";
+pub const EPOCHS_COLLECTION: &str = "MPC_orbits_epochs";
+pub const MAX_EPOCH_GAP_DAYS: f64 = 15.0;
+
+async fn nearest_epoch(
+    db: &mongodb::Database,
+    jd: f64,
+) -> Result<Option<f64>, mongodb::error::Error> {
+    let epochs: Vec<Document> = db
+        .collection::<Document>(EPOCHS_COLLECTION)
+        .find(doc! { "_id": {
+            "$gte": jd - MAX_EPOCH_GAP_DAYS,
+            "$lte": jd + MAX_EPOCH_GAP_DAYS,
+        } })
+        .await?
+        .try_collect()
+        .await?;
+    Ok(epochs
+        .iter()
+        .filter_map(|d| d.get_f64("_id").ok())
+        .min_by(|a, b| (a - jd).abs().total_cmp(&(b - jd).abs())))
+}
+
+/// `(source, propagated)` elements by designation.
+async fn load_epoch(
+    db: &mongodb::Database,
+    epoch: f64,
+) -> Result<HashMap<String, (OrbitalElements, OrbitalElements)>, mongodb::error::Error> {
+    let mut cursor = db
+        .collection::<Document>(PROPAGATED_COLLECTION)
+        .find(doc! { "epoch_jd": epoch })
+        .await?;
+    let mut out = HashMap::new();
+    while let Some(d) = cursor.try_next().await? {
+        let source = d
+            .get_document("source")
+            .ok()
+            .and_then(elements_from_document);
+        if let (Ok(designation), Some(source), Some(elements)) =
+            (d.get_str("designation"), source, elements_from_document(&d))
+        {
+            out.insert(designation.to_string(), (source, elements));
+        }
+    }
+    Ok(out)
+}
+
+fn elements_document(el: &OrbitalElements) -> Document {
+    doc! {
+        "epoch_jd": el.epoch_jd,
+        "a": el.a,
+        "e": el.e,
+        "incl": el.incl,
+        "node": el.node,
+        "peri": el.peri,
+        "mean_anomaly": el.mean_anomaly,
+        "q": el.q,
+        "tp": el.tp,
+    }
+}
+
+#[derive(thiserror::Error, Debug)]
+pub enum PropagationError {
+    #[error(transparent)]
+    Nbody(#[from] crate::utils::nbody::NbodyError),
+    #[error(transparent)]
+    Mongo(#[from] mongodb::error::Error),
+    #[error("propagation panicked: {0}")]
+    Join(#[from] tokio::task::JoinError),
+    #[error("canceled")]
+    Canceled,
+}
+
+pub async fn stale_orbits(
+    db: &mongodb::Database,
+    orbits: Vec<crate::utils::identify::OrbitEntry>,
+    epoch: f64,
+) -> Result<Vec<crate::utils::identify::OrbitEntry>, mongodb::error::Error> {
+    let stored = load_epoch(db, epoch).await?;
+    Ok(orbits
+        .into_iter()
+        .filter(|o| {
+            stored
+                .get(&o.designation)
+                .is_none_or(|(source, _)| *source != o.elements)
+        })
+        .collect())
+}
+
+pub async fn propagate_to_epochs<F, Fut>(
+    db: &mongodb::Database,
+    orbits: &[crate::utils::identify::OrbitEntry],
+    epochs: &[f64],
+    live: bool,
+    threads: usize,
+    keep_going: F,
+) -> Result<u64, PropagationError>
+where
+    F: Fn(u64, u64) -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    use mongodb::options::{ReplaceOneModel, UpdateOneModel, WriteModel};
+
+    let mut epochs = epochs.to_vec();
+    epochs.sort_by(f64::total_cmp);
+    epochs.dedup();
+    crate::utils::nbody::load_planets().await?;
+
+    let propagated = db.collection::<Document>(PROPAGATED_COLLECTION);
+    propagated
+        .create_index(
+            mongodb::IndexModel::builder()
+                .keys(doc! { "epoch_jd": 1 })
+                .build(),
+        )
+        .await?;
+
+    let chunk_size = (200_000 / epochs.len().max(1)).clamp(1_000, 50_000);
+    let total = orbits.len() as u64;
+    let mut done = 0u64;
+    let mut written = 0u64;
+    for chunk in orbits.chunks(chunk_size) {
+        let sources: Vec<OrbitalElements> = chunk.iter().map(|o| o.elements).collect();
+        let targets = epochs.clone();
+        let results = tokio::task::spawn_blocking(move || {
+            crate::utils::nbody::propagate_all(&sources, &targets, threads)
+        })
+        .await??;
+
+        let now = chrono::Utc::now().timestamp() as f64;
+        let mut models = Vec::new();
+        for (orbit, at_epochs) in chunk.iter().zip(&results) {
+            for (epoch, elements) in epochs.iter().zip(at_epochs) {
+                let Some(elements) = elements else { continue };
+                let id = format!("{epoch}|{}", orbit.designation);
+                let mut replacement = elements_document(elements);
+                replacement.insert("_id", id.as_str());
+                replacement.insert("epoch_jd", *epoch);
+                replacement.insert("designation", orbit.designation.as_str());
+                replacement.insert("source", elements_document(&orbit.elements));
+                replacement.insert("updated_at", now);
+                models.push(WriteModel::ReplaceOne(
+                    ReplaceOneModel::builder()
+                        .namespace(propagated.namespace())
+                        .filter(doc! { "_id": id })
+                        .replacement(replacement)
+                        .upsert(true)
+                        .build(),
+                ));
+            }
+        }
+        written += models.len() as u64;
+        if !models.is_empty() {
+            db.client().bulk_write(models).await?;
+        }
+        done += chunk.len() as u64;
+        if !keep_going(done, total).await {
+            return Err(PropagationError::Canceled);
+        }
+    }
+
+    let now = chrono::Utc::now().timestamp() as f64;
+    let markers: Vec<WriteModel> = epochs
+        .iter()
+        .map(|epoch| {
+            WriteModel::UpdateOne(
+                UpdateOneModel::builder()
+                    .namespace(db.collection::<Document>(EPOCHS_COLLECTION).namespace())
+                    .filter(doc! { "_id": *epoch })
+                    .update(doc! { "$set": { "live": live, "updated_at": now } })
+                    .upsert(true)
+                    .build(),
+            )
+        })
+        .collect();
+    db.client().bulk_write(markers).await?;
+    Ok(written)
+}
+
+pub async fn drop_epochs(
+    db: &mongodb::Database,
+    epochs: &[f64],
+) -> Result<u64, mongodb::error::Error> {
+    db.collection::<Document>(EPOCHS_COLLECTION)
+        .delete_many(doc! { "_id": { "$in": epochs } })
+        .await?;
+    Ok(db
+        .collection::<Document>(PROPAGATED_COLLECTION)
+        .delete_many(doc! { "epoch_jd": { "$in": epochs } })
+        .await?
+        .deleted_count)
+}
+
+pub async fn stored_epochs(
+    db: &mongodb::Database,
+    from: f64,
+    to: f64,
+    live: bool,
+) -> Result<Vec<f64>, mongodb::error::Error> {
+    let found: Vec<Document> = db
+        .collection::<Document>(EPOCHS_COLLECTION)
+        .find(doc! { "_id": { "$gte": from, "$lte": to }, "live": live })
+        .await?
+        .try_collect()
+        .await?;
+    Ok(found.iter().filter_map(|d| d.get_f64("_id").ok()).collect())
+}
+
+pub async fn load_mpcorb(
+    db: &mongodb::Database,
 ) -> Result<Vec<crate::utils::identify::OrbitEntry>, mongodb::error::Error> {
     let projection = doc! {
         "epoch_jd": 1, "a": 1, "e": 1, "incl": 1, "node": 1, "peri": 1,
