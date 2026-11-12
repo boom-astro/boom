@@ -30,6 +30,12 @@ pub fn hash_token(token: &str) -> String {
         .collect()
 }
 
+/// Matches the user holding the personal access token with this hash, as long
+/// as that token has not expired.
+fn unexpired_token_filter(token_hash: &str, now: i64) -> mongodb::bson::Document {
+    doc! { "tokens": { "$elemMatch": { "token_hash": token_hash, "expires_at": { "$gt": now } } } }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Claims {
     pub sub: String,
@@ -315,7 +321,7 @@ async fn resolve_babamul_user(
         let now = flare::Time::now().to_utc().timestamp();
         collection
             .find_one_and_update(
-                doc! { "tokens.token_hash": &token_hash },
+                unexpired_token_filter(&token_hash, now),
                 doc! { "$set": { "tokens.$[token].last_used_at": now } },
             )
             .with_options(
@@ -450,7 +456,7 @@ async fn authenticate_babamul_user(req: &ServiceRequest) -> Result<BabamulUser, 
 
                 match babamul_users_collection
                     .find_one_and_update(
-                        doc! { "tokens.token_hash": &token_hash },
+                        unexpired_token_filter(&token_hash, now),
                         doc! { "$set": { "tokens.$[token].last_used_at": now } },
                     )
                     .with_options(
