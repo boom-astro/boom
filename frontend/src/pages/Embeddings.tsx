@@ -10,6 +10,7 @@ import {
   EmbeddingsDisabled,
   fetchEmbeddingsCount,
   fetchSimilarObjects,
+  type QueryObject,
   type SimilarObject,
 } from "@/lib/api";
 
@@ -31,6 +32,7 @@ export default function Embeddings() {
   const [objectId, setObjectId] = useState("");
   const [topK, setTopK] = useState(String(DEFAULT_TOP_K));
   const [results, setResults] = useState<SimilarObject[] | null>(null);
+  const [query, setQuery] = useState<QueryObject | null>(null);
   const [searchedId, setSearchedId] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -82,13 +84,15 @@ export default function Embeddings() {
     setError(null);
     setNotice(null);
     try {
-      const { results, message } = await fetchSimilarObjects(trimmed, k);
+      const { query, results, message } = await fetchSimilarObjects(trimmed, k);
+      setQuery(query ?? null);
       setResults(results);
       setSearchedId(trimmed);
       // No embedding stored is a normal answer, shown as a notice, not an error.
       if (results.length === 0) setNotice(message ?? `No neighbors found for ${trimmed}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Similarity search failed");
+      setQuery(null);
       setResults(null);
     } finally {
       setLoading(false);
@@ -169,6 +173,22 @@ export default function Embeddings() {
 
           {error && <p className="text-sm text-destructive">{error}</p>}
           {notice && !error && <p className="text-sm text-muted-foreground">{notice}</p>}
+
+          {query && (
+            <div className="rounded-md border p-4 space-y-3">
+              <div className="flex flex-wrap items-center gap-3">
+                <span className="text-sm text-muted-foreground">Query object</span>
+                <Link
+                  to={`/objects/${EMBEDDING_SURVEY}/${encodeURIComponent(query.object_id)}`}
+                  className="font-mono text-sm underline"
+                >
+                  {query.object_id}
+                </Link>
+                <Decision fusion={query.applecider_fusion} />
+              </div>
+              <ClassProbabilities fusion={query.applecider_fusion} />
+            </div>
+          )}
 
           {results && results.length > 0 && (
             <Table>

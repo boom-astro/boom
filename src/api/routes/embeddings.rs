@@ -12,7 +12,7 @@
 
 use crate::api::models::response;
 use crate::enrichment::models::applecider_postprocess::AppleCiderFusion;
-use crate::milvus::{MilvusClient, SearchHit};
+use crate::milvus::MilvusClient;
 use crate::utils::enums::ProgramId;
 
 use std::collections::HashMap;
@@ -51,6 +51,22 @@ pub struct SimilarObject {
     pub applecider_fusion: Option<AppleCiderFusion>,
 }
 
+/// The seed object of a similarity search.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub struct QueryObject {
+    pub object_id: String,
+    /// AppleCiDEr's classification of the alert the seed's stored embedding
+    /// came from. Null when that alert has none or could not be looked up.
+    pub applecider_fusion: Option<AppleCiderFusion>,
+}
+
+/// A similarity search's seed and its nearest neighbors, best-first.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub struct SimilarObjects {
+    pub query: QueryObject,
+    pub neighbors: Vec<SimilarObject>,
+}
+
 #[derive(serde::Deserialize)]
 struct ClassifiedAlert {
     #[serde(rename = "_id")]
@@ -75,15 +91,14 @@ pub(crate) fn client_or_unavailable(
     }
 }
 
-/// Map each hit's candid to the AppleCiDEr classification stored on its alert.
+/// Map each candid to the AppleCiDEr classification stored on its alert.
 async fn applecider_classifications(
     db: &Database,
-    hits: &[SearchHit],
+    candids: Vec<i64>,
 ) -> Result<HashMap<i64, AppleCiderFusion>, mongodb::error::Error> {
-    if hits.is_empty() {
+    if candids.is_empty() {
         return Ok(HashMap::new());
     }
-    let candids: Vec<i64> = hits.iter().map(|hit| hit.candid).collect();
     let alerts: Vec<ClassifiedAlert> = db
         .collection::<ClassifiedAlert>(ZTF_ALERTS)
         .find(doc! { "_id": { "$in": candids } })
@@ -143,15 +158,22 @@ pub(crate) async fn similar_objects_response(
         .take(top_k as usize)
         .collect();
 
-    // The classification only annotates the neighbors, so a failed lookup
-    // drops it rather than the search results.
-    let mut classes = applecider_classifications(db, &hits)
+    // The classifications only annotate the results, so a failed lookup
+    // drops them rather than the search.
+    let candids = std::iter::once(seed.candid)
+        .chain(hits.iter().map(|hit| hit.candid))
+        .collect();
+    let mut classes = applecider_classifications(db, candids)
         .await
         .unwrap_or_else(|e| {
             tracing::error!("Error fetching AppleCiDEr classifications: {}", e);
             HashMap::new()
         });
 
+    let query = QueryObject {
+        object_id: seed.object_id,
+        applecider_fusion: classes.remove(&seed.candid),
+    };
     let neighbors: Vec<_> = hits
         .into_iter()
         .map(|hit| SimilarObject {
@@ -161,7 +183,7 @@ pub(crate) async fn similar_objects_response(
         })
         .collect();
 
-    response::ok_ser("success", neighbors)
+    response::ok_ser("success", SimilarObjects { query, neighbors })
 }
 
 /// Count the stored embeddings.
@@ -183,14 +205,14 @@ pub(crate) async fn embeddings_count_response(
 ///
 /// Looks up the seed object's stored embedding, then runs a nearest-neighbor
 /// search with it. The seed object (which would otherwise be its own closest
-/// match) is filtered out of the results. Each neighbor carries AppleCiDEr's
-/// classification of the alert its embedding came from.
+/// match) is filtered out of the neighbors. The seed and each neighbor carry
+/// AppleCiDEr's classification of the alert its embedding came from.
 #[utoipa::path(
     post,
     path = "/similarity/objects",
     request_body = SimilarObjectsQuery,
     responses(
-        (status = 200, description = "Nearest neighbors, best-first", body = Vec<SimilarObject>),
+        (status = 200, description = "The seed object and its nearest neighbors", body = SimilarObjects),
         (status = 404, description = "No embedding stored for the object"),
         (status = 500, description = "Milvus unavailable or search failed"),
         (status = 501, description = "Milvus not enabled or misconfigured")
