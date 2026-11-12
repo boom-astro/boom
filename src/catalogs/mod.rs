@@ -1766,6 +1766,7 @@ mod status_tests {
             cancel_requested: false,
             error: None,
             attempts: 1,
+            resubmitted_from: None,
         };
         tasks.insert_one(&run).await.expect("queues a run");
 
