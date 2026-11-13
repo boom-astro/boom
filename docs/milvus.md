@@ -247,7 +247,8 @@ server-side, and the seed is stripped from its own results. `top_k` defaults to
 10 and is clamped to 100. A 404 means the object has no stored embedding, which
 is an ordinary outcome — only ZTF alerts that clear the AppleCiDEr gate get one.
 
-Each neighbor is `{"object_id", "score", "applecider_fusion"}`. The last is
+Each neighbor is `{"object_id", "score", "jd", "applecider_fusion"}`, where
+`jd` is the date of the alert its stored embedding came from. The last is
 AppleCiDEr's classification (`decision_label`, `decision_probability`,
 `class_probabilities`, ...), read from `classifications.applecider_fusion` on
 the `ZTF_alerts` document whose candid Milvus stored. Classifications live in

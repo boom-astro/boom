@@ -46,6 +46,8 @@ pub struct SimilarObject {
     pub object_id: String,
     /// Similarity score under the collection's metric; higher is closer.
     pub score: f32,
+    /// Julian date of the alert the stored embedding came from.
+    pub jd: f64,
     /// AppleCiDEr's classification of the alert the stored embedding came
     /// from. Null when that alert has none or could not be looked up.
     pub applecider_fusion: Option<AppleCiderFusion>,
@@ -158,6 +160,7 @@ pub(crate) async fn similar_objects_response(
             applecider_fusion: classes.remove(&hit.candid),
             object_id: hit.object_id,
             score: hit.score,
+            jd: hit.jd,
         })
         .collect();
 
