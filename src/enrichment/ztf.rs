@@ -23,7 +23,9 @@ use crate::utils::lightcurves::{
     STATIONARY_MIN_FORCED_SNR, ZTF_ZP,
 };
 use crate::utils::linking::{angular_separation_deg, night_at};
-use crate::utils::mpcorb::{elements_from_document, normalize_ztf_ssnamenr, ORBITS_COLLECTION};
+use crate::utils::mpcorb::{
+    elements_from_document, is_comet_designation, normalize_ztf_ssnamenr, ORBITS_COLLECTION,
+};
 use crate::utils::outburst::{median, Point, MAX_SEPARATION_ARCSEC};
 use crate::utils::phase_curve::{curves_from_document, PhaseCurve, BASELINES_COLLECTION};
 use crate::utils::sso_geometry::{geometry_at, OrbitalElements, ZTF};
@@ -1456,7 +1458,6 @@ impl ZtfEnrichmentWorker {
         let programid = candidate.programid;
         let ssdistnr = candidate.ssdistnr.unwrap_or(f32::INFINITY);
         let ssmagnr = candidate.ssmagnr.unwrap_or(f32::INFINITY);
-        let is_rock = (0.0..12.0).contains(&ssdistnr) && ssmagnr >= 0.0;
 
         let activity = ActivityMetrics::from_magnitudes(Some(candidate.magpsf), candidate.magap);
 
@@ -1465,6 +1466,14 @@ impl ZtfEnrichmentWorker {
             .ssnamenr
             .as_deref()
             .and_then(|name| orbits.get(name));
+
+        // IPAC predicts no magnitude for comets.
+        let known_comet = elements.is_some()
+            && candidate
+                .ssnamenr
+                .as_deref()
+                .is_some_and(is_comet_designation);
+        let is_rock = (0.0..12.0).contains(&ssdistnr) && (ssmagnr >= 0.0 || known_comet);
 
         let sso = ZtfSsoAssociation::from_ipac(
             candidate.ssnamenr.clone(),
