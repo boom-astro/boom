@@ -1961,6 +1961,67 @@ mod tests {
     }
 
     #[actix_rt::test]
+    async fn test_expired_token_is_rejected() {
+        load_dotenv();
+        let database: Database = get_test_db_api().await;
+        let auth_app_data = get_test_auth(&database).await.unwrap();
+        let test_user = TestUser::create(&database, &auth_app_data).await;
+
+        let now = flare::Time::now().to_utc().timestamp();
+        // A UUID string is exactly the 36 characters a token secret has.
+        let expired = uuid::Uuid::new_v4().to_string();
+        let valid = uuid::Uuid::new_v4().to_string();
+        let token = |name: &str, secret: &str, expires_at: i64| {
+            doc! {
+                "id": uuid::Uuid::new_v4().to_string(),
+                "name": name,
+                "token_hash": hash_token(secret),
+                "created_at": now - 86400,
+                "expires_at": expires_at,
+            }
+        };
+        let tokens = vec![
+            token("expired", &expired, now - 1),
+            token("valid", &valid, now + 86400),
+        ];
+        database
+            .collection::<BabamulUser>("babamul_users")
+            .update_one(
+                doc! { "_id": &test_user.user.id },
+                doc! { "$set": { "tokens": tokens } },
+            )
+            .await
+            .unwrap();
+
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(database.clone()))
+                .app_data(web::Data::new(auth_app_data))
+                .service(
+                    web::scope("/babamul")
+                        .wrap(from_fn(babamul_auth_middleware))
+                        .service(routes::babamul::get_babamul_profile),
+                ),
+        )
+        .await;
+        let profile = |secret: &str| {
+            test::TestRequest::get()
+                .uri("/babamul/profile")
+                .insert_header(("Authorization", format!("Bearer bbml_{}", secret)))
+                .to_request()
+        };
+
+        let resp = test::call_service(&app, profile(&valid)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let resp = test::try_call_service(&app, profile(&expired)).await;
+        assert_eq!(
+            resp.err().unwrap().as_response_error().status_code(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[actix_rt::test]
     async fn test_post_token_limit() {
         load_dotenv();
         let database: Database = get_test_db_api().await;
