@@ -156,9 +156,9 @@ impl TryFrom<ZtfForcedPhotometry> for ZtfPhotometry {
         let flux = phot
             .flux
             .filter(|f| *f != -99999.0 && !f.is_nan())
-            .map(|f| f * 1e9_f64 * zp_scaling_factor); // convert to a fixed ZP and nJy
+            .map(|f| f * zp_scaling_factor);
         let flux_err = if phot.flux_err != -99999.0 && !phot.flux_err.is_nan() {
-            phot.flux_err * 1e9_f64 * zp_scaling_factor // convert to a fixed ZP and nJy
+            phot.flux_err * zp_scaling_factor
         } else {
             return Err(EnrichmentWorkerError::MissingFluxPSF);
         };

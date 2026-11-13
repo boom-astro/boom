@@ -517,8 +517,7 @@ async fn test_filter_ztf_alert() {
 
     // then we compute magpsf and magpsf_err from the flux and flux_err values
     // we compute in the alert worker (at a fixed ZP)
-    let (magpsf, magpsf_err_from_flux) =
-        flux2mag(-flux as f32 * 1e-9, flux_err as f32 * 1e-9, ZTF_ZP);
+    let (magpsf, magpsf_err_from_flux) = flux2mag(-flux as f32, flux_err as f32, ZTF_ZP);
 
     // they should be consistent within a small tolerance
     assert!((magpsf_forcediffimflux - magpsf).abs() < 1e-6);
@@ -543,7 +542,7 @@ async fn test_filter_ztf_alert() {
     let flux = prv_candidate_point.flux.unwrap();
     let flux_err = prv_candidate_point.flux_err;
     let (magpsf_prv_candidate, magpsf_err_prv_candidate) =
-        flux2mag((flux.abs() * 1e-9) as f32, (flux_err * 1e-9) as f32, ZTF_ZP);
+        flux2mag(flux.abs() as f32, flux_err as f32, ZTF_ZP);
     assert!((magpsf_prv_candidate - 16.8002).abs() < 1e-4);
     assert!((magpsf_err_prv_candidate - 0.1788).abs() < 1e-4);
 
