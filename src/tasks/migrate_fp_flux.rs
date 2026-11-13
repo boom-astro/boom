@@ -2,10 +2,10 @@
 //!
 //! Recomputes `psfFlux` and `psfFluxErr` in `fp_hists` from the raw IPAC
 //! `forcediffimflux` / `forcediffimfluxunc` fields, converting to nJy at the
-//! fixed `ZTF_ZP` = 23.9 zeropoint:
+//! fixed `ZTF_ZP` = 31.4 zeropoint:
 //!
 //! ```text
-//! value = raw_value * 1e9 * 10^((23.9 - magzpsci) / 2.5)
+//! value = raw_value * 10^((31.4 - magzpsci) / 2.5)
 //! ```
 //!
 //! Idempotent, because it always recomputes from the raw fields rather than
@@ -125,17 +125,32 @@ async fn migrate(
         "fp_hists.0": { "$exists": true },
     };
 
+    let pipeline = vec![doc! { "$set": { "fp_hists": fp_hists_flux_expr() } }];
+
+    let total = run_batched_update(
+        ctx,
+        collection,
+        filter,
+        pipeline,
+        batch_size,
+        estimated_count,
+        "migrate",
+    )
+    .await?;
+
+    ctx.info(format!("migration complete: {total} documents modified"));
+    Ok(total)
+}
+
+pub(super) fn fp_hists_flux_expr() -> Document {
     // Converts raw flux to nJy at the fixed zeropoint:
-    //   psf_flux * 1e9 * 10^((ZTF_ZP - magzpsci) / 2.5)
+    //   psf_flux * 10^((ZTF_ZP - magzpsci) / 2.5)
     let scale_factor = doc! {
-        "$multiply": [
-            1e9_f64,
-            { "$pow": [
-                10.0_f64,
-                { "$divide": [
-                    { "$subtract": [ZTF_ZP as f64, "$$fp.magzpsci"] },
-                    2.5_f64
-                ]}
+        "$pow": [
+            10.0_f64,
+            { "$divide": [
+                { "$subtract": [ZTF_ZP as f64, "$$fp.magzpsci"] },
+                2.5_f64
             ]}
         ]
     };
@@ -179,39 +194,21 @@ async fn migrate(
         }
     };
 
-    let pipeline = vec![doc! {
-        "$set": {
-            "fp_hists": {
-                "$map": {
-                    "input": "$fp_hists",
-                    "as": "fp",
-                    "in": {
-                        "$mergeObjects": [
-                            "$$fp",
-                            {
-                                "psfFlux": &new_flux,
-                                "psfFluxErr": &new_flux_err,
-                            }
-                        ]
+    doc! {
+        "$map": {
+            "input": "$fp_hists",
+            "as": "fp",
+            "in": {
+                "$mergeObjects": [
+                    "$$fp",
+                    {
+                        "psfFlux": new_flux,
+                        "psfFluxErr": new_flux_err,
                     }
-                }
-            },
+                ]
+            }
         }
-    }];
-
-    let total = run_batched_update(
-        ctx,
-        collection,
-        filter,
-        pipeline,
-        batch_size,
-        estimated_count,
-        "migrate",
-    )
-    .await?;
-
-    ctx.info(format!("migration complete: {total} documents modified"));
-    Ok(total)
+    }
 }
 
 async fn validate(
@@ -243,11 +240,11 @@ async fn validate(
                                     { "$eq": ["$$fp.procstatus", "0"] },
                                 ]},
                                 "then": {
-                                    // magpsf = -2.5 * log10(abs(psfFlux / 1e9)) + ZTF_ZP
+                                    // magpsf = -2.5 * log10(abs(psfFlux)) + ZTF_ZP
                                     "$add": [
                                         { "$multiply": [
                                             -2.5,
-                                            { "$log10": { "$abs": { "$divide": ["$$fp.psfFlux", 1e9_f64] } }}
+                                            { "$log10": { "$abs": "$$fp.psfFlux" } }
                                         ]},
                                         ZTF_ZP as f64
                                     ]
@@ -266,12 +263,12 @@ async fn validate(
                                     { "$eq": ["$$fp.procstatus", "0"] },
                                 ]},
                                 "then": {
-                                    // (2.5 / ln(10)) * (psfFluxErr * 1e-9 / abs(psfFlux * 1e-9))
+                                    // (2.5 / ln(10)) * (psfFluxErr / abs(psfFlux))
                                     "$multiply": [
                                         FLUXERR2MAGERR_FACTOR,
                                         { "$divide": [
-                                            { "$multiply": ["$$fp.psfFluxErr", 1e-9_f64] },
-                                            { "$abs": { "$multiply": ["$$fp.psfFlux", 1e-9_f64] } }
+                                            "$$fp.psfFluxErr",
+                                            { "$abs": "$$fp.psfFlux" }
                                         ]}
                                     ]
                                 },

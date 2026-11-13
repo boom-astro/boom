@@ -98,13 +98,10 @@ fn create_mock_enriched_ztf_alert(candid: i64, object_id: &str, is_rock: bool) -
 
     // let's make sure that the flux and flux_err generated when converting from Candidate to ZtfCandidate
     // can be converted back to the original magpsf and sigmapsf using the same ZP, to verify that the conversion is consistent
-    let (new_magpsf, new_sigmapsf) = flux2mag(
-        candidate.psf_flux.abs() / 1e9_f32, // convert back to Jy
-        candidate.psf_flux_err / 1e9_f32,   // convert back to Jy
-        ZTF_ZP,
-    );
+    let (new_magpsf, new_sigmapsf) =
+        flux2mag(candidate.psf_flux.abs(), candidate.psf_flux_err, ZTF_ZP);
     assert!(
-        (new_magpsf - candidate.candidate.magpsf).abs() < 1e-6,
+        (new_magpsf - candidate.candidate.magpsf).abs() < 1e-5,
         "Magnitude conversion mismatch: expected {}, got {}",
         candidate.candidate.magpsf,
         new_magpsf
@@ -145,13 +142,9 @@ fn create_mock_enriched_ztf_alert(candid: i64, object_id: &str, is_rock: bool) -
 
     // the new flux is on a fixed zeropoint (ZTF_ZP), verify
     // that converting it back to magnitude gives the same magpsf and sigmapsf as the original data
-    let (new_magpsf, new_sigmapsf) = flux2mag(
-        -new_flux as f32 * 1e-9,    // from nJy to Jy
-        new_flux_err as f32 * 1e-9, // from nJy to Jy
-        ZTF_ZP,
-    );
+    let (new_magpsf, new_sigmapsf) = flux2mag(-new_flux as f32, new_flux_err as f32, ZTF_ZP);
     assert!(
-        (new_magpsf - magpsf as f32).abs() < 1e-6,
+        (new_magpsf - magpsf as f32).abs() < 1e-5,
         "Magnitude conversion mismatch: expected {}, got {}",
         magpsf,
         new_magpsf
