@@ -1,0 +1,4 @@
+# Back to the CPU image after a profile that turned the GPU on: ONNX on CPU,
+# and no Villar fits, which only the GPU build computes.
+benchmark:
+  gpu: false

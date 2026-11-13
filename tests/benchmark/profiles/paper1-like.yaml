@@ -1,0 +1,10 @@
+# Closest current equivalent of Paper I's benchmark workload: NED as the only
+# catalog, no host association, no Babamul streams, CPU inference (so no Villar
+# fits). AppleCiDEr has no switch and still runs, so this is not Paper I's code
+# path exactly; for that, run tests/throughput at the Paper I commit.
+benchmark:
+  catalogs: [NED]
+host_galaxy:
+  enabled: false
+babamul:
+  enabled: false

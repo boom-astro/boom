@@ -1,0 +1,23 @@
+# GPU overlay: the ZTF scheduler runs the CUDA image, which is also the only
+# build that computes Villar fits (the `gpu` cargo feature). Needs the NVIDIA
+# Container Toolkit. Only ZTF enrichment uses the GPU model pool.
+services:
+  scheduler-ztf:
+    image: ${BENCH_GPU_IMAGE:-boom-astro/boom-gpu:bench}
+    runtime: nvidia
+    environment:
+      NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    volumes:
+      - ${BENCH_CONFIG:-/dev/null}:/app/config.yaml:ro
+      - ${BOOM_REPO_ROOT:-../..}/data/models:/app/data/models:ro
+      - ${BOOM_REPO_ROOT:-../..}/data/ls_footprint_moc.fits:/app/data/ls_footprint_moc.fits:ro
+      # Kernels compiled on first use; a host directory, so `down -v` keeps them across runs.
+      - ${BENCH_NV_CACHE:-/tmp/boom-bench-nv-cache}:/root/.nv/ComputeCache

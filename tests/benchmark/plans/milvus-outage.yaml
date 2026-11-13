@@ -1,0 +1,18 @@
+# Milvus is stopped two minutes after the workers start, for three minutes,
+# while they work through the night's backlog. Enrichment throughput should not
+# move, and the stored-embedding backlog should drain after Milvus returns
+# (timeline.png). The summary warns if every stage was idle before the outage.
+name: milvus-outage
+repeats: 1
+defaults:
+  bundle: [~/boom-bench/bundles/ztf-NIGHT]
+  # mode: realtime
+  # speed: 1
+  mode: drain
+  profile: [production]
+  # window-seconds: 2400
+  cache: cold
+steps:
+  - {name: baseline}
+  # - {name: outage, milvus-outage: "600:300"}
+  - {name: outage, milvus-outage: "120:180"}

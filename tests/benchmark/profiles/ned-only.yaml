@@ -1,0 +1,3 @@
+# Cross-match against NED alone; every other catalog is removed from crossmatch.
+benchmark:
+  catalogs: [NED]

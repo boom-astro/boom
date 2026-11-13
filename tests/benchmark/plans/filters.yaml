@@ -1,0 +1,21 @@
+# Filter stage cost against the number of filters, using filters exported from
+# a deployment (see filters/README.md). Past the number exported, filters are
+# repeated, which understates the cost; the run records a warning.
+name: filters
+repeats: 2
+defaults:
+  bundle: [~/boom-bench/bundles/ztf-NIGHT]
+  # mode: realtime
+  # speed: 1
+  mode: drain
+  profile: [production]
+  window-seconds: 3600
+  window-start: 0        # the first hour of each survey's night: the seed's cut
+  cache: cold
+  filters: ~/boom-bench/filters-prod
+steps:
+  - {name: n0, n-filters: 0}
+  - {name: n10, n-filters: 10}
+  - {name: n25, n-filters: 25}
+  - {name: n50, n-filters: 50}
+  - {name: n100, n-filters: 100}

@@ -1,0 +1,35 @@
+# Paper I's night (2025-03-11, public ZTF) on the old fixture, so the new
+# numbers connect to the published ones. CI's worker counts are 6/5/2
+# (.github/workflows/test-throughput.yaml).
+#
+# The old fixture already holds a document for each of the night's 27,948
+# objects, including the 4,860 first detected that night. BOOM cross-matches
+# and associates a host only when it creates an object, so on that fixture no
+# catalog cross-match runs at all. Build two seeds to show the difference:
+#
+#   seed_db.py --data-root ~/boom-bench-legacy start && seed_db.py --data-root ~/boom-bench-legacy load-legacy
+#   seed_db.py --data-root ~/boom-bench-legacy stop
+#   seed_db.py --data-root ~/boom-bench-legacy-fixed start
+#   seed_db.py --data-root ~/boom-bench-legacy-fixed load-legacy --remove-new-objects
+#   seed_db.py --data-root ~/boom-bench-legacy-fixed stop
+name: continuity
+repeats: 3
+defaults:
+  bundle: [~/boom-bench/bundles/ztf-20250311-public]
+  mode: drain
+  cache: cold
+  n-filters: 25
+  set:
+    - workers.ztf.alert.n_workers=6
+    - workers.ztf.enrichment.n_workers=5
+    - workers.ztf.filter.n_workers=2
+steps:
+  - name: paper1-like              # as published: every object pre-exists
+    profile: [paper1-like]
+    data-root: ~/boom-bench-legacy
+  - name: paper1-like-new-objects  # the night's new objects created, so NED is queried
+    profile: [paper1-like]
+    data-root: ~/boom-bench-legacy-fixed
+  - name: current-cpu-new-objects  # today's defaults, without a GPU; most catalogs are empty here
+    profile: [babamul]
+    data-root: ~/boom-bench-legacy-fixed

@@ -1,0 +1,178 @@
+# Benchmark stack, driven by run.py; see README.md.
+#
+# Infrastructure (mongo, valkey, broker) has no profile. Each survey's consumer
+# and scheduler sit under that survey's profile, and the API under `api`, so a
+# run starts only what it replays. run.py sets every ${BENCH_*} variable; the
+# defaults here only keep `docker compose config` readable.
+name: boom-bench
+
+networks:
+  bench:
+
+x-boom: &boom
+  image: ${BENCH_IMAGE:-boom-astro/boom:bench}
+  pull_policy: never
+  networks: [bench]
+  environment: &boom-env
+    RUST_LOG: ${BENCH_RUST_LOG:-error,boom=info,scheduler=info}
+    # No collector runs in this stack, and an SDK exporting to nothing costs
+    # ~8% throughput (tests/throughput/compose.yaml). Latency is measured from
+    # Kafka and Mongo timestamps instead.
+    OTEL_SDK_DISABLED: ${BENCH_OTEL_SDK_DISABLED:-true}
+  volumes: &boom-volumes
+    - ${BENCH_CONFIG:-/dev/null}:/app/config.yaml:ro
+
+x-scheduler-volumes: &scheduler-volumes
+  - ${BENCH_CONFIG:-/dev/null}:/app/config.yaml:ro
+  - ${BOOM_REPO_ROOT:-../..}/data/models:/app/data/models:ro
+  - ${BOOM_REPO_ROOT:-../..}/data/ls_footprint_moc.fits:/app/data/ls_footprint_moc.fits:ro
+
+x-infra-deps: &infra-deps
+  mongo:
+    condition: service_healthy
+  valkey:
+    condition: service_healthy
+  broker:
+    condition: service_healthy
+
+services:
+  mongo:
+    image: mongo:8.2
+    command: ["--wiredTigerCacheSizeGB", "${MONGO_CACHE_GB:-8}"]
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: mongoadmin
+      MONGO_INITDB_ROOT_PASSWORD: mongoadminsecret
+    volumes:
+      # A copy of the seed made by run.py; a fresh directory per run.
+      - ${BENCH_DBPATH:-/tmp/boom-bench-db}:/data/db
+    ports:
+      - "127.0.0.1:${MONGO_HOST_PORT:-27117}:27017"
+    networks: [bench]
+    healthcheck:
+      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/test --quiet
+      interval: 5s
+      timeout: 10s
+      retries: 60
+      start_period: 30s
+
+  valkey:
+    image: valkey/valkey:7.2.6
+    # Queues only; persistence would add disk writes production does not pay per alert.
+    command: valkey-server --save "" --appendonly no
+    ports:
+      - "127.0.0.1:${VALKEY_HOST_PORT:-16379}:6379"
+    networks: [bench]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  broker:
+    image: apache/kafka:4.3.1
+    hostname: broker
+    ports:
+      - "127.0.0.1:${KAFKA_HOST_PORT:-19092}:9092"
+    networks: [bench]
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@broker:29093
+      KAFKA_LISTENERS: PLAINTEXT://broker:29092,CONTROLLER://broker:29093,PLAINTEXT_HOST://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://broker:29092,PLAINTEXT_HOST://localhost:${KAFKA_HOST_PORT:-19092}
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_NUM_PARTITIONS: ${KAFKA_NUM_PARTITIONS:-15}
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      # LSST packets with cutouts can exceed Kafka's 1 MB default.
+      KAFKA_MESSAGE_MAX_BYTES: 20971520
+      KAFKA_REPLICA_FETCH_MAX_BYTES: 20971520
+      KAFKA_HEAP_OPTS: "-Xmx2G -Xms2G -XX:+UseG1GC -XX:MaxGCPauseMillis=200"
+    healthcheck:
+      test: /opt/kafka/bin/kafka-cluster.sh cluster-id --bootstrap-server broker:29092
+      interval: 5s
+      timeout: 10s
+      retries: 30
+
+  # --- ZTF -------------------------------------------------------------------
+  consumer-ztf:
+    <<: *boom
+    profiles: [ztf]
+    depends_on: *infra-deps
+    command: ["/app/kafka_consumer", "ztf", "--on", "${ZTF_NIGHT:-20250311}",
+              "--programids", "${ZTF_PROGRAMIDS:-public}",
+              "--processes", "${CONSUMER_PROCESSES:-1}",
+              "--max-in-queue", "${CONSUMER_MAX_IN_QUEUE:-15000}"]
+  scheduler-ztf:
+    <<: *boom
+    profiles: [ztf]
+    depends_on: *infra-deps
+    command: ["/app/scheduler", "ztf"]
+    volumes: *scheduler-volumes
+
+  # --- LSST ------------------------------------------------------------------
+  # The LSST alert worker resolves packet schemas from the Rubin registry, so
+  # this service needs outbound internet (or kafka.consumer.lsst.schema_registry
+  # pointed at a mirror).
+  consumer-lsst:
+    <<: *boom
+    profiles: [lsst]
+    depends_on: *infra-deps
+    command: ["/app/kafka_consumer", "lsst", "--on", "${LSST_NIGHT:-20260301}",
+              "--processes", "${CONSUMER_PROCESSES:-1}",
+              "--max-in-queue", "${CONSUMER_MAX_IN_QUEUE:-15000}"]
+  scheduler-lsst:
+    <<: *boom
+    profiles: [lsst]
+    depends_on: *infra-deps
+    command: ["/app/scheduler", "lsst"]
+    volumes: *scheduler-volumes
+
+  # --- DECam -----------------------------------------------------------------
+  consumer-decam:
+    <<: *boom
+    profiles: [decam]
+    depends_on: *infra-deps
+    command: ["/app/kafka_consumer", "decam", "--on", "${DECAM_NIGHT:-20250520}",
+              "--processes", "${CONSUMER_PROCESSES:-1}",
+              "--max-in-queue", "${CONSUMER_MAX_IN_QUEUE:-15000}"]
+  scheduler-decam:
+    <<: *boom
+    profiles: [decam]
+    depends_on: *infra-deps
+    command: ["/app/scheduler", "decam"]
+    volumes: *scheduler-volumes
+
+  # --- WINTER ----------------------------------------------------------------
+  consumer-winter:
+    <<: *boom
+    profiles: [winter]
+    depends_on: *infra-deps
+    command: ["/app/kafka_consumer", "winter", "--on", "${WINTER_NIGHT:-20260918}",
+              "--processes", "${CONSUMER_PROCESSES:-1}",
+              "--max-in-queue", "${CONSUMER_MAX_IN_QUEUE:-15000}"]
+  scheduler-winter:
+    <<: *boom
+    profiles: [winter]
+    depends_on: *infra-deps
+    command: ["/app/scheduler", "winter"]
+    volumes: *scheduler-volumes
+
+  # --- API, for the query benchmarks and for API load during a replay --------
+  api:
+    <<: *boom
+    profiles: [api]
+    depends_on:
+      mongo:
+        condition: service_healthy
+    command: ["/app/boom-api"]
+    environment:
+      <<: *boom-env
+      BOOM_BABAMUL__ENABLED: "true"
+    ports:
+      - "127.0.0.1:${API_HOST_PORT:-14000}:4000"

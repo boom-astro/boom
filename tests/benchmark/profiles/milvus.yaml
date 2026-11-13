@@ -1,0 +1,4 @@
+# Upsert AppleCiDEr embeddings into a local Milvus started with the run
+# (compose.milvus.yaml), never the shared NRP collection.
+benchmark:
+  milvus: true

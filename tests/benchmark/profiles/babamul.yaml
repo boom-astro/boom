@@ -1,0 +1,4 @@
+# Publish the public Babamul streams. Their messages are also the per-alert
+# latency probe for ZTF and LSST, so most runs want this on.
+babamul:
+  enabled: true

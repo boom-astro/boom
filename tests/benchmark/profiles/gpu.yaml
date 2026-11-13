@@ -1,0 +1,7 @@
+# The CUDA image for the ZTF scheduler: ONNX inference on the GPU, plus the
+# Villar fits, which only that build computes. Pick devices with
+# --set gpu.device_ids=[0,1].
+benchmark:
+  gpu: true
+gpu:
+  device_ids: [0]

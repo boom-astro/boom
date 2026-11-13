@@ -1,0 +1,20 @@
+# How much memory matters. Cold drops the page cache so every first read goes
+# to disk; warm pre-reads the database files. Production sits between, so
+# report both. The WiredTiger cache is what mongod keeps decompressed.
+name: cache
+repeats: 2
+defaults:
+  bundle: [~/boom-bench/bundles/ztf-NIGHT, ~/boom-bench/bundles/lsst-NIGHT]
+  # align: absolute
+  # mode: realtime
+  # speed: 1
+  mode: drain
+  profile: [production]
+  window-seconds: 3600
+  window-start: 0        # the first hour of each survey's night: the seed's cut
+steps:
+  - {name: cold-wt4, cache: cold, mongo-cache-gb: 4}
+  - {name: cold-wt16, cache: cold, mongo-cache-gb: 16}
+  - {name: cold-wt64, cache: cold, mongo-cache-gb: 64}
+  - {name: warm-wt16, cache: warm, mongo-cache-gb: 16}
+  - {name: warm-wt64, cache: warm, mongo-cache-gb: 64}

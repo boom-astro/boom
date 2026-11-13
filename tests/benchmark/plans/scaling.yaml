@@ -1,0 +1,37 @@
+# Each worker pool scaled on its own, the others held generous, to show the
+# stages scale independently. Then batch size (GPU efficiency against latency)
+# and GPU count. Drain mode: these measure capacity.
+name: scaling
+repeats: 3
+defaults:
+  bundle: [~/boom-bench/bundles/ztf-NIGHT]
+  mode: drain
+  window-seconds: 3600
+  window-start: 0        # the first hour of each survey's night: the seed's cut
+  cache: cold
+  profile: [production]
+  set:
+    - workers.ztf.alert.n_workers=8
+    - workers.ztf.enrichment.n_workers=4
+    - workers.ztf.filter.n_workers=4
+steps:
+  - {name: alert-1, set: [workers.ztf.alert.n_workers=1]}
+  - {name: alert-2, set: [workers.ztf.alert.n_workers=2]}
+  - {name: alert-4, set: [workers.ztf.alert.n_workers=4]}
+  - {name: alert-8, set: [workers.ztf.alert.n_workers=8]}
+  - {name: alert-16, set: [workers.ztf.alert.n_workers=16]}
+  - {name: enrichment-1, set: [workers.ztf.enrichment.n_workers=1]}
+  - {name: enrichment-2, set: [workers.ztf.enrichment.n_workers=2]}
+  - {name: enrichment-4, set: [workers.ztf.enrichment.n_workers=4]}
+  - {name: enrichment-8, set: [workers.ztf.enrichment.n_workers=8]}
+  - {name: filter-1, set: [workers.ztf.filter.n_workers=1]}
+  - {name: filter-2, set: [workers.ztf.filter.n_workers=2]}
+  - {name: filter-4, set: [workers.ztf.filter.n_workers=4]}
+  - {name: batch-250, set: [workers.ztf.enrichment.batch_size=250]}
+  - {name: batch-500, set: [workers.ztf.enrichment.batch_size=500]}
+  - {name: batch-750, set: [workers.ztf.enrichment.batch_size=750]}
+  - {name: batch-1000, set: [workers.ztf.enrichment.batch_size=1000]}
+  - {name: gpus-1, set: ["gpu.device_ids=[0]"]}
+  - {name: gpus-2, set: ["gpu.device_ids=[0,1]"]}
+  - {name: gpus-4, set: ["gpu.device_ids=[0,1,2,3]"]}
+  - {name: cpu-only, profile: [cpu]}

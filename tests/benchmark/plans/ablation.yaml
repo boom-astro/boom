@@ -1,0 +1,31 @@
+# What each feature added since Paper I costs, one step at a time, as each
+# configuration's throughput draining the same queued hour.
+#
+# Edit the bundle paths first. The base config already has host association on
+# and Babamul off, so the steps switch features with profiles relative to that.
+name: ablation
+repeats: 3
+defaults:
+  bundle: [~/boom-bench/bundles/ztf-NIGHT]
+  mode: drain
+  # window-seconds: 3600   # the busiest hour of the night
+  window-seconds: 3600
+  window-start: 0        # the first hour of each survey's night: the seed's cut
+  cache: cold
+steps:
+  - name: paper1-like        # NED only, no host, no Babamul, CPU
+    profile: [paper1-like]
+  - name: all-catalogs
+    profile: [no-host, no-babamul]
+  - name: host-association
+    profile: [no-babamul]
+  - name: babamul
+    profile: [babamul]
+  - name: gpu-villar         # GPU inference, and Villar fits (GPU build only)
+    profile: [babamul, gpu]
+  - name: milvus
+    profile: [babamul, gpu, milvus]
+  - name: with-lsst          # the same, with an LSST night arriving alongside
+    profile: [production]
+    bundle: [~/boom-bench/bundles/lsst-NIGHT]
+    # align: absolute

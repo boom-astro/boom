@@ -1,0 +1,15 @@
+# The headline: a whole night of ZTF and LSST queued, then drained with
+# everything on. `drain_s` against `night_s` is how long BOOM needed for what
+# the surveys took the night to deliver; `throughput.headroom` above 1 means it
+# clears alerts faster than the night's busiest minute arrived.
+#
+#   report.py logs/benchmark/*night-* --group-by step
+name: night
+repeats: 3
+defaults:
+  bundle: [~/boom-bench/bundles/ztf-NIGHT, ~/boom-bench/bundles/lsst-NIGHT]
+  mode: drain
+  profile: [production]
+  cache: cold
+steps:
+  - {name: production}

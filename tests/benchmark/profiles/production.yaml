@@ -1,0 +1,11 @@
+# Everything on, as deployed: all catalogs, host association, Babamul, GPU
+# inference with Villar fits, and embedding upserts.
+benchmark:
+  gpu: true
+  milvus: true
+host_galaxy:
+  enabled: true
+babamul:
+  enabled: true
+gpu:
+  device_ids: [0]

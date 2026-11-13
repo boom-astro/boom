@@ -49,6 +49,7 @@ config.docker.yaml
 *.duckdb
 *.avro
 *.db
+*.bin
 
 # ...except the artifacts the repo genuinely tracks, all of them reviewed and
 # most of them in LFS. Negations, so adding a new one needs an explicit path
