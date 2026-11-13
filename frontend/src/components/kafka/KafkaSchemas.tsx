@@ -16,7 +16,7 @@ const getFieldDescriptions = (survey: Survey): Record<string, ReactNode> => ({
   ...survey === ZTF ? {
     rock: (
       <>
-        <code className="text-chart-2">True</code> if a known Solar System object is within 12&nbsp;arcsec (<code>ssdistnr</code>) with a valid <code>ssmagnr</code>.
+        <code className="text-chart-2">True</code> if a known Solar System object is within 12&nbsp;arcsec (<code>ssdistnr</code>) with a valid <code>ssmagnr</code>, or is a known comet.
       </>
     ),
     star: (
