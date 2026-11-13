@@ -180,7 +180,7 @@ function propertyTooltips(survey: 'ZTF' | 'LSST') {
     return {
       rock: (
         <>
-          <span className={T.green}>True</span> if a known Solar System object is within 12&nbsp;arcsec (<code>ssdistnr</code>) with a valid <code>ssmagnr</code>.
+          <span className={T.green}>True</span> if a known Solar System object is within 12&nbsp;arcsec (<code>ssdistnr</code>) with a valid <code>ssmagnr</code>, or is a known comet.
         </>
       ),
       star: (

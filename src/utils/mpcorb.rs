@@ -917,7 +917,7 @@ pub fn fill_geometry(
 ///
 /// Deliberately narrow. A provisional asteroid designation can also end in one
 /// of these letters -- `2010TC` -- and must reach the provisional path instead.
-fn is_comet_designation(s: &str) -> bool {
+pub fn is_comet_designation(s: &str) -> bool {
     if s.contains('/') {
         return true;
     }
