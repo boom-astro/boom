@@ -253,8 +253,10 @@ list or another value is a 400. A client that serves several users, like
 SkyPortal, passes the requesting user's access. The Babamul route always
 searches programid 1.
 
-Each neighbor is `{"object_id", "score", "jd", "applecider_fusion"}`, where
-`jd` is the date of the alert its stored embedding came from. The last is
+The reply is `{"query", "neighbors"}`: `query` is the seed as
+`{"object_id", "applecider_fusion"}`, and each neighbor is
+`{"object_id", "score", "jd", "applecider_fusion"}`, best-first, where `jd` is
+the date of the alert its stored embedding came from. `applecider_fusion` is
 AppleCiDEr's classification (`decision_label`, `decision_probability`,
 `class_probabilities`, ...), read from `classifications.applecider_fusion` on
 the `ZTF_alerts` document whose candid Milvus stored. Classifications live in
@@ -277,9 +279,10 @@ browser → BOOM API → Milvus.
 ## Web UI
 
 The frontend serves similarity search at `/embeddings`
-(`frontend/src/pages/Embeddings.tsx`): an object id plus neighbor count, results
-linking through to each object's page, and a tile showing the stored-embedding
-count. That count doubles as a health signal — enrichment pauses embedding
+(`frontend/src/pages/Embeddings.tsx`): an object id plus neighbor count, and a
+results table whose highlighted first row is the searched object with its own
+classification, followed by its neighbors, each linking through to its object
+page. A tile shows the stored-embedding count. That count doubles as a health signal — enrichment pauses embedding
 uploads while Milvus is unreachable, and a count that stops growing is the
 visible symptom.
 

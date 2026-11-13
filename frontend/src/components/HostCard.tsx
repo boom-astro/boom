@@ -1,10 +1,31 @@
-import { Fragment } from 'react';
+import { Fragment, ReactNode } from 'react';
 import { Card, CardContent, CardTitle } from '@/components/ui/card';
 import { ApiObject, HostSummary } from '@/lib/api';
 
-function hostRows(host: HostSummary): [string, string][] {
-  const rows: [string, string][] = [];
-  if (host.name) rows.push(['Name', host.name]);
+function hostUrl(host: HostSummary): string | null {
+  if (host.catalog === 'NED' && host.name) {
+    return `https://ned.ipac.caltech.edu/byname?objname=${encodeURIComponent(host.name)}`;
+  }
+  if (host.ra == null || host.dec == null) return null;
+  const layer = host.catalog === 'LSDR9' ? 'ls-dr9' : 'ls-dr10';
+  return `https://www.legacysurvey.org/viewer?ra=${host.ra}&dec=${host.dec}&layer=${layer}&zoom=16&mark=${host.ra},${host.dec}`;
+}
+
+function hostRows(host: HostSummary): [string, ReactNode][] {
+  const rows: [string, ReactNode][] = [];
+  if (host.name) {
+    const url = hostUrl(host);
+    rows.push([
+      'Name',
+      url ? (
+        <a className="underline hover:no-underline" href={url} target="_blank" rel="noreferrer">
+          {host.name}
+        </a>
+      ) : (
+        host.name
+      ),
+    ]);
+  }
   if (host.catalog) rows.push(['Catalog', host.catalog]);
   if (host.z != null) {
     rows.push(['Redshift', host.z_err != null ? `${host.z.toFixed(4)} ± ${host.z_err.toFixed(4)}` : host.z.toFixed(4)]);

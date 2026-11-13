@@ -34,15 +34,18 @@ describe("fetchSimilarObjects", () => {
     const fetchMock = vi.fn(async () =>
       jsonResponse({
         message: "success",
-        data: [
-          { object_id: "ZTF21aaa", score: 0.98 },
-          { object_id: "ZTF21bbb", score: 0.91 },
-        ],
+        data: {
+          query: { object_id: "ZTF18abcdefg", applecider_fusion: null },
+          neighbors: [
+            { object_id: "ZTF21aaa", score: 0.98 },
+            { object_id: "ZTF21bbb", score: 0.91 },
+          ],
+        },
       })
     )
     vi.stubGlobal("fetch", fetchMock)
 
-    const { results } = await fetchSimilarObjects("ZTF18abcdefg", 2)
+    const { query, results } = await fetchSimilarObjects("ZTF18abcdefg", 2)
 
     const { url, init } = lastRequest(fetchMock)
     expect(url).toBe("/api/babamul/similarity/objects")
@@ -50,9 +53,10 @@ describe("fetchSimilarObjects", () => {
     expect(JSON.parse(String(init.body))).toEqual({ object_id: "ZTF18abcdefg", top_k: 2 })
     expect(results.map((r) => r.object_id)).toEqual(["ZTF21aaa", "ZTF21bbb"])
     expect(results[0].score).toBeCloseTo(0.98)
+    expect(query?.object_id).toBe("ZTF18abcdefg")
   })
 
-  it("passes each neighbor's AppleCiDEr classification through, null when absent", async () => {
+  it("passes the query's and each neighbor's AppleCiDEr classification through, null when absent", async () => {
     const fusion = {
       decision_label: "Ia-like SN",
       decision_level: "class",
@@ -65,16 +69,20 @@ describe("fetchSimilarObjects", () => {
       vi.fn(async () =>
         jsonResponse({
           message: "success",
-          data: [
-            { object_id: "ZTF21aaa", score: 0.98, applecider_fusion: fusion },
-            { object_id: "ZTF21bbb", score: 0.91, applecider_fusion: null },
-          ],
+          data: {
+            query: { object_id: "ZTF18abcdefg", applecider_fusion: fusion },
+            neighbors: [
+              { object_id: "ZTF21aaa", score: 0.98, applecider_fusion: fusion },
+              { object_id: "ZTF21bbb", score: 0.91, applecider_fusion: null },
+            ],
+          },
         })
       )
     )
 
-    const { results } = await fetchSimilarObjects("ZTF18abcdefg")
+    const { query, results } = await fetchSimilarObjects("ZTF18abcdefg")
 
+    expect(query?.applecider_fusion).toEqual(fusion)
     expect(results[0].applecider_fusion).toEqual(fusion)
     expect(results[1].applecider_fusion).toBeNull()
   })
@@ -91,6 +99,21 @@ describe("fetchSimilarObjects", () => {
     expect(message).toBe("No embedding stored for object ZTF18abcdefg")
   })
 
+  it("returns no message when the search succeeds with no neighbors", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse({ message: "success", data: { query: { object_id: "ZTF18abcdefg" }, neighbors: [] } })
+      )
+    )
+
+    const { query, results, message } = await fetchSimilarObjects("ZTF18abcdefg")
+
+    expect(query?.object_id).toBe("ZTF18abcdefg")
+    expect(results).toEqual([])
+    expect(message).toBeUndefined()
+  })
+
   it("throws when Milvus is unavailable, so the page can say so", async () => {
     const fetchMock = vi.fn(async () =>
       jsonResponse({ message: "Milvus is not enabled or misconfigured" }, 501)
@@ -105,7 +128,10 @@ describe("fetchSimilarObjects", () => {
   it("works signed out, and sends no Authorization header", async () => {
     localStorage.clear()
     const fetchMock = vi.fn(async () =>
-      jsonResponse({ message: "success", data: [{ object_id: "ZTF21aaa", score: 0.9 }] })
+      jsonResponse({
+        message: "success",
+        data: { query: { object_id: "ZTF18abcdefg" }, neighbors: [{ object_id: "ZTF21aaa", score: 0.9 }] },
+      })
     )
     vi.stubGlobal("fetch", fetchMock)
 
@@ -117,7 +143,9 @@ describe("fetchSimilarObjects", () => {
   })
 
   it("defaults to 10 neighbors when no count is given", async () => {
-    const fetchMock = vi.fn(async () => jsonResponse({ message: "success", data: [] }))
+    const fetchMock = vi.fn(async () =>
+      jsonResponse({ message: "success", data: { query: { object_id: "ZTF18abcdefg" }, neighbors: [] } })
+    )
     vi.stubGlobal("fetch", fetchMock)
 
     await fetchSimilarObjects("ZTF18abcdefg")
