@@ -1356,11 +1356,18 @@ pub async fn recover_temp_queue(
     let temp_queue_name = alert_temp_queue_name(input_queue_name);
     let pending: usize = con.llen(&temp_queue_name).await?;
     let mut recovered = 0;
+    // Onto the tail the worker pops next, the earliest-popped packet last, so
+    // they are retried first and in their original order.
     for _ in 0..pending {
-        let moved: Option<Vec<Vec<u8>>> =
-            con.rpoplpush(&temp_queue_name, input_queue_name)
-                .await
-                .inspect_err(as_error!("failed to requeue an alert from the temp queue"))?;
+        let moved: Option<Vec<u8>> = con
+            .lmove(
+                &temp_queue_name,
+                input_queue_name,
+                redis::Direction::Left,
+                redis::Direction::Right,
+            )
+            .await
+            .inspect_err(as_error!("failed to requeue an alert from the temp queue"))?;
         if moved.is_none() {
             break;
         }
@@ -1609,4 +1616,43 @@ pub async fn run_alert_worker<T: AlertWorker>(
     }
     ingest_stats::flush(&db, &survey_name, &mut stats).await;
     Ok(())
+}
+
+#[cfg(test)]
+mod queue_tests {
+    use super::{alert_temp_queue_name, recover_temp_queue, retrieve_avro_bytes};
+    use crate::{conf, kafka::push_to_queue, utils::testing::TEST_CONFIG_FILE};
+    use redis::AsyncCommands;
+
+    async fn pop(con: &redis::aio::MultiplexedConnection, input: &str) -> Option<String> {
+        retrieve_avro_bytes(con, "TEST", input, &alert_temp_queue_name(input))
+            .await
+            .unwrap()
+            .map(|packet| String::from_utf8(packet).unwrap())
+    }
+
+    #[tokio::test]
+    async fn test_packets_are_processed_in_arrival_order() {
+        let input = "TEST_order_alerts_packets_queue";
+        let temp = alert_temp_queue_name(input);
+        let config = conf::load_config(Some(TEST_CONFIG_FILE)).unwrap();
+        let mut con = config.build_redis().await.unwrap();
+        con.del::<_, usize>(&[input, temp.as_str()]).await.unwrap();
+
+        for packet in ["a", "b", "c", "d"] {
+            push_to_queue(&con, input, packet.as_bytes()).await.unwrap();
+        }
+        assert_eq!(pop(&con, input).await.as_deref(), Some("a"));
+        assert_eq!(pop(&con, input).await.as_deref(), Some("b"));
+
+        // The worker dies with "a" and "b" in flight; they are retried first.
+        assert_eq!(recover_temp_queue(&mut con, input).await.unwrap(), 2);
+        let mut order = vec![];
+        while let Some(packet) = pop(&con, input).await {
+            order.push(packet);
+        }
+        assert_eq!(order, ["a", "b", "c", "d"]);
+
+        con.del::<_, usize>(&[input, temp.as_str()]).await.unwrap();
+    }
 }
