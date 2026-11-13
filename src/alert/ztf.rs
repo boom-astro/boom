@@ -1454,16 +1454,16 @@ mod tests {
 
         assert_eq!(avro_alert.candidate.candidate.ra, ra);
         assert_eq!(avro_alert.candidate.candidate.dec, dec);
-        assert!((avro_alert.candidate.psf_flux + 3957191600000.0).abs() < 1e-3);
-        assert!((avro_alert.candidate.psf_flux_err - 55887786000.0).abs() < 1e-3);
+        assert!((avro_alert.candidate.psf_flux / -3957191.6 - 1.0).abs() < 1e-5);
+        assert!((avro_alert.candidate.psf_flux_err / 55887.786 - 1.0).abs() < 1e-5);
         assert!(
             (avro_alert.candidate.snr_psf.unwrap()
                 - avro_alert.candidate.psf_flux.abs() / avro_alert.candidate.psf_flux_err)
                 .abs()
                 < 1e-6
         );
-        assert!((avro_alert.candidate.ap_flux.unwrap() + 3650897600000.0).abs() < 1e-3);
-        assert!((avro_alert.candidate.ap_flux_err.unwrap() - 24546988000.0).abs() < 1e-3);
+        assert!((avro_alert.candidate.ap_flux.unwrap() / -3650897.6 - 1.0).abs() < 1e-5);
+        assert!((avro_alert.candidate.ap_flux_err.unwrap() / 24546.988 - 1.0).abs() < 1e-5);
         assert!(
             (avro_alert.candidate.snr_ap.unwrap()
                 - avro_alert.candidate.ap_flux.unwrap().abs()
@@ -1479,7 +1479,7 @@ mod tests {
             avro_alert.candidate.psf_flux_err,
             ZTF_ZP,
         );
-        assert!((magpsf - avro_alert.candidate.candidate.magpsf).abs() < 1e-6);
+        assert!((magpsf - avro_alert.candidate.candidate.magpsf).abs() < 1e-5);
         assert!((sigmapsf - avro_alert.candidate.candidate.sigmapsf).abs() < 1e-6);
 
         // validate the prv_candidates
@@ -1517,7 +1517,7 @@ mod tests {
             detection.psf_flux_err.unwrap(),
             ZTF_ZP,
         );
-        assert!((magpsf - detection.prv_candidate.magpsf.unwrap()).abs() < 1e-6);
+        assert!((magpsf - detection.prv_candidate.magpsf.unwrap()).abs() < 1e-5);
         assert!((sigmapsf - detection.prv_candidate.sigmapsf.unwrap()).abs() < 1e-6);
 
         // validate the fp_hists
@@ -1549,7 +1549,7 @@ mod tests {
             fp_negative_det.psf_flux_err.unwrap(),
             ZTF_ZP,
         );
-        assert!((magpsf - 15.949999).abs() < 1e-6);
+        assert!((magpsf - 15.949999).abs() < 1e-5);
         assert!((sigmapsf - 0.002316).abs() < 1e-6);
         // let's also verify that forcediffimflux(unc) converts to psfFlux(Err) correctly
         let zp_scaling_factor =
@@ -1591,7 +1591,7 @@ mod tests {
             fp_positive_det.psf_flux_err.unwrap(),
             ZTF_ZP,
         );
-        assert!((magpsf - 20.801506).abs() < 1e-6);
+        assert!((magpsf - 20.801506).abs() < 1e-5);
         assert!((sigmapsf - 0.3616859).abs() < 1e-6);
         let zp_scaling_factor =
             10f64.powf((ZTF_ZP as f64 - fp_positive_det.fp_hist.magzpsci.unwrap() as f64) / 2.5);

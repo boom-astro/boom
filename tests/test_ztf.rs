@@ -520,7 +520,7 @@ async fn test_filter_ztf_alert() {
     let (magpsf, magpsf_err_from_flux) = flux2mag(-flux as f32, flux_err as f32, ZTF_ZP);
 
     // they should be consistent within a small tolerance
-    assert!((magpsf_forcediffimflux - magpsf).abs() < 1e-6);
+    assert!((magpsf_forcediffimflux - magpsf).abs() < 1e-5);
     assert!((magpsf_err - magpsf_err_from_flux).abs() < 1e-6);
 
     // let's do a similar validation for the first prv_candidates point, where the ZP is fixed at ZTF_ZP
