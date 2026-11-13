@@ -29,8 +29,8 @@ use super::ledger::{MutationTarget, Operation};
 use crate::conf::AppConfig;
 use crate::enrichment::{
     models::{SharedModelPool, SharedModels},
-    DecamEnrichmentWorker, EnrichmentWorker, EnrichmentWorkerError, LsstEnrichmentWorker,
-    WinterEnrichmentWorker, ZtfEnrichmentWorker,
+    AskapEnrichmentWorker, DecamEnrichmentWorker, EnrichmentWorker, EnrichmentWorkerError,
+    LsstEnrichmentWorker, WinterEnrichmentWorker, ZtfEnrichmentWorker,
 };
 use crate::utils::{
     enums::Survey,
@@ -348,6 +348,7 @@ pub async fn run(
                     Survey::Lsst => run_enrich_only::<LsstEnrichmentWorker>,
                     Survey::Decam => run_enrich_only::<DecamEnrichmentWorker>,
                     Survey::Winter => run_enrich_only::<WinterEnrichmentWorker>,
+                    Survey::Askap => run_enrich_only::<AskapEnrichmentWorker>,
                 };
                 let result = run_worker(receiver, &config_path, shared_models, queue);
                 result.unwrap_or_else(as_error!("enrichment worker failed"));
@@ -558,7 +559,13 @@ mod tests {
 
     #[test]
     fn every_survey_has_an_enrichment_worker() {
-        for survey in [Survey::Ztf, Survey::Lsst, Survey::Decam, Survey::Winter] {
+        for survey in [
+            Survey::Ztf,
+            Survey::Lsst,
+            Survey::Decam,
+            Survey::Winter,
+            Survey::Askap,
+        ] {
             assert!(
                 params(survey.clone(), Selection::All)
                     .validate_params()
@@ -578,7 +585,7 @@ mod tests {
 
     #[test]
     fn stale_is_refused_for_a_survey_that_does_not_stamp() {
-        for survey in [Survey::Lsst, Survey::Decam, Survey::Winter] {
+        for survey in [Survey::Lsst, Survey::Decam, Survey::Winter, Survey::Askap] {
             let message = params(survey.clone(), Selection::Stale)
                 .validate_params()
                 .expect_err("stale must be refused for a survey that does not stamp");

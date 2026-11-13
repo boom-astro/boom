@@ -2,8 +2,8 @@ use crate::{
     api::{catalogs::WATCHLIST_PREFIX, filters::joined_collections},
     conf::{self, AppConfig},
     filter::{
-        build_decam_filter_pipeline, build_lsst_filter_pipeline, build_winter_filter_pipeline,
-        build_ztf_filter_pipeline,
+        build_askap_filter_pipeline, build_decam_filter_pipeline, build_lsst_filter_pipeline,
+        build_winter_filter_pipeline, build_ztf_filter_pipeline,
     },
     scheduler::{count_filtered_alerts, record_kafka_alert_published, record_worker_retry},
     utils::{
@@ -438,6 +438,7 @@ fn candidate_fields(survey: &Survey) -> std::collections::HashSet<String> {
         Survey::Lsst => crate::alert::LsstCandidate::get_schema(),
         Survey::Winter => crate::alert::WinterCandidate::get_schema(),
         Survey::Decam => crate::alert::DecamCandidate::get_schema(),
+        Survey::Askap => crate::alert::AskapCandidate::get_schema(),
     };
     match schema {
         Schema::Record(record) => record.fields.iter().map(|f| f.name.clone()).collect(),
@@ -874,6 +875,7 @@ pub async fn build_filter_pipeline(
         Survey::Lsst => build_lsst_filter_pipeline(pipeline, permissions).await?,
         Survey::Decam => build_decam_filter_pipeline(pipeline, permissions).await?,
         Survey::Winter => build_winter_filter_pipeline(pipeline, permissions).await?,
+        Survey::Askap => build_askap_filter_pipeline(pipeline, permissions).await?,
     };
     Ok(pipeline)
 }

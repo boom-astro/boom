@@ -1,8 +1,8 @@
 use crate::{
     alert::{
-        DecamAliases, DecamCandidate, DecamForcedPhot, LsstAliases, LsstCandidate, LsstForcedPhot,
-        WinterAliases, WinterCandidate, WinterPrvCandidate, ZtfAliases, ZtfCandidate,
-        ZtfForcedPhot, ZtfPrvCandidate,
+        AskapAliases, AskapCandidate, DecamAliases, DecamCandidate, DecamForcedPhot, LsstAliases,
+        LsstCandidate, LsstForcedPhot, WinterAliases, WinterCandidate, WinterPrvCandidate,
+        ZtfAliases, ZtfCandidate, ZtfForcedPhot, ZtfPrvCandidate,
     },
     api::{
         catalogs::{catalog_accessible, WATCHLIST_PREFIX},
@@ -12,8 +12,8 @@ use crate::{
     },
     conf::{AppConfig, CatalogXmatchConfig, FilterWorkerConfig},
     enrichment::{
-        DecamAlertProperties, LsstAlertProperties, WinterAlertProperties, ZtfAlertClassifications,
-        ZtfAlertProperties,
+        AskapAlertProperties, DecamAlertProperties, LsstAlertProperties, WinterAlertProperties,
+        ZtfAlertClassifications, ZtfAlertProperties,
     },
     filter::{
         build_filter_pipeline, find_unknown_field, DocumentShape, Filter, FilterError,
@@ -1834,12 +1834,29 @@ pub struct DecamAlertToFilter {
     pub host_galaxy: Option<HostGalaxyAssociation>,
 }
 
+#[serdavro]
+#[derive(Debug, Deserialize, Serialize)]
+/// ASKAP data available at filtering time
+pub struct AskapAlertToFilter {
+    pub candid: i64,
+    #[serde(rename = "objectId")]
+    pub object_id: String,
+    pub candidate: AskapCandidate,
+    pub properties: AskapAlertProperties,
+    pub coordinates: GalacticCoordinates,
+    pub prv_candidates: Vec<AskapCandidate>,
+    pub fp_hists: Vec<AskapCandidate>,
+    pub aliases: AskapAliases,
+    pub host_galaxy: Option<HostGalaxyAssociation>,
+}
+
 fn filter_schema(survey: &Survey) -> apache_avro::Schema {
     match survey {
         Survey::Ztf => ZtfAlertToFilter::get_schema(),
         Survey::Lsst => LsstAlertToFilter::get_schema(),
         Survey::Winter => WinterAlertToFilter::get_schema(),
         Survey::Decam => DecamAlertToFilter::get_schema(),
+        Survey::Askap => AskapAlertToFilter::get_schema(),
     }
 }
 

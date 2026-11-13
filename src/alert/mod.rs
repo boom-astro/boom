@@ -1,8 +1,13 @@
+mod askap;
 mod base;
 mod decam;
 mod lsst;
 mod winter;
 mod ztf;
+pub use askap::{
+    AskapAlert, AskapAlertWorker, AskapAliases, AskapCandidate, AskapObject, AskapRawAvroAlert,
+    ASKAP_DEC_RANGE,
+};
 pub use base::{
     alert_temp_queue_name, deserialize_mjd, deserialize_mjd_option, get_schema_and_startidx,
     recover_temp_queue, run_alert_worker, AlertError, AlertWorker, AlertWorkerError,
