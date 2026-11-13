@@ -1536,8 +1536,10 @@ mod tests {
         assert_eq!(fp_negative_det.isdiffpos.unwrap(), false);
         assert!(
             (fp_negative_det.snr_psf.unwrap()
-                - fp_negative_det.psf_flux.unwrap().abs() / fp_negative_det.psf_flux_err.unwrap())
-            .abs()
+                / (fp_negative_det.psf_flux.unwrap().abs()
+                    / fp_negative_det.psf_flux_err.unwrap())
+                - 1.0)
+                .abs()
                 < 1e-6
         );
         assert!((fp_negative_det.fp_hist.jd - 2460447.920278).abs() < 1e-6);
@@ -1578,8 +1580,10 @@ mod tests {
         assert_eq!(fp_positive_det.isdiffpos.is_some(), true);
         assert!(
             (fp_positive_det.snr_psf.unwrap()
-                - fp_positive_det.psf_flux.unwrap().abs() / fp_positive_det.psf_flux_err.unwrap())
-            .abs()
+                / (fp_positive_det.psf_flux.unwrap().abs()
+                    / fp_positive_det.psf_flux_err.unwrap())
+                - 1.0)
+                .abs()
                 < 1e-6
         );
         assert!((fp_positive_det.fp_hist.jd - 2460420.9637616).abs() < 1e-6);
