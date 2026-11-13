@@ -233,6 +233,8 @@ pub enum SchemaRegistryError {
 
 #[derive(thiserror::Error, Debug)]
 pub enum AlertError {
+    #[error("photometry points comparison failed: {0:#}")]
+    PhotometryPoints(#[source] anyhow::Error),
     #[error("error from avro")]
     Avro(#[from] apache_avro::Error),
     #[error("value access error from bson")]
@@ -1016,6 +1018,8 @@ mod timeseries_tests {
 
 #[derive(thiserror::Error, Debug)]
 pub enum AlertWorkerError {
+    #[error("failed to initialize photometry points: {0:#}")]
+    PhotometryPoints(#[source] anyhow::Error),
     #[error("failed to load config")]
     LoadConfigError(#[from] conf::BoomConfigError),
     #[error("error from redis")]
