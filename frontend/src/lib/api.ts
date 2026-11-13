@@ -594,9 +594,10 @@ export type SimilarObject = {
 export type QueryObject = Omit<SimilarObject, "score">;
 
 /**
- * Objects whose AppleCiDEr fusion embedding is closest to this one's, excluding
- * itself. A 404 means no embedding is stored (only ZTF alerts that pass the
- * AppleCiDEr gate get one), so it returns an empty list rather than throwing.
+ * The searched object with its AppleCiDEr classification, and the objects whose
+ * fusion embedding is closest to its own. A 404 means no embedding is stored
+ * (only ZTF alerts that pass the AppleCiDEr gate get one), so it returns no
+ * query and an empty list, with the server's explanation, rather than throwing.
  */
 export async function fetchSimilarObjects(
   objectId: string,
@@ -625,7 +626,6 @@ export async function fetchSimilarObjects(
   return {
     query: data.query,
     results: Array.isArray(data.neighbors) ? (data.neighbors as SimilarObject[]) : [],
-    message,
   };
 }
 

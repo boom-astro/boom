@@ -272,9 +272,10 @@ browser → BOOM API → Milvus.
 ## Web UI
 
 The frontend serves similarity search at `/embeddings`
-(`frontend/src/pages/Embeddings.tsx`): an object id plus neighbor count, results
-linking through to each object's page, and a tile showing the stored-embedding
-count. That count doubles as a health signal — enrichment pauses embedding
+(`frontend/src/pages/Embeddings.tsx`): an object id plus neighbor count, and a
+results table whose highlighted first row is the searched object with its own
+classification, followed by its neighbors, each linking through to its object
+page. A tile shows the stored-embedding count. That count doubles as a health signal — enrichment pauses embedding
 uploads while Milvus is unreachable, and a count that stops growing is the
 visible symptom.
 

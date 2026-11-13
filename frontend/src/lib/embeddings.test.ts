@@ -99,6 +99,21 @@ describe("fetchSimilarObjects", () => {
     expect(message).toBe("No embedding stored for object ZTF18abcdefg")
   })
 
+  it("returns no message when the search succeeds with no neighbors", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse({ message: "success", data: { query: { object_id: "ZTF18abcdefg" }, neighbors: [] } })
+      )
+    )
+
+    const { query, results, message } = await fetchSimilarObjects("ZTF18abcdefg")
+
+    expect(query?.object_id).toBe("ZTF18abcdefg")
+    expect(results).toEqual([])
+    expect(message).toBeUndefined()
+  })
+
   it("throws when Milvus is unavailable, so the page can say so", async () => {
     const fetchMock = vi.fn(async () =>
       jsonResponse({ message: "Milvus is not enabled or misconfigured" }, 501)

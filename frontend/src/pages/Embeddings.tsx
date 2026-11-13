@@ -199,7 +199,10 @@ export default function Embeddings() {
                     <TableCell className="font-mono text-sm">
                       <div className="flex items-center gap-2">
                         <ObjectLink objectId={query.object_id} />
-                        <Badge className="px-2.5 py-0.5 font-sans text-sm font-semibold uppercase tracking-wide">
+                        <Badge
+                          variant="outline"
+                          className="border-primary bg-background px-2.5 py-0.5 font-sans text-sm font-semibold uppercase tracking-wide text-primary"
+                        >
                           Query
                         </Badge>
                       </div>
