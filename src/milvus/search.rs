@@ -41,6 +41,8 @@ pub struct SearchHit {
     pub score: f32,
     /// Alert the stored embedding came from, for joining against Mongo.
     pub candid: i64,
+    /// Julian date of that alert.
+    pub jd: f64,
 }
 
 impl MilvusClient {
@@ -86,7 +88,7 @@ impl MilvusClient {
             search_input: Some(SearchInput::PlaceholderGroup(encode_float_placeholder(&[
                 query,
             ]))),
-            output_fields: vec![FIELD_CANDID.to_string()],
+            output_fields: vec![FIELD_CANDID.to_string(), FIELD_JD.to_string()],
             search_params,
             nq: 1,
             use_default_consistency: true,
@@ -296,6 +298,7 @@ fn parse_search_hits(data: Option<SearchResultData>) -> Vec<SearchHit> {
         _ => return vec![],
     };
     let candids = long_column(&data.fields_data, FIELD_CANDID).unwrap_or_default();
+    let jds = double_column(&data.fields_data, FIELD_JD).unwrap_or_default();
 
     object_ids
         .into_iter()
@@ -304,6 +307,7 @@ fn parse_search_hits(data: Option<SearchResultData>) -> Vec<SearchHit> {
             object_id,
             score: data.scores.get(i).copied().unwrap_or(f32::NAN),
             candid: candids.get(i).copied().unwrap_or_default(),
+            jd: jds.get(i).copied().unwrap_or_default(),
         })
         .collect()
 }
@@ -519,10 +523,18 @@ mod tests {
                     data: vec!["ZTF_A".into(), "ZTF_B".into()],
                 })),
             }),
-            fields_data: vec![scalar(
-                FIELD_CANDID,
-                scalar_field::Data::LongData(LongArray { data: vec![10, 20] }),
-            )],
+            fields_data: vec![
+                scalar(
+                    FIELD_CANDID,
+                    scalar_field::Data::LongData(LongArray { data: vec![10, 20] }),
+                ),
+                scalar(
+                    FIELD_JD,
+                    scalar_field::Data::DoubleData(DoubleArray {
+                        data: vec![2461000.5, 2461001.5],
+                    }),
+                ),
+            ],
             ..Default::default()
         };
 
@@ -534,11 +546,13 @@ mod tests {
                     object_id: "ZTF_A".into(),
                     score: 0.9,
                     candid: 10,
+                    jd: 2461000.5,
                 },
                 SearchHit {
                     object_id: "ZTF_B".into(),
                     score: 0.8,
                     candid: 20,
+                    jd: 2461001.5,
                 },
             ]
         );

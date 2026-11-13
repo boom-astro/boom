@@ -21,8 +21,14 @@ use actix_web::{get, post, web, HttpResponse};
 use futures::TryStreamExt;
 use mongodb::{bson::doc, Database};
 
-/// What every caller may search until per-user access is derived from ACLs.
-const PUBLIC_ONLY: &[i32] = &[ProgramId::Public as i32];
+/// What Babamul callers may search, and the internal default.
+pub(crate) const PUBLIC_ONLY: &[i32] = &[ProgramId::Public as i32];
+
+const KNOWN_PROGRAMIDS: &[i32] = &[
+    ProgramId::Public as i32,
+    ProgramId::Partnership as i32,
+    ProgramId::Caltech as i32,
+];
 
 /// Request body for a similarity search seeded by a known object.
 #[derive(serde::Deserialize, utoipa::ToSchema)]
@@ -32,6 +38,18 @@ pub struct SimilarObjectsQuery {
     /// How many neighbors to return (default 10, capped at 100). The seed
     /// object itself is excluded, so at most `top_k` others come back.
     pub top_k: Option<i64>,
+}
+
+/// Internal similarity search, scoped to the programids the caller grants.
+#[derive(serde::Deserialize, utoipa::ToSchema)]
+pub struct ScopedSimilarObjectsQuery {
+    /// The object whose stored embedding seeds the search.
+    pub object_id: String,
+    /// How many neighbors to return (default 10, capped at 100).
+    pub top_k: Option<i64>,
+    /// ZTF programids the seed and its neighbors may belong to (default `[1]`).
+    /// A client serving several users passes the requesting user's access.
+    pub programids: Option<Vec<i32>>,
 }
 
 const DEFAULT_TOP_K: i64 = 10;
@@ -46,6 +64,8 @@ pub struct SimilarObject {
     pub object_id: String,
     /// Similarity score under the collection's metric; higher is closer.
     pub score: f32,
+    /// Julian date of the alert the stored embedding came from.
+    pub jd: f64,
     /// AppleCiDEr's classification of the alert the stored embedding came
     /// from. Null when that alert has none or could not be looked up.
     pub applecider_fusion: Option<AppleCiderFusion>,
@@ -138,6 +158,7 @@ fn attach_classifications(
                 applecider_fusion: classes.get(&hit.candid).cloned(),
                 object_id: hit.object_id,
                 score: hit.score,
+                jd: hit.jd,
             })
             .collect(),
     }
@@ -149,6 +170,7 @@ pub(crate) async fn similar_objects_response(
     db: &Database,
     object_id: &str,
     top_k: Option<i64>,
+    programids: &[i32],
 ) -> HttpResponse {
     let mut client = match client_or_unavailable(milvus) {
         Ok(client) => client,
@@ -163,9 +185,7 @@ pub(crate) async fn similar_objects_response(
 
     // Fetch the seed object's embedding — the API caller supplies an id, not a
     // raw 384-float vector, so we resolve it here before searching.
-    // TODO: replace PUBLIC_ONLY, here and in the search below, with the
-    // caller's allowed programids from their ACLs.
-    let seed = match client.get_embeddings(&[object_id], PUBLIC_ONLY).await {
+    let seed = match client.get_embeddings(&[object_id], programids).await {
         Ok(rows) => rows,
         Err(e) => return response::internal_error(&format!("Error fetching embedding: {}", e)),
     };
@@ -176,7 +196,7 @@ pub(crate) async fn similar_objects_response(
     // Ask for one extra result: the seed object matches itself perfectly and is
     // stripped out below, so this keeps up to `top_k` genuine neighbors.
     let hits = match client
-        .search_embedding(&seed.embedding, top_k + 1, PUBLIC_ONLY)
+        .search_embedding(&seed.embedding, top_k + 1, programids)
         .await
     {
         Ok(hits) => hits,
@@ -219,6 +239,26 @@ pub(crate) async fn embeddings_count_response(
     }
 }
 
+/// Validate the requested programids, defaulting to public only.
+fn scoped_programids(requested: Option<&[i32]>) -> Result<Vec<i32>, HttpResponse> {
+    let Some(requested) = requested else {
+        return Ok(PUBLIC_ONLY.to_vec());
+    };
+    if requested.is_empty() {
+        return Err(response::bad_request("programids must not be empty"));
+    }
+    if let Some(unknown) = requested.iter().find(|p| !KNOWN_PROGRAMIDS.contains(p)) {
+        return Err(response::bad_request(&format!(
+            "unknown programid {}, expected one of {:?}",
+            unknown, KNOWN_PROGRAMIDS
+        )));
+    }
+    let mut programids = requested.to_vec();
+    programids.sort_unstable();
+    programids.dedup();
+    Ok(programids)
+}
+
 /// Find the objects most similar to a given object.
 ///
 /// Looks up the seed object's stored embedding, then runs a nearest-neighbor
@@ -228,9 +268,10 @@ pub(crate) async fn embeddings_count_response(
 #[utoipa::path(
     post,
     path = "/similarity/objects",
-    request_body = SimilarObjectsQuery,
+    request_body = ScopedSimilarObjectsQuery,
     responses(
         (status = 200, description = "The seed object and its nearest neighbors", body = SimilarObjects),
+        (status = 400, description = "Invalid object_id or programids"),
         (status = 404, description = "No embedding stored for the object"),
         (status = 500, description = "Milvus unavailable or search failed"),
         (status = 501, description = "Milvus not enabled or misconfigured")
@@ -241,9 +282,13 @@ pub(crate) async fn embeddings_count_response(
 pub async fn post_similar_objects(
     milvus: web::Data<Option<MilvusClient>>,
     db: web::Data<Database>,
-    body: web::Json<SimilarObjectsQuery>,
+    body: web::Json<ScopedSimilarObjectsQuery>,
 ) -> HttpResponse {
-    similar_objects_response(&milvus, &db, &body.object_id, body.top_k).await
+    let programids = match scoped_programids(body.programids.as_deref()) {
+        Ok(programids) => programids,
+        Err(resp) => return resp,
+    };
+    similar_objects_response(&milvus, &db, &body.object_id, body.top_k, &programids).await
 }
 
 /// Get the number of embeddings currently stored.
@@ -304,6 +349,7 @@ mod tests {
             object_id: object_id.to_string(),
             score: 0.9,
             candid,
+            jd: 2460000.5,
         }
     }
 

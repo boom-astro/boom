@@ -6,6 +6,7 @@
 
 use crate::api::routes::embeddings::{
     embeddings_count_response, similar_objects_response, SimilarObjects, SimilarObjectsQuery,
+    PUBLIC_ONLY,
 };
 use crate::milvus::MilvusClient;
 
@@ -37,7 +38,7 @@ pub async fn post_babamul_similar_objects(
     db: web::Data<Database>,
     body: web::Json<SimilarObjectsQuery>,
 ) -> HttpResponse {
-    similar_objects_response(&milvus, &db, &body.object_id, body.top_k).await
+    similar_objects_response(&milvus, &db, &body.object_id, body.top_k, PUBLIC_ONLY).await
 }
 
 /// Get the number of embeddings currently stored.
