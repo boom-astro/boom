@@ -125,6 +125,24 @@ async fn migrate(
         "fp_hists.0": { "$exists": true },
     };
 
+    let pipeline = vec![doc! { "$set": { "fp_hists": fp_hists_flux_expr() } }];
+
+    let total = run_batched_update(
+        ctx,
+        collection,
+        filter,
+        pipeline,
+        batch_size,
+        estimated_count,
+        "migrate",
+    )
+    .await?;
+
+    ctx.info(format!("migration complete: {total} documents modified"));
+    Ok(total)
+}
+
+pub(super) fn fp_hists_flux_expr() -> Document {
     // Converts raw flux to nJy at the fixed zeropoint:
     //   psf_flux * 10^((ZTF_ZP - magzpsci) / 2.5)
     let scale_factor = doc! {
@@ -176,39 +194,21 @@ async fn migrate(
         }
     };
 
-    let pipeline = vec![doc! {
-        "$set": {
-            "fp_hists": {
-                "$map": {
-                    "input": "$fp_hists",
-                    "as": "fp",
-                    "in": {
-                        "$mergeObjects": [
-                            "$$fp",
-                            {
-                                "psfFlux": &new_flux,
-                                "psfFluxErr": &new_flux_err,
-                            }
-                        ]
+    doc! {
+        "$map": {
+            "input": "$fp_hists",
+            "as": "fp",
+            "in": {
+                "$mergeObjects": [
+                    "$$fp",
+                    {
+                        "psfFlux": new_flux,
+                        "psfFluxErr": new_flux_err,
                     }
-                }
-            },
+                ]
+            }
         }
-    }];
-
-    let total = run_batched_update(
-        ctx,
-        collection,
-        filter,
-        pipeline,
-        batch_size,
-        estimated_count,
-        "migrate",
-    )
-    .await?;
-
-    ctx.info(format!("migration complete: {total} documents modified"));
-    Ok(total)
+    }
 }
 
 async fn validate(
