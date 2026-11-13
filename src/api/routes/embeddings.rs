@@ -51,6 +51,22 @@ pub struct SimilarObject {
     pub applecider_fusion: Option<AppleCiderFusion>,
 }
 
+/// The seed object of a similarity search.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub struct QueryObject {
+    pub object_id: String,
+    /// AppleCiDEr's classification of the alert the seed's stored embedding
+    /// came from. Null when that alert has none or could not be looked up.
+    pub applecider_fusion: Option<AppleCiderFusion>,
+}
+
+/// A similarity search's seed and its nearest neighbors, best-first.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub struct SimilarObjects {
+    pub query: QueryObject,
+    pub neighbors: Vec<SimilarObject>,
+}
+
 #[derive(serde::Deserialize)]
 struct ClassifiedAlert {
     #[serde(rename = "_id")]
@@ -75,15 +91,14 @@ pub(crate) fn client_or_unavailable(
     }
 }
 
-/// Map each hit's candid to the AppleCiDEr classification stored on its alert.
+/// Map each candid to the AppleCiDEr classification stored on its alert.
 async fn applecider_classifications(
     db: &Database,
-    hits: &[SearchHit],
+    candids: Vec<i64>,
 ) -> Result<HashMap<i64, AppleCiderFusion>, mongodb::error::Error> {
-    if hits.is_empty() {
+    if candids.is_empty() {
         return Ok(HashMap::new());
     }
-    let candids: Vec<i64> = hits.iter().map(|hit| hit.candid).collect();
     let alerts: Vec<ClassifiedAlert> = db
         .collection::<ClassifiedAlert>(ZTF_ALERTS)
         .find(doc! { "_id": { "$in": candids } })
@@ -95,6 +110,37 @@ async fn applecider_classifications(
         .into_iter()
         .filter_map(|alert| Some((alert.candid, alert.classifications?.applecider_fusion?)))
         .collect())
+}
+
+/// The alerts whose classifications annotate a search: the seed's, then each
+/// neighbor's.
+fn candids_to_classify(seed_candid: i64, hits: &[SearchHit]) -> Vec<i64> {
+    std::iter::once(seed_candid)
+        .chain(hits.iter().map(|hit| hit.candid))
+        .collect()
+}
+
+/// Pair the seed and each neighbor with the classification of its alert.
+fn attach_classifications(
+    seed_object_id: String,
+    seed_candid: i64,
+    hits: Vec<SearchHit>,
+    classes: &HashMap<i64, AppleCiderFusion>,
+) -> SimilarObjects {
+    SimilarObjects {
+        query: QueryObject {
+            object_id: seed_object_id,
+            applecider_fusion: classes.get(&seed_candid).cloned(),
+        },
+        neighbors: hits
+            .into_iter()
+            .map(|hit| SimilarObject {
+                applecider_fusion: classes.get(&hit.candid).cloned(),
+                object_id: hit.object_id,
+                score: hit.score,
+            })
+            .collect(),
+    }
 }
 
 /// Resolve the seed object's embedding and return its nearest neighbors.
@@ -143,25 +189,19 @@ pub(crate) async fn similar_objects_response(
         .take(top_k as usize)
         .collect();
 
-    // The classification only annotates the neighbors, so a failed lookup
-    // drops it rather than the search results.
-    let mut classes = applecider_classifications(db, &hits)
+    // The classifications only annotate the results, so a failed lookup
+    // drops them rather than the search.
+    let classes = applecider_classifications(db, candids_to_classify(seed.candid, &hits))
         .await
         .unwrap_or_else(|e| {
             tracing::error!("Error fetching AppleCiDEr classifications: {}", e);
             HashMap::new()
         });
 
-    let neighbors: Vec<_> = hits
-        .into_iter()
-        .map(|hit| SimilarObject {
-            applecider_fusion: classes.remove(&hit.candid),
-            object_id: hit.object_id,
-            score: hit.score,
-        })
-        .collect();
-
-    response::ok_ser("success", neighbors)
+    response::ok_ser(
+        "success",
+        attach_classifications(seed.object_id, seed.candid, hits, &classes),
+    )
 }
 
 /// Count the stored embeddings.
@@ -183,14 +223,14 @@ pub(crate) async fn embeddings_count_response(
 ///
 /// Looks up the seed object's stored embedding, then runs a nearest-neighbor
 /// search with it. The seed object (which would otherwise be its own closest
-/// match) is filtered out of the results. Each neighbor carries AppleCiDEr's
-/// classification of the alert its embedding came from.
+/// match) is filtered out of the neighbors. The seed and each neighbor carry
+/// AppleCiDEr's classification of the alert its embedding came from.
 #[utoipa::path(
     post,
     path = "/similarity/objects",
     request_body = SimilarObjectsQuery,
     responses(
-        (status = 200, description = "Nearest neighbors, best-first", body = Vec<SimilarObject>),
+        (status = 200, description = "The seed object and its nearest neighbors", body = SimilarObjects),
         (status = 404, description = "No embedding stored for the object"),
         (status = 500, description = "Milvus unavailable or search failed"),
         (status = 501, description = "Milvus not enabled or misconfigured")
@@ -257,6 +297,46 @@ mod tests {
             read.class_probabilities.agn_like,
             fusion.class_probabilities.agn_like
         );
+    }
+
+    fn hit(object_id: &str, candid: i64) -> SearchHit {
+        SearchHit {
+            object_id: object_id.to_string(),
+            score: 0.9,
+            candid,
+        }
+    }
+
+    #[test]
+    fn the_seed_alert_is_classified_along_with_the_neighbors() {
+        let hits = [hit("ZTF21aaa", 2), hit("ZTF21bbb", 3)];
+        assert_eq!(candids_to_classify(1, &hits), vec![1, 2, 3]);
+        assert_eq!(candids_to_classify(1, &[]), vec![1]);
+    }
+
+    #[test]
+    fn classifications_attach_to_the_seed_and_each_neighbor() {
+        let alpha = [20.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0];
+        let (fusion, _) = derive(&alpha, 10, MODALITIES).expect("8 alphas derive");
+        let label = fusion.decision_label.clone();
+        let classes = HashMap::from([(1, fusion.clone()), (2, fusion)]);
+
+        let result = attach_classifications(
+            "ZTF18seed".to_string(),
+            1,
+            vec![hit("ZTF21aaa", 2), hit("ZTF21bbb", 3)],
+            &classes,
+        );
+
+        assert_eq!(result.query.object_id, "ZTF18seed");
+        let seed_class = result.query.applecider_fusion.expect("seed is classified");
+        assert_eq!(seed_class.decision_label, label);
+        let neighbors: Vec<_> = result
+            .neighbors
+            .iter()
+            .map(|n| (n.object_id.as_str(), n.applecider_fusion.is_some()))
+            .collect();
+        assert_eq!(neighbors, [("ZTF21aaa", true), ("ZTF21bbb", false)]);
     }
 
     #[test]

@@ -5,7 +5,7 @@
 //! are public (`BABAMUL_PUBLIC_ROUTES`), like the `/dashboard` stats.
 
 use crate::api::routes::embeddings::{
-    embeddings_count_response, similar_objects_response, SimilarObject, SimilarObjectsQuery,
+    embeddings_count_response, similar_objects_response, SimilarObjects, SimilarObjectsQuery,
 };
 use crate::milvus::MilvusClient;
 
@@ -15,15 +15,15 @@ use mongodb::Database;
 /// Find the objects most similar to a given object.
 ///
 /// Looks up the seed object's stored embedding, then runs a nearest-neighbor
-/// search with it. The seed object itself is excluded from the results. Each
-/// neighbor carries AppleCiDEr's classification of the alert its embedding came
-/// from.
+/// search with it. The seed object itself is excluded from the neighbors. The
+/// seed and each neighbor carry AppleCiDEr's classification of the alert its
+/// embedding came from.
 #[utoipa::path(
     post,
     path = "/babamul/similarity/objects",
     request_body = SimilarObjectsQuery,
     responses(
-        (status = 200, description = "Nearest neighbors, best-first", body = Vec<SimilarObject>),
+        (status = 200, description = "The seed object and its nearest neighbors", body = SimilarObjects),
         (status = 401, description = "Unauthorized"),
         (status = 404, description = "No embedding stored for the object"),
         (status = 500, description = "Milvus unavailable or search failed"),

@@ -633,15 +633,19 @@ export type SimilarObject = {
   applecider_fusion?: AppleCiderFusion | null;
 };
 
+/** The seed of a similarity search, with its own AppleCiDEr classification. */
+export type QueryObject = Omit<SimilarObject, "score">;
+
 /**
- * Objects whose AppleCiDEr fusion embedding is closest to this one's, excluding
- * itself. A 404 means no embedding is stored (only ZTF alerts that pass the
- * AppleCiDEr gate get one), so it returns an empty list rather than throwing.
+ * The searched object with its AppleCiDEr classification, and the objects whose
+ * fusion embedding is closest to its own. A 404 means no embedding is stored
+ * (only ZTF alerts that pass the AppleCiDEr gate get one), so it returns no
+ * query and an empty list, with the server's explanation, rather than throwing.
  */
 export async function fetchSimilarObjects(
   objectId: string,
   topK: number = 10
-): Promise<{ results: SimilarObject[]; message?: string }> {
+): Promise<{ query?: QueryObject; results: SimilarObject[]; message?: string }> {
   const url = `${API_BASE}/similarity/objects`;
   const res = await fetch(url, {
     method: "POST",
@@ -661,8 +665,11 @@ export async function fetchSimilarObjects(
     throw new Error(message ?? `Similarity search failed: ${res.status}`);
   }
 
-  const result = unwrapData<unknown>(body, []);
-  return { results: Array.isArray(result) ? (result as SimilarObject[]) : [], message };
+  const data = unwrapData<{ query?: QueryObject; neighbors?: unknown }>(body, {});
+  return {
+    query: data.query,
+    results: Array.isArray(data.neighbors) ? (data.neighbors as SimilarObject[]) : [],
+  };
 }
 
 export class EmbeddingsDisabled extends Error {}
