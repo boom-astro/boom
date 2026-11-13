@@ -247,6 +247,12 @@ server-side, and the seed is stripped from its own results. `top_k` defaults to
 10 and is clamped to 100. A 404 means the object has no stored embedding, which
 is an ordinary outcome — only ZTF alerts that clear the AppleCiDEr gate get one.
 
+The internal route also takes `programids`, the ZTF programs (`1`, `2`, `3`)
+the seed and its neighbors may belong to. It defaults to `[1]`, and an empty
+list or another value is a 400. A client that serves several users, like
+SkyPortal, passes the requesting user's access. The Babamul route always
+searches programid 1.
+
 Each neighbor is `{"object_id", "score", "jd", "applecider_fusion"}`, where
 `jd` is the date of the alert its stored embedding came from. The last is
 AppleCiDEr's classification (`decision_label`, `decision_probability`,
