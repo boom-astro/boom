@@ -77,6 +77,13 @@ impl LsstPhotometry {
             _ => None,
         }
     }
+
+    pub fn to_positive_mag(&self) -> Option<PhotometryMag> {
+        if self.flux.is_some_and(|f| f < 0.0) {
+            return None;
+        }
+        self.to_photometry_mag(None)
+    }
 }
 
 pub fn lsst_detections(
@@ -531,13 +538,13 @@ impl LsstEnrichmentWorker {
             .prv_candidates
             .iter()
             .filter(|p| p.jd <= alert.candidate.jd)
-            .filter_map(|p| p.to_photometry_mag(None))
+            .filter_map(|p| p.to_positive_mag())
             .collect();
         let fp_hists: Vec<PhotometryMag> = alert
             .fp_hists
             .iter()
             .filter(|p| p.jd <= alert.candidate.jd)
-            .filter_map(|p| p.to_photometry_mag(None))
+            .filter_map(|p| p.to_positive_mag())
             .collect();
 
         // lightcurve is prv_candidates + fp_hists, no need for parse_photometry here
@@ -569,13 +576,13 @@ impl LsstEnrichmentWorker {
                     .prv_candidates
                     .iter()
                     .filter(|p| p.jd <= alert.candidate.jd)
-                    .filter_map(|p| p.to_photometry_mag(None))
+                    .filter_map(|p| p.to_positive_mag())
                     .collect();
                 let ztf_fp_hists: Vec<PhotometryMag> = ztf_match
                     .fp_hists
                     .iter()
                     .filter(|p| p.jd <= alert.candidate.jd)
-                    .filter_map(|p| p.to_photometry_mag(None))
+                    .filter_map(|p| p.to_positive_mag())
                     .collect();
                 lightcurve.extend([ztf_prv_candidates, ztf_fp_hists].concat());
                 prepare_photometry(&mut lightcurve);
