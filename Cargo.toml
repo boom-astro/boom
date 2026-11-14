@@ -35,6 +35,7 @@ indicatif = "0.18.4"
 itertools = "0.14.0"
 kete_core = { git = "https://github.com/dahlend/kete", rev = "418a5bf19fc71a881dfc661b456a22fa1c38bfa7" }
 kete_spice = { git = "https://github.com/dahlend/kete", rev = "418a5bf19fc71a881dfc661b456a22fa1c38bfa7" }
+lightcurve-fitting = { git = "https://github.com/boom-astro/lightcurve-fitting", rev = "d1b110d6341af47c6302b8c7a6d6cb48946f7dc2" }
 jsonwebtoken = { version = "10.4.0", features = ["aws_lc_rs"] }
 lettre = "0.11"
 moc = "0.19.2"

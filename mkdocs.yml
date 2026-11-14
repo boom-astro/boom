@@ -69,6 +69,7 @@ nav:
   - Classification and fits:
       - AppleCiDER: applecider.md
       - Villar light-curve fits: villar-fit.md
+      - Arnett and temperature fits: lightcurve-fits.md
       - Milvus vector database: milvus.md
   - Babamul:
       - Babamul: babamul.md
