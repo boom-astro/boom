@@ -14,7 +14,7 @@ pub const SNT: f32 = 3.0; // Signal-to-noise threshold for detection
 const FACTOR: f32 = 1.0857362047581294; // where 1.0857362047581294 = 2.5 / np.log(10)
 
 // now survey-specific values:
-pub const ZTF_ZP: f32 = 23.9;
+pub const ZTF_ZP: f32 = ZP_AB + 22.5;
 pub const LSST_ZP_AB_NJY: f32 = ZP_AB + 22.5; // ZP + nJy to Jy conversion factor, as 2.5 * log10(1e9) = 22.5
 
 pub fn flux2mag(flux: f32, flux_err: f32, zp: f32) -> (f32, f32) {

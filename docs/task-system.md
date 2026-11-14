@@ -190,6 +190,7 @@ later.
 | --- | --- |
 | `catalog_ingest` | Download an archival catalog and insert it. See [catalogs.md](./catalogs.md). |
 | `migrate_fp_flux` | Recompute ZTF forced-photometry flux in `ZTF_alerts_aux` at a fixed zeropoint. |
+| `migrate_ztf_flux` | Recompute every ZTF flux (alerts, detections, non-detections, forced photometry) in nJy. |
 | `migrate_snr` | Recompute `snr_psf`, `snr_ap` and ZTF `apFlux` across alerts and lightcurves. |
 | `reprocess_crossmatch` | Fill in or refresh crossmatches on a survey's `alerts_aux` records, or with `remove` unset a dropped catalog's matches. |
 | `prepare_catalog` | Add spatial fields and a 2dsphere index to a hand-imported collection. |

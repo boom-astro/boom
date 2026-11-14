@@ -47,6 +47,7 @@ pub mod export_catalog;
 pub mod link_tracks;
 pub mod migrate_fp_flux;
 pub mod migrate_snr;
+pub mod migrate_ztf_flux;
 pub mod mpcorb_ingest;
 pub mod prepare_catalog;
 pub mod propagate_orbits;
@@ -106,12 +107,13 @@ pub enum TaskType {
     ReprocessCrossmatch,
     MigrateSnr,
     MigrateFpFlux,
+    MigrateZtfFlux,
     TnsSync,
     TnsPhotometry,
 }
 
 impl TaskType {
-    pub const ALL: [TaskType; 20] = [
+    pub const ALL: [TaskType; 21] = [
         Self::CatalogIngest,
         Self::StreamKowalskiAlerts,
         Self::CopyCutouts,
@@ -130,6 +132,7 @@ impl TaskType {
         Self::ReprocessCrossmatch,
         Self::MigrateSnr,
         Self::MigrateFpFlux,
+        Self::MigrateZtfFlux,
         Self::TnsSync,
         Self::TnsPhotometry,
     ];
@@ -154,6 +157,7 @@ impl TaskType {
             Self::ReprocessCrossmatch => reprocess_crossmatch::TASK_TYPE,
             Self::MigrateSnr => migrate_snr::TASK_TYPE,
             Self::MigrateFpFlux => migrate_fp_flux::TASK_TYPE,
+            Self::MigrateZtfFlux => migrate_ztf_flux::TASK_TYPE,
             Self::TnsSync => tns_sync::TASK_TYPE,
             Self::TnsPhotometry => tns_photometry::TASK_TYPE,
         }
@@ -461,6 +465,16 @@ pub const TASKS: &[TaskSpec] = &[
         params_schema: || schema_of::<migrate_fp_flux::MigrateFpFluxParams>(),
     },
     TaskSpec {
+        id: migrate_ztf_flux::TASK_TYPE,
+        title: "Recompute ZTF fluxes in nJy",
+        description: "Recompute psfFlux, psfFluxErr, apFlux and apFluxErr of ZTF alerts, \
+                      detections, non-detections and forced photometry from their \
+                      magnitudes and raw fluxes, in nJy.",
+        idempotent: true,
+        destructive: false,
+        params_schema: || schema_of::<migrate_ztf_flux::MigrateZtfFluxParams>(),
+    },
+    TaskSpec {
         id: tns_sync::TASK_TYPE,
         title: "Sync the TNS collection",
         description: "Upsert TNS from the public objects files: the full file once it is \
@@ -587,6 +601,12 @@ pub fn validate_params(task_type: &str, params: &serde_json::Value) -> Result<()
                     .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
             parsed.validate_params().map_err(TaskError::InvalidParams)
         }
+        migrate_ztf_flux::TASK_TYPE => {
+            let parsed: migrate_ztf_flux::MigrateZtfFluxParams =
+                serde_json::from_value(params.clone())
+                    .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            parsed.validate_params().map_err(TaskError::InvalidParams)
+        }
         export_catalog::TASK_TYPE => {
             let parsed: export_catalog::ExportCatalogParams =
                 serde_json::from_value(params.clone())
@@ -657,7 +677,7 @@ pub fn single_flight_key(
         // One migration of a collection at a time: two concurrent runs would
         // rewrite the same documents with the same pipeline, wasting a large
         // amount of write throughput for no benefit.
-        migrate_fp_flux::TASK_TYPE => Some(doc! {}),
+        migrate_fp_flux::TASK_TYPE | migrate_ztf_flux::TASK_TYPE => Some(doc! {}),
         // Two imports into one BOOM would duplicate the whole stream's work,
         // and the destination is always the deployment this runs in, so there
         // is nothing to key on: one import at a time.
@@ -875,6 +895,11 @@ pub async fn dispatch(
             let params = migrate_fp_flux::MigrateFpFluxParams::deserialize(params)
                 .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
             migrate_fp_flux::run(ctx, params).await
+        }
+        migrate_ztf_flux::TASK_TYPE => {
+            let params = migrate_ztf_flux::MigrateZtfFluxParams::deserialize(params)
+                .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            migrate_ztf_flux::run(ctx, params).await
         }
         tns_sync::TASK_TYPE => {
             let params = tns_sync::TnsSyncParams::deserialize(params)

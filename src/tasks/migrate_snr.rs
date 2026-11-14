@@ -170,7 +170,7 @@ pub async fn run(
     }))
 }
 
-const ZTF_ZP: f64 = 23.9;
+const ZTF_ZP: f64 = 31.4;
 const FACTOR: f64 = 1.0857362047581294; // 2.5 / ln(10)
 
 // ---------------------------------------------------------------------------
@@ -251,7 +251,7 @@ fn ztf_flux_raw_expr(magap_ref: &str) -> Document {
     }
 }
 
-/// Compute `apFlux = flux_raw * 1e9` from magap, with sign determined by isdiffpos.
+/// Compute `apFlux = flux_raw` from magap, with sign determined by isdiffpos.
 /// Positive when `isdiffpos` is true, negative otherwise (matching psfFlux convention).
 fn ztf_ap_flux_expr(magap_ref: &str, isdiffpos_ref: &str, existing_ref: &str) -> Document {
     doc! {
@@ -260,8 +260,8 @@ fn ztf_ap_flux_expr(magap_ref: &str, isdiffpos_ref: &str, existing_ref: &str) ->
             "then": {
                 "$cond": {
                     "if": { "$eq": [isdiffpos_ref, true] },
-                    "then": { "$multiply": [ztf_flux_raw_expr(magap_ref), 1e9_f64] },
-                    "else": { "$multiply": [ztf_flux_raw_expr(magap_ref), -1e9_f64] },
+                    "then": ztf_flux_raw_expr(magap_ref),
+                    "else": { "$multiply": [ztf_flux_raw_expr(magap_ref), -1.0_f64] },
                 }
             },
             "else": existing_ref,
@@ -269,7 +269,7 @@ fn ztf_ap_flux_expr(magap_ref: &str, isdiffpos_ref: &str, existing_ref: &str) ->
     }
 }
 
-/// Compute `apFluxErr = (sigmagap / FACTOR) * flux_raw * 1e9` from magap + sigmagap.
+/// Compute `apFluxErr = (sigmagap / FACTOR) * flux_raw` from magap + sigmagap.
 fn ztf_ap_flux_err_expr(magap_ref: &str, sigmagap_ref: &str, existing_ref: &str) -> Document {
     doc! {
         "$cond": {
@@ -281,7 +281,6 @@ fn ztf_ap_flux_err_expr(magap_ref: &str, sigmagap_ref: &str, existing_ref: &str)
                 "$multiply": [
                     { "$divide": [sigmagap_ref, FACTOR] },
                     ztf_flux_raw_expr(magap_ref),
-                    1e9_f64,
                 ]
             },
             "else": existing_ref,
@@ -585,14 +584,13 @@ async fn migrate_lsst_alerts_aux(
 const LSST_ZP_AB_NJY: f64 = 31.4;
 
 /// Aggregation sub-expression: compute magap from apFlux.
-/// `magap = -2.5 * log10(abs(flux_ref / scale)) + zp`
-/// where `scale = 1e9` for ZTF (flux stored as nJy, ZP in Jy-mag) and `1.0` for LSST (flux in nJy, ZP already accounts for that).
-fn computed_mag_expr(flux_ref: &str, scale: f64, zp: f64) -> Document {
+/// `magap = -2.5 * log10(abs(flux_ref)) + zp`, with the flux in nJy.
+fn computed_mag_expr(flux_ref: &str, zp: f64) -> Document {
     doc! {
         "$add": [
             { "$multiply": [
                 -2.5_f64,
-                { "$log10": { "$abs": { "$divide": [flux_ref, scale] } } }
+                { "$log10": { "$abs": flux_ref } }
             ]},
             zp
         ]
@@ -825,7 +823,7 @@ async fn validate_ztf_alerts(ctx: &TaskContext, db: &mongodb::Database) -> Resul
                             { "$ne": ["$candidate.apFlux", Bson::Null] },
                             { "$gt": [{ "$abs": "$candidate.apFlux" }, 0.0_f64] },
                         ]},
-                        "then": computed_mag_expr("$candidate.apFlux", 1e9, ZTF_ZP),
+                        "then": computed_mag_expr("$candidate.apFlux", ZTF_ZP),
                         "else": Bson::Null,
                     }
                 },
@@ -923,7 +921,7 @@ async fn validate_ztf_alerts_aux(
                                     { "$ne": ["$$pc.apFlux", Bson::Null] },
                                     { "$gt": [{ "$abs": "$$pc.apFlux" }, 0.0_f64] },
                                 ]},
-                                "then": computed_mag_expr("$$pc.apFlux", 1e9, ZTF_ZP),
+                                "then": computed_mag_expr("$$pc.apFlux", ZTF_ZP),
                                 "else": Bson::Null,
                             }
                         },
@@ -1059,7 +1057,7 @@ async fn validate_lsst_alerts(ctx: &TaskContext, db: &mongodb::Database) -> Resu
                             { "$ne": ["$candidate.apFlux", Bson::Null] },
                             { "$gt": [{ "$abs": "$candidate.apFlux" }, 0.0_f64] },
                         ]},
-                        "then": computed_mag_expr("$candidate.apFlux", 1.0, LSST_ZP_AB_NJY),
+                        "then": computed_mag_expr("$candidate.apFlux", LSST_ZP_AB_NJY),
                         "else": Bson::Null,
                     }
                 },
@@ -1159,7 +1157,7 @@ async fn validate_lsst_alerts_aux(
                                     { "$ne": ["$$pc.apFlux", Bson::Null] },
                                     { "$gt": [{ "$abs": "$$pc.apFlux" }, 0.0_f64] },
                                 ]},
-                                "then": computed_mag_expr("$$pc.apFlux", 1.0, LSST_ZP_AB_NJY),
+                                "then": computed_mag_expr("$$pc.apFlux", LSST_ZP_AB_NJY),
                                 "else": Bson::Null,
                             }
                         },
