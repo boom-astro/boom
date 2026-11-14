@@ -79,6 +79,8 @@ pub fn ztf_mid_exposure(jd: f64, exptime: Option<f64>) -> f64 {
     jd + exptime.unwrap_or(30.0) / 2.0 / 86_400.0
 }
 
+const KNOWN_ASSOCIATION_ARCSEC: f64 = 15.0;
+
 /// Detections for the window, with the `ssnamenr` label when there is one.
 ///
 /// `known` selects the detections IPAC already matched to a solar system
@@ -93,20 +95,18 @@ pub async fn load_window(
     known: bool,
     region: Option<(f64, f64, f64)>,
 ) -> Result<(Vec<Detection>, HashMap<i64, String>), DiscoveryError> {
-    // Absent on an unassociated detection, so $exists rather than a null type.
-    let association = if known {
-        doc! { "$type": "string" }
-    } else {
-        doc! { "$exists": false }
-    };
+    let within = doc! { "$gte": 0.0, "$lt": KNOWN_ASSOCIATION_ARCSEC };
     let mut filter = doc! {
         "candidate.jd": { "$gte": jd_start, "$lt": jd_start + span },
-        "candidate.ssnamenr": association,
         "candidate.drb": { "$gt": drb },
         "candidate.isdiffpos": true,
     };
-    // A mover lands on fresh sky each exposure, so nothing persistent sits there.
-    if !known {
+    if known {
+        filter.insert("candidate.ssnamenr", doc! { "$type": "string" });
+        filter.insert("candidate.ssdistnr", within);
+    } else {
+        filter.insert("candidate.ssdistnr", doc! { "$not": within });
+        // A mover lands on fresh sky each exposure, so nothing persistent sits there.
         filter.insert("properties.stationary", false);
         filter.insert("properties.rock", false);
     }
@@ -148,11 +148,13 @@ pub async fn load_window(
         let Some(detection) = detection_of(&doc) else {
             continue;
         };
-        if let Ok(name) = doc
-            .get_document("candidate")
-            .and_then(|c| c.get_str("ssnamenr"))
-        {
-            labels.insert(detection.id, name.to_string());
+        if known {
+            if let Ok(name) = doc
+                .get_document("candidate")
+                .and_then(|c| c.get_str("ssnamenr"))
+            {
+                labels.insert(detection.id, name.to_string());
+            }
         }
         detections.push(detection);
     }
