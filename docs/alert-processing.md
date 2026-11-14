@@ -164,6 +164,7 @@ the matching version in `DERIVATIONS`.** The components are deliberately coarse:
 | `host_association` | `properties.hosted` and `properties.best_host`, from the `host_galaxy` the DLR scoring writes |
 | `applecider_postprocess` | `applecider_fusion`, `applecider_outputs` and the fusion embedding, which BOOM derives from the model's `alpha` |
 | `villar_fit` | `villar_fit`, on a GPU build. Fitted by BOOM's own PSO, so a change to the fit or its `PsoConfig` belongs here rather than in a model hash |
+| `lightcurve_fits` | `arnett_fit` and `thermal_fit`, including a change to the pinned `lightcurve-fitting` revision that alters them |
 
 These are the ZTF worker's. The LSST, DECam and WINTER workers write
 `properties` only, so a set of theirs names no models.

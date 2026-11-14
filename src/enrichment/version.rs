@@ -91,6 +91,8 @@ pub const DERIVATIONS: &[(&str, u32)] = &[
     ("host_association", 2),
     // applecider_fusion, applecider_outputs and fusion_embedding.
     ("applecider_postprocess", 1),
+    // arnett_fit and thermal_fit.
+    ("lightcurve_fits", 1),
 ];
 
 /// Only GPU builds compute `villar_fit`; bump it when the PSO fit or its `PsoConfig` changes.

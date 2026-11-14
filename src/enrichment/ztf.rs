@@ -16,6 +16,7 @@ use crate::utils::cutouts::{AlertCutout, CutoutStorage};
 use crate::utils::db::mongify;
 use crate::utils::enums::{ProgramId, Survey};
 use crate::utils::host::{HostGalaxyAssociation, HostSummary};
+use crate::utils::lightcurve_fits;
 use crate::utils::lightcurves::{
     analyze_photometry, is_stationary, prepare_photometry, signed_snr, summarise_detections,
     ActivityMetrics, AllBandsProperties, Band, DetectionHistory, EpisodeHistory, Morphology,
@@ -1020,6 +1021,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         let batch_size = alerts.len();
         let mut skipped_empty_lightcurve: Vec<i64> = Vec::new();
         let mut work_items: Vec<AlertWork> = Vec::with_capacity(alerts.len());
+        let mut fit_inputs: Vec<Vec<PhotometryMag>> = Vec::with_capacity(alerts.len());
         #[cfg(feature = "gpu")]
         let mut villar_inputs: Vec<(i64, Vec<PhotometryMag>)> = Vec::new();
         for alert in alerts {
@@ -1027,7 +1029,6 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             let cutouts = candid_to_cutouts
                 .remove(&candid)
                 .ok_or_else(|| EnrichmentWorkerError::MissingCutouts(candid))?;
-            #[cfg_attr(not(feature = "gpu"), allow(unused_variables))]
             let (properties, all_bands_properties, programid, lightcurve, ztf_lightcurve) =
                 match self
                     .get_alert_properties(&alert, &orbits, &sso_history, &baselines)
@@ -1044,8 +1045,9 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                 };
             #[cfg(feature = "gpu")]
             if self.models.gpu_ctx.is_some() {
-                villar_inputs.push((candid, lightcurve));
+                villar_inputs.push((candid, lightcurve.clone()));
             }
+            fit_inputs.push(lightcurve);
 
             work_items.push(AlertWork {
                 candid,
@@ -1077,7 +1079,20 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             }));
         }
 
+        let span = tracing::Span::current();
+        let fits_task = tokio::task::spawn_blocking(move || {
+            span.in_scope(|| lightcurve_fits::fit_many(&fit_inputs))
+        });
+
         let classifications_list = self.classify(&self.models, &work_items)?;
+
+        let mut fits = fits_task
+            .await
+            .unwrap_or_else(|e| {
+                warn!("light curve fitting failed for the whole batch: {}", e);
+                Vec::new()
+            })
+            .into_iter();
 
         for (item, mut classifications) in work_items.into_iter().zip(classifications_list) {
             // Extracting the fusion embedding from the classifications
@@ -1093,6 +1108,10 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             };
             if let Some(cls) = &classifications {
                 set_doc.insert("classifications", mongify(cls));
+            }
+            if let Some(Some(fit)) = fits.next() {
+                set_doc.insert("arnett_fit", mongify(&fit.arnett));
+                set_doc.insert("thermal_fit", mongify(&fit.thermal));
             }
 
             updates.push(WriteModel::UpdateOne(
