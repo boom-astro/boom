@@ -111,7 +111,7 @@ function ZtfRules() {
             <OR/>
             <li>
               <code>
-                0 &le; candidate.ssdistnr &lt; 12.0&Prime; <AND/> candidate.ssmagnr &ge; 0
+                0 &le; candidate.ssdistnr &lt; 12.0&Prime; <AND/> (candidate.ssmagnr &ge; 0 <OR/> known comet)
               </code> (solar-system object)
             </li>
             <OR/>
