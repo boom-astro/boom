@@ -23,9 +23,9 @@ use crate::conf::CatalogXmatchConfig;
 use crate::utils::{
     db::{index_cuts, merge_filters, shard_filters},
     enums::Survey,
-    host::{self, HostGalaxyAssociation, HostGalaxyConfig, HostSummary},
+    host::{self, HostGalaxyConfig, HostSummary, StoredHostCandidate},
 };
-use futures::TryStreamExt;
+use futures::{StreamExt, TryStreamExt};
 use mongodb::{
     bson::{doc, to_bson, Bson, Document},
     options::{Hint, UpdateManyModel, UpdateOneModel, WriteModel},
@@ -46,6 +46,7 @@ const QUEUE_MULTIPLIER: usize = 2;
 const CATALOG_PROBE_SAMPLE: i64 = 1_000;
 /// How many records to scan between progress publishes.
 const PROGRESS_EVERY: u64 = 50_000;
+const NO_HOST_RANGES: usize = 4_096;
 const SCAN_PAGE: i64 = 1_000;
 
 fn default_batch_size() -> usize {
@@ -72,6 +73,8 @@ pub struct BackfillHostGalaxyParams {
     pub processes: usize,
     #[serde(default = "default_scan_shards")]
     pub scan_shards: usize,
+    #[serde(default)]
+    pub no_host_pass: bool,
     /// Skip records that already carry a `host_galaxy`, which makes an
     /// interrupted run resumable. Leave it off to rescore everything after a
     /// change to the association parameters.
@@ -92,6 +95,9 @@ impl BackfillHostGalaxyParams {
         }
         if self.scan_shards == 0 || self.scan_shards > MAX_PROCESSES {
             return Err(format!("scan_shards must be between 1 and {MAX_PROCESSES}"));
+        }
+        if self.no_host_pass && self.skip_existing {
+            return Err("no_host_pass needs every record scanned, not skip_existing".to_string());
         }
         Ok(())
     }
@@ -155,11 +161,11 @@ fn galaxy_matches(
 /// What the enrichment workers copy from `host_galaxy` onto each alert.
 fn alert_host_fields(
     survey: &Survey,
-    association: &HostGalaxyAssociation,
+    best_host: Option<&StoredHostCandidate>,
 ) -> Result<Document, mongodb::bson::ser::Error> {
-    let mut fields = doc! { "properties.hosted": association.best_host.is_some() };
+    let mut fields = doc! { "properties.hosted": best_host.is_some() };
     if matches!(survey, Survey::Ztf | Survey::Lsst) {
-        let best_host = association.best_host.as_ref().map(HostSummary::from);
+        let best_host = best_host.map(HostSummary::from);
         fields.insert("properties.best_host", to_bson(&best_host)?);
     }
     Ok(fields)
@@ -218,6 +224,7 @@ async fn worker(
     survey: Survey,
     batch_size: usize,
     dry_run: bool,
+    no_host_pass: bool,
 ) -> Result<(u64, u64), super::TaskError> {
     let catalogs = [
         config.ned_catalog.as_str(),
@@ -283,7 +290,7 @@ async fn worker(
         let encode = || -> Result<_, mongodb::bson::ser::Error> {
             Ok((
                 to_bson(&association)?,
-                alert_host_fields(&survey, &association)?,
+                alert_host_fields(&survey, association.best_host.as_ref())?,
             ))
         };
         let (value, alert_fields) = match encode() {
@@ -306,10 +313,14 @@ async fn worker(
                 .build(),
         ));
         // Alerts not enriched yet have no `properties` to complete.
+        let mut alerts_filter = doc! { "objectId": object_id, "properties": { "$type": "object" } };
+        if no_host_pass && association.best_host.is_none() {
+            alerts_filter.insert("properties.hosted", true);
+        }
         batch.push(WriteModel::UpdateMany(
             UpdateManyModel::builder()
                 .namespace(alerts_ns.clone())
-                .filter(doc! { "objectId": object_id, "properties": { "$type": "object" } })
+                .filter(alerts_filter)
                 .update(doc! { "$set": alert_fields })
                 .build(),
         ));
@@ -351,6 +362,72 @@ async fn worker(
         written += n;
     }
     Ok((written, unreadable))
+}
+
+/// In `_id` order, so each page is dirtied once rather than once per alert.
+async fn set_no_host(
+    ctx: &TaskContext,
+    alerts: &mongodb::Collection<Document>,
+    survey: &Survey,
+    concurrency: usize,
+) -> (u64, Result<(), super::TaskError>) {
+    let fields = match alert_host_fields(survey, None) {
+        Ok(fields) => fields,
+        Err(e) => return (0, Err(failed(e))),
+    };
+    let mut filter = doc! { "properties": { "$type": "object" } };
+    if matches!(survey, Survey::Ztf | Survey::Lsst) {
+        filter.insert(
+            "$or",
+            vec![
+                doc! { "properties.hosted": Bson::Null },
+                doc! { "properties.best_host": { "$exists": false } },
+            ],
+        );
+    } else {
+        filter.insert("properties.hosted", Bson::Null);
+    }
+    let estimated = alerts.estimated_document_count().await.unwrap_or(0);
+    ctx.info(format!(
+        "no-host pass: cutting {NO_HOST_RANGES} ranges on the _id index of {}",
+        alerts.name()
+    ));
+    let cuts = match index_cuts(alerts, NO_HOST_RANGES, "_id", estimated).await {
+        Ok(cuts) => cuts,
+        Err(e) => return (0, Err(failed(e))),
+    };
+    let ranges = shard_filters("_id", &cuts);
+    let total = ranges.len() as u64;
+    let (done, modified) = (AtomicU64::new(0), AtomicU64::new(0));
+    let result = futures::stream::iter(ranges.iter().map(|range| {
+        let (filter, fields) = (merge_filters(&filter, range), fields.clone());
+        let (done, modified) = (&done, &modified);
+        async move {
+            if ctx.is_canceled() {
+                return Err(super::TaskError::Canceled);
+            }
+            let written = alerts
+                .update_many(filter, doc! { "$set": fields })
+                .hint(Hint::Keys(doc! { "_id": 1 }))
+                .await
+                .map_err(failed)?
+                .modified_count;
+            let m = modified.fetch_add(written, Ordering::Relaxed) + written;
+            let d = done.fetch_add(1, Ordering::Relaxed) + 1;
+            ctx.progress(
+                d,
+                total,
+                format!("no-host pass: {d}/{total} ranges, {m} alert(s) set"),
+            )
+            .await;
+            Ok(())
+        }
+    }))
+    .buffer_unordered(concurrency)
+    .try_collect::<Vec<()>>()
+    .await
+    .map(|_| ());
+    (modified.load(Ordering::Relaxed), result)
 }
 
 pub async fn run(
@@ -419,6 +496,7 @@ pub async fn run(
             params.survey.clone(),
             params.batch_size,
             params.dry_run,
+            params.no_host_pass,
         )
     }));
     drop(rx);
@@ -575,11 +653,36 @@ pub async fn run(
         return Err(super::TaskError::Canceled);
     }
 
+    let mut no_host_alerts = 0;
+    if params.no_host_pass && !params.dry_run {
+        let alerts: mongodb::Collection<Document> = db.collection(&alerts_ns.coll);
+        let (modified, result) = set_no_host(ctx, &alerts, &params.survey, params.processes).await;
+        no_host_alerts = modified;
+        if modified > 0 {
+            ctx.record_mutation(
+                MutationTarget {
+                    database: db.name().to_string(),
+                    collection: alerts_ns.coll.clone(),
+                    catalog: None,
+                    survey: Some(params.survey.to_string().to_lowercase()),
+                },
+                Operation::Recompute,
+                doc! {
+                    "field": "properties.hosted, properties.best_host",
+                    "no_host_alerts": modified as i64,
+                },
+            )
+            .await;
+        }
+        result?;
+    }
+
     Ok(serde_json::json!({
         "survey": params.survey.to_string(),
         "scanned": fed,
         "written": total,
         "unreadable": unreadable,
+        "no_host_alerts": no_host_alerts,
         "skip_existing": params.skip_existing,
         "dry_run": params.dry_run,
     }))
