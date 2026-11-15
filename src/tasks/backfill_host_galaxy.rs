@@ -21,18 +21,19 @@ use super::context::TaskContext;
 use super::ledger::{MutationTarget, Operation};
 use crate::conf::CatalogXmatchConfig;
 use crate::utils::{
-    db::CURSOR_BATCH_SIZE,
+    db::{index_cuts, merge_filters, shard_filters},
     enums::Survey,
     host::{self, HostGalaxyAssociation, HostGalaxyConfig, HostSummary},
 };
 use futures::TryStreamExt;
 use mongodb::{
     bson::{doc, to_bson, Bson, Document},
-    options::{UpdateManyModel, UpdateOneModel, WriteModel},
+    options::{Hint, UpdateManyModel, UpdateOneModel, WriteModel},
     Namespace,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use utoipa::ToSchema;
 
 /// Stable identifier for this task type.
@@ -45,6 +46,7 @@ const QUEUE_MULTIPLIER: usize = 2;
 const CATALOG_PROBE_SAMPLE: i64 = 1_000;
 /// How many records to scan between progress publishes.
 const PROGRESS_EVERY: u64 = 50_000;
+const SCAN_PAGE: i64 = 1_000;
 
 fn default_batch_size() -> usize {
     5_000
@@ -52,6 +54,10 @@ fn default_batch_size() -> usize {
 
 fn default_processes() -> usize {
     4
+}
+
+fn default_scan_shards() -> usize {
+    1
 }
 
 /// What a client may ask for.
@@ -64,6 +70,8 @@ pub struct BackfillHostGalaxyParams {
     /// Parallel association workers.
     #[serde(default = "default_processes")]
     pub processes: usize,
+    #[serde(default = "default_scan_shards")]
+    pub scan_shards: usize,
     /// Skip records that already carry a `host_galaxy`, which makes an
     /// interrupted run resumable. Leave it off to rescore everything after a
     /// change to the association parameters.
@@ -81,6 +89,9 @@ impl BackfillHostGalaxyParams {
         }
         if self.processes == 0 || self.processes > MAX_PROCESSES {
             return Err(format!("processes must be between 1 and {MAX_PROCESSES}"));
+        }
+        if self.scan_shards == 0 || self.scan_shards > MAX_PROCESSES {
+            return Err(format!("scan_shards must be between 1 and {MAX_PROCESSES}"));
         }
         Ok(())
     }
@@ -428,36 +439,74 @@ pub async fn run(
         doc! {}
     };
 
-    let feed = async {
-        let mut cursor = aux_collection
-            .find(find_filter)
-            // Only the galaxy catalogs' rows: `cross_matches` as a whole is
-            // every catalog the pipeline queries, which is far more BSON than
-            // association reads.
-            .projection(projection)
-            .batch_size(CURSOR_BATCH_SIZE)
-            .no_cursor_timeout(true)
+    let shards = if params.scan_shards > 1 {
+        ctx.info(format!(
+            "cutting {} shards on the _id index of {aux_name}",
+            params.scan_shards
+        ));
+        let cuts = index_cuts(&aux_collection, params.scan_shards, "_id", estimated)
             .await
             .map_err(failed)?;
-        let mut fed = 0u64;
-        let mut last_reported = 0u64;
-        while let Some(record) = cursor.try_next().await.map_err(failed)? {
-            if ctx.is_canceled() {
-                ctx.warn(format!("canceled while streaming after {fed} record(s)"));
-                break;
-            }
-            if tx.send(record).await.is_err() {
-                break;
-            }
-            fed += 1;
-            if fed - last_reported >= PROGRESS_EVERY {
-                last_reported = fed;
-                ctx.progress(fed, estimated.max(fed), format!("{fed} record(s) scanned"))
-                    .await;
-            }
-        }
+        shard_filters("_id", &cuts)
+    } else {
+        vec![Document::new()]
+    };
+    let fed = AtomicU64::new(0);
+    let feed = async {
+        let feeders: Vec<_> = shards
+            .iter()
+            .map(|shard| {
+                let tx = tx.clone();
+                let fed = &fed;
+                let (aux_collection, projection) = (&aux_collection, &projection);
+                let shard_filter = merge_filters(&find_filter, shard);
+                async move {
+                    let mut after: Option<Bson> = None;
+                    loop {
+                        let filter = match after.take() {
+                            Some(id) => {
+                                merge_filters(&shard_filter, &doc! { "_id": { "$gt": id } })
+                            }
+                            None => shard_filter.clone(),
+                        };
+                        // Read whole before blocking on the channel: an idle cursor dies with its session.
+                        let page = aux_collection
+                            .find(filter)
+                            // Only the galaxy catalogs' rows: `cross_matches` as a whole is
+                            // every catalog the pipeline queries, which is far more BSON than
+                            // association reads.
+                            .projection(projection.clone())
+                            .sort(doc! { "_id": 1 })
+                            .hint(Hint::Keys(doc! { "_id": 1 }))
+                            .limit(SCAN_PAGE)
+                            .batch_size(SCAN_PAGE as u32)
+                            .await
+                            .map_err(failed)?
+                            .try_collect::<Vec<Document>>()
+                            .await
+                            .map_err(failed)?;
+                        let last_page = (page.len() as i64) < SCAN_PAGE;
+                        after = page.last().and_then(|record| record.get("_id").cloned());
+                        for record in page {
+                            if ctx.is_canceled() || tx.send(record).await.is_err() {
+                                return Ok::<(), super::TaskError>(());
+                            }
+                            let n = fed.fetch_add(1, Ordering::Relaxed) + 1;
+                            if n % PROGRESS_EVERY == 0 {
+                                ctx.progress(n, estimated.max(n), format!("{n} record(s) scanned"))
+                                    .await;
+                            }
+                        }
+                        if last_page {
+                            return Ok(());
+                        }
+                    }
+                }
+            })
+            .collect();
         drop(tx);
-        Ok::<u64, super::TaskError>(fed)
+        futures::future::try_join_all(feeders).await?;
+        Ok::<u64, super::TaskError>(fed.load(Ordering::Relaxed))
     };
 
     let (fed, per_worker) = futures::try_join!(feed, workers)?;
