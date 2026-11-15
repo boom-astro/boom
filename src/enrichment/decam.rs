@@ -8,9 +8,9 @@ use crate::utils::enums::Survey;
 use crate::utils::host::HostGalaxyAssociation;
 use crate::utils::identify::{closest, IdentifyConfig, NightPaths, OrbitEntry};
 use crate::utils::lightcurves::{
-    analyze_photometry, prepare_photometry, summarise_detections, Band, DetectionHistory,
-    EpisodeHistory, MultisurveyDetectionHistory, PerBandProperties, PhotometryMag,
-    EPISODE_GAP_DAYS, SNT,
+    analyze_photometry, is_stationary, prepare_photometry, summarise_detections, Band,
+    DetectionHistory, EpisodeHistory, MultisurveyDetectionHistory, PerBandProperties,
+    PhotometryMag, EPISODE_GAP_DAYS, SNT,
 };
 use crate::utils::linking::{night_start, Detection};
 use crate::utils::mpcorb::{load_catalogue, MAX_EPOCH_GAP_DAYS};
@@ -179,13 +179,16 @@ pub struct DecamPhotometry {
 }
 
 impl DecamPhotometry {
-    fn to_photometry_mag(&self) -> PhotometryMag {
-        PhotometryMag {
+    fn to_positive_mag(&self) -> Option<PhotometryMag> {
+        if self.snr.is_some_and(|s| s < 0.0) {
+            return None;
+        }
+        Some(PhotometryMag {
             time: self.time,
             mag: self.mag,
             mag_err: self.mag_err,
             band: self.band.clone(),
-        }
+        })
     }
 }
 
@@ -210,7 +213,7 @@ impl DecamMatch {
             .iter()
             .chain(&self.fp_hists)
             .filter(|p| p.time <= jd)
-            .map(DecamPhotometry::to_photometry_mag)
+            .filter_map(DecamPhotometry::to_positive_mag)
             .collect()
     }
 
@@ -581,7 +584,7 @@ impl DecamEnrichmentWorker {
         let prv_candidates: Vec<PhotometryMag> = alert
             .prv_candidates
             .iter()
-            .map(DecamPhotometry::to_photometry_mag)
+            .filter_map(DecamPhotometry::to_positive_mag)
             .collect();
         let fp_hists = alert.fp_hists.clone();
 
@@ -589,7 +592,14 @@ impl DecamEnrichmentWorker {
         let mut lightcurve = [prv_candidates, fp_hists].concat();
 
         prepare_photometry(&mut lightcurve);
-        let (photstats, _, stationary) = analyze_photometry(&lightcurve);
+        let (photstats, _, _) = analyze_photometry(&lightcurve);
+        let stationary = is_stationary(
+            alert
+                .prv_candidates
+                .iter()
+                .map(|p| p.time)
+                .chain(alert.fp_hists.iter().map(|p| p.time)),
+        );
 
         let jd = alert.candidate.jd;
         let decam_points = lightcurve.len();
@@ -600,7 +610,7 @@ impl DecamEnrichmentWorker {
                         .iter()
                         .chain(&ztf.fp_hists)
                         .filter(|p| p.jd <= jd)
-                        .filter_map(|p| p.to_photometry_mag(None)),
+                        .filter_map(|p| p.to_positive_mag()),
                 );
             }
             if let Some(lsst) = &matches.lsst {
@@ -609,7 +619,7 @@ impl DecamEnrichmentWorker {
                         .iter()
                         .chain(&lsst.fp_hists)
                         .filter(|p| p.jd <= jd)
-                        .filter_map(|p| p.to_photometry_mag(None)),
+                        .filter_map(|p| p.to_positive_mag()),
                 );
             }
         }

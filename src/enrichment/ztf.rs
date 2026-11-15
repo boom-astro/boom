@@ -239,6 +239,13 @@ impl ZtfPhotometry {
             _ => None,
         }
     }
+
+    pub fn to_positive_mag(&self) -> Option<PhotometryMag> {
+        if self.flux.is_some_and(|f| f < 0.0) {
+            return None;
+        }
+        self.to_photometry_mag(None)
+    }
 }
 
 pub fn ztf_detections(
@@ -1562,9 +1569,18 @@ impl ZtfEnrichmentWorker {
         if lightcurve.is_empty() {
             return Err(EnrichmentWorkerError::EmptyLightcurve(alert.candid));
         }
-        let (photstats, all_bands_properties, _) = analyze_photometry(&lightcurve);
+        let (_, all_bands_properties, _) = analyze_photometry(&lightcurve);
         // cider was trained on ZTF only, so snapshot before the cross-survey extend.
         let ztf_lightcurve = lightcurve.clone();
+        let mut detections: Vec<PhotometryMag> = alert
+            .prv_candidates
+            .iter()
+            .chain(&alert.fp_hists)
+            .filter(|p| p.jd <= alert.candidate.candidate.jd)
+            .filter_map(|p| p.to_positive_mag())
+            .collect();
+        prepare_photometry(&mut detections);
+        let photstats = analyze_photometry(&detections).0;
         let stationary = is_stationary(
             alert
                 .prv_candidates
@@ -1593,11 +1609,20 @@ impl ZtfEnrichmentWorker {
                     .collect();
                 lightcurve.extend(lsst_lightcurve);
                 prepare_photometry(&mut lightcurve);
+                detections.extend(
+                    lsst_match
+                        .prv_candidates
+                        .iter()
+                        .chain(&lsst_match.fp_hists)
+                        .filter(|p| p.jd <= candidate.jd)
+                        .filter_map(|p| p.to_positive_mag()),
+                );
+                prepare_photometry(&mut detections);
                 has_matches = true;
             }
         }
         let multisurvey_photstats = if has_matches {
-            analyze_photometry(&lightcurve).0
+            analyze_photometry(&detections).0
         } else {
             photstats.clone()
         };
@@ -1609,7 +1634,7 @@ impl ZtfEnrichmentWorker {
         let multisurvey_photstats = if decam_lightcurve.is_empty() {
             multisurvey_photstats
         } else {
-            let mut with_decam = [lightcurve.clone(), decam_lightcurve].concat();
+            let mut with_decam = [detections, decam_lightcurve].concat();
             prepare_photometry(&mut with_decam);
             analyze_photometry(&with_decam).0
         };
