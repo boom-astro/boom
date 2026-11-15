@@ -404,6 +404,12 @@ Completion needs `LLEN == 0` twice in a row. A worker pops a batch of up to
 still in flight, and stopping there would count those alerts as reprocessed
 before they were.
 
+Each worker moves its batch onto its own in-flight list and clears it once the
+batch is processed. A batch that fails is retried one alert at a time; the
+alerts that still fail, and the batch of a worker that died, go to
+`<queue>_failed`. The run then fails and names that list, which can be passed
+back as `input_queue` to retry them.
+
 Selection is explicit rather than inferred: everything not enriched by the
 current set (`stale`, the one to use after changing a model or a formula),
 alerts missing a field, a candid range, or everything. See

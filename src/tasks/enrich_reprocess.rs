@@ -34,14 +34,14 @@ use crate::enrichment::{
 };
 use crate::utils::{
     enums::Survey,
-    o11y::logging::as_error,
+    o11y::logging::{as_error, log_error, WARN},
     worker::{should_terminate, WorkerCmd},
 };
 use futures::TryStreamExt;
 use mongodb::bson::{doc, Document};
-use redis::AsyncCommands;
+use redis::{AsyncCommands, Script};
 use serde::{Deserialize, Serialize};
-use std::{num::NonZero, sync::Arc, thread, time::Duration};
+use std::{sync::Arc, thread, time::Duration};
 use tokio::sync::mpsc;
 use tracing::{debug, span, Level};
 use utoipa::ToSchema;
@@ -54,6 +54,24 @@ const PUSH_BATCH: usize = 1_000;
 
 /// How often to check whether the queue has drained.
 const DRAIN_POLL: Duration = Duration::from_secs(5);
+
+const CLAIM: &str = r#"
+local candids = {}
+for i = 1, tonumber(ARGV[1]) do
+  local candid = redis.call('LMOVE', KEYS[1], KEYS[2], 'RIGHT', 'LEFT')
+  if not candid then break end
+  candids[i] = candid
+end
+return candids
+"#;
+
+fn in_flight_queue(queue: &str, worker: usize) -> String {
+    format!("{queue}_in_flight_{worker}")
+}
+
+fn failed_queue(queue: &str) -> String {
+    format!("{queue}_failed")
+}
 
 /// Which alerts to reprocess.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -282,6 +300,8 @@ pub async fn run(
         )
     });
 
+    park_in_flight(config, &queue).await?;
+
     let queued = if owned {
         ctx.info(format!(
             "selecting {} for {} reprocessing",
@@ -333,7 +353,7 @@ pub async fn run(
 
     let mut workers: Vec<(thread::JoinHandle<()>, mpsc::Sender<WorkerCmd>)> =
         Vec::with_capacity(n_workers);
-    for _ in 0..n_workers {
+    for worker in 0..n_workers {
         let (sender, receiver) = mpsc::channel(1);
         let config_path = ctx.config_path().to_string();
         let queue = queue.clone();
@@ -349,7 +369,7 @@ pub async fn run(
                     Survey::Decam => run_enrich_only::<DecamEnrichmentWorker>,
                     Survey::Winter => run_enrich_only::<WinterEnrichmentWorker>,
                 };
-                let result = run_worker(receiver, &config_path, shared_models, queue);
+                let result = run_worker(receiver, &config_path, shared_models, queue, worker);
                 result.unwrap_or_else(as_error!("enrichment worker failed"));
             })
         });
@@ -373,11 +393,14 @@ pub async fn run(
         ctx.error(format!("{panicked} enrichment worker(s) panicked"));
     }
 
+    let not_enriched = park_in_flight(config, &queue).await;
+
     if owned {
         discard_owned_queue(config, &queue).await;
     }
 
     let processed = outcome?;
+    let not_enriched = not_enriched?;
 
     ctx.record_mutation(
         MutationTarget {
@@ -399,12 +422,41 @@ pub async fn run(
     )
     .await;
 
+    if not_enriched > 0 {
+        return Err(failed(format!(
+            "{not_enriched} alerts could not be enriched; their candids are on {}, which can \
+             be passed as input_queue to retry them",
+            failed_queue(&queue)
+        )));
+    }
+
     Ok(serde_json::json!({
         "survey": params.survey.to_string(),
         "selection": params.selection.describe(),
         "queued": queued,
         "processed": processed,
     }))
+}
+
+async fn park_in_flight(config: &AppConfig, queue: &str) -> Result<u64, super::TaskError> {
+    let failed = |e: String| super::TaskError::Failed(e);
+    let mut con = config
+        .build_redis()
+        .await
+        .map_err(|e| failed(e.to_string()))?;
+    let failed_queue = failed_queue(queue);
+    for worker in 0..MAX_WORKERS {
+        let in_flight = in_flight_queue(queue, worker);
+        while con
+            .rpoplpush::<&str, &str, Option<String>>(&in_flight, &failed_queue)
+            .await
+            .map_err(|e| failed(e.to_string()))?
+            .is_some()
+        {}
+    }
+    con.llen::<&str, u64>(&failed_queue)
+        .await
+        .map_err(|e| failed(e.to_string()))
 }
 
 /// Drop a queue this run created.
@@ -444,17 +496,12 @@ async fn drain(
             return Err(super::TaskError::Canceled);
         }
 
-        // A worker exits only on TERM, which is sent after this returns, so one
-        // finishing here has died. Tolerating it while others run is what makes
-        // a lost batch look processed: the dead worker's RPOP already removed
-        // its candids, the survivors drain the rest, and `queued - 0` then
-        // counts the batch that went with it.
         let exited = workers.iter().filter(|(h, _)| h.is_finished()).count();
         if exited > 0 {
             return Err(super::TaskError::Failed(format!(
-                "{exited} enrichment worker(s) exited before the queue drained; a batch \
-                 already popped may have been lost, so this run is not complete -- \
-                 resubmitting reprocesses whatever is still stale"
+                "{exited} enrichment worker(s) exited before the queue drained; the batches \
+                 they had claimed are on {}",
+                failed_queue(queue)
             )));
         }
 
@@ -497,6 +544,7 @@ async fn run_enrich_only<T: EnrichmentWorker>(
     config_path: &str,
     shared_models: Option<Arc<SharedModels>>,
     input_queue: String,
+    worker_index: usize,
 ) -> Result<(), EnrichmentWorkerError> {
     debug!(?config_path);
     let mut worker = T::new(config_path, shared_models).await?;
@@ -510,13 +558,15 @@ async fn run_enrich_only<T: EnrichmentWorker>(
         .ok_or(EnrichmentWorkerError::WorkerConfigMissing(survey))?;
 
     let mut con = config.build_redis().await?;
+    let claim = Script::new(CLAIM);
+    let in_flight = in_flight_queue(&input_queue, worker_index);
+    let failed_queue = failed_queue(&input_queue);
 
     let command_interval = worker_config.command_interval;
     let mut command_check_countdown = command_interval;
     // The deployment's tuning rather than a constant, so a reprocess batches
-    // the GPU and memory footprint exactly as the live worker does. Zero would
-    // read as "pop one", so it floors at a single element.
-    let batch_size = NonZero::new(worker_config.enrichment.batch_size.max(1));
+    // the GPU and memory footprint exactly as the live worker does.
+    let batch_size = worker_config.enrichment.batch_size.max(1);
 
     loop {
         if command_check_countdown == 0 {
@@ -526,7 +576,12 @@ async fn run_enrich_only<T: EnrichmentWorker>(
             command_check_countdown = command_interval;
         }
 
-        let candids: Vec<i64> = con.rpop::<&str, Vec<i64>>(&input_queue, batch_size).await?;
+        let candids: Vec<i64> = claim
+            .key(&input_queue)
+            .key(&in_flight)
+            .arg(batch_size)
+            .invoke_async(&mut con)
+            .await?;
 
         if candids.is_empty() {
             tokio::time::sleep(Duration::from_millis(500)).await;
@@ -536,8 +591,29 @@ async fn run_enrich_only<T: EnrichmentWorker>(
 
         command_check_countdown = command_check_countdown.saturating_sub(candids.len());
 
+        let mut failed = Vec::new();
         // Return value dropped on purpose: nothing is pushed to an output queue.
-        worker.process_alerts(&candids).await?;
+        if let Err(error) = worker.process_alerts(&candids).await {
+            log_error!(
+                WARN,
+                error,
+                "batch failed, retrying its alerts one at a time"
+            );
+            for &candid in &candids {
+                if let Err(error) = worker.process_alerts(&[candid]).await {
+                    log_error!(error, "could not enrich candid {}", candid);
+                    failed.push(candid);
+                }
+            }
+        }
+
+        let mut pipe = redis::pipe();
+        pipe.atomic();
+        if !failed.is_empty() {
+            pipe.lpush(&failed_queue, &failed).ignore();
+        }
+        pipe.del(&in_flight).ignore();
+        pipe.query_async::<()>(&mut con).await?;
     }
 
     Ok(())
