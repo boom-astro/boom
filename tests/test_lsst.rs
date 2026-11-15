@@ -171,16 +171,9 @@ async fn test_enrich_lsst_alert() {
     assert_eq!(properties.get_bool("rock").unwrap(), false);
     assert_eq!(properties.get_bool("stationary").unwrap(), false);
     assert_eq!(properties.get_bool("star").is_ok(), true);
-    // the properties also include "photstats, a document with bands as keys and
-    // as values the rate of evolution (mag/day) before and after peak
+    // the alert's only detection has a negative flux
     let photstats = properties.get_document("photstats").unwrap();
-
-    assert!(photstats.contains_key("r"));
-    let r_stats = photstats.get_document("r").unwrap();
-    let peak_mag = r_stats.get_f64("peak_mag").unwrap();
-    let peak_jd = r_stats.get_f64("peak_jd").unwrap();
-    assert!((peak_mag - 23.674994).abs() < 1e-6);
-    assert!((peak_jd - 2460961.732664).abs() < 1e-6);
+    assert_eq!(photstats.get("r"), Some(&mongodb::bson::Bson::Null));
 }
 
 #[tokio::test]
