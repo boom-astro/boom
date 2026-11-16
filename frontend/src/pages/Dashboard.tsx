@@ -12,6 +12,7 @@ import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch.tsx";
 import { Label } from "@/components/ui/label.tsx";
 import KafkaAlertCounts from "@/components/kafka/KafkaAlertCounts.tsx";
+import LiveIngest from "@/components/LiveIngest";
 import { toast } from "sonner";
 import { useAppStore } from "@/lib/store";
 
@@ -403,6 +404,7 @@ export default function Dashboard() {
           </Tooltip>
         )}
       </div>
+      <LiveIngest />
       {visibleData.length > 0 ? (
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
           <StatCard
