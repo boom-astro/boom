@@ -1,10 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import api, { type LiveBin, type LiveIngest as LiveIngestData } from "@/lib/api";
+import { type LiveBin, type LiveIngest as LiveIngestData } from "@/lib/api";
+import { formatAgo } from "@/lib/liveIngest";
 import { darkIntervals } from "@/lib/sun";
 import { SITES, formatClock } from "@/lib/telescopes";
 
-const REFRESH_MS = 60_000;
 const TICK_MS = 15_000;
 const LIVE_MS = 20 * 60_000;
 const MINUTE = 60_000;
@@ -46,20 +45,6 @@ function formatLatency(seconds: number): string {
   return `${(seconds / 3600).toFixed(1)} h`;
 }
 
-function formatAgo(ms: number): string {
-  const minutes = Math.round(ms / MINUTE);
-  if (minutes < 1) return "just now";
-  if (minutes < 90) return `${minutes} min ago`;
-  return `${(minutes / 60).toFixed(1)} h ago`;
-}
-
-function formatNight(date: string): string {
-  const evening = new Date(`${date}T00:00:00`);
-  const morning = new Date(evening.getFullYear(), evening.getMonth(), evening.getDate() + 1);
-  const day = (d: Date) => d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
-  return `${day(evening)} → ${morning.getMonth() === evening.getMonth() ? morning.getDate() : day(morning)}`;
-}
-
 const utc = (ms: number) => formatClock(ms, "UTC");
 
 function status(lane: Lane, now: number): { label: string; live: boolean } {
@@ -79,38 +64,15 @@ function StatusDot({ live }: { live: boolean }) {
   );
 }
 
-export default function LiveIngest() {
-  const [data, setData] = useState<LiveIngestData | null>(null);
-  const [error, setError] = useState<string | null>(null);
+export default function LiveIngest({ data, surveys }: {
+  data: LiveIngestData | null;
+  surveys: ReadonlySet<string>;
+}) {
   const [now, setNow] = useState(Date.now);
   const [width, setWidth] = useState(0);
   const [hover, setHover] = useState<{ slot: number; x: number; y: number; right: number | null } | null>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
   const axisRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    const load = () => {
-      if (document.visibilityState !== "visible") return;
-      api.fetchLiveIngest()
-        .then((live) => {
-          if (cancelled) return;
-          setData(live);
-          setError(null);
-        })
-        .catch((e) => {
-          if (!cancelled) setError(e instanceof Error ? e.message : "Failed to load tonight's alerts");
-        });
-    };
-    load();
-    const id = setInterval(load, REFRESH_MS);
-    document.addEventListener("visibilitychange", load);
-    return () => {
-      cancelled = true;
-      clearInterval(id);
-      document.removeEventListener("visibilitychange", load);
-    };
-  }, []);
 
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), TICK_MS);
@@ -129,7 +91,8 @@ export default function LiveIngest() {
 
   const lanes = useMemo<Lane[]>(() => {
     if (!data) return [];
-    return [...data.surveys]
+    return data.surveys
+      .filter((survey) => surveys.has(survey.survey))
       .sort((a, b) => ORDER.indexOf(a.survey) - ORDER.indexOf(b.survey))
       .flatMap((survey) => {
         const telescope = TELESCOPES.find((t) => t.id === survey.survey);
@@ -154,7 +117,7 @@ export default function LiveIngest() {
           latency: last?.latency_s ?? null,
         }];
       });
-  }, [data]);
+  }, [data, surveys]);
 
   const [from, to] = useMemo(() => {
     const edges = lanes.flatMap((lane) => [
@@ -263,197 +226,170 @@ export default function LiveIngest() {
   const hovered = hover
     ? lanes.map((lane) => ({ lane, bin: lane.bins.get(hover.slot) }))
     : [];
-  const anyLive = lanes.some((lane) => status(lane, now).live);
+  if (!data) return <div className="shimmer h-87.5 w-full rounded-md" />;
 
   return (
-    <Card>
-      <CardHeader>
-        <div className="flex flex-wrap items-end justify-between gap-2">
-          <div className="space-y-1.5">
-            <CardTitle className="flex items-center gap-2">
-              Tonight
-              {anyLive && <StatusDot live />}
-            </CardTitle>
-            <CardDescription>
-              {data?.date ? `Night of ${formatNight(data.date)}, alerts per ${data.bin_minutes} min` : "Alerts of the current night"}
-            </CardDescription>
-          </div>
-          {data?.updated_at && (
-            <span className="text-muted-foreground text-xs">
-              Updated {formatAgo(now - Date.parse(data.updated_at))}
-            </span>
-          )}
-        </div>
-        {error && <p className="text-destructive text-sm">{error}</p>}
-      </CardHeader>
-      <CardContent>
-        {!data ? (
-          <div className="shimmer h-72 w-full rounded-md" />
-        ) : (
-          <div
-            ref={wrapperRef}
-            className="relative grid grid-cols-[7.5rem_minmax(0,1fr)_2.5rem] gap-x-3 gap-y-2 select-none sm:grid-cols-[11rem_minmax(0,1fr)_3rem]"
-            onPointerLeave={() => setHover(null)}
-          >
-            {lanes.map((lane) => {
-              const { label, live } = status(lane, now);
-              const detail = lane.lastIngest !== null
-                ? [formatAgo(now - lane.lastIngest), lane.latency !== null ? `${formatLatency(lane.latency)} latency` : null]
-                  .filter(Boolean).join(" · ")
-                : "";
-              return (
-                <div key={lane.id} className="contents">
-                  <div className="flex min-w-0 flex-col justify-center" style={{ minHeight: LANE_HEIGHT }}>
-                    <div className="flex items-center gap-2">
-                      <span className="size-2.5 shrink-0 rounded-[3px]" style={{ background: lane.color }} />
-                      <span className="text-sm font-medium">{lane.label}</span>
-                      <span className={`ml-auto flex items-center gap-1.5 text-xs whitespace-nowrap ${live ? "text-foreground" : "text-muted-foreground"}`}>
-                        <StatusDot live={live} />
-                        <span className="hidden sm:inline">{label}</span>
-                      </span>
-                    </div>
-                    <span className="text-lg leading-tight font-semibold tabular-nums sm:text-xl">
-                      {lane.total.toLocaleString()}
-                    </span>
-                    <span className="text-muted-foreground truncate text-xs">
-                      <span className="sm:hidden">{detail ? `${label} · ` : label}</span>
-                      {detail || "\u00a0"}
-                    </span>
-                  </div>
-                  <div
-                    className="border-border relative overflow-hidden rounded-sm border-b"
-                    style={{ height: LANE_HEIGHT }}
-                    onPointerMove={track}
-                    role="img"
-                    aria-label={`${lane.label}: ${lane.total.toLocaleString()} alerts tonight`}
-                  >
-                    {sky(lane)}
-                    {[...lane.bins.entries()].map(([t, bin]) => (
-                      <div
-                        key={t}
-                        className="absolute bottom-0 rounded-t-[3px]"
-                        style={{
-                          left: `${pct(t)}%`,
-                          width: `max(1px, calc(${(binMs / span) * 100}% - ${gap}px))`,
-                          height: `max(2px, ${(bin.n_alerts / (lane.max || 1)) * 100}%)`,
-                          background: lane.color,
-                        }}
-                      />
-                    ))}
-                    {overlay()}
-                  </div>
-                  <div className="text-muted-foreground pt-0.5 text-[11px] tabular-nums">
-                    {lane.max > 0 && compact.format(lane.max)}
-                  </div>
-                </div>
-              );
-            })}
-
-            {latency && (
-              <div className="contents">
-                <div className="flex flex-col justify-center" style={{ minHeight: LATENCY_HEIGHT }}>
-                  <span className="text-sm font-medium">Latency</span>
-                  <span className="text-muted-foreground text-xs">observation to ingestion</span>
-                </div>
-                <div className="relative" style={{ height: LATENCY_HEIGHT }} onPointerMove={track}>
-                  <svg width={width} height={LATENCY_HEIGHT} className="absolute inset-0 overflow-visible">
-                    {latency.gridlines.map(([seconds]) => (
-                      <line
-                        key={seconds}
-                        x1={0}
-                        x2={width}
-                        y1={latency.y(seconds)}
-                        y2={latency.y(seconds)}
-                        stroke="var(--border)"
-                        strokeWidth={1}
-                      />
-                    ))}
-                    {latency.series.map(({ lane, runs }) =>
-                      runs.map((run) =>
-                        run.length > 1 ? (
-                          <polyline
-                            key={`${lane.id}-${run[0].t}`}
-                            points={run.map((p) => `${latency.x(p.t)},${latency.y(p.seconds)}`).join(" ")}
-                            fill="none"
-                            stroke={lane.color}
-                            strokeWidth={2}
-                            strokeLinejoin="round"
-                            strokeLinecap="round"
-                          />
-                        ) : (
-                          <circle
-                            key={`${lane.id}-${run[0].t}`}
-                            cx={latency.x(run[0].t)}
-                            cy={latency.y(run[0].seconds)}
-                            r={3}
-                            fill={lane.color}
-                          />
-                        ),
-                      ),
-                    )}
-                  </svg>
-                  {overlay()}
-                </div>
-                <div className="text-muted-foreground relative text-[11px] tabular-nums" style={{ height: LATENCY_HEIGHT }}>
-                  {latency.gridlines.map(([seconds, text]) => (
-                    <span key={seconds} className="absolute -translate-y-1/2 whitespace-nowrap" style={{ top: latency.y(seconds) }}>
-                      {text}
-                    </span>
-                  ))}
-                </div>
+    <div
+      ref={wrapperRef}
+      className="relative grid grid-cols-[7.5rem_minmax(0,1fr)_2.5rem] gap-x-3 gap-y-2 select-none sm:grid-cols-[11rem_minmax(0,1fr)_3rem]"
+      onPointerLeave={() => setHover(null)}
+    >
+      {lanes.map((lane) => {
+        const { label, live } = status(lane, now);
+        const detail = lane.lastIngest !== null
+          ? [formatAgo(now - lane.lastIngest), lane.latency !== null ? `${formatLatency(lane.latency)} latency` : null]
+            .filter(Boolean).join(" · ")
+          : "";
+        return (
+          <div key={lane.id} className="contents">
+            <div className="flex min-w-0 flex-col justify-center" style={{ minHeight: LANE_HEIGHT }}>
+              <div className="flex items-center gap-2">
+                <span className="size-2.5 shrink-0 rounded-[3px]" style={{ background: lane.color }} />
+                <span className="text-sm font-medium">{lane.label}</span>
+                <span className={`ml-auto flex items-center gap-1.5 text-xs whitespace-nowrap ${live ? "text-foreground" : "text-muted-foreground"}`}>
+                  <StatusDot live={live} />
+                  <span className="hidden sm:inline">{label}</span>
+                </span>
               </div>
-            )}
-
-            <div className="text-muted-foreground flex items-start text-[11px]">UTC</div>
-            <div ref={axisRef} className="relative h-5">
-              {ticks.filter((t) => !nowInView || Math.abs(t - now) / span * width > 40).map((t) => (
-                <span
-                  key={t}
-                  className="text-muted-foreground absolute top-0 -translate-x-1/2 text-[11px] whitespace-nowrap tabular-nums"
-                  style={{ left: `${pct(t)}%` }}
-                >
-                  {utc(t)}
-                </span>
-              ))}
-              {nowInView && (
-                <span
-                  className="text-destructive absolute top-0 -translate-x-1/2 bg-card px-1 text-[11px] font-medium tabular-nums"
-                  style={{ left: `${pct(now)}%` }}
-                >
-                  {utc(now)}
-                </span>
-              )}
+              <span className="text-lg leading-tight font-semibold tabular-nums sm:text-xl">
+                {lane.total.toLocaleString()}
+              </span>
+              <span className="text-muted-foreground truncate text-xs">
+                <span className="sm:hidden">{detail ? `${label} · ` : label}</span>
+                {detail || "\u00a0"}
+              </span>
             </div>
-            <div />
-
-            {hover && (
-              <div
-                className="bg-background border-border/50 pointer-events-none absolute z-10 min-w-44 rounded-lg border px-2.5 py-1.5 text-xs shadow-xl"
-                style={{
-                  top: hover.y + 12,
-                  ...(hover.right !== null ? { right: hover.right + 12 } : { left: hover.x + 12 }),
-                }}
-              >
-                <div className="mb-1 font-medium tabular-nums">
-                  {utc(hover.slot)} – {utc(hover.slot + binMs)} UTC
-                </div>
-                {hovered.map(({ lane, bin }) => (
-                  <div key={lane.id} className="flex items-center gap-2 py-0.5">
-                    <span className="size-2.5 shrink-0 rounded-[3px]" style={{ background: lane.color }} />
-                    <span className="text-muted-foreground">{lane.label}</span>
-                    <span className="ml-auto font-mono font-medium tabular-nums">
-                      {bin ? bin.n_alerts.toLocaleString() : "–"}
-                    </span>
-                    <span className="text-muted-foreground w-12 text-right tabular-nums">
-                      {bin?.latency_s ? formatLatency(bin.latency_s) : ""}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            )}
+            <div
+              className="border-border relative overflow-hidden rounded-sm border-b"
+              style={{ height: LANE_HEIGHT }}
+              onPointerMove={track}
+              role="img"
+              aria-label={`${lane.label}: ${lane.total.toLocaleString()} alerts tonight`}
+            >
+              {sky(lane)}
+              {[...lane.bins.entries()].map(([t, bin]) => (
+                <div
+                  key={t}
+                  className="absolute bottom-0 rounded-t-[3px]"
+                  style={{
+                    left: `${pct(t)}%`,
+                    width: `max(1px, calc(${(binMs / span) * 100}% - ${gap}px))`,
+                    height: `max(2px, ${(bin.n_alerts / (lane.max || 1)) * 100}%)`,
+                    background: lane.color,
+                  }}
+                />
+              ))}
+              {overlay()}
+            </div>
+            <div className="text-muted-foreground pt-0.5 text-[11px] tabular-nums">
+              {lane.max > 0 && compact.format(lane.max)}
+            </div>
           </div>
+        );
+      })}
+
+      {latency && (
+        <div className="contents">
+          <div className="flex flex-col justify-center" style={{ minHeight: LATENCY_HEIGHT }}>
+            <span className="text-sm font-medium">Latency</span>
+            <span className="text-muted-foreground text-xs">observation to ingestion</span>
+          </div>
+          <div className="relative" style={{ height: LATENCY_HEIGHT }} onPointerMove={track}>
+            <svg width={width} height={LATENCY_HEIGHT} className="absolute inset-0 overflow-visible">
+              {latency.gridlines.map(([seconds]) => (
+                <line
+                  key={seconds}
+                  x1={0}
+                  x2={width}
+                  y1={latency.y(seconds)}
+                  y2={latency.y(seconds)}
+                  stroke="var(--border)"
+                  strokeWidth={1}
+                />
+              ))}
+              {latency.series.map(({ lane, runs }) =>
+                runs.map((run) =>
+                  run.length > 1 ? (
+                    <polyline
+                      key={`${lane.id}-${run[0].t}`}
+                      points={run.map((p) => `${latency.x(p.t)},${latency.y(p.seconds)}`).join(" ")}
+                      fill="none"
+                      stroke={lane.color}
+                      strokeWidth={2}
+                      strokeLinejoin="round"
+                      strokeLinecap="round"
+                    />
+                  ) : (
+                    <circle
+                      key={`${lane.id}-${run[0].t}`}
+                      cx={latency.x(run[0].t)}
+                      cy={latency.y(run[0].seconds)}
+                      r={3}
+                      fill={lane.color}
+                    />
+                  ),
+                ),
+              )}
+            </svg>
+            {overlay()}
+          </div>
+          <div className="text-muted-foreground relative text-[11px] tabular-nums" style={{ height: LATENCY_HEIGHT }}>
+            {latency.gridlines.map(([seconds, text]) => (
+              <span key={seconds} className="absolute -translate-y-1/2 whitespace-nowrap" style={{ top: latency.y(seconds) }}>
+                {text}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div className="text-muted-foreground flex items-start text-[11px]">UTC</div>
+      <div ref={axisRef} className="relative h-5">
+        {ticks.filter((t) => !nowInView || Math.abs(t - now) / span * width > 40).map((t) => (
+          <span
+            key={t}
+            className="text-muted-foreground absolute top-0 -translate-x-1/2 text-[11px] whitespace-nowrap tabular-nums"
+            style={{ left: `${pct(t)}%` }}
+          >
+            {utc(t)}
+          </span>
+        ))}
+        {nowInView && (
+          <span
+            className="text-destructive absolute top-0 -translate-x-1/2 bg-card px-1 text-[11px] font-medium tabular-nums"
+            style={{ left: `${pct(now)}%` }}
+          >
+            {utc(now)}
+          </span>
         )}
-      </CardContent>
-    </Card>
+      </div>
+      <div />
+
+      {hover && (
+        <div
+          className="bg-background border-border/50 pointer-events-none absolute z-10 min-w-44 rounded-lg border px-2.5 py-1.5 text-xs shadow-xl"
+          style={{
+            top: hover.y + 12,
+            ...(hover.right !== null ? { right: hover.right + 12 } : { left: hover.x + 12 }),
+          }}
+        >
+          <div className="mb-1 font-medium tabular-nums">
+            {utc(hover.slot)} – {utc(hover.slot + binMs)} UTC
+          </div>
+          {hovered.map(({ lane, bin }) => (
+            <div key={lane.id} className="flex items-center gap-2 py-0.5">
+              <span className="size-2.5 shrink-0 rounded-[3px]" style={{ background: lane.color }} />
+              <span className="text-muted-foreground">{lane.label}</span>
+              <span className="ml-auto font-mono font-medium tabular-nums">
+                {bin ? bin.n_alerts.toLocaleString() : "–"}
+              </span>
+              <span className="text-muted-foreground w-12 text-right tabular-nums">
+                {bin?.latency_s ? formatLatency(bin.latency_s) : ""}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
