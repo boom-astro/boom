@@ -4,15 +4,17 @@ use tracing::{debug, info, instrument, warn};
 
 use crate::alert::AskapCandidate;
 use crate::conf::AppConfig;
-use crate::enrichment::fetch_alerts;
+use crate::enrichment::{fetch_alerts, LsstMatch, ZtfMatch};
 use crate::filter::{
-    build_loaded_filters, record_filter_result, run_filter, uses_field_in_filter,
-    validate_filter_pipeline, watchlist_projections, Alert, Filter, FilterError, FilterResults,
-    FilterWorker, FilterWorkerError, LoadedFilter, Origin, Photometry, SurveyMatches,
+    build_loaded_filters, lsst_survey_match, record_filter_result, run_filter,
+    survey_match_projection, uses_field_in_filter, validate_filter_pipeline, watchlist_projections,
+    ztf_survey_match, Alert, AlertHostGalaxy, Filter, FilterError, FilterResults, FilterWorker,
+    FilterWorkerError, LoadedFilter, Origin, Photometry, SurveyMatches,
 };
 use crate::utils::cutouts::CutoutStorage;
 use crate::utils::db::{fetch_timeseries_op, get_array_dict_element};
 use crate::utils::enums::Survey;
+use crate::utils::host::HostGalaxyAssociation;
 
 /// mJy -> nJy (the downstream Photometry convention).
 const MJY_TO_NJY: f64 = 1.0e6;
@@ -47,6 +49,12 @@ impl AskapPhotometry {
     }
 }
 
+#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
+pub struct AskapSurveyMatches {
+    pub ztf: Option<ZtfMatch>,
+    pub lsst: Option<LsstMatch>,
+}
+
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct AskapAlertForFilter {
     #[serde(rename = "_id")]
@@ -58,6 +66,10 @@ pub struct AskapAlertForFilter {
     pub prv_candidates: Vec<AskapPhotometry>,
     #[serde(default)]
     pub fp_hists: Vec<AskapPhotometry>,
+    #[serde(default)]
+    pub survey_matches: Option<AskapSurveyMatches>,
+    #[serde(default)]
+    pub host_galaxy: Option<HostGalaxyAssociation>,
 }
 
 fn create_askap_filter_alert_pipeline() -> Vec<Document> {
@@ -82,9 +94,36 @@ fn create_askap_filter_alert_pipeline() -> Vec<Document> {
             }
         },
         doc! {
+            "$addFields": {
+                "ztf_alias": { "$arrayElemAt": [{ "$arrayElemAt": [ "$aux.aliases.ZTF", 0 ] }, 0] },
+                "lsst_alias": { "$arrayElemAt": [{ "$arrayElemAt": [ "$aux.aliases.LSST", 0 ] }, 0] },
+            }
+        },
+        doc! {
+            "$lookup": {
+                "from": "ZTF_alerts_aux",
+                "localField": "ztf_alias",
+                "foreignField": "_id",
+                "as": "ztf_aux"
+            }
+        },
+        doc! {
+            "$lookup": {
+                "from": "LSST_alerts_aux",
+                "localField": "lsst_alias",
+                "foreignField": "_id",
+                "as": "lsst_aux"
+            }
+        },
+        doc! {
             "$project": doc! {
                 "objectId": 1,
                 "candidate": 1,
+                "survey_matches": {
+                    "ztf": survey_match_projection("ztf_aux", true),
+                    "lsst": survey_match_projection("lsst_aux", false),
+                },
+                "host_galaxy": { "$arrayElemAt": ["$aux.host_galaxy", 0] },
                 "prv_candidates": fetch_timeseries_op(
                     "aux.prv_candidates",
                     "candidate.jd",
@@ -115,6 +154,8 @@ fn create_askap_filter_alert_pipeline() -> Vec<Document> {
                 "fp_hists.frequency": 1,
                 "fp_hists.ra": 1,
                 "fp_hists.dec": 1,
+                "survey_matches": 1,
+                "host_galaxy": 1,
             }
         },
     ]
@@ -201,6 +242,7 @@ pub async fn build_askap_alerts(
                 None => (Vec::new(), Vec::new(), Vec::new()),
             };
 
+        let survey_matches = alert.survey_matches.unwrap_or_default();
         let alert = Alert {
             candid: alert.candid,
             object_id: alert.object_id,
@@ -218,11 +260,14 @@ pub async fn build_askap_alerts(
             cutout_difference,
             survey: Survey::Askap,
             survey_matches: SurveyMatches {
-                ztf: None,
-                lsst: None,
+                ztf: survey_matches.ztf.as_ref().map(ztf_survey_match),
+                lsst: survey_matches.lsst.as_ref().map(lsst_survey_match),
                 decam: None,
             },
-            host_galaxy: None,
+            host_galaxy: alert
+                .host_galaxy
+                .as_ref()
+                .and_then(AlertHostGalaxy::from_association),
         };
 
         alerts_output.push(alert);

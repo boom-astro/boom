@@ -54,9 +54,11 @@ pub fn create_askap_alert_pipeline() -> Vec<Document> {
                 "prv_candidates.jd": 1,
                 "prv_candidates.flux_peak": 1,
                 "prv_candidates.flux_peak_err": 1,
+                "prv_candidates.frequency": 1,
                 "fp_hists.jd": 1,
                 "fp_hists.flux_peak": 1,
                 "fp_hists.flux_peak_err": 1,
+                "fp_hists.frequency": 1,
             }
         },
     ]
@@ -67,6 +69,8 @@ pub struct AskapFluxPoint {
     pub jd: f64,
     pub flux_peak: f32,
     pub flux_peak_err: f32,
+    #[serde(default)]
+    pub frequency: Option<f32>,
 }
 
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
@@ -233,7 +237,17 @@ impl EnrichmentWorker for AskapEnrichmentWorker {
         for alert in alerts {
             let candid = alert.candid;
 
-            let lightcurve = [alert.prv_candidates.clone(), alert.fp_hists.clone()].concat();
+            let frequency = alert.candidate.frequency;
+            let lightcurve: Vec<AskapFluxPoint> = alert
+                .prv_candidates
+                .iter()
+                .chain(alert.fp_hists.iter())
+                .filter(|p| match (frequency, p.frequency) {
+                    (Some(f), Some(pf)) => (f - pf).abs() < 1.0,
+                    _ => true,
+                })
+                .cloned()
+                .collect();
             let properties = variability_metrics(&lightcurve);
 
             let update_alert_document = doc! {
@@ -270,6 +284,7 @@ mod tests {
             jd,
             flux_peak: flux,
             flux_peak_err: err,
+            frequency: None,
         }
     }
 

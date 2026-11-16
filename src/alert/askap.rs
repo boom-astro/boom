@@ -28,8 +28,7 @@ use tracing::{debug, error, instrument, warn};
 pub const STREAM_NAME: &str = "ASKAP";
 // VAST/ASKAP observes the southern sky (dec <~ +41).
 pub const ASKAP_DEC_RANGE: (f64, f64) = (-90.0, 41.0);
-// Typical VAST combined astrometric uncertainty in arcsec.
-pub const ASKAP_POSITION_UNCERTAINTY: f64 = 2.0;
+pub const ASKAP_POSITION_UNCERTAINTY: f64 = 3.0;
 pub const ALERT_COLLECTION: &str = concat!(STREAM_NAME, "_alerts");
 pub const ALERT_AUX_COLLECTION: &str = concat!(STREAM_NAME, "_alerts_aux");
 

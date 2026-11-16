@@ -21,7 +21,7 @@ use base::{
 };
 use decam::{
     add_decam_survey_match, build_decam_aux_data, decam_survey_match,
-    insert_decam_aux_pipeline_if_needed, DecamMatch,
+    insert_decam_aux_pipeline_if_needed, survey_match_projection, DecamMatch,
 };
 pub use decam::{build_decam_filter_pipeline, DecamFilterWorker};
 pub use fields::{find_unknown_field, DocumentShape};
