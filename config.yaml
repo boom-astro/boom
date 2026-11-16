@@ -2153,7 +2153,7 @@ crossmatch:
         mag_white: 1
       max_results: 3 # 3 nearest neighbors
     Gaia_DR3:
-      radius: 2.0
+      radius: 3.0
       use_distance: false
       projection:
         _id: 1
@@ -2175,7 +2175,7 @@ crossmatch:
         ruwe: 1
         phot_bp_rp_excess_factor: 1
     milliquas_v8:
-      radius: 2.0
+      radius: 3.0
       use_distance: false
       projection:
         _id: 1
@@ -2220,7 +2220,7 @@ crossmatch:
         Diam_survey: 1
         DistMpc_method: 1
     2MASS_PSC:
-      radius: 2.0
+      radius: 3.0
       use_distance: false
       projection:
         _id: 1
@@ -2237,7 +2237,7 @@ crossmatch:
         k_snr: 1
         ndet: 1
     GALEX:
-      radius: 2.0
+      radius: 3.0
       use_distance: false
       projection:
         _id: 1
@@ -2252,7 +2252,7 @@ crossmatch:
         obstype: 1
         band: 1
     VSX:
-      radius: 2.0
+      radius: 3.0
       use_distance: false
       projection:
         _id: 1
@@ -2270,7 +2270,7 @@ crossmatch:
         period: 1
         spectral_type: 1
     CatWISE2020:
-      radius: 2.0
+      radius: 3.0
       use_distance: false
       projection:
         _id: 1
@@ -2291,7 +2291,7 @@ crossmatch:
         sigpmdec: 1
         unwise_objid: 1
     TNS:
-      radius: 2.0
+      radius: 3.0
       use_distance: false
       projection:
         _id: 1
@@ -2356,7 +2356,7 @@ crossmatch:
         mstar_maskbit: 1
         in_sga_2020: 1
     PS1_DR2:
-      radius: 2.0
+      radius: 3.0
       use_distance: false
       projection:
         _id: 1
@@ -2445,7 +2445,7 @@ crossmatch:
         flux_ivar_r: 1
         fracflux_r: 1
     AllWISE:
-      radius: 2.0
+      radius: 3.0
       use_distance: false
       projection:
         _id: 1
