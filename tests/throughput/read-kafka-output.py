@@ -39,7 +39,7 @@ try:
 finally:
     consumer.close()
 
-n_expected = 22674
+n_expected = 22677
 
 if n_alerts != n_expected:
     raise RuntimeError(f"Expected {n_expected} alerts, but got {n_alerts}")
