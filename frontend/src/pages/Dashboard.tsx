@@ -404,7 +404,6 @@ export default function Dashboard() {
           </Tooltip>
         )}
       </div>
-      <LiveIngest />
       {visibleData.length > 0 ? (
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
           <StatCard
@@ -570,6 +569,8 @@ export default function Dashboard() {
           )}
         </CardContent>
       </Card>
+
+      <LiveIngest />
 
       <Card>
         <CardHeader>
