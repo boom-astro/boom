@@ -559,10 +559,13 @@ pub fn shard_filters(field: &str, cuts: &[Bson]) -> Vec<Document> {
         return vec![Document::new()];
     }
     let mut shards = Vec::with_capacity(cuts.len() + 1);
-    shards.push(doc! { "$or": [
-        doc! { field: { "$lt": cuts[0].clone() } },
-        doc! { field: { "$exists": false } },
-    ] });
+    let first = doc! { field: { "$lt": cuts[0].clone() } };
+    // `_id` is never missing, and an `$or` keeps a paged `$gt` from bounding the index scan.
+    shards.push(if field == "_id" {
+        first
+    } else {
+        doc! { "$or": [first, doc! { field: { "$exists": false } }] }
+    });
     for pair in cuts.windows(2) {
         shards.push(doc! { field: { "$gte": pair[0].clone(), "$lt": pair[1].clone() } });
     }
