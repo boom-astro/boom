@@ -190,6 +190,7 @@ async fn main() -> std::io::Result<()> {
                     .service(routes::babamul::stats::get_nightly_stats)
                     .service(routes::babamul::stats::get_collection_stats)
                     .service(routes::babamul::stats::get_kafka_stats)
+                    .service(routes::babamul::stats::get_live_ingest)
                     .service(routes::babamul::stats::post_stats_refresh)
                     .service(routes::babamul::tokens::get_tokens)
                     .service(routes::babamul::tokens::post_token)
