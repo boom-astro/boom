@@ -28,8 +28,20 @@ pub struct EnrichedZtfAlert {
     #[serde(rename = "objectId")]
     pub object_id: String,
     pub candidate: ZtfCandidate,
+    #[serde(default, deserialize_with = "deserialize_partial_properties")]
     pub properties: Option<ZtfAlertProperties>,
     pub classifications: Option<ZtfAlertClassifications>,
+}
+
+fn deserialize_partial_properties<'de, D>(
+    deserializer: D,
+) -> Result<Option<ZtfAlertProperties>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw =
+        <Option<mongodb::bson::RawDocumentBuf> as serde::Deserialize>::deserialize(deserializer)?;
+    Ok(raw.and_then(|raw| mongodb::bson::from_slice(raw.as_bytes()).ok()))
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
