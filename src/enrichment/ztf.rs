@@ -27,7 +27,9 @@ use crate::utils::linking::{angular_separation_deg, night_at};
 use crate::utils::mpcorb::{
     elements_from_document, is_comet_designation, normalize_ztf_ssnamenr, ORBITS_COLLECTION,
 };
-use crate::utils::outburst::{median, Point, MAX_SEPARATION_ARCSEC};
+use crate::utils::outburst::{
+    is_static_interloper, median, stored_static_interloper, Point, MAX_SEPARATION_ARCSEC,
+};
 use crate::utils::phase_curve::{curves_from_document, PhaseCurve, BASELINES_COLLECTION};
 use crate::utils::sso_geometry::{geometry_at, OrbitalElements, ZTF};
 use crate::utils::variability::PerBandVariability;
@@ -391,6 +393,9 @@ const HISTORY_WINDOW_DAYS: f64 = 30.0;
 /// the document is missing photometry or geometry.
 fn history_point(doc: &Document) -> Option<(String, f64, Point)> {
     let candidate = doc.get_document("candidate").ok()?;
+    if stored_static_interloper(candidate) {
+        return None;
+    }
     let sso = doc
         .get_document("properties")
         .ok()?
@@ -424,7 +429,7 @@ fn outburst_for(
 ) -> Option<Outburst> {
     // A detection away from the object's position is not a measurement of it.
     let separation = sso.separation_arcsec? as f64;
-    if separation >= MAX_SEPARATION_ARCSEC {
+    if separation >= MAX_SEPARATION_ARCSEC || is_interloper(candidate) {
         return None;
     }
     let test = Point {
@@ -449,6 +454,18 @@ fn outburst_for(
         .unwrap_or_default();
     let curve = baselines.get(designation).and_then(|b| b.get(&test.band));
     Outburst::from_history(&history, test, candidate.jd, curve)
+}
+
+fn is_interloper(candidate: &Candidate) -> bool {
+    candidate.ssdistnr.is_some_and(|separation| {
+        is_static_interloper(
+            f64::from(separation),
+            candidate.ssmagnr.map(f64::from),
+            f64::from(candidate.magpsf),
+            Some(f64::from(candidate.ndethist)),
+            candidate.distnr.map(f64::from),
+        )
+    })
 }
 
 const MAX_SHAPE_SEPARATION_ARCSEC: f64 = 5.0;
@@ -1419,6 +1436,9 @@ impl ZtfEnrichmentWorker {
             "candidate.magpsf": 1,
             "candidate.sigmapsf": 1,
             "candidate.ssdistnr": 1,
+            "candidate.ssmagnr": 1,
+            "candidate.ndethist": 1,
+            "candidate.distnr": 1,
             "candidate.ra": 1,
             "candidate.dec": 1,
             "candidate.seeratio": 1,
@@ -1499,7 +1519,9 @@ impl ZtfEnrichmentWorker {
                 .ssnamenr
                 .as_deref()
                 .is_some_and(is_comet_designation);
-        let is_rock = (0.0..12.0).contains(&ssdistnr) && (ssmagnr >= 0.0 || known_comet);
+        let is_rock = (0.0..12.0).contains(&ssdistnr)
+            && (ssmagnr >= 0.0 || known_comet)
+            && !is_interloper(candidate);
 
         let sso = ZtfSsoAssociation::from_ipac(
             candidate.ssnamenr.clone(),
