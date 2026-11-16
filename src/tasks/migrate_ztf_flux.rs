@@ -42,8 +42,8 @@ pub async fn run(
     params: MigrateZtfFluxParams,
 ) -> Result<serde_json::Value, super::TaskError> {
     let mut modified = serde_json::Map::new();
+    // The aux light curves go out with every alert that passes a filter, so they come first.
     for (collection, filter, pipeline) in [
-        (ALERTS, doc! {}, alerts_pipeline()),
         (
             AUX,
             doc! { "$or": [
@@ -53,6 +53,7 @@ pub async fn run(
             ]},
             aux_pipeline(),
         ),
+        (ALERTS, doc! {}, alerts_pipeline()),
     ] {
         let coll = ctx.db().collection::<Document>(collection);
         let estimated = coll.estimated_document_count().await.unwrap_or(0);
