@@ -87,6 +87,9 @@ pub struct AskapCandidate {
     pub flag_c4: Option<bool>,
     pub flux_peak_isl_ratio: Option<f32>,
     pub flux_int_isl_ratio: Option<f32>,
+    pub n_neighbour_dist: Option<f32>,
+    pub n_relations: Option<i32>,
+    pub n_siblings: Option<i32>,
 }
 
 impl TimeSeries for AskapCandidate {
