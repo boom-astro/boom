@@ -16,8 +16,9 @@ use crate::{
         ZtfAlertProperties,
     },
     filter::{
-        build_filter_pipeline, find_unknown_field, DocumentShape, Filter, FilterError,
-        FilterVersion, SURVEYS_REQUIRING_PERMISSIONS,
+        build_filter_pipeline, find_unknown_field,
+        simulation::{simulate_lsst_filter, SimulatedLightcurve, SimulatedLightcurveResult},
+        DocumentShape, Filter, FilterError, FilterVersion, SURVEYS_REQUIRING_PERMISSIONS,
     },
     utils::{
         db::{count_alerts_in_jd_window, mongify},
@@ -1459,6 +1460,91 @@ pub async fn post_filter_test(
     response::ok_ser(
         "filter test executed successfully",
         FilterTestResponse::new(test_pipeline, results),
+    )
+}
+
+#[derive(serde::Deserialize, Clone, ToSchema)]
+pub struct FilterSimulationRequest {
+    pub survey: Survey,
+    pub pipeline: Vec<serde_json::Value>,
+    pub permissions: HashMap<Survey, Vec<i32>>,
+    pub lightcurves: Vec<SimulatedLightcurve>,
+    #[serde(default)]
+    #[schema(value_type = Object)]
+    pub detection_fields: serde_json::Map<String, serde_json::Value>,
+}
+
+#[derive(serde::Serialize, ToSchema)]
+pub struct FilterSimulationResponse {
+    pub pipeline: Vec<serde_json::Value>,
+    pub results: Vec<SimulatedLightcurveResult>,
+}
+
+/// Test a filter on simulated light curves
+#[utoipa::path(
+    post,
+    path = "/filters/test/simulated",
+    request_body = FilterSimulationRequest,
+    responses(
+        (status = 200, description = "Filter simulation executed successfully", body = FilterSimulationResponse),
+        (status = 400, description = "Invalid filter or light curves submitted"),
+        (status = 500, description = "Internal server error")
+    ),
+    tags=["Filters"]
+)]
+#[post("/filters/test/simulated")]
+pub async fn post_filter_test_simulated(
+    db: web::Data<Database>,
+    config: web::Data<AppConfig>,
+    body: web::Json<FilterSimulationRequest>,
+    current_user: Option<web::ReqData<User>>,
+) -> HttpResponse {
+    if current_user.is_none() {
+        return HttpResponse::Unauthorized().body("Unauthorized");
+    }
+    let body = body.into_inner();
+    if body.survey != Survey::Lsst {
+        return response::bad_request("simulated light curves are only supported for LSST");
+    }
+    let limits = &config.api.filter_simulation;
+    if body.lightcurves.len() > limits.max_lightcurves {
+        return response::bad_request(&format!(
+            "maximum of {} light curves per simulation",
+            limits.max_lightcurves
+        ));
+    }
+    let n_points: usize = body.lightcurves.iter().map(|l| l.points.len()).sum();
+    if n_points > limits.max_points {
+        return response::bad_request(&format!(
+            "maximum of {} points per simulation",
+            limits.max_points
+        ));
+    }
+    let _slot = match large_query_slot().await {
+        Ok(slot) => slot,
+        Err(response) => return response,
+    };
+    let pipeline =
+        match build_filter_pipeline(&body.pipeline, &body.permissions, &body.survey).await {
+            Ok(pipeline) => pipeline,
+            Err(e) => {
+                return response::bad_request(&format!("Filter build failed with error: {e}"));
+            }
+        };
+    let results = simulate_lsst_filter(
+        &db,
+        &config,
+        &pipeline,
+        &body.lightcurves,
+        &body.detection_fields,
+    )
+    .await;
+    response::ok_ser(
+        "filter simulation executed successfully",
+        FilterSimulationResponse {
+            pipeline: doc2json(pipeline),
+            results,
+        },
     )
 }
 

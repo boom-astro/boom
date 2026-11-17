@@ -2,6 +2,7 @@ mod base;
 mod decam;
 mod fields;
 mod lsst;
+pub mod simulation;
 mod winter;
 mod ztf;
 

@@ -1,6 +1,7 @@
 mod base;
 mod decam;
 mod lsst;
+mod simulation;
 mod winter;
 mod ztf;
 pub use base::{
@@ -16,6 +17,10 @@ pub use lsst::{
     DiaForcedSource, DiaSource, LsstAlert, LsstAlertWorker, LsstAliases, LsstCandidate,
     LsstForcedPhot, LsstObject, LsstPrvCandidate, LsstRawAvroAlert, SsSource, LSST_DEC_RANGE,
     LSST_SCHEMA_REGISTRY_GITHUB_FALLBACK_URL, LSST_SCHEMA_REGISTRY_URL, LSST_ZTF_XMATCH_RADIUS,
+};
+pub use simulation::{
+    lsst_surroundings, simulated_lsst_object, SimulatedEpoch, SimulatedLsstObject,
+    SimulatedSurroundings,
 };
 pub use winter::{
     fid_to_band, sanitize_winter_avro, WinterAlert, WinterAlertWorker, WinterAliases,
