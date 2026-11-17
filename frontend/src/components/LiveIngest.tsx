@@ -9,6 +9,7 @@ const LIVE_MS = 20 * 60_000;
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 const LANE_HEIGHT = 64;
+const CUMULATIVE_HEIGHT = 140;
 const LATENCY_HEIGHT = 72;
 const LATENCY_TICKS: [number, string][] = [
   [10, "10 s"],
@@ -64,10 +65,7 @@ function StatusDot({ live }: { live: boolean }) {
   );
 }
 
-export default function LiveIngest({ data, surveys }: {
-  data: LiveIngestData | null;
-  surveys: ReadonlySet<string>;
-}) {
+export default function LiveIngest({ data }: { data: LiveIngestData | null }) {
   const [now, setNow] = useState(Date.now);
   const [width, setWidth] = useState(0);
   const [hover, setHover] = useState<{ slot: number; x: number; y: number; right: number | null } | null>(null);
@@ -91,8 +89,7 @@ export default function LiveIngest({ data, surveys }: {
 
   const lanes = useMemo<Lane[]>(() => {
     if (!data) return [];
-    return data.surveys
-      .filter((survey) => surveys.has(survey.survey))
+    return [...data.surveys]
       .sort((a, b) => ORDER.indexOf(a.survey) - ORDER.indexOf(b.survey))
       .flatMap((survey) => {
         const telescope = TELESCOPES.find((t) => t.id === survey.survey);
@@ -117,7 +114,7 @@ export default function LiveIngest({ data, surveys }: {
           latency: last?.latency_s ?? null,
         }];
       });
-  }, [data, surveys]);
+  }, [data]);
 
   const [from, to] = useMemo(() => {
     const edges = lanes.flatMap((lane) => [
@@ -171,6 +168,33 @@ export default function LiveIngest({ data, surveys }: {
     });
     return { y, x, series, gridlines };
   }, [lanes, from, span, width, binMs]);
+
+  const cumulative = useMemo(() => {
+    const starts = lanes.flatMap((lane) => [...lane.bins.keys()]);
+    if (!starts.length) return null;
+    const first = Math.min(...starts);
+    const last = Math.max(...starts) + binMs;
+    const running = lanes.map(() => 0);
+    const points = [{ t: first, values: [...running] }];
+    for (let t = first; t < last; t += binMs) {
+      lanes.forEach((lane, i) => {
+        running[i] += lane.bins.get(t)?.n_alerts ?? 0;
+      });
+      points.push({ t: t + binMs, values: [...running] });
+    }
+    const end = Math.min(to, Math.max(now, last));
+    if (end > last) points.push({ t: end, values: [...running] });
+    const total = running.reduce((sum, n) => sum + n, 0);
+    const x = (ms: number) => ((ms - from) / span) * width;
+    const y = (n: number) => CUMULATIVE_HEIGHT - (n / (total || 1)) * (CUMULATIVE_HEIGHT - 8);
+    const stacked = (values: number[], n: number) => values.slice(0, n).reduce((sum, v) => sum + v, 0);
+    const bands = lanes.map((lane, i) => {
+      const upper = points.map((p) => `${x(p.t)},${y(stacked(p.values, i + 1))}`);
+      const lower = points.map((p) => `${x(p.t)},${y(stacked(p.values, i))}`).reverse();
+      return { lane, area: [...upper, ...lower].join(" "), line: upper.join(" ") };
+    }).filter(({ lane }) => lane.total > 0);
+    return { total, top: y(total), bands };
+  }, [lanes, binMs, from, to, span, width, now]);
 
   function track(e: React.PointerEvent<HTMLDivElement>) {
     const wrapper = wrapperRef.current;
@@ -226,6 +250,10 @@ export default function LiveIngest({ data, surveys }: {
   const hovered = hover
     ? lanes.map((lane) => ({ lane, bin: lane.bins.get(hover.slot) }))
     : [];
+  const hoveredTotal = hover
+    ? lanes.reduce((sum, lane) =>
+      sum + [...lane.bins.entries()].reduce((n, [t, bin]) => (t <= hover.slot ? n + bin.n_alerts : n), 0), 0)
+    : 0;
   if (!data) return <div className="shimmer h-87.5 w-full rounded-md" />;
 
   return (
@@ -234,6 +262,42 @@ export default function LiveIngest({ data, surveys }: {
       className="relative grid grid-cols-[7.5rem_minmax(0,1fr)_2.5rem] gap-x-3 gap-y-2 select-none sm:grid-cols-[11rem_minmax(0,1fr)_3rem]"
       onPointerLeave={() => setHover(null)}
     >
+      {cumulative && (
+        <div className="contents">
+          <div className="flex min-w-0 flex-col justify-center" style={{ minHeight: CUMULATIVE_HEIGHT }}>
+            <span className="text-sm font-medium">All surveys</span>
+            <span className="text-xl leading-tight font-semibold tabular-nums sm:text-2xl">
+              {cumulative.total.toLocaleString()}
+            </span>
+            <span className="text-muted-foreground text-xs">alerts tonight</span>
+          </div>
+          <div
+            className="border-border relative border-b"
+            style={{ height: CUMULATIVE_HEIGHT }}
+            onPointerMove={track}
+            role="img"
+            aria-label={`${cumulative.total.toLocaleString()} alerts tonight, all surveys`}
+          >
+            <svg width={width} height={CUMULATIVE_HEIGHT} className="absolute inset-0">
+              <line x1={0} x2={width} y1={cumulative.top} y2={cumulative.top} stroke="var(--border)" strokeWidth={1} />
+              {cumulative.bands.map(({ lane, area, line }) => (
+                <g key={lane.id}>
+                  <polygon points={area} fill={lane.color} fillOpacity={0.35} />
+                  <polyline points={line} fill="none" stroke={lane.color} strokeWidth={2} strokeLinejoin="round" />
+                </g>
+              ))}
+            </svg>
+            {overlay()}
+          </div>
+          <div className="text-muted-foreground relative text-[11px] tabular-nums">
+            <span className="absolute -translate-y-1/2" style={{ top: cumulative.top }}>
+              {compact.format(cumulative.total)}
+            </span>
+          </div>
+          <div className="text-muted-foreground col-span-3 pt-3 text-xs">Alerts per {data.bin_minutes} minutes</div>
+        </div>
+      )}
+
       {lanes.map((lane) => {
         const { label, live } = status(lane, now);
         const detail = lane.lastIngest !== null
@@ -373,9 +437,10 @@ export default function LiveIngest({ data, surveys }: {
             ...(hover.right !== null ? { right: hover.right + 12 } : { left: hover.x + 12 }),
           }}
         >
-          <div className="mb-1 font-medium tabular-nums">
+          <div className="font-medium tabular-nums">
             {utc(hover.slot)} – {utc(hover.slot + binMs)} UTC
           </div>
+          <div className="text-muted-foreground mb-1 tabular-nums">{hoveredTotal.toLocaleString()} alerts so far</div>
           {hovered.map(({ lane, bin }) => (
             <div key={lane.id} className="flex items-center gap-2 py-0.5">
               <span className="size-2.5 shrink-0 rounded-[3px]" style={{ background: lane.color }} />

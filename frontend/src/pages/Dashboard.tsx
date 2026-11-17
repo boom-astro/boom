@@ -1,5 +1,4 @@
-import { useState, useEffect, useLayoutEffect, useMemo, useRef } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Bar, BarChart, CartesianGrid, ReferenceArea, ReferenceLine, XAxis, YAxis } from "recharts";
@@ -37,13 +36,6 @@ const chartConfig = {
 } satisfies ChartConfig;
 
 const FIRST_NIGHT = "2018-01-01";
-
-type View = "nights" | "tonight";
-
-const VIEWS: [View, string][] = [["nights", "Alerts per Night"], ["tonight", "Tonight"]];
-
-const ZOOMED_IN = "scale(2.5)";
-const ZOOMED_OUT = "scale(0.3)";
 
 // The API refuses to recount a longer range in one refresh, except for admins.
 const MAX_REFRESH_MONTHS = 6;
@@ -229,11 +221,7 @@ export default function Dashboard() {
   const [chartWidth, setChartWidth] = useState(0);
   const [now, setNow] = useState(Date.now);
   const isAdmin = useAppStore((s) => s.profile?.is_admin === true);
-  const [searchParams, setSearchParams] = useSearchParams();
-  const view: View = searchParams.get("view") === "tonight" ? "tonight" : "nights";
-  const live = useLiveIngest(view === "tonight");
-  const viewRef = useRef<HTMLDivElement>(null);
-  const enteringRef = useRef<View | null>(null);
+  const live = useLiveIngest(true);
 
   useEffect(() => {
     setLoading(true);
@@ -396,44 +384,6 @@ export default function Dashboard() {
     setZoomSlice(null);
   }
 
-  useLayoutEffect(() => {
-    const entering = enteringRef.current;
-    const el = viewRef.current;
-    if (!entering || !el) return;
-    enteringRef.current = null;
-    el.getAnimations().forEach((animation) => animation.cancel());
-    el.animate(
-      [{ transform: entering === "tonight" ? ZOOMED_OUT : ZOOMED_IN, opacity: 0 }, { transform: "scale(1)", opacity: 1 }],
-      { duration: 420, easing: "cubic-bezier(0.16, 1, 0.3, 1)" },
-    ).finished.then(() => {
-      if (chartRef.current) chartRef.current.style.overflow = "";
-    }, () => undefined);
-  }, [view]);
-
-  async function showView(next: View) {
-    if (next === view) return;
-    const el = viewRef.current;
-    const frame = chartRef.current;
-    if (el && frame && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
-      const bar = nowX ?? chartData.length - 0.5;
-      const x = 64 + (bar / Math.max(chartData.length, 1)) * Math.max(chartWidth - 68, 0);
-      frame.style.overflow = "hidden";
-      el.getAnimations().forEach((animation) => animation.cancel());
-      el.style.transformOrigin = `${Math.round(x)}px 80%`;
-      const exit = el.animate(
-        [{ transform: "scale(1)", opacity: 1 }, { transform: next === "tonight" ? ZOOMED_IN : ZOOMED_OUT, opacity: 0 }],
-        { duration: 220, easing: "cubic-bezier(0.4, 0, 1, 1)", fill: "forwards" },
-      );
-      await Promise.race([exit.finished.catch(() => undefined), new Promise((resolve) => setTimeout(resolve, 400))]);
-      enteringRef.current = next;
-    }
-    setSearchParams((params) => {
-      if (next === "tonight") params.set("view", "tonight");
-      else params.delete("view");
-      return params;
-    }, { replace: true });
-  }
-
   const busy = loading || refreshing;
   const isLoggedIn = !!api.getTokenRecord();
 
@@ -485,40 +435,18 @@ export default function Dashboard() {
       <Card>
         <CardHeader className="space-y-3">
           <div className="flex flex-wrap items-center justify-between gap-4">
-            <div className="space-y-2.5">
+            <div className="space-y-1.5">
               <CardTitle className="flex items-center gap-1.5">
-                <div role="tablist" className="flex items-center gap-4">
-                  {VIEWS.map(([id, label]) => (
-                    <button
-                      key={id}
-                      type="button"
-                      role="tab"
-                      aria-selected={view === id}
-                      onClick={() => showView(id)}
-                      className={`relative cursor-pointer transition-colors ${view === id ? "text-foreground" : "text-muted-foreground hover:text-foreground"}`}
-                    >
-                      {label}
-                      <span
-                        className={`bg-foreground absolute inset-x-0 -bottom-1.5 h-0.5 rounded-full transition-opacity ${view === id ? "opacity-100" : "opacity-0"}`}
-                      />
-                    </button>
-                  ))}
-                </div>
-                {view === "nights" && (
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <IconInfoCircle className="text-muted-foreground size-4 cursor-help" />
-                    </TooltipTrigger>
-                    <TooltipContent side="right" className="max-w-xs">{nightConvention(availableSurveys)}</TooltipContent>
-                  </Tooltip>
-                )}
+                Alerts per Night
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <IconInfoCircle className="text-muted-foreground size-4 cursor-help" />
+                  </TooltipTrigger>
+                  <TooltipContent side="right" className="max-w-xs">{nightConvention(availableSurveys)}</TooltipContent>
+                </Tooltip>
               </CardTitle>
               <CardDescription>
-                {view === "nights"
-                  ? `${chartData.length} nights${zoomSlice ? " — zoomed" : ""}`
-                  : live.data?.date
-                    ? `Night of ${formatNight(live.data.date)}, alerts per ${live.data.bin_minutes} min, updated ${formatAgo(now - Date.parse(live.data.updated_at))}`
-                    : "Current night"}
+                {chartData.length} nights{zoomSlice ? " — zoomed" : ""}
               </CardDescription>
             </div>
             <div className="flex flex-wrap items-center gap-6">
@@ -540,119 +468,122 @@ export default function Dashboard() {
                   </Toggle>
                 ))}
               </div>
-              {view === "nights" && (
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="text-muted-foreground text-sm">Nights</span>
-                  <NightInput value={startDate} max={todayUTC} onChange={setStartDate} />
-                  <span className="text-muted-foreground text-sm">to</span>
-                  <NightInput value={endDate} max={todayUTC} onChange={setEndDate} />
-                </div>
-              )}
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-muted-foreground text-sm">Nights</span>
+                <NightInput value={startDate} max={todayUTC} onChange={setStartDate} />
+                <span className="text-muted-foreground text-sm">to</span>
+                <NightInput value={endDate} max={todayUTC} onChange={setEndDate} />
+              </div>
             </div>
           </div>
-          {(view === "nights" ? error : live.error) && (
-            <p className="text-sm text-destructive">{view === "nights" ? error : live.error}</p>
-          )}
+          {error && <p className="text-sm text-destructive">{error}</p>}
         </CardHeader>
         <CardContent className="relative" ref={chartRef}>
-          <div ref={viewRef}>
-            {view === "tonight" ? (
-              <LiveIngest data={live.data} surveys={surveys} />
-            ) : (
-              <>
-                {zoomSlice && (
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Toggle
-                        onPressedChange={resetZoom}
-                        className="absolute top-0 right-8 z-1"
-                        aria-label="Reset zoom"
-                      >
-                        <IconZoomReset className="w-4 h-4" />
-                      </Toggle>
-                    </TooltipTrigger>
-                    <TooltipContent side="left">Reset zoom</TooltipContent>
-                  </Tooltip>
+          {zoomSlice && (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Toggle
+                  onPressedChange={resetZoom}
+                  className="absolute top-0 right-8 z-1"
+                  aria-label="Reset zoom"
+                >
+                  <IconZoomReset className="w-4 h-4" />
+                </Toggle>
+              </TooltipTrigger>
+              <TooltipContent side="left">Reset zoom</TooltipContent>
+            </Tooltip>
+          )}
+          {loading ? (
+            <div className="h-87.5 w-full shimmer" />
+          ) : (
+            <ChartContainer config={chartConfig} className="h-87.5 w-full select-none">
+              <BarChart
+                data={chartData}
+                margin={{top: 4, right: 4, bottom: 0, left: 4}}
+                onMouseDown={startZoomSelection}
+                onMouseMove={updateZoomSelection}
+                onMouseUp={zoomIntoSelection}
+                onMouseLeave={zoomIntoSelection}
+                onDoubleClick={resetZoom}
+              >
+                <CartesianGrid vertical={false}/>
+                <XAxis
+                  dataKey="date"
+                  tickLine={false}
+                  axisLine={false}
+                  tickMargin={8}
+                  ticks={dayTicks}
+                  interval={0}
+                  tickFormatter={nightDay}
+                />
+                <XAxis
+                  dataKey="date"
+                  xAxisId="month"
+                  ticks={monthTicks}
+                  interval={0}
+                  tickLine={false}
+                  axisLine={false}
+                  tickMargin={0}
+                  height={18}
+                  tick={{ style: { fill: "var(--foreground)" }, fontSize: 11 }}
+                  tickFormatter={nightMonth}
+                />
+                <XAxis xAxisId="now" type="number" domain={[0, chartData.length]} allowDataOverflow hide />
+                <YAxis
+                  tickLine={false}
+                  axisLine={false}
+                  tickMargin={8}
+                  tickFormatter={formatCount}
+                />
+                <ChartTooltip
+                  content={
+                    <ChartTooltipContent
+                      labelFormatter={(_, payload) => {
+                        const date: string | undefined = payload?.[0]?.payload?.date;
+                        if (!date) return "";
+                        return (
+                          <div className="space-y-0.5">
+                            <div>{formatNightRangeLong(date)}</div>
+                            <div className="text-muted-foreground font-normal">{describeNight(date)}</div>
+                          </div>
+                        );
+                      }}
+                    />
+                  }
+                />
+                {shownSurveys.map((s) => (
+                  <Bar key={s} dataKey={s} fill={`var(--color-${s})`} radius={[2, 2, 0, 0]}/>
+                ))}
+                {nowX !== null && (
+                  <ReferenceLine
+                    xAxisId="now"
+                    x={nowX}
+                    stroke="var(--destructive)"
+                    strokeWidth={2}
+                    label={{ value: "now", position: "insideTopRight", fill: "var(--destructive)", fontSize: 11 }}
+                  />
                 )}
-                {loading ? (
-                  <div className="h-87.5 w-full shimmer" />
-                ) : (
-                  <ChartContainer config={chartConfig} className="h-87.5 w-full select-none">
-                    <BarChart
-                      data={chartData}
-                      margin={{top: 4, right: 4, bottom: 0, left: 4}}
-                      onMouseDown={startZoomSelection}
-                      onMouseMove={updateZoomSelection}
-                      onMouseUp={zoomIntoSelection}
-                      onMouseLeave={zoomIntoSelection}
-                      onDoubleClick={resetZoom}
-                    >
-                      <CartesianGrid vertical={false}/>
-                      <XAxis
-                        dataKey="date"
-                        tickLine={false}
-                        axisLine={false}
-                        tickMargin={8}
-                        ticks={dayTicks}
-                        interval={0}
-                        tickFormatter={nightDay}
-                      />
-                      <XAxis
-                        dataKey="date"
-                        xAxisId="month"
-                        ticks={monthTicks}
-                        interval={0}
-                        tickLine={false}
-                        axisLine={false}
-                        tickMargin={0}
-                        height={18}
-                        tick={{ style: { fill: "var(--foreground)" }, fontSize: 11 }}
-                        tickFormatter={nightMonth}
-                      />
-                      <XAxis xAxisId="now" type="number" domain={[0, chartData.length]} allowDataOverflow hide />
-                      <YAxis
-                        tickLine={false}
-                        axisLine={false}
-                        tickMargin={8}
-                        tickFormatter={formatCount}
-                      />
-                      <ChartTooltip
-                        content={
-                          <ChartTooltipContent
-                            labelFormatter={(_, payload) => {
-                              const date: string | undefined = payload?.[0]?.payload?.date;
-                              if (!date) return "";
-                              return (
-                                <div className="space-y-0.5">
-                                  <div>{formatNightRangeLong(date)}</div>
-                                  <div className="text-muted-foreground font-normal">{describeNight(date)}</div>
-                                </div>
-                              );
-                            }}
-                          />
-                        }
-                      />
-                      {shownSurveys.map((s) => (
-                        <Bar key={s} dataKey={s} fill={`var(--color-${s})`} radius={[2, 2, 0, 0]}/>
-                      ))}
-                      {nowX !== null && (
-                        <ReferenceLine
-                          xAxisId="now"
-                          x={nowX}
-                          stroke="var(--destructive)"
-                          strokeWidth={2}
-                          label={{ value: "now", position: "insideTopRight", fill: "var(--destructive)", fontSize: 11 }}
-                        />
-                      )}
-                      {zoomLeft && zoomRight && (
-                        <ReferenceArea x1={zoomLeft} x2={zoomRight} strokeOpacity={0.3} fill="hsl(var(--accent))" fillOpacity={0.3} />
-                      )}
-                    </BarChart>
-                  </ChartContainer>
+                {zoomLeft && zoomRight && (
+                  <ReferenceArea x1={zoomLeft} x2={zoomRight} strokeOpacity={0.3} fill="hsl(var(--accent))" fillOpacity={0.3} />
                 )}
-              </>
-            )}
-          </div>
+              </BarChart>
+            </ChartContainer>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Tonight</CardTitle>
+          <CardDescription>
+            {live.data?.date
+              ? `Night of ${formatNight(live.data.date)}, updated ${formatAgo(now - Date.parse(live.data.updated_at))}`
+              : "Current night"}
+          </CardDescription>
+          {live.error && <p className="text-sm text-destructive">{live.error}</p>}
+        </CardHeader>
+        <CardContent>
+          <LiveIngest data={live.data} />
         </CardContent>
       </Card>
 
