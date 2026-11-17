@@ -1,6 +1,7 @@
 use crate::conf::AppConfig;
 use crate::utils::cutouts::AlertCutout;
 use crate::utils::enums::Survey;
+use crate::utils::ingest_stats;
 use crate::utils::worker::WorkerCmd;
 use crate::{
     conf,
@@ -1336,6 +1337,8 @@ pub trait AlertWorker {
     async fn process_alert(&mut self, avro_bytes: &[u8]) -> Result<ProcessAlertStatus, AlertError>;
 }
 
+const STATS_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+
 pub fn alert_temp_queue_name(input_queue_name: &str) -> String {
     format!("{}_temp", input_queue_name)
 }
@@ -1485,6 +1488,9 @@ pub async fn run_alert_worker<T: AlertWorker>(
         .await
         .inspect_err(as_error!("failed to create redis client"))?;
     let survey_name = survey.to_string();
+    let db = config.build_db().await?;
+    let mut stats = ingest_stats::MinuteStats::new();
+    let mut last_stats_flush = std::time::Instant::now();
 
     let command_interval: usize = worker_config.command_interval;
     let mut command_check_countdown = command_interval;
@@ -1523,6 +1529,10 @@ pub async fn run_alert_worker<T: AlertWorker>(
         KeyValue::new("reason", "output_queue"),
     ];
     loop {
+        if !stats.is_empty() && last_stats_flush.elapsed() >= STATS_FLUSH_INTERVAL {
+            ingest_stats::flush(&db, &survey_name, &mut stats).await;
+            last_stats_flush = std::time::Instant::now();
+        }
         // check for command from threadpool
         if command_check_countdown == 0 {
             if should_terminate(&mut receiver) {
@@ -1556,7 +1566,17 @@ pub async fn run_alert_worker<T: AlertWorker>(
             }
         };
 
-        let process_result = alert_processor.process_alert(&avro_bytes).await;
+        let (received_ms, payload) = ingest_stats::unwrap(&avro_bytes);
+        let process_result = alert_processor.process_alert(payload).await;
+        if let (Ok(ProcessAlertStatus::Added(candid)), Some(received_ms)) =
+            (&process_result, received_ms)
+        {
+            ingest_stats::mark_received(&con, &survey_name, *candid, received_ms).await;
+            stats
+                .entry(ingest_stats::minute_of(received_ms))
+                .or_default()
+                .received += 1;
+        }
         let mut attributes = match process_result {
             Ok(ProcessAlertStatus::Added(_)) => &ok_added_attrs,
             Ok(ProcessAlertStatus::Exists(_)) => &ok_exists_attrs,
@@ -1582,5 +1602,6 @@ pub async fn run_alert_worker<T: AlertWorker>(
 
         handle_result?;
     }
+    ingest_stats::flush(&db, &survey_name, &mut stats).await;
     Ok(())
 }

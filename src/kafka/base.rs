@@ -15,6 +15,7 @@ use crate::{
 use std::future::Future;
 use std::sync::{Arc, LazyLock};
 
+use crate::utils::ingest_stats;
 use indicatif::ProgressBar;
 use opentelemetry::{metrics::Counter, KeyValue};
 use rdkafka::{
@@ -941,6 +942,14 @@ where
     .await
 }
 
+fn queue_payload<M: Message>(message: &M) -> Vec<u8> {
+    let received_ms = message
+        .timestamp()
+        .to_millis()
+        .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
+    ingest_stats::wrap(received_ms, message.payload().unwrap_or_default())
+}
+
 async fn push_to_queue(
     con: &redis::aio::MultiplexedConnection,
     queue: &str,
@@ -1272,8 +1281,8 @@ pub async fn consumer(
                 }
                 // Yields nothing while paused, but forwards anything still in flight.
                 if let Some(Ok(message)) = consumer.poll(core::time::Duration::from_millis(500)) {
-                    let payload = message.payload().unwrap_or_default();
-                    push_to_queue(&con, output_queue, payload)
+                    let payload = queue_payload(&message);
+                    push_to_queue(&con, output_queue, &payload)
                         .await
                         .inspect_err(|error| {
                             log_error!(error, "failed to push message to queue");
@@ -1295,8 +1304,8 @@ pub async fn consumer(
         }
         match consumer.poll(KAFKA_TIMEOUT_SECS) {
             Some(Ok(message)) => {
-                let payload = message.payload().unwrap_or_default();
-                push_to_queue(&con, output_queue, payload)
+                let payload = queue_payload(&message);
+                push_to_queue(&con, output_queue, &payload)
                     .await
                     .inspect_err(|error| {
                         log_error!(error, "failed to push message to queue");
