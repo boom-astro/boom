@@ -59,6 +59,12 @@ api:
     admin_username: admin
     admin_password: "" # Set via BOOM_API__AUTH__ADMIN_PASSWORD environment variable
     admin_email: admin@example.com
+  # POST /filters/test/simulated: replays simulated light curves as alerts,
+  # read-only against the catalogs. Cost grows with alerts x points per object.
+  filter_simulation:
+    enabled: false
+    max_lightcurves: 1000
+    max_points: 200000
 babamul:
   # Emails that are admins, granted at every API startup. Admins can also be
   # appointed in the admin page, and startup never revokes. To remove one: take
