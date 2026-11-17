@@ -1138,6 +1138,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             if let Some(Some(fit)) = fits.next() {
                 set_doc.insert("arnett_fit", mongify(&fit.arnett));
                 set_doc.insert("thermal_fit", mongify(&fit.thermal));
+                set_doc.insert("gp2d_fit", mongify(&fit.gp2d));
             }
 
             updates.push(WriteModel::UpdateOne(

@@ -30,7 +30,8 @@ how reference catalogs are ingested and cross-matched.
 
 [AppleCiDER](applecider.md) describes the fusion classifier,
 [Villar light-curve fits](villar-fit.md) the parametric light-curve model,
-[Arnett and temperature fits](lightcurve-fits.md) the per-band Arnett and blackbody fits, and
+[Arnett, temperature and 2D GP fits](lightcurve-fits.md) the per-band Arnett, blackbody and
+time-wavelength Gaussian process fits, and
 [Milvus vector database](milvus.md) the embedding store used for similarity
 search.
 
