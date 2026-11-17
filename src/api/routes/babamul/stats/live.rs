@@ -4,7 +4,7 @@ use crate::api::routes::babamul::{BabamulAcl, BabamulUser};
 use crate::utils::enums::Survey;
 use actix_web::{get, web, HttpResponse};
 use chrono::{DateTime, Duration, NaiveDate, Utc};
-use futures::{StreamExt, TryStreamExt};
+use futures::TryStreamExt;
 use mongodb::{
     bson::{doc, Document},
     Collection, Database,
@@ -17,7 +17,6 @@ use utoipa::ToSchema;
 const LIVE_INGEST_CACHE_KEY: &str = "live_ingest";
 const LIVE_INGEST_CACHE_SECS: f64 = 60.0;
 const BIN_MINUTES: u32 = 10;
-const LATENCY_SAMPLE: i64 = 25;
 const LIVE_SURVEYS: [Survey; 4] = [Survey::Ztf, Survey::Lsst, Survey::Decam, Survey::Winter];
 
 static RECOUNT: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
@@ -34,7 +33,6 @@ struct LiveIngestCache {
 pub struct LiveBin {
     pub start: DateTime<Utc>,
     pub n_alerts: u64,
-    pub latency_s: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -92,14 +90,6 @@ fn jd_to_utc(jd: f64) -> DateTime<Utc> {
     flare::Time::from_jd(jd).to_utc()
 }
 
-fn median(mut values: Vec<f64>) -> Option<f64> {
-    if values.is_empty() {
-        return None;
-    }
-    values.sort_by(f64::total_cmp);
-    Some(values[values.len() / 2])
-}
-
 async fn count_survey(
     db: &Database,
     survey: &Survey,
@@ -136,32 +126,12 @@ async fn count_survey(
         .await?;
     counts.sort_unstable();
 
-    let samples_collection: Collection<Sample> = db.collection(&format!("{}_alerts", survey));
-    let mut samples: Vec<(i64, Vec<Sample>)> =
-        futures::stream::iter(counts.iter().map(|&(bin, _)| {
-            let from = start_jd + bin as f64 * bin_days;
-            let filter = window(from, from + bin_days);
-            let collection = samples_collection.clone();
-            async move {
-                let sample: Vec<Sample> = collection
-                    .find(filter)
-                    .sort(doc! { "candidate.jd": -1 })
-                    .limit(LATENCY_SAMPLE)
-                    .projection(doc! { "_id": 0, "candidate.jd": 1, "created_at": 1 })
-                    .await?
-                    .try_collect()
-                    .await?;
-                Ok::<_, mongodb::error::Error>((bin, sample))
-            }
-        }))
-        .buffer_unordered(8)
-        .try_collect()
-        .await?;
-    samples.sort_unstable_by_key(|(bin, _)| *bin);
-
+    let samples: Collection<Sample> = db.collection(&format!("{}_alerts", survey));
     let latest = samples
-        .last()
-        .and_then(|(_, sample)| sample.first())
+        .find_one(window(start_jd, start_jd + n_bins * bin_days))
+        .sort(doc! { "candidate.jd": -1 })
+        .projection(doc! { "_id": 0, "candidate.jd": 1, "created_at": 1 })
+        .await?
         .map(|alert| LatestAlert {
             observed_at: jd_to_utc(alert.candidate.jd),
             ingested_at: alert.created_at.map(jd_to_utc),
@@ -169,20 +139,9 @@ async fn count_survey(
 
     let bins = counts
         .iter()
-        .zip(samples)
-        .map(|(&(bin, n_alerts), (_, sample))| LiveBin {
+        .map(|&(bin, n_alerts)| LiveBin {
             start: start + Duration::minutes(bin * BIN_MINUTES as i64),
             n_alerts,
-            latency_s: median(
-                sample
-                    .iter()
-                    .filter_map(|alert| {
-                        alert
-                            .created_at
-                            .map(|created_at| (created_at - alert.candidate.jd) * 86_400.0)
-                    })
-                    .collect(),
-            ),
         })
         .collect();
 
@@ -229,7 +188,7 @@ async fn read_cache(collection: &Collection<LiveIngestCache>) -> Option<LiveInge
         .map(|cache| cache.live)
 }
 
-/// Tonight's alerts per survey in 10-minute bins, with ingestion latency, cached one minute.
+/// Tonight's alerts per survey in 10-minute bins and the latest alert, cached one minute.
 #[utoipa::path(
     get,
     path = "/babamul/stats/live",
