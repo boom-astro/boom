@@ -122,6 +122,10 @@ pub trait EnrichmentWorker {
     /// Forcibly disable Babamul on this worker, regardless of config.
     fn disable_babamul(&mut self);
 
+    fn write_only_properties(&mut self, _keys: Vec<String>) -> bool {
+        false
+    }
+
     /// Called when the input queue comes up empty, before the worker sleeps.
     /// Background catch-up that would otherwise compete with live batches
     /// belongs here. Must not fail: an idle worker has nothing to report.
