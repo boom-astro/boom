@@ -1056,10 +1056,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                 .remove(&candid)
                 .ok_or_else(|| EnrichmentWorkerError::MissingCutouts(candid))?;
             let (properties, all_bands_properties, programid, lightcurve, ztf_lightcurve) =
-                match self
-                    .get_alert_properties(&alert, &orbits, &sso_history, &baselines)
-                    .await
-                {
+                match Self::alert_properties(&alert, &orbits, &sso_history, &baselines) {
                     Ok(v) => v,
                     // Skip the alert instead of aborting the batch: the queue keeps draining.
                     Err(EnrichmentWorkerError::EmptyLightcurve(_)) => {
@@ -1484,8 +1481,7 @@ impl ZtfEnrichmentWorker {
         history
     }
 
-    async fn get_alert_properties(
-        &self,
+    fn alert_properties(
         alert: &ZtfAlertForEnrichment,
         orbits: &HashMap<String, OrbitalElements>,
         sso_history: &SsoHistory,
@@ -2012,6 +2008,18 @@ impl ZtfEnrichmentWorker {
 
         Ok(results)
     }
+}
+
+pub fn ztf_alert_properties_without_sso(
+    alert: &ZtfAlertForEnrichment,
+) -> Result<(ZtfAlertProperties, Vec<PhotometryMag>), EnrichmentWorkerError> {
+    let (properties, _, _, lightcurve, _) = ZtfEnrichmentWorker::alert_properties(
+        alert,
+        &HashMap::new(),
+        &SsoHistory::default(),
+        &HashMap::new(),
+    )?;
+    Ok((properties, lightcurve))
 }
 
 #[cfg(test)]
