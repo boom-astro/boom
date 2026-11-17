@@ -28,6 +28,8 @@ pub enum Survey {
     Decam,
     #[serde(alias = "winter", alias = "wntr", alias = "WNTR")]
     Winter,
+    #[serde(alias = "askap")]
+    Askap,
 }
 
 impl Survey {
@@ -37,6 +39,7 @@ impl Survey {
             Survey::Lsst => "LSST",
             Survey::Decam => "DECAM",
             Survey::Winter => "WINTER",
+            Survey::Askap => "ASKAP",
         }
     }
 
@@ -48,6 +51,7 @@ impl Survey {
         match self {
             Survey::Ztf | Survey::Winter => Tz::America__Los_Angeles,
             Survey::Lsst | Survey::Decam => Tz::America__Santiago,
+            Survey::Askap => Tz::Australia__Perth,
         }
     }
 
