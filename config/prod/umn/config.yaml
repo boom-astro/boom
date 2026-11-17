@@ -62,7 +62,7 @@ api:
   # POST /filters/test/simulated: replays simulated light curves as alerts,
   # read-only against the catalogs. Cost grows with alerts x points per object.
   filter_simulation:
-    enabled: false
+    enabled: true
     max_lightcurves: 1000
     max_points: 200000
 babamul:
