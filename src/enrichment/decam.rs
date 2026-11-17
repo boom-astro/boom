@@ -524,7 +524,7 @@ impl EnrichmentWorker for DecamEnrichmentWorker {
             let candid = alert.candid;
 
             let sso = associations.as_mut().and_then(|a| a.remove(&candid));
-            let properties = self.get_alert_properties(&alert, sso).await?;
+            let properties = Self::alert_properties(&alert, sso)?;
 
             let update_alert_document = doc! {
                 "$set": {
@@ -576,8 +576,7 @@ impl DecamEnrichmentWorker {
         self.known.as_mut()
     }
 
-    async fn get_alert_properties(
-        &self,
+    fn alert_properties(
         alert: &DecamAlertForEnrichment,
         sso: Option<DecamSsoAssociation>,
     ) -> Result<DecamAlertProperties, EnrichmentWorkerError> {
@@ -693,4 +692,10 @@ impl DecamEnrichmentWorker {
             sso,
         })
     }
+}
+
+pub fn decam_alert_properties_without_sso(
+    alert: &DecamAlertForEnrichment,
+) -> Result<DecamAlertProperties, EnrichmentWorkerError> {
+    DecamEnrichmentWorker::alert_properties(alert, None)
 }

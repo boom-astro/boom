@@ -368,7 +368,7 @@ pub struct LsstCandidate {
 }
 
 impl LsstCandidate {
-    fn new(
+    pub(crate) fn new(
         dia_source: DiaSource,
         dia_object: Option<DiaObject>,
         observation_reason: Option<String>,
