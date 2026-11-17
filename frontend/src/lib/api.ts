@@ -588,15 +588,19 @@ export async function fetchCollectionStats(): Promise<CollectionStats> {
 
 export type LiveBin = {
   start: string;
-  n_alerts: number;
+  received: number;
+  processed: number;
+  latency_s: number | null;
+  latency_max_s: number | null;
 };
 
 export type LiveSurvey = {
   survey: string;
   start: string;
   end: string;
-  n_alerts: number;
-  latest: { observed_at: string; ingested_at: string | null } | null;
+  received: number;
+  processed: number;
+  last_received_at: string | null;
   bins: LiveBin[];
 };
 

@@ -11,6 +11,15 @@ const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 const CUMULATIVE_HEIGHT = 140;
 const BATCH_HEIGHT = 120;
+const LATENCY_HEIGHT = 96;
+const LATENCY_TICKS: [number, string][] = [
+  [1, "1 s"],
+  [10, "10 s"],
+  [60, "1 min"],
+  [600, "10 min"],
+  [3600, "1 h"],
+  [36_000, "10 h"],
+];
 const ORDER = ["ztf", "lsst", "decam", "winter"];
 
 const TELESCOPES = SITES.flatMap((site) => site.telescopes.map((telescope) => ({ ...telescope, site })));
@@ -24,6 +33,7 @@ type Lane = {
   label: string;
   color: string;
   total: number;
+  processed: number;
   bins: Map<number, LiveBin>;
   night: Interval | null;
   sky: Interval | null;
@@ -31,6 +41,12 @@ type Lane = {
 };
 
 const utc = (ms: number) => formatClock(ms, "UTC");
+
+function formatLatency(seconds: number): string {
+  if (seconds < 90) return `${seconds < 10 ? seconds.toFixed(1) : Math.round(seconds)} s`;
+  if (seconds < 90 * 60) return `${Math.round(seconds / 60)} min`;
+  return `${(seconds / 3600).toFixed(1)} h`;
+}
 
 const sumOf = (values: number[]) => values.reduce((sum, v) => sum + v, 0);
 
@@ -86,16 +102,16 @@ export default function LiveIngest({ data }: { data: LiveIngestData | null }) {
         const start = Date.parse(survey.start);
         const end = Date.parse(survey.end);
         const { lat, lon } = telescope.site;
-        const ingested = survey.latest?.ingested_at ?? survey.latest?.observed_at;
         return [{
           id: survey.survey,
           label: telescope.name,
           color: SURVEY_COLORS[survey.survey as keyof typeof SURVEY_COLORS] ?? telescope.color,
-          total: survey.n_alerts,
+          total: survey.received,
+          processed: survey.processed,
           bins: new Map(survey.bins.map((bin) => [Date.parse(bin.start), bin])),
           night: darkIntervals(start, end, lat, lon)[0] ?? null,
           sky: darkIntervals(start, end, lat, lon, 0)[0] ?? null,
-          lastIngest: ingested ? Date.parse(ingested) : null,
+          lastIngest: survey.last_received_at ? Date.parse(survey.last_received_at) : null,
         }];
       });
   }, [data]);
@@ -131,7 +147,7 @@ export default function LiveIngest({ data }: { data: LiveIngestData | null }) {
     const slots = [...new Set(shown.flatMap((lane) => [...lane.bins.keys()]))].sort((a, b) => a - b);
     const rows = slots.map((t) => ({
       t,
-      parts: shown.map((lane) => ({ lane, n: lane.bins.get(t)?.n_alerts ?? 0 })).filter((part) => part.n > 0),
+      parts: shown.map((lane) => ({ lane, n: lane.bins.get(t)?.received ?? 0 })).filter((part) => part.n > 0),
     })).map((row) => ({ ...row, total: sumOf(row.parts.map((part) => part.n)) }));
     const peak = rows.reduce<(typeof rows)[number] | null>((best, row) => (!best || row.total > best.total ? row : best), null);
     return { rows, peak };
@@ -146,7 +162,7 @@ export default function LiveIngest({ data }: { data: LiveIngestData | null }) {
     const points = [{ t: first, values: [...running] }];
     for (let t = first; t < last; t += binMs) {
       shown.forEach((lane, i) => {
-        running[i] += lane.bins.get(t)?.n_alerts ?? 0;
+        running[i] += lane.bins.get(t)?.received ?? 0;
       });
       points.push({ t: t + binMs, values: [...running] });
     }
@@ -162,6 +178,36 @@ export default function LiveIngest({ data }: { data: LiveIngestData | null }) {
     }).filter(({ lane }) => lane.total > 0);
     return { total, top: y(total), bands };
   }, [lanes, shown, binMs, from, to, span, width, now]);
+
+  const latency = useMemo(() => {
+    const values = shown.flatMap((lane) =>
+      [...lane.bins.values()].flatMap((bin) => (bin.latency_s && bin.latency_s > 0 ? [bin.latency_s] : [])),
+    );
+    if (!values.length) return null;
+    const lo = Math.log10(Math.min(1, ...values));
+    const hi = Math.log10(Math.max(60, ...values));
+    const y = (seconds: number) =>
+      LATENCY_HEIGHT - 4 - ((Math.log10(Math.max(seconds, 10 ** lo)) - lo) / (hi - lo)) * (LATENCY_HEIGHT - 10);
+    const x = (ms: number) => ((ms + binMs / 2 - from) / span) * width;
+    const series = shown.map((lane) => {
+      const runs: { t: number; seconds: number }[][] = [];
+      for (const [t, bin] of [...lane.bins.entries()].sort(([a], [b]) => a - b)) {
+        if (!bin.latency_s || bin.latency_s <= 0) continue;
+        const run = runs[runs.length - 1];
+        const previous = run?.[run.length - 1];
+        if (run && previous && t - previous.t === binMs) run.push({ t, seconds: bin.latency_s });
+        else runs.push([{ t, seconds: bin.latency_s }]);
+      }
+      return { lane, runs };
+    });
+    const gridlines = LATENCY_TICKS.filter(([seconds]) => {
+      const v = Math.log10(seconds);
+      return v >= lo && v <= hi;
+    });
+    return { y, x, series, gridlines };
+  }, [shown, from, span, width, binMs]);
+
+  const inProgress = sumOf(shown.map((lane) => lane.total - lane.processed));
 
   const label = shown.length === lanes.length ? "All surveys" : shown.map((lane) => lane.label).join(" + ") || "No survey";
   const nights = union(shown.flatMap((lane) => (lane.night ? [lane.night] : [])));
@@ -232,7 +278,7 @@ export default function LiveIngest({ data }: { data: LiveIngestData | null }) {
   if (!data) return <div className="shimmer h-87.5 w-full rounded-md" />;
 
   const hoveredSoFar = hover
-    ? sumOf(shown.map((lane) => sumOf([...lane.bins.entries()].filter(([t]) => t <= hover.slot).map(([, bin]) => bin.n_alerts))))
+    ? sumOf(shown.map((lane) => sumOf([...lane.bins.entries()].filter(([t]) => t <= hover.slot).map(([, bin]) => bin.received))))
     : 0;
 
   return (
@@ -246,7 +292,9 @@ export default function LiveIngest({ data }: { data: LiveIngestData | null }) {
         <span className="text-xl leading-tight font-semibold tabular-nums sm:text-2xl">
           {(cumulative?.total ?? 0).toLocaleString()}
         </span>
-        <span className="text-muted-foreground text-xs">alerts tonight</span>
+        <span className="text-muted-foreground text-xs">
+          alerts received tonight{inProgress > 0 ? `, ${inProgress.toLocaleString()} in progress` : ""}
+        </span>
         <div className="mt-2 flex flex-wrap gap-1.5">
           {lanes.map((lane) => {
             const on = selected.has(lane.id);
@@ -342,6 +390,61 @@ export default function LiveIngest({ data }: { data: LiveIngestData | null }) {
         {batches.peak && compact.format(batches.peak.total)}
       </div>
 
+      {latency && (
+        <>
+          <div className="flex min-w-0 flex-col justify-center" style={{ minHeight: LATENCY_HEIGHT }}>
+            <span className="text-sm font-medium">BOOM latency</span>
+            <span className="text-muted-foreground text-xs">arrival to enrichment</span>
+          </div>
+          <div className="relative" style={{ height: LATENCY_HEIGHT }} onPointerMove={track}>
+            <svg width={width} height={LATENCY_HEIGHT} className="absolute inset-0 overflow-visible">
+              {latency.gridlines.map(([seconds]) => (
+                <line
+                  key={seconds}
+                  x1={0}
+                  x2={width}
+                  y1={latency.y(seconds)}
+                  y2={latency.y(seconds)}
+                  stroke="var(--border)"
+                  strokeWidth={1}
+                />
+              ))}
+              {latency.series.map(({ lane, runs }) =>
+                runs.map((run) =>
+                  run.length > 1 ? (
+                    <polyline
+                      key={`${lane.id}-${run[0].t}`}
+                      points={run.map((p) => `${latency.x(p.t)},${latency.y(p.seconds)}`).join(" ")}
+                      fill="none"
+                      stroke={lane.color}
+                      strokeWidth={2}
+                      strokeLinejoin="round"
+                      strokeLinecap="round"
+                    />
+                  ) : (
+                    <circle
+                      key={`${lane.id}-${run[0].t}`}
+                      cx={latency.x(run[0].t)}
+                      cy={latency.y(run[0].seconds)}
+                      r={3}
+                      fill={lane.color}
+                    />
+                  ),
+                ),
+              )}
+            </svg>
+            {overlay()}
+          </div>
+          <div className="text-muted-foreground relative text-[11px] tabular-nums" style={{ height: LATENCY_HEIGHT }}>
+            {latency.gridlines.map(([seconds, text]) => (
+              <span key={seconds} className="absolute -translate-y-1/2 whitespace-nowrap" style={{ top: latency.y(seconds) }}>
+                {text}
+              </span>
+            ))}
+          </div>
+        </>
+      )}
+
       <div className="text-muted-foreground flex items-start text-[11px]">UTC</div>
       <div ref={axisRef} className="relative h-5">
         {ticks.filter((t) => !nowInView || Math.abs(t - now) / span * width > 40).map((t) => (
@@ -383,7 +486,10 @@ export default function LiveIngest({ data }: { data: LiveIngestData | null }) {
                 <span className="size-2.5 shrink-0 rounded-[3px]" style={{ background: lane.color }} />
                 <span className="text-muted-foreground">{lane.label}</span>
                 <span className="ml-auto font-mono font-medium tabular-nums">
-                  {bin ? bin.n_alerts.toLocaleString() : "–"}
+                  {bin ? bin.received.toLocaleString() : "–"}
+                </span>
+                <span className="text-muted-foreground w-12 text-right tabular-nums">
+                  {bin?.latency_s ? formatLatency(bin.latency_s) : ""}
                 </span>
               </div>
             );
