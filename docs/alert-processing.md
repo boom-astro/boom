@@ -166,8 +166,9 @@ the matching version in `DERIVATIONS`.** The components are deliberately coarse:
 | `villar_fit` | `villar_fit`, on a GPU build. Fitted by BOOM's own PSO, so a change to the fit or its `PsoConfig` belongs here rather than in a model hash |
 | `lightcurve_fits` | `arnett_fit`, `thermal_fit` and `gp2d_fit`, including a change to the pinned `lightcurve-fitting` revision that alters them |
 
-These are the ZTF worker's. The LSST, DECam and WINTER workers write
-`properties` only, so a set of theirs names no models.
+These are the ZTF worker's. The LSST, DECam and WINTER workers run no models,
+so a set of theirs names none. Besides `properties`, the LSST worker writes
+`gp2d_fit`.
 
 `villar_fit` is declared in `GPU_DERIVATIONS` rather than `DERIVATIONS`,
 because a CPU build writes no fit at all and so produces genuinely different

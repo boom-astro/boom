@@ -12,6 +12,9 @@ photometry up to the alert, plus the photometry of the matched LSST object),
 restricted to the points from 50 days before to 100 days after its brightest
 point. Alerts enriched before these fits were added lack their keys.
 
+LSST alerts get `gp2d_fit` only, from the LSST light curve plus the photometry
+of the matched ZTF object, over the same window.
+
 ## `arnett_fit`
 
 One sub-document per band, `g`, `r` and `i`, each fitted on its own in flux:

@@ -296,7 +296,7 @@ async fn create_mock_enriched_lsst_alert_with_matches(
         decam_match: None,
     };
 
-    let properties = enrichment_worker
+    let (properties, _) = enrichment_worker
         .get_alert_properties(&lsst_alert_for_enrichment)
         .await
         .unwrap();
