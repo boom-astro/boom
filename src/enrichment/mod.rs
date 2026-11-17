@@ -7,10 +7,12 @@ pub mod version;
 mod winter;
 mod ztf;
 pub use base::{fetch_alerts, run_enrichment_worker, EnrichmentWorker, EnrichmentWorkerError};
-pub use decam::{DecamAlertProperties, DecamEnrichmentWorker, DecamSsoAssociation};
+pub use decam::{
+    add_decam_match, DecamAlertProperties, DecamEnrichmentWorker, DecamSsoAssociation,
+};
 pub use lsst::{
-    create_lsst_alert_pipeline, LsstAlertForEnrichment, LsstAlertProperties, LsstEnrichmentWorker,
-    LsstMatch, LsstPhotometry, LsstSurveyMatches,
+    create_lsst_alert_pipeline, lsst_alert_properties, LsstAlertForEnrichment, LsstAlertProperties,
+    LsstEnrichmentWorker, LsstMatch, LsstPhotometry, LsstSurveyMatches,
 };
 pub use winter::{
     create_winter_alert_pipeline, WinterAlertForEnrichment, WinterAlertProperties,
