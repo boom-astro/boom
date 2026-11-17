@@ -2,14 +2,13 @@ use super::STATS_COLLECTION;
 use crate::api::models::response;
 use crate::api::routes::babamul::{BabamulAcl, BabamulUser};
 use crate::utils::enums::Survey;
+use crate::utils::ingest_stats::{stat_id, INGEST_STATS_COLLECTION};
 use actix_web::{get, web, HttpResponse};
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use futures::TryStreamExt;
-use mongodb::{
-    bson::{doc, Document},
-    Collection, Database,
-};
+use mongodb::{bson::doc, Collection, Database};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::sync::LazyLock;
 use tokio::sync::Mutex;
 use utoipa::ToSchema;
@@ -32,13 +31,10 @@ struct LiveIngestCache {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct LiveBin {
     pub start: DateTime<Utc>,
-    pub n_alerts: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
-pub struct LatestAlert {
-    pub observed_at: DateTime<Utc>,
-    pub ingested_at: Option<DateTime<Utc>>,
+    pub received: u64,
+    pub processed: u64,
+    pub latency_s: Option<f64>,
+    pub latency_max_s: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -46,8 +42,9 @@ pub struct LiveSurvey {
     pub survey: String,
     pub start: DateTime<Utc>,
     pub end: DateTime<Utc>,
-    pub n_alerts: u64,
-    pub latest: Option<LatestAlert>,
+    pub received: u64,
+    pub processed: u64,
+    pub last_received_at: Option<DateTime<Utc>>,
     pub bins: Vec<LiveBin>,
 }
 
@@ -60,21 +57,24 @@ pub struct LiveIngest {
 }
 
 #[derive(Debug, Deserialize)]
-struct BinCount {
-    #[serde(rename = "_id")]
-    bin: f64,
-    n: u64,
+struct MinuteRecord {
+    minute: i64,
+    #[serde(default)]
+    received: u64,
+    #[serde(default)]
+    processed: u64,
+    #[serde(default)]
+    latency_sum: f64,
+    #[serde(default)]
+    latency_max: f64,
 }
 
-#[derive(Debug, Deserialize)]
-struct SampleCandidate {
-    jd: f64,
-}
-
-#[derive(Debug, Deserialize)]
-struct Sample {
-    candidate: SampleCandidate,
-    created_at: Option<f64>,
+#[derive(Default)]
+struct BinTotals {
+    received: u64,
+    processed: u64,
+    latency_sum: f64,
+    latency_max: f64,
 }
 
 fn current_night(survey: &Survey, now: DateTime<Utc>) -> NaiveDate {
@@ -86,71 +86,59 @@ fn current_night(survey: &Survey, now: DateTime<Utc>) -> NaiveDate {
     }
 }
 
-fn jd_to_utc(jd: f64) -> DateTime<Utc> {
-    flare::Time::from_jd(jd).to_utc()
-}
-
 async fn count_survey(
     db: &Database,
     survey: &Survey,
     date: &NaiveDate,
 ) -> Result<LiveSurvey, mongodb::error::Error> {
     let (start, end) = survey.night_window(date);
-    let (start_jd, _) = survey.night_jd_window(date);
-    let bin_days = BIN_MINUTES as f64 / 1440.0;
-    let n_bins = (end - start).num_minutes() as f64 / BIN_MINUTES as f64;
-    let window = |from: f64, to: f64| {
-        let mut filter = doc! { "candidate.jd": { "$gte": from, "$lt": to } };
-        if *survey == Survey::Ztf {
-            filter.insert("candidate.programid", 1);
-        }
-        filter
-    };
-
-    let alerts: Collection<Document> = db.collection(&format!("{}_alerts", survey));
-    let mut counts: Vec<(i64, u64)> = alerts
-        .aggregate(vec![
-            doc! { "$match": window(start_jd, start_jd + n_bins * bin_days) },
-            doc! { "$group": {
-                "_id": { "$floor": { "$divide": [
-                    { "$subtract": ["$candidate.jd", start_jd] },
-                    bin_days,
-                ] } },
-                "n": { "$sum": 1 },
-            } },
-        ])
-        .with_type::<BinCount>()
+    let name = survey.as_str();
+    let collection: Collection<MinuteRecord> = db.collection(INGEST_STATS_COLLECTION);
+    let records: Vec<MinuteRecord> = collection
+        .find(doc! { "_id": {
+            "$gte": stat_id(name, start.timestamp_millis()),
+            "$lt": stat_id(name, end.timestamp_millis()),
+        } })
         .await?
-        .map_ok(|count| (count.bin as i64, count.n))
         .try_collect()
         .await?;
-    counts.sort_unstable();
 
-    let samples: Collection<Sample> = db.collection(&format!("{}_alerts", survey));
-    let latest = samples
-        .find_one(window(start_jd, start_jd + n_bins * bin_days))
-        .sort(doc! { "candidate.jd": -1 })
-        .projection(doc! { "_id": 0, "candidate.jd": 1, "created_at": 1 })
-        .await?
-        .map(|alert| LatestAlert {
-            observed_at: jd_to_utc(alert.candidate.jd),
-            ingested_at: alert.created_at.map(jd_to_utc),
-        });
+    let bin_ms = BIN_MINUTES as i64 * 60_000;
+    let mut totals: BTreeMap<i64, BinTotals> = BTreeMap::new();
+    for record in &records {
+        let bin = (record.minute - start.timestamp_millis()).div_euclid(bin_ms);
+        let total = totals.entry(bin).or_default();
+        total.received += record.received;
+        total.processed += record.processed;
+        total.latency_sum += record.latency_sum;
+        total.latency_max = total.latency_max.max(record.latency_max);
+    }
 
-    let bins = counts
+    let last_received_at = records
         .iter()
-        .map(|&(bin, n_alerts)| LiveBin {
+        .filter(|record| record.received > 0)
+        .map(|record| record.minute)
+        .max()
+        .and_then(DateTime::<Utc>::from_timestamp_millis);
+
+    let bins: Vec<LiveBin> = totals
+        .into_iter()
+        .map(|(bin, total)| LiveBin {
             start: start + Duration::minutes(bin * BIN_MINUTES as i64),
-            n_alerts,
+            received: total.received,
+            processed: total.processed,
+            latency_s: (total.processed > 0).then(|| total.latency_sum / total.processed as f64),
+            latency_max_s: (total.processed > 0).then_some(total.latency_max),
         })
         .collect();
 
     Ok(LiveSurvey {
-        survey: survey.as_str().to_lowercase(),
+        survey: name.to_lowercase(),
         start,
         end,
-        n_alerts: counts.iter().map(|(_, n)| n).sum(),
-        latest,
+        received: bins.iter().map(|bin| bin.received).sum(),
+        processed: bins.iter().map(|bin| bin.processed).sum(),
+        last_received_at,
         bins,
     })
 }
@@ -188,7 +176,7 @@ async fn read_cache(collection: &Collection<LiveIngestCache>) -> Option<LiveInge
         .map(|cache| cache.live)
 }
 
-/// Tonight's alerts per survey in 10-minute bins and the latest alert, cached one minute.
+/// Alerts BOOM received tonight per survey in 10-minute bins, with its processing latency, cached one minute.
 #[utoipa::path(
     get,
     path = "/babamul/stats/live",
