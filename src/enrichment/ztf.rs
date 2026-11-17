@@ -243,14 +243,17 @@ impl ZtfPhotometry {
         }
     }
 
-    pub fn to_gp_point(&self) -> GpPoint {
-        GpPoint {
+    pub fn to_gp_point(&self) -> Option<GpPoint> {
+        if self.magpsf.is_some() && self.flux.is_some_and(|f| f < 0.0) {
+            return None;
+        }
+        Some(GpPoint {
             jd: self.jd,
             magpsf: self.magpsf,
             sigmapsf: self.sigmapsf,
             diffmaglim: self.diffmaglim,
             band: self.band.clone(),
-        }
+        })
     }
 
     pub fn to_positive_mag(&self) -> Option<PhotometryMag> {
@@ -889,7 +892,7 @@ fn gp_observations(alert: &ZtfAlertForEnrichment, config: &rust_gp::GpConfig) ->
         .chain(&alert.prv_nondetections)
         .chain(&alert.fp_hists)
         .filter(|p| p.jd <= jd)
-        .map(ZtfPhotometry::to_gp_point);
+        .filter_map(ZtfPhotometry::to_gp_point);
     gp_fit::observations(points, config)
 }
 

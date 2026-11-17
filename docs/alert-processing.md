@@ -165,6 +165,7 @@ the matching version in `DERIVATIONS`.** The components are deliberately coarse:
 | `applecider_postprocess` | `applecider_fusion`, `applecider_outputs` and the fusion embedding, which BOOM derives from the model's `alpha` |
 | `villar_fit` | `villar_fit`, on a GPU build. Fitted by BOOM's own PSO, so a change to the fit or its `PsoConfig` belongs here rather than in a model hash |
 | `lightcurve_fits` | `arnett_fit` and `thermal_fit`, including a change to the pinned `lightcurve-fitting` revision that alters them |
+| `gp_fit` | `gp_fit`, including a change to the pinned `rust-gp` revision that alters it |
 
 These are the ZTF worker's. The LSST, DECam and WINTER workers write
 `properties` only, so a set of theirs names no models.

@@ -156,8 +156,6 @@ fn to_document(quality: &FitQuality, features: &[BandFeatures]) -> Document {
         .collect();
 
     let mut doc = doc! {
-        // "chi2": quality.chi2,
-        // "dof": quality.dof,
         "reduced_chi2": quality.reduced_chi2,
     };
     for (name, value) in fields {
