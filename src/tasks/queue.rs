@@ -372,17 +372,22 @@ pub async fn get(db: &Database, task_id: &str) -> Result<Option<Task>, QueueErro
     Ok(collection(db).find_one(doc! { "_id": task_id }).await?)
 }
 
-/// Most recent runs first, optionally filtered by task type.
+/// Runs, most recent first. An empty `statuses` means any status.
 pub async fn list(
     db: &Database,
     task_type: Option<&str>,
+    statuses: &[TaskStatus],
     limit: i64,
 ) -> Result<Vec<Task>, QueueError> {
     use futures::TryStreamExt;
-    let filter: Document = match task_type {
-        Some(t) => doc! { "task_type": t },
-        None => doc! {},
-    };
+    let mut filter = Document::new();
+    if let Some(t) = task_type {
+        filter.insert("task_type", t);
+    }
+    if !statuses.is_empty() {
+        let statuses: Vec<&str> = statuses.iter().map(TaskStatus::as_str).collect();
+        filter.insert("status", doc! { "$in": statuses });
+    }
     let cursor = collection(db)
         .find(filter)
         .sort(doc! { "requested_at": -1 })
@@ -410,6 +415,51 @@ pub async fn find_active(
     Ok(collection(db).find_one(filter).await?)
 }
 
+/// Values of one parameter across every run of a task type that is still
+/// queued or running.
+///
+/// For deciding whether a thing is being worked on right now, which is a
+/// different question from what state it is in. A catalog that is half
+/// ingested because a run is part way through it and one that is half ingested
+/// because a run died look identical in the catalog's own state document, and
+/// only one of them is something to go and do anything about.
+pub async fn active_param_values(
+    db: &Database,
+    task_type: &str,
+    param: &str,
+) -> Result<std::collections::HashSet<String>, QueueError> {
+    // A running run counts only while its lease is live. A worker that died
+    // leaves its run `Running` until `requeue_expired` gets to it, and that
+    // runs in the task worker's between-run loop -- so with no worker up, or
+    // with every worker busy, an abandoned run would go on claiming to be
+    // working on something indefinitely. The lease is the thing that actually
+    // expires on its own.
+    let filter = doc! {
+        "task_type": task_type,
+        "$or": [
+            { "status": TaskStatus::Queued.as_str() },
+            {
+                "status": TaskStatus::Running.as_str(),
+                "lease_expires_at": { "$gt": now() },
+            },
+        ],
+        format!("params.{param}"): { "$type": "string" },
+    };
+    let mut cursor = collection(db).find(filter).await?;
+    let mut values = std::collections::HashSet::new();
+    while cursor.advance().await? {
+        if let Some(value) = cursor
+            .deserialize_current()?
+            .params
+            .get(param)
+            .and_then(|v| v.as_str())
+        {
+            values.insert(value.to_string());
+        }
+    }
+    Ok(values)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -425,6 +475,7 @@ mod tests {
             actor: Actor {
                 user_id: "test".into(),
                 username: "test".into(),
+                email: None,
             },
             trigger: Trigger::Api,
             requested_at: now(),
@@ -436,6 +487,7 @@ mod tests {
             cancel_requested: false,
             error: None,
             attempts: 0,
+            resubmitted_from: None,
         }
     }
 
@@ -482,6 +534,19 @@ mod tests {
         let _ = db
             .collection::<Task>(TASKS_COLLECTION)
             .delete_many(doc! { "task_type": task_type })
+            .await;
+    }
+
+    /// Clean up one run by id.
+    ///
+    /// For the two tests here that use a *registered* task type rather than a
+    /// unique one: deleting every run of `catalog_ingest` reaches runs this
+    /// module did not create, and `catalogs::status` reads that type from the
+    /// same database.
+    async fn cleanup_run(db: &Database, id: &str) {
+        let _ = db
+            .collection::<Task>(TASKS_COLLECTION)
+            .delete_one(doc! { "_id": id })
             .await;
     }
 
@@ -633,7 +698,7 @@ mod tests {
         let reaped = get(&db, &task.id).await.unwrap().unwrap();
         assert_eq!(reaped.status, TaskStatus::Queued);
         assert!(reaped.worker.is_none());
-        cleanup(&db, &task_type).await;
+        cleanup_run(&db, &task.id).await;
     }
 
     #[tokio::test]
@@ -855,6 +920,36 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+        cleanup(&db, &task_type).await;
+    }
+
+    #[tokio::test]
+    async fn listing_filters_by_status() {
+        let db = crate::conf::get_test_db().await;
+        let task_type = unique_type();
+        let waiting = queued(&task_type, serde_json::json!({}));
+        let failed = queued(&task_type, serde_json::json!({}));
+        submit(&db, &waiting).await.unwrap();
+        submit(&db, &failed).await.unwrap();
+        finish(&db, &failed.id, TaskStatus::Failed, Some("boom".into()))
+            .await
+            .unwrap();
+
+        let ids = |runs: Vec<Task>| runs.into_iter().map(|t| t.id).collect::<Vec<_>>();
+        let only_failed = list(&db, Some(&task_type), &[TaskStatus::Failed], 10)
+            .await
+            .unwrap();
+        assert_eq!(ids(only_failed), vec![failed.id.clone()]);
+        let active = list(
+            &db,
+            Some(&task_type),
+            &[TaskStatus::Queued, TaskStatus::Running],
+            10,
+        )
+        .await
+        .unwrap();
+        assert_eq!(ids(active), vec![waiting.id.clone()]);
+        assert_eq!(list(&db, Some(&task_type), &[], 10).await.unwrap().len(), 2);
         cleanup(&db, &task_type).await;
     }
 }

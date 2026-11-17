@@ -1,12 +1,15 @@
+mod askap;
 pub mod babamul;
 mod base;
 mod decam;
 mod lsst;
 pub mod models;
+pub mod version;
 mod winter;
 mod ztf;
+pub use askap::{AskapAlertProperties, AskapEnrichmentWorker};
 pub use base::{fetch_alerts, run_enrichment_worker, EnrichmentWorker, EnrichmentWorkerError};
-pub use decam::{DecamAlertProperties, DecamEnrichmentWorker};
+pub use decam::{DecamAlertProperties, DecamEnrichmentWorker, DecamSsoAssociation};
 pub use lsst::{
     create_lsst_alert_pipeline, LsstAlertForEnrichment, LsstAlertProperties, LsstEnrichmentWorker,
     LsstMatch, LsstPhotometry, LsstSurveyMatches,

@@ -489,11 +489,13 @@ mod tests {
         let database: Database = get_test_db_api().await;
         let token = create_admin_token(&database).await;
         let auth_app_data = get_test_auth(&database).await.unwrap();
+        let config = AppConfig::from_test_config().unwrap();
 
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(database.clone()))
                 .app_data(web::Data::new(auth_app_data.clone()))
+                .app_data(web::Data::new(config))
                 .wrap(from_fn(auth_middleware))
                 .service(routes::filters::get_filter_schema),
         )
@@ -521,6 +523,15 @@ mod tests {
         assert!(data["type"] == "record");
         assert!(data["name"] == "ZtfAlertToFilter");
         assert!(data["fields"].is_array());
+        let names: Vec<&str> = data["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|f| f["name"].as_str())
+            .collect();
+        for name in ["villar_fit", "sso_history", "cross_matches"] {
+            assert!(names.contains(&name), "ZTF schema has no {name}");
+        }
 
         // LSST schema test
         let req = test::TestRequest::get()

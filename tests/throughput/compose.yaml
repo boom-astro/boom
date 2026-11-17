@@ -99,6 +99,7 @@ services:
     image: boom-astro/boom:latest
     pull_policy: build
     hostname: producer
+    # The only build of this image: consumer and scheduler reuse it.
     build:
       dockerfile: ${BOOM_REPO_ROOT:?Variable not set}/Dockerfile
       context: ${BOOM_REPO_ROOT:?Variable not set}
@@ -123,12 +124,8 @@ services:
       - ${BOOM_REPO_ROOT:?Variable not set}/tests/throughput/config.yaml:/app/config.yaml
   consumer:
     image: boom-astro/boom:latest
-    pull_policy: build
+    pull_policy: never
     hostname: consumer
-    build:
-      dockerfile: ${BOOM_REPO_ROOT:?Variable not set}/Dockerfile
-      context: ${BOOM_REPO_ROOT:?Variable not set}
-      pull: false
     networks:
       - boom
     # have it sleep 5 seconds to allow kafka to finish producing
@@ -153,12 +150,8 @@ services:
       - ${BOOM_REPO_ROOT:?Variable not set}/tests/throughput/config.yaml:/app/config.yaml
   scheduler:
     image: boom-astro/boom:latest
-    pull_policy: build
+    pull_policy: never
     hostname: scheduler
-    build:
-      dockerfile: ${BOOM_REPO_ROOT:?Variable not set}/Dockerfile
-      context: ${BOOM_REPO_ROOT:?Variable not set}
-      pull: false
     command:
       - /app/scheduler
       - ztf

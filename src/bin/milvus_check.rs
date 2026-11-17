@@ -45,10 +45,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let config = AppConfig::from_path(&cli.config)?;
     let milvus_config = &config.milvus;
 
-    if !milvus_config.enabled {
+    if !milvus_config.is_enabled() {
         return Err(
-            "milvus is disabled; set BOOM_MILVUS__ENABLED=true (and the credentials) to use it"
-                .into(),
+            "milvus is disabled; set milvus.read_embeddings (and the credentials) to use it".into(),
+        );
+    }
+    if cli.create_collection && !milvus_config.write_embeddings {
+        return Err(
+            "--create-collection needs milvus.write_embeddings; this deployment only reads".into(),
         );
     }
 

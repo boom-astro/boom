@@ -111,6 +111,16 @@ impl TaskContext {
         self.canceled.load(Ordering::Relaxed)
     }
 
+    /// A handle on this run's cancellation flag, for work that must be spawned
+    /// rather than borrowed.
+    ///
+    /// `is_canceled` is enough wherever the work can hold `&self`. A
+    /// `tokio::spawn`ed task cannot, and without this it never observes
+    /// cancellation at all.
+    pub fn cancel_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.canceled)
+    }
+
     /// Log a line to both the run's log and the process log.
     ///
     /// Both, deliberately: the run log is what the admin page tails, and the

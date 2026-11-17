@@ -11,7 +11,8 @@
 # Then point BOOM at it in .env (local Milvus is plaintext gRPC on 19530 with
 # auth disabled and the built-in `default` database):
 #
-#   BOOM_MILVUS__ENABLED=true
+#   BOOM_MILVUS__READ_EMBEDDINGS=true
+#   BOOM_MILVUS__WRITE_EMBEDDINGS=true
 #   BOOM_MILVUS__HOST=localhost
 #   BOOM_MILVUS__PORT=19530
 #   BOOM_MILVUS__TLS=false

@@ -1271,10 +1271,9 @@ fn default_gpu_device_ids() -> Vec<i32> {
 /// with an administrative/user account supplied entirely through the environment.
 #[derive(Deserialize, Debug, Clone)]
 pub struct MilvusConfig {
-    /// When false, BOOM never opens a Milvus connection. Defaults to false so
-    /// that existing deployments are unaffected.
+    /// Whether the API serves the embedding count and similarity search.
     #[serde(default)]
-    pub enabled: bool,
+    pub read_embeddings: bool,
     #[serde(default = "default_milvus_host")]
     pub host: String,
     #[serde(default = "default_milvus_port")]
@@ -1295,10 +1294,25 @@ pub struct MilvusConfig {
     /// Per-RPC timeout in seconds.
     #[serde(default = "default_milvus_timeout_seconds")]
     pub timeout_seconds: u64,
+    /// Timeout for opening a connection, kept short so an unreachable server
+    /// fails a request quickly while a slow search still has `timeout_seconds`.
+    #[serde(default = "default_milvus_connect_timeout_seconds")]
+    pub connect_timeout_seconds: u64,
+    /// Whether ZTF enrichment upserts embeddings and the scheduler provisions
+    /// the collection. The collection is shared, so only its owner sets this.
+    #[serde(default)]
+    pub write_embeddings: bool,
     #[serde(default)]
     pub collection: MilvusCollectionConfig,
     #[serde(default)]
     pub backup_queue: MilvusBackupQueueConfig,
+}
+
+impl MilvusConfig {
+    /// Whether this deployment connects to Milvus at all.
+    pub fn is_enabled(&self) -> bool {
+        self.read_embeddings || self.write_embeddings
+    }
 }
 
 /// Where embeddings wait while Milvus is unreachable, so an outage costs
@@ -1348,6 +1362,10 @@ fn default_milvus_timeout_seconds() -> u64 {
     30
 }
 
+fn default_milvus_connect_timeout_seconds() -> u64 {
+    5
+}
+
 fn default_milvus_backup_queue_enabled() -> bool {
     true
 }
@@ -1383,7 +1401,7 @@ fn default_milvus_object_id_max_length() -> i64 {
 impl Default for MilvusConfig {
     fn default() -> Self {
         MilvusConfig {
-            enabled: false,
+            read_embeddings: false,
             host: default_milvus_host(),
             port: default_milvus_port(),
             tls: default_milvus_tls(),
@@ -1391,6 +1409,8 @@ impl Default for MilvusConfig {
             password: String::new(),
             database: String::new(),
             timeout_seconds: default_milvus_timeout_seconds(),
+            connect_timeout_seconds: default_milvus_connect_timeout_seconds(),
+            write_embeddings: false,
             collection: MilvusCollectionConfig::default(),
             backup_queue: MilvusBackupQueueConfig::default(),
         }
@@ -1445,6 +1465,11 @@ pub struct LinkerConfig {
     /// Minimum drb for a detection to be searched.
     #[serde(default = "default_linker_drb")]
     pub drb: f64,
+    /// Minimum reliability for an LSST detection to be searched.
+    #[serde(default = "default_linker_lsst_min_reliability")]
+    pub lsst_min_reliability: f64,
+    #[serde(default = "default_linker_surveys")]
+    pub surveys: Vec<Survey>,
     /// Link tracklets across nights.
     #[serde(default = "default_linker_pass")]
     pub link: bool,
@@ -1455,6 +1480,10 @@ pub struct LinkerConfig {
     /// designation as a recovery rather than as a discovery candidate.
     #[serde(default = "default_linker_pass")]
     pub match_known: bool,
+    #[serde(default = "default_linker_pass")]
+    pub reject_known: bool,
+    #[serde(default)]
+    pub flag_satellites: bool,
     /// Store tracks and stamp their alerts. Off, a run reports what it would
     /// store and writes nothing.
     #[serde(default = "default_linker_pass")]
@@ -1471,12 +1500,41 @@ pub struct LinkerConfig {
     pub attach: bool,
     #[serde(default = "default_linker_attach_lookback_nights")]
     pub attach_lookback_nights: u32,
+    /// Also link and recover unbound orbits, up to this hyperbolic excess
+    /// speed, km/s.
+    #[serde(default)]
+    pub max_vinf_km_s: f64,
+    /// Largest residual an unbound orbit may leave and stand, arcseconds. A
+    /// track fitting worse keeps its bound fit if that passes, or is dropped.
+    #[serde(default = "default_linker_max_unbound_rms_arcsec")]
+    pub max_unbound_rms_arcsec: f64,
+    #[serde(default)]
+    pub fast: bool,
+    #[serde(default = "default_linker_fast_window_nights")]
+    pub fast_window_nights: u32,
+    #[serde(default = "default_linker_fast_min_rate")]
+    pub fast_min_rate_deg_per_day: f64,
+    #[serde(default = "default_linker_fast_max_rate")]
+    pub fast_max_rate_deg_per_day: f64,
+    #[serde(default = "default_linker_fast_dense_detections")]
+    pub fast_dense_detections: usize,
+    #[serde(default = "default_linker_fast_dense_max_rate")]
+    pub fast_dense_max_rate_deg_per_day: f64,
+    #[serde(default)]
+    pub fast_live_every_minutes: u32,
+    #[serde(default)]
+    pub fast_single_night: bool,
+    #[serde(default = "default_linker_fast_min_neo_score")]
+    pub fast_min_neo_score: f64,
 }
 
 impl LinkerConfig {
     /// Settings no night could be searched with, which would otherwise shift
     /// or empty every window without saying so.
     pub fn validate(&self) -> Result<(), String> {
+        if self.surveys.is_empty() {
+            return Err("surveys must name at least one survey".to_string());
+        }
         if self.run_after_utc_hour > 23 {
             return Err(format!(
                 "run_after_utc_hour is {}, not an hour of the day",
@@ -1495,6 +1553,50 @@ impl LinkerConfig {
         if !(0.0..=1.0).contains(&self.drb) {
             return Err(format!("drb is {}, but scores run from 0 to 1", self.drb));
         }
+        if !(0.0..=1.0).contains(&self.lsst_min_reliability) {
+            return Err(format!(
+                "lsst_min_reliability is {}, but scores run from 0 to 1",
+                self.lsst_min_reliability
+            ));
+        }
+        if !(0.0..f64::INFINITY).contains(&self.max_vinf_km_s) {
+            return Err(format!(
+                "max_vinf_km_s is {}, but must be zero or a positive speed",
+                self.max_vinf_km_s
+            ));
+        }
+        if !self.max_unbound_rms_arcsec.is_finite() || self.max_unbound_rms_arcsec <= 0.0 {
+            return Err(format!(
+                "max_unbound_rms_arcsec is {}, but must be a positive residual",
+                self.max_unbound_rms_arcsec
+            ));
+        }
+        if self.fast_window_nights == 0 || self.fast_window_nights > self.window_nights {
+            return Err(format!(
+                "fast_window_nights is {}, but must be between 1 and window_nights ({})",
+                self.fast_window_nights, self.window_nights
+            ));
+        }
+        if !(self.fast_min_rate_deg_per_day > 0.0
+            && self.fast_min_rate_deg_per_day < self.fast_max_rate_deg_per_day)
+        {
+            return Err(format!(
+                "fast rates run from {} to {} deg/day, which is no range",
+                self.fast_min_rate_deg_per_day, self.fast_max_rate_deg_per_day
+            ));
+        }
+        if self.fast_dense_max_rate_deg_per_day <= self.fast_min_rate_deg_per_day {
+            return Err(format!(
+                "fast_dense_max_rate_deg_per_day is {}, but must exceed fast_min_rate_deg_per_day ({})",
+                self.fast_dense_max_rate_deg_per_day, self.fast_min_rate_deg_per_day
+            ));
+        }
+        if !(0.0..=100.0).contains(&self.fast_min_neo_score) {
+            return Err(format!(
+                "fast_min_neo_score is {}, not a digest2 score from 0 to 100",
+                self.fast_min_neo_score
+            ));
+        }
         Ok(())
     }
 }
@@ -1506,20 +1608,63 @@ impl Default for LinkerConfig {
             thor_window_nights: default_linker_thor_window_nights(),
             run_after_utc_hour: default_linker_run_after_utc_hour(),
             drb: default_linker_drb(),
+            lsst_min_reliability: default_linker_lsst_min_reliability(),
+            surveys: default_linker_surveys(),
             link: default_linker_pass(),
             thor: default_linker_pass(),
             match_known: default_linker_pass(),
+            reject_known: default_linker_pass(),
+            flag_satellites: false,
             persist: default_linker_pass(),
             recall: default_linker_pass(),
             recall_window_nights: default_linker_recall_window_nights(),
             attach: default_linker_pass(),
             attach_lookback_nights: default_linker_attach_lookback_nights(),
+            max_vinf_km_s: 0.0,
+            max_unbound_rms_arcsec: default_linker_max_unbound_rms_arcsec(),
+            fast: false,
+            fast_window_nights: default_linker_fast_window_nights(),
+            fast_min_rate_deg_per_day: default_linker_fast_min_rate(),
+            fast_max_rate_deg_per_day: default_linker_fast_max_rate(),
+            fast_dense_detections: default_linker_fast_dense_detections(),
+            fast_dense_max_rate_deg_per_day: default_linker_fast_dense_max_rate(),
+            fast_live_every_minutes: 0,
+            fast_single_night: false,
+            fast_min_neo_score: default_linker_fast_min_neo_score(),
         }
     }
 }
 
+fn default_linker_max_unbound_rms_arcsec() -> f64 {
+    0.5
+}
+
 fn default_linker_attach_lookback_nights() -> u32 {
     60
+}
+
+fn default_linker_fast_window_nights() -> u32 {
+    7
+}
+
+fn default_linker_fast_min_rate() -> f64 {
+    1.0
+}
+
+fn default_linker_fast_max_rate() -> f64 {
+    25.0
+}
+
+fn default_linker_fast_dense_detections() -> usize {
+    10_000
+}
+
+fn default_linker_fast_min_neo_score() -> f64 {
+    90.0
+}
+
+fn default_linker_fast_dense_max_rate() -> f64 {
+    5.0
 }
 
 fn default_linker_recall_window_nights() -> u32 {
@@ -1542,8 +1687,121 @@ fn default_linker_drb() -> f64 {
     0.8
 }
 
+fn default_linker_lsst_min_reliability() -> f64 {
+    0.5
+}
+
+fn default_linker_surveys() -> Vec<Survey> {
+    vec![Survey::Ztf]
+}
+
 fn default_linker_pass() -> bool {
     true
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct TnsConfig {
+    #[serde(default = "default_tns_base_url")]
+    pub base_url: String,
+    #[serde(default)]
+    pub bot_id: String,
+    #[serde(default)]
+    pub bot_name: String,
+    #[serde(default)]
+    pub api_key: String,
+    #[serde(default = "default_tns_sync_every_minutes")]
+    pub sync_every_minutes: u64,
+    #[serde(default = "default_tns_full_sync_every_hours")]
+    pub full_sync_every_hours: u64,
+    #[serde(default)]
+    pub photometry: TnsPhotometryConfig,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct TnsPhotometryConfig {
+    #[serde(default = "default_tns_photometry_every_minutes")]
+    pub every_minutes: u64,
+    #[serde(default = "default_tns_photometry_max_distance_mpc")]
+    pub max_distance_mpc: f64,
+    #[serde(default = "default_tns_photometry_max_age_days")]
+    pub max_age_days: f64,
+    #[serde(default = "default_tns_photometry_refresh_hours")]
+    pub refresh_hours: f64,
+    #[serde(default = "default_tns_photometry_max_objects")]
+    pub max_objects: usize,
+}
+
+impl Default for TnsConfig {
+    fn default() -> Self {
+        TnsConfig {
+            base_url: default_tns_base_url(),
+            bot_id: String::new(),
+            bot_name: String::new(),
+            api_key: String::new(),
+            sync_every_minutes: default_tns_sync_every_minutes(),
+            full_sync_every_hours: default_tns_full_sync_every_hours(),
+            photometry: TnsPhotometryConfig::default(),
+        }
+    }
+}
+
+impl Default for TnsPhotometryConfig {
+    fn default() -> Self {
+        TnsPhotometryConfig {
+            every_minutes: default_tns_photometry_every_minutes(),
+            max_distance_mpc: default_tns_photometry_max_distance_mpc(),
+            max_age_days: default_tns_photometry_max_age_days(),
+            refresh_hours: default_tns_photometry_refresh_hours(),
+            max_objects: default_tns_photometry_max_objects(),
+        }
+    }
+}
+
+impl TnsConfig {
+    pub fn has_credentials(&self) -> bool {
+        [&self.bot_id, &self.bot_name, &self.api_key]
+            .iter()
+            .all(|value| !value.trim().is_empty())
+    }
+
+    pub fn has_partial_credentials(&self) -> bool {
+        !self.has_credentials()
+            && [&self.bot_id, &self.bot_name, &self.api_key]
+                .iter()
+                .any(|value| !value.trim().is_empty())
+    }
+}
+
+fn default_tns_base_url() -> String {
+    "https://www.wis-tns.org".to_string()
+}
+
+fn default_tns_sync_every_minutes() -> u64 {
+    60
+}
+
+fn default_tns_full_sync_every_hours() -> u64 {
+    24
+}
+
+fn default_tns_photometry_every_minutes() -> u64 {
+    360
+}
+
+fn default_tns_photometry_max_distance_mpc() -> f64 {
+    200.0
+}
+
+fn default_tns_photometry_max_age_days() -> f64 {
+    60.0
+}
+
+fn default_tns_photometry_refresh_hours() -> f64 {
+    24.0
+}
+
+fn default_tns_photometry_max_objects() -> usize {
+    250
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -1569,6 +1827,8 @@ pub struct AppConfig {
     pub host_galaxy: HostGalaxyConfig,
     #[serde(default)]
     pub linker: LinkerConfig,
+    #[serde(default)]
+    pub tns: TnsConfig,
     pub cutouts_storage: CutoutsStorage,
 }
 
@@ -1585,23 +1845,7 @@ impl AppConfig {
 
     #[instrument(err)]
     pub fn from_test_config() -> Result<Self, BoomConfigError> {
-        let mut current_dir = std::env::current_dir().expect("Failed to get current directory");
-        let test_config_path = loop {
-            let tests_dir = current_dir.join("tests");
-            let test_config = tests_dir.join("config.test.yaml");
-
-            if test_config.exists() {
-                break test_config;
-            }
-
-            if let Some(parent) = current_dir.parent() {
-                current_dir = parent.to_path_buf();
-            } else {
-                panic!("Could not find workspace root with tests/config.test.yaml");
-            }
-        };
-
-        load_config(Some(test_config_path.to_str().expect("Invalid path")))
+        load_config(Some(&test_config_path()))
     }
 
     /// Validate that all required secrets are present
@@ -1643,26 +1887,12 @@ impl AppConfig {
             }
         }
 
-        // Milvus settings are only required when the integration is switched on,
-        // so that deployments not using it need no extra configuration.
-        if self.milvus.enabled {
-            if self.milvus.username.is_empty() {
-                return Err(
-                    "Milvus username must be set via BOOM_MILVUS__USERNAME environment variable when milvus.enabled is true"
-                        .to_string(),
-                );
-            }
-
-            if self.milvus.password.is_empty() {
-                return Err(
-                    "Milvus password must be set via BOOM_MILVUS__PASSWORD environment variable when milvus.enabled is true"
-                        .to_string(),
-                );
-            }
-
+        // Credentials are checked when a client is built instead, so services
+        // that load this config but never dial Milvus start without them.
+        if self.milvus.is_enabled() {
             if self.milvus.database.is_empty() {
                 return Err(
-                    "Milvus database must not be empty when milvus.enabled is true; config.yaml supplies a default, override it with BOOM_MILVUS__DATABASE"
+                    "Milvus database must not be empty when milvus.read_embeddings or milvus.write_embeddings is true; config.yaml supplies a default, override it with BOOM_MILVUS__DATABASE"
                         .to_string(),
                 );
             }
@@ -1736,6 +1966,21 @@ pub fn load_config(config_path: Option<&str>) -> Result<AppConfig, BoomConfigErr
     );
 
     Ok(app_config)
+}
+
+/// Path to `tests/config.test.yaml`, found by walking up from the working directory.
+pub fn test_config_path() -> String {
+    let mut current_dir = std::env::current_dir().expect("Failed to get current directory");
+    loop {
+        let test_config = current_dir.join("tests").join("config.test.yaml");
+        if test_config.exists() {
+            return test_config.to_str().expect("Invalid path").to_string();
+        }
+        match current_dir.parent() {
+            Some(parent) => current_dir = parent.to_path_buf(),
+            None => panic!("Could not find workspace root with tests/config.test.yaml"),
+        }
+    }
 }
 
 pub async fn get_test_db() -> Database {

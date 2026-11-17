@@ -11,6 +11,7 @@ import {
   IconBook,
   IconShieldLock,
   IconTelescope,
+  IconVector,
 } from "@tabler/icons-react"
 
 import { useCatalogIssues } from "@/hooks/use-catalog-issues"
@@ -46,6 +47,11 @@ const data = {
       title: "Telescopes",
       url: "/telescopes",
       icon: IconTelescope,
+    },
+    {
+      title: "Embeddings",
+      url: "/embeddings",
+      icon: IconVector,
     },
   ],
   navSecondary: [
@@ -99,7 +105,8 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
         ...data.navMain,
         {
           title: "Admin",
-          url: "/admin",
+          // The badge counts catalog and enrichment issues, so it leads to them.
+          url: issues.count > 0 ? `/admin?tab=${issues.tab ?? "catalogs"}` : "/admin",
           icon: IconShieldLock,
           badge: issues.count,
           badgeLabel: issues.label,

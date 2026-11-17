@@ -13,7 +13,7 @@
 use crate::api::models::response;
 use crate::api::routes::{babamul::BabamulUser, users::User};
 use crate::tasks::Actor;
-use actix_web::{web, HttpResponse};
+use actix_web::{web, HttpResponse, ResponseError as _};
 
 /// An authenticated admin, whichever realm they came from.
 #[derive(Debug)]
@@ -23,6 +23,7 @@ pub struct AdminActor {
     pub realm: &'static str,
     pub user_id: String,
     pub username: String,
+    pub email: String,
 }
 
 impl AdminActor {
@@ -34,6 +35,7 @@ impl AdminActor {
             // look the person up later.
             user_id: format!("{}:{}", self.realm, self.user_id),
             username: self.username.clone(),
+            email: Some(self.email.clone()),
         }
     }
 }
@@ -52,6 +54,18 @@ pub enum AdminDenied {
     Unauthenticated,
 }
 
+const ADMIN_REQUIRED: &str = "Admin access required";
+const UNAUTHENTICATED: &str = "Unauthorized";
+
+impl AdminDenied {
+    pub fn as_error(&self) -> response::ApiError {
+        match self {
+            AdminDenied::NotAnAdmin => response::ApiError::forbidden(ADMIN_REQUIRED),
+            AdminDenied::Unauthenticated => response::ApiError::unauthorized(UNAUTHENTICATED),
+        }
+    }
+}
+
 /// Resolve an admin from whichever realm authenticated the request.
 ///
 /// The middlewares inject one realm or the other, never both. If both are
@@ -68,6 +82,7 @@ pub fn resolve_admin(
                 realm: "boom",
                 user_id: user.id.clone(),
                 username: user.username.clone(),
+                email: user.email.clone(),
             })
         } else {
             Err(AdminDenied::NotAnAdmin)
@@ -79,6 +94,7 @@ pub fn resolve_admin(
                 realm: "babamul",
                 user_id: user.id.clone(),
                 username: user.username.clone(),
+                email: user.email.clone(),
             })
         } else {
             Err(AdminDenied::NotAnAdmin)
@@ -107,12 +123,7 @@ impl actix_web::FromRequest for AdminActor {
         use actix_web::HttpMessage as _;
         let extensions = req.extensions();
         let resolved = resolve_admin(extensions.get::<User>(), extensions.get::<BabamulUser>())
-            .map_err(|denied| match denied {
-                AdminDenied::NotAnAdmin => {
-                    actix_web::error::ErrorForbidden("Admin access required")
-                }
-                AdminDenied::Unauthenticated => actix_web::error::ErrorUnauthorized("Unauthorized"),
-            });
+            .map_err(|denied| actix_web::Error::from(denied.as_error()));
         std::future::ready(resolved)
     }
 }
@@ -125,10 +136,7 @@ pub fn require_admin(
         boom_user.as_ref().map(|u| &**u),
         babamul_user.as_ref().map(|u| &**u),
     )
-    .map_err(|denied| match denied {
-        AdminDenied::NotAnAdmin => response::forbidden("Admin access required"),
-        AdminDenied::Unauthenticated => HttpResponse::Unauthorized().body("Unauthorized"),
-    })
+    .map_err(|denied| denied.as_error().error_response())
 }
 
 /// Grant `is_admin` to the Babamul accounts named in the configured list.
@@ -225,6 +233,89 @@ mod tests {
             .delete_many(doc! {})
             .await
             .expect("clears");
+    }
+
+    async fn body_of(response: HttpResponse) -> actix_web::web::Bytes {
+        actix_web::body::to_bytes(response.into_body())
+            .await
+            .expect("reads body")
+    }
+
+    #[tokio::test]
+    async fn a_refusal_says_why_in_json() {
+        use actix_web::http::{header::CONTENT_TYPE, StatusCode};
+
+        for (denied, status, message) in [
+            (
+                AdminDenied::NotAnAdmin,
+                StatusCode::FORBIDDEN,
+                ADMIN_REQUIRED,
+            ),
+            (
+                AdminDenied::Unauthenticated,
+                StatusCode::UNAUTHORIZED,
+                UNAUTHENTICATED,
+            ),
+        ] {
+            let response = denied.as_error().error_response();
+            assert_eq!(response.status(), status);
+            assert_eq!(
+                response
+                    .headers()
+                    .get(CONTENT_TYPE)
+                    .and_then(|v| v.to_str().ok()),
+                Some("application/json")
+            );
+            let parsed: serde_json::Value =
+                serde_json::from_slice(&body_of(response).await).expect("json");
+            assert_eq!(parsed["message"], message);
+        }
+    }
+
+    #[tokio::test]
+    async fn the_extractor_and_the_helper_refuse_alike() {
+        use actix_web::{test::TestRequest, FromRequest as _, HttpMessage as _};
+
+        let callers: [(&str, Option<User>, Option<BabamulUser>); 3] = [
+            ("no credential", None, None),
+            ("non-admin boom user", Some(boom_user(false)), None),
+            ("non-admin babamul user", None, Some(babamul_user(false))),
+        ];
+        for (caller, boom, babamul) in callers {
+            let req = TestRequest::default().to_http_request();
+            if let Some(user) = boom {
+                req.extensions_mut().insert(user);
+            }
+            if let Some(user) = babamul {
+                req.extensions_mut().insert(user);
+            }
+
+            let from_extractor = AdminActor::extract(&req)
+                .await
+                .expect_err("refused")
+                .error_response();
+            let from_helper = require_admin(
+                &web::ReqData::<User>::extract(&req).await.ok(),
+                &web::ReqData::<BabamulUser>::extract(&req).await.ok(),
+            )
+            .expect_err("refused");
+
+            assert_eq!(from_extractor.status(), from_helper.status(), "{caller}");
+            assert_eq!(
+                from_extractor
+                    .headers()
+                    .get(actix_web::http::header::CONTENT_TYPE),
+                from_helper
+                    .headers()
+                    .get(actix_web::http::header::CONTENT_TYPE),
+                "{caller}"
+            );
+            assert_eq!(
+                body_of(from_extractor).await,
+                body_of(from_helper).await,
+                "{caller}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -399,5 +490,13 @@ mod tests {
         // Same username in both realms, so the id is what disambiguates.
         assert_eq!(boom.username, babamul.username);
         assert_ne!(boom.user_id, babamul.user_id);
+    }
+
+    #[test]
+    fn the_recorded_actor_carries_the_email() {
+        let actor = resolve_admin(None, Some(&babamul_user(true)))
+            .unwrap()
+            .as_task_actor();
+        assert_eq!(actor.email.as_deref(), Some("pete@example.org"));
     }
 }

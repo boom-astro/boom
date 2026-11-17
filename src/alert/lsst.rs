@@ -17,7 +17,6 @@ use crate::{
         spatial::{xmatch, Coordinates},
     },
 };
-use apache_avro_derive::AvroSchema;
 use apache_avro_macros::serdavro;
 use constcat::concat;
 use flare::Time;
@@ -50,12 +49,6 @@ pub const LSST_SCHEMA_REGISTRY_GITHUB_FALLBACK_URL: &str =
 /// compatibility when an Avro schema makes a previously-optional field mandatory, while our
 /// Rust structs keep the field as `Option<T>`.
 ///
-/// Currently implemented for `visit_i32` only, covering the Avro `int` fields that went from
-/// optional to non-optional in LSST alert schema v10 → v11 (`long`/`i64` fields were
-/// unaffected). If future schema versions make other field types mandatory (e.g. `long`,
-/// `float`, `boolean`), extend this visitor with the corresponding `visit_*` method and apply
-/// `#[serde_as(deserialize_as = "FlexibleOption")]` to the newly affected fields.
-///
 /// Wire-format cases handled:
 ///   Union(Null)   → visit_unit  → None
 ///   Union(Int(n)) → visit_i32   → Some(n)   (v10: field was nullable)
@@ -85,6 +78,14 @@ impl<'de, T: Deserialize<'de>> serde::de::Visitor<'de> for FlexibleOptionVisitor
 
     fn visit_i32<E: serde::de::Error>(self, v: i32) -> Result<Option<T>, E> {
         T::deserialize(serde::de::value::I32Deserializer::<E>::new(v)).map(Some)
+    }
+
+    fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<Option<T>, E> {
+        T::deserialize(serde::de::value::BoolDeserializer::<E>::new(v)).map(Some)
+    }
+
+    fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Option<T>, E> {
+        T::deserialize(serde::de::value::StrDeserializer::<E>::new(v)).map(Some)
     }
 }
 
@@ -296,6 +297,8 @@ pub struct DiaSource {
     /// Saturated pixel in the 3x3 region around the centroid.
     #[serde(rename = "pixelFlags_saturatedCenter")]
     pub pixel_flags_saturated_center: Option<bool>,
+    #[serde(rename = "pixelFlags_spike")]
+    pub pixel_flags_spike: Option<bool>,
     /// DiaSource's footprint includes suspect pixels.
     #[serde(rename = "pixelFlags_suspect")]
     pub pixel_flags_suspect: Option<bool>,
@@ -322,6 +325,21 @@ pub struct DiaSource {
     pub pixel_flags_injected_template_center: Option<bool>,
     /// This flag is set if the source is part of a glint trail.
     pub glint_trail: Option<bool>,
+    #[serde(rename = "templateMjdMean")]
+    pub template_mjd_mean: Option<f64>,
+    #[serde(rename = "templateMjdMin")]
+    pub template_mjd_min: Option<f64>,
+    #[serde(rename = "templateMjdMax")]
+    pub template_mjd_max: Option<f64>,
+    #[serde(rename = "templateInstrument")]
+    #[serde_as(deserialize_as = "FlexibleOption")]
+    pub template_instrument: Option<String>,
+    #[serde(rename = "templateVersion")]
+    #[serde_as(deserialize_as = "FlexibleOption")]
+    pub template_version: Option<i32>,
+    #[serde(rename = "mixedInstruments")]
+    #[serde_as(deserialize_as = "FlexibleOption")]
+    pub mixed_instruments: Option<bool>,
 }
 
 #[serde_as]
@@ -742,7 +760,8 @@ pub struct DiaObject {
 
 #[serde_as]
 #[skip_serializing_none]
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, Default, AvroSchema, ToSchema)]
+#[serdavro]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, Default, ToSchema)]
 #[serde(default)]
 pub struct DiaForcedSource {
     /// Unique id.
@@ -954,7 +973,7 @@ pub struct SsSource {
     pub dia_distance_rank: Option<i32>,
 }
 
-/// Rubin Avro alert schema v11.1 (minus the `mpc_orbits` orbital-elements record, which we do
+/// Rubin Avro alert schema v11.2 (minus the `mpc_orbits` orbital-elements record, which we do
 /// not use here yet)
 #[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
 pub struct LsstRawAvroAlert {
@@ -1016,6 +1035,7 @@ where
     let dia_sources = <Vec<DiaSource> as Deserialize>::deserialize(deserializer)?;
     let candidates = dia_sources
         .into_iter()
+        .filter(|dia_source| dia_source.psf_flux.is_none_or(f32::is_finite))
         .map(LsstPrvCandidate::try_from)
         .collect::<Result<Vec<LsstPrvCandidate>, AlertError>>()
         .map_err(serde::de::Error::custom)?;
@@ -1091,19 +1111,23 @@ struct AlertAuxForUpdate {
     pub version: Option<i32>,
 }
 
-fn first_detection_jd(
+fn detection_history(
     prv_candidates: &[LsstPrvCandidate],
     existing_aux: Option<&AlertAuxForUpdate>,
-) -> Option<f64> {
+    jd: f64,
+) -> (Option<f64>, i32) {
     let stored = existing_aux
         .into_iter()
         .flat_map(|aux| aux.prv_candidates.iter().map(|pc| pc.jd));
-    prv_candidates
+    let mut jds: Vec<f64> = prv_candidates
         .iter()
         .map(|pc| pc.jd)
         .chain(stored)
-        .filter(|jd| jd.is_finite())
-        .reduce(f64::min)
+        .filter(|pc_jd| pc_jd.is_finite() && *pc_jd <= jd)
+        .collect();
+    jds.sort_by(f64::total_cmp);
+    jds.dedup();
+    (jds.first().copied(), jds.len() as i32)
 }
 
 pub struct LsstAlertWorker {
@@ -1410,10 +1434,15 @@ impl AlertWorker for LsstAlertWorker {
 
         let existing_alert_aux = self.get_existing_aux(&object_id).await?;
 
-        if candidate.jdstarthist.is_none() {
-            candidate.jdstarthist =
-                first_detection_jd(&prv_candidates, existing_alert_aux.as_ref());
-        }
+        // Rubin's nDiaSources and firstDiaSourceMjdTai only cover the last 12 months
+        let (first_jd, ndethist) =
+            detection_history(&prv_candidates, existing_alert_aux.as_ref(), candidate.jd);
+        candidate.jdstarthist = candidate
+            .jdstarthist
+            .into_iter()
+            .chain(first_jd)
+            .reduce(f64::min);
+        candidate.ndethist = Some(ndethist);
 
         let alert = LsstAlert {
             candid,
@@ -1439,6 +1468,21 @@ impl AlertWorker for LsstAlertWorker {
                 .await
                 .inspect_err(as_error!())?,
         );
+        if let Some(id) = survey_matches
+            .as_ref()
+            .and_then(|a| a.ztf.first())
+            .filter(|_| ss_object_id.is_none())
+        {
+            self.link_counterpart(
+                &self.ztf_alert_aux_collection,
+                id,
+                &object_id,
+                "LSST",
+                "DECAM",
+            )
+            .await
+            .inspect_err(as_error!())?;
+        }
 
         // The designation is only known once a diaSource is linked to an ssObject; keep it
         // current independent of whichever branch below runs, and regardless of any ZTF
@@ -1953,6 +1997,48 @@ mod tests {
         assert_eq!(dia_source.trail_flag, Some(true));
         assert_eq!(dia_source.trail_algorithm, Some(2));
         assert_eq!(dia_source.reliability_version, Some("0.3".to_string()));
+        assert_eq!(dia_source.template_instrument, None);
+        assert_eq!(dia_source.mixed_instruments, None);
+    }
+
+    #[test]
+    fn test_dia_source_v11_2_fields_from_avro_value() {
+        use apache_avro::{from_value, types::Value};
+
+        let value = Value::Record(vec![
+            ("diaSourceId".to_string(), Value::Long(123456789)),
+            (
+                "pixelFlags_spike".to_string(),
+                Value::Union(1, Box::new(Value::Boolean(true))),
+            ),
+            (
+                "templateMjdMean".to_string(),
+                Value::Union(1, Box::new(Value::Double(56000.5))),
+            ),
+            (
+                "templateMjdMin".to_string(),
+                Value::Union(1, Box::new(Value::Double(55000.0))),
+            ),
+            (
+                "templateMjdMax".to_string(),
+                Value::Union(0, Box::new(Value::Null)),
+            ),
+            (
+                "templateInstrument".to_string(),
+                Value::String("DECam".to_string()),
+            ),
+            ("templateVersion".to_string(), Value::Int(1)),
+            ("mixedInstruments".to_string(), Value::Boolean(true)),
+        ]);
+
+        let dia_source: DiaSource = from_value(&value).expect("failed to deserialize DiaSource");
+        assert_eq!(dia_source.pixel_flags_spike, Some(true));
+        assert_eq!(dia_source.template_mjd_mean, Some(56000.5));
+        assert_eq!(dia_source.template_mjd_min, Some(55000.0));
+        assert_eq!(dia_source.template_mjd_max, None);
+        assert_eq!(dia_source.template_instrument, Some("DECam".to_string()));
+        assert_eq!(dia_source.template_version, Some(1));
+        assert_eq!(dia_source.mixed_instruments, Some(true));
     }
 
     #[tokio::test]

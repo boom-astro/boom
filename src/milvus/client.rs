@@ -30,6 +30,10 @@ pub enum MilvusError {
     MissingStatus(&'static str),
     #[error("milvus is not enabled in the configuration")]
     NotEnabled,
+    #[error(
+        "milvus is enabled but BOOM_MILVUS__USERNAME and BOOM_MILVUS__PASSWORD are not both set"
+    )]
+    MissingCredentials,
     #[error("embedding has {got} dimensions but the collection expects {expected}")]
     DimensionMismatch { expected: i64, got: usize },
 }
@@ -67,19 +71,40 @@ pub struct MilvusClient {
 impl MilvusClient {
     /// Connect to Milvus using the supplied configuration.
     ///
-    /// Returns [`MilvusError::NotEnabled`] if `milvus.enabled` is false, so that
+    /// Returns [`MilvusError::NotEnabled`] if both Milvus flags are false, so that
     /// callers cannot accidentally dial a server the operator has switched off.
     #[instrument(skip_all, err, fields(endpoint = %config.endpoint(), database = %config.database))]
     pub async fn connect(config: &MilvusConfig) -> Result<Self, MilvusError> {
-        if !config.enabled {
+        let channel = Self::build_endpoint(config)?
+            .connect()
+            .await
+            .map_err(MilvusError::ConnectError)?;
+        info!(endpoint = %config.endpoint(), "connected to milvus");
+        Self::with_channel(config, channel)
+    }
+
+    /// Build a client without dialing. The connection is opened by the first
+    /// RPC, and tonic redials on a later RPC if it fails, so a long-lived
+    /// caller recovers from an outage without being restarted. Errors only for
+    /// configuration that will never connect.
+    pub fn connect_lazy(config: &MilvusConfig) -> Result<Self, MilvusError> {
+        let channel = Self::build_endpoint(config)?.connect_lazy();
+        Self::with_channel(config, channel)
+    }
+
+    fn build_endpoint(config: &MilvusConfig) -> Result<Endpoint, MilvusError> {
+        if !config.is_enabled() {
             return Err(MilvusError::NotEnabled);
+        }
+        if config.username.is_empty() || config.password.is_empty() {
+            return Err(MilvusError::MissingCredentials);
         }
 
         let endpoint_url = config.endpoint();
         let mut endpoint = Endpoint::from_shared(endpoint_url.clone())
-            .map_err(|_| MilvusError::InvalidEndpoint(endpoint_url.clone()))?
+            .map_err(|_| MilvusError::InvalidEndpoint(endpoint_url))?
             .timeout(Duration::from_secs(config.timeout_seconds))
-            .connect_timeout(Duration::from_secs(config.timeout_seconds));
+            .connect_timeout(Duration::from_secs(config.connect_timeout_seconds));
 
         if config.tls {
             // NRP serves a standard Let's Encrypt certificate, so the platform
@@ -91,19 +116,13 @@ impl MilvusClient {
                 .tls_config(tls)
                 .map_err(MilvusError::ConnectError)?;
         }
+        Ok(endpoint)
+    }
 
-        let channel = endpoint
-            .connect()
-            .await
-            .map_err(MilvusError::ConnectError)?;
-
+    fn with_channel(config: &MilvusConfig, channel: Channel) -> Result<Self, MilvusError> {
         let interceptor = Self::build_interceptor(config)?;
-        let inner = MilvusServiceClient::with_interceptor(channel, interceptor);
-
-        info!(endpoint = %endpoint_url, "connected to milvus");
-
         Ok(Self {
-            inner,
+            inner: MilvusServiceClient::with_interceptor(channel, interceptor),
             config: config.clone(),
         })
     }
@@ -225,4 +244,29 @@ pub(super) fn check_status(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config(username: &str, password: &str) -> MilvusConfig {
+        MilvusConfig {
+            read_embeddings: true,
+            username: username.to_string(),
+            password: password.to_string(),
+            ..MilvusConfig::default()
+        }
+    }
+
+    #[test]
+    fn build_endpoint_requires_both_credentials() {
+        for (username, password) in [("", ""), ("user", ""), ("", "pass")] {
+            assert!(matches!(
+                MilvusClient::build_endpoint(&config(username, password)),
+                Err(MilvusError::MissingCredentials)
+            ));
+        }
+        assert!(MilvusClient::build_endpoint(&config("user", "pass")).is_ok());
+    }
 }

@@ -28,8 +28,20 @@ pub struct EnrichedZtfAlert {
     #[serde(rename = "objectId")]
     pub object_id: String,
     pub candidate: ZtfCandidate,
+    #[serde(default, deserialize_with = "deserialize_partial_properties")]
     pub properties: Option<ZtfAlertProperties>,
     pub classifications: Option<ZtfAlertClassifications>,
+}
+
+fn deserialize_partial_properties<'de, D>(
+    deserializer: D,
+) -> Result<Option<ZtfAlertProperties>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw =
+        <Option<mongodb::bson::RawDocumentBuf> as serde::Deserialize>::deserialize(deserializer)?;
+    Ok(raw.and_then(|raw| mongodb::bson::from_slice(raw.as_bytes()).ok()))
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, ToSchema)]
@@ -61,6 +73,7 @@ struct AlertsQuery {
     is_star: Option<bool>,
     is_near_brightstar: Option<bool>,
     is_stationary: Option<bool>,
+    max_host_dist_mpc: Option<f64>,
     limit: Option<u32>,
     skip: Option<u64>,
 }
@@ -91,7 +104,8 @@ enum AlertsQueryResult {
         ("is_star" = Option<bool>, Query, description = "Whether to filter for likely star candidates"),
         ("is_near_brightstar" = Option<bool>, Query, description = "Whether to filter for candidates near bright stars"),
         ("is_stationary" = Option<bool>, Query, description = "Whether to filter for stationary candidates"),
-        ("limit" = Option<u32>, Query, description = "Maximum number of alerts to return"),
+        ("max_host_dist_mpc" = Option<f64>, Query, description = "Maximum distance in Mpc of the best host galaxy"),
+        ("limit" = Option<u32>, Query, description = "Maximum number of alerts to return (1-100000, default 1000)"),
         ("skip" = Option<u64>, Query, description = "Number of alerts to skip (for pagination)"),
     ),
     responses(
@@ -120,7 +134,7 @@ pub async fn get_alerts(
         Err(response) => return response,
     };
 
-    let limit = query.limit.unwrap_or(100000);
+    let limit = query.limit.unwrap_or(1000);
     if limit == 0 || limit > 100000 {
         return response::bad_request("Invalid limit, must be between 1 and 100000");
     }
@@ -244,6 +258,12 @@ pub async fn get_alerts(
     if let Some(is_stationary) = query.is_stationary {
         filter_doc.insert("properties.stationary", is_stationary);
     }
+    if let Some(max_host_dist_mpc) = query.max_host_dist_mpc {
+        filter_doc.insert(
+            "properties.best_host.dist_mpc",
+            doc! { "$lte": max_host_dist_mpc },
+        );
+    }
 
     match survey {
         Survey::Ztf => {
@@ -274,9 +294,9 @@ pub async fn get_alerts(
             } {
                 results.push(alert_doc);
             }
-            return response::ok(
+            return response::ok_ser(
                 &format!("found {} alerts matching query", results.len()),
-                serde_json::json!(results),
+                &results,
             );
         }
         Survey::Lsst => {
@@ -307,9 +327,9 @@ pub async fn get_alerts(
             } {
                 results.push(alert_doc);
             }
-            return response::ok(
+            return response::ok_ser(
                 &format!("found {} alerts matching query", results.len()),
-                serde_json::json!(results),
+                &results,
             );
         }
         _ => {
@@ -413,14 +433,14 @@ where
         }
         results.insert(object_name.clone(), alert_results);
     }
-    response::ok(
+    response::ok_ser(
         &format!(
             "found cross-matches for {}/{} coordinates, with a total {} alerts",
             coordinates_with_matches_count,
             coordinates.len(),
             alert_count
         ),
-        serde_json::json!(results),
+        &results,
     )
 }
 
