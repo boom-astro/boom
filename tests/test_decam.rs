@@ -2,7 +2,7 @@
 use boom::{
     alert::{AlertWorker, ProcessAlertStatus, DECAM_LSST_XMATCH_RADIUS, DECAM_ZTF_XMATCH_RADIUS},
     conf::{get_test_cutout_storage, get_test_db},
-    enrichment::{EnrichmentWorker, ZtfEnrichmentWorker},
+    enrichment::{DecamEnrichmentWorker, EnrichmentWorker, ZtfEnrichmentWorker},
     filter::{
         alert_to_avro_bytes, load_alert_schema, DecamFilterWorker, FilterWorker, LsstFilterWorker,
         ZtfFilterWorker,
@@ -75,6 +75,55 @@ async fn test_process_decam_alert() {
     assert_eq!(prv_candidates.len(), 5);
     let fp_hists = aux.get_array("fp_hists").unwrap();
     assert!(fp_hists.is_empty());
+
+    drop_alert_from_collections(candid, &Survey::Decam)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn test_enrich_decam_alert_with_forced_photometry() {
+    let mut alert_worker = decam_alert_worker().await;
+    let (candid, object_id, _, _, bytes_content) =
+        AlertRandomizer::new_randomized(Survey::Decam).get().await;
+    alert_worker.process_alert(&bytes_content).await.unwrap();
+
+    let db = get_test_db().await;
+    let alert = db
+        .collection::<Document>("DECAM_alerts")
+        .find_one(doc! {"_id": candid})
+        .await
+        .unwrap()
+        .unwrap();
+    let jd = alert
+        .get_document("candidate")
+        .unwrap()
+        .get_f64("jd")
+        .unwrap();
+    db.collection::<Document>("DECAM_alerts_aux")
+        .update_one(
+            doc! {"_id": &object_id},
+            doc! {"$push": {"fp_hists": {
+                "jd": jd - 1.0,
+                "mjd": jd - 1.0 - 2400000.5,
+                "forcediffimflux": 10.0,
+                "forcediffimfluxunc": 1.0,
+                "magap": 20.0,
+                "sigmagap": 0.1,
+                "band": "g",
+                "diffmaglim": 22.0,
+                "snr": 10.0,
+            }}},
+        )
+        .await
+        .unwrap();
+
+    let mut enrichment_worker = DecamEnrichmentWorker::new(TEST_CONFIG_FILE, None)
+        .await
+        .unwrap();
+    let result = enrichment_worker.process_alerts(&[candid]).await;
+    assert!(result.is_ok(), "{:?}", result);
+    assert_eq!(result.unwrap(), vec![candid.to_string()]);
 
     drop_alert_from_collections(candid, &Survey::Decam)
         .await

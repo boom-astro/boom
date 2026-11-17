@@ -306,7 +306,7 @@ pub struct DecamAlertForEnrichment {
     pub candidate: DecamCandidate,
     // Signed SNR is only needed here: detection history counts detections.
     pub prv_candidates: Vec<DecamPhotometry>,
-    pub fp_hists: Vec<PhotometryMag>,
+    pub fp_hists: Vec<DecamPhotometry>,
     #[serde(default)]
     pub fp_nondetections: Vec<DecamNonDetection>,
     #[serde(default)]
@@ -586,7 +586,11 @@ impl DecamEnrichmentWorker {
             .iter()
             .filter_map(DecamPhotometry::to_positive_mag)
             .collect();
-        let fp_hists = alert.fp_hists.clone();
+        let fp_hists: Vec<PhotometryMag> = alert
+            .fp_hists
+            .iter()
+            .map(DecamPhotometry::to_photometry_mag)
+            .collect();
 
         // lightcurve is prv_candidates + fp_hists, no need for parse_photometry here
         let mut lightcurve = [prv_candidates, fp_hists].concat();
