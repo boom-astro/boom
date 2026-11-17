@@ -12,6 +12,13 @@ export const ZTF = "ztf";
 export const LSST = "lsst";
 
 export const SURVEYS = [LSST, ZTF] as const;
+
+export const SURVEY_COLORS = {
+  ztf: "var(--chart-1)",
+  lsst: "var(--chart-2)",
+  decam: "var(--chart-3)",
+  winter: "var(--chart-4)",
+} as const;
 export type Survey = (typeof SURVEYS)[number];
 
 // Every Babamul Kafka topic, named `babamul.{survey}.{cross-match}.{class}`.

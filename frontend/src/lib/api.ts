@@ -589,7 +589,6 @@ export async function fetchCollectionStats(): Promise<CollectionStats> {
 export type LiveBin = {
   start: string;
   n_alerts: number;
-  latency_s: number | null;
 };
 
 export type LiveSurvey = {

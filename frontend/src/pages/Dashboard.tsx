@@ -16,17 +16,11 @@ import LiveIngest from "@/components/LiveIngest";
 import { formatAgo, formatNight, useLiveIngest } from "@/lib/liveIngest";
 import { toast } from "sonner";
 import { useAppStore } from "@/lib/store";
+import { SURVEY_COLORS } from "@/lib/constants";
 
 const SURVEY_ORDER = ["ztf", "lsst", "decam", "winter"] as const;
 
 type Survey = (typeof SURVEY_ORDER)[number];
-
-const SURVEY_COLORS: Record<Survey, string> = {
-  ztf: "var(--chart-1)",
-  lsst: "var(--chart-2)",
-  decam: "var(--chart-3)",
-  winter: "var(--chart-4)",
-};
 
 const chartConfig = {
   ztf: { label: "ZTF", color: SURVEY_COLORS.ztf },
