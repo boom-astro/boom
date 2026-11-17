@@ -24,7 +24,7 @@ pub use lsst::{
     LSST_SCHEMA_REGISTRY_GITHUB_FALLBACK_URL, LSST_SCHEMA_REGISTRY_URL, LSST_ZTF_XMATCH_RADIUS,
 };
 pub use simulation::{
-    lsst_surroundings, simulated_lsst_object, SimulatedEpoch, SimulatedLsstObject,
+    simulated_object, simulated_surroundings, SimulatedAlert, SimulatedEpoch, SimulatedObject,
     SimulatedSurroundings,
 };
 pub use winter::{

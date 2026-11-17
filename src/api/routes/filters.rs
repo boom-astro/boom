@@ -17,8 +17,11 @@ use crate::{
     },
     filter::{
         build_filter_pipeline, find_unknown_field,
-        simulation::{simulate_lsst_filter, SimulatedLightcurve, SimulatedLightcurveResult},
-        DocumentShape, Filter, FilterError, FilterVersion, SURVEYS_REQUIRING_PERMISSIONS,
+        simulation::{
+            simulate_filter, SimulatedLightcurve, SimulatedLightcurveResult, SIMULATED_SURVEYS,
+        },
+        uses_field_in_filter, DocumentShape, Filter, FilterError, FilterVersion,
+        SURVEYS_REQUIRING_PERMISSIONS,
     },
     utils::{
         db::{count_alerts_in_jd_window, mongify},
@@ -1477,6 +1480,7 @@ pub struct FilterSimulationRequest {
 #[derive(serde::Serialize, ToSchema)]
 pub struct FilterSimulationResponse {
     pub pipeline: Vec<serde_json::Value>,
+    pub warnings: Vec<String>,
     pub results: Vec<SimulatedLightcurveResult>,
 }
 
@@ -1503,8 +1507,11 @@ pub async fn post_filter_test_simulated(
         return HttpResponse::Unauthorized().body("Unauthorized");
     }
     let body = body.into_inner();
-    if body.survey != Survey::Lsst {
-        return response::bad_request("simulated light curves are only supported for LSST");
+    if !SIMULATED_SURVEYS.contains(&body.survey) {
+        return response::bad_request(&format!(
+            "simulated light curves are not supported for {}",
+            body.survey
+        ));
     }
     let limits = &config.api.filter_simulation;
     if body.lightcurves.len() > limits.max_lightcurves {
@@ -1531,18 +1538,32 @@ pub async fn post_filter_test_simulated(
                 return response::bad_request(&format!("Filter build failed with error: {e}"));
             }
         };
-    let results = simulate_lsst_filter(
+    let warnings = ["classifications", "villar_fit", "track"]
+        .into_iter()
+        .filter(|field| uses_field_in_filter(&body.pipeline, field).is_some())
+        .map(|field| {
+            format!("{field} is not computed for simulated alerts, so cuts on it pass nothing")
+        })
+        .collect();
+    let results = match simulate_filter(
         &db,
         &config,
+        &body.survey,
         &pipeline,
+        &body.permissions,
         &body.lightcurves,
         &body.detection_fields,
     )
-    .await;
+    .await
+    {
+        Ok(results) => results,
+        Err(e) => return response::bad_request(&e.to_string()),
+    };
     response::ok_ser(
         "filter simulation executed successfully",
         FilterSimulationResponse {
             pipeline: doc2json(pipeline),
+            warnings,
             results,
         },
     )

@@ -1,22 +1,25 @@
 use crate::{
     alert::{
-        lsst_surroundings, simulated_lsst_object, AlertError, SimulatedEpoch, SimulatedSurroundings,
+        simulated_object, simulated_surroundings, AlertError, SimulatedEpoch, SimulatedSurroundings,
     },
     conf::AppConfig,
     enrichment::{
-        add_decam_match, create_lsst_alert_pipeline, lsst_alert_properties, LsstAlertForEnrichment,
+        add_decam_match, create_decam_alert_pipeline, create_lsst_alert_pipeline,
+        create_ztf_alert_pipeline, decam_alert_properties_without_sso, lsst_alert_properties,
+        ztf_alert_properties_without_sso, DecamAlertForEnrichment, EnrichmentWorkerError,
+        LsstAlertForEnrichment, ZtfAlertForEnrichment,
     },
-    utils::{db::mongify, enums::Survey, lightcurves::Band},
+    utils::{db::mongify, enums::Survey, lightcurve_fits, lightcurves::Band},
 };
 use futures::TryStreamExt;
-use mongodb::bson::{doc, Document};
+use mongodb::bson::{doc, from_document, Bson, Document};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
 use utoipa::ToSchema;
 
-const LSST_ALERT_AUX_COLLECTION: &str = "LSST_alerts_aux";
 const ALERTS_PER_AGGREGATE: usize = 200;
+pub const SIMULATED_SURVEYS: [Survey; 3] = [Survey::Lsst, Survey::Ztf, Survey::Decam];
 
 #[derive(Debug, Clone, Deserialize, ToSchema)]
 pub struct SimulatedPoint {
@@ -35,6 +38,7 @@ pub struct SimulatedLightcurve {
     pub ra: f64,
     pub dec: f64,
     pub t0: Option<f64>,
+    pub programid: Option<i32>,
     pub points: Vec<SimulatedPoint>,
 }
 
@@ -67,9 +71,9 @@ pub enum SimulationError {
     #[error(transparent)]
     Alert(#[from] AlertError),
     #[error(transparent)]
-    Mongodb(#[from] mongodb::error::Error),
+    Enrichment(#[from] EnrichmentWorkerError),
     #[error(transparent)]
-    BsonSerialization(#[from] mongodb::bson::ser::Error),
+    Mongodb(#[from] mongodb::error::Error),
     #[error(transparent)]
     BsonDeserialization(#[from] mongodb::bson::de::Error),
     #[error(transparent)]
@@ -78,28 +82,113 @@ pub enum SimulationError {
     NotEnriched(i64),
 }
 
-fn up_to_alert(path: &str) -> Document {
-    doc! { "$filter": { "input": path, "cond": { "$lte": ["$$this.jd", "$candidate.jd"] } } }
+struct Replay {
+    aux_collection: &'static str,
+    series: &'static [&'static str],
+    enrichment_pipeline: Vec<Document>,
+}
+
+fn replay(survey: &Survey) -> Result<Replay, SimulationError> {
+    match survey {
+        Survey::Lsst => Ok(Replay {
+            aux_collection: "LSST_alerts_aux",
+            series: &["prv_candidates", "fp_hists"],
+            enrichment_pipeline: add_decam_match(create_lsst_alert_pipeline()),
+        }),
+        Survey::Ztf => Ok(Replay {
+            aux_collection: "ZTF_alerts_aux",
+            series: &["prv_candidates", "prv_nondetections", "fp_hists"],
+            enrichment_pipeline: add_decam_match(create_ztf_alert_pipeline(false)),
+        }),
+        Survey::Decam => Ok(Replay {
+            aux_collection: "DECAM_alerts_aux",
+            series: &["prv_candidates", "fp_hists"],
+            enrichment_pipeline: create_decam_alert_pipeline(),
+        }),
+        _ => Err(SimulationError::InvalidInput(format!(
+            "simulation is not supported for {survey}"
+        ))),
+    }
+}
+
+fn enrich(survey: &Survey, document: Document) -> Result<Option<Document>, SimulationError> {
+    match survey {
+        Survey::Lsst => {
+            let alert: LsstAlertForEnrichment = from_document(document)?;
+            Ok(Some(
+                doc! { "properties": mongify(&lsst_alert_properties(&alert)) },
+            ))
+        }
+        Survey::Ztf => {
+            let alert: ZtfAlertForEnrichment = from_document(document)?;
+            match ztf_alert_properties_without_sso(&alert) {
+                Ok((properties, lightcurve)) => {
+                    let mut fields = doc! { "properties": mongify(&properties) };
+                    if let Some(Some(fits)) = lightcurve_fits::fit_many(&[lightcurve]).pop() {
+                        fields.insert("arnett_fit", mongify(&fits.arnett));
+                        fields.insert("thermal_fit", mongify(&fits.thermal));
+                    }
+                    Ok(Some(fields))
+                }
+                Err(EnrichmentWorkerError::EmptyLightcurve(_)) => Ok(None),
+                Err(e) => Err(e.into()),
+            }
+        }
+        Survey::Decam => {
+            let alert: DecamAlertForEnrichment = from_document(document)?;
+            Ok(Some(
+                doc! { "properties": mongify(&decam_alert_properties_without_sso(&alert)?) },
+            ))
+        }
+        _ => Ok(None),
+    }
 }
 
 fn documents_stage(documents: &[Document]) -> Document {
     doc! { "$documents": { "$literal": documents.to_vec() } }
 }
 
-pub fn join_literal_documents(pipeline: &mut [Document], collection: &str, documents: &[Document]) {
+pub fn join_literal_aux(
+    pipeline: &mut [Document],
+    collection: &str,
+    aux: &Document,
+    series: &[&str],
+) {
+    let trimmed: Document = series
+        .iter()
+        .map(|name| {
+            let filter = doc! { "$filter": {
+                "input": format!("${name}"),
+                "cond": { "$lte": ["$$this.jd", "$$alert_jd"] },
+            }};
+            (name.to_string(), Bson::Document(filter))
+        })
+        .collect();
     for stage in pipeline.iter_mut() {
         let Ok(lookup) = stage.get_document_mut("$lookup") else {
             continue;
         };
-        if lookup.get_str("from").is_ok_and(|from| from == collection) {
+        let own_aux = lookup.get_str("from").is_ok_and(|from| from == collection)
+            && lookup
+                .get_str("localField")
+                .is_ok_and(|field| field == "objectId");
+        if own_aux {
             lookup.remove("from");
-            lookup.insert("pipeline", vec![documents_stage(documents)]);
+            lookup.insert("let", doc! { "alert_jd": "$candidate.jd" });
+            lookup.insert(
+                "pipeline",
+                vec![
+                    documents_stage(std::slice::from_ref(aux)),
+                    doc! { "$set": trimmed.clone() },
+                ],
+            );
         }
     }
 }
 
 async fn run_on_documents(
     db: &mongodb::Database,
+    replay: &Replay,
     pipeline: &[Document],
     alerts: &[Document],
     aux: &Document,
@@ -108,11 +197,7 @@ async fn run_on_documents(
     for chunk in alerts.chunks(ALERTS_PER_AGGREGATE) {
         let mut pipeline = pipeline.to_vec();
         pipeline[0] = documents_stage(chunk);
-        join_literal_documents(
-            &mut pipeline,
-            LSST_ALERT_AUX_COLLECTION,
-            std::slice::from_ref(aux),
-        );
+        join_literal_aux(&mut pipeline, replay.aux_collection, aux, replay.series);
         let mut cursor = db.aggregate(pipeline).await?;
         while let Some(document) = cursor.try_next().await? {
             handle(document)?;
@@ -121,11 +206,20 @@ async fn run_on_documents(
     Ok(())
 }
 
-async fn simulate_lsst_lightcurve(
+fn band_name(band: &Band) -> Option<String> {
+    serde_json::to_value(band)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_string))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn simulate_lightcurve(
     db: &mongodb::Database,
+    survey: &Survey,
+    replay: &Replay,
     filter_pipeline: &[Document],
     lightcurve: &SimulatedLightcurve,
-    dia_object_id: i64,
+    index: usize,
     detection_fields: &Map<String, Value>,
     surroundings: &SimulatedSurroundings,
     now: f64,
@@ -149,57 +243,63 @@ async fn simulate_lsst_lightcurve(
         .collect::<Result<Vec<_>, SimulationError>>()?;
     epochs.sort_by(|a, b| a.mjd.total_cmp(&b.mjd));
 
-    let object = simulated_lsst_object(
-        dia_object_id,
+    let object = simulated_object(
+        survey,
+        index as i64,
         lightcurve.ra,
         lightcurve.dec,
+        lightcurve.programid.unwrap_or(1),
         &epochs,
         detection_fields,
         surroundings,
         now,
     )?;
-    let aux = mongodb::bson::to_document(&object.aux)?;
-    let mut alerts = object
+    let alert_documents: Vec<Document> = object
         .alerts
         .iter()
-        .map(mongodb::bson::to_document)
-        .collect::<Result<Vec<_>, _>>()?;
+        .map(|alert| alert.document.clone())
+        .collect();
 
-    let mut enrichment_pipeline = add_decam_match(create_lsst_alert_pipeline());
-    // Properties ignore later points; trimming them only saves transfer.
-    if let Some(unwind) = enrichment_pipeline
-        .iter()
-        .position(|stage| stage.contains_key("$unwind"))
-    {
-        enrichment_pipeline.insert(
-            unwind + 1,
-            doc! { "$set": {
-                "aux.prv_candidates": up_to_alert("$aux.prv_candidates"),
-                "aux.fp_hists": up_to_alert("$aux.fp_hists"),
-            }},
-        );
-    }
-    let mut properties: HashMap<i64, Document> = HashMap::new();
-    run_on_documents(db, &enrichment_pipeline, &alerts, &aux, |document| {
-        let alert: LsstAlertForEnrichment = mongodb::bson::from_document(document)?;
-        properties.insert(alert.candid, mongify(&lsst_alert_properties(&alert)));
-        Ok(())
-    })
+    let mut enriched: HashMap<i64, Option<Document>> = HashMap::new();
+    run_on_documents(
+        db,
+        replay,
+        &replay.enrichment_pipeline,
+        &alert_documents,
+        &object.aux,
+        |document| {
+            let candid = document.get_i64("_id")?;
+            enriched.insert(candid, enrich(survey, document)?);
+            Ok(())
+        },
+    )
     .await?;
-    for alert in alerts.iter_mut() {
-        let candid = alert.get_i64("_id")?;
-        let alert_properties = properties
-            .remove(&candid)
-            .ok_or(SimulationError::NotEnriched(candid))?;
-        alert.insert("properties", alert_properties);
+    let mut filterable = Vec::with_capacity(object.alerts.len());
+    for alert in &object.alerts {
+        match enriched.remove(&alert.candid) {
+            None => return Err(SimulationError::NotEnriched(alert.candid)),
+            Some(None) => {}
+            Some(Some(fields)) => {
+                let mut document = alert.document.clone();
+                document.extend(fields);
+                filterable.push(document);
+            }
+        }
     }
 
     let mut passed: HashMap<i64, Option<Document>> = HashMap::new();
-    run_on_documents(db, filter_pipeline, &alerts, &aux, |document| {
-        let candid = document.get_i64("_id")?;
-        passed.insert(candid, document.get_document("annotations").ok().cloned());
-        Ok(())
-    })
+    run_on_documents(
+        db,
+        replay,
+        filter_pipeline,
+        &filterable,
+        &object.aux,
+        |document| {
+            let candid = document.get_i64("_id")?;
+            passed.insert(candid, document.get_document("annotations").ok().cloned());
+            Ok(())
+        },
+    )
     .await?;
 
     let passed: Vec<SimulatedAlertResult> = object
@@ -207,15 +307,10 @@ async fn simulate_lsst_lightcurve(
         .iter()
         .filter_map(|alert| {
             let annotations = passed.remove(&alert.candid)?;
-            let dia_source = &alert.candidate.dia_source;
             Some(SimulatedAlertResult {
                 candid: alert.candid,
-                mjd: dia_source.midpoint_mjd_tai,
-                band: dia_source
-                    .band
-                    .as_ref()
-                    .and_then(|band| serde_json::to_value(band).ok())
-                    .and_then(|band| band.as_str().map(str::to_string)),
+                mjd: alert.mjd,
+                band: band_name(&alert.band),
                 annotations,
             })
         })
@@ -224,7 +319,7 @@ async fn simulate_lsst_lightcurve(
 
     Ok(SimulatedLightcurveResult {
         id: lightcurve.id.clone(),
-        object_id: dia_object_id.to_string(),
+        object_id: (-(index as i64) - 1).to_string(),
         n_alerts: object.alerts.len(),
         n_passed: passed.len(),
         first_passed_mjd,
@@ -236,27 +331,43 @@ async fn simulate_lsst_lightcurve(
     })
 }
 
-pub async fn simulate_lsst_filter(
+pub async fn simulate_filter(
     db: &mongodb::Database,
     config: &AppConfig,
+    survey: &Survey,
     filter_pipeline: &[Document],
+    permissions: &HashMap<Survey, Vec<i32>>,
     lightcurves: &[SimulatedLightcurve],
     detection_fields: &Map<String, Value>,
-) -> Vec<SimulatedLightcurveResult> {
-    let xmatch_configs = config
-        .crossmatch
-        .get(&Survey::Lsst)
-        .cloned()
-        .unwrap_or_default();
+) -> Result<Vec<SimulatedLightcurveResult>, SimulationError> {
+    let replay = replay(survey)?;
+    let ztf_programids = permissions.get(&Survey::Ztf).cloned().unwrap_or_default();
+    let mut filter_pipeline = filter_pipeline.to_vec();
+    if *survey == Survey::Ztf {
+        filter_pipeline.insert(
+            1,
+            doc! { "$match": { "candidate.programid": { "$in": &ztf_programids } } },
+        );
+    }
+    let xmatch_configs = config.crossmatch.get(survey).cloned().unwrap_or_default();
     let now = flare::Time::now().to_jd();
     let mut surroundings: HashMap<(u64, u64), SimulatedSurroundings> = HashMap::new();
     let mut results = Vec::with_capacity(lightcurves.len());
 
     for (index, lightcurve) in lightcurves.iter().enumerate() {
-        let dia_object_id = -(index as i64 + 1);
+        let programid = lightcurve.programid.unwrap_or(1);
+        if *survey == Survey::Ztf && !ztf_programids.contains(&programid) {
+            results.push(failed(
+                lightcurve,
+                index,
+                format!("programid {programid} is not in the filter's ZTF permissions"),
+            ));
+            continue;
+        }
         let position = (lightcurve.ra.to_bits(), lightcurve.dec.to_bits());
         if !surroundings.contains_key(&position) {
-            match lsst_surroundings(
+            match simulated_surroundings(
+                survey,
                 lightcurve.ra,
                 lightcurve.dec,
                 &xmatch_configs,
@@ -269,35 +380,37 @@ pub async fn simulate_lsst_filter(
                     surroundings.insert(position, found);
                 }
                 Err(e) => {
-                    results.push(failed(lightcurve, dia_object_id, e.to_string()));
+                    results.push(failed(lightcurve, index, e.to_string()));
                     continue;
                 }
             }
         }
-        let result = simulate_lsst_lightcurve(
+        let result = simulate_lightcurve(
             db,
-            filter_pipeline,
+            survey,
+            &replay,
+            &filter_pipeline,
             lightcurve,
-            dia_object_id,
+            index,
             detection_fields,
             &surroundings[&position],
             now,
         )
         .await
-        .unwrap_or_else(|e| failed(lightcurve, dia_object_id, e.to_string()));
+        .unwrap_or_else(|e| failed(lightcurve, index, e.to_string()));
         results.push(result);
     }
-    results
+    Ok(results)
 }
 
 fn failed(
     lightcurve: &SimulatedLightcurve,
-    dia_object_id: i64,
+    index: usize,
     error: String,
 ) -> SimulatedLightcurveResult {
     SimulatedLightcurveResult {
         id: lightcurve.id.clone(),
-        object_id: dia_object_id.to_string(),
+        object_id: (-(index as i64) - 1).to_string(),
         n_alerts: 0,
         n_passed: 0,
         first_passed_mjd: None,
