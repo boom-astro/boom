@@ -353,6 +353,13 @@ async fn test_enrich_ztf_alert() {
     assert_eq!(properties.get_bool("near_brightstar").unwrap(), true);
     assert_eq!(properties.get_bool("stationary").unwrap(), true);
 
+    // Written for every enriched alert, with every key null when the light
+    // curve cannot be fitted.
+    let gp_fit = alert
+        .get_document("gp_fit")
+        .expect("gp_fit must be written");
+    assert!(gp_fit.contains_key("reduced_chi2"));
+
     // only the first epoch of each band has a positive flux
     let photstats = properties.get_document("photstats").unwrap();
     for (band, peak_mag, peak_jd) in [
