@@ -9,6 +9,7 @@
 use crate::utils::heliolinc::{
     bound_seed, is_bound, propagate_position, radec_from_ecliptic, state_to_elements, Conics, State,
 };
+use crate::utils::linking::night_of;
 use crate::utils::sso_geometry::{dot, norm, observer_position, OrbitalElements, Site};
 
 /// One astrometric position.
@@ -595,6 +596,174 @@ fn fit(
         iterations,
         n_obs: observations.len(),
     })
+}
+
+const OUTLIER_SIGMAS: f64 = 5.0;
+const MAX_OUTLIER_SHARE: f64 = 0.25;
+// Three positions fit any orbit exactly.
+const MIN_KEPT: usize = 4;
+const DEEPER_SEEDS: usize = 8;
+const SEED_SCREEN_ARCSEC: f64 = 2.0;
+const NIGHTS_TRIED: usize = 3;
+
+fn off_in_sigmas(fit: &OrbitFit, obs: &Observation) -> f64 {
+    observed_minus_computed(&fit.state, fit.epoch_jd, obs).map_or(f64::INFINITY, |(ra, dec)| {
+        ra.hypot(dec) / obs.site.astrometric_sigma_arcsec
+    })
+}
+
+fn within_sigmas(fit: &OrbitFit, observations: &[Observation]) -> bool {
+    observations
+        .iter()
+        .all(|obs| off_in_sigmas(fit, obs) <= OUTLIER_SIGMAS)
+}
+
+// A long arc can converge from its linking seed into a wrong orbit leaving 1" where the right one leaves 0.1".
+fn deepest_fit(
+    observations: &[Observation],
+    seed: &State,
+    epoch_jd: f64,
+    conics: Conics,
+) -> Option<OrbitFit> {
+    let from_seed = converge_orbit(observations, seed, epoch_jd, CONVERGE_ITERATIONS, conics);
+    if from_seed
+        .as_ref()
+        .is_some_and(|fit| within_sigmas(fit, observations))
+    {
+        return from_seed;
+    }
+    let anchor = from_seed.as_ref().map_or(*seed, |fit| fit.state);
+    let mut along: Vec<(f64, State)> = observations
+        .iter()
+        .min_by(|a, b| (a.jd - epoch_jd).abs().total_cmp(&(b.jd - epoch_jd).abs()))
+        .map(|o| line_of_sight_seeds(&anchor, epoch_jd, &o.site))
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|s| Some((rms_arcsec(&s, epoch_jd, observations)?, s)))
+        .filter(|(rms, _)| rms.is_finite())
+        .collect();
+    along.sort_by(|a, b| a.0.total_cmp(&b.0));
+    [bound_seed(&anchor)]
+        .into_iter()
+        .chain(along.into_iter().take(DEEPER_SEEDS).map(|(_, s)| s))
+        .filter(|s| conics.admits(s))
+        .filter_map(|s| {
+            screen_then_converge(observations, &s, epoch_jd, SEED_SCREEN_ARCSEC, conics)
+        })
+        .chain(from_seed)
+        .min_by(|a, b| a.rms_arcsec.total_cmp(&b.rms_arcsec))
+}
+
+// A false link usually adds another object's whole tracklet, so nights are dropped as well as single positions.
+pub fn within_precision(
+    observations: &[Observation],
+    seed: &State,
+    epoch_jd: f64,
+) -> Option<(Vec<bool>, OrbitFit)> {
+    let conics = if is_bound(seed) {
+        Conics::Bound
+    } else {
+        Conics::Unbound {
+            vinf_au_per_day: f64::INFINITY,
+            max_rms_arcsec: f64::INFINITY,
+        }
+    };
+    let all = vec![true; observations.len()];
+    let fit = deepest_fit(observations, seed, epoch_jd, conics)?;
+    if within_sigmas(&fit, observations) {
+        return Some((all, fit));
+    }
+    let nights: Vec<i64> = observations.iter().map(|obs| night_of(obs.jd)).collect();
+    let mut worst_nights: Vec<(i64, f64)> = Vec::new();
+    for (night, obs) in nights.iter().zip(observations) {
+        let off = off_in_sigmas(&fit, obs);
+        match worst_nights.iter_mut().find(|(n, _)| n == night) {
+            Some(entry) => entry.1 = entry.1.max(off),
+            None => worst_nights.push((*night, off)),
+        }
+    }
+    let n_nights = worst_nights.len();
+    worst_nights.sort_by(|a, b| b.1.total_cmp(&a.1));
+    let mut tried: Vec<i64> = worst_nights
+        .iter()
+        .take(NIGHTS_TRIED)
+        .map(|(night, _)| *night)
+        .collect();
+    // A foreign night at an end of the arc drags the orbit onto itself.
+    for end in [nights.iter().min(), nights.iter().max()]
+        .into_iter()
+        .flatten()
+    {
+        if !tried.contains(end) {
+            tried.push(*end);
+        }
+    }
+    let mut best = clip(observations, all.clone(), fit.clone(), conics);
+    for night in tried {
+        if n_nights < 3 {
+            break;
+        }
+        let kept: Vec<bool> = nights.iter().map(|n| *n != night).collect();
+        let rest = subset(observations, &kept);
+        if rest.len() < MIN_KEPT {
+            continue;
+        }
+        let Some(without) = deepest_fit(&rest, &fit.state, epoch_jd, conics) else {
+            continue;
+        };
+        let Some(candidate) = clip(observations, kept, without, conics) else {
+            continue;
+        };
+        let count = |kept: &[bool]| kept.iter().filter(|k| **k).count();
+        let better = best.as_ref().is_none_or(|(kept, fit)| {
+            (count(&candidate.0), -candidate.1.rms_arcsec) > (count(kept), -fit.rms_arcsec)
+        });
+        if better {
+            best = Some(candidate);
+        }
+    }
+    best.or_else(|| (observations.len() <= MIN_KEPT).then_some((all, fit)))
+}
+
+fn subset(observations: &[Observation], kept: &[bool]) -> Vec<Observation> {
+    observations
+        .iter()
+        .zip(kept)
+        .filter(|(_, k)| **k)
+        .map(|(obs, _)| *obs)
+        .collect()
+}
+
+fn clip(
+    observations: &[Observation],
+    mut kept: Vec<bool>,
+    mut fit: OrbitFit,
+    conics: Conics,
+) -> Option<(Vec<bool>, OrbitFit)> {
+    let start = kept.iter().filter(|k| **k).count();
+    let max_dropped = (start as f64 * MAX_OUTLIER_SHARE) as usize;
+    let mut dropped = 0;
+    loop {
+        let (worst, off) = (0..observations.len())
+            .filter(|&i| kept[i])
+            .map(|i| (i, off_in_sigmas(&fit, &observations[i])))
+            .max_by(|a, b| a.1.total_cmp(&b.1))?;
+        if off <= OUTLIER_SIGMAS {
+            return Some((kept, fit));
+        }
+        if dropped >= max_dropped || start - dropped <= MIN_KEPT {
+            return None;
+        }
+        kept[worst] = false;
+        dropped += 1;
+        fit = converge_orbit(
+            &subset(observations, &kept),
+            &fit.state,
+            fit.epoch_jd,
+            CONVERGE_ITERATIONS,
+            conics,
+        )?;
+    }
 }
 
 #[cfg(test)]
