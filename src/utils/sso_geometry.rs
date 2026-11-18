@@ -72,6 +72,17 @@ impl OrbitalElements {
         self.tp = self.epoch_jd - self.mean_anomaly.to_radians() / n;
         self
     }
+
+    pub fn tisserand_jupiter(&self) -> Option<f64> {
+        if self.q <= 0.0 {
+            return None;
+        }
+        let a_jupiter = JUPITER.elements[0];
+        Some(
+            a_jupiter * (1.0 - self.e) / self.q
+                + 2.0 * self.incl.to_radians().cos() * (self.q * (1.0 + self.e) / a_jupiter).sqrt(),
+        )
+    }
 }
 
 /// Observing geometry at a given instant.
