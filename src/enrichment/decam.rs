@@ -331,6 +331,11 @@ pub struct DecamSsoAssociation {
     pub helio_dist: Option<f32>,
     pub topo_dist: Option<f32>,
     pub phase_angle: Option<f32>,
+    pub a: Option<f32>,
+    pub e: Option<f32>,
+    pub incl: Option<f32>,
+    pub q: Option<f32>,
+    pub tisserand_jupiter: Option<f32>,
 }
 
 /// DECAM alert properties computed during enrichment
@@ -413,7 +418,8 @@ fn known_associations(
             .map(|d| {
                 let sso = match closest(d, orbits, paths, &cfg) {
                     Some((idx, separation)) => {
-                        let geometry = geometry_at(&orbits[idx].elements, d.jd, &DECAM);
+                        let elements = &orbits[idx].elements;
+                        let geometry = geometry_at(elements, d.jd, &DECAM);
                         DecamSsoAssociation {
                             is_sso: true,
                             designation: Some(orbits[idx].designation.clone()),
@@ -422,6 +428,11 @@ fn known_associations(
                             helio_dist: Some(geometry.helio_dist as f32),
                             topo_dist: Some(geometry.topo_dist as f32),
                             phase_angle: Some(geometry.phase_angle as f32),
+                            a: (elements.e < 1.0).then_some(elements.a as f32),
+                            e: Some(elements.e as f32),
+                            incl: Some(elements.incl as f32),
+                            q: Some(elements.q as f32),
+                            tisserand_jupiter: elements.tisserand_jupiter().map(|t| t as f32),
                         }
                     }
                     None => DecamSsoAssociation::default(),
