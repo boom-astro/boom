@@ -230,7 +230,7 @@ pub struct DecamAlertForFilter {
 }
 
 /// The object matched in another survey, from its aux lookup, or null.
-fn survey_match_projection(aux_field: &str, with_nondetections: bool) -> Document {
+pub fn survey_match_projection(aux_field: &str, with_nondetections: bool) -> Document {
     let aux = format!("${}", aux_field);
     let mut then = doc! {
         "objectId": { "$arrayElemAt": [ format!("{}._id", aux), 0 ] },

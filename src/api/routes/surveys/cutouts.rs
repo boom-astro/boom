@@ -79,9 +79,10 @@ pub async fn get_cutouts(
             .as_ref()
             .unwrap_or(&WhichCutouts::Brightest)
             .clone();
-        let mag_field = match survey {
-            Survey::Decam => "candidate.magap",
-            _ => "candidate.magpsf",
+        let (brightness_field, brightest_order) = match survey {
+            Survey::Decam => ("candidate.magap", 1),
+            Survey::Askap => ("candidate.flux_peak", -1),
+            _ => ("candidate.magpsf", 1),
         };
         let find_options = match which {
             WhichCutouts::First => mongodb::options::FindOneOptions::builder()
@@ -91,10 +92,10 @@ pub async fn get_cutouts(
                 .sort(doc! { "candidate.jd": -1 })
                 .build(),
             WhichCutouts::Brightest => mongodb::options::FindOneOptions::builder()
-                .sort(doc! { mag_field: 1 }) // Lowest mag is brightest, so sort in ascending order
+                .sort(doc! { brightness_field: brightest_order })
                 .build(),
             WhichCutouts::Faintest => mongodb::options::FindOneOptions::builder()
-                .sort(doc! { mag_field: -1 }) // Highest mag is faintest, so sort in descending order
+                .sort(doc! { brightness_field: -brightest_order })
                 .build(),
         };
 

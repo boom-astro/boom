@@ -586,6 +586,37 @@ export async function fetchCollectionStats(): Promise<CollectionStats> {
   return unwrapData<CollectionStats>(await readJson(res), { n_collections: 0, collections: [] });
 }
 
+export type LiveBin = {
+  start: string;
+  received: number;
+  processed: number;
+  latency_s: number | null;
+  latency_max_s: number | null;
+};
+
+export type LiveSurvey = {
+  survey: string;
+  start: string;
+  end: string;
+  received: number;
+  processed: number;
+  last_received_at: string | null;
+  bins: LiveBin[];
+};
+
+export type LiveIngest = {
+  date: string;
+  bin_minutes: number;
+  updated_at: string;
+  surveys: LiveSurvey[];
+};
+
+export async function fetchLiveIngest(): Promise<LiveIngest> {
+  const res = await fetch(`${API_BASE}/stats/live`, { headers: optionalAuthHeaders() });
+  await ensureOk(res, "Fetch live ingest");
+  return unwrapData<LiveIngest>(await readJson(res), { date: "", bin_minutes: 10, updated_at: "", surveys: [] });
+}
+
 export type SearchResult = {
   objectId: string;
   ra: number;
@@ -712,4 +743,5 @@ export default {
   fetchStats,
   refreshStats,
   fetchCollectionStats,
+  fetchLiveIngest,
 };

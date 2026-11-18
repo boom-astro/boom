@@ -88,6 +88,7 @@ fn timeseries_fields(survey: &Survey) -> &'static [&'static str] {
         Survey::Lsst => &["prv_candidates", "fp_hists"],
         Survey::Decam => &["prv_candidates", "fp_hists"],
         Survey::Winter => &["prv_candidates"],
+        Survey::Askap => &["prv_candidates", "fp_hists"],
     }
 }
 
@@ -539,7 +540,13 @@ mod tests {
 
     #[test]
     fn timeseries_fields_matches_the_alert_aux_for_update_structs() {
-        for survey in [Survey::Ztf, Survey::Lsst, Survey::Decam, Survey::Winter] {
+        for survey in [
+            Survey::Ztf,
+            Survey::Lsst,
+            Survey::Decam,
+            Survey::Winter,
+            Survey::Askap,
+        ] {
             let path = format!(
                 "{}/src/alert/{}.rs",
                 env!("CARGO_MANIFEST_DIR"),

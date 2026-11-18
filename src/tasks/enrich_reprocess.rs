@@ -29,8 +29,8 @@ use super::ledger::{MutationTarget, Operation};
 use crate::conf::AppConfig;
 use crate::enrichment::{
     models::{SharedModelPool, SharedModels},
-    DecamEnrichmentWorker, EnrichmentWorker, EnrichmentWorkerError, LsstEnrichmentWorker,
-    WinterEnrichmentWorker, ZtfEnrichmentWorker,
+    AskapEnrichmentWorker, DecamEnrichmentWorker, EnrichmentWorker, EnrichmentWorkerError,
+    LsstEnrichmentWorker, WinterEnrichmentWorker, ZtfEnrichmentWorker,
 };
 use crate::utils::{
     enums::Survey,
@@ -124,6 +124,9 @@ pub struct EnrichReprocessParams {
     /// filled out of band; the task will not add to it or delete it.
     #[serde(default)]
     pub input_queue: Option<String>,
+    /// Write only these keys of `properties`. DECam only.
+    #[serde(default)]
+    pub properties: Option<Vec<String>>,
 }
 
 /// More than this and the workers contend for the connection pool and, on ZTF,
@@ -140,6 +143,14 @@ impl EnrichReprocessParams {
         if let Selection::MissingField { field } = &self.selection {
             if field.trim().is_empty() {
                 return Err("selection.field is required".to_string());
+            }
+        }
+        if let Some(keys) = &self.properties {
+            if keys.is_empty() || keys.iter().any(|k| k.trim().is_empty()) {
+                return Err("properties must list at least one key".to_string());
+            }
+            if !matches!(self.survey, Survey::Decam) {
+                return Err(format!("properties is not supported for {}", self.survey));
             }
         }
         if let Selection::CandidRange { from, to } = &self.selection {
@@ -358,6 +369,7 @@ pub async fn run(
         let config_path = ctx.config_path().to_string();
         let queue = queue.clone();
         let survey = params.survey.clone();
+        let properties = params.properties.clone();
         let shared_models = shared_model_pool.as_ref().map(|pool| pool.next_model_set());
 
         let handle = thread::spawn(move || {
@@ -368,8 +380,16 @@ pub async fn run(
                     Survey::Lsst => run_enrich_only::<LsstEnrichmentWorker>,
                     Survey::Decam => run_enrich_only::<DecamEnrichmentWorker>,
                     Survey::Winter => run_enrich_only::<WinterEnrichmentWorker>,
+                    Survey::Askap => run_enrich_only::<AskapEnrichmentWorker>,
                 };
-                let result = run_worker(receiver, &config_path, shared_models, queue, worker);
+                let result = run_worker(
+                    receiver,
+                    &config_path,
+                    shared_models,
+                    queue,
+                    worker,
+                    properties,
+                );
                 result.unwrap_or_else(as_error!("enrichment worker failed"));
             })
         });
@@ -545,10 +565,19 @@ async fn run_enrich_only<T: EnrichmentWorker>(
     shared_models: Option<Arc<SharedModels>>,
     input_queue: String,
     worker_index: usize,
+    properties: Option<Vec<String>>,
 ) -> Result<(), EnrichmentWorkerError> {
     debug!(?config_path);
     let mut worker = T::new(config_path, shared_models).await?;
     worker.disable_babamul();
+    if let Some(keys) = properties {
+        if !worker.write_only_properties(keys) {
+            return Err(EnrichmentWorkerError::ConfigurationError(format!(
+                "{} cannot write a subset of properties",
+                T::survey()
+            )));
+        }
+    }
 
     let config = AppConfig::from_path(config_path)?;
     let survey = T::survey();
@@ -629,12 +658,19 @@ mod tests {
             selection,
             n_workers: None,
             input_queue: None,
+            properties: None,
         }
     }
 
     #[test]
     fn every_survey_has_an_enrichment_worker() {
-        for survey in [Survey::Ztf, Survey::Lsst, Survey::Decam, Survey::Winter] {
+        for survey in [
+            Survey::Ztf,
+            Survey::Lsst,
+            Survey::Decam,
+            Survey::Winter,
+            Survey::Askap,
+        ] {
             assert!(
                 params(survey.clone(), Selection::All)
                     .validate_params()
@@ -654,7 +690,7 @@ mod tests {
 
     #[test]
     fn stale_is_refused_for_a_survey_that_does_not_stamp() {
-        for survey in [Survey::Lsst, Survey::Decam, Survey::Winter] {
+        for survey in [Survey::Lsst, Survey::Decam, Survey::Winter, Survey::Askap] {
             let message = params(survey.clone(), Selection::Stale)
                 .validate_params()
                 .expect_err("stale must be refused for a survey that does not stamp");

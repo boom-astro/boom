@@ -1,6 +1,7 @@
 use crate::conf::AppConfig;
 use crate::utils::cutouts::AlertCutout;
 use crate::utils::enums::Survey;
+use crate::utils::ingest_stats;
 use crate::utils::worker::WorkerCmd;
 use crate::{
     conf,
@@ -644,6 +645,37 @@ fn to_bits_normalized(jd: f64) -> u64 {
     bits
 }
 
+pub async fn nearest_match(
+    ra: f64,
+    dec: f64,
+    dec_range: (f64, f64),
+    radius_rad: f64,
+    collection: &Collection<Document>,
+) -> Result<Vec<String>, AlertError> {
+    if !(dec >= dec_range.0 && dec <= dec_range.1) {
+        return Ok(vec![]);
+    }
+    let result = collection
+        .find_one(doc! {
+            "coordinates.radec_geojson": {
+                "$nearSphere": [ra - 180.0, dec],
+                "$maxDistance": radius_rad,
+            },
+        })
+        .projection(doc! {
+            "_id": 1
+        })
+        .await;
+    match result {
+        Ok(Some(doc)) => Ok(vec![doc.get_str("_id")?.to_string()]),
+        Ok(None) => Ok(vec![]),
+        Err(e) => {
+            error!("Error cross-matching with {}: {}", collection.name(), e);
+            Ok(vec![])
+        }
+    }
+}
+
 pub trait TimeSeries {
     /// Return the time value of this TimeSeries point as a Julian Date (JD).
     fn time(&self) -> f64;
@@ -1144,33 +1176,7 @@ pub trait AlertWorker {
         radius_rad: f64,
         collection: &Collection<Document>,
     ) -> Result<Vec<String>, AlertError> {
-        let matches = if dec >= dec_range.0 && dec <= dec_range.1 {
-            let result = collection
-                .find_one(doc! {
-                    "coordinates.radec_geojson": {
-                        "$nearSphere": [ra - 180.0, dec],
-                        "$maxDistance": radius_rad,
-                    },
-                })
-                .projection(doc! {
-                    "_id": 1
-                })
-                .await;
-            match result {
-                Ok(Some(doc)) => {
-                    let object_id = doc.get_str("_id")?;
-                    vec![object_id.to_string()]
-                }
-                Ok(None) => vec![],
-                Err(e) => {
-                    error!("Error cross-matching with {}: {}", collection.name(), e);
-                    vec![]
-                }
-            }
-        } else {
-            vec![]
-        };
-        Ok(matches)
+        nearest_match(ra, dec, dec_range, radius_rad, collection).await
     }
 
     #[instrument(skip(self, collection), fields(xmatch_survey = collection.name()), err)]
@@ -1336,6 +1342,8 @@ pub trait AlertWorker {
     async fn process_alert(&mut self, avro_bytes: &[u8]) -> Result<ProcessAlertStatus, AlertError>;
 }
 
+const STATS_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+
 pub fn alert_temp_queue_name(input_queue_name: &str) -> String {
     format!("{}_temp", input_queue_name)
 }
@@ -1485,6 +1493,9 @@ pub async fn run_alert_worker<T: AlertWorker>(
         .await
         .inspect_err(as_error!("failed to create redis client"))?;
     let survey_name = survey.to_string();
+    let db = config.build_db().await?;
+    let mut stats = ingest_stats::MinuteStats::new();
+    let mut last_stats_flush = std::time::Instant::now();
 
     let command_interval: usize = worker_config.command_interval;
     let mut command_check_countdown = command_interval;
@@ -1523,6 +1534,10 @@ pub async fn run_alert_worker<T: AlertWorker>(
         KeyValue::new("reason", "output_queue"),
     ];
     loop {
+        if !stats.is_empty() && last_stats_flush.elapsed() >= STATS_FLUSH_INTERVAL {
+            ingest_stats::flush(&db, &survey_name, &mut stats).await;
+            last_stats_flush = std::time::Instant::now();
+        }
         // check for command from threadpool
         if command_check_countdown == 0 {
             if should_terminate(&mut receiver) {
@@ -1556,7 +1571,17 @@ pub async fn run_alert_worker<T: AlertWorker>(
             }
         };
 
-        let process_result = alert_processor.process_alert(&avro_bytes).await;
+        let (received_ms, payload) = ingest_stats::unwrap(&avro_bytes);
+        let process_result = alert_processor.process_alert(payload).await;
+        if let (Ok(ProcessAlertStatus::Added(candid)), Some(received_ms)) =
+            (&process_result, received_ms)
+        {
+            ingest_stats::mark_received(&con, &survey_name, *candid, received_ms).await;
+            stats
+                .entry(ingest_stats::minute_of(received_ms))
+                .or_default()
+                .received += 1;
+        }
         let mut attributes = match process_result {
             Ok(ProcessAlertStatus::Added(_)) => &ok_added_attrs,
             Ok(ProcessAlertStatus::Exists(_)) => &ok_exists_attrs,
@@ -1582,5 +1607,6 @@ pub async fn run_alert_worker<T: AlertWorker>(
 
         handle_result?;
     }
+    ingest_stats::flush(&db, &survey_name, &mut stats).await;
     Ok(())
 }

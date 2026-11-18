@@ -82,7 +82,7 @@ pub const ZTF_MODELS: &[ModelFile] = &[
 pub const DERIVATIONS: &[(&str, u32)] = &[
     // photstats and multisurvey_photstats.
     ("photstats", 2),
-    ("sso", 2),
+    ("sso", 3),
     // rock, star, near_brightstar and stationary.
     ("crossmatch_flags", 2),
     ("detection_history", 2),
@@ -93,6 +93,7 @@ pub const DERIVATIONS: &[(&str, u32)] = &[
     ("applecider_postprocess", 1),
     // arnett_fit and thermal_fit.
     ("lightcurve_fits", 1),
+    ("gp_fit", 1),
 ];
 
 /// Only GPU builds compute `villar_fit`; bump it when the PSO fit or its `PsoConfig` changes.

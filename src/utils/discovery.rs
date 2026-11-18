@@ -207,6 +207,7 @@ pub async fn load_unknown(
             "candidate.rb": { "$gte": 0.5 },
             "$expr": { "$lt": [{ "$subtract": ["$candidate.jd", "$candidate.jdstarthist"] }, 0.5] },
         },
+        Survey::Askap => return Ok(Vec::new()),
     };
     let mut cursor = db
         .collection::<Document>(&format!("{survey}_alerts"))
@@ -291,6 +292,7 @@ fn projection(survey: &Survey) -> Document {
         Survey::Lsst => ("midpointMjdTai", "magpsf", "sigmapsf", "band"),
         Survey::Decam => ("jd", "magap", "sigmagap", "band"),
         Survey::Winter => ("jd", "magpsf", "sigmapsf", "band"),
+        Survey::Askap => return doc! { "_id": 1 },
     };
     let mut projection = doc! { "_id": 1, "candidate.ra": 1, "candidate.dec": 1 };
     for field in [jd, mag, mag_err, band] {
@@ -317,6 +319,7 @@ fn detection_from(survey: &Survey, doc: &Document) -> Option<Detection> {
             "magpsf",
             "sigmapsf",
         ),
+        Survey::Askap => return None,
     };
     Some(Detection {
         id: detection_id(survey, doc.get_i64("_id").ok()?),

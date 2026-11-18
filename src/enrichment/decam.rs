@@ -306,7 +306,7 @@ pub struct DecamAlertForEnrichment {
     pub candidate: DecamCandidate,
     // Signed SNR is only needed here: detection history counts detections.
     pub prv_candidates: Vec<DecamPhotometry>,
-    pub fp_hists: Vec<PhotometryMag>,
+    pub fp_hists: Vec<DecamPhotometry>,
     #[serde(default)]
     pub fp_nondetections: Vec<DecamNonDetection>,
     #[serde(default)]
@@ -331,6 +331,11 @@ pub struct DecamSsoAssociation {
     pub helio_dist: Option<f32>,
     pub topo_dist: Option<f32>,
     pub phase_angle: Option<f32>,
+    pub a: Option<f32>,
+    pub e: Option<f32>,
+    pub incl: Option<f32>,
+    pub q: Option<f32>,
+    pub tisserand_jupiter: Option<f32>,
 }
 
 /// DECAM alert properties computed during enrichment
@@ -413,7 +418,8 @@ fn known_associations(
             .map(|d| {
                 let sso = match closest(d, orbits, paths, &cfg) {
                     Some((idx, separation)) => {
-                        let geometry = geometry_at(&orbits[idx].elements, d.jd, &DECAM);
+                        let elements = &orbits[idx].elements;
+                        let geometry = geometry_at(elements, d.jd, &DECAM);
                         DecamSsoAssociation {
                             is_sso: true,
                             designation: Some(orbits[idx].designation.clone()),
@@ -422,6 +428,11 @@ fn known_associations(
                             helio_dist: Some(geometry.helio_dist as f32),
                             topo_dist: Some(geometry.topo_dist as f32),
                             phase_angle: Some(geometry.phase_angle as f32),
+                            a: (elements.e < 1.0).then_some(elements.a as f32),
+                            e: Some(elements.e as f32),
+                            incl: Some(elements.incl as f32),
+                            q: Some(elements.q as f32),
+                            tisserand_jupiter: elements.tisserand_jupiter().map(|t| t as f32),
                         }
                     }
                     None => DecamSsoAssociation::default(),
@@ -442,6 +453,7 @@ pub struct DecamEnrichmentWorker {
     alert_collection: mongodb::Collection<Document>,
     alert_pipeline: Vec<Document>,
     known: Option<KnownObjects>,
+    only_properties: Option<Vec<String>>,
 }
 
 #[async_trait::async_trait]
@@ -467,6 +479,7 @@ impl EnrichmentWorker for DecamEnrichmentWorker {
             alert_collection,
             alert_pipeline: create_decam_alert_pipeline(),
             known: None,
+            only_properties: None,
         })
     }
 
@@ -475,6 +488,11 @@ impl EnrichmentWorker for DecamEnrichmentWorker {
     }
 
     fn disable_babamul(&mut self) {}
+
+    fn write_only_properties(&mut self, keys: Vec<String>) -> bool {
+        self.only_properties = Some(keys);
+        true
+    }
 
     fn input_queue_name(&self) -> String {
         self.input_queue.clone()
@@ -511,10 +529,17 @@ impl EnrichmentWorker for DecamEnrichmentWorker {
             .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), a| {
                 (lo.min(a.candidate.jd), hi.max(a.candidate.jd))
             });
-        let mut associations = self
-            .known_objects((first + last) / 2.0)
-            .await
-            .map(|known| known_associations(known, &alerts));
+        let match_known = self
+            .only_properties
+            .as_ref()
+            .is_none_or(|keys| keys.iter().any(|k| k == "rock" || k == "sso"));
+        let mut associations = if match_known {
+            self.known_objects((first + last) / 2.0)
+                .await
+                .map(|known| known_associations(known, &alerts))
+        } else {
+            None
+        };
 
         // we keep it very simple for now, let's run on 1 alert at a time
         // we will move to batch processing later
@@ -524,14 +549,20 @@ impl EnrichmentWorker for DecamEnrichmentWorker {
             let candid = alert.candid;
 
             let sso = associations.as_mut().and_then(|a| a.remove(&candid));
-            let properties = self.get_alert_properties(&alert, sso).await?;
-
-            let update_alert_document = doc! {
-                "$set": {
-                    "properties": mongify(&properties),
-                    "updated_at": now,
-                }
+            let properties = mongify(&Self::alert_properties(&alert, sso)?);
+            let mut set = match &self.only_properties {
+                None => doc! { "properties": properties },
+                Some(keys) => keys
+                    .iter()
+                    .filter_map(|k| {
+                        properties
+                            .get(k)
+                            .map(|v| (format!("properties.{k}"), v.clone()))
+                    })
+                    .collect(),
             };
+            set.insert("updated_at", now);
+            let update_alert_document = doc! { "$set": set };
 
             let update = WriteModel::UpdateOne(
                 UpdateOneModel::builder()
@@ -576,8 +607,7 @@ impl DecamEnrichmentWorker {
         self.known.as_mut()
     }
 
-    async fn get_alert_properties(
-        &self,
+    fn alert_properties(
         alert: &DecamAlertForEnrichment,
         sso: Option<DecamSsoAssociation>,
     ) -> Result<DecamAlertProperties, EnrichmentWorkerError> {
@@ -586,7 +616,11 @@ impl DecamEnrichmentWorker {
             .iter()
             .filter_map(DecamPhotometry::to_positive_mag)
             .collect();
-        let fp_hists = alert.fp_hists.clone();
+        let fp_hists: Vec<PhotometryMag> = alert
+            .fp_hists
+            .iter()
+            .filter_map(DecamPhotometry::to_positive_mag)
+            .collect();
 
         // lightcurve is prv_candidates + fp_hists, no need for parse_photometry here
         let mut lightcurve = [prv_candidates, fp_hists].concat();
@@ -689,4 +723,10 @@ impl DecamEnrichmentWorker {
             sso,
         })
     }
+}
+
+pub fn decam_alert_properties_without_sso(
+    alert: &DecamAlertForEnrichment,
+) -> Result<DecamAlertProperties, EnrichmentWorkerError> {
+    DecamEnrichmentWorker::alert_properties(alert, None)
 }

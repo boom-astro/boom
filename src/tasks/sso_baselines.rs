@@ -13,7 +13,7 @@
 
 use super::context::TaskContext;
 use super::ledger::{MutationTarget, Operation};
-use crate::utils::outburst::{Point, MAX_SEPARATION_ARCSEC};
+use crate::utils::outburst::{stored_static_interloper, Point, MAX_SEPARATION_ARCSEC};
 use crate::utils::phase_curve::{baseline_document, fit, PhaseCurve, BASELINES_COLLECTION};
 use futures::TryStreamExt;
 use mongodb::bson::{doc, Document};
@@ -87,6 +87,8 @@ pub async fn run(
             "_id": 0,
             "candidate.ssnamenr": 1, "candidate.fid": 1,
             "candidate.magpsf": 1, "candidate.sigmapsf": 1,
+            "candidate.ssdistnr": 1, "candidate.ssmagnr": 1,
+            "candidate.ndethist": 1, "candidate.distnr": 1,
             "properties.sso.helio_dist": 1, "properties.sso.topo_dist": 1,
             "properties.sso.phase_angle": 1,
         })
@@ -231,6 +233,9 @@ fn fit_bands(points: &[Point]) -> HashMap<u8, PhaseCurve> {
 /// One archived detection, or `None` when it is missing photometry or geometry.
 fn point_from(doc: &Document) -> Option<(String, Point)> {
     let candidate = doc.get_document("candidate").ok()?;
+    if stored_static_interloper(candidate) {
+        return None;
+    }
     let sso = doc
         .get_document("properties")
         .ok()?

@@ -58,6 +58,12 @@ api:
     admin_username: admin
     admin_password: "" # Set via BOOM_API__AUTH__ADMIN_PASSWORD environment variable
     admin_email: admin@example.com
+  # POST /filters/test/simulated: replays simulated light curves as alerts,
+  # read-only against the catalogs. Cost grows with alerts x points per object.
+  filter_simulation:
+    enabled: false
+    max_lightcurves: 1000
+    max_points: 200000
 babamul:
   # Emails that are admins, granted at every API startup. Admins can also be
   # appointed in the admin page, and startup never revokes. To remove one: take
@@ -178,6 +184,9 @@ kafka:
       # window drops a whole night, and nothing re-subscribes to it afterwards.
       # A longer outage than this still needs `kafka_consumer winter --on DATE`.
       subscription_window_days: 2
+    askap:
+      server: "localhost:9092"
+      group_id: "" # Set via BOOM_KAFKA__CONSUMER__ASKAP__GROUP_ID environment variable
   producer:
     server: "localhost:9092" # Only one global producer for now (filter worker output)
 workers:
@@ -233,6 +242,18 @@ workers:
       max_match_rate: 100
       reference_night: "2026-09-18"
       reference_window_days: 30
+  askap:
+    command_interval: 500
+    alert:
+      n_workers: 1
+    enrichment:
+      n_workers: 1
+    filter:
+      n_workers: 1
+      refresh_interval_minutes: 15
+      max_match_rate: 5
+      reference_night:
+      reference_window_days: 30
 # Shape-aware host-galaxy association: scores each galaxy cross-match by its
 # directional light radius (d_DLR) instead of a fixed circular aperture. Stored
 # on the alert aux document under `host_galaxy`; filters cut on
@@ -244,11 +265,12 @@ workers:
 # stored as `objtype`):
 #   NED      -> Diam, Diam_ba, Diam_pa, Diam_survey, DistMpc, DistMpc_method, z
 #   LSDR10   -> shape_r, shape_e1, shape_e2, objtype, flux_r, and where the
-#               ingest provides them sersic, flux_ivar_r, fracflux_r
+#               ingest provides them sersic, flux_{g,i,z}, flux_ivar_{r,g,i,z},
+#               fracflux_{r,g,i,z}
 #
-# The three optional Legacy columns degrade one step each rather than failing:
-# no `sersic` leaves a SER row on its half-light radius, no `flux_ivar_r` leaves
-# a REX row judged on size and blending alone, no `fracflux_r` reads as unblended.
+# No `sersic` leaves a SER row on its half-light radius, no `fracflux_<band>`
+# reads as unblended. A REX row is judged in r, or in the best of g, i, z when r
+# was not observed, and is dropped when no band has a `flux_ivar_<band>`.
 host_galaxy:
   enabled: true
   ned_catalog: NED
@@ -593,6 +615,12 @@ crossmatch:
         sersic: 1
         flux_ivar_r: 1
         fracflux_r: 1
+        flux_ivar_g: 1
+        flux_ivar_i: 1
+        flux_ivar_z: 1
+        fracflux_g: 1
+        fracflux_i: 1
+        fracflux_z: 1
     LSDR9:
       radius: 30.0
       use_distance: true
@@ -625,6 +653,10 @@ crossmatch:
         sersic: 1
         flux_ivar_r: 1
         fracflux_r: 1
+        flux_ivar_g: 1
+        flux_ivar_z: 1
+        fracflux_g: 1
+        fracflux_z: 1
     AllWISE:
       radius: 2.0
       use_distance: false
@@ -1043,6 +1075,12 @@ crossmatch:
         sersic: 1
         flux_ivar_r: 1
         fracflux_r: 1
+        flux_ivar_g: 1
+        flux_ivar_i: 1
+        flux_ivar_z: 1
+        fracflux_g: 1
+        fracflux_i: 1
+        fracflux_z: 1
     LSDR9:
       radius: 30.0
       use_distance: true
@@ -1075,6 +1113,10 @@ crossmatch:
         sersic: 1
         flux_ivar_r: 1
         fracflux_r: 1
+        flux_ivar_g: 1
+        flux_ivar_z: 1
+        fracflux_g: 1
+        fracflux_z: 1
     AllWISE:
       radius: 2.0
       use_distance: false
@@ -1493,6 +1535,12 @@ crossmatch:
         sersic: 1
         flux_ivar_r: 1
         fracflux_r: 1
+        flux_ivar_g: 1
+        flux_ivar_i: 1
+        flux_ivar_z: 1
+        fracflux_g: 1
+        fracflux_i: 1
+        fracflux_z: 1
     LSDR9:
       radius: 30.0
       use_distance: true
@@ -1525,6 +1573,10 @@ crossmatch:
         sersic: 1
         flux_ivar_r: 1
         fracflux_r: 1
+        flux_ivar_g: 1
+        flux_ivar_z: 1
+        fracflux_g: 1
+        fracflux_z: 1
     AllWISE:
       radius: 2.0
       use_distance: false
@@ -1933,6 +1985,12 @@ crossmatch:
         sersic: 1
         flux_ivar_r: 1
         fracflux_r: 1
+        flux_ivar_g: 1
+        flux_ivar_i: 1
+        flux_ivar_z: 1
+        fracflux_g: 1
+        fracflux_i: 1
+        fracflux_z: 1
     LSDR9:
       radius: 30.0
       use_distance: true
@@ -1965,6 +2023,10 @@ crossmatch:
         sersic: 1
         flux_ivar_r: 1
         fracflux_r: 1
+        flux_ivar_g: 1
+        flux_ivar_z: 1
+        fracflux_g: 1
+        fracflux_z: 1
     AllWISE:
       radius: 2.0
       use_distance: false
@@ -2126,3 +2188,463 @@ crossmatch:
         n_det: 1
         lightcurve: 1
         forced: 1
+  askap:
+    LSPSC:
+      radius: 30.0 # 30 arcseconds
+      use_distance: false
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        score: 1
+        mag_white: 1
+      max_results: 3 # 3 nearest neighbors
+    Gaia_DR3:
+      radius: 3.0
+      use_distance: false
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        parallax: 1
+        parallax_error: 1
+        pm: 1
+        pmra: 1
+        pmra_error: 1
+        pmdec: 1
+        pmdec_error: 1
+        phot_g_mean_mag: 1
+        phot_bp_mean_mag: 1
+        phot_rp_mean_mag: 1
+        phot_g_n_obs: 1
+        phot_bp_n_obs: 1
+        phot_rp_n_obs: 1
+        ruwe: 1
+        phot_bp_rp_excess_factor: 1
+    milliquas_v8:
+      radius: 3.0
+      use_distance: false
+      projection:
+        _id: 1
+        Name: 1
+        Descrip: 1
+        objtype: 1
+        Qpct: 1
+        ra: 1
+        dec: 1
+    NED:
+      radius: 300.0 # 300 arcseconds
+      use_distance: true
+      distance_key: "z"
+      distance_max: 30.0
+      distance_max_near: 300.0
+      angular_size_key: Diam
+      # Must be >= host_galaxy.max_dlr: d_DLR <= N implies sep <= N * semi-major.
+      angular_size_scale: 5.0
+      angular_size_radius_max: 21600.0 # 6 deg, enough for the LMC
+      angular_size_radius_min: 5.0 # a row with neither Diam nor z, matched on astrometry alone
+      max_results: 50
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        objtype: 1
+        z: 1
+        z_unc: 1
+        z_tech: 1
+        z_qual: 1
+        DistMpc: 1
+        DistMpc_unc: 1
+        ebv: 1
+        m_Ks: 1
+        m_Ks_unc: 1
+        tMASSphot: 1
+        Mstar: 1
+        Mstar_unc: 1
+        Diam: 1
+        Diam_ba: 1
+        Diam_pa: 1
+        Diam_survey: 1
+        DistMpc_method: 1
+    2MASS_PSC:
+      radius: 3.0
+      use_distance: false
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        j_m: 1
+        j_msigcom: 1
+        j_snr: 1
+        h_m: 1
+        h_msigcom: 1
+        h_snr: 1
+        k_m: 1
+        k_msigcom: 1
+        k_snr: 1
+        ndet: 1
+    GALEX:
+      radius: 3.0
+      use_distance: false
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        fuv_mag: 1
+        fuv_magerr: 1
+        nuv_mag: 1
+        nuv_magerr: 1
+        fuv_exp: 1
+        nuv_exp: 1
+        obstype: 1
+        band: 1
+    VSX:
+      radius: 3.0
+      use_distance: false
+      projection:
+        _id: 1
+        name: 1
+        var_flag: 1
+        ra: 1
+        dec: 1
+        types: 1
+        max: 1
+        max_band: 1
+        min_is_amplitude: 1
+        min: 1
+        min_band: 1
+        epoch: 1
+        period: 1
+        spectral_type: 1
+    CatWISE2020:
+      radius: 3.0
+      use_distance: false
+      projection:
+        _id: 1
+        source_name: 1
+        ra: 1
+        dec: 1
+        sigra: 1
+        sigdec: 1
+        w1mpro: 1
+        w2mpro: 1
+        w1sigmpro: 1
+        w2sigmpro: 1
+        w1rchi2: 1
+        w2rchi2: 1
+        pmra: 1
+        pmdec: 1
+        sigpmra: 1
+        sigpmdec: 1
+        unwise_objid: 1
+    TNS:
+      radius: 3.0
+      use_distance: false
+      projection:
+        _id: 1
+        name_prefix: 1
+        name: 1
+        ra: 1
+        dec: 1
+        type: 1
+        redshift: 1
+        discovery_mag: 1
+        discovery_jd: 1
+        internal_names: 1
+      max_results: 3
+    DESI_DR1:
+      radius: 30.0 # 30 arcseconds
+      use_distance: true
+      distance_key: "z"
+      distance_max: 30.0
+      distance_max_near: 300.0
+      # DESI is spectroscopic and full of stars, which sit at z ~ 0 and so have
+      # no meaningful projected distance. Naming the type column keeps them from
+      # being ranked as though they were very nearby galaxies. QSO is left out
+      # deliberately: it is a plausible counterpart, so it ranks like a galaxy.
+      type_key: "spectype"
+      stellar_types: ["STAR"]
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        z: 1
+        zerr: 1
+        zwarn: 1
+        chi2: 1
+        deltachi2: 1
+        spectype: 1
+        zcat_nspec: 1
+    DESI_DR1_dwarfs:
+      radius: 300.0 # 300 arcseconds
+      use_distance: true
+      distance_key: "z"
+      distance_max: 30.0
+      distance_max_near: 300.0
+      angular_size_key: r50_r
+      # r50_r is a radius, not a diameter: 10.0 matches within 5 half-light radii.
+      angular_size_scale: 10.0
+      angular_size_radius_max: 1800.0
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        z: 1
+        zwarn: 1
+        lumi_dist_mpc: 1
+        dist_source: 1
+        log_mstar_m24: 1
+        log_mstar_m24_err: 1
+        mag_g: 1
+        mag_r: 1
+        mag_z: 1
+        r50_r: 1
+        dwarf_maskbit: 1
+        mstar_maskbit: 1
+        in_sga_2020: 1
+    PS1_DR2:
+      radius: 3.0
+      use_distance: false
+      projection:
+        _id: 1
+        gMeanPSFMag: 1
+        gMeanPSFMagErr: 1
+        rMeanPSFMag: 1
+        rMeanPSFMagErr: 1
+        iMeanPSFMag: 1
+        iMeanPSFMagErr: 1
+        zMeanPSFMag: 1
+        zMeanPSFMagErr: 1
+        yMeanPSFMag: 1
+        yMeanPSFMagErr: 1
+        ra: 1
+        dec: 1
+        strm_class: 1
+        strm_prob_galaxy: 1
+        strm_prob_qso: 1
+        strm_prob_star: 1
+        strm_uid: 1
+        strm_z_phot: 1
+        strm_z_phot_err: 1
+    LSDR10:
+      radius: 30.0
+      use_distance: true
+      distance_key: "z_phot_mean"
+      distance_max: 60.0
+      distance_max_near: 300.0
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        objtype: 1
+        ebv: 1
+        z_spec: 1
+        survey: 1
+        z_phot_mean: 1
+        z_phot_median: 1
+        z_phot_std: 1
+        z_phot_l95: 1
+        z_phot_u95: 1
+        flux_g: 1
+        flux_r: 1
+        flux_i: 1
+        flux_z: 1
+        flux_w1: 1
+        flux_w2: 1
+        flux_w3: 1
+        flux_w4: 1
+        shape_r: 1
+        shape_e1: 1
+        shape_e2: 1
+        sersic: 1
+        flux_ivar_r: 1
+        fracflux_r: 1
+        flux_ivar_g: 1
+        flux_ivar_i: 1
+        flux_ivar_z: 1
+        fracflux_g: 1
+        fracflux_i: 1
+        fracflux_z: 1
+    LSDR9:
+      radius: 30.0
+      use_distance: true
+      distance_key: "z_phot_mean"
+      distance_max: 60.0
+      distance_max_near: 300.0
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        objtype: 1
+        ebv: 1
+        z_spec: 1
+        survey: 1
+        z_phot_mean: 1
+        z_phot_median: 1
+        z_phot_std: 1
+        z_phot_l95: 1
+        z_phot_u95: 1
+        flux_g: 1
+        flux_r: 1
+        flux_z: 1
+        flux_w1: 1
+        flux_w2: 1
+        flux_w3: 1
+        flux_w4: 1
+        shape_r: 1
+        shape_e1: 1
+        shape_e2: 1
+        sersic: 1
+        flux_ivar_r: 1
+        fracflux_r: 1
+        flux_ivar_g: 1
+        flux_ivar_z: 1
+        fracflux_g: 1
+        fracflux_z: 1
+    AllWISE:
+      radius: 3.0
+      use_distance: false
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        w1mpro: 1
+        w2mpro: 1
+        w3mpro: 1
+        w4mpro: 1
+    eRASS1_Main:
+      radius: 45.0
+      use_distance: false
+      angular_size_key: pos_err
+      # pos_err is a 1-sigma radius, not a diameter: 6.0 matches within 3 sigma.
+      angular_size_scale: 6.0
+      angular_size_radius_max: 45.0
+      angular_size_radius_min: 5.0
+      projection:
+        _id: 1
+        iauname: 1
+        ra: 1
+        dec: 1
+        pos_err: 1
+        mjd_min: 1
+        mjd_max: 1
+        ext: 1
+        ext_like: 1
+        det_like_0: 1
+        ml_rate_1: 1
+        ml_rate_err_1: 1
+        ml_flux_1: 1
+        ml_flux_err_1: 1
+        ml_rate_p1: 1
+        ml_rate_err_p1: 1
+        ml_rate_p2: 1
+        ml_rate_err_p2: 1
+        ml_rate_p3: 1
+        ml_rate_err_p3: 1
+        flag_sp_snr: 1
+        flag_sp_bps: 1
+        flag_sp_scl: 1
+        flag_sp_lga: 1
+        flag_sp_gc_cons: 1
+        flag_opt: 1
+    5XMM_DR15:
+      radius: 20.0
+      use_distance: false
+      angular_size_key: radec_err
+      # 3 x radec_err, floored for the uncorrected 0.88" systematic error.
+      angular_size_scale: 6.0
+      angular_size_radius_max: 20.0
+      angular_size_radius_min: 4.0
+      projection:
+        _id: 1
+        iauname: 1
+        ra: 1
+        dec: 1
+        radec_err: 1
+        n_obs: 1
+        mjd_first: 1
+        mjd_last: 1
+        ep_flux: 1
+        ep_flux_err: 1
+        ep_det_ml: 1
+        ep_hr1: 1
+        ep_hr2: 1
+        ep_hr3: 1
+        ep_hr4: 1
+        extent: 1
+        extent_ml: 1
+        sum_flag: 1
+        var_flag: 1
+        fvar: 1
+        var_prob: 1
+        fratio: 1
+        classx_class: 1
+        classx_prob_agn: 1
+        classx_prob_star: 1
+        classx_prob_gal_xrb: 1
+        classx_prob_gal_cv: 1
+    2SXPS:
+      radius: 30.0
+      use_distance: false
+      angular_size_key: Err90
+      # Err90 is a 90% radius, not a diameter: 3.0 matches within 1.5 x Err90.
+      angular_size_scale: 3.0
+      angular_size_radius_max: 30.0
+      angular_size_radius_min: 2.0
+      projection:
+        _id: 1
+        IAUName: 1
+        ra: 1
+        dec: 1
+        Err90: 1
+        AstromType: 1
+        DetFlag: 1
+        FieldFlag: 1
+        NumObs: 1
+        NumDetObs: 1
+        FirstDetDate: 1
+        LastDetDate: 1
+        Rate_band0: 1
+        Rate_band0_pos: 1
+        Rate_band0_neg: 1
+        PeakRate_band0: 1
+        HR1: 1
+        HR2: 1
+        PvarPchiSnapshot_band0: 1
+        PvarPchiObsID_band0: 1
+        PowFlux: 1
+        PowFlux_pos: 1
+        PowFlux_neg: 1
+    4FGL_DR4:
+      radius: 3600.0
+      use_distance: false
+      angular_size_key: Conf_95_SemiMajor
+      # Conf_95_SemiMajor is in degrees: 7200.0 matches within the semi-major axis.
+      angular_size_scale: 7200.0
+      angular_size_radius_max: 3600.0
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        DataRelease: 1
+        Conf_95_SemiMajor: 1
+        Conf_95_SemiMinor: 1
+        Conf_95_PosAng: 1
+        Signif_Avg: 1
+        Flux1000: 1
+        Unc_Flux1000: 1
+        Energy_Flux100: 1
+        Unc_Energy_Flux100: 1
+        SpectrumType: 1
+        PL_Index: 1
+        Variability_Index: 1
+        Frac_Variability: 1
+        Flags: 1
+        CLASS1: 1
+        CLASS2: 1
+        ASSOC1: 1
+        ASSOC2: 1
+        ASSOC_PROB_BAY: 1
+        ASSOC_PROB_LR: 1
+        RA_Counterpart: 1
+        DEC_Counterpart: 1
