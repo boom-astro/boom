@@ -3863,7 +3863,7 @@ dependencies = [
 [[package]]
 name = "lightcurve-fitting"
 version = "0.1.0"
-source = "git+https://github.com/boom-astro/lightcurve-fitting?rev=8cdd434da79853556c62468efceaeb2754911999#8cdd434da79853556c62468efceaeb2754911999"
+source = "git+https://github.com/boom-astro/lightcurve-fitting?rev=9134d9cf63c57935007e97fd4b6dc0aa23aaa241#9134d9cf63c57935007e97fd4b6dc0aa23aaa241"
 dependencies = [
  "argmin",
  "argmin-math",

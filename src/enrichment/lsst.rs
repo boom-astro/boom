@@ -10,7 +10,6 @@ use crate::enrichment::{
 use crate::utils::db::mongify;
 use crate::utils::enums::Survey;
 use crate::utils::host::{HostGalaxyAssociation, HostSummary};
-use crate::utils::lightcurve_fits;
 use crate::utils::lightcurves::{
     analyze_photometry, is_stationary, prepare_photometry, signed_snr, summarise_detections,
     ActivityMetrics, Band, DetectionHistory, EpisodeHistory, MultisurveyDetectionHistory,
@@ -422,37 +421,18 @@ impl EnrichmentWorker for LsstEnrichmentWorker {
             BabamulLsstAlert,
             std::collections::HashMap<String, Vec<serde_json::Value>>,
         )> = Vec::new();
-        let mut work_items = Vec::with_capacity(alerts.len());
-        let mut fit_inputs = Vec::with_capacity(alerts.len());
         for alert in alerts {
-            // Compute numerical and boolean features from lightcurve and candidate analysis
-            let (properties, lightcurve) = self.get_alert_properties(&alert).await?;
-            fit_inputs.push(lightcurve);
-            work_items.push((alert, properties));
-        }
-
-        let span = tracing::Span::current();
-        let mut fits = tokio::task::spawn_blocking(move || {
-            span.in_scope(|| lightcurve_fits::fit_gp2d_many(&fit_inputs))
-        })
-        .await
-        .unwrap_or_else(|e| {
-            warn!("light curve fitting failed for the whole batch: {}", e);
-            Vec::new()
-        })
-        .into_iter();
-
-        for (alert, properties) in work_items {
             let candid = alert.candid;
 
-            let mut set_doc = doc! {
-                "properties": mongify(&properties),
-                "updated_at": now,
+            // Compute numerical and boolean features from lightcurve and candidate analysis
+            let properties = self.get_alert_properties(&alert).await?;
+
+            let update_alert_document = doc! {
+                "$set": {
+                    "properties": mongify(&properties),
+                    "updated_at": now,
+                }
             };
-            if let Some(Some(fit)) = fits.next() {
-                set_doc.insert("gp2d_fit", mongify(&fit));
-            }
-            let update_alert_document = doc! { "$set": set_doc };
 
             let update = WriteModel::UpdateOne(
                 UpdateOneModel::builder()
@@ -493,7 +473,7 @@ impl LsstEnrichmentWorker {
     pub async fn get_alert_properties(
         &self,
         alert: &LsstAlertForEnrichment,
-    ) -> Result<(LsstAlertProperties, Vec<PhotometryMag>), EnrichmentWorkerError> {
+    ) -> Result<LsstAlertProperties, EnrichmentWorkerError> {
         // Compute numerical and boolean features from lightcurve and candidate analysis
         let is_rock = alert.ss_object_id.is_some();
         let sso =
@@ -622,7 +602,7 @@ impl LsstEnrichmentWorker {
         let multisurvey_photstats = if decam_lightcurve.is_empty() {
             multisurvey_photstats
         } else {
-            let mut with_decam = [lightcurve.as_slice(), decam_lightcurve.as_slice()].concat();
+            let mut with_decam = [lightcurve, decam_lightcurve].concat();
             prepare_photometry(&mut with_decam);
             analyze_photometry(&with_decam).0
         };
@@ -675,7 +655,7 @@ impl LsstEnrichmentWorker {
                 .filter_map(|p| Some((p.jd, p.flux?, p.flux_err, p.band.clone()))),
         );
 
-        let properties = LsstAlertProperties {
+        Ok(LsstAlertProperties {
             rock: is_rock,
             hosted: alert.host_galaxy.as_ref().map(|h| h.best_host.is_some()),
             best_host: alert
@@ -694,8 +674,7 @@ impl LsstEnrichmentWorker {
             multisurvey_detection_history: Some(multisurvey_detection_history),
             episode_history: Some(episode_history),
             variability: Some(variability),
-        };
-        Ok((properties, lightcurve))
+        })
     }
 }
 

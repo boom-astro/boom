@@ -1,6 +1,6 @@
 use crate::utils::lightcurves::PhotometryMag;
 use lightcurve_fitting::{
-    build_flux_bands, build_mag_bands, fit_gp_2d, fit_parametric_model, fit_thermal, BandData,
+    build_flux_bands, build_mag_bands, fit_parametric_model, fit_thermal, BandData,
     ParametricBandResult, SviModelName, UncertaintyMethod,
 };
 use rayon::prelude::*;
@@ -44,22 +44,10 @@ pub struct ThermalFit {
     pub n_bands_used: i32,
 }
 
-#[derive(Debug, Default, Serialize)]
-pub struct Gp2dFit {
-    pub amp: Option<f64>,
-    pub ls_time: Option<f64>,
-    pub ls_wave: Option<f64>,
-    pub train_rms: Option<f64>,
-    pub log_likelihood: Option<f64>,
-    pub n_train: i32,
-    pub n_bands: i32,
-}
-
 #[derive(Debug, Default)]
 pub struct LightcurveFits {
     pub arnett: ArnettFit,
     pub thermal: ThermalFit,
-    pub gp2d: Gp2dFit,
 }
 
 fn finite(x: f64) -> Option<f64> {
@@ -142,64 +130,25 @@ fn fit_temperature(bands: HashMap<String, BandData>) -> ThermalFit {
     }
 }
 
-fn fit_gp2d(bands: &HashMap<String, BandData>) -> Gp2dFit {
-    let Some((_, result)) = fit_gp_2d(bands) else {
-        return Gp2dFit::default();
-    };
-    Gp2dFit {
-        amp: finite(result.amp),
-        ls_time: finite(result.ls_time),
-        ls_wave: finite(result.ls_wave),
-        train_rms: finite(result.train_rms),
-        log_likelihood: finite(result.log_likelihood),
-        n_train: result.n_train as i32,
-        n_bands: result.n_bands as i32,
-    }
-}
-
-fn columns(lightcurve: &[PhotometryMag]) -> Option<(Vec<f64>, Vec<f64>, Vec<f64>, Vec<String>)> {
+pub fn fit(lightcurve: &[PhotometryMag]) -> LightcurveFits {
     let points = around_peak(lightcurve);
     if points.is_empty() {
-        return None;
-    }
-    Some((
-        points.iter().map(|p| p.time).collect(),
-        points.iter().map(|p| p.mag as f64).collect(),
-        points.iter().map(|p| p.mag_err as f64).collect(),
-        points.iter().map(|p| p.band.to_string()).collect(),
-    ))
-}
-
-pub fn fit(lightcurve: &[PhotometryMag]) -> LightcurveFits {
-    let Some((times, mags, errs, bands)) = columns(lightcurve) else {
         return LightcurveFits::default();
-    };
+    }
+    let times: Vec<f64> = points.iter().map(|p| p.time).collect();
+    let mags: Vec<f64> = points.iter().map(|p| p.mag as f64).collect();
+    let errs: Vec<f64> = points.iter().map(|p| p.mag_err as f64).collect();
+    let bands: Vec<String> = points.iter().map(|p| p.band.to_string()).collect();
     let jd_min = times.iter().copied().fold(f64::INFINITY, f64::min);
-    let mag_bands = build_mag_bands(&times, &mags, &errs, &bands);
     LightcurveFits {
         arnett: fit_arnett(build_flux_bands(&times, &mags, &errs, &bands), jd_min),
-        gp2d: fit_gp2d(&mag_bands),
-        thermal: fit_temperature(mag_bands),
+        thermal: fit_temperature(build_mag_bands(&times, &mags, &errs, &bands)),
     }
-}
-
-pub fn fit_gp2d_only(lightcurve: &[PhotometryMag]) -> Gp2dFit {
-    let Some((times, mags, errs, bands)) = columns(lightcurve) else {
-        return Gp2dFit::default();
-    };
-    fit_gp2d(&build_mag_bands(&times, &mags, &errs, &bands))
 }
 
 pub fn fit_many(lightcurves: &[Vec<PhotometryMag>]) -> Vec<Option<LightcurveFits>> {
     lightcurves
         .par_iter()
         .map(|lc| catch_unwind(AssertUnwindSafe(|| fit(lc))).ok())
-        .collect()
-}
-
-pub fn fit_gp2d_many(lightcurves: &[Vec<PhotometryMag>]) -> Vec<Option<Gp2dFit>> {
-    lightcurves
-        .par_iter()
-        .map(|lc| catch_unwind(AssertUnwindSafe(|| fit_gp2d_only(lc))).ok())
         .collect()
 }
