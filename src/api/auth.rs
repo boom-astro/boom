@@ -370,6 +370,7 @@ const BABAMUL_PUBLIC_ROUTES: &[&str] = &[
     "/babamul/stats/nightly",
     "/babamul/stats/collections",
     "/babamul/stats/kafka",
+    "/babamul/stats/live",
     // Read-only similarity search, public like the stats behind /dashboard.
     "/babamul/similarity/objects",
     "/babamul/embeddings/count",

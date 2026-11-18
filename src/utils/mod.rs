@@ -17,6 +17,7 @@ pub mod gpu;
 pub mod heliolinc;
 pub mod host;
 pub mod identify;
+pub mod ingest_stats;
 pub mod lightcurve_fits;
 pub mod lightcurves;
 pub mod linking;
