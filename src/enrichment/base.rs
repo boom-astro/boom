@@ -6,6 +6,7 @@ use crate::{
         cutouts::CutoutStorageError,
         enums::Survey,
         fits::CutoutError,
+        ingest_stats,
         o11y::metrics::SCHEDULER_METER,
         retry::{
             is_transient_redis_error, retry_transient, DEFAULT_BASE_BACKOFF, DEFAULT_MAX_RETRIES,
@@ -122,6 +123,10 @@ pub trait EnrichmentWorker {
     /// Forcibly disable Babamul on this worker, regardless of config.
     fn disable_babamul(&mut self);
 
+    fn write_only_properties(&mut self, _keys: Vec<String>) -> bool {
+        false
+    }
+
     /// Called when the input queue comes up empty, before the worker sleeps.
     /// Background catch-up that would otherwise compete with live batches
     /// belongs here. Must not fail: an idle worker has nothing to report.
@@ -190,6 +195,7 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker + Send>(
         .ok_or(EnrichmentWorkerError::WorkerConfigMissing(survey.clone()))?;
 
     let con = config.build_redis().await?;
+    let stats_db = config.build_db().await?;
 
     let input_queue = enrichment_worker.input_queue_name();
     let output_queue = enrichment_worker.output_queue_name();
@@ -281,6 +287,7 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker + Send>(
                 ACTIVE.add(-1, &active_attrs);
                 BATCH_PROCESSED.add(1, &processing_error_attrs);
             })?;
+        ingest_stats::record_processed(&con, &stats_db, &survey, &candids).await;
 
         if processed_alerts.is_empty() {
             let attributes = &ok_attrs;

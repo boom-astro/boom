@@ -442,6 +442,7 @@ pub struct DecamEnrichmentWorker {
     alert_collection: mongodb::Collection<Document>,
     alert_pipeline: Vec<Document>,
     known: Option<KnownObjects>,
+    only_properties: Option<Vec<String>>,
 }
 
 #[async_trait::async_trait]
@@ -467,6 +468,7 @@ impl EnrichmentWorker for DecamEnrichmentWorker {
             alert_collection,
             alert_pipeline: create_decam_alert_pipeline(),
             known: None,
+            only_properties: None,
         })
     }
 
@@ -475,6 +477,11 @@ impl EnrichmentWorker for DecamEnrichmentWorker {
     }
 
     fn disable_babamul(&mut self) {}
+
+    fn write_only_properties(&mut self, keys: Vec<String>) -> bool {
+        self.only_properties = Some(keys);
+        true
+    }
 
     fn input_queue_name(&self) -> String {
         self.input_queue.clone()
@@ -511,10 +518,17 @@ impl EnrichmentWorker for DecamEnrichmentWorker {
             .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), a| {
                 (lo.min(a.candidate.jd), hi.max(a.candidate.jd))
             });
-        let mut associations = self
-            .known_objects((first + last) / 2.0)
-            .await
-            .map(|known| known_associations(known, &alerts));
+        let match_known = self
+            .only_properties
+            .as_ref()
+            .is_none_or(|keys| keys.iter().any(|k| k == "rock" || k == "sso"));
+        let mut associations = if match_known {
+            self.known_objects((first + last) / 2.0)
+                .await
+                .map(|known| known_associations(known, &alerts))
+        } else {
+            None
+        };
 
         // we keep it very simple for now, let's run on 1 alert at a time
         // we will move to batch processing later
@@ -524,14 +538,20 @@ impl EnrichmentWorker for DecamEnrichmentWorker {
             let candid = alert.candid;
 
             let sso = associations.as_mut().and_then(|a| a.remove(&candid));
-            let properties = Self::alert_properties(&alert, sso)?;
-
-            let update_alert_document = doc! {
-                "$set": {
-                    "properties": mongify(&properties),
-                    "updated_at": now,
-                }
+            let properties = mongify(&Self::alert_properties(&alert, sso)?);
+            let mut set = match &self.only_properties {
+                None => doc! { "properties": properties },
+                Some(keys) => keys
+                    .iter()
+                    .filter_map(|k| {
+                        properties
+                            .get(k)
+                            .map(|v| (format!("properties.{k}"), v.clone()))
+                    })
+                    .collect(),
             };
+            set.insert("updated_at", now);
+            let update_alert_document = doc! { "$set": set };
 
             let update = WriteModel::UpdateOne(
                 UpdateOneModel::builder()

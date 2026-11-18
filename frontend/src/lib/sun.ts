@@ -76,12 +76,13 @@ export function darkIntervals(
   to: number,
   lat: number,
   lon: number,
+  altitude = NIGHT_SUN_ALTITUDE,
 ): { start: number; end: number }[] {
   const intervals: { start: number; end: number }[] = [];
   let t = from;
-  let dark = sunAltitudeAt(t, lat, lon) < NIGHT_SUN_ALTITUDE;
+  let dark = sunAltitudeAt(t, lat, lon) < altitude;
   while (t < to) {
-    const next = nextCrossing(t, lat, lon, NIGHT_SUN_ALTITUDE, to - t) ?? to;
+    const next = nextCrossing(t, lat, lon, altitude, to - t) ?? to;
     if (dark) intervals.push({ start: t, end: Math.min(next, to) });
     dark = !dark;
     t = next;

@@ -330,7 +330,7 @@ async fn wait_for_payloads(
         let items: Vec<Vec<u8>> = con.lrange(queue, 0, -1).await.unwrap_or_default();
         let seen: std::collections::HashSet<String> = items
             .iter()
-            .map(|b| String::from_utf8_lossy(b).to_string())
+            .map(|b| String::from_utf8_lossy(boom::utils::ingest_stats::unwrap(b).1).to_string())
             .collect();
         if expected.iter().all(|e| seen.contains(e)) {
             return seen;
