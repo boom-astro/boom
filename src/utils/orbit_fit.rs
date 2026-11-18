@@ -684,8 +684,22 @@ pub fn within_precision(
     }
     let n_nights = worst_nights.len();
     worst_nights.sort_by(|a, b| b.1.total_cmp(&a.1));
+    let mut tried: Vec<i64> = worst_nights
+        .iter()
+        .take(NIGHTS_TRIED)
+        .map(|(night, _)| *night)
+        .collect();
+    // A foreign night at an end of the arc drags the orbit onto itself.
+    for end in [nights.iter().min(), nights.iter().max()]
+        .into_iter()
+        .flatten()
+    {
+        if !tried.contains(end) {
+            tried.push(*end);
+        }
+    }
     let mut best = clip(observations, all.clone(), fit.clone(), conics);
-    for (night, _) in worst_nights.into_iter().take(NIGHTS_TRIED) {
+    for night in tried {
         if n_nights < 3 {
             break;
         }
