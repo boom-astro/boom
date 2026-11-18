@@ -183,6 +183,7 @@ const AlertCard = memo(function AlertCard({ alert, survey, scrollRoot, getCache,
   }, [cutouts, survey]);
 
   const drb = alert.candidate.drb ?? alert.candidate.reliability ?? null;
+  const host = alert.properties?.best_host;
 
   const handleClick = useCallback(() => {
     window.open(`/objects/${encodeURIComponent(survey)}/${encodeURIComponent(alert.objectId || '')}`, '_blank');
@@ -231,6 +232,7 @@ const AlertCard = memo(function AlertCard({ alert, survey, scrollRoot, getCache,
         {drb !== null && <div><span className="text-muted-foreground">DRB/Reliability:</span> <span className="font-mono">{drb.toFixed(3)}</span></div>}
         {alert.candidate.magpsf !== undefined && <div><span className="text-muted-foreground">Magnitude:</span> <span className="font-mono">{alert.candidate.magpsf.toFixed(2)}</span></div>}
         {alert.candidate.fid !== undefined && <div><span className="text-muted-foreground">Band:</span> <span className="font-mono">{String(alert.candidate.band)}</span></div>}
+        {host?.dist_mpc != null && <div><span className="text-muted-foreground">Host:</span> <span className="font-mono">{host.name ? `${host.name}, ` : ''}{host.dist_mpc.toFixed(1)} Mpc</span></div>}
       </div>
     </div>
   );

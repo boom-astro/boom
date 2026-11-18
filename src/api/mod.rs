@@ -9,6 +9,7 @@ pub mod docs;
 pub mod email;
 pub mod filters;
 pub mod kafka;
+pub mod limits;
 pub mod models;
 pub mod oauth;
 pub mod observability;

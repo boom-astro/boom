@@ -9,8 +9,10 @@ use crate::{
     },
 };
 
+use crate::api::limits::{
+    large_query_slot, next_result, too_large, ResultError, DEFAULT_QUERY_MAX_TIME,
+};
 use actix_web::{post, web, HttpResponse};
-use futures::StreamExt;
 use mongodb::{
     bson::{doc, Bson, Document},
     Database,
@@ -57,9 +59,11 @@ impl FindQuery {
                 }
             }
         }
-        if let Some(max_time_ms) = self.max_time_ms {
-            options.max_time = Some(std::time::Duration::from_millis(max_time_ms));
-        }
+        options.max_time = Some(
+            self.max_time_ms
+                .map(std::time::Duration::from_millis)
+                .unwrap_or(DEFAULT_QUERY_MAX_TIME),
+        );
         Ok(options)
     }
 }
@@ -87,6 +91,10 @@ pub async fn post_find_query(
         Some(user) => user,
         None => return HttpResponse::Unauthorized().body("Unauthorized"),
     };
+    let _slot = match large_query_slot().await {
+        Ok(slot) => slot,
+        Err(response) => return response,
+    };
     let catalog_name = body.catalog_name.trim();
     if !catalog_accessible(&db, catalog_name, &current_user, &config).await {
         return response::not_found(&format!("Catalog {} does not exist", catalog_name));
@@ -113,10 +121,13 @@ pub async fn post_find_query(
         Err(e) => return super::query_error(e, "Error finding documents"),
     };
     let mut docs = Vec::new();
-    while let Some(result) = cursor.next().await {
-        match result {
-            Ok(doc) => docs.push(doc),
-            Err(e) => {
+    let mut bytes_read = 0;
+    loop {
+        match next_result(&mut cursor, &mut bytes_read).await {
+            Ok(Some(doc)) => docs.push(doc),
+            Ok(None) => break,
+            Err(ResultError::TooLarge) => return too_large(),
+            Err(ResultError::Database(e)) => {
                 tracing::error!("Error retrieving document from the database: {}", e);
                 return super::query_error(e, "Error retrieving documents");
             }

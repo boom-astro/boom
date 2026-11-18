@@ -36,6 +36,9 @@ use tracing::instrument;
 /// its own right.
 pub const STATE_COLLECTION: &str = "catalog_state";
 
+/// The task type whose runs populate these collections.
+const TASK_TYPE_CATALOG_INGEST: &str = crate::tasks::catalog_ingest::TASK_TYPE;
+
 /// Which reader turns this catalog's source files into documents.
 ///
 /// One variant per catalog rather than one per format: the format only says how
@@ -57,6 +60,8 @@ pub enum Reader {
     Milliquas,
     /// DESI DR1 redshifts, converted and filtered from the iron zcatalog.
     DesiDr1,
+    /// DESI DR1 dwarf galaxies, converted from a staged FITS table.
+    DesiDr1Dwarfs,
     /// CatWISE2020, converted from the published IPAC tables.
     CatWise2020,
     /// Gaia DR3, read straight from the published gzipped CSV.
@@ -73,6 +78,10 @@ pub enum Reader {
     /// Legacy Survey point-source scores, staged gzipped JSONL exported from
     /// BOOM's own copy.
     Lspsc,
+    Erass1,
+    FiveXmm,
+    TwoSxps,
+    FourFgl,
 }
 
 /// Where a catalog's files come from, which decides whether BOOM may delete
@@ -170,6 +179,17 @@ pub const CATALOGS: &[CatalogDef] = &[
         aliases: &[],
     },
     CatalogDef {
+        id: "desi-dr1-dwarfs",
+        collection: "DESI_DR1_dwarfs",
+        title: "DESI DR1 dwarf galaxies",
+        description: "Dwarf galaxies from DESI DR1 with stellar masses, distances and \
+                      half-light radii, one row per galaxy. The DESIRT compilation, which \
+                      is not published: stage the FITS file by hand, see docs/catalogs.md.",
+        reader: Reader::DesiDr1Dwarfs,
+        source: Source::Staged,
+        aliases: &[],
+    },
+    CatalogDef {
         id: "catwise2020",
         collection: "CatWISE2020",
         title: "CatWISE2020",
@@ -245,6 +265,50 @@ pub const CATALOGS: &[CatalogDef] = &[
                       it. See docs/catalogs.md.",
         reader: Reader::Lspsc,
         source: Source::Staged,
+        aliases: &[],
+    },
+    CatalogDef {
+        id: "erass1-main",
+        collection: "eRASS1_Main",
+        title: "eRASS1 Main",
+        description: "eROSITA-DE DR1 X-ray sources detected in 0.2-2.3 keV, with fluxes, \
+                      band rates, extent and detection likelihood. German half of the sky \
+                      only (Galactic longitude 180 to 360 degrees). One table, converted from \
+                      FITS.",
+        reader: Reader::Erass1,
+        source: Source::Fetched,
+        aliases: &[],
+    },
+    CatalogDef {
+        id: "5xmm-dr15",
+        collection: "5XMM_DR15",
+        title: "5XMM-DR15",
+        description: "XMM-Newton serendipitous X-ray sources, one row per unique source, with \
+                      fluxes, hardness ratios, variability and CLASSX classifications. One \
+                      table, converted from FITS.",
+        reader: Reader::FiveXmm,
+        source: Source::Fetched,
+        aliases: &[],
+    },
+    CatalogDef {
+        id: "2sxps",
+        collection: "2SXPS",
+        title: "2SXPS",
+        description: "Swift-XRT point sources, clean subset, with count rates, hardness \
+                      ratios, fluxes and variability probabilities. One table, converted from \
+                      FITS.",
+        reader: Reader::TwoSxps,
+        source: Source::Fetched,
+        aliases: &[],
+    },
+    CatalogDef {
+        id: "4fgl-dr4",
+        collection: "4FGL_DR4",
+        title: "Fermi-LAT 4FGL-DR4",
+        description: "Gamma-ray sources from 14 years of Fermi-LAT, with 95% error ellipses, \
+                      fluxes, variability and associations. One table, converted from FITS.",
+        reader: Reader::FourFgl,
+        source: Source::Fetched,
         aliases: &[],
     },
 ];
@@ -793,6 +857,9 @@ async fn ingest_file(
         Reader::AllWise => Ok(arrow::ingest_parquet::<types::AllWise>(inserter, path).await?),
         Reader::Milliquas => Ok(arrow::ingest_parquet::<types::Milliquas>(inserter, path).await?),
         Reader::DesiDr1 => Ok(arrow::ingest_parquet::<types::DesiDr1>(inserter, path).await?),
+        Reader::DesiDr1Dwarfs => {
+            Ok(arrow::ingest_parquet::<types::DesiDr1Dwarf>(inserter, path).await?)
+        }
         Reader::CatWise2020 => {
             Ok(arrow::ingest_parquet::<types::CatWise2020>(inserter, path).await?)
         }
@@ -802,6 +869,10 @@ async fn ingest_file(
         Reader::PanStarrs => Ok(arrow::ingest_parquet::<types::PanStarrs>(inserter, path).await?),
         Reader::LsDr9 => Ok(arrow::ingest_parquet::<types::LsDr9>(inserter, path).await?),
         Reader::Lspsc => Ok(jsonl::ingest_jsonl::<types::Lspsc>(inserter, path).await?),
+        Reader::Erass1 => Ok(arrow::ingest_parquet::<types::Erass1>(inserter, path).await?),
+        Reader::FiveXmm => Ok(arrow::ingest_parquet::<types::FiveXmm>(inserter, path).await?),
+        Reader::TwoSxps => Ok(arrow::ingest_parquet::<types::TwoSxps>(inserter, path).await?),
+        Reader::FourFgl => Ok(arrow::ingest_parquet::<types::FourFgl>(inserter, path).await?),
     }
 }
 
@@ -946,11 +1017,20 @@ pub enum CatalogHealth {
     Present,
     /// Declared, but the collection has never been ingested.
     Missing,
-    /// Declared and started, but not every chunk is in. The collection exists
-    /// and is partly populated, so a crossmatch against it silently returns
-    /// fewer matches than it should -- worse than absent, which at least fails
-    /// loudly.
+    /// Declared and started, but not every chunk is in, and nothing is
+    /// working on it. The collection exists and is partly populated, so a
+    /// crossmatch against it silently returns fewer matches than it should --
+    /// worse than absent, which at least fails loudly.
     Partial,
+    /// Partly ingested because a run is part way through it right now.
+    ///
+    /// Indistinguishable from `Partial` in the catalog's own state document,
+    /// and a different thing entirely: one is work in progress and the other
+    /// is work that stopped. Reported apart so the admin badge does not count
+    /// an ingest somebody started a minute ago -- a badge that lights up for
+    /// hours whenever the page is used as intended is a badge people learn to
+    /// read past, which is the failure `External` exists to avoid as well.
+    Ingesting,
     /// Declared in config, but this release has no definition for it. Almost
     /// always a typo in the slug.
     Undeclared,
@@ -1005,6 +1085,20 @@ pub async fn status(
     crossmatched: &[String],
 ) -> Result<Vec<CatalogStatus>, CatalogError> {
     let state = db.collection::<Document>(STATE_COLLECTION);
+
+    // Asked of the task queue rather than inferred from the state document's
+    // timestamps: `updated_at` advances once per chunk, and a chunk of a large
+    // catalog can take long enough that any staleness threshold would report a
+    // healthy ingest as abandoned. The queue knows for certain.
+    let ingesting =
+        crate::tasks::queue::active_param_values(db, TASK_TYPE_CATALOG_INGEST, "catalog")
+            .await
+            .unwrap_or_else(|e| {
+                // Not fatal: without it a running ingest reads as `Partial`, which is
+                // what it did before and is still true enough to act on.
+                tracing::warn!("could not read active ingests: {e}");
+                Default::default()
+            });
 
     // Everything the release can build, then anything config names that it
     // cannot -- the second group is almost always a typo, and hiding it would
@@ -1068,20 +1162,16 @@ pub async fn status(
                 }
             }
         }
-        // An alias populated before this release tracked ingest state has no
-        // state document at all, so the collection itself is the only evidence.
-        // Counted rather than assumed missing, because a populated alias is
-        // what the crossmatch is reading right now.
         let mut untracked = 0i64;
         if doc.is_none() {
-            for alias in def.aliases {
+            for name in std::iter::once(&def.collection).chain(def.aliases) {
                 let count = db
-                    .collection::<Document>(alias)
+                    .collection::<Document>(name)
                     .estimated_document_count()
                     .await
                     .unwrap_or(0) as i64;
                 if count > 0 {
-                    serving = (*alias).to_string();
+                    serving = (*name).to_string();
                     untracked = count;
                     break;
                 }
@@ -1102,6 +1192,8 @@ pub async fn status(
                 let complete = doc.get_str("status").is_ok_and(|s| s == "complete");
                 let health = if complete {
                     CatalogHealth::Present
+                } else if ingesting.contains(def.id) {
+                    CatalogHealth::Ingesting
                 } else {
                     CatalogHealth::Partial
                 };
@@ -1144,7 +1236,7 @@ pub const WITHOUT_DEFINITIONS: &[(&str, &str)] = &[
     (
         "TNS",
         "the Transient Name Server is a live, credentialed feed rather than an archival \
-         download, and is populated outside the catalog ingest path",
+         download, kept current by the tns_sync task instead of the catalog ingest path",
     ),
 ];
 
@@ -1208,8 +1300,7 @@ pub fn validate_crossmatch(
 /// An `AppConfig` from `path`, with a stand-in environment.
 ///
 /// Deserializing an `AppConfig` requires the secrets a deployment supplies
-/// -- the database password, the API keys, and, for any config with
-/// `milvus.enabled` (`config/prod/umn` has it), the milvus credentials. A
+/// -- the database password and the API keys. A
 /// substituted environment rather than `set_var` keeps that off the other
 /// tests in this binary and makes the result the same whether or not the
 /// developer has a `.env` loaded. Secret *validation* is `check_config`'s
@@ -1220,8 +1311,6 @@ fn config_from(path: &str) -> crate::conf::AppConfig {
         ("BOOM_DATABASE__PASSWORD", "test-db-password"),
         ("BOOM_API__AUTH__SECRET_KEY", "test-secret-key"),
         ("BOOM_API__AUTH__ADMIN_PASSWORD", "test-admin-password"),
-        ("BOOM_MILVUS__USERNAME", "test-milvus-username"),
-        ("BOOM_MILVUS__PASSWORD", "test-milvus-password"),
     ]
     .iter()
     .map(|(key, value)| (key.to_string(), value.to_string()))
@@ -1592,10 +1681,9 @@ mod source_tests {
             .filter(|c| c.source == Source::Staged)
             .map(|c| c.id)
             .collect();
-        // lspsc is published upstream as a cone-search API, so BOOM ingests an
-        // export of its own copy. It cannot be fetched, and its files must not
-        // be deleted after ingest.
-        assert_eq!(staged, vec!["lspsc"]);
+        // lspsc is an export of BOOM's own copy and the DESI DR1 dwarfs are not
+        // published: neither can be fetched, and their files must not be deleted.
+        assert_eq!(staged, vec!["desi-dr1-dwarfs", "lspsc"]);
     }
 
     #[test]
@@ -1610,6 +1698,118 @@ mod source_tests {
 
 #[cfg(test)]
 mod status_tests {
+
+    /// A half-ingested catalog with a run working on it and one with nothing
+    /// working on it look identical in the state document, and only one of
+    /// them is something to act on.
+    ///
+    /// The distinction exists for the admin badge: it counts partially
+    /// ingested catalogs, so without this an ingest somebody started a minute
+    /// ago lit the badge for the hours it ran -- training the operator to read
+    /// past a badge that is meant to mean something.
+    #[tokio::test]
+    async fn an_ingest_in_flight_is_not_reported_as_abandoned() {
+        let db = crate::conf::get_test_db().await;
+        let def = CATALOGS[0];
+        let state = db.collection::<Document>(STATE_COLLECTION);
+        let tasks = db.collection::<crate::tasks::models::Task>("tasks");
+
+        let half_ingested = doc! {
+            "catalog": def.id,
+            "status": "ingesting",
+            "chunks_total": 4i64,
+            "chunks_done": ["0"],
+            "n_records": 1i64,
+            "updated_at": now(),
+        };
+        state
+            .update_one(
+                doc! { "_id": def.collection },
+                doc! { "$set": half_ingested },
+            )
+            .upsert(true)
+            .await
+            .expect("writes state");
+
+        let health_of = |statuses: &[CatalogStatus]| {
+            statuses
+                .iter()
+                .find(|s| s.id == def.id)
+                .expect("the catalog is listed")
+                .health
+        };
+
+        let declared = vec![def.id.to_string()];
+        let statuses = status(&db, &declared, &[]).await.expect("reads status");
+        assert_eq!(
+            health_of(&statuses),
+            CatalogHealth::Partial,
+            "nothing is running, so this one is stopped part way through"
+        );
+
+        let run = crate::tasks::models::Task {
+            id: uuid::Uuid::new_v4().to_string(),
+            task_type: TASK_TYPE_CATALOG_INGEST.to_string(),
+            params: serde_json::json!({ "catalog": def.id }),
+            status: crate::tasks::models::TaskStatus::Running,
+            actor: crate::tasks::models::Actor::system(),
+            trigger: crate::tasks::models::Trigger::Api,
+            requested_at: now(),
+            started_at: Some(now()),
+            finished_at: None,
+            progress: Default::default(),
+            worker: None,
+            // A live lease, because that is what makes the run count: a worker
+            // that died leaves its run `Running` until the reaper gets to it,
+            // and the reaper only runs in a worker's between-run loop.
+            lease_expires_at: Some(now() + crate::tasks::queue::LEASE_SECONDS),
+            cancel_requested: false,
+            error: None,
+            attempts: 1,
+            resubmitted_from: None,
+        };
+        tasks.insert_one(&run).await.expect("queues a run");
+
+        let statuses = status(&db, &declared, &[]).await.expect("reads status");
+        assert_eq!(health_of(&statuses), CatalogHealth::Ingesting);
+
+        // An abandoned worker's run must not go on claiming to be working on
+        // the catalog, or a genuinely stuck ingest loses its warning for as
+        // long as no worker is up to reap it.
+        tasks
+            .update_one(
+                doc! { "_id": &run.id },
+                doc! { "$set": { "lease_expires_at": now() - 1.0 } },
+            )
+            .await
+            .expect("expires the lease");
+        let statuses = status(&db, &declared, &[]).await.expect("reads status");
+        assert_eq!(
+            health_of(&statuses),
+            CatalogHealth::Partial,
+            "a dead worker's run does not count as work in progress"
+        );
+
+        // A run still waiting for a worker has no lease and does count.
+        tasks
+            .update_one(
+                doc! { "_id": &run.id },
+                doc! { "$set": { "status": "queued" }, "$unset": { "lease_expires_at": "" } },
+            )
+            .await
+            .expect("requeues");
+        let statuses = status(&db, &declared, &[]).await.expect("reads status");
+        assert_eq!(health_of(&statuses), CatalogHealth::Ingesting);
+
+        tasks
+            .delete_one(doc! { "_id": &run.id })
+            .await
+            .expect("cleans up");
+        state
+            .delete_one(doc! { "_id": def.collection })
+            .await
+            .expect("cleans up");
+    }
     use super::*;
 
     /// A deployment whose crossmatch config points at an older release of a

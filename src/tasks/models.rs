@@ -50,18 +50,20 @@ impl TaskStatus {
 pub struct Actor {
     pub user_id: String,
     pub username: String,
+    /// Absent on runs recorded before it was captured, and on system runs.
+    /// Usernames are derived from an email's local part, so "admin" is not
+    /// enough to say who.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
 }
 
 impl Actor {
-    /// The actor for a run nothing human asked for.
-    ///
-    /// Exists so that when recurring tasks land, a scheduled run is
-    /// distinguishable from one a person submitted rather than being attributed
-    /// to whoever happened to configure the schedule.
+    /// The actor for a run nothing human asked for, such as a scheduled one.
     pub fn system() -> Self {
         Self {
             user_id: "system".to_string(),
             username: "system".to_string(),
+            email: None,
         }
     }
 }
@@ -77,7 +79,7 @@ pub enum Trigger {
     /// A person, through the API.
     #[default]
     Api,
-    /// A recurring schedule. Not yet implemented -- see docs/task-system.md.
+    /// A recurring schedule, see `tasks::schedule`.
     Schedule,
 }
 
@@ -125,6 +127,9 @@ pub struct Task {
     /// deploy is on its second attempt, which is normal and worth seeing.
     #[serde(default)]
     pub attempts: u32,
+    /// The finished run this one repeats, when it was submitted by resubmitting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resubmitted_from: Option<String>,
 }
 
 /// One flush of log lines from a run.

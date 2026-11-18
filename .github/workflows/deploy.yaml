@@ -60,13 +60,15 @@ jobs:
       BOOM_BABAMUL__OAUTH__ORCID__CLIENT_ID: ${{ secrets.BOOM_BABAMUL__OAUTH__ORCID__CLIENT_ID }}
       BOOM_BABAMUL__OAUTH__ORCID__CLIENT_SECRET: ${{ secrets.BOOM_BABAMUL__OAUTH__ORCID__CLIENT_SECRET }}
       BOOM_DATABASE__PASSWORD: ${{ secrets.BOOM_DATABASE__PASSWORD }}
-      BOOM_MILVUS__ENABLED: ${{ vars.BOOM_MILVUS__ENABLED }}
       BOOM_MILVUS__USERNAME: ${{ vars.BOOM_MILVUS__USERNAME }}
       BOOM_MILVUS__PASSWORD: ${{ secrets.BOOM_MILVUS__PASSWORD }}
       BOOM_MILVUS__DATABASE: ${{ vars.BOOM_MILVUS__DATABASE }}
       BOOM_API__DOMAIN: ${{ vars.BOOM_API__DOMAIN }}
       BOOM_API__AUTH__SECRET_KEY: ${{ secrets.BOOM_API__AUTH__SECRET_KEY }}
       BOOM_API__AUTH__ADMIN_PASSWORD: ${{ secrets.BOOM_API__AUTH__ADMIN_PASSWORD }}
+      BOOM_TNS__BOT_ID: ${{ secrets.BOOM_TNS__BOT_ID }}
+      BOOM_TNS__BOT_NAME: ${{ secrets.BOOM_TNS__BOT_NAME }}
+      BOOM_TNS__API_KEY: ${{ secrets.BOOM_TNS__API_KEY }}
       # Unset, compose builds every image from this checkout. See docs/deployment.md.
       BOOM_IMAGE: ${{ vars.BOOM_IMAGE }}
       BOOM_PULL_POLICY: ${{ vars.BOOM_PULL_POLICY }}

@@ -5,7 +5,19 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 #[serdavro]
-#[derive(clap::ValueEnum, Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq, Hash)]
+#[derive(
+    clap::ValueEnum,
+    Clone,
+    Debug,
+    Serialize,
+    Deserialize,
+    ToSchema,
+    PartialEq,
+    Eq,
+    Hash,
+    PartialOrd,
+    Ord,
+)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum Survey {
     #[serde(alias = "ztf")]
@@ -16,6 +28,8 @@ pub enum Survey {
     Decam,
     #[serde(alias = "winter", alias = "wntr", alias = "WNTR")]
     Winter,
+    #[serde(alias = "askap")]
+    Askap,
 }
 
 impl Survey {
@@ -25,6 +39,7 @@ impl Survey {
             Survey::Lsst => "LSST",
             Survey::Decam => "DECAM",
             Survey::Winter => "WINTER",
+            Survey::Askap => "ASKAP",
         }
     }
 
@@ -36,6 +51,7 @@ impl Survey {
         match self {
             Survey::Ztf | Survey::Winter => Tz::America__Los_Angeles,
             Survey::Lsst | Survey::Decam => Tz::America__Santiago,
+            Survey::Askap => Tz::Australia__Perth,
         }
     }
 

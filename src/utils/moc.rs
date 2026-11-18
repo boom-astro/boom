@@ -386,25 +386,33 @@ pub fn credible_volume_to_2d_moc(
 ) -> HpxMoc {
     let threshold = idx.density_threshold(credible_level);
 
-    let mut sorted_prob: Vec<f64> = skymap.prob.clone();
-    sorted_prob.sort_unstable_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
-    let cumsum: Vec<f64> = sorted_prob
+    // Rank by density, not PROB: in a multi-order map a coarse pixel holds more
+    // probability than a fine one of equal density, so ranking by PROB trades the
+    // high-resolution core for the low-resolution outskirts.
+    let density: Vec<f64> = skymap
+        .prob
         .iter()
-        .scan(0.0, |acc, &p| {
-            *acc += p;
-            Some(*acc)
-        })
+        .zip(&skymap.pixel_area_sr)
+        .map(|(&p, &a)| p / a)
         .collect();
-    let cutoff_idx = cumsum.partition_point(|&s| s <= credible_level);
-    let prob_floor_2d = if cutoff_idx < sorted_prob.len() {
-        sorted_prob[cutoff_idx]
-    } else {
-        0.0
-    };
+    let mut by_density: Vec<usize> = (0..density.len()).collect();
+    by_density.sort_unstable_by(|&a, &b| {
+        density[b]
+            .partial_cmp(&density[a])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let mut cumsum = 0.0;
+    let density_floor_2d = by_density
+        .iter()
+        .find(|&&row| {
+            cumsum += skymap.prob[row];
+            cumsum > credible_level
+        })
+        .map_or(0.0, |&row| density[row]);
 
     let included = (0..skymap.prob.len())
         .filter(|&row| {
-            if skymap.prob[row] < prob_floor_2d {
+            if density[row] < density_floor_2d {
                 return false;
             }
             // Peak density is at D = DISTMU.
@@ -1320,6 +1328,73 @@ mod tests {
             "highest-PROB pixel (row={}, order={}, ipix={}) should be inside the 90% 2D MOC projection",
             best_pix, order, ipix
         );
+    }
+
+    /// Split every pixel above `min_prob` into its four children at the same
+    /// density, as BAYESTAR's multi-order maps refine the core of a localization.
+    fn refine_core(flat: &LIGO3dskymap, min_prob: f64) -> LIGO3dskymap {
+        let mut m = LIGO3dskymap {
+            uniq: vec![],
+            pixel_area_sr: vec![],
+            prob: vec![],
+            distmu: vec![],
+            distsigma: vec![],
+            distnorm: vec![],
+            max_order: flat.max_order + 1,
+            uniq_to_row: None,
+        };
+        let mut push = |uniq, area, prob, row: usize| {
+            m.uniq.push(uniq);
+            m.pixel_area_sr.push(area);
+            m.prob.push(prob);
+            m.distmu.push(flat.distmu[row]);
+            m.distsigma.push(flat.distsigma[row]);
+            m.distnorm.push(flat.distnorm[row]);
+        };
+        for row in 0..flat.prob.len() {
+            let (uniq, area, prob) = (flat.uniq[row], flat.pixel_area_sr[row], flat.prob[row]);
+            if prob > min_prob {
+                let child_order = uniq_to_order(uniq) as u32 + 1;
+                for j in 0..4 {
+                    let child = (1u64 << (2 * child_order + 2)) + 4 * uniq_to_ipix(uniq) + j;
+                    push(child, area / 4.0, prob / 4.0, row);
+                }
+            } else {
+                push(uniq, area, prob, row);
+            }
+        }
+        m.uniq_to_row = Some(m.uniq.iter().enumerate().map(|(i, &u)| (u, i)).collect());
+        m
+    }
+
+    /// The credible region is a property of the density, so storing the same
+    /// localization at a finer resolution in its core must not move it.
+    #[test]
+    fn test_the_credible_region_does_not_depend_on_pixelization() {
+        let flat =
+            parse_3d_skymap("./data/S240618ah_bayestar.fits").expect("Failed to parse 3D skymap");
+        // Children stay well above the 1e-7 floor CredibleVolumeIndex::build skips below.
+        let multi = refine_core(&flat, 1e-5);
+        assert!(
+            multi.prob.len() > flat.prob.len() + 1000,
+            "the core should have been refined"
+        );
+
+        let flat_idx = CredibleVolumeIndex::build(&flat, 200);
+        let multi_idx = CredibleVolumeIndex::build(&multi, 200);
+        for level in [0.5, 0.9, 0.95] {
+            let from_flat = credible_volume_to_2d_moc(&flat, &flat_idx, level);
+            let from_multi = credible_volume_to_2d_moc(&multi, &multi_idx, level);
+            let differ = from_flat.xor(&from_multi);
+            assert!(
+                differ.is_empty(),
+                "the {level} region moved with the pixelization: {:.3}% of the sky differs \
+                 (flat covers {:.3}%, multi-order {:.3}%)",
+                differ.coverage_percentage() * 100.0,
+                from_flat.coverage_percentage() * 100.0,
+                from_multi.coverage_percentage() * 100.0,
+            );
+        }
     }
 
     #[test]

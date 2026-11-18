@@ -644,6 +644,37 @@ fn to_bits_normalized(jd: f64) -> u64 {
     bits
 }
 
+pub async fn nearest_match(
+    ra: f64,
+    dec: f64,
+    dec_range: (f64, f64),
+    radius_rad: f64,
+    collection: &Collection<Document>,
+) -> Result<Vec<String>, AlertError> {
+    if !(dec >= dec_range.0 && dec <= dec_range.1) {
+        return Ok(vec![]);
+    }
+    let result = collection
+        .find_one(doc! {
+            "coordinates.radec_geojson": {
+                "$nearSphere": [ra - 180.0, dec],
+                "$maxDistance": radius_rad,
+            },
+        })
+        .projection(doc! {
+            "_id": 1
+        })
+        .await;
+    match result {
+        Ok(Some(doc)) => Ok(vec![doc.get_str("_id")?.to_string()]),
+        Ok(None) => Ok(vec![]),
+        Err(e) => {
+            error!("Error cross-matching with {}: {}", collection.name(), e);
+            Ok(vec![])
+        }
+    }
+}
+
 pub trait TimeSeries {
     /// Return the time value of this TimeSeries point as a Julian Date (JD).
     fn time(&self) -> f64;
@@ -1144,33 +1175,31 @@ pub trait AlertWorker {
         radius_rad: f64,
         collection: &Collection<Document>,
     ) -> Result<Vec<String>, AlertError> {
-        let matches = if dec >= dec_range.0 && dec <= dec_range.1 {
-            let result = collection
-                .find_one(doc! {
-                    "coordinates.radec_geojson": {
-                        "$nearSphere": [ra - 180.0, dec],
-                        "$maxDistance": radius_rad,
-                    },
-                })
-                .projection(doc! {
-                    "_id": 1
-                })
-                .await;
-            match result {
-                Ok(Some(doc)) => {
-                    let object_id = doc.get_str("_id")?;
-                    vec![object_id.to_string()]
-                }
-                Ok(None) => vec![],
-                Err(e) => {
-                    error!("Error cross-matching with {}: {}", collection.name(), e);
-                    vec![]
-                }
-            }
-        } else {
-            vec![]
-        };
-        Ok(matches)
+        nearest_match(ra, dec, dec_range, radius_rad, collection).await
+    }
+
+    #[instrument(skip(self, collection), fields(xmatch_survey = collection.name()), err)]
+    async fn link_counterpart(
+        &self,
+        collection: &Collection<Document>,
+        id: &str,
+        object_id: &str,
+        survey: &str,
+        other_survey: &str,
+    ) -> Result<(), AlertError> {
+        let alias = doc! { "$literal": [object_id] };
+        let unlinked = format!("aliases.{}.0", survey);
+        collection
+            .update_one(
+                doc! { "_id": id, unlinked: { "$exists": false } },
+                vec![doc! { "$set": { "aliases": { "$cond": [
+                    { "$eq": [{ "$type": "$aliases" }, "object"] },
+                    { "$mergeObjects": ["$aliases", { survey: &alias }] },
+                    { other_survey: [], survey: &alias },
+                ] } } }],
+            )
+            .await?;
+        Ok(())
     }
 
     /// Update the alert auxiliary collection (object-level table) with new survey matches,

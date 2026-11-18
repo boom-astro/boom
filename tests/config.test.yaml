@@ -41,6 +41,9 @@ kafka:
     winter:
       server: "localhost:9092"
       group_id: "test" # Set via BOOM_KAFKA__CONSUMER__WINTER__GROUP_ID environment variable
+    askap:
+      server: "localhost:9092"
+      group_id: "test" # Set via BOOM_KAFKA__CONSUMER__ASKAP__GROUP_ID environment variable
   producer:
     server: "localhost:9092" # Only one global producer for now (filter worker output)
 cutouts_storage:
@@ -92,6 +95,18 @@ workers:
       max_match_rate: 5
       reference_night:
   winter:
+    command_interval: 500
+    alert:
+      n_workers: 1
+    enrichment:
+      n_workers: 1
+    filter:
+      n_workers: 1
+      refresh_interval_minutes: 15
+      max_match_rate: 5
+      reference_night:
+      reference_window_days: 30
+  askap:
     command_interval: 500
     alert:
       n_workers: 1
@@ -180,3 +195,4 @@ crossmatch:
       max_results: 3
   decam: {}
   winter: {}
+  askap: {}

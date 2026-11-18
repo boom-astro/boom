@@ -23,6 +23,8 @@ pub struct VillarFitResponse {
     /// AB magnitude of the flux normalization scale used by the fit. `null` if
     /// no fit could be produced.
     pub peak_mag: Option<f64>,
+    /// JD where the model phase is zero (brightest r-band point). `null` if unknown.
+    pub t_peak: Option<f64>,
     /// Villar model parameters, keyed as `{param}_{filter}` (e.g. `A_ZTF_g`).
     /// `A` is an AB magnitude and `extra_sigma` a magnitude scatter; the rest
     /// are in days or day⁻¹. Values are `null` where a fit could not be produced.
@@ -152,6 +154,7 @@ pub async fn get_villar_fit(
 
     let mut reduced_chi2 = None;
     let mut peak_mag = None;
+    let mut t_peak = None;
     let mut params = HashMap::new();
     for (key, value) in villar_fit_doc.iter() {
         let value = match value.as_f64() {
@@ -161,6 +164,7 @@ pub async fn get_villar_fit(
         match key.as_str() {
             "reduced_chi2" => reduced_chi2 = Some(value),
             "peak_mag" => peak_mag = Some(value),
+            "t_peak" => t_peak = Some(value),
             _ => {
                 params.insert(key.clone(), value);
             }
@@ -171,6 +175,7 @@ pub async fn get_villar_fit(
         candid,
         reduced_chi2,
         peak_mag,
+        t_peak,
         params,
     };
     response::ok_ser(&format!("found Villar fit for candid {}", candid), response)

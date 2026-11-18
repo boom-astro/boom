@@ -59,6 +59,12 @@ api:
     admin_username: admin
     admin_password: "" # Set via BOOM_API__AUTH__ADMIN_PASSWORD environment variable
     admin_email: admin@example.com
+  # POST /filters/test/simulated: replays simulated light curves as alerts,
+  # read-only against the catalogs. Cost grows with alerts x points per object.
+  filter_simulation:
+    enabled: true
+    max_lightcurves: 1000
+    max_points: 200000
 babamul:
   # Emails that are admins, granted at every API startup. Admins can also be
   # appointed in the admin page, and startup never revokes. To remove one: take
@@ -111,13 +117,11 @@ gpu:
 redis:
   host: localhost
   port: 6379
-# The NRP Milvus instance is UMN's, so this stays out of the base config.yaml:
-# Caltech has no credentials for it and would warn on every enrichment batch.
+# UMN owns the NRP collection and is the only deployment that writes it.
 # Credentials come from BOOM_MILVUS__USERNAME / __PASSWORD.
 milvus:
   # Vector database holding the AppleCiDEr fusion model's embeddings.
   # See docs/milvus.md.
-  enabled: true # Set via BOOM_MILVUS__ENABLED environment variable
   host: milvus.nrp-nautilus.io
   port: 50051
   tls: true
@@ -125,6 +129,9 @@ milvus:
   password: "" # Set via BOOM_MILVUS__PASSWORD environment variable
   database: umn_babamul_vectordb # Override via BOOM_MILVUS__DATABASE environment variable
   timeout_seconds: 30
+  connect_timeout_seconds: 5
+  read_embeddings: true # Set per deployment in overrides.yaml
+  write_embeddings: true # Set per deployment in overrides.yaml
   collection:
     name: boom_ztf_fusion_embeddings
     dim: 384
@@ -180,6 +187,9 @@ kafka:
       # window drops a whole night, and nothing re-subscribes to it afterwards.
       # A longer outage than this still needs `kafka_consumer winter --on DATE`.
       subscription_window_days: 2
+    askap:
+      server: "localhost:9092"
+      group_id: "" # Set via BOOM_KAFKA__CONSUMER__ASKAP__GROUP_ID environment variable
   producer:
     server: "localhost:9092" # Only one global producer for now (filter worker output)
 workers:
@@ -235,6 +245,18 @@ workers:
       max_match_rate: 100
       reference_night: "2026-09-18"
       reference_window_days: 30
+  askap:
+    command_interval: 500
+    alert:
+      n_workers: 1
+    enrichment:
+      n_workers: 1
+    filter:
+      n_workers: 1
+      refresh_interval_minutes: 15
+      max_match_rate: 5
+      reference_night:
+      reference_window_days: 30
 # Shape-aware host-galaxy association: scores each galaxy cross-match by its
 # directional light radius (d_DLR) instead of a fixed circular aperture. Stored
 # on the alert aux document under `host_galaxy`; filters cut on
@@ -256,6 +278,7 @@ host_galaxy:
   enabled: true
   ned_catalog: NED
   ls_dr10_catalog: LSDR10 # collection name as ingested; UMN uses LSDR10
+  ls_dr9_catalog: LSDR9 # fallback where LSDR10 has no rows
   max_dlr: 5.0 # admission cutoff; filters should cut tighter (~4)
   min_axis_arcsec: 0.05
   max_candidates: 10
@@ -285,11 +308,17 @@ linker:
   # Palomar's nights end by about 13:00 UTC.
   run_after_utc_hour: 14
   drb: 0.8 # minimum drb for a detection to be searched
+  # Minimum reliability for an LSST detection to be searched. On 14 nights, 0.6
+  # instead of 0.5 runs four times faster but links a quarter fewer faint objects.
+  lsst_min_reliability: 0.5
+  surveys: [ztf, lsst, decam, winter] # linked together, any of ztf, lsst, decam, winter
   link: true # link tracklets across nights
   thor: true # recover objects seen once a night
   # Store known objects under their MPC designation, as recoveries rather
   # than discovery candidates.
   match_known: true
+  reject_known: true # drop DECam and WINTER tracklets moving as a known object
+  flag_satellites: true # mark tracks that stay next to a giant planet
   persist: true # false reports what would be stored and writes nothing
   # Also link the detections IPAC already identified, store nothing, and log
   # how many of those objects the search recovered.
@@ -299,6 +328,35 @@ linker:
   recall_window_nights: 5
   attach: true
   attach_lookback_nights: 60
+  # Also link and recover unbound orbits up to this hyperbolic excess speed
+  # (km/s), 0 is off. THOR then runs about 30 times longer.
+  max_vinf_km_s: 100.0
+  # Largest residual an unbound orbit may leave (arcsec); a track fitting worse
+  # keeps its bound fit if that passes, or is dropped.
+  max_unbound_rms_arcsec: 0.5
+  fast: true # link movers too fast for the linking pass
+  fast_window_nights: 7
+  fast_min_rate_deg_per_day: 1.0
+  fast_max_rate_deg_per_day: 25.0
+  fast_dense_detections: 10000 # above this a night keeps no untrailed pairs
+  fast_dense_max_rate_deg_per_day: 5.0 # untrailed rate limit on those nights
+  fast_live_every_minutes: 0 # also rerun the fast pass on the night in progress, 0 is off
+  fast_single_night: true # also store a night's lone fast tracklets scoring fast_min_neo_score or more
+  fast_min_neo_score: 90.0 # digest2 NEO score, 0 to 100
+tns:
+  base_url: "https://www.wis-tns.org"
+  bot_id: "" # BOOM_TNS__BOT_ID, BOOM_TNS__BOT_NAME, BOOM_TNS__API_KEY; nothing is scheduled without all three
+  bot_name: ""
+  api_key: ""
+  sync_every_minutes: 60 # 0 is off
+  full_sync_every_hours: 24
+  photometry:
+    every_minutes: 360 # 0 is off
+    max_distance_mpc: 200.0
+    max_age_days: 60.0
+    refresh_hours: 24.0
+    max_objects: 250
+# Off until each is ingested on this deployment, see docs/catalogs.md.
 crossmatch:
   ztf:
     Gaia_DR3:
@@ -477,6 +535,33 @@ crossmatch:
         deltachi2: 1
         spectype: 1
         zcat_nspec: 1
+    DESI_DR1_dwarfs:
+      radius: 300.0 # 300 arcseconds
+      use_distance: true
+      distance_key: "z"
+      distance_max: 30.0
+      distance_max_near: 300.0
+      angular_size_key: r50_r
+      # r50_r is a radius, not a diameter: 10.0 matches within 5 half-light radii.
+      angular_size_scale: 10.0
+      angular_size_radius_max: 1800.0
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        z: 1
+        zwarn: 1
+        lumi_dist_mpc: 1
+        dist_source: 1
+        log_mstar_m24: 1
+        log_mstar_m24_err: 1
+        mag_g: 1
+        mag_r: 1
+        mag_z: 1
+        r50_r: 1
+        dwarf_maskbit: 1
+        mstar_maskbit: 1
+        in_sga_2020: 1
     PS1_DR2:
       radius: 2.0
       use_distance: false
@@ -540,6 +625,38 @@ crossmatch:
         fracflux_g: 1
         fracflux_i: 1
         fracflux_z: 1
+    LSDR9:
+      radius: 30.0
+      use_distance: true
+      distance_key: "z_phot_mean"
+      distance_max: 60.0
+      distance_max_near: 300.0
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        objtype: 1
+        ebv: 1
+        z_spec: 1
+        survey: 1
+        z_phot_mean: 1
+        z_phot_median: 1
+        z_phot_std: 1
+        z_phot_l95: 1
+        z_phot_u95: 1
+        flux_g: 1
+        flux_r: 1
+        flux_z: 1
+        flux_w1: 1
+        flux_w2: 1
+        flux_w3: 1
+        flux_w4: 1
+        shape_r: 1
+        shape_e1: 1
+        shape_e2: 1
+        sersic: 1
+        flux_ivar_r: 1
+        fracflux_r: 1
     AllWISE:
       radius: 2.0
       use_distance: false
@@ -551,15 +668,10 @@ crossmatch:
         w2mpro: 1
         w3mpro: 1
         w4mpro: 1
-    watchlist_supernovas:
-      radius: 2.0
-      use_distance: false
-      projection:
-        _id: 1
-        classification: 1
-        redshift: 1
-        distance_mpc: 1
-        discovery_date: 1
+    eRASS1_Main: null
+    5XMM_DR15: null
+    2SXPS: null
+    4FGL_DR4: null
   lsst:
     LSPSC:
       radius: 30.0 # 30 arcseconds
@@ -747,6 +859,33 @@ crossmatch:
         deltachi2: 1
         spectype: 1
         zcat_nspec: 1
+    DESI_DR1_dwarfs:
+      radius: 300.0 # 300 arcseconds
+      use_distance: true
+      distance_key: "z"
+      distance_max: 30.0
+      distance_max_near: 300.0
+      angular_size_key: r50_r
+      # r50_r is a radius, not a diameter: 10.0 matches within 5 half-light radii.
+      angular_size_scale: 10.0
+      angular_size_radius_max: 1800.0
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        z: 1
+        zwarn: 1
+        lumi_dist_mpc: 1
+        dist_source: 1
+        log_mstar_m24: 1
+        log_mstar_m24_err: 1
+        mag_g: 1
+        mag_r: 1
+        mag_z: 1
+        r50_r: 1
+        dwarf_maskbit: 1
+        mstar_maskbit: 1
+        in_sga_2020: 1
     PS1_DR2:
       radius: 2.0
       use_distance: false
@@ -810,6 +949,38 @@ crossmatch:
         fracflux_g: 1
         fracflux_i: 1
         fracflux_z: 1
+    LSDR9:
+      radius: 30.0
+      use_distance: true
+      distance_key: "z_phot_mean"
+      distance_max: 60.0
+      distance_max_near: 300.0
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        objtype: 1
+        ebv: 1
+        z_spec: 1
+        survey: 1
+        z_phot_mean: 1
+        z_phot_median: 1
+        z_phot_std: 1
+        z_phot_l95: 1
+        z_phot_u95: 1
+        flux_g: 1
+        flux_r: 1
+        flux_z: 1
+        flux_w1: 1
+        flux_w2: 1
+        flux_w3: 1
+        flux_w4: 1
+        shape_r: 1
+        shape_e1: 1
+        shape_e2: 1
+        sersic: 1
+        flux_ivar_r: 1
+        fracflux_r: 1
     AllWISE:
       radius: 2.0
       use_distance: false
@@ -821,15 +992,10 @@ crossmatch:
         w2mpro: 1
         w3mpro: 1
         w4mpro: 1
-    watchlist_supernovas:
-      radius: 2.0
-      use_distance: false
-      projection:
-        _id: 1
-        classification: 1
-        redshift: 1
-        distance_mpc: 1
-        discovery_date: 1
+    eRASS1_Main: null
+    5XMM_DR15: null
+    2SXPS: null
+    4FGL_DR4: null
   decam:
     LSPSC:
       radius: 30.0 # 30 arcseconds
@@ -1017,6 +1183,33 @@ crossmatch:
         deltachi2: 1
         spectype: 1
         zcat_nspec: 1
+    DESI_DR1_dwarfs:
+      radius: 300.0 # 300 arcseconds
+      use_distance: true
+      distance_key: "z"
+      distance_max: 30.0
+      distance_max_near: 300.0
+      angular_size_key: r50_r
+      # r50_r is a radius, not a diameter: 10.0 matches within 5 half-light radii.
+      angular_size_scale: 10.0
+      angular_size_radius_max: 1800.0
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        z: 1
+        zwarn: 1
+        lumi_dist_mpc: 1
+        dist_source: 1
+        log_mstar_m24: 1
+        log_mstar_m24_err: 1
+        mag_g: 1
+        mag_r: 1
+        mag_z: 1
+        r50_r: 1
+        dwarf_maskbit: 1
+        mstar_maskbit: 1
+        in_sga_2020: 1
     PS1_DR2:
       radius: 2.0
       use_distance: false
@@ -1080,6 +1273,38 @@ crossmatch:
         fracflux_g: 1
         fracflux_i: 1
         fracflux_z: 1
+    LSDR9:
+      radius: 30.0
+      use_distance: true
+      distance_key: "z_phot_mean"
+      distance_max: 60.0
+      distance_max_near: 300.0
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        objtype: 1
+        ebv: 1
+        z_spec: 1
+        survey: 1
+        z_phot_mean: 1
+        z_phot_median: 1
+        z_phot_std: 1
+        z_phot_l95: 1
+        z_phot_u95: 1
+        flux_g: 1
+        flux_r: 1
+        flux_z: 1
+        flux_w1: 1
+        flux_w2: 1
+        flux_w3: 1
+        flux_w4: 1
+        shape_r: 1
+        shape_e1: 1
+        shape_e2: 1
+        sersic: 1
+        flux_ivar_r: 1
+        fracflux_r: 1
     AllWISE:
       radius: 2.0
       use_distance: false
@@ -1091,6 +1316,10 @@ crossmatch:
         w2mpro: 1
         w3mpro: 1
         w4mpro: 1
+    eRASS1_Main: null
+    5XMM_DR15: null
+    2SXPS: null
+    4FGL_DR4: null
   winter:
     Gaia_DR3:
       radius: 2.0 # 2 arcseconds
@@ -1268,6 +1497,33 @@ crossmatch:
         deltachi2: 1
         spectype: 1
         zcat_nspec: 1
+    DESI_DR1_dwarfs:
+      radius: 300.0 # 300 arcseconds
+      use_distance: true
+      distance_key: "z"
+      distance_max: 30.0
+      distance_max_near: 300.0
+      angular_size_key: r50_r
+      # r50_r is a radius, not a diameter: 10.0 matches within 5 half-light radii.
+      angular_size_scale: 10.0
+      angular_size_radius_max: 1800.0
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        z: 1
+        zwarn: 1
+        lumi_dist_mpc: 1
+        dist_source: 1
+        log_mstar_m24: 1
+        log_mstar_m24_err: 1
+        mag_g: 1
+        mag_r: 1
+        mag_z: 1
+        r50_r: 1
+        dwarf_maskbit: 1
+        mstar_maskbit: 1
+        in_sga_2020: 1
     PS1_DR2:
       radius: 2.0
       use_distance: false
@@ -1331,6 +1587,38 @@ crossmatch:
         fracflux_g: 1
         fracflux_i: 1
         fracflux_z: 1
+    LSDR9:
+      radius: 30.0
+      use_distance: true
+      distance_key: "z_phot_mean"
+      distance_max: 60.0
+      distance_max_near: 300.0
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        objtype: 1
+        ebv: 1
+        z_spec: 1
+        survey: 1
+        z_phot_mean: 1
+        z_phot_median: 1
+        z_phot_std: 1
+        z_phot_l95: 1
+        z_phot_u95: 1
+        flux_g: 1
+        flux_r: 1
+        flux_z: 1
+        flux_w1: 1
+        flux_w2: 1
+        flux_w3: 1
+        flux_w4: 1
+        shape_r: 1
+        shape_e1: 1
+        shape_e2: 1
+        sersic: 1
+        flux_ivar_r: 1
+        fracflux_r: 1
     AllWISE:
       radius: 2.0
       use_distance: false
@@ -1342,6 +1630,10 @@ crossmatch:
         w2mpro: 1
         w3mpro: 1
         w4mpro: 1
+    eRASS1_Main: null
+    5XMM_DR15: null
+    2SXPS: null
+    4FGL_DR4: null
     watchlist_wtp:
       radius: 2.75 # 2.75 arcseconds, one WISE pixel
       use_distance: false
@@ -1356,3 +1648,327 @@ crossmatch:
         n_det: 1
         lightcurve: 1
         forced: 1
+  askap:
+    LSPSC:
+      radius: 30.0 # 30 arcseconds
+      use_distance: false
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        score: 1
+        mag_white: 1
+      max_results: 3 # 3 nearest neighbors
+    Gaia_DR3:
+      radius: 3.0
+      use_distance: false
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        parallax: 1
+        parallax_error: 1
+        pm: 1
+        pmra: 1
+        pmra_error: 1
+        pmdec: 1
+        pmdec_error: 1
+        phot_g_mean_mag: 1
+        phot_bp_mean_mag: 1
+        phot_rp_mean_mag: 1
+        phot_g_n_obs: 1
+        phot_bp_n_obs: 1
+        phot_rp_n_obs: 1
+        ruwe: 1
+        phot_bp_rp_excess_factor: 1
+    milliquas_v8:
+      radius: 3.0
+      use_distance: false
+      projection:
+        _id: 1
+        Name: 1
+        Descrip: 1
+        objtype: 1
+        Qpct: 1
+        ra: 1
+        dec: 1
+    NED:
+      radius: 300.0 # 300 arcseconds
+      use_distance: true
+      distance_key: "z"
+      distance_max: 30.0
+      distance_max_near: 300.0
+      angular_size_key: Diam
+      # Must be >= host_galaxy.max_dlr: d_DLR <= N implies sep <= N * semi-major.
+      angular_size_scale: 5.0
+      angular_size_radius_max: 21600.0 # 6 deg, enough for the LMC
+      angular_size_radius_min: 5.0 # a row with neither Diam nor z, matched on astrometry alone
+      max_results: 50
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        objtype: 1
+        z: 1
+        z_unc: 1
+        z_tech: 1
+        z_qual: 1
+        DistMpc: 1
+        DistMpc_unc: 1
+        ebv: 1
+        m_Ks: 1
+        m_Ks_unc: 1
+        tMASSphot: 1
+        Mstar: 1
+        Mstar_unc: 1
+        Diam: 1
+        Diam_ba: 1
+        Diam_pa: 1
+        Diam_survey: 1
+        DistMpc_method: 1
+    2MASS_PSC:
+      radius: 3.0
+      use_distance: false
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        j_m: 1
+        j_msigcom: 1
+        j_snr: 1
+        h_m: 1
+        h_msigcom: 1
+        h_snr: 1
+        k_m: 1
+        k_msigcom: 1
+        k_snr: 1
+        ndet: 1
+    GALEX:
+      radius: 3.0
+      use_distance: false
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        fuv_mag: 1
+        fuv_magerr: 1
+        nuv_mag: 1
+        nuv_magerr: 1
+        fuv_exp: 1
+        nuv_exp: 1
+        obstype: 1
+        band: 1
+    VSX:
+      radius: 3.0
+      use_distance: false
+      projection:
+        _id: 1
+        name: 1
+        var_flag: 1
+        ra: 1
+        dec: 1
+        types: 1
+        max: 1
+        max_band: 1
+        min_is_amplitude: 1
+        min: 1
+        min_band: 1
+        epoch: 1
+        period: 1
+        spectral_type: 1
+    CatWISE2020:
+      radius: 3.0
+      use_distance: false
+      projection:
+        _id: 1
+        source_name: 1
+        ra: 1
+        dec: 1
+        sigra: 1
+        sigdec: 1
+        w1mpro: 1
+        w2mpro: 1
+        w1sigmpro: 1
+        w2sigmpro: 1
+        w1rchi2: 1
+        w2rchi2: 1
+        pmra: 1
+        pmdec: 1
+        sigpmra: 1
+        sigpmdec: 1
+        unwise_objid: 1
+    TNS:
+      radius: 3.0
+      use_distance: false
+      projection:
+        _id: 1
+        name_prefix: 1
+        name: 1
+        ra: 1
+        dec: 1
+        type: 1
+        redshift: 1
+        discovery_mag: 1
+        discovery_jd: 1
+        internal_names: 1
+      max_results: 3
+    DESI_DR1:
+      radius: 30.0 # 30 arcseconds
+      use_distance: true
+      distance_key: "z"
+      distance_max: 30.0
+      distance_max_near: 300.0
+      # DESI is spectroscopic and full of stars, which sit at z ~ 0 and so have
+      # no meaningful projected distance. Naming the type column keeps them from
+      # being ranked as though they were very nearby galaxies. QSO is left out
+      # deliberately: it is a plausible counterpart, so it ranks like a galaxy.
+      type_key: "spectype"
+      stellar_types: ["STAR"]
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        z: 1
+        zerr: 1
+        zwarn: 1
+        chi2: 1
+        deltachi2: 1
+        spectype: 1
+        zcat_nspec: 1
+    DESI_DR1_dwarfs:
+      radius: 300.0 # 300 arcseconds
+      use_distance: true
+      distance_key: "z"
+      distance_max: 30.0
+      distance_max_near: 300.0
+      angular_size_key: r50_r
+      # r50_r is a radius, not a diameter: 10.0 matches within 5 half-light radii.
+      angular_size_scale: 10.0
+      angular_size_radius_max: 1800.0
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        z: 1
+        zwarn: 1
+        lumi_dist_mpc: 1
+        dist_source: 1
+        log_mstar_m24: 1
+        log_mstar_m24_err: 1
+        mag_g: 1
+        mag_r: 1
+        mag_z: 1
+        r50_r: 1
+        dwarf_maskbit: 1
+        mstar_maskbit: 1
+        in_sga_2020: 1
+    PS1_DR2:
+      radius: 3.0
+      use_distance: false
+      projection:
+        _id: 1
+        gMeanPSFMag: 1
+        gMeanPSFMagErr: 1
+        rMeanPSFMag: 1
+        rMeanPSFMagErr: 1
+        iMeanPSFMag: 1
+        iMeanPSFMagErr: 1
+        zMeanPSFMag: 1
+        zMeanPSFMagErr: 1
+        yMeanPSFMag: 1
+        yMeanPSFMagErr: 1
+        ra: 1
+        dec: 1
+        strm_class: 1
+        strm_prob_galaxy: 1
+        strm_prob_qso: 1
+        strm_prob_star: 1
+        strm_uid: 1
+        strm_z_phot: 1
+        strm_z_phot_err: 1
+    LSDR10:
+      radius: 30.0
+      use_distance: true
+      distance_key: "z_phot_mean"
+      distance_max: 60.0
+      distance_max_near: 300.0
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        objtype: 1
+        ebv: 1
+        z_spec: 1
+        survey: 1
+        z_phot_mean: 1
+        z_phot_median: 1
+        z_phot_std: 1
+        z_phot_l95: 1
+        z_phot_u95: 1
+        flux_g: 1
+        flux_r: 1
+        flux_i: 1
+        flux_z: 1
+        flux_w1: 1
+        flux_w2: 1
+        flux_w3: 1
+        flux_w4: 1
+        shape_r: 1
+        shape_e1: 1
+        shape_e2: 1
+        sersic: 1
+        flux_ivar_r: 1
+        fracflux_r: 1
+        flux_ivar_g: 1
+        flux_ivar_i: 1
+        flux_ivar_z: 1
+        fracflux_g: 1
+        fracflux_i: 1
+        fracflux_z: 1
+    LSDR9:
+      radius: 30.0
+      use_distance: true
+      distance_key: "z_phot_mean"
+      distance_max: 60.0
+      distance_max_near: 300.0
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        objtype: 1
+        ebv: 1
+        z_spec: 1
+        survey: 1
+        z_phot_mean: 1
+        z_phot_median: 1
+        z_phot_std: 1
+        z_phot_l95: 1
+        z_phot_u95: 1
+        flux_g: 1
+        flux_r: 1
+        flux_z: 1
+        flux_w1: 1
+        flux_w2: 1
+        flux_w3: 1
+        flux_w4: 1
+        shape_r: 1
+        shape_e1: 1
+        shape_e2: 1
+        sersic: 1
+        flux_ivar_r: 1
+        fracflux_r: 1
+    AllWISE:
+      radius: 3.0
+      use_distance: false
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        w1mpro: 1
+        w2mpro: 1
+        w3mpro: 1
+        w4mpro: 1
+    eRASS1_Main: null
+    5XMM_DR15: null
+    2SXPS: null
+    4FGL_DR4: null

@@ -40,6 +40,7 @@ export default function Query() {
   const [isNearBrightstar, setIsNearBrightstar] = useState<BoolFilter>('any');
   const [isStationary, setIsStationary] = useState<BoolFilter>('any');
   const [isPositive, setIsPositive] = useState<BoolFilter>('any');
+  const [maxHostDist, setMaxHostDist] = useState('');
 
   // Alert results state
   const [alerts, setAlerts] = useState<Alert[]>([]);
@@ -63,6 +64,7 @@ export default function Query() {
     isNearBrightstar, setIsNearBrightstar,
     isStationary, setIsStationary,
     isPositive, setIsPositive,
+    maxHostDist, setMaxHostDist,
   };
 
   async function executeSearch(survey: 'ZTF' | 'LSST', params: AlertSearchParams, searchType: string) {
@@ -121,12 +123,14 @@ export default function Query() {
       if (isNearBrightstar !== 'any') baseParams.is_near_brightstar = isNearBrightstar === 'true';
       if (isStationary !== 'any') baseParams.is_stationary = isStationary === 'true';
       if (isPositive !== 'any') baseParams.is_positive = isPositive === 'true';
+      if (maxHostDist) baseParams.max_host_dist_mpc = parseFloat(maxHostDist);
       analytics.trackAlertSearchSubmitted({
         survey: alertSurvey, search_type: searchType,
         has_date_filter: !!(startJd || endJd),
         has_magnitude_filter: !!(minMag || maxMag),
         has_drb_filter: !!(minDrb || maxDrb),
         has_classification_filter: [isRock, isStar, isNearBrightstar, isStationary].some(v => v !== 'any'),
+        has_host_distance_filter: !!maxHostDist,
       });
     }
 

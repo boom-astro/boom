@@ -51,6 +51,8 @@ pub enum Operation {
     Delete,
     /// Indexes created or dropped.
     Index,
+    /// A decision recorded against data, with no document rewritten.
+    Annotate,
     /// A whole collection removed.
     Drop,
 }
@@ -206,6 +208,7 @@ mod tests {
         Actor {
             user_id: "babamul:abc".into(),
             username: "pete".into(),
+            email: None,
         }
     }
 

@@ -15,7 +15,7 @@
 //! it is self-contained enough to move into its own crate alongside
 //! `villar-pso` when the kernels are written.
 
-use crate::utils::linking::{night_of, tangent_plane, Detection};
+use crate::utils::linking::{tangent_plane, Detection};
 use serde::{Deserialize, Serialize};
 
 /// Where the test orbit appears, at each epoch the detections were taken.
@@ -121,6 +121,7 @@ pub struct Cluster {
 pub struct Projected {
     pub id: i64,
     pub jd: f64,
+    pub night: i64,
     pub x: f64,
     pub y: f64,
 }
@@ -138,6 +139,7 @@ pub fn project(detections: &[Detection], track: &TestOrbitTrack, cfg: &Config) -
             (x.hypot(y) <= cfg.max_offset_deg).then_some(Projected {
                 id: d.id,
                 jd: d.jd,
+                night: d.night(),
                 x,
                 y,
             })
@@ -225,7 +227,7 @@ pub fn cluster(projected: &[Projected], cfg: &Config) -> Vec<Cluster> {
                 }
                 let nights = members
                     .iter()
-                    .map(|&k| night_of(projected[k].jd))
+                    .map(|&k| projected[k].night)
                     .collect::<std::collections::HashSet<_>>()
                     .len();
                 if nights < cfg.min_nights {
@@ -295,7 +297,7 @@ fn summarise(members: &[usize], projected: &[Projected], vx: f64, vy: f64) -> Cl
     }
     let nights = members
         .iter()
-        .map(|&k| night_of(projected[k].jd))
+        .map(|&k| projected[k].night)
         .collect::<std::collections::HashSet<_>>()
         .len();
     let mut ids: Vec<i64> = members.iter().map(|&k| projected[k].id).collect();
