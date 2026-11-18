@@ -9,6 +9,7 @@ import NightMap from "@/components/telescopes/NightMap";
 import NightTimeline from "@/components/telescopes/NightTimeline";
 import boomLogo from "@/assets/boom-logo.png";
 import api, { type NightlyStat } from "@/lib/api";
+import { sendingSurveys, useLiveIngest } from "@/lib/liveIngest";
 import { CATALOG_COLORS, CATALOGS, type Coverage } from "@/lib/coverage";
 import { nextCrossing, skyState, sunAltitudeAt, type SkyState } from "@/lib/sun";
 import { formatClock, NIGHT_COLOR, SITES, type Site, type Telescope } from "@/lib/telescopes";
@@ -251,6 +252,11 @@ export default function Telescopes() {
   const [nights, setNights] = useState<NightlyStat[]>([]);
   const [selected, setSelected] = useState<Selection[]>([]);
   const hubRef = useRef<HTMLDivElement>(null);
+  const ingest = useLiveIngest(true);
+  const sending = useMemo(() => {
+    const surveys = sendingSurveys(ingest.data, time);
+    return new Set(SITES.filter((site) => site.telescopes.some((t) => surveys.has(t.id))).map((site) => site.id));
+  }, [ingest.data, time]);
   const select = useCallback((id: string) => setSelected((current) => {
     if (current.some((selection) => selection.id === id)) return current.filter((selection) => selection.id !== id);
     const kept = current.slice(1 - MAX_SELECTED);
@@ -286,7 +292,7 @@ export default function Telescopes() {
 
   const states = new Map(SITES.map((site) => [site.id, siteState(site, time)]));
   const changes = new Map(SITES.map((site) => [site.id, nextCrossing(time, site.lat, site.lon)]));
-  const receiving = SITES.some((site) => states.get(site.id) === "night");
+  const receiving = sending.size > 0;
   const counted = TELESCOPES.filter(({ telescope }) => alerts(telescope, 0) !== undefined);
   const tonight = counted.reduce((n, { telescope }) => n + (alerts(telescope, 0) ?? 0), 0);
 
@@ -306,6 +312,7 @@ export default function Telescopes() {
         <CardContent>
           <NightMap
             sites={SITES}
+            sending={sending}
             timeRef={timeRef}
             hubRef={hubRef}
             coverages={coverages}

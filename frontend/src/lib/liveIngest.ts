@@ -3,6 +3,19 @@ import api, { type LiveIngest } from "@/lib/api";
 
 const REFRESH_MS = 60_000;
 const MINUTE = 60_000;
+const SENDING_MS = 20 * MINUTE;
+
+export function sendingSurveys(live: LiveIngest | null, at: number): Set<string> {
+  const binMs = (live?.bin_minutes ?? 10) * MINUTE;
+  return new Set(
+    (live?.surveys ?? [])
+      .filter((survey) => survey.bins.some((bin) => {
+        const start = Date.parse(bin.start);
+        return bin.received > 0 && start <= at && at - (start + binMs) < SENDING_MS;
+      }))
+      .map((survey) => survey.survey),
+  );
+}
 
 export function formatAgo(ms: number): string {
   const minutes = Math.round(ms / MINUTE);

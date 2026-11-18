@@ -15,9 +15,7 @@ import { followsSiderealTime, footprintCoverage, type Coverage } from "@/lib/cov
 import {
   NIGHT_SUN_ALTITUDE,
   siderealAngle,
-  skyState,
   subsolarPoint,
-  sunAltitude,
   wrapLongitude,
 } from "@/lib/sun";
 import { type Site } from "@/lib/telescopes";
@@ -417,8 +415,9 @@ function computeCoverage(scene: Scene, layer: CoverageLayer, ms: number) {
   layer.computedAt = ms;
 }
 
-export default function NightMap({ sites, timeRef, hubRef, coverages, onSelect }: {
+export default function NightMap({ sites, sending, timeRef, hubRef, coverages, onSelect }: {
   sites: Site[];
+  sending: ReadonlySet<string>;
   timeRef: React.RefObject<number>;
   hubRef: React.RefObject<HTMLElement | null>;
   coverages: Coverage[];
@@ -427,6 +426,7 @@ export default function NightMap({ sites, timeRef, hubRef, coverages, onSelect }
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const coverageRef = useRef<ActiveCoverage[]>([]);
+  const sendingRef = useRef(sending);
   const [land, setLand] = useState<GeoPermissibleObjects | null>(null);
 
   useEffect(() => {
@@ -441,6 +441,10 @@ export default function NightMap({ sites, timeRef, hubRef, coverages, onSelect }
       ...coverages.filter((coverage) => !shown.has(coverage.id)).map((coverage) => ({ coverage, since: now })),
     ];
   }, [coverages]);
+
+  useEffect(() => {
+    sendingRef.current = sending;
+  }, [sending]);
 
   useEffect(() => {
     let cancelled = false;
@@ -600,15 +604,13 @@ export default function NightMap({ sites, timeRef, hubRef, coverages, onSelect }
     }
 
     function paintSites(scene: Scene, now: number) {
-      const sun = subsolarPoint(timeRef.current);
-      const states = sites.map((site) => skyState(sunAltitude(sun, site.lat, site.lon)));
-      states.forEach((state, i) => state === "night" && paintFlow(scene.flows[i], colors[i], now));
+      const active = sites.map((site) => sendingRef.current.has(site.id));
+      active.forEach((on, i) => on && paintFlow(scene.flows[i], colors[i], now));
 
       sites.forEach((_, i) => {
         const [x, y] = scene.points[i];
         const siteColors = colors[i];
-        const state = states[i];
-        const intensity = state === "night" ? 1 : state === "twilight" ? 0.35 : 0;
+        const intensity = active[i] ? 1 : 0;
 
         if (intensity > 0) {
           for (let k = 0; k < RINGS; k++) {

@@ -2,11 +2,11 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Toggle } from "@/components/ui/toggle";
 import { type LiveBin, type LiveIngest as LiveIngestData } from "@/lib/api";
 import { SURVEY_COLORS } from "@/lib/constants";
+import { sendingSurveys } from "@/lib/liveIngest";
 import { darkIntervals } from "@/lib/sun";
 import { SITES, formatClock } from "@/lib/telescopes";
 
 const TICK_MS = 15_000;
-const LIVE_MS = 20 * 60_000;
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 const CUMULATIVE_HEIGHT = 140;
@@ -37,7 +37,6 @@ type Lane = {
   bins: Map<number, LiveBin>;
   night: Interval | null;
   sky: Interval | null;
-  lastIngest: number | null;
 };
 
 const utc = (ms: number) => formatClock(ms, "UTC");
@@ -111,7 +110,6 @@ export default function LiveIngest({ data }: { data: LiveIngestData | null }) {
           bins: new Map(survey.bins.map((bin) => [Date.parse(bin.start), bin])),
           night: darkIntervals(start, end, lat, lon)[0] ?? null,
           sky: darkIntervals(start, end, lat, lon, 0)[0] ?? null,
-          lastIngest: survey.last_received_at ? Date.parse(survey.last_received_at) : null,
         }];
       });
   }, [data]);
@@ -207,6 +205,7 @@ export default function LiveIngest({ data }: { data: LiveIngestData | null }) {
     return { y, x, series, gridlines };
   }, [shown, from, span, width, binMs]);
 
+  const sending = sendingSurveys(data, now);
   const inProgress = sumOf(shown.map((lane) => lane.total - lane.processed));
 
   const label = shown.length === lanes.length ? "All surveys" : shown.map((lane) => lane.label).join(" + ") || "No survey";
@@ -312,7 +311,7 @@ export default function LiveIngest({ data }: { data: LiveIngestData | null }) {
                   backgroundColor: `color-mix(in oklch, ${lane.color} 15%, transparent)`,
                 } : {}}
               >
-                {lane.lastIngest !== null && now - lane.lastIngest < LIVE_MS && <LiveDot />}
+                {sending.has(lane.id) && <LiveDot />}
                 {lane.label}
               </Toggle>
             );
