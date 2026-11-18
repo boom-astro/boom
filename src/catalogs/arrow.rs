@@ -98,7 +98,10 @@ pub fn f64_column(batch: &RecordBatch, name: &str) -> Result<Vec<Option<f64>>, C
 
 /// Read a column as `i64`, whatever integer width it was written at.
 pub fn i64_column(batch: &RecordBatch, name: &str) -> Result<Vec<Option<i64>>, ColumnError> {
-    use arrow::array::{Int16Array, Int32Array, Int64Array, UInt32Array, UInt64Array};
+    use arrow::array::{
+        Int16Array, Int32Array, Int64Array, Int8Array, UInt16Array, UInt32Array, UInt64Array,
+        UInt8Array,
+    };
     let column = column(batch, name)?;
 
     macro_rules! collect {
@@ -125,6 +128,10 @@ pub fn i64_column(batch: &RecordBatch, name: &str) -> Result<Vec<Option<i64>>, C
         DataType::Int64 => collect!(Int64Array, |v: i64| v),
         DataType::Int32 => collect!(Int32Array, |v: i32| v as i64),
         DataType::Int16 => collect!(Int16Array, |v: i16| v as i64),
+        DataType::Int8 => collect!(Int8Array, |v: i8| v as i64),
+        // FITS `B` columns, which astropy reads as uint8.
+        DataType::UInt8 => collect!(UInt8Array, |v: u8| v as i64),
+        DataType::UInt16 => collect!(UInt16Array, |v: u16| v as i64),
         // Legacy Survey ids and similar identifiers are written unsigned but
         // fit in an i64, which is what BSON can store.
         DataType::UInt64 => collect!(UInt64Array, |v: u64| v as i64),

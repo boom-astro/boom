@@ -1681,6 +1681,161 @@ impl super::arrow::FromRecordBatch for FourFgl {
 
 impl HasCoordinates for FourFgl {}
 
+// ---------------------------------------------------------------------------
+// REGALADE v2 -- parquet, converted from slices of the published FITS table
+// ---------------------------------------------------------------------------
+
+/// One galaxy of REGALADE v2 (Tranin et al. 2026), with distances in Mpc, the
+/// ellipse semi-axes `R1`/`R2` in arcseconds and `PA` in degrees.
+///
+/// `_id` is the row's position in `regalade_v2.fits`: names repeat, as
+/// residual duplicates with different distances, and both are kept.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Regalade {
+    #[serde(rename(serialize = "_id"))]
+    pub row: i64,
+    pub name: String,
+    pub ra: f64,
+    pub dec: f64,
+    /// The recommended distance.
+    #[serde(rename(serialize = "D"))]
+    pub dist_mpc: Option<f64>,
+    pub z: Option<f64>,
+    pub z_err: Option<f64>,
+    #[serde(rename(serialize = "D_min"))]
+    pub dist_min: Option<f64>,
+    #[serde(rename(serialize = "D_max"))]
+    pub dist_max: Option<f64>,
+    /// The best single published distance, which `D_err` is the error on.
+    #[serde(rename(serialize = "D_input"))]
+    pub dist_input: Option<f64>,
+    #[serde(rename(serialize = "D_err"))]
+    pub dist_err: Option<f64>,
+    #[serde(rename(serialize = "D_tmean"))]
+    pub dist_tmean: Option<f64>,
+    #[serde(rename(serialize = "ref_D_in"))]
+    pub ref_dist_in: Option<i64>,
+    pub ref_z_in: Option<i64>,
+    pub n_dist: Option<i64>,
+    #[serde(rename(serialize = "R1"))]
+    pub r1: Option<f64>,
+    #[serde(rename(serialize = "R2"))]
+    pub r2: Option<f64>,
+    #[serde(rename(serialize = "PA"))]
+    pub pa: Option<f64>,
+    pub ref_ell: Option<i64>,
+    /// Bit flags naming the input catalogs the galaxy was matched in.
+    pub id_cat: Option<i64>,
+    pub gmag: Option<f64>,
+    pub rmag: Option<f64>,
+    pub imag: Option<f64>,
+    pub zmag: Option<f64>,
+    #[serde(rename(serialize = "W1mag"))]
+    pub w1mag: Option<f64>,
+    #[serde(rename(serialize = "W2mag"))]
+    pub w2mag: Option<f64>,
+    pub griz_ref: Option<i64>,
+    #[serde(rename(serialize = "W_ref"))]
+    pub w_ref: Option<i64>,
+    #[serde(rename(serialize = "EBV"))]
+    pub ebv: Option<f64>,
+    /// log10 of the stellar mass in solar masses.
+    #[serde(rename(serialize = "logM"))]
+    pub log_mstar: Option<f64>,
+    /// Only in the lower-reliability input catalogs.
+    pub f_reliability: Option<bool>,
+    pub simbad_z: Option<f64>,
+    pub f_simbad_zdiscrepancy: Option<bool>,
+}
+
+impl super::arrow::FromRecordBatch for Regalade {
+    fn from_batch(
+        batch: &::arrow::array::RecordBatch,
+    ) -> Result<Vec<Self>, super::arrow::ColumnError> {
+        use super::arrow::{bool_column, f64_column, i64_column, string_column};
+
+        let row = i64_column(batch, "row")?;
+        let name = string_column(batch, "name")?;
+        let ra = f64_column(batch, "gal_ra")?;
+        let dec = f64_column(batch, "gal_dec")?;
+        let dist_mpc = f64_column(batch, "D")?;
+        let z = f64_column(batch, "z")?;
+        let z_err = f64_column(batch, "z_err")?;
+        let dist_min = f64_column(batch, "D_min")?;
+        let dist_max = f64_column(batch, "D_max")?;
+        let dist_input = f64_column(batch, "D_input")?;
+        let dist_err = f64_column(batch, "D_err")?;
+        let dist_tmean = f64_column(batch, "D_tmean")?;
+        let ref_dist_in = i64_column(batch, "ref_D_in")?;
+        let ref_z_in = i64_column(batch, "ref_z_in")?;
+        let n_dist = i64_column(batch, "n_dist")?;
+        let r1 = f64_column(batch, "R1")?;
+        let r2 = f64_column(batch, "R2")?;
+        let pa = f64_column(batch, "PA")?;
+        let ref_ell = i64_column(batch, "ref_ell")?;
+        let id_cat = i64_column(batch, "id_cat")?;
+        let gmag = f64_column(batch, "gmag")?;
+        let rmag = f64_column(batch, "rmag")?;
+        let imag = f64_column(batch, "imag")?;
+        let zmag = f64_column(batch, "zmag")?;
+        let w1mag = f64_column(batch, "W1mag")?;
+        let w2mag = f64_column(batch, "W2mag")?;
+        let griz_ref = i64_column(batch, "griz_ref")?;
+        let w_ref = i64_column(batch, "W_ref")?;
+        let ebv = f64_column(batch, "EBV")?;
+        let log_mstar = f64_column(batch, "logM")?;
+        let f_reliability = bool_column(batch, "f_reliability")?;
+        let simbad_z = f64_column(batch, "simbad_z")?;
+        let f_simbad_zdiscrepancy = bool_column(batch, "f_simbad_zdiscrepancy")?;
+
+        let mut rows = Vec::with_capacity(batch.num_rows());
+        for i in 0..batch.num_rows() {
+            let (Some(row), Some(ra), Some(dec)) = (row[i], ra[i], dec[i]) else {
+                continue;
+            };
+            rows.push(Regalade {
+                row,
+                name: name[i].clone().unwrap_or_default(),
+                ra,
+                dec,
+                dist_mpc: dist_mpc[i],
+                z: z[i],
+                z_err: z_err[i],
+                dist_min: dist_min[i],
+                dist_max: dist_max[i],
+                dist_input: dist_input[i],
+                dist_err: dist_err[i],
+                dist_tmean: dist_tmean[i],
+                ref_dist_in: ref_dist_in[i],
+                ref_z_in: ref_z_in[i],
+                n_dist: n_dist[i],
+                r1: r1[i],
+                r2: r2[i],
+                pa: pa[i],
+                ref_ell: ref_ell[i],
+                id_cat: id_cat[i],
+                gmag: gmag[i],
+                rmag: rmag[i],
+                imag: imag[i],
+                zmag: zmag[i],
+                w1mag: w1mag[i],
+                w2mag: w2mag[i],
+                griz_ref: griz_ref[i],
+                w_ref: w_ref[i],
+                ebv: ebv[i],
+                log_mstar: log_mstar[i],
+                f_reliability: f_reliability[i],
+                simbad_z: simbad_z[i],
+                f_simbad_zdiscrepancy: f_simbad_zdiscrepancy[i],
+            });
+        }
+        Ok(rows)
+    }
+}
+
+impl HasCoordinates for Regalade {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2304,5 +2459,56 @@ mod tests {
             "these record types do not serialize an _id, so a resumed ingest \
              would duplicate every row: {missing:?}"
         );
+    }
+
+    #[test]
+    fn regalade_reads_the_column_types_the_fits_conversion_writes() {
+        use ::arrow::array::{
+            ArrayRef, Float32Array, Int16Array, Int32Array, Int64Array, RecordBatch, StringArray,
+            UInt8Array,
+        };
+        use ::arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+
+        use crate::catalogs::arrow::FromRecordBatch;
+
+        const FLOATS: &str = "gal_ra gal_dec D z z_err D_min D_max D_input D_err D_tmean R1 R2 \
+                              PA gmag rmag imag zmag W1mag W2mag EBV logM simbad_z";
+        const INTS: &str = "ref_D_in ref_z_in n_dist ref_ell id_cat griz_ref W_ref";
+        let mut fields = vec![
+            Field::new("name", DataType::Utf8, true),
+            Field::new("row", DataType::Int64, false),
+            Field::new("f_reliability", DataType::UInt8, false),
+            Field::new("f_simbad_zdiscrepancy", DataType::Int16, false),
+        ];
+        let mut columns: Vec<ArrayRef> = vec![
+            Arc::new(StringArray::from(vec!["PGC4126716", "PGC4126716"])),
+            Arc::new(Int64Array::from(vec![71_480_000, 71_480_001])),
+            Arc::new(UInt8Array::from(vec![1, 0])),
+            Arc::new(Int16Array::from(vec![0, 0])),
+        ];
+        for name in FLOATS.split_whitespace() {
+            fields.push(Field::new(name, DataType::Float32, true));
+            // FITS has no null, so a missing stellar mass arrives as NaN.
+            let missing = if name == "logM" { f32::NAN } else { 2.5 };
+            columns.push(Arc::new(Float32Array::from(vec![missing, 2.5])));
+        }
+        for name in INTS.split_whitespace() {
+            fields.push(Field::new(name, DataType::Int32, false));
+            columns.push(Arc::new(Int32Array::from(vec![7, 7])));
+        }
+        let batch =
+            RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).expect("valid batch");
+
+        let rows = Regalade::from_batch(&batch).expect("every column is present");
+        assert_eq!(rows.len(), 2, "a repeated name is a second galaxy, not a duplicate");
+        let doc = mongodb::bson::to_document(&rows[0]).expect("serializes");
+        assert_eq!(doc.get_i64("_id").unwrap(), 71_480_000);
+        assert_eq!(doc.get_f64("ra").unwrap(), 2.5);
+        assert_eq!(doc.get_f64("D").unwrap(), 2.5);
+        assert_eq!(doc.get_i64("ref_D_in").unwrap(), 7);
+        assert!(doc.get_bool("f_reliability").unwrap());
+        assert!(!doc.contains_key("logM"));
+        assert!(!doc.contains_key("row") && !doc.contains_key("gal_ra"));
     }
 }

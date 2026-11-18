@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 from astropy.table import Table
 
 from .http import log
@@ -22,6 +23,7 @@ def fits_to_parquet(
     row_filter=None,
     label: str = "",
     memmap: bool = False,
+    row_offset: int | None = None,
 ) -> Path:
     """Convert `hdu` of a FITS table to parquet, keeping `columns`.
 
@@ -31,6 +33,9 @@ def fits_to_parquet(
     ingest all proportional to what is actually stored.
 
     `memmap` needs an uncompressed file and leaves NaN and blanks unmasked.
+
+    `row_offset` adds a `row` column numbering rows from it, for a catalog with
+    no unique identifier whose rows are fetched a slice at a time.
     """
     table = Table.read(fits_path, hdu=hdu, memmap=memmap)
     missing = [c for c in columns if c not in table.colnames]
@@ -39,6 +44,9 @@ def fits_to_parquet(
             f"{label or fits_path.name} is missing expected columns {missing}; "
             "the published schema may have changed"
         )
+    if row_offset is not None:
+        table["row"] = np.arange(row_offset, row_offset + len(table))
+        columns = [*columns, "row"]
     if row_filter is not None:
         before = len(table)
         table = table[row_filter(table)]

@@ -107,6 +107,38 @@ def test_download_restarts_when_server_ignores_range(tmp_path, monkeypatch):
     assert dest.read_bytes() == b"payload"
 
 
+@responses.activate
+def test_download_fetches_and_resumes_a_byte_range(tmp_path):
+    dest = tmp_path / "rows"
+    dest.with_suffix(".part").write_bytes(b"ay")
+    responses.add(
+        responses.GET,
+        "https://example.test/f.fits",
+        body=b"lo",
+        status=206,
+        headers={"Content-Range": "bytes 3-4/10"},
+        match=[responses.matchers.header_matcher({"Range": "bytes=3-4"})],
+    )
+    download("https://example.test/f.fits", dest, byte_range=(1, 4))
+    assert dest.read_bytes() == b"aylo"
+
+
+@responses.activate
+def test_download_refuses_a_whole_file_for_a_byte_range(tmp_path, monkeypatch):
+    """Taking a 200 here would write the whole file where a slice belongs."""
+    monkeypatch.setattr("boompy.catalog.http.time.sleep", lambda _: None)
+    responses.add(
+        responses.GET, "https://example.test/f.fits", body=b"0123456789"
+    )
+    with pytest.raises(RuntimeError, match="bytes 1-4"):
+        download(
+            "https://example.test/f.fits",
+            tmp_path / "rows",
+            byte_range=(1, 4),
+            attempts=2,
+        )
+
+
 def test_every_request_identifies_boom():
     """At least one archive (quasars.org) answers 406 to the default
     `python-requests/x.y` agent, so a valid download fails for no visible
