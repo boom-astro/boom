@@ -793,6 +793,41 @@ crossmatch:
         ASSOC_PROB_LR: 1
         RA_Counterpart: 1
         DEC_Counterpart: 1
+    Euclid_DR1_SPE:
+      radius: 30.0 # 30 arcseconds
+      use_distance: true
+      distance_key: "spe_z"
+      distance_max: 30.0
+      distance_max_near: 300.0
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        survey: 1
+        spe_class: 1
+        spe_z: 1
+        spe_z_err: 1
+        spe_z_prob: 1
+        spe_subclass: 1
+        spe_gal_prob: 1
+        spe_qso_prob: 1
+    Euclid_DR1_PHZ:
+      radius: 30.0 # 30 arcseconds
+      use_distance: true
+      distance_key: "phz_median"
+      distance_max: 30.0
+      distance_max_near: 300.0
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        survey: 1
+        phz_median: 1
+        phz_70_int_1: 1
+        phz_70_int_2: 1
+        phz_classification: 1
+        phz_weight: 1
+        flux_vis_unif: 1
   lsst:
     LSPSC:
       radius: 30.0 # 30 arcseconds
@@ -1243,6 +1278,41 @@ crossmatch:
         ASSOC_PROB_LR: 1
         RA_Counterpart: 1
         DEC_Counterpart: 1
+    Euclid_DR1_SPE:
+      radius: 30.0 # 30 arcseconds
+      use_distance: true
+      distance_key: "spe_z"
+      distance_max: 30.0
+      distance_max_near: 300.0
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        survey: 1
+        spe_class: 1
+        spe_z: 1
+        spe_z_err: 1
+        spe_z_prob: 1
+        spe_subclass: 1
+        spe_gal_prob: 1
+        spe_qso_prob: 1
+    Euclid_DR1_PHZ:
+      radius: 30.0 # 30 arcseconds
+      use_distance: true
+      distance_key: "phz_median"
+      distance_max: 30.0
+      distance_max_near: 300.0
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        survey: 1
+        phz_median: 1
+        phz_70_int_1: 1
+        phz_70_int_2: 1
+        phz_classification: 1
+        phz_weight: 1
+        flux_vis_unif: 1
   decam:
     LSPSC:
       radius: 30.0 # 30 arcseconds
@@ -1693,6 +1763,41 @@ crossmatch:
         ASSOC_PROB_LR: 1
         RA_Counterpart: 1
         DEC_Counterpart: 1
+    Euclid_DR1_SPE:
+      radius: 30.0 # 30 arcseconds
+      use_distance: true
+      distance_key: "spe_z"
+      distance_max: 30.0
+      distance_max_near: 300.0
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        survey: 1
+        spe_class: 1
+        spe_z: 1
+        spe_z_err: 1
+        spe_z_prob: 1
+        spe_subclass: 1
+        spe_gal_prob: 1
+        spe_qso_prob: 1
+    Euclid_DR1_PHZ:
+      radius: 30.0 # 30 arcseconds
+      use_distance: true
+      distance_key: "phz_median"
+      distance_max: 30.0
+      distance_max_near: 300.0
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        survey: 1
+        phz_median: 1
+        phz_70_int_1: 1
+        phz_70_int_2: 1
+        phz_classification: 1
+        phz_weight: 1
+        flux_vis_unif: 1
   winter:
     Gaia_DR3:
       radius: 2.0 # 2 arcseconds
@@ -2133,6 +2238,41 @@ crossmatch:
         ASSOC_PROB_LR: 1
         RA_Counterpart: 1
         DEC_Counterpart: 1
+    Euclid_DR1_SPE:
+      radius: 30.0 # 30 arcseconds
+      use_distance: true
+      distance_key: "spe_z"
+      distance_max: 30.0
+      distance_max_near: 300.0
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        survey: 1
+        spe_class: 1
+        spe_z: 1
+        spe_z_err: 1
+        spe_z_prob: 1
+        spe_subclass: 1
+        spe_gal_prob: 1
+        spe_qso_prob: 1
+    Euclid_DR1_PHZ:
+      radius: 30.0 # 30 arcseconds
+      use_distance: true
+      distance_key: "phz_median"
+      distance_max: 30.0
+      distance_max_near: 300.0
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        survey: 1
+        phz_median: 1
+        phz_70_int_1: 1
+        phz_70_int_2: 1
+        phz_classification: 1
+        phz_weight: 1
+        flux_vis_unif: 1
     watchlist_wtp:
       radius: 2.75 # 2.75 arcseconds, one WISE pixel
       use_distance: false
@@ -2597,3 +2737,38 @@ crossmatch:
         ASSOC_PROB_LR: 1
         RA_Counterpart: 1
         DEC_Counterpart: 1
+    Euclid_DR1_SPE:
+      radius: 30.0 # 30 arcseconds
+      use_distance: true
+      distance_key: "spe_z"
+      distance_max: 30.0
+      distance_max_near: 300.0
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        survey: 1
+        spe_class: 1
+        spe_z: 1
+        spe_z_err: 1
+        spe_z_prob: 1
+        spe_subclass: 1
+        spe_gal_prob: 1
+        spe_qso_prob: 1
+    Euclid_DR1_PHZ:
+      radius: 30.0 # 30 arcseconds
+      use_distance: true
+      distance_key: "phz_median"
+      distance_max: 30.0
+      distance_max_near: 300.0
+      projection:
+        _id: 1
+        ra: 1
+        dec: 1
+        survey: 1
+        phz_median: 1
+        phz_70_int_1: 1
+        phz_70_int_2: 1
+        phz_classification: 1
+        phz_weight: 1
+        flux_vis_unif: 1

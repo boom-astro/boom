@@ -665,6 +665,8 @@ crossmatch:
     5XMM_DR15: null
     2SXPS: null
     4FGL_DR4: null
+    Euclid_DR1_SPE: null
+    Euclid_DR1_PHZ: null
   lsst:
     LSPSC:
       radius: 30.0 # 30 arcseconds
@@ -983,6 +985,8 @@ crossmatch:
     5XMM_DR15: null
     2SXPS: null
     4FGL_DR4: null
+    Euclid_DR1_SPE: null
+    Euclid_DR1_PHZ: null
   decam:
     LSPSC:
       radius: 30.0 # 30 arcseconds
@@ -1301,6 +1305,8 @@ crossmatch:
     5XMM_DR15: null
     2SXPS: null
     4FGL_DR4: null
+    Euclid_DR1_SPE: null
+    Euclid_DR1_PHZ: null
   winter:
     Gaia_DR3:
       radius: 2.0 # 2 arcseconds
@@ -1609,6 +1615,8 @@ crossmatch:
     5XMM_DR15: null
     2SXPS: null
     4FGL_DR4: null
+    Euclid_DR1_SPE: null
+    Euclid_DR1_PHZ: null
     watchlist_wtp:
       radius: 2.75 # 2.75 arcseconds, one WISE pixel
       use_distance: false
@@ -1941,3 +1949,5 @@ crossmatch:
     5XMM_DR15: null
     2SXPS: null
     4FGL_DR4: null
+    Euclid_DR1_SPE: null
+    Euclid_DR1_PHZ: null
