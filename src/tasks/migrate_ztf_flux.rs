@@ -1,6 +1,6 @@
 //! Recompute every stored ZTF flux in nJy from the magnitudes and raw forced fluxes.
 
-use super::batch::{run_batched_update, BatchError};
+use super::batch::{run_batched_update_after, BatchError};
 use super::context::TaskContext;
 use super::ledger::{MutationTarget, Operation};
 use super::migrate_fp_flux::fp_hists_flux_expr;
@@ -20,6 +20,31 @@ const FACTOR: f64 = 2.5_f64 / std::f64::consts::LN_10;
 pub struct MigrateZtfFluxParams {
     #[serde(default = "default_batch_size")]
     pub batch_size: usize,
+    /// Resume after the last `_id` a stopped run reported; earlier collections are skipped.
+    #[serde(default)]
+    pub resume: Option<MigrateZtfFluxResume>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct MigrateZtfFluxResume {
+    pub collection: String,
+    pub after_id: String,
+}
+
+impl MigrateZtfFluxResume {
+    fn after(&self) -> Result<Bson, String> {
+        match self.collection.as_str() {
+            AUX => Ok(Bson::String(self.after_id.clone())),
+            ALERTS => self
+                .after_id
+                .parse::<i64>()
+                .map(Bson::Int64)
+                .map_err(|_| format!("resume.after_id must be a candid for {ALERTS}")),
+            other => Err(format!(
+                "resume.collection must be {AUX} or {ALERTS}, not {other}"
+            )),
+        }
+    }
 }
 
 fn default_batch_size() -> usize {
@@ -33,6 +58,9 @@ impl MigrateZtfFluxParams {
         if self.batch_size == 0 || self.batch_size > MAX_BATCH_SIZE {
             return Err(format!("batch_size must be between 1 and {MAX_BATCH_SIZE}"));
         }
+        if let Some(resume) = &self.resume {
+            resume.after()?;
+        }
         Ok(())
     }
 }
@@ -42,6 +70,7 @@ pub async fn run(
     params: MigrateZtfFluxParams,
 ) -> Result<serde_json::Value, super::TaskError> {
     let mut modified = serde_json::Map::new();
+    let mut resume = params.resume.as_ref();
     // The aux light curves go out with every alert that passes a filter, so they come first.
     for (collection, filter, pipeline) in [
         (
@@ -55,10 +84,24 @@ pub async fn run(
         ),
         (ALERTS, doc! {}, alerts_pipeline()),
     ] {
+        let after = match resume {
+            Some(r) if r.collection != collection => {
+                ctx.info(format!(
+                    "skipping {collection}, resuming at {}",
+                    r.collection
+                ));
+                continue;
+            }
+            Some(r) => {
+                resume = None;
+                Some(r.after().map_err(super::TaskError::InvalidParams)?)
+            }
+            None => None,
+        };
         let coll = ctx.db().collection::<Document>(collection);
         let estimated = coll.estimated_document_count().await.unwrap_or(0);
         ctx.info(format!("migrating {collection}: ~{estimated} documents"));
-        let count = run_batched_update(
+        let count = run_batched_update_after(
             ctx,
             &coll,
             filter,
@@ -66,6 +109,7 @@ pub async fn run(
             params.batch_size,
             estimated,
             collection,
+            after,
         )
         .await
         .map_err(|e| match e {
