@@ -656,6 +656,10 @@ crossmatch:
         sersic: 1
         flux_ivar_r: 1
         fracflux_r: 1
+        flux_ivar_g: 1
+        flux_ivar_z: 1
+        fracflux_g: 1
+        fracflux_z: 1
     AllWISE:
       radius: 2.0
       use_distance: false
@@ -980,6 +984,10 @@ crossmatch:
         sersic: 1
         flux_ivar_r: 1
         fracflux_r: 1
+        flux_ivar_g: 1
+        flux_ivar_z: 1
+        fracflux_g: 1
+        fracflux_z: 1
     AllWISE:
       radius: 2.0
       use_distance: false
@@ -1304,6 +1312,10 @@ crossmatch:
         sersic: 1
         flux_ivar_r: 1
         fracflux_r: 1
+        flux_ivar_g: 1
+        flux_ivar_z: 1
+        fracflux_g: 1
+        fracflux_z: 1
     AllWISE:
       radius: 2.0
       use_distance: false
@@ -1618,6 +1630,10 @@ crossmatch:
         sersic: 1
         flux_ivar_r: 1
         fracflux_r: 1
+        flux_ivar_g: 1
+        flux_ivar_z: 1
+        fracflux_g: 1
+        fracflux_z: 1
     AllWISE:
       radius: 2.0
       use_distance: false
@@ -1956,6 +1972,10 @@ crossmatch:
         sersic: 1
         flux_ivar_r: 1
         fracflux_r: 1
+        flux_ivar_g: 1
+        flux_ivar_z: 1
+        fracflux_g: 1
+        fracflux_z: 1
     AllWISE:
       radius: 3.0
       use_distance: false
