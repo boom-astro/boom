@@ -627,6 +627,16 @@ pub struct ZtfSsoAssociation {
     /// Perihelion passage, JD. Per detection because a refreshed orbit moves it.
     #[serde(default)]
     pub perihelion_time: Option<f64>,
+    #[serde(default)]
+    pub a: Option<f32>,
+    #[serde(default)]
+    pub e: Option<f32>,
+    #[serde(default)]
+    pub incl: Option<f32>,
+    #[serde(default)]
+    pub q: Option<f32>,
+    #[serde(default)]
+    pub tisserand_jupiter: Option<f32>,
 }
 
 impl ZtfSsoAssociation {
@@ -648,6 +658,11 @@ impl ZtfSsoAssociation {
             phase_angle: None,
             true_anomaly: None,
             perihelion_time: None,
+            a: None,
+            e: None,
+            incl: None,
+            q: None,
+            tisserand_jupiter: None,
         }
     }
 
@@ -659,6 +674,11 @@ impl ZtfSsoAssociation {
             self.phase_angle = Some(geometry.phase_angle as f32);
             self.true_anomaly = Some(geometry.true_anomaly as f32);
             self.perihelion_time = Some(geometry.perihelion_time);
+            self.a = (elements.e < 1.0).then_some(elements.a as f32);
+            self.e = Some(elements.e as f32);
+            self.incl = Some(elements.incl as f32);
+            self.q = Some(elements.q as f32);
+            self.tisserand_jupiter = elements.tisserand_jupiter().map(|t| t as f32);
         }
         self
     }
@@ -2254,6 +2274,8 @@ mod tests {
             "topocentric distance was {topo}"
         );
         assert!((phase - 17.6824).abs() < 0.01, "phase angle was {phase}");
+        let tisserand = sso.tisserand_jupiter.expect("Tisserand parameter");
+        assert!((tisserand - 3.310).abs() < 1e-3, "T_J was {tisserand}");
     }
 
     // A default would be indistinguishable from a real measurement downstream.
