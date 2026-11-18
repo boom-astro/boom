@@ -474,207 +474,211 @@ impl LsstEnrichmentWorker {
         &self,
         alert: &LsstAlertForEnrichment,
     ) -> Result<LsstAlertProperties, EnrichmentWorkerError> {
-        // Compute numerical and boolean features from lightcurve and candidate analysis
-        let is_rock = alert.ss_object_id.is_some();
-        let sso =
-            LsstSsoAssociation::from_rubin(alert.ss_object_id.as_deref(), alert.ss_source.as_ref());
-        let activity = ActivityMetrics::from_fluxes(
-            alert.candidate.dia_source.psf_flux,
-            alert.candidate.dia_source.ap_flux,
-        );
+        Ok(lsst_alert_properties(alert))
+    }
+}
 
-        // Determine if this is a star based on LSPSC cross-matches
-        let mut is_star = Some(false);
-        let mut is_near_brightstar = Some(false);
+pub fn lsst_alert_properties(alert: &LsstAlertForEnrichment) -> LsstAlertProperties {
+    // Compute numerical and boolean features from lightcurve and candidate analysis
+    let is_rock = alert.ss_object_id.is_some();
+    let sso =
+        LsstSsoAssociation::from_rubin(alert.ss_object_id.as_deref(), alert.ss_source.as_ref());
+    let activity = ActivityMetrics::from_fluxes(
+        alert.candidate.dia_source.psf_flux,
+        alert.candidate.dia_source.ap_flux,
+    );
 
-        let empty_vec = vec![];
-        let lspsc_matches = alert
-            .cross_matches
-            .as_ref()
-            .and_then(|xmatches| xmatches.get("LSPSC"))
-            .unwrap_or(&empty_vec);
-        if lspsc_matches.is_empty() {
-            if !is_in_footprint(
-                alert.candidate.dia_source.ra,
-                alert.candidate.dia_source.dec,
-            ) {
-                is_star = None;
-                is_near_brightstar = None;
+    // Determine if this is a star based on LSPSC cross-matches
+    let mut is_star = Some(false);
+    let mut is_near_brightstar = Some(false);
+
+    let empty_vec = vec![];
+    let lspsc_matches = alert
+        .cross_matches
+        .as_ref()
+        .and_then(|xmatches| xmatches.get("LSPSC"))
+        .unwrap_or(&empty_vec);
+    if lspsc_matches.is_empty() {
+        if !is_in_footprint(
+            alert.candidate.dia_source.ra,
+            alert.candidate.dia_source.dec,
+        ) {
+            is_star = None;
+            is_near_brightstar = None;
+        }
+    } else {
+        // Check each LSPSC match for a nearby stellar-like object
+        // and for bright stars within a larger radius
+        for m in lspsc_matches {
+            let distance = match m.get("distance_arcsec").and_then(|v| v.as_f64()) {
+                Some(d) => d,
+                None => continue,
+            };
+            let score = match m.get("score").and_then(|v| v.as_f64()) {
+                Some(s) => s,
+                None => continue,
+            };
+            if distance <= IS_STELLAR_DISTANCE_THRESH_ARCSEC && score > IS_HOSTED_SCORE_THRESH {
+                is_star = Some(true);
             }
-        } else {
-            // Check each LSPSC match for a nearby stellar-like object
-            // and for bright stars within a larger radius
-            for m in lspsc_matches {
-                let distance = match m.get("distance_arcsec").and_then(|v| v.as_f64()) {
-                    Some(d) => d,
-                    None => continue,
-                };
-                let score = match m.get("score").and_then(|v| v.as_f64()) {
-                    Some(s) => s,
-                    None => continue,
-                };
-                if distance <= IS_STELLAR_DISTANCE_THRESH_ARCSEC && score > IS_HOSTED_SCORE_THRESH {
-                    is_star = Some(true);
-                }
-                let mag_white = match m.get("mag_white").and_then(|v| v.as_f64()) {
-                    Some(m) => m,
-                    None => continue,
-                };
-                if distance <= IS_NEAR_BRIGHTSTAR_DISTANCE_THRESH_ARCSEC
-                    && score > IS_HOSTED_SCORE_THRESH
-                    && mag_white <= IS_NEAR_BRIGHTSTAR_MAG_THRESH
-                {
-                    is_near_brightstar = Some(true);
-                }
+            let mag_white = match m.get("mag_white").and_then(|v| v.as_f64()) {
+                Some(m) => m,
+                None => continue,
+            };
+            if distance <= IS_NEAR_BRIGHTSTAR_DISTANCE_THRESH_ARCSEC
+                && score > IS_HOSTED_SCORE_THRESH
+                && mag_white <= IS_NEAR_BRIGHTSTAR_MAG_THRESH
+            {
+                is_near_brightstar = Some(true);
+            }
 
-                // if the 2 properties we are evaluating are true, we can stop checking
-                if is_star == Some(true) && is_near_brightstar == Some(true) {
-                    break;
-                }
+            // if the 2 properties we are evaluating are true, we can stop checking
+            if is_star == Some(true) && is_near_brightstar == Some(true) {
+                break;
             }
         }
+    }
 
-        let prv_candidates: Vec<PhotometryMag> = alert
+    let prv_candidates: Vec<PhotometryMag> = alert
+        .prv_candidates
+        .iter()
+        .filter(|p| p.jd <= alert.candidate.jd)
+        .filter_map(|p| p.to_positive_mag())
+        .collect();
+    let fp_hists: Vec<PhotometryMag> = alert
+        .fp_hists
+        .iter()
+        .filter(|p| p.jd <= alert.candidate.jd)
+        .filter_map(|p| p.to_positive_mag())
+        .collect();
+
+    // lightcurve is prv_candidates + fp_hists, no need for parse_photometry here
+    let mut lightcurve = [prv_candidates, fp_hists].concat();
+
+    prepare_photometry(&mut lightcurve);
+    let (photstats, _, _) = analyze_photometry(&lightcurve);
+    let stationary = is_stationary(
+        alert
             .prv_candidates
             .iter()
             .filter(|p| p.jd <= alert.candidate.jd)
-            .filter_map(|p| p.to_positive_mag())
-            .collect();
-        let fp_hists: Vec<PhotometryMag> = alert
-            .fp_hists
-            .iter()
-            .filter(|p| p.jd <= alert.candidate.jd)
-            .filter_map(|p| p.to_positive_mag())
-            .collect();
-
-        // lightcurve is prv_candidates + fp_hists, no need for parse_photometry here
-        let mut lightcurve = [prv_candidates, fp_hists].concat();
-
-        prepare_photometry(&mut lightcurve);
-        let (photstats, _, _) = analyze_photometry(&lightcurve);
-        let stationary = is_stationary(
-            alert
-                .prv_candidates
-                .iter()
-                .filter(|p| p.jd <= alert.candidate.jd)
-                .filter_map(|p| p.to_photometry_mag(None))
-                .chain(
-                    alert
-                        .fp_hists
-                        .iter()
-                        .filter(|p| p.jd <= alert.candidate.jd)
-                        .filter_map(|p| p.to_photometry_mag(Some(STATIONARY_MIN_FORCED_SNR))),
-                )
-                .map(|p| p.time),
-        );
-
-        // Compute multisurvey photstats (including ZTF if available, other surveys can be added later)
-        let mut has_matches = false;
-        if let Some(survey_matches) = &alert.survey_matches {
-            if let Some(ztf_match) = &survey_matches.ztf {
-                let ztf_prv_candidates: Vec<PhotometryMag> = ztf_match
-                    .prv_candidates
-                    .iter()
-                    .filter(|p| p.jd <= alert.candidate.jd)
-                    .filter_map(|p| p.to_positive_mag())
-                    .collect();
-                let ztf_fp_hists: Vec<PhotometryMag> = ztf_match
+            .filter_map(|p| p.to_photometry_mag(None))
+            .chain(
+                alert
                     .fp_hists
                     .iter()
                     .filter(|p| p.jd <= alert.candidate.jd)
-                    .filter_map(|p| p.to_positive_mag())
-                    .collect();
-                lightcurve.extend([ztf_prv_candidates, ztf_fp_hists].concat());
-                prepare_photometry(&mut lightcurve);
-                has_matches = true;
-            }
-        }
-        let multisurvey_photstats = if has_matches {
-            analyze_photometry(&lightcurve).0
-        } else {
-            photstats.clone()
-        };
-        let decam_lightcurve = alert
-            .decam_match
-            .as_ref()
-            .map(|m| m.lightcurve(alert.candidate.jd))
-            .unwrap_or_default();
-        let multisurvey_photstats = if decam_lightcurve.is_empty() {
-            multisurvey_photstats
-        } else {
-            let mut with_decam = [lightcurve, decam_lightcurve].concat();
-            prepare_photometry(&mut with_decam);
-            analyze_photometry(&with_decam).0
-        };
+                    .filter_map(|p| p.to_photometry_mag(Some(STATIONARY_MIN_FORCED_SNR))),
+            )
+            .map(|p| p.time),
+    );
 
-        // Per-object detection history for history-aware filters (positive/negative
-        // by psfFlux sign; LSST difference psfFlux is signed natively).
-        let (mut detection_history, episode_history) = summarise_detections(
-            alert
+    // Compute multisurvey photstats (including ZTF if available, other surveys can be added later)
+    let mut has_matches = false;
+    if let Some(survey_matches) = &alert.survey_matches {
+        if let Some(ztf_match) = &survey_matches.ztf {
+            let ztf_prv_candidates: Vec<PhotometryMag> = ztf_match
                 .prv_candidates
                 .iter()
-                .map(|p| (p.jd, p.flux.filter(|f| !f.is_nan()).map(|f| f < 0.0))),
-            // magpsf is set only above SNT, so it marks a forced detection.
-            alert
-                .fp_hists
-                .iter()
-                .filter(|p| p.magpsf.is_some())
-                .map(|p| (p.jd, signed_snr(p.snr_psf, p.flux))),
-            alert.candidate.jd,
-            EPISODE_GAP_DAYS,
-        );
-        detection_history.add_nondetections(
-            lsst_nondetections(&alert.fp_hists).map(|(jd, maglim, ..)| (jd, maglim)),
-            alert.candidate.jd,
-        );
-
-        let ztf_match = alert.survey_matches.as_ref().and_then(|m| m.ztf.as_ref());
-        let multisurvey_detection_history = MultisurveyDetectionHistory::from_points(
-            lsst_detections(&alert.prv_candidates)
-                .chain(
-                    ztf_match
-                        .into_iter()
-                        .flat_map(|m| ztf_detections(&m.prv_candidates)),
-                )
-                .chain(alert.decam_match.iter().flat_map(|m| m.detections())),
-            lsst_nondetections(&alert.fp_hists)
-                .chain(
-                    ztf_match
-                        .into_iter()
-                        .flat_map(|m| ztf_nondetections(&m.prv_nondetections, &m.fp_hists)),
-                )
-                .chain(alert.decam_match.iter().flat_map(|m| m.nondetections())),
-            alert.candidate.jd,
-        );
-
-        let variability = PerBandVariability::from_points(
-            alert
+                .filter(|p| p.jd <= alert.candidate.jd)
+                .filter_map(|p| p.to_positive_mag())
+                .collect();
+            let ztf_fp_hists: Vec<PhotometryMag> = ztf_match
                 .fp_hists
                 .iter()
                 .filter(|p| p.jd <= alert.candidate.jd)
-                .filter_map(|p| Some((p.jd, p.flux?, p.flux_err, p.band.clone()))),
-        );
+                .filter_map(|p| p.to_positive_mag())
+                .collect();
+            lightcurve.extend([ztf_prv_candidates, ztf_fp_hists].concat());
+            prepare_photometry(&mut lightcurve);
+            has_matches = true;
+        }
+    }
+    let multisurvey_photstats = if has_matches {
+        analyze_photometry(&lightcurve).0
+    } else {
+        photstats.clone()
+    };
+    let decam_lightcurve = alert
+        .decam_match
+        .as_ref()
+        .map(|m| m.lightcurve(alert.candidate.jd))
+        .unwrap_or_default();
+    let multisurvey_photstats = if decam_lightcurve.is_empty() {
+        multisurvey_photstats
+    } else {
+        let mut with_decam = [lightcurve, decam_lightcurve].concat();
+        prepare_photometry(&mut with_decam);
+        analyze_photometry(&with_decam).0
+    };
 
-        Ok(LsstAlertProperties {
-            rock: is_rock,
-            hosted: alert.host_galaxy.as_ref().map(|h| h.best_host.is_some()),
-            best_host: alert
-                .host_galaxy
-                .as_ref()
-                .and_then(|h| h.best_host.as_ref())
-                .map(HostSummary::from),
-            sso: Some(sso),
-            activity: Some(activity),
-            star: is_star,
-            near_brightstar: is_near_brightstar,
-            stationary,
-            photstats,
-            multisurvey_photstats,
-            detection_history: Some(detection_history),
-            multisurvey_detection_history: Some(multisurvey_detection_history),
-            episode_history: Some(episode_history),
-            variability: Some(variability),
-        })
+    // Per-object detection history for history-aware filters (positive/negative
+    // by psfFlux sign; LSST difference psfFlux is signed natively).
+    let (mut detection_history, episode_history) = summarise_detections(
+        alert
+            .prv_candidates
+            .iter()
+            .map(|p| (p.jd, p.flux.filter(|f| !f.is_nan()).map(|f| f < 0.0))),
+        // magpsf is set only above SNT, so it marks a forced detection.
+        alert
+            .fp_hists
+            .iter()
+            .filter(|p| p.magpsf.is_some())
+            .map(|p| (p.jd, signed_snr(p.snr_psf, p.flux))),
+        alert.candidate.jd,
+        EPISODE_GAP_DAYS,
+    );
+    detection_history.add_nondetections(
+        lsst_nondetections(&alert.fp_hists).map(|(jd, maglim, ..)| (jd, maglim)),
+        alert.candidate.jd,
+    );
+
+    let ztf_match = alert.survey_matches.as_ref().and_then(|m| m.ztf.as_ref());
+    let multisurvey_detection_history = MultisurveyDetectionHistory::from_points(
+        lsst_detections(&alert.prv_candidates)
+            .chain(
+                ztf_match
+                    .into_iter()
+                    .flat_map(|m| ztf_detections(&m.prv_candidates)),
+            )
+            .chain(alert.decam_match.iter().flat_map(|m| m.detections())),
+        lsst_nondetections(&alert.fp_hists)
+            .chain(
+                ztf_match
+                    .into_iter()
+                    .flat_map(|m| ztf_nondetections(&m.prv_nondetections, &m.fp_hists)),
+            )
+            .chain(alert.decam_match.iter().flat_map(|m| m.nondetections())),
+        alert.candidate.jd,
+    );
+
+    let variability = PerBandVariability::from_points(
+        alert
+            .fp_hists
+            .iter()
+            .filter(|p| p.jd <= alert.candidate.jd)
+            .filter_map(|p| Some((p.jd, p.flux?, p.flux_err, p.band.clone()))),
+    );
+
+    LsstAlertProperties {
+        rock: is_rock,
+        hosted: alert.host_galaxy.as_ref().map(|h| h.best_host.is_some()),
+        best_host: alert
+            .host_galaxy
+            .as_ref()
+            .and_then(|h| h.best_host.as_ref())
+            .map(HostSummary::from),
+        sso: Some(sso),
+        activity: Some(activity),
+        star: is_star,
+        near_brightstar: is_near_brightstar,
+        stationary,
+        photstats,
+        multisurvey_photstats,
+        detection_history: Some(detection_history),
+        multisurvey_detection_history: Some(multisurvey_detection_history),
+        episode_history: Some(episode_history),
+        variability: Some(variability),
     }
 }
 

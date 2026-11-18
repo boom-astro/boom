@@ -306,7 +306,7 @@ pub struct DecamAlertForEnrichment {
     pub candidate: DecamCandidate,
     // Signed SNR is only needed here: detection history counts detections.
     pub prv_candidates: Vec<DecamPhotometry>,
-    pub fp_hists: Vec<PhotometryMag>,
+    pub fp_hists: Vec<DecamPhotometry>,
     #[serde(default)]
     pub fp_nondetections: Vec<DecamNonDetection>,
     #[serde(default)]
@@ -524,7 +524,7 @@ impl EnrichmentWorker for DecamEnrichmentWorker {
             let candid = alert.candid;
 
             let sso = associations.as_mut().and_then(|a| a.remove(&candid));
-            let properties = self.get_alert_properties(&alert, sso).await?;
+            let properties = Self::alert_properties(&alert, sso)?;
 
             let update_alert_document = doc! {
                 "$set": {
@@ -576,8 +576,7 @@ impl DecamEnrichmentWorker {
         self.known.as_mut()
     }
 
-    async fn get_alert_properties(
-        &self,
+    fn alert_properties(
         alert: &DecamAlertForEnrichment,
         sso: Option<DecamSsoAssociation>,
     ) -> Result<DecamAlertProperties, EnrichmentWorkerError> {
@@ -586,7 +585,11 @@ impl DecamEnrichmentWorker {
             .iter()
             .filter_map(DecamPhotometry::to_positive_mag)
             .collect();
-        let fp_hists = alert.fp_hists.clone();
+        let fp_hists: Vec<PhotometryMag> = alert
+            .fp_hists
+            .iter()
+            .filter_map(DecamPhotometry::to_positive_mag)
+            .collect();
 
         // lightcurve is prv_candidates + fp_hists, no need for parse_photometry here
         let mut lightcurve = [prv_candidates, fp_hists].concat();
@@ -689,4 +692,10 @@ impl DecamEnrichmentWorker {
             sso,
         })
     }
+}
+
+pub fn decam_alert_properties_without_sso(
+    alert: &DecamAlertForEnrichment,
+) -> Result<DecamAlertProperties, EnrichmentWorkerError> {
+    DecamEnrichmentWorker::alert_properties(alert, None)
 }

@@ -55,7 +55,13 @@ async fn main() -> std::io::Result<()> {
 
     // Build cutout storage for each survey once at startup
     let mut cutout_storage_map: HashMap<Survey, CutoutStorage> = HashMap::new();
-    for survey in [Survey::Ztf, Survey::Lsst, Survey::Decam, Survey::Winter] {
+    for survey in [
+        Survey::Ztf,
+        Survey::Lsst,
+        Survey::Decam,
+        Survey::Winter,
+        Survey::Askap,
+    ] {
         let storage = config
             .build_cutout_storage(&survey)
             .await
@@ -137,6 +143,7 @@ async fn main() -> std::io::Result<()> {
     let api_doc = ApiDoc::openapi();
     let babamul_doc = BabamulApiDoc::openapi();
 
+    let filter_simulation_enabled = config.api.filter_simulation.enabled;
     let server_result = HttpServer::new(move || {
         let mut app = App::new()
             .app_data(web::Data::new(config.clone()))
@@ -269,7 +276,12 @@ async fn main() -> std::io::Result<()> {
                     actix_web::web::scope("")
                         .app_data(web::JsonConfig::default().limit(209_715_200))
                         .service(routes::filters::post_filter_test)
-                        .service(routes::filters::post_filter_test_count),
+                        .service(routes::filters::post_filter_test_count)
+                        .configure(|cfg| {
+                            if filter_simulation_enabled {
+                                cfg.service(routes::filters::post_filter_test_simulated);
+                            }
+                        }),
                 )
                 .wrap(Logger::default()),
         )

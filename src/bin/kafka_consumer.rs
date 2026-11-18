@@ -1,8 +1,8 @@
 use boom::{
     conf::load_dotenv,
     kafka::{
-        AlertConsumer, DecamAlertConsumer, LsstAlertConsumer, StartDate, WinterAlertConsumer,
-        ZtfAlertConsumer,
+        AlertConsumer, AskapAlertConsumer, DecamAlertConsumer, LsstAlertConsumer, StartDate,
+        WinterAlertConsumer, ZtfAlertConsumer,
     },
     utils::{
         enums::{ProgramId, Survey},
@@ -153,6 +153,9 @@ async fn run(
         }
         Survey::Winter => {
             consume_with(WinterAlertConsumer::new(None), &args, start, &date_label).await
+        }
+        Survey::Askap => {
+            consume_with(AskapAlertConsumer::new(None), &args, start, &date_label).await
         }
     }
 

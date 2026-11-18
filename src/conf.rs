@@ -803,6 +803,26 @@ pub struct ApiConfig {
     pub auth: AuthConfig,
     #[serde(default = "default_api_port")]
     pub port: u16,
+    #[serde(default)]
+    pub filter_simulation: FilterSimulationConfig,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+#[serde(default)]
+pub struct FilterSimulationConfig {
+    pub enabled: bool,
+    pub max_lightcurves: usize,
+    pub max_points: usize,
+}
+
+impl Default for FilterSimulationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_lightcurves: 1000,
+            max_points: 200_000,
+        }
+    }
 }
 
 #[derive(Deserialize, Debug, Clone)]

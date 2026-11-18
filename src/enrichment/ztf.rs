@@ -15,6 +15,7 @@ use crate::milvus::{BackupQueue, EmbeddingRow, MilvusSink};
 use crate::utils::cutouts::{AlertCutout, CutoutStorage};
 use crate::utils::db::mongify;
 use crate::utils::enums::{ProgramId, Survey};
+use crate::utils::gp_fit::{self, GpPoint};
 use crate::utils::host::{HostGalaxyAssociation, HostSummary};
 use crate::utils::lightcurve_fits;
 use crate::utils::lightcurves::{
@@ -27,7 +28,9 @@ use crate::utils::linking::{angular_separation_deg, night_at};
 use crate::utils::mpcorb::{
     elements_from_document, is_comet_designation, normalize_ztf_ssnamenr, ORBITS_COLLECTION,
 };
-use crate::utils::outburst::{median, Point, MAX_SEPARATION_ARCSEC};
+use crate::utils::outburst::{
+    is_static_interloper, median, stored_static_interloper, Point, MAX_SEPARATION_ARCSEC,
+};
 use crate::utils::phase_curve::{curves_from_document, PhaseCurve, BASELINES_COLLECTION};
 use crate::utils::sso_geometry::{geometry_at, OrbitalElements, ZTF};
 use crate::utils::variability::PerBandVariability;
@@ -240,6 +243,19 @@ impl ZtfPhotometry {
         }
     }
 
+    pub fn to_gp_point(&self) -> Option<GpPoint> {
+        if self.magpsf.is_some() && self.flux.is_some_and(|f| f < 0.0) {
+            return None;
+        }
+        Some(GpPoint {
+            jd: self.jd,
+            magpsf: self.magpsf,
+            sigmapsf: self.sigmapsf,
+            diffmaglim: self.diffmaglim,
+            band: self.band.clone(),
+        })
+    }
+
     pub fn to_positive_mag(&self) -> Option<PhotometryMag> {
         if self.flux.is_some_and(|f| f < 0.0) {
             return None;
@@ -391,6 +407,9 @@ const HISTORY_WINDOW_DAYS: f64 = 30.0;
 /// the document is missing photometry or geometry.
 fn history_point(doc: &Document) -> Option<(String, f64, Point)> {
     let candidate = doc.get_document("candidate").ok()?;
+    if stored_static_interloper(candidate) {
+        return None;
+    }
     let sso = doc
         .get_document("properties")
         .ok()?
@@ -424,7 +443,7 @@ fn outburst_for(
 ) -> Option<Outburst> {
     // A detection away from the object's position is not a measurement of it.
     let separation = sso.separation_arcsec? as f64;
-    if separation >= MAX_SEPARATION_ARCSEC {
+    if separation >= MAX_SEPARATION_ARCSEC || is_interloper(candidate) {
         return None;
     }
     let test = Point {
@@ -449,6 +468,18 @@ fn outburst_for(
         .unwrap_or_default();
     let curve = baselines.get(designation).and_then(|b| b.get(&test.band));
     Outburst::from_history(&history, test, candidate.jd, curve)
+}
+
+fn is_interloper(candidate: &Candidate) -> bool {
+    candidate.ssdistnr.is_some_and(|separation| {
+        is_static_interloper(
+            f64::from(separation),
+            candidate.ssmagnr.map(f64::from),
+            f64::from(candidate.magpsf),
+            Some(f64::from(candidate.ndethist)),
+            candidate.distnr.map(f64::from),
+        )
+    })
 }
 
 const MAX_SHAPE_SEPARATION_ARCSEC: f64 = 5.0;
@@ -850,6 +881,21 @@ fn position_index(indices: &[usize]) -> HashMap<usize, usize> {
         .collect()
 }
 
+/// The alert's ZTF photometry up to its own epoch, as the GP fit takes it.
+/// A matched LSST object's photometry is left out.
+fn gp_observations(alert: &ZtfAlertForEnrichment, config: &rust_gp::GpConfig) -> Vec<rust_gp::Obs> {
+    let jd = alert.candidate.candidate.jd;
+    // Alert photometry ahead of forced, so it is kept for an exposure both report.
+    let points = alert
+        .prv_candidates
+        .iter()
+        .chain(&alert.prv_nondetections)
+        .chain(&alert.fp_hists)
+        .filter(|p| p.jd <= jd)
+        .filter_map(ZtfPhotometry::to_gp_point);
+    gp_fit::observations(points, config)
+}
+
 #[cfg(feature = "gpu")]
 fn to_villar_photometry(p: &PhotometryMag) -> Option<villar_pso::PhotometryMag> {
     let band = match p.band {
@@ -1030,6 +1076,9 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
         let batch_size = alerts.len();
         let mut skipped_empty_lightcurve: Vec<i64> = Vec::new();
         let mut work_items: Vec<AlertWork> = Vec::with_capacity(alerts.len());
+        let gp_config = gp_fit::gp_config();
+        // One per work item, in the same order.
+        let mut gp_inputs: Vec<(i64, Vec<rust_gp::Obs>)> = Vec::with_capacity(alerts.len());
         let mut fit_inputs: Vec<Vec<PhotometryMag>> = Vec::with_capacity(alerts.len());
         #[cfg(feature = "gpu")]
         let mut villar_inputs: Vec<(i64, Vec<PhotometryMag>)> = Vec::new();
@@ -1039,10 +1088,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                 .remove(&candid)
                 .ok_or_else(|| EnrichmentWorkerError::MissingCutouts(candid))?;
             let (properties, all_bands_properties, programid, lightcurve, ztf_lightcurve) =
-                match self
-                    .get_alert_properties(&alert, &orbits, &sso_history, &baselines)
-                    .await
-                {
+                match Self::alert_properties(&alert, &orbits, &sso_history, &baselines) {
                     Ok(v) => v,
                     // Skip the alert instead of aborting the batch: the queue keeps draining.
                     Err(EnrichmentWorkerError::EmptyLightcurve(_)) => {
@@ -1058,6 +1104,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             }
             fit_inputs.push(lightcurve);
 
+            gp_inputs.push((candid, gp_observations(&alert, &gp_config)));
             work_items.push(AlertWork {
                 candid,
                 programid,
@@ -1088,13 +1135,23 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             }));
         }
 
+        // CPU-only, so the fits run on the Rayon pool while inference holds this thread.
         let span = tracing::Span::current();
+        let gp_span = span.clone();
+        let gp_task = tokio::task::spawn_blocking(move || {
+            gp_span.in_scope(|| gp_fit::fit_many(&gp_inputs, &gp_config))
+        });
         let fits_task = tokio::task::spawn_blocking(move || {
             span.in_scope(|| lightcurve_fits::fit_many(&fit_inputs))
         });
 
         let classifications_list = self.classify(&self.models, &work_items)?;
 
+        let mut gp_fits = gp_task
+            .await
+            .inspect_err(|e| warn!("GP fitting failed for the whole batch: {}", e))
+            .ok()
+            .map(Vec::into_iter);
         let mut fits = fits_task
             .await
             .unwrap_or_else(|e| {
@@ -1117,6 +1174,11 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             };
             if let Some(cls) = &classifications {
                 set_doc.insert("classifications", mongify(cls));
+            }
+            // Every key null when the light curve could not be fitted, absent
+            // when fitting never ran, so a backfill can select on the missing key.
+            if let Some(fit) = gp_fits.as_mut().and_then(Iterator::next) {
+                set_doc.insert("gp_fit", fit);
             }
             if let Some(Some(fit)) = fits.next() {
                 set_doc.insert("arnett_fit", mongify(&fit.arnett));
@@ -1419,6 +1481,9 @@ impl ZtfEnrichmentWorker {
             "candidate.magpsf": 1,
             "candidate.sigmapsf": 1,
             "candidate.ssdistnr": 1,
+            "candidate.ssmagnr": 1,
+            "candidate.ndethist": 1,
+            "candidate.distnr": 1,
             "candidate.ra": 1,
             "candidate.dec": 1,
             "candidate.seeratio": 1,
@@ -1464,8 +1529,7 @@ impl ZtfEnrichmentWorker {
         history
     }
 
-    async fn get_alert_properties(
-        &self,
+    fn alert_properties(
         alert: &ZtfAlertForEnrichment,
         orbits: &HashMap<String, OrbitalElements>,
         sso_history: &SsoHistory,
@@ -1499,7 +1563,9 @@ impl ZtfEnrichmentWorker {
                 .ssnamenr
                 .as_deref()
                 .is_some_and(is_comet_designation);
-        let is_rock = (0.0..12.0).contains(&ssdistnr) && (ssmagnr >= 0.0 || known_comet);
+        let is_rock = (0.0..12.0).contains(&ssdistnr)
+            && (ssmagnr >= 0.0 || known_comet)
+            && !is_interloper(candidate);
 
         let sso = ZtfSsoAssociation::from_ipac(
             candidate.ssnamenr.clone(),
@@ -1990,6 +2056,18 @@ impl ZtfEnrichmentWorker {
 
         Ok(results)
     }
+}
+
+pub fn ztf_alert_properties_without_sso(
+    alert: &ZtfAlertForEnrichment,
+) -> Result<(ZtfAlertProperties, Vec<PhotometryMag>), EnrichmentWorkerError> {
+    let (properties, _, _, lightcurve, _) = ZtfEnrichmentWorker::alert_properties(
+        alert,
+        &HashMap::new(),
+        &SsoHistory::default(),
+        &HashMap::new(),
+    )?;
+    Ok((properties, lightcurve))
 }
 
 #[cfg(test)]

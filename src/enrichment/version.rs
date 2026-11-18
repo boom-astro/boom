@@ -93,6 +93,7 @@ pub const DERIVATIONS: &[(&str, u32)] = &[
     ("applecider_postprocess", 1),
     // arnett_fit and thermal_fit.
     ("lightcurve_fits", 1),
+    ("gp_fit", 1),
 ];
 
 /// Only GPU builds compute `villar_fit`; bump it when the PSO fit or its `PsoConfig` changes.
