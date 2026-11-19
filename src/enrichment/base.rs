@@ -123,7 +123,7 @@ pub trait EnrichmentWorker {
     /// Forcibly disable Babamul on this worker, regardless of config.
     fn disable_babamul(&mut self);
 
-    fn write_only_properties(&mut self, _keys: Vec<String>) -> bool {
+    fn write_only(&mut self, _properties: Vec<String>, _gp_fit: bool) -> bool {
         false
     }
 

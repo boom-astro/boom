@@ -1088,9 +1088,9 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
 
         // Independent reads: awaiting them in turn pays each round trip.
         let (orbits, sso_history, baselines) = tokio::join!(
-            self.fetch_orbits(&alerts),
-            self.fetch_sso_history(&alerts),
-            self.fetch_baselines(&alerts),
+            Self::fetch_orbits(&self.mpc_orbits, &alerts),
+            Self::fetch_sso_history(&self.alert_collection, &alerts),
+            Self::fetch_baselines(&self.sso_baselines, &alerts),
         );
 
         let batch_size = alerts.len();
@@ -1343,10 +1343,148 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
     }
 }
 
+/// Leaves `enrichment_set` alone: the classifications it stamps are not recomputed.
+pub struct ZtfSubsetWorker {
+    client: mongodb::Client,
+    alert_collection: Collection<Document>,
+    mpc_orbits: Collection<Document>,
+    sso_baselines: Collection<Document>,
+    alert_pipeline: Vec<Document>,
+    properties: Vec<String>,
+    gp_fit: bool,
+}
+
+#[async_trait::async_trait]
+impl EnrichmentWorker for ZtfSubsetWorker {
+    #[instrument(skip(_shared_models), err)]
+    async fn new(
+        config_path: &str,
+        _shared_models: Option<Arc<SharedModels>>,
+    ) -> Result<Self, EnrichmentWorkerError> {
+        let config = AppConfig::from_path(config_path)?;
+        let db: Database = config.build_db().await?;
+        Ok(ZtfSubsetWorker {
+            client: db.client().clone(),
+            alert_collection: db.collection("ZTF_alerts"),
+            mpc_orbits: db.collection(ORBITS_COLLECTION),
+            sso_baselines: db.collection(BASELINES_COLLECTION),
+            alert_pipeline: add_decam_match(create_ztf_alert_pipeline(false)),
+            properties: Vec::new(),
+            gp_fit: false,
+        })
+    }
+
+    fn survey() -> Survey {
+        Survey::Ztf
+    }
+
+    fn disable_babamul(&mut self) {}
+
+    fn write_only(&mut self, properties: Vec<String>, gp_fit: bool) -> bool {
+        self.properties = properties;
+        self.gp_fit = gp_fit;
+        true
+    }
+
+    fn input_queue_name(&self) -> String {
+        "ZTF_alerts_enrichment_queue".to_string()
+    }
+
+    fn output_queue_name(&self) -> String {
+        "ZTF_alerts_filter_queue".to_string()
+    }
+
+    #[instrument(skip_all, err)]
+    async fn process_alerts(
+        &mut self,
+        candids: &[i64],
+    ) -> Result<Vec<String>, EnrichmentWorkerError> {
+        let alerts: Vec<ZtfAlertForEnrichment> =
+            fetch_alerts(candids, &self.alert_pipeline, &self.alert_collection).await?;
+        if alerts.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let gp_task = self.gp_fit.then(|| {
+            let gp_config = gp_fit::gp_config();
+            let inputs: Vec<(i64, Vec<rust_gp::Obs>)> = alerts
+                .iter()
+                .map(|alert| (alert.candid, gp_observations(alert, &gp_config)))
+                .collect();
+            tokio::task::spawn_blocking(move || gp_fit::fit_many(&inputs, &gp_config))
+        });
+
+        let (orbits, sso_history, baselines) = if self.properties.is_empty() {
+            Default::default()
+        } else {
+            tokio::join!(
+                ZtfEnrichmentWorker::fetch_orbits(&self.mpc_orbits, &alerts),
+                ZtfEnrichmentWorker::fetch_sso_history(&self.alert_collection, &alerts),
+                ZtfEnrichmentWorker::fetch_baselines(&self.sso_baselines, &alerts),
+            )
+        };
+
+        let mut gp_fits = match gp_task {
+            Some(task) => task
+                .await
+                .inspect_err(|e| warn!("GP fitting failed for the whole batch: {}", e))
+                .ok()
+                .map(Vec::into_iter),
+            None => None,
+        };
+
+        let now = flare::Time::now().to_jd();
+        let mut updates = Vec::with_capacity(alerts.len());
+        let mut processed_alerts = Vec::with_capacity(alerts.len());
+        for alert in &alerts {
+            let mut set_doc = Document::new();
+            if !self.properties.is_empty() {
+                match ZtfEnrichmentWorker::alert_properties(
+                    alert,
+                    &orbits,
+                    &sso_history,
+                    &baselines,
+                ) {
+                    Ok((properties, ..)) => {
+                        let properties = mongify(&properties);
+                        for key in &self.properties {
+                            if let Some(value) = properties.get(key) {
+                                set_doc.insert(format!("properties.{key}"), value.clone());
+                            }
+                        }
+                    }
+                    Err(EnrichmentWorkerError::EmptyLightcurve(_)) => {}
+                    Err(e) => return Err(e),
+                }
+            }
+            if let Some(fit) = gp_fits.as_mut().and_then(Iterator::next) {
+                set_doc.insert("gp_fit", fit);
+            }
+            if set_doc.is_empty() {
+                continue;
+            }
+            set_doc.insert("updated_at", now);
+            updates.push(WriteModel::UpdateOne(
+                UpdateOneModel::builder()
+                    .namespace(self.alert_collection.namespace())
+                    .filter(doc! { "_id": alert.candid })
+                    .update(doc! { "$set": set_doc })
+                    .build(),
+            ));
+            processed_alerts.push(alert.candid.to_string());
+        }
+
+        if !updates.is_empty() {
+            self.client.bulk_write(updates).await?;
+        }
+        Ok(processed_alerts)
+    }
+}
+
 impl ZtfEnrichmentWorker {
     /// Keyed by `ssnamenr` as the alert carries it, not by the MPCORB key.
     async fn fetch_orbits(
-        &self,
+        mpc_orbits: &Collection<Document>,
         alerts: &[ZtfAlertForEnrichment],
     ) -> HashMap<String, OrbitalElements> {
         let key_by_name: HashMap<&str, String> = alerts
@@ -1368,7 +1506,7 @@ impl ZtfEnrichmentWorker {
             .into_iter()
             .collect();
 
-        let cursor = match self.mpc_orbits.find(doc! { "_id": { "$in": &keys } }).await {
+        let cursor = match mpc_orbits.find(doc! { "_id": { "$in": &keys } }).await {
             Ok(cursor) => cursor,
             Err(e) => {
                 warn!("failed to query {}: {}", ORBITS_COLLECTION, e);
@@ -1391,8 +1529,7 @@ impl ZtfEnrichmentWorker {
 
         // An empty catalogue looks like every object missing, so say which it is.
         if by_key.is_empty() {
-            let catalogue_empty = self
-                .mpc_orbits
+            let catalogue_empty = mpc_orbits
                 .estimated_document_count()
                 .await
                 .is_ok_and(|count| count == 0);
@@ -1418,7 +1555,7 @@ impl ZtfEnrichmentWorker {
     /// One `$in` per batch, for the same reason `fetch_orbits` batches. An object
     /// with no entry is scored against its window alone.
     async fn fetch_baselines(
-        &self,
+        sso_baselines: &Collection<Document>,
         alerts: &[ZtfAlertForEnrichment],
     ) -> HashMap<String, HashMap<u8, PhaseCurve>> {
         let names: Vec<&str> = alerts
@@ -1432,11 +1569,7 @@ impl ZtfEnrichmentWorker {
             return HashMap::new();
         }
 
-        let cursor = match self
-            .sso_baselines
-            .find(doc! { "_id": { "$in": &names } })
-            .await
-        {
+        let cursor = match sso_baselines.find(doc! { "_id": { "$in": &names } }).await {
             Ok(cursor) => cursor,
             Err(e) => {
                 warn!("failed to query {}: {}", BASELINES_COLLECTION, e);
@@ -1470,7 +1603,10 @@ impl ZtfEnrichmentWorker {
     /// cannot place one whose distances are unknown.
     ///
     /// A failure is not fatal, matching `fetch_orbits`.
-    async fn fetch_sso_history(&self, alerts: &[ZtfAlertForEnrichment]) -> SsoHistory {
+    async fn fetch_sso_history(
+        alert_collection: &Collection<Document>,
+        alerts: &[ZtfAlertForEnrichment],
+    ) -> SsoHistory {
         let names: Vec<&str> = alerts
             .iter()
             .filter_map(|a| a.candidate.candidate.ssnamenr.as_deref())
@@ -1514,12 +1650,7 @@ impl ZtfEnrichmentWorker {
             "properties.sso.phase_angle": 1,
         };
 
-        let cursor = match self
-            .alert_collection
-            .find(filter)
-            .projection(projection)
-            .await
-        {
+        let cursor = match alert_collection.find(filter).projection(projection).await {
             Ok(cursor) => cursor,
             Err(e) => {
                 warn!("failed to query solar system history: {}", e);

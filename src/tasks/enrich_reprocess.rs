@@ -30,7 +30,7 @@ use crate::conf::AppConfig;
 use crate::enrichment::{
     models::{SharedModelPool, SharedModels},
     AskapEnrichmentWorker, DecamEnrichmentWorker, EnrichmentWorker, EnrichmentWorkerError,
-    LsstEnrichmentWorker, WinterEnrichmentWorker, ZtfEnrichmentWorker,
+    LsstEnrichmentWorker, WinterEnrichmentWorker, ZtfEnrichmentWorker, ZtfSubsetWorker,
 };
 use crate::utils::{
     enums::Survey,
@@ -124,9 +124,12 @@ pub struct EnrichReprocessParams {
     /// filled out of band; the task will not add to it or delete it.
     #[serde(default)]
     pub input_queue: Option<String>,
-    /// Write only these keys of `properties`. DECam only.
+    /// Write only these keys of `properties`, with no classification. DECam and ZTF.
     #[serde(default)]
     pub properties: Option<Vec<String>>,
+    /// Write only `gp_fit`, plus any `properties` keys. ZTF only.
+    #[serde(default)]
+    pub gp_fit: bool,
 }
 
 /// More than this and the workers contend for the connection pool and, on ZTF,
@@ -134,6 +137,10 @@ pub struct EnrichReprocessParams {
 const MAX_WORKERS: usize = 32;
 
 impl EnrichReprocessParams {
+    fn writes_subset(&self) -> bool {
+        self.properties.is_some() || self.gp_fit
+    }
+
     pub fn validate_params(&self) -> Result<(), String> {
         if let Some(n) = self.n_workers {
             if n == 0 || n > MAX_WORKERS {
@@ -149,9 +156,19 @@ impl EnrichReprocessParams {
             if keys.is_empty() || keys.iter().any(|k| k.trim().is_empty()) {
                 return Err("properties must list at least one key".to_string());
             }
-            if !matches!(self.survey, Survey::Decam) {
+            if !matches!(self.survey, Survey::Decam | Survey::Ztf) {
                 return Err(format!("properties is not supported for {}", self.survey));
             }
+        }
+        if self.gp_fit && !matches!(self.survey, Survey::Ztf) {
+            return Err(format!("gp_fit is not supported for {}", self.survey));
+        }
+        if self.writes_subset() && matches!(self.selection, Selection::Stale) {
+            return Err(
+                "selection 'stale' needs a full reprocess: a partial one does not restamp \
+                 the enrichment set"
+                    .to_string(),
+            );
         }
         if let Selection::CandidRange { from, to } = &self.selection {
             if from > to {
@@ -261,44 +278,49 @@ pub async fn run(
     // The answer the workers will reach, without loading anything: the pool is
     // only loaded once the queue is filled, since selection can scan the whole
     // archive and the GPU is in use by the live workers meanwhile.
-    let gpu_active = matches!(params.survey, Survey::Ztf) && config.gpu.is_active();
+    let subset = params.writes_subset();
+    let gpu_active = matches!(params.survey, Survey::Ztf) && config.gpu.is_active() && !subset;
 
     let survey_key = params.survey.to_string().to_lowercase();
     // Only ZTF stamps, and `ZTF_MODELS` is the only model list.
-    let (current_set_id, acceptable) =
-        if crate::enrichment::version::stamps_enrichment_set(&survey_key) {
-            // Concurrent interning needs the unique fingerprint index first.
-            crate::enrichment::version::initialize_indexes(ctx.db())
+    let stamps = !subset && crate::enrichment::version::stamps_enrichment_set(&survey_key);
+    let (current_set_id, acceptable) = if stamps {
+        // Concurrent interning needs the unique fingerprint index first.
+        crate::enrichment::version::initialize_indexes(ctx.db())
+            .await
+            .map_err(|e| failed(e.to_string()))?;
+        // Workers without a pool run on CPU and compute no `villar_fit`.
+        let current_set = crate::enrichment::version::resolve_current_set(
+            ctx.db(),
+            &survey_key,
+            crate::enrichment::version::ZTF_MODELS,
+            gpu_active,
+        )
+        .await
+        .map_err(|e| failed(e.to_string()))?;
+        let acceptable =
+            crate::enrichment::version::acceptable_set_ids(ctx.db(), &survey_key, current_set.id)
                 .await
                 .map_err(|e| failed(e.to_string()))?;
-            // Workers without a pool run on CPU and compute no `villar_fit`.
-            let current_set = crate::enrichment::version::resolve_current_set(
-                ctx.db(),
-                &survey_key,
-                crate::enrichment::version::ZTF_MODELS,
-                gpu_active,
-            )
-            .await
-            .map_err(|e| failed(e.to_string()))?;
-            let acceptable = crate::enrichment::version::acceptable_set_ids(
-                ctx.db(),
-                &survey_key,
-                current_set.id,
-            )
-            .await
-            .map_err(|e| failed(e.to_string()))?;
-            ctx.info(format!(
-                "current enrichment set is {}; acceptable: {acceptable:?}",
-                current_set.id
-            ));
-            (Some(current_set.id), acceptable)
-        } else {
-            ctx.info(format!(
-                "{} does not stamp an enrichment set; reprocessing without one",
-                params.survey
-            ));
-            (None, Vec::new())
-        };
+        ctx.info(format!(
+            "current enrichment set is {}; acceptable: {acceptable:?}",
+            current_set.id
+        ));
+        (Some(current_set.id), acceptable)
+    } else if subset {
+        ctx.info(format!(
+            "writing only properties {:?} and gp_fit {}; the enrichment set is left as it is",
+            params.properties.as_deref().unwrap_or_default(),
+            params.gp_fit
+        ));
+        (None, Vec::new())
+    } else {
+        ctx.info(format!(
+            "{} does not stamp an enrichment set; reprocessing without one",
+            params.survey
+        ));
+        (None, Vec::new())
+    };
 
     // Owning the queue is what makes "empty" mean "done". A caller-supplied one
     // may still be filling, so the task only drains it and never deletes it.
@@ -370,12 +392,14 @@ pub async fn run(
         let queue = queue.clone();
         let survey = params.survey.clone();
         let properties = params.properties.clone();
+        let gp_fit = params.gp_fit;
         let shared_models = shared_model_pool.as_ref().map(|pool| pool.next_model_set());
 
         let handle = thread::spawn(move || {
             let tid = std::thread::current().id();
             span!(Level::INFO, "enrich-only worker", ?tid, ?survey).in_scope(|| {
                 let run_worker = match survey {
+                    Survey::Ztf if subset => run_enrich_only::<ZtfSubsetWorker>,
                     Survey::Ztf => run_enrich_only::<ZtfEnrichmentWorker>,
                     Survey::Lsst => run_enrich_only::<LsstEnrichmentWorker>,
                     Survey::Decam => run_enrich_only::<DecamEnrichmentWorker>,
@@ -389,6 +413,7 @@ pub async fn run(
                     queue,
                     worker,
                     properties,
+                    gp_fit,
                 );
                 result.unwrap_or_else(as_error!("enrichment worker failed"));
             })
@@ -434,6 +459,8 @@ pub async fn run(
         doc! {
             "selection": params.selection.describe(),
             "enrichment_set": current_set_id,
+            "properties": params.properties.clone(),
+            "gp_fit": params.gp_fit,
             "queued": queued as i64,
             "workers": n_workers as i64,
             "code_version": mongodb::bson::to_bson(&super::ledger::CodeVersion::current())
@@ -566,17 +593,18 @@ async fn run_enrich_only<T: EnrichmentWorker>(
     input_queue: String,
     worker_index: usize,
     properties: Option<Vec<String>>,
+    gp_fit: bool,
 ) -> Result<(), EnrichmentWorkerError> {
     debug!(?config_path);
     let mut worker = T::new(config_path, shared_models).await?;
     worker.disable_babamul();
-    if let Some(keys) = properties {
-        if !worker.write_only_properties(keys) {
-            return Err(EnrichmentWorkerError::ConfigurationError(format!(
-                "{} cannot write a subset of properties",
-                T::survey()
-            )));
-        }
+    if (properties.is_some() || gp_fit)
+        && !worker.write_only(properties.unwrap_or_default(), gp_fit)
+    {
+        return Err(EnrichmentWorkerError::ConfigurationError(format!(
+            "{} cannot write a subset of its outputs",
+            T::survey()
+        )));
     }
 
     let config = AppConfig::from_path(config_path)?;
@@ -659,6 +687,7 @@ mod tests {
             n_workers: None,
             input_queue: None,
             properties: None,
+            gp_fit: false,
         }
     }
 
