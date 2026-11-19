@@ -25,5 +25,5 @@ pub use ztf::{
     create_ztf_alert_pipeline, deserialize_ztf_alert_lightcurve, deserialize_ztf_forced_lightcurve,
     ztf_alert_properties_without_sso, ZtfAlertClassifications, ZtfAlertForEnrichment,
     ZtfAlertProperties, ZtfEnrichmentWorker, ZtfForcedPhotometry, ZtfMatch, ZtfPhotometry,
-    ZtfSsoAssociation, ZtfSurveyMatches,
+    ZtfSsoAssociation, ZtfSubsetWorker, ZtfSurveyMatches,
 };
