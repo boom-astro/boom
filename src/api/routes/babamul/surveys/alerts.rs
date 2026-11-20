@@ -16,6 +16,7 @@ use base64::prelude::*;
 use futures::TryStreamExt;
 use mongodb::{
     bson::{doc, Bson, Document},
+    options::Hint,
     Collection, Database,
 };
 use std::collections::HashMap;
@@ -147,9 +148,9 @@ pub async fn get_alerts(
     };
 
     // We need to have at least object_id OR position OR time range (less than 1 jd)
-    if query.object_id.is_none()
-        && (query.ra.is_none() || query.dec.is_none() || query.radius_arcsec.is_none())
-    {
+    let time_range_only = query.object_id.is_none()
+        && (query.ra.is_none() || query.dec.is_none() || query.radius_arcsec.is_none());
+    if time_range_only {
         match (query.start_jd, query.end_jd) {
             (Some(start_jd), Some(end_jd)) => {
                 if end_jd - start_jd > 1.0 {
@@ -265,17 +266,28 @@ pub async fn get_alerts(
         );
     }
 
+    // Sorting on _id makes Mongo walk the _id index over the whole collection.
+    let epoch_index = time_range_only.then(|| {
+        Hint::Keys(if survey == Survey::Ztf {
+            doc! { "candidate.jd": -1, "candidate.programid": 1 }
+        } else {
+            doc! { "candidate.jd": -1 }
+        })
+    });
+
     match survey {
         Survey::Ztf => {
             let alerts_collection: Collection<EnrichedZtfAlert> =
                 db.collection(&format!("{}_alerts", survey));
-            let mut alert_cursor = match alerts_collection
+            let mut find = alerts_collection
                 .find(filter_doc)
                 .sort(doc! { "_id": 1 })
                 .skip(skip)
-                .limit(limit as i64)
-                .await
-            {
+                .limit(limit as i64);
+            if let Some(hint) = epoch_index {
+                find = find.hint(hint);
+            }
+            let mut alert_cursor = match find.await {
                 Ok(cursor) => cursor,
                 Err(error) => {
                     return response::internal_error(&format!(
@@ -302,13 +314,15 @@ pub async fn get_alerts(
         Survey::Lsst => {
             let alerts_collection: Collection<EnrichedLsstAlert> =
                 db.collection(&format!("{}_alerts", survey));
-            let mut alert_cursor = match alerts_collection
+            let mut find = alerts_collection
                 .find(filter_doc)
                 .sort(doc! { "_id": 1 })
                 .skip(skip)
-                .limit(limit as i64)
-                .await
-            {
+                .limit(limit as i64);
+            if let Some(hint) = epoch_index {
+                find = find.hint(hint);
+            }
+            let mut alert_cursor = match find.await {
                 Ok(cursor) => cursor,
                 Err(error) => {
                     return response::internal_error(&format!(
