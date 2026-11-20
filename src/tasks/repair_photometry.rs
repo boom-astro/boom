@@ -89,6 +89,7 @@ fn timeseries_fields(survey: &Survey) -> &'static [&'static str] {
         Survey::Decam => &["prv_candidates", "fp_hists"],
         Survey::Winter => &["prv_candidates"],
         Survey::Askap => &["prv_candidates", "fp_hists"],
+        Survey::Argus => &[],
     }
 }
 

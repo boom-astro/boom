@@ -29,8 +29,9 @@ use super::ledger::{MutationTarget, Operation};
 use crate::conf::AppConfig;
 use crate::enrichment::{
     models::{SharedModelPool, SharedModels},
-    AskapEnrichmentWorker, DecamEnrichmentWorker, EnrichmentWorker, EnrichmentWorkerError,
-    LsstEnrichmentWorker, WinterEnrichmentWorker, ZtfEnrichmentWorker, ZtfSubsetWorker,
+    ArgusEnrichmentWorker, AskapEnrichmentWorker, DecamEnrichmentWorker, EnrichmentWorker,
+    EnrichmentWorkerError, LsstEnrichmentWorker, WinterEnrichmentWorker, ZtfEnrichmentWorker,
+    ZtfSubsetWorker,
 };
 use crate::utils::{
     enums::Survey,
@@ -405,6 +406,7 @@ pub async fn run(
                     Survey::Decam => run_enrich_only::<DecamEnrichmentWorker>,
                     Survey::Winter => run_enrich_only::<WinterEnrichmentWorker>,
                     Survey::Askap => run_enrich_only::<AskapEnrichmentWorker>,
+                    Survey::Argus => run_enrich_only::<ArgusEnrichmentWorker>,
                 };
                 let result = run_worker(
                     receiver,

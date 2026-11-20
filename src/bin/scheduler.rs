@@ -1,7 +1,7 @@
 #[cfg(target_os = "linux")]
 use boom::utils::gpu::validate_gpu_configuration_for_survey;
 use boom::{
-    alert::recover_temp_queue,
+    alert::{recover_temp_queue, ArgusLane},
     api::catalogs::WATCHLIST_PREFIX,
     conf::{load_dotenv, AppConfig, CatalogXmatchConfig},
     enrichment::models::SharedModelPool,
@@ -46,8 +46,39 @@ const MPC_ORBITS_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 const MPC_ORBITS_CHECK_INTERVAL: Duration = Duration::from_secs(4 * 60 * 60);
 const MPC_ORBITS_STARTUP_WAIT: Duration = Duration::from_secs(5 * 60);
 
-fn pool_state(pool: &ThreadPool) -> String {
-    format!("{}/{}", pool.live_worker_count(), pool.total_worker_count())
+fn pool_state(pools: &[ThreadPool]) -> String {
+    let (live, total) = pools_counts(pools);
+    format!("{}/{}", live, total)
+}
+
+fn lane_pools(
+    worker_type: WorkerType,
+    default: usize,
+    lanes: &std::collections::HashMap<String, usize>,
+    config_path: &str,
+) -> Vec<ThreadPool> {
+    ArgusLane::ALL
+        .iter()
+        .map(|lane| {
+            ThreadPool::with_queues(
+                worker_type,
+                lanes.get(lane.slug()).copied().unwrap_or(default),
+                Survey::Argus,
+                config_path.to_string(),
+                lane.worker_queues(worker_type),
+                None,
+            )
+        })
+        .collect()
+}
+
+fn pools_counts(pools: &[ThreadPool]) -> (usize, usize) {
+    pools.iter().fold((0, 0), |(live, total), pool| {
+        (
+            live + pool.live_worker_count(),
+            total + pool.total_worker_count(),
+        )
+    })
 }
 
 /// Whether the catalogue is due a refresh. An absent one always is.
@@ -391,12 +422,27 @@ async fn run(
         None
     };
 
+    let alert_queues: Vec<String> = if args.survey == Survey::Argus {
+        ArgusLane::ALL.iter().map(ArgusLane::alert_queue).collect()
+    } else {
+        vec![args.survey.alert_input_queue()]
+    };
+
     match config.build_redis().await {
-        Ok(mut con) => match recover_temp_queue(&mut con, &args.survey.alert_input_queue()).await {
-            Ok(0) => {}
-            Ok(recovered) => warn!(recovered, "requeued alerts left in the alert temp queue"),
-            Err(error) => log_error!(WARN, error, "failed to recover the alert temp queue"),
-        },
+        Ok(mut con) => {
+            for queue in &alert_queues {
+                match recover_temp_queue(&mut con, queue).await {
+                    Ok(0) => {}
+                    Ok(recovered) => {
+                        warn!(
+                            recovered,
+                            queue, "requeued alerts left in the alert temp queue"
+                        )
+                    }
+                    Err(error) => log_error!(WARN, error, "failed to recover the alert temp queue"),
+                }
+            }
+        }
         Err(error) => log_error!(
             WARN,
             error,
@@ -404,47 +450,71 @@ async fn run(
         ),
     }
 
-    let mut alert_pool = ThreadPool::new(
-        WorkerType::Alert,
-        n_alert,
-        args.survey.clone(),
-        config_path.clone(),
-        None,
-    );
-    let mut enrichment_pool = ThreadPool::new(
-        WorkerType::Enrichment,
-        n_enrichment,
-        args.survey.clone(),
-        config_path.clone(),
-        shared_model_pool,
-    );
-    let mut filter_pool = ThreadPool::new(
-        WorkerType::Filter,
-        n_filter,
-        args.survey.clone(),
-        config_path,
-        None,
-    );
+    let (mut alert_pools, mut enrichment_pools, mut filter_pools) = if args.survey == Survey::Argus
+    {
+        (
+            lane_pools(
+                WorkerType::Alert,
+                n_alert,
+                &worker_config.alert.lanes,
+                &config_path,
+            ),
+            lane_pools(
+                WorkerType::Enrichment,
+                n_enrichment,
+                &worker_config.enrichment.lanes,
+                &config_path,
+            ),
+            lane_pools(
+                WorkerType::Filter,
+                n_filter,
+                &worker_config.filter.lanes,
+                &config_path,
+            ),
+        )
+    } else {
+        (
+            vec![ThreadPool::new(
+                WorkerType::Alert,
+                n_alert,
+                args.survey.clone(),
+                config_path.clone(),
+                None,
+            )],
+            vec![ThreadPool::new(
+                WorkerType::Enrichment,
+                n_enrichment,
+                args.survey.clone(),
+                config_path.clone(),
+                shared_model_pool,
+            )],
+            vec![ThreadPool::new(
+                WorkerType::Filter,
+                n_filter,
+                args.survey.clone(),
+                config_path,
+                None,
+            )],
+        )
+    };
 
     // By reference, so the supervision tick below can still borrow them mutably.
-    let record_pool_metrics =
-        |survey: &Survey, alert: &ThreadPool, enrichment: &ThreadPool, filter: &ThreadPool| {
-            for (kind, pool) in [
-                ("alert", alert),
-                ("enrichment", enrichment),
-                ("filter", filter),
-            ] {
-                record_worker_pool_state(
-                    survey,
-                    kind,
-                    pool.live_worker_count(),
-                    pool.total_worker_count(),
-                );
-            }
-        };
+    let record_pool_metrics = |survey: &Survey,
+                               alert: &[ThreadPool],
+                               enrichment: &[ThreadPool],
+                               filter: &[ThreadPool]| {
+        for (kind, pools) in [
+            ("alert", alert),
+            ("enrichment", enrichment),
+            ("filter", filter),
+        ] {
+            let (live, total) = pools_counts(pools);
+            record_worker_pool_state(survey, kind, live, total);
+        }
+    };
 
     // Emit an initial sample so dashboards show running workers immediately.
-    record_pool_metrics(&args.survey, &alert_pool, &enrichment_pool, &filter_pool);
+    record_pool_metrics(&args.survey, &alert_pools, &enrichment_pools, &filter_pools);
 
     // Supervise often to respawn fast, but only log the heartbeat once a minute.
     let mut supervise_tick = tokio::time::interval(Duration::from_secs(5));
@@ -458,17 +528,21 @@ async fn run(
                 break;
             }
             _ = supervise_tick.tick() => {
-                alert_pool.supervise();
-                enrichment_pool.supervise();
-                filter_pool.supervise();
+                for pool in alert_pools
+                    .iter_mut()
+                    .chain(enrichment_pools.iter_mut())
+                    .chain(filter_pools.iter_mut())
+                {
+                    pool.supervise();
+                }
             }
             _ = heartbeat_tick.tick() => {
-                record_pool_metrics(&args.survey, &alert_pool, &enrichment_pool, &filter_pool);
+                record_pool_metrics(&args.survey, &alert_pools, &enrichment_pools, &filter_pools);
                 let counts = take_heartbeat_counts();
                 info!(
-                    alert = %pool_state(&alert_pool),
-                    enrichment = %pool_state(&enrichment_pool),
-                    filter = %pool_state(&filter_pool),
+                    alert = %pool_state(&alert_pools),
+                    enrichment = %pool_state(&enrichment_pools),
+                    filter = %pool_state(&filter_pools),
                     processed = counts.alert,
                     enriched = counts.enrichment,
                     filtered = counts.filter,
@@ -480,9 +554,9 @@ async fn run(
     }
 
     info!("shutting down");
-    drop(alert_pool);
-    drop(enrichment_pool);
-    drop(filter_pool);
+    drop(alert_pools);
+    drop(enrichment_pools);
+    drop(filter_pools);
     if let Some(meter_provider) = meter_provider {
         if let Err(error) = meter_provider.shutdown() {
             log_error!(WARN, error, "failed to shut down the meter provider");

@@ -1,3 +1,4 @@
+mod argus;
 mod askap;
 mod base;
 mod decam;
@@ -7,6 +8,7 @@ pub mod simulation;
 mod winter;
 mod ztf;
 
+pub use argus::{build_argus_filter_pipeline, ArgusFilterWorker};
 pub use askap::{build_askap_filter_pipeline, AskapFilterWorker};
 pub use base::{
     alert_to_avro_bytes, build_filter_pipeline, build_loaded_filter, build_loaded_filters,

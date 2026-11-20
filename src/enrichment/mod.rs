@@ -1,3 +1,4 @@
+mod argus;
 mod askap;
 pub mod babamul;
 mod base;
@@ -7,6 +8,7 @@ pub mod models;
 pub mod version;
 mod winter;
 mod ztf;
+pub use argus::{ArgusAlertProperties, ArgusEnrichmentWorker, ArgusPhotstats};
 pub use askap::{AskapAlertProperties, AskapEnrichmentWorker};
 pub use base::{fetch_alerts, run_enrichment_worker, EnrichmentWorker, EnrichmentWorkerError};
 pub use decam::{

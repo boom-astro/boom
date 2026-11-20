@@ -1,8 +1,9 @@
 use boom::{
-    conf::load_dotenv,
+    alert::ArgusLane,
+    conf::{load_dotenv, AppConfig, KafkaConsumerConfig},
     kafka::{
-        AlertConsumer, AskapAlertConsumer, DecamAlertConsumer, LsstAlertConsumer, StartDate,
-        WinterAlertConsumer, ZtfAlertConsumer,
+        AlertConsumer, ArgusAlertConsumer, AskapAlertConsumer, DecamAlertConsumer,
+        LsstAlertConsumer, StartDate, WinterAlertConsumer, ZtfAlertConsumer,
     },
     utils::{
         enums::{ProgramId, Survey},
@@ -94,6 +95,7 @@ async fn consume_with<C: AlertConsumer>(
     args: &Cli,
     start: StartDate,
     date_label: &str,
+    kafka_config: Option<KafkaConsumerConfig>,
 ) {
     info!(
         "Consuming {} alerts (date {}, replay: {}, exit on EOF: {})",
@@ -110,7 +112,7 @@ async fn consume_with<C: AlertConsumer>(
         .consume(
             args.topics_override.clone(),
             start,
-            None,
+            kafka_config,
             Some(args.processes),
             Some(args.max_in_queue),
             args.exit_on_eof,
@@ -121,6 +123,37 @@ async fn consume_with<C: AlertConsumer>(
         Ok(_) => info!("Successfully consumed alerts"),
         Err(e) => error!("Failed to consume alerts: {}", e),
     };
+}
+
+async fn consume_argus_lanes(args: &Cli, start: StartDate, date_label: &str) {
+    if args.topics_override.is_some() {
+        return consume_with(ArgusAlertConsumer::mixed(), args, start, date_label, None).await;
+    }
+    let base_config = match AppConfig::from_path(&args.config)
+        .map(|config| config.kafka.consumer.get(&Survey::Argus).cloned())
+    {
+        Ok(Some(kafka_config)) => kafka_config,
+        Ok(None) => {
+            error!("kafka.consumer.argus is missing from the config");
+            return;
+        }
+        Err(e) => {
+            error!("Failed to load config: {}", e);
+            return;
+        }
+    };
+    futures::future::join_all(ArgusLane::ALL.map(|lane| {
+        let mut kafka_config = base_config.clone();
+        kafka_config.group_id = format!("{}-{}", kafka_config.group_id, lane);
+        consume_with(
+            ArgusAlertConsumer::new(lane),
+            args,
+            start,
+            date_label,
+            Some(kafka_config),
+        )
+    }))
+    .await;
 }
 
 // No `#[instrument]`: `run` lives as long as the process, so one wrapping span
@@ -142,21 +175,43 @@ async fn run(
     match args.survey {
         Survey::Ztf => {
             let consumer = ZtfAlertConsumer::new(None, Some(args.programids.clone()));
-            consume_with(consumer, &args, start, &date_label).await
+            consume_with(consumer, &args, start, &date_label, None).await
         }
         Survey::Lsst => {
             let consumer = LsstAlertConsumer::new(None, args.simulated);
-            consume_with(consumer, &args, start, &date_label).await
+            consume_with(consumer, &args, start, &date_label, None).await
         }
         Survey::Decam => {
-            consume_with(DecamAlertConsumer::new(None), &args, start, &date_label).await
+            consume_with(
+                DecamAlertConsumer::new(None),
+                &args,
+                start,
+                &date_label,
+                None,
+            )
+            .await
         }
         Survey::Winter => {
-            consume_with(WinterAlertConsumer::new(None), &args, start, &date_label).await
+            consume_with(
+                WinterAlertConsumer::new(None),
+                &args,
+                start,
+                &date_label,
+                None,
+            )
+            .await
         }
         Survey::Askap => {
-            consume_with(AskapAlertConsumer::new(None), &args, start, &date_label).await
+            consume_with(
+                AskapAlertConsumer::new(None),
+                &args,
+                start,
+                &date_label,
+                None,
+            )
+            .await
         }
+        Survey::Argus => consume_argus_lanes(&args, start, &date_label).await,
     }
 
     if let Some(meter_provider) = meter_provider {
