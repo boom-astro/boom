@@ -407,7 +407,7 @@ impl std::fmt::Display for ArgusLane {
 }
 
 // alertId is HEALPix-derived: every detection at one position shares it.
-pub fn argus_candid(alert: &ArgusRawAvroAlert) -> i64 {
+fn argus_candid(alert: &ArgusRawAvroAlert) -> i64 {
     let key = format!(
         "{}|{}|{}|{}",
         alert.alert_id,
@@ -423,7 +423,7 @@ pub fn argus_candid(alert: &ArgusRawAvroAlert) -> i64 {
     (hash & i64::MAX as u64) as i64
 }
 
-pub fn iso_to_jd(iso: &str) -> Result<f64, AlertError> {
+fn iso_to_jd(iso: &str) -> Result<f64, AlertError> {
     let utc = chrono::DateTime::parse_from_rfc3339(iso)
         .map(|dt| dt.with_timezone(&chrono::Utc))
         .or_else(|_| {

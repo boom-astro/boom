@@ -8,9 +8,9 @@ mod simulation;
 mod winter;
 mod ztf;
 pub use argus::{
-    argus_candid, argus_candidate_fields, decode_argus_packet, encode_argus_alert, iso_to_jd,
-    ArgusAlertWorker, ArgusAliases, ArgusCandidate, ArgusEventAssociation, ArgusLane,
-    ArgusPhotometry, ArgusRawAvroAlert, ArgusSsoAssociation, ArgusSsoHistoryEntry, ARGUS_DEC_RANGE,
+    argus_candidate_fields, decode_argus_packet, encode_argus_alert, ArgusAlertWorker,
+    ArgusAliases, ArgusCandidate, ArgusEventAssociation, ArgusLane, ArgusPhotometry,
+    ArgusRawAvroAlert, ArgusSsoAssociation, ArgusSsoHistoryEntry, ARGUS_DEC_RANGE,
     ARGUS_RESULTS_TOPIC, ARGUS_SCHEMA,
 };
 pub use askap::{
