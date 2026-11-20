@@ -69,11 +69,18 @@ services:
       BOOM_CUTOUTS_STORAGE__SECRET_KEY: ${BOOM_CUTOUTS_STORAGE__SECRET_KEY:?BOOM_CUTOUTS_STORAGE__SECRET_KEY must be set}
       BOOM_CUTOUTS_STORAGE__CACHE__HOST: valkey-cutouts
       BOOM_CUTOUTS_STORAGE__CACHE__PORT: 6379
-  consumer-ztf:
+  # Prod splits the ZTF consumer by programid (see docker-compose.yaml).
+  consumer-ztf-public:
+    <<: *s3_cutouts_env
+  consumer-ztf-partnership:
+    <<: *s3_cutouts_env
+  consumer-ztf-caltech:
     <<: *s3_cutouts_env
   consumer-lsst:
     <<: *s3_cutouts_env
   consumer-winter:
+    <<: *s3_cutouts_env
+  consumer-decam:
     <<: *s3_cutouts_env
   scheduler-ztf:
     <<: *s3_cutouts_env
@@ -81,8 +88,21 @@ services:
     <<: *s3_cutouts_env
   scheduler-winter:
     <<: *s3_cutouts_env
+  scheduler-decam:
+    <<: *s3_cutouts_env
   scheduler-askap:
     <<: *s3_cutouts_env
+  task-worker:
+    <<: *s3_cutouts_env
+  linker-ztf:
+    <<: *s3_cutouts_env
+  # Dev-only single ZTF consumer, defined in docker-compose.override.yaml.
+  # Gated to the dev profile so it isn't an orphan (no image/build) in prod,
+  # where the *-public/-partnership/-caltech services above apply instead.
+  consumer-ztf:
+    <<: *s3_cutouts_env
+    profiles:
+      - dev
 
   # Dedicated Valkey instance for the cutout cache. Kept separate from the main
   # valkey so it can be capped with a fixed maxmemory budget and its eviction
