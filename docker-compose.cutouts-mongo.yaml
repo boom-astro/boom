@@ -80,6 +80,8 @@ services:
     <<: *mongo_cutouts_env
   scheduler-decam:
     <<: *mongo_cutouts_env
+  scheduler-askap:
+    <<: *mongo_cutouts_env
   task-worker:
     <<: *mongo_cutouts_env
   linker-ztf:
