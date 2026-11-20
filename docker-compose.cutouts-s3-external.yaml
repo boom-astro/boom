@@ -85,3 +85,5 @@ services:
     <<: *s3_external_cutouts_env
   scheduler-winter:
     <<: *s3_external_cutouts_env
+  scheduler-askap:
+    <<: *s3_external_cutouts_env

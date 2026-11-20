@@ -851,6 +851,37 @@ services:
     command:
       - /app/scheduler
       - decam
+  scheduler-askap:
+    image: ${BOOM_IMAGE:-ghcr.io/boom-astro/boom:latest}
+    pull_policy: ${BOOM_PULL_POLICY:-build}
+    hostname: scheduler-askap
+    restart: always
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        BOOM_GIT_SHA: ${BOOM_GIT_SHA:-}
+    environment:
+      BOOM_DATABASE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
+      BOOM_CUTOUTS_STORAGE__PASSWORD: ${BOOM_DATABASE__PASSWORD:?BOOM_DATABASE__PASSWORD must be set}
+      BOOM_API__AUTH__SECRET_KEY: ${BOOM_API__AUTH__SECRET_KEY:?BOOM_API__AUTH__SECRET_KEY must be set}
+      BOOM_API__AUTH__ADMIN_PASSWORD: ${BOOM_API__AUTH__ADMIN_PASSWORD:?BOOM_API__AUTH__ADMIN_PASSWORD must be set}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      BOOM_DATABASE__HOST: mongo
+      BOOM_DATABASE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
+      BOOM_CUTOUTS_STORAGE__USERNAME: ${BOOM_DATABASE__USERNAME:-mongoadmin}
+      BOOM_CUTOUTS_STORAGE__TYPE: mongo
+      BOOM_CUTOUTS_STORAGE__HOST: mongo
+      BOOM_REDIS__HOST: valkey
+    networks:
+      - boom
+    profiles:
+      - prod
+    volumes:
+      - ${BOOM_CONFIG_PATH:-./config.yaml}:/app/config.yaml
+    command:
+      - /app/scheduler
+      - askap
   # Moving-object discovery: once each ZTF night is over, links the last
   # `linker.window_nights` nights of unassociated detections, stores the tracks
   # in ZTF_tracks, and logs the recall on objects IPAC identified. Settings are
