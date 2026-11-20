@@ -1,5 +1,5 @@
 use crate::alert::{LsstCandidate, ZtfCandidate};
-use crate::api::limits::{large_query_slot, next_result};
+use crate::api::limits::{large_query_slot, next_result, DEFAULT_QUERY_MAX_TIME};
 use crate::api::models::response;
 use crate::api::routes::babamul::BabamulUser;
 use crate::enrichment::{LsstAlertProperties, ZtfAlertClassifications, ZtfAlertProperties};
@@ -283,7 +283,8 @@ pub async fn get_alerts(
                 .find(filter_doc)
                 .sort(doc! { "_id": 1 })
                 .skip(skip)
-                .limit(limit as i64);
+                .limit(limit as i64)
+                .max_time(DEFAULT_QUERY_MAX_TIME);
             if let Some(hint) = epoch_index {
                 find = find.hint(hint);
             }
@@ -318,7 +319,8 @@ pub async fn get_alerts(
                 .find(filter_doc)
                 .sort(doc! { "_id": 1 })
                 .skip(skip)
-                .limit(limit as i64);
+                .limit(limit as i64)
+                .max_time(DEFAULT_QUERY_MAX_TIME);
             if let Some(hint) = epoch_index {
                 find = find.hint(hint);
             }
