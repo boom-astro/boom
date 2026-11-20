@@ -88,7 +88,7 @@
     "@types/react-dom": "^19.2.3",
     "@types/topojson-client": "^3.1.5",
     "@vitejs/plugin-react": "^4.7.0",
-    "eslint": "^9.39.4",
+    "eslint": "^10.11.0",
     "eslint-plugin-react-hooks": "^5.2.0",
     "eslint-plugin-react-refresh": "^0.4.26",
     "globals": "^16.5.0",
