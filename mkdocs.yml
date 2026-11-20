@@ -66,6 +66,7 @@ nav:
       - Data model: data-model.md
       - Task system: task-system.md
       - Archival catalogs: catalogs.md
+      - Argus: argus.md
   - Classification and fits:
       - AppleCiDER: applecider.md
       - Villar light-curve fits: villar-fit.md
