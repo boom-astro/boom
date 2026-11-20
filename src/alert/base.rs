@@ -2,7 +2,7 @@ use crate::conf::AppConfig;
 use crate::utils::cutouts::AlertCutout;
 use crate::utils::enums::Survey;
 use crate::utils::ingest_stats;
-use crate::utils::worker::WorkerCmd;
+use crate::utils::worker::{WorkerCmd, WorkerQueues};
 use crate::{
     conf,
     scheduler::{count_processed_alert, record_worker_retry},
@@ -1473,6 +1473,7 @@ pub async fn run_alert_worker<T: AlertWorker>(
     mut receiver: mpsc::Receiver<WorkerCmd>,
     config_path: &str,
     worker_id: Uuid,
+    queues: WorkerQueues,
 ) -> Result<(), AlertWorkerError> {
     debug!(?config_path);
     let config = AppConfig::from_path(config_path)?;
@@ -1484,9 +1485,13 @@ pub async fn run_alert_worker<T: AlertWorker>(
 
     let mut alert_processor = T::new(config_path).await?;
 
-    let input_queue_name = alert_processor.input_queue_name();
+    let input_queue_name = queues
+        .input
+        .unwrap_or_else(|| alert_processor.input_queue_name());
     let temp_queue_name = alert_temp_queue_name(&input_queue_name);
-    let output_queue_name = alert_processor.output_queue_name();
+    let output_queue_name = queues
+        .output
+        .unwrap_or_else(|| alert_processor.output_queue_name());
 
     let con = config
         .build_redis()

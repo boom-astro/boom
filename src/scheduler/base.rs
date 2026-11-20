@@ -15,7 +15,7 @@ use crate::{
     utils::{
         enums::Survey,
         o11y::logging::as_error,
-        worker::{WorkerCmd, WorkerType},
+        worker::{WorkerCmd, WorkerQueues, WorkerType},
     },
 };
 
@@ -124,6 +124,7 @@ pub struct ThreadPool {
     worker_type: WorkerType,
     survey_name: Survey,
     config_path: String,
+    queues: WorkerQueues,
     workers: Vec<Worker>,
     /// Restart bookkeeping, one entry per slot in `workers` (kept in lockstep).
     restart_states: Vec<RestartState>,
@@ -148,11 +149,30 @@ impl ThreadPool {
         config_path: String,
         shared_model_pool: Option<Arc<SharedModelPool>>,
     ) -> Self {
+        Self::with_queues(
+            worker_type,
+            size,
+            survey_name,
+            config_path,
+            WorkerQueues::default(),
+            shared_model_pool,
+        )
+    }
+
+    pub fn with_queues(
+        worker_type: WorkerType,
+        size: usize,
+        survey_name: Survey,
+        config_path: String,
+        queues: WorkerQueues,
+        shared_model_pool: Option<Arc<SharedModelPool>>,
+    ) -> Self {
         debug!(?config_path);
         let mut thread_pool = ThreadPool {
             worker_type,
             survey_name,
             config_path,
+            queues,
             workers: Vec::new(),
             restart_states: Vec::new(),
             shared_model_pool,
@@ -224,6 +244,7 @@ impl ThreadPool {
             self.worker_type,
             self.survey_name.clone(),
             self.config_path.clone(),
+            self.queues.clone(),
             shared_models,
         )
     }
@@ -352,6 +373,7 @@ impl Worker {
         worker_type: WorkerType,
         survey_name: Survey,
         config_path: String,
+        queues: WorkerQueues,
         shared_models: Option<Arc<SharedModels>>,
     ) -> Worker {
         let id = Uuid::new_v4();
@@ -375,7 +397,8 @@ impl Worker {
                     Survey::Askap => run_alert_worker::<AskapAlertWorker>,
                     Survey::Winter => run_alert_worker::<WinterAlertWorker>,
                 };
-                run(receiver, &config_path, id).unwrap_or_else(as_error!("alert worker failed"));
+                run(receiver, &config_path, id, queues)
+                    .unwrap_or_else(as_error!("alert worker failed"));
             }),
             WorkerType::Filter => thread::spawn(move || {
                 let tid = std::thread::current().id();
@@ -388,7 +411,8 @@ impl Worker {
                     Survey::Askap => run_filter_worker::<AskapFilterWorker>,
                     Survey::Winter => run_filter_worker::<WinterFilterWorker>,
                 };
-                run(receiver, &config_path, id).unwrap_or_else(as_error!("filter worker failed"));
+                run(receiver, &config_path, id, queues)
+                    .unwrap_or_else(as_error!("filter worker failed"));
             }),
             WorkerType::Enrichment => thread::spawn(move || {
                 let tid = std::thread::current().id();
@@ -401,7 +425,7 @@ impl Worker {
                     Survey::Askap => run_enrichment_worker::<AskapEnrichmentWorker>,
                     Survey::Winter => run_enrichment_worker::<WinterEnrichmentWorker>,
                 };
-                run(receiver, &config_path, id, shared_models)
+                run(receiver, &config_path, id, shared_models, queues)
                     .unwrap_or_else(as_error!("enrichment worker failed"));
             }),
         };

@@ -57,6 +57,12 @@ impl fmt::Display for WorkerType {
     }
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct WorkerQueues {
+    pub input: Option<String>,
+    pub output: Option<String>,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum WorkerCmd {
     TERM,

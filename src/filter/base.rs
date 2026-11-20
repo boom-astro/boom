@@ -14,7 +14,7 @@ use crate::{
         retry::{
             is_transient_redis_error, retry_transient, DEFAULT_BASE_BACKOFF, DEFAULT_MAX_RETRIES,
         },
-        worker::{should_terminate, WorkerCmd},
+        worker::{should_terminate, WorkerCmd, WorkerQueues},
     },
 };
 
@@ -1099,6 +1099,7 @@ pub async fn run_filter_worker<T: FilterWorker>(
     mut receiver: mpsc::Receiver<WorkerCmd>,
     config_path: &str,
     worker_id: Uuid,
+    queues: WorkerQueues,
 ) -> Result<(), FilterWorkerError> {
     debug!(?config_path);
 
@@ -1114,7 +1115,12 @@ pub async fn run_filter_worker<T: FilterWorker>(
     // in a never ending loop, loop over the queues
     let con = config.build_redis().await?;
 
-    let input_queue = filter_worker.input_queue_name();
+    let input_queue = queues
+        .input
+        .unwrap_or_else(|| filter_worker.input_queue_name());
+    let output_topic = queues
+        .output
+        .unwrap_or_else(|| filter_worker.output_topic_name());
     let survey = input_queue
         .split('_')
         .next()
@@ -1251,7 +1257,6 @@ pub async fn run_filter_worker<T: FilterWorker>(
         );
         count_filtered_alerts(alerts.len(), matched_alerts.len());
 
-        let output_topic = filter_worker.output_topic_name();
         let mut total_enqueued = 0;
         let mut delivery_futures = Vec::new();
         let mut enqueue_error = None;

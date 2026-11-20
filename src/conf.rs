@@ -1069,6 +1069,8 @@ fn default_posthog_consumption_interval_seconds() -> u64 {
 #[derive(Deserialize, Debug, Clone)]
 pub struct WorkerConfig {
     pub n_workers: usize,
+    #[serde(default)]
+    pub lanes: HashMap<String, usize>,
 }
 
 fn default_enrichment_batch_size() -> usize {
@@ -1084,6 +1086,8 @@ pub struct EnrichmentWorkerConfig {
     /// `SameAsRequested`, so this shape must not vary; see `config.yaml` for sizing.
     #[serde(default = "default_enrichment_batch_size")]
     pub batch_size: usize,
+    #[serde(default)]
+    pub lanes: HashMap<String, usize>,
 }
 
 fn default_filter_refresh_interval_minutes() -> u64 {
@@ -1171,6 +1175,8 @@ where
 #[derive(Deserialize, Debug, Clone)]
 pub struct FilterWorkerConfig {
     pub n_workers: usize,
+    #[serde(default)]
+    pub lanes: HashMap<String, usize>,
     #[serde(
         default = "default_filter_refresh_interval_minutes",
         deserialize_with = "deserialize_filter_refresh_interval"
