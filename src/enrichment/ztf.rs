@@ -1107,7 +1107,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             let cutouts = candid_to_cutouts
                 .remove(&candid)
                 .ok_or_else(|| EnrichmentWorkerError::MissingCutouts(candid))?;
-            let (properties, all_bands_properties, programid, lightcurve, ztf_lightcurve) =
+            let (properties, all_bands_properties, programid, fit_lightcurve, ztf_lightcurve) =
                 match Self::alert_properties(&alert, &orbits, &sso_history, &baselines) {
                     Ok(v) => v,
                     // Skip the alert instead of aborting the batch: the queue keeps draining.
@@ -1120,9 +1120,9 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                 };
             #[cfg(feature = "gpu")]
             if self.models.gpu_ctx.is_some() {
-                villar_inputs.push((candid, lightcurve.clone()));
+                villar_inputs.push((candid, fit_lightcurve.clone()));
             }
-            fit_inputs.push(lightcurve);
+            fit_inputs.push(fit_lightcurve);
 
             gp_inputs.push((candid, gp_observations(&alert, &gp_config)));
             work_items.push(AlertWork {
@@ -1787,8 +1787,6 @@ impl ZtfEnrichmentWorker {
             return Err(EnrichmentWorkerError::EmptyLightcurve(alert.candid));
         }
         let (_, all_bands_properties, _) = analyze_photometry(&lightcurve);
-        // cider was trained on ZTF only, so snapshot before the cross-survey extend.
-        let ztf_lightcurve = lightcurve.clone();
         let mut detections: Vec<PhotometryMag> = alert
             .prv_candidates
             .iter()
@@ -1798,6 +1796,7 @@ impl ZtfEnrichmentWorker {
             .collect();
         prepare_photometry(&mut detections);
         let photstats = analyze_photometry(&detections).0;
+        let fit_lightcurve = detections.clone();
         let stationary = is_stationary(
             alert
                 .prv_candidates
@@ -1817,15 +1816,6 @@ impl ZtfEnrichmentWorker {
         let mut has_matches = false;
         if let Some(survey_matches) = &alert.survey_matches {
             if let Some(lsst_match) = &survey_matches.lsst {
-                let lsst_lightcurve: Vec<PhotometryMag> = lsst_match
-                    .prv_candidates
-                    .iter()
-                    .chain(&lsst_match.fp_hists)
-                    .filter(|p| p.jd <= candidate.jd)
-                    .filter_map(|p| p.to_photometry_mag(None))
-                    .collect();
-                lightcurve.extend(lsst_lightcurve);
-                prepare_photometry(&mut lightcurve);
                 detections.extend(
                     lsst_match
                         .prv_candidates
@@ -1931,8 +1921,8 @@ impl ZtfEnrichmentWorker {
             },
             all_bands_properties,
             programid,
+            fit_lightcurve,
             lightcurve,
-            ztf_lightcurve,
         ))
     }
 
@@ -2212,13 +2202,13 @@ impl ZtfEnrichmentWorker {
 pub fn ztf_alert_properties_without_sso(
     alert: &ZtfAlertForEnrichment,
 ) -> Result<(ZtfAlertProperties, Vec<PhotometryMag>), EnrichmentWorkerError> {
-    let (properties, _, _, lightcurve, _) = ZtfEnrichmentWorker::alert_properties(
+    let (properties, _, _, fit_lightcurve, _) = ZtfEnrichmentWorker::alert_properties(
         alert,
         &HashMap::new(),
         &SsoHistory::default(),
         &HashMap::new(),
     )?;
-    Ok((properties, lightcurve))
+    Ok((properties, fit_lightcurve))
 }
 
 #[cfg(test)]
