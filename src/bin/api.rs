@@ -61,6 +61,7 @@ async fn main() -> std::io::Result<()> {
         Survey::Decam,
         Survey::Winter,
         Survey::Askap,
+        Survey::Argus,
     ] {
         let storage = config
             .build_cutout_storage(&survey)

@@ -1,0 +1,613 @@
+{
+  "type": "record",
+  "namespace": "argus.alert",
+  "name": "candidate",
+  "doc": "Argus candidate record, alert schema version 3.0. One per epoch; reused by every history array in argus.alert.",
+  "version": "3.0",
+  "fields": [
+    {
+      "name": "alertId",
+      "type": "string",
+      "doc": "Unique alert identifier, HEALPix-derived (ADR-0027); the same value as the envelope's."
+    },
+    {
+      "name": "obsStartTime",
+      "type": "string",
+      "doc": "Observation/co-addition window start time (DATE-OBS/UTCSTART, ISO)."
+    },
+    {
+      "name": "obsEndTime",
+      "type": "string",
+      "doc": "Observation/co-addition window end time (DATE-OBS/UTCEND, ISO)."
+    },
+    {
+      "name": "obsWeightedMidpoint",
+      "type": "string",
+      "doc": "Midpoint of integration within the observing/co-addition window."
+    },
+    {
+      "name": "integrationTime",
+      "type": "float",
+      "doc": "Total integration time for this candidate [seconds]."
+    },
+    {
+      "name": "coadd",
+      "type": "boolean",
+      "doc": "Bool: is this candidate in a coadd."
+    },
+    {
+      "name": "coaddSpacing",
+      "type": [
+        "null",
+        "long"
+      ],
+      "doc": "Nullable, int64 bit mask representing the co-addition spacing of the next lower hierarchy of coadds.",
+      "default": null
+    },
+    {
+      "name": "filter",
+      "type": "int",
+      "doc": "Filter band ID this source was observed with (1=b; 2=rho)."
+    },
+    {
+      "name": "epochId",
+      "type": "string",
+      "doc": "UUID of the epoch in which this candidate was measured."
+    },
+    {
+      "name": "cameraIds",
+      "type": {
+        "type": "array",
+        "items": "int"
+      },
+      "doc": "List of the ids of all observing cameras."
+    },
+    {
+      "name": "otaIds",
+      "type": {
+        "type": "array",
+        "items": "int"
+      },
+      "doc": "List of the ids of all observing OTAs."
+    },
+    {
+      "name": "filterIds",
+      "type": {
+        "type": "array",
+        "items": "int"
+      },
+      "doc": "List of the ids of all observing filters."
+    },
+    {
+      "name": "focuserIds",
+      "type": {
+        "type": "array",
+        "items": "int"
+      },
+      "doc": "List of the ids of all observing focusers."
+    },
+    {
+      "name": "subarrayIds",
+      "type": {
+        "type": "array",
+        "items": "int"
+      },
+      "doc": "List of the ids of all observing sub-arrays."
+    },
+    {
+      "name": "timestamp",
+      "type": "long",
+      "doc": "Packet build time (Unix milliseconds)."
+    },
+    {
+      "name": "withdrawalTime",
+      "type": [
+        "null",
+        "string"
+      ],
+      "doc": "Nullable, time the candidate was withdrawn (DATE-OBS/UTCSTART, ISO).",
+      "default": null
+    },
+    {
+      "name": "ra",
+      "type": "double",
+      "doc": "Right ascension of the candidate centroid (degrees, J2000)."
+    },
+    {
+      "name": "dec",
+      "type": "double",
+      "doc": "Declination of the candidate centroid (degrees, J2000)."
+    },
+    {
+      "name": "raErr",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "RA uncertainty (arcsec).",
+      "default": null
+    },
+    {
+      "name": "decErr",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "Dec uncertainty (arcsec).",
+      "default": null
+    },
+    {
+      "name": "raDecCovariance",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "Covariance of ra and dec for this candidate.",
+      "default": null
+    },
+    {
+      "name": "x",
+      "type": "float",
+      "doc": "X pixel coordinate of candidate centroid in segment."
+    },
+    {
+      "name": "y",
+      "type": "float",
+      "doc": "Y pixel coordinate of candidate centroid in segment."
+    },
+    {
+      "name": "xErr",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "Uncertainty of X pixel centroid in segment.",
+      "default": null
+    },
+    {
+      "name": "yErr",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "Uncertainty of Y pixel centroid in segment.",
+      "default": null
+    },
+    {
+      "name": "flags",
+      "type": "int",
+      "doc": "Packed quality bitmask: 1=saturated, 2=near-bad-pixel, 4=astrometry-suspect, 8=near-edge."
+    },
+    {
+      "name": "tansegId",
+      "type": "long",
+      "doc": "TAN segment id of the candidate."
+    },
+    {
+      "name": "minipixIdx",
+      "type": [
+        "null",
+        "int"
+      ],
+      "doc": "Minipix local index (0-4095) within the segment.",
+      "default": null
+    },
+    {
+      "name": "healpixId",
+      "type": [
+        "null",
+        "long"
+      ],
+      "doc": "HEALPix pixel (NESTED) at healpixOrder.",
+      "default": null
+    },
+    {
+      "name": "healpixOrder",
+      "type": [
+        "null",
+        "int"
+      ],
+      "doc": "HEALPix order; nside = 2**order.",
+      "default": null
+    },
+    {
+      "name": "numReferenceSources",
+      "type": [
+        "null",
+        "int"
+      ],
+      "doc": "Reference sources used in the WCS solution.",
+      "default": null
+    },
+    {
+      "name": "residualRMS",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "WCS residual RMS (arcsec).",
+      "default": null
+    },
+    {
+      "name": "psfFluxSci",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "Candidate flux from PSF photometry on the unsubtracted science image (electrons).",
+      "default": null
+    },
+    {
+      "name": "psfMagnitudeSci",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "Photometric magnitude from PSF photometry on the unsubtracted science image (AB).",
+      "default": null
+    },
+    {
+      "name": "psfFluxDif",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "Candidate flux from PSF photometry on the subtracted difference image (electrons).",
+      "default": null
+    },
+    {
+      "name": "psfMagnitudeDif",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "Photometric magnitude from PSF photometry on the subtracted difference image (AB).",
+      "default": null
+    },
+    {
+      "name": "psfFluxSciErr",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "Flux uncertainty from PSF photometry on the unsubtracted science image (electrons).",
+      "default": null
+    },
+    {
+      "name": "psfMagnitudeSciErr",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "Magnitude uncertainty from PSF photometry on the unsubtracted science image.",
+      "default": null
+    },
+    {
+      "name": "psfFluxDifErr",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "Flux uncertainty from PSF photometry on the subtracted difference image (electrons).",
+      "default": null
+    },
+    {
+      "name": "psfMagnitudeDifErr",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "Magnitude uncertainty from PSF photometry on the subtracted difference image.",
+      "default": null
+    },
+    {
+      "name": "psfChi2",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "Reduced chi-square of the PSF fit.",
+      "default": null
+    },
+    {
+      "name": "aperFluxSci",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "Candidate flux from aperture photometry on the unsubtracted science image (electrons).",
+      "default": null
+    },
+    {
+      "name": "aperMagnitudeSci",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "Photometric magnitude from aperture photometry on the unsubtracted science image (AB).",
+      "default": null
+    },
+    {
+      "name": "aperFluxDif",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "Candidate flux from aperture photometry on the subtracted difference image (electrons).",
+      "default": null
+    },
+    {
+      "name": "aperMagnitudeDif",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "Photometric magnitude from aperture photometry on the subtracted difference image (AB).",
+      "default": null
+    },
+    {
+      "name": "aperFluxSciErr",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "Flux uncertainty from aperture photometry on the unsubtracted science image (electrons).",
+      "default": null
+    },
+    {
+      "name": "aperMagnitudeSciErr",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "Magnitude uncertainty from aperture photometry on the unsubtracted science image.",
+      "default": null
+    },
+    {
+      "name": "aperFluxDifErr",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "Flux uncertainty from aperture photometry on the subtracted difference image (electrons).",
+      "default": null
+    },
+    {
+      "name": "aperMagnitudeDifErr",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "Magnitude uncertainty from aperture photometry on the subtracted difference image.",
+      "default": null
+    },
+    {
+      "name": "psfSnr",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "Signal-to-noise ratio of the candidate in the difference image using PSF photometry.",
+      "default": null
+    },
+    {
+      "name": "aperSnr",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "Signal-to-noise ratio of the candidate in the difference image using aperture photometry.",
+      "default": null
+    },
+    {
+      "name": "isFluxPositive",
+      "type": "boolean",
+      "doc": "Candidate was detected with significantly positive flux in difference imaging."
+    },
+    {
+      "name": "psfLimMag",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "5-sigma limiting mag in the difference image using PSF photometry.",
+      "default": null
+    },
+    {
+      "name": "aperLimMag",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "5-sigma limiting mag in the difference image using aperture photometry.",
+      "default": null
+    },
+    {
+      "name": "skyBackground",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "Sky background in tan segment.",
+      "default": null
+    },
+    {
+      "name": "psfZeropoint",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "Photometric zeropoint for PSF photometry (mag).",
+      "default": null
+    },
+    {
+      "name": "aperZeropoint",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "Photometric zeropoint for aperture photometry (mag).",
+      "default": null
+    },
+    {
+      "name": "psfZpErr",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "Zeropoint uncertainty for PSF photometry (mag).",
+      "default": null
+    },
+    {
+      "name": "aperZpErr",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "Zeropoint uncertainty for aperture photometry (mag).",
+      "default": null
+    },
+    {
+      "name": "placeholderPhotometricCalibration",
+      "type": [
+        "null",
+        "string"
+      ],
+      "doc": "PLACEHOLDER. Photometric calibration details in alerts is to be determined.",
+      "default": null
+    },
+    {
+      "name": "starGalaxyPlaceholder",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "PLACEHOLDER. Argus star-galaxy score, method to be explored.",
+      "default": null
+    },
+    {
+      "name": "fwhm",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "Measured source FWHM (pixels).",
+      "default": null
+    },
+    {
+      "name": "ellipticity",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "Ellipticity (1 - b/a).",
+      "default": null
+    },
+    {
+      "name": "nPixels",
+      "type": [
+        "null",
+        "int"
+      ],
+      "doc": "Footprint pixel count.",
+      "default": null
+    },
+    {
+      "name": "peak",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "Peak pixel value (electrons).",
+      "default": null
+    },
+    {
+      "name": "psfFwhm",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "PSF model FWHM (pixels; from seeing).",
+      "default": null
+    },
+    {
+      "name": "psfBeta",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "Moffat beta (PSF shape).",
+      "default": null
+    },
+    {
+      "name": "psfOverAp",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "PSF-flux / aperture-flux ratio.",
+      "default": null
+    },
+    {
+      "name": "artefactPlaceholder",
+      "type": [
+        "null",
+        "string"
+      ],
+      "doc": "PLACEHOLDER. Whether artifact characterization will be included in the alerts remains TBD.",
+      "default": null
+    },
+    {
+      "name": "realBogusScore",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "Real/bogus classifier score (0-1, 1=real).",
+      "default": null
+    },
+    {
+      "name": "rbModelVersion",
+      "type": "string",
+      "doc": "Real-bogus model version."
+    },
+    {
+      "name": "realBogusConfidence",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "Model confidence in the score (1 - tree-vote dispersion).",
+      "default": null
+    },
+    {
+      "name": "placeholderCatalogContext",
+      "type": [
+        "null",
+        "string"
+      ],
+      "doc": "PLACEHOLDER. Catalog crossmatching and other alert enrichment will be explored.",
+      "default": null
+    },
+    {
+      "name": "referenceId",
+      "type": "long",
+      "doc": "TansegID for the reference patch used to generate the difference image."
+    },
+    {
+      "name": "referenceStart",
+      "type": "double",
+      "doc": "Observation Julian date of earliest exposure used to generate the reference patch used for difference imaging [days]."
+    },
+    {
+      "name": "referenceEnd",
+      "type": "double",
+      "doc": "Observation Julian date of latest exposure used to generate the reference patch used for difference imaging [days]."
+    },
+    {
+      "name": "referenceDepth",
+      "type": "float",
+      "doc": "Depth (AB mag) of the Argus reference in the observed band at the location of the candidate."
+    }
+  ]
+}

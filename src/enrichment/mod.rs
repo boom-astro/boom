@@ -1,3 +1,4 @@
+mod argus;
 mod askap;
 pub mod babamul;
 mod base;
@@ -7,6 +8,7 @@ pub mod models;
 pub mod version;
 mod winter;
 mod ztf;
+pub use argus::{ArgusAlertProperties, ArgusEnrichmentWorker, ArgusPhotstats};
 pub use askap::{AskapAlertProperties, AskapEnrichmentWorker};
 pub use base::{fetch_alerts, run_enrichment_worker, EnrichmentWorker, EnrichmentWorkerError};
 pub use decam::{
@@ -25,5 +27,5 @@ pub use ztf::{
     create_ztf_alert_pipeline, deserialize_ztf_alert_lightcurve, deserialize_ztf_forced_lightcurve,
     ztf_alert_properties_without_sso, ZtfAlertClassifications, ZtfAlertForEnrichment,
     ZtfAlertProperties, ZtfEnrichmentWorker, ZtfForcedPhotometry, ZtfMatch, ZtfPhotometry,
-    ZtfSsoAssociation, ZtfSurveyMatches,
+    ZtfSsoAssociation, ZtfSubsetWorker, ZtfSurveyMatches,
 };

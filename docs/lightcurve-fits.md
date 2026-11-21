@@ -7,10 +7,10 @@ evolution under `thermal_fit`. Like [`villar_fit`](villar-fit.md), they are
 stored per alert, from the light curve as it stood at that alert's epoch, and
 filters can use them.
 
-Both fits use the light curve the Villar fit uses (ZTF detections and forced
-photometry up to the alert, plus the photometry of the matched LSST object),
-restricted to the points from 50 days before to 100 days after its brightest
-point. Alerts enriched before these fits were added have neither key.
+Both fits use the light curve the Villar fit uses (the alert's ZTF detections
+and forced photometry up to its epoch, without negative-flux detections or
+LSST points), restricted to the points from 50 days before to 100 days after
+its brightest point. Alerts enriched before these fits were added have neither key.
 
 ## `arnett_fit`
 

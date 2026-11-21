@@ -376,6 +376,21 @@ impl CredibleVolumeIndex {
         let dpdv = skymap.pixel_dpdv(row, d_mpc)?;
         Some(self.searched_prob_vol(dpdv))
     }
+
+    pub fn best_searched_prob_vol_between(
+        &self,
+        skymap: &LIGO3dskymap,
+        ra_deg: f64,
+        dec_deg: f64,
+        d_low_mpc: f64,
+        d_high_mpc: f64,
+    ) -> Option<f64> {
+        let row = skymap.ang2pix(ra_deg, dec_deg)?;
+        let (mu, _, _) = skymap.dist_params(row)?;
+        // dP/dV along the line of sight peaks at DISTMU.
+        let dpdv = skymap.pixel_dpdv(row, mu.max(d_low_mpc).min(d_high_mpc))?;
+        Some(self.searched_prob_vol(dpdv))
+    }
 }
 
 /// Deliberately an over-approximation: callers must still run `searched_prob_vol_at`.

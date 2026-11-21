@@ -30,6 +30,8 @@ pub enum Survey {
     Winter,
     #[serde(alias = "askap")]
     Askap,
+    #[serde(alias = "argus")]
+    Argus,
 }
 
 impl Survey {
@@ -40,6 +42,7 @@ impl Survey {
             Survey::Decam => "DECAM",
             Survey::Winter => "WINTER",
             Survey::Askap => "ASKAP",
+            Survey::Argus => "ARGUS",
         }
     }
 
@@ -52,6 +55,7 @@ impl Survey {
             Survey::Ztf | Survey::Winter => Tz::America__Los_Angeles,
             Survey::Lsst | Survey::Decam => Tz::America__Santiago,
             Survey::Askap => Tz::Australia__Perth,
+            Survey::Argus => Tz::America__Chicago,
         }
     }
 
@@ -119,6 +123,8 @@ mod tests {
             (Survey::Lsst, (2026, 7, 1), 16),
             (Survey::Decam, (2026, 9, 6), 15),
             (Survey::Decam, (2026, 12, 1), 15),
+            (Survey::Argus, (2026, 1, 15), 18),
+            (Survey::Argus, (2026, 7, 1), 17),
         ] {
             let date = NaiveDate::from_ymd_opt(y, m, d).unwrap();
             let expected = Utc.with_ymd_and_hms(y, m, d, utc_hour, 0, 0).unwrap();

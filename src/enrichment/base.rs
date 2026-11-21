@@ -11,7 +11,7 @@ use crate::{
         retry::{
             is_transient_redis_error, retry_transient, DEFAULT_BASE_BACKOFF, DEFAULT_MAX_RETRIES,
         },
-        worker::{should_terminate, WorkerCmd},
+        worker::{should_terminate, WorkerCmd, WorkerQueues},
     },
 };
 
@@ -123,7 +123,7 @@ pub trait EnrichmentWorker {
     /// Forcibly disable Babamul on this worker, regardless of config.
     fn disable_babamul(&mut self);
 
-    fn write_only_properties(&mut self, _keys: Vec<String>) -> bool {
+    fn write_only(&mut self, _properties: Vec<String>, _gp_fit: bool) -> bool {
         false
     }
 
@@ -183,6 +183,7 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker + Send>(
     config_path: &str,
     worker_id: Uuid,
     shared_models: Option<Arc<SharedModels>>,
+    queues: WorkerQueues,
 ) -> Result<(), EnrichmentWorkerError> {
     debug!(?config_path);
     let mut enrichment_worker = T::new(config_path, shared_models).await?;
@@ -197,8 +198,12 @@ pub async fn run_enrichment_worker<T: EnrichmentWorker + Send>(
     let con = config.build_redis().await?;
     let stats_db = config.build_db().await?;
 
-    let input_queue = enrichment_worker.input_queue_name();
-    let output_queue = enrichment_worker.output_queue_name();
+    let input_queue = queues
+        .input
+        .unwrap_or_else(|| enrichment_worker.input_queue_name());
+    let output_queue = queues
+        .output
+        .unwrap_or_else(|| enrichment_worker.output_queue_name());
     let survey = input_queue
         .split('_')
         .next()

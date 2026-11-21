@@ -82,6 +82,7 @@ pub async fn get_cutouts(
         let (brightness_field, brightest_order) = match survey {
             Survey::Decam => ("candidate.magap", 1),
             Survey::Askap => ("candidate.flux_peak", -1),
+            Survey::Argus => ("candidate.psfMagnitudeDif", 1),
             _ => ("candidate.magpsf", 1),
         };
         let find_options = match which {

@@ -2,8 +2,8 @@ use crate::{
     api::{catalogs::WATCHLIST_PREFIX, filters::joined_collections},
     conf::{self, AppConfig},
     filter::{
-        build_askap_filter_pipeline, build_decam_filter_pipeline, build_lsst_filter_pipeline,
-        build_winter_filter_pipeline, build_ztf_filter_pipeline,
+        build_argus_filter_pipeline, build_askap_filter_pipeline, build_decam_filter_pipeline,
+        build_lsst_filter_pipeline, build_winter_filter_pipeline, build_ztf_filter_pipeline,
     },
     scheduler::{count_filtered_alerts, record_kafka_alert_published, record_worker_retry},
     utils::{
@@ -14,7 +14,7 @@ use crate::{
         retry::{
             is_transient_redis_error, retry_transient, DEFAULT_BASE_BACKOFF, DEFAULT_MAX_RETRIES,
         },
-        worker::{should_terminate, WorkerCmd},
+        worker::{should_terminate, WorkerCmd, WorkerQueues},
     },
 };
 
@@ -439,6 +439,7 @@ fn candidate_fields(survey: &Survey) -> std::collections::HashSet<String> {
         Survey::Winter => crate::alert::WinterCandidate::get_schema(),
         Survey::Decam => crate::alert::DecamCandidate::get_schema(),
         Survey::Askap => crate::alert::AskapCandidate::get_schema(),
+        Survey::Argus => return crate::alert::argus_candidate_fields(),
     };
     match schema {
         Schema::Record(record) => record.fields.iter().map(|f| f.name.clone()).collect(),
@@ -876,6 +877,7 @@ pub async fn build_filter_pipeline(
         Survey::Decam => build_decam_filter_pipeline(pipeline, permissions).await?,
         Survey::Winter => build_winter_filter_pipeline(pipeline, permissions).await?,
         Survey::Askap => build_askap_filter_pipeline(pipeline, permissions).await?,
+        Survey::Argus => build_argus_filter_pipeline(pipeline, permissions).await?,
     };
     Ok(pipeline)
 }
@@ -1099,6 +1101,7 @@ pub async fn run_filter_worker<T: FilterWorker>(
     mut receiver: mpsc::Receiver<WorkerCmd>,
     config_path: &str,
     worker_id: Uuid,
+    queues: WorkerQueues,
 ) -> Result<(), FilterWorkerError> {
     debug!(?config_path);
 
@@ -1114,7 +1117,12 @@ pub async fn run_filter_worker<T: FilterWorker>(
     // in a never ending loop, loop over the queues
     let con = config.build_redis().await?;
 
-    let input_queue = filter_worker.input_queue_name();
+    let input_queue = queues
+        .input
+        .unwrap_or_else(|| filter_worker.input_queue_name());
+    let output_topic = queues
+        .output
+        .unwrap_or_else(|| filter_worker.output_topic_name());
     let survey = input_queue
         .split('_')
         .next()
@@ -1251,7 +1259,6 @@ pub async fn run_filter_worker<T: FilterWorker>(
         );
         count_filtered_alerts(alerts.len(), matched_alerts.len());
 
-        let output_topic = filter_worker.output_topic_name();
         let mut total_enqueued = 0;
         let mut delivery_futures = Vec::new();
         let mut enqueue_error = None;
@@ -1382,6 +1389,7 @@ mod tests {
             objtype: Some("G".to_string()),
             size_is_isophotal: true,
             orientation_is_nominal: false,
+            rex_snr_band: None,
             ra: 197.448,
             dec: -23.384,
             sep_arcsec: 10.6,

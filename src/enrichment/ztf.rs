@@ -627,6 +627,16 @@ pub struct ZtfSsoAssociation {
     /// Perihelion passage, JD. Per detection because a refreshed orbit moves it.
     #[serde(default)]
     pub perihelion_time: Option<f64>,
+    #[serde(default)]
+    pub a: Option<f32>,
+    #[serde(default)]
+    pub e: Option<f32>,
+    #[serde(default)]
+    pub incl: Option<f32>,
+    #[serde(default)]
+    pub q: Option<f32>,
+    #[serde(default)]
+    pub tisserand_jupiter: Option<f32>,
 }
 
 impl ZtfSsoAssociation {
@@ -648,6 +658,11 @@ impl ZtfSsoAssociation {
             phase_angle: None,
             true_anomaly: None,
             perihelion_time: None,
+            a: None,
+            e: None,
+            incl: None,
+            q: None,
+            tisserand_jupiter: None,
         }
     }
 
@@ -659,6 +674,11 @@ impl ZtfSsoAssociation {
             self.phase_angle = Some(geometry.phase_angle as f32);
             self.true_anomaly = Some(geometry.true_anomaly as f32);
             self.perihelion_time = Some(geometry.perihelion_time);
+            self.a = (elements.e < 1.0).then_some(elements.a as f32);
+            self.e = Some(elements.e as f32);
+            self.incl = Some(elements.incl as f32);
+            self.q = Some(elements.q as f32);
+            self.tisserand_jupiter = elements.tisserand_jupiter().map(|t| t as f32);
         }
         self
     }
@@ -1068,9 +1088,9 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
 
         // Independent reads: awaiting them in turn pays each round trip.
         let (orbits, sso_history, baselines) = tokio::join!(
-            self.fetch_orbits(&alerts),
-            self.fetch_sso_history(&alerts),
-            self.fetch_baselines(&alerts),
+            Self::fetch_orbits(&self.mpc_orbits, &alerts),
+            Self::fetch_sso_history(&self.alert_collection, &alerts),
+            Self::fetch_baselines(&self.sso_baselines, &alerts),
         );
 
         let batch_size = alerts.len();
@@ -1087,7 +1107,7 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             let cutouts = candid_to_cutouts
                 .remove(&candid)
                 .ok_or_else(|| EnrichmentWorkerError::MissingCutouts(candid))?;
-            let (properties, all_bands_properties, programid, lightcurve, ztf_lightcurve) =
+            let (properties, all_bands_properties, programid, fit_lightcurve, ztf_lightcurve) =
                 match Self::alert_properties(&alert, &orbits, &sso_history, &baselines) {
                     Ok(v) => v,
                     // Skip the alert instead of aborting the batch: the queue keeps draining.
@@ -1100,9 +1120,9 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
                 };
             #[cfg(feature = "gpu")]
             if self.models.gpu_ctx.is_some() {
-                villar_inputs.push((candid, lightcurve.clone()));
+                villar_inputs.push((candid, fit_lightcurve.clone()));
             }
-            fit_inputs.push(lightcurve);
+            fit_inputs.push(fit_lightcurve);
 
             gp_inputs.push((candid, gp_observations(&alert, &gp_config)));
             work_items.push(AlertWork {
@@ -1323,10 +1343,148 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
     }
 }
 
+/// Leaves `enrichment_set` alone: the classifications it stamps are not recomputed.
+pub struct ZtfSubsetWorker {
+    client: mongodb::Client,
+    alert_collection: Collection<Document>,
+    mpc_orbits: Collection<Document>,
+    sso_baselines: Collection<Document>,
+    alert_pipeline: Vec<Document>,
+    properties: Vec<String>,
+    gp_fit: bool,
+}
+
+#[async_trait::async_trait]
+impl EnrichmentWorker for ZtfSubsetWorker {
+    #[instrument(skip(_shared_models), err)]
+    async fn new(
+        config_path: &str,
+        _shared_models: Option<Arc<SharedModels>>,
+    ) -> Result<Self, EnrichmentWorkerError> {
+        let config = AppConfig::from_path(config_path)?;
+        let db: Database = config.build_db().await?;
+        Ok(ZtfSubsetWorker {
+            client: db.client().clone(),
+            alert_collection: db.collection("ZTF_alerts"),
+            mpc_orbits: db.collection(ORBITS_COLLECTION),
+            sso_baselines: db.collection(BASELINES_COLLECTION),
+            alert_pipeline: add_decam_match(create_ztf_alert_pipeline(false)),
+            properties: Vec::new(),
+            gp_fit: false,
+        })
+    }
+
+    fn survey() -> Survey {
+        Survey::Ztf
+    }
+
+    fn disable_babamul(&mut self) {}
+
+    fn write_only(&mut self, properties: Vec<String>, gp_fit: bool) -> bool {
+        self.properties = properties;
+        self.gp_fit = gp_fit;
+        true
+    }
+
+    fn input_queue_name(&self) -> String {
+        "ZTF_alerts_enrichment_queue".to_string()
+    }
+
+    fn output_queue_name(&self) -> String {
+        "ZTF_alerts_filter_queue".to_string()
+    }
+
+    #[instrument(skip_all, err)]
+    async fn process_alerts(
+        &mut self,
+        candids: &[i64],
+    ) -> Result<Vec<String>, EnrichmentWorkerError> {
+        let alerts: Vec<ZtfAlertForEnrichment> =
+            fetch_alerts(candids, &self.alert_pipeline, &self.alert_collection).await?;
+        if alerts.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let gp_task = self.gp_fit.then(|| {
+            let gp_config = gp_fit::gp_config();
+            let inputs: Vec<(i64, Vec<rust_gp::Obs>)> = alerts
+                .iter()
+                .map(|alert| (alert.candid, gp_observations(alert, &gp_config)))
+                .collect();
+            tokio::task::spawn_blocking(move || gp_fit::fit_many(&inputs, &gp_config))
+        });
+
+        let (orbits, sso_history, baselines) = if self.properties.is_empty() {
+            Default::default()
+        } else {
+            tokio::join!(
+                ZtfEnrichmentWorker::fetch_orbits(&self.mpc_orbits, &alerts),
+                ZtfEnrichmentWorker::fetch_sso_history(&self.alert_collection, &alerts),
+                ZtfEnrichmentWorker::fetch_baselines(&self.sso_baselines, &alerts),
+            )
+        };
+
+        let mut gp_fits = match gp_task {
+            Some(task) => task
+                .await
+                .inspect_err(|e| warn!("GP fitting failed for the whole batch: {}", e))
+                .ok()
+                .map(Vec::into_iter),
+            None => None,
+        };
+
+        let now = flare::Time::now().to_jd();
+        let mut updates = Vec::with_capacity(alerts.len());
+        let mut processed_alerts = Vec::with_capacity(alerts.len());
+        for alert in &alerts {
+            let mut set_doc = Document::new();
+            if !self.properties.is_empty() {
+                match ZtfEnrichmentWorker::alert_properties(
+                    alert,
+                    &orbits,
+                    &sso_history,
+                    &baselines,
+                ) {
+                    Ok((properties, ..)) => {
+                        let properties = mongify(&properties);
+                        for key in &self.properties {
+                            if let Some(value) = properties.get(key) {
+                                set_doc.insert(format!("properties.{key}"), value.clone());
+                            }
+                        }
+                    }
+                    Err(EnrichmentWorkerError::EmptyLightcurve(_)) => {}
+                    Err(e) => return Err(e),
+                }
+            }
+            if let Some(fit) = gp_fits.as_mut().and_then(Iterator::next) {
+                set_doc.insert("gp_fit", fit);
+            }
+            if set_doc.is_empty() {
+                continue;
+            }
+            set_doc.insert("updated_at", now);
+            updates.push(WriteModel::UpdateOne(
+                UpdateOneModel::builder()
+                    .namespace(self.alert_collection.namespace())
+                    .filter(doc! { "_id": alert.candid })
+                    .update(doc! { "$set": set_doc })
+                    .build(),
+            ));
+            processed_alerts.push(alert.candid.to_string());
+        }
+
+        if !updates.is_empty() {
+            self.client.bulk_write(updates).await?;
+        }
+        Ok(processed_alerts)
+    }
+}
+
 impl ZtfEnrichmentWorker {
     /// Keyed by `ssnamenr` as the alert carries it, not by the MPCORB key.
     async fn fetch_orbits(
-        &self,
+        mpc_orbits: &Collection<Document>,
         alerts: &[ZtfAlertForEnrichment],
     ) -> HashMap<String, OrbitalElements> {
         let key_by_name: HashMap<&str, String> = alerts
@@ -1348,7 +1506,7 @@ impl ZtfEnrichmentWorker {
             .into_iter()
             .collect();
 
-        let cursor = match self.mpc_orbits.find(doc! { "_id": { "$in": &keys } }).await {
+        let cursor = match mpc_orbits.find(doc! { "_id": { "$in": &keys } }).await {
             Ok(cursor) => cursor,
             Err(e) => {
                 warn!("failed to query {}: {}", ORBITS_COLLECTION, e);
@@ -1371,8 +1529,7 @@ impl ZtfEnrichmentWorker {
 
         // An empty catalogue looks like every object missing, so say which it is.
         if by_key.is_empty() {
-            let catalogue_empty = self
-                .mpc_orbits
+            let catalogue_empty = mpc_orbits
                 .estimated_document_count()
                 .await
                 .is_ok_and(|count| count == 0);
@@ -1398,7 +1555,7 @@ impl ZtfEnrichmentWorker {
     /// One `$in` per batch, for the same reason `fetch_orbits` batches. An object
     /// with no entry is scored against its window alone.
     async fn fetch_baselines(
-        &self,
+        sso_baselines: &Collection<Document>,
         alerts: &[ZtfAlertForEnrichment],
     ) -> HashMap<String, HashMap<u8, PhaseCurve>> {
         let names: Vec<&str> = alerts
@@ -1412,11 +1569,7 @@ impl ZtfEnrichmentWorker {
             return HashMap::new();
         }
 
-        let cursor = match self
-            .sso_baselines
-            .find(doc! { "_id": { "$in": &names } })
-            .await
-        {
+        let cursor = match sso_baselines.find(doc! { "_id": { "$in": &names } }).await {
             Ok(cursor) => cursor,
             Err(e) => {
                 warn!("failed to query {}: {}", BASELINES_COLLECTION, e);
@@ -1450,7 +1603,10 @@ impl ZtfEnrichmentWorker {
     /// cannot place one whose distances are unknown.
     ///
     /// A failure is not fatal, matching `fetch_orbits`.
-    async fn fetch_sso_history(&self, alerts: &[ZtfAlertForEnrichment]) -> SsoHistory {
+    async fn fetch_sso_history(
+        alert_collection: &Collection<Document>,
+        alerts: &[ZtfAlertForEnrichment],
+    ) -> SsoHistory {
         let names: Vec<&str> = alerts
             .iter()
             .filter_map(|a| a.candidate.candidate.ssnamenr.as_deref())
@@ -1494,12 +1650,7 @@ impl ZtfEnrichmentWorker {
             "properties.sso.phase_angle": 1,
         };
 
-        let cursor = match self
-            .alert_collection
-            .find(filter)
-            .projection(projection)
-            .await
-        {
+        let cursor = match alert_collection.find(filter).projection(projection).await {
             Ok(cursor) => cursor,
             Err(e) => {
                 warn!("failed to query solar system history: {}", e);
@@ -1636,8 +1787,6 @@ impl ZtfEnrichmentWorker {
             return Err(EnrichmentWorkerError::EmptyLightcurve(alert.candid));
         }
         let (_, all_bands_properties, _) = analyze_photometry(&lightcurve);
-        // cider was trained on ZTF only, so snapshot before the cross-survey extend.
-        let ztf_lightcurve = lightcurve.clone();
         let mut detections: Vec<PhotometryMag> = alert
             .prv_candidates
             .iter()
@@ -1647,6 +1796,7 @@ impl ZtfEnrichmentWorker {
             .collect();
         prepare_photometry(&mut detections);
         let photstats = analyze_photometry(&detections).0;
+        let fit_lightcurve = detections.clone();
         let stationary = is_stationary(
             alert
                 .prv_candidates
@@ -1666,15 +1816,6 @@ impl ZtfEnrichmentWorker {
         let mut has_matches = false;
         if let Some(survey_matches) = &alert.survey_matches {
             if let Some(lsst_match) = &survey_matches.lsst {
-                let lsst_lightcurve: Vec<PhotometryMag> = lsst_match
-                    .prv_candidates
-                    .iter()
-                    .chain(&lsst_match.fp_hists)
-                    .filter(|p| p.jd <= candidate.jd)
-                    .filter_map(|p| p.to_photometry_mag(None))
-                    .collect();
-                lightcurve.extend(lsst_lightcurve);
-                prepare_photometry(&mut lightcurve);
                 detections.extend(
                     lsst_match
                         .prv_candidates
@@ -1780,8 +1921,8 @@ impl ZtfEnrichmentWorker {
             },
             all_bands_properties,
             programid,
+            fit_lightcurve,
             lightcurve,
-            ztf_lightcurve,
         ))
     }
 
@@ -2061,13 +2202,13 @@ impl ZtfEnrichmentWorker {
 pub fn ztf_alert_properties_without_sso(
     alert: &ZtfAlertForEnrichment,
 ) -> Result<(ZtfAlertProperties, Vec<PhotometryMag>), EnrichmentWorkerError> {
-    let (properties, _, _, lightcurve, _) = ZtfEnrichmentWorker::alert_properties(
+    let (properties, _, _, fit_lightcurve, _) = ZtfEnrichmentWorker::alert_properties(
         alert,
         &HashMap::new(),
         &SsoHistory::default(),
         &HashMap::new(),
     )?;
-    Ok((properties, lightcurve))
+    Ok((properties, fit_lightcurve))
 }
 
 #[cfg(test)]
@@ -2254,6 +2395,8 @@ mod tests {
             "topocentric distance was {topo}"
         );
         assert!((phase - 17.6824).abs() < 0.01, "phase angle was {phase}");
+        let tisserand = sso.tisserand_jupiter.expect("Tisserand parameter");
+        assert!((tisserand - 3.310).abs() < 1e-3, "T_J was {tisserand}");
     }
 
     // A default would be indistinguishable from a real measurement downstream.

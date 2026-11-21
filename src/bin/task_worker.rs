@@ -33,8 +33,8 @@ use tracing::{error, info, warn};
 /// keeps the claim query down to a handful of indexed lookups a minute.
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
 
-/// Renew well inside the lease so a slow round trip does not cost us the run.
-const HEARTBEAT_INTERVAL: Duration = Duration::from_secs((queue::LEASE_SECONDS / 3.0) as u64);
+/// Also how often a cancellation request is noticed, so kept well under the lease.
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(20);
 
 #[derive(Parser)]
 #[command(about = "Claim and run queued BOOM tasks")]

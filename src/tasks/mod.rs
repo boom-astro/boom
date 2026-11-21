@@ -48,6 +48,7 @@ pub mod link_tracks;
 pub mod migrate_fp_flux;
 pub mod migrate_snr;
 pub mod migrate_ztf_flux;
+pub mod move_ztf_bogus;
 pub mod mpcorb_ingest;
 pub mod prepare_catalog;
 pub mod propagate_orbits;
@@ -108,12 +109,13 @@ pub enum TaskType {
     MigrateSnr,
     MigrateFpFlux,
     MigrateZtfFlux,
+    MoveZtfBogus,
     TnsSync,
     TnsPhotometry,
 }
 
 impl TaskType {
-    pub const ALL: [TaskType; 21] = [
+    pub const ALL: [TaskType; 22] = [
         Self::CatalogIngest,
         Self::StreamKowalskiAlerts,
         Self::CopyCutouts,
@@ -133,6 +135,7 @@ impl TaskType {
         Self::MigrateSnr,
         Self::MigrateFpFlux,
         Self::MigrateZtfFlux,
+        Self::MoveZtfBogus,
         Self::TnsSync,
         Self::TnsPhotometry,
     ];
@@ -158,6 +161,7 @@ impl TaskType {
             Self::MigrateSnr => migrate_snr::TASK_TYPE,
             Self::MigrateFpFlux => migrate_fp_flux::TASK_TYPE,
             Self::MigrateZtfFlux => migrate_ztf_flux::TASK_TYPE,
+            Self::MoveZtfBogus => move_ztf_bogus::TASK_TYPE,
             Self::TnsSync => tns_sync::TASK_TYPE,
             Self::TnsPhotometry => tns_photometry::TASK_TYPE,
         }
@@ -475,6 +479,20 @@ pub const TASKS: &[TaskSpec] = &[
         params_schema: || schema_of::<migrate_ztf_flux::MigrateZtfFluxParams>(),
     },
     TaskSpec {
+        id: move_ztf_bogus::TASK_TYPE,
+        title: "Move clearly bogus ZTF objects out of the main collections",
+        description: "Move ZTF objects whose every detection has a drb below max_drb and is \
+                      older than min_age_days, with no known solar system object nearby, no \
+                      TNS match and no counterpart in another survey, together with their \
+                      alerts, to ZTF_alerts_aux_bogus and ZTF_alerts_bogus. Backfills and the \
+                      API no longer see them; cutouts stay where they are. An object that is \
+                      detected again later starts a new record from its alert history. Run \
+                      with dry_run first.",
+        idempotent: true,
+        destructive: true,
+        params_schema: || schema_of::<move_ztf_bogus::MoveZtfBogusParams>(),
+    },
+    TaskSpec {
         id: tns_sync::TASK_TYPE,
         title: "Sync the TNS collection",
         description: "Upsert TNS from the public objects files: the full file once it is \
@@ -607,6 +625,11 @@ pub fn validate_params(task_type: &str, params: &serde_json::Value) -> Result<()
                     .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
             parsed.validate_params().map_err(TaskError::InvalidParams)
         }
+        move_ztf_bogus::TASK_TYPE => {
+            let parsed: move_ztf_bogus::MoveZtfBogusParams = serde_json::from_value(params.clone())
+                .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            parsed.validate_params().map_err(TaskError::InvalidParams)
+        }
         export_catalog::TASK_TYPE => {
             let parsed: export_catalog::ExportCatalogParams =
                 serde_json::from_value(params.clone())
@@ -678,6 +701,7 @@ pub fn single_flight_key(
         // rewrite the same documents with the same pipeline, wasting a large
         // amount of write throughput for no benefit.
         migrate_fp_flux::TASK_TYPE | migrate_ztf_flux::TASK_TYPE => Some(doc! {}),
+        move_ztf_bogus::TASK_TYPE => Some(doc! {}),
         // Two imports into one BOOM would duplicate the whole stream's work,
         // and the destination is always the deployment this runs in, so there
         // is nothing to key on: one import at a time.
@@ -900,6 +924,11 @@ pub async fn dispatch(
             let params = migrate_ztf_flux::MigrateZtfFluxParams::deserialize(params)
                 .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
             migrate_ztf_flux::run(ctx, params).await
+        }
+        move_ztf_bogus::TASK_TYPE => {
+            let params = move_ztf_bogus::MoveZtfBogusParams::deserialize(params)
+                .map_err(|e| TaskError::InvalidParams(e.to_string()))?;
+            move_ztf_bogus::run(ctx, params).await
         }
         tns_sync::TASK_TYPE => {
             let params = tns_sync::TnsSyncParams::deserialize(params)

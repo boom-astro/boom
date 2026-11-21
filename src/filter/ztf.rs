@@ -695,6 +695,7 @@ pub async fn build_ztf_filter_pipeline(
                 "villar_fit": 1,
                 "arnett_fit": 1,
                 "thermal_fit": 1,
+                "gp_fit": 1,
                 "track": 1,
                 // The threshold a forced epoch had to clear for `isdiffpos` and
                 // `snr_psf` to be set, so a filter can say so rather than

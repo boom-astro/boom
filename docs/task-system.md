@@ -143,7 +143,7 @@ the pipeline.
 ## Leases, and surviving a deploy
 
 A claimed run carries `lease_expires_at`, renewed by the worker's heartbeat
-every 20 seconds against a 60-second lease. Two things use it:
+every 20 seconds against a five-minute lease. Two things use it:
 
 - **A worker shutting down cleanly** (SIGTERM, i.e. a deploy) sets the running
   task's cancellation flag, waits for it to stop at its next safe point, and
@@ -190,7 +190,8 @@ later.
 | --- | --- |
 | `catalog_ingest` | Download an archival catalog and insert it. See [catalogs.md](./catalogs.md). |
 | `migrate_fp_flux` | Recompute ZTF forced-photometry flux in `ZTF_alerts_aux` at a fixed zeropoint. |
-| `migrate_ztf_flux` | Recompute every ZTF flux (alerts, detections, non-detections, forced photometry) in nJy. |
+| `migrate_ztf_flux` | Recompute every ZTF flux (alerts, detections, non-detections, forced photometry) in nJy. `resume` restarts after the last `_id` a stopped run reported. |
+| `move_ztf_bogus` | Move ZTF objects whose every detection has a drb below `max_drb` (0.01) and is older than `min_age_days` (30), with no known solar system object, TNS match or counterpart in another survey, and their alerts, to `ZTF_alerts_aux_bogus` and `ZTF_alerts_bogus`. Cutouts stay. Run with `dry_run` first. |
 | `migrate_snr` | Recompute `snr_psf`, `snr_ap` and ZTF `apFlux` across alerts and lightcurves. |
 | `reprocess_crossmatch` | Fill in or refresh crossmatches on a survey's `alerts_aux` records, or with `remove` unset a dropped catalog's matches. |
 | `prepare_catalog` | Add spatial fields and a 2dsphere index to a hand-imported collection. |

@@ -1,0 +1,315 @@
+{
+  "type": "record",
+  "namespace": "argus.alert",
+  "name": "eventAssociation",
+  "doc": "Metadata and (depending on cadence) photometric history of the event associated with this candidate.",
+  "version": "3.0",
+  "fields": [
+    {
+      "name": "eventId",
+      "type": "string",
+      "doc": "Unique event identifier (UUID)."
+    },
+    {
+      "name": "eventRa",
+      "type": "double",
+      "doc": "Right ascension of the associated event, distinct from the per-detection candidate position (degrees, J2000)."
+    },
+    {
+      "name": "eventRaErr",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "RA uncertainty of the associated event position (arcsec).",
+      "default": null
+    },
+    {
+      "name": "eventDec",
+      "type": "double",
+      "doc": "Declination of the associated event, distinct from the per-detection candidate position (degrees, J2000)."
+    },
+    {
+      "name": "eventDecErr",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "Dec uncertainty of the associated event position (arcsec).",
+      "default": null
+    },
+    {
+      "name": "summaryStart",
+      "type": [
+        "null",
+        "string"
+      ],
+      "doc": "The start time from which sidereal association fields were generated.",
+      "default": null
+    },
+    {
+      "name": "firstDetection",
+      "type": [
+        "null",
+        "long"
+      ],
+      "doc": "Epoch of the first candidate ever associated with this event, at any cadence.",
+      "default": null
+    },
+    {
+      "name": "mostRecentDetectionAtCadence",
+      "type": [
+        "null",
+        "long"
+      ],
+      "doc": "The epoch of the most recent candidate associated with this event at the same cadence as this candidate in Argus photometric history.",
+      "default": null
+    },
+    {
+      "name": "numDetectionAtThisCadence",
+      "type": [
+        "null",
+        "long"
+      ],
+      "doc": "The number of candidates associated with this event at the same cadence as this candidate in Argus photometric history.",
+      "default": null
+    },
+    {
+      "name": "numDetectionBaseCadence",
+      "type": [
+        "null",
+        "long"
+      ],
+      "doc": "The number of candidates associated with this event at 15-minute cadence in Argus photometric history.",
+      "default": null
+    },
+    {
+      "name": "betaPsfFluxMean",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "The mean beta-band PSF-fit flux over all base-cadence candidates associated with this event in Argus photometric history.",
+      "default": null
+    },
+    {
+      "name": "betaPsfFluxMin",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "The minimum beta-band PSF-fit flux over all base-cadence candidates associated with this event in Argus photometric history.",
+      "default": null
+    },
+    {
+      "name": "betaPsfFluxMax",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "The maximum beta-band PSF-fit flux over all base-cadence candidates associated with this event in Argus photometric history.",
+      "default": null
+    },
+    {
+      "name": "betaPsfFluxSlopeBeforeMax",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "The slope of beta-band PSF-fit flux with time over the base-cadence candidates preceding betaPsfFluxMax in Argus photometric history.",
+      "default": null
+    },
+    {
+      "name": "betaPsfFluxSlopeAfterMax",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "The slope of beta-band PSF-fit flux with time over the base-cadence candidates following betaPsfFluxMax in Argus photometric history.",
+      "default": null
+    },
+    {
+      "name": "betaApFluxMean",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "The mean beta-band aperture flux over all base-cadence candidates associated with this event in Argus photometric history.",
+      "default": null
+    },
+    {
+      "name": "betaApFluxMin",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "The minimum beta-band aperture flux over all base-cadence candidates associated with this event in Argus photometric history.",
+      "default": null
+    },
+    {
+      "name": "betaApFluxMax",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "The maximum beta-band aperture flux over all base-cadence candidates associated with this event in Argus photometric history.",
+      "default": null
+    },
+    {
+      "name": "betaApFluxSlopeBeforeMax",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "The slope of beta-band aperture flux with time over the base-cadence candidates preceding betaApFluxMax in Argus photometric history.",
+      "default": null
+    },
+    {
+      "name": "betaApFluxSlopeAfterMax",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "The slope of beta-band aperture flux with time over the base-cadence candidates following betaApFluxMax in Argus photometric history.",
+      "default": null
+    },
+    {
+      "name": "rhoPsfFluxMean",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "The mean rho-band PSF-fit flux over all base-cadence candidates associated with this event in Argus photometric history.",
+      "default": null
+    },
+    {
+      "name": "rhoPsfFluxMin",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "The minimum rho-band PSF-fit flux over all base-cadence candidates associated with this event in Argus photometric history.",
+      "default": null
+    },
+    {
+      "name": "rhoPsfFluxMax",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "The maximum rho-band PSF-fit flux over all base-cadence candidates associated with this event in Argus photometric history.",
+      "default": null
+    },
+    {
+      "name": "rhoPsfFluxSlopeBeforeMax",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "The slope of rho-band PSF-fit flux with time over the base-cadence candidates preceding rhoPsfFluxMax in Argus photometric history.",
+      "default": null
+    },
+    {
+      "name": "rhoPsfFluxSlopeAfterMax",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "The slope of rho-band PSF-fit flux with time over the base-cadence candidates following rhoPsfFluxMax in Argus photometric history.",
+      "default": null
+    },
+    {
+      "name": "rhoApFluxMean",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "The mean rho-band aperture flux over all base-cadence candidates associated with this event in Argus photometric history.",
+      "default": null
+    },
+    {
+      "name": "rhoApFluxMin",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "The minimum rho-band aperture flux over all base-cadence candidates associated with this event in Argus photometric history.",
+      "default": null
+    },
+    {
+      "name": "rhoApFluxMax",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "The maximum rho-band aperture flux over all base-cadence candidates associated with this event in Argus photometric history.",
+      "default": null
+    },
+    {
+      "name": "rhoApFluxSlopeBeforeMax",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "The slope of rho-band aperture flux with time over the base-cadence candidates preceding rhoApFluxMax in Argus photometric history.",
+      "default": null
+    },
+    {
+      "name": "rhoApFluxSlopeAfterMax",
+      "type": [
+        "null",
+        "float"
+      ],
+      "doc": "The slope of rho-band aperture flux with time over the base-cadence candidates following rhoApFluxMax in Argus photometric history.",
+      "default": null
+    },
+    {
+      "name": "secondCadenceHistory",
+      "type": [
+        "null",
+        {
+          "type": "array",
+          "items": "argus.alert.candidate"
+        }
+      ],
+      "doc": "The last l epochs of 1-second cadence observations. (The value of l is TBD, will vary with cadence, and will possibly be 0 at lower/higher cadences.)",
+      "default": null
+    },
+    {
+      "name": "minuteCadenceHistory",
+      "type": [
+        "null",
+        {
+          "type": "array",
+          "items": "argus.alert.candidate"
+        }
+      ],
+      "doc": "The last m epochs of 1-minute cadence observations. (The value of m is TBD, will vary with cadence, and will possibly be 0 at lower/higher cadences.)",
+      "default": null
+    },
+    {
+      "name": "baseCoaddHistory",
+      "type": [
+        "null",
+        {
+          "type": "array",
+          "items": "argus.alert.candidate"
+        }
+      ],
+      "doc": "The last n epochs of base-cadence coadd observations. (The value of n is TBD, will vary with cadence, and will possibly be 0 at lower/higher cadences.)",
+      "default": null
+    },
+    {
+      "name": "hourCoaddHistory",
+      "type": [
+        "null",
+        {
+          "type": "array",
+          "items": "argus.alert.candidate"
+        }
+      ],
+      "doc": "The last p epochs of 1-hour coadd observations. (The value of p is TBD, will vary with cadence, and will possibly be 0 at lower/higher cadences.)",
+      "default": null
+    }
+  ]
+}

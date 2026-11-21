@@ -189,6 +189,9 @@ kafka:
     askap:
       server: "localhost:9092"
       group_id: "" # Set via BOOM_KAFKA__CONSUMER__ASKAP__GROUP_ID environment variable
+    argus:
+      server: "localhost:9092"
+      group_id: "" # Set via BOOM_KAFKA__CONSUMER__ARGUS__GROUP_ID environment variable
   producer:
     server: "broker:29092" # Only one global producer for now (filter worker output)
 workers:
@@ -254,8 +257,39 @@ workers:
       n_workers: 1
       refresh_interval_minutes: 15
       max_match_rate: 5
-      reference_night:
+      reference_night: "2026-09-13"
       reference_window_days: 30
+  argus:
+    command_interval: 500
+    alert:
+      n_workers: 1
+      lanes:
+        1s: 1
+        1m: 1
+        15m: 1
+        1h: 1
+        1d: 1
+        sso: 1
+    enrichment:
+      n_workers: 1
+      batch_size: 250
+      lanes:
+        1s: 1
+        1m: 1
+        15m: 1
+        1h: 1
+        1d: 1
+        sso: 1
+    filter:
+      n_workers: 1
+      refresh_interval_minutes: 15
+      lanes:
+        1s: 1
+        1m: 1
+        15m: 1
+        1h: 1
+        1d: 1
+        sso: 1
 # Shape-aware host-galaxy association: scores each galaxy cross-match by its
 # directional light radius (d_DLR) instead of a fixed circular aperture. Stored
 # on the alert aux document under `host_galaxy`; filters cut on
@@ -267,11 +301,12 @@ workers:
 # stored as `objtype`):
 #   NED      -> Diam, Diam_ba, Diam_pa, Diam_survey, DistMpc, DistMpc_method, z
 #   LSDR10   -> shape_r, shape_e1, shape_e2, objtype, flux_r, and where the
-#               ingest provides them sersic, flux_ivar_r, fracflux_r
+#               ingest provides them sersic, flux_{g,i,z}, flux_ivar_{r,g,i,z},
+#               fracflux_{r,g,i,z}
 #
-# The three optional Legacy columns degrade one step each rather than failing:
-# no `sersic` leaves a SER row on its half-light radius, no `flux_ivar_r` leaves
-# a REX row judged on size and blending alone, no `fracflux_r` reads as unblended.
+# No `sersic` leaves a SER row on its half-light radius, no `fracflux_<band>`
+# reads as unblended. A REX row is judged in r, or in the best of g, i, z when r
+# was not observed, and is dropped when no band has a `flux_ivar_<band>`.
 host_galaxy:
   enabled: true
   ned_catalog: NED
@@ -617,6 +652,12 @@ crossmatch:
         sersic: 1
         flux_ivar_r: 1
         fracflux_r: 1
+        flux_ivar_g: 1
+        flux_ivar_i: 1
+        flux_ivar_z: 1
+        fracflux_g: 1
+        fracflux_i: 1
+        fracflux_z: 1
     LSDR9:
       radius: 30.0
       use_distance: true
@@ -649,6 +690,10 @@ crossmatch:
         sersic: 1
         flux_ivar_r: 1
         fracflux_r: 1
+        flux_ivar_g: 1
+        flux_ivar_z: 1
+        fracflux_g: 1
+        fracflux_z: 1
     AllWISE:
       radius: 2.0
       use_distance: false
@@ -935,6 +980,12 @@ crossmatch:
         sersic: 1
         flux_ivar_r: 1
         fracflux_r: 1
+        flux_ivar_g: 1
+        flux_ivar_i: 1
+        flux_ivar_z: 1
+        fracflux_g: 1
+        fracflux_i: 1
+        fracflux_z: 1
     LSDR9:
       radius: 30.0
       use_distance: true
@@ -967,6 +1018,10 @@ crossmatch:
         sersic: 1
         flux_ivar_r: 1
         fracflux_r: 1
+        flux_ivar_g: 1
+        flux_ivar_z: 1
+        fracflux_g: 1
+        fracflux_z: 1
     AllWISE:
       radius: 2.0
       use_distance: false
@@ -1253,6 +1308,12 @@ crossmatch:
         sersic: 1
         flux_ivar_r: 1
         fracflux_r: 1
+        flux_ivar_g: 1
+        flux_ivar_i: 1
+        flux_ivar_z: 1
+        fracflux_g: 1
+        fracflux_i: 1
+        fracflux_z: 1
     LSDR9:
       radius: 30.0
       use_distance: true
@@ -1285,6 +1346,10 @@ crossmatch:
         sersic: 1
         flux_ivar_r: 1
         fracflux_r: 1
+        flux_ivar_g: 1
+        flux_ivar_z: 1
+        fracflux_g: 1
+        fracflux_z: 1
     AllWISE:
       radius: 2.0
       use_distance: false
@@ -1300,6 +1365,7 @@ crossmatch:
     5XMM_DR15: null
     2SXPS: null
     4FGL_DR4: null
+  argus: {}
   winter:
     Gaia_DR3:
       radius: 2.0 # 2 arcseconds
@@ -1561,6 +1627,12 @@ crossmatch:
         sersic: 1
         flux_ivar_r: 1
         fracflux_r: 1
+        flux_ivar_g: 1
+        flux_ivar_i: 1
+        flux_ivar_z: 1
+        fracflux_g: 1
+        fracflux_i: 1
+        fracflux_z: 1
     LSDR9:
       radius: 30.0
       use_distance: true
@@ -1593,6 +1665,10 @@ crossmatch:
         sersic: 1
         flux_ivar_r: 1
         fracflux_r: 1
+        flux_ivar_g: 1
+        flux_ivar_z: 1
+        fracflux_g: 1
+        fracflux_z: 1
     AllWISE:
       radius: 2.0
       use_distance: false
@@ -1893,6 +1969,12 @@ crossmatch:
         sersic: 1
         flux_ivar_r: 1
         fracflux_r: 1
+        flux_ivar_g: 1
+        flux_ivar_i: 1
+        flux_ivar_z: 1
+        fracflux_g: 1
+        fracflux_i: 1
+        fracflux_z: 1
     LSDR9:
       radius: 30.0
       use_distance: true
@@ -1925,6 +2007,10 @@ crossmatch:
         sersic: 1
         flux_ivar_r: 1
         fracflux_r: 1
+        flux_ivar_g: 1
+        flux_ivar_z: 1
+        fracflux_g: 1
+        fracflux_z: 1
     AllWISE:
       radius: 3.0
       use_distance: false

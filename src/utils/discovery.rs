@@ -21,7 +21,9 @@ use crate::utils::linking::{
     angular_separation_deg, circular_mean_deg, find_tracklets, night_of, night_start, Detection,
     Tracklet, TrackletConfig,
 };
-use crate::utils::orbit_fit::{fit_within, observed_minus_computed, Observation, OrbitFit};
+use crate::utils::orbit_fit::{
+    fit_within, observed_minus_computed, within_precision, Observation, OrbitFit,
+};
 use crate::utils::sso_geometry::{Planet, Site, JUPITER, NEPTUNE, SATURN, URANUS, ZTF};
 use crate::utils::thor;
 use crate::utils::tracks::{
@@ -207,7 +209,7 @@ pub async fn load_unknown(
             "candidate.rb": { "$gte": 0.5 },
             "$expr": { "$lt": [{ "$subtract": ["$candidate.jd", "$candidate.jdstarthist"] }, 0.5] },
         },
-        Survey::Askap => return Ok(Vec::new()),
+        Survey::Askap | Survey::Argus => return Ok(Vec::new()),
     };
     let mut cursor = db
         .collection::<Document>(&format!("{survey}_alerts"))
@@ -292,7 +294,7 @@ fn projection(survey: &Survey) -> Document {
         Survey::Lsst => ("midpointMjdTai", "magpsf", "sigmapsf", "band"),
         Survey::Decam => ("jd", "magap", "sigmagap", "band"),
         Survey::Winter => ("jd", "magpsf", "sigmapsf", "band"),
-        Survey::Askap => return doc! { "_id": 1 },
+        Survey::Askap | Survey::Argus => return doc! { "_id": 1 },
     };
     let mut projection = doc! { "_id": 1, "candidate.ra": 1, "candidate.dec": 1 };
     for field in [jd, mag, mag_err, band] {
@@ -319,7 +321,7 @@ fn detection_from(survey: &Survey, doc: &Document) -> Option<Detection> {
             "magpsf",
             "sigmapsf",
         ),
-        Survey::Askap => return None,
+        Survey::Askap | Survey::Argus => return None,
     };
     Some(Detection {
         id: detection_id(survey, doc.get_i64("_id").ok()?),
@@ -926,6 +928,65 @@ async fn keep_reproduced(
     })
 }
 
+async fn hold_to_precision(
+    db: &mongodb::Database,
+    plan: UpsertPlan,
+    run: &HashMap<i64, &Detection>,
+    stored: &HashMap<i64, Detection>,
+) -> Result<Option<UpsertPlan>, mongodb::error::Error> {
+    // Dropping one of an unidentified two-night track's few detections lets almost any orbit through.
+    let skipped = plan.unchanged_since.is_some()
+        || plan.kind.as_deref() == Some(FAST_KIND)
+        || (plan.n_nights == 2 && plan.designation.is_none())
+        || plan.bound_fit.as_deref() != Some(BoundFit::Good.as_str());
+    let Some(orbit) = plan.orbit.filter(|_| !skipped) else {
+        return Ok(Some(plan));
+    };
+    let found = member_detections(db, &plan.members, run, stored).await?;
+    let observations: Vec<Observation> = found
+        .iter()
+        .flatten()
+        .map(|d| Observation {
+            jd: d.jd,
+            ra: d.ra,
+            dec: d.dec,
+            site: d.site.unwrap_or(ZTF),
+        })
+        .collect();
+    let seed = State {
+        pos: orbit.pos,
+        vel: orbit.vel,
+    };
+    let Some((verdicts, fit)) = within_precision(&observations, &seed, orbit.epoch_jd) else {
+        return Ok(None);
+    };
+    let mut verdicts = verdicts.into_iter();
+    let (mut members, mut epochs, mut dropped) = (Vec::new(), Vec::new(), plan.dropped.clone());
+    for ((member, epoch), position) in plan.members.iter().zip(&plan.epochs).zip(&found) {
+        if position.is_none() || verdicts.next().unwrap_or(true) {
+            members.push(member.clone());
+            epochs.push(*epoch);
+        } else {
+            dropped.push(member.clone());
+        }
+    }
+    let (n_detections, n_nights, arc_days, first_jd, last_jd) = summarise(&members, &epochs);
+    Ok(Some(UpsertPlan {
+        members,
+        epochs,
+        n_detections,
+        n_nights,
+        arc_days,
+        first_jd,
+        last_jd,
+        bound_fit_residual_arcsec: Some(fit.rms_arcsec),
+        bound_fit_detections: Some(fit.n_obs as i32),
+        orbit: Some(orbit_of(&fit)),
+        dropped,
+        ..plan
+    }))
+}
+
 /// The detection behind each of `members`, from the run or else its alert, and
 /// `None` for one with neither.
 async fn member_detections(
@@ -1327,6 +1388,24 @@ async fn persist(
             Err(e) => {
                 error!(
                     "could not check one of the {} against its orbit: {}",
+                    what, e
+                );
+                report.failed += 1;
+                continue;
+            }
+        };
+        let plan = match hold_to_precision(db, plan, &by_id, stored).await {
+            Ok(Some(plan)) => plan,
+            Ok(None) => {
+                info!(
+                    "dropping one of the {}: its orbit leaves too many detections beyond their astrometric precision",
+                    what
+                );
+                continue;
+            }
+            Err(e) => {
+                error!(
+                    "could not check one of the {} against its astrometric precision: {}",
                     what, e
                 );
                 report.failed += 1;

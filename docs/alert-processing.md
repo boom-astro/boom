@@ -323,6 +323,23 @@ The task selects the alerts, queues them, runs the enrichment workers over them,
 and finishes when the queue drains. It disables Babamul and does not forward to
 the filter queue, so reprocessing never re-alerts anyone.
 
+### Writing only some outputs
+
+To backfill a field that enrichment gained after older alerts were processed,
+list what to write instead of re-running everything:
+
+```bash
+-d '{"task_type": "enrich_reprocess",
+     "params": {"survey": "ztf", "selection": {"kind": "missing_field", "field": "gp_fit"},
+                "gp_fit": true}}'
+```
+
+`properties` lists keys of `properties` to rewrite (DECam and ZTF), and
+`gp_fit: true` refits `gp_fit` (ZTF). Nothing else on the alert changes: no
+model is loaded, no free GPU memory is required, no cutout is read, and
+`enrichment_set` keeps its value, since the classifications it vouches for were
+not recomputed. That is also why such a run cannot use the `stale` selection.
+
 ### Watching and controlling a run
 
 The admin page shows active runs with a progress bar and a live log tail. Or:
@@ -349,8 +366,9 @@ the enrichment set each one wrote. See [the task system](./task-system.md).
 
 - **Selective re-running.** The set records components and `version::diff` says
   which moved, but `enrich_reprocess` re-runs the whole enrichment for a
-  selected alert rather than only the changed part. The information needed to
-  narrow it is recorded; the narrowing is not built.
+  selected alert unless told which outputs to write (see
+  [Writing only some outputs](#writing-only-some-outputs)). Narrowing it from
+  the recorded versions is not built.
 - **Catching a forgotten version bump.** Nothing verifies that a change to
   derivation logic came with a bump — it is a code-review responsibility. A
   golden-output test (fixed input alerts, checked-in expected output, failing

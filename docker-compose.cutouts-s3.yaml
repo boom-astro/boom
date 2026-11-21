@@ -81,6 +81,8 @@ services:
     <<: *s3_cutouts_env
   scheduler-winter:
     <<: *s3_cutouts_env
+  scheduler-askap:
+    <<: *s3_cutouts_env
 
   # Dedicated Valkey instance for the cutout cache. Kept separate from the main
   # valkey so it can be capped with a fixed maxmemory budget and its eviction
