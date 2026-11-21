@@ -92,13 +92,13 @@ pub const DERIVATIONS: &[(&str, u32)] = &[
     // applecider_fusion, applecider_outputs and fusion_embedding.
     ("applecider_postprocess", 1),
     // arnett_fit and thermal_fit.
-    ("lightcurve_fits", 1),
+    ("lightcurve_fits", 2),
     ("gp_fit", 1),
 ];
 
 /// Only GPU builds compute `villar_fit`; bump it when the PSO fit or its `PsoConfig` changes.
 #[cfg(feature = "gpu")]
-pub const GPU_DERIVATIONS: &[(&str, u32)] = &[("villar_fit", 1)];
+pub const GPU_DERIVATIONS: &[(&str, u32)] = &[("villar_fit", 2)];
 #[cfg(not(feature = "gpu"))]
 pub const GPU_DERIVATIONS: &[(&str, u32)] = &[];
 
