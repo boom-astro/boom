@@ -265,8 +265,10 @@ pub async fn run(
     let config = ctx.config();
 
     #[cfg(target_os = "linux")]
-    crate::utils::gpu::validate_gpu_configuration_for_survey(&params.survey, config)
-        .map_err(|e| super::TaskError::InvalidParams(e.to_string()))?;
+    if !params.writes_subset() {
+        crate::utils::gpu::validate_gpu_configuration_for_survey(&params.survey, config)
+            .map_err(|e| super::TaskError::InvalidParams(e.to_string()))?;
+    }
 
     let worker_config = config.workers.get(&params.survey).ok_or_else(|| {
         super::TaskError::InvalidParams(format!("no worker config for {}", params.survey))
