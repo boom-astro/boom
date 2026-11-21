@@ -54,6 +54,7 @@ COPY Cargo.toml Cargo.lock build.rs /app/
 # build.rs generates the Milvus gRPC bindings from these vendored protos into
 # OUT_DIR; without them src/milvus/proto.rs has nothing to include!().
 COPY ./proto /app/proto
+COPY ./schemas /app/schemas
 COPY ./src /app/src
 
 # BuildKit cache mounts keep the compiled crates (target/) and the fetched

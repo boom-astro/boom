@@ -1,3 +1,4 @@
+mod argus;
 mod askap;
 mod base;
 mod decam;
@@ -5,6 +6,7 @@ mod lsst;
 mod winter;
 mod ztf;
 
+pub use argus::ArgusAlertConsumer;
 pub use askap::{AskapAlertConsumer, AskapAlertProducer};
 pub use base::{
     consumer, count_messages, delete_topic, initialize_topic, subscription_window, AlertConsumer,

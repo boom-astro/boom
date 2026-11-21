@@ -1,3 +1,5 @@
+mod argus;
+pub mod argus_mock;
 mod askap;
 mod base;
 mod decam;
@@ -5,6 +7,12 @@ mod lsst;
 mod simulation;
 mod winter;
 mod ztf;
+pub use argus::{
+    argus_candidate_fields, decode_argus_packet, encode_argus_alert, ArgusAlertWorker,
+    ArgusAliases, ArgusCandidate, ArgusEventAssociation, ArgusLane, ArgusPhotometry,
+    ArgusRawAvroAlert, ArgusSsoAssociation, ArgusSsoHistoryEntry, ARGUS_DEC_RANGE,
+    ARGUS_RESULTS_TOPIC, ARGUS_SCHEMA,
+};
 pub use askap::{
     AskapAlert, AskapAlertWorker, AskapAliases, AskapCandidate, AskapObject, AskapRawAvroAlert,
     ASKAP_DEC_RANGE,

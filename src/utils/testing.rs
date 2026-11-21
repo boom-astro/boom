@@ -202,6 +202,7 @@ pub async fn insert_test_filter(
         (Survey::Decam, _) => DECAM_TEST_PIPELINE,
         (Survey::Winter, _) => WINTER_TEST_PIPELINE,
         (Survey::Askap, _) => ASKAP_TEST_PIPELINE,
+        (Survey::Argus, _) => return Err("ARGUS has no filters yet".into()),
     };
 
     insert_custom_test_filter(survey, pipeline).await
@@ -481,6 +482,7 @@ pub fn randomize_object_id(survey: &Survey) -> String {
             object_id
         }
         Survey::Lsst => format!("{}", rand::rng().random_range(0..i64::MAX)),
+        Survey::Argus => uuid::Uuid::new_v4().to_string(),
     }
 }
 
@@ -520,6 +522,7 @@ impl AlertRandomizer {
 
     pub fn new_randomized(survey: Survey) -> Self {
         let (object_id, payload, schema, schema_registry) = match survey {
+            Survey::Argus => panic!("ARGUS test alerts come from alert::argus_mock"),
             Survey::Ztf | Survey::Decam | Survey::Winter | Survey::Askap => {
                 let payload = match survey {
                     Survey::Ztf => {
@@ -700,6 +703,7 @@ impl AlertRandomizer {
 
     pub async fn get(self) -> (i64, String, f64, f64, Vec<u8>) {
         match self.survey {
+            Survey::Argus => panic!("ARGUS test alerts come from alert::argus_mock"),
             Survey::Ztf | Survey::Decam | Survey::Winter | Survey::Askap => {
                 // Use the same logic for ZTF/Decam/WINTER, just different objectId
                 // prefix (and lowercase `objectid` key for WINTER).
