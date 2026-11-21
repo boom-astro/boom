@@ -13,10 +13,9 @@ use tracing::instrument;
 
 /// How long a claim is good for without a heartbeat.
 ///
-/// Long enough that a briefly stalled worker is not robbed of its run, short
-/// enough that a killed one is picked up promptly. The heartbeat renews at a
-/// third of this.
-pub const LEASE_SECONDS: f64 = 60.0;
+/// Long enough that a worker stalled on a saturated database is not robbed of
+/// its run, short enough that a killed one is picked up within minutes.
+pub const LEASE_SECONDS: f64 = 300.0;
 
 #[derive(thiserror::Error, Debug)]
 pub enum QueueError {
