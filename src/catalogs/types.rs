@@ -1681,6 +1681,174 @@ impl super::arrow::FromRecordBatch for FourFgl {
 
 impl HasCoordinates for FourFgl {}
 
+// ---------------------------------------------------------------------------
+// Euclid DR1 -- parquet, joined and filtered by boompy from IRSA's HATS tables
+// ---------------------------------------------------------------------------
+
+/// One Euclid DR1 object with a reliable spectroscopic redshift: a galaxy or
+/// QSO whose rank-0 redshift for its SPE class has `spe_z_prob` >= 0.99.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Serialize, Deserialize)]
+pub struct EuclidSpe {
+    #[serde(rename(serialize = "_id"))]
+    pub object_id: i64,
+    pub ra: f64,
+    pub dec: f64,
+    /// `wide` or `deep`.
+    pub survey: String,
+    /// `galaxy` or `qso`, the class the redshift was fitted for.
+    pub spe_class: String,
+    pub spe_star_prob: Option<f64>,
+    pub spe_gal_prob: Option<f64>,
+    pub spe_qso_prob: Option<f64>,
+    pub spe_z: f64,
+    pub spe_z_err: Option<f64>,
+    pub spe_z_prob: Option<f64>,
+    pub spe_z_rel: Option<f64>,
+    pub spe_subclass: Option<String>,
+}
+
+impl super::arrow::FromRecordBatch for EuclidSpe {
+    fn from_batch(
+        batch: &::arrow::array::RecordBatch,
+    ) -> Result<Vec<Self>, super::arrow::ColumnError> {
+        use super::arrow::{f64_column, i64_column, string_column};
+
+        let object_id = i64_column(batch, "object_id")?;
+        let ra = f64_column(batch, "ra")?;
+        let dec = f64_column(batch, "dec")?;
+        let survey = string_column(batch, "survey")?;
+        let spe_class = string_column(batch, "spe_class")?;
+        let spe_star_prob = f64_column(batch, "spe_star_prob")?;
+        let spe_gal_prob = f64_column(batch, "spe_gal_prob")?;
+        let spe_qso_prob = f64_column(batch, "spe_qso_prob")?;
+        let spe_z = f64_column(batch, "spe_z")?;
+        let spe_z_err = f64_column(batch, "spe_z_err")?;
+        let spe_z_prob = f64_column(batch, "spe_z_prob")?;
+        let spe_z_rel = f64_column(batch, "spe_z_rel")?;
+        let spe_subclass = string_column(batch, "spe_subclass")?;
+
+        let mut rows = Vec::with_capacity(batch.num_rows());
+        for i in 0..batch.num_rows() {
+            let (Some(object_id), Some(ra), Some(dec), Some(spe_z)) =
+                (object_id[i], ra[i], dec[i], spe_z[i])
+            else {
+                continue;
+            };
+            rows.push(EuclidSpe {
+                object_id,
+                ra,
+                dec,
+                survey: survey[i].clone().unwrap_or_default(),
+                spe_class: spe_class[i].clone().unwrap_or_default(),
+                spe_star_prob: spe_star_prob[i],
+                spe_gal_prob: spe_gal_prob[i],
+                spe_qso_prob: spe_qso_prob[i],
+                spe_z,
+                spe_z_err: spe_z_err[i],
+                spe_z_prob: spe_z_prob[i],
+                spe_z_rel: spe_z_rel[i],
+                spe_subclass: spe_subclass[i].clone(),
+            });
+        }
+        Ok(rows)
+    }
+}
+
+impl HasCoordinates for EuclidSpe {}
+
+/// One Euclid DR1 galaxy photometric redshift, for rows with `phz_flags` 0
+/// that PHZ accepts as a galaxy and not as a star. Fluxes are in µJy.
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Serialize, Deserialize)]
+pub struct EuclidPhz {
+    #[serde(rename(serialize = "_id"))]
+    pub object_id: i64,
+    pub ra: f64,
+    pub dec: f64,
+    pub survey: String,
+    pub phz_median: Option<f64>,
+    pub phz_70_int_1: Option<f64>,
+    pub phz_70_int_2: Option<f64>,
+    pub phz_90_int_1: Option<f64>,
+    pub phz_90_int_2: Option<f64>,
+    pub phz_mode_1: Option<f64>,
+    pub phz_mode_1_area: Option<f64>,
+    pub phz_mode_2: Option<f64>,
+    pub phz_mode_2_area: Option<f64>,
+    pub phz_classification: Option<i64>,
+    pub phz_flags: Option<i64>,
+    pub phz_weight: Option<f64>,
+    pub best_chi2: Option<f64>,
+    pub flux_vis_unif: Option<f64>,
+    pub flux_y_unif: Option<f64>,
+    pub flux_j_unif: Option<f64>,
+    pub flux_h_unif: Option<f64>,
+}
+
+impl super::arrow::FromRecordBatch for EuclidPhz {
+    fn from_batch(
+        batch: &::arrow::array::RecordBatch,
+    ) -> Result<Vec<Self>, super::arrow::ColumnError> {
+        use super::arrow::{f64_column, i64_column, string_column};
+
+        let object_id = i64_column(batch, "object_id")?;
+        let ra = f64_column(batch, "ra")?;
+        let dec = f64_column(batch, "dec")?;
+        let survey = string_column(batch, "survey")?;
+        let phz_median = f64_column(batch, "phz_median")?;
+        let phz_70_int_1 = f64_column(batch, "phz_70_int_1")?;
+        let phz_70_int_2 = f64_column(batch, "phz_70_int_2")?;
+        let phz_90_int_1 = f64_column(batch, "phz_90_int_1")?;
+        let phz_90_int_2 = f64_column(batch, "phz_90_int_2")?;
+        let phz_mode_1 = f64_column(batch, "phz_mode_1")?;
+        let phz_mode_1_area = f64_column(batch, "phz_mode_1_area")?;
+        let phz_mode_2 = f64_column(batch, "phz_mode_2")?;
+        let phz_mode_2_area = f64_column(batch, "phz_mode_2_area")?;
+        let phz_classification = i64_column(batch, "phz_classification")?;
+        let phz_flags = i64_column(batch, "phz_flags")?;
+        let phz_weight = f64_column(batch, "phz_weight")?;
+        let best_chi2 = f64_column(batch, "best_chi2")?;
+        let flux_vis_unif = f64_column(batch, "flux_vis_unif")?;
+        let flux_y_unif = f64_column(batch, "flux_y_unif")?;
+        let flux_j_unif = f64_column(batch, "flux_j_unif")?;
+        let flux_h_unif = f64_column(batch, "flux_h_unif")?;
+
+        let mut rows = Vec::with_capacity(batch.num_rows());
+        for i in 0..batch.num_rows() {
+            let (Some(object_id), Some(ra), Some(dec)) = (object_id[i], ra[i], dec[i]) else {
+                continue;
+            };
+            rows.push(EuclidPhz {
+                object_id,
+                ra,
+                dec,
+                survey: survey[i].clone().unwrap_or_default(),
+                phz_median: phz_median[i],
+                phz_70_int_1: phz_70_int_1[i],
+                phz_70_int_2: phz_70_int_2[i],
+                phz_90_int_1: phz_90_int_1[i],
+                phz_90_int_2: phz_90_int_2[i],
+                phz_mode_1: phz_mode_1[i],
+                phz_mode_1_area: phz_mode_1_area[i],
+                phz_mode_2: phz_mode_2[i],
+                phz_mode_2_area: phz_mode_2_area[i],
+                phz_classification: phz_classification[i],
+                phz_flags: phz_flags[i],
+                phz_weight: phz_weight[i],
+                best_chi2: best_chi2[i],
+                flux_vis_unif: flux_vis_unif[i],
+                flux_y_unif: flux_y_unif[i],
+                flux_j_unif: flux_j_unif[i],
+                flux_h_unif: flux_h_unif[i],
+            });
+        }
+        Ok(rows)
+    }
+}
+
+impl HasCoordinates for EuclidPhz {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2102,7 +2270,7 @@ mod tests {
     }
 
     #[test]
-    fn high_energy_documents_have_every_key_their_crossmatch_projects() {
+    fn documents_have_every_key_their_crossmatch_projects() {
         use crate::catalogs::arrow::FromRecordBatch;
         use mongodb::bson::Document;
 
@@ -2240,6 +2408,50 @@ mod tests {
                         "ASSOC1",
                         "ASSOC2",
                     ],
+                )),
+            ),
+            (
+                "Euclid_DR1_SPE",
+                first::<EuclidSpe>(one_row(
+                    &["object_id"],
+                    &[
+                        "ra",
+                        "dec",
+                        "spe_star_prob",
+                        "spe_gal_prob",
+                        "spe_qso_prob",
+                        "spe_z",
+                        "spe_z_err",
+                        "spe_z_prob",
+                        "spe_z_rel",
+                    ],
+                    &["survey", "spe_class", "spe_subclass"],
+                )),
+            ),
+            (
+                "Euclid_DR1_PHZ",
+                first::<EuclidPhz>(one_row(
+                    &["object_id", "phz_classification", "phz_flags"],
+                    &[
+                        "ra",
+                        "dec",
+                        "phz_median",
+                        "phz_70_int_1",
+                        "phz_70_int_2",
+                        "phz_90_int_1",
+                        "phz_90_int_2",
+                        "phz_mode_1",
+                        "phz_mode_1_area",
+                        "phz_mode_2",
+                        "phz_mode_2_area",
+                        "phz_weight",
+                        "best_chi2",
+                        "flux_vis_unif",
+                        "flux_y_unif",
+                        "flux_j_unif",
+                        "flux_h_unif",
+                    ],
+                    &["survey"],
                 )),
             ),
         ];

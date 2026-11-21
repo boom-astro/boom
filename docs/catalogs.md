@@ -162,6 +162,8 @@ still resolves to the same catalog definition.
 | `5xmm-dr15` | `5XMM_DR15` | parquet, from FITS | 1 | XMM-Newton serendipitous source table, 818,656 unique sources, with fluxes, hardness ratios, variability and CLASSX classifications. 2 GB decompressed, so it is read memory-mapped. |
 | `2sxps` | `2SXPS` | parquet, from FITS | 1 | Swift-XRT point sources, the 146,768 of the clean subset, with count rates, hardness ratios, fluxes and variability probabilities. |
 | `4fgl-dr4` | `4FGL_DR4` | parquet, from FITS | 1 | Fermi-LAT 14-year catalog, 7,195 gamma-ray sources with 95% error ellipses, fluxes, variability and associations. |
+| `euclid-dr1-spe` | `Euclid_DR1_SPE` | parquet, joined from IRSA's HATS tables | 23 classification partitions (13 Wide, 10 Deep) | Euclid NISP grism redshifts for galaxies and QSOs, reliable ones only. See below. |
+| `euclid-dr1-phz` | `Euclid_DR1_PHZ` | parquet, from IRSA's HATS mirror | 91 Deep partitions | Euclid photometric redshifts and VIS/NISP fluxes for galaxies, Deep fields only for now. See below. |
 
 ### Matching within a positional error
 
@@ -175,6 +177,37 @@ the semi-major axis of the 95% ellipse, a circle that contains the ellipse; the
 ellipse itself (`Conf_95_SemiMajor`, `Conf_95_SemiMinor`, `Conf_95_PosAng`, in
 degrees) is projected so a filter can test containment. The 90 4FGL sources
 without an ellipse, 81 of them extended, are never matched.
+
+### Euclid DR1
+
+Both come from IRSA's HATS copy of DR1-Foundation in the public
+`nasa-irsa-euclid-dr1` bucket, read with pyarrow rather than `lsdb` because SPE
+joins four tables partitioned differently. Positions are IRSA's
+`ra_from_object_id`/`dec_from_object_id`, decoded from the MER `object_id`, which
+is also `_id`.
+
+**SPE.** Every MER object has an SPE row, so most of the 875 million are noise.
+`Euclid_DR1_SPE` keeps objects with a spectrum (a classification row) classed
+`galaxy` or `qso` whose rank-0 candidate for that class has `spe_z_prob` of at
+least 0.99 (`MIN_Z_PROB` in `euclid_dr1_spe.py`): about 17% of classified Wide
+objects, 3.7 million in the largest partition. Classified objects carry
+`SPE_ERROR_FLAG` 0, so the quality table is not read. The largest chunk peaks
+at about 3 GB of memory. Deep is ingested first, and
+an object in both keeps its Deep redshift. `spe_z_rel` is stored but is not a
+probability (median 0.03); cut on `spe_z_prob`.
+
+**PHZ.** Rows with `phz_flags` 0 that PHZ accepts as a galaxy and not a star,
+with the median, 70% and 90% intervals, both modes, `phz_weight` and the
+unified VIS/Y/J/H fluxes in µJy. The `fluxerr_*_unif` columns are all zero in
+DR1 and are left out. IRSA has not published the Wide photo-z as HATS yet; once
+it has, add it to `SURVEYS` in `euclid_dr1_phz.py`.
+
+Both are crossmatched like `DESI_DR1`, within 30 kpc at the row's redshift, and
+both are off in the production overrides until ingested.
+
+`data/filters/lsst_euclid_nuclear.json` is a starting point for nuclear
+transients with a Euclid redshift: LSST alerts within 0.5" of a reliable SPE
+object, annotated with that object.
 
 ### The two Legacy Survey releases
 

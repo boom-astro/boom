@@ -666,3 +666,19 @@ mod host_galaxy_tests {
         assert!(!format!("{built:?}").contains("aux.host_galaxy"));
     }
 }
+
+#[cfg(test)]
+mod euclid_filter_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_the_euclid_nuclear_filter_builds_with_cross_matches() {
+        let permissions = HashMap::from([(Survey::Lsst, vec![1])]);
+        let source = include_str!("../../data/filters/lsst_euclid_nuclear.json");
+        let pipeline: Vec<serde_json::Value> = serde_json::from_str(source).expect("valid JSON");
+        let built = build_lsst_filter_pipeline(&pipeline, &permissions)
+            .await
+            .expect("builds");
+        assert!(format!("{built:?}").contains("aux.cross_matches"));
+    }
+}

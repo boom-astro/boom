@@ -82,6 +82,8 @@ pub enum Reader {
     FiveXmm,
     TwoSxps,
     FourFgl,
+    EuclidSpe,
+    EuclidPhz,
 }
 
 /// Where a catalog's files come from, which decides whether BOOM may delete
@@ -308,6 +310,28 @@ pub const CATALOGS: &[CatalogDef] = &[
         description: "Gamma-ray sources from 14 years of Fermi-LAT, with 95% error ellipses, \
                       fluxes, variability and associations. One table, converted from FITS.",
         reader: Reader::FourFgl,
+        source: Source::Fetched,
+        aliases: &[],
+    },
+    CatalogDef {
+        id: "euclid-dr1-spe",
+        collection: "Euclid_DR1_SPE",
+        title: "Euclid DR1 spectroscopic redshifts",
+        description: "Galaxies and QSOs with a reliable NISP grism redshift (rank-0 \
+                      spe_z_prob >= 0.99), Wide Survey and Deep, joined from IRSA's HATS \
+                      tables one classification partition at a time.",
+        reader: Reader::EuclidSpe,
+        source: Source::Fetched,
+        aliases: &[],
+    },
+    CatalogDef {
+        id: "euclid-dr1-phz",
+        collection: "Euclid_DR1_PHZ",
+        title: "Euclid DR1 photometric redshifts",
+        description: "Photo-z summaries and VIS/NISP fluxes for unflagged galaxies in the \
+                      Euclid Deep Fields, from IRSA's HATS mirror. Wide follows once IRSA \
+                      publishes it.",
+        reader: Reader::EuclidPhz,
         source: Source::Fetched,
         aliases: &[],
     },
@@ -873,6 +897,8 @@ async fn ingest_file(
         Reader::FiveXmm => Ok(arrow::ingest_parquet::<types::FiveXmm>(inserter, path).await?),
         Reader::TwoSxps => Ok(arrow::ingest_parquet::<types::TwoSxps>(inserter, path).await?),
         Reader::FourFgl => Ok(arrow::ingest_parquet::<types::FourFgl>(inserter, path).await?),
+        Reader::EuclidSpe => Ok(arrow::ingest_parquet::<types::EuclidSpe>(inserter, path).await?),
+        Reader::EuclidPhz => Ok(arrow::ingest_parquet::<types::EuclidPhz>(inserter, path).await?),
     }
 }
 

@@ -1,0 +1,24 @@
+[
+  {
+    "$match": {
+      "candidate.reliability": { "$gt": 0.5 },
+      "candidate.snr": { "$gt": 5.0 },
+      "cross_matches.Euclid_DR1_SPE": {
+        "$elemMatch": { "distance_arcsec": { "$lt": 0.5 } }
+      }
+    }
+  },
+  {
+    "$project": {
+      "objectId": 1,
+      "annotations.euclid": {
+        "$first": {
+          "$filter": {
+            "input": "$cross_matches.Euclid_DR1_SPE",
+            "cond": { "$lt": ["$$this.distance_arcsec", 0.5] }
+          }
+        }
+      }
+    }
+  }
+]
