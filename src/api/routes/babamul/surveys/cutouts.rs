@@ -58,6 +58,27 @@ pub async fn get_cutouts(
     };
 
     if let Some(candid) = query.candid {
+        // Only public ZTF alerts are served. Any other candid reads as missing,
+        // so the response doesn't reveal whether a private alert exists.
+        if survey == Survey::Ztf {
+            let alert_collection = db.collection::<AlertCandidOnly>(&format!("{}_alerts", survey));
+            match alert_collection
+                .find_one(doc! { "_id": candid, "candidate.programid": 1 })
+                .projection(doc! { "_id": 1 })
+                .await
+            {
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    return response::not_found(&format!("no cutouts found for candid {}", candid));
+                }
+                Err(error) => {
+                    return response::internal_error(&format!(
+                        "error getting documents: {}",
+                        error
+                    ));
+                }
+            }
+        }
         let cutouts = match cutout_storage.retrieve_cutouts(candid, false).await {
             Ok(cutouts) => cutouts,
             Err(CutoutStorageError::CutoutsNotFound) => {

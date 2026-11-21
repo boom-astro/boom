@@ -516,18 +516,19 @@ mod tests {
             .await
             .expect("Failed to build ZTF cutout storage");
         let test_candid = uuid::Uuid::new_v4().as_u128() as i64;
+        let private_candid = test_candid.wrapping_add(1);
 
-        let cutouts = AlertCutout {
-            candid: test_candid,
-            cutout_science: vec![1, 2, 3],
-            cutout_template: vec![4, 5, 6],
-            cutout_difference: vec![7, 8, 9],
-        };
-
-        ztf_cutouts_storage
-            .insert_cutouts(cutouts)
-            .await
-            .expect("Failed to store test cutout");
+        for candid in [test_candid, private_candid] {
+            ztf_cutouts_storage
+                .insert_cutouts(AlertCutout {
+                    candid,
+                    cutout_science: vec![1, 2, 3],
+                    cutout_template: vec![4, 5, 6],
+                    cutout_difference: vec![7, 8, 9],
+                })
+                .await
+                .expect("Failed to store test cutout");
+        }
 
         let mut cutout_storage_map: HashMap<Survey, CutoutStorage> = HashMap::new();
         cutout_storage_map.insert(Survey::Ztf, ztf_cutouts_storage);
@@ -545,15 +546,38 @@ mod tests {
         )
         .await;
 
-        let req = test::TestRequest::get()
-            .uri(&format!(
-                "/babamul/surveys/ztf/cutouts?candid={}",
-                test_candid
-            ))
-            .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
-            .to_request();
+        let get = |candid: i64| {
+            test::TestRequest::get()
+                .uri(&format!("/babamul/surveys/ztf/cutouts?candid={}", candid))
+                .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+                .to_request()
+        };
 
-        let resp = test::call_service(&app, req).await;
+        let resp = test::call_service(&app, get(test_candid)).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "Cutouts without an alert should not be served"
+        );
+
+        let alerts =
+            database.collection::<mongodb::bson::Document>(&format!("{}_alerts", Survey::Ztf));
+        alerts
+            .insert_many([
+                doc! { "_id": test_candid, "candidate": { "programid": 1, "jd": 2460000.5 } },
+                doc! { "_id": private_candid, "candidate": { "programid": 2, "jd": 2460000.5 } },
+            ])
+            .await
+            .expect("Failed to insert test alerts");
+
+        let resp = test::call_service(&app, get(private_candid)).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "A private alert's cutouts should not be served"
+        );
+
+        let resp = test::call_service(&app, get(test_candid)).await;
         assert_eq!(
             resp.status(),
             StatusCode::OK,
@@ -572,13 +596,20 @@ mod tests {
             "Cutout should be base64 encoded string"
         );
 
-        config
+        let storage = config
             .build_cutout_storage(&Survey::Ztf)
             .await
-            .expect("Failed to build ZTF cutout storage for cleanup")
-            .delete_cutouts(test_candid)
+            .expect("Failed to build ZTF cutout storage for cleanup");
+        for candid in [test_candid, private_candid] {
+            storage
+                .delete_cutouts(candid)
+                .await
+                .expect("Failed to delete test cutout");
+        }
+        alerts
+            .delete_many(doc! { "_id": { "$in": [test_candid, private_candid] } })
             .await
-            .expect("Failed to delete test cutout");
+            .expect("Failed to delete test alerts");
 
         let req = test::TestRequest::get()
             .uri("/babamul/surveys/ztf/cutouts?candid=8888888888")
