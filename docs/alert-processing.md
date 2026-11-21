@@ -336,9 +336,9 @@ list what to write instead of re-running everything:
 
 `properties` lists keys of `properties` to rewrite (DECam and ZTF), and
 `gp_fit: true` refits `gp_fit` (ZTF). Nothing else on the alert changes: no
-model is loaded, no cutout is read, and `enrichment_set` keeps its value, since
-the classifications it vouches for were not recomputed. That is also why such a
-run cannot use the `stale` selection.
+model is loaded, no free GPU memory is required, no cutout is read, and
+`enrichment_set` keeps its value, since the classifications it vouches for were
+not recomputed. That is also why such a run cannot use the `stale` selection.
 
 ### Watching and controlling a run
 
