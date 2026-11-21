@@ -128,6 +128,9 @@ export default function CrossmatchCard() {
                                   if (v === null || v === undefined) return <TableCell key={col}>—</TableCell>;
                                   if (typeof v === 'number') return <TableCell key={col}>{formatNum(v)}</TableCell>;
                                   if (typeof v === 'string') {
+                                    // Integer IDs past 2^53 (Gaia, PS1) arrive as strings from
+                                    // parseJsonText, and Number() would round them.
+                                    if (/^-?\d+$/.test(v)) return <TableCell key={col}>{v}</TableCell>;
                                     // if string contains a numeric value, format it
                                     const maybeNum = Number(v);
                                     if (Number.isFinite(maybeNum)) {
