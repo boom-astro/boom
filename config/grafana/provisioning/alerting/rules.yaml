@@ -359,7 +359,7 @@ groups:
             datasourceUid: prometheus
             model:
               refId: A
-              # Two conditions, both required:
+              # Three conditions, all required:
               #
               #   1. min_over_time > 50k -- the queue's low-water mark over the last
               #      30m is still above the threshold: even at its emptiest it never
@@ -369,6 +369,7 @@ groups:
               #      backlog that legitimately takes weeks to chew through is still
               #      draining and must stay silent, so we ask only whether the number
               #      is moving down at all, never how fast.
+              #   3. offset 30m -- a queue filled in one go keeps a positive slope from its fill.
               #
               # deriv is a least-squares slope (items/sec) over the window, not an
               # endpoint diff, so a single scrape blip can't flip its sign. 15m is
@@ -381,6 +382,8 @@ groups:
                     (min_over_time(redis_key_size{key=~".*_queue.*"}[30m]) > 50000)
                   and
                     (deriv(redis_key_size{key=~".*_queue.*"}[15m]) >= 0)
+                  and
+                    (redis_key_size{key=~".*_queue.*"} offset 30m)
                 )
               instant: true
               intervalMs: 1000
@@ -468,3 +471,4 @@ groups:
         annotations:
           summary: '{{ $labels.survey }} {{ $labels.worker_type }} worker pool degraded'
           description: 'One or more {{ $labels.survey }} {{ $labels.worker_type }} workers have died and not been respawned (the scheduler''s supervisor gives up after repeated rapid crashes). The corresponding Valkey queue will stop draining. Check scheduler logs for "{{ $labels.worker_type }} worker failed" and the attached error.'
+
