@@ -107,6 +107,7 @@ def download(
     dest: Path,
     expected_size: int | None = None,
     attempts: int = DEFAULT_ATTEMPTS,
+    byte_range: tuple[int, int] | None = None,
 ) -> Path:
     """Download `url` to `dest`, resuming and retrying.
 
@@ -114,14 +115,24 @@ def download(
     transfer is never mistaken for a complete file by the next run. Retries with
     a `Range` header where the server supports it, since re-fetching a gigabyte
     because the connection dropped at 90% is the common failure here.
+
+    `byte_range` is an inclusive `(first, last)` slice of `url`, for a catalog
+    published as one file too large to fetch whole.
     """
     partial = dest.with_suffix(dest.suffix + ".part")
     last_error: Exception | None = None
+    first, last = byte_range if byte_range else (0, None)
+    if byte_range and expected_size is None:
+        expected_size = last - first + 1
 
     for attempt in range(attempts):
         try:
             downloaded = partial.stat().st_size if partial.exists() else 0
-            headers = {"Range": f"bytes={downloaded}-"} if downloaded else {}
+            headers = {}
+            if byte_range:
+                headers["Range"] = f"bytes={first + downloaded}-{last}"
+            elif downloaded:
+                headers["Range"] = f"bytes={downloaded}-"
             response = session().get(
                 url,
                 stream=True,
@@ -138,6 +149,16 @@ def download(
                 log(f"{url}: server ignored Range, restarting the download")
                 downloaded = 0
             response.raise_for_status()
+            # Ignoring the range here means sending the whole file, and a
+            # Content-Range starting elsewhere would splice in the wrong bytes.
+            served = response.headers.get("content-range", "no range")
+            if byte_range and not served.startswith(
+                f"bytes {first + downloaded}-"
+            ):
+                raise OSError(
+                    f"asked for bytes {first + downloaded}-{last}, "
+                    f"got {response.status_code} with {served}"
+                )
 
             with open(partial, "ab" if downloaded else "wb") as f:
                 f.writelines(response.iter_content(chunk_size=BLOCK_SIZE))
