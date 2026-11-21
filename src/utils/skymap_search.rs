@@ -120,31 +120,68 @@ pub fn credible_level_at(
     host_galaxy: Option<&Document>,
     cross_matches: Option<&Document>,
 ) -> Option<f64> {
-    let best = host_redshifts(host_galaxy, cross_matches)
-        .into_iter()
-        .filter_map(|z| idx.searched_prob_vol_at(skymap, ra, dec, luminosity_distance_mpc(z)))
+    best_credible_level(
+        skymap,
+        idx,
+        ra,
+        dec,
+        &host_redshift_ranges(host_galaxy, cross_matches),
+        luminosity_distance_mpc,
+    )
+}
+
+pub fn best_credible_level(
+    skymap: &LIGO3dskymap,
+    idx: &CredibleVolumeIndex,
+    ra: f64,
+    dec: f64,
+    z_ranges: &[(f64, f64)],
+    mut distance_mpc: impl FnMut(f64) -> f64,
+) -> Option<f64> {
+    let best = z_ranges
+        .iter()
+        .filter_map(|&(z_low, z_high)| {
+            let d_low = distance_mpc(z_low);
+            let d_high = if z_high > z_low {
+                distance_mpc(z_high)
+            } else {
+                d_low
+            };
+            idx.best_searched_prob_vol_between(skymap, ra, dec, d_low, d_high)
+        })
         .fold(f64::INFINITY, f64::min);
     best.is_finite().then_some(best)
 }
 
-/// The redshifts to place the alert at.
+pub const HOST_Z_ERR_SIGMAS: f64 = 2.0;
+
+/// The redshift ranges to place the alert at.
 ///
 /// A directional-light-radius association names the galaxy the transient sits
-/// in, so where there is one its redshift is the only distance worth trying.
+/// in, so where there is one its redshift range is the only one worth trying.
 /// Without one nothing says which neighbour is the host, and the level is taken
 /// at whichever catalogued redshift places the alert deepest in the volume --
 /// an upper bound on how well it fits, over every galaxy that could be the host.
-pub fn host_redshifts(
+pub fn host_redshift_ranges(
     host_galaxy: Option<&Document>,
     cross_matches: Option<&Document>,
-) -> Vec<f64> {
-    let dlr_z = host_galaxy
+) -> Vec<(f64, f64)> {
+    let host_range = host_galaxy
         .and_then(|h| h.get_document("best_host").ok())
-        .and_then(|b| get_f64_from_doc(b, "z"))
-        .filter(|&z| z > 0.0);
-    match dlr_z {
-        Some(z) => vec![z],
-        None => extract_host_redshifts(cross_matches),
+        .and_then(|b| {
+            let z = get_f64_from_doc(b, "z").filter(|&z| z > 0.0)?;
+            let half_width = HOST_Z_ERR_SIGMAS
+                * get_f64_from_doc(b, "z_err")
+                    .filter(|&z_err| z_err > 0.0)
+                    .unwrap_or(0.0);
+            Some(((z - half_width).max(0.0), z + half_width))
+        });
+    match host_range {
+        Some(range) => vec![range],
+        None => extract_host_redshifts(cross_matches)
+            .into_iter()
+            .map(|z| (z, z))
+            .collect(),
     }
 }
 
@@ -211,6 +248,22 @@ mod tests {
 
         // No cross-matches at all: nothing to place it with.
         assert!(credible_level_at(&skymap, &idx, ra, dec, None, None).is_none());
+
+        let far_host = |z_err: f64| {
+            doc! { "best_host": doc! { "z": 2.0 * z, "z_err": z_err, "posterior": 0.9 } }
+        };
+        let at_far_z = credible_level_at(&skymap, &idx, ra, dec, Some(&far_host(0.0)), None)
+            .expect("the host places the alert");
+        let over_range = credible_level_at(&skymap, &idx, ra, dec, Some(&far_host(0.5 * z)), None)
+            .expect("the host places the alert");
+        assert!(
+            over_range < at_far_z,
+            "a range reaching the pixel's distance should beat its far end, got {over_range} and {at_far_z}"
+        );
+        assert!(
+            (over_range - level).abs() < 1e-3,
+            "the range holds the pixel's distance, so it should score like it: {over_range} vs {level}"
+        );
     }
 
     /// A directional-light-radius association names the host, so its redshift is
@@ -224,15 +277,31 @@ mod tests {
         let host = doc! { "best_host": doc! { "ra": 10.0, "dec": 20.0, "z": 0.2 } };
 
         assert_eq!(
-            host_redshifts(Some(&host), Some(&cross_matches)),
-            vec![0.2],
+            host_redshift_ranges(Some(&host), Some(&cross_matches)),
+            vec![(0.2, 0.2)],
             "the associated host's redshift should be the only one tried"
         );
         // And without an association every catalogued redshift is a candidate.
         assert_eq!(
-            host_redshifts(None, Some(&cross_matches)),
-            vec![0.05],
+            host_redshift_ranges(None, Some(&cross_matches)),
+            vec![(0.05, 0.05)],
             "the sweep should still run when nothing is associated"
+        );
+    }
+
+    #[test]
+    fn test_the_host_range_spans_its_redshift_error() {
+        let host = |z_err: f64| {
+            doc! { "best_host": doc! { "z": 0.25, "z_err": z_err, "posterior": 0.9 } }
+        };
+        assert_eq!(
+            host_redshift_ranges(Some(&host(0.0625)), None),
+            vec![(0.125, 0.375)]
+        );
+        assert_eq!(
+            host_redshift_ranges(Some(&host(0.25)), None),
+            vec![(0.0, 0.75)],
+            "the range should stop at zero redshift"
         );
     }
 
@@ -249,8 +318,8 @@ mod tests {
             doc! { "best_host": doc! { "ra": 10.0, "dec": 20.0, "z": 0.0 } },
         ] {
             assert_eq!(
-                host_redshifts(Some(&host), Some(&cross_matches)),
-                vec![0.05],
+                host_redshift_ranges(Some(&host), Some(&cross_matches)),
+                vec![(0.05, 0.05)],
                 "fell through to nothing for {host:?}"
             );
         }

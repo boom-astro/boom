@@ -10,7 +10,7 @@ use crate::utils::moc::{
     parse_3d_skymap_bytes, select_covering_depth_bounded, Cone, CredibleVolumeIndex, HpxMoc,
     LIGO3dskymap, Skymap3dError,
 };
-use crate::utils::skymap_search::host_redshifts;
+use crate::utils::skymap_search::{best_credible_level, host_redshift_ranges};
 use actix_web::{get, post, web, HttpResponse};
 use base64::prelude::*;
 use futures::TryStreamExt;
@@ -693,7 +693,7 @@ where
                 .await
                 .map_err(|e| response::internal_error(&format!("error querying aux: {}", e)))?;
 
-            let mut host_z_map: HashMap<String, Vec<f64>> = HashMap::new();
+            let mut host_z_map: HashMap<String, Vec<(f64, f64)>> = HashMap::new();
             while let Some(aux_doc) = aux_cursor.try_next().await.map_err(|e| {
                 response::internal_error(&format!("error reading aux cursor: {}", e))
             })? {
@@ -702,11 +702,11 @@ where
                 };
                 // Same precedence as the filter test endpoints: an associated host
                 // names the galaxy, so the two cannot disagree about one alert.
-                let z_values = host_redshifts(
+                let z_ranges = host_redshift_ranges(
                     aux_doc.get_document("host_galaxy").ok(),
                     aux_doc.get_document("cross_matches").ok(),
                 );
-                host_z_map.insert(oid.to_string(), z_values);
+                host_z_map.insert(oid.to_string(), z_ranges);
             }
 
             // luminosity_distance_mpc is a 200-step integration; alerts share hosts.
@@ -714,28 +714,23 @@ where
             let mut results = Vec::new();
             for alert in spatial_candidates {
                 let (ra, dec) = coords(&alert);
-                let z_values = host_z_map
+                let z_ranges = host_z_map
                     .get(object_id(&alert))
                     .map(|v| v.as_slice())
                     .unwrap_or(&[]);
 
-                if z_values.is_empty() {
+                if z_ranges.is_empty() {
                     // No host: the 2D test is all we have, so let it through.
                     results.push((alert, None));
-                } else {
-                    let best_spv = z_values
-                        .iter()
-                        .filter_map(|&z| {
-                            let d_mpc = *dist_cache
-                                .entry(z.to_bits())
-                                .or_insert_with(|| luminosity_distance_mpc(z));
-                            idx.searched_prob_vol_at(skymap, ra, dec, d_mpc)
-                        })
-                        .fold(f64::INFINITY, f64::min);
-
-                    if best_spv.is_finite() && best_spv <= *credible_level {
-                        results.push((alert, Some(best_spv)));
-                    }
+                } else if let Some(level) =
+                    best_credible_level(skymap, idx, ra, dec, z_ranges, |z| {
+                        *dist_cache
+                            .entry(z.to_bits())
+                            .or_insert_with(|| luminosity_distance_mpc(z))
+                    })
+                    .filter(|&level| level <= *credible_level)
+                {
+                    results.push((alert, Some(level)));
                 }
 
                 if results.len() >= limit as usize {
@@ -1133,8 +1128,11 @@ mod tests {
             doc! { "ra": 10.0, "dec": 20.0, "z": 0.05, "z_tech": "SPEC" },
         )]);
         let host = doc! { "best_host": doc! { "ra": 10.0, "dec": 20.0, "z": 0.2 } };
-        assert_eq!(host_redshifts(Some(&host), Some(&cm)), vec![0.2]);
-        assert_eq!(host_redshifts(None, Some(&cm)), vec![0.05]);
+        assert_eq!(
+            host_redshift_ranges(Some(&host), Some(&cm)),
+            vec![(0.2, 0.2)]
+        );
+        assert_eq!(host_redshift_ranges(None, Some(&cm)), vec![(0.05, 0.05)]);
     }
 
     #[test]
