@@ -143,7 +143,7 @@ the pipeline.
 ## Leases, and surviving a deploy
 
 A claimed run carries `lease_expires_at`, renewed by the worker's heartbeat
-every 20 seconds against a 60-second lease. Two things use it:
+every 20 seconds against a five-minute lease. Two things use it:
 
 - **A worker shutting down cleanly** (SIGTERM, i.e. a deploy) sets the running
   task's cancellation flag, waits for it to stop at its next safe point, and
