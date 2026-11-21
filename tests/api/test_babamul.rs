@@ -104,6 +104,23 @@ mod tests {
         }
     }
 
+    /// Gives a ZTF aux object one detection per program, which is all that
+    /// Babamul's public-object check reads.
+    async fn set_ztf_programids(database: &Database, object_id: &str, programids: &[i32]) {
+        let prv_candidates: Vec<_> = programids
+            .iter()
+            .map(|p| doc! { "programid": *p })
+            .collect();
+        database
+            .collection::<mongodb::bson::Document>("ZTF_alerts_aux")
+            .update_one(
+                doc! { "_id": object_id },
+                doc! { "$set": { "prv_candidates": prv_candidates } },
+            )
+            .await
+            .expect("Failed to set ZTF detections");
+    }
+
     #[actix_rt::test]
     async fn test_babamul_signup() {
         load_dotenv();
@@ -1087,24 +1104,37 @@ mod tests {
         let lsst_aux: mongodb::Collection<boom::alert::LsstObject> =
             database.collection("LSST_alerts_aux");
 
-        let ztf_id = format!("ZTF24conetest_{}", unique_suffix);
+        // Real-format IDs, so the object_id search can find them.
+        let random_ztf_id = || {
+            let letters: String = uuid::Uuid::new_v4().as_bytes()[..7]
+                .iter()
+                .map(|b| (b'a' + b % 26) as char)
+                .collect();
+            format!("ZTF98{}", letters)
+        };
+        let ztf_id = random_ztf_id();
+        let private_ztf_id = random_ztf_id();
         let lsst_id = format!("111{}", unique_suffix);
 
-        ztf_aux
-            .insert_one(boom::alert::ZtfObject {
-                object_id: ztf_id.clone(),
-                coordinates: Coordinates::new(ztf_ra, ztf_dec),
-                prv_candidates: vec![],
-                prv_nondetections: vec![],
-                fp_hists: vec![],
-                aliases: None,
-                created_at: 0.0,
-                updated_at: 0.0,
-                cross_matches: None,
-                host_galaxy: None,
-            })
-            .await
-            .expect("Failed to insert ZTF test object");
+        // Only the first has a public (programid 1) detection.
+        for (object_id, programids) in [(&ztf_id, vec![2, 1]), (&private_ztf_id, vec![2])] {
+            ztf_aux
+                .insert_one(boom::alert::ZtfObject {
+                    object_id: object_id.clone(),
+                    coordinates: Coordinates::new(ztf_ra, ztf_dec),
+                    prv_candidates: vec![],
+                    prv_nondetections: vec![],
+                    fp_hists: vec![],
+                    aliases: None,
+                    created_at: 0.0,
+                    updated_at: 0.0,
+                    cross_matches: None,
+                    host_galaxy: None,
+                })
+                .await
+                .expect("Failed to insert ZTF test object");
+            set_ztf_programids(&database, object_id, &programids).await;
+        }
 
         lsst_aux
             .insert_one(boom::alert::LsstObject {
@@ -1159,6 +1189,10 @@ mod tests {
         assert!(
             ids.contains(&ztf_id.as_str()),
             "ZTF object should be in results"
+        );
+        assert!(
+            !ids.contains(&private_ztf_id.as_str()),
+            "A private ZTF object should not be in results"
         );
         assert!(
             ids.contains(&lsst_id.as_str()),
@@ -1256,7 +1290,25 @@ mod tests {
             "Should reject request with no search params"
         );
 
+        for (object_id, expected) in [(&ztf_id, 1), (&private_ztf_id, 0)] {
+            let req = test::TestRequest::get()
+                .uri(&format!("/babamul/objects?object_id={}", object_id))
+                .insert_header(("Authorization", format!("Bearer {}", test_user.token)))
+                .to_request();
+            let body = read_json_response(test::call_service(&app, req).await).await;
+            assert_eq!(
+                body["data"].as_array().unwrap().len(),
+                expected,
+                "object_id search for {}",
+                object_id
+            );
+        }
+
         ztf_aux.delete_one(doc! { "_id": &ztf_id }).await.ok();
+        ztf_aux
+            .delete_one(doc! { "_id": &private_ztf_id })
+            .await
+            .ok();
         lsst_aux.delete_one(doc! { "_id": &lsst_id }).await.ok();
     }
 
@@ -2658,6 +2710,9 @@ mod tests {
                 .await
                 .expect("Failed to insert test object");
         }
+        // Only the first has a public (programid 1) detection.
+        set_ztf_programids(&database, &test_objects[0].object_id, &[1]).await;
+        set_ztf_programids(&database, &test_objects[1].object_id, &[2]).await;
 
         let app = test::init_service(
             App::new()
@@ -2693,6 +2748,19 @@ mod tests {
 
         let body = read_json_response(resp).await;
         assert!(body["data"].is_object(), "Should return results as object");
+        let found = |search: &str| -> Vec<String> {
+            body["data"][search]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|r| r["objectId"].as_str().map(String::from))
+                .collect()
+        };
+        assert!(found("search1").contains(&test_objects[0].object_id));
+        assert!(
+            !found("search2").contains(&test_objects[1].object_id),
+            "A private ZTF object should not be in results"
+        );
 
         let req = test::TestRequest::post()
             .uri("/babamul/surveys/ztf/objects/cone-search")

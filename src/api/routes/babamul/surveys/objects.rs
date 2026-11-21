@@ -405,12 +405,12 @@ pub async fn get_object(
             // Get the nearest ZtfObject if any. We use a near query on the aux collection
             let (ra, dec) = aux_entry.coordinates.get_radec();
             let nearest_ztf = match ztf_aux_collection
-                .find_one(doc! {
+                .find_one(public_ztf_objects(doc! {
                     "coordinates.radec_geojson": {
                         "$nearSphere": [ra - 180.0, dec],
                         "$maxDistance": LSST_ZTF_XMATCH_RADIUS,
                     },
-                })
+                }))
                 .await
             {
                 Ok(entry) => entry,
@@ -500,6 +500,13 @@ fn ztf_bad_formatting_message(value: &str) -> String {
 }
 
 /// Infer survey from objectId value and return normalized id
+/// Babamul serves only public ZTF data, so a ZTF object is listed only once it
+/// has a public (programid 1) detection.
+fn public_ztf_objects(mut filter: mongodb::bson::Document) -> mongodb::bson::Document {
+    filter.insert("prv_candidates.programid", 1);
+    filter
+}
+
 fn infer_survey_from_objectid(value: &str) -> Result<(Survey, String), String> {
     let trimmed = value.trim();
     let upper = trimmed.to_ascii_uppercase();
@@ -648,9 +655,12 @@ pub async fn get_objects(
         };
 
         let collection = db.collection::<ObjectMini>(&format!("{}_alerts_aux", survey));
-        let filter = doc! {
+        let mut filter = doc! {
             "_id": { "$regex": format!("^{}", normalized_id) }
         };
+        if survey == Survey::Ztf {
+            filter = public_ztf_objects(filter);
+        }
 
         match collection
             .find(filter)
@@ -718,7 +728,11 @@ pub async fn get_objects(
         let mut results: Vec<SearchObjectResult> = vec![];
 
         let ztf_collection = db.collection::<ObjectMini>("ZTF_alerts_aux");
-        match ztf_collection.find(near_filter.clone()).limit(limit).await {
+        match ztf_collection
+            .find(public_ztf_objects(near_filter.clone()))
+            .limit(limit)
+            .await
+        {
             Ok(mut cursor) => {
                 while let Ok(Some(obj)) = cursor.try_next().await {
                     let (obj_ra, obj_dec) = obj.coordinates.get_radec();
@@ -872,6 +886,11 @@ pub async fn cone_search_objects(
             }
         };
 
+        let filter = if survey == Survey::Ztf {
+            public_ztf_objects(filter)
+        } else {
+            filter
+        };
         match collection.find(filter).await {
             Ok(mut cursor) => {
                 let mut matches = vec![];
