@@ -153,34 +153,38 @@ pub fn best_credible_level(
     best.is_finite().then_some(best)
 }
 
+pub const MIN_HOST_POSTERIOR: f64 = 0.5;
 pub const HOST_Z_ERR_SIGMAS: f64 = 2.0;
 
 /// The redshift ranges to place the alert at.
 ///
 /// A directional-light-radius association names the galaxy the transient sits
-/// in, so where there is one its redshift range is the only one worth trying.
-/// Without one nothing says which neighbour is the host, and the level is taken
+/// in, so where it is reliable its redshift range is the only one worth trying.
+/// Otherwise nothing says which neighbour is the host, and the level is taken
 /// at whichever catalogued redshift places the alert deepest in the volume --
 /// an upper bound on how well it fits, over every galaxy that could be the host.
 pub fn host_redshift_ranges(
     host_galaxy: Option<&Document>,
     cross_matches: Option<&Document>,
 ) -> Vec<(f64, f64)> {
-    let host_range = host_galaxy
-        .and_then(|h| h.get_document("best_host").ok())
-        .and_then(|b| {
-            let z = get_f64_from_doc(b, "z").filter(|&z| z > 0.0)?;
-            let half_width = HOST_Z_ERR_SIGMAS
-                * get_f64_from_doc(b, "z_err")
-                    .filter(|&z_err| z_err > 0.0)
-                    .unwrap_or(0.0);
-            Some(((z - half_width).max(0.0), z + half_width))
-        });
+    let best_host = host_galaxy.and_then(|h| h.get_document("best_host").ok());
+    let host_range = best_host.and_then(|b| {
+        let z = get_f64_from_doc(b, "z").filter(|&z| z > 0.0)?;
+        let half_width = HOST_Z_ERR_SIGMAS
+            * get_f64_from_doc(b, "z_err")
+                .filter(|&z_err| z_err > 0.0)
+                .unwrap_or(0.0);
+        Some(((z - half_width).max(0.0), z + half_width))
+    });
+    let reliable = best_host
+        .and_then(|b| get_f64_from_doc(b, "posterior"))
+        .is_some_and(|posterior| posterior >= MIN_HOST_POSTERIOR);
     match host_range {
-        Some(range) => vec![range],
-        None => extract_host_redshifts(cross_matches)
+        Some(range) if reliable => vec![range],
+        _ => extract_host_redshifts(cross_matches)
             .into_iter()
             .map(|z| (z, z))
+            .chain(host_range)
             .collect(),
     }
 }
@@ -274,12 +278,19 @@ mod tests {
         let cross_matches = doc! {
             "NED": [ doc! { "ra": 10.0, "dec": 20.0, "z": 0.05, "z_tech": "SPEC" } ]
         };
-        let host = doc! { "best_host": doc! { "ra": 10.0, "dec": 20.0, "z": 0.2 } };
+        let host = |posterior: f64| {
+            doc! { "best_host": doc! { "ra": 10.0, "dec": 20.0, "z": 0.2, "posterior": posterior } }
+        };
 
         assert_eq!(
-            host_redshift_ranges(Some(&host), Some(&cross_matches)),
+            host_redshift_ranges(Some(&host(0.9)), Some(&cross_matches)),
             vec![(0.2, 0.2)],
             "the associated host's redshift should be the only one tried"
+        );
+        assert_eq!(
+            host_redshift_ranges(Some(&host(0.1)), Some(&cross_matches)),
+            vec![(0.05, 0.05), (0.2, 0.2)],
+            "an unreliable host should join the sweep, not replace it"
         );
         // And without an association every catalogued redshift is a candidate.
         assert_eq!(

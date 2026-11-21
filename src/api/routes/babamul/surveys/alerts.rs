@@ -1127,7 +1127,8 @@ mod tests {
             "NED",
             doc! { "ra": 10.0, "dec": 20.0, "z": 0.05, "z_tech": "SPEC" },
         )]);
-        let host = doc! { "best_host": doc! { "ra": 10.0, "dec": 20.0, "z": 0.2 } };
+        let host =
+            doc! { "best_host": doc! { "ra": 10.0, "dec": 20.0, "z": 0.2, "posterior": 0.9 } };
         assert_eq!(
             host_redshift_ranges(Some(&host), Some(&cm)),
             vec![(0.2, 0.2)]
