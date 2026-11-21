@@ -4216,7 +4216,9 @@ mod tests {
         let auth_app_data = get_test_auth(&database).await.unwrap();
         let app = oauth_app!(oauth_test_config(), database.clone(), auth_app_data);
 
-        // `seed_pending_identity` reuses one name, so both derive the same username.
+        // Both share a name, so they derive the same username. Only this test uses
+        // it: the other OAuth tests' "A Researcher" accounts come and go mid-run.
+        let name = format!("Researcher {}", uuid::Uuid::new_v4().simple());
         let emails: Vec<String> = (0..2)
             .map(|_| format!("test+{}@babamul.example.com", uuid::Uuid::new_v4()))
             .collect();
@@ -4224,6 +4226,10 @@ mod tests {
             let subject = format!("0000-0006-{}", uuid::Uuid::new_v4().simple());
             let ticket =
                 seed_pending_identity(&database, &subject, Some(email), Some("NAME1234")).await;
+            pending_identities(&database)
+                .update_one(doc! { "_id": &ticket }, doc! { "$set": { "name": &name } })
+                .await
+                .unwrap();
             let resp = test::call_service(
                 &app,
                 test::TestRequest::post()
