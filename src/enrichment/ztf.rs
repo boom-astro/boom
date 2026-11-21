@@ -28,6 +28,7 @@ use crate::utils::linking::{angular_separation_deg, night_at};
 use crate::utils::mpcorb::{
     elements_from_document, is_comet_designation, normalize_ztf_ssnamenr, ORBITS_COLLECTION,
 };
+use crate::utils::o11y::logging::log_error;
 use crate::utils::outburst::{
     is_static_interloper, median, stored_static_interloper, Point, MAX_SEPARATION_ARCSEC,
 };
@@ -1335,8 +1336,12 @@ impl EnrichmentWorker for ZtfEnrichmentWorker {
             }
         }
 
+        // Babamul is a side output: its failure must not keep the batch from
+        // reaching the filter queue.
         if let Some(babamul) = self.babamul.as_ref() {
-            babamul.process_ztf_alerts(enriched_alerts).await?;
+            if let Err(error) = babamul.process_ztf_alerts(enriched_alerts).await {
+                log_error!(error, "failed to publish enriched ZTF alerts to Babamul");
+            }
         }
 
         Ok(processed_alerts)
