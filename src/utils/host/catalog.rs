@@ -286,33 +286,51 @@ fn is_good_galaxy_spectrum(doc: &Document) -> bool {
         && opt_f64(doc, "z").is_some_and(|z| z > 0.0)
 }
 
+pub(super) fn redshift_is_photometric(
+    catalog: Option<&str>,
+    redshift: Option<f64>,
+    redshift_err: Option<f64>,
+    config: &HostGalaxyConfig,
+) -> bool {
+    let from_legacy =
+        catalog.is_some_and(|c| c == config.ls_dr10_catalog || c == config.ls_dr9_catalog);
+    redshift.is_none() || (from_legacy && redshift_err.is_some())
+}
+
+pub(super) fn nearest_galaxy_spectrum(
+    spectra: &[Document],
+    ra: f64,
+    dec: f64,
+    max_arcsec: f64,
+) -> Option<&Document> {
+    spectra
+        .iter()
+        .filter(|doc| is_good_galaxy_spectrum(doc))
+        .filter_map(|doc| {
+            let sep =
+                great_circle_distance(ra, dec, opt_f64(doc, "ra")?, opt_f64(doc, "dec")?) * 3600.0;
+            (sep <= max_arcsec).then_some((doc, sep))
+        })
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(doc, _)| doc)
+}
+
 fn add_spectroscopic_redshift(
     galaxy: &mut GalaxyCandidate,
     spectra: &[Document],
     config: &HostGalaxyConfig,
 ) {
-    let from_legacy = galaxy
-        .catalog
-        .as_deref()
-        .is_some_and(|c| c == config.ls_dr10_catalog || c == config.ls_dr9_catalog);
-    let photometric = galaxy.redshift.is_none() || (from_legacy && galaxy.redshift_err.is_some());
-    if !photometric {
+    if !redshift_is_photometric(
+        galaxy.catalog.as_deref(),
+        galaxy.redshift,
+        galaxy.redshift_err,
+        config,
+    ) {
         return;
     }
-    let spectrum = spectra
-        .iter()
-        .filter(|doc| is_good_galaxy_spectrum(doc))
-        .filter_map(|doc| {
-            let sep = great_circle_distance(
-                galaxy.ra,
-                galaxy.dec,
-                opt_f64(doc, "ra")?,
-                opt_f64(doc, "dec")?,
-            ) * 3600.0;
-            (sep <= config.spectrum_match_arcsec).then_some((doc, sep))
-        })
-        .min_by(|a, b| a.1.total_cmp(&b.1));
-    if let Some((doc, _)) = spectrum {
+    let spectrum =
+        nearest_galaxy_spectrum(spectra, galaxy.ra, galaxy.dec, config.spectrum_match_arcsec);
+    if let Some(doc) = spectrum {
         galaxy.redshift = opt_f64(doc, "z");
         galaxy.redshift_err = opt_f64(doc, "zerr");
     }

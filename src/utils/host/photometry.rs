@@ -132,6 +132,44 @@ pub fn photometry_from_xmatches(
     from_legacy(row, catalog, sep)
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn rows_at(
+    ra: f64,
+    dec: f64,
+    catalog: &str,
+    radius_arcsec: f64,
+    xmatch_configs: &[CatalogXmatchConfig],
+    survey: &Survey,
+    object_id: &str,
+    db: &mongodb::Database,
+) -> Option<Vec<Document>> {
+    let mut config = xmatch_configs
+        .iter()
+        .find(|c| c.catalog == catalog)?
+        .clone();
+    config.radius = conf::arcsec_to_radians(radius_arcsec);
+    config.use_distance = false;
+    config.angular_size_key = None;
+    config.max_results = None;
+
+    match xmatch(
+        ra,
+        dec,
+        object_id,
+        survey,
+        std::slice::from_ref(&config),
+        db,
+    )
+    .await
+    {
+        Ok(mut matches) => matches.remove(catalog),
+        Err(e) => {
+            warn!(object_id, catalog, error = %e, "host lookup failed");
+            None
+        }
+    }
+}
+
 async fn photometry_from_ps1(
     best: &StoredHostCandidate,
     config: &HostGalaxyConfig,
@@ -140,34 +178,19 @@ async fn photometry_from_ps1(
     object_id: &str,
     db: &mongodb::Database,
 ) -> Option<HostPhotometry> {
-    let mut ps1 = xmatch_configs
-        .iter()
-        .find(|c| c.catalog == config.ps1_catalog)?
-        .clone();
-    ps1.radius = conf::arcsec_to_radians(config.photometry_match_arcsec);
-    ps1.use_distance = false;
-    ps1.angular_size_key = None;
-    ps1.max_results = None;
-
-    let matches = match xmatch(
+    let rows = rows_at(
         best.ra,
         best.dec,
-        object_id,
+        &config.ps1_catalog,
+        config.photometry_match_arcsec,
+        xmatch_configs,
         survey,
-        std::slice::from_ref(&ps1),
+        object_id,
         db,
     )
-    .await
-    {
-        Ok(matches) => matches,
-        Err(e) => {
-            warn!(object_id, error = %e, "host photometry lookup failed");
-            return None;
-        }
-    };
-    let rows = matches.get(&ps1.catalog)?;
-    let (row, sep) = nearest(rows, best.ra, best.dec, config.photometry_match_arcsec)?;
-    from_ps1(row, &ps1.catalog, sep)
+    .await?;
+    let (row, sep) = nearest(&rows, best.ra, best.dec, config.photometry_match_arcsec)?;
+    from_ps1(row, &config.ps1_catalog, sep)
 }
 
 pub async fn attach_photometry(
