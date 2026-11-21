@@ -127,7 +127,7 @@ export function ClassificationBadges({
           Nuclear
         </Badge>
       )}
-      {((classifications['btsbot'] ?? 0) > 0.8) || ((classifications['acai_h'] ?? 0) > 0.8 && !properties?.star && ((data.candidate?.ndethist ?? 0) < 200)) && (
+      {(((classifications['btsbot'] ?? 0) > 0.8) || ((classifications['acai_h'] ?? 0) > 0.8 && !properties?.star && ((data.candidate?.ndethist ?? 0) < 200))) && (
         <Badge variant="outline" className="text-sm font-semibold">
           SN?
         </Badge>
