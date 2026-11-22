@@ -4,6 +4,12 @@ on:
   push:
     branches: [ "main" ]
   pull_request:
+    paths-ignore:
+      - "docs/**"
+      - "mkdocs.yml"
+      - "frontend/**"
+      - "config/grafana/**"
+      - "**/*.md"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}

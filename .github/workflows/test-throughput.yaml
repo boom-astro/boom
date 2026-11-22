@@ -4,6 +4,12 @@ on:
   push:
     branches: ["main"]
   pull_request:
+    paths-ignore:
+      - "docs/**"
+      - "mkdocs.yml"
+      - "frontend/**"
+      - "config/grafana/**"
+      - "**/*.md"
   workflow_dispatch:
 
 concurrency:
