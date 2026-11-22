@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import api, { type LiveIngest } from "@/lib/api";
+import api, { type LiveIngest, type LiveNight } from "@/lib/api";
 
 const REFRESH_MS = 60_000;
 const MINUTE = 60_000;
@@ -31,23 +31,28 @@ export function formatNight(date: string): string {
   return `${day(evening)} → ${morning.getMonth() === evening.getMonth() ? morning.getDate() : day(morning)}`;
 }
 
-export function useLiveIngest(enabled: boolean): { data: LiveIngest | null; error: string | null } {
+export function useLiveIngest(
+  enabled: boolean,
+  night: LiveNight = "current",
+): { data: LiveIngest | null; error: string | null } {
   const [data, setData] = useState<LiveIngest | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!enabled) return;
     let cancelled = false;
+    setData(null);
+    setError(null);
     const load = () => {
       if (document.visibilityState !== "visible") return;
-      api.fetchLiveIngest()
+      api.fetchLiveIngest(night)
         .then((live) => {
           if (cancelled) return;
           setData(live);
           setError(null);
         })
         .catch((e) => {
-          if (!cancelled) setError(e instanceof Error ? e.message : "Failed to load tonight's alerts");
+          if (!cancelled) setError(e instanceof Error ? e.message : "Failed to load the night's alerts");
         });
     };
     load();
@@ -58,7 +63,7 @@ export function useLiveIngest(enabled: boolean): { data: LiveIngest | null; erro
       clearInterval(id);
       document.removeEventListener("visibilitychange", load);
     };
-  }, [enabled]);
+  }, [enabled, night]);
 
   return { data, error };
 }
