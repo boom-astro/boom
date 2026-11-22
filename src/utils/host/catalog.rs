@@ -261,15 +261,22 @@ pub(super) fn legacy_rows<'a>(
 /// distances. Legacy Survey shreds large galaxies into many rows, each of which
 /// would split the posterior among fragments of one galaxy, so a Legacy row
 /// inside an accepted NED-LVS galaxy (d_DLR <= 1) is dropped. A DESI spectrum on
-/// a galaxy's centre then replaces its missing or photometric redshift.
+/// a galaxy's centre then replaces its missing or photometric redshift, and
+/// failing that a NED spectroscopic redshift there, even from a row with no
+/// diameter or of an excluded type.
 pub fn collect_galaxies(
     xmatches: &std::collections::HashMap<String, Vec<Document>>,
     config: &HostGalaxyConfig,
 ) -> Vec<GalaxyCandidate> {
     let mut galaxies = shaped_galaxies(xmatches, config);
-    if let Some(spectra) = xmatches.get(&config.desi_catalog) {
-        for galaxy in galaxies.iter_mut() {
+    let spectra = xmatches.get(&config.desi_catalog);
+    let ned = xmatches.get(&config.ned_catalog);
+    for galaxy in galaxies.iter_mut() {
+        if let Some(spectra) = spectra {
             add_spectroscopic_redshift(galaxy, spectra, config);
+        }
+        if let Some(ned) = ned {
+            add_ned_redshift(galaxy, ned, config);
         }
     }
     galaxies
@@ -286,35 +293,93 @@ fn is_good_galaxy_spectrum(doc: &Document) -> bool {
         && opt_f64(doc, "z").is_some_and(|z| z > 0.0)
 }
 
+pub(super) fn redshift_is_photometric(
+    catalog: Option<&str>,
+    redshift: Option<f64>,
+    redshift_err: Option<f64>,
+    config: &HostGalaxyConfig,
+) -> bool {
+    let from_legacy =
+        catalog.is_some_and(|c| c == config.ls_dr10_catalog || c == config.ls_dr9_catalog);
+    redshift.is_none() || (from_legacy && redshift_err.is_some())
+}
+
+fn is_ned_spectroscopic(doc: &Document) -> bool {
+    opt_string(doc, "z_tech").as_deref() == Some("SPEC")
+        && opt_f64(doc, "z").is_some_and(|z| z > 0.0)
+}
+
+fn nearest_where(
+    docs: &[Document],
+    ra: f64,
+    dec: f64,
+    max_arcsec: f64,
+    keep: impl Fn(&Document) -> bool,
+) -> Option<&Document> {
+    docs.iter()
+        .filter(|doc| keep(doc))
+        .filter_map(|doc| {
+            let sep =
+                great_circle_distance(ra, dec, opt_f64(doc, "ra")?, opt_f64(doc, "dec")?) * 3600.0;
+            (sep <= max_arcsec).then_some((doc, sep))
+        })
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(doc, _)| doc)
+}
+
+pub(super) fn nearest_galaxy_spectrum(
+    spectra: &[Document],
+    ra: f64,
+    dec: f64,
+    max_arcsec: f64,
+) -> Option<&Document> {
+    nearest_where(spectra, ra, dec, max_arcsec, is_good_galaxy_spectrum)
+}
+
 fn add_spectroscopic_redshift(
     galaxy: &mut GalaxyCandidate,
     spectra: &[Document],
     config: &HostGalaxyConfig,
 ) {
-    let from_legacy = galaxy
-        .catalog
-        .as_deref()
-        .is_some_and(|c| c == config.ls_dr10_catalog || c == config.ls_dr9_catalog);
-    let photometric = galaxy.redshift.is_none() || (from_legacy && galaxy.redshift_err.is_some());
-    if !photometric {
+    if !redshift_is_photometric(
+        galaxy.catalog.as_deref(),
+        galaxy.redshift,
+        galaxy.redshift_err,
+        config,
+    ) {
         return;
     }
-    let spectrum = spectra
-        .iter()
-        .filter(|doc| is_good_galaxy_spectrum(doc))
-        .filter_map(|doc| {
-            let sep = great_circle_distance(
-                galaxy.ra,
-                galaxy.dec,
-                opt_f64(doc, "ra")?,
-                opt_f64(doc, "dec")?,
-            ) * 3600.0;
-            (sep <= config.spectrum_match_arcsec).then_some((doc, sep))
-        })
-        .min_by(|a, b| a.1.total_cmp(&b.1));
-    if let Some((doc, _)) = spectrum {
+    let spectrum =
+        nearest_galaxy_spectrum(spectra, galaxy.ra, galaxy.dec, config.spectrum_match_arcsec);
+    if let Some(doc) = spectrum {
         galaxy.redshift = opt_f64(doc, "z");
         galaxy.redshift_err = opt_f64(doc, "zerr");
+    }
+}
+
+fn add_ned_redshift(galaxy: &mut GalaxyCandidate, ned: &[Document], config: &HostGalaxyConfig) {
+    if !redshift_is_photometric(
+        galaxy.catalog.as_deref(),
+        galaxy.redshift,
+        galaxy.redshift_err,
+        config,
+    ) {
+        return;
+    }
+    let Some(doc) = nearest_where(
+        ned,
+        galaxy.ra,
+        galaxy.dec,
+        config.spectrum_match_arcsec,
+        is_ned_spectroscopic,
+    ) else {
+        return;
+    };
+    galaxy.redshift = opt_f64(doc, "z");
+    galaxy.redshift_err = opt_f64(doc, "z_unc");
+    if galaxy.dist_mpc.is_none() {
+        galaxy.dist_mpc = opt_f64(doc, "DistMpc");
+        galaxy.dist_mpc_method = opt_string(doc, "DistMpc_method");
     }
 }
 
