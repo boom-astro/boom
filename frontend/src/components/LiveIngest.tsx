@@ -292,7 +292,7 @@ export default function LiveIngest({ data }: { data: LiveIngestData | null }) {
           {(cumulative?.total ?? 0).toLocaleString()}
         </span>
         <span className="text-muted-foreground text-xs">
-          alerts received tonight{inProgress > 0 ? `, ${inProgress.toLocaleString()} in progress` : ""}
+          alerts received{inProgress > 0 ? `, ${inProgress.toLocaleString()} in progress` : ""}
         </span>
         <div className="mt-2 flex flex-wrap gap-1.5">
           {lanes.map((lane) => {
@@ -323,7 +323,7 @@ export default function LiveIngest({ data }: { data: LiveIngestData | null }) {
         style={{ height: CUMULATIVE_HEIGHT }}
         onPointerMove={track}
         role="img"
-        aria-label={`${label}: ${(cumulative?.total ?? 0).toLocaleString()} alerts tonight`}
+        aria-label={`${label}: ${(cumulative?.total ?? 0).toLocaleString()} alerts`}
       >
         {sky()}
         {cumulative && (
@@ -350,7 +350,7 @@ export default function LiveIngest({ data }: { data: LiveIngestData | null }) {
       <div className="flex min-w-0 flex-col justify-center" style={{ minHeight: BATCH_HEIGHT }}>
         <span className="text-sm font-medium">Per {data.bin_minutes} minutes</span>
         <span className="text-muted-foreground text-xs">
-          {batches.peak ? `peak ${batches.peak.total.toLocaleString()} at ${utc(batches.peak.t)}` : "no alerts yet"}
+          {batches.peak ? `peak ${batches.peak.total.toLocaleString()} at ${utc(batches.peak.t)}` : "no alerts"}
         </span>
       </div>
       <div

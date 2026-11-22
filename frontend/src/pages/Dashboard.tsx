@@ -1,13 +1,14 @@
 import { useState, useEffect, useMemo, useRef } from "react";
-import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
+import { Card, CardHeader, CardTitle, CardDescription, CardContent, CardAction } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Bar, BarChart, CartesianGrid, ReferenceArea, ReferenceLine, XAxis, YAxis } from "recharts";
 import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from "@/components/ui/chart";
 import { Toggle } from "@/components/ui/toggle";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 import { IconInfoCircle, IconRefresh, IconZoomReset } from "@tabler/icons-react";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import api, { CollectionEntry, fetchTopics, NightlyStat, type TopicInfo } from "@/lib/api";
+import api, { CollectionEntry, fetchTopics, NightlyStat, type LiveNight, type TopicInfo } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch.tsx";
 import { Label } from "@/components/ui/label.tsx";
@@ -215,7 +216,8 @@ export default function Dashboard() {
   const [chartWidth, setChartWidth] = useState(0);
   const [now, setNow] = useState(Date.now);
   const isAdmin = useAppStore((s) => s.profile?.is_admin === true);
-  const live = useLiveIngest(true);
+  const [night, setNight] = useState<LiveNight>("current");
+  const live = useLiveIngest(true, night);
 
   useEffect(() => {
     setLoading(true);
@@ -568,12 +570,26 @@ export default function Dashboard() {
 
       <Card>
         <CardHeader>
-          <CardTitle>Tonight</CardTitle>
+          <CardTitle>{night === "current" ? "Tonight" : "Last night"}</CardTitle>
           <CardDescription>
-            {live.data?.date
-              ? `Night of ${formatNight(live.data.date)}, updated ${formatAgo(now - Date.parse(live.data.updated_at))}`
-              : "Current night"}
+            {!live.data?.date
+              ? night === "current" ? "Current night" : "Previous night"
+              : night === "current"
+                ? `Night of ${formatNight(live.data.date)}, updated ${formatAgo(now - Date.parse(live.data.updated_at))}`
+                : `Night of ${formatNight(live.data.date)}`}
           </CardDescription>
+          <CardAction>
+            <ToggleGroup
+              type="single"
+              variant="outline"
+              size="sm"
+              value={night}
+              onValueChange={(value) => value && setNight(value as LiveNight)}
+            >
+              <ToggleGroupItem value="previous" className="px-3">Last night</ToggleGroupItem>
+              <ToggleGroupItem value="current" className="px-3">Tonight</ToggleGroupItem>
+            </ToggleGroup>
+          </CardAction>
           {live.error && <p className="text-sm text-destructive">{live.error}</p>}
         </CardHeader>
         <CardContent>

@@ -611,8 +611,10 @@ export type LiveIngest = {
   surveys: LiveSurvey[];
 };
 
-export async function fetchLiveIngest(): Promise<LiveIngest> {
-  const res = await fetch(`${API_BASE}/stats/live`, { headers: optionalAuthHeaders() });
+export type LiveNight = "current" | "previous";
+
+export async function fetchLiveIngest(night: LiveNight = "current"): Promise<LiveIngest> {
+  const res = await fetch(`${API_BASE}/stats/live?night=${night}`, { headers: optionalAuthHeaders() });
   await ensureOk(res, "Fetch live ingest");
   return unwrapData<LiveIngest>(await readJson(res), { date: "", bin_minutes: 10, updated_at: "", surveys: [] });
 }
