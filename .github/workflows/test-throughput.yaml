@@ -4,6 +4,7 @@ on:
   push:
     branches: ["main"]
   pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
     paths-ignore:
       - "docs/**"
       - "mkdocs.yml"
@@ -13,7 +14,8 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
+  # Other labels must not cancel a running test.
+  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}${{ github.event.label.name != 'skip-throughput' && github.event.label && format('-{0}', github.run_id) || '' }}
   # Only PR runs are superseded; main keeps one run, and one status, per commit.
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
@@ -35,6 +37,10 @@ env:
 jobs:
   test:
     name: Run throughput test
+    if: >-
+      github.event_name != 'pull_request' ||
+      (!contains(github.event.pull_request.labels.*.name, 'skip-throughput') &&
+      (!github.event.label || github.event.label.name == 'skip-throughput'))
     runs-on: ubuntu-latest
     permissions: write-all
     # The cap catches a hang, and leaves room for a slow runner rather than
