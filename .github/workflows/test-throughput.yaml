@@ -35,12 +35,32 @@ env:
   BOOM_GPU__ENABLED: 'false'
 
 jobs:
+  merged-pr-labels:
+    name: Check the merged pull request labels
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      skip: ${{ steps.labels.outputs.skip }}
+    steps:
+      - id: labels
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls" --jq '.[].labels[].name' | grep -qx skip-throughput; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
   test:
     name: Run throughput test
+    needs: merged-pr-labels
     if: >-
-      github.event_name != 'pull_request' ||
+      !cancelled() && needs.merged-pr-labels.outputs.skip != 'true' &&
+      (github.event_name != 'pull_request' ||
       (!contains(github.event.pull_request.labels.*.name, 'skip-throughput') &&
-      (!github.event.label || github.event.label.name == 'skip-throughput'))
+      (!github.event.label || github.event.label.name == 'skip-throughput')))
     runs-on: ubuntu-latest
     permissions: write-all
     # The cap catches a hang, and leaves room for a slow runner rather than
@@ -156,6 +176,9 @@ jobs:
           # the last few successful main runs, and link every run it covers.
           links=()
           while read -r run_id; do
+            if [ ${#links[@]} -ge "$BASELINE_RUNS" ]; then
+              break
+            fi
             downloaded=0
             for type in mongo s3; do
               if gh run download "$run_id" --repo "$GITHUB_REPOSITORY" \
@@ -170,7 +193,7 @@ jobs:
             fi
           done < <(gh run list --repo "$GITHUB_REPOSITORY" \
             --workflow test-throughput.yaml --branch main --status success \
-            --limit "$BASELINE_RUNS" --json databaseId --jq '.[].databaseId')
+            --limit 30 --json databaseId --jq '.[].databaseId')
           if [ ${#links[@]} -eq 0 ]; then
             echo "link=_no successful main run found_" >> "$GITHUB_OUTPUT"
           else
