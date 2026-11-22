@@ -151,7 +151,7 @@ jobs:
       contents: read
       actions: read # gh run list + cross-run artifact download
     needs: test
-    if: github.event_name == 'pull_request'
+    if: ${{ !cancelled() && github.event_name == 'pull_request' && needs.test.result == 'success' }}
     steps:
       - uses: actions/checkout@v4
       - name: Download Mongo logs
