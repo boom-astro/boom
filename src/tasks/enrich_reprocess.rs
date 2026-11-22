@@ -58,6 +58,8 @@ const DRAIN_POLL: Duration = Duration::from_secs(5);
 
 const BATCH_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
+const STOP_GRACE: Duration = Duration::from_secs(BATCH_TIMEOUT.as_secs() + 60);
+
 const CLAIM: &str = r#"
 local candids = {}
 for i = 1, tonumber(ARGV[1]) do
@@ -434,14 +436,27 @@ pub async fn run(
     for (_, sender) in &workers {
         let _ = sender.send(WorkerCmd::TERM).await;
     }
+    let deadline = tokio::time::Instant::now() + STOP_GRACE;
+    while workers.iter().any(|(h, _)| !h.is_finished()) && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
     let mut panicked = 0;
+    let mut stuck = 0;
     for (handle, _) in workers {
-        if handle.join().is_err() {
+        if !handle.is_finished() {
+            stuck += 1;
+        } else if handle.join().is_err() {
             panicked += 1;
         }
     }
     if panicked > 0 {
         ctx.error(format!("{panicked} enrichment worker(s) panicked"));
+    }
+    if stuck > 0 {
+        ctx.error(format!(
+            "{stuck} enrichment worker(s) did not stop within {STOP_GRACE:?} and were left \
+             behind; the alerts they had claimed are counted as not enriched"
+        ));
     }
 
     let not_enriched = park_in_flight(config, &queue).await;
