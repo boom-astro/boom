@@ -41,6 +41,8 @@ jobs:
       uses: dtolnay/rust-toolchain@stable
     - name: Configure cache
       uses: Swatinem/rust-cache@v2
+      with:
+        save-if: ${{ github.ref == 'refs/heads/main' }}
     - name: Create default .env file & enable Babamul
       run: |
         cp .env.example .env
