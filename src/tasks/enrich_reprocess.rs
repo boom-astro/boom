@@ -43,7 +43,7 @@ use mongodb::bson::{doc, Document};
 use redis::{AsyncCommands, Script};
 use serde::{Deserialize, Serialize};
 use std::{sync::Arc, thread, time::Duration};
-use tokio::sync::mpsc;
+use tokio::{sync::mpsc, time::timeout};
 use tracing::{debug, span, Level};
 use utoipa::ToSchema;
 
@@ -55,6 +55,8 @@ const PUSH_BATCH: usize = 1_000;
 
 /// How often to check whether the queue has drained.
 const DRAIN_POLL: Duration = Duration::from_secs(5);
+
+const BATCH_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
 const CLAIM: &str = r#"
 local candids = {}
@@ -654,17 +656,36 @@ async fn run_enrich_only<T: EnrichmentWorker>(
 
         let mut failed = Vec::new();
         // Return value dropped on purpose: nothing is pushed to an output queue.
-        if let Err(error) = worker.process_alerts(&candids).await {
-            log_error!(
-                WARN,
-                error,
-                "batch failed, retrying its alerts one at a time"
-            );
-            for &candid in &candids {
-                if let Err(error) = worker.process_alerts(&[candid]).await {
-                    log_error!(error, "could not enrich candid {}", candid);
-                    failed.push(candid);
+        match timeout(BATCH_TIMEOUT, worker.process_alerts(&candids)).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => {
+                log_error!(
+                    WARN,
+                    error,
+                    "batch failed, retrying its alerts one at a time"
+                );
+                for &candid in &candids {
+                    match timeout(BATCH_TIMEOUT, worker.process_alerts(&[candid])).await {
+                        Ok(Ok(_)) => {}
+                        Ok(Err(error)) => {
+                            log_error!(error, "could not enrich candid {}", candid);
+                            failed.push(candid);
+                        }
+                        Err(elapsed) => {
+                            log_error!(elapsed, "could not enrich candid {}", candid);
+                            failed.push(candid);
+                        }
+                    }
                 }
+            }
+            Err(elapsed) => {
+                log_error!(
+                    elapsed,
+                    "batch of {} alerts did not finish, parking them on {}",
+                    candids.len(),
+                    failed_queue
+                );
+                failed.extend_from_slice(&candids);
             }
         }
 
