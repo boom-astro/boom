@@ -18,11 +18,6 @@ jobs:
     name: Build & Test
     runs-on: ubuntu-latest
     permissions: write-all
-    # `cargo test --release` is around twenty minutes of this job and the rest
-    # is under two, so a thirty minute cap sat close enough to the typical run
-    # that an ordinarily slow runner was cancelled rather than reported. The
-    # ceiling is here to stop a hung test burning an hour, not to bound a
-    # healthy run.
     timeout-minutes: 60
     strategy:
       matrix:
@@ -141,4 +136,4 @@ jobs:
           echo "$date: $(find "$dir" -maxdepth 1 -name '*.avro' | wc -l | tr -d ' ') alerts"
         done
     - name: Test BOOM
-      run: PATH=/opt/kafka/bin:$PATH cargo test --release
+      run: PATH=/opt/kafka/bin:$PATH cargo test --profile ci
