@@ -2050,7 +2050,9 @@ pub async fn get_filter_schema(
     config: web::Data<AppConfig>,
 ) -> HttpResponse {
     let survey_name = path.into_inner().0;
-    let mut schema = serde_json::json!(filter_schema(&survey_name));
+    let avro = filter_schema(&survey_name);
+    let mut schema = serde_json::json!(avro);
+    with_field_docs(&avro, &mut schema);
     let catalogs = config
         .crossmatch
         .get(&survey_name)
@@ -2062,6 +2064,47 @@ pub async fn get_filter_schema(
         }
     }
     response::ok(&format!("avro schema for survey {}", survey_name), schema)
+}
+
+/// apache-avro serializes a record field without its `doc`, so copy each one back.
+fn with_field_docs(schema: &apache_avro::Schema, json: &mut serde_json::Value) {
+    use apache_avro::Schema;
+    match schema {
+        Schema::Record(record) => {
+            let Some(fields) = json
+                .get_mut("fields")
+                .and_then(serde_json::Value::as_array_mut)
+            else {
+                return;
+            };
+            for (field, value) in record.fields.iter().zip(fields.iter_mut()) {
+                if let Some(doc) = &field.doc {
+                    value["doc"] = serde_json::json!(doc);
+                }
+                if let Some(kind) = value.get_mut("type") {
+                    with_field_docs(&field.schema, kind);
+                }
+            }
+        }
+        Schema::Union(inner) => {
+            if let Some(variants) = json.as_array_mut() {
+                for (variant, value) in inner.variants().iter().zip(variants.iter_mut()) {
+                    with_field_docs(variant, value);
+                }
+            }
+        }
+        Schema::Array(inner) => {
+            if let Some(items) = json.get_mut("items") {
+                with_field_docs(&inner.items, items);
+            }
+        }
+        Schema::Map(inner) => {
+            if let Some(values) = json.get_mut("values") {
+                with_field_docs(&inner.types, values);
+            }
+        }
+        _ => {}
+    }
 }
 
 const CATALOG_SAMPLE_SIZE: i64 = 20;
