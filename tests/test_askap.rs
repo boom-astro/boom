@@ -19,6 +19,7 @@ async fn test_process_askap_alert() {
 
     let (candid, object_id, ra, dec, bytes_content) =
         AlertRandomizer::new_randomized(Survey::Askap).get().await;
+    let object_id = format!("ASKAP-{object_id}");
     let result = alert_worker.process_alert(&bytes_content).await;
     assert!(result.is_ok(), "{:?}", result);
     assert_eq!(result.unwrap(), ProcessAlertStatus::Added(candid));
@@ -76,6 +77,7 @@ async fn test_filter_askap_alert() {
 
     let (candid, object_id, _ra, _dec, bytes_content) =
         AlertRandomizer::new_randomized(Survey::Askap).get().await;
+    let object_id = format!("ASKAP-{object_id}");
     let status = alert_worker.process_alert(&bytes_content).await.unwrap();
     assert_eq!(status, ProcessAlertStatus::Added(candid));
 

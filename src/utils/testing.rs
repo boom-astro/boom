@@ -471,7 +471,7 @@ pub async fn assert_update_aux_branches_and_fallback<A>(
 pub fn randomize_object_id(survey: &Survey) -> String {
     let mut rng = rand::rng();
     match survey {
-        Survey::Ztf | Survey::Decam | Survey::Winter | Survey::Askap => {
+        Survey::Ztf | Survey::Decam | Survey::Winter => {
             let mut object_id = survey.to_string();
             for _ in 0..2 {
                 object_id.push(rng.random_range('0'..='9'));
@@ -482,6 +482,7 @@ pub fn randomize_object_id(survey: &Survey) -> String {
             object_id
         }
         Survey::Lsst => format!("{}", rand::rng().random_range(0..i64::MAX)),
+        Survey::Askap => format!("{}", rng.random_range(0..i64::MAX)),
         Survey::Argus => uuid::Uuid::new_v4().to_string(),
     }
 }

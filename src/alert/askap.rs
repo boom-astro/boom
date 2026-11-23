@@ -36,6 +36,16 @@ pub const ASKAP_ZTF_XMATCH_RADIUS: f64 =
     (ASKAP_POSITION_UNCERTAINTY.max(ztf::ZTF_POSITION_UNCERTAINTY) / 3600.0_f64).to_radians();
 pub const ASKAP_LSST_XMATCH_RADIUS: f64 =
     (ASKAP_POSITION_UNCERTAINTY.max(lsst::LSST_POSITION_UNCERTAINTY) / 3600.0_f64).to_radians();
+const OBJECT_ID_PREFIX: &str = concat!(STREAM_NAME, "-");
+
+/// VAST source ids are bare integers, which downstream tools take for LSST ids.
+fn askap_object_id(source_id: String) -> String {
+    if source_id.starts_with(OBJECT_ID_PREFIX) {
+        source_id
+    } else {
+        format!("{OBJECT_ID_PREFIX}{source_id}")
+    }
+}
 
 /// One VAST measurement (blind or forced); carries `jd` natively.
 #[apache_avro_macros::serdavro]
@@ -381,7 +391,7 @@ impl AlertWorker for AskapAlertWorker {
             .inspect_err(as_error!())?;
 
         let candid = avro_alert.candid;
-        let object_id = avro_alert.object_id;
+        let object_id = askap_object_id(avro_alert.object_id);
         let ra = avro_alert.candidate.ra;
         let dec = avro_alert.candidate.dec;
 
