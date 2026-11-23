@@ -30,14 +30,20 @@ ENV LIBCLANG_PATH=/usr/lib/llvm-19/lib
 
 WORKDIR /app
 
-FROM base AS builder
+FROM base AS chef
+
+RUN cargo install --locked cargo-chef --version 0.1.78
+
+FROM chef AS planner
+
+COPY apache-avro-macros /app/apache-avro-macros
+COPY Cargo.toml Cargo.lock build.rs /app/
+COPY ./src /app/src
+RUN cargo chef prepare --recipe-path recipe.json
+
+FROM chef AS builder
 
 ARG ONNXRUNTIME_GPU_VERSION=1.24.4
-# Compiled into the binaries and recorded on every data mutation, so the ledger
-# can name the commit that produced a change. Absent when unset -- the ledger
-# records that honestly rather than inventing a value.
-ARG BOOM_GIT_SHA
-ENV BOOM_GIT_SHA=${BOOM_GIT_SHA}
 
 RUN python3 -m venv /opt/ort-py && \
     /opt/ort-py/bin/pip install --no-cache-dir "onnxruntime==${ONNXRUNTIME_GPU_VERSION}" && \
@@ -49,6 +55,15 @@ RUN ORT_CAPI_DIR="$('/opt/ort-py/bin/python' -c 'import pathlib, onnxruntime as 
     cp "${ORT_CAPI_DIR}/libonnxruntime_providers_shared.so" /opt/ort/ && \
     rm -rf /opt/ort-py && ln -sf /opt/ort/libonnxruntime.so.${ONNXRUNTIME_GPU_VERSION} /opt/ort/libonnxruntime.so
 
+COPY --from=planner /app/recipe.json /app/recipe.json
+RUN cargo chef cook --release --recipe-path recipe.json
+
+# Compiled into the binaries and recorded on every data mutation, so the ledger
+# can name the commit that produced a change. Absent when unset -- the ledger
+# records that honestly rather than inventing a value.
+ARG BOOM_GIT_SHA
+ENV BOOM_GIT_SHA=${BOOM_GIT_SHA}
+
 COPY apache-avro-macros /app/apache-avro-macros
 COPY Cargo.toml Cargo.lock build.rs /app/
 # build.rs generates the Milvus gRPC bindings from these vendored protos into
@@ -57,19 +72,7 @@ COPY ./proto /app/proto
 COPY ./schemas /app/schemas
 COPY ./src /app/src
 
-# BuildKit cache mounts keep the compiled crates (target/) and the fetched
-# dependencies (cargo registry/git) between builds, so only the crates that
-# actually changed are recompiled -- unlike a plain image layer, which is
-# all-or-nothing and rebuilds the whole workspace on any source change.
-#
-# A cache mount is NOT part of the image, so the release binaries are copied out
-# to /app/bin within the same RUN for the runtime stage to pick up. On CI the
-# mounts are persisted across runs by buildkit-cache-dance (see build.yaml);
-# locally they persist on the BuildKit builder.
-RUN --mount=type=cache,target=/app/target,sharing=locked \
-    --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
-    cargo build --release && \
+RUN cargo build --release && \
     mkdir -p /app/bin && \
     cp target/release/scheduler \
        target/release/kafka_consumer \

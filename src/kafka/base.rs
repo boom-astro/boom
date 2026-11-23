@@ -23,7 +23,7 @@ use rdkafka::{
     client::DefaultClientContext,
     config::ClientConfig,
     consumer::{BaseConsumer, CommitMode, Consumer},
-    error::{KafkaError, KafkaResult},
+    error::{KafkaError, KafkaResult, RDKafkaErrorCode},
     message::Message,
     producer::{FutureProducer, FutureRecord, Producer},
     TopicPartitionList,
@@ -66,6 +66,10 @@ fn get_partition_ids(
         Some(topic) => topic,
         None => return Ok(None),
     };
+    if topic.error().map(RDKafkaErrorCode::from) == Some(RDKafkaErrorCode::UnknownTopicOrPartition)
+    {
+        return Ok(None);
+    }
     let partition_ids = topic
         .partitions()
         .iter()

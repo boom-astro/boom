@@ -112,3 +112,10 @@ villar-pso = { git = "https://github.com/frenbox/villar-pso", rev = "94569a874fc
 
 [workspace]
 members = ["apache-avro-macros"]
+
+[profile.ci]
+inherits = "release"
+opt-level = 1
+
+[profile.ci.package."*"]
+opt-level = 3

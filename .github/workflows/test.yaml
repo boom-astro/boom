@@ -4,6 +4,12 @@ on:
   push:
     branches: [ "main" ]
   pull_request:
+    paths-ignore:
+      - "docs/**"
+      - "mkdocs.yml"
+      - "frontend/**"
+      - "config/grafana/**"
+      - "**/*.md"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
@@ -18,11 +24,6 @@ jobs:
     name: Build & Test
     runs-on: ubuntu-latest
     permissions: write-all
-    # `cargo test --release` is around twenty minutes of this job and the rest
-    # is under two, so a thirty minute cap sat close enough to the typical run
-    # that an ordinarily slow runner was cancelled rather than reported. The
-    # ceiling is here to stop a hung test burning an hour, not to bound a
-    # healthy run.
     timeout-minutes: 60
     strategy:
       matrix:
@@ -40,6 +41,8 @@ jobs:
       uses: dtolnay/rust-toolchain@stable
     - name: Configure cache
       uses: Swatinem/rust-cache@v2
+      with:
+        save-if: ${{ github.ref == 'refs/heads/main' }}
     - name: Create default .env file & enable Babamul
       run: |
         cp .env.example .env
@@ -141,4 +144,4 @@ jobs:
           echo "$date: $(find "$dir" -maxdepth 1 -name '*.avro' | wc -l | tr -d ' ') alerts"
         done
     - name: Test BOOM
-      run: PATH=/opt/kafka/bin:$PATH cargo test --release
+      run: PATH=/opt/kafka/bin:$PATH cargo test --profile ci
