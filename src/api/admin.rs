@@ -202,11 +202,6 @@ mod tests {
     use super::*;
     use mongodb::bson::doc;
 
-    /// Serializes the seeding tests: they share one `babamul_users` collection
-    /// and each one cares how many admins are in it.
-    static SEED_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
-        std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
-
     async fn insert_user(db: &mongodb::Database, email: &str, is_admin: bool) -> String {
         let id = uuid::Uuid::new_v4().to_string();
         let mut user = babamul_user(is_admin);
@@ -228,9 +223,9 @@ mod tests {
             .is_admin
     }
 
-    async fn clear(db: &mongodb::Database) {
+    async fn clear(db: &mongodb::Database, emails: &[&str]) {
         db.collection::<BabamulUser>("babamul_users")
-            .delete_many(doc! {})
+            .delete_many(doc! { "email": { "$in": emails } })
             .await
             .expect("clears");
     }
@@ -320,11 +315,10 @@ mod tests {
 
     #[tokio::test]
     async fn an_admin_appointed_in_the_app_survives_a_restart() {
-        let _seeding = SEED_LOCK.lock().await;
         // Grants only, so somebody appointed through the API keeps it without
         // being named in config.
         let db = crate::conf::get_test_db().await;
-        clear(&db).await;
+        clear(&db, &["appointed@example.org"]).await;
         let appointed = insert_user(&db, "appointed@example.org", true).await;
 
         reconcile_babamul_admins(&db, &["someone-else@example.org".to_string()])
@@ -332,14 +326,13 @@ mod tests {
             .expect("seeds");
 
         assert!(is_admin(&db, &appointed).await);
-        clear(&db).await;
+        clear(&db, &["appointed@example.org"]).await;
     }
 
     #[tokio::test]
     async fn the_first_admin_comes_from_config() {
-        let _seeding = SEED_LOCK.lock().await;
         let db = crate::conf::get_test_db().await;
-        clear(&db).await;
+        clear(&db, &["first@example.org"]).await;
         let id = insert_user(&db, "first@example.org", false).await;
 
         reconcile_babamul_admins(&db, &["First@Example.org".to_string()])
@@ -348,18 +341,17 @@ mod tests {
 
         // Case-insensitively, because that is how sign-in matches an address.
         assert!(is_admin(&db, &id).await);
-        clear(&db).await;
+        clear(&db, &["first@example.org"]).await;
     }
 
     #[tokio::test]
     async fn everyone_on_the_list_is_an_admin_after_startup() {
-        let _seeding = SEED_LOCK.lock().await;
         // The list is a floor, enforced on every boot. The consequence worth
         // pinning: revoking somebody still named here does not stick, which is
         // why removing an admin means editing the list first and revoking
         // second.
         let db = crate::conf::get_test_db().await;
-        clear(&db).await;
+        clear(&db, &["keeper@example.org", "revoked@example.org"]).await;
         let keeper = insert_user(&db, "keeper@example.org", true).await;
         let revoked = insert_user(&db, "revoked@example.org", false).await;
 
@@ -379,20 +371,19 @@ mod tests {
             "everyone on the list is an admin after startup, which is why removing \
              one means editing the list first"
         );
-        clear(&db).await;
+        clear(&db, &["keeper@example.org", "revoked@example.org"]).await;
     }
 
     #[tokio::test]
     async fn an_empty_list_writes_nothing() {
-        let _seeding = SEED_LOCK.lock().await;
         let db = crate::conf::get_test_db().await;
-        clear(&db).await;
+        clear(&db, &["nobody@example.org"]).await;
         let id = insert_user(&db, "nobody@example.org", false).await;
 
         reconcile_babamul_admins(&db, &[]).await.expect("no-op");
 
         assert!(!is_admin(&db, &id).await);
-        clear(&db).await;
+        clear(&db, &["nobody@example.org"]).await;
     }
 
     fn boom_user(is_admin: bool) -> User {
