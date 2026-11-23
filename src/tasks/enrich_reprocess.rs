@@ -43,7 +43,7 @@ use mongodb::bson::{doc, Document};
 use redis::{AsyncCommands, Script};
 use serde::{Deserialize, Serialize};
 use std::{sync::Arc, thread, time::Duration};
-use tokio::sync::mpsc;
+use tokio::{sync::mpsc, time::timeout};
 use tracing::{debug, span, Level};
 use utoipa::ToSchema;
 
@@ -55,6 +55,10 @@ const PUSH_BATCH: usize = 1_000;
 
 /// How often to check whether the queue has drained.
 const DRAIN_POLL: Duration = Duration::from_secs(5);
+
+const BATCH_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+
+const STOP_GRACE: Duration = Duration::from_secs(BATCH_TIMEOUT.as_secs() + 60);
 
 const CLAIM: &str = r#"
 local candids = {}
@@ -432,14 +436,27 @@ pub async fn run(
     for (_, sender) in &workers {
         let _ = sender.send(WorkerCmd::TERM).await;
     }
+    let deadline = tokio::time::Instant::now() + STOP_GRACE;
+    while workers.iter().any(|(h, _)| !h.is_finished()) && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
     let mut panicked = 0;
+    let mut stuck = 0;
     for (handle, _) in workers {
-        if handle.join().is_err() {
+        if !handle.is_finished() {
+            stuck += 1;
+        } else if handle.join().is_err() {
             panicked += 1;
         }
     }
     if panicked > 0 {
         ctx.error(format!("{panicked} enrichment worker(s) panicked"));
+    }
+    if stuck > 0 {
+        ctx.error(format!(
+            "{stuck} enrichment worker(s) did not stop within {STOP_GRACE:?} and were left \
+             behind; the alerts they had claimed are counted as not enriched"
+        ));
     }
 
     let not_enriched = park_in_flight(config, &queue).await;
@@ -654,17 +671,36 @@ async fn run_enrich_only<T: EnrichmentWorker>(
 
         let mut failed = Vec::new();
         // Return value dropped on purpose: nothing is pushed to an output queue.
-        if let Err(error) = worker.process_alerts(&candids).await {
-            log_error!(
-                WARN,
-                error,
-                "batch failed, retrying its alerts one at a time"
-            );
-            for &candid in &candids {
-                if let Err(error) = worker.process_alerts(&[candid]).await {
-                    log_error!(error, "could not enrich candid {}", candid);
-                    failed.push(candid);
+        match timeout(BATCH_TIMEOUT, worker.process_alerts(&candids)).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => {
+                log_error!(
+                    WARN,
+                    error,
+                    "batch failed, retrying its alerts one at a time"
+                );
+                for &candid in &candids {
+                    match timeout(BATCH_TIMEOUT, worker.process_alerts(&[candid])).await {
+                        Ok(Ok(_)) => {}
+                        Ok(Err(error)) => {
+                            log_error!(error, "could not enrich candid {}", candid);
+                            failed.push(candid);
+                        }
+                        Err(elapsed) => {
+                            log_error!(elapsed, "could not enrich candid {}", candid);
+                            failed.push(candid);
+                        }
+                    }
                 }
+            }
+            Err(elapsed) => {
+                log_error!(
+                    elapsed,
+                    "batch of {} alerts did not finish, parking them on {}",
+                    candids.len(),
+                    failed_queue
+                );
+                failed.extend_from_slice(&candids);
             }
         }
 
