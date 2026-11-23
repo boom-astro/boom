@@ -421,6 +421,7 @@ pub struct RecentProperties {
 #[derive(Debug, PartialEq, Clone, Deserialize, Serialize, AvroSchema, ToSchema)]
 pub struct BandProperties {
     pub peak_jd: f64,
+    /// Brightest magnitude seen, so a brighter peak is a smaller value.
     pub peak_mag: f32,
     pub peak_mag_err: f32,
     pub dt: f32,

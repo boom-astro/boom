@@ -273,8 +273,12 @@ impl LsstSsoAssociation {
 pub struct LsstAlertProperties {
     /// Deprecated alias for `sso.is_sso`, kept so existing filters keep working.
     pub rock: bool,
+    /// Detections at this position span more than 0.01 day (about 15 minutes).
     pub stationary: bool,
+    /// An LSPSC point source (score > 0.5) within 1". `None` outside the LSPSC footprint.
     pub star: Option<bool>,
+    /// Within 20" of an LSPSC point source brighter than 15 mag. `None` outside the LSPSC
+    /// footprint.
     pub near_brightstar: Option<bool>,
     /// Absent means never evaluated for a host, not evaluated and hostless.
     #[serde(default)]
