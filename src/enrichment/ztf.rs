@@ -690,7 +690,10 @@ impl ZtfSsoAssociation {
 pub struct ZtfAlertProperties {
     /// Deprecated, thresholded at a hardcoded 12". Prefer `sso.is_sso`.
     pub rock: bool,
+    /// Coincides with a PS1 star: sgscore1 > 0.76 within 2", or a red point source within 1".
     pub star: bool,
+    /// Within 20" of a Gaia star with G <= 12 or a PS1 star with r <= 15, where the
+    /// subtraction may be unreliable.
     pub near_brightstar: bool,
     /// A host galaxy was associated within the configured `max_dlr`.
     ///
@@ -704,6 +707,7 @@ pub struct ZtfAlertProperties {
     #[serde(default)]
     #[avro(default = "null")]
     pub best_host: Option<HostSummary>,
+    /// Detections at this position span more than 0.01 day (about 15 minutes).
     pub stationary: bool,
     pub photstats: PerBandProperties,
     pub multisurvey_photstats: Option<PerBandProperties>,
@@ -780,11 +784,17 @@ impl AppleCiderClassProbs {
 /// ZTF alert ML classifier scores
 #[derive(Debug, Clone, Deserialize, Serialize, AvroSchema, utoipa::ToSchema)]
 pub struct ZtfAlertClassifications {
+    /// ACAI score for a hosted transient, such as a supernova on its galaxy (Duev et al. 2021).
     pub acai_h: f32,
+    /// ACAI score for a nuclear transient, at the center of its host.
     pub acai_n: f32,
+    /// ACAI score for a variable star.
     pub acai_v: f32,
+    /// ACAI score for an orphan transient, with no visible host.
     pub acai_o: f32,
+    /// ACAI score for a bogus alert, a subtraction artifact: keep low values.
     pub acai_b: f32,
+    /// BTSbot score for a bright extragalactic transient worth a spectrum (Rehemtulla et al. 2024).
     pub btsbot: f32,
     /// Calibrated, prior-adjusted leaf probabilities. Previously the raw head
     /// output; `applecider_outputs.alpha` still recovers that exactly.

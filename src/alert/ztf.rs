@@ -360,6 +360,7 @@ pub struct Candidate {
     #[serde(deserialize_with = "deserialize_tooflag")]
     pub tooflag: bool,
     pub candid: i64,
+    /// True when the difference is positive, the source brighter than the reference.
     #[serde(deserialize_with = "deserialize_isdiffpos")]
     pub isdiffpos: bool,
     pub nid: Option<i32>,
@@ -400,6 +401,8 @@ pub struct Candidate {
     pub szmag1: Option<f32>,
     pub sgscore1: Option<f32>,
     pub distpsnr1: Option<f32>,
+    /// IPAC's count of earlier detections within 1.5" on the same field and readout
+    /// channel, which differs from `properties.detection_history.n_pos`.
     pub ndethist: i32,
     pub ncovhist: i32,
     pub jdstarthist: Option<f64>,
@@ -433,6 +436,7 @@ pub struct Candidate {
     pub magzpscirms: Option<f32>,
     pub zpmed: Option<f32>,
     pub exptime: Option<f32>,
+    /// Deep-learning real/bogus score, 1 for real: the usual realness cut.
     pub drb: Option<f32>,
 
     pub clrcoeff: Option<f32>,
