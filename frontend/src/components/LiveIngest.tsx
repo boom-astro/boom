@@ -172,7 +172,8 @@ export default function LiveIngest({ data }: { data: LiveIngestData | null }) {
     const bands = shown.map((lane, i) => {
       const upper = points.map((p) => `${x(p.t)},${y(sumOf(p.values.slice(0, i + 1)))}`);
       const lower = points.map((p) => `${x(p.t)},${y(sumOf(p.values.slice(0, i)))}`).reverse();
-      return { lane, area: [...upper, ...lower].join(" "), line: upper.join(" ") };
+      const start = Math.max(0, points.findIndex((p) => p.values[i] > 0) - 1);
+      return { lane, area: [...upper, ...lower].join(" "), line: upper.slice(start).join(" ") };
     }).filter(({ lane }) => lane.total > 0);
     return { total, top: y(total), bands };
   }, [lanes, shown, binMs, from, to, span, width, now]);
