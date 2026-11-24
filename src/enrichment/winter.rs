@@ -106,6 +106,7 @@ pub struct WinterAlertForEnrichment {
 /// alert document.
 #[derive(Debug, serde::Deserialize, serde::Serialize, AvroSchema)]
 pub struct WinterAlertProperties {
+    /// Detections at this position span more than 0.01 day (about 15 minutes).
     pub stationary: bool,
     /// Absent means never evaluated for a host, not evaluated and hostless.
     #[serde(default)]
