@@ -61,47 +61,88 @@ pub struct Cutout {
 #[derive(Debug, PartialEq, Clone, Deserialize, Serialize, Default, AvroSchema, ToSchema)]
 #[serde(default)]
 pub struct PrvCandidate {
+    /// Observation Julian date at start of exposure [days].
     pub jd: f64,
+    /// Filter ID (1=g; 2=R; 3=i).
     pub fid: i32,
+    /// Processing ID for image.
     pub pid: i64,
+    /// Expected 5-sigma mag limit in difference image based on global noise estimate [mag].
     pub diffmaglim: Option<f32>,
+    /// Principal investigator attached to program ID.
     pub programpi: Option<String>,
+    /// Program ID: encodes either public, collab, or caltech mode.
     pub programid: i32,
+    /// Candidate ID from operations DB.
     pub candid: Option<i64>,
+    /// True when the difference is positive, the source brighter than the reference.
     #[serde(deserialize_with = "deserialize_isdiffpos_option")]
     pub isdiffpos: Option<bool>,
+    /// Night ID.
     pub nid: Option<i32>,
+    /// Readout channel ID [00 .. 63].
     pub rcid: Option<i32>,
+    /// ZTF field ID.
     pub field: Option<i32>,
+    /// Right Ascension of candidate; J2000 [deg].
     pub ra: Option<f64>,
+    /// Declination of candidate; J2000 [deg].
     pub dec: Option<f64>,
+    /// Magnitude from PSF-fit photometry [mag].
     pub magpsf: Option<f32>,
+    /// 1-sigma uncertainty in magpsf [mag].
     pub sigmapsf: Option<f32>,
+    /// Reduced chi-square for PSF-fit.
     pub chipsf: Option<f32>,
+    /// Aperture mag using 14 pixel diameter aperture [mag].
     pub magap: Option<f32>,
+    /// 1-sigma uncertainty in magap [mag].
     pub sigmagap: Option<f32>,
+    /// Distance to nearest source in reference image PSF-catalog [pixels].
     pub distnr: Option<f32>,
+    /// Magnitude of nearest source in reference image PSF-catalog [mag].
     pub magnr: Option<f32>,
+    /// 1-sigma uncertainty in magnr [mag].
     pub sigmagnr: Option<f32>,
+    /// DAOPhot chi parameter of nearest source in reference image PSF-catalog.
     pub chinr: Option<f32>,
+    /// DAOPhot sharp parameter of nearest source in reference image PSF-catalog.
     pub sharpnr: Option<f32>,
+    /// Local sky background estimate [DN].
     pub sky: Option<f32>,
+    /// Full Width Half Max assuming a Gaussian core, from SExtractor [pixels].
     pub fwhm: Option<f32>,
+    /// Distance to nearest edge in image [pixels].
     pub mindtoedge: Option<f32>,
+    /// Ratio: difffwhm / fwhm.
     pub seeratio: Option<f32>,
+    /// Windowed profile RMS afloat major axis from SExtractor [pixels].
     pub aimage: Option<f32>,
+    /// Windowed profile RMS afloat minor axis from SExtractor [pixels].
     pub bimage: Option<f32>,
+    /// Ratio: aimage / bimage.
     pub elong: Option<f32>,
+    /// Number of negative pixels in a 5 x 5 pixel stamp.
     pub nneg: Option<i32>,
+    /// Number of prior-tagged bad pixels in a 5 x 5 pixel stamp.
     pub nbad: Option<i32>,
+    /// RealBogus quality score; range is 0 to 1 where closer to 1 is more reliable.
     pub rb: Option<f32>,
+    /// Distance to nearest known solar system object if exists within 30 arcsec [arcsec].
     pub ssdistnr: Option<f32>,
+    /// Magnitude of nearest known solar system object if exists within 30 arcsec (usually V-band
+    /// from MPC archive) [mag].
     pub ssmagnr: Option<f32>,
+    /// Name of nearest known solar system object if exists within 30 arcsec (from MPC archive).
     #[serde(deserialize_with = "deserialize_ssnamenr")]
     pub ssnamenr: Option<String>,
+    /// Right Ascension of nearest source in reference image PSF-catalog; J2000 [deg].
     pub ranr: Option<f64>,
+    /// Declination of nearest source in reference image PSF-catalog; J2000 [deg].
     pub decnr: Option<f64>,
+    /// Peak-pixel signal-to-noise ratio in point source matched-filtered detection image.
     pub scorr: Option<f64>,
+    /// Magnitude zero point for photometry estimates [mag].
     pub magzpsci: Option<f32>,
 }
 
@@ -233,27 +274,48 @@ where
 #[derive(Debug, PartialEq, Clone, Deserialize, Serialize, Default, AvroSchema, ToSchema)]
 #[serde(default)]
 pub struct FpHist {
+    /// ZTF field ID.
     pub field: Option<i32>,
+    /// Readout channel ID [00 .. 63].
     pub rcid: Option<i32>,
+    /// Filter ID (1=g; 2=R; 3=i).
     pub fid: i32,
+    /// Processing ID for image.
     pub pid: i64,
+    /// Processing ID for reference image to facilitate archive retrieval.
     pub rfid: i64,
+    /// Magnitude zero point for photometry estimates [mag].
     pub magzpsci: Option<f32>,
+    /// Magnitude zero point uncertainty (in magzpsci) [mag].
     pub magzpsciunc: Option<f32>,
+    /// RMS (deviation from average) in all differences between instrumental photometry and matched
+    /// photometric calibrators from science image processing [mag].
     pub magzpscirms: Option<f32>,
+    /// Integration time of camera exposure [sec].
     pub exptime: Option<f32>,
+    /// Expected 5-sigma mag limit in difference image based on global noise estimate [mag].
     pub diffmaglim: Option<f32>,
+    /// Program ID: encodes either public, collab, or caltech mode.
     pub programid: i32,
+    /// Observation Julian date at start of exposure [days].
     pub jd: f64,
+    /// Forced difference image PSF-fit flux [DN].
     #[serde(deserialize_with = "deserialize_missing_flux")]
     pub forcediffimflux: Option<f32>,
+    /// 1-sigma uncertainty in forcediffimflux [DN].
     #[serde(deserialize_with = "deserialize_missing_flux")]
     pub forcediffimfluxunc: Option<f32>,
+    /// Forced photometry processing status codes (0 => no warnings); see documentation.
     pub procstatus: Option<String>,
+    /// Distance to nearest source in reference image PSF-catalog [arcsec].
     pub distnr: Option<f32>,
+    /// Magnitude of nearest source in reference image PSF-catalog [mag].
     pub magnr: Option<f32>,
+    /// 1-sigma uncertainty in magnr [mag].
     pub sigmagnr: Option<f32>,
+    /// DAOPhot chi parameter of nearest source in reference image PSF-catalog.
     pub chinr: Option<f32>,
+    /// DAOPhot sharp parameter of nearest source in reference image PSF-catalog.
     pub sharpnr: Option<f32>,
 }
 
@@ -350,100 +412,202 @@ impl TimeSeries for ZtfForcedPhot {
 #[derive(Debug, PartialEq, Clone, Deserialize, Serialize, Default, AvroSchema, ToSchema)]
 #[serde(default)]
 pub struct Candidate {
+    /// Observation Julian date at start of exposure [days].
     pub jd: f64,
+    /// Filter ID (1=g; 2=R; 3=i).
     pub fid: i32,
+    /// Processing ID for science image to facilitate archive retrieval.
     pub pid: i64,
+    /// Expected 5-sigma mag limit in difference image based on global noise estimate [mag].
     pub diffmaglim: Option<f32>,
+    /// Principal investigator attached to program ID.
     pub programpi: Option<String>,
+    /// Program ID: encodes either public, collab, or caltech mode.
     pub programid: i32,
     /// Whether the exposure was a Target of Opportunity, as WINTER reports it.
     #[serde(deserialize_with = "deserialize_tooflag")]
     pub tooflag: bool,
+    /// Candidate ID from operations DB.
     pub candid: i64,
     /// True when the difference is positive, the source brighter than the reference.
     #[serde(deserialize_with = "deserialize_isdiffpos")]
     pub isdiffpos: bool,
+    /// Night ID.
     pub nid: Option<i32>,
+    /// Readout channel ID [00 .. 63].
     pub rcid: Option<i32>,
+    /// ZTF field ID.
     pub field: Option<i32>,
+    /// Right Ascension of candidate; J2000 [deg].
     pub ra: f64,
+    /// Declination of candidate; J2000 [deg].
     pub dec: f64,
+    /// Magnitude from PSF-fit photometry [mag].
     pub magpsf: f32,
+    /// 1-sigma uncertainty in magpsf [mag].
     pub sigmapsf: f32,
+    /// Reduced chi-square for PSF-fit.
     pub chipsf: Option<f32>,
+    /// Aperture mag using 14 pixel diameter aperture [mag].
     pub magap: Option<f32>,
+    /// 1-sigma uncertainty in magap [mag].
     pub sigmagap: Option<f32>,
+    /// Distance to nearest source in reference image PSF-catalog [pixels].
     pub distnr: Option<f32>,
+    /// Magnitude of nearest source in reference image PSF-catalog [mag].
     pub magnr: Option<f32>,
+    /// 1-sigma uncertainty in magnr [mag].
     pub sigmagnr: Option<f32>,
+    /// DAOPhot chi parameter of nearest source in reference image PSF-catalog.
     pub chinr: Option<f32>,
+    /// DAOPhot sharp parameter of nearest source in reference image PSF-catalog.
     pub sharpnr: Option<f32>,
+    /// Local sky background estimate [DN].
     pub sky: Option<f32>,
+    /// Full Width Half Max assuming a Gaussian core, from SExtractor [pixels].
     pub fwhm: Option<f32>,
+    /// Star/Galaxy classification score from SExtractor.
     pub classtar: Option<f32>,
+    /// Distance to nearest edge in image [pixels].
     pub mindtoedge: Option<f32>,
+    /// Ratio: difffwhm / fwhm.
     pub seeratio: Option<f32>,
+    /// Windowed profile RMS afloat major axis from SExtractor [pixels].
     pub aimage: Option<f32>,
+    /// Windowed profile RMS afloat minor axis from SExtractor [pixels].
     pub bimage: Option<f32>,
+    /// Ratio: aimage / bimage.
     pub elong: Option<f32>,
+    /// Number of negative pixels in a 5 x 5 pixel stamp.
     pub nneg: Option<i32>,
+    /// Number of prior-tagged bad pixels in a 5 x 5 pixel stamp.
     pub nbad: Option<i32>,
+    /// RealBogus quality score from Random Forest classifier; range is 0 to 1 where closer to 1 is
+    /// more reliable.
     pub rb: Option<f32>,
+    /// Distance to nearest known solar system object if exists within 30 arcsec [arcsec].
     pub ssdistnr: Option<f32>,
+    /// Magnitude of nearest known solar system object if exists within 30 arcsec (usually V-band
+    /// from MPC archive) [mag].
     pub ssmagnr: Option<f32>,
+    /// Name of nearest known solar system object if exists within 30 arcsec (from MPC archive).
     #[serde(deserialize_with = "deserialize_ssnamenr")]
     pub ssnamenr: Option<String>,
+    /// Right Ascension of nearest source in reference image PSF-catalog; J2000 [deg].
     pub ranr: f64,
+    /// Declination of nearest source in reference image PSF-catalog; J2000 [deg].
     pub decnr: f64,
+    /// g-band PSF-fit magnitude of closest source from PS1 catalog; if exists within 30 arcsec
+    /// [mag].
     pub sgmag1: Option<f32>,
+    /// r-band PSF-fit magnitude of closest source from PS1 catalog; if exists within 30 arcsec
+    /// [mag].
     pub srmag1: Option<f32>,
+    /// i-band PSF-fit magnitude of closest source from PS1 catalog; if exists within 30 arcsec
+    /// [mag].
     pub simag1: Option<f32>,
+    /// z-band PSF-fit magnitude of closest source from PS1 catalog; if exists within 30 arcsec
+    /// [mag].
     pub szmag1: Option<f32>,
+    /// Star/Galaxy score of closest source from PS1 catalog; if exists within 30 arcsec:
+    /// 0 <= sgscore <= 1 where closer to 1 implies higher likelihood of being a star.
     pub sgscore1: Option<f32>,
+    /// Distance to closest source from PS1 catalog; if exists within 30 arcsec [arcsec].
     pub distpsnr1: Option<f32>,
     /// IPAC's count of earlier detections within 1.5" on the same field and readout
     /// channel, which differs from `properties.detection_history.n_pos`.
     pub ndethist: i32,
+    /// Number of times input candidate position fell on any field and readout-channel going back to
+    /// beginning of survey.
     pub ncovhist: i32,
+    /// Earliest Julian date of epoch corresponding to ndethist [days].
     pub jdstarthist: Option<f64>,
+    /// Peak-pixel signal-to-noise ratio in point source matched-filtered detection image.
     pub scorr: Option<f64>,
+    /// g-band PSF-fit magnitude of second closest source from PS1 catalog; if exists within 30
+    /// arcsec [mag].
     pub sgmag2: Option<f32>,
+    /// r-band PSF-fit magnitude of second closest source from PS1 catalog; if exists within 30
+    /// arcsec [mag].
     pub srmag2: Option<f32>,
+    /// i-band PSF-fit magnitude of second closest source from PS1 catalog; if exists within 30
+    /// arcsec [mag].
     pub simag2: Option<f32>,
+    /// z-band PSF-fit magnitude of second closest source from PS1 catalog; if exists within 30
+    /// arcsec [mag].
     pub szmag2: Option<f32>,
+    /// Star/Galaxy score of second closest source from PS1 catalog; if exists within 30 arcsec:
+    /// 0 <= sgscore <= 1 where closer to 1 implies higher likelihood of being a star.
     pub sgscore2: Option<f32>,
+    /// Distance to second closest source from PS1 catalog; if exists within 30 arcsec [arcsec].
     pub distpsnr2: Option<f32>,
+    /// g-band PSF-fit magnitude of third closest source from PS1 catalog; if exists within 30
+    /// arcsec [mag].
     pub sgmag3: Option<f32>,
+    /// r-band PSF-fit magnitude of third closest source from PS1 catalog; if exists within 30
+    /// arcsec [mag].
     pub srmag3: Option<f32>,
+    /// i-band PSF-fit magnitude of third closest source from PS1 catalog; if exists within 30
+    /// arcsec [mag].
     pub simag3: Option<f32>,
+    /// z-band PSF-fit magnitude of third closest source from PS1 catalog; if exists within 30
+    /// arcsec [mag].
     pub szmag3: Option<f32>,
+    /// Star/Galaxy score of third closest source from PS1 catalog; if exists within 30 arcsec:
+    /// 0 <= sgscore <= 1 where closer to 1 implies higher likelihood of being a star.
     pub sgscore3: Option<f32>,
+    /// Distance to third closest source from PS1 catalog; if exists within 30 arcsec [arcsec].
     pub distpsnr3: Option<f32>,
+    /// Number of source matches from PS1 catalog falling within 30 arcsec.
     pub nmtchps: i32,
+    /// Processing ID for reference image to facilitate archive retrieval.
     #[serde(deserialize_with = "deserialize_some")]
     pub rfid: Option<i64>,
+    /// Observation Julian date of earliest exposure used to generate reference image [days].
     #[serde(deserialize_with = "deserialize_some")]
     pub jdstartref: Option<f64>,
+    /// Observation Julian date of latest exposure used to generate reference image [days].
     #[serde(deserialize_with = "deserialize_some")]
     pub jdendref: Option<f64>,
+    /// Number of frames (epochal images) used to generate reference image.
     #[serde(deserialize_with = "deserialize_some")]
     pub nframesref: Option<i32>,
+    /// Ratio: D/stddev(D) on event position where D = difference image.
     pub dsnrms: Option<f32>,
+    /// Ratio: S/stddev(S) on event position where S = image of convolution: D (x) PSF(D).
     pub ssnrms: Option<f32>,
+    /// Difference of statistics: dsnrms - ssnrms.
     pub dsdiff: Option<f32>,
+    /// Magnitude zero point for photometry estimates [mag].
     pub magzpsci: Option<f32>,
+    /// Magnitude zero point uncertainty (in magzpsci) [mag].
     pub magzpsciunc: Option<f32>,
+    /// RMS (deviation from average) in all differences between instrumental photometry and matched
+    /// photometric calibrators from science image processing [mag].
     pub magzpscirms: Option<f32>,
+    /// Magnitude zero point from median of all differences between instrumental photometry and
+    /// matched photometric calibrators from science image processing [mag].
     pub zpmed: Option<f32>,
+    /// Integration time of camera exposure [sec].
     pub exptime: Option<f32>,
     /// Deep-learning real/bogus score, 1 for real: the usual realness cut.
     pub drb: Option<f32>,
 
+    /// Color coefficient from linear fit from photometric calibration of science image.
     pub clrcoeff: Option<f32>,
+    /// Color coefficient uncertainty from linear fit (corresponding to clrcoeff).
     pub clrcounc: Option<f32>,
+    /// Distance to closest source from Gaia DR1 catalog irrespective of magnitude; if exists within
+    /// 90 arcsec [arcsec].
     pub neargaia: Option<f32>,
+    /// Gaia (G-band) magnitude of closest source from Gaia DR1 catalog irrespective of magnitude;
+    /// if exists within 90 arcsec [mag].
     pub maggaia: Option<f32>,
+    /// Distance to closest source from Gaia DR1 catalog brighter than magnitude 14; if exists
+    /// within 90 arcsec [arcsec].
     pub neargaiabright: Option<f32>,
+    /// Gaia (G-band) magnitude of closest source from Gaia DR1 catalog brighter than magnitude 14;
+    /// if exists within 90 arcsec [mag].
     pub maggaiabright: Option<f32>,
 }
 
