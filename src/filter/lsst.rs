@@ -9,12 +9,13 @@ use crate::enrichment::{
     create_lsst_alert_pipeline, fetch_alerts, LsstMatch, LsstPhotometry, ZtfMatch,
 };
 use crate::filter::{
-    add_decam_survey_match, build_decam_aux_data, build_loaded_filters, build_ztf_aux_data,
-    decam_survey_match, insert_decam_aux_pipeline_if_needed, insert_ztf_aux_pipeline_if_needed,
-    record_filter_result, run_filter, update_aliases_index_multiple, uses_field_in_filter,
-    validate_filter_pipeline, watchlist_projections, ztf_survey_match, Alert, AlertHostGalaxy,
-    Classification, DecamMatch, Filter, FilterError, FilterResults, FilterWorker,
-    FilterWorkerError, LoadedFilter, Origin, Photometry, SurveyMatch, SurveyMatches,
+    add_decam_survey_match, aux_lookup, build_decam_aux_data, build_loaded_filters,
+    build_ztf_aux_data, decam_survey_match, insert_decam_aux_pipeline_if_needed,
+    insert_ztf_aux_pipeline_if_needed, record_filter_result, run_filters,
+    update_aliases_index_multiple, uses_field_in_filter, validate_filter_pipeline,
+    watchlist_projections, ztf_survey_match, Alert, AlertHostGalaxy, Classification, DecamMatch,
+    Filter, FilterError, FilterResults, FilterWorker, FilterWorkerError, LoadedFilter, Origin,
+    Photometry, SurveyMatch, SurveyMatches,
 };
 use crate::utils::cutouts::CutoutStorage;
 use crate::utils::db::{fetch_timeseries_op, get_array_dict_element};
@@ -445,14 +446,7 @@ pub async fn build_lsst_filter_pipeline(
         let x = mongodb::bson::to_document(&filter_pipeline[i])?;
 
         if insert_aux_pipeline && i == insert_aux_index {
-            pipeline.push(doc! {
-                "$lookup": doc! {
-                    "from": "LSST_alerts_aux",
-                    "localField": "objectId",
-                    "foreignField": "_id",
-                    "as": "aux"
-                }
-            });
+            pipeline.push(aux_lookup("LSST_alerts_aux", &aux_add_fields));
             pipeline.push(doc! {
                 "$addFields": &aux_add_fields
             });
@@ -574,15 +568,9 @@ impl FilterWorker for LsstFilterWorker {
 
         // run the filters
         let mut results_map: HashMap<i64, Vec<FilterResults>> = HashMap::new();
-        for filter in &self.filters {
-            let out_documents = run_filter(
-                &candids,
-                &filter.id,
-                filter.pipeline.clone(),
-                &self.alert_collection,
-            )
-            .await?;
-
+        let filters: Vec<&LoadedFilter> = self.filters.iter().collect();
+        let outputs = run_filters(&candids, &filters, &self.alert_collection).await?;
+        for (filter, out_documents) in filters.into_iter().zip(outputs) {
             record_filter_result(&Survey::Lsst, filter, out_documents.len(), candids.len());
             debug!(
                 "{}/{} LSST alerts passed filter {}",

@@ -33,7 +33,7 @@ async fn test_build_filter() {
     let pipeline: Vec<Document> = vec![
         doc! { "$match": { "_id": { "$in": [] } } },
         doc! { "$project": { "objectId": 1, "candidate": 1, "classifications": 1, "properties": 1, "coordinates": 1, "villar_fit": 1, "arnett_fit": 1, "thermal_fit": 1, "gp_fit": 1, "track": 1, "snt": { "$literal": 3.0 } } },
-        doc! { "$lookup": { "from": "ZTF_alerts_aux", "localField": "objectId", "foreignField": "_id", "as": "aux" } },
+        doc! { "$lookup": { "from": "ZTF_alerts_aux", "localField": "objectId", "foreignField": "_id", "as": "aux", "pipeline": [{ "$project": { "prv_candidates": 1 } }] } },
         doc! {
             "$addFields": {
                 "aux": mongodb::bson::Bson::Null,
@@ -111,7 +111,7 @@ async fn test_build_multisurvey_filter() {
             "candidate.drb": { "$gte": 0.5 },
             "candidate.magpsf": { "$lte": 18.5 }
         } },
-        doc! { "$lookup": { "from": "ZTF_alerts_aux", "localField": "objectId", "foreignField": "_id", "as": "aux" } },
+        doc! { "$lookup": { "from": "ZTF_alerts_aux", "localField": "objectId", "foreignField": "_id", "as": "aux", "pipeline": [{ "$project": { "prv_candidates": 1, "aliases": 1 } }] } },
         doc! {
             "$addFields": {
                 "aux": mongodb::bson::Bson::Null,

@@ -6,9 +6,9 @@ use crate::alert::ARGUS_RESULTS_TOPIC;
 use crate::conf::AppConfig;
 use crate::enrichment::fetch_alerts;
 use crate::filter::{
-    build_loaded_filters, build_lsst_aux_data, build_ztf_aux_data,
+    aux_lookup, build_loaded_filters, build_lsst_aux_data, build_ztf_aux_data,
     insert_lsst_aux_pipeline_if_needed, insert_ztf_aux_pipeline_if_needed, record_filter_result,
-    run_filter, uses_field_in_filter, validate_filter_pipeline, watchlist_projections, Alert,
+    run_filters, uses_field_in_filter, validate_filter_pipeline, watchlist_projections, Alert,
     AlertHostGalaxy, Classification, Filter, FilterError, FilterResults, FilterWorker,
     FilterWorkerError, LoadedFilter, Origin, Photometry, SurveyMatches,
 };
@@ -284,14 +284,7 @@ pub async fn build_argus_filter_pipeline(
 
     for (index, stage) in filter_pipeline.iter().enumerate() {
         if Some(index) == insert_aux_index {
-            pipeline.push(doc! {
-                "$lookup": {
-                    "from": "ARGUS_alerts_aux",
-                    "localField": "objectId",
-                    "foreignField": "_id",
-                    "as": "aux"
-                }
-            });
+            pipeline.push(aux_lookup("ARGUS_alerts_aux", &aux_add_fields));
             pipeline.push(doc! { "$addFields": &aux_add_fields });
             insert_ztf_aux_pipeline_if_needed(
                 &mut pipeline,
@@ -390,15 +383,9 @@ impl FilterWorker for ArgusFilterWorker {
             .collect();
 
         let mut results_map: HashMap<i64, Vec<FilterResults>> = HashMap::new();
-        for filter in &self.filters {
-            let out_documents = run_filter(
-                &candids,
-                &filter.id,
-                filter.pipeline.clone(),
-                &self.alert_collection,
-            )
-            .await?;
-
+        let filters: Vec<&LoadedFilter> = self.filters.iter().collect();
+        let outputs = run_filters(&candids, &filters, &self.alert_collection).await?;
+        for (filter, out_documents) in filters.into_iter().zip(outputs) {
             record_filter_result(&Survey::Argus, filter, out_documents.len(), candids.len());
             debug!(
                 "{}/{} ARGUS alerts passed filter {}",
