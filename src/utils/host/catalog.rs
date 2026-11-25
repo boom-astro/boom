@@ -301,15 +301,11 @@ fn is_good_galaxy_spectrum(doc: &Document) -> bool {
         && opt_f64(doc, "z").is_some_and(|z| z > 0.0)
 }
 
-pub(super) fn redshift_is_photometric(
-    catalog: Option<&str>,
+pub(super) fn lacks_spectroscopic_redshift(
     redshift: Option<f64>,
-    redshift_err: Option<f64>,
-    config: &HostGalaxyConfig,
+    redshift_type: Option<&str>,
 ) -> bool {
-    let from_legacy =
-        catalog.is_some_and(|c| c == config.ls_dr10_catalog || c == config.ls_dr9_catalog);
-    redshift.is_none() || (from_legacy && redshift_err.is_some())
+    redshift.is_none() || redshift_type != Some(SPECTROSCOPIC)
 }
 
 fn ned_redshift_type(doc: &Document) -> Option<String> {
@@ -357,12 +353,7 @@ fn add_spectroscopic_redshift(
     spectra: &[Document],
     config: &HostGalaxyConfig,
 ) {
-    if !redshift_is_photometric(
-        galaxy.catalog.as_deref(),
-        galaxy.redshift,
-        galaxy.redshift_err,
-        config,
-    ) {
+    if !lacks_spectroscopic_redshift(galaxy.redshift, galaxy.redshift_type.as_deref()) {
         return;
     }
     let spectrum =
@@ -375,12 +366,7 @@ fn add_spectroscopic_redshift(
 }
 
 fn add_ned_redshift(galaxy: &mut GalaxyCandidate, ned: &[Document], config: &HostGalaxyConfig) {
-    if !redshift_is_photometric(
-        galaxy.catalog.as_deref(),
-        galaxy.redshift,
-        galaxy.redshift_err,
-        config,
-    ) {
+    if !lacks_spectroscopic_redshift(galaxy.redshift, galaxy.redshift_type.as_deref()) {
         return;
     }
     let Some(doc) = nearest_where(
