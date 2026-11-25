@@ -950,11 +950,66 @@ pub fn prepare_photometry(photometry: &mut Vec<PhotometryMag>) {
 
 pub const STATIONARY_MIN_FORCED_SNR: f64 = 5.0;
 
-pub fn is_stationary(times: impl IntoIterator<Item = f64>) -> bool {
+const MOTION_MAX_SPAN_DAYS: f64 = 0.5;
+const MOTION_MIN_SIGMA: f64 = 4.0;
+const MOTION_MIN_ARC_ARCSEC: f64 = 0.4;
+
+fn time_span(times: impl IntoIterator<Item = f64>) -> f64 {
     let (first, last) = times
         .into_iter()
         .fold((f64::MAX, f64::MIN), |(lo, hi), t| (lo.min(t), hi.max(t)));
-    last - first > 0.01
+    last - first
+}
+
+pub fn is_stationary(times: impl IntoIterator<Item = f64>) -> bool {
+    time_span(times) > 0.01
+}
+
+pub fn moves_within_night(
+    times: impl IntoIterator<Item = f64>,
+    positions: &[(f64, f64, f64)],
+    sigma_arcsec: f64,
+) -> bool {
+    let n = positions.len();
+    if n < 2 || time_span(times) >= MOTION_MAX_SPAN_DAYS {
+        return false;
+    }
+    let (jd0, ra0, dec0) = positions[0];
+    let hours: Vec<f64> = positions.iter().map(|p| (p.0 - jd0) * 24.0).collect();
+    let mean_hours = hours.iter().sum::<f64>() / n as f64;
+    let spread: f64 = hours.iter().map(|t| (t - mean_hours).powi(2)).sum();
+    if spread <= 0.0 {
+        return false;
+    }
+    let cos_dec = dec0.to_radians().cos();
+    let fit = |offsets: Vec<f64>| {
+        let mean = offsets.iter().sum::<f64>() / n as f64;
+        let rate = hours
+            .iter()
+            .zip(&offsets)
+            .map(|(t, x)| (t - mean_hours) * (x - mean))
+            .sum::<f64>()
+            / spread;
+        let scatter = if n > 2 {
+            let residuals: f64 = hours
+                .iter()
+                .zip(&offsets)
+                .map(|(t, x)| (x - mean - rate * (t - mean_hours)).powi(2))
+                .sum();
+            (residuals / (n - 2) as f64).sqrt().max(sigma_arcsec)
+        } else {
+            sigma_arcsec
+        };
+        (rate, scatter / spread.sqrt())
+    };
+    let (ra_rate, ra_err) = fit(positions
+        .iter()
+        .map(|p| ((p.1 - ra0 + 180.0).rem_euclid(360.0) - 180.0) * cos_dec * 3600.0)
+        .collect());
+    let (dec_rate, dec_err) = fit(positions.iter().map(|p| (p.2 - dec0) * 3600.0).collect());
+    let rate = ra_rate.hypot(dec_rate);
+    let arc = rate * time_span(hours.iter().copied());
+    rate >= MOTION_MIN_SIGMA * ra_err.hypot(dec_err) && arc >= MOTION_MIN_ARC_ARCSEC
 }
 
 // we want a function that takes a Vec of PhotometryMag and:

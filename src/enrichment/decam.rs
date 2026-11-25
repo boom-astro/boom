@@ -8,9 +8,9 @@ use crate::utils::enums::Survey;
 use crate::utils::host::HostGalaxyAssociation;
 use crate::utils::identify::{closest, IdentifyConfig, NightPaths, OrbitEntry};
 use crate::utils::lightcurves::{
-    analyze_photometry, is_stationary, prepare_photometry, summarise_detections, Band,
-    DetectionHistory, EpisodeHistory, MultisurveyDetectionHistory, PerBandProperties,
-    PhotometryMag, EPISODE_GAP_DAYS, SNT,
+    analyze_photometry, is_stationary, moves_within_night, prepare_photometry,
+    summarise_detections, Band, DetectionHistory, EpisodeHistory, MultisurveyDetectionHistory,
+    PerBandProperties, PhotometryMag, EPISODE_GAP_DAYS, SNT,
 };
 use crate::utils::linking::{night_start, Detection};
 use crate::utils::mpcorb::{load_catalogue, MAX_EPOCH_GAP_DAYS};
@@ -139,6 +139,8 @@ pub fn create_decam_alert_pipeline() -> Vec<Document> {
                 "prv_candidates.sigmagap": 1,
                 "prv_candidates.band": 1,
                 "prv_candidates.snr": 1,
+                "prv_candidates.ra": 1,
+                "prv_candidates.dec": 1,
                 "fp_hists.jd": 1,
                 "fp_hists.magap": 1,
                 "fp_hists.sigmagap": 1,
@@ -176,6 +178,10 @@ pub struct DecamPhotometry {
     pub band: Band,
     #[serde(default)]
     pub snr: Option<f64>,
+    #[serde(default)]
+    pub ra: Option<f64>,
+    #[serde(default)]
+    pub dec: Option<f64>,
 }
 
 impl DecamPhotometry {
@@ -631,13 +637,20 @@ impl DecamEnrichmentWorker {
 
         prepare_photometry(&mut lightcurve);
         let (photstats, _, _) = analyze_photometry(&lightcurve);
-        let stationary = is_stationary(
+        let times = || {
             alert
                 .prv_candidates
                 .iter()
                 .map(|p| p.time)
-                .chain(alert.fp_hists.iter().map(|p| p.time)),
-        );
+                .chain(alert.fp_hists.iter().map(|p| p.time))
+        };
+        let positions: Vec<(f64, f64, f64)> = alert
+            .prv_candidates
+            .iter()
+            .filter_map(|p| Some((p.time, p.ra?, p.dec?)))
+            .collect();
+        let stationary = is_stationary(times())
+            && !moves_within_night(times(), &positions, DECAM.astrometric_sigma_arcsec);
 
         let jd = alert.candidate.jd;
         let decam_points = lightcurve.len();

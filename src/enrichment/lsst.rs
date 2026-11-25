@@ -11,10 +11,12 @@ use crate::utils::db::mongify;
 use crate::utils::enums::Survey;
 use crate::utils::host::{HostGalaxyAssociation, HostSummary};
 use crate::utils::lightcurves::{
-    analyze_photometry, is_stationary, prepare_photometry, signed_snr, summarise_detections,
-    ActivityMetrics, Band, DetectionHistory, EpisodeHistory, MultisurveyDetectionHistory,
-    PerBandProperties, PhotometryMag, EPISODE_GAP_DAYS, STATIONARY_MIN_FORCED_SNR,
+    analyze_photometry, is_stationary, moves_within_night, prepare_photometry, signed_snr,
+    summarise_detections, ActivityMetrics, Band, DetectionHistory, EpisodeHistory,
+    MultisurveyDetectionHistory, PerBandProperties, PhotometryMag, EPISODE_GAP_DAYS,
+    STATIONARY_MIN_FORCED_SNR,
 };
+use crate::utils::sso_geometry::RUBIN;
 use crate::utils::variability::PerBandVariability;
 use apache_avro_derive::AvroSchema;
 use apache_avro_macros::serdavro;
@@ -561,7 +563,7 @@ pub fn lsst_alert_properties(alert: &LsstAlertForEnrichment) -> LsstAlertPropert
 
     prepare_photometry(&mut lightcurve);
     let (photstats, _, _) = analyze_photometry(&lightcurve);
-    let stationary = is_stationary(
+    let times = || {
         alert
             .prv_candidates
             .iter()
@@ -574,8 +576,16 @@ pub fn lsst_alert_properties(alert: &LsstAlertForEnrichment) -> LsstAlertPropert
                     .filter(|p| p.jd <= alert.candidate.jd)
                     .filter_map(|p| p.to_photometry_mag(Some(STATIONARY_MIN_FORCED_SNR))),
             )
-            .map(|p| p.time),
-    );
+            .map(|p| p.time)
+    };
+    let positions: Vec<(f64, f64, f64)> = alert
+        .prv_candidates
+        .iter()
+        .filter(|p| p.jd <= alert.candidate.jd)
+        .filter_map(|p| Some((p.jd, p.ra?, p.dec?)))
+        .collect();
+    let stationary = is_stationary(times())
+        && !moves_within_night(times(), &positions, RUBIN.astrometric_sigma_arcsec);
 
     // Compute multisurvey photstats (including ZTF if available, other surveys can be added later)
     let mut has_matches = false;

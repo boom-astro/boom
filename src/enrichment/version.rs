@@ -84,7 +84,7 @@ pub const DERIVATIONS: &[(&str, u32)] = &[
     ("photstats", 2),
     ("sso", 3),
     // rock, star, near_brightstar and stationary.
-    ("crossmatch_flags", 2),
+    ("crossmatch_flags", 3),
     ("detection_history", 2),
     ("variability", 1),
     // hosted, best_host. Also bump when the DLR scoring parameters change: hosts are rewritten in place.
