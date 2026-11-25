@@ -44,7 +44,14 @@ detection at one position. Events are crossmatched with the
 
 Enrichment fits the light curve at the alert's own cadence, per band
 (`properties.photstats.beta` and `.rho`), and adds the detection and episode
-histories and the cadences the object was seen at. Filters see `kind`, `lane`,
+histories and the cadences the object was seen at. `properties.flare_fit` fits
+the last 256 points of the alert's band and cadence over one day with sums of
+Davenport et al. (2014) flare templates (lightcurve-fitting `fit_flares`, up to
+3 components), on the difference flux over the alert's reference flux
+(`psfFluxSci - psfFluxDif`). It gives the number of components, `delta_bic`
+against a flat baseline, the total equivalent duration, and the peak time,
+FWHM, amplitude and equivalent duration of the latest component, times in
+seconds. Filters see `kind`, `lane`,
 `alertCadence`, `candidate`, `properties`, `eventAssociation` or
 `ssoAssociation`, and from the aux `prv_candidates`, `cross_matches`,
 `host_galaxy` and `aliases`.
