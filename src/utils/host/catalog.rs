@@ -95,6 +95,7 @@ pub fn galaxy_from_ned(doc: &Document, config: &HostGalaxyConfig) -> Option<Gala
         pa_deg: opt_f64(doc, "Diam_pa").unwrap_or(0.0),
         redshift: opt_f64(doc, "z"),
         redshift_err: opt_f64(doc, "z_unc"),
+        redshift_type: ned_redshift_type(doc),
         dist_mpc: opt_f64(doc, "DistMpc"),
         dist_mpc_method: opt_string(doc, "DistMpc_method"),
         mag: opt_f64(doc, "m_Ks"),
@@ -208,12 +209,16 @@ pub fn galaxy_from_legacy(
     };
 
     // Spectroscopic where Legacy has one; its error is negligible beside a photo-z.
-    let (redshift, redshift_err) = match legacy_redshift(doc, "z_spec") {
-        Some(z) => (Some(z), None),
-        None => (
-            legacy_redshift(doc, "z_phot_median"),
-            legacy_redshift(doc, "z_phot_std"),
-        ),
+    let (redshift, redshift_err, redshift_type) = match legacy_redshift(doc, "z_spec") {
+        Some(z) => (Some(z), None, Some(SPECTROSCOPIC)),
+        None => {
+            let z = legacy_redshift(doc, "z_phot_median");
+            (
+                z,
+                legacy_redshift(doc, "z_phot_std"),
+                z.map(|_| PHOTOMETRIC),
+            )
+        }
     };
 
     Some(GalaxyCandidate {
@@ -224,6 +229,7 @@ pub fn galaxy_from_legacy(
         pa_deg: ellipse.pa_rad.to_degrees(),
         redshift,
         redshift_err,
+        redshift_type: redshift_type.map(String::from),
         dist_mpc: None,
         dist_mpc_method: None,
         mag: None,
@@ -239,6 +245,8 @@ pub fn galaxy_from_legacy(
 }
 
 pub const NED: &str = "NED";
+pub(super) const SPECTROSCOPIC: &str = "spectroscopic";
+pub(super) const PHOTOMETRIC: &str = "photometric";
 pub const LS_DR10: &str = "LSDR10";
 pub const LS_DR9: &str = "LSDR9";
 
@@ -304,6 +312,14 @@ pub(super) fn redshift_is_photometric(
     redshift.is_none() || (from_legacy && redshift_err.is_some())
 }
 
+fn ned_redshift_type(doc: &Document) -> Option<String> {
+    match opt_string(doc, "z_tech").as_deref() {
+        Some("SPEC") => Some(SPECTROSCOPIC.to_string()),
+        Some("PHOT") => Some(PHOTOMETRIC.to_string()),
+        _ => None,
+    }
+}
+
 fn is_ned_spectroscopic(doc: &Document) -> bool {
     opt_string(doc, "z_tech").as_deref() == Some("SPEC")
         && opt_f64(doc, "z").is_some_and(|z| z > 0.0)
@@ -354,6 +370,7 @@ fn add_spectroscopic_redshift(
     if let Some(doc) = spectrum {
         galaxy.redshift = opt_f64(doc, "z");
         galaxy.redshift_err = opt_f64(doc, "zerr");
+        galaxy.redshift_type = Some(SPECTROSCOPIC.to_string());
     }
 }
 
@@ -377,6 +394,7 @@ fn add_ned_redshift(galaxy: &mut GalaxyCandidate, ned: &[Document], config: &Hos
     };
     galaxy.redshift = opt_f64(doc, "z");
     galaxy.redshift_err = opt_f64(doc, "z_unc");
+    galaxy.redshift_type = Some(SPECTROSCOPIC.to_string());
     if galaxy.dist_mpc.is_none() {
         galaxy.dist_mpc = opt_f64(doc, "DistMpc");
         galaxy.dist_mpc_method = opt_string(doc, "DistMpc_method");

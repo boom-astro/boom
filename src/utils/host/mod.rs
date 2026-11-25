@@ -164,6 +164,7 @@ async fn add_spectrum_at_host_center(
     {
         host.z = z;
         host.z_err = z_err;
+        host.z_type = Some(catalog::SPECTROSCOPIC.to_string());
     }
 }
 
