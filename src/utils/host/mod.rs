@@ -127,7 +127,7 @@ async fn add_spectrum_at_host_center(
     let Some(best) = association.best_host.as_ref() else {
         return;
     };
-    if !catalog::redshift_is_photometric(best.catalog.as_deref(), best.z, best.z_err, config) {
+    if !catalog::lacks_spectroscopic_redshift(best.z, best.z_type.as_deref()) {
         return;
     }
     let (ra, dec, radius) = (best.ra, best.dec, config.spectrum_match_arcsec);
@@ -164,6 +164,7 @@ async fn add_spectrum_at_host_center(
     {
         host.z = z;
         host.z_err = z_err;
+        host.z_type = Some(catalog::SPECTROSCOPIC.to_string());
     }
 }
 

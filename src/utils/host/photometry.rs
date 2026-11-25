@@ -244,6 +244,7 @@ mod tests {
             posterior: 0.7,
             z: None,
             z_err: None,
+            z_type: None,
             dist_mpc: None,
             dist_mpc_method: None,
             a_arcsec: 20.0,

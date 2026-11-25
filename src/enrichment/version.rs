@@ -88,7 +88,7 @@ pub const DERIVATIONS: &[(&str, u32)] = &[
     ("detection_history", 2),
     ("variability", 1),
     // hosted, best_host. Also bump when the DLR scoring parameters change: hosts are rewritten in place.
-    ("host_association", 3),
+    ("host_association", 4),
     // applecider_fusion, applecider_outputs and fusion_embedding.
     ("applecider_postprocess", 1),
     // arnett_fit and thermal_fit.

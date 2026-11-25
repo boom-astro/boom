@@ -28,6 +28,7 @@ pub struct GalaxyCandidate {
     pub pa_deg: f64,
     pub redshift: Option<f64>,
     pub redshift_err: Option<f64>,
+    pub redshift_type: Option<String>,
     /// Adopted distance in Mpc, redshift-independent only when
     /// `dist_mpc_method` says so.
     pub dist_mpc: Option<f64>,
