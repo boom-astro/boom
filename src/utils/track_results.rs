@@ -1,8 +1,10 @@
 use crate::conf::AppConfig;
 use crate::filter::{
-    build_loaded_filters, build_ztf_alerts, create_producer, load_alert_schema, run_filter,
-    send_alert_to_kafka, watchlist_projections, ztf_results_pipeline, FilterResults,
-    FilterWorkerError, LoadedFilter,
+    build_decam_alerts, build_loaded_filters, build_lsst_alerts, build_winter_alerts,
+    build_ztf_alerts, create_decam_filter_alert_pipeline, create_lsst_filter_alert_pipeline,
+    create_producer, create_winter_filter_alert_pipeline, load_alert_schema, run_filter,
+    send_alert_to_kafka, watchlist_projections, ztf_results_pipeline, Alert, FilterResults,
+    FilterWorkerError, LoadedFilter, SURVEYS_REQUIRING_PERMISSIONS,
 };
 use crate::utils::bson_number;
 use crate::utils::cutouts::CutoutStorage;
@@ -16,7 +18,6 @@ use std::collections::HashMap;
 use tracing::{info, instrument, warn};
 
 const CURSOR_ID: &str = "linker_results_cursor";
-const RESULTS_TOPIC: &str = "ZTF_alerts_results";
 const PAGE_SIZE: usize = 500;
 const FILTER_BATCH: usize = 1000;
 
@@ -26,23 +27,81 @@ struct Passed {
     annotations: String,
 }
 
-pub struct TrackPublisher {
-    producer: FutureProducer,
-    schema: Schema,
+struct SurveyResults {
+    survey: Survey,
     cutouts: CutoutStorage,
     pipeline: Vec<Document>,
     watchlists: HashMap<String, Document>,
 }
 
+impl SurveyResults {
+    async fn build(
+        &self,
+        results: &HashMap<i64, Vec<FilterResults>>,
+        alerts: &Collection<Document>,
+    ) -> Result<Vec<Alert>, FilterWorkerError> {
+        let (pipeline, cutouts) = (&self.pipeline, &self.cutouts);
+        match self.survey {
+            Survey::Lsst => build_lsst_alerts(results, pipeline, alerts, cutouts).await,
+            Survey::Decam => build_decam_alerts(results, pipeline, alerts, cutouts).await,
+            Survey::Winter => build_winter_alerts(results, pipeline, alerts, cutouts).await,
+            _ => build_ztf_alerts(results, pipeline, alerts, cutouts).await,
+        }
+    }
+}
+
+pub struct TrackPublisher {
+    producer: FutureProducer,
+    schema: Schema,
+    surveys: Vec<SurveyResults>,
+}
+
 impl TrackPublisher {
     pub async fn new(config: &AppConfig) -> Result<Self, FilterWorkerError> {
+        let mut surveys = Vec::new();
+        for (survey, pipeline) in [
+            (Survey::Ztf, ztf_results_pipeline()),
+            (Survey::Lsst, create_lsst_filter_alert_pipeline()),
+            (Survey::Decam, create_decam_filter_alert_pipeline()),
+            (Survey::Winter, create_winter_filter_alert_pipeline()),
+        ] {
+            surveys.push(SurveyResults {
+                cutouts: config.build_cutout_storage(&survey).await?,
+                watchlists: watchlist_projections(config, &survey),
+                survey,
+                pipeline,
+            });
+        }
         Ok(TrackPublisher {
             producer: create_producer(&config.kafka.producer).await?,
             schema: load_alert_schema()?,
-            cutouts: config.build_cutout_storage(&Survey::Ztf).await?,
-            pipeline: ztf_results_pipeline(),
-            watchlists: watchlist_projections(config, &Survey::Ztf),
+            surveys,
         })
+    }
+
+    async fn track_filters(
+        &self,
+        db: &mongodb::Database,
+        filter_ids: Option<&[String]>,
+    ) -> Result<Vec<(&SurveyResults, Vec<LoadedFilter>)>, FilterWorkerError> {
+        let mut by_survey = Vec::new();
+        for survey in &self.surveys {
+            let filters: Vec<LoadedFilter> = build_loaded_filters(
+                &None,
+                &survey.survey,
+                &db.collection("filters"),
+                &survey.watchlists,
+            )
+            .await?
+            .into_iter()
+            .filter(|filter| filter.reads_track)
+            .filter(|filter| filter_ids.is_none_or(|ids| ids.contains(&filter.id)))
+            .collect();
+            if !filters.is_empty() {
+                by_survey.push((survey, filters));
+            }
+        }
+        Ok(by_survey)
     }
 
     #[instrument(skip_all, err)]
@@ -53,31 +112,23 @@ impl TrackPublisher {
     ) -> Result<usize, FilterWorkerError> {
         let counters = db.collection::<Document>(COUNTERS_COLLECTION);
         let now = chrono::Utc::now().timestamp_millis() as f64 / 1000.0;
-        let filters: Vec<LoadedFilter> = build_loaded_filters(
-            &None,
-            &Survey::Ztf,
-            &db.collection("filters"),
-            &self.watchlists,
-        )
-        .await?
-        .into_iter()
-        .filter(|filter| filter.reads_track)
-        .collect();
+        let filters = self.track_filters(db, None).await?;
         let cursor = read_cursor(&counters).await?;
         let (Some(mut query), false) = (cursor, filters.is_empty()) else {
             save_cursor(&counters, now, None).await?;
             info!(
-                filters = filters.len(),
+                surveys = filters.len(),
                 "no track filter or cursor yet, running from now on"
             );
             return Ok(0);
         };
         query.min_last_jd = Some(min_last_jd);
-        let alerts = db.collection::<Document>("ZTF_alerts");
         let mut published = 0;
         loop {
             let page = list_tracks(db, &query, PAGE_SIZE).await?;
-            published += self.publish_page(&alerts, &filters, &page.tracks).await?;
+            for (survey, filters) in &filters {
+                published += self.publish_page(db, survey, filters, &page.tracks).await?;
+            }
             let full = page.tracks.len() == PAGE_SIZE;
             let Some(next) = page.next else {
                 break;
@@ -92,38 +143,64 @@ impl TrackPublisher {
         Ok(published)
     }
 
+    #[instrument(skip_all, err)]
+    pub async fn publish_tracks(
+        &self,
+        db: &mongodb::Database,
+        tracks: &[StoredTrack],
+        filter_ids: Option<&[String]>,
+    ) -> Result<usize, FilterWorkerError> {
+        let filters = self.track_filters(db, filter_ids).await?;
+        let mut published = 0;
+        for page in tracks.chunks(PAGE_SIZE) {
+            for (survey, filters) in &filters {
+                published += self.publish_page(db, survey, filters, page).await?;
+            }
+        }
+        Ok(published)
+    }
+
     async fn publish_page(
         &self,
-        alerts: &Collection<Document>,
+        db: &mongodb::Database,
+        survey: &SurveyResults,
         filters: &[LoadedFilter],
         tracks: &[StoredTrack],
     ) -> Result<usize, FilterWorkerError> {
+        let alerts = db.collection::<Document>(&format!("{}_alerts", survey.survey));
+        let target = &survey.survey;
         let track_of: HashMap<i64, &str> = tracks
             .iter()
             .flat_map(|track| {
                 track
                     .member_keys()
                     .into_iter()
-                    .filter(|(survey, _)| *survey == Survey::Ztf)
+                    .filter(move |(member_survey, _)| member_survey == target)
                     .map(move |(_, id)| (id, track.id.as_str()))
             })
             .collect();
-        let members = programids_and_epochs(alerts, track_of.keys().copied().collect()).await?;
+        if track_of.is_empty() {
+            return Ok(0);
+        }
+        let members =
+            programids_and_epochs(&alerts, &survey.survey, track_of.keys().copied().collect())
+                .await?;
 
         let mut latest: HashMap<(&str, &str), Passed> = HashMap::new();
         for filter in filters {
             let permitted = filter
                 .permissions
-                .get(&Survey::Ztf)
+                .get(&survey.survey)
                 .cloned()
                 .unwrap_or_default();
+            let checked = SURVEYS_REQUIRING_PERMISSIONS.contains(&survey.survey);
             let candids: Vec<i64> = members
                 .iter()
-                .filter(|(_, (programid, _))| permitted.contains(programid))
+                .filter(|(_, (programid, _))| !checked || permitted.contains(programid))
                 .map(|(&candid, _)| candid)
                 .collect();
             for batch in candids.chunks(FILTER_BATCH) {
-                for doc in run_filter(batch, &filter.id, filter.pipeline.clone(), alerts).await? {
+                for doc in run_filter(batch, &filter.id, filter.pipeline.clone(), &alerts).await? {
                     let candid = doc.get_i64("_id")?;
                     let (Some(&track_id), Some(&(_, jd))) =
                         (track_of.get(&candid), members.get(&candid))
@@ -167,25 +244,22 @@ impl TrackPublisher {
                 });
         }
 
+        let topic = format!("{}_alerts_results", survey.survey);
         let mut published = 0;
         for (candid, filter_results) in results {
-            let built = match build_ztf_alerts(
-                &HashMap::from([(candid, filter_results)]),
-                &self.pipeline,
-                alerts,
-                &self.cutouts,
-            )
-            .await
+            let built = match survey
+                .build(&HashMap::from([(candid, filter_results)]), &alerts)
+                .await
             {
                 Ok(built) => built,
                 Err(error) => {
-                    warn!(%error, candid, "could not build the alert of a track");
+                    warn!(%error, candid, survey = %survey.survey, "could not build the alert of a track");
                     continue;
                 }
             };
             for alert in &built {
                 let delivery =
-                    send_alert_to_kafka(alert, &self.schema, &self.producer, RESULTS_TOPIC).await?;
+                    send_alert_to_kafka(alert, &self.schema, &self.producer, &topic).await?;
                 let failed = match delivery.await {
                     Ok(Ok(_)) => None,
                     Ok(Err((error, _))) => Some(error.to_string()),
@@ -205,12 +279,14 @@ impl TrackPublisher {
 
 async fn programids_and_epochs(
     alerts: &Collection<Document>,
+    survey: &Survey,
     candids: Vec<i64>,
 ) -> Result<HashMap<i64, (i32, f64)>, mongodb::error::Error> {
     let mut out = HashMap::new();
     if candids.is_empty() {
         return Ok(out);
     }
+    let checked = SURVEYS_REQUIRING_PERMISSIONS.contains(survey);
     let mut cursor = alerts
         .find(doc! { "_id": { "$in": candids } })
         .projection(doc! { "candidate.programid": 1, "candidate.jd": 1 })
@@ -220,11 +296,14 @@ async fn programids_and_epochs(
         let Ok(candidate) = alert.get_document("candidate") else {
             continue;
         };
-        if let (Ok(candid), Ok(programid), Ok(jd)) = (
-            alert.get_i64("_id"),
-            candidate.get_i32("programid"),
-            candidate.get_f64("jd"),
-        ) {
+        let programid = if checked {
+            candidate.get_i32("programid").ok()
+        } else {
+            Some(1)
+        };
+        if let (Ok(candid), Some(programid), Ok(jd)) =
+            (alert.get_i64("_id"), programid, candidate.get_f64("jd"))
+        {
             out.insert(candid, (programid, jd));
         }
     }

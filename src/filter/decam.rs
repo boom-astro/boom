@@ -259,7 +259,7 @@ pub fn survey_match_projection(aux_field: &str, with_nondetections: bool) -> Doc
 
 /// Pipeline used to fetch full DECam alert data (candidate + lightcurve) to
 /// build the alert packets emitted after filtering.
-fn create_decam_filter_alert_pipeline() -> Vec<Document> {
+pub fn create_decam_filter_alert_pipeline() -> Vec<Document> {
     vec![
         doc! {
             "$match": {

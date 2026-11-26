@@ -27,11 +27,20 @@ use decam::{
     add_decam_survey_match, build_decam_aux_data, decam_survey_match,
     insert_decam_aux_pipeline_if_needed, survey_match_projection, DecamMatch,
 };
-pub use decam::{build_decam_filter_pipeline, DecamFilterWorker};
+pub use decam::{
+    build_decam_alerts, build_decam_filter_pipeline, create_decam_filter_alert_pipeline,
+    DecamFilterWorker,
+};
 pub use fields::{find_unknown_field, DocumentShape};
+pub use lsst::{
+    build_lsst_alerts, build_lsst_filter_pipeline, create_lsst_filter_alert_pipeline,
+    LsstFilterWorker,
+};
 use lsst::{build_lsst_aux_data, insert_lsst_aux_pipeline_if_needed, lsst_survey_match};
-pub use lsst::{build_lsst_filter_pipeline, LsstFilterWorker};
 pub use roman::{build_roman_filter_pipeline, RomanFilterWorker};
-pub use winter::{build_winter_filter_pipeline, WinterFilterWorker};
+pub use winter::{
+    build_winter_alerts, build_winter_filter_pipeline, create_winter_filter_alert_pipeline,
+    WinterFilterWorker,
+};
 pub use ztf::{build_ztf_alerts, build_ztf_filter_pipeline, ztf_results_pipeline, ZtfFilterWorker};
 use ztf::{build_ztf_aux_data, insert_ztf_aux_pipeline_if_needed, ztf_survey_match};

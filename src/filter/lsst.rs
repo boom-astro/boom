@@ -172,6 +172,12 @@ pub struct LsstAlertForFilter {
     pub survey_matches: Option<LsstOutputSurveyMatches>,
 }
 
+pub fn create_lsst_filter_alert_pipeline() -> Vec<Document> {
+    let mut pipeline = create_lsst_alert_pipeline();
+    add_decam_survey_match(&mut pipeline);
+    pipeline
+}
+
 /// Builds LSST Alert objects from the provided filter results and alert collection.
 ///
 /// # Arguments
@@ -515,11 +521,8 @@ impl FilterWorker for LsstFilterWorker {
         )
         .await?;
 
-        let mut alert_pipeline = create_lsst_alert_pipeline();
-        add_decam_survey_match(&mut alert_pipeline);
-
         Ok(LsstFilterWorker {
-            alert_pipeline,
+            alert_pipeline: create_lsst_filter_alert_pipeline(),
             alert_collection,
             alert_cutout_storage,
             filter_collection,
