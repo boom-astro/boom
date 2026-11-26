@@ -187,7 +187,11 @@ struct FlareInput {
 impl FlareInput {
     fn from_alert(alert: &ArgusAlertForEnrichment) -> Option<Self> {
         let candidate = &alert.candidate;
-        let reference = (candidate.psf_flux_sci? - candidate.psf_flux_dif?) as f64;
+        let flux_dif = candidate.psf_flux_dif?;
+        if !(flux_dif.is_finite() && flux_dif > 0.0) {
+            return None;
+        }
+        let reference = (candidate.psf_flux_sci? - flux_dif) as f64;
         if !(reference.is_finite() && reference > 0.0) {
             return None;
         }
