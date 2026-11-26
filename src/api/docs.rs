@@ -93,6 +93,7 @@ impl Modify for BabamulSecurityAddon {
         routes::queries::cone_search::post_cone_search_query,
         routes::surveys::cutouts::get_cutouts,
         routes::surveys::cutouts::get_batch_cutouts,
+        routes::tracks::get_all_tracks,
         routes::surveys::tracks::get_tracks,
         routes::surveys::tracks::get_track,
         routes::queries::pipeline::post_pipeline_query,

@@ -1118,6 +1118,7 @@ pub struct TrackQuery {
     pub max_rms_ratio: Option<f64>,
     pub min_neo_score: Option<f64>,
     pub min_last_jd: Option<f64>,
+    pub survey: Option<Survey>,
 }
 
 impl TrackQuery {
@@ -1154,6 +1155,9 @@ impl TrackQuery {
         }
         if let Some(min_last_jd) = self.min_last_jd {
             filter.insert("last_jd", doc! { "$gte": min_last_jd });
+        }
+        if let Some(survey) = &self.survey {
+            filter.insert("member_surveys", survey.as_str());
         }
         filter
     }
@@ -1524,6 +1528,7 @@ pub(crate) mod tests {
             max_rms_ratio: Some(4.0),
             min_neo_score: None,
             min_last_jd: None,
+            survey: None,
         };
         let filter = query.filter();
         assert_eq!(filter.keys().next().map(String::as_str), Some("updated_at"));

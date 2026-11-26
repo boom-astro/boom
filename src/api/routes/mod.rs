@@ -8,4 +8,5 @@ pub mod kafka;
 pub mod queries;
 pub mod surveys;
 pub mod tasks;
+pub mod tracks;
 pub mod users;

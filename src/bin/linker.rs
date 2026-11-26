@@ -7,7 +7,7 @@
 //! recent `linker.thor_window_nights`, matches what it finds to the MPC
 //! catalog so a known object is stored as a recovery, and stores the tracks.
 //! Each run then runs the filters that read `track` over the alerts of the
-//! tracks it changed, and publishes what passes on `ZTF_alerts_results`.
+//! tracks it changed, and publishes what passes on each survey's results topic.
 //!
 //! It then links the detections IPAC already identified over the most recent
 //! `linker.recall_window_nights`, stores nothing, and logs how many of those
