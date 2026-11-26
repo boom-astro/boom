@@ -4,6 +4,7 @@ mod askap;
 mod base;
 mod decam;
 mod lsst;
+mod roman;
 mod simulation;
 mod winter;
 mod ztf;
@@ -30,6 +31,11 @@ pub use lsst::{
     DiaForcedSource, DiaSource, LsstAlert, LsstAlertWorker, LsstAliases, LsstCandidate,
     LsstForcedPhot, LsstObject, LsstPrvCandidate, LsstRawAvroAlert, SsSource, LSST_DEC_RANGE,
     LSST_SCHEMA_REGISTRY_GITHUB_FALLBACK_URL, LSST_SCHEMA_REGISTRY_URL, LSST_ZTF_XMATCH_RADIUS,
+};
+pub use roman::{
+    RomanAlert, RomanAlertWorker, RomanAliases, RomanCandidate, RomanDiaForcedSource,
+    RomanDiaObject, RomanDiaSource, RomanForcedPhot, RomanObject, RomanRawAvroAlert, RomanSsMatch,
+    ROMAN_DEC_RANGE, ROMAN_LSST_XMATCH_RADIUS, ROMAN_ZTF_XMATCH_RADIUS,
 };
 pub use simulation::{
     simulated_object, simulated_surroundings, SimulatedAlert, SimulatedEpoch, SimulatedObject,

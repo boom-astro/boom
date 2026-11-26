@@ -1,8 +1,8 @@
 use boom::{
     conf::load_dotenv,
     kafka::{
-        AlertProducer, AskapAlertProducer, DecamAlertProducer, WinterAlertProducer,
-        ZtfAlertProducer,
+        AlertProducer, AskapAlertProducer, DecamAlertProducer, RomanAlertProducer,
+        WinterAlertProducer, ZtfAlertProducer,
     },
     utils::{
         enums::{ProgramId, Survey},
@@ -73,6 +73,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Survey::Winter => {
             let producer = WinterAlertProducer::new(date, limit, &server_url, true);
+            producer.produce(None).await?;
+        }
+        Survey::Roman => {
+            let producer = RomanAlertProducer::new(date, limit, &server_url, true);
             producer.produce(None).await?;
         }
         _ => {

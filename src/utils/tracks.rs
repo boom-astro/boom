@@ -336,7 +336,7 @@ pub fn member_of(d: &Detection) -> Option<Member> {
 
 fn legacy_member_id(survey: &Survey, alert_id: i64) -> i64 {
     match survey {
-        Survey::Ztf | Survey::Lsst | Survey::Askap | Survey::Argus => alert_id,
+        Survey::Ztf | Survey::Lsst | Survey::Askap | Survey::Argus | Survey::Roman => alert_id,
         Survey::Decam => DECAM_IDS.wrapping_add(alert_id),
         Survey::Winter => WINTER_IDS.wrapping_add(alert_id),
     }
@@ -354,7 +354,7 @@ fn legacy_member(id: i64) -> Member {
 /// `None` for ZTF, the default site of every fit.
 pub fn survey_site(survey: &Survey) -> Option<Site> {
     match survey {
-        Survey::Ztf | Survey::Askap | Survey::Argus => None,
+        Survey::Ztf | Survey::Askap | Survey::Argus | Survey::Roman => None,
         Survey::Lsst => Some(RUBIN),
         Survey::Decam => Some(DECAM),
         Survey::Winter => Some(WINTER),

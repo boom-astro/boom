@@ -291,7 +291,7 @@ async fn build_cutout_storage(
                     ))?;
             let cache = CutoutCache::new(redis_conn, s3_conf.cache.ttl_seconds, key_prefix.clone());
 
-            let compress_stamps = matches!(survey, Survey::Lsst);
+            let compress_stamps = matches!(survey, Survey::Lsst | Survey::Roman);
             CutoutStorage::from_s3(
                 rustfs_client,
                 bucket_name,

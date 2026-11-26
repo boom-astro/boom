@@ -1,9 +1,9 @@
 use crate::{
     alert::{
         alert_temp_queue_name, sanitize_winter_avro, AlertWorker, AskapAlertWorker,
-        DecamAlertWorker, LightcurveJdOnly, LsstAlertWorker, SchemaRegistry, WinterAlertWorker,
-        WinterRawAvroAlert, ZtfAlertWorker, LSST_SCHEMA_REGISTRY_GITHUB_FALLBACK_URL,
-        LSST_SCHEMA_REGISTRY_URL,
+        DecamAlertWorker, LightcurveJdOnly, LsstAlertWorker, RomanAlertWorker, SchemaRegistry,
+        WinterAlertWorker, WinterRawAvroAlert, ZtfAlertWorker,
+        LSST_SCHEMA_REGISTRY_GITHUB_FALLBACK_URL, LSST_SCHEMA_REGISTRY_URL,
     },
     conf,
     filter::{Filter, FilterVersion},
@@ -53,6 +53,13 @@ pub async fn askap_alert_worker() -> AskapAlertWorker {
         .await
         .unwrap();
     AskapAlertWorker::new(TEST_CONFIG_FILE).await.unwrap()
+}
+
+pub async fn roman_alert_worker() -> RomanAlertWorker {
+    initialize_survey_indexes(&Survey::Roman, &conf::get_test_db().await)
+        .await
+        .unwrap();
+    RomanAlertWorker::new(TEST_CONFIG_FILE).await.unwrap()
 }
 
 pub fn read_winter_test_alert(path: &str) -> WinterRawAvroAlert {
@@ -132,6 +139,7 @@ const WINTER_TEST_PIPELINE: &str = "[{\"$match\": {\"candidate.magpsf\": {\"$lte
 // DECam stores the difference-image magnitude as `magap` (not `magpsf`) and the
 // CNN real-bogus score as `reliability`.
 const DECAM_TEST_PIPELINE: &str = "[{\"$match\": {\"candidate.reliability\": {\"$gt\": 0.1}, \"candidate.magap\": {\"$lte\": 25.0}}}, {\"$project\": {\"objectId\": 1, \"annotations.mag_now\": {\"$round\": [\"$candidate.magap\", 2]}}}]";
+const ROMAN_TEST_PIPELINE: &str = "[{\"$match\": {\"candidate.snr_psf\": {\"$gt\": 5.0}, \"candidate.magpsf\": {\"$lte\": 27.0}}}, {\"$project\": {\"objectId\": 1, \"annotations.mag_now\": {\"$round\": [\"$candidate.magpsf\", 2]}}}]";
 
 pub async fn remove_test_filter(
     filter_id: &str,
@@ -203,6 +211,7 @@ pub async fn insert_test_filter(
         (Survey::Winter, _) => WINTER_TEST_PIPELINE,
         (Survey::Askap, _) => ASKAP_TEST_PIPELINE,
         (Survey::Argus, _) => return Err("ARGUS has no filters yet".into()),
+        (Survey::Roman, _) => ROMAN_TEST_PIPELINE,
     };
 
     insert_custom_test_filter(survey, pipeline).await
@@ -482,7 +491,7 @@ pub fn randomize_object_id(survey: &Survey) -> String {
             object_id
         }
         Survey::Lsst => format!("{}", rand::rng().random_range(0..i64::MAX)),
-        Survey::Askap => format!("{}", rng.random_range(0..i64::MAX)),
+        Survey::Askap | Survey::Roman => format!("{}", rng.random_range(0..i64::MAX)),
         Survey::Argus => uuid::Uuid::new_v4().to_string(),
     }
 }
@@ -524,13 +533,14 @@ impl AlertRandomizer {
     pub fn new_randomized(survey: Survey) -> Self {
         let (object_id, payload, schema, schema_registry) = match survey {
             Survey::Argus => panic!("ARGUS test alerts come from alert::argus_mock"),
-            Survey::Ztf | Survey::Decam | Survey::Winter | Survey::Askap => {
+            Survey::Ztf | Survey::Decam | Survey::Winter | Survey::Askap | Survey::Roman => {
                 let payload = match survey {
                     Survey::Ztf => {
                         fs::read("tests/data/alerts/ztf/2695378462115010012.avro").unwrap()
                     }
                     Survey::Decam => fs::read("tests/data/alerts/decam/alert.avro").unwrap(),
                     Survey::Askap => fs::read("tests/data/alerts/askap/alert.avro").unwrap(),
+                    Survey::Roman => fs::read("tests/data/alerts/roman/alert.avro").unwrap(),
                     // The upstream WINTER schema has a duplicate field name; sanitize
                     // it so the strict avro Reader can parse the container.
                     Survey::Winter => {
@@ -658,6 +668,51 @@ impl AlertRandomizer {
         }
     }
 
+    fn update_nested_dia_object_ids(value: &mut Value, object_id: &str) {
+        let Ok(object_id) = object_id.parse::<i64>() else {
+            return;
+        };
+        let inner = match value {
+            Value::Union(_, boxed) => boxed.as_mut(),
+            other => other,
+        };
+        let Value::Array(items) = inner else {
+            return;
+        };
+        for item in items.iter_mut() {
+            if let Value::Record(fields) = item {
+                for (key, field) in fields.iter_mut() {
+                    if key == "diaObjectId" {
+                        // Nullable on diaSource, a plain long on diaForcedSource.
+                        *field = match field {
+                            Value::Union(..) => {
+                                Value::Union(1_u32, Box::new(Value::Long(object_id)))
+                            }
+                            _ => Value::Long(object_id),
+                        };
+                    }
+                }
+            }
+        }
+    }
+
+    fn update_dia_object_id(value: &mut Value, object_id: &str) {
+        let Ok(object_id) = object_id.parse::<i64>() else {
+            return;
+        };
+        let inner = match value {
+            Value::Union(_, boxed) => boxed.as_mut(),
+            other => other,
+        };
+        if let Value::Record(fields) = inner {
+            for (key, field) in fields.iter_mut() {
+                if key == "diaObjectId" {
+                    *field = Value::Long(object_id);
+                }
+            }
+        }
+    }
+
     // For LSST, similar logic for diaSource
     fn update_diasource_fields(
         candidate_record: &mut Vec<(String, Value)>,
@@ -774,6 +829,77 @@ impl AlertRandomizer {
                         _ => {}
                     }
                 }
+                let mut writer = Writer::new(&schema, Vec::new());
+                let mut new_record = Record::new(writer.schema()).unwrap();
+                for (key, value) in record {
+                    new_record.put(&key, value);
+                }
+                writer.append(new_record).unwrap();
+                let new_payload = writer.into_inner().unwrap();
+                (
+                    candid.unwrap(),
+                    object_id.unwrap(),
+                    ra.unwrap(),
+                    dec.unwrap(),
+                    new_payload,
+                )
+            }
+            Survey::Roman => {
+                let mut candid = self.candid;
+                let mut object_id = self.object_id;
+                let mut ra = self.ra;
+                let mut dec = self.dec;
+                let (payload, schema) = match (self.payload, self.schema) {
+                    (Some(payload), Some(schema)) => (payload, schema),
+                    _ => {
+                        let payload = fs::read("tests/data/alerts/roman/alert.avro").unwrap();
+                        let reader = Reader::new(&payload[..]).unwrap();
+                        let schema = reader.writer_schema().clone();
+                        (payload, schema)
+                    }
+                };
+                let reader = Reader::new(&payload[..]).unwrap();
+                let value = reader.into_iter().next().unwrap().unwrap();
+                let mut record = match value {
+                    Value::Record(record) => record,
+                    _ => panic!("Not a record"),
+                };
+
+                for (key, value) in record.iter_mut() {
+                    match key.as_str() {
+                        "diaSourceId" => {
+                            if let Some(id) = candid {
+                                *value = Value::Long(id);
+                            } else {
+                                candid = Some(Self::value_to_i64(value));
+                            }
+                        }
+                        "diaSource" => {
+                            if let Value::Record(candidate_record) = value {
+                                Self::update_diasource_fields(
+                                    candidate_record,
+                                    &mut candid,
+                                    &mut object_id,
+                                    &mut ra,
+                                    &mut dec,
+                                );
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
+                let object_id_value = object_id.clone().expect("objectId should be set");
+                for (key, value) in record.iter_mut() {
+                    match key.as_str() {
+                        "prvDiaSources" | "prvDiaForcedSources" => {
+                            Self::update_nested_dia_object_ids(value, &object_id_value)
+                        }
+                        "diaObject" => Self::update_dia_object_id(value, &object_id_value),
+                        _ => {}
+                    }
+                }
+
                 let mut writer = Writer::new(&schema, Vec::new());
                 let mut new_record = Record::new(writer.schema()).unwrap();
                 for (key, value) in record {

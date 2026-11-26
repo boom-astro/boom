@@ -31,6 +31,14 @@ pub struct PerBandVariability {
     pub j: Option<VariabilityStats>,
     pub h: Option<VariabilityStats>,
     pub k: Option<VariabilityStats>,
+    pub f062: Option<VariabilityStats>,
+    pub f087: Option<VariabilityStats>,
+    pub f106: Option<VariabilityStats>,
+    pub f129: Option<VariabilityStats>,
+    pub f146: Option<VariabilityStats>,
+    pub f158: Option<VariabilityStats>,
+    pub f184: Option<VariabilityStats>,
+    pub f213: Option<VariabilityStats>,
 }
 
 impl PerBandVariability {
@@ -60,6 +68,14 @@ impl PerBandVariability {
                 Band::J => out.j = stats,
                 Band::H => out.h = stats,
                 Band::K => out.k = stats,
+                Band::F062 => out.f062 = stats,
+                Band::F087 => out.f087 = stats,
+                Band::F106 => out.f106 = stats,
+                Band::F129 => out.f129 = stats,
+                Band::F146 => out.f146 = stats,
+                Band::F158 => out.f158 = stats,
+                Band::F184 => out.f184 = stats,
+                Band::F213 => out.f213 = stats,
             }
         }
         out
