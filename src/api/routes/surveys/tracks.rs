@@ -95,7 +95,7 @@ struct TrackDetail {
     get,
     path = "/surveys/{survey}/tracks/{track_id}",
     params(
-        ("survey" = Survey, Path, description = "Name of the survey (only ztf has tracks)"),
+        ("survey" = Survey, Path, description = "Name of the survey (tracks are shared across surveys)"),
         ("track_id" = String, Path, description = "Track id, e.g. BT000001"),
     ),
     responses(
@@ -107,10 +107,7 @@ struct TrackDetail {
 )]
 #[get("/surveys/{survey}/tracks/{track_id}")]
 pub async fn get_track(path: web::Path<(Survey, String)>, db: web::Data<Database>) -> HttpResponse {
-    let (survey, track_id) = path.into_inner();
-    if survey != Survey::Ztf {
-        return response::not_found(&format!("no tracks for survey {}", survey));
-    }
+    let (_, track_id) = path.into_inner();
     let track = match track_by_id(&db, &track_id).await {
         Ok(Some(track)) => track.explicit(),
         Ok(None) => return response::not_found(&format!("no track {}", track_id)),
