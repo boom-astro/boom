@@ -142,6 +142,19 @@ pub fn create_lsst_alert_pipeline() -> Vec<Document> {
                 "ss_source": 1,
                 "candidate": 1,
                 "prv_candidates": "$aux.prv_candidates",
+                "cosmic_ray_jds": {
+                    "$map": {
+                        "input": {
+                            "$filter": {
+                                "input": { "$ifNull": [ "$aux.prv_candidates", [] ] },
+                                "as": "p",
+                                "cond": { "$eq": [ "$$p.pixelFlags_cr", true ] }
+                            }
+                        },
+                        "as": "p",
+                        "in": "$$p.jd"
+                    }
+                },
                 "fp_hists": "$aux.fp_hists",
                 "cross_matches": "$aux.cross_matches",
                 "host_galaxy": "$aux.host_galaxy",
@@ -199,6 +212,8 @@ pub struct LsstAlertForEnrichment {
     pub ss_source: Option<SsSource>,
     pub candidate: LsstCandidate,
     pub prv_candidates: Vec<LsstPhotometry>,
+    #[serde(default)]
+    pub cosmic_ray_jds: Vec<f64>,
     pub fp_hists: Vec<LsstPhotometry>,
     pub cross_matches: Option<HashMap<String, Vec<serde_json::Value>>>,
     #[serde(default)]
@@ -581,7 +596,7 @@ pub fn lsst_alert_properties(alert: &LsstAlertForEnrichment) -> LsstAlertPropert
     let positions: Vec<(f64, f64, f64)> = alert
         .prv_candidates
         .iter()
-        .filter(|p| p.jd <= alert.candidate.jd)
+        .filter(|p| p.jd <= alert.candidate.jd && !alert.cosmic_ray_jds.contains(&p.jd))
         .filter_map(|p| Some((p.jd, p.ra?, p.dec?)))
         .collect();
     let stationary = is_stationary(times())
