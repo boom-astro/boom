@@ -265,6 +265,7 @@ async fn main() -> std::io::Result<()> {
                 .service(routes::queries::post_cone_search_query)
                 .service(routes::surveys::get_cutouts)
                 .service(routes::surveys::get_batch_cutouts)
+                .service(routes::tracks::get_all_tracks)
                 .service(routes::surveys::get_tracks)
                 .service(routes::surveys::get_track)
                 .service(routes::queries::post_count_query)
