@@ -1,6 +1,6 @@
 use crate::conf::AppConfig;
 use crate::enrichment::{fetch_alerts, EnrichmentWorker, EnrichmentWorkerError};
-use crate::utils::db::{fetch_timeseries_op, mongify};
+use crate::utils::db::{fetch_timeseries_op, get_array_element, mongify};
 use crate::utils::enums::Survey;
 use crate::utils::host::HostGalaxyAssociation;
 use crate::utils::lightcurves::{
@@ -61,6 +61,36 @@ pub fn create_argus_alert_pipeline() -> Vec<Document> {
                     None
                 ),
                 "host_galaxy": {"$arrayElemAt": ["$aux.host_galaxy", 0]},
+                "flare_window": {
+                    "$cond": [
+                        {"$gt": ["$candidate.psfFluxDif", 0]},
+                        {"$map": {
+                            "input": {"$slice": [
+                                {"$filter": {
+                                    "input": get_array_element("aux.prv_candidates"),
+                                    "as": "x",
+                                    "cond": {"$and": [
+                                        {"$lte": ["$$x.jd", "$candidate.jd"]},
+                                        {"$lte": [{"$subtract": ["$candidate.jd", "$$x.jd"]}, FLARE_WINDOW_DAYS]},
+                                        {"$eq": ["$$x.cadence", "$alertCadence"]},
+                                        {"$eq": ["$$x.filter", "$candidate.filter"]},
+                                        {"$isNumber": "$$x.psfFluxDif"},
+                                        {"$gt": ["$$x.psfFluxDifErr", 0]},
+                                    ]},
+                                }},
+                                -(FLARE_MAX_POINTS as i32),
+                            ]},
+                            "as": "p",
+                            "in": {
+                                "jd": "$$p.jd",
+                                "psfFluxDif": "$$p.psfFluxDif",
+                                "psfFluxDifErr": "$$p.psfFluxDifErr",
+                                "isFluxPositive": "$$p.isFluxPositive",
+                            },
+                        }},
+                        [],
+                    ]
+                },
             }
         },
         doc! {
@@ -74,10 +104,9 @@ pub fn create_argus_alert_pipeline() -> Vec<Document> {
                 "prv_candidates.filter": 1,
                 "prv_candidates.psfMagnitudeDif": 1,
                 "prv_candidates.psfMagnitudeDifErr": 1,
-                "prv_candidates.psfFluxDif": 1,
-                "prv_candidates.psfFluxDifErr": 1,
                 "prv_candidates.isFluxPositive": 1,
                 "host_galaxy": 1,
+                "flare_window": 1,
             }
         },
     ]
@@ -91,6 +120,13 @@ pub struct ArgusPoint {
     pub filter: i32,
     pub psf_magnitude_dif: Option<f32>,
     pub psf_magnitude_dif_err: Option<f32>,
+    pub is_flux_positive: bool,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArgusFlarePoint {
+    pub jd: f64,
     pub psf_flux_dif: Option<f32>,
     pub psf_flux_dif_err: Option<f32>,
     pub is_flux_positive: bool,
@@ -135,6 +171,8 @@ pub struct ArgusAlertForEnrichment {
     pub prv_candidates: Vec<ArgusPoint>,
     #[serde(default, rename = "host_galaxy")]
     pub host_galaxy: Option<HostGalaxyAssociation>,
+    #[serde(default, rename = "flare_window")]
+    pub flare_window: Vec<ArgusFlarePoint>,
 }
 
 #[apache_avro_macros::serdavro]
@@ -195,11 +233,9 @@ impl FlareInput {
         if !(reference.is_finite() && reference > 0.0) {
             return None;
         }
-        let mut points: Vec<(f64, f64, f64)> = alert
-            .prv_candidates
+        let points: Vec<(f64, f64, f64)> = alert
+            .flare_window
             .iter()
-            .filter(|p| p.cadence == alert.alert_cadence && p.filter == candidate.filter)
-            .filter(|p| candidate.jd - p.jd <= FLARE_WINDOW_DAYS)
             .filter_map(|p| {
                 let flux = p.psf_flux_dif.filter(|f| f.is_finite())?.abs() as f64;
                 let err = p.psf_flux_dif_err.filter(|e| e.is_finite() && *e > 0.0)? as f64;
@@ -207,8 +243,6 @@ impl FlareInput {
                 Some((p.jd, flux / reference, err / reference))
             })
             .collect();
-        points.sort_by(|a, b| a.0.total_cmp(&b.0));
-        let points = &points[points.len().saturating_sub(FLARE_MAX_POINTS)..];
         if points.len() < FLARE_MIN_POINTS {
             return None;
         }
