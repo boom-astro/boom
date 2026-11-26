@@ -20,6 +20,8 @@ def test_staged_chunks_are_read_in_place(tmp_path, monkeypatch):
             '"strm_prob_galaxy":0.9994,"strm_z_phot":0.0381,"strm_z_phot_err":0.0086}\n'
         )
     assert [chunk.id for chunk in panstarrs_hosts.list_chunks()] == [part.name]
-    assert panstarrs_hosts.fetch_chunk(part.name, tmp_path / "download") == [part]
+    assert panstarrs_hosts.fetch_chunk(part.name, tmp_path / "download") == [
+        part
+    ]
     with pytest.raises(ValueError, match="Invalid"):
         panstarrs_hosts.fetch_chunk("../part-0001.jsonl.gz", tmp_path)

@@ -11,14 +11,22 @@ ID = "panstarrs-hosts"
 
 
 def staged_dir() -> Path:
-    return Path(os.getenv("BOOM_CATALOG_DATA_PATH", "data/catalogs")) / "staged" / ID
+    return (
+        Path(os.getenv("BOOM_CATALOG_DATA_PATH", "data/catalogs"))
+        / "staged"
+        / ID
+    )
 
 
 def list_chunks() -> list[Chunk]:
     directory = staged_dir()
-    files = sorted(path.name for path in directory.glob("*.jsonl.gz") if path.is_file())
+    files = sorted(
+        path.name for path in directory.glob("*.jsonl.gz") if path.is_file()
+    )
     if not files:
-        raise RuntimeError(f"Stage panstarrs-hosts .jsonl.gz chunks in {directory}.")
+        raise RuntimeError(
+            f"Stage panstarrs-hosts .jsonl.gz chunks in {directory}."
+        )
     return [Chunk(id=name, label=name) for name in files]
 
 
