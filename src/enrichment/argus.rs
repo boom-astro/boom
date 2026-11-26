@@ -7,12 +7,20 @@ use crate::utils::lightcurves::{
     analyze_photometry, prepare_photometry, summarise_detections, Band, BandProperties,
     DetectionHistory, EpisodeHistory, PhotometryMag, EPISODE_GAP_DAYS,
 };
+use lightcurve_fitting::{fit_flares, FlareFitOptions};
 use mongodb::bson::{doc, Document};
 use mongodb::options::{UpdateOneModel, WriteModel};
+use rayon::prelude::*;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use tracing::{instrument, warn};
 
 const BETA: i32 = 1;
 const RHO: i32 = 2;
+const SECONDS_PER_DAY: f64 = 86_400.0;
+const FLARE_WINDOW_DAYS: f64 = 1.0;
+const FLARE_MAX_POINTS: usize = 256;
+const FLARE_MIN_POINTS: usize = 8;
+const FLARE_MAX_COMPONENTS: usize = 3;
 
 pub fn create_argus_alert_pipeline() -> Vec<Document> {
     vec![
@@ -27,6 +35,9 @@ pub fn create_argus_alert_pipeline() -> Vec<Document> {
                 "kind": 1,
                 "alertCadence": 1,
                 "candidate.jd": 1,
+                "candidate.filter": 1,
+                "candidate.psfFluxSci": 1,
+                "candidate.psfFluxDif": 1,
             }
         },
         doc! {
@@ -63,6 +74,8 @@ pub fn create_argus_alert_pipeline() -> Vec<Document> {
                 "prv_candidates.filter": 1,
                 "prv_candidates.psfMagnitudeDif": 1,
                 "prv_candidates.psfMagnitudeDifErr": 1,
+                "prv_candidates.psfFluxDif": 1,
+                "prv_candidates.psfFluxDifErr": 1,
                 "prv_candidates.isFluxPositive": 1,
                 "host_galaxy": 1,
             }
@@ -78,6 +91,8 @@ pub struct ArgusPoint {
     pub filter: i32,
     pub psf_magnitude_dif: Option<f32>,
     pub psf_magnitude_dif_err: Option<f32>,
+    pub psf_flux_dif: Option<f32>,
+    pub psf_flux_dif_err: Option<f32>,
     pub is_flux_positive: bool,
 }
 
@@ -100,8 +115,12 @@ impl ArgusPoint {
 }
 
 #[derive(Debug, serde::Deserialize)]
-pub struct ArgusCandidateTime {
+#[serde(rename_all = "camelCase")]
+pub struct ArgusCandidateForEnrichment {
     pub jd: f64,
+    pub filter: i32,
+    pub psf_flux_sci: Option<f32>,
+    pub psf_flux_dif: Option<f32>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -111,7 +130,7 @@ pub struct ArgusAlertForEnrichment {
     pub candid: i64,
     pub kind: String,
     pub alert_cadence: i32,
-    pub candidate: ArgusCandidateTime,
+    pub candidate: ArgusCandidateForEnrichment,
     #[serde(default, rename = "prv_candidates")]
     pub prv_candidates: Vec<ArgusPoint>,
     #[serde(default, rename = "host_galaxy")]
@@ -127,6 +146,25 @@ pub struct ArgusPhotstats {
 
 #[apache_avro_macros::serdavro]
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
+pub struct ArgusFlareFit {
+    pub filter: i32,
+    pub n_points: i32,
+    pub n_flares: i32,
+    pub delta_bic: f64,
+    pub reduced_chi2: f64,
+    pub ed_total_s: f64,
+    pub t_peak: Option<f64>,
+    pub t_peak_err_s: Option<f64>,
+    pub fwhm_s: Option<f64>,
+    pub fwhm_err_s: Option<f64>,
+    pub amplitude: Option<f64>,
+    pub amplitude_err: Option<f64>,
+    pub ed_s: Option<f64>,
+    pub ed_err_s: Option<f64>,
+}
+
+#[apache_avro_macros::serdavro]
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
 pub struct ArgusAlertProperties {
     pub stationary: bool,
     pub hosted: Option<bool>,
@@ -134,6 +172,90 @@ pub struct ArgusAlertProperties {
     pub cadences: Vec<i32>,
     pub detection_history: DetectionHistory,
     pub episode_history: EpisodeHistory,
+    pub flare_fit: Option<ArgusFlareFit>,
+}
+
+struct FlareInput {
+    filter: i32,
+    jd: f64,
+    exposure_s: f64,
+    times_s: Vec<f64>,
+    flux: Vec<f64>,
+    flux_err: Vec<f64>,
+}
+
+impl FlareInput {
+    fn from_alert(alert: &ArgusAlertForEnrichment) -> Option<Self> {
+        let candidate = &alert.candidate;
+        let flux_dif = candidate.psf_flux_dif?;
+        if !(flux_dif.is_finite() && flux_dif > 0.0) {
+            return None;
+        }
+        let reference = (candidate.psf_flux_sci? - flux_dif) as f64;
+        if !(reference.is_finite() && reference > 0.0) {
+            return None;
+        }
+        let mut points: Vec<(f64, f64, f64)> = alert
+            .prv_candidates
+            .iter()
+            .filter(|p| p.cadence == alert.alert_cadence && p.filter == candidate.filter)
+            .filter(|p| candidate.jd - p.jd <= FLARE_WINDOW_DAYS)
+            .filter_map(|p| {
+                let flux = p.psf_flux_dif.filter(|f| f.is_finite())?.abs() as f64;
+                let err = p.psf_flux_dif_err.filter(|e| e.is_finite() && *e > 0.0)? as f64;
+                let flux = if p.is_flux_positive { flux } else { -flux };
+                Some((p.jd, flux / reference, err / reference))
+            })
+            .collect();
+        points.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let points = &points[points.len().saturating_sub(FLARE_MAX_POINTS)..];
+        if points.len() < FLARE_MIN_POINTS {
+            return None;
+        }
+        Some(FlareInput {
+            filter: candidate.filter,
+            jd: candidate.jd,
+            exposure_s: alert.alert_cadence as f64,
+            times_s: points
+                .iter()
+                .map(|p| (p.0 - candidate.jd) * SECONDS_PER_DAY)
+                .collect(),
+            flux: points.iter().map(|p| p.1).collect(),
+            flux_err: points.iter().map(|p| p.2).collect(),
+        })
+    }
+
+    fn fit(&self) -> Option<ArgusFlareFit> {
+        let opts = FlareFitOptions {
+            max_flares: FLARE_MAX_COMPONENTS,
+            exposure_time: Some(self.exposure_s),
+            ..Default::default()
+        };
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            fit_flares(&self.times_s, &self.flux, &self.flux_err, &opts)
+        }))
+        .ok()??;
+        let last = result
+            .flares
+            .iter()
+            .max_by(|a, b| a.t_peak.total_cmp(&b.t_peak));
+        Some(ArgusFlareFit {
+            filter: self.filter,
+            n_points: result.n_obs as i32,
+            n_flares: result.flares.len() as i32,
+            delta_bic: result.per_k_bic.first().map_or(0.0, |b0| b0 - result.bic),
+            reduced_chi2: result.reduced_chi2,
+            ed_total_s: result.flares.iter().map(|f| f.equivalent_duration).sum(),
+            t_peak: last.map(|f| self.jd + f.t_peak / SECONDS_PER_DAY),
+            t_peak_err_s: last.and_then(|f| f.t_peak_err),
+            fwhm_s: last.map(|f| f.t_half),
+            fwhm_err_s: last.and_then(|f| f.t_half_err),
+            amplitude: last.map(|f| f.amplitude),
+            amplitude_err: last.and_then(|f| f.amplitude_err),
+            ed_s: last.map(|f| f.equivalent_duration),
+            ed_err_s: last.and_then(|f| f.equivalent_duration_err),
+        })
+    }
 }
 
 pub struct ArgusEnrichmentWorker {
@@ -183,6 +305,7 @@ impl ArgusEnrichmentWorker {
             cadences,
             detection_history,
             episode_history,
+            flare_fit: None,
         }
     }
 }
@@ -236,11 +359,30 @@ impl EnrichmentWorker for ArgusEnrichmentWorker {
             return Ok(vec![]);
         }
 
+        let flare_inputs: Vec<Option<FlareInput>> =
+            alerts.iter().map(FlareInput::from_alert).collect();
+        let span = tracing::Span::current();
+        let mut flare_fits = tokio::task::spawn_blocking(move || {
+            span.in_scope(|| {
+                flare_inputs
+                    .par_iter()
+                    .map(|input| input.as_ref().and_then(FlareInput::fit))
+                    .collect::<Vec<_>>()
+            })
+        })
+        .await
+        .unwrap_or_else(|e| {
+            warn!("flare fitting failed for the whole batch: {}", e);
+            Vec::new()
+        })
+        .into_iter();
+
         let now = flare::Time::now().to_jd();
         let mut updates = Vec::with_capacity(alerts.len());
         let mut processed = Vec::with_capacity(alerts.len());
         for alert in &alerts {
-            let properties = Self::get_alert_properties(alert);
+            let mut properties = Self::get_alert_properties(alert);
+            properties.flare_fit = flare_fits.next().flatten();
             updates.push(WriteModel::UpdateOne(
                 UpdateOneModel::builder()
                     .namespace(self.alert_collection.namespace())
