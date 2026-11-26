@@ -404,6 +404,7 @@ export type HostSummary = {
   dec?: number;
   z?: number | null;
   z_err?: number | null;
+  z_type?: 'photometric' | 'spectroscopic' | null;
   dist_mpc?: number | null;
   dist_mpc_method?: string | null;
   sep_arcsec: number;

@@ -3,6 +3,44 @@ use serde::{Deserialize, Serialize};
 use super::associate::AssociationConfig;
 use super::catalog::{LS_DR10, LS_DR9, NED};
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Ps1FallbackConfig {
+    pub radius_arcsec: f64,
+    pub min_galaxy_score: f64,
+    pub min_extendedness_sigma: f64,
+    pub max_dlr: f64,
+}
+
+impl Default for Ps1FallbackConfig {
+    fn default() -> Self {
+        Self {
+            radius_arcsec: 45.0,
+            min_galaxy_score: 0.7,
+            min_extendedness_sigma: 0.0,
+            max_dlr: 3.0,
+        }
+    }
+}
+
+impl Ps1FallbackConfig {
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        if self.radius_arcsec > 0.0
+            && self.radius_arcsec <= 180.0 * 3600.0
+            && (0.0..=1.0).contains(&self.min_galaxy_score)
+            && self.min_extendedness_sigma.is_finite()
+            && self.max_dlr.is_finite()
+            && self.max_dlr > 0.0
+        {
+            return Ok(());
+        }
+        Err(
+            "invalid host_galaxy.ps1_fallback radius, galaxy score, extendedness, or max_dlr"
+                .into(),
+        )
+    }
+}
+
 /// Host-galaxy association, read from `config.yaml` under `host_galaxy`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -47,6 +85,8 @@ pub struct HostGalaxyConfig {
     /// Cross-match catalog searched at the host's position when no Legacy row is on it.
     pub ps1_catalog: String,
     pub photometry_match_arcsec: f64,
+    /// Enable the separate Pan-STARRS host search when no primary host is accepted.
+    pub ps1_fallback: Option<Ps1FallbackConfig>,
     /// Cross-match catalog of spectra whose redshift replaces a photometric one.
     pub desi_catalog: String,
     /// Largest offset between a spectrum and the galaxy centre, arcsec.
@@ -77,6 +117,7 @@ impl Default for HostGalaxyConfig {
             isophote_mag: super::sersic::MU_25,
             ps1_catalog: "PS1_DR2".to_string(),
             photometry_match_arcsec: 2.0,
+            ps1_fallback: None,
             desi_catalog: "DESI_DR1".to_string(),
             spectrum_match_arcsec: 1.0,
         }
@@ -101,6 +142,26 @@ mod tests {
     #[test]
     fn test_disabled_by_default() {
         assert!(!HostGalaxyConfig::default().enabled);
+        assert!(HostGalaxyConfig::default().ps1_fallback.is_none());
+    }
+
+    #[test]
+    fn ps1_fallback_has_its_own_defaults_and_cutoffs() {
+        let config: HostGalaxyConfig =
+            serde_json::from_str(r#"{"enabled":true,"ps1_fallback":{}}"#).unwrap();
+        let cuts = config.ps1_fallback.unwrap();
+        assert_eq!(config.max_dlr, 5.0);
+        assert_eq!(cuts.max_dlr, 3.0);
+        assert_eq!(cuts.radius_arcsec, 45.0);
+        assert_eq!(cuts.min_galaxy_score, 0.7);
+        assert_eq!(cuts.min_extendedness_sigma, 0.0);
+        assert!(cuts.validate().is_ok());
+        assert!(Ps1FallbackConfig {
+            max_dlr: f64::NAN,
+            ..cuts
+        }
+        .validate()
+        .is_err());
     }
 
     #[test]
