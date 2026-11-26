@@ -11,10 +11,12 @@ use crate::utils::db::mongify;
 use crate::utils::enums::Survey;
 use crate::utils::host::{HostGalaxyAssociation, HostSummary};
 use crate::utils::lightcurves::{
-    analyze_photometry, is_stationary, prepare_photometry, signed_snr, summarise_detections,
-    ActivityMetrics, Band, DetectionHistory, EpisodeHistory, MultisurveyDetectionHistory,
-    PerBandProperties, PhotometryMag, EPISODE_GAP_DAYS, STATIONARY_MIN_FORCED_SNR,
+    analyze_photometry, is_stationary, moves_within_night, prepare_photometry, signed_snr,
+    summarise_detections, ActivityMetrics, Band, DetectionHistory, EpisodeHistory,
+    MultisurveyDetectionHistory, PerBandProperties, PhotometryMag, EPISODE_GAP_DAYS,
+    STATIONARY_MIN_FORCED_SNR,
 };
+use crate::utils::sso_geometry::RUBIN;
 use crate::utils::variability::PerBandVariability;
 use apache_avro_derive::AvroSchema;
 use apache_avro_macros::serdavro;
@@ -140,6 +142,19 @@ pub fn create_lsst_alert_pipeline() -> Vec<Document> {
                 "ss_source": 1,
                 "candidate": 1,
                 "prv_candidates": "$aux.prv_candidates",
+                "cosmic_ray_jds": {
+                    "$map": {
+                        "input": {
+                            "$filter": {
+                                "input": { "$ifNull": [ "$aux.prv_candidates", [] ] },
+                                "as": "p",
+                                "cond": { "$eq": [ "$$p.pixelFlags_cr", true ] }
+                            }
+                        },
+                        "as": "p",
+                        "in": "$$p.jd"
+                    }
+                },
                 "fp_hists": "$aux.fp_hists",
                 "cross_matches": "$aux.cross_matches",
                 "host_galaxy": "$aux.host_galaxy",
@@ -197,6 +212,8 @@ pub struct LsstAlertForEnrichment {
     pub ss_source: Option<SsSource>,
     pub candidate: LsstCandidate,
     pub prv_candidates: Vec<LsstPhotometry>,
+    #[serde(default)]
+    pub cosmic_ray_jds: Vec<f64>,
     pub fp_hists: Vec<LsstPhotometry>,
     pub cross_matches: Option<HashMap<String, Vec<serde_json::Value>>>,
     #[serde(default)]
@@ -561,7 +578,7 @@ pub fn lsst_alert_properties(alert: &LsstAlertForEnrichment) -> LsstAlertPropert
 
     prepare_photometry(&mut lightcurve);
     let (photstats, _, _) = analyze_photometry(&lightcurve);
-    let stationary = is_stationary(
+    let times = || {
         alert
             .prv_candidates
             .iter()
@@ -574,8 +591,16 @@ pub fn lsst_alert_properties(alert: &LsstAlertForEnrichment) -> LsstAlertPropert
                     .filter(|p| p.jd <= alert.candidate.jd)
                     .filter_map(|p| p.to_photometry_mag(Some(STATIONARY_MIN_FORCED_SNR))),
             )
-            .map(|p| p.time),
-    );
+            .map(|p| p.time)
+    };
+    let positions: Vec<(f64, f64, f64)> = alert
+        .prv_candidates
+        .iter()
+        .filter(|p| p.jd <= alert.candidate.jd && !alert.cosmic_ray_jds.contains(&p.jd))
+        .filter_map(|p| Some((p.jd, p.ra?, p.dec?)))
+        .collect();
+    let stationary = is_stationary(times())
+        && !moves_within_night(times(), &positions, RUBIN.astrometric_sigma_arcsec);
 
     // Compute multisurvey photstats (including ZTF if available, other surveys can be added later)
     let mut has_matches = false;
